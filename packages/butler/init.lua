@@ -476,6 +476,7 @@ local function team_member_guidance(parent)
 You are a Butler team member. Your leader is ]] .. parent .. [[. Work on the
 task sent to this terminal. Your Butler identity is already in
 `REMUDA_BUTLER_AGENT_ID`, and your leader is in `REMUDA_BUTLER_LEADER_ID`.
+Start by running `remuda butler inbox` to read your welcome message.
 
 Use Butler's CLI for communication:
 
@@ -491,8 +492,9 @@ the normal way for a member to communicate.
 ]]
 end
 local function team_member_prompt(parent)
-  return "You are a Butler team member. Read AGENTS.md in your working directory first. "
-    .. "Use `remuda butler inbox`, `remuda butler send MEMBER MESSAGE...`, and "
+  return "You are a Butler team member. Start by running `remuda butler inbox` to read "
+    .. "your welcome message, then read AGENTS.md in your working directory. Use "
+    .. "`remuda butler inbox`, `remuda butler send MEMBER MESSAGE...`, and "
     .. "`remuda butler send-to-leader RESULT...` for coordination. Your leader is " .. parent .. "."
 end
 local function write_agent_guidance(root, text, replace)
@@ -533,6 +535,8 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
     children[#children + 1] = actual
   end
   mailbox(actual)
+  -- A failed welcome write must not prevent the agent from starting.
+  pcall(queue_message, parent or "butler", actual, team_member_guidance(parent or "butler"), "Welcome to Butler")
   if task and task ~= "" then
     local poke, attempts = nil, 0
     poke = remuda.schedule({ every = 0.5, run = function()
