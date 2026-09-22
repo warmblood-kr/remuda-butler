@@ -68,9 +68,12 @@ until the generic external CLI/client contract is implemented in Remuda core.
 
 ```sh
 remuda mod install warmblood-kr/remuda-butler
-remuda butler
+remuda butler --agent codex
 ```
 
 `remuda mod update butler` updates the installed extension. An already-running
 daemon keeps its current Lua image until `remuda butler` is run again or the
 daemon is restarted.
+
+`remuda butler --agent claude|codex` selects the root Butler agent without an
+environment variable. Add `--headless` when only the service should start.

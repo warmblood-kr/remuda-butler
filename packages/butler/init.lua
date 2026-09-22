@@ -747,7 +747,9 @@ remuda.tool{
 }
 
 local existing_butler = bus.agents.butler
+local launch_options = remuda._mod_launch_options and remuda._mod_launch_options.butler
 local butler_kind = existing_butler and existing_butler.kind
+  or (launch_options and launch_options.agent)
   or os.getenv("REMUDA_BUTLER_AGENT") or "claude"
 local butler_token = existing_butler and existing_butler.token or next_token("butler")
 bus.tokens[butler_token] = "butler"
