@@ -11,4 +11,5 @@ separate runtime or extension catalog.
 
 Butler topics use stable session names and are delivered through the Butler
 message queue. The extraction boundary, runtime dependencies, and migration
-plan are maintained in the repository's `BUTLER_MIGRATION.md`.
+plan are maintained in the repository's
+[`BUTLER_MIGRATION.md`](https://github.com/warmblood-kr/remuda-butler/blob/main/BUTLER_MIGRATION.md).

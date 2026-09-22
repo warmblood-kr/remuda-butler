@@ -4,9 +4,8 @@ Standalone Butler distribution for Remuda. Butler is a trusted Lua extension
 and coordination CLI; it is not a second daemon and does not contain Remuda's
 PTY, IPC, terminal, or session implementation.
 
-This checkout is a local extraction staging area from Remuda commit `93e9c28`.
-It is intentionally not committed or connected to a new GitHub repository yet.
-The original source clone remains at `../clone-remuda`.
+This is the independent Butler extension repository. The migration boundary
+from the original embedded package is documented in `BUTLER_MIGRATION.md`.
 
 ## Runtime dependency
 
