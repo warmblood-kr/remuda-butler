@@ -26,22 +26,22 @@ $XDG_DATA_HOME/remuda/extensions/butler/
   packages/butler/agents/*.lua
 ```
 
-The current `extension.toml` is migration metadata for that contract. Runtime
-resolver support still belongs in Remuda core/native.
+The `extension.toml` manifest is the installation contract. Remuda resolves it
+from disk; Butler is never compiled into the Remuda executable.
 
 ## Compatibility
 
-During migration, the installed distribution should preserve:
+The installed distribution preserves:
 
 ```text
 remuda exec butler
 remuda butler ...
 ```
 
-The preferred end state is a `remuda-butler` executable using generic Remuda
-IPC/eval, with `remuda butler` forwarding to it or to a manifest-declared
-command. Butler must fail clearly when Remuda or the Butler package is absent;
-it must not silently download or re-embed itself.
+The manifest declares `command = "butler"`. `remuda butler` loads the
+extension, while `remuda butler ...` dispatches to its Lua command handler.
+Butler fails clearly when it has not been installed; it does not silently
+download or re-embed itself.
 
 The current CLI source is retained at `cli/butler_cli.rs` as a migration input.
 It still imports Remuda workspace crates and is not independently buildable
@@ -64,16 +64,13 @@ until the generic external CLI/client contract is implemented in Remuda core.
 - `BUTLER_MIGRATION.md`: boundary, retained core responsibilities, risks, and
   extraction sequence.
 
-## Current blockers
+## Install
 
-This staging repository is a source distribution, not yet a standalone build:
+```sh
+remuda mod install warmblood-kr/remuda-butler
+remuda butler
+```
 
-1. Remuda needs a generic disk extension resolver and manifest/API-version
-   contract.
-2. The CLI shim needs a transport-only client or external command contract so
-   it no longer imports `remuda-core`/`remuda-native` source crates.
-3. Butler integration tests need to be split from shared daemon tests.
-4. The path checker must receive an explicit core checkout or validate a
-   published loader contract instead of opening removed core files.
-
-See `BUTLER_MIGRATION.md` for the proposed sequence.
+`remuda mod update butler` updates the installed extension. An already-running
+daemon keeps its current Lua image until `remuda butler` is run again or the
+daemon is restarted.

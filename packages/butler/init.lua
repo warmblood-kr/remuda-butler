@@ -422,7 +422,7 @@ local mail = assert(remuda._butler_mail)
 local mailbox = mail.mailbox
 local queue_message = mail.queue
 local function agent_mcp_json(token)
-  local env = '"REMUDA_BUTLER_SESSION_TOKEN":"' .. token .. '"'
+  local env = '"REMUDA_SESSION_CAPABILITY":"' .. token .. '"'
   if runtime_dir then env = env .. ',"REMUDA_RUNTIME_DIR":"' .. runtime_dir .. '"' end
   return '{"mcpServers":{"remuda":{"command":"remuda","args":["-s","'
     .. server .. '","mcp"],"env":{' .. env .. '}}}}'
@@ -435,7 +435,7 @@ local function agent_mcp_path(name, token)
   return path
 end
 local function agent_mcp_flags(token)
-  local env = 'REMUDA_BUTLER_SESSION_TOKEN="' .. token .. '"'
+  local env = 'REMUDA_SESSION_CAPABILITY="' .. token .. '"'
   if runtime_dir then env = env .. ',REMUDA_RUNTIME_DIR="' .. runtime_dir .. '"' end
   return {
     "-c", 'mcp_servers.remuda.command="remuda"',
@@ -444,7 +444,7 @@ local function agent_mcp_flags(token)
   }
 end
 local function agent_mcp_config(token)
-  local env = '"REMUDA_BUTLER_SESSION_TOKEN":"' .. token .. '"'
+  local env = '"REMUDA_SESSION_CAPABILITY":"' .. token .. '"'
   if runtime_dir then env = env .. ',"REMUDA_RUNTIME_DIR":"' .. runtime_dir .. '"' end
   return '{"mcp_servers":{"remuda":{"command":"remuda","args":["-s","'
     .. server .. '","mcp"],"env":{' .. env .. '}}}}'
@@ -608,6 +608,79 @@ function remuda._butler_sessions()
   table.sort(out)
   return #out == 0 and "no Butler agents" or "SESSION\tAGENT\tLEADER\n" .. table.concat(out, "\n")
 end
+
+function remuda.session_detail(session)
+  local agent = bus.agents[session.name]
+  if not agent then return nil end
+  local telemetry = remuda._butler_telemetry_for(agent)
+  local function context_k(tokens)
+    if tokens == "?" then return "?" end
+    return string.format("%.0fk", tonumber(tokens) / 1000)
+  end
+  local context = "CTX " .. context_k(telemetry.context_used) .. "/" .. context_k(telemetry.context_window)
+  if telemetry.context_percent ~= "?" then context = context .. " " .. telemetry.context_percent .. "%" end
+  return (agent.kind or "agent") .. " · " .. telemetry.model .. " · " .. context
+end
+
+local BUTLER_USAGE = [[remuda butler — coordination for managed agents
+
+  remuda butler sessions
+  remuda butler launch <claude|codex> [name]
+  remuda butler topic new <name> [--template T] [--agent A]
+  remuda butler topic delegate <name> <task...> [--agent A] [--leader L]
+  remuda butler send <to> <message...>
+  remuda butler send <from> <to> <message...>
+  remuda butler send-to-leader <message...>
+  remuda butler inbox [name]
+]]
+
+local function words_after(args, first)
+  local words = {}
+  for i = first, #args do words[#words + 1] = args[i] end
+  return table.concat(words, " ")
+end
+
+local function current_agent()
+  return os.getenv("REMUDA_BUTLER_AGENT_ID") or os.getenv("REMUDA_BUTLER_SESSION_NAME")
+end
+
+-- The generic Remuda extension-command bridge passes an argv-like Lua table.
+-- This parser lives with Butler, not in the Remuda executable.
+remuda.extension_command("butler", function(args)
+  if #args == 0 or args[1] == "help" or args[1] == "-h" or args[1] == "--help" then return BUTLER_USAGE end
+  if #args == 1 and args[1] == "sessions" then return remuda._butler_sessions() end
+  if args[1] == "launch" and (args[2] == "claude" or args[2] == "codex") then
+    if #args == 2 then return remuda._butler_launch(args[2], nil) end
+    if #args == 3 then return remuda._butler_launch(args[2], args[3]) end
+  end
+  if args[1] == "inbox" then return remuda._butler_inbox(args[2] or assert(current_agent(), "inbox needs REMUDA_BUTLER_AGENT_ID")) end
+  if args[1] == "send-to-leader" and #args >= 2 then
+    local from = assert(current_agent(), "send-to-leader needs REMUDA_BUTLER_AGENT_ID")
+    return remuda._butler_report(from, words_after(args, 2))
+  end
+  if args[1] == "send" and #args >= 3 then
+    local from, to, first = current_agent(), args[2], 3
+    if #args >= 4 then from, to, first = args[2], args[3], 4 end
+    return remuda._butler_send(assert(from, "send needs REMUDA_BUTLER_AGENT_ID"), to, words_after(args, first))
+  end
+  if args[1] == "topic" and args[2] == "new" and args[3] then
+    local template, kind, i = nil, nil, 4
+    while i <= #args do
+      if args[i] == "--template" then template = args[i + 1] elseif args[i] == "--agent" then kind = args[i + 1] else return BUTLER_USAGE end
+      i = i + 2
+    end
+    return remuda._butler_topic_new(args[3], template, kind)
+  end
+  if args[1] == "topic" and args[2] == "delegate" and args[3] then
+    local kind, parent, i = nil, os.getenv("REMUDA_BUTLER_LEADER_ID") or "butler", 4
+    while i <= #args and (args[i] == "--agent" or args[i] == "--leader") do
+      if args[i] == "--agent" then kind = args[i + 1] else parent = args[i + 1] end
+      i = i + 2
+    end
+    if i <= #args then return remuda._butler_topic_delegate(args[3], words_after(args, i), nil, kind, parent) end
+  end
+  return BUTLER_USAGE
+end)
 
 remuda.tool{
   name = "butler_launch",
