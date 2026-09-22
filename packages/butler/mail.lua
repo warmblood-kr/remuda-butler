@@ -140,6 +140,7 @@ local function load_inbox(name)
 end
 
 local function queue(from, to, text, subject, in_reply_to)
+  load_inbox(to)
   local id = message_id()
   local object_id = id:gsub("^message%-", "object-")
   local sender, body = from or "outside", tostring(text)
