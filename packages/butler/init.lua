@@ -583,7 +583,7 @@ function remuda._butler_send(from, to, text)
   local message, err = queue_message(from, to, text)
   if not message then error(err, 0) end
   local notice = "Butler message " .. message.id .. " from " .. message.from.session
-    .. " arrived. Read it: remuda butler inbox " .. to
+    .. " arrived. Read it: remuda butler inbox"
   local delivered, why = pcall(remuda.type_text, to, notice)
   if delivered then return "queued " .. message.id .. " and notified " .. to end
   return "queued " .. message.id .. " for " .. to .. "; terminal delivery deferred: " .. tostring(why)
@@ -632,6 +632,10 @@ local BUTLER_USAGE = [[remuda butler — coordination for managed agents
   remuda butler send <from> <to> <message...>
   remuda butler send-to-leader <message...>
   remuda butler inbox [name]
+
+Agent sessions receive REMUDA_BUTLER_AGENT_ID and REMUDA_BUTLER_LEADER_ID.
+In an agent session, use `inbox`, `send <to> ...`, and `send-to-leader ...`.
+The explicit `send <from> <to> ...` form is for an operator attributing a note.
 ]]
 
 local function words_after(args, first)
@@ -672,7 +676,7 @@ remuda.extension_command("butler", function(args)
     return remuda._butler_topic_new(args[3], template, kind)
   end
   if args[1] == "topic" and args[2] == "delegate" and args[3] then
-    local kind, parent, i = nil, os.getenv("REMUDA_BUTLER_LEADER_ID") or "butler", 4
+    local kind, parent, i = nil, current_agent() or "butler", 4
     while i <= #args and (args[i] == "--agent" or args[i] == "--leader") do
       if args[i] == "--agent" then kind = args[i + 1] else parent = args[i + 1] end
       i = i + 2
@@ -779,10 +783,23 @@ local SYSTEM_PROMPT = "Early in this session, call remuda._butler_register_compa
   .. "Remuda-managed member with `remuda butler topic delegate NAME TASK`. "
   .. "Internal agent subagents are separate from Butler team members. Use `remuda butler sessions` to "
   .. "inspect members, `inbox` to read reports, and `send` for follow-up direction."
-local BUTLER_GUIDANCE = "You are Butler, manager of this household. Create team members only with "
-  .. "`remuda butler topic delegate NAME TASK`. Internal agent subagents are separate from Butler "
-  .. "team members. Supervise Butler members through `remuda butler sessions`, "
-  .. "`inbox`, and `send`."
+local BUTLER_GUIDANCE = [[# Butler
+
+You are Butler, manager of this household. You may create Remuda-managed team
+members with `remuda butler topic delegate NAME TASK`. Internal agent
+subagents are separate from Butler team members.
+
+Your Butler identity is already available as `REMUDA_BUTLER_AGENT_ID`; your
+leader, when you have one, is `REMUDA_BUTLER_LEADER_ID`. Use the short forms:
+
+- `remuda butler sessions` to inspect the household.
+- `remuda butler inbox` to read your own inbox.
+- `remuda butler send MEMBER MESSAGE...` to direct a member; your sender is inferred.
+- `remuda butler send-to-leader MESSAGE...` to report a completed work loop.
+
+`remuda butler send FROM TO MESSAGE...` is an operator form for sending on
+behalf of another session. Do not use it for ordinary team communication.
+]]
 if token_path then
   SYSTEM_PROMPT = "You are bridged into one Matrix room via remuda. "
     .. "Every line you receive here that starts with \"[matrix · \" is a "

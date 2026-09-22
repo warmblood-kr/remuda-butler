@@ -55,6 +55,19 @@ remuda butler inbox
 remuda butler send-to-leader "work is complete"
 ```
 
+Every Butler-managed agent receives `REMUDA_BUTLER_AGENT_ID` and, when it has
+one, `REMUDA_BUTLER_LEADER_ID`. Therefore agents normally use the short forms:
+
+```sh
+remuda butler inbox
+remuda butler send reviewer "please check the latest patch"
+remuda butler send-to-leader "review complete: no blockers"
+```
+
+The sender is inferred from the environment. `remuda butler send FROM TO
+MESSAGE...` remains available for an operator who intentionally sends a note
+on another session's behalf.
+
 ### Optional Matrix bridge
 
 With Matrix credentials configured, Butler can bridge one room. The bridge is
