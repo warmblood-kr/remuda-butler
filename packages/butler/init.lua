@@ -470,13 +470,30 @@ local function setup_telemetry(kind, spec)
   local adapter = TELEMETRY_ADAPTERS[kind]
   return adapter and adapter.setup and adapter.setup(spec) or {}
 end
+local function team_member_guidance(parent)
+  return [[# Butler team member
+
+You are a Butler team member. Your leader is ]] .. parent .. [[. Work on the
+task sent to this terminal. Your Butler identity is already in
+`REMUDA_BUTLER_AGENT_ID`, and your leader is in `REMUDA_BUTLER_LEADER_ID`.
+
+Use Butler's CLI for communication:
+
+- `remuda butler inbox` reads your own queued messages.
+- `remuda butler send MEMBER MESSAGE...` sends a message; your sender is inferred.
+- `remuda butler send-to-leader RESULT...` reports a completed work loop.
+- `remuda butler sessions` shows the household.
+
+You may create a Remuda-managed child team with `remuda butler topic delegate
+NAME TASK...` when useful. Internal agent subagents are separate from Butler
+team members. `remuda butler send FROM TO MESSAGE...` is an operator form, not
+the normal way for a member to communicate.
+]]
+end
 local function team_member_prompt(parent)
-  return "You are a Butler team member. Your leader is " .. parent .. ". "
-    .. "Work on the task sent to this terminal. When a work loop is complete, "
-    .. "use `remuda butler send-to-leader RESULT...` to report "
-    .. "a concise result. The Butler CLI is your coordination interface; you may "
-    .. "create a Remuda-managed child team with `remuda butler topic delegate NAME TASK...` "
-    .. "when useful. Internal agent subagents are separate from Butler team members."
+  return "You are a Butler team member. Read AGENTS.md in your working directory first. "
+    .. "Use `remuda butler inbox`, `remuda butler send MEMBER MESSAGE...`, and "
+    .. "`remuda butler send-to-leader RESULT...` for coordination. Your leader is " .. parent .. "."
 end
 local function write_agent_guidance(root, text, replace)
   local path = root .. "/AGENTS.md"
@@ -487,6 +504,11 @@ local function write_agent_guidance(root, text, replace)
 end
 local function launch_agent(kind, requested_name, cwd, model, parent, task)
   local name = requested_name or kind
+  if not cwd and data_home then
+    cwd = data_home .. "/remuda/butler/sessions/" .. name
+    remuda.mkdir(cwd)
+  end
+  if cwd and parent then write_agent_guidance(cwd, team_member_guidance(parent)) end
   local token = next_token(name)
   local agent_telemetry = setup_telemetry(kind, { name = name, model = model })
   local argv = build_agent_argv(kind, {
@@ -557,7 +579,7 @@ local function make_topic(name, template, kind, parent, task)
     assert(type(setup) == "function", "Butler topic template must be a function: " .. template)
     setup(topic)
   end
-  write_agent_guidance(root, team_member_prompt(parent or "butler"))
+  write_agent_guidance(root, team_member_guidance(parent or "butler"))
   return launch_agent(kind or "claude", name, root, nil, parent, task)
 end
 
