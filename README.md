@@ -77,3 +77,23 @@ daemon is restarted.
 
 `remuda butler --agent claude|codex` selects the root Butler agent without an
 environment variable. Add `--headless` when only the service should start.
+
+### One-line install
+
+For a fresh machine, this composes the core install with mod install, a
+daemon restart to load the new mod, and a butler launch:
+
+```sh
+curl -fsSL https://warmblood-kr.github.io/remuda/install.sh | REMUDA_CHANNEL=nightly sh && ~/.local/bin/remuda mod install warmblood-kr/remuda-butler && ~/.local/bin/remuda stop -f && ~/.local/bin/remuda exec butler
+```
+
+Verified end-to-end in a fresh container: it gets you `remuda` installed, the
+`butler` mod installed, and a daemon that has attempted to launch butler. It
+does not by itself produce a working Matrix-bridged session. In a bare
+container the daemon's reconcile loop fails even before reaching Matrix
+setup, because it tries to spawn a `claude` CLI as the underlying agent
+process and retries continuously once that's missing; a real colleague's
+machine, which already runs a coding-agent CLI, gets past that point. Beyond
+it lies the Matrix `REMUDA_BUTLER_TOKEN`/`REMUDA_BUTLER_CONFIG` requirement,
+which this line intentionally leaves unset — see
+[`docs/butler.md`](docs/butler.md) for Matrix bridging configuration.
