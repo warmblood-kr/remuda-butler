@@ -10,7 +10,7 @@ Two independent two-way agreements live in this one file, since both share
 fallback shape:
 
 1. `install/install-butler.sh`'s `config_home`/`token_file`/`config_file` defaults
-   and `packages/butler/init.lua`'s `default_config_home()` + `resolve_path()`
+   and `packages/butler/main.lua`'s `default_config_home()` + `resolve_path()`
    -- one shell, one Lua -- both implement
    `${XDG_CONFIG_HOME:-$HOME/.config}/remuda/butler/{token,config}`.
 2. If `REMUDA_CORE_ROOT` is supplied, `install/install-butler.sh`'s
@@ -37,7 +37,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 INSTALLER = ROOT / "install" / "install-butler.sh"
-INIT_LUA = ROOT / "packages" / "butler" / "init.lua"
+INIT_LUA = ROOT / "packages" / "butler" / "main.lua"
 CORE_ROOT = os.environ.get("REMUDA_CORE_ROOT")
 DAEMON_RS = (
     Path(CORE_ROOT).expanduser() / "native" / "src" / "daemon.rs"
@@ -152,7 +152,7 @@ daemon_rs = DAEMON_RS.read_text(encoding="utf-8")
 # checked once.
 sh_init_lua_target = re.search(r'init_lua="\$config_home(/remuda/init\.lua)"', installer)
 # Rust side: `PathBuf::from(std::env::var_os("HOME")?).join(".config")`, then
-# `config_home.join("remuda").join("init.lua")` in `user_config_path()`.
+# `config_home.join("remuda").join("main.lua")` in `user_config_path()`.
 rust_fallback = re.search(r'var_os\("HOME"\)\?\)\.join\("([^"]*)"\)', daemon_rs)
 rust_segments = re.findall(r'config_home\.join\("(\w+)"\)\.join\("([\w.]+)"\)', daemon_rs)
 
@@ -170,7 +170,7 @@ if not rust_fallback:
 if not rust_segments:
     problems2.append(
         f"{DAEMON_RS.name}: could not find user_config_path()'s "
-        'config_home.join("remuda").join("init.lua") -- parser or convention changed'
+        'config_home.join("remuda").join("main.lua") -- parser or convention changed'
     )
 
 if problems2:

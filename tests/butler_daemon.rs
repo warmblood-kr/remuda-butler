@@ -1174,7 +1174,7 @@ fn restart_refuses_to_kill_a_live_session_without_being_told_twice() {
 /// already running — is deliberately NOT covered by this test on Windows;
 /// see warmblood-kr/remuda#54.
 ///
-/// `packages/butler/init.lua` now needs real Matrix config to run past this
+/// `packages/butler/main.lua` now needs real Matrix config to run past this
 /// point (`REMUDA_BUTLER_TOKEN`/`REMUDA_BUTLER_CONFIG`), which this test
 /// deliberately never provides — `remuda._butler_test_mode` is exactly the
 /// escape hatch it exposes for that (see `native/tests/daemon.rs`'s own
@@ -1851,7 +1851,7 @@ fn an_unpaced_flood_exercises_real_backpressure_and_the_child_blocks() {
 // Everything below runs against a stub HTTP server of our own
 // (`tests/support/matrix_stub_server.py`), never a real Matrix homeserver.
 // `HELPER_SRC`/`REPLY_SRC` are read straight out of the real
-// `packages/butler/init.lua` by running it (in test mode) in a daemon's
+// `packages/butler/main.lua` by running it (in test mode) in a daemon's
 // living image via `remuda exec butler`, then referenced BY NAME
 // (`remuda._butler_helper_src` / `remuda._butler_reply_src`) from later
 // `remuda.process` calls against that same image — the exact embedded
@@ -1936,7 +1936,7 @@ fn butler_config(
     (token_path, config_path)
 }
 
-/// Pre-start a daemon, then run the real `packages/butler/init.lua` inside
+/// Pre-start a daemon, then run the real `packages/butler/main.lua` inside
 /// it with `remuda._butler_test_mode` set — the same `remuda exec`
 /// invocation `exec_butler_runs_the_builtin_package_in_the_daemons_image`
 /// uses — so `remuda._butler_helper_src`/`remuda._butler_reply_src` hold
@@ -2443,7 +2443,7 @@ fn butler_helper_persists_since_across_a_restart() {
     eval(&path, "remuda.kill(remuda.persist_handle2)");
 }
 
-// `REPLY_SRC` is a bash script by design (packages/butler/init.lua) -- the
+// `REPLY_SRC` is a bash script by design (packages/butler/main.lua) -- the
 // real deployment target is a single Linux host, and there is no plan to
 // run this specific package's helpers on Windows. Windows CI does have a
 // `bash` on PATH (Git Bash), but the script's coreutils-flavored pieces
@@ -2871,7 +2871,7 @@ fn butler_initializes_mail_and_persists_a_sent_message() {
 fn butler_session_exited_hook_relaunches_via_the_shared_launch_function() {
     // Normalized once: a `\n`-only search below would miss a real call on a
     // checkout where git converts this file to CRLF (Windows runners do).
-    let init_lua = include_str!("../../packages/butler/init.lua").replace("\r\n", "\n");
+    let init_lua = include_str!("../../packages/butler/main.lua").replace("\r\n", "\n");
 
     let launch_fn_idx = init_lua
         .find("local function launch_butler()")
@@ -3198,7 +3198,7 @@ fn butler_compaction_schedule_sends_compact_when_idle_but_not_when_busy() {
 }
 
 /// Minimal shape check for `os.date("!%Y-%m-%dT%H:%M:%SZ")` -- exactly what
-/// `_butler_trace` in `packages/butler/init.lua` writes -- without pulling a
+/// `_butler_trace` in `packages/butler/main.lua` writes -- without pulling a
 /// date-parsing crate into this test binary for one field.
 fn looks_like_iso8601_utc(s: &str) -> bool {
     let b = s.as_bytes();
@@ -3347,7 +3347,7 @@ fn butler_compaction_trace_records_registered_skipped_and_sent() {
 
 /// Same real-process substitution as
 /// `butler_watchdog_relaunches_a_session_that_really_died`, but the witness
-/// here is the trace FILE `_butler_session_trace` in `packages/butler/init.lua`
+/// here is the trace FILE `_butler_session_trace` in `packages/butler/main.lua`
 /// writes from the `session_exited` hook, not the in-memory
 /// `remuda._watchdog_exits` list -- proving the watchdog's own trace records
 /// both the exit and the relaunch it triggers, not just that they happened.
@@ -3465,7 +3465,7 @@ fn butler_watchdog_records_session_exit_and_relaunch_in_a_trace_file() {
 /// Sibling of `butler_watchdog_records_session_exit_and_relaunch_in_a_trace_file`,
 /// but proving the DEFAULT-fallback branch itself: `remuda._butler_session_trace_path`
 /// is never set here, so this only passes if `_butler_session_trace` in
-/// `packages/butler/init.lua` actually falls back to
+/// `packages/butler/main.lua` actually falls back to
 /// `$HOME/.config/remuda/session-trace.log`, the same default-path idiom
 /// `_butler_trace` (compaction) already uses. Same `Daemon::spawn_with_home`
 /// HOME-redirection precedent as
@@ -3573,7 +3573,7 @@ fn butler_session_trace_defaults_to_the_conventional_path_with_no_seam_set() {
 
 /// This documents the case where NO persistence layer is installed: `remuda`
 /// itself never re-execs butler on its own, restart or not — the only way
-/// `packages/butler/init.lua`'s real code ever runs is an explicit `remuda
+/// `packages/butler/main.lua`'s real code ever runs is an explicit `remuda
 /// exec butler`. That stays true regardless of `docs/install-butler.sh`,
 /// because the systemd timer / launchd agent it installs lives entirely
 /// outside this binary; this test's daemon has none of that wired in, so it

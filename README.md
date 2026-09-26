@@ -20,7 +20,8 @@ for example:
 ```text
 $XDG_DATA_HOME/remuda/extensions/butler/
   extension.toml
-  packages/butler/init.lua
+  packages/butler/init.lua        (lifecycle entry)
+  packages/butler/main.lua
   packages/butler/mail.lua
   packages/butler/telemetry.lua
   packages/butler/agents/*.lua
