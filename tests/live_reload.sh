@@ -3,6 +3,8 @@
 # reloads twice more and rolls back. Never touches the default daemon: every
 # call carries a private REMUDA_RUNTIME_DIR and its own -s server name.
 #   usage: tests/live_reload.sh [OLD_REF]   (OLD_REF defaults to origin/main)
+#   AUTOSTART=1 lets the CLI auto-start the daemon, as on a real machine, and
+#   leaves Matrix unconfigured (no relay), like the live install.
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 OLD_REF=${1:-origin/main}
@@ -16,9 +18,13 @@ mkdir -p "$MOD" "$HOME" "$XDG_CONFIG_HOME/remuda/butler"
 # A dead homeserver keeps the relay helper alive in its retry loop, so live
 # relay processes can be counted by the token path unique to this run.
 TOKEN=$XDG_CONFIG_HOME/remuda/butler/token
-echo fake-token >"$TOKEN"
-printf 'http://127.0.0.1:9\n!room:x\n@butler:x\n' >"$XDG_CONFIG_HOME/remuda/butler/config"
-echo '{"since": "s0"}' >"$XDG_CONFIG_HOME/remuda/butler/config.since"  # skip the unguarded first sync
+RELAYS=0
+if [[ -z ${AUTOSTART:-} ]]; then
+  RELAYS=1
+  echo fake-token >"$TOKEN"
+  printf 'http://127.0.0.1:9\n!room:x\n@butler:x\n' >"$XDG_CONFIG_HOME/remuda/butler/config"
+  echo '{"since": "s0"}' >"$XDG_CONFIG_HOME/remuda/butler/config.since"  # skip the unguarded first sync
+fi
 trap 'remuda -s $S stop -f >/dev/null 2>&1 || true; pkill -f "$TOKEN" || true; rm -rf "$T"' EXIT
 
 lua() { remuda -s "$S" -e "$1"; }
@@ -27,6 +33,7 @@ old_files() { install_files git -C "$REPO" archive "$OLD_REF" extension.toml pac
 new_files() { install_files tar -c -C "$REPO" extension.toml packages; }
 fail() { echo "FAIL: $*"; exit 1; }
 start_daemon() {
+  [[ -n ${AUTOSTART:-} ]] && return  # the next CLI call starts it
   remuda -s "$S" daemon </dev/null >>"$T/daemon.log" 2>&1 &
   for _ in $(seq 50); do [[ -S $REMUDA_RUNTIME_DIR/remuda/$S.sock ]] && return; sleep 0.1; done
   fail "daemon never bound"
@@ -57,20 +64,21 @@ old_files
 # Started explicitly: an auto-started daemon currently dies when the relay
 # spawns (under investigation in core), unrelated to reload.
 start_daemon
-lua "remuda._butler_argv = {'sleep', '100001'}; remuda._butler_reconcile_interval = 0.5; remuda.exec('butler')"
+lua "remuda._butler_argv = {'sleep', '100001'}; remuda._butler_reconcile_interval = 0.5"
+remuda -s "$S" butler --headless
 lua "remuda._butler_agent_builders.fake = function() return {'sleep', '100002'} end
      remuda._butler_launch('fake', 'm1'); remuda._butler_send('butler', 'm1', 'kept across reload')"
 settle
 echo "legacy: $(lua "$SNAPSHOT") relays=$(relays)"
 BASE=$(lua "$SNAPSHOT" | sed 's/.* bus=//')
-EXPECT="hooks=1,1,1,1 schedules=1 sessions=butler,m1 member=true mail=2 bus=$BASE relays=1 pids=$(pids)"
+EXPECT="hooks=1,1,1,1 schedules=1 sessions=butler,m1 member=true mail=2 bus=$BASE relays=$RELAYS pids=$(pids)"
 
 echo "== swap in new files, reload x3"
 new_files
 for i in 1 2 3; do
   lua "remuda.reload('butler')"; settle
   check "reload $i" "boots=$i $EXPECT"
-  relay=$(pgrep -f "$TOKEN"); [[ $i == 1 || $relay == "$last_relay" ]] || fail "relay restarted on reload $i"
+  relay=$(pgrep -f "$TOKEN" || true); [[ $i == 1 || $relay == "$last_relay" ]] || fail "relay restarted on reload $i"
   last_relay=$relay
 done
 remuda -s "$S" butler sessions | grep -q m1 || fail "'remuda butler sessions' lost m1"
@@ -78,7 +86,7 @@ remuda -s "$S" butler inbox m1 | grep -q 'kept across reload' || fail "m1 mail l
 
 echo "== rollback to $OLD_REF (legacy code spawns its relay unconditionally)"
 old_files
-lua "remuda.kill(remuda._butler_relay); remuda.exec('butler')"; settle
+lua "if remuda._butler_relay then remuda.kill(remuda._butler_relay) end; remuda.exec('butler')"; settle
 check "rollback" "boots=3 ${EXPECT/mail=2/mail=0}"
 
 echo "== roll forward again"
@@ -92,5 +100,5 @@ start_daemon
 lua "remuda._butler_argv = {'sleep', '100001'}"
 remuda -s "$S" butler --headless; settle
 lua "$SNAPSHOT" | grep -q 'boots=1 hooks=1,1,1,1 schedules=1 sessions=butler ' || fail "cold boot: $(lua "$SNAPSHOT")"
-[[ $(relays) == 1 ]] || fail "cold boot relays=$(relays)"
+[[ $(relays) == "$RELAYS" ]] || fail "cold boot relays=$(relays)"
 echo PASS
