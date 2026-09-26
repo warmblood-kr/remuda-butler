@@ -574,7 +574,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
   return actual
 end
 
-local function make_topic(name, template, kind, parent, task)
+local function make_topic(name, template, kind, parent, task, model)
   load_topic_config()
   local root = topic_config.project_home .. "/" .. name
   remuda.mkdir(root)
@@ -599,7 +599,7 @@ local function make_topic(name, template, kind, parent, task)
     setup(topic)
   end
   write_agent_guidance(root, team_member_guidance(parent or "butler"))
-  return launch_agent(kind or "claude", name, root, nil, parent, task)
+  return launch_agent(kind or "claude", name, root, model, parent, task)
 end
 
 -- Shell-facing doors into the same deliberately mutable bus.  These are not
@@ -607,17 +607,17 @@ end
 -- attribution a human (or an agent using the CLI) chose to leave on a note.
 -- Keeping them on `remuda` also makes the post office pleasant to explore from
 -- a REPL without having to know this chunk's private locals.
-function remuda._butler_launch(kind, name)
-  return launch_agent(kind, name, nil, nil, "butler")
+function remuda._butler_launch(kind, name, model)
+  return launch_agent(kind, name, nil, model, "butler")
 end
-function remuda._butler_topic_new(name, template, kind)
-  return make_topic(name, template, kind, "butler")
+function remuda._butler_topic_new(name, template, kind, model)
+  return make_topic(name, template, kind, "butler", nil, model)
 end
-function remuda._butler_topic_delegate(name, task, template, kind, parent)
+function remuda._butler_topic_delegate(name, task, template, kind, parent, model)
   parent = parent or "butler"
   local leader = bus.agents[parent]
   if not leader then error("no Butler leader named " .. tostring(parent), 0) end
-  return make_topic(name, template, kind or leader.kind, parent, task)
+  return make_topic(name, template, kind or leader.kind, parent, task, model)
 end
 function remuda._butler_send(from, to, text)
   if not bus.agents[to] then error("no Butler agent named " .. tostring(to), 0) end
@@ -666,9 +666,9 @@ end
 local BUTLER_USAGE = [[remuda butler — coordination for managed agents
 
   remuda butler sessions
-  remuda butler launch <claude|codex> [name]
-  remuda butler topic new <name> [--template T] [--agent A]
-  remuda butler topic delegate <name> <task...> [--agent A] [--leader L]
+  remuda butler launch <claude|codex> [name] [--model M]
+  remuda butler topic new <name> [--template T] [--agent A] [--model M]
+  remuda butler topic delegate <name> [--agent A] [--leader L] [--model M] <task...>
   remuda butler send <to> "<message>"
   remuda butler send <from> <to> <message...>
   remuda butler send-to-leader <message...>
@@ -694,8 +694,10 @@ remuda.extension_command("butler", function(args, caller)
   if #args == 0 or args[1] == "help" or args[1] == "-h" or args[1] == "--help" then return BUTLER_USAGE end
   if #args == 1 and args[1] == "sessions" then return remuda._butler_sessions() end
   if args[1] == "launch" and (args[2] == "claude" or args[2] == "codex") then
-    if #args == 2 then return remuda._butler_launch(args[2], nil) end
-    if #args == 3 then return remuda._butler_launch(args[2], args[3]) end
+    local model
+    if args[#args - 1] == "--model" then model = args[#args]; args[#args] = nil; args[#args] = nil end
+    if #args == 2 then return remuda._butler_launch(args[2], nil, model) end
+    if #args == 3 then return remuda._butler_launch(args[2], args[3], model) end
   end
   if args[1] == "inbox" then return remuda._butler_inbox(args[2] or assert(current_agent(caller), "inbox needs REMUDA_BUTLER_AGENT_ID")) end
   if args[1] == "send-to-leader" and #args >= 2 then
@@ -708,20 +710,25 @@ remuda.extension_command("butler", function(args, caller)
     return remuda._butler_send(assert(from, "send needs REMUDA_BUTLER_AGENT_ID"), to, words_after(args, first))
   end
   if args[1] == "topic" and args[2] == "new" and args[3] then
-    local template, kind, i = nil, nil, 4
+    local template, kind, model, i = nil, nil, nil, 4
     while i <= #args do
-      if args[i] == "--template" then template = args[i + 1] elseif args[i] == "--agent" then kind = args[i + 1] else return BUTLER_USAGE end
+      if args[i] == "--template" then template = args[i + 1]
+      elseif args[i] == "--agent" then kind = args[i + 1]
+      elseif args[i] == "--model" then model = args[i + 1]
+      else return BUTLER_USAGE end
       i = i + 2
     end
-    return remuda._butler_topic_new(args[3], template, kind)
+    return remuda._butler_topic_new(args[3], template, kind, model)
   end
   if args[1] == "topic" and args[2] == "delegate" and args[3] then
-    local kind, parent, i = nil, current_agent(caller) or "butler", 4
-    while i <= #args and (args[i] == "--agent" or args[i] == "--leader") do
-      if args[i] == "--agent" then kind = args[i + 1] else parent = args[i + 1] end
+    local kind, parent, model, i = nil, current_agent(caller) or "butler", nil, 4
+    while i <= #args and (args[i] == "--agent" or args[i] == "--leader" or args[i] == "--model") do
+      if args[i] == "--agent" then kind = args[i + 1]
+      elseif args[i] == "--model" then model = args[i + 1]
+      else parent = args[i + 1] end
       i = i + 2
     end
-    if i <= #args then return remuda._butler_topic_delegate(args[3], words_after(args, i), nil, kind, parent) end
+    if i <= #args then return remuda._butler_topic_delegate(args[3], words_after(args, i), nil, kind, parent, model) end
   end
   return BUTLER_USAGE
 end)
@@ -740,12 +747,12 @@ remuda.tool{
 remuda.tool{
   name = "butler_delegate",
   about = "Create a topic, start a child agent in it, and give it an initial task. The child reports each completed work loop to this leader.",
-  args = { name = "Topic and child-session name.", task = "Initial task for the child.", template = "Optional Butler topic template.", kind = "Optional agent kind; defaults to the leader's kind." },
+  args = { name = "Topic and child-session name.", task = "Initial task for the child.", template = "Optional Butler topic template.", kind = "Optional agent kind; defaults to the leader's kind.", model = "Optional model override." },
   needs = { "name", "task" },
   run = function(a, caller)
     local parent = caller_name(caller)
     if not bus.agents[parent] then parent = "butler" end
-    return "delegated " .. remuda._butler_topic_delegate(a.name, a.task, a.template, a.kind, parent)
+    return "delegated " .. remuda._butler_topic_delegate(a.name, a.task, a.template, a.kind, parent, a.model)
   end,
 }
 remuda.tool{
