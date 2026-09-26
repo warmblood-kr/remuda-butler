@@ -64,9 +64,13 @@ remuda butler send reviewer "please check the latest patch"
 remuda butler send-to-leader "review complete: no blockers"
 ```
 
-The sender is inferred from the environment. `remuda butler send FROM TO
-MESSAGE...` remains available for an operator who intentionally sends a note
-on another session's behalf.
+The sender is inferred from the calling shell's environment; quote the
+message for `send`, since `remuda butler send FROM TO MESSAGE...` (what an
+unquoted multi-word message parses as) is the operator form for sending a note on another
+session's behalf. The short forms need a Remuda core that forwards the caller's
+`REMUDA_*` variables to mod commands (warmblood-kr/remuda#95); on an older
+core, pass the name explicitly (`remuda butler inbox "$REMUDA_BUTLER_AGENT_ID"`)
+or use the MCP `butler_*` tools.
 
 ### Optional Matrix bridge
 
