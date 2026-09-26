@@ -55,6 +55,11 @@ remuda butler inbox
 remuda butler send-to-leader "work is complete"
 ```
 
+`launch`, `topic new`, and `topic delegate` take `--model M` to pick the
+member's model (e.g. `remuda butler topic delegate docgen --agent codex
+--model gpt-5.5 "build the documentation site"`); without it the agent uses its
+own default. The MCP `butler_launch` and `butler_delegate` tools take `model`.
+
 Every Butler-managed agent receives `REMUDA_BUTLER_AGENT_ID` and, when it has
 one, `REMUDA_BUTLER_LEADER_ID`. Therefore agents normally use the short forms:
 

@@ -16,5 +16,7 @@ telemetry.codex = {
 }
 
 builders.codex = function(spec)
-  return { "remuda", "_codex_tui", "--status", spec.telemetry.status_path }
+  local argv = { "remuda", "_codex_tui", "--status", spec.telemetry.status_path }
+  if spec.model and spec.model ~= "" then argv[#argv + 1] = "--model"; argv[#argv + 1] = spec.model end
+  return argv
 end
