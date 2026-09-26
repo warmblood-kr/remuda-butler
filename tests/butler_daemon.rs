@@ -2660,6 +2660,84 @@ fn butler_codex_builder_uses_automatic_approval() {
         .any(|pair| pair == ["--status", "/tmp/status"]));
 }
 
+/// A delegated task must survive the agent's startup dialogs: Butler answers
+/// each kind's known modals (agents/*.lua) and types the task only once the
+/// composer is ready. Screens are real captures (Claude's workspace-trust
+/// modal, Codex's update prompt), fed through a fake `remuda.capture`; a
+/// screen no table knows must time out into the trace, never be typed into.
+#[test]
+#[cfg(unix)]
+fn butler_task_poke_answers_startup_modals_before_typing() {
+    let dir = scratch_dir("butler-startup-modals");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).expect("test home");
+    let daemon = Daemon::spawn_with_home(&dir, &home);
+    let path = daemon::socket_path_in(&dir, "s");
+    eval(
+        &path,
+        r#"remuda._butler_argv = {"sh", "-c", "sleep 30"}; remuda._butler_skip_relay = true"#,
+    );
+    let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let trace = dir.join("session-trace.log");
+    eval(
+        &path,
+        &format!(
+            r#"
+          remuda.butler.project_home({home:?})
+          remuda._butler_session_trace_path = {trace:?}
+          remuda._butler_task_poke_attempts = 6
+          remuda._butler_agent_builders.claude = function() return {{"sh"}} end
+          remuda._butler_agent_builders.codex = function() return {{"sh"}} end
+          local rule = string.rep("─", 20)
+          local screens = {{
+            ["t-claude"] = {{
+              rule .. "\n Accessing workspace:\n\n ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm · Esc to cancel",
+              rule .. "\n❯ Try \"how do I log an error?\"\n" .. rule,
+            }},
+            ["t-codex"] = {{
+              "  Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip\n  3. Skip until next version",
+              "│ ✨ Update available! │\n› Ask Codex to do anything",
+            }},
+            ["t-stuck"] = {{ " Some unknown dialog\n ❯ 1. No, exit" }},
+          }}
+          local log = {{}}
+          remuda._t = log
+          remuda.capture = function(n)
+            local q = screens[n]
+            if #q > 1 then return table.remove(q, 1) end
+            return q[1]
+          end
+          remuda.key = function(n, k) log[#log + 1] = n .. " key " .. k end
+          remuda.type_text = function(n, t) log[#log + 1] = n .. " type " .. t end
+          local leader = remuda._butler_initial_name
+          remuda._butler_topic_delegate("t-claude", "task one", nil, "claude", leader)
+          remuda._butler_topic_delegate("t-codex", "task two", nil, "codex", leader)
+          remuda._butler_topic_delegate("t-stuck", "task three", nil, "claude", leader)
+        "#,
+            home = home.to_string_lossy(),
+            trace = trace.to_string_lossy(),
+        ),
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let log = loop {
+        let log = eval(&path, "return table.concat(remuda._t, '\\n')");
+        let traced = std::fs::read_to_string(&trace).unwrap_or_default();
+        if log.matches(" type ").count() == 2 && traced.contains("task_poke_timeout\tt-stuck") {
+            break log;
+        }
+        assert!(Instant::now() < deadline, "pokes never settled: {log}\n{traced}");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let claude: Vec<&str> = log.lines().filter(|l| l.starts_with("t-claude ")).collect();
+    assert_eq!(claude, ["t-claude key <down>", "t-claude key RET", "t-claude type task one"]);
+    let codex: Vec<&str> = log.lines().filter(|l| l.starts_with("t-codex ")).collect();
+    assert_eq!(codex, ["t-codex key 2", "t-codex type task two"]);
+    assert!(!log.contains("t-stuck"), "typed into an unknown dialog: {log}");
+    drop(daemon);
+}
+
 #[test]
 #[cfg(unix)]
 fn reexecuting_butler_keeps_the_root_telemetry_identity() {

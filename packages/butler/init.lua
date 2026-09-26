@@ -450,6 +450,7 @@ local function agent_mcp_config(token)
     .. server .. '","mcp"],"env":{' .. env .. '}}}}'
 end
 remuda._butler_agent_builders = remuda._butler_agent_builders or {}
+remuda._butler_agent_startup = remuda._butler_agent_startup or {}
 remuda._butler_agent_support = {
   mcp_config_path = agent_mcp_path,
   mcp_flags = agent_mcp_flags,
@@ -504,6 +505,7 @@ local function write_agent_guidance(root, text, replace)
   f:write(text)
   f:close()
 end
+local _butler_session_trace -- defined below; the task poke fires later
 local function launch_agent(kind, requested_name, cwd, model, parent, task)
   local name = requested_name or kind
   if not cwd and data_home then
@@ -538,21 +540,37 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
   -- A failed welcome write must not prevent the agent from starting.
   pcall(queue_message, parent or "butler", actual, team_member_guidance(parent or "butler"), "Welcome to Butler")
   if task and task ~= "" then
-    local poke, attempts = nil, 0
+    -- Answer known startup modals (agents/*.lua) and type the task only once
+    -- the composer is ready; never blind-type into an unknown dialog.
+    local startup = remuda._butler_agent_startup[kind] or {}
+    local poke, attempts, settle = nil, 0, 0
     poke = remuda.schedule({ every = 0.5, run = function()
       attempts = attempts + 1
       -- A short-lived launcher (or a failed executable) can disappear before
-      -- Codex has painted its composer. A deferred poke is best-effort; it
+      -- the agent has painted its composer. A deferred poke is best-effort; it
       -- must not leave a throwing callback in the daemon's shared Lua image.
       local captured, screen = pcall(remuda.capture, actual)
       if not captured then
         remuda.cancel(poke)
         return
       end
-      local ready = screen:find("Ask Codex", 1, true)
-      if ready or attempts >= 20 then
+      if attempts < settle then return end -- let an answered modal repaint
+      if not startup.ready or startup.ready(screen) then
         remuda.cancel(poke)
         pcall(remuda.type_text, actual, task)
+        return
+      end
+      for _, modal in ipairs(startup.modals or {}) do
+        if screen:find(modal.match, 1, true) then
+          _butler_session_trace("startup_modal", actual .. " " .. modal.match)
+          for _, key in ipairs(modal.keys) do pcall(remuda.key, actual, key) end
+          settle = attempts + 3
+          return
+        end
+      end
+      if attempts >= (remuda._butler_task_poke_attempts or 60) then
+        remuda.cancel(poke)
+        _butler_session_trace("task_poke_timeout", actual)
       end
     end })
   end
@@ -963,7 +981,7 @@ end
 -- tempfile, same idiom as remuda._butler_compaction_trace_path above; nil in
 -- production falls back to the real default, matching the token/config path
 -- convention already used by default_config_home() above.
-local function _butler_session_trace(event, detail)
+function _butler_session_trace(event, detail)
   pcall(function()
     local path = remuda._butler_session_trace_path
       or (os.getenv("XDG_CONFIG_HOME") or (os.getenv("HOME") .. "/.config"))

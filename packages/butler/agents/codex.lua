@@ -18,3 +18,11 @@ telemetry.codex = {
 builders.codex = function(spec)
   return { "remuda", "_codex_tui", "--status", spec.telemetry.status_path }
 end
+
+remuda._butler_agent_startup.codex = {
+  ready = function(screen) return screen:find("Ask Codex", 1, true) ~= nil end,
+  modals = {
+    { match = "Skip until next version", keys = { "2" } }, -- update prompt: 2. Skip (not persisted)
+    { match = "Trust this folder?", keys = { "1" } }, -- 1. Trust and continue
+  },
+}
