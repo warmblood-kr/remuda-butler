@@ -802,7 +802,10 @@ function remuda._butler_report(from, text)
 end
 -- The household as a leader -> member walk: parents first, siblings sorted
 -- by display name, then orphans (missing or cyclic leaders) at depth 0. One
--- walk feeds both the CLI roster and the client pane's `session_order` hook.
+-- walk feeds both the CLI roster and the client pane's `session_order` hook,
+-- so its `indent` is the single view policy for both: butler may parent
+-- everything, so a root and its direct children share the margin and
+-- indentation starts at grandchildren.
 local MAX_TREE_INDENT_DEPTH = 20
 local function display_name(id)
   local agent = bus.agents[id]
@@ -832,8 +835,8 @@ local function team_order()
       local item = table.remove(stack)
       if not visited[item.id] then
         visited[item.id] = true
-        order[#order + 1] = { id = item.id, orphan = item.orphan,
-          depth = math.min(item.depth, MAX_TREE_INDENT_DEPTH) }
+        order[#order + 1] = { id = item.id, orphan = item.orphan, depth = item.depth,
+          indent = math.min(math.max(0, item.depth - 1), MAX_TREE_INDENT_DEPTH) }
         local children = children_of(item.id)
         for index = #children, 1, -1 do
           stack[#stack + 1] = { id = children[index], depth = item.depth + 1, orphan = false }
@@ -860,7 +863,7 @@ function remuda._butler_sessions()
   local rows = {}
   for _, item in ipairs(team_order()) do
     local agent = bus.agents[item.id]
-    rows[#rows + 1] = string.rep(" ", item.depth * 2) .. (item.orphan and "[orphan] " or "")
+    rows[#rows + 1] = string.rep(" ", item.indent * 2) .. (item.orphan and "[orphan] " or "")
       .. display_name(item.id) .. "\t" .. tostring(agent.kind or "") .. "\t"
       .. tostring(agent.parent or "-")
   end
@@ -873,7 +876,7 @@ end
 function remuda.session_order()
   local order = {}
   for _, item in ipairs(team_order()) do
-    order[#order + 1] = { name = item.id, depth = item.depth }
+    order[#order + 1] = { name = item.id, depth = item.indent }
   end
   return order
 end
@@ -882,13 +885,11 @@ function remuda.session_detail(session)
   local agent = bus.agents[session.name]
   if not agent then return nil end
   local telemetry = remuda._butler_telemetry_for(agent)
-  local function context_k(tokens)
-    if tokens == "?" then return "?" end
-    return string.format("%.0fk", tonumber(tokens) / 1000)
-  end
-  local context = "CTX " .. context_k(telemetry.context_used) .. "/" .. context_k(telemetry.context_window)
-  if telemetry.context_percent ~= "?" then context = context .. " " .. telemetry.context_percent .. "%" end
-  return (agent.kind or "agent") .. " · " .. telemetry.model .. " · " .. context
+  local detail = (agent.kind or "agent") .. " · " .. telemetry.model
+  -- Current usage only: the window and percent cost width and rarely change.
+  local used = tonumber(telemetry.context_used)
+  if used then detail = detail .. " · " .. string.format("%.0fK", used / 1000) end
+  return detail
 end
 
 local BUTLER_USAGE = [[remuda butler — coordination for managed agents

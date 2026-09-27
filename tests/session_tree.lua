@@ -29,9 +29,11 @@ local rows = displayed_rows(fixture({
 }))
 assert_equal(rows[1], "SESSION\tAGENT\tLEADER", "roster header")
 assert_equal(rows[2], "root\tclaude\t-", "root row")
-assert_equal(rows[3], "  alpha\tcodex\troot", "sorted first child")
-assert_equal(rows[4], "    worker\tcodex\talpha", "grandchild follows parent")
-assert_equal(rows[5], "  zeta\tclaude\troot", "sorted second child")
+-- View policy: a root (butler) and its direct children sit at the margin;
+-- indentation starts at grandchildren (indent = max(0, depth - 1)).
+assert_equal(rows[3], "alpha\tcodex\troot", "direct child stays at the margin")
+assert_equal(rows[4], "  worker\tcodex\talpha", "grandchild is the first indented row")
+assert_equal(rows[5], "zeta\tclaude\troot", "sorted second child")
 
 -- The client's session pane asks the same tree for its order (core's
 -- remuda.session_order hook): same walk, depth per row, names as sessions.
@@ -46,8 +48,8 @@ assert(type(remuda.session_order) == "function", "butler provides the session_or
 local order = remuda.session_order(remuda.ls())
 local seen = {}
 for index, item in ipairs(order) do seen[index] = item.name .. "@" .. item.depth end
-assert_equal(table.concat(seen, " "), "root@0 alpha@1 worker@2 zeta@1 lost@0",
-  "pane order matches the roster tree, orphans last at depth 0")
+assert_equal(table.concat(seen, " "), "root@0 alpha@0 worker@1 zeta@0 lost@0",
+  "pane order and indent match the roster, orphans last at the margin")
 rows = displayed_rows(fixture({
   {"root-b", "codex"},
   {"root-a", "claude"},
@@ -77,6 +79,19 @@ assert(found_orphan, "orphan row is marked and retains its missing parent")
 assert(found_cycle_a and found_cycle_b, "cycle members are visible")
 assert_equal((function() local n=0 for _ in pairs(seen) do n=n+1 end return n end)(), 5, "every graph record appears once")
 
+-- The pane's detail line: current context usage only, in K.
+fixture({{"root", "claude"}})
+local real_telemetry = remuda._butler_telemetry_for
+remuda._butler_telemetry_for = function()
+  return { model = "opus", context_used = "123456", context_window = "1000000", context_percent = "12" }
+end
+assert_equal(remuda.session_detail({ name = "root" }), "claude · opus · 123K", "detail shows usage in K")
+remuda._butler_telemetry_for = function()
+  return { model = "opus", context_used = "?", context_window = "?", context_percent = "?" }
+end
+assert_equal(remuda.session_detail({ name = "root" }), "claude · opus", "unknown usage is left out")
+remuda._butler_telemetry_for = real_telemetry
+
 local deep = {{"depth-0", "claude"}}
 for depth = 1, 26 do deep[#deep + 1] = {"depth-" .. depth, "codex", "depth-" .. (depth - 1)} end
 rows = displayed_rows(fixture(deep))
@@ -88,6 +103,7 @@ for index = 2, #rows do
   assert(indent <= 40 and indent % 2 == 0, "bounded two-space indentation")
   assert(not kind:match("^ ") and not leader:match("^ "), "only session display column is indented")
   local depth = tonumber(alias:match("depth%-(%d+)$"))
-  assert(depth and indent == math.min(depth, 20) * 2, "depth indentation cap at 40 spaces")
+  assert(depth and indent == math.min(math.max(0, depth - 1), 20) * 2,
+    "indent starts at grandchildren and caps at 40 spaces")
 end
 return "sessions tree acceptance passed: parent-first, stable siblings, roots/orphans/cycles, 40-space cap, compact columns"
