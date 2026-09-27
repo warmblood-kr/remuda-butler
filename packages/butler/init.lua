@@ -526,6 +526,9 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
     REMUDA_BUTLER_AGENT_ID = name,
     REMUDA_BUTLER_LEADER_ID = parent or "",
     REMUDA_BUTLER_AGENT_KIND = kind,
+    -- A daemon started from inside Claude Code inherits CLAUDE_CODE_CHILD_SESSION,
+    -- which turns off transcript saving and so makes a crashed agent unresumable.
+    CLAUDE_CODE_FORCE_SESSION_PERSISTENCE = "1",
   })
   bus.tokens[token] = actual
   bus.agents[actual] = {
@@ -927,6 +930,7 @@ local function launch_butler()
     REMUDA_BUTLER_AGENT_ID = requested_name,
     REMUDA_BUTLER_LEADER_ID = "",
     REMUDA_BUTLER_AGENT_KIND = butler_kind,
+    CLAUDE_CODE_FORCE_SESSION_PERSISTENCE = "1",
   })
   remuda._butler_name = butler_name
   return butler_name
