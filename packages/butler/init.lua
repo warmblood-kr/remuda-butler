@@ -12,6 +12,8 @@ if not sealed then
   return remuda.exec("butler")
 end
 local host = sealed.__index.remuda
+-- ponytail: the unsealed-table lookup and one-shot schedule sidestep the seal;
+-- replace them with the start hook asked for in warmblood-kr/remuda#98 (1).
 local kick
 kick = host.schedule({ name = "butler-start", every = 0.05, run = function()
   host.cancel(kick)
