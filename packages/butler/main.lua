@@ -770,7 +770,7 @@ function remuda._butler_topic_new(name, template, kind, model)
   return make_topic(name, template, kind, "butler", nil, model)
 end
 function remuda._butler_topic_delegate(name, task, template, kind, parent, model)
-  parent = parent or "butler"
+  parent = resolve(parent or "butler")
   local leader = bus.agents[parent]
   if not leader then error("no Butler leader named " .. tostring(parent), 0) end
   return make_topic(name, template, kind or leader.kind, parent, task, model)

@@ -4,9 +4,14 @@
 #   AUTOSTART=1 tests/live_reload.sh     CLI-auto-started daemon
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-OLD_REF=${1:-origin/main}
+# Default: the last legacy (pre-lifecycle) Butler. origin/main is lifecycle
+# since #21, so it no longer replays the transition and its boot is miscounted.
+OLD_REF=${1:-8950e51^}
 T=$(mktemp -d /tmp/brl.XXXXXX)
 S=brl
+# This run's own fake-process durations: a global `sleep 10000[12]` pgrep saw
+# every concurrent run's sessions and failed the pid check at random.
+ID=$((RANDOM % 90000 + 10000))
 export REMUDA_RUNTIME_DIR=$T/run XDG_DATA_HOME=$T/data XDG_CONFIG_HOME=$T/config
 export HOME=$T/home REMUDA_BUTLER_PROJECT_HOME=$T/projects REMUDA_BUTLER_SERVER=$S
 unset REMUDA_BUTLER_TOKEN REMUDA_BUTLER_CONFIG
@@ -46,7 +51,7 @@ return string.format("boots=%d hooks=%d,%d,%d,%d schedules=%d sessions=%s member
   remuda.event_counts()["butler-start"] or 0, n("session_exited"), n("butler-compaction-submit"), n("butler-matrix-line"), n("butler-matrix-submit"),
   s, table.concat(live, ","), tostring(member ~= nil), #inbox, tostring(bus))'
 relays() { (pgrep -f "$TOKEN" || true) | wc -l | tr -d ' '; }
-pids() { (pgrep -f 'sleep 10000[12]' || true) | sort | tr '\n' ','; }
+pids() { (pgrep -f "sleep ${ID}[12]\$" || true) | sort | tr '\n' ','; }
 settle() { sleep 1; }
 check() {
   local got
@@ -58,9 +63,9 @@ check() {
 echo "== legacy install ($OLD_REF)"
 old_files
 start_daemon
-lua "remuda._butler_argv = {'sleep', '100001'}; remuda._butler_reconcile_interval = 0.5"
+lua "remuda._butler_argv = {'sleep', '${ID}1'}; remuda._butler_reconcile_interval = 0.5"
 remuda -s "$S" butler --headless
-lua "remuda._butler_agent_builders.fake = function() return {'sleep', '100002'} end
+lua "remuda._butler_agent_builders.fake = function() return {'sleep', '${ID}2'} end
      remuda._butler_launch('fake', 'm1'); remuda._butler_send('butler', 'm1', 'kept across reload')"
 settle
 echo "legacy: $(lua "$SNAPSHOT") relays=$(relays)"
@@ -90,11 +95,18 @@ new_files
 lua "remuda.reload('butler')"; settle
 check "roll forward" "boots=4 ${EXPECT/mail=2/mail=0}"
 
+echo "== tight reload loop: one boot per reload, nothing duplicated"
+lua "for _ = 1, 5 do remuda.reload('butler') end"
+for _ in 1 2 3 4 5; do lua "remuda.reload('butler')"; done
+settle
+check "tight x10" "boots=14 ${EXPECT/mail=2/mail=0}"
+[[ $(lua 'return #(remuda.hooks["butler-start"] or {})') == 1 ]] || fail "butler-start hook duplicated"
+
 echo "== cold boot through remuda butler"
 remuda -s "$S" stop -f >/dev/null 2>&1
 pkill -f "$TOKEN" >/dev/null 2>&1 || true
 start_daemon
-lua "remuda._butler_argv = {'sleep', '100001'}"
+lua "remuda._butler_argv = {'sleep', '${ID}1'}"
 remuda -s "$S" butler --headless; settle
 lua "$SNAPSHOT" | grep -q 'boots=1 hooks=1,1,1,1 schedules=1 sessions=butler ' || \
   fail "cold boot: $(lua "$SNAPSHOT")"
