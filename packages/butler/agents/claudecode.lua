@@ -33,3 +33,11 @@ builders.claude = function(spec)
   if spec.model and spec.model ~= "" then argv[#argv + 1] = "--model"; argv[#argv + 1] = spec.model end
   return argv
 end
+
+-- Fresh topic dirs are created by Butler itself, so trusting them is safe.
+remuda._butler_agent_startup.claude = {
+  ready = function(screen) return screen:find("─\n❯", 1, true) ~= nil end, -- idle composer under its rule
+  modals = {
+    { match = "Yes, I trust this folder", keys = { "<down>", "RET" } },
+  },
+}
