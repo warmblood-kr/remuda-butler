@@ -71,6 +71,10 @@ lua() { "$REMUDA_BIN" -s "$SERVER" -e "$1"; }
 load_butler() {
   lua 'remuda._butler_argv = {"sh", "-c", "env | grep ^REMUDA_BUTLER_; sleep 30"}; remuda._butler_skip_relay = true' >/dev/null
   "$REMUDA_BIN" -s "$SERVER" exec butler >/dev/null
+  for _ in $(seq 50); do
+    if lua 'return remuda._butler_agent_builders ~= nil' | grep -qx true; then break; fi
+    sleep 0.1
+  done
   lua 'remuda._butler_agent_builders.fake = function() return {"sh", "-c", "env | grep ^REMUDA_BUTLER_; sleep 30"} end' >/dev/null
 }
 
