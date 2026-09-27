@@ -90,6 +90,13 @@ new_files
 lua "remuda.reload('butler')"; settle
 check "roll forward" "boots=4 ${EXPECT/mail=2/mail=0}"
 
+echo "== tight reload loop: one boot per reload, nothing duplicated"
+lua "for _ = 1, 5 do remuda.reload('butler') end"
+for _ in 1 2 3 4 5; do lua "remuda.reload('butler')"; done
+settle
+check "tight x10" "boots=14 ${EXPECT/mail=2/mail=0}"
+[[ $(lua 'return #(remuda.hooks["butler-start"] or {})') == 1 ]] || fail "butler-start hook duplicated"
+
 echo "== cold boot through remuda butler"
 remuda -s "$S" stop -f >/dev/null 2>&1
 pkill -f "$TOKEN" >/dev/null 2>&1 || true
