@@ -1,0 +1,19 @@
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    # Butler's daemon-level Rust tests, built against a pinned Remuda core
+    # (tests/rust_tests.sh). warmblood-kr/remuda-butler#20.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: tests/rust_tests.sh

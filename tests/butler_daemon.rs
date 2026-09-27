@@ -2802,7 +2802,7 @@ fn butler_mail_separates_the_envelope_from_its_body_object() {
         &path,
         r#"
           remuda._butler_mail_config = {
-            bus = { inboxes = {}, messages = {}, objects = {}, next = 0 },
+            bus = { agents = { fixer = { id = "01FIXER" } }, inboxes = {}, messages = {}, objects = {}, next = 0 },
             json_quote = function(value) return '"' .. value .. '"' end,
           }
           remuda.exec("butler/mail")
@@ -2815,7 +2815,7 @@ fn butler_mail_separates_the_envelope_from_its_body_object() {
           local object = remuda._butler_mail_config.bus.objects[message.body.object_id]
           return message.from.host .. ":" .. message.from.session .. "\n"
             .. message.body.object_id .. "\n" .. object.content .. "\n"
-            .. remuda._butler_mail.inbox("fixer")
+            .. remuda._butler_mail.inbox("01FIXER")
         "#,
     );
     let lines: Vec<&str> = result.lines().collect();
@@ -2837,7 +2837,7 @@ fn butler_mail_survives_a_fresh_lua_mailbox_and_remembers_reads() {
         &format!(
             r#"
               remuda._butler_mail_config = {{
-                bus = {{ inboxes = {{}}, messages = {{}}, objects = {{}}, next = 0 }},
+                bus = {{ agents = {{ fixer = {{ id = "01FIXER" }} }}, inboxes = {{}}, messages = {{}}, objects = {{}}, next = 0 }},
                 root = {root_lua}, json_quote = function(value) return '"' .. value .. '"' end,
               }}
               remuda.exec("butler/mail")
@@ -2850,11 +2850,11 @@ fn butler_mail_survives_a_fresh_lua_mailbox_and_remembers_reads() {
         &format!(
             r#"
               remuda._butler_mail_config = {{
-                bus = {{ inboxes = {{}}, messages = {{}}, objects = {{}}, next = 0 }},
+                bus = {{ agents = {{ fixer = {{ id = "01FIXER" }} }}, inboxes = {{}}, messages = {{}}, objects = {{}}, next = 0 }},
                 root = {root_lua}, json_quote = function(value) return '"' .. value .. '"' end,
               }}
               remuda.exec("butler/mail")
-              return remuda._butler_mail.inbox("fixer")
+              return remuda._butler_mail.inbox("01FIXER")
             "#
         ),
     );
@@ -2864,11 +2864,11 @@ fn butler_mail_survives_a_fresh_lua_mailbox_and_remembers_reads() {
         &format!(
             r#"
               remuda._butler_mail_config = {{
-                bus = {{ inboxes = {{}}, messages = {{}}, objects = {{}}, next = 0 }},
+                bus = {{ agents = {{ fixer = {{ id = "01FIXER" }} }}, inboxes = {{}}, messages = {{}}, objects = {{}}, next = 0 }},
                 root = {root_lua}, json_quote = function(value) return '"' .. value .. '"' end,
               }}
               remuda.exec("butler/mail")
-              return remuda._butler_mail.inbox("fixer")
+              return remuda._butler_mail.inbox("01FIXER")
             "#
         ),
     );
@@ -2880,6 +2880,10 @@ fn butler_mail_survives_a_fresh_lua_mailbox_and_remembers_reads() {
 fn butler_initializes_mail_and_persists_a_sent_message() {
     let dir = scratch_dir("butler-mail-init");
     let data_home = dir.join("data");
+    // A private data home still needs the installed mod (tests/rust_tests.sh).
+    let mods = PathBuf::from(std::env::var_os("XDG_DATA_HOME").expect("XDG_DATA_HOME"));
+    std::fs::create_dir_all(data_home.join("remuda")).expect("data home");
+    let _ = std::os::unix::fs::symlink(mods.join("remuda/mods"), data_home.join("remuda/mods"));
     let (token_path, config_path) = butler_config(
         &dir,
         "mail-init",
@@ -2936,7 +2940,9 @@ fn butler_initializes_mail_and_persists_a_sent_message() {
     assert_eq!(envelopes.len(), 1);
     let envelope = std::fs::read_to_string(envelopes[0].path()).expect("message envelope");
     assert!(envelope.contains("\"body\":{\"object_id\":\"object-"));
-    assert!(mail.join("inboxes/6275746c6572.jsonl").is_file());
+    // Inboxes are keyed by the recipient's Butler ULID (b900a22), not its alias.
+    let inboxes = std::fs::read_dir(mail.join("inboxes")).expect("inboxes");
+    assert_eq!(inboxes.filter(|e| e.is_ok()).count(), 1);
     drop(daemon);
 }
 
@@ -2949,7 +2955,7 @@ fn butler_initializes_mail_and_persists_a_sent_message() {
 fn butler_session_exited_hook_relaunches_via_the_shared_launch_function() {
     // Normalized once: a `\n`-only search below would miss a real call on a
     // checkout where git converts this file to CRLF (Windows runners do).
-    let init_lua = include_str!("../../packages/butler/init.lua").replace("\r\n", "\n");
+    let init_lua = include_str!("../../packages/butler/main.lua").replace("\r\n", "\n");
 
     let launch_fn_idx = init_lua
         .find("local function launch_butler()")
@@ -3720,7 +3726,7 @@ fn a_daemon_restart_does_not_relaunch_the_butler_session() {
     // Same restart path as `restart_stops_a_daemon_and_leaves_the_next_command_free_to_start_one`,
     // with `-f`: the live butler session makes a bare `restart` refuse (see
     // `restart_refuses_to_kill_a_live_session_without_being_told_twice`).
-    let out = remuda(&dir, &["-s", "s", "restart", "-f"]);
+    let out = remuda(&dir, &["-s", "s", "stop", "-f"]);
     assert!(
         out.status.success(),
         "{}",
@@ -3818,7 +3824,7 @@ fn a_supervisor_polling_remuda_ls_can_relaunch_butler_after_a_restart() {
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    let out = remuda(&dir, &["-s", "s", "restart", "-f"]);
+    let out = remuda(&dir, &["-s", "s", "stop", "-f"]);
     assert!(
         out.status.success(),
         "{}",
