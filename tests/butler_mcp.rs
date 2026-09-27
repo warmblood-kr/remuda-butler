@@ -184,7 +184,10 @@ fn an_unknown_mcp_caller_cannot_launch_or_delegate() {
     ] {
         let reply = call(&path, tool, arguments);
         assert_eq!(reply["result"]["isError"], true, "{tool}: {reply}");
-        assert!(text_of(&reply).contains("unknown caller"), "{tool}: {reply}");
+        assert!(
+            text_of(&reply).contains("unknown caller: run from a Butler session"),
+            "{tool}: {reply}"
+        );
     }
     assert_eq!(eval(&path, sessions), before, "no session was created");
 }

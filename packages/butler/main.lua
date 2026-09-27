@@ -554,7 +554,8 @@ end
 local function caller_leader(caller)
   local parent = caller_name(caller)
   if not bus.agents[parent] then
-    error("unknown caller: no Butler capability or live agent identity", 0)
+    error("unknown caller: run from a Butler session, or pass an explicit leader"
+      .. " with `remuda butler topic delegate --leader NAME`", 0)
   end
   return parent
 end
