@@ -35,4 +35,8 @@ expect "env-less send-to-leader names the operator" \
   "remuda._t({'send-to-leader', 'done'}, {})" "operator has no leader"
 expect "a member's forwarded env picks its own inbox" \
   "remuda._t({'inbox'}, {REMUDA_BUTLER_AGENT_ID = 'm1'})" "inbox empty"
+expect "an empty AGENT_ID falls through to SESSION_NAME" \
+  "remuda._t({'inbox'}, {REMUDA_BUTLER_AGENT_ID = '', REMUDA_BUTLER_SESSION_NAME = 'm1'})" "inbox empty"
+expect "empty identity vars are the operator" \
+  "remuda._t({'inbox'}, {REMUDA_BUTLER_AGENT_ID = '', REMUDA_BUTLER_SESSION_NAME = ''})" "no Butler identity"
 echo PASS

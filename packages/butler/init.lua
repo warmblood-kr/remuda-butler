@@ -210,7 +210,9 @@ remuda._butler_initial_name = initial_butler_name()
 local OPERATOR = "operator"
 local function current_agent(caller)
   local env = caller and caller.env or {}
-  return env.REMUDA_BUTLER_AGENT_ID or env.REMUDA_BUTLER_SESSION_NAME
+  for _, key in ipairs({ "REMUDA_BUTLER_AGENT_ID", "REMUDA_BUTLER_SESSION_NAME" }) do
+    if env[key] and env[key] ~= "" then return env[key] end
+  end
 end
 remuda._butler_current_agent = current_agent
 if remuda._butler_test_mode then
