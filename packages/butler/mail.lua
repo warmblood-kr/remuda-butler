@@ -8,8 +8,24 @@ local function mailbox(name)
   return bus.inboxes[name]
 end
 
-local function address(session)
-  return { host = "local", session = session }
+local function address(value)
+  if type(value) == "table" then
+    local copy = {}
+    for key, field in pairs(value) do copy[key] = field end
+    copy.host = copy.host or "local"
+    copy.alias = copy.alias or copy.session or "unknown"
+    copy.session = copy.session or copy.alias
+    copy.id, copy.kind, copy.leader = copy.id or "", copy.kind or "", copy.leader or ""
+    return copy
+  end
+  local agent = bus.agents[value]
+  if agent then
+    local parent = agent.parent and bus.agents[agent.parent]
+    return { host = "local", id = agent.id or "", alias = agent.alias or value,
+      session = agent.alias or value, kind = agent.kind or "", leader = parent and parent.id or "" }
+  end
+  return { host = "local", id = "", alias = tostring(value or "outside"),
+    session = tostring(value or "outside"), kind = "", leader = "" }
 end
 
 local function file_component(value)
@@ -75,10 +91,13 @@ local function prepare_storage()
 end
 
 local function envelope_json(message, object)
-  return '{"id":' .. config.json_quote(message.id) .. ',"from":{"host":'
-    .. config.json_quote(message.from.host) .. ',"session":' .. config.json_quote(message.from.session)
-    .. '},"to":[{"host":' .. config.json_quote(message.to[1].host) .. ',"session":'
-    .. config.json_quote(message.to[1].session) .. '}],"subject":' .. config.json_quote(message.subject)
+  local function address_json(item)
+    return '{"host":' .. config.json_quote(item.host) .. ',"id":' .. config.json_quote(item.id)
+      .. ',"alias":' .. config.json_quote(item.alias) .. ',"kind":' .. config.json_quote(item.kind)
+      .. ',"leader":' .. config.json_quote(item.leader) .. ',"session":' .. config.json_quote(item.session) .. '}'
+  end
+  return '{"id":' .. config.json_quote(message.id) .. ',"from":' .. address_json(message.from)
+    .. ',"to":[' .. address_json(message.to[1]) .. '],"subject":' .. config.json_quote(message.subject)
     .. ',"created_at":' .. config.json_quote(message.created_at) .. ',"content_type":'
     .. config.json_quote(message.content_type) .. ',"body":{"object_id":'
     .. config.json_quote(object.id) .. ',"bytes":' .. tostring(object.bytes) .. ',"content_type":'
@@ -110,10 +129,17 @@ local function load_message(disk, id)
   if not object_file then return nil end
   local content = object_file:read("*a")
   object_file:close()
-  local sender = envelope:match('"session":"([^"]+)"') or "unknown"
+  local from = envelope:match('"from":(%b{})') or "{}"
+  local sender = from:match('"session":"([^"]+)"') or "unknown"
+  local sender_alias = from:match('"alias":"([^"]+)"') or sender
+  local sender_id = from:match('"id":"([^"]*)"') or ""
+  local sender_kind = from:match('"kind":"([^"]*)"') or ""
+  local sender_leader = from:match('"leader":"([^"]*)"') or ""
+  local sender_host = from:match('"host":"([^"]+)"') or "local"
   local subject = envelope:match('"subject":"([^"]*)"') or "Message"
   local created_at = envelope:match('"created_at":"([^"]+)"') or "unknown"
-  local message = { id = id, from = address(sender), subject = subject, created_at = created_at,
+  local message = { id = id, from = { host = sender_host, id = sender_id, alias = sender_alias,
+      session = sender, kind = sender_kind, leader = sender_leader }, subject = subject, created_at = created_at,
     body = { object_id = object_id }, content_type = "text/plain; charset=utf-8" }
   bus.messages[id] = message
   bus.objects[object_id] = { id = object_id, content = content, bytes = #content,
@@ -127,29 +153,90 @@ local function load_inbox(name)
   local disk = paths(name)
   if not disk then return end
   local read = load_read(name)
+  local present = {}
+  for _, id in ipairs(mailbox(name)) do present[id] = true end
   local file = io.open(disk.inbox, "r")
   if not file then return end
   for line in file:lines() do
     local id = line:match('"message_id":"([^"]+)"')
-    if id and not read[id] then
+    if id and not read[id] and not present[id] then
       load_message(disk, id)
       mailbox(name)[#mailbox(name) + 1] = id
+      present[id] = true
     end
   end
   file:close()
 end
 
+-- Copy unread legacy alias-addressed messages into the new identity inbox.
+-- The target's on-disk message-id set is the idempotency boundary: a crash
+-- after copying but before acknowledging the old log is safe to retry.
+local function migrate_legacy(alias, id)
+  if not config.root or not alias or not id or alias == id then return true end
+  local source, target = paths(alias), paths(id)
+  local legacy = io.open(source.inbox, "r")
+  if not legacy then return true end
+  local ready, ready_err = prepare_storage()
+  if not ready then legacy:close(); return nil, ready_err end
+  local old_read = load_read(alias)
+  local seen, unread, copy_ids = {}, {}, {}
+  local current = io.open(target.inbox, "r")
+  if current then
+    for line in current:lines() do
+      local message_id = line:match('"message_id":"([^"]+)"')
+      if message_id then seen[message_id] = true end
+    end
+    current:close()
+  end
+  for line in legacy:lines() do
+    local message_id = line:match('"message_id":"([^"]+)"')
+    if message_id and not old_read[message_id] then
+      unread[#unread + 1] = message_id
+      if not seen[message_id] then
+        copy_ids[#copy_ids + 1] = message_id
+        seen[message_id] = true
+      end
+    end
+  end
+  legacy:close()
+  if #copy_ids > 0 then
+    local rows = {}
+    for _, message_id in ipairs(copy_ids) do
+      rows[#rows + 1] = '{"message_id":' .. config.json_quote(message_id) .. '}\n'
+    end
+    local copied, copy_err = append(target.inbox, table.concat(rows))
+    if not copied then return nil, copy_err end
+  end
+  local ack = {}
+  for _, message_id in ipairs(unread) do
+    if not old_read[message_id] then ack[#ack + 1] = message_id; old_read[message_id] = true end
+  end
+  if #ack > 0 then
+    local marked, mark_err = append(source.read, table.concat(ack, "\n") .. "\n")
+    if not marked then return nil, mark_err end
+  end
+  if bus.mail_loaded[id] then
+    bus.mail_loaded[id] = nil
+    load_inbox(id)
+  end
+  return true
+end
+
 local function queue(from, to, text, subject, in_reply_to)
-  load_inbox(to)
+  from, to = address(from), address(to)
+  if to.id == "" then return nil, "recipient has no Butler ULID" end
+  if from.alias == "" then from.alias, from.session = from.session, from.session end
+  local recipient_id = to.id
+  load_inbox(recipient_id)
   local id = message_id()
   local object_id = id:gsub("^message%-", "object-")
-  local sender, body = from or "outside", tostring(text)
+  local sender, body = from.alias or "outside", tostring(text)
   local object = { id = object_id, content = body, bytes = #body,
     content_type = "text/plain; charset=utf-8", content_hash = nil }
-  local message = { id = id, from = address(sender), to = { address(to) },
+  local message = { id = id, from = from, to = { to },
     subject = subject or ("Message from " .. sender), created_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
     in_reply_to = in_reply_to, content_type = "text/plain; charset=utf-8", body = { object_id = object_id } }
-  local disk = paths(to)
+  local disk = paths(recipient_id)
   if disk then
     local ready, ready_err = prepare_storage()
     if not ready then return nil, "cannot prepare Butler mail storage: " .. tostring(ready_err) end
@@ -161,7 +248,7 @@ local function queue(from, to, text, subject, in_reply_to)
     if not wrote then return nil, "cannot deliver Butler mail: " .. tostring(err) end
   end
   bus.objects[object_id], bus.messages[id] = object, message
-  mailbox(to)[#mailbox(to) + 1] = id
+  mailbox(recipient_id)[#mailbox(recipient_id) + 1] = id
   return message
 end
 
@@ -188,4 +275,4 @@ local function inbox(name)
   return table.concat(out, "\n")
 end
 
-remuda._butler_mail = { mailbox = mailbox, queue = queue, inbox = inbox }
+remuda._butler_mail = { mailbox = mailbox, queue = queue, inbox = inbox, migrate_legacy = migrate_legacy }

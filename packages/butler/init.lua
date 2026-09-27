@@ -512,6 +512,28 @@ local function resolve(ref)
   local last = bus.identities[ref]
   error("alias " .. tostring(ref) .. " has no live agent; last was " .. (last and last.id or "unknown"), 0)
 end
+local function mail_address(alias)
+  local agent = bus.agents[alias]
+  if not agent then
+    return { host = "local", id = "", alias = alias or "outside", session = alias or "outside", kind = "", leader = "" }
+  end
+  local parent = agent.parent and bus.agents[agent.parent]
+  return { host = "local", id = agent.id or "", alias = agent.alias or alias,
+    session = agent.alias or alias, kind = agent.kind or "", leader = parent and parent.id or "" }
+end
+local function mail_id(ref, allow_ended)
+  if is_ulid(ref) then
+    local record = bus.identity_ids[ref]
+    if not record then error("no Butler agent with id " .. tostring(ref), 0) end
+    local live = bus.agents[record.alias]
+    if live and live.id == ref then return ref, live end
+    if allow_ended then return ref, nil end
+    error("agent " .. ref .. " (alias " .. tostring(record.alias) .. ") has ended", 0)
+  end
+  local alias = resolve(ref)
+  local agent = bus.agents[alias]
+  return agent.id, agent
+end
 remuda._butler_resolve = resolve
 remuda._butler_new_ulid = crockford_ulid
 local function next_token(name)
@@ -532,6 +554,8 @@ remuda.exec("butler/mail")
 local mail = assert(remuda._butler_mail)
 local mailbox = mail.mailbox
 local queue_message = mail.queue
+local migrate_legacy_mail = mail.migrate_legacy
+remuda._butler_migrate_legacy_mail = migrate_legacy_mail
 local function agent_mcp_json(token)
   local env = '"REMUDA_SESSION_CAPABILITY":"' .. token .. '"'
   if runtime_dir then env = env .. ',"REMUDA_RUNTIME_DIR":"' .. runtime_dir .. '"' end
@@ -662,9 +686,12 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
     local children = bus.agents[parent].children
     children[#children + 1] = actual
   end
-  mailbox(actual)
+  local migrated, migration_error = migrate_legacy_mail(actual, identity.id)
+  if not migrated then error("cannot migrate legacy Butler mail: " .. tostring(migration_error), 0) end
+  mailbox(identity.id)
   -- A failed welcome write must not prevent the agent from starting.
-  pcall(queue_message, parent or "butler", actual, team_member_guidance(parent or "butler"), "Welcome to Butler")
+  pcall(queue_message, mail_address(parent or "butler"), mail_address(actual),
+    team_member_guidance(parent or "butler"), "Welcome to Butler")
   if task and task ~= "" then
     -- Answer known startup modals (agents/*.lua) and type the task only once
     -- the composer is ready; never blind-type into an unknown dialog.
@@ -749,19 +776,20 @@ function remuda._butler_topic_delegate(name, task, template, kind, parent)
   return make_topic(name, template, kind or leader.kind, parent, task)
 end
 function remuda._butler_send(from, to, text)
-  to = resolve(to)
-  if from ~= "operator" and from ~= "outside" then from = resolve(from) end
-  local message, err = queue_message(from, to, text)
+  local _, recipient = mail_id(to, false)
+  local sender = (from == "operator" or from == "outside") and mail_address(from)
+    or mail_address(resolve(from))
+  local message, err = queue_message(sender, mail_address(recipient.alias), text)
   if not message then error(err, 0) end
   local notice = "Butler message " .. message.id .. " from " .. message.from.session
     .. " arrived. Read it: remuda butler inbox"
-  local delivered, why = pcall(remuda.type_text, to, notice)
-  if delivered then return "queued " .. message.id .. " and notified " .. to end
-  return "queued " .. message.id .. " for " .. to .. "; terminal delivery deferred: " .. tostring(why)
+  local delivered, why = pcall(remuda.type_text, recipient.alias, notice)
+  if delivered then return "queued " .. message.id .. " and notified " .. recipient.alias end
+  return "queued " .. message.id .. " for " .. recipient.alias .. "; terminal delivery deferred: " .. tostring(why)
 end
 function remuda._butler_inbox(name)
-  name = resolve(name)
-  return mail.inbox(name)
+  local id = mail_id(name, true)
+  return mail.inbox(id)
 end
 function remuda._butler_report(from, text)
   from = resolve(from)
@@ -1021,7 +1049,9 @@ bus.agents.butler.alias = "butler"
 bus.agents.butler.session_name = bus.agents.butler.session_name or "butler"
 bus.identity_ids[root_identity.id] = bus.identities.butler or root_identity
 bus.identities.butler = bus.identities.butler or root_identity
-mailbox("butler")
+local root_migrated, root_migration_error = migrate_legacy_mail("butler", root_identity.id)
+if not root_migrated then error("cannot migrate legacy Butler mail: " .. tostring(root_migration_error), 0) end
+mailbox(root_identity.id)
 local mcp_file = io.open(mcp_config_path, "w")
 mcp_file:write(agent_mcp_json(butler_token))
 mcp_file:close()
