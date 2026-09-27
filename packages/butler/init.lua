@@ -203,13 +203,14 @@ remuda._butler_reply_src = REPLY_SRC
 remuda._butler_statusline_src = STATUSLINE_SRC
 remuda._butler_initial_name = initial_butler_name()
 
--- The command handler runs in the daemon, so `os.getenv` is the daemon's
--- environment. A core that forwards caller context (#95) puts the caller's
--- `REMUDA_*` variables in `caller.env`; `os.getenv` is the older-core fallback.
+-- The command handler runs in the daemon, so identity comes only from the
+-- caller's `REMUDA_*` variables that core forwards in `caller.env` (#95) --
+-- never `os.getenv`, which is whatever session happened to birth the daemon.
+-- No forwarded identity (a plain shell, or an older core) is the operator.
+local OPERATOR = "operator"
 local function current_agent(caller)
   local env = caller and caller.env or {}
   return env.REMUDA_BUTLER_AGENT_ID or env.REMUDA_BUTLER_SESSION_NAME
-    or os.getenv("REMUDA_BUTLER_AGENT_ID") or os.getenv("REMUDA_BUTLER_SESSION_NAME")
 end
 remuda._butler_current_agent = current_agent
 if remuda._butler_test_mode then
@@ -496,9 +497,10 @@ Use Butler's CLI for communication:
 - `remuda butler send-to-leader RESULT...` reports a completed work loop.
 - `remuda butler sessions` shows the household.
 
-If a no-name form fails with "needs REMUDA_BUTLER_AGENT_ID", your Remuda core
-predates caller-env forwarding: pass your id (`remuda butler inbox
-$REMUDA_BUTLER_AGENT_ID`) or use the MCP `butler_*` tools.
+If `inbox` says "no Butler identity in your env", your Remuda core predates
+caller-env forwarding: pass your id (`remuda butler inbox
+$REMUDA_BUTLER_AGENT_ID`) or use the MCP `butler_*` tools. On such a core,
+`send` is attributed to "operator" rather than to you.
 
 You may create a Remuda-managed child team with `remuda butler topic delegate
 NAME TASK...` when useful. Internal agent subagents are separate from Butler
@@ -678,8 +680,9 @@ Agent sessions receive REMUDA_BUTLER_AGENT_ID and REMUDA_BUTLER_LEADER_ID.
 In an agent session, use `inbox`, `send <to> "..."`, and `send-to-leader ...`;
 the identity comes from the caller's environment. Quote the message for
 `send <to>`: an unquoted multi-word message reads as `send <from> <to> ...`,
-the operator form for attributing a note. On a Remuda core that does not
-forward the caller's env, pass the name (`inbox <name>`) or use MCP tools.
+the operator form for attributing a note. Without a forwarded Butler identity
+(a plain shell, or a core that does not forward the caller's env), `send` is
+from "operator" and `inbox` needs a name (`inbox <name>`).
 ]]
 
 local function words_after(args, first)
@@ -697,15 +700,15 @@ remuda.extension_command("butler", function(args, caller)
     if #args == 2 then return remuda._butler_launch(args[2], nil) end
     if #args == 3 then return remuda._butler_launch(args[2], args[3]) end
   end
-  if args[1] == "inbox" then return remuda._butler_inbox(args[2] or assert(current_agent(caller), "inbox needs REMUDA_BUTLER_AGENT_ID")) end
+  if args[1] == "inbox" then return remuda._butler_inbox(args[2] or assert(current_agent(caller), "no Butler identity in your env; use `inbox <name>`")) end
   if args[1] == "send-to-leader" and #args >= 2 then
-    local from = assert(current_agent(caller), "send-to-leader needs REMUDA_BUTLER_AGENT_ID")
+    local from = assert(current_agent(caller), OPERATOR .. " has no leader; send-to-leader is for Butler agents")
     return remuda._butler_report(from, words_after(args, 2))
   end
   if args[1] == "send" and #args >= 3 then
-    local from, to, first = current_agent(caller), args[2], 3
+    local from, to, first = current_agent(caller) or OPERATOR, args[2], 3
     if #args >= 4 then from, to, first = args[2], args[3], 4 end
-    return remuda._butler_send(assert(from, "send needs REMUDA_BUTLER_AGENT_ID"), to, words_after(args, first))
+    return remuda._butler_send(from, to, words_after(args, first))
   end
   if args[1] == "topic" and args[2] == "new" and args[3] then
     local template, kind, i = nil, nil, 4
@@ -837,9 +840,10 @@ leader, when you have one, is `REMUDA_BUTLER_LEADER_ID`. Use the short forms:
 - `remuda butler send MEMBER "MESSAGE"` to direct a member; your sender is inferred.
 - `remuda butler send-to-leader MESSAGE...` to report a completed work loop.
 
-If a no-name form fails with "needs REMUDA_BUTLER_AGENT_ID", your Remuda core
-predates caller-env forwarding: pass your id (`remuda butler inbox
-$REMUDA_BUTLER_AGENT_ID`) or use the MCP `butler_*` tools.
+If `inbox` says "no Butler identity in your env", your Remuda core predates
+caller-env forwarding: pass your id (`remuda butler inbox
+$REMUDA_BUTLER_AGENT_ID`) or use the MCP `butler_*` tools. On such a core,
+`send` is attributed to "operator" rather than to you.
 
 `remuda butler send FROM TO MESSAGE...` is an operator form for sending on
 behalf of another session. Do not use it for ordinary team communication.
