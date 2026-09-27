@@ -421,11 +421,109 @@ remuda._butler_bus = remuda._butler_bus or {
 local bus = remuda._butler_bus
 bus.messages = bus.messages or {}
 bus.objects = bus.objects or {}
+-- ULIDs are durable public identities; session names remain the mutable,
+-- human-friendly keys used by the mailbox and the in-memory team tree.
+local alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+local function crockford_ulid()
+  local millis = math.floor(os.time() * 1000)
+  local bytes = {}
+  for i = 6, 1, -1 do bytes[i] = millis % 256; millis = math.floor(millis / 256) end
+  local random = io.open("/dev/urandom", "rb")
+  local entropy = random and random:read(10)
+  if random then random:close() end
+  if not entropy or #entropy ~= 10 then
+    math.randomseed(os.time() + math.floor(os.clock() * 1000000))
+    local out = {}
+    for i = 1, 10 do out[i] = string.char(math.random(0, 255)) end
+    entropy = table.concat(out)
+  end
+  for i = 1, 10 do bytes[i + 6] = entropy:byte(i) end
+  local bits, out = { 0, 0 }, {}
+  for _, byte in ipairs(bytes) do
+    for bit = 7, 0, -1 do bits[#bits + 1] = math.floor(byte / (2 ^ bit)) % 2 end
+  end
+  -- ULIDs have two zero padding bits before the 128-bit payload.
+  for group = 0, 25 do
+    local n = 0
+    for j = 1, 5 do n = n * 2 + bits[group * 5 + j] end
+    out[#out + 1] = alphabet:sub(n + 1, n + 1)
+  end
+  return table.concat(out)
+end
+local function is_ulid(value)
+  return type(value) == "string" and #value == 26
+    and value:match("^[0-9A-HJKMNP-TV-Z]+$") ~= nil
+end
+local identity_path = data_home and data_home .. "/remuda/butler/agents.jsonl"
+bus.identities = bus.identities or {}
+bus.identity_ids = bus.identity_ids or {}
+local function identity_record(id, alias, kind, leader_id, ended)
+  if not identity_path then return end
+  local dir = identity_path:match("^(.*)/[^/]+$")
+  if dir then os.execute("mkdir -p " .. shell_quote(dir)) end
+  local f = io.open(identity_path, "a")
+  if not f then return end
+  local row = '{"id":' .. json_quote(id) .. ',"alias":' .. json_quote(alias)
+    .. ',"kind":' .. json_quote(kind or "") .. ',"leader_id":' .. json_quote(leader_id or "")
+    .. ',"created_at":' .. json_quote(os.date("!%Y-%m-%dT%H:%M:%SZ"))
+  if ended then row = row .. ',"ended_at":' .. json_quote(os.date("!%Y-%m-%dT%H:%M:%SZ")) end
+  f:write(row .. "}\n"); f:close()
+end
+local function json_field(line, key)
+  local quoted = line:match('"' .. key .. '":(".-")')
+  if not quoted then return nil end
+  local value = quoted:sub(2, -2)
+  return (value:gsub('\\(.)', function(c)
+    if c == "n" then return "\n" elseif c == "r" then return "\r"
+    elseif c == "t" then return "\t" else return c end
+  end))
+end
+if identity_path and not bus.identities_loaded then
+  local f = io.open(identity_path, "r")
+  if f then
+    for line in f:lines() do
+      local id, alias = json_field(line, "id"), json_field(line, "alias")
+      if id and alias then
+        local record = { id = id, alias = alias, kind = json_field(line, "kind"),
+          leader_id = json_field(line, "leader_id"), ended_at = json_field(line, "ended_at") }
+        bus.identity_ids[id] = record
+        bus.identities[alias] = record
+      end
+    end
+    f:close()
+  end
+  bus.identities_loaded = true
+end
+local function register_identity(alias, kind, leader_id, id)
+  id = id or crockford_ulid()
+  local record = { id = id, alias = alias, kind = kind, leader_id = leader_id or "" }
+  bus.identities[alias], bus.identity_ids[id] = record, record
+  identity_record(id, alias, kind, leader_id)
+  return record
+end
+local function resolve(ref)
+  if is_ulid(ref) then
+    local record = bus.identity_ids[ref]
+    if record and bus.agents[record.alias] and bus.agents[record.alias].id == ref then return record.alias end
+    error("no live Butler agent with id " .. ref, 0)
+  end
+  local live = bus.agents[ref]
+  if live then return ref end
+  local last = bus.identities[ref]
+  error("alias " .. tostring(ref) .. " has no live agent; last was " .. (last and last.id or "unknown"), 0)
+end
+remuda._butler_resolve = resolve
+remuda._butler_new_ulid = crockford_ulid
 local function next_token(name)
   bus.next = bus.next + 1
   return name .. "-" .. os.time() .. "-" .. bus.next
 end
 local function caller_name(caller)
+  local current = current_agent(caller)
+  if current then
+    local ok, alias = pcall(resolve, current)
+    if ok then return alias end
+  end
   local token = caller and caller.capability
   return (token and bus.tokens[token]) or "outside"
 end
@@ -527,6 +625,11 @@ end
 local _butler_session_trace -- defined below; the task poke fires later
 local function launch_agent(kind, requested_name, cwd, model, parent, task)
   local name = requested_name or kind
+  if bus.agents[name] then
+    error("alias " .. name .. " is live as " .. tostring(bus.agents[name].id) .. "; pick another alias", 0)
+  end
+  local parent_identity = parent and bus.agents[parent]
+  local identity = register_identity(name, kind, parent_identity and parent_identity.id or "")
   if not cwd and data_home then
     cwd = data_home .. "/remuda/butler/sessions/" .. name
     remuda.mkdir(cwd)
@@ -542,8 +645,9 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
   })
   local actual = remuda.new(name, argv, cwd, {
     REMUDA_BUTLER_SESSION_NAME = name,
-    REMUDA_BUTLER_AGENT_ID = name,
-    REMUDA_BUTLER_LEADER_ID = parent or "",
+    REMUDA_BUTLER_AGENT_ID = identity.id,
+    REMUDA_BUTLER_AGENT_ALIAS = name,
+    REMUDA_BUTLER_LEADER_ID = parent_identity and parent_identity.id or "",
     REMUDA_BUTLER_AGENT_KIND = kind,
     -- A daemon started from inside Claude Code inherits CLAUDE_CODE_CHILD_SESSION,
     -- which turns off transcript saving and so makes a crashed agent unresumable.
@@ -552,7 +656,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
   bus.tokens[token] = actual
   bus.agents[actual] = {
     kind = kind, token = token, model = model, telemetry = agent_telemetry,
-    parent = parent, children = {},
+    parent = parent, children = {}, id = identity.id, alias = actual, session_name = actual,
   }
   if parent and bus.agents[parent] then
     local children = bus.agents[parent].children
@@ -645,7 +749,8 @@ function remuda._butler_topic_delegate(name, task, template, kind, parent)
   return make_topic(name, template, kind or leader.kind, parent, task)
 end
 function remuda._butler_send(from, to, text)
-  if not bus.agents[to] then error("no Butler agent named " .. tostring(to), 0) end
+  to = resolve(to)
+  if from ~= "operator" and from ~= "outside" then from = resolve(from) end
   local message, err = queue_message(from, to, text)
   if not message then error(err, 0) end
   local notice = "Butler message " .. message.id .. " from " .. message.from.session
@@ -655,10 +760,11 @@ function remuda._butler_send(from, to, text)
   return "queued " .. message.id .. " for " .. to .. "; terminal delivery deferred: " .. tostring(why)
 end
 function remuda._butler_inbox(name)
-  if not bus.agents[name] then error("no Butler agent named " .. tostring(name), 0) end
+  name = resolve(name)
   return mail.inbox(name)
 end
 function remuda._butler_report(from, text)
+  from = resolve(from)
   local agent = bus.agents[from]
   if not agent then error("no Butler agent named " .. tostring(from), 0) end
   if not agent.parent then error("Butler agent " .. from .. " has no leader to report to", 0) end
@@ -892,6 +998,10 @@ local butler_kind = existing_butler and existing_butler.kind
   or os.getenv("REMUDA_BUTLER_AGENT") or "claude"
 local butler_token = existing_butler and existing_butler.token or next_token("butler")
 bus.tokens[butler_token] = "butler"
+local root_identity = existing_butler and existing_butler.id
+  and { id = existing_butler.id, alias = "butler" }
+  or (bus.identities.butler and { id = bus.identities.butler.id, alias = "butler" })
+  or register_identity("butler", butler_kind, "")
 local butler_telemetry = existing_butler and existing_butler.telemetry
   or setup_telemetry(butler_kind, { name = "butler", status_path = status_path })
 status_path = butler_telemetry.status_path or status_path
@@ -899,10 +1009,18 @@ remuda._butler_status_path = status_path
 local settings_path = butler_telemetry.settings_path
 bus.agents.butler = existing_butler or {
   kind = butler_kind,
+  id = root_identity.id,
+  alias = "butler",
+  session_name = "butler",
   token = butler_token,
   telemetry = butler_telemetry,
   children = {},
 }
+bus.agents.butler.id = root_identity.id
+bus.agents.butler.alias = "butler"
+bus.agents.butler.session_name = bus.agents.butler.session_name or "butler"
+bus.identity_ids[root_identity.id] = bus.identities.butler or root_identity
+bus.identities.butler = bus.identities.butler or root_identity
 mailbox("butler")
 local mcp_file = io.open(mcp_config_path, "w")
 mcp_file:write(agent_mcp_json(butler_token))
@@ -1020,7 +1138,8 @@ local function launch_butler()
   end
   butler_name = remuda.new(requested_name, BUTLER_ARGV, butler_session_cwd, {
     REMUDA_BUTLER_SESSION_NAME = requested_name,
-    REMUDA_BUTLER_AGENT_ID = requested_name,
+    REMUDA_BUTLER_AGENT_ID = root_identity.id,
+    REMUDA_BUTLER_AGENT_ALIAS = "butler",
     REMUDA_BUTLER_LEADER_ID = "",
     REMUDA_BUTLER_AGENT_KIND = butler_kind,
     CLAUDE_CODE_FORCE_SESSION_PERSISTENCE = "1",
@@ -1110,6 +1229,19 @@ function remuda._butler_reconcile()
 end
 remuda.on("session_exited", function(name)
   _butler_session_trace("session_exited", name)
+  local exited = bus.agents[name]
+  if exited and name ~= "butler" then
+    identity_record(exited.id, exited.alias or name, exited.kind,
+      exited.parent and bus.agents[exited.parent] and bus.agents[exited.parent].id or "", true)
+    local ended = bus.identity_ids[exited.id] or exited
+    ended.ended_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+    bus.identity_ids[exited.id], bus.identities[exited.alias or name] = ended, ended
+    bus.agents[name] = nil
+    if exited.parent and bus.agents[exited.parent] then
+      local children = bus.agents[exited.parent].children
+      for i = #children, 1, -1 do if children[i] == name then table.remove(children, i) end end
+    end
+  end
   if name == butler_name then
     _butler_session_trace("relaunching", name)
     remuda._butler_reconcile()
