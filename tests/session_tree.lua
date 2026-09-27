@@ -33,6 +33,21 @@ assert_equal(rows[3], "  alpha\tcodex\troot", "sorted first child")
 assert_equal(rows[4], "    worker\tcodex\talpha", "grandchild follows parent")
 assert_equal(rows[5], "  zeta\tclaude\troot", "sorted second child")
 
+-- The client's session pane asks the same tree for its order (core's
+-- remuda.session_order hook): same walk, depth per row, names as sessions.
+fixture({
+  {"root", "claude"},
+  {"zeta", "claude", "root"},
+  {"alpha", "codex", "root"},
+  {"worker", "codex", "alpha"},
+  {"lost", "codex", "MISSING_PARENT"},
+})
+assert(type(remuda.session_order) == "function", "butler provides the session_order hook")
+local order = remuda.session_order(remuda.ls())
+local seen = {}
+for index, item in ipairs(order) do seen[index] = item.name .. "@" .. item.depth end
+assert_equal(table.concat(seen, " "), "root@0 alpha@1 worker@2 zeta@1 lost@0",
+  "pane order matches the roster tree, orphans last at depth 0")
 rows = displayed_rows(fixture({
   {"root-b", "codex"},
   {"root-a", "claude"},
