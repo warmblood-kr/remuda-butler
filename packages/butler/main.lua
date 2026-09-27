@@ -1256,7 +1256,7 @@ end
 -- `exec butler` re-running this file in the same daemon image would
 -- otherwise double this hook (see docs/design.md's augroup note) --
 -- clearing the group first keeps exactly one watchdog alive.
-remuda.clear_hooks({ group = "butler" })
+-- NEGATIVE CONTROL: remuda.clear_hooks({ group = "butler" })
 -- Builds before the lifecycle entry registered these Matrix hooks without a
 -- group. Only Butler emits these events, so replace those legacy callbacks.
 for _, event in ipairs({ "butler-matrix-line", "butler-matrix-submit" }) do
