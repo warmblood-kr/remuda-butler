@@ -13,8 +13,12 @@ trap 'remuda -s $S stop -f >/dev/null 2>&1 || true; rm -rf "$T"' EXIT
 remuda -s "$S" daemon </dev/null >/dev/null 2>&1 &
 for _ in $(seq 50); do [[ -S $REMUDA_RUNTIME_DIR/remuda/$S.sock ]] && break; sleep 0.1; done
 ENV="{'sh', '-c', 'env | grep CLAUDE_CODE_; sleep 1000'}"
-remuda -s "$S" -e "remuda._butler_argv = $ENV; remuda.exec('butler')
-  remuda._butler_agent_builders.fake = function() return $ENV end
+remuda -s "$S" -e "remuda._butler_argv = $ENV; remuda.exec('butler')"
+for _ in $(seq 50); do
+  if remuda -s "$S" -e 'return remuda._butler_agent_builders ~= nil' | grep -qx true; then break; fi
+  sleep 0.1
+done
+remuda -s "$S" -e "remuda._butler_agent_builders.fake = function() return $ENV end
   remuda._butler_launch('fake', 'm1')"
 sleep 1
 for name in butler m1; do

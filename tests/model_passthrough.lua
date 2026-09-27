@@ -2,6 +2,7 @@
 -- Run from the repo root: luajit tests/model_passthrough.lua
 remuda = {
   _butler_agent_builders = {},
+  _butler_agent_startup = {},
   _butler_telemetry_adapters = {},
   _butler_agent_support = { mcp_config_path = function() return "mcp.json" end },
 }

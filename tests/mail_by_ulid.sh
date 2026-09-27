@@ -55,6 +55,10 @@ use_instance
 start_daemon
 lua 'remuda._butler_argv = {"sh", "-c", "sleep 60"}; remuda._butler_skip_relay = true' >/dev/null
 "$REMUDA_BIN" -s "$SERVER" exec butler >/dev/null
+for _ in $(seq 50); do
+  if lua 'return remuda._butler_agent_builders ~= nil' | grep -qx true; then break; fi
+  sleep 0.1
+done
 lua 'remuda._butler_agent_builders.fake = function() return {"sh", "-c", "sleep 12"} end' >/dev/null
 ROOT_ID=$(lua 'return remuda._butler_bus.agents.butler.id')
 expect_ulid "root id" "$ROOT_ID"

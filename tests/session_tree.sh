@@ -52,7 +52,14 @@ start_private_daemon() {
 }
 
 start_private_daemon
-"$REMUDA_BIN" -s "$SERVER" -e 'remuda._butler_argv = {"sh", "-c", "while read line; do :; done"}; remuda._butler_skip_relay = true; remuda.exec("butler"); return "Butler loaded with a private stub adapter"' >/dev/null
+"$REMUDA_BIN" -s "$SERVER" -e 'remuda._butler_argv = {"sh", "-c", "while read line; do :; done"}; remuda._butler_skip_relay = true' >/dev/null
+"$REMUDA_BIN" -s "$SERVER" exec butler >/dev/null
+ATTEMPT=0
+while ! "$REMUDA_BIN" -s "$SERVER" -e 'return remuda._butler_bus ~= nil' | grep -qx true; do
+  ATTEMPT=$((ATTEMPT + 1))
+  if [ "$ATTEMPT" -ge 50 ]; then echo "Butler lifecycle did not start"; exit 1; fi
+  sleep 0.1
+done
 
 set +e
 PREPATCH_OUTPUT=$("$REMUDA_BIN" -s "$SERVER" -e "return dofile('$BUTLER_TREE_ROOT/tests/session_tree.lua')" 2>&1)

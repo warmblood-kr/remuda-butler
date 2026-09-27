@@ -16,7 +16,12 @@ trap 'remuda -s $S stop -f >/dev/null 2>&1 || true; rm -rf "$T"' EXIT
 remuda -s "$S" daemon </dev/null >/dev/null 2>&1 &
 for _ in $(seq 50); do [[ -S $REMUDA_RUNTIME_DIR/remuda/$S.sock ]] && break; sleep 0.1; done
 lua() { remuda -s "$S" -e "$1" 2>&1; }
-lua "remuda._butler_argv = {'sleep', '100'}; remuda.exec('butler')
+lua "remuda._butler_argv = {'sleep', '100'}; remuda.exec('butler')" >/dev/null
+for _ in $(seq 50); do
+  if lua 'return remuda._butler_agent_builders ~= nil' | grep -qx true; then break; fi
+  sleep 0.1
+done
+lua "
   remuda._butler_agent_builders.fake = function() return {'sleep', '100'} end
   remuda._butler_launch('fake', 'm1')
   function remuda._t(args, env) return remuda._extension_commands.butler(args, { env = env }) end" >/dev/null
