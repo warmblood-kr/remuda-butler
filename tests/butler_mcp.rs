@@ -154,3 +154,37 @@ fn butler_status_is_a_live_mcp_tool_not_a_terminal_scrape() {
         "MODEL:sonnet CTX:? CTXWIN:? CTXPCT:?"
     );
 }
+
+fn eval(path: &Path, code: &str) -> String {
+    match client::request(path, &Request::Eval { code: code.into(), name: None }).expect("eval") {
+        Response::Value(value) => value,
+        other => panic!("eval {code:?} failed: {other:?}"),
+    }
+}
+
+/// #24: an MCP caller Butler cannot identify (no capability token) must get a
+/// tool error, not a child silently parented to `butler`.
+#[test]
+fn an_unknown_mcp_caller_cannot_launch_or_delegate() {
+    let dir = scratch("unknown-caller");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+    eval(
+        &path,
+        "for _, kind in ipairs({'claude', 'codex'}) do \
+           remuda._butler_agent_builders[kind] = function() return {'sleep', '100'} end end",
+    );
+    let sessions = "local n = 0 for _ in pairs(remuda.ls()) do n = n + 1 end return n";
+    let before = eval(&path, sessions);
+
+    for (tool, arguments) in [
+        ("butler_delegate", json!({"name": "e1", "task": "hi"})),
+        ("butler_launch", json!({"kind": "claude", "name": "e2"})),
+    ] {
+        let reply = call(&path, tool, arguments);
+        assert_eq!(reply["result"]["isError"], true, "{tool}: {reply}");
+        assert!(text_of(&reply).contains("unknown caller"), "{tool}: {reply}");
+    }
+    assert_eq!(eval(&path, sessions), before, "no session was created");
+}

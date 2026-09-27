@@ -549,6 +549,15 @@ local function caller_name(caller)
   local token = caller and caller.capability
   return (token and bus.tokens[token]) or "outside"
 end
+-- A child's leader is the calling agent, never a guess: an unidentified
+-- caller silently became `butler`'s child and reported to root (#24).
+local function caller_leader(caller)
+  local parent = caller_name(caller)
+  if not bus.agents[parent] then
+    error("unknown caller: no Butler capability or live agent identity", 0)
+  end
+  return parent
+end
 remuda._butler_mail_config = { bus = bus, root = mail_root, json_quote = json_quote }
 remuda.exec("butler/mail")
 local mail = assert(remuda._butler_mail)
@@ -969,8 +978,7 @@ remuda.tool{
   args = { kind = "Agent kind: claude or codex.", name = "Optional session name.", cwd = "Optional working directory.", model = "Optional model override." },
   needs = { "kind" },
   run = function(a, caller)
-    local parent = caller_name(caller)
-    if not bus.agents[parent] then parent = "butler" end
+    local parent = caller_leader(caller)
     return "launched " .. launch_agent(a.kind, a.name, a.cwd, a.model, parent)
   end,
 }
@@ -980,8 +988,7 @@ remuda.tool{
   args = { name = "Topic and child-session name.", task = "Initial task for the child.", template = "Optional Butler topic template.", kind = "Optional agent kind; defaults to the leader's kind.", model = "Optional model override." },
   needs = { "name", "task" },
   run = function(a, caller)
-    local parent = caller_name(caller)
-    if not bus.agents[parent] then parent = "butler" end
+    local parent = caller_leader(caller)
     return "delegated " .. remuda._butler_topic_delegate(a.name, a.task, a.template, a.kind, parent, a.model)
   end,
 }
