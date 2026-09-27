@@ -9,10 +9,11 @@ from the original embedded package is documented in `BUTLER_MIGRATION.md`.
 
 ## Runtime dependency
 
-Install Remuda core/native first. Minimum core: `0.1.0-nightly.20260927085114.3cb8a39`
+Install Remuda core/native first. Recommended core: `0.1.0-nightly.20260927085114.3cb8a39`
 or later — the first with the lifecycle `start` hook (warmblood-kr/remuda#104)
-that boots Butler after activation. On an older core Butler installs but never
-boots; `install/install-butler.sh` detects that and asks for `remuda upgrade`.
+that boots Butler right after activation. An older core ignores `start`; Butler
+then boots by a one-shot fallback on the next tick and writes `booted by
+fallback -- run \`remuda upgrade\`` to the daemon log (`tests/old_core_boot.sh`).
 
 Butler requires a running `remuda` daemon and
 the generic Lua/runtime APIs supplied by `remuda-native`, with protocol and
