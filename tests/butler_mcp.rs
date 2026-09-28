@@ -478,6 +478,40 @@ fn a_topic_task_is_submitted_before_an_immediate_notice_is_typed() {
     );
 }
 
+/// A fast agent can accept Return before the first confirmation poll. The task
+/// is submitted when that first observation already has an empty composer.
+#[test]
+#[cfg(unix)]
+fn a_fast_topic_task_clears_pending_without_a_composer_observation() {
+    let dir = scratch("topic-first-poll-empty");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+    eval(
+        &path,
+        r#"
+        remuda.butler.project_home("/tmp")
+        remuda._butler_agent_builders.claude = function() return {"sh", "-c", "sleep 30"} end
+        remuda.capture = function() return "──────\n❯ " end
+        remuda.type_text = function() end
+        remuda.key = function() end
+        remuda.session = function() return {is_busy = false} end
+        remuda._butler_notify_policy = function() return true end
+        remuda._butler_topic_delegate("fast", "finish immediately", nil, "claude", "butler")
+        "#,
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        let pending = eval(&path, "return tostring(remuda._butler_bus.pending_tasks.fast)");
+        if pending == "nil" {
+            break;
+        }
+        assert!(Instant::now() < deadline, "fast task stayed pending: {pending}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// #29(3): on a core with `ls().human_idle` (#136) and `capture_styled`
 /// (#137), the policy waits on the human's own idle time and reads the cursor
 /// row without dim ghost text. The old-core path is the test above.

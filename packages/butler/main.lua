@@ -861,7 +861,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
         -- retry Return if the same task remains in the composer.
         bus.pending_tasks[actual] = task
         local task_line = task:gsub("^%s+", ""):match("^[^\n]*") or ""
-        local checks, observed_task = 0, false
+        local checks = 0
         confirm = remuda.schedule({ every = 0.5, run = function()
           checks = checks + 1
           local seen, latest = pcall(remuda.capture, actual)
@@ -874,8 +874,10 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
           local busy = remuda.session(actual).is_busy == true
           local task_in_composer = #task_line > 0 and (text == task_line
             or (#text > 0 and task_line:sub(1, #text) == text))
-          if decision == "NON-EMPTY" and task_in_composer then observed_task = true end
-          if observed_task and not task_in_composer and (decision == "EMPTY" or busy) then
+          -- The task can be accepted between type_text and this first poll.
+          -- An empty composer or busy agent confirms submission even when no
+          -- poll ever observed the task in the composer.
+          if not task_in_composer and (decision == "EMPTY" or busy) then
             remuda.cancel(confirm)
             bus.pending_tasks[actual] = nil
             return
