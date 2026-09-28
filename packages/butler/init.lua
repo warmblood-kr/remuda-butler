@@ -21,6 +21,28 @@ local function boot()
   host.emit("butler-start")
 end
 
+-- Retire only the process handle recorded by the legacy Matrix relay. The
+-- handle is scoped to this Remuda image; require its old script location to
+-- match the exact path that the Butler module used under its install dir.
+local function stop_legacy_matrix_relay()
+  local id = host._butler_matrix_relay
+  if id == nil or type(host.processes) ~= "function" or type(host.kill) ~= "function" then return end
+  local data_home = os.getenv("XDG_DATA_HOME")
+  if not data_home or data_home == "" then data_home = (os.getenv("HOME") or "") .. "/.local/share" end
+  local mod_dir = data_home .. "/remuda/mods/butler"
+  local expected_script = mod_dir .. "/packages/butler/matrix_relay.py"
+  local script = host._butler_matrix_relay_script_path or expected_script
+  if script ~= expected_script or not script:match("^" .. mod_dir:gsub("([^%w])", "%%%1") .. "/") then return end
+  for _, running_id in ipairs(host.processes()) do
+    if running_id == id then
+      pcall(host.kill, id)
+      break
+    end
+  end
+  host._butler_matrix_relay = nil
+  host._butler_matrix_relay_script_path = nil
+end
+
 local fallback
 if host._butler_start_fallback then host.cancel(host._butler_start_fallback) end
 fallback = host.schedule({ name = "butler-start-fallback", every = 0.05, run = function()
@@ -41,6 +63,7 @@ return {
   start = function(state)
     host._butler_state = state
     boot()
+    stop_legacy_matrix_relay()
     local matrix = host.butler and host.butler.matrix
     if matrix and matrix.relay and not host._butler_skip_relay
       and type(host.http) == "table" and type(host.http.request) == "function" then
@@ -52,13 +75,18 @@ return {
     local matrix = host.butler and host.butler.matrix
     if matrix and matrix.relay then pcall(matrix.relay.stop)
     end
+    stop_legacy_matrix_relay()
     if host._butler_start_fallback then host.cancel(host._butler_start_fallback) end
     host._butler_start_fallback = nil
   end,
   hooks = {
     { event = "butler-start", id = "boot", run = load_main },
     { event = "butler/deliver", id = "inbox", depth = 0,
-      run = function(_, message) return host._butler_inbox_delivery(message) end },
+      run = function(_, message)
+        local ok, result = pcall(host._butler_inbox_delivery, message)
+        if not ok then return { __butler_delivery_hook_error = tostring(result) } end
+        return result
+      end },
     { event = "session_exited", id = "identity", depth = -50,
       run = function(_, name) return host._butler_session_exited(name) end },
     { event = "butler-compaction-submit", id = "submit",

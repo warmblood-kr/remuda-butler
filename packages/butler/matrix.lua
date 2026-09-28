@@ -11,9 +11,4 @@ if not matrix.send then remuda.exec("butler/matrix_write") end
 remuda.exec("butler/matrix_cli")
 remuda.exec("butler/matrix_relay")
 
-if remuda._butler_matrix_config and matrix.relay and not remuda._butler_skip_relay
-  and type(remuda.http) == "table" and type(remuda.http.request) == "function" then
-  matrix.relay.start(remuda._butler_matrix_config)
-end
-
 return matrix

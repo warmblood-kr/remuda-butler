@@ -32,40 +32,38 @@ local function read_file(path, what)
   return value
 end
 
-local function config()
-  local paths = remuda._butler_matrix_config
-  if not paths or not paths.token_path or not paths.config_path then
-    return nil, "Matrix is not configured"
-  end
-  local token, token_error = read_file(paths.token_path, "token")
-  if not token then return nil, token_error end
-  token = trim(token)
-  if token == "" then return nil, "Matrix token is empty" end
-  local contents, config_error = read_file(paths.config_path, "config")
-  if not contents then return nil, config_error end
+-- The request client and inbound relay must interpret the same on-disk
+-- settings. Normalize every line here so CRLF and surrounding whitespace do
+-- not change room or sender authorization decisions.
+function matrix.read_config(path)
+  local contents, err = read_file(path, "config")
+  if not contents then return nil, err end
   local lines = {}
-  for line in (contents .. "\n"):gmatch("([^\r\n]*)\r?\n") do lines[#lines + 1] = line end
-  if #lines < 3 or trim(lines[1] or "") == "" or trim(lines[2] or "") == "" then
+  for line in (contents .. "\n"):gmatch("([^\r\n]*)\r?\n") do
+    lines[#lines + 1] = trim(line)
+  end
+  if #lines < 3 or lines[1] == "" or lines[2] == "" or lines[3] == "" then
     return nil, "Matrix config requires homeserver, room ID, and user ID"
+  end
+  local base = lines[1]:gsub("/+$", "")
+  if not base:match("^https?://") then return nil, "Matrix homeserver must use http:// or https://" end
+  local allowed = {}
+  for sender in (lines[4] or ""):gmatch("[^,]+") do
+    sender = trim(sender)
+    if sender ~= "" then allowed[sender] = true end
   end
   local opts = {}
   for i = 5, #lines do
-    local key, value = lines[i]:match("^%s*([^=]+)%s*=%s*(.-)%s*$")
+    local key, value = lines[i]:match("^([^=]+)=(.*)$")
     if key then opts[trim(key)] = trim(value) end
   end
-  local base = trim(lines[1]):gsub("/+$", "")
-  if not base:match("^https?://") then return nil, "Matrix homeserver must use http:// or https://" end
-  local ca_file = opts.ca_file and trim(opts.ca_file) or nil
-  local pin_hex = opts.pin_sha256 and trim(opts.pin_sha256) or nil
+  local mode = (lines[5] or ""):lower()
+  local timeout = tonumber(lines[6]) or 30000
+  local ca_file, pin_hex = opts.ca_file, opts.pin_sha256
   if ca_file == "" then ca_file = nil end
   if pin_hex == "" then pin_hex = nil end
-  if base:match("^https://") and not ca_file and not pin_hex then
-    return nil, "HTTPS Matrix homeserver requires ca_file=PATH or pin_sha256=HEX"
-  end
   local pin
-  if pin_hex and pin_hex ~= "" then
-    -- remuda.http pin values are SHA-256 of the leaf certificate SPKI. The
-    -- config stores that digest as hex; convert it to the transport's form.
+  if pin_hex then
     local hex = pin_hex:gsub(":", ""):lower()
     if #hex ~= 64 or not hex:match("^%x+$") then
       return nil, "Matrix pin_sha256 must be 64 hexadecimal characters"
@@ -85,10 +83,28 @@ local function config()
     pin = "sha256/" .. table.concat(encoded)
   end
   return {
-    base = base, room = trim(lines[2]), token = token,
-    ca_file = ca_file and ca_file ~= "" and ca_file or nil,
-    pin = pin,
+    base = base, room = lines[2], self_mxid = lines[3], allowed_senders = allowed,
+    use_messages = mode == "1" or mode == "true" or mode == "messages" or mode == "fallback",
+    timeout_ms = math.max(1, timeout), ca_file = ca_file, pin = pin,
   }
+end
+
+local function config()
+  local paths = remuda._butler_matrix_config
+  if not paths or not paths.token_path or not paths.config_path then
+    return nil, "Matrix is not configured"
+  end
+  local token, token_error = read_file(paths.token_path, "token")
+  if not token then return nil, token_error end
+  token = trim(token)
+  if token == "" then return nil, "Matrix token is empty" end
+  local parsed, config_error = matrix.read_config(paths.config_path)
+  if not parsed then return nil, config_error end
+  if parsed.base:match("^https://") and not parsed.ca_file and not parsed.pin then
+    return nil, "HTTPS Matrix homeserver requires ca_file=PATH or pin_sha256=HEX"
+  end
+  parsed.token = token
+  return parsed
 end
 
 -- Read composites use the configured room when --room is omitted. Expose only
