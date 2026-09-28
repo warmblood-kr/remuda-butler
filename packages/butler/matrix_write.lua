@@ -1,0 +1,278 @@
+-- L2 Matrix write composites over remuda.butler.matrix.request.
+local matrix = assert(remuda.butler and remuda.butler.matrix, "Matrix request word is unavailable")
+
+local MAX_CHUNK_BYTES = 4000
+local MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+local txn_counter = 0
+local process_tag = tostring({}):gsub("[^%w]", "")
+
+local function once(callback)
+  local called = false
+  return function(value)
+    if called then return end
+    called = true
+    if callback then callback(value) end
+  end
+end
+
+local function error_result(callback, message)
+  callback({ error = message })
+  return { cancel = function() end }
+end
+
+local function path_component(value)
+  return (tostring(value):gsub("([^%w%-%._~])", function(char)
+    return string.format("%%%02X", char:byte())
+  end))
+end
+
+local function configured_room(opts, callback)
+  local room = opts and opts.room
+  if not room or room == "" then room = matrix.configured_room() end
+  if not room then
+    callback({ error = "Matrix is not configured with an allowlisted room" })
+    return nil
+  end
+  return room
+end
+
+local function next_txn()
+  txn_counter = txn_counter + 1
+  return "t" .. tostring(os.time()) .. "_" .. process_tag .. "_" .. tostring(txn_counter)
+end
+
+local function split_utf8(text)
+  local chunks, chunk, bytes = {}, {}, 0
+  local at = 1
+  while at <= #text do
+    local first = text:byte(at)
+    local width = first < 0x80 and 1 or (first < 0xe0 and 2 or (first < 0xf0 and 3 or 4))
+    if at + width - 1 > #text then width = 1 end
+    if bytes > 0 and bytes + width > MAX_CHUNK_BYTES then
+      chunks[#chunks + 1] = table.concat(chunk)
+      chunk, bytes = {}, 0
+    end
+    chunk[#chunk + 1] = text:sub(at, at + width - 1)
+    bytes = bytes + width
+    at = at + width
+  end
+  if #chunk > 0 then chunks[#chunks + 1] = table.concat(chunk) end
+  return chunks
+end
+
+local function send_chunks(room, text, relation, on_done, reject_dash)
+  local done = once(on_done)
+  if type(text) ~= "string" or text == "" then
+    return error_result(done, "message text must not be empty")
+  end
+  if reject_dash and text == "-" then
+    return error_result(done, "send - is unavailable until stdin forwarding lands (#213)")
+  end
+  local chunks, event_ids, index, current, cancelled = split_utf8(text), {}, 1, nil, false
+  local handle = { cancel = function()
+    cancelled = true
+    if current then current:cancel() end
+  end }
+  local function step()
+    if cancelled then return done({ error = "Matrix send cancelled" }) end
+    if index > #chunks then
+      return done({ sent = #event_ids, event_ids = event_ids })
+    end
+    local content = { msgtype = "m.text", body = chunks[index] }
+    if relation then content["m.relates_to"] = relation end
+    local body, encode_error = matrix.encode_json(content)
+    if not body then return done({ error = encode_error }) end
+    local txn = next_txn()
+    current = matrix.request_json({ method = "PUT",
+      path = "/_matrix/client/v3/rooms/" .. path_component(room)
+        .. "/send/m.room.message/" .. txn,
+      room = room, body = body, headers = { ["Content-Type"] = "application/json" },
+    }, function(result)
+      if result.error then return done(result) end
+      event_ids[#event_ids + 1] = result.json and result.json.event_id or ""
+      index = index + 1
+      step()
+    end)
+  end
+  step()
+  return handle
+end
+
+function matrix.send(opts, on_done)
+  opts = opts or {}
+  local done = once(on_done)
+  local room = configured_room(opts, done)
+  if not room then return { cancel = function() end } end
+  return send_chunks(room, opts.text, nil, done, true)
+end
+
+local function same_room_then(room, event_id, on_done, action)
+  local done = once(on_done)
+  if type(event_id) ~= "string" or event_id == "" then
+    return error_result(done, "event_id is required")
+  end
+  local current
+  current = matrix.same_room(room, event_id, function(result)
+    if type(result) == "table" and result.error then return done(result) end
+    if result ~= true then return done({ error = "event is outside the configured Matrix room" }) end
+    current = action(done)
+  end)
+  return { cancel = function() if current then current:cancel() end end }
+end
+
+function matrix.reply(opts, on_done)
+  opts = opts or {}
+  local done = once(on_done)
+  local room = configured_room(opts, done)
+  if not room then return { cancel = function() end } end
+  if type(opts.text) ~= "string" or opts.text == "" then
+    return error_result(done, "message text must not be empty")
+  end
+  return same_room_then(room, opts.event_id, done, function(reply_done)
+    return send_chunks(room, opts.text,
+      { ["m.in_reply_to"] = { event_id = opts.event_id } }, reply_done, false)
+  end)
+end
+
+function matrix.react(opts, on_done)
+  opts = opts or {}
+  local done = once(on_done)
+  local room = configured_room(opts, done)
+  if not room then return { cancel = function() end } end
+  if type(opts.key) ~= "string" or opts.key == "" then
+    return error_result(done, "reaction key must not be empty")
+  end
+  return same_room_then(room, opts.event_id, done, function(action_done)
+    local body, encode_error = matrix.encode_json({ ["m.relates_to"] = {
+      rel_type = "m.annotation", event_id = opts.event_id, key = opts.key,
+    } })
+    if not body then return action_done({ error = encode_error }) end
+    return matrix.request_json({ method = "PUT",
+      path = "/_matrix/client/v3/rooms/" .. path_component(room)
+        .. "/send/m.reaction/" .. next_txn(),
+      room = room, body = body, headers = { ["Content-Type"] = "application/json" },
+    }, function(result)
+      if result.error then return action_done(result) end
+      action_done({ event_id = result.json and result.json.event_id or "" })
+    end)
+  end)
+end
+
+function matrix.redact(opts, on_done)
+  opts = opts or {}
+  local done = once(on_done)
+  local room = configured_room(opts, done)
+  if not room then return { cancel = function() end } end
+  if type(opts.event_id) ~= "string" or opts.event_id == "" then
+    return error_result(done, "event_id is required")
+  end
+  local content = {}
+  if opts.reason ~= nil then content.reason = opts.reason end
+  local body, encode_error = matrix.encode_json(content)
+  if not body then return error_result(done, encode_error) end
+  return matrix.request_json({ method = "PUT",
+    path = "/_matrix/client/v3/rooms/" .. path_component(room) .. "/redact/"
+      .. path_component(opts.event_id) .. "/" .. next_txn(),
+    room = room, body = body, headers = { ["Content-Type"] = "application/json" },
+  }, function(result)
+    if result.error then return done(result) end
+    done({ event_id = result.json and result.json.event_id or "" })
+  end)
+end
+
+local function absolute(path)
+  return path:sub(1, 1) == "/" or path:match("^%a:[/\\]") ~= nil
+end
+
+local function media_type(name)
+  local extension = name:match("%.([^%.]+)$")
+  extension = extension and extension:lower()
+  local types = { png = "image/png", jpg = "image/jpeg", jpeg = "image/jpeg",
+    gif = "image/gif", webp = "image/webp", bmp = "image/bmp" }
+  return types[extension] or "application/octet-stream"
+end
+
+function matrix.upload(opts, on_done)
+  opts = opts or {}
+  local done = once(on_done)
+  local room = configured_room(opts, done)
+  if not room then return { cancel = function() end } end
+  if type(opts.file) ~= "string" or opts.file == "" or not absolute(opts.file) then
+    return error_result(done, "use an absolute path (the daemon does not know your cwd)")
+  end
+  local file, open_error = io.open(opts.file, "rb")
+  if not file then return error_result(done, "cannot read upload file: " .. tostring(open_error)) end
+  local data = file:read(MAX_UPLOAD_BYTES + 1)
+  file:close()
+  if #data > MAX_UPLOAD_BYTES then return error_result(done, "upload exceeds 20 MiB limit") end
+  local filename = opts.file:match("([^/\\]+)$") or opts.file
+  local mime = media_type(filename)
+  local content_uri
+  local current, cancelled = nil, false
+  local handle = { cancel = function()
+    cancelled = true
+    if current then current:cancel() end
+  end }
+  local query = "filename=" .. path_component(filename)
+  current = matrix.request({ method = "POST", path = "/_matrix/media/v3/upload?" .. query,
+    room = room, body = data, headers = { ["Content-Type"] = mime }, max_bytes = 1024 * 1024,
+  }, function(upload_result)
+    if cancelled then return done({ error = "Matrix upload cancelled" }) end
+    if upload_result.error then return done(upload_result) end
+    local uploaded, decode_error = matrix.decode_json(upload_result.body or "")
+    if not uploaded or not uploaded.content_uri then
+      return done({ error = "Matrix media upload response omitted content_uri"
+        .. (decode_error and (": " .. decode_error) or "") })
+    end
+    content_uri = uploaded.content_uri
+    local msgtype = mime:sub(1, 6) == "image/" and "m.image" or "m.file"
+    local body, encode_error = matrix.encode_json({ msgtype = msgtype, body = filename,
+      url = content_uri, info = { mimetype = mime, size = #data } })
+    if not body then return done({ error = encode_error }) end
+    current = matrix.request_json({ method = "PUT",
+      path = "/_matrix/client/v3/rooms/" .. path_component(room)
+        .. "/send/" .. msgtype .. "/" .. next_txn(),
+      room = room, body = body, headers = { ["Content-Type"] = "application/json" },
+    }, function(result)
+      if result.error then return done(result) end
+      done({ event_id = result.json and result.json.event_id or "", content_uri = content_uri })
+    end)
+  end)
+  return handle
+end
+
+local function operator_room(verb, opts, agent, callback)
+  if agent then
+    callback({ error = "matrix " .. verb .. " is operator-only (advisory at the same UID until core #218)" })
+    return nil
+  end
+  if not opts.room or opts.room == "" then
+    callback({ error = verb .. " requires room" })
+    return nil
+  end
+  return opts.room
+end
+
+function matrix.join(opts, on_done, agent)
+  opts = opts or {}
+  local done = once(on_done)
+  local room = operator_room("join", opts, agent, done)
+  if not room then return { cancel = function() end } end
+  return matrix.request_json({ method = "POST",
+    path = "/_matrix/client/v3/rooms/" .. path_component(room) .. "/join",
+    room = room, body = "{}", headers = { ["Content-Type"] = "application/json" },
+  }, done)
+end
+
+function matrix.leave(opts, on_done, agent)
+  opts = opts or {}
+  local done = once(on_done)
+  local room = operator_room("leave", opts, agent, done)
+  if not room then return { cancel = function() end } end
+  return matrix.request_json({ method = "POST",
+    path = "/_matrix/client/v3/rooms/" .. path_component(room) .. "/leave",
+    room = room, body = "{}", headers = { ["Content-Type"] = "application/json" },
+  }, done)
+end
+
+return matrix
