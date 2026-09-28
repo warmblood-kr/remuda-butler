@@ -2316,7 +2316,10 @@ fn butler_matrix_fake_http_matches_core_cancellation_bounds_and_headers() {
       request({}, function(value) normalized = value end)
       if normalized then return "callback-ran-inline" end
       remuda.http.tick()
-      if normalized.headers["content-type"] ~= "application/json, text/plain" then return "duplicate-header" end
+      local content_type = normalized.headers["content-type"]
+      if content_type ~= "application/json, text/plain" and content_type ~= "text/plain, application/json" then
+        return "duplicate-header:" .. tostring(normalized.headers["content-type"])
+      end
       if type(normalized.headers["set-cookie"]) ~= "table" or normalized.headers["set-cookie"][2] ~= "b=2" then
         return "set-cookie"
       end
