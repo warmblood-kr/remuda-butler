@@ -433,6 +433,9 @@ fn notify_policy_uses_human_idle_and_dim_spans_when_the_core_has_them() {
         local r = {}
         r[#r + 1] = 'typing=' .. case(2, plain('❯ '))
         r[#r + 1] = 'ghost=' .. case(12, plain('❯ '), dim('Try "fix typecheck errors"'))
+        -- butler-qa's real Claude frame: one dim run per word, plain spaces
+        -- between them, NBSP after the glyph.
+        r[#r + 1] = 'ghost_words=' .. case(12, plain('❯\u{A0}'), dim('Try'), plain(' '), dim('"fix'), plain(' '), dim('typecheck'), plain(' '), dim('errors"'))
         r[#r + 1] = 'typed=' .. case(12, plain('❯ co'))
         r[#r + 1] = 'never=' .. case(math.huge, plain('❯ '))
         r[#r + 1] = 'off_prompt=' .. case(12, plain('some output'))
@@ -443,6 +446,6 @@ fn notify_policy_uses_human_idle_and_dim_spans_when_the_core_has_them() {
     );
     assert_eq!(
         got,
-        "typing=false ghost=true typed=false never=true off_prompt=false knob=false"
+        "typing=false ghost=true ghost_words=true typed=false never=true off_prompt=false knob=false"
     );
 }
