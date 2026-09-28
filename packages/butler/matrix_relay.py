@@ -62,11 +62,14 @@ def load_state():
                 isinstance(event_id, str) for event_id in processed_ids
             ):
                 raise ValueError("processed_event_ids must be a string list")
-            if not isinstance(pending, dict) or not all(
-                isinstance(event_id, str) and isinstance(event, dict)
-                for event_id, event in pending.items()
-            ):
-                raise ValueError("pending_events must be an object of event objects")
+            if not isinstance(pending, dict):
+                raise ValueError("pending_events must be an object")
+            pending = {
+                event_id: event for event_id, event in pending.items()
+                if isinstance(event_id, str) and isinstance(event, dict)
+                and all(isinstance(event.get(key), str)
+                        for key in ("sender", "room_id", "created_at", "body"))
+            }
             # Read the old cursor-only format so upgrades resume in place.
             processed = {}
             for event_id in processed_ids:

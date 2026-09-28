@@ -2489,7 +2489,7 @@ fn matrix_relay_restart_waits_for_backoff_after_daemon_uptime_exceeds_delay() {
         &dir, "backoff-gap", "http://127.0.0.1:1", "!room:example.org", "@bot:example.org", "",
     );
     let source = format!(
-        "import pathlib,time; pathlib.Path({}).open('a').write(str(time.monotonic())+'\\n'); raise SystemExit(7)",
+        "import pathlib,time; pathlib.Path({}).open('a').write(str(time.monotonic())+'\\n'); time.sleep(60)",
         serde_json::to_string(&marker.to_string_lossy()).unwrap(),
     );
     let token_env = token_path.to_string_lossy().to_string();
@@ -2512,16 +2512,29 @@ fn matrix_relay_restart_waits_for_backoff_after_daemon_uptime_exceeds_delay() {
     let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
 
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let starts = loop {
-        let starts = std::fs::read_to_string(&marker).unwrap_or_default();
-        if starts.lines().count() >= 5 { break starts; }
-        assert!(Instant::now() < deadline, "relay did not reach the 8-second retry: {starts}");
+    let started = Instant::now() + Duration::from_secs(9);
+    while std::fs::read_to_string(&marker).unwrap_or_default().lines().count() < 1 {
+        assert!(Instant::now() < started, "relay did not start");
         std::thread::sleep(Duration::from_millis(20));
-    };
-    let times: Vec<f64> = starts.lines().map(|line| line.parse().unwrap()).collect();
-    let gap = times[4] - times[3];
-    assert!(gap >= 7.0, "8-second backoff was shortened after daemon uptime exceeded it: {gap}s; {starts}");
+    }
+    std::thread::sleep(Duration::from_secs(9));
+    let crash_at = Instant::now();
+    eval(
+        &path,
+        "remuda._butler_matrix_restart_attempts = 3; remuda.kill(remuda._butler_matrix_relay)",
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let starts = std::fs::read_to_string(&marker).unwrap_or_default();
+        if starts.lines().count() >= 2 { break; }
+        assert!(Instant::now() < deadline, "relay did not restart after the 8-second delay: {starts}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let gap = crash_at.elapsed().as_secs_f64();
+    assert!(gap >= 7.0, "8-second backoff was shortened while daemon uptime already exceeded it: {gap}s");
+    let trace = std::fs::read_to_string(&trace).expect("matrix restart trace");
+    assert!(trace.contains("attempt=4 backoff=8"), "expected an 8-second restart: {trace}");
     eval(&path, "remuda._butler_matrix_stop()");
 }
 
@@ -2562,6 +2575,61 @@ fn matrix_relay_recovery_resets_accumulated_restart_backoff() {
     assert!(traces.contains("attempt=5 backoff=16"), "expected five accumulated failures: {traces}");
     assert!(traces.contains("attempt=1 backoff=1"), "recovered relay should restart with fast backoff: {traces}");
     eval(&path, "remuda._butler_matrix_stop()");
+}
+
+#[test]
+fn matrix_relay_treats_wrongly_typed_processed_ids_as_corrupt_state() {
+    let dir = scratch_dir("matrix-typed-state");
+    let (token_path, config_path) = butler_config(
+        &dir, "typed-state", "http://127.0.0.1:1", "!room:example.org", "@bot:example.org", "",
+    );
+    std::fs::write(format!("{}.since", config_path.display()), r#"{"processed_event_ids":5}"#)
+        .unwrap();
+    let relay = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../packages/butler/matrix_relay.py");
+    let probe = format!(
+        "import runpy,sys; sys.argv=['relay',{},{}]; m=runpy.run_path({},run_name='matrix_test'); s,p,ms,pending=m['load_state'](); assert s is None and not p and ms is None and not pending",
+        serde_json::to_string(&token_path.to_string_lossy()).unwrap(),
+        serde_json::to_string(&config_path.to_string_lossy()).unwrap(),
+        serde_json::to_string(&relay.to_string_lossy()).unwrap(),
+    );
+    let result = std::process::Command::new("python3").arg("-c").arg(probe).status().unwrap();
+    assert!(result.success(), "wrongly typed processed IDs were not reset to a fresh state");
+}
+
+#[test]
+fn matrix_relay_drops_incomplete_and_wrongly_typed_pending_envelopes() {
+    let dir = scratch_dir("matrix-pending-state-types");
+    let (token_path, config_path) = butler_config(
+        &dir, "pending-state-types", "http://127.0.0.1:1", "!room:example.org", "@bot:example.org", "",
+    );
+    let valid = serde_json::json!({
+        "sender": "@alice:example.org", "room_id": "!room:example.org",
+        "created_at": "2026-09-28T00:00:00Z", "body": "still deliverable"
+    });
+    let state = serde_json::json!({
+        "since": "resume-here", "processed_event_ids": [],
+        "pending_events": {
+            "$valid": valid,
+            "$missing": {"sender": "@alice:example.org"},
+            "$wrong-type": {
+                "sender": 123, "room_id": "!room:example.org",
+                "created_at": "2026-09-28T00:00:00Z", "body": "bad"
+            }
+        }
+    });
+    std::fs::write(format!("{}.since", config_path.display()), state.to_string()).unwrap();
+    let relay = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../packages/butler/matrix_relay.py");
+    let probe = format!(
+        "import runpy,sys; sys.argv=['relay',{},{}]; m=runpy.run_path({},run_name='matrix_test'); s,p,ms,pending=m['load_state'](); assert s == 'resume-here' and pending == {{'$valid': {}}}",
+        serde_json::to_string(&token_path.to_string_lossy()).unwrap(),
+        serde_json::to_string(&config_path.to_string_lossy()).unwrap(),
+        serde_json::to_string(&relay.to_string_lossy()).unwrap(),
+        serde_json::to_string(&valid).unwrap(),
+    );
+    let result = std::process::Command::new("python3").arg("-c").arg(probe).status().unwrap();
+    assert!(result.success(), "load_state did not keep only the well-formed pending envelope");
 }
 
 #[test]
@@ -2685,7 +2753,7 @@ fn matrix_reload_replaces_the_relay_once_per_reload() {
 }
 
 #[test]
-fn matrix_relay_recovers_from_a_corrupt_state_file_and_acknowledges_mail() {
+fn matrix_relay_drops_malformed_pending_entries_and_acknowledges_mail() {
     let dir = scratch_dir("matrix-corrupt-state");
     let (_daemon, path) = butler_test_daemon(&dir);
     let room = "!corrupt:example.org";
@@ -2705,7 +2773,10 @@ fn matrix_relay_recovers_from_a_corrupt_state_file_and_acknowledges_mail() {
         &dir, "corrupt-state", &stub.base_url(), room, "@bot:example.org", "@alice:example.org",
     );
     let since_path = format!("{}.since", config_path.display());
-    std::fs::write(&since_path, r#"{"processed_event_ids":5}"#).unwrap();
+    std::fs::write(
+        &since_path,
+        r#"{"since":null,"processed_event_ids":[],"pending_events":{"$missing":{"sender":"a"},"$wrong":{"sender":123,"room_id":"!bad","created_at":"2026-09-28T00:00:00Z","body":"bad"}}}"#,
+    ).unwrap();
     let ack_path = format!("{}.acks", config_path.display());
     eval(&path, "remuda.corrupt_lines = {};");
     eval(
