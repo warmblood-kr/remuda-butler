@@ -27,3 +27,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: tests/golden_guidance.sh
+
+  shell:
+    # Every tests/*.sh and the luajit tests (tests/shell_tests.sh), on the same
+    # pinned core. None ran in CI before, so failures went unnoticed (#32).
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: sudo apt-get update && sudo apt-get install --yes luajit
+      - run: tests/shell_tests.sh
