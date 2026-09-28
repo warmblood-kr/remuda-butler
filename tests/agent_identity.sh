@@ -117,7 +117,8 @@ echo "ok - a live alias cannot be reused"
 
 ROSTER=$("$REMUDA_BIN" -s "$SERVER" butler sessions)
 printf '%s\n' "$ROSTER" | grep -F $'butler\t' >/dev/null || fail "tree omits the root alias: $ROSTER"
-printf '%s\n' "$ROSTER" | grep -F $'  member\tfake\tbutler' >/dev/null || \
+# View policy (#25): a root's direct children sit at the margin, not indented.
+printf '%s\n' "$ROSTER" | grep -Fx $'member\tfake\tbutler' >/dev/null || \
   fail "tree lost alias display or leader nesting: $ROSTER"
 [[ $ROSTER != *"$ROOT_ID"* && $ROSTER != *"$MEMBER_ID"* ]] || fail "tree displayed ULIDs instead of aliases: $ROSTER"
 echo "ok - session tree displays aliases with leader nesting"
