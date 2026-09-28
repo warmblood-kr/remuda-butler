@@ -58,7 +58,7 @@ return {
     { event = "butler/deliver", id = "inbox", depth = 0,
       run = function(_, message) return host._butler_inbox_delivery(message) end },
     { event = "session_exited", id = "identity", depth = -50,
-      run = function(_, name) return host._butler_session_exited(name) end },
+      run = function(_, name, info) return host._butler_session_exited(name, info) end },
     { event = "butler-compaction-submit", id = "submit",
       run = function() return host._butler_compaction_submit() end },
     { event = "butler-matrix-line", id = "matrix-line",
