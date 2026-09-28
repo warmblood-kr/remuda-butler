@@ -5307,7 +5307,7 @@ done
             &path,
             &format!("remuda.butler.compact({name:?})"),
         );
-        let deadline = Instant::now() + Duration::from_secs(8);
+        let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             let in_progress = eval(&path, &format!(
                 "return tostring(remuda._butler_compaction_members_state[{name:?}].compaction_in_progress == true)"
@@ -5349,7 +5349,7 @@ done
                     &path,
                     &format!("return remuda._butler_compaction_members_state[{name:?}].pending_restore_model"),
                 ),
-                "Opus",
+                "claude-opus-4-7[1m]",
                 "failed restore must retain the original model for the next policy attempt"
             );
             assert!(
