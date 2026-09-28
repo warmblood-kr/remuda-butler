@@ -55,7 +55,10 @@ local function config()
   end
   local base = trim(lines[1]):gsub("/+$", "")
   if not base:match("^https?://") then return nil, "Matrix homeserver must use http:// or https://" end
-  local ca_file, pin_hex = opts.ca_file, opts.pin_sha256
+  local ca_file = opts.ca_file and trim(opts.ca_file) or nil
+  local pin_hex = opts.pin_sha256 and trim(opts.pin_sha256) or nil
+  if ca_file == "" then ca_file = nil end
+  if pin_hex == "" then pin_hex = nil end
   if base:match("^https://") and not ca_file and not pin_hex then
     return nil, "HTTPS Matrix homeserver requires ca_file=PATH or pin_sha256=HEX"
   end
@@ -92,7 +95,7 @@ function matrix.configured_room()
   return conf.room
 end
 
-local function once(callback)
+matrix.once = matrix.once or function(callback)
   local called = false
   return function(value)
     if called then return end
@@ -100,11 +103,22 @@ local function once(callback)
     if callback then callback(value) end
   end
 end
+local once = matrix.once
 
-local function percent_encode(value)
+matrix.path_component = matrix.path_component or function(value)
   return (tostring(value):gsub("([^%w%-%._~])", function(char)
     return string.format("%%%02X", char:byte())
   end))
+end
+local percent_encode = matrix.path_component
+
+local function percent_decode(value)
+  local remainder = value:gsub("%%[%x][%x]", "")
+  if remainder:find("%%") then return nil end
+  local decoded = value:gsub("%%(%x%x)", function(hex)
+    return string.char(tonumber(hex, 16))
+  end)
+  return decoded
 end
 
 local function report_error(callback, message)
@@ -315,6 +329,7 @@ local function schedule_queue()
   if interval == 0 then
     while #queue > 0 do
       local item = table.remove(queue, 1)
+      item.in_queue = false
       if not item.cancelled then item.dispatch(item) end
     end
     return
@@ -323,6 +338,7 @@ local function schedule_queue()
     tokens = math.min(burst, tokens + 1)
     if #queue > 0 and tokens > 0 then
       local item = table.remove(queue, 1)
+      item.in_queue = false
       tokens = tokens - 1
       if not item.cancelled then item.dispatch(item) end
     end
@@ -335,10 +351,20 @@ local function schedule_queue()
   end })
 end
 
-local function enqueue(dispatch)
+local function enqueue(dispatch, done)
   local item = { dispatch = dispatch, cancelled = false }
   local handle = { cancel = function()
+    if item.cancelled or item.completed then return end
     item.cancelled = true
+    if item.in_queue then
+      for index, queued in ipairs(queue) do
+        if queued == item then table.remove(queue, index); break end
+      end
+      item.in_queue = false
+      item.completed = true
+      done({ error = "cancelled" })
+      return
+    end
     if item.transport then item.transport:cancel() end
   end }
   item.handle = handle
@@ -346,6 +372,7 @@ local function enqueue(dispatch)
     tokens = tokens - 1
     dispatch(item)
   else
+    item.in_queue = true
     queue[#queue + 1] = item
     schedule_queue()
   end
@@ -370,6 +397,15 @@ function matrix.request(args, on_done)
     report_error(done, "Matrix request method must be GET, PUT, or POST")
     return { cancel = function() end }
   end
+  local path = args.path:sub(1, 1) == "/" and args.path or ("/" .. args.path)
+  local encoded_room = path:match("/rooms/([^/?]+)")
+  if encoded_room then
+    local path_room = percent_decode(encoded_room)
+    if not path_room or path_room ~= conf.room then
+      report_error(done, "room is outside the configured Matrix allowlist")
+      return { cancel = function() end }
+    end
+  end
   if args.room ~= nil and args.room ~= conf.room then
     report_error(done, "room is outside the configured Matrix allowlist")
     return { cancel = function() end }
@@ -389,7 +425,6 @@ function matrix.request(args, on_done)
     report_error(done, "Matrix timeout and max_bytes must be positive")
     return { cancel = function() end }
   end
-  local path = args.path:sub(1, 1) == "/" and args.path or ("/" .. args.path)
   local headers = {}
   if args.headers ~= nil and type(args.headers) ~= "table" then
     report_error(done, "Matrix request headers must be a table")
@@ -425,7 +460,7 @@ function matrix.request(args, on_done)
     if item and item.cancelled then return end
     item.transport = remuda.http.request(spec)
   end
-  return enqueue(dispatch)
+  return enqueue(dispatch, done)
 end
 
 function matrix.same_room(room, event_id, on_done)

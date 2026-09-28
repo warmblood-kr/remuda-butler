@@ -20,7 +20,11 @@ function remuda.http.request(spec)
   table.insert(remuda.http.pending, entry)
   if remuda.http.holds[entry.key] then entry.held = true end
   return { cancel = function()
-    if not entry.completed then entry.cancelled = true end
+    if not entry.completed then
+      entry.cancelled = true
+      entry.held = false
+      entry.result = { error = "cancelled" }
+    end
   end }
 end
 
@@ -69,8 +73,7 @@ function remuda.http.tick()
       if not entry.result then entry.result = { error = "no scripted fake HTTP response for " .. entry.key } end
     end
     if not entry.completed and not entry.held then
-      if entry.cancelled then entry.completed = true
-      elseif entry.result then
+      if entry.result then
         entry.completed = true
         entry.callback(entry.result)
       end
