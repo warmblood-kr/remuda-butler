@@ -2481,6 +2481,45 @@ fn matrix_relay_restarts_after_unexpected_exit_and_records_it() {
 }
 
 #[test]
+fn matrix_relay_recovery_resets_accumulated_restart_backoff() {
+    let dir = scratch_dir("matrix-backoff-reset");
+    let trace = dir.join("matrix-trace.log");
+    let (token_path, config_path) = butler_config(
+        &dir, "backoff-reset", "http://127.0.0.1:1", "!room:example.org", "@bot:example.org", "",
+    );
+    let token_env = token_path.to_string_lossy().to_string();
+    let config_env = config_path.to_string_lossy().to_string();
+    let _daemon = Daemon::spawn_with_env(
+        &dir,
+        &[
+            ("REMUDA_BUTLER_TOKEN", &token_env),
+            ("REMUDA_BUTLER_CONFIG", &config_env),
+        ],
+    );
+    let path = daemon::socket_path_in(&dir, "s");
+    eval(
+        &path,
+        &format!(
+            "remuda._butler_test_mode = 'lifecycle'; remuda._butler_argv = {{'sh','-c','sleep 60'}}; remuda._butler_helper_src_override = 'import time; time.sleep(60)'; remuda._butler_matrix_trace_path = {}",
+            lua_raw_string(&trace.to_string_lossy()),
+        ),
+    );
+    let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    // Exercise five failed relay exits, then the same success marker emitted
+    // by the relay after a completed /sync response.
+    eval(
+        &path,
+        "for _ = 1, 5 do remuda._butler_matrix_sync_exit(7) end; remuda._butler_matrix_line('__REMUDA_MATRIX_HEALTHY__'); remuda._butler_matrix_sync_exit(7)",
+    );
+    let traces = std::fs::read_to_string(&trace).expect("matrix restart trace");
+    assert!(traces.contains("attempt=5 backoff=16"), "expected five accumulated failures: {traces}");
+    assert!(traces.contains("attempt=1 backoff=1"), "recovered relay should restart with fast backoff: {traces}");
+    eval(&path, "remuda._butler_matrix_stop()");
+}
+
+#[test]
 fn matrix_relay_retries_an_unreachable_first_sync_baseline() {
     let dir = scratch_dir("matrix-baseline-retry");
     let (_daemon, path) = butler_test_daemon(&dir);

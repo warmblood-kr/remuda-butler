@@ -229,6 +229,7 @@ def main():
         since = resp["next_batch"]
         save_state(since, processed, messages_since, pending)
         emit_pending(pending, new_ids)
+        print("__REMUDA_MATRIX_HEALTHY__", flush=True)
 
 
 if __name__ == "__main__":

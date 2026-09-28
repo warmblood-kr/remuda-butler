@@ -24,6 +24,10 @@ local function unescape(value)
 end
 
 function remuda._butler_matrix_line(line)
+  if line == "__REMUDA_MATRIX_HEALTHY__" then
+    remuda._butler_matrix_restart_attempts = 0
+    return
+  end
   local sender, room_id, event_id, created_at, body = line:match(
     "^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t(.*)$"
   )
