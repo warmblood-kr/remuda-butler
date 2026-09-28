@@ -19,3 +19,9 @@ agent's idle prompt before selecting it. The default order is Claude, then
 Codex; set `REMUDA_BUTLER_AGENT_ORDER=codex,claude` to change it. This order
 also applies to delegates without an explicit kind. `remuda butler sessions`
 shows the selected kind and the reason each earlier candidate was skipped.
+
+`remuda butler status` prints `butler: up (<kind>)` and exits 0 when the root
+Butler is ready. During launch it exits 1 with output beginning `launching`;
+after failure it exits 1 with output beginning `failed`. Both states include
+one line per attempted candidate. The install script can poll this command
+until it reports `up` or `failed`.

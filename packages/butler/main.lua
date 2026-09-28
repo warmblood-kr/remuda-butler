@@ -841,7 +841,7 @@ if not remuda.contribute then
       ready = startup.ready and function(_, screen) return startup.ready(screen) end or nil,
       working = function(_, screen) return screen:find("esc to interrupt", 1, true) ~= nil end,
       login = kind_id == "claude"
-        and { "Please log in", "not logged in", "Authentication required", "Invalid API key", "Please run /login" }
+        and { "Please log in", "not logged in", "Authentication required", "Invalid API key", "Please run /login", "Select login method" }
         or { "Please log in", "not logged in", "Authentication required", "Sign in to continue", "Not authenticated" },
       dialogs = startup.modals,
     })
@@ -852,155 +852,162 @@ local function build_agent_argv(kind, spec)
   if not builder then error("unknown agent kind: " .. tostring(kind), 0) end
   return builder(spec)
 end
+local function one_line(value)
+  return (tostring(value or ""):match("^[^\r\n]*") or ""):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+end
 -- The one generic launch chooser serves Butler and every managed member. Kinds
 -- are lifecycle contributions; the chooser only reads their data and callbacks.
-local function choose(candidates, opts)
-  local attempts = {}
-  local by_id = {}
-  for _, row in ipairs(contributions("butler.agent")) do by_id[row.id] = row.entry end
-  local legacy_builders = {}
-  for kind, builder in pairs(AGENT_BUILDERS) do
-    if not by_id[kind] then
-      local startup = remuda._butler_agent_startup[kind] or {}
-      by_id[kind] = { argv = function(_, spec) return builder(spec) end,
-        ready = startup.ready and function(_, screen) return startup.ready(screen) end or nil,
-        login = {}, dialogs = startup.modals }
-      legacy_builders[kind] = true
+-- Member launches must not hold the daemon image while an agent paints its
+-- first prompt. This scheduler advances one candidate at a time and invokes
+-- `done(name, kind, attempts)` when a candidate is ready or the chain ends.
+local function choose(candidates, opts, done)
+  local attempts, index, state, schedule = {}, 0, nil, nil
+  local function trace(attempt)
+    if remuda._butler_session_trace then
+      remuda._butler_session_trace("candidate", attempt.kind .. ": " .. attempt.reason
+        .. ": " .. (attempt.detail or ""))
     end
   end
-  local function quote(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end
-  local function present(command)
-    local ok = os.execute("command -v " .. quote(command) .. " >/dev/null 2>&1")
-    return ok == true or ok == 0
+  local function callback(name, kind)
+    if schedule then remuda.cancel(schedule); schedule = nil end
+    done(name, kind, attempts)
   end
   local function alive(name)
-    for _, row in ipairs(remuda.ls()) do if row.name == name then return row.alive end end
+    for _, row in ipairs(remuda.ls()) do if row.name == name and row.alive then return true end end
     return false
   end
-  local function call_kind_callback(callback, ...)
-    local args = { ... }
-    local unpack_args = table.unpack or unpack
-    local ok, value = pcall(callback, remuda, unpack_args(args, 1, #args))
+  local function call_callback(fn, ...)
+    local args, unpack_args = {...}, table.unpack or unpack
+    local ok, value = pcall(fn, remuda, unpack_args(args, 1, #args))
     if ok then return true, value end
-    return pcall(callback, unpack_args(args, 1, #args))
+    return pcall(fn, unpack_args(args, 1, #args))
   end
-  for _, id in ipairs(candidates) do
+  local by_id = {}
+  for _, row in ipairs(contributions("butler.agent")) do by_id[row.id] = row.entry end
+  for id, builder in pairs(remuda._butler_agent_builders or {}) do
+    if not by_id[id] then
+      local startup = remuda._butler_agent_startup[id] or {}
+      by_id[id] = { argv = function(_, spec) return builder(spec) end,
+        ready = startup.ready and function(_, screen) return startup.ready(screen) end or nil,
+        login = {}, dialogs = startup.modals }
+    end
+  end
+  local function fail_candidate(reason, detail)
+    local current = state
+    current.attempt.reason, current.attempt.detail = reason, detail
+    local ok, err = pcall(remuda.close, current.name)
+    current.closing, current.close_error, current.close_ticks = true, ok and nil or err, 0
+  end
+  local function start_next()
+    index = index + 1
+    local id = candidates[index]
+    if not id then callback(nil, nil); return end
     local entry = by_id[id]
-    local overridden_test_builder = AGENT_BUILDERS[id] and AGENT_BUILDERS[id] ~= BUILTIN_AGENT_BUILDERS[id]
     local attempt = { kind = id, reason = "unknown" }
     attempts[#attempts + 1] = attempt
     if not entry then
       attempt.reason, attempt.detail = "not_found", "agent kind is not registered"
-    else
-      local spec = opts.spec(id)
-      local argv = (type(opts.argv) == "function" and opts.argv(id, spec)) or opts.argv
-        or (type(entry.argv) == "function" and select(2, call_kind_callback(entry.argv, spec))) or entry.argv
-        or (entry.build and entry.build(spec) or build_agent_argv(id, spec))
-      local executable = entry.executable or (argv and argv[1]) or id
-      if not opts.argv and not overridden_test_builder and not present(executable) then
+      trace(attempt); start_next(); return
+    end
+    local spec = opts.spec(id)
+    local argv = (type(opts.argv) == "function" and opts.argv(id, spec)) or opts.argv
+      or (type(entry.argv) == "function" and select(2, call_callback(entry.argv, spec))) or entry.argv
+      or (entry.build and entry.build(spec))
+    local executable = (argv and argv[1]) or entry.executable or id
+    if not opts.argv then
+      local quoted = "'" .. tostring(executable):gsub("'", "'\\''") .. "'"
+      local found = os.execute("command -v " .. quoted .. " >/dev/null 2>&1")
+      if found ~= true and found ~= 0 then
         attempt.reason, attempt.detail = "not_found", executable .. " not found in PATH"
-      else
-      local ok, name = pcall(remuda.new, opts.name, argv, opts.cwd, opts.env(id, spec))
-      if not ok then
-        attempt.reason, attempt.detail = "spawn_error", tostring(name)
-      elseif opts.skip_probe or legacy_builders[id] or overridden_test_builder then
-        attempt.reason, attempt.session = "ready", name
-        return name, id, attempts
-      else
-        local started, handled = os.time(), {}
-        local timeout = opts.timeout or remuda._butler_readiness_timeout or 15
-        local reason, detail, last_screen, ready_seen, dialog_seen = nil, nil, nil, false, nil
-        while os.time() - started < timeout do
-          if not alive(name) then reason, detail = "exited", "session exited before prompt became ready"; break end
-          local captured, screen = pcall(remuda.capture, name)
-          if not captured then reason, detail = "exited", tostring(screen); break end
-          screen = tostring(screen or ""):gsub("\r\n", "\n"):gsub("\r", "\n")
-          last_screen = screen
-          local ready = false
-          if entry.ready then
-            local tested, matched = call_kind_callback(entry.ready, screen)
-            ready = tested and not not matched
-          end
-          if not ready then
-            local startup = remuda._butler_agent_startup[id] or {}
-            if startup.ready then
-              local tested, matched = pcall(startup.ready, screen)
-              ready = tested and not not matched
-            end
-          end
-          if not ready and remuda._butler_prompt_is_empty then
-            local tested, decision = pcall(remuda._butler_prompt_is_empty, id, screen)
-            ready = tested and decision == "EMPTY"
-          end
-          if not ready and (screen:match("\n%s*❯%s*$") or screen:match("\n%s*>%s*$")
-              or screen:match("\n%s*›%s*$")) then ready = true end
-          if ready then ready_seen = true; break end
-          for _, pattern in ipairs(entry.login or {}) do
-            if screen:find(pattern, 1, true) then reason, detail = "login", screen; break end
-          end
-          if reason then break end
-          local dialogs = type(entry.dialogs) == "function"
-            and select(2, call_kind_callback(entry.dialogs)) or entry.dialogs or {}
-          local known = false
-          for index, dialog in ipairs(dialogs) do
-            if screen:find(dialog.match, 1, true) then
-              known = true
-              dialog_seen = dialog.match
-              if not handled[index] then
-                handled[index] = true
-                for _, key in ipairs(dialog.keys or {}) do pcall(remuda.key, name, key) end
-              end
-              break
-            end
-          end
-          local lower = screen:lower()
-          if not known and (lower:find("trust", 1, true) or lower:find("continue", 1, true)
-              or lower:find("press enter", 1, true) or lower:find("select an option", 1, true)
-              or lower:find("terms of service", 1, true) or lower:find("confirm", 1, true)) then
-            reason, detail = "dialog", screen
-            break
-          end
-          os.execute("sleep 0.2")
-        end
-        if not reason then
-          if ready_seen then
-            attempt.reason, attempt.session = "ready", name
-            return name, id, attempts
-          end
-          local captured, screen = pcall(remuda.capture, name)
-          local tested, matched = captured and entry.ready
-            and call_kind_callback(entry.ready, tostring(screen or ""))
-          if tested and matched then
-            attempt.reason, attempt.session = "ready", name
-            return name, id, attempts
-          end
-          reason = dialog_seen and "dialog" or "timeout"
-          detail = (dialog_seen and ("dialog remained after its handler: " .. dialog_seen .. "; ") or "")
-            .. "readiness prompt not observed within " .. tostring(timeout)
-            .. " seconds; last screen: " .. (last_screen or "<empty>")
-        end
-        attempt.reason, attempt.detail = reason, detail
-        local closed, close_error = pcall(remuda.close, name)
-        for _ = 1, 10 do
-          if not alive(name) then break end
-          os.execute("sleep 0.1")
-        end
-        if not closed or alive(name) then
-          attempt.reason = "spawn_error"
-          attempt.detail = (attempt.detail or "") .. "; failed to kill failed session"
-            .. (close_error and (": " .. tostring(close_error)) or "")
-          return nil, nil, attempts
-        end
-      end
+        trace(attempt); start_next(); return
       end
     end
-    if remuda._butler_session_trace then
-      remuda._butler_session_trace("candidate", id .. ": " .. attempt.reason .. ": " .. (attempt.detail or ""))
+    local ok, name = pcall(remuda.new, opts.name, argv, opts.cwd, opts.env(id, spec))
+    if not ok then
+      attempt.reason, attempt.detail = "spawn_error", one_line(name)
+      trace(attempt); start_next(); return
+    end
+    state = { id = id, entry = entry, attempt = attempt, name = name,
+      started = os.time(), timeout = opts.timeout or remuda._butler_readiness_timeout or 15,
+      handled = {}, last_screen = "", dialog_seen = nil }
+    local test_builder = remuda._butler_agent_builders[id]
+      and remuda._butler_agent_builders[id] ~= BUILTIN_AGENT_BUILDERS[id]
+    if opts.skip_probe or test_builder then
+      attempt.reason, attempt.session = "ready", name
+      callback(name, id)
     end
   end
-  return nil, nil, attempts
+  local function tick()
+    if not state then return end
+    if state.closing then
+      state.close_ticks = state.close_ticks + 1
+      if not alive(state.name) then
+        trace(state.attempt); state = nil; start_next()
+      elseif state.close_ticks >= 10 then
+        state.attempt.reason = "spawn_error"
+        state.attempt.detail = (state.attempt.detail or "") .. "; failed to kill failed session"
+          .. (state.close_error and (": " .. tostring(state.close_error)) or "")
+        trace(state.attempt); callback(nil, nil)
+      end
+      return
+    end
+    if not alive(state.name) then fail_candidate("exited", "session exited before prompt became ready"); return end
+    local captured, screen = pcall(remuda.capture, state.name)
+    if not captured then fail_candidate("exited", one_line(screen)); return end
+    screen = tostring(screen or ""):gsub("\r\n", "\n"):gsub("\r", "\n")
+    state.last_screen = one_line(screen)
+    local entry, id = state.entry, state.id
+    -- Authentication screens can still contain a prompt glyph; classify
+    -- login before readiness so expired credentials never look usable.
+    for _, pattern in ipairs(entry.login or {}) do
+      if screen:find(pattern, 1, true) then fail_candidate("login", one_line(screen)); return end
+    end
+    local ready = false
+    if entry.ready then local tested, matched = call_callback(entry.ready, screen); ready = tested and not not matched end
+    local startup = remuda._butler_agent_startup[id] or {}
+    if not ready and startup.ready then local tested, matched = pcall(startup.ready, screen); ready = tested and not not matched end
+    if not ready and remuda._butler_prompt_is_empty then
+      local tested, decision = pcall(remuda._butler_prompt_is_empty, id, screen); ready = tested and decision == "EMPTY"
+    end
+    if not ready and (screen:match("\n%s*❯%s*$") or screen:match("\n%s*>%s*$") or screen:match("\n%s*›%s*$")) then ready = true end
+    if ready then state.attempt.reason, state.attempt.session = "ready", state.name; callback(state.name, id); return end
+    local dialogs = type(entry.dialogs) == "function" and select(2, call_callback(entry.dialogs)) or entry.dialogs or {}
+    local known = false
+    for dialog_index, dialog in ipairs(dialogs) do
+      if screen:find(dialog.match, 1, true) then
+        known, state.dialog_seen = true, dialog.match
+        if not state.handled[dialog_index] then
+          state.handled[dialog_index] = true
+          for _, key in ipairs(dialog.keys or {}) do pcall(remuda.key, state.name, key) end
+        end
+        break
+      end
+    end
+    local lower = screen:lower()
+    if not known and (lower:find("trust", 1, true) or lower:find("continue", 1, true)
+        or lower:find("press enter", 1, true) or lower:find("select an option", 1, true)
+        or lower:find("terms of service", 1, true) or lower:find("confirm", 1, true)) then
+      fail_candidate("dialog", one_line(screen)); return
+    end
+    if os.time() - state.started >= state.timeout then
+      local prefix = state.dialog_seen and ("dialog remained after its handler: " .. state.dialog_seen .. "; ") or ""
+      fail_candidate(state.dialog_seen and "dialog" or "timeout", prefix
+        .. "readiness prompt not observed within " .. tostring(state.timeout)
+        .. " seconds; last screen: " .. (state.last_screen ~= "" and state.last_screen or "<empty>"))
+    end
+  end
+  schedule = remuda.schedule({ every = 0.2, run = function()
+    local ok, err = pcall(tick)
+    if not ok then
+      if state and state.name then fail_candidate("spawn_error", tostring(err))
+      else callback(nil, nil) end
+    end
+  end })
+  start_next()
+  return attempts
 end
 remuda._butler_choose = choose
+remuda._butler_choose_async = choose
 local function configured_agent_order()
   if remuda._butler_candidate_order then return remuda._butler_candidate_order end
   local raw = os.getenv("REMUDA_BUTLER_AGENT_ORDER")
@@ -1009,8 +1016,19 @@ local function configured_agent_order()
     for kind in raw:gmatch("[^,%s]+") do order[#order + 1] = kind end
     if #order > 0 then return order end
   end
-  return { "claude", "codex" }
+  local rows = contributions("butler.agent")
+  table.sort(rows, function(a, b)
+    local ao = tonumber(a.order or (a.entry and a.entry.order)) or 0
+    local bo = tonumber(b.order or (b.entry and b.entry.order)) or 0
+    if ao ~= bo then return ao < bo end
+    return a.id < b.id
+  end)
+  local order = {}
+  for _, row in ipairs(rows) do order[#order + 1] = row.id end
+  if #order == 0 then return { "claude", "codex" } end
+  return order
 end
+remuda._butler_configured_agent_order = configured_agent_order
 local function setup_telemetry(kind, spec)
   local adapter = TELEMETRY_ADAPTERS[kind]
   return adapter and adapter.setup and adapter.setup(spec) or {}
@@ -1105,7 +1123,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
   local telemetry_by_kind = {}
   local agent_telemetry = setup_telemetry(kind, { name = name, model = model })
   telemetry_by_kind[kind] = agent_telemetry
-  local actual, selected_kind, attempts = choose(candidates, {
+  local choose_opts = {
     name = name, cwd = cwd,
     spec = function(candidate_kind)
       local telemetry = telemetry_by_kind[candidate_kind]
@@ -1122,11 +1140,16 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
         REMUDA_BUTLER_AGENT_KIND = candidate_kind,
         CLAUDE_CODE_FORCE_SESSION_PERSISTENCE = "1" }
     end,
-  })
+  }
+  local function finish(actual, selected_kind, attempts)
   if not actual then
     local errors = {}
     for _, a in ipairs(attempts) do errors[#errors + 1] = a.kind .. ": " .. a.reason .. " (" .. (a.detail or "") .. ")" end
-    error("no agent candidate became ready: " .. table.concat(errors, "; "), 0)
+    local message = "no agent candidate became ready: " .. table.concat(errors, "; ")
+    bus.launch_failures = bus.launch_failures or {}
+    bus.launch_failures[name] = { attempts = attempts, error = message }
+    _butler_session_trace("launch_failed", name .. ": " .. message)
+    return nil
   end
   kind = selected_kind
   agent_telemetry = telemetry_by_kind[kind]
@@ -1247,6 +1270,18 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
     end })
   end
   return actual
+  end
+  local result
+  choose(candidates, choose_opts, function(actual, selected_kind, attempts)
+    local ok, value = pcall(finish, actual, selected_kind, attempts)
+    if ok then result = value
+    else
+      bus.launch_failures = bus.launch_failures or {}
+      bus.launch_failures[name] = { attempts = attempts, error = tostring(value) }
+      _butler_session_trace("launch_failed", name .. ": " .. tostring(value))
+    end
+  end)
+  return result or ("launching " .. name)
 end
 
 local function make_topic(name, template, kind, parent, task, model)
@@ -1561,6 +1596,21 @@ function remuda._butler_sessions()
     end
   end
   if #member_attempts > 0 then out = out .. "\nMEMBER ATTEMPTS\n" .. table.concat(member_attempts, "\n") end
+  local failed_names = {}
+  for name in pairs(bus.launch_failures or {}) do failed_names[#failed_names + 1] = name end
+  table.sort(failed_names)
+  if #failed_names > 0 then
+    local failed = {}
+    for _, name in ipairs(failed_names) do
+      local report = bus.launch_failures[name]
+      local details = {}
+      for _, attempt in ipairs(report.attempts or {}) do
+        details[#details + 1] = attempt.kind .. ": " .. attempt.reason
+      end
+      failed[#failed + 1] = name .. ": " .. (#details > 0 and table.concat(details, ", ") or report.error)
+    end
+    out = out .. "\nFAILED LAUNCHES\n" .. table.concat(failed, "\n")
+  end
   return out
 end
 
@@ -1676,6 +1726,13 @@ local function command(order, verb, usage, run)
 end
 command(10, "sessions", "  remuda butler sessions", function(args)
   if #args == 1 then return remuda._butler_sessions() end
+end)
+command(12, "status", "  remuda butler status  (0=up; errors start with launching or failed)", function(args)
+  if #args == 1 then
+    local message, code = remuda._butler_status()
+    if code ~= 0 then error(message, 0) end
+    return message
+  end
 end)
 command(15, "agents", "  remuda butler agents [--all]", function(args)
   if #args == 1 then return registry_list(false) end
@@ -1965,6 +2022,28 @@ local function session_exists(name)
   end
   return false
 end
+function remuda._butler_status()
+  local name = butler_name or remuda._butler_initial_name
+  local selected = remuda._butler_selected_agent or butler_kind or bus.agents.butler.kind
+  if remuda._butler_start_pending or remuda._butler_launching then
+    local lines = { "launching" }
+    for _, attempt in ipairs(remuda._butler_attempts or {}) do
+      lines[#lines + 1] = attempt.kind .. ": " .. attempt.reason
+        .. (attempt.detail and attempt.detail ~= "" and (": " .. one_line(attempt.detail)) or "")
+    end
+    return table.concat(lines, "\n"), 1
+  end
+  if selected and session_exists(name) then return "butler: up (" .. tostring(selected) .. ")", 0 end
+  if remuda._butler_start_error then
+    local lines = { "failed" }
+    for _, attempt in ipairs(remuda._butler_attempts or {}) do
+      lines[#lines + 1] = attempt.kind .. ": " .. attempt.reason
+        .. (attempt.detail and attempt.detail ~= "" and (": " .. one_line(attempt.detail)) or "")
+    end
+    return table.concat(lines, "\n"), 1
+  end
+  return "launching", 1
+end
 local function launch_butler()
   local requested_name = butler_name or remuda._butler_initial_name
   if butler_session_cwd then
@@ -1976,9 +2055,11 @@ local function launch_butler()
     remuda._butler_name = butler_name
     return
   end
+  if remuda._butler_launching then return "launching Butler" end
+  remuda._butler_selected_agent = nil
   local order = configured_agent_order()
   local telemetry_by_kind = {}
-  local selected, kind, attempts = choose(order, {
+  local choose_opts = {
     name = requested_name, cwd = butler_session_cwd, argv = remuda._butler_argv,
     skip_probe = remuda._butler_argv ~= nil,
     spec = function(candidate_kind)
@@ -1992,16 +2073,26 @@ local function launch_butler()
         REMUDA_BUTLER_AGENT_ALIAS = "butler", REMUDA_BUTLER_LEADER_ID = "",
         REMUDA_BUTLER_AGENT_KIND = candidate_kind, CLAUDE_CODE_FORCE_SESSION_PERSISTENCE = "1" }
     end,
-  })
+  }
+  local function finish(selected, kind, attempts)
   butler_attempts = attempts
   remuda._butler_attempts = attempts
   bus.agents.butler.launch_attempts = attempts
   if not selected then
-    local failures = {}
-    for _, a in ipairs(attempts) do failures[#failures + 1] = a.kind .. ": " .. a.reason .. " (" .. (a.detail or "") .. ")" end
-    local message = "butler: no candidate became ready; " .. table.concat(failures, "; ")
-    io.stderr:write(message .. "\n")
-    error(message, 0)
+    local failures = { "butler: no candidate became ready" }
+    for _, a in ipairs(attempts) do
+      failures[#failures + 1] = "butler: " .. one_line(a.kind) .. ": " .. one_line(a.reason)
+        .. (a.detail and a.detail ~= "" and (" (" .. one_line(a.detail) .. ")") or "")
+    end
+    local message = table.concat(failures, "\n")
+    remuda._butler_start_error = message
+    remuda._butler_start_pending = false
+    for _, attempt in ipairs(attempts) do
+      io.stderr:write("butler: " .. one_line(attempt.kind) .. ": " .. one_line(attempt.reason)
+        .. (attempt.detail and attempt.detail ~= "" and (" (" .. one_line(attempt.detail) .. ")") or "") .. "\n")
+    end
+    _butler_session_trace("reconcile_error", message)
+    return nil
   end
   butler_name, butler_kind = selected, kind
   remuda._butler_name, remuda._butler_selected_agent = selected, kind
@@ -2010,7 +2101,23 @@ local function launch_butler()
   root_record.kind = kind
   bus.identities.butler, bus.identity_ids[root_record.id] = root_record, root_record
   identity_record(root_record)
+  remuda._butler_start_error = nil
+  remuda._butler_start_pending = false
   return selected
+  end
+  remuda._butler_launching = true
+  remuda._butler_start_pending = true
+  local attempts = choose(order, choose_opts, function(selected, kind, attempts)
+    remuda._butler_launching = nil
+    local ok, err = pcall(finish, selected, kind, attempts)
+    if not ok then
+      remuda._butler_start_error = tostring(err)
+      _butler_session_trace("reconcile_error", tostring(err))
+    end
+  end)
+  butler_attempts, remuda._butler_attempts = attempts, attempts
+  bus.agents.butler.launch_attempts = attempts
+  return "launching Butler"
 end
 
 -- The lifecycle declaration owns the one compaction schedule. The session's
@@ -2133,9 +2240,13 @@ function remuda._butler_session_exited(name)
   end
 end
 
-if remuda._butler_test_mode ~= "lifecycle" then
-  local _, launch_error = remuda._butler_reconcile()
-  if launch_error then error(launch_error, 0) end
+function remuda._butler_bootstrap()
+  return remuda._butler_reconcile()
+end
+-- Pre-lifecycle cores load this file directly; lifecycle cores call bootstrap
+-- from init.lua only after the command and contribution registries are live.
+if remuda._butler_test_mode ~= "lifecycle" and not remuda._butler_state then
+  remuda._butler_bootstrap()
 end
 
 function remuda._butler_compaction_submit()

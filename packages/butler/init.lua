@@ -17,6 +17,7 @@ local function boot()
   if booted then return end
   booted = true
   load_main()
+  if host._butler_bootstrap and host._butler_test_mode ~= "lifecycle" then host._butler_bootstrap() end
   host.emit("butler-start")
 end
 
@@ -79,7 +80,7 @@ return {
         argv = function(_, spec) return host._butler_agent_builders.claude(spec) end,
         ready = function(_, screen) return screen:find("─\n❯", 1, true) ~= nil end,
         working = function(_, screen) return screen:find("esc to interrupt", 1, true) ~= nil end,
-        login = { "Please log in", "not logged in", "Authentication required", "Invalid API key", "Please run /login" },
+        login = { "Please log in", "not logged in", "Authentication required", "Invalid API key", "Please run /login", "Select login method" },
         dialogs = function() return host._butler_agent_startup.claude.modals end },
       { id = "codex", order = 20, executable = "codex",
         argv = function(_, spec) return host._butler_agent_builders.codex(spec) end,
@@ -143,6 +144,8 @@ the normal way for a member to communicate.
     ["butler.command"] = {
       { id = "sessions", order = 10, verb = "sessions", usage = "  remuda butler sessions",
         run = function(_, args, caller) return host._butler_command_run("sessions", args, caller) end },
+      { id = "status", order = 12, verb = "status", usage = "  remuda butler status  (0=up; errors start with launching or failed)",
+        run = function(_, args, caller) return host._butler_command_run("status", args, caller) end },
       { id = "agents", order = 15, verb = "agents", usage = "  remuda butler agents [--all]",
         run = function(_, args, caller) return host._butler_command_run("agents", args, caller) end },
       { id = "launch", order = 20, verb = "launch", usage = "  remuda butler launch <claude|codex> [name] [--model M]",
