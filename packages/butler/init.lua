@@ -7,10 +7,16 @@ if not getmetatable(_G) then
 end
 
 local host = getmetatable(_G).__index.remuda
-local booted = false
+local booted, main_loaded = false, false
+local function load_main()
+  if main_loaded then return end
+  main_loaded = true
+  host.exec("butler/main")
+end
 local function boot()
   if booted then return end
   booted = true
+  load_main()
   host.emit("butler-start")
 end
 
@@ -44,7 +50,7 @@ return {
     host._butler_start_fallback = nil
   end,
   hooks = {
-    { event = "butler-start", id = "boot", run = function() host.exec("butler/main") end },
+    { event = "butler-start", id = "boot", run = load_main },
     { event = "butler/deliver", id = "inbox", depth = 0,
       run = function(_, message) return host._butler_inbox_delivery(message) end },
     { event = "session_exited", id = "identity", depth = -50,
@@ -68,6 +74,20 @@ return {
     end },
   },
   contributes = {
+    ["butler.agent"] = {
+      { id = "claude", order = 10, executable = "claude",
+        argv = function(_, spec) return host._butler_agent_builders.claude(spec) end,
+        ready = function(_, screen) return screen:find("─\n❯", 1, true) ~= nil end,
+        working = function(_, screen) return screen:find("esc to interrupt", 1, true) ~= nil end,
+        login = { "Please log in", "not logged in", "Authentication required", "Invalid API key", "Please run /login" },
+        dialogs = function() return host._butler_agent_startup.claude.modals end },
+      { id = "codex", order = 20, executable = "codex",
+        argv = function(_, spec) return host._butler_agent_builders.codex(spec) end,
+        ready = function(_, screen) return screen:find("Ask Codex", 1, true) ~= nil end,
+        working = function(_, screen) return screen:find("esc to interrupt", 1, true) ~= nil end,
+        login = { "Please log in", "not logged in", "Authentication required", "Sign in to continue", "Not authenticated" },
+        dialogs = function() return host._butler_agent_startup.codex.modals end },
+    },
     ["butler.guidance"] = {
       { id = "header", order = 10,
         agents_md = function(_, ctx)

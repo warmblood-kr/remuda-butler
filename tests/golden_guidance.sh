@@ -48,6 +48,7 @@ cat >"$T/bin/claude" <<EOF
 #!/usr/bin/env python3
 import os, sys, time
 open("$T/argv/" + os.environ.get("REMUDA_BUTLER_SESSION_NAME", "x"), "w").write("\n".join(sys.argv[1:]) + "\n")
+print("─\n❯", flush=True)
 while True: time.sleep(1)
 EOF
 chmod +x "$T/bin/claude"

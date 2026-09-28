@@ -15,9 +15,14 @@ remuda = {
   capture = function() return screen end,
 }
 dofile("packages/butler/main.lua")
-remuda._butler_agent_startup = {
-  claude = { working = function(value) return value:find("esc to interrupt", 1, true) ~= nil end },
-}
+remuda.contributions = function(point)
+  if point == "butler.agent" then
+    return { { id = "claude", entry = {
+      working = function(_, value) return value:find("esc to interrupt", 1, true) ~= nil end,
+    } } }
+  end
+  return {}
+end
 remuda._butler_prompt_is_empty = function()
   return composer_empty and "EMPTY" or "NON-EMPTY"
 end
