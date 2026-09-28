@@ -232,7 +232,7 @@ remuda._butler_compaction_reset_idle(remuda._butler_state or remuda._butler_comp
 -- `Daemon::spawn_with_env` unchanged. Mirrors install-butler.sh's own
 -- `${XDG_CONFIG_HOME:-$HOME/.config}/remuda/butler/{token,config}` exactly,
 -- kept in sync with install-butler.sh's own default by
--- scripts/check-butler-path-convention.py, which fails if the two diverge.
+-- scripts/check-butler-path-convention.lua, which fails if the two diverge.
 local function default_config_home()
   local xdg = os.getenv("XDG_CONFIG_HOME")
   if xdg and xdg ~= "" then
@@ -381,6 +381,7 @@ local function json_quote(s)
     :gsub('\r', '\\r'):gsub('\n', '\\n'):gsub('\t', '\\t') .. '"'
 end
 local function status_settings(path)
+  -- TODO core #213: remove this Python statusLine helper once the core JSON/stdin boundary is settled.
   local helper_path = path .. ".py"
   local settings_path = path .. ".settings.json"
   local helper = assert(io.open(helper_path, "w"))

@@ -74,8 +74,10 @@ until the generic external CLI/client contract is implemented in Remuda core.
 - `tests/butler_daemon.rs`, `tests/butler_mcp.rs` and `tests/support/`: Butler's
   Rust integration tests. `tests/rust_tests.sh` builds them inside a pinned
   Remuda core checkout and runs the Butler ones; CI runs it on every PR.
-- `scripts/check-butler-path-convention.py`: path consistency check spanning
+- `scripts/check-butler-path-convention.lua`: path consistency check spanning
   the Butler installer and the Remuda daemon loader.
+- `scripts/check-no-python.sh`: CI guard for Python files and invocations;
+  its Matrix and statusLine exceptions have removal TODOs.
 - `BUTLER_MIGRATION.md`: boundary, retained core responsibilities, risks, and
   extraction sequence.
 
