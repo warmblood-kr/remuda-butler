@@ -322,6 +322,24 @@ end
 
 -- The inbox row is the commit point: files written before it may be orphaned
 -- by a crash, never left dangling.
+local MATRIX_BODY_MAX_BYTES = 64 * 1024
+local function cap_matrix_body(text)
+  if #text <= MATRIX_BODY_MAX_BYTES then return text end
+  local keep = MATRIX_BODY_MAX_BYTES
+  while true do
+    while keep > 0 do
+      local next_byte = text:byte(keep + 1)
+      if not next_byte or next_byte < 0x80 or next_byte >= 0xc0 then break end
+      keep = keep - 1
+    end
+    local prefix = text:sub(1, keep)
+    local suffix = "[truncated " .. tostring(#text - #prefix) .. " bytes]"
+    local next_keep = MATRIX_BODY_MAX_BYTES - #suffix
+    if next_keep == keep then return prefix .. suffix end
+    keep = next_keep
+  end
+end
+
 local function queue(from, to, text, subject, in_reply_to, references, matrix)
   from, to = address(from), address(to)
   if to.id == "" then return nil, "recipient has no Butler ULID" end
@@ -341,6 +359,7 @@ local function queue(from, to, text, subject, in_reply_to, references, matrix)
   local id = message_id()
   local object_id = "object-" .. id
   local sender, body = from.alias or "outside", tostring(text)
+  if matrix then body = cap_matrix_body(body) end
   local object = { id = object_id, content = body, bytes = #body,
     content_type = "text/plain; charset=utf-8", content_hash = nil }
   local message = { id = id, from = from, to = { to },

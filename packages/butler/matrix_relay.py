@@ -16,8 +16,32 @@ if len(_lines) > 3 and _lines[3].strip():
 USE_MESSAGES_POLLING = len(_lines) > 4 and _lines[4].strip().lower() in ("1", "true", "messages", "fallback")
 
 SYNC_TIMEOUT_MS = 30000
+MAX_PROCESSED_EVENT_IDS = 5000
+MAX_BODY_BYTES = 64 * 1024
 STATE_FILE = Path(CONFIG_PATH + ".since")
 ACK_FILE = Path(CONFIG_PATH + ".acks")
+
+
+def add_processed(processed, event_id):
+    processed.pop(event_id, None)
+    processed[event_id] = None
+    while len(processed) > MAX_PROCESSED_EVENT_IDS:
+        processed.pop(next(iter(processed)))
+
+
+def cap_body(body):
+    raw = str(body).encode("utf-8")
+    if len(raw) <= MAX_BODY_BYTES:
+        return raw.decode("utf-8")
+    keep = MAX_BODY_BYTES
+    while True:
+        prefix = raw[:keep].decode("utf-8", "ignore")
+        removed = len(raw) - len(prefix.encode("utf-8"))
+        suffix = f"[truncated {removed} bytes]"
+        next_keep = MAX_BODY_BYTES - len(suffix.encode("utf-8"))
+        if next_keep == keep:
+            return prefix + suffix
+        keep = next_keep
 
 
 def load_state():
@@ -25,16 +49,20 @@ def load_state():
         try:
             state = json.loads(STATE_FILE.read_text())
             # Read the old cursor-only format so upgrades resume in place.
-            return (state.get("since"), set(state.get("processed_event_ids", [])),
+            processed = {}
+            for event_id in state.get("processed_event_ids", []):
+                if isinstance(event_id, str) and event_id:
+                    add_processed(processed, event_id)
+            return (state.get("since"), processed,
                     state.get("messages_since"), state.get("pending_events", {}))
         except (ValueError, AttributeError):
             return None, set(), None, {}
-    return None, set(), None, {}
+    return None, {}, None, {}
 
 
 def save_state(token, processed, messages_since=None, pending=None):
     tmp = STATE_FILE.with_name(STATE_FILE.name + ".tmp")
-    tmp.write_text(json.dumps({"since": token, "processed_event_ids": sorted(processed),
+    tmp.write_text(json.dumps({"since": token, "processed_event_ids": list(processed),
                                "messages_since": messages_since, "pending_events": pending or {}}))
     tmp.replace(STATE_FILE)
 
@@ -46,7 +74,7 @@ def reconcile_acks(since, processed, messages_since, pending):
         changed = False
         for event_id in path.read_text().splitlines():
             if event_id in pending:
-                processed.add(event_id)
+                add_processed(processed, event_id)
                 pending.pop(event_id, None)
                 changed = True
         if changed:
@@ -121,7 +149,7 @@ def handle_events(events, since, processed, messages_since=None, pending=None):
         except (KeyError, TypeError, ValueError, OverflowError):
             timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         pending[event_id] = {"sender": sender, "room_id": ROOM_ID,
-                             "created_at": timestamp, "body": content.get("body", "")}
+                             "created_at": timestamp, "body": cap_body(content.get("body", ""))}
         added.append(event_id)
         # Persist the mail envelope before advancing the sync cursor. The
         # relay retries pending envelopes until Lua acknowledges delivery.
@@ -148,7 +176,7 @@ def main():
                     for event in baseline.get("chunk", []):
                         event_id = event.get("event_id")
                         if event_id:
-                            processed.add(event_id)
+                            add_processed(processed, event_id)
                     save_state(since, processed, messages_since, pending)
                     emit_pending(pending)
                     time.sleep(3)

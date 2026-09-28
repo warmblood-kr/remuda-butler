@@ -2436,6 +2436,64 @@ fn spawn_stub(dir: &Path, tag: &str, responses: &[serde_json::Value]) -> (StubSe
 }
 
 #[test]
+fn butler_helper_bounds_processed_matrix_event_ids_on_load() {
+    let dir = scratch_dir("butler-matrix-bounded-ids");
+    let (_daemon, path) = butler_test_daemon(&dir);
+    let (stub, get_log) = spawn_stub(
+        &dir,
+        "bounded-ids",
+        &[serde_json::json!({"rooms": {"join": {}}, "next_batch": "bounded-cursor"})],
+    );
+    let (token_path, config_path) = butler_config(
+        &dir, "bounded-ids", &stub.base_url(), "!room:example.org", "@bot:example.org", "",
+    );
+    let since_path = format!("{}.since", config_path.display());
+    let old_ids: Vec<String> = (0..5007).map(|i| format!("$old-{i:04}")).collect();
+    std::fs::write(
+        &since_path,
+        serde_json::json!({"since": null, "processed_event_ids": old_ids}).to_string(),
+    )
+    .unwrap();
+    eval(
+        &path,
+        &format!(
+            "remuda.bounded_lines = {{}}; remuda.on('bounded-line', function(l) table.insert(remuda.bounded_lines, l) end); remuda.bounded_handle = remuda.process{{argv = {{'python3', '-c', remuda._butler_helper_src, {}, {}}}, on_line = 'bounded-line'}}",
+            lua_raw_string(&token_path.to_string_lossy()),
+            lua_raw_string(&config_path.to_string_lossy()),
+        ),
+    );
+    let deadline = Instant::now() + PATIENCE;
+    while std::fs::read_to_string(&get_log)
+        .unwrap_or_default()
+        .lines()
+        .count()
+        < 1
+    {
+        assert!(Instant::now() < deadline, "helper did not poll Matrix stub");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    loop {
+        let state_text = std::fs::read_to_string(&since_path).unwrap_or_default();
+        let state: serde_json::Value = serde_json::from_str(&state_text).unwrap_or_default();
+        let ids = state
+            .get("processed_event_ids")
+            .and_then(serde_json::Value::as_array);
+        if ids.is_some_and(|ids| ids.len() <= 5000) {
+            assert_eq!(ids.unwrap().len(), 5000);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "helper did not rewrite bounded processed ids; ids={}, requests={}",
+            state.get("processed_event_ids").and_then(serde_json::Value::as_array).map_or(0, Vec::len),
+            std::fs::read_to_string(&get_log).unwrap_or_default()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    eval(&path, "remuda.kill(remuda.bounded_handle)");
+}
+
+#[test]
 // The 4th config line (sender allowlist) pushed this back over clippy's
 // too-many-lines threshold; the two-instance restart scenario this proves
 // doesn't split further without losing the point of the test.
@@ -3684,6 +3742,28 @@ fn matrix_mail_envelope_is_durable_and_deduplicated_across_daemon_restarts() {
         ),
     );
     assert_eq!(after_restart, ids[0], "a restarted mail store did not deduplicate the Matrix event");
+}
+
+#[test]
+fn matrix_mail_truncates_oversized_bodies_with_a_byte_count() {
+    let dir = scratch_dir("matrix-mail-body-cap");
+    let (root, _, _) = seeded_mail_root(&dir, REPLY_F);
+    let _daemon = Daemon::spawn(&dir);
+    let path = daemon::socket_path_in(&dir, "s");
+    let result = eval(
+        &path,
+        &format!(
+            r#"{}
+               local from = {{ host = "matrix", alias = "@alice:example.org", session = "@alice:example.org", kind = "matrix" }}
+               local msg = assert(M.queue(from, F, string.rep("a", 65536 + 100), nil, nil, nil,
+                 {{ sender = "@alice:example.org", room_id = "!room:example.org", event_id = "$large" }}))
+               local body = remuda._butler_mail_config.bus.objects[msg.body.object_id].content
+               return tostring(#body) .. "|" .. (body:match("%[truncated %d+ bytes%]$") or "missing")
+            "#,
+            reply_prelude(&root),
+        ),
+    );
+    assert_eq!(result, "65536|[truncated 121 bytes]");
 }
 
 #[test]
