@@ -1132,7 +1132,7 @@ local function codex_update_complete(screen)
 end
 local function capture_update_evidence(session, screen)
   local evidence = tostring(screen or "")
-  -- Some hosts may expose scrollback separately; core 7247c45 only exposes
+  -- Some hosts may expose scrollback separately; core 355e8b2 only exposes
   -- the current screen through remuda.capture.
   if type(remuda.capture_scrollback) == "function" then
     local ok, scrollback = pcall(remuda.capture_scrollback, session)
