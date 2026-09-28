@@ -2261,7 +2261,8 @@ fn butler_matrix_request_uses_fake_http_for_auth_trust_allow_and_same_room() {
     let dir = scratch_dir("butler-matrix-request");
     let (_daemon, path) = butler_test_daemon(&dir);
     let room = "!request:example.org";
-    let pin_hex = "00".repeat(32);
+    // SHA-256 of the leaf SPKI in core 4f6612f's native/src/net/testdata/test-leaf.pem.
+    let pin_hex = "2422726e5c424b33929b018e7aaa57a75774278af9a5bed5f4cd99b1e53126c2";
     let (token_path, config_path) = butler_config(&dir, "request", "https://matrix.example.org",
         room, "@bot:example.org", "");
     std::fs::write(&config_path, format!(
@@ -2286,7 +2287,7 @@ fn butler_matrix_request_uses_fake_http_for_auth_trust_allow_and_same_room() {
       if not spec then return "no-request" end
       if finished then return "callback-ran-inline" end
       if spec.headers.Authorization ~= "Bearer test-token" then return "bad-auth" end
-      if spec.pin ~= "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" then return "bad-pin:" .. tostring(spec.pin) end
+      if spec.pin ~= "sha256/JCJyblxCSzOSmwGOeqpXp1d0J4r5pb7V9M2ZseUxJsI=" then return "bad-pin:" .. tostring(spec.pin) end
       if spec.ca_file ~= "/tmp/test-ca.pem" then return "bad-ca" end
       if spec.max_bytes ~= 2048 or spec.timeout ~= 12 then return "bad-bounds" end
       remuda.http.tick()
@@ -2341,6 +2342,20 @@ fn butler_matrix_request_uses_fake_http_for_auth_trust_allow_and_same_room() {
       return "ok"
     "#));
     assert_eq!(result, "ok", "Matrix request word should use the fake async HTTP boundary: {result}");
+
+    std::fs::write(&config_path, format!(
+        "https://matrix.example.org\n{room}\n@bot:example.org\n\npin_sha256=not-a-pin\n"))
+        .expect("write malformed pin config");
+    let malformed = eval(&path, r#"
+      local failure
+      remuda.butler.matrix.request({ method = "GET", path = "/_matrix/client/v3/versions" },
+        function(value) failure = value end)
+      if not failure or not failure.error or not failure.error:find("64 hexadecimal characters", 1, true) then
+        return "malformed-pin-not-rejected"
+      end
+      return #remuda.http.calls == 5 and "ok" or "malformed-pin-reached-network"
+    "#);
+    assert_eq!(malformed, "ok", "malformed Matrix pin must fail closed: {malformed}");
 }
 
 #[test]
@@ -2377,7 +2392,8 @@ fn butler_matrix_fake_http_holds_and_releases_long_poll_on_tick() {
       local url = "https://matrix.example.org/_matrix/client/v3/sync?since=s0&timeout=30000"
       remuda.http.hold("GET", url)
       local completed
-      remuda.http.request({ method = "GET", url = url, callback = function(value) completed = value end })
+      remuda.http.request({ method = "GET", url = url, timeout = 35,
+        callback = function(value) completed = value end })
       remuda.http.tick()
       if completed then return "held-callback-fired" end
       if #remuda.http.calls ~= 1 then return "request-not-recorded" end
@@ -2390,6 +2406,101 @@ fn butler_matrix_fake_http_holds_and_releases_long_poll_on_tick() {
       return "ok"
     "#);
     assert_eq!(result, "ok", "fake HTTP long-poll hold must be asynchronous: {result}");
+}
+
+#[test]
+fn butler_matrix_fake_http_matches_core_cancellation_bounds_and_headers() {
+    let dir = scratch_dir("butler-http-fake-parity");
+    let (_daemon, path) = butler_test_daemon(&dir);
+    eval(&path, include_str!("support/fake_http.lua"));
+    let result = eval(&path, r#"
+      local url = "http://matrix.example.org/parity"
+      local function request(extra, callback)
+        local spec = { method = "GET", url = url, timeout = 3, callback = callback }
+        for key, value in pairs(extra or {}) do spec[key] = value end
+        return remuda.http.request(spec)
+      end
+      local cancelled, cancel_count
+      cancel_count = 0
+      local handle = request({}, function(value) cancelled = value; cancel_count = cancel_count + 1 end)
+      handle:cancel()
+      remuda.http.tick()
+      if not cancelled or cancelled.error ~= "request cancelled" or cancel_count ~= 1 then
+        return "cancel-does-not-deliver-once"
+      end
+      remuda.http.tick()
+      if cancel_count ~= 1 then return "cancel-delivered-twice" end
+
+      local too_big
+      remuda.http.respond("GET", url, { status = 200, headers = {}, body = "12345" })
+      request({ max_bytes = 4 }, function(value) too_big = value end)
+      remuda.http.tick()
+      if not too_big or too_big.error ~= "response exceeds max_bytes" or too_big.status then
+        return "max-bytes-not-an-error"
+      end
+
+      local normalized
+      remuda.http.respond("GET", url, { status = 200,
+        headers = { ["Content-Type"] = "application/json", ["CONTENT-TYPE"] = "text/plain",
+          ["Set-Cookie"] = { "a=1", "b=2" } }, body = "{}" })
+      request({}, function(value) normalized = value end)
+      remuda.http.tick()
+      if normalized.headers.content_type ~= nil then return "header-name-not-lowercase" end
+      if normalized.headers["content-type"] ~= "application/json, text/plain" then
+        return "duplicate-header-not-combined"
+      end
+      if type(normalized.headers["set-cookie"]) ~= "table"
+        or normalized.headers["set-cookie"][2] ~= "b=2" then return "set-cookie-not-list" end
+
+      local invalid
+      request({ timeout = 3601 }, function(value) invalid = value end)
+      remuda.http.tick()
+      if not invalid or not invalid.error then return "invalid-timeout-accepted" end
+      local oversized
+      request({ max_bytes = 20 * 1024 * 1024 + 1 }, function(value) oversized = value end)
+      remuda.http.tick()
+      if not oversized or oversized.error ~= "max_bytes exceeds 20 MiB" then
+        return "oversized-limit-accepted"
+      end
+      return "ok"
+    "#);
+    assert_eq!(result, "ok", "fake HTTP should match core cancellation, bounds, and response headers: {result}");
+}
+
+#[test]
+fn butler_matrix_real_http_binding_delivers_unreachable_local_error() {
+    let dir = scratch_dir("butler-real-http-smoke");
+    let (_daemon, path) = butler_test_daemon(&dir);
+    let room = "!smoke:example.org";
+    let (token_path, config_path) = butler_config(
+        &dir, "real-http", "http://127.0.0.1:1", room, "@bot:example.org", "",
+    );
+    eval(&path, &format!(
+        "remuda._butler_matrix_config = {{ token_path = {}, config_path = {} }}; remuda.exec('butler/matrix_request')",
+        lua_raw_string(&token_path.to_string_lossy()), lua_raw_string(&config_path.to_string_lossy())));
+    eval(&path, r#"
+      remuda._butler_real_http_result = nil
+      remuda.butler.matrix.request({ method = "GET", path = "/_matrix/client/v3/account/whoami",
+        timeout = 2 }, function(value) remuda._butler_real_http_result = value end)
+    "#);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let result = eval(&path, r#"
+          local value = remuda._butler_real_http_result
+          if not value then return "pending" end
+          if not value.error then return "missing-error" end
+          if value.status ~= nil or value.headers ~= nil or value.body ~= nil then
+            return "failure-has-response-fields"
+          end
+          return "error:" .. value.error
+        "#);
+        if result != "pending" {
+            assert!(result.starts_with("error:"), "real remuda.http failure shape: {result}");
+            return;
+        }
+        assert!(Instant::now() < deadline, "real remuda.http callback did not arrive");
+        std::thread::sleep(Duration::from_millis(40));
+    }
 }
 
 #[test]

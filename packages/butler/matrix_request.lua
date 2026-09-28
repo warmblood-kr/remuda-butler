@@ -61,6 +61,8 @@ local function config()
   end
   local pin
   if pin_hex and pin_hex ~= "" then
+    -- remuda.http pin values are SHA-256 of the leaf certificate SPKI. The
+    -- config stores that digest as hex; convert it to the transport's form.
     local hex = pin_hex:gsub(":", ""):lower()
     if #hex ~= 64 or not hex:match("^%x+$") then
       return nil, "Matrix pin_sha256 must be 64 hexadecimal characters"

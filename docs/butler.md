@@ -21,6 +21,13 @@ optional fifth line set to `messages` enables the `/rooms/{room}/messages`
 polling fallback for account/room pairs affected by the homeserver `/sync`
 defect. The default uses `/sync`.
 
+Optional transport settings follow the fifth line as `key=value` entries.
+Use `ca_file=PATH` to trust a custom CA, or `pin_sha256=HEX` to pin the
+homeserver's leaf certificate public key: the value is the 64-character
+hexadecimal SHA-256 digest of the leaf certificate's SubjectPublicKeyInfo
+(SPKI), not a digest of the certificate file. Butler converts it to the
+`sha256/<base64>` form required by `remuda.http`.
+
 Butler topics use stable session names and are delivered through the Butler
 message queue. The extraction boundary, runtime dependencies, and migration
 plan are maintained in the repository's

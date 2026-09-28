@@ -190,7 +190,7 @@ function matrix.download(args, callback)
     local headers = result.headers or {}
     finish({ status = result.status, headers = result.headers, path = output,
       bytes = #(result.body or ""),
-      content_type = headers["content-type"] or headers["Content-Type"] or "application/octet-stream",
+      content_type = headers["content-type"] or "application/octet-stream",
       mxc = args.mxc })
   end
   local function legacy()
