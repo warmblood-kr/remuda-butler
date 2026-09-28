@@ -91,6 +91,16 @@ load_butler
 ROOT_ID=$(lua 'return remuda._butler_bus.agents.butler.id or ""')
 expect_ulid "root Butler id" "$ROOT_ID"
 
+# Freeze the seconds clock so the generator's monotonic mode is exercised
+# directly. A run of random values is overwhelmingly unlikely to be sorted.
+SAME_SECOND_IDS=$(lua 'local now=os.time; os.time=function() return 42 end; local ids={}; for i=1,32 do ids[i]=remuda._butler_new_ulid() end; os.time=now; return table.concat(ids, "\n")')
+PREVIOUS=
+while IFS= read -r ID; do
+  if [[ -n $PREVIOUS && ! $PREVIOUS < $ID ]]; then fail "same-second ULIDs are not strictly increasing: $PREVIOUS then $ID"; fi
+  PREVIOUS=$ID
+done <<< "$SAME_SECOND_IDS"
+echo "ok - ULIDs increase within the same second"
+
 lua 'remuda._butler_agent_builders.fake = function() return {"sh", "-c", "env | grep ^REMUDA_BUTLER_; sleep 8"} end; remuda._butler_launch("fake", "member")' >/dev/null
 MEMBER_ID=$(lua 'return remuda._butler_bus.agents.member.id or ""')
 expect_ulid "member id" "$MEMBER_ID"

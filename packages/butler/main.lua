@@ -457,19 +457,37 @@ bus.objects = bus.objects or {}
 -- ULIDs are durable public identities; session names remain the mutable,
 -- human-friendly keys used by the mailbox and the in-memory team tree.
 local alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+local previous_ulid_second, previous_ulid_random
 local function crockford_ulid()
-  local millis = math.floor(os.time() * 1000)
+  local second = os.time()
+  local millis = math.floor(second * 1000)
   local bytes = {}
   for i = 6, 1, -1 do bytes[i] = millis % 256; millis = math.floor(millis / 256) end
-  local random = io.open("/dev/urandom", "rb")
-  local entropy = random and random:read(10)
-  if random then random:close() end
-  if not entropy or #entropy ~= 10 then
-    math.randomseed(os.time() + math.floor(os.clock() * 1000000))
+  local entropy
+  if previous_ulid_second == second then
+    local bytes = { previous_ulid_random:byte(1, 10) }
+    local carry = 1
+    for i = 10, 1, -1 do
+      local value = bytes[i] + carry
+      bytes[i] = value % 256
+      carry = math.floor(value / 256)
+    end
+    if carry ~= 0 then error("ULID random component overflow", 0) end
     local out = {}
-    for i = 1, 10 do out[i] = string.char(math.random(0, 255)) end
+    for i = 1, 10 do out[i] = string.char(bytes[i]) end
     entropy = table.concat(out)
+  else
+    local random = io.open("/dev/urandom", "rb")
+    entropy = random and random:read(10)
+    if random then random:close() end
+    if not entropy or #entropy ~= 10 then
+      math.randomseed(second + math.floor(os.clock() * 1000000))
+      local out = {}
+      for i = 1, 10 do out[i] = string.char(math.random(0, 255)) end
+      entropy = table.concat(out)
+    end
   end
+  previous_ulid_second, previous_ulid_random = second, entropy
   for i = 1, 10 do bytes[i + 6] = entropy:byte(i) end
   local bits, out = { 0, 0 }, {}
   for _, byte in ipairs(bytes) do
