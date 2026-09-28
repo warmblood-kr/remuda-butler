@@ -5167,7 +5167,7 @@ while IFS= read -r line; do
       case "$answer" in 1|2) model=Sonnet ;; esac
       paint
       ;;
-    '/model claude-opus-4-7[1m]')
+    '/model opus')
       if [ "$scenario" = restore-timeout ]; then continue; fi
       printf 'Switch model?\n❯ 1. Yes, switch to Opus\n2. No\n'
       IFS= read -r -n 1 answer || exit 0
@@ -5208,6 +5208,9 @@ done
       remuda._fake_attached = {{}}
       remuda._fake_busy_after_key = {{}}
       remuda._fake_busy_until = {{}}
+      remuda._fake_attach_on_ctx_drop = {{}}
+      remuda._fake_no_family = {{}}
+      remuda._fake_wrong_restored_window = {{}}
       remuda.session = function(name)
         return {{is_busy=remuda._fake_busy_until[name] and os.time() < remuda._fake_busy_until[name] or false,
           attached=remuda._fake_attached[name] == true}}
@@ -5231,8 +5234,18 @@ done
       end
       remuda._butler_telemetry_for = function(agent)
         local screen = remuda.capture(agent.session_name)
-        return {{context_used=screen:match("CTX:%s*(%d+)"),
-          model=screen:find("MODEL:Sonnet", 1, true) and "sonnet" or "claude-opus-4-7[1m]"}}
+        local sonnet = screen:find("MODEL:Sonnet", 1, true) ~= nil
+        local used = screen:match("CTX:%s*(%d+)")
+        if remuda._fake_attach_on_ctx_drop[agent.session_name] and used == "200000" then
+          remuda._fake_attached[agent.session_name] = true
+          remuda._fake_attach_on_ctx_drop[agent.session_name] = nil
+        end
+        return {{context_used=used,
+          context_window=(not sonnet and used == "200000"
+              and remuda._fake_wrong_restored_window[agent.session_name])
+            and "200000" or (sonnet and "200000" or "1000000"),
+          model=remuda._fake_no_family[agent.session_name] and "Experimental-Model"
+            or (sonnet and "Sonnet-4.5" or "Opus-4.7-1M-context")}}
       end
       remuda._fake_setup_compaction = function(name, kind, log, scenario)
         remuda.new(name, {{"bash", {script:?}, log, scenario}}, nil, {{}})
@@ -5246,7 +5259,7 @@ done
         (
             "fake-happy",
             "happy",
-            "CMD:/model sonnet\nKEY:1\nCMD:/compact\nCMD:/model claude-opus-4-7[1m]\nKEY:1\n",
+            "CMD:/model sonnet\nKEY:1\nCMD:/compact\nCMD:/model opus\nKEY:1\n",
         ),
         (
             "fake-absent",
@@ -5256,33 +5269,48 @@ done
         (
             "fake-option2",
             "option2",
-            "CMD:/model sonnet\nKEY:2\nCMD:/compact\nCMD:/model claude-opus-4-7[1m]\nKEY:1\n",
+            "CMD:/model sonnet\nKEY:2\nCMD:/compact\nCMD:/model opus\nKEY:1\n",
         ),
         (
             "fake-busy-after-switch",
             "happy",
-            "CMD:/model sonnet\nKEY:1\nCMD:/compact\nCMD:/model claude-opus-4-7[1m]\nKEY:1\n",
+            "CMD:/model sonnet\nKEY:1\nCMD:/compact\nCMD:/model opus\nKEY:1\n",
         ),
         (
             "fake-unknown",
             "unknown",
-            "CMD:/model sonnet\nKEY:\x1b\nCMD:/model claude-opus-4-7[1m]\nKEY:1\n",
+            "CMD:/model sonnet\nKEY:\x1b\nCMD:/model opus\nKEY:1\n",
         ),
         (
             "fake-switch-label-unknown",
             "switch-label-unknown",
-            "CMD:/model sonnet\nKEY:\x1b\nCMD:/model claude-opus-4-7[1m]\nKEY:1\n",
+            "CMD:/model sonnet\nKEY:\x1b\nCMD:/model opus\nKEY:1\n",
         ),
         ("fake-timeout", "timeout", "CMD:/model sonnet\n"),
         (
             "fake-restore-timeout",
             "restore-timeout",
-            "CMD:/model sonnet\nKEY:1\nCMD:/compact\nCMD:/model claude-opus-4-7[1m]\nCMD:/model claude-opus-4-7[1m]\n",
+            "CMD:/model sonnet\nKEY:1\nCMD:/compact\nCMD:/model opus\nCMD:/model opus\n",
         ),
         (
             "fake-attached",
             "happy",
             "CMD:/model sonnet\nKEY:1\n",
+        ),
+        (
+            "fake-attach-mid",
+            "happy",
+            "CMD:/model sonnet\nKEY:1\nCMD:/compact\nCMD:/model opus\nKEY:1\n",
+        ),
+        (
+            "fake-no-family",
+            "happy",
+            "CMD:/model sonnet\nKEY:1\nCMD:/compact\n",
+        ),
+        (
+            "fake-window-mismatch",
+            "happy",
+            "CMD:/model sonnet\nKEY:1\nCMD:/compact\nCMD:/model opus\nKEY:1\n",
         ),
     ] {
         let log = dir.join(format!("{name}.log"));
@@ -5303,16 +5331,49 @@ done
                 &format!("remuda._fake_busy_after_key[{name:?}] = true"),
             );
         }
+        if name == "fake-attach-mid" {
+            eval(&path, &format!("remuda._fake_attach_on_ctx_drop[{name:?}] = true"));
+        }
+        if name == "fake-no-family" {
+            eval(&path, &format!("remuda._fake_no_family[{name:?}] = true"));
+        }
+        if name == "fake-window-mismatch" {
+            eval(&path, &format!("remuda._fake_wrong_restored_window[{name:?}] = true"));
+        }
         eval(
             &path,
             &format!("remuda.butler.compact({name:?})"),
         );
         let deadline = Instant::now() + Duration::from_secs(20);
+        let mut attach_retry_started = false;
         loop {
             let in_progress = eval(&path, &format!(
                 "return tostring(remuda._butler_compaction_members_state[{name:?}].compaction_in_progress == true)"
             ));
             let log_text = std::fs::read_to_string(&log).unwrap_or_default();
+            if name == "fake-attach-mid" && !attach_retry_started
+                && in_progress == "false"
+                && log_text == "CMD:/model sonnet\nKEY:1\nCMD:/compact\n"
+            {
+                assert_eq!(
+                    eval(&path, &format!("return tostring(remuda._fake_attached[{name:?}])")),
+                    "true",
+                    "human should attach after compact completes"
+                );
+                assert_eq!(
+                    eval(&path, &format!("return remuda._butler_compaction_members_state[{name:?}].pending_restore_model")),
+                    "opus",
+                    "mid-compaction attach must preserve the pending family"
+                );
+                eval(&path, &format!("remuda._butler_compaction_tick({name:?}, false)"));
+                std::thread::sleep(Duration::from_millis(250));
+                assert_eq!(std::fs::read_to_string(&log).unwrap(), log_text,
+                    "restore must send no command or key while attached");
+                eval(&path, &format!("remuda._fake_attached[{name:?}] = false"));
+                eval(&path, &format!("remuda._butler_compaction_tick({name:?}, false)"));
+                attach_retry_started = true;
+                continue;
+            }
             if in_progress == "false" && log_text == expected {
                 break;
             }
@@ -5324,6 +5385,8 @@ done
         }
         let got = std::fs::read_to_string(&log).unwrap_or_default();
         assert_eq!(got, expected, "unexpected commands/keys for {scenario}");
+        assert!(!got.contains("CMD:/model Opus"), "must not send a display tag: {got:?}");
+        assert!(!got.contains("CMD:/model claude-opus"), "must not send a raw model id: {got:?}");
         if scenario == "unknown" || scenario == "switch-label-unknown" || scenario == "timeout" || scenario == "restore-timeout"
             || name == "fake-attached"
         {
@@ -5349,8 +5412,8 @@ done
                     &path,
                     &format!("return remuda._butler_compaction_members_state[{name:?}].pending_restore_model"),
                 ),
-                "claude-opus-4-7[1m]",
-                "failed restore must retain the original model for the next policy attempt"
+                "opus",
+                "failed restore must retain the original model family for the next policy attempt"
             );
             assert!(
                 eval(
@@ -5359,6 +5422,36 @@ done
                 ) == "true",
                 "failed compaction must set a retry backoff"
             );
+        }
+        if name == "fake-attach-mid" {
+            let got = std::fs::read_to_string(&log).unwrap();
+            assert_eq!(got.matches("CMD:/model opus\n").count(), 1,
+                "detaching should retry the pending restore exactly once: {got:?}");
+            assert_eq!(
+                eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].pending_restore_model == nil)")),
+                "true",
+                "confirmed restore should clear pending state"
+            );
+        }
+        if name == "fake-no-family" {
+            let reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
+            let message = "compaction left Experimental-Model on Sonnet; restore needs a known model family";
+            assert_eq!(reports.matches(message).count(), 1, "expected one missing-family notice: {reports:?}");
+            assert_eq!(
+                eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].pending_restore_model_unavailable)")),
+                "true",
+                "unknown-family restore state must remain visible"
+            );
+        }
+        if name == "fake-window-mismatch" {
+            let before = std::fs::read_to_string(&log).unwrap();
+            eval(&path, &format!("remuda._butler_compaction_tick({name:?}, false)"));
+            std::thread::sleep(Duration::from_millis(250));
+            assert_eq!(std::fs::read_to_string(&log).unwrap(), before,
+                "a context-window mismatch must not retry the restore");
+            let reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
+            assert_eq!(reports.matches("compaction restore mismatch").count(), 1,
+                "expected one context-window mismatch notice: {reports:?}");
         }
     }
     drop(daemon);
