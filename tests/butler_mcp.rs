@@ -434,18 +434,35 @@ fn notice_recovery_preserves_idle_draft_and_respects_attached_human() {
         remuda._notice_test_state.screen = '› temporary text'
         remuda._butler_send('operator', 'm1', 'next notice')"#,
     );
+    eval(&path, "remuda._notice_test_state.screen = '› ' .. remuda._butler_bus.notices.m1.text");
+    let deadline = Instant::now() + PATIENCE;
+    while eval(&path, "return tostring(remuda._butler_bus.notices.m1 ~= nil)") != "false" {
+        assert!(Instant::now() < deadline, "one-line existing Butler notice was not submitted");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let events = eval(&path, "return table.concat(remuda._notice_test_state.events, '\\n')");
+    assert!(events.contains("key RET"), "one-line existing notice was not submitted: {events}");
+    assert!(!events.contains("key C-u"), "one-line existing notice was cleared: {events}");
+
+    eval(
+        &path,
+        r#"remuda._notice_test_state.events = {}
+        remuda._notice_test_state.after_type = 0
+        remuda._notice_test_state.screen = '› temporary text'
+        remuda._butler_send('operator', 'm1', 'wrapped notice')"#,
+    );
     eval(&path, r#"local notice = remuda._butler_bus.notices.m1.text
         local split = assert(notice:find('Read it:', 1, true)) + #'Read it:'
         remuda._notice_test_state.screen = '› ' .. notice:sub(1, split) .. '\n' .. notice:sub(split + 2)"#);
     let deadline = Instant::now() + PATIENCE;
     while eval(&path, "return tostring(remuda._butler_bus.notices.m1 ~= nil)") != "false" {
-        assert!(Instant::now() < deadline, "existing Butler notice was not submitted");
+        assert!(Instant::now() < deadline, "wrapped existing Butler notice was not submitted");
         std::thread::sleep(Duration::from_millis(100));
     }
     let events = eval(&path, "return table.concat(remuda._notice_test_state.events, '\\n')");
-    assert!(events.contains("key C-l"), "existing notice was not redrawn first: {events}");
-    assert!(events.contains("key RET"), "existing notice was not submitted: {events}");
-    assert!(!events.contains("key C-u"), "recovery erased the existing Butler notice: {events}");
+    assert!(events.contains("key C-l"), "wrapped existing notice was not redrawn first: {events}");
+    assert!(events.contains("key RET"), "wrapped existing notice was not submitted: {events}");
+    assert!(!events.contains("key C-u"), "recovery erased the wrapped existing Butler notice: {events}");
 
     eval(
         &path,

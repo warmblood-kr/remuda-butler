@@ -1449,7 +1449,9 @@ end
 local function notice_matches_composer(session, screen, text, expected)
   local agent = bus.agents[session]
   local composer, safe = recovery_draft(agent and agent.kind or "", screen, text)
-  return safe and compact_composer(composer) == compact_composer(expected)
+  local expected_compact = compact_composer(expected)
+  return (safe and compact_composer(composer) == expected_compact)
+    or compact_composer(text) == expected_compact
 end
 local function recovery_composer_empty(session, screen, decision, text)
   if decision ~= "EMPTY" then return false end
