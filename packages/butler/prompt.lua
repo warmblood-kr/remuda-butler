@@ -93,6 +93,13 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
       finish(true)
       return
     end
+    -- The retry is issued only after the full task was visible in the
+    -- composer. If the next capture is empty, the submit was accepted even
+    -- when the TUI no longer keeps the task in its scrollback.
+    if options.return_retried and empty then
+      finish(true)
+      return
+    end
     -- A task can be fully painted while its first Return is dropped. Retry
     -- submit once, before allowing queued notices to reach this composer.
     if started and not empty and not session_busy and verify_ticks >= 4 and not options.return_retried then

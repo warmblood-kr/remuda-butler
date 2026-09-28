@@ -30,6 +30,7 @@ local function exercise(kind, drop_submissions)
     transcript = {},
     sends = 0,
     drop_submissions = drop_submissions,
+    completed = false,
   }
   local ready_marker = kind == "codex" and "Ask Codex" or "─\n❯"
   local fake = {}
@@ -91,6 +92,9 @@ local function exercise(kind, drop_submissions)
     empty = function()
       return state.composer == "" and "EMPTY" or "NON-EMPTY"
     end,
+    on_done = function(ok)
+      state.completed = ok
+    end,
   })
   for tick = 1, 120 do
     state.tick = tick
@@ -100,6 +104,7 @@ local function exercise(kind, drop_submissions)
   local delivered = table.concat(state.transcript, "\n")
   assert(state.first_send_tick >= state.ready_at, kind .. " received input before its composer was ready")
   if drop_submissions then
+    assert(state.completed, kind .. " did not clear pending delivery after retry acceptance")
     assert(not state.failure, state.failure)
     assert(state.sends == 1, kind .. " re-injected the task instead of retrying Return")
     assert(state.returns == 1, kind .. " did not retry a dropped Return exactly once")
