@@ -2200,7 +2200,7 @@ remuda.tool{
     local synchronous, invoking = nil, true
     remuda.butler.matrix.send({ text = a.text }, function(result)
       if invoking then synchronous = result
-      else
+      elseif result and result.error then
         remuda.emit("butler-matrix-error", "send", result.error)
         io.stderr:write("butler Matrix send failed: " .. tostring(result.error) .. "\n")
       end

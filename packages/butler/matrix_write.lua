@@ -4,26 +4,27 @@ local matrix = assert(remuda.butler and remuda.butler.matrix, "Matrix request wo
 local MAX_CHUNK_BYTES = 4000
 local MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 local txn_counter = 0
-local process_tag = tostring({}):gsub("[^%w]", "")
-
-local function once(callback)
-  local called = false
-  return function(value)
-    if called then return end
-    called = true
-    if callback then callback(value) end
+local function random_tag()
+  local file = io.open("/dev/urandom", "rb")
+  local bytes = file and file:read(16)
+  if file then file:close() end
+  if not bytes or #bytes < 16 then
+    math.randomseed(os.time() + math.floor(os.clock() * 1000000))
+    local out = {}
+    for i = 1, 16 do out[i] = string.char(math.random(0, 255)) end
+    bytes = table.concat(out)
   end
+  local hex = {}
+  for i = 1, #bytes do hex[i] = string.format("%02x", bytes:byte(i)) end
+  return table.concat(hex)
 end
+local process_tag = random_tag()
+local once = matrix.once
+local path_component = matrix.path_component
 
 local function error_result(callback, message)
   callback({ error = message })
   return { cancel = function() end }
-end
-
-local function path_component(value)
-  return (tostring(value):gsub("([^%w%-%._~])", function(char)
-    return string.format("%%%02X", char:byte())
-  end))
 end
 
 local function configured_room(opts, callback)
@@ -60,14 +61,12 @@ local function split_utf8(text)
   return chunks
 end
 
-local function send_chunks(room, text, relation, on_done, reject_dash)
+local function send_chunks(room, text, relation, on_done)
   local done = once(on_done)
   if type(text) ~= "string" or text == "" then
     return error_result(done, "message text must not be empty")
   end
-  if reject_dash and text == "-" then
-    return error_result(done, "send - is unavailable until stdin forwarding lands (#213)")
-  end
+  -- CLI parsing may reserve '-' for stdin; this async word sends it literally.
   local chunks, event_ids, index, current, cancelled = split_utf8(text), {}, 1, nil, false
   local handle = { cancel = function()
     cancelled = true
@@ -103,7 +102,7 @@ function matrix.send(opts, on_done)
   local done = once(on_done)
   local room = configured_room(opts, done)
   if not room then return { cancel = function() end } end
-  return send_chunks(room, opts.text, nil, done, true)
+  return send_chunks(room, opts.text, nil, done)
 end
 
 local function same_room_then(room, event_id, on_done, action)
@@ -130,7 +129,7 @@ function matrix.reply(opts, on_done)
   end
   return same_room_then(room, opts.event_id, done, function(reply_done)
     return send_chunks(room, opts.text,
-      { ["m.in_reply_to"] = { event_id = opts.event_id } }, reply_done, false)
+      { ["m.in_reply_to"] = { event_id = opts.event_id } }, reply_done)
   end)
 end
 
@@ -202,8 +201,11 @@ function matrix.upload(opts, on_done)
   end
   local file, open_error = io.open(opts.file, "rb")
   if not file then return error_result(done, "cannot read upload file: " .. tostring(open_error)) end
-  local data = file:read(MAX_UPLOAD_BYTES + 1)
+  local ok, data, read_error = pcall(function() return file:read(MAX_UPLOAD_BYTES + 1) end)
   file:close()
+  if not ok then return error_result(done, "upload path is not a readable regular file") end
+  if read_error then return error_result(done, "upload path is not a readable regular file: " .. tostring(read_error)) end
+  if not data or #data == 0 then return error_result(done, "upload file must not be empty") end
   if #data > MAX_UPLOAD_BYTES then return error_result(done, "upload exceeds 20 MiB limit") end
   local filename = opts.file:match("([^/\\]+)$") or opts.file
   local mime = media_type(filename)
@@ -216,6 +218,7 @@ function matrix.upload(opts, on_done)
   local query = "filename=" .. path_component(filename)
   current = matrix.request({ method = "POST", path = "/_matrix/media/v3/upload?" .. query,
     room = room, body = data, headers = { ["Content-Type"] = mime }, max_bytes = 1024 * 1024,
+    timeout = 60,
   }, function(upload_result)
     if cancelled then return done({ error = "Matrix upload cancelled" }) end
     if upload_result.error then return done(upload_result) end
