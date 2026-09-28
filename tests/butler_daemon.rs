@@ -3678,7 +3678,7 @@ fn butler_compaction_schedule_sends_compact_when_idle_but_not_when_busy() {
     );
 
     let butler_name = eval(&path, "return remuda._butler_initial_name");
-    eval(&path, r#"remuda.capture = function() return "MODEL:Claude CTX:500000 CTXWIN:1000000 CTXPCT:50" end"#);
+    eval(&path, r#"remuda.capture = function() return "MODEL:Sonnet-4.5 CTX:500000 CTXWIN:1000000 CTXPCT:50\n❯" end"#);
 
     // Simulates the launched session's own one-time `run_script` call the
     // system prompt asks for.
@@ -3776,7 +3776,7 @@ fn butler_compaction_context_case(
     eval(
         &path,
         &format!(
-            "remuda.capture = function() return {} end; remuda.session = function() return {{ is_busy = false }} end; remuda._butler_compaction_sends = 0; remuda.type_text = function(_, text) if text == '/compact' then remuda._butler_compaction_sends = remuda._butler_compaction_sends + 1 end end; remuda.key = function() end",
+            "remuda.capture = function() return {} .. '\\n❯' end; remuda.session = function() return {{ is_busy = false }} end; remuda._butler_compaction_sends = 0; remuda.type_text = function(_, text) if text == '/compact' then remuda._butler_compaction_sends = remuda._butler_compaction_sends + 1 end end; remuda.key = function() end",
             lua_raw_string(context_line)
         ),
     );
@@ -3808,7 +3808,7 @@ fn butler_compaction_context_case(
         eval(&path, "if remuda._butler_compaction_run then remuda._butler_compaction_run.release() end");
         eval(
             &path,
-            r#"remuda.capture = function() return "MODEL:Claude CTX:500000 CTXWIN:1000000 CTXPCT:50" end"#,
+            r#"remuda.capture = function() return "MODEL:Sonnet-4.5 CTX:500000 CTXWIN:1000000 CTXPCT:50\n❯" end"#,
         );
         let deadline = Instant::now() + PATIENCE;
         while eval(&path, "return tostring(remuda._butler_compaction_interval_current)") != "0.05"
@@ -3854,7 +3854,7 @@ fn butler_compaction_context_case(
 fn butler_compaction_skips_ok_context() {
     butler_compaction_context_case(
         "butler-compaction-ok-context",
-        "MODEL:Claude CTX:399999 CTXWIN:1000000 CTXPCT:39",
+        "MODEL:Sonnet-4.5 CTX:399999 CTXWIN:1000000 CTXPCT:39",
         "skipped_ok",
         0,
         "0.05",
@@ -3866,7 +3866,7 @@ fn butler_compaction_skips_ok_context() {
 fn butler_compaction_warn_context_sends_when_idle() {
     butler_compaction_context_case(
         "butler-compaction-warn-context",
-        "MODEL:Claude CTX:400000 CTXWIN:1000000 CTXPCT:40",
+        "MODEL:Sonnet-4.5 CTX:400000 CTXWIN:1000000 CTXPCT:40",
         "sent",
         1,
         "0.05",
@@ -3878,7 +3878,7 @@ fn butler_compaction_warn_context_sends_when_idle() {
 fn butler_compaction_critical_context_shortens_interval() {
     butler_compaction_context_case(
         "butler-compaction-critical-context",
-        "MODEL:Claude CTX:600000 CTXWIN:1000000 CTXPCT:60",
+        "MODEL:Sonnet-4.5 CTX:600000 CTXWIN:1000000 CTXPCT:60",
         "sent",
         1,
         "0.01",
@@ -3890,7 +3890,7 @@ fn butler_compaction_critical_context_shortens_interval() {
 fn butler_compaction_skips_unknown_context() {
     butler_compaction_context_case(
         "butler-compaction-unknown-context",
-        "MODEL:Claude CTX:? CTXWIN:1000000 CTXPCT:?",
+        "MODEL:Sonnet-4.5 CTX:? CTXWIN:1000000 CTXPCT:?",
         "skipped_unknown",
         0,
         "0.05",
@@ -3932,7 +3932,7 @@ fn butler_compaction_uses_codex_telemetry_when_footer_has_no_ctx() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     eval(
         &path,
-        r#"remuda.capture = function() return "GPT-5.6-Terra medium · ~/repo · topic" end
+        r#"remuda.capture = function() return "GPT-6-Luna medium · ~/repo · topic\n›" end
           remuda._butler_telemetry_adapters.codex.read = function() return { context_used = 600000 } end
           remuda.session = function() return { is_busy = false } end
           remuda._butler_compaction_sends = 0
@@ -3951,6 +3951,7 @@ fn butler_compaction_uses_codex_telemetry_when_footer_has_no_ctx() {
     }
     assert_eq!(eval(&path, "return tostring(remuda._butler_compaction_sends)"), "1");
     assert_eq!(eval(&path, "return tostring(remuda._butler_compaction_interval_current)"), "0.01");
+    eval(&path, "if remuda._butler_compaction_run then remuda._butler_compaction_run.release(true) end");
     drop(daemon);
 }
 
@@ -4022,7 +4023,11 @@ fn butler_compaction_fake_agents_restore_models_and_answer_registered_dialogs() 
     );
     assert_eq!(
         eval(&path, r#"local keys = remuda._butler_compaction_dialog("claude", "Select model"); return table.concat(keys, ",")"#),
-        "sonnet,RET"
+        "sonnet"
+    );
+    assert_eq!(
+        eval(&path, r#"local keys = remuda._butler_compaction_dialog("claude", "Select model", "restore", "Opus-5.5", "sonnet"); return table.concat(keys, ",")"#),
+        "Opus-5.5"
     );
     assert_eq!(
         eval(&path, r#"local keys = remuda._butler_compaction_dialog("codex", "This will invalidate the cache"); return table.concat(keys, ",")"#),
@@ -4085,7 +4090,7 @@ fn butler_codex_compaction_restores_its_isolated_config_snapshot_and_releases_fl
     eval(
         &path,
         &format!(
-            r#"remuda.capture = function() return "GPT-5.6-Terra medium · repo CTX:600000" end
+            r#"remuda.capture = function() return "GPT-5.6-Terra medium · repo CTX:600000\n›" end
               remuda.session = function() return {{ is_busy = false }} end
               remuda.key = function() end
               remuda.type_text = function(_, text)
@@ -4105,13 +4110,51 @@ fn butler_codex_compaction_restores_its_isolated_config_snapshot_and_releases_fl
         std::thread::sleep(Duration::from_millis(50));
     }
     assert!(std::fs::read_to_string(&config_file).unwrap().contains("gpt-6-luna"));
-    assert!(dir.join("remuda-compaction.lock").exists());
-    eval(&path, "remuda._butler_compaction_run.release()");
+    assert!(codex_home.join(".remuda-compaction.lock").exists());
+    eval(
+        &path,
+        r#"local run = remuda._butler_compaction_run
+          run.restore_pending = true
+          remuda._butler_compaction_tick(remuda._butler_state)"#,
+    );
+    assert!(
+        eval(&path, "return remuda._butler_command_log").ends_with("/model GPT-5.6-Terra medium|"),
+        "the next policy tick must retry restoration to the saved model"
+    );
+    eval(&path, "remuda._butler_compaction_run.release(true)");
     assert_eq!(std::fs::read_to_string(&config_file).unwrap(), original);
-    assert!(!dir.join("remuda-compaction.lock").exists());
+    assert!(!codex_home.join(".remuda-compaction.lock").exists());
     assert_eq!(
         eval(&path, "return remuda._butler_command_log"),
-        "/model gpt-6-luna|/compact|/model GPT-5.6-Terra medium|"
+        "/model gpt-6-luna|/model GPT-5.6-Terra medium|"
+    );
+
+    eval(
+        &path,
+        r#"remuda._butler_send = function() end
+          remuda._butler_compaction_tick(remuda._butler_state)"#,
+    );
+    assert!(codex_home.join(".remuda-compaction.lock").exists());
+    std::fs::write(&config_file, "model = \"external-change\"\n").expect("simulate concurrent config edit");
+    eval(&path, "remuda._butler_compaction_run.release(true)");
+    assert_eq!(
+        std::fs::read_to_string(&config_file).unwrap(),
+        "model = \"external-change\"\n",
+        "a concurrent config edit must never be overwritten"
+    );
+    assert!(!codex_home.join(".remuda-compaction.lock").exists());
+    eval(
+        &path,
+        r#"remuda.capture = function() return "GPT-5.6-Terra medium · repo CTX:600000\n› keep this text" end
+          remuda._butler_compaction_tick(remuda._butler_state)"#,
+    );
+    assert!(
+        std::fs::read_to_string(&trace_path).unwrap().contains("\tskipped_prompt\t"),
+        "compaction must defer when the composer already contains text"
+    );
+    assert_eq!(
+        eval(&path, "return remuda._butler_command_log"),
+        "/model gpt-6-luna|/model GPT-5.6-Terra medium|/model gpt-6-luna|"
     );
     drop(daemon);
 }
@@ -4187,7 +4230,7 @@ fn butler_compaction_trace_records_registered_skipped_and_sent() {
     );
 
     let butler_name = eval(&path, "return remuda._butler_initial_name");
-    eval(&path, r#"remuda.capture = function() return "MODEL:Claude CTX:500000 CTXWIN:1000000 CTXPCT:50" end"#);
+    eval(&path, r#"remuda.capture = function() return "MODEL:Sonnet-4.5 CTX:500000 CTXWIN:1000000 CTXPCT:50\n❯" end"#);
 
     // Simulates the launched session's own one-time `run_script` call the
     // system prompt asks for -- this alone must already leave a "registered"

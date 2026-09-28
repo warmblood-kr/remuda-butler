@@ -40,11 +40,15 @@ return {
     if relay then pcall(host.kill, relay) end
     state.relay = nil
     host._butler_relay = nil
-    if state.compaction_run and state.compaction_run.release then
-      pcall(state.compaction_run.release)
+    if state.compaction_run then
+      if state.compaction_run.model_restored and state.compaction_run.release then
+        pcall(state.compaction_run.release, true)
+      else
+        state.compaction_run.restore_pending = state.compaction_run.switch or state.compaction_run.restore_pending
+        state.compaction_run.turns = 0
+      end
     end
-    state.compaction_run = nil
-    host._butler_compaction_run = nil
+    if not state.compaction_run then host._butler_compaction_run = nil end
     if host._butler_start_fallback then host.cancel(host._butler_start_fallback) end
     host._butler_start_fallback = nil
   end,

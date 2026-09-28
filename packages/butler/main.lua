@@ -1466,8 +1466,8 @@ local COMPACTION_WATCHDOG_TICKS = remuda._butler_compaction_watchdog_ticks or 12
 -- Dialogs which are understood while changing models. Keep this as data so
 -- an observed prompt can be added without changing the state machine.
 local COMPACTION_DIALOGS = {
-  { agent = "claude", pattern = "Select model", keys = { "sonnet", "RET" }, description = "Claude model picker" },
-  { agent = "codex", pattern = "Select a model", keys = { "gpt-6-luna", "RET" }, description = "Codex model picker" },
+  { agent = "claude", pattern = "Select model", keys = { "sonnet" }, description = "Claude model picker" },
+  { agent = "codex", pattern = "Select a model", keys = { "gpt-6-luna" }, description = "Codex model picker" },
   { agent = "codex", pattern = "invalidate the cache", keys = { "y" }, description = "Codex cache invalidation confirmation" },
 }
 local function compaction_commands(kind, screen)
@@ -1494,15 +1494,31 @@ local function compaction_commands(kind, screen)
   if switch then commands[#commands + 1] = "/model " .. previous .. (effort and (" " .. effort) or "") end
   return commands, previous, effort, lower, switch
 end
-local function compaction_dialog(kind, capture)
+local function compaction_dialog(kind, capture, stage, previous, lower)
   for _, dialog in ipairs(COMPACTION_DIALOGS) do
     if dialog.agent == kind and capture:lower():find(dialog.pattern:lower(), 1, true) then
-      return dialog.keys, dialog.description
+      local keys = dialog.keys
+      if dialog.description:find("model picker", 1, true) then
+        local target = stage == "restore" and previous or lower
+        if target then keys = { target } end
+      end
+      return keys, dialog.description
     end
   end
 end
 remuda._butler_compaction_commands = compaction_commands
 remuda._butler_compaction_dialog = compaction_dialog
+local function compaction_context(agent, screen)
+  local context = type(screen) == "string" and tonumber(screen:match("CTX:(%d+)")) or nil
+  if not context and agent and agent.kind == "codex" then
+    local telemetry_ok, telemetry = pcall(remuda._butler_telemetry_for, agent)
+    if telemetry_ok and telemetry then context = tonumber(telemetry.context_used) end
+  end
+  return context
+end
+local function compaction_type(session, command)
+  return pcall(remuda.type_text, session, command)
+end
 -- remuda._butler_compaction_trace_path lets a test redirect the append-only
 -- trace below to a throwaway tempfile instead of the real config dir (same
 -- idiom as remuda._butler_compaction_interval just above). nil in
@@ -1586,17 +1602,36 @@ end
 local function compaction_tick(state)
   state = state or remuda._butler_state or {}
   local captured_ok, screen = pcall(remuda.capture, butler_name)
-  local context = captured_ok and type(screen) == "string"
-    and tonumber(screen:match("CTX:(%d+)")) or nil
+  local active_run = state.compaction_run or remuda._butler_compaction_run
+  if active_run and active_run.restore_pending then
+    if active_run.model_restored then
+      if active_run.release then active_run.release(true) end
+    else
+      local prompt = captured_ok and type(screen) == "string"
+        and remuda._butler_prompt_is_empty(active_run.kind, screen) or "UNPARSEABLE"
+      if prompt == "EMPTY" and active_run.previous then
+        local command = "/model " .. active_run.previous
+          .. (active_run.effort and (" " .. active_run.effort) or "")
+        local entered = compaction_type(butler_name, command)
+        if entered then
+          active_run.restore_pending = false
+          active_run.stage = "restore"
+          active_run.turns = 0
+          active_run.idle_ticks = 0
+          _butler_trace("restore_retry", "session=" .. butler_name)
+        end
+      else
+        _butler_trace("restore_deferred", "session=" .. butler_name .. " prompt=" .. prompt)
+      end
+    end
+    return
+  end
+  local agent = butler_name and bus.agents[butler_name]
+  local context = captured_ok and compaction_context(agent, screen) or nil
   -- Codex's footer displays model and reasoning effort but no CTX count. Its
   -- app-server telemetry adapter already records the same token usage in the
   -- Butler-owned status file; use that only for Codex when the captured pane
   -- has no CTX field.
-  local agent = butler_name and bus.agents[butler_name]
-  if not context and agent and agent.kind == "codex" then
-    local telemetry_ok, telemetry = pcall(remuda._butler_telemetry_for, agent)
-    if telemetry_ok and telemetry then context = tonumber(telemetry.context_used) end
-  end
   if not context then
     state.compaction_interval_current = COMPACTION_CHECK_INTERVAL
     state.compaction_ticks = 0
@@ -1640,67 +1675,109 @@ local function compaction_tick(state)
     _butler_trace("model_unknown", "level=" .. level .. " ctx=" .. context)
   end
 
-  local run = { stage = "lower", kind = current_agent.kind, previous = previous_model,
+  local prompt = remuda._butler_prompt_is_empty(current_agent.kind, type(screen) == "string" and screen or "")
+  if prompt ~= "EMPTY" then
+    _butler_trace("skipped_prompt", "level=" .. level .. " ctx=" .. context .. " state=" .. prompt)
+    return
+  end
+
+  local run = { stage = switch and "lower" or "compact", kind = current_agent.kind, previous = previous_model,
     effort = effort, lower = lower, switch = switch, level = level, context = context,
     turns = 0, original_config = nil, config_path = nil }
   remuda._butler_compaction_run = run
   state.compaction_run = run
-  local lock = (os.getenv("REMUDA_RUNTIME_DIR") or "/tmp") .. "/remuda-compaction.lock"
-  local acquired = os.execute("mkdir " .. string.format("%q", lock) .. " 2>/dev/null")
-  if acquired ~= true and acquired ~= 0 then
-    remuda._butler_compaction_run = nil
-    if state.compaction_run == run then state.compaction_run = nil end
-    _butler_trace("skipped_lock", "level=" .. level .. " ctx=" .. context)
-    return
-  end
-  run.lock = lock
   if current_agent.kind == "codex" then
     local home = os.getenv("CODEX_HOME") or ((os.getenv("HOME") or "") .. "/.codex")
     run.config_path = home .. "/config.toml"
+    os.execute("mkdir -p " .. string.format("%q", home))
+    run.lock = home .. "/.remuda-compaction.lock"
+  end
+  if run.lock then
+    local acquired = os.execute("mkdir " .. string.format("%q", run.lock) .. " 2>/dev/null")
+    if acquired ~= true and acquired ~= 0 then
+      remuda._butler_compaction_run = nil
+      if state.compaction_run == run then state.compaction_run = nil end
+      _butler_trace("skipped_lock", "level=" .. level .. " ctx=" .. context)
+      return
+    end
+  end
+  if run.config_path then
     local file = io.open(run.config_path, "rb")
     if file then run.original_config = file:read("*a"); run.config_existed = true; file:close() end
   end
-  local function release()
+  state.compaction_restore_pending = state.compaction_restore_pending or {}
+  if switch then
+    state.compaction_restore_pending[butler_name] = {
+      model = previous_model, effort = effort, kind = current_agent.kind,
+    }
+  end
+  local function read_config()
+    if not run.config_path then return nil end
+    local file = io.open(run.config_path, "rb")
+    if not file then return nil end
+    local contents = file:read("*a"); file:close()
+    return contents
+  end
+  local function restore_config()
     if run.config_path then
-      local restored, restore_error = pcall(function()
+      local current = read_config()
+      if current == run.original_config and run.config_existed then return true end
+      if current == nil and not run.config_existed then return true end
+      if current ~= run.switch_config then
+        run.config_conflict = true
+        _butler_trace("config_restore_conflict", "session=" .. butler_name)
+        pcall(remuda._butler_send, "butler", "butler", "Codex config for " .. butler_name
+          .. " changed outside the compaction switch; leaving it untouched.")
+        return true
+      end
+      local ok, restore_error = pcall(function()
         if run.config_existed then
-          local file = assert(io.open(run.config_path, "wb"))
+          local temporary = run.config_path .. ".remuda-restore-tmp"
+          local file = assert(io.open(temporary, "wb"))
           assert(file:write(run.original_config))
           file:close()
+          assert(os.rename(temporary, run.config_path))
         else
-          local removed = os.remove(run.config_path)
-          if not removed then
-            local file = io.open(run.config_path, "rb")
-            if file then file:close(); error("could not remove newly-created Codex config") end
-          end
+          assert(os.remove(run.config_path))
         end
       end)
-      if not restored then _butler_trace("config_restore_error", tostring(restore_error)) end
+      if not ok then return false, restore_error end
+    end
+    return true
+  end
+  local function release(confirmed)
+    if confirmed then
+      local restored, restore_error = restore_config()
+      if not restored then
+        run.restore_pending = true
+        run.model_restored = true
+        _butler_trace("config_restore_error", tostring(restore_error))
+        if not run.config_restore_alerted then
+          run.config_restore_alerted = true
+          pcall(remuda._butler_send, "butler", "butler", "Could not restore Codex config for "
+            .. butler_name .. "; compaction lock remains held and restoration will retry: " .. tostring(restore_error))
+        end
+        return false
+      end
     end
     if run.lock then os.execute("rmdir " .. string.format("%q", run.lock) .. " 2>/dev/null") end
     remuda._butler_compaction_run = nil
     if state.compaction_run == run then state.compaction_run = nil end
+    if confirmed and state.compaction_restore_pending then
+      state.compaction_restore_pending[butler_name] = nil
+    end
+    return true
   end
   run.release = release
-  local function type_submit(text)
-    local ok, err = pcall(remuda.type_text, butler_name, text)
-    if not ok then return false, err end
-    return pcall(remuda.key, butler_name, "RET")
+  local ok, err = compaction_type(butler_name, commands[1])
+  if not ok then
+    state.compaction_restore_pending[butler_name] = nil
+    release(false); _butler_trace("error", "stage=" .. run.stage .. " " .. tostring(err)); return
   end
-  if switch then
-    local ok, err = type_submit(commands[1])
-    if not ok then release(); _butler_trace("error", "stage=lower " .. tostring(err)); return end
-  end
-  run.stage = "compact"
-  local compact_at = switch and 2 or 1
-  local ok, err = type_submit(commands[compact_at])
-  if not ok then release(); _butler_trace("error", "stage=compact " .. tostring(err)); return end
-  if switch then
-    run.stage = "restore"
-    ok, err = type_submit(commands[3])
-    if not ok then release(); _butler_trace("error", "stage=restore " .. tostring(err)); return end
-  end
-  _butler_trace("sent", "level=" .. level .. " ctx=" .. context .. " switch=" .. tostring(switch))
+  if run.config_path then run.switch_config = read_config() end
+  if not switch then run.compaction_before_ctx = context end
+  _butler_trace("sent", "level=" .. level .. " ctx=" .. context .. " switch=" .. tostring(switch)
+    .. " stage=" .. run.stage)
   return run
 end
 
@@ -1708,59 +1785,115 @@ function remuda._butler_compaction_dialog_tick(state)
   state = state or remuda._butler_state or {}
   local run = state.compaction_run or remuda._butler_compaction_run
   if not run then return end
+    local function timeout_restore()
+      _butler_trace("error", "stage=" .. run.stage .. " restore_timeout session=" .. butler_name)
+      if run.switch then
+        run.restore_pending = true
+        run.turns = 0
+        if not run.restore_timeout_alerted then
+          run.restore_timeout_alerted = true
+          pcall(remuda._butler_send, "butler", "butler", "Compaction model restore timed out for "
+            .. butler_name .. "; saved model " .. tostring(run.previous) .. " will be retried on the next policy tick.")
+        end
+      elseif run.release then
+        run.release(true)
+      end
+    end
     run.turns = run.turns + 1
     local captured, capture = pcall(remuda.capture, butler_name)
     if not captured or type(capture) ~= "string" then
       if run.turns > COMPACTION_WATCHDOG_TICKS then
-        _butler_trace("error", "stage=" .. run.stage .. " capture_timeout session=" .. butler_name)
-        if run.release then run.release() end
+        timeout_restore()
       end
       return
     end
     local screen_lower = capture:lower()
-    if run.switch and screen_lower:find(run.previous:lower(), 1, true) then
-      run.stage = "lower"
-    elseif screen_lower:find("compacting", 1, true) or screen_lower:find("summarizing", 1, true)
-      or screen_lower:find("/compact", 1, true) then
-      run.stage = "compact"
-    elseif run.switch and screen_lower:find(run.lower:lower(), 1, true) then
-      run.stage = "restore"
-    end
-    run.handled_dialogs = run.handled_dialogs or {}
-    local dialog_keys, description = compaction_dialog(run.kind, capture)
-    if description and run.handled_dialogs[description] then return end
-    if dialog_keys then
-      run.handled_dialogs[description] = true
-      for _, key in ipairs(dialog_keys) do
-        if key == "sonnet" or key == "gpt-6-luna" then pcall(remuda.type_text, butler_name, key)
-        else pcall(remuda.key, butler_name, key) end
-      end
-      _butler_trace("dialog", "stage=" .. run.stage .. " session=" .. butler_name .. " " .. description)
+    if run.last_dialog_capture == capture then
+      if run.turns > COMPACTION_WATCHDOG_TICKS then timeout_restore() end
       return
     end
-    local looks_dialog = capture:find("Select", 1, true) or capture:find("confirm", 1, true)
-      or capture:find("Continue?", 1, true) or capture:find("Yes", 1, true)
+    run.last_dialog_capture = nil
+    local _, visible_model, visible_effort = compaction_commands(run.kind, capture)
+    if run.kind == "codex" and run.switch and run.config_path and visible_model
+      and visible_model:lower():find(run.lower:lower(), 1, true) then
+      local file = io.open(run.config_path, "rb")
+      if file then run.switch_config = file:read("*a"); file:close() end
+    end
+    local dialog_stage = run.stage
+    local dialog_keys, description = compaction_dialog(run.kind, capture, dialog_stage, run.previous, run.lower)
+    if dialog_keys then
+      run.last_dialog_capture = capture
+      for _, key in ipairs(dialog_keys) do
+        pcall(remuda.type_text, butler_name, key)
+      end
+      _butler_trace("dialog", "stage=" .. dialog_stage .. " session=" .. butler_name .. " " .. description)
+      return
+    end
+    local looks_dialog = false
+    for line in (capture .. "\n"):gmatch("(.-)\n") do
+      local heading = line:gsub("^%s*", ""):gsub("^[│╭╰]%s*", "")
+      if heading:match("^Select%s+%u[%w%s%-]*%s*$")
+        or heading:match("^Confirm%s+[%w%s%-]+%s*$")
+        or heading:match("^Continue%?%s*$")
+        or heading:match("^Do you want to [%w%s%-]+%?%s*$") then
+        looks_dialog = true
+        break
+      end
+    end
     if looks_dialog then
-      report_unknown_compaction_dialog(run.stage, butler_name, capture)
-      if run.release then run.release() end
+      run.last_dialog_capture = capture
+      report_unknown_compaction_dialog(dialog_stage, butler_name, capture)
+      if run.switch then
+        run.restore_pending = true
+        run.turns = 0
+      elseif run.release then
+        run.release(true)
+      end
       return
     end
     local session_ok, current_session = pcall(remuda.session, butler_name)
-    local restored_model = not run.switch or (capture:lower():find(run.previous:lower(), 1, true)
-      and (not run.effort or capture:lower():find(run.effort:lower(), 1, true)))
-    if run.turns >= 20 and restored_model and session_ok and current_session and current_session.is_busy == false then
+    local prompt = remuda._butler_prompt_is_empty(run.kind, capture)
+    local context = compaction_context(bus.agents[butler_name], capture)
+    if run.stage == "lower" and visible_model and visible_model:lower():find(run.lower:lower(), 1, true)
+      and prompt == "EMPTY" then
+      run.stage = "compact"
+      run.compaction_before_ctx = context or run.context
+      compaction_type(butler_name, "/compact")
+      _butler_trace("step", "stage=compact session=" .. butler_name .. " ctx=" .. tostring(run.compaction_before_ctx))
+      return
+    end
+    if run.stage == "compact" and context and run.compaction_before_ctx
+      and context < run.compaction_before_ctx and prompt == "EMPTY"
+      and session_ok and current_session and current_session.is_busy == false then
+      if run.switch then
+        local command = "/model " .. run.previous .. (run.effort and (" " .. run.effort) or "")
+        if compaction_type(butler_name, command) then
+          run.stage = "restore"
+          run.idle_ticks = 0
+          _butler_trace("step", "stage=restore session=" .. butler_name .. " ctx=" .. context)
+        end
+        return
+      end
+      run.model_restored = true
+      if run.release and run.release(true) then return end
+    end
+    local restored_model = not run.switch or (visible_model and run.previous
+      and visible_model:lower():find(run.previous:lower(), 1, true)
+      and (not run.effort or (visible_effort and visible_effort:lower() == run.effort:lower())))
+    if run.stage == "restore" and restored_model and prompt == "EMPTY"
+      and session_ok and current_session and current_session.is_busy == false then
       run.idle_ticks = (run.idle_ticks or 0) + 1
       if run.idle_ticks >= 2 then
+        run.model_restored = true
         _butler_trace("restored", "session=" .. butler_name .. " level=" .. run.level .. " ctx=" .. run.context)
-        if run.release then run.release() end
-        return
+        if run.release and run.release(true) then return end
+        run.idle_ticks = 0
       end
     else
       run.idle_ticks = 0
     end
     if run.turns > COMPACTION_WATCHDOG_TICKS then
-      _butler_trace("error", "stage=" .. run.stage .. " restore_timeout session=" .. butler_name)
-      if run.release then run.release() end
+      timeout_restore()
     end
 end
 
