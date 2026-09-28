@@ -2117,6 +2117,146 @@ fn butler_test_daemon(dir: &Path) -> (Daemon, PathBuf) {
 }
 
 #[test]
+fn butler_matrix_line_preserves_thread_and_media_metadata() {
+    let dir = scratch_dir("butler-mline");
+    let (_daemon, path) = butler_test_daemon(&dir);
+    let extended = "@alice:example.org\t!room:example.org\t$event\t2026-09-28T01:02:03Z\tbody\\ntext\t$root\t$parent\tmxc://media.example.org/a\\nmxc://media.example.org/b";
+    let legacy = "@alice:example.org\t!room:example.org\t$legacy\t2026-09-28T01:02:03Z\tlegacy body";
+    let parsed = eval(
+        &path,
+        &format!(
+            r#"
+              remuda.emit_until_success = function(_, message)
+                remuda._matrix_captured = message
+                return true
+              end
+              remuda._butler_matrix_line({extended})
+              local current = remuda._matrix_captured.matrix
+              local first = table.concat({{ current.sender, current.event_id, current.thread_root,
+                current.in_reply_to, tostring(#current.media), table.concat(current.media, ",") }}, "|")
+              remuda._butler_matrix_line({legacy})
+              local old = remuda._matrix_captured.matrix
+              return first .. "\n" .. table.concat({{ old.event_id, old.thread_root,
+                old.in_reply_to, tostring(#old.media) }}, "|")
+            "#,
+            extended = lua_raw_string(extended),
+            legacy = lua_raw_string(legacy),
+        ),
+    );
+    assert_eq!(parsed,
+        "@alice:example.org|$event|$root|$parent|2|mxc://media.example.org/a,mxc://media.example.org/b\n$legacy|||0");
+}
+
+#[test]
+fn butler_matrix_read_composites_use_async_request_for_history_and_thread_pages() {
+    let dir = scratch_dir("butler-matrix-read");
+    let (_daemon, path) = butler_test_daemon(&dir);
+    let room = "!read:example.org";
+    let (token_path, config_path) = butler_config(&dir, "read", "http://matrix.example.org",
+        room, "@bot:example.org", "");
+    eval(&path, include_str!("support/fake_http.lua"));
+    eval(&path, &format!(
+        "remuda._butler_matrix_config = {{ token_path = {}, config_path = {} }}; remuda.exec('butler/matrix_request'); remuda.exec('butler/matrix_read')",
+        lua_raw_string(&token_path.to_string_lossy()), lua_raw_string(&config_path.to_string_lossy())));
+
+    let result = eval(&path, r#"
+      local matrix = remuda.butler.matrix
+      local room = "!read:example.org"
+      local encoded_room = "%21read%3Aexample.org"
+      local history_url = "http://matrix.example.org/_matrix/client/v3/rooms/" .. encoded_room .. "/messages?dir=b&limit=25"
+      remuda.http.respond("GET", history_url, { status = 200, headers = {}, body = '{"chunk":[{"event_id":"$h"}]}' })
+      local history
+      matrix.history({ n = 25 }, function(value) history = value end)
+      if history then return "history-callback-inline" end
+      remuda.http.tick()
+      if not history or not history.json or history.json.chunk[1].event_id ~= "$h" then return "history-result" end
+      if remuda.http.calls[1].headers.Authorization ~= "Bearer test-token" then return "history-auth" end
+      local invalid
+      matrix.history({ n = 201 }, function(value) invalid = value end)
+      if not invalid or not invalid.error or #remuda.http.calls ~= 1 then return "history-bound" end
+
+      local first = "http://matrix.example.org/_matrix/client/v1/rooms/" .. encoded_room
+        .. "/relations/%24root/m.thread?dir=b&limit=100"
+      local second = first .. "&from=page%2F2"
+      remuda.http.respond("GET", first, { status = 200, headers = {}, body = '{"chunk":[{"event_id":"$a"}],"next_batch":"page/2"}' })
+      remuda.http.respond("GET", second, { status = 200, headers = {}, body = '{"chunk":[{"event_id":"$b"}]}' })
+      local thread
+      matrix.thread({ event_id = "$root" }, function(value) thread = value end)
+      for _ = 1, 6 do remuda.http.tick() end
+      if not thread or #thread.json.chunk ~= 2 then return "thread-pages" end
+      if thread.json.chunk[1].event_id ~= "$a" or thread.json.chunk[2].event_id ~= "$b" then return "thread-order" end
+      if #remuda.http.calls ~= 3 then return "thread-request-count" end
+      remuda.http.respond("GET", "http://matrix.example.org/_matrix/client/v3/joined_rooms",
+        { status = 200, headers = {}, body = '{"joined_rooms":["!read:example.org"]}' })
+      local rooms
+      matrix.rooms({}, function(value) rooms = value end)
+      for _ = 1, 5 do remuda.http.tick() end
+      if not rooms or rooms.json.joined_rooms[1] ~= room then return "rooms-result" end
+      remuda.http.respond("GET", "http://matrix.example.org/_matrix/client/v3/rooms/" .. encoded_room .. "/event/%24event",
+        { status = 200, headers = {}, body = '{"event_id":"$event","room_id":"!read:example.org"}' })
+      local event
+      matrix.event({ event_id = "$event" }, function(value) event = value end)
+      for _ = 1, 5 do remuda.http.tick() end
+      if not event or event.json.event_id ~= "$event" or event.json.room_id ~= room then return "event-result" end
+      if #remuda.http.calls ~= 5 then return "read-request-count" end
+      return "ok"
+    "#);
+    assert_eq!(result, "ok", "read composites should page asynchronously through matrix.request: {result}");
+}
+
+#[test]
+fn butler_matrix_read_status_and_download_keep_cursor_and_media_bounds() {
+    let dir = scratch_dir("butler-matrix-read-media");
+    let (_daemon, path) = butler_test_daemon(&dir);
+    let (token_path, config_path) = butler_config(&dir, "read-media", "http://matrix.example.org",
+        "!read:example.org", "@bot:example.org", "");
+    std::fs::write(PathBuf::from(format!("{}.since", config_path.display())),
+        r#"{"since":"s-7","messages_since":"m-4"}"#).expect("write saved cursors");
+    let output = dir.join("download.bin");
+    let empty_output = dir.join("empty-download.bin");
+    eval(&path, include_str!("support/fake_http.lua"));
+    eval(&path, &format!(
+        "remuda._butler_matrix_config = {{ token_path = {}, config_path = {} }}; remuda.exec('butler/matrix_request'); remuda.exec('butler/matrix_read')",
+        lua_raw_string(&token_path.to_string_lossy()), lua_raw_string(&config_path.to_string_lossy())));
+
+    let result = eval(&path, &format!(r#"
+      local matrix = remuda.butler.matrix
+      remuda.http.respond("GET", "http://matrix.example.org/_matrix/client/v3/account/whoami",
+        {{ status = 200, headers = {{}}, body = '{{"user_id":"@bot:example.org","device_id":"D1"}}' }})
+      remuda.http.respond("GET", "http://matrix.example.org/_matrix/client/v3/joined_rooms",
+        {{ status = 200, headers = {{}}, body = '{{"joined_rooms":["!read:example.org"]}}' }})
+      local status
+      matrix.status({{}}, function(value) status = value end)
+      for _ = 1, 5 do remuda.http.tick() end
+      if not status or status.json.user_id ~= "@bot:example.org" or status.json.device_id ~= "D1" then return "status-identity" end
+      if status.json.sync_cursor ~= "s-7" or status.json.fallback_cursor ~= "m-4" then return "status-cursor" end
+      local v1 = "http://matrix.example.org/_matrix/client/v1/media/download/media.example/asset%3A1"
+      local legacy = "http://matrix.example.org/_matrix/media/v3/download/media.example/asset%3A1"
+      remuda.http.respond("GET", v1, {{ status = 404, headers = {{}}, body = '{{"errcode":"M_NOT_FOUND"}}' }})
+      remuda.http.respond("GET", legacy, {{ status = 200, headers = {{ ["content-type"] = "application/octet-stream" }}, body = string.char(0, 255) .. "binary" }})
+      local media
+      matrix.download({{ mxc = "mxc://media.example/asset:1", output = {} }}, function(value) media = value end)
+      for _ = 1, 6 do remuda.http.tick() end
+      if not media or media.bytes ~= 8 then return "download-result:" .. tostring(media and media.error) .. ":bytes=" .. tostring(media and media.bytes) .. ":calls=" .. #remuda.http.calls end
+      if remuda.http.calls[3].max_bytes ~= 20 * 1024 * 1024 or remuda.http.calls[4].max_bytes ~= 20 * 1024 * 1024 then return "download-cap" end
+      if remuda.http.calls[3].headers.Accept ~= "*/*" or remuda.http.calls[4].headers.Authorization ~= "Bearer test-token" then return "download-headers" end
+      local empty_url = "http://matrix.example.org/_matrix/client/v1/media/download/media.example/empty"
+      remuda.http.respond("GET", empty_url, {{ status = 200, headers = {{}}, body = "" }})
+      local empty
+      matrix.download({{ mxc = "mxc://media.example/empty", output = {} }}, function(value) empty = value end)
+      for _ = 1, 5 do remuda.http.tick() end
+      if not empty or empty.error or empty.bytes ~= 0 then return "empty-download" end
+      local relative
+      matrix.download({{ mxc = "mxc://media.example/asset", output = "relative.bin" }}, function(value) relative = value end)
+      if not relative or not relative.error or #remuda.http.calls ~= 5 then return "relative-output" end
+      return "ok"
+    "#, lua_raw_string(&output.to_string_lossy()), lua_raw_string(&empty_output.to_string_lossy())));
+    assert_eq!(result, "ok", "status and media reads should remain bounded and authenticated: {result}");
+    assert_eq!(std::fs::read(output).expect("read downloaded bytes"), b"\0\xffbinary");
+    assert_eq!(std::fs::read(empty_output).expect("read empty downloaded file"), b"");
+}
+
+#[test]
 fn butler_matrix_request_uses_fake_http_for_auth_trust_allow_and_same_room() {
     let dir = scratch_dir("butler-matrix-request");
     let (_daemon, path) = butler_test_daemon(&dir);
