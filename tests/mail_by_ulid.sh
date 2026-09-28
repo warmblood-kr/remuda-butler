@@ -95,7 +95,7 @@ grep -F '"to":[{"host":"local","id":"'"$MEMBER_ID"'","alias":"member"' "$DATA/me
 echo "ok - mail to an alias is stored in the recipient ULID inbox"
 
 lua 'remuda._butler_send("member", "butler", "sender metadata")' >/dev/null
-ENVELOPE=$(rg -l '"subject":"Message from member"' "$DATA/messages" 2>/dev/null | head -1 || true)
+ENVELOPE=$(grep -rlF '"subject":"Message from member"' "$DATA/messages" | head -1 || true)
 [[ -n $ENVELOPE ]] || fail "member sender envelope was not written"
 grep -F '"id":"'"$MEMBER_ID"'"' "$ENVELOPE" >/dev/null || fail "sender id missing from envelope"
 grep -F '"alias":"member"' "$ENVELOPE" >/dev/null || fail "sender alias missing from envelope"
