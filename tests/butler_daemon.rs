@@ -1991,7 +1991,7 @@ fn butler_config(
 fn butler_test_daemon(dir: &Path) -> (Daemon, PathBuf) {
     let daemon = Daemon::spawn(dir);
     let path = daemon::socket_path_in(dir, "s");
-    eval(&path, "remuda._butler_test_mode = true");
+    eval(&path, "remuda._butler_test_mode = true; remuda._butler_skip_relay = true");
     let out = remuda_timed(dir, &["-s", "s", "exec", "butler"]);
     assert!(
         out.status.success(),
@@ -4811,6 +4811,451 @@ fn butler_boot_ends_identities_whose_sessions_died_with_the_daemon() {
     assert!(!last(r#""id":"01ROOT"#).contains("ended_at"), "the root stays live: {rows}");
     assert!(eval(&path, "return remuda._butler_bus.identities.ghost.ended_at ~= nil") == "true");
     drop(daemon);
+}
+
+#[test]
+fn butler_matrix_read_composites_use_async_request_for_history_and_thread_pages() {
+    let dir = scratch_dir("butler-matrix-read");
+    let (_daemon, path) = butler_test_daemon(&dir);
+    let room = "!read:example.org";
+    let (token_path, config_path) = butler_config(&dir, "read", "http://matrix.example.org",
+        room, "@bot:example.org", "");
+    eval(&path, include_str!("support/fake_http.lua"));
+    eval(&path, &format!(
+        "remuda._butler_matrix_config = {{ token_path = {}, config_path = {} }}; remuda.exec('butler/matrix_request'); remuda.exec('butler/matrix_read')",
+        lua_raw_string(&token_path.to_string_lossy()), lua_raw_string(&config_path.to_string_lossy())));
+
+    let result = eval(&path, r#"
+      local matrix = remuda.butler.matrix
+      local room = "!read:example.org"
+      local encoded_room = "%21read%3Aexample.org"
+      local history_url = "http://matrix.example.org/_matrix/client/v3/rooms/" .. encoded_room .. "/messages?dir=b&limit=25"
+      remuda.http.respond("GET", history_url, { status = 200, headers = {}, body = '{"chunk":[{"event_id":"$h"}]}' })
+      local history
+      matrix.history({ n = 25 }, function(value) history = value end)
+      if history then return "history-callback-inline" end
+      remuda.http.tick()
+      if not history or not history.json or history.json.chunk[1].event_id ~= "$h" then return "history-result" end
+      if remuda.http.calls[1].headers.Authorization ~= "Bearer test-token" then return "history-auth" end
+      local invalid
+      matrix.history({ n = 201 }, function(value) invalid = value end)
+      if not invalid or not invalid.error or #remuda.http.calls ~= 1 then return "history-bound" end
+
+      local first = "http://matrix.example.org/_matrix/client/v1/rooms/" .. encoded_room
+        .. "/relations/%24root/m.thread?dir=b&limit=100"
+      local second = first .. "&from=page%2F2"
+      remuda.http.respond("GET", first, { status = 200, headers = {}, body = '{"chunk":[{"event_id":"$a"}],"next_batch":"page/2"}' })
+      remuda.http.respond("GET", second, { status = 200, headers = {}, body = '{"chunk":[{"event_id":"$b"}]}' })
+      local thread
+      matrix.thread({ event_id = "$root" }, function(value) thread = value end)
+      for _ = 1, 6 do remuda.http.tick() end
+      if not thread or #thread.json.chunk ~= 2 then return "thread-pages" end
+      if thread.json.chunk[1].event_id ~= "$a" or thread.json.chunk[2].event_id ~= "$b" then return "thread-order" end
+      if #remuda.http.calls ~= 3 then return "thread-request-count" end
+      remuda.http.respond("GET", "http://matrix.example.org/_matrix/client/v3/joined_rooms",
+        { status = 200, headers = {}, body = '{"joined_rooms":["!read:example.org"]}' })
+      local rooms
+      matrix.rooms({}, function(value) rooms = value end)
+      for _ = 1, 5 do remuda.http.tick() end
+      if not rooms or rooms.json.joined_rooms[1] ~= room then return "rooms-result" end
+      remuda.http.respond("GET", "http://matrix.example.org/_matrix/client/v3/rooms/" .. encoded_room .. "/event/%24event",
+        { status = 200, headers = {}, body = '{"event_id":"$event","room_id":"!read:example.org"}' })
+      local event
+      matrix.event({ event_id = "$event" }, function(value) event = value end)
+      for _ = 1, 5 do remuda.http.tick() end
+      if not event or event.json.event_id ~= "$event" or event.json.room_id ~= room then return "event-result" end
+      if #remuda.http.calls ~= 5 then return "read-request-count" end
+      return "ok"
+    "#);
+    assert_eq!(result, "ok", "read composites should page asynchronously through matrix.request: {result}");
+}
+
+#[test]
+fn butler_matrix_read_status_and_download_keep_cursor_and_media_bounds() {
+    let dir = scratch_dir("butler-matrix-read-media");
+    let (_daemon, path) = butler_test_daemon(&dir);
+    let (token_path, config_path) = butler_config(&dir, "read-media", "http://matrix.example.org",
+        "!read:example.org", "@bot:example.org", "");
+    std::fs::write(PathBuf::from(format!("{}.since", config_path.display())),
+        r#"{"since":"s-7","messages_since":"m-4"}"#).expect("write saved cursors");
+    let output = dir.join("download.bin");
+    let empty_output = dir.join("empty-download.bin");
+    eval(&path, include_str!("support/fake_http.lua"));
+    eval(&path, &format!(
+        "remuda._butler_matrix_config = {{ token_path = {}, config_path = {} }}; remuda.exec('butler/matrix_request'); remuda.exec('butler/matrix_read')",
+        lua_raw_string(&token_path.to_string_lossy()), lua_raw_string(&config_path.to_string_lossy())));
+
+    let result = eval(&path, &format!(r#"
+      local matrix = remuda.butler.matrix
+      remuda.http.respond("GET", "http://matrix.example.org/_matrix/client/v3/account/whoami",
+        {{ status = 200, headers = {{}}, body = '{{"user_id":"@bot:example.org","device_id":"D1"}}' }})
+      remuda.http.respond("GET", "http://matrix.example.org/_matrix/client/v3/joined_rooms",
+        {{ status = 200, headers = {{}}, body = '{{"joined_rooms":["!read:example.org"]}}' }})
+      local status
+      matrix.status({{}}, function(value) status = value end)
+      for _ = 1, 5 do remuda.http.tick() end
+      if not status or status.json.user_id ~= "@bot:example.org" or status.json.device_id ~= "D1" then return "status-identity" end
+      if status.json.sync_cursor ~= "s-7" or status.json.fallback_cursor ~= "m-4" then return "status-cursor" end
+      local v1 = "http://matrix.example.org/_matrix/client/v1/media/download/media.example/asset%3A1"
+      local legacy = "http://matrix.example.org/_matrix/media/v3/download/media.example/asset%3A1"
+      remuda.http.respond("GET", v1, {{ status = 404, headers = {{}}, body = '{{"errcode":"M_NOT_FOUND"}}' }})
+      remuda.http.respond("GET", legacy, {{ status = 200, headers = {{ ["content-type"] = "application/octet-stream" }}, body = string.char(0, 255) .. "binary" }})
+      local media
+      matrix.download({{ mxc = "mxc://media.example/asset:1", output = {} }}, function(value) media = value end)
+      for _ = 1, 6 do remuda.http.tick() end
+      if not media or media.bytes ~= 8 then return "download-result:" .. tostring(media and media.error) .. ":bytes=" .. tostring(media and media.bytes) .. ":calls=" .. #remuda.http.calls end
+      if remuda.http.calls[3].max_bytes ~= 20 * 1024 * 1024 or remuda.http.calls[4].max_bytes ~= 20 * 1024 * 1024 then return "download-cap" end
+      if remuda.http.calls[3].headers.Accept ~= "*/*" or remuda.http.calls[4].headers.Authorization ~= "Bearer test-token" then return "download-headers" end
+      local empty_url = "http://matrix.example.org/_matrix/client/v1/media/download/media.example/empty"
+      remuda.http.respond("GET", empty_url, {{ status = 200, headers = {{}}, body = "" }})
+      local empty
+      matrix.download({{ mxc = "mxc://media.example/empty", output = {} }}, function(value) empty = value end)
+      for _ = 1, 5 do remuda.http.tick() end
+      if not empty or empty.error or empty.bytes ~= 0 then return "empty-download" end
+      local relative
+      matrix.download({{ mxc = "mxc://media.example/asset", output = "relative.bin" }}, function(value) relative = value end)
+      if not relative or not relative.error or #remuda.http.calls ~= 5 then return "relative-output" end
+      return "ok"
+    "#, lua_raw_string(&output.to_string_lossy()), lua_raw_string(&empty_output.to_string_lossy())));
+    assert_eq!(result, "ok", "status and media reads should remain bounded and authenticated: {result}");
+    assert_eq!(std::fs::read(output).expect("read downloaded bytes"), b"\0\xffbinary");
+    assert_eq!(std::fs::read(empty_output).expect("read empty downloaded file"), b"");
+}
+
+#[test]
+fn butler_matrix_fake_http_matches_core_cancellation_bounds_and_headers() {
+    let dir = scratch_dir("butler-http-fake-parity");
+    let (_daemon, path) = butler_test_daemon(&dir);
+    eval(&path, include_str!("support/fake_http.lua"));
+    let result = eval(&path, r#"
+      local url = "http://matrix.example.org/parity"
+      local function request(extra, callback)
+        local spec = { method = "GET", url = url, timeout = 3, callback = callback }
+        for key, value in pairs(extra or {}) do spec[key] = value end
+        return remuda.http.request(spec)
+      end
+      local cancelled, count = nil, 0
+      local handle = request({}, function(value) cancelled = value; count = count + 1 end)
+      handle:cancel()
+      remuda.http.tick()
+      if not cancelled or cancelled.error ~= "request cancelled" or count ~= 1 then return "cancel-not-once" end
+      remuda.http.tick()
+      if count ~= 1 then return "cancel-delivered-twice" end
+
+      local too_big
+      remuda.http.respond("GET", url, { status = 200, headers = {}, body = "12345" })
+      request({ max_bytes = 4 }, function(value) too_big = value end)
+      remuda.http.tick()
+      if not too_big or too_big.error ~= "response exceeds max_bytes" or too_big.status then return "max-bytes" end
+
+      local normalized
+      remuda.http.respond("GET", url, { status = 200,
+        headers = { ["Content-Type"] = "application/json", ["CONTENT-TYPE"] = "text/plain",
+          ["Set-Cookie"] = { "a=1", "b=2" } }, body = "{}" })
+      request({}, function(value) normalized = value end)
+      if normalized then return "callback-ran-inline" end
+      remuda.http.tick()
+      local content_type = normalized.headers["content-type"]
+      if content_type ~= "application/json, text/plain" and content_type ~= "text/plain, application/json" then
+        return "duplicate-header:" .. tostring(normalized.headers["content-type"])
+      end
+      if type(normalized.headers["set-cookie"]) ~= "table" or normalized.headers["set-cookie"][2] ~= "b=2" then
+        return "set-cookie"
+      end
+      local invalid
+      request({ timeout = 3601 }, function(value) invalid = value end)
+      remuda.http.tick()
+      if not invalid or not invalid.error then return "invalid-timeout-accepted" end
+      local oversized
+      request({ max_bytes = 20 * 1024 * 1024 + 1 }, function(value) oversized = value end)
+      remuda.http.tick()
+      if not oversized or oversized.error ~= "max_bytes exceeds 20 MiB" then return "oversized-limit-accepted" end
+      return "ok"
+    "#);
+    assert_eq!(result, "ok", "fake HTTP transport semantics should match core: {result}");
+}
+
+#[test]
+fn butler_matrix_real_http_binding_delivers_unreachable_local_error() {
+    let dir = scratch_dir("butler-real-http-smoke");
+    let (_daemon, path) = butler_test_daemon(&dir);
+    let room = "!smoke:example.org";
+    let (token_path, config_path) = butler_config(
+        &dir, "real-http", "http://127.0.0.1:1", room, "@bot:example.org", "",
+    );
+    eval(&path, &format!(
+        "remuda._butler_matrix_config = {{ token_path = {}, config_path = {} }}; remuda.exec('butler/matrix_request')",
+        lua_raw_string(&token_path.to_string_lossy()), lua_raw_string(&config_path.to_string_lossy())));
+    eval(&path, r#"
+      remuda._butler_real_http_result = nil
+      remuda.butler.matrix.request({ method = "GET", path = "/_matrix/client/v3/account/whoami", timeout = 2 },
+        function(value) remuda._butler_real_http_result = value end)
+    "#);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let result = eval(&path, r#"
+          local value = remuda._butler_real_http_result
+          if not value then return "pending" end
+          if not value.error then return "missing-error" end
+          if value.status ~= nil or value.headers ~= nil or value.body ~= nil then return "failure-has-response-fields" end
+          return "error:" .. value.error
+        "#);
+        if result != "pending" {
+            assert!(result.starts_with("error:"), "real remuda.http failure shape: {result}");
+            return;
+        }
+        assert!(Instant::now() < deadline, "real remuda.http callback did not arrive");
+        std::thread::sleep(Duration::from_millis(40));
+    }
+}
+
+#[test]
+fn butler_matrix_cancellation_completes_queued_inflight_and_held_once() {
+    let dir = scratch_dir("butler-matrix-cancel");
+    let (_daemon, path) = butler_test_daemon(&dir);
+    let room = "!cancel:example.org";
+    let (token_path, config_path) = butler_config(&dir, "cancel", "http://matrix.example.org",
+        room, "@bot:example.org", "");
+    eval(&path, include_str!("support/fake_http.lua"));
+    eval(&path, &format!(
+        "remuda._butler_matrix_config = {{ token_path = {}, config_path = {} }}; remuda.exec('butler/matrix')",
+        lua_raw_string(&token_path.to_string_lossy()), lua_raw_string(&config_path.to_string_lossy())));
+    let result = eval(&path, &format!(r#"
+      local matrix, room = remuda.butler.matrix, "{room}"
+      local first_result, queued_result, queued_count
+      queued_count = 0
+      local first = matrix.request({{ method = "GET", path = "/_matrix/client/v3/first" }}, function(value) first_result = value end)
+      local queued = matrix.request({{ method = "GET", path = "/_matrix/client/v3/queued" }}, function(value)
+        queued_result = value; queued_count = queued_count + 1 end)
+      queued:cancel()
+      queued:cancel()
+      if not queued_result or queued_result.error ~= "cancelled" or queued_count ~= 1 then return "queued-cancel-not-completed-once" end
+      if #remuda.http.calls ~= 1 then return "queued-cancel-consumed-network-slot" end
+      first:cancel()
+      first:cancel()
+      remuda.http.tick()
+       if not first_result or first_result.error ~= "request cancelled" then return "inflight-cancel-not-reported" end
+      local count = 0
+      local held_url = "https://matrix.example.org/_matrix/client/v3/sync?timeout=30000"
+      remuda.http.hold("GET", held_url)
+       local held = remuda.http.request({{ method = "GET", url = held_url, timeout = 35, callback = function(value)
+         count = count + 1; if value.error ~= "request cancelled" then count = 99 end end }})
+      remuda.http.tick()
+      held:cancel()
+      held:cancel()
+      remuda.http.tick()
+      if count ~= 1 then return "held-cancel-not-reported-once" end
+      local completed_count = 0
+      local complete_url = "https://matrix.example.org/_matrix/client/v3/complete"
+      remuda.http.respond("GET", complete_url, {{ status = 200, headers = {{}}, body = "{{}}" }})
+       local completed = remuda.http.request({{ method = "GET", url = complete_url, timeout = 10, callback = function()
+        completed_count = completed_count + 1 end }})
+      remuda.http.tick()
+      completed:cancel()
+      remuda.http.tick()
+      if completed_count ~= 1 then return "completed-cancel-was-not-a-noop" end
+      return "ok"
+    "#));
+    assert_eq!(result, "ok", "Matrix cancellation must settle queued, in-flight, and held calls once: {result}");
+}
+
+#[test]
+fn butler_matrix_send_chunks_utf8_async_and_rejects_empty_or_dash() {
+    let dir = scratch_dir("butler-matrix-send");
+    let (_daemon, path) = butler_test_daemon(&dir);
+    let room = "!write:example.org";
+    let (token_path, config_path) = butler_config(&dir, "write", "http://matrix.example.org",
+        room, "@bot:example.org", "");
+    eval(&path, include_str!("support/fake_http.lua"));
+    eval(&path, &format!(
+        "remuda._butler_matrix_config = {{ token_path = {}, config_path = {} }}; remuda.exec('butler/matrix')",
+        lua_raw_string(&token_path.to_string_lossy()), lua_raw_string(&config_path.to_string_lossy())));
+    let result = eval(&path, r#"
+      local matrix = remuda.butler.matrix
+      local sent, empty, dash
+      matrix.send({ text = "", room = "!write:example.org" }, function(v) empty = v end)
+      if not empty or not empty.error or #remuda.http.calls ~= 0 then return "empty-send-not-rejected" end
+      remuda.http.respond_prefix("PUT",
+        "http://matrix.example.org/_matrix/client/v3/rooms/%21write%3Aexample.org/send/m.room.message/",
+        { status = 200, headers = {}, body = '{"event_id":"$sent"}' })
+      matrix.send({ text = "-", room = "!write:example.org" }, function(v) dash = v end)
+      if dash or #remuda.http.calls ~= 1 then return "dash-not-sent-literally" end
+      remuda.http.tick()
+      if not dash or dash.error then return "dash-send-failed" end
+      local dash_body = matrix.decode_json(remuda.http.calls[1].body)
+      if not dash_body or dash_body.body ~= "-" then return "dash-body-not-literal" end
+      matrix.send({ text = string.rep("한", 2000), room = "!write:example.org" }, function(value) sent = value end)
+      if sent then return "send-callback-ran-inline" end
+      if #remuda.http.calls ~= 1 then return "first-chunk-not-queued" end
+      for _ = 1, 4 do remuda.http.tick() end
+      if not sent or sent.error then return "send-failed" end
+      if sent.sent ~= 2 or #remuda.http.calls ~= 3 then return "wrong-chunk-count" end
+      local combined, previous = {}, nil
+      for index, spec in ipairs(remuda.http.calls) do
+        local body = matrix.decode_json(spec.body)
+        if not body or #body.body > 4000 then return "chunk-over-4000-bytes" end
+        if index > 1 then combined[#combined + 1] = body.body end
+        local txn = spec.url:match("/send/m%.room%.message/(.+)$")
+        if not txn or txn == previous then return "transaction-id-not-unique" end
+        previous = txn
+      end
+      if table.concat(combined) ~= string.rep("한", 2000) then return "utf8-chunking-lost-data" end
+      return "ok"
+    "#);
+    assert_eq!(result, "ok", "Matrix send should compose bounded async requests: {result}");
+}
+
+#[test]
+fn butler_matrix_transaction_ids_change_across_daemon_restarts() {
+    fn txn_in_fresh_daemon(tag: &str) -> String {
+        let dir = scratch_dir(tag);
+        let (_daemon, path) = butler_test_daemon(&dir);
+        let room = "!txn:example.org";
+        let (token_path, config_path) = butler_config(&dir, tag, "http://matrix.example.org",
+            room, "@bot:example.org", "");
+        eval(&path, include_str!("support/fake_http.lua"));
+        eval(&path, &format!(
+            "remuda._butler_matrix_config = {{ token_path = {}, config_path = {} }}; remuda.exec('butler/matrix')",
+            lua_raw_string(&token_path.to_string_lossy()), lua_raw_string(&config_path.to_string_lossy())));
+        let result = eval(&path, r#"
+          remuda.butler.matrix.send({ text = "txn", room = "!txn:example.org" }, function() end)
+          return remuda.http.calls[1].url
+        "#);
+        result.rsplit('/').next().unwrap().to_owned()
+    }
+    let first = txn_in_fresh_daemon("butler-matrix-txn-first");
+    let second = txn_in_fresh_daemon("butler-matrix-txn-second");
+    assert_ne!(first, second, "transaction IDs must not collide after a daemon restart");
+    assert!(first.len() >= 45 && second.len() >= 45, "transaction IDs must include startup entropy");
+}
+
+#[test]
+fn butler_matrix_reply_react_upload_redact_join_and_leave_compose_request() {
+    let dir = scratch_dir("butler-matrix-write-words");
+    let (_daemon, path) = butler_test_daemon(&dir);
+    let room = "!write:example.org";
+    let (token_path, config_path) = butler_config(&dir, "write", "https://matrix.example.org",
+        room, "@bot:example.org", "");
+    std::fs::write(&config_path, format!(
+        "https://matrix.example.org\n{room}\n@bot:example.org\n\npin_sha256={}\n", "00".repeat(32)))
+        .expect("write pinned HTTPS Matrix config");
+    let media_path = dir.join("image.png");
+    std::fs::write(&media_path, b"png-bytes").expect("write upload fixture");
+    let media_path_lua = lua_raw_string(&media_path.to_string_lossy());
+    let directory_path_lua = lua_raw_string(&dir.to_string_lossy());
+    let large_path = dir.join("too-large.bin");
+    std::fs::write(&large_path, vec![0u8; 20 * 1024 * 1024 + 1]).expect("write oversized upload fixture");
+    let large_path_lua = lua_raw_string(&large_path.to_string_lossy());
+    eval(&path, include_str!("support/fake_http.lua"));
+    eval(&path, &format!(
+        "remuda._butler_matrix_config = {{ token_path = {}, config_path = {} }}; remuda.exec('butler/matrix')",
+        lua_raw_string(&token_path.to_string_lossy()), lua_raw_string(&config_path.to_string_lossy())));
+    let result = eval(&path, &format!(r#"
+      local matrix, room = remuda.butler.matrix, "{room}"
+      local function response(body) return {{ status = 200, headers = {{}}, body = body }} end
+      remuda.http.respond_prefix("GET", "https://matrix.example.org/_matrix/client/v3/rooms/%21write%3Aexample.org/context/",
+        response('{{"event":{{"room_id":"{room}"}}}}'))
+      remuda.http.respond_prefix("PUT", "https://matrix.example.org/_matrix/client/v3/rooms/%21write%3Aexample.org/send/m.room.message/",
+        response('{{"event_id":"$reply"}}'))
+      remuda.http.respond_prefix("PUT", "https://matrix.example.org/_matrix/client/v3/rooms/%21write%3Aexample.org/send/m.reaction/",
+        response('{{"event_id":"$react"}}'))
+      remuda.http.respond_prefix("POST", "https://matrix.example.org/_matrix/media/v3/upload?filename=image.png",
+        response('{{"content_uri":"mxc://example.org/media"}}'))
+      remuda.http.respond_prefix("PUT", "https://matrix.example.org/_matrix/client/v3/rooms/%21write%3Aexample.org/send/m.image/",
+        response('{{"event_id":"$image"}}'))
+      remuda.http.respond_prefix("PUT", "https://matrix.example.org/_matrix/client/v3/rooms/%21write%3Aexample.org/redact/%24redact/",
+        response('{{"event_id":"$redact"}}'))
+      remuda.http.respond("POST", "https://matrix.example.org/_matrix/client/v3/rooms/%21write%3Aexample.org/join", response("{{}}"))
+      remuda.http.respond("POST", "https://matrix.example.org/_matrix/client/v3/rooms/%21write%3Aexample.org/leave", response("{{}}"))
+      local function ticks(n) for _ = 1, n do remuda.http.tick() end end
+      local agent_error
+      matrix.join({{ room = room }}, function(value) agent_error = value end, "agent1")
+      if not agent_error or not agent_error.error or #remuda.http.calls ~= 0 then return "agent-join-not-refused" end
+      local outside, before_outside = nil, #remuda.http.calls
+      remuda.http.respond("GET", "https://matrix.example.org/_matrix/client/v3/rooms/%21write%3Aexample.org/context/%24outside",
+        response('{{"event":{{"room_id":"!other:example.org"}}}}'))
+      matrix.reply({{ room = room, event_id = "$outside", text = "must not send" }}, function(value) outside = value end)
+      ticks(3)
+      if not outside or not outside.error or #remuda.http.calls ~= before_outside + 1 then return "cross-room-reply-sent" end
+      local context_error, before_error = nil, #remuda.http.calls
+      remuda.http.respond("GET", "https://matrix.example.org/_matrix/client/v3/rooms/%21write%3Aexample.org/context/%24broken",
+        {{ error = "injected context failure" }})
+      matrix.reply({{ room = room, event_id = "$broken", text = "must not send" }}, function(value) context_error = value end)
+      ticks(3)
+      if not context_error or not context_error.error or #remuda.http.calls ~= before_error + 1 then return "context-error-sent-reply" end
+      local reply
+      matrix.reply({{ room = room, event_id = "$reply-source", text = "reply text" }}, function(value) reply = value end)
+      ticks(4)
+      if not reply or reply.error then return "reply-failed:" .. tostring(reply and reply.error or "no callback")
+        .. "|calls=" .. tostring(#remuda.http.calls) .. "|last=" .. tostring(remuda.http.calls[#remuda.http.calls] and remuda.http.calls[#remuda.http.calls].url) end
+      local react
+      matrix.react({{ room = room, event_id = "$react-source", key = "👍" }}, function(value) react = value end)
+      ticks(4)
+      if not react or react.event_id ~= "$react" then return "react-failed" end
+      local redact
+      matrix.redact({{ room = room, event_id = "$redact", reason = "cleanup" }}, function(value) redact = value end)
+      ticks(3)
+      if not redact or redact.event_id ~= "$redact" then return "redact-failed" end
+      local upload
+      matrix.upload({{ room = room, file = {media_path_lua} }}, function(value) upload = value end)
+      ticks(5)
+      if not upload or upload.event_id ~= "$image" or upload.content_uri ~= "mxc://example.org/media" then return "upload-failed" end
+      local upload_timeout
+      for _, spec in ipairs(remuda.http.calls) do
+        if spec.method == "POST" and spec.url:find("/media/v3/upload?", 1, true) then upload_timeout = spec.timeout end
+      end
+      if upload_timeout ~= 60 then return "upload-timeout-not-60s:" .. tostring(upload_timeout) end
+      local relative
+      matrix.upload({{ room = room, file = "relative.png" }}, function(value) relative = value end)
+      if not relative or not relative.error or not relative.error:find("absolute path", 1, true) then return "relative-upload-accepted" end
+      local empty_path = {media_path_lua} .. ".empty"
+      local empty_file = assert(io.open(empty_path, "wb")); empty_file:close()
+      local empty_upload, empty_raised
+      local empty_ok = pcall(function()
+        matrix.upload({{ room = room, file = empty_path }}, function(value) empty_upload = value end)
+      end)
+      empty_raised = not empty_ok
+      if empty_raised or not empty_upload or not empty_upload.error then return "empty-upload-not-rejected-safely" end
+      local directory_upload, directory_raised
+      local directory_ok = pcall(function()
+        matrix.upload({{ room = room, file = "{directory_path_lua}" }}, function(value) directory_upload = value end)
+      end)
+      directory_raised = not directory_ok
+      if directory_raised then return "directory-upload-raised" end
+      if not directory_upload or not directory_upload.error then return "directory-upload-not-rejected" end
+      local before_large = #remuda.http.calls
+      local oversized
+      matrix.upload({{ room = room, file = "{large_path_lua}" }}, function(value) oversized = value end)
+      if not oversized or not oversized.error or #remuda.http.calls ~= before_large then return "oversized-upload-not-rejected" end
+      local joined, left
+      matrix.join({{ room = room }}, function(value) joined = value end)
+      ticks(3)
+      matrix.leave({{ room = room }}, function(value) left = value end)
+      ticks(3)
+      if not joined or joined.error or not left or left.error then return "join-leave-failed" end
+      local bodies = {{}}
+      for _, spec in ipairs(remuda.http.calls) do
+        if spec.body and spec.headers["Content-Type"] == "application/json" then
+          bodies[#bodies + 1] = matrix.decode_json(spec.body)
+        end
+      end
+      local found_reply, found_react, found_redact, found_file = false, false, false, false
+      for _, body in ipairs(bodies) do
+        if body["m.relates_to"] and body["m.relates_to"]["m.in_reply_to"] then found_reply = body["m.relates_to"]["m.in_reply_to"].event_id == "$reply-source" end
+        if body["m.relates_to"] and body["m.relates_to"].rel_type == "m.annotation" then found_react = body["m.relates_to"].key == "👍" end
+        if body.reason == "cleanup" then found_redact = true end
+        if body.msgtype == "m.image" and body.url == "mxc://example.org/media" then found_file = true end
+      end
+      if not found_reply or not found_react or not found_redact or not found_file then return "wrong-write-content" end
+      local joined_route, left_route = false, false
+      for _, spec in ipairs(remuda.http.calls) do
+        if spec.url:match("/join$") then joined_route = spec.method == "POST" and spec.body == "{{}}" end
+        if spec.url:match("/leave$") then left_route = spec.method == "POST" and spec.body == "{{}}" end
+      end
+      if not joined_route or not left_route then return "wrong-room-route" end
+      return "ok"
+    "#));
+    assert_eq!(result, "ok", "Matrix write verbs should compose only request and same_room: {result}");
 }
 
 #[test]
