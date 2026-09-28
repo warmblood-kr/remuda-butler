@@ -55,16 +55,43 @@ function remuda._butler_matrix_submit()
 end
 
 function remuda._butler_matrix_stop()
-  local relay = remuda._butler_matrix_relay
   local retry = remuda._butler_matrix_restart_schedule
   if retry then pcall(remuda.cancel, retry) end
   remuda._butler_matrix_restart_schedule = nil
   remuda._butler_matrix_restart_after_stop = false
-  if relay then
+  if remuda._butler_matrix_stopping then
+    for _, id in ipairs(remuda.processes()) do
+      if id == remuda._butler_matrix_relay or id == remuda._butler_relay then
+        pcall(remuda.kill, id)
+      end
+    end
+    return
+  end
+
+  local active, found = {}, {}
+  for _, id in ipairs(remuda.processes()) do
+    if (id == remuda._butler_matrix_relay or id == remuda._butler_relay) and not found[id] then
+      active[#active + 1] = id
+      found[id] = true
+    end
+  end
+  local waiting = remuda._butler_matrix_legacy_exit_pending or 0
+  remuda._butler_matrix_legacy_exit_pending = 0
+  if #active > 0 then
+    remuda._butler_matrix_relay = active[1]
+    remuda._butler_relay = nil
+    waiting = waiting + #active
     remuda._butler_matrix_stopping = true
-    pcall(remuda.kill, relay)
+    remuda._butler_matrix_stop_exit_count = waiting
+    for _, id in ipairs(active) do pcall(remuda.kill, id) end
+  elseif waiting > 0 then
+    remuda._butler_matrix_stopping = true
+    remuda._butler_matrix_stop_exit_count = waiting
   else
+    remuda._butler_matrix_relay = nil
+    remuda._butler_relay = nil
     remuda._butler_matrix_stopping = false
+    remuda._butler_matrix_stop_exit_count = nil
   end
 end
 
@@ -90,15 +117,32 @@ function remuda._butler_matrix_start()
     return false
   end
   local running = false
+  local legacy
   for _, id in ipairs(remuda.processes()) do
     if id == remuda._butler_matrix_relay then running = true end
     -- A pre-extraction Butler kept its process in this root-owned slot. Stop
     -- that worker before starting the new protocol so the first upgrade does
     -- not leave two relays polling the same room.
     if id == remuda._butler_relay then
-      pcall(remuda.kill, id)
-      remuda._butler_relay = nil
+      legacy = id
     end
+  end
+  if legacy then
+    remuda._butler_relay = nil
+    if not running then
+      -- The legacy worker uses the same exit event. Keep its id in the new
+      -- slot and start the replacement only after the core reports it dead.
+      remuda._butler_matrix_relay = legacy
+      remuda._butler_matrix_stopping = true
+      remuda._butler_matrix_restart_after_stop = true
+      remuda._butler_matrix_stop_exit_count = 1
+      matrix_trace("relay_stop", "legacy worker during upgrade")
+      pcall(remuda.kill, legacy)
+      return false
+    end
+    remuda._butler_matrix_legacy_exit_pending = (remuda._butler_matrix_legacy_exit_pending or 0) + 1
+    pcall(remuda.kill, legacy)
+    remuda._butler_relay = nil
   end
   if not running then
     local attempt = remuda._butler_matrix_restart_attempts or 0
@@ -115,6 +159,25 @@ function remuda._butler_matrix_start()
 end
 
 function remuda._butler_matrix_sync_exit(code)
+  local waiting = remuda._butler_matrix_stop_exit_count or 0
+  if waiting > 0 then
+    waiting = waiting - 1
+    remuda._butler_matrix_stop_exit_count = waiting > 0 and waiting or nil
+    if waiting > 0 then return end
+    remuda._butler_matrix_relay = nil
+    remuda._butler_relay = nil
+    remuda._butler_matrix_stopping = false
+    if remuda._butler_matrix_restart_after_stop then
+      remuda._butler_matrix_restart_after_stop = false
+      remuda._butler_matrix_start()
+    end
+    return
+  end
+  local ignored = remuda._butler_matrix_legacy_exit_pending or 0
+  if ignored > 0 then
+    remuda._butler_matrix_legacy_exit_pending = ignored - 1
+    return
+  end
   remuda._butler_matrix_relay = nil
   if remuda._butler_matrix_stopping then
     remuda._butler_matrix_stopping = false
