@@ -2290,8 +2290,12 @@ function remuda._butler_compaction_tick(target_name, dry_run)
           else
             results[#results + 1] = remuda.butler.compact(session_name)
           end
-        else
-          results[#results + 1] = session_name .. ":" .. tostring(event)
+      else
+        if event ~= state.last_trace_event then
+          _butler_trace(event, "ctx=" .. tostring(ctx))
+          state.last_trace_event = event
+        end
+        results[#results + 1] = session_name .. ":" .. tostring(event)
         end
       end
     end
@@ -2334,7 +2338,7 @@ function remuda._butler_compaction_execute(session_name)
     local config = compaction_config()
     local dialog_timeout = math.max(1, config.dialog_timeout)
     local failure_reason, compact_sent, restore_requested, verification_failed
-    local verify, request_restore, watch_restore
+    local verify, request_restore, watch_restore, restore_after_unknown
     local function watch(branches, options, restore_on_error)
       local ok, handle = pcall(remuda.expect, session_name, branches, options)
       if not ok then
@@ -2356,12 +2360,10 @@ function remuda._butler_compaction_execute(session_name)
       local registry = remuda._butler_compaction_dialog_registry
       if #registry >= 50 then table.remove(registry, 1) end
       table.insert(registry, { session = session_name, kind = "unknown_dialog", at = os.time() })
-      local safe = remuda._butler_compaction_preflight(session_name)
-      if not safe then pcall(remuda.key, session_name, "ESC") end
       local handler_name = "unrecognized-" .. session_name .. "-" .. #remuda._butler_compaction_dialog_registry
       remuda._butler_compaction_register_dialog(handler_name, function(screen_value)
         if not is_unknown_dialog(screen_value) then return false end
-        request_restore("registered unknown dialog needs a reviewed handler: " .. handler_name)
+        restore_after_unknown("registered unknown dialog needs a reviewed handler: " .. handler_name)
         return true
       end)
     end
@@ -2416,7 +2418,7 @@ function remuda._butler_compaction_execute(session_name)
         on_unknown = function(value)
           register_unknown_dialog(value)
           failure_reason = "unrecognized dialog during verification"
-          request_restore(failure_reason)
+          restore_after_unknown(failure_reason)
         end,
         on_error = function(err)
           verification_failed = true
@@ -2442,7 +2444,7 @@ function remuda._butler_compaction_execute(session_name)
         end,
         on_unknown = function(value)
           register_unknown_dialog(value)
-          request_restore("unrecognized dialog during restore")
+          restore_after_unknown("unrecognized dialog during restore")
         end,
         on_timeout = function() request_restore("restore confirmation timed out") end,
         on_error = function(err) request_restore("restore confirmation error: " .. tostring(err)) end }, true)
@@ -2475,10 +2477,39 @@ function remuda._butler_compaction_execute(session_name)
       end
       finish_failed_restore("model status is neither prior nor low; restore was not sent")
     end
+    restore_after_unknown = function(reason)
+      failure_reason = reason or failure_reason
+      local safe = remuda._butler_compaction_preflight(session_name)
+      if safe then finish_failed_restore("could not dismiss unknown dialog: " .. safe); return end
+      local ok, err = pcall(remuda.key, session_name, "ESC")
+      if not ok then finish_failed_restore("could not dismiss unknown dialog: " .. tostring(err)); return end
+      local deadline = os.time() + math.max(2, math.ceil(config.idle_wait_timeout))
+      local timer
+      local finished = false
+      local function poll()
+        if finished then return end
+        local captured, current = pcall(remuda.capture, session_name)
+        if not captured or type(current) ~= "string" then
+          finished = true
+          remuda.cancel(timer)
+          finish_failed_restore("could not verify unknown dialog dismissal")
+        elseif not is_unknown_dialog(current) then
+          finished = true
+          remuda.cancel(timer)
+          request_restore(failure_reason)
+        elseif os.time() >= deadline then
+          finished = true
+          remuda.cancel(timer)
+          finish_failed_restore("unknown dialog did not close after Escape")
+        end
+      end
+      timer = remuda.schedule({ every = 0.25, run = poll })
+      poll()
+    end
     local function unknown_dialog(value)
       register_unknown_dialog(value)
       failure_reason = "unrecognized dialog"
-      request_restore(failure_reason)
+      restore_after_unknown(failure_reason)
     end
     local function after_switch()
       local blocked = remuda._butler_compaction_preflight(session_name)
@@ -2524,7 +2555,7 @@ function remuda._butler_compaction_execute(session_name)
       }, { timeout = config.completion_timeout, unknown = is_unknown_dialog,
         on_unknown = function(value)
           register_unknown_dialog(value)
-          request_restore("unrecognized dialog after compaction")
+          restore_after_unknown("unrecognized dialog after compaction")
         end,
         on_timeout = function() request_restore("compaction context did not drop") end,
         on_error = function(err) request_restore("compaction completion error: " .. tostring(err)) end }, true)

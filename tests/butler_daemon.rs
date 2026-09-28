@@ -5144,7 +5144,10 @@ while IFS= read -r line; do
     '/model sonnet')
       if [ "$scenario" = timeout ]; then continue; fi
       if [ "$scenario" = unknown ] && [ "$first" = 1 ]; then
-        first=0; model=Sonnet; paint; printf 'Mystery dialog\nPress 8 to continue\n'; continue
+        first=0; model=Sonnet; paint; printf 'Mystery dialog\nPress 8 to continue\n'
+        IFS= read -r -n 1 answer || exit 0
+        printf 'KEY:%s\n' "$answer" >> "$log"
+        paint; continue
       fi
       if [ "$model" = Sonnet ]; then paint; continue; fi
       if [ "$scenario" = option2 ]; then
@@ -5243,7 +5246,7 @@ done
         (
             "fake-unknown",
             "unknown",
-            "CMD:/model sonnet\nCMD:/model Opus\nKEY:1\n",
+            "CMD:/model sonnet\nKEY:\x1b\nCMD:/model Opus\nKEY:1\n",
         ),
         ("fake-timeout", "timeout", "CMD:/model sonnet\n"),
         (
