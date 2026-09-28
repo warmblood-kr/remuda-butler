@@ -2261,6 +2261,30 @@ fn butler_matrix_request_rejects_https_without_trust_before_network() {
 }
 
 #[test]
+fn butler_matrix_fake_http_holds_and_releases_long_poll_on_tick() {
+    let dir = scratch_dir("butler-matrix-fake-hold");
+    let (_daemon, path) = butler_test_daemon(&dir);
+    eval(&path, include_str!("support/fake_http.lua"));
+    let result = eval(&path, r#"
+      local url = "https://matrix.example.org/_matrix/client/v3/sync?since=s0&timeout=30000"
+      remuda.http.hold("GET", url)
+      local completed
+      remuda.http.request({ method = "GET", url = url, callback = function(value) completed = value end })
+      remuda.http.tick()
+      if completed then return "held-callback-fired" end
+      if #remuda.http.calls ~= 1 then return "request-not-recorded" end
+      local released = remuda.http.release("GET", url,
+        { status = 200, headers = {}, body = "{}" })
+      if not released then return "request-not-released" end
+      if completed then return "release-fired-inline" end
+      remuda.http.tick()
+      if not completed or completed.status ~= 200 then return "release-not-delivered-on-tick" end
+      return "ok"
+    "#);
+    assert_eq!(result, "ok", "fake HTTP long-poll hold must be asynchronous: {result}");
+}
+
+#[test]
 fn butler_helper_filters_to_the_allowlisted_room() {
     let dir = scratch_dir("butler-allowlist");
     let (_daemon, path) = butler_test_daemon(&dir);
