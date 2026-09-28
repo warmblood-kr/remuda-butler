@@ -470,6 +470,20 @@ local function setup_telemetry(kind, spec)
   local adapter = TELEMETRY_ADAPTERS[kind]
   return adapter and adapter.setup and adapter.setup(spec) or {}
 end
+local function prompt_marker(text, from_end)
+  local compact = tostring(text):gsub("%s+", "")
+  if from_end then
+    return compact:sub(-math.min(48, #compact))
+  end
+  return compact:sub(1, math.min(48, #compact))
+end
+local function prompt_visible(screen, task)
+  local compact_screen = tostring(screen):gsub("%s+", "")
+  local start, finish = prompt_marker(task), prompt_marker(task, true)
+  return start ~= "" and finish ~= ""
+    and compact_screen:find(start, 1, true) ~= nil
+    and compact_screen:find(finish, 1, true) ~= nil
+end
 local function team_member_prompt(parent)
   return "You are a Butler team member. Your leader is " .. parent .. ". "
     .. "Work on the task sent to this terminal. When a work loop is complete, "
@@ -512,21 +526,44 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
   end
   mailbox(actual)
   if task and task ~= "" then
-    local poke, attempts = nil, 0
+    local poke, attempts, sends, checks = nil, 0, 0, 0
     poke = remuda.schedule({ every = 0.5, run = function()
       attempts = attempts + 1
-      -- A short-lived launcher (or a failed executable) can disappear before
-      -- Codex has painted its composer. A deferred poke is best-effort; it
-      -- must not leave a throwing callback in the daemon's shared Lua image.
+      -- A launcher can still be painting its composer after the session is
+      -- registered. Wait for its ready prompt before sending the first task.
       local captured, screen = pcall(remuda.capture, actual)
       if not captured then
         remuda.cancel(poke)
         return
       end
       local ready = screen:find("Ask Codex", 1, true)
-      if ready or attempts >= 20 then
-        remuda.cancel(poke)
-        pcall(remuda.type_text, actual, task)
+      if sends == 0 and (ready or attempts >= 20) then
+        sends = 1
+        checks = 0
+        -- Codex treats a fast text+Return as paste-in-progress. Give the
+        -- composer time to consume the full (possibly multiline) prompt
+        -- before the Return in type_text is delivered.
+        pcall(remuda.type_text, actual, task, 2)
+      elseif sends > 0 then
+        -- Check both ends: a long prompt can be clipped while still leaving
+        -- plausible text in the composer. Whitespace is ignored because the
+        -- terminal wraps long lines and lays out newlines as rows.
+        if prompt_visible(screen, task) then
+          remuda.cancel(poke)
+          return
+        end
+        checks = checks + 1
+        if checks >= 20 and sends == 1 then
+          -- Retry exactly once if the first attempt did not leave both task
+          -- markers on screen.
+          sends = 2
+          checks = 0
+          pcall(remuda.type_text, actual, task, 2)
+        elseif checks >= 20 then
+          remuda.cancel(poke)
+          pcall(remuda._butler_send, "butler", parent,
+            "Could not verify delivery of the initial task to " .. name .. " after two attempts.")
+        end
       end
     end })
   end
