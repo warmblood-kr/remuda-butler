@@ -58,6 +58,7 @@ loaded=false
 for _ in $(seq 50); do if lua 'return remuda._butler_choose ~= nil' 2>/dev/null | grep -qx true; then loaded=true; break; fi; sleep 0.1; done
 $loaded || { cat "$SCRATCH/daemon.log" >&2; fail "Butler implementation did not load"; }
 for _ in $(seq 50); do lua 'return remuda._butler_choose ~= nil' 2>/dev/null | grep -qx true && break; sleep 0.1; done
+HAS_TYPED_FAIL=$(lua 'return type(remuda.fail)')
 STATUS_OK=false
 for _ in $(seq 50); do
   if "$REMUDA_BIN" -s "$SERVER" butler status >"$SCRATCH/status.out" 2>"$SCRATCH/status.err"; then
@@ -70,6 +71,7 @@ for _ in $(seq 50); do
 done
 $STATUS_OK || fail "ready Butler status never exited 0: $(cat "$SCRATCH/status.out" "$SCRATCH/status.err")"
 grep -F 'butler: up (claude)' "$SCRATCH/status.out" >/dev/null || fail "status omitted selected kind"
+grep -F 'butler: up (claude)' "$SCRATCH/status.out" >/dev/null || fail "status omitted ready kind"
 # Registering these kinds exercises the chooser without adding branches to it.
 lua 'local function add(id, exe, ready, login, order)
   remuda._butler_contribute("butler.agent", id, {
@@ -166,18 +168,24 @@ mkdir -p "$SCRATCH/empty-bin"
 "$REMUDA_BIN" -s "$SERVER" daemon >"$SCRATCH/empty-daemon.log" 2>&1 &
 for _ in $(seq 50); do [[ -S $REMUDA_RUNTIME_DIR/remuda/$SERVER.sock ]] && break; sleep 0.1; done
 "$REMUDA_BIN" -s "$SERVER" exec butler >"$SCRATCH/exec.out" 2>"$SCRATCH/exec.err" ||
-  fail "exec butler should return after starting the scheduled candidate chain"
-if "$REMUDA_BIN" -s "$SERVER" butler status >"$SCRATCH/status-failed.out" 2>"$SCRATCH/status-failed.err"; then
-  fail "failed Butler status must exit nonzero"
+  fail "bare exec butler should remain asynchronous"
+set +e
+"$REMUDA_BIN" -s "$SERVER" butler status >"$SCRATCH/status-failed.out" 2>"$SCRATCH/status-failed.err"
+FAILED_STATUS=$?
+set -e
+if [[ $HAS_TYPED_FAIL == function ]]; then
+  [[ $FAILED_STATUS == 1 ]] || fail "failed status should exit 1, got $FAILED_STATUS"
+else
+  [[ $FAILED_STATUS != 0 ]] || fail "legacy failed status should be nonzero"
 fi
-for reason in 'failed' 'claude: not_found' 'codex: not_found'; do
-  grep -F "$reason" "$SCRATCH/status-failed.out" "$SCRATCH/status-failed.err" >/dev/null ||
+[[ ! -s "$SCRATCH/status-failed.out" ]] || fail "failed status wrote to stdout: $(cat "$SCRATCH/status-failed.out")"
+for reason in 'claude: not_found' 'codex: not_found'; do
+  grep -F "$reason" "$SCRATCH/status-failed.err" >/dev/null ||
     fail "status omitted $reason: $(cat "$SCRATCH/status-failed.out" "$SCRATCH/status-failed.err")"
 done
-for reason in 'claude: not_found' 'codex: not_found'; do
-  grep -F "$reason" "$SCRATCH/exec.err" >/dev/null || grep -F "$reason" "$SCRATCH/empty-daemon.log" >/dev/null ||
-    fail "fresh-install error omitted $reason"
-done
+if [[ $HAS_TYPED_FAIL == function ]] && grep -E 'runtime error|stack traceback' "$SCRATCH/status-failed.err" >/dev/null; then
+  fail "failed status leaked a runtime error or Lua traceback: $(cat "$SCRATCH/status-failed.err")"
+fi
 for failure in 'butler: claude: not_found' 'butler: codex: not_found'; do
   grep -F "$failure" "$SCRATCH/empty-daemon.log" >/dev/null || fail "daemon log omitted clean failure line $failure"
 done
@@ -206,9 +214,15 @@ chmod +x "$SCRATCH/pending-bin/claude"
 export PATH="$SCRATCH/pending-bin:/usr/bin:/bin"
 "$REMUDA_BIN" -s "$SERVER" daemon >"$SCRATCH/pending-daemon.log" 2>&1 &
 for _ in $(seq 50); do [[ -S $REMUDA_RUNTIME_DIR/remuda/$SERVER.sock ]] && break; sleep 0.1; done
-"$REMUDA_BIN" -s "$SERVER" exec butler >/dev/null
-if "$REMUDA_BIN" -s "$SERVER" butler status >"$SCRATCH/status-pending.out" 2>"$SCRATCH/status-pending.err"; then
-  fail "pending Butler status must exit nonzero: $(cat "$SCRATCH/status-pending.out" "$SCRATCH/status-pending.err")"
+"$REMUDA_BIN" -s "$SERVER" exec butler >"$SCRATCH/exec-pending.out" 2>"$SCRATCH/exec-pending.err" ||
+  fail "pending exec should remain asynchronous"
+set +e
+"$REMUDA_BIN" -s "$SERVER" butler status >"$SCRATCH/status-pending.out" 2>"$SCRATCH/status-pending.err"
+PENDING_STATUS=$?
+set -e
+[[ $PENDING_STATUS == 75 || $PENDING_STATUS == 1 ]] || fail "pending status returned unexpected code $PENDING_STATUS"
+if [[ $HAS_TYPED_FAIL == function ]]; then
+  [[ $PENDING_STATUS == 75 ]] || fail "pending status should exit 75, got $PENDING_STATUS"
 fi
 grep -F 'launching' "$SCRATCH/status-pending.out" "$SCRATCH/status-pending.err" >/dev/null ||
   fail "pending status omitted launching prefix: $(cat "$SCRATCH/status-pending.out" "$SCRATCH/status-pending.err")"

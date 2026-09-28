@@ -120,8 +120,10 @@ fi
 remuda_bin=$(command -v remuda) || die "remuda is not on PATH -- install it first: curl -fsSL https://warmblood-kr.github.io/remuda/install.sh | sh"
 remuda_bin_dir=$(dirname "$remuda_bin")
 
-# `exec` only schedules Butler's readiness chain. Wait until the status
-# command reports a ready agent before treating installation as complete.
+# `exec` only schedules Butler's readiness chain. Status exits 75 while the
+# chain is still running, 0 when ready, and 1 when every candidate failed.
+# Older Remuda cores lack `remuda.fail`, so their launching error is recognized
+# by its text while the package remains compatible with those cores.
 wait_butler_ready() {
 	attempt=0
 	last_status=""
@@ -129,12 +131,17 @@ wait_butler_ready() {
 		if last_status=$(env -u PWD remuda butler status 2>&1); then
 			printf '%s\n' "$last_status"
 			return 0
+		else
+			status_code=$?
 		fi
-		case "$last_status" in
-		*launching*) ;;
-		*failed*) printf '%s\n' "$last_status" >&2; return 1 ;;
-		*) printf '%s\n' "$last_status" >&2; return 1 ;;
-		esac
+		if [ "$status_code" -eq 75 ]; then
+			:
+		else
+			case "$last_status" in
+			*launching*) ;; # older core: `remuda.fail` is not installed
+			*) printf '%s\n' "$last_status" >&2; return 1 ;;
+			esac
+		fi
 		attempt=$((attempt + 1))
 		sleep 0.5
 	done

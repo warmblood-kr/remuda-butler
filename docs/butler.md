@@ -21,7 +21,11 @@ also applies to delegates without an explicit kind. `remuda butler sessions`
 shows the selected kind and the reason each earlier candidate was skipped.
 
 `remuda butler status` prints `butler: up (<kind>)` and exits 0 when the root
-Butler is ready. During launch it exits 1 with output beginning `launching`;
-after failure it exits 1 with output beginning `failed`. Both states include
-one line per attempted candidate. The install script can poll this command
-until it reports `up` or `failed`.
+Butler is ready. During launch it exits 75 and writes `launching` plus one
+line per attempted candidate to standard error. After failure it exits 1 and
+writes `failed` plus each candidate's reason to standard error. Older Remuda
+cores without `remuda.fail` report these states as ordinary command errors.
+The install script polls status every half second for at most 30 seconds,
+continues while status is 75, and stops on ready or failure. Bare
+`remuda exec butler` remains asynchronous; use `remuda butler status` to
+inspect readiness.

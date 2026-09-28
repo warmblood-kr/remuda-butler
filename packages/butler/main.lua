@@ -1765,7 +1765,10 @@ end)
 command(12, "status", "  remuda butler status  (0=up; errors start with launching or failed)", function(args)
   if #args == 1 then
     local message, code = remuda._butler_status()
-    if code ~= 0 then error(message, 0) end
+    if code ~= 0 then
+      if type(remuda.fail) == "function" then return remuda.fail(message, code) end
+      error(message, 0)
+    end
     return message
   end
 end)
@@ -2066,7 +2069,7 @@ function remuda._butler_status()
       lines[#lines + 1] = attempt.kind .. ": " .. attempt.reason
         .. (attempt.detail and attempt.detail ~= "" and (": " .. one_line(attempt.detail)) or "")
     end
-    return table.concat(lines, "\n"), 1
+    return table.concat(lines, "\n"), 75
   end
   if selected and session_exists(name) then return "butler: up (" .. tostring(selected) .. ")", 0 end
   if remuda._butler_start_error then
@@ -2077,7 +2080,7 @@ function remuda._butler_status()
     end
     return table.concat(lines, "\n"), 1
   end
-  return "launching", 1
+  return "launching", 75
 end
 local function launch_butler()
   local requested_name = butler_name or remuda._butler_initial_name
