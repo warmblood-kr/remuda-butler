@@ -233,7 +233,12 @@ function remuda._butler_compaction_gate(session_name, st)
     st.idle_ticks = 0
     return false, "skipped_small", ctx
   end
-  if remuda.session(session_name).is_busy ~= false then
+  local found, session = pcall(remuda.session, session_name)
+  if not found or not session then
+    st.idle_ticks = 0
+    return false, "skipped_unknown", ctx
+  end
+  if session.is_busy ~= false then
     st.idle_ticks = 0
     return false, "skipped_busy", ctx
   end
@@ -241,6 +246,18 @@ function remuda._butler_compaction_gate(session_name, st)
   if not captured then
     st.idle_ticks = 0
     return false, "skipped_composer", ctx
+  end
+  local startup = (remuda._butler_agent_startup or {})[agent.kind] or {}
+  if startup.working then
+    local checked, working = pcall(startup.working, screen)
+    if not checked then
+      st.idle_ticks = 0
+      return false, "skipped_unknown", ctx
+    end
+    if working then
+      st.idle_ticks = 0
+      return false, "skipped_busy", ctx
+    end
   end
   local parsed, decision = pcall(remuda._butler_prompt_is_empty, agent.kind or "", screen)
   if not parsed or decision ~= "EMPTY" then
@@ -251,6 +268,10 @@ function remuda._butler_compaction_gate(session_name, st)
   if st.idle_ticks < 2 then return false, "skipped_idle", ctx end
   st.idle_ticks = 0
   return true, "sent", ctx
+end
+
+function remuda._butler_compaction_submit_matches(decision, text)
+  return decision == "NON-EMPTY" and text == "/compact"
 end
 
 if remuda._butler_test_mode == true then
@@ -1665,7 +1686,23 @@ end
 if remuda._butler_test_mode ~= "lifecycle" then remuda._butler_reconcile() end
 
 function remuda._butler_compaction_submit()
-  remuda.send(butler_name, "")
+  if not butler_name then return false end
+  local agent = bus.agents[butler_name] or {}
+  local captured, screen = pcall(remuda.capture, butler_name)
+  local parsed, decision, text = false, nil, nil
+  if captured then
+    parsed, decision, text = pcall(remuda._butler_prompt_is_empty, agent.kind or "", screen)
+  end
+  if not captured or not parsed or not remuda._butler_compaction_submit_matches(decision, text) then
+    _butler_trace("submit_skipped", "decision=" .. tostring(decision))
+    return false
+  end
+  local sent, err = pcall(remuda.send, butler_name, "")
+  if not sent then
+    _butler_trace("submit_error", tostring(err))
+    return false
+  end
+  return true
 end
 
 function remuda._butler_matrix_line(line)
