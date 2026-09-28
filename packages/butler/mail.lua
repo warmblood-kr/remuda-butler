@@ -3,6 +3,7 @@ local bus = assert(config.bus)
 bus.mail_loaded = bus.mail_loaded or {}
 bus.mail_read = bus.mail_read or {}
 bus.mail_unreadable = bus.mail_unreadable or {}
+bus.mail_delivered = bus.mail_delivered or {}
 
 local function mailbox(name)
   bus.inboxes[name] = bus.inboxes[name] or {}
@@ -101,6 +102,19 @@ local function prepare_storage()
   return ok, err
 end
 
+-- Optional RFC 5322 §3.6.4 / §3.6.2 fields; an envelope without them is a root.
+local function thread_json(message, address_json)
+  local out = ""
+  if message.in_reply_to then out = out .. ',"in_reply_to":' .. config.json_quote(message.in_reply_to) end
+  if message.references and #message.references > 0 then
+    local quoted = {}
+    for i, id in ipairs(message.references) do quoted[i] = config.json_quote(id) end
+    out = out .. ',"references":[' .. table.concat(quoted, ",") .. "]"
+  end
+  if message.reply_to then out = out .. ',"reply_to":' .. address_json(message.reply_to) end
+  return out
+end
+
 local function envelope_json(message, object)
   local function address_json(item)
     return '{"host":' .. config.json_quote(item.host) .. ',"id":' .. config.json_quote(item.id)
@@ -110,7 +124,7 @@ local function envelope_json(message, object)
   return '{"id":' .. config.json_quote(message.id) .. ',"from":' .. address_json(message.from)
     .. ',"to":[' .. address_json(message.to[1]) .. '],"subject":' .. config.json_quote(message.subject)
     .. ',"created_at":' .. config.json_quote(message.created_at) .. ',"content_type":'
-    .. config.json_quote(message.content_type) .. ',"body":{"object_id":'
+    .. config.json_quote(message.content_type) .. thread_json(message, address_json) .. ',"body":{"object_id":'
     .. config.json_quote(object.id) .. ',"bytes":' .. tostring(object.bytes) .. ',"content_type":'
     .. config.json_quote(object.content_type) .. ',"content_hash":null}}\n'
 end
@@ -152,10 +166,43 @@ local function load_message(disk, id)
   local message = { id = id, from = { host = sender_host, id = sender_id, alias = sender_alias,
       session = sender, kind = sender_kind, leader = sender_leader }, subject = subject, created_at = created_at,
     body = { object_id = object_id }, content_type = "text/plain; charset=utf-8" }
+  message.in_reply_to = envelope:match('"in_reply_to":"([^"]+)"')
+  local references = envelope:match('"references":(%b[])')
+  if references then
+    message.references = {}
+    for ref in references:gmatch('"([^"]+)"') do message.references[#message.references + 1] = ref end
+  end
+  local reply_to = envelope:match('"reply_to":(%b{})')
+  if reply_to then
+    message.reply_to = { host = reply_to:match('"host":"([^"]+)"') or "local", id = reply_to:match('"id":"([^"]*)"') or "",
+      alias = reply_to:match('"alias":"([^"]+)"'), session = reply_to:match('"session":"([^"]+)"') }
+  end
   bus.messages[id] = message
   bus.objects[object_id] = { id = object_id, content = content, bytes = #content,
     content_type = "text/plain; charset=utf-8" }
   return message
+end
+
+local function mark_delivered(name, id)
+  bus.mail_delivered[name] = bus.mail_delivered[name] or {}
+  bus.mail_delivered[name][id] = true
+end
+
+-- The inbox log is the delivered set: every row ever, read or not. Reply and
+-- forward rely on it, so no compaction may drop ids from it.
+local function delivered(name, id)
+  local known = bus.mail_delivered[name]
+  if known and known[id] then return true end
+  local disk = paths(name)
+  local file = disk and io.open(disk.inbox, "r")
+  if not file then return false end
+  local found = false
+  for line in file:lines() do
+    if line:match('"message_id":"([^"]+)"') == id then found = true end
+  end
+  file:close()
+  if found then mark_delivered(name, id) end
+  return found
 end
 
 local function load_inbox(name)
@@ -170,6 +217,7 @@ local function load_inbox(name)
   if not file then return end
   for line in file:lines() do
     local id = line:match('"message_id":"([^"]+)"')
+    if id then mark_delivered(name, id) end
     if id and not read[id] and not present[id] then
       present[id] = true
       if load_message(disk, id) then
@@ -242,7 +290,9 @@ local function migrate_legacy(alias, id)
   return true
 end
 
-local function queue(from, to, text, subject, in_reply_to)
+-- The inbox row is the commit point: files written before it may be orphaned
+-- by a crash, never left dangling.
+local function queue(from, to, text, subject, in_reply_to, references)
   from, to = address(from), address(to)
   if to.id == "" then return nil, "recipient has no Butler ULID" end
   if from.alias == "" then from.alias, from.session = from.session, from.session end
@@ -255,7 +305,8 @@ local function queue(from, to, text, subject, in_reply_to)
     content_type = "text/plain; charset=utf-8", content_hash = nil }
   local message = { id = id, from = from, to = { to },
     subject = subject or ("Message from " .. sender), created_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
-    in_reply_to = in_reply_to, content_type = "text/plain; charset=utf-8", body = { object_id = object_id } }
+    in_reply_to = in_reply_to, references = references, content_type = "text/plain; charset=utf-8",
+    body = { object_id = object_id } }
   local disk = paths(recipient_id)
   if disk then
     local ready, ready_err = prepare_storage()
@@ -269,7 +320,38 @@ local function queue(from, to, text, subject, in_reply_to)
   end
   bus.objects[object_id], bus.messages[id] = object, message
   mailbox(recipient_id)[#mailbox(recipient_id) + 1] = id
+  mark_delivered(recipient_id, id)
   return message
+end
+
+local function find_message(id)
+  return bus.messages[id] or (config.root and load_message(paths(""), id)) or nil
+end
+
+-- RFC 5322 §3.6.4: in_reply_to is the parent; references are the parent's (or
+-- its in_reply_to), then the parent. JWZ: repeats and self-references drop.
+local function reply(caller, parent_id, text)
+  caller = address(caller)
+  if caller.id ~= "" and not delivered(caller.id, parent_id) then
+    return nil, "message " .. parent_id .. " was not delivered to you"
+  end
+  local parent = find_message(parent_id)
+  if not parent then return nil, "message " .. parent_id .. " cannot be read" end
+  local to = parent.reply_to or parent.from
+  if not to.id or to.id == "" then
+    return nil, "cannot reply: message " .. parent_id .. " is from " .. tostring(to.alias or to.session)
+      .. ", which has no Butler inbox"
+  end
+  local chain = parent.references or {}
+  if #chain == 0 and parent.in_reply_to then chain = { parent.in_reply_to } end
+  local references, seen = {}, {}
+  for _, id in ipairs(chain) do
+    if id ~= parent_id and not seen[id] then references[#references + 1], seen[id] = id, true end
+  end
+  references[#references + 1] = parent_id
+  local subject = parent.subject or "Message"
+  if not subject:match("^Re: ") then subject = "Re: " .. subject end
+  return queue(caller, to, text, subject, parent_id, references)
 end
 
 -- load_inbox runs once per daemon, so ids left unread for a bad envelope are
@@ -298,8 +380,14 @@ local function inbox(name)
     local message = bus.messages[id]
     local object = message and bus.objects[message.body.object_id]
     if message and object then
-      out[#out + 1] = "[" .. message.id .. " from " .. message.from.host .. "/"
-        .. message.from.session .. " · " .. message.created_at .. "] " .. message.subject .. "\n" .. object.content
+      local lines = { "[" .. message.id .. " from " .. message.from.host .. "/"
+        .. message.from.session .. " · " .. message.created_at .. "] " .. message.subject }
+      if message.in_reply_to then
+        local root = message.references and message.references[1] or message.in_reply_to
+        lines[#lines + 1] = "  in reply to " .. message.in_reply_to .. " (thread " .. root .. ")"
+      end
+      lines[#lines + 1] = object.content
+      out[#out + 1] = table.concat(lines, "\n")
       read[id], shown[#shown + 1] = true, id
     end
   end
@@ -323,5 +411,5 @@ local function unread(name)
   return #mailbox(name)
 end
 
-remuda._butler_mail = { mailbox = mailbox, queue = queue, inbox = inbox, unread = unread, append = append,
+remuda._butler_mail = { mailbox = mailbox, queue = queue, reply = reply, inbox = inbox, unread = unread, append = append,
   migrate_legacy = migrate_legacy }
