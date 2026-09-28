@@ -128,6 +128,23 @@ if ! remuda mod install warmblood-kr/remuda-butler --force; then
 	die "could not install the Butler extension"
 fi
 
+# Matrix has its own lifecycle and state boundary. It ships from the same
+# repository as a companion mod; no dependency manifest is needed on the
+# current core, so install it beside Butler explicitly.
+data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+matrix_mod="$data_home/remuda/mods/butler-matrix"
+mkdir -p "$matrix_mod/packages/butler-matrix"
+matrix_raw=https://raw.githubusercontent.com/warmblood-kr/remuda-butler/main/packages/butler-matrix
+if ! curl -fsSL "$matrix_raw/extension.toml" -o "$matrix_mod/extension.toml"; then
+	die "could not install the butler-matrix companion manifest"
+fi
+for file in init.lua relay.py; do
+	if ! curl -fsSL "$matrix_raw/$file" -o "$matrix_mod/packages/butler-matrix/$file"; then
+		die "could not install the butler-matrix companion ($file)"
+	fi
+done
+status "installed the butler-matrix companion."
+
 # A real functional probe, not a version-string parse: reuse the exact error
 # text the binary already produces (`no such package: butler`) rather than
 # hardcoding a date or commit that will rot the moment the package is

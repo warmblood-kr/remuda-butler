@@ -1,0 +1,4 @@
+name = "butler-matrix"
+entry = "packages/butler-matrix/init.lua"
+lifecycle = "remuda-module-v1"
+api = "remuda-lua-v1"

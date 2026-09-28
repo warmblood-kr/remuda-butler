@@ -35,6 +35,11 @@ ln -sfn "$REPO/packages" "$CORE_DIR/packages"
 export XDG_DATA_HOME=$scratch/data
 mkdir -p "$XDG_DATA_HOME/remuda/mods/butler"
 cp -R "$REPO/extension.toml" "$REPO/packages" "$XDG_DATA_HOME/remuda/mods/butler/"
+mkdir -p "$XDG_DATA_HOME/remuda/mods/butler-matrix"
+cp "$REPO/packages/butler-matrix/extension.toml" "$XDG_DATA_HOME/remuda/mods/butler-matrix/"
+mkdir -p "$XDG_DATA_HOME/remuda/mods/butler-matrix/packages/butler-matrix"
+cp "$REPO/packages/butler-matrix/init.lua" "$REPO/packages/butler-matrix/relay.py" \
+  "$XDG_DATA_HOME/remuda/mods/butler-matrix/packages/butler-matrix/"
 unset REMUDA_SERVER REMUDA_BUTLER_TOKEN REMUDA_BUTLER_CONFIG
 
 echo "core $(git -C "$CORE_DIR" rev-parse --short HEAD), butler $(git -C "$REPO" rev-parse --short HEAD)"

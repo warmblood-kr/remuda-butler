@@ -25,6 +25,7 @@ import json
 import re
 import sys
 import threading
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 fixture_path, get_log_path, put_log_path, send_status = sys.argv[1:5]
@@ -55,7 +56,10 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def do_GET(self):
-        if self.path.split("?", 1)[0] != "/_matrix/client/v3/sync":
+        route = urllib.parse.urlsplit(self.path).path
+        if route != "/_matrix/client/v3/sync" and not re.match(
+            r"^/_matrix/client/v3/rooms/[^/]+/messages$", route
+        ):
             self._reply(404, {"errcode": "M_NOT_FOUND"})
             return
         append(get_log_path, self.path)

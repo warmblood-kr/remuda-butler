@@ -55,7 +55,9 @@ until the generic external CLI/client contract is implemented in Remuda core.
 
 ## Contents
 
-- `packages/butler/`: Lua package, mail, telemetry, and agent adapters.
+- `packages/butler/`: Butler core, mail, telemetry, and agent adapters.
+- `packages/butler-matrix/`: optional inbound Matrix channel, relay, and its
+  separately reloadable lifecycle manifest.
 - `cli/butler_cli.rs`: current Butler command shim to extract into a standalone
   CLI.
 - `install/install-butler.sh`: config validation, bootstrap, loader, and

@@ -36,10 +36,6 @@ return {
     boot()
   end,
   stop = function(state)
-    local relay = state.relay or host._butler_relay
-    if relay then pcall(host.kill, relay) end
-    state.relay = nil
-    host._butler_relay = nil
     if host._butler_start_fallback then host.cancel(host._butler_start_fallback) end
     host._butler_start_fallback = nil
   end,
@@ -51,10 +47,6 @@ return {
       run = function(_, name) return host._butler_session_exited(name) end },
     { event = "butler-compaction-submit", id = "submit",
       run = function() return host._butler_compaction_submit() end },
-    { event = "butler-matrix-line", id = "line",
-      run = function(_, line) return host._butler_matrix_line(line) end },
-    { event = "butler-matrix-submit", id = "submit",
-      run = function() return host._butler_matrix_submit() end },
   },
   schedules = {
     { name = "butler-notices", every = 1, run = function()
