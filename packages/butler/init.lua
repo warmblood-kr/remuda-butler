@@ -160,10 +160,10 @@ defaults to the configured room).
         usage = [[  remuda butler matrix send [--room ROOM] [--json] TEXT
   remuda butler matrix reply [--room ROOM] [--json] EVENT_ID TEXT
   remuda butler matrix react [--room ROOM] [--json] EVENT_ID KEY
-  remuda butler matrix upload [--room ROOM] [--json] FILE
+  remuda butler matrix upload [--room ROOM] [--json] ABSOLUTE_FILE_PATH
   remuda butler matrix redact [--room ROOM] [--reason TEXT] [--json] EVENT_ID
-  remuda butler matrix join [--json] ROOM (operator)
-  remuda butler matrix leave [--json] ROOM (operator)]],
+  remuda butler matrix join [--json] ROOM (operator; advisory at same UID, core #218)
+  remuda butler matrix leave [--json] ROOM (operator; advisory at same UID, core #218)]],
         run = function(_, args, caller) return host._butler_command_run("matrix", args, caller) end },
     },
   },

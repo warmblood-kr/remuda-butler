@@ -38,11 +38,19 @@ local function python_words(script_path, token_path, config_path, state_dir, ver
   return argv
 end
 
-local function run(verb, values, json_mode)
+local function build_argv(verb, opts, values)
   local token_path, config_path, state_dir, script_path = paths()
   local argv = python_words(script_path, token_path, config_path, state_dir, verb)
-  if json_mode then argv[#argv + 1] = "--json" end
+  opts = opts or {}
+  if opts.room then argv[#argv + 1] = "--room"; argv[#argv + 1] = opts.room end
+  if opts.json then argv[#argv + 1] = "--json" end
+  argv[#argv + 1] = "--"
   for _, value in ipairs(values) do argv[#argv + 1] = tostring(value) end
+  return argv
+end
+
+local function run(verb, opts, values)
+  local argv = build_argv(verb, opts, values)
   local quoted = {}
   for _, value in ipairs(argv) do quoted[#quoted + 1] = quote(value) end
   local stderr_path = os.tmpname()
@@ -63,85 +71,60 @@ local function run(verb, values, json_mode)
   return output
 end
 
-local function argv_for(verb, values, json_mode)
-  local token_path, config_path, state_dir, script_path = paths()
-  local argv = python_words(script_path, token_path, config_path, state_dir, verb)
-  if json_mode then argv[#argv + 1] = "--json" end
-  for _, value in ipairs(values) do argv[#argv + 1] = tostring(value) end
-  return argv
-end
-
-local function option_args(opts)
-  opts = opts or {}
-  local values = {}
-  if opts.room then values[#values + 1] = "--room"; values[#values + 1] = opts.room end
-  if opts.json then values[#values + 1] = "--json" end
-  return values
-end
-
 function matrix.send(opts)
   opts = opts or {}
-  local values = option_args(opts)
   assert(opts.text ~= nil, "send requires text")
-  values[#values + 1] = opts.text
-  return run("send", values)
+  return run("send", opts, { opts.text })
 end
 
 function matrix.queue_send(opts)
   opts = opts or {}
   assert(opts.text ~= nil, "send requires text")
-  local values = {}
-  if opts.room then values[#values + 1] = "--room"; values[#values + 1] = opts.room end
-  values[#values + 1] = opts.text
-  remuda.process({ argv = argv_for("send", values, false), on_line = "butler-matrix-reply-line",
+  remuda.process({ argv = build_argv("send", opts, { opts.text }), on_line = "butler-matrix-reply-line",
     on_exit = "butler-matrix-reply-exit" })
   return "queued"
 end
 
 function matrix.reply(opts)
   opts = opts or {}
-  local values = option_args(opts)
   assert(opts.event_id and opts.text, "reply requires event_id and text")
-  values[#values + 1] = opts.event_id
-  values[#values + 1] = opts.text
-  return run("reply", values)
+  return run("reply", opts, { opts.event_id, opts.text })
 end
 
 function matrix.react(opts)
   opts = opts or {}
-  local values = option_args(opts)
   assert(opts.event_id and opts.key, "react requires event_id and key")
-  values[#values + 1] = opts.event_id
-  values[#values + 1] = opts.key
-  return run("react", values)
+  return run("react", opts, { opts.event_id, opts.key })
 end
 
 function matrix.upload(opts)
   opts = opts or {}
-  local values = option_args(opts)
   assert(opts.file, "upload requires file")
-  values[#values + 1] = opts.file
-  return run("upload", values)
+  return run("upload", opts, { opts.file })
 end
 
 function matrix.redact(opts)
   opts = opts or {}
-  local values = option_args(opts)
   assert(opts.event_id, "redact requires event_id")
-  values[#values + 1] = opts.event_id
+  local values = { opts.event_id }
   if opts.reason then values[#values + 1] = opts.reason end
-  return run("redact", values)
+  return run("redact", opts, values)
 end
 
 local function operator_only(verb, opts, caller)
+  -- Advisory only at the same UID; core #218 will provide a trusted caller().
   local agent = remuda._butler_current_agent and remuda._butler_current_agent(caller)
   if agent then
     error("matrix " .. verb .. " is operator-only", 0)
   end
   opts = opts or {}
   assert(opts.room, verb .. " requires room")
-  return run(verb, { opts.room }, opts.json)
+  return run(verb, opts, { opts.room })
 end
+
+remuda.on("butler-matrix-reply-exit", function(code)
+  if code ~= 0 then io.stderr:write("Matrix reply failed (exit " .. tostring(code) .. ")\n") end
+end)
 
 function matrix.join(opts, caller) return operator_only("join", opts, caller) end
 function matrix.leave(opts, caller) return operator_only("leave", opts, caller) end

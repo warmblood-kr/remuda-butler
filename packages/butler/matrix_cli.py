@@ -2,7 +2,6 @@
 import argparse
 import json
 import mimetypes
-import os
 from pathlib import Path
 import secrets
 import sys
@@ -33,8 +32,8 @@ def _chunks(text):
             chunk, size = [], 0
         chunk.append(char)
         size += width
-    if chunk or not text:
-        yield "".join(chunk)
+        if chunk:
+            yield "".join(chunk)
 
 
 def _send(client, room, body, relation=None):
@@ -49,6 +48,8 @@ def _send(client, room, body, relation=None):
 
 
 def send(client, text, room=None):
+    if not text:
+        raise MatrixError("message text must not be empty")
     return _send(client, room or client.room, text)
 
 
@@ -58,6 +59,8 @@ def _same_room(client, room, event_id):
 
 
 def reply(client, event_id, text, room=None):
+    if not text:
+        raise MatrixError("message text must not be empty")
     room = room or client.room
     _same_room(client, room, event_id)
     return _send(client, room, text, {"m.in_reply_to": {"event_id": event_id}})
@@ -92,6 +95,8 @@ def leave(client, room):
 def upload(client, file_path, room=None):
     room = room or client.room
     path = Path(file_path)
+    if not path.is_absolute():
+        raise MatrixError("use an absolute path (the daemon does not know your cwd)")
     size = path.stat().st_size
     if size > MAX_UPLOAD_BYTES:
         raise MatrixError("upload exceeds 20 MiB limit")
@@ -140,8 +145,6 @@ def main(argv=None):
     room = args.room or client.room
     if args.verb == "send":
         text = " ".join(args.values)
-        if text == "-":
-            text = sys.stdin.read()
         result = send(client, text, room)
     elif args.verb == "reply" and len(args.values) >= 2:
         result = reply(client, args.values[0], " ".join(args.values[1:]), room)

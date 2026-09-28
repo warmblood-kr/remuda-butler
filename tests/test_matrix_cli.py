@@ -9,7 +9,6 @@ import time
 import unittest
 import io
 from contextlib import redirect_stdout
-from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "packages" / "butler"))
 
@@ -86,14 +85,20 @@ class ButlerMatrixCliTests(unittest.TestCase):
         matrix_cli.send(client, "x" * (matrix_cli.MAX_CHUNK_BYTES + 1), self.room)
         self.assertGreaterEqual(time.monotonic() - started, 0.07)
 
-    def test_butler_matrix_send_cli_reads_stdin_for_dash(self):
+    def test_butler_matrix_cli_preserves_leading_dash_values(self):
         output = io.StringIO()
-        argv = [str(self.token), str(self.config), str(self.state), "send", "-"]
-        with mock.patch.object(sys, "stdin", io.StringIO("from stdin")), redirect_stdout(output):
-            matrix_cli.main(argv)
-        self.assertEqual(self.put_bodies()[0]["body"], "from stdin")
+        for value in ("--json", "-", "-h"):
+            argv = [str(self.token), str(self.config), str(self.state), "send", "--", value]
+            with redirect_stdout(output):
+                matrix_cli.main(argv)
+        self.assertEqual([row["body"] for row in self.put_bodies()], ["--json", "-", "-h"])
         self.assertIn("Sent 1", output.getvalue())
         self.assert_authenticated()
+
+    def test_butler_matrix_send_rejects_empty_text(self):
+        with self.assertRaisesRegex(MatrixError, "must not be empty"):
+            matrix_cli.send(self.client, "", self.room)
+        self.assertEqual(self.requests(), [])
 
     def test_butler_matrix_reply_checks_same_room_and_formats_relation(self):
         result = matrix_cli.reply(self.client, "$event", "answer", self.room)
