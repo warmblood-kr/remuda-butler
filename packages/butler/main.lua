@@ -1,113 +1,6 @@
 -- remuda-butler: runs one Claude Code session, optionally bridged to Matrix
 -- and replying there via an MCP tool. See docs/design.md.
 
-local HELPER_SRC = [==[
-import json
-import sys
-import time
-import urllib.parse
-import urllib.request
-from pathlib import Path
-
-TOKEN_PATH, CONFIG_PATH = sys.argv[1], sys.argv[2]
-TOKEN = Path(TOKEN_PATH).read_text().strip()
-_lines = Path(CONFIG_PATH).read_text().splitlines()
-HOMESERVER, ROOM_ID, SELF_MXID = _lines[0].strip(), _lines[1].strip(), _lines[2].strip()
-ALLOWED_SENDERS = set()
-if len(_lines) > 3 and _lines[3].strip():
-    ALLOWED_SENDERS = {s.strip() for s in _lines[3].split(",") if s.strip()}
-
-SYNC_TIMEOUT_MS = 30000
-SINCE_FILE = Path(CONFIG_PATH + ".since")
-
-
-def load_since():
-    if SINCE_FILE.exists():
-        try:
-            return json.loads(SINCE_FILE.read_text()).get("since")
-        except (ValueError, AttributeError):
-            return None
-    return None
-
-
-def save_since(token):
-    tmp = SINCE_FILE.with_name(SINCE_FILE.name + ".tmp")
-    tmp.write_text(json.dumps({"since": token}))
-    tmp.replace(SINCE_FILE)
-
-
-def matrix_get(path, params=None):
-    url = HOMESERVER + path
-    if params:
-        url += "?" + urllib.parse.urlencode(params)
-    req = urllib.request.Request(url, headers={"Authorization": "Bearer " + TOKEN})
-    with urllib.request.urlopen(req, timeout=(SYNC_TIMEOUT_MS / 1000) + 10) as resp:
-        return json.loads(resp.read())
-
-
-def emit(sender, body):
-    # Backslash escaped FIRST, then newline, so the result can never itself
-    # contain a raw newline: remuda.process's pipe is strictly line-oriented,
-    # so one Matrix event must become exactly one physical output line.
-    escaped = body.replace("\\", "\\\\").replace("\n", "\\n")
-    sys.stdout.write(sender + "\t" + escaped + "\n")
-    sys.stdout.flush()
-
-
-def handle_room(room):
-    for ev in room.get("timeline", {}).get("events", []):
-        if ev.get("type") != "m.room.message":
-            continue
-        sender = ev.get("sender")
-        if sender == SELF_MXID:
-            continue
-        # Sender allowlist: only a configured human account may reach the
-        # session. `--permission-mode auto` gives that session shell access
-        # with no per-call confirmation, so anyone else in the room must
-        # never be able to feed it input.
-        if sender not in ALLOWED_SENDERS:
-            continue
-        content = ev.get("content", {})
-        if content.get("msgtype") not in ("m.text", "m.notice", "m.emote"):
-            continue
-        emit(sender, content.get("body", ""))
-
-
-def main():
-    since = load_since()
-    if since is None:
-        # First run: establish a baseline without replaying room history.
-        resp = matrix_get("/_matrix/client/v3/sync", {"timeout": "0"})
-        since = resp["next_batch"]
-        save_since(since)
-
-    while True:
-        try:
-            resp = matrix_get(
-                "/_matrix/client/v3/sync",
-                {"since": since, "timeout": str(SYNC_TIMEOUT_MS)},
-            )
-        # Deliberately broad: a relay must outlive every transport failure,
-        # not just urllib.error.URLError (a killed connection mid-request
-        # raises ConnectionResetError/RemoteDisconnected, which is not one).
-        except Exception:
-            time.sleep(5)
-            continue
-
-        # Allowlist: only ever look at the one configured room. Never
-        # iterate any other key of resp["rooms"]["join"].
-        room = resp.get("rooms", {}).get("join", {}).get(ROOM_ID)
-        if room:
-            handle_room(room)
-
-        since = resp["next_batch"]
-        save_since(since)
-
-
-if __name__ == "__main__":
-    main()
-]==]
-
 local REPLY_SRC = [==[
 set -euo pipefail
 
@@ -195,10 +88,8 @@ local function initial_butler_name()
   return "butler"
 end
 
--- Exposed so tests can extract the exact embedded source without triggering
--- the side effects below (starting a real process/session needs real
--- config this test harness doesn't have, and shouldn't start one anyway).
-remuda._butler_helper_src = HELPER_SRC
+-- Exposed so tests can inspect the daemon-local MCP helper without starting a
+-- real process/session (this harness does not have a real agent CLI).
 remuda._butler_reply_src = REPLY_SRC
 remuda._butler_statusline_src = STATUSLINE_SRC
 remuda._butler_initial_name = initial_butler_name()
@@ -301,6 +192,12 @@ end
 if remuda._butler_test_mode == true then
   return
 end
+
+-- The 4bbd90f lifecycle host does not yet call a module `stop` method on
+-- reload. Stop an existing Matrix child here as well, before new config is
+-- resolved; matrix.lua will start exactly one relay after the new config is
+-- installed. Newer hosts can also stop it through init.lua's stop callback.
+if remuda._butler_matrix_stop then pcall(remuda._butler_matrix_stop) end
 
 -- Replace handles created imperatively by the previous Butler version. The
 -- lifecycle declaration owns these schedules from this activation onward.
@@ -447,7 +344,13 @@ local config_path = nil
 if matrix_requested then
   token_path = resolve_path("REMUDA_BUTLER_TOKEN", "token", "token file")
   config_path = resolve_path("REMUDA_BUTLER_CONFIG", "config", "config file")
+  remuda._butler_matrix_config = { token_path = token_path, config_path = config_path }
+else
+  remuda._butler_matrix_config = nil
 end
+-- This internal module is the single inbound Matrix entry point. It registers
+-- only the optional relay and remains inert when credentials are absent.
+remuda.exec("butler/matrix")
 
 -- The session needs an `--mcp-config` pointing back at this same daemon, or
 -- it has no way to reach `matrix_reply` at all — a bare `remuda.new(nil,
@@ -761,7 +664,7 @@ local function inbox_delivery(message)
     delivered, why = mail.forward_delivery(message)
   else
     delivered, why = queue_message(message.from, message.to, message.text, message.subject,
-      message.in_reply_to, message.references)
+      message.in_reply_to, message.references, message.matrix)
   end
   if not delivered then
     message.delivery_error = why
@@ -783,7 +686,7 @@ local function deliver_message(message)
     delivered, why = mail.forward_delivery(message)
   else
     delivered, why = queue_message(message.from, message.to, message.text, message.subject,
-      message.in_reply_to, message.references)
+      message.in_reply_to, message.references, message.matrix)
   end
   if not delivered then error(why or "no Butler channel installed (try remuda-butler-inbox)", 0) end
   return delivered
@@ -1973,10 +1876,6 @@ local mcp_file = io.open(mcp_config_path, "w")
 mcp_file:write(agent_mcp_json(butler_token))
 mcp_file:close()
 
--- Without this, the session has no reason to ever call `matrix_reply`: a
--- line arriving on its terminal is not by itself an instruction to use a
--- specific tool. This is what turns "text showed up" into "the tool got
--- called" for an otherwise-unprompted incoming message.
 local SYSTEM_PROMPT = "Early in this session, call remuda._butler_register_compaction_schedule() "
   .. "via the run_script MCP tool, once, to enable this butler's own periodic "
   .. "context-compaction upkeep. You lead a Butler team. For every delegation, create a "
@@ -2005,16 +1904,6 @@ $REMUDA_BUTLER_AGENT_ID`) or use the MCP `butler_*` tools. On such a core,
 `remuda butler send FROM TO MESSAGE...` is an operator form for sending on
 behalf of another session. Do not use it for ordinary team communication.
 ]]
-if token_path then
-  SYSTEM_PROMPT = "You are bridged into one Matrix room via remuda. "
-    .. "Every line you receive here that starts with \"[matrix · \" is a "
-    .. "message from that room, not from the person running this terminal. "
-    .. "Reply to it by calling the matrix_reply MCP tool with your response "
-    .. "text -- printing a reply in this terminal does not send it anywhere; "
-    .. "only calling the tool does. "
-    .. SYSTEM_PROMPT
-end
-
 -- Finger-tight: an arbitrary placeholder, never tuned against a real
 -- colleague's usage. Tightening step: revisit once this has run on a real
 -- machine for a real "몇 날" and someone has an opinion about the cadence.
@@ -2317,56 +2206,6 @@ function remuda._butler_compaction_submit()
     return false
   end
   return true
-end
-
-function remuda._butler_matrix_line(line)
-  local sender, body = line:match("^([^\t]*)\t(.*)$")
-  if not body then
-    return
-  end
-  -- One pass, not two sequential gsubs: a two-pass unescape would let an
-  -- escaped backslash immediately followed by a literal "n" in the original
-  -- text (e.g. someone pasting `\n` as text, not a newline) get misread as
-  -- a newline escape on the first pass. Matching `\\(.)` and deciding per
-  -- match consumes each escape atomically, left to right.
-  body = body:gsub("\\(.)", function(c)
-    return c == "n" and "\n" or c
-  end)
-  remuda.send(butler_name, "[matrix · " .. sender .. "] " .. body)
-  -- `remuda.send`'s text+Enter lands as one write, and this TUI reads a
-  -- burst of printable text immediately followed by \r as paste-in-progress,
-  -- not "text, then a distinct Enter" (measured in
-  -- native/tests/claude_session.rs's `send_and_submit`) -- so the line above
-  -- sits typed but unsubmitted until a separately-timed, empty `send` (a
-  -- bare Enter, its own write) confirms it. `remuda.sleep` would block the
-  -- Image's whole job queue for the delay; a `remuda.process` running `sleep`
-  -- gets the same delay without blocking anything else queued behind it.
-  -- Enter on an already-submitted empty box is a no-op, so this is safe even
-  -- if two lines arrive close together.
-  remuda.process{
-    argv = {"sleep", "2"},
-    on_exit = "butler-matrix-submit",
-  }
-end
-
-function remuda._butler_matrix_submit()
-  remuda.send(butler_name, "")
-end
-
-local function relay_running()
-  for _, id in ipairs(remuda.processes()) do
-    if id == remuda._butler_relay then return true end
-  end
-  return false
-end
-if token_path and not remuda._butler_skip_relay and not relay_running() then
-  local relay = remuda.process{
-    argv = {"python3", "-c", HELPER_SRC, token_path, config_path},
-    on_line = "butler-matrix-line",
-    on_exit = "butler-matrix-sync-exit",
-  }
-  remuda._butler_relay = relay
-  if remuda._butler_state then remuda._butler_state.relay = relay end
 end
 
 if token_path then

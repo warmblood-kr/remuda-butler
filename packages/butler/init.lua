@@ -41,9 +41,11 @@ return {
   start = function(state)
     host._butler_state = state
     boot()
+    if host._butler_matrix_start then host._butler_matrix_start() end
   end,
   stop = function(state)
     if host._butler_cancel_active_choosers then host._butler_cancel_active_choosers(state) end
+    if host._butler_matrix_stop then pcall(host._butler_matrix_stop) end
     local relay = state.relay or host._butler_relay
     if relay then pcall(host.kill, relay) end
     state.relay = nil
@@ -59,10 +61,12 @@ return {
       run = function(_, name) return host._butler_session_exited(name) end },
     { event = "butler-compaction-submit", id = "submit",
       run = function() return host._butler_compaction_submit() end },
-    { event = "butler-matrix-line", id = "line",
+    { event = "butler-matrix-line", id = "matrix-line",
       run = function(_, line) return host._butler_matrix_line(line) end },
-    { event = "butler-matrix-submit", id = "submit",
+    { event = "butler-matrix-submit", id = "matrix-submit",
       run = function() return host._butler_matrix_submit() end },
+    { event = "butler-matrix-sync-exit", id = "matrix-supervisor",
+      run = function(_, code) return host._butler_matrix_sync_exit(code) end },
   },
   schedules = {
     { name = "butler-notices", every = 1, run = function()
