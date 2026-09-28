@@ -475,3 +475,54 @@ fn an_ended_aliases_unread_mail_is_readable_by_alias() {
     .expect("eval");
     assert!(matches!(unknown, Response::Error(_)), "{unknown:?}");
 }
+
+/// §7 step 3: another channel can claim delivery before Butler's inbox hook.
+#[test]
+fn lower_depth_delivery_channel_can_claim_butler_mail() {
+    let channel = format!("test-channel-{}", std::process::id());
+    let data = std::env::var_os("XDG_DATA_HOME").expect("rust_tests sets XDG_DATA_HOME");
+    let install = PathBuf::from(data).join("remuda/mods").join(&channel);
+    let entry = install.join(format!("packages/{channel}/init.lua"));
+    std::fs::create_dir_all(entry.parent().unwrap()).expect("create channel package");
+    std::fs::write(
+        install.join("extension.toml"),
+        format!(
+            "name = \"{channel}\"\napi = \"remuda-lua-v1\"\nentry = \"packages/{channel}/init.lua\"\nlifecycle = \"remuda-module-v1\"\n"
+        ),
+    )
+    .expect("write channel manifest");
+    std::fs::write(
+        entry,
+        r#"return { api = "remuda-module-v1", state_version = 1,
+          initialize = function() return {} end,
+          hooks = {{ event = "butler/deliver", id = "alternate", depth = -10,
+            run = function(state, msg)
+              return { id = "alternate-message", from = msg.from, to = msg.to, text = msg.text }
+            end }} }
+        "#,
+    )
+    .expect("write channel module");
+
+    let dir = scratch("channel-inversion");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    eval(
+        &path,
+        &format!(
+            "remuda._butler_argv = {{'sh'}}; remuda.exec('butler'); remuda.exec('{channel}')"
+        ),
+    );
+    let got = eval(
+        &path,
+        r#"local notify = remuda._butler_notify
+        remuda._butler_notify = function() return true end
+        local inbox_owner = false
+        for _, hook in ipairs(remuda.hook_list("butler/deliver")) do
+          if hook.id == "inbox" and hook.owner == "butler" then inbox_owner = true end
+        end
+        local sent = remuda._butler_send("operator", "butler", "through another channel")
+        remuda._butler_notify = notify
+        return tostring(inbox_owner) .. "|" .. sent"#,
+    );
+    assert_eq!(got, "true|queued alternate-message and notified butler");
+}
