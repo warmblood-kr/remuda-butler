@@ -222,3 +222,184 @@ fn cli_launch_parents_to_the_calling_member_not_butler() {
     assert!(matches!(unknown, Response::Error(_)), "{unknown:?}");
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.agents.m4)"), "nil");
 }
+
+fn screen_of(path: &Path, session: &str, until: &str) -> String {
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let screen = eval(path, &format!("return remuda.capture('{session}')"));
+        if screen.contains(until) || Instant::now() > deadline {
+            return screen;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// #29: a mail notice is typed only when `remuda._butler_notify_policy` lets
+/// it; until then notices wait per recipient and arrive as one coalesced line.
+#[test]
+fn mail_notices_wait_for_the_policy_and_coalesce() {
+    let dir = scratch("notice-queue");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+    eval(
+        &path,
+        "remuda._butler_agent_builders.fake = function() return {'sh', '-c', 'stty -echo; cat'} end; \
+         remuda._butler_launch('fake', 'm1'); \
+         remuda._butler_notify_policy = function() return false end",
+    );
+    for n in 1..=3 {
+        let sent = eval(&path, &format!("return remuda._butler_send('operator', 'm1', 'hi {n}')"));
+        assert!(sent.contains("notice deferred"), "{sent}");
+    }
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(!screen_of(&path, "m1", "").contains("Butler"), "typed while the policy said no");
+
+    eval(&path, "remuda._butler_notify_policy = function() return true end");
+    let screen = screen_of(&path, "m1", "3 new Butler messages");
+    assert_eq!(screen.matches("3 new Butler messages").count(), 1, "{screen}");
+    assert!(!screen.contains("Butler message message-"), "{screen}");
+    let notices = "local n = 0 for _, s in pairs(remuda.schedules) do \
+                   if s.name == 'butler-notices' then n = n + 1 end end return n";
+    assert_eq!(eval(&path, notices), "1");
+}
+
+/// #29: one case per branch of `remuda._butler_notify_policy`, with `ls` and
+/// `capture` stubbed and the clock passed in.
+#[test]
+fn notify_policy_types_only_into_a_detached_or_quiet_empty_prompt() {
+    let dir = scratch("notice-policy");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    let trace = dir.join("session-trace.log");
+    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+    let got = eval(
+        &path,
+        &format!(
+            r#"remuda._butler_session_trace_path = {trace:?}
+            local real_ls, real_capture = remuda.ls, remuda.capture
+            local row, screen = {{ name = 'p1', alive = true, attached = true }}, ''
+            remuda.ls = function() return {{ row }} end
+            remuda.capture = function() return screen end
+            local policy, t = remuda._butler_notify_policy, 0
+            local function settled(text) t = t + 100; screen = text; policy('p1', t); return policy('p1', t + 3) end
+            local r = {{}}
+            r[#r + 1] = 'half=' .. tostring(settled('history\n> co'))
+            r[#r + 1] = 'empty_stable=' .. tostring(settled('history\n> '))
+            r[#r + 1] = 'claude_box=' .. tostring(settled('──\n│ ❯     │\n  ? for shortcuts'))
+            r[#r + 1] = 'claude_nbsp=' .. tostring(settled('──\n❯\u{{A0}}\n──'))
+            r[#r + 1] = 'claude_nbsp_typed=' .. tostring(settled('──\n❯\u{{A0}}co\n──'))
+            t = t + 100; screen = 'a\n> '; policy('p1', t); screen = 'b\n> '
+            r[#r + 1] = 'empty_changing=' .. tostring(policy('p1', t + 3))
+            r[#r + 1] = 'unparseable=' .. tostring(settled('Do you trust this folder?'))
+            remuda._butler_bus.agents.p1 = {{ kind = 'codex' }}
+            r[#r + 1] = 'codex_placeholder=' .. tostring(settled('› Ask Codex to do anything'))
+            r[#r + 1] = 'codex_typed=' .. tostring(settled('› Ask Codex to do anything else'))
+            remuda._butler_bus.agents.p1 = nil
+            row.attached = false; screen = 'x\n> co'
+            r[#r + 1] = 'detached=' .. tostring(policy('p1', t + 500))
+            remuda.ls, remuda.capture = real_ls, real_capture
+            return table.concat(r, ' ')"#
+        ),
+    );
+    assert_eq!(
+        got,
+        "half=false empty_stable=true claude_box=true claude_nbsp=true claude_nbsp_typed=false empty_changing=false unparseable=false \
+         codex_placeholder=true codex_typed=false detached=true"
+    );
+    let log = std::fs::read_to_string(&trace).unwrap_or_default();
+    assert!(log.contains("notice_prompt\tp1  NON-EMPTY co"), "{log}");
+    assert!(log.contains("notice_prompt\tp1  UNPARSEABLE"), "{log}");
+}
+
+fn butler_with_member(tag: &str) -> (PathBuf, impl Drop) {
+    let dir = scratch(tag);
+    let path = daemon::socket_path_in(&dir, "s");
+    let daemon = daemon_at(&path);
+    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+    eval(
+        &path,
+        "remuda._butler_agent_builders.fake = function() return {'sleep', '100'} end; \
+         remuda._butler_launch('fake', 'm1')",
+    );
+    (path, daemon)
+}
+
+/// #29 review 1: a notice whose type_text fails stays queued for the retry.
+#[test]
+fn a_notice_that_fails_to_type_stays_queued() {
+    let (path, _daemon) = butler_with_member("notice-type-fails");
+    let sent = eval(
+        &path,
+        "remuda._butler_notify_policy = function() return true end; \
+         remuda._real_type_text = remuda.type_text; \
+         remuda.type_text = function() error('pty write failed') end; \
+         return remuda._butler_send('operator', 'm1', 'hi')",
+    );
+    assert!(sent.contains("terminal delivery deferred"), "{sent}");
+    assert_eq!(eval(&path, "return remuda._butler_bus.notices.m1.count"), "1");
+    eval(
+        &path,
+        "remuda.type_text = remuda._real_type_text; remuda._butler_deliver_notices()",
+    );
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1)"), "nil");
+}
+
+/// #29 review 2: an exited session's pending notice and screen record go too.
+#[test]
+fn session_exit_clears_the_notice_queue_and_screen_record() {
+    let (path, _daemon) = butler_with_member("notice-exit");
+    eval(
+        &path,
+        "remuda._butler_notify_policy = function() return false end; \
+         remuda._butler_send('operator', 'm1', 'hi'); \
+         remuda._butler_bus.notice_screens.m1 = { screen = '', since = 0 }; \
+         remuda.emit('session_exited', 'm1')",
+    );
+    assert_eq!(
+        eval(&path, "return tostring(remuda._butler_bus.notices.m1) .. tostring(remuda._butler_bus.notice_screens.m1)"),
+        "nilnil"
+    );
+}
+
+/// #29 review 3: a task the policy keeps deferring times out, is logged, and
+/// its leader is told, instead of waiting forever.
+#[test]
+fn a_task_deferred_too_long_times_out_and_tells_the_leader() {
+    let dir = scratch("task-deferred");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    let trace = dir.join("session-trace.log");
+    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+    eval(
+        &path,
+        &format!(
+            "remuda._butler_session_trace_path = {trace:?}; \
+             remuda.butler.project_home({projects:?}); \
+             remuda._butler_agent_builders.fake = function() return {{'sleep', '100'}} end; \
+             remuda._butler_agent_startup.fake = {{ ready = function() return true end }}; \
+             remuda._butler_notify_policy = function() return false end; \
+             remuda._butler_task_poke_deferrals = 3; \
+             remuda._butler_topic_delegate('t1', 'the task', nil, 'fake', 'butler')",
+            projects = dir.join("projects")
+        ),
+    );
+    // A startup screen that never looks ready times out the same way.
+    eval(
+        &path,
+        "remuda._butler_agent_startup.fake = { ready = function() return false end }; \
+         remuda._butler_task_poke_attempts = 3; \
+         remuda._butler_topic_delegate('t2', 'the task', nil, 'fake', 'butler')",
+    );
+    std::thread::sleep(Duration::from_secs(3));
+    let log = std::fs::read_to_string(&trace).unwrap_or_default();
+    assert!(log.contains("task_poke_timeout\tt1 deferred"), "{log}");
+    assert!(log.contains("task_poke_timeout\tt2"), "{log}");
+    let inbox = eval(&path, "return remuda._butler_inbox('butler')");
+    for topic in ["t1", "t2"] {
+        assert!(
+            inbox.contains(&format!("Task for {topic} was not delivered")),
+            "{inbox}"
+        );
+    }
+}

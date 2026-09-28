@@ -2724,7 +2724,10 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
     let log = loop {
         let log = eval(&path, "return table.concat(remuda._t, '\\n')");
         let traced = std::fs::read_to_string(&trace).unwrap_or_default();
-        if log.matches(" type ").count() == 2 && traced.contains("task_poke_timeout\tt-stuck") {
+        // The leader's "task not delivered" notice is typed too; count only
+        // the topic sessions' own lines.
+        let typed = log.lines().filter(|l| l.starts_with("t-") && l.contains(" type ")).count();
+        if typed == 2 && traced.contains("task_poke_timeout\tt-stuck") {
             break log;
         }
         assert!(Instant::now() < deadline, "pokes never settled: {log}\n{traced}");
@@ -2734,7 +2737,8 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
     assert_eq!(claude, ["t-claude key <down>", "t-claude key RET", "t-claude type task one"]);
     let codex: Vec<&str> = log.lines().filter(|l| l.starts_with("t-codex ")).collect();
     assert_eq!(codex, ["t-codex key 2", "t-codex type task two"]);
-    assert!(!log.contains("t-stuck"), "typed into an unknown dialog: {log}");
+    assert!(!log.contains("t-stuck "), "typed into an unknown dialog: {log}");
+    assert!(log.contains(" type Butler message "), "the leader is told about t-stuck: {log}");
     drop(daemon);
 }
 
