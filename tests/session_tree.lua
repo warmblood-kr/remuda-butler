@@ -90,6 +90,17 @@ remuda._butler_telemetry_for = function()
   return { model = "opus", context_used = "?", context_window = "?", context_percent = "?" }
 end
 assert_equal(remuda.session_detail({ name = "root" }), "claude · opus", "unknown usage is left out")
+
+-- Unread mail: the recipient's unread count, and nothing once it is read.
+local root_id = "01TESTUNREADC0UNT000000000"
+remuda._butler_bus.agents.root.id = root_id
+local to_root = { host = "local", id = root_id, alias = "root", session = "root" }
+assert_equal(remuda.session_detail({ name = "root" }), "claude · opus", "no mail, no count")
+remuda._butler_mail.queue("operator", to_root, "one")
+remuda._butler_mail.queue("operator", to_root, "two")
+assert_equal(remuda.session_detail({ name = "root" }), "claude · opus · ✉2", "unread count")
+remuda._butler_mail.inbox(root_id)
+assert_equal(remuda.session_detail({ name = "root" }), "claude · opus", "read mail is not counted")
 remuda._butler_telemetry_for = real_telemetry
 
 local deep = {{"depth-0", "claude"}}
