@@ -2402,6 +2402,7 @@ fn butler_matrix_relay_survives_an_error_in_event_handling() {
       relay:start()
       remuda.http.tick()
       remuda.http.tick()
+      remuda.http.tick()
       if not remuda.pending_was_durable then io.stderr=old_stderr; return "pending-or-cursor-not-durable-on-error" end
       if (remuda.relay_delivery_attempts["$throws-once"] or 0) < 2 then io.stderr=old_stderr; return "failed-handoff-not-retried" end
       local logged = false
@@ -2423,6 +2424,65 @@ fn butler_matrix_relay_survives_an_error_in_event_handling() {
         first_response=lua_raw_string(&first_response.to_string()), later_response=lua_raw_string(&later_response.to_string()),
         config=lua_raw_string(&config_path.to_string_lossy()), state=lua_raw_string(&state_path.to_string_lossy())));
     assert_eq!(result, "ok", "relay must log and recover from one event-handler error: {result}");
+}
+
+#[test]
+fn butler_matrix_relay_dead_letters_poison_event_and_continues() {
+    let dir = scratch_dir("mr-poison");
+    let (_daemon, path) = butler_test_daemon(&dir);
+    let room = "!relay:example.org";
+    let (token_path, config_path) = butler_config(
+        &dir, "poison", "http://matrix.example.org", room, "@bot:example.org", "@alice:example.org");
+    eval(&path, include_str!("support/fake_http.lua"));
+    eval(&path, &format!(
+        "remuda._butler_matrix_config = {{ token_path = {}, config_path = {} }}; remuda.exec('butler/matrix_request'); remuda.exec('butler/matrix_relay')",
+        lua_raw_string(&token_path.to_string_lossy()), lua_raw_string(&config_path.to_string_lossy())));
+    let baseline = "http://matrix.example.org/_matrix/client/v3/sync?timeout=0";
+    let first_sync = "http://matrix.example.org/_matrix/client/v3/sync?since=s0&timeout=100";
+    let poison = serde_json::json!({"type":"m.room.message","event_id":"$poison","sender":"@alice:example.org",
+        "content":{"msgtype":"m.text","body":"always throws"}});
+    let normal = serde_json::json!({"type":"m.room.message","event_id":"$normal","sender":"@alice:example.org",
+        "content":{"msgtype":"m.text","body":"keep going"}});
+    let response = serde_json::json!({"next_batch":"s1","rooms":{"join":{room:{"timeline":{"events":[poison, normal]}}}}});
+    let result = eval(&path, &format!(r#"
+      remuda.http.respond("GET", {baseline}, {{ status=200, headers={{}}, body='{{"next_batch":"s0"}}' }})
+      remuda.http.respond("GET", {first_sync}, {{ status=200, headers={{}}, body={response} }})
+      remuda.relay_delivery_attempts, remuda.relay_deliveries, remuda.relay_logs = {{}}, {{}}, {{}}
+      local old_stderr = io.stderr
+      io.stderr = {{ write=function(_, value) table.insert(remuda.relay_logs, value) end }}
+      local relay = remuda.butler.matrix.relay.new({{ config_path={config}, matrix=remuda.butler.matrix,
+        deliver=function(e)
+          remuda.relay_delivery_attempts[e.event_id] = (remuda.relay_delivery_attempts[e.event_id] or 0) + 1
+          if e.event_id == "$poison" then error("poison handler") end
+          table.insert(remuda.relay_deliveries, e.event_id)
+          return true
+        end }})
+      relay:start()
+      remuda.http.tick()
+      remuda.http.tick()
+      if (remuda.relay_delivery_attempts["$poison"] or 0) ~= 1 then io.stderr=old_stderr; return "poison-first-attempt-missing" end
+      if #remuda.relay_deliveries ~= 1 or remuda.relay_deliveries[1] ~= "$normal"
+        then io.stderr=old_stderr; return "normal-event-blocked-by-poison" end
+      for _=1,24 do remuda.http.tick() end
+      io.stderr = old_stderr
+      if remuda.relay_delivery_attempts["$poison"] ~= 5
+        then return "poison-attempt-bound-wrong:" .. tostring(remuda.relay_delivery_attempts["$poison"]) end
+      if relay:state().pending["$poison"] then return "poison-remains-pending" end
+      if relay:state().processed["$poison"] then return "dead-lettered-poison-marked-delivered" end
+      local dead_letter_logged = false
+      for _, line in ipairs(remuda.relay_logs) do
+        if line:find("dead-lettered $poison after 5 failed attempts", 1, true) then dead_letter_logged=true end
+      end
+      if not dead_letter_logged then return "dead-letter-not-logged" end
+      local normal_count = 0
+      for _, id in ipairs(remuda.relay_deliveries) do if id == "$normal" then normal_count=normal_count+1 end end
+      if normal_count ~= 1 then return "normal-event-not-delivered-exactly-once" end
+      relay:stop()
+      return "ok"
+    "#,
+        baseline=lua_raw_string(baseline), first_sync=lua_raw_string(first_sync), response=lua_raw_string(&response.to_string()),
+        config=lua_raw_string(&config_path.to_string_lossy())));
+    assert_eq!(result, "ok", "poison event must be retried with a bound, dead-lettered, and not block later events: {result}");
 }
 
 #[test]

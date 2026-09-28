@@ -7,6 +7,7 @@ matrix.relay = relay
 local JSON_ARRAY_MT = getmetatable(matrix.json_array({}))
 
 local MAX_PROCESSED = 5000
+local MAX_DELIVERY_FAILURES = 5
 local MAX_BODY_BYTES = 64 * 1024
 local SYNC_PATH = "/_matrix/client/v3/sync"
 local MESSAGES_PREFIX = "/_matrix/client/v3/rooms/"
@@ -218,6 +219,7 @@ function relay.new(options)
   local state_path, ack_path = config_path .. ".since", config_path .. ".acks"
   local state = load_state(state_path)
   local active, request_handle, retry_timer, backfill_timer = false, nil, nil, nil
+  local delivery_retry_waiting, delivery_retry_timers = {}, {}
   local failures = 0
 
   local instance = {}
@@ -260,7 +262,23 @@ function relay.new(options)
     assert(file:close())
   end
 
-  local function deliver_pending(only)
+  local deliver_pending
+  local function schedule_delivery_retry(id, delay)
+    local elapsed = 0
+    local timer
+    timer = remuda.schedule({ every = 1, run = function()
+      if delivery_retry_timers[id] ~= timer then return end
+      elapsed = elapsed + 1
+      if elapsed < delay then return end
+      remuda.cancel(timer)
+      delivery_retry_timers[id] = nil
+      delivery_retry_waiting[id] = nil
+      if active then deliver_pending({ id }) end
+    end })
+    delivery_retry_timers[id] = timer
+  end
+
+  deliver_pending = function(only)
     local ids = only or state.pending_order
     if not ids then
       ids = {}
@@ -269,14 +287,28 @@ function relay.new(options)
     end
     for _, id in ipairs(ids) do
       local event = state.pending[id]
-      if event then
+      if event and not delivery_retry_waiting[id] then
         local ok, result = pcall(deliver, event)
         if ok and result ~= nil then
           append_ack(id)
         elseif not ok then
-          pcall(function()
-            io.stderr:write("butler Matrix delivery failed for " .. tostring(id) .. ": " .. tostring(result) .. "\n")
-          end)
+          local attempts = (tonumber(event._relay_failures) or 0) + 1
+          event._relay_failures = attempts
+          if attempts >= MAX_DELIVERY_FAILURES then
+            state.pending[id] = nil
+            persist()
+            pcall(function()
+              io.stderr:write("butler Matrix delivery dead-lettered " .. tostring(id)
+                .. " after " .. tostring(attempts) .. " failed attempts: " .. tostring(result) .. "\n")
+            end)
+          else
+            persist()
+            delivery_retry_waiting[id] = true
+            schedule_delivery_retry(id, math.min(16, 2 ^ (attempts - 1)))
+            pcall(function()
+              io.stderr:write("butler Matrix delivery failed for " .. tostring(id) .. ": " .. tostring(result) .. "\n")
+            end)
+          end
         end
       end
     end
@@ -416,6 +448,8 @@ function relay.new(options)
     request_handle = nil
     if retry_timer then pcall(remuda.cancel, retry_timer) end
     if backfill_timer then pcall(remuda.cancel, backfill_timer) end
+    for _, timer in pairs(delivery_retry_timers) do pcall(remuda.cancel, timer) end
+    delivery_retry_timers, delivery_retry_waiting = {}, {}
     retry_timer, backfill_timer = nil, nil
     return true
   end
