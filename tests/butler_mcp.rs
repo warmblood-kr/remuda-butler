@@ -299,6 +299,8 @@ fn notify_policy_types_only_into_a_detached_or_quiet_empty_prompt() {
             remuda._butler_bus.agents.p1 = nil
             row.attached = false; screen = 'x\n> co'
             r[#r + 1] = 'detached=' .. tostring(policy('p1', t + 500))
+            screen = 'x\n> '
+            r[#r + 1] = 'detached_empty=' .. tostring(policy('p1', t + 501))
             remuda.ls, remuda.capture, remuda.capture_styled = real_ls, real_capture, real_capture_styled
             return table.concat(r, ' ')"#
         ),
@@ -306,7 +308,7 @@ fn notify_policy_types_only_into_a_detached_or_quiet_empty_prompt() {
     assert_eq!(
         got,
         "half=false empty_stable=true claude_box=true claude_nbsp=true claude_nbsp_typed=false empty_changing=false unparseable=false \
-         codex_placeholder=true codex_typed=false detached=true"
+         codex_placeholder=true codex_typed=false detached=false detached_empty=true"
     );
     let log = std::fs::read_to_string(&trace).unwrap_or_default();
     assert!(log.contains("notice_prompt\tp1  NON-EMPTY co"), "{log}");
@@ -405,6 +407,158 @@ fn a_task_deferred_too_long_times_out_and_tells_the_leader() {
     }
 }
 
+/// #44: the fake agent drops the task's first Return. Butler must retry it
+/// while keeping an immediate notice out of the still-populated composer.
+#[test]
+#[cfg(unix)]
+fn a_topic_task_is_submitted_before_an_immediate_notice_is_typed() {
+    let dir = scratch("topic-first-prompt-notice");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    let script = dir.join("fake-claude.sh");
+    let submitted = dir.join("submitted.txt");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\n\
+         submitted=$1\n\
+         stty -echo\n\
+         printf 'Claude Code\\n────────────────────\\n❯ '\n\
+         IFS= read -r task || exit 0\n\
+         # Drop the first Return while leaving the task in the composer.\n\
+         printf '\\r\\033[2K❯ %s' \"$task\"\n\
+         IFS= read -r line || exit 0\n\
+         if [ -n \"$line\" ]; then task=\"$task$line\"; fi\n\
+         printf '%s\\n' \"$task\" >> \"$submitted\"\n\
+         printf '\\r\\033[2Kaccepted:%s\\n────────────────────\\n❯ ' \"$task\"\n\
+         while IFS= read -r line; do\n\
+           printf '%s\\n' \"$line\" >> \"$submitted\"\n\
+           printf '\\r\\033[2Kaccepted:%s\\n────────────────────\\n❯ ' \"$line\"\n\
+         done\n",
+    )
+    .expect("write fake Claude");
+    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+    eval(
+        &path,
+        &format!(
+            r#"
+            remuda.butler.project_home({projects:?})
+            remuda._butler_agent_builders.claude = function() return {{"sh", {script:?}, {submitted:?}}} end
+            remuda.session = function() return {{is_busy = false}} end
+            remuda._butler_topic_delegate("topic", "do the delegated task", nil, "claude", "butler")
+            remuda._butler_send("operator", "topic", "immediate mail")
+            "#,
+            projects = dir.join("projects").to_string_lossy(),
+            script = script.to_string_lossy(),
+            submitted = submitted.to_string_lossy(),
+        ),
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let screen = eval(&path, "return remuda.capture('topic')");
+        let composer = screen.rsplit('❯').next().unwrap_or("");
+        assert!(
+            !(composer.contains("delegated task") && composer.contains("Butler message")),
+            "the delegated task and mail notice shared the unsubmitted composer:\n{screen}"
+        );
+        let received = std::fs::read_to_string(&submitted).unwrap_or_default();
+        if received.lines().any(|line| line == "do the delegated task") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the delegated task was never submitted; received={received:?}; screen:\n{screen}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let received = std::fs::read_to_string(&submitted).expect("fake Claude submitted a turn");
+    assert_eq!(
+        received.lines().next(),
+        Some("do the delegated task"),
+        "an immediate mail notice must not take the delegated task's first turn: {received:?}"
+    );
+}
+
+/// A dropped first Return leaves the task in the composer. Butler retries it,
+/// waits for acceptance, then delivers the queued notice.
+#[test]
+#[cfg(unix)]
+fn a_topic_task_retries_a_dropped_return_before_delivering_a_notice() {
+    let dir = scratch("topic-dropped-return");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+    eval(
+        &path,
+        r#"
+        remuda.butler.project_home("/tmp")
+        remuda._butler_agent_builders.claude = function() return {"sh", "-c", "sleep 30"} end
+        local screen, events, first_poll_empty = "──────\n❯ ", {}, false
+        remuda._topic_test_events = events
+        remuda._topic_test_pending_at_notice = true
+        remuda.capture = function()
+          if first_poll_empty then
+            first_poll_empty = false
+            table.insert(events, "first poll blank while text paints")
+            return "──────\n❯ "
+          end
+          return screen
+        end
+        remuda.type_text = function(n, text)
+          if text == "finish immediately" then
+            table.insert(events, "task typed; first Return dropped")
+            screen = "──────\n❯ " .. text
+            first_poll_empty = true
+          else
+            table.insert(events, "notice delivered")
+            remuda._topic_test_pending_at_notice = remuda._butler_bus.pending_tasks[n] ~= nil
+          end
+        end
+        remuda.key = function(_, key)
+          if key == "RET" then
+            table.insert(events, "retry Return accepted")
+            screen = "──────\n❯ "
+          end
+        end
+        remuda.session = function() return {is_busy = false} end
+        remuda._butler_notify_policy = function() return true end
+        remuda._butler_topic_delegate("fast", "finish immediately", nil, "claude", "butler")
+        remuda._butler_send("operator", "fast", "immediate mail")
+        "#,
+    );
+
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let pending = eval(&path, "return tostring(remuda._butler_bus.pending_tasks.fast)");
+        let events = eval(&path, "return table.concat(remuda._topic_test_events, '\\n')");
+        if pending == "nil" && events.lines().any(|line| line == "notice delivered") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fast task stayed pending: {pending}; events={}",
+            eval(&path, "return table.concat(remuda._topic_test_events, '\\n')")
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let events = eval(&path, "return table.concat(remuda._topic_test_events, '\\n')");
+    assert_eq!(
+        events.lines().collect::<Vec<_>>(),
+        [
+            "task typed; first Return dropped",
+            "first poll blank while text paints",
+            "retry Return accepted",
+            "notice delivered",
+        ],
+        "the dropped Enter must be retried and the notice must follow acceptance: {events}"
+    );
+    assert_eq!(
+        eval(&path, "return tostring(remuda._topic_test_pending_at_notice)"),
+        "false",
+        "the notice must be typed only after pending_tasks clears"
+    );
+}
+
 /// #29(3): on a core with `ls().human_idle` (#136) and `capture_styled`
 /// (#137), the policy waits on the human's own idle time and reads the cursor
 /// row without dim ghost text. The old-core path is the test above.
@@ -440,14 +594,18 @@ fn notify_policy_uses_human_idle_and_dim_spans_when_the_core_has_them() {
         r[#r + 1] = 'typed=' .. case(12, plain('❯ co'))
         r[#r + 1] = 'never=' .. case(math.huge, plain('❯ '))
         r[#r + 1] = 'off_prompt=' .. case(12, plain('some output'))
+        row.attached = false
+        r[#r + 1] = 'detached_typed=' .. case(math.huge, plain('❯ co'))
+        r[#r + 1] = 'detached_empty=' .. case(0, plain('❯ '))
         remuda._butler_notice_human_idle = 20
+        row.attached = true
         r[#r + 1] = 'knob=' .. case(12, plain('❯ '))
         remuda.ls, remuda.capture, remuda.capture_styled = real_ls, real_capture, real_styled
         return table.concat(r, ' ')"#,
     );
     assert_eq!(
         got,
-        "typing=false ghost=true ghost_words=true typed=false never=true off_prompt=false knob=false"
+        "typing=false ghost=true ghost_words=true typed=false never=true off_prompt=false detached_typed=false detached_empty=true knob=false"
     );
 }
 

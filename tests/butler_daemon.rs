@@ -2788,11 +2788,11 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
           local screens = {{
             ["t-claude"] = {{
               rule .. "\n Accessing workspace:\n\n ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm · Esc to cancel",
-              rule .. "\n❯ Try \"how do I log an error?\"\n" .. rule,
+              rule .. "\n❯ \n" .. rule,
             }},
             ["t-codex"] = {{
               "  Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip\n  3. Skip until next version",
-              "│ ✨ Update available! │\n› Ask Codex to do anything",
+              "› Ask Codex to do anything",
             }},
             ["t-stuck"] = {{ " Some unknown dialog\n ❯ 1. No, exit" }},
           }}
@@ -2803,8 +2803,18 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
             if #q > 1 then return table.remove(q, 1) end
             return q[1]
           end
+          remuda.capture_styled = nil
           remuda.key = function(n, k) log[#log + 1] = n .. " key " .. k end
-          remuda.type_text = function(n, t) log[#log + 1] = n .. " type " .. t end
+          remuda.type_text = function(n, t)
+            log[#log + 1] = n .. " type " .. t
+            local glyph = n == "t-codex" and "› " or "❯ "
+            screens[n] = {{ glyph .. t, glyph }}
+          end
+          local policy = remuda._butler_notify_policy
+          remuda._butler_notify_policy = function(n, now)
+            if n == "butler" then return true end
+            return policy(n, now)
+          end
           local leader = remuda._butler_initial_name
           remuda._butler_topic_delegate("t-claude", "task one", nil, "claude", leader)
           remuda._butler_topic_delegate("t-codex", "task two", nil, "codex", leader)
@@ -3394,7 +3404,10 @@ fn butler_initializes_mail_and_persists_a_sent_message() {
     );
     let queued_id = sent.strip_prefix("queued ").and_then(|s| s.split_whitespace().next()).unwrap_or("");
     assert!(queued_id.len() == 26 && queued_id.bytes().all(|b| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&b)), "{sent:?}");
-    assert!(sent.ends_with(" and notified butler"), "{sent:?}");
+    assert!(
+        sent.contains("notice deferred") || sent.ends_with(" and notified butler"),
+        "{sent:?}"
+    );
     let mail = data_home.join("remuda/butler/mail");
     let objects: Vec<_> = std::fs::read_dir(mail.join("objects"))
         .expect("body objects")
