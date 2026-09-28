@@ -382,9 +382,22 @@ fn a_task_deferred_too_long_times_out_and_tells_the_leader() {
             projects = dir.join("projects")
         ),
     );
+    // A startup screen that never looks ready times out the same way.
+    eval(
+        &path,
+        "remuda._butler_agent_startup.fake = { ready = function() return false end }; \
+         remuda._butler_task_poke_attempts = 3; \
+         remuda._butler_topic_delegate('t2', 'the task', nil, 'fake', 'butler')",
+    );
     std::thread::sleep(Duration::from_secs(3));
     let log = std::fs::read_to_string(&trace).unwrap_or_default();
     assert!(log.contains("task_poke_timeout\tt1 deferred"), "{log}");
+    assert!(log.contains("task_poke_timeout\tt2"), "{log}");
     let inbox = eval(&path, "return remuda._butler_inbox('butler')");
-    assert!(inbox.contains("t1") && inbox.contains("not delivered"), "{inbox}");
+    for topic in ["t1", "t2"] {
+        assert!(
+            inbox.contains(&format!("Task for {topic} was not delivered")),
+            "{inbox}"
+        );
+    }
 }

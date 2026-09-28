@@ -720,6 +720,15 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
     -- the composer is ready; never blind-type into an unknown dialog.
     local startup = remuda._butler_agent_startup[kind] or {}
     local poke, attempts, settle, deferred = nil, 0, 0, 0
+    -- Either timeout means the task never reached the agent: say so to its
+    -- leader rather than only in the trace (#29).
+    local function give_up(detail)
+      remuda.cancel(poke)
+      _butler_session_trace("task_poke_timeout", actual .. detail)
+      pcall(remuda._butler_send, "butler", parent or "butler", "Task for " .. actual
+        .. " was not delivered: its pane never became ready or free to type into."
+        .. " Resend it with `remuda butler send " .. actual .. " TASK` once it is.")
+    end
     poke = remuda.schedule({ every = 0.5, run = function()
       attempts = attempts + 1
       -- A short-lived launcher (or a failed executable) can disappear before
@@ -736,13 +745,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
         -- separately (default 600 ticks = 300s); then the leader is told.
         if not remuda._butler_notify_policy(actual) then
           attempts, deferred = attempts - 1, deferred + 1
-          if deferred >= (remuda._butler_task_poke_deferrals or 600) then
-            remuda.cancel(poke)
-            _butler_session_trace("task_poke_timeout", actual .. " deferred")
-            pcall(remuda._butler_send, "butler", parent or "butler", "Task for " .. actual
-              .. " was not delivered: its pane never became free to type into. Resend it with"
-              .. " `remuda butler send " .. actual .. " TASK` once it is.")
-          end
+          if deferred >= (remuda._butler_task_poke_deferrals or 600) then give_up(" deferred") end
           return
         end
         remuda.cancel(poke)
@@ -757,10 +760,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
           return
         end
       end
-      if attempts >= (remuda._butler_task_poke_attempts or 60) then
-        remuda.cancel(poke)
-        _butler_session_trace("task_poke_timeout", actual)
-      end
+      if attempts >= (remuda._butler_task_poke_attempts or 60) then give_up("") end
     end })
   end
   return actual
