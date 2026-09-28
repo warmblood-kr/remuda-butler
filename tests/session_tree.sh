@@ -40,7 +40,7 @@ start_private_daemon() {
   "$REMUDA_BIN" -s "$SERVER" daemon >>"$DAEMON_LOG" 2>&1 &
   DAEMON_PID=$!
   ATTEMPT=0
-  while ! python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.settimeout(.1); s.connect(sys.argv[1])' "$SOCKET" >/dev/null 2>&1; do
+  while [ ! -S "$SOCKET" ] || ! "$REMUDA_BIN" -s "$SERVER" ls >/dev/null 2>&1; do
     ATTEMPT=$((ATTEMPT + 1))
     if [ "$ATTEMPT" -ge 100 ] || ! kill -0 "$DAEMON_PID" >/dev/null 2>&1; then
       echo "private daemon did not bind $SOCKET"
