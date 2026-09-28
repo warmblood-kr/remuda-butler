@@ -13,6 +13,14 @@ sessions, and MCP transport.
 [Install Butler](#install) · [Read the migration notes](https://github.com/warmblood-kr/remuda-butler/blob/main/BUTLER_MIGRATION.md) ·
 [View the source on GitHub](https://github.com/warmblood-kr/remuda-butler)
 
+## Cascading spawn
+
+![A terminal session tree: butler has spawned a lead session, which has in
+turn spawned several of its own worker sessions, shown nested in the
+sidebar](remuda-cascading-spawn.png)
+
+The butler spawns a lead; a worker can spawn its own workers (cascading).
+
 ## Install
 
 Install Remuda first, then install Butler as an extension:
