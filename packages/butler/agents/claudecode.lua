@@ -37,7 +37,6 @@ end
 -- Fresh topic dirs are created by Butler itself, so trusting them is safe.
 remuda._butler_agent_startup.claude = {
   ready = function(screen) return screen:find("─\n❯", 1, true) ~= nil end, -- idle composer under its rule
-  working = function(screen) return screen:find("esc to interrupt", 1, true) ~= nil end,
   modals = {
     { match = "Yes, I trust this folder", keys = { "<down>", "RET" } },
   },

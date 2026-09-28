@@ -32,6 +32,10 @@ remuda mod install warmblood-kr/remuda-butler
 remuda exec butler
 ```
 
+The launch command returns while readiness is still being checked. Use
+`remuda butler status` to inspect the result: exit 0 means ready, exit 75 means
+the readiness chain is still running, and exit 1 means every candidate failed.
+
 The installer also supports the optional service setup:
 
 ```sh

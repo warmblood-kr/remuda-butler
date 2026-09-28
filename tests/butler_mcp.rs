@@ -130,8 +130,17 @@ fn butler_status_is_a_live_mcp_tool_not_a_terminal_scrape() {
     assert_eq!(reply["result"]["isError"], false, "status failed: {reply}");
     assert_eq!(
         text_of(&reply),
-        "MODEL:Claude-Opus-4.6 CTX:12345 CTXWIN:200000 CTXPCT:6"
+        "MODEL:Claude-Opus-4.6 CTX:12345 CTXWIN:200000 CTXPCT:6 AGENT:claude"
     );
+    eval(
+        &path,
+        "remuda._butler_bus.agents.butler.kind='codex'; remuda._butler_attempts={{kind='claude',reason='login'},{kind='codex',reason='ready'}}",
+    );
+    assert_eq!(
+        text_of(&call(&path, "butler_status", json!({}))),
+        "MODEL:Claude-Opus-4.6 CTX:12345 CTXWIN:200000 CTXPCT:6 AGENT:codex SKIPPED:claude=login"
+    );
+    eval(&path, "remuda._butler_bus.agents.butler.kind='claude'; remuda._butler_attempts={}");
 
     // Missing context data remains explicit rather than being invented from
     // launch arguments or terminal rendering.
@@ -151,7 +160,7 @@ fn butler_status_is_a_live_mcp_tool_not_a_terminal_scrape() {
     assert!(output.status.success(), "status helper failed: {output:?}");
     assert_eq!(
         text_of(&call(&path, "butler_status", json!({}))),
-        "MODEL:sonnet CTX:? CTXWIN:? CTXPCT:?"
+        "MODEL:sonnet CTX:? CTXWIN:? CTXPCT:? AGENT:claude"
     );
 }
 
