@@ -70,7 +70,10 @@ class Handler(BaseHTTPRequestHandler):
         context = re.match(r"^/_matrix/client/v3/rooms/([^/]+)/context/([^/]+)$", route)
         if context:
             room = urllib.parse.unquote(context.group(1))
-            self._reply(200, {"event": {"room_id": room, "event_id": urllib.parse.unquote(context.group(2))}})
+            event_id = urllib.parse.unquote(context.group(2))
+            if event_id == "$other-room":
+                room = "!other:example.org"
+            self._reply(200, {"event": {"room_id": room, "event_id": event_id}})
             return
         if route != "/_matrix/client/v3/sync" and not re.match(
             r"^/_matrix/client/v3/rooms/[^/]+/messages$", route
@@ -109,7 +112,7 @@ class Handler(BaseHTTPRequestHandler):
         append(put_log_path, body)
         append(request_log_path, json.dumps({"method": "PUT", "path": self.path,
                                              "authorization": self.headers.get("Authorization")}))
-        if not re.match(r"^/_matrix/client/v3/rooms/[^/]+/send/m\.room\.message/", self.path):
+        if not re.match(r"^/_matrix/client/v3/rooms/[^/]+/send/[^/]+/", self.path):
             self._reply(200, {"ok": True})
             return
         if send_status == 200:
@@ -123,6 +126,9 @@ class Handler(BaseHTTPRequestHandler):
         append(put_log_path, body)
         append(request_log_path, json.dumps({"method": "POST", "path": self.path,
                                              "authorization": self.headers.get("Authorization")}))
+        if urllib.parse.urlsplit(self.path).path == "/_matrix/media/v3/upload":
+            self._reply(200, {"content_uri": "mxc://example.org/stub-media"})
+            return
         self._reply(200, {"ok": True})
 
 
