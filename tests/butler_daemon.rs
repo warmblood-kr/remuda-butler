@@ -396,7 +396,7 @@ fn a_human_attaches_through_a_real_terminal_and_detaches_with_ctrl_backslash() {
     }
 
     // 2. Keystrokes reach the far session, and its output comes back.
-    let held = viewer.attach().expect("drive the viewer");
+    let held = viewer.attach();
     held.write_raw(b"echo $((6*7))-typed\r").expect("type");
     wait_for(&path, "target", "42-typed");
 
