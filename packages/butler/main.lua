@@ -1147,6 +1147,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
         bus.pending_tasks[actual] = nil
         if delivered then return end
         local detail = reason or "delivery could not be verified"
+        if detail == "submit" then detail = "it was typed but not submitted" end
         _butler_session_trace("task_poke_timeout", actual .. " " .. detail)
         pcall(remuda._butler_send, "butler", parent or "butler", "Task for " .. actual
           .. " was not delivered: " .. detail
