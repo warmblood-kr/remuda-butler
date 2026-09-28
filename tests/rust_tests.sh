@@ -21,6 +21,16 @@ CORE_REF=${CORE_REF:-4bbd90f}
 scratch=$(mktemp -d /tmp/butler-rust.XXXXXX)
 trap 'rm -rf "$scratch"' EXIT
 
+source_home=${HOME:-/tmp}
+export CARGO_HOME=${CARGO_HOME:-$source_home/.cargo}
+export RUSTUP_HOME=${RUSTUP_HOME:-$source_home/.rustup}
+export HOME=$scratch/home
+export XDG_CONFIG_HOME=$scratch/config
+export XDG_CACHE_HOME=$scratch/cache
+export XDG_STATE_HOME=$scratch/state
+export REMUDA_RUNTIME_DIR=$scratch/runtime
+mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_STATE_HOME" "$REMUDA_RUNTIME_DIR"
+
 if [[ -z ${CORE_DIR:-} ]]; then
   CORE_DIR=$scratch/remuda
   git clone --quiet "$CORE_URL" "$CORE_DIR"

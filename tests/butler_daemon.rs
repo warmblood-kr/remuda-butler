@@ -2118,6 +2118,37 @@ fn butler_test_daemon(dir: &Path) -> (Daemon, PathBuf) {
 }
 
 #[test]
+fn butler_matrix_line_preserves_thread_and_media_metadata() {
+    let dir = scratch_dir("butler-matrix-line-metadata");
+    let (_daemon, path) = butler_test_daemon(&dir);
+    let extended = "@alice:example.org\t!room:example.org\t$event\t2026-09-28T01:02:03Z\tbody\\ntext\t$root\t$parent\tmxc://media.example.org/a\\nmxc://media.example.org/b";
+    let legacy = "@alice:example.org\t!room:example.org\t$legacy\t2026-09-28T01:02:03Z\tlegacy body";
+    let parsed = eval(
+        &path,
+        &format!(
+            r#"
+              remuda.emit_until_success = function(_, message)
+                remuda._matrix_captured = message
+                return true
+              end
+              remuda._butler_matrix_line({extended})
+              local current = remuda._matrix_captured.matrix
+              local first = table.concat({{ current.sender, current.event_id, current.thread_root,
+                current.in_reply_to, tostring(#current.media), table.concat(current.media, ",") }}, "|")
+              remuda._butler_matrix_line({legacy})
+              local old = remuda._matrix_captured.matrix
+              return first .. "\n" .. table.concat({{ old.event_id, old.thread_root,
+                old.in_reply_to, tostring(#old.media) }}, "|")
+            "#,
+            extended = lua_raw_string(extended),
+            legacy = lua_raw_string(legacy),
+        ),
+    );
+    assert_eq!(parsed,
+        "@alice:example.org|$event|$root|$parent|2|mxc://media.example.org/a,mxc://media.example.org/b\n$legacy|||0");
+}
+
+#[test]
 fn butler_helper_filters_to_the_allowlisted_room() {
     let dir = scratch_dir("butler-allowlist");
     let (_daemon, path) = butler_test_daemon(&dir);
@@ -4172,7 +4203,9 @@ fn matrix_mail_envelope_is_durable_and_deduplicated_across_daemon_restarts() {
     let (root, _, _) = seeded_mail_root(&dir, REPLY_F);
     let path = daemon::socket_path_in(&dir, "s");
     let matrix = r#"{ sender = "@alice:example.org", room_id = "!inbound:example.org",
-      event_id = "$matrix-event", created_at = "2026-09-28T01:02:03Z" }"#;
+      event_id = "$matrix-event", created_at = "2026-09-28T01:02:03Z",
+      thread_root = "$matrix-root", in_reply_to = "$parent-event",
+      media = { "mxc://media.example.org/image" } }"#;
 
     let daemon = Daemon::spawn(&dir);
     let first = eval(
@@ -4195,6 +4228,9 @@ fn matrix_mail_envelope_is_durable_and_deduplicated_across_daemon_restarts() {
     assert!(envelope.contains(r#""room_id":"!inbound:example.org""#), "{envelope}");
     assert!(envelope.contains(r#""event_id":"$matrix-event""#), "{envelope}");
     assert!(envelope.contains(r#""created_at":"2026-09-28T01:02:03Z""#), "{envelope}");
+    assert!(envelope.contains(r#""thread_root":"$matrix-root""#), "{envelope}");
+    assert!(envelope.contains(r#""in_reply_to":"$parent-event""#), "{envelope}");
+    assert!(envelope.contains(r#""media":["mxc://media.example.org/image"]"#), "{envelope}");
     drop(daemon);
 
     let _restarted = Daemon::spawn(&dir);
@@ -4203,11 +4239,17 @@ fn matrix_mail_envelope_is_durable_and_deduplicated_across_daemon_restarts() {
         &format!(
             r#"{}
                local from = {{ host = "matrix", alias = "@alice:example.org", session = "@alice:example.org", kind = "matrix" }}
-               return assert(M.queue(from, F, "hello from Matrix", nil, nil, nil, {matrix})).id"#,
+               local replay = assert(M.queue(from, F, "hello from Matrix", nil, nil, nil, {matrix}))
+               return replay.id .. "\n" .. replay.matrix.thread_root .. "\n" .. replay.matrix.in_reply_to
+                 .. "\n" .. replay.matrix.media[1]"#,
             reply_prelude(&root)
         ),
     );
-    assert_eq!(after_restart, ids[0], "a restarted mail store did not deduplicate the Matrix event");
+    let restart_fields: Vec<&str> = after_restart.lines().collect();
+    assert_eq!(restart_fields[0], ids[0], "a restarted mail store did not deduplicate the Matrix event");
+    assert_eq!(restart_fields[1], "$matrix-root");
+    assert_eq!(restart_fields[2], "$parent-event");
+    assert_eq!(restart_fields[3], "mxc://media.example.org/image");
 }
 
 #[test]
