@@ -13,11 +13,17 @@ telemetry.claude = {
     local line = status:read("*l")
     status:close()
     if not line then return {} end
-    local model, used, window, percent = line:match(
-      "^MODEL:([A-Za-z0-9_.%-?]+) CTX:([0-9?]+) CTXWIN:([0-9?]+) CTXPCT:([0-9?]+)$"
+    local model, model_id, used, window, percent = line:match(
+      "^MODEL:([A-Za-z0-9_.%-?]+) MODELID:([A-Za-z0-9_.%-?]+) CTX:([0-9?]+) CTXWIN:([0-9?]+) CTXPCT:([0-9?]+)$"
     )
+    if not model then
+      model, used, window, percent = line:match(
+        "^MODEL:([A-Za-z0-9_.%-?]+) CTX:([0-9?]+) CTXWIN:([0-9?]+) CTXPCT:([0-9?]+)$"
+      )
+      model_id = model
+    end
     if not model then return {} end
-    return { model = model, context_used = used, context_window = window, context_percent = percent }
+    return { model = model, model_id = model_id, context_used = used, context_window = window, context_percent = percent }
   end,
 }
 

@@ -97,11 +97,9 @@ const FAKE_COMPACTION_EXPECT: &str = r#"
   remuda.expect_option = function() return "1" end
   remuda.expect = function(_, branches)
     local branch = branches[1]
-    if branch.id == "switch-confirm" then
+    if branch.id == "restore-dialog" then
       branch.action("Switch model?\n1. Yes, switch to Sonnet\n2. No")
-    elseif branch.id == "restore-confirm" then
-      branch.action("Switch model?\n1. Yes, switch to Opus\n2. No")
-    elseif branch.id == "verified" then
+    elseif branch.id == "compact-complete" or branch.id == "verified" then
       fake_ctx, fake_model = "200000", "Opus"
       if branch.match() then branch.action() end
     end
@@ -4736,6 +4734,8 @@ fn butler_compaction_schedule_registration_is_idempotent() {
         ],
     );
     let path = daemon::socket_path_in(&dir, "s");
+    let trace_path = dir.join("compaction-trace.log");
+    eval(&path, &format!("remuda._butler_compaction_trace_path = {}", lua_raw_string(&trace_path.to_string_lossy())));
 
     eval(
         &path,
@@ -4822,6 +4822,9 @@ fn butler_compaction_schedule_sends_compact_when_idle_but_not_when_busy() {
         ],
     );
     let path = daemon::socket_path_in(&dir, "s");
+
+    let trace_path = dir.join("compaction-trace.log");
+    eval(&path, &format!("remuda._butler_compaction_trace_path = {}", lua_raw_string(&trace_path.to_string_lossy())));
 
     eval(&path, "remuda._butler_compaction_interval = 0.05");
     eval(&path, r#"remuda._butler_argv = {"sh"}"#);
@@ -5176,8 +5179,7 @@ done
         &format!(
             r#"
       remuda._butler_compaction_model = "sonnet"
-      remuda._butler_compaction_dialog_timeout = 1
-      remuda._butler_compaction_gate = function() return true, "sent", "500000" end
+      remuda._butler_compaction_config = {{dialog_timeout=1, completion_timeout=2, verification_timeout=2, input_settle=0.01}}
       remuda._butler_bus = remuda._butler_bus or {{agents={{}}, pending_tasks={{}}, notices={{}}}}
       local prior_contributions = remuda.contributions
       remuda.contributions = function(point)
@@ -5264,7 +5266,7 @@ done
         }
         eval(
             &path,
-            &format!("remuda._butler_compaction_tick({name:?}, false)"),
+            &format!("remuda.butler.compact({name:?})"),
         );
         let deadline = Instant::now() + Duration::from_secs(8);
         loop {

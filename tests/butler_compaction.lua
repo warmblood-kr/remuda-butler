@@ -4,10 +4,10 @@ local used, used_pct, busy, composer_empty, session_failure, attached, queued = 
 local screen = "mock idle screen"
 remuda = {
   _butler_test_mode = true,
-  _butler_compaction_threshold = 400000,
-  _butler_compaction_critical_threshold = 600000,
-  _butler_compaction_capture_gap = 3,
-  _butler_compaction_cooldown = 2,
+  _butler_compaction_config = {
+    watch = 400000, warn = 600000, critical = 800000, critical_pct = 90,
+    capture_gap = 3, cooldown_ticks = 2,
+  },
   _butler_bus = { agents = { butler = { kind = "claude" } } },
   _butler_telemetry_for = function() return { context_used = used, context_pct = used_pct } end,
   session = function()
@@ -36,6 +36,16 @@ end
 used, used_pct = "100000", 91
 assert(remuda.butler.ctx_level("butler").level == "critical",
   "critical percentage must override a low absolute usage count")
+remuda._butler_prompt_is_empty = function() return "EMPTY" end
+local urgent, urgent_reason = remuda.butler.compaction_policy("butler", {})
+assert(urgent and urgent_reason == "sent",
+  "critical percentage must trigger policy even when absolute usage is low")
+local dry_state = { idle_ticks = 3, cooldown_ticks = 2, last_idle_capture_at = 50 }
+used, used_pct = "600000", nil
+local _, dry_reason = remuda.butler.compaction_policy("butler", dry_state, true)
+assert(dry_reason == "skipped_cooldown" and dry_state.idle_ticks == 3
+  and dry_state.cooldown_ticks == 2 and dry_state.last_idle_capture_at == 50,
+  "dry-run policy must not mutate its input state")
 used_pct = nil
 remuda.contributions = function(point)
   if point == "butler.agent" then
@@ -66,9 +76,9 @@ remuda._butler_compaction_now = function() return fake_now end
 local function tick(ctx, is_busy)
   fake_now = fake_now + 3
   used, busy = ctx, is_busy
-  local should_send, reason, actual_ctx = remuda._butler_compaction_gate("butler", state)
+  local should_send, reason, actual_ctx = remuda.butler.compaction_policy("butler", state)
   if should_send then sends = sends + 1 end
-  return should_send, reason, actual_ctx
+  return should_send, reason, tostring(actual_ctx)
 end
 
 local send, reason, ctx = tick("399999", false)
@@ -76,8 +86,8 @@ assert(not send and reason == "skipped_small" and ctx == "399999" and sends == 0
   "small context must not send /compact and must report skipped_small with ctx")
 
 send, reason, ctx = tick("?", false)
-assert(not send and reason == "skipped_unknown" and ctx == "?" and sends == 0,
-  "unknown context must not send /compact and must report skipped_unknown with ctx")
+assert(not send and reason == "skipped_small" and ctx == "?" and sends == 0,
+  "unknown context must classify as ok and not send /compact")
 session_failure = true
 send, reason, ctx = tick("500000", false)
 assert(not send and reason == "skipped_unknown" and ctx == "500000" and sends == 0,
@@ -175,6 +185,10 @@ assert(answer == nil and phase == "ready", "already-switched statusline must adv
 answer, phase = remuda._butler_compaction_visible_answer(
   "claude", "Unknown modal\nPress 1 to continue", "sonnet")
 assert(answer == nil and phase == "unknown", "unrecognized dialog must be reported, never answered blindly")
+assert(remuda._butler_compaction_is_unknown_dialog("Mystery dialog\nPress 8 to continue"),
+  "modal marker plus visible option should be classified as an unknown dialog")
+assert(not remuda._butler_compaction_is_unknown_dialog("Earlier the dialog said press 1 to continue"),
+  "transcript prose must not be mistaken for an active dialog")
 
 local claude_sequence = remuda._butler_compaction_sequence("claude", "opus", "sonnet")
 assert(table.concat(claude_sequence, "|") == "/model sonnet|/compact|/model opus",
