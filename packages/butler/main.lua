@@ -855,6 +855,11 @@ end
 local function one_line(value)
   return (tostring(value or ""):match("^[^\r\n]*") or ""):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
 end
+local function readiness_timeout()
+  local configured = tonumber(remuda._butler_readiness_timeout or os.getenv("REMUDA_BUTLER_READINESS_TIMEOUT"))
+  if configured and configured > 0 then return configured end
+  return 15
+end
 -- The one generic launch chooser serves Butler and every managed member. Kinds
 -- are lifecycle contributions; the chooser only reads their data and callbacks.
 -- Member launches must not hold the daemon image while an agent paints its
@@ -938,7 +943,7 @@ local function choose(candidates, opts, done)
       trace(attempt); start_next(); return
     end
     state = { id = id, entry = entry, attempt = attempt, name = name,
-      started = os.time(), timeout = opts.timeout or remuda._butler_readiness_timeout or 15,
+      started = os.time(), timeout = opts.timeout or readiness_timeout(),
       handled = {}, last_screen = "", dialog_seen = nil }
     local test_builder = remuda._butler_agent_builders[id]
       and remuda._butler_agent_builders[id] ~= BUILTIN_AGENT_BUILDERS[id]
@@ -1064,6 +1069,11 @@ local function configured_agent_order()
   return order
 end
 remuda._butler_configured_agent_order = configured_agent_order
+local function readiness_chain_budget()
+  -- Include time for the ordered candidates plus room for the scheduler to
+  -- notice each timeout and close a failed session before advancing.
+  return math.ceil(#configured_agent_order() * readiness_timeout() + 15)
+end
 local function setup_telemetry(kind, spec)
   local adapter = TELEMETRY_ADAPTERS[kind]
   return adapter and adapter.setup and adapter.setup(spec) or {}
@@ -2064,7 +2074,7 @@ function remuda._butler_status()
   local name = butler_name or remuda._butler_initial_name
   local selected = remuda._butler_selected_agent
   if remuda._butler_start_pending or remuda._butler_launching then
-    local lines = { "launching" }
+    local lines = { "launching", "readiness budget: " .. tostring(readiness_chain_budget()) }
     for _, attempt in ipairs(remuda._butler_attempts or {}) do
       lines[#lines + 1] = attempt.kind .. ": " .. attempt.reason
         .. (attempt.detail and attempt.detail ~= "" and (": " .. one_line(attempt.detail)) or "")

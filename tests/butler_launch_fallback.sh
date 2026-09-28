@@ -211,7 +211,7 @@ sleep 30
 STUB
 chmod +x "$SCRATCH/pending-bin/claude"
 export PATH="$SCRATCH/pending-bin:/usr/bin:/bin"
-"$REMUDA_BIN" -s "$SERVER" daemon >"$SCRATCH/pending-daemon.log" 2>&1 &
+REMUDA_BUTLER_READINESS_TIMEOUT=2 "$REMUDA_BIN" -s "$SERVER" daemon >"$SCRATCH/pending-daemon.log" 2>&1 &
 for _ in $(seq 50); do [[ -S $REMUDA_RUNTIME_DIR/remuda/$SERVER.sock ]] && break; sleep 0.1; done
 "$REMUDA_BIN" -s "$SERVER" exec butler >"$SCRATCH/exec-pending.out" 2>"$SCRATCH/exec-pending.err" ||
   fail "pending exec should remain asynchronous"
@@ -225,6 +225,8 @@ if [[ $HAS_TYPED_FAIL == function ]]; then
 fi
 grep -F 'launching' "$SCRATCH/status-pending.out" "$SCRATCH/status-pending.err" >/dev/null ||
   fail "pending status omitted launching prefix: $(cat "$SCRATCH/status-pending.out" "$SCRATCH/status-pending.err")"
+grep -F 'readiness budget: 19' "$SCRATCH/status-pending.err" >/dev/null ||
+  fail "pending status omitted the configured two-candidate chain budget: $(cat "$SCRATCH/status-pending.err")"
 "$REMUDA_BIN" -s "$SERVER" -e 'return "responsive"' >"$SCRATCH/root-responsive.out" &
 ROOT_RESPONSIVE_PID=$!
 for _ in $(seq 10); do ! kill -0 "$ROOT_RESPONSIVE_PID" 2>/dev/null && break; sleep 0.1; done

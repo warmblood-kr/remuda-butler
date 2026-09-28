@@ -125,15 +125,35 @@ remuda_bin_dir=$(dirname "$remuda_bin")
 # Older Remuda cores lack `remuda.fail`, so their launching error is recognized
 # by its text while the package remains compatible with those cores.
 wait_butler_ready() {
+	readiness_timeout=${REMUDA_BUTLER_READINESS_TIMEOUT:-15}
+	case "$readiness_timeout" in
+	'' | *[!0-9]*) readiness_timeout=15 ;;
+	esac
+	[ "$readiness_timeout" -gt 0 ] || readiness_timeout=15
+	agent_order=${REMUDA_BUTLER_AGENT_ORDER:-claude,codex}
+	candidate_count=$(printf '%s\n' "$agent_order" | awk -F'[,[:space:]]+' '{ for (i = 1; i <= NF; i++) if ($i != "") n++ } END { print n + 0 }')
+	[ "$candidate_count" -gt 0 ] || candidate_count=2
+	readiness_budget=$((candidate_count * readiness_timeout + 15))
+	max_attempt=$((readiness_budget * 2 + 1))
 	attempt=0
 	last_status=""
-	while [ "$attempt" -lt 60 ]; do
+	while [ "$attempt" -lt "$max_attempt" ]; do
 		if last_status=$(env -u PWD remuda butler status 2>&1); then
 			printf '%s\n' "$last_status"
 			return 0
 		else
 			status_code=$?
 		fi
+		reported_budget=$(printf '%s\n' "$last_status" | sed -n 's/^readiness budget: \([0-9][0-9]*\)$/\1/p' | tail -1)
+		case "$reported_budget" in
+		'' | *[!0-9]*) ;;
+		*)
+			if [ "$reported_budget" -gt "$readiness_budget" ]; then
+				readiness_budget=$reported_budget
+				max_attempt=$((readiness_budget * 2 + 1))
+			fi
+			;;
+		esac
 		if [ "$status_code" -eq 75 ]; then
 			:
 		else
@@ -146,7 +166,7 @@ wait_butler_ready() {
 		sleep 0.5
 	done
 	[ -n "$last_status" ] && printf '%s\n' "$last_status" >&2
-	die "Butler did not become ready within 30 seconds"
+	die "Butler did not become ready within $readiness_budget seconds"
 }
 
 # Butler is an independently distributed extension. Installing it is explicit
