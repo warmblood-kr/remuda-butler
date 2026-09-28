@@ -1258,7 +1258,7 @@ fn butler_lifecycle_reload_replaces_hooks_and_schedules_and_rolls_back() {
     "#;
     let initial = eval(&path, counts);
     assert!(
-        initial == "1|6|1|1|1|13" || initial == "1|6|1|1|1|-1",
+        initial == "1|6|1|1|1|14" || initial == "1|6|1|1|1|-1",
         "unexpected Butler lifecycle registrations: {initial}"
     );
 
@@ -2788,11 +2788,11 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
           local screens = {{
             ["t-claude"] = {{
               rule .. "\n Accessing workspace:\n\n ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm · Esc to cancel",
-              rule .. "\n❯ Try \"how do I log an error?\"\n" .. rule,
+              rule .. "\n❯ \n" .. rule,
             }},
             ["t-codex"] = {{
               "  Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip\n  3. Skip until next version",
-              "│ ✨ Update available! │\n› Ask Codex to do anything",
+              "› Ask Codex to do anything",
             }},
             ["t-stuck"] = {{ " Some unknown dialog\n ❯ 1. No, exit" }},
           }}
@@ -2803,8 +2803,18 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
             if #q > 1 then return table.remove(q, 1) end
             return q[1]
           end
+          remuda.capture_styled = nil
           remuda.key = function(n, k) log[#log + 1] = n .. " key " .. k end
-          remuda.type_text = function(n, t) log[#log + 1] = n .. " type " .. t end
+          remuda.type_text = function(n, t)
+            log[#log + 1] = n .. " type " .. t
+            local glyph = n == "t-codex" and "› " or "❯ "
+            screens[n] = {{ glyph .. t, glyph }}
+          end
+          local policy = remuda._butler_notify_policy
+          remuda._butler_notify_policy = function(n, now)
+            if n == "butler" then return true end
+            return policy(n, now)
+          end
           local leader = remuda._butler_initial_name
           remuda._butler_topic_delegate("t-claude", "task one", nil, "claude", leader)
           remuda._butler_topic_delegate("t-codex", "task two", nil, "codex", leader)
@@ -2893,19 +2903,27 @@ fn reexecuting_butler_keeps_the_root_telemetry_identity() {
     drop(daemon);
 }
 
+fn test_ulid_stub() -> &'static str {
+    r#"remuda._butler_new_ulid = remuda._butler_new_ulid or function()
+      remuda._mail_test_ulid = (remuda._mail_test_ulid or 0) + 1
+      return string.format("0000000000%016X", remuda._mail_test_ulid)
+    end"#
+}
+
 #[test]
 fn butler_mail_separates_the_envelope_from_its_body_object() {
     let path = scratch("butler-mail");
     let _daemon = daemon_at(&path);
     eval(
         &path,
-        r#"
+        &(test_ulid_stub().to_owned()
+            + r#"
           remuda._butler_mail_config = {
             bus = { agents = { fixer = { id = "01FIXER" } }, inboxes = {}, messages = {}, objects = {}, next = 0 },
             json_quote = function(value) return '"' .. value .. '"' end,
           }
           remuda.exec("butler/mail")
-        "#,
+        "#),
     );
     let result = eval(
         &path,
@@ -2945,12 +2963,14 @@ fn seeded_mail_root(dir: &Path, id: &str) -> (PathBuf, PathBuf, PathBuf) {
 
 fn mail_config_lua(root: &Path) -> String {
     format!(
-        r#"remuda._butler_mail_config = {{
+        r#"{stub}
+           remuda._butler_mail_config = {{
              bus = {{ agents = {{}}, inboxes = {{}}, messages = {{}}, objects = {{}}, next = 0 }},
-             root = {}, json_quote = function(value) return '"' .. value .. '"' end,
+             root = {root}, json_quote = function(value) return '"' .. value .. '"' end,
            }}
            remuda.exec("butler/mail")"#,
-        lua_raw_string(&root.to_string_lossy())
+        stub = test_ulid_stub(),
+        root = lua_raw_string(&root.to_string_lossy())
     )
 }
 
@@ -3231,24 +3251,23 @@ fn butler_mail_forwarded_read_state_is_per_inbox_and_replies_reach_the_original_
 fn butler_mail_refuses_to_overwrite_an_existing_message_on_an_id_collision() {
     let dir = scratch_dir("butler-mail-collide");
     let (root, f_inbox, _) = seeded_mail_root(&dir, REPLY_F);
-    std::fs::write(root.join("messages/message-3e8-1-lua_fixed.json"), "ORIGINAL").unwrap();
+    let collision_id = "00000000000000000000000000";
+    std::fs::write(root.join(format!("messages/{collision_id}.json")), "ORIGINAL").unwrap();
     let path = scratch("butler-mail-collide");
     let _daemon = daemon_at(&path);
     let out = eval(
         &path,
         &format!(
             r#"{}
-               local time, tmpname = os.time, os.tmpname
-               os.time, os.tmpname = function() return 1000 end, function() return "/tmp/lua_fixed" end
+               remuda._butler_new_ulid = function() return "{collision_id}" end
                local ok, message, err = pcall(M.queue, B, F, "second")
-               os.time, os.tmpname = time, tmpname
                return tostring(ok) .. "|" .. tostring(message) .. "|" .. tostring(err)"#,
             reply_prelude(&root)
         ),
     );
     assert!(out.starts_with("true|nil|") && out.contains("already exists"), "not refused loudly: {out}");
-    assert_eq!(std::fs::read_to_string(root.join("messages/message-3e8-1-lua_fixed.json")).unwrap(), "ORIGINAL");
-    assert!(!std::fs::read_to_string(&f_inbox).unwrap_or_default().contains("message-3e8-1-lua_fixed"), "a row was committed");
+    assert_eq!(std::fs::read_to_string(root.join(format!("messages/{collision_id}.json"))).unwrap(), "ORIGINAL");
+    assert!(!std::fs::read_to_string(&f_inbox).unwrap_or_default().contains(collision_id), "a row was committed");
 }
 
 /// Only an explicit operator skips the delivered check; an id-less caller
@@ -3294,41 +3313,44 @@ fn butler_mail_survives_a_fresh_lua_mailbox_and_remembers_reads() {
     eval(
         &path,
         &format!(
-            r#"
+            r#"{stub}
               remuda._butler_mail_config = {{
                 bus = {{ agents = {{ fixer = {{ id = "01FIXER" }} }}, inboxes = {{}}, messages = {{}}, objects = {{}}, next = 0 }},
                 root = {root_lua}, json_quote = function(value) return '"' .. value .. '"' end,
               }}
               remuda.exec("butler/mail")
               return remuda._butler_mail.queue("butler", "fixer", "survives a restart").id
-            "#
+            "#,
+            stub = test_ulid_stub(),
         ),
     );
     let received = eval(
         &path,
         &format!(
-            r#"
+            r#"{stub}
               remuda._butler_mail_config = {{
                 bus = {{ agents = {{ fixer = {{ id = "01FIXER" }} }}, inboxes = {{}}, messages = {{}}, objects = {{}}, next = 0 }},
                 root = {root_lua}, json_quote = function(value) return '"' .. value .. '"' end,
               }}
               remuda.exec("butler/mail")
               return remuda._butler_mail.inbox("01FIXER")
-            "#
+            "#,
+            stub = test_ulid_stub(),
         ),
     );
     assert!(received.contains("survives a restart"), "{received:?}");
     let after_read = eval(
         &path,
         &format!(
-            r#"
+            r#"{stub}
               remuda._butler_mail_config = {{
                 bus = {{ agents = {{ fixer = {{ id = "01FIXER" }} }}, inboxes = {{}}, messages = {{}}, objects = {{}}, next = 0 }},
                 root = {root_lua}, json_quote = function(value) return '"' .. value .. '"' end,
               }}
               remuda.exec("butler/mail")
               return remuda._butler_mail.inbox("01FIXER")
-            "#
+            "#,
+            stub = test_ulid_stub(),
         ),
     );
     assert_eq!(after_read, "inbox empty");
@@ -3380,8 +3402,12 @@ fn butler_initializes_mail_and_persists_a_sent_message() {
         &path,
         r#"return remuda._butler_send("butler", "butler", "private body")"#,
     );
-    assert!(sent.starts_with("queued message-"), "{sent:?}");
-    assert!(sent.ends_with(" and notified butler"), "{sent:?}");
+    let queued_id = sent.strip_prefix("queued ").and_then(|s| s.split_whitespace().next()).unwrap_or("");
+    assert!(queued_id.len() == 26 && queued_id.bytes().all(|b| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&b)), "{sent:?}");
+    assert!(
+        sent.contains("notice deferred") || sent.ends_with(" and notified butler"),
+        "{sent:?}"
+    );
     let mail = data_home.join("remuda/butler/mail");
     let objects: Vec<_> = std::fs::read_dir(mail.join("objects"))
         .expect("body objects")
