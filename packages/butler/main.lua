@@ -2501,7 +2501,8 @@ function remuda._butler_compaction_tick(target_name, dry_run)
         end },
         { id = "already-low", match = function(value)
           local model = compaction_model(value)
-          return model and model:lower():find(low:lower(), 1, true) ~= nil
+          return not is_unknown_dialog(value)
+            and model and model:lower():find(low:lower(), 1, true) ~= nil
         end, action = after_switch },
       }, { timeout = dialog_timeout, unknown = is_unknown_dialog,
         on_unknown = unknown_dialog,

@@ -39,9 +39,11 @@ assert(remuda.butler.ctx_level("butler").level == "critical",
 used_pct = nil
 remuda.contributions = function(point)
   if point == "butler.agent" then
-    return { { id = "claude", entry = {
-      working = function(_, value) return value:find("esc to interrupt", 1, true) ~= nil end,
-    } } }
+    local function working(_, value) return value:find("esc to interrupt", 1, true) ~= nil end
+    return {
+      { id = "claude", entry = { working = working } },
+      { id = "codex", entry = { working = working } },
+    }
   end
   return {}
 end
@@ -186,4 +188,50 @@ assert(not submit("EMPTY", "") and submit_count == 0,
   "submit must skip if the composer changed before the delayed Enter")
 assert(submit("NON-EMPTY", "/compact") and submit_count == 1,
   "submit may confirm only the exact /compact composer text")
-print("ok - Butler compaction context and two-tick idle gate")
+
+-- Drive the lifecycle-owned schedule callback without arguments, as the core
+-- scheduler does. The tick stub uses the real policy and records the Codex
+-- compact command so this covers state closure, warn-level policy, and action.
+local saved_bus, saved_telemetry = remuda._butler_bus, remuda._butler_telemetry_for
+local saved_schedule, saved_cancel, saved_exec, saved_emit =
+  remuda.schedule, remuda.cancel, remuda.exec, remuda.emit
+local registered = {}
+remuda.schedule = function(spec)
+  registered[#registered + 1] = spec
+  return spec
+end
+remuda.cancel = function() end
+remuda.exec = function() end
+remuda.emit = function() end
+remuda._butler_bus = { agents = { codex_member = { kind = "codex" } }, pending_tasks = {}, notices = {} }
+remuda._butler_telemetry_for = function()
+  return { context_used = "600000" }
+end
+local scheduled_commands = {}
+remuda.send = function(name, command)
+  scheduled_commands[#scheduled_commands + 1] = { name = name, command = command }
+end
+remuda._butler_compaction_tick = function()
+  local member_state = {}
+  local should_send = remuda.butler.compaction_policy("codex_member", member_state)
+  if should_send then remuda.send("codex_member", "/compact") end
+end
+local prior_mt = getmetatable(_G)
+setmetatable(_G, { __index = { remuda = remuda } })
+local lifecycle = dofile("packages/butler/init.lua")
+setmetatable(_G, prior_mt)
+local schedule_state = { compaction_enabled = true }
+lifecycle.start(schedule_state)
+local compaction_schedule
+for _, spec in ipairs(lifecycle.schedules) do
+  if spec.name == "butler-compaction" then compaction_schedule = spec end
+end
+assert(compaction_schedule, "init.lua must declare the compaction schedule")
+compaction_schedule.run()
+assert(#scheduled_commands == 1 and scheduled_commands[1].name == "codex_member"
+  and scheduled_commands[1].command == "/compact",
+  "one enabled lifecycle tick must compact an idle Codex member at warn level")
+remuda._butler_bus, remuda._butler_telemetry_for = saved_bus, saved_telemetry
+remuda.schedule, remuda.cancel, remuda.exec, remuda.emit =
+  saved_schedule, saved_cancel, saved_exec, saved_emit
+print("ok - Butler compaction context, idle gate, and lifecycle schedule")
