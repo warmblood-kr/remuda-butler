@@ -160,4 +160,50 @@ do
   assert(#state.typed == 1 and state.typed[1] == task, "task was not typed exactly once after modal")
   assert(state.completed and state.cancelled, "modal task delivery did not complete")
 end
+
+-- A paste whose START is absent must never trigger a second whole-task paste;
+-- a known modal that ignores its key must time out and release the task.
+do
+  local state = { typed = 0, keys = 0, cancelled = false }
+  local fake = {}
+  function fake.schedule(spec) state.callback = spec.run; return "bounded-poll" end
+  function fake.cancel() state.cancelled = true end
+  function fake.capture() return "Update available\n2. Skip" end
+  function fake.key() state.keys = state.keys + 1 end
+  function fake.type_text() state.typed = state.typed + 1 end
+  fake.session = function() return { is_busy = false } end
+  M.schedule(fake, "codex", "stuck-modal", "stuck", "leader", "task", {
+    modals = { { match = "2. Skip", keys = { "2" } } },
+    ready_timeout = 4,
+    on_done = function(ok, reason) state.ok, state.reason = ok, reason end,
+  })
+  for _ = 1, 10 do if not state.cancelled then state.callback() end end
+  assert(state.keys == 1 and state.typed == 0, "stuck modal was re-keyed or task typed")
+  assert(state.cancelled and state.ok == false and state.reason == "startup modal did not clear",
+    "stuck modal did not time out and release pending delivery")
+end
+
+do
+  local state = { sends = 0, checks = 0, cancelled = false }
+  local fake = {}
+  function fake.schedule(spec) state.callback = spec.run; return "no-start-poll" end
+  function fake.cancel() state.cancelled = true end
+  function fake.capture()
+    state.checks = state.checks + 1
+    if state.checks == 1 then return "Ask Codex" end
+    return "Ask Codex\n❯ truncated tail"
+  end
+  function fake.type_text() state.sends = state.sends + 1 end
+  function fake.session() return { is_busy = false } end
+  M.schedule(fake, "codex", "no-start", "no-start", "leader", "START complete task", {
+    ready = function(screen) return screen:find("Ask Codex", 1, true) ~= nil end,
+    empty = function() return "NON-EMPTY" end,
+    submit_timeout = 3,
+    on_done = function(ok, reason) state.ok, state.reason = ok, reason end,
+  })
+  for _ = 1, 10 do if not state.cancelled then state.callback() end end
+  assert(state.sends == 1, "missing START caused a second whole-task paste")
+  assert(state.cancelled and state.ok == false and state.reason == "submit",
+    "unverified partial prompt did not report submit failure")
+end
 print("first prompt delivery passed for Claude and Codex")

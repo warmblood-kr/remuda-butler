@@ -31,7 +31,8 @@ end
 
 local function schedule(remuda, kind, actual, name, parent, task, options)
   options = options or {}
-  local poll, ticks, attempts, verify_ticks = nil, 0, 0, 0
+  local poll, startup_ticks, deferred_ticks, verify_ticks = nil, 0, 0, 0
+  local attempts = 0
   local handled_modals, settle_until, task_seen_in_composer = {}, 0, false
   local function finish(ok, reason)
     remuda.cancel(poll)
@@ -42,7 +43,6 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
     end
   end
   poll = remuda.schedule({ every = 0.5, run = function()
-    ticks = ticks + 1
     local captured, screen = pcall(remuda.capture, actual)
     if not captured then
       finish(false, "could not capture the agent screen")
@@ -50,17 +50,26 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
     end
 
     if attempts == 0 then
+      startup_ticks = startup_ticks + 1
       for index, modal in ipairs(options.modals or {}) do
         if screen:find(modal.match, 1, true) then
           if not handled_modals[index] then
             handled_modals[index] = true
             for _, key in ipairs(modal.keys or {}) do pcall(remuda.key, actual, key) end
-            settle_until = ticks + 3
+            settle_until = startup_ticks + 3
+          end
+          if startup_ticks >= (options.ready_timeout or 60) then
+            finish(false, "startup modal did not clear")
           end
           return
         end
       end
-      if ticks < settle_until then return end
+      if startup_ticks < settle_until then
+        if startup_ticks >= (options.ready_timeout or 60) then
+          finish(false, "startup modal did not clear")
+        end
+        return
+      end
       local is_ready = ready(kind, screen)
       if options.ready then
         local checked, result = pcall(options.ready, screen)
@@ -73,17 +82,19 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
           allowed = checked and result == true
         end
         if not allowed then
-          if ticks >= (options.timeout or 60) then
+          deferred_ticks = deferred_ticks + 1
+          if deferred_ticks >= (options.timeout or 600) then
             finish(false, "deferred")
           end
           return
         end
         attempts = 1
         verify_ticks = 0
-        -- One atomic paste after the agent has enabled its composer. The
-        -- longer settle also ensures Codex sees Return as a separate submit.
-        pcall(remuda.type_text, actual, task, 2)
-      elseif ticks >= (options.ready_timeout or 60) then
+        -- Keep this nonblocking: a long terminal sleep stalls every daemon
+        -- callback, including notice and lifecycle work.
+        local typed = pcall(remuda.type_text, actual, task, 0.1)
+        if not typed then finish(false, "type failed") end
+      elseif startup_ticks >= (options.ready_timeout or 60) then
         finish(false, "the composer never became ready")
       end
       return
@@ -101,19 +112,16 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
       local checked, session = pcall(remuda.session, actual)
       session_busy = checked and session and session.is_busy == true
     end
+    if session_busy then
+      finish(true)
+      return
+    end
     if started and not empty then task_seen_in_composer = true end
-    if started and (empty or session_busy) then
+    if started and empty then
       finish(true)
       return
     end
     if task_seen_in_composer and empty then
-      finish(true)
-      return
-    end
-    -- The retry is issued only after the full task was visible in the
-    -- composer. If the next capture is empty, the submit was accepted even
-    -- when the TUI no longer keeps the task in its scrollback.
-    if options.return_retried and empty then
       finish(true)
       return
     end
@@ -125,14 +133,8 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
       verify_ticks = 0
       return
     end
-    if verify_ticks >= 12 and attempts == 1 and not task_seen_in_composer then
-      -- The initial send may have raced a screen transition. A single full
-      -- retry is permitted; the long prompt is never split into chunks.
-      attempts = 2
-      verify_ticks = 0
-      pcall(remuda.type_text, actual, task, 2)
-    elseif verify_ticks >= 12 then
-      finish(false, "deferred")
+    if verify_ticks >= (options.submit_timeout or 600) then
+      finish(false, "submit")
     end
   end })
   return poll
