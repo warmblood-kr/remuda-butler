@@ -15,14 +15,6 @@ local function compact(text)
   return tostring(text):gsub("%s+", "")
 end
 
-local function same_prompt_text(left, right)
-  local function normalize(text)
-    return tostring(text):gsub("\194\160", " "):gsub("\r\n", "\n"):gsub("\r", "\n")
-      :match("^%s*(.-)%s*$")
-  end
-  return normalize(left) == normalize(right)
-end
-
 local function prompt_start_visible(screen, task)
   local visible, expected = compact(screen), compact(task)
   if expected == "" then return false end
@@ -42,6 +34,14 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
   local poll, startup_ticks, deferred_ticks, verify_ticks = nil, 0, 0, 0
   local attempts = 0
   local handled_modals, settle_until, task_seen_in_composer = {}, 0, false
+  local verify_started
+  local function now()
+    if options.now then
+      local ok, value = pcall(options.now)
+      if ok and tonumber(value) then return tonumber(value) end
+    end
+    return os.time()
+  end
   local function finish(ok, reason)
     remuda.cancel(poll)
     if options.on_done then
@@ -104,7 +104,7 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
         -- Keep this nonblocking: a long terminal sleep stalls every daemon
         -- callback, including notice and lifecycle work.
         local typed = pcall(remuda.type_text, actual, task, 0.1)
-        if not typed then finish(false, "type failed") end
+        if not typed then finish(false, "type failed") else verify_started = now() end
       else
         local human_active = false
         if options.human_active then
@@ -145,7 +145,8 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
       return
     end
     local placeholder = composer_text:match("^%[?Pasted text #%d+%s*%+%s*%d+%s+lines?%]?%s*$") ~= nil
-    local composer_is_task = not empty and (same_prompt_text(composer_text, task) or placeholder)
+      or composer_text:match("^%[Pasted Content %d+ chars%]$") ~= nil
+    local composer_is_task = not empty and (compact(composer_text) == compact(task) or placeholder)
     if composer_is_task then task_seen_in_composer = true end
     if started and empty then
       finish(true)
@@ -173,7 +174,7 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
       verify_ticks = 0
       return
     end
-    if verify_ticks >= (options.submit_timeout or 600) then
+    if verify_started and now() - verify_started >= (options.submit_timeout or 300) then
       finish(false, "submit")
     end
   end })

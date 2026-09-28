@@ -12,6 +12,8 @@ main_file:close()
 assert(main:find('remuda.exec("butler/prompt")', 1, true), "Butler does not load prompt delivery")
 assert(main:find("PROMPT_DELIVERY.schedule(remuda, kind, actual, name, parent, task", 1, true),
   "agent launch bypasses the verified prompt delivery path")
+assert(main:find("submit_timeout = remuda._butler_submit_timeout or 300", 1, true),
+  "submit verification timeout has no seconds-based Butler setting")
 
 local function count(text, needle)
   local n, at = 0, 1
@@ -22,7 +24,7 @@ local function count(text, needle)
   end
 end
 
-local function exercise(kind, drop_submissions)
+local function exercise(kind, drop_submissions, busy_echo)
   local state = {
     tick = 0,
     ready_at = 24,
@@ -74,7 +76,7 @@ local function exercise(kind, drop_submissions)
   fake.session = function()
     -- Echoing text makes the terminal busy even though the first Return was
     -- dropped. Busy alone must not complete delivery.
-    return { is_busy = drop_submissions and state.composer ~= "" }
+    return { is_busy = busy_echo and state.composer ~= "" }
   end
   function fake._butler_send(_, parent, warning)
     state.failure = parent .. ": " .. warning
@@ -135,10 +137,11 @@ end
 
 exercise("claude")
 exercise("codex")
-exercise("claude", true)
+exercise("claude", true, false)
+exercise("claude", true, true)
 
 local function exercise_composer_after_paste(composer_after_paste, mixed)
-  local state = { composer = "", sends = 0, returns = 0, transcript = {}, cancelled = false }
+  local state = { composer = "", sends = 0, returns = 0, transcript = {}, cancelled = false, now = 0 }
   local task = "START exact delegated task\nsecond line of task"
   local fake = {}
   function fake.schedule(spec) state.callback = spec.run; return "paste-state-poll" end
@@ -165,9 +168,13 @@ local function exercise_composer_after_paste(composer_after_paste, mixed)
       return state.composer == "" and "EMPTY" or "NON-EMPTY", state.composer
     end,
     submit_timeout = 6,
+    now = function() return state.now end,
     on_done = function(ok, reason) state.ok, state.reason = ok, reason end,
   })
-  for _ = 1, 20 do if not state.cancelled then state.callback() end end
+  for _ = 1, 20 do
+    state.now = state.now + 0.5
+    if not state.cancelled then state.callback() end
+  end
   assert(state.sends == 1, "task was pasted more than once")
   assert(state.cancelled, "paste verification poll did not stop")
   if mixed then
@@ -180,6 +187,7 @@ local function exercise_composer_after_paste(composer_after_paste, mixed)
 end
 
 exercise_composer_after_paste("[Pasted text #1 +2 lines]", false)
+exercise_composer_after_paste("[Pasted Content 2048 chars]", false)
 exercise_composer_after_paste("START exact delegated task\nsecond line of task HUMAN follow-up", true)
 
 -- Known startup dialogs must be answered before the task is typed, and the
@@ -240,7 +248,7 @@ do
 end
 
 do
-  local state = { sends = 0, checks = 0, cancelled = false }
+  local state = { sends = 0, checks = 0, cancelled = false, now = 0 }
   local fake = {}
   function fake.schedule(spec) state.callback = spec.run; return "no-start-poll" end
   function fake.cancel() state.cancelled = true end
@@ -255,9 +263,13 @@ do
     ready = function(screen) return screen:find("Ask Codex", 1, true) ~= nil end,
     empty = function() return "NON-EMPTY" end,
     submit_timeout = 3,
+    now = function() return state.now end,
     on_done = function(ok, reason) state.ok, state.reason = ok, reason end,
   })
-  for _ = 1, 10 do if not state.cancelled then state.callback() end end
+  for _ = 1, 10 do
+    state.now = state.now + 1
+    if not state.cancelled then state.callback() end
+  end
   assert(state.sends == 1, "missing START caused a second whole-task paste")
   assert(state.cancelled and state.ok == false and state.reason == "submit",
     "unverified partial prompt did not report submit failure")

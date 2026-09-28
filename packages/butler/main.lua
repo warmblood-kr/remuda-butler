@@ -1142,6 +1142,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
       end,
       timeout = remuda._butler_task_poke_deferrals or 600,
       ready_timeout = remuda._butler_task_poke_attempts or 60,
+      submit_timeout = remuda._butler_submit_timeout or 300,
       on_done = function(delivered, reason)
         bus.pending_tasks[actual] = nil
         if delivered then return end
@@ -1226,19 +1227,39 @@ local NOTICE_STABLE_SECONDS = 3
 -- plain text, so a dim ghost suggestion reads as NON-EMPTY and defers (#137).
 local PROMPT_GLYPHS = { "❯", ">", "›" }
 function remuda._butler_prompt_is_empty(kind, screen)
-  local text
+  local text, prompt_at
   -- Claude draws its empty composer as '❯' + NO-BREAK SPACE; Lua's %s
   -- misses U+00A0, so fold it to a space before parsing (every kind).
   screen = screen:gsub("\194\160", " ")
-  for line in (screen .. "\n"):gmatch("(.-)\n") do
+  local lines = {}
+  for line in (screen .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
+  for index, line in ipairs(lines) do
     local rest = line:gsub("^%s+", "")
     if rest:sub(1, 3) == "│" then rest = rest:sub(4):gsub("^%s+", "") end
     for _, glyph in ipairs(PROMPT_GLYPHS) do
-      if rest:sub(1, #glyph) == glyph then text = rest:sub(#glyph + 1) break end
+      if rest:sub(1, #glyph) == glyph then
+        text, prompt_at = rest:sub(#glyph + 1), index
+        break
+      end
     end
   end
   if not text then return "UNPARSEABLE", "" end
   text = text:gsub("│%s*$", ""):match("^%s*(.-)%s*$")
+  local parts = { text }
+  for index = prompt_at + 1, #lines do
+    local rest = lines[index]:gsub("^%s+", "")
+    if rest:sub(1, 3) == "╰" or rest:sub(1, 3) == "└" or rest:sub(1, 3) == "─" then break end
+    if rest:match("^%? for shortcuts")
+        or (kind == "codex" and (rest:lower():find("context left", 1, true)
+        or rest:match("^[^%s]+%s+[^%s]+%s+·"))) then
+      break
+    end
+    if kind == "claude" and rest:sub(1, 3) == "│" then
+      rest = rest:sub(4):gsub("│%s*$", "")
+    end
+    parts[#parts + 1] = rest
+  end
+  text = table.concat(parts, "\n"):match("^%s*(.-)%s*$")
   if text == "" then return "EMPTY", text end
   local startup = remuda._butler_agent_startup[kind] or {}
   for _, placeholder in ipairs(startup.placeholders or {}) do
