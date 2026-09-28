@@ -453,7 +453,7 @@ fn notice_recovery_preserves_idle_draft_and_respects_attached_human() {
     );
     eval(&path, r#"local notice = remuda._butler_bus.notices.m1.text
         local split = assert(notice:find('Read it:', 1, true)) + #'Read it:'
-        remuda._notice_test_state.screen = '› ' .. notice:sub(1, split) .. '\n' .. notice:sub(split + 2)"#);
+        remuda._notice_test_state.screen = '› ' .. notice:sub(1, split) .. '\n' .. notice:sub(split + 1)"#);
     let deadline = Instant::now() + PATIENCE;
     while eval(&path, "return tostring(remuda._butler_bus.notices.m1 ~= nil)") != "false" {
         assert!(Instant::now() < deadline, "wrapped existing Butler notice was not submitted");
