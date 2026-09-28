@@ -20,10 +20,17 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 GOLDEN=$REPO/tests/golden
 CORE_URL=${CORE_URL:-https://github.com/warmblood-kr/remuda.git}
 # Keep in step with tests/rust_tests.sh.
-CORE_REF=${CORE_REF:-4bbd90f}
+CORE_REF=${CORE_REF:-b6c1389}
 T=$(mktemp -d /tmp/bgg.XXXXXX) S=bgg
+source_home=${HOME:-/tmp}
+export CARGO_HOME=${CARGO_HOME:-$source_home/.cargo}
+export RUSTUP_HOME=${RUSTUP_HOME:-$source_home/.rustup}
 cleanup() {
-  remuda -s "$S" stop -f >/dev/null 2>&1 || true
+  if [[ ${REMUDA_RUNTIME_DIR:-} == "$T/run" ]]; then
+    remuda -s "$S" stop -f >/dev/null 2>&1 || true
+  else
+    echo "refusing to stop golden daemon outside its scratch runtime" >&2
+  fi
   pkill -f "$T/" 2>/dev/null || true
   rm -rf "$T"
 }
@@ -37,10 +44,12 @@ if [[ -z ${REMUDA_BIN:-} ]]; then
 fi
 
 export HOME=$T/home REMUDA_RUNTIME_DIR=$T/run XDG_DATA_HOME=$T/data XDG_CONFIG_HOME=$T/config
+export XDG_CACHE_HOME=$T/cache XDG_STATE_HOME=$T/state XDG_RUNTIME_DIR=$T/xdg-run
 export REMUDA_BUTLER_PROJECT_HOME=$T/projects REMUDA_BUTLER_SERVER=$S REMUDA_NO_UPDATE_CHECK=1
 unset REMUDA_BUTLER_TOKEN REMUDA_BUTLER_CONFIG REMUDA_BUTLER_AGENT_ID REMUDA_BUTLER_LEADER_ID \
   REMUDA_BUTLER_SESSION_NAME REMUDA_BUTLER_AGENT_ALIAS REMUDA_BUTLER_AGENT_KIND REMUDA_SESSION_CAPABILITY
-mkdir -p "$HOME" "$T/bin" "$T/argv" "$T/projects" "$XDG_DATA_HOME/remuda/mods/butler"
+mkdir -p "$HOME" "$XDG_CACHE_HOME" "$XDG_STATE_HOME" "$XDG_RUNTIME_DIR" \
+  "$T/bin" "$T/argv" "$T/projects" "$XDG_DATA_HOME/remuda/mods/butler"
 cp "$REMUDA_BIN" "$T/bin/remuda"
 cp -R "$REPO/extension.toml" "$REPO/packages" "$XDG_DATA_HOME/remuda/mods/butler/"
 # A fake claude: records its argv, one argument per NUL-free line, and stays up.
