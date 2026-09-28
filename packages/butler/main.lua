@@ -1728,6 +1728,9 @@ command(80, "forward", "  remuda butler forward <message-id> <member> [note...]"
   return remuda._butler_forward(current_agent(caller) or OPERATOR, args[2], args[3],
     #args >= 4 and words_after(args, 4) or nil)
 end)
+command(100, "matrix", remuda.butler.matrix.cli_usage(), function(args, caller)
+  return remuda.butler.matrix.cli(args, current_agent(caller))
+end)
 remuda._butler_command_run = function(verb, args, caller)
   local entry = command_entries[verb]
   if entry then return entry.run(args, caller) end

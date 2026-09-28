@@ -143,6 +143,28 @@ team members. `remuda butler send FROM TO MESSAGE...` is an operator form, not
 the normal way for a member to communicate.
 ]]
         end },
+      { id = "matrix", order = 50,
+        agents_md = function()
+          return [[Matrix is the human-facing adapter.
+- For status, use `remuda butler matrix status`; never call REST/curl.
+- For rooms, use `remuda butler matrix rooms`; never call REST/curl.
+- For history, use `remuda butler matrix history`; never call REST/curl.
+- For thread, use `remuda butler matrix thread`; never call REST/curl.
+- For event or get, use `remuda butler matrix event|get`; never call REST/curl.
+- For download, use `remuda butler matrix download`; never call REST/curl.
+- For send, use `remuda butler matrix send`; never call REST/curl. `send -` is refused until core #213.
+- For reply, use `remuda butler matrix reply`; never call REST/curl.
+- For react, use `remuda butler matrix react`; never call REST/curl.
+- For upload, use `remuda butler matrix upload`; never call REST/curl.
+- For redact, use `remuda butler matrix redact`; never call REST/curl.
+- For join, use `remuda butler matrix join`; never call REST/curl. Operator-only, advisory at the same UID until core #218.
+- For leave, use `remuda butler matrix leave`; never call REST/curl. Operator-only, advisory at the same UID until core #218.
+- Use `--json` for machine output and put options before verb arguments.
+]]
+        end,
+        prompt = function()
+          return "For Matrix, use `remuda butler matrix VERB`; never call Matrix REST or curl directly. "
+        end },
       { id = "leader", order = 90,
         prompt = function(_, ctx) return "Your leader is " .. ctx.parent .. "." end },
     },
@@ -168,6 +190,21 @@ the normal way for a member to communicate.
         run = function(_, args, caller) return host._butler_command_run("reply", args, caller) end },
       { id = "forward", order = 80, verb = "forward", usage = "  remuda butler forward <message-id> <member> [note...]",
         run = function(_, args, caller) return host._butler_command_run("forward", args, caller) end },
+      { id = "matrix", order = 100, verb = "matrix",
+        usage = [[  remuda butler matrix [--json] status
+  remuda butler matrix [--json] rooms
+  remuda butler matrix [--json] [--room ROOM] [-n N] history
+  remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
+  remuda butler matrix [--json] [-o PATH] download MXC
+  remuda butler matrix [--json] [--room ROOM] send TEXT
+  remuda butler matrix [--json] [--room ROOM] reply EVENT_ID TEXT
+  remuda butler matrix [--json] [--room ROOM] react EVENT_ID KEY
+  remuda butler matrix [--json] [--room ROOM] upload PATH
+  remuda butler matrix [--json] [--room ROOM] redact EVENT_ID [--reason TEXT]
+  remuda butler matrix [--json] join ROOM (operator)
+  remuda butler matrix [--json] leave ROOM (operator)]],
+        run = function(_, args, caller) return host._butler_command_run("matrix", args, caller) end },
     },
   },
 }

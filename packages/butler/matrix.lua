@@ -6,6 +6,7 @@ local config = remuda._butler_matrix_config
 remuda.exec("butler/matrix_request")
 remuda.exec("butler/matrix_read")
 remuda.exec("butler/matrix_write")
+remuda.exec("butler/matrix_cli")
 local relay_path = data_home .. "/remuda/mods/butler/packages/butler/matrix_relay.py"
 local helper_src = remuda._butler_helper_src_override
 if not helper_src then

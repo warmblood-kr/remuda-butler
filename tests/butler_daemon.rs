@@ -1322,7 +1322,7 @@ fn butler_lifecycle_reload_replaces_hooks_and_schedules_and_rolls_back() {
     "#;
     let initial = eval(&path, counts);
     assert!(
-        initial == "1|7|1|1|1|15" || initial == "1|7|1|1|1|-1",
+        initial == "1|7|1|1|1|17" || initial == "1|7|1|1|1|-1",
         "unexpected Butler lifecycle registrations: {initial}"
     );
 
@@ -2113,6 +2113,15 @@ fn butler_test_daemon(dir: &Path) -> (Daemon, PathBuf) {
         String::from_utf8_lossy(&out.stderr)
     );
     eval(&path, "remuda.exec('butler/matrix')");
+    (daemon, path)
+}
+
+fn butler_cli_test_daemon(dir: &Path) -> (Daemon, PathBuf) {
+    let daemon = Daemon::spawn(dir);
+    let path = daemon::socket_path_in(dir, "s");
+    eval(&path, "remuda._butler_test_mode = 'lifecycle'; remuda._butler_skip_relay = true");
+    let out = remuda_timed(dir, &["-s", "s", "butler", "--headless"]);
+    assert!(out.status.success(), "load Butler CLI: {}", String::from_utf8_lossy(&out.stderr));
     (daemon, path)
 }
 
@@ -4066,6 +4075,155 @@ fn matrix_reply_tool_uses_async_matrix_request_without_subprocess() {
     assert_eq!(literal, "-");
     assert_eq!(eval(&path, "return remuda._matrix_error_events"), "0",
         "successful literal dash MCP send emitted an error");
+}
+
+#[test]
+fn butler_matrix_cli_pending_routes_async_send_and_serializes_json() {
+    let dir = scratch_dir("butler-matrix-cli-pending");
+    let (_daemon, path) = butler_cli_test_daemon(&dir);
+    let room = "!cli:example.org";
+    let (token_path, config_path) = butler_config(&dir, "cli", "http://matrix.example.org",
+        room, "@bot:example.org", "");
+    eval(&path, include_str!("support/fake_http.lua"));
+    eval(&path, &format!(
+        "remuda._butler_matrix_config = {{ token_path = {}, config_path = {} }}; remuda.exec('butler/matrix')",
+        lua_raw_string(&token_path.to_string_lossy()), lua_raw_string(&config_path.to_string_lossy())));
+    eval(&path, &format!(r#"
+      remuda.http.respond_prefix("PUT", "http://matrix.example.org/_matrix/client/v3/rooms/%21cli%3Aexample.org/send/m.room.message/",
+        {{ status = 200, headers = {{}}, body = '{{"event_id":"$cli"}}' }})
+    "#));
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
+        .args(["-s", "s", "butler", "matrix", "--json", "--room", room, "send", "hello async"])
+        .env("REMUDA_RUNTIME_DIR", &dir)
+        .env("REMUDA_NO_UPDATE_CHECK", "1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn().expect("spawn Matrix CLI command");
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let call_count = eval(&path, "return #remuda.http.calls");
+        if call_count == "1" { break; }
+        assert!(Instant::now() < deadline, "Matrix CLI never dispatched its async send");
+        assert!(child.try_wait().expect("poll Matrix CLI").is_none(),
+            "Matrix CLI exited before its async result arrived");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(child.try_wait().expect("poll pending Matrix CLI").is_none(),
+        "extension command must remain pending until its async callback");
+    eval(&path, "remuda.http.tick()");
+    let output = child.wait_with_output().expect("collect Matrix CLI output");
+    assert!(output.status.success(), "Matrix CLI failed: {}", String::from_utf8_lossy(&output.stderr));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("parse Matrix CLI JSON");
+    assert_eq!(json["sent"], 1);
+    assert_eq!(json["event_ids"][0], "$cli");
+    assert!(output.stderr.is_empty(), "successful Matrix CLI wrote stderr");
+
+    eval(&path, r#"
+      remuda.http.respond("GET", "http://matrix.example.org/_matrix/client/v3/rooms/%21cli%3Aexample.org/event/%24event",
+        { status = 200, headers = {}, body = '{"event_id":"$event","sender":"@a:example.org","content":{"body":"found"}}' })
+    "#);
+    let mut get = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
+        .args(["-s", "s", "butler", "matrix", "--json", "--room", room, "get", "$event"])
+        .env("REMUDA_RUNTIME_DIR", &dir)
+        .env("REMUDA_NO_UPDATE_CHECK", "1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn().expect("spawn Matrix event alias command");
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        if eval(&path, "remuda.http.tick(); return #remuda.http.calls") == "2" { break; }
+        assert!(Instant::now() < deadline, "event|get alias never dispatched");
+        assert!(get.try_wait().expect("poll event alias").is_none(), "event|get returned before callback");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    eval(&path, "remuda.http.tick()");
+    let output = get.wait_with_output().expect("collect event alias output");
+    assert!(output.status.success(), "event|get failed: {}", String::from_utf8_lossy(&output.stderr));
+    let event: serde_json::Value = serde_json::from_slice(&output.stdout).expect("parse event alias JSON");
+    assert_eq!(event["json"]["event_id"], "$event");
+}
+
+#[test]
+fn butler_matrix_cli_client_disconnect_cancels_active_word() {
+    let dir = scratch_dir("butler-matrix-cli-cancel");
+    let (_daemon, path) = butler_cli_test_daemon(&dir);
+    let room = "!cli-cancel:example.org";
+    let (token_path, config_path) = butler_config(&dir, "cli-cancel", "http://matrix.example.org",
+        room, "@bot:example.org", "");
+    eval(&path, include_str!("support/fake_http.lua"));
+    eval(&path, r#"
+      local pending = remuda.pending
+      remuda.pending = function(options)
+        remuda._test_pending_on_cancel = options.on_cancel
+        return pending(options)
+      end
+    "#);
+    eval(&path, &format!(
+        "remuda._butler_matrix_config = {{ token_path = {}, config_path = {} }}; remuda.exec('butler/matrix')",
+        lua_raw_string(&token_path.to_string_lossy()), lua_raw_string(&config_path.to_string_lossy())));
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
+        .args(["-s", "s", "butler", "matrix", "--json", "--room", room, "send", "cancel me"])
+        .env("REMUDA_RUNTIME_DIR", &dir)
+        .env("REMUDA_NO_UPDATE_CHECK", "1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn().expect("spawn cancellable Matrix CLI command");
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        if eval(&path, "return #remuda.http.calls") == "1" { break; }
+        assert!(Instant::now() < deadline, "Matrix CLI never started cancellable work");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(child.try_wait().expect("poll cancellable CLI").is_none(), "outstanding async work should keep CLI pending");
+    child.kill().expect("disconnect CLI client");
+    let _ = child.wait_with_output().expect("reap disconnected CLI");
+    let cancelled = eval(&path, r#"
+      assert(type(remuda._test_pending_on_cancel) == "function", "CLI did not register on_cancel")
+      remuda._test_pending_on_cancel("client_disconnected")
+      remuda.http.tick()
+      return tostring(remuda.http.pending[1].cancelled)
+    "#);
+    assert_eq!(cancelled, "true", "pending cancellation must cancel the active Matrix word");
+}
+
+#[test]
+fn butler_matrix_cli_refuses_send_dash_and_fails_cleanly_without_pending() {
+    let dir = scratch_dir("butler-matrix-cli-compat");
+    let (_daemon, path) = butler_cli_test_daemon(&dir);
+    let room = "!cli:example.org";
+    let (token_path, config_path) = butler_config(&dir, "cli", "http://matrix.example.org",
+        room, "@bot:example.org", "");
+    eval(&path, include_str!("support/fake_http.lua"));
+    eval(&path, &format!(
+        "remuda._butler_matrix_config = {{ token_path = {}, config_path = {} }}; remuda.exec('butler/matrix')",
+        lua_raw_string(&token_path.to_string_lossy()), lua_raw_string(&config_path.to_string_lossy())));
+    let help = remuda_timed(&dir, &["-s", "s", "butler", "help"]);
+    assert!(help.status.success(), "Butler help failed: {}", String::from_utf8_lossy(&help.stderr));
+    let help = String::from_utf8_lossy(&help.stdout);
+    assert!(help.contains("event|get EVENT_ID"), "help omitted the event alias row");
+    assert!(help.contains("join ROOM (operator)"), "help omitted operator guidance");
+    let dash = remuda_timed(&dir, &["-s", "s", "butler", "matrix", "send", "-"]);
+    assert!(!dash.status.success(), "send - must be refused by CLI glue");
+    assert!(String::from_utf8_lossy(&dash.stderr).contains("stdin"), "unexpected send - error: {}",
+        String::from_utf8_lossy(&dash.stderr));
+    assert_eq!(eval(&path, "return #remuda.http.calls"), "0", "send - unexpectedly touched Matrix");
+
+    let agent_join = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
+        .args(["-s", "s", "butler", "matrix", "join", room])
+        .env("REMUDA_RUNTIME_DIR", &dir)
+        .env("REMUDA_NO_UPDATE_CHECK", "1")
+        .env("REMUDA_BUTLER_AGENT_ID", "agent1")
+        .output().expect("run agent join command");
+    assert!(!agent_join.status.success(), "join must be operator-only");
+    assert!(String::from_utf8_lossy(&agent_join.stderr).contains("operator-only"),
+        "unexpected agent join error: {}", String::from_utf8_lossy(&agent_join.stderr));
+    assert_eq!(eval(&path, "return #remuda.http.calls"), "0", "agent join reached the network");
+
+    eval(&path, "remuda.pending = nil");
+    let old_core = remuda_timed(&dir, &["-s", "s", "butler", "matrix", "--json", "rooms"]);
+    assert!(!old_core.status.success(), "missing remuda.pending must fail nonzero");
+    assert_eq!(String::from_utf8_lossy(&old_core.stderr).trim(),
+        "Matrix CLI requires a remuda core with deferred replies (core #213/#239)");
 }
 
 #[test]
