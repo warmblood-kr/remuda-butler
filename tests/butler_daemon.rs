@@ -4138,6 +4138,196 @@ fn butler_compaction_trace_records_registered_skipped_and_sent() {
     );
 }
 
+/// Exercise the Claude compaction state machine with real private daemon PTYs.
+/// The fake Claude process prints a statusline, presents numbered model dialogs,
+/// consumes the key, and changes model/context exactly as Claude does.
+#[test]
+#[cfg(unix)]
+fn butler_compaction_fake_claude_scenarios_send_only_visible_keys() {
+    let dir = scratch_dir("butler-fake-claude");
+    let (_daemon, path) = butler_test_daemon(&dir);
+    eval(&path, "remuda._butler_compaction_interval = 45");
+    let trace_path = dir.join("compaction-trace.log");
+    eval(
+        &path,
+        &format!(
+            "remuda._butler_compaction_trace_path = {}",
+            lua_raw_string(&trace_path.to_string_lossy())
+        ),
+    );
+
+    let script = dir.join("fake-claude.sh");
+    std::fs::write(
+        &script,
+        r#"#!/bin/bash
+log=$1
+scenario=$2
+model=Opus
+ctx=500000
+first=1
+if [ "$scenario" = absent ]; then model=Sonnet; fi
+paint() { printf '\033[H\033[2JMODEL:%s CTX:%s\n' "$model" "$ctx"; }
+paint
+while IFS= read -r line; do
+  printf 'CMD:%s\n' "$line" >> "$log"
+  case "$line" in
+    '/model sonnet')
+      if [ "$scenario" = timeout ]; then continue; fi
+      if [ "$scenario" = unknown ] && [ "$first" = 1 ]; then
+        first=0; model=Sonnet; paint; printf 'Mystery dialog\nPress 8 to continue\n'; continue
+      fi
+      if [ "$model" = Sonnet ]; then paint; continue; fi
+      if [ "$scenario" = option2 ]; then
+        printf 'Switch model?\n1. No\n2. Yes, switch to Sonnet\n'
+      else
+        printf 'Switch model?\n1. Yes, switch to Sonnet\n2. No\n'
+      fi
+      IFS= read -r -n 1 answer || exit 0
+      printf 'KEY:%s\n' "$answer" >> "$log"
+      case "$answer" in 1|2) model=Sonnet ;; esac
+      paint
+      ;;
+    '/model Opus')
+      printf 'Switch model?\n1. Yes, switch to Opus\n2. No\n'
+      IFS= read -r -n 1 answer || exit 0
+      printf 'KEY:%s\n' "$answer" >> "$log"
+      case "$answer" in 1|2) model=Opus ;; esac
+      paint
+      ;;
+    '/model Sonnet') paint ;;
+    '/compact') ctx=200000; paint ;;
+  esac
+done
+"#,
+    )
+    .expect("write fake Claude");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    eval(
+        &path,
+        &format!(
+            r#"
+      remuda._butler_compaction_model = "sonnet"
+      remuda._butler_compaction_dialog_timeout = 1
+      remuda._butler_compaction_gate = function() return true, "sent", "500000" end
+      remuda._butler_agent_startup = {{claude={{working=function() return false end}}}}
+      remuda._butler_prompt_is_empty = function() return "EMPTY" end
+      remuda._butler_send = function(_, _, message)
+        remuda._fake_compaction_reports = remuda._fake_compaction_reports or {{}}
+        table.insert(remuda._fake_compaction_reports, message)
+      end
+      local original_session = remuda.session
+      remuda._fake_attached = {{}}
+      remuda.session = function(name)
+        return {{is_busy=false, attached=remuda._fake_attached[name] == true}}
+      end
+      local original_key = remuda.key
+      remuda.key = function(name, key)
+        original_key(name, key)
+        if remuda._fake_attach_after_first_key == name then
+          local deadline = os.time() + 3
+          repeat
+            if remuda.capture(name):find("MODEL:Sonnet", 1, true) then break end
+            remuda.sleep(0.05)
+          until os.time() >= deadline
+          remuda._fake_attached[name] = true
+          remuda._fake_attach_after_first_key = nil
+        end
+      end
+      remuda._butler_telemetry_for = function(agent)
+        local screen = remuda.capture(agent.session_name)
+        return {{context_used=screen:match("CTX:%s*(%d+)"),
+          model=screen:match("MODEL:%s*([%w%.%-]+)")}}
+      end
+      remuda._fake_setup_compaction = function(name, kind, log, scenario)
+        remuda.new(name, {{"bash", {script:?}, log, scenario}}, nil, {{}})
+        remuda._butler_bus.agents[name] = {{id=name, kind=kind, session_name=name}}
+      end
+    "#
+        ),
+    );
+
+    for (name, scenario, expected) in [
+        (
+            "fake-happy",
+            "happy",
+            "CMD:/model sonnet\nKEY:1\nCMD:/compact\nCMD:/model Opus\nKEY:1\n",
+        ),
+        (
+            "fake-absent",
+            "absent",
+            "CMD:/model sonnet\nCMD:/compact\nCMD:/model Sonnet\n",
+        ),
+        (
+            "fake-option2",
+            "option2",
+            "CMD:/model sonnet\nKEY:2\nCMD:/compact\nCMD:/model Opus\nKEY:1\n",
+        ),
+        (
+            "fake-unknown",
+            "unknown",
+            "CMD:/model sonnet\nCMD:/model Opus\nKEY:1\n",
+        ),
+        ("fake-timeout", "timeout", "CMD:/model sonnet\n"),
+        (
+            "fake-attached",
+            "happy",
+            "CMD:/model sonnet\nKEY:1\nCMD:/model Opus\nKEY:1\n",
+        ),
+    ] {
+        let log = dir.join(format!("{name}.log"));
+        eval(
+            &path,
+            &format!("remuda._fake_setup_compaction({name:?}, 'claude', {log:?}, {scenario:?})"),
+        );
+        wait_for(&path, name, "MODEL:");
+        if name == "fake-attached" {
+            eval(
+                &path,
+                &format!("remuda._fake_attach_after_first_key = {name:?}"),
+            );
+        }
+        eval(
+            &path,
+            &format!("remuda._butler_compaction_tick({name:?}, false)"),
+        );
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            let in_progress = eval(&path, &format!(
+                "return tostring(remuda._butler_compaction_members_state[{name:?}].compaction_in_progress == true)"
+            ));
+            let log_text = std::fs::read_to_string(&log).unwrap_or_default();
+            if in_progress == "false" && log_text == expected {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "fake scenario {scenario} stalled; log={log_text:?}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let got = std::fs::read_to_string(&log).unwrap_or_default();
+        assert_eq!(got, expected, "unexpected commands/keys for {scenario}");
+        if scenario == "unknown" || scenario == "timeout" || name == "fake-attached" {
+            let reports = eval(
+                &path,
+                "return table.concat(remuda._fake_compaction_reports or {}, '\\n')",
+            );
+            let marker = match scenario {
+                "unknown" => "unrecognized dialog",
+                "timeout" => "first model dialog timed out",
+                _ => "aborted: human attached",
+            };
+            assert!(
+                reports.contains(marker),
+                "expected report {marker:?}, got {reports:?}"
+            );
+        }
+    }
+    drop(_daemon);
+}
+
 /// Same real-process substitution as
 /// `butler_watchdog_relaunches_a_session_that_really_died`, but the witness
 /// here is the trace FILE `_butler_session_trace` in `packages/butler/init.lua`

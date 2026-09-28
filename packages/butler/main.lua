@@ -2062,13 +2062,17 @@ function remuda._butler_compaction_tick(target_name, dry_run)
       local model = compaction_model(value)
       return model and prior and model:lower() == prior:lower()
     end
-    watch_restore = function()
+    watch_restore = function(ignore_unknown)
       watch({
         { id = "restore-dialog", match = is_switch_dialog, action = function(value)
           if answer_switch_dialog(value) then watch_restore() end
         end },
         { id = "restore-prior", match = restore_match, action = after_restored },
-      }, { timeout = dialog_timeout, unknown = is_unknown_dialog,
+      }, { timeout = dialog_timeout, unknown = function(value)
+          if not is_unknown_dialog(value) then return false end
+          return not (ignore_unknown and is_unknown_dialog(ignore_unknown)
+            and compaction_model(value) == compaction_model(ignore_unknown))
+        end,
         on_unknown = function(value)
           register_unknown_dialog(value)
           finish_failed_restore("unrecognized dialog during restore: " .. tostring(value):sub(1, 180))
@@ -2097,7 +2101,7 @@ function remuda._butler_compaction_tick(target_name, dry_run)
         restore_requested = true
         local sent, err = pcall(remuda.send, session_name, "/model " .. prior)
         if not sent then finish_failed_restore("could not request prior model: " .. tostring(err)); return end
-        watch_restore()
+        watch_restore(is_unknown_dialog(current_screen) and current_screen or nil)
         return
       end
       finish_failed_restore("model status is neither prior nor low; restore was not sent")
