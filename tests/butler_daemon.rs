@@ -3054,6 +3054,82 @@ fn butler_mail_reply_tolerates_old_missing_and_self_referencing_parents() {
     assert!(b_view.contains("in reply to message-orphan (thread message-gone)"), "{b_view}");
 }
 
+const REPLY_W: &str = "01REP1YW0RKER0000000000000";
+
+/// RFC 5322 §3.6.6 + postfix redirection: forward re-delivers the SAME message
+/// (id, sender, body untouched) with a resent row; a second delivery is refused.
+#[test]
+fn butler_mail_forward_redelivers_the_original_with_a_resent_row() {
+    let dir = scratch_dir("butler-mail-forward");
+    let (root, _, _) = seeded_mail_root(&dir, REPLY_F);
+    let path = scratch("butler-mail-forward");
+    let _daemon = daemon_at(&path);
+    let prelude = format!(
+        r#"{}
+           local W = {{ host = "local", id = "{REPLY_W}", alias = "worker", session = "worker" }}"#,
+        reply_prelude(&root)
+    );
+    let a = eval(&path, &format!("{prelude}\nreturn assert(M.queue(B, F, \"question\")).id"));
+    let envelope = root.join(format!("messages/{a}.json"));
+    let before = std::fs::read(&envelope).unwrap();
+    let out = eval(
+        &path,
+        &format!(
+            r#"{prelude}
+               assert(M.forward(F, "{a}", W, "see para 2"))
+               local _, again = M.forward(F, "{a}", W)
+               local _, back = M.forward(W, "{a}", F)
+               local _, stranger = M.forward(W, "message-nope", B)
+               return table.concat({{ tostring(again), tostring(back), tostring(stranger) }}, "\n")"#
+        ),
+    );
+    let v: Vec<&str> = out.lines().collect();
+    assert!(v[0].contains("already delivered to worker"), "loop guard: {out}");
+    assert!(v[1].contains("already delivered to fixer"), "loop guard back: {out}");
+    assert!(v[2].contains("not delivered"), "only your own mail: {out}");
+    assert_eq!(std::fs::read(&envelope).unwrap(), before, "the original envelope is never rewritten");
+    let row = std::fs::read_to_string(root.join(format!("inboxes/{}.jsonl", hex_component(REPLY_W)))).unwrap();
+    assert!(row.contains(&format!(r#""message_id":"{a}","resent":{{"#)) && row.contains("note_object_id"), "{row}");
+
+    let fresh = eval(&path, &format!("{prelude}\nreturn M.inbox(W.id)"));
+    assert!(fresh.contains(&format!("[{a} from local/butler ")), "original sender kept: {fresh}");
+    assert!(fresh.contains("  forwarded by fixer to worker at ") && fresh.contains(": see para 2"), "{fresh}");
+    assert!(fresh.contains("question"), "original body kept: {fresh}");
+}
+
+/// Butler's approval (a) and (b): read state is per inbox, and a reply to a
+/// forwarded message goes to the ORIGINAL sender, not the forwarder.
+#[test]
+fn butler_mail_forwarded_read_state_is_per_inbox_and_replies_reach_the_original_sender() {
+    let dir = scratch_dir("butler-mail-fwd-read");
+    let (root, _, _) = seeded_mail_root(&dir, REPLY_F);
+    let path = scratch("butler-mail-fwd-read");
+    let _daemon = daemon_at(&path);
+    let out = eval(
+        &path,
+        &format!(
+            r#"{}
+               local W = {{ host = "local", id = "{REPLY_W}", alias = "worker", session = "worker" }}
+               local a = assert(M.queue(B, F, "question"))
+               assert(M.forward(F, a.id, W))
+               M.inbox(F.id)
+               local w_unread_after_f_read = M.unread(W.id)
+               local w_view = M.inbox(W.id)
+               local f_again = M.inbox(F.id)
+               local r = assert(M.reply(W, a.id, "answer from worker"))
+               return table.concat({{ tostring(w_unread_after_f_read), tostring(w_view:find("question", 1, true) ~= nil),
+                 f_again, r.to[1].alias, r.in_reply_to == a.id and "threaded" or "not" }}, "\n")"#,
+            reply_prelude(&root)
+        ),
+    );
+    let v: Vec<&str> = out.lines().collect();
+    assert_eq!(v[0], "1", "the forwarder reading it leaves the target unread");
+    assert_eq!(v[1], "true", "the target still sees it");
+    assert_eq!(v[2], "inbox empty", "the target reading it does not re-open the forwarder's copy");
+    assert_eq!(v[3], "butler", "a reply to forwarded mail goes to the original sender");
+    assert_eq!(v[4], "threaded");
+}
+
 #[test]
 fn butler_mail_survives_a_fresh_lua_mailbox_and_remembers_reads() {
     let dir = scratch_dir("butler-mail-reload");
