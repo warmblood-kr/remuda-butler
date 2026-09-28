@@ -3380,7 +3380,8 @@ fn butler_initializes_mail_and_persists_a_sent_message() {
         &path,
         r#"return remuda._butler_send("butler", "butler", "private body")"#,
     );
-    assert!(sent.starts_with("queued message-"), "{sent:?}");
+    let queued_id = sent.strip_prefix("queued ").and_then(|s| s.split_whitespace().next()).unwrap_or("");
+    assert!(queued_id.len() == 26 && queued_id.bytes().all(|b| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&b)), "{sent:?}");
     assert!(sent.ends_with(" and notified butler"), "{sent:?}");
     let mail = data_home.join("remuda/butler/mail");
     let objects: Vec<_> = std::fs::read_dir(mail.join("objects"))

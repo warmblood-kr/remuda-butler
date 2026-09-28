@@ -70,7 +70,7 @@ cp "$XDG_DATA_HOME/remuda/butler/sessions/w1/AGENTS.md" "$OUT/agents-launch.md"
 R butler inbox lead1 | python3 -c '
 import re, sys
 text = sys.stdin.read()
-m = re.search(r"^\[[^\]]*\] Welcome to Butler\n(.*?)(?=^\[message-|\Z)", text, re.S | re.M)
+m = re.search(r"^\[[^\]]*\] Welcome to Butler\n(.*?)(?=^\[message-|^\[[0-9A-HJKMNP-TV-Z]{26} from |\Z)", text, re.S | re.M)
 sys.stdout.write(m.group(1) if m else "NO WELCOME MESSAGE\n" + text)' >"$OUT/welcome.txt"
 cp "$T/argv/lead1" "$OUT/argv-claude.txt"
 
