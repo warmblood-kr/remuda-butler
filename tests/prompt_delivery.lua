@@ -1,0 +1,97 @@
+-- Run with: luajit tests/prompt_delivery.lua
+-- Fake agent TUIs remain unavailable for 24 scheduler ticks, then expose
+-- their kind-specific composer marker. Before readiness they keep only the
+-- tail of an injected prompt, matching the observed first-prompt failure.
+
+local prompt_module = "packages/butler/prompt.lua"
+_G.remuda = {}
+local M = dofile(prompt_module)
+local init = assert(io.open("packages/butler/init.lua", "r")):read("*a")
+assert(init:find('remuda.exec("butler/prompt")', 1, true), "Butler does not load prompt delivery")
+assert(init:find("PROMPT_DELIVERY.schedule(remuda, kind, actual, name, parent, task)", 1, true),
+  "agent launch bypasses the verified prompt delivery path")
+
+local function count(text, needle)
+  local n, at = 0, 1
+  while true do
+    at = text:find(needle, at, true)
+    if not at then return n end
+    n, at = n + 1, at + #needle
+  end
+end
+
+local function exercise(kind, drop_submissions)
+  local state = {
+    tick = 0,
+    ready_at = 24,
+    composer = "",
+    transcript = {},
+    sends = 0,
+    drop_submissions = drop_submissions,
+  }
+  local ready_marker = kind == "codex" and "Ask Codex" or "❯"
+  local fake = {}
+  function fake.schedule(spec)
+    state.callback = spec.run
+    return "fake-prompt-poll"
+  end
+  function fake.cancel(handle)
+    assert(handle == "fake-prompt-poll")
+    state.cancelled = true
+  end
+  function fake.capture()
+    if state.tick < state.ready_at then return "agent is booting" end
+    return ready_marker .. "\n" .. state.composer .. "\n" .. table.concat(state.transcript, "\n")
+  end
+  function fake.type_text(_, text)
+    state.sends = state.sends + 1
+    state.first_send_tick = state.first_send_tick or state.tick
+    if state.tick < state.ready_at then
+      state.composer = text:sub(-96)
+      return
+    end
+    if not state.drop_submissions then
+      state.transcript[#state.transcript + 1] = state.composer .. text
+    end
+    state.submits = (state.submits or 0) + 1
+    state.composer = ""
+  end
+  function fake._butler_send(_, parent, warning)
+    state.failure = parent .. ": " .. warning
+  end
+
+  local task = "START-59-" .. kind .. "-marker\n" .. string.rep(
+    "A delegated first task must arrive whole, in order, and be submitted exactly once. ",
+    19
+  ) .. "\nEND-59-" .. kind .. "-marker"
+  assert(#task >= 1600, "regression task must exercise a long first prompt")
+
+  M.schedule(fake, kind, "member-session", "member", "leader", task)
+  for tick = 1, 120 do
+    state.tick = tick
+    if not state.cancelled then state.callback() end
+  end
+
+  local delivered = table.concat(state.transcript, "\n")
+  assert(state.first_send_tick >= state.ready_at, kind .. " received input before its composer was ready")
+  if drop_submissions then
+    assert(state.failure and state.failure:find("Could not verify delivery", 1, true),
+      kind .. " did not notify its leader when both attempts failed")
+    assert(state.sends == 2, kind .. " did not retry exactly once")
+    assert(#state.transcript == 0, kind .. " fake unexpectedly accepted a dropped prompt")
+  else
+    assert(not state.failure, state.failure)
+    assert(#state.transcript == 1, kind .. " submitted the first task " .. #state.transcript .. " times")
+    assert(state.sends == 1, kind .. " injected the first task " .. state.sends .. " times")
+    assert(state.submits == 1, kind .. " submitted the prompt " .. tostring(state.submits) .. " times")
+    assert(delivered == task, kind .. " changed or truncated the task")
+    assert(count(delivered, "START-59-" .. kind .. "-marker") == 1, kind .. " lost or duplicated START")
+    assert(count(delivered, "END-59-" .. kind .. "-marker") == 1, kind .. " lost or duplicated END")
+  end
+  assert(state.cancelled, kind .. " left its prompt poll running")
+end
+
+exercise("claude")
+exercise("codex")
+exercise("claude", true)
+print("first prompt delivery passed for Claude and Codex")
