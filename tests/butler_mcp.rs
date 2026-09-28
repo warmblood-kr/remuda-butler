@@ -526,7 +526,7 @@ fn lower_depth_delivery_channel_can_claim_butler_mail() {
         remuda._butler_notify = function() return true end
         local inbox_owner = false
         for _, hook in ipairs(remuda.hook_list("butler/deliver")) do
-          if hook.id == "inbox" and hook.group == "butler" then inbox_owner = true end
+          if hook.id == "inbox" and (hook.group == "remuda-module:butler" or hook.owner == "butler") then inbox_owner = true end
         end
         local sent = remuda._butler_send("operator", "butler", "through another channel")
         local report = remuda._butler_report("m1", "report through another channel")
@@ -556,8 +556,10 @@ fn missing_delivery_channel_is_reported_to_the_sender() {
     eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
     let got = eval(
         &path,
-        r#"remuda.clear_hooks({ group = "butler" })
+        r#"local emit = remuda.emit_until_success
+        remuda.emit_until_success = function() return nil end
         local ok, err = pcall(remuda._butler_send, "operator", "butler", "no channel")
+        remuda.emit_until_success = emit
         return tostring(ok) .. "|" .. tostring(err)"#,
     );
     assert_eq!(
