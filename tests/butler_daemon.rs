@@ -4319,6 +4319,14 @@ fn butler_session_exited_hook_relaunches_via_the_shared_launch_function() {
     let init_lua = include_str!("../../packages/butler/init.lua").replace("\r\n", "\n");
     let matrix_init = include_str!("../../packages/butler/init.lua").replace("\r\n", "\n");
     let matrix_impl = include_str!("../../packages/butler/matrix.lua").replace("\r\n", "\n");
+    let matrix_stop_start = matrix_impl
+        .find("function remuda._butler_matrix_stop()")
+        .expect("Matrix package lost its lifecycle stop function");
+    let matrix_stop_end = matrix_impl[matrix_stop_start..]
+        .find("\nlocal function matrix_trace")
+        .map(|offset| matrix_stop_start + offset)
+        .expect("Matrix package lifecycle stop function is unterminated");
+    let matrix_stop = &matrix_impl[matrix_stop_start..matrix_stop_end];
 
     let launch_fn_idx = main_lua
         .find("local function launch_butler()")
@@ -4328,8 +4336,13 @@ fn butler_session_exited_hook_relaunches_via_the_shared_launch_function() {
         "Butler reload must rely on lifecycle ownership, not hook purges"
     );
     assert!(
-        matrix_init.contains("stop = function(state)") && matrix_init.contains("host._butler_matrix_stop")
-            && matrix_impl.contains("pcall(remuda.kill, relay)")
+        matrix_init.contains("stop = function(state)")
+            && matrix_init.contains("host._butler_matrix_stop")
+            && matrix_stop.contains("for _, id in ipairs(remuda.processes()) do")
+            && matrix_stop.contains(
+                "if id == remuda._butler_matrix_relay or id == remuda._butler_relay then"
+            )
+            && matrix_stop.contains("pcall(remuda.kill, id)")
             && !main_lua.contains("pkill -f"),
         "the Matrix relay must be stopped by process id through the lifecycle stop hook"
     );
