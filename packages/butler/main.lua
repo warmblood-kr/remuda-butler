@@ -61,13 +61,21 @@ if not isinstance(used, (int, float)):
     used = sum(parts) if parts else None
 
 model = snapshot.get("model") or {}
-line = "MODEL:{model} MODELID:{model_id} CTX:{used} CTXWIN:{capacity} CTXPCT:{percent}".format(
+line = "MODEL:{model} CTX:{used} CTXWIN:{capacity} CTXPCT:{percent}".format(
     model=tag(model.get("display_name") or model.get("id")),
-    model_id=tag(model.get("id")),
     used=integer(used),
     capacity=integer(window.get("context_window_size")),
     percent=integer(window.get("used_percentage")),
 )
+
+try:
+    meta_path = path + ".modelid"
+    meta_tmp = meta_path + ".tmp"
+    with open(meta_tmp, "w", encoding="utf-8") as out:
+        out.write(tag(model.get("id")) + "\n")
+    os.replace(meta_tmp, meta_path)
+except Exception:
+    pass
 
 try:
     tmp = path + ".tmp"
@@ -561,8 +569,7 @@ remuda.tool{
     f:close()
     -- The helper owns this file.  Refuse a malformed or externally replaced
     -- record instead of presenting arbitrary file contents as Claude status.
-    if not line or not (line:match("^MODEL:[A-Za-z0-9_.%-?]+ MODELID:[A-Za-z0-9_.%-?]+ CTX:[0-9?]+ CTXWIN:[0-9?]+ CTXPCT:[0-9?]+$")
-      or line:match("^MODEL:[A-Za-z0-9_.%-?]+ CTX:[0-9?]+ CTXWIN:[0-9?]+ CTXPCT:[0-9?]+$")) then
+    if not line or not line:match("^MODEL:[A-Za-z0-9_.%-?]+ CTX:[0-9?]+ CTXWIN:[0-9?]+ CTXPCT:[0-9?]+$") then
       error("butler status record is malformed", 0)
     end
     return line .. launch

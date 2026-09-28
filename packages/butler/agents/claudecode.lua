@@ -5,7 +5,8 @@ local telemetry = assert(remuda._butler_telemetry_adapters)
 telemetry.claude = {
   setup = function(spec)
     local status_path = spec.status_path or (os.tmpname() .. "." .. spec.name .. ".status")
-    return { status_path = status_path, settings_path = support.status_settings(status_path) }
+    return { status_path = status_path, model_id_path = status_path .. ".modelid",
+      settings_path = support.status_settings(status_path) }
   end,
   read = function(state)
     local status = state.status_path and io.open(state.status_path, "r")
@@ -13,16 +14,16 @@ telemetry.claude = {
     local line = status:read("*l")
     status:close()
     if not line then return {} end
-    local model, model_id, used, window, percent = line:match(
-      "^MODEL:([A-Za-z0-9_.%-?]+) MODELID:([A-Za-z0-9_.%-?]+) CTX:([0-9?]+) CTXWIN:([0-9?]+) CTXPCT:([0-9?]+)$"
+    local model, used, window, percent = line:match(
+      "^MODEL:([A-Za-z0-9_.%-?]+) CTX:([0-9?]+) CTXWIN:([0-9?]+) CTXPCT:([0-9?]+)$"
     )
-    if not model then
-      model, used, window, percent = line:match(
-        "^MODEL:([A-Za-z0-9_.%-?]+) CTX:([0-9?]+) CTXWIN:([0-9?]+) CTXPCT:([0-9?]+)$"
-      )
-      model_id = model
-    end
     if not model then return {} end
+    local model_id = model
+    local meta = state.model_id_path and io.open(state.model_id_path, "r")
+    if meta then
+      model_id = meta:read("*l") or model_id
+      meta:close()
+    end
     return { model = model, model_id = model_id, context_used = used, context_window = window, context_percent = percent }
   end,
 }
