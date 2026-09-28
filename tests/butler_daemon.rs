@@ -2118,6 +2118,118 @@ fn butler_test_daemon(dir: &Path) -> (Daemon, PathBuf) {
 }
 
 #[test]
+fn butler_matrix_request_uses_fake_http_for_auth_trust_allow_and_same_room() {
+    let dir = scratch_dir("butler-matrix-request");
+    let (_daemon, path) = butler_test_daemon(&dir);
+    let room = "!request:example.org";
+    let pin_hex = "00".repeat(32);
+    let (token_path, config_path) = butler_config(&dir, "request", "https://matrix.example.org",
+        room, "@bot:example.org", "");
+    std::fs::write(&config_path, format!(
+        "https://matrix.example.org\n{room}\n@bot:example.org\n\npin_sha256={pin_hex}\nca_file=/tmp/test-ca.pem\n"))
+        .expect("write Matrix request config");
+    eval(&path, include_str!("support/fake_http.lua"));
+    eval(&path, &format!(
+        "remuda._butler_matrix_config = {{ token_path = {}, config_path = {} }}",
+        lua_raw_string(&token_path.to_string_lossy()), lua_raw_string(&config_path.to_string_lossy())));
+
+    let result = eval(&path, &format!(r#"
+      local loaded, load_error = pcall(remuda.exec, "butler/matrix_request")
+      if not loaded then return "missing|" .. tostring(load_error) end
+      local matrix = remuda.butler.matrix
+      remuda.http.respond("GET", "https://matrix.example.org/_matrix/client/v3/joined_rooms",
+        {{ status = 200, headers = {{}}, body = "{{}}" }})
+      local finished, finished_count
+      finished_count = 0
+      matrix.request({{ method = "GET", path = "/_matrix/client/v3/joined_rooms",
+        max_bytes = 2048, timeout = 12 }}, function(value) finished = value; finished_count = finished_count + 1 end)
+      local spec = remuda.http.calls[1]
+      if not spec then return "no-request" end
+      if finished then return "callback-ran-inline" end
+      if spec.headers.Authorization ~= "Bearer test-token" then return "bad-auth" end
+      if spec.pin ~= "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" then return "bad-pin:" .. tostring(spec.pin) end
+      if spec.ca_file ~= "/tmp/test-ca.pem" then return "bad-ca" end
+      if spec.max_bytes ~= 2048 or spec.timeout ~= 12 then return "bad-bounds" end
+      remuda.http.tick()
+      remuda.http.tick()
+      if finished.status ~= 200 then return "callback-not-delivered" end
+      if finished_count ~= 1 then return "callback-not-once" end
+      local denied
+      matrix.request({{ method = "GET", path = "/_matrix/client/v3/rooms/!other:example.org/messages",
+        room = "!other:example.org" }}, function(value) denied = value end)
+      if #remuda.http.calls ~= 1 then return "allowlist-reached-network" end
+      if not denied or not denied.error then return "allowlist-not-reported" end
+      remuda.http.respond("GET", "https://matrix.example.org/_matrix/client/v3/rooms/%21request%3Aexample.org/context/%24event",
+        {{ status = 200, headers = {{}}, body = '{{"event":{{"room_id":"{room}"}}}}' }})
+      local same
+      matrix.same_room("{room}", "$event", function(value) same = value end)
+      if #remuda.http.calls ~= 1 then return "limiter-did-not-queue" end
+      remuda.http.respond("PUT", "https://matrix.example.org/_matrix/media/v3/upload",
+        {{ status = 201, headers = {{ ["Content-Type"] = "application/octet-stream" }}, body = "\0\255" }})
+      local uploaded
+      matrix.request({{ method = "PUT", path = "/_matrix/media/v3/upload", room = "{room}",
+        body = "\0\255", headers = {{ ["Content-Type"] = "application/octet-stream" }}, max_bytes = 4096 }},
+        function(value) uploaded = value end)
+      if #remuda.http.calls ~= 1 then return "limiter-did-not-queue-burst" end
+      remuda.http.tick()
+      if #remuda.http.calls ~= 2 then return "limiter-did-not-release" end
+      if same ~= true then return "same-room-failed" end
+      if uploaded then return "second-callback-ran-too-early" end
+      remuda.http.tick()
+      if #remuda.http.calls ~= 3 then return "limiter-did-not-preserve-burst" end
+      local raw = remuda.http.calls[3]
+      if raw.method ~= "PUT" or raw.body ~= "\0\255" then return "raw-body-changed" end
+      if raw.headers["Content-Type"] ~= "application/octet-stream" then return "raw-content-type-lost" end
+      if not uploaded or uploaded.status ~= 201 then return "raw-callback-not-delivered" end
+      remuda.http.respond("GET", "https://matrix.example.org/_matrix/client/v3/versions",
+        {{ status = 200, headers = {{}}, body = '{{"next_batch":"n","unicode":"\\uD83D\\uDE42","ok":true}}' }})
+      local decoded
+      matrix.request_json({{ method = "GET", path = "/_matrix/client/v3/versions" }},
+        function(value) decoded = value end)
+      remuda.http.tick()
+      if not decoded or not decoded.json or decoded.json.next_batch ~= "n" or decoded.json.ok ~= true
+        or decoded.json.unicode ~= "🙂" then return "json-response-not-decoded" end
+      local encoded, encode_error = matrix.encode_json({{ body = "line\n", count = 2 }})
+      if not encoded then return "json-encode-failed:" .. tostring(encode_error) end
+      local roundtrip = matrix.decode_json(encoded)
+      if not roundtrip or roundtrip.body ~= "line\n" or roundtrip.count ~= 2 then return "json-roundtrip-failed" end
+      remuda.http.respond("GET", "https://matrix.example.org/_matrix/client/v3/bad",
+        {{ status = 400, headers = {{}}, body = "bad request" }})
+      local failed
+      matrix.request_json({{ method = "GET", path = "/_matrix/client/v3/bad" }}, function(value) failed = value end)
+      remuda.http.tick()
+      if not failed or not failed.error or not failed.error:find("Matrix HTTP 400", 1, true) then return "http-error-not-surfaced" end
+      return "ok"
+    "#));
+    assert_eq!(result, "ok", "Matrix request word should use the fake async HTTP boundary: {result}");
+}
+
+#[test]
+fn butler_matrix_request_rejects_https_without_trust_before_network() {
+    let dir = scratch_dir("butler-matrix-no-trust");
+    let (_daemon, path) = butler_test_daemon(&dir);
+    let room = "!request:example.org";
+    let (token_path, config_path) = butler_config(&dir, "request", "https://matrix.example.org",
+        room, "@bot:example.org", "");
+    std::fs::write(&config_path,
+        format!("https://matrix.example.org\n{room}\n@bot:example.org\n"))
+        .expect("write Matrix config without TLS trust policy");
+    eval(&path, include_str!("support/fake_http.lua"));
+    eval(&path, &format!(
+        "remuda._butler_matrix_config = {{ token_path = {}, config_path = {} }}; remuda.exec('butler/matrix_request')",
+        lua_raw_string(&token_path.to_string_lossy()), lua_raw_string(&config_path.to_string_lossy())));
+    let result = eval(&path, r#"
+      local failure
+      remuda.butler.matrix.request({ method = "GET", path = "/_matrix/client/v3/versions" },
+        function(value) failure = value end)
+      if not failure or not failure.error or not failure.error:find("requires ca_file=PATH or pin_sha256=HEX", 1, true)
+        then return "missing-trust-error" end
+      return #remuda.http.calls == 0 and "ok" or "network-reached"
+    "#);
+    assert_eq!(result, "ok", "HTTPS must fail closed before HTTP: {result}");
+}
+
+#[test]
 fn butler_helper_filters_to_the_allowlisted_room() {
     let dir = scratch_dir("butler-allowlist");
     let (_daemon, path) = butler_test_daemon(&dir);
