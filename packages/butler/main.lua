@@ -831,7 +831,10 @@ local function choose(candidates, opts, done)
     local argv = (type(opts.argv) == "function" and opts.argv(id, spec)) or opts.argv
       or (type(entry.argv) == "function" and select(2, call_callback(entry.argv, spec))) or entry.argv
       or (entry.build and entry.build(spec))
-    local executable = entry.requires or entry.executable or (argv and argv[1]) or id
+    local builder_override = remuda._butler_agent_builders[id]
+      and remuda._butler_agent_builders[id] ~= BUILTIN_AGENT_BUILDERS[id]
+    local executable = (builder_override and argv and argv[1])
+      or entry.requires or entry.executable or (argv and argv[1]) or id
     if not opts.argv then
       local quoted = "'" .. tostring(executable):gsub("'", "'\\''") .. "'"
       local found = os.execute("command -v " .. quoted .. " >/dev/null 2>&1")
@@ -1979,7 +1982,7 @@ function remuda._butler_status()
     end
     return table.concat(lines, "\n"), 1
   end
-  return "launching", 75
+  return "launching\nreadiness budget: " .. tostring(readiness_chain_budget()), 75
 end
 local function launch_butler()
   local requested_name = butler_name or remuda._butler_initial_name
