@@ -544,6 +544,10 @@ local function mail_id(ref, allow_ended)
     if allow_ended then return ref, nil end
     error("agent " .. ref .. " (alias " .. tostring(record.alias) .. ") has ended", 0)
   end
+  -- An ended alias's mail is still worth reading (#23): an inbox read falls
+  -- back to the alias's last identity instead of demanding its ULID.
+  local last = bus.identities[ref]
+  if allow_ended and not bus.agents[ref] and last then return last.id, nil end
   local alias = resolve(ref)
   local agent = bus.agents[alias]
   return agent.id, agent
