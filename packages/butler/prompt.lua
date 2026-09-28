@@ -15,6 +15,14 @@ local function compact(text)
   return tostring(text):gsub("%s+", "")
 end
 
+local function same_prompt_text(left, right)
+  local function normalize(text)
+    return tostring(text):gsub("\194\160", " "):gsub("\r\n", "\n"):gsub("\r", "\n")
+      :match("^%s*(.-)%s*$")
+  end
+  return normalize(left) == normalize(right)
+end
+
 local function prompt_start_visible(screen, task)
   local visible, expected = compact(screen), compact(task)
   if expected == "" then return false end
@@ -119,9 +127,11 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
     verify_ticks = verify_ticks + 1
     local started = prompt_start_visible(screen, task)
     local empty = true
+    local composer_text = ""
     if options.empty then
-      local checked, decision = pcall(options.empty, screen)
+      local checked, decision, text = pcall(options.empty, screen)
       empty = checked and decision == "EMPTY"
+      if checked then composer_text = tostring(text or "") end
     end
     local session_busy = false
     if remuda.session then
@@ -134,7 +144,9 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
       finish(true)
       return
     end
-    if started and not empty then task_seen_in_composer = true end
+    local placeholder = composer_text:match("^%[?Pasted text #%d+%s*%+%s*%d+%s+lines?%]?%s*$") ~= nil
+    local composer_is_task = not empty and (same_prompt_text(composer_text, task) or placeholder)
+    if composer_is_task then task_seen_in_composer = true end
     if started and empty then
       finish(true)
       return
@@ -145,7 +157,7 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
     end
     -- A task can be fully painted while its first Return is dropped. Retry
     -- submit once, before allowing queued notices to reach this composer.
-    if started and not empty and verify_ticks >= 4 and not options.return_retried then
+    if composer_is_task and verify_ticks >= 4 and not options.return_retried then
       local allowed = true
       if options.allowed then
         local checked, result = pcall(options.allowed, true, screen)

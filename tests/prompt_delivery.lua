@@ -100,7 +100,7 @@ local function exercise(kind, drop_submissions)
       return true
     end,
     empty = function()
-      return state.composer == "" and "EMPTY" or "NON-EMPTY"
+      return state.composer == "" and "EMPTY" or "NON-EMPTY", state.composer
     end,
     on_done = function(ok)
       state.completed = ok
@@ -136,6 +136,51 @@ end
 exercise("claude")
 exercise("codex")
 exercise("claude", true)
+
+local function exercise_composer_after_paste(composer_after_paste, mixed)
+  local state = { composer = "", sends = 0, returns = 0, transcript = {}, cancelled = false }
+  local task = "START exact delegated task\nsecond line of task"
+  local fake = {}
+  function fake.schedule(spec) state.callback = spec.run; return "paste-state-poll" end
+  function fake.cancel() state.cancelled = true end
+  function fake.capture() return "Ask Codex\n❯ " .. state.composer end
+  function fake.type_text(_, text)
+    assert(text == task)
+    state.sends = state.sends + 1
+    state.composer = composer_after_paste
+  end
+  function fake.key(_, key)
+    assert(key == "RET")
+    state.returns = state.returns + 1
+    if not mixed then
+      state.transcript[#state.transcript + 1] = task
+      state.composer = ""
+    end
+  end
+  function fake.session() return { is_busy = state.composer ~= "" } end
+  M.schedule(fake, "codex", "paste-state", "member", "leader", task, {
+    ready = function(screen) return screen:find("Ask Codex", 1, true) ~= nil end,
+    allowed = function() return true end,
+    empty = function()
+      return state.composer == "" and "EMPTY" or "NON-EMPTY", state.composer
+    end,
+    submit_timeout = 6,
+    on_done = function(ok, reason) state.ok, state.reason = ok, reason end,
+  })
+  for _ = 1, 20 do if not state.cancelled then state.callback() end end
+  assert(state.sends == 1, "task was pasted more than once")
+  assert(state.cancelled, "paste verification poll did not stop")
+  if mixed then
+    assert(state.returns == 0, "Return submitted task together with human text")
+    assert(state.ok == false and state.reason == "submit", "mixed composer was not reported to the leader")
+  else
+    assert(state.returns == 1, "collapsed paste placeholder did not get one Return retry")
+    assert(state.ok and state.transcript[1] == task, "accepted placeholder submit was not recorded")
+  end
+end
+
+exercise_composer_after_paste("[Pasted text #1 +2 lines]", false)
+exercise_composer_after_paste("START exact delegated task\nsecond line of task HUMAN follow-up", true)
 
 -- Known startup dialogs must be answered before the task is typed, and the
 -- delivery poll must not replay the task while the prompt settles.
