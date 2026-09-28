@@ -1,6 +1,7 @@
 """The single authenticated HTTP client for Butler's Matrix adapter."""
 import contextlib
 import hashlib
+import hmac
 import http.client
 import json
 import os
@@ -71,7 +72,7 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
         super().connect()
         cert = self.sock.getpeercert(binary_form=True)
         actual = hashlib.sha256(cert).hexdigest()
-        if not __import__("hmac").compare_digest(actual, self.pin):
+        if not hmac.compare_digest(actual, self.pin):
             self.close()
             raise ssl.SSLError("Matrix TLS certificate pin mismatch")
 
@@ -82,7 +83,8 @@ class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
         self.pin = pin
 
     def https_open(self, req):
-        return self.do_open(lambda host, **kw: _PinnedHTTPSConnection(host, pin=self.pin, **kw), req)
+        return self.do_open(lambda host, **kw: _PinnedHTTPSConnection(host, pin=self.pin, **kw),
+                            req, context=self._context)
 
 
 class Client:

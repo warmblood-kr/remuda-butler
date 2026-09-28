@@ -2133,7 +2133,7 @@ fn butler_matrix_http_wrong_pin_sends_no_authenticated_request() {
     let config = dir.join("config");
     std::fs::write(
         &config,
-        format!("https://127.0.0.1:{}\n!stub:example.org\n@bot:example.org\n@alice:example.org\n\n\npin_sha256={}\n",
+        format!("https://localhost:{}\n!stub:example.org\n@bot:example.org\n@alice:example.org\n\n\npin_sha256={}\n",
             server.port, "0".repeat(64)),
     )
     .expect("write wrong-pin config");
@@ -2146,9 +2146,61 @@ fn butler_matrix_http_wrong_pin_sends_no_authenticated_request() {
         .output()
         .expect("run wrong-pin client");
     assert!(!output.status.success(), "wrong certificate pin was accepted");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("certificate pin mismatch"),
+        "request failed for a reason other than the pin check: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let requests_path = get_log.with_file_name("get.log.requests");
     let requests = std::fs::read_to_string(requests_path).unwrap_or_default();
     assert!(requests.is_empty(), "server received an HTTP request: {requests}");
+}
+
+#[test]
+fn butler_matrix_http_correct_pin_and_ca_trust_the_stub() {
+    let dir = scratch_dir("matrix-http-tls-trust");
+    let fixture = dir.join("fixture.jsonl");
+    let get_log = dir.join("get.log");
+    let put_log = dir.join("put.log");
+    write_fixture(&fixture, &[]);
+    let cert = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/support/matrix-stub-cert.pem");
+    let key = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/support/matrix-stub-key.pem");
+    let unrelated = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/support/matrix-untrusted-ca.pem");
+    let server = StubServer::spawn_with_tls(&fixture, &get_log, &put_log, 200, Some(&cert), Some(&key));
+    let token = dir.join("token");
+    std::fs::write(&token, "stub-secret\n").expect("write stub token");
+    let pin = std::process::Command::new("python3")
+        .arg("-c")
+        .arg("import hashlib,ssl,sys; print(hashlib.sha256(ssl.PEM_cert_to_DER_cert(open(sys.argv[1]).read())).hexdigest())")
+        .arg(&cert)
+        .output()
+        .expect("compute certificate pin");
+    assert!(pin.status.success());
+    let pin = String::from_utf8(pin.stdout).expect("pin output").trim().to_owned();
+    let client = concat!(env!("CARGO_MANIFEST_DIR"), "/packages/butler/matrix_http.py");
+
+    for policy in [format!("pin_sha256={pin}"), format!("ca_file={}", cert.display())] {
+        let config = dir.join("trusted-config");
+        std::fs::write(&config, format!("https://localhost:{}\n!stub:example.org\n@bot:example.org\n@alice:example.org\n\n\n{policy}\n", server.port)).expect("write trusted config");
+        let output = std::process::Command::new("python3")
+            .arg(client).arg(&token).arg(&config).arg("GET")
+            .arg("/_matrix/client/v3/joined_rooms").output().expect("run trusted client");
+        assert!(output.status.success(), "TLS trust policy failed: {}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    let config = dir.join("untrusted-config");
+    std::fs::write(&config, format!("https://localhost:{}\n!stub:example.org\n@bot:example.org\n@alice:example.org\n\n\nca_file={}\n", server.port, unrelated.display())).expect("write untrusted config");
+    let output = std::process::Command::new("python3")
+        .arg(client).arg(&token).arg(&config).arg("GET")
+        .arg("/_matrix/client/v3/joined_rooms").output().expect("run untrusted client");
+    assert!(!output.status.success(), "unrelated CA was accepted");
+    let requests = std::fs::read_to_string(get_log.with_file_name("get.log.requests"))
+        .expect("TLS stub request/auth log");
+    assert_eq!(requests.lines().count(), 2, "only pin and configured CA requests should reach stub: {requests}");
+    assert!(requests.contains("Bearer stub-secret"), "trusted requests lacked auth: {requests}");
 }
 
 /// One canned `/sync` response per line, in the shape the stub expects.
