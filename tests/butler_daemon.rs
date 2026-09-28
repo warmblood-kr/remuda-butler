@@ -3703,6 +3703,10 @@ fn butler_compaction_schedule_sends_compact_when_idle_but_not_when_busy() {
     );
 
     let butler_name = eval(&path, "return remuda._butler_initial_name");
+    eval(
+        &path,
+        r#"remuda._butler_telemetry_for = function() return { context_used = "500000" } end; remuda.capture = function() return "mock screen" end; remuda._butler_prompt_is_empty = function() return "EMPTY" end"#,
+    );
 
     // Simulates the launched session's own one-time `run_script` call the
     // system prompt asks for.
@@ -3822,6 +3826,10 @@ fn butler_compaction_trace_records_registered_skipped_and_sent() {
     );
 
     let butler_name = eval(&path, "return remuda._butler_initial_name");
+    eval(
+        &path,
+        r#"remuda._butler_telemetry_for = function() return { context_used = "500000" } end; remuda.capture = function() return "mock screen" end; remuda._butler_prompt_is_empty = function() return "EMPTY" end"#,
+    );
 
     // Simulates the launched session's own one-time `run_script` call the
     // system prompt asks for -- this alone must already leave a "registered"

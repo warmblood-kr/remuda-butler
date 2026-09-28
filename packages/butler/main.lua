@@ -215,6 +215,77 @@ local function current_agent(caller)
   end
 end
 remuda._butler_current_agent = current_agent
+
+-- The compaction gate is kept above the test-mode return so the standalone
+-- Lua acceptance test can exercise the same state machine without a daemon.
+function remuda._butler_compaction_gate(session_name, st)
+  st.idle_ticks = st.idle_ticks or 0
+  local agent = remuda._butler_bus.agents[session_name] or {}
+  local telemetry = remuda._butler_telemetry_for(agent)
+  local ctx = telemetry.context_used or "?"
+  local used = tonumber(ctx)
+  if not used then
+    st.idle_ticks = 0
+    if (st.cooldown_ticks or 0) > 0 then st.cooldown_ticks = st.cooldown_ticks - 1 end
+    return false, "skipped_unknown", ctx
+  end
+  local threshold = remuda._butler_compaction_threshold or 400000
+  if used < threshold then
+    st.idle_ticks = 0
+    st.cooldown_ticks = 0
+    return false, "skipped_small", ctx
+  end
+  if (st.cooldown_ticks or 0) > 0 then
+    st.cooldown_ticks = st.cooldown_ticks - 1
+    st.idle_ticks = 0
+    return false, "skipped_cooldown", ctx
+  end
+  local found, session = pcall(remuda.session, session_name)
+  if not found or not session then
+    st.idle_ticks = 0
+    return false, "skipped_unknown", ctx
+  end
+  if session.is_busy ~= false then
+    st.idle_ticks = 0
+    return false, "skipped_busy", ctx
+  end
+  local captured, screen = pcall(remuda.capture, session_name)
+  if not captured then
+    st.idle_ticks = 0
+    return false, "skipped_composer", ctx
+  end
+  local startup = (remuda._butler_agent_startup or {})[agent.kind] or {}
+  if startup.working then
+    local checked, working = pcall(startup.working, screen)
+    if not checked then
+      st.idle_ticks = 0
+      return false, "skipped_unknown", ctx
+    end
+    if working then
+      st.idle_ticks = 0
+      return false, "skipped_busy", ctx
+    end
+  end
+  local parsed, decision = pcall(remuda._butler_prompt_is_empty, agent.kind or "", screen)
+  if not parsed or decision ~= "EMPTY" then
+    st.idle_ticks = 0
+    return false, "skipped_composer", ctx
+  end
+  st.idle_ticks = st.idle_ticks + 1
+  if st.idle_ticks < 2 then return false, "skipped_idle", ctx end
+  st.idle_ticks = 0
+  st.cooldown_ticks = math.max(0, tonumber(remuda._butler_compaction_cooldown) or 4)
+  return true, "sent", ctx
+end
+
+function remuda._butler_compaction_reset_idle(st)
+  st.idle_ticks = 0
+end
+
+function remuda._butler_compaction_submit_matches(decision, text)
+  return decision == "NON-EMPTY" and text == "/compact"
+end
+
 if remuda._butler_test_mode == true then
   return
 end
@@ -231,6 +302,10 @@ end
 if legacy_compaction_schedule and remuda._butler_state then
   remuda._butler_state.compaction_enabled = true
 end
+if not remuda._butler_state then
+  remuda._butler_compaction_state = remuda._butler_compaction_state or {}
+end
+remuda._butler_compaction_reset_idle(remuda._butler_state or remuda._butler_compaction_state)
 
 -- `os.getenv` here reads the *daemon's own* environment, fixed forever at
 -- whichever moment first birthed that daemon (see docs/install-butler.sh's
@@ -1672,6 +1747,9 @@ end
 -- replaces the schedule without leaving an old handle behind.
 function remuda._butler_register_compaction_schedule()
   _butler_trace("registered")
+  local state = remuda._butler_state or remuda._butler_compaction_state or {}
+  remuda._butler_compaction_reset_idle(state)
+  if not remuda._butler_state then remuda._butler_compaction_state = state end
   if remuda._butler_state then
     remuda._butler_state.compaction_enabled = true
   else
@@ -1685,24 +1763,26 @@ function remuda._butler_compaction_tick()
   elseif not remuda._butler_compaction_enabled then
     return
   end
-  -- `context_left` is unimplemented (tools.lua:362-366, canon says "지금
-  -- 안 만든다") -- `is_busy` (idle-time heuristic, never a real token
-  -- count) is the proxy the canon names instead: only ever nudge
-  -- compaction while the session looks idle, never mid-task.
-  if butler_name and remuda.session(butler_name).is_busy == false then
+  if not butler_name then return end
+  if not remuda._butler_state then
+    remuda._butler_compaction_state = remuda._butler_compaction_state or {}
+  end
+  local state = remuda._butler_state or remuda._butler_compaction_state
+  local should_send, event, ctx = remuda._butler_compaction_gate(butler_name, state)
+  local detail = "ctx=" .. tostring(ctx)
+  if event ~= "skipped_idle" and event ~= "sent" then _butler_trace(event, detail) end
+  if should_send then
     local ok, err = pcall(remuda.send, butler_name, "/compact")
-    if ok then
-      _butler_trace("sent")
-    else
-      _butler_trace("error", tostring(err))
+    if not ok then
+      _butler_trace("error", detail .. " error=" .. tostring(err))
+      return
     end
+    _butler_trace("sent", detail)
     -- Same "type it, wait, then submit" hand-off the Matrix relay below
     -- already uses -- `remuda.send`'s text+Enter lands as one write,
     -- which this TUI reads as paste-in-progress rather than a distinct
     -- Enter, so a separately-timed bare Enter confirms it.
     remuda.process({ argv = { "sleep", "2" }, on_exit = "butler-compaction-submit" })
-  else
-    _butler_trace("skipped_busy")
   end
 end
 
@@ -1785,7 +1865,23 @@ end
 if remuda._butler_test_mode ~= "lifecycle" then remuda._butler_reconcile() end
 
 function remuda._butler_compaction_submit()
-  remuda.send(butler_name, "")
+  if not butler_name then return false end
+  local agent = bus.agents[butler_name] or {}
+  local captured, screen = pcall(remuda.capture, butler_name)
+  local parsed, decision, text = false, nil, nil
+  if captured then
+    parsed, decision, text = pcall(remuda._butler_prompt_is_empty, agent.kind or "", screen)
+  end
+  if not captured or not parsed or not remuda._butler_compaction_submit_matches(decision, text) then
+    _butler_trace("submit_skipped", "decision=" .. tostring(decision))
+    return false
+  end
+  local sent, err = pcall(remuda.send, butler_name, "")
+  if not sent then
+    _butler_trace("submit_error", tostring(err))
+    return false
+  end
+  return true
 end
 
 function remuda._butler_matrix_line(line)
