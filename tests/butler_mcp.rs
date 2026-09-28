@@ -403,3 +403,28 @@ fn a_task_deferred_too_long_times_out_and_tells_the_leader() {
         );
     }
 }
+
+/// #23a: an ended member's unread mail stays readable by its alias, not only
+/// by ULID, and a never-known alias still errors.
+#[test]
+fn an_ended_aliases_unread_mail_is_readable_by_alias() {
+    let dir = scratch("ended-alias-inbox");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+    eval(
+        &path,
+        "remuda._butler_agent_builders.fake = function() return {'sleep', '100'} end; \
+         remuda._butler_launch('fake', 'lead1'); \
+         remuda._butler_send('operator', 'lead1', 'unread-after-end'); \
+         remuda.emit('session_exited', 'lead1')",
+    );
+    let inbox = eval(&path, "return remuda._butler_inbox('lead1')");
+    assert!(inbox.contains("unread-after-end"), "{inbox}");
+    let unknown = client::request(
+        &path,
+        &Request::Eval { code: "return remuda._butler_inbox('nobody')".into(), name: None },
+    )
+    .expect("eval");
+    assert!(matches!(unknown, Response::Error(_)), "{unknown:?}");
+}
