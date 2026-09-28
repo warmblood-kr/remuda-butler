@@ -866,10 +866,13 @@ local function deliver_notice(session)
   local pending = bus.notices[session]
   if not pending then return true end
   if not remuda._butler_notify_policy(session) then return false end
-  bus.notices[session] = nil
   local text = pending.count == 1 and pending.text
     or (pending.count .. " new Butler messages arrived. Read them: remuda butler inbox")
-  return pcall(remuda.type_text, session, text)
+  local typed, why = pcall(remuda.type_text, session, text)
+  -- Keep a notice that failed to type for the next retry; the exit hook
+  -- drops it if the session is gone.
+  if typed then bus.notices[session] = nil end
+  return typed, why
 end
 function remuda._butler_notify(alias, notice)
   local pending = bus.notices[alias] or { count = 0 }

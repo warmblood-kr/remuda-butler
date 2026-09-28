@@ -304,3 +304,82 @@ fn notify_policy_types_only_into_a_detached_or_quiet_empty_prompt() {
     assert!(log.contains("notice_prompt\tp1  NON-EMPTY co"), "{log}");
     assert!(log.contains("notice_prompt\tp1  UNPARSEABLE"), "{log}");
 }
+
+fn butler_with_member(tag: &str) -> (PathBuf, impl Drop) {
+    let dir = scratch(tag);
+    let path = daemon::socket_path_in(&dir, "s");
+    let daemon = daemon_at(&path);
+    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+    eval(
+        &path,
+        "remuda._butler_agent_builders.fake = function() return {'sleep', '100'} end; \
+         remuda._butler_launch('fake', 'm1')",
+    );
+    (path, daemon)
+}
+
+/// #29 review 1: a notice whose type_text fails stays queued for the retry.
+#[test]
+fn a_notice_that_fails_to_type_stays_queued() {
+    let (path, _daemon) = butler_with_member("notice-type-fails");
+    let sent = eval(
+        &path,
+        "remuda._butler_notify_policy = function() return true end; \
+         remuda._real_type_text = remuda.type_text; \
+         remuda.type_text = function() error('pty write failed') end; \
+         return remuda._butler_send('operator', 'm1', 'hi')",
+    );
+    assert!(sent.contains("terminal delivery deferred"), "{sent}");
+    assert_eq!(eval(&path, "return remuda._butler_bus.notices.m1.count"), "1");
+    eval(
+        &path,
+        "remuda.type_text = remuda._real_type_text; remuda._butler_deliver_notices()",
+    );
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1)"), "nil");
+}
+
+/// #29 review 2: an exited session's pending notice and screen record go too.
+#[test]
+fn session_exit_clears_the_notice_queue_and_screen_record() {
+    let (path, _daemon) = butler_with_member("notice-exit");
+    eval(
+        &path,
+        "remuda._butler_notify_policy = function() return false end; \
+         remuda._butler_send('operator', 'm1', 'hi'); \
+         remuda._butler_bus.notice_screens.m1 = { screen = '', since = 0 }; \
+         remuda.emit('session_exited', 'm1')",
+    );
+    assert_eq!(
+        eval(&path, "return tostring(remuda._butler_bus.notices.m1) .. tostring(remuda._butler_bus.notice_screens.m1)"),
+        "nilnil"
+    );
+}
+
+/// #29 review 3: a task the policy keeps deferring times out, is logged, and
+/// its leader is told, instead of waiting forever.
+#[test]
+fn a_task_deferred_too_long_times_out_and_tells_the_leader() {
+    let dir = scratch("task-deferred");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    let trace = dir.join("session-trace.log");
+    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+    eval(
+        &path,
+        &format!(
+            "remuda._butler_session_trace_path = {trace:?}; \
+             remuda.butler.project_home({projects:?}); \
+             remuda._butler_agent_builders.fake = function() return {{'sleep', '100'}} end; \
+             remuda._butler_agent_startup.fake = {{ ready = function() return true end }}; \
+             remuda._butler_notify_policy = function() return false end; \
+             remuda._butler_task_poke_deferrals = 3; \
+             remuda._butler_topic_delegate('t1', 'the task', nil, 'fake', 'butler')",
+            projects = dir.join("projects")
+        ),
+    );
+    std::thread::sleep(Duration::from_secs(3));
+    let log = std::fs::read_to_string(&trace).unwrap_or_default();
+    assert!(log.contains("task_poke_timeout\tt1 deferred"), "{log}");
+    let inbox = eval(&path, "return remuda._butler_inbox('butler')");
+    assert!(inbox.contains("t1") && inbox.contains("not delivered"), "{inbox}");
+}
