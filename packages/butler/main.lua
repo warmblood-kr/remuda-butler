@@ -1203,7 +1203,7 @@ function remuda._butler_sessions()
 end
 
 local function registry_list(include_ended)
-  local latest = {}
+  local latest, first_created = {}, {}
   if identity_path then
     local file = io.open(identity_path, "r")
     if file then
@@ -1213,13 +1213,18 @@ local function registry_list(include_ended)
           local created_at, ended_at = json_field(line, "created_at"), json_field(line, "ended_at")
           local state = json_field(line, "state")
           local unknown = line:match('"created_at_unknown":true') ~= nil
-            or (not state and ended_at and created_at == ended_at)
+            or not created_at or (ended_at and created_at == ended_at)
+          if first_created[id] == nil and latest[id] == nil and not unknown then
+            first_created[id] = created_at
+          end
+          local shown_created = created_at
+          if unknown then shown_created = first_created[id] end
           latest[id] = {
             id = id, alias = alias, kind = json_field(line, "kind") or "",
             leader = json_field(line, "leader_id") or "",
             state = state or (ended_at and "ended" or "running"),
             reason = json_field(line, "reason") or "",
-            created = unknown and "?" or (created_at or ""),
+            created = shown_created or "?",
             ended = ended_at or "",
           }
         end

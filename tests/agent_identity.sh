@@ -212,12 +212,20 @@ INSTANCE="$SCRATCH_ROOT/two"
 use_instance "$INSTANCE" identity-two
 REGISTRY="$XDG_DATA_HOME/remuda/butler/agents.jsonl"
 mkdir -p "$(dirname "$REGISTRY")"
-printf '%s\n' '{"id":"legacy-clobbered","alias":"old","kind":"fake","leader_id":"","created_at":"2020-01-01T00:00:00Z","ended_at":"2020-01-01T00:00:00Z"}' >"$REGISTRY"
+printf '%s\n' \
+  '{"id":"legacy-clobbered","alias":"old","kind":"fake","leader_id":"","created_at":"2020-01-01T00:00:00Z","ended_at":"2020-01-01T00:00:00Z"}' \
+  '{"id":"legacy-history","alias":"history","kind":"fake","leader_id":"","created_at":"2020-01-01T00:00:00Z"}' \
+  '{"id":"legacy-history","alias":"history","kind":"fake","leader_id":"","created_at":"2020-01-02T00:00:00Z","ended_at":"2020-01-02T00:00:00Z"}' \
+  '{"id":"legacy-missing-created","alias":"missing","kind":"fake","leader_id":"","ended_at":"2020-01-03T00:00:00Z"}' >"$REGISTRY"
 start_private_daemon
 load_butler
 ALL_AGENTS=$("$REMUDA_BIN" -s "$SERVER" butler agents --all)
 [[ $ALL_AGENTS == *$'legacy-clobbered\told\tfake\t\tended\t\t?\t2020-01-01T00:00:00Z'* ]] || \
   fail "clobbered historical creation time was fabricated or hidden: $ALL_AGENTS"
+[[ $ALL_AGENTS == *$'legacy-history\thistory\tfake\t\tended\t\t2020-01-01T00:00:00Z\t2020-01-02T00:00:00Z'* ]] || \
+  fail "history row discarded the recorded launch time: $ALL_AGENTS"
+[[ $ALL_AGENTS == *$'legacy-missing-created\tmissing\tfake\t\tended\t\t?\t2020-01-03T00:00:00Z'* ]] || \
+  fail "missing created_at was not displayed as unknown: $ALL_AGENTS"
 lua 'remuda._butler_launch("fake", "member")' >/dev/null
 MEMBER_ID_FRESH=$(lua 'return remuda._butler_bus.agents.member.id or ""')
 expect_ulid "fresh-daemon member id" "$MEMBER_ID_FRESH"
