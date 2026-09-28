@@ -516,7 +516,7 @@ fn lower_depth_delivery_channel_can_claim_butler_mail() {
         remuda._butler_agent_builders.fake = function() return { 'sleep', '100' } end
         remuda._butler_launch('fake', 'm1')
         local sent = remuda._butler_send('m1', 'butler', 'reply parent')
-        return sent:match('^queued (message%-[^ ]+)')"#,
+        return sent:match('^queued ([^ ]+)')"#,
     );
     eval(&path, &format!("remuda.exec('{channel}')"));
     let got = eval(

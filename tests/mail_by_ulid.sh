@@ -86,7 +86,11 @@ MEMBER_INBOX="$DATA/inboxes/$ID_COMPONENT.jsonl"
 
 SENT_RESULT=$(lua 'return remuda._butler_send("butler", "member", "new-by-alias")')
 SENT_ID=$(printf '%s\n' "$SENT_RESULT" | sed -E 's/^queued ([^ ]+).*/\1/')
+expect_ulid "message id" "$SENT_ID"
 grep -F 'new-by-alias' "$DATA/objects/"* >/dev/null || fail "alias-addressed message body was not persisted"
+grep -F '"object_id":"object-'"$SENT_ID"'"' "$DATA/messages/$SENT_ID.json" >/dev/null || \
+  fail "message object id is not explicitly object-<ULID>"
+[[ -f $DATA/objects/object-$SENT_ID ]] || fail "ULID message object path is missing"
 grep -F '"message_id"' "$MEMBER_INBOX" >/dev/null || fail "alias-addressed message did not land in the ULID inbox"
 grep -F '"to":[{"host":"local","id":"'"$MEMBER_ID"'","alias":"member"' "$DATA/messages/$SENT_ID.json" >/dev/null || \
   fail "recipient ULID and alias are missing from the envelope"
