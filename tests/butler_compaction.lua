@@ -39,7 +39,13 @@ assert(remuda.butler.ctx_level("butler").level == "critical",
 used_pct = nil
 remuda.contributions = function(point)
   if point == "butler.agent" then
-    local function working(_, value) return value:find("esc to interrupt", 1, true) ~= nil end
+    local contribution_state = {}
+    local function bind_working(fn)
+      return function(...) return fn(contribution_state, ...) end
+    end
+    local working = bind_working(function(_, value)
+      return value:find("esc to interrupt", 1, true) ~= nil
+    end)
     return {
       { id = "claude", entry = { working = working } },
       { id = "codex", entry = { working = working } },
@@ -52,6 +58,9 @@ remuda._butler_prompt_is_empty = function()
 end
 local idle, idle_reason = remuda.butler.is_idle("butler")
 assert(idle and idle_reason == "idle", "is_idle should accept idle session with empty composer")
+local preflight = remuda._butler_compaction_preflight("butler")
+assert(preflight == nil,
+  "preflight should call the registered bound working predicate with the screen")
 local state, sends, fake_now = {}, 0, 100
 remuda._butler_compaction_now = function() return fake_now end
 local function tick(ctx, is_busy)

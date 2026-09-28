@@ -116,6 +116,10 @@ local function registered_agent_kind(kind)
     if id == kind then return entry end
   end
 end
+local function registered_agent_working(entry, screen)
+  if not entry or type(entry.working) ~= "function" then return true, false end
+  return pcall(entry.working, screen)
+end
 remuda._butler_current_agent = current_agent
 
 -- The compaction gate is kept above the test-mode return so the standalone
@@ -185,8 +189,7 @@ function remuda._butler_compaction_gate(session_name, st)
   end
   local kind_entry = registered_agent_kind(agent.kind)
   if kind_entry and kind_entry.working then
-    local checked, working = pcall(kind_entry.working, remuda, screen)
-    if not checked then checked, working = pcall(kind_entry.working, screen) end
+    local checked, working = registered_agent_working(kind_entry, screen)
     if not checked then
       st.idle_ticks = 0
       return false, "skipped_unknown", ctx
@@ -244,7 +247,7 @@ function remuda.butler.is_idle(name)
   local agent = (remuda._butler_bus and remuda._butler_bus.agents[name]) or {}
   local registered = registered_agent_kind(agent.kind)
   if registered and registered.working then
-    local checked, working = pcall(registered.working, remuda, screen)
+    local checked, working = registered_agent_working(registered, screen)
     if not checked then return false, "working state unknown" end
     if working then return false, "working" end
   end
@@ -285,7 +288,7 @@ function remuda._butler_compaction_preflight(session_name)
   local agent = remuda._butler_bus.agents[session_name] or {}
   local registered = registered_agent_kind(agent.kind)
   if registered and registered.working then
-    local checked, working = pcall(registered.working, remuda, screen)
+    local checked, working = registered_agent_working(registered, screen)
     if not checked then return "busy state unknown" end
     if working then return "busy" end
   end
