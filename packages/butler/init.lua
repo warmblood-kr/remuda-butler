@@ -37,12 +37,13 @@ host._butler_start_fallback = fallback
 return {
   api = "remuda-module-v1",
   state_version = 1,
-  initialize = function() return { compaction_enabled = false } end,
+  initialize = function() return { compaction_enabled = false, active_choosers = {}, next_chooser_id = 0 } end,
   start = function(state)
     host._butler_state = state
     boot()
   end,
   stop = function(state)
+    if host._butler_cancel_active_choosers then host._butler_cancel_active_choosers(state) end
     local relay = state.relay or host._butler_relay
     if relay then pcall(host.kill, relay) end
     state.relay = nil
@@ -76,13 +77,13 @@ return {
   },
   contributes = {
     ["butler.agent"] = {
-      { id = "claude", order = 10, executable = "claude",
+      { id = "claude", order = 10, executable = "claude", requires = "claude",
         argv = function(_, spec) return host._butler_agent_builders.claude(spec) end,
         ready = function(_, screen) return screen:find("─\n❯", 1, true) ~= nil end,
         working = function(_, screen) return screen:find("esc to interrupt", 1, true) ~= nil end,
         login = { "Please log in", "not logged in", "Authentication required", "Invalid API key", "Please run /login", "Select login method" },
         dialogs = function() return host._butler_agent_startup.claude.modals end },
-      { id = "codex", order = 20, executable = "codex",
+      { id = "codex", order = 20, executable = "codex", requires = "codex",
         argv = function(_, spec) return host._butler_agent_builders.codex(spec) end,
         ready = function(_, screen) return screen:find("Ask Codex", 1, true) ~= nil end,
         working = function(_, screen) return screen:find("esc to interrupt", 1, true) ~= nil end,

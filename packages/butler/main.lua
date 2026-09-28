@@ -862,6 +862,13 @@ end
 -- `done(name, kind, attempts)` when a candidate is ready or the chain ends.
 local function choose(candidates, opts, done)
   local attempts, index, state, schedule = {}, 0, nil, nil
+  local lifecycle = remuda._butler_state or remuda._butler_compaction_state or {}
+  lifecycle.active_choosers = lifecycle.active_choosers or {}
+  lifecycle.next_chooser_id = (lifecycle.next_chooser_id or 0) + 1
+  local chooser_id = "chooser-" .. tostring(lifecycle.next_chooser_id)
+  local chooser_record = { id = chooser_id, name = opts.name }
+  lifecycle.active_choosers[chooser_id] = chooser_record
+  local cancelled = false
   local function trace(attempt)
     if remuda._butler_session_trace then
       remuda._butler_session_trace("candidate", attempt.kind .. ": " .. attempt.reason
@@ -869,7 +876,10 @@ local function choose(candidates, opts, done)
     end
   end
   local function callback(name, kind)
+    if cancelled then return end
     if schedule then remuda.cancel(schedule); schedule = nil end
+    chooser_record.ready = name ~= nil
+    lifecycle.active_choosers[chooser_id] = nil
     done(name, kind, attempts)
   end
   local function alive(name)
@@ -913,7 +923,7 @@ local function choose(candidates, opts, done)
     local argv = (type(opts.argv) == "function" and opts.argv(id, spec)) or opts.argv
       or (type(entry.argv) == "function" and select(2, call_callback(entry.argv, spec))) or entry.argv
       or (entry.build and entry.build(spec))
-    local executable = (argv and argv[1]) or entry.executable or id
+    local executable = entry.requires or entry.executable or (argv and argv[1]) or id
     if not opts.argv then
       local quoted = "'" .. tostring(executable):gsub("'", "'\\''") .. "'"
       local found = os.execute("command -v " .. quoted .. " >/dev/null 2>&1")
@@ -1003,11 +1013,36 @@ local function choose(candidates, opts, done)
       else callback(nil, nil) end
     end
   end })
+  chooser_record.schedule = schedule
+  chooser_record.cancel = function()
+    if cancelled then return end
+    cancelled = true
+    if schedule then pcall(remuda.cancel, schedule); schedule = nil end
+    if state and not chooser_record.ready then
+      local name = state.name
+      if name and alive(name) then pcall(remuda.close, name) end
+      state = nil
+    end
+    if opts.name == "butler" then
+      remuda._butler_launching, remuda._butler_start_pending = nil, nil
+      remuda._butler_selected_agent = nil
+    end
+    lifecycle.active_choosers[chooser_id] = nil
+  end
   start_next()
   return attempts
 end
 remuda._butler_choose = choose
 remuda._butler_choose_async = choose
+function remuda._butler_cancel_active_choosers(lifecycle)
+  lifecycle = lifecycle or remuda._butler_state or remuda._butler_compaction_state
+  local active = lifecycle and lifecycle.active_choosers or {}
+  local pending = {}
+  for id, record in pairs(active) do pending[#pending + 1] = { id = id, record = record } end
+  for _, item in ipairs(pending) do
+    if item.record.cancel then pcall(item.record.cancel) else active[item.id] = nil end
+  end
+end
 local function configured_agent_order()
   if remuda._butler_candidate_order then return remuda._butler_candidate_order end
   local raw = os.getenv("REMUDA_BUTLER_AGENT_ORDER")
@@ -2024,7 +2059,7 @@ local function session_exists(name)
 end
 function remuda._butler_status()
   local name = butler_name or remuda._butler_initial_name
-  local selected = remuda._butler_selected_agent or butler_kind or bus.agents.butler.kind
+  local selected = remuda._butler_selected_agent
   if remuda._butler_start_pending or remuda._butler_launching then
     local lines = { "launching" }
     for _, attempt in ipairs(remuda._butler_attempts or {}) do
@@ -2050,13 +2085,17 @@ local function launch_butler()
     remuda.mkdir(butler_session_cwd)
     write_agent_guidance(butler_session_cwd, BUTLER_GUIDANCE, true)
   end
-  if session_exists(requested_name) then
+  local stale_session = session_exists(requested_name)
+  if remuda._butler_selected_agent and stale_session then
     butler_name = requested_name
     remuda._butler_name = butler_name
     return
   end
   if remuda._butler_launching then return "launching Butler" end
   remuda._butler_selected_agent = nil
+  remuda._butler_launching = true
+  remuda._butler_start_pending = true
+  if stale_session then pcall(remuda.close, requested_name) end
   local order = configured_agent_order()
   local telemetry_by_kind = {}
   local choose_opts = {
@@ -2105,8 +2144,6 @@ local function launch_butler()
   remuda._butler_start_pending = false
   return selected
   end
-  remuda._butler_launching = true
-  remuda._butler_start_pending = true
   local attempts = choose(order, choose_opts, function(selected, kind, attempts)
     remuda._butler_launching = nil
     local ok, err = pcall(finish, selected, kind, attempts)

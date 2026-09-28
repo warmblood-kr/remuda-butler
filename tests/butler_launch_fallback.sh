@@ -95,6 +95,18 @@ for _ in $(seq 50); do
   sleep 0.1
 done
 [[ $(lua 'return remuda._butler_test_order_kind or ""') == early ]] || fail "lower-order kind was not tried first"
+# Codex starts through `remuda _codex_tui`, but its registry entry requires
+# the separate `codex` CLI. Its precheck must reject that missing executable.
+lua 'local attempts=remuda._butler_choose({"codex"}, {
+  name="codex-requires", spec=function() return {name="codex", telemetry={status_path="/tmp/codex-status"}} end,
+  env=function() return {} end,
+}, function() end); remuda._butler_codex_requires=attempts[1]' >/dev/null
+for _ in $(seq 20); do
+  [[ $(lua 'return remuda._butler_codex_requires and remuda._butler_codex_requires.reason or ""') == not_found ]] && break
+  sleep 0.1
+done
+[[ $(lua 'return remuda._butler_codex_requires and remuda._butler_codex_requires.detail or ""') == *"codex not found in PATH"* ]] ||
+  fail "Codex precheck did not use its required executable"
 # A pending readiness probe must leave command dispatch responsive.
 lua 'remuda._butler_choose_async({"hang"}, {name="async-hang", spec=function() return {} end,
   env=function() return {} end}, function() end)' >/dev/null
@@ -182,6 +194,11 @@ mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME/remuda/mods/butler" "$REMUDA
 tar -c -C "$REPO" extension.toml packages | tar -x -C "$XDG_DATA_HOME/remuda/mods/butler"
 cat > "$SCRATCH/pending-bin/claude" <<'STUB'
 #!/bin/sh
+if [ -f "$REMUDA_BUTLER_PROJECT_HOME/reload-ready" ]; then
+  printf '\033[2J\033[H─\n❯\n'
+  sleep 30
+  exit
+fi
 printf 'Loading agent...\n'
 sleep 30
 STUB
@@ -201,4 +218,24 @@ for _ in $(seq 10); do ! kill -0 "$ROOT_RESPONSIVE_PID" 2>/dev/null && break; sl
 if kill -0 "$ROOT_RESPONSIVE_PID" 2>/dev/null; then fail "root readiness blocked the daemon"; fi
 wait "$ROOT_RESPONSIVE_PID"
 grep -qx responsive "$SCRATCH/root-responsive.out" || fail "root responsive call returned unexpected output"
+# Reload while the first probe is hanging. stop() must cancel its owned
+# chooser and close that candidate before the new lifecycle launches again.
+lua 'remuda._butler_test_old_lifecycle=remuda._butler_state; local n=0; for _ in pairs(remuda._butler_state.active_choosers) do n=n+1 end; assert(n==1, "expected one active chooser")' >/dev/null
+mkdir -p "$REMUDA_BUTLER_PROJECT_HOME"
+touch "$REMUDA_BUTLER_PROJECT_HOME/reload-ready"
+"$REMUDA_BIN" -s "$SERVER" -e 'remuda.reload("butler")' >/dev/null
+RELOADED=false
+for _ in $(seq 100); do
+  if "$REMUDA_BIN" -s "$SERVER" butler status >"$SCRATCH/reload-status.out" 2>"$SCRATCH/reload-status.err" &&
+      grep -F 'butler: up (claude)' "$SCRATCH/reload-status.out" >/dev/null; then
+    RELOADED=true
+    break
+  fi
+  sleep 0.1
+done
+$RELOADED || fail "Butler did not relaunch cleanly after a mid-probe reload: $(cat "$SCRATCH/reload-status.out" "$SCRATCH/reload-status.err")"
+lua 'local old=remuda._butler_test_old_lifecycle.active_choosers; assert(next(old)==nil, "old lifecycle retained an active chooser"); local active=remuda._butler_state.active_choosers; assert(next(active)==nil, "new lifecycle retained a completed chooser")' >/dev/null ||
+  fail "chooser remained registered after reload/relaunch"
+LIVE_ROOTS=$(lua 'local n=0; for _,s in ipairs(remuda.ls()) do if s.name=="butler" and s.alive then n=n+1 end end; return n')
+[[ "$LIVE_ROOTS" == 1 ]] || fail "expected exactly one live root after reload, got $LIVE_ROOTS"
 echo PASS
