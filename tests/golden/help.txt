@@ -1,6 +1,7 @@
 remuda butler — coordination for managed agents
 
   remuda butler sessions
+  remuda butler agents [--all]
   remuda butler launch <claude|codex> [name] [--model M]
   remuda butler topic new <name> [--template T] [--agent A] [--model M]
   remuda butler topic delegate <name> [--agent A] [--leader L] [--model M] <task...>

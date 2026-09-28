@@ -20,7 +20,7 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 GOLDEN=$REPO/tests/golden
 CORE_URL=${CORE_URL:-https://github.com/warmblood-kr/remuda.git}
 # Keep in step with tests/rust_tests.sh.
-CORE_REF=${CORE_REF:-938a488}
+CORE_REF=${CORE_REF:-4bbd90f}
 T=$(mktemp -d /tmp/bgg.XXXXXX) S=bgg
 cleanup() {
   remuda -s "$S" stop -f >/dev/null 2>&1 || true
@@ -70,7 +70,7 @@ cp "$XDG_DATA_HOME/remuda/butler/sessions/w1/AGENTS.md" "$OUT/agents-launch.md"
 R butler inbox lead1 | python3 -c '
 import re, sys
 text = sys.stdin.read()
-m = re.search(r"^\[[^\]]*\] Welcome to Butler\n(.*?)(?=^\[message-|\Z)", text, re.S | re.M)
+m = re.search(r"^\[[^\]]*\] Welcome to Butler\n(.*?)(?=^\[message-|^\[[0-9A-HJKMNP-TV-Z]{26} from |\Z)", text, re.S | re.M)
 sys.stdout.write(m.group(1) if m else "NO WELCOME MESSAGE\n" + text)' >"$OUT/welcome.txt"
 cp "$T/argv/lead1" "$OUT/argv-claude.txt"
 

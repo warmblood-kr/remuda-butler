@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# Replays the legacy -> lifecycle transition using only a private daemon.
+# Replays the step 3 -> lifecycle-owned transition using a private daemon.
 #   tests/live_reload.sh [OLD_REF]       explicit daemon
 #   AUTOSTART=1 tests/live_reload.sh     CLI-auto-started daemon
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-# Default: the last legacy (pre-lifecycle) Butler. origin/main is lifecycle
-# since #21, so it no longer replays the transition and its boot is miscounted.
-OLD_REF=${1:-8950e51^}
+# Default: step 3 Butler with imperative, manually purged registrations.
+OLD_REF=${1:-2535f27}
 T=$(mktemp -d /tmp/brl.XXXXXX)
 S=brl
 # This run's own fake-process durations: a global `sleep 10000[12]` pgrep saw
@@ -42,15 +41,21 @@ start_daemon() {
 
 SNAPSHOT='
 local function n(e) return #(remuda.hooks[e] or {}) end
-local s = 0 for _ in pairs(remuda.schedules) do s = s + 1 end
+local relay_running = false
+for _, id in ipairs(remuda.processes()) do
+  if id == remuda._butler_relay then relay_running = true end
+end
+local s = 0 for _, x in pairs(remuda.schedules) do
+  if x.name == "butler-notices" or x.name == "butler-reconcile" or x.name == "butler-compaction" then s = s + 1 end
+end
 local live = {} for _, x in ipairs(remuda.ls()) do if x.alive then live[#live + 1] = x.name end end
 table.sort(live)
 local bus = remuda._butler_bus
 local member = bus.agents.m1
 local inbox = member and bus.inboxes[member.id] or {}
-return string.format("boots=%d hooks=%d,%d,%d,%d schedules=%d sessions=%s member=%s mail=%d bus=%s",
-  remuda.event_counts()["butler-start"] or 0, n("session_exited"), n("butler-compaction-submit"), n("butler-matrix-line"), n("butler-matrix-submit"),
-  s, table.concat(live, ","), tostring(member ~= nil), #inbox, tostring(bus))'
+return string.format("boots=%d hooks=%d,%d,%d,%d,%d schedules=%d sessions=%s member=%s mail=%d relay=%s bus=%s",
+  remuda.event_counts()["butler-start"] or 0, n("butler/deliver"), n("session_exited"), n("butler-compaction-submit"), n("butler-matrix-line"), n("butler-matrix-submit"),
+  s, table.concat(live, ","), tostring(member ~= nil), #inbox, tostring(relay_running), tostring(bus))'
 relays() { (pgrep -f "$TOKEN" || true) | wc -l | tr -d ' '; }
 pids() { (pgrep -f "sleep ${ID}[12]\$" || true) | sort | tr '\n' ','; }
 settle() { sleep 1; }
@@ -68,39 +73,45 @@ lua "remuda._butler_argv = {'sleep', '${ID}1'}; remuda._butler_reconcile_interva
 remuda -s "$S" butler --headless
 lua "remuda._butler_agent_builders.fake = function() return {'sleep', '${ID}2'} end
      remuda._butler_launch('fake', 'm1'); remuda._butler_send('butler', 'm1', 'kept across reload')"
+lua "remuda._butler_register_compaction_schedule()"  # active pre-step-4 handle is migrated on reload
 settle
 echo "legacy: $(lua "$SNAPSHOT") relays=$(relays)"
 BASE=$(lua "$SNAPSHOT" | sed 's/.* bus=//')
-EXPECT="hooks=1,1,1,1 schedules=2 sessions=butler,m1 member=true mail=2 bus=$BASE relays=$RELAYS pids=$(pids)"
+BASE_BOOT=$(lua 'return remuda.event_counts()["butler-start"] or 0')
+EXPECT_NEW="hooks=1,1,1,1,1 schedules=3 sessions=butler,m1 member=true mail=2 relay=$([[ $RELAYS == 1 ]] && echo true || echo false) bus=$BASE relays=$RELAYS pids=$(pids)"
+EXPECT_OLD="hooks=1,1,1,1,1 schedules=2 sessions=butler,m1 member=true mail=0 relay=$([[ $RELAYS == 1 ]] && echo true || echo false) bus=$BASE relays=$RELAYS pids=$(pids)"
+EXPECT_NEW_EMPTY="hooks=1,1,1,1,1 schedules=3 sessions=butler,m1 member=true mail=0 relay=$([[ $RELAYS == 1 ]] && echo true || echo false) bus=$BASE relays=$RELAYS pids=$(pids)"
 
 echo "== swap in lifecycle files, reload x3"
 new_files
 for i in 1 2 3; do
   lua "remuda.reload('butler')"; settle
-  check "reload $i" "boots=$i $EXPECT"
-  relay=$(pgrep -f "$TOKEN" || true)
-  [[ $i == 1 || $relay == "$last_relay" ]] || fail "relay restarted on reload $i"
-  last_relay=$relay
+  check "reload $i" "boots=$((BASE_BOOT + i)) $EXPECT_NEW"
+  if [[ $i == 1 ]]; then
+    lua "local m = remuda._butler_bus.agents.m1; remuda._butler_delivery_count_before = #remuda._butler_mail.mailbox(m.id); remuda._butler_send('butler', 'm1', 'single delivery after transition')"
+    lua "local m = remuda._butler_bus.agents.m1; assert(#remuda._butler_mail.mailbox(m.id) - remuda._butler_delivery_count_before == 1, 'one send after transition must queue exactly one inbox message')"
+    EXPECT_NEW=${EXPECT_NEW/mail=2/mail=3}
+  fi
 done
 remuda -s "$S" butler sessions | grep -q m1 || fail "'remuda butler sessions' lost m1"
 remuda -s "$S" butler inbox m1 | grep -q 'kept across reload' || fail "m1 mail lost"
 
 echo "== rollback to $OLD_REF"
 old_files
-lua "if remuda._butler_relay then remuda.kill(remuda._butler_relay) end; remuda.exec('butler')"
+lua "remuda.reload('butler')"
 settle
-check "rollback" "boots=3 ${EXPECT/mail=2/mail=0}"
+check "rollback" "boots=$((BASE_BOOT + 4)) $EXPECT_OLD"
 
 echo "== roll forward again"
 new_files
 lua "remuda.reload('butler')"; settle
-check "roll forward" "boots=4 ${EXPECT/mail=2/mail=0}"
+check "roll forward" "boots=$((BASE_BOOT + 5)) $EXPECT_NEW_EMPTY"
 
 echo "== tight reload loop: one boot per reload, nothing duplicated"
 lua "for _ = 1, 5 do remuda.reload('butler') end"
 for _ in 1 2 3 4 5; do lua "remuda.reload('butler')"; done
 settle
-check "tight x10" "boots=14 ${EXPECT/mail=2/mail=0}"
+check "tight x10" "boots=$((BASE_BOOT + 15)) $EXPECT_NEW_EMPTY"
 [[ $(lua 'return #(remuda.hooks["butler-start"] or {})') == 1 ]] || fail "butler-start hook duplicated"
 
 echo "== cold boot through remuda butler"
@@ -109,7 +120,7 @@ pkill -f "$TOKEN" >/dev/null 2>&1 || true
 start_daemon
 lua "remuda._butler_argv = {'sleep', '${ID}1'}"
 remuda -s "$S" butler --headless; settle
-lua "$SNAPSHOT" | grep -q 'boots=1 hooks=1,1,1,1 schedules=2 sessions=butler ' || \
+lua "$SNAPSHOT" | grep -q 'boots=1 hooks=1,1,1,1,1 schedules=3 sessions=butler ' || \
   fail "cold boot: $(lua "$SNAPSHOT")"
 [[ $(relays) == "$RELAYS" ]] || fail "cold boot relays=$(relays)"
 echo PASS

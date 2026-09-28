@@ -1222,6 +1222,101 @@ fn exec_butler_runs_the_builtin_package_in_the_daemons_image() {
     );
 }
 
+#[test]
+fn butler_lifecycle_reload_replaces_hooks_and_schedules_and_rolls_back() {
+    let path = scratch("butler-lifecycle-reload");
+    let _daemon = daemon_at(&path);
+    eval(&path, "remuda._butler_test_mode = 'lifecycle'; remuda.exec('butler')");
+
+    let main = include_str!("../../packages/butler/main.lua");
+    assert!(
+        !main.contains("remuda.clear_hooks(") && !main.contains("remuda.hooks[event]"),
+        "Butler registrations must be lifecycle-owned, without file-scope clearing or hand-purging"
+    );
+
+    let counts = r#"
+        local inbox, owned, notices, reconcile, compaction, owned_contributions = 0, 0, 0, 0, 0, -1
+        for _, hook in ipairs(remuda.hook_list()) do
+          if hook.group == "remuda-module:butler" then owned = owned + 1 end
+          if hook.event == "butler/deliver" and hook.id == "inbox"
+            and hook.group == "remuda-module:butler" then inbox = inbox + 1 end
+        end
+        for _, schedule in pairs(remuda.schedules) do
+          if schedule.name == "butler-notices" then notices = notices + 1 end
+          if schedule.name == "butler-reconcile" then reconcile = reconcile + 1 end
+          if schedule.name == "butler-compaction" then compaction = compaction + 1 end
+        end
+        if type(remuda.contributions) == "function" then
+          owned_contributions = 0
+          for _, point in ipairs({ "butler.command", "butler.guidance" }) do
+            for _, item in ipairs(remuda.contributions(point)) do
+              if item.owner == "butler" then owned_contributions = owned_contributions + 1 end
+            end
+          end
+        end
+        return table.concat({ inbox, owned, notices, reconcile, compaction, owned_contributions }, "|")
+    "#;
+    let initial = eval(&path, counts);
+    assert!(
+        initial == "1|6|1|1|1|14" || initial == "1|6|1|1|1|-1",
+        "unexpected Butler lifecycle registrations: {initial}"
+    );
+
+    // Simulate the dynamic schedule handle created by a pre-step-4 Butler.
+    // The first lifecycle start must migrate its enabled state and replace it.
+    eval(
+        &path,
+        r#"remuda._butler_compaction_schedule = remuda.schedule({
+          name = "butler-compaction", every = 60, run = function() end
+        })"#,
+    );
+
+    for _ in 0..3 {
+        eval(&path, "remuda.reload('butler')");
+        assert_eq!(eval(&path, counts), initial, "reload duplicated Butler registrations");
+        assert_eq!(
+            eval(&path, "return tostring(remuda._butler_state.compaction_enabled)"),
+            "true",
+            "reload did not preserve the previously enabled compaction schedule"
+        );
+        assert!(
+            read_count(
+                &path,
+                r#"local n = 0 for _, s in pairs(remuda.schedules) do
+                  if s.name == "butler-start-fallback" then n = n + 1 end
+                end return n"#,
+            ) <= 1,
+            "reload duplicated the one-shot start compatibility schedule"
+        );
+    }
+
+    let failed = eval(
+        &path,
+        r#"
+            local original = remuda.emit
+            remuda.emit = function(event, ...)
+              if event == "butler-start" then error("injected Butler start failure") end
+              return original(event, ...)
+            end
+            local ok, err = pcall(remuda.reload, "butler")
+            remuda.emit = original
+            return tostring(ok) .. "|" .. tostring(err)
+        "#,
+    );
+    assert!(failed.starts_with("false|"), "reload should report its failed start: {failed}");
+    assert!(failed.contains("injected Butler start failure"), "wrong start error: {failed}");
+    assert_eq!(eval(&path, counts), initial, "failed reload did not restore Butler registrations");
+    assert!(
+        read_count(
+            &path,
+            r#"local n = 0 for _, s in pairs(remuda.schedules) do
+              if s.name == "butler-start-fallback" then n = n + 1 end
+            end return n"#,
+        ) <= 1,
+        "failed reload left multiple start compatibility schedules"
+    );
+}
+
 /// `remuda._butler_initial_name` is set before the test-mode return (see
 /// `init.lua`), so this reaches real code without needing the live `claude`
 /// launch that `remuda._butler_test_mode` exists to avoid.
@@ -2808,19 +2903,27 @@ fn reexecuting_butler_keeps_the_root_telemetry_identity() {
     drop(daemon);
 }
 
+fn test_ulid_stub() -> &'static str {
+    r#"remuda._butler_new_ulid = remuda._butler_new_ulid or function()
+      remuda._mail_test_ulid = (remuda._mail_test_ulid or 0) + 1
+      return string.format("0000000000%016X", remuda._mail_test_ulid)
+    end"#
+}
+
 #[test]
 fn butler_mail_separates_the_envelope_from_its_body_object() {
     let path = scratch("butler-mail");
     let _daemon = daemon_at(&path);
     eval(
         &path,
-        r#"
+        &(test_ulid_stub().to_owned()
+            + r#"
           remuda._butler_mail_config = {
             bus = { agents = { fixer = { id = "01FIXER" } }, inboxes = {}, messages = {}, objects = {}, next = 0 },
             json_quote = function(value) return '"' .. value .. '"' end,
           }
           remuda.exec("butler/mail")
-        "#,
+        "#),
     );
     let result = eval(
         &path,
@@ -2860,12 +2963,14 @@ fn seeded_mail_root(dir: &Path, id: &str) -> (PathBuf, PathBuf, PathBuf) {
 
 fn mail_config_lua(root: &Path) -> String {
     format!(
-        r#"remuda._butler_mail_config = {{
+        r#"{stub}
+           remuda._butler_mail_config = {{
              bus = {{ agents = {{}}, inboxes = {{}}, messages = {{}}, objects = {{}}, next = 0 }},
-             root = {}, json_quote = function(value) return '"' .. value .. '"' end,
+             root = {root}, json_quote = function(value) return '"' .. value .. '"' end,
            }}
            remuda.exec("butler/mail")"#,
-        lua_raw_string(&root.to_string_lossy())
+        stub = test_ulid_stub(),
+        root = lua_raw_string(&root.to_string_lossy())
     )
 }
 
@@ -3146,24 +3251,23 @@ fn butler_mail_forwarded_read_state_is_per_inbox_and_replies_reach_the_original_
 fn butler_mail_refuses_to_overwrite_an_existing_message_on_an_id_collision() {
     let dir = scratch_dir("butler-mail-collide");
     let (root, f_inbox, _) = seeded_mail_root(&dir, REPLY_F);
-    std::fs::write(root.join("messages/message-3e8-1-lua_fixed.json"), "ORIGINAL").unwrap();
+    let collision_id = "00000000000000000000000000";
+    std::fs::write(root.join(format!("messages/{collision_id}.json")), "ORIGINAL").unwrap();
     let path = scratch("butler-mail-collide");
     let _daemon = daemon_at(&path);
     let out = eval(
         &path,
         &format!(
             r#"{}
-               local time, tmpname = os.time, os.tmpname
-               os.time, os.tmpname = function() return 1000 end, function() return "/tmp/lua_fixed" end
+               remuda._butler_new_ulid = function() return "{collision_id}" end
                local ok, message, err = pcall(M.queue, B, F, "second")
-               os.time, os.tmpname = time, tmpname
                return tostring(ok) .. "|" .. tostring(message) .. "|" .. tostring(err)"#,
             reply_prelude(&root)
         ),
     );
     assert!(out.starts_with("true|nil|") && out.contains("already exists"), "not refused loudly: {out}");
-    assert_eq!(std::fs::read_to_string(root.join("messages/message-3e8-1-lua_fixed.json")).unwrap(), "ORIGINAL");
-    assert!(!std::fs::read_to_string(&f_inbox).unwrap_or_default().contains("message-3e8-1-lua_fixed"), "a row was committed");
+    assert_eq!(std::fs::read_to_string(root.join(format!("messages/{collision_id}.json"))).unwrap(), "ORIGINAL");
+    assert!(!std::fs::read_to_string(&f_inbox).unwrap_or_default().contains(collision_id), "a row was committed");
 }
 
 /// Only an explicit operator skips the delivered check; an id-less caller
@@ -3209,41 +3313,44 @@ fn butler_mail_survives_a_fresh_lua_mailbox_and_remembers_reads() {
     eval(
         &path,
         &format!(
-            r#"
+            r#"{stub}
               remuda._butler_mail_config = {{
                 bus = {{ agents = {{ fixer = {{ id = "01FIXER" }} }}, inboxes = {{}}, messages = {{}}, objects = {{}}, next = 0 }},
                 root = {root_lua}, json_quote = function(value) return '"' .. value .. '"' end,
               }}
               remuda.exec("butler/mail")
               return remuda._butler_mail.queue("butler", "fixer", "survives a restart").id
-            "#
+            "#,
+            stub = test_ulid_stub(),
         ),
     );
     let received = eval(
         &path,
         &format!(
-            r#"
+            r#"{stub}
               remuda._butler_mail_config = {{
                 bus = {{ agents = {{ fixer = {{ id = "01FIXER" }} }}, inboxes = {{}}, messages = {{}}, objects = {{}}, next = 0 }},
                 root = {root_lua}, json_quote = function(value) return '"' .. value .. '"' end,
               }}
               remuda.exec("butler/mail")
               return remuda._butler_mail.inbox("01FIXER")
-            "#
+            "#,
+            stub = test_ulid_stub(),
         ),
     );
     assert!(received.contains("survives a restart"), "{received:?}");
     let after_read = eval(
         &path,
         &format!(
-            r#"
+            r#"{stub}
               remuda._butler_mail_config = {{
                 bus = {{ agents = {{ fixer = {{ id = "01FIXER" }} }}, inboxes = {{}}, messages = {{}}, objects = {{}}, next = 0 }},
                 root = {root_lua}, json_quote = function(value) return '"' .. value .. '"' end,
               }}
               remuda.exec("butler/mail")
               return remuda._butler_mail.inbox("01FIXER")
-            "#
+            "#,
+            stub = test_ulid_stub(),
         ),
     );
     assert_eq!(after_read, "inbox empty");
@@ -3295,7 +3402,8 @@ fn butler_initializes_mail_and_persists_a_sent_message() {
         &path,
         r#"return remuda._butler_send("butler", "butler", "private body")"#,
     );
-    assert!(sent.starts_with("queued message-"), "{sent:?}");
+    let queued_id = sent.strip_prefix("queued ").and_then(|s| s.split_whitespace().next()).unwrap_or("");
+    assert!(queued_id.len() == 26 && queued_id.bytes().all(|b| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&b)), "{sent:?}");
     assert!(
         sent.contains("notice deferred") || sent.ends_with(" and notified butler"),
         "{sent:?}"
@@ -3325,42 +3433,36 @@ fn butler_initializes_mail_and_persists_a_sent_message() {
 
 /// Same live-`claude` limitation as the test above blocks a real kill-and-
 /// watch-it-come-back test for the respawn watchdog. This checks, at the
-/// source level, that the watchdog reuses one launch function (so a
-/// respawn can't drift from a fresh start) and clears its hook group before
-/// registering (so a second `exec butler` can't double-launch a session).
+/// source level, that the lifecycle-owned watchdog reuses one launch
+/// function (so a respawn can't drift from a fresh start).
 #[test]
 fn butler_session_exited_hook_relaunches_via_the_shared_launch_function() {
     // Normalized once: a `\n`-only search below would miss a real call on a
     // checkout where git converts this file to CRLF (Windows runners do).
-    let init_lua = include_str!("../../packages/butler/main.lua").replace("\r\n", "\n");
+    let main_lua = include_str!("../../packages/butler/main.lua").replace("\r\n", "\n");
+    let init_lua = include_str!("../../packages/butler/init.lua").replace("\r\n", "\n");
 
-    let launch_fn_idx = init_lua
+    let launch_fn_idx = main_lua
         .find("local function launch_butler()")
         .expect("butler package lost its shared launch function");
-    let clear_hooks_idx = init_lua
-        .find("remuda.clear_hooks({ group = \"butler\" })")
-        .expect("butler package lost its clear_hooks guard against a second exec");
-    let session_exited_idx = init_lua
-        .find("remuda.on(\"session_exited\",")
-        .expect("butler package lost its session_exited watchdog");
-
     assert!(
-        launch_fn_idx < clear_hooks_idx && clear_hooks_idx < session_exited_idx,
-        "expected launch_butler to be defined before the guarded watchdog is registered"
+        !main_lua.contains("remuda.clear_hooks(") && !main_lua.contains("remuda.hooks[event]"),
+        "Butler reload must rely on lifecycle ownership, not hook purges"
     );
-
-    let hook_body_end = init_lua[session_exited_idx..]
-        .find("end, { group = \"butler\" })")
-        .map(|i| session_exited_idx + i)
-        .expect("session_exited hook is not registered in the \"butler\" group");
-    let hook_body = &init_lua[session_exited_idx..hook_body_end];
     assert!(
-        hook_body.contains("remuda._butler_reconcile()"),
-        "the session_exited watchdog must use the shared reconciler: {hook_body:?}"
+        init_lua.contains("stop = function(state)") && init_lua.contains("pcall(host.kill, relay)")
+            && !main_lua.contains("pkill -f"),
+        "the Matrix relay must be stopped by process id through the lifecycle stop hook"
+    );
+    assert!(
+        init_lua.contains("event = \"session_exited\", id = \"identity\"")
+            && main_lua.contains("function remuda._butler_session_exited(name)")
+            && main_lua[launch_fn_idx..].contains("remuda._butler_reconcile()"),
+        "the declared session-exit hook must use the shared reconciler"
     );
     assert!(
         init_lua.contains("name = \"butler-reconcile\"")
-            && init_lua.contains("remuda._butler_reconcile()\n"),
+            && init_lua.contains("host._butler_reconcile then host._butler_reconcile()"),
         "butler needs a periodic reconciler as well as an exit event hook"
     );
 }
@@ -3398,9 +3500,7 @@ fn butler_watchdog_relaunches_a_session_that_really_died() {
     );
     let path = daemon::socket_path_in(&dir, "s");
 
-    // A separate hook group: `init.lua` clears the "butler" group itself on
-    // every `exec` (see its own comment above `remuda.clear_hooks`), so an
-    // observer registered there would be wiped the moment `exec butler` runs.
+    // Keep the observer outside Butler's lifecycle-owned registrations.
     eval(
         &path,
         r#"
@@ -3481,16 +3581,9 @@ fn butler_watchdog_relaunches_a_session_that_really_died() {
     );
 }
 
-/// Registration itself needs no live session at all -- `remuda.schedule`
-/// does not touch `butler_name`, only the `run` callback does when it later
-/// fires -- so this exercises `remuda._butler_register_compaction_schedule()`
-/// exactly the way a launched session's own `run_script` call would: a
-/// separate `eval` against an already-running daemon, called twice, standing
-/// in for a re-`exec` or a confused agent calling it more than once.
-/// `remuda.schedule` has no group-based bulk-cancel (only `remuda.clear_hooks`
-/// does, and only for hooks -- see `tools.lua`'s own doc comment on
-/// `remuda.schedule`), so without the cancel-before-register guard this would
-/// leave TWO handles both named "butler-compaction" in `remuda.schedules`.
+/// The lifecycle declaration owns one compaction schedule; the session's
+/// run_script call only enables it. Repeating that request must not register
+/// another schedule.
 #[test]
 #[cfg(unix)]
 fn butler_compaction_schedule_registration_is_idempotent() {
@@ -3547,7 +3640,7 @@ fn butler_compaction_schedule_registration_is_idempotent() {
     assert_eq!(
         live, 1,
         "two calls to remuda._butler_register_compaction_schedule() left {live} live \
-         \"butler-compaction\" schedules -- expected exactly 1 (cancel-before-register)"
+         \"butler-compaction\" schedules -- expected the one lifecycle schedule"
     );
 
     drop(daemon);

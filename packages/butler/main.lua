@@ -215,8 +215,21 @@ local function current_agent(caller)
   end
 end
 remuda._butler_current_agent = current_agent
-if remuda._butler_test_mode then
+if remuda._butler_test_mode == true then
   return
+end
+
+-- Replace handles created imperatively by the previous Butler version. The
+-- lifecycle declaration owns these schedules from this activation onward.
+local legacy_compaction_schedule = remuda._butler_compaction_schedule
+for _, key in ipairs({ "_butler_notice_schedule", "_butler_reconcile_schedule", "_butler_compaction_schedule" }) do
+  if remuda[key] then
+    remuda.cancel(remuda[key])
+    remuda[key] = nil
+  end
+end
+if legacy_compaction_schedule and remuda._butler_state then
+  remuda._butler_state.compaction_enabled = true
 end
 
 -- `os.getenv` here reads the *daemon's own* environment, fixed forever at
@@ -446,18 +459,35 @@ bus.objects = bus.objects or {}
 -- human-friendly keys used by the mailbox and the in-memory team tree.
 local alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 local function crockford_ulid()
-  local millis = math.floor(os.time() * 1000)
+  local second = os.time()
+  local millis = math.floor(second * 1000)
   local bytes = {}
   for i = 6, 1, -1 do bytes[i] = millis % 256; millis = math.floor(millis / 256) end
-  local random = io.open("/dev/urandom", "rb")
-  local entropy = random and random:read(10)
-  if random then random:close() end
-  if not entropy or #entropy ~= 10 then
-    math.randomseed(os.time() + math.floor(os.clock() * 1000000))
+  local entropy
+  if bus.previous_ulid_second == second then
+    local bytes = { bus.previous_ulid_random:byte(1, 10) }
+    local carry = 1
+    for i = 10, 1, -1 do
+      local value = bytes[i] + carry
+      bytes[i] = value % 256
+      carry = math.floor(value / 256)
+    end
+    if carry ~= 0 then error("ULID random component overflow", 0) end
     local out = {}
-    for i = 1, 10 do out[i] = string.char(math.random(0, 255)) end
+    for i = 1, 10 do out[i] = string.char(bytes[i]) end
     entropy = table.concat(out)
+  else
+    local random = io.open("/dev/urandom", "rb")
+    entropy = random and random:read(10)
+    if random then random:close() end
+    if not entropy or #entropy ~= 10 then
+      math.randomseed(second + math.floor(os.clock() * 1000000))
+      local out = {}
+      for i = 1, 10 do out[i] = string.char(math.random(0, 255)) end
+      entropy = table.concat(out)
+    end
   end
+  bus.previous_ulid_second, bus.previous_ulid_random = second, entropy
   for i = 1, 10 do bytes[i + 6] = entropy:byte(i) end
   local bits, out = { 0, 0 }, {}
   for _, byte in ipairs(bytes) do
@@ -479,16 +509,24 @@ local identity_path = data_home and data_home .. "/remuda/butler/agents.jsonl"
 bus.identities = bus.identities or {}
 bus.identity_ids = bus.identity_ids or {}
 -- Loaded before identity_record so agents.jsonl shares mail.lua's append.
+remuda._butler_new_ulid = crockford_ulid
 remuda._butler_mail_config = { bus = bus, root = mail_root, json_quote = json_quote }
 remuda.exec("butler/mail")
-local function identity_record(id, alias, kind, leader_id, ended)
+local function identity_record(record)
   if not identity_path then return end
   local dir = identity_path:match("^(.*)/[^/]+$")
   if dir then os.execute("mkdir -p " .. shell_quote(dir)) end
-  local row = '{"id":' .. json_quote(id) .. ',"alias":' .. json_quote(alias)
-    .. ',"kind":' .. json_quote(kind or "") .. ',"leader_id":' .. json_quote(leader_id or "")
-    .. ',"created_at":' .. json_quote(os.date("!%Y-%m-%dT%H:%M:%SZ"))
-  if ended then row = row .. ',"ended_at":' .. json_quote(os.date("!%Y-%m-%dT%H:%M:%SZ")) end
+  local row = '{"id":' .. json_quote(record.id) .. ',"alias":' .. json_quote(record.alias)
+    .. ',"kind":' .. json_quote(record.kind or "") .. ',"leader_id":' .. json_quote(record.leader_id or "")
+  if record.created_at and not record.created_at_unknown then
+    row = row .. ',"created_at":' .. json_quote(record.created_at)
+  elseif record.created_at_unknown then
+    row = row .. ',"created_at_unknown":true'
+  end
+  row = row .. ',"state":' .. json_quote(record.state or "running")
+  if record.reason then row = row .. ',"reason":' .. json_quote(record.reason) end
+  if record.ended_at then row = row .. ',"ended_at":' .. json_quote(record.ended_at) end
+  if record.ended_at_estimate then row = row .. ',"ended_at_estimate":true' end
   remuda._butler_mail.append(identity_path, row .. "}\n")
 end
 local function json_field(line, key)
@@ -506,8 +544,16 @@ if identity_path and not bus.identities_loaded then
     for line in f:lines() do
       local id, alias = json_field(line, "id"), json_field(line, "alias")
       if id and alias then
+        local created_at, ended_at = json_field(line, "created_at"), json_field(line, "ended_at")
+        local state = json_field(line, "state")
+        local created_at_unknown = line:match('"created_at_unknown":true') ~= nil
+          or (not state and ended_at and created_at == ended_at)
         local record = { id = id, alias = alias, kind = json_field(line, "kind"),
-          leader_id = json_field(line, "leader_id"), ended_at = json_field(line, "ended_at") }
+          leader_id = json_field(line, "leader_id"), created_at = created_at,
+          created_at_unknown = created_at_unknown, ended_at = ended_at,
+          state = state or (ended_at and "ended" or "running"),
+          reason = json_field(line, "reason"),
+          ended_at_estimate = line:match('"ended_at_estimate":true') ~= nil }
         bus.identity_ids[id] = record
         bus.identities[alias] = record
       end
@@ -523,17 +569,20 @@ if identity_path and not bus.identities_loaded then
   end
   for id, record in pairs(bus.identity_ids) do
     if not record.ended_at and record.alias ~= "butler" and not live[record.alias] then
-      identity_record(id, record.alias, record.kind, record.leader_id, true)
+      record.state, record.reason = "ended", "daemon_restart"
       record.ended_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+      record.ended_at_estimate = true
+      identity_record(record)
     end
   end
   bus.identities_loaded = true
 end
 local function register_identity(alias, kind, leader_id, id)
   id = id or crockford_ulid()
-  local record = { id = id, alias = alias, kind = kind, leader_id = leader_id or "" }
+  local record = { id = id, alias = alias, kind = kind, leader_id = leader_id or "",
+    created_at = os.date("!%Y-%m-%dT%H:%M:%SZ"), state = "running" }
   bus.identities[alias], bus.identity_ids[id] = record, record
-  identity_record(id, alias, kind, leader_id)
+  identity_record(record)
   return record
 end
 local function resolve(ref)
@@ -574,7 +623,6 @@ local function mail_id(ref, allow_ended)
   return agent.id, agent
 end
 remuda._butler_resolve = resolve
-remuda._butler_new_ulid = crockford_ulid
 local function next_token(name)
   bus.next = bus.next + 1
   return name .. "-" .. os.time() .. "-" .. bus.next
@@ -627,6 +675,7 @@ local function inbox_delivery(message)
   end
   return delivered
 end
+remuda._butler_inbox_delivery = inbox_delivery
 local function deliver_message(message)
   if delivery_events then
     local delivered = remuda.emit_until_success("butler/deliver", message)
@@ -697,6 +746,7 @@ local function setup_telemetry(kind, spec)
 end
 -- A member's AGENTS.md and prompt are `butler.guidance` sections joined in
 -- order, so an extension adds its own section (hook-design §4.2).
+if not remuda.contribute then
 remuda._butler_contribute("butler.guidance", "header", { order = 10,
   agents_md = function(ctx)
     return [[# Butler team member
@@ -747,6 +797,7 @@ the normal way for a member to communicate.
   end })
 remuda._butler_contribute("butler.guidance", "leader", { order = 90,
   prompt = function(ctx) return "Your leader is " .. ctx.parent .. "." end })
+end
 local function guidance(part, parent)
   local out = {}
   for _, item in ipairs(contributions("butler.guidance")) do
@@ -1074,19 +1125,6 @@ function remuda._butler_deliver_notices()
     if bus.agents[session] then deliver_notice(session) else bus.notices[session] = nil end
   end
 end
--- init.lua declares the schedule; a core before remuda#116 ignores declared
--- schedules, so keep exactly one imperative stand-in there.
-if remuda._butler_notice_schedule then remuda.cancel(remuda._butler_notice_schedule) end
-remuda._butler_notice_schedule = nil
-local declared_notices = false
-for _, schedule in pairs(remuda.schedules) do
-  if schedule.name == "butler-notices" then declared_notices = true end
-end
-if not declared_notices then
-  remuda._butler_notice_schedule = remuda.schedule({ name = "butler-notices", every = 1,
-    run = function() remuda._butler_deliver_notices() end })
-end
-
 function remuda._butler_send(from, to, text)
   local _, recipient = mail_id(to, false)
   local sender = (from == "operator" or from == "outside") and mail_address(from)
@@ -1216,6 +1254,52 @@ function remuda._butler_sessions()
     or "SESSION\tAGENT\tLEADER\n" .. table.concat(rows, "\n")
 end
 
+local function registry_list(include_ended)
+  local latest, first_created = {}, {}
+  if identity_path then
+    local file = io.open(identity_path, "r")
+    if file then
+      for line in file:lines() do
+        local id, alias = json_field(line, "id"), json_field(line, "alias")
+        if id and alias then
+          local created_at, ended_at = json_field(line, "created_at"), json_field(line, "ended_at")
+          local state = json_field(line, "state")
+          local unknown = line:match('"created_at_unknown":true') ~= nil
+            or not created_at or (ended_at and created_at == ended_at)
+          if first_created[id] == nil and latest[id] == nil and not unknown then
+            first_created[id] = created_at
+          end
+          local shown_created = created_at
+          if unknown then shown_created = first_created[id] end
+          latest[id] = {
+            id = id, alias = alias, kind = json_field(line, "kind") or "",
+            leader = json_field(line, "leader_id") or "",
+            state = state or (ended_at and "ended" or "running"),
+            reason = json_field(line, "reason") or "",
+            created = shown_created or "?",
+            ended = ended_at or "",
+          }
+        end
+      end
+      file:close()
+    end
+  end
+  local records = {}
+  for _, record in pairs(latest) do
+    if include_ended or record.state == "running" then records[#records + 1] = record end
+  end
+  table.sort(records, function(a, b)
+    if a.alias ~= b.alias then return a.alias < b.alias end
+    return a.id < b.id
+  end)
+  local lines = { "ID\tALIAS\tKIND\tLEADER\tSTATE\tREASON\tCREATED\tENDED" }
+  for _, record in ipairs(records) do
+    lines[#lines + 1] = table.concat({ record.id, record.alias, record.kind, record.leader,
+      record.state, record.reason, record.created, record.ended }, "\t")
+  end
+  return table.concat(lines, "\n")
+end
+
 -- Core's client pane asks this for its row order and indentation; sessions
 -- Butler does not manage are left for core to append in its own order.
 function remuda.session_order()
@@ -1266,11 +1350,18 @@ end
 
 -- Each verb is a `butler.command` entry (hook-design §4.1); `run` returns nil
 -- when its arguments do not fit, and the caller gets the usage text.
+local command_entries = {}
 local function command(order, verb, usage, run)
-  remuda._butler_contribute("butler.command", verb, { order = order, verb = verb, usage = usage, run = run })
+  local entry = { id = verb, order = order, verb = verb, usage = usage, run = run }
+  command_entries[verb] = entry
+  if not remuda.contribute then remuda._butler_contribute("butler.command", verb, entry) end
 end
 command(10, "sessions", "  remuda butler sessions", function(args)
   if #args == 1 then return remuda._butler_sessions() end
+end)
+command(15, "agents", "  remuda butler agents [--all]", function(args)
+  if #args == 1 then return registry_list(false) end
+  if #args == 2 and args[2] == "--all" then return registry_list(true) end
 end)
 command(20, "launch", "  remuda butler launch <claude|codex> [name] [--model M]", function(args, caller)
   if args[2] ~= "claude" and args[2] ~= "codex" then return nil end
@@ -1328,6 +1419,10 @@ command(80, "forward", "  remuda butler forward <message-id> <member> [note...]"
   return remuda._butler_forward(current_agent(caller) or OPERATOR, args[2], args[3],
     #args >= 4 and words_after(args, 4) or nil)
 end)
+remuda._butler_command_run = function(verb, args, caller)
+  local entry = command_entries[verb]
+  if entry then return entry.run(args, caller) end
+end
 
 -- The generic Remuda extension-command bridge passes an argv-like Lua table.
 -- This parser lives with Butler, not in the Remuda executable.
@@ -1499,8 +1594,6 @@ end
 -- machine for a real "몇 날" and someone has an opinion about the cadence.
 -- remuda._butler_compaction_interval lets a test override it (same idiom as
 -- every other remuda._butler_* test hook in this file).
-local COMPACTION_CHECK_INTERVAL = remuda._butler_compaction_interval or 30 * 60
-
 -- remuda._butler_compaction_trace_path lets a test redirect the append-only
 -- trace below to a throwaway tempfile instead of the real config dir (same
 -- idiom as remuda._butler_compaction_interval just above). nil in
@@ -1574,49 +1667,43 @@ local function launch_butler()
   return butler_name
 end
 
--- Reused across every re-`exec` and every later call from the launched
--- session's own run_script -- a plain Lua local would NOT survive either
--- (each `exec butler` is a fresh chunk with fresh locals; a later run_script
--- call is a wholly separate Eval). `remuda._butler_compaction_schedule`
--- lives on the persistent `remuda` table, so only a slot on that same table
--- can hold "the one we already registered" across calls -- same reasoning
--- as `remuda._butler_argv` and friends, just read back instead of only
--- written. `run_script` needs no separate registration step to reach this:
--- it evals arbitrary Lua against the daemon's live globals (`mcp.rs`'s
--- `run_script => Request::Eval{code}`), so a plain function assigned onto
--- `remuda` is already callable by name from a later run_script call, exactly
--- like `remuda._butler_initial_name` already is.
+-- The lifecycle declaration owns the one compaction schedule. The session's
+-- one-time run_script call only enables its callback; reloading the mod
+-- replaces the schedule without leaving an old handle behind.
 function remuda._butler_register_compaction_schedule()
-  if remuda._butler_compaction_schedule then
-    remuda.cancel(remuda._butler_compaction_schedule)
-  end
   _butler_trace("registered")
-  remuda._butler_compaction_schedule = remuda.schedule({
-    name = "butler-compaction",
-    every = COMPACTION_CHECK_INTERVAL,
-    run = function()
-      -- `context_left` is unimplemented (tools.lua:362-366, canon says "지금
-      -- 안 만든다") -- `is_busy` (idle-time heuristic, never a real token
-      -- count) is the proxy the canon names instead: only ever nudge
-      -- compaction while the session looks idle, never mid-task.
-      if butler_name and remuda.session(butler_name).is_busy == false then
-        local ok, err = pcall(remuda.send, butler_name, "/compact")
-        if ok then
-          _butler_trace("sent")
-        else
-          _butler_trace("error", tostring(err))
-        end
-        -- Same "type it, wait, then submit" hand-off the Matrix relay below
-        -- already uses -- `remuda.send`'s text+Enter lands as one write,
-        -- which this TUI reads as paste-in-progress rather than a distinct
-        -- Enter, so a separately-timed bare Enter confirms it.
-        remuda.process({ argv = { "sleep", "2" }, on_exit = "butler-compaction-submit" })
-      else
-        _butler_trace("skipped_busy")
-      end
-    end,
-  })
-  return remuda._butler_compaction_schedule
+  if remuda._butler_state then
+    remuda._butler_state.compaction_enabled = true
+  else
+    remuda._butler_compaction_enabled = true
+  end
+  return true
+end
+function remuda._butler_compaction_tick()
+  if remuda._butler_state then
+    if not remuda._butler_state.compaction_enabled then return end
+  elseif not remuda._butler_compaction_enabled then
+    return
+  end
+  -- `context_left` is unimplemented (tools.lua:362-366, canon says "지금
+  -- 안 만든다") -- `is_busy` (idle-time heuristic, never a real token
+  -- count) is the proxy the canon names instead: only ever nudge
+  -- compaction while the session looks idle, never mid-task.
+  if butler_name and remuda.session(butler_name).is_busy == false then
+    local ok, err = pcall(remuda.send, butler_name, "/compact")
+    if ok then
+      _butler_trace("sent")
+    else
+      _butler_trace("error", tostring(err))
+    end
+    -- Same "type it, wait, then submit" hand-off the Matrix relay below
+    -- already uses -- `remuda.send`'s text+Enter lands as one write,
+    -- which this TUI reads as paste-in-progress rather than a distinct
+    -- Enter, so a separately-timed bare Enter confirms it.
+    remuda.process({ argv = { "sleep", "2" }, on_exit = "butler-compaction-submit" })
+  else
+    _butler_trace("skipped_busy")
+  end
 end
 
 -- remuda._butler_session_trace_path lets a test redirect this to a throwaway
@@ -1641,22 +1728,6 @@ function _butler_session_trace(event, detail)
   end)
 end
 
--- `exec butler` re-running this file in the same daemon image would
--- otherwise double this hook (see docs/design.md's augroup note) --
--- clearing the group first keeps exactly one watchdog alive.
-remuda.clear_hooks({ group = "butler" })
-if delivery_events then
-  remuda.on("butler/deliver", inbox_delivery, { group = "butler", id = "inbox", depth = 0 })
-end
--- Builds before the lifecycle entry registered these Matrix hooks without a
--- group. Only Butler emits these events, so replace those legacy callbacks.
-for _, event in ipairs({ "butler-matrix-line", "butler-matrix-submit" }) do
-  local kept = {}
-  for _, hook in ipairs(remuda.hooks[event] or {}) do
-    if hook.group then kept[#kept + 1] = hook end
-  end
-  remuda.hooks[event] = kept
-end
 function remuda._butler_reconcile()
   local ok, result = pcall(launch_butler)
   if not ok then
@@ -1665,16 +1736,39 @@ function remuda._butler_reconcile()
   end
   return result
 end
-remuda.on("session_exited", function(name)
+-- The session_exited hook only carries the session name. Remember an explicit
+-- remuda.close call long enough for the hook to distinguish it from an agent
+-- process ending on its own.
+if not bus.close_wrapper_installed and type(remuda.close) == "function" then
+  local close_session = remuda.close
+  bus.close_wrapper_installed = true
+  bus.close_requested = bus.close_requested or {}
+  remuda.close = function(name, ...)
+    local tracked = bus.agents[name] ~= nil
+    if tracked then bus.close_requested[name] = true end
+    local ok, a, b, c = pcall(close_session, name, ...)
+    if not ok then
+      if tracked then bus.close_requested[name] = nil end
+      error(a, 0)
+    end
+    return a, b, c
+  end
+end
+function remuda._butler_session_exited(name)
   _butler_session_trace("session_exited", name)
   -- #29: the mail stays in the inbox; only the pending pane notice goes.
   bus.notices[name], bus.notice_screens[name], bus.pending_tasks[name] = nil, nil, nil
   local exited = bus.agents[name]
   if exited and name ~= "butler" then
-    identity_record(exited.id, exited.alias or name, exited.kind,
-      exited.parent and bus.agents[exited.parent] and bus.agents[exited.parent].id or "", true)
     local ended = bus.identity_ids[exited.id] or exited
+    ended.alias, ended.kind = exited.alias or name, exited.kind
+    ended.leader_id = exited.parent and bus.agents[exited.parent] and bus.agents[exited.parent].id or ""
+    local was_closed = bus.close_requested and bus.close_requested[name]
+    if bus.close_requested then bus.close_requested[name] = nil end
+    ended.state, ended.reason = "ended", was_closed and "closed" or "exited"
     ended.ended_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+    ended.ended_at_estimate = nil
+    identity_record(ended)
     bus.identity_ids[exited.id], bus.identities[exited.alias or name] = ended, ended
     bus.agents[name] = nil
     if exited.parent and bus.agents[exited.parent] then
@@ -1686,25 +1780,15 @@ remuda.on("session_exited", function(name)
     _butler_session_trace("relaunching", name)
     remuda._butler_reconcile()
   end
-end, { group = "butler" })
-
-if remuda._butler_reconcile_schedule then
-  remuda.cancel(remuda._butler_reconcile_schedule)
 end
-remuda._butler_reconcile_schedule = remuda.schedule({
-  name = "butler-reconcile",
-  every = remuda._butler_reconcile_interval or 2,
-  run = function()
-    remuda._butler_reconcile()
-  end,
-})
-remuda._butler_reconcile()
 
-remuda.on("butler-compaction-submit", function()
+if remuda._butler_test_mode ~= "lifecycle" then remuda._butler_reconcile() end
+
+function remuda._butler_compaction_submit()
   remuda.send(butler_name, "")
-end, { group = "butler" })
+end
 
-remuda.on("butler-matrix-line", function(line)
+function remuda._butler_matrix_line(line)
   local sender, body = line:match("^([^\t]*)\t(.*)$")
   if not body then
     return
@@ -1732,11 +1816,11 @@ remuda.on("butler-matrix-line", function(line)
     argv = {"sleep", "2"},
     on_exit = "butler-matrix-submit",
   }
-end, { group = "butler" })
+end
 
-remuda.on("butler-matrix-submit", function()
+function remuda._butler_matrix_submit()
   remuda.send(butler_name, "")
-end, { group = "butler" })
+end
 
 local function relay_running()
   for _, id in ipairs(remuda.processes()) do
@@ -1745,14 +1829,13 @@ local function relay_running()
   return false
 end
 if token_path and not remuda._butler_skip_relay and not relay_running() then
-  -- A relay started before live reload has no recorded id. Replace it once
-  -- by matching its unique config path as the trailing process argument.
-  os.execute("pkill -f -- " .. shell_quote(config_path .. "$"))
-  remuda._butler_relay = remuda.process{
+  local relay = remuda.process{
     argv = {"python3", "-c", HELPER_SRC, token_path, config_path},
     on_line = "butler-matrix-line",
     on_exit = "butler-matrix-sync-exit",
   }
+  remuda._butler_relay = relay
+  if remuda._butler_state then remuda._butler_state.relay = relay end
 end
 
 if token_path then

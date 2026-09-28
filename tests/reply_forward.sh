@@ -40,9 +40,32 @@ ROOT=$(lua 'return remuda._butler_bus.agents.butler.id')
 M1=$(lua 'return remuda._butler_bus.agents.m1.id')
 M2=$(lua 'return remuda._butler_bus.agents.m2.id')
 
+# Seed a persisted pre-ULID message before the recipient's inbox is loaded.
+component() { printf '%s' "$1" | od -An -tx1 | tr -d ' \n'; }
+M1_ROWS="$XDG_DATA_HOME/remuda/butler/mail/inboxes/$(component "$M1").jsonl"
+mkdir -p "$(dirname "$M1_ROWS")" "$XDG_DATA_HOME/remuda/butler/mail/messages" "$XDG_DATA_HOME/remuda/butler/mail/objects"
+printf '{"message_id":"message-legacy"}\n' >"$M1_ROWS"
+printf '{"id":"message-legacy","from":{"host":"local","id":"%s","alias":"butler","session":"butler"},"subject":"Legacy","body":{"object_id":"object-legacy"}}\n' "$ROOT" \
+  >"$XDG_DATA_HOME/remuda/butler/mail/messages/message-legacy.json"
+printf 'legacy body' >"$XDG_DATA_HOME/remuda/butler/mail/objects/object-legacy"
+# Launching m1 already loaded its inbox for the welcome message; invalidate
+# that in-memory snapshot so the following read picks up the disk-seeded row.
+lua "remuda._butler_bus.mail_loaded['$M1'] = nil" >/dev/null
+
+M1_INBOX=$(as "$M1" inbox)
+[[ $M1_INBOX == *"message-legacy"* && $M1_INBOX == *"Legacy"* ]] || \
+  fail "persisted old-format message did not appear in inbox: $M1_INBOX"
+
 SENT=$(as "$ROOT" send m1 "the plan")
 ID=$(printf '%s\n' "$SENT" | sed -E 's/^queued ([^ ]+).*/\1/')
-[[ $ID == message-* ]] || fail "send did not report an id: $SENT"
+[[ $ID =~ ^[0-9A-HJKMNP-TV-Z]{26}$ ]] || fail "send did not report a bare ULID: $SENT"
+
+# A persisted pre-ULID message remains addressable beside the new ULID.
+as "$M1" forward message-legacy m2 legacy note | grep -F "m2" >/dev/null || fail "legacy message could not be forwarded"
+as "$M1" reply message-legacy "legacy reply" | grep -F "butler" >/dev/null || fail "legacy message could not be replied to"
+ROOT_INBOX=$(as "$ROOT" inbox)
+[[ $ROOT_INBOX == *"legacy reply"* ]] || fail "reply to legacy message was not delivered: $ROOT_INBOX"
+echo "ok - persisted message-* ids still resolve beside ULID messages"
 
 as "$M1" forward "$ID" m2 see step 2 | grep -F "m2" >/dev/null || fail "forward did not report its target"
 M2_INBOX=$(as "$M2" inbox)
@@ -66,7 +89,6 @@ HELP=$("$REMUDA_BIN" -s "$SERVER" butler help 2>&1 || true)
 echo "ok - help says a reply goes to the original sender"
 
 # Authorization (review of #39): no unidentified caller may reply or forward.
-component() { printf '%s' "$1" | od -An -tx1 | tr -d ' \n'; }
 mcp() { printf '%s\n' "$2" | REMUDA_SESSION_CAPABILITY=$1 "$REMUDA_BIN" -s "$SERVER" mcp 2>&1; }
 call() { printf '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"%s","arguments":%s}}' "$1" "$2"; }
 M1_ROWS="$XDG_DATA_HOME/remuda/butler/mail/inboxes/$(component "$M1").jsonl"
