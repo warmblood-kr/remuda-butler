@@ -11,8 +11,9 @@ set -uo pipefail
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 CORE_URL=${CORE_URL:-https://github.com/warmblood-kr/remuda.git}
-# Keep in step with tests/rust_tests.sh and tests/golden_guidance.sh.
-CORE_REF=${CORE_REF:-938a488}
+# Keep in step with tests/rust_tests.sh and tests/golden_guidance.sh; Butler's
+# lifecycle declaration needs the schedule and hook APIs available in f604e14.
+CORE_REF=${CORE_REF:-f604e14}
 T=$(mktemp -d /tmp/bst.XXXXXX)
 trap 'rm -rf "$T"' EXIT
 
