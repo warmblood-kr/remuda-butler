@@ -432,6 +432,7 @@ local bus = remuda._butler_bus
 bus.pending_tasks = bus.pending_tasks or {}
 bus.codex_update_state = bus.codex_update_state or { claimed = false, done = false }
 bus.codex_update_relaunches = bus.codex_update_relaunches or {}
+bus.codex_update_state.waiting = bus.codex_update_state.waiting or {}
 
 -- Contribution points (hook-design §4): core's owned registry when this core
 -- has one (remuda#141), else Butler's own with the same order rules, on bus.
@@ -1065,13 +1066,10 @@ local function write_agent_guidance(root, text, replace)
   f:close()
 end
 local _butler_session_trace -- defined below; the task poke fires later
+local startup_action_safe
 local function option_number(screen, matches)
-  if type(remuda.expect_option) == "function" then
-    local ok, number = pcall(remuda.expect_option, screen, matches)
-    if ok then return number end
-  end
-  -- Compatibility for pinned cores predating expect_option; the selection is
-  -- still matched by label, never by a fixed slot or Enter.
+  -- Parse the visible chooser ourselves. Core versions that strip a UTF-8
+  -- selection glyph as a byte-class can leave stray bytes before its label.
   local found
   for line in (tostring(screen or "") .. "\n"):gmatch("(.-)\n") do
     line = line:gsub("^%s*", "")
@@ -1088,6 +1086,23 @@ local function option_number(screen, matches)
     end
   end
   return found
+end
+local function codex_update_version(screen)
+  local from, to = tostring(screen or ""):match("(%d+%.%d+%.%d+)%s*→%s*(%d+%.%d+%.%d+)")
+  if from and to then return from .. "->" .. to end
+end
+local function skip_option_number(screen)
+  local number = option_number(screen, function(label) return label:lower() == "skip" end)
+  if number then return number end
+  number = option_number(screen, function(label)
+    local lower = label:lower()
+    return lower:sub(1, 5) == "skip " and lower ~= "skip until next version"
+  end)
+  if number then return number end
+  return option_number(screen, function(label) return label:lower() == "skip until next version" end)
+end
+local function startup_modal_attempt_limit()
+  return tonumber(remuda._butler_modal_attempts or remuda._butler_task_poke_attempts) or 60
 end
 local function startup_modal(startup, screen)
   local lower = screen:lower()
@@ -1177,7 +1192,8 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
     -- the composer is ready; never blind-type into an unknown dialog.
     local startup = remuda._butler_agent_startup[kind] or {}
     local poke, confirm, attempts, settle, deferred = nil, nil, 0, 0, 0
-    local update_waiting, update_deadline = false, 0
+    local update_waiting, waiting_for_update, update_deadline = false, false, 0
+    local modal_polls, update_timeout_reported, update_version = 0, false, nil
     local update_relaunch_record_ref
     local function update_relaunch_record()
       local agent = bus.agents[actual] or {}
@@ -1189,12 +1205,22 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
     local function relaunch_after_update()
       if update_relaunch_record_ref and update_relaunch_record_ref.relaunched then
         remuda.cancel(poke)
-        return
+        return true
       end
+      if not startup_action_safe or not startup_action_safe(actual) then return false end
       bus.codex_update_relaunches[actual] = update_relaunch_record()
       update_relaunch_record_ref = bus.codex_update_relaunches[actual]
+      update_relaunch_record_ref.version = update_version
+      update_relaunch_record_ref.expected_close = true
+      if bus.codex_update_state.waiting then bus.codex_update_state.waiting[actual] = nil end
+      local closed, result = pcall(remuda.close, actual)
+      if not closed or result == false then
+        bus.codex_update_relaunches[actual] = nil
+        update_relaunch_record_ref = nil
+        return false
+      end
       remuda.cancel(poke)
-      pcall(remuda.close, actual)
+      return true
     end
     -- Either timeout means the task never reached the agent: say so to its
     -- leader rather than only in the trace (#29).
@@ -1207,9 +1233,19 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
         .. " was not delivered: its pane never became ready or free to type into."
         .. " Resend it with `remuda butler send " .. actual .. " TASK` once it is.")
     end
+    local function report_update_timeout(detail)
+      if update_timeout_reported then return end
+      update_timeout_reported = true
+      bus.pending_tasks[actual] = nil
+      _butler_session_trace("codex_update_timeout", actual .. detail)
+      pcall(remuda._butler_send, "butler", parent or "butler", "Codex update for " .. actual
+        .. " is still in progress after " .. tostring(tonumber(remuda._butler_codex_update_timeout) or 300)
+        .. " seconds. Its pane was left open; task delivery will resume if Codex exits after updating.")
+    end
     poke = remuda.schedule({ every = 0.5, run = function()
-      if update_relaunch_record_ref and update_relaunch_record_ref.relaunched then
+      if update_relaunch_record_ref and (update_relaunch_record_ref.relaunched or update_relaunch_record_ref.cancelled) then
         remuda.cancel(poke)
+        bus.pending_tasks[actual] = nil
         return
       end
       attempts = attempts + 1
@@ -1228,58 +1264,151 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
         if not modal and startup.ready and startup.ready(screen) then
           -- The update completed in place. Restart the same alias with the
           -- same identity so the task is submitted only by its fresh pane.
-          relaunch_after_update()
+          if not relaunch_after_update() and modal_polls >= startup_modal_attempt_limit() then
+            report_update_timeout(" human attached")
+          end
           return
         end
         if os.time() >= update_deadline then
-          local update_state = bus.codex_update_state
-          update_state.done, update_state.claimed = true, false
-          update_state.owner = nil
-          local skip = modal and modal.update and option_number(screen, function(label)
-            return label:lower() == "skip"
-          end)
-          if skip then
+          local skip = modal and modal.update and skip_option_number(screen)
+          if skip and startup_action_safe and startup_action_safe(actual) then
             pcall(remuda.key, actual, skip)
+            local update_state = bus.codex_update_state
+            if update_state.owner == actual then
+              update_state.claimed, update_state.owner = false, nil
+              update_state.aborted_version = update_version
+              update_state.waiting = {}
+            end
             bus.codex_update_relaunches[actual] = nil
             update_relaunch_record_ref = nil
             update_waiting, settle = false, attempts + 3
             return
           end
-          -- The attempted update stalled or failed. Relaunch once with the
-          -- shared guard set, so the next update prompt is skipped by label.
-          relaunch_after_update()
+          -- Never close a pane while brew may still be replacing Codex.
+          report_update_timeout(" still updating")
           return
         end
         return
       end
+      local update_state = bus.codex_update_state
+      if update_state.done and update_state.waiting and update_state.waiting[actual] then
+        update_version, waiting_for_update = update_state.done_version, true
+        if relaunch_after_update() then return end
+        modal_polls = modal_polls + 1
+        if modal_polls >= startup_modal_attempt_limit() then give_up(" update completed while human attached") end
+        return
+      end
+      if update_state.claimed and update_state.owner ~= actual
+          and update_state.waiting and update_state.waiting[actual] then
+        waiting_for_update = true
+        if update_deadline == 0 then
+          update_deadline = os.time() + (tonumber(remuda._butler_codex_update_timeout) or 300)
+        end
+        if os.time() >= update_deadline then
+          local skip = modal and modal.update and skip_option_number(screen)
+          if skip and startup_action_safe and startup_action_safe(actual) then
+            pcall(remuda.key, actual, skip)
+            waiting_for_update, settle = false, attempts + 3
+            update_state.waiting[actual] = nil
+          else
+            give_up(" waiting for Codex update")
+          end
+        end
+        return
+      end
+      local version = modal and modal.update and codex_update_version(screen) or nil
+      if version then
+        if update_state.version and update_state.version ~= version and not update_state.claimed then
+          update_state.done, update_state.done_version = false, nil
+          update_state.waiting = {}
+        end
+        update_state.version = version
+        update_version = version
+      end
       if modal then
         _butler_session_trace("startup_modal", actual .. " " .. modal.match)
         if modal.update then
-          local update_state = bus.codex_update_state
-          if not update_state.claimed and not update_state.done then
+          if update_state.done and update_state.done_version == version
+              and update_state.waiting and update_state.waiting[actual] then
+            waiting_for_update = true
+          end
+          if update_state.claimed and update_state.owner ~= actual then
+            waiting_for_update = true
+            update_state.waiting[actual] = true
+            if update_deadline == 0 then
+              update_deadline = os.time() + (tonumber(remuda._butler_codex_update_timeout) or 300)
+            end
+            if update_state.done and update_state.done_version == version then
+              if relaunch_after_update() then return end
+              modal_polls = modal_polls + 1
+              if modal_polls >= startup_modal_attempt_limit() then give_up(" modal human attached") end
+              return
+            end
+            if os.time() >= update_deadline then
+              local skip = skip_option_number(screen)
+              if skip and startup_action_safe and startup_action_safe(actual) then
+                pcall(remuda.key, actual, skip)
+                waiting_for_update, settle = false, attempts + 3
+                update_state.waiting[actual] = nil
+                return
+              end
+            end
+            modal_polls = modal_polls + 1
+            if modal_polls >= startup_modal_attempt_limit() then give_up(" waiting for Codex update") end
+            return
+          end
+          if waiting_for_update and update_state.done and update_state.done_version == version then
+            if relaunch_after_update() then return end
+          end
+          if update_state.aborted_version == version then
+            local skip = skip_option_number(screen)
+            if skip and startup_action_safe and startup_action_safe(actual) then
+              pcall(remuda.key, actual, skip)
+              settle = attempts + 3
+              return
+            end
+          elseif update_state.done and update_state.done_version == version then
+            local skip = skip_option_number(screen)
+            if skip and startup_action_safe and startup_action_safe(actual) then
+              pcall(remuda.key, actual, skip)
+              settle = attempts + 3
+              return
+            end
+          elseif not update_state.claimed then
             local update = option_number(screen, function(label)
               return label:lower():find("update now", 1, true) ~= nil
             end)
-            if update then
+            if update and startup_action_safe and startup_action_safe(actual) then
               update_state.claimed, update_state.owner = true, actual
               update_waiting = true
-              update_deadline = os.time() + (tonumber(remuda._butler_codex_update_timeout) or 45)
+              update_deadline = os.time() + (tonumber(remuda._butler_codex_update_timeout) or 300)
+              update_state.waiting = update_state.waiting or {}
+              for member, agent in pairs(bus.agents) do
+                if member ~= actual and agent.kind == "codex" then update_state.waiting[member] = true end
+              end
               bus.codex_update_relaunches[actual] = update_relaunch_record()
               update_relaunch_record_ref = bus.codex_update_relaunches[actual]
+              update_relaunch_record_ref.version = update_version
               local pressed = pcall(remuda.key, actual, update)
               if pressed then return end
               bus.codex_update_relaunches[actual] = nil
               update_relaunch_record_ref = nil
-              update_state.done, update_state.claimed, update_state.owner = true, false, nil
+              update_state.claimed, update_state.owner = false, nil
             end
           end
-          local skip = option_number(screen, function(label) return label:lower() == "skip" end)
-          if skip then
+          local skip = skip_option_number(screen)
+          if skip and startup_action_safe and startup_action_safe(actual) then
             pcall(remuda.key, actual, skip)
             settle = attempts + 3
+          else
+            modal_polls = modal_polls + 1
+            if modal_polls >= startup_modal_attempt_limit() then give_up(" update dialog") end
           end
           return
         end
+        modal_polls = modal_polls + 1
+        if modal_polls >= startup_modal_attempt_limit() then give_up(" modal") end
+        if startup_action_safe and not startup_action_safe(actual) then return end
         for _, key in ipairs(modal.keys or {}) do pcall(remuda.key, actual, key) end
         settle = attempts + 3
         return
@@ -1491,6 +1620,31 @@ function remuda._butler_notify_policy(session, now)
     _butler_session_trace("notice_prompt", session .. " " .. kind .. " " .. decision .. " " .. text)
   end
   return decision == "EMPTY"
+end
+
+-- Startup dialogs are not empty prompts, so task/notice policy cannot be used
+-- to decide whether a key or close is safe. Protect attached human panes using
+-- the same idle/stable-screen rule, while allowing detached panes to proceed.
+startup_action_safe = function(session, now)
+  now = now or os.time()
+  for _, row in ipairs(remuda.ls()) do
+    if row.name == session and row.alive then
+      if not row.attached then return true end
+      if row.human_idle ~= nil then
+        return row.human_idle >= (remuda._butler_notice_human_idle or 10)
+      end
+      local captured, screen = pcall(remuda.capture, session)
+      if not captured then return false end
+      local seen = bus.notice_screens[session] or {}
+      bus.notice_screens[session] = seen
+      if seen.startup_screen ~= screen then
+        seen.startup_screen, seen.startup_since = screen, now
+        return false
+      end
+      return now - (seen.startup_since or now) >= NOTICE_STABLE_SECONDS
+    end
+  end
+  return false
 end
 
 -- `_butler_notify` is the seam: queue NOTICE for ALIAS and type it (with any
@@ -2280,10 +2434,24 @@ end
 function remuda._butler_session_exited(name)
   _butler_session_trace("session_exited", name)
   local update_restart = bus.codex_update_relaunches[name]
+  local explicitly_closed = bus.close_requested and bus.close_requested[name]
+  if update_restart and explicitly_closed and not update_restart.expected_close then
+    -- A leader/human close wins over a pending update restart.
+    update_restart.cancelled = true
+    bus.codex_update_relaunches[name] = nil
+    if bus.codex_update_state.waiting then bus.codex_update_state.waiting[name] = nil end
+    if bus.codex_update_state.owner == name then
+      bus.codex_update_state.claimed, bus.codex_update_state.owner = false, nil
+      bus.codex_update_state.aborted_version = update_restart.version
+      bus.codex_update_state.waiting = {}
+    end
+    update_restart = nil
+  end
   if update_restart then
     update_restart.relaunched = true
     bus.codex_update_relaunches[name] = nil
     bus.codex_update_state.done, bus.codex_update_state.claimed = true, false
+    bus.codex_update_state.done_version = update_restart.version
     bus.codex_update_state.owner = nil
   end
   -- #29: the mail stays in the inbox; only the pending pane notice goes.
