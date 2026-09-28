@@ -7,10 +7,17 @@ if not getmetatable(_G) then
 end
 
 local host = getmetatable(_G).__index.remuda
-local booted = false
+local booted, main_loaded = false, false
+local function load_main()
+  if main_loaded then return end
+  main_loaded = true
+  host.exec("butler/main")
+end
 local function boot()
   if booted then return end
   booted = true
+  load_main()
+  if host._butler_bootstrap and host._butler_test_mode ~= "lifecycle" then host._butler_bootstrap() end
   host.emit("butler-start")
 end
 
@@ -30,12 +37,15 @@ host._butler_start_fallback = fallback
 return {
   api = "remuda-module-v1",
   state_version = 1,
-  initialize = function() return { compaction_enabled = false } end,
+  initialize = function() return { compaction_enabled = false, active_choosers = {}, next_chooser_id = 0 } end,
   start = function(state)
     host._butler_state = state
     boot()
+    if host._butler_matrix_start then host._butler_matrix_start() end
   end,
   stop = function(state)
+    if host._butler_cancel_active_choosers then host._butler_cancel_active_choosers(state) end
+    if host._butler_matrix_stop then pcall(host._butler_matrix_stop) end
     local relay = state.relay or host._butler_relay
     if relay then pcall(host.kill, relay) end
     state.relay = nil
@@ -44,17 +54,19 @@ return {
     host._butler_start_fallback = nil
   end,
   hooks = {
-    { event = "butler-start", id = "boot", run = function() host.exec("butler/main") end },
+    { event = "butler-start", id = "boot", run = load_main },
     { event = "butler/deliver", id = "inbox", depth = 0,
       run = function(_, message) return host._butler_inbox_delivery(message) end },
     { event = "session_exited", id = "identity", depth = -50,
       run = function(_, name) return host._butler_session_exited(name) end },
     { event = "butler-compaction-submit", id = "submit",
       run = function() return host._butler_compaction_submit() end },
-    { event = "butler-matrix-line", id = "line",
+    { event = "butler-matrix-line", id = "matrix-line",
       run = function(_, line) return host._butler_matrix_line(line) end },
-    { event = "butler-matrix-submit", id = "submit",
+    { event = "butler-matrix-submit", id = "matrix-submit",
       run = function() return host._butler_matrix_submit() end },
+    { event = "butler-matrix-sync-exit", id = "matrix-supervisor",
+      run = function(_, code) return host._butler_matrix_sync_exit(code) end },
   },
   schedules = {
     { name = "butler-notices", every = 1, run = function()
@@ -68,6 +80,20 @@ return {
     end },
   },
   contributes = {
+    ["butler.agent"] = {
+      { id = "claude", order = 10, executable = "claude", requires = "claude",
+        argv = function(_, spec) return host._butler_agent_builders.claude(spec) end,
+        ready = function(_, screen) return screen:find("─\n❯", 1, true) ~= nil end,
+        working = function(_, screen) return screen:find("esc to interrupt", 1, true) ~= nil end,
+        login = { "Please log in", "not logged in", "Authentication required", "Invalid API key", "Please run /login", "Select login method" },
+        dialogs = function() return host._butler_agent_startup.claude.modals end },
+      { id = "codex", order = 20, executable = "codex", requires = "codex",
+        argv = function(_, spec) return host._butler_agent_builders.codex(spec) end,
+        ready = function(_, screen) return screen:find("Ask Codex", 1, true) ~= nil end,
+        working = function(_, screen) return screen:find("esc to interrupt", 1, true) ~= nil end,
+        login = { "Please log in", "not logged in", "Authentication required", "Sign in to continue", "Not authenticated" },
+        dialogs = function() return host._butler_agent_startup.codex.modals end },
+    },
     ["butler.guidance"] = {
       { id = "header", order = 10,
         agents_md = function(_, ctx)
@@ -123,6 +149,8 @@ the normal way for a member to communicate.
     ["butler.command"] = {
       { id = "sessions", order = 10, verb = "sessions", usage = "  remuda butler sessions",
         run = function(_, args, caller) return host._butler_command_run("sessions", args, caller) end },
+      { id = "status", order = 12, verb = "status", usage = "  remuda butler status  (0=up, 75=launching, 1=failed)",
+        run = function(_, args, caller) return host._butler_command_run("status", args, caller) end },
       { id = "agents", order = 15, verb = "agents", usage = "  remuda butler agents [--all]",
         run = function(_, args, caller) return host._butler_command_run("agents", args, caller) end },
       { id = "launch", order = 20, verb = "launch", usage = "  remuda butler launch <claude|codex> [name] [--model M]",

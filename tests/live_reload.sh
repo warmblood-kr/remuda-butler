@@ -43,7 +43,7 @@ SNAPSHOT='
 local function n(e) return #(remuda.hooks[e] or {}) end
 local relay_running = false
 for _, id in ipairs(remuda.processes()) do
-  if id == remuda._butler_relay then relay_running = true end
+  if id == remuda._butler_matrix_relay or id == remuda._butler_relay then relay_running = true end
 end
 local s = 0 for _, x in pairs(remuda.schedules) do
   if x.name == "butler-notices" or x.name == "butler-reconcile" or x.name == "butler-compaction" then s = s + 1 end
@@ -85,7 +85,15 @@ EXPECT_NEW_EMPTY="hooks=1,1,1,1,1 schedules=3 sessions=butler,m1 member=true mai
 echo "== swap in lifecycle files, reload x3"
 new_files
 for i in 1 2 3; do
-  lua "remuda.reload('butler')"; settle
+  if [[ $i == 1 ]]; then
+    # The legacy root was explicitly made with the test's fake argv and has
+    # no readiness probe to migrate. Mark this injected session as the ready
+    # root so the current lifecycle reload exercises the normal reuse path.
+    lua "remuda._butler_selected_agent='claude'; remuda.reload('butler')"
+  else
+    lua "remuda.reload('butler')"
+  fi
+  settle
   check "reload $i" "boots=$((BASE_BOOT + i)) $EXPECT_NEW"
   if [[ $i == 1 ]]; then
     lua "local m = remuda._butler_bus.agents.m1; remuda._butler_delivery_count_before = #remuda._butler_mail.mailbox(m.id); remuda._butler_send('butler', 'm1', 'single delivery after transition')"
