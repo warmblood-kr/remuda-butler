@@ -1,0 +1,19 @@
+remuda butler — coordination for managed agents
+
+  remuda butler sessions
+  remuda butler launch <claude|codex> [name] [--model M]
+  remuda butler topic new <name> [--template T] [--agent A] [--model M]
+  remuda butler topic delegate <name> [--agent A] [--leader L] [--model M] <task...>
+  remuda butler send <to> "<message>"
+  remuda butler send <from> <to> <message...>
+  remuda butler send-to-leader <message...>
+  remuda butler inbox [name]
+
+Agent sessions receive REMUDA_BUTLER_AGENT_ID and REMUDA_BUTLER_LEADER_ID.
+In an agent session, use `inbox`, `send <to> "..."`, and `send-to-leader ...`;
+the identity comes from the caller's environment. Quote the message for
+`send <to>`: an unquoted multi-word message reads as `send <from> <to> ...`,
+the operator form for attributing a note. Without a forwarded Butler identity
+(a plain shell, or a core that does not forward the caller's env), `send` is
+from "operator" and `inbox` needs a name (`inbox <name>`).
+
