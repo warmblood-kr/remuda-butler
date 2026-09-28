@@ -1,17 +1,6 @@
 -- remuda-butler: runs one Claude Code session, optionally bridged to Matrix
 -- and replying there via an MCP tool. See docs/design.md.
 
-local HELPER_SRC = (function()
-  local data_home = os.getenv("XDG_DATA_HOME")
-  if not data_home or data_home == "" then data_home = (os.getenv("HOME") or "") .. "/.local/share" end
-  local path = data_home .. "/remuda/mods/butler-matrix/packages/butler-matrix/relay.py"
-  local f = io.open(path, "r")
-  if not f then return nil end
-  local source = f:read("*a")
-  f:close()
-  return source
-end)()
-
 local REPLY_SRC = [==[
 set -euo pipefail
 
@@ -99,10 +88,8 @@ local function initial_butler_name()
   return "butler"
 end
 
--- Exposed so tests can extract the exact embedded source without triggering
--- the side effects below (starting a real process/session needs real
--- config this test harness doesn't have, and shouldn't start one anyway).
-remuda._butler_helper_src = HELPER_SRC
+-- Exposed so tests can inspect the daemon-local MCP helper without starting a
+-- real process/session (this harness does not have a real agent CLI).
 remuda._butler_reply_src = REPLY_SRC
 remuda._butler_statusline_src = STATUSLINE_SRC
 remuda._butler_initial_name = initial_butler_name()
@@ -268,6 +255,9 @@ if matrix_requested then
 else
   remuda._butler_matrix_config = nil
 end
+-- This internal module is the single inbound Matrix entry point. It registers
+-- only the optional relay and remains inert when credentials are absent.
+remuda.exec("butler/matrix")
 
 -- The session needs an `--mcp-config` pointing back at this same daemon, or
 -- it has no way to reach `matrix_reply` at all — a bare `remuda.new(nil,
@@ -1519,12 +1509,6 @@ if remuda._butler_test_mode ~= "lifecycle" then remuda._butler_reconcile() end
 
 function remuda._butler_compaction_submit()
   remuda.send(butler_name, "")
-end
-
-if token_path and not remuda._butler_skip_relay then
-  -- Matrix is a separately reloadable optional extension; the installer
-  -- places it beside Butler so it can own its relay and event registrations.
-  remuda.exec("butler-matrix")
 end
 
 if token_path then

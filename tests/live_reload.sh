@@ -43,7 +43,7 @@ SNAPSHOT='
 local function n(e) return #(remuda.hooks[e] or {}) end
 local relay_running = false
 for _, id in ipairs(remuda.processes()) do
-  if id == remuda._butler_relay then relay_running = true end
+  if id == remuda._butler_matrix_relay or id == remuda._butler_relay then relay_running = true end
 end
 local s = 0 for _, x in pairs(remuda.schedules) do
   if x.name == "butler-notices" or x.name == "butler-reconcile" or x.name == "butler-compaction" then s = s + 1 end

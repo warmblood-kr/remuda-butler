@@ -1180,8 +1180,8 @@ fn restart_refuses_to_kill_a_live_session_without_being_told_twice() {
 /// deliberately never provides — `remuda._butler_test_mode` is exactly the
 /// escape hatch it exposes for that (see `native/tests/daemon.rs`'s own
 /// `butler_test_daemon` and the tests around it for the full package), so
-/// this test asserts only the general "same living image" property, via the
-/// two globals every mode of `init.lua` sets before that point.
+/// this test asserts only that the package's internal Matrix module and MCP
+/// source share the daemon image.
 #[test]
 fn exec_butler_runs_the_builtin_package_in_the_daemons_image() {
     let dir = scratch_dir("exec-butler");
@@ -1200,17 +1200,28 @@ fn exec_butler_runs_the_builtin_package_in_the_daemons_image() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    let path = daemon::socket_path_in(&dir, "s");
+    let matrix_entry = eval(&path, "local ok, err = pcall(remuda.exec, 'butler/matrix'); return tostring(ok) .. '|' .. tostring(err)");
+    assert!(matrix_entry.starts_with("true|"), "Butler's internal Matrix package failed to load: {matrix_entry}");
 
-    let read = remuda_timed(
-        &dir,
-        &[
-            "-s",
-            "s",
-            "-e",
-            "return (remuda._butler_helper_src ~= nil and remuda._butler_reply_src ~= nil) \
-             and 'ok' or 'missing'",
-        ],
-    );
+    let deadline = Instant::now() + PATIENCE;
+    let read = loop {
+        let read = remuda_timed(
+            &dir,
+            &[
+                "-s",
+                "s",
+                "-e",
+                "return (remuda._butler_helper_src ~= nil and remuda._butler_reply_src ~= nil) \
+                 and 'ok' or 'missing'",
+            ],
+        );
+        if String::from_utf8_lossy(&read.stdout).trim() == "ok" {
+            break read;
+        }
+        assert!(Instant::now() < deadline, "Butler package did not load its internal sources");
+        std::thread::sleep(Duration::from_millis(20));
+    };
     assert!(
         read.status.success(),
         "{}",
@@ -1259,7 +1270,7 @@ fn butler_lifecycle_reload_replaces_hooks_and_schedules_and_rolls_back() {
     "#;
     let initial = eval(&path, counts);
     assert!(
-        initial == "1|4|1|1|1|13" || initial == "1|4|1|1|1|-1",
+        initial == "1|6|1|1|1|13" || initial == "1|6|1|1|1|-1",
         "unexpected Butler lifecycle registrations: {initial}"
     );
 
@@ -1946,12 +1957,12 @@ fn an_unpaced_flood_exercises_real_backpressure_and_the_child_blocks() {
 //
 // Everything below runs against a stub HTTP server of our own
 // (`tests/support/matrix_stub_server.py`), never a real Matrix homeserver.
-// `HELPER_SRC`/`REPLY_SRC` are read straight out of the real
-// `packages/butler/init.lua` by running it (in test mode) in a daemon's
+// `HELPER_SRC`/`REPLY_SRC` are read from the internal Matrix module by running
+// the Butler package in test mode in a daemon's
 // living image via `remuda exec butler`, then referenced BY NAME
 // (`remuda._butler_helper_src` / `remuda._butler_reply_src`) from later
-// `remuda.process` calls against that same image — the exact embedded
-// source, with no separate string round-trip through Rust needed.
+// `remuda.process` calls against that same image — with no separate string
+// round-trip through Rust needed.
 
 /// The stub Matrix homeserver, as its own process — plain
 /// `std::process::Command`, not `remuda.process`: this is test
@@ -2032,12 +2043,13 @@ fn butler_config(
     (token_path, config_path)
 }
 
-/// Pre-start a daemon, then run the real `packages/butler/init.lua` inside
+/// Pre-start a daemon, then run the real Butler package inside
 /// it with `remuda._butler_test_mode` set — the same `remuda exec`
 /// invocation `exec_butler_runs_the_builtin_package_in_the_daemons_image`
-/// uses — so `remuda._butler_helper_src`/`remuda._butler_reply_src` hold
-/// the exact embedded source, without starting a real Claude session or
-/// needing `REMUDA_BUTLER_TOKEN`/`REMUDA_BUTLER_CONFIG`. Both globals stay
+/// uses, then load the internal Matrix entry point — so
+/// `remuda._butler_helper_src`/`remuda._butler_reply_src` hold the exact
+/// package source, without starting a real Claude session or needing
+/// `REMUDA_BUTLER_TOKEN`/`REMUDA_BUTLER_CONFIG`. Both globals stay
 /// live in this same image afterward, so a later `eval` can reference them
 /// by name directly inside a `remuda.process{argv = {...}}` call.
 fn butler_test_daemon(dir: &Path) -> (Daemon, PathBuf) {
@@ -2050,6 +2062,7 @@ fn butler_test_daemon(dir: &Path) -> (Daemon, PathBuf) {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    eval(&path, "remuda.exec('butler/matrix')");
     (daemon, path)
 }
 
@@ -2756,12 +2769,7 @@ fn matrix_extension_delivers_a_durable_mail_envelope_once() {
     eval(&path, r#"remuda._butler_argv = {"sh", "-c", "sleep 60"}"#);
     let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    let matrix_activation = eval(
-        &path,
-        "local ok, err = pcall(remuda.exec, 'butler-matrix'); return tostring(ok) .. '|' .. tostring(err)",
-    );
-    assert!(matrix_activation.starts_with("true|"), "butler-matrix activation failed: {matrix_activation}");
-
+    eval(&path, "remuda.exec('butler/matrix')");
     let envelope = r#"
       local bus = remuda._butler_bus
       local count, found = 0, nil
@@ -3737,7 +3745,8 @@ fn butler_session_exited_hook_relaunches_via_the_shared_launch_function() {
     // checkout where git converts this file to CRLF (Windows runners do).
     let main_lua = include_str!("../../packages/butler/main.lua").replace("\r\n", "\n");
     let init_lua = include_str!("../../packages/butler/init.lua").replace("\r\n", "\n");
-    let matrix_init = include_str!("../../packages/butler-matrix/init.lua").replace("\r\n", "\n");
+    let matrix_init = include_str!("../../packages/butler/init.lua").replace("\r\n", "\n");
+    let matrix_impl = include_str!("../../packages/butler/matrix.lua").replace("\r\n", "\n");
 
     let launch_fn_idx = main_lua
         .find("local function launch_butler()")
@@ -3747,7 +3756,8 @@ fn butler_session_exited_hook_relaunches_via_the_shared_launch_function() {
         "Butler reload must rely on lifecycle ownership, not hook purges"
     );
     assert!(
-        matrix_init.contains("stop = function(state)") && matrix_init.contains("pcall(host.kill, state.relay)")
+        matrix_init.contains("stop = function(state)") && matrix_init.contains("host._butler_matrix_stop")
+            && matrix_impl.contains("pcall(remuda.kill, relay)")
             && !main_lua.contains("pkill -f"),
         "the Matrix relay must be stopped by process id through the lifecycle stop hook"
     );
