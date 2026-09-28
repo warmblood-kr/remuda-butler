@@ -2088,6 +2088,14 @@ fn butler_matrix_request_uses_fake_http_for_auth_trust_allow_and_same_room() {
       if not encoded then return "json-encode-failed:" .. tostring(encode_error) end
       local roundtrip = matrix.decode_json(encoded)
       if not roundtrip or roundtrip.body ~= "line\n" or roundtrip.count ~= 2 then return "json-roundtrip-failed" end
+      local duplicate, duplicate_error = remuda.json.decode('{{"key":1,"key":2}}')
+      if duplicate ~= nil or duplicate_error ~= "duplicate key" then return "duplicate-key-not-rejected" end
+      local tagged = remuda.json.encode({{ array = remuda.json.array({{}}), object = remuda.json.object({{}}) }})
+      local tagged_value = remuda.json.decode(tagged)
+      if not tagged_value or getmetatable(tagged_value.array) ~= getmetatable(remuda.json.array({{}}))
+        or getmetatable(tagged_value.object) ~= getmetatable(remuda.json.object({{}})) then
+        return "empty-json-shapes-not-preserved"
+      end
       remuda.http.respond("GET", "https://matrix.example.org/_matrix/client/v3/bad",
         {{ status = 400, headers = {{}}, body = "bad request" }})
       local failed

@@ -1,7 +1,9 @@
 -- Lua-side L3 relay tests. The HTTP callback is scripted at the stable
--- remuda.butler.matrix.request_json boundary; shared request/transport tests
--- exercise the actual remuda.http fake on a private daemon.
-remuda = { butler = { matrix = {} } }
+-- remuda.butler.matrix.request_json boundary; run under core so the relay's
+-- persisted state uses the same remuda.json implementation as production.
+assert(type(remuda) == "table" and type(remuda.json) == "table",
+  "run this suite with a Remuda core that provides remuda.json")
+remuda.butler = { matrix = {} }
 remuda._relay_timers = {}
 function remuda.schedule(spec)
   local timer = { spec = spec, cancelled = false }
@@ -139,7 +141,7 @@ local function test_state_restart_corruption_and_processed_cap()
   local ids = matrix.json_array({})
   for i = 1, 5003 do ids[i] = "event-" .. tostring(i) end
   local encoded = assert(matrix.encode_json({ since = "persisted", processed_event_ids = ids,
-    messages_since = matrix.json_null, pending_events = {} }))
+    messages_since = matrix.json_null, pending_events = remuda.json.object({}) }))
   local file = assert(io.open(state_path, "wb")); file:write(encoded); file:close()
 
   local relay = relay_module.new({ config_path = config_path, matrix = client, deliver = function() return true end })

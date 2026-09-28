@@ -2,9 +2,10 @@
 -- The relay owns no transport details; request_json is its only HTTP composite.
 local matrix = assert(remuda.butler and remuda.butler.matrix,
   "load butler/matrix_request before butler/matrix_relay")
+local json = assert(remuda.json, "Matrix requires core remuda.json")
 local relay = matrix.relay or {}
 matrix.relay = relay
-local JSON_ARRAY_MT = getmetatable(matrix.json_array({}))
+local JSON_ARRAY_MT = getmetatable(json.array({}))
 
 local MAX_PROCESSED = 5000
 local MAX_DELIVERY_FAILURES = 5
@@ -13,13 +14,13 @@ local SYNC_PATH = "/_matrix/client/v3/sync"
 local MESSAGES_PREFIX = "/_matrix/client/v3/rooms/"
 
 local function encode(value)
-  local result, err = matrix.encode_json(value)
-  if not result then error("cannot encode Matrix relay state: " .. tostring(err)) end
+  local ok, result = pcall(json.encode, value)
+  if not ok then error("cannot encode Matrix relay state: " .. tostring(result)) end
   return result
 end
 
 local function decode(value)
-  return matrix.decode_json(value)
+  return json.decode(value)
 end
 
 local function percent_encode(value)
@@ -128,7 +129,7 @@ local function add_processed(state, id)
 end
 
 local function empty_state()
-  return { since = nil, messages_since = nil, processed = {}, processed_order = {}, pending = {} }
+  return { since = nil, messages_since = nil, processed = {}, processed_order = {}, pending = json.object({}) }
 end
 
 local function load_state(path)
@@ -144,20 +145,20 @@ local function load_state(path)
   file:close()
   if recovered then os.rename(backup, path) end
   local value, err = decode(text)
-  if type(value) ~= "table" or value == matrix.json_null or getmetatable(value) == JSON_ARRAY_MT then
+  if type(value) ~= "table" or value == json.null or getmetatable(value) == JSON_ARRAY_MT then
     return empty_state(), err or "invalid state root"
   end
   local since, messages_since = value.since, value.messages_since
-  if since == matrix.json_null then since = nil end
-  if messages_since == matrix.json_null then messages_since = nil end
+  if since == json.null then since = nil end
+  if messages_since == json.null then messages_since = nil end
   local processed_ids = value.processed_event_ids
-  if processed_ids == nil then processed_ids = matrix.json_array({}) end
-  local pending = value.pending_events or {}
+  if processed_ids == nil then processed_ids = json.array({}) end
+  local pending = value.pending_events or json.object({})
   if (since ~= nil and type(since) ~= "string")
     or (messages_since ~= nil and type(messages_since) ~= "string")
-    or type(processed_ids) ~= "table" or processed_ids == matrix.json_null
+    or type(processed_ids) ~= "table" or processed_ids == json.null
     or getmetatable(processed_ids) ~= JSON_ARRAY_MT
-    or type(pending) ~= "table" or pending == matrix.json_null
+    or type(pending) ~= "table" or pending == json.null
     or getmetatable(pending) == JSON_ARRAY_MT then
     return empty_state(), "invalid Matrix relay state fields"
   end
@@ -179,7 +180,7 @@ local function load_state(path)
 end
 
 local function save_state(path, state)
-  local processed = matrix.json_array(state.processed_order)
+  local processed = json.array(state.processed_order)
   local json = encode({ since = state.since, processed_event_ids = processed,
     messages_since = state.messages_since, pending_events = state.pending })
   local temp = path .. ".tmp"

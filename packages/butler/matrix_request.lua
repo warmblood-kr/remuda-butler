@@ -4,13 +4,9 @@ local butler = remuda.butler or {}
 remuda.butler = butler
 local matrix = butler.matrix or {}
 butler.matrix = matrix
-local JSON_NULL = matrix.json_null or {}
-matrix.json_null = JSON_NULL
-local JSON_ARRAY = {}
-
-function matrix.json_array(values)
-  return setmetatable(values or {}, JSON_ARRAY)
-end
+local json = assert(remuda.json, "Matrix requires core remuda.json")
+matrix.json_null = json.null
+matrix.json_array = json.array
 
 local MiB = 1024 * 1024
 local MAX_REQUEST_BYTES = 20 * MiB
@@ -129,185 +125,10 @@ local function report_error(callback, message)
   callback({ error = message })
 end
 
-local function utf8_char(codepoint)
-  if codepoint <= 0x7f then return string.char(codepoint) end
-  if codepoint <= 0x7ff then
-    return string.char(0xc0 + math.floor(codepoint / 64), 0x80 + codepoint % 64)
-  end
-  if codepoint <= 0xffff then
-    return string.char(0xe0 + math.floor(codepoint / 4096),
-      0x80 + math.floor(codepoint / 64) % 64, 0x80 + codepoint % 64)
-  end
-  return string.char(0xf0 + math.floor(codepoint / 262144),
-    0x80 + math.floor(codepoint / 4096) % 64,
-    0x80 + math.floor(codepoint / 64) % 64, 0x80 + codepoint % 64)
-end
-
-local function decode_json(source)
-  local at, length = 1, #source
-  local null = JSON_NULL
-  local function skip_space()
-    while at <= length and source:sub(at, at):match("%s") do at = at + 1 end
-  end
-  local function parse_string()
-    if source:sub(at, at) ~= '"' then error("expected JSON string") end
-    at = at + 1
-    local chunks = {}
-    while at <= length do
-      local byte = source:byte(at)
-      if byte == 34 then at = at + 1; return table.concat(chunks) end
-      if byte == 92 then
-        at = at + 1
-        local escape = source:sub(at, at)
-        local mapped = ({ ['"'] = '"', ["\\"] = "\\", ["/"] = "/",
-          b = "\b", f = "\f", n = "\n", r = "\r", t = "\t" })[escape]
-        if mapped then
-          chunks[#chunks + 1] = mapped
-          at = at + 1
-        elseif escape == "u" then
-          local hex = source:sub(at + 1, at + 4)
-          local codepoint = tonumber(hex, 16)
-          if not codepoint or #hex ~= 4 then error("invalid JSON unicode escape") end
-          at = at + 5
-          if codepoint >= 0xd800 and codepoint <= 0xdbff then
-            if source:sub(at, at + 1) ~= "\\u" then error("invalid JSON surrogate pair") end
-            local low = tonumber(source:sub(at + 2, at + 5), 16)
-            if not low or low < 0xdc00 or low > 0xdfff then error("invalid JSON surrogate pair") end
-            codepoint = 0x10000 + (codepoint - 0xd800) * 0x400 + low - 0xdc00
-            at = at + 6
-          elseif codepoint >= 0xdc00 and codepoint <= 0xdfff then
-            error("unexpected JSON low surrogate")
-          end
-          chunks[#chunks + 1] = utf8_char(codepoint)
-        else
-          error("invalid JSON escape")
-        end
-      else
-        if byte < 32 then error("control byte in JSON string") end
-        chunks[#chunks + 1] = source:sub(at, at)
-        at = at + 1
-      end
-    end
-    error("unterminated JSON string")
-  end
-  local parse_value
-  local function parse_array()
-    at = at + 1
-    skip_space()
-    local result = {}
-    if source:sub(at, at) == "]" then at = at + 1; return setmetatable(result, JSON_ARRAY) end
-    while true do
-      result[#result + 1] = parse_value()
-      skip_space()
-      local char = source:sub(at, at)
-      if char == "]" then at = at + 1; return setmetatable(result, JSON_ARRAY) end
-      if char ~= "," then error("expected comma in JSON array") end
-      at = at + 1
-      skip_space()
-    end
-  end
-  local function parse_object()
-    at = at + 1
-    skip_space()
-    local result = {}
-    if source:sub(at, at) == "}" then at = at + 1; return result end
-    while true do
-      local key = parse_string()
-      skip_space()
-      if source:sub(at, at) ~= ":" then error("expected colon in JSON object") end
-      at = at + 1
-      skip_space()
-      result[key] = parse_value()
-      skip_space()
-      local char = source:sub(at, at)
-      if char == "}" then at = at + 1; return result end
-      if char ~= "," then error("expected comma in JSON object") end
-      at = at + 1
-      skip_space()
-    end
-  end
-  parse_value = function()
-    skip_space()
-    local char = source:sub(at, at)
-    if char == '"' then return parse_string() end
-    if char == "{" then return parse_object() end
-    if char == "[" then return parse_array() end
-    if source:sub(at, at + 3) == "true" then at = at + 4; return true end
-    if source:sub(at, at + 4) == "false" then at = at + 5; return false end
-    if source:sub(at, at + 3) == "null" then at = at + 4; return null end
-    local number = source:sub(at):match("^-?%d+%.?%d*[eE]?[+-]?%d*")
-    if number and number ~= "" and not number:match("[%.eE%+%-]$") then
-      local value = tonumber(number)
-      if value then at = at + #number; return value end
-    end
-    error("invalid JSON value")
-  end
-  local value = parse_value()
-  skip_space()
-  if at <= length then error("trailing data after JSON value") end
-  return value
-end
-
-local function encode_json(value, active)
-  local kind = type(value)
-  if value == JSON_NULL then return "null" end
-  if kind == "nil" then return "null" end
-  if kind == "boolean" or kind == "number" then
-    if kind == "number" and (value ~= value or value == math.huge or value == -math.huge) then
-      error("cannot encode non-finite JSON number")
-    end
-    return tostring(value)
-  end
-  if kind == "string" then
-    local escaped = value:gsub('["\\%z\1-\31]', function(char)
-      local replacements = { ['"'] = '\\"', ["\\"] = "\\\\", ["\b"] = "\\b",
-        ["\f"] = "\\f", ["\n"] = "\\n", ["\r"] = "\\r", ["\t"] = "\\t" }
-      return replacements[char] or string.format("\\u%04x", char:byte())
-    end)
-    return '"' .. escaped .. '"'
-  end
-  if kind ~= "table" then error("unsupported JSON value type: " .. kind) end
-  active = active or {}
-  if active[value] then error("cycle in JSON value") end
-  active[value] = true
-  local n, is_array = #value, getmetatable(value) == JSON_ARRAY
-  if not is_array and n > 0 then
-    is_array = true
-    for key in pairs(value) do
-      if type(key) ~= "number" or key < 1 or key > n or key % 1 ~= 0 then
-        is_array = false
-        break
-      end
-    end
-  end
-  local parts = {}
-  if is_array then
-    for i = 1, n do parts[i] = encode_json(value[i], active) end
-    active[value] = nil
-    return "[" .. table.concat(parts, ",") .. "]"
-  end
-  local keys = {}
-  for key in pairs(value) do
-    if type(key) ~= "string" then error("JSON object keys must be strings") end
-    keys[#keys + 1] = key
-  end
-  table.sort(keys)
-  for _, key in ipairs(keys) do
-    parts[#parts + 1] = encode_json(key, active) .. ":" .. encode_json(value[key], active)
-  end
-  active[value] = nil
-  return "{" .. table.concat(parts, ",") .. "}"
-end
-
-function matrix.decode_json(source)
-  if type(source) ~= "string" then return nil, "JSON input must be a byte string" end
-  local ok, value = pcall(decode_json, source)
-  if not ok then return nil, tostring(value) end
-  return value
-end
-
-function matrix.encode_json(value)
-  local ok, encoded = pcall(encode_json, value)
+-- Keep the Matrix result convention while delegating the actual codec to core.
+matrix.decode_json = json.decode
+matrix.encode_json = function(value)
+  local ok, encoded = pcall(json.encode, value)
   if not ok then return nil, tostring(encoded) end
   return encoded
 end
@@ -317,7 +138,7 @@ function matrix.request_json(args, on_done)
   return matrix.request(args, function(result)
     if result.error then return done(result) end
     local value, decode_error
-    if not result.body or result.body == "" then value = {}
+    if not result.body or result.body == "" then value = json.object({})
     else value, decode_error = matrix.decode_json(result.body) end
     if value == nil and decode_error then
       return done({ error = "invalid Matrix JSON response: " .. decode_error,
@@ -453,6 +274,7 @@ function matrix.request(args, on_done)
     max_bytes = max_bytes, ca_file = conf.ca_file, pin = conf.pin,
     callback = function(result)
       if result.error then return done({ error = result.error }) end
+      result.headers = json.object(type(result.headers) == "table" and result.headers or {})
       if result.status and (result.status < 200 or result.status >= 300) then
         return done({ error = "Matrix HTTP " .. result.status, status = result.status,
           headers = result.headers, body = result.body })
