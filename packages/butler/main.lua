@@ -1404,6 +1404,8 @@ function remuda._butler_reconcile()
 end
 remuda.on("session_exited", function(name)
   _butler_session_trace("session_exited", name)
+  -- #29: the mail stays in the inbox; only the pending pane notice goes.
+  bus.notices[name], bus.notice_screens[name] = nil, nil
   local exited = bus.agents[name]
   if exited and name ~= "butler" then
     identity_record(exited.id, exited.alias or name, exited.kind,
