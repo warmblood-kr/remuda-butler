@@ -1102,14 +1102,28 @@ local function skip_option_number(screen)
   if number then return number end
   return option_number(screen, function(label) return label:lower() == "skip until next version" end)
 end
-local function startup_modal_attempt_limit()
-  return tonumber(remuda._butler_modal_attempts or remuda._butler_task_poke_attempts) or 60
+local function startup_modal_timeout_seconds()
+  return tonumber(remuda._butler_modal_timeout or remuda._butler_modal_attempts or remuda._butler_task_poke_attempts) or 60
 end
 local function startup_modal(startup, screen)
   local lower = screen:lower()
   for _, modal in ipairs(startup.modals or {}) do
     if modal.match and lower:find(modal.match:lower(), 1, true) then return modal end
   end
+end
+local function known_startup_modal(startup, screen)
+  if startup_modal(startup, screen) then return true end
+  local lower = tostring(screen or ""):lower()
+  return lower:find("updating codex", 1, true) ~= nil
+    or lower:find("installing codex update", 1, true) ~= nil
+end
+local function codex_update_complete(screen)
+  local lower = tostring(screen or ""):lower()
+  return lower:find("update complete", 1, true) ~= nil
+    or lower:find("update successful", 1, true) ~= nil
+    or lower:find("codex was updated", 1, true) ~= nil
+    or lower:find("codex has been updated", 1, true) ~= nil
+    or lower:find("restarting codex", 1, true) ~= nil
 end
 local function launch_agent(kind, requested_name, cwd, model, parent, task, relaunch_identity)
   local candidates = kind and { kind } or configured_agent_order()
@@ -1194,7 +1208,11 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
     local startup = remuda._butler_agent_startup[kind] or {}
     local poke, confirm, attempts, settle, deferred = nil, nil, 0, 0, 0
     local update_waiting, waiting_for_update, update_deadline = false, false, 0
-    local modal_polls, update_timeout_reported, update_version = 0, false, nil
+    local modal_wait_started, update_timeout_reported, update_version = nil, false, nil
+    local function modal_wait_expired()
+      modal_wait_started = modal_wait_started or os.time()
+      return os.time() - modal_wait_started >= startup_modal_timeout_seconds()
+    end
     local update_relaunch_record_ref
     local function update_relaunch_record()
       local agent = bus.agents[actual] or {}
@@ -1249,9 +1267,8 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       update_timeout_reported = true
       bus.pending_tasks[actual] = nil
       _butler_session_trace("codex_update_timeout", actual .. detail)
-      pcall(remuda._butler_send, "butler", parent or "butler", "Codex update for " .. actual
-        .. " has not reached a safe relaunch after " .. tostring(tonumber(remuda._butler_codex_update_timeout) or 300)
-        .. " seconds. Its pane was left open; task delivery will resume when the pane is safe to relaunch.")
+      pcall(remuda._butler_send, "butler", parent or "butler", "Codex update wait limit reached for " .. actual
+        .. ". Its pane was left open; task delivery will resume when the pane is safe to relaunch.")
     end
     poke = remuda.schedule({ every = 0.5, run = function()
       if update_relaunch_record_ref and (update_relaunch_record_ref.relaunched or update_relaunch_record_ref.cancelled) then
@@ -1271,14 +1288,16 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       end
       if attempts < settle then return end -- let an answered modal repaint
       local modal = startup_modal(startup, screen)
+      if update_waiting and update_relaunch_record_ref and codex_update_complete(screen) then
+        update_relaunch_record_ref.update_complete_seen = true
+      end
       if update_waiting then
         if not modal and startup.ready and startup.ready(screen) then
           -- The update completed in place. Restart the same alias with the
           -- same identity so the task is submitted only by its fresh pane.
           finish_update()
           if not relaunch_after_update() then
-            modal_polls = modal_polls + 1
-            if modal_polls >= startup_modal_attempt_limit() then
+            if modal_wait_expired(screen) then
               bus.codex_update_state.restart_waiting[actual] = true
               report_update_timeout(" update completed while human attached")
             end
@@ -1310,15 +1329,13 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       if update_state.done and update_state.waiting and update_state.waiting[actual] then
         update_version, waiting_for_update = update_state.done_version, true
         if relaunch_after_update() then return end
-        modal_polls = modal_polls + 1
-        if modal_polls >= startup_modal_attempt_limit() then give_up(" update completed while human attached") end
+        if modal_wait_expired(screen) then give_up(" update completed while human attached") end
         return
       end
       if update_state.done and update_state.restart_waiting and update_state.restart_waiting[actual] then
         update_version, waiting_for_update = update_state.done_version, true
         if relaunch_after_update() then update_state.restart_waiting[actual] = nil; return end
-        modal_polls = modal_polls + 1
-        if modal_polls >= startup_modal_attempt_limit() then give_up(" update completed while human attached") end
+        if modal_wait_expired(screen) then give_up(" update completed while human attached") end
         return
       end
       if update_state.claimed and update_state.owner ~= actual
@@ -1363,8 +1380,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
             end
             if update_state.done and update_state.done_version == version then
               if relaunch_after_update() then return end
-              modal_polls = modal_polls + 1
-              if modal_polls >= startup_modal_attempt_limit() then give_up(" modal human attached") end
+              if modal_wait_expired(screen) then give_up(" modal human attached") end
               return
             end
             if os.time() >= update_deadline then
@@ -1376,8 +1392,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
                 return
               end
             end
-            modal_polls = modal_polls + 1
-            if modal_polls >= startup_modal_attempt_limit() then give_up(" waiting for Codex update") end
+            if modal_wait_expired(screen) then give_up(" waiting for Codex update") end
             return
           end
           if waiting_for_update and update_state.done and update_state.done_version == version then
@@ -1421,13 +1436,11 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
             pcall(remuda.key, actual, skip)
             settle = attempts + 3
           else
-            modal_polls = modal_polls + 1
-            if modal_polls >= startup_modal_attempt_limit() then give_up(" update dialog") end
+            if modal_wait_expired(screen) then give_up(" update dialog") end
           end
           return
         end
-        modal_polls = modal_polls + 1
-        if modal_polls >= startup_modal_attempt_limit() then give_up(" modal"); return end
+        if modal_wait_expired(screen) then give_up(" modal"); return end
         if startup_action_safe and not startup_action_safe(actual) then return end
         for _, key in ipairs(modal.keys or {}) do pcall(remuda.key, actual, key) end
         settle = attempts + 3
@@ -1634,6 +1647,15 @@ function remuda._butler_notify_policy(session, now)
   end
   local agent = bus.agents[session]
   local kind = agent and agent.kind or ""
+  if not screen then
+    local captured
+    captured, screen = pcall(remuda.capture, session)
+    if not captured then return false end
+  end
+  if known_startup_modal(remuda._butler_agent_startup[kind] or {}, screen) then
+    _butler_session_trace("notice_deferred_modal", session .. " " .. kind)
+    return false
+  end
   local decision, text = remuda._butler_prompt_is_empty(kind, screen)
   if seen.decision ~= decision then -- once per change, not every retry
     seen.decision = decision
@@ -2455,16 +2477,20 @@ function remuda._butler_session_exited(name)
   _butler_session_trace("session_exited", name)
   local update_restart = bus.codex_update_relaunches[name]
   local explicitly_closed = bus.close_requested and bus.close_requested[name]
-  if update_restart and explicitly_closed and not update_restart.expected_close then
-    -- A leader/human close wins over a pending update restart.
+  if update_restart and not update_restart.expected_close
+      and (explicitly_closed or not update_restart.update_complete_seen) then
+    -- The core exit hook carries no close reason. Treat an unmarked exit as an
+    -- abort unless the pane showed Codex's update-complete evidence first.
     update_restart.cancelled = true
     bus.codex_update_relaunches[name] = nil
     if bus.codex_update_state.waiting then bus.codex_update_state.waiting[name] = nil end
     if bus.codex_update_state.owner == name then
       bus.codex_update_state.claimed, bus.codex_update_state.owner = false, nil
+      bus.codex_update_state.done, bus.codex_update_state.done_version = false, nil
       bus.codex_update_state.aborted_version = update_restart.version
       bus.codex_update_state.waiting, bus.codex_update_state.restart_waiting = {}, {}
     end
+    _butler_session_trace("codex_update_exit_unconfirmed", name)
     update_restart = nil
   end
   if update_restart then
