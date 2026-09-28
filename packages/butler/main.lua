@@ -732,6 +732,8 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
       end
       if attempts < settle then return end -- let an answered modal repaint
       if not startup.ready or startup.ready(screen) then
+        -- #29: never type the task over a human's line; waiting is not an attempt.
+        if not remuda._butler_notify_policy(actual) then attempts = attempts - 1 return end
         remuda.cancel(poke)
         pcall(remuda.type_text, actual, task)
         return
@@ -798,6 +800,103 @@ function remuda._butler_topic_delegate(name, task, template, kind, parent, model
   if not leader then error("no Butler leader named " .. tostring(parent), 0) end
   return make_topic(name, template, kind or leader.kind, parent, task, model)
 end
+-- #29: a mail notice must never land on a human's half-typed line. Notices
+-- wait per recipient, coalesce, and are typed only when the policy allows;
+-- the declared `butler-notices` schedule (init.lua) retries every second.
+bus.notices = bus.notices or {}
+bus.notice_screens = bus.notice_screens or {}
+local NOTICE_STABLE_SECONDS = 3
+
+-- The composer's text: the last line led (after an optional box edge) by a
+-- prompt glyph. Returns "EMPTY" (nothing, or exactly one of the kind's
+-- `placeholders`), "NON-EMPTY" or "UNPARSEABLE", plus the text. Capture is
+-- plain text, so a dim ghost suggestion reads as NON-EMPTY and defers (#137).
+local PROMPT_GLYPHS = { "❯", ">", "›" }
+function remuda._butler_prompt_is_empty(kind, screen)
+  local text
+  for line in (screen .. "\n"):gmatch("(.-)\n") do
+    local rest = line:gsub("^%s+", "")
+    if rest:sub(1, 3) == "│" then rest = rest:sub(4):gsub("^%s+", "") end
+    for _, glyph in ipairs(PROMPT_GLYPHS) do
+      if rest:sub(1, #glyph) == glyph then text = rest:sub(#glyph + 1) break end
+    end
+  end
+  if not text then return "UNPARSEABLE", "" end
+  text = text:gsub("│%s*$", ""):match("^%s*(.-)%s*$")
+  if text == "" then return "EMPTY", text end
+  local startup = remuda._butler_agent_startup[kind] or {}
+  for _, placeholder in ipairs(startup.placeholders or {}) do
+    if text == placeholder then return "EMPTY", text end
+  end
+  return "NON-EMPTY", text
+end
+
+-- The one delivery policy: may Butler type into SESSION now? A detached pane
+-- always; an attached one only while its prompt is empty and its screen has
+-- not changed for NOTICE_STABLE_SECONDS. Anything unrecognised defers.
+function remuda._butler_notify_policy(session, now)
+  now = now or os.time()
+  local row
+  for _, candidate in ipairs(remuda.ls()) do
+    if candidate.name == session then row = candidate end
+  end
+  if not row or not row.alive then return false end
+  if not row.attached then bus.notice_screens[session] = nil return true end
+  local captured, screen = pcall(remuda.capture, session)
+  if not captured then return false end
+  local seen = bus.notice_screens[session]
+  if not seen or seen.screen ~= screen then
+    bus.notice_screens[session] = { screen = screen, since = now }
+    return false
+  end
+  if now - seen.since < NOTICE_STABLE_SECONDS then return false end
+  local agent = bus.agents[session]
+  local kind = agent and agent.kind or ""
+  local decision, text = remuda._butler_prompt_is_empty(kind, screen)
+  if seen.decision ~= decision then -- once per change, not every retry
+    seen.decision = decision
+    _butler_session_trace("notice_prompt", session .. " " .. kind .. " " .. decision .. " " .. text)
+  end
+  return decision == "EMPTY"
+end
+
+-- `_butler_notify` is the seam: queue NOTICE for ALIAS and type it (with any
+-- still pending) if the policy allows. Returns delivered, type_text error.
+local function deliver_notice(session)
+  local pending = bus.notices[session]
+  if not pending then return true end
+  if not remuda._butler_notify_policy(session) then return false end
+  bus.notices[session] = nil
+  local text = pending.count == 1 and pending.text
+    or (pending.count .. " new Butler messages arrived. Read them: remuda butler inbox")
+  return pcall(remuda.type_text, session, text)
+end
+function remuda._butler_notify(alias, notice)
+  local pending = bus.notices[alias] or { count = 0 }
+  pending.count, pending.text = pending.count + 1, notice
+  bus.notices[alias] = pending
+  return deliver_notice(alias)
+end
+function remuda._butler_deliver_notices()
+  local sessions = {}
+  for session in pairs(bus.notices) do sessions[#sessions + 1] = session end
+  for _, session in ipairs(sessions) do
+    if bus.agents[session] then deliver_notice(session) else bus.notices[session] = nil end
+  end
+end
+-- init.lua declares the schedule; a core before remuda#116 ignores declared
+-- schedules, so keep exactly one imperative stand-in there.
+if remuda._butler_notice_schedule then remuda.cancel(remuda._butler_notice_schedule) end
+remuda._butler_notice_schedule = nil
+local declared_notices = false
+for _, schedule in pairs(remuda.schedules) do
+  if schedule.name == "butler-notices" then declared_notices = true end
+end
+if not declared_notices then
+  remuda._butler_notice_schedule = remuda.schedule({ name = "butler-notices", every = 1,
+    run = function() remuda._butler_deliver_notices() end })
+end
+
 function remuda._butler_send(from, to, text)
   local _, recipient = mail_id(to, false)
   local sender = (from == "operator" or from == "outside") and mail_address(from)
@@ -806,9 +905,12 @@ function remuda._butler_send(from, to, text)
   if not message then error(err, 0) end
   local notice = "Butler message " .. message.id .. " from " .. message.from.session
     .. " arrived. Read it: remuda butler inbox"
-  local delivered, why = pcall(remuda.type_text, recipient.alias, notice)
+  local delivered, why = remuda._butler_notify(recipient.alias, notice)
   if delivered then return "queued " .. message.id .. " and notified " .. recipient.alias end
-  return "queued " .. message.id .. " for " .. recipient.alias .. "; terminal delivery deferred: " .. tostring(why)
+  if why then
+    return "queued " .. message.id .. " for " .. recipient.alias .. "; terminal delivery deferred: " .. tostring(why)
+  end
+  return "queued " .. message.id .. " for " .. recipient.alias .. "; notice deferred until its pane is free"
 end
 function remuda._butler_inbox(name)
   local id = mail_id(name, true)

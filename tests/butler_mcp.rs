@@ -222,3 +222,85 @@ fn cli_launch_parents_to_the_calling_member_not_butler() {
     assert!(matches!(unknown, Response::Error(_)), "{unknown:?}");
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.agents.m4)"), "nil");
 }
+
+fn screen_of(path: &Path, session: &str, until: &str) -> String {
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let screen = eval(path, &format!("return remuda.capture('{session}')"));
+        if screen.contains(until) || Instant::now() > deadline {
+            return screen;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// #29: a mail notice is typed only when `remuda._butler_notify_policy` lets
+/// it; until then notices wait per recipient and arrive as one coalesced line.
+#[test]
+fn mail_notices_wait_for_the_policy_and_coalesce() {
+    let dir = scratch("notice-queue");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+    eval(
+        &path,
+        "remuda._butler_agent_builders.fake = function() return {'sh', '-c', 'stty -echo; cat'} end; \
+         remuda._butler_launch('fake', 'm1'); \
+         remuda._butler_notify_policy = function() return false end",
+    );
+    for n in 1..=3 {
+        let sent = eval(&path, &format!("return remuda._butler_send('operator', 'm1', 'hi {n}')"));
+        assert!(sent.contains("notice deferred"), "{sent}");
+    }
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(!screen_of(&path, "m1", "").contains("Butler"), "typed while the policy said no");
+
+    eval(&path, "remuda._butler_notify_policy = function() return true end");
+    let screen = screen_of(&path, "m1", "3 new Butler messages");
+    assert_eq!(screen.matches("3 new Butler messages").count(), 1, "{screen}");
+    assert!(!screen.contains("Butler message message-"), "{screen}");
+    let notices = "local n = 0 for _, s in pairs(remuda.schedules) do \
+                   if s.name == 'butler-notices' then n = n + 1 end end return n";
+    assert_eq!(eval(&path, notices), "1");
+}
+
+/// #29: one case per branch of `remuda._butler_notify_policy`, with `ls` and
+/// `capture` stubbed and the clock passed in.
+#[test]
+fn notify_policy_types_only_into_a_detached_or_quiet_empty_prompt() {
+    let dir = scratch("notice-policy");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    let trace = dir.join("session-trace.log");
+    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+    let got = eval(
+        &path,
+        &format!(
+            r#"remuda._butler_session_trace_path = {trace:?}
+            local real_ls, real_capture = remuda.ls, remuda.capture
+            local row, screen = {{ name = 'p1', alive = true, attached = true }}, ''
+            remuda.ls = function() return {{ row }} end
+            remuda.capture = function() return screen end
+            local policy, t = remuda._butler_notify_policy, 0
+            local function settled(text) t = t + 100; screen = text; policy('p1', t); return policy('p1', t + 3) end
+            local r = {{}}
+            r[#r + 1] = 'half=' .. tostring(settled('history\n> co'))
+            r[#r + 1] = 'empty_stable=' .. tostring(settled('history\n> '))
+            r[#r + 1] = 'claude_box=' .. tostring(settled('──\n│ ❯     │\n  ? for shortcuts'))
+            t = t + 100; screen = 'a\n> '; policy('p1', t); screen = 'b\n> '
+            r[#r + 1] = 'empty_changing=' .. tostring(policy('p1', t + 3))
+            r[#r + 1] = 'unparseable=' .. tostring(settled('Do you trust this folder?'))
+            row.attached = false; screen = 'x\n> co'
+            r[#r + 1] = 'detached=' .. tostring(policy('p1', t + 500))
+            remuda.ls, remuda.capture = real_ls, real_capture
+            return table.concat(r, ' ')"#
+        ),
+    );
+    assert_eq!(
+        got,
+        "half=false empty_stable=true claude_box=true empty_changing=false unparseable=false detached=true"
+    );
+    let log = std::fs::read_to_string(&trace).unwrap_or_default();
+    assert!(log.contains("notice_prompt\tp1  NON-EMPTY co"), "{log}");
+    assert!(log.contains("notice_prompt\tp1  UNPARSEABLE"), "{log}");
+}

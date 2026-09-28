@@ -41,4 +41,10 @@ return {
   hooks = {
     { event = "butler-start", run = function() host.exec("butler/main") end },
   },
+  -- #29: retry mail notices held back while a human was typing.
+  schedules = {
+    { name = "butler-notices", every = 1, run = function()
+      if host._butler_deliver_notices then host._butler_deliver_notices() end
+    end },
+  },
 }
