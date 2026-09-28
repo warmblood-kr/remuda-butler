@@ -170,12 +170,12 @@ if remuda._butler_test_mode == true then
   return
 end
 
--- Cancel the existing Matrix request loop before resolving new config;
+-- Cancel the existing Matrix relay before resolving new config;
 -- matrix.lua will start exactly one relay after the new config is installed.
 local old_matrix = remuda.butler and remuda.butler.matrix
 local old_relay = old_matrix and old_matrix.relay
 if old_relay and old_relay.stop then pcall(old_relay.stop)
-elseif remuda._butler_matrix_stop then pcall(remuda._butler_matrix_stop) end
+end
 
 -- Replace handles created imperatively by the previous Butler version. The
 -- lifecycle declaration owns these schedules from this activation onward.

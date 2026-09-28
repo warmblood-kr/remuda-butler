@@ -4588,7 +4588,7 @@ fn butler_exec_starts_without_matrix_credentials() {
         "local-only butler session never appeared in ls"
     );
     assert_eq!(
-        eval(&path, "return tostring(remuda._butler_matrix_config == nil and remuda._butler_matrix_relay == nil)"),
+        eval(&path, "local m = remuda.butler and remuda.butler.matrix; return tostring(remuda._butler_matrix_config == nil and (not m or not m.relay or m.relay.instance == nil))"),
         "true",
         "Matrix must stay inert without configuration"
     );

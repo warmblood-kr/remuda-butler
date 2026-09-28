@@ -51,11 +51,7 @@ return {
     if host._butler_cancel_active_choosers then host._butler_cancel_active_choosers(state) end
     local matrix = host.butler and host.butler.matrix
     if matrix and matrix.relay then pcall(matrix.relay.stop)
-    elseif host._butler_matrix_stop then pcall(host._butler_matrix_stop) end
-    local relay = state.relay or host._butler_relay
-    if relay then pcall(host.kill, relay) end
-    state.relay = nil
-    host._butler_relay = nil
+    end
     if host._butler_start_fallback then host.cancel(host._butler_start_fallback) end
     host._butler_start_fallback = nil
   end,

@@ -18,14 +18,13 @@ unset REMUDA_BUTLER_TOKEN REMUDA_BUTLER_CONFIG
 MOD=$XDG_DATA_HOME/remuda/mods/butler
 mkdir -p "$MOD" "$HOME" "$XDG_CONFIG_HOME/remuda/butler"
 TOKEN=$XDG_CONFIG_HOME/remuda/butler/token
-RELAYS=0
+RELAY_EXPECT=false
 if [[ -z ${AUTOSTART:-} ]]; then
-  RELAYS=1
   echo fake-token >"$TOKEN"
   printf 'http://127.0.0.1:9\n!room:x\n@butler:x\n' >"$XDG_CONFIG_HOME/remuda/butler/config"
   echo '{"since": "s0"}' >"$XDG_CONFIG_HOME/remuda/butler/config.since"
 fi
-trap 'remuda -s "$S" stop -f >/dev/null 2>&1 || true; pkill -f "$TOKEN" >/dev/null 2>&1 || true; rm -rf "$T"' EXIT
+trap 'remuda -s "$S" stop -f >/dev/null 2>&1 || true; rm -rf "$T"' EXIT
 
 lua() { remuda -s "$S" -e "$1"; }
 install_files() { rm -rf "$MOD"; mkdir -p "$MOD"; "$@" | tar -x -C "$MOD"; }
@@ -41,10 +40,8 @@ start_daemon() {
 
 SNAPSHOT='
 local function n(e) return #(remuda.hooks[e] or {}) end
-local relay_running = false
-for _, id in ipairs(remuda.processes()) do
-  if id == remuda._butler_matrix_relay or id == remuda._butler_relay then relay_running = true end
-end
+local matrix = remuda.butler and remuda.butler.matrix
+local relay_running = matrix and matrix.relay and matrix.relay.instance ~= nil or false
 local s = 0 for _, x in pairs(remuda.schedules) do
   if x.name == "butler-notices" or x.name == "butler-reconcile" or x.name == "butler-compaction" then s = s + 1 end
 end
@@ -53,15 +50,14 @@ table.sort(live)
 local bus = remuda._butler_bus
 local member = bus.agents.m1
 local inbox = member and bus.inboxes[member.id] or {}
-return string.format("boots=%d hooks=%d,%d,%d,%d,%d schedules=%d sessions=%s member=%s mail=%d relay=%s bus=%s",
+return string.format("boots=%d hooks=%d,%d,%d legacy_matrix_hooks=%d,%d schedules=%d sessions=%s member=%s mail=%d relay=%s bus=%s",
   remuda.event_counts()["butler-start"] or 0, n("butler/deliver"), n("session_exited"), n("butler-compaction-submit"), n("butler-matrix-line"), n("butler-matrix-submit"),
   s, table.concat(live, ","), tostring(member ~= nil), #inbox, tostring(relay_running), tostring(bus))'
-relays() { (pgrep -f "$TOKEN" || true) | wc -l | tr -d ' '; }
 pids() { (pgrep -f "sleep ${ID}[12]\$" || true) | sort | tr '\n' ','; }
 settle() { sleep 1; }
 check() {
   local got
-  got="$(lua "$SNAPSHOT") relays=$(relays) pids=$(pids)"
+  got="$(lua "$SNAPSHOT") pids=$(pids)"
   echo "$1: $got"
   [[ "$got" == "$2" ]] || fail "$1: expected '$2'"
 }
@@ -69,18 +65,21 @@ check() {
 echo "== legacy install ($OLD_REF)"
 old_files
 start_daemon
+if [[ -z ${AUTOSTART:-} ]] && [[ $(lua 'return tostring(type(remuda.http) == "table" and type(remuda.http.request) == "function")') == true ]]; then
+  RELAY_EXPECT=true
+fi
 lua "remuda._butler_argv = {'sleep', '${ID}1'}; remuda._butler_reconcile_interval = 0.5"
 remuda -s "$S" butler --headless
 lua "remuda._butler_agent_builders.fake = function() return {'sleep', '${ID}2'} end
      remuda._butler_launch('fake', 'm1'); remuda._butler_send('butler', 'm1', 'kept across reload')"
 lua "remuda._butler_register_compaction_schedule()"  # active pre-step-4 handle is migrated on reload
 settle
-echo "legacy: $(lua "$SNAPSHOT") relays=$(relays)"
+echo "legacy: $(lua "$SNAPSHOT")"
 BASE=$(lua "$SNAPSHOT" | sed 's/.* bus=//')
 BASE_BOOT=$(lua 'return remuda.event_counts()["butler-start"] or 0')
-EXPECT_NEW="hooks=1,1,1,1,1 schedules=3 sessions=butler,m1 member=true mail=2 relay=$([[ $RELAYS == 1 ]] && echo true || echo false) bus=$BASE relays=$RELAYS pids=$(pids)"
-EXPECT_OLD="hooks=1,1,1,1,1 schedules=2 sessions=butler,m1 member=true mail=0 relay=$([[ $RELAYS == 1 ]] && echo true || echo false) bus=$BASE relays=$RELAYS pids=$(pids)"
-EXPECT_NEW_EMPTY="hooks=1,1,1,1,1 schedules=3 sessions=butler,m1 member=true mail=0 relay=$([[ $RELAYS == 1 ]] && echo true || echo false) bus=$BASE relays=$RELAYS pids=$(pids)"
+EXPECT_NEW="hooks=1,1,1 legacy_matrix_hooks=0,0 schedules=3 sessions=butler,m1 member=true mail=2 relay=$RELAY_EXPECT bus=$BASE pids=$(pids)"
+EXPECT_OLD="hooks=1,1,1 legacy_matrix_hooks=1,1 schedules=2 sessions=butler,m1 member=true mail=0 relay=false bus=$BASE pids=$(pids)"
+EXPECT_NEW_EMPTY="hooks=1,1,1 legacy_matrix_hooks=0,0 schedules=3 sessions=butler,m1 member=true mail=0 relay=$RELAY_EXPECT bus=$BASE pids=$(pids)"
 
 echo "== swap in lifecycle files, reload x3"
 new_files
@@ -124,11 +123,10 @@ check "tight x10" "boots=$((BASE_BOOT + 15)) $EXPECT_NEW_EMPTY"
 
 echo "== cold boot through remuda butler"
 remuda -s "$S" stop -f >/dev/null 2>&1
-pkill -f "$TOKEN" >/dev/null 2>&1 || true
 start_daemon
 lua "remuda._butler_argv = {'sleep', '${ID}1'}"
 remuda -s "$S" butler --headless; settle
-lua "$SNAPSHOT" | grep -q 'boots=1 hooks=1,1,1,1,1 schedules=3 sessions=butler ' || \
-  fail "cold boot: $(lua "$SNAPSHOT")"
-[[ $(relays) == "$RELAYS" ]] || fail "cold boot relays=$(relays)"
+COLD=$(lua "$SNAPSHOT")
+[[ "$COLD" == *"boots=1 hooks=1,1,1 legacy_matrix_hooks=0,0 schedules=3 sessions=butler member=false mail=0 relay=$RELAY_EXPECT bus="* ]] || \
+  fail "cold boot: $COLD"
 echo PASS
