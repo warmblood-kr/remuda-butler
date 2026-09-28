@@ -730,8 +730,10 @@ remuda._butler_agent_support = {
 remuda.exec("butler/telemetry")
 remuda.exec("butler/agents/claudecode")
 remuda.exec("butler/agents/codex")
+remuda.exec("butler/prompt")
 local AGENT_BUILDERS = remuda._butler_agent_builders
 local TELEMETRY_ADAPTERS = remuda._butler_telemetry_adapters
+local PROMPT_DELIVERY = assert(remuda._butler_prompt_delivery)
 local BUILTIN_AGENT_BUILDERS = {}
 for kind, builder in pairs(AGENT_BUILDERS) do BUILTIN_AGENT_BUILDERS[kind] = builder end
 if not remuda.contribute then
@@ -1126,99 +1128,32 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
     -- Keep an immediate mail notice out of the child's first prompt until the
     -- delegated task has been submitted.
     bus.pending_tasks[actual] = true
-    -- Answer known startup modals (agents/*.lua) and type the task only once
-    -- the composer is ready; never blind-type into an unknown dialog.
     local startup = remuda._butler_agent_startup[kind] or {}
-    local poke, confirm, attempts, settle, deferred = nil, nil, 0, 0, 0
-    -- Either timeout means the task never reached the agent: say so to its
-    -- leader rather than only in the trace (#29).
-    local function give_up(detail)
-      remuda.cancel(poke)
-      if confirm then remuda.cancel(confirm) end
-      bus.pending_tasks[actual] = nil
-      _butler_session_trace("task_poke_timeout", actual .. detail)
-      pcall(remuda._butler_send, "butler", parent or "butler", "Task for " .. actual
-        .. " was not delivered: its pane never became ready or free to type into."
-        .. " Resend it with `remuda butler send " .. actual .. " TASK` once it is.")
-    end
-    poke = remuda.schedule({ every = 0.5, run = function()
-      attempts = attempts + 1
-      -- A short-lived launcher (or a failed executable) can disappear before
-      -- the agent has painted its composer. A deferred poke is best-effort; it
-      -- must not leave a throwing callback in the daemon's shared Lua image.
-      local captured, screen = pcall(remuda.capture, actual)
-      if not captured then
-        remuda.cancel(poke)
+    PROMPT_DELIVERY.schedule(remuda, kind, actual, name, parent, task, {
+      ready = startup.ready,
+      modals = startup.modals,
+      allowed = function(retrying)
+        if retrying then return remuda._butler_task_retry_policy(actual) end
+        return remuda._butler_notify_policy(actual)
+      end,
+      human_active = function() return remuda._butler_human_active(actual) end,
+      empty = function(screen)
+        return remuda._butler_prompt_is_empty(kind, screen)
+      end,
+      timeout = remuda._butler_task_poke_deferrals or 600,
+      ready_timeout = remuda._butler_task_poke_attempts or 60,
+      submit_timeout = remuda._butler_submit_timeout or 300,
+      on_done = function(delivered, reason)
         bus.pending_tasks[actual] = nil
-        return
-      end
-      if attempts < settle then return end -- let an answered modal repaint
-      if not startup.ready or startup.ready(screen) then
-        -- #29: never type the task over a human's line. Waiting is bounded
-        -- separately (default 600 ticks = 300s); then the leader is told.
-        if not remuda._butler_notify_policy(actual) then
-          attempts, deferred = attempts - 1, deferred + 1
-          if deferred >= (remuda._butler_task_poke_deferrals or 600) then give_up(" deferred") end
-          return
-        end
-        remuda.cancel(poke)
-        local typed = pcall(remuda.type_text, actual, task)
-        if not typed then
-          give_up(" type failed")
-          return
-        end
-
-        -- A terminal write succeeding does not mean the agent accepted its
-        -- Return. Keep notices out until the composer releases the task, and
-        -- retry Return if the same task remains in the composer.
-        bus.pending_tasks[actual] = task
-        local task_line = task:gsub("^%s+", ""):match("^[^\n]*") or ""
-        local checks, empty_checks = 0, 0
-        confirm = remuda.schedule({ every = 0.5, run = function()
-          checks = checks + 1
-          local seen, latest = pcall(remuda.capture, actual)
-          if not seen then
-            remuda.cancel(confirm)
-            bus.pending_tasks[actual] = nil
-            return
-          end
-          local decision, text = remuda._butler_prompt_is_empty(kind, latest)
-          local busy = remuda.session(actual).is_busy == true
-          local task_in_composer = #task_line > 0 and (text == task_line
-            or (#text > 0 and task_line:sub(1, #text) == text))
-          if not task_in_composer and decision == "EMPTY" then
-            empty_checks = empty_checks + 1
-          else
-            empty_checks = 0
-          end
-          -- The task can be accepted between type_text and this first poll.
-          -- A fast TUI may also still be painting the text on its first empty
-          -- poll, so require two consecutive empty captures. Busy is definitive.
-          if busy or empty_checks >= 2 then
-            remuda.cancel(confirm)
-            bus.pending_tasks[actual] = nil
-            return
-          end
-          -- Give the UI time to consume the first Return before retrying.
-          if decision == "NON-EMPTY" and task_in_composer and checks >= 4 and checks % 4 == 0 then
-            pcall(remuda.key, actual, "RET")
-          end
-          if checks >= (remuda._butler_task_poke_deferrals or 600) then
-            give_up(" submit")
-          end
-        end })
-        return
-      end
-      for _, modal in ipairs(startup.modals or {}) do
-        if screen:find(modal.match, 1, true) then
-          _butler_session_trace("startup_modal", actual .. " " .. modal.match)
-          for _, key in ipairs(modal.keys) do pcall(remuda.key, actual, key) end
-          settle = attempts + 3
-          return
-        end
-      end
-      if attempts >= (remuda._butler_task_poke_attempts or 60) then give_up("") end
-    end })
+        if delivered then return end
+        local detail = reason or "delivery could not be verified"
+        if detail == "submit" then detail = "it was typed but not submitted" end
+        _butler_session_trace("task_poke_timeout", actual .. " " .. detail)
+        pcall(remuda._butler_send, "butler", parent or "butler", "Task for " .. actual
+          .. " was not delivered: " .. detail
+          .. ". Resend it with `remuda butler send " .. actual .. " TASK` once it is.")
+      end,
+    })
   end
   return actual
   end
@@ -1293,19 +1228,39 @@ local NOTICE_STABLE_SECONDS = 3
 -- plain text, so a dim ghost suggestion reads as NON-EMPTY and defers (#137).
 local PROMPT_GLYPHS = { "❯", ">", "›" }
 function remuda._butler_prompt_is_empty(kind, screen)
-  local text
+  local text, prompt_at
   -- Claude draws its empty composer as '❯' + NO-BREAK SPACE; Lua's %s
   -- misses U+00A0, so fold it to a space before parsing (every kind).
   screen = screen:gsub("\194\160", " ")
-  for line in (screen .. "\n"):gmatch("(.-)\n") do
+  local lines = {}
+  for line in (screen .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
+  for index, line in ipairs(lines) do
     local rest = line:gsub("^%s+", "")
     if rest:sub(1, 3) == "│" then rest = rest:sub(4):gsub("^%s+", "") end
     for _, glyph in ipairs(PROMPT_GLYPHS) do
-      if rest:sub(1, #glyph) == glyph then text = rest:sub(#glyph + 1) break end
+      if rest:sub(1, #glyph) == glyph then
+        text, prompt_at = rest:sub(#glyph + 1), index
+        break
+      end
     end
   end
   if not text then return "UNPARSEABLE", "" end
   text = text:gsub("│%s*$", ""):match("^%s*(.-)%s*$")
+  local parts = { text }
+  for index = prompt_at + 1, #lines do
+    local rest = lines[index]:gsub("^%s+", "")
+    if rest:sub(1, 3) == "╰" or rest:sub(1, 3) == "└" or rest:sub(1, 3) == "─" then break end
+    if rest:match("^%? for shortcuts")
+        or (kind == "codex" and (rest:lower():find("context left", 1, true)
+        or rest:match("^[^%s]+%s+[^%s]+%s+·"))) then
+      break
+    end
+    if kind == "claude" and rest:sub(1, 3) == "│" then
+      rest = rest:sub(4):gsub("│%s*$", "")
+    end
+    parts[#parts + 1] = rest
+  end
+  text = table.concat(parts, "\n"):match("^%s*(.-)%s*$")
   if text == "" then return "EMPTY", text end
   local startup = remuda._butler_agent_startup[kind] or {}
   for _, placeholder in ipairs(startup.placeholders or {}) do
@@ -1368,6 +1323,56 @@ function remuda._butler_notify_policy(session, now)
     _butler_session_trace("notice_prompt", session .. " " .. kind .. " " .. decision .. " " .. text)
   end
   return decision == "EMPTY"
+end
+
+-- A Return retry happens while the delegated task is still in the composer,
+-- so the notice policy's empty-composer check cannot be reused. Keep its human
+-- pause guard: use human_idle when available, otherwise require a stable screen.
+bus.task_retry_screens = bus.task_retry_screens or {}
+function remuda._butler_task_retry_policy(session, now)
+  now = now or os.time()
+  local row
+  for _, candidate in ipairs(remuda.ls()) do
+    if candidate.name == session then row = candidate end
+  end
+  if not row or not row.alive then return false end
+  if not row.attached then return true end
+  if row.human_idle ~= nil then
+    return row.human_idle >= (remuda._butler_notice_human_idle or 10)
+  end
+  local captured, screen = pcall(remuda.capture, session)
+  if not captured then return false end
+  local seen = bus.task_retry_screens[session] or {}
+  bus.task_retry_screens[session] = seen
+  if seen.screen ~= screen then
+    seen.screen, seen.since = screen, now
+    return false
+  end
+  return now - seen.since >= NOTICE_STABLE_SECONDS
+end
+
+-- Some agent builds hide their idle marker while a person types. Keep those
+-- waits on the human clock, not the bounded startup-readiness clock.
+bus.human_activity_screens = bus.human_activity_screens or {}
+function remuda._butler_human_active(session, now)
+  now = now or os.time()
+  local row
+  for _, candidate in ipairs(remuda.ls()) do
+    if candidate.name == session then row = candidate end
+  end
+  if not row or not row.alive or not row.attached then return false end
+  if row.human_idle ~= nil then
+    return row.human_idle < (remuda._butler_notice_human_idle or 10)
+  end
+  local captured, screen = pcall(remuda.capture, session)
+  if not captured then return true end
+  local seen = bus.human_activity_screens[session] or {}
+  bus.human_activity_screens[session] = seen
+  if seen.screen ~= screen then
+    seen.screen, seen.since = screen, now
+    return true
+  end
+  return now - seen.since < NOTICE_STABLE_SECONDS
 end
 
 -- `_butler_notify` is the seam: queue NOTICE for ALIAS and type it (with any
