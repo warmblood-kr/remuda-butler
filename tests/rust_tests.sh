@@ -29,7 +29,8 @@ fi
 
 cp "$REPO/tests/butler_daemon.rs" "$REPO/tests/butler_mcp.rs" "$CORE_DIR/native/tests/"
 mkdir -p "$CORE_DIR/native/tests/support"
-cp "$REPO/tests/support/matrix_stub_server.py" "$CORE_DIR/native/tests/support/"
+cp "$REPO/tests/support/matrix_stub_server.py" "$REPO/tests/test_matrix_http.py" "$CORE_DIR/native/tests/support/"
+cp "$REPO/tests/support/matrix-stub-cert.pem" "$REPO/tests/support/matrix-stub-key.pem" "$CORE_DIR/native/tests/support/"
 ln -sfn "$REPO/packages" "$CORE_DIR/packages"
 
 export XDG_DATA_HOME=$scratch/data

@@ -19,7 +19,11 @@ The Matrix config is a newline-delimited file: homeserver URL, room ID, the
 Matrix account's own user ID, and a comma-separated sender allowlist. An
 optional fifth line set to `messages` enables the `/rooms/{room}/messages`
 polling fallback for account/room pairs affected by the homeserver `/sync`
-defect. The default uses `/sync`.
+defect. The default uses `/sync`. Add `ca_file=/path/to/ca.pem` or
+`pin_sha256=<certificate SHA-256 hex>` on a later line for HTTPS homeservers;
+HTTPS fails closed when neither option is configured. A certificate pin is
+checked immediately after the TLS handshake and before an authenticated request
+is sent.
 
 Butler topics use stable session names and are delivered through the Butler
 message queue. The extraction boundary, runtime dependencies, and migration

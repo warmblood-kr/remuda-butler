@@ -2026,6 +2026,17 @@ struct StubServer {
 
 impl StubServer {
     fn spawn(fixture: &Path, get_log: &Path, put_log: &Path, send_status: u16) -> Self {
+        Self::spawn_with_tls(fixture, get_log, put_log, send_status, None, None)
+    }
+
+    fn spawn_with_tls(
+        fixture: &Path,
+        get_log: &Path,
+        put_log: &Path,
+        send_status: u16,
+        cert: Option<&Path>,
+        key: Option<&Path>,
+    ) -> Self {
         let mut child = std::process::Command::new("python3")
             .arg(concat!(
                 env!("CARGO_MANIFEST_DIR"),
@@ -2035,6 +2046,7 @@ impl StubServer {
             .arg(get_log)
             .arg(put_log)
             .arg(send_status.to_string())
+            .args(cert.into_iter().chain(key))
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -2060,6 +2072,83 @@ impl Drop for StubServer {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+#[test]
+fn butler_matrix_http_uses_authenticated_allowlisted_stub_client() {
+    let dir = scratch_dir("matrix-http-client");
+    let fixture = dir.join("fixture.jsonl");
+    let get_log = dir.join("get.log");
+    let put_log = dir.join("put.log");
+    write_fixture(&fixture, &[]);
+    let server = StubServer::spawn(&fixture, &get_log, &put_log, 200);
+    let token = dir.join("token");
+    std::fs::write(&token, "stub-secret\n").expect("write stub token");
+    let config = dir.join("config");
+    std::fs::write(
+        &config,
+        format!("{}\n!stub:example.org\n@bot:example.org\n@alice:example.org\n", server.base_url()),
+    )
+    .expect("write stub config");
+
+    let output = std::process::Command::new("python3")
+        .arg("-c")
+        .arg("import sys,matrix_http; c=matrix_http.Client(sys.argv[1],sys.argv[2],interval=0); assert c.get('/_matrix/client/v3/joined_rooms')['joined_rooms']; assert c.context_same_room('!stub:example.org','$event');\ntry: c.get('/_matrix/client/v3/rooms/!other:example.org/messages',room='!other:example.org')\nexcept matrix_http.MatrixError: print('allowlist-blocked')\nelse: raise AssertionError('room allowlist bypassed')")
+        .arg(&token)
+        .arg(&config)
+        .env(
+            "PYTHONPATH",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/packages/butler"),
+        )
+        .output()
+        .expect("run shared Matrix client");
+    assert!(
+        output.status.success(),
+        "matrix client failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("allowlist-blocked"));
+    let requests = std::fs::read_to_string(get_log.with_file_name("get.log.requests"))
+        .expect("stub request/auth log");
+    assert!(requests.contains("Bearer stub-secret"), "request lacked auth: {requests}");
+    assert!(requests.contains("/_matrix/client/v3/joined_rooms"), "missing joined rooms: {requests}");
+    assert!(requests.contains("/context/%24event"), "missing /context request: {requests}");
+    assert!(!requests.contains("!other:example.org"), "disallowed room reached the stub: {requests}");
+}
+
+#[test]
+fn butler_matrix_http_wrong_pin_sends_no_authenticated_request() {
+    let dir = scratch_dir("matrix-http-pin");
+    let fixture = dir.join("fixture.jsonl");
+    let get_log = dir.join("get.log");
+    let put_log = dir.join("put.log");
+    write_fixture(&fixture, &[]);
+    let cert = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/support/matrix-stub-cert.pem");
+    let key = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/support/matrix-stub-key.pem");
+    let server = StubServer::spawn_with_tls(&fixture, &get_log, &put_log, 200, Some(&cert), Some(&key));
+    let token = dir.join("token");
+    std::fs::write(&token, "must-not-be-sent\n").expect("write stub token");
+    let config = dir.join("config");
+    std::fs::write(
+        &config,
+        format!("https://127.0.0.1:{}\n!stub:example.org\n@bot:example.org\n@alice:example.org\n\n\npin_sha256={}\n",
+            server.port, "0".repeat(64)),
+    )
+    .expect("write wrong-pin config");
+    let output = std::process::Command::new("python3")
+        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/packages/butler/matrix_http.py"))
+        .arg(&token)
+        .arg(&config)
+        .arg("GET")
+        .arg("/_matrix/client/v3/joined_rooms")
+        .output()
+        .expect("run wrong-pin client");
+    assert!(!output.status.success(), "wrong certificate pin was accepted");
+    let requests_path = get_log.with_file_name("get.log.requests");
+    let requests = std::fs::read_to_string(requests_path).unwrap_or_default();
+    assert!(requests.is_empty(), "server received an HTTP request: {requests}");
 }
 
 /// One canned `/sync` response per line, in the shape the stub expects.

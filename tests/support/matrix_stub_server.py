@@ -24,6 +24,7 @@ failure paths of `remuda.process`'s `on_exit`.
 """
 import json
 import re
+import ssl
 import sys
 import threading
 import time
@@ -32,11 +33,13 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 fixture_path, get_log_path, put_log_path, send_status = sys.argv[1:5]
 send_status = int(send_status)
+tls_cert, tls_key = sys.argv[5:7] if len(sys.argv) >= 7 else (None, None)
 
 with open(fixture_path) as f:
     fixture = [json.loads(line) for line in f if line.strip()]
 
 state = {"index": 0, "last_token": "stub-idle-0", "lock": threading.Lock()}
+request_log_path = get_log_path + ".requests"
 
 
 def append(path, line):
@@ -59,6 +62,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         route = urllib.parse.urlsplit(self.path).path
+        append(request_log_path, json.dumps({"method": "GET", "path": self.path,
+                                             "authorization": self.headers.get("Authorization")}))
+        if route == "/_matrix/client/v3/joined_rooms":
+            self._reply(200, {"joined_rooms": ["!stub:example.org"]})
+            return
+        context = re.match(r"^/_matrix/client/v3/rooms/([^/]+)/context/([^/]+)$", route)
+        if context:
+            room = urllib.parse.unquote(context.group(1))
+            self._reply(200, {"event": {"room_id": room, "event_id": urllib.parse.unquote(context.group(2))}})
+            return
         if route != "/_matrix/client/v3/sync" and not re.match(
             r"^/_matrix/client/v3/rooms/[^/]+/messages$", route
         ):
@@ -91,20 +104,34 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def do_PUT(self):
-        if not re.match(r"^/_matrix/client/v3/rooms/[^/]+/send/m\.room\.message/", self.path):
-            self._reply(404, {"errcode": "M_NOT_FOUND"})
-            return
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length).decode("utf-8", "replace")
         append(put_log_path, body)
+        append(request_log_path, json.dumps({"method": "PUT", "path": self.path,
+                                             "authorization": self.headers.get("Authorization")}))
+        if not re.match(r"^/_matrix/client/v3/rooms/[^/]+/send/m\.room\.message/", self.path):
+            self._reply(200, {"ok": True})
+            return
         if send_status == 200:
             self._reply(200, {"event_id": "$stub-fake-event"})
         else:
             self._reply(send_status, {"errcode": "M_UNKNOWN", "error": "stub failure"})
 
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length).decode("utf-8", "replace")
+        append(put_log_path, body)
+        append(request_log_path, json.dumps({"method": "POST", "path": self.path,
+                                             "authorization": self.headers.get("Authorization")}))
+        self._reply(200, {"ok": True})
+
 
 def main():
     server = HTTPServer(("127.0.0.1", 0), Handler)
+    if tls_cert and tls_key:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(tls_cert, tls_key)
+        server.socket = context.wrap_socket(server.socket, server_side=True)
     print(server.server_address[1], flush=True)
     server.serve_forever()
 
