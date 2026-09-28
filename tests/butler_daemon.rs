@@ -3695,7 +3695,7 @@ fn butler_compaction_context_case(
     eval(
         &path,
         &format!(
-            "remuda.capture = function() return {} end; remuda.session = function() return {{ is_busy = false }} end; remuda._butler_compaction_sends = 0; remuda.send = function(_, text) if text == '/compact' then remuda._butler_compaction_sends = remuda._butler_compaction_sends + 1 end end; remuda.process = function() end",
+            "remuda.capture = function() return {} end; remuda.session = function() return {{ is_busy = false }} end; remuda._butler_compaction_sends = 0; remuda.type_text = function(_, text) if text == '/compact' then remuda._butler_compaction_sends = remuda._butler_compaction_sends + 1 end end; remuda.key = function() end",
             lua_raw_string(context_line)
         ),
     );
@@ -3724,6 +3724,7 @@ fn butler_compaction_context_case(
         "wrong check interval for {context_line:?}"
     );
     if expected_interval == "0.01" {
+        eval(&path, "if remuda._butler_compaction_run then remuda._butler_compaction_run.release() end");
         eval(
             &path,
             r#"remuda.capture = function() return "MODEL:Claude CTX:500000 CTXWIN:1000000 CTXPCT:50" end"#,
@@ -3850,8 +3851,8 @@ fn butler_compaction_uses_codex_telemetry_when_footer_has_no_ctx() {
           remuda._butler_telemetry_adapters.codex.read = function() return { context_used = 600000 } end
           remuda.session = function() return { is_busy = false } end
           remuda._butler_compaction_sends = 0
-          remuda.send = function(_, text) if text == "/compact" then remuda._butler_compaction_sends = remuda._butler_compaction_sends + 1 end end
-          remuda.process = function() end"#,
+          remuda.type_text = function(_, text) if text == "/compact" then remuda._butler_compaction_sends = remuda._butler_compaction_sends + 1 end end
+          remuda.key = function() end"#,
     );
     eval(&path, "remuda._butler_register_compaction_schedule()");
     let deadline = Instant::now() + PATIENCE;
@@ -3865,6 +3866,166 @@ fn butler_compaction_uses_codex_telemetry_when_footer_has_no_ctx() {
     }
     assert_eq!(eval(&path, "return tostring(remuda._butler_compaction_sends)"), "1");
     assert_eq!(eval(&path, "return tostring(remuda._butler_compaction_interval_current)"), "0.01");
+    drop(daemon);
+}
+
+/// Fake Claude and Codex captures exercise the compaction command queue and
+/// dialog registry without starting either vendor agent or reading user config.
+#[test]
+#[cfg(unix)]
+fn butler_compaction_fake_agents_restore_models_and_answer_registered_dialogs() {
+    let dir = scratch_dir("butler-compaction-fake-agents");
+    let (token_path, config_path) = butler_config(
+        &dir,
+        "compaction-fake-agents",
+        "http://127.0.0.1:1",
+        "!room:example.org",
+        "@butler:example.org",
+        "",
+    );
+    let token_str = token_path.to_string_lossy().to_string();
+    let config_str = config_path.to_string_lossy().to_string();
+    let daemon = Daemon::spawn_with_env(
+        &dir,
+        &[
+            ("REMUDA_BUTLER_TOKEN", token_str.as_str()),
+            ("REMUDA_BUTLER_CONFIG", config_str.as_str()),
+        ],
+    );
+    let path = daemon::socket_path_in(&dir, "s");
+    eval(&path, r#"remuda._butler_argv = {"sh"}; remuda._butler_skip_relay = true"#);
+    let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    let claude = eval(
+        &path,
+        r#"local commands = remuda._butler_compaction_commands("claude", "MODEL:Opus-5.5 CTX:600000")
+          local log = {}
+          remuda.type_text = function(_, text) log[#log + 1] = "type:" .. text end
+          remuda.key = function(_, key) log[#log + 1] = "key:" .. key end
+          for _, command in ipairs(commands) do remuda.type_text("fake-claude", command); remuda.key("fake-claude", "RET") end
+          return table.concat(log, "|")"#,
+    );
+    assert_eq!(
+        claude,
+        "type:/model sonnet|key:RET|type:/compact|key:RET|type:/model Opus-5.5|key:RET"
+    );
+    let codex = eval(
+        &path,
+        r#"local commands = remuda._butler_compaction_commands("codex", "GPT-5.6-Terra medium · repo")
+          local log = {}
+          remuda.type_text = function(_, text) log[#log + 1] = "type:" .. text end
+          remuda.key = function(_, key) log[#log + 1] = "key:" .. key end
+          for _, command in ipairs(commands) do remuda.type_text("fake-codex", command); remuda.key("fake-codex", "RET") end
+          return table.concat(log, "|")"#,
+    );
+    assert_eq!(
+        codex,
+        "type:/model gpt-6-luna|key:RET|type:/compact|key:RET|type:/model GPT-5.6-Terra medium|key:RET"
+    );
+    assert_eq!(
+        eval(&path, r#"local c = remuda._butler_compaction_commands("codex", "MODEL:GPT-6-Luna medium CTX:600000"); return table.concat(c, "|")"#),
+        "/compact"
+    );
+    assert_eq!(
+        eval(&path, r#"local c = remuda._butler_compaction_commands("claude", "MODEL:Sonnet-4.5 CTX:600000"); return table.concat(c, "|")"#),
+        "/compact"
+    );
+    assert_eq!(
+        eval(&path, r#"local c = remuda._butler_compaction_commands("codex", "MODEL:unknown CTX:600000"); return table.concat(c, "|")"#),
+        "/compact"
+    );
+    assert_eq!(
+        eval(&path, r#"local keys = remuda._butler_compaction_dialog("claude", "Select model"); return table.concat(keys, ",")"#),
+        "sonnet,RET"
+    );
+    assert_eq!(
+        eval(&path, r#"local keys = remuda._butler_compaction_dialog("codex", "This will invalidate the cache"); return table.concat(keys, ",")"#),
+        "y"
+    );
+    assert_eq!(
+        eval(&path, r#"return tostring(remuda._butler_compaction_dialog("codex", "unrecognized modal") == nil)"#),
+        "true"
+    );
+    let report = eval(
+        &path,
+        r#"local sent = ""
+          remuda._butler_send = function(_, _, text) sent = text end
+          remuda._butler_compaction_report_unknown("restore", "fake-codex", "Unknown popup\nPress 1")
+          return sent"#,
+    );
+    assert!(report.contains("stage restore") && report.contains("fake-codex"));
+    assert!(report.contains("Unknown popup\nPress 1"));
+    drop(daemon);
+}
+
+#[test]
+#[cfg(unix)]
+fn butler_codex_compaction_restores_its_isolated_config_snapshot_and_releases_fleet_lock() {
+    let dir = scratch_dir("butler-compaction-codex-config");
+    let codex_home = dir.join("codex-home");
+    std::fs::create_dir_all(&codex_home).expect("create isolated Codex home");
+    let config_file = codex_home.join("config.toml");
+    let original = "model = \"gpt-5.6-terra\"\nmodel_reasoning_effort = \"medium\"\n";
+    std::fs::write(&config_file, original).expect("seed isolated Codex config");
+    let (token_path, config_path) = butler_config(
+        &dir,
+        "compaction-codex-config",
+        "http://127.0.0.1:1",
+        "!room:example.org",
+        "@butler:example.org",
+        "",
+    );
+    let token_str = token_path.to_string_lossy().to_string();
+    let config_str = config_path.to_string_lossy().to_string();
+    let codex_home_str = codex_home.to_string_lossy().to_string();
+    let daemon = Daemon::spawn_with_env(
+        &dir,
+        &[
+            ("REMUDA_BUTLER_TOKEN", token_str.as_str()),
+            ("REMUDA_BUTLER_CONFIG", config_str.as_str()),
+            ("REMUDA_BUTLER_AGENT", "codex"),
+            ("CODEX_HOME", codex_home_str.as_str()),
+        ],
+    );
+    let path = daemon::socket_path_in(&dir, "s");
+    let trace_path = dir.join("codex-config-compaction.log");
+    eval(&path, "remuda._butler_compaction_interval = 0.05");
+    eval(&path, &format!("remuda._butler_compaction_trace_path = {}", lua_raw_string(&trace_path.to_string_lossy())));
+    eval(&path, r#"remuda._butler_argv = {"sh"}; remuda._butler_skip_relay = true"#);
+    let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    eval(
+        &path,
+        &format!(
+            r#"remuda.capture = function() return "GPT-5.6-Terra medium · repo CTX:600000" end
+              remuda.session = function() return {{ is_busy = false }} end
+              remuda.key = function() end
+              remuda.type_text = function(_, text)
+                local f = io.open({}, "wb")
+                if f then f:write('model = "gpt-6-luna"' .. string.char(10)); f:close() end
+                remuda._butler_command_log = (remuda._butler_command_log or "") .. text .. "|"
+              end"#,
+            lua_raw_string(&config_file.to_string_lossy())
+        ),
+    );
+    eval(&path, "remuda._butler_register_compaction_schedule()");
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let trace = std::fs::read_to_string(&trace_path).unwrap_or_default();
+        if trace.contains("\tsent\t") { break; }
+        assert!(Instant::now() < deadline, "Codex compaction did not start: {trace}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(std::fs::read_to_string(&config_file).unwrap().contains("gpt-6-luna"));
+    assert!(dir.join("remuda-compaction.lock").exists());
+    eval(&path, "remuda._butler_compaction_run.release()");
+    assert_eq!(std::fs::read_to_string(&config_file).unwrap(), original);
+    assert!(!dir.join("remuda-compaction.lock").exists());
+    assert_eq!(
+        eval(&path, "return remuda._butler_command_log"),
+        "/model gpt-6-luna|/compact|/model GPT-5.6-Terra medium|"
+    );
     drop(daemon);
 }
 
