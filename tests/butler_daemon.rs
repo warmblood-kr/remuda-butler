@@ -5197,7 +5197,7 @@ done
         (
             "fake-absent",
             "absent",
-            "CMD:/model sonnet\nCMD:/compact\nCMD:/model Sonnet\n",
+            "CMD:/model sonnet\nCMD:/compact\n",
         ),
         (
             "fake-option2",

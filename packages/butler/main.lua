@@ -2464,7 +2464,19 @@ function remuda._butler_compaction_tick(target_name, dry_run)
         return
       end
       compact_sent = true
-      request_restore()
+      watch({
+        { id = "compact-complete", match = function()
+          local current = remuda._butler_telemetry_for(agent)
+          local used = tonumber(current.context_used)
+          return used and ctx_before and used < ctx_before
+        end, action = function() request_restore() end },
+      }, { timeout = 45, unknown = is_unknown_dialog,
+        on_unknown = function(value)
+          register_unknown_dialog(value)
+          request_restore("unrecognized dialog after compaction: " .. tostring(value):sub(1, 180))
+        end,
+        on_timeout = function() request_restore("compaction context did not drop") end,
+        on_error = function(err) request_restore("compaction completion error: " .. tostring(err)) end }, true)
     end
     if agent.kind == "codex" then
       after_switch()

@@ -75,8 +75,9 @@ return {
     { name = "butler-reconcile", every = host._butler_reconcile_interval or 2, run = function()
       if host._butler_reconcile then host._butler_reconcile() end
     end },
-    { name = "butler-compaction", every = host._butler_compaction_interval or 45, run = function(state)
-      if state.compaction_enabled and host._butler_compaction_tick then host._butler_compaction_tick() end
+    { name = "butler-compaction", every = host._butler_compaction_interval or 45, run = function()
+      local state = host._butler_state or host._butler_compaction_state
+      if state and state.compaction_enabled and host._butler_compaction_tick then host._butler_compaction_tick() end
     end },
   },
   contributes = {
