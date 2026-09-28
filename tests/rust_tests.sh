@@ -51,4 +51,4 @@ echo "core $(git -C "$CORE_DIR" rev-parse --short HEAD), butler $(git -C "$REPO"
 cd "$CORE_DIR"
 cargo test -p remuda-native --test butler_mcp
 # a_fresh_daemon_* stay in core's daemon.rs; everything else matching is Butler's.
-cargo test -p remuda-native --test butler_daemon -- butler matrix_reply --skip a_fresh_daemon
+cargo test -p remuda-native --test butler_daemon -- butler matrix_reply

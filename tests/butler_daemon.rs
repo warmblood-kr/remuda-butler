@@ -5413,9 +5413,9 @@ fn a_fresh_daemon_auto_loads_the_user_config_and_registers_butler_with_no_human_
         std::thread::sleep(Duration::from_millis(50));
     };
 
-    // Restart leg. `-f`: a live butler session makes a bare `restart` refuse
-    // (see `restart_refuses_to_kill_a_live_session_without_being_told_twice`).
-    let out = remuda(&dir, &["-s", "s", "restart", "-f"]);
+    // Restart leg using the stop command available on the pinned core; a live
+    // butler session makes a bare stop refuse without `-f`.
+    let out = remuda(&dir, &["-s", "s", "stop", "-f"]);
     assert!(
         out.status.success(),
         "{}",
