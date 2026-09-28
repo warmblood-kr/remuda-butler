@@ -3130,6 +3130,32 @@ fn butler_mail_forwarded_read_state_is_per_inbox_and_replies_reach_the_original_
     assert_eq!(v[4], "threaded");
 }
 
+/// rename() replaces silently; an id collision must fail loudly instead of
+/// clobbering the earlier message (NOTES.md checklist #6, Maildir/nmh link()).
+#[test]
+fn butler_mail_refuses_to_overwrite_an_existing_message_on_an_id_collision() {
+    let dir = scratch_dir("butler-mail-collide");
+    let (root, f_inbox, _) = seeded_mail_root(&dir, REPLY_F);
+    std::fs::write(root.join("messages/message-3e8-1-lua_fixed.json"), "ORIGINAL").unwrap();
+    let path = scratch("butler-mail-collide");
+    let _daemon = daemon_at(&path);
+    let out = eval(
+        &path,
+        &format!(
+            r#"{}
+               local time, tmpname = os.time, os.tmpname
+               os.time, os.tmpname = function() return 1000 end, function() return "/tmp/lua_fixed" end
+               local ok, message, err = pcall(M.queue, B, F, "second")
+               os.time, os.tmpname = time, tmpname
+               return tostring(ok) .. "|" .. tostring(message) .. "|" .. tostring(err)"#,
+            reply_prelude(&root)
+        ),
+    );
+    assert!(out.starts_with("true|nil|") && out.contains("already exists"), "not refused loudly: {out}");
+    assert_eq!(std::fs::read_to_string(root.join("messages/message-3e8-1-lua_fixed.json")).unwrap(), "ORIGINAL");
+    assert!(!std::fs::read_to_string(&f_inbox).unwrap_or_default().contains("message-3e8-1-lua_fixed"), "a row was committed");
+}
+
 #[test]
 fn butler_mail_survives_a_fresh_lua_mailbox_and_remembers_reads() {
     let dir = scratch_dir("butler-mail-reload");
