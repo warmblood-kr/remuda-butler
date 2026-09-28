@@ -2004,7 +2004,7 @@ fn an_unpaced_flood_exercises_real_backpressure_and_the_child_blocks() {
     }
 }
 
-// --- packages/butler: the Matrix bridge's Python/bash helpers -------------
+// --- packages/butler: the Matrix bridge helpers --------------------------
 //
 // Everything below runs against a stub HTTP server of our own
 // (`tests/support/matrix_stub_server.py`), never a real Matrix homeserver.

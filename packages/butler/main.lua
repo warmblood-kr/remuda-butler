@@ -1,6 +1,7 @@
 -- remuda-butler: runs one Claude Code session, optionally bridged to Matrix
 -- and replying there via an MCP tool. See docs/design.md.
 
+-- TODO M2: remove this Python reply helper with the Matrix relay extraction.
 local REPLY_SRC = [==[
 set -euo pipefail
 
@@ -232,7 +233,7 @@ remuda._butler_compaction_reset_idle(remuda._butler_state or remuda._butler_comp
 -- `Daemon::spawn_with_env` unchanged. Mirrors install-butler.sh's own
 -- `${XDG_CONFIG_HOME:-$HOME/.config}/remuda/butler/{token,config}` exactly,
 -- kept in sync with install-butler.sh's own default by
--- scripts/check-butler-path-convention.py, which fails if the two diverge.
+-- scripts/check-butler-path-convention.lua, which fails if the two diverge.
 local function default_config_home()
   local xdg = os.getenv("XDG_CONFIG_HOME")
   if xdg and xdg ~= "" then
@@ -381,6 +382,7 @@ local function json_quote(s)
     :gsub('\r', '\\r'):gsub('\n', '\\n'):gsub('\t', '\\t') .. '"'
 end
 local function status_settings(path)
+  -- TODO core #213: remove this Python statusLine helper once the core JSON/stdin boundary is settled.
   local helper_path = path .. ".py"
   local settings_path = path .. ".settings.json"
   local helper = assert(io.open(helper_path, "w"))
@@ -734,8 +736,10 @@ remuda._butler_agent_support = {
 remuda.exec("butler/telemetry")
 remuda.exec("butler/agents/claudecode")
 remuda.exec("butler/agents/codex")
+remuda.exec("butler/prompt")
 local AGENT_BUILDERS = remuda._butler_agent_builders
 local TELEMETRY_ADAPTERS = remuda._butler_telemetry_adapters
+local PROMPT_DELIVERY = assert(remuda._butler_prompt_delivery)
 local BUILTIN_AGENT_BUILDERS = {}
 for kind, builder in pairs(AGENT_BUILDERS) do BUILTIN_AGENT_BUILDERS[kind] = builder end
 if not remuda.contribute then
@@ -1222,9 +1226,8 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
     -- Keep an immediate mail notice out of the child's first prompt until the
     -- delegated task has been submitted.
     bus.pending_tasks[actual] = true
-    -- Answer known startup modals (agents/*.lua) and type the task only once
-    -- the composer is ready; never blind-type into an unknown dialog.
     local startup = remuda._butler_agent_startup[kind] or {}
+    if kind == "codex" then
     local poke, confirm, attempts, settle, deferred = nil, nil, 0, 0, 0
     local update_waiting, waiting_for_update, update_deadline = false, false, 0
     local modal_wait_started, update_timeout_reported, update_version = nil, false, nil
@@ -1533,6 +1536,33 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       end
       if attempts >= (remuda._butler_task_poke_attempts or 60) then give_up("") end
     end })
+    else
+    PROMPT_DELIVERY.schedule(remuda, kind, actual, name, parent, task, {
+      ready = startup.ready,
+      modals = startup.modals,
+      allowed = function(retrying)
+        if retrying then return remuda._butler_task_retry_policy(actual) end
+        return remuda._butler_notify_policy(actual)
+      end,
+      human_active = function() return remuda._butler_human_active(actual) end,
+      empty = function(screen)
+        return remuda._butler_prompt_is_empty(kind, screen)
+      end,
+      timeout = remuda._butler_task_poke_deferrals or 600,
+      ready_timeout = remuda._butler_task_poke_attempts or 60,
+      submit_timeout = remuda._butler_submit_timeout or 300,
+      on_done = function(delivered, reason)
+        bus.pending_tasks[actual] = nil
+        if delivered then return end
+        local detail = reason or "delivery could not be verified"
+        if detail == "submit" then detail = "it was typed but not submitted" end
+        _butler_session_trace("task_poke_timeout", actual .. " " .. detail)
+        pcall(remuda._butler_send, "butler", parent or "butler", "Task for " .. actual
+          .. " was not delivered: " .. detail
+          .. ". Resend it with `remuda butler send " .. actual .. " TASK` once it is.")
+      end,
+    })
+    end
   end
   return actual
   end
@@ -1607,19 +1637,39 @@ local NOTICE_STABLE_SECONDS = 3
 -- plain text, so a dim ghost suggestion reads as NON-EMPTY and defers (#137).
 local PROMPT_GLYPHS = { "❯", ">", "›" }
 function remuda._butler_prompt_is_empty(kind, screen)
-  local text
+  local text, prompt_at
   -- Claude draws its empty composer as '❯' + NO-BREAK SPACE; Lua's %s
   -- misses U+00A0, so fold it to a space before parsing (every kind).
   screen = screen:gsub("\194\160", " ")
-  for line in (screen .. "\n"):gmatch("(.-)\n") do
+  local lines = {}
+  for line in (screen .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
+  for index, line in ipairs(lines) do
     local rest = line:gsub("^%s+", "")
     if rest:sub(1, 3) == "│" then rest = rest:sub(4):gsub("^%s+", "") end
     for _, glyph in ipairs(PROMPT_GLYPHS) do
-      if rest:sub(1, #glyph) == glyph then text = rest:sub(#glyph + 1) break end
+      if rest:sub(1, #glyph) == glyph then
+        text, prompt_at = rest:sub(#glyph + 1), index
+        break
+      end
     end
   end
   if not text then return "UNPARSEABLE", "" end
   text = text:gsub("│%s*$", ""):match("^%s*(.-)%s*$")
+  local parts = { text }
+  for index = prompt_at + 1, #lines do
+    local rest = lines[index]:gsub("^%s+", "")
+    if rest:sub(1, 3) == "╰" or rest:sub(1, 3) == "└" or rest:sub(1, 3) == "─" then break end
+    if rest:match("^%? for shortcuts")
+        or (kind == "codex" and (rest:lower():find("context left", 1, true)
+        or rest:match("^[^%s]+%s+[^%s]+%s+·"))) then
+      break
+    end
+    if kind == "claude" and rest:sub(1, 3) == "│" then
+      rest = rest:sub(4):gsub("│%s*$", "")
+    end
+    parts[#parts + 1] = rest
+  end
+  text = table.concat(parts, "\n"):match("^%s*(.-)%s*$")
   if text == "" then return "EMPTY", text end
   local startup = remuda._butler_agent_startup[kind] or {}
   for _, placeholder in ipairs(startup.placeholders or {}) do
@@ -1721,6 +1771,56 @@ startup_action_safe = function(session, now)
     end
   end
   return false
+end
+
+-- A Return retry happens while the delegated task is still in the composer,
+-- so the notice policy's empty-composer check cannot be reused. Keep its human
+-- pause guard: use human_idle when available, otherwise require a stable screen.
+bus.task_retry_screens = bus.task_retry_screens or {}
+function remuda._butler_task_retry_policy(session, now)
+  now = now or os.time()
+  local row
+  for _, candidate in ipairs(remuda.ls()) do
+    if candidate.name == session then row = candidate end
+  end
+  if not row or not row.alive then return false end
+  if not row.attached then return true end
+  if row.human_idle ~= nil then
+    return row.human_idle >= (remuda._butler_notice_human_idle or 10)
+  end
+  local captured, screen = pcall(remuda.capture, session)
+  if not captured then return false end
+  local seen = bus.task_retry_screens[session] or {}
+  bus.task_retry_screens[session] = seen
+  if seen.screen ~= screen then
+    seen.screen, seen.since = screen, now
+    return false
+  end
+  return now - seen.since >= NOTICE_STABLE_SECONDS
+end
+
+-- Some agent builds hide their idle marker while a person types. Keep those
+-- waits on the human clock, not the bounded startup-readiness clock.
+bus.human_activity_screens = bus.human_activity_screens or {}
+function remuda._butler_human_active(session, now)
+  now = now or os.time()
+  local row
+  for _, candidate in ipairs(remuda.ls()) do
+    if candidate.name == session then row = candidate end
+  end
+  if not row or not row.alive or not row.attached then return false end
+  if row.human_idle ~= nil then
+    return row.human_idle < (remuda._butler_notice_human_idle or 10)
+  end
+  local captured, screen = pcall(remuda.capture, session)
+  if not captured then return true end
+  local seen = bus.human_activity_screens[session] or {}
+  bus.human_activity_screens[session] = seen
+  if seen.screen ~= screen then
+    seen.screen, seen.since = screen, now
+    return true
+  end
+  return now - seen.since < NOTICE_STABLE_SECONDS
 end
 
 -- `_butler_notify` is the seam: queue NOTICE for ALIAS and type it (with any
