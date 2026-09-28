@@ -11,7 +11,8 @@ T=$(mktemp -d /tmp/brl.XXXXXX)
 S=brl
 # This run's own fake-process durations: a global `sleep 10000[12]` pgrep saw
 # every concurrent run's sessions and failed the pid check at random.
-ID=$((RANDOM % 90000 + 10000))
+# A caller that cleans up after this run passes its id (remuda#148).
+ID=${LIVE_RELOAD_ID:-$((RANDOM % 90000 + 10000))}
 export REMUDA_RUNTIME_DIR=$T/run XDG_DATA_HOME=$T/data XDG_CONFIG_HOME=$T/config
 export HOME=$T/home REMUDA_BUTLER_PROJECT_HOME=$T/projects REMUDA_BUTLER_SERVER=$S
 unset REMUDA_BUTLER_TOKEN REMUDA_BUTLER_CONFIG
