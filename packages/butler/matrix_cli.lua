@@ -16,7 +16,7 @@ local function quote(value)
     value = '"' .. value:gsub('(\\*)"', '%1%1\\"'):gsub("(\\+)$", "%1%1") .. '"'
     return value
   end
-  return "'" .. value:gsub("'", "'\\"'\\"'") .. "'"
+  return "'" .. value:gsub("'", [['"'"']]) .. "'"
 end
 
 local function paths()
@@ -55,6 +55,10 @@ local function run(verb, values, json_mode)
   os.remove(stderr_path)
   output = output:gsub("%s+$", "")
   stderr = stderr:gsub("%s+$", "")
+  if not ok and (stderr:find("not found", 1, true) or stderr:find("not recognized", 1, true)) then
+    error("Python 3 is required for Butler Matrix verbs; install Python 3"
+      .. (windows and " with the py launcher" or "") .. ". " .. stderr, 0)
+  end
   if not ok then error(stderr ~= "" and stderr or ("Matrix " .. verb .. " failed (" .. tostring(code) .. ")"), 0) end
   return output
 end
@@ -89,7 +93,8 @@ function matrix.queue_send(opts)
   local values = {}
   if opts.room then values[#values + 1] = "--room"; values[#values + 1] = opts.room end
   values[#values + 1] = opts.text
-  remuda.process({ argv = argv_for("send", values, false), on_exit = "butler-matrix-reply-exit" })
+  remuda.process({ argv = argv_for("send", values, false), on_line = "butler-matrix-reply-line",
+    on_exit = "butler-matrix-reply-exit" })
   return "queued"
 end
 
@@ -128,7 +133,8 @@ function matrix.redact(opts)
   return run("redact", values)
 end
 
-local function operator_only(verb, opts, agent)
+local function operator_only(verb, opts, caller)
+  local agent = remuda._butler_current_agent and remuda._butler_current_agent(caller)
   if agent then
     error("matrix " .. verb .. " is operator-only", 0)
   end
@@ -137,7 +143,7 @@ local function operator_only(verb, opts, agent)
   return run(verb, { opts.room }, opts.json)
 end
 
-function matrix.join(opts, agent) return operator_only("join", opts, agent) end
-function matrix.leave(opts, agent) return operator_only("leave", opts, agent) end
+function matrix.join(opts, caller) return operator_only("join", opts, caller) end
+function matrix.leave(opts, caller) return operator_only("leave", opts, caller) end
 
 return matrix

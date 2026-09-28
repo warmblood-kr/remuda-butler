@@ -96,7 +96,10 @@ def upload(client, file_path, room=None):
     if size > MAX_UPLOAD_BYTES:
         raise MatrixError("upload exceeds 20 MiB limit")
     media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-    data = path.read_bytes()
+    with path.open("rb") as source:
+        data = source.read(MAX_UPLOAD_BYTES + 1)
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise MatrixError("upload exceeds 20 MiB limit")
     query = urllib.parse.urlencode({"filename": path.name})
     _, _, raw = client.request_raw("POST", "/_matrix/media/v3/upload?" + query,
                                    data, media_type, room=room)
