@@ -10,7 +10,7 @@ Two independent two-way agreements live in this one file, since both share
 fallback shape:
 
 1. `install/install-butler.sh`'s `config_home`/`token_file`/`config_file` defaults
-   and `packages/butler/init.lua`'s `default_config_home()` + `resolve_path()`
+   and `packages/butler/main.lua`'s `default_config_home()` + `resolve_path()`
    -- one shell, one Lua -- both implement
    `${XDG_CONFIG_HOME:-$HOME/.config}/remuda/butler/{token,config}`.
 2. If `REMUDA_CORE_ROOT` is supplied, `install/install-butler.sh`'s
@@ -37,7 +37,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 INSTALLER = ROOT / "install" / "install-butler.sh"
-INIT_LUA = ROOT / "packages" / "butler" / "init.lua"
+BUTLER_MAIN = ROOT / "packages" / "butler" / "main.lua"
 CORE_ROOT = os.environ.get("REMUDA_CORE_ROOT")
 DAEMON_RS = (
     Path(CORE_ROOT).expanduser() / "native" / "src" / "daemon.rs"
@@ -45,13 +45,13 @@ DAEMON_RS = (
     else None
 )
 
-for path in (INSTALLER, INIT_LUA):
+for path in (INSTALLER, BUTLER_MAIN):
     if not path.is_file():
         print(f"missing {path.relative_to(ROOT)}", file=sys.stderr)
         sys.exit(1)
 
 installer = INSTALLER.read_text(encoding="utf-8")
-init_lua = INIT_LUA.read_text(encoding="utf-8")
+butler_main = BUTLER_MAIN.read_text(encoding="utf-8")
 
 # Shell side: config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
 sh_fallback = re.search(r'config_home="\$\{XDG_CONFIG_HOME:-\$HOME(/[^}]*)\}"', installer)
@@ -61,11 +61,11 @@ sh_fallback = re.search(r'config_home="\$\{XDG_CONFIG_HOME:-\$HOME(/[^}]*)\}"', 
 sh_segments = set(re.findall(r"\$config_home(/remuda/butler/\w+)\b", installer))
 
 # Lua side: `return home .. "/.config"`, the last line of default_config_home().
-lua_fallback = re.search(r'os\.getenv\("HOME"\).*?home \.\. "([^"]*)"', init_lua, re.S)
+lua_fallback = re.search(r'os\.getenv\("HOME"\).*?home \.\. "([^"]*)"', butler_main, re.S)
 # Lua side: `path = config_home .. "/remuda/butler/" .. filename` in resolve_path().
-lua_join = re.search(r'config_home \.\. "(/remuda/butler/)" \.\. filename', init_lua)
+lua_join = re.search(r'config_home \.\. "(/remuda/butler/)" \.\. filename', butler_main)
 # Lua side: the two resolve_path("REMUDA_BUTLER_...", "<filename>", ...) call sites.
-lua_filenames = re.findall(r'resolve_path\("REMUDA_BUTLER_\w+",\s*"(\w+)"', init_lua)
+lua_filenames = re.findall(r'resolve_path\("REMUDA_BUTLER_\w+",\s*"(\w+)"', butler_main)
 
 problems: list[str] = []
 
@@ -83,18 +83,18 @@ if not sh_segments:
     )
 if not lua_fallback:
     problems.append(
-        f"{INIT_LUA.name}: could not find default_config_home()'s HOME fallback "
+        f"{BUTLER_MAIN.name}: could not find default_config_home()'s HOME fallback "
         "-- parser or convention changed"
     )
 if not lua_join:
     problems.append(
-        f'{INIT_LUA.name}: could not find resolve_path()\'s '
+        f'{BUTLER_MAIN.name}: could not find resolve_path()\'s '
         'config_home .. "/remuda/butler/" .. filename join -- parser or '
         "convention changed"
     )
 if not lua_filenames:
     problems.append(
-        f"{INIT_LUA.name}: found no resolve_path(...) call site naming a "
+        f"{BUTLER_MAIN.name}: found no resolve_path(...) call site naming a "
         "filename -- parser or convention changed"
     )
 
@@ -109,23 +109,23 @@ lua_segments = {lua_join.group(1) + name for name in lua_filenames}
 if sh_fallback.group(1) != lua_fallback.group(1):
     problems.append(
         f"HOME fallback diverged: install-butler.sh uses $HOME{sh_fallback.group(1)}, "
-        f"init.lua's default_config_home() uses $HOME{lua_fallback.group(1)}"
+        f"main.lua's default_config_home() uses $HOME{lua_fallback.group(1)}"
     )
 if sh_segments != lua_segments:
     problems.append(
         f"remuda/butler path segments diverged: install-butler.sh has "
-        f"{sorted(sh_segments)}, init.lua has {sorted(lua_segments)}"
+        f"{sorted(sh_segments)}, main.lua has {sorted(lua_segments)}"
     )
 
 if problems:
     print(
-        "install-butler.sh and init.lua no longer agree on the butler path convention:\n",
+        "install-butler.sh and main.lua no longer agree on the butler path convention:\n",
         file=sys.stderr,
     )
     for p in problems:
         print(f"  - {p}", file=sys.stderr)
     print(
-        "\ninit.lua's default lookup and install-butler.sh's canonical-copy target "
+        "\nmain.lua's default lookup and install-butler.sh's canonical-copy target "
         "must resolve to the same path, or the daemon will never find what the "
         "installer wrote there -- fix whichever side changed.",
         file=sys.stderr,
@@ -133,7 +133,7 @@ if problems:
     sys.exit(1)
 
 print(
-    f"ok — install-butler.sh and init.lua agree: $HOME{sh_fallback.group(1)} "
+    f"ok — install-butler.sh and main.lua agree: $HOME{sh_fallback.group(1)} "
     f"fallback, segments {sorted(sh_segments)}"
 )
 

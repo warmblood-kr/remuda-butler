@@ -29,33 +29,56 @@ local function notify(remuda, parent, name, reason)
   end
 end
 
-local function schedule(remuda, kind, actual, name, parent, task)
+local function schedule(remuda, kind, actual, name, parent, task, options)
+  options = options or {}
   local poll, ticks, attempts, verify_ticks = nil, 0, 0, 0
+  local function finish(ok, reason)
+    remuda.cancel(poll)
+    if options.on_done then
+      pcall(options.on_done, ok, reason)
+    elseif not ok then
+      notify(remuda, parent, name, reason)
+    end
+  end
   poll = remuda.schedule({ every = 0.5, run = function()
     ticks = ticks + 1
     local captured, screen = pcall(remuda.capture, actual)
     if not captured then
-      remuda.cancel(poll)
-      notify(remuda, parent, name, "could not capture the agent screen")
+      finish(false, "could not capture the agent screen")
       return
     end
 
     if attempts == 0 then
-      if ready(kind, screen) then
+      local is_ready = ready(kind, screen)
+      if options.ready then
+        local checked, result = pcall(options.ready, screen)
+        is_ready = checked and result == true
+      end
+      if is_ready then
+        local allowed = true
+        if options.allowed then
+          local checked, result = pcall(options.allowed)
+          allowed = checked and result == true
+        end
+        if not allowed then
+          if ticks >= (options.timeout or 60) then
+            finish(false, "the composer remained busy or attached")
+          end
+          return
+        end
         attempts = 1
         verify_ticks = 0
         -- One atomic paste after the agent has enabled its composer. The
         -- longer settle also ensures Codex sees Return as a separate submit.
         pcall(remuda.type_text, actual, task, 2)
-      elseif ticks >= 60 then
-        remuda.cancel(poll)
-        notify(remuda, parent, name, "the composer never became ready")
+      elseif ticks >= (options.timeout or 60) then
+        finish(false, "the composer never became ready")
       end
       return
     end
 
     if prompt_start_visible(screen, task) then
-      remuda.cancel(poll)
+      finish(true)
       return
     end
 
@@ -67,8 +90,7 @@ local function schedule(remuda, kind, actual, name, parent, task)
       verify_ticks = 0
       pcall(remuda.type_text, actual, task, 2)
     elseif verify_ticks >= 12 then
-      remuda.cancel(poll)
-      notify(remuda, parent, name, "the START marker remained absent after two attempts")
+      finish(false, "the START marker remained absent after two attempts")
     end
   end })
   return poll

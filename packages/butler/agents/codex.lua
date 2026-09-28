@@ -16,5 +16,17 @@ telemetry.codex = {
 }
 
 builders.codex = function(spec)
-  return { "remuda", "_codex_tui", "--status", spec.telemetry.status_path }
+  local argv = { "remuda", "_codex_tui", "--status", spec.telemetry.status_path }
+  if spec.model and spec.model ~= "" then argv[#argv + 1] = "--model"; argv[#argv + 1] = spec.model end
+  return argv
 end
+
+remuda._butler_agent_startup.codex = {
+  ready = function(screen) return screen:find("Ask Codex", 1, true) ~= nil end,
+  -- #29: the empty composer's fixed placeholder (codex 0.156.0), exact match.
+  placeholders = { "Ask Codex to do anything" },
+  modals = {
+    { match = "Skip until next version", keys = { "2" } }, -- update prompt: 2. Skip (not persisted)
+    { match = "Trust this folder?", keys = { "1" } }, -- 1. Trust and continue
+  },
+}

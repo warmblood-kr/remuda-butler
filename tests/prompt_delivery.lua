@@ -6,9 +6,11 @@
 local prompt_module = "packages/butler/prompt.lua"
 _G.remuda = {}
 local M = dofile(prompt_module)
-local init = assert(io.open("packages/butler/init.lua", "r")):read("*a")
-assert(init:find('remuda.exec("butler/prompt")', 1, true), "Butler does not load prompt delivery")
-assert(init:find("PROMPT_DELIVERY.schedule(remuda, kind, actual, name, parent, task)", 1, true),
+local main_file = assert(io.open("packages/butler/main.lua", "r"))
+local main = main_file:read("*a")
+main_file:close()
+assert(main:find('remuda.exec("butler/prompt")', 1, true), "Butler does not load prompt delivery")
+assert(main:find("PROMPT_DELIVERY.schedule(remuda, kind, actual, name, parent, task", 1, true),
   "agent launch bypasses the verified prompt delivery path")
 
 local function count(text, needle)
@@ -29,7 +31,7 @@ local function exercise(kind, drop_submissions)
     sends = 0,
     drop_submissions = drop_submissions,
   }
-  local ready_marker = kind == "codex" and "Ask Codex" or "❯"
+  local ready_marker = kind == "codex" and "Ask Codex" or "─\n❯"
   local fake = {}
   function fake.schedule(spec)
     state.callback = spec.run
@@ -66,7 +68,13 @@ local function exercise(kind, drop_submissions)
   ) .. "\nEND-59-" .. kind .. "-marker"
   assert(#task >= 1600, "regression task must exercise a long first prompt")
 
-  M.schedule(fake, kind, "member-session", "member", "leader", task)
+  M.schedule(fake, kind, "member-session", "member", "leader", task, {
+    ready = function(screen)
+      local marker = kind == "codex" and "Ask Codex" or "─\n❯"
+      return screen:find(marker, 1, true) ~= nil
+    end,
+    allowed = function() return true end,
+  })
   for tick = 1, 120 do
     state.tick = tick
     if not state.cancelled then state.callback() end

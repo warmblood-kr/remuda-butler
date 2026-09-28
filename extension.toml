@@ -1,7 +1,8 @@
 name = "butler"
 entry = "packages/butler/init.lua"
+lifecycle = "remuda-module-v1"
 api = "remuda-lua-v1"
-command = "remuda-butler"
+command = "butler"
 
 # This manifest describes the target independent-install contract. Resolver
 # support and compatibility validation remain responsibilities of Remuda core.

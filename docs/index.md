@@ -13,6 +13,14 @@ sessions, and MCP transport.
 [Install Butler](#install) · [Read the migration notes](https://github.com/warmblood-kr/remuda-butler/blob/main/BUTLER_MIGRATION.md) ·
 [View the source on GitHub](https://github.com/warmblood-kr/remuda-butler)
 
+## Cascading spawn
+
+![A terminal session tree: butler has spawned a lead session, which has in
+turn spawned several of its own worker sessions, shown nested in the
+sidebar](remuda-cascading-spawn.png)
+
+The butler spawns a lead; a worker can spawn its own workers (cascading).
+
 ## Install
 
 Install Remuda first, then install Butler as an extension:
@@ -23,6 +31,10 @@ curl -fsSL https://warmblood-kr.github.io/remuda/install.sh \
 remuda mod install warmblood-kr/remuda-butler
 remuda exec butler
 ```
+
+The launch command returns while readiness is still being checked. Use
+`remuda butler status` to inspect the result: exit 0 means ready, exit 75 means
+the readiness chain is still running, and exit 1 means every candidate failed.
 
 The installer also supports the optional service setup:
 
@@ -54,6 +66,28 @@ remuda butler topic delegate docgen "build the documentation site"
 remuda butler inbox
 remuda butler send-to-leader "work is complete"
 ```
+
+`launch`, `topic new`, and `topic delegate` take `--model M` to pick the
+member's model (e.g. `remuda butler topic delegate docgen --agent codex
+--model gpt-5.5 "build the documentation site"`); without it the agent uses its
+own default. The MCP `butler_launch` and `butler_delegate` tools take `model`.
+
+Every Butler-managed agent receives `REMUDA_BUTLER_AGENT_ID` and, when it has
+one, `REMUDA_BUTLER_LEADER_ID`. Therefore agents normally use the short forms:
+
+```sh
+remuda butler inbox
+remuda butler send reviewer "please check the latest patch"
+remuda butler send-to-leader "review complete: no blockers"
+```
+
+The sender is inferred from the calling shell's environment; quote the
+message for `send`, since `remuda butler send FROM TO MESSAGE...` (what an
+unquoted multi-word message parses as) is the operator form for sending a note on another
+session's behalf. The short forms need a Remuda core that forwards the caller's
+`REMUDA_*` variables to mod commands (warmblood-kr/remuda#95); on an older
+core, pass the name explicitly (`remuda butler inbox "$REMUDA_BUTLER_AGENT_ID"`)
+or use the MCP `butler_*` tools.
 
 ### Optional Matrix bridge
 
