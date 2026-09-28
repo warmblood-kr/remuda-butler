@@ -127,27 +127,32 @@ class Client:
             return urllib.request.build_opener(urllib.request.HTTPSHandler(context=context))
         return urllib.request.build_opener()
 
-    def request(self, method, path, body=None, room=None):
+    def request_raw(self, method, path, data, content_type, room=None):
+        """Make one authenticated request and preserve its response bytes."""
         if room is not None and room != self.room:
             raise MatrixError("room is outside the configured Matrix allowlist")
         url = urllib.parse.urljoin(self.base + "/", path.lstrip("/"))
-        data = None if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8")
         headers = {"Authorization": "Bearer " + self.token, "Accept": "application/json"}
-        if data is not None:
-            headers["Content-Type"] = "application/json"
+        if content_type:
+            headers["Content-Type"] = content_type
         self._rate_limit()
         req = urllib.request.Request(url, data=data, headers=headers, method=method.upper())
         try:
             with self._opener().open(req, timeout=30) as response:
-                raw = response.read(1024 * 1024 + 1)
-                if len(raw) > 1024 * 1024:
-                    raise MatrixError("Matrix response exceeded 1 MiB")
-                return json.loads(raw.decode("utf-8")) if raw else {}
+                return response.status, dict(response.headers.items()), response.read()
         except urllib.error.HTTPError as exc:
             raw = exc.read(4096).decode("utf-8", "replace")
             raise MatrixError("Matrix HTTP %d: %s" % (exc.code, raw)) from exc
         except (urllib.error.URLError, TimeoutError, ssl.SSLError, OSError) as exc:
             raise MatrixError("Matrix request failed: %s" % exc) from exc
+
+    def request(self, method, path, body=None, room=None):
+        data = None if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8")
+        _, _, raw = self.request_raw(
+            method, path, data, "application/json" if data is not None else None, room=room)
+        if len(raw) > 1024 * 1024:
+            raise MatrixError("Matrix response exceeded 1 MiB")
+        return json.loads(raw.decode("utf-8")) if raw else {}
 
     def get(self, path, params=None, room=None):
         if params:
