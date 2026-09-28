@@ -95,6 +95,18 @@ class ButlerMatrixCliTests(unittest.TestCase):
         self.assertIn("Sent 1", output.getvalue())
         self.assert_authenticated()
 
+    def test_butler_matrix_reply_cli_preserves_leading_dash_text(self):
+        output = io.StringIO()
+        for value in ("--json", "-", "-h"):
+            argv = [str(self.token), str(self.config), str(self.state), "reply", "--", "$event", value]
+            with redirect_stdout(output):
+                matrix_cli.main(argv)
+        bodies = self.put_bodies()
+        self.assertEqual([row["body"] for row in bodies], ["--json", "-", "-h"])
+        self.assertTrue(all(row["m.relates_to"]["m.in_reply_to"]["event_id"] == "$event"
+                            for row in bodies))
+        self.assert_authenticated()
+
     def test_butler_matrix_send_rejects_empty_text(self):
         with self.assertRaisesRegex(MatrixError, "must not be empty"):
             matrix_cli.send(self.client, "", self.room)
