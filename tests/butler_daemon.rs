@@ -3156,6 +3156,39 @@ fn butler_mail_refuses_to_overwrite_an_existing_message_on_an_id_collision() {
     assert!(!std::fs::read_to_string(&f_inbox).unwrap_or_default().contains("message-3e8-1-lua_fixed"), "a row was committed");
 }
 
+/// Only an explicit operator skips the delivered check; an id-less caller
+/// (an unknown MCP client) is refused and writes nothing (review of #39).
+#[test]
+fn butler_mail_an_unidentified_caller_cannot_reply_or_forward_but_the_operator_can() {
+    let dir = scratch_dir("butler-mail-authz");
+    let (root, _, _) = seeded_mail_root(&dir, REPLY_F);
+    let path = scratch("butler-mail-authz");
+    let _daemon = daemon_at(&path);
+    let out = eval(
+        &path,
+        &format!(
+            r#"{}
+               local W = {{ host = "local", id = "{REPLY_W}", alias = "worker", session = "worker" }}
+               local OUT = {{ host = "local", id = "", alias = "outside", session = "outside" }}
+               local a = assert(M.queue(B, F, "secret"))
+               local r1, e1 = M.forward(OUT, a.id, W)
+               local r2, e2 = M.reply(OUT, a.id, "x")
+               local w_rows = M.unread(W.id)
+               local op = M.reply({{ host = "local", id = "", alias = "operator", session = "operator" }}, a.id, "from op", true)
+               return table.concat({{ tostring(r1), tostring(e1), tostring(r2), tostring(e2), tostring(w_rows),
+                 op and op.to[1].alias or "refused" }}, "\n")"#,
+            reply_prelude(&root)
+        ),
+    );
+    let v: Vec<&str> = out.lines().collect();
+    assert_eq!(v[0], "nil", "an unidentified forward went through: {out}");
+    assert!(v[1].contains("unknown caller"), "{out}");
+    assert_eq!(v[2], "nil", "an unidentified reply went through: {out}");
+    assert!(v[3].contains("unknown caller"), "{out}");
+    assert_eq!(v[4], "0", "nothing reached the target");
+    assert_eq!(v[5], "butler", "the explicit operator may still reply");
+}
+
 #[test]
 fn butler_mail_survives_a_fresh_lua_mailbox_and_remembers_reads() {
     let dir = scratch_dir("butler-mail-reload");
