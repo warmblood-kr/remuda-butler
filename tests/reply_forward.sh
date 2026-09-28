@@ -40,7 +40,7 @@ ROOT=$(lua 'return remuda._butler_bus.agents.butler.id')
 M1=$(lua 'return remuda._butler_bus.agents.m1.id')
 M2=$(lua 'return remuda._butler_bus.agents.m2.id')
 
-# Seed a persisted pre-ULID message before the first inbox read.
+# Seed a persisted pre-ULID message before the recipient's inbox is loaded.
 component() { printf '%s' "$1" | od -An -tx1 | tr -d ' \n'; }
 M1_ROWS="$XDG_DATA_HOME/remuda/butler/mail/inboxes/$(component "$M1").jsonl"
 mkdir -p "$(dirname "$M1_ROWS")" "$XDG_DATA_HOME/remuda/butler/mail/messages" "$XDG_DATA_HOME/remuda/butler/mail/objects"
@@ -48,6 +48,13 @@ printf '{"message_id":"message-legacy"}\n' >"$M1_ROWS"
 printf '{"id":"message-legacy","from":{"host":"local","id":"%s","alias":"butler","session":"butler"},"subject":"Legacy","body":{"object_id":"object-legacy"}}\n' "$ROOT" \
   >"$XDG_DATA_HOME/remuda/butler/mail/messages/message-legacy.json"
 printf 'legacy body' >"$XDG_DATA_HOME/remuda/butler/mail/objects/object-legacy"
+# Launching m1 already loaded its inbox for the welcome message; invalidate
+# that in-memory snapshot so the following read picks up the disk-seeded row.
+lua "remuda._butler_bus.mail_loaded['$M1'] = nil" >/dev/null
+
+M1_INBOX=$(as "$M1" inbox)
+[[ $M1_INBOX == *"message-legacy"* && $M1_INBOX == *"Legacy"* ]] || \
+  fail "persisted old-format message did not appear in inbox: $M1_INBOX"
 
 SENT=$(as "$ROOT" send m1 "the plan")
 ID=$(printf '%s\n' "$SENT" | sed -E 's/^queued ([^ ]+).*/\1/')
