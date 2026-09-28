@@ -40,7 +40,7 @@ start_daemon() {
   "$REMUDA_BIN" -s "$SERVER" daemon >"$INSTANCE/daemon.log" 2>&1 &
   DAEMON_PID=$!
   for _ in $(seq 100); do
-    if "$REMUDA_BIN" -s "$SERVER" ls >/dev/null 2>&1; then return; fi
+    if [ -S "$SOCKET" ] && "$REMUDA_BIN" -s "$SERVER" ls >/dev/null 2>&1; then return; fi
     if ! kill -0 "$DAEMON_PID" >/dev/null 2>&1; then cat "$INSTANCE/daemon.log" >&2; fail "private daemon exited"; fi
     sleep 0.1
   done

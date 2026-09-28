@@ -1,6 +1,7 @@
 -- remuda-butler: runs one Claude Code session, optionally bridged to Matrix
 -- and replying there via an MCP tool. See docs/design.md.
 
+-- TODO M2: remove this Python reply helper with the Matrix relay extraction.
 local REPLY_SRC = [==[
 set -euo pipefail
 

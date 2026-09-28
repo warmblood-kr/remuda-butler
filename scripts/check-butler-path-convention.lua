@@ -46,6 +46,12 @@ local function fail(lines, heading)
   for _, line in ipairs(lines) do io.stderr:write("  - ", line, "\n") end
 end
 
+local standalone = arg and arg[0] and arg[0]:match("check%-butler%-path%-convention%.lua$") ~= nil
+local function failed()
+  if standalone then os.exit(1) end
+  return false
+end
+
 local installer, main = read(installer_path), read(main_path)
 for _, item in ipairs({ { installer_path, installer }, { main_path, main } }) do
   if not item[2] then
@@ -61,7 +67,7 @@ if sh_start then
   local value_end = installer:find("}", value_start, true)
   if value_end then sh_fallback = installer:sub(value_start, value_end - 1) end
 end
-local sh_segments = unique_matches(installer, '%$config_home(/remuda/butler/%w+)')
+local sh_segments = unique_matches(installer, '%$config_home(/remuda/butler/[%w_]+)')
 local lua_fallback = main:match('os%.getenv%("HOME"%).-home%s*%.%.%s*"([^"]*)"')
 local lua_join = main:match('config_home%s*%.%.%s*"(/remuda/butler/)"%s*%.%.%s*filename')
 local lua_filenames = {}
@@ -87,7 +93,7 @@ if not next(lua_filenames) then
 end
 if #problems > 0 then
   fail(problems, "could not extract the path convention from one or both sides:")
-  return false
+  return failed()
 end
 
 local lua_segments = {}
@@ -102,7 +108,7 @@ end
 if #problems > 0 then
   fail(problems, "install-butler.sh and main.lua no longer agree on the butler path convention:")
   io.stderr:write("\nmain.lua's default lookup and install-butler.sh's canonical-copy target must resolve to the same path, or the daemon will never find what the installer wrote there -- fix whichever side changed.\n")
-  return false
+  return failed()
 end
 io.stdout:write("ok — install-butler.sh and main.lua agree: $HOME", sh_fallback, " fallback, segments ", show(sh_list), "\n")
 
@@ -123,7 +129,7 @@ if not rust_fallback then problems2[#problems2 + 1] = 'daemon.rs: could not find
 if #rust_segments == 0 then problems2[#problems2 + 1] = 'daemon.rs: could not find user_config_path()\'s config_home.join("remuda").join("init.lua") -- parser or convention changed' end
 if #problems2 > 0 then
   fail(problems2, "could not extract the init.lua path convention from one or both sides:")
-  return false
+  return failed()
 end
 local rust_init_target = "/" .. rust_segments[1]
 local rust_home = "/" .. rust_fallback

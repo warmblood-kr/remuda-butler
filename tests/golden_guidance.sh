@@ -14,7 +14,7 @@
 #   REMUDA_BIN=~/.local/bin/remuda tests/golden_guidance.sh
 #   GOLDEN_UPDATE=1 tests/golden_guidance.sh  # a DELIBERATE guidance change: rewrite
 #                                             # tests/golden/ and commit the diff with it
-# Needs: bash, git, awk, luajit, and cargo when REMUDA_BIN is unset.
+# Needs: bash, git, awk, and cargo when REMUDA_BIN is unset.
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 GOLDEN=$REPO/tests/golden
@@ -77,7 +77,7 @@ wait_welcome() {
   return 1
 }
 
-R -e "if not dofile('$REPO/scripts/check-butler-path-convention.lua') then error('path convention check failed', 0) end" >/dev/null
+R -e "if not dofile('$REPO/scripts/check-butler-path-convention.lua') then error('path convention check failed', 0) end"
 
 R -e 'remuda._butler_argv = {"sh", "-c", "while :; do sleep 1; done"}' >/dev/null   # root session: no agent
 R butler --headless >/dev/null

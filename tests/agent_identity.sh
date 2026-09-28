@@ -48,7 +48,7 @@ start_private_daemon() {
   "$REMUDA_BIN" -s "$SERVER" daemon >"$INSTANCE/daemon.log" 2>&1 &
   DAEMON_PID=$!
   ATTEMPT=0
-  while ! "$REMUDA_BIN" -s "$SERVER" ls >/dev/null 2>&1; do
+  while [ ! -S "$SOCKET" ] || ! "$REMUDA_BIN" -s "$SERVER" ls >/dev/null 2>&1; do
     ATTEMPT=$((ATTEMPT + 1))
     if [ "$ATTEMPT" -ge 100 ] || ! kill -0 "$DAEMON_PID" >/dev/null 2>&1; then
       cat "$INSTANCE/daemon.log" >&2
@@ -109,6 +109,7 @@ expect_ulid "member id" "$MEMBER_ID"
 RUNNING_ROW=$(awk -v id="$MEMBER_ID" 'index($0, "\"id\":\"" id "\"") { row=$0 } END { print row }' "$REGISTRY")
 [[ $RUNNING_ROW == *'"state":"running"'* ]] || fail "launch row lacks state=running: $RUNNING_ROW"
 CREATED_AT=$(printf '%s\n' "$RUNNING_ROW" | sed -n 's/.*"created_at":"\([^"]*\)".*/\1/p')
+[[ -n $CREATED_AT ]] || fail "running row has no created_at: $RUNNING_ROW"
 AGENTS=$("$REMUDA_BIN" -s "$SERVER" butler agents)
 [[ $AGENTS == *$'ID\tALIAS\tKIND\tLEADER\tSTATE\tREASON\tCREATED\tENDED'* ]] || fail "agents command has no expected header: $AGENTS"
 [[ $AGENTS == *"$MEMBER_ID"* && $AGENTS == *$'running'* ]] || fail "agents command omits the running member: $AGENTS"
@@ -150,6 +151,7 @@ lua 'return remuda._butler_bus.agents.member == nil' | grep -qx true || fail "ex
 ENDED_ROW=$(awk -v id="$MEMBER_ID" 'index($0, "\"id\":\"" id "\"") { row=$0 } END { print row }' "$REGISTRY")
 [[ $ENDED_ROW == *'"state":"ended"'* && $ENDED_ROW == *'"reason":"exited"'* ]] || fail "exit row lacks lifecycle state/reason: $ENDED_ROW"
 ENDED_CREATED_AT=$(printf '%s\n' "$ENDED_ROW" | sed -n 's/.*"created_at":"\([^"]*\)".*/\1/p')
+[[ -n $ENDED_CREATED_AT ]] || fail "ended row has no created_at: $ENDED_ROW"
 [[ $CREATED_AT == "$ENDED_CREATED_AT" ]] || fail "ended row rewrote created_at: $CREATED_AT -> $ENDED_CREATED_AT"
 [[ $("$REMUDA_BIN" -s "$SERVER" butler agents) != *"$MEMBER_ID"* ]] || fail "agents without --all included an ended member"
 [[ $("$REMUDA_BIN" -s "$SERVER" butler agents --all) == *"$MEMBER_ID"* ]] || fail "agents --all omitted an ended member"

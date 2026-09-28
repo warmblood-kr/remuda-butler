@@ -77,7 +77,7 @@ until the generic external CLI/client contract is implemented in Remuda core.
 - `scripts/check-butler-path-convention.lua`: path consistency check spanning
   the Butler installer and the Remuda daemon loader.
 - `scripts/check-no-python.sh`: CI guard for Python files and invocations;
-  its Matrix and statusLine exceptions have removal TODOs.
+  its Matrix and statusLine exceptions have explicit ownership TODOs.
 - `BUTLER_MIGRATION.md`: boundary, retained core responsibilities, risks, and
   extraction sequence.
 
