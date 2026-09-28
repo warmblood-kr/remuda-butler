@@ -21,6 +21,15 @@ CORE_REF=${CORE_REF:-4bbd90f}
 scratch=$(mktemp -d /tmp/butler-rust.XXXXXX)
 trap 'rm -rf "$scratch"' EXIT
 
+source_home=${HOME:-/tmp}
+export CARGO_HOME=${CARGO_HOME:-$source_home/.cargo}
+export RUSTUP_HOME=${RUSTUP_HOME:-$source_home/.rustup}
+export HOME=$scratch/home
+export XDG_CONFIG_HOME=$scratch/config
+export XDG_CACHE_HOME=$scratch/cache
+export XDG_STATE_HOME=$scratch/state
+mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_STATE_HOME"
+
 if [[ -z ${CORE_DIR:-} ]]; then
   CORE_DIR=$scratch/remuda
   git clone --quiet "$CORE_URL" "$CORE_DIR"
@@ -32,11 +41,14 @@ mkdir -p "$CORE_DIR/native/tests/support"
 cp "$REPO/tests/support/matrix_stub_server.py" "$REPO/tests/test_matrix_http.py" "$CORE_DIR/native/tests/support/"
 cp "$REPO/tests/support/matrix-stub-cert.pem" "$REPO/tests/support/matrix-stub-key.pem" "$REPO/tests/support/matrix-untrusted-ca.pem" "$CORE_DIR/native/tests/support/"
 ln -sfn "$REPO/packages" "$CORE_DIR/packages"
+ln -sfn "$REPO/packages" "$CORE_DIR/native/packages"
 
 export XDG_DATA_HOME=$scratch/data
 mkdir -p "$XDG_DATA_HOME/remuda/mods/butler"
 cp -R "$REPO/extension.toml" "$REPO/packages" "$XDG_DATA_HOME/remuda/mods/butler/"
 unset REMUDA_SERVER REMUDA_BUTLER_TOKEN REMUDA_BUTLER_CONFIG
+
+python3 "$REPO/tests/test_matrix_cli.py"
 
 echo "core $(git -C "$CORE_DIR" rev-parse --short HEAD), butler $(git -C "$REPO" rev-parse --short HEAD)"
 cd "$CORE_DIR"

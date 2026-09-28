@@ -29,7 +29,7 @@ import sys
 import threading
 import time
 import urllib.parse
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 fixture_path, get_log_path, put_log_path, send_status = sys.argv[1:5]
 send_status = int(send_status)
@@ -113,7 +113,13 @@ class Handler(BaseHTTPRequestHandler):
         append(request_log_path, json.dumps({"method": "PUT", "path": self.path,
                                              "authorization": self.headers.get("Authorization")}))
         if not re.match(r"^/_matrix/client/v3/rooms/[^/]+/send/[^/]+/", self.path):
-            self._reply(200, {"ok": True})
+            if re.match(r"^/_matrix/client/v3/rooms/[^/]+/redact/", self.path):
+                if send_status == 200:
+                    self._reply(200, {"event_id": "$stub-redacted"})
+                else:
+                    self._reply(send_status, {"errcode": "M_UNKNOWN", "error": "stub failure"})
+            else:
+                self._reply(200, {"ok": True})
             return
         if send_status == 200:
             self._reply(200, {"event_id": "$stub-fake-event"})
@@ -127,13 +133,19 @@ class Handler(BaseHTTPRequestHandler):
         append(request_log_path, json.dumps({"method": "POST", "path": self.path,
                                              "authorization": self.headers.get("Authorization")}))
         if urllib.parse.urlsplit(self.path).path == "/_matrix/media/v3/upload":
-            self._reply(200, {"content_uri": "mxc://example.org/stub-media"})
+            if send_status == 200:
+                self._reply(200, {"content_uri": "mxc://example.org/stub-media"})
+            else:
+                self._reply(send_status, {"errcode": "M_UNKNOWN", "error": "stub failure"})
             return
-        self._reply(200, {"ok": True})
+        if send_status == 200:
+            self._reply(200, {"ok": True})
+        else:
+            self._reply(send_status, {"errcode": "M_UNKNOWN", "error": "stub failure"})
 
 
 def main():
-    server = HTTPServer(("127.0.0.1", 0), Handler)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     if tls_cert and tls_key:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(tls_cert, tls_key)

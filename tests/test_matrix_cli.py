@@ -7,6 +7,9 @@ import sys
 import tempfile
 import time
 import unittest
+import io
+from contextlib import redirect_stdout
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "packages" / "butler"))
 
@@ -60,6 +63,10 @@ class ButlerMatrixCliTests(unittest.TestCase):
     def put_bodies(self):
         return [json.loads(row) for row in self.put_log.read_text(encoding="utf-8").splitlines()]
 
+    def assert_authenticated(self):
+        self.assertTrue(self.requests(), "expected one or more Matrix requests")
+        self.assertTrue(all(row["authorization"] == "Bearer stub-secret" for row in self.requests()))
+
     def test_butler_matrix_send_chunks_utf8_and_uses_unique_transactions(self):
         text = "한" * 1400
         result = matrix_cli.send(self.client, text, self.room)
@@ -71,13 +78,22 @@ class ButlerMatrixCliTests(unittest.TestCase):
         paths = [row["path"] for row in self.requests()]
         self.assertEqual(len(paths), 2)
         self.assertNotEqual(paths[0].rsplit("/", 1)[-1], paths[1].rsplit("/", 1)[-1])
-        self.assertTrue(all(row["authorization"] == "Bearer stub-secret" for row in self.requests()))
+        self.assert_authenticated()
 
     def test_butler_matrix_send_rate_limit_spaces_chunks(self):
         client = Client(self.token, self.config, state_dir=self.state, interval=0.08)
         started = time.monotonic()
         matrix_cli.send(client, "x" * (matrix_cli.MAX_CHUNK_BYTES + 1), self.room)
         self.assertGreaterEqual(time.monotonic() - started, 0.07)
+
+    def test_butler_matrix_send_cli_reads_stdin_for_dash(self):
+        output = io.StringIO()
+        argv = [str(self.token), str(self.config), str(self.state), "send", "-"]
+        with mock.patch.object(sys, "stdin", io.StringIO("from stdin")), redirect_stdout(output):
+            matrix_cli.main(argv)
+        self.assertEqual(self.put_bodies()[0]["body"], "from stdin")
+        self.assertIn("Sent 1", output.getvalue())
+        self.assert_authenticated()
 
     def test_butler_matrix_reply_checks_same_room_and_formats_relation(self):
         result = matrix_cli.reply(self.client, "$event", "answer", self.room)
@@ -86,6 +102,7 @@ class ButlerMatrixCliTests(unittest.TestCase):
         self.assertEqual(body["msgtype"], "m.text")
         self.assertEqual(body["m.relates_to"]["m.in_reply_to"]["event_id"], "$event")
         self.assertTrue(any("/context/%24event" in row["path"] for row in self.requests()))
+        self.assert_authenticated()
 
     def test_butler_matrix_reply_rejects_cross_room_without_sending(self):
         with self.assertRaises(MatrixError):
@@ -97,12 +114,14 @@ class ButlerMatrixCliTests(unittest.TestCase):
         body = self.put_bodies()[0]
         self.assertEqual(body["m.relates_to"], {
             "rel_type": "m.annotation", "event_id": "$event", "key": "👍"})
+        self.assert_authenticated()
 
     def test_butler_matrix_redact_sends_reason(self):
         matrix_cli.redact(self.client, "$event", "cleanup", self.room)
         body = self.put_bodies()[0]
         self.assertEqual(body["reason"], "cleanup")
         self.assertIn("/redact/", self.requests()[0]["path"])
+        self.assert_authenticated()
 
     def test_butler_matrix_join_and_leave_use_operator_routes(self):
         matrix_cli.join(self.client, self.room)
@@ -110,6 +129,7 @@ class ButlerMatrixCliTests(unittest.TestCase):
         self.assertEqual([row["method"] for row in self.requests()], ["POST", "POST"])
         self.assertIn("/join", self.requests()[0]["path"])
         self.assertIn("/leave", self.requests()[1]["path"])
+        self.assert_authenticated()
 
     def test_butler_matrix_upload_sends_media_and_message(self):
         source = self.root / "image.png"
@@ -119,6 +139,52 @@ class ButlerMatrixCliTests(unittest.TestCase):
         rows = self.requests()
         self.assertTrue(any("/_matrix/media/v3/upload" in row["path"] for row in rows))
         self.assertTrue(any("/send/m.image/" in row["path"] for row in rows))
+        self.assert_authenticated()
+
+    def test_butler_matrix_upload_rejects_over_20_mib_before_request(self):
+        source = self.root / "too-large.bin"
+        with source.open("wb") as output:
+            output.truncate(matrix_cli.MAX_UPLOAD_BYTES + 1)
+        with self.assertRaisesRegex(MatrixError, "exceeds 20 MiB limit"):
+            matrix_cli.upload(self.client, str(source), self.room)
+        self.assertEqual(self.requests(), [])
+
+    def test_butler_matrix_write_errors_surface_for_each_verb(self):
+        error_get = self.root / "error-get.log"
+        error_put = self.root / "error-put.log"
+        error_server = subprocess.Popen(
+            [sys.executable, str(ROOT / "tests/support/matrix_stub_server.py"),
+             str(self.fixture), str(error_get), str(error_put), "400"],
+            stdout=subprocess.PIPE, text=True,
+        )
+        try:
+            port = int(error_server.stdout.readline().strip())
+            error_config = self.root / "error-config"
+            error_config.write_text(
+                f"http://127.0.0.1:{port}\n{self.room}\n@bot:example.org\n", encoding="utf-8")
+            client = Client(self.token, error_config, state_dir=self.root / "error-state", interval=0)
+            media = self.root / "error.bin"
+            media.write_bytes(b"media")
+            operations = (
+                lambda: matrix_cli.send(client, "bad", self.room),
+                lambda: matrix_cli.reply(client, "$event", "bad", self.room),
+                lambda: matrix_cli.react(client, "$event", "x", self.room),
+                lambda: matrix_cli.upload(client, str(media), self.room),
+                lambda: matrix_cli.redact(client, "$event", "bad", self.room),
+                lambda: matrix_cli.join(client, self.room),
+                lambda: matrix_cli.leave(client, self.room),
+            )
+            for operation in operations:
+                with self.subTest(operation=operation):
+                    with self.assertRaisesRegex(MatrixError, "Matrix HTTP 400"):
+                        operation()
+            requests = [json.loads(row) for row in error_get.with_name("error-get.log.requests")
+                        .read_text(encoding="utf-8").splitlines()]
+            self.assertTrue(requests)
+            self.assertTrue(all(row["authorization"] == "Bearer stub-secret" for row in requests))
+        finally:
+            error_server.terminate()
+            error_server.wait(timeout=5)
 
 
 if __name__ == "__main__":

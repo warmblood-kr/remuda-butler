@@ -1,28 +1,6 @@
 -- remuda-butler: runs one Claude Code session, optionally bridged to Matrix
 -- and replying there via an MCP tool. See docs/design.md.
 
-local REPLY_SRC = [==[
-set -euo pipefail
-
-TOKEN="$(cat "$1")"
-HOMESERVER="$(sed -n '1p' "$2")"
-ROOM_ID="$(sed -n '2p' "$2")"
-TEXT="$3"
-
-TXN_ID="remuda-butler-$(date +%s%N)"
-BODY_JSON="$(python3 -c 'import json,sys; print(json.dumps({"msgtype":"m.text","body":sys.argv[1]}))' "$TEXT")"
-ENC_ROOM="$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$ROOM_ID")"
-
-# The Authorization header carries the bearer token; passing it via -H would
-# put the token in this process's own argv, visible to any other user via
-# `ps`. -K - reads curl's config (here, just the one header) from stdin
-# instead, which never appears in argv.
-printf 'header = "Authorization: Bearer %s"\n' "$TOKEN" | curl -sf -K - -X PUT \
-  "$HOMESERVER/_matrix/client/v3/rooms/$ENC_ROOM/send/m.room.message/$TXN_ID" \
-  -H "Content-Type: application/json" \
-  -d "$BODY_JSON" >/dev/null
-]==]
-
 -- Claude calls statusLine commands with a JSON snapshot on stdin.  This
 -- helper is deliberately the sole producer of Butler's telemetry: it emits a
 -- fixed marker for people in the terminal and atomically publishes that exact
@@ -90,7 +68,6 @@ end
 
 -- Exposed so tests can inspect the daemon-local MCP helper without starting a
 -- real process/session (this harness does not have a real agent CLI).
-remuda._butler_reply_src = REPLY_SRC
 remuda._butler_statusline_src = STATUSLINE_SRC
 remuda._butler_initial_name = initial_butler_name()
 
@@ -339,6 +316,7 @@ end
 -- This internal module is the single inbound Matrix entry point. It registers
 -- only the optional relay and remains inert when credentials are absent.
 remuda.exec("butler/matrix")
+remuda.exec("butler/matrix_cli")
 
 -- The session needs an `--mcp-config` pointing back at this same daemon, or
 -- it has no way to reach `matrix_reply` at all — a bare `remuda.new(nil,
@@ -1326,6 +1304,49 @@ local function words_after(args, first)
   return table.concat(words, " ")
 end
 
+local function matrix_command(args, caller)
+  local verb = args[2]
+  local words, opts, i = {}, { json = false }, 3
+  while i <= #args do
+    if args[i] == "--room" then
+      if not args[i + 1] then return nil end
+      opts.room, i = args[i + 1], i + 2
+    elseif args[i] == "--json" then
+      opts.json, i = true, i + 1
+    elseif verb == "redact" and args[i] == "--reason" then
+      if not args[i + 1] then return nil end
+      opts.reason, i = args[i + 1], i + 2
+    else
+      words[#words + 1], i = args[i], i + 1
+    end
+  end
+  local matrix = assert(remuda.butler and remuda.butler.matrix, "Matrix verbs are unavailable")
+  if verb == "send" and #words >= 1 then
+    opts.text = words_after(words, 1)
+    -- Core #213 adds stdin forwarding; never turn its unavailable '-' into an empty send.
+    if opts.text == "-" then
+      error("stdin forwarding is unavailable until core issue #213; pass TEXT directly", 0)
+    end
+    return matrix.send(opts)
+  elseif verb == "reply" and #words >= 2 then
+    opts.event_id, opts.text = words[1], words_after(words, 2)
+    return matrix.reply(opts)
+  elseif verb == "react" and #words == 2 then
+    opts.event_id, opts.key = words[1], words[2]
+    return matrix.react(opts)
+  elseif verb == "upload" and #words == 1 then
+    opts.file = words[1]
+    return matrix.upload(opts)
+  elseif verb == "redact" and #words == 1 then
+    opts.event_id = words[1]
+    return matrix.redact(opts)
+  elseif (verb == "join" or verb == "leave") and #words == 1 then
+    opts.room = opts.room or words[1]
+    if verb == "join" then return matrix.join(opts, caller) end
+    return matrix.leave(opts, caller)
+  end
+end
+
 -- Each verb is a `butler.command` entry (hook-design §4.1); `run` returns nil
 -- when its arguments do not fit, and the caller gets the usage text.
 local command_entries = {}
@@ -1396,6 +1417,15 @@ command(80, "forward", "  remuda butler forward <message-id> <member> [note...]"
   if #args < 3 then return nil end
   return remuda._butler_forward(current_agent(caller) or OPERATOR, args[2], args[3],
     #args >= 4 and words_after(args, 4) or nil)
+end)
+command(100, "matrix", [[  remuda butler matrix send [--room ROOM] [--json] TEXT
+  remuda butler matrix reply [--room ROOM] [--json] EVENT_ID TEXT
+  remuda butler matrix react [--room ROOM] [--json] EVENT_ID KEY
+  remuda butler matrix upload [--room ROOM] [--json] FILE
+  remuda butler matrix redact [--room ROOM] [--reason TEXT] [--json] EVENT_ID
+  remuda butler matrix join [--json] ROOM (operator)
+  remuda butler matrix leave [--json] ROOM (operator)]], function(args, caller)
+  if #args >= 3 then return matrix_command(args, caller) end
 end)
 remuda._butler_command_run = function(verb, args, caller)
   local entry = command_entries[verb]
@@ -1782,11 +1812,7 @@ remuda.tool{
   args = { text = "The reply text to send." },
   needs = { "text" },
   run = function(a)
-    remuda.process{
-      argv = {"bash", "-c", REPLY_SRC, "_", token_path, config_path, a.text},
-      on_exit = "butler-matrix-reply-exit",
-    }
-    return "queued"
+    return remuda.butler.matrix.queue_send({ text = a.text })
   end,
 }
 end
