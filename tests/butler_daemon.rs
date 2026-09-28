@@ -4786,8 +4786,8 @@ fn butler_compaction_schedule_registration_is_idempotent() {
     );
 }
 
-/// The schedule end to end, on a real spawned `sh` standing in for the
-/// launched `claude` session -- the same substitution
+/// The schedule end to end, on a real spawned `sh` standing in for a
+/// Codex-style member that does not switch models -- the same substitution
 /// `butler_watchdog_relaunches_a_session_that_really_died` uses. Split into
 /// two phases against ONE session's one life: busy (kept below the 2s idle
 /// threshold `Session::idle_for`/`Session.is_busy` read, by repeatedly
@@ -4833,6 +4833,10 @@ fn butler_compaction_schedule_sends_compact_when_idle_but_not_when_busy() {
     );
 
     let butler_name = eval(&path, "return remuda._butler_initial_name");
+    eval(
+        &path,
+        &format!("remuda._butler_bus.agents[{butler_name:?}].kind = 'codex'"),
+    );
     eval(&path, FAKE_COMPACTION_EXPECT);
 
     // Simulates the launched session's own one-time `run_script` call the
@@ -5104,6 +5108,7 @@ done
       remuda._butler_compaction_model = "sonnet"
       remuda._butler_compaction_dialog_timeout = 1
       remuda._butler_compaction_gate = function() return true, "sent", "500000" end
+      remuda._butler_bus = remuda._butler_bus or {{agents={{}}, pending_tasks={{}}, notices={{}}}}
       local prior_contributions = remuda.contributions
       remuda.contributions = function(point)
         if point == "butler.agent" then
