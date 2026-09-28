@@ -4,6 +4,7 @@ bus.mail_loaded = bus.mail_loaded or {}
 bus.mail_read = bus.mail_read or {}
 bus.mail_unreadable = bus.mail_unreadable or {}
 bus.mail_delivered = bus.mail_delivered or {}
+bus.mail_resent = bus.mail_resent or {}
 
 local function mailbox(name)
   bus.inboxes[name] = bus.inboxes[name] or {}
@@ -115,12 +116,13 @@ local function thread_json(message, address_json)
   return out
 end
 
+local function address_json(item)
+  return '{"host":' .. config.json_quote(item.host) .. ',"id":' .. config.json_quote(item.id)
+    .. ',"alias":' .. config.json_quote(item.alias) .. ',"kind":' .. config.json_quote(item.kind)
+    .. ',"leader":' .. config.json_quote(item.leader) .. ',"session":' .. config.json_quote(item.session) .. '}'
+end
+
 local function envelope_json(message, object)
-  local function address_json(item)
-    return '{"host":' .. config.json_quote(item.host) .. ',"id":' .. config.json_quote(item.id)
-      .. ',"alias":' .. config.json_quote(item.alias) .. ',"kind":' .. config.json_quote(item.kind)
-      .. ',"leader":' .. config.json_quote(item.leader) .. ',"session":' .. config.json_quote(item.session) .. '}'
-  end
   return '{"id":' .. config.json_quote(message.id) .. ',"from":' .. address_json(message.from)
     .. ',"to":[' .. address_json(message.to[1]) .. '],"subject":' .. config.json_quote(message.subject)
     .. ',"created_at":' .. config.json_quote(message.created_at) .. ',"content_type":'
@@ -218,6 +220,17 @@ local function load_inbox(name)
   for line in file:lines() do
     local id = line:match('"message_id":"([^"]+)"')
     if id then mark_delivered(name, id) end
+    local resent = id and line:match('"resent":(%b{})')
+    if resent then
+      local note_id = resent:match('"note_object_id":"([^"]+)"')
+      local note_file = note_id and io.open(disk.objects .. note_id, "r")
+      local note = note_file and note_file:read("*a")
+      if note_file then note_file:close() end
+      bus.mail_resent[name] = bus.mail_resent[name] or {}
+      bus.mail_resent[name][id] = { date = resent:match('"date":"([^"]+)"'), note = note,
+        from = { alias = (resent:match('"from":(%b{})') or ""):match('"alias":"([^"]+)"') },
+        to = { alias = (resent:match('"to":(%b{})') or ""):match('"alias":"([^"]+)"') } }
+    end
     if id and not read[id] and not present[id] then
       present[id] = true
       if load_message(disk, id) then
@@ -354,6 +367,42 @@ local function reply(caller, parent_id, text)
   return queue(caller, to, text, subject, parent_id, references)
 end
 
+-- RFC 5322 §3.6.6 and postfix redirection: the original envelope is never
+-- rewritten; the target gets a row for the same id plus who resent it.
+local function forward(caller, id, target, note)
+  caller, target = address(caller), address(target)
+  if target.id == "" then return nil, "recipient has no Butler ULID" end
+  if caller.id ~= "" and not delivered(caller.id, id) then
+    return nil, "message " .. id .. " was not delivered to you"
+  end
+  if not find_message(id) then return nil, "message " .. id .. " cannot be read" end
+  if delivered(target.id, id) then return nil, "message " .. id .. " was already delivered to " .. target.alias end
+  load_inbox(target.id)
+  local resent = { from = caller, to = target, date = os.date("!%Y-%m-%dT%H:%M:%SZ"), note = note }
+  local disk = paths(target.id)
+  if disk then
+    local ready, ready_err = prepare_storage()
+    if not ready then return nil, "cannot prepare Butler mail storage: " .. tostring(ready_err) end
+    local note_json = ""
+    if note and note ~= "" then
+      local note_id = message_id():gsub("^message%-", "object-")
+      local wrote, err = write_atomic(disk.objects .. note_id, note)
+      if not wrote then return nil, "cannot write the forward note: " .. tostring(err) end
+      note_json = ',"note_object_id":' .. config.json_quote(note_id)
+    end
+    -- The row is the commit point, written after the note object.
+    local wrote, err = append(disk.inbox, '{"message_id":' .. config.json_quote(id) .. ',"resent":{"from":'
+      .. address_json(caller) .. ',"to":' .. address_json(target) .. ',"date":'
+      .. config.json_quote(resent.date) .. note_json .. '}}\n')
+    if not wrote then return nil, "cannot deliver the forward: " .. tostring(err) end
+  end
+  bus.mail_resent[target.id] = bus.mail_resent[target.id] or {}
+  bus.mail_resent[target.id][id] = resent
+  mailbox(target.id)[#mailbox(target.id) + 1] = id
+  mark_delivered(target.id, id)
+  return find_message(id)
+end
+
 -- load_inbox runs once per daemon, so ids left unread for a bad envelope are
 -- retried here; one that now loads is delivered like any other.
 local function retry_unreadable(name)
@@ -386,6 +435,11 @@ local function inbox(name)
         local root = message.references and message.references[1] or message.in_reply_to
         lines[#lines + 1] = "  in reply to " .. message.in_reply_to .. " (thread " .. root .. ")"
       end
+      local resent = bus.mail_resent[name] and bus.mail_resent[name][id]
+      if resent then
+        lines[#lines + 1] = "  forwarded by " .. tostring(resent.from.alias) .. " to " .. tostring(resent.to.alias)
+          .. " at " .. tostring(resent.date) .. ((resent.note and resent.note ~= "") and (": " .. resent.note) or "")
+      end
       lines[#lines + 1] = object.content
       out[#out + 1] = table.concat(lines, "\n")
       read[id], shown[#shown + 1] = true, id
@@ -411,5 +465,5 @@ local function unread(name)
   return #mailbox(name)
 end
 
-remuda._butler_mail = { mailbox = mailbox, queue = queue, reply = reply, inbox = inbox, unread = unread, append = append,
+remuda._butler_mail = { mailbox = mailbox, queue = queue, reply = reply, forward = forward, inbox = inbox, unread = unread, append = append,
   migrate_legacy = migrate_legacy }
