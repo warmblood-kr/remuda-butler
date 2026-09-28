@@ -457,17 +457,18 @@ end
 local identity_path = data_home and data_home .. "/remuda/butler/agents.jsonl"
 bus.identities = bus.identities or {}
 bus.identity_ids = bus.identity_ids or {}
+-- Loaded before identity_record so agents.jsonl shares mail.lua's append.
+remuda._butler_mail_config = { bus = bus, root = mail_root, json_quote = json_quote }
+remuda.exec("butler/mail")
 local function identity_record(id, alias, kind, leader_id, ended)
   if not identity_path then return end
   local dir = identity_path:match("^(.*)/[^/]+$")
   if dir then os.execute("mkdir -p " .. shell_quote(dir)) end
-  local f = io.open(identity_path, "a")
-  if not f then return end
   local row = '{"id":' .. json_quote(id) .. ',"alias":' .. json_quote(alias)
     .. ',"kind":' .. json_quote(kind or "") .. ',"leader_id":' .. json_quote(leader_id or "")
     .. ',"created_at":' .. json_quote(os.date("!%Y-%m-%dT%H:%M:%SZ"))
   if ended then row = row .. ',"ended_at":' .. json_quote(os.date("!%Y-%m-%dT%H:%M:%SZ")) end
-  f:write(row .. "}\n"); f:close()
+  remuda._butler_mail.append(identity_path, row .. "}\n")
 end
 local function json_field(line, key)
   local quoted = line:match('"' .. key .. '":(".-")')
@@ -572,8 +573,6 @@ local function caller_leader(caller)
   end
   return parent
 end
-remuda._butler_mail_config = { bus = bus, root = mail_root, json_quote = json_quote }
-remuda.exec("butler/mail")
 local mail = assert(remuda._butler_mail)
 local mailbox = mail.mailbox
 local queue_message = mail.queue
@@ -1028,6 +1027,8 @@ function remuda.session_detail(session)
   -- Current usage only: the window and percent cost width and rarely change.
   local used = tonumber(telemetry.context_used)
   if used then detail = detail .. " · " .. string.format("%.0fK", used / 1000) end
+  local unread = agent.id and agent.id ~= "" and mail.unread(agent.id) or 0
+  if unread > 0 then detail = detail .. " · ✉" .. unread end
   return detail
 end
 
