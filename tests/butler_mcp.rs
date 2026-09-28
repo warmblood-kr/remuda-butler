@@ -191,3 +191,34 @@ fn an_unknown_mcp_caller_cannot_launch_or_delegate() {
     }
     assert_eq!(eval(&path, sessions), before, "no session was created");
 }
+
+/// #24, CLI side: `remuda butler launch` from a member's shell parents the
+/// child to that member, and an identity Butler cannot resolve fails loudly.
+#[test]
+fn cli_launch_parents_to_the_calling_member_not_butler() {
+    let dir = scratch("cli-launch-parent");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+    eval(
+        &path,
+        "remuda._butler_agent_builders.claude = function() return {'sleep', '100'} end; \
+         remuda._butler_launch('claude', 'm1')",
+    );
+    let launch = |env: &str, name: &str| {
+        format!(
+            "return remuda._extension_commands.butler({{'launch', 'claude', '{name}'}}, {{ env = {env} }})"
+        )
+    };
+    eval(&path, &launch("{ REMUDA_BUTLER_AGENT_ID = remuda._butler_bus.agents.m1.id }", "m2"));
+    assert_eq!(eval(&path, "return remuda._butler_bus.agents.m2.parent"), "m1");
+    eval(&path, &launch("{}", "m3"));
+    assert_eq!(eval(&path, "return remuda._butler_bus.agents.m3.parent"), "butler");
+    let unknown = client::request(
+        &path,
+        &Request::Eval { code: launch("{ REMUDA_BUTLER_AGENT_ID = 'ghost' }", "m4"), name: None },
+    )
+    .expect("eval");
+    assert!(matches!(unknown, Response::Error(_)), "{unknown:?}");
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.agents.m4)"), "nil");
+}
