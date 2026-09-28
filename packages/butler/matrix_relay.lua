@@ -271,7 +271,13 @@ function relay.new(options)
       local event = state.pending[id]
       if event then
         local ok, result = pcall(deliver, event)
-        if ok and result ~= nil then append_ack(id) end
+        if ok and result ~= nil then
+          append_ack(id)
+        elseif not ok then
+          pcall(function()
+            io.stderr:write("butler Matrix delivery failed for " .. tostring(id) .. ": " .. tostring(result) .. "\n")
+          end)
+        end
       end
     end
     reconcile_acks()

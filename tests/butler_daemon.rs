@@ -2350,6 +2350,71 @@ fn butler_matrix_relay_persists_pending_before_cursor_and_retries_after_restart(
 }
 
 #[test]
+fn butler_matrix_relay_survives_an_error_in_event_handling() {
+    let dir = scratch_dir("mr-handler-error");
+    let (_daemon, path) = butler_test_daemon(&dir);
+    let room = "!relay:example.org";
+    let (token_path, config_path) = butler_config(
+        &dir, "handler-error", "http://matrix.example.org", room, "@bot:example.org", "@alice:example.org");
+    eval(&path, include_str!("support/fake_http.lua"));
+    eval(&path, &format!(
+        "remuda._butler_matrix_config = {{ token_path = {}, config_path = {} }}; remuda.exec('butler/matrix_request'); remuda.exec('butler/matrix_relay')",
+        lua_raw_string(&token_path.to_string_lossy()), lua_raw_string(&config_path.to_string_lossy())));
+    let baseline = "http://matrix.example.org/_matrix/client/v3/sync?timeout=0";
+    let first_sync = "http://matrix.example.org/_matrix/client/v3/sync?since=s0&timeout=100";
+    let later_sync = "http://matrix.example.org/_matrix/client/v3/sync?since=s1&timeout=100";
+    let first_event = serde_json::json!({"type":"m.room.message","event_id":"$throws-once","sender":"@alice:example.org",
+        "content":{"msgtype":"m.text","body":"retry this handoff"}});
+    let later_event = serde_json::json!({"type":"m.room.message","event_id":"$later","sender":"@alice:example.org",
+        "content":{"msgtype":"m.text","body":"later event"}});
+    let first_response = serde_json::json!({"next_batch":"s1","rooms":{"join":{room:{"timeline":{"events":[first_event]}}}}});
+    let later_response = serde_json::json!({"next_batch":"s2","rooms":{"join":{room:{"timeline":{"events":[later_event]}}}}});
+    let state_path = PathBuf::from(format!("{}.since", config_path.display()));
+    let result = eval(&path, &format!(r#"
+      local matrix = remuda.butler.matrix
+      remuda.http.respond("GET", {baseline}, {{ status=200, headers={{}}, body='{{"next_batch":"s0"}}' }})
+      remuda.http.respond("GET", {first_sync}, {{ status=200, headers={{}}, body={first_response} }})
+      remuda.http.respond("GET", {later_sync}, {{ status=200, headers={{}}, body={later_response} }})
+      remuda.relay_deliveries, remuda.relay_delivery_attempts, remuda.relay_logs = {{}}, {{}}, {{}}
+      local old_stderr = io.stderr
+      io.stderr = {{ write=function(_, value) table.insert(remuda.relay_logs, value) end }}
+      local relay = matrix.relay.new({{ config_path={config}, matrix=matrix, deliver=function(e)
+        remuda.relay_delivery_attempts[e.event_id] = (remuda.relay_delivery_attempts[e.event_id] or 0) + 1
+        if e.event_id == "$throws-once" and remuda.relay_delivery_attempts[e.event_id] == 1 then
+          local f = assert(io.open({state}, "rb")); local saved = matrix.decode_json(f:read("*a")); f:close()
+          remuda.pending_was_durable = saved.since == "s1" and saved.pending_events[e.event_id] ~= nil
+          error("injected relay handler failure")
+        end
+        table.insert(remuda.relay_deliveries, e.event_id)
+        return true
+      end }})
+      relay:start()
+      remuda.http.tick()
+      remuda.http.tick()
+      if not remuda.pending_was_durable then io.stderr=old_stderr; return "pending-or-cursor-not-durable-on-error" end
+      if (remuda.relay_delivery_attempts["$throws-once"] or 0) < 2 then io.stderr=old_stderr; return "failed-handoff-not-retried" end
+      local logged = false
+      for _, line in ipairs(remuda.relay_logs) do
+        if line:find("$throws-once", 1, true) and line:find("injected relay handler failure", 1, true) then logged=true end
+      end
+      if not logged then io.stderr=old_stderr; return "handler-error-not-logged" end
+      remuda.http.tick()
+      io.stderr = old_stderr
+      local delivered = {{}}
+      for _, id in ipairs(remuda.relay_deliveries) do delivered[id] = (delivered[id] or 0) + 1 end
+      if delivered["$throws-once"] ~= 1 then return "pending-event-not-delivered-once-after-retry" end
+      if delivered["$later"] ~= 1 then return "relay-did-not-deliver-later-event" end
+      if not relay:state().processed["$throws-once"] then return "retried-event-not-acknowledged" end
+      relay:stop()
+      return "ok"
+    "#,
+        baseline=lua_raw_string(baseline), first_sync=lua_raw_string(first_sync), later_sync=lua_raw_string(later_sync),
+        first_response=lua_raw_string(&first_response.to_string()), later_response=lua_raw_string(&later_response.to_string()),
+        config=lua_raw_string(&config_path.to_string_lossy()), state=lua_raw_string(&state_path.to_string_lossy())));
+    assert_eq!(result, "ok", "relay must log and recover from one event-handler error: {result}");
+}
+
+#[test]
 fn butler_matrix_relay_retries_an_unreachable_first_sync_baseline() {
     let dir = scratch_dir("mr-retry");
     let (_daemon, path) = butler_test_daemon(&dir);
