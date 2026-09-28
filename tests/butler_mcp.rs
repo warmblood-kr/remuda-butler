@@ -443,6 +443,7 @@ fn a_topic_task_is_submitted_before_an_immediate_notice_is_typed() {
             r#"
             remuda.butler.project_home({projects:?})
             remuda._butler_agent_builders.claude = function() return {{"sh", {script:?}, {submitted:?}}} end
+            remuda.session = function() return {{is_busy = false}} end
             remuda._butler_topic_delegate("topic", "do the delegated task", nil, "claude", "butler")
             remuda._butler_send("operator", "topic", "immediate mail")
             "#,
@@ -478,12 +479,12 @@ fn a_topic_task_is_submitted_before_an_immediate_notice_is_typed() {
     );
 }
 
-/// A fast agent can accept Return before the first confirmation poll. The task
-/// is submitted when that first observation already has an empty composer.
+/// A dropped first Return leaves the task in the composer. Butler retries it,
+/// waits for acceptance, then delivers the queued notice.
 #[test]
 #[cfg(unix)]
-fn a_fast_topic_task_clears_pending_without_a_composer_observation() {
-    let dir = scratch("topic-first-poll-empty");
+fn a_topic_task_retries_a_dropped_return_before_delivering_a_notice() {
+    let dir = scratch("topic-dropped-return");
     let path = daemon::socket_path_in(&dir, "s");
     let _daemon = daemon_at(&path);
     eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
@@ -492,24 +493,70 @@ fn a_fast_topic_task_clears_pending_without_a_composer_observation() {
         r#"
         remuda.butler.project_home("/tmp")
         remuda._butler_agent_builders.claude = function() return {"sh", "-c", "sleep 30"} end
-        remuda.capture = function() return "──────\n❯ " end
-        remuda.type_text = function() end
-        remuda.key = function() end
+        local screen, events, first_poll_empty = "──────\n❯ ", {}, false
+        remuda._topic_test_events = events
+        remuda._topic_test_pending_at_notice = true
+        remuda.capture = function()
+          if first_poll_empty then
+            first_poll_empty = false
+            table.insert(events, "first poll blank while text paints")
+            return "──────\n❯ "
+          end
+          return screen
+        end
+        remuda.type_text = function(n, text)
+          if text == "finish immediately" then
+            table.insert(events, "task typed; first Return dropped")
+            screen = "──────\n❯ " .. text
+            first_poll_empty = true
+          else
+            table.insert(events, "notice delivered")
+            remuda._topic_test_pending_at_notice = remuda._butler_bus.pending_tasks[n] ~= nil
+          end
+        end
+        remuda.key = function(_, key)
+          if key == "RET" then
+            table.insert(events, "retry Return accepted")
+            screen = "──────\n❯ "
+          end
+        end
         remuda.session = function() return {is_busy = false} end
         remuda._butler_notify_policy = function() return true end
         remuda._butler_topic_delegate("fast", "finish immediately", nil, "claude", "butler")
+        remuda._butler_send("operator", "fast", "immediate mail")
         "#,
     );
 
-    let deadline = Instant::now() + Duration::from_secs(4);
+    let deadline = Instant::now() + PATIENCE;
     loop {
         let pending = eval(&path, "return tostring(remuda._butler_bus.pending_tasks.fast)");
-        if pending == "nil" {
+        let events = eval(&path, "return table.concat(remuda._topic_test_events, '\\n')");
+        if pending == "nil" && events.lines().any(|line| line == "notice delivered") {
             break;
         }
-        assert!(Instant::now() < deadline, "fast task stayed pending: {pending}");
+        assert!(
+            Instant::now() < deadline,
+            "fast task stayed pending: {pending}; events={}",
+            eval(&path, "return table.concat(remuda._topic_test_events, '\\n')")
+        );
         std::thread::sleep(Duration::from_millis(50));
     }
+    let events = eval(&path, "return table.concat(remuda._topic_test_events, '\\n')");
+    assert_eq!(
+        events.lines().collect::<Vec<_>>(),
+        [
+            "task typed; first Return dropped",
+            "first poll blank while text paints",
+            "retry Return accepted",
+            "notice delivered",
+        ],
+        "the dropped Enter must be retried and the notice must follow acceptance: {events}"
+    );
+    assert_eq!(
+        eval(&path, "return tostring(remuda._topic_test_pending_at_notice)"),
+        "false",
+        "the notice must be typed only after pending_tasks clears"
+    );
 }
 
 /// #29(3): on a core with `ls().human_idle` (#136) and `capture_styled`
