@@ -4,6 +4,7 @@ local data_home = os.getenv("XDG_DATA_HOME")
 if not data_home or data_home == "" then data_home = (os.getenv("HOME") or "") .. "/.local/share" end
 local config = remuda._butler_matrix_config
 remuda.exec("butler/matrix_request")
+remuda.exec("butler/matrix_write")
 local relay_path = data_home .. "/remuda/mods/butler/packages/butler/matrix_relay.py"
 local helper_src = remuda._butler_helper_src_override
 if not helper_src then

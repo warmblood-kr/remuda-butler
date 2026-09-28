@@ -1,6 +1,6 @@
 -- Reusable async-shaped remuda.http fake for Butler Matrix tests.
--- Calls are recorded without touching the network; tests complete them explicitly.
-remuda.http = { calls = {}, pending = {}, responses = {}, holds = {} }
+-- Calls are recorded without touching the network; callbacks run on tick.
+remuda.http = { calls = {}, pending = {}, responses = {}, response_prefixes = {}, holds = {} }
 remuda._fake_http_timers = {}
 
 remuda.schedule = function(spec)
@@ -14,20 +14,14 @@ remuda.cancel = function(timer)
 end
 
 function remuda.http.request(spec)
-  local index = #remuda.http.calls + 1
-  local entry = { spec = spec, callback = spec.callback, completed = false, cancelled = false }
-  remuda.http.calls[index] = spec
-  remuda.http.pending[index] = entry
-  local key = spec.method .. " " .. spec.url
-  local script = remuda.http.responses[key]
-  if remuda.http.holds[key] then entry.held = true
-  elseif script and #script > 0 then entry.result = table.remove(script, 1)
-  else entry.result = { error = "no scripted fake HTTP response for " .. key } end
-  return {
-    cancel = function()
-      if not entry.completed then entry.cancelled = true end
-    end,
-  }
+  local entry = { spec = spec, callback = spec.callback, completed = false, cancelled = false,
+    key = spec.method .. " " .. spec.url }
+  table.insert(remuda.http.calls, spec)
+  table.insert(remuda.http.pending, entry)
+  if remuda.http.holds[entry.key] then entry.held = true end
+  return { cancel = function()
+    if not entry.completed then entry.cancelled = true end
+  end }
 end
 
 function remuda.http.respond(method, url, result)
@@ -36,8 +30,10 @@ function remuda.http.respond(method, url, result)
   table.insert(remuda.http.responses[key], result)
 end
 
--- Keep a selected request pending across ticks to model a held /sync long poll.
--- Releasing it only makes its result eligible for the next daemon tick.
+function remuda.http.respond_prefix(method, url_prefix, result)
+  table.insert(remuda.http.response_prefixes, { method = method, prefix = url_prefix, result = result })
+end
+
 function remuda.http.hold(method, url)
   remuda.http.holds[method .. " " .. url] = true
 end
@@ -45,10 +41,8 @@ end
 function remuda.http.release(method, url, result)
   local key = method .. " " .. url
   for _, entry in ipairs(remuda.http.pending) do
-    local spec = entry.spec
-    if entry.held and spec.method .. " " .. spec.url == key then
-      entry.held = false
-      entry.result = result
+    if entry.held and entry.key == key then
+      entry.held, entry.result = false, result
       remuda.http.holds[key] = nil
       return true
     end
@@ -61,9 +55,25 @@ function remuda.http.tick()
     if not timer.cancelled then timer.spec.run() end
   end
   for _, entry in ipairs(remuda.http.pending) do
-    if not entry.completed and not entry.held and entry.result then
-      entry.completed = true
-      entry.callback(entry.result)
+    if not entry.completed and not entry.held and not entry.result then
+      local script = remuda.http.responses[entry.key]
+      if script and #script > 0 then entry.result = table.remove(script, 1) end
+      if not entry.result then
+        local best
+        for _, route in ipairs(remuda.http.response_prefixes) do
+          if route.method == entry.spec.method and entry.spec.url:sub(1, #route.prefix) == route.prefix
+            and (not best or #route.prefix > #best.prefix) then best = route end
+        end
+        if best then entry.result = best.result end
+      end
+      if not entry.result then entry.result = { error = "no scripted fake HTTP response for " .. entry.key } end
+    end
+    if not entry.completed and not entry.held then
+      if entry.cancelled then entry.completed = true
+      elseif entry.result then
+        entry.completed = true
+        entry.callback(entry.result)
+      end
     end
   end
 end

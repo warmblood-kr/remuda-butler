@@ -13,7 +13,7 @@
 
 use remuda_core::protocol::{Request, Response};
 use remuda_core::{Session, Size};
-use remuda_native::{client, daemon, ipc, CommandBuilder, PtyAgent, SystemClock};
+use remuda_native::{client, daemon, ipc, mcp, CommandBuilder, PtyAgent, SystemClock};
 use std::path::{Path, PathBuf};
 use std::os::unix::process::CommandExt;
 use std::sync::Arc;
@@ -1263,7 +1263,8 @@ fn exec_butler_runs_the_builtin_package_in_the_daemons_image() {
                 "-s",
                 "s",
                 "-e",
-                "return (remuda._butler_helper_src ~= nil and remuda._butler_reply_src ~= nil) \
+                "return (remuda._butler_helper_src ~= nil and remuda.butler and remuda.butler.matrix \
+                 and type(remuda.butler.matrix.request) == 'function' and type(remuda.butler.matrix.send) == 'function') \
                  and 'ok' or 'missing'",
             ],
         );
@@ -2004,16 +2005,14 @@ fn an_unpaced_flood_exercises_real_backpressure_and_the_child_blocks() {
     }
 }
 
-// --- packages/butler: the Matrix bridge's Python/bash helpers -------------
+// --- packages/butler: the Matrix bridge's inbound Python relay -------------
 //
 // Everything below runs against a stub HTTP server of our own
 // (`tests/support/matrix_stub_server.py`), never a real Matrix homeserver.
-// `HELPER_SRC`/`REPLY_SRC` are read from the internal Matrix module by running
-// the Butler package in test mode in a daemon's
-// living image via `remuda exec butler`, then referenced BY NAME
-// (`remuda._butler_helper_src` / `remuda._butler_reply_src`) from later
-// `remuda.process` calls against that same image — with no separate string
-// round-trip through Rust needed.
+// `HELPER_SRC` is read from the internal Matrix module by running the Butler
+// package in test mode in a daemon's living image via `remuda exec butler`,
+// then referenced BY NAME (`remuda._butler_helper_src`) from later
+// `remuda.process` calls against that same image.
 
 /// The stub Matrix homeserver, as its own process — plain
 /// `std::process::Command`, not `remuda.process`: this is test
@@ -2098,8 +2097,8 @@ fn butler_config(
 /// it with `remuda._butler_test_mode` set — the same `remuda exec`
 /// invocation `exec_butler_runs_the_builtin_package_in_the_daemons_image`
 /// uses, then load the internal Matrix entry point — so
-/// `remuda._butler_helper_src`/`remuda._butler_reply_src` hold the exact
-/// package source, without starting a real Claude session or needing
+/// `remuda._butler_helper_src` holds the exact package source, without
+/// starting a real Claude session or needing
 /// `REMUDA_BUTLER_TOKEN`/`REMUDA_BUTLER_CONFIG`. Both globals stay
 /// live in this same image afterward, so a later `eval` can reference them
 /// by name directly inside a `remuda.process{argv = {...}}` call.
@@ -2251,6 +2250,137 @@ fn butler_matrix_fake_http_holds_and_releases_long_poll_on_tick() {
       return "ok"
     "#);
     assert_eq!(result, "ok", "fake HTTP long-poll hold must be asynchronous: {result}");
+}
+
+#[test]
+fn butler_matrix_send_chunks_utf8_async_and_rejects_empty_or_dash() {
+    let dir = scratch_dir("butler-matrix-send");
+    let (_daemon, path) = butler_test_daemon(&dir);
+    let room = "!write:example.org";
+    let (token_path, config_path) = butler_config(&dir, "write", "http://matrix.example.org",
+        room, "@bot:example.org", "");
+    eval(&path, include_str!("support/fake_http.lua"));
+    eval(&path, &format!(
+        "remuda._butler_matrix_config = {{ token_path = {}, config_path = {} }}; remuda.exec('butler/matrix')",
+        lua_raw_string(&token_path.to_string_lossy()), lua_raw_string(&config_path.to_string_lossy())));
+    let result = eval(&path, r#"
+      local matrix = remuda.butler.matrix
+      local sent, empty, dash
+      matrix.send({ text = "", room = "!write:example.org" }, function(v) empty = v end)
+      if not empty or not empty.error or #remuda.http.calls ~= 0 then return "empty-send-not-rejected" end
+      matrix.send({ text = "-", room = "!write:example.org" }, function(v) dash = v end)
+      if not dash or not dash.error or #remuda.http.calls ~= 0 then return "dash-send-not-rejected" end
+      remuda.http.respond_prefix("PUT",
+        "http://matrix.example.org/_matrix/client/v3/rooms/%21write%3Aexample.org/send/m.room.message/",
+        { status = 200, headers = {}, body = '{"event_id":"$sent"}' })
+      matrix.send({ text = string.rep("한", 2000), room = "!write:example.org" }, function(value) sent = value end)
+      if sent then return "send-callback-ran-inline" end
+      if #remuda.http.calls ~= 1 then return "first-chunk-not-sent" end
+      for _ = 1, 4 do remuda.http.tick() end
+      if not sent or sent.error then return "send-failed" end
+      if sent.sent ~= 2 or #remuda.http.calls ~= 2 then return "wrong-chunk-count" end
+      local combined, previous = {}, nil
+      for _, spec in ipairs(remuda.http.calls) do
+        local body = matrix.decode_json(spec.body)
+        if not body or #body.body > 4000 then return "chunk-over-4000-bytes" end
+        combined[#combined + 1] = body.body
+        local txn = spec.url:match("/send/m%.room%.message/(.+)$")
+        if not txn or txn == previous then return "transaction-id-not-unique" end
+        previous = txn
+      end
+      if table.concat(combined) ~= string.rep("한", 2000) then return "utf8-chunking-lost-data" end
+      return "ok"
+    "#);
+    assert_eq!(result, "ok", "Matrix send should compose bounded async requests: {result}");
+}
+
+#[test]
+fn butler_matrix_reply_react_upload_redact_join_and_leave_compose_request() {
+    let dir = scratch_dir("butler-matrix-write-words");
+    let (_daemon, path) = butler_test_daemon(&dir);
+    let room = "!write:example.org";
+    let (token_path, config_path) = butler_config(&dir, "write", "https://matrix.example.org",
+        room, "@bot:example.org", "");
+    std::fs::write(&config_path, format!(
+        "https://matrix.example.org\n{room}\n@bot:example.org\n\npin_sha256={}\n", "00".repeat(32)))
+        .expect("write pinned HTTPS Matrix config");
+    let media_path = dir.join("image.png");
+    std::fs::write(&media_path, b"png-bytes").expect("write upload fixture");
+    let media_path_lua = lua_raw_string(&media_path.to_string_lossy());
+    eval(&path, include_str!("support/fake_http.lua"));
+    eval(&path, &format!(
+        "remuda._butler_matrix_config = {{ token_path = {}, config_path = {} }}; remuda.exec('butler/matrix')",
+        lua_raw_string(&token_path.to_string_lossy()), lua_raw_string(&config_path.to_string_lossy())));
+    let result = eval(&path, &format!(r#"
+      local matrix, room = remuda.butler.matrix, "{room}"
+      local function response(body) return {{ status = 200, headers = {{}}, body = body }} end
+      remuda.http.respond_prefix("GET", "https://matrix.example.org/_matrix/client/v3/rooms/%21write%3Aexample.org/context/",
+        response('{{"event":{{"room_id":"{room}"}}}}'))
+      remuda.http.respond_prefix("PUT", "https://matrix.example.org/_matrix/client/v3/rooms/%21write%3Aexample.org/send/m.room.message/",
+        response('{{"event_id":"$reply"}}'))
+      remuda.http.respond_prefix("PUT", "https://matrix.example.org/_matrix/client/v3/rooms/%21write%3Aexample.org/send/m.reaction/",
+        response('{{"event_id":"$react"}}'))
+      remuda.http.respond_prefix("POST", "https://matrix.example.org/_matrix/media/v3/upload?filename=image.png",
+        response('{{"content_uri":"mxc://example.org/media"}}'))
+      remuda.http.respond_prefix("PUT", "https://matrix.example.org/_matrix/client/v3/rooms/%21write%3Aexample.org/send/m.image/",
+        response('{{"event_id":"$image"}}'))
+      remuda.http.respond_prefix("PUT", "https://matrix.example.org/_matrix/client/v3/rooms/%21write%3Aexample.org/redact/%24redact/",
+        response('{{"event_id":"$redact"}}'))
+      remuda.http.respond("POST", "https://matrix.example.org/_matrix/client/v3/rooms/%21write%3Aexample.org/join", response("{{}}"))
+      remuda.http.respond("POST", "https://matrix.example.org/_matrix/client/v3/rooms/%21write%3Aexample.org/leave", response("{{}}"))
+      local function ticks(n) for _ = 1, n do remuda.http.tick() end end
+      local agent_error
+      matrix.join({{ room = room }}, function(value) agent_error = value end, "agent1")
+      if not agent_error or not agent_error.error or #remuda.http.calls ~= 0 then return "agent-join-not-refused" end
+      local reply
+      matrix.reply({{ room = room, event_id = "$reply-source", text = "reply text" }}, function(value) reply = value end)
+      ticks(4)
+      if not reply or reply.error then return "reply-failed:" .. tostring(reply and reply.error or "no callback")
+        .. "|calls=" .. tostring(#remuda.http.calls) .. "|last=" .. tostring(remuda.http.calls[#remuda.http.calls] and remuda.http.calls[#remuda.http.calls].url) end
+      local react
+      matrix.react({{ room = room, event_id = "$react-source", key = "👍" }}, function(value) react = value end)
+      ticks(4)
+      if not react or react.event_id ~= "$react" then return "react-failed" end
+      local redact
+      matrix.redact({{ room = room, event_id = "$redact", reason = "cleanup" }}, function(value) redact = value end)
+      ticks(3)
+      if not redact or redact.event_id ~= "$redact" then return "redact-failed" end
+      local upload
+      matrix.upload({{ room = room, file = {media_path_lua} }}, function(value) upload = value end)
+      ticks(5)
+      if not upload or upload.event_id ~= "$image" or upload.content_uri ~= "mxc://example.org/media" then return "upload-failed" end
+      local relative
+      matrix.upload({{ room = room, file = "relative.png" }}, function(value) relative = value end)
+      if not relative or not relative.error or not relative.error:find("absolute path", 1, true) then return "relative-upload-accepted" end
+      local joined, left
+      matrix.join({{ room = room }}, function(value) joined = value end)
+      ticks(3)
+      matrix.leave({{ room = room }}, function(value) left = value end)
+      ticks(3)
+      if not joined or joined.error or not left or left.error then return "join-leave-failed" end
+      local bodies = {{}}
+      for _, spec in ipairs(remuda.http.calls) do
+        if spec.body and spec.headers["Content-Type"] == "application/json" then
+          bodies[#bodies + 1] = matrix.decode_json(spec.body)
+        end
+      end
+      local found_reply, found_react, found_redact, found_file = false, false, false, false
+      for _, body in ipairs(bodies) do
+        if body["m.relates_to"] and body["m.relates_to"]["m.in_reply_to"] then found_reply = body["m.relates_to"]["m.in_reply_to"].event_id == "$reply-source" end
+        if body["m.relates_to"] and body["m.relates_to"].rel_type == "m.annotation" then found_react = body["m.relates_to"].key == "👍" end
+        if body.reason == "cleanup" then found_redact = true end
+        if body.msgtype == "m.image" and body.url == "mxc://example.org/media" then found_file = true end
+      end
+      if not found_reply or not found_react or not found_redact or not found_file then return "wrong-write-content" end
+      local joined_route, left_route = false, false
+      for _, spec in ipairs(remuda.http.calls) do
+        if spec.url:match("/join$") then joined_route = spec.method == "POST" and spec.body == "{{}}" end
+        if spec.url:match("/leave$") then left_route = spec.method == "POST" and spec.body == "{{}}" end
+      end
+      if not joined_route or not left_route then return "wrong-room-route" end
+      return "ok"
+    "#));
+    assert_eq!(result, "ok", "Matrix write verbs should compose only request and same_room: {result}");
 }
 
 #[test]
@@ -3484,185 +3614,61 @@ fn matrix_extension_delivers_a_durable_mail_envelope_once() {
     drop(daemon);
 }
 
-// `REPLY_SRC` is a bash script by design (packages/butler/init.lua) -- the
-// real deployment target is a single Linux host, and there is no plan to
-// run this specific package's helpers on Windows. Windows CI does have a
-// `bash` on PATH (Git Bash), but the script's coreutils-flavored pieces
-// (`date +%s%N`, `sed -n`) are not guaranteed to behave identically there,
-// and that gap is not worth chasing for a component that will never run on
-// that platform in practice.
+// The Matrix MCP tool now uses the daemon's async request word directly.
 #[test]
-#[cfg(unix)]
-fn matrix_reply_tool_queues_a_send_and_reports_its_own_exit() {
-    let dir = scratch_dir("butler-reply");
-    let (_daemon, path) = butler_test_daemon(&dir);
-
+fn matrix_reply_tool_uses_async_matrix_request_without_subprocess() {
+    let dir = scratch_dir("butler-matrix-reply-tool");
     let room = "!reply:example.org";
-    let self_mxid = "@bot:example.org";
-    let empty_fixture = dir.join("reply-fixture.jsonl");
-    std::fs::write(&empty_fixture, "").expect("write empty fixture");
+    let (token_path, config_path) = butler_config(
+        &dir, "reply", "http://matrix.example.org", room, "@bot:example.org", "");
+    let token_env = token_path.to_string_lossy().into_owned();
+    let config_env = config_path.to_string_lossy().into_owned();
+    let _daemon = Daemon::spawn_with_env(&dir, &[
+        ("REMUDA_BUTLER_TOKEN", token_env.as_str()),
+        ("REMUDA_BUTLER_CONFIG", config_env.as_str()),
+    ]);
+    let path = daemon::socket_path_in(&dir, "s");
+    eval(&path, "remuda._butler_test_mode = 'lifecycle'; remuda._butler_skip_relay = true");
+    eval(&path, include_str!("support/fake_http.lua"));
+    let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    eval(&path, r#"
+      remuda.http.respond_prefix("PUT",
+        "http://matrix.example.org/_matrix/client/v3/rooms/%21reply%3Aexample.org/send/m.room.message/",
+        { status = 200, headers = {}, body = '{"event_id":"$reply"}' })
+    "#);
+    let process_count = read_count(&path, "return #remuda.processes()");
 
-    // Success case.
-    let get_log = dir.join("reply-get.log");
-    let put_log = dir.join("reply-put.log");
-    std::fs::write(&get_log, "").unwrap();
-    std::fs::write(&put_log, "").unwrap();
-    let stub_ok = StubServer::spawn(&empty_fixture, &get_log, &put_log, 200);
-    let (token_path, config_path) =
-        butler_config(&dir, "reply-ok", &stub_ok.base_url(), room, self_mxid, "");
-
-    eval(&path, "remuda.reply_exit_ok = nil");
-    eval(
+    let tools: serde_json::Value = serde_json::from_str(
+        &mcp::handle(&path, r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#)
+            .expect("list MCP tools"),
+    ).expect("parse tools/list response");
+    let tool = tools["result"]["tools"].as_array().unwrap().iter()
+        .find(|tool| tool["name"] == "matrix_reply").expect("matrix_reply tool");
+    assert_eq!(tool["inputSchema"]["required"], serde_json::json!(["text"]));
+    let reply = mcp::handle(
         &path,
-        "remuda.on('reply-exit-ok', function(c) remuda.reply_exit_ok = c end)",
-    );
-    eval(
-        &path,
-        &format!(
-            "remuda.process{{argv = {{'bash', '-c', remuda._butler_reply_src, '_', {}, {}, 'hello'}}, on_exit = 'reply-exit-ok'}}",
-            lua_raw_string(&token_path.to_string_lossy()),
-            lua_raw_string(&config_path.to_string_lossy()),
-        ),
-    );
+        &serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name":"matrix_reply","arguments":{"text":"hello"}}}).to_string(),
+    ).expect("call matrix_reply");
+    let reply: serde_json::Value = serde_json::from_str(&reply).expect("parse tool result");
+    assert_eq!(reply["result"]["content"][0]["text"], "queued");
+    assert_eq!(reply["result"]["isError"], false);
+    assert_eq!(read_count(&path, "return #remuda.processes()"), process_count,
+        "matrix_reply must not launch a subprocess");
 
-    let deadline = Instant::now() + PATIENCE;
-    while read_count(&path, "return remuda.reply_exit_ok and 1 or 0") == 0 {
-        assert!(
-            Instant::now() < deadline,
-            "on_exit never fired for the successful send"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    assert_eq!(
-        read_count(&path, "return remuda.reply_exit_ok"),
-        0,
-        "a successful send must exit 0"
-    );
-    let sent = std::fs::read_to_string(&put_log).expect("put log");
-    assert!(
-        sent.contains("hello"),
-        "the stub never received the reply body: {sent}"
-    );
-
-    // Failure case: a fresh stub configured to answer 400.
-    let get_log2 = dir.join("reply-get2.log");
-    let put_log2 = dir.join("reply-put2.log");
-    std::fs::write(&get_log2, "").unwrap();
-    std::fs::write(&put_log2, "").unwrap();
-    let stub_fail = StubServer::spawn(&empty_fixture, &get_log2, &put_log2, 400);
-    let (token_path2, config_path2) = butler_config(
-        &dir,
-        "reply-fail",
-        &stub_fail.base_url(),
-        room,
-        self_mxid,
-        "",
-    );
-
-    eval(&path, "remuda.reply_exit_fail = nil");
-    eval(
-        &path,
-        "remuda.on('reply-exit-fail', function(c) remuda.reply_exit_fail = c end)",
-    );
-    eval(
-        &path,
-        &format!(
-            "remuda.process{{argv = {{'bash', '-c', remuda._butler_reply_src, '_', {}, {}, 'hello'}}, on_exit = 'reply-exit-fail'}}",
-            lua_raw_string(&token_path2.to_string_lossy()),
-            lua_raw_string(&config_path2.to_string_lossy()),
-        ),
-    );
-
-    let deadline = Instant::now() + PATIENCE;
-    while read_count(&path, "return remuda.reply_exit_fail and 1 or 0") == 0 {
-        assert!(
-            Instant::now() < deadline,
-            "on_exit never fired for the failing send"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    assert!(
-        read_count(&path, "return remuda.reply_exit_fail") != 0,
-        "a failing send (HTTP 400) must be observably distinguishable from success via a nonzero exit code"
-    );
-}
-
-// Fix for "TOKEN IN ARGV": the reply script must never pass the bearer
-// token as a curl argument, since a process's argv is visible to any other
-// user via `ps`. Proven by intercepting curl itself: a fake `curl` on a
-// PATH of our own logs exactly the argv and stdin it received, then exits
-// 0 without ever making a network call -- REPLY_SRC's own token-handling is
-// what's under test here, not the network path (already covered by
-// `matrix_reply_tool_queues_a_send_and_reports_its_own_exit`).
-#[test]
-#[cfg(unix)]
-fn matrix_reply_tool_never_puts_the_token_in_curls_argv() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let dir = scratch_dir("butler-reply-token");
-    let (_daemon, path) = butler_test_daemon(&dir);
-    let reply_src = eval(&path, "return remuda._butler_reply_src");
-
-    let token_path = dir.join("token-argv.token");
-    let config_path = dir.join("token-argv.config");
-    let token = "s3cr3t-token-value";
-    std::fs::write(&token_path, format!("{token}\n")).expect("write token");
-    std::fs::write(
-        &config_path,
-        "http://127.0.0.1:1\n!room:example.org\n@bot:example.org\n",
-    )
-    .expect("write config");
-
-    let fake_curl_dir = dir.join("fake-bin");
-    std::fs::create_dir_all(&fake_curl_dir).expect("fake bin dir");
-    let argv_log = dir.join("curl-argv.log");
-    let stdin_log = dir.join("curl-stdin.log");
-    std::fs::write(&argv_log, "").expect("init argv log");
-    let fake_curl = fake_curl_dir.join("curl");
-    std::fs::write(
-        &fake_curl,
-        format!(
-            "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> '{}'; done\ncat > '{}'\nexit 0\n",
-            argv_log.display(),
-            stdin_log.display(),
-        ),
-    )
-    .expect("write fake curl");
-    std::fs::set_permissions(&fake_curl, std::fs::Permissions::from_mode(0o755))
-        .expect("chmod fake curl");
-
-    let path_with_fake_curl = format!(
-        "{}:{}",
-        fake_curl_dir.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
-
-    let status = std::process::Command::new("bash")
-        .arg("-c")
-        .arg(&reply_src)
-        .arg("_")
-        .arg(&token_path)
-        .arg(&config_path)
-        .arg("hello")
-        .env("PATH", path_with_fake_curl)
-        .status()
-        .expect("run REPLY_SRC with the fake curl on PATH");
-    assert!(
-        status.success(),
-        "REPLY_SRC exited nonzero against the fake curl"
-    );
-
-    let logged_argv = std::fs::read_to_string(&argv_log).expect("read fake curl's argv log");
-    assert!(
-        !logged_argv.contains(token),
-        "the token appeared in curl's own argv: {logged_argv:?}"
-    );
-
-    let logged_stdin = std::fs::read_to_string(&stdin_log).unwrap_or_default();
-    assert!(
-        logged_stdin.contains(&format!("Authorization: Bearer {token}")),
-        "the Authorization header was never delivered to curl via stdin: {logged_stdin:?}"
-    );
+    let request = eval(&path, r#"
+      local spec = remuda.http.calls[1]
+      if not spec then return "missing-request" end
+      local decoded = remuda.butler.matrix.decode_json(spec.body)
+      return table.concat({spec.headers.Authorization, spec.url, decoded.body}, "\n")
+    "#);
+    let fields: Vec<_> = request.lines().collect();
+    assert_eq!(fields[0], "Bearer test-token");
+    assert!(fields[1].starts_with("http://matrix.example.org/"));
+    assert_eq!(fields[2], "hello");
+    assert!(!request.contains("sensitive-token"), "token leaked outside the Authorization header");
+    eval(&path, "remuda.http.tick()");
 }
 
 #[test]

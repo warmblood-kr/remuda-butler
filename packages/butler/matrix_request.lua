@@ -54,6 +54,7 @@ local function config()
     if key then opts[trim(key)] = trim(value) end
   end
   local base = trim(lines[1]):gsub("/+$", "")
+  if not base:match("^https?://") then return nil, "Matrix homeserver must use http:// or https://" end
   local ca_file, pin_hex = opts.ca_file, opts.pin_sha256
   if base:match("^https://") and not ca_file and not pin_hex then
     return nil, "HTTPS Matrix homeserver requires ca_file=PATH or pin_sha256=HEX"
@@ -83,6 +84,12 @@ local function config()
     ca_file = ca_file and ca_file ~= "" and ca_file or nil,
     pin = pin,
   }
+end
+
+function matrix.configured_room()
+  local conf, err = config()
+  if not conf then return nil, err end
+  return conf.room
 end
 
 local function once(callback)
@@ -348,10 +355,19 @@ end
 function matrix.request(args, on_done)
   args = args or {}
   local done = once(on_done)
+  if type(args) ~= "table" then
+    report_error(done, "Matrix request options must be a table")
+    return { cancel = function() end }
+  end
   local conf, conf_error = config()
   if not conf then report_error(done, conf_error); return { cancel = function() end } end
   if type(args.method) ~= "string" or type(args.path) ~= "string" then
     report_error(done, "Matrix request requires method and path")
+    return { cancel = function() end }
+  end
+  local method = args.method:upper()
+  if method ~= "GET" and method ~= "PUT" and method ~= "POST" then
+    report_error(done, "Matrix request method must be GET, PUT, or POST")
     return { cancel = function() end }
   end
   if args.room ~= nil and args.room ~= conf.room then
@@ -375,11 +391,25 @@ function matrix.request(args, on_done)
   end
   local path = args.path:sub(1, 1) == "/" and args.path or ("/" .. args.path)
   local headers = {}
-  for name, value in pairs(args.headers or {}) do headers[name] = value end
+  if args.headers ~= nil and type(args.headers) ~= "table" then
+    report_error(done, "Matrix request headers must be a table")
+    return { cancel = function() end }
+  end
+  for name, value in pairs(args.headers or {}) do
+    if type(name) ~= "string" or type(value) ~= "string" then
+      report_error(done, "Matrix request header names and values must be strings")
+      return { cancel = function() end }
+    end
+    local lower = name:lower()
+    if lower ~= "authorization" and lower ~= "accept" and lower ~= "host"
+      and lower ~= "content-length" and lower ~= "transfer-encoding" then
+      headers[name] = value
+    end
+  end
   headers.Accept = "application/json"
   headers.Authorization = "Bearer " .. conf.token
   local spec = {
-    method = args.method:upper(), url = conf.base .. path, headers = headers,
+    method = method, url = conf.base .. path, headers = headers,
     body = body, timeout = timeout, connect_timeout = math.min(10, timeout),
     max_bytes = max_bytes, ca_file = conf.ca_file, pin = conf.pin,
     callback = function(result)
@@ -400,7 +430,16 @@ end
 
 function matrix.same_room(room, event_id, on_done)
   local done = once(on_done)
-  if room ~= (select(1, config()) or {}).room then
+  if type(room) ~= "string" or type(event_id) ~= "string" or event_id == "" then
+    report_error(done, "same_room requires room and event_id")
+    return { cancel = function() end }
+  end
+  local conf, conf_error = config()
+  if not conf then
+    report_error(done, conf_error)
+    return { cancel = function() end }
+  end
+  if room ~= conf.room then
     report_error(done, "room is outside the configured Matrix allowlist")
     return { cancel = function() end }
   end
