@@ -277,7 +277,8 @@ fn notify_policy_types_only_into_a_detached_or_quiet_empty_prompt() {
         &path,
         &format!(
             r#"remuda._butler_session_trace_path = {trace:?}
-            local real_ls, real_capture = remuda.ls, remuda.capture
+            local real_ls, real_capture, real_capture_styled = remuda.ls, remuda.capture, remuda.capture_styled
+            remuda.capture_styled = nil
             local row, screen = {{ name = 'p1', alive = true, attached = true }}, ''
             remuda.ls = function() return {{ row }} end
             remuda.capture = function() return screen end
@@ -298,7 +299,7 @@ fn notify_policy_types_only_into_a_detached_or_quiet_empty_prompt() {
             remuda._butler_bus.agents.p1 = nil
             row.attached = false; screen = 'x\n> co'
             r[#r + 1] = 'detached=' .. tostring(policy('p1', t + 500))
-            remuda.ls, remuda.capture = real_ls, real_capture
+            remuda.ls, remuda.capture, remuda.capture_styled = real_ls, real_capture, real_capture_styled
             return table.concat(r, ' ')"#
         ),
     );
