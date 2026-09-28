@@ -1222,6 +1222,57 @@ fn exec_butler_runs_the_builtin_package_in_the_daemons_image() {
     );
 }
 
+#[test]
+fn butler_lifecycle_reload_replaces_hooks_and_schedules_and_rolls_back() {
+    let path = scratch("butler-lifecycle-reload");
+    let _daemon = daemon_at(&path);
+    eval(&path, "remuda._butler_test_mode = true; remuda.exec('butler')");
+
+    let main = include_str!("../../packages/butler/main.lua");
+    assert!(
+        !main.contains("remuda.clear_hooks(") && !main.contains("remuda.hooks[event]"),
+        "Butler registrations must be lifecycle-owned, without file-scope clearing or hand-purging"
+    );
+
+    let counts = r#"
+        local inbox, owned, notices, reconcile = 0, 0, 0, 0
+        for _, hook in ipairs(remuda.hook_list()) do
+          if hook.group == "remuda-module:butler" then owned = owned + 1 end
+          if hook.event == "butler/deliver" and hook.id == "inbox"
+            and hook.group == "remuda-module:butler" then inbox = inbox + 1 end
+        end
+        for _, schedule in pairs(remuda.schedules) do
+          if schedule.name == "butler-notices" then notices = notices + 1 end
+          if schedule.name == "butler-reconcile" then reconcile = reconcile + 1 end
+        end
+        return table.concat({ inbox, owned, notices, reconcile }, "|")
+    "#;
+    let initial = eval(&path, counts);
+    assert_eq!(initial, "1|5|1|1", "unexpected Butler lifecycle registrations: {initial}");
+
+    for _ in 0..3 {
+        eval(&path, "remuda.reload('butler')");
+        assert_eq!(eval(&path, counts), initial, "reload duplicated Butler registrations");
+    }
+
+    let failed = eval(
+        &path,
+        r#"
+            local original = remuda.exec
+            remuda.exec = function(name, ...)
+              if name == "butler/main" then error("injected Butler start failure") end
+              return original(name, ...)
+            end
+            local ok, err = pcall(remuda.reload, "butler")
+            remuda.exec = original
+            return tostring(ok) .. "|" .. tostring(err)
+        "#,
+    );
+    assert!(failed.starts_with("false|"), "reload should report its failed start: {failed}");
+    assert!(failed.contains("injected Butler start failure"), "wrong start error: {failed}");
+    assert_eq!(eval(&path, counts), initial, "failed reload did not restore Butler registrations");
+}
+
 /// `remuda._butler_initial_name` is set before the test-mode return (see
 /// `init.lua`), so this reaches real code without needing the live `claude`
 /// launch that `remuda._butler_test_mode` exists to avoid.
