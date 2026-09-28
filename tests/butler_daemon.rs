@@ -2946,6 +2946,114 @@ fn butler_mail_unreadable_envelope_is_retried_in_the_same_bus() {
     assert!(read_ids.contains("message-late"), "the delivered id was not marked read");
 }
 
+const REPLY_B: &str = "01REP1YBUT1ER0000000000000";
+const REPLY_F: &str = "01REP1YF1XER00000000000000";
+
+fn hex_component(id: &str) -> String {
+    id.bytes().map(|b| format!("{b:02x}")).collect()
+}
+
+/// `mail.lua` plus two addresses, `B` (butler) and `F` (fixer), in Lua.
+fn reply_prelude(root: &Path) -> String {
+    format!(
+        r#"{}
+           local M = remuda._butler_mail
+           local B = {{ host = "local", id = "{REPLY_B}", alias = "butler", session = "butler" }}
+           local F = {{ host = "local", id = "{REPLY_F}", alias = "fixer", session = "fixer" }}"#,
+        mail_config_lua(root)
+    )
+}
+
+/// RFC 5322 §3.6.4: a reply carries in_reply_to = parent and references =
+/// parent's references + parent; it goes to the parent's sender.
+#[test]
+fn butler_mail_reply_threads_with_in_reply_to_and_references() {
+    let dir = scratch_dir("butler-mail-thread");
+    let (root, _, _) = seeded_mail_root(&dir, REPLY_F);
+    let path = scratch("butler-mail-thread");
+    let _daemon = daemon_at(&path);
+    let out = eval(
+        &path,
+        &format!(
+            r#"{}
+               local a = assert(M.queue(B, F, "question"))
+               local b = assert(M.reply(F, a.id, "answer"))
+               local c = assert(M.reply(B, b.id, "thanks"))
+               return table.concat({{ a.id, b.id, c.id, b.to[1].alias, c.to[1].alias, b.subject,
+                 c.subject, table.concat(c.references, ","), c.in_reply_to }}, "\n")"#,
+            reply_prelude(&root)
+        ),
+    );
+    let v: Vec<&str> = out.lines().collect();
+    let (a, b, c) = (v[0], v[1], v[2]);
+    assert_eq!(v[3], "butler", "a reply goes to the parent's sender");
+    assert_eq!(v[4], "fixer");
+    assert_eq!(v[5], "Re: Message from butler");
+    assert_eq!(v[6], "Re: Message from butler", "Re: is not doubled");
+    assert_eq!(v[7], format!("{a},{b}"), "references = parent's references + parent");
+    assert_eq!(v[8], b);
+    let envelope = std::fs::read_to_string(root.join(format!("messages/{c}.json"))).unwrap();
+    assert!(envelope.contains(&format!(r#""in_reply_to":"{b}""#)), "{envelope}");
+    assert!(envelope.contains(&format!(r#""references":["{a}","{b}"]"#)), "{envelope}");
+
+    let fresh = eval(&path, &format!("{}\nreturn M.inbox(F.id)", reply_prelude(&root)));
+    assert!(fresh.contains(&format!("  in reply to {b} (thread {a})")), "{fresh}");
+    assert!(fresh.contains("thanks") && fresh.contains("question"), "{fresh}");
+}
+
+/// JWZ safety: a missing parent keeps the thread, a self-reference is
+/// dropped; an envelope from before threading replies like a root.
+#[test]
+fn butler_mail_reply_tolerates_old_missing_and_self_referencing_parents() {
+    let dir = scratch_dir("butler-mail-jwz");
+    let (root, f_inbox, _) = seeded_mail_root(&dir, REPLY_F);
+    let from_b = format!(r#""from":{{"host":"local","id":"{REPLY_B}","alias":"butler","kind":"","leader":"","session":"butler"}}"#);
+    for (id, extra) in [
+        ("message-old", String::new()),
+        ("message-orphan", r#","in_reply_to":"message-gone""#.to_string()),
+        ("message-selfref", r#","in_reply_to":"message-selfref","references":["message-selfref"]"#.to_string()),
+        ("message-op", String::new()),
+    ] {
+        let from = if id == "message-op" {
+            r#""from":{"host":"local","id":"","alias":"operator","kind":"","leader":"","session":"operator"}"#.to_string()
+        } else {
+            from_b.clone()
+        };
+        std::fs::write(
+            root.join(format!("messages/{id}.json")),
+            format!(r#"{{"id":"{id}",{from},"subject":"S {id}"{extra},"body":{{"object_id":"object-a"}}}}"#),
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        &f_inbox,
+        "{\"message_id\":\"message-old\"}\n{\"message_id\":\"message-orphan\"}\n{\"message_id\":\"message-selfref\"}\n{\"message_id\":\"message-op\"}\n",
+    )
+    .unwrap();
+    let path = scratch("butler-mail-jwz");
+    let _daemon = daemon_at(&path);
+    let out = eval(
+        &path,
+        &format!(
+            r#"{}
+               local function refs(id) local m = assert(M.reply(F, id, "r")); return table.concat(m.references, ",") .. "|" .. m.to[1].alias end
+               local _, not_mine = M.reply(B, "message-old", "x")
+               local _, from_op = M.reply(F, "message-op", "x")
+               return table.concat({{ refs("message-old"), refs("message-orphan"), refs("message-selfref"),
+                 tostring(not_mine), tostring(from_op) }}, "\n")"#,
+            reply_prelude(&root)
+        ),
+    );
+    let v: Vec<&str> = out.lines().collect();
+    assert_eq!(v[0], "message-old|butler", "an old envelope is a thread root");
+    assert_eq!(v[1], "message-gone,message-orphan|butler", "a missing parent still threads");
+    assert_eq!(v[2], "message-selfref|butler", "a self-reference is dropped, never looped");
+    assert!(v[3].contains("not delivered"), "reply is only for mail delivered to you: {out}");
+    assert!(v[4].contains("no Butler inbox"), "operator has no inbox to reply to: {out}");
+    let b_view = eval(&path, &format!("{}\nreturn M.inbox(B.id)", reply_prelude(&root)));
+    assert!(b_view.contains("in reply to message-orphan (thread message-gone)"), "{b_view}");
+}
+
 #[test]
 fn butler_mail_survives_a_fresh_lua_mailbox_and_remembers_reads() {
     let dir = scratch_dir("butler-mail-reload");
