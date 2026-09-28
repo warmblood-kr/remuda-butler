@@ -2098,7 +2098,7 @@ fn butler_matrix_http_uses_authenticated_allowlisted_stub_client() {
         .arg(&config)
         .env(
             "PYTHONPATH",
-            concat!(env!("CARGO_MANIFEST_DIR"), "/packages/butler"),
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../packages/butler"),
         )
         .output()
         .expect("run shared Matrix client");
@@ -2138,7 +2138,7 @@ fn butler_matrix_http_wrong_pin_sends_no_authenticated_request() {
     )
     .expect("write wrong-pin config");
     let output = std::process::Command::new("python3")
-        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/packages/butler/matrix_http.py"))
+        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../packages/butler/matrix_http.py"))
         .arg(&token)
         .arg(&config)
         .arg("GET")
@@ -2180,7 +2180,7 @@ fn butler_matrix_http_correct_pin_and_ca_trust_the_stub() {
         .expect("compute certificate pin");
     assert!(pin.status.success());
     let pin = String::from_utf8(pin.stdout).expect("pin output").trim().to_owned();
-    let client = concat!(env!("CARGO_MANIFEST_DIR"), "/packages/butler/matrix_http.py");
+    let client = concat!(env!("CARGO_MANIFEST_DIR"), "/../packages/butler/matrix_http.py");
 
     for policy in [format!("pin_sha256={pin}"), format!("ca_file={}", cert.display())] {
         let config = dir.join("trusted-config");
