@@ -433,6 +433,7 @@ bus.pending_tasks = bus.pending_tasks or {}
 bus.codex_update_state = bus.codex_update_state or { claimed = false, done = false }
 bus.codex_update_relaunches = bus.codex_update_relaunches or {}
 bus.codex_update_state.waiting = bus.codex_update_state.waiting or {}
+bus.codex_update_state.restart_waiting = bus.codex_update_state.restart_waiting or {}
 
 -- Contribution points (hook-design §4): core's owned registry when this core
 -- has one (remuda#141), else Butler's own with the same order rules, on bus.
@@ -1213,6 +1214,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       update_relaunch_record_ref.version = update_version
       update_relaunch_record_ref.expected_close = true
       if bus.codex_update_state.waiting then bus.codex_update_state.waiting[actual] = nil end
+      if bus.codex_update_state.restart_waiting then bus.codex_update_state.restart_waiting[actual] = nil end
       local closed, result = pcall(remuda.close, actual)
       if not closed or result == false then
         bus.codex_update_relaunches[actual] = nil
@@ -1222,12 +1224,21 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       remuda.cancel(poke)
       return true
     end
+    local function finish_update()
+      local state = bus.codex_update_state
+      state.done, state.claimed, state.done_version, state.owner = true, false, update_version, nil
+      state.restart_waiting = state.restart_waiting or {}
+      for member in pairs(state.waiting or {}) do state.restart_waiting[member] = true end
+      state.waiting = {}
+    end
     -- Either timeout means the task never reached the agent: say so to its
     -- leader rather than only in the trace (#29).
     local function give_up(detail)
       remuda.cancel(poke)
       if confirm then remuda.cancel(confirm) end
       bus.pending_tasks[actual] = nil
+      if bus.codex_update_state.waiting then bus.codex_update_state.waiting[actual] = nil end
+      if bus.codex_update_state.restart_waiting then bus.codex_update_state.restart_waiting[actual] = nil end
       _butler_session_trace("task_poke_timeout", actual .. detail)
       pcall(remuda._butler_send, "butler", parent or "butler", "Task for " .. actual
         .. " was not delivered: its pane never became ready or free to type into."
@@ -1239,8 +1250,8 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       bus.pending_tasks[actual] = nil
       _butler_session_trace("codex_update_timeout", actual .. detail)
       pcall(remuda._butler_send, "butler", parent or "butler", "Codex update for " .. actual
-        .. " is still in progress after " .. tostring(tonumber(remuda._butler_codex_update_timeout) or 300)
-        .. " seconds. Its pane was left open; task delivery will resume if Codex exits after updating.")
+        .. " has not reached a safe relaunch after " .. tostring(tonumber(remuda._butler_codex_update_timeout) or 300)
+        .. " seconds. Its pane was left open; task delivery will resume when the pane is safe to relaunch.")
     end
     poke = remuda.schedule({ every = 0.5, run = function()
       if update_relaunch_record_ref and (update_relaunch_record_ref.relaunched or update_relaunch_record_ref.cancelled) then
@@ -1264,8 +1275,13 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
         if not modal and startup.ready and startup.ready(screen) then
           -- The update completed in place. Restart the same alias with the
           -- same identity so the task is submitted only by its fresh pane.
-          if not relaunch_after_update() and modal_polls >= startup_modal_attempt_limit() then
-            report_update_timeout(" human attached")
+          finish_update()
+          if not relaunch_after_update() then
+            modal_polls = modal_polls + 1
+            if modal_polls >= startup_modal_attempt_limit() then
+              bus.codex_update_state.restart_waiting[actual] = true
+              report_update_timeout(" update completed while human attached")
+            end
           end
           return
         end
@@ -1277,7 +1293,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
             if update_state.owner == actual then
               update_state.claimed, update_state.owner = false, nil
               update_state.aborted_version = update_version
-              update_state.waiting = {}
+              update_state.waiting, update_state.restart_waiting = {}, {}
             end
             bus.codex_update_relaunches[actual] = nil
             update_relaunch_record_ref = nil
@@ -1294,6 +1310,13 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       if update_state.done and update_state.waiting and update_state.waiting[actual] then
         update_version, waiting_for_update = update_state.done_version, true
         if relaunch_after_update() then return end
+        modal_polls = modal_polls + 1
+        if modal_polls >= startup_modal_attempt_limit() then give_up(" update completed while human attached") end
+        return
+      end
+      if update_state.done and update_state.restart_waiting and update_state.restart_waiting[actual] then
+        update_version, waiting_for_update = update_state.done_version, true
+        if relaunch_after_update() then update_state.restart_waiting[actual] = nil; return end
         modal_polls = modal_polls + 1
         if modal_polls >= startup_modal_attempt_limit() then give_up(" update completed while human attached") end
         return
@@ -1316,11 +1339,11 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
         end
         return
       end
-      local version = modal and modal.update and codex_update_version(screen) or nil
-      if version then
+      local version = modal and modal.update and (codex_update_version(screen) or "unknown") or nil
+      if version and version ~= "unknown" then
         if update_state.version and update_state.version ~= version and not update_state.claimed then
           update_state.done, update_state.done_version = false, nil
-          update_state.waiting = {}
+          update_state.waiting, update_state.restart_waiting = {}, {}
         end
         update_state.version = version
         update_version = version
@@ -1383,9 +1406,6 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
               update_waiting = true
               update_deadline = os.time() + (tonumber(remuda._butler_codex_update_timeout) or 300)
               update_state.waiting = update_state.waiting or {}
-              for member, agent in pairs(bus.agents) do
-                if member ~= actual and agent.kind == "codex" then update_state.waiting[member] = true end
-              end
               bus.codex_update_relaunches[actual] = update_relaunch_record()
               update_relaunch_record_ref = bus.codex_update_relaunches[actual]
               update_relaunch_record_ref.version = update_version
@@ -1407,7 +1427,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
           return
         end
         modal_polls = modal_polls + 1
-        if modal_polls >= startup_modal_attempt_limit() then give_up(" modal") end
+        if modal_polls >= startup_modal_attempt_limit() then give_up(" modal"); return end
         if startup_action_safe and not startup_action_safe(actual) then return end
         for _, key in ipairs(modal.keys or {}) do pcall(remuda.key, actual, key) end
         settle = attempts + 3
@@ -2443,16 +2463,20 @@ function remuda._butler_session_exited(name)
     if bus.codex_update_state.owner == name then
       bus.codex_update_state.claimed, bus.codex_update_state.owner = false, nil
       bus.codex_update_state.aborted_version = update_restart.version
-      bus.codex_update_state.waiting = {}
+      bus.codex_update_state.waiting, bus.codex_update_state.restart_waiting = {}, {}
     end
     update_restart = nil
   end
   if update_restart then
     update_restart.relaunched = true
     bus.codex_update_relaunches[name] = nil
-    bus.codex_update_state.done, bus.codex_update_state.claimed = true, false
-    bus.codex_update_state.done_version = update_restart.version
-    bus.codex_update_state.owner = nil
+    local update_state = bus.codex_update_state
+    update_state.done, update_state.claimed = true, false
+    update_state.done_version = update_restart.version
+    update_state.owner = nil
+    update_state.restart_waiting = update_state.restart_waiting or {}
+    for member in pairs(update_state.waiting or {}) do update_state.restart_waiting[member] = true end
+    update_state.waiting = {}
   end
   -- #29: the mail stays in the inbox; only the pending pane notice goes.
   bus.notices[name], bus.notice_screens[name], bus.pending_tasks[name] = nil, nil, nil
