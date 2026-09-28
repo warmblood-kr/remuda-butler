@@ -2481,6 +2481,51 @@ fn matrix_relay_restarts_after_unexpected_exit_and_records_it() {
 }
 
 #[test]
+fn matrix_relay_restart_waits_for_backoff_after_daemon_uptime_exceeds_delay() {
+    let dir = scratch_dir("matrix-backoff-gap");
+    let marker = dir.join("relay-starts.log");
+    let trace = dir.join("matrix-trace.log");
+    let (token_path, config_path) = butler_config(
+        &dir, "backoff-gap", "http://127.0.0.1:1", "!room:example.org", "@bot:example.org", "",
+    );
+    let source = format!(
+        "import pathlib,time; pathlib.Path({}).open('a').write(str(time.monotonic())+'\\n'); raise SystemExit(7)",
+        serde_json::to_string(&marker.to_string_lossy()).unwrap(),
+    );
+    let token_env = token_path.to_string_lossy().to_string();
+    let config_env = config_path.to_string_lossy().to_string();
+    let _daemon = Daemon::spawn_with_env(
+        &dir,
+        &[
+            ("REMUDA_BUTLER_TOKEN", &token_env),
+            ("REMUDA_BUTLER_CONFIG", &config_env),
+        ],
+    );
+    let path = daemon::socket_path_in(&dir, "s");
+    eval(
+        &path,
+        &format!(
+            "remuda._butler_test_mode = 'lifecycle'; remuda._butler_argv = {{'sh','-c','sleep 60'}}; remuda._butler_helper_src_override = {}; remuda._butler_matrix_trace_path = {}",
+            lua_raw_string(&source), lua_raw_string(&trace.to_string_lossy()),
+        ),
+    );
+    let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let starts = loop {
+        let starts = std::fs::read_to_string(&marker).unwrap_or_default();
+        if starts.lines().count() >= 5 { break starts; }
+        assert!(Instant::now() < deadline, "relay did not reach the 8-second retry: {starts}");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let times: Vec<f64> = starts.lines().map(|line| line.parse().unwrap()).collect();
+    let gap = times[4] - times[3];
+    assert!(gap >= 7.0, "8-second backoff was shortened after daemon uptime exceeded it: {gap}s; {starts}");
+    eval(&path, "remuda._butler_matrix_stop()");
+}
+
+#[test]
 fn matrix_relay_recovery_resets_accumulated_restart_backoff() {
     let dir = scratch_dir("matrix-backoff-reset");
     let trace = dir.join("matrix-trace.log");
@@ -2660,7 +2705,7 @@ fn matrix_relay_recovers_from_a_corrupt_state_file_and_acknowledges_mail() {
         &dir, "corrupt-state", &stub.base_url(), room, "@bot:example.org", "@alice:example.org",
     );
     let since_path = format!("{}.since", config_path.display());
-    std::fs::write(&since_path, "not valid JSON").unwrap();
+    std::fs::write(&since_path, r#"{"processed_event_ids":5}"#).unwrap();
     let ack_path = format!("{}.acks", config_path.display());
     eval(&path, "remuda.corrupt_lines = {};");
     eval(

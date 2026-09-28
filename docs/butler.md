@@ -10,6 +10,11 @@ ID, and UTC timestamp. The relay persists its sync cursor and processed event
 IDs beside its config so it can resume after a restart. Without Matrix config,
 it starts no Matrix relay.
 
+If the saved `.since` state is unreadable or has invalid field types, the relay
+starts with a fresh sync baseline. It does not replay room history; messages
+sent while the relay was down can be missed, and pending deliveries recorded
+only in the damaged state file cannot be recovered.
+
 The Matrix config is a newline-delimited file: homeserver URL, room ID, the
 Matrix account's own user ID, and a comma-separated sender allowlist. An
 optional fifth line set to `messages` enables the `/rooms/{room}/messages`

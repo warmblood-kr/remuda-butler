@@ -48,14 +48,32 @@ def load_state():
     if STATE_FILE.exists():
         try:
             state = json.loads(STATE_FILE.read_text())
+            if not isinstance(state, dict):
+                raise ValueError("state root must be an object")
+            since = state.get("since")
+            messages_since = state.get("messages_since")
+            processed_ids = state.get("processed_event_ids", [])
+            pending = state.get("pending_events", {})
+            if since is not None and not isinstance(since, str):
+                raise ValueError("since must be a string or null")
+            if messages_since is not None and not isinstance(messages_since, str):
+                raise ValueError("messages_since must be a string or null")
+            if not isinstance(processed_ids, list) or not all(
+                isinstance(event_id, str) for event_id in processed_ids
+            ):
+                raise ValueError("processed_event_ids must be a string list")
+            if not isinstance(pending, dict) or not all(
+                isinstance(event_id, str) and isinstance(event, dict)
+                for event_id, event in pending.items()
+            ):
+                raise ValueError("pending_events must be an object of event objects")
             # Read the old cursor-only format so upgrades resume in place.
             processed = {}
-            for event_id in state.get("processed_event_ids", []):
+            for event_id in processed_ids:
                 if isinstance(event_id, str) and event_id:
                     add_processed(processed, event_id)
-            return (state.get("since"), processed,
-                    state.get("messages_since"), state.get("pending_events", {}))
-        except (ValueError, AttributeError):
+            return since, processed, messages_since, pending
+        except (ValueError, AttributeError, TypeError):
             return None, {}, None, {}
     return None, {}, None, {}
 
@@ -204,6 +222,7 @@ def main():
                 time.sleep(5)
 
     emit_pending(pending)
+    healthy_reported = False
     while True:
         reconcile_acks(since, processed, messages_since, pending)
         try:
@@ -229,7 +248,11 @@ def main():
         since = resp["next_batch"]
         save_state(since, processed, messages_since, pending)
         emit_pending(pending, new_ids)
-        print("__REMUDA_MATRIX_HEALTHY__", flush=True)
+        if room:
+            healthy_reported = True
+        elif not healthy_reported:
+            print("__REMUDA_MATRIX_HEALTHY__", flush=True)
+            healthy_reported = True
 
 
 if __name__ == "__main__":

@@ -41,6 +41,7 @@ function remuda._butler_matrix_line(line)
     created_at = created_at, matrix = matrix,
   })
   if delivered == nil then error("no Butler mail channel accepted Matrix event " .. event_id, 0) end
+  remuda._butler_matrix_restart_attempts = 0
   if config and config.config_path then
     local ack = assert(io.open(config.config_path .. ".acks", "a"))
     assert(ack:write(event_id, "\n"))
@@ -130,11 +131,13 @@ function remuda._butler_matrix_sync_exit(code)
   remuda._butler_matrix_restart_attempts = attempts
   local delay = math.min(60, 2 ^ math.min(6, attempts - 1))
   matrix_trace("relay_exit", "code=" .. tostring(code) .. " attempt=" .. attempts .. " backoff=" .. delay)
+  local due = os.time() + delay
   local old = remuda._butler_matrix_restart_schedule
   if old then pcall(remuda.cancel, old) end
   local handle
-  handle = remuda.schedule({ name = "butler-matrix-restart", every = delay, run = function()
+  handle = remuda.schedule({ name = "butler-matrix-restart", every = 1, run = function()
     if remuda._butler_matrix_restart_schedule == handle then
+      if os.time() < due then return end
       remuda.cancel(handle)
       remuda._butler_matrix_restart_schedule = nil
       remuda._butler_matrix_start()
