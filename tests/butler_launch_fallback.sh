@@ -3,17 +3,17 @@ set -euo pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 REMUDA_BIN=${REMUDA_BIN:-remuda}
 REMUDA_BIN=$(command -v "$REMUDA_BIN")
-SCRATCH=$(mktemp -d /tmp/butler-fallback.XXXXXX)
+SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/bf.XXXXXX")
 SERVER=butler-fallback
 export HOME=$SCRATCH/home XDG_CONFIG_HOME=$SCRATCH/config XDG_DATA_HOME=$SCRATCH/data
-export REMUDA_RUNTIME_DIR=$SCRATCH/run REMUDA_NO_UPDATE_CHECK=1 REMUDA_BUTLER_PROJECT_HOME=$SCRATCH/projects
+export REMUDA_RUNTIME_DIR=$SCRATCH/r REMUDA_NO_UPDATE_CHECK=1 REMUDA_BUTLER_PROJECT_HOME=$SCRATCH/projects
 unset REMUDA_BUTLER_AGENT_ORDER
 mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME/remuda/mods/butler" "$REMUDA_RUNTIME_DIR" "$SCRATCH/bin"
 tar -c -C "$REPO" extension.toml packages | tar -x -C "$XDG_DATA_HOME/remuda/mods/butler"
 cleanup() {
-  REMUDA_RUNTIME_DIR="$SCRATCH/run" "$REMUDA_BIN" -s butler-fallback stop -f >/dev/null 2>&1 || true
-  REMUDA_RUNTIME_DIR="$SCRATCH/pending-run" "$REMUDA_BIN" -s butler-fallback-pending stop -f >/dev/null 2>&1 || true
-  REMUDA_RUNTIME_DIR="$SCRATCH/empty-run" "$REMUDA_BIN" -s butler-fallback-empty stop -f >/dev/null 2>&1 || true
+  REMUDA_RUNTIME_DIR="$SCRATCH/r" "$REMUDA_BIN" -s butler-fallback stop -f >/dev/null 2>&1 || true
+  REMUDA_RUNTIME_DIR="$SCRATCH/p" "$REMUDA_BIN" -s butler-fallback-pending stop -f >/dev/null 2>&1 || true
+  REMUDA_RUNTIME_DIR="$SCRATCH/e" "$REMUDA_BIN" -s butler-fallback-empty stop -f >/dev/null 2>&1 || true
   rm -rf "$SCRATCH"
 }
 trap cleanup EXIT INT TERM
@@ -159,7 +159,7 @@ done
 # command surface loaded and reports the failure through status.
 SERVER=butler-fallback-empty
 export HOME=$SCRATCH/empty-home XDG_CONFIG_HOME=$SCRATCH/empty-config
-export XDG_DATA_HOME=$SCRATCH/empty-data REMUDA_RUNTIME_DIR=$SCRATCH/empty-run
+export XDG_DATA_HOME=$SCRATCH/empty-data REMUDA_RUNTIME_DIR=$SCRATCH/e
 mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME/remuda/mods/butler" "$REMUDA_RUNTIME_DIR"
 tar -c -C "$REPO" extension.toml packages | tar -x -C "$XDG_DATA_HOME/remuda/mods/butler"
 export PATH="$SCRATCH/empty-bin:/usr/bin:/bin"
@@ -196,7 +196,7 @@ done
 # the pending prefix while the image continues servicing requests.
 SERVER=butler-fallback-pending
 export HOME=$SCRATCH/pending-home XDG_CONFIG_HOME=$SCRATCH/pending-config
-export XDG_DATA_HOME=$SCRATCH/pending-data REMUDA_RUNTIME_DIR=$SCRATCH/pending-run
+export XDG_DATA_HOME=$SCRATCH/pending-data REMUDA_RUNTIME_DIR=$SCRATCH/p
 mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME/remuda/mods/butler" "$REMUDA_RUNTIME_DIR" "$SCRATCH/pending-bin"
 tar -c -C "$REPO" extension.toml packages | tar -x -C "$XDG_DATA_HOME/remuda/mods/butler"
 cat > "$SCRATCH/pending-bin/claude" <<'STUB'
