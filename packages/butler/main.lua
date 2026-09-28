@@ -411,6 +411,8 @@ remuda._butler_bus = remuda._butler_bus or {
 }
 local bus = remuda._butler_bus
 bus.pending_tasks = bus.pending_tasks or {}
+bus.codex_update_state = bus.codex_update_state or { claimed = false, done = false }
+bus.codex_update_relaunches = bus.codex_update_relaunches or {}
 
 -- Contribution points (hook-design §4): core's owned registry when this core
 -- has one (remuda#141), else Butler's own with the same order rules, on bus.
@@ -794,13 +796,49 @@ local function write_agent_guidance(root, text, replace)
   f:close()
 end
 local _butler_session_trace -- defined below; the task poke fires later
-local function launch_agent(kind, requested_name, cwd, model, parent, task)
+local function option_number(screen, matches)
+  if type(remuda.expect_option) == "function" then
+    local ok, number = pcall(remuda.expect_option, screen, matches)
+    if ok then return number end
+  end
+  -- Compatibility for pinned cores predating expect_option; the selection is
+  -- still matched by label, never by a fixed slot or Enter.
+  local found
+  for line in (tostring(screen or "") .. "\n"):gmatch("(.-)\n") do
+    line = line:gsub("^%s*", "")
+    for _, marker in ipairs({ "│", "┃", "❯", "›", ">" }) do
+      if line:sub(1, #marker) == marker then
+        line = line:sub(#marker + 1):gsub("^%s*", "")
+        break
+      end
+    end
+    local number, label = line:match("^%s*(%d+)[%.)]%s*(.-)%s*$")
+    if number and matches(label) then
+      if found then return nil end
+      found = number
+    end
+  end
+  return found
+end
+local function startup_modal(startup, screen)
+  local lower = screen:lower()
+  for _, modal in ipairs(startup.modals or {}) do
+    if modal.match and lower:find(modal.match:lower(), 1, true) then return modal end
+  end
+end
+local function launch_agent(kind, requested_name, cwd, model, parent, task, relaunch_identity)
   local name = requested_name or kind
   if bus.agents[name] then
     error("alias " .. name .. " is live as " .. tostring(bus.agents[name].id) .. "; pick another alias", 0)
   end
   local parent_identity = parent and bus.agents[parent]
-  local identity = register_identity(name, kind, parent_identity and parent_identity.id or "")
+  local identity = relaunch_identity and (bus.identity_ids[relaunch_identity] or bus.identities[name])
+    or register_identity(name, kind, parent_identity and parent_identity.id or "")
+  if relaunch_identity then
+    identity.kind, identity.leader_id, identity.state = kind, parent_identity and parent_identity.id or "", "running"
+    identity.ended_at, identity.reason = nil, nil
+    identity_record(identity)
+  end
   if not cwd and data_home then
     cwd = data_home .. "/remuda/butler/sessions/" .. name
     remuda.mkdir(cwd)
@@ -828,6 +866,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
   bus.agents[actual] = {
     kind = kind, token = token, model = model, telemetry = agent_telemetry,
     parent = parent, children = {}, id = identity.id, alias = actual, session_name = actual,
+    cwd = cwd, task = task,
   }
   if parent and bus.agents[parent] then
     local children = bus.agents[parent].children
@@ -837,8 +876,10 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
   if not migrated then error("cannot migrate legacy Butler mail: " .. tostring(migration_error), 0) end
   mailbox(identity.id)
   -- A failed welcome write must not prevent the agent from starting.
-  pcall(queue_message, mail_address(parent or "butler"), mail_address(actual),
-    team_member_guidance(parent or "butler"), "Welcome to Butler")
+  if not relaunch_identity then
+    pcall(queue_message, mail_address(parent or "butler"), mail_address(actual),
+      team_member_guidance(parent or "butler"), "Welcome to Butler")
+  end
   if task and task ~= "" then
     -- Keep an immediate mail notice out of the child's first prompt until the
     -- delegated task has been submitted.
@@ -847,6 +888,25 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
     -- the composer is ready; never blind-type into an unknown dialog.
     local startup = remuda._butler_agent_startup[kind] or {}
     local poke, confirm, attempts, settle, deferred = nil, nil, 0, 0, 0
+    local update_waiting, update_deadline = false, 0
+    local update_relaunch_record_ref
+    local function update_relaunch_record()
+      local agent = bus.agents[actual] or {}
+      return {
+        kind = kind, name = actual, cwd = agent.cwd, model = agent.model,
+        parent = agent.parent, task = task, identity = agent.id,
+      }
+    end
+    local function relaunch_after_update()
+      if update_relaunch_record_ref and update_relaunch_record_ref.relaunched then
+        remuda.cancel(poke)
+        return
+      end
+      bus.codex_update_relaunches[actual] = update_relaunch_record()
+      update_relaunch_record_ref = bus.codex_update_relaunches[actual]
+      remuda.cancel(poke)
+      pcall(remuda.close, actual)
+    end
     -- Either timeout means the task never reached the agent: say so to its
     -- leader rather than only in the trace (#29).
     local function give_up(detail)
@@ -859,6 +919,10 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
         .. " Resend it with `remuda butler send " .. actual .. " TASK` once it is.")
     end
     poke = remuda.schedule({ every = 0.5, run = function()
+      if update_relaunch_record_ref and update_relaunch_record_ref.relaunched then
+        remuda.cancel(poke)
+        return
+      end
       attempts = attempts + 1
       -- A short-lived launcher (or a failed executable) can disappear before
       -- the agent has painted its composer. A deferred poke is best-effort; it
@@ -870,6 +934,67 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
         return
       end
       if attempts < settle then return end -- let an answered modal repaint
+      local modal = startup_modal(startup, screen)
+      if update_waiting then
+        if not modal and startup.ready and startup.ready(screen) then
+          -- The update completed in place. Restart the same alias with the
+          -- same identity so the task is submitted only by its fresh pane.
+          relaunch_after_update()
+          return
+        end
+        if os.time() >= update_deadline then
+          local update_state = bus.codex_update_state
+          update_state.done, update_state.claimed = true, false
+          update_state.owner = nil
+          local skip = modal and modal.update and option_number(screen, function(label)
+            return label:lower() == "skip"
+          end)
+          if skip then
+            pcall(remuda.key, actual, skip)
+            bus.codex_update_relaunches[actual] = nil
+            update_relaunch_record_ref = nil
+            update_waiting, settle = false, attempts + 3
+            return
+          end
+          -- The attempted update stalled or failed. Relaunch once with the
+          -- shared guard set, so the next update prompt is skipped by label.
+          relaunch_after_update()
+          return
+        end
+        return
+      end
+      if modal then
+        _butler_session_trace("startup_modal", actual .. " " .. modal.match)
+        if modal.update then
+          local update_state = bus.codex_update_state
+          if not update_state.claimed and not update_state.done then
+            local update = option_number(screen, function(label)
+              return label:lower():find("update now", 1, true) ~= nil
+            end)
+            if update then
+              update_state.claimed, update_state.owner = true, actual
+              update_waiting = true
+              update_deadline = os.time() + (tonumber(remuda._butler_codex_update_timeout) or 45)
+              bus.codex_update_relaunches[actual] = update_relaunch_record()
+              update_relaunch_record_ref = bus.codex_update_relaunches[actual]
+              local pressed = pcall(remuda.key, actual, update)
+              if pressed then return end
+              bus.codex_update_relaunches[actual] = nil
+              update_relaunch_record_ref = nil
+              update_state.done, update_state.claimed, update_state.owner = true, false, nil
+            end
+          end
+          local skip = option_number(screen, function(label) return label:lower() == "skip" end)
+          if skip then
+            pcall(remuda.key, actual, skip)
+            settle = attempts + 3
+          end
+          return
+        end
+        for _, key in ipairs(modal.keys or {}) do pcall(remuda.key, actual, key) end
+        settle = attempts + 3
+        return
+      end
       if not startup.ready or startup.ready(screen) then
         -- #29: never type the task over a human's line. Waiting is bounded
         -- separately (default 600 ticks = 300s); then the leader is told.
@@ -925,14 +1050,6 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
           end
         end })
         return
-      end
-      for _, modal in ipairs(startup.modals or {}) do
-        if screen:find(modal.match, 1, true) then
-          _butler_session_trace("startup_modal", actual .. " " .. modal.match)
-          for _, key in ipairs(modal.keys) do pcall(remuda.key, actual, key) end
-          settle = attempts + 3
-          return
-        end
       end
       if attempts >= (remuda._butler_task_poke_attempts or 60) then give_up("") end
     end })
@@ -1725,6 +1842,13 @@ if not bus.close_wrapper_installed and type(remuda.close) == "function" then
 end
 function remuda._butler_session_exited(name)
   _butler_session_trace("session_exited", name)
+  local update_restart = bus.codex_update_relaunches[name]
+  if update_restart then
+    update_restart.relaunched = true
+    bus.codex_update_relaunches[name] = nil
+    bus.codex_update_state.done, bus.codex_update_state.claimed = true, false
+    bus.codex_update_state.owner = nil
+  end
   -- #29: the mail stays in the inbox; only the pending pane notice goes.
   bus.notices[name], bus.notice_screens[name], bus.pending_tasks[name] = nil, nil, nil
   local exited = bus.agents[name]
@@ -1748,6 +1872,17 @@ function remuda._butler_session_exited(name)
   if name == butler_name then
     _butler_session_trace("relaunching", name)
     remuda._butler_reconcile()
+  end
+  if update_restart then
+    _butler_session_trace("codex_updated_relaunch", name)
+    local ok, err = pcall(launch_agent, update_restart.kind, update_restart.name,
+      update_restart.cwd, update_restart.model, update_restart.parent, update_restart.task,
+      update_restart.identity)
+    if not ok then
+      _butler_session_trace("codex_updated_relaunch_failed", name .. ": " .. tostring(err))
+      pcall(remuda._butler_send, "butler", update_restart.parent or "butler",
+        "Codex update completed but " .. name .. " could not be relaunched: " .. tostring(err))
+    end
   end
 end
 

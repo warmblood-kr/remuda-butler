@@ -3601,20 +3601,52 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
               rule .. "\n❯ \n" .. rule,
             }},
             ["t-codex"] = {{
-              "  Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip\n  3. Skip until next version",
+              "  Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip\n  3. Skip until next version\n› Ask Codex to do anything",
+              "› Ask Codex to do anything",
+            }},
+            ["t-codex-peer"] = {{
+              "  Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip\n  3. Skip until next version\n› Ask Codex to do anything",
+              "› Ask Codex to do anything",
+            }},
+            ["t-codex-timeout"] = {{
+              "  Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip\n  3. Skip until next version\n› Ask Codex to do anything",
               "› Ask Codex to do anything",
             }},
             ["t-stuck"] = {{ " Some unknown dialog\n ❯ 1. No, exit" }},
           }}
           local log = {{}}
           remuda._t = log
+          remuda._butler_bus.codex_update_state = {{claimed=false, done=false}}
+          remuda._butler_codex_update_timeout = 2
+          local native_new = remuda.new
+          remuda.new = function(name, ...)
+            local actual = native_new(name, ...)
+            if name == "t-codex" or name == "t-codex-peer" then log[#log + 1] = name .. " launch" end
+            if name == "t-codex-timeout" then
+              log[#log + 1] = name .. " launch"
+              screens[name] = {{ "  Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip\n  3. Skip until next version\n› Ask Codex to do anything" }}
+            end
+            return actual
+          end
           remuda.capture = function(n)
             local q = screens[n]
             if #q > 1 then return table.remove(q, 1) end
             return q[1]
           end
           remuda.capture_styled = nil
-          remuda.key = function(n, k) log[#log + 1] = n .. " key " .. k end
+          remuda.key = function(n, k)
+            log[#log + 1] = n .. " key " .. k
+            if (n == "t-codex" or n == "t-codex-peer") and k == "1" then
+              screens[n] = {{ "› Ask Codex to do anything" }}
+              remuda.close(n) -- the update completed and Codex exited
+            elseif (n == "t-codex" or n == "t-codex-peer") and k == "2" then
+              screens[n] = {{ "› Ask Codex to do anything" }}
+            elseif n == "t-codex-timeout" and k == "1" then
+              screens[n] = {{ "Updating Codex..." }} -- update never finishes
+            elseif n == "t-codex-timeout" and k == "2" then
+              screens[n] = {{ "› Ask Codex to do anything" }}
+            end
+          end
           remuda.type_text = function(n, t)
             log[#log + 1] = n .. " type " .. t
             local glyph = n == "t-codex" and "› " or "❯ "
@@ -3626,8 +3658,11 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
             return policy(n, now)
           end
           local leader = remuda._butler_initial_name
+          local update_screen = screens["t-codex"][1]
+          assert(not remuda._butler_agent_startup.codex.ready(update_screen), "update dialog counted as ready")
           remuda._butler_topic_delegate("t-claude", "task one", nil, "claude", leader)
           remuda._butler_topic_delegate("t-codex", "task two", nil, "codex", leader)
+          remuda._butler_topic_delegate("t-codex-peer", "task peer", nil, "codex", leader)
           remuda._butler_topic_delegate("t-stuck", "task three", nil, "claude", leader)
         "#,
             home = home.to_string_lossy(),
@@ -3642,7 +3677,7 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
         // The leader's "task not delivered" notice is typed too; count only
         // the topic sessions' own lines.
         let typed = log.lines().filter(|l| l.starts_with("t-") && l.contains(" type ")).count();
-        if typed == 2 && traced.contains("task_poke_timeout\tt-stuck") {
+        if typed == 3 && traced.contains("task_poke_timeout\tt-stuck") {
             break log;
         }
         assert!(Instant::now() < deadline, "pokes never settled: {log}\n{traced}");
@@ -3650,10 +3685,45 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
     };
     let claude: Vec<&str> = log.lines().filter(|l| l.starts_with("t-claude ")).collect();
     assert_eq!(claude, ["t-claude key <down>", "t-claude key RET", "t-claude type task one"]);
-    let codex: Vec<&str> = log.lines().filter(|l| l.starts_with("t-codex ")).collect();
-    assert_eq!(codex, ["t-codex key 2", "t-codex type task two"]);
+    let codex_key_one = log.lines().find(|l| l.ends_with(" key 1")).unwrap();
+    let update_owner = codex_key_one.split_whitespace().next().unwrap();
+    assert_eq!(log.lines().filter(|l| l.ends_with(" key 1")).count(), 1, "more than one member upgraded: {log}");
+    assert_eq!(log.lines().filter(|l| l.ends_with(" key 2")).count(), 1, "the other member did not skip by label: {log}");
+    for (member, task) in [("t-codex", "task two"), ("t-codex-peer", "task peer")] {
+        let rows: Vec<&str> = log.lines().filter(|l| l.starts_with(&format!("{member} "))).collect();
+        let launches = rows.iter().filter(|l| l.ends_with(" launch")).count();
+        assert_eq!(launches, if member == update_owner { 2 } else { 1 }, "wrong relaunch count: {log}");
+        assert_eq!(rows.iter().filter(|l| l.ends_with(&format!(" type {task}"))).count(), 1, "task was not delivered exactly once: {log}");
+        assert!(rows.iter().any(|l| l.ends_with(if member == update_owner { " key 1" } else { " key 2" })), "update decision was not label-selected: {log}");
+    }
     assert!(!log.contains("t-stuck "), "typed into an unknown dialog: {log}");
     assert!(log.contains(" type Butler message "), "the leader is told about t-stuck: {log}");
+    eval(
+        &path,
+        r#"
+          remuda._butler_bus.codex_update_state = {claimed=false, done=false}
+          remuda._butler_topic_delegate("t-codex-timeout", "task after timeout", nil, "codex", remuda._butler_initial_name)
+        "#,
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let after_timeout = loop {
+        let log = eval(&path, "return table.concat(remuda._t, '\\n')");
+        if log.contains("t-codex-timeout type task after timeout") {
+            break log;
+        }
+        assert!(Instant::now() < deadline, "update timeout did not fall back to Skip and launch: {log}");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let timed_out_member: Vec<&str> = after_timeout.lines()
+        .filter(|l| l.starts_with("t-codex-timeout "))
+        .collect();
+    assert_eq!(timed_out_member, [
+        "t-codex-timeout launch",
+        "t-codex-timeout key 1",
+        "t-codex-timeout launch",
+        "t-codex-timeout key 2",
+        "t-codex-timeout type task after timeout",
+    ]);
     drop(daemon);
 }
 
