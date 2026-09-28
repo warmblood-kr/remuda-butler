@@ -1138,8 +1138,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
       end,
       human_active = function() return remuda._butler_human_active(actual) end,
       empty = function(screen)
-        local decision = remuda._butler_prompt_is_empty(kind, screen)
-        return decision
+        return remuda._butler_prompt_is_empty(kind, screen)
       end,
       timeout = remuda._butler_task_poke_deferrals or 600,
       ready_timeout = remuda._butler_task_poke_attempts or 60,
