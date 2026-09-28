@@ -506,6 +506,10 @@ fn lower_depth_delivery_channel_can_claim_butler_mail() {
     let dir = scratch("channel-inversion");
     let path = daemon::socket_path_in(&dir, "s");
     let _daemon = daemon_at(&path);
+    if eval(&path, "return tostring(type(remuda.emit_until_success) == 'function')") != "true" {
+        eprintln!("skipping lower_depth_delivery_channel_can_claim_butler_mail: core lacks remuda.emit_until_success");
+        return;
+    }
     let parent_id = eval(
         &path,
         r#"remuda._butler_argv = { 'sh' }; remuda.exec('butler')
@@ -545,6 +549,10 @@ fn missing_delivery_channel_is_reported_to_the_sender() {
     let dir = scratch("channel-missing");
     let path = daemon::socket_path_in(&dir, "s");
     let _daemon = daemon_at(&path);
+    if eval(&path, "return tostring(type(remuda.emit_until_success) == 'function')") != "true" {
+        eprintln!("skipping missing_delivery_channel_is_reported_to_the_sender: core lacks remuda.emit_until_success");
+        return;
+    }
     eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
     let got = eval(
         &path,
