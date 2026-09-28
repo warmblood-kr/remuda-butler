@@ -71,7 +71,6 @@ for _ in $(seq 50); do
 done
 $STATUS_OK || fail "ready Butler status never exited 0: $(cat "$SCRATCH/status.out" "$SCRATCH/status.err")"
 grep -F 'butler: up (claude)' "$SCRATCH/status.out" >/dev/null || fail "status omitted selected kind"
-grep -F 'butler: up (claude)' "$SCRATCH/status.out" >/dev/null || fail "status omitted ready kind"
 # Registering these kinds exercises the chooser without adding branches to it.
 lua 'local function add(id, exe, ready, login, order)
   remuda._butler_contribute("butler.agent", id, {

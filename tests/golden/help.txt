@@ -1,7 +1,6 @@
 remuda butler — coordination for managed agents
 
   remuda butler sessions
-  remuda butler status  (0=up; errors start with launching or failed)
   remuda butler agents [--all]
   remuda butler launch <claude|codex> [name] [--model M]
   remuda butler topic new <name> [--template T] [--agent A] [--model M]
