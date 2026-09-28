@@ -299,6 +299,8 @@ fn notify_policy_types_only_into_a_detached_or_quiet_empty_prompt() {
             remuda._butler_bus.agents.p1 = nil
             row.attached = false; screen = 'x\n> co'
             r[#r + 1] = 'detached=' .. tostring(policy('p1', t + 500))
+            screen = 'x\n> '
+            r[#r + 1] = 'detached_empty=' .. tostring(policy('p1', t + 501))
             remuda.ls, remuda.capture, remuda.capture_styled = real_ls, real_capture, real_capture_styled
             return table.concat(r, ' ')"#
         ),
@@ -306,7 +308,7 @@ fn notify_policy_types_only_into_a_detached_or_quiet_empty_prompt() {
     assert_eq!(
         got,
         "half=false empty_stable=true claude_box=true claude_nbsp=true claude_nbsp_typed=false empty_changing=false unparseable=false \
-         codex_placeholder=true codex_typed=false detached=true"
+         codex_placeholder=true codex_typed=false detached=false detached_empty=true"
     );
     let log = std::fs::read_to_string(&trace).unwrap_or_default();
     assert!(log.contains("notice_prompt\tp1  NON-EMPTY co"), "{log}");
@@ -405,8 +407,8 @@ fn a_task_deferred_too_long_times_out_and_tells_the_leader() {
     }
 }
 
-/// #44: a notice must not join a delegated task in the child's unsubmitted
-/// first prompt. The delegated task is submitted before the notice may type.
+/// #44: the fake agent drops the task's first Return. Butler must retry it
+/// while keeping an immediate notice out of the still-populated composer.
 #[test]
 #[cfg(unix)]
 fn a_topic_task_is_submitted_before_an_immediate_notice_is_typed() {
@@ -419,10 +421,18 @@ fn a_topic_task_is_submitted_before_an_immediate_notice_is_typed() {
         &script,
         "#!/bin/sh\n\
          submitted=$1\n\
+         stty -echo\n\
          printf 'Claude Code\\n────────────────────\\n❯ '\n\
+         IFS= read -r task || exit 0\n\
+         # Drop the first Return while leaving the task in the composer.\n\
+         printf '\\r\\033[2K❯ %s' \"$task\"\n\
+         IFS= read -r line || exit 0\n\
+         if [ -n \"$line\" ]; then task=\"$task$line\"; fi\n\
+         printf '%s\\n' \"$task\" >> \"$submitted\"\n\
+         printf '\\r\\033[2Kaccepted:%s\\n────────────────────\\n❯ ' \"$task\"\n\
          while IFS= read -r line; do\n\
            printf '%s\\n' \"$line\" >> \"$submitted\"\n\
-           printf '\\naccepted:%s\\n────────────────────\\n❯ ' \"$line\"\n\
+           printf '\\r\\033[2Kaccepted:%s\\n────────────────────\\n❯ ' \"$line\"\n\
          done\n",
     )
     .expect("write fake Claude");
@@ -503,14 +513,18 @@ fn notify_policy_uses_human_idle_and_dim_spans_when_the_core_has_them() {
         r[#r + 1] = 'typed=' .. case(12, plain('❯ co'))
         r[#r + 1] = 'never=' .. case(math.huge, plain('❯ '))
         r[#r + 1] = 'off_prompt=' .. case(12, plain('some output'))
+        row.attached = false
+        r[#r + 1] = 'detached_typed=' .. case(math.huge, plain('❯ co'))
+        r[#r + 1] = 'detached_empty=' .. case(0, plain('❯ '))
         remuda._butler_notice_human_idle = 20
+        row.attached = true
         r[#r + 1] = 'knob=' .. case(12, plain('❯ '))
         remuda.ls, remuda.capture, remuda.capture_styled = real_ls, real_capture, real_styled
         return table.concat(r, ' ')"#,
     );
     assert_eq!(
         got,
-        "typing=false ghost=true ghost_words=true typed=false never=true off_prompt=false knob=false"
+        "typing=false ghost=true ghost_words=true typed=false never=true off_prompt=false detached_typed=false detached_empty=true knob=false"
     );
 }
 

@@ -817,11 +817,12 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
     -- Answer known startup modals (agents/*.lua) and type the task only once
     -- the composer is ready; never blind-type into an unknown dialog.
     local startup = remuda._butler_agent_startup[kind] or {}
-    local poke, attempts, settle, deferred = nil, 0, 0, 0
+    local poke, confirm, attempts, settle, deferred = nil, nil, 0, 0, 0
     -- Either timeout means the task never reached the agent: say so to its
     -- leader rather than only in the trace (#29).
     local function give_up(detail)
       remuda.cancel(poke)
+      if confirm then remuda.cancel(confirm) end
       bus.pending_tasks[actual] = nil
       _butler_session_trace("task_poke_timeout", actual .. detail)
       pcall(remuda._butler_send, "butler", parent or "butler", "Task for " .. actual
@@ -849,14 +850,44 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
           return
         end
         remuda.cancel(poke)
-        -- type_text submits with Return before it returns, so a successful
-        -- call is the point where notices can safely use the composer.
         local typed = pcall(remuda.type_text, actual, task)
-        if typed then
-          bus.pending_tasks[actual] = nil
-        else
+        if not typed then
           give_up(" type failed")
+          return
         end
+
+        -- A terminal write succeeding does not mean the agent accepted its
+        -- Return. Keep notices out until the composer releases the task, and
+        -- retry Return if the same task remains in the composer.
+        bus.pending_tasks[actual] = task
+        local task_line = task:gsub("^%s+", ""):match("^[^\n]*") or ""
+        local checks, observed_task = 0, false
+        confirm = remuda.schedule({ every = 0.5, run = function()
+          checks = checks + 1
+          local seen, latest = pcall(remuda.capture, actual)
+          if not seen then
+            remuda.cancel(confirm)
+            bus.pending_tasks[actual] = nil
+            return
+          end
+          local decision, text = remuda._butler_prompt_is_empty(kind, latest)
+          local busy = remuda.session(actual).is_busy == true
+          local task_in_composer = #task_line > 0 and (text == task_line
+            or (#text > 0 and task_line:sub(1, #text) == text))
+          if decision == "NON-EMPTY" and task_in_composer then observed_task = true end
+          if observed_task and not task_in_composer and (decision == "EMPTY" or busy) then
+            remuda.cancel(confirm)
+            bus.pending_tasks[actual] = nil
+            return
+          end
+          -- Give the UI time to consume the first Return before retrying.
+          if decision == "NON-EMPTY" and task_in_composer and checks >= 4 and checks % 4 == 0 then
+            pcall(remuda.key, actual, "RET")
+          end
+          if checks >= (remuda._butler_task_poke_deferrals or 600) then
+            give_up(" submit")
+          end
+        end })
         return
       end
       for _, modal in ipairs(startup.modals or {}) do
@@ -952,11 +983,11 @@ function remuda._butler_prompt_is_empty(kind, screen)
   return "NON-EMPTY", text
 end
 
--- The one delivery policy: may Butler type into SESSION now? A detached pane
--- always; an attached one only while its prompt is empty and the human has
--- paused (human_idle >= remuda._butler_notice_human_idle, default 10s) or, on
--- a core without human_idle, the screen has not changed for
--- NOTICE_STABLE_SECONDS. Anything unrecognised defers.
+-- The one delivery policy: may Butler type into SESSION now? Every pane needs
+-- a known empty prompt. An attached pane also needs the human to pause
+-- (human_idle >= remuda._butler_notice_human_idle, default 10s) or, on a core
+-- without human_idle, a screen unchanged for NOTICE_STABLE_SECONDS. Anything
+-- unrecognised defers.
 function remuda._butler_notify_policy(session, now)
   now = now or os.time()
   local row
@@ -964,15 +995,15 @@ function remuda._butler_notify_policy(session, now)
     if candidate.name == session then row = candidate end
   end
   if not row or not row.alive then return false end
-  if not row.attached then bus.notice_screens[session] = nil return true end
+  local attached = row.attached
   local seen = bus.notice_screens[session] or {}
   bus.notice_screens[session] = seen
   local screen
-  if row.human_idle ~= nil then
+  if attached and row.human_idle ~= nil then
     -- A core with remuda#136 says when the human last typed (math.huge if
     -- never); wait for them to pause instead of guessing from the screen.
     if row.human_idle < (remuda._butler_notice_human_idle or 10) then return false end
-  else
+  elseif attached then
     -- Older core: a screen unchanged for NOTICE_STABLE_SECONDS stands in.
     local captured
     captured, screen = pcall(remuda.capture, session)
