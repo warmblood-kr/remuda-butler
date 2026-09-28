@@ -719,7 +719,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
     -- Answer known startup modals (agents/*.lua) and type the task only once
     -- the composer is ready; never blind-type into an unknown dialog.
     local startup = remuda._butler_agent_startup[kind] or {}
-    local poke, attempts, settle = nil, 0, 0
+    local poke, attempts, settle, deferred = nil, 0, 0, 0
     poke = remuda.schedule({ every = 0.5, run = function()
       attempts = attempts + 1
       -- A short-lived launcher (or a failed executable) can disappear before
@@ -732,8 +732,19 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
       end
       if attempts < settle then return end -- let an answered modal repaint
       if not startup.ready or startup.ready(screen) then
-        -- #29: never type the task over a human's line; waiting is not an attempt.
-        if not remuda._butler_notify_policy(actual) then attempts = attempts - 1 return end
+        -- #29: never type the task over a human's line. Waiting is bounded
+        -- separately (default 600 ticks = 300s); then the leader is told.
+        if not remuda._butler_notify_policy(actual) then
+          attempts, deferred = attempts - 1, deferred + 1
+          if deferred >= (remuda._butler_task_poke_deferrals or 600) then
+            remuda.cancel(poke)
+            _butler_session_trace("task_poke_timeout", actual .. " deferred")
+            pcall(remuda._butler_send, "butler", parent or "butler", "Task for " .. actual
+              .. " was not delivered: its pane never became free to type into. Resend it with"
+              .. " `remuda butler send " .. actual .. " TASK` once it is.")
+          end
+          return
+        end
         remuda.cancel(poke)
         pcall(remuda.type_text, actual, task)
         return
