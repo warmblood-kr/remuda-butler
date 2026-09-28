@@ -32,6 +32,7 @@ end
 local function schedule(remuda, kind, actual, name, parent, task, options)
   options = options or {}
   local poll, ticks, attempts, verify_ticks = nil, 0, 0, 0
+  local handled_modals, settle_until, task_seen_in_composer = {}, 0, false
   local function finish(ok, reason)
     remuda.cancel(poll)
     if options.on_done then
@@ -49,6 +50,17 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
     end
 
     if attempts == 0 then
+      for index, modal in ipairs(options.modals or {}) do
+        if screen:find(modal.match, 1, true) then
+          if not handled_modals[index] then
+            handled_modals[index] = true
+            for _, key in ipairs(modal.keys or {}) do pcall(remuda.key, actual, key) end
+            settle_until = ticks + 3
+          end
+          return
+        end
+      end
+      if ticks < settle_until then return end
       local is_ready = ready(kind, screen)
       if options.ready then
         local checked, result = pcall(options.ready, screen)
@@ -71,7 +83,7 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
         -- One atomic paste after the agent has enabled its composer. The
         -- longer settle also ensures Codex sees Return as a separate submit.
         pcall(remuda.type_text, actual, task, 2)
-      elseif ticks >= (options.timeout or 60) then
+      elseif ticks >= (options.ready_timeout or 60) then
         finish(false, "the composer never became ready")
       end
       return
@@ -89,7 +101,12 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
       local checked, session = pcall(remuda.session, actual)
       session_busy = checked and session and session.is_busy == true
     end
+    if started and not empty then task_seen_in_composer = true end
     if started and (empty or session_busy) then
+      finish(true)
+      return
+    end
+    if task_seen_in_composer and empty then
       finish(true)
       return
     end
@@ -108,7 +125,7 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
       verify_ticks = 0
       return
     end
-    if verify_ticks >= 12 and attempts == 1 then
+    if verify_ticks >= 12 and attempts == 1 and not task_seen_in_composer then
       -- The initial send may have raced a screen transition. A single full
       -- retry is permitted; the long prompt is never split into chunks.
       attempts = 2

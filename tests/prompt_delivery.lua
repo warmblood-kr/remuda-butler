@@ -125,4 +125,39 @@ end
 exercise("claude")
 exercise("codex")
 exercise("claude", true)
+
+-- Known startup dialogs must be answered before the task is typed, and the
+-- delivery poll must not replay the task while the prompt settles.
+do
+  local state = { keys = {}, typed = {}, cancelled = false }
+  local fake = {}
+  function fake.schedule(spec) state.callback = spec.run; return "modal-poll" end
+  function fake.cancel(handle) assert(handle == "modal-poll"); state.cancelled = true end
+  function fake.capture()
+    if state.capture_queue and #state.capture_queue > 0 then
+      return table.remove(state.capture_queue, 1)
+    end
+    if #state.keys == 0 then return "Update available\n2. Skip" end
+    return "› Ask Codex to do anything\n❯ "
+  end
+  function fake.key(_, key) state.keys[#state.keys + 1] = key end
+  function fake.type_text(_, task)
+    state.typed[#state.typed + 1] = task
+    state.capture_queue = { "› " .. task, "❯ " }
+  end
+  fake.session = function() return { is_busy = false } end
+  local task = "task after startup modal"
+  M.schedule(fake, "codex", "modal-session", "modal-member", "leader", task, {
+    ready = function(screen) return screen:find("Ask Codex", 1, true) ~= nil end,
+    modals = { { match = "2. Skip", keys = { "2" } } },
+    empty = function() return "EMPTY" end,
+    on_done = function(ok) state.completed = ok end,
+  })
+  for _ = 1, 20 do
+    if not state.cancelled then state.callback() end
+  end
+  assert(state.keys[1] == "2", "Codex startup modal was not handled")
+  assert(#state.typed == 1 and state.typed[1] == task, "task was not typed exactly once after modal")
+  assert(state.completed and state.cancelled, "modal task delivery did not complete")
+end
 print("first prompt delivery passed for Claude and Codex")
