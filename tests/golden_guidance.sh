@@ -14,7 +14,7 @@
 #   REMUDA_BIN=~/.local/bin/remuda tests/golden_guidance.sh
 #   GOLDEN_UPDATE=1 tests/golden_guidance.sh  # a DELIBERATE guidance change: rewrite
 #                                             # tests/golden/ and commit the diff with it
-# Needs: bash, git, python3 (and cargo when REMUDA_BIN is unset).
+# Needs: bash, git, awk, and cargo when REMUDA_BIN is unset.
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 GOLDEN=$REPO/tests/golden
@@ -46,6 +46,7 @@ fi
 export HOME=$T/home REMUDA_RUNTIME_DIR=$T/run XDG_DATA_HOME=$T/data XDG_CONFIG_HOME=$T/config
 export XDG_CACHE_HOME=$T/cache XDG_STATE_HOME=$T/state XDG_RUNTIME_DIR=$T/xdg-run
 export REMUDA_BUTLER_PROJECT_HOME=$T/projects REMUDA_BUTLER_SERVER=$S REMUDA_NO_UPDATE_CHECK=1
+export REMUDA_BUTLER_REPO_ROOT=$REPO
 unset REMUDA_BUTLER_TOKEN REMUDA_BUTLER_CONFIG REMUDA_BUTLER_AGENT_ID REMUDA_BUTLER_LEADER_ID \
   REMUDA_BUTLER_SESSION_NAME REMUDA_BUTLER_AGENT_ALIAS REMUDA_BUTLER_AGENT_KIND REMUDA_SESSION_CAPABILITY
 mkdir -p "$HOME" "$XDG_CACHE_HOME" "$XDG_STATE_HOME" "$XDG_RUNTIME_DIR" \
@@ -54,11 +55,12 @@ cp "$REMUDA_BIN" "$T/bin/remuda"
 cp -R "$REPO/extension.toml" "$REPO/packages" "$XDG_DATA_HOME/remuda/mods/butler/"
 # A fake claude: records its argv, one argument per NUL-free line, and stays up.
 cat >"$T/bin/claude" <<EOF
-#!/usr/bin/env python3
-import os, sys, time
-open("$T/argv/" + os.environ.get("REMUDA_BUTLER_SESSION_NAME", "x"), "w").write("\n".join(sys.argv[1:]) + "\n")
-print("─\n❯", flush=True)
-while True: time.sleep(1)
+#!/bin/sh
+dest="$T/argv/\${REMUDA_BUTLER_SESSION_NAME:-x}"
+: >"\$dest"
+for arg do printf '%s\\n' "\$arg" >>"\$dest"; done
+printf '─\\n❯\\n'
+while :; do sleep 1; done
 EOF
 chmod +x "$T/bin/claude"
 export PATH=$T/bin:$PATH
@@ -74,6 +76,8 @@ wait_welcome() {
   echo "welcome was not queued for lead1" >&2
   return 1
 }
+
+R -e "if not dofile('$REPO/scripts/check-butler-path-convention.lua') then error('path convention check failed', 0) end"
 
 R -e 'remuda._butler_argv = {"sh", "-c", "while :; do sleep 1; done"}' >/dev/null   # root session: no agent
 R butler --headless >/dev/null
@@ -94,31 +98,24 @@ if grep -F 'Welcome to Butler' "$T/welcome-second-inbox.txt" >/dev/null; then
   echo "duplicate welcome queued for lead1" >&2
   exit 1
 fi
-cat "$T/welcome-inbox.txt" | python3 -c '
-import re, sys
-text = sys.stdin.read()
-m = re.search(r"^\[[^\]]*\] Welcome to Butler\n(.*?)(?=^\[message-|^\[[0-9A-HJKMNP-TV-Z]{26} from |\Z)", text, re.S | re.M)
-sys.stdout.write(m.group(1) if m else "NO WELCOME MESSAGE\n" + text)' >"$OUT/welcome.txt"
+if grep -F 'Welcome to Butler' "$T/welcome-inbox.txt" >/dev/null; then
+  awk '
+    /^\[[^]]+\] Welcome to Butler$/ { body=1; found=1; next }
+    body && /^\[message-/ { exit }
+    body && /^\[[^]]+ from / { exit }
+    body { print }
+  ' "$T/welcome-inbox.txt" >"$OUT/welcome.txt"
+else
+  { printf '%s\n' 'NO WELCOME MESSAGE'; cat "$T/welcome-inbox.txt"; } >"$OUT/welcome.txt"
+fi
 cp "$T/argv/lead1" "$OUT/argv-claude.txt"
 
 # Normalise run-specific values so only guidance text is compared.
-python3 - "$OUT" "$T" <<'PY'
-import os, re, sys
-out, t = sys.argv[1], sys.argv[2]
-subs = [
-    (re.escape(os.path.realpath(t)), "<T>"), (re.escape(t), "<T>"),
-    (r"/(?:private/)?(?:tmp|var/folders)/[^\s\"']*lua_[A-Za-z0-9]+[^\s\"']*", "<TMPFILE>"),
-    (r"message-[0-9a-f]+-[0-9a-f]+-lua_[A-Za-z0-9]+", "<MSGID>"),
-    (r"\b[0-9A-HJKMNP-TV-Z]{26}\b", "<ULID>"),
-    (r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z", "<TIME>"),
-    (r'("REMUDA_SESSION_CAPABILITY"\s*:\s*")[^"]+', r"\1<CAP>"),
-    (r"(REMUDA_SESSION_CAPABILITY=\"?)[A-Za-z0-9_-]+", r"\1<CAP>"),
-]
-for name in sorted(os.listdir(out)):
-    p = os.path.join(out, name); s = open(p).read()
-    for pat, rep in subs: s = re.sub(pat, rep, s)
-    open(p, "w").write(s)
-PY
+NORMALIZE_ROOT=$(cd "$T" && pwd -P)
+for file in "$OUT"/*; do
+  awk -v t="$T" -v real_t="$NORMALIZE_ROOT" -f "$REPO/tests/normalize-guidance.awk" "$file" >"$file.tmp"
+  mv "$file.tmp" "$file"
+done
 
 if [[ ${GOLDEN_UPDATE:-} == 1 ]]; then
   mkdir -p "$GOLDEN"

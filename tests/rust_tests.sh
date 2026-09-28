@@ -9,7 +9,8 @@
 #   CORE_DIR=~/src/remuda tests/rust_tests.sh
 #
 # Only Butler's tests run: the rest of butler_daemon.rs duplicates core's own
-# daemon.rs and is core's to test. Needs: cargo and git.
+# daemon.rs and is core's to test. Needs: cargo and git. Matrix relay coverage
+# uses the local Lua fake HTTP fixture, not a separate stub-server process.
 set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)

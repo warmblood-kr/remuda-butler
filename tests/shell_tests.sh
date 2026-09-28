@@ -6,7 +6,7 @@
 #   REMUDA_BIN=~/.local/bin/remuda tests/shell_tests.sh
 #
 # Needs: bash, git (full history: live_reload.sh archives an old ref),
-# python3, luajit, and cargo when REMUDA_BIN is unset.
+# awk, luajit, and cargo when REMUDA_BIN is unset.
 set -uo pipefail
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
