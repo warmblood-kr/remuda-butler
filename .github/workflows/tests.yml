@@ -16,6 +16,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - run: scripts/check-no-python.sh
       - run: tests/rust_tests.sh
 
   golden:
