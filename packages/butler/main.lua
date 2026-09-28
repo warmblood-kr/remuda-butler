@@ -849,6 +849,8 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
           return
         end
         remuda.cancel(poke)
+        -- type_text submits with Return before it returns, so a successful
+        -- call is the point where notices can safely use the composer.
         local typed = pcall(remuda.type_text, actual, task)
         if typed then
           bus.pending_tasks[actual] = nil
