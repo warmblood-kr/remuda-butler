@@ -230,9 +230,11 @@ function remuda._butler_compaction_gate(session_name, st)
     return false, "skipped_unknown", ctx
   end
   local threshold = remuda._butler_compaction_threshold or 400000
+  local critical = remuda._butler_compaction_critical_threshold or 600000
   if used < threshold then
     st.idle_ticks = 0
     st.cooldown_ticks = 0
+    st.saw_busy = false
     return false, "skipped_small", ctx
   end
   if (st.cooldown_ticks or 0) > 0 then
@@ -246,8 +248,29 @@ function remuda._butler_compaction_gate(session_name, st)
     return false, "skipped_unknown", ctx
   end
   if session.is_busy ~= false then
+    st.saw_busy = true
     st.idle_ticks = 0
+    st.last_idle_capture_at = nil
     return false, "skipped_busy", ctx
+  end
+  local attached = session.attached == true
+  if type(remuda.ls) == "function" then
+    local listed, rows = pcall(remuda.ls)
+    if listed then
+      for _, row in ipairs(rows or {}) do
+        if row.name == session_name and row.attached then attached = true end
+      end
+    end
+  end
+  if attached then
+    st.idle_ticks, st.last_idle_capture_at = 0, nil
+    return false, "skipped_attached", ctx
+  end
+  if (remuda._butler_compaction_has_queued_mail and remuda._butler_compaction_has_queued_mail(session_name))
+    or ((remuda._butler_bus.pending_tasks or {})[session_name])
+    or ((remuda._butler_bus.notices or {})[session_name]) then
+    st.idle_ticks, st.last_idle_capture_at = 0, nil
+    return false, "skipped_queued", ctx
   end
   local captured, screen = pcall(remuda.capture, session_name)
   if not captured then
@@ -271,9 +294,18 @@ function remuda._butler_compaction_gate(session_name, st)
     st.idle_ticks = 0
     return false, "skipped_composer", ctx
   end
+  local now = (remuda._butler_compaction_now or os.time)()
+  local gap = math.max(1, tonumber(remuda._butler_compaction_capture_gap) or 3)
+  if st.last_idle_capture_at and now - st.last_idle_capture_at < gap then
+    return false, "skipped_idle", ctx
+  end
+  st.last_idle_capture_at = now
   st.idle_ticks = st.idle_ticks + 1
-  if st.idle_ticks < 2 then return false, "skipped_idle", ctx end
+  local needed = used >= critical and 2 or (st.saw_busy and 2 or math.huge)
+  if st.idle_ticks < needed then return false, "skipped_idle", ctx end
   st.idle_ticks = 0
+  st.last_idle_capture_at = nil
+  st.saw_busy = false
   st.cooldown_ticks = math.max(0, tonumber(remuda._butler_compaction_cooldown) or 4)
   return true, "sent", ctx
 end
@@ -284,6 +316,86 @@ end
 
 function remuda._butler_compaction_submit_matches(decision, text)
   return decision == "NON-EMPTY" and text == "/compact"
+end
+
+local function compaction_model(screen)
+  return type(screen) == "string" and screen:match("MODEL:([^\r\n]+)") or nil
+end
+local function compaction_yes_option(screen)
+  local matches = {}
+  for line in (screen .. "\n"):gmatch("(.-)\n") do
+    local number, label = line:match("^%s*(%d+)[%.)]%s*(.-)%s*$")
+    local lower = label and label:lower() or ""
+    if lower:find("yes", 1, true) and lower:find("switch", 1, true) then
+      matches[#matches + 1] = number
+    end
+  end
+  if #matches == 1 then return matches[1] end
+end
+remuda._butler_compaction_yes_option = compaction_yes_option
+function remuda._butler_compaction_visible_answer(kind, screen, target)
+  if kind == "claude" and screen:lower():find("switch model?", 1, true) then
+    local option = compaction_yes_option(screen)
+    if option then return option, "dialog" end
+    return nil, "unknown"
+  end
+  local model = compaction_model(screen)
+  if model and target and model:lower():find(target:lower(), 1, true) then return nil, "ready" end
+  if type(screen) == "string" and (screen:find("dialog", 1, true) or screen:find("modal", 1, true)
+    or screen:find("Press ", 1, true)) then return nil, "unknown" end
+  return nil, "waiting"
+end
+function remuda._butler_compaction_sequence(kind, prior, low)
+  if kind == "codex" then return { "/compact", "ENTER" } end
+  return { "/model " .. low, "/compact", "/model " .. prior }
+end
+
+-- Reusable screen-driven expect primitive. The caller owns state and invokes
+-- it from the existing schedule, so waits are bounded and never block Lua.
+function remuda._butler_expect(session_name, branches, options, state)
+  options, state = options or {}, state or {}
+  local now = (remuda._butler_compaction_now or os.time)()
+  if not state.started_at then
+    state.started_at = now
+    state.deadline = now + math.max(1, tonumber(options.timeout) or 6)
+    state.next_at = now + math.max(0, tonumber(options.delay) or 0)
+    if state.next_at > now then return "waiting" end
+  end
+  if now < (state.next_at or now) then return "waiting" end
+  local ok, screen = pcall(remuda.capture, session_name)
+  if not ok or type(screen) ~= "string" then screen = "" end
+  for _, branch in ipairs(branches or {}) do
+    local matched = type(branch.match) == "function" and branch.match(screen)
+      or (type(branch.match) == "string" and screen:find(branch.match, 1, true) ~= nil)
+    if matched then
+      if type(branch.action) == "function" then branch.action(screen)
+      elseif type(branch.keys) == "table" then
+        for _, key in ipairs(branch.keys) do remuda.key(session_name, key) end
+      end
+      if branch.continue then
+        state.next_at = now + math.max(0, tonumber(options.delay) or 0)
+        return "continue", branch.id, screen
+      end
+      return "matched", branch.id, screen
+    end
+  end
+  if options.is_unknown and options.is_unknown(screen) then
+    if options.on_unknown then options.on_unknown(screen) end
+    return "unknown", nil, screen
+  end
+  if now >= state.deadline then
+    if options.on_timeout then options.on_timeout(screen) end
+    return "timeout", nil, screen
+  end
+  state.next_at = now + math.max(0, tonumber(options.delay) or 0)
+  return "waiting", nil, screen
+end
+
+remuda._butler_compaction_dialog_handlers = remuda._butler_compaction_dialog_handlers or {}
+function remuda._butler_compaction_register_dialog(name, handler)
+  assert(type(name) == "string" and type(handler) == "function", "dialog handler needs a name and function")
+  remuda._butler_compaction_dialog_handlers[name] = handler
+  return true
 end
 
 if remuda._butler_test_mode == true then
