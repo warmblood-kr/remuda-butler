@@ -352,9 +352,98 @@ fn a_notice_that_fails_to_type_stays_queued() {
     assert_eq!(eval(&path, "return remuda._butler_bus.notices.m1.count"), "1");
     eval(
         &path,
-        "remuda.type_text = remuda._real_type_text; remuda._butler_deliver_notices()",
+        "remuda.type_text = remuda._real_type_text; \
+         remuda.capture = function() return 'Butler message hi\\n❯ ' end; \
+         remuda._butler_deliver_notices()",
     );
+    let deadline = Instant::now() + PATIENCE;
+    while eval(&path, "return tostring(remuda._butler_bus.notices.m1 ~= nil)") != "false" {
+        assert!(Instant::now() < deadline, "successfully submitted notice was not verified");
+        std::thread::sleep(Duration::from_millis(100));
+    }
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1)"), "nil");
+}
+
+/// #64: an idle non-empty composer is redrawn, its draft is preserved,
+/// cleared with a verified input key, and the queued notice is submitted.
+#[test]
+fn notice_recovery_preserves_idle_draft_and_respects_attached_human() {
+    let (path, _daemon) = butler_with_member("notice-recovery-draft");
+    eval(
+        &path,
+        r#"
+        local row = { name = 'm1', alive = true, attached = false }
+        remuda.ls = function() return { row } end
+        remuda.capture_styled = nil
+        remuda._butler_bus.agents.m1.kind = 'codex'
+        local state = { screen = '› unsent draft text', events = {}, after_type = 0 }
+        remuda._notice_test_state = state
+        remuda.capture = function()
+          table.insert(state.events, 'capture')
+          if state.after_type == 1 then state.after_type = 2; return '› Butler message notice' end
+          if state.after_type == 2 then return '› ' end
+          return state.screen
+        end
+        remuda.session = function() return { is_busy = false } end
+        remuda.key = function(_, key)
+          table.insert(state.events, 'key ' .. key)
+          if key == 'C-u' then state.screen = '› ' end
+          if key == 'RET' then state.screen = '› ' end
+        end
+        remuda.type_text = function(_, text)
+          table.insert(state.events, 'type ' .. text)
+          state.after_type = 1
+        end
+        remuda._butler_send('operator', 'm1', 'notice')
+        "#,
+    );
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let queued = eval(&path, "return tostring(remuda._butler_bus.notices.m1 ~= nil)");
+        if queued == "false" { break; }
+        assert!(Instant::now() < deadline, "notice recovery did not settle: {}", eval(&path, "return table.concat(remuda._notice_test_state.events, '\\n')"));
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let events = eval(&path, "return table.concat(remuda._notice_test_state.events, '\\n')");
+    assert!(events.contains("key C-l"), "recovery did not try a redraw first: {events}");
+    assert!(events.contains("key C-u"), "recovery did not clear the draft safely: {events}");
+    assert!(events.contains("type Butler message"), "notice was not typed: {events}");
+    assert!(events.contains("your unsent draft was: unsent draft text"), "draft was not preserved: {events}");
+    assert!(!events.contains("C-c"), "recovery sent Ctrl-C: {events}");
+    assert!(events.find("key C-l") < events.find("key C-u"), "draft cleared before redraw: {events}");
+    assert_eq!(eval(&path, "return tostring(remuda.ls()[1].alive)"), "true");
+
+    eval(
+        &path,
+        r#"remuda._notice_test_state.events = {}
+        remuda._notice_test_state.after_type = 0
+        remuda._notice_test_state.screen = '› Butler message older notice'
+        remuda._butler_send('operator', 'm1', 'next notice')"#,
+    );
+    let deadline = Instant::now() + PATIENCE;
+    while eval(&path, "return tostring(remuda._butler_bus.notices.m1 ~= nil)") != "false" {
+        assert!(Instant::now() < deadline, "existing Butler notice was not submitted");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let events = eval(&path, "return table.concat(remuda._notice_test_state.events, '\\n')");
+    assert!(events.contains("key C-l"), "existing notice was not redrawn first: {events}");
+    assert!(events.contains("key RET"), "existing notice was not submitted: {events}");
+    assert!(!events.contains("key C-u"), "recovery erased the existing Butler notice: {events}");
+
+    eval(
+        &path,
+        r#"local row = remuda.ls()[1]
+        row.attached, row.human_idle = true, 0
+        remuda._notice_test_state.events = {}
+        remuda._notice_test_state.screen = '› human draft'
+        remuda._butler_send('operator', 'm1', 'human-safe notice')"#,
+    );
+    std::thread::sleep(Duration::from_millis(1200));
+    assert_eq!(
+        eval(&path, "return tostring(table.concat(remuda._notice_test_state.events, '\\n'))"),
+        "capture",
+        "recovery sent a key or typed into a human-active pane",
+    );
 }
 
 /// #29 review 2: an exited session's pending notice and screen record go too.
@@ -365,12 +454,13 @@ fn session_exit_clears_the_notice_queue_and_screen_record() {
         &path,
         "remuda._butler_notify_policy = function() return false end; \
          remuda._butler_send('operator', 'm1', 'hi'); \
+         remuda._butler_bus.notice_recoveries.m1 = { phase = 'probe' }; \
          remuda._butler_bus.notice_screens.m1 = { screen = '', since = 0 }; \
          remuda.emit('session_exited', 'm1')",
     );
     assert_eq!(
-        eval(&path, "return tostring(remuda._butler_bus.notices.m1) .. tostring(remuda._butler_bus.notice_screens.m1)"),
-        "nilnil"
+        eval(&path, "return tostring(remuda._butler_bus.notices.m1) .. tostring(remuda._butler_bus.notice_screens.m1) .. tostring(remuda._butler_bus.notice_recoveries.m1)"),
+        "nilnilnil"
     );
 }
 
