@@ -5265,7 +5265,7 @@ done
             );
         }
     }
-    drop(_daemon);
+    drop(daemon);
 }
 
 /// Same real-process substitution as
