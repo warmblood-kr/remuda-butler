@@ -1,5 +1,7 @@
 import json
+import os
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 import urllib.parse
@@ -184,6 +186,15 @@ def handle_room(room, since, processed, messages_since, pending):
 
 
 def main():
+    parent_pid = os.getppid()
+
+    def watch_parent():
+        while True:
+            time.sleep(0.25)
+            if os.getppid() != parent_pid:
+                os._exit(0)
+
+    threading.Thread(target=watch_parent, daemon=True).start()
     since, processed, messages_since, pending = load_state()
     reconcile_acks(since, processed, messages_since, pending)
     if USE_MESSAGES_POLLING:

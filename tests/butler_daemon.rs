@@ -15,6 +15,7 @@ use remuda_core::protocol::{Request, Response};
 use remuda_core::{Session, Size};
 use remuda_native::{client, daemon, ipc, CommandBuilder, PtyAgent, SystemClock};
 use std::path::{Path, PathBuf};
+use std::os::unix::process::CommandExt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -938,6 +939,7 @@ impl Daemon {
         let child = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
             .args(["-s", "s", "daemon"])
             .env("REMUDA_RUNTIME_DIR", dir)
+            .process_group(0)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -959,7 +961,8 @@ impl Daemon {
     fn spawn_with_pwd(dir: &Path, pwd: Option<&str>) -> Self {
         let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"));
         cmd.args(["-s", "s", "daemon"])
-            .env("REMUDA_RUNTIME_DIR", dir);
+            .env("REMUDA_RUNTIME_DIR", dir)
+            .process_group(0);
         match pwd {
             Some(p) => cmd.env("PWD", p),
             None => cmd.env_remove("PWD"),
@@ -988,7 +991,8 @@ impl Daemon {
     fn spawn_with_env(dir: &Path, extra_env: &[(&str, &str)]) -> Self {
         let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"));
         cmd.args(["-s", "s", "daemon"])
-            .env("REMUDA_RUNTIME_DIR", dir);
+            .env("REMUDA_RUNTIME_DIR", dir)
+            .process_group(0);
         for (k, v) in extra_env {
             cmd.env(k, v);
         }
@@ -1018,6 +1022,7 @@ impl Daemon {
         let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"));
         cmd.args(["-s", "s", "daemon"])
             .env("REMUDA_RUNTIME_DIR", dir)
+            .process_group(0)
             .env("HOME", home)
             .env_remove("XDG_CONFIG_HOME")
             .env_remove("REMUDA_BUTLER_TOKEN")
@@ -1053,9 +1058,56 @@ impl Daemon {
 
 impl Drop for Daemon {
     fn drop(&mut self) {
+        let process_group = -(self.0.id() as i32);
+        unsafe { libc::kill(process_group, libc::SIGKILL); }
         let _ = self.0.kill();
         let _ = self.0.wait();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut survivors = matrix_relays_in_process_group(-process_group);
+        while !survivors.is_empty() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+            survivors = matrix_relays_in_process_group(-process_group);
+        }
+        if !survivors.is_empty() {
+            if std::thread::panicking() {
+                eprintln!("Matrix relay children survived private daemon teardown: {survivors:?}");
+            } else {
+                panic!("Matrix relay children survived private daemon teardown: {survivors:?}");
+            }
+        }
     }
+}
+
+fn matrix_relays_in_process_group(group: i32) -> Vec<String> {
+    let output = std::process::Command::new("ps")
+        .args(["-ww", "-axo", "pid=,pgid=,command="])
+        .output()
+        .expect("scan processes for surviving Matrix relay children");
+    assert!(output.status.success(), "ps failed while checking Matrix relay cleanup");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            fields.get(1).and_then(|value| value.parse::<i32>().ok()) == Some(group)
+                && line.contains("MAX_PROCESSED_EVENT_IDS = 5000")
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+fn matrix_relays_matching(marker: &Path) -> Vec<String> {
+    let output = std::process::Command::new("ps")
+        .args(["-ww", "-axo", "pid=,ppid=,command="])
+        .output()
+        .expect("scan processes for Matrix relay marker argv");
+    assert!(output.status.success(), "ps failed while scanning Matrix relay marker argv");
+    let marker = marker.to_string_lossy();
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| line.contains("MAX_PROCESSED_EVENT_IDS = 5000") && line.contains(marker.as_ref()))
+        .map(str::to_owned)
+        .collect()
 }
 
 /// What a person types, with its own pipes and no terminal — so `restart`
@@ -2692,6 +2744,41 @@ fn matrix_stub_honors_sync_timeout_instead_of_busy_looping() {
     let requests = std::fs::read_to_string(&get_log).unwrap_or_default();
     assert!(requests.lines().count() <= 7, "idle sync fixture busy-looped: {requests}");
     eval(&path, "remuda.kill(remuda.long_poll_handle)");
+}
+
+#[test]
+fn matrix_relay_exits_when_its_parent_daemon_dies() {
+    let dir = scratch_dir("matrix-parent-death");
+    let (mut daemon, path) = butler_test_daemon(&dir);
+    let (stub, get_log) = spawn_stub(&dir, "parent-death", &[]);
+    let (token_path, config_path) = butler_config(
+        &dir, "parent-death", &stub.base_url(), "!room:example.org", "@bot:example.org", "",
+    );
+    eval(
+        &path,
+        &format!(
+            "remuda.parent_death_handle = remuda.process{{argv = {{'python3', '-c', remuda._butler_helper_src, {}, {}}}}}",
+            lua_raw_string(&token_path.to_string_lossy()),
+            lua_raw_string(&config_path.to_string_lossy()),
+        ),
+    );
+
+    let started_deadline = Instant::now() + PATIENCE;
+    while std::fs::read_to_string(&get_log).unwrap_or_default().lines().count() < 2 {
+        assert!(Instant::now() < started_deadline, "Matrix relay did not begin polling");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!matrix_relays_matching(&config_path).is_empty(), "relay marker argv was not visible to the test");
+
+    let _ = daemon.0.kill();
+    let _ = daemon.0.wait();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut survivors = matrix_relays_matching(&config_path);
+    while !survivors.is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(25));
+        survivors = matrix_relays_matching(&config_path);
+    }
+    assert!(survivors.is_empty(), "Matrix relay survived the death of its parent daemon: {survivors:?}");
 }
 
 #[test]
