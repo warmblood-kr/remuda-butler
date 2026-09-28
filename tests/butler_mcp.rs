@@ -378,11 +378,11 @@ fn notice_recovery_preserves_idle_draft_and_respects_attached_human() {
         remuda.ls = function() return { row } end
         remuda.capture_styled = nil
         remuda._butler_bus.agents.m1.kind = 'codex'
-        local state = { screen = '› unsent draft text', events = {}, after_type = 0 }
+        local state = { screen = '› unsent draft text\nGPT-6-Luna medium · ~/projects/ids · task\n? for shortcuts\n98% context left', events = {}, after_type = 0 }
         remuda._notice_test_state = state
         remuda.capture = function()
           table.insert(state.events, 'capture')
-          if state.after_type == 1 then state.after_type = 2; return '› Butler message notice' end
+          if state.after_type == 1 then state.after_type = 2; return '› ' .. remuda._butler_bus.notices.m1.text end
           if state.after_type == 2 then return '› ' end
           return state.screen
         end
@@ -419,9 +419,10 @@ fn notice_recovery_preserves_idle_draft_and_respects_attached_human() {
         &path,
         r#"remuda._notice_test_state.events = {}
         remuda._notice_test_state.after_type = 0
-        remuda._notice_test_state.screen = '› Butler message older notice'
+        remuda._notice_test_state.screen = '› temporary text'
         remuda._butler_send('operator', 'm1', 'next notice')"#,
     );
+    eval(&path, "remuda._notice_test_state.screen = '› ' .. remuda._butler_bus.notices.m1.text");
     let deadline = Instant::now() + PATIENCE;
     while eval(&path, "return tostring(remuda._butler_bus.notices.m1 ~= nil)") != "false" {
         assert!(Instant::now() < deadline, "existing Butler notice was not submitted");
@@ -434,8 +435,24 @@ fn notice_recovery_preserves_idle_draft_and_respects_attached_human() {
 
     eval(
         &path,
+        r#"remuda._notice_test_state.events = {}
+        remuda._notice_test_state.after_type = 0
+        remuda._notice_test_state.screen = '› Butler message but this is user prose'
+        remuda._butler_send('operator', 'm1', 'prefix draft notice')"#,
+    );
+    let deadline = Instant::now() + PATIENCE;
+    while eval(&path, "return tostring(remuda._butler_bus.notices.m1 ~= nil)") != "false" {
+        assert!(Instant::now() < deadline, "Butler message prefix draft did not settle");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let events = eval(&path, "return table.concat(remuda._notice_test_state.events, '\\n')");
+    assert!(events.contains("key C-u"), "prefix draft was mistaken for an existing notice: {events}");
+    assert!(events.contains("Your unsent draft was: Butler message but this is user prose"), "prefix draft was not preserved: {events}");
+
+    eval(
+        &path,
         r#"local row = remuda.ls()[1]
-        row.attached, row.human_idle = true, 0
+        row.attached, row.human_idle = true, 15
         remuda._notice_test_state.events = {}
         remuda._notice_test_state.screen = '› human draft'
         remuda._butler_send('operator', 'm1', 'human-safe notice')"#,
@@ -445,6 +462,19 @@ fn notice_recovery_preserves_idle_draft_and_respects_attached_human() {
         eval(&path, "return tostring(table.concat(remuda._notice_test_state.events, '\\n'))"),
         "capture",
         "recovery sent a key or typed into a human-active pane",
+    );
+
+    eval(&path, r#"local row = remuda.ls()[1]
+        row.attached = false
+        remuda._notice_test_state.events = {}
+        remuda._notice_test_state.busy = true
+        remuda.session = function() return { is_busy = remuda._notice_test_state.busy } end
+        remuda._butler_bus.notice_recoveries.m1.checks = 39"#);
+    std::thread::sleep(Duration::from_millis(1200));
+    assert_eq!(
+        eval(&path, "return tostring(remuda._butler_bus.notice_recoveries.m1.failed)"),
+        "false",
+        "busy pane ticks incorrectly exhausted the recovery timeout",
     );
 }
 
