@@ -120,6 +120,55 @@ fi
 remuda_bin=$(command -v remuda) || die "remuda is not on PATH -- install it first: curl -fsSL https://warmblood-kr.github.io/remuda/install.sh | sh"
 remuda_bin_dir=$(dirname "$remuda_bin")
 
+# `exec` only schedules Butler's readiness chain. Status exits 75 while the
+# chain is still running, 0 when ready, and 1 when every candidate failed.
+# Older Remuda cores lack `remuda.fail`, so their launching error is recognized
+# by its text while the package remains compatible with those cores.
+wait_butler_ready() {
+	readiness_timeout=${REMUDA_BUTLER_READINESS_TIMEOUT:-15}
+	case "$readiness_timeout" in
+	'' | *[!0-9]*) readiness_timeout=15 ;;
+	esac
+	[ "$readiness_timeout" -gt 0 ] || readiness_timeout=15
+	agent_order=${REMUDA_BUTLER_AGENT_ORDER:-claude,codex}
+	candidate_count=$(printf '%s\n' "$agent_order" | awk -F'[,[:space:]]+' '{ for (i = 1; i <= NF; i++) if ($i != "") n++ } END { print n + 0 }')
+	[ "$candidate_count" -gt 0 ] || candidate_count=2
+	readiness_budget=$((candidate_count * readiness_timeout + 15))
+	max_attempt=$((readiness_budget * 2 + 1))
+	attempt=0
+	last_status=""
+	while [ "$attempt" -lt "$max_attempt" ]; do
+		if last_status=$(env -u PWD remuda butler status 2>&1); then
+			printf '%s\n' "$last_status"
+			return 0
+		else
+			status_code=$?
+		fi
+		reported_budget=$(printf '%s\n' "$last_status" | sed -n 's/^readiness budget: \([0-9][0-9]*\)$/\1/p' | tail -1)
+		case "$reported_budget" in
+		'' | *[!0-9]*) ;;
+		*)
+			if [ "$reported_budget" -gt "$readiness_budget" ]; then
+				readiness_budget=$reported_budget
+				max_attempt=$((readiness_budget * 2 + 1))
+			fi
+			;;
+		esac
+		if [ "$status_code" -eq 75 ]; then
+			:
+		else
+			case "$last_status" in
+			*launching*) ;; # older core: `remuda.fail` is not installed
+			*) printf '%s\n' "$last_status" >&2; return 1 ;;
+			esac
+		fi
+		attempt=$((attempt + 1))
+		sleep 0.5
+	done
+	[ -n "$last_status" ] && printf '%s\n' "$last_status" >&2
+	die "Butler did not become ready within $readiness_budget seconds"
+}
+
 # Butler is an independently distributed extension. Installing it is explicit
 # and atomic in Remuda's extension directory; it never relies on a package
 # compiled into the Remuda executable.
@@ -149,17 +198,10 @@ fi
 # exited 0 with empty stderr while registering no process, tool, or session at
 # all. Assert the positive post-condition instead of trusting the exit code.
 #
-# This makes the exact-match `remuda ls` check the THIRD consumer of one
-# liveness instrument, alongside butler-poll.sh below and
-# native/tests/daemon.rs's a_daemon_restart_does_not_relaunch_the_butler_session.
-# That repetition is only safe because the daemon.rs test is a negative
-# control on `remuda ls` itself -- if `remuda ls` ever lied about a session's
-# presence, that test goes red. Weakening or deleting it re-enables a known
-# false-positive across all three consumers, not just loosens one test.
-if ! env -u PWD remuda ls | awk '$1 == "butler" { found = 1 } END { exit !found }'; then
-	die "remuda exec butler exited successfully but registered no session named 'butler' -- this remuda build predates the lifecycle start hook Butler boots from (warmblood-kr/remuda#104) or the real butler package; run 'remuda upgrade' and try again"
+if ! wait_butler_ready; then
+	die "Butler did not become ready; see the candidate attempts above"
 fi
-status "butler registered for this run."
+status "butler is ready."
 
 # Sibling to remuda/butler/, not inside it: the generic per-daemon loader
 # (native/src/daemon.rs's `load_user_config`), evaluated automatically by
@@ -180,37 +222,16 @@ remuda.exec("butler")
 LUA
 status "wrote $init_lua"
 
-# Real functional verification, same discipline as the probe above (assert
-# the positive post-condition, never trust an exit code alone): kill the
-# daemon and let the next command lazily start a fresh one, then check for
-# an exact-match 'butler' session again -- WITHOUT calling `remuda exec
-# butler` a second time. If butler does not come back on its own, the
-# loader did not do its job.
+# Real functional verification: kill the daemon and let the next command
+# lazily start a fresh one, then wait for Butler's readiness without calling
+# `remuda exec butler` a second time.
 status "restarting the daemon to verify the new loader actually re-registers butler..."
 env -u PWD remuda restart -f >&2
 
-# Bounded retry, not a single immediate check: native/src/daemon.rs's
-# load_user_config runs on its own thread, CONCURRENTLY with
-# listener.incoming() starting, not strictly before it (see steps/035's "A
-# real deadlock" section) -- so there is a real, if narrow, window right
-# after a fresh daemon starts accepting connections where `remuda ls` can
-# run before the loader's own `remuda.exec("butler")` call has finished.
-# 20 attempts * 500ms = 10s, matching native/tests/daemon.rs's own
-# PATIENCE deadline for the identical race.
-attempt=0
-found=0
-while [ "$attempt" -lt 20 ]; do
-	if env -u PWD remuda ls | awk '$1 == "butler" { found = 1 } END { exit !found }'; then
-		found=1
-		break
-	fi
-	attempt=$((attempt + 1))
-	sleep 0.5
-done
-if [ "$found" -ne 1 ]; then
-	die "butler did not come back on its own after a daemon restart -- the boot-time loader ($init_lua) did not work; this build may predate it (try 'remuda upgrade' and re-run this installer)"
+if ! wait_butler_ready; then
+	die "Butler did not come back ready after a daemon restart -- the boot-time loader ($init_lua) did not work; try 'remuda upgrade' and re-run this installer"
 fi
-status "confirmed: butler came back automatically after a daemon restart, with no 'remuda exec butler' call."
+status "confirmed: butler came back ready after a daemon restart, with no 'remuda exec butler' call."
 
 # The poll-and-relaunch logic lives in its own small script rather than
 # inline in the unit/plist ExecStart -- both systemd unit files and plist
