@@ -145,7 +145,7 @@ the normal way for a member to communicate.
     ["butler.command"] = {
       { id = "sessions", order = 10, verb = "sessions", usage = "  remuda butler sessions",
         run = function(_, args, caller) return host._butler_command_run("sessions", args, caller) end },
-      { id = "status", order = 12, verb = "status", usage = "  remuda butler status  (0=up; errors start with launching or failed)",
+      { id = "status", order = 12, verb = "status", usage = "  remuda butler status  (0=up, 75=launching, 1=failed)",
         run = function(_, args, caller) return host._butler_command_run("status", args, caller) end },
       { id = "agents", order = 15, verb = "agents", usage = "  remuda butler agents [--all]",
         run = function(_, args, caller) return host._butler_command_run("agents", args, caller) end },

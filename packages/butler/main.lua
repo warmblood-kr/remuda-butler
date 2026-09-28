@@ -1762,7 +1762,7 @@ end
 command(10, "sessions", "  remuda butler sessions", function(args)
   if #args == 1 then return remuda._butler_sessions() end
 end)
-command(12, "status", "  remuda butler status  (0=up; errors start with launching or failed)", function(args)
+command(12, "status", "  remuda butler status  (0=up, 75=launching, 1=failed)", function(args)
   if #args == 1 then
     local message, code = remuda._butler_status()
     if code ~= 0 then
