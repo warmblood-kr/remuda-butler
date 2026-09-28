@@ -88,6 +88,26 @@ fn capture(path: &Path, name: &str) -> String {
     }
 }
 
+const FAKE_COMPACTION_EXPECT: &str = r#"
+  local fake_ctx, fake_model = "500000", "Opus"
+  remuda._butler_telemetry_for = function() return { context_used = fake_ctx, model = fake_model } end
+  remuda.capture = function() return "MODEL:" .. fake_model .. " CTX:" .. fake_ctx .. "\nmock screen" end
+  remuda._butler_prompt_is_empty = function() return "EMPTY" end
+  remuda.expect_option = function() return "1" end
+  remuda.expect = function(_, branches)
+    local branch = branches[1]
+    if branch.id == "switch-confirm" then
+      branch.action("Switch model?\n1. Yes, switch to Sonnet\n2. No")
+    elseif branch.id == "restore-confirm" then
+      branch.action("Switch model?\n1. Yes, switch to Opus\n2. No")
+    elseif branch.id == "verified" then
+      fake_ctx, fake_model = "200000", "Opus"
+      if branch.match() then branch.action() end
+    end
+    return { state = { status = "matched" } }
+  end
+"#;
+
 fn wait_for(path: &Path, name: &str, needle: &str) -> String {
     let deadline = Instant::now() + PATIENCE;
     loop {
@@ -1226,7 +1246,10 @@ fn exec_butler_runs_the_builtin_package_in_the_daemons_image() {
 fn butler_lifecycle_reload_replaces_hooks_and_schedules_and_rolls_back() {
     let path = scratch("butler-lifecycle-reload");
     let _daemon = daemon_at(&path);
-    eval(&path, "remuda._butler_test_mode = 'lifecycle'; remuda.exec('butler')");
+    eval(
+        &path,
+        "remuda._butler_test_mode = 'lifecycle'; remuda.exec('butler')",
+    );
 
     let main = include_str!("../../packages/butler/main.lua");
     assert!(
@@ -1273,9 +1296,16 @@ fn butler_lifecycle_reload_replaces_hooks_and_schedules_and_rolls_back() {
 
     for _ in 0..3 {
         eval(&path, "remuda.reload('butler')");
-        assert_eq!(eval(&path, counts), initial, "reload duplicated Butler registrations");
         assert_eq!(
-            eval(&path, "return tostring(remuda._butler_state.compaction_enabled)"),
+            eval(&path, counts),
+            initial,
+            "reload duplicated Butler registrations"
+        );
+        assert_eq!(
+            eval(
+                &path,
+                "return tostring(remuda._butler_state.compaction_enabled)"
+            ),
             "true",
             "reload did not preserve the previously enabled compaction schedule"
         );
@@ -1303,9 +1333,19 @@ fn butler_lifecycle_reload_replaces_hooks_and_schedules_and_rolls_back() {
             return tostring(ok) .. "|" .. tostring(err)
         "#,
     );
-    assert!(failed.starts_with("false|"), "reload should report its failed start: {failed}");
-    assert!(failed.contains("injected Butler start failure"), "wrong start error: {failed}");
-    assert_eq!(eval(&path, counts), initial, "failed reload did not restore Butler registrations");
+    assert!(
+        failed.starts_with("false|"),
+        "reload should report its failed start: {failed}"
+    );
+    assert!(
+        failed.contains("injected Butler start failure"),
+        "wrong start error: {failed}"
+    );
+    assert_eq!(
+        eval(&path, counts),
+        initial,
+        "failed reload did not restore Butler registrations"
+    );
     assert!(
         read_count(
             &path,
@@ -2773,7 +2813,11 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
         r#"remuda._butler_argv = {"sh", "-c", "sleep 30"}; remuda._butler_skip_relay = true"#,
     );
     let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let trace = dir.join("session-trace.log");
     eval(
         &path,
@@ -2831,19 +2875,38 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
         let traced = std::fs::read_to_string(&trace).unwrap_or_default();
         // The leader's "task not delivered" notice is typed too; count only
         // the topic sessions' own lines.
-        let typed = log.lines().filter(|l| l.starts_with("t-") && l.contains(" type ")).count();
+        let typed = log
+            .lines()
+            .filter(|l| l.starts_with("t-") && l.contains(" type "))
+            .count();
         if typed == 2 && traced.contains("task_poke_timeout\tt-stuck") {
             break log;
         }
-        assert!(Instant::now() < deadline, "pokes never settled: {log}\n{traced}");
+        assert!(
+            Instant::now() < deadline,
+            "pokes never settled: {log}\n{traced}"
+        );
         std::thread::sleep(Duration::from_millis(100));
     };
     let claude: Vec<&str> = log.lines().filter(|l| l.starts_with("t-claude ")).collect();
-    assert_eq!(claude, ["t-claude key <down>", "t-claude key RET", "t-claude type task one"]);
+    assert_eq!(
+        claude,
+        [
+            "t-claude key <down>",
+            "t-claude key RET",
+            "t-claude type task one"
+        ]
+    );
     let codex: Vec<&str> = log.lines().filter(|l| l.starts_with("t-codex ")).collect();
     assert_eq!(codex, ["t-codex key 2", "t-codex type task two"]);
-    assert!(!log.contains("t-stuck "), "typed into an unknown dialog: {log}");
-    assert!(log.contains(" type Butler message "), "the leader is told about t-stuck: {log}");
+    assert!(
+        !log.contains("t-stuck "),
+        "typed into an unknown dialog: {log}"
+    );
+    assert!(
+        log.contains(" type Butler message "),
+        "the leader is told about t-stuck: {log}"
+    );
     drop(daemon);
 }
 
@@ -2981,7 +3044,11 @@ fn butler_mail_torn_inbox_tail_does_not_swallow_the_next_delivery() {
     let id = "01TORNTA1L000000000000000A";
     let dir = scratch_dir("butler-mail-torn");
     let (root, inbox, _) = seeded_mail_root(&dir, id);
-    std::fs::write(&inbox, "{\"message_id\":\"message-a\"}\n{\"message_id\":\"message-to").expect("torn");
+    std::fs::write(
+        &inbox,
+        "{\"message_id\":\"message-a\"}\n{\"message_id\":\"message-to",
+    )
+    .expect("torn");
     let path = scratch("butler-mail-torn");
     let _daemon = daemon_at(&path);
     eval(
@@ -2994,9 +3061,21 @@ fn butler_mail_torn_inbox_tail_does_not_swallow_the_next_delivery() {
         ),
     );
     // A fresh mailbox reads the inbox back from disk, as after a restart.
-    let out = eval(&path, &format!("{}\nreturn remuda._butler_mail.inbox(\"{id}\")", mail_config_lua(&root)));
-    assert!(out.contains("body of a"), "the torn row's neighbour was lost: {out:?}");
-    assert!(out.contains("the new delivery"), "the delivery after a torn row was lost: {out:?}");
+    let out = eval(
+        &path,
+        &format!(
+            "{}\nreturn remuda._butler_mail.inbox(\"{id}\")",
+            mail_config_lua(&root)
+        ),
+    );
+    assert!(
+        out.contains("body of a"),
+        "the torn row's neighbour was lost: {out:?}"
+    );
+    assert!(
+        out.contains("the new delivery"),
+        "the delivery after a torn row was lost: {out:?}"
+    );
 }
 
 /// An inbox row whose envelope is missing or corrupt must stay unread and be
@@ -3014,7 +3093,13 @@ fn butler_mail_unloadable_envelope_stays_unread_and_is_reported() {
     .expect("inbox rows");
     let path = scratch("butler-mail-unloadable");
     let _daemon = daemon_at(&path);
-    let first = eval(&path, &format!("{}\nreturn remuda._butler_mail.inbox(\"{id}\")", mail_config_lua(&root)));
+    let first = eval(
+        &path,
+        &format!(
+            "{}\nreturn remuda._butler_mail.inbox(\"{id}\")",
+            mail_config_lua(&root)
+        ),
+    );
     assert!(first.contains("body of a"), "{first:?}");
     for bad in ["message-missing", "message-corrupt"] {
         assert!(
@@ -3023,12 +3108,33 @@ fn butler_mail_unloadable_envelope_stays_unread_and_is_reported() {
         );
     }
     let read_ids = std::fs::read_to_string(&read).unwrap_or_default();
-    assert!(read_ids.contains("message-a"), "the shown message was not marked read");
-    assert!(!read_ids.contains("message-missing"), "an unloadable row was marked read");
-    assert!(!read_ids.contains("message-corrupt"), "an unloadable row was marked read");
-    let again = eval(&path, &format!("{}\nreturn remuda._butler_mail.inbox(\"{id}\")", mail_config_lua(&root)));
-    assert!(again.contains("message message-missing: envelope unreadable"), "{again:?}");
-    assert!(!again.contains("body of a"), "a read message came back: {again:?}");
+    assert!(
+        read_ids.contains("message-a"),
+        "the shown message was not marked read"
+    );
+    assert!(
+        !read_ids.contains("message-missing"),
+        "an unloadable row was marked read"
+    );
+    assert!(
+        !read_ids.contains("message-corrupt"),
+        "an unloadable row was marked read"
+    );
+    let again = eval(
+        &path,
+        &format!(
+            "{}\nreturn remuda._butler_mail.inbox(\"{id}\")",
+            mail_config_lua(&root)
+        ),
+    );
+    assert!(
+        again.contains("message message-missing: envelope unreadable"),
+        "{again:?}"
+    );
+    assert!(
+        !again.contains("body of a"),
+        "a read message came back: {again:?}"
+    );
 }
 
 /// Within ONE live bus: an envelope that becomes readable later is delivered
@@ -3041,9 +3147,21 @@ fn butler_mail_unreadable_envelope_is_retried_in_the_same_bus() {
     std::fs::write(&inbox, "{\"message_id\":\"message-late\"}\n").expect("inbox row");
     let path = scratch("butler-mail-retry");
     let _daemon = daemon_at(&path);
-    let first = eval(&path, &format!("{}\nreturn remuda._butler_mail.inbox(\"{id}\")", mail_config_lua(&root)));
-    assert!(first.contains("message message-late: envelope unreadable, left unread"), "{first:?}");
-    let count = eval(&path, &format!("return tostring(remuda._butler_mail.unread(\"{id}\"))"));
+    let first = eval(
+        &path,
+        &format!(
+            "{}\nreturn remuda._butler_mail.inbox(\"{id}\")",
+            mail_config_lua(&root)
+        ),
+    );
+    assert!(
+        first.contains("message message-late: envelope unreadable, left unread"),
+        "{first:?}"
+    );
+    let count = eval(
+        &path,
+        &format!("return tostring(remuda._butler_mail.unread(\"{id}\"))"),
+    );
     assert_eq!(count, "0", "an unreadable id is not counted");
 
     std::fs::write(
@@ -3052,13 +3170,25 @@ fn butler_mail_unreadable_envelope_is_retried_in_the_same_bus() {
     )
     .expect("late envelope");
     std::fs::write(root.join("objects/object-late"), "late body").expect("late object");
-    let count = eval(&path, &format!("return tostring(remuda._butler_mail.unread(\"{id}\"))"));
+    let count = eval(
+        &path,
+        &format!("return tostring(remuda._butler_mail.unread(\"{id}\"))"),
+    );
     assert_eq!(count, "1", "a now-readable id is counted");
-    let second = eval(&path, &format!("return remuda._butler_mail.inbox(\"{id}\")"));
-    assert!(second.contains("late body"), "the late envelope was not delivered: {second:?}");
+    let second = eval(
+        &path,
+        &format!("return remuda._butler_mail.inbox(\"{id}\")"),
+    );
+    assert!(
+        second.contains("late body"),
+        "the late envelope was not delivered: {second:?}"
+    );
     assert!(!second.contains("envelope unreadable"), "{second:?}");
     let read_ids = std::fs::read_to_string(&read).unwrap_or_default();
-    assert!(read_ids.contains("message-late"), "the delivered id was not marked read");
+    assert!(
+        read_ids.contains("message-late"),
+        "the delivered id was not marked read"
+    );
 }
 
 const REPLY_B: &str = "01REP1YBUT1ER0000000000000";
@@ -3105,15 +3235,34 @@ fn butler_mail_reply_threads_with_in_reply_to_and_references() {
     assert_eq!(v[4], "fixer");
     assert_eq!(v[5], "Re: Message from butler");
     assert_eq!(v[6], "Re: Message from butler", "Re: is not doubled");
-    assert_eq!(v[7], format!("{a},{b}"), "references = parent's references + parent");
+    assert_eq!(
+        v[7],
+        format!("{a},{b}"),
+        "references = parent's references + parent"
+    );
     assert_eq!(v[8], b);
     let envelope = std::fs::read_to_string(root.join(format!("messages/{c}.json"))).unwrap();
-    assert!(envelope.contains(&format!(r#""in_reply_to":"{b}""#)), "{envelope}");
-    assert!(envelope.contains(&format!(r#""references":["{a}","{b}"]"#)), "{envelope}");
+    assert!(
+        envelope.contains(&format!(r#""in_reply_to":"{b}""#)),
+        "{envelope}"
+    );
+    assert!(
+        envelope.contains(&format!(r#""references":["{a}","{b}"]"#)),
+        "{envelope}"
+    );
 
-    let fresh = eval(&path, &format!("{}\nreturn M.inbox(F.id)", reply_prelude(&root)));
-    assert!(fresh.contains(&format!("  in reply to {b} (thread {a})")), "{fresh}");
-    assert!(fresh.contains("thanks") && fresh.contains("question"), "{fresh}");
+    let fresh = eval(
+        &path,
+        &format!("{}\nreturn M.inbox(F.id)", reply_prelude(&root)),
+    );
+    assert!(
+        fresh.contains(&format!("  in reply to {b} (thread {a})")),
+        "{fresh}"
+    );
+    assert!(
+        fresh.contains("thanks") && fresh.contains("question"),
+        "{fresh}"
+    );
 }
 
 /// JWZ safety: a missing parent keeps the thread, a self-reference is
@@ -3122,11 +3271,19 @@ fn butler_mail_reply_threads_with_in_reply_to_and_references() {
 fn butler_mail_reply_tolerates_old_missing_and_self_referencing_parents() {
     let dir = scratch_dir("butler-mail-jwz");
     let (root, f_inbox, _) = seeded_mail_root(&dir, REPLY_F);
-    let from_b = format!(r#""from":{{"host":"local","id":"{REPLY_B}","alias":"butler","kind":"","leader":"","session":"butler"}}"#);
+    let from_b = format!(
+        r#""from":{{"host":"local","id":"{REPLY_B}","alias":"butler","kind":"","leader":"","session":"butler"}}"#
+    );
     for (id, extra) in [
         ("message-old", String::new()),
-        ("message-orphan", r#","in_reply_to":"message-gone""#.to_string()),
-        ("message-selfref", r#","in_reply_to":"message-selfref","references":["message-selfref"]"#.to_string()),
+        (
+            "message-orphan",
+            r#","in_reply_to":"message-gone""#.to_string(),
+        ),
+        (
+            "message-selfref",
+            r#","in_reply_to":"message-selfref","references":["message-selfref"]"#.to_string(),
+        ),
         ("message-op", String::new()),
     ] {
         let from = if id == "message-op" {
@@ -3160,13 +3317,34 @@ fn butler_mail_reply_tolerates_old_missing_and_self_referencing_parents() {
         ),
     );
     let v: Vec<&str> = out.lines().collect();
-    assert_eq!(v[0], "message-old|butler", "an old envelope is a thread root");
-    assert_eq!(v[1], "message-gone,message-orphan|butler", "a missing parent still threads");
-    assert_eq!(v[2], "message-selfref|butler", "a self-reference is dropped, never looped");
-    assert!(v[3].contains("not delivered"), "reply is only for mail delivered to you: {out}");
-    assert!(v[4].contains("no Butler inbox"), "operator has no inbox to reply to: {out}");
-    let b_view = eval(&path, &format!("{}\nreturn M.inbox(B.id)", reply_prelude(&root)));
-    assert!(b_view.contains("in reply to message-orphan (thread message-gone)"), "{b_view}");
+    assert_eq!(
+        v[0], "message-old|butler",
+        "an old envelope is a thread root"
+    );
+    assert_eq!(
+        v[1], "message-gone,message-orphan|butler",
+        "a missing parent still threads"
+    );
+    assert_eq!(
+        v[2], "message-selfref|butler",
+        "a self-reference is dropped, never looped"
+    );
+    assert!(
+        v[3].contains("not delivered"),
+        "reply is only for mail delivered to you: {out}"
+    );
+    assert!(
+        v[4].contains("no Butler inbox"),
+        "operator has no inbox to reply to: {out}"
+    );
+    let b_view = eval(
+        &path,
+        &format!("{}\nreturn M.inbox(B.id)", reply_prelude(&root)),
+    );
+    assert!(
+        b_view.contains("in reply to message-orphan (thread message-gone)"),
+        "{b_view}"
+    );
 }
 
 const REPLY_W: &str = "01REP1YW0RKER0000000000000";
@@ -3184,7 +3362,10 @@ fn butler_mail_forward_redelivers_the_original_with_a_resent_row() {
            local W = {{ host = "local", id = "{REPLY_W}", alias = "worker", session = "worker" }}"#,
         reply_prelude(&root)
     );
-    let a = eval(&path, &format!("{prelude}\nreturn assert(M.queue(B, F, \"question\")).id"));
+    let a = eval(
+        &path,
+        &format!("{prelude}\nreturn assert(M.queue(B, F, \"question\")).id"),
+    );
     let envelope = root.join(format!("messages/{a}.json"));
     let before = std::fs::read(&envelope).unwrap();
     let out = eval(
@@ -3199,16 +3380,38 @@ fn butler_mail_forward_redelivers_the_original_with_a_resent_row() {
         ),
     );
     let v: Vec<&str> = out.lines().collect();
-    assert!(v[0].contains("already delivered to worker"), "loop guard: {out}");
-    assert!(v[1].contains("already delivered to fixer"), "loop guard back: {out}");
+    assert!(
+        v[0].contains("already delivered to worker"),
+        "loop guard: {out}"
+    );
+    assert!(
+        v[1].contains("already delivered to fixer"),
+        "loop guard back: {out}"
+    );
     assert!(v[2].contains("not delivered"), "only your own mail: {out}");
-    assert_eq!(std::fs::read(&envelope).unwrap(), before, "the original envelope is never rewritten");
-    let row = std::fs::read_to_string(root.join(format!("inboxes/{}.jsonl", hex_component(REPLY_W)))).unwrap();
-    assert!(row.contains(&format!(r#""message_id":"{a}","resent":{{"#)) && row.contains("note_object_id"), "{row}");
+    assert_eq!(
+        std::fs::read(&envelope).unwrap(),
+        before,
+        "the original envelope is never rewritten"
+    );
+    let row =
+        std::fs::read_to_string(root.join(format!("inboxes/{}.jsonl", hex_component(REPLY_W))))
+            .unwrap();
+    assert!(
+        row.contains(&format!(r#""message_id":"{a}","resent":{{"#))
+            && row.contains("note_object_id"),
+        "{row}"
+    );
 
     let fresh = eval(&path, &format!("{prelude}\nreturn M.inbox(W.id)"));
-    assert!(fresh.contains(&format!("[{a} from local/butler ")), "original sender kept: {fresh}");
-    assert!(fresh.contains("  forwarded by fixer to worker at ") && fresh.contains(": see para 2"), "{fresh}");
+    assert!(
+        fresh.contains(&format!("[{a} from local/butler ")),
+        "original sender kept: {fresh}"
+    );
+    assert!(
+        fresh.contains("  forwarded by fixer to worker at ") && fresh.contains(": see para 2"),
+        "{fresh}"
+    );
     assert!(fresh.contains("question"), "original body kept: {fresh}");
 }
 
@@ -3238,10 +3441,19 @@ fn butler_mail_forwarded_read_state_is_per_inbox_and_replies_reach_the_original_
         ),
     );
     let v: Vec<&str> = out.lines().collect();
-    assert_eq!(v[0], "1", "the forwarder reading it leaves the target unread");
+    assert_eq!(
+        v[0], "1",
+        "the forwarder reading it leaves the target unread"
+    );
     assert_eq!(v[1], "true", "the target still sees it");
-    assert_eq!(v[2], "inbox empty", "the target reading it does not re-open the forwarder's copy");
-    assert_eq!(v[3], "butler", "a reply to forwarded mail goes to the original sender");
+    assert_eq!(
+        v[2], "inbox empty",
+        "the target reading it does not re-open the forwarder's copy"
+    );
+    assert_eq!(
+        v[3], "butler",
+        "a reply to forwarded mail goes to the original sender"
+    );
     assert_eq!(v[4], "threaded");
 }
 
@@ -3252,7 +3464,11 @@ fn butler_mail_refuses_to_overwrite_an_existing_message_on_an_id_collision() {
     let dir = scratch_dir("butler-mail-collide");
     let (root, f_inbox, _) = seeded_mail_root(&dir, REPLY_F);
     let collision_id = "00000000000000000000000000";
-    std::fs::write(root.join(format!("messages/{collision_id}.json")), "ORIGINAL").unwrap();
+    std::fs::write(
+        root.join(format!("messages/{collision_id}.json")),
+        "ORIGINAL",
+    )
+    .unwrap();
     let path = scratch("butler-mail-collide");
     let _daemon = daemon_at(&path);
     let out = eval(
@@ -3265,9 +3481,20 @@ fn butler_mail_refuses_to_overwrite_an_existing_message_on_an_id_collision() {
             reply_prelude(&root)
         ),
     );
-    assert!(out.starts_with("true|nil|") && out.contains("already exists"), "not refused loudly: {out}");
-    assert_eq!(std::fs::read_to_string(root.join(format!("messages/{collision_id}.json"))).unwrap(), "ORIGINAL");
-    assert!(!std::fs::read_to_string(&f_inbox).unwrap_or_default().contains(collision_id), "a row was committed");
+    assert!(
+        out.starts_with("true|nil|") && out.contains("already exists"),
+        "not refused loudly: {out}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join(format!("messages/{collision_id}.json"))).unwrap(),
+        "ORIGINAL"
+    );
+    assert!(
+        !std::fs::read_to_string(&f_inbox)
+            .unwrap_or_default()
+            .contains(collision_id),
+        "a row was committed"
+    );
 }
 
 /// Only an explicit operator skips the delivered check; an id-less caller
@@ -3402,8 +3629,17 @@ fn butler_initializes_mail_and_persists_a_sent_message() {
         &path,
         r#"return remuda._butler_send("butler", "butler", "private body")"#,
     );
-    let queued_id = sent.strip_prefix("queued ").and_then(|s| s.split_whitespace().next()).unwrap_or("");
-    assert!(queued_id.len() == 26 && queued_id.bytes().all(|b| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&b)), "{sent:?}");
+    let queued_id = sent
+        .strip_prefix("queued ")
+        .and_then(|s| s.split_whitespace().next())
+        .unwrap_or("");
+    assert!(
+        queued_id.len() == 26
+            && queued_id
+                .bytes()
+                .all(|b| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&b)),
+        "{sent:?}"
+    );
     assert!(
         sent.contains("notice deferred") || sent.ends_with(" and notified butler"),
         "{sent:?}"
@@ -3450,7 +3686,8 @@ fn butler_session_exited_hook_relaunches_via_the_shared_launch_function() {
         "Butler reload must rely on lifecycle ownership, not hook purges"
     );
     assert!(
-        init_lua.contains("stop = function(state)") && init_lua.contains("pcall(host.kill, relay)")
+        init_lua.contains("stop = function(state)")
+            && init_lua.contains("pcall(host.kill, relay)")
             && !main_lua.contains("pkill -f"),
         "the Matrix relay must be stopped by process id through the lifecycle stop hook"
     );
@@ -3703,10 +3940,7 @@ fn butler_compaction_schedule_sends_compact_when_idle_but_not_when_busy() {
     );
 
     let butler_name = eval(&path, "return remuda._butler_initial_name");
-    eval(
-        &path,
-        r#"remuda._butler_telemetry_for = function() return { context_used = "500000" } end; remuda.capture = function() return "mock screen" end; remuda._butler_prompt_is_empty = function() return "EMPTY" end"#,
-    );
+    eval(&path, FAKE_COMPACTION_EXPECT);
 
     // Simulates the launched session's own one-time `run_script` call the
     // system prompt asks for.
@@ -3826,10 +4060,7 @@ fn butler_compaction_trace_records_registered_skipped_and_sent() {
     );
 
     let butler_name = eval(&path, "return remuda._butler_initial_name");
-    eval(
-        &path,
-        r#"remuda._butler_telemetry_for = function() return { context_used = "500000" } end; remuda.capture = function() return "mock screen" end; remuda._butler_prompt_is_empty = function() return "EMPTY" end"#,
-    );
+    eval(&path, FAKE_COMPACTION_EXPECT);
 
     // Simulates the launched session's own one-time `run_script` call the
     // system prompt asks for -- this alone must already leave a "registered"
@@ -4654,16 +4885,45 @@ fn butler_boot_ends_identities_whose_sessions_died_with_the_daemon() {
     let data = data_home.to_string_lossy().to_string();
     let daemon = Daemon::spawn_with_env(&dir, &[("XDG_DATA_HOME", data.as_str())]);
     let path = daemon::socket_path_in(&dir, "s");
-    eval(&path, r#"remuda._butler_argv = {"sh", "-c", "while read line; do :; done"}; remuda._butler_skip_relay = true"#);
+    eval(
+        &path,
+        r#"remuda._butler_argv = {"sh", "-c", "while read line; do :; done"}; remuda._butler_skip_relay = true"#,
+    );
     let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let rows = std::fs::read_to_string(&agents).expect("read agents.jsonl");
-    let last = |id: &str| rows.lines().filter(|l| l.contains(id)).last().unwrap_or_default().to_string();
-    let count = |id: &str| rows.lines().filter(|l| l.contains(&format!(r#""id":"{id}""#))).count();
+    let last = |id: &str| {
+        rows.lines()
+            .filter(|l| l.contains(id))
+            .last()
+            .unwrap_or_default()
+            .to_string()
+    };
+    let count = |id: &str| {
+        rows.lines()
+            .filter(|l| l.contains(&format!(r#""id":"{id}""#)))
+            .count()
+    };
     assert!(last("01GHST").contains("ended_at"), "{rows}");
-    assert_eq!(count("01DNE000000000000000000000"), 1, "an ended identity is not re-ended: {rows}");
-    assert!(!last(r#""id":"01ROOT"#).contains("ended_at"), "the root stays live: {rows}");
-    assert!(eval(&path, "return remuda._butler_bus.identities.ghost.ended_at ~= nil") == "true");
+    assert_eq!(
+        count("01DNE000000000000000000000"),
+        1,
+        "an ended identity is not re-ended: {rows}"
+    );
+    assert!(
+        !last(r#""id":"01ROOT"#).contains("ended_at"),
+        "the root stays live: {rows}"
+    );
+    assert!(
+        eval(
+            &path,
+            "return remuda._butler_bus.identities.ghost.ended_at ~= nil"
+        ) == "true"
+    );
     drop(daemon);
 }
