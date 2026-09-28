@@ -3631,7 +3631,17 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
           remuda._butler_codex_update_timeout = 2
           remuda._butler_modal_timeout = 3
           local native_close = remuda.close
-          local function natural_exit(n)
+          -- remuda.close is reported as reason "closed" by cores with #258; a
+          -- simulated natural exit substitutes the exit the real process would report.
+          local exit_infos = {{}}
+          local session_exited = remuda._butler_session_exited
+          remuda._butler_session_exited = function(n, info)
+            local natural = exit_infos[n]
+            exit_infos[n] = nil
+            return session_exited(n, natural or info)
+          end
+          local function natural_exit(n, info)
+            exit_infos[n] = info
             native_close(n)
             remuda._butler_bus.close_requested[n] = nil
           end
@@ -3687,7 +3697,7 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
               screens[n] = {{ "🎉 Update ran successfully! Please restart Codex." }}
               local restart = remuda._butler_bus.codex_update_relaunches[n]
               restart.last_screen = remuda.capture(n) -- captured immediately before Codex exits
-              natural_exit(n)
+              natural_exit(n, {{ reason = "exited", exit_code = 0 }})
             elseif n == "t-codex-human-owner" and k == "1" then
               human_owner_update_started = true
               screens[n] = {{ "› Ask Codex to do anything" }} -- update completed in place
