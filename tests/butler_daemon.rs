@@ -1062,52 +1062,7 @@ impl Drop for Daemon {
         unsafe { libc::kill(process_group, libc::SIGKILL); }
         let _ = self.0.kill();
         let _ = self.0.wait();
-
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let mut survivors = matrix_relays_in_process_group(-process_group);
-        while !survivors.is_empty() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(20));
-            survivors = matrix_relays_in_process_group(-process_group);
-        }
-        if !survivors.is_empty() {
-            if std::thread::panicking() {
-                eprintln!("Matrix relay children survived private daemon teardown: {survivors:?}");
-            } else {
-                panic!("Matrix relay children survived private daemon teardown: {survivors:?}");
-            }
-        }
     }
-}
-
-fn matrix_relays_in_process_group(group: i32) -> Vec<String> {
-    let output = std::process::Command::new("ps")
-        .args(["-ww", "-axo", "pid=,pgid=,command="])
-        .output()
-        .expect("scan processes for surviving Matrix relay children");
-    assert!(output.status.success(), "ps failed while checking Matrix relay cleanup");
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|line| {
-            let fields: Vec<_> = line.split_whitespace().collect();
-            fields.get(1).and_then(|value| value.parse::<i32>().ok()) == Some(group)
-                && line.contains("MAX_PROCESSED_EVENT_IDS = 5000")
-        })
-        .map(str::to_owned)
-        .collect()
-}
-
-fn matrix_relays_matching(marker: &Path) -> Vec<String> {
-    let output = std::process::Command::new("ps")
-        .args(["-ww", "-axo", "pid=,ppid=,command="])
-        .output()
-        .expect("scan processes for Matrix relay marker argv");
-    assert!(output.status.success(), "ps failed while scanning Matrix relay marker argv");
-    let marker = marker.to_string_lossy();
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|line| line.contains("MAX_PROCESSED_EVENT_IDS = 5000") && line.contains(marker.as_ref()))
-        .map(str::to_owned)
-        .collect()
 }
 
 /// What a person types, with its own pipes and no terminal — so `restart`
@@ -1263,8 +1218,9 @@ fn exec_butler_runs_the_builtin_package_in_the_daemons_image() {
                 "-s",
                 "s",
                 "-e",
-                "return (remuda._butler_helper_src ~= nil and remuda._butler_reply_src ~= nil) \
-                 and 'ok' or 'missing'",
+                "local matrix = remuda.butler and remuda.butler.matrix; return \
+                 (matrix and matrix.request_json and matrix.relay and matrix.relay.new \
+                   and remuda._butler_reply_src ~= nil) and 'ok' or 'missing'",
             ],
         );
         if String::from_utf8_lossy(&read.stdout).trim() == "ok" {
@@ -2004,18 +1960,13 @@ fn an_unpaced_flood_exercises_real_backpressure_and_the_child_blocks() {
     }
 }
 
-// --- packages/butler: the Matrix bridge's Python/bash helpers -------------
+// --- packages/butler: the Matrix async client and reply helper -------------
 //
-// Everything below runs against a stub HTTP server of our own
-// (`tests/support/matrix_stub_server.py`), never a real Matrix homeserver.
-// `HELPER_SRC`/`REPLY_SRC` are read from the internal Matrix module by running
-// the Butler package in test mode in a daemon's
-// living image via `remuda exec butler`, then referenced BY NAME
-// (`remuda._butler_helper_src` / `remuda._butler_reply_src`) from later
-// `remuda.process` calls against that same image — with no separate string
-// round-trip through Rust needed.
+// Relay HTTP tests use tests/support/fake_http.lua on a private daemon. The
+// reply helper cases below still use the local Python stub until the write
+// verb migration replaces that helper.
 
-/// The stub Matrix homeserver, as its own process — plain
+/// The reply-path stub Matrix homeserver, as its own process — plain
 /// `std::process::Command`, not `remuda.process`: this is test
 /// infrastructure standing in for a homeserver, not part of the package
 /// under test.
@@ -2094,15 +2045,9 @@ fn butler_config(
     (token_path, config_path)
 }
 
-/// Pre-start a daemon, then run the real Butler package inside
-/// it with `remuda._butler_test_mode` set — the same `remuda exec`
-/// invocation `exec_butler_runs_the_builtin_package_in_the_daemons_image`
-/// uses, then load the internal Matrix entry point — so
-/// `remuda._butler_helper_src`/`remuda._butler_reply_src` hold the exact
-/// package source, without starting a real Claude session or needing
-/// `REMUDA_BUTLER_TOKEN`/`REMUDA_BUTLER_CONFIG`. Both globals stay
-/// live in this same image afterward, so a later `eval` can reference them
-/// by name directly inside a `remuda.process{argv = {...}}` call.
+/// Pre-start a daemon, then run the real Butler package inside it in test
+/// mode. The Matrix modules remain available in the same image for evals,
+/// without starting a real agent or contacting a homeserver.
 fn butler_test_daemon(dir: &Path) -> (Daemon, PathBuf) {
     let daemon = Daemon::spawn(dir);
     let path = daemon::socket_path_in(dir, "s");
@@ -2254,1234 +2199,87 @@ fn butler_matrix_fake_http_holds_and_releases_long_poll_on_tick() {
 }
 
 #[test]
-fn butler_helper_filters_to_the_allowlisted_room() {
-    let dir = scratch_dir("butler-allowlist");
+fn butler_matrix_relay_uses_async_request_and_preserves_envelope_metadata() {
+    let dir = scratch_dir("butler-matrix-relay-async");
     let (_daemon, path) = butler_test_daemon(&dir);
-
-    let allowed_room = "!allowed:example.org";
-    let other_room = "!other:example.org";
-    let self_mxid = "@bot:example.org";
-
-    let get_log = dir.join("allowlist-get.log");
-    let put_log = dir.join("allowlist-put.log");
-    let fixture = dir.join("allowlist-fixture.jsonl");
-    std::fs::write(&get_log, "").unwrap();
-    std::fs::write(&put_log, "").unwrap();
-    write_fixture(
-        &fixture,
-        &[
-            serde_json::json!({"rooms": {"join": {}}, "next_batch": "aw-0"}),
-            serde_json::json!({
-                "rooms": {"join": {
-                    allowed_room: {"timeline": {"events": [
-                        {"type": "m.room.message", "event_id": "$1", "sender": "@alice:example.org",
-                         "content": {"msgtype": "m.text", "body": "hello from allowed room"}}
-                    ]}},
-                    other_room: {"timeline": {"events": [
-                        {"type": "m.room.message", "event_id": "$2", "sender": "@bob:example.org",
-                         "content": {"msgtype": "m.text", "body": "hello from other room"}}
-                    ]}}
-                }},
-                "next_batch": "aw-1"
-            }),
-        ],
-    );
-
-    let stub = StubServer::spawn(&fixture, &get_log, &put_log, 200);
+    let room = "!relay:example.org";
     let (token_path, config_path) = butler_config(
         &dir,
-        "allowlist",
-        &stub.base_url(),
-        allowed_room,
-        self_mxid,
+        "relay",
+        "https://matrix.example.org",
+        room,
+        "@bot:example.org",
         "@alice:example.org",
     );
-
-    eval(&path, "remuda.allow_lines = {}");
-    eval(
-        &path,
-        "remuda.on('allow-line', function(l) table.insert(remuda.allow_lines, l) end)",
-    );
-    eval(
-        &path,
-        &format!(
-            "remuda.allow_handle = remuda.process{{argv = {{'python3', '-c', remuda._butler_helper_src, {}, {}}}, on_line = 'allow-line'}}",
-            lua_raw_string(&token_path.to_string_lossy()),
-            lua_raw_string(&config_path.to_string_lossy()),
+    std::fs::write(
+        &config_path,
+        format!(
+            "https://matrix.example.org\n{room}\n@bot:example.org\n@alice:example.org\nfalse\n30000\nca_file=/tmp/test-ca.pem\n"
         ),
-    );
-
-    let deadline = Instant::now() + PATIENCE;
-    while read_count(&path, "return #remuda.allow_lines") == 0 {
-        assert!(
-            Instant::now() < deadline,
-            "no line ever arrived from the allowlisted room"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    // A message from the non-allowlisted room must produce ZERO emits, not
-    // just "the count happens to work out" — give it a real window to show
-    // up wrongly before checking.
-    std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(
-        read_count(&path, "return #remuda.allow_lines"),
-        1,
-        "exactly one emit was expected — the non-allowlisted room's event leaked through"
-    );
-    let line = eval(&path, "return remuda.allow_lines[1]");
-    assert!(
-        line.starts_with("@alice:example.org\t"),
-        "wrong event emitted: {line}"
-    );
-
-    eval(&path, "remuda.kill(remuda.allow_handle)");
-}
-
-#[test]
-fn butler_helper_drops_a_non_allowlisted_sender_in_the_same_room() {
-    let dir = scratch_dir("butler-sender-allowlist");
-    let (_daemon, path) = butler_test_daemon(&dir);
-
-    let room = "!senders:example.org";
-    let self_mxid = "@bot:example.org";
-    let allowed_sender = "@alice:example.org";
-    let other_member = "@mallory:example.org";
-
-    let get_log = dir.join("senders-get.log");
-    let put_log = dir.join("senders-put.log");
-    let fixture = dir.join("senders-fixture.jsonl");
-    std::fs::write(&get_log, "").unwrap();
-    std::fs::write(&put_log, "").unwrap();
-    write_fixture(
-        &fixture,
-        &[
-            serde_json::json!({"rooms": {"join": {}}, "next_batch": "sa-0"}),
-            serde_json::json!({
-                "rooms": {"join": {
-                    room: {"timeline": {"events": [
-                        {"type": "m.room.message", "event_id": "$1", "sender": other_member,
-                         "content": {"msgtype": "m.text", "body": "not on the allowlist"}},
-                        {"type": "m.room.message", "event_id": "$2", "sender": allowed_sender,
-                         "content": {"msgtype": "m.text", "body": "hello from the allowed sender"}}
-                    ]}}
-                }},
-                "next_batch": "sa-1"
-            }),
-        ],
-    );
-
-    let stub = StubServer::spawn(&fixture, &get_log, &put_log, 200);
-    let (token_path, config_path) = butler_config(
-        &dir,
-        "senders",
-        &stub.base_url(),
-        room,
-        self_mxid,
-        allowed_sender,
-    );
-
-    eval(&path, "remuda.sender_lines = {}");
-    eval(
-        &path,
-        "remuda.on('sender-line', function(l) table.insert(remuda.sender_lines, l) end)",
-    );
-    eval(
-        &path,
-        &format!(
-            "remuda.sender_handle = remuda.process{{argv = {{'python3', '-c', remuda._butler_helper_src, {}, {}}}, on_line = 'sender-line'}}",
-            lua_raw_string(&token_path.to_string_lossy()),
-            lua_raw_string(&config_path.to_string_lossy()),
-        ),
-    );
-
-    let deadline = Instant::now() + PATIENCE;
-    while read_count(&path, "return #remuda.sender_lines") == 0 {
-        assert!(
-            Instant::now() < deadline,
-            "no line ever arrived from the allowlisted sender"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    // The non-allowlisted member's message must produce ZERO emits, not just
-    // "the count happens to work out" -- give it a real window to show up
-    // wrongly before checking.
-    std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(
-        read_count(&path, "return #remuda.sender_lines"),
-        1,
-        "exactly one emit was expected -- the non-allowlisted sender's event leaked through"
-    );
-    let line = eval(&path, "return remuda.sender_lines[1]");
-    assert!(
-        line.starts_with("@alice:example.org\t"),
-        "wrong event emitted: {line}"
-    );
-
-    eval(&path, "remuda.kill(remuda.sender_handle)");
-}
-
-#[test]
-fn butler_helper_ignores_its_own_messages() {
-    let dir = scratch_dir("butler-self");
-    let (_daemon, path) = butler_test_daemon(&dir);
-
-    let room = "!self:example.org";
-    let self_mxid = "@bot:example.org";
-
-    let get_log = dir.join("self-get.log");
-    let put_log = dir.join("self-put.log");
-    let fixture = dir.join("self-fixture.jsonl");
-    std::fs::write(&get_log, "").unwrap();
-    std::fs::write(&put_log, "").unwrap();
-    write_fixture(
-        &fixture,
-        &[
-            serde_json::json!({"rooms": {"join": {}}, "next_batch": "sf-0"}),
-            serde_json::json!({
-                "rooms": {"join": {
-                    room: {"timeline": {"events": [
-                        {"type": "m.room.message", "event_id": "$1", "sender": self_mxid,
-                         "content": {"msgtype": "m.text", "body": "an echo of my own reply"}}
-                    ]}}
-                }},
-                "next_batch": "sf-1"
-            }),
-        ],
-    );
-
-    let stub = StubServer::spawn(&fixture, &get_log, &put_log, 200);
-    let (token_path, config_path) =
-        butler_config(&dir, "self", &stub.base_url(), room, self_mxid, "");
-
-    eval(&path, "remuda.self_lines = {}");
-    eval(
-        &path,
-        "remuda.on('self-line', function(l) table.insert(remuda.self_lines, l) end)",
-    );
-    eval(
-        &path,
-        &format!(
-            "remuda.self_handle = remuda.process{{argv = {{'python3', '-c', remuda._butler_helper_src, {}, {}}}, on_line = 'self-line'}}",
-            lua_raw_string(&token_path.to_string_lossy()),
-            lua_raw_string(&config_path.to_string_lossy()),
-        ),
-    );
-
-    // Proof the fixture's event was actually reached (not just "nothing ran
-    // yet"): wait for the stub to have answered both the baseline call and
-    // the one carrying the self-authored event.
-    let deadline = Instant::now() + PATIENCE;
-    while std::fs::read_to_string(&get_log)
-        .unwrap_or_default()
-        .lines()
-        .count()
-        < 2
-    {
-        assert!(
-            Instant::now() < deadline,
-            "the helper never even polled past the baseline"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(
-        read_count(&path, "return #remuda.self_lines"),
-        0,
-        "a message from the bridge's own account must never be re-ingested"
-    );
-
-    eval(&path, "remuda.kill(remuda.self_handle)");
-}
-
-#[test]
-fn butler_helper_escapes_a_multiline_message_into_exactly_one_line() {
-    let dir = scratch_dir("butler-escape");
-    let (_daemon, path) = butler_test_daemon(&dir);
-
-    let room = "!escape:example.org";
-    let self_mxid = "@bot:example.org";
-    // Includes a real newline, a standalone backslash, AND a literal
-    // backslash-then-"n" (not a real newline) — the last one is what a
-    // naive two-pass unescape (newline-pass then backslash-pass) gets
-    // wrong, since the backslash it doubles for its own escaping can end
-    // up immediately before a literal "n" and be misread as a newline
-    // escape on the first pass.
-    let original_body = "line one\nline two with a \\ backslash and a literal \\n as text";
-
-    let get_log = dir.join("escape-get.log");
-    let put_log = dir.join("escape-put.log");
-    let fixture = dir.join("escape-fixture.jsonl");
-    std::fs::write(&get_log, "").unwrap();
-    std::fs::write(&put_log, "").unwrap();
-    write_fixture(
-        &fixture,
-        &[
-            serde_json::json!({"rooms": {"join": {}}, "next_batch": "es-0"}),
-            serde_json::json!({
-                "rooms": {"join": {
-                    room: {"timeline": {"events": [
-                        {"type": "m.room.message", "event_id": "$1", "sender": "@carol:example.org",
-                         "origin_server_ts": 1790000000000_i64,
-                         "content": {"msgtype": "m.text", "body": original_body}}
-                    ]}}
-                }},
-                "next_batch": "es-1"
-            }),
-        ],
-    );
-
-    let stub = StubServer::spawn(&fixture, &get_log, &put_log, 200);
-    let (token_path, config_path) = butler_config(
-        &dir,
-        "escape",
-        &stub.base_url(),
-        room,
-        self_mxid,
-        "@carol:example.org",
-    );
-
-    eval(&path, "remuda.esc_lines = {}");
-    eval(
-        &path,
-        "remuda.on('esc-line', function(l) table.insert(remuda.esc_lines, l) end)",
-    );
-    eval(
-        &path,
-        &format!(
-            "remuda.esc_handle = remuda.process{{argv = {{'python3', '-c', remuda._butler_helper_src, {}, {}}}, on_line = 'esc-line'}}",
-            lua_raw_string(&token_path.to_string_lossy()),
-            lua_raw_string(&config_path.to_string_lossy()),
-        ),
-    );
-
-    let deadline = Instant::now() + PATIENCE;
-    while read_count(&path, "return #remuda.esc_lines") == 0 {
-        assert!(Instant::now() < deadline, "no line ever arrived");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    // Exactly one emit for one Matrix event — not two, not a parse error —
-    // even though the body contains a real newline.
-    std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(
-        read_count(&path, "return #remuda.esc_lines"),
-        1,
-        "one Matrix event with an embedded newline must become exactly one physical line"
-    );
-
-    let raw_line = eval(&path, "return remuda.esc_lines[1]");
-    assert!(
-        !raw_line.contains('\n'),
-        "the delivered line itself contained a raw newline: {raw_line:?}"
-    );
-    let fields: Vec<&str> = raw_line.splitn(5, '\t').collect();
-    assert_eq!(fields.len(), 5, "relay output did not carry a complete mail envelope: {raw_line}");
-    assert_eq!(fields[0], "@carol:example.org");
-    assert_eq!(fields[1], room);
-    assert_eq!(fields[2], "$1");
-    assert!(fields[3].starts_with("2026-") && fields[3].ends_with('Z'), "timestamp was not UTC: {}", fields[3]);
-
-    // Round-trip: the exact unescape logic `init.lua`'s own `butler-matrix-line`
-    // hook uses, run against the raw received line.
-    let reconstructed = eval(
-        &path,
-        &format!(
-            r#"
-            local line = {raw}
-            local _, _, _, _, body = line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t(.*)$")
-            body = body:gsub("\\(.)", function(c)
-              if c == "n" then return "\n" elseif c == "r" then return "\r"
-              elseif c == "t" then return "\t" else return c end
-            end)
-            return body
-            "#,
-            raw = lua_raw_string(&raw_line)
-        ),
-    );
-    assert_eq!(
-        reconstructed, original_body,
-        "the round trip through escape/unescape did not reproduce the original body"
-    );
-
-    eval(&path, "remuda.kill(remuda.esc_handle)");
-}
-
-/// Writes an empty get/put log and a fixture, then starts a stub server on
-/// it. Shared by tests that need more than one stub instance in sequence
-/// (e.g. proving persistence across a restart), so each instance is one
-/// line instead of the six it takes to set up by hand.
-fn spawn_stub(dir: &Path, tag: &str, responses: &[serde_json::Value]) -> (StubServer, PathBuf) {
-    let get_log = dir.join(format!("{tag}-get.log"));
-    let put_log = dir.join(format!("{tag}-put.log"));
-    let fixture = dir.join(format!("{tag}-fixture.jsonl"));
-    std::fs::write(&get_log, "").unwrap();
-    std::fs::write(&put_log, "").unwrap();
-    write_fixture(&fixture, responses);
-    (
-        StubServer::spawn(&fixture, &get_log, &put_log, 200),
-        get_log,
     )
-}
-
-#[test]
-fn matrix_relay_restarts_after_unexpected_exit_and_records_it() {
-    let dir = scratch_dir("matrix-supervise");
-    let marker = dir.join("relay-starts.log");
-    let trace = dir.join("matrix-trace.log");
-    let (token_path, config_path) = butler_config(
-        &dir, "supervise", "http://127.0.0.1:1", "!room:example.org", "@bot:example.org", "",
-    );
-    let source = format!(
-        "import pathlib; pathlib.Path({}).open('a').write('start\\n'); raise SystemExit(7)",
-        serde_json::to_string(&marker.to_string_lossy()).unwrap(),
-    );
-    let token_env = token_path.to_string_lossy().to_string();
-    let config_env = config_path.to_string_lossy().to_string();
-    let _daemon = Daemon::spawn_with_env(
-        &dir,
-        &[
-            ("REMUDA_BUTLER_TOKEN", &token_env),
-            ("REMUDA_BUTLER_CONFIG", &config_env),
-        ],
-    );
-    let path = daemon::socket_path_in(&dir, "s");
+    .expect("write relay config");
+    eval(&path, include_str!("support/fake_http.lua"));
     eval(
         &path,
         &format!(
-            "remuda._butler_test_mode = 'lifecycle'; remuda._butler_argv = {{'sh','-c','sleep 60'}}; remuda._butler_helper_src_override = {}; remuda._butler_matrix_trace_path = {}",
-            lua_raw_string(&source), lua_raw_string(&trace.to_string_lossy()),
+            "remuda._butler_matrix_config = {{ token_path = {}, config_path = {} }}; remuda.exec('butler/matrix_request'); remuda.exec('butler/matrix_relay')",
+            lua_raw_string(&token_path.to_string_lossy()),
+            lua_raw_string(&config_path.to_string_lossy()),
         ),
     );
-    let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    let deadline = Instant::now() + PATIENCE;
-    while std::fs::read_to_string(&marker).unwrap_or_default().lines().count() < 2 {
-        assert!(Instant::now() < deadline, "relay did not restart after exit");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    eval(&path, "remuda._butler_matrix_stop()");
-    let trace = std::fs::read_to_string(&trace).expect("matrix restart trace");
-    assert!(trace.contains("relay_restart"), "missing restart trace: {trace}");
-    assert!(trace.contains("backoff=1"), "first restart should use 1-second backoff: {trace}");
-    assert!(
-        include_str!("../../packages/butler/matrix.lua").contains("math.min(60"),
-        "relay restart backoff must have a 60-second cap"
-    );
-}
-
-#[test]
-fn matrix_relay_restart_waits_for_backoff_after_daemon_uptime_exceeds_delay() {
-    let dir = scratch_dir("matrix-backoff-gap");
-    let marker = dir.join("relay-starts.log");
-    let trace = dir.join("matrix-trace.log");
-    let (token_path, config_path) = butler_config(
-        &dir, "backoff-gap", "http://127.0.0.1:1", "!room:example.org", "@bot:example.org", "",
-    );
-    let source = format!(
-        "import pathlib,time; pathlib.Path({}).open('a').write(str(time.monotonic())+'\\n'); time.sleep(60)",
-        serde_json::to_string(&marker.to_string_lossy()).unwrap(),
-    );
-    let token_env = token_path.to_string_lossy().to_string();
-    let config_env = config_path.to_string_lossy().to_string();
-    let _daemon = Daemon::spawn_with_env(
-        &dir,
-        &[
-            ("REMUDA_BUTLER_TOKEN", &token_env),
-            ("REMUDA_BUTLER_CONFIG", &config_env),
-        ],
-    );
-    let path = daemon::socket_path_in(&dir, "s");
-    eval(
-        &path,
-        &format!(
-            "remuda._butler_test_mode = 'lifecycle'; remuda._butler_argv = {{'sh','-c','sleep 60'}}; remuda._butler_helper_src_override = {}; remuda._butler_matrix_trace_path = {}",
-            lua_raw_string(&source), lua_raw_string(&trace.to_string_lossy()),
-        ),
-    );
-    let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-
-    let started = Instant::now() + Duration::from_secs(9);
-    while std::fs::read_to_string(&marker).unwrap_or_default().lines().count() < 1 {
-        assert!(Instant::now() < started, "relay did not start");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    std::thread::sleep(Duration::from_secs(9));
-    let crash_at = Instant::now();
-    eval(
-        &path,
-        "remuda._butler_matrix_restart_attempts = 3; remuda.kill(remuda._butler_matrix_relay)",
-    );
-
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        let starts = std::fs::read_to_string(&marker).unwrap_or_default();
-        if starts.lines().count() >= 2 { break; }
-        assert!(Instant::now() < deadline, "relay did not restart after the 8-second delay: {starts}");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let gap = crash_at.elapsed().as_secs_f64();
-    assert!(gap >= 7.0, "8-second backoff was shortened while daemon uptime already exceeded it: {gap}s");
-    let trace = std::fs::read_to_string(&trace).expect("matrix restart trace");
-    assert!(trace.contains("attempt=4 backoff=8"), "expected an 8-second restart: {trace}");
-    eval(&path, "remuda._butler_matrix_stop()");
-}
-
-#[test]
-fn matrix_relay_recovery_resets_accumulated_restart_backoff() {
-    let dir = scratch_dir("matrix-backoff-reset");
-    let trace = dir.join("matrix-trace.log");
-    let (token_path, config_path) = butler_config(
-        &dir, "backoff-reset", "http://127.0.0.1:1", "!room:example.org", "@bot:example.org", "",
-    );
-    let token_env = token_path.to_string_lossy().to_string();
-    let config_env = config_path.to_string_lossy().to_string();
-    let _daemon = Daemon::spawn_with_env(
-        &dir,
-        &[
-            ("REMUDA_BUTLER_TOKEN", &token_env),
-            ("REMUDA_BUTLER_CONFIG", &config_env),
-        ],
-    );
-    let path = daemon::socket_path_in(&dir, "s");
-    eval(
-        &path,
-        &format!(
-            "remuda._butler_test_mode = 'lifecycle'; remuda._butler_argv = {{'sh','-c','sleep 60'}}; remuda._butler_helper_src_override = 'import time; time.sleep(60)'; remuda._butler_matrix_trace_path = {}",
-            lua_raw_string(&trace.to_string_lossy()),
-        ),
-    );
-    let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-
-    // Exercise five failed relay exits, then the same success marker emitted
-    // by the relay after a completed /sync response.
-    eval(
-        &path,
-        "for _ = 1, 5 do remuda._butler_matrix_sync_exit(7) end; remuda._butler_matrix_line('__REMUDA_MATRIX_HEALTHY__'); remuda._butler_matrix_sync_exit(7)",
-    );
-    let traces = std::fs::read_to_string(&trace).expect("matrix restart trace");
-    assert!(traces.contains("attempt=5 backoff=16"), "expected five accumulated failures: {traces}");
-    assert!(traces.contains("attempt=1 backoff=1"), "recovered relay should restart with fast backoff: {traces}");
-    eval(&path, "remuda._butler_matrix_stop()");
-}
-
-#[test]
-fn matrix_relay_treats_wrongly_typed_processed_ids_as_corrupt_state() {
-    let dir = scratch_dir("matrix-typed-state");
-    let (token_path, config_path) = butler_config(
-        &dir, "typed-state", "http://127.0.0.1:1", "!room:example.org", "@bot:example.org", "",
-    );
-    std::fs::write(format!("{}.since", config_path.display()), r#"{"processed_event_ids":5}"#)
-        .unwrap();
-    let relay = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../packages/butler/matrix_relay.py");
-    let probe = format!(
-        "import runpy,sys; sys.argv=['relay',{},{}]; m=runpy.run_path({},run_name='matrix_test'); s,p,ms,pending=m['load_state'](); assert s is None and not p and ms is None and not pending",
-        serde_json::to_string(&token_path.to_string_lossy()).unwrap(),
-        serde_json::to_string(&config_path.to_string_lossy()).unwrap(),
-        serde_json::to_string(&relay.to_string_lossy()).unwrap(),
-    );
-    let result = std::process::Command::new("python3").arg("-c").arg(probe).status().unwrap();
-    assert!(result.success(), "wrongly typed processed IDs were not reset to a fresh state");
-}
-
-#[test]
-fn matrix_relay_drops_incomplete_and_wrongly_typed_pending_envelopes() {
-    let dir = scratch_dir("matrix-pending-state-types");
-    let (token_path, config_path) = butler_config(
-        &dir, "pending-state-types", "http://127.0.0.1:1", "!room:example.org", "@bot:example.org", "",
-    );
-    let valid = serde_json::json!({
-        "sender": "@alice:example.org", "room_id": "!room:example.org",
-        "created_at": "2026-09-28T00:00:00Z", "body": "still deliverable"
-    });
-    let state = serde_json::json!({
-        "since": "resume-here", "processed_event_ids": [],
-        "pending_events": {
-            "$valid": valid,
-            "$missing": {"sender": "@alice:example.org"},
-            "$wrong-type": {
-                "sender": 123, "room_id": "!room:example.org",
-                "created_at": "2026-09-28T00:00:00Z", "body": "bad"
+    let baseline_url = "https://matrix.example.org/_matrix/client/v3/sync?timeout=0";
+    let sync_url = "https://matrix.example.org/_matrix/client/v3/sync?since=s0&timeout=30000";
+    let event = serde_json::json!({
+        "type": "m.room.message", "event_id": "$relay-event", "sender": "@alice:example.org",
+        "origin_server_ts": 0,
+        "content": {
+            "msgtype": "m.text", "body": "hello",
+            "url": "mxc://media/example",
+            "m.relates_to": {
+                "rel_type": "m.thread", "event_id": "$thread-root",
+                "m.in_reply_to": {"event_id": "$parent"}
             }
         }
     });
-    std::fs::write(format!("{}.since", config_path.display()), state.to_string()).unwrap();
-    let relay = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../packages/butler/matrix_relay.py");
-    let probe = format!(
-        "import runpy,sys; sys.argv=['relay',{},{}]; m=runpy.run_path({},run_name='matrix_test'); s,p,ms,pending=m['load_state'](); assert s == 'resume-here' and pending == {{'$valid': {}}}",
-        serde_json::to_string(&token_path.to_string_lossy()).unwrap(),
-        serde_json::to_string(&config_path.to_string_lossy()).unwrap(),
-        serde_json::to_string(&relay.to_string_lossy()).unwrap(),
-        serde_json::to_string(&valid).unwrap(),
-    );
-    let result = std::process::Command::new("python3").arg("-c").arg(probe).status().unwrap();
-    assert!(result.success(), "load_state did not keep only the well-formed pending envelope");
-}
-
-#[test]
-fn matrix_relay_retries_an_unreachable_first_sync_baseline() {
-    let dir = scratch_dir("matrix-baseline-retry");
-    let (_daemon, path) = butler_test_daemon(&dir);
-    let (stub, get_log) = spawn_stub(
-        &dir,
-        "baseline-retry",
-        &[
-            serde_json::json!({"__http_status": 503}),
-            serde_json::json!({"rooms": {"join": {}}, "next_batch": "retried-baseline"}),
-        ],
-    );
-    let (token_path, config_path) = butler_config(
-        &dir, "baseline-retry", &stub.base_url(), "!room:example.org", "@bot:example.org", "",
-    );
-    eval(
-        &path,
-        &format!(
-            "remuda.baseline_handle = remuda.process{{argv = {{'python3', '-c', remuda._butler_helper_src, {}, {}}}}}",
-            lua_raw_string(&token_path.to_string_lossy()),
-            lua_raw_string(&config_path.to_string_lossy()),
-        ),
-    );
-    let deadline = Instant::now() + PATIENCE;
-    while std::fs::read_to_string(&get_log).unwrap_or_default().lines().count() < 2 {
-        assert!(Instant::now() < deadline, "baseline request did not retry after transport error");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let state: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(format!("{}.since", config_path.display())).unwrap(),
-    ).unwrap();
-    assert_eq!(state.get("since").and_then(serde_json::Value::as_str), Some("retried-baseline"));
-    eval(&path, "remuda.kill(remuda.baseline_handle)");
-}
-
-#[test]
-fn matrix_stub_honors_sync_timeout_instead_of_busy_looping() {
-    let dir = scratch_dir("matrix-long-poll");
-    let (_daemon, path) = butler_test_daemon(&dir);
-    let (stub, get_log) = spawn_stub(&dir, "long-poll", &[]);
-    let (token_path, config_path) = butler_config(
-        &dir, "long-poll", &stub.base_url(), "!room:example.org", "@bot:example.org", "",
-    );
-    eval(
-        &path,
-        &format!(
-            "remuda.long_poll_handle = remuda.process{{argv = {{'python3', '-c', remuda._butler_helper_src, {}, {}}}}}",
-            lua_raw_string(&token_path.to_string_lossy()),
-            lua_raw_string(&config_path.to_string_lossy()),
-        ),
-    );
-    let deadline = Instant::now() + PATIENCE;
-    while std::fs::read_to_string(&get_log).unwrap_or_default().lines().count() < 2 {
-        assert!(Instant::now() < deadline, "relay did not start the idle long poll");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    std::thread::sleep(Duration::from_millis(400));
-    let requests = std::fs::read_to_string(&get_log).unwrap_or_default();
-    assert!(requests.lines().count() <= 7, "idle sync fixture busy-looped: {requests}");
-    eval(&path, "remuda.kill(remuda.long_poll_handle)");
-}
-
-#[test]
-fn matrix_relay_exits_when_its_parent_daemon_dies() {
-    let dir = scratch_dir("matrix-parent-death");
-    let (mut daemon, path) = butler_test_daemon(&dir);
-    let (stub, get_log) = spawn_stub(&dir, "parent-death", &[]);
-    let (token_path, config_path) = butler_config(
-        &dir, "parent-death", &stub.base_url(), "!room:example.org", "@bot:example.org", "",
-    );
-    eval(
-        &path,
-        &format!(
-            "remuda.parent_death_handle = remuda.process{{argv = {{'python3', '-c', remuda._butler_helper_src, {}, {}}}}}",
-            lua_raw_string(&token_path.to_string_lossy()),
-            lua_raw_string(&config_path.to_string_lossy()),
-        ),
-    );
-
-    let started_deadline = Instant::now() + PATIENCE;
-    while std::fs::read_to_string(&get_log).unwrap_or_default().lines().count() < 2 {
-        assert!(Instant::now() < started_deadline, "Matrix relay did not begin polling");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    assert!(!matrix_relays_matching(&config_path).is_empty(), "relay marker argv was not visible to the test");
-
-    let _ = daemon.0.kill();
-    let _ = daemon.0.wait();
-    let deadline = Instant::now() + Duration::from_secs(3);
-    let mut survivors = matrix_relays_matching(&config_path);
-    while !survivors.is_empty() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(25));
-        survivors = matrix_relays_matching(&config_path);
-    }
-    assert!(survivors.is_empty(), "Matrix relay survived the death of its parent daemon: {survivors:?}");
-}
-
-#[test]
-fn matrix_reload_replaces_the_relay_once_per_reload() {
-    let dir = scratch_dir("matrix-reload");
-    let (stub, _) = spawn_stub(
-        &dir,
-        "reload",
-        &[serde_json::json!({"rooms": {"join": {}}, "next_batch": "reload-cursor"})],
-    );
-    let (token_path, config_path) = butler_config(
-        &dir, "reload", &stub.base_url(), "!room:example.org", "@bot:example.org", "",
-    );
-    let trace_path = dir.join("matrix-reload.trace");
-    let token_env = token_path.to_string_lossy().to_string();
-    let config_env = config_path.to_string_lossy().to_string();
-    let _daemon = Daemon::spawn_with_env(
-        &dir,
-        &[
-            ("REMUDA_BUTLER_TOKEN", &token_env),
-            ("REMUDA_BUTLER_CONFIG", &config_env),
-        ],
-    );
-    let path = daemon::socket_path_in(&dir, "s");
-    eval(
-        &path,
-        &format!(
-            "remuda._butler_test_mode = 'lifecycle'; remuda._butler_argv = {{'sh','-c','sleep 60'}}; remuda._butler_matrix_trace_path = {}; remuda.exec('butler')",
-            lua_raw_string(&trace_path.to_string_lossy()),
-        ),
-    );
-    let initial_deadline = Instant::now() + PATIENCE;
-    while eval(&path, "return tostring(remuda._butler_matrix_relay)") == "nil" {
-        assert!(Instant::now() < initial_deadline, "initial Matrix relay did not start");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let mut prior = eval(&path, "return tostring(remuda._butler_matrix_relay)");
-    assert_ne!(prior, "nil", "initial relay did not start");
-    for _ in 0..3 {
-        eval(&path, "remuda.reload('butler')");
-        let deadline = Instant::now() + PATIENCE;
-        let current = loop {
-            let id = eval(&path, "return tostring(remuda._butler_matrix_relay)");
-            if id != prior { break id; }
-            assert!(Instant::now() < deadline, "reload retained the old Matrix relay process; trace={}; stopping={}",
-                std::fs::read_to_string(&trace_path).unwrap_or_default(),
-                eval(&path, "return tostring(remuda._butler_matrix_stopping)"));
-            std::thread::sleep(Duration::from_millis(20));
-        };
-        assert_ne!(current, prior, "reload retained the old Matrix relay process");
-        assert_eq!(
-            read_count(&path, "local n=0 for _,id in ipairs(remuda.processes()) do if id == remuda._butler_matrix_relay then n=n+1 end end return n"),
-            1,
-            "reload must leave exactly one active Matrix relay",
-        );
-        prior = current;
-    }
-    eval(&path, "remuda._butler_matrix_stop()");
-}
-
-#[test]
-fn matrix_relay_drops_malformed_pending_entries_and_acknowledges_mail() {
-    let dir = scratch_dir("matrix-corrupt-state");
-    let (_daemon, path) = butler_test_daemon(&dir);
-    let room = "!corrupt:example.org";
-    let (stub, get_log) = spawn_stub(
-        &dir,
-        "corrupt-state",
-        &[
-            serde_json::json!({"rooms": {"join": {}}, "next_batch": "corrupt-0"}),
-            serde_json::json!({"rooms": {"join": {room: {"timeline": {"events": [
-                {"type": "m.room.message", "event_id": "$corrupt", "sender": "@alice:example.org",
-                 "origin_server_ts": 1790000000000_i64,
-                 "content": {"msgtype": "m.text", "body": "survives corrupt state"}}
-            ]}}}}, "next_batch": "corrupt-1"}),
-        ],
-    );
-    let (token_path, config_path) = butler_config(
-        &dir, "corrupt-state", &stub.base_url(), room, "@bot:example.org", "@alice:example.org",
-    );
-    let since_path = format!("{}.since", config_path.display());
-    std::fs::write(
-        &since_path,
-        r#"{"since":null,"processed_event_ids":[],"pending_events":{"$missing":{"sender":"a"},"$wrong":{"sender":123,"room_id":"!bad","created_at":"2026-09-28T00:00:00Z","body":"bad"}}}"#,
-    ).unwrap();
-    let ack_path = format!("{}.acks", config_path.display());
-    eval(&path, "remuda.corrupt_lines = {};");
-    eval(
-        &path,
-        &format!(
-            "remuda.on('corrupt-line', function(l) table.insert(remuda.corrupt_lines,l); local id=l:match('^[^\\t]*\\t[^\\t]*\\t([^\\t]*)'); local f=assert(io.open({},'a')); assert(f:write(id,'\\n')); assert(f:close()) end)",
-            lua_raw_string(&ack_path),
-        ),
-    );
-    eval(
-        &path,
-        &format!(
-            "remuda.corrupt_handle = remuda.process{{argv = {{'python3', '-c', remuda._butler_helper_src, {}, {}}}, on_line = 'corrupt-line'}}",
-            lua_raw_string(&token_path.to_string_lossy()),
-            lua_raw_string(&config_path.to_string_lossy()),
-        ),
-    );
-    let deadline = Instant::now() + PATIENCE;
-    loop {
-        let state: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(&since_path).unwrap_or_default(),
-        ).unwrap_or_default();
-        if state.get("processed_event_ids").and_then(serde_json::Value::as_array)
-            .is_some_and(|ids| ids.contains(&serde_json::json!("$corrupt")))
-        {
-            break;
-        }
-        assert!(Instant::now() < deadline, "relay failed to acknowledge mail after corrupt state; requests={}",
-            std::fs::read_to_string(&get_log).unwrap_or_default());
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    assert_eq!(read_count(&path, "return #remuda.corrupt_lines"), 1);
-    eval(&path, "remuda.kill(remuda.corrupt_handle)");
-}
-
-#[test]
-fn butler_helper_bounds_processed_matrix_event_ids_on_load() {
-    let dir = scratch_dir("butler-matrix-bounded-ids");
-    let (_daemon, path) = butler_test_daemon(&dir);
-    let (stub, get_log) = spawn_stub(
-        &dir,
-        "bounded-ids",
-        &[serde_json::json!({"rooms": {"join": {}}, "next_batch": "bounded-cursor"})],
-    );
-    let (token_path, config_path) = butler_config(
-        &dir, "bounded-ids", &stub.base_url(), "!room:example.org", "@bot:example.org", "",
-    );
-    let since_path = format!("{}.since", config_path.display());
-    let old_ids: Vec<String> = (0..5007).map(|i| format!("$old-{i:04}")).collect();
-    std::fs::write(
-        &since_path,
-        serde_json::json!({"since": null, "processed_event_ids": old_ids}).to_string(),
-    )
-    .unwrap();
-    eval(
-        &path,
-        &format!(
-            "remuda.bounded_lines = {{}}; remuda.on('bounded-line', function(l) table.insert(remuda.bounded_lines, l) end); remuda.bounded_handle = remuda.process{{argv = {{'python3', '-c', remuda._butler_helper_src, {}, {}}}, on_line = 'bounded-line'}}",
-            lua_raw_string(&token_path.to_string_lossy()),
-            lua_raw_string(&config_path.to_string_lossy()),
-        ),
-    );
-    let deadline = Instant::now() + PATIENCE;
-    while std::fs::read_to_string(&get_log)
-        .unwrap_or_default()
-        .lines()
-        .count()
-        < 1
-    {
-        assert!(Instant::now() < deadline, "helper did not poll Matrix stub");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    loop {
-        let state_text = std::fs::read_to_string(&since_path).unwrap_or_default();
-        let state: serde_json::Value = serde_json::from_str(&state_text).unwrap_or_default();
-        let ids = state
-            .get("processed_event_ids")
-            .and_then(serde_json::Value::as_array);
-        if ids.is_some_and(|ids| ids.len() <= 5000) {
-            assert_eq!(ids.unwrap().len(), 5000);
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "helper did not rewrite bounded processed ids; ids={}, requests={}",
-            state.get("processed_event_ids").and_then(serde_json::Value::as_array).map_or(0, Vec::len),
-            std::fs::read_to_string(&get_log).unwrap_or_default()
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    eval(&path, "remuda.kill(remuda.bounded_handle)");
-}
-
-#[test]
-// The 4th config line (sender allowlist) pushed this back over clippy's
-// too-many-lines threshold; the two-instance restart scenario this proves
-// doesn't split further without losing the point of the test.
-#[allow(clippy::too_many_lines)]
-fn butler_helper_persists_since_across_a_restart() {
-    let dir = scratch_dir("butler-persist");
-    let (_daemon, path) = butler_test_daemon(&dir);
-
-    let room = "!persist:example.org";
-    let self_mxid = "@bot:example.org";
-
-    // First instance: a baseline, then one qualifying event.
-    let (stub1, _get_log1) = spawn_stub(
-        &dir,
-        "persist1",
-        &[
-            serde_json::json!({"rooms": {"join": {}}, "next_batch": "d-since-0"}),
-            serde_json::json!({
-                "rooms": {"join": {
-                    room: {"timeline": {"events": [
-                        {"type": "m.room.message", "event_id": "$1", "sender": "@dave:example.org",
-                         "content": {"msgtype": "m.text", "body": "first batch"}}
-                    ]}}
-                }},
-                "next_batch": "d-since-1"
-            }),
-        ],
-    );
-    let (token_path, config_path) = butler_config(
-        &dir,
-        "persist",
-        &stub1.base_url(),
-        room,
-        self_mxid,
-        "@dave:example.org",
-    );
-    let since_path = format!("{}.since", config_path.display());
-
-    eval(&path, "remuda.persist_lines = {}");
-    eval(
-        &path,
-        &format!(
-            "remuda.on('persist-line', function(l) table.insert(remuda.persist_lines, l); local id = l:match('^[^\\t]*\\t[^\\t]*\\t([^\\t]*)'); local f = assert(io.open({}, 'a')); assert(f:write(id, '\\n')); assert(f:close()) end)",
-            lua_raw_string(&format!("{}.acks", config_path.display()))
-        ),
-    );
-    eval(
-        &path,
-        &format!(
-            "remuda.persist_handle = remuda.process{{argv = {{'python3', '-c', remuda._butler_helper_src, {}, {}}}, on_line = 'persist-line'}}",
-            lua_raw_string(&token_path.to_string_lossy()),
-            lua_raw_string(&config_path.to_string_lossy()),
-        ),
-    );
-
-    let deadline = Instant::now() + PATIENCE;
-    while read_count(&path, "return #remuda.persist_lines") == 0 {
-        assert!(
-            Instant::now() < deadline,
-            "the first instance never emitted its line"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let state_deadline = Instant::now() + PATIENCE;
-    loop {
-        let state_text = std::fs::read_to_string(&since_path).unwrap_or_default();
-        let state: serde_json::Value = serde_json::from_str(&state_text).unwrap_or_default();
-        let acknowledged = state
-            .get("processed_event_ids")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|ids| ids.contains(&serde_json::json!("$1")));
-        if acknowledged {
-            break;
-        }
-        assert!(Instant::now() < state_deadline, "helper did not persist the acknowledged event id");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    eval(&path, "remuda.kill(remuda.persist_handle)");
-    std::thread::sleep(Duration::from_millis(200));
-    drop(stub1);
-
-    let since_before = std::fs::read_to_string(&since_path).expect("since file exists");
-    assert!(
-        since_before.contains("d-since-1"),
-        "unexpected since file contents: {since_before}"
-    );
-
-    // Second instance: same config path (so the same since file), a fresh
-    // stub with its own second batch, and the config file repointed at it.
-    let (stub2, get_log2) = spawn_stub(
-        &dir,
-        "persist2",
-        &[serde_json::json!({"rooms": {"join": {room: {"timeline": {"events": [
-            {"type": "m.room.message", "event_id": "$1", "sender": "@dave:example.org",
-             "content": {"msgtype": "m.text", "body": "first batch"}}
-        ]}}}}, "next_batch": "d-since-2"})],
-    );
-    std::fs::write(
-        &config_path,
-        format!(
-            "{}\n{}\n{}\n@dave:example.org\n",
-            stub2.base_url(),
-            room,
-            self_mxid
-        ),
-    )
-    .expect("repoint config at the second stub");
-
-    eval(
-        &path,
-        &format!(
-            "remuda.persist_handle2 = remuda.process{{argv = {{'python3', '-c', remuda._butler_helper_src, {}, {}}}}}",
-            lua_raw_string(&token_path.to_string_lossy()),
-            lua_raw_string(&config_path.to_string_lossy()),
-        ),
-    );
-
-    let deadline = Instant::now() + PATIENCE;
-    loop {
-        if !std::fs::read_to_string(&get_log2)
-            .unwrap_or_default()
-            .trim()
-            .is_empty()
-        {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the second instance never called the new stub"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let first_request = std::fs::read_to_string(&get_log2).expect("get log2");
-    let first_line = first_request.lines().next().expect("at least one request");
-    assert!(
-        first_line.contains("since=d-since-1"),
-        "the second instance did not resume from the persisted since token: {first_line}"
-    );
-    assert!(
-        !first_line.contains("since=d-since-0") && !first_line.contains("timeout=0"),
-        "the second instance replayed the baseline instead of resuming: {first_line}"
-    );
-    std::thread::sleep(Duration::from_millis(250));
-    assert_eq!(
-        read_count(&path, "return #remuda.persist_lines"),
-        1,
-        "a processed event_id must not be delivered again after restart"
-    );
-
-    eval(&path, "remuda.kill(remuda.persist_handle2)");
-}
-
-#[test]
-fn butler_helper_deduplicates_repeated_matrix_event_ids() {
-    let dir = scratch_dir("butler-matrix-event-dedupe");
-    let (_daemon, path) = butler_test_daemon(&dir);
-    let room = "!dedupe:example.org";
-    let self_mxid = "@bot:example.org";
-    let (stub, _get_log) = spawn_stub(
-        &dir,
-        "dedupe",
-        &[
-            serde_json::json!({"rooms": {"join": {}}, "next_batch": "dd-0"}),
-            serde_json::json!({"rooms": {"join": {room: {"timeline": {"events": [
-                {"type": "m.room.message", "event_id": "$same", "sender": "@alice:example.org",
-                 "origin_server_ts": 1790000000000_i64,
-                 "content": {"msgtype": "m.text", "body": "deliver once"}}
-            ]}}}}, "next_batch": "dd-1"}),
-            serde_json::json!({"rooms": {"join": {room: {"timeline": {"events": [
-                {"type": "m.room.message", "event_id": "$same", "sender": "@alice:example.org",
-                 "origin_server_ts": 1790000000000_i64,
-                 "content": {"msgtype": "m.text", "body": "deliver once"}}
-            ]}}}}, "next_batch": "dd-2"}),
-        ],
-    );
-    let (token_path, config_path) = butler_config(
-        &dir,
-        "dedupe",
-        &stub.base_url(),
-        room,
-        self_mxid,
-        "@alice:example.org",
-    );
-
-    eval(&path, "remuda.dedupe_lines = {}");
-    eval(
-        &path,
-        "remuda.on('dedupe-line', function(l) table.insert(remuda.dedupe_lines, l) end)",
-    );
-    eval(
-        &path,
-        &format!(
-            "remuda.dedupe_handle = remuda.process{{argv = {{'python3', '-c', remuda._butler_helper_src, {}, {}}}, on_line = 'dedupe-line'}}",
-            lua_raw_string(&token_path.to_string_lossy()),
-            lua_raw_string(&config_path.to_string_lossy()),
-        ),
-    );
-
-    let deadline = Instant::now() + PATIENCE;
-    while std::fs::read_to_string(dir.join("dedupe-get.log"))
-        .unwrap_or_default()
-        .lines()
-        .count()
-        < 3
-    {
-        assert!(Instant::now() < deadline, "helper did not consume duplicate fixture events");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    std::thread::sleep(Duration::from_millis(250));
-    assert_eq!(
-        read_count(&path, "return #remuda.dedupe_lines"),
-        1,
-        "a repeated Matrix event_id must only be delivered once"
-    );
-    eval(&path, "remuda.kill(remuda.dedupe_handle)");
-}
-
-#[test]
-fn butler_helper_uses_messages_endpoint_when_fallback_is_configured() {
-    let dir = scratch_dir("matrix-msg-fb");
-    let (_daemon, path) = butler_test_daemon(&dir);
-    let room = "!fallback:example.org";
-    let (stub, get_log) = spawn_stub(
-        &dir,
-        "fallback",
-        &[
-            serde_json::json!({"start": "messages-0", "end": "messages-old", "chunk": [
-                {"type": "m.room.message", "event_id": "$baseline", "sender": "@alice:example.org",
-                 "origin_server_ts": 1790000000000_i64,
-                 "content": {"msgtype": "m.text", "body": "old history"}}
-            ]}),
-            serde_json::json!({"start": "messages-0", "end": "messages-1", "chunk": [
-                {"type": "m.room.message", "event_id": "$baseline", "sender": "@alice:example.org",
-                 "origin_server_ts": 1790000000000_i64,
-                 "content": {"msgtype": "m.text", "body": "old history"}},
-                {"type": "m.room.message", "event_id": "$fallback", "sender": "@alice:example.org",
-                 "origin_server_ts": 1790000000000_i64,
-                 "content": {"msgtype": "m.text", "body": "from messages"}}
-            ]}),
-        ],
-    );
-    let (token_path, config_path) = butler_config(
-        &dir,
-        "fallback",
-        &stub.base_url(),
-        room,
-        "@bot:example.org",
-        "@alice:example.org",
-    );
-    std::fs::write(
-        &config_path,
-        format!(
-            "{}\n{}\n@bot:example.org\n@alice:example.org\nmessages\n100\n",
-            stub.base_url(), room
-        ),
-    )
-    .unwrap();
-
-    eval(&path, "remuda.fallback_lines = {}; remuda.fallback_exit = nil");
-    eval(
-        &path,
-        "remuda.on('fallback-line', function(l) table.insert(remuda.fallback_lines, l) end)",
-    );
-    eval(
-        &path,
-        "remuda.on('fallback-exit', function(code) remuda.fallback_exit = code end)",
-    );
-    eval(
-        &path,
-        &format!(
-            "remuda.fallback_handle = remuda.process{{argv = {{'python3', '-c', remuda._butler_helper_src, {}, {}}}, on_line = 'fallback-line', on_exit = 'fallback-exit'}}",
-            lua_raw_string(&token_path.to_string_lossy()),
-            lua_raw_string(&config_path.to_string_lossy()),
-        ),
-    );
-
-    let deadline = Instant::now() + PATIENCE;
-    while read_count(&path, "return #remuda.fallback_lines") == 0 {
-        assert!(
-            Instant::now() < deadline,
-            "fallback poll delivered no Matrix event; requests: {}; exit: {}",
-            std::fs::read_to_string(&get_log).unwrap_or_default(),
-            eval(&path, "return tostring(remuda.fallback_exit)")
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let requests = std::fs::read_to_string(&get_log).expect("fallback request log");
-    assert!(requests.contains("/rooms/"), "fallback did not call /rooms/{room}/messages: {requests}");
-    assert!(requests.contains("from=messages-0"), "fallback did not resume with its persisted cursor: {requests}");
-    assert!(!requests.contains("/_matrix/client/v3/sync"), "fallback unexpectedly called /sync: {requests}");
-    let line = eval(&path, "return remuda.fallback_lines[1]");
-    assert!(line.ends_with("from messages"), "unexpected fallback delivery: {line}");
-    eval(&path, "remuda.kill(remuda.fallback_handle)");
-}
-
-#[test]
-#[cfg(unix)]
-fn matrix_extension_delivers_a_durable_mail_envelope_once() {
-    let dir = scratch_dir("mx-inbound");
-    let room = "!inbound:example.org";
-    let event = serde_json::json!({
-        "type": "m.room.message", "event_id": "$inbound-once", "sender": "@alice:example.org",
-        "origin_server_ts": 1790000000000_i64,
-        "content": {"msgtype": "m.text", "body": "mail from Matrix"}
+    let response = serde_json::json!({
+        "next_batch": "s1",
+        "rooms": {"join": { room: {"timeline": {"events": [event]}}}}
     });
-    let (stub, get_log) = spawn_stub(
-        &dir,
-        "inbound",
-        &[
-            serde_json::json!({"rooms": {"join": {}}, "next_batch": "in-0"}),
-            serde_json::json!({"rooms": {"join": {room: {"timeline": {"events": [event.clone()]}}}}, "next_batch": "in-1"}),
-            serde_json::json!({"rooms": {"join": {room: {"timeline": {"events": [event]}}}}, "next_batch": "in-2"}),
-        ],
+    let result = eval(
+        &path,
+        &format!(
+            r#"
+            local matrix = remuda.butler.matrix
+            remuda.http.respond("GET", {baseline}, {{ status = 200, headers = {{}}, body = '{{"next_batch":"s0"}}' }})
+            remuda.http.respond("GET", {sync}, {{ status = 200, headers = {{}}, body = {response} }})
+            remuda.relay_deliveries = {{}}
+            remuda.relay_client = matrix.relay.new({{ config_path = {config}, matrix = matrix,
+              deliver = function(value) table.insert(remuda.relay_deliveries, value); return true end }})
+            remuda.relay_client:start()
+            if #remuda.http.calls ~= 1 then return "baseline-not-started" end
+            if remuda.relay_deliveries[1] then return "callback-ran-inline" end
+            remuda.http.tick()
+            remuda.http.tick()
+            if #remuda.relay_deliveries ~= 1 then return "event-not-delivered" end
+            local event = remuda.relay_deliveries[1]
+            if event.event_id ~= "$relay-event" or event.thread_root ~= "$thread-root"
+              or event.in_reply_to ~= "$parent" or event.mxc ~= "mxc://media/example" then return "metadata-lost" end
+            if event.created_at ~= "1970-01-01T00:00:00Z" then return "timestamp-wrong" end
+            local first = remuda.http.calls[1]
+            if first.headers.Authorization ~= "Bearer test-token" then return "missing-auth" end
+            if first.ca_file ~= "/tmp/test-ca.pem" then return "missing-ca" end
+            if first.timeout ~= 10 then return "baseline-timeout-wrong" end
+            if remuda.http.calls[2].url ~= {sync} then return "since-poll-wrong" end
+            remuda.relay_client:stop()
+            return "ok"
+            "#,
+            baseline = lua_raw_string(baseline_url),
+            sync = lua_raw_string(sync_url),
+            response = lua_raw_string(&response.to_string()),
+            config = lua_raw_string(&config_path.to_string_lossy()),
+        ),
     );
-    let (token_path, config_path) = butler_config(
-        &dir,
-        "inbound",
-        &stub.base_url(),
-        room,
-        "@bot:example.org",
-        "@alice:example.org",
-    );
-    let token = token_path.to_string_lossy().to_string();
-    let config = config_path.to_string_lossy().to_string();
-    let daemon = Daemon::spawn_with_env(
-        &dir,
-        &[
-            ("REMUDA_BUTLER_TOKEN", token.as_str()),
-            ("REMUDA_BUTLER_CONFIG", config.as_str()),
-        ],
-    );
-    let path = daemon::socket_path_in(&dir, "s");
-    eval(&path, r#"remuda._butler_argv = {"sh", "-c", "sleep 60"}"#);
-    let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    eval(&path, "remuda.exec('butler/matrix')");
-    let envelope = r#"
-      local bus = remuda._butler_bus
-      local count, found = 0, nil
-      for _, message in pairs(bus.messages) do
-        if message.matrix and message.matrix.event_id == "$inbound-once" then
-          count = count + 1
-          found = message
-        end
-      end
-      if not found then return tostring(count) end
-      local object = bus.objects[found.body.object_id]
-      return table.concat({ tostring(count), found.from.host, found.from.alias,
-        found.matrix.room_id, found.matrix.event_id, found.created_at, object.content }, "\n")
-    "#;
-    let deadline = Instant::now() + PATIENCE;
-    let result = loop {
-        let current = eval(&path, envelope);
-        if current.contains("$inbound-once") {
-            break current;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "Matrix event never reached Butler mail; relay requests: {}; current mail probe: {current}; runtime: {}",
-            std::fs::read_to_string(&get_log).unwrap_or_default(),
-            eval(&path, "local c = remuda._butler_matrix_config; return tostring(c and c.config_path) .. '|' .. type(remuda._butler_helper_src) .. '|' .. tostring(remuda._butler_matrix_relay)")
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    };
-    let fields: Vec<&str> = result.lines().collect();
-    assert_eq!(fields, [
-        "1", "matrix", "@alice:example.org", room, "$inbound-once",
-        "2026-09-21T14:13:20Z", "mail from Matrix",
-    ]);
-
-    let state_path = format!("{}.since", config_path.display());
-    let state_deadline = Instant::now() + PATIENCE;
-    loop {
-        let state_text = std::fs::read_to_string(&state_path).unwrap_or_default();
-        let state: serde_json::Value = serde_json::from_str(&state_text).unwrap_or_default();
-        let acknowledged = state
-            .get("processed_event_ids")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|ids| ids.contains(&serde_json::json!("$inbound-once")));
-        if acknowledged {
-            break;
-        }
-        assert!(Instant::now() < state_deadline, "relay did not persist acknowledged event id: {state_text}");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let requests = std::fs::read_to_string(get_log).expect("local stub request log");
-    assert!(requests.lines().count() >= 3, "duplicate sync response was not consumed: {requests}");
-    drop(daemon);
+    assert_eq!(result, "ok", "L3 must poll asynchronously via L1 and retain envelope metadata: {result}");
 }
 
 // `REPLY_SRC` is a bash script by design (packages/butler/init.lua) -- the
@@ -4308,7 +3106,8 @@ fn matrix_mail_envelope_is_durable_and_deduplicated_across_daemon_restarts() {
     let (root, _, _) = seeded_mail_root(&dir, REPLY_F);
     let path = daemon::socket_path_in(&dir, "s");
     let matrix = r#"{ sender = "@alice:example.org", room_id = "!inbound:example.org",
-      event_id = "$matrix-event", created_at = "2026-09-28T01:02:03Z" }"#;
+      event_id = "$matrix-event", thread_root = "$thread-root", in_reply_to = "$parent",
+      mxc = "mxc://media/example", created_at = "2026-09-28T01:02:03Z" }"#;
 
     let daemon = Daemon::spawn(&dir);
     let first = eval(
@@ -4330,6 +3129,9 @@ fn matrix_mail_envelope_is_durable_and_deduplicated_across_daemon_restarts() {
     assert!(envelope.contains(r#""sender":"@alice:example.org""#), "{envelope}");
     assert!(envelope.contains(r#""room_id":"!inbound:example.org""#), "{envelope}");
     assert!(envelope.contains(r#""event_id":"$matrix-event""#), "{envelope}");
+    assert!(envelope.contains(r#""thread_root":"$thread-root""#), "{envelope}");
+    assert!(envelope.contains(r#""in_reply_to":"$parent""#), "{envelope}");
+    assert!(envelope.contains(r#""mxc":"mxc://media/example""#), "{envelope}");
     assert!(envelope.contains(r#""created_at":"2026-09-28T01:02:03Z""#), "{envelope}");
     drop(daemon);
 
@@ -4339,11 +3141,13 @@ fn matrix_mail_envelope_is_durable_and_deduplicated_across_daemon_restarts() {
         &format!(
             r#"{}
                local from = {{ host = "matrix", alias = "@alice:example.org", session = "@alice:example.org", kind = "matrix" }}
-               return assert(M.queue(from, F, "hello from Matrix", nil, nil, nil, {matrix})).id"#,
+               local message = assert(M.queue(from, F, "hello from Matrix", nil, nil, nil, {matrix}))
+               return table.concat({{ message.id, message.matrix.thread_root or "", message.matrix.in_reply_to or "", message.matrix.mxc or "" }}, "\n")"#,
             reply_prelude(&root)
         ),
     );
-    assert_eq!(after_restart, ids[0], "a restarted mail store did not deduplicate the Matrix event");
+    assert_eq!(after_restart, format!("{}\n$thread-root\n$parent\nmxc://media/example", ids[0]),
+        "a restarted mail store did not deduplicate the Matrix event or restore its metadata");
 }
 
 #[test]
@@ -4455,14 +3259,7 @@ fn butler_session_exited_hook_relaunches_via_the_shared_launch_function() {
     let init_lua = include_str!("../../packages/butler/init.lua").replace("\r\n", "\n");
     let matrix_init = include_str!("../../packages/butler/init.lua").replace("\r\n", "\n");
     let matrix_impl = include_str!("../../packages/butler/matrix.lua").replace("\r\n", "\n");
-    let matrix_stop_start = matrix_impl
-        .find("function remuda._butler_matrix_stop()")
-        .expect("Matrix package lost its lifecycle stop function");
-    let matrix_stop_end = matrix_impl[matrix_stop_start..]
-        .find("\nlocal function matrix_trace")
-        .map(|offset| matrix_stop_start + offset)
-        .expect("Matrix package lifecycle stop function is unterminated");
-    let matrix_stop = &matrix_impl[matrix_stop_start..matrix_stop_end];
+    let matrix_relay = include_str!("../../packages/butler/matrix_relay.lua").replace("\r\n", "\n");
 
     let launch_fn_idx = main_lua
         .find("local function launch_butler()")
@@ -4473,14 +3270,13 @@ fn butler_session_exited_hook_relaunches_via_the_shared_launch_function() {
     );
     assert!(
         matrix_init.contains("stop = function(state)")
-            && matrix_init.contains("host._butler_matrix_stop")
-            && matrix_stop.contains("for _, id in ipairs(remuda.processes()) do")
-            && matrix_stop.contains(
-                "if id == remuda._butler_matrix_relay or id == remuda._butler_relay then"
-            )
-            && matrix_stop.contains("pcall(remuda.kill, id)")
+            && matrix_init.contains("pcall(matrix.relay.stop)")
+            && matrix_init.contains("matrix.relay.start(host._butler_matrix_config)")
+            && matrix_impl.contains("matrix.relay.start(remuda._butler_matrix_config)")
+            && matrix_relay.contains("function instance:stop()")
+            && matrix_relay.contains("request_handle:cancel()")
             && !main_lua.contains("pkill -f"),
-        "the Matrix relay must be stopped by process id through the lifecycle stop hook"
+        "the async Matrix relay must be cancelled through its public lifecycle table"
     );
     assert!(
         init_lua.contains("event = \"session_exited\", id = \"identity\"")

@@ -193,11 +193,12 @@ if remuda._butler_test_mode == true then
   return
 end
 
--- The 4bbd90f lifecycle host does not yet call a module `stop` method on
--- reload. Stop an existing Matrix child here as well, before new config is
--- resolved; matrix.lua will start exactly one relay after the new config is
--- installed. Newer hosts can also stop it through init.lua's stop callback.
-if remuda._butler_matrix_stop then pcall(remuda._butler_matrix_stop) end
+-- Cancel the existing Matrix request loop before resolving new config;
+-- matrix.lua will start exactly one relay after the new config is installed.
+local old_matrix = remuda.butler and remuda.butler.matrix
+local old_relay = old_matrix and old_matrix.relay
+if old_relay and old_relay.stop then pcall(old_relay.stop)
+elseif remuda._butler_matrix_stop then pcall(remuda._butler_matrix_stop) end
 
 -- Replace handles created imperatively by the previous Butler version. The
 -- lifecycle declaration owns these schedules from this activation onward.
@@ -350,6 +351,7 @@ else
 end
 -- This internal module is the single inbound Matrix entry point. It registers
 -- only the optional relay and remains inert when credentials are absent.
+remuda.exec("butler/matrix_request")
 remuda.exec("butler/matrix")
 
 -- The session needs an `--mcp-config` pointing back at this same daemon, or

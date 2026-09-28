@@ -131,7 +131,10 @@ end
 local function envelope_json(message, object)
   local matrix = message.matrix and (',"matrix":{"sender":' .. config.json_quote(message.matrix.sender)
     .. ',"room_id":' .. config.json_quote(message.matrix.room_id)
-    .. ',"event_id":' .. config.json_quote(message.matrix.event_id) .. '}') or ""
+    .. ',"event_id":' .. config.json_quote(message.matrix.event_id)
+    .. (message.matrix.thread_root and ',"thread_root":' .. config.json_quote(message.matrix.thread_root) or "")
+    .. (message.matrix.in_reply_to and ',"in_reply_to":' .. config.json_quote(message.matrix.in_reply_to) or "")
+    .. (message.matrix.mxc and ',"mxc":' .. config.json_quote(message.matrix.mxc) or "") .. '}') or ""
   return '{"id":' .. config.json_quote(message.id) .. ',"from":' .. address_json(message.from)
     .. ',"to":[' .. address_json(message.to[1]) .. '],"subject":' .. config.json_quote(message.subject)
     .. ',"created_at":' .. config.json_quote(message.created_at) .. ',"content_type":'
@@ -194,6 +197,9 @@ local function load_message(disk, id)
       sender = matrix:match('"sender":"(.-)"'),
       room_id = matrix:match('"room_id":"(.-)"'),
       event_id = matrix:match('"event_id":"(.-)"'),
+      thread_root = matrix:match('"thread_root":"(.-)"'),
+      in_reply_to = matrix:match('"in_reply_to":"(.-)"'),
+      mxc = matrix:match('"mxc":"(.-)"'),
     }
   end
   bus.messages[id] = message
@@ -367,6 +373,7 @@ local function queue(from, to, text, subject, in_reply_to, references, matrix)
     in_reply_to = in_reply_to, references = references, content_type = "text/plain; charset=utf-8",
     body = { object_id = object_id }, matrix = matrix and {
       sender = matrix.sender, room_id = matrix.room_id, event_id = matrix.event_id,
+      thread_root = matrix.thread_root, in_reply_to = matrix.in_reply_to, mxc = matrix.mxc,
     } or nil }
   local disk = paths(recipient_id)
   if disk then
