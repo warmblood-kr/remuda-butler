@@ -475,3 +475,93 @@ fn an_ended_aliases_unread_mail_is_readable_by_alias() {
     .expect("eval");
     assert!(matches!(unknown, Response::Error(_)), "{unknown:?}");
 }
+
+/// §7 step 3: another channel can claim delivery before Butler's inbox hook.
+#[test]
+fn lower_depth_delivery_channel_can_claim_butler_mail() {
+    let channel = format!("test-channel-{}", std::process::id());
+    let data = std::env::var_os("XDG_DATA_HOME").expect("rust_tests sets XDG_DATA_HOME");
+    let install = PathBuf::from(data).join("remuda/mods").join(&channel);
+    let entry = install.join(format!("packages/{channel}/init.lua"));
+    std::fs::create_dir_all(entry.parent().unwrap()).expect("create channel package");
+    std::fs::write(
+        install.join("extension.toml"),
+        format!(
+            "name = \"{channel}\"\napi = \"remuda-lua-v1\"\nentry = \"packages/{channel}/init.lua\"\nlifecycle = \"remuda-module-v1\"\n"
+        ),
+    )
+    .expect("write channel manifest");
+    std::fs::write(
+        entry,
+        r#"return { api = "remuda-module-v1", state_version = 1,
+          initialize = function() return {} end,
+          hooks = {{ event = "butler/deliver", id = "alternate", depth = -10,
+            run = function(state, msg)
+              return { id = "alternate-message", from = msg.from, to = { msg.to }, text = msg.text }
+            end }} }
+        "#,
+    )
+    .expect("write channel module");
+
+    let dir = scratch("channel-inversion");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    if eval(&path, "return tostring(type(remuda.emit_until_success) == 'function')") != "true" {
+        eprintln!("skipping lower_depth_delivery_channel_can_claim_butler_mail: core lacks remuda.emit_until_success");
+        return;
+    }
+    let parent_id = eval(
+        &path,
+        r#"remuda._butler_argv = { 'sh' }; remuda.exec('butler')
+        remuda._butler_agent_builders.fake = function() return { 'sleep', '100' } end
+        remuda._butler_launch('fake', 'm1')
+        local sent = remuda._butler_send('m1', 'butler', 'reply parent')
+        return sent:match('^queued (message%-[^ ]+)')"#,
+    );
+    eval(&path, &format!("remuda.exec('{channel}')"));
+    let got = eval(
+        &path,
+        &format!(
+            r#"local notify = remuda._butler_notify
+        remuda._butler_notify = function() return true end
+        local inbox_owner = false
+        for _, hook in ipairs(remuda.hook_list("butler/deliver")) do
+          if hook.id == "inbox" and hook.group == "butler" then inbox_owner = true end
+        end
+        local sent = remuda._butler_send("operator", "butler", "through another channel")
+        local report = remuda._butler_report("m1", "report through another channel")
+        local reply = remuda._butler_reply("operator", "{parent_id}", "reply through another channel")
+        local forward = remuda._butler_forward("operator", "{parent_id}", "m1", "forward through another channel")
+        remuda._butler_notify = notify
+        return table.concat({{ tostring(inbox_owner), sent, report, reply, forward }}, "|")"#
+        ),
+    );
+    assert_eq!(
+        got,
+        format!(
+            "true|queued alternate-message and notified butler|queued alternate-message and notified butler|queued alternate-message and notified m1|forwarded {parent_id} to m1; queued alternate-message and notified m1"
+        )
+    );
+}
+
+#[test]
+fn missing_delivery_channel_is_reported_to_the_sender() {
+    let dir = scratch("channel-missing");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    if eval(&path, "return tostring(type(remuda.emit_until_success) == 'function')") != "true" {
+        eprintln!("skipping missing_delivery_channel_is_reported_to_the_sender: core lacks remuda.emit_until_success");
+        return;
+    }
+    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+    let got = eval(
+        &path,
+        r#"remuda.clear_hooks({ group = "butler" })
+        local ok, err = pcall(remuda._butler_send, "operator", "butler", "no channel")
+        return tostring(ok) .. "|" .. tostring(err)"#,
+    );
+    assert_eq!(
+        got,
+        "false|no Butler channel installed (try remuda-butler-inbox)"
+    );
+}

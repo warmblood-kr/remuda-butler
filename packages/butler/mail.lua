@@ -362,7 +362,7 @@ end
 
 -- RFC 5322 §3.6.4: in_reply_to is the parent; references are the parent's (or
 -- its in_reply_to), then the parent. JWZ: repeats and self-references drop.
-local function reply(caller, parent_id, text, as_operator)
+local function reply(caller, parent_id, text, as_operator, deliver)
   caller = address(caller)
   local allowed, why = may_resend(caller, parent_id, as_operator)
   if not allowed then return nil, why end
@@ -382,20 +382,21 @@ local function reply(caller, parent_id, text, as_operator)
   references[#references + 1] = parent_id
   local subject = parent.subject or "Message"
   if not subject:match("^Re: ") then subject = "Re: " .. subject end
+  local message = {
+    kind = "mail", from = caller, to = to, text = text, subject = subject,
+    in_reply_to = parent_id, references = references,
+  }
+  if deliver then return deliver(message), nil, to end
   return queue(caller, to, text, subject, parent_id, references)
 end
 
 -- RFC 5322 §3.6.6 and postfix redirection: the original envelope is never
 -- rewritten; the target gets a row for the same id plus who resent it.
-local function forward(caller, id, target, note, as_operator)
-  caller, target = address(caller), address(target)
-  if target.id == "" then return nil, "recipient has no Butler ULID" end
-  local allowed, why = may_resend(caller, id, as_operator)
-  if not allowed then return nil, why end
-  if not find_message(id) then return nil, "message " .. id .. " cannot be read" end
+local function deliver_forward(message)
+  local caller, id, target, note = message.from, message.id, message.to, message.note
   if delivered(target.id, id) then return nil, "message " .. id .. " was already delivered to " .. target.alias end
   load_inbox(target.id)
-  local resent = { from = caller, to = target, date = os.date("!%Y-%m-%dT%H:%M:%SZ"), note = note }
+  local resent = { from = caller, to = target, date = message.date, note = note }
   local disk = paths(target.id)
   if disk then
     local ready, ready_err = prepare_storage()
@@ -418,6 +419,20 @@ local function forward(caller, id, target, note, as_operator)
   mailbox(target.id)[#mailbox(target.id) + 1] = id
   mark_delivered(target.id, id)
   return find_message(id)
+end
+
+local function forward(caller, id, target, note, as_operator, deliver)
+  caller, target = address(caller), address(target)
+  if target.id == "" then return nil, "recipient has no Butler ULID" end
+  local allowed, why = may_resend(caller, id, as_operator)
+  if not allowed then return nil, why end
+  if not find_message(id) then return nil, "message " .. id .. " cannot be read" end
+  local message = {
+    kind = "forward", id = id, from = caller, to = target,
+    date = os.date("!%Y-%m-%dT%H:%M:%SZ"), note = note,
+  }
+  if deliver then return deliver(message) end
+  return deliver_forward(message)
 end
 
 -- load_inbox runs once per daemon, so ids left unread for a bad envelope are
@@ -482,5 +497,5 @@ local function unread(name)
   return #mailbox(name)
 end
 
-remuda._butler_mail = { mailbox = mailbox, queue = queue, reply = reply, forward = forward, inbox = inbox, unread = unread, append = append,
+remuda._butler_mail = { mailbox = mailbox, queue = queue, reply = reply, forward = forward, forward_delivery = deliver_forward, inbox = inbox, unread = unread, append = append,
   migrate_legacy = migrate_legacy }

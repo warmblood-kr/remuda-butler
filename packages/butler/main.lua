@@ -611,6 +611,39 @@ local mailbox = mail.mailbox
 local queue_message = mail.queue
 local migrate_legacy_mail = mail.migrate_legacy
 remuda._butler_migrate_legacy_mail = migrate_legacy_mail
+local delivery_events = type(remuda.emit_until_success) == "function"
+local function inbox_delivery(message)
+  local delivered, why
+  if message.kind == "forward" then
+    delivered, why = mail.forward_delivery(message)
+  else
+    delivered, why = queue_message(message.from, message.to, message.text, message.subject,
+      message.in_reply_to, message.references)
+  end
+  if not delivered then
+    message.delivery_error = why
+    return nil
+  end
+  return delivered
+end
+local function deliver_message(message)
+  if delivery_events then
+    local delivered = remuda.emit_until_success("butler/deliver", message)
+    if delivered == nil then
+      error(message.delivery_error or "no Butler channel installed (try remuda-butler-inbox)", 0)
+    end
+    return delivered
+  end
+  local delivered, why
+  if message.kind == "forward" then
+    delivered, why = mail.forward_delivery(message)
+  else
+    delivered, why = queue_message(message.from, message.to, message.text, message.subject,
+      message.in_reply_to, message.references)
+  end
+  if not delivered then error(why or "no Butler channel installed (try remuda-butler-inbox)", 0) end
+  return delivered
+end
 local function agent_mcp_json(token)
   local env = '"REMUDA_SESSION_CAPABILITY":"' .. token .. '"'
   if runtime_dir then env = env .. ',"REMUDA_RUNTIME_DIR":"' .. runtime_dir .. '"' end
@@ -1006,9 +1039,8 @@ function remuda._butler_send(from, to, text)
   local _, recipient = mail_id(to, false)
   local sender = (from == "operator" or from == "outside") and mail_address(from)
     or mail_address(resolve(from))
-  local message, err = queue_message(sender, mail_address(recipient.alias), text)
-  if not message then error(err, 0) end
-  local notice = "Butler message " .. message.id .. " from " .. message.from.session
+  local message = deliver_message({ from = sender, to = mail_address(recipient.alias), text = text })
+  local notice = "Butler message " .. message.id .. " from " .. sender.session
     .. " arrived. Read it: remuda butler inbox"
   local delivered, why = remuda._butler_notify(recipient.alias, notice)
   if delivered then return "queued " .. message.id .. " and notified " .. recipient.alias end
@@ -1035,14 +1067,15 @@ local function notify_queued(message, alias, what)
 end
 function remuda._butler_reply(from, message_id, text)
   local sender = sender_address(from)
-  local message, err = mail.reply(sender, message_id, text, from == OPERATOR)
+  local message, err, recipient = mail.reply(sender, message_id, text, from == OPERATOR, deliver_message)
   if not message then error(err, 0) end
-  return notify_queued(message, message.to[1].alias, "(reply) from " .. sender.alias)
+  return notify_queued(message, recipient.alias, "(reply) from " .. sender.alias)
 end
 function remuda._butler_forward(from, message_id, member, note)
   local sender = sender_address(from)
   local _, target = mail_id(member, false)
-  local message, err = mail.forward(sender, message_id, mail_address(target.alias), note, from == OPERATOR)
+  local message, err = mail.forward(sender, message_id, mail_address(target.alias), note,
+    from == OPERATOR, deliver_message)
   if not message then error(err, 0) end
   return "forwarded " .. message_id .. " to " .. target.alias .. "; "
     .. notify_queued(message, target.alias, "forwarded by " .. sender.alias)
@@ -1560,6 +1593,9 @@ end
 -- otherwise double this hook (see docs/design.md's augroup note) --
 -- clearing the group first keeps exactly one watchdog alive.
 remuda.clear_hooks({ group = "butler" })
+if delivery_events then
+  remuda.on("butler/deliver", inbox_delivery, { group = "butler", id = "inbox", depth = 0 })
+end
 -- Builds before the lifecycle entry registered these Matrix hooks without a
 -- group. Only Butler emits these events, so replace those legacy callbacks.
 for _, event in ipairs({ "butler-matrix-line", "butler-matrix-submit" }) do
