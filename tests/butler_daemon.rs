@@ -2213,6 +2213,7 @@ fn butler_matrix_read_status_and_download_keep_cursor_and_media_bounds() {
     std::fs::write(PathBuf::from(format!("{}.since", config_path.display())),
         r#"{"since":"s-7","messages_since":"m-4"}"#).expect("write saved cursors");
     let output = dir.join("download.bin");
+    let empty_output = dir.join("empty-download.bin");
     eval(&path, include_str!("support/fake_http.lua"));
     eval(&path, &format!(
         "remuda._butler_matrix_config = {{ token_path = {}, config_path = {} }}; remuda.exec('butler/matrix_request'); remuda.exec('butler/matrix_read')",
@@ -2239,13 +2240,20 @@ fn butler_matrix_read_status_and_download_keep_cursor_and_media_bounds() {
       if not media or media.bytes ~= 8 then return "download-result:" .. tostring(media and media.error) .. ":bytes=" .. tostring(media and media.bytes) .. ":calls=" .. #remuda.http.calls end
       if remuda.http.calls[3].max_bytes ~= 20 * 1024 * 1024 or remuda.http.calls[4].max_bytes ~= 20 * 1024 * 1024 then return "download-cap" end
       if remuda.http.calls[3].headers.Accept ~= "*/*" or remuda.http.calls[4].headers.Authorization ~= "Bearer test-token" then return "download-headers" end
+      local empty_url = "http://matrix.example.org/_matrix/client/v1/media/download/media.example/empty"
+      remuda.http.respond("GET", empty_url, {{ status = 200, headers = {{}}, body = "" }})
+      local empty
+      matrix.download({{ mxc = "mxc://media.example/empty", output = {} }}, function(value) empty = value end)
+      for _ = 1, 5 do remuda.http.tick() end
+      if not empty or empty.error or empty.bytes ~= 0 then return "empty-download" end
       local relative
       matrix.download({{ mxc = "mxc://media.example/asset", output = "relative.bin" }}, function(value) relative = value end)
-      if not relative or not relative.error or #remuda.http.calls ~= 4 then return "relative-output" end
+      if not relative or not relative.error or #remuda.http.calls ~= 5 then return "relative-output" end
       return "ok"
-    "#, lua_raw_string(&output.to_string_lossy())));
+    "#, lua_raw_string(&output.to_string_lossy()), lua_raw_string(&empty_output.to_string_lossy())));
     assert_eq!(result, "ok", "status and media reads should remain bounded and authenticated: {result}");
     assert_eq!(std::fs::read(output).expect("read downloaded bytes"), b"\0\xffbinary");
+    assert_eq!(std::fs::read(empty_output).expect("read empty downloaded file"), b"");
 }
 
 #[test]
