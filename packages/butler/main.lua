@@ -69,15 +69,6 @@ line = "MODEL:{model} CTX:{used} CTXWIN:{capacity} CTXPCT:{percent}".format(
 )
 
 try:
-    meta_path = path + ".modelid"
-    meta_tmp = meta_path + ".tmp"
-    with open(meta_tmp, "w", encoding="utf-8") as out:
-        out.write(tag(model.get("id")) + "\n")
-    os.replace(meta_tmp, meta_path)
-except Exception:
-    pass
-
-try:
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as out:
         out.write(line + "\n")
@@ -141,7 +132,7 @@ local DEFAULT_COMPACTION_CONFIG = {
   watch = 400000, warn = 600000, critical = 800000, critical_pct = 90,
   cooldown_ticks = 4, capture_gap = 3, dialog_timeout = 30,
   completion_timeout = 45, verification_timeout = 45, input_settle = 0.15,
-  idle_wait_timeout = 12, restore_attempts = 2,
+  idle_wait_timeout = 12, restore_attempts = 2, failure_cooldown_ticks = 12,
 }
 local function compaction_config()
   local configured = remuda._butler_compaction_config or {}
@@ -199,7 +190,8 @@ function remuda.butler.is_idle(name)
 end
 function remuda.butler.compact(name)
   if not remuda._butler_compaction_execute then return "compaction procedure unavailable" end
-  return remuda._butler_compaction_execute(name)
+  local result = remuda._butler_compaction_execute(name)
+  return result or "started"
 end
 function remuda.butler.compaction_policy(name, state, dry_run)
   state = state or {}
@@ -247,6 +239,20 @@ function remuda._butler_compaction_reset_idle(st)
   st.idle_ticks = 0
 end
 
+function remuda._butler_compaction_action_guard(session_name)
+  local found, session = pcall(remuda.session, session_name)
+  if not found or not session then return "session unavailable" end
+  if session.attached then return "human attached" end
+  if type(remuda.ls) == "function" then
+    local listed, rows = pcall(remuda.ls)
+    if not listed then return "session list unavailable" end
+    for _, row in ipairs(rows or {}) do
+      if row.name == session_name and row.attached then return "human attached" end
+    end
+  end
+  return nil
+end
+
 function remuda._butler_compaction_preflight(session_name)
   local found, session = pcall(remuda.session, session_name)
   if not found or not session then return "session unavailable" end
@@ -285,10 +291,20 @@ local function compaction_model(screen)
   local model = screen:match("MODEL:(.-)%s+CTX:") or screen:match("MODEL:([^\r\n]+)")
   return model and model:gsub("%s+$", "") or nil
 end
+local function numbered_option(line)
+  local trimmed = line:gsub("^%s+", "")
+  for _, marker in ipairs({ "❯", "›", ">" }) do
+    if trimmed:sub(1, #marker) == marker then
+      trimmed = trimmed:sub(#marker + 1):gsub("^%s+", "")
+      break
+    end
+  end
+  return trimmed:match("^(%d+)[%.)]%s*(.-)%s*$"), trimmed:match("^%d+[%.)]%s*(.-)%s*$")
+end
 local function compaction_yes_option(screen)
   local matches = {}
   for line in (screen .. "\n"):gmatch("(.-)\n") do
-    local number, label = line:match("^%s*(%d+)[%.)]%s*(.-)%s*$")
+    local number, label = numbered_option(line)
     local lower = label and label:lower() or ""
     if lower:find("yes", 1, true) and lower:find("switch", 1, true) then
       matches[#matches + 1] = number
@@ -297,29 +313,48 @@ local function compaction_yes_option(screen)
   if #matches == 1 then return matches[1] end
 end
 remuda._butler_compaction_yes_option = compaction_yes_option
+local function compaction_is_switch_dialog(screen)
+  if type(screen) ~= "string" then return false end
+  local lines = {}
+  for line in (screen .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
+  for i, line in ipairs(lines) do
+    if line:gsub("^%s+", ""):gsub("%s+$", ""):lower() == "switch model?" then
+      for j = i + 1, math.min(#lines, i + 4) do
+        if numbered_option(lines[j]) then return true end
+      end
+    end
+  end
+  return false
+end
 function remuda._butler_compaction_is_unknown_dialog(screen)
   if type(screen) ~= "string" then return false end
+  if compaction_is_switch_dialog(screen) then return false end
   local lines = {}
   for line in (screen .. "\n"):gmatch("(.-)\n") do
     lines[#lines + 1] = line
     if #lines > 8 then table.remove(lines, 1) end
   end
-  local modal_cue, prompt_cue, options = false, false, 0
-  for _, line in ipairs(lines) do
+  local top_border, bottom_border, selected_option, option_line, prompt_line = false, false, false, nil, nil
+  for i, line in ipairs(lines) do
     local trimmed = line:gsub("^%s+", "")
-    local lower = trimmed:lower()
-    if lower:find("switch model?", 1, true) then return false end
-    if lower:find("dialog", 1, true) or lower:find("modal", 1, true)
-      or lower:find("select an option", 1, true) or lower:find("choose an option", 1, true) then
-      modal_cue = true
+    local prompt = trimmed:gsub("%s+$", "")
+    local first, last = trimmed:sub(1, 3), trimmed:sub(-3)
+    if (first == "╭" or first == "┌" or first == "╔")
+      and (last == "╮" or last == "┐" or last == "╗") then top_border = true end
+    if (first == "╰" or first == "└" or first == "╚")
+      and (last == "╯" or last == "┘" or last == "╝") then bottom_border = true end
+    if numbered_option(line) then
+      option_line = i
+      if trimmed:sub(1, #"❯") == "❯" or trimmed:sub(1, #"›") == "›" then selected_option = true end
     end
-    if lower:match("^press%s+[%w%d]+%s+to%s+continue") then prompt_cue = true end
-    if lower:match("^%d+[%.)]%s+.+") then options = options + 1 end
+    if prompt == "❯" or prompt == "›" or prompt == ">" then prompt_line = i end
   end
-  return modal_cue and (prompt_cue or options > 0)
+  return (top_border and bottom_border) or selected_option
+    or (option_line and prompt_line and prompt_line > option_line and prompt_line - option_line <= 2)
+    or false
 end
 function remuda._butler_compaction_visible_answer(kind, screen, target)
-  if kind == "claude" and type(screen) == "string" and screen:lower():find("switch model?", 1, true) then
+  if kind == "claude" and compaction_is_switch_dialog(screen) then
     local option = remuda.expect_option and remuda.expect_option(screen, function(label)
       local lower = label:lower()
       return lower:find("yes", 1, true) and lower:find("switch", 1, true)
@@ -333,15 +368,8 @@ function remuda._butler_compaction_visible_answer(kind, screen, target)
   return nil, "waiting"
 end
 function remuda._butler_compaction_sequence(kind, prior, low)
-  if kind == "codex" then return { "/compact", "ENTER" } end
+  if kind == "codex" then return { "/compact" } end
   return { "/model " .. low, "/compact", "/model " .. prior }
-end
-
-remuda._butler_compaction_dialog_handlers = remuda._butler_compaction_dialog_handlers or {}
-function remuda._butler_compaction_register_dialog(name, handler)
-  assert(type(name) == "string" and type(handler) == "function", "dialog handler needs a name and function")
-  remuda._butler_compaction_dialog_handlers[name] = handler
-  return true
 end
 
 if remuda._butler_test_mode == true then
@@ -2319,25 +2347,30 @@ function remuda._butler_compaction_execute(session_name)
   local level = remuda.butler.ctx_level(session_name)
   local ctx = level.used or "?"
   local detail = "ctx=" .. tostring(ctx)
+  local config = compaction_config()
   state.compaction_in_progress = true
   owner_state.compaction_fleet_active = state_key
-  _butler_trace("sent", detail)
     local function report(reason)
       state.compaction_in_progress = false
       if owner_state.compaction_fleet_active == state_key then owner_state.compaction_fleet_active = nil end
-      state.cooldown_ticks = 0
+      state.cooldown_ticks = config.failure_cooldown_ticks
       _butler_trace("error", detail .. " reason=" .. tostring(reason))
       pcall(remuda._butler_send, session_name, "butler", "Compaction failed: " .. tostring(reason))
     end
     local screen_ok, screen = pcall(remuda.capture, session_name)
     local agent = remuda._butler_bus.agents[session_name] or {}
-    local prior = compaction_model(screen)
     local initial_telemetry = remuda._butler_telemetry_for(agent) or {}
-    local prior_command = initial_telemetry.model_id or prior
+    local prior = state.pending_restore_model or initial_telemetry.model
+    local used_fallback = not prior or prior == "?" or prior == ""
+    if used_fallback then prior = agent.policy_default_model or agent.default_model or "opus" end
+    if not state.pending_restore_model then state.pending_restore_model_fallback = used_fallback end
+    state.pending_restore_model = prior
+    local prior_command = prior
     local low = remuda._butler_compaction_model or "sonnet"
-    local config = compaction_config()
+    if used_fallback then detail = detail .. " prior=fallback:" .. tostring(prior) end
+    _butler_trace("sent", detail)
     local dialog_timeout = math.max(1, config.dialog_timeout)
-    local failure_reason, compact_sent, restore_requested, verification_failed
+    local failure_reason, compact_sent, restore_attempt_count, verification_failed
     local verify, request_restore, watch_restore, restore_after_unknown
     local function watch(branches, options, restore_on_error)
       local ok, handle = pcall(remuda.expect, session_name, branches, options)
@@ -2349,10 +2382,9 @@ function remuda._butler_compaction_execute(session_name)
       return handle
     end
     if not screen_ok or type(screen) ~= "string" then report("could not capture model status"); return end
-    if agent.kind == "claude" and (not prior or prior == "?" or prior == "") then report("prior statusline model is unknown"); return end
     local ctx_before = tonumber(ctx)
     local function is_switch_dialog(value)
-      return type(value) == "string" and value:lower():find("switch model?", 1, true) ~= nil
+      return compaction_is_switch_dialog(value)
     end
     local is_unknown_dialog = remuda._butler_compaction_is_unknown_dialog
     local function register_unknown_dialog(value)
@@ -2360,35 +2392,116 @@ function remuda._butler_compaction_execute(session_name)
       local registry = remuda._butler_compaction_dialog_registry
       if #registry >= 50 then table.remove(registry, 1) end
       table.insert(registry, { session = session_name, kind = "unknown_dialog", at = os.time() })
-      local handler_name = "unrecognized-" .. session_name .. "-" .. #remuda._butler_compaction_dialog_registry
-      remuda._butler_compaction_register_dialog(handler_name, function(screen_value)
-        if not is_unknown_dialog(screen_value) then return false end
-        restore_after_unknown("registered unknown dialog needs a reviewed handler: " .. handler_name)
-        return true
-      end)
     end
-    local function answer_switch_dialog(value)
-      local answer = remuda.expect_option(value, function(label)
-        local lower = label:lower()
-        return lower:find("yes", 1, true) and lower:find("switch", 1, true)
-      end)
-      if not answer then
-        register_unknown_dialog(value)
-        failure_reason = "restore dialog had no unique yes/switch option"
-        report(failure_reason)
-        return false
+    local function wait_until_output_idle(callback)
+      local deadline = os.time() + math.max(1, math.ceil(config.idle_wait_timeout))
+      local timer, finished
+      local function poll()
+        if finished then return end
+        local ok, current = pcall(remuda.session, session_name)
+        if not ok or not current then
+          finished = true
+          if timer then remuda.cancel(timer) end
+          callback("session unavailable")
+        elseif current.attached then
+          finished = true
+          if timer then remuda.cancel(timer) end
+          callback("human attached")
+        elseif current.is_busy == false then
+          finished = true
+          if timer then remuda.cancel(timer) end
+          callback(nil)
+        elseif os.time() >= deadline then
+          finished = true
+          if timer then remuda.cancel(timer) end
+          callback("output idle timeout")
+        end
       end
-      local safe = remuda._butler_compaction_preflight(session_name)
-      if safe then report("aborted: " .. safe); return false end
-      local ok, err = pcall(remuda.key, session_name, answer)
-      if not ok then report("restore dialog answer failed: " .. tostring(err)); return false end
-      return true
+      poll()
+      if not finished then timer = remuda.schedule({ every = 0.25, run = poll }) end
+    end
+    local function wait_until_switch_closed(callback)
+      local deadline = os.time() + math.max(1, math.ceil(config.dialog_timeout))
+      local timer, finished
+      local function poll()
+        if finished then return end
+        local ok, current = pcall(remuda.capture, session_name)
+        if ok and type(current) == "string" and not is_switch_dialog(current) then
+          finished = true
+          if timer then remuda.cancel(timer) end
+          wait_until_output_idle(callback)
+        elseif os.time() >= deadline then
+          finished = true
+          if timer then remuda.cancel(timer) end
+          callback("switch dialog did not close")
+        end
+      end
+      poll()
+      if not finished then timer = remuda.schedule({ every = 0.25, run = poll }) end
+    end
+    local function answer_switch_dialog(_, on_answered)
+      wait_until_output_idle(function(idle_error)
+        if idle_error then
+          if idle_error == "human attached" then report("aborted: human attached; restore suppressed")
+          else
+            failure_reason = "switch dialog did not become idle: " .. idle_error
+            restore_after_unknown(failure_reason)
+          end
+          return
+        end
+        local captured, current = pcall(remuda.capture, session_name)
+        if not captured or type(current) ~= "string" then
+          failure_reason = "could not capture switch dialog"
+          request_restore(failure_reason)
+          return
+        end
+        if not is_switch_dialog(current) then
+          on_answered()
+          return
+        end
+        local answer = remuda.expect_option(current, function(label)
+          local lower = label:lower()
+          return lower:find("yes", 1, true) and lower:find("switch", 1, true)
+        end)
+        if not answer then
+          register_unknown_dialog(current)
+          failure_reason = "switch dialog had no unique yes/switch option"
+          restore_after_unknown(failure_reason)
+          return
+        end
+        local safe = remuda._butler_compaction_action_guard(session_name)
+        if safe then
+          if safe == "human attached" then report("aborted: human attached; restore suppressed")
+          else request_restore("aborted: " .. safe) end
+          return
+        end
+        local ok, err = pcall(remuda.key, session_name, answer)
+        if not ok then
+          failure_reason = "switch dialog answer failed: " .. tostring(err)
+          restore_after_unknown(failure_reason)
+          return
+        end
+        wait_until_switch_closed(function(close_error)
+          if close_error then
+            if close_error == "human attached" then
+              report("aborted: human attached; restore suppressed")
+            else
+              failure_reason = close_error
+              restore_after_unknown(close_error)
+            end
+          else
+            on_answered()
+          end
+        end)
+      end)
     end
     local function after_restored()
       if compact_sent then
         if verification_failed then report(failure_reason or "verification failed after model restore")
         else verify() end
       else
+        state.pending_restore_model = nil
+        state.pending_restore_model_fallback = nil
         report(failure_reason or "compaction aborted before /compact")
       end
     end
@@ -2406,6 +2519,8 @@ function remuda._butler_compaction_execute(session_name)
           if failure_reason then report(failure_reason)
           else
             state.compaction_in_progress = false
+            state.pending_restore_model = nil
+            state.pending_restore_model_fallback = nil
             if owner_state.compaction_fleet_active == state_key then owner_state.compaction_fleet_active = nil end
             _butler_trace("verified", detail)
           end
@@ -2429,12 +2544,20 @@ function remuda._butler_compaction_execute(session_name)
     verify = start_verification
     local function restore_match(value)
       local model = compaction_model(value)
+      local current = remuda._butler_telemetry_for(agent) or {}
+      local current_model = current.model
+      if current_model and current_model ~= "?" then
+        if prior and current_model:lower() == prior:lower() then return true end
+        if state.pending_restore_model_fallback and model and prior
+          and model:lower():find(prior:lower(), 1, true) then return true end
+        return false
+      end
       return model and prior and model:lower() == prior:lower()
     end
     watch_restore = function(ignore_unknown)
       watch({
         { id = "restore-dialog", match = is_switch_dialog, action = function(value)
-          if answer_switch_dialog(value) then watch_restore() end
+          answer_switch_dialog(value, function() watch_restore() end)
         end },
         { id = "restore-prior", match = restore_match, action = after_restored },
       }, { timeout = dialog_timeout, unknown = function(value)
@@ -2457,18 +2580,22 @@ function remuda._butler_compaction_execute(session_name)
         return
       end
       local current_model = compaction_model(current_screen)
-      if restore_match(current_screen) then after_restored(); return end
       if is_switch_dialog(current_screen) then
-        if answer_switch_dialog(current_screen) then watch_restore() end
-        return
-      end
-      if current_model and current_model:lower():find(low:lower(), 1, true) then
-        if restore_requested then
-          finish_failed_restore("prior model restore was already requested but model remains " .. current_model)
+        if not compact_sent and (restore_attempt_count or 0) == 0 then
+          restore_after_unknown(failure_reason or "aborting before compaction")
           return
         end
-        restore_requested = true
-        local safe = remuda._butler_compaction_preflight(session_name)
+        answer_switch_dialog(current_screen, function() watch_restore() end)
+        return
+      end
+      if restore_match(current_screen) then after_restored(); return end
+      if current_model and current_model:lower():find(low:lower(), 1, true) then
+        if (restore_attempt_count or 0) >= config.restore_attempts then
+          finish_failed_restore("prior model restore attempts exhausted while model remains " .. current_model)
+          return
+        end
+        restore_attempt_count = (restore_attempt_count or 0) + 1
+        local safe = remuda._butler_compaction_action_guard(session_name)
         if safe then finish_failed_restore("restore aborted: " .. safe); return end
         local sent, err = pcall(remuda.type_text, session_name, "/model " .. prior_command, config.input_settle)
         if not sent then finish_failed_restore("could not request prior model: " .. tostring(err)); return end
@@ -2479,7 +2606,7 @@ function remuda._butler_compaction_execute(session_name)
     end
     restore_after_unknown = function(reason)
       failure_reason = reason or failure_reason
-      local safe = remuda._butler_compaction_preflight(session_name)
+      local safe = remuda._butler_compaction_action_guard(session_name)
       if safe then finish_failed_restore("could not dismiss unknown dialog: " .. safe); return end
       local ok, err = pcall(remuda.key, session_name, "ESC")
       if not ok then finish_failed_restore("could not dismiss unknown dialog: " .. tostring(err)); return end
@@ -2493,7 +2620,7 @@ function remuda._butler_compaction_execute(session_name)
           finished = true
           remuda.cancel(timer)
           finish_failed_restore("could not verify unknown dialog dismissal")
-        elseif not is_unknown_dialog(current) then
+        elseif not is_unknown_dialog(current) and not is_switch_dialog(current) then
           finished = true
           remuda.cancel(timer)
           request_restore(failure_reason)
@@ -2521,23 +2648,17 @@ function remuda._butler_compaction_execute(session_name)
       if agent.kind == "codex" then
         local safe = remuda._butler_compaction_preflight(session_name)
         if safe then request_restore("aborted: " .. safe); return end
+        safe = remuda._butler_compaction_action_guard(session_name)
+        if safe then request_restore("aborted: " .. safe); return end
         local sent, err = pcall(remuda.type_text, session_name, "/compact", config.input_settle)
         if not sent then report("Codex compact command failed: " .. tostring(err)); return end
         compact_sent = true
-        local enter, ticks = nil, 0
-        enter = remuda.schedule({ every = 1, run = function()
-          ticks = ticks + 1
-          if ticks >= 3 then
-            remuda.cancel(enter)
-            local safe = remuda._butler_compaction_preflight(session_name)
-            if safe then report("aborted: " .. safe); return end
-            local ok, enter_err = pcall(remuda.key, session_name, "RET")
-            if not ok then report("Codex confirmation failed: " .. tostring(enter_err)) else verify() end
-          end
-        end })
+        verify()
         return
       end
       local safe = remuda._butler_compaction_preflight(session_name)
+      if safe then request_restore("aborted: " .. safe); return end
+      safe = remuda._butler_compaction_action_guard(session_name)
       if safe then request_restore("aborted: " .. safe); return end
       local compact_ok, compact_err = pcall(remuda.type_text, session_name, "/compact", config.input_settle)
       if not compact_ok then
@@ -2565,31 +2686,24 @@ function remuda._butler_compaction_execute(session_name)
     else
       local safe = remuda._butler_compaction_preflight(session_name)
       if safe then report("aborted: " .. safe); return end
+      safe = remuda._butler_compaction_action_guard(session_name)
+      if safe then report("aborted: " .. safe); return end
       local sent, send_err = pcall(remuda.type_text, session_name, "/model " .. low, config.input_settle)
       if not sent then request_restore("could not request low model: " .. tostring(send_err)); return end
       watch({
         { id = "switch-confirm", match = is_switch_dialog, action = function(value)
-          local answer = remuda.expect_option(value, function(label)
-            local lower = label:lower()
-            return lower:find("yes", 1, true) and lower:find("switch", 1, true)
-          end)
-          if not answer then
-            register_unknown_dialog(value)
-            failure_reason = "first switch dialog had no unique yes/switch option"
-            request_restore(failure_reason)
-            return
-          end
-          local safe = remuda._butler_compaction_preflight(session_name)
-          if safe then request_restore("aborted: " .. safe); return end
-          local ok, err = pcall(remuda.key, session_name, answer)
-          if not ok then request_restore("first switch answer failed: " .. tostring(err)); return end
-          after_switch()
+          answer_switch_dialog(value, after_switch)
         end },
         { id = "already-low", match = function(value)
           local model = compaction_model(value)
           return not is_unknown_dialog(value)
             and model and model:lower():find(low:lower(), 1, true) ~= nil
-        end, action = after_switch },
+        end, action = function()
+          wait_until_output_idle(function(idle_error)
+            if idle_error then request_restore("aborted: " .. idle_error)
+            else after_switch() end
+          end)
+        end },
       }, { timeout = dialog_timeout, unknown = is_unknown_dialog,
         on_unknown = unknown_dialog,
         on_timeout = function() request_restore("first model dialog timed out") end,

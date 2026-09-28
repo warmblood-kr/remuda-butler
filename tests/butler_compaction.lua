@@ -176,6 +176,9 @@ assert(answer == "3" and phase == "dialog", "dialog answer must be parsed from t
 answer, phase = remuda._butler_compaction_visible_answer(
   "claude", "Switch model?\n1. Yes, switch to Sonnet\n2. No", "sonnet")
 assert(answer == "1" and phase == "dialog", "dialog option order may vary")
+assert(remuda._butler_compaction_yes_option(
+  "Switch model?\n1. No\n❯ 2. Yes, switch to Sonnet") == "2",
+  "the local option parser must retain the number from a highlighted Unicode option")
 answer, phase = remuda._butler_compaction_visible_answer(
   "claude", "Switch model?\n1. No\n2. Keep current model", "sonnet")
 assert(answer == nil and phase == "unknown", "dialog without a yes/switch label must be unknown")
@@ -183,19 +186,27 @@ answer, phase = remuda._butler_compaction_visible_answer(
   "claude", "MODEL:Sonnet-4.5 CTX:500000\n❯", "sonnet")
 assert(answer == nil and phase == "ready", "already-switched statusline must advance without a stray key")
 answer, phase = remuda._butler_compaction_visible_answer(
-  "claude", "Unknown modal\nPress 1 to continue", "sonnet")
+  "claude", "Mystery chooser\n1. Continue\n❯", "sonnet")
 assert(answer == nil and phase == "unknown", "unrecognized dialog must be reported, never answered blindly")
-assert(remuda._butler_compaction_is_unknown_dialog("Mystery dialog\nPress 8 to continue"),
-  "modal marker plus visible option should be classified as an unknown dialog")
+assert(remuda._butler_compaction_is_unknown_dialog("Mystery chooser\n1. Continue\n❯"),
+  "numbered option immediately above the prompt should be an active unknown dialog")
+assert(remuda._butler_compaction_is_unknown_dialog("Mystery chooser\n❯ 1. Continue\n2. Cancel"),
+  "a highlighted numbered option should identify an active modal")
+assert(not remuda._butler_compaction_is_unknown_dialog(
+  "Switch model?\n❯ 1. Yes, switch to Sonnet\n2. No"),
+  "the known model switch dialog must remain in the switch handler")
 assert(not remuda._butler_compaction_is_unknown_dialog("Earlier the dialog said press 1 to continue"),
   "transcript prose must not be mistaken for an active dialog")
+assert(not remuda._butler_compaction_is_unknown_dialog(
+  "1. Fix the modal dialog detection in the last 8 lines"),
+  "dialog words in transcript text must not be mistaken for a modal")
 
 local claude_sequence = remuda._butler_compaction_sequence("claude", "opus", "sonnet")
 assert(table.concat(claude_sequence, "|") == "/model sonnet|/compact|/model opus",
   "Claude sequence must queue low model, compact, then restore prior model")
 local codex_sequence = remuda._butler_compaction_sequence("codex", "gpt-5.6-terra", "sonnet")
-assert(table.concat(codex_sequence, "|") == "/compact|ENTER",
-  "Codex sequence must compact and include its extra Enter without switching models")
+assert(table.concat(codex_sequence, "|") == "/compact",
+  "Codex sequence must submit compact exactly once without switching models")
 
 local submit_count = 0
 local function submit(decision, text)

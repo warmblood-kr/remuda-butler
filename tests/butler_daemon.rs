@@ -5132,7 +5132,7 @@ fn butler_compaction_fake_claude_scenarios_send_only_visible_keys() {
         r#"#!/bin/bash
 log=$1
 scenario=$2
-model=Opus
+model='Opus 4.7 (1M context)'
 ctx=500000
 first=1
 if [ "$scenario" = absent ]; then model=Sonnet; fi
@@ -5143,28 +5143,36 @@ while IFS= read -r line; do
   case "$line" in
     '/model sonnet')
       if [ "$scenario" = timeout ]; then continue; fi
+      if [ "$scenario" = switch-label-unknown ] && [ "$first" = 1 ]; then
+        first=0; model=Sonnet; paint
+        printf 'Switch model?\n1. Apply using an unknown label\n2. Cancel\n'
+        IFS= read -r -n 1 answer || exit 0
+        printf 'KEY:%s\n' "$answer" >> "$log"
+        paint; continue
+      fi
       if [ "$scenario" = unknown ] && [ "$first" = 1 ]; then
-        first=0; model=Sonnet; paint; printf 'Mystery dialog\nPress 8 to continue\n'
+        first=0; model=Sonnet; paint; printf 'Mystery chooser\n1. Continue\n❯\n'
         IFS= read -r -n 1 answer || exit 0
         printf 'KEY:%s\n' "$answer" >> "$log"
         paint; continue
       fi
       if [ "$model" = Sonnet ]; then paint; continue; fi
       if [ "$scenario" = option2 ]; then
-        printf 'Switch model?\n1. No\n2. Yes, switch to Sonnet\n'
+        printf 'Switch model?\n1. No\n❯ 2. Yes, switch to Sonnet\n'
       else
-        printf 'Switch model?\n1. Yes, switch to Sonnet\n2. No\n'
+        printf 'Switch model?\n❯ 1. Yes, switch to Sonnet\n2. No\n'
       fi
       IFS= read -r -n 1 answer || exit 0
       printf 'KEY:%s\n' "$answer" >> "$log"
       case "$answer" in 1|2) model=Sonnet ;; esac
       paint
       ;;
-    '/model Opus')
-      printf 'Switch model?\n1. Yes, switch to Opus\n2. No\n'
+    '/model claude-opus-4-7[1m]')
+      if [ "$scenario" = restore-timeout ]; then continue; fi
+      printf 'Switch model?\n❯ 1. Yes, switch to Opus\n2. No\n'
       IFS= read -r -n 1 answer || exit 0
       printf 'KEY:%s\n' "$answer" >> "$log"
-      case "$answer" in 1|2) model=Opus ;; esac
+      case "$answer" in 1|2) model='Opus 4.7 (1M context)' ;; esac
       paint
       ;;
     '/model Sonnet') paint ;;
@@ -5198,12 +5206,19 @@ done
       end
       local original_session = remuda.session
       remuda._fake_attached = {{}}
+      remuda._fake_busy_after_key = {{}}
+      remuda._fake_busy_until = {{}}
       remuda.session = function(name)
-        return {{is_busy=false, attached=remuda._fake_attached[name] == true}}
+        return {{is_busy=remuda._fake_busy_until[name] and os.time() < remuda._fake_busy_until[name] or false,
+          attached=remuda._fake_attached[name] == true}}
       end
       local original_key = remuda.key
       remuda.key = function(name, key)
         original_key(name, key)
+        if remuda._fake_busy_after_key[name] then
+          remuda._fake_busy_after_key[name] = nil
+          remuda._fake_busy_until[name] = os.time() + 2
+        end
         if remuda._fake_attach_after_first_key == name then
           local deadline = os.time() + 3
           repeat
@@ -5217,7 +5232,7 @@ done
       remuda._butler_telemetry_for = function(agent)
         local screen = remuda.capture(agent.session_name)
         return {{context_used=screen:match("CTX:%s*(%d+)"),
-          model=screen:match("MODEL:%s*([%w%.%-]+)")}}
+          model=screen:find("MODEL:Sonnet", 1, true) and "sonnet" or "claude-opus-4-7[1m]"}}
       end
       remuda._fake_setup_compaction = function(name, kind, log, scenario)
         remuda.new(name, {{"bash", {script:?}, log, scenario}}, nil, {{}})
@@ -5231,7 +5246,7 @@ done
         (
             "fake-happy",
             "happy",
-            "CMD:/model sonnet\nKEY:1\nCMD:/compact\nCMD:/model Opus\nKEY:1\n",
+            "CMD:/model sonnet\nKEY:1\nCMD:/compact\nCMD:/model claude-opus-4-7[1m]\nKEY:1\n",
         ),
         (
             "fake-absent",
@@ -5241,14 +5256,29 @@ done
         (
             "fake-option2",
             "option2",
-            "CMD:/model sonnet\nKEY:2\nCMD:/compact\nCMD:/model Opus\nKEY:1\n",
+            "CMD:/model sonnet\nKEY:2\nCMD:/compact\nCMD:/model claude-opus-4-7[1m]\nKEY:1\n",
+        ),
+        (
+            "fake-busy-after-switch",
+            "happy",
+            "CMD:/model sonnet\nKEY:1\nCMD:/compact\nCMD:/model claude-opus-4-7[1m]\nKEY:1\n",
         ),
         (
             "fake-unknown",
             "unknown",
-            "CMD:/model sonnet\nKEY:\x1b\nCMD:/model Opus\nKEY:1\n",
+            "CMD:/model sonnet\nKEY:\x1b\nCMD:/model claude-opus-4-7[1m]\nKEY:1\n",
+        ),
+        (
+            "fake-switch-label-unknown",
+            "switch-label-unknown",
+            "CMD:/model sonnet\nKEY:\x1b\nCMD:/model claude-opus-4-7[1m]\nKEY:1\n",
         ),
         ("fake-timeout", "timeout", "CMD:/model sonnet\n"),
+        (
+            "fake-restore-timeout",
+            "restore-timeout",
+            "CMD:/model sonnet\nKEY:1\nCMD:/compact\nCMD:/model claude-opus-4-7[1m]\nCMD:/model claude-opus-4-7[1m]\n",
+        ),
         (
             "fake-attached",
             "happy",
@@ -5265,6 +5295,12 @@ done
             eval(
                 &path,
                 &format!("remuda._fake_attach_after_first_key = {name:?}"),
+            );
+        }
+        if name == "fake-busy-after-switch" {
+            eval(
+                &path,
+                &format!("remuda._fake_busy_after_key[{name:?}] = true"),
             );
         }
         eval(
@@ -5288,19 +5324,40 @@ done
         }
         let got = std::fs::read_to_string(&log).unwrap_or_default();
         assert_eq!(got, expected, "unexpected commands/keys for {scenario}");
-        if scenario == "unknown" || scenario == "timeout" || name == "fake-attached" {
+        if scenario == "unknown" || scenario == "switch-label-unknown" || scenario == "timeout" || scenario == "restore-timeout"
+            || name == "fake-attached"
+        {
             let reports = eval(
                 &path,
                 "return table.concat(remuda._fake_compaction_reports or {}, '\\n')",
             );
             let marker = match scenario {
                 "unknown" => "unrecognized dialog",
+                "switch-label-unknown" => "no unique yes/switch option",
                 "timeout" => "first model dialog timed out",
+                "restore-timeout" => "restore attempts exhausted",
                 _ => "aborted: human attached",
             };
             assert!(
                 reports.contains(marker),
                 "expected report {marker:?}, got {reports:?}"
+            );
+        }
+        if scenario == "restore-timeout" {
+            assert_eq!(
+                eval(
+                    &path,
+                    &format!("return remuda._butler_compaction_members_state[{name:?}].pending_restore_model"),
+                ),
+                "Opus",
+                "failed restore must retain the original model for the next policy attempt"
+            );
+            assert!(
+                eval(
+                    &path,
+                    &format!("return remuda._butler_compaction_members_state[{name:?}].cooldown_ticks >= 12"),
+                ) == "true",
+                "failed compaction must set a retry backoff"
             );
         }
     }
