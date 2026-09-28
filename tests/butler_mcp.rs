@@ -434,7 +434,9 @@ fn notice_recovery_preserves_idle_draft_and_respects_attached_human() {
         remuda._notice_test_state.screen = '› temporary text'
         remuda._butler_send('operator', 'm1', 'next notice')"#,
     );
-    eval(&path, "remuda._notice_test_state.screen = '› ' .. remuda._butler_bus.notices.m1.text");
+    eval(&path, r#"local notice = remuda._butler_bus.notices.m1.text
+        local split = assert(notice:find('Read it:', 1, true)) + #'Read it:'
+        remuda._notice_test_state.screen = '› ' .. notice:sub(1, split) .. '\n' .. notice:sub(split + 2)"#);
     let deadline = Instant::now() + PATIENCE;
     while eval(&path, "return tostring(remuda._butler_bus.notices.m1 ~= nil)") != "false" {
         assert!(Instant::now() < deadline, "existing Butler notice was not submitted");
@@ -504,6 +506,47 @@ fn notice_recovery_preserves_idle_draft_and_respects_attached_human() {
         "false",
         "busy pane ticks incorrectly exhausted the recovery timeout",
     );
+}
+
+#[test]
+fn partial_clear_escalation_keeps_the_full_parsed_draft() {
+    let (path, _daemon) = butler_with_member("notice-recovery-partial-clear");
+    eval(
+        &path,
+        r#"
+        local row = { name = 'm1', alive = true, attached = false }
+        remuda.ls = function() return { row } end
+        remuda.capture_styled = nil
+        remuda._butler_bus.agents.m1.kind = 'codex'
+        local state = { screen = '› first draft line\nsecond draft line', events = {} }
+        remuda._partial_clear_state = state
+        remuda.capture = function()
+          table.insert(state.events, 'capture')
+          return state.screen
+        end
+        remuda.session = function() return { is_busy = false } end
+        remuda.key = function(_, key)
+          table.insert(state.events, 'key ' .. key)
+          if key == 'C-u' then state.screen = '› second draft line' end
+        end
+        remuda.type_text = function(_, text) table.insert(state.events, 'type ' .. text) end
+        local send = remuda._butler_send
+        remuda._butler_send = function(from, to, text)
+          if to == 'm1' then return send(from, to, text) end
+          state.escalation = text
+          return 'captured escalation'
+        end
+        remuda._butler_send('operator', 'm1', 'partial clear check')
+        "#,
+    );
+    let deadline = Instant::now() + PATIENCE;
+    while eval(&path, "return tostring(remuda._partial_clear_state.escalation ~= nil)") != "true" {
+        assert!(Instant::now() < deadline, "partial clear did not report its failure");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let escalation = eval(&path, "return remuda._partial_clear_state.escalation");
+    assert!(escalation.contains("Parsed composer draft: first draft line\nsecond draft line"), "escalation lost the full original draft: {escalation}");
+    assert!(escalation.contains("composer did not become empty"), "partial clear reason was missing: {escalation}");
 }
 
 /// #29 review 2: an exited session's pending notice and screen record go too.

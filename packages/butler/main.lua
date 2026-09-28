@@ -1222,10 +1222,10 @@ bus.notices = bus.notices or {}
 bus.notice_screens = bus.notice_screens or {}
 local NOTICE_STABLE_SECONDS = 3
 
--- The composer's text: the last line led (after an optional box edge) by a
--- prompt glyph. Returns "EMPTY" (nothing, or exactly one of the kind's
--- `placeholders`), "NON-EMPTY" or "UNPARSEABLE", plus the text. Capture is
--- plain text, so a dim ghost suggestion reads as NON-EMPTY and defers (#137).
+-- The composer's text starts after the last prompt glyph and includes its
+-- continuation rows up to the TUI footer. Returns "EMPTY" (nothing, or
+-- exactly one of the kind's `placeholders`), "NON-EMPTY" or "UNPARSEABLE",
+-- plus the text. Dim ghost suggestions stay NON-EMPTY and defer (#137).
 local PROMPT_GLYPHS = { "❯", ">", "›" }
 function remuda._butler_prompt_is_empty(kind, screen)
   local text, prompt_at
@@ -1443,10 +1443,13 @@ local function normalized_composer(text)
   return tostring(text or ""):gsub("\194\160", " "):gsub("\r\n", "\n"):gsub("\r", "\n")
     :match("^%s*(.-)%s*$")
 end
+local function compact_composer(text)
+  return tostring(text or ""):gsub("\194\160", " "):gsub("%s+", "")
+end
 local function notice_matches_composer(session, screen, text, expected)
   local agent = bus.agents[session]
   local composer, safe = recovery_draft(agent and agent.kind or "", screen, text)
-  return safe and normalized_composer(composer) == normalized_composer(expected)
+  return safe and compact_composer(composer) == compact_composer(expected)
 end
 local function recovery_composer_empty(session, screen, decision, text)
   if decision ~= "EMPTY" then return false end
