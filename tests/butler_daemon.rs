@@ -5252,7 +5252,7 @@ done
         (
             "fake-attached",
             "happy",
-            "CMD:/model sonnet\nKEY:1\nCMD:/model Opus\nKEY:1\n",
+            "CMD:/model sonnet\nKEY:1\n",
         ),
     ] {
         let log = dir.join(format!("{name}.log"));
