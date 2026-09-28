@@ -85,6 +85,14 @@ local function config()
   }
 end
 
+-- Read composites use the configured room when --room is omitted. Expose only
+-- the allowlisted room, never the token or transport settings.
+function matrix.configured_room()
+  local conf, err = config()
+  if not conf then return nil, err end
+  return conf.room
+end
+
 local function once(callback)
   local called = false
   return function(value)
@@ -376,7 +384,7 @@ function matrix.request(args, on_done)
   local path = args.path:sub(1, 1) == "/" and args.path or ("/" .. args.path)
   local headers = {}
   for name, value in pairs(args.headers or {}) do headers[name] = value end
-  headers.Accept = "application/json"
+  if not headers.Accept and not headers.accept then headers.Accept = "application/json" end
   headers.Authorization = "Bearer " .. conf.token
   local spec = {
     method = args.method:upper(), url = conf.base .. path, headers = headers,
