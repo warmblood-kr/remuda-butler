@@ -475,9 +475,17 @@ fn notice_recovery_preserves_idle_draft_and_respects_attached_human() {
     eval(&path, r#"local row = remuda.ls()[1]
         row.attached = false
         remuda._notice_test_state.events = {}
-        remuda._notice_test_state.busy = true
+        remuda._notice_test_state.after_type = 0
+        remuda._notice_test_state.screen = '› busy pane draft'
+        remuda._notice_test_state.busy = false
         remuda.session = function() return { is_busy = remuda._notice_test_state.busy } end
-        remuda._butler_bus.notice_recoveries.m1.checks = 39"#);
+        remuda._butler_bus.notices.m1 = nil
+        remuda._butler_bus.notice_recoveries.m1 = nil
+        remuda._butler_send('operator', 'm1', 'busy pane timeout notice')
+        assert(remuda._butler_bus.notice_recoveries.m1, 'busy timeout recovery was not created')
+        remuda._butler_bus.notice_recoveries.m1.checks = 39
+        remuda._butler_bus.notice_recoveries.m1.failed = false
+        remuda._notice_test_state.busy = true"#);
     std::thread::sleep(Duration::from_millis(1200));
     assert_eq!(
         eval(&path, "return tostring(remuda._butler_bus.notice_recoveries.m1.failed)"),
