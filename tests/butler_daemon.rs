@@ -4152,3 +4152,40 @@ fn a_broken_user_config_is_reported_but_never_bricks_the_daemon() {
          -- the image is poisoned"
     );
 }
+
+/// #24: `stop -f` kills agents without a `session_exited`, so their last
+/// `agents.jsonl` row never got `ended_at`. The next boot must close every
+/// identity with no live session, leaving ended rows and the root alone.
+#[test]
+fn butler_boot_ends_identities_whose_sessions_died_with_the_daemon() {
+    let dir = scratch_dir("butler-boot-ended");
+    let data_home = dir.join("data");
+    let mods = PathBuf::from(std::env::var_os("XDG_DATA_HOME").expect("XDG_DATA_HOME"));
+    std::fs::create_dir_all(data_home.join("remuda/butler")).expect("data home");
+    let _ = std::os::unix::fs::symlink(mods.join("remuda/mods"), data_home.join("remuda/mods"));
+    let agents = data_home.join("remuda/butler/agents.jsonl");
+    std::fs::write(
+        &agents,
+        concat!(
+            r#"{"id":"01ROOT00000000000000000000","alias":"butler","kind":"claude","leader_id":"","created_at":"2026-09-27T00:00:00Z"}"#, "\n",
+            r#"{"id":"01GHST00000000000000000000","alias":"ghost","kind":"claude","leader_id":"01ROOT00000000000000000000","created_at":"2026-09-27T00:00:00Z"}"#, "\n",
+            r#"{"id":"01DNE000000000000000000000","alias":"done","kind":"claude","leader_id":"01ROOT00000000000000000000","created_at":"2026-09-27T00:00:00Z","ended_at":"2026-09-27T00:01:00Z"}"#, "\n",
+        ),
+    )
+    .expect("seed agents.jsonl");
+    let data = data_home.to_string_lossy().to_string();
+    let daemon = Daemon::spawn_with_env(&dir, &[("XDG_DATA_HOME", data.as_str())]);
+    let path = daemon::socket_path_in(&dir, "s");
+    eval(&path, r#"remuda._butler_argv = {"sh", "-c", "while read line; do :; done"}; remuda._butler_skip_relay = true"#);
+    let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    let rows = std::fs::read_to_string(&agents).expect("read agents.jsonl");
+    let last = |id: &str| rows.lines().filter(|l| l.contains(id)).last().unwrap_or_default().to_string();
+    let count = |id: &str| rows.lines().filter(|l| l.contains(&format!(r#""id":"{id}""#))).count();
+    assert!(last("01GHST").contains("ended_at"), "{rows}");
+    assert_eq!(count("01DNE000000000000000000000"), 1, "an ended identity is not re-ended: {rows}");
+    assert!(!last(r#""id":"01ROOT"#).contains("ended_at"), "the root stays live: {rows}");
+    assert!(eval(&path, "return remuda._butler_bus.identities.ghost.ended_at ~= nil") == "true");
+    drop(daemon);
+}

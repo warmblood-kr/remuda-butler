@@ -492,6 +492,19 @@ if identity_path and not bus.identities_loaded then
     end
     f:close()
   end
+  -- A fresh image after `stop -f`: its agents died with the daemon and no
+  -- `session_exited` recorded them, so end each identity with no live session
+  -- (#24). The root keeps its identity across daemons and is never ended.
+  local live = {}
+  for _, session in ipairs(remuda.ls()) do
+    if session.alive then live[session.name] = true end
+  end
+  for id, record in pairs(bus.identity_ids) do
+    if not record.ended_at and record.alias ~= "butler" and not live[record.alias] then
+      identity_record(id, record.alias, record.kind, record.leader_id, true)
+      record.ended_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+    end
+  end
   bus.identities_loaded = true
 end
 local function register_identity(alias, kind, leader_id, id)
@@ -773,8 +786,8 @@ end
 -- attribution a human (or an agent using the CLI) chose to leave on a note.
 -- Keeping them on `remuda` also makes the post office pleasant to explore from
 -- a REPL without having to know this chunk's private locals.
-function remuda._butler_launch(kind, name, model)
-  return launch_agent(kind, name, nil, model, "butler")
+function remuda._butler_launch(kind, name, model, parent)
+  return launch_agent(kind, name, nil, model, resolve(parent or "butler"))
 end
 function remuda._butler_topic_new(name, template, kind, model)
   return make_topic(name, template, kind, "butler", nil, model)
@@ -936,8 +949,10 @@ remuda.extension_command("butler", function(args, caller)
   if args[1] == "launch" and (args[2] == "claude" or args[2] == "codex") then
     local model
     if args[#args - 1] == "--model" then model = args[#args]; args[#args] = nil; args[#args] = nil end
-    if #args == 2 then return remuda._butler_launch(args[2], nil, model) end
-    if #args == 3 then return remuda._butler_launch(args[2], args[3], model) end
+    -- The calling member leads the child; only the operator's falls to butler (#24).
+    local parent = current_agent(caller)
+    if #args == 2 then return remuda._butler_launch(args[2], nil, model, parent) end
+    if #args == 3 then return remuda._butler_launch(args[2], args[3], model, parent) end
   end
   if args[1] == "inbox" then return remuda._butler_inbox(args[2] or assert(current_agent(caller), "no Butler identity in your env; use `inbox <name>`")) end
   if args[1] == "send-to-leader" and #args >= 2 then
