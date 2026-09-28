@@ -825,6 +825,9 @@ local NOTICE_STABLE_SECONDS = 3
 local PROMPT_GLYPHS = { "❯", ">", "›" }
 function remuda._butler_prompt_is_empty(kind, screen)
   local text
+  -- Claude draws its empty composer as '❯' + NO-BREAK SPACE; Lua's %s
+  -- misses U+00A0, so fold it to a space before parsing (every kind).
+  screen = screen:gsub("\194\160", " ")
   for line in (screen .. "\n"):gmatch("(.-)\n") do
     local rest = line:gsub("^%s+", "")
     if rest:sub(1, 3) == "│" then rest = rest:sub(4):gsub("^%s+", "") end

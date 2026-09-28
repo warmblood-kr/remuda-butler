@@ -287,6 +287,8 @@ fn notify_policy_types_only_into_a_detached_or_quiet_empty_prompt() {
             r[#r + 1] = 'half=' .. tostring(settled('history\n> co'))
             r[#r + 1] = 'empty_stable=' .. tostring(settled('history\n> '))
             r[#r + 1] = 'claude_box=' .. tostring(settled('──\n│ ❯     │\n  ? for shortcuts'))
+            r[#r + 1] = 'claude_nbsp=' .. tostring(settled('──\n❯\u{{A0}}\n──'))
+            r[#r + 1] = 'claude_nbsp_typed=' .. tostring(settled('──\n❯\u{{A0}}co\n──'))
             t = t + 100; screen = 'a\n> '; policy('p1', t); screen = 'b\n> '
             r[#r + 1] = 'empty_changing=' .. tostring(policy('p1', t + 3))
             r[#r + 1] = 'unparseable=' .. tostring(settled('Do you trust this folder?'))
@@ -302,7 +304,7 @@ fn notify_policy_types_only_into_a_detached_or_quiet_empty_prompt() {
     );
     assert_eq!(
         got,
-        "half=false empty_stable=true claude_box=true empty_changing=false unparseable=false \
+        "half=false empty_stable=true claude_box=true claude_nbsp=true claude_nbsp_typed=false empty_changing=false unparseable=false \
          codex_placeholder=true codex_typed=false detached=true"
     );
     let log = std::fs::read_to_string(&trace).unwrap_or_default();
