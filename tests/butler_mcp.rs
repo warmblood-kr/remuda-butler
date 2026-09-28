@@ -288,7 +288,7 @@ fn notify_policy_types_only_into_a_detached_or_quiet_empty_prompt() {
             r#"remuda._butler_session_trace_path = {trace:?}
             local real_ls, real_capture, real_capture_styled = remuda.ls, remuda.capture, remuda.capture_styled
             remuda.capture_styled = nil
-            local row, screen = {{ name = 'p1', alive = true, attached = true }}, ''
+            local row, screen = {{ name = 'p1', alive = true, attached = false }}, ''
             remuda.ls = function() return {{ row }} end
             remuda.capture = function() return screen end
             local policy, t = remuda._butler_notify_policy, 0
@@ -702,7 +702,7 @@ fn notify_policy_uses_human_idle_and_dim_spans_when_the_core_has_them() {
     let got = eval(
         &path,
         r#"local real_ls, real_capture, real_styled = remuda.ls, remuda.capture, remuda.capture_styled
-        local row, spans = { name = 'p1', alive = true, attached = true }, {}
+        local row, spans = { name = 'p1', alive = true, attached = false }, {}
         remuda.ls = function() return { row } end
         remuda.capture = function() error('the new-core path must not need plain capture') end
         remuda.capture_styled = function()
@@ -730,13 +730,14 @@ fn notify_policy_uses_human_idle_and_dim_spans_when_the_core_has_them() {
         r[#r + 1] = 'detached_empty=' .. case(0, plain('❯ '))
         remuda._butler_notice_human_idle = 20
         row.attached = true
+        r[#r + 1] = 'attached_idle=' .. case(120, plain('❯ '))
         r[#r + 1] = 'knob=' .. case(12, plain('❯ '))
         remuda.ls, remuda.capture, remuda.capture_styled = real_ls, real_capture, real_styled
         return table.concat(r, ' ')"#,
     );
     assert_eq!(
         got,
-        "typing=false ghost=true ghost_words=true typed=false never=true off_prompt=false detached_typed=false detached_empty=true knob=false"
+        "typing=false ghost=true ghost_words=true typed=false never=true off_prompt=false detached_typed=false detached_empty=true attached_idle=false knob=false"
     );
 }
 

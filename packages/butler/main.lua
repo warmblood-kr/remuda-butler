@@ -1252,11 +1252,8 @@ function remuda._butler_prompt_is_empty(kind, screen)
   return "NON-EMPTY", text
 end
 
--- The one delivery policy: may Butler type into SESSION now? Every pane needs
--- a known empty prompt. An attached pane also needs the human to pause
--- (human_idle >= remuda._butler_notice_human_idle, default 10s) or, on a core
--- without human_idle, a screen unchanged for NOTICE_STABLE_SECONDS. Anything
--- unrecognised defers.
+-- The one delivery policy: may Butler type into SESSION now? Notices are only
+-- typed into detached panes, and every pane needs a known empty prompt.
 function remuda._butler_notify_policy(session, now)
   now = now or os.time()
   local row
@@ -1264,25 +1261,10 @@ function remuda._butler_notify_policy(session, now)
     if candidate.name == session then row = candidate end
   end
   if not row or not row.alive then return false end
-  local attached = row.attached
+  if row.attached then return false end
   local seen = bus.notice_screens[session] or {}
   bus.notice_screens[session] = seen
   local screen
-  if attached and row.human_idle ~= nil then
-    -- A core with remuda#136 says when the human last typed (math.huge if
-    -- never); wait for them to pause instead of guessing from the screen.
-    if row.human_idle < (remuda._butler_notice_human_idle or 10) then return false end
-  elseif attached then
-    -- Older core: a screen unchanged for NOTICE_STABLE_SECONDS stands in.
-    local captured
-    captured, screen = pcall(remuda.capture, session)
-    if not captured then return false end
-    if seen.screen ~= screen then
-      seen.screen, seen.since = screen, now
-      return false
-    end
-    if now - seen.since < NOTICE_STABLE_SECONDS then return false end
-  end
   if remuda.capture_styled then
     -- A core with remuda#137 marks dim text: parse only the cursor row, and
     -- drop a TUI's dim ghost suggestion so it reads as the empty prompt it is.
