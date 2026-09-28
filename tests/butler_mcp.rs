@@ -353,7 +353,9 @@ fn a_notice_that_fails_to_type_stays_queued() {
     eval(
         &path,
         "remuda.type_text = remuda._real_type_text; \
-         remuda.capture = function() return 'Butler message hi\\n❯ ' end; \
+         remuda.capture = function() \
+           return remuda._butler_bus.notices.m1.text .. '\\n❯ ' \
+         end; \
          remuda._butler_deliver_notices()",
     );
     let deadline = Instant::now() + PATIENCE;
@@ -408,7 +410,7 @@ fn notice_recovery_preserves_idle_draft_and_respects_attached_human() {
     assert!(events.contains("key C-l"), "recovery did not try a redraw first: {events}");
     assert!(events.contains("key C-u"), "recovery did not clear the draft safely: {events}");
     assert!(events.contains("type Butler message"), "notice was not typed: {events}");
-    assert!(events.contains("your unsent draft was: unsent draft text"), "draft was not preserved: {events}");
+    assert!(events.contains("Your unsent draft was: unsent draft text"), "draft was not preserved: {events}");
     assert!(!events.contains("C-c"), "recovery sent Ctrl-C: {events}");
     assert!(events.find("key C-l") < events.find("key C-u"), "draft cleared before redraw: {events}");
     assert_eq!(eval(&path, "return tostring(remuda.ls()[1].alive)"), "true");
