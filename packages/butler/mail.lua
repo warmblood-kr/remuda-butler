@@ -129,12 +129,15 @@ local function address_json(item)
 end
 
 local function envelope_json(message, object)
+  local matrix = message.matrix and (',"matrix":{"sender":' .. config.json_quote(message.matrix.sender)
+    .. ',"room_id":' .. config.json_quote(message.matrix.room_id)
+    .. ',"event_id":' .. config.json_quote(message.matrix.event_id) .. '}') or ""
   return '{"id":' .. config.json_quote(message.id) .. ',"from":' .. address_json(message.from)
     .. ',"to":[' .. address_json(message.to[1]) .. '],"subject":' .. config.json_quote(message.subject)
     .. ',"created_at":' .. config.json_quote(message.created_at) .. ',"content_type":'
     .. config.json_quote(message.content_type) .. thread_json(message, address_json) .. ',"body":{"object_id":'
     .. config.json_quote(object.id) .. ',"bytes":' .. tostring(object.bytes) .. ',"content_type":'
-    .. config.json_quote(object.content_type) .. ',"content_hash":null}}\n'
+    .. config.json_quote(object.content_type) .. ',"content_hash":null}' .. matrix .. '}\n'
 end
 
 local function load_read(name)
@@ -184,6 +187,14 @@ local function load_message(disk, id)
   if reply_to then
     message.reply_to = { host = reply_to:match('"host":"([^"]+)"') or "local", id = reply_to:match('"id":"([^"]*)"') or "",
       alias = reply_to:match('"alias":"([^"]+)"'), session = reply_to:match('"session":"([^"]+)"') }
+  end
+  local matrix = envelope:match('"matrix":(%b{})')
+  if matrix then
+    message.matrix = {
+      sender = matrix:match('"sender":"(.-)"'),
+      room_id = matrix:match('"room_id":"(.-)"'),
+      event_id = matrix:match('"event_id":"(.-)"'),
+    }
   end
   bus.messages[id] = message
   bus.objects[object_id] = { id = object_id, content = content, bytes = #content,
@@ -311,21 +322,52 @@ end
 
 -- The inbox row is the commit point: files written before it may be orphaned
 -- by a crash, never left dangling.
-local function queue(from, to, text, subject, in_reply_to, references)
+local MATRIX_BODY_MAX_BYTES = 64 * 1024
+local function cap_matrix_body(text)
+  if #text <= MATRIX_BODY_MAX_BYTES then return text end
+  local keep = MATRIX_BODY_MAX_BYTES
+  while true do
+    while keep > 0 do
+      local next_byte = text:byte(keep + 1)
+      if not next_byte or next_byte < 0x80 or next_byte >= 0xc0 then break end
+      keep = keep - 1
+    end
+    local prefix = text:sub(1, keep)
+    local suffix = "[truncated " .. tostring(#text - #prefix) .. " bytes]"
+    local next_keep = MATRIX_BODY_MAX_BYTES - #suffix
+    if next_keep == keep then return prefix .. suffix end
+    keep = next_keep
+  end
+end
+
+local function queue(from, to, text, subject, in_reply_to, references, matrix)
   from, to = address(from), address(to)
   if to.id == "" then return nil, "recipient has no Butler ULID" end
   if from.alias == "" then from.alias, from.session = from.session, from.session end
   local recipient_id = to.id
   load_inbox(recipient_id)
+  if matrix and matrix.event_id then
+    for existing_id in pairs(bus.mail_delivered[recipient_id] or {}) do
+      local existing = bus.messages[existing_id]
+        or (config.root and load_message(paths(recipient_id), existing_id))
+      if existing and existing.matrix and existing.matrix.event_id == matrix.event_id
+        and existing.matrix.room_id == matrix.room_id then
+        return existing
+      end
+    end
+  end
   local id = message_id()
   local object_id = "object-" .. id
   local sender, body = from.alias or "outside", tostring(text)
+  if matrix then body = cap_matrix_body(body) end
   local object = { id = object_id, content = body, bytes = #body,
     content_type = "text/plain; charset=utf-8", content_hash = nil }
   local message = { id = id, from = from, to = { to },
-    subject = subject or ("Message from " .. sender), created_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    subject = subject or ("Message from " .. sender), created_at = matrix and matrix.created_at or os.date("!%Y-%m-%dT%H:%M:%SZ"),
     in_reply_to = in_reply_to, references = references, content_type = "text/plain; charset=utf-8",
-    body = { object_id = object_id } }
+    body = { object_id = object_id }, matrix = matrix and {
+      sender = matrix.sender, room_id = matrix.room_id, event_id = matrix.event_id,
+    } or nil }
   local disk = paths(recipient_id)
   if disk then
     local ready, ready_err = prepare_storage()
