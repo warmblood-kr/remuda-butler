@@ -71,7 +71,11 @@ local function exercise(kind, drop_submissions)
       state.transcript[#state.transcript + 1] = state.task
     end
   end
-  fake.session = function() return { is_busy = false } end
+  fake.session = function()
+    -- Echoing text makes the terminal busy even though the first Return was
+    -- dropped. Busy alone must not complete delivery.
+    return { is_busy = drop_submissions and state.composer ~= "" }
+  end
   function fake._butler_send(_, parent, warning)
     state.failure = parent .. ": " .. warning
   end
@@ -88,7 +92,13 @@ local function exercise(kind, drop_submissions)
       local marker = kind == "codex" and "Ask Codex" or "─\n❯"
       return screen:find(marker, 1, true) ~= nil
     end,
-    allowed = function() return true end,
+    allowed = function(retrying)
+      if drop_submissions and retrying then
+        state.retry_guard_checks = (state.retry_guard_checks or 0) + 1
+        return state.retry_guard_checks > 1
+      end
+      return true
+    end,
     empty = function()
       return state.composer == "" and "EMPTY" or "NON-EMPTY"
     end,
@@ -108,6 +118,7 @@ local function exercise(kind, drop_submissions)
     assert(not state.failure, state.failure)
     assert(state.sends == 1, kind .. " re-injected the task instead of retrying Return")
     assert(state.returns == 1, kind .. " did not retry a dropped Return exactly once")
+    assert(state.retry_guard_checks == 2, kind .. " did not wait for the human guard before retrying Return")
     assert(#state.transcript == 1 and state.transcript[1] == task,
       kind .. " did not submit the complete task after retrying Return")
   else
@@ -205,5 +216,32 @@ do
   assert(state.sends == 1, "missing START caused a second whole-task paste")
   assert(state.cancelled and state.ok == false and state.reason == "submit",
     "unverified partial prompt did not report submit failure")
+end
+
+do
+  local state = { tick = 0, typed = 0, cancelled = false }
+  local fake = {}
+  function fake.schedule(spec) state.callback = spec.run; return "human-wait-poll" end
+  function fake.cancel() state.cancelled = true end
+  function fake.capture()
+    if state.typed > 0 then return "Ask Codex\nSTART human guarded task\n❯ " end
+    if state.tick <= 5 then return "❯ person typing" end
+    return "Ask Codex"
+  end
+  function fake.type_text() state.typed = state.typed + 1 end
+  function fake.session() return { is_busy = false } end
+  M.schedule(fake, "codex", "human-wait", "human-wait", "leader", "START human guarded task", {
+    ready = function(screen) return screen:find("Ask Codex", 1, true) ~= nil end,
+    human_active = function() return state.tick <= 5 end,
+    empty = function() return "EMPTY" end,
+    ready_timeout = 2,
+    on_done = function(ok, reason) state.ok, state.reason = ok, reason end,
+  })
+  for tick = 1, 20 do
+    state.tick = tick
+    if not state.cancelled then state.callback() end
+  end
+  assert(state.typed == 1 and state.ok and state.cancelled,
+    "human typing consumed the bounded startup-readiness timeout")
 end
 print("first prompt delivery passed for Claude and Codex")

@@ -50,13 +50,15 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
     end
 
     if attempts == 0 then
-      startup_ticks = startup_ticks + 1
       for index, modal in ipairs(options.modals or {}) do
         if screen:find(modal.match, 1, true) then
           if not handled_modals[index] then
             handled_modals[index] = true
             for _, key in ipairs(modal.keys or {}) do pcall(remuda.key, actual, key) end
+            startup_ticks = startup_ticks + 1
             settle_until = startup_ticks + 3
+          else
+            startup_ticks = startup_ticks + 1
           end
           if startup_ticks >= (options.ready_timeout or 60) then
             finish(false, "startup modal did not clear")
@@ -65,6 +67,7 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
         end
       end
       if startup_ticks < settle_until then
+        startup_ticks = startup_ticks + 1
         if startup_ticks >= (options.ready_timeout or 60) then
           finish(false, "startup modal did not clear")
         end
@@ -78,7 +81,7 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
       if is_ready then
         local allowed = true
         if options.allowed then
-          local checked, result = pcall(options.allowed)
+          local checked, result = pcall(options.allowed, false, screen)
           allowed = checked and result == true
         end
         if not allowed then
@@ -94,8 +97,21 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
         -- callback, including notice and lifecycle work.
         local typed = pcall(remuda.type_text, actual, task, 0.1)
         if not typed then finish(false, "type failed") end
-      elseif startup_ticks >= (options.ready_timeout or 60) then
-        finish(false, "the composer never became ready")
+      else
+        local human_active = false
+        if options.human_active then
+          local checked, result = pcall(options.human_active, screen)
+          human_active = checked and result == true
+        end
+        if human_active then
+          deferred_ticks = deferred_ticks + 1
+          if deferred_ticks >= (options.timeout or 600) then finish(false, "deferred") end
+        else
+          startup_ticks = startup_ticks + 1
+          if startup_ticks >= (options.ready_timeout or 60) then
+            finish(false, "the composer never became ready")
+          end
+        end
       end
       return
     end
@@ -112,7 +128,9 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
       local checked, session = pcall(remuda.session, actual)
       session_busy = checked and session and session.is_busy == true
     end
-    if session_busy then
+    -- Busy is useful only after the composer releases our text; typing the
+    -- task itself also makes a terminal look busy.
+    if session_busy and empty then
       finish(true)
       return
     end
@@ -127,7 +145,17 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
     end
     -- A task can be fully painted while its first Return is dropped. Retry
     -- submit once, before allowing queued notices to reach this composer.
-    if started and not empty and not session_busy and verify_ticks >= 4 and not options.return_retried then
+    if started and not empty and verify_ticks >= 4 and not options.return_retried then
+      local allowed = true
+      if options.allowed then
+        local checked, result = pcall(options.allowed, true, screen)
+        allowed = checked and result == true
+      end
+      if not allowed then
+        deferred_ticks = deferred_ticks + 1
+        if deferred_ticks >= (options.timeout or 600) then finish(false, "deferred") end
+        return
+      end
       options.return_retried = true
       pcall(remuda.key, actual, "RET")
       verify_ticks = 0

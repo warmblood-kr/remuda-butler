@@ -1132,7 +1132,11 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
     PROMPT_DELIVERY.schedule(remuda, kind, actual, name, parent, task, {
       ready = startup.ready,
       modals = startup.modals,
-      allowed = function() return remuda._butler_notify_policy(actual) end,
+      allowed = function(retrying)
+        if retrying then return remuda._butler_task_retry_policy(actual) end
+        return remuda._butler_notify_policy(actual)
+      end,
+      human_active = function() return remuda._butler_human_active(actual) end,
       empty = function(screen)
         local decision = remuda._butler_prompt_is_empty(kind, screen)
         return decision
@@ -1298,6 +1302,56 @@ function remuda._butler_notify_policy(session, now)
     _butler_session_trace("notice_prompt", session .. " " .. kind .. " " .. decision .. " " .. text)
   end
   return decision == "EMPTY"
+end
+
+-- A Return retry happens while the delegated task is still in the composer,
+-- so the notice policy's empty-composer check cannot be reused. Keep its human
+-- pause guard: use human_idle when available, otherwise require a stable screen.
+bus.task_retry_screens = bus.task_retry_screens or {}
+function remuda._butler_task_retry_policy(session, now)
+  now = now or os.time()
+  local row
+  for _, candidate in ipairs(remuda.ls()) do
+    if candidate.name == session then row = candidate end
+  end
+  if not row or not row.alive then return false end
+  if not row.attached then return true end
+  if row.human_idle ~= nil then
+    return row.human_idle >= (remuda._butler_notice_human_idle or 10)
+  end
+  local captured, screen = pcall(remuda.capture, session)
+  if not captured then return false end
+  local seen = bus.task_retry_screens[session] or {}
+  bus.task_retry_screens[session] = seen
+  if seen.screen ~= screen then
+    seen.screen, seen.since = screen, now
+    return false
+  end
+  return now - seen.since >= NOTICE_STABLE_SECONDS
+end
+
+-- Some agent builds hide their idle marker while a person types. Keep those
+-- waits on the human clock, not the bounded startup-readiness clock.
+bus.human_activity_screens = bus.human_activity_screens or {}
+function remuda._butler_human_active(session, now)
+  now = now or os.time()
+  local row
+  for _, candidate in ipairs(remuda.ls()) do
+    if candidate.name == session then row = candidate end
+  end
+  if not row or not row.alive or not row.attached then return false end
+  if row.human_idle ~= nil then
+    return row.human_idle < (remuda._butler_notice_human_idle or 10)
+  end
+  local captured, screen = pcall(remuda.capture, session)
+  if not captured then return true end
+  local seen = bus.human_activity_screens[session] or {}
+  bus.human_activity_screens[session] = seen
+  if seen.screen ~= screen then
+    seen.screen, seen.since = screen, now
+    return true
+  end
+  return now - seen.since < NOTICE_STABLE_SECONDS
 end
 
 -- `_butler_notify` is the seam: queue NOTICE for ALIAS and type it (with any
