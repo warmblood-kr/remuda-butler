@@ -845,8 +845,10 @@ function remuda._butler_prompt_is_empty(kind, screen)
 end
 
 -- The one delivery policy: may Butler type into SESSION now? A detached pane
--- always; an attached one only while its prompt is empty and its screen has
--- not changed for NOTICE_STABLE_SECONDS. Anything unrecognised defers.
+-- always; an attached one only while its prompt is empty and the human has
+-- paused (human_idle >= remuda._butler_notice_human_idle, default 10s) or, on
+-- a core without human_idle, the screen has not changed for
+-- NOTICE_STABLE_SECONDS. Anything unrecognised defers.
 function remuda._butler_notify_policy(session, now)
   now = now or os.time()
   local row
@@ -855,14 +857,39 @@ function remuda._butler_notify_policy(session, now)
   end
   if not row or not row.alive then return false end
   if not row.attached then bus.notice_screens[session] = nil return true end
-  local captured, screen = pcall(remuda.capture, session)
-  if not captured then return false end
-  local seen = bus.notice_screens[session]
-  if not seen or seen.screen ~= screen then
-    bus.notice_screens[session] = { screen = screen, since = now }
-    return false
+  local seen = bus.notice_screens[session] or {}
+  bus.notice_screens[session] = seen
+  local screen
+  if row.human_idle ~= nil then
+    -- A core with remuda#136 says when the human last typed (math.huge if
+    -- never); wait for them to pause instead of guessing from the screen.
+    if row.human_idle < (remuda._butler_notice_human_idle or 10) then return false end
+  else
+    -- Older core: a screen unchanged for NOTICE_STABLE_SECONDS stands in.
+    local captured
+    captured, screen = pcall(remuda.capture, session)
+    if not captured then return false end
+    if seen.screen ~= screen then
+      seen.screen, seen.since = screen, now
+      return false
+    end
+    if now - seen.since < NOTICE_STABLE_SECONDS then return false end
   end
-  if now - seen.since < NOTICE_STABLE_SECONDS then return false end
+  if remuda.capture_styled then
+    -- A core with remuda#137 marks dim text: parse only the cursor row, and
+    -- drop a TUI's dim ghost suggestion so it reads as the empty prompt it is.
+    local captured, styled = pcall(remuda.capture_styled, session)
+    if not captured then return false end
+    local parts = {}
+    for _, span in ipairs(styled.rows[styled.cursor.row] or {}) do
+      if not span.dim then parts[#parts + 1] = span.text end
+    end
+    screen = table.concat(parts)
+  elseif not screen then
+    local captured
+    captured, screen = pcall(remuda.capture, session)
+    if not captured then return false end
+  end
   local agent = bus.agents[session]
   local kind = agent and agent.kind or ""
   local decision, text = remuda._butler_prompt_is_empty(kind, screen)

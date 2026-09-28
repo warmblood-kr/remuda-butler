@@ -403,3 +403,49 @@ fn a_task_deferred_too_long_times_out_and_tells_the_leader() {
         );
     }
 }
+
+/// #29(3): on a core with `ls().human_idle` (#136) and `capture_styled`
+/// (#137), the policy waits on the human's own idle time and reads the cursor
+/// row without dim ghost text. The old-core path is the test above.
+#[test]
+fn notify_policy_uses_human_idle_and_dim_spans_when_the_core_has_them() {
+    let dir = scratch("notice-policy-new-core");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+    let got = eval(
+        &path,
+        r#"local real_ls, real_capture, real_styled = remuda.ls, remuda.capture, remuda.capture_styled
+        local row, spans = { name = 'p1', alive = true, attached = true }, {}
+        remuda.ls = function() return { row } end
+        remuda.capture = function() error('the new-core path must not need plain capture') end
+        remuda.capture_styled = function()
+          return { rows = { { { text = 'history', dim = false } }, spans }, cursor = { row = 2, col = 3, visible = true } }
+        end
+        local function case(idle, ...)
+          row.human_idle = idle
+          for i = #spans, 1, -1 do spans[i] = nil end
+          for i, span in ipairs({ ... }) do spans[i] = span end
+          return tostring(remuda._butler_notify_policy('p1'))
+        end
+        local plain = function(text) return { text = text, dim = false } end
+        local dim = function(text) return { text = text, dim = true } end
+        local r = {}
+        r[#r + 1] = 'typing=' .. case(2, plain('❯ '))
+        r[#r + 1] = 'ghost=' .. case(12, plain('❯ '), dim('Try "fix typecheck errors"'))
+        -- butler-qa's real Claude frame: one dim run per word, plain spaces
+        -- between them, NBSP after the glyph.
+        r[#r + 1] = 'ghost_words=' .. case(12, plain('❯\u{A0}'), dim('Try'), plain(' '), dim('"fix'), plain(' '), dim('typecheck'), plain(' '), dim('errors"'))
+        r[#r + 1] = 'typed=' .. case(12, plain('❯ co'))
+        r[#r + 1] = 'never=' .. case(math.huge, plain('❯ '))
+        r[#r + 1] = 'off_prompt=' .. case(12, plain('some output'))
+        remuda._butler_notice_human_idle = 20
+        r[#r + 1] = 'knob=' .. case(12, plain('❯ '))
+        remuda.ls, remuda.capture, remuda.capture_styled = real_ls, real_capture, real_styled
+        return table.concat(r, ' ')"#,
+    );
+    assert_eq!(
+        got,
+        "typing=false ghost=true ghost_words=true typed=false never=true off_prompt=false knob=false"
+    );
+}
