@@ -70,7 +70,7 @@ lua "remuda._butler_agent_builders.fake = function() return {'sleep', '${ID}2'} 
 settle
 echo "legacy: $(lua "$SNAPSHOT") relays=$(relays)"
 BASE=$(lua "$SNAPSHOT" | sed 's/.* bus=//')
-EXPECT="hooks=1,1,1,1 schedules=1 sessions=butler,m1 member=true mail=2 bus=$BASE relays=$RELAYS pids=$(pids)"
+EXPECT="hooks=1,1,1,1 schedules=2 sessions=butler,m1 member=true mail=2 bus=$BASE relays=$RELAYS pids=$(pids)"
 
 echo "== swap in lifecycle files, reload x3"
 new_files
@@ -108,7 +108,7 @@ pkill -f "$TOKEN" >/dev/null 2>&1 || true
 start_daemon
 lua "remuda._butler_argv = {'sleep', '${ID}1'}"
 remuda -s "$S" butler --headless; settle
-lua "$SNAPSHOT" | grep -q 'boots=1 hooks=1,1,1,1 schedules=1 sessions=butler ' || \
+lua "$SNAPSHOT" | grep -q 'boots=1 hooks=1,1,1,1 schedules=2 sessions=butler ' || \
   fail "cold boot: $(lua "$SNAPSHOT")"
 [[ $(relays) == "$RELAYS" ]] || fail "cold boot relays=$(relays)"
 echo PASS
