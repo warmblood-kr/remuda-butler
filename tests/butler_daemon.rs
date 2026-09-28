@@ -2912,6 +2912,36 @@ fn butler_mail_unloadable_envelope_stays_unread_and_is_reported() {
     assert!(!again.contains("body of a"), "a read message came back: {again:?}");
 }
 
+/// Within ONE live bus: an envelope that becomes readable later is delivered
+/// on the next inbox(), not reported unreadable until a restart.
+#[test]
+fn butler_mail_unreadable_envelope_is_retried_in_the_same_bus() {
+    let id = "01RETRYUNREADAB1E000000000";
+    let dir = scratch_dir("butler-mail-retry");
+    let (root, inbox, read) = seeded_mail_root(&dir, id);
+    std::fs::write(&inbox, "{\"message_id\":\"message-late\"}\n").expect("inbox row");
+    let path = scratch("butler-mail-retry");
+    let _daemon = daemon_at(&path);
+    let first = eval(&path, &format!("{}\nreturn remuda._butler_mail.inbox(\"{id}\")", mail_config_lua(&root)));
+    assert!(first.contains("message message-late: envelope unreadable, left unread"), "{first:?}");
+    let count = eval(&path, &format!("return tostring(remuda._butler_mail.unread(\"{id}\"))"));
+    assert_eq!(count, "0", "an unreadable id is not counted");
+
+    std::fs::write(
+        root.join("messages/message-late.json"),
+        r#"{"id":"message-late","from":{"host":"local","session":"slow"},"subject":"Late","body":{"object_id":"object-late"}}"#,
+    )
+    .expect("late envelope");
+    std::fs::write(root.join("objects/object-late"), "late body").expect("late object");
+    let count = eval(&path, &format!("return tostring(remuda._butler_mail.unread(\"{id}\"))"));
+    assert_eq!(count, "1", "a now-readable id is counted");
+    let second = eval(&path, &format!("return remuda._butler_mail.inbox(\"{id}\")"));
+    assert!(second.contains("late body"), "the late envelope was not delivered: {second:?}");
+    assert!(!second.contains("envelope unreadable"), "{second:?}");
+    let read_ids = std::fs::read_to_string(&read).unwrap_or_default();
+    assert!(read_ids.contains("message-late"), "the delivered id was not marked read");
+}
+
 #[test]
 fn butler_mail_survives_a_fresh_lua_mailbox_and_remembers_reads() {
     let dir = scratch_dir("butler-mail-reload");

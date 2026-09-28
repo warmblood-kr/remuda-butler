@@ -272,8 +272,25 @@ local function queue(from, to, text, subject, in_reply_to)
   return message
 end
 
+-- load_inbox runs once per daemon, so ids left unread for a bad envelope are
+-- retried here; one that now loads is delivered like any other.
+local function retry_unreadable(name)
+  local unreadable, disk = bus.mail_unreadable[name], paths(name)
+  if not unreadable or not disk then return end
+  local still = {}
+  for _, id in ipairs(unreadable) do
+    if load_message(disk, id) then
+      mailbox(name)[#mailbox(name) + 1] = id
+    else
+      still[#still + 1] = id
+    end
+  end
+  bus.mail_unreadable[name] = still
+end
+
 local function inbox(name)
   load_inbox(name)
+  retry_unreadable(name)
   local messages, unreadable = mailbox(name), bus.mail_unreadable[name] or {}
   if #messages == 0 and #unreadable == 0 then return "inbox empty" end
   local out, read, shown = {}, load_read(name), {}
@@ -302,6 +319,7 @@ end
 -- (load_inbox is memoized); queue and inbox keep the in-memory list current.
 local function unread(name)
   load_inbox(name)
+  retry_unreadable(name)
   return #mailbox(name)
 end
 
