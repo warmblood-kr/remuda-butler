@@ -912,6 +912,8 @@ function remuda.session_detail(session)
   -- Current usage only: the window and percent cost width and rarely change.
   local used = tonumber(telemetry.context_used)
   if used then detail = detail .. " · " .. string.format("%.0fK", used / 1000) end
+  local unread = agent.id and agent.id ~= "" and mail.unread(agent.id) or 0
+  if unread > 0 then detail = detail .. " · ✉" .. unread end
   return detail
 end
 

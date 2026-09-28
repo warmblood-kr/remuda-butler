@@ -275,4 +275,12 @@ local function inbox(name)
   return table.concat(out, "\n")
 end
 
-remuda._butler_mail = { mailbox = mailbox, queue = queue, inbox = inbox, migrate_legacy = migrate_legacy }
+-- Unread count for the session list, rendered often: the file is read once
+-- (load_inbox is memoized); queue and inbox keep the in-memory list current.
+local function unread(name)
+  load_inbox(name)
+  return #mailbox(name)
+end
+
+remuda._butler_mail = { mailbox = mailbox, queue = queue, inbox = inbox, unread = unread,
+  migrate_legacy = migrate_legacy }
