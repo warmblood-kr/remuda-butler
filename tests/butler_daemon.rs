@@ -5093,9 +5093,8 @@ fn a_daemon_restart_does_not_relaunch_the_butler_session() {
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    // Same restart path as `restart_stops_a_daemon_and_leaves_the_next_command_free_to_start_one`,
-    // with `-f`: the live butler session makes a bare `restart` refuse (see
-    // `restart_refuses_to_kill_a_live_session_without_being_told_twice`).
+    // Stop with `-f` on the pinned core; the live butler session makes a bare
+    // stop refuse. The next check starts a fresh daemon on the same runtime.
     let out = remuda(&dir, &["-s", "s", "stop", "-f"]);
     assert!(
         out.status.success(),
