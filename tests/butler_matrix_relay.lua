@@ -277,19 +277,30 @@ local function test_messages_backfill_baseline_and_retry_backoff()
   local file = assert(io.open(config_path, "wb")); file:write(
     "https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nmessages\n30000\n"); file:close()
   local client, delivered = scripted_client(), {}
+  local old = { type = "m.room.message", event_id = "$old", sender = "@alice:example.org",
+    content = { msgtype = "m.text", body = "baseline duplicate must be suppressed" } }
   local relay = relay_module.new({ config_path = config_path, matrix = client, deliver = function(e)
     delivered[#delivered + 1] = e; return true
   end })
   relay:start()
   assert(client.requests[1].path == "/_matrix/client/v3/rooms/%21room%3Aexample.org/messages?dir=b&limit=1")
   client:complete(1, { json = { start = "start", ["end"] = "back", chunk = {
-    { event_id = "$old" },
+    old,
   } } })
   assert(relay:state().messages_since == "start")
   assert(relay:state().processed["$old"], "backfill baseline events must be suppressed")
   tick_timers(3)
   assert(client.requests[2].path == "/_matrix/client/v3/rooms/%21room%3Aexample.org/messages?from=start&dir=f&limit=100")
-  client:complete(2, { error = "offline" })
+  client:complete(2, { json = { start = "start", ["end"] = "forward", chunk = {
+    old,
+    { type = "m.room.message", event_id = "$new", sender = "@alice:example.org",
+      content = { msgtype = "m.text", body = "new" } },
+  } } })
+  assert(#delivered == 1 and delivered[1].event_id == "$new",
+    "a baseline event repeated by forward pagination must stay suppressed")
+  tick_timers(3)
+  assert(client.requests[3].path:find("from=forward", 1, true), "forward cursor must advance")
+  client:complete(3, { error = "offline" })
   assert(#remuda._relay_timers > 0, "transport errors schedule a retry")
   relay:stop()
   os.execute("rm -rf " .. string.format("%q", dir))
@@ -318,10 +329,34 @@ local function test_retry_backoff_grows_and_resets_after_recovery()
   os.execute("rm -rf " .. string.format("%q", dir))
 end
 
+local function test_allowlist_refusal_is_logged_once()
+  local dir, config_path = fixture()
+  local calls, logs = 0, {}
+  local client = { request_json = function(_, callback)
+    calls = calls + 1
+    callback({ error = "room is outside the configured Matrix allowlist" })
+  end }
+  local old_stderr = io.stderr
+  io.stderr = { write = function(_, line) logs[#logs + 1] = line end }
+  local relay = relay_module.new({ config_path = config_path, matrix = client, deliver = function() return true end })
+  relay:start()
+  tick_timers(1)
+  io.stderr = old_stderr
+  local refusals = 0
+  for _, line in ipairs(logs) do
+    if line:find("request refused by configured allowlist", 1, true) then refusals = refusals + 1 end
+  end
+  assert(calls == 2, "refusal retry fixture did not exercise a repeated request")
+  assert(refusals == 1, "a persistent allowlist refusal must log once per relay lifetime")
+  relay:stop()
+  os.execute("rm -rf " .. string.format("%q", dir))
+end
+
 test_baseline_resume_filters_and_envelope()
 test_state_restart_corruption_and_processed_cap()
 test_pending_delivery_retries_safely_after_restart()
 test_ack_reconcile_and_utf8_body_cap()
 test_messages_backfill_baseline_and_retry_backoff()
 test_retry_backoff_grows_and_resets_after_recovery()
+test_allowlist_refusal_is_logged_once()
 print("ok: Matrix relay resume, exactly-once, filters, state, acks, caps, fallback, and backoff")

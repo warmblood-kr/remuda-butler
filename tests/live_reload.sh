@@ -83,7 +83,25 @@ EXPECT_NEW_EMPTY="hooks=1,1,1 legacy_matrix_hooks=0,0 schedules=3 sessions=butle
 
 echo "== swap in lifecycle files, reload x3"
 new_files
+mkdir -p "$MOD/packages/butler" "$T/foreign"
+OWN_SCRIPT=$MOD/packages/butler/matrix_relay.py
+FOREIGN_SCRIPT=$T/foreign/matrix_relay.py
+cat >"$OWN_SCRIPT" <<'PY'
+import time
+time.sleep(600)
+PY
+cat >"$FOREIGN_SCRIPT" <<'PY'
+import time
+time.sleep(600)
+PY
+OWN_RELAY_ID=$(lua "remuda._butler_matrix_relay = remuda.process{argv={'python3', '$OWN_SCRIPT'}}; remuda._butler_matrix_relay_script_path = '$OWN_SCRIPT'; return remuda._butler_matrix_relay")
+FOREIGN_RELAY_ID=$(lua "remuda._butler_foreign_matrix_relay = remuda.process{argv={'python3', '$FOREIGN_SCRIPT'}}; return remuda._butler_foreign_matrix_relay")
 for i in 1 2 3; do
+  if [[ $i == 2 ]]; then
+    # A tracked process with the legacy name is still foreign when its exact
+    # script path lives outside this Butler module directory.
+    lua "remuda._butler_matrix_relay = $FOREIGN_RELAY_ID; remuda._butler_matrix_relay_script_path = '$FOREIGN_SCRIPT'"
+  fi
   if [[ $i == 1 ]]; then
     # The legacy root was explicitly made with the test's fake argv and has
     # no readiness probe to migrate. Mark this injected session as the ready
@@ -95,11 +113,16 @@ for i in 1 2 3; do
   settle
   check "reload $i" "boots=$((BASE_BOOT + i)) $EXPECT_NEW"
   if [[ $i == 1 ]]; then
+    lua "local ids = {}; for _, id in ipairs(remuda.processes()) do ids[id] = true end; assert(not ids[$OWN_RELAY_ID], 'legacy Python relay survived reload 1'); assert(ids[$FOREIGN_RELAY_ID], 'foreign same-named relay was killed')"
     lua "local m = remuda._butler_bus.agents.m1; remuda._butler_delivery_count_before = #remuda._butler_mail.mailbox(m.id); remuda._butler_send('butler', 'm1', 'single delivery after transition')"
     lua "local m = remuda._butler_bus.agents.m1; assert(#remuda._butler_mail.mailbox(m.id) - remuda._butler_delivery_count_before == 1, 'one send after transition must queue exactly one inbox message')"
     EXPECT_NEW=${EXPECT_NEW/mail=2/mail=3}
   fi
+  if [[ $i == 2 ]]; then
+    lua "local ids = {}; for _, id in ipairs(remuda.processes()) do ids[id] = true end; assert(ids[$FOREIGN_RELAY_ID], 'foreign path recorded in legacy slot was killed')"
+  fi
 done
+lua "pcall(remuda.kill, $FOREIGN_RELAY_ID); remuda._butler_foreign_matrix_relay = nil"
 remuda -s "$S" butler sessions | grep -q m1 || fail "'remuda butler sessions' lost m1"
 remuda -s "$S" butler inbox m1 | grep -q 'kept across reload' || fail "m1 mail lost"
 

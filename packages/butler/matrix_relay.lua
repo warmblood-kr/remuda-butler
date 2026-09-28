@@ -45,29 +45,6 @@ local function query(path, params)
   return path .. "?" .. table.concat(parts, "&")
 end
 
-local function read_config(path)
-  local file, err = io.open(path, "rb")
-  if not file then return nil, "cannot read Matrix config: " .. tostring(err) end
-  local lines = {}
-  for line in file:lines() do lines[#lines + 1] = line end
-  file:close()
-  if #lines < 3 or lines[1] == "" or lines[2] == "" then
-    return nil, "Matrix config requires homeserver, room ID, and user ID"
-  end
-  local allowed = {}
-  for sender in (lines[4] or ""):gmatch("[^,]+") do
-    sender = sender:gsub("^%s+", ""):gsub("%s+$", "")
-    if sender ~= "" then allowed[sender] = true end
-  end
-  local mode = (lines[5] or ""):lower()
-  local timeout = tonumber(lines[6]) or 30000
-  return {
-    room = lines[2], self_mxid = lines[3], allowed_senders = allowed,
-    use_messages = mode == "1" or mode == "true" or mode == "messages" or mode == "fallback",
-    timeout_ms = math.max(1, timeout),
-  }
-end
-
 local function cap_body(body)
   body = tostring(body or "")
   if #body <= MAX_BODY_BYTES then return body end
@@ -215,13 +192,14 @@ function relay.new(options)
   local config_path = assert(options.config_path, "Matrix relay requires config_path")
   local api = assert(options.matrix or matrix, "Matrix relay requires the L1 matrix client")
   local deliver = assert(options.deliver, "Matrix relay requires a delivery function")
-  local cfg, config_error = read_config(config_path)
+  local cfg, config_error = matrix.read_config(config_path)
   if not cfg then error(config_error, 0) end
   local state_path, ack_path = config_path .. ".since", config_path .. ".acks"
   local state = load_state(state_path)
   local active, request_handle, retry_timer, backfill_timer = false, nil, nil, nil
   local delivery_retry_waiting, delivery_retry_timers = {}, {}
   local failures = 0
+  local warned_allowlist_refusal = false
 
   local instance = {}
   local function persist()
@@ -373,6 +351,12 @@ function relay.new(options)
       request_handle = nil
       if not active then return end
       if type(result) ~= "table" or result.error or type(result.json) ~= "table" then
+        if not warned_allowlist_refusal and type(result) == "table" and type(result.error) == "string"
+          and result.error:find("outside the configured Matrix allowlist", 1, true) then
+          warned_allowlist_refusal = true
+          pcall(function() io.stderr:write("butler Matrix relay request refused by configured allowlist: "
+            .. result.error .. "\n") end)
+        end
         failed(); return
       end
       failures = 0
@@ -475,10 +459,13 @@ function relay.start(config)
         from = { host = "matrix", id = "", alias = event.sender, session = event.sender,
           kind = "matrix", leader = "" },
         to = "butler", text = event.body, subject = "Matrix message from " .. event.sender,
-        created_at = event.created_at,
         matrix = { sender = event.sender, room_id = event.room_id, event_id = event.event_id,
-          thread_root = event.thread_root, in_reply_to = event.in_reply_to, mxc = event.mxc },
+          created_at = event.created_at, thread_root = event.thread_root,
+          in_reply_to = event.in_reply_to, mxc = event.mxc },
       })
+      if type(delivered) == "table" and delivered.__butler_delivery_hook_error then
+        error(delivered.__butler_delivery_hook_error, 0)
+      end
       return delivered
     end,
   })
