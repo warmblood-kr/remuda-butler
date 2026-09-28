@@ -45,7 +45,17 @@ local function message_id()
   return "message-" .. string.format("%x", os.time()) .. "-" .. string.format("%x", bus.next) .. "-" .. suffix
 end
 
-local function write_atomic(path, content)
+-- FRESH refuses an existing target: rename() replaces silently, and a new
+-- message or object must never clobber an earlier one (single writer, so
+-- check-then-rename cannot race).
+local function write_atomic(path, content, fresh)
+  if fresh then
+    local existing = io.open(path, "r")
+    if existing then
+      existing:close()
+      return nil, path:match("([^/]+)$") .. " already exists; refusing to overwrite it"
+    end
+  end
   local temporary = path .. ".tmp-" .. message_id()
   local file, err = io.open(temporary, "w")
   if not file then return nil, err end
@@ -324,9 +334,9 @@ local function queue(from, to, text, subject, in_reply_to, references)
   if disk then
     local ready, ready_err = prepare_storage()
     if not ready then return nil, "cannot prepare Butler mail storage: " .. tostring(ready_err) end
-    local wrote, err = write_atomic(disk.objects .. object_id, body)
+    local wrote, err = write_atomic(disk.objects .. object_id, body, true)
     if not wrote then return nil, "cannot write Butler mail body: " .. tostring(err) end
-    wrote, err = write_atomic(disk.messages .. id .. ".json", envelope_json(message, object))
+    wrote, err = write_atomic(disk.messages .. id .. ".json", envelope_json(message, object), true)
     if not wrote then return nil, "cannot write Butler mail envelope: " .. tostring(err) end
     wrote, err = append(disk.inbox, '{"message_id":' .. config.json_quote(id) .. '}\n')
     if not wrote then return nil, "cannot deliver Butler mail: " .. tostring(err) end
@@ -386,7 +396,7 @@ local function forward(caller, id, target, note)
     local note_json = ""
     if note and note ~= "" then
       local note_id = message_id():gsub("^message%-", "object-")
-      local wrote, err = write_atomic(disk.objects .. note_id, note)
+      local wrote, err = write_atomic(disk.objects .. note_id, note, true)
       if not wrote then return nil, "cannot write the forward note: " .. tostring(err) end
       note_json = ',"note_object_id":' .. config.json_quote(note_id)
     end
