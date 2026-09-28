@@ -1393,6 +1393,12 @@ local function recovery_draft(kind, screen, first_line)
   local lines, prompt_at = {}, nil
   screen = tostring(screen or ""):gsub("\194\160", " "):gsub("\r\n", "\n")
   for line in (screen .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
+  local composer_text = tostring(first_line or "")
+  local composer_lines = {}
+  for line in (composer_text .. "\n"):gmatch("(.-)\n") do
+    composer_lines[line:match("^%s*(.-)%s*$")] = true
+  end
+  local composer_is_multiline = composer_text:find("\n", 1, true) ~= nil
   local glyphs = { "❯", ">", "›" }
   for index, line in ipairs(lines) do
     local rest = line:gsub("^%s+", "")
@@ -1402,7 +1408,7 @@ local function recovery_draft(kind, screen, first_line)
     end
   end
   if not prompt_at then return nil, false end
-  local parts = { first_line }
+  local parts = { composer_text }
   for index = prompt_at + 1, #lines do
     local rest = lines[index]:gsub("^%s+", "")
     if rest == "" then
@@ -1411,11 +1417,19 @@ local function recovery_draft(kind, screen, first_line)
       break
     elseif kind == "claude" and rest:sub(1, 3) == "│" then
       local continuation = rest:sub(4):gsub("│%s*$", ""):match("^%s*(.-)%s*$")
-      if continuation ~= "" then parts[#parts + 1] = continuation end
+      if continuation ~= "" then
+        if composer_is_multiline then
+          if not composer_lines[continuation] then return nil, false end
+        else
+          parts[#parts + 1] = continuation
+        end
+      end
     elseif kind == "codex" and (rest:match("^%? for shortcuts")
         or rest:lower():find("context left", 1, true)
         or rest:match("^[^%s]+%s+[^%s]+%s+·")) then
       -- Known Codex model/path and help footer rows are outside the composer.
+    elseif composer_is_multiline and composer_lines[rest:match("^%s*(.-)%s*$")] then
+      -- This row was already parsed into the full composer text.
     else
       -- Don't erase a multiline draft when the TUI's continuation rows
       -- cannot be distinguished from footer text.
@@ -1537,14 +1551,13 @@ local function tick_notice_recovery(session, state)
     end
     local agent = bus.agents[session]
     local startup = remuda._butler_agent_startup[agent and agent.kind or ""] or {}
-    state.draft = text
-    if not startup.clear_input then
-      return notice_recovery_error(session, state, "this agent has no verified composer clear key")
-    end
     local draft, safe = recovery_draft(agent and agent.kind or "", screen, text)
     if not safe then
-      state.draft = text
       return notice_recovery_error(session, state, "the draft spans unrecognized composer rows")
+    end
+    if not startup.clear_input then
+      state.draft = draft
+      return notice_recovery_error(session, state, "this agent has no verified composer clear key")
     end
     state.draft = draft
     local cleared, why = pcall(remuda.key, session, startup.clear_input)
