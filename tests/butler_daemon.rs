@@ -4846,10 +4846,36 @@ fn butler_compaction_schedule_sends_compact_when_idle_but_not_when_busy() {
         &format!("remuda._butler_bus.agents[{butler_name:?}].kind = 'codex'"),
     );
     eval(&path, FAKE_COMPACTION_EXPECT);
+    eval(
+        &path,
+        r#"remuda._butler_telemetry_for = function() return { context_used = "600000" } end"#,
+    );
+    assert_eq!(
+        eval(
+            &path,
+            &format!("return remuda.butler.ctx_level({butler_name:?}).level"),
+        ),
+        "warn",
+        "the Codex fixture must cross the warn-level compaction threshold"
+    );
 
     // Simulates the launched session's own one-time `run_script` call the
     // system prompt asks for.
     eval(&path, "remuda._butler_register_compaction_schedule()");
+    assert_eq!(
+        read_count(
+            &path,
+            r#"local n = 0 for _, s in pairs(remuda.schedules) do
+              if s.name == "butler-compaction" then n = n + 1 end
+            end return n"#,
+        ),
+        1,
+        "run_script must enable the lifecycle-declared compaction schedule"
+    );
+    let fires_before_idle = read_count(
+        &path,
+        r#"return remuda.schedule_fires()["butler-compaction"] or 0"#,
+    );
 
     // Busy phase: outrun the 2s idle threshold for a few seconds, spanning
     // at least two real 1s daemon ticks, and confirm the guard actually
@@ -4872,6 +4898,14 @@ fn butler_compaction_schedule_sends_compact_when_idle_but_not_when_busy() {
     loop {
         let screen = capture(&path, &butler_name);
         if screen.contains("/compact") {
+            let fires = read_count(
+                &path,
+                r#"return remuda.schedule_fires()["butler-compaction"] or 0"#,
+            );
+            assert!(
+                fires > fires_before_idle,
+                "the lifecycle compaction schedule did not fire after registration"
+            );
             break;
         }
         assert!(
