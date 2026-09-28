@@ -290,6 +290,10 @@ fn notify_policy_types_only_into_a_detached_or_quiet_empty_prompt() {
             t = t + 100; screen = 'a\n> '; policy('p1', t); screen = 'b\n> '
             r[#r + 1] = 'empty_changing=' .. tostring(policy('p1', t + 3))
             r[#r + 1] = 'unparseable=' .. tostring(settled('Do you trust this folder?'))
+            remuda._butler_bus.agents.p1 = {{ kind = 'codex' }}
+            r[#r + 1] = 'codex_placeholder=' .. tostring(settled('› Ask Codex to do anything'))
+            r[#r + 1] = 'codex_typed=' .. tostring(settled('› Ask Codex to do anything else'))
+            remuda._butler_bus.agents.p1 = nil
             row.attached = false; screen = 'x\n> co'
             r[#r + 1] = 'detached=' .. tostring(policy('p1', t + 500))
             remuda.ls, remuda.capture = real_ls, real_capture
@@ -298,7 +302,8 @@ fn notify_policy_types_only_into_a_detached_or_quiet_empty_prompt() {
     );
     assert_eq!(
         got,
-        "half=false empty_stable=true claude_box=true empty_changing=false unparseable=false detached=true"
+        "half=false empty_stable=true claude_box=true empty_changing=false unparseable=false \
+         codex_placeholder=true codex_typed=false detached=true"
     );
     let log = std::fs::read_to_string(&trace).unwrap_or_default();
     assert!(log.contains("notice_prompt\tp1  NON-EMPTY co"), "{log}");
