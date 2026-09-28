@@ -4812,11 +4812,13 @@ fn butler_compaction_schedule_sends_compact_when_idle_but_not_when_busy() {
     );
     let token_str = token_path.to_string_lossy().to_string();
     let config_str = config_path.to_string_lossy().to_string();
+    let data_str = std::env::var("XDG_DATA_HOME").expect("test XDG_DATA_HOME");
     let daemon = Daemon::spawn_with_env(
         &dir,
         &[
             ("REMUDA_BUTLER_TOKEN", token_str.as_str()),
             ("REMUDA_BUTLER_CONFIG", config_str.as_str()),
+            ("XDG_DATA_HOME", data_str.as_str()),
         ],
     );
     let path = daemon::socket_path_in(&dir, "s");
@@ -4830,6 +4832,12 @@ fn butler_compaction_schedule_sends_compact_when_idle_but_not_when_busy() {
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert_eq!(
+        eval(&path, "return type(remuda._butler_compaction_tick)"),
+        "function",
+        "loading the Butler module must define the scheduled compaction tick"
     );
 
     let butler_name = eval(&path, "return remuda._butler_initial_name");
@@ -5042,7 +5050,35 @@ fn butler_compaction_trace_records_registered_skipped_and_sent() {
 #[cfg(unix)]
 fn butler_compaction_fake_claude_scenarios_send_only_visible_keys() {
     let dir = scratch_dir("butler-fake-claude");
-    let (_daemon, path) = butler_test_daemon(&dir);
+    let (token_path, config_path) = butler_config(
+        &dir,
+        "fake-claude",
+        "http://127.0.0.1:1",
+        "!room:example.org",
+        "@butler:example.org",
+        "",
+    );
+    let token_str = token_path.to_string_lossy().to_string();
+    let config_str = config_path.to_string_lossy().to_string();
+    let data_str = std::env::var("XDG_DATA_HOME").expect("test XDG_DATA_HOME");
+    let daemon = Daemon::spawn_with_env(
+        &dir,
+        &[
+            ("REMUDA_BUTLER_TOKEN", token_str.as_str()),
+            ("REMUDA_BUTLER_CONFIG", config_str.as_str()),
+            ("XDG_DATA_HOME", data_str.as_str()),
+        ],
+    );
+    let path = daemon::socket_path_in(&dir, "s");
+    eval(&path, r#"remuda._butler_argv = {"sh", "-c", "while read line; do :; done"}"#);
+    eval(&path, "remuda._butler_skip_relay = true");
+    let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        eval(&path, "return type(remuda._butler_compaction_tick)"),
+        "function",
+        "loading the Butler module must define the scheduled compaction tick"
+    );
     eval(&path, "remuda._butler_compaction_interval = 45");
     let trace_path = dir.join("compaction-trace.log");
     eval(
