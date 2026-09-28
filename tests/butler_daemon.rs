@@ -2829,6 +2829,123 @@ fn butler_mail_separates_the_envelope_from_its_body_object() {
     assert!(result.contains("Message from butler\nprivate body"));
 }
 
+/// A mail root holding one delivered message (`message-a`) for `id`, and the
+/// hex inbox/read paths mail.lua derives from that id.
+fn seeded_mail_root(dir: &Path, id: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let root = dir.join("mail");
+    for sub in ["inboxes", "read", "messages", "objects"] {
+        std::fs::create_dir_all(root.join(sub)).expect("mail dirs");
+    }
+    std::fs::write(
+        root.join("messages/message-a.json"),
+        r#"{"id":"message-a","from":{"host":"local","session":"old"},"subject":"Seeded A","body":{"object_id":"object-a"}}"#,
+    )
+    .expect("envelope a");
+    std::fs::write(root.join("objects/object-a"), "body of a").expect("object a");
+    let hex: String = id.bytes().map(|b| format!("{b:02x}")).collect();
+    let inbox = root.join(format!("inboxes/{hex}.jsonl"));
+    let read = root.join(format!("read/{hex}.jsonl"));
+    (root, inbox, read)
+}
+
+fn mail_config_lua(root: &Path) -> String {
+    format!(
+        r#"remuda._butler_mail_config = {{
+             bus = {{ agents = {{}}, inboxes = {{}}, messages = {{}}, objects = {{}}, next = 0 }},
+             root = {}, json_quote = function(value) return '"' .. value .. '"' end,
+           }}
+           remuda.exec("butler/mail")"#,
+        lua_raw_string(&root.to_string_lossy())
+    )
+}
+
+/// A crash mid-append leaves a row with no newline; the next delivery must
+/// not be glued onto it and lost (NOTES.md §1 finding 1).
+#[test]
+fn butler_mail_torn_inbox_tail_does_not_swallow_the_next_delivery() {
+    let id = "01TORNTA1L000000000000000A";
+    let dir = scratch_dir("butler-mail-torn");
+    let (root, inbox, _) = seeded_mail_root(&dir, id);
+    std::fs::write(&inbox, "{\"message_id\":\"message-a\"}\n{\"message_id\":\"message-to").expect("torn");
+    let path = scratch("butler-mail-torn");
+    let _daemon = daemon_at(&path);
+    eval(
+        &path,
+        &format!(
+            r#"{}
+               local to = {{ host = "local", id = "{id}", alias = "fixer", session = "fixer" }}
+               assert(remuda._butler_mail.queue("butler", to, "the new delivery"))"#,
+            mail_config_lua(&root)
+        ),
+    );
+    // A fresh mailbox reads the inbox back from disk, as after a restart.
+    let out = eval(&path, &format!("{}\nreturn remuda._butler_mail.inbox(\"{id}\")", mail_config_lua(&root)));
+    assert!(out.contains("body of a"), "the torn row's neighbour was lost: {out:?}");
+    assert!(out.contains("the new delivery"), "the delivery after a torn row was lost: {out:?}");
+}
+
+/// An inbox row whose envelope is missing or corrupt must stay unread and be
+/// reported, never silently marked read (NOTES.md §1 finding 2).
+#[test]
+fn butler_mail_unloadable_envelope_stays_unread_and_is_reported() {
+    let id = "01UN10ADAB1E00000000000000";
+    let dir = scratch_dir("butler-mail-unloadable");
+    let (root, inbox, read) = seeded_mail_root(&dir, id);
+    std::fs::write(root.join("messages/message-corrupt.json"), "{not json").expect("corrupt");
+    std::fs::write(
+        &inbox,
+        "{\"message_id\":\"message-a\"}\n{\"message_id\":\"message-missing\"}\n{\"message_id\":\"message-corrupt\"}\n",
+    )
+    .expect("inbox rows");
+    let path = scratch("butler-mail-unloadable");
+    let _daemon = daemon_at(&path);
+    let first = eval(&path, &format!("{}\nreturn remuda._butler_mail.inbox(\"{id}\")", mail_config_lua(&root)));
+    assert!(first.contains("body of a"), "{first:?}");
+    for bad in ["message-missing", "message-corrupt"] {
+        assert!(
+            first.contains(&format!("message {bad}: envelope unreadable, left unread")),
+            "{bad} was not reported: {first:?}"
+        );
+    }
+    let read_ids = std::fs::read_to_string(&read).unwrap_or_default();
+    assert!(read_ids.contains("message-a"), "the shown message was not marked read");
+    assert!(!read_ids.contains("message-missing"), "an unloadable row was marked read");
+    assert!(!read_ids.contains("message-corrupt"), "an unloadable row was marked read");
+    let again = eval(&path, &format!("{}\nreturn remuda._butler_mail.inbox(\"{id}\")", mail_config_lua(&root)));
+    assert!(again.contains("message message-missing: envelope unreadable"), "{again:?}");
+    assert!(!again.contains("body of a"), "a read message came back: {again:?}");
+}
+
+/// Within ONE live bus: an envelope that becomes readable later is delivered
+/// on the next inbox(), not reported unreadable until a restart.
+#[test]
+fn butler_mail_unreadable_envelope_is_retried_in_the_same_bus() {
+    let id = "01RETRYUNREADAB1E000000000";
+    let dir = scratch_dir("butler-mail-retry");
+    let (root, inbox, read) = seeded_mail_root(&dir, id);
+    std::fs::write(&inbox, "{\"message_id\":\"message-late\"}\n").expect("inbox row");
+    let path = scratch("butler-mail-retry");
+    let _daemon = daemon_at(&path);
+    let first = eval(&path, &format!("{}\nreturn remuda._butler_mail.inbox(\"{id}\")", mail_config_lua(&root)));
+    assert!(first.contains("message message-late: envelope unreadable, left unread"), "{first:?}");
+    let count = eval(&path, &format!("return tostring(remuda._butler_mail.unread(\"{id}\"))"));
+    assert_eq!(count, "0", "an unreadable id is not counted");
+
+    std::fs::write(
+        root.join("messages/message-late.json"),
+        r#"{"id":"message-late","from":{"host":"local","session":"slow"},"subject":"Late","body":{"object_id":"object-late"}}"#,
+    )
+    .expect("late envelope");
+    std::fs::write(root.join("objects/object-late"), "late body").expect("late object");
+    let count = eval(&path, &format!("return tostring(remuda._butler_mail.unread(\"{id}\"))"));
+    assert_eq!(count, "1", "a now-readable id is counted");
+    let second = eval(&path, &format!("return remuda._butler_mail.inbox(\"{id}\")"));
+    assert!(second.contains("late body"), "the late envelope was not delivered: {second:?}");
+    assert!(!second.contains("envelope unreadable"), "{second:?}");
+    let read_ids = std::fs::read_to_string(&read).unwrap_or_default();
+    assert!(read_ids.contains("message-late"), "the delivered id was not marked read");
+}
+
 #[test]
 fn butler_mail_survives_a_fresh_lua_mailbox_and_remembers_reads() {
     let dir = scratch_dir("butler-mail-reload");

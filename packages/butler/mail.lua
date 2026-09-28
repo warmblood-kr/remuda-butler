@@ -2,6 +2,7 @@ local config = assert(remuda._butler_mail_config)
 local bus = assert(config.bus)
 bus.mail_loaded = bus.mail_loaded or {}
 bus.mail_read = bus.mail_read or {}
+bus.mail_unreadable = bus.mail_unreadable or {}
 
 local function mailbox(name)
   bus.inboxes[name] = bus.inboxes[name] or {}
@@ -60,7 +61,17 @@ local function write_atomic(path, content)
   return true
 end
 
+-- Shared by every JSONL log (inboxes, read, agents). A crash can leave a last
+-- row with no newline; end it first, or the next row is glued on and lost.
 local function append(path, content)
+  local tail = io.open(path, "rb")
+  if tail then
+    local size = tail:seek("end")
+    if size and size > 0 and tail:seek("set", size - 1) and tail:read(1) ~= "\n" then
+      content = "\n" .. content
+    end
+    tail:close()
+  end
   local file, err = io.open(path, "a")
   if not file then return nil, err end
   local ok, write_err = file:write(content)
@@ -160,9 +171,18 @@ local function load_inbox(name)
   for line in file:lines() do
     local id = line:match('"message_id":"([^"]+)"')
     if id and not read[id] and not present[id] then
-      load_message(disk, id)
-      mailbox(name)[#mailbox(name) + 1] = id
       present[id] = true
+      if load_message(disk, id) then
+        mailbox(name)[#mailbox(name) + 1] = id
+      else
+        -- Never delivered, so never marked read: it is reported, not lost.
+        io.stderr:write("butler mail: message " .. id .. " in " .. name .. ": envelope unreadable, left unread\n")
+        local unreadable = bus.mail_unreadable[name] or {}
+        bus.mail_unreadable[name] = unreadable
+        local known = false
+        for _, seen in ipairs(unreadable) do known = known or seen == id end
+        if not known then unreadable[#unreadable + 1] = id end
+      end
     end
   end
   file:close()
@@ -252,27 +272,56 @@ local function queue(from, to, text, subject, in_reply_to)
   return message
 end
 
+-- load_inbox runs once per daemon, so ids left unread for a bad envelope are
+-- retried here; one that now loads is delivered like any other.
+local function retry_unreadable(name)
+  local unreadable, disk = bus.mail_unreadable[name], paths(name)
+  if not unreadable or not disk then return end
+  local still = {}
+  for _, id in ipairs(unreadable) do
+    if load_message(disk, id) then
+      mailbox(name)[#mailbox(name) + 1] = id
+    else
+      still[#still + 1] = id
+    end
+  end
+  bus.mail_unreadable[name] = still
+end
+
 local function inbox(name)
   load_inbox(name)
-  local messages = mailbox(name)
-  if #messages == 0 then return "inbox empty" end
-  local out, read = {}, load_read(name)
+  retry_unreadable(name)
+  local messages, unreadable = mailbox(name), bus.mail_unreadable[name] or {}
+  if #messages == 0 and #unreadable == 0 then return "inbox empty" end
+  local out, read, shown = {}, load_read(name), {}
   for _, id in ipairs(messages) do
     local message = bus.messages[id]
     local object = message and bus.objects[message.body.object_id]
     if message and object then
       out[#out + 1] = "[" .. message.id .. " from " .. message.from.host .. "/"
         .. message.from.session .. " · " .. message.created_at .. "] " .. message.subject .. "\n" .. object.content
-      read[id] = true
+      read[id], shown[#shown + 1] = true, id
     end
   end
+  for _, id in ipairs(unreadable) do
+    out[#out + 1] = "message " .. id .. ": envelope unreadable, left unread"
+  end
   local disk = paths(name)
-  if disk then
-    local wrote, err = append(disk.read, table.concat(messages, "\n") .. "\n")
+  if disk and #shown > 0 then
+    local wrote, err = append(disk.read, table.concat(shown, "\n") .. "\n")
     if not wrote then return "mail read-state was not saved: " .. tostring(err) end
   end
   bus.inboxes[name] = {}
   return table.concat(out, "\n")
 end
 
-remuda._butler_mail = { mailbox = mailbox, queue = queue, inbox = inbox, migrate_legacy = migrate_legacy }
+-- Unread count for the session list, rendered often: the file is read once
+-- (load_inbox is memoized); queue and inbox keep the in-memory list current.
+local function unread(name)
+  load_inbox(name)
+  retry_unreadable(name)
+  return #mailbox(name)
+end
+
+remuda._butler_mail = { mailbox = mailbox, queue = queue, inbox = inbox, unread = unread, append = append,
+  migrate_legacy = migrate_legacy }
