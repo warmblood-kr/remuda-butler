@@ -62,7 +62,7 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
         end
         if not allowed then
           if ticks >= (options.timeout or 60) then
-            finish(false, "the composer remained busy or attached")
+            finish(false, "deferred")
           end
           return
         end
@@ -77,12 +77,30 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
       return
     end
 
-    if prompt_start_visible(screen, task) then
+    verify_ticks = verify_ticks + 1
+    local started = prompt_start_visible(screen, task)
+    local empty = true
+    if options.empty then
+      local checked, decision = pcall(options.empty, screen)
+      empty = checked and decision == "EMPTY"
+    end
+    local session_busy = false
+    if remuda.session then
+      local checked, session = pcall(remuda.session, actual)
+      session_busy = checked and session and session.is_busy == true
+    end
+    if started and (empty or session_busy) then
       finish(true)
       return
     end
-
-    verify_ticks = verify_ticks + 1
+    -- A task can be fully painted while its first Return is dropped. Retry
+    -- submit once, before allowing queued notices to reach this composer.
+    if started and not empty and not session_busy and verify_ticks >= 4 and not options.return_retried then
+      options.return_retried = true
+      pcall(remuda.key, actual, "RET")
+      verify_ticks = 0
+      return
+    end
     if verify_ticks >= 12 and attempts == 1 then
       -- The initial send may have raced a screen transition. A single full
       -- retry is permitted; the long prompt is never split into chunks.
@@ -90,7 +108,7 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
       verify_ticks = 0
       pcall(remuda.type_text, actual, task, 2)
     elseif verify_ticks >= 12 then
-      finish(false, "the START marker remained absent after two attempts")
+      finish(false, "deferred")
     end
   end })
   return poll

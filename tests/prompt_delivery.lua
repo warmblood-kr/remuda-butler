@@ -56,8 +56,21 @@ local function exercise(kind, drop_submissions)
       state.transcript[#state.transcript + 1] = state.composer .. text
     end
     state.submits = (state.submits or 0) + 1
-    state.composer = ""
+    if state.drop_submissions and state.submits == 1 then
+      state.composer = text
+    else
+      state.composer = ""
+    end
   end
+  function fake.key(_, key)
+    assert(key == "RET")
+    state.returns = (state.returns or 0) + 1
+    if state.returns == 1 then
+      state.composer = ""
+      state.transcript[#state.transcript + 1] = state.task
+    end
+  end
+  fake.session = function() return { is_busy = false } end
   function fake._butler_send(_, parent, warning)
     state.failure = parent .. ": " .. warning
   end
@@ -66,6 +79,7 @@ local function exercise(kind, drop_submissions)
     "A delegated first task must arrive whole, in order, and be submitted exactly once. ",
     19
   ) .. "\nEND-59-" .. kind .. "-marker"
+  state.task = task
   assert(#task >= 1600, "regression task must exercise a long first prompt")
 
   M.schedule(fake, kind, "member-session", "member", "leader", task, {
@@ -74,6 +88,9 @@ local function exercise(kind, drop_submissions)
       return screen:find(marker, 1, true) ~= nil
     end,
     allowed = function() return true end,
+    empty = function()
+      return state.composer == "" and "EMPTY" or "NON-EMPTY"
+    end,
   })
   for tick = 1, 120 do
     state.tick = tick
@@ -83,10 +100,11 @@ local function exercise(kind, drop_submissions)
   local delivered = table.concat(state.transcript, "\n")
   assert(state.first_send_tick >= state.ready_at, kind .. " received input before its composer was ready")
   if drop_submissions then
-    assert(state.failure and state.failure:find("Could not verify delivery", 1, true),
-      kind .. " did not notify its leader when both attempts failed")
-    assert(state.sends == 2, kind .. " did not retry exactly once")
-    assert(#state.transcript == 0, kind .. " fake unexpectedly accepted a dropped prompt")
+    assert(not state.failure, state.failure)
+    assert(state.sends == 1, kind .. " re-injected the task instead of retrying Return")
+    assert(state.returns == 1, kind .. " did not retry a dropped Return exactly once")
+    assert(#state.transcript == 1 and state.transcript[1] == task,
+      kind .. " did not submit the complete task after retrying Return")
   else
     assert(not state.failure, state.failure)
     assert(#state.transcript == 1, kind .. " submitted the first task " .. #state.transcript .. " times")

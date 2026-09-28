@@ -1132,6 +1132,10 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
     PROMPT_DELIVERY.schedule(remuda, kind, actual, name, parent, task, {
       ready = startup.ready,
       allowed = function() return remuda._butler_notify_policy(actual) end,
+      empty = function(screen)
+        local decision = remuda._butler_prompt_is_empty(kind, screen)
+        return decision
+      end,
       timeout = remuda._butler_task_poke_deferrals or 600,
       on_done = function(delivered, reason)
         bus.pending_tasks[actual] = nil
