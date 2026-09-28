@@ -215,8 +215,21 @@ local function current_agent(caller)
   end
 end
 remuda._butler_current_agent = current_agent
-if remuda._butler_test_mode then
+if remuda._butler_test_mode == true then
   return
+end
+
+-- Replace handles created imperatively by the previous Butler version. The
+-- lifecycle declaration owns these schedules from this activation onward.
+local legacy_compaction_schedule = remuda._butler_compaction_schedule
+for _, key in ipairs({ "_butler_notice_schedule", "_butler_reconcile_schedule", "_butler_compaction_schedule" }) do
+  if remuda[key] then
+    remuda.cancel(remuda[key])
+    remuda[key] = nil
+  end
+end
+if legacy_compaction_schedule and remuda._butler_state then
+  remuda._butler_state.compaction_enabled = true
 end
 
 -- `os.getenv` here reads the *daemon's own* environment, fixed forever at
@@ -626,6 +639,7 @@ local function inbox_delivery(message)
   end
   return delivered
 end
+remuda._butler_inbox_delivery = inbox_delivery
 local function deliver_message(message)
   if delivery_events then
     local delivered = remuda.emit_until_success("butler/deliver", message)
@@ -696,6 +710,7 @@ local function setup_telemetry(kind, spec)
 end
 -- A member's AGENTS.md and prompt are `butler.guidance` sections joined in
 -- order, so an extension adds its own section (hook-design §4.2).
+if not remuda.contribute then
 remuda._butler_contribute("butler.guidance", "header", { order = 10,
   agents_md = function(ctx)
     return [[# Butler team member
@@ -746,6 +761,7 @@ the normal way for a member to communicate.
   end })
 remuda._butler_contribute("butler.guidance", "leader", { order = 90,
   prompt = function(ctx) return "Your leader is " .. ctx.parent .. "." end })
+end
 local function guidance(part, parent)
   local out = {}
   for _, item in ipairs(contributions("butler.guidance")) do
@@ -1022,19 +1038,6 @@ function remuda._butler_deliver_notices()
     if bus.agents[session] then deliver_notice(session) else bus.notices[session] = nil end
   end
 end
--- init.lua declares the schedule; a core before remuda#116 ignores declared
--- schedules, so keep exactly one imperative stand-in there.
-if remuda._butler_notice_schedule then remuda.cancel(remuda._butler_notice_schedule) end
-remuda._butler_notice_schedule = nil
-local declared_notices = false
-for _, schedule in pairs(remuda.schedules) do
-  if schedule.name == "butler-notices" then declared_notices = true end
-end
-if not declared_notices then
-  remuda._butler_notice_schedule = remuda.schedule({ name = "butler-notices", every = 1,
-    run = function() remuda._butler_deliver_notices() end })
-end
-
 function remuda._butler_send(from, to, text)
   local _, recipient = mail_id(to, false)
   local sender = (from == "operator" or from == "outside") and mail_address(from)
@@ -1214,8 +1217,11 @@ end
 
 -- Each verb is a `butler.command` entry (hook-design §4.1); `run` returns nil
 -- when its arguments do not fit, and the caller gets the usage text.
+local command_entries = {}
 local function command(order, verb, usage, run)
-  remuda._butler_contribute("butler.command", verb, { order = order, verb = verb, usage = usage, run = run })
+  local entry = { id = verb, order = order, verb = verb, usage = usage, run = run }
+  command_entries[verb] = entry
+  if not remuda.contribute then remuda._butler_contribute("butler.command", verb, entry) end
 end
 command(10, "sessions", "  remuda butler sessions", function(args)
   if #args == 1 then return remuda._butler_sessions() end
@@ -1276,6 +1282,10 @@ command(80, "forward", "  remuda butler forward <message-id> <member> [note...]"
   return remuda._butler_forward(current_agent(caller) or OPERATOR, args[2], args[3],
     #args >= 4 and words_after(args, 4) or nil)
 end)
+remuda._butler_command_run = function(verb, args, caller)
+  local entry = command_entries[verb]
+  if entry then return entry.run(args, caller) end
+end
 
 -- The generic Remuda extension-command bridge passes an argv-like Lua table.
 -- This parser lives with Butler, not in the Remuda executable.
@@ -1526,7 +1536,7 @@ end
 
 local function report_unknown_compaction_dialog(stage, session, capture)
   _butler_trace("unknown_dialog", "stage=" .. stage .. " session=" .. session .. " capture=" .. capture:gsub("\n", "\\n"))
-  pcall(remuda._butler_send, "butler", "operator", "Unknown compaction dialog at stage " .. stage
+  pcall(remuda._butler_send, "butler", "butler", "Unknown compaction dialog at stage " .. stage
     .. " in session " .. session .. ". Add a dialog registry handler. Raw capture:\n" .. capture)
 end
 remuda._butler_compaction_report_unknown = report_unknown_compaction_dialog
@@ -1573,7 +1583,8 @@ local function launch_butler()
   return butler_name
 end
 
-local function compaction_tick()
+local function compaction_tick(state)
+  state = state or remuda._butler_state or {}
   local captured_ok, screen = pcall(remuda.capture, butler_name)
   local context = captured_ok and type(screen) == "string"
     and tonumber(screen:match("CTX:(%d+)")) or nil
@@ -1587,17 +1598,29 @@ local function compaction_tick()
     if telemetry_ok and telemetry then context = tonumber(telemetry.context_used) end
   end
   if not context then
+    state.compaction_interval_current = COMPACTION_CHECK_INTERVAL
+    state.compaction_ticks = 0
+    remuda._butler_compaction_interval_current = COMPACTION_CHECK_INTERVAL
     _butler_trace("skipped_unknown", "level=unknown")
     return
   end
 
   local level = context >= COMPACTION_CRITICAL and "critical"
     or context >= COMPACTION_WARN and "warn" or "ok"
-  local interval = level == "critical" and COMPACTION_CRITICAL_INTERVAL
-    or COMPACTION_CHECK_INTERVAL
-  if remuda._butler_compaction_interval_current ~= interval then
-    remuda._butler_register_compaction_schedule(interval)
+  local interval = level == "critical" and COMPACTION_CRITICAL_INTERVAL or COMPACTION_CHECK_INTERVAL
+  local tick_interval = math.min(COMPACTION_CHECK_INTERVAL, COMPACTION_CRITICAL_INTERVAL)
+  if state.compaction_interval_current ~= interval then
+    state.compaction_interval_current = interval
+    state.compaction_ticks = 0
   end
+  remuda._butler_compaction_interval_current = interval
+  state.compaction_ticks = (state.compaction_ticks or 0) + 1
+  local cadence_ticks = math.max(1, math.ceil(interval / tick_interval))
+  if state.compaction_ticks < cadence_ticks then
+    _butler_trace("skipped_cadence", "level=" .. level .. " ctx=" .. context .. " ticks=" .. state.compaction_ticks)
+    return
+  end
+  state.compaction_ticks = 0
 
   if level == "ok" then
     _butler_trace("skipped_ok", "level=ok ctx=" .. context)
@@ -1621,10 +1644,12 @@ local function compaction_tick()
     effort = effort, lower = lower, switch = switch, level = level, context = context,
     turns = 0, original_config = nil, config_path = nil }
   remuda._butler_compaction_run = run
+  state.compaction_run = run
   local lock = (os.getenv("REMUDA_RUNTIME_DIR") or "/tmp") .. "/remuda-compaction.lock"
   local acquired = os.execute("mkdir " .. string.format("%q", lock) .. " 2>/dev/null")
   if acquired ~= true and acquired ~= 0 then
     remuda._butler_compaction_run = nil
+    if state.compaction_run == run then state.compaction_run = nil end
     _butler_trace("skipped_lock", "level=" .. level .. " ctx=" .. context)
     return
   end
@@ -1654,6 +1679,7 @@ local function compaction_tick()
     end
     if run.lock then os.execute("rmdir " .. string.format("%q", run.lock) .. " 2>/dev/null") end
     remuda._butler_compaction_run = nil
+    if state.compaction_run == run then state.compaction_run = nil end
   end
   run.release = release
   local function type_submit(text)
@@ -1675,14 +1701,19 @@ local function compaction_tick()
     if not ok then release(); _butler_trace("error", "stage=restore " .. tostring(err)); return end
   end
   _butler_trace("sent", "level=" .. level .. " ctx=" .. context .. " switch=" .. tostring(switch))
-  run.poll = remuda.schedule({ name = "butler-compaction-dialog", every = 0.5, run = function()
+  return run
+end
+
+function remuda._butler_compaction_dialog_tick(state)
+  state = state or remuda._butler_state or {}
+  local run = state.compaction_run or remuda._butler_compaction_run
+  if not run then return end
     run.turns = run.turns + 1
     local captured, capture = pcall(remuda.capture, butler_name)
     if not captured or type(capture) ~= "string" then
       if run.turns > COMPACTION_WATCHDOG_TICKS then
-        remuda.cancel(run.poll)
         _butler_trace("error", "stage=" .. run.stage .. " capture_timeout session=" .. butler_name)
-        release()
+        if run.release then run.release() end
       end
       return
     end
@@ -1710,9 +1741,8 @@ local function compaction_tick()
     local looks_dialog = capture:find("Select", 1, true) or capture:find("confirm", 1, true)
       or capture:find("Continue?", 1, true) or capture:find("Yes", 1, true)
     if looks_dialog then
-      remuda.cancel(run.poll)
       report_unknown_compaction_dialog(run.stage, butler_name, capture)
-      release()
+      if run.release then run.release() end
       return
     end
     local session_ok, current_session = pcall(remuda.session, butler_name)
@@ -1721,37 +1751,39 @@ local function compaction_tick()
     if run.turns >= 20 and restored_model and session_ok and current_session and current_session.is_busy == false then
       run.idle_ticks = (run.idle_ticks or 0) + 1
       if run.idle_ticks >= 2 then
-        remuda.cancel(run.poll)
         _butler_trace("restored", "session=" .. butler_name .. " level=" .. run.level .. " ctx=" .. run.context)
-        release()
+        if run.release then run.release() end
         return
       end
     else
       run.idle_ticks = 0
     end
     if run.turns > COMPACTION_WATCHDOG_TICKS then
-      remuda.cancel(run.poll)
       _butler_trace("error", "stage=" .. run.stage .. " restore_timeout session=" .. butler_name)
       if run.release then run.release() end
     end
-  end })
 end
 
--- Reused across every re-`exec` and every later call from the launched
--- session's own run_script. The persistent handle and interval live on remuda.
-function remuda._butler_register_compaction_schedule(interval)
-  if remuda._butler_compaction_schedule then
-    remuda.cancel(remuda._butler_compaction_schedule)
+-- The lifecycle declaration owns the compaction schedule. The session's
+-- one-time run_script call only enables its callback; reload replaces the
+-- schedule without leaving an old handle behind.
+function remuda._butler_register_compaction_schedule()
+  _butler_trace("registered")
+  if remuda._butler_state then
+    remuda._butler_state.compaction_enabled = true
+  else
+    remuda._butler_compaction_enabled = true
   end
-  interval = interval or COMPACTION_CHECK_INTERVAL
-  remuda._butler_compaction_interval_current = interval
-  _butler_trace("registered", "period=" .. interval)
-  remuda._butler_compaction_schedule = remuda.schedule({
-    name = "butler-compaction",
-    every = interval,
-    run = compaction_tick,
-  })
-  return remuda._butler_compaction_schedule
+  return true
+end
+function remuda._butler_compaction_tick(state)
+  state = state or remuda._butler_state
+  if state then
+    if not state.compaction_enabled then return end
+  elseif not remuda._butler_compaction_enabled then
+    return
+  end
+  return compaction_tick(state)
 end
 
 -- remuda._butler_session_trace_path lets a test redirect this to a throwaway
@@ -1776,22 +1808,6 @@ function _butler_session_trace(event, detail)
   end)
 end
 
--- `exec butler` re-running this file in the same daemon image would
--- otherwise double this hook (see docs/design.md's augroup note) --
--- clearing the group first keeps exactly one watchdog alive.
-remuda.clear_hooks({ group = "butler" })
-if delivery_events then
-  remuda.on("butler/deliver", inbox_delivery, { group = "butler", id = "inbox", depth = 0 })
-end
--- Builds before the lifecycle entry registered these Matrix hooks without a
--- group. Only Butler emits these events, so replace those legacy callbacks.
-for _, event in ipairs({ "butler-matrix-line", "butler-matrix-submit" }) do
-  local kept = {}
-  for _, hook in ipairs(remuda.hooks[event] or {}) do
-    if hook.group then kept[#kept + 1] = hook end
-  end
-  remuda.hooks[event] = kept
-end
 function remuda._butler_reconcile()
   local ok, result = pcall(launch_butler)
   if not ok then
@@ -1800,7 +1816,7 @@ function remuda._butler_reconcile()
   end
   return result
 end
-remuda.on("session_exited", function(name)
+function remuda._butler_session_exited(name)
   _butler_session_trace("session_exited", name)
   -- #29: the mail stays in the inbox; only the pending pane notice goes.
   bus.notices[name], bus.notice_screens[name] = nil, nil
@@ -1821,25 +1837,15 @@ remuda.on("session_exited", function(name)
     _butler_session_trace("relaunching", name)
     remuda._butler_reconcile()
   end
-end, { group = "butler" })
-
-if remuda._butler_reconcile_schedule then
-  remuda.cancel(remuda._butler_reconcile_schedule)
 end
-remuda._butler_reconcile_schedule = remuda.schedule({
-  name = "butler-reconcile",
-  every = remuda._butler_reconcile_interval or 2,
-  run = function()
-    remuda._butler_reconcile()
-  end,
-})
-remuda._butler_reconcile()
 
-remuda.on("butler-compaction-submit", function()
+if remuda._butler_test_mode ~= "lifecycle" then remuda._butler_reconcile() end
+
+function remuda._butler_compaction_submit()
   remuda.send(butler_name, "")
-end, { group = "butler" })
+end
 
-remuda.on("butler-matrix-line", function(line)
+function remuda._butler_matrix_line(line)
   local sender, body = line:match("^([^\t]*)\t(.*)$")
   if not body then
     return
@@ -1867,11 +1873,11 @@ remuda.on("butler-matrix-line", function(line)
     argv = {"sleep", "2"},
     on_exit = "butler-matrix-submit",
   }
-end, { group = "butler" })
+end
 
-remuda.on("butler-matrix-submit", function()
+function remuda._butler_matrix_submit()
   remuda.send(butler_name, "")
-end, { group = "butler" })
+end
 
 local function relay_running()
   for _, id in ipairs(remuda.processes()) do
@@ -1880,14 +1886,13 @@ local function relay_running()
   return false
 end
 if token_path and not remuda._butler_skip_relay and not relay_running() then
-  -- A relay started before live reload has no recorded id. Replace it once
-  -- by matching its unique config path as the trailing process argument.
-  os.execute("pkill -f -- " .. shell_quote(config_path .. "$"))
-  remuda._butler_relay = remuda.process{
+  local relay = remuda.process{
     argv = {"python3", "-c", HELPER_SRC, token_path, config_path},
     on_line = "butler-matrix-line",
     on_exit = "butler-matrix-sync-exit",
   }
+  remuda._butler_relay = relay
+  if remuda._butler_state then remuda._butler_state.relay = relay end
 end
 
 if token_path then
