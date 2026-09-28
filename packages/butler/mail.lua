@@ -347,17 +347,25 @@ local function queue(from, to, text, subject, in_reply_to, references)
   return message
 end
 
+-- Only the explicit operator (the CLI with no Butler identity) skips the
+-- delivered check; any other caller must be a known agent holding the message.
+local function may_resend(caller, id, as_operator)
+  if as_operator then return true end
+  if caller.id == "" then return nil, "unknown caller: run from a Butler session" end
+  if not delivered(caller.id, id) then return nil, "message " .. id .. " was not delivered to you" end
+  return true
+end
+
 local function find_message(id)
   return bus.messages[id] or (config.root and load_message(paths(""), id)) or nil
 end
 
 -- RFC 5322 §3.6.4: in_reply_to is the parent; references are the parent's (or
 -- its in_reply_to), then the parent. JWZ: repeats and self-references drop.
-local function reply(caller, parent_id, text)
+local function reply(caller, parent_id, text, as_operator)
   caller = address(caller)
-  if caller.id ~= "" and not delivered(caller.id, parent_id) then
-    return nil, "message " .. parent_id .. " was not delivered to you"
-  end
+  local allowed, why = may_resend(caller, parent_id, as_operator)
+  if not allowed then return nil, why end
   local parent = find_message(parent_id)
   if not parent then return nil, "message " .. parent_id .. " cannot be read" end
   local to = parent.reply_to or parent.from
@@ -379,12 +387,11 @@ end
 
 -- RFC 5322 §3.6.6 and postfix redirection: the original envelope is never
 -- rewritten; the target gets a row for the same id plus who resent it.
-local function forward(caller, id, target, note)
+local function forward(caller, id, target, note, as_operator)
   caller, target = address(caller), address(target)
   if target.id == "" then return nil, "recipient has no Butler ULID" end
-  if caller.id ~= "" and not delivered(caller.id, id) then
-    return nil, "message " .. id .. " was not delivered to you"
-  end
+  local allowed, why = may_resend(caller, id, as_operator)
+  if not allowed then return nil, why end
   if not find_message(id) then return nil, "message " .. id .. " cannot be read" end
   if delivered(target.id, id) then return nil, "message " .. id .. " was already delivered to " .. target.alias end
   load_inbox(target.id)

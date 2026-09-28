@@ -563,6 +563,15 @@ local function caller_name(caller)
   local token = caller and caller.capability
   return (token and bus.tokens[token]) or "outside"
 end
+-- An MCP caller that acts on mail must be a known agent: an unknown or garbage
+-- capability is refused, never treated as the operator (review of #39).
+local function caller_agent(caller)
+  local name = caller_name(caller)
+  if not bus.agents[name] then
+    error("unknown caller: run from a Butler session (its MCP config carries the capability)", 0)
+  end
+  return name
+end
 -- A child's leader is the calling agent, never a guess: an unidentified
 -- caller silently became `butler`'s child and reported to root (#24).
 local function caller_leader(caller)
@@ -931,7 +940,9 @@ end
 -- Reply and forward live in mail.lua; this adds the caller's identity and the
 -- terminal notice. A recipient that has ended still gets the mail, unnotified.
 local function sender_address(from)
-  return (from == "operator" or from == "outside") and mail_address(from) or mail_address(resolve(from))
+  if from == OPERATOR then return mail_address(OPERATOR) end
+  if from == "outside" then error("unknown caller: run from a Butler session", 0) end
+  return mail_address(resolve(from))
 end
 local function notify_queued(message, alias, what)
   local live = pcall(mail_id, alias, false)
@@ -944,14 +955,14 @@ local function notify_queued(message, alias, what)
 end
 function remuda._butler_reply(from, message_id, text)
   local sender = sender_address(from)
-  local message, err = mail.reply(sender, message_id, text)
+  local message, err = mail.reply(sender, message_id, text, from == OPERATOR)
   if not message then error(err, 0) end
   return notify_queued(message, message.to[1].alias, "(reply) from " .. sender.alias)
 end
 function remuda._butler_forward(from, message_id, member, note)
   local sender = sender_address(from)
   local _, target = mail_id(member, false)
-  local message, err = mail.forward(sender, message_id, mail_address(target.alias), note)
+  local message, err = mail.forward(sender, message_id, mail_address(target.alias), note, from == OPERATOR)
   if not message then error(err, 0) end
   return "forwarded " .. message_id .. " to " .. target.alias .. "; "
     .. notify_queued(message, target.alias, "forwarded by " .. sender.alias)
@@ -1198,7 +1209,7 @@ remuda.tool{
   args = { message_id = "Message to reply to.", to = "Recipient, only without message_id.", text = "Reply body." },
   needs = { "text" },
   run = function(a, caller)
-    if a.message_id then return remuda._butler_reply(caller_name(caller), a.message_id, a.text) end
+    if a.message_id then return remuda._butler_reply(caller_agent(caller), a.message_id, a.text) end
     if not a.to then error("butler_reply needs message_id or to", 0) end
     return remuda._butler_send(caller_name(caller), a.to, a.text)
   end,
@@ -1209,7 +1220,7 @@ remuda.tool{
   args = { message_id = "Message to forward.", to = "Member to forward it to.", note = "Optional note." },
   needs = { "message_id", "to" },
   run = function(a, caller)
-    return remuda._butler_forward(caller_name(caller), a.message_id, a.to, a.note)
+    return remuda._butler_forward(caller_agent(caller), a.message_id, a.to, a.note)
   end,
 }
 remuda.tool{
