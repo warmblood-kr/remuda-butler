@@ -337,6 +337,18 @@ fn butler_with_member(tag: &str) -> (PathBuf, impl Drop) {
     (path, daemon)
 }
 
+#[test]
+fn prompt_parser_returns_multiline_task_and_stops_at_codex_footer() {
+    let (path, _daemon) = butler_with_member("prompt-parser-multiline");
+    let parsed = eval(
+        &path,
+        r#"local decision, text = remuda._butler_prompt_is_empty('codex',
+          'Ask Codex\n› START task\nsecond task line\nEND task\nGPT-6-Luna medium · ~/projects/ids · task\n? for shortcuts\n98% context left')
+        return decision .. '\n' .. text"#,
+    );
+    assert_eq!(parsed, "NON-EMPTY\nSTART task\nsecond task line\nEND task");
+}
+
 /// #29 review 1: a notice whose type_text fails stays queued for the retry.
 #[test]
 fn a_notice_that_fails_to_type_stays_queued() {
