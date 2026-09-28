@@ -229,8 +229,12 @@ function remuda._butler_compaction_gate(session_name, st)
     if (st.cooldown_ticks or 0) > 0 then st.cooldown_ticks = st.cooldown_ticks - 1 end
     return false, "skipped_unknown", ctx
   end
-  local threshold = remuda._butler_compaction_threshold or 400000
-  local critical = remuda._butler_compaction_critical_threshold or 600000
+  local threshold = tonumber(remuda._butler_compaction_watch_threshold or remuda._butler_compaction_threshold) or 400000
+  local warn = tonumber(remuda._butler_compaction_warn_threshold) or 600000
+  local critical = tonumber(remuda._butler_compaction_level_critical_threshold) or 800000
+  local pct = tonumber(telemetry.context_pct or telemetry.context_percent)
+  local is_urgent = used >= warn or used >= critical
+    or (pct and pct >= (tonumber(remuda._butler_compaction_critical_pct) or 90))
   if used < threshold then
     st.idle_ticks = 0
     st.cooldown_ticks = 0
@@ -301,13 +305,51 @@ function remuda._butler_compaction_gate(session_name, st)
   end
   st.last_idle_capture_at = now
   st.idle_ticks = st.idle_ticks + 1
-  local needed = used >= critical and 2 or (st.saw_busy and 2 or math.huge)
+  local needed = is_urgent and 1 or 2
   if st.idle_ticks < needed then return false, "skipped_idle", ctx end
   st.idle_ticks = 0
   st.last_idle_capture_at = nil
   st.saw_busy = false
   st.cooldown_ticks = math.max(0, tonumber(remuda._butler_compaction_cooldown) or 4)
   return true, "sent", ctx
+end
+
+-- Public, composable policy units. The policy uses the legacy gate below for
+-- compatibility while callers can inspect context and idleness independently.
+remuda.butler = remuda.butler or {}
+function remuda.butler.ctx_level(name)
+  local agent = (remuda._butler_bus and remuda._butler_bus.agents[name]) or {}
+  local telemetry = remuda._butler_telemetry_for(agent) or {}
+  local used = tonumber(telemetry.context_used)
+  local pct = tonumber(telemetry.context_pct or telemetry.context_percent)
+  local watch = tonumber(remuda._butler_compaction_watch_threshold) or 400000
+  local warn = tonumber(remuda._butler_compaction_warn_threshold) or 600000
+  local critical = tonumber(remuda._butler_compaction_level_critical_threshold) or 800000
+  local pct_critical = tonumber(remuda._butler_compaction_critical_pct) or 90
+  local level = "ok"
+  if (used and used >= critical) or (pct and pct >= pct_critical) then level = "critical"
+  elseif used and used >= warn then level = "warn"
+  elseif used and used >= watch then level = "watch" end
+  return { level = level, used = used, pct = pct }
+end
+function remuda.butler.is_idle(name)
+  local ok, session = pcall(remuda.session, name)
+  if not ok or not session then return false, "session unavailable" end
+  if session.is_busy ~= false then return false, "busy" end
+  local captured, screen = pcall(remuda.capture, name)
+  if not captured or type(screen) ~= "string" then return false, "capture unavailable" end
+  local agent = (remuda._butler_bus and remuda._butler_bus.agents[name]) or {}
+  local startup = (remuda._butler_agent_startup or {})[agent.kind] or {}
+  if startup.working and startup.working(screen) then return false, "working" end
+  local empty, decision = pcall(remuda._butler_prompt_is_empty, agent.kind or "", screen)
+  if not empty or decision ~= "EMPTY" then return false, "composer not empty" end
+  return true, "idle"
+end
+function remuda.butler.compact(name)
+  return remuda._butler_compaction_tick(name, false)
+end
+function remuda.butler.compaction_policy(name, state)
+  return remuda._butler_compaction_gate(name, state)
 end
 
 function remuda._butler_compaction_reset_idle(st)
@@ -1885,14 +1927,19 @@ function remuda._butler_compaction_tick(target_name, dry_run)
     end
     return "compaction disabled: core lacks remuda.expect (run remuda upgrade)"
   end
-  remuda._butler_compaction_members_state = remuda._butler_compaction_members_state or {}
-  local state = remuda._butler_compaction_members_state[session_name]
+  local owner_state = remuda._butler_state or remuda._butler_compaction_state or {}
+  owner_state.compaction_members = owner_state.compaction_members or remuda._butler_compaction_members_state or {}
+  remuda._butler_compaction_members_state = owner_state.compaction_members
+  local agent = remuda._butler_bus.agents[session_name] or {}
+  local state_key = tostring(agent.id or session_name)
+  local state = remuda._butler_compaction_members_state[state_key]
   if not state then
-    state = session_name == "butler" and (remuda._butler_state or remuda._butler_compaction_state) or {}
-    remuda._butler_compaction_members_state[session_name] = state
+    state = {}
+    remuda._butler_compaction_members_state[state_key] = state
   end
   if state.compaction_in_progress then return "compaction_in_progress" end
-  local should_send, event, ctx = remuda._butler_compaction_gate(session_name, state)
+  if owner_state.compaction_fleet_active then return "fleet_busy" end
+  local should_send, event, ctx = remuda.butler.compaction_policy(session_name, state)
   local detail = "ctx=" .. tostring(ctx)
   if dry_run then
     local agent = remuda._butler_bus.agents[session_name] or {}
@@ -1905,10 +1952,12 @@ function remuda._butler_compaction_tick(target_name, dry_run)
   if event ~= "skipped_idle" and event ~= "sent" then _butler_trace(event, detail) end
   if not should_send then return event .. " ctx=" .. tostring(ctx) end
   state.compaction_in_progress = true
+  owner_state.compaction_fleet_active = state_key
   if should_send then
     _butler_trace("sent", detail)
     local function report(reason)
       state.compaction_in_progress = false
+      if owner_state.compaction_fleet_active == state_key then owner_state.compaction_fleet_active = nil end
       _butler_trace("error", detail .. " reason=" .. tostring(reason))
       pcall(remuda._butler_send, session_name, "butler", "Compaction failed: " .. tostring(reason))
     end
@@ -1988,6 +2037,7 @@ function remuda._butler_compaction_tick(target_name, dry_run)
           if failure_reason then report(failure_reason)
           else
             state.compaction_in_progress = false
+            if owner_state.compaction_fleet_active == state_key then owner_state.compaction_fleet_active = nil end
             _butler_trace("verified", detail)
           end
         end },

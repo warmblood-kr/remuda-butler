@@ -1,6 +1,6 @@
 -- Run from the repo root: luajit tests/butler_compaction.lua
 -- Exercise the scheduled tick's shared compaction gate without a daemon.
-local used, busy, composer_empty, session_failure, attached, queued = "?", false, true, false, false, false
+local used, used_pct, busy, composer_empty, session_failure, attached, queued = "?", nil, false, true, false, false, false
 local screen = "mock idle screen"
 remuda = {
   _butler_test_mode = true,
@@ -9,7 +9,7 @@ remuda = {
   _butler_compaction_capture_gap = 3,
   _butler_compaction_cooldown = 2,
   _butler_bus = { agents = { butler = { kind = "claude" } } },
-  _butler_telemetry_for = function() return { context_used = used } end,
+  _butler_telemetry_for = function() return { context_used = used, context_pct = used_pct } end,
   session = function()
     if session_failure then error("session is no longer alive") end
     return { is_busy = busy, attached = attached }
@@ -19,12 +19,32 @@ remuda = {
   capture = function() return screen end,
 }
 dofile("packages/butler/main.lua")
+used = "500000"
+assert(type(remuda.butler) == "table", "composable compaction API must be exported")
+local level = remuda.butler.ctx_level("butler")
+assert(level.level == "watch" and level.used == 500000,
+  "ctx_level must classify threshold context and retain usage")
+assert(type(remuda.butler.is_idle) == "function" and type(remuda.butler.compact) == "function"
+  and type(remuda.butler.compaction_policy) == "function",
+  "compaction must expose idle, per-agent action and composite policy units")
+for _, case in ipairs({ {"399999", "ok"}, {"400000", "watch"},
+    {"600000", "warn"}, {"800000", "critical"} }) do
+  used = case[1]
+  assert(remuda.butler.ctx_level("butler").level == case[2],
+    "unexpected context level at " .. case[1])
+end
+used, used_pct = "100000", 91
+assert(remuda.butler.ctx_level("butler").level == "critical",
+  "critical percentage must override a low absolute usage count")
+used_pct = nil
 remuda._butler_agent_startup = {
   claude = { working = function(value) return value:find("esc to interrupt", 1, true) ~= nil end },
 }
 remuda._butler_prompt_is_empty = function()
   return composer_empty and "EMPTY" or "NON-EMPTY"
 end
+local idle, idle_reason = remuda.butler.is_idle("butler")
+assert(idle and idle_reason == "idle", "is_idle should accept idle session with empty composer")
 local state, sends, fake_now = {}, 0, 100
 remuda._butler_compaction_now = function() return fake_now end
 local function tick(ctx, is_busy)
@@ -99,29 +119,20 @@ end
 send, reason = tick("500000", false)
 assert(not send and reason == "skipped_idle", "idle counting resumes after cooldown ticks pass")
 send, reason = tick("500000", false)
-assert(not send and reason == "skipped_idle" and sends == 2,
-  "normal threshold remains gated until a fresh busy-to-idle transition")
-send, reason = tick("500000", true)
-assert(not send and reason == "skipped_busy", "busy work-loop end arms the next normal compaction")
-send, reason = tick("500000", false)
-assert(not send and reason == "skipped_idle", "first idle capture after work completion waits")
-send, reason = tick("500000", false)
 assert(send and reason == "sent" and sends == 3,
-  "compaction may send again after the configured cooldown expires")
+  "watch level compacts after two idle captures even without a busy transition")
 
 state = {}
 send, reason = tick("500000", false)
 assert(not send and reason == "skipped_idle", "normal threshold idle capture one must wait")
 send, reason = tick("500000", false)
-assert(not send and reason == "skipped_idle" and sends == 3,
-  "normal threshold must not compact during an idle that did not follow busy")
+assert(send and reason == "sent" and sends == 4,
+  "watch level compacts on the second idle capture")
 
 state = {}
 send, reason = tick("600000", false)
-assert(not send and reason == "skipped_idle", "critical threshold still needs the first idle capture")
-send, reason = tick("600000", false)
-assert(send and reason == "sent" and sends == 4,
-  "critical threshold may compact during already-established idle after two captures")
+assert(send and reason == "sent" and sends == 5,
+  "warn level compacts on the first idle capture")
 
 state = {}
 attached = true

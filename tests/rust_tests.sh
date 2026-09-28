@@ -16,7 +16,7 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 CORE_URL=${CORE_URL:-https://github.com/warmblood-kr/remuda.git}
 # Core with delivery channel hooks. Bump deliberately; a core change must not
 # redden Butler PRs.
-CORE_REF=${CORE_REF:-4bbd90f}
+CORE_REF=${CORE_REF:-origin/main}
 
 scratch=$(mktemp -d /tmp/butler-rust.XXXXXX)
 trap 'rm -rf "$scratch"' EXIT
@@ -33,7 +33,11 @@ cp "$REPO/tests/support/matrix_stub_server.py" "$CORE_DIR/native/tests/support/"
 ln -sfn "$REPO/packages" "$CORE_DIR/packages"
 
 export XDG_DATA_HOME=$scratch/data
+export XDG_CONFIG_HOME=$scratch/config
+export TMPDIR=$scratch/tmp
 mkdir -p "$XDG_DATA_HOME/remuda/mods/butler"
+mkdir -p "$XDG_CONFIG_HOME"
+mkdir -p "$TMPDIR"
 cp -R "$REPO/extension.toml" "$REPO/packages" "$XDG_DATA_HOME/remuda/mods/butler/"
 unset REMUDA_SERVER REMUDA_BUTLER_TOKEN REMUDA_BUTLER_CONFIG
 
