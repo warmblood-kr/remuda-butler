@@ -133,12 +133,13 @@ local function envelope_json(message, object)
   if message.matrix then
     local media = {}
     for i, url in ipairs(message.matrix.media or {}) do media[i] = config.json_quote(url) end
-    local thread_root = message.matrix.thread_root and (',"thread_root":' .. config.json_quote(message.matrix.thread_root)) or ""
-    local in_reply_to = message.matrix.in_reply_to and (',"in_reply_to":' .. config.json_quote(message.matrix.in_reply_to)) or ""
     matrix = ',"matrix":{"sender":' .. config.json_quote(message.matrix.sender)
       .. ',"room_id":' .. config.json_quote(message.matrix.room_id)
       .. ',"event_id":' .. config.json_quote(message.matrix.event_id)
-      .. thread_root .. in_reply_to .. ',"media":[' .. table.concat(media, ",") .. ']}'
+      .. (message.matrix.thread_root and ',"thread_root":' .. config.json_quote(message.matrix.thread_root) or "")
+      .. (message.matrix.in_reply_to and ',"in_reply_to":' .. config.json_quote(message.matrix.in_reply_to) or "")
+      .. (message.matrix.mxc and ',"mxc":' .. config.json_quote(message.matrix.mxc) or "")
+      .. ',"media":[' .. table.concat(media, ",") .. ']}'
   end
   return '{"id":' .. config.json_quote(message.id) .. ',"from":' .. address_json(message.from)
     .. ',"to":[' .. address_json(message.to[1]) .. '],"subject":' .. config.json_quote(message.subject)
@@ -204,6 +205,7 @@ local function load_message(disk, id)
       event_id = matrix:match('"event_id":"(.-)"'),
       thread_root = matrix:match('"thread_root":"(.-)"'),
       in_reply_to = matrix:match('"in_reply_to":"(.-)"'),
+      mxc = matrix:match('"mxc":"(.-)"'),
       media = {},
     }
     local media = matrix:match('"media":(%b[])')
@@ -382,9 +384,8 @@ local function queue(from, to, text, subject, in_reply_to, references, matrix)
     in_reply_to = in_reply_to, references = references, content_type = "text/plain; charset=utf-8",
     body = { object_id = object_id }, matrix = matrix and {
       sender = matrix.sender, room_id = matrix.room_id, event_id = matrix.event_id,
-      thread_root = matrix.thread_root ~= "" and matrix.thread_root or nil,
-      in_reply_to = matrix.in_reply_to ~= "" and matrix.in_reply_to or nil,
-      media = matrix.media or {},
+      thread_root = matrix.thread_root, in_reply_to = matrix.in_reply_to,
+      mxc = matrix.mxc, media = matrix.media or {},
     } or nil }
   local disk = paths(recipient_id)
   if disk then
