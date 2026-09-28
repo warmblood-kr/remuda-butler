@@ -1631,10 +1631,10 @@ bus.notices = bus.notices or {}
 bus.notice_screens = bus.notice_screens or {}
 local NOTICE_STABLE_SECONDS = 3
 
--- The composer's text: the last line led (after an optional box edge) by a
--- prompt glyph. Returns "EMPTY" (nothing, or exactly one of the kind's
--- `placeholders`), "NON-EMPTY" or "UNPARSEABLE", plus the text. Capture is
--- plain text, so a dim ghost suggestion reads as NON-EMPTY and defers (#137).
+-- The composer's text starts after the last prompt glyph and includes its
+-- continuation rows up to the TUI footer. Returns "EMPTY" (nothing, or
+-- exactly one of the kind's `placeholders`), "NON-EMPTY" or "UNPARSEABLE",
+-- plus the text. Dim ghost suggestions stay NON-EMPTY and defer (#137).
 local PROMPT_GLYPHS = { "❯", ">", "›" }
 function remuda._butler_prompt_is_empty(kind, screen)
   local text, prompt_at
@@ -1823,20 +1823,268 @@ function remuda._butler_human_active(session, now)
   return now - seen.since < NOTICE_STABLE_SECONDS
 end
 
--- `_butler_notify` is the seam: queue NOTICE for ALIAS and type it (with any
--- still pending) if the policy allows. Returns delivered, type_text error.
+-- `_butler_notify` queues each notice. Delivery verifies an empty composer;
+-- for an idle stuck composer it uses the bounded, draft-preserving recovery below.
+bus.notice_recoveries = bus.notice_recoveries or {}
+local function pending_notice_text(pending)
+  return pending.count == 1 and pending.text
+    or (pending.count .. " new Butler messages arrived. Read them: remuda butler inbox")
+end
+local function recovery_screen(session)
+  local ok, screen = pcall(remuda.capture, session)
+  if not ok then return nil end
+  local agent = bus.agents[session]
+  local kind = agent and agent.kind or ""
+  local decision, text = remuda._butler_prompt_is_empty(kind, tostring(screen or ""))
+  return screen, decision, text
+end
+local function recovery_draft(kind, screen, first_line)
+  local lines, prompt_at = {}, nil
+  screen = tostring(screen or ""):gsub("\194\160", " "):gsub("\r\n", "\n")
+  for line in (screen .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
+  local composer_text = tostring(first_line or "")
+  local composer_lines = {}
+  for line in (composer_text .. "\n"):gmatch("(.-)\n") do
+    composer_lines[line:match("^%s*(.-)%s*$")] = true
+  end
+  local composer_is_multiline = composer_text:find("\n", 1, true) ~= nil
+  local glyphs = { "❯", ">", "›" }
+  for index, line in ipairs(lines) do
+    local rest = line:gsub("^%s+", "")
+    if rest:sub(1, 3) == "│" then rest = rest:sub(4):gsub("^%s+", "") end
+    for _, glyph in ipairs(glyphs) do
+      if rest:sub(1, #glyph) == glyph then prompt_at = index end
+    end
+  end
+  if not prompt_at then return nil, false end
+  local parts = { composer_text }
+  for index = prompt_at + 1, #lines do
+    local rest = lines[index]:gsub("^%s+", "")
+    if rest == "" then
+      -- Empty rows can separate a boxed prompt from its lower border.
+    elseif rest:sub(1, 3) == "╰" or rest:sub(1, 3) == "└" or rest:sub(1, 3) == "─" then
+      break
+    elseif kind == "claude" and rest:sub(1, 3) == "│" then
+      local continuation = rest:sub(4):gsub("│%s*$", ""):match("^%s*(.-)%s*$")
+      if continuation ~= "" then
+        if composer_is_multiline then
+          if not composer_lines[continuation] then return nil, false end
+        else
+          parts[#parts + 1] = continuation
+        end
+      end
+    elseif kind == "codex" and (rest:match("^%? for shortcuts")
+        or rest:lower():find("context left", 1, true)
+        or rest:match("^[^%s]+%s+[^%s]+%s+·")) then
+      -- Known Codex model/path and help footer rows are outside the composer.
+    elseif composer_is_multiline and composer_lines[rest:match("^%s*(.-)%s*$")] then
+      -- This row was already parsed into the full composer text.
+    else
+      -- Don't erase a multiline draft when the TUI's continuation rows
+      -- cannot be distinguished from footer text.
+      return nil, false
+    end
+  end
+  return table.concat(parts, "\n"), true
+end
+local function normalized_composer(text)
+  return tostring(text or ""):gsub("\194\160", " "):gsub("\r\n", "\n"):gsub("\r", "\n")
+    :match("^%s*(.-)%s*$")
+end
+local function compact_composer(text)
+  return tostring(text or ""):gsub("\194\160", " "):gsub("%s+", "")
+end
+local function notice_matches_composer(session, screen, text, expected)
+  local agent = bus.agents[session]
+  local composer, safe = recovery_draft(agent and agent.kind or "", screen, text)
+  local expected_compact = compact_composer(expected)
+  return (safe and compact_composer(composer) == expected_compact)
+    or compact_composer(text) == expected_compact
+end
+local function recovery_composer_empty(session, screen, decision, text)
+  if decision ~= "EMPTY" then return false end
+  local agent = bus.agents[session]
+  local composer, safe = recovery_draft(agent and agent.kind or "", screen, "")
+  return safe and normalized_composer(composer) == ""
+end
+local function notice_recovery_error(session, state, reason)
+  state.failed = true
+  local agent = bus.agents[session]
+  local parent = agent and agent.parent or "butler"
+  _butler_session_trace("notice_recovery_failed", session .. " " .. reason)
+  pcall(remuda._butler_send, "butler", parent,
+    "Could not safely deliver queued Butler mail to " .. session .. ": " .. reason
+    .. ". Inspect the composer and resend the notice."
+    .. (state.draft and (" Parsed composer draft: " .. state.draft) or ""))
+  return false
+end
+local function complete_notice_recovery(session, state)
+  local pending = bus.notices[session]
+  if pending then
+    pending.count = pending.count - state.count
+    if pending.count <= 0 then bus.notices[session] = nil end
+  end
+  bus.notice_recoveries[session] = nil
+  return true
+end
+local function recovery_human_safe(session)
+  local session_row
+  for _, candidate in ipairs(remuda.ls()) do
+    if candidate.name == session then session_row = candidate end
+  end
+  if not session_row or not session_row.alive or session_row.attached then return false end
+  if remuda._butler_human_active(session) then return false end
+  if remuda.session then
+    local ok, row = pcall(remuda.session, session)
+    if not ok or not row or row.is_busy then return false end
+  end
+  return true
+end
+local function begin_notice_submit(session, state, draft)
+  local pending = bus.notices[session]
+  if not pending then bus.notice_recoveries[session] = nil; return true end
+  state.draft = draft
+  state.count = pending.count
+  state.notice = pending_notice_text(pending)
+  if draft and draft ~= "" then
+    state.notice = state.notice .. "\n\nYour unsent draft was: " .. draft
+  end
+  bus.notice_recoveries[session] = state
+  local typed, why = pcall(remuda.type_text, session, state.notice, 0.1)
+  if not typed then return notice_recovery_error(session, state, "the notice could not be typed: " .. tostring(why)) end
+  state.phase, state.checks, state.saw_notice = "verify_notice", 0, false
+  return false
+end
+local function tick_notice_recovery(session, state)
+  if state.failed then return false end
+  if not recovery_human_safe(session) then return false end
+  state.checks = (state.checks or 0) + 1
+  if state.checks > 40 then return notice_recovery_error(session, state, "verification timed out") end
+  local screen, decision, text = recovery_screen(session)
+  if not screen then return notice_recovery_error(session, state, "the pane could not be captured") end
+  local normalized = tostring(screen):gsub("\r\n", "\n"):gsub("\r", "\n")
+  if state.phase == "probe" then
+    if state.last_screen == normalized then state.stable = (state.stable or 0) + 1
+    else state.last_screen, state.stable = normalized, 1 end
+    if state.stable < 2 then return false end
+    if decision == "EMPTY" then
+      bus.notice_recoveries[session] = nil
+      return begin_notice_submit(session, state)
+    end
+    state.pre_redraw_decision, state.pre_redraw_screen, state.pre_redraw_text = decision, screen, text
+    local redrawn, why = pcall(remuda.key, session, "C-l")
+    if not redrawn then return notice_recovery_error(session, state, "Ctrl-L redraw failed: " .. tostring(why)) end
+    state.phase = "redrawn"
+    return false
+  elseif state.phase == "redrawn" then
+    if decision == "EMPTY" then
+      if state.pre_redraw_decision == "NON-EMPTY" then
+        local pending = pending_notice_text(bus.notices[session] or { count = 0, text = "" })
+        if notice_matches_composer(session, state.pre_redraw_screen, state.pre_redraw_text, pending) then
+          return begin_notice_submit(session, state)
+        end
+        local agent = bus.agents[session]
+        local draft, safe = recovery_draft(agent and agent.kind or "", state.pre_redraw_screen,
+          state.pre_redraw_text)
+        if not safe then
+          return notice_recovery_error(session, state, "the pre-redraw draft could not be preserved")
+        end
+        return begin_notice_submit(session, state, draft)
+      end
+      return begin_notice_submit(session, state)
+    end
+    if decision == "UNPARSEABLE" or not text or text == "" then
+      return notice_recovery_error(session, state, "the composer remained unparseable after Ctrl-L")
+    end
+    local current_notice = pending_notice_text(bus.notices[session] or { count = 0, text = "" })
+    if notice_matches_composer(session, screen, text, current_notice) then
+      local pressed, why = pcall(remuda.key, session, "RET")
+      if not pressed then return notice_recovery_error(session, state, "the existing Butler notice could not be submitted: " .. tostring(why)) end
+      state.phase, state.checks = "verify_existing", 0
+      return false
+    end
+    local agent = bus.agents[session]
+    local startup = remuda._butler_agent_startup[agent and agent.kind or ""] or {}
+    local draft, safe = recovery_draft(agent and agent.kind or "", screen, text)
+    if not safe then
+      return notice_recovery_error(session, state, "the draft spans unrecognized composer rows")
+    end
+    if not startup.clear_input then
+      state.draft = draft
+      return notice_recovery_error(session, state, "this agent has no verified composer clear key")
+    end
+    state.draft = draft
+    local cleared, why = pcall(remuda.key, session, startup.clear_input)
+    if not cleared then return notice_recovery_error(session, state, "the draft clear key failed: " .. tostring(why)) end
+    state.phase, state.checks = "verify_clear", 0
+    return false
+  elseif state.phase == "verify_clear" then
+    if not recovery_composer_empty(session, screen, decision, text) then
+      return notice_recovery_error(session, state, "the composer did not become empty after the clear key")
+    end
+    return begin_notice_submit(session, state, state.draft)
+  elseif state.phase == "verify_existing" then
+    if decision == "EMPTY" then
+      return complete_notice_recovery(session, state)
+    end
+    if state.checks >= 6 then
+      return notice_recovery_error(session, state, "the existing Butler notice did not leave the composer")
+    end
+    return false
+  elseif state.phase == "verify_notice" then
+    local notice_head = tostring(state.notice or ""):gsub("%s+", ""):sub(1, 32)
+    local notice_visible = notice_head ~= "" and normalized:gsub("%s+", ""):find(notice_head, 1, true) ~= nil
+    if notice_visible or (decision == "NON-EMPTY"
+        and notice_matches_composer(session, screen, text, state.notice)) then
+      state.saw_notice = true
+    end
+    local agent = bus.agents[session]
+    local non_tui_echo = decision == "UNPARSEABLE" and agent
+      and agent.kind ~= "claude" and agent.kind ~= "codex" and notice_visible
+    if (decision == "EMPTY" and state.saw_notice) or non_tui_echo then
+      return complete_notice_recovery(session, state)
+    end
+    if decision == "NON-EMPTY" and notice_matches_composer(session, screen, text, state.notice)
+        and not state.return_retried then
+      if not recovery_human_safe(session) then return false end
+      local pressed, why = pcall(remuda.key, session, "RET")
+      if not pressed then return notice_recovery_error(session, state, "the notice Return failed: " .. tostring(why)) end
+      state.return_retried = true
+      return false
+    end
+    if state.checks >= 12 then
+      return notice_recovery_error(session, state, "the notice submit could not be verified")
+    end
+    return false
+  end
+  return notice_recovery_error(session, state, "unknown recovery state")
+end
 local function deliver_notice(session)
   local pending = bus.notices[session]
   if not pending then return true end
   if bus.pending_tasks[session] then return false end
-  if not remuda._butler_notify_policy(session) then return false end
-  local text = pending.count == 1 and pending.text
-    or (pending.count .. " new Butler messages arrived. Read them: remuda butler inbox")
-  local typed, why = pcall(remuda.type_text, session, text)
-  -- Keep a notice that failed to type for the next retry; the exit hook
-  -- drops it if the session is gone.
-  if typed then bus.notices[session] = nil end
-  return typed, why
+  local recovering = bus.notice_recoveries[session]
+  if recovering then
+    if (recovering.failed or recovering.phase == "probe" or recovering.phase == "redrawn")
+        and remuda._butler_notify_policy(session) then
+      bus.notice_recoveries[session] = nil
+      recovering = nil
+    else
+      return tick_notice_recovery(session, recovering)
+    end
+  end
+  if remuda._butler_notify_policy(session) then
+    local state = { phase = "verify_notice", count = pending.count, notice = pending_notice_text(pending), checks = 0 }
+    local typed, why = pcall(remuda.type_text, session, state.notice, 0.1)
+    if not typed then return false, why end
+    bus.notice_recoveries[session] = state
+    return false
+  end
+  local screen, decision = recovery_screen(session)
+  if not screen or decision == "EMPTY" then return false end
+  local state = { phase = "probe", count = pending.count, checks = 0 }
+  bus.notice_recoveries[session] = state
+  return tick_notice_recovery(session, state)
 end
 function remuda._butler_notify(alias, notice)
   local pending = bus.notices[alias] or { count = 0 }
@@ -2654,6 +2902,7 @@ function remuda._butler_session_exited(name, info)
   end
   -- #29: the mail stays in the inbox; only the pending pane notice goes.
   bus.notices[name], bus.notice_screens[name], bus.pending_tasks[name] = nil, nil, nil
+  bus.notice_recoveries[name], bus.task_retry_screens[name], bus.human_activity_screens[name] = nil, nil, nil
   local exited = bus.agents[name]
   if exited and name ~= "butler" then
     local ended = bus.identity_ids[exited.id] or exited

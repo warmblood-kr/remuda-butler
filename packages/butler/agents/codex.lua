@@ -40,6 +40,7 @@ remuda._butler_agent_startup.codex = {
     return screen:find("Ask Codex", 1, true) ~= nil
   end,
   working = function(screen) return screen:find("esc to interrupt", 1, true) ~= nil end,
+  clear_input = "C-u",
   -- #29: the empty composer's fixed placeholder (codex 0.156.0), exact match.
   placeholders = { "Ask Codex to do anything" },
   modals = {
