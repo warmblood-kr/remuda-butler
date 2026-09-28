@@ -1,27 +1,5 @@
--- remuda-butler: runs one Claude Code session, optionally bridged to Matrix
--- and replying there via an MCP tool. See docs/design.md.
-
-local REPLY_SRC = [==[
-set -euo pipefail
-
-TOKEN="$(cat "$1")"
-HOMESERVER="$(sed -n '1p' "$2")"
-ROOM_ID="$(sed -n '2p' "$2")"
-TEXT="$3"
-
-TXN_ID="remuda-butler-$(date +%s%N)"
-BODY_JSON="$(python3 -c 'import json,sys; print(json.dumps({"msgtype":"m.text","body":sys.argv[1]}))' "$TEXT")"
-ENC_ROOM="$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$ROOM_ID")"
-
-# The Authorization header carries the bearer token; passing it via -H would
-# put the token in this process's own argv, visible to any other user via
-# `ps`. -K - reads curl's config (here, just the one header) from stdin
-# instead, which never appears in argv.
-printf 'header = "Authorization: Bearer %s"\n' "$TOKEN" | curl -sf -K - -X PUT \
-  "$HOMESERVER/_matrix/client/v3/rooms/$ENC_ROOM/send/m.room.message/$TXN_ID" \
-  -H "Content-Type: application/json" \
-  -d "$BODY_JSON" >/dev/null
-]==]
+-- remuda-butler: runs one Claude Code session, optionally bridged to Matrix.
+-- Matrix writes compose the async request vocabulary in matrix_write.lua.
 
 -- Claude calls statusLine commands with a JSON snapshot on stdin.  This
 -- helper is deliberately the sole producer of Butler's telemetry: it emits a
@@ -90,7 +68,6 @@ end
 
 -- Exposed so tests can inspect the daemon-local MCP helper without starting a
 -- real process/session (this harness does not have a real agent CLI).
-remuda._butler_reply_src = REPLY_SRC
 remuda._butler_statusline_src = STATUSLINE_SRC
 remuda._butler_initial_name = initial_butler_name()
 
@@ -2222,10 +2199,16 @@ remuda.tool{
   args = { text = "The reply text to send." },
   needs = { "text" },
   run = function(a)
-    remuda.process{
-      argv = {"bash", "-c", REPLY_SRC, "_", token_path, config_path, a.text},
-      on_exit = "butler-matrix-reply-exit",
-    }
+    local synchronous, invoking = nil, true
+    remuda.butler.matrix.send({ text = a.text }, function(result)
+      if invoking then synchronous = result
+      else
+        remuda.emit("butler-matrix-error", "send", result.error)
+        io.stderr:write("butler Matrix send failed: " .. tostring(result.error) .. "\n")
+      end
+    end)
+    invoking = false
+    if synchronous and synchronous.error then error(synchronous.error, 0) end
     return "queued"
   end,
 }

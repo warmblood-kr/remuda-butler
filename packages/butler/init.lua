@@ -42,7 +42,10 @@ return {
     host._butler_state = state
     boot()
     local matrix = host.butler and host.butler.matrix
-    if matrix and matrix.relay then matrix.relay.start(host._butler_matrix_config) end
+    if matrix and matrix.relay and not host._butler_skip_relay
+      and type(host.http) == "table" and type(host.http.request) == "function" then
+      matrix.relay.start(host._butler_matrix_config)
+    end
   end,
   stop = function(state)
     if host._butler_cancel_active_choosers then host._butler_cancel_active_choosers(state) end

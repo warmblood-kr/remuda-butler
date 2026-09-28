@@ -6,9 +6,11 @@ local matrix = butler.matrix or {}
 butler.matrix = matrix
 
 if not matrix.request_json then remuda.exec("butler/matrix_request") end
+if not matrix.send then remuda.exec("butler/matrix_write") end
 remuda.exec("butler/matrix_relay")
 
-if remuda._butler_matrix_config and matrix.relay then
+if remuda._butler_matrix_config and matrix.relay and not remuda._butler_skip_relay
+  and type(remuda.http) == "table" and type(remuda.http.request) == "function" then
   matrix.relay.start(remuda._butler_matrix_config)
 end
 

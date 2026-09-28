@@ -33,7 +33,13 @@ cp "$REPO/tests/support/matrix_stub_server.py" "$REPO/tests/support/fake_http.lu
 ln -sfn "$REPO/packages" "$CORE_DIR/packages"
 
 export XDG_DATA_HOME=$scratch/data
-mkdir -p "$XDG_DATA_HOME/remuda/mods/butler"
+export HOME=$scratch/home
+export XDG_CONFIG_HOME=$scratch/config
+export REMUDA_RUNTIME_DIR=$scratch/run
+export CARGO_HOME=/Users/jeongsoopark/.cargo
+export RUSTUP_HOME=/Users/jeongsoopark/.rustup
+export PATH=$CARGO_HOME/bin:$PATH
+mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$REMUDA_RUNTIME_DIR" "$XDG_DATA_HOME/remuda/mods/butler"
 cp -R "$REPO/extension.toml" "$REPO/packages" "$XDG_DATA_HOME/remuda/mods/butler/"
 unset REMUDA_SERVER REMUDA_BUTLER_TOKEN REMUDA_BUTLER_CONFIG
 
