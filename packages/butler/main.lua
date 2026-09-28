@@ -419,6 +419,26 @@ remuda._butler_bus = remuda._butler_bus or {
   agents = {}, tokens = {}, inboxes = {}, messages = {}, objects = {}, next = 0,
 }
 local bus = remuda._butler_bus
+
+-- Contribution points (hook-design §4): core's owned registry when this core
+-- has one (remuda#141), else Butler's own with the same order rules, on bus.
+bus.contributions = bus.contributions or {}
+function remuda._butler_contribute(point, id, entry)
+  if remuda.contribute then return remuda.contribute(point, id, entry) end
+  bus.contributions[point] = bus.contributions[point] or {}
+  bus.contributions[point][id] = entry
+end
+local function contributions(point)
+  if remuda.contributions then return remuda.contributions(point) end
+  local rows = {}
+  for id, entry in pairs(bus.contributions[point] or {}) do rows[#rows + 1] = { id = id, entry = entry } end
+  table.sort(rows, function(a, b)
+    local left, right = a.entry.order or 0, b.entry.order or 0
+    if left ~= right then return left < right end
+    return a.id < b.id
+  end)
+  return rows
+end
 bus.messages = bus.messages or {}
 bus.objects = bus.objects or {}
 -- ULIDs are durable public identities; session names remain the mutable,
@@ -641,15 +661,26 @@ local function setup_telemetry(kind, spec)
   local adapter = TELEMETRY_ADAPTERS[kind]
   return adapter and adapter.setup and adapter.setup(spec) or {}
 end
-local function team_member_guidance(parent)
-  return [[# Butler team member
+-- A member's AGENTS.md and prompt are `butler.guidance` sections joined in
+-- order, so an extension adds its own section (hook-design §4.2).
+remuda._butler_contribute("butler.guidance", "header", { order = 10,
+  agents_md = function(ctx)
+    return [[# Butler team member
 
-You are a Butler team member. Your leader is ]] .. parent .. [[. Work on the
+You are a Butler team member. Your leader is ]] .. ctx.parent .. [[. Work on the
 task sent to this terminal. Your Butler identity is already in
 `REMUDA_BUTLER_AGENT_ID`, and your leader is in `REMUDA_BUTLER_LEADER_ID`.
 Start by running `remuda butler inbox` to read your welcome message.
 
-Use Butler's CLI for communication:
+]]
+  end,
+  prompt = function()
+    return "You are a Butler team member. Start by running `remuda butler inbox` to read "
+      .. "your welcome message, then read AGENTS.md in your working directory. "
+  end })
+remuda._butler_contribute("butler.guidance", "cli", { order = 20,
+  agents_md = function()
+    return [[Use Butler's CLI for communication:
 
 - `remuda butler inbox` reads your own queued messages.
 - `remuda butler send MEMBER "MESSAGE"` sends a message; your sender is inferred.
@@ -657,23 +688,41 @@ Use Butler's CLI for communication:
 - `remuda butler send-to-leader RESULT...` reports a completed work loop.
 - `remuda butler sessions` shows the household.
 
-If `inbox` says "no Butler identity in your env", your Remuda core predates
+]]
+  end,
+  prompt = function()
+    return "Use `remuda butler inbox`, `remuda butler send MEMBER \"MESSAGE\"`, and "
+      .. "`remuda butler send-to-leader RESULT...` for coordination. "
+  end })
+remuda._butler_contribute("butler.guidance", "old-core", { order = 30,
+  agents_md = function()
+    return [[If `inbox` says "no Butler identity in your env", your Remuda core predates
 caller-env forwarding: pass your id (`remuda butler inbox
 $REMUDA_BUTLER_AGENT_ID`) or use the MCP `butler_*` tools. On such a core,
 `send` is attributed to "operator" rather than to you.
 
-You may create a Remuda-managed child team with `remuda butler topic delegate
+]]
+  end })
+remuda._butler_contribute("butler.guidance", "delegation", { order = 40,
+  agents_md = function()
+    return [[You may create a Remuda-managed child team with `remuda butler topic delegate
 NAME TASK...` when useful. Internal agent subagents are separate from Butler
 team members. `remuda butler send FROM TO MESSAGE...` is an operator form, not
 the normal way for a member to communicate.
 ]]
+  end })
+remuda._butler_contribute("butler.guidance", "leader", { order = 90,
+  prompt = function(ctx) return "Your leader is " .. ctx.parent .. "." end })
+local function guidance(part, parent)
+  local out = {}
+  for _, item in ipairs(contributions("butler.guidance")) do
+    local render = item.entry[part]
+    if render then out[#out + 1] = render({ parent = parent }) or "" end
+  end
+  return table.concat(out)
 end
-local function team_member_prompt(parent)
-  return "You are a Butler team member. Start by running `remuda butler inbox` to read "
-    .. "your welcome message, then read AGENTS.md in your working directory. Use "
-    .. "`remuda butler inbox`, `remuda butler send MEMBER \"MESSAGE\"`, and "
-    .. "`remuda butler send-to-leader RESULT...` for coordination. Your leader is " .. parent .. "."
-end
+local function team_member_guidance(parent) return guidance("agents_md", parent) end
+local function team_member_prompt(parent) return guidance("prompt", parent) end
 local function write_agent_guidance(root, text, replace)
   local path = root .. "/AGENTS.md"
   if not replace and file_exists(path) then return end
@@ -1105,19 +1154,7 @@ function remuda.session_detail(session)
   return detail
 end
 
-local BUTLER_USAGE = [[remuda butler — coordination for managed agents
-
-  remuda butler sessions
-  remuda butler launch <claude|codex> [name] [--model M]
-  remuda butler topic new <name> [--template T] [--agent A] [--model M]
-  remuda butler topic delegate <name> [--agent A] [--leader L] [--model M] <task...>
-  remuda butler send <to> "<message>"
-  remuda butler send <from> <to> <message...>
-  remuda butler send-to-leader <message...>
-  remuda butler inbox [name]
-  remuda butler reply <message-id> <message...>
-  remuda butler forward <message-id> <member> [note...]
-
+local USAGE_NOTES = [[
 Agent sessions receive REMUDA_BUTLER_AGENT_ID and REMUDA_BUTLER_LEADER_ID.
 In an agent session, use `inbox`, `send <to> "..."`, and `send-to-leader ...`;
 the identity comes from the caller's environment. Quote the message for
@@ -1128,6 +1165,13 @@ from "operator" and `inbox` needs a name (`inbox <name>`).
 `reply` answers a message's original sender, even when it was forwarded to you;
 `forward` re-delivers a message you received, keeping its sender, with a note.
 ]]
+-- Help lists every `butler.command` entry's usage in order, so it names only
+-- the verbs that are installed.
+local function butler_usage()
+  local lines = {}
+  for _, item in ipairs(contributions("butler.command")) do lines[#lines + 1] = item.entry.usage end
+  return "remuda butler — coordination for managed agents\n\n" .. table.concat(lines, "\n") .. "\n\n" .. USAGE_NOTES
+end
 
 local function words_after(args, first)
   local words = {}
@@ -1135,48 +1179,37 @@ local function words_after(args, first)
   return table.concat(words, " ")
 end
 
--- The generic Remuda extension-command bridge passes an argv-like Lua table.
--- This parser lives with Butler, not in the Remuda executable.
-remuda.extension_command("butler", function(args, caller)
-  if #args == 0 or args[1] == "help" or args[1] == "-h" or args[1] == "--help" then return BUTLER_USAGE end
-  if #args == 1 and args[1] == "sessions" then return remuda._butler_sessions() end
-  if args[1] == "launch" and (args[2] == "claude" or args[2] == "codex") then
-    local model
-    if args[#args - 1] == "--model" then model = args[#args]; args[#args] = nil; args[#args] = nil end
-    -- The calling member leads the child; only the operator's falls to butler (#24).
-    local parent = current_agent(caller)
-    if #args == 2 then return remuda._butler_launch(args[2], nil, model, parent) end
-    if #args == 3 then return remuda._butler_launch(args[2], args[3], model, parent) end
-  end
-  if args[1] == "inbox" then return remuda._butler_inbox(args[2] or assert(current_agent(caller), "no Butler identity in your env; use `inbox <name>`")) end
-  if args[1] == "reply" and #args >= 3 then
-    return remuda._butler_reply(current_agent(caller) or OPERATOR, args[2], words_after(args, 3))
-  end
-  if args[1] == "forward" and #args >= 3 then
-    return remuda._butler_forward(current_agent(caller) or OPERATOR, args[2], args[3],
-      #args >= 4 and words_after(args, 4) or nil)
-  end
-  if args[1] == "send-to-leader" and #args >= 2 then
-    local from = assert(current_agent(caller), OPERATOR .. " has no leader; send-to-leader is for Butler agents")
-    return remuda._butler_report(from, words_after(args, 2))
-  end
-  if args[1] == "send" and #args >= 3 then
-    local from, to, first = current_agent(caller) or OPERATOR, args[2], 3
-    if #args >= 4 then from, to, first = args[2], args[3], 4 end
-    return remuda._butler_send(from, to, words_after(args, first))
-  end
-  if args[1] == "topic" and args[2] == "new" and args[3] then
+-- Each verb is a `butler.command` entry (hook-design §4.1); `run` returns nil
+-- when its arguments do not fit, and the caller gets the usage text.
+local function command(order, verb, usage, run)
+  remuda._butler_contribute("butler.command", verb, { order = order, verb = verb, usage = usage, run = run })
+end
+command(10, "sessions", "  remuda butler sessions", function(args)
+  if #args == 1 then return remuda._butler_sessions() end
+end)
+command(20, "launch", "  remuda butler launch <claude|codex> [name] [--model M]", function(args, caller)
+  if args[2] ~= "claude" and args[2] ~= "codex" then return nil end
+  local model
+  if args[#args - 1] == "--model" then model = args[#args]; args[#args] = nil; args[#args] = nil end
+  -- The calling member leads the child; only the operator's falls to butler (#24).
+  local parent = current_agent(caller)
+  if #args == 2 then return remuda._butler_launch(args[2], nil, model, parent) end
+  if #args == 3 then return remuda._butler_launch(args[2], args[3], model, parent) end
+end)
+command(30, "topic", "  remuda butler topic new <name> [--template T] [--agent A] [--model M]\n"
+  .. "  remuda butler topic delegate <name> [--agent A] [--leader L] [--model M] <task...>", function(args, caller)
+  if args[2] == "new" and args[3] then
     local template, kind, model, i = nil, nil, nil, 4
     while i <= #args do
       if args[i] == "--template" then template = args[i + 1]
       elseif args[i] == "--agent" then kind = args[i + 1]
       elseif args[i] == "--model" then model = args[i + 1]
-      else return BUTLER_USAGE end
+      else return nil end
       i = i + 2
     end
     return remuda._butler_topic_new(args[3], template, kind, model)
   end
-  if args[1] == "topic" and args[2] == "delegate" and args[3] then
+  if args[2] == "delegate" and args[3] then
     local kind, parent, model, i = nil, current_agent(caller) or "butler", nil, 4
     while i <= #args and (args[i] == "--agent" or args[i] == "--leader" or args[i] == "--model") do
       if args[i] == "--agent" then kind = args[i + 1]
@@ -1186,7 +1219,42 @@ remuda.extension_command("butler", function(args, caller)
     end
     if i <= #args then return remuda._butler_topic_delegate(args[3], words_after(args, i), nil, kind, parent, model) end
   end
-  return BUTLER_USAGE
+end)
+command(40, "send", '  remuda butler send <to> "<message>"\n  remuda butler send <from> <to> <message...>', function(args, caller)
+  if #args < 3 then return nil end
+  local from, to, first = current_agent(caller) or OPERATOR, args[2], 3
+  if #args >= 4 then from, to, first = args[2], args[3], 4 end
+  return remuda._butler_send(from, to, words_after(args, first))
+end)
+command(50, "send-to-leader", "  remuda butler send-to-leader <message...>", function(args, caller)
+  if #args < 2 then return nil end
+  local from = assert(current_agent(caller), OPERATOR .. " has no leader; send-to-leader is for Butler agents")
+  return remuda._butler_report(from, words_after(args, 2))
+end)
+command(60, "inbox", "  remuda butler inbox [name]", function(args, caller)
+  return remuda._butler_inbox(args[2] or assert(current_agent(caller), "no Butler identity in your env; use `inbox <name>`"))
+end)
+command(70, "reply", "  remuda butler reply <message-id> <message...>", function(args, caller)
+  if #args < 3 then return nil end
+  return remuda._butler_reply(current_agent(caller) or OPERATOR, args[2], words_after(args, 3))
+end)
+command(80, "forward", "  remuda butler forward <message-id> <member> [note...]", function(args, caller)
+  if #args < 3 then return nil end
+  return remuda._butler_forward(current_agent(caller) or OPERATOR, args[2], args[3],
+    #args >= 4 and words_after(args, 4) or nil)
+end)
+
+-- The generic Remuda extension-command bridge passes an argv-like Lua table.
+-- This parser lives with Butler, not in the Remuda executable.
+remuda.extension_command("butler", function(args, caller)
+  if #args == 0 or args[1] == "help" or args[1] == "-h" or args[1] == "--help" then return butler_usage() end
+  for _, item in ipairs(contributions("butler.command")) do
+    if item.entry.verb == args[1] then
+      local result = item.entry.run(args, caller)
+      if result ~= nil then return result end
+    end
+  end
+  return butler_usage()
 end)
 
 remuda.tool{
