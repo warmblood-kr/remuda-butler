@@ -9,7 +9,8 @@
 #   CORE_DIR=~/src/remuda tests/rust_tests.sh
 #
 # Only Butler's tests run: the rest of butler_daemon.rs duplicates core's own
-# daemon.rs and is core's to test. Needs: cargo, git, python3.
+# daemon.rs and is core's to test. Needs: cargo and git. The Matrix stub server
+# is an explicit Python exception pending M2's relay conversion.
 set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
