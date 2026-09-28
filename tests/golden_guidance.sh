@@ -20,7 +20,7 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 GOLDEN=$REPO/tests/golden
 CORE_URL=${CORE_URL:-https://github.com/warmblood-kr/remuda.git}
 # Keep in step with tests/rust_tests.sh.
-CORE_REF=${CORE_REF:-4f6612f}
+CORE_REF=${CORE_REF:-844b0c9}
 T=$(mktemp -d /tmp/bgg.XXXXXX) S=bgg
 source_home=${HOME:-/tmp}
 export CARGO_HOME=${CARGO_HOME:-$source_home/.cargo}
