@@ -226,12 +226,19 @@ function remuda._butler_compaction_gate(session_name, st)
   local used = tonumber(ctx)
   if not used then
     st.idle_ticks = 0
+    if (st.cooldown_ticks or 0) > 0 then st.cooldown_ticks = st.cooldown_ticks - 1 end
     return false, "skipped_unknown", ctx
   end
   local threshold = remuda._butler_compaction_threshold or 400000
   if used < threshold then
     st.idle_ticks = 0
+    st.cooldown_ticks = 0
     return false, "skipped_small", ctx
+  end
+  if (st.cooldown_ticks or 0) > 0 then
+    st.cooldown_ticks = st.cooldown_ticks - 1
+    st.idle_ticks = 0
+    return false, "skipped_cooldown", ctx
   end
   local found, session = pcall(remuda.session, session_name)
   if not found or not session then
@@ -267,7 +274,12 @@ function remuda._butler_compaction_gate(session_name, st)
   st.idle_ticks = st.idle_ticks + 1
   if st.idle_ticks < 2 then return false, "skipped_idle", ctx end
   st.idle_ticks = 0
+  st.cooldown_ticks = math.max(0, tonumber(remuda._butler_compaction_cooldown) or 4)
   return true, "sent", ctx
+end
+
+function remuda._butler_compaction_reset_idle(st)
+  st.idle_ticks = 0
 end
 
 function remuda._butler_compaction_submit_matches(decision, text)
@@ -290,6 +302,10 @@ end
 if legacy_compaction_schedule and remuda._butler_state then
   remuda._butler_state.compaction_enabled = true
 end
+if not remuda._butler_state then
+  remuda._butler_compaction_state = remuda._butler_compaction_state or {}
+end
+remuda._butler_compaction_reset_idle(remuda._butler_state or remuda._butler_compaction_state)
 
 -- `os.getenv` here reads the *daemon's own* environment, fixed forever at
 -- whichever moment first birthed that daemon (see docs/install-butler.sh's
@@ -1731,6 +1747,9 @@ end
 -- replaces the schedule without leaving an old handle behind.
 function remuda._butler_register_compaction_schedule()
   _butler_trace("registered")
+  local state = remuda._butler_state or remuda._butler_compaction_state or {}
+  remuda._butler_compaction_reset_idle(state)
+  if not remuda._butler_state then remuda._butler_compaction_state = state end
   if remuda._butler_state then
     remuda._butler_state.compaction_enabled = true
   else
