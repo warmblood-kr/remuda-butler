@@ -405,6 +405,69 @@ fn a_task_deferred_too_long_times_out_and_tells_the_leader() {
     }
 }
 
+/// #44: a notice must not join a delegated task in the child's unsubmitted
+/// first prompt. The delegated task is submitted before the notice may type.
+#[test]
+#[cfg(unix)]
+fn a_topic_task_is_submitted_before_an_immediate_notice_is_typed() {
+    let dir = scratch("topic-first-prompt-notice");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    let script = dir.join("fake-claude.sh");
+    let submitted = dir.join("submitted.txt");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\n\
+         submitted=$1\n\
+         printf 'Claude Code\\n────────────────────\\n❯ '\n\
+         while IFS= read -r line; do\n\
+           printf '%s\\n' \"$line\" >> \"$submitted\"\n\
+           printf '\\naccepted:%s\\n────────────────────\\n❯ ' \"$line\"\n\
+         done\n",
+    )
+    .expect("write fake Claude");
+    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+    eval(
+        &path,
+        &format!(
+            r#"
+            remuda.butler.project_home({projects:?})
+            remuda._butler_agent_builders.claude = function() return {{"sh", {script:?}, {submitted:?}}} end
+            remuda._butler_topic_delegate("topic", "do the delegated task", nil, "claude", "butler")
+            remuda._butler_send("operator", "topic", "immediate mail")
+            "#,
+            projects = dir.join("projects").to_string_lossy(),
+            script = script.to_string_lossy(),
+            submitted = submitted.to_string_lossy(),
+        ),
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let screen = eval(&path, "return remuda.capture('topic')");
+        let composer = screen.rsplit('❯').next().unwrap_or("");
+        assert!(
+            !(composer.contains("delegated task") && composer.contains("Butler message")),
+            "the delegated task and mail notice shared the unsubmitted composer:\n{screen}"
+        );
+        let received = std::fs::read_to_string(&submitted).unwrap_or_default();
+        if received.lines().any(|line| line == "do the delegated task") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the delegated task was never submitted; received={received:?}; screen:\n{screen}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let received = std::fs::read_to_string(&submitted).expect("fake Claude submitted a turn");
+    assert_eq!(
+        received.lines().next(),
+        Some("do the delegated task"),
+        "an immediate mail notice must not take the delegated task's first turn: {received:?}"
+    );
+}
+
 /// #29(3): on a core with `ls().human_idle` (#136) and `capture_styled`
 /// (#137), the policy waits on the human's own idle time and reads the cursor
 /// row without dim ghost text. The old-core path is the test above.
