@@ -86,6 +86,7 @@ expect_ulid() {
 
 INSTANCE="$SCRATCH_ROOT/one"
 use_instance "$INSTANCE" identity-one
+REGISTRY="$XDG_DATA_HOME/remuda/butler/agents.jsonl"
 start_private_daemon
 load_butler
 ROOT_ID=$(lua 'return remuda._butler_bus.agents.butler.id or ""')
@@ -104,6 +105,19 @@ echo "ok - ULIDs increase within the same second"
 lua 'remuda._butler_agent_builders.fake = function() return {"sh", "-c", "env | grep ^REMUDA_BUTLER_; sleep 8"} end; remuda._butler_launch("fake", "member")' >/dev/null
 MEMBER_ID=$(lua 'return remuda._butler_bus.agents.member.id or ""')
 expect_ulid "member id" "$MEMBER_ID"
+RUNNING_ROW=$(python3 - "$REGISTRY" "$MEMBER_ID" <<'PY'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
+row = next(row for row in reversed(rows) if row["id"] == sys.argv[2])
+print(json.dumps(row))
+PY
+)
+[[ $RUNNING_ROW == *'"state": "running"'* ]] || fail "launch row lacks state=running: $RUNNING_ROW"
+CREATED_AT=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["created_at"])' "$RUNNING_ROW")
+AGENTS=$("$REMUDA_BIN" -s "$SERVER" butler agents)
+[[ $AGENTS == *$'ID\tALIAS\tKIND\tLEADER\tSTATE\tREASON\tCREATED\tENDED'* ]] || fail "agents command has no expected header: $AGENTS"
+[[ $AGENTS == *"$MEMBER_ID"* && $AGENTS == *$'running'* ]] || fail "agents command omits the running member: $AGENTS"
+echo "ok - registry launch row and agents command show a running identity"
 
 MEMBER_ENV=$(lua 'return remuda.capture("member")')
 [[ $MEMBER_ENV == *"REMUDA_BUTLER_AGENT_ID=$MEMBER_ID"* ]] || fail "member env lacks its ULID: $MEMBER_ENV"
@@ -138,6 +152,35 @@ for _ in $(seq 100); do
   sleep 0.1
 done
 lua 'return remuda._butler_bus.agents.member == nil' | grep -qx true || fail "exited member remained live"
+ENDED_ROW=$(python3 - "$REGISTRY" "$MEMBER_ID" <<'PY'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
+row = next(row for row in reversed(rows) if row["id"] == sys.argv[2])
+print(json.dumps(row))
+PY
+)
+[[ $ENDED_ROW == *'"state": "ended"'* && $ENDED_ROW == *'"reason": "exited"'* ]] || fail "exit row lacks lifecycle state/reason: $ENDED_ROW"
+ENDED_CREATED_AT=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["created_at"])' "$ENDED_ROW")
+[[ $CREATED_AT == "$ENDED_CREATED_AT" ]] || fail "ended row rewrote created_at: $CREATED_AT -> $ENDED_CREATED_AT"
+[[ $("$REMUDA_BIN" -s "$SERVER" butler agents) != *"$MEMBER_ID"* ]] || fail "agents without --all included an ended member"
+[[ $("$REMUDA_BIN" -s "$SERVER" butler agents --all) == *"$MEMBER_ID"* ]] || fail "agents --all omitted an ended member"
+echo "ok - ended rows preserve creation time and agents --all includes them"
+lua 'remuda._butler_agent_builders.fake = function() return {"sleep", "30"} end; remuda._butler_launch("fake", "closer")' >/dev/null
+CLOSER_ID=$(lua 'return remuda._butler_bus.agents.closer.id or ""')
+lua 'remuda.close("closer")' >/dev/null
+for _ in $(seq 50); do
+  if lua 'return remuda._butler_bus.agents.closer == nil' | grep -qx true; then break; fi
+  sleep 0.1
+done
+CLOSED_ROW=$(python3 - "$REGISTRY" "$CLOSER_ID" <<'PY'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
+row = next(row for row in reversed(rows) if row["id"] == sys.argv[2])
+print(json.dumps(row))
+PY
+)
+[[ $CLOSED_ROW == *'"reason": "closed"'* ]] || fail "explicit close was not recorded as closed: $CLOSED_ROW"
+echo "ok - explicit remuda.close is recorded as closed"
 lua 'remuda._butler_agent_builders.fake = function() return {"sleep", "30"} end' >/dev/null
 lua 'remuda._butler_launch("fake", "member")' >/dev/null
 MEMBER_ID_2=$(lua 'return remuda._butler_bus.identities.member.id or ""')
@@ -145,7 +188,6 @@ expect_ulid "reused alias id" "$MEMBER_ID_2"
 [[ $MEMBER_ID_2 != "$MEMBER_ID" ]] || fail "reused alias kept its old id"
 echo "ok - an exited alias can be reused with a new id"
 
-REGISTRY="$XDG_DATA_HOME/remuda/butler/agents.jsonl"
 grep -F "\"id\":\"$MEMBER_ID\"" "$REGISTRY" >/dev/null || fail "registry omits the first member id"
 grep -F "\"ended_at\":" "$REGISTRY" >/dev/null || fail "registry omits the ended member record"
 
@@ -154,13 +196,28 @@ start_private_daemon
 load_butler
 ROOT_ID_AFTER_RESTART=$(lua 'return remuda._butler_bus.agents.butler.id or ""')
 [[ $ROOT_ID_AFTER_RESTART == "$ROOT_ID" ]] || fail "root id changed across daemon restart: $ROOT_ID -> $ROOT_ID_AFTER_RESTART"
+RESTART_ROW=$(python3 - "$REGISTRY" "$MEMBER_ID_2" <<'PY'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
+row = next(row for row in reversed(rows) if row["id"] == sys.argv[2])
+print(json.dumps(row))
+PY
+)
+[[ $RESTART_ROW == *'"state": "ended"'* && $RESTART_ROW == *'"reason": "daemon_restart"'* && $RESTART_ROW == *'"ended_at_estimate": true'* ]] || \
+  fail "restart row lacks estimated daemon_restart state: $RESTART_ROW"
 echo "ok - root Butler id survives a daemon restart"
 stop_private_daemon
 
 INSTANCE="$SCRATCH_ROOT/two"
 use_instance "$INSTANCE" identity-two
+REGISTRY="$XDG_DATA_HOME/remuda/butler/agents.jsonl"
+mkdir -p "$(dirname "$REGISTRY")"
+printf '%s\n' '{"id":"legacy-clobbered","alias":"old","kind":"fake","leader_id":"","created_at":"2020-01-01T00:00:00Z","ended_at":"2020-01-01T00:00:00Z"}' >"$REGISTRY"
 start_private_daemon
 load_butler
+ALL_AGENTS=$("$REMUDA_BIN" -s "$SERVER" butler agents --all)
+[[ $ALL_AGENTS == *$'legacy-clobbered\told\tfake\t\tended\t\t?\t2020-01-01T00:00:00Z'* ]] || \
+  fail "clobbered historical creation time was fabricated or hidden: $ALL_AGENTS"
 lua 'remuda._butler_launch("fake", "member")' >/dev/null
 MEMBER_ID_FRESH=$(lua 'return remuda._butler_bus.agents.member.id or ""')
 expect_ulid "fresh-daemon member id" "$MEMBER_ID_FRESH"

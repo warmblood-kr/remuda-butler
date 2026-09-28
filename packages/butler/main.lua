@@ -457,15 +457,14 @@ bus.objects = bus.objects or {}
 -- ULIDs are durable public identities; session names remain the mutable,
 -- human-friendly keys used by the mailbox and the in-memory team tree.
 local alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
-local previous_ulid_second, previous_ulid_random
 local function crockford_ulid()
   local second = os.time()
   local millis = math.floor(second * 1000)
   local bytes = {}
   for i = 6, 1, -1 do bytes[i] = millis % 256; millis = math.floor(millis / 256) end
   local entropy
-  if previous_ulid_second == second then
-    local bytes = { previous_ulid_random:byte(1, 10) }
+  if bus.previous_ulid_second == second then
+    local bytes = { bus.previous_ulid_random:byte(1, 10) }
     local carry = 1
     for i = 10, 1, -1 do
       local value = bytes[i] + carry
@@ -487,7 +486,7 @@ local function crockford_ulid()
       entropy = table.concat(out)
     end
   end
-  previous_ulid_second, previous_ulid_random = second, entropy
+  bus.previous_ulid_second, bus.previous_ulid_random = second, entropy
   for i = 1, 10 do bytes[i + 6] = entropy:byte(i) end
   local bits, out = { 0, 0 }, {}
   for _, byte in ipairs(bytes) do
@@ -509,16 +508,24 @@ local identity_path = data_home and data_home .. "/remuda/butler/agents.jsonl"
 bus.identities = bus.identities or {}
 bus.identity_ids = bus.identity_ids or {}
 -- Loaded before identity_record so agents.jsonl shares mail.lua's append.
+remuda._butler_new_ulid = crockford_ulid
 remuda._butler_mail_config = { bus = bus, root = mail_root, json_quote = json_quote }
 remuda.exec("butler/mail")
-local function identity_record(id, alias, kind, leader_id, ended)
+local function identity_record(record)
   if not identity_path then return end
   local dir = identity_path:match("^(.*)/[^/]+$")
   if dir then os.execute("mkdir -p " .. shell_quote(dir)) end
-  local row = '{"id":' .. json_quote(id) .. ',"alias":' .. json_quote(alias)
-    .. ',"kind":' .. json_quote(kind or "") .. ',"leader_id":' .. json_quote(leader_id or "")
-    .. ',"created_at":' .. json_quote(os.date("!%Y-%m-%dT%H:%M:%SZ"))
-  if ended then row = row .. ',"ended_at":' .. json_quote(os.date("!%Y-%m-%dT%H:%M:%SZ")) end
+  local row = '{"id":' .. json_quote(record.id) .. ',"alias":' .. json_quote(record.alias)
+    .. ',"kind":' .. json_quote(record.kind or "") .. ',"leader_id":' .. json_quote(record.leader_id or "")
+  if record.created_at and not record.created_at_unknown then
+    row = row .. ',"created_at":' .. json_quote(record.created_at)
+  elseif record.created_at_unknown then
+    row = row .. ',"created_at_unknown":true'
+  end
+  row = row .. ',"state":' .. json_quote(record.state or "running")
+  if record.reason then row = row .. ',"reason":' .. json_quote(record.reason) end
+  if record.ended_at then row = row .. ',"ended_at":' .. json_quote(record.ended_at) end
+  if record.ended_at_estimate then row = row .. ',"ended_at_estimate":true' end
   remuda._butler_mail.append(identity_path, row .. "}\n")
 end
 local function json_field(line, key)
@@ -536,8 +543,16 @@ if identity_path and not bus.identities_loaded then
     for line in f:lines() do
       local id, alias = json_field(line, "id"), json_field(line, "alias")
       if id and alias then
+        local created_at, ended_at = json_field(line, "created_at"), json_field(line, "ended_at")
+        local state = json_field(line, "state")
+        local created_at_unknown = line:match('"created_at_unknown":true') ~= nil
+          or (not state and ended_at and created_at == ended_at)
         local record = { id = id, alias = alias, kind = json_field(line, "kind"),
-          leader_id = json_field(line, "leader_id"), ended_at = json_field(line, "ended_at") }
+          leader_id = json_field(line, "leader_id"), created_at = created_at,
+          created_at_unknown = created_at_unknown, ended_at = ended_at,
+          state = state or (ended_at and "ended" or "running"),
+          reason = json_field(line, "reason"),
+          ended_at_estimate = line:match('"ended_at_estimate":true') ~= nil }
         bus.identity_ids[id] = record
         bus.identities[alias] = record
       end
@@ -553,17 +568,20 @@ if identity_path and not bus.identities_loaded then
   end
   for id, record in pairs(bus.identity_ids) do
     if not record.ended_at and record.alias ~= "butler" and not live[record.alias] then
-      identity_record(id, record.alias, record.kind, record.leader_id, true)
+      record.state, record.reason = "ended", "daemon_restart"
       record.ended_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+      record.ended_at_estimate = true
+      identity_record(record)
     end
   end
   bus.identities_loaded = true
 end
 local function register_identity(alias, kind, leader_id, id)
   id = id or crockford_ulid()
-  local record = { id = id, alias = alias, kind = kind, leader_id = leader_id or "" }
+  local record = { id = id, alias = alias, kind = kind, leader_id = leader_id or "",
+    created_at = os.date("!%Y-%m-%dT%H:%M:%SZ"), state = "running" }
   bus.identities[alias], bus.identity_ids[id] = record, record
-  identity_record(id, alias, kind, leader_id)
+  identity_record(record)
   return record
 end
 local function resolve(ref)
@@ -604,7 +622,6 @@ local function mail_id(ref, allow_ended)
   return agent.id, agent
 end
 remuda._butler_resolve = resolve
-remuda._butler_new_ulid = crockford_ulid
 local function next_token(name)
   bus.next = bus.next + 1
   return name .. "-" .. os.time() .. "-" .. bus.next
@@ -1185,6 +1202,47 @@ function remuda._butler_sessions()
     or "SESSION\tAGENT\tLEADER\n" .. table.concat(rows, "\n")
 end
 
+local function registry_list(include_ended)
+  local latest = {}
+  if identity_path then
+    local file = io.open(identity_path, "r")
+    if file then
+      for line in file:lines() do
+        local id, alias = json_field(line, "id"), json_field(line, "alias")
+        if id and alias then
+          local created_at, ended_at = json_field(line, "created_at"), json_field(line, "ended_at")
+          local state = json_field(line, "state")
+          local unknown = line:match('"created_at_unknown":true') ~= nil
+            or (not state and ended_at and created_at == ended_at)
+          latest[id] = {
+            id = id, alias = alias, kind = json_field(line, "kind") or "",
+            leader = json_field(line, "leader_id") or "",
+            state = state or (ended_at and "ended" or "running"),
+            reason = json_field(line, "reason") or "",
+            created = unknown and "?" or (created_at or ""),
+            ended = ended_at or "",
+          }
+        end
+      end
+      file:close()
+    end
+  end
+  local records = {}
+  for _, record in pairs(latest) do
+    if include_ended or record.state == "running" then records[#records + 1] = record end
+  end
+  table.sort(records, function(a, b)
+    if a.alias ~= b.alias then return a.alias < b.alias end
+    return a.id < b.id
+  end)
+  local lines = { "ID\tALIAS\tKIND\tLEADER\tSTATE\tREASON\tCREATED\tENDED" }
+  for _, record in ipairs(records) do
+    lines[#lines + 1] = table.concat({ record.id, record.alias, record.kind, record.leader,
+      record.state, record.reason, record.created, record.ended }, "\t")
+  end
+  return table.concat(lines, "\n")
+end
+
 -- Core's client pane asks this for its row order and indentation; sessions
 -- Butler does not manage are left for core to append in its own order.
 function remuda.session_order()
@@ -1243,6 +1301,10 @@ local function command(order, verb, usage, run)
 end
 command(10, "sessions", "  remuda butler sessions", function(args)
   if #args == 1 then return remuda._butler_sessions() end
+end)
+command(15, "agents", "  remuda butler agents [--all]", function(args)
+  if #args == 1 then return registry_list(false) end
+  if #args == 2 and args[2] == "--all" then return registry_list(true) end
 end)
 command(20, "launch", "  remuda butler launch <claude|codex> [name] [--model M]", function(args, caller)
   if args[2] ~= "claude" and args[2] ~= "codex" then return nil end
@@ -1617,16 +1679,39 @@ function remuda._butler_reconcile()
   end
   return result
 end
+-- The session_exited hook only carries the session name. Remember an explicit
+-- remuda.close call long enough for the hook to distinguish it from an agent
+-- process ending on its own.
+if not bus.close_wrapper_installed and type(remuda.close) == "function" then
+  local close_session = remuda.close
+  bus.close_wrapper_installed = true
+  bus.close_requested = bus.close_requested or {}
+  remuda.close = function(name, ...)
+    local tracked = bus.agents[name] ~= nil
+    if tracked then bus.close_requested[name] = true end
+    local ok, a, b, c = pcall(close_session, name, ...)
+    if not ok then
+      if tracked then bus.close_requested[name] = nil end
+      error(a, 0)
+    end
+    return a, b, c
+  end
+end
 function remuda._butler_session_exited(name)
   _butler_session_trace("session_exited", name)
   -- #29: the mail stays in the inbox; only the pending pane notice goes.
   bus.notices[name], bus.notice_screens[name] = nil, nil
   local exited = bus.agents[name]
   if exited and name ~= "butler" then
-    identity_record(exited.id, exited.alias or name, exited.kind,
-      exited.parent and bus.agents[exited.parent] and bus.agents[exited.parent].id or "", true)
     local ended = bus.identity_ids[exited.id] or exited
+    ended.alias, ended.kind = exited.alias or name, exited.kind
+    ended.leader_id = exited.parent and bus.agents[exited.parent] and bus.agents[exited.parent].id or ""
+    local was_closed = bus.close_requested and bus.close_requested[name]
+    if bus.close_requested then bus.close_requested[name] = nil end
+    ended.state, ended.reason = "ended", was_closed and "closed" or "exited"
     ended.ended_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+    ended.ended_at_estimate = nil
+    identity_record(ended)
     bus.identity_ids[exited.id], bus.identities[exited.alias or name] = ended, ended
     bus.agents[name] = nil
     if exited.parent and bus.agents[exited.parent] then
