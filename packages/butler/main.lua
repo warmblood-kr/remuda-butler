@@ -181,6 +181,12 @@ if remuda._butler_test_mode == true then
   return
 end
 
+-- The 4bbd90f lifecycle host does not yet call a module `stop` method on
+-- reload. Stop an existing Matrix child here as well, before new config is
+-- resolved; matrix.lua will start exactly one relay after the new config is
+-- installed. Newer hosts can also stop it through init.lua's stop callback.
+if remuda._butler_matrix_stop then pcall(remuda._butler_matrix_stop) end
+
 -- Replace handles created imperatively by the previous Butler version. The
 -- lifecycle declaration owns these schedules from this activation onward.
 local legacy_compaction_schedule = remuda._butler_compaction_schedule

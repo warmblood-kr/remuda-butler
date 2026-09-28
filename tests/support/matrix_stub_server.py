@@ -10,11 +10,12 @@ line of stdout, flushed, so the test harness can read it back.
 GET /_matrix/client/v3/sync answers with the next line of `fixture_path`
 (one JSON object per line, in order) each time it is called; every request
 is also appended to `get_log_path` (full path + query string), which is how
-a test proves what `since` value a later call carried. Once the fixture is
-exhausted, it keeps answering with an empty room list and the SAME
-`next_batch` it last used — deliberately not incrementing, so a caller that
-is killed and restarted against a persisted `since` sees a stable token to
-resume from, not a moving target.
+a test proves what `since` value a later call carried. A fixture row may use
+`__http_status` to return an HTTP error. Once exhausted, it keeps answering
+with an empty room list and the SAME `next_batch` it last used — deliberately
+not incrementing, so a caller that is killed and restarted against a
+persisted `since` sees a stable token to resume from, not a moving target.
+Idle /sync requests wait for their requested timeout like a long-poll server.
 
 PUT .../rooms/<id>/send/m.room.message/<txn> logs the request body to
 `put_log_path` and answers with `send_status` (200 -> a fake event_id,
@@ -25,6 +26,7 @@ import json
 import re
 import sys
 import threading
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -63,14 +65,30 @@ class Handler(BaseHTTPRequestHandler):
             self._reply(404, {"errcode": "M_NOT_FOUND"})
             return
         append(get_log_path, self.path)
+        status = 200
+        exhausted = False
         with state["lock"]:
             if state["index"] < len(fixture):
                 body = fixture[state["index"]]
                 state["index"] += 1
-                state["last_token"] = body.get("next_batch", state["last_token"])
+                status = int(body.get("__http_status", 200))
+                if status != 200:
+                    body = {"errcode": "M_UNKNOWN", "error": "stub sync failure"}
+                else:
+                    state["last_token"] = body.get("next_batch", state["last_token"])
             else:
                 body = {"rooms": {"join": {}}, "next_batch": state["last_token"]}
-        self._reply(200, body)
+                exhausted = True
+        params = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        timeout_ms = int((params.get("timeout") or ["0"])[0])
+        if exhausted and route == "/_matrix/client/v3/sync" and timeout_ms > 0:
+            # Model Matrix /sync long polling after all canned events. This
+            # keeps an idle relay from turning the fixture into a busy loop.
+            time.sleep(timeout_ms / 1000)
+        try:
+            self._reply(status, body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def do_PUT(self):
         if not re.match(r"^/_matrix/client/v3/rooms/[^/]+/send/m\.room\.message/", self.path):

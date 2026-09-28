@@ -1,14 +1,16 @@
 -- Internal inbound Matrix channel. main.lua enters through this one package
 -- seam; packages/butler/init.lua owns the stable hook ids.
-local config = remuda._butler_matrix_config
 local data_home = os.getenv("XDG_DATA_HOME")
 if not data_home or data_home == "" then data_home = (os.getenv("HOME") or "") .. "/.local/share" end
+local config = remuda._butler_matrix_config
 local relay_path = data_home .. "/remuda/mods/butler/packages/butler/matrix_relay.py"
-local file = io.open(relay_path, "r")
-local helper_src
-if file then
-  helper_src = file:read("*a")
-  file:close()
+local helper_src = remuda._butler_helper_src_override
+if not helper_src then
+  local file = io.open(relay_path, "r")
+  if file then
+    helper_src = file:read("*a")
+    file:close()
+  end
 end
 remuda._butler_helper_src = helper_src
 
@@ -49,12 +51,39 @@ end
 
 function remuda._butler_matrix_stop()
   local relay = remuda._butler_matrix_relay
-  if relay then pcall(remuda.kill, relay) end
-  remuda._butler_matrix_relay = nil
+  local retry = remuda._butler_matrix_restart_schedule
+  if retry then pcall(remuda.cancel, retry) end
+  remuda._butler_matrix_restart_schedule = nil
+  remuda._butler_matrix_restart_after_stop = false
+  if relay then
+    remuda._butler_matrix_stopping = true
+    pcall(remuda.kill, relay)
+  else
+    remuda._butler_matrix_stopping = false
+  end
 end
 
-if config and config.token_path and config.config_path and helper_src
-  and not remuda._butler_skip_relay then
+local function matrix_trace(event, detail)
+  local config = remuda._butler_matrix_config
+  local path = remuda._butler_matrix_trace_path
+    or (config and config.config_path and (config.config_path .. ".trace"))
+  if not path then return end
+  pcall(function()
+    local f = assert(io.open(path, "a"))
+    f:write(os.date("!%Y-%m-%dT%H:%M:%SZ"), "\t", event, "\t", tostring(detail or ""), "\n")
+    f:close()
+  end)
+end
+
+function remuda._butler_matrix_start()
+  local config = remuda._butler_matrix_config
+  local source = remuda._butler_helper_src_override or remuda._butler_helper_src
+  if not config or not config.token_path or not config.config_path or not source
+    or remuda._butler_skip_relay then return false end
+  if remuda._butler_matrix_stopping then
+    remuda._butler_matrix_restart_after_stop = true
+    return false
+  end
   local running = false
   for _, id in ipairs(remuda.processes()) do
     if id == remuda._butler_matrix_relay then running = true end
@@ -67,10 +96,47 @@ if config and config.token_path and config.config_path and helper_src
     end
   end
   if not running then
+    local attempt = remuda._butler_matrix_restart_attempts or 0
+    if attempt > 0 then matrix_trace("relay_restart", "attempt=" .. attempt .. " backoff=" .. math.min(60, 2 ^ math.min(6, attempt - 1)))
+    else matrix_trace("relay_start", "initial") end
     remuda._butler_matrix_relay = remuda.process{
-      argv = { "python3", "-c", helper_src, config.token_path, config.config_path },
+      argv = { "python3", "-c", source, config.token_path, config.config_path },
       on_line = "butler-matrix-line",
       on_exit = "butler-matrix-sync-exit",
     }
+    return true
   end
+  return true
 end
+
+function remuda._butler_matrix_sync_exit(code)
+  remuda._butler_matrix_relay = nil
+  if remuda._butler_matrix_stopping then
+    remuda._butler_matrix_stopping = false
+    if remuda._butler_matrix_restart_after_stop then
+      remuda._butler_matrix_restart_after_stop = false
+      remuda._butler_matrix_start()
+    end
+    return
+  end
+
+  local config = remuda._butler_matrix_config
+  if not config or remuda._butler_skip_relay then return end
+  local attempts = (remuda._butler_matrix_restart_attempts or 0) + 1
+  remuda._butler_matrix_restart_attempts = attempts
+  local delay = math.min(60, 2 ^ math.min(6, attempts - 1))
+  matrix_trace("relay_exit", "code=" .. tostring(code) .. " attempt=" .. attempts .. " backoff=" .. delay)
+  local old = remuda._butler_matrix_restart_schedule
+  if old then pcall(remuda.cancel, old) end
+  local handle
+  handle = remuda.schedule({ name = "butler-matrix-restart", every = delay, run = function()
+    if remuda._butler_matrix_restart_schedule == handle then
+      remuda.cancel(handle)
+      remuda._butler_matrix_restart_schedule = nil
+      remuda._butler_matrix_start()
+    end
+  end })
+  remuda._butler_matrix_restart_schedule = handle
+end
+
+remuda._butler_matrix_start()

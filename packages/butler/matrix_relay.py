@@ -15,7 +15,7 @@ if len(_lines) > 3 and _lines[3].strip():
     ALLOWED_SENDERS = {s.strip() for s in _lines[3].split(",") if s.strip()}
 USE_MESSAGES_POLLING = len(_lines) > 4 and _lines[4].strip().lower() in ("1", "true", "messages", "fallback")
 
-SYNC_TIMEOUT_MS = 30000
+SYNC_TIMEOUT_MS = int(_lines[5].strip()) if len(_lines) > 5 and _lines[5].strip() else 30000
 MAX_PROCESSED_EVENT_IDS = 5000
 MAX_BODY_BYTES = 64 * 1024
 STATE_FILE = Path(CONFIG_PATH + ".since")
@@ -56,7 +56,7 @@ def load_state():
             return (state.get("since"), processed,
                     state.get("messages_since"), state.get("pending_events", {}))
         except (ValueError, AttributeError):
-            return None, set(), None, {}
+            return None, {}, None, {}
     return None, {}, None, {}
 
 
@@ -195,9 +195,13 @@ def main():
             time.sleep(3)
     if since is None:
         # First run: establish a baseline without replaying room history.
-        resp = matrix_get("/_matrix/client/v3/sync", {"timeout": "0"})
-        since = resp["next_batch"]
-        save_state(since, processed, messages_since, pending)
+        while since is None:
+            try:
+                resp = matrix_get("/_matrix/client/v3/sync", {"timeout": "0"})
+                since = resp["next_batch"]
+                save_state(since, processed, messages_since, pending)
+            except Exception:
+                time.sleep(5)
 
     emit_pending(pending)
     while True:

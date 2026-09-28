@@ -34,6 +34,7 @@ return {
   start = function(state)
     host._butler_state = state
     boot()
+    if host._butler_matrix_start then host._butler_matrix_start() end
   end,
   stop = function(state)
     if host._butler_matrix_stop then pcall(host._butler_matrix_stop) end
@@ -52,6 +53,8 @@ return {
       run = function(_, line) return host._butler_matrix_line(line) end },
     { event = "butler-matrix-submit", id = "matrix-submit",
       run = function() return host._butler_matrix_submit() end },
+    { event = "butler-matrix-sync-exit", id = "matrix-supervisor",
+      run = function(_, code) return host._butler_matrix_sync_exit(code) end },
   },
   schedules = {
     { name = "butler-notices", every = 1, run = function()
