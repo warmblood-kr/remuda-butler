@@ -3597,6 +3597,7 @@ fn butler_compaction_schedule_sends_compact_when_idle_but_not_when_busy() {
     );
 
     let butler_name = eval(&path, "return remuda._butler_initial_name");
+    eval(&path, r#"remuda.capture = function() return "MODEL:Claude CTX:500000 CTXWIN:1000000 CTXPCT:50" end"#);
 
     // Simulates the launched session's own one-time `run_script` call the
     // system prompt asks for.
@@ -3643,6 +3644,228 @@ fn butler_compaction_schedule_sends_compact_when_idle_but_not_when_busy() {
         leaked.is_empty(),
         "orphan process(es) still reference this test's own token path after teardown: {leaked:?}"
     );
+}
+
+fn butler_compaction_context_case(
+    name: &str,
+    context_line: &str,
+    expected_event: &str,
+    expected_sends: usize,
+    expected_interval: &str,
+) {
+    let dir = scratch_dir(name);
+    let (token_path, config_path) = butler_config(
+        &dir,
+        name,
+        "http://127.0.0.1:1",
+        "!room:example.org",
+        "@butler:example.org",
+        "",
+    );
+    let token_str = token_path.to_string_lossy().to_string();
+    let config_str = config_path.to_string_lossy().to_string();
+    let daemon = Daemon::spawn_with_env(
+        &dir,
+        &[
+            ("REMUDA_BUTLER_TOKEN", token_str.as_str()),
+            ("REMUDA_BUTLER_CONFIG", config_str.as_str()),
+        ],
+    );
+    let path = daemon::socket_path_in(&dir, "s");
+    let trace_path = dir.join("compaction-context.log");
+    eval(&path, "remuda._butler_compaction_interval = 0.05");
+    eval(&path, "remuda._butler_compaction_critical_interval = 0.01");
+    eval(&path, "remuda._butler_compaction_warn = 400000");
+    eval(&path, "remuda._butler_compaction_critical = 600000");
+    eval(
+        &path,
+        &format!(
+            "remuda._butler_compaction_trace_path = {}",
+            lua_raw_string(&trace_path.to_string_lossy())
+        ),
+    );
+    eval(&path, r#"remuda._butler_argv = {"sh"}; remuda._butler_skip_relay = true"#);
+
+    let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    eval(
+        &path,
+        &format!(
+            "remuda.capture = function() return {} end; remuda.session = function() return {{ is_busy = false }} end; remuda._butler_compaction_sends = 0; remuda.send = function(_, text) if text == '/compact' then remuda._butler_compaction_sends = remuda._butler_compaction_sends + 1 end end; remuda.process = function() end",
+            lua_raw_string(context_line)
+        ),
+    );
+    eval(&path, "remuda._butler_register_compaction_schedule()");
+
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let trace = std::fs::read_to_string(&trace_path).unwrap_or_default();
+        if trace.contains(expected_event) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no {expected_event:?} trace for statusline {context_line:?}:\n{trace}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert_eq!(
+        eval(&path, "return tostring(remuda._butler_compaction_sends)"),
+        expected_sends.to_string(),
+        "wrong compact send count for {context_line:?}"
+    );
+    assert_eq!(
+        eval(&path, "return tostring(remuda._butler_compaction_interval_current)"),
+        expected_interval,
+        "wrong check interval for {context_line:?}"
+    );
+    if expected_interval == "0.01" {
+        eval(
+            &path,
+            r#"remuda.capture = function() return "MODEL:Claude CTX:500000 CTXWIN:1000000 CTXPCT:50" end"#,
+        );
+        let deadline = Instant::now() + PATIENCE;
+        while eval(&path, "return tostring(remuda._butler_compaction_interval_current)") != "0.05" {
+            assert!(Instant::now() < deadline, "critical cadence did not return to normal at warn context");
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let trace = std::fs::read_to_string(&trace_path).unwrap_or_default();
+        assert!(
+            trace.contains("\tsent\tlevel=warn ctx=500000"),
+            "trace did not record the cadence reset at warn context: {trace}"
+        );
+    }
+    let trace = std::fs::read_to_string(&trace_path).unwrap_or_default();
+    if let Some(ctx) = context_line
+        .split("CTX:")
+        .nth(1)
+        .and_then(|field| field.split_whitespace().next())
+        .filter(|value| value.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        let context: u64 = ctx.parse().expect("numeric context");
+        let level = if context >= 600000 { "critical" } else { "warn" };
+        let level = if context < 400000 { "ok" } else { level };
+        assert!(
+            trace.contains(&format!("\t{expected_event}\tlevel={level} ctx={ctx}")),
+            "trace omitted level/context for {context_line:?}: {trace}"
+        );
+    } else {
+        assert!(
+            trace.contains("\tskipped_unknown\tlevel=unknown"),
+            "unknown statusline trace omitted its level: {trace}"
+        );
+    }
+
+    drop(daemon);
+}
+
+#[test]
+#[cfg(unix)]
+fn butler_compaction_skips_ok_context() {
+    butler_compaction_context_case(
+        "butler-compaction-ok-context",
+        "MODEL:Claude CTX:399999 CTXWIN:1000000 CTXPCT:39",
+        "skipped_ok",
+        0,
+        "0.05",
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn butler_compaction_warn_context_sends_when_idle() {
+    butler_compaction_context_case(
+        "butler-compaction-warn-context",
+        "MODEL:Claude CTX:400000 CTXWIN:1000000 CTXPCT:40",
+        "sent",
+        1,
+        "0.05",
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn butler_compaction_critical_context_shortens_interval() {
+    butler_compaction_context_case(
+        "butler-compaction-critical-context",
+        "MODEL:Claude CTX:600000 CTXWIN:1000000 CTXPCT:60",
+        "sent",
+        1,
+        "0.01",
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn butler_compaction_skips_unknown_context() {
+    butler_compaction_context_case(
+        "butler-compaction-unknown-context",
+        "MODEL:Claude CTX:? CTXWIN:1000000 CTXPCT:?",
+        "skipped_unknown",
+        0,
+        "0.05",
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn butler_compaction_uses_codex_telemetry_when_footer_has_no_ctx() {
+    let dir = scratch_dir("butler-compaction-codex-telemetry");
+    let (token_path, config_path) = butler_config(
+        &dir,
+        "butler-compaction-codex-telemetry",
+        "http://127.0.0.1:1",
+        "!room:example.org",
+        "@butler:example.org",
+        "",
+    );
+    let token_str = token_path.to_string_lossy().to_string();
+    let config_str = config_path.to_string_lossy().to_string();
+    let daemon = Daemon::spawn_with_env(
+        &dir,
+        &[
+            ("REMUDA_BUTLER_TOKEN", token_str.as_str()),
+            ("REMUDA_BUTLER_CONFIG", config_str.as_str()),
+            ("REMUDA_BUTLER_AGENT", "codex"),
+        ],
+    );
+    let path = daemon::socket_path_in(&dir, "s");
+    let trace_path = dir.join("compaction-codex.log");
+    eval(&path, "remuda._butler_compaction_interval = 0.05");
+    eval(&path, "remuda._butler_compaction_critical_interval = 0.01");
+    eval(&path, &format!(
+        "remuda._butler_compaction_trace_path = {}",
+        lua_raw_string(&trace_path.to_string_lossy())
+    ));
+    eval(&path, r#"remuda._butler_argv = {"sh"}; remuda._butler_skip_relay = true"#);
+    let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    eval(
+        &path,
+        r#"remuda.capture = function() return "GPT-5.6-Terra medium · ~/repo · topic" end
+          remuda._butler_telemetry_adapters.codex.read = function() return { context_used = 600000 } end
+          remuda.session = function() return { is_busy = false } end
+          remuda._butler_compaction_sends = 0
+          remuda.send = function(_, text) if text == "/compact" then remuda._butler_compaction_sends = remuda._butler_compaction_sends + 1 end end
+          remuda.process = function() end"#,
+    );
+    eval(&path, "remuda._butler_register_compaction_schedule()");
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let trace = std::fs::read_to_string(&trace_path).unwrap_or_default();
+        if trace.contains("\tsent\tlevel=critical ctx=600000") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "Codex telemetry did not drive compaction: {trace}");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert_eq!(eval(&path, "return tostring(remuda._butler_compaction_sends)"), "1");
+    assert_eq!(eval(&path, "return tostring(remuda._butler_compaction_interval_current)"), "0.01");
+    drop(daemon);
 }
 
 /// Minimal shape check for `os.date("!%Y-%m-%dT%H:%M:%SZ")` -- exactly what
@@ -3716,6 +3939,7 @@ fn butler_compaction_trace_records_registered_skipped_and_sent() {
     );
 
     let butler_name = eval(&path, "return remuda._butler_initial_name");
+    eval(&path, r#"remuda.capture = function() return "MODEL:Claude CTX:500000 CTXWIN:1000000 CTXPCT:50" end"#);
 
     // Simulates the launched session's own one-time `run_script` call the
     // system prompt asks for -- this alone must already leave a "registered"

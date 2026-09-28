@@ -1448,6 +1448,9 @@ end
 -- remuda._butler_compaction_interval lets a test override it (same idiom as
 -- every other remuda._butler_* test hook in this file).
 local COMPACTION_CHECK_INTERVAL = remuda._butler_compaction_interval or 30 * 60
+local COMPACTION_CRITICAL_INTERVAL = remuda._butler_compaction_critical_interval or 5 * 60
+local COMPACTION_WARN = remuda._butler_compaction_warn or 400000
+local COMPACTION_CRITICAL = remuda._butler_compaction_critical or 600000
 
 -- remuda._butler_compaction_trace_path lets a test redirect the append-only
 -- trace below to a throwaway tempfile instead of the real config dir (same
@@ -1522,47 +1525,65 @@ local function launch_butler()
   return butler_name
 end
 
+local function compaction_tick()
+  local captured_ok, screen = pcall(remuda.capture, butler_name)
+  local context = captured_ok and type(screen) == "string"
+    and tonumber(screen:match("CTX:(%d+)")) or nil
+  -- Codex's footer displays model and reasoning effort but no CTX count. Its
+  -- app-server telemetry adapter already records the same token usage in the
+  -- Butler-owned status file; use that only for Codex when the captured pane
+  -- has no CTX field.
+  local agent = butler_name and bus.agents[butler_name]
+  if not context and agent and agent.kind == "codex" then
+    local telemetry_ok, telemetry = pcall(remuda._butler_telemetry_for, agent)
+    if telemetry_ok and telemetry then context = tonumber(telemetry.context_used) end
+  end
+  if not context then
+    _butler_trace("skipped_unknown", "level=unknown")
+    return
+  end
+
+  local level = context >= COMPACTION_CRITICAL and "critical"
+    or context >= COMPACTION_WARN and "warn" or "ok"
+  local interval = level == "critical" and COMPACTION_CRITICAL_INTERVAL
+    or COMPACTION_CHECK_INTERVAL
+  if remuda._butler_compaction_interval_current ~= interval then
+    remuda._butler_register_compaction_schedule(interval)
+  end
+
+  if level == "ok" then
+    _butler_trace("skipped_ok", "level=ok ctx=" .. context)
+    return
+  end
+
+  if not butler_name or remuda.session(butler_name).is_busy ~= false then
+    _butler_trace("skipped_busy", "level=" .. level .. " ctx=" .. context)
+    return
+  end
+
+  local ok, err = pcall(remuda.send, butler_name, "/compact")
+  if ok then
+    _butler_trace("sent", "level=" .. level .. " ctx=" .. context)
+  else
+    _butler_trace("error", "level=" .. level .. " ctx=" .. context .. " " .. tostring(err))
+  end
+  -- Same "type it, wait, then submit" hand-off the Matrix relay below uses.
+  remuda.process({ argv = { "sleep", "2" }, on_exit = "butler-compaction-submit" })
+end
+
 -- Reused across every re-`exec` and every later call from the launched
--- session's own run_script -- a plain Lua local would NOT survive either
--- (each `exec butler` is a fresh chunk with fresh locals; a later run_script
--- call is a wholly separate Eval). `remuda._butler_compaction_schedule`
--- lives on the persistent `remuda` table, so only a slot on that same table
--- can hold "the one we already registered" across calls -- same reasoning
--- as `remuda._butler_argv` and friends, just read back instead of only
--- written. `run_script` needs no separate registration step to reach this:
--- it evals arbitrary Lua against the daemon's live globals (`mcp.rs`'s
--- `run_script => Request::Eval{code}`), so a plain function assigned onto
--- `remuda` is already callable by name from a later run_script call, exactly
--- like `remuda._butler_initial_name` already is.
-function remuda._butler_register_compaction_schedule()
+-- session's own run_script. The persistent handle and interval live on remuda.
+function remuda._butler_register_compaction_schedule(interval)
   if remuda._butler_compaction_schedule then
     remuda.cancel(remuda._butler_compaction_schedule)
   end
-  _butler_trace("registered")
+  interval = interval or COMPACTION_CHECK_INTERVAL
+  remuda._butler_compaction_interval_current = interval
+  _butler_trace("registered", "period=" .. interval)
   remuda._butler_compaction_schedule = remuda.schedule({
     name = "butler-compaction",
-    every = COMPACTION_CHECK_INTERVAL,
-    run = function()
-      -- `context_left` is unimplemented (tools.lua:362-366, canon says "지금
-      -- 안 만든다") -- `is_busy` (idle-time heuristic, never a real token
-      -- count) is the proxy the canon names instead: only ever nudge
-      -- compaction while the session looks idle, never mid-task.
-      if butler_name and remuda.session(butler_name).is_busy == false then
-        local ok, err = pcall(remuda.send, butler_name, "/compact")
-        if ok then
-          _butler_trace("sent")
-        else
-          _butler_trace("error", tostring(err))
-        end
-        -- Same "type it, wait, then submit" hand-off the Matrix relay below
-        -- already uses -- `remuda.send`'s text+Enter lands as one write,
-        -- which this TUI reads as paste-in-progress rather than a distinct
-        -- Enter, so a separately-timed bare Enter confirms it.
-        remuda.process({ argv = { "sleep", "2" }, on_exit = "butler-compaction-submit" })
-      else
-        _butler_trace("skipped_busy")
-      end
-    end,
+    every = interval,
+    run = compaction_tick,
   })
   return remuda._butler_compaction_schedule
 end
