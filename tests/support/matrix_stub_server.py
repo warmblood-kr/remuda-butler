@@ -34,6 +34,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 fixture_path, get_log_path, put_log_path, send_status = sys.argv[1:5]
 send_status = int(send_status)
 tls_cert, tls_key = sys.argv[5:7] if len(sys.argv) >= 7 else (None, None)
+if tls_cert == "-":
+    tls_cert = None
+if tls_key == "-":
+    tls_key = None
+media_v1_status = int(sys.argv[7]) if len(sys.argv) >= 8 else 200
 
 with open(fixture_path) as f:
     fixture = [json.loads(line) for line in f if line.strip()]
@@ -60,12 +65,22 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
+    def _reply_bytes(self, status, body, content_type="application/octet-stream"):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         route = urllib.parse.urlsplit(self.path).path
         append(request_log_path, json.dumps({"method": "GET", "path": self.path,
                                              "authorization": self.headers.get("Authorization")}))
         if route == "/_matrix/client/v3/joined_rooms":
             self._reply(200, {"joined_rooms": ["!stub:example.org"]})
+            return
+        if route == "/_matrix/client/v3/account/whoami":
+            self._reply(200, {"user_id": "@bot:example.org", "device_id": "STUBDEVICE"})
             return
         context = re.match(r"^/_matrix/client/v3/rooms/([^/]+)/context/([^/]+)$", route)
         if context:
@@ -74,6 +89,39 @@ class Handler(BaseHTTPRequestHandler):
             if event_id == "$other-room":
                 room = "!other:example.org"
             self._reply(200, {"event": {"room_id": room, "event_id": event_id}})
+            return
+        relations = re.match(r"^/_matrix/client/v1/rooms/([^/]+)/relations/([^/]+)/m\.thread$", route)
+        if relations:
+            params = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            first_page = "from" not in params
+            chunk = [{"event_id": "$thread-child", "sender": "@alice:example.org",
+                      "content": {"msgtype": "m.text", "body": "thread reply"}}] if first_page else []
+            self._reply(200, {"chunk": chunk, "next_batch": "thread-page-2" if first_page else None})
+            return
+        event = re.match(r"^/_matrix/client/v3/rooms/([^/]+)/event/([^/]+)$", route)
+        if event:
+            self._reply(200, {"event_id": urllib.parse.unquote(event.group(2)),
+                              "room_id": urllib.parse.unquote(event.group(1)),
+                              "sender": "@alice:example.org",
+                              "content": {"msgtype": "m.text", "body": "stub event"}})
+            return
+        messages_route = re.match(r"^/_matrix/client/v3/rooms/[^/]+/messages$", route)
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        if messages_route and query.get("dir") == ["b"] and query.get("limit") != ["1"]:
+            append(get_log_path, self.path)
+            self._reply(200, {"chunk": [{"event_id": "$history-event", "sender": "@alice:example.org",
+                                           "content": {"msgtype": "m.text", "body": "history row"}}],
+                              "start": "history-start", "end": "history-end"})
+            return
+        media = re.match(r"^/_matrix/client/v1/media/download/[^/]+/[^/]+$", route)
+        if media:
+            if media_v1_status != 200:
+                self._reply(media_v1_status, {"errcode": "M_UNRECOGNIZED", "error": "legacy media route required"})
+            else:
+                self._reply_bytes(200, b"stub-media-bytes", "image/png")
+            return
+        if re.match(r"^/_matrix/media/v3/download/[^/]+/[^/]+$", route):
+            self._reply_bytes(200, b"stub-media-bytes", "image/png")
             return
         if route != "/_matrix/client/v3/sync" and not re.match(
             r"^/_matrix/client/v3/rooms/[^/]+/messages$", route

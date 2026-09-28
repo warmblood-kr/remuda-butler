@@ -25,6 +25,18 @@ HTTPS fails closed when neither option is configured. A certificate pin is
 checked immediately after the TLS handshake and before an authenticated request
 is sent.
 
+Matrix reads use the authenticated `remuda butler matrix` commands:
+
+- `status` shows the account, joined rooms, and saved sync cursors.
+- `history [--room ROOM] [-n N]` reads recent events from the configured room.
+- `rooms` lists joined rooms without changing membership.
+- `thread ROOM EVENT_ID` reads a thread; `event` and `get` fetch one event.
+- `download MXC [-o PATH]` downloads an `mxc://` attachment.
+
+Add `--json` for machine-readable output. Room-scoped reads use the configured
+room allowlist. Media downloads use the authenticated v1 endpoint and fall back
+to the legacy v3 endpoint when the homeserver reports it is unsupported.
+
 Butler topics use stable session names and are delivered through the Butler
 message queue. The extraction boundary, runtime dependencies, and migration
 plan are maintained in the repository's

@@ -5,19 +5,23 @@ import threading
 import time
 from datetime import datetime, timezone
 import urllib.parse
-import urllib.request
 from pathlib import Path
 
+_data_home = os.getenv("XDG_DATA_HOME") or str(Path(os.getenv("HOME") or "") / ".local/share")
+_package_dir = Path(_data_home) / "remuda/mods/butler/packages/butler"
+sys.path.insert(0, str(_package_dir))
+from matrix_http import Client
+
 TOKEN_PATH, CONFIG_PATH = sys.argv[1], sys.argv[2]
-TOKEN = Path(TOKEN_PATH).read_text().strip()
 _lines = Path(CONFIG_PATH).read_text().splitlines()
-HOMESERVER, ROOM_ID, SELF_MXID = _lines[0].strip(), _lines[1].strip(), _lines[2].strip()
+ROOM_ID, SELF_MXID = _lines[1].strip(), _lines[2].strip()
 ALLOWED_SENDERS = set()
 if len(_lines) > 3 and _lines[3].strip():
     ALLOWED_SENDERS = {s.strip() for s in _lines[3].split(",") if s.strip()}
 USE_MESSAGES_POLLING = len(_lines) > 4 and _lines[4].strip().lower() in ("1", "true", "messages", "fallback")
 
 SYNC_TIMEOUT_MS = int(_lines[5].strip()) if len(_lines) > 5 and _lines[5].strip() else 30000
+HTTP = Client(TOKEN_PATH, CONFIG_PATH, timeout=(SYNC_TIMEOUT_MS / 1000) + 10)
 MAX_PROCESSED_EVENT_IDS = 5000
 MAX_BODY_BYTES = 64 * 1024
 STATE_FILE = Path(CONFIG_PATH + ".since")
@@ -71,7 +75,15 @@ def load_state():
                 if isinstance(event_id, str) and isinstance(event, dict)
                 and all(isinstance(event.get(key), str)
                         for key in ("sender", "room_id", "created_at", "body"))
+                and all(event.get(key) is None or isinstance(event.get(key), str)
+                        for key in ("thread_root", "in_reply_to"))
+                and (event.get("media") is None or (isinstance(event.get("media"), list)
+                     and all(isinstance(url, str) for url in event.get("media"))))
             }
+            for event in pending.values():
+                event.setdefault("thread_root", "")
+                event.setdefault("in_reply_to", "")
+                event.setdefault("media", [])
             # Read the old cursor-only format so upgrades resume in place.
             processed = {}
             for event_id in processed_ids:
@@ -114,12 +126,7 @@ def reconcile_acks(since, processed, messages_since, pending):
 
 
 def matrix_get(path, params=None):
-    url = HOMESERVER + path
-    if params:
-        url += "?" + urllib.parse.urlencode(params)
-    req = urllib.request.Request(url, headers={"Authorization": "Bearer " + TOKEN})
-    with urllib.request.urlopen(req, timeout=(SYNC_TIMEOUT_MS / 1000) + 10) as resp:
-        return json.loads(resp.read())
+    return HTTP.get(path, params, room=ROOM_ID)
 
 
 def messages_path():
@@ -127,11 +134,12 @@ def messages_path():
     return "/_matrix/client/v3/rooms/" + room + "/messages"
 
 
-def emit(sender, room, event_id, timestamp, body):
+def emit(sender, room, event_id, timestamp, body, thread_root="", in_reply_to="", media=None):
     # Escape backslashes first so tabs/newlines stay on one pipe line.
     def escaped(value):
         return value.replace("\\", "\\\\").replace("\t", "\\t").replace("\r", "\\r").replace("\n", "\\n")
-    values = (sender, room, event_id, timestamp, body)
+    values = (sender, room, event_id, timestamp, body, thread_root, in_reply_to,
+              "\n".join(media or []))
     sys.stdout.write("\t".join(escaped(value) for value in values) + "\n")
     sys.stdout.flush()
 
@@ -141,7 +149,8 @@ def emit_pending(pending, event_ids=None):
         event = pending[event_id]
         if event:
             emit(event["sender"], event["room_id"], event_id,
-                 event["created_at"], event["body"])
+                 event["created_at"], event["body"], event.get("thread_root", ""),
+                 event.get("in_reply_to", ""), event.get("media", []))
 
 
 def handle_events(events, since, processed, messages_since=None, pending=None):
@@ -163,7 +172,7 @@ def handle_events(events, since, processed, messages_since=None, pending=None):
         if sender not in ALLOWED_SENDERS:
             continue
         content = ev.get("content", {})
-        if content.get("msgtype") not in ("m.text", "m.notice", "m.emote"):
+        if content.get("msgtype") not in ("m.text", "m.notice", "m.emote", "m.image", "m.file"):
             continue
         try:
             timestamp = datetime.fromtimestamp(
@@ -171,8 +180,22 @@ def handle_events(events, since, processed, messages_since=None, pending=None):
             ).strftime("%Y-%m-%dT%H:%M:%SZ")
         except (KeyError, TypeError, ValueError, OverflowError):
             timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        relation = content.get("m.relates_to", {})
+        if not isinstance(relation, dict):
+            relation = {}
+        thread_root = relation.get("event_id", "") if relation.get("rel_type") == "m.thread" else ""
+        reply = relation.get("m.in_reply_to", {})
+        in_reply_to = reply.get("event_id", "") if isinstance(reply, dict) else ""
+        media = []
+        file_content = content.get("file")
+        if not isinstance(file_content, dict):
+            file_content = {}
+        for candidate in (content.get("url"), file_content.get("url")):
+            if isinstance(candidate, str) and candidate.startswith("mxc://") and candidate not in media:
+                media.append(candidate)
         pending[event_id] = {"sender": sender, "room_id": ROOM_ID,
-                             "created_at": timestamp, "body": cap_body(content.get("body", ""))}
+                             "created_at": timestamp, "body": cap_body(content.get("body", "")),
+                             "thread_root": thread_root, "in_reply_to": in_reply_to, "media": media}
         added.append(event_id)
         # Persist the mail envelope before advancing the sync cursor. The
         # relay retries pending envelopes until Lua acknowledges delivery.

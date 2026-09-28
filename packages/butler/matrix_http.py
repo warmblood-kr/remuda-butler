@@ -88,14 +88,18 @@ class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
 
 
 class Client:
-    def __init__(self, token_path, config_path, state_dir=None, interval=None):
+    def __init__(self, token_path, config_path, state_dir=None, interval=None, timeout=None):
+        self.token_path = Path(token_path)
+        self.config_path = Path(config_path)
         self.base, self.room, self.options = _config(config_path)
-        self.token = Path(token_path).read_text(encoding="utf-8").strip()
+        self.token = self.token_path.read_text(encoding="utf-8").strip()
         if not self.token:
             raise MatrixError("Matrix token is empty")
         self.state_dir = Path(state_dir or (str(config_path) + ".state"))
         self.interval = float(interval if interval is not None else
                                os.environ.get("REMUDA_BUTLER_MATRIX_RATE_INTERVAL", "0.25"))
+        self.timeout = float(timeout if timeout is not None else
+                              os.environ.get("REMUDA_BUTLER_MATRIX_HTTP_TIMEOUT", "30"))
         self.ca_file = self.options.get("ca_file")
         self.pin = self.options.get("pin_sha256")
         if self.base.startswith("https://") and not self.ca_file and not self.pin:
@@ -138,10 +142,11 @@ class Client:
         self._rate_limit()
         req = urllib.request.Request(url, data=data, headers=headers, method=method.upper())
         try:
-            with self._opener().open(req, timeout=30) as response:
+            with self._opener().open(req, timeout=self.timeout) as response:
                 return response.status, dict(response.headers.items()), response.read()
         except urllib.error.HTTPError as exc:
             raw = exc.read(4096).decode("utf-8", "replace")
+            exc.close()
             raise MatrixError("Matrix HTTP %d: %s" % (exc.code, raw)) from exc
         except (urllib.error.URLError, TimeoutError, ssl.SSLError, OSError) as exc:
             raise MatrixError("Matrix request failed: %s" % exc) from exc

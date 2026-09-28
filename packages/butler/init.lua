@@ -121,9 +121,7 @@ the normal way for a member to communicate.
         prompt = function(_, ctx) return "Your leader is " .. ctx.parent .. "." end },
       { id = "matrix", order = 110,
         agents_md = function()
-          return [[Matrix: never call the homeserver REST API or curl directly; use
-`remuda butler matrix <verb>` (add `--json` for machine output; `--room ROOM`
-defaults to the configured room).
+          return [[Matrix: never call the homeserver REST API or curl directly; use `remuda butler matrix <verb>` (add `--json` for machine output; `--room ROOM` defaults to the configured room).
 - `status`: whoami, joined rooms, and the sync cursor.
 - `history [-n N]`: recent messages in the room.
 - `rooms`: joined rooms (read-only).
@@ -131,9 +129,8 @@ defaults to the configured room).
 - `event EVENT_ID` (alias `get`): one event.
 - `send TEXT`: post a message (long text is split, rate-limited).
 - `reply EVENT_ID TEXT` / `react EVENT_ID KEY`: answer or react (same room only).
-- `upload FILE` (up to 20 MB): post a file. `download MXC [-o PATH]`: fetch media.
-- `redact EVENT_ID [--reason TEXT]`: remove your message.
-]]
+- `upload FILE`: post a file (≤ 20 MB). `download MXC [-o PATH]`: fetch media.
+- `redact EVENT_ID [--reason TEXT]`: remove your message.]]
         end },
     },
     ["butler.command"] = {
@@ -163,7 +160,13 @@ defaults to the configured room).
   remuda butler matrix upload [--room ROOM] [--json] FILE
   remuda butler matrix redact [--room ROOM] [--reason TEXT] [--json] EVENT_ID
   remuda butler matrix join [--json] ROOM (operator)
-  remuda butler matrix leave [--json] ROOM (operator)]],
+  remuda butler matrix leave [--json] ROOM (operator)
+  remuda butler matrix status [--json]
+  remuda butler matrix history [--room ROOM] [-n N] [--json]
+  remuda butler matrix rooms [--json]
+  remuda butler matrix thread [--room ROOM] [--json] EVENT_ID
+  remuda butler matrix event|get [--room ROOM] [--json] EVENT_ID
+  remuda butler matrix download [-o PATH] [--json] MXC]],
         run = function(_, args, caller) return host._butler_command_run("matrix", args, caller) end },
     },
   },

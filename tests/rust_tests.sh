@@ -28,7 +28,8 @@ export HOME=$scratch/home
 export XDG_CONFIG_HOME=$scratch/config
 export XDG_CACHE_HOME=$scratch/cache
 export XDG_STATE_HOME=$scratch/state
-mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_STATE_HOME"
+export REMUDA_RUNTIME_DIR=$scratch/runtime
+mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_STATE_HOME" "$REMUDA_RUNTIME_DIR"
 
 if [[ -z ${CORE_DIR:-} ]]; then
   CORE_DIR=$scratch/remuda
@@ -48,6 +49,7 @@ mkdir -p "$XDG_DATA_HOME/remuda/mods/butler"
 cp -R "$REPO/extension.toml" "$REPO/packages" "$XDG_DATA_HOME/remuda/mods/butler/"
 unset REMUDA_SERVER REMUDA_BUTLER_TOKEN REMUDA_BUTLER_CONFIG
 
+python3 "$REPO/tests/test_matrix_http.py"
 python3 "$REPO/tests/test_matrix_cli.py"
 
 echo "core $(git -C "$CORE_DIR" rev-parse --short HEAD), butler $(git -C "$REPO" rev-parse --short HEAD)"

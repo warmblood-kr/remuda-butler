@@ -2257,6 +2257,7 @@ fn butler_test_daemon(dir: &Path) -> (Daemon, PathBuf) {
         String::from_utf8_lossy(&out.stderr)
     );
     eval(&path, "remuda.exec('butler/matrix')");
+    eval(&path, "remuda.exec('butler/matrix_cli')");
     (daemon, path)
 }
 
@@ -2326,6 +2327,19 @@ fn butler_matrix_cli_reads_late_config_and_quotes_hostile_text() {
         .expect("read stub request log");
     assert!(requests.contains("Bearer test-token"), "request lacked auth: {requests}");
     drop(daemon);
+}
+
+#[test]
+fn butler_matrix_read_words_live_in_the_public_nested_table() {
+    let dir = scratch_dir("butler-matrix-public-api");
+    let (_daemon, path) = butler_test_daemon(&dir);
+    let words = eval(
+        &path,
+        r#"local matrix = remuda.butler.matrix
+          return table.concat({ type(matrix.status), type(matrix.history), type(matrix.rooms),
+            type(matrix.thread), type(matrix.event), type(matrix.get), type(matrix.download) }, "|")"#,
+    );
+    assert_eq!(words, "function|function|function|function|function|function|function");
 }
 
 #[test]
@@ -2648,8 +2662,8 @@ fn butler_helper_escapes_a_multiline_message_into_exactly_one_line() {
         !raw_line.contains('\n'),
         "the delivered line itself contained a raw newline: {raw_line:?}"
     );
-    let fields: Vec<&str> = raw_line.splitn(5, '\t').collect();
-    assert_eq!(fields.len(), 5, "relay output did not carry a complete mail envelope: {raw_line}");
+    let fields: Vec<&str> = raw_line.split('\t').collect();
+    assert_eq!(fields.len(), 8, "relay output did not carry a complete mail envelope: {raw_line}");
     assert_eq!(fields[0], "@carol:example.org");
     assert_eq!(fields[1], room);
     assert_eq!(fields[2], "$1");
@@ -2662,7 +2676,7 @@ fn butler_helper_escapes_a_multiline_message_into_exactly_one_line() {
         &format!(
             r#"
             local line = {raw}
-            local _, _, _, _, body = line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t(.*)$")
+            local _, _, _, _, body = line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t[^\t]*\t[^\t]*\t.*$")
             body = body:gsub("\\(.)", function(c)
               if c == "n" then return "\n" elseif c == "r" then return "\r"
               elseif c == "t" then return "\t" else return c end
@@ -3460,7 +3474,7 @@ fn butler_helper_uses_messages_endpoint_when_fallback_is_configured() {
     assert!(requests.contains("from=messages-0"), "fallback did not resume with its persisted cursor: {requests}");
     assert!(!requests.contains("/_matrix/client/v3/sync"), "fallback unexpectedly called /sync: {requests}");
     let line = eval(&path, "return remuda.fallback_lines[1]");
-    assert!(line.ends_with("from messages"), "unexpected fallback delivery: {line}");
+    assert_eq!(line.split('\t').nth(4), Some("from messages"), "unexpected fallback delivery: {line}");
     eval(&path, "remuda.kill(remuda.fallback_handle)");
 }
 

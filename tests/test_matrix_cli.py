@@ -187,5 +187,99 @@ class ButlerMatrixCliTests(unittest.TestCase):
             error_server.wait(timeout=5)
 
 
+    def test_butler_matrix_status_reports_identity_rooms_and_sync_cursors(self):
+        Path(str(self.config) + ".since").write_text(
+            json.dumps({"since": "sync-42", "messages_since": "messages-7"}), encoding="utf-8")
+        result = matrix_cli.status(self.client)
+        self.assertEqual(result["user_id"], "@bot:example.org")
+        self.assertEqual(result["joined_rooms"], ["!stub:example.org"])
+        self.assertEqual(result["sync_cursor"], "sync-42")
+        self.assertEqual(result["fallback_cursor"], "messages-7")
+        self.assertEqual([row["path"].rsplit("/", 1)[-1] for row in self.requests()], ["whoami", "joined_rooms"])
+        self.assert_authenticated()
+
+    def test_butler_matrix_rooms_is_read_only(self):
+        self.assertEqual(matrix_cli.rooms(self.client), {"joined_rooms": ["!stub:example.org"]})
+        self.assertEqual([row["method"] for row in self.requests()], ["GET"])
+        self.assertIn("/_matrix/client/v3/joined_rooms", self.requests()[0]["path"])
+        self.assert_authenticated()
+
+    def test_butler_matrix_history_limits_room_and_count(self):
+        result = matrix_cli.history(self.client, count=3)
+        request = self.requests()[0]
+        self.assertIn("/rooms/%21stub%3Aexample.org/messages", request["path"])
+        self.assertIn("dir=b", request["path"])
+        self.assertIn("limit=3", request["path"])
+        self.assertEqual(result["chunk"][0]["event_id"], "$history-event")
+        self.assert_authenticated()
+        with self.assertRaises(MatrixError):
+            matrix_cli.history(self.client, "!other:example.org", 3)
+
+    def test_butler_matrix_thread_paginates_relations(self):
+        result = matrix_cli.thread(self.client, self.room, "$root")
+        requests = self.requests()
+        self.assertEqual(len(requests), 2)
+        self.assertTrue(all("/relations/%24root/m.thread" in row["path"] for row in requests))
+        self.assertIn("from=thread-page-2", requests[1]["path"])
+        self.assertEqual(result["chunk"][0]["event_id"], "$thread-child")
+        self.assert_authenticated()
+        with self.assertRaises(MatrixError):
+            matrix_cli.thread(self.client, "!other:example.org", "$root")
+
+    def test_butler_matrix_event_and_get_use_the_configured_room(self):
+        event = matrix_cli.event(self.client, self.room, "$event")
+        self.assertEqual(event["content"]["body"], "stub event")
+        self.assertIn("/event/%24event", self.requests()[0]["path"])
+        self.assert_authenticated()
+        with self.assertRaises(MatrixError):
+            matrix_cli.event(self.client, "!other:example.org", "$event")
+
+    def test_butler_matrix_get_cli_alias_emits_json(self):
+        env = os.environ.copy()
+        env["REMUDA_BUTLER_MATRIX_RATE_INTERVAL"] = "0"
+        result = subprocess.run(
+            [sys.executable, matrix_cli.__file__, str(self.token), str(self.config), str(self.state),
+             "get", "--room", self.room, "$event", "--json"],
+            capture_output=True, text=True, check=True, env=env,
+        )
+        self.assertEqual(json.loads(result.stdout)["content"]["body"], "stub event")
+        self.assert_authenticated()
+
+    def test_butler_matrix_download_writes_authenticated_media(self):
+        target = self.root / "saved-image.png"
+        result = matrix_cli.download(self.client, "mxc://media.example.org/image", str(target))
+        self.assertEqual(target.read_bytes(), b"stub-media-bytes")
+        self.assertEqual(result["content_type"], "image/png")
+        self.assertIn("/_matrix/client/v1/media/download/media.example.org/image", self.requests()[0]["path"])
+        self.assertEqual(self.requests()[0]["authorization"], "Bearer stub-secret")
+        self.assert_authenticated()
+        with self.assertRaises(MatrixError):
+            matrix_cli.download(self.client, "https://media.example.org/image")
+
+    def test_butler_matrix_download_falls_back_to_legacy_media_route(self):
+        alt_get = self.root / "fallback-get.log"
+        alt_put = self.root / "fallback-put.log"
+        server = subprocess.Popen(
+            [sys.executable, str(ROOT / "tests/support/matrix_stub_server.py"),
+             str(self.fixture), str(alt_get), str(alt_put), "200", "-", "-", "404"],
+            stdout=subprocess.PIPE, text=True,
+        )
+        try:
+            port = int(server.stdout.readline().strip())
+            config = self.root / "fallback-config"
+            config.write_text(f"http://127.0.0.1:{port}\n{self.room}\n@bot:example.org\n", encoding="utf-8")
+            client = Client(self.token, config, state_dir=self.state, interval=0)
+            result = matrix_cli.download(client, "mxc://media.example.org/image", str(self.root / "fallback.bin"))
+            self.assertEqual(result["bytes"], len(b"stub-media-bytes"))
+            requests = [json.loads(line) for line in alt_get.with_name("fallback-get.log.requests").read_text().splitlines()]
+            self.assertEqual(len(requests), 2)
+            self.assertIn("/_matrix/client/v1/media/download/", requests[0]["path"])
+            self.assertIn("/_matrix/media/v3/download/", requests[1]["path"])
+        finally:
+            server.terminate()
+            server.wait(timeout=5)
+            server.stdout.close()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1313,6 +1313,11 @@ local function matrix_command(args, caller)
       opts.room, i = args[i + 1], i + 2
     elseif args[i] == "--json" then
       opts.json, i = true, i + 1
+    elseif args[i] == "-n" or args[i] == "-o" then
+      if not args[i + 1] then return nil end
+      if args[i] == "-n" then opts.count = tonumber(args[i + 1]); if not opts.count then return nil end
+      else opts.output = args[i + 1] end
+      i = i + 2
     elseif verb == "redact" and args[i] == "--reason" then
       if not args[i + 1] then return nil end
       opts.reason, i = args[i + 1], i + 2
@@ -1344,6 +1349,21 @@ local function matrix_command(args, caller)
     opts.room = opts.room or words[1]
     if verb == "join" then return matrix.join(opts, caller) end
     return matrix.leave(opts, caller)
+  elseif verb == "status" and #words == 0 then
+    return matrix.status(opts)
+  elseif verb == "history" and #words == 0 then
+    return matrix.history(opts)
+  elseif verb == "rooms" and #words == 0 then
+    return matrix.rooms(opts)
+  elseif verb == "thread" and #words == 1 then
+    opts.event_id = words[1]
+    return matrix.thread(opts)
+  elseif (verb == "event" or verb == "get") and #words == 1 then
+    opts.event_id = words[1]
+    return matrix.event(opts)
+  elseif verb == "download" and #words == 1 then
+    opts.mxc = words[1]
+    return matrix.download(opts)
   end
 end
 
@@ -1424,7 +1444,13 @@ command(100, "matrix", [[  remuda butler matrix send [--room ROOM] [--json] TEXT
   remuda butler matrix upload [--room ROOM] [--json] FILE
   remuda butler matrix redact [--room ROOM] [--reason TEXT] [--json] EVENT_ID
   remuda butler matrix join [--json] ROOM (operator)
-  remuda butler matrix leave [--json] ROOM (operator)]], function(args, caller)
+  remuda butler matrix leave [--json] ROOM (operator)
+  remuda butler matrix status [--json]
+  remuda butler matrix history [--room ROOM] [-n N] [--json]
+  remuda butler matrix rooms [--json]
+  remuda butler matrix thread [--room ROOM] [--json] EVENT_ID
+  remuda butler matrix event|get [--room ROOM] [--json] EVENT_ID
+  remuda butler matrix download [-o PATH] [--json] MXC]], function(args, caller)
   if #args >= 3 then return matrix_command(args, caller) end
 end)
 remuda._butler_command_run = function(verb, args, caller)

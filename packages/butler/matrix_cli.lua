@@ -145,5 +145,45 @@ end
 
 function matrix.join(opts, caller) return operator_only("join", opts, caller) end
 function matrix.leave(opts, caller) return operator_only("leave", opts, caller) end
+function matrix.status(opts)
+  opts = opts or {}
+  return run("status", {}, opts.json)
+end
+
+function matrix.history(opts)
+  opts = opts or {}
+  local values = option_args(opts)
+  if opts.count then values[#values + 1] = "-n"; values[#values + 1] = opts.count end
+  return run("history", values)
+end
+
+function matrix.rooms(opts)
+  opts = opts or {}
+  return run("rooms", option_args(opts))
+end
+
+function matrix.thread(opts)
+  opts = opts or {}
+  local values = option_args(opts)
+  assert(opts.event_id, "thread requires event_id")
+  values[#values + 1] = opts.event_id
+  return run("thread", values)
+end
+
+function matrix.event(opts)
+  opts = opts or {}
+  assert(opts.event_id, "event requires event_id")
+  return run("event", option_args(opts))
+end
+matrix.get = matrix.event
+
+function matrix.download(opts)
+  opts = opts or {}
+  assert(opts.mxc, "download requires mxc")
+  local values = { opts.mxc }
+  if opts.output then values[#values + 1] = "-o"; values[#values + 1] = opts.output end
+  return run("download", values, opts.json)
+end
+
 
 return matrix

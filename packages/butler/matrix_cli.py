@@ -114,6 +114,111 @@ def upload(client, file_path, room=None):
     return {"event_id": result.get("event_id", ""), "content_uri": content_uri}
 
 
+def status(client):
+    who = client.get("/_matrix/client/v3/account/whoami")
+    joined = client.get("/_matrix/client/v3/joined_rooms").get("joined_rooms", [])
+    cursor = {}
+    state_path = Path(str(client.config_path) + ".since")
+    try:
+        saved = json.loads(state_path.read_text(encoding="utf-8"))
+        if isinstance(saved, dict):
+            cursor = {key: saved.get(key) for key in ("since", "messages_since")}
+    except (OSError, ValueError):
+        pass
+    return {"user_id": who.get("user_id"), "device_id": who.get("device_id"),
+            "joined_rooms": joined, "sync_cursor": cursor.get("since"),
+            "fallback_cursor": cursor.get("messages_since")}
+
+
+def history(client, room=None, count=20):
+    room = room or client.room
+    count = int(count)
+    if count < 1 or count > 1000:
+        raise MatrixError("history count must be between 1 and 1000")
+    path = _path(room, "messages")
+    result = client.get(path, {"dir": "b", "limit": str(count)}, room=room)
+    return {"room_id": room, "chunk": result.get("chunk", []),
+            "start": result.get("start"), "end": result.get("end")}
+
+
+def rooms(client):
+    return {"joined_rooms": client.get("/_matrix/client/v3/joined_rooms").get("joined_rooms", [])}
+
+
+def thread(client, room, event_id):
+    path = "/_matrix/client/v1/rooms/%s/relations/%s/m.thread" % (
+        urllib.parse.quote(room, safe=""), urllib.parse.quote(event_id, safe=""))
+    events, cursor, seen = [], None, set()
+    for _ in range(1000):
+        params = {"dir": "b", "limit": "100"}
+        if cursor:
+            params["from"] = cursor
+        page = client.get(path, params, room=room)
+        events.extend(page.get("chunk", []))
+        next_cursor = page.get("next_batch")
+        if not next_cursor or next_cursor == cursor or next_cursor in seen:
+            break
+        seen.add(next_cursor)
+        cursor = next_cursor
+    return {"room_id": room, "event_id": event_id, "chunk": events, "next_batch": cursor}
+
+
+def event(client, room, event_id):
+    path = _path(room, "event/" + urllib.parse.quote(event_id, safe=""))
+    return client.get(path, room=room)
+
+
+def download(client, mxc, output_path=None):
+    parsed = urllib.parse.urlsplit(mxc)
+    media_id = parsed.path.lstrip("/")
+    if parsed.scheme != "mxc" or not parsed.netloc or not media_id or "/" in media_id:
+        raise MatrixError("download expects an mxc://server/media_id URL")
+    server = urllib.parse.quote(parsed.netloc, safe="")
+    media = urllib.parse.quote(media_id, safe="")
+    v1 = "/_matrix/client/v1/media/download/%s/%s" % (server, media)
+    try:
+        _, headers, body = client.request_raw("GET", v1, None, None)
+    except MatrixError as exc:
+        message = str(exc)
+        if "Matrix HTTP 404" not in message and "M_UNRECOGNIZED" not in message:
+            raise
+        legacy = "/_matrix/media/v3/download/%s/%s" % (server, media)
+        _, headers, body = client.request_raw("GET", legacy, None, None)
+    target = Path(output_path) if output_path else Path("matrix-" + Path(media_id).name)
+    target.write_bytes(body)
+    return {"mxc": mxc, "path": str(target), "bytes": len(body),
+            "content_type": headers.get("Content-Type", "application/octet-stream")}
+
+
+def _event_line(item):
+    event_content = item.get("content", {})
+    sender = item.get("sender", "?")
+    body = event_content.get("body", "") if isinstance(event_content, dict) else ""
+    if not body and isinstance(event_content, dict):
+        file_content = event_content.get("file")
+        if not isinstance(file_content, dict):
+            file_content = {}
+        body = event_content.get("url", file_content.get("url", ""))
+    return "%s %s: %s" % (item.get("event_id", ""), sender, body)
+
+
+def _render_read(value, machine, verb):
+    if machine:
+        json_out(value)
+    elif verb == "status":
+        print("%s · joined %d room(s) · sync %s · fallback %s" % (
+            value.get("user_id") or "unknown user", len(value["joined_rooms"]),
+            value.get("sync_cursor") or "baseline pending", value.get("fallback_cursor") or "inactive"))
+    elif verb == "rooms":
+        print("\n".join(value["joined_rooms"]) or "No joined rooms")
+    elif verb == "download":
+        print("Downloaded %d bytes to %s" % (value["bytes"], value["path"]))
+    elif verb in ("history", "thread"):
+        print("\n".join(_event_line(item) for item in value["chunk"]) or "No events")
+    else:
+        print(_event_line(value))
+
+
 def _render(value, machine):
     if machine:
         json_out(value)
@@ -131,14 +236,29 @@ def main(argv=None):
     parser.add_argument("token")
     parser.add_argument("config")
     parser.add_argument("state_dir")
-    parser.add_argument("verb", choices=("send", "reply", "react", "upload", "redact", "join", "leave"))
+    parser.add_argument("verb", choices=("send", "reply", "react", "upload", "redact", "join", "leave",
+                                          "status", "history", "rooms", "thread", "event", "get", "download"))
     parser.add_argument("--json", action="store_true", dest="machine")
     parser.add_argument("--room")
+    parser.add_argument("-n", type=int, default=20, dest="count")
+    parser.add_argument("-o", dest="output_path")
     parser.add_argument("values", nargs="*")
     args = parser.parse_args(argv)
     client = Client(args.token, args.config, state_dir=args.state_dir)
     room = args.room or client.room
-    if args.verb == "send":
+    if args.verb == "status" and not args.values:
+        result = status(client)
+    elif args.verb == "rooms" and not args.values:
+        result = rooms(client)
+    elif args.verb == "history" and not args.values:
+        result = history(client, args.room, args.count)
+    elif args.verb == "thread" and len(args.values) == 1:
+        result = thread(client, room, args.values[0])
+    elif args.verb in ("event", "get") and len(args.values) == 1:
+        result = event(client, room, args.values[0])
+    elif args.verb == "download" and len(args.values) == 1:
+        result = download(client, args.values[0], args.output_path)
+    elif args.verb == "send":
         text = " ".join(args.values)
         if text == "-":
             text = sys.stdin.read()
@@ -155,7 +275,10 @@ def main(argv=None):
         result = globals()[args.verb](client, args.values[0])
     else:
         parser.error("invalid arguments for %s" % args.verb)
-    _render(result, args.machine)
+    if args.verb in ("status", "rooms", "history", "thread", "event", "get", "download"):
+        _render_read(result, args.machine, args.verb)
+    else:
+        _render(result, args.machine)
 
 
 if __name__ == "__main__":

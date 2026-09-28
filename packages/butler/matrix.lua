@@ -34,13 +34,23 @@ function remuda._butler_matrix_line(line)
     remuda._butler_matrix_restart_attempts = 0
     return
   end
-  local sender, room_id, event_id, created_at, body = line:match(
-    "^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t(.*)$"
+  local sender, room_id, event_id, created_at, body, thread_root, in_reply_to, media_urls = line:match(
+    "^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t(.*)$"
   )
+  if not body then
+    sender, room_id, event_id, created_at, body = line:match(
+      "^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t(.*)$"
+    )
+    thread_root, in_reply_to, media_urls = "", "", ""
+  end
   if not body then return end
   sender, room_id, event_id, created_at, body = unescape(sender), unescape(room_id),
     unescape(event_id), unescape(created_at), unescape(body)
-  local matrix = { sender = sender, room_id = room_id, event_id = event_id, created_at = created_at }
+  thread_root, in_reply_to, media_urls = unescape(thread_root), unescape(in_reply_to), unescape(media_urls)
+  local media = {}
+  for url in media_urls:gmatch("[^\n]+") do media[#media + 1] = url end
+  local matrix = { sender = sender, room_id = room_id, event_id = event_id,
+    created_at = created_at, thread_root = thread_root, in_reply_to = in_reply_to, media = media }
   local delivered = remuda.emit_until_success("butler/deliver", {
     from = { host = "matrix", id = "", alias = sender, session = sender, kind = "matrix", leader = "" },
     to = "butler", text = body, subject = "Matrix message from " .. sender,
