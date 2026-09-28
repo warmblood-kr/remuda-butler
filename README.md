@@ -7,6 +7,14 @@ PTY, IPC, terminal, or session implementation.
 This is the independent Butler extension repository. The migration boundary
 from the original embedded package is documented in `BUTLER_MIGRATION.md`.
 
+## Cascading spawn
+
+![A terminal session tree: butler has spawned a lead session, which has in
+turn spawned several of its own worker sessions, shown nested in the
+sidebar](docs/remuda-cascading-spawn.png)
+
+The butler spawns a lead; a worker can spawn its own workers (cascading).
+
 ## Runtime dependency
 
 Install Remuda core/native first. Recommended core: `0.1.0-nightly.20260927085114.3cb8a39`
