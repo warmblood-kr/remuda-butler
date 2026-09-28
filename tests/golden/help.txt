@@ -8,6 +8,8 @@ remuda butler — coordination for managed agents
   remuda butler send <from> <to> <message...>
   remuda butler send-to-leader <message...>
   remuda butler inbox [name]
+  remuda butler reply <message-id> <message...>
+  remuda butler forward <message-id> <member> [note...]
 
 Agent sessions receive REMUDA_BUTLER_AGENT_ID and REMUDA_BUTLER_LEADER_ID.
 In an agent session, use `inbox`, `send <to> "..."`, and `send-to-leader ...`;
@@ -16,4 +18,6 @@ the identity comes from the caller's environment. Quote the message for
 the operator form for attributing a note. Without a forwarded Butler identity
 (a plain shell, or a core that does not forward the caller's env), `send` is
 from "operator" and `inbox` needs a name (`inbox <name>`).
+`reply` answers a message's original sender, even when it was forwarded to you;
+`forward` re-delivers a message you received, keeping its sender, with a note.
 
