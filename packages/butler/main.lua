@@ -1121,9 +1121,28 @@ local function codex_update_complete(screen)
   local lower = tostring(screen or ""):lower()
   return lower:find("update complete", 1, true) ~= nil
     or lower:find("update successful", 1, true) ~= nil
+    or lower:find("update ran successfully", 1, true) ~= nil
     or lower:find("codex was updated", 1, true) ~= nil
     or lower:find("codex has been updated", 1, true) ~= nil
     or lower:find("restarting codex", 1, true) ~= nil
+end
+local function capture_update_evidence(session, screen)
+  local evidence = tostring(screen or "")
+  -- Some hosts may expose scrollback separately; core 7247c45 only exposes
+  -- the current screen through remuda.capture.
+  if type(remuda.capture_scrollback) == "function" then
+    local ok, scrollback = pcall(remuda.capture_scrollback, session)
+    if ok and scrollback then
+      if type(scrollback) == "table" then
+        local rows = {}
+        for _, row in ipairs(scrollback) do rows[#rows + 1] = tostring(row) end
+        evidence = table.concat(rows, "\n") .. "\n" .. evidence
+      else
+        evidence = tostring(scrollback) .. "\n" .. evidence
+      end
+    end
+  end
+  return evidence
 end
 local function launch_agent(kind, requested_name, cwd, model, parent, task, relaunch_identity)
   local candidates = kind and { kind } or configured_agent_order()
@@ -1219,6 +1238,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       return {
         kind = kind, name = actual, cwd = agent.cwd, model = agent.model,
         parent = agent.parent, task = task, identity = agent.id,
+        update_pressed = false, last_screen = agent.last_screen,
       }
     end
     local function relaunch_after_update()
@@ -1285,6 +1305,11 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
         remuda.cancel(poke)
         bus.pending_tasks[actual] = nil
         return
+      end
+      local agent = bus.agents[actual]
+      if agent then agent.last_screen = capture_update_evidence(actual, screen) end
+      if update_relaunch_record_ref then
+        update_relaunch_record_ref.last_screen = agent and agent.last_screen or capture_update_evidence(actual, screen)
       end
       if attempts < settle then return end -- let an answered modal repaint
       local modal = startup_modal(startup, screen)
@@ -1424,8 +1449,12 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
               bus.codex_update_relaunches[actual] = update_relaunch_record()
               update_relaunch_record_ref = bus.codex_update_relaunches[actual]
               update_relaunch_record_ref.version = update_version
+              update_relaunch_record_ref.update_pressed = true
               local pressed = pcall(remuda.key, actual, update)
-              if pressed then return end
+              if pressed then
+                return
+              end
+              update_relaunch_record_ref.update_pressed = false
               bus.codex_update_relaunches[actual] = nil
               update_relaunch_record_ref = nil
               update_state.claimed, update_state.owner = false, nil
@@ -1630,33 +1659,38 @@ function remuda._butler_notify_policy(session, now)
     end
     if now - seen.since < NOTICE_STABLE_SECONDS then return false end
   end
+  local full_screen, prompt_screen = screen, screen
   if remuda.capture_styled then
     -- A core with remuda#137 marks dim text: parse only the cursor row, and
     -- drop a TUI's dim ghost suggestion so it reads as the empty prompt it is.
     local captured, styled = pcall(remuda.capture_styled, session)
     if not captured then return false end
-    local parts = {}
-    for _, span in ipairs(styled.rows[styled.cursor.row] or {}) do
-      if not span.dim then parts[#parts + 1] = span.text end
+    local rows = {}
+    for row_index, spans in ipairs(styled.rows or {}) do
+      local parts = {}
+      for _, span in ipairs(spans) do parts[#parts + 1] = span.text end
+      rows[row_index] = table.concat(parts)
     end
-    screen = table.concat(parts)
-  elseif not screen then
+    if not full_screen then full_screen = table.concat(rows, "\n") end
+    local cursor_parts = {}
+    for _, span in ipairs(styled.rows[styled.cursor.row] or {}) do
+      if not span.dim then cursor_parts[#cursor_parts + 1] = span.text end
+    end
+    prompt_screen = table.concat(cursor_parts)
+  end
+  if not full_screen then
     local captured
-    captured, screen = pcall(remuda.capture, session)
+    captured, full_screen = pcall(remuda.capture, session)
     if not captured then return false end
   end
+  prompt_screen = prompt_screen or full_screen
   local agent = bus.agents[session]
   local kind = agent and agent.kind or ""
-  if not screen then
-    local captured
-    captured, screen = pcall(remuda.capture, session)
-    if not captured then return false end
-  end
-  if known_startup_modal(remuda._butler_agent_startup[kind] or {}, screen) then
+  if known_startup_modal(remuda._butler_agent_startup[kind] or {}, full_screen) then
     _butler_session_trace("notice_deferred_modal", session .. " " .. kind)
     return false
   end
-  local decision, text = remuda._butler_prompt_is_empty(kind, screen)
+  local decision, text = remuda._butler_prompt_is_empty(kind, prompt_screen)
   if seen.decision ~= decision then -- once per change, not every retry
     seen.decision = decision
     _butler_session_trace("notice_prompt", session .. " " .. kind .. " " .. decision .. " " .. text)
@@ -2455,9 +2489,8 @@ function remuda._butler_reconcile()
   end
   return result
 end
--- The session_exited hook only carries the session name. Remember an explicit
--- remuda.close call long enough for the hook to distinguish it from an agent
--- process ending on its own.
+-- Remember an explicit remuda.close call for older cores whose session_exited
+-- event carries only the session name.
 if not bus.close_wrapper_installed and type(remuda.close) == "function" then
   local close_session = remuda.close
   bus.close_wrapper_installed = true
@@ -2473,14 +2506,28 @@ if not bus.close_wrapper_installed and type(remuda.close) == "function" then
     return a, b, c
   end
 end
-function remuda._butler_session_exited(name)
+local function report_update_task_not_relaunched(record, reason)
+  if not record or not record.task or record.task == "" then return end
+  pcall(remuda._butler_send, "butler", record.parent or "butler",
+    "Task for " .. record.name .. " was not delivered because its Codex update ended without a safe relaunch ("
+      .. tostring(reason or "update aborted") .. "). Resend it with `remuda butler send "
+      .. record.name .. " TASK` when the pane is ready.")
+end
+function remuda._butler_session_exited(name, info)
   _butler_session_trace("session_exited", name)
   local update_restart = bus.codex_update_relaunches[name]
   local explicitly_closed = bus.close_requested and bus.close_requested[name]
+  local reason = type(info) == "table" and info.reason or nil
+  local exit_code = type(info) == "table" and tonumber(info.exit_code) or nil
+  local saw_success = update_restart and (update_restart.update_complete_seen
+    or codex_update_complete(update_restart.last_screen))
+  local exited_successfully = update_restart and update_restart.update_pressed
+    and reason == "exited" and exit_code == 0
+  local closed_by_person = explicitly_closed or reason == "closed"
   if update_restart and not update_restart.expected_close
-      and (explicitly_closed or not update_restart.update_complete_seen) then
-    -- The core exit hook carries no close reason. Treat an unmarked exit as an
-    -- abort unless the pane showed Codex's update-complete evidence first.
+      and (closed_by_person or not saw_success and not exited_successfully) then
+    -- Older cores carry only the name; newer cores report reason and exit code.
+    -- A human close always wins, while successful exits can use either signal.
     update_restart.cancelled = true
     bus.codex_update_relaunches[name] = nil
     if bus.codex_update_state.waiting then bus.codex_update_state.waiting[name] = nil end
@@ -2491,6 +2538,7 @@ function remuda._butler_session_exited(name)
       bus.codex_update_state.waiting, bus.codex_update_state.restart_waiting = {}, {}
     end
     _butler_session_trace("codex_update_exit_unconfirmed", name)
+    report_update_task_not_relaunched(update_restart, closed_by_person and "closed by a person" or "update did not report success")
     update_restart = nil
   end
   if update_restart then

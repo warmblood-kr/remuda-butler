@@ -3625,6 +3625,7 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
           }}
           local log = {{}}
           local human_owner_update_started = false
+          local versionless_launches = 0
           remuda._t = log
           remuda._butler_bus.codex_update_state = {{claimed=false, done=false}}
           remuda._butler_codex_update_timeout = 2
@@ -3649,6 +3650,10 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
           remuda.new = function(name, ...)
             local actual = native_new(name, ...)
             if name:match("^t%-codex") then log[#log + 1] = name .. " launch" end
+            if name == "t-codex-versionless" then
+              versionless_launches = versionless_launches + 1
+              if versionless_launches > 1 then screens[name] = {{ "› Ask Codex to do anything" }} end
+            end
             if name == "t-codex-timeout" then
               log[#log + 1] = name .. " launch"
               screens[name] = {{ "  Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip\n  3. Skip until next version\n› Ask Codex to do anything" }}
@@ -3679,7 +3684,10 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
             elseif n == "t-codex-skip-label" and k == "3" then
               screens[n] = {{ "› Ask Codex to do anything" }}
             elseif n == "t-codex-versionless" and k == "1" then
-              screens[n] = {{ "› Ask Codex to do anything" }}
+              screens[n] = {{ "🎉 Update ran successfully! Please restart Codex." }}
+              local restart = remuda._butler_bus.codex_update_relaunches[n]
+              restart.last_screen = remuda.capture(n) -- captured immediately before Codex exits
+              natural_exit(n)
             elseif n == "t-codex-human-owner" and k == "1" then
               human_owner_update_started = true
               screens[n] = {{ "› Ask Codex to do anything" }} -- update completed in place
@@ -3822,6 +3830,7 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
     };
     assert_eq!(versionless_log.lines().filter(|l| l.starts_with("t-codex-versionless key 1")).count(), 1, "versionless update did not select Update now: {versionless_log}");
     assert_eq!(versionless_log.lines().filter(|l| l.starts_with("t-codex-versionless type versionless task")).count(), 1, "versionless task delivery duplicated: {versionless_log}");
+    assert_eq!(versionless_log.lines().filter(|l| l.starts_with("t-codex-versionless launch")).count(), 2, "successful exiting update was not relaunched: {versionless_log}");
     eval(&path, r#"remuda._butler_bus.codex_update_state={claimed=false,done=false,waiting={},restart_waiting={}}; remuda._butler_topic_delegate("t-codex-human-owner", "task after human", nil, "codex", remuda._butler_initial_name)"#);
     let human_owner_deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -3841,6 +3850,8 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
         std::thread::sleep(Duration::from_millis(100));
     }
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.codex_update_state.done_version ~= '0.157.1->0.158.0' and remuda._butler_bus.codex_update_state.claimed == false and remuda._butler_bus.codex_update_relaunches['t-codex-gui-close'] == nil)"), "true", "screen close was mistaken for update completion");
+    assert_eq!(eval(&path, "local found=false; for _,o in pairs(remuda._butler_bus.objects) do if (o.content or ''):find('Task for t-codex-gui-close was not delivered', 1, true) then found=true end end; return tostring(found)"), "true", "aborted update silently lost its task");
+    eval(&path, r#"remuda.capture_styled=function() return {rows={[2]={{text="",dim=false}},[3]={{text="",dim=false}}},cursor={row=3}} end"#);
     eval(&path, r#"remuda._butler_notify("t-codex-timeout", "Butler message 01M3MX8NCGV5GVSGN104YP4TFT arrived. Read them: remuda butler inbox")"#);
     let modal_notice_log = eval(&path, "return table.concat(remuda._t, '\\n')");
     assert!(!modal_notice_log.contains("t-codex-timeout type Butler message"), "mail notice was typed into an update progress dialog: {modal_notice_log}");
@@ -4538,7 +4549,7 @@ fn butler_session_exited_hook_relaunches_via_the_shared_launch_function() {
     );
     assert!(
         init_lua.contains("event = \"session_exited\", id = \"identity\"")
-            && main_lua.contains("function remuda._butler_session_exited(name)")
+            && main_lua.contains("function remuda._butler_session_exited(name, info)")
             && main_lua[launch_fn_idx..].contains("remuda._butler_reconcile()"),
         "the declared session-exit hook must use the shared reconciler"
     );
