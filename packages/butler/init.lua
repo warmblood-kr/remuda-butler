@@ -145,21 +145,16 @@ the normal way for a member to communicate.
         end },
       { id = "matrix", order = 50,
         agents_md = function()
-          return [[Matrix is the human-facing adapter.
-- For status, use `remuda butler matrix status`; never call REST/curl.
-- For rooms, use `remuda butler matrix rooms`; never call REST/curl.
-- For history, use `remuda butler matrix history`; never call REST/curl.
-- For thread, use `remuda butler matrix thread`; never call REST/curl.
-- For event or get, use `remuda butler matrix event|get`; never call REST/curl.
-- For download, use `remuda butler matrix download`; never call REST/curl.
-- For send, use `remuda butler matrix send`; never call REST/curl. `send -` is refused until core #213.
-- For reply, use `remuda butler matrix reply`; never call REST/curl.
-- For react, use `remuda butler matrix react`; never call REST/curl.
-- For upload, use `remuda butler matrix upload`; never call REST/curl.
-- For redact, use `remuda butler matrix redact`; never call REST/curl.
-- For join, use `remuda butler matrix join`; never call REST/curl. Operator-only, advisory at the same UID until core #218.
-- For leave, use `remuda butler matrix leave`; never call REST/curl. Operator-only, advisory at the same UID until core #218.
-- Use `--json` for machine output and put options before verb arguments.
+          return [[Matrix is the human-facing adapter: never call the homeserver REST API or curl directly; use `remuda butler matrix [OPTIONS] VERB ARGS`. Options go BEFORE the verb (`--json` for machine output; `--room ROOM` defaults to the configured room).
+- `status`: whoami, joined rooms, and the sync cursor.
+- `[-n N] history`: recent messages in the room.
+- `rooms`: joined rooms (read-only).
+- `thread EVENT_ID`: all replies in a thread.
+- `event EVENT_ID` (alias `get`): one event.
+- `send TEXT`: post a message (long text is split, rate-limited); `send -` is refused until core #213.
+- `reply EVENT_ID TEXT` / `react EVENT_ID KEY`: answer or react (same room only).
+- `upload PATH`: post a file (up to 20 MB). `[-o PATH] download MXC`: fetch media.
+- `redact EVENT_ID [--reason TEXT]`: remove your message.
 ]]
         end,
         prompt = function()
