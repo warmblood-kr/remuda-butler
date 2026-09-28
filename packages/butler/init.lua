@@ -120,6 +120,8 @@ the normal way for a member to communicate.
     ["butler.command"] = {
       { id = "sessions", order = 10, verb = "sessions", usage = "  remuda butler sessions",
         run = function(_, args, caller) return host._butler_command_run("sessions", args, caller) end },
+      { id = "agents", order = 15, verb = "agents", usage = "  remuda butler agents [--all]",
+        run = function(_, args, caller) return host._butler_command_run("agents", args, caller) end },
       { id = "launch", order = 20, verb = "launch", usage = "  remuda butler launch <claude|codex> [name] [--model M]",
         run = function(_, args, caller) return host._butler_command_run("launch", args, caller) end },
       { id = "topic", order = 30, verb = "topic", usage = "  remuda butler topic new <name> [--template T] [--agent A] [--model M]\n"

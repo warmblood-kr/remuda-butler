@@ -38,11 +38,7 @@ local function file_component(value)
 end
 
 local function message_id()
-  bus.next = bus.next + 1
-  local seed = os.tmpname()
-  os.remove(seed)
-  local suffix = (seed:match("([^/]+)$") or seed):gsub("[^%w_-]", "-")
-  return "message-" .. string.format("%x", os.time()) .. "-" .. string.format("%x", bus.next) .. "-" .. suffix
+  return remuda._butler_new_ulid()
 end
 
 -- FRESH refuses an existing target: rename() replaces silently, and a new
@@ -343,7 +339,7 @@ local function queue(from, to, text, subject, in_reply_to, references, matrix)
     end
   end
   local id = message_id()
-  local object_id = id:gsub("^message%-", "object-")
+  local object_id = "object-" .. id
   local sender, body = from.alias or "outside", tostring(text)
   local object = { id = object_id, content = body, bytes = #body,
     content_type = "text/plain; charset=utf-8", content_hash = nil }
@@ -426,7 +422,7 @@ local function deliver_forward(message)
     if not ready then return nil, "cannot prepare Butler mail storage: " .. tostring(ready_err) end
     local note_json = ""
     if note and note ~= "" then
-      local note_id = message_id():gsub("^message%-", "object-")
+      local note_id = "object-" .. message_id()
       local wrote, err = write_atomic(disk.objects .. note_id, note, true)
       if not wrote then return nil, "cannot write the forward note: " .. tostring(err) end
       note_json = ',"note_object_id":' .. config.json_quote(note_id)
