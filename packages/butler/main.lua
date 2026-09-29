@@ -1032,7 +1032,9 @@ local function choose(candidates, opts, done)
       handled = {}, last_screen = "", dialog_seen = nil }
     local test_builder = remuda._butler_agent_builders[id]
       and remuda._butler_agent_builders[id] ~= BUILTIN_AGENT_BUILDERS[id]
-    if opts.skip_probe or test_builder then
+    local force_test_probe = type(remuda._butler_test_force_launch_probe) == "table"
+      and remuda._butler_test_force_launch_probe[opts.name] == true
+    if opts.skip_probe or (test_builder and not force_test_probe) then
       attempt.reason, attempt.session = "ready", name
       callback(name, id)
     end
