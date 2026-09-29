@@ -7,18 +7,64 @@
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 T=$(mktemp -d /tmp/boc.XXXXXX)
+T=$(cd "$T" && pwd -P)
 S=boc
 ID=$((RANDOM % 90000 + 10000))  # this run's own fake-session sleep
+DAEMON_PID=
 export REMUDA_RUNTIME_DIR=$T/run XDG_DATA_HOME=$T/data XDG_CONFIG_HOME=$T/config
 export HOME=$T/home REMUDA_BUTLER_PROJECT_HOME=$T/projects REMUDA_BUTLER_SERVER=$S
 unset REMUDA_BUTLER_TOKEN REMUDA_BUTLER_CONFIG
 MOD=$XDG_DATA_HOME/remuda/mods/butler
 mkdir -p "$MOD" "$HOME" "$XDG_CONFIG_HOME/remuda/butler"
-trap 'remuda -s "$S" stop -f >/dev/null 2>&1 || true; pkill -f "sleep ${ID}3\$" >/dev/null 2>&1 || true; rm -rf "$T"' EXIT
+cleanup() {
+  [[ ${REMUDA_RUNTIME_DIR:-} == "$T/run" ]] || { echo "refusing cleanup outside scratch runtime" >&2; return 1; }
+  local pid killed=0 left=0
+  local descendants=()
+  if [[ -n "$DAEMON_PID" ]]; then
+    while IFS= read -r pid; do [[ -n "$pid" ]] && descendants+=("$pid"); done < <(
+      ps -axo pid=,ppid= | awk -v root="$DAEMON_PID" '
+        { ppid[$1]=$2; rows[NR]=$1 }
+        END {
+          found[root]=1
+          do {
+            changed=0
+            for (i=1; i<=NR; i++) if (!found[rows[i]] && found[ppid[rows[i]]]) {
+              found[rows[i]]=1; changed=1
+            }
+          } while (changed)
+          for (i=1; i<=NR; i++) if (rows[i] != root && found[rows[i]]) print rows[i]
+        }')
+  fi
+  remuda -s "$S" stop -f >/dev/null 2>&1 || true
+  for pid in "${descendants[@]}" "$DAEMON_PID"; do
+    [[ -n "$pid" ]] || continue
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      kill "$pid" >/dev/null 2>&1 || true
+      killed=$((killed + 1))
+    fi
+  done
+  [[ -n "$DAEMON_PID" ]] && wait "$DAEMON_PID" 2>/dev/null || true
+  for _ in $(seq 20); do
+    left=0
+    for pid in "${descendants[@]}"; do
+      [[ -n "$pid" ]] && kill -0 "$pid" >/dev/null 2>&1 && left=$((left + 1))
+    done
+    [[ $left == 0 ]] && break
+    sleep 0.05
+  done
+  rm -rf "$T"
+  echo "resources cleaned: $killed killed / $left left"
+}
+trap cleanup EXIT
 tar -c -C "$REPO" extension.toml packages | tar -x -C "$MOD"
 lua() { remuda -s "$S" -e "$1"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 boots() { lua 'return remuda.event_counts()["butler-start"] or 0'; }
+
+remuda -s "$S" daemon </dev/null >"$T/daemon.log" 2>&1 &
+DAEMON_PID=$!
+for _ in $(seq 50); do [[ -S $REMUDA_RUNTIME_DIR/remuda/$S.sock ]] && break; sleep 0.1; done
+[[ -S $REMUDA_RUNTIME_DIR/remuda/$S.sock ]] || { cat "$T/daemon.log" >&2; fail "private daemon did not bind"; }
 
 echo "core: $(remuda -s "$S" --version 2>/dev/null | tail -1)"
 lua "remuda._butler_argv = {'sleep', '${ID}3'}" >/dev/null
