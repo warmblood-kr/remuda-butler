@@ -208,31 +208,18 @@ assert(table.concat(remuda._butler_compaction_sequence("opus"), "|")
   == "/model sonnet|/compact|/model opus",
   "Claude compaction should use sonnet, compact, then restore the prior model")
 local settings_after_model = { model = "sonnet", theme = "dark" }
-assert(type(remuda._butler_compaction_restore_settings_model) == "function"
-  and remuda._butler_compaction_restore_settings_model(settings_after_model, "opus") == true
-  and settings_after_model.model == "opus" and settings_after_model.theme == "dark",
-  "Claude compaction must restore settings.json if /model changed its saved model")
-local settings_path = os.tmpname()
-local settings_file = assert(io.open(settings_path, "w"))
-settings_file:write('{"model":"sonnet","theme":"dark"}')
-settings_file:close()
-local old_json, old_fs = remuda.json, remuda.fs
-remuda.json = {
-  decode = function(value)
-    return { model = value:match('"model":"([^"]+)"'), theme = value:match('"theme":"([^"]+)"') }
-  end,
-  encode = function(value) return '{"model":"' .. value.model .. '","theme":"' .. value.theme .. '"}' end,
-}
-remuda.fs = { write_atomic = function(path, value)
-  local file = assert(io.open(path, "w")); file:write(value); file:close(); return true
-end }
-assert(remuda._butler_compaction_restore_settings_file(settings_path, "opus"),
-  "settings.json model must be verified and restored through remuda.fs.write_atomic")
-local restored = assert(io.open(settings_path, "r")):read("*a")
-assert(restored:find('"model":"opus"', 1, true) and restored:find('"theme":"dark"', 1, true),
-  "restoring settings.json must preserve unrelated settings")
-os.remove(settings_path)
-remuda.json, remuda.fs = old_json, old_fs
+local matches_model, actual_model, verify_status = remuda._butler_compaction_verify_settings_model(settings_after_model, "opus")
+assert(matches_model == false and actual_model == "sonnet" and verify_status == nil
+  and settings_after_model.model == "sonnet" and settings_after_model.theme == "dark",
+  "settings.json verification reports a mismatch without changing the decoded settings")
+local missing_model_match, missing_model_actual, missing_model_status =
+  remuda._butler_compaction_verify_settings_model({ theme = "dark" }, "opus")
+assert(missing_model_match == nil and missing_model_actual == nil and missing_model_status == "model_missing",
+  "a missing settings.json model key is unverified rather than a mismatch")
+local unavailable_match, unavailable_actual, unavailable_status =
+  remuda._butler_compaction_verify_settings_model(nil, "opus")
+assert(unavailable_match == nil and unavailable_actual == nil and unavailable_status == "unavailable",
+  "missing or invalid settings.json is unverified rather than a mismatch")
 local codex_sequence = remuda._butler_compaction_sequence()
 assert(table.concat(codex_sequence, "|") == "/compact",
   "Codex sequence must submit compact exactly once without switching models")

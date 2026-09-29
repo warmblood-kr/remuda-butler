@@ -316,13 +316,6 @@ function remuda._butler_compaction_sequence(prior_model)
   return { "/compact" }
 end
 
-function remuda._butler_compaction_restore_settings_model(settings, prior_model)
-  if type(settings) ~= "table" or type(prior_model) ~= "string" or prior_model == "" then return false end
-  if settings.model == prior_model then return false end
-  settings.model = prior_model
-  return true
-end
-
 local function read_claude_settings(path)
   local file = io.open(path, "r")
   if not file then return nil end
@@ -335,25 +328,10 @@ local function read_claude_settings(path)
   return settings
 end
 
-local function write_claude_settings(path, settings)
-  local json = remuda.json
-  if not json or type(json.encode) ~= "function" or not remuda.fs
-      or type(remuda.fs.write_atomic) ~= "function" then return false end
-  local encoded_ok, encoded = pcall(json.encode, settings)
-  if not encoded_ok or type(encoded) ~= "string" or not remuda.fs
-      or type(remuda.fs.write_atomic) ~= "function" then return false end
-  local parent = path:match("^(.*)/[^/]+$")
-  if parent and remuda.fs.mkdir_new then pcall(remuda.fs.mkdir_new, parent) end
-  local wrote = remuda.fs.write_atomic(path, encoded)
-  return wrote == true
-end
-
-function remuda._butler_compaction_restore_settings_file(path, prior_model)
-  local settings = read_claude_settings(path) or {}
-  local changed = remuda._butler_compaction_restore_settings_model(settings, prior_model)
-  if changed and not write_claude_settings(path, settings) then return false end
-  local verified = read_claude_settings(path)
-  return verified ~= nil and verified.model == prior_model
+function remuda._butler_compaction_verify_settings_model(settings, prior_model)
+  if type(settings) ~= "table" then return nil, nil, "unavailable" end
+  if settings.model == nil then return nil, nil, "model_missing" end
+  return settings.model == prior_model, settings.model, nil
 end
 
 function remuda._butler_claude_model_for(agent)
@@ -3471,22 +3449,16 @@ function remuda._butler_compaction_execute(session_name, force)
   local level = remuda.butler.ctx_level(session_name)
   local detail = "ctx=" .. tostring(level.used or "?")
   local ctx_before = tonumber(level.used)
-  local prior_model, settings_path, prior_settings_model
+  local prior_model, settings_path
   if agent.kind == "claude" then
     prior_model = restore_pending or remuda._butler_claude_model_for(agent)
     settings_path = (os.getenv("HOME") or "") .. "/.claude/settings.json"
-    local settings = read_claude_settings(settings_path)
-    prior_settings_model = settings and type(settings.model) == "string"
-      and settings.model ~= "" and settings.model or prior_model
   end
   local function release_lock()
     state.compaction_in_progress = false
     if owner_state.compaction_fleet_active == state_key then owner_state.compaction_fleet_active = nil end
   end
   local function fail(reason)
-    if agent.kind == "claude" and settings_path and prior_settings_model then
-      pcall(remuda._butler_compaction_restore_settings_file, settings_path, prior_settings_model)
-    end
     release_lock()
     if state.restore_pending_attempt_active then
       state.restore_pending_attempt_active = nil
@@ -3514,11 +3486,23 @@ function remuda._butler_compaction_execute(session_name, force)
     pcall(remuda._butler_send, session_name, agent.parent or "butler",
       "Compaction failed: " .. tostring(reason))
   end
+  local settings_model_alert_sent = false
   local function finish_success(event)
     if agent.kind == "claude" then
-      if not remuda._butler_compaction_restore_settings_file(settings_path, prior_settings_model) then
-        fail("Claude settings.json model did not restore")
-        return
+      local settings = read_claude_settings(settings_path)
+      local matches, actual, status = remuda._butler_compaction_verify_settings_model(settings, prior_model)
+      if status then
+        _butler_trace("settings_verify_skipped", detail .. " reason=" .. status)
+      elseif not matches then
+        _butler_trace("settings_model_mismatch", detail .. " model=" .. tostring(actual)
+          .. " expected=" .. tostring(prior_model))
+        if not settings_model_alert_sent then
+          settings_model_alert_sent = true
+          pcall(remuda._butler_send, session_name, agent.parent or "butler",
+            "settings.json model is " .. tostring(actual) .. ", expected " .. tostring(prior_model))
+        end
+      else
+        _butler_trace("settings_model_verified", detail .. " model=" .. tostring(actual))
       end
     end
     release_lock()
