@@ -462,6 +462,118 @@ fn narrow_claude_wrapped_notice_is_verified_and_submitted() {
     assert!(!events.contains("key RET"), "already-submitted history notice was submitted twice: {events}");
 }
 
+/// #82 decision: a submitted notice in Claude history plus an approval
+/// dialog is success even though the empty composer is no longer visible.
+#[test]
+fn submitted_claude_notice_followed_by_approval_dialog_clears_pending_notice() {
+    let (path, _daemon) = butler_with_member("notice-followup-dialog");
+    eval(
+        &path,
+        r#"
+        local row = { name = 'm1', alive = true, attached = false }
+        local state = { screen = '❯ \n', events = {}, submitted = false }
+        remuda._notice_dialog_test_state = state
+        remuda._butler_bus.agents.m1 = remuda._butler_bus.agents.m1 or {
+          id = '01ARZ3NDEKTSV4RRFFQ69G5FAV', kind = 'claude' }
+        remuda._butler_bus.agents.m1.kind = 'claude'
+        remuda.capture_styled = nil
+        remuda.ls = function() return { row } end
+        remuda.session = function() return { is_busy = false } end
+        remuda.capture = function() return state.screen end
+        remuda._butler_notify_policy = function() return not state.submitted end
+        local function box(text)
+          return '❯ ' .. text .. string.rep(' ', math.max(0, 78 - #text))
+            .. '\n' .. string.rep('─', 80)
+        end
+        remuda.type_text = function(_, text)
+          table.insert(state.events, 'type')
+          state.notice = text
+          state.screen = box(text)
+        end
+        remuda.key = function(_, key)
+          table.insert(state.events, 'key ' .. key)
+          if key == 'RET' then
+            state.submitted = true
+            state.screen = state.notice .. '\n'
+              .. '⏺ Bash(remuda butler inbox)\n'
+              .. '⎿ This command requires approval\n'
+              .. '❯ 1. Yes\n  2. No\n'
+              .. string.rep('─', 80)
+          end
+        end
+        remuda._butler_bus.notices.m1 = { count = 1, text = 'dialog notice fixture' }
+        "#,
+    );
+
+    for _ in 0..14 {
+        eval(&path, "remuda._butler_deliver_notices()");
+        if eval(&path, "return tostring(remuda._butler_bus.notice_recoveries.m1.failed)") == "true" {
+            break;
+        }
+    }
+    assert_eq!(
+        eval(&path, "return tostring(remuda._butler_bus.notices.m1 ~= nil)"),
+        "false",
+        "notice remained queued after successful submit and follow-up dialog"
+    );
+    let events = eval(&path, "return table.concat(remuda._notice_dialog_test_state.events, ',')");
+    assert_eq!(events.matches("type").count(), 1, "{events}");
+    assert_eq!(events.matches("key RET").count(), 1, "{events}");
+    assert!(eval(&path, "return tostring(remuda._notice_dialog_test_state.submitted)") == "true");
+}
+
+/// A notice that remains the exact Claude composer text gets one Return retry,
+/// then the existing verification failure is reported without clearing mail.
+#[test]
+fn claude_notice_still_in_composer_is_retried_once_then_reported() {
+    let (path, _daemon) = butler_with_member("notice-still-in-composer");
+    eval(
+        &path,
+        r#"
+        local row = { name = 'm1', alive = true, attached = false }
+        local state = { screen = '❯ \n', events = {}, report = '' }
+        remuda._notice_stuck_test_state = state
+        remuda._butler_bus.agents.m1 = remuda._butler_bus.agents.m1 or {
+          id = '01ARZ3NDEKTSV4RRFFQ69G5FAV', kind = 'claude' }
+        remuda._butler_bus.agents.m1.kind = 'claude'
+        remuda.capture_styled = nil
+        remuda.ls = function() return { row } end
+        remuda.session = function() return { is_busy = false } end
+        remuda.capture = function() return state.screen end
+        remuda._butler_notify_policy = function() return not state.retried end
+        local function box(text)
+          return '❯ ' .. text .. string.rep(' ', math.max(0, 78 - #text))
+            .. '\n' .. string.rep('─', 80)
+        end
+        remuda.type_text = function(_, text)
+          table.insert(state.events, 'type')
+          state.screen = box(text)
+        end
+        remuda.key = function(_, key)
+          table.insert(state.events, 'key ' .. key)
+          state.retried = true
+        end
+        local send = remuda._butler_send
+        remuda._butler_send = function(from, to, text)
+          if from == 'operator' then return send(from, to, text) end
+          state.report = text
+          return true
+        end
+        remuda._butler_bus.notices.m1 = { count = 1, text = 'stuck notice fixture' }
+        "#,
+    );
+
+    for _ in 1..24 {
+        eval(&path, "remuda._butler_deliver_notices()");
+    }
+    let events = eval(&path, "return table.concat(remuda._notice_stuck_test_state.events, ',')");
+    assert_eq!(events.matches("type").count(), 1, "{events}");
+    assert_eq!(events.matches("key RET").count(), 1, "{events}");
+    assert!(eval(&path, "return tostring(remuda._butler_bus.notices.m1 ~= nil)") == "true");
+    assert!(eval(&path, "return tostring(remuda._butler_bus.notice_recoveries.m1.failed)") == "true");
+    assert!(eval(&path, "return remuda._notice_stuck_test_state.report").contains("could not be verified"));
+}
+
 /// #82: failed comparisons write a bounded capture record to the private
 /// session trace; the diagnostic is never typed into the member pane.
 #[test]
