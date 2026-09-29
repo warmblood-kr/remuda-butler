@@ -1862,6 +1862,10 @@ function remuda._butler_notify_policy(session, now)
     if candidate.name == session then row = candidate end
   end
   if not row or not row.alive then return false end
+  if remuda.session then
+    local checked, current = pcall(remuda.session, session)
+    if not checked or not current or current.is_busy then return false end
+  end
   local attached = row.attached
   local seen = bus.notice_screens[session] or {}
   bus.notice_screens[session] = seen
