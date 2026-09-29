@@ -70,8 +70,8 @@ remuda butler send-to-leader "work is complete"
 `launch`, `topic new`, and `topic delegate` take `--model M` to pick the
 member's model (e.g. `remuda butler topic delegate docgen --agent codex
 --model gpt-5.5 "build the documentation site"`). Claude members use the
-explicit `sonnet` default when no model is assigned; set
-`REMUDA_BUTLER_CLAUDE_MODEL` to choose another Butler default. Claude's native
+explicit `opus` default when no model is assigned; set
+`REMUDA_BUTLER_CLAUDE_DEFAULT_MODEL` to choose another Butler default. Claude's native
 autocompact safety net defaults to `600k`; set
 `REMUDA_BUTLER_CLAUDE_AUTOCOMPACT` to `auto` or a threshold such as `400k`.
 The Butler scheduler remains the primary compaction path. The MCP

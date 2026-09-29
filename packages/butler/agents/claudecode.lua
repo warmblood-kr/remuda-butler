@@ -57,7 +57,7 @@ builders.claude = function(spec)
   if not model or model == "" then
     local config = remuda._butler_compaction_config or {}
     model = remuda._butler_claude_default_model
-      or os.getenv("REMUDA_BUTLER_CLAUDE_MODEL") or config.claude_model or "sonnet"
+      or os.getenv("REMUDA_BUTLER_CLAUDE_DEFAULT_MODEL") or config.claude_default_model or "opus"
   end
   argv[#argv + 1] = "--model"; argv[#argv + 1] = model
   return argv

@@ -2237,7 +2237,7 @@ fn butler_compact_cli_rejects_unknown_sessions_and_previews_safe_keys() {
 
     eval(&path, r#"
       remuda._butler_bus.agents["preview-opus"] = {
-        id = "preview-opus", kind = "claude", session_name = "preview-opus", model = "Opus-4.7"
+        id = "preview-opus", kind = "claude", session_name = "preview-opus", model = "opus"
       }
       remuda._butler_bus.agents["preview-unknown"] = {
         id = "preview-unknown", kind = "claude", session_name = "preview-unknown", model = "Experimental-Model"
@@ -2252,13 +2252,14 @@ fn butler_compact_cli_rejects_unknown_sessions_and_previews_safe_keys() {
     let opus = remuda_timed(&dir, &["-s", "s", "butler", "compact", "preview-opus", "--dry-run"]);
     assert!(opus.status.success(), "known-family preview failed: {}", String::from_utf8_lossy(&opus.stderr));
     let preview = String::from_utf8_lossy(&opus.stdout);
-    assert!(preview.contains("/compact -> RET"), "preview omitted the current-model compact keys: {preview}");
-    assert!(!preview.contains("Opus-4.7"), "preview exposed the display tag: {preview}");
+    assert!(preview.contains("/model sonnet -> /compact -> /model opus -> RET"),
+        "preview omitted the owner model-switch sequence: {preview}");
 
     let unknown = remuda_timed(&dir, &["-s", "s", "butler", "compact", "preview-unknown", "--dry-run"]);
     assert!(unknown.status.success(), "unknown-family preview failed: {}", String::from_utf8_lossy(&unknown.stderr));
     let preview = String::from_utf8_lossy(&unknown.stdout);
-    assert!(preview.contains("/compact -> RET"), "unknown model family should still compact on the current model: {preview}");
+    assert!(preview.contains("/model sonnet -> /compact -> /model Experimental-Model -> RET"),
+        "unknown model should be restored from the assigned model value: {preview}");
 }
 
 
@@ -5154,9 +5155,9 @@ while IFS= read -r line; do
         ctx=200000; paint
       fi
       ;;
-    '/model current-model')
+    '/model opus')
       printf 'KEY:RET\n' >> "$log"
-      model='current-model'; paint
+      model='opus'; paint
       ;;
   esac
 done
@@ -5315,7 +5316,7 @@ done
                 std::thread::sleep(Duration::from_millis(50));
             }
             let got = std::fs::read_to_string(&log).unwrap_or_default();
-            assert_eq!(got, "CMD:/model sonnet\nKEY:RET\nCMD:/compact\nKEY:RET\nCMD:/model current-model\nKEY:RET\n",
+            assert_eq!(got, "CMD:/model sonnet\nKEY:RET\nCMD:/compact\nKEY:RET\nCMD:/model opus\nKEY:RET\n",
                 "Claude should compact on sonnet and restore its prior model: {got:?}");
         }
         if name == "fake-stale-flags" {
@@ -5344,7 +5345,7 @@ done
                 std::thread::sleep(Duration::from_millis(50));
             }
             assert_eq!(std::fs::read_to_string(&log).unwrap(),
-                "CMD:/model sonnet\nKEY:RET\nCMD:/compact\nKEY:RET\nCMD:/model sonnet\nKEY:RET\nCMD:/compact\nKEY:RET\nCMD:/model current-model\nKEY:RET\n");
+                "CMD:/model sonnet\nKEY:RET\nCMD:/compact\nKEY:RET\nCMD:/model sonnet\nKEY:RET\nCMD:/compact\nKEY:RET\nCMD:/model opus\nKEY:RET\n");
         }
         if name == "fake-force" {
             let deadline = Instant::now() + Duration::from_secs(8);
@@ -5367,7 +5368,7 @@ done
                 std::thread::sleep(Duration::from_millis(50));
             }
             assert_eq!(std::fs::read_to_string(&log).unwrap(),
-                "CMD:/model sonnet\nKEY:RET\nCMD:/compact\nKEY:RET\nCMD:/model sonnet\nKEY:RET\nCMD:/compact\nKEY:RET\nCMD:/model current-model\nKEY:RET\n");
+                "CMD:/model sonnet\nKEY:RET\nCMD:/compact\nKEY:RET\nCMD:/model sonnet\nKEY:RET\nCMD:/compact\nKEY:RET\nCMD:/model opus\nKEY:RET\n");
         }
     }
     drop(daemon);

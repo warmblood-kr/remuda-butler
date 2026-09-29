@@ -356,6 +356,30 @@ function remuda._butler_compaction_restore_settings_file(path, prior_model)
   return verified ~= nil and verified.model == prior_model
 end
 
+function remuda._butler_claude_model_for(agent)
+  if type(agent) == "table" and type(agent.model) == "string" and agent.model ~= "" then
+    return agent.model
+  end
+  local config = remuda._butler_compaction_config or {}
+  local configured = remuda._butler_claude_default_model
+    or os.getenv("REMUDA_BUTLER_CLAUDE_DEFAULT_MODEL") or config.claude_default_model
+  if type(configured) == "string" and configured ~= "" then return configured end
+  local home_variable = os.getenv("HOME")
+  local settings = home_variable and read_claude_settings(home_variable .. "/.claude/settings.json")
+  if settings and type(settings.model) == "string" and settings.model ~= "" then return settings.model end
+  return "opus"
+end
+
+local function statusline_model_matches(actual, expected)
+  if type(actual) ~= "string" or type(expected) ~= "string" then return false end
+  local actual_lower, expected_lower = actual:lower(), expected:lower()
+  if actual_lower == expected_lower then return true end
+  local family = expected_lower:match("^(opus)") or expected_lower:match("(sonnet)")
+    or expected_lower:match("(haiku)")
+  if family then return actual_lower:find(family, 1, true) ~= nil end
+  return actual_lower:find(expected_lower, 1, true) ~= nil
+end
+
 local function clear_legacy_restore_state(state)
   for _, key in ipairs({ "pending_restore_model", "pending_restore_model_fallback",
     "pending_restore_model_unavailable", "pending_restore_display",
@@ -1454,7 +1478,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   if kind == "claude" and (not model or model == "") then
     local config = remuda._butler_compaction_config or {}
     model = remuda._butler_claude_default_model
-      or os.getenv("REMUDA_BUTLER_CLAUDE_MODEL") or config.claude_model or "sonnet"
+      or os.getenv("REMUDA_BUTLER_CLAUDE_DEFAULT_MODEL") or config.claude_default_model or "opus"
   end
   local name = valid_child_name(requested_name or kind or "agent", "agent name")
   if cwd ~= nil and (type(cwd) ~= "string" or cwd:find("%c")) then
@@ -3444,14 +3468,11 @@ function remuda._butler_compaction_execute(session_name, force)
   local ctx_before = tonumber(level.used)
   local prior_model, settings_path, prior_settings_model
   if agent.kind == "claude" then
-    local telemetry = remuda._butler_telemetry_for(agent) or {}
-    prior_model = telemetry.model or agent.model
-    if not prior_model or prior_model == "" or prior_model == "?" then
-      return "skipped_unknown_model"
-    end
+    prior_model = remuda._butler_claude_model_for(agent)
     settings_path = (os.getenv("HOME") or "") .. "/.claude/settings.json"
     local settings = read_claude_settings(settings_path)
-    prior_settings_model = settings and settings.model or prior_model
+    prior_settings_model = settings and type(settings.model) == "string"
+      and settings.model ~= "" and settings.model or prior_model
   end
   local function release_lock()
     state.compaction_in_progress = false
@@ -3518,7 +3539,7 @@ function remuda._butler_compaction_execute(session_name, force)
     if not send_command("/model " .. prior_model) then return end
     wait_for("model-restored", function()
       local current = remuda._butler_telemetry_for(agent) or {}
-      return current.model == prior_model
+      return statusline_model_matches(current.model, prior_model)
     end, function()
       if after_restore then after_restore() else finish_success(event or "verified") end
     end, completion_timeout)
