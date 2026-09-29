@@ -548,7 +548,7 @@ fn notice_ids_are_deduplicated_and_read_messages_are_not_notified() {
     );
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1.count)"), "1",
         "the same message id inflated its pending notice count");
-    eval(&path, "remuda._butler_mail.inbox(remuda._butler_bus.agents.m1.id); remuda._butler_deliver_notices()");
+    eval(&path, "remuda._butler_inbox('m1'); remuda._butler_deliver_notices()");
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1 == nil)"), "true",
         "reading the message left its pane notification queued");
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notice_recoveries.m1 == nil)"), "true",
