@@ -70,6 +70,7 @@ if [[ -z ${CORE_DIR:-} ]]; then
 fi
 
 cp "$REPO/tests/butler_daemon.rs" "$REPO/tests/butler_mcp.rs" "$CORE_DIR/native/tests/"
+cp -R "$REPO/tests/fixtures" "$CORE_DIR/native/tests/"
 mkdir -p "$CORE_DIR/native/tests/support"
 cp "$REPO/tests/support/fake_http.lua" "$CORE_DIR/native/tests/support/"
 ln -sfn "$REPO/packages" "$CORE_DIR/packages"

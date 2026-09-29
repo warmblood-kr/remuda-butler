@@ -3304,6 +3304,7 @@ fn butler_codex_builder_uses_automatic_approval() {
 #[cfg(unix)]
 fn butler_task_poke_answers_startup_modals_before_typing() {
     let dir = scratch_dir("butler-startup-modals");
+    let claude_trust_capture = include_str!("fixtures/claude-trust-dialog.txt");
     let home = dir.join("home");
     std::fs::create_dir_all(&home).expect("test home");
     let daemon = Daemon::spawn_with_home(&dir, &home);
@@ -3346,18 +3347,8 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
               "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n"
                 .. " Accessing workspace:\n\n /private/tmp/t3qa/untrusted-13690\n\n"
                 .. " Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source",
-              "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n"
-                .. " Accessing workspace:\n\n /private/tmp/t3qa/untrusted-13690\n\n"
-                .. " Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source\n"
-                .. " project, or work from your team). If not, take a moment to review what's in this folder first.\n\n"
-                .. " Claude Code'll be able to read, edit, and execute files here.\n\n Security guide\n\n"
-                .. " ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm · Esc to cancel",
-              "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n"
-                .. " Accessing workspace:\n\n /private/tmp/t3qa/untrusted-13690\n\n"
-                .. " Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source\n"
-                .. " project, or work from your team). If not, take a moment to review what's in this folder first.\n\n"
-                .. " Claude Code'll be able to read, edit, and execute files here.\n\n Security guide\n\n"
-                .. " ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm · Esc to cancel",
+              {claude_trust_capture:?},
+              {claude_trust_capture:?},
               rule .. "\n❯ \n" .. rule,
             }},
             ["t-claude-launch-unknown"] = {{ "Workspace access changed\n ❯ 1. Continue\n   2. Cancel" }},
@@ -3497,6 +3488,7 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
         "#,
             home = home.to_string_lossy(),
             trace = trace.to_string_lossy(),
+            claude_trust_capture = claude_trust_capture,
         ),
     );
 

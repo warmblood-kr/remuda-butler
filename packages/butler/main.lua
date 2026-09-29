@@ -1341,7 +1341,7 @@ trust_modal_state = function(modal, screen)
     if not selected_no or not selected_index then return "human" end
     local options = 0
     for _, line in ipairs(lines) do
-      if line:match("^%s*[❯›]%s*%S") or line:match("^  %S") then options = options + 1 end
+      if line:match("^%s*[❯›]%s*%S") or line:match("^%s%s%S") then options = options + 1 end
     end
     if affirmative and selected_no and options == 2 then return "safe" end
     return "human"
