@@ -293,11 +293,12 @@ fn notify_policy_types_only_into_a_detached_or_quiet_empty_prompt() {
         &path,
         &format!(
             r#"remuda._butler_session_trace_path = {trace:?}
-            local real_ls, real_capture, real_capture_styled = remuda.ls, remuda.capture, remuda.capture_styled
+            local real_ls, real_capture, real_capture_styled, real_session = remuda.ls, remuda.capture, remuda.capture_styled, remuda.session
             remuda.capture_styled = nil
             local row, screen = {{ name = 'p1', alive = true, attached = true }}, ''
             remuda.ls = function() return {{ row }} end
             remuda.capture = function() return screen end
+            remuda.session = function() return {{ is_busy = false }} end
             local policy, t = remuda._butler_notify_policy, 0
             local function settled(text) t = t + 100; screen = text; policy('p1', t); return policy('p1', t + 3) end
             local r = {{}}
@@ -317,7 +318,7 @@ fn notify_policy_types_only_into_a_detached_or_quiet_empty_prompt() {
             r[#r + 1] = 'detached=' .. tostring(policy('p1', t + 500))
             screen = 'x\n> '
             r[#r + 1] = 'detached_empty=' .. tostring(policy('p1', t + 501))
-            remuda.ls, remuda.capture, remuda.capture_styled = real_ls, real_capture, real_capture_styled
+            remuda.ls, remuda.capture, remuda.capture_styled, remuda.session = real_ls, real_capture, real_capture_styled, real_session
             return table.concat(r, ' ')"#
         ),
     );
@@ -1101,9 +1102,10 @@ fn notify_policy_uses_human_idle_and_dim_spans_when_the_core_has_them() {
     eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
     let got = eval(
         &path,
-        r#"local real_ls, real_capture, real_styled = remuda.ls, remuda.capture, remuda.capture_styled
+        r#"local real_ls, real_capture, real_styled, real_session = remuda.ls, remuda.capture, remuda.capture_styled, remuda.session
         local row, spans = { name = 'p1', alive = true, attached = true }, {}
         remuda.ls = function() return { row } end
+        remuda.session = function() return { is_busy = false } end
         remuda.capture = function() error('the new-core path must not need plain capture') end
         remuda.capture_styled = function()
           return { rows = { { { text = 'history', dim = false } }, spans }, cursor = { row = 2, col = 3, visible = true } }
@@ -1131,7 +1133,7 @@ fn notify_policy_uses_human_idle_and_dim_spans_when_the_core_has_them() {
         remuda._butler_notice_human_idle = 20
         row.attached = true
         r[#r + 1] = 'knob=' .. case(12, plain('❯ '))
-        remuda.ls, remuda.capture, remuda.capture_styled = real_ls, real_capture, real_styled
+        remuda.ls, remuda.capture, remuda.capture_styled, remuda.session = real_ls, real_capture, real_styled, real_session
         return table.concat(r, ' ')"#,
     );
     assert_eq!(
