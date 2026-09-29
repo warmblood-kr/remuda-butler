@@ -62,7 +62,7 @@ local function statusline_record(input)
 
   local model = status_object(snapshot.model)
   local display_name = model.display_name
-  if display_name == nil or display_name == false or display_name == 0 or display_name == "" then
+  if type(display_name) ~= "string" or display_name == "" then
     display_name = model.id
   end
   local line = "MODEL:" .. status_tag(display_name)

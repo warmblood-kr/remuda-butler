@@ -183,6 +183,40 @@ fn butler_statusline_reads_stdin_and_keeps_legacy_status_files() {
         text_of(&call(&path, "butler_status", json!({}))),
         "MODEL:Claude-Opus-4.6 CTX:12345 CTXWIN:200000 CTXPCT:6 AGENT:claude"
     );
+
+    const ID_FALLBACK_GOLDEN: &[u8] =
+        b"MODEL:claude-opus-4-6-20250201 CTX:? CTXWIN:? CTXPCT:?\n";
+    for display_name in ["null", "{}", "7"] {
+        let snapshot = format!(
+            r#"{{"model":{{"id":"claude-opus-4-6-20250201","display_name":{display_name}}},"context_window":{{}}}}"#
+        );
+        let mut statusline = Command::new(env!("CARGO_BIN_EXE_remuda"))
+            .args(["--stdin", "butler", "statusline", &status_path])
+            .env("REMUDA_RUNTIME_DIR", &dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start the remuda statusLine display-name fallback command");
+        statusline
+            .stdin
+            .take()
+            .expect("statusLine stdin")
+            .write_all(snapshot.as_bytes())
+            .expect("write Claude status snapshot");
+        let output = statusline
+            .wait_with_output()
+            .expect("wait for display-name fallback statusLine");
+        assert!(
+            output.status.success(),
+            "statusLine failed for display_name={display_name}: {output:?}"
+        );
+        assert_eq!(
+            output.stdout,
+            ID_FALLBACK_GOLDEN,
+            "display_name={display_name}"
+        );
+    }
 }
 
 fn eval(path: &Path, code: &str) -> String {

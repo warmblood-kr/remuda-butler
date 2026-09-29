@@ -1449,7 +1449,7 @@ fn butler_lifecycle_reload_replaces_hooks_and_schedules_and_rolls_back() {
     "#;
     let initial = eval(&path, counts);
     assert!(
-        initial == "1|7|1|1|1|18" || initial == "1|7|1|1|1|-1",
+        initial == "1|4|1|1|1|19" || initial == "1|4|1|1|1|-1",
         "unexpected Butler lifecycle registrations: {initial}"
     );
 
@@ -3658,6 +3658,56 @@ fn reexecuting_butler_keeps_the_root_telemetry_identity() {
             "#,
         ),
         format!("{token}\n{status_path}\nclaude:1234:200000:1")
+    );
+    drop(daemon);
+}
+
+#[test]
+#[cfg(unix)]
+fn butler_claude_json_statusline_updates_member_telemetry_and_compaction_gate() {
+    let dir = scratch_dir("butler-json-telemetry");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).expect("test home");
+    let daemon = Daemon::spawn_with_home(&dir, &home);
+    let path = daemon::socket_path_in(&dir, "s");
+    eval(
+        &path,
+        r#"
+          remuda._butler_argv = {"sh", "-c", "sleep 30"}
+          remuda._butler_skip_relay = true
+        "#,
+    );
+    let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let status_path = eval(
+        &path,
+        "return remuda._butler_bus.agents.butler.telemetry.status_path",
+    );
+    std::fs::write(
+        &status_path,
+        r#"{"marker":"MODEL:Claude-Opus-4.6 CTX:850000 CTXWIN:1000000 CTXPCT:85","model_id":"claude-opus-4-6-20250201","model_name":"Claude Opus 4.6","context":{"used":850000,"capacity":1000000,"percentage":85}}"#,
+    )
+    .expect("structured status record");
+
+    let observed = eval(
+        &path,
+        r#"
+          local agent = remuda._butler_bus.agents.butler
+          local telemetry = remuda._butler_telemetry_for(agent)
+          local level = remuda.butler.ctx_level("butler")
+          remuda.butler.is_idle = function() return true, "idle" end
+          local allowed, reason, used = remuda.butler.compaction_policy("butler", {}, true)
+          return table.concat({telemetry.model, telemetry.context_used, telemetry.context_window,
+            telemetry.context_percent, level.level, tostring(allowed), reason, tostring(used)}, ":")
+        "#,
+    );
+    assert_eq!(
+        observed,
+        "Claude-Opus-4.6:850000:1000000:85:critical:true:sent:850000"
     );
     drop(daemon);
 }

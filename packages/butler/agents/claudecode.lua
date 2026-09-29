@@ -10,14 +10,40 @@ telemetry.claude = {
   read = function(state)
     local status = state.status_path and io.open(state.status_path, "r")
     if not status then return {} end
-    local line = status:read("*l")
+    local contents = status:read("*a")
     status:close()
-    if not line then return {} end
-    local model, used, window, percent = line:match(
-      "^MODEL:([A-Za-z0-9_.%-?]+) CTX:([0-9?]+) CTXWIN:([0-9?]+) CTXPCT:([0-9?]+)$"
-    )
-    if not model then return {} end
-    return { model = model, context_used = used, context_window = window, context_percent = percent }
+    if not contents or contents == "" then return {} end
+
+    local function parse_marker(line)
+      local model, used, window, percent = line:match(
+        "^MODEL:([A-Za-z0-9_.%-?]+) CTX:([0-9?]+) CTXWIN:([0-9?]+) CTXPCT:([0-9?]+)$"
+      )
+      if not model then return nil end
+      return { model = model, context_used = used, context_window = window, context_percent = percent }
+    end
+
+    if contents:sub(1, 1) == "{" then
+      local ok, record = pcall(remuda.json.decode, contents)
+      if ok and type(record) == "table" and type(record.marker) == "string" then
+        local telemetry = parse_marker(record.marker)
+        if telemetry then
+          local context = type(record.context) == "table" and record.context or {}
+          local function context_count(value)
+            if type(value) == "number" then
+              return string.format("%.0f", math.modf(value))
+            end
+            if type(value) == "string" and value:match("^%d+$") then return value end
+          end
+          telemetry.context_used = context_count(context.used) or telemetry.context_used
+          telemetry.context_window = context_count(context.capacity) or telemetry.context_window
+          telemetry.context_percent = context_count(context.percentage) or telemetry.context_percent
+          return telemetry
+        end
+      end
+    end
+
+    local line = contents:match("^([^\r\n]*)")
+    return parse_marker(line or "") or {}
   end,
 }
 
