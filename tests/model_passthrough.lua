@@ -18,6 +18,8 @@ assert(table.concat(build.codex({ telemetry = telemetry }), " ") == "remuda _cod
 assert(tail(build.codex({ telemetry = telemetry, model = "gpt-5.5" }), 2) == "--model gpt-5.5")
 assert(tail(build.claude({ name = "c", system_prompt = "p" }), 1) == "p")
 assert(tail(build.claude({ name = "c", system_prompt = "p", model = "opus" }), 2) == "--model opus")
+assert(tail(build.claude({ name = "c", system_prompt = "p" }), 2) == "--model sonnet",
+  "Claude launch without an assigned model must use Butler's explicit default")
 
 -- Native autocompact is opt-in to the installed Claude CLI capability. The
 -- probe is argv-only, cached, and does not affect Codex launches.
