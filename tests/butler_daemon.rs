@@ -5174,6 +5174,7 @@ done
             "happy",
             "CMD:/model sonnet\nKEY:1\nCMD:/compact\nCMD:/model opus\nKEY:1\n",
         ),
+        ("fake-mid-turn", "happy", ""),
         (
             "fake-busy-after-compact",
             "happy",
@@ -5232,6 +5233,12 @@ done
             eval(
                 &path,
                 &format!("remuda._fake_busy_after_key[{name:?}] = true"),
+            );
+        }
+        if name == "fake-mid-turn" {
+            eval(
+                &path,
+                &format!("remuda._fake_busy_until[{name:?}] = os.time() + 60"),
             );
         }
         if name == "fake-busy-after-compact" {
@@ -5339,6 +5346,38 @@ done
                 ) == "true",
                 "failed compaction must set a retry backoff"
             );
+        }
+        if scenario == "unknown" {
+            let before_retry = std::fs::read_to_string(&log).unwrap();
+            assert_eq!(
+                eval(&path, &format!("return remuda.butler.compact({name:?})")),
+                "skipped_cooldown",
+                "a failed fake-Claude compaction must not be retried inside its failure cooldown"
+            );
+            assert_eq!(
+                eval(&path, &format!("return remuda._butler_compaction_tick({name:?}, false)")),
+                format!("{name}:skipped_cooldown"),
+                "scheduled policy ticks must honor the same per-session failure cooldown"
+            );
+            std::thread::sleep(Duration::from_millis(250));
+            assert_eq!(
+                std::fs::read_to_string(&log).unwrap(),
+                before_retry,
+                "cooldown must suppress all follow-up commands and keys"
+            );
+        }
+        if name == "fake-mid-turn" {
+            assert_eq!(
+                eval(&path, &format!("return remuda._fake_busy_until[{name:?}] > os.time() and 'busy' or 'idle'")),
+                "busy",
+                "the fixture must still be mid-turn when the command log is checked"
+            );
+            assert!(
+                std::fs::read_to_string(&log).unwrap_or_default().is_empty(),
+                "compaction must not type into a session while it is mid-turn"
+            );
+            let reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
+            assert!(reports.contains("aborted: busy"), "busy abort must be reported: {reports:?}");
         }
         if name == "fake-attach-mid" {
             let got = std::fs::read_to_string(&log).unwrap();

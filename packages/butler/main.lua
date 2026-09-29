@@ -3010,6 +3010,7 @@ function remuda._butler_compaction_tick(target_name, dry_run)
           state.cooldown_ticks = state.cooldown_ticks - 1
           results[#results + 1] = session_name .. ":restore_pending_cooldown"
         elseif type(remuda.expect) == "function" then
+          state.failure_cooldown = nil
           results[#results + 1] = remuda.butler.compact(session_name)
         else
           results[#results + 1] = session_name .. ":restore_pending_core_lacks_expect"
@@ -3030,6 +3031,7 @@ function remuda._butler_compaction_tick(target_name, dry_run)
               "keys=" .. table.concat(sequence, " -> ") .. " -> visible switch option (if prompted)" }, "; ")
           end
         elseif should_send then
+          state.failure_cooldown = nil
           if type(remuda.expect) ~= "function" then
             if not remuda._butler_compaction_core_missing then
               remuda._butler_compaction_core_missing = true
@@ -3040,12 +3042,12 @@ function remuda._butler_compaction_tick(target_name, dry_run)
           else
             results[#results + 1] = remuda.butler.compact(session_name)
           end
-      else
-        if event ~= state.last_trace_event then
-          _butler_trace(event, "ctx=" .. tostring(ctx))
-          state.last_trace_event = event
-        end
-        results[#results + 1] = session_name .. ":" .. tostring(event)
+        else
+          if event ~= state.last_trace_event then
+            _butler_trace(event, "ctx=" .. tostring(ctx))
+            state.last_trace_event = event
+          end
+          results[#results + 1] = session_name .. ":" .. tostring(event)
         end
       end
     end
@@ -3068,6 +3070,8 @@ function remuda._butler_compaction_execute(session_name)
   local state = owner_state.compaction_members[state_key] or {}
   owner_state.compaction_members[state_key] = state
   if state.compaction_in_progress then return "compaction_in_progress" end
+  if state.failure_cooldown and (state.cooldown_ticks or 0) > 0 then return "skipped_cooldown" end
+  state.failure_cooldown = nil
   if owner_state.compaction_fleet_active and owner_state.compaction_fleet_active ~= state_key then return "fleet_busy" end
   local level = remuda.butler.ctx_level(session_name)
   local ctx = level.used or "?"
@@ -3079,6 +3083,7 @@ function remuda._butler_compaction_execute(session_name)
       state.compaction_in_progress = false
       if not keep_fleet and owner_state.compaction_fleet_active == state_key then owner_state.compaction_fleet_active = nil end
       state.cooldown_ticks = config.failure_cooldown_ticks
+      state.failure_cooldown = not keep_fleet
       if keep_fleet then state.cooldown_ticks = 0 end
       _butler_trace("error", detail .. " reason=" .. tostring(reason))
       if not suppress_notice then
