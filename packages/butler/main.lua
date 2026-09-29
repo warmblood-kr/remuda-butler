@@ -495,36 +495,62 @@ remuda._butler_compaction_load_restore_record = function()
 end
 remuda._butler_compaction_restore_sessions = compaction_restore_sessions
 
+local function compaction_agent_key(agent, session_name)
+  local id = type(agent) == "table" and agent.id or nil
+  if type(id) == "string" and id ~= "" then return id end
+  return session_name
+end
+
+local function write_compaction_restore_record(record)
+  local ok, encoded = pcall(remuda.json.encode, record)
+  if not ok then return nil, encoded end
+  local wrote, write_err = remuda.fs.write_atomic(compaction_restore_path, encoded)
+  if not wrote then return nil, write_err end
+  compaction_restore_sessions = record
+  remuda._butler_compaction_restore_sessions = compaction_restore_sessions
+  return true
+end
+
+local function compaction_restore_for(agent, session_name)
+  local key = compaction_agent_key(agent, session_name)
+  local model = compaction_restore_sessions[key]
+  if model then return model end
+  -- #91 stored session names. Preserve those records across the key upgrade,
+  -- then migrate them as soon as the matching live agent is known.
+  if key ~= session_name and compaction_restore_sessions[session_name] then
+    model = compaction_restore_sessions[session_name]
+    local next_record = {}
+    for name, prior in pairs(compaction_restore_sessions) do
+      if name ~= session_name then next_record[name] = prior end
+    end
+    next_record[key] = model
+    write_compaction_restore_record(next_record)
+    return model
+  end
+  return nil
+end
+
 local function persist_compaction_restore(session, model)
   if not compaction_restore_path then return nil, "Butler state directory unavailable" end
   local next_record = {}
   for name, prior in pairs(compaction_restore_sessions) do next_record[name] = prior end
   next_record[session] = model
-  local ok, encoded = pcall(remuda.json.encode, next_record)
-  if not ok then return nil, encoded end
   local made, make_err = pcall(remuda.mkdir, mail_root)
   if not made then return nil, make_err end
-  local wrote, write_err = remuda.fs.write_atomic(compaction_restore_path, encoded)
-  if not wrote then return nil, write_err end
-  compaction_restore_sessions = next_record
-  remuda._butler_compaction_restore_sessions = compaction_restore_sessions
-  return true
+  return write_compaction_restore_record(next_record)
 end
 
-local function clear_compaction_restore(session)
+local function clear_compaction_restore(key, legacy_session)
   if not compaction_restore_path then return nil, "Butler state directory unavailable" end
   local next_record = {}
   for name, prior in pairs(compaction_restore_sessions) do
-    if name ~= session then next_record[name] = prior end
+    if name ~= key and name ~= legacy_session then next_record[name] = prior end
   end
   if next(next_record) == nil then
     local removed, remove_err = os.remove(compaction_restore_path)
     if not removed and remove_err then return nil, remove_err end
   else
-    local ok, encoded = pcall(remuda.json.encode, next_record)
-    if not ok then return nil, encoded end
-    local wrote, write_err = remuda.fs.write_atomic(compaction_restore_path, encoded)
-    if not wrote then return nil, write_err end
+    return write_compaction_restore_record(next_record)
   end
   compaction_restore_sessions = next_record
   remuda._butler_compaction_restore_sessions = compaction_restore_sessions
@@ -3430,7 +3456,7 @@ function remuda._butler_compaction_tick(target_name, dry_run)
       local members = owner_state.compaction_members or remuda._butler_compaction_members_state or {}
       if not dry_run then owner_state.compaction_members = members end
       local agent = remuda._butler_bus.agents[session_name] or {}
-      local state_key = tostring(agent.id or session_name)
+      local state_key = compaction_agent_key(agent, session_name)
       local state = members[state_key] or {}
       if dry_run then
         local snapshot = {}
@@ -3443,7 +3469,7 @@ function remuda._butler_compaction_tick(target_name, dry_run)
       end
       if agent.kind == "claude" then clear_legacy_restore_state(state) end
       if agent.kind == "claude" and not state.restore_pending then
-        local persisted = compaction_restore_sessions[session_name]
+        local persisted = compaction_restore_for(agent, session_name)
         if persisted then
           state.restore_pending = persisted
           state.restore_pending_attempts = 0
@@ -3509,12 +3535,12 @@ function remuda._butler_compaction_execute(session_name, force)
     pcall(remuda._butler_send, session_name, agent.parent or "butler", message)
     return "skipped_unsupported_kind"
   end
-  local state_key = tostring(agent.id or session_name)
+  local state_key = compaction_agent_key(agent, session_name)
   local state = owner_state.compaction_members[state_key] or {}
   owner_state.compaction_members[state_key] = state
   if agent.kind == "claude" then clear_legacy_restore_state(state) end
   if agent.kind == "claude" and not state.restore_pending then
-    local persisted = compaction_restore_sessions[session_name]
+    local persisted = compaction_restore_for(agent, session_name)
     if persisted then
       state.restore_pending = persisted
       state.restore_pending_attempts = 0
@@ -3617,7 +3643,7 @@ function remuda._butler_compaction_execute(session_name, force)
     state.restore_pending_failure_notified = nil
     state.restore_pending_exhausted = nil
     clear_legacy_restore_state(state)
-    local cleared, clear_err = clear_compaction_restore(session_name)
+    local cleared, clear_err = clear_compaction_restore(compaction_agent_key(agent, session_name), session_name)
     if not cleared then
       _butler_trace("restore_record_clear_failed", detail .. " reason=" .. tostring(clear_err))
       pcall(remuda._butler_send, session_name, agent.parent or "butler",
@@ -3673,6 +3699,9 @@ function remuda._butler_compaction_execute(session_name, force)
       end
       state.restore_pending_attempt_active = nil
       state.restore_pending_exhausted = true
+      state.failure_cooldown_until = (remuda._butler_compaction_now or os.time)()
+        + config.failure_cooldown_seconds
+      state.cooldown_ticks = 0
       release_lock()
       _butler_trace("unsafe_model", detail)
       return false
@@ -3728,7 +3757,15 @@ function remuda._butler_compaction_execute(session_name, force)
     end)
   end
   if restore_pending then
-    if state.restore_pending_exhausted then return "restore_pending" end
+    if state.restore_pending_exhausted then
+      local cooling = remuda._butler_compaction_failure_cooldown(
+        state, (remuda._butler_compaction_now or os.time)())
+      if cooling then return "restore_pending" end
+      state.restore_pending_attempts = 0
+      state.restore_pending_exhausted = nil
+      state.restore_pending_failure_notified = nil
+      state.restore_pending_invalid_notified = nil
+    end
     local captured, screen = pcall(remuda.capture, session_name)
     if pane_busy() ~= false or not captured or type(screen) ~= "string"
         or remuda._butler_compaction_is_unknown_dialog(screen) then
@@ -3750,6 +3787,9 @@ function remuda._butler_compaction_execute(session_name, force)
     if not remuda._butler_compaction_valid_model(prior_model) then
       state.compaction_in_progress = false
       owner_state.compaction_fleet_active = nil
+      state.failure_cooldown_until = (remuda._butler_compaction_now or os.time)()
+        + config.failure_cooldown_seconds
+      state.cooldown_ticks = 0
       pcall(remuda._butler_send, session_name, agent.parent or "butler",
         "Compaction stopped: unsafe Claude model value; no model command was sent")
       _butler_trace("unsafe_model", detail)
@@ -3759,10 +3799,17 @@ function remuda._butler_compaction_execute(session_name, force)
     state.restore_pending_attempts = 0
     state.restore_pending_exhausted = nil
     state.restore_pending_invalid_notified = nil
-    local persisted, persist_err = persist_compaction_restore(session_name, prior_model)
+    local persisted, persist_err = persist_compaction_restore(
+      compaction_agent_key(agent, session_name), prior_model)
     if not persisted then
+      state.restore_pending = nil
+      state.restore_pending_attempts = nil
+      state.restore_pending_attempt_active = nil
       state.compaction_in_progress = false
       owner_state.compaction_fleet_active = nil
+      state.failure_cooldown_until = (remuda._butler_compaction_now or os.time)()
+        + config.failure_cooldown_seconds
+      state.cooldown_ticks = 0
       pcall(remuda._butler_send, session_name, agent.parent or "butler",
         "Compaction stopped: could not persist model restore state: " .. tostring(persist_err))
       _butler_trace("restore_record_write_failed", detail .. " reason=" .. tostring(persist_err))
