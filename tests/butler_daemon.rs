@@ -5114,8 +5114,7 @@ done
       remuda._fake_busy = {{}}
       remuda._fake_clear_unknown = {{}}
       remuda.session = function(name)
-        return {{is_busy=remuda._fake_busy[name] == true
-            or (remuda._fake_busy_until[name] and os.time() < remuda._fake_busy_until[name]) or false,
+        return {{is_busy=remuda._fake_busy[name] == true,
           attached=remuda._fake_attached[name] == true}}
       end
       local original_type_text = remuda.type_text
