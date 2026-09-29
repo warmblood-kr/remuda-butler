@@ -1800,6 +1800,7 @@ end
 -- the declared `butler-notices` schedule (init.lua) retries every second.
 bus.notices = bus.notices or {}
 bus.notice_screens = bus.notice_screens or {}
+bus.notice_seen = bus.notice_seen or {}
 local NOTICE_STABLE_SECONDS = 3
 
 -- The composer's text starts after the last prompt glyph and includes its
@@ -2001,6 +2002,26 @@ local function pending_notice_text(pending)
   return pending.count == 1 and pending.text
     or (pending.count .. " new Butler messages arrived. Read them: remuda butler inbox")
 end
+local function refresh_pending_notice(session, pending)
+  if not pending.message_order then return pending end
+  local agent = bus.agents[session]
+  local identity = agent and agent.id
+  local order, notices = {}, {}
+  for _, id in ipairs(pending.message_order) do
+    local notice = pending.message_ids and pending.message_ids[id]
+    if notice and identity and mail.is_unread(identity, id) then
+      order[#order + 1], notices[id] = id, notice
+    end
+  end
+  pending.message_order, pending.message_ids = order, notices
+  pending.count = #order
+  pending.text = order[#order] and notices[order[#order]] or nil
+  if pending.count == 0 then
+    bus.notices[session], bus.notice_recoveries[session] = nil, nil
+    return nil
+  end
+  return pending
+end
 local function recovery_screen(session)
   local ok, screen = pcall(remuda.capture, session)
   if not ok then return nil end
@@ -2109,13 +2130,25 @@ end
 local function complete_notice_recovery(session, state)
   local pending = bus.notices[session]
   if pending then
-    pending.count = pending.count - state.count
+    if state.message_ids and pending.message_order then
+      local submitted = {}
+      for _, id in ipairs(state.message_ids) do submitted[id] = true end
+      local order = {}
+      for _, id in ipairs(pending.message_order) do
+        if not submitted[id] then order[#order + 1] = id end
+      end
+      pending.message_order = order
+      pending.count = #order
+      pending.text = order[#order] and pending.message_ids[order[#order]] or nil
+    else
+      pending.count = pending.count - state.count
+    end
     if pending.count <= 0 then bus.notices[session] = nil end
   end
   bus.notice_recoveries[session] = nil
   return true
 end
-local function recovery_human_safe(session)
+local function recovery_human_safe(session, allow_busy)
   local session_row
   for _, candidate in ipairs(remuda.ls()) do
     if candidate.name == session then session_row = candidate end
@@ -2124,7 +2157,7 @@ local function recovery_human_safe(session)
   if remuda._butler_human_active(session) then return false end
   if remuda.session then
     local ok, row = pcall(remuda.session, session)
-    if not ok or not row or row.is_busy then return false end
+    if not ok or not row or (row.is_busy and not allow_busy) then return false end
   end
   return true
 end
@@ -2133,6 +2166,8 @@ local function begin_notice_submit(session, state, draft)
   if not pending then bus.notice_recoveries[session] = nil; return true end
   state.draft = draft
   state.count = pending.count
+  state.message_ids = {}
+  for _, id in ipairs(pending.message_order or {}) do state.message_ids[#state.message_ids + 1] = id end
   state.notice = pending_notice_text(pending)
   if draft and draft ~= "" then
     state.notice = state.notice .. "\n\nYour unsent draft was: " .. draft
@@ -2145,8 +2180,14 @@ local function begin_notice_submit(session, state, draft)
 end
 local function tick_notice_recovery(session, state)
   if state.failed then return false end
-  if not recovery_human_safe(session) then return false end
-  state.checks = (state.checks or 0) + 1
+  local observing_submit = state.phase == "verify_notice" or state.phase == "verify_existing"
+  if not recovery_human_safe(session, observing_submit) then return false end
+  local busy = false
+  if remuda.session then
+    local checked, row = pcall(remuda.session, session)
+    busy = checked and row and row.is_busy == true
+  end
+  if not busy then state.checks = (state.checks or 0) + 1 end
   if state.checks > 40 then return notice_recovery_error(session, state, "verification timed out") end
   local screen, decision, text = recovery_screen(session)
   if not screen then return notice_recovery_error(session, state, "the pane could not be captured") end
@@ -2188,7 +2229,11 @@ local function tick_notice_recovery(session, state)
     if notice_matches_composer(session, screen, text, current_notice) then
       local pressed, why = pcall(remuda.key, session, "RET")
       if not pressed then return notice_recovery_error(session, state, "the existing Butler notice could not be submitted: " .. tostring(why)) end
-      state.phase, state.checks = "verify_existing", 0
+      state.phase, state.checks, state.notice = "verify_existing", 0, current_notice
+      state.message_ids = {}
+      for _, id in ipairs((bus.notices[session] or {}).message_order or {}) do
+        state.message_ids[#state.message_ids + 1] = id
+      end
       return false
     end
     local agent = bus.agents[session]
@@ -2212,9 +2257,14 @@ local function tick_notice_recovery(session, state)
     end
     return begin_notice_submit(session, state, state.draft)
   elseif state.phase == "verify_existing" then
-    if decision == "EMPTY" then
+    local notice_visible = state.notice and tostring(screen):gsub("%s+", "")
+      :find(tostring(state.notice):gsub("%s+", ""):sub(1, 32), 1, true) ~= nil
+    local notice_in_composer = decision == "NON-EMPTY"
+      and notice_matches_composer(session, screen, text, state.notice)
+    if decision == "EMPTY" or (notice_visible and not notice_in_composer) then
       return complete_notice_recovery(session, state)
     end
+    if busy then return false end
     if state.checks >= 6 then
       return notice_recovery_error(session, state, "the existing Butler notice did not leave the composer")
     end
@@ -2252,6 +2302,8 @@ end
 local function deliver_notice(session)
   local pending = bus.notices[session]
   if not pending then return true end
+  pending = refresh_pending_notice(session, pending)
+  if not pending then return true end
   if bus.pending_tasks[session] then return false end
   local recovering = bus.notice_recoveries[session]
   if recovering then
@@ -2265,6 +2317,8 @@ local function deliver_notice(session)
   end
   if remuda._butler_notify_policy(session) then
     local state = { phase = "verify_notice", count = pending.count, notice = pending_notice_text(pending), checks = 0 }
+    state.message_ids = {}
+    for _, id in ipairs(pending.message_order or {}) do state.message_ids[#state.message_ids + 1] = id end
     local typed, why = pcall(remuda.type_text, session, state.notice, 0.1)
     if not typed then return false, why end
     bus.notice_recoveries[session] = state
@@ -2276,8 +2330,23 @@ local function deliver_notice(session)
   bus.notice_recoveries[session] = state
   return tick_notice_recovery(session, state)
 end
-function remuda._butler_notify(alias, notice)
+function remuda._butler_notify(alias, notice, message_id)
+  local _, recipient = mail_id(alias, false)
+  if message_id and not mail.is_unread(recipient.id, message_id) then return true end
+  if message_id then
+    local seen = bus.notice_seen[recipient.id] or {}
+    bus.notice_seen[recipient.id] = seen
+    if seen[message_id] then return false end
+    seen[message_id] = true
+  end
   local pending = bus.notices[alias] or { count = 0 }
+  if message_id then
+    pending.message_ids = pending.message_ids or {}
+    pending.message_order = pending.message_order or {}
+    if pending.message_ids[message_id] then return false end
+    pending.message_ids[message_id] = notice
+    pending.message_order[#pending.message_order + 1] = message_id
+  end
   pending.count, pending.text = pending.count + 1, notice
   bus.notices[alias] = pending
   return deliver_notice(alias)
@@ -2296,7 +2365,7 @@ function remuda._butler_send(from, to, text)
   local message = deliver_message({ from = sender, to = mail_address(recipient.alias), text = text })
   local notice = "Butler message " .. message.id .. " from " .. sender.session
     .. " arrived. Read it: remuda butler inbox"
-  local delivered, why = remuda._butler_notify(recipient.alias, notice)
+  local delivered, why = remuda._butler_notify(recipient.alias, notice, message.id)
   if delivered then return "queued " .. message.id .. " and notified " .. recipient.alias end
   if why then
     return "queued " .. message.id .. " for " .. recipient.alias .. "; terminal delivery deferred: " .. tostring(why)
@@ -2314,7 +2383,7 @@ local function notify_queued(message, alias, what)
   local live = pcall(mail_id, alias, false)
   if not live then return "queued " .. message.id .. " for " .. alias .. "; it is not live, so no notice" end
   local delivered, why = remuda._butler_notify(alias, "Butler message " .. message.id .. " " .. what
-    .. " arrived. Read it: remuda butler inbox")
+    .. " arrived. Read it: remuda butler inbox", message.id)
   if delivered then return "queued " .. message.id .. " and notified " .. alias end
   return "queued " .. message.id .. " for " .. alias .. "; notice deferred"
     .. (why and (": " .. tostring(why)) or " until its pane is free")
@@ -2336,7 +2405,21 @@ function remuda._butler_forward(from, message_id, member, note)
 end
 function remuda._butler_inbox(name)
   local id = mail_id(name, true)
-  return mail.inbox(id)
+  local result = mail.inbox(id)
+  if mail.unread(id) == 0 then
+    for alias, agent in pairs(bus.agents) do
+      if agent.id == id then
+        bus.notices[alias], bus.notice_recoveries[alias] = nil, nil
+      end
+    end
+    local seen = bus.notice_seen[id]
+    if seen then
+      for message_id in pairs(seen) do
+        if not mail.is_unread(id, message_id) then seen[message_id] = nil end
+      end
+    end
+  end
+  return result
 end
 function remuda._butler_report(from, text)
   from = resolve(from)

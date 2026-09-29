@@ -39,7 +39,6 @@ remuda._butler_agent_startup.claude = {
   ready = function(screen) return screen:find("─\n❯", 1, true) ~= nil end, -- idle composer under its rule
   clear_input = "C-u",
   modals = {
-    { match = "Do you trust the files in this folder?", keys = { "<down>", "RET" } },
     { match = "Yes, I trust this folder", keys = { "<down>", "RET" } },
   },
 }
