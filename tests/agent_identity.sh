@@ -4,12 +4,21 @@
 set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
+source "$REPO/tests/awk-timeout.sh"
 REMUDA_BIN=${REMUDA_BIN:-remuda}
 SCRATCH_ROOT=$(mktemp -d /tmp/butler-id.XXXXXX)
 SCRATCH_ROOT=$(cd "$SCRATCH_ROOT" && pwd -P)
+FAKE_AGENT="$SCRATCH_ROOT/fake-agent"
 DAEMON_PID=
 SERVER=
 SOCKET=
+cat >"$FAKE_AGENT" <<EOF
+#!/bin/sh
+echo "\$\$" >>"$SCRATCH_ROOT/child-pids"
+if [ "\$1" = env ]; then env | grep '^REMUDA_BUTLER_'; shift; fi
+exec /bin/sleep "\${1:-30}"
+EOF
+chmod +x "$FAKE_AGENT"
 
 cleanup() {
   STATUS=$?
@@ -17,6 +26,12 @@ cleanup() {
     "$REMUDA_BIN" -s "$SERVER" -e 'pcall(remuda.close, "butler"); pcall(remuda.close, "member")' >/dev/null 2>&1 || true
     kill "$DAEMON_PID" >/dev/null 2>&1 || true
     wait "$DAEMON_PID" >/dev/null 2>&1 || true
+  fi
+  if [ -f "$SCRATCH_ROOT/child-pids" ]; then
+    while IFS= read -r PID; do
+      [ -n "$PID" ] || continue
+      kill "$PID" >/dev/null 2>&1 || true
+    done <"$SCRATCH_ROOT/child-pids"
   fi
   rm -rf "$SCRATCH_ROOT"
   exit "$STATUS"
@@ -71,13 +86,13 @@ stop_private_daemon() {
 lua() { "$REMUDA_BIN" -s "$SERVER" -e "$1"; }
 
 load_butler() {
-  lua 'remuda._butler_argv = {"sh", "-c", "env | grep ^REMUDA_BUTLER_; sleep 30"}; remuda._butler_skip_relay = true' >/dev/null
+  lua "remuda._butler_argv = {'$FAKE_AGENT', 'env', '30'}; remuda._butler_skip_relay = true" >/dev/null
   "$REMUDA_BIN" -s "$SERVER" exec butler >/dev/null
   for _ in $(seq 50); do
     if lua 'return remuda._butler_agent_builders ~= nil' | grep -qx true; then break; fi
     sleep 0.1
   done
-  lua 'remuda._butler_agent_builders.fake = function() return {"sh", "-c", "env | grep ^REMUDA_BUTLER_; sleep 30"} end' >/dev/null
+  lua "remuda._butler_agent_builders.fake = function() return {'$FAKE_AGENT', 'env', '30'} end" >/dev/null
 }
 
 expect_ulid() {
@@ -104,10 +119,10 @@ while IFS= read -r ID; do
 done <<< "$SAME_SECOND_IDS"
 echo "ok - ULIDs increase within the same second"
 
-lua 'remuda._butler_agent_builders.fake = function() return {"sh", "-c", "env | grep ^REMUDA_BUTLER_; sleep 8"} end; remuda._butler_launch("fake", "member")' >/dev/null
+lua "remuda._butler_agent_builders.fake = function() return {'$FAKE_AGENT', 'env', '8'} end; remuda._butler_launch('fake', 'member')" >/dev/null
 MEMBER_ID=$(lua 'return remuda._butler_bus.agents.member.id or ""')
 expect_ulid "member id" "$MEMBER_ID"
-RUNNING_ROW=$(awk -v id="$MEMBER_ID" 'index($0, "\"id\":\"" id "\"") { row=$0 } END { print row }' "$REGISTRY")
+RUNNING_ROW=$(bounded_awk -v id="$MEMBER_ID" 'index($0, "\"id\":\"" id "\"") { row=$0 } END { print row }' "$REGISTRY")
 [[ $RUNNING_ROW == *'"state":"running"'* ]] || fail "launch row lacks state=running: $RUNNING_ROW"
 CREATED_AT=$(printf '%s\n' "$RUNNING_ROW" | sed -n 's/.*"created_at":"\([^"]*\)".*/\1/p')
 [[ -n $CREATED_AT ]] || fail "running row has no created_at: $RUNNING_ROW"
@@ -116,7 +131,12 @@ AGENTS=$("$REMUDA_BIN" -s "$SERVER" butler agents)
 [[ $AGENTS == *"$MEMBER_ID"* && $AGENTS == *$'running'* ]] || fail "agents command omits the running member: $AGENTS"
 echo "ok - registry launch row and agents command show a running identity"
 
-MEMBER_ENV=$(lua 'return remuda.capture("member")')
+MEMBER_ENV=
+for _ in $(seq 50); do
+  MEMBER_ENV=$(lua 'return remuda.capture("member")')
+  [[ $MEMBER_ENV == *"REMUDA_BUTLER_AGENT_ID=$MEMBER_ID"* ]] && break
+  sleep 0.1
+done
 [[ $MEMBER_ENV == *"REMUDA_BUTLER_AGENT_ID=$MEMBER_ID"* ]] || fail "member env lacks its ULID: $MEMBER_ENV"
 [[ $MEMBER_ENV == *"REMUDA_BUTLER_AGENT_ALIAS=member"* ]] || fail "member env lacks its alias: $MEMBER_ENV"
 [[ $MEMBER_ENV == *"REMUDA_BUTLER_LEADER_ID=$ROOT_ID"* ]] || fail "member env lacks its leader ULID: $MEMBER_ENV"
@@ -149,7 +169,7 @@ for _ in $(seq 100); do
   sleep 0.1
 done
 lua 'return remuda._butler_bus.agents.member == nil' | grep -qx true || fail "exited member remained live"
-ENDED_ROW=$(awk -v id="$MEMBER_ID" 'index($0, "\"id\":\"" id "\"") { row=$0 } END { print row }' "$REGISTRY")
+ENDED_ROW=$(bounded_awk -v id="$MEMBER_ID" 'index($0, "\"id\":\"" id "\"") { row=$0 } END { print row }' "$REGISTRY")
 [[ $ENDED_ROW == *'"state":"ended"'* && $ENDED_ROW == *'"reason":"exited"'* ]] || fail "exit row lacks lifecycle state/reason: $ENDED_ROW"
 ENDED_CREATED_AT=$(printf '%s\n' "$ENDED_ROW" | sed -n 's/.*"created_at":"\([^"]*\)".*/\1/p')
 [[ -n $ENDED_CREATED_AT ]] || fail "ended row has no created_at: $ENDED_ROW"
@@ -157,18 +177,18 @@ ENDED_CREATED_AT=$(printf '%s\n' "$ENDED_ROW" | sed -n 's/.*"created_at":"\([^"]
 [[ $("$REMUDA_BIN" -s "$SERVER" butler agents) != *"$MEMBER_ID"* ]] || fail "agents without --all included an ended member"
 [[ $("$REMUDA_BIN" -s "$SERVER" butler agents --all) == *"$MEMBER_ID"* ]] || fail "agents --all omitted an ended member"
 echo "ok - ended rows preserve creation time and agents --all includes them"
-lua 'remuda._butler_agent_builders.fake = function() return {"sleep", "30"} end; remuda._butler_launch("fake", "closer")' >/dev/null
+lua "remuda._butler_agent_builders.fake = function() return {'$FAKE_AGENT', '30'} end; remuda._butler_launch('fake', 'closer')" >/dev/null
 CLOSER_ID=$(lua 'return remuda._butler_bus.agents.closer.id or ""')
 lua 'remuda.close("closer")' >/dev/null
 for _ in $(seq 50); do
   if lua 'return remuda._butler_bus.agents.closer == nil' | grep -qx true; then break; fi
   sleep 0.1
 done
-CLOSED_ROW=$(awk -v id="$CLOSER_ID" 'index($0, "\"id\":\"" id "\"") { row=$0 } END { print row }' "$REGISTRY")
+CLOSED_ROW=$(bounded_awk -v id="$CLOSER_ID" 'index($0, "\"id\":\"" id "\"") { row=$0 } END { print row }' "$REGISTRY")
 [[ $CLOSED_ROW == *'"reason":"closed"'* ]] || fail "explicit close was not recorded as closed: $CLOSED_ROW"
 echo "ok - explicit remuda.close is recorded as closed"
-lua 'remuda._butler_agent_builders.fake = function() return {"sleep", "30"} end' >/dev/null
-lua 'remuda._butler_launch("fake", "member")' >/dev/null
+lua "remuda._butler_agent_builders.fake = function() return {'$FAKE_AGENT', '30'} end" >/dev/null
+lua "remuda._butler_launch('fake', 'member')" >/dev/null
 MEMBER_ID_2=$(lua 'return remuda._butler_bus.identities.member.id or ""')
 expect_ulid "reused alias id" "$MEMBER_ID_2"
 [[ $MEMBER_ID_2 != "$MEMBER_ID" ]] || fail "reused alias kept its old id"
@@ -182,7 +202,7 @@ start_private_daemon
 load_butler
 ROOT_ID_AFTER_RESTART=$(lua 'return remuda._butler_bus.agents.butler.id or ""')
 [[ $ROOT_ID_AFTER_RESTART == "$ROOT_ID" ]] || fail "root id changed across daemon restart: $ROOT_ID -> $ROOT_ID_AFTER_RESTART"
-RESTART_ROW=$(awk -v id="$MEMBER_ID_2" 'index($0, "\"id\":\"" id "\"") { row=$0 } END { print row }' "$REGISTRY")
+RESTART_ROW=$(bounded_awk -v id="$MEMBER_ID_2" 'index($0, "\"id\":\"" id "\"") { row=$0 } END { print row }' "$REGISTRY")
 [[ $RESTART_ROW == *'"state":"ended"'* && $RESTART_ROW == *'"reason":"daemon_restart"'* && $RESTART_ROW == *'"ended_at_estimate":true'* ]] || \
   fail "restart row lacks estimated daemon_restart state: $RESTART_ROW"
 echo "ok - root Butler id survives a daemon restart"
@@ -206,7 +226,7 @@ ALL_AGENTS=$("$REMUDA_BIN" -s "$SERVER" butler agents --all)
   fail "history row discarded the recorded launch time: $ALL_AGENTS"
 [[ $ALL_AGENTS == *$'legacy-missing-created\tmissing\tfake\t\tended\t\t?\t2020-01-03T00:00:00Z'* ]] || \
   fail "missing created_at was not displayed as unknown: $ALL_AGENTS"
-lua 'remuda._butler_launch("fake", "member")' >/dev/null
+lua "remuda._butler_launch('fake', 'member')" >/dev/null
 MEMBER_ID_FRESH=$(lua 'return remuda._butler_bus.agents.member.id or ""')
 expect_ulid "fresh-daemon member id" "$MEMBER_ID_FRESH"
 [[ $MEMBER_ID_FRESH != "$MEMBER_ID" ]] || fail "fresh daemons minted the same first member id"

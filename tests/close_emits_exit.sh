@@ -5,19 +5,45 @@
 set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
+source "$REPO/tests/awk-timeout.sh"
 REMUDA_BIN=${REMUDA_BIN:-remuda}
 SCRATCH=$(mktemp -d /tmp/bcee.XXXXXX)
 SCRATCH=$(cd "$SCRATCH" && pwd -P)
 SERVER=bcee
+DAEMON_PID=
 export HOME=$SCRATCH/home XDG_CONFIG_HOME=$SCRATCH/config XDG_DATA_HOME=$SCRATCH/data
 export REMUDA_RUNTIME_DIR=$SCRATCH/run REMUDA_NO_UPDATE_CHECK=1 REMUDA_BUTLER_PROJECT_HOME=$SCRATCH/projects
 unset REMUDA_BUTLER_TOKEN REMUDA_BUTLER_CONFIG REMUDA_BUTLER_AGENT_ID REMUDA_BUTLER_LEADER_ID REMUDA_BUTLER_SESSION_NAME
 mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME/remuda/mods/butler" "$REMUDA_RUNTIME_DIR"
 tar -c -C "$REPO" extension.toml packages | tar -x -C "$XDG_DATA_HOME/remuda/mods/butler"
+mkdir -p "$SCRATCH/bin"
+cat >"$SCRATCH/bin/sleep" <<EOF
+#!/bin/sh
+if [ "\$#" = 1 ] && [ "\$1" = 60 ]; then echo "\$\$" >>"$SCRATCH/child-pids"; fi
+exec /bin/sleep "\$@"
+EOF
+chmod +x "$SCRATCH/bin/sleep"
+export PATH="$SCRATCH/bin:$PATH"
 
 cleanup() {
-  "$REMUDA_BIN" -s "$SERVER" stop -f >/dev/null 2>&1 || true
+  status=$?
+  if [[ ${REMUDA_RUNTIME_DIR:-} == "$SCRATCH/run" ]]; then
+    "$REMUDA_BIN" -s "$SERVER" stop -f >/dev/null 2>&1 || true
+  else
+    echo "refusing to stop close-emits daemon outside its scratch runtime" >&2
+  fi
+  if [[ -f $SCRATCH/child-pids ]]; then
+    while IFS= read -r pid; do
+      [[ -n $pid ]] || continue
+      kill "$pid" >/dev/null 2>&1 || true
+    done <"$SCRATCH/child-pids"
+  fi
+  if [[ -n $DAEMON_PID ]]; then
+    kill "$DAEMON_PID" >/dev/null 2>&1 || true
+    wait "$DAEMON_PID" >/dev/null 2>&1 || true
+  fi
   rm -rf "$SCRATCH"
+  exit "$status"
 }
 trap cleanup EXIT INT TERM
 
@@ -25,6 +51,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 lua() { "$REMUDA_BIN" -s "$SERVER" -e "$1"; }
 
 "$REMUDA_BIN" -s "$SERVER" daemon >"$SCRATCH/daemon.log" 2>&1 &
+DAEMON_PID=$!
 for _ in $(seq 50); do
   [[ -S $REMUDA_RUNTIME_DIR/remuda/$SERVER.sock ]] && break
   sleep 0.1
@@ -53,7 +80,7 @@ done
 SEEN=$(lua "return table.concat(remuda._close_exit_seen, ',')")
 BUTLER_SEEN=
 if [[ -f $SCRATCH/butler.trace ]]; then
-  BUTLER_SEEN=$(awk -F '\t' '$2 == "session_exited" { print $3 }' "$SCRATCH/butler.trace" | paste -sd, -)
+  BUTLER_SEEN=$(bounded_awk -F '\t' '$2 == "session_exited" { print $3 }' "$SCRATCH/butler.trace" | paste -sd, -)
 fi
 echo "generic session_exited: ${SEEN:-<none>}"
 echo "butler session_exited: ${BUTLER_SEEN:-<none>}"
