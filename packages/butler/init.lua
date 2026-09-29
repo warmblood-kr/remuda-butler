@@ -148,9 +148,13 @@ the normal way for a member to communicate.
         prompt = function(_, ctx) return "Your leader is " .. ctx.parent .. "." end },
     },
     ["butler.command"] = {
-      { id = "compact", order = 8, verb = "compact", usage = "  remuda butler compact <session>",
+      { id = "compact", order = 16, verb = "compact", usage = "  remuda butler compact <session> [--dry-run]",
         run = function(_, args)
-          if #args ~= 2 or not args[2] or args[2] == "" then return nil end
+          if not args[2] or args[2] == "" then return nil end
+          if #args == 3 and args[3] == "--dry-run" then
+            return host._butler_compaction_tick(args[2], true)
+          end
+          if #args ~= 2 then return nil end
           return host.butler.compact(args[2])
         end },
       { id = "sessions", order = 10, verb = "sessions", usage = "  remuda butler sessions",
