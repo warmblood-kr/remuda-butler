@@ -4948,6 +4948,46 @@ fn butler_initializes_mail_and_persists_a_sent_message() {
     drop(daemon);
 }
 
+#[test]
+fn butler_matrix_relay_starts_on_fallback_boot_and_only_once() {
+    let dir = scratch_dir("matrix-fallback-boot");
+    let room = "!fallback-boot:example.org";
+    let (token_path, config_path) = butler_config(
+        &dir, "fallback-boot", "http://matrix.example.org", room, "@bot:example.org", "");
+    let token = token_path.to_string_lossy().into_owned();
+    let config = config_path.to_string_lossy().into_owned();
+    let _daemon = Daemon::spawn_with_env(&dir, &[
+        ("REMUDA_BUTLER_TOKEN", token.as_str()),
+        ("REMUDA_BUTLER_CONFIG", config.as_str()),
+    ]);
+    let path = daemon::socket_path_in(&dir, "s");
+    eval(&path, include_str!("support/fake_http.lua"));
+    let init = include_str!("../../packages/butler/init.lua");
+    let result = eval(&path, &format!(r#"
+      remuda._butler_test_mode = "lifecycle"
+      local fallback
+      local original_schedule = remuda.schedule
+      remuda.schedule = function(spec)
+        if spec.name == "butler-start-fallback" then fallback = spec end
+        return original_schedule(spec)
+      end
+      local old_metatable = getmetatable(_G)
+      setmetatable(_G, {{ __index = {{ remuda = remuda }} }})
+      local module = (function()
+{init}
+      end)()
+      setmetatable(_G, old_metatable)
+      remuda.schedule = original_schedule
+      if not fallback then return "fallback-schedule-missing" end
+      fallback.run()
+      local after_fallback = #remuda.http.calls
+      module.start(module.initialize())
+      return after_fallback .. "|" .. #remuda.http.calls
+    "#));
+    assert_eq!(result, "1|1",
+        "fallback boot must start the Matrix relay once, and lifecycle startup must not duplicate it: {result}");
+}
+
 /// Same live-`claude` limitation as the test above blocks a real kill-and-
 /// watch-it-come-back test for the respawn watchdog. This checks, at the
 /// source level, that the lifecycle-owned watchdog reuses one launch
