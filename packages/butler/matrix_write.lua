@@ -102,6 +102,13 @@ function matrix.send(opts, on_done)
   local done = once(on_done)
   local room = configured_room(opts, done)
   if not room then return { cancel = function() end } end
+  if type(opts.text) == "string" then
+    for mentioned in opts.text:gmatch("@[%w._=/%-]+:[%w.%-]+") do
+      if matrix.is_agent_mxid and matrix.is_agent_mxid(mentioned) then
+        return error_result(done, "Butler-to-Butler sends are disabled")
+      end
+    end
+  end
   return send_chunks(room, opts.text, nil, done)
 end
 

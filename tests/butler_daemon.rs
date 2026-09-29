@@ -2524,7 +2524,8 @@ fn butler_matrix_relay_persists_matrix_event_time_through_real_mail_delivery() {
       for _, id in ipairs(remuda._butler_mail.mailbox(root.id)) do
         local message = bus.messages[id]
         if message and message.matrix and message.matrix.event_id == "$mail-time" then
-          return message.created_at
+          return message.created_at .. "|" .. tostring(message.matrix.room)
+            .. "|" .. tostring(message.matrix.event_id)
         end
       end
       local state = matrix.relay.instance:state()
@@ -2533,7 +2534,8 @@ fn butler_matrix_relay_persists_matrix_event_time_through_real_mail_delivery() {
         .. "|inbox=" .. #remuda._butler_mail.mailbox(root.id)
     "#,
         baseline=lua_raw_string(baseline), sync=lua_raw_string(sync), response=lua_raw_string(&response.to_string())));
-    assert_eq!(result, "1970-01-01T00:00:00Z", "relay-to-mail delivery must preserve Matrix event time: {result}");
+    assert_eq!(result, "1970-01-01T00:00:00Z|home|$mail-time",
+        "relay-to-mail delivery must preserve the timestamp and Matrix envelope: {result}");
 }
 
 #[test]
@@ -2721,82 +2723,125 @@ fn butler_matrix_reply_is_correlated_and_sent_id_is_durable() {
 }
 
 #[test]
-fn butler_matrix_reply_multi_identity_routes_only_mentions_owned_threads_and_dms() {
-    let dir = scratch_dir("matrix-multi-butler");
+fn butler_matrix_reply_home_all_roster_subscriptions_survive_restart() {
+    let dir = scratch_dir("matrix-home-all");
     let (_daemon, path) = butler_cli_test_daemon(&dir);
-    let room = "!shared:example.org";
-    let (_a_token, a_config) = butler_config(
-        &dir, "butler-a", "http://matrix.example.org", room, "@a:example.org",
-        "@human:example.org,@b:example.org");
-    let (_b_token, b_config) = butler_config(
-        &dir, "butler-b", "http://matrix.example.org", room, "@b:example.org",
-        "@human:example.org,@a:example.org");
+    let home_a = "!home-a:example.org";
+    let home_b = "!home-b:example.org";
+    let all = "!all:example.org";
+    let (a_token, a_config) = butler_config(&dir, "butler-a", "http://matrix.example.org",
+        home_a, "@butler-a:example.org", "@human:example.org,@agent-bot:example.org");
+    let (_b_token, b_config) = butler_config(&dir, "butler-b", "http://matrix.example.org",
+        home_b, "@butler-b:example.org", "@human:example.org,@agent-bot:example.org");
     for config in [&a_config, &b_config] {
         use std::io::Write;
         let mut file = std::fs::OpenOptions::new().append(true).open(config).unwrap();
-        writeln!(file, "butler_senders=@a:example.org,@b:example.org").unwrap();
+        writeln!(file, "all_room={all}").unwrap();
     }
     eval(&path, include_str!("support/fake_http.lua"));
     eval(&path, "remuda.exec('butler/matrix')");
     let result = eval(&path, &format!(r#"
       local matrix = remuda.butler.matrix
-      local room = {room}
+      local home_a, home_b, all = {home_a}, {home_b}, {all}
       local config_a, config_b = {a_config}, {b_config}
-      local a, b, b_context = {{}}, {{}}, nil
-      local ra = matrix.relay.new({{config_path=config_a, matrix=matrix, deliver=function(e)
-        a[#a+1] = e.event_id; return {{id="mail-a-" .. tostring(#a)}}
-      end}})
-      local rb = matrix.relay.new({{config_path=config_b, matrix=matrix, deliver=function(e)
-        b[#b+1] = e.event_id; b_context = e.context_mail_id
-        return {{id="mail-b-" .. tostring(#b)}}
-      end}})
-      rb:state().routes["mail-b-origin"] = {{room_id=room, event_id="$b-origin",
-        thread_root="$b-origin", last_reply_event_id="$b-own", created_at="2026-01-01T00:00:00Z"}}
-      local function ev(id, sender, body, relation)
+      local a, b = {{}}, {{}}
+      local function deliver(target, label)
+        return function(e)
+          target[#target+1] = e
+          local mail_id = label .. "-mail-" .. tostring(#target)
+          e.test_mail_id = mail_id
+          return {{id=mail_id}}
+        end
+      end
+      local ra = matrix.relay.new({{config_path=config_a, matrix=matrix, deliver=deliver(a, "a")}})
+      local rb = matrix.relay.new({{config_path=config_b, matrix=matrix, deliver=deliver(b, "b")}})
+      local function ev(id, sender, body, root, reply)
         local content = {{msgtype="m.text", body=body}}
-        if relation then content["m.relates_to"] = relation end
+        if root then content["m.relates_to"] = {{rel_type="m.thread", event_id=root,
+          ["m.in_reply_to"]={{event_id=reply or root}}}} end
         return {{type="m.room.message", event_id=id, sender=sender, content=content}}
       end
-      local events = {{
-        ev("$mention-a", "@human:example.org", "@a:example.org hello"),
-        ev("$thread-b", "@human:example.org", "reply under B",
-          {{rel_type="m.thread", event_id="$b-origin", ["m.in_reply_to"]={{event_id="$b-own"}}}}),
-        ev("$unaddressed", "@human:example.org", "hello room"),
-        ev("$butler-to-a", "@b:example.org", "@a:example.org please inspect"),
+      local function room(events)
+        return {{timeline={{events=events}}, state={{events={{
+          {{type="m.room.member", state_key="@human:example.org", content={{membership="join"}}}},
+          {{type="m.room.member", state_key="@agent-bot:example.org", content={{membership="join"}}}},
+          {{type="m.room.member", state_key="@butler-a:example.org", content={{membership="join"}}}},
+          {{type="m.room.member", state_key="@butler-b:example.org", content={{membership="join"}}}},
+        }}}}}}
+      end
+      local function response(cursor, events_a, events_b, events_all)
+        return {{next_batch=cursor, rooms={{join={{
+          [home_a]=room(events_a or {{}}), [home_b]=room(events_b or {{}}), [all]=room(events_all or {{}}),
+        }}}}}}
+      end
+      ra._response({{next_batch="base-a"}}, "/_matrix/client/v3/sync")
+      rb._response({{next_batch="base-b"}}, "/_matrix/client/v3/sync")
+      ra._response(response("cursor-1", {{ev("$home-a", "@human:example.org", "home A")}}, nil, {{
+        ev("$top", "@human:example.org", "top level"),
+        ev("$unsub", "@human:example.org", "unsubscribed", "$other-thread"),
+        ev("$mention-a", "@human:example.org", "@butler-a:example.org join", "$mention-thread"),
+        ev("$agent-quiet", "@agent-bot:example.org", "quiet"),
+        ev("$agent-mention", "@agent-bot:example.org", "@butler-a:example.org inspect", "$agent-thread"),
+      }}), "/_matrix/client/v3/sync")
+      rb._response(response("cursor-1", nil, {{ev("$home-b", "@human:example.org", "home B")}}, {{
+        ev("$top", "@human:example.org", "top level"),
+        ev("$unsub", "@human:example.org", "unsubscribed", "$other-thread"),
+        ev("$mention-a", "@human:example.org", "@butler-a:example.org join", "$mention-thread"),
+        ev("$agent-quiet", "@agent-bot:example.org", "quiet"),
+        ev("$agent-mention", "@agent-bot:example.org", "@butler-a:example.org inspect", "$agent-thread"),
+      }}), "/_matrix/client/v3/sync")
+      local function has(target, id)
+        for _, item in ipairs(target) do if item.event_id == id then return item end end
+      end
+      if not has(a, "$home-a") or has(b, "$home-a") then return "home-routing-failed" end
+      if not has(b, "$home-b") or has(a, "$home-b") then return "other-home-routing-failed" end
+      if not has(a, "$top") or not has(b, "$top") then return "all-top-level-missed" end
+      if has(a, "$unsub") or has(b, "$unsub") or has(b, "$mention-a") then return "thread-routing-failed" end
+      local top = has(a, "$top")
+      if top.room ~= "all" or top.event_id ~= "$top" then return "mail-room-metadata-missing" end
+      if has(a, "$mention-a").thread_id ~= "$mention-thread" then return "thread-id-metadata-missing" end
+      if has(a, "$agent-quiet") or has(b, "$agent-quiet") then return "unmentioned-agent-delivered" end
+      if not has(a, "$agent-mention") or has(b, "$agent-mention") then return "agent-mention-routing-failed" end
+      if ra:can_reply_to("$agent-mention") or ra:can_reply_to("$unknown-event") then return "reply-guard-failed-open" end
+      remuda._butler_matrix_config = {{token_path={a_token}, config_path=config_a}}
+      local send_error
+      matrix.send({{room=all, text="@butler-b:example.org please reply"}},
+        function(result) send_error=result.error end)
+      if not send_error or not send_error:find("Butler-to-Butler", 1, true) then return "send-loop-not-blocked" end
+      if not ra:record_outgoing_reply("$top", "$a-post") then return "post-route-missing" end
+      ra:stop()
+      ra = matrix.relay.new({{config_path=config_a, matrix=matrix, deliver=deliver(a, "a")}})
+      if ra:state().since ~= "cursor-1" then return "cursor-not-restored" end
+      local followups = {{
+        ev("$mention-followup", "@human:example.org", "continued", "$mention-thread"),
+        ev("$post-followup", "@human:example.org", "reply to A post", "$top", "$a-post"),
+        ev("$agent-thread-followup", "@human:example.org", "agent thread continuation", "$agent-thread"),
+        ev("$agent-quiet-2", "@agent-bot:example.org", "quiet again", "$mention-thread"),
+        ev("$agent-mention-2", "@agent-bot:example.org", "@butler-a:example.org again", "$mention-thread"),
       }}
-      local function payload(direct_room, include_dm)
-        local rooms = {{}}
-        rooms[room] = {{timeline={{events=events}}}}
-        if include_dm then
-          rooms[direct_room] = {{timeline={{events={{ev("$dm-a", "@human:example.org", "private hello")}}}}}}
-        end
-        local direct = {{}}
-        direct["@human:example.org"] = {{direct_room}}
-        return {{next_batch="s1", rooms={{join=rooms}},
-          account_data={{events={{{{type="m.direct", content=direct}}}}}}}}
+      ra._response(response("cursor-2", nil, nil, followups), "/_matrix/client/v3/sync")
+      rb._response(response("cursor-2", nil, nil, followups), "/_matrix/client/v3/sync")
+      if not has(a, "$mention-followup") or not has(a, "$post-followup")
+        or not has(a, "$agent-thread-followup") then return "subscription-not-restored" end
+      if has(a, "$mention-followup").context_mail_id ~= has(a, "$mention-a").test_mail_id
+        or has(a, "$post-followup").context_mail_id ~= has(a, "$top").test_mail_id then
+        return "thread-context-mail-lost:" .. tostring(has(a, "$mention-followup").context_mail_id)
+          .. ":" .. tostring(has(a, "$post-followup").context_mail_id)
       end
-      ra._response({{next_batch="s0"}}, "/_matrix/client/v3/sync")
-      rb._response({{next_batch="s0"}}, "/_matrix/client/v3/sync")
-      ra._response(payload("!dm-a:example.org", true), "/_matrix/client/v3/sync")
-      rb._response(payload("!dm-b:example.org", false), "/_matrix/client/v3/sync")
-      if b_context ~= "mail-b-origin" then return "thread-context-lost:" .. tostring(b_context) end
-      if ra:can_reply_to("$butler-to-a") ~= false then return "butler-loop-not-blocked" end
-      matrix.relay.instance = ra
-      local loop_error
-      matrix.reply({{room=room, event_id="$butler-to-a", text="loop"}},
-        function(result) loop_error=result.error end)
-      if not loop_error or not loop_error:find("Butler-to-Butler", 1, true) then
-        return "matrix-reply-loop-not-blocked"
-      end
-      matrix.relay.instance = nil
-      table.sort(a); table.sort(b)
-      return table.concat(a, ",") .. "|" .. table.concat(b, ",")
+      if has(b, "$mention-followup") or has(b, "$post-followup") or has(b, "$agent-thread-followup") then return "thread-leaked-to-B" end
+      if has(a, "$agent-quiet-2") or has(b, "$agent-quiet-2") then return "agent-without-mention-delivered" end
+      if not has(a, "$agent-mention-2") or has(b, "$agent-mention-2") then return "agent-mention-followup-routing-failed" end
+      if ra:can_reply_to("$agent-mention-2") then return "agent-reply-allowed" end
+      local before = #a + #b
+      ra._response(response("cursor-3", nil, nil, followups), "/_matrix/client/v3/sync")
+      rb._response(response("cursor-3", nil, nil, followups), "/_matrix/client/v3/sync")
+      if #a + #b ~= before then return "duplicate-after-replay" end
+      return "ok"
     "#,
-      room=lua_raw_string(room),
-      a_config=lua_raw_string(&a_config.to_string_lossy()),
-      b_config=lua_raw_string(&b_config.to_string_lossy())));
-    assert_eq!(result, "$butler-to-a,$dm-a,$mention-a|$thread-b",
-        "only the addressed Butler should receive each Matrix event; unaddressed room posts are ignored: {result}");
+      home_a=lua_raw_string(home_a), home_b=lua_raw_string(home_b), all=lua_raw_string(all),
+      a_config=lua_raw_string(&a_config.to_string_lossy()), b_config=lua_raw_string(&b_config.to_string_lossy()),
+      a_token=lua_raw_string(&a_token.to_string_lossy())));
+    assert_eq!(result, "ok", "home/all routing, roster, thread subscriptions, and restart contract: {result}");
 }
 
 #[test]

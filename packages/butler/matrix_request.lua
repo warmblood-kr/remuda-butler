@@ -83,8 +83,20 @@ function matrix.read_config(path)
     sender = trim(sender)
     if sender ~= "" then butler_senders[sender] = true end
   end
+  local all_room = opts.all_room
+  if all_room == "" then all_room = nil end
+  if all_room == lines[2] then return nil, "HOME and ALL-BUTLERS rooms must be different" end
+  local rooms = { [lines[2]] = "home" }
+  if all_room then
+    if mode == "1" or mode == "true" or mode == "messages" or mode == "fallback" then
+      return nil, "ALL-BUTLERS room requires /sync; messages fallback supports HOME only"
+    end
+    rooms[all_room] = "all"
+  end
   return {
-    base = base, room = lines[2], self_mxid = lines[3], allowed_senders = allowed,
+    base = base, room = lines[2], home_room = lines[2], all_room = all_room,
+    rooms = rooms,
+    self_mxid = lines[3], allowed_senders = allowed,
     butler_senders = butler_senders,
     use_messages = mode == "1" or mode == "true" or mode == "messages" or mode == "fallback",
     timeout_ms = math.max(1, timeout), ca_file = ca_file, pin = pin,
@@ -115,6 +127,25 @@ function matrix.configured_room()
   local conf, err = config()
   if not conf then return nil, err end
   return conf.room
+end
+
+function matrix.room_allowed(room)
+  local conf, err = config()
+  if not conf then return false, err end
+  return room == conf.home_room or (conf.all_room ~= nil and room == conf.all_room)
+end
+
+function matrix.room_kind(room)
+  local conf, err = config()
+  if not conf then return nil, err end
+  return conf.rooms[room]
+end
+
+function matrix.is_agent_mxid(mxid)
+  local localpart = type(mxid) == "string" and mxid:match("^@([^:]+):")
+  if localpart and (localpart:match("^agent%-") or localpart:match("^butler%-")) then return true end
+  local conf = config()
+  return conf ~= nil and (mxid == conf.self_mxid or conf.butler_senders[mxid] == true)
 end
 
 matrix.once = matrix.once or function(callback)
@@ -248,12 +279,12 @@ function matrix.request(args, on_done)
   local encoded_room = path:match("/rooms/([^/?]+)")
   if encoded_room then
     local path_room = percent_decode(encoded_room)
-    if not path_room or path_room ~= conf.room then
+    if not path_room or (path_room ~= conf.home_room and path_room ~= conf.all_room) then
       report_error(done, "room is outside the configured Matrix allowlist")
       return { cancel = function() end }
     end
   end
-  if args.room ~= nil and args.room ~= conf.room then
+  if args.room ~= nil and args.room ~= conf.home_room and args.room ~= conf.all_room then
     report_error(done, "room is outside the configured Matrix allowlist")
     return { cancel = function() end }
   end

@@ -135,9 +135,12 @@ local function envelope_json(message, object)
     for i, url in ipairs(message.matrix.media or {}) do media[i] = config.json_quote(url) end
     matrix = ',"matrix":{"sender":' .. config.json_quote(message.matrix.sender)
       .. ',"room_id":' .. config.json_quote(message.matrix.room_id)
+      .. (message.matrix.room and ',"room":' .. config.json_quote(message.matrix.room) or "")
       .. ',"event_id":' .. config.json_quote(message.matrix.event_id)
       .. (message.matrix.thread_root and ',"thread_root":' .. config.json_quote(message.matrix.thread_root) or "")
+      .. (message.matrix.thread_id and ',"thread_id":' .. config.json_quote(message.matrix.thread_id) or "")
       .. (message.matrix.in_reply_to and ',"in_reply_to":' .. config.json_quote(message.matrix.in_reply_to) or "")
+      .. (message.matrix.room_kind and ',"room_kind":' .. config.json_quote(message.matrix.room_kind) or "")
       .. (message.matrix.mxc and ',"mxc":' .. config.json_quote(message.matrix.mxc) or "")
       .. ',"media":[' .. table.concat(media, ",") .. ']}'
   end
@@ -203,8 +206,11 @@ local function load_message(disk, id)
       sender = matrix:match('"sender":"(.-)"'),
       room_id = matrix:match('"room_id":"(.-)"'),
       event_id = matrix:match('"event_id":"(.-)"'),
+      room = matrix:match('"room":"(.-)"'),
       thread_root = matrix:match('"thread_root":"(.-)"'),
+      thread_id = matrix:match('"thread_id":"(.-)"'),
       in_reply_to = matrix:match('"in_reply_to":"(.-)"'),
+      room_kind = matrix:match('"room_kind":"(.-)"'),
       mxc = matrix:match('"mxc":"(.-)"'),
       media = {},
     }
@@ -384,7 +390,9 @@ local function queue(from, to, text, subject, in_reply_to, references, matrix)
     in_reply_to = in_reply_to, references = references, content_type = "text/plain; charset=utf-8",
     body = { object_id = object_id }, matrix = matrix and {
       sender = matrix.sender, room_id = matrix.room_id, event_id = matrix.event_id,
+      room = matrix.room or matrix.room_kind, thread_id = matrix.thread_id,
       thread_root = matrix.thread_root, in_reply_to = matrix.in_reply_to,
+      room_kind = matrix.room_kind,
       mxc = matrix.mxc, media = matrix.media or {},
     } or nil }
   local disk = paths(recipient_id)

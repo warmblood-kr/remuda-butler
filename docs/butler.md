@@ -4,12 +4,23 @@ Butler is Remuda's local session manager. It starts and coordinates one agent
 session through the same Lua runtime and Remuda protocol used by other
 extensions. It works without Matrix configuration.
 
-When Matrix credentials are configured, Butler listens in its configured room
-and its account's Matrix direct-message rooms. In a shared room, it takes a
-message only when addressed by its exact MXID mention or when the message
-replies in a thread to one of its own messages. Unaddressed room messages are
-ignored, so multiple Butler accounts do not duplicate mail. Accepted messages
-become Butler mail with Matrix sender, room, event, and thread context.
+When Matrix credentials are configured, Butler listens in its HOME room and,
+when configured, the shared ALL-BUTLERS room. In HOME, every human message is
+delivered to that room's Butler. In ALL-BUTLERS, every top-level human message
+is delivered to every Butler; thread replies are delivered only to Butlers
+subscribed to that thread. A Butler subscribes when it is mentioned in a
+thread or posts in the thread. Subscriptions and the event cursor persist
+across restarts. Agent messages are delivered only when they mention the
+receiving Butler, and Butler never auto-replies to agent-authored messages.
+Mail records the Matrix sender, `room` (`home` or `all`), room ID, event ID,
+and thread ID.
+
+Roster classification uses Matrix MXID localparts: `agent-` and `butler-`
+prefixes identify AGENT accounts; configured `butler_senders` are also AGENTs
+for older accounts. Every other syntactically valid MXID is a HUMAN account.
+Malformed or unrecognized sender IDs are not routed to mail.
+The relay reads room membership state and keeps its roster with its private
+state file. The sender allowlist still applies before classification.
 
 If the saved `.since` state is unreadable or has invalid field types, the relay
 starts with a fresh sync baseline. It does not replay room history; messages
@@ -20,8 +31,8 @@ only in the damaged state file cannot be recovered.
 
 Use `remuda butler matrix` for Matrix reads and writes. Options come before
 the verb or its positional arguments. `--json` selects machine-readable
-output. Read verbs accept `--room ROOM` where applicable; it must name the
-single room in the config file.
+output. Verbs that accept `--room ROOM` require the configured HOME room or
+ALL-BUTLERS room.
 
 ```text
 remuda butler matrix [--json] status
@@ -41,8 +52,9 @@ remuda butler matrix [--json] quarantine [--id EVENT_ID]
 ```
 
 `event` and `get` are aliases for the same read. `rooms` is read-only. The
-configured room is the security boundary: no verb adds a room to it or widens
-the allowlist. Change the config explicitly to use a different room. The
+configured HOME and ALL-BUTLERS rooms are the security boundary: no verb adds a
+room to them or widens the allowlist. Change the config explicitly to use
+different rooms. The
 `send -` stdin form is unsupported until core #213.
 
 `join` and `leave` change room membership and are operator-only. Until core
@@ -59,18 +71,21 @@ The token is stored in a separate token file. The newline-delimited config
 file contains:
 
 1. Homeserver URL.
-2. The single configured Matrix room ID.
+2. The HOME Matrix room ID.
 3. The Matrix account's own user ID.
 4. A comma-separated allowlist of sender MXIDs. Messages from senders not on
    this list are ignored; a blank line allows no senders.
 5. Optional `messages` to use the `/rooms/{room}/messages` polling fallback
-   for homeservers affected by a `/sync` defect; blank uses `/sync`.
+   for homeservers affected by a `/sync` defect; blank uses `/sync`. ALL-BUTLERS
+   requires `/sync` and is rejected with this fallback enabled.
 6. Optional sync timeout in milliseconds; blank defaults to `30000`.
-7. Optional transport settings, one `key=value` per line: `ca_file=PATH`
-   trusts a custom CA, and `pin_sha256=HEX` pins the homeserver's leaf key.
-   `butler_senders=@id:server,...` identifies other Butler accounts; messages
-   from those accounts are ignored unless they mention this Butler. Replies to
-   another Butler are blocked to prevent reply loops.
+7. Optional transport and room settings, one `key=value` per line:
+   `all_room=ROOM_ID` configures the shared ALL-BUTLERS room;
+   `ca_file=PATH` trusts a custom CA, and `pin_sha256=HEX` pins the
+   homeserver's leaf key. `butler_senders=@id:server,...` remains accepted for
+   older accounts that do not use the prefix convention; `agent-` and
+   `butler-` MXID prefixes identify agent accounts and prevent
+   Butler-to-Butler reply and send loops.
 
 `pin_sha256` is the 64-character hexadecimal SHA-256 digest of the leaf
 certificate's SubjectPublicKeyInfo (SPKI), not the certificate file. Compute
