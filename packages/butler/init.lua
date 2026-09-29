@@ -233,13 +233,14 @@ the normal way for a member to communicate.
       { id = "topic", order = 30, verb = "topic", usage = "  remuda butler topic new <name> [--template T] [--agent A] [--model M]\n"
           .. "  remuda butler topic delegate <name> [--agent A] [--leader L] [--model M] <task...>",
         run = function(_, args, caller) return host._butler_command_run("topic", args, caller) end },
-      { id = "send", order = 40, verb = "send", usage = '  remuda butler send <to> "<message>"\n  remuda butler send <from> <to> <message...>',
+      { id = "send", order = 40, verb = "send", usage = '  remuda butler send <to> "<message>" | <to> - | <to> --file PATH\n'
+          .. '  remuda butler send <from> <to> <message...> | <from> <to> - | <from> <to> --file PATH',
         run = function(_, args, caller) return host._butler_command_run("send", args, caller) end },
-      { id = "send-to-leader", order = 50, verb = "send-to-leader", usage = "  remuda butler send-to-leader <message...>",
+      { id = "send-to-leader", order = 50, verb = "send-to-leader", usage = "  remuda butler send-to-leader <message...> | - | --file PATH",
         run = function(_, args, caller) return host._butler_command_run("send-to-leader", args, caller) end },
       { id = "inbox", order = 60, verb = "inbox", usage = "  remuda butler inbox [name]",
         run = function(_, args, caller) return host._butler_command_run("inbox", args, caller) end },
-      { id = "reply", order = 70, verb = "reply", usage = "  remuda butler reply <message-id> <message...>",
+      { id = "reply", order = 70, verb = "reply", usage = "  remuda butler reply <message-id> <message...> | - | --file PATH",
         run = function(_, args, caller) return host._butler_command_run("reply", args, caller) end },
       { id = "forward", order = 80, verb = "forward", usage = "  remuda butler forward <message-id> <member> [note...]",
         run = function(_, args, caller) return host._butler_command_run("forward", args, caller) end },

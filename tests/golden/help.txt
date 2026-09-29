@@ -36,3 +36,4 @@ identity (a plain shell, or a core that does not forward the caller's env),
 `send` is from "operator" and `inbox` needs a name (`inbox <name>`).
 `reply` answers a message's original sender, even when it was forwarded to you;
 `forward` re-delivers a message you received, keeping its sender, with a note.
+
