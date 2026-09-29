@@ -16,23 +16,58 @@
 #                                             # tests/golden/ and commit the diff with it
 # Needs: bash, git, awk, and cargo when REMUDA_BIN is unset.
 set -euo pipefail
+export LC_ALL=C
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 GOLDEN=$REPO/tests/golden
 CORE_URL=${CORE_URL:-https://github.com/warmblood-kr/remuda.git}
 # Keep in step with tests/rust_tests.sh.
 CORE_REF=${CORE_REF:-355e8b2}
 T=$(mktemp -d /tmp/bgg.XXXXXX) S=bgg
+DAEMON_PID=
 source_home=${HOME:-/tmp}
 export CARGO_HOME=${CARGO_HOME:-$source_home/.cargo}
 export RUSTUP_HOME=${RUSTUP_HOME:-$source_home/.rustup}
 cleanup() {
+  local pid killed=0 left=0
+  local descendants=()
+  if [[ -n "$DAEMON_PID" ]]; then
+    while IFS= read -r pid; do [[ -n "$pid" ]] && descendants+=("$pid"); done < <(
+      ps -axo pid=,ppid= | awk -v root="$DAEMON_PID" '
+        { ppid[$1]=$2; rows[NR]=$1 }
+        END {
+          found[root]=1
+          do {
+            changed=0
+            for (i=1; i<=NR; i++) if (!found[rows[i]] && found[ppid[rows[i]]]) {
+              found[rows[i]]=1; changed=1
+            }
+          } while (changed)
+          for (i=1; i<=NR; i++) if (rows[i] != root && found[rows[i]]) print rows[i]
+        }')
+  fi
   if [[ ${REMUDA_RUNTIME_DIR:-} == "$T/run" ]]; then
     remuda -s "$S" stop -f >/dev/null 2>&1 || true
   else
     echo "refusing to stop golden daemon outside its scratch runtime" >&2
   fi
-  pkill -f "$T/" 2>/dev/null || true
+  for pid in "${descendants[@]}" "$DAEMON_PID"; do
+    [[ -n "$pid" ]] || continue
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      kill "$pid" >/dev/null 2>&1 || true
+      killed=$((killed + 1))
+    fi
+  done
+  [[ -n "$DAEMON_PID" ]] && wait "$DAEMON_PID" 2>/dev/null || true
+  for _ in $(seq 20); do
+    left=0
+    for pid in "${descendants[@]}"; do
+      [[ -n "$pid" ]] && kill -0 "$pid" >/dev/null 2>&1 && left=$((left + 1))
+    done
+    [[ $left == 0 ]] && break
+    sleep 0.05
+  done
   rm -rf "$T"
+  echo "resources cleaned: $killed killed / $left left"
 }
 trap cleanup EXIT
 
@@ -76,6 +111,11 @@ wait_welcome() {
   echo "welcome was not queued for lead1" >&2
   return 1
 }
+
+R daemon </dev/null >>"$T/daemon.log" 2>&1 &
+DAEMON_PID=$!
+for _ in $(seq 80); do [[ -S $REMUDA_RUNTIME_DIR/remuda/$S.sock ]] && break; sleep 0.1; done
+[[ -S $REMUDA_RUNTIME_DIR/remuda/$S.sock ]] || { cat "$T/daemon.log" >&2; exit 1; }
 
 R -e "if not dofile('$REPO/scripts/check-butler-path-convention.lua') then error('path convention check failed', 0) end"
 
