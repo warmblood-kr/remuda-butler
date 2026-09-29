@@ -70,6 +70,7 @@ if [[ -z ${CORE_DIR:-} ]]; then
 fi
 
 cp "$REPO/tests/butler_daemon.rs" "$REPO/tests/butler_mcp.rs" "$CORE_DIR/native/tests/"
+cp -R "$REPO/tests/fixtures" "$CORE_DIR/native/tests/"
 mkdir -p "$CORE_DIR/native/tests/support"
 cp "$REPO/tests/support/fake_http.lua" "$CORE_DIR/native/tests/support/"
 ln -sfn "$REPO/packages" "$CORE_DIR/packages"
@@ -85,14 +86,35 @@ unset REMUDA_SERVER REMUDA_BUTLER_TOKEN REMUDA_BUTLER_CONFIG
 
 echo "core $(git -C "$CORE_DIR" rev-parse --short HEAD), butler $(git -C "$REPO" rev-parse --short HEAD)"
 cd "$CORE_DIR"
-if [[ -z ${BUTLER_TEST_FILTER:-} ]]; then
-  cargo test -p remuda-native --test butler_mcp
+if [[ -n ${BUTLER_MCP_TEST_FILTERS:-${BUTLER_MCP_TEST_FILTER:-}} ]]; then
+  IFS=',' read -r -a mcp_filters <<< "${BUTLER_MCP_TEST_FILTERS:-${BUTLER_MCP_TEST_FILTER:-}}"
+  for mcp_filter in "${mcp_filters[@]}"; do
+    if [[ -n ${RUST_TEST_THREADS:-} ]]; then
+      cargo test -p remuda-native --test butler_mcp "$mcp_filter" -- --nocapture --test-threads="$RUST_TEST_THREADS"
+    else
+      cargo test -p remuda-native --test butler_mcp "$mcp_filter" -- --nocapture
+    fi
+  done
+elif [[ -z ${BUTLER_TEST_FILTER:-} ]]; then
+  if [[ -n ${RUST_TEST_THREADS:-} ]]; then
+    cargo test -p remuda-native --test butler_mcp -- --test-threads="$RUST_TEST_THREADS"
+  else
+    cargo test -p remuda-native --test butler_mcp
+  fi
 fi
 # a_fresh_daemon_* stay in core's daemon.rs; everything else matching is Butler's.
 if [[ -n ${BUTLER_TEST_FILTER:-} ]]; then
-  cargo test -p remuda-native --test butler_daemon "$BUTLER_TEST_FILTER" -- --nocapture
+  if [[ -n ${RUST_TEST_THREADS:-} ]]; then
+    cargo test -p remuda-native --test butler_daemon "$BUTLER_TEST_FILTER" -- --nocapture --test-threads="$RUST_TEST_THREADS"
+  else
+    cargo test -p remuda-native --test butler_daemon "$BUTLER_TEST_FILTER" -- --nocapture
+  fi
 else
-  cargo test -p remuda-native --test butler_daemon -- butler matrix_reply
+  if [[ -n ${RUST_TEST_THREADS:-} ]]; then
+    cargo test -p remuda-native --test butler_daemon -- butler matrix_reply --test-threads="$RUST_TEST_THREADS"
+  else
+    cargo test -p remuda-native --test butler_daemon -- butler matrix_reply
+  fi
 fi
 
 remaining_relays=$(relay_pids_under_scratch)
