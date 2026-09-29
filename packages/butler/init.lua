@@ -115,8 +115,9 @@ return {
     { name = "butler-reconcile", every = host._butler_reconcile_interval or 2, run = function()
       if host._butler_reconcile then host._butler_reconcile() end
     end },
-    { name = "butler-compaction", every = host._butler_compaction_interval or 30 * 60, run = function(state)
-      if state.compaction_enabled and host._butler_compaction_tick then host._butler_compaction_tick() end
+    { name = "butler-compaction", every = host._butler_compaction_interval or 45, run = function()
+      local state = host._butler_state or host._butler_compaction_state
+      if state and state.compaction_enabled and host._butler_compaction_tick then host._butler_compaction_tick() end
     end },
   },
   contributes = {
@@ -204,6 +205,20 @@ the normal way for a member to communicate.
         prompt = function(_, ctx) return "Your leader is " .. ctx.parent .. "." end },
     },
     ["butler.command"] = {
+      { id = "compact", order = 16, verb = "compact", usage = "  remuda butler compact <session> [--dry-run]",
+        run = function(_, args)
+          if not args[2] or args[2] == "" then return nil end
+          if not host._butler_compaction_has_session(args[2]) then
+            local message = "unknown session: " .. args[2]
+            if type(host.fail) == "function" then return host.fail(message, 1) end
+            error(message, 0)
+          end
+          if #args == 3 and args[3] == "--dry-run" then
+            return host._butler_compaction_tick(args[2], true)
+          end
+          if #args ~= 2 then return nil end
+          return host.butler.compact(args[2])
+        end },
       { id = "sessions", order = 10, verb = "sessions", usage = "  remuda butler sessions",
         run = function(_, args, caller) return host._butler_command_run("sessions", args, caller) end },
       { id = "status", order = 12, verb = "status", usage = "  remuda butler status  (0=up, 75=launching, 1=failed)",
