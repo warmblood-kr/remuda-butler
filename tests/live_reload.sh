@@ -132,7 +132,7 @@ if [[ -n "$OLD_RELAY_ID" && -n "$OLD_RELAY_PID" ]]; then
   CHILD_PIDS+=("$OLD_RELAY_PID")
 else
   OLD_RELAY_ID= OLD_RELAY_PID=
-  echo "SKIP: old Butler started no Python Matrix relay; legacy relay retirement not asserted"
+  echo "SKIP: old Butler started no legacy Matrix relay; retirement not asserted"
 fi
 lua "remuda._butler_agent_builders.fake = function() return {'sleep', '${ID}2'} end
      remuda._butler_launch('fake', 'm1'); remuda._butler_send('butler', 'm1', 'kept across reload')"
