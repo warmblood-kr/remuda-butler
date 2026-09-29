@@ -2538,6 +2538,99 @@ fn butler_matrix_relay_persists_matrix_event_time_through_real_mail_delivery() {
 }
 
 #[test]
+fn matrix_relay_quarantines_rejected_events_for_operator_inspection() {
+    let dir = scratch_dir("matrix-quarantine-red");
+    let (_daemon, path) = butler_cli_test_daemon(&dir);
+    let room = "!quarantine:example.org";
+    let (token_path, config_path) = butler_config(
+        &dir, "quarantine", "http://matrix.example.org", room, "@bot:example.org", "@alice:example.org");
+    let room_events = serde_json::json!({"timeline":{"events":[
+        {"type":"m.room.message","event_id":"$not-allowed","sender":"@mallory:example.org",
+         "origin_server_ts":0,"content":{"msgtype":"m.text","body":"private rejected text"}},
+        {"type":"m.room.message","event_id":"$unsafe","sender":"@alice:example.org",
+         "origin_server_ts":1,"content":{"msgtype":"m.image","body":"unsafe image"}}
+    ]}});
+    let mut joined = serde_json::Map::new();
+    joined.insert(room.to_string(), room_events);
+    let response = serde_json::json!({"rooms":{"join":joined}});
+    eval(&path, include_str!("support/fake_http.lua"));
+    eval(&path, &format!(
+        "remuda._butler_matrix_config={{token_path={},config_path={}}}; remuda.exec('butler/matrix_request'); remuda.exec('butler/matrix')",
+        lua_raw_string(&token_path.to_string_lossy()), lua_raw_string(&config_path.to_string_lossy())));
+    let result = eval(&path, &format!(r#"
+      local matrix = remuda.butler.matrix
+      local relay = matrix.relay.new({{config_path={config}, matrix=matrix, deliver=function() return true end}})
+      relay._response({{next_batch="s0"}}, "/_matrix/client/v3/sync")
+      relay._response(assert(matrix.decode_json({response})), "/_matrix/client/v3/sync")
+      local rows = assert(matrix.quarantine_list())
+      if #rows ~= 2 then return "count:" .. #rows end
+      if rows[1].event_id == rows[2].event_id then return "duplicate" end
+      if rows[1].reason == nil or rows[2].reason == nil then return "reason-missing" end
+      local root = remuda._butler_bus.agents.butler
+      for _, id in ipairs(remuda._butler_mail.mailbox(root.id)) do
+        local message = remuda._butler_bus.messages[id]
+        if message and message.matrix and message.matrix.event_id ~= nil then return "quarantine-leaked-to-mail" end
+      end
+      return "ok"
+    "#,
+      config=lua_raw_string(&config_path.to_string_lossy()),
+      response=lua_raw_string(&response.to_string())));
+    assert_eq!(result, "ok", "rejected Matrix events must be privately inspectable and never enter mail: {result}");
+}
+
+#[test]
+fn matrix_mail_reply_is_correlated_and_sent_id_is_durable() {
+    let dir = scratch_dir("matrix-mail-reply-red");
+    let (_daemon, path) = butler_cli_test_daemon(&dir);
+    let room = "!reply:example.org";
+    let (token_path, config_path) = butler_config(
+        &dir, "reply", "http://matrix.example.org", room, "@bot:example.org", "@alice:example.org");
+    let room_events = serde_json::json!({"timeline":{"events":[
+        {"type":"m.room.message","event_id":"$incoming","sender":"@alice:example.org",
+         "origin_server_ts":0,"content":{"msgtype":"m.text","body":"question",
+           "m.relates_to":{"rel_type":"m.thread","event_id":"$root"}}}
+    ]}});
+    let mut joined = serde_json::Map::new();
+    joined.insert(room.to_string(), room_events);
+    let response = serde_json::json!({"rooms":{"join":joined}});
+    eval(&path, include_str!("support/fake_http.lua"));
+    eval(&path, &format!(
+        "remuda._butler_matrix_config={{token_path={},config_path={}}}; remuda.exec('butler/matrix_request'); remuda.exec('butler/matrix')",
+        lua_raw_string(&token_path.to_string_lossy()), lua_raw_string(&config_path.to_string_lossy())));
+    let result = eval(&path, &format!(r#"
+      local matrix = remuda.butler.matrix
+      local room = {room}
+      local payload = assert(matrix.decode_json({response}))
+      if not payload.rooms or not payload.rooms.join or not payload.rooms.join[room] then return "room-key-missing" end
+      local relay = matrix.relay.new({{config_path={config}, matrix=matrix, deliver=function(event)
+        local delivered = remuda._butler_inbox_delivery({{from={{host="matrix", alias=event.sender,
+          session=event.sender, kind="matrix", id="", leader=""}}, to="butler", text=event.body,
+          subject="Matrix", matrix=event}})
+        remuda.source_mail_id = delivered and delivered.id
+        return delivered
+      end}})
+      relay._response({{next_batch="s0"}}, "/_matrix/client/v3/sync")
+      relay._response(payload, "/_matrix/client/v3/sync")
+      if not remuda.source_mail_id then
+        local state=relay:state()
+        local count=0; for _ in pairs(state.pending) do count=count+1 end
+        return "mail-not-delivered|pending=" .. tostring(count) .. "|processed=" .. tostring(state.processed["$incoming"])
+      end
+      remuda.http.respond("PUT", "http://matrix.example.org/_matrix/client/v3/rooms/%21reply%3Aexample.org/send/m.room.message/reply-test",
+        {{status=200, headers={{}}, body='{{"event_id":"$outgoing"}}'}})
+      local queued, err = matrix.mail_reply({{mail_id=remuda.source_mail_id, text="answer", txn_id="reply-test"}}, function(value) remuda.reply_result=value end)
+      if err then return "reply-error:" .. err end
+      remuda.http.tick()
+      if not remuda.reply_result or remuda.reply_result.event_id ~= "$outgoing" then return "send-not-recorded" end
+      local status = matrix.mail_reply_status(remuda.source_mail_id)
+      return status and status.event_id == "$outgoing" and status.thread_root == "$root" and "ok" or "mapping-not-durable"
+    "#,
+      config=lua_raw_string(&config_path.to_string_lossy()),
+      response=lua_raw_string(&response.to_string()), room=lua_raw_string(room)));
+    assert_eq!(result, "ok", "a Butler mail reply must route to its Matrix thread and durably record the sent event: {result}");
+}
+
+#[test]
 fn butler_matrix_pending_mail_survives_five_fast_lifecycle_restarts() {
     let dir = scratch_dir("mr-fast-restarts");
     let room = "!restart:example.org";
