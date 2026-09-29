@@ -2,14 +2,61 @@ BEGIN {
   ulid_pattern = "[0-7]"
   for (i = 1; i < 26; i++) ulid_pattern = ulid_pattern "[0-9A-HJKMNP-TV-Z]"
 }
-function replace_literal(text, from, to,    at, result) {
+function replace_literal(text, from, to,    at, result, next_at) {
   if (from == "") return text
   result = ""
   while ((at = index(text, from)) != 0) {
     result = result substr(text, 1, at - 1) to
-    text = substr(text, at + length(from))
+    # Advance over the literal match. The explicit length check keeps this
+    # loop bounded even on awk implementations with unusual index semantics.
+    next_at = at + length(from)
+    if (next_at <= at) break
+    text = substr(text, next_at)
   }
   return result text
+}
+function replace_capabilities(text,    json_key, shell_key, at, value_start, value_end, quote, ch, scan) {
+  # Avoid a gsub replacement that still satisfies the broad JSON value pattern.
+  # Advance beyond each inserted placeholder so every original occurrence is
+  # handled once, including duplicate keys on one line.
+  json_key = "\"REMUDA_SESSION_CAPABILITY\":\""
+  scan = 1
+  while ((at = index(substr(text, scan), json_key)) != 0) {
+    at += scan - 1
+    value_start = at + length(json_key)
+    value_end = index(substr(text, value_start), "\"")
+    if (value_end == 0) break
+    value_end += value_start - 1
+    if (value_end > value_start) {
+      text = substr(text, 1, value_start - 1) "<CAP>" substr(text, value_end)
+      scan = value_start + 5
+    } else {
+      scan = value_end + 1
+    }
+  }
+
+  shell_key = "REMUDA_SESSION_CAPABILITY="
+  scan = 1
+  while ((at = index(substr(text, scan), shell_key)) != 0) {
+    at += scan - 1
+    value_start = at + length(shell_key)
+    quote = substr(text, value_start, 1) == "\""
+    if (quote) value_start++
+    value_end = value_start
+    while (value_end <= length(text)) {
+      ch = substr(text, value_end, 1)
+      if (ch !~ /^[A-Za-z0-9_-]$/) break
+      value_end++
+    }
+    if (value_end > value_start) {
+      text = substr(text, 1, value_start - 1) "<CAP>" substr(text, value_end)
+      scan = value_start + 5
+    } else {
+      scan = value_start
+      if (scan <= at) scan = at + length(shell_key)
+    }
+  }
+  return text
 }
 {
   line = replace_literal($0, real_t, "<T>")
@@ -37,7 +84,6 @@ function replace_literal(text, from, to,    at, result) {
   }
   line = normalized
   gsub(/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?Z/, "<TIME>", line)
-  gsub(/"REMUDA_SESSION_CAPABILITY":"[^"]+"/, "\"REMUDA_SESSION_CAPABILITY\":\"<CAP>\"", line)
-  gsub(/REMUDA_SESSION_CAPABILITY="?[A-Za-z0-9_-]+/, "REMUDA_SESSION_CAPABILITY=\"<CAP>", line)
+  line = replace_capabilities(line)
   print line
 }

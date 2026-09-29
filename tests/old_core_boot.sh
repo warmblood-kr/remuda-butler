@@ -6,25 +6,60 @@
 #   PATH=/path/to/old-core-dir:$PATH tests/old_core_boot.sh
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd)
+source "$REPO/tests/awk-timeout.sh"
 T=$(mktemp -d /tmp/boc.XXXXXX)
 S=boc
-ID=$((RANDOM % 90000 + 10000))  # this run's own fake-session sleep
+DAEMON_PID=
 export REMUDA_RUNTIME_DIR=$T/run XDG_DATA_HOME=$T/data XDG_CONFIG_HOME=$T/config
 export HOME=$T/home REMUDA_BUTLER_PROJECT_HOME=$T/projects REMUDA_BUTLER_SERVER=$S
 unset REMUDA_BUTLER_TOKEN REMUDA_BUTLER_CONFIG
 MOD=$XDG_DATA_HOME/remuda/mods/butler
 mkdir -p "$MOD" "$HOME" "$XDG_CONFIG_HOME/remuda/butler"
-trap 'remuda -s "$S" stop -f >/dev/null 2>&1 || true; pkill -f "sleep ${ID}3\$" >/dev/null 2>&1 || true; rm -rf "$T"' EXIT
+mkdir -p "$T/bin"
+cat >"$T/bin/fake-session" <<EOF
+#!/bin/sh
+echo "\$\$" >>"$T/child-pids"
+exec /bin/sleep 3600
+EOF
+chmod +x "$T/bin/fake-session"
+cleanup() {
+  status=$?
+  if [[ ${REMUDA_RUNTIME_DIR:-} == "$T/run" ]]; then
+    remuda -s "$S" stop -f >/dev/null 2>&1 || true
+  else
+    echo "refusing to stop old-core daemon outside its scratch runtime" >&2
+  fi
+  if [[ -f $T/child-pids ]]; then
+    while IFS= read -r pid; do
+      [[ -n $pid ]] || continue
+      kill "$pid" >/dev/null 2>&1 || true
+    done <"$T/child-pids"
+  fi
+  if [[ -n $DAEMON_PID ]]; then
+    kill "$DAEMON_PID" >/dev/null 2>&1 || true
+    wait "$DAEMON_PID" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$T"
+  exit "$status"
+}
+trap cleanup EXIT INT TERM
 tar -c -C "$REPO" extension.toml packages | tar -x -C "$MOD"
 lua() { remuda -s "$S" -e "$1"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 boots() { lua 'return remuda.event_counts()["butler-start"] or 0'; }
 
 echo "core: $(remuda -s "$S" --version 2>/dev/null | tail -1)"
-lua "remuda._butler_argv = {'sleep', '${ID}3'}" >/dev/null
+remuda -s "$S" daemon >"$T/daemon.log" 2>&1 &
+DAEMON_PID=$!
+for _ in $(seq 80); do
+  [[ -S "$REMUDA_RUNTIME_DIR/remuda/$S.sock" ]] && break
+  sleep 0.25
+done
+[[ -S "$REMUDA_RUNTIME_DIR/remuda/$S.sock" ]] || { cat "$T/daemon.log" >&2; fail "private daemon did not bind"; }
+lua "remuda._butler_argv = {'$T/bin/fake-session'}" >/dev/null
 remuda -s "$S" butler --headless
 sleep 1
-remuda -s "$S" ls | awk '$1 == "butler" { found = 1 } END { exit !found }' || fail "butler never booted"
+remuda -s "$S" ls | bounded_awk '$1 == "butler" { found = 1 } END { exit !found }' || fail "butler never booted"
 [[ $(boots) == 1 ]] || fail "boots=$(boots) after one activation, want 1"
 remuda -s "$S" butler sessions >/dev/null || fail "'butler sessions' failed: mod command not loaded"
 
