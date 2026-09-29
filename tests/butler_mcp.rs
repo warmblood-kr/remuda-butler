@@ -12,7 +12,10 @@ use std::time::{Duration, Instant};
 const PATIENCE: Duration = Duration::from_secs(10);
 
 fn scratch(tag: &str) -> PathBuf {
-    let base = std::fs::canonicalize(std::env::temp_dir()).unwrap_or_else(|_| std::env::temp_dir());
+    let configured = std::env::var_os("REMUDA_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let base = std::fs::canonicalize(&configured).unwrap_or(configured);
     let dir = base.join(format!("remuda-m{}-{tag}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     dir
@@ -20,6 +23,9 @@ fn scratch(tag: &str) -> PathBuf {
 
 /// Start a daemon and return once it actually answers, not once it was spawned.
 fn daemon_at(path: &Path) -> impl Drop {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     let serving = path.to_path_buf();
     std::thread::spawn(move || {
         let _ = daemon::serve(&serving);
@@ -287,11 +293,12 @@ fn notify_policy_types_only_into_a_detached_or_quiet_empty_prompt() {
         &path,
         &format!(
             r#"remuda._butler_session_trace_path = {trace:?}
-            local real_ls, real_capture, real_capture_styled = remuda.ls, remuda.capture, remuda.capture_styled
+            local real_ls, real_capture, real_capture_styled, real_session = remuda.ls, remuda.capture, remuda.capture_styled, remuda.session
             remuda.capture_styled = nil
             local row, screen = {{ name = 'p1', alive = true, attached = true }}, ''
             remuda.ls = function() return {{ row }} end
             remuda.capture = function() return screen end
+            remuda.session = function() return {{ is_busy = false }} end
             local policy, t = remuda._butler_notify_policy, 0
             local function settled(text) t = t + 100; screen = text; policy('p1', t); return policy('p1', t + 3) end
             local r = {{}}
@@ -311,14 +318,18 @@ fn notify_policy_types_only_into_a_detached_or_quiet_empty_prompt() {
             r[#r + 1] = 'detached=' .. tostring(policy('p1', t + 500))
             screen = 'x\n> '
             r[#r + 1] = 'detached_empty=' .. tostring(policy('p1', t + 501))
-            remuda.ls, remuda.capture, remuda.capture_styled = real_ls, real_capture, real_capture_styled
+            remuda.session = function() return nil end
+            r[#r + 1] = 'detached_unknown=' .. tostring(policy('p1', t + 502))
+            remuda.session = function() error('busy state unavailable') end
+            r[#r + 1] = 'detached_busy_error=' .. tostring(policy('p1', t + 503))
+            remuda.ls, remuda.capture, remuda.capture_styled, remuda.session = real_ls, real_capture, real_capture_styled, real_session
             return table.concat(r, ' ')"#
         ),
     );
     assert_eq!(
         got,
         "half=false empty_stable=true claude_box=true claude_nbsp=true claude_nbsp_typed=false empty_changing=false unparseable=false \
-         codex_placeholder=true codex_typed=false detached=false detached_empty=true"
+         codex_placeholder=true codex_typed=false detached=false detached_empty=true detached_unknown=true detached_busy_error=true"
     );
     let log = std::fs::read_to_string(&trace).unwrap_or_default();
     assert!(log.contains("notice_prompt\tp1  NON-EMPTY co"), "{log}");
@@ -377,6 +388,373 @@ fn a_notice_that_fails_to_type_stays_queued() {
         std::thread::sleep(Duration::from_millis(100));
     }
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1)"), "nil");
+}
+
+#[test]
+fn a_busy_notice_input_retries_on_the_next_tick() {
+    let (path, _daemon) = butler_with_member("notice-input-busy-retry");
+    eval(
+        &path,
+        r#"
+        remuda._butler_notify_policy = function() return true end
+        remuda._notice_busy_calls = 0
+        remuda.type_text = function(_, text)
+          remuda._notice_busy_calls = remuda._notice_busy_calls + 1
+          if remuda._notice_busy_calls == 1 then error('a session input write is already in flight') end
+          remuda._notice_typed = text
+          return true
+        end
+        remuda._butler_send('operator', 'm1', 'retry me')
+        "#,
+    );
+    assert_eq!(eval(&path, "return tostring(remuda._notice_busy_calls)"), "1");
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1.count)"), "1");
+    eval(&path, "remuda._butler_deliver_notices()");
+    assert_eq!(eval(&path, "return tostring(remuda._notice_busy_calls)"), "2");
+    assert_ne!(eval(&path, "return tostring(remuda._notice_typed)"), "nil");
+}
+
+#[test]
+fn a_non_busy_error_containing_busy_is_not_retried_as_input_lock() {
+    let (path, _daemon) = butler_with_member("notice-false-busy-error");
+    eval(
+        &path,
+        r#"
+        local row = { name = 'm1', alive = true, attached = false }
+        remuda.ls = function() return { row } end
+        remuda.session = function() return { is_busy = false } end
+        remuda._butler_human_active = function() return false end
+        remuda.capture = function() return '❯ ' end
+        remuda._notice_busy_error_calls = 0
+        remuda.type_text = function()
+          remuda._notice_busy_error_calls = remuda._notice_busy_error_calls + 1
+          error('disk is busy while the terminal write failed')
+        end
+        remuda._notice_busy_error_report = nil
+        remuda._butler_send = function(_, _, text)
+          remuda._notice_busy_error_report = text
+          return 'captured report'
+        end
+        remuda._butler_bus.notices.m1 = { count = 1, text = 'pending' }
+        local recovery = {
+          phase = 'retry_type', checks = 0, notice = 'pending', count = 1,
+        }
+        remuda._butler_bus.notice_recoveries.m1 = recovery
+        remuda._butler_deliver_notices()
+        remuda._notice_recovery_failed = recovery.failed
+        "#,
+    );
+    assert_eq!(eval(&path, "return tostring(remuda._notice_busy_error_calls)"), "1");
+    assert_eq!(eval(&path, "return tostring(remuda._notice_recovery_failed)"), "true");
+    assert!(
+        eval(&path, "return tostring(remuda._notice_busy_error_report)").contains("disk is busy"),
+        "non-Busy type_text error was not reported"
+    );
+}
+
+/// #82: notice submit verification accepts Claude's soft-wrapped composer in
+/// a narrow 27-column pane, then retries Return once if the draft remains.
+#[test]
+fn narrow_claude_wrapped_notice_is_verified_and_submitted() {
+    let (path, _daemon) = butler_with_member("notice-narrow-wrap");
+    eval(
+        &path,
+        r#"
+        local row = { name = 'm1', alive = true, attached = false }
+        local state = { columns = 27, events = {}, screen = '❯ \n', submitted = false, busy = false }
+        remuda._notice_test_state = state
+        remuda._butler_bus.agents.m1.kind = 'claude'
+        remuda.capture_styled = nil
+        remuda.ls = function() return { row } end
+        remuda.session = function() return { is_busy = state.busy } end
+        remuda.capture = function() return state.screen end
+        remuda._butler_notify_policy = function() return true end
+        local function render_notice(text)
+          local rows, width, line = {}, state.columns - 2, '' -- ❯ and continuation indent each occupy two columns
+          local function push(prefix, value)
+            rows[#rows + 1] = prefix .. value .. string.rep(' ', state.columns - 2 - #value)
+          end
+          local function append_word(word)
+            while #word > width do
+              if line ~= '' then push(#rows == 0 and '❯ ' or '  ', line); line = '' end
+              push(#rows == 0 and '❯ ' or '  ', word:sub(1, width))
+              word = word:sub(width + 1)
+            end
+            if line == '' then line = word
+            elseif #line + 1 + #word <= width then line = line .. ' ' .. word
+            else push(#rows == 0 and '❯ ' or '  ', line); line = word end
+          end
+          for word in text:gmatch('%S+') do append_word(word) end
+          push(#rows == 0 and '❯ ' or '  ', line)
+          local rule = string.rep('─', state.columns)
+          local empty_prompt = '❯ ' .. string.rep(' ', state.columns - 2)
+          local status = '  MODEL:Opus-5.5 CTX:13925…\n  ⏵⏵ auto mode on      · ←…'
+          local screen = rule .. '\n' .. table.concat(rows, '\n') .. '\n' .. rule
+          if state.submitted then screen = screen .. '\n' .. empty_prompt .. '\n' .. rule end
+          return screen .. '\n' .. status
+        end
+        remuda.type_text = function(_, text)
+          table.insert(state.events, 'type')
+          state.screen = render_notice(text)
+        end
+        remuda.key = function(_, key)
+          table.insert(state.events, 'key ' .. key)
+          if key == 'RET' then
+            state.submitted, state.busy = true, true
+            state.screen = '❯ ' .. string.rep(' ', state.columns - 2)
+            .. '\n' .. string.rep('─', state.columns) .. '\n  MODEL:Opus-5.5 CTX:13925…' end
+        end
+        remuda._butler_send('operator', 'm1', 'narrow pane notice')
+        "#,
+    );
+
+    let deadline = Instant::now() + PATIENCE;
+    while eval(&path, "return tostring(remuda._butler_bus.notices.m1 ~= nil)") != "false" {
+        eval(&path, "remuda._butler_deliver_notices()");
+        assert!(Instant::now() < deadline, "wrapped notice was not safely submitted: {}", eval(&path, "return table.concat(remuda._notice_test_state.events, ',')"));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let events = eval(&path, "return table.concat(remuda._notice_test_state.events, ',')");
+    assert!(events.contains("key RET"), "wrapped notice was not submitted: {events}");
+    assert_eq!(events.matches("type").count(), 1, "wrapped notice was retyped instead of verified: {events}");
+    assert_eq!(events.matches("key RET").count(), 1, "notice submit used more than one Return retry: {events}");
+    assert!(!events.contains("key C-u"), "recovery erased its own wrapped notice: {events}");
+
+    eval(
+        &path,
+        r#"local state = remuda._notice_test_state
+        state.events, state.submitted = {}, true
+        remuda._butler_send('operator', 'm1', 'history layout notice')"#,
+    );
+    let deadline = Instant::now() + PATIENCE;
+    while eval(&path, "return tostring(remuda._butler_bus.notices.m1 ~= nil)") != "false" {
+        eval(&path, "remuda._butler_deliver_notices()");
+        assert!(Instant::now() < deadline, "wrapped notice in history was not verified: {}", eval(&path, "return table.concat(remuda._notice_test_state.events, ',')"));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let events = eval(&path, "return table.concat(remuda._notice_test_state.events, ',')");
+    assert_eq!(events.matches("type").count(), 1, "history notice was retyped: {events}");
+    assert!(!events.contains("key RET"), "already-submitted history notice was submitted twice: {events}");
+}
+
+/// #82 decision: a submitted notice in Claude history plus an approval
+/// dialog is success even though the empty composer is no longer visible.
+#[test]
+fn submitted_claude_notice_followed_by_approval_dialog_clears_pending_notice() {
+    let (path, _daemon) = butler_with_member("notice-followup-dialog");
+    eval(
+        &path,
+        r#"
+        local row = { name = 'm1', alive = true, attached = false }
+        local state = { screen = '❯ \n', events = {}, submitted = false, busy = false }
+        remuda._notice_dialog_test_state = state
+        remuda._butler_bus.agents.m1 = remuda._butler_bus.agents.m1 or {
+          id = '01ARZ3NDEKTSV4RRFFQ69G5FAV', kind = 'claude' }
+        remuda._butler_bus.agents.m1.kind = 'claude'
+        remuda.capture_styled = nil
+        remuda.ls = function() return { row } end
+        remuda.session = function() return { is_busy = state.busy } end
+        remuda.capture = function() return state.screen end
+        remuda._butler_notify_policy = function() return not state.submitted end
+        local function box(text)
+          return '❯ ' .. text .. string.rep(' ', math.max(0, 78 - #text))
+            .. '\n' .. string.rep('─', 80)
+        end
+        remuda.type_text = function(_, text)
+          table.insert(state.events, 'type')
+          state.notice = text
+          state.screen = box(text)
+        end
+        remuda.key = function(_, key)
+          table.insert(state.events, 'key ' .. key)
+          if key == 'RET' then
+            state.submitted = true
+            state.busy = true
+            state.screen = state.notice .. '\n'
+              .. '⏺ Bash(remuda butler inbox)\n'
+              .. '⎿ This command requires approval\n'
+              .. '❯ 1. Yes\n  2. No\n'
+              .. string.rep('─', 80)
+          end
+        end
+        remuda._butler_bus.notices.m1 = { count = 1, text = 'dialog notice fixture' }
+        "#,
+    );
+
+    for _ in 0..14 {
+        eval(&path, "remuda._butler_deliver_notices()");
+    }
+    assert_eq!(
+        eval(&path, "return tostring(remuda._butler_bus.notices.m1 ~= nil)"),
+        "false",
+        "notice remained queued after successful submit while Claude was busy on a follow-up dialog"
+    );
+    let events = eval(&path, "return table.concat(remuda._notice_dialog_test_state.events, ',')");
+    assert_eq!(events.matches("type").count(), 1, "{events}");
+    assert_eq!(events.matches("key RET").count(), 1, "{events}");
+    assert!(eval(&path, "return tostring(remuda._notice_dialog_test_state.submitted)") == "true");
+}
+
+/// The core can show an empty composer after Return while Claude is already
+/// working, before the accepted text is visible in the transcript capture.
+#[test]
+fn busy_claude_with_empty_composer_confirms_submitted_notice() {
+    let (path, _daemon) = butler_with_member("notice-busy-empty");
+    eval(
+        &path,
+        r#"
+        local row = { name = 'm1', alive = true, attached = false }
+        local state = { screen = '❯ \n', events = {}, busy = false }
+        remuda._notice_busy_empty_state = state
+        remuda._butler_bus.agents.m1.kind = 'claude'
+        remuda.capture_styled = nil
+        remuda.ls = function() return { row } end
+        remuda.session = function() return { is_busy = state.busy } end
+        remuda.capture = function() return state.screen end
+        remuda._butler_notify_policy = function() return true end
+        remuda.type_text = function(_, text)
+          table.insert(state.events, 'type')
+          state.notice = text
+          state.screen = '❯ \n' .. string.rep('─', 80)
+          state.busy = true
+        end
+        remuda.key = function(_, key) table.insert(state.events, 'key ' .. key) end
+        remuda._butler_bus.notices.m1 = { count = 1, text = 'busy empty notice fixture' }
+        "#,
+    );
+
+    for _ in 0..4 {
+        eval(&path, "remuda._butler_deliver_notices()");
+    }
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1 == nil)"), "true",
+        "busy pane with an empty composer did not confirm the notice submit");
+    let events = eval(&path, "return table.concat(remuda._notice_busy_empty_state.events, ',')");
+    assert_eq!(events.matches("type").count(), 1, "notice was retyped: {events}");
+    assert!(!events.contains("key RET"), "busy empty composer was submitted twice: {events}");
+}
+
+/// Repeated delivery of the same unread message must not increment notice counts;
+/// reading it in the inbox must cancel any still-pending pane notice.
+#[test]
+fn notice_ids_are_deduplicated_and_read_messages_are_not_notified() {
+    let (path, _daemon) = butler_with_member("notice-read-dedupe");
+    eval(
+        &path,
+        r#"
+        remuda._butler_notify_policy = function() return true end
+        remuda.capture_styled = nil
+        remuda.capture = function() return '❯ ' end
+        remuda.type_text = function() end
+        local sent = remuda._butler_send('operator', 'm1', 'dedupe fixture')
+        remuda._notice_dedupe_id = sent:match('queued ([^ ]+)')
+        assert(remuda._notice_dedupe_id)
+        local notice = 'Butler message ' .. remuda._notice_dedupe_id .. ' from operator arrived. Read it: remuda butler inbox'
+        remuda._butler_notify('m1', notice, remuda._notice_dedupe_id)
+        remuda._butler_notify('m1', notice, remuda._notice_dedupe_id)
+        "#,
+    );
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1.count)"), "1",
+        "the same message id inflated its pending notice count");
+    eval(&path, "remuda._butler_inbox('m1'); remuda._butler_deliver_notices()");
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1 == nil)"), "true",
+        "reading the message left its pane notification queued");
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notice_recoveries.m1 == nil)"), "true",
+        "reading the message left its notice recovery active");
+}
+
+/// A notice that remains the exact Claude composer text gets one Return retry,
+/// then the bounded verification failure is reported and its count cleared.
+#[test]
+fn claude_notice_still_in_composer_is_retried_once_then_reported() {
+    let (path, _daemon) = butler_with_member("notice-still-in-composer");
+    eval(
+        &path,
+        r#"
+        local row = { name = 'm1', alive = true, attached = false }
+        local state = { screen = '❯ \n', events = {}, report = '' }
+        remuda._notice_stuck_test_state = state
+        remuda._butler_bus.agents.m1 = remuda._butler_bus.agents.m1 or {
+          id = '01ARZ3NDEKTSV4RRFFQ69G5FAV', kind = 'claude' }
+        remuda._butler_bus.agents.m1.kind = 'claude'
+        remuda.capture_styled = nil
+        remuda.ls = function() return { row } end
+        remuda.session = function() return { is_busy = false } end
+        remuda.capture = function() return state.screen end
+        remuda._butler_notify_policy = function() return not state.retried end
+        local function box(text)
+          return '❯ ' .. text .. string.rep(' ', math.max(0, 78 - #text))
+            .. '\n' .. string.rep('─', 80)
+        end
+        remuda.type_text = function(_, text)
+          table.insert(state.events, 'type')
+          state.screen = box(text)
+        end
+        remuda.key = function(_, key)
+          table.insert(state.events, 'key ' .. key)
+          state.retried = true
+        end
+        local send = remuda._butler_send
+        remuda._butler_send = function(from, to, text)
+          if from == 'operator' then return send(from, to, text) end
+          state.report = text
+          return true
+        end
+        remuda._butler_bus.notices.m1 = { count = 1, text = 'stuck notice fixture' }
+        "#,
+    );
+
+    for _ in 1..24 {
+        eval(&path, "remuda._butler_deliver_notices()");
+    }
+    let events = eval(&path, "return table.concat(remuda._notice_stuck_test_state.events, ',')");
+    assert_eq!(events.matches("type").count(), 1, "{events}");
+    assert_eq!(events.matches("key RET").count(), 1, "{events}");
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1 ~= nil)"), "false",
+        "a terminal notice failure left its pending count behind");
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notice_recoveries.m1 == nil)"), "true",
+        "a terminal notice failure left recovery state behind");
+    assert!(eval(&path, "return remuda._notice_stuck_test_state.report").contains("could not be verified"));
+}
+
+/// #82: failed comparisons write a bounded capture record to the private
+/// session trace; the diagnostic is never typed into the member pane.
+#[test]
+fn notice_verify_mismatch_logs_bounded_capture_and_expected_text() {
+    let (path, _daemon) = butler_with_member("notice-verify-trace");
+    let trace = path.parent().unwrap().join("session-trace.log");
+    eval(
+        &path,
+        &format!(
+            r#"remuda._butler_session_trace_path = {trace:?}
+            local state = {{screen = string.rep('x', 9000) .. '\n❯ unrelated composer\n─', keys = 0}}
+            remuda._notice_log_test_state = state
+            remuda._butler_bus.agents.m1.kind = 'claude'
+            remuda.ls = function() return {{ {{name = 'm1', alive = true, attached = false}} }} end
+            remuda.session = function() return {{is_busy = false}} end
+            remuda.capture = function() return state.screen end
+            remuda._butler_notify_policy = function() return true end
+            remuda.type_text = function(_, expected) state.expected = expected end
+            remuda.key = function() state.keys = state.keys + 1 end
+            remuda._butler_send('operator', 'm1', 'notice log fixture')"#
+        ),
+    );
+    for _ in 0..12 {
+        eval(&path, "remuda._butler_deliver_notices()");
+    }
+    let log = std::fs::read_to_string(&trace).expect("notice diagnostic trace");
+    assert!(log.contains("notice_verify_mismatch\tm1 capture=\""), "{log}");
+    assert!(log.contains("<truncated; 9027 bytes total>"), "{log}");
+    assert!(log.contains("expected=\"Butler message"), "{log}");
+    assert!(
+        log.len() < 40_000,
+        "notice diagnostic was not bounded: {} bytes",
+        log.len()
+    );
+    assert_eq!(
+        eval(&path, "return tostring(remuda._notice_log_test_state.keys)"),
+        "0",
+        "diagnostic logging must not send keys to the pane"
+    );
 }
 
 /// #64: an idle non-empty composer is redrawn, its draft is preserved,
@@ -577,12 +955,16 @@ fn session_exit_clears_the_notice_queue_and_screen_record() {
          remuda._butler_send('operator', 'm1', 'hi'); \
          remuda._butler_bus.notice_recoveries.m1 = { phase = 'probe' }; \
          remuda._butler_bus.notice_screens.m1 = { screen = '', since = 0 }; \
-         remuda.emit('session_exited', 'm1')",
+         local cwd = remuda._butler_bus.agents.m1.cwd; \
+         remuda._butler_bus.trusted_launch_dirs = { [cwd] = true }; \
+         remuda.emit('session_exited', 'm1'); \
+         remuda._trust_path_cleared = remuda._butler_bus.trusted_launch_dirs[cwd] == nil",
     );
     assert_eq!(
         eval(&path, "return tostring(remuda._butler_bus.notices.m1) .. tostring(remuda._butler_bus.notice_screens.m1) .. tostring(remuda._butler_bus.notice_recoveries.m1)"),
         "nilnilnil"
     );
+    assert_eq!(eval(&path, "return tostring(remuda._trust_path_cleared)"), "true");
 }
 
 /// #29 review 3: a task the policy keeps deferring times out, is logged, and
@@ -790,9 +1172,10 @@ fn notify_policy_uses_human_idle_and_dim_spans_when_the_core_has_them() {
     eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
     let got = eval(
         &path,
-        r#"local real_ls, real_capture, real_styled = remuda.ls, remuda.capture, remuda.capture_styled
+        r#"local real_ls, real_capture, real_styled, real_session = remuda.ls, remuda.capture, remuda.capture_styled, remuda.session
         local row, spans = { name = 'p1', alive = true, attached = true }, {}
         remuda.ls = function() return { row } end
+        remuda.session = function() return { is_busy = false } end
         remuda.capture = function() error('the new-core path must not need plain capture') end
         remuda.capture_styled = function()
           return { rows = { { { text = 'history', dim = false } }, spans }, cursor = { row = 2, col = 3, visible = true } }
@@ -820,13 +1203,178 @@ fn notify_policy_uses_human_idle_and_dim_spans_when_the_core_has_them() {
         remuda._butler_notice_human_idle = 20
         row.attached = true
         r[#r + 1] = 'knob=' .. case(12, plain('❯ '))
-        remuda.ls, remuda.capture, remuda.capture_styled = real_ls, real_capture, real_styled
+        remuda.ls, remuda.capture, remuda.capture_styled, remuda.session = real_ls, real_capture, real_styled, real_session
         return table.concat(r, ' ')"#,
     );
     assert_eq!(
         got,
         "typing=false ghost=true ghost_words=true typed=false never=true off_prompt=false detached_typed=false detached_empty=true knob=false"
     );
+}
+
+#[test]
+fn topic_names_cannot_escape_the_project_home() {
+    let dir = scratch("topic-name-escape");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+    let projects = dir.join("projects");
+    let got = eval(
+        &path,
+        &format!(
+            "remuda.butler.project_home({projects:?}); \
+             remuda._butler_agent_builders.fake = function() return {{'sleep','20'}} end; \
+             local rejected = {{}} \
+             for _, name in ipairs({{'../escape', 'back\\\\slash', '.hidden', 'line\\nbreak'}}) do \
+               local ok = pcall(remuda._butler_topic_new, name, nil, 'fake'); \
+               rejected[#rejected + 1] = tostring(not ok) \
+             end \
+             return table.concat(rejected, ',')"
+        ),
+    );
+    assert_eq!(got, "true,true,true,true", "unsafe topic name was accepted: {got}");
+    assert!(
+        !dir.join("escape").exists(),
+        "traversal topic created a directory outside project_home"
+    );
+}
+
+#[test]
+fn launch_cwd_rejects_control_characters() {
+    let dir = scratch("launch-cwd-controls");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+    let cwd = dir.join("cwd\nnotice-injection");
+    std::fs::create_dir_all(&cwd).expect("control-character cwd");
+    let cwd_lua = format!("{:?}", cwd.to_string_lossy());
+    let accepted = eval(
+        &path,
+        &format!(
+            "remuda._butler_agent_builders.claude = function() return {{'sleep', '20'}} end; \
+             local token = remuda._butler_bus.agents.butler.token; \
+             pcall(remuda._call, 'butler_launch', \
+               {{ kind = 'claude', name = 'badcwd', cwd = {cwd_lua} }}, \
+               {{ capability = token }}); \
+             return tostring(remuda._butler_bus.agents.badcwd ~= nil)"
+        ),
+    );
+    assert_eq!(accepted, "false", "launch accepted a control character in cwd");
+}
+
+#[test]
+#[cfg(unix)]
+fn trust_dialogs_on_external_or_reused_directories_wait_for_a_human() {
+    let dir = scratch("untrusted-launch-cwd");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    eval(&path, "remuda._butler_argv = {'sh', '-c', 'sleep 30'}; remuda.exec('butler')");
+    let projects = dir.join("projects");
+    let reused = projects.join("reused");
+    let external = dir.join("external");
+    std::fs::create_dir_all(&reused).expect("pre-existing topic directory");
+    std::fs::create_dir_all(&external).expect("external cwd");
+    eval(
+        &path,
+        &format!(
+            r#"remuda.butler.project_home({projects:?})
+            remuda._butler_readiness_timeout = 30
+            remuda._butler_test_force_launch_probe = {{ outside = true, outside_codex = true, reused = true, three = true, templated = true, fresh = true }}
+            remuda._butler_agent_builders.claude = function() return {{'sh', '-c', 'sleep 20'}} end
+            remuda._butler_agent_builders.codex = function() return {{'sh', '-c', 'sleep 20'}} end
+            local real_ls = remuda.ls
+            remuda.ls = function()
+              local rows = real_ls()
+              for _, row in ipairs(rows) do row.attached = false end
+              return rows
+            end
+            local selected_yes = "Accessing workspace:\n❯ Yes, I trust this folder\n  No, exit"
+            local safe_modal = "Accessing workspace:\n❯ No, exit\n  Yes, I trust this folder"
+            local three_options = safe_modal .. "\n  Inspect first"
+            local codex_modal = "Trust this folder?\n› 1. Trust and continue\n  2. Don't trust"
+            remuda.capture = function(name)
+              if name == 'outside' then return selected_yes end
+              if name == 'outside_codex' then return codex_modal end
+              if name == 'reused' then return safe_modal end
+              if name == 'fresh' then return safe_modal end
+              return three_options
+            end
+            remuda._trust_test_keys, remuda._trust_test_reports = {{}}, {{}}
+            remuda.key = function(name, key) table.insert(remuda._trust_test_keys, name .. ':' .. key) end
+            remuda._butler_send = function(_, _, text) table.insert(remuda._trust_test_reports, text); return 'captured' end
+            local cap = remuda._butler_bus.agents.butler.token
+            remuda._call('butler_launch', {{ kind = 'claude', name = 'outside', cwd = {external:?} }}, {{ capability = cap }})
+            remuda._call('butler_launch', {{ kind = 'codex', name = 'outside_codex', cwd = {external:?} }}, {{ capability = cap }})
+            remuda._butler_topic_new('reused', nil, 'claude')
+            remuda._butler_topic_new('three', nil, 'claude')
+            remuda.butler.template('clone', function(topic) topic.write('repo.txt', 'third-party source') end)
+            remuda._butler_topic_new('templated', 'clone', 'claude')
+            remuda._butler_topic_new('fresh', nil, 'claude')"#
+        ),
+    );
+    std::thread::sleep(Duration::from_secs(2));
+    let keys = eval(&path, "return table.concat(remuda._trust_test_keys, '\\n')");
+    assert!(keys.lines().all(|key| key.starts_with("fresh:")), "a human trust dialog was answered automatically: {keys}");
+    assert!(keys.contains("fresh:"), "fresh trust dialog was not answered: {keys}; state={}",
+        eval(&path, "local a=remuda._butler_bus.agents.fresh; return tostring(a and a.cwd)..':'..tostring(a and a.trust_allowed)..':'..tostring(a and a.trust_reported)..':'..tostring(a and a.launch_attempts[1].reason)..':'..tostring(remuda._butler_bus.trusted_launch_dirs)"));
+    let reports = eval(&path, "return table.concat(remuda._trust_test_reports, '\\n')");
+    assert!(reports.contains("waiting for a human: trust dialog"), "leader was not asked for human trust: {reports}");
+    assert!(reports.contains(&external.to_string_lossy().to_string()), "external cwd missing from trust report: {reports}");
+    assert!(reports.contains(&reused.to_string_lossy().to_string()), "reused topic path missing from trust report: {reports}");
+    assert!(reports.contains(&projects.join("three").to_string_lossy().to_string()), "three-option topic path missing from trust report: {reports}");
+    assert!(reports.contains(&projects.join("templated").to_string_lossy().to_string()), "template topic path missing from trust report: {reports}");
+    let fresh_path = projects.join("fresh").to_string_lossy().to_string();
+    assert_eq!(
+        eval(&path, &format!("return tostring(remuda._butler_bus.trusted_launch_dirs[{fresh_path:?}])")),
+        "nil",
+        "trusted-launch record was not consumed after answering"
+    );
+}
+
+#[test]
+fn unknown_busy_state_advances_notice_recovery_timeout() {
+    let (path, _daemon) = butler_with_member("unknown-busy-recovery");
+    eval(
+        &path,
+        r#"
+        local row = { name = 'm1', alive = true, attached = false }
+        remuda.ls = function() return { row } end
+        remuda.session = function() error('output idle unavailable') end
+        remuda.capture = function() return '› Butler message pending' end
+        remuda._butler_bus.notices.m1 = { count = 1, text = 'Butler message pending' }
+        remuda._butler_bus.notice_recoveries.m1 = {
+          phase = 'verify_notice', checks = 0, notice = 'Butler message pending', count = 1,
+        }
+        remuda._butler_deliver_notices()
+        "#,
+    );
+    let checks = eval(&path, "return tostring(remuda._butler_bus.notice_recoveries.m1.checks)");
+    assert_eq!(checks, "1", "unknown busy state stalled notice verification");
+}
+
+#[test]
+fn reading_mail_mid_notice_recovery_reports_the_cleared_draft() {
+    let (path, _daemon) = butler_with_member("notice-read-mid-recovery");
+    eval(
+        &path,
+        r#"
+        remuda._butler_send('operator', 'm1', 'notice whose recovery is active')
+        remuda._butler_bus.notice_recoveries.m1 = {
+          phase = 'verify_notice', checks = 1, notice = 'notice', count = 1,
+          draft = 'important unsent draft',
+        }
+        local send = remuda._butler_send
+        remuda._notice_read_recovery_report = nil
+        remuda._butler_send = function(from, to, text)
+          if to == 'm1' then return send(from, to, text) end
+          remuda._notice_read_recovery_report = text
+          return 'captured report'
+        end
+        remuda._butler_inbox('m1')
+        "#,
+    );
+    let report = eval(&path, "return tostring(remuda._notice_read_recovery_report)");
+    assert!(report.contains("important unsent draft"), "read cleared recovery without reporting its draft: {report}");
 }
 
 /// #23a: an ended member's unread mail stays readable by its alias, not only

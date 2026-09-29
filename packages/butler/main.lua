@@ -517,6 +517,27 @@ local status_path = remuda._butler_status_path
 local function shell_quote(s)
   return "'" .. s:gsub("'", "'\\\"'\\\"'") .. "'"
 end
+local function valid_child_name(name, what)
+  if type(name) ~= "string" or name == "" or name:sub(1, 1) == "."
+      or name:find("/", 1, true) or name:find("\\", 1, true)
+      or name:find("..", 1, true) or name:find("%c") then
+    error((what or "name") .. " must be a single path component without separators, '..', or a leading dot", 0)
+  end
+  return name
+end
+local function create_fresh_directory(path)
+  if not (remuda.fs and remuda.fs.mkdir_new) then return false end
+  local parent = path:match("^(.*)/[^/]+$")
+  if not parent then return false end
+  remuda.mkdir(parent)
+  local created, reason = remuda.fs.mkdir_new(path)
+  return created == true
+end
+local function directory_is_under(path, root)
+  if type(path) ~= "string" or type(root) ~= "string" or path == root then return false end
+  local prefix = root:sub(-1) == "/" and root or (root .. "/")
+  return path:sub(1, #prefix) == prefix
+end
 local function json_quote(s)
   return '"' .. s:gsub('\\', '\\\\'):gsub('"', '\\"')
     :gsub('\r', '\\r'):gsub('\n', '\\n'):gsub('\t', '\\t') .. '"'
@@ -911,6 +932,8 @@ local function readiness_timeout()
   if configured and configured > 0 then return configured end
   return 15
 end
+local startup_action_safe
+local trust_modal_state
 -- The one generic launch chooser serves Butler and every managed member. Kinds
 -- are lifecycle contributions; the chooser only reads their data and callbacks.
 -- Member launches must not hold the daemon image while an agent paints its
@@ -995,7 +1018,9 @@ local function choose(candidates, opts, done)
       handled = {}, last_screen = "", dialog_seen = nil }
     local test_builder = remuda._butler_agent_builders[id]
       and remuda._butler_agent_builders[id] ~= BUILTIN_AGENT_BUILDERS[id]
-    if opts.skip_probe or test_builder then
+    local force_test_probe = type(remuda._butler_test_force_launch_probe) == "table"
+      and remuda._butler_test_force_launch_probe[opts.name] == true
+    if opts.skip_probe or (test_builder and not force_test_probe) then
       attempt.reason, attempt.session = "ready", name
       callback(name, id)
     end
@@ -1037,8 +1062,39 @@ local function choose(candidates, opts, done)
     local dialogs = type(entry.dialogs) == "function" and select(2, call_callback(entry.dialogs)) or entry.dialogs or {}
     local known = false
     for dialog_index, dialog in ipairs(dialogs) do
-      if screen:lower():find(dialog.match:lower(), 1, true) then
+      local lower_screen = screen:lower()
+      local trust_state = dialog.trust and trust_modal_state(dialog, screen) or nil
+      local matched = dialog.trust and trust_state ~= "absent"
+        or (dialog.match and lower_screen:find(dialog.match:lower(), 1, true))
+      if matched then
         known, state.dialog_seen = true, dialog.match
+        if dialog.trust then
+          if state.trust_screen == screen then state.trust_ticks = (state.trust_ticks or 0) + 1
+          else state.trust_screen, state.trust_ticks = screen, 1 end
+          if state.trust_ticks < 2 then break end
+          if trust_state == "pending" and opts.auto_trust then break end
+          if trust_state == "safe" and opts.auto_trust and bus.trusted_launch_dirs
+              and bus.trusted_launch_dirs[opts.cwd] == true and startup_action_safe
+              and startup_action_safe(state.name) then
+            if not state.handled[dialog_index] then
+              state.handled[dialog_index] = true
+              local answered = true
+              for _, key in ipairs(dialog.keys or {}) do
+                local ok, result = pcall(remuda.key, state.name, key)
+                if not ok or result == false then answered = false end
+              end
+              if answered then
+                state.attempt.trust_answered = true
+                bus.trusted_launch_dirs[opts.cwd] = nil
+              end
+            end
+            break
+          end
+          state.attempt.reason, state.attempt.session = "waiting_for_human_trust", state.name
+          state.attempt.trust_path = opts.cwd
+          callback(state.name, id)
+          return
+        end
         -- Codex's update is an actionable startup state. Hand it to the
         -- member launch flow, which owns the shared update lock and relaunch.
         if dialog.update then
@@ -1051,13 +1107,31 @@ local function choose(candidates, opts, done)
           for _, key in ipairs(dialog.keys or {}) do pcall(remuda.key, state.name, key) end
         end
         break
+      elseif dialog.pending_match and lower_screen:find(dialog.pending_match:lower(), 1, true) then
+        -- Claude paints the trust explanation before the selectable options.
+        -- Keep polling that known startup state until its affirmative option
+        -- is visible; the broad unknown-dialog check below would otherwise
+        -- reject the partial frame before the label handler can run.
+        known, state.dialog_seen = true, dialog.pending_match
+        break
       end
     end
-    local lower = screen:lower()
-    if not known and (lower:find("trust", 1, true) or lower:find("continue", 1, true)
+    if known then
+      state.unknown_dialog_screen, state.unknown_dialog_since = nil, nil
+    else
+      local lower = screen:lower()
+      local suspicious = lower:find("trust", 1, true) or lower:find("continue", 1, true)
         or lower:find("press enter", 1, true) or lower:find("select an option", 1, true)
-        or lower:find("terms of service", 1, true) or lower:find("confirm", 1, true)) then
-      fail_candidate("dialog", one_line(screen)); return
+        or lower:find("terms of service", 1, true) or lower:find("confirm", 1, true)
+      if suspicious then
+        if state.unknown_dialog_screen ~= screen then
+          state.unknown_dialog_screen, state.unknown_dialog_since = screen, os.time()
+        elseif os.time() - state.unknown_dialog_since >= 2 then
+          fail_candidate("dialog", one_line(screen)); return
+        end
+      else
+        state.unknown_dialog_screen, state.unknown_dialog_since = nil, nil
+      end
     end
     if os.time() - state.started >= state.timeout then
       local prefix = state.dialog_seen and ("dialog remained after its handler: " .. state.dialog_seen .. "; ") or ""
@@ -1207,7 +1281,6 @@ local function write_agent_guidance(root, text, replace)
   f:close()
 end
 local _butler_session_trace -- defined below; the task poke fires later
-local startup_action_safe
 local function option_number(screen, matches)
   -- Parse the visible chooser ourselves. Core versions that strip a UTF-8
   -- selection glyph as a byte-class can leave stray bytes before its label.
@@ -1245,10 +1318,58 @@ end
 local function startup_modal_timeout_seconds()
   return tonumber(remuda._butler_modal_timeout or remuda._butler_modal_attempts or remuda._butler_task_poke_attempts) or 60
 end
+trust_modal_state = function(modal, screen)
+  local lines, title, affirmative, selected_no, selected_index, selected_codex = {}, false, false, false, nil, false
+  for line in (tostring(screen or "") .. "\n"):gmatch("(.-)\n") do
+    lines[#lines + 1] = line
+    local trimmed = line:gsub("^%s+", "")
+    if trimmed:find("Accessing workspace:", 1, true) then title = true end
+    if trimmed:match("^❯%s*No, exit") then selected_no, selected_index = true, #lines end
+    if trimmed:match("^Yes, I trust this folder%s*$") then affirmative = true end
+    if trimmed:match("^[›❯]%s*1[.)]%s*Trust and continue%s*$") then selected_codex = true end
+  end
+  local lower = tostring(screen or ""):lower()
+  if modal.trust == "claude" then
+    if not title then
+      if lower:find("quick safety check:", 1, true) then return "pending" end
+      return "absent"
+    end
+    if not lower:find("no, exit", 1, true) or not lower:find("yes, i trust this folder", 1, true) then
+      if lower:find("quick safety check:", 1, true) then return "pending" end
+      return "human"
+    end
+    if not selected_no or not selected_index then return "human" end
+    local options = 0
+    for _, line in ipairs(lines) do
+      if line:match("^%s*[❯›]%s*%S") or line:match("^%s%s%S") then options = options + 1 end
+    end
+    if affirmative and selected_no and options == 2 then return "safe" end
+    return "human"
+  elseif modal.trust == "codex" then
+    if not lower:find("trust this folder?", 1, true) then return "absent" end
+    local options = 0
+    local no_option = false
+    for _, line in ipairs(lines) do
+      if line:match("^%s*[❯›]%s+") or line:match("^%s*%d+[.)]%s+") then
+        options = options + 1
+        if line:lower():find("don't trust", 1, true) or line:lower():find("do not trust", 1, true) then no_option = true end
+      end
+    end
+    if selected_codex and no_option and options == 2 then return "safe" end
+    return "human"
+  end
+  return "human"
+end
 local function startup_modal(startup, screen)
-  local lower = screen:lower()
+  local lower = tostring(screen or ""):lower()
   for _, modal in ipairs(startup.modals or {}) do
-    if modal.match and lower:find(modal.match:lower(), 1, true) then return modal end
+    if modal.trust then
+      if trust_modal_state(modal, screen) ~= "absent" then return modal end
+    elseif modal.match and lower:find(modal.match:lower(), 1, true) then
+      return modal
+    elseif modal.pending_match and lower:find(modal.pending_match:lower(), 1, true) then
+      return modal
+    end
   end
 end
 local function known_startup_modal(startup, screen)
@@ -1284,10 +1405,13 @@ local function capture_update_evidence(session, screen)
   end
   return evidence
 end
-local function launch_agent(kind, requested_name, cwd, model, parent, task, relaunch_identity)
+local function launch_agent(kind, requested_name, cwd, model, parent, task, relaunch_identity, fresh_trusted_cwd)
   local candidates = kind and { kind } or configured_agent_order()
   kind = kind or candidates[1]
-  local name = requested_name or kind or "agent"
+  local name = valid_child_name(requested_name or kind or "agent", "agent name")
+  if cwd ~= nil and (type(cwd) ~= "string" or cwd:find("%c")) then
+    error("cwd must be a string without control characters", 0)
+  end
   if bus.agents[name] then
     error("alias " .. name .. " is live as " .. tostring(bus.agents[name].id) .. "; pick another alias", 0)
   end
@@ -1299,17 +1423,27 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
     identity.ended_at, identity.reason = nil, nil
     identity_record(identity)
   end
+  local auto_trust = fresh_trusted_cwd == true
   if not cwd and data_home then
-    cwd = data_home .. "/remuda/butler/sessions/" .. name
-    remuda.mkdir(cwd)
+    local sessions_root = data_home .. "/remuda/butler/sessions"
+    cwd = sessions_root .. "/" .. name
+    local created_now = create_fresh_directory(cwd)
+    if created_now then
+      bus.trusted_launch_dirs = bus.trusted_launch_dirs or {}
+      bus.trusted_launch_dirs[cwd] = true
+    end
+    if not created_now then remuda.mkdir(cwd) end
+    auto_trust = created_now and directory_is_under(sessions_root, data_home)
+      and directory_is_under(cwd, sessions_root)
   end
-  if cwd and parent then write_agent_guidance(cwd, team_member_guidance(parent)) end
+  local launch_cwd = cwd or "."
+  if cwd and parent and auto_trust then write_agent_guidance(cwd, team_member_guidance(parent)) end
   local token = next_token(name)
   local telemetry_by_kind = {}
   local agent_telemetry = setup_telemetry(kind, { name = name, model = model })
   telemetry_by_kind[kind] = agent_telemetry
   local choose_opts = {
-    name = name, cwd = cwd,
+    name = name, cwd = launch_cwd, auto_trust = auto_trust,
     spec = function(candidate_kind)
       local telemetry = telemetry_by_kind[candidate_kind]
         or setup_telemetry(candidate_kind, { name = name, model = model })
@@ -1328,6 +1462,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   }
   local function finish(actual, selected_kind, attempts)
   if not actual then
+    if bus.trusted_launch_dirs then bus.trusted_launch_dirs[launch_cwd] = nil end
     local errors = {}
     for _, a in ipairs(attempts) do errors[#errors + 1] = a.kind .. ": " .. a.reason .. " (" .. (a.detail or "") .. ")" end
     local message = "no agent candidate became ready: " .. table.concat(errors, "; ")
@@ -1340,11 +1475,19 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   agent_telemetry = telemetry_by_kind[kind]
   identity.kind = kind
   identity_record(identity)
+  local waiting_for_trust, trust_answered = false, false
+  for _, attempt in ipairs(attempts or {}) do
+    if attempt.session == actual and attempt.reason == "waiting_for_human_trust" then
+      waiting_for_trust = true
+    end
+    if attempt.session == actual and attempt.trust_answered then trust_answered = true end
+  end
   bus.tokens[token] = actual
   bus.agents[actual] = {
     kind = kind, token = token, model = model, telemetry = agent_telemetry,
     parent = parent, children = {}, id = identity.id, alias = actual, session_name = actual,
-    cwd = cwd, task = task, launch_attempts = attempts,
+    cwd = launch_cwd, task = task, launch_attempts = attempts, trust_allowed = auto_trust,
+    trust_reported = waiting_for_trust, trust_answered = trust_answered,
   }
   if parent and bus.agents[parent] then
     local children = bus.agents[parent].children
@@ -1353,6 +1496,10 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   local migrated, migration_error = migrate_legacy_mail(actual, identity.id)
   if not migrated then error("cannot migrate legacy Butler mail: " .. tostring(migration_error), 0) end
   mailbox(identity.id)
+  if waiting_for_trust then
+    pcall(remuda._butler_send, "butler", parent or "butler",
+      "waiting for a human: trust dialog in " .. tostring(launch_cwd or "unknown directory"))
+  end
   -- A failed welcome write must not prevent the agent from starting.
   if not relaunch_identity then
     pcall(queue_message, mail_address(parent or "butler"), mail_address(actual),
@@ -1452,6 +1599,34 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       end
       if attempts < settle then return end -- let an answered modal repaint
       local modal = startup_modal(startup, screen)
+      if modal and modal.trust then
+        local trust_state = trust_modal_state(modal, screen)
+        local agent = bus.agents[actual]
+        if trust_state == "safe" and agent.trust_answered then return end
+        if agent.last_trust_screen == screen then agent.trust_ticks = (agent.trust_ticks or 0) + 1
+        else agent.last_trust_screen, agent.trust_ticks = screen, 1 end
+        if agent.trust_ticks < 2 then return end
+        if trust_state == "safe" and agent.trust_allowed and bus.trusted_launch_dirs
+            and bus.trusted_launch_dirs[agent.cwd] == true and startup_action_safe
+            and startup_action_safe(actual) then
+          if not agent.trust_answered then
+            local answered = true
+            for _, key in ipairs(modal.keys or {}) do
+              local ok, result = pcall(remuda.key, actual, key)
+              if not ok or result == false then answered = false end
+            end
+            if answered then
+              agent.trust_answered = true
+              bus.trusted_launch_dirs[agent.cwd] = nil
+            end
+          end
+        elseif not agent.trust_reported then
+          agent.trust_reported = true
+          pcall(remuda._butler_send, "butler", parent or "butler",
+            "waiting for a human: trust dialog in " .. tostring(agent.cwd or "unknown directory"))
+        end
+        return
+      end
       if update_waiting and update_relaunch_record_ref and codex_update_complete(screen) then
         update_relaunch_record_ref.update_complete_seen = true
       end
@@ -1676,6 +1851,10 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
     PROMPT_DELIVERY.schedule(remuda, kind, actual, name, parent, task, {
       ready = startup.ready,
       modals = startup.modals,
+      trust_dialog = function(screen)
+        local modal = startup_modal(startup, screen)
+        return modal ~= nil and modal.trust ~= nil
+      end,
       allowed = function(retrying)
         if retrying then return remuda._butler_task_retry_policy(actual) end
         return remuda._butler_notify_policy(actual)
@@ -1716,9 +1895,19 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
 end
 
 local function make_topic(name, template, kind, parent, task, model)
+  valid_child_name(name, "topic name")
   load_topic_config()
   local root = topic_config.project_home .. "/" .. name
-  remuda.mkdir(root)
+  local created_now = create_fresh_directory(root)
+  if created_now then
+    bus.trusted_launch_dirs = bus.trusted_launch_dirs or {}
+    bus.trusted_launch_dirs[root] = true
+  end
+  if not created_now then remuda.mkdir(root) end
+  if template and not created_now then
+    error("topic directory already exists; templates require a fresh topic name", 0)
+  end
+  local auto_trust = created_now and not template and directory_is_under(root, topic_config.project_home)
   local topic = { name = name, root = root }
   function topic.write(relative_path, contents)
     local f = assert(io.open(root .. "/" .. relative_path, "w"))
@@ -1739,8 +1928,8 @@ local function make_topic(name, template, kind, parent, task, model)
     assert(type(setup) == "function", "Butler topic template must be a function: " .. template)
     setup(topic)
   end
-  write_agent_guidance(root, team_member_guidance(parent or "butler"))
-  return launch_agent(kind, name, root, model, parent, task)
+  if created_now and not template then write_agent_guidance(root, team_member_guidance(parent or "butler")) end
+  return launch_agent(kind, name, root, model, parent, task, nil, auto_trust)
 end
 
 -- Shell-facing doors into the same deliberately mutable bus.  These are not
@@ -1765,6 +1954,7 @@ end
 -- the declared `butler-notices` schedule (init.lua) retries every second.
 bus.notices = bus.notices or {}
 bus.notice_screens = bus.notice_screens or {}
+bus.notice_seen = bus.notice_seen or {}
 local NOTICE_STABLE_SECONDS = 3
 
 -- The composer's text starts after the last prompt glyph and includes its
@@ -1827,6 +2017,19 @@ function remuda._butler_notify_policy(session, now)
   end
   if not row or not row.alive then return false end
   local attached = row.attached
+  -- Attached panes use the human idle clock or screen stability below. Only
+  -- detached panes need the core busy bit, whose Session metatable may throw
+  -- when older cores lack output_idle data.
+  if not attached and remuda.session then
+    local checked, busy = pcall(function()
+      local current = remuda.session(session)
+      return current and current.is_busy
+    end)
+    -- Older cores and synthetic rows can lack a Session object, and some
+    -- Session metatables can fail while computing is_busy. Unknown busy state
+    -- falls through to the prompt parser; only an explicit busy state defers.
+    if checked and busy == true then return false end
+  end
   local seen = bus.notice_screens[session] or {}
   bus.notice_screens[session] = seen
   local screen
@@ -1966,6 +2169,37 @@ local function pending_notice_text(pending)
   return pending.count == 1 and pending.text
     or (pending.count .. " new Butler messages arrived. Read them: remuda butler inbox")
 end
+local notice_recovery_error
+local function input_was_busy(ok, result, detail)
+  local message = tostring(ok and (detail or result) or result or "")
+  return message == "a session input write is already in flight"
+    or message == "runtime error: a session input write is already in flight"
+end
+local function refresh_pending_notice(session, pending)
+  if not pending.message_order then return pending end
+  local agent = bus.agents[session]
+  local identity = agent and agent.id
+  local order, notices = {}, {}
+  for _, id in ipairs(pending.message_order) do
+    local notice = pending.message_ids and pending.message_ids[id]
+    if notice and identity and mail.is_unread(identity, id) then
+      order[#order + 1], notices[id] = id, notice
+    end
+  end
+  pending.message_order, pending.message_ids = order, notices
+  pending.count = #order
+  pending.text = order[#order] and notices[order[#order]] or nil
+  if pending.count == 0 then
+    local recovery = bus.notice_recoveries[session]
+    if recovery and recovery.draft and recovery.draft ~= "" then
+      notice_recovery_error(session, recovery, "mail was read while notice recovery was active; draft preserved")
+    else
+      bus.notices[session], bus.notice_recoveries[session] = nil, nil
+    end
+    return nil
+  end
+  return pending
+end
 local function recovery_screen(session)
   local ok, screen = pcall(remuda.capture, session)
   if not ok then return nil end
@@ -2037,13 +2271,28 @@ local function notice_matches_composer(session, screen, text, expected)
   return (safe and compact_composer(composer) == expected_compact)
     or compact_composer(text) == expected_compact
 end
+local function notice_log_value(value)
+  local raw = tostring(value or "")
+  local length = #raw
+  if length > 8192 then
+    raw = raw:sub(1, 8192) .. ("<truncated; %d bytes total>"):format(length)
+  end
+  return string.format("%q", raw)
+end
+local function log_notice_verify_mismatch(session, screen, text, expected)
+  -- Failure-only trace data; never display diagnostic captures in an agent pane.
+  _butler_session_trace("notice_verify_mismatch", session
+    .. " capture=" .. notice_log_value(screen)
+    .. " composer=" .. notice_log_value(text)
+    .. " expected=" .. notice_log_value(expected))
+end
 local function recovery_composer_empty(session, screen, decision, text)
   if decision ~= "EMPTY" then return false end
   local agent = bus.agents[session]
   local composer, safe = recovery_draft(agent and agent.kind or "", screen, "")
   return safe and normalized_composer(composer) == ""
 end
-local function notice_recovery_error(session, state, reason)
+notice_recovery_error = function(session, state, reason)
   state.failed = true
   local agent = bus.agents[session]
   local parent = agent and agent.parent or "butler"
@@ -2052,18 +2301,32 @@ local function notice_recovery_error(session, state, reason)
     "Could not safely deliver queued Butler mail to " .. session .. ": " .. reason
     .. ". Inspect the composer and resend the notice."
     .. (state.draft and (" Parsed composer draft: " .. state.draft) or ""))
+  bus.notices[session] = nil
+  bus.notice_recoveries[session] = nil
   return false
 end
 local function complete_notice_recovery(session, state)
   local pending = bus.notices[session]
   if pending then
-    pending.count = pending.count - state.count
+    if state.message_ids and pending.message_order then
+      local submitted = {}
+      for _, id in ipairs(state.message_ids) do submitted[id] = true end
+      local order = {}
+      for _, id in ipairs(pending.message_order) do
+        if not submitted[id] then order[#order + 1] = id end
+      end
+      pending.message_order = order
+      pending.count = #order
+      pending.text = order[#order] and pending.message_ids[order[#order]] or nil
+    else
+      pending.count = pending.count - state.count
+    end
     if pending.count <= 0 then bus.notices[session] = nil end
   end
   bus.notice_recoveries[session] = nil
   return true
 end
-local function recovery_human_safe(session)
+local function recovery_human_safe(session, allow_busy)
   local session_row
   for _, candidate in ipairs(remuda.ls()) do
     if candidate.name == session then session_row = candidate end
@@ -2071,8 +2334,11 @@ local function recovery_human_safe(session)
   if not session_row or not session_row.alive or session_row.attached then return false end
   if remuda._butler_human_active(session) then return false end
   if remuda.session then
-    local ok, row = pcall(remuda.session, session)
-    if not ok or not row or row.is_busy then return false end
+    local ok, busy = pcall(function()
+      local row = remuda.session(session)
+      return row and row.is_busy
+    end)
+    if ok and busy == true and not allow_busy then return false end
   end
   return true
 end
@@ -2081,24 +2347,43 @@ local function begin_notice_submit(session, state, draft)
   if not pending then bus.notice_recoveries[session] = nil; return true end
   state.draft = draft
   state.count = pending.count
+  state.message_ids = {}
+  for _, id in ipairs(pending.message_order or {}) do state.message_ids[#state.message_ids + 1] = id end
   state.notice = pending_notice_text(pending)
   if draft and draft ~= "" then
     state.notice = state.notice .. "\n\nYour unsent draft was: " .. draft
   end
   bus.notice_recoveries[session] = state
-  local typed, why = pcall(remuda.type_text, session, state.notice, 0.1)
-  if not typed then return notice_recovery_error(session, state, "the notice could not be typed: " .. tostring(why)) end
+  local typed, result, why = pcall(remuda.type_text, session, state.notice, 0.1)
+  if input_was_busy(typed, result, why) then
+    state.phase = "retry_type"
+    return false
+  end
+  if not typed then return notice_recovery_error(session, state,
+    "the notice could not be typed: " .. tostring(why or result)) end
   state.phase, state.checks, state.saw_notice = "verify_notice", 0, false
   return false
 end
 local function tick_notice_recovery(session, state)
   if state.failed then return false end
-  if not recovery_human_safe(session) then return false end
-  state.checks = (state.checks or 0) + 1
+  local observing_submit = state.phase == "verify_notice" or state.phase == "verify_existing"
+  if not recovery_human_safe(session, observing_submit) then return false end
+  local busy = false
+  if remuda.session then
+    local checked, value = pcall(function()
+      local row = remuda.session(session)
+      return row and row.is_busy
+    end)
+    busy = checked and value == true
+  end
+  if not busy then state.checks = (state.checks or 0) + 1 end
   if state.checks > 40 then return notice_recovery_error(session, state, "verification timed out") end
   local screen, decision, text = recovery_screen(session)
   if not screen then return notice_recovery_error(session, state, "the pane could not be captured") end
   local normalized = tostring(screen):gsub("\r\n", "\n"):gsub("\r", "\n")
+  if state.phase == "retry_type" then
+    return begin_notice_submit(session, state, state.draft)
+  end
   if state.phase == "probe" then
     if state.last_screen == normalized then state.stable = (state.stable or 0) + 1
     else state.last_screen, state.stable = normalized, 1 end
@@ -2134,9 +2419,15 @@ local function tick_notice_recovery(session, state)
     end
     local current_notice = pending_notice_text(bus.notices[session] or { count = 0, text = "" })
     if notice_matches_composer(session, screen, text, current_notice) then
-      local pressed, why = pcall(remuda.key, session, "RET")
-      if not pressed then return notice_recovery_error(session, state, "the existing Butler notice could not be submitted: " .. tostring(why)) end
-      state.phase, state.checks = "verify_existing", 0
+      local pressed, result, why = pcall(remuda.key, session, "RET")
+      if input_was_busy(pressed, result, why) then return false end
+      if not pressed then return notice_recovery_error(session, state,
+        "the existing Butler notice could not be submitted: " .. tostring(why or result)) end
+      state.phase, state.checks, state.notice = "verify_existing", 0, current_notice
+      state.message_ids = {}
+      for _, id in ipairs((bus.notices[session] or {}).message_order or {}) do
+        state.message_ids[#state.message_ids + 1] = id
+      end
       return false
     end
     local agent = bus.agents[session]
@@ -2160,9 +2451,14 @@ local function tick_notice_recovery(session, state)
     end
     return begin_notice_submit(session, state, state.draft)
   elseif state.phase == "verify_existing" then
-    if decision == "EMPTY" then
+    local notice_visible = state.notice and tostring(screen):gsub("%s+", "")
+      :find(tostring(state.notice):gsub("%s+", ""):sub(1, 32), 1, true) ~= nil
+    local notice_in_composer = decision == "NON-EMPTY"
+      and notice_matches_composer(session, screen, text, state.notice)
+    if decision == "EMPTY" or (notice_visible and not notice_in_composer) then
       return complete_notice_recovery(session, state)
     end
+    if busy then return false end
     if state.checks >= 6 then
       return notice_recovery_error(session, state, "the existing Butler notice did not leave the composer")
     end
@@ -2170,25 +2466,29 @@ local function tick_notice_recovery(session, state)
   elseif state.phase == "verify_notice" then
     local notice_head = tostring(state.notice or ""):gsub("%s+", ""):sub(1, 32)
     local notice_visible = notice_head ~= "" and normalized:gsub("%s+", ""):find(notice_head, 1, true) ~= nil
-    if notice_visible or (decision == "NON-EMPTY"
-        and notice_matches_composer(session, screen, text, state.notice)) then
+    local notice_in_composer = decision == "NON-EMPTY"
+      and notice_matches_composer(session, screen, text, state.notice)
+    if notice_visible or notice_in_composer then
       state.saw_notice = true
     end
     local agent = bus.agents[session]
     local non_tui_echo = decision == "UNPARSEABLE" and agent
       and agent.kind ~= "claude" and agent.kind ~= "codex" and notice_visible
-    if (decision == "EMPTY" and state.saw_notice) or non_tui_echo then
+    if (decision == "EMPTY" and (state.saw_notice or busy))
+        or (state.saw_notice and notice_visible and not notice_in_composer) or non_tui_echo then
       return complete_notice_recovery(session, state)
     end
-    if decision == "NON-EMPTY" and notice_matches_composer(session, screen, text, state.notice)
-        and not state.return_retried then
+    if notice_in_composer and not state.return_retried then
       if not recovery_human_safe(session) then return false end
-      local pressed, why = pcall(remuda.key, session, "RET")
-      if not pressed then return notice_recovery_error(session, state, "the notice Return failed: " .. tostring(why)) end
+      local pressed, result, why = pcall(remuda.key, session, "RET")
+      if input_was_busy(pressed, result, why) then return false end
+      if not pressed then return notice_recovery_error(session, state,
+        "the notice Return failed: " .. tostring(why or result)) end
       state.return_retried = true
       return false
     end
     if state.checks >= 12 then
+      log_notice_verify_mismatch(session, screen, text, state.notice)
       return notice_recovery_error(session, state, "the notice submit could not be verified")
     end
     return false
@@ -2197,6 +2497,8 @@ local function tick_notice_recovery(session, state)
 end
 local function deliver_notice(session)
   local pending = bus.notices[session]
+  if not pending then return true end
+  pending = refresh_pending_notice(session, pending)
   if not pending then return true end
   if bus.pending_tasks[session] then return false end
   local recovering = bus.notice_recoveries[session]
@@ -2211,8 +2513,11 @@ local function deliver_notice(session)
   end
   if remuda._butler_notify_policy(session) then
     local state = { phase = "verify_notice", count = pending.count, notice = pending_notice_text(pending), checks = 0 }
-    local typed, why = pcall(remuda.type_text, session, state.notice, 0.1)
-    if not typed then return false, why end
+    state.message_ids = {}
+    for _, id in ipairs(pending.message_order or {}) do state.message_ids[#state.message_ids + 1] = id end
+    local typed, result, why = pcall(remuda.type_text, session, state.notice, 0.1)
+    if input_was_busy(typed, result, why) then return false, "busy" end
+    if not typed then return false, why or result end
     bus.notice_recoveries[session] = state
     return false
   end
@@ -2222,8 +2527,23 @@ local function deliver_notice(session)
   bus.notice_recoveries[session] = state
   return tick_notice_recovery(session, state)
 end
-function remuda._butler_notify(alias, notice)
+function remuda._butler_notify(alias, notice, message_id)
+  local _, recipient = mail_id(alias, false)
+  if message_id and not mail.is_unread(recipient.id, message_id) then return true end
+  if message_id then
+    local seen = bus.notice_seen[recipient.id] or {}
+    bus.notice_seen[recipient.id] = seen
+    if seen[message_id] then return false end
+    seen[message_id] = true
+  end
   local pending = bus.notices[alias] or { count = 0 }
+  if message_id then
+    pending.message_ids = pending.message_ids or {}
+    pending.message_order = pending.message_order or {}
+    if pending.message_ids[message_id] then return false end
+    pending.message_ids[message_id] = notice
+    pending.message_order[#pending.message_order + 1] = message_id
+  end
   pending.count, pending.text = pending.count + 1, notice
   bus.notices[alias] = pending
   return deliver_notice(alias)
@@ -2242,7 +2562,7 @@ function remuda._butler_send(from, to, text)
   local message = deliver_message({ from = sender, to = mail_address(recipient.alias), text = text })
   local notice = "Butler message " .. message.id .. " from " .. sender.session
     .. " arrived. Read it: remuda butler inbox"
-  local delivered, why = remuda._butler_notify(recipient.alias, notice)
+  local delivered, why = remuda._butler_notify(recipient.alias, notice, message.id)
   if delivered then return "queued " .. message.id .. " and notified " .. recipient.alias end
   if why then
     return "queued " .. message.id .. " for " .. recipient.alias .. "; terminal delivery deferred: " .. tostring(why)
@@ -2260,7 +2580,7 @@ local function notify_queued(message, alias, what)
   local live = pcall(mail_id, alias, false)
   if not live then return "queued " .. message.id .. " for " .. alias .. "; it is not live, so no notice" end
   local delivered, why = remuda._butler_notify(alias, "Butler message " .. message.id .. " " .. what
-    .. " arrived. Read it: remuda butler inbox")
+    .. " arrived. Read it: remuda butler inbox", message.id)
   if delivered then return "queued " .. message.id .. " and notified " .. alias end
   return "queued " .. message.id .. " for " .. alias .. "; notice deferred"
     .. (why and (": " .. tostring(why)) or " until its pane is free")
@@ -2282,7 +2602,26 @@ function remuda._butler_forward(from, message_id, member, note)
 end
 function remuda._butler_inbox(name)
   local id = mail_id(name, true)
-  return mail.inbox(id)
+  local result = mail.inbox(id)
+  if mail.unread(id) == 0 then
+    for alias, agent in pairs(bus.agents) do
+      if agent.id == id then
+        local recovery = bus.notice_recoveries[alias]
+        if recovery and recovery.draft and recovery.draft ~= "" then
+          notice_recovery_error(alias, recovery, "mail was read while notice recovery was active; draft preserved")
+        else
+          bus.notices[alias], bus.notice_recoveries[alias] = nil, nil
+        end
+      end
+    end
+    local seen = bus.notice_seen[id]
+    if seen then
+      for message_id in pairs(seen) do
+        if not mail.is_unread(id, message_id) then seen[message_id] = nil end
+      end
+    end
+  end
+  return result
 end
 function remuda._butler_report(from, text)
   from = resolve(from)
@@ -2394,6 +2733,7 @@ function remuda._butler_sessions()
       local details = {}
       for _, attempt in ipairs(report.attempts or {}) do
         details[#details + 1] = attempt.kind .. ": " .. attempt.reason
+          .. (attempt.detail and (" (" .. attempt.detail:gsub("\n", " ") .. ")") or "")
       end
       failed[#failed + 1] = name .. ": " .. (#details > 0 and table.concat(details, ", ") or report.error)
     end
@@ -3239,6 +3579,9 @@ function remuda._butler_session_exited(name, info)
   bus.notices[name], bus.notice_screens[name], bus.pending_tasks[name] = nil, nil, nil
   bus.notice_recoveries[name], bus.task_retry_screens[name], bus.human_activity_screens[name] = nil, nil, nil
   local exited = bus.agents[name]
+  if exited and exited.cwd and bus.trusted_launch_dirs then
+    bus.trusted_launch_dirs[exited.cwd] = nil
+  end
   if exited and name ~= "butler" then
     local ended = bus.identity_ids[exited.id] or exited
     ended.alias, ended.kind = exited.alias or name, exited.kind

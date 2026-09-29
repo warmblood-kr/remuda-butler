@@ -51,6 +51,6 @@ remuda._butler_agent_startup.codex = {
     { match = "Codex update available", update = true },
     { match = "Update now", update = true },
     { match = "Skip until next version", update = true },
-    { match = "Trust this folder?", keys = { "1" } }, -- 1. Trust and continue
+    { trust = "codex", keys = { "1" } }, -- only a stable, exact two-option trust modal is actionable
   },
 }

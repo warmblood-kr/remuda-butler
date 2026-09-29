@@ -3304,6 +3304,7 @@ fn butler_codex_builder_uses_automatic_approval() {
 #[cfg(unix)]
 fn butler_task_poke_answers_startup_modals_before_typing() {
     let dir = scratch_dir("butler-startup-modals");
+    let claude_trust_capture = include_str!("fixtures/claude-trust-dialog.txt");
     let home = dir.join("home");
     std::fs::create_dir_all(&home).expect("test home");
     let daemon = Daemon::spawn_with_home(&dir, &home);
@@ -3326,14 +3327,32 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
           remuda.butler.project_home({home:?})
           remuda._butler_session_trace_path = {trace:?}
           remuda._butler_task_poke_attempts = 6
+          remuda._butler_test_force_launch_probe = {{
+            ["t-claude"] = true,
+            ["t-claude-launch"] = true,
+            ["t-claude-human-trust"] = true,
+            ["t-claude-launch-unknown"] = true,
+            ["t-claude-launch-transient"] = true,
+          }}
           remuda._butler_agent_builders.claude = function() return {{"sh"}} end
           remuda._butler_agent_builders.codex = function() return {{"sh", "-c", "sleep 30"}} end
           local rule = string.rep("─", 20)
           local screens = {{
             ["t-claude"] = {{
               rule .. "\n Accessing workspace:\n\n ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm · Esc to cancel",
+              rule .. "\n Accessing workspace:\n\n ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm · Esc to cancel",
               rule .. "\n❯ \n" .. rule,
             }},
+            ["t-claude-launch"] = {{
+              "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n"
+                .. " Accessing workspace:\n\n /private/tmp/t3qa/untrusted-13690\n\n"
+                .. " Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source",
+              {claude_trust_capture:?},
+              {claude_trust_capture:?},
+              rule .. "\n❯ \n" .. rule,
+            }},
+            ["t-claude-launch-unknown"] = {{ "Workspace access changed\n ❯ 1. Continue\n   2. Cancel" }},
+            ["t-claude-launch-transient"] = {{ "Continue setup", rule .. "\n❯ \n" .. rule }},
             ["t-codex"] = {{
               "  Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip\n  3. Skip until next version\n› Ask Codex to do anything",
               "› Ask Codex to do anything",
@@ -3412,7 +3431,9 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
           remuda.capture_styled = nil
           remuda.key = function(n, k)
             log[#log + 1] = n .. " key " .. k
-            if (n == "t-codex" or n == "t-codex-peer") and k == "1" then
+            if n == "t-claude-launch" and k == "RET" then
+              screens[n] = {{ rule .. "\n❯ \n" .. rule }}
+            elseif (n == "t-codex" or n == "t-codex-peer") and k == "1" then
               screens[n] = {{ "› Ask Codex to do anything" }}
             elseif (n == "t-codex" or n == "t-codex-peer") and k == "2" then
               screens[n] = {{ "› Ask Codex to do anything" }}
@@ -3461,9 +3482,13 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
           remuda._butler_topic_delegate("t-codex-human", "task human", nil, "codex", leader)
           remuda._butler_topic_delegate("t-claude-human-trust", "task human trust", nil, "claude", leader)
           remuda._butler_topic_delegate("t-stuck", "task three", nil, "claude", leader)
+          remuda._butler_launch("claude", "t-claude-launch")
+          remuda._butler_launch("claude", "t-claude-launch-unknown")
+          remuda._butler_launch("claude", "t-claude-launch-transient")
         "#,
             home = home.to_string_lossy(),
             trace = trace.to_string_lossy(),
+            claude_trust_capture = claude_trust_capture,
         ),
     );
 
@@ -3475,6 +3500,10 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
         // the topic sessions' own lines.
         let typed = log.lines().filter(|l| l.starts_with("t-") && l.contains(" type ")).count();
         if typed == 3 && traced.contains("task_poke_timeout\tt-stuck")
+            && eval(&path, "return tostring(remuda._butler_bus.agents['t-claude-launch'] ~= nil)") == "true"
+            && eval(&path, "return tostring(remuda._butler_bus.agents['t-claude-launch-transient'] ~= nil)") == "true"
+            && eval(&path, "return remuda._butler_sessions()")
+                .contains("Workspace access changed")
             && eval(&path, "return tostring(remuda._butler_bus.pending_tasks['t-codex-unanswerable'] == nil and remuda._butler_bus.pending_tasks['t-codex-human'] == nil)") == "true" {
             break log;
         }
@@ -3486,6 +3515,14 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
     };
     let claude: Vec<&str> = log.lines().filter(|l| l.starts_with("t-claude ")).collect();
     assert_eq!(claude, ["t-claude key <down>", "t-claude key RET", "t-claude type task one"]);
+    let launch_rows: Vec<&str> = log.lines().filter(|l| l.starts_with("t-claude-launch key ")).collect();
+    assert_eq!(launch_rows, ["t-claude-launch key <down>", "t-claude-launch key RET"],
+        "launch did not answer the exact captured trust dialog: {log}");
+    let launch_report = eval(&path, "return remuda._butler_sessions()");
+    assert!(launch_report.contains("Workspace access changed"),
+        "failed launch omitted the unknown dialog's label: {launch_report}");
+    assert!(!launch_report.contains("t-claude-launch-transient: claude: dialog"),
+        "a changing partial screen was rejected as an unknown dialog: {launch_report}");
     let codex_key_one = log.lines().find(|l| l.ends_with(" key 1")).unwrap();
     let update_owner = codex_key_one.split_whitespace().next().unwrap();
     assert_eq!(log.lines().filter(|l| l.ends_with(" key 1")).count(), 1, "more than one member upgraded: {log}");
@@ -3502,6 +3539,8 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
         }
     }
     assert!(!log.contains("t-stuck "), "typed into an unknown dialog: {log}");
+    assert!(std::fs::read_to_string(&trace).unwrap_or_default().contains("Workspace access changed"),
+        "launch failure did not preserve the unknown dialog label");
     assert!(log.contains(" type Butler message "), "the leader is told about t-stuck: {log}");
     assert_eq!(log.lines().filter(|l| l.starts_with("t-codex-unanswerable key ")).count(), 0, "an unknown update menu was answered: {log}");
     assert_eq!(log.lines().filter(|l| l.starts_with("t-codex-human key ")).count(), 0, "a human-attached pane was changed: {log}");
