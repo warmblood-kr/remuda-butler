@@ -2220,18 +2220,19 @@ local function tick_notice_recovery(session, state)
   elseif state.phase == "verify_notice" then
     local notice_head = tostring(state.notice or ""):gsub("%s+", ""):sub(1, 32)
     local notice_visible = notice_head ~= "" and normalized:gsub("%s+", ""):find(notice_head, 1, true) ~= nil
-    if notice_visible or (decision == "NON-EMPTY"
-        and notice_matches_composer(session, screen, text, state.notice)) then
+    local notice_in_composer = decision == "NON-EMPTY"
+      and notice_matches_composer(session, screen, text, state.notice)
+    if notice_visible or notice_in_composer then
       state.saw_notice = true
     end
     local agent = bus.agents[session]
     local non_tui_echo = decision == "UNPARSEABLE" and agent
       and agent.kind ~= "claude" and agent.kind ~= "codex" and notice_visible
-    if (decision == "EMPTY" and state.saw_notice) or non_tui_echo then
+    if (decision == "EMPTY" and state.saw_notice)
+        or (state.saw_notice and notice_visible and not notice_in_composer) or non_tui_echo then
       return complete_notice_recovery(session, state)
     end
-    if decision == "NON-EMPTY" and notice_matches_composer(session, screen, text, state.notice)
-        and not state.return_retried then
+    if notice_in_composer and not state.return_retried then
       if not recovery_human_safe(session) then return false end
       local pressed, why = pcall(remuda.key, session, "RET")
       if not pressed then return notice_recovery_error(session, state, "the notice Return failed: " .. tostring(why)) end
