@@ -4476,8 +4476,9 @@ fn butler_session_exited_hook_relaunches_via_the_shared_launch_function() {
     );
     assert!(
         init_lua.contains("event = \"session_exited\", id = \"identity\"")
-            && init_lua.contains("host._butler_session_exited(name, info, instance_id)")
-            && main_lua.contains("function remuda._butler_session_exited(name, info, instance_id)")
+            && init_lua.contains("host._butler_session_exited(name, info)")
+            && main_lua.contains("function remuda._butler_session_exited(name, info)")
+            && main_lua.contains("type(info) == \"table\" and info.instance_id or nil")
             && main_lua.contains("stale_session_exit(name, instance_id)")
             && main_lua.contains("session.instance_id ~= instance_id")
             && main_lua[launch_fn_idx..].contains("remuda._butler_reconcile()"),
@@ -4507,20 +4508,35 @@ fn butler_session_exited_ignores_stale_instance_and_handles_current_instance() {
           bus.notice_screens[name] = "notice screen"
           bus.pending_tasks[name] = "pending task"
 
-          remuda._butler_session_exited(name, { reason = "exited" }, "old-instance")
+          remuda.emit("session_exited", name,
+            { reason = "exited", instance_id = "old-instance" })
           local stale_ignored = bus.notices[name] == "pending notice"
             and bus.notice_screens[name] == "notice screen"
             and bus.pending_tasks[name] == "pending task"
 
-          remuda._butler_session_exited(name, { reason = "closed" }, "new-instance")
+          remuda.emit("session_exited", name,
+            { reason = "closed", instance_id = "new-instance" })
           local current_handled = bus.notices[name] == nil
+            and bus.notice_screens[name] == nil
+            and bus.pending_tasks[name] == nil
+
+          bus.notices[name] = "legacy notice"
+          bus.notice_screens[name] = "legacy screen"
+          bus.pending_tasks[name] = "legacy task"
+          remuda.emit("session_exited", name, { reason = "closed" })
+          local missing_id_falls_back = bus.notices[name] == nil
             and bus.notice_screens[name] == nil
             and bus.pending_tasks[name] == nil
           remuda.ls = original_ls
           return tostring(stale_ignored) .. ":" .. tostring(current_handled)
+            .. ":" .. tostring(missing_id_falls_back)
         "#,
     );
-    assert_eq!(result, "true:true", "a stale exit must be ignored while a current exit is handled");
+    assert_eq!(
+        result,
+        "true:true:true",
+        "stale exits are ignored; current and missing-id exits are handled"
+    );
 }
 
 /// The watchdog end to end, proven by a real effect rather than a call

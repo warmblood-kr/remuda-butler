@@ -3209,7 +3209,8 @@ local function stale_session_exit(name, instance_id)
   return false
 end
 
-function remuda._butler_session_exited(name, info, instance_id)
+function remuda._butler_session_exited(name, info)
+  local instance_id = type(info) == "table" and info.instance_id or nil
   if stale_session_exit(name, instance_id) then
     _butler_session_trace("stale_session_exit", name .. " instance=" .. instance_id)
     return
