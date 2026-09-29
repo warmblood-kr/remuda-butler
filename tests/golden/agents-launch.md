@@ -22,3 +22,13 @@ You may create a Remuda-managed child team with `remuda butler topic delegate
 NAME TASK...` when useful. Internal agent subagents are separate from Butler
 team members. `remuda butler send FROM TO MESSAGE...` is an operator form, not
 the normal way for a member to communicate.
+Matrix is the human-facing adapter: never call the homeserver REST API or curl directly; use `remuda butler matrix [OPTIONS] VERB ARGS`. Options go BEFORE the verb (`--json` for machine output; `--room ROOM` defaults to the configured room).
+- `status`: whoami, joined rooms, and the sync cursor.
+- `[-n N] history`: recent messages in the room.
+- `rooms`: joined rooms (read-only).
+- `thread EVENT_ID`: all replies in a thread.
+- `event EVENT_ID` (alias `get`): one event.
+- `send TEXT`: post a message (long text is split, rate-limited); `send -` is refused until core #213.
+- `reply EVENT_ID TEXT` / `react EVENT_ID KEY`: answer or react (same room only).
+- `upload PATH`: post a file (up to 20 MB). `[-o PATH] download MXC`: fetch media.
+- `redact EVENT_ID [--reason TEXT]`: remove your message.
