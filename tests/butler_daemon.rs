@@ -4491,6 +4491,39 @@ fn butler_session_exited_hook_relaunches_via_the_shared_launch_function() {
     );
 }
 
+#[test]
+fn butler_session_exited_ignores_stale_instance_and_handles_current_instance() {
+    let dir = scratch_dir("butler-session-exit-instance-id");
+    let (_daemon, path) = butler_cli_test_daemon(&dir);
+    let result = eval(
+        &path,
+        r#"
+          local name = "reused-session"
+          local bus = remuda._butler_bus
+          local original_ls = remuda.ls
+          remuda.ls = function()
+            return {{ name = name, alive = true, instance_id = "new-instance" }}
+          end
+          bus.notices[name] = "pending notice"
+          bus.notice_screens[name] = "notice screen"
+          bus.pending_tasks[name] = "pending task"
+
+          remuda._butler_session_exited(name, { reason = "exited" }, "old-instance")
+          local stale_ignored = bus.notices[name] == "pending notice"
+            and bus.notice_screens[name] == "notice screen"
+            and bus.pending_tasks[name] == "pending task"
+
+          remuda._butler_session_exited(name, { reason = "closed" }, "new-instance")
+          local current_handled = bus.notices[name] == nil
+            and bus.notice_screens[name] == nil
+            and bus.pending_tasks[name] == nil
+          remuda.ls = original_ls
+          return tostring(stale_ignored) .. ":" .. tostring(current_handled)
+        "#,
+    );
+    assert_eq!(result, "true:true", "a stale exit must be ignored while a current exit is handled");
+}
+
 /// The watchdog end to end, proven by a real effect rather than a call
 /// record. `_butler_test_mode` is never set here -- this is the first test
 /// in this file to run the real `launch_butler`/`session_exited` code past
