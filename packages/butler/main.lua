@@ -827,7 +827,17 @@ remuda._butler_migrate_legacy_mail = migrate_legacy_mail
 local delivery_events = type(remuda.emit_until_success) == "function"
 local function inbox_delivery(message)
   local delivered, why
-  if message.kind == "forward" then
+  if message.kind == "matrix_reply" then
+    local queued, queue_error = remuda.butler.matrix.mail_reply({
+      mail_id = message.in_reply_to, reply_mail_id = message.reply_id,
+      text = message.text, route = message.matrix_route,
+    })
+    if not queued then
+      message.delivery_error = queue_error
+      return nil
+    end
+    return { id = message.reply_id, matrix_reply = true, source_mail_id = message.in_reply_to }
+  elseif message.kind == "forward" then
     delivered, why = mail.forward_delivery(message)
   else
     delivered, why = queue_message(message.from, message.to, message.text, message.subject,
@@ -847,6 +857,9 @@ local function deliver_message(message)
       error(message.delivery_error or "no Butler channel installed (try remuda-butler-inbox)", 0)
     end
     return delivered
+  end
+  if message.kind == "matrix_reply" then
+    error("Matrix reply delivery requires the Butler delivery event hook", 0)
   end
   local delivered, why
   if message.kind == "forward" then
@@ -2589,6 +2602,7 @@ function remuda._butler_reply(from, message_id, text)
   local sender = sender_address(from)
   local message, err, recipient = mail.reply(sender, message_id, text, from == OPERATOR, deliver_message)
   if not message then error(err, 0) end
+  if message.matrix_reply then return "queued Matrix reply " .. message.id .. " for " .. message.source_mail_id end
   return notify_queued(message, recipient.alias, "(reply) from " .. sender.alias)
 end
 function remuda._butler_forward(from, message_id, member, note)
