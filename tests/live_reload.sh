@@ -7,6 +7,7 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 # Default: step 3 Butler with imperative, manually purged registrations.
 OLD_REF=${1:-2535f27}
 T=$(mktemp -d /tmp/brl.XXXXXX)
+T=$(cd "$T" && pwd -P)
 S=brl
 # This run's own fake-process durations: a global `sleep 10000[12]` pgrep saw
 # every concurrent run's sessions and failed the pid check at random.

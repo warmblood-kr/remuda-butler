@@ -14,6 +14,7 @@ CORE_URL=${CORE_URL:-https://github.com/warmblood-kr/remuda.git}
 # Keep in step with tests/rust_tests.sh and tests/golden_guidance.sh.
 CORE_REF=${CORE_REF:-355e8b2}
 T=$(mktemp -d /tmp/bst.XXXXXX)
+T=$(cd "$T" && pwd -P)
 trap 'rm -rf "$T"' EXIT
 
 if [[ -z ${REMUDA_BIN:-} ]]; then
