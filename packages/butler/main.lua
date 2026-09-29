@@ -1098,11 +1098,22 @@ local function choose(candidates, opts, done)
         break
       end
     end
-    local lower = screen:lower()
-    if not known and (lower:find("trust", 1, true) or lower:find("continue", 1, true)
+    if known then
+      state.unknown_dialog_screen, state.unknown_dialog_since = nil, nil
+    else
+      local lower = screen:lower()
+      local suspicious = lower:find("trust", 1, true) or lower:find("continue", 1, true)
         or lower:find("press enter", 1, true) or lower:find("select an option", 1, true)
-        or lower:find("terms of service", 1, true) or lower:find("confirm", 1, true)) then
-      fail_candidate("dialog", one_line(screen)); return
+        or lower:find("terms of service", 1, true) or lower:find("confirm", 1, true)
+      if suspicious then
+        if state.unknown_dialog_screen ~= screen then
+          state.unknown_dialog_screen, state.unknown_dialog_since = screen, os.time()
+        elseif os.time() - state.unknown_dialog_since >= 2 then
+          fail_candidate("dialog", one_line(screen)); return
+        end
+      else
+        state.unknown_dialog_screen, state.unknown_dialog_since = nil, nil
+      end
     end
     if os.time() - state.started >= state.timeout then
       local prefix = state.dialog_seen and ("dialog remained after its handler: " .. state.dialog_seen .. "; ") or ""
