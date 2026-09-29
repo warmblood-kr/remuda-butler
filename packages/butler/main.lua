@@ -3458,8 +3458,9 @@ function remuda._butler_compaction_execute(session_name, force)
     }
     return statuses[blocked] or "skipped_unknown"
   end
-  local action_blocked = not restore_pending and remuda._butler_compaction_action_guard(session_name)
+  local action_blocked = remuda._butler_compaction_action_guard(session_name)
   if action_blocked then
+    if restore_pending then return "restore_pending" end
     if action_blocked == "human attached" then return "skipped_attached" end
     if action_blocked == "busy" then return "skipped_busy" end
     return "skipped_unknown"
@@ -3487,6 +3488,25 @@ function remuda._butler_compaction_execute(session_name, force)
       pcall(remuda._butler_compaction_restore_settings_file, settings_path, prior_settings_model)
     end
     release_lock()
+    if state.restore_pending_attempt_active then
+      state.restore_pending_attempt_active = nil
+      if (tonumber(state.restore_pending_attempts) or 0) >= 3 then
+        state.restore_pending = nil
+        state.failure_cooldown_until = (remuda._butler_compaction_now or os.time)()
+          + config.failure_cooldown_seconds
+        state.cooldown_ticks = 0
+        if not state.restore_pending_failure_notified then
+          state.restore_pending_failure_notified = true
+          pcall(remuda._butler_send, session_name, agent.parent or "butler",
+            "model restore failed; member may still be on sonnet")
+        end
+      else
+        state.failure_cooldown_until = nil
+      end
+      _butler_trace("restore_failed", detail .. " attempt=" .. tostring(state.restore_pending_attempts)
+        .. " reason=" .. tostring(reason))
+      return
+    end
     state.failure_cooldown_until = (remuda._butler_compaction_now or os.time)()
       + config.failure_cooldown_seconds
     state.cooldown_ticks = 0
@@ -3506,6 +3526,9 @@ function remuda._butler_compaction_execute(session_name, force)
     state.cooldown_ticks = config.cooldown_ticks
     state.compaction_still_running_notice_sent = nil
     state.restore_pending = nil
+    state.restore_pending_attempts = nil
+    state.restore_pending_attempt_active = nil
+    state.restore_pending_failure_notified = nil
     clear_legacy_restore_state(state)
     _butler_trace(event or "verified", detail)
   end
@@ -3535,6 +3558,9 @@ function remuda._butler_compaction_execute(session_name, force)
       on_unknown = function()
         if agent.kind == "claude" and (id == "model-sonnet" or id == "compact-complete") then
           state.restore_pending = prior_model
+          state.restore_pending_attempts = 0
+          state.restore_pending_attempt_active = nil
+          state.restore_pending_failure_notified = nil
         end
         fail("unrecognized dialog during " .. id)
       end,
@@ -3605,6 +3631,8 @@ function remuda._butler_compaction_execute(session_name, force)
     state.compaction_in_progress = true
     state.failure_cooldown_until = nil
     owner_state.compaction_fleet_active = state_key
+    state.restore_pending_attempts = (tonumber(state.restore_pending_attempts) or 0) + 1
+    state.restore_pending_attempt_active = true
     restore_model("restored_after_dialog")
     return "restoring_model"
   end
