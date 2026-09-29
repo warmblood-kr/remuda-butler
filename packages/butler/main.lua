@@ -1883,11 +1883,17 @@ function remuda._butler_notify_policy(session, now)
     if candidate.name == session then row = candidate end
   end
   if not row or not row.alive then return false end
-  if remuda.session then
-    local checked, current = pcall(remuda.session, session)
-    if not checked or not current or current.is_busy then return false end
-  end
   local attached = row.attached
+  -- Attached panes use the human idle clock or screen stability below. Only
+  -- detached panes need the core busy bit, whose Session metatable may throw
+  -- when older cores lack output_idle data.
+  if not attached and remuda.session then
+    local checked, busy = pcall(function()
+      local current = remuda.session(session)
+      return current and current.is_busy
+    end)
+    if not checked or type(busy) ~= "boolean" or busy then return false end
+  end
   local seen = bus.notice_screens[session] or {}
   bus.notice_screens[session] = seen
   local screen
@@ -2181,8 +2187,11 @@ local function recovery_human_safe(session, allow_busy)
   if not session_row or not session_row.alive or session_row.attached then return false end
   if remuda._butler_human_active(session) then return false end
   if remuda.session then
-    local ok, row = pcall(remuda.session, session)
-    if not ok or not row or (row.is_busy and not allow_busy) then return false end
+    local ok, busy = pcall(function()
+      local row = remuda.session(session)
+      return row and row.is_busy
+    end)
+    if not ok or type(busy) ~= "boolean" or (busy and not allow_busy) then return false end
   end
   return true
 end
@@ -2209,8 +2218,12 @@ local function tick_notice_recovery(session, state)
   if not recovery_human_safe(session, observing_submit) then return false end
   local busy = false
   if remuda.session then
-    local checked, row = pcall(remuda.session, session)
-    busy = checked and row and row.is_busy == true
+    local checked, value = pcall(function()
+      local row = remuda.session(session)
+      return row and row.is_busy
+    end)
+    if not checked or type(value) ~= "boolean" then return false end
+    busy = value
   end
   if not busy then state.checks = (state.checks or 0) + 1 end
   if state.checks > 40 then return notice_recovery_error(session, state, "verification timed out") end

@@ -3327,11 +3327,11 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
           remuda.butler.project_home({home:?})
           remuda._butler_session_trace_path = {trace:?}
           remuda._butler_task_poke_attempts = 6
-          remuda._butler_test_force_launch_probe = {
+          remuda._butler_test_force_launch_probe = {{
             ["t-claude-launch"] = true,
             ["t-claude-launch-unknown"] = true,
             ["t-claude-launch-transient"] = true,
-          }
+          }}
           remuda._butler_agent_builders.claude = function() return {{"sh"}} end
           remuda._butler_agent_builders.codex = function() return {{"sh", "-c", "sleep 30"}} end
           local rule = string.rep("─", 20)
@@ -3539,7 +3539,7 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
         }
     }
     assert!(!log.contains("t-stuck "), "typed into an unknown dialog: {log}");
-    assert!(std::fs::read_to_string(&trace).unwrap_or_default().contains("Some unknown dialog"),
+    assert!(std::fs::read_to_string(&trace).unwrap_or_default().contains("Workspace access changed"),
         "launch failure did not preserve the unknown dialog label");
     assert!(log.contains(" type Butler message "), "the leader is told about t-stuck: {log}");
     assert_eq!(log.lines().filter(|l| l.starts_with("t-codex-unanswerable key ")).count(), 0, "an unknown update menu was answered: {log}");
