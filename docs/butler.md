@@ -15,12 +15,12 @@ receiving Butler, and Butler never auto-replies to agent-authored messages.
 Mail records the Matrix sender, `room` (`home` or `all`), room ID, event ID,
 and thread ID.
 
-Roster classification uses Matrix MXID localparts: `agent-` and `butler-`
-prefixes identify AGENT accounts; configured `butler_senders` are also AGENTs
-for older accounts. Every other syntactically valid MXID is a HUMAN account.
-Malformed or unrecognized sender IDs are not routed to mail.
-The relay reads room membership state and keeps its roster with its private
-state file. The sender allowlist still applies before classification.
+Roster classification uses Matrix MXID localparts: case-insensitive `agent-`
+and `butler-` prefixes identify AGENT accounts; configured `butler_senders`
+also identify older agent accounts. Every other syntactically valid MXID is a
+HUMAN account. Malformed or unrecognized sender IDs are not routed to mail.
+The sender allowlist applies before classification. Butler classifies each
+event directly from its sender MXID, without a cached roster.
 
 If the saved `.since` state is unreadable or has invalid field types, the relay
 starts with a fresh sync baseline. It does not replay room history; messages

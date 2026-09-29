@@ -2506,7 +2506,7 @@ fn butler_matrix_relay_persists_matrix_event_time_through_real_mail_delivery() {
     let sync = "http://matrix.example.org/_matrix/client/v3/sync?since=s0&timeout=100";
     let event = serde_json::json!({"type":"m.room.message","event_id":"$mail-time",
         "sender":"@alice:example.org","origin_server_ts":0,
-        "content":{"msgtype":"m.text","body":"dated by Matrix"}});
+        "content":{"msgtype":"m.text","body":"dated \u{1b}[31mby Matrix\u{9b}2J"}});
     let response = serde_json::json!({"next_batch":"s1","rooms":{"join":{room:{"timeline":{"events":[event]}}}}});
     let result = eval(&path, &format!(r#"
       local matrix = remuda.butler.matrix
@@ -2524,8 +2524,9 @@ fn butler_matrix_relay_persists_matrix_event_time_through_real_mail_delivery() {
       for _, id in ipairs(remuda._butler_mail.mailbox(root.id)) do
         local message = bus.messages[id]
         if message and message.matrix and message.matrix.event_id == "$mail-time" then
+          local body = bus.objects[message.body.object_id].content
           return message.created_at .. "|" .. tostring(message.matrix.room)
-            .. "|" .. tostring(message.matrix.event_id)
+            .. "|" .. tostring(message.matrix.event_id) .. "|" .. body
         end
       end
       local state = matrix.relay.instance:state()
@@ -2534,8 +2535,8 @@ fn butler_matrix_relay_persists_matrix_event_time_through_real_mail_delivery() {
         .. "|inbox=" .. #remuda._butler_mail.mailbox(root.id)
     "#,
         baseline=lua_raw_string(baseline), sync=lua_raw_string(sync), response=lua_raw_string(&response.to_string())));
-    assert_eq!(result, "1970-01-01T00:00:00Z|home|$mail-time",
-        "relay-to-mail delivery must preserve the timestamp and Matrix envelope: {result}");
+    assert_eq!(result, "1970-01-01T00:00:00Z|home|$mail-time|dated [31mby Matrix2J",
+        "relay-to-mail delivery must preserve metadata and strip control characters: {result}");
 }
 
 #[test]
@@ -2808,27 +2809,51 @@ fn butler_matrix_reply_home_all_roster_subscriptions_survive_restart() {
       matrix.send({{room=all, text="@butler-b:example.org please reply"}},
         function(result) send_error=result.error end)
       if not send_error or not send_error:find("Butler-to-Butler", 1, true) then return "send-loop-not-blocked" end
+      local send_completion
+      remuda.pending = function()
+        return {{resolve=function(_, code, stdout, stderr)
+          send_completion={{code=code, stdout=stdout, stderr=stderr}}
+        end}}
+      end
+      local send_path = "http://matrix.example.org/_matrix/client/v3/rooms/"
+        .. matrix.path_component(all) .. "/send/m.room.message/"
+      remuda.http.respond_prefix("PUT", send_path,
+        {{status=200,headers={{}},body='{{"event_id":"$a-send"}}'}})
+      matrix.relay.instance = ra
+      matrix.cli({{"matrix", "--room", all, "send", "fleet note"}}, nil)
+      for _=1,4 do remuda.http.tick() end
+      if not send_completion or send_completion.code ~= 0 then return "all-room-send-failed" end
+      if not ra:state().subscriptions[all]["$a-send"] then return "send-did-not-subscribe" end
+      local mention_mail_id = has(a, "$mention-a").test_mail_id
+      if not ra:state().subscriptions[all]["$mention-thread"]
+        or ra:state().subscriptions[all]["$mention-thread"].mail_id ~= mention_mail_id then
+        return "mention-subscription-missing"
+      end
+      ra:state().routes[mention_mail_id] = nil
       if not ra:record_outgoing_reply("$top", "$a-post") then return "post-route-missing" end
+      if ra:state().routes[mention_mail_id] then return "mention-route-not-removed" end
       ra:stop()
       ra = matrix.relay.new({{config_path=config_a, matrix=matrix, deliver=deliver(a, "a")}})
       if ra:state().since ~= "cursor-1" then return "cursor-not-restored" end
       local followups = {{
         ev("$mention-followup", "@human:example.org", "continued", "$mention-thread"),
         ev("$post-followup", "@human:example.org", "reply to A post", "$top", "$a-post"),
+        ev("$send-followup", "@human:example.org", "reply to send", "$a-send"),
         ev("$agent-thread-followup", "@human:example.org", "agent thread continuation", "$agent-thread"),
         ev("$agent-quiet-2", "@agent-bot:example.org", "quiet again", "$mention-thread"),
         ev("$agent-mention-2", "@agent-bot:example.org", "@butler-a:example.org again", "$mention-thread"),
       }}
       ra._response(response("cursor-2", nil, nil, followups), "/_matrix/client/v3/sync")
       rb._response(response("cursor-2", nil, nil, followups), "/_matrix/client/v3/sync")
-      if not has(a, "$mention-followup") or not has(a, "$post-followup")
+      if not has(a, "$mention-followup") or not has(a, "$post-followup") or not has(a, "$send-followup")
         or not has(a, "$agent-thread-followup") then return "subscription-not-restored" end
       if has(a, "$mention-followup").context_mail_id ~= has(a, "$mention-a").test_mail_id
         or has(a, "$post-followup").context_mail_id ~= has(a, "$top").test_mail_id then
         return "thread-context-mail-lost:" .. tostring(has(a, "$mention-followup").context_mail_id)
           .. ":" .. tostring(has(a, "$post-followup").context_mail_id)
       end
-      if has(b, "$mention-followup") or has(b, "$post-followup") or has(b, "$agent-thread-followup") then return "thread-leaked-to-B" end
+      if has(b, "$mention-followup") or has(b, "$post-followup") or has(b, "$send-followup")
+        or has(b, "$agent-thread-followup") then return "thread-leaked-to-B" end
       if has(a, "$agent-quiet-2") or has(b, "$agent-quiet-2") then return "agent-without-mention-delivered" end
       if not has(a, "$agent-mention-2") or has(b, "$agent-mention-2") then return "agent-mention-followup-routing-failed" end
       if ra:can_reply_to("$agent-mention-2") then return "agent-reply-allowed" end
@@ -2848,10 +2873,16 @@ fn butler_matrix_reply_home_all_roster_subscriptions_survive_restart() {
 fn butler_matrix_reply_thread_returns_to_original_mail_after_relay_restart() {
     let dir = scratch_dir("matrix-thread-restart");
     let (_daemon, path) = butler_cli_test_daemon(&dir);
-    let room = "!thread-restart:example.org";
+    let home = "!thread-restart-home:example.org";
+    let room = "!thread-restart-all:example.org";
     let (token_path, config_path) = butler_config(
-        &dir, "thread-restart", "http://matrix.example.org", room,
-        "@butler:example.org", "@human:example.org");
+        &dir, "thread-restart", "http://matrix.example.org", home,
+        "@butler:example.org", "@human:example.org,@agent-helper:example.org");
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new().append(true).open(&config_path).unwrap();
+        writeln!(file, "all_room={room}").unwrap();
+    }
     eval(&path, include_str!("support/fake_http.lua"));
     eval(&path, &format!(
         "remuda._butler_matrix_config={{token_path={},config_path={}}}; remuda.exec('butler/matrix')",
@@ -2859,13 +2890,15 @@ fn butler_matrix_reply_thread_returns_to_original_mail_after_relay_restart() {
     let result = eval(&path, &format!(r#"
       local matrix, room = remuda.butler.matrix, {room}
       local config_path = {config}
+      local parsed = assert(matrix.read_config(config_path))
+      if parsed.all_room ~= room then return "all-room-config-missing:" .. tostring(parsed.all_room) end
       local function payload(cursor, events)
         return {{next_batch=cursor, rooms={{join={{[room]={{timeline={{events=events}}}}}}}}}}
       end
       local function deliver(event)
         return remuda._butler_inbox_delivery({{
           from={{host="matrix", id="", alias=event.sender, session=event.sender,
-            kind=event.from_butler and "matrix-butler" or "matrix", leader=""}},
+            kind=event.from_agent and "matrix-agent" or "matrix", leader=""}},
           to="butler", text=event.body, in_reply_to=event.context_mail_id,
           subject="Matrix", matrix=event,
         }})
@@ -2873,31 +2906,52 @@ fn butler_matrix_reply_thread_returns_to_original_mail_after_relay_restart() {
       local relay = matrix.relay.new({{config_path=config_path, matrix=matrix, deliver=deliver}})
       relay._response({{next_batch="s0"}}, "/_matrix/client/v3/sync")
       relay._response(payload("s1", {{{{type="m.room.message", event_id="$human-root",
-        sender="@human:example.org", content={{msgtype="m.text", body="@butler:example.org please help"}}}}}}),
+        sender="@human:example.org", content={{msgtype="m.text", body="please help"}}}},
+        {{type="m.room.message", event_id="$agent-root", sender="@agent-helper:example.org",
+          content={{msgtype="m.text", body="@butler:example.org check this"}}}}}}),
         "/_matrix/client/v3/sync")
-      local source_id
-      for mail_id in pairs(relay:state().routes) do source_id=mail_id end
+      local source_id, agent_id
+      for mail_id, route in pairs(relay:state().routes) do
+        if route.event_id == "$human-root" then source_id=mail_id end
+        if route.event_id == "$agent-root" then agent_id=mail_id end
+      end
       if not source_id then return "source-mail-route-missing" end
+      if not agent_id then return "agent-mail-route-missing" end
+      if not matrix.room_allowed(room) then return "request-config-does-not-allow-all-room" end
 
       remuda.http.respond("GET",
-        "http://matrix.example.org/_matrix/client/v3/rooms/%21thread-restart%3Aexample.org/context/%24human-root",
-        {{status=200, headers={{}}, body='{{"event":{{"room_id":"!thread-restart:example.org"}}}}'}})
+        "http://matrix.example.org/_matrix/client/v3/rooms/%21thread-restart-all%3Aexample.org/context/%24human-root",
+        {{status=200, headers={{}}, body='{{"event":{{"room_id":"!thread-restart-all:example.org"}}}}'}})
       remuda.http.respond_prefix("PUT",
-        "http://matrix.example.org/_matrix/client/v3/rooms/%21thread-restart%3Aexample.org/send/m.room.message/",
+        "http://matrix.example.org/_matrix/client/v3/rooms/%21thread-restart-all%3Aexample.org/send/m.room.message/",
         {{status=200, headers={{}}, body='{{"event_id":"$butler-reply"}}'}})
       matrix.relay.instance = relay
-      local completion
+      local completion, cli_completion
       remuda.pending = function()
         return {{resolve=function(_, code, stdout, stderr)
-          completion={{code=code, stdout=stdout, stderr=stderr}}
+          cli_completion={{code=code, stdout=stdout, stderr=stderr}}
         end}}
       end
-      matrix.cli({{"matrix", "reply", "$human-root", "answer"}}, nil)
+      matrix.relay.instance = nil
+      matrix.cli({{"matrix", "reply", "$human-root", "no relay"}}, nil)
+      if not cli_completion or cli_completion.code == 0
+        or not cli_completion.stderr:find("relay is not running", 1, true) then return "cli-failed-open-without-relay" end
+      matrix.relay.instance = relay
+      local before = #remuda.http.calls
+      local sent_ok, sent_error = pcall(remuda._butler_reply, "butler", agent_id, "must refuse")
+      if sent_ok or not tostring(sent_error):find("Butler-to-Butler replies are disabled", 1, true)
+        or #remuda.http.calls ~= before then return "agent-mail-reply-not-refused" end
+      local queued_reply = remuda._butler_reply("butler", source_id, "answer")
       for _=1,4 do remuda.http.tick() end
-      if not completion or completion.code ~= 0 then return "butler-reply-failed:" .. tostring(completion and completion.stderr) end
       if relay:state().routes[source_id].last_reply_event_id ~= "$butler-reply" then
-        return "sent-event-not-correlated"
+        local pending = false
+        for _, item in pairs(relay:state().reply_outbox) do pending = item.last_error or item.status end
+        return "sent-event-not-correlated:" .. tostring(queued_reply) .. ":"
+          .. tostring(relay:state().routes[source_id].last_reply_event_id) .. ":"
+          .. tostring(pending) .. ":calls=" .. tostring(#remuda.http.calls)
       end
+      local subscribed = relay:state().subscriptions[room]["$human-root"]
+      if type(subscribed) ~= "table" or subscribed.mail_id ~= source_id then return "mail-reply-did-not-subscribe" end
       local threaded = false
       for _, call in ipairs(remuda.http.calls) do
         if call.method == "PUT" then
@@ -2911,6 +2965,9 @@ fn butler_matrix_reply_thread_returns_to_original_mail_after_relay_restart() {
 
       relay:stop()
       local restarted = matrix.relay.new({{config_path=config_path, matrix=matrix, deliver=deliver}})
+      matrix.relay.instance = restarted
+      local persisted = restarted:state().subscriptions[room]["$human-root"]
+      if type(persisted) ~= "table" or persisted.mail_id ~= source_id then return "reply-subscription-not-persisted" end
       local followup={{{{type="m.room.message", event_id="$human-followup",
         sender="@human:example.org", content={{msgtype="m.text", body="thanks",
           ["m.relates_to"]={{rel_type="m.thread", event_id="$human-root",
@@ -6863,6 +6920,14 @@ fn butler_matrix_reply_react_upload_redact_join_and_leave_compose_request() {
       matrix.join({{ room = room }}, function(value) agent_error = value end, "agent1")
       if not agent_error or not agent_error.error or #remuda.http.calls ~= 0 then return "agent-join-not-refused" end
       local outside, before_outside = nil, #remuda.http.calls
+      matrix.relay.instance = nil
+      local no_relay
+      matrix.reply({{room=room, event_id="$outside", text="must fail closed"}},
+        function(value) no_relay=value end)
+      if not no_relay or not no_relay.error or #remuda.http.calls ~= before_outside then
+        return "low-level-reply-failed-open-without-relay"
+      end
+      matrix.relay.instance = {{can_reply_to=function() return true end}}
       remuda.http.respond("GET", "https://matrix.example.org/_matrix/client/v3/rooms/%21write%3Aexample.org/context/%24outside",
         response('{{"event":{{"room_id":"!other:example.org"}}}}'))
       matrix.reply({{ room = room, event_id = "$outside", text = "must not send" }}, function(value) outside = value end)

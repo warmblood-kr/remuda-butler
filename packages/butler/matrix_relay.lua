@@ -86,6 +86,12 @@ local function cap_body(body)
   return prefix .. suffix
 end
 
+local function mail_body(body)
+  body = cap_body(body)
+  body = body:gsub("[\000-\008\011-\013\014-\031\127]", "")
+  return (body:gsub("\194[\128-\159]", ""))
+end
+
 local function timestamp(event)
   local ms = event and tonumber(event.origin_server_ts)
   if ms and ms >= 0 and ms < 253402300800000 then
@@ -124,13 +130,28 @@ local function mentions(content, body, mxid)
   if type(mentions) == "table" and type(mentions.user_ids) == "table" then
     for _, user in ipairs(mentions.user_ids) do if user == mxid then return true end end
   end
-  return type(body) == "string" and body:find(mxid, 1, true) ~= nil
+  if type(body) ~= "string" then return false end
+  local at = 1
+  while true do
+    local first, last = body:find(mxid, at, true)
+    if not first then return false end
+    local before = first > 1 and body:sub(first - 1, first - 1) or nil
+    local after = body:sub(last + 1, last + 1)
+    local boundary = "[%w._=/%-:@]"
+    if (not before or not before:match(boundary)) and (after == "" or not after:match(boundary)) then
+      return true
+    end
+    at = first + 1
+  end
 end
 
 local function member_kind(mxid, cfg)
-  local localpart = type(mxid) == "string" and mxid:match("^@([^:]+):")
+  local localpart, server = type(mxid) == "string" and mxid:match("^@([^:]+):(.+)$")
+  if not localpart or server == "" then return "UNKNOWN" end
+  local agent_prefix = localpart and localpart:sub(1, 6):lower() == "agent-"
+  local butler_prefix = localpart and localpart:sub(1, 7):lower() == "butler-"
   if mxid == cfg.self_mxid or cfg.butler_senders[mxid]
-    or (localpart and (localpart:match("^agent%-") or localpart:match("^butler%-"))) then
+    or agent_prefix or butler_prefix then
     return "AGENT"
   end
   if localpart and localpart ~= "" then return "HUMAN" end
@@ -179,14 +200,15 @@ local function subscribe(state, room_id, thread_id, mail_id)
   if type(room_id) ~= "string" or type(thread_id) ~= "string" or thread_id == "" then return end
   local subscriptions = state.subscriptions[room_id] or json.object({})
   state.subscriptions[room_id] = subscriptions
-  subscriptions[thread_id] = mail_id or true
+  subscriptions[thread_id] = { mail_id = mail_id,
+    created_at = os.date("!%Y-%m-%dT%H:%M:%SZ") }
   trim_map(subscriptions, MAX_THREAD_SUBSCRIPTIONS, "created_at")
 end
 
 local function empty_state()
   return { since = nil, messages_since = nil, processed = {}, processed_order = {},
     pending = json.object({}), quarantine = json.array({}), routes = json.object({}),
-    subscriptions = json.object({}), roster = json.object({}),
+    subscriptions = json.object({}),
     reply_outbox = json.object({}), reply_results = json.object({}) }
 end
 
@@ -215,7 +237,6 @@ local function load_state(path)
   local reply_outbox = value.matrix_reply_outbox or json.object({})
   local reply_results = value.matrix_reply_results or json.object({})
   local subscriptions = value.matrix_thread_subscriptions or json.object({})
-  local roster = value.matrix_room_roster or json.object({})
   if (since ~= nil and type(since) ~= "string")
     or (messages_since ~= nil and type(messages_since) ~= "string")
     or type(processed_ids) ~= "table" or processed_ids == json.null
@@ -227,8 +248,7 @@ local function load_state(path)
     or type(routes) ~= "table" or routes == json.null or getmetatable(routes) == JSON_ARRAY_MT
     or type(reply_outbox) ~= "table" or reply_outbox == json.null or getmetatable(reply_outbox) == JSON_ARRAY_MT
     or type(reply_results) ~= "table" or reply_results == json.null or getmetatable(reply_results) == JSON_ARRAY_MT
-    or type(subscriptions) ~= "table" or subscriptions == json.null or getmetatable(subscriptions) == JSON_ARRAY_MT
-    or type(roster) ~= "table" or roster == json.null or getmetatable(roster) == JSON_ARRAY_MT then
+    or type(subscriptions) ~= "table" or subscriptions == json.null or getmetatable(subscriptions) == JSON_ARRAY_MT then
     return empty_state(), "invalid Matrix relay state fields"
   end
   local state = empty_state()
@@ -240,18 +260,16 @@ local function load_state(path)
     if type(room_id) == "string" and type(roots) == "table" and getmetatable(roots) ~= JSON_ARRAY_MT then
       local valid_roots = json.object({})
       for thread_id, mail_id in pairs(roots) do
-        if type(thread_id) == "string" and thread_id ~= ""
-          and (mail_id == true or type(mail_id) == "string") then
-          valid_roots[thread_id] = mail_id
+        if type(thread_id) == "string" and thread_id ~= "" then
+          if type(mail_id) == "table" and type(mail_id.created_at) == "string" then
+            valid_roots[thread_id] = mail_id
+          elseif mail_id == true or type(mail_id) == "string" then
+            valid_roots[thread_id] = { mail_id = type(mail_id) == "string" and mail_id or nil, created_at = "" }
+          end
         end
       end
       trim_map(valid_roots, MAX_THREAD_SUBSCRIPTIONS, "created_at")
       state.subscriptions[room_id] = valid_roots
-    end
-  end
-  for room_id, members in pairs(roster) do
-    if type(room_id) == "string" and type(members) == "table" and getmetatable(members) ~= JSON_ARRAY_MT then
-      state.roster[room_id] = members
     end
   end
   for _, id in ipairs(processed_ids) do
@@ -313,7 +331,7 @@ local function save_state(path, state)
     messages_since = state.messages_since, pending_events = state.pending,
     quarantine = state.quarantine, matrix_mail_routes = state.routes,
     matrix_reply_outbox = state.reply_outbox, matrix_reply_results = state.reply_results,
-    matrix_thread_subscriptions = state.subscriptions, matrix_room_roster = state.roster })
+    matrix_thread_subscriptions = state.subscriptions })
   return remuda.fs.write_atomic(path, json, { private = true })
 end
 
@@ -425,7 +443,7 @@ function relay.new(options)
     if type(event_id) ~= "string" or type(sent_id) ~= "string" or sent_id == "" then return false end
     for source_mail_id, route in pairs(state.routes) do
       if route.event_id == event_id or route.last_reply_event_id == event_id then
-        if route.from_agent then return false end
+        if route.from_agent ~= false then return false end
         route.last_reply_event_id = sent_id
         if route.room_kind == "all" then
           subscribe(state, route.room_id, route.thread_root or route.event_id, source_mail_id)
@@ -440,7 +458,7 @@ function relay.new(options)
   function instance:can_reply_to(event_id)
     for _, route in pairs(state.routes) do
       if route.event_id == event_id or route.last_reply_event_id == event_id then
-        return not route.from_agent
+        return route.from_agent == false
       end
     end
     return false
@@ -503,8 +521,12 @@ function relay.new(options)
         else
           local route = state.routes[item.source_mail_id] or {}
           route.room_id, route.event_id, route.thread_root = item.room_id, item.event_id, item.thread_root
+          route.from_agent, route.room_kind = item.from_agent, item.room_kind
           route.last_reply_mail_id, route.last_reply_event_id = reply_id, sent_id
           state.routes[item.source_mail_id] = route
+          if route.room_kind == "all" then
+            subscribe(state, route.room_id, route.thread_root or route.event_id, item.source_mail_id)
+          end
           state.reply_results[reply_id] = { source_mail_id = item.source_mail_id,
             reply_mail_id = reply_id, room_id = item.room_id, thread_root = item.thread_root,
             event_id = sent_id, event_ids = ids, completed_at = os.date("!%Y-%m-%dT%H:%M:%SZ") }
@@ -538,19 +560,20 @@ function relay.new(options)
     if type(source_id) ~= "string" or source_id == "" or type(reply_id) ~= "string" or reply_id == "" then
       return nil, "mail_id and reply_mail_id are required"
     end
+    local route = state.routes[source_id] or opts.route
+    if not route then return nil, "Matrix route for Butler mail " .. source_id .. " was not found" end
+    if route.from_agent ~= false then return nil, "Butler-to-Butler replies are disabled" end
     if state.reply_results[reply_id] then
       if callback then callback(state.reply_results[reply_id]) end
       return { cancel = function() end }
     end
-    local route = state.routes[source_id] or opts.route
-    if not route then return nil, "Matrix route for Butler mail " .. source_id .. " was not found" end
-    if route.from_butler then return nil, "Butler-to-Butler replies are disabled" end
     if not state.routes[source_id] then
       if type(route.room_id) ~= "string" or type(route.event_id) ~= "string" then
         return nil, "Matrix reply route is incomplete"
       end
       state.routes[source_id] = { room_id = route.room_id, event_id = route.event_id,
         thread_root = route.thread_root, in_reply_to = route.in_reply_to,
+        from_agent = route.from_agent, room_kind = route.room_kind,
         created_at = os.date("!%Y-%m-%dT%H:%M:%SZ") }
       route = state.routes[source_id]
       trim_map(state.routes, MAX_MAIL_ROUTES, "created_at")
@@ -566,6 +589,7 @@ function relay.new(options)
       local root = route.thread_root
       state.reply_outbox[reply_id] = { source_mail_id = source_id, room_id = route.room_id,
         event_id = route.event_id, thread_root = root, text = opts.text,
+        from_agent = route.from_agent, room_kind = route.room_kind,
         txn_id = opts.txn_id or ("butler_" .. reply_id), attempts = 0, status = "pending",
         created_at = os.date("!%Y-%m-%dT%H:%M:%SZ") }
       persist()
@@ -698,29 +722,6 @@ function relay.new(options)
     schedule(delay, "retry", function() if active then poll() end end)
   end
 
-  local function update_roster(room_id, room)
-    local roster = state.roster[room_id] or json.object({})
-    state.roster[room_id] = roster
-    local changed = false
-    local function scan(events)
-      for _, event in ipairs(type(events) == "table" and events or {}) do
-        if type(event) == "table" and event.type == "m.room.member"
-          and type(event.state_key) == "string" and type(event.content) == "table" then
-          local membership = event.content.membership
-          if membership == "join" then
-            roster[event.state_key] = member_kind(event.state_key, cfg)
-          elseif membership == "leave" or membership == "ban" then
-            roster[event.state_key] = nil
-          end
-          changed = true
-        end
-      end
-    end
-    scan(room and room.state and room.state.events)
-    scan(room and room.timeline and room.timeline.events)
-    return changed
-  end
-
   local function accept_events(events, cursor, room_id)
     local added = {}
     for _, ev in ipairs(type(events) == "table" and events or {}) do
@@ -742,10 +743,7 @@ function relay.new(options)
           else
           local thread_root, in_reply_to = relation_fields(content)
           local actual_room = room_id or cfg.room
-          local roster = state.roster[actual_room] or json.object({})
-          state.roster[actual_room] = roster
-          local sender_kind = roster[ev.sender] or member_kind(ev.sender, cfg)
-          roster[ev.sender] = sender_kind
+          local sender_kind = member_kind(ev.sender, cfg)
           local is_mention = mentions(content, content.body, cfg.self_mxid)
           local is_home = actual_room == cfg.home_room
           local thread_id = thread_root or in_reply_to
@@ -760,15 +758,16 @@ function relay.new(options)
               (not is_threaded or is_mention or is_subscribed))))
           local route_mail_id = thread_id
             and instance:mail_route_for_event(actual_room, thread_root, in_reply_to) or nil
-          local subscribed_mail_id = thread_id and subscriptions[thread_id]
-          local context_mail_id = route_mail_id or (type(subscribed_mail_id) == "string" and subscribed_mail_id or nil)
+          local subscription = thread_id and subscriptions[thread_id]
+          local subscribed_mail_id = type(subscription) == "table" and subscription.mail_id or nil
+          local context_mail_id = route_mail_id or subscribed_mail_id
           if not accepted then
             add_processed(state, ev.event_id)
             if cursor then state.since = cursor end
           else
           state.pending[ev.event_id] = {
             sender = ev.sender, room_id = actual_room, event_id = ev.event_id,
-            created_at = timestamp(ev), body = cap_body(content.body),
+            created_at = timestamp(ev), body = mail_body(content.body),
             thread_root = thread_root, in_reply_to = in_reply_to, mxc = media_uri(content),
             room = cfg.rooms[actual_room], room_kind = cfg.rooms[actual_room], context_mail_id = context_mail_id,
             from_agent = is_agent,
@@ -823,9 +822,6 @@ function relay.new(options)
   function instance._response(response, path)
     if path == SYNC_PATH and state.since == nil then
       if type(response.next_batch) ~= "string" then failed(); return end
-      for room_id, room in pairs(response.rooms and response.rooms.join or {}) do
-        if cfg.rooms[room_id] then update_roster(room_id, room) end
-      end
       state.since = response.next_batch
       persist()
       deliver_pending()
@@ -837,7 +833,6 @@ function relay.new(options)
       local joined = response.rooms and response.rooms.join or {}
       for room_id, room in pairs(joined) do
         if cfg.rooms[room_id] then
-          update_roster(room_id, room)
           local room_added = accept_events(room and room.timeline and room.timeline.events, nil, room_id)
           for _, id in ipairs(room_added) do added[#added + 1] = id end
         end

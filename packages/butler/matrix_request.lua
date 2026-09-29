@@ -143,9 +143,11 @@ end
 
 function matrix.is_agent_mxid(mxid)
   local localpart = type(mxid) == "string" and mxid:match("^@([^:]+):")
-  if localpart and (localpart:match("^agent%-") or localpart:match("^butler%-")) then return true end
+  if localpart and (localpart:sub(1, 6):lower() == "agent-"
+    or localpart:sub(1, 7):lower() == "butler-") then return true end
   local conf = config()
-  return conf ~= nil and (mxid == conf.self_mxid or conf.butler_senders[mxid] == true)
+  if not conf then return nil end
+  return type(mxid) == "string" and (mxid == conf.self_mxid or conf.butler_senders[mxid] == true)
 end
 
 matrix.once = matrix.once or function(callback)
@@ -353,7 +355,7 @@ function matrix.same_room(room, event_id, on_done)
     report_error(done, conf_error)
     return { cancel = function() end }
   end
-  if room ~= conf.room then
+  if room ~= conf.home_room and room ~= conf.all_room then
     report_error(done, "room is outside the configured Matrix allowlist")
     return { cancel = function() end }
   end

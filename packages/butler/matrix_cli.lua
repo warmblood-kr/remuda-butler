@@ -243,9 +243,14 @@ function matrix.cli(args, agent)
     if active and active.cancel then active:cancel() end
   end })
   local callback = function(result) finish(reply, cancelled, completed, verb, options, result) end
-  if verb == "reply" and matrix.relay and matrix.relay.instance then
-    local relay = matrix.relay.instance
-    if relay.can_reply_to and not relay:can_reply_to(options.event_id) then
+  if verb == "reply" then
+    local relay = matrix.relay and matrix.relay.instance
+    if not relay or type(relay.can_reply_to) ~= "function" then
+      finish(reply, cancelled, completed, verb, options,
+        { error = "Matrix relay is not running; event sender cannot be verified" })
+      return reply
+    end
+    if not relay:can_reply_to(options.event_id) then
       finish(reply, cancelled, completed, verb, options,
         { error = "Butler-to-Butler replies are disabled" })
       return reply

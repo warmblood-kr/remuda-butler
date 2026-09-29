@@ -457,7 +457,9 @@ local function reply(caller, parent_id, text, as_operator, deliver)
   if matrix_parent then
     message.reply_id = message_id()
     message.matrix_route = { room_id = parent.matrix.room_id, event_id = parent.matrix.event_id,
-      thread_root = parent.matrix.thread_root, in_reply_to = parent.matrix.in_reply_to }
+      thread_root = parent.matrix.thread_root, in_reply_to = parent.matrix.in_reply_to,
+      room_kind = parent.matrix.room or parent.matrix.room_kind,
+      from_agent = remuda.butler.matrix.is_agent_mxid(parent.matrix.sender) }
   end
   if matrix_parent and not deliver then return nil, "Matrix replies require durable relay delivery" end
   if deliver then return deliver(message), nil, to end
