@@ -4,7 +4,8 @@
 # an explicit caller table, so this does not depend on the installed core.
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-T=$(cd "$(mktemp -d /tmp/bci.XXXXXX)" && pwd -P); S=bci
+T=$(mktemp -d /tmp/bci.XXXXXX)
+T=$(cd "$T" && pwd -P); S=bci
 export REMUDA_RUNTIME_DIR=$T/run XDG_DATA_HOME=$T/data XDG_CONFIG_HOME=$T/config HOME=$T/home
 export REMUDA_BUTLER_PROJECT_HOME=$T/projects
 unset REMUDA_BUTLER_TOKEN REMUDA_BUTLER_CONFIG

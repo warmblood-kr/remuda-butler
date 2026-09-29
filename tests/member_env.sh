@@ -3,7 +3,8 @@
 # inherited CLAUDE_CODE_CHILD_SESSION. Throwaway daemon only.
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-T=$(cd "$(mktemp -d /tmp/bme.XXXXXX)" && pwd -P); S=bme
+T=$(mktemp -d /tmp/bme.XXXXXX)
+T=$(cd "$T" && pwd -P); S=bme
 export REMUDA_RUNTIME_DIR=$T/run XDG_DATA_HOME=$T/data XDG_CONFIG_HOME=$T/config HOME=$T/home
 export REMUDA_BUTLER_PROJECT_HOME=$T/projects CLAUDE_CODE_CHILD_SESSION=1
 unset REMUDA_BUTLER_TOKEN REMUDA_BUTLER_CONFIG

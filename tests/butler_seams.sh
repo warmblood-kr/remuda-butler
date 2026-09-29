@@ -6,7 +6,8 @@ set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 REMUDA_BIN=${REMUDA_BIN:-remuda}
-SCRATCH=$(cd "$(mktemp -d /tmp/bsm.XXXXXX)" && pwd -P)
+SCRATCH=$(mktemp -d /tmp/bsm.XXXXXX)
+SCRATCH=$(cd "$SCRATCH" && pwd -P)
 SERVER=bsm
 export HOME=$SCRATCH/home XDG_CONFIG_HOME=$SCRATCH/config XDG_DATA_HOME=$SCRATCH/data
 export REMUDA_RUNTIME_DIR=$SCRATCH/run REMUDA_NO_UPDATE_CHECK=1 REMUDA_BUTLER_PROJECT_HOME=$SCRATCH/projects

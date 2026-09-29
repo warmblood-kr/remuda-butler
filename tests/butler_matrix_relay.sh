@@ -4,7 +4,8 @@ set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 REMUDA_BIN=${REMUDA_BIN:-remuda}
-T=$(cd "$(mktemp -d /tmp/bmr.XXXXXX)" && pwd -P)
+T=$(mktemp -d /tmp/bmr.XXXXXX)
+T=$(cd "$T" && pwd -P)
 S=bmr
 export HOME=$T/home XDG_CONFIG_HOME=$T/config XDG_DATA_HOME=$T/data
 export REMUDA_RUNTIME_DIR=$T/run REMUDA_NO_UPDATE_CHECK=1

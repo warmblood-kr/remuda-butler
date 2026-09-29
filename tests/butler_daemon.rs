@@ -31,6 +31,7 @@ fn scratch_dir(tag: &str) -> PathBuf {
     let base = std::env::var_os("REMUDA_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
+    let base = std::fs::canonicalize(&base).unwrap_or(base);
     let dir = base.join(format!("remuda-t{}-{tag}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     dir

@@ -5,7 +5,8 @@ set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 REMUDA_BIN=${REMUDA_BIN:-remuda}
-SCRATCH_ROOT=$(cd "$(mktemp -d /tmp/butler-id.XXXXXX)" && pwd -P)
+SCRATCH_ROOT=$(mktemp -d /tmp/butler-id.XXXXXX)
+SCRATCH_ROOT=$(cd "$SCRATCH_ROOT" && pwd -P)
 DAEMON_PID=
 SERVER=
 SOCKET=
