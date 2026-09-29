@@ -2252,14 +2252,13 @@ fn butler_compact_cli_rejects_unknown_sessions_and_previews_safe_keys() {
     let opus = remuda_timed(&dir, &["-s", "s", "butler", "compact", "preview-opus", "--dry-run"]);
     assert!(opus.status.success(), "known-family preview failed: {}", String::from_utf8_lossy(&opus.stderr));
     let preview = String::from_utf8_lossy(&opus.stdout);
-    assert!(preview.contains("/model opus"), "preview omitted the model-family alias: {preview}");
+    assert!(preview.contains("/compact -> RET"), "preview omitted the current-model compact keys: {preview}");
     assert!(!preview.contains("Opus-4.7"), "preview exposed the display tag: {preview}");
 
     let unknown = remuda_timed(&dir, &["-s", "s", "butler", "compact", "preview-unknown", "--dry-run"]);
     assert!(unknown.status.success(), "unknown-family preview failed: {}", String::from_utf8_lossy(&unknown.stderr));
     let preview = String::from_utf8_lossy(&unknown.stdout);
-    assert!(preview.contains("skip: model family unknown"), "preview omitted the safety skip: {preview}");
-    assert!(!preview.contains("keys="), "unknown-family preview showed an unsafe key sequence: {preview}");
+    assert!(preview.contains("/compact -> RET"), "unknown model family should still compact on the current model: {preview}");
 }
 
 

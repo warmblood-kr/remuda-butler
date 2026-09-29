@@ -3019,16 +3019,11 @@ function remuda._butler_compaction_tick(target_name, dry_run)
         if dry_run then
           local telemetry = remuda._butler_telemetry_for(agent) or {}
           local family = compaction_family(telemetry.model) or compaction_family(agent.model)
-          if should_send and agent.kind == "claude" and not family then
-            results[#results + 1] = table.concat({ session_name, "skip: model family unknown",
-              "ctx=" .. tostring(ctx), "idle_captures=" .. tostring(state.idle_ticks or 0) }, "; ")
-          else
-            local sequence = remuda._butler_compaction_sequence(agent.kind or "claude", family,
-              remuda._butler_compaction_model or "sonnet")
-            results[#results + 1] = table.concat({ session_name, "decision=" .. tostring(event),
-              "ctx=" .. tostring(ctx), "idle_captures=" .. tostring(state.idle_ticks or 0),
-              "keys=" .. table.concat(sequence, " -> ") .. " -> visible switch option (if prompted)" }, "; ")
-          end
+          local sequence = remuda._butler_compaction_sequence(agent.kind or "claude", family,
+            remuda._butler_compaction_model or "sonnet")
+          results[#results + 1] = table.concat({ session_name, "decision=" .. tostring(event),
+            "ctx=" .. tostring(ctx), "idle_captures=" .. tostring(state.idle_ticks or 0),
+            "keys=" .. table.concat(sequence, " -> ") .. " -> RET" }, "; ")
         elseif should_send then
           state.failure_cooldown = nil
           if type(remuda.expect) ~= "function" then
@@ -3531,6 +3526,7 @@ function remuda._butler_compaction_execute(session_name)
         end,
         on_timeout = function() report("compaction context did not drop") end,
         on_error = function(err) report("compaction completion error: " .. tostring(err)) end }, false)
+      return
     elseif restore_only then
       if not prior then
         request_restore("retrying pending restore")
