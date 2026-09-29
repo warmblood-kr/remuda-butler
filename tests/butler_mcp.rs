@@ -102,7 +102,7 @@ fn butler_statusline_reads_stdin_and_keeps_legacy_status_files() {
         settings["statusLine"]["command"].as_str(),
         Some(
             &format!(
-                "REMUDA_NO_AUTOSTART=1 REMUDA_CLIENT_TIMEOUT_MS=500 remuda --stdin butler statusline '{status_path}' || printf 'MODEL:? CTX:? CTXWIN:? CTXPCT:?\\n'"
+                "REMUDA_NO_UPDATE_CHECK=1 REMUDA_NO_AUTOSTART=1 REMUDA_CLIENT_TIMEOUT_MS=500 remuda --stdin butler statusline '{status_path}' || printf 'MODEL:? CTX:? CTXWIN:? CTXPCT:?\\n'"
             )[..]
         )
     );
@@ -302,7 +302,7 @@ fn butler_statusline_shell_fallback_covers_oversized_stdin_without_starting_daem
     let dir = scratch("butler-statusline-down");
     let status_path = dir.join("status");
     let command = format!(
-        "REMUDA_NO_AUTOSTART=1 REMUDA_CLIENT_TIMEOUT_MS=500 {} --stdin butler statusline '{}' || printf 'MODEL:? CTX:? CTXWIN:? CTXPCT:?\\n'",
+        "REMUDA_NO_UPDATE_CHECK=1 REMUDA_NO_AUTOSTART=1 REMUDA_CLIENT_TIMEOUT_MS=500 {} --stdin butler statusline '{}' || printf 'MODEL:? CTX:? CTXWIN:? CTXPCT:?\\n'",
         env!("CARGO_BIN_EXE_remuda"),
         status_path.display(),
     );
@@ -311,14 +311,19 @@ fn butler_statusline_shell_fallback_covers_oversized_stdin_without_starting_daem
             .arg("-c")
             .arg(&command)
             .env("REMUDA_RUNTIME_DIR", &dir)
-            .env("XDG_DATA_HOME", dir.join("data"))
             .env("HOME", &dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .expect("start installed fallback command");
-        child.stdin.take().unwrap().write_all(&input).unwrap();
+        if let Err(error) = child.stdin.take().unwrap().write_all(&input) {
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe,
+                "writing statusLine stdin failed: {error}"
+            );
+        }
         let output = child.wait_with_output().expect("wait for shell fallback");
         assert!(output.status.success(), "fallback failed: {output:?}");
         assert_eq!(output.stdout, b"MODEL:? CTX:? CTXWIN:? CTXPCT:?\n");

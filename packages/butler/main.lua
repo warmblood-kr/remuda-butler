@@ -592,7 +592,7 @@ local function json_quote(s)
 end
 local function status_settings(path)
   local settings_path = path .. ".settings.json"
-  local command = "REMUDA_NO_AUTOSTART=1 REMUDA_CLIENT_TIMEOUT_MS=500 remuda "
+  local command = "REMUDA_NO_UPDATE_CHECK=1 REMUDA_NO_AUTOSTART=1 REMUDA_CLIENT_TIMEOUT_MS=500 remuda "
   if server ~= "default" then command = command .. "-s " .. shell_quote(server) .. " " end
   command = command .. "--stdin butler statusline " .. shell_quote(path)
     .. " || printf 'MODEL:? CTX:? CTXWIN:? CTXPCT:?\\n'"
