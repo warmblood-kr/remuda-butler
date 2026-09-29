@@ -22,7 +22,7 @@ source "$REPO/tests/awk-timeout.sh"
 GOLDEN=$REPO/tests/golden
 CORE_URL=${CORE_URL:-https://github.com/warmblood-kr/remuda.git}
 # Keep in step with tests/rust_tests.sh.
-CORE_REF=${CORE_REF:-412a9c8}
+CORE_REF=${CORE_REF:-f02dad6a3cea2e5a4cab062dcc18216c2df0df59}
 T=$(mktemp -d /tmp/bgg.XXXXXX)
 T=$(cd "$T" && pwd -P)
 S=bgg

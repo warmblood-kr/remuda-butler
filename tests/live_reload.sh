@@ -72,8 +72,14 @@ start_daemon() {
   remuda -s "$S" daemon </dev/null >>"$T/daemon.log" 2>&1 &
   DAEMON_PID=$!
   DAEMON_PIDS+=("$DAEMON_PID")
-  for _ in $(seq 50); do [[ -S $REMUDA_RUNTIME_DIR/remuda/$S.sock ]] && return; sleep 0.1; done
-  fail "daemon never bound"
+  for _ in $(seq 100); do
+    [[ -S $REMUDA_RUNTIME_DIR/remuda/$S.sock ]] && return
+    kill -0 "$DAEMON_PID" 2>/dev/null || break
+    sleep 0.1
+  done
+  echo "explicit daemon log:" >&2
+  cat "$T/daemon.log" >&2
+  fail "daemon never bound within 10 seconds"
 }
 record_autostart_daemon_pid() {
   [[ -n ${AUTOSTART:-} ]] || return 0
