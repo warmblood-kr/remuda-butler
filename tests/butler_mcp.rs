@@ -462,6 +462,47 @@ fn narrow_claude_wrapped_notice_is_verified_and_submitted() {
     assert!(!events.contains("key RET"), "already-submitted history notice was submitted twice: {events}");
 }
 
+/// #82: failed comparisons write a bounded capture record to the private
+/// session trace; the diagnostic is never typed into the member pane.
+#[test]
+fn notice_verify_mismatch_logs_bounded_capture_and_expected_text() {
+    let (path, _daemon) = butler_with_member("notice-verify-trace");
+    let trace = path.parent().unwrap().join("session-trace.log");
+    eval(
+        &path,
+        &format!(
+            r#"remuda._butler_session_trace_path = {trace:?}
+            local state = {{screen = string.rep('x', 9000) .. '\n❯ unrelated composer\n─', keys = 0}}
+            remuda._notice_log_test_state = state
+            remuda._butler_bus.agents.m1.kind = 'claude'
+            remuda.ls = function() return {{ {{name = 'm1', alive = true, attached = false}} }} end
+            remuda.session = function() return {{is_busy = false}} end
+            remuda.capture = function() return state.screen end
+            remuda._butler_notify_policy = function() return true end
+            remuda.type_text = function(_, expected) state.expected = expected end
+            remuda.key = function() state.keys = state.keys + 1 end
+            remuda._butler_send('operator', 'm1', 'notice log fixture')"#
+        ),
+    );
+    for _ in 0..12 {
+        eval(&path, "remuda._butler_deliver_notices()");
+    }
+    let log = std::fs::read_to_string(&trace).expect("notice diagnostic trace");
+    assert!(log.contains("notice_verify_mismatch\tm1 capture=\""), "{log}");
+    assert!(log.contains("<truncated; 9027 bytes total>"), "{log}");
+    assert!(log.contains("expected=\"Butler message"), "{log}");
+    assert!(
+        log.len() < 40_000,
+        "notice diagnostic was not bounded: {} bytes",
+        log.len()
+    );
+    assert_eq!(
+        eval(&path, "return tostring(remuda._notice_log_test_state.keys)"),
+        "0",
+        "diagnostic logging must not send keys to the pane"
+    );
+}
+
 /// #64: an idle non-empty composer is redrawn, its draft is preserved,
 /// cleared with a verified input key, and the queued notice is submitted.
 #[test]
