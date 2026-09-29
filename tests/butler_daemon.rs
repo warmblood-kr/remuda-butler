@@ -5730,12 +5730,22 @@ done
           attached=remuda._fake_attached[name] == true}}
       end
       local original_type_text = remuda.type_text
+      local original_write_atomic = remuda.fs.write_atomic
+      remuda.fs.write_atomic = function(path, bytes)
+        if remuda._fake_fail_restore_write then return nil, "fake write failure" end
+        return original_write_atomic(path, bytes)
+      end
       remuda.type_text = function(name, value, settle)
         if name == "fake-hang" then remuda._fake_busy[name] = true end
         if value == "/model sonnet" then
           local f = io.open(remuda._fake_restore_file, "r")
           remuda._fake_restore_record_before_sonnet = f ~= nil
           if f then remuda._fake_restore_record_bytes = f:read("*a"); f:close() end
+        end
+        if value == "/model opus" then
+          local f = io.open(remuda._fake_restore_file, "r")
+          remuda._fake_restore_record_before_restore = f and f:read("*a") or ""
+          if f then f:close() end
         end
         return original_type_text(name, value, settle)
       end
@@ -5746,7 +5756,11 @@ done
       end
       remuda._fake_setup_compaction = function(name, kind, log, scenario)
         remuda.new(name, {{"bash", {script:?}, log, scenario}}, nil, {{}})
-        remuda._butler_bus.agents[name] = {{id=name, kind=kind, session_name=name}}
+        local id = name
+        if name == "fake-stable-id" then id = "stable-agent-17" end
+        if name == "fake-empty-id" then id = "" end
+        if name == "fake-legacy-record" then id = "stable-agent-legacy" end
+        remuda._butler_bus.agents[name] = {{id=id, kind=kind, session_name=name}}
       end
       remuda._fake_restore_file = {data_str:?} .. "/remuda/butler/mail/compaction-restore.json"
     "#
@@ -5756,6 +5770,10 @@ done
     for (name, kind, scenario) in [
         ("fake-happy", "claude", "happy"),
         ("fake-persist", "claude", "happy"),
+        ("fake-persist-fails", "claude", "happy"),
+        ("fake-stable-id", "claude", "happy"),
+        ("fake-empty-id", "claude", "happy"),
+        ("fake-legacy-record", "claude", "happy"),
         ("fake-mid-turn", "claude", "happy"),
         ("fake-busy-screen", "claude", "busy-screen"),
         ("fake-attached", "claude", "happy"),
@@ -5790,6 +5808,17 @@ done
             &path,
             &format!("remuda._fake_setup_compaction({name:?}, {kind:?}, {log:?}, {scenario:?})"),
         );
+        if name == "fake-legacy-record" {
+            eval(&path, r#"
+              local f = assert(io.open(remuda._fake_restore_file, 'w'))
+              f:write('{"fake-legacy-record":"opus"}')
+              f:close()
+              remuda._butler_compaction_load_restore_record()
+            "#);
+        }
+        if name == "fake-persist-fails" {
+            eval(&path, "remuda._fake_fail_restore_write = true");
+        }
         if name == "fake-unsafe-model" {
             eval(&path, "remuda._butler_bus.agents['fake-unsafe-model'].model = 'opus; /compact'");
         }
@@ -5809,6 +5838,8 @@ done
         }
         let result = if name == "fake-stale-flags" {
             eval(&path, &format!("return remuda._butler_compaction_tick({name:?}, false)"))
+        } else if name == "fake-legacy-record" {
+            eval(&path, &format!("return remuda.butler.compact({name:?})"))
         } else {
             eval(&path, &format!("return remuda.butler.compact({name:?})"))
         };
@@ -5818,10 +5849,25 @@ done
             "fake-attach-mid" => assert_eq!(result, "skipped_attached"),
             "fake-draft" => assert_eq!(result, "skipped_composer"),
             "fake-unknown-kind" => assert_eq!(result, "skipped_unsupported_kind"),
+            "fake-persist-fails" => assert_eq!(result, "failed"),
             "fake-unsafe-model" => assert_eq!(result, "failed"),
+            "fake-legacy-record" => assert_eq!(result, "restoring_model"),
             _ => assert_eq!(result, "started"),
         }
+        if name == "fake-persist-fails" {
+            assert_eq!(eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].restore_pending)")), "nil",
+                "a failed durable write must clear the in-memory restore request");
+            assert!(std::fs::read_to_string(&log).unwrap_or_default().is_empty(),
+                "a failed durable write must prevent model changes");
+            eval(&path, &format!("return remuda._butler_compaction_tick({name:?}, false)"));
+            assert!(std::fs::read_to_string(&log).unwrap_or_default().is_empty(),
+                "the following tick must not send a needless restore command");
+            eval(&path, "remuda._fake_fail_restore_write = false");
+        }
         if name == "fake-unsafe-model" {
+            for _ in 0..3 {
+                eval(&path, "return remuda.butler.compact('fake-unsafe-model')");
+            }
             assert!(std::fs::read_to_string(&log).unwrap_or_default().is_empty(),
                 "an invalid model value must never produce pane input");
             let reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
@@ -5851,11 +5897,12 @@ done
                 std::thread::sleep(Duration::from_millis(100));
             }
         }
-        if name == "fake-stale-flags" || name == "fake-happy" || name == "fake-persist" || name.starts_with("fake-settings-") {
+        if name == "fake-stale-flags" || name == "fake-happy" || name == "fake-persist" || name == "fake-stable-id" || name == "fake-empty-id" || name.starts_with("fake-settings-") {
+            let state_key = if name == "fake-stable-id" { "stable-agent-17" } else { name };
             let deadline = Instant::now() + Duration::from_secs(8);
             loop {
                 let in_progress = eval(&path, &format!(
-                    "return tostring(remuda._butler_compaction_members_state[{name:?}].compaction_in_progress == true)"
+                    "return tostring(remuda._butler_compaction_members_state[{state_key:?}].compaction_in_progress == true)"
                 ));
                 let got = std::fs::read_to_string(&log).unwrap_or_default();
                 if in_progress == "false" && got.matches("CMD:/compact\nKEY:RET\n").count() >= 1 { break; }
@@ -5872,6 +5919,16 @@ done
                     "the durable record must map this session to its prior model");
                 assert!(!std::path::Path::new(&eval(&path, "return remuda._fake_restore_file")).exists(),
                     "verified restore must delete the durable record");
+            }
+            if name == "fake-stable-id" {
+                assert!(eval(&path, "return remuda._fake_restore_record_bytes").contains("stable-agent-17"),
+                    "durable records must use a non-empty stable agent id");
+                assert!(!eval(&path, "return remuda._fake_restore_record_bytes").contains("fake-stable-id"),
+                    "durable records must not use the session key when a stable id exists");
+            }
+            if name == "fake-empty-id" {
+                assert!(eval(&path, "return remuda._fake_restore_record_bytes").contains("fake-empty-id"),
+                    "empty agent ids must fall back to the session name");
             }
             if name.starts_with("fake-settings-") {
                 let settings_after = if name == "fake-settings-mismatch" {
@@ -5903,6 +5960,20 @@ done
                 "unknown agent kinds must not receive commands");
             let reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
             assert!(reports.contains("unsupported agent kind"), "unknown kind should be reported: {reports:?}");
+        }
+        if name == "fake-legacy-record" {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let got = std::fs::read_to_string(&log).unwrap_or_default();
+                if got.contains("CMD:/model opus\nKEY:RET\n") { break; }
+                assert!(Instant::now() < deadline, "legacy session-keyed restore was not resumed: {got:?}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let prior_record = eval(&path, "return remuda._fake_restore_record_before_restore");
+            assert!(prior_record.contains("stable-agent-legacy"),
+                "legacy session-keyed records must migrate to the stable agent id before restore");
+            assert!(!prior_record.contains("fake-legacy-record"),
+                "migration must remove the old session key");
         }
         if name == "fake-unknown" {
             let deadline = Instant::now() + Duration::from_secs(8);
@@ -5983,6 +6054,36 @@ done
                 "notify the parent once after the final failed restore");
             eval(&path, &format!("return remuda._butler_compaction_tick({name:?}, false)"));
             assert_eq!(std::fs::read_to_string(&log).unwrap(), got, "exhausted recovery must stop sending restore commands");
+            eval(&path, "remuda._fake_now(1011); return remuda._butler_compaction_tick('fake-restore-fails', false)");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let got_after_cooldown = std::fs::read_to_string(&log).unwrap_or_default();
+                let in_progress = eval(&path, "return tostring(remuda._butler_compaction_members_state['fake-restore-fails'].compaction_in_progress == true)");
+                if got_after_cooldown.matches("CMD:/model opus\nKEY:RET\n").count() == 4 && in_progress == "false" { break; }
+                assert!(Instant::now() < deadline, "restore retry did not resume after cooldown: {got_after_cooldown:?}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            eval(&path, "return remuda._butler_compaction_tick('fake-restore-fails', false)");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let got_after_cooldown = std::fs::read_to_string(&log).unwrap_or_default();
+                let in_progress = eval(&path, "return tostring(remuda._butler_compaction_members_state['fake-restore-fails'].compaction_in_progress == true)");
+                if got_after_cooldown.matches("CMD:/model opus\nKEY:RET\n").count() == 5 && in_progress == "false" { break; }
+                assert!(Instant::now() < deadline, "cooldown retry batch did not finish: {got_after_cooldown:?}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            eval(&path, "return remuda._butler_compaction_tick('fake-restore-fails', false)");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let got_after_cooldown = std::fs::read_to_string(&log).unwrap_or_default();
+                let in_progress = eval(&path, "return tostring(remuda._butler_compaction_members_state['fake-restore-fails'].compaction_in_progress == true)");
+                if got_after_cooldown.matches("CMD:/model opus\nKEY:RET\n").count() == 6 && in_progress == "false" { break; }
+                assert!(Instant::now() < deadline, "third retry attempt did not finish: {got_after_cooldown:?}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let reports_after = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
+            assert_eq!(reports_after.matches("model restore failed; member may still be on sonnet").count(), 2,
+                "notify once for each exhausted three-attempt cooldown batch");
         }
         if name == "fake-force" {
             let deadline = Instant::now() + Duration::from_secs(8);
