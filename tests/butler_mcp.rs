@@ -477,14 +477,14 @@ fn submitted_claude_notice_followed_by_approval_dialog_clears_pending_notice() {
         &path,
         r#"
         local row = { name = 'm1', alive = true, attached = false }
-        local state = { screen = '❯ \n', events = {}, submitted = false }
+        local state = { screen = '❯ \n', events = {}, submitted = false, busy = false }
         remuda._notice_dialog_test_state = state
         remuda._butler_bus.agents.m1 = remuda._butler_bus.agents.m1 or {
           id = '01ARZ3NDEKTSV4RRFFQ69G5FAV', kind = 'claude' }
         remuda._butler_bus.agents.m1.kind = 'claude'
         remuda.capture_styled = nil
         remuda.ls = function() return { row } end
-        remuda.session = function() return { is_busy = false } end
+        remuda.session = function() return { is_busy = state.busy } end
         remuda.capture = function() return state.screen end
         remuda._butler_notify_policy = function() return not state.submitted end
         local function box(text)
@@ -500,6 +500,7 @@ fn submitted_claude_notice_followed_by_approval_dialog_clears_pending_notice() {
           table.insert(state.events, 'key ' .. key)
           if key == 'RET' then
             state.submitted = true
+            state.busy = true
             state.screen = state.notice .. '\n'
               .. '⏺ Bash(remuda butler inbox)\n'
               .. '⎿ This command requires approval\n'
@@ -513,14 +514,11 @@ fn submitted_claude_notice_followed_by_approval_dialog_clears_pending_notice() {
 
     for _ in 0..14 {
         eval(&path, "remuda._butler_deliver_notices()");
-        if eval(&path, "return tostring(remuda._butler_bus.notice_recoveries.m1.failed)") == "true" {
-            break;
-        }
     }
     assert_eq!(
         eval(&path, "return tostring(remuda._butler_bus.notices.m1 ~= nil)"),
         "false",
-        "notice remained queued after successful submit and follow-up dialog"
+        "notice remained queued after successful submit while Claude was busy on a follow-up dialog"
     );
     let events = eval(&path, "return table.concat(remuda._notice_dialog_test_state.events, ',')");
     assert_eq!(events.matches("type").count(), 1, "{events}");
@@ -528,8 +526,37 @@ fn submitted_claude_notice_followed_by_approval_dialog_clears_pending_notice() {
     assert!(eval(&path, "return tostring(remuda._notice_dialog_test_state.submitted)") == "true");
 }
 
+/// Repeated delivery of the same unread message must not increment notice counts;
+/// reading it in the inbox must cancel any still-pending pane notice.
+#[test]
+fn notice_ids_are_deduplicated_and_read_messages_are_not_notified() {
+    let (path, _daemon) = butler_with_member("notice-read-dedupe");
+    eval(
+        &path,
+        r#"
+        remuda._butler_notify_policy = function() return true end
+        remuda.capture_styled = nil
+        remuda.capture = function() return '❯ ' end
+        remuda.type_text = function() end
+        local sent = remuda._butler_send('operator', 'm1', 'dedupe fixture')
+        remuda._notice_dedupe_id = sent:match('queued ([^ ]+)')
+        assert(remuda._notice_dedupe_id)
+        local notice = 'Butler message ' .. remuda._notice_dedupe_id .. ' from operator arrived. Read it: remuda butler inbox'
+        remuda._butler_notify('m1', notice, remuda._notice_dedupe_id)
+        remuda._butler_notify('m1', notice, remuda._notice_dedupe_id)
+        "#,
+    );
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1.count)"), "1",
+        "the same message id inflated its pending notice count");
+    eval(&path, "remuda._butler_mail.inbox(remuda._butler_bus.agents.m1.id); remuda._butler_deliver_notices()");
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1 == nil)"), "true",
+        "reading the message left its pane notification queued");
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notice_recoveries.m1 == nil)"), "true",
+        "reading the message left its notice recovery active");
+}
+
 /// A notice that remains the exact Claude composer text gets one Return retry,
-/// then the existing verification failure is reported without clearing mail.
+/// then the bounded verification failure is reported and its count cleared.
 #[test]
 fn claude_notice_still_in_composer_is_retried_once_then_reported() {
     let (path, _daemon) = butler_with_member("notice-still-in-composer");
@@ -575,8 +602,10 @@ fn claude_notice_still_in_composer_is_retried_once_then_reported() {
     let events = eval(&path, "return table.concat(remuda._notice_stuck_test_state.events, ',')");
     assert_eq!(events.matches("type").count(), 1, "{events}");
     assert_eq!(events.matches("key RET").count(), 1, "{events}");
-    assert!(eval(&path, "return tostring(remuda._butler_bus.notices.m1 ~= nil)") == "true");
-    assert!(eval(&path, "return tostring(remuda._butler_bus.notice_recoveries.m1.failed)") == "true");
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1 ~= nil)"), "false",
+        "a terminal notice failure left its pending count behind");
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notice_recoveries.m1 == nil)"), "true",
+        "a terminal notice failure left recovery state behind");
     assert!(eval(&path, "return remuda._notice_stuck_test_state.report").contains("could not be verified"));
 }
 
