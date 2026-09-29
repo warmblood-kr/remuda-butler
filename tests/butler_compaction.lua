@@ -24,6 +24,7 @@ assert(type(remuda.butler) == "table", "composable compaction API must be export
 local level = remuda.butler.ctx_level("butler")
 assert(level.level == "watch" and level.used == 500000,
   "ctx_level must classify threshold context and retain usage")
+remuda._butler_prompt_is_empty = function() return "EMPTY" end
 remuda._butler_bus.agents.butler.native_autocompact = true
 local native_skip, native_reason = remuda.butler.compaction_policy("butler", {})
 assert(not native_skip and native_reason == "skipped_idle",
@@ -206,9 +207,32 @@ local claude_sequence = remuda._butler_compaction_sequence()
 assert(table.concat(remuda._butler_compaction_sequence("opus"), "|")
   == "/model sonnet|/compact|/model opus",
   "Claude compaction should use sonnet, compact, then restore the prior model")
+local settings_after_model = { model = "sonnet", theme = "dark" }
 assert(type(remuda._butler_compaction_restore_settings_model) == "function"
-  and remuda._butler_compaction_restore_settings_model("opus", "sonnet") == true,
+  and remuda._butler_compaction_restore_settings_model(settings_after_model, "opus") == true
+  and settings_after_model.model == "opus" and settings_after_model.theme == "dark",
   "Claude compaction must restore settings.json if /model changed its saved model")
+local settings_path = os.tmpname()
+local settings_file = assert(io.open(settings_path, "w"))
+settings_file:write('{"model":"sonnet","theme":"dark"}')
+settings_file:close()
+local old_json, old_fs = remuda.json, remuda.fs
+remuda.json = {
+  decode = function(value)
+    return { model = value:match('"model":"([^"]+)"'), theme = value:match('"theme":"([^"]+)"') }
+  end,
+  encode = function(value) return '{"model":"' .. value.model .. '","theme":"' .. value.theme .. '"}' end,
+}
+remuda.fs = { write_atomic = function(path, value)
+  local file = assert(io.open(path, "w")); file:write(value); file:close(); return true
+end }
+assert(remuda._butler_compaction_restore_settings_file(settings_path, "opus"),
+  "settings.json model must be verified and restored through remuda.fs.write_atomic")
+local restored = assert(io.open(settings_path, "r")):read("*a")
+assert(restored:find('"model":"opus"', 1, true) and restored:find('"theme":"dark"', 1, true),
+  "restoring settings.json must preserve unrelated settings")
+os.remove(settings_path)
+remuda.json, remuda.fs = old_json, old_fs
 local codex_sequence = remuda._butler_compaction_sequence()
 assert(table.concat(codex_sequence, "|") == "/compact",
   "Codex sequence must submit compact exactly once without switching models")

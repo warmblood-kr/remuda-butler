@@ -5064,7 +5064,7 @@ fn butler_compaction_trace_records_registered_skipped_and_sent() {
 }
 
 /// Exercise the Claude compaction state machine with real private daemon PTYs.
-/// The fake Claude process accepts only `/compact` and records the Return key.
+/// The fake Claude process accepts Butler's cheaper-model compaction sequence.
 #[test]
 #[cfg(unix)]
 fn butler_compaction_fake_claude_scenarios_send_only_visible_keys() {
@@ -5124,7 +5124,7 @@ fn butler_compaction_fake_claude_scenarios_send_only_visible_keys() {
         r#"#!/bin/bash
 log=$1
 scenario=$2
-model='Opus 4.7 (1M context)'
+model='current-model'
 ctx=500000
 failed=0
 paint() {
@@ -5139,6 +5139,10 @@ paint
 while IFS= read -r line; do
   printf 'CMD:%s\n' "$line" >> "$log"
   case "$line" in
+    '/model sonnet')
+      printf 'KEY:RET\n' >> "$log"
+      model='sonnet'; paint
+      ;;
     '/compact')
       printf 'KEY:RET\n' >> "$log"
       if [ "$scenario" = unknown ] && [ "$failed" = 0 ]; then
@@ -5149,6 +5153,10 @@ while IFS= read -r line; do
       else
         ctx=200000; paint
       fi
+      ;;
+    '/model current-model')
+      printf 'KEY:RET\n' >> "$log"
+      model='current-model'; paint
       ;;
   esac
 done
@@ -5216,7 +5224,7 @@ done
       remuda._butler_telemetry_for = function(agent)
         local screen = remuda.capture(agent.session_name)
         local used = screen:match("CTX:%s*(%d+)")
-        return {{context_used=used, model="current-model"}}
+        return {{context_used=used, model=screen:match("MODEL:([^ %c]+)") or "current-model"}}
       end
       remuda._fake_setup_compaction = function(name, kind, log, scenario)
         remuda.new(name, {{"bash", {script:?}, log, scenario}}, nil, {{}})
@@ -5307,7 +5315,8 @@ done
                 std::thread::sleep(Duration::from_millis(50));
             }
             let got = std::fs::read_to_string(&log).unwrap_or_default();
-            assert_eq!(got, "CMD:/compact\nKEY:RET\n", "Claude must receive only /compact and Return: {got:?}");
+            assert_eq!(got, "CMD:/model sonnet\nKEY:RET\nCMD:/compact\nKEY:RET\nCMD:/model current-model\nKEY:RET\n",
+                "Claude should compact on sonnet and restore its prior model: {got:?}");
         }
         if name == "fake-stale-flags" {
             assert_eq!(eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].pending_restore_blocked == nil and remuda._butler_compaction_members_state[{name:?}].pending_restore_model_unavailable == nil)")), "true");
@@ -5334,7 +5343,8 @@ done
                 assert!(Instant::now() < deadline, "expired cooldown retry stalled: {got:?}");
                 std::thread::sleep(Duration::from_millis(50));
             }
-            assert_eq!(std::fs::read_to_string(&log).unwrap(), "CMD:/compact\nKEY:RET\nCMD:/compact\nKEY:RET\n");
+            assert_eq!(std::fs::read_to_string(&log).unwrap(),
+                "CMD:/model sonnet\nKEY:RET\nCMD:/compact\nKEY:RET\nCMD:/model sonnet\nKEY:RET\nCMD:/compact\nKEY:RET\nCMD:/model current-model\nKEY:RET\n");
         }
         if name == "fake-force" {
             let deadline = Instant::now() + Duration::from_secs(8);
@@ -5356,7 +5366,8 @@ done
                 assert!(Instant::now() < deadline, "forced retry stalled: {got:?}");
                 std::thread::sleep(Duration::from_millis(50));
             }
-            assert_eq!(std::fs::read_to_string(&log).unwrap(), "CMD:/compact\nKEY:RET\nCMD:/compact\nKEY:RET\n");
+            assert_eq!(std::fs::read_to_string(&log).unwrap(),
+                "CMD:/model sonnet\nKEY:RET\nCMD:/compact\nKEY:RET\nCMD:/model sonnet\nKEY:RET\nCMD:/compact\nKEY:RET\nCMD:/model current-model\nKEY:RET\n");
         }
     }
     drop(daemon);

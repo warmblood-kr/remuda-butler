@@ -24,12 +24,13 @@ telemetry.claude = {
 builders.claude = function(spec)
   local argv = { "claude" }
   local config = remuda._butler_compaction_config or {}
-  local configured = remuda._butler_claude_autocompact or config.claude_autocompact or "400k"
+  local configured = remuda._butler_claude_autocompact
+    or os.getenv("REMUDA_BUTLER_CLAUDE_AUTOCOMPACT") or config.claude_autocompact or "600k"
   if type(configured) ~= "string" or (configured ~= "auto"
-      and not configured:match("^%d+k$") ) then configured = "400k" end
+      and not configured:match("^%d+k$") ) then configured = "600k" end
   if configured ~= "auto" then
     local amount = tonumber(configured:match("^(%d+)k$"))
-    if not amount or amount < 100 or amount > 1000 then configured = "400k" end
+    if not amount or amount < 100 or amount > 1000 then configured = "600k" end
   end
   local supported = remuda._butler_claude_autocompact_supported
   if supported == nil then
@@ -42,8 +43,7 @@ builders.claude = function(spec)
     remuda._butler_claude_autocompact_supported = supported
     if not ok and remuda.log then remuda.log("warn", "Claude --autocompact help probe failed: " .. tostring(result)) end
   end
-  spec.native_autocompact = supported == true
-  if spec.native_autocompact then
+  if supported then
     argv[#argv + 1] = "--autocompact"; argv[#argv + 1] = configured
   end
   if spec.settings_path then argv[#argv + 1] = "--settings"; argv[#argv + 1] = spec.settings_path end
@@ -53,7 +53,13 @@ builders.claude = function(spec)
   argv[#argv + 1] = "--append-system-prompt"
   argv[#argv + 1] = spec.system_prompt
     or "This session is managed by Remuda Butler. The remuda butler CLI is available for coordination."
-  if spec.model and spec.model ~= "" then argv[#argv + 1] = "--model"; argv[#argv + 1] = spec.model end
+  local model = spec.model
+  if not model or model == "" then
+    local config = remuda._butler_compaction_config or {}
+    model = remuda._butler_claude_default_model
+      or os.getenv("REMUDA_BUTLER_CLAUDE_MODEL") or config.claude_model or "sonnet"
+  end
+  argv[#argv + 1] = "--model"; argv[#argv + 1] = model
   return argv
 end
 

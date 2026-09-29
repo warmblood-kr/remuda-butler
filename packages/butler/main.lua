@@ -106,7 +106,7 @@ end
 remuda._butler_current_agent = current_agent
 
 local DEFAULT_COMPACTION_CONFIG = {
-  watch = 400000, warn = 600000, critical = 800000, critical_pct = 90,
+  watch = 300000, warn = 400000, critical = 800000, critical_pct = 90,
   cooldown_ticks = 4, capture_gap = 3, completion_timeout = 45,
   claude_completion_timeout = 180, failure_cooldown_seconds = 600,
   input_settle = 0.15,
@@ -186,9 +186,6 @@ function remuda.butler.compaction_policy(name, state, dry_run)
     for key, value in pairs(state) do current[key] = value end
   end
   current.idle_ticks = current.idle_ticks or 0
-  local named_agent = (remuda._butler_bus and remuda._butler_bus.agents
-    and remuda._butler_bus.agents[name]) or {}
-  if named_agent.native_autocompact then return false, "skipped_native_autocompact" end
   local level = remuda.butler.ctx_level(name)
   if level.level == "ok" then
     current.idle_ticks, current.cooldown_ticks, current.last_idle_capture_at = 0, 0, nil
@@ -312,8 +309,51 @@ function remuda._butler_compaction_is_unknown_dialog(screen)
     or (option_line and prompt_line and prompt_line > option_line and prompt_line - option_line <= 2)
     or false
 end
-function remuda._butler_compaction_sequence()
+function remuda._butler_compaction_sequence(prior_model)
+  if type(prior_model) == "string" and prior_model ~= "" and prior_model ~= "?" then
+    return { "/model sonnet", "/compact", "/model " .. prior_model }
+  end
   return { "/compact" }
+end
+
+function remuda._butler_compaction_restore_settings_model(settings, prior_model)
+  if type(settings) ~= "table" or type(prior_model) ~= "string" or prior_model == "" then return false end
+  if settings.model == prior_model then return false end
+  settings.model = prior_model
+  return true
+end
+
+local function read_claude_settings(path)
+  local file = io.open(path, "r")
+  if not file then return nil end
+  local original = file:read("*a")
+  file:close()
+  local json = remuda.json
+  if not json or type(json.decode) ~= "function" then return nil end
+  local ok, settings = pcall(json.decode, original)
+  if not ok or type(settings) ~= "table" then return nil end
+  return settings
+end
+
+local function write_claude_settings(path, settings)
+  local json = remuda.json
+  if not json or type(json.encode) ~= "function" or not remuda.fs
+      or type(remuda.fs.write_atomic) ~= "function" then return false end
+  local encoded_ok, encoded = pcall(json.encode, settings)
+  if not encoded_ok or type(encoded) ~= "string" or not remuda.fs
+      or type(remuda.fs.write_atomic) ~= "function" then return false end
+  local parent = path:match("^(.*)/[^/]+$")
+  if parent and remuda.fs.mkdir_new then pcall(remuda.fs.mkdir_new, parent) end
+  local wrote = remuda.fs.write_atomic(path, encoded)
+  return wrote == true
+end
+
+function remuda._butler_compaction_restore_settings_file(path, prior_model)
+  local settings = read_claude_settings(path) or {}
+  local changed = remuda._butler_compaction_restore_settings_model(settings, prior_model)
+  if changed and not write_claude_settings(path, settings) then return false end
+  local verified = read_claude_settings(path)
+  return verified ~= nil and verified.model == prior_model
 end
 
 local function clear_legacy_restore_state(state)
@@ -999,7 +1039,6 @@ local function choose(candidates, opts, done)
     local argv = (type(opts.argv) == "function" and opts.argv(id, spec)) or opts.argv
       or (type(entry.argv) == "function" and select(2, call_callback(entry.argv, spec))) or entry.argv
       or (entry.build and entry.build(spec))
-    attempt.native_autocompact = id == "claude" and spec.native_autocompact == true
     local builder_override = remuda._butler_agent_builders[id]
       and remuda._butler_agent_builders[id] ~= BUILTIN_AGENT_BUILDERS[id]
     local executable = (builder_override and argv and argv[1])
@@ -1412,6 +1451,11 @@ end
 local function launch_agent(kind, requested_name, cwd, model, parent, task, relaunch_identity, fresh_trusted_cwd)
   local candidates = kind and { kind } or configured_agent_order()
   kind = kind or candidates[1]
+  if kind == "claude" and (not model or model == "") then
+    local config = remuda._butler_compaction_config or {}
+    model = remuda._butler_claude_default_model
+      or os.getenv("REMUDA_BUTLER_CLAUDE_MODEL") or config.claude_model or "sonnet"
+  end
   local name = valid_child_name(requested_name or kind or "agent", "agent name")
   if cwd ~= nil and (type(cwd) ~= "string" or cwd:find("%c")) then
     error("cwd must be a string without control characters", 0)
@@ -1480,13 +1524,11 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   identity.kind = kind
   identity_record(identity)
   local waiting_for_trust, trust_answered = false, false
-  local native_autocompact = false
   for _, attempt in ipairs(attempts or {}) do
     if attempt.session == actual and attempt.reason == "waiting_for_human_trust" then
       waiting_for_trust = true
     end
     if attempt.session == actual and attempt.trust_answered then trust_answered = true end
-    if attempt.session == actual then native_autocompact = attempt.native_autocompact == true end
   end
   bus.tokens[token] = actual
   bus.agents[actual] = {
@@ -1494,7 +1536,6 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
     parent = parent, children = {}, id = identity.id, alias = actual, session_name = actual,
     cwd = launch_cwd, task = task, launch_attempts = attempts, trust_allowed = auto_trust,
     trust_reported = waiting_for_trust, trust_answered = trust_answered,
-    native_autocompact = native_autocompact,
   }
   if parent and bus.agents[parent] then
     local children = bus.agents[parent].children
@@ -3324,7 +3365,9 @@ function remuda._butler_compaction_tick(target_name, dry_run)
       else
         local should_send, event, ctx = remuda.butler.compaction_policy(session_name, state, dry_run)
         if dry_run then
-          local sequence = remuda._butler_compaction_sequence()
+          local sequence = agent.kind == "claude"
+            and remuda._butler_compaction_sequence((remuda._butler_telemetry_for(agent) or {}).model or agent.model)
+            or { "/compact" }
           results[#results + 1] = table.concat({ session_name, "decision=" .. tostring(event),
             "ctx=" .. tostring(ctx), "idle_captures=" .. tostring(state.idle_ticks or 0),
             "keys=" .. table.concat(sequence, " -> ") .. " -> RET" }, "; ")
@@ -3363,7 +3406,6 @@ function remuda._butler_compaction_execute(session_name, force)
   owner_state.compaction_members = owner_state.compaction_members or remuda._butler_compaction_members_state or {}
   remuda._butler_compaction_members_state = owner_state.compaction_members
   local agent = remuda._butler_bus.agents[session_name] or {}
-  if agent.native_autocompact then return "skipped_native_autocompact" end
   if agent.kind ~= "claude" and agent.kind ~= "codex" then
     local message = "compaction skipped: unsupported agent kind " .. tostring(agent.kind)
     pcall(remuda._butler_send, session_name, agent.parent or "butler", message)
@@ -3400,11 +3442,25 @@ function remuda._butler_compaction_execute(session_name, force)
   local level = remuda.butler.ctx_level(session_name)
   local detail = "ctx=" .. tostring(level.used or "?")
   local ctx_before = tonumber(level.used)
+  local prior_model, settings_path, prior_settings_model
+  if agent.kind == "claude" then
+    local telemetry = remuda._butler_telemetry_for(agent) or {}
+    prior_model = telemetry.model or agent.model
+    if not prior_model or prior_model == "" or prior_model == "?" then
+      return "skipped_unknown_model"
+    end
+    settings_path = (os.getenv("HOME") or "") .. "/.claude/settings.json"
+    local settings = read_claude_settings(settings_path)
+    prior_settings_model = settings and settings.model or prior_model
+  end
   local function release_lock()
     state.compaction_in_progress = false
     if owner_state.compaction_fleet_active == state_key then owner_state.compaction_fleet_active = nil end
   end
   local function fail(reason)
+    if agent.kind == "claude" and settings_path and prior_settings_model then
+      pcall(remuda._butler_compaction_restore_settings_file, settings_path, prior_settings_model)
+    end
     release_lock()
     state.failure_cooldown_until = (remuda._butler_compaction_now or os.time)()
       + config.failure_cooldown_seconds
@@ -3414,6 +3470,12 @@ function remuda._butler_compaction_execute(session_name, force)
       "Compaction failed: " .. tostring(reason))
   end
   local function finish_success(event)
+    if agent.kind == "claude" then
+      if not remuda._butler_compaction_restore_settings_file(settings_path, prior_settings_model) then
+        fail("Claude settings.json model did not restore")
+        return
+      end
+    end
     release_lock()
     state.failure_cooldown_until = nil
     state.cooldown_ticks = config.cooldown_ticks
@@ -3435,6 +3497,32 @@ function remuda._butler_compaction_execute(session_name, force)
     end
     return false
   end
+  local function send_command(command)
+    local sent, send_err = pcall(remuda.type_text, session_name, command, config.input_settle)
+    if not sent then fail("compaction command failed: " .. tostring(send_err)); return false end
+    return true
+  end
+  local function wait_for(id, matcher, action, timeout, on_timeout)
+    local ok, handle = pcall(remuda.expect, session_name, {
+      { id = id, match = matcher, action = action },
+    }, { timeout = timeout, unknown = remuda._butler_compaction_is_unknown_dialog,
+      on_unknown = function() fail("unrecognized dialog during " .. id) end,
+      on_timeout = on_timeout or function() fail("timed out waiting for " .. id) end,
+      on_error = function(err) fail("compaction watcher error: " .. tostring(err)) end }, false)
+    if not ok then fail("could not start " .. id .. " watcher: " .. tostring(handle)) end
+    return ok
+  end
+  local completion_timeout = agent.kind == "claude"
+    and config.claude_completion_timeout or config.completion_timeout
+  local function restore_model(event, after_restore)
+    if not send_command("/model " .. prior_model) then return end
+    wait_for("model-restored", function()
+      local current = remuda._butler_telemetry_for(agent) or {}
+      return current.model == prior_model
+    end, function()
+      if after_restore then after_restore() else finish_success(event or "verified") end
+    end, completion_timeout)
+  end
   local function monitor_until_idle()
     local warned = pcall(remuda._butler_send, session_name, agent.parent or "butler",
       "Compaction is still running; the fleet lock remains held until this session is idle.")
@@ -3449,7 +3537,8 @@ function remuda._butler_compaction_execute(session_name, force)
         if state.compaction_monitor then remuda.cancel(state.compaction_monitor) end
         state.compaction_monitor = nil
         state.compaction_still_running_notice_sent = nil
-        finish_success("completed_after_timeout")
+        if agent.kind == "claude" then restore_model("completed_after_timeout")
+        else finish_success("completed_after_timeout") end
       end
     end })
     if monitor_ok then state.compaction_monitor = monitor end
@@ -3459,34 +3548,36 @@ function remuda._butler_compaction_execute(session_name, force)
   state.failure_cooldown_until = nil
   owner_state.compaction_fleet_active = state_key
   _butler_trace("sent", detail)
-  local sent, send_err = pcall(remuda.type_text, session_name, "/compact", config.input_settle)
-  if not sent then fail("compact command failed: " .. tostring(send_err)); return "failed" end
-  local completion_timeout = agent.kind == "claude"
-    and config.claude_completion_timeout or config.completion_timeout
-  local watch_ok, handle = pcall(remuda.expect, session_name, {
-    { id = "compact-complete", match = function()
+  local function compact()
+    if not send_command("/compact") then return end
+    wait_for("compact-complete", function()
       local current = remuda._butler_telemetry_for(agent) or {}
       local used = tonumber(current.context_used)
       return used and ctx_before and used < ctx_before
-    end, action = function() finish_success("verified") end },
-  }, { timeout = completion_timeout,
-    unknown = remuda._butler_compaction_is_unknown_dialog,
-    on_unknown = function()
-      fail("unrecognized dialog after compaction")
-    end,
-    on_timeout = function()
+    end, function()
+      if agent.kind == "claude" then restore_model("verified")
+      else finish_success("verified") end
+    end, completion_timeout, function()
       if agent.kind == "claude" then
         if pane_busy() ~= false then
           monitor_until_idle()
         else
-          fail("compaction context did not drop")
+          restore_model(nil, function() fail("compaction context did not drop") end)
         end
       else
         fail("compaction context did not drop")
       end
-    end,
-    on_error = function(err) fail("compaction completion error: " .. tostring(err)) end }, false)
-  if not watch_ok then fail("could not start compaction watcher: " .. tostring(handle)); return "failed" end
+    end)
+  end
+  if agent.kind == "claude" then
+    if not send_command("/model sonnet") then return "failed" end
+    wait_for("model-sonnet", function()
+      local current = remuda._butler_telemetry_for(agent) or {}
+      return type(current.model) == "string" and current.model:lower():find("sonnet", 1, true) ~= nil
+    end, compact, completion_timeout)
+  else
+    compact()
+  end
   return "started"
 end
 
