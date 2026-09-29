@@ -204,6 +204,12 @@ assert(not remuda._butler_compaction_is_unknown_dialog(
   "dialog words in transcript text must not be mistaken for a modal")
 
 local claude_sequence = remuda._butler_compaction_sequence()
+assert(remuda._butler_compaction_valid_model("opus"), "opus is an allowed model")
+assert(remuda._butler_compaction_valid_model("claude-opus-4-7[1m]"), "Claude model ids with the 1m suffix are allowed")
+assert(not remuda._butler_compaction_valid_model("opus; /compact"), "model strings must not permit command injection")
+assert(not remuda._butler_compaction_valid_model("claude-opus-4-7[1m]x"), "only the optional 1m suffix is accepted")
+assert(remuda._butler_compaction_statusline_model_matches("Opus", "claude-opus-4-7"),
+  "statusline matching should find the model family anywhere in the expected id")
 assert(table.concat(remuda._butler_compaction_sequence("opus"), "|")
   == "/model sonnet|/compact|/model opus",
   "Claude compaction should use sonnet, compact, then restore the prior model")

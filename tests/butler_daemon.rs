@@ -5224,6 +5224,11 @@ done
       local original_type_text = remuda.type_text
       remuda.type_text = function(name, value, settle)
         if name == "fake-hang" then remuda._fake_busy[name] = true end
+        if value == "/model sonnet" then
+          local f = io.open(remuda._fake_restore_file, "r")
+          remuda._fake_restore_record_before_sonnet = f ~= nil
+          if f then remuda._fake_restore_record_bytes = f:read("*a"); f:close() end
+        end
         return original_type_text(name, value, settle)
       end
       remuda._butler_telemetry_for = function(agent)
@@ -5235,12 +5240,14 @@ done
         remuda.new(name, {{"bash", {script:?}, log, scenario}}, nil, {{}})
         remuda._butler_bus.agents[name] = {{id=name, kind=kind, session_name=name}}
       end
+      remuda._fake_restore_file = {data_str:?} .. "/remuda/butler/mail/compaction-restore.json"
     "#
         ),
     );
 
     for (name, kind, scenario) in [
         ("fake-happy", "claude", "happy"),
+        ("fake-persist", "claude", "happy"),
         ("fake-mid-turn", "claude", "happy"),
         ("fake-busy-screen", "claude", "busy-screen"),
         ("fake-attached", "claude", "happy"),
@@ -5254,6 +5261,7 @@ done
         ("fake-settings-mismatch", "claude", "settings-mismatch"),
         ("fake-unknown", "claude", "unknown"),
         ("fake-restore-fails", "claude", "unknown-restore-fails"),
+        ("fake-unsafe-model", "claude", "happy"),
         ("fake-force", "claude", "unknown"),
         ("fake-hang", "claude", "hang"),
     ] {
@@ -5274,6 +5282,9 @@ done
             &path,
             &format!("remuda._fake_setup_compaction({name:?}, {kind:?}, {log:?}, {scenario:?})"),
         );
+        if name == "fake-unsafe-model" {
+            eval(&path, "remuda._butler_bus.agents['fake-unsafe-model'].model = 'opus; /compact'");
+        }
         wait_for(&path, name, "MODEL:");
         if name == "fake-mid-turn" {
             eval(&path, &format!("remuda._fake_busy[{name:?}] = true"));
@@ -5299,7 +5310,14 @@ done
             "fake-attach-mid" => assert_eq!(result, "skipped_attached"),
             "fake-draft" => assert_eq!(result, "skipped_composer"),
             "fake-unknown-kind" => assert_eq!(result, "skipped_unsupported_kind"),
+            "fake-unsafe-model" => assert_eq!(result, "failed"),
             _ => assert_eq!(result, "started"),
+        }
+        if name == "fake-unsafe-model" {
+            assert!(std::fs::read_to_string(&log).unwrap_or_default().is_empty(),
+                "an invalid model value must never produce pane input");
+            let reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
+            assert!(reports.contains("unsafe Claude model"), "unsafe model should alert the parent: {reports:?}");
         }
         if name == "fake-hang" {
             let deadline = Instant::now() + Duration::from_secs(8);
@@ -5325,7 +5343,7 @@ done
                 std::thread::sleep(Duration::from_millis(100));
             }
         }
-        if name == "fake-stale-flags" || name == "fake-happy" || name.starts_with("fake-settings-") {
+        if name == "fake-stale-flags" || name == "fake-happy" || name == "fake-persist" || name.starts_with("fake-settings-") {
             let deadline = Instant::now() + Duration::from_secs(8);
             loop {
                 let in_progress = eval(&path, &format!(
@@ -5339,6 +5357,14 @@ done
             let got = std::fs::read_to_string(&log).unwrap_or_default();
             assert_eq!(got, "CMD:/model sonnet\nKEY:RET\nCMD:/compact\nKEY:RET\nCMD:/model opus\nKEY:RET\n",
                 "Claude should compact on sonnet and restore its prior model: {got:?}");
+            if name == "fake-persist" {
+                assert_eq!(eval(&path, "return tostring(remuda._fake_restore_record_before_sonnet)"), "true",
+                    "the prior model record must be durable before typing /model sonnet");
+                assert!(eval(&path, "return remuda._fake_restore_record_bytes").contains("opus"),
+                    "the durable record must map this session to its prior model");
+                assert!(!std::path::Path::new(&eval(&path, "return remuda._fake_restore_file")).exists(),
+                    "verified restore must delete the durable record");
+            }
             if name.starts_with("fake-settings-") {
                 let settings_after = if name == "fake-settings-mismatch" {
                     Some(b"{\"model\":\"sonnet\",\"theme\":\"dark\"}\n" as &[u8])
@@ -5384,6 +5410,15 @@ done
                 "never type into the unknown dialog or attempt a model restore while it is visible");
             assert_eq!(eval(&path, &format!("return remuda._butler_compaction_members_state[{name:?}].restore_pending")), "opus",
                 "remember prior model for idle recovery");
+            assert!(std::path::Path::new(&eval(&path, "return remuda._fake_restore_file")).exists(),
+                "an interrupted compaction must leave a durable prior-model record");
+            eval(&path, &format!(r#"
+              remuda._butler_compaction_members_state[{name:?}].restore_pending = nil
+              remuda._butler_compaction_load_restore_record()
+              return remuda._butler_compaction_tick({name:?}, false)
+            "#));
+            assert_eq!(eval(&path, &format!("return remuda._butler_compaction_members_state[{name:?}].restore_pending")), "opus",
+                "the next tick must reload and resume a durable restore");
             eval(&path, &format!("return remuda._butler_compaction_tick({name:?}, false)"));
             assert_eq!(std::fs::read_to_string(&log).unwrap(), before,
                 "recovery must wait while the unknown dialog is still visible");
@@ -5429,10 +5464,12 @@ done
                     std::thread::sleep(Duration::from_millis(50));
                 }
                 let pending = eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].restore_pending)"));
-                assert_eq!(pending, if attempt < 3 { "opus" } else { "nil" });
+                assert_eq!(pending, "opus", "failed verification must retain recovery state after attempt {attempt}");
             }
             let got = std::fs::read_to_string(&log).unwrap();
             assert_eq!(got.matches("CMD:/model opus\nKEY:RET\n").count(), 3, "attempt exactly three verified restores");
+            assert!(std::path::Path::new(&eval(&path, "return remuda._fake_restore_file")).exists(),
+                "failed restore must retain its durable recovery record");
             let reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
             assert_eq!(reports.matches("model restore failed; member may still be on sonnet").count(), 1,
                 "notify the parent once after the final failed restore");
