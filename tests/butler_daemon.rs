@@ -2201,6 +2201,69 @@ fn butler_cli_test_daemon(dir: &Path) -> (Daemon, PathBuf) {
 }
 
 #[test]
+fn butler_message_bodies_preserve_stdin_and_file_content_and_enforce_limits() {
+    let dir = scratch_dir("butler-message-body");
+    let (_daemon, path) = butler_cli_test_daemon(&dir);
+    let body = "backticks `here`; literal $(never_run); \"quoted\"\nsecond line\n";
+    let body_lua = lua_raw_string(body);
+    let stdin_result = eval(&path, &format!(r#"
+      remuda._butler_send = function(_, _, text) remuda._test_body = text; return "captured" end
+      local result = remuda._butler_command_run("send", {{"send", "member", "-"}}, {{env={{}}, stdin={body_lua}}})
+      assert(result == "captured")
+      return remuda._test_body
+    "#));
+    assert_eq!(stdin_result, body);
+
+    let file = dir.join("message.txt");
+    std::fs::write(&file, body).expect("write body file");
+    let file_lua = lua_raw_string(&file.to_string_lossy());
+    let file_result = eval(&path, &format!(r#"
+      local result = remuda._butler_command_run("send", {{"send", "member", "--file", {file_lua}}}, {{env={{}}}})
+      assert(result == "captured")
+      return remuda._test_body
+    "#));
+    assert_eq!(file_result, body);
+
+    let empty_stdin = eval(&path, r#"
+      local ok, err = pcall(function()
+        remuda._butler_command_run("send", {"send", "member", "-"}, {env={}, stdin=""})
+      end)
+      assert(not ok)
+      return tostring(err)
+    "#);
+    assert!(empty_stdin.contains("message body must not be empty"), "{empty_stdin}");
+
+    let oversized = "x".repeat(65_537);
+    for (content, expected) in [("", "message body must not be empty"), (oversized.as_str(), "message body exceeds the 64 KiB limit")] {
+        std::fs::write(&file, content).expect("write invalid body file");
+        let code = format!(r#"
+          local ok, err = pcall(function()
+            remuda._butler_command_run("send", {{"send", "member", "--file", {file_lua}}}, {{env={{}}}})
+          end)
+          assert(not ok)
+          return tostring(err)
+        "#);
+        assert!(eval(&path, &code).contains(expected));
+    }
+}
+
+#[test]
+fn butler_cli_unknown_recipient_and_inbox_help_are_plain_errors() {
+    let dir = scratch_dir("butler-cli-errors");
+    let (_daemon, _path) = butler_cli_test_daemon(&dir);
+    let unknown = remuda_timed(&dir, &["-s", "s", "butler", "send", "no-such-member", "hello"]);
+    assert!(!unknown.status.success());
+    let stderr = String::from_utf8_lossy(&unknown.stderr);
+    assert!(stderr.contains("unknown member: no-such-member"), "{stderr}");
+    assert!(stderr.contains("remuda butler agents"), "{stderr}");
+    assert!(!stderr.contains("runtime error"), "{stderr}");
+
+    let help = remuda_timed(&dir, &["-s", "s", "butler", "inbox", "--help"]);
+    assert!(help.status.success(), "{}", String::from_utf8_lossy(&help.stderr));
+    assert!(String::from_utf8_lossy(&help.stdout).contains("Usage: remuda butler inbox [name]"));
+}
+
+#[test]
 fn butler_compact_cli_rejects_unknown_sessions_and_previews_safe_keys() {
     let dir = scratch_dir("butler-compact-cli");
     let (_daemon, path) = butler_cli_test_daemon(&dir);

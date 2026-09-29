@@ -773,8 +773,7 @@ local function resolve(ref)
   end
   local live = bus.agents[ref]
   if live then return ref end
-  local last = bus.identities[ref]
-  error("alias " .. tostring(ref) .. " has no live agent; last was " .. (last and last.id or "unknown"), 0)
+  error("unknown member: " .. tostring(ref) .. "; run `remuda butler agents` to list live members", 0)
 end
 local function mail_address(alias)
   local agent = bus.agents[alias]
@@ -1194,7 +1193,9 @@ remuda._butler_contribute("butler.guidance", "cli", { order = 20,
 
 - `remuda butler inbox` reads your own queued messages.
 - `remuda butler send MEMBER "MESSAGE"` sends a message; your sender is inferred.
-  Quote the message: a second unquoted word makes it `send FROM TO ...`.
+- For long bodies, use `cat <<'EOF' | remuda butler send MEMBER -` or `--file PATH`.
+- `send-to-leader` and `reply MESSAGE_ID` accept `-` and `--file PATH` too.
+- Message bodies are limited to 64 KiB; short quoted messages can stay positional.
 - `remuda butler send-to-leader RESULT...` reports a completed work loop.
 - `remuda butler sessions` shows the household.
 
@@ -1202,7 +1203,8 @@ remuda._butler_contribute("butler.guidance", "cli", { order = 20,
   end,
   prompt = function()
     return "Use `remuda butler inbox`, `remuda butler send MEMBER \"MESSAGE\"`, and "
-      .. "`remuda butler send-to-leader RESULT...` for coordination. "
+      .. "`remuda butler send-to-leader RESULT...` for coordination. Long bodies use "
+      .. "stdin (`-`) or `--file PATH`; message bodies are limited to 64 KiB. "
   end })
 remuda._butler_contribute("butler.guidance", "old-core", { order = 30,
   agents_md = function()
@@ -2517,11 +2519,11 @@ end
 local USAGE_NOTES = [[
 Agent sessions receive REMUDA_BUTLER_AGENT_ID and REMUDA_BUTLER_LEADER_ID.
 In an agent session, use `inbox`, `send <to> "..."`, and `send-to-leader ...`;
-the identity comes from the caller's environment. Quote the message for
-`send <to>`: an unquoted multi-word message reads as `send <from> <to> ...`,
-the operator form for attributing a note. Without a forwarded Butler identity
-(a plain shell, or a core that does not forward the caller's env), `send` is
-from "operator" and `inbox` needs a name (`inbox <name>`).
+the identity comes from the caller's environment. For a long message, use
+`cat <<'EOF' | remuda butler send MEMBER -` or `--file PATH`; `reply` accepts
+the same forms. Bodies are limited to 64 KiB. Without a forwarded Butler
+identity (a plain shell, or a core that does not forward the caller's env),
+`send` is from "operator" and `inbox` needs a name (`inbox <name>`).
 `reply` answers a message's original sender, even when it was forwarded to you;
 `forward` re-delivers a message you received, keeping its sender, with a note.
 ]]
@@ -2537,6 +2539,43 @@ local function words_after(args, first)
   local words = {}
   for i = first, #args do words[#words + 1] = args[i] end
   return table.concat(words, " ")
+end
+
+local MAX_MESSAGE_BYTES = 64 * 1024
+local function checked_message_body(body)
+  if type(body) ~= "string" or #body == 0 then error("message body must not be empty", 0) end
+  if #body > MAX_MESSAGE_BYTES then error("message body exceeds the 64 KiB limit", 0) end
+  return body
+end
+local function message_body(args, first, caller)
+  if args[first] == "-" then
+    if #args ~= first then error("stdin message form takes no extra arguments", 0) end
+    local body = caller and caller.stdin
+    if type(body) ~= "string" then
+      error("no message body received on stdin; use `--file PATH` or a Remuda core with caller stdin support", 0)
+    end
+    return checked_message_body(body)
+  elseif args[first] == "--file" then
+    if #args ~= first + 1 or not args[first + 1] or args[first + 1] == "" then
+      error("expected one path after --file", 0)
+    end
+    local path = args[first + 1]
+    local file, open_error = io.open(path, "rb")
+    if not file then error("cannot read message file " .. path .. ": " .. tostring(open_error), 0) end
+    local body, read_error = file:read(MAX_MESSAGE_BYTES + 1)
+    file:close()
+    if body == nil and read_error ~= nil then error("cannot read message file " .. path .. ": " .. tostring(read_error), 0) end
+    if body == nil then body = "" end
+    return checked_message_body(body)
+  end
+  return checked_message_body(words_after(args, first))
+end
+local function cli_result(callback)
+  local ok, result = pcall(callback)
+  if ok then return result end
+  local message = tostring(result)
+  if type(remuda.fail) == "function" then return remuda.fail(message, 1) end
+  error(message, 0)
 end
 
 -- Each verb is a `butler.command` entry (hook-design §4.1); `run` returns nil
@@ -2600,28 +2639,47 @@ command(30, "topic", "  remuda butler topic new <name> [--template T] [--agent A
     if i <= #args then return remuda._butler_topic_delegate(args[3], words_after(args, i), nil, kind, parent, model) end
   end
 end)
-command(40, "send", '  remuda butler send <to> "<message>"\n  remuda butler send <from> <to> <message...>', function(args, caller)
+command(40, "send", '  remuda butler send <to> "<message>" | <to> - | <to> --file PATH\n'
+  .. '  remuda butler send <from> <to> <message...> | <from> <to> - | <from> <to> --file PATH', function(args, caller)
   if #args < 3 then return nil end
   local from, to, first = current_agent(caller) or OPERATOR, args[2], 3
-  if #args >= 4 then from, to, first = args[2], args[3], 4 end
-  return remuda._butler_send(from, to, words_after(args, first))
+  if args[3] ~= "-" and args[3] ~= "--file" and #args >= 4 then
+    from, to, first = args[2], args[3], 4
+  elseif args[3] ~= "-" and args[3] ~= "--file" and #args < 4 then
+    -- Positional short messages retain the caller-inferred sender form.
+  elseif args[4] == "-" or args[4] == "--file" then
+    from, to, first = args[2], args[3], 4
+  end
+  return cli_result(function()
+    return remuda._butler_send(from, to, message_body(args, first, caller))
+  end)
 end)
-command(50, "send-to-leader", "  remuda butler send-to-leader <message...>", function(args, caller)
+command(50, "send-to-leader", "  remuda butler send-to-leader <message...> | - | --file PATH", function(args, caller)
   if #args < 2 then return nil end
-  local from = assert(current_agent(caller), OPERATOR .. " has no leader; send-to-leader is for Butler agents")
-  return remuda._butler_report(from, words_after(args, 2))
+  return cli_result(function()
+    local from = assert(current_agent(caller), OPERATOR .. " has no leader; send-to-leader is for Butler agents")
+    return remuda._butler_report(from, message_body(args, 2, caller))
+  end)
 end)
 command(60, "inbox", "  remuda butler inbox [name]", function(args, caller)
-  return remuda._butler_inbox(args[2] or assert(current_agent(caller), "no Butler identity in your env; use `inbox <name>`"))
+  if args[2] == "--help" or args[2] == "-h" then return "Usage: remuda butler inbox [name]\n" end
+  if #args > 2 then return nil end
+  return cli_result(function()
+    return remuda._butler_inbox(args[2] or assert(current_agent(caller), "no Butler identity in your env; use `inbox <name>`"))
+  end)
 end)
-command(70, "reply", "  remuda butler reply <message-id> <message...>", function(args, caller)
+command(70, "reply", "  remuda butler reply <message-id> <message...> | - | --file PATH", function(args, caller)
   if #args < 3 then return nil end
-  return remuda._butler_reply(current_agent(caller) or OPERATOR, args[2], words_after(args, 3))
+  return cli_result(function()
+    return remuda._butler_reply(current_agent(caller) or OPERATOR, args[2], message_body(args, 3, caller))
+  end)
 end)
 command(80, "forward", "  remuda butler forward <message-id> <member> [note...]", function(args, caller)
   if #args < 3 then return nil end
-  return remuda._butler_forward(current_agent(caller) or OPERATOR, args[2], args[3],
-    #args >= 4 and words_after(args, 4) or nil)
+  return cli_result(function()
+    return remuda._butler_forward(current_agent(caller) or OPERATOR, args[2], args[3],
+      #args >= 4 and words_after(args, 4) or nil)
+  end)
 end)
 command(100, "matrix", remuda.butler.matrix.cli_usage(), function(args, caller)
   return remuda.butler.matrix.cli(args, current_agent(caller))
@@ -2773,6 +2831,8 @@ leader, when you have one, is `REMUDA_BUTLER_LEADER_ID`. Use the short forms:
 - `remuda butler inbox` to read your own inbox.
 - `remuda butler send MEMBER "MESSAGE"` to direct a member; your sender is inferred.
 - `remuda butler send-to-leader MESSAGE...` to report a completed work loop.
+- For long bodies, use `cat <<'EOF' | remuda butler send MEMBER -` or `--file PATH`;
+  `send-to-leader` and `reply MESSAGE_ID` accept those forms too. The limit is 64 KiB.
 
 If `inbox` says "no Butler identity in your env", your Remuda core predates
 caller-env forwarding: pass your id (`remuda butler inbox
