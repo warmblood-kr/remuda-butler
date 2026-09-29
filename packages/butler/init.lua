@@ -25,6 +25,22 @@ end
 -- handle is scoped to this Remuda image; require its old script location to
 -- match the exact path that the Butler module used under its install dir.
 local function stop_legacy_matrix_relay()
+  -- The pre-extraction Butler stored its relay in this host slot.
+  -- It has no script-path argv to verify; the daemon-owned handle and current
+  -- process membership are the identity boundary for this one-time upgrade stop.
+  local old_id = host._butler_relay
+  if old_id ~= nil then
+    if type(host.processes) == "function" and type(host.kill) == "function" then
+      for _, running_id in ipairs(host.processes()) do
+        if running_id == old_id then
+          pcall(host.kill, old_id)
+          break
+        end
+      end
+    end
+    host._butler_relay = nil
+  end
+
   local id = host._butler_matrix_relay
   if id == nil or type(host.processes) ~= "function" or type(host.kill) ~= "function" then return end
   local data_home = os.getenv("XDG_DATA_HOME")

@@ -934,6 +934,53 @@ fn the_daemon_names_the_build_it_was_started_from() {
 /// turns any failure below into a hung job instead of a red one.
 struct Daemon(std::process::Child);
 
+/// Snapshot the exact descendant PIDs owned by this harness daemon. Teardown
+/// signals those IDs individually instead of using a process-name or group kill.
+fn descendant_pids_of(parent: i32) -> Vec<i32> {
+    let out = std::process::Command::new("ps")
+        .args(["-axo", "pid=,ppid="])
+        .output()
+        .expect("ps");
+    let rows: Vec<(i32, i32)> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?))
+        })
+        .collect();
+    let mut parents = vec![parent];
+    let mut descendants = Vec::new();
+    loop {
+        let before = descendants.len();
+        for (pid, ppid) in &rows {
+            if parents.contains(ppid) && !parents.contains(pid) {
+                parents.push(*pid);
+                descendants.push(*pid);
+            }
+        }
+        if descendants.len() == before { break; }
+    }
+    descendants
+}
+
+#[cfg(unix)]
+fn process_pid_alive(pid: i32) -> bool {
+    let rc = unsafe { libc::kill(pid, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+#[cfg(unix)]
+struct ProcessPidGuard(Vec<i32>);
+
+#[cfg(unix)]
+impl Drop for ProcessPidGuard {
+    fn drop(&mut self) {
+        for pid in &self.0 {
+            unsafe { libc::kill(*pid, libc::SIGKILL); }
+        }
+    }
+}
+
 impl Daemon {
     fn spawn(dir: &Path) -> Self {
         let child = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
@@ -1058,8 +1105,11 @@ impl Daemon {
 
 impl Drop for Daemon {
     fn drop(&mut self) {
-        let process_group = -(self.0.id() as i32);
-        unsafe { libc::kill(process_group, libc::SIGKILL); }
+        let daemon_pid = self.0.id() as i32;
+        for pid in descendant_pids_of(daemon_pid).into_iter().rev() {
+            unsafe { libc::kill(pid, libc::SIGKILL); }
+        }
+        unsafe { libc::kill(daemon_pid, libc::SIGKILL); }
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
@@ -2578,6 +2628,7 @@ fn butler_matrix_relay_dead_letters_poison_event_and_continues() {
         lua_raw_string(&token_path.to_string_lossy()), lua_raw_string(&config_path.to_string_lossy())));
     let baseline = "http://matrix.example.org/_matrix/client/v3/sync?timeout=0";
     let first_sync = "http://matrix.example.org/_matrix/client/v3/sync?since=s0&timeout=100";
+    let later_sync = "http://matrix.example.org/_matrix/client/v3/sync?since=s1&timeout=100";
     let poison = serde_json::json!({"type":"m.room.message","event_id":"$poison","sender":"@alice:example.org",
         "content":{"msgtype":"m.text","body":"always throws"}});
     let normal = serde_json::json!({"type":"m.room.message","event_id":"$normal","sender":"@alice:example.org",
@@ -2607,7 +2658,7 @@ fn butler_matrix_relay_dead_letters_poison_event_and_continues() {
       if remuda.relay_delivery_attempts["$poison"] ~= 5
         then return "poison-attempt-bound-wrong:" .. tostring(remuda.relay_delivery_attempts["$poison"]) end
       if relay:state().pending["$poison"] then return "poison-remains-pending" end
-      if relay:state().processed["$poison"] then return "dead-lettered-poison-marked-delivered" end
+      if not relay:state().processed["$poison"] then return "dead-lettered-poison-not-marked-processed" end
       local dead_letter_logged = false
       for _, line in ipairs(remuda.relay_logs) do
         if line:find("dead-lettered $poison after 5 failed attempts", 1, true) then dead_letter_logged=true end
@@ -2616,10 +2667,15 @@ fn butler_matrix_relay_dead_letters_poison_event_and_continues() {
       local normal_count = 0
       for _, id in ipairs(remuda.relay_deliveries) do if id == "$normal" then normal_count=normal_count+1 end end
       if normal_count ~= 1 then return "normal-event-not-delivered-exactly-once" end
+      remuda.http.respond("GET", {later_sync}, {{ status=200, headers={{}}, body={poison_response} }})
+      remuda.http.tick()
+      remuda.http.tick()
+      if remuda.relay_delivery_attempts["$poison"] ~= 5 then return "dead-lettered-id-was-retried" end
       relay:stop()
       return "ok"
     "#,
-        baseline=lua_raw_string(baseline), first_sync=lua_raw_string(first_sync), response=lua_raw_string(&response.to_string()),
+        baseline=lua_raw_string(baseline), first_sync=lua_raw_string(first_sync), later_sync=lua_raw_string(later_sync),
+        response=lua_raw_string(&response.to_string()), poison_response=lua_raw_string(&serde_json::json!({"next_batch":"s2","rooms":{"join":{room:{"timeline":{"events":[{"type":"m.room.message","event_id":"$poison","sender":"@alice:example.org","content":{"msgtype":"m.text","body":"again"}}]}}}}}).to_string()),
         config=lua_raw_string(&config_path.to_string_lossy())));
     assert_eq!(result, "ok", "poison event must be retried with a bound, dead-lettered, and not block later events: {result}");
 }
@@ -2787,6 +2843,44 @@ fn butler_matrix_relay_reload_replaces_the_fake_http_loop_once() {
         "repeated reloads must not duplicate relay loops");
 }
 
+#[cfg(unix)]
+#[test]
+fn butler_matrix_lua_relay_has_no_process_child_after_daemon_sigkill() {
+    let dir = scratch_dir("butler-relay-sigkill");
+    let (token_path, config_path) = butler_config(
+        &dir, "sigkill", "http://127.0.0.1:1", "!relay:example.org", "@bot:example.org", "");
+    let token = token_path.to_string_lossy().into_owned();
+    let config = config_path.to_string_lossy().into_owned();
+    let daemon = Daemon::spawn_with_env(
+        &dir,
+        &[("REMUDA_BUTLER_TOKEN", token.as_str()), ("REMUDA_BUTLER_CONFIG", config.as_str())],
+    );
+    let path = daemon::socket_path_in(&dir, "s");
+    eval(&path, &format!(
+        "remuda._butler_matrix_config = {{ token_path={}, config_path={} }}; \
+         remuda.exec('butler/matrix_request'); remuda.exec('butler/matrix_relay'); \
+         assert(remuda.butler.matrix.relay.start(remuda._butler_matrix_config))",
+        lua_raw_string(&token), lua_raw_string(&config)));
+    assert_eq!(read_count(&path, "return remuda.butler.matrix.relay.instance ~= nil and 1 or 0"), 1,
+        "the in-process Lua relay must be active before daemon death");
+
+    let daemon_pid = daemon.0.id() as i32;
+    let children = descendant_pids_of(daemon_pid);
+    let _child_guard = ProcessPidGuard(children.clone());
+    assert!(children.is_empty(), "Lua relay unexpectedly started child processes: {children:?}");
+    assert_eq!(unsafe { libc::kill(daemon_pid, libc::SIGKILL) }, 0,
+        "SIGKILL of the private daemon must succeed");
+
+    let deadline = Instant::now() + PATIENCE;
+    while children.iter().any(|pid| process_pid_alive(*pid)) {
+        assert!(Instant::now() < deadline,
+            "a child process of the relay daemon survived SIGKILL: {children:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(children.iter().all(|pid| !process_pid_alive(*pid)),
+        "no child process of the daemon may survive its SIGKILL");
+}
+
 #[test]
 fn butler_matrix_relay_bounds_processed_ids_and_reconciles_bad_pending_state() {
     let dir = scratch_dir("mr-state");
@@ -2840,11 +2934,18 @@ fn butler_matrix_relay_bounds_processed_ids_and_reconciles_bad_pending_state() {
 
     std::fs::write(&state_path, "{broken").expect("seed malformed state");
     let malformed = eval(&path, &format!(r#"
+      remuda.relay_state_logs = {{}}
+      local old_stderr = io.stderr
+      io.stderr = {{ write=function(_, value) table.insert(remuda.relay_state_logs, value) end }}
       local relay = remuda.butler.matrix.relay.new({{ config_path={config}, matrix=remuda.butler.matrix,
         deliver=function() return true end }})
-      return relay:state().since == nil and #relay:state().processed_order == 0 and "ok" or "malformed-state-not-reset"
+      io.stderr = old_stderr
+      if relay:state().since ~= nil or #relay:state().processed_order ~= 0 then return "malformed-state-not-reset" end
+      if #remuda.relay_state_logs ~= 1 or not remuda.relay_state_logs[1]:find("invalid Matrix relay state", 1, true)
+        then return "malformed-state-not-logged-once" end
+      return "ok"
     "#, config=lua_raw_string(&config_path.to_string_lossy())));
-    assert_eq!(malformed, "ok", "malformed JSON state must reset cleanly");
+    assert_eq!(malformed, "ok", "malformed JSON state must reset cleanly and log once");
     std::fs::remove_file(&state_path).expect("remove malformed primary state");
     std::fs::write(format!("{}.bak", state_path.display()), r#"{"since":"backup-cursor"}"#)
         .expect("seed replace-window backup");
@@ -2856,6 +2957,49 @@ fn butler_matrix_relay_bounds_processed_ids_and_reconciles_bad_pending_state() {
       return relay:state().since == "backup-cursor" and f and "ok" or "backup-not-recovered"
     "#, config=lua_raw_string(&config_path.to_string_lossy()), state=lua_raw_string(&state_path.to_string_lossy())));
     assert_eq!(recovered, "ok", "crash-window backup must restore the previous cursor");
+}
+
+#[test]
+fn butler_matrix_relay_logs_distinct_transport_misconfigurations_once() {
+    let dir = scratch_dir("mr-config-log");
+    let (_daemon, path) = butler_test_daemon(&dir);
+    let (https_token, https_config) = butler_config(
+        &dir, "https", "https://matrix.example.org", "!relay:example.org", "@bot:example.org", "");
+    let (empty_token, empty_config) = butler_config(
+        &dir, "empty", "http://matrix.example.org", "!relay:example.org", "@bot:example.org", "");
+    std::fs::write(&empty_token, "").expect("seed empty token");
+    eval(&path, include_str!("support/fake_http.lua"));
+    eval(&path, "remuda.exec('butler/matrix_request'); remuda.exec('butler/matrix_relay')");
+    let result = eval(&path, &format!(r#"
+      local old_stderr = io.stderr
+      remuda.relay_config_logs = {{}}
+      io.stderr = {{ write=function(_, value) table.insert(remuda.relay_config_logs, value) end }}
+      local function run(token, config)
+        remuda._butler_matrix_config = {{ token_path=token, config_path=config }}
+        local relay = remuda.butler.matrix.relay.new({{ config_path=config, matrix=remuda.butler.matrix,
+          deliver=function() return true end }})
+        relay:start()
+        for _=1,30 do remuda.http.tick() end
+        relay:stop()
+      end
+      run({https_token}, {https_config})
+      run({empty_token}, {empty_config})
+      io.stderr = old_stderr
+      if #remuda.relay_config_logs ~= 2 then return "expected-two-distinct-warnings:" .. #remuda.relay_config_logs end
+      local https, empty = false, false
+      for _, line in ipairs(remuda.relay_config_logs) do
+        if line:find("HTTPS Matrix homeserver requires", 1, true) then https = true end
+        if line:find("Matrix token is empty", 1, true) then empty = true end
+      end
+      if not https then return "missing-https-warning" end
+      if not empty then return "missing-empty-token-warning" end
+      return "ok"
+    "#,
+        https_token=lua_raw_string(&https_token.to_string_lossy()),
+        https_config=lua_raw_string(&https_config.to_string_lossy()),
+        empty_token=lua_raw_string(&empty_token.to_string_lossy()),
+        empty_config=lua_raw_string(&empty_config.to_string_lossy())));
+    assert_eq!(result, "ok", "relay should log one warning per distinct invalid transport configuration: {result}");
 }
 
 // The Matrix MCP tool now uses the daemon's async request word directly.

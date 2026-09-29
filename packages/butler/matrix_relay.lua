@@ -12,6 +12,15 @@ local MAX_DELIVERY_FAILURES = 5
 local MAX_BODY_BYTES = 64 * 1024
 local SYNC_PATH = "/_matrix/client/v3/sync"
 local MESSAGES_PREFIX = "/_matrix/client/v3/rooms/"
+local warning_keys = relay.warning_keys or {}
+relay.warning_keys = warning_keys
+
+local function warn_once(kind, key, message)
+  local warning_key = kind .. "\0" .. key
+  if warning_keys[warning_key] then return end
+  warning_keys[warning_key] = true
+  pcall(function() io.stderr:write(message .. "\n") end)
+end
 
 local function encode(value)
   local ok, result = pcall(json.encode, value)
@@ -195,12 +204,14 @@ function relay.new(options)
   local cfg, config_error = matrix.read_config(config_path)
   if not cfg then error(config_error, 0) end
   local state_path, ack_path = config_path .. ".since", config_path .. ".acks"
-  local state = load_state(state_path)
+  local state, state_error = load_state(state_path)
+  if state_error then
+    warn_once("state", state_path .. "\0" .. state_error,
+      "butler invalid Matrix relay state; starting from a fresh baseline: " .. tostring(state_error))
+  end
   local active, request_handle, retry_timer, backfill_timer = false, nil, nil, nil
   local delivery_retry_waiting, delivery_retry_timers = {}, {}
   local failures = 0
-  local warned_allowlist_refusal = false
-
   local instance = {}
   local function persist()
     local ok, err = save_state(state_path, state)
@@ -274,6 +285,7 @@ function relay.new(options)
           local attempts = (tonumber(event._relay_failures) or 0) + 1
           event._relay_failures = attempts
           if attempts >= MAX_DELIVERY_FAILURES then
+            add_processed(state, id)
             state.pending[id] = nil
             persist()
             pcall(function()
@@ -351,11 +363,14 @@ function relay.new(options)
       request_handle = nil
       if not active then return end
       if type(result) ~= "table" or result.error or type(result.json) ~= "table" then
-        if not warned_allowlist_refusal and type(result) == "table" and type(result.error) == "string"
-          and result.error:find("outside the configured Matrix allowlist", 1, true) then
-          warned_allowlist_refusal = true
-          pcall(function() io.stderr:write("butler Matrix relay request refused by configured allowlist: "
-            .. result.error .. "\n") end)
+        if type(result) == "table" and type(result.error) == "string" then
+          if result.error:find("outside the configured Matrix allowlist", 1, true) then
+            warn_once("allowlist", result.error,
+              "butler Matrix relay request refused by configured allowlist: " .. result.error)
+          elseif result.error == "Matrix token is empty"
+              or result.error:find("^HTTPS Matrix homeserver requires ca_file=PATH or pin_sha256=HEX") then
+            warn_once("config", result.error, "butler Matrix relay misconfigured: " .. result.error)
+          end
         end
         failed(); return
       end
