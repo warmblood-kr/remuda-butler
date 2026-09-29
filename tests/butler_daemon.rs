@@ -2099,6 +2099,68 @@ fn butler_cli_test_daemon(dir: &Path) -> (Daemon, PathBuf) {
     (daemon, path)
 }
 
+#[test]
+fn butler_compact_cli_rejects_unknown_sessions_and_previews_safe_keys() {
+    let dir = scratch_dir("butler-compact-cli");
+    let (_daemon, path) = butler_cli_test_daemon(&dir);
+    let trace_path = dir.join("compaction-trace.log");
+    eval(
+        &path,
+        &format!(
+            "remuda._butler_compaction_trace_path = {}",
+            lua_raw_string(&trace_path.to_string_lossy())
+        ),
+    );
+
+    for dry_run in [false, true] {
+        let out = if dry_run {
+            remuda_timed(&dir, &["-s", "s", "butler", "compact", "no-such-member", "--dry-run"])
+        } else {
+            remuda_timed(&dir, &["-s", "s", "butler", "compact", "no-such-member"])
+        };
+        assert!(!out.status.success(), "unknown session unexpectedly succeeded: {}",
+            String::from_utf8_lossy(&out.stdout));
+        assert!(String::from_utf8_lossy(&out.stderr).contains("unknown session: no-such-member"),
+            "unknown-session error was not clear: {}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(
+            eval(&path, r#"
+              local state = remuda._butler_state or remuda._butler_compaction_state or {}
+              local members = state.compaction_members or remuda._butler_compaction_members_state or {}
+              return tostring(members["no-such-member"] == nil)
+            "#),
+            "true",
+            "unknown session must not create compaction member state"
+        );
+        assert!(!trace_path.exists(), "unknown session unexpectedly wrote a compaction trace");
+    }
+
+    eval(&path, r#"
+      remuda._butler_bus.agents["preview-opus"] = {
+        id = "preview-opus", kind = "claude", session_name = "preview-opus", model = "Opus-4.7"
+      }
+      remuda._butler_bus.agents["preview-unknown"] = {
+        id = "preview-unknown", kind = "claude", session_name = "preview-unknown", model = "Experimental-Model"
+      }
+      remuda._butler_telemetry_for = function(agent)
+        return { context_used = 900000, model = agent.model }
+      end
+      remuda.session = function() return { is_busy = false, attached = false } end
+      remuda.capture = function() return "idle composer" end
+      remuda._butler_prompt_is_empty = function() return "EMPTY" end
+    "#);
+    let opus = remuda_timed(&dir, &["-s", "s", "butler", "compact", "preview-opus", "--dry-run"]);
+    assert!(opus.status.success(), "known-family preview failed: {}", String::from_utf8_lossy(&opus.stderr));
+    let preview = String::from_utf8_lossy(&opus.stdout);
+    assert!(preview.contains("/model opus"), "preview omitted the model-family alias: {preview}");
+    assert!(!preview.contains("Opus-4.7"), "preview exposed the display tag: {preview}");
+
+    let unknown = remuda_timed(&dir, &["-s", "s", "butler", "compact", "preview-unknown", "--dry-run"]);
+    assert!(unknown.status.success(), "unknown-family preview failed: {}", String::from_utf8_lossy(&unknown.stderr));
+    let preview = String::from_utf8_lossy(&unknown.stdout);
+    assert!(preview.contains("skip: model family unknown"), "preview omitted the safety skip: {preview}");
+    assert!(!preview.contains("keys="), "unknown-family preview showed an unsafe key sequence: {preview}");
+}
+
 
 #[test]
 fn butler_matrix_request_uses_fake_http_for_auth_trust_allow_and_same_room() {

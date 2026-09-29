@@ -170,6 +170,14 @@ function remuda.butler.compact(name)
   local result = remuda._butler_compaction_execute(name)
   return result or "started"
 end
+function remuda._butler_compaction_has_session(name)
+  if type(name) ~= "string" or name == "" then return false end
+  local agents = (remuda._butler_bus or {}).agents or {}
+  for key, agent in pairs(agents) do
+    if (agent.session_name or key) == name then return true end
+  end
+  return false
+end
 function remuda.butler.compaction_policy(name, state, dry_run)
   state = state or {}
   local current = state
@@ -2953,6 +2961,9 @@ function remuda._butler_register_compaction_schedule()
   return true
 end
 function remuda._butler_compaction_tick(target_name, dry_run)
+  if target_name and not remuda._butler_compaction_has_session(target_name) then
+    return "unknown session: " .. tostring(target_name)
+  end
   local owner_state = remuda._butler_state or remuda._butler_compaction_state or {}
   if not target_name then
     if dry_run then
@@ -3007,11 +3018,17 @@ function remuda._butler_compaction_tick(target_name, dry_run)
         local should_send, event, ctx = remuda.butler.compaction_policy(session_name, state, dry_run)
         if dry_run then
           local telemetry = remuda._butler_telemetry_for(agent) or {}
-          local sequence = remuda._butler_compaction_sequence(agent.kind or "claude", telemetry.model,
-            remuda._butler_compaction_model or "sonnet")
-          results[#results + 1] = table.concat({ session_name, "decision=" .. tostring(event),
-            "ctx=" .. tostring(ctx), "idle_captures=" .. tostring(state.idle_ticks or 0),
-            "keys=" .. table.concat(sequence, " -> ") .. " -> visible switch option (if prompted)" }, "; ")
+          local family = compaction_family(telemetry.model) or compaction_family(agent.model)
+          if should_send and agent.kind == "claude" and not family then
+            results[#results + 1] = table.concat({ session_name, "skip: model family unknown",
+              "ctx=" .. tostring(ctx), "idle_captures=" .. tostring(state.idle_ticks or 0) }, "; ")
+          else
+            local sequence = remuda._butler_compaction_sequence(agent.kind or "claude", family,
+              remuda._butler_compaction_model or "sonnet")
+            results[#results + 1] = table.concat({ session_name, "decision=" .. tostring(event),
+              "ctx=" .. tostring(ctx), "idle_captures=" .. tostring(state.idle_ticks or 0),
+              "keys=" .. table.concat(sequence, " -> ") .. " -> visible switch option (if prompted)" }, "; ")
+          end
         elseif should_send then
           if type(remuda.expect) ~= "function" then
             if not remuda._butler_compaction_core_missing then
@@ -3040,6 +3057,9 @@ end
 
 function remuda._butler_compaction_execute(session_name)
   if not session_name then return "no session" end
+  if not remuda._butler_compaction_has_session(session_name) then
+    return "unknown session: " .. tostring(session_name)
+  end
   local owner_state = remuda._butler_state or remuda._butler_compaction_state or {}
   owner_state.compaction_members = owner_state.compaction_members or remuda._butler_compaction_members_state or {}
   remuda._butler_compaction_members_state = owner_state.compaction_members

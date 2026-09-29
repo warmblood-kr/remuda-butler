@@ -208,6 +208,11 @@ the normal way for a member to communicate.
       { id = "compact", order = 16, verb = "compact", usage = "  remuda butler compact <session> [--dry-run]",
         run = function(_, args)
           if not args[2] or args[2] == "" then return nil end
+          if not host._butler_compaction_has_session(args[2]) then
+            local message = "unknown session: " .. args[2]
+            if type(host.fail) == "function" then return host.fail(message, 1) end
+            error(message, 0)
+          end
           if #args == 3 and args[3] == "--dry-run" then
             return host._butler_compaction_tick(args[2], true)
           end
