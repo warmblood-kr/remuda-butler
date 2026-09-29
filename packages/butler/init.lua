@@ -104,7 +104,9 @@ return {
         return result
       end },
     { event = "session_exited", id = "identity", depth = -50,
-      run = function(_, name, info) return host._butler_session_exited(name, info) end },
+      run = function(_, name, info, instance_id)
+        return host._butler_session_exited(name, info, instance_id)
+      end },
     { event = "butler-compaction-submit", id = "submit",
       run = function() return host._butler_compaction_submit() end },
   },

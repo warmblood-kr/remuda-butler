@@ -4477,7 +4477,10 @@ fn butler_session_exited_hook_relaunches_via_the_shared_launch_function() {
     );
     assert!(
         init_lua.contains("event = \"session_exited\", id = \"identity\"")
-            && main_lua.contains("function remuda._butler_session_exited(name, info)")
+            && init_lua.contains("host._butler_session_exited(name, info, instance_id)")
+            && main_lua.contains("function remuda._butler_session_exited(name, info, instance_id)")
+            && main_lua.contains("stale_session_exit(name, instance_id)")
+            && main_lua.contains("session.instance_id ~= instance_id")
             && main_lua[launch_fn_idx..].contains("remuda._butler_reconcile()"),
         "the declared session-exit hook must use the shared reconciler"
     );

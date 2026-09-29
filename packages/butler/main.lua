@@ -3605,7 +3605,24 @@ local function report_update_task_not_relaunched(record, reason)
       .. tostring(reason or "update aborted") .. "). Resend it with `remuda butler send "
       .. record.name .. " TASK` when the pane is ready.")
 end
-function remuda._butler_session_exited(name, info)
+local function stale_session_exit(name, instance_id)
+  if type(instance_id) ~= "string" or instance_id == "" then return false end
+  local ok, sessions = pcall(remuda.ls)
+  if not ok or type(sessions) ~= "table" then return false end
+  for _, session in ipairs(sessions) do
+    if session.name == name and session.alive
+        and type(session.instance_id) == "string" then
+      return session.instance_id ~= instance_id
+    end
+  end
+  return false
+end
+
+function remuda._butler_session_exited(name, info, instance_id)
+  if stale_session_exit(name, instance_id) then
+    _butler_session_trace("stale_session_exit", name .. " instance=" .. instance_id)
+    return
+  end
   _butler_session_trace("session_exited", name)
   local update_restart = bus.codex_update_relaunches[name]
   local explicitly_closed = bus.close_requested and bus.close_requested[name]
