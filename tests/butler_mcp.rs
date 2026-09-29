@@ -400,7 +400,7 @@ fn a_busy_notice_input_retries_on_the_next_tick() {
         remuda._notice_busy_calls = 0
         remuda.type_text = function(_, text)
           remuda._notice_busy_calls = remuda._notice_busy_calls + 1
-          if remuda._notice_busy_calls == 1 then return nil, 'Busy' end
+          if remuda._notice_busy_calls == 1 then error('a session input write is already in flight') end
           remuda._notice_typed = text
           return true
         end
@@ -412,6 +412,44 @@ fn a_busy_notice_input_retries_on_the_next_tick() {
     eval(&path, "remuda._butler_deliver_notices()");
     assert_eq!(eval(&path, "return tostring(remuda._notice_busy_calls)"), "2");
     assert_ne!(eval(&path, "return tostring(remuda._notice_typed)"), "nil");
+}
+
+#[test]
+fn a_non_busy_error_containing_busy_is_not_retried_as_input_lock() {
+    let (path, _daemon) = butler_with_member("notice-false-busy-error");
+    eval(
+        &path,
+        r#"
+        local row = { name = 'm1', alive = true, attached = false }
+        remuda.ls = function() return { row } end
+        remuda.session = function() return { is_busy = false } end
+        remuda._butler_human_active = function() return false end
+        remuda.capture = function() return '❯ ' end
+        remuda._notice_busy_error_calls = 0
+        remuda.type_text = function()
+          remuda._notice_busy_error_calls = remuda._notice_busy_error_calls + 1
+          error('disk is busy while the terminal write failed')
+        end
+        remuda._notice_busy_error_report = nil
+        remuda._butler_send = function(_, _, text)
+          remuda._notice_busy_error_report = text
+          return 'captured report'
+        end
+        remuda._butler_bus.notices.m1 = { count = 1, text = 'pending' }
+        local recovery = {
+          phase = 'retry_type', checks = 0, notice = 'pending', count = 1,
+        }
+        remuda._butler_bus.notice_recoveries.m1 = recovery
+        remuda._butler_deliver_notices()
+        remuda._notice_recovery_failed = recovery.failed
+        "#,
+    );
+    assert_eq!(eval(&path, "return tostring(remuda._notice_busy_error_calls)"), "1");
+    assert_eq!(eval(&path, "return tostring(remuda._notice_recovery_failed)"), "true");
+    assert!(
+        eval(&path, "return tostring(remuda._notice_busy_error_report)").contains("disk is busy"),
+        "non-Busy type_text error was not reported"
+    );
 }
 
 /// #82: notice submit verification accepts Claude's soft-wrapped composer in
@@ -917,12 +955,16 @@ fn session_exit_clears_the_notice_queue_and_screen_record() {
          remuda._butler_send('operator', 'm1', 'hi'); \
          remuda._butler_bus.notice_recoveries.m1 = { phase = 'probe' }; \
          remuda._butler_bus.notice_screens.m1 = { screen = '', since = 0 }; \
-         remuda.emit('session_exited', 'm1')",
+         local cwd = remuda._butler_bus.agents.m1.cwd; \
+         remuda._butler_bus.trusted_launch_dirs = { [cwd] = true }; \
+         remuda.emit('session_exited', 'm1'); \
+         remuda._trust_path_cleared = remuda._butler_bus.trusted_launch_dirs[cwd] == nil",
     );
     assert_eq!(
         eval(&path, "return tostring(remuda._butler_bus.notices.m1) .. tostring(remuda._butler_bus.notice_screens.m1) .. tostring(remuda._butler_bus.notice_recoveries.m1)"),
         "nilnilnil"
     );
+    assert_eq!(eval(&path, "return tostring(remuda._trust_path_cleared)"), "true");
 }
 
 /// #29 review 3: a task the policy keeps deferring times out, is logged, and
@@ -1183,18 +1225,41 @@ fn topic_names_cannot_escape_the_project_home() {
             "remuda.butler.project_home({projects:?}); \
              remuda._butler_agent_builders.fake = function() return {{'sleep','20'}} end; \
              local rejected = {{}} \
-             for _, name in ipairs({{'../escape', 'back\\\\slash', '.hidden'}}) do \
+             for _, name in ipairs({{'../escape', 'back\\\\slash', '.hidden', 'line\\nbreak'}}) do \
                local ok = pcall(remuda._butler_topic_new, name, nil, 'fake'); \
                rejected[#rejected + 1] = tostring(not ok) \
              end \
              return table.concat(rejected, ',')"
         ),
     );
-    assert_eq!(got, "true,true,true", "unsafe topic name was accepted: {got}");
+    assert_eq!(got, "true,true,true,true", "unsafe topic name was accepted: {got}");
     assert!(
         !dir.join("escape").exists(),
         "traversal topic created a directory outside project_home"
     );
+}
+
+#[test]
+fn launch_cwd_rejects_control_characters() {
+    let dir = scratch("launch-cwd-controls");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+    let cwd = dir.join("cwd\nnotice-injection");
+    std::fs::create_dir_all(&cwd).expect("control-character cwd");
+    let cwd_lua = format!("{:?}", cwd.to_string_lossy());
+    let accepted = eval(
+        &path,
+        &format!(
+            "remuda._butler_agent_builders.claude = function() return {{'sleep', '20'}} end; \
+             local token = remuda._butler_bus.agents.butler.token; \
+             pcall(remuda._call, 'butler_launch', \
+               {{ kind = 'claude', name = 'badcwd', cwd = {cwd_lua} }}, \
+               {{ capability = token }}); \
+             return tostring(remuda._butler_bus.agents.badcwd ~= nil)"
+        ),
+    );
+    assert_eq!(accepted, "false", "launch accepted a control character in cwd");
 }
 
 #[test]
@@ -1214,9 +1279,15 @@ fn trust_dialogs_on_external_or_reused_directories_wait_for_a_human() {
         &format!(
             r#"remuda.butler.project_home({projects:?})
             remuda._butler_readiness_timeout = 30
-            remuda._butler_test_force_launch_probe = {{ outside = true, outside_codex = true, reused = true, three = true, templated = true }}
+            remuda._butler_test_force_launch_probe = {{ outside = true, outside_codex = true, reused = true, three = true, templated = true, fresh = true }}
             remuda._butler_agent_builders.claude = function() return {{'sh', '-c', 'sleep 20'}} end
             remuda._butler_agent_builders.codex = function() return {{'sh', '-c', 'sleep 20'}} end
+            local real_ls = remuda.ls
+            remuda.ls = function()
+              local rows = real_ls()
+              for _, row in ipairs(rows) do row.attached = false end
+              return rows
+            end
             local selected_yes = "Accessing workspace:\n❯ Yes, I trust this folder\n  No, exit"
             local safe_modal = "Accessing workspace:\n❯ No, exit\n  Yes, I trust this folder"
             local three_options = safe_modal .. "\n  Inspect first"
@@ -1225,6 +1296,7 @@ fn trust_dialogs_on_external_or_reused_directories_wait_for_a_human() {
               if name == 'outside' then return selected_yes end
               if name == 'outside_codex' then return codex_modal end
               if name == 'reused' then return safe_modal end
+              if name == 'fresh' then return safe_modal end
               return three_options
             end
             remuda._trust_test_keys, remuda._trust_test_reports = {{}}, {{}}
@@ -1236,18 +1308,27 @@ fn trust_dialogs_on_external_or_reused_directories_wait_for_a_human() {
             remuda._butler_topic_new('reused', nil, 'claude')
             remuda._butler_topic_new('three', nil, 'claude')
             remuda.butler.template('clone', function(topic) topic.write('repo.txt', 'third-party source') end)
-            remuda._butler_topic_new('templated', 'clone', 'claude')"#
+            remuda._butler_topic_new('templated', 'clone', 'claude')
+            remuda._butler_topic_new('fresh', nil, 'claude')"#
         ),
     );
     std::thread::sleep(Duration::from_secs(2));
     let keys = eval(&path, "return table.concat(remuda._trust_test_keys, '\\n')");
-    assert!(keys.is_empty(), "a human trust dialog was answered automatically: {keys}");
+    assert!(keys.lines().all(|key| key.starts_with("fresh:")), "a human trust dialog was answered automatically: {keys}");
+    assert!(keys.contains("fresh:"), "fresh trust dialog was not answered: {keys}; state={}",
+        eval(&path, "local a=remuda._butler_bus.agents.fresh; return tostring(a and a.cwd)..':'..tostring(a and a.trust_allowed)..':'..tostring(a and a.trust_reported)..':'..tostring(a and a.launch_attempts[1].reason)..':'..tostring(remuda._butler_bus.trusted_launch_dirs)"));
     let reports = eval(&path, "return table.concat(remuda._trust_test_reports, '\\n')");
     assert!(reports.contains("waiting for a human: trust dialog"), "leader was not asked for human trust: {reports}");
     assert!(reports.contains(&external.to_string_lossy().to_string()), "external cwd missing from trust report: {reports}");
     assert!(reports.contains(&reused.to_string_lossy().to_string()), "reused topic path missing from trust report: {reports}");
     assert!(reports.contains(&projects.join("three").to_string_lossy().to_string()), "three-option topic path missing from trust report: {reports}");
     assert!(reports.contains(&projects.join("templated").to_string_lossy().to_string()), "template topic path missing from trust report: {reports}");
+    let fresh_path = projects.join("fresh").to_string_lossy().to_string();
+    assert_eq!(
+        eval(&path, &format!("return tostring(remuda._butler_bus.trusted_launch_dirs[{fresh_path:?}])")),
+        "nil",
+        "trusted-launch record was not consumed after answering"
+    );
 }
 
 #[test]

@@ -557,7 +557,7 @@ end
 local function valid_child_name(name, what)
   if type(name) ~= "string" or name == "" or name:sub(1, 1) == "."
       or name:find("/", 1, true) or name:find("\\", 1, true)
-      or name:find("..", 1, true) then
+      or name:find("..", 1, true) or name:find("%c") then
     error((what or "name") .. " must be a single path component without separators, '..', or a leading dot", 0)
   end
   return name
@@ -1115,7 +1115,15 @@ local function choose(candidates, opts, done)
               and startup_action_safe(state.name) then
             if not state.handled[dialog_index] then
               state.handled[dialog_index] = true
-              for _, key in ipairs(dialog.keys or {}) do pcall(remuda.key, state.name, key) end
+              local answered = true
+              for _, key in ipairs(dialog.keys or {}) do
+                local ok, result = pcall(remuda.key, state.name, key)
+                if not ok or result == false then answered = false end
+              end
+              if answered then
+                state.attempt.trust_answered = true
+                bus.trusted_launch_dirs[opts.cwd] = nil
+              end
             end
             break
           end
@@ -1366,10 +1374,10 @@ trust_modal_state = function(modal, screen)
       return "human"
     end
     if not selected_no or not selected_index then return "human" end
-    local first, last = selected_index, selected_index
-    while first > 1 and lines[first - 1]:match("%S") do first = first - 1 end
-    while last < #lines and lines[last + 1]:match("%S") do last = last + 1 end
-    local options = last - first + 1
+    local options = 0
+    for _, line in ipairs(lines) do
+      if line:match("^%s*[❯›]%s*%S") or line:match("^  %S") then options = options + 1 end
+    end
     if affirmative and selected_no and options == 2 then return "safe" end
     return "human"
   elseif modal.trust == "codex" then
@@ -1436,6 +1444,9 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   local candidates = kind and { kind } or configured_agent_order()
   kind = kind or candidates[1]
   local name = valid_child_name(requested_name or kind or "agent", "agent name")
+  if cwd ~= nil and (type(cwd) ~= "string" or cwd:find("%c")) then
+    error("cwd must be a string without control characters", 0)
+  end
   if bus.agents[name] then
     error("alias " .. name .. " is live as " .. tostring(bus.agents[name].id) .. "; pick another alias", 0)
   end
@@ -1486,6 +1497,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   }
   local function finish(actual, selected_kind, attempts)
   if not actual then
+    if bus.trusted_launch_dirs then bus.trusted_launch_dirs[launch_cwd] = nil end
     local errors = {}
     for _, a in ipairs(attempts) do errors[#errors + 1] = a.kind .. ": " .. a.reason .. " (" .. (a.detail or "") .. ")" end
     local message = "no agent candidate became ready: " .. table.concat(errors, "; ")
@@ -1498,18 +1510,19 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   agent_telemetry = telemetry_by_kind[kind]
   identity.kind = kind
   identity_record(identity)
-  local waiting_for_trust = false
+  local waiting_for_trust, trust_answered = false, false
   for _, attempt in ipairs(attempts or {}) do
     if attempt.session == actual and attempt.reason == "waiting_for_human_trust" then
       waiting_for_trust = true
     end
+    if attempt.session == actual and attempt.trust_answered then trust_answered = true end
   end
   bus.tokens[token] = actual
   bus.agents[actual] = {
     kind = kind, token = token, model = model, telemetry = agent_telemetry,
     parent = parent, children = {}, id = identity.id, alias = actual, session_name = actual,
     cwd = launch_cwd, task = task, launch_attempts = attempts, trust_allowed = auto_trust,
-    trust_reported = waiting_for_trust,
+    trust_reported = waiting_for_trust, trust_answered = trust_answered,
   }
   if parent and bus.agents[parent] then
     local children = bus.agents[parent].children
@@ -1624,6 +1637,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       if modal and modal.trust then
         local trust_state = trust_modal_state(modal, screen)
         local agent = bus.agents[actual]
+        if trust_state == "safe" and agent.trust_answered then return end
         if agent.last_trust_screen == screen then agent.trust_ticks = (agent.trust_ticks or 0) + 1
         else agent.last_trust_screen, agent.trust_ticks = screen, 1 end
         if agent.trust_ticks < 2 then return end
@@ -1631,8 +1645,15 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
             and bus.trusted_launch_dirs[agent.cwd] == true and startup_action_safe
             and startup_action_safe(actual) then
           if not agent.trust_answered then
-            agent.trust_answered = true
-            for _, key in ipairs(modal.keys or {}) do pcall(remuda.key, actual, key) end
+            local answered = true
+            for _, key in ipairs(modal.keys or {}) do
+              local ok, result = pcall(remuda.key, actual, key)
+              if not ok or result == false then answered = false end
+            end
+            if answered then
+              agent.trust_answered = true
+              bus.trusted_launch_dirs[agent.cwd] = nil
+            end
           end
         elseif not agent.trust_reported then
           agent.trust_reported = true
@@ -2186,7 +2207,8 @@ end
 local notice_recovery_error
 local function input_was_busy(ok, result, detail)
   local message = tostring(ok and (detail or result) or result or "")
-  return message:lower():find("busy", 1, true) ~= nil
+  return message == "a session input write is already in flight"
+    or message == "runtime error: a session input write is already in flight"
 end
 local function refresh_pending_notice(session, pending)
   if not pending.message_order then return pending end
@@ -3966,6 +3988,9 @@ function remuda._butler_session_exited(name, info)
   bus.notices[name], bus.notice_screens[name], bus.pending_tasks[name] = nil, nil, nil
   bus.notice_recoveries[name], bus.task_retry_screens[name], bus.human_activity_screens[name] = nil, nil, nil
   local exited = bus.agents[name]
+  if exited and exited.cwd and bus.trusted_launch_dirs then
+    bus.trusted_launch_dirs[exited.cwd] = nil
+  end
   if exited and name ~= "butler" then
     local ended = bus.identity_ids[exited.id] or exited
     ended.alias, ended.kind = exited.alias or name, exited.kind
