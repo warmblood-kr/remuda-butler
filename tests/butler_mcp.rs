@@ -528,6 +528,44 @@ fn submitted_claude_notice_followed_by_approval_dialog_clears_pending_notice() {
     assert!(eval(&path, "return tostring(remuda._notice_dialog_test_state.submitted)") == "true");
 }
 
+/// The core can show an empty composer after Return while Claude is already
+/// working, before the accepted text is visible in the transcript capture.
+#[test]
+fn busy_claude_with_empty_composer_confirms_submitted_notice() {
+    let (path, _daemon) = butler_with_member("notice-busy-empty");
+    eval(
+        &path,
+        r#"
+        local row = { name = 'm1', alive = true, attached = false }
+        local state = { screen = '❯ \n', events = {}, busy = false }
+        remuda._notice_busy_empty_state = state
+        remuda._butler_bus.agents.m1.kind = 'claude'
+        remuda.capture_styled = nil
+        remuda.ls = function() return { row } end
+        remuda.session = function() return { is_busy = state.busy } end
+        remuda.capture = function() return state.screen end
+        remuda._butler_notify_policy = function() return true end
+        remuda.type_text = function(_, text)
+          table.insert(state.events, 'type')
+          state.notice = text
+          state.screen = '❯ \n' .. string.rep('─', 80)
+          state.busy = true
+        end
+        remuda.key = function(_, key) table.insert(state.events, 'key ' .. key) end
+        remuda._butler_bus.notices.m1 = { count = 1, text = 'busy empty notice fixture' }
+        "#,
+    );
+
+    for _ in 0..4 {
+        eval(&path, "remuda._butler_deliver_notices()");
+    }
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1 == nil)"), "true",
+        "busy pane with an empty composer did not confirm the notice submit");
+    let events = eval(&path, "return table.concat(remuda._notice_busy_empty_state.events, ',')");
+    assert_eq!(events.matches("type").count(), 1, "notice was retyped: {events}");
+    assert!(!events.contains("key RET"), "busy empty composer was submitted twice: {events}");
+}
+
 /// Repeated delivery of the same unread message must not increment notice counts;
 /// reading it in the inbox must cancel any still-pending pane notice.
 #[test]
