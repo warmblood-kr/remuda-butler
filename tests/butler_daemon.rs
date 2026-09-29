@@ -25,7 +25,13 @@ const PATIENCE: Duration = Duration::from_secs(10);
 /// a long path fails at bind with a message no caller would guess from a
 /// timeout, which is what the binary's startup-error handling exists for.
 fn scratch_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("remuda-t{}-{tag}", std::process::id()));
+    // Keep every test daemon (and its child processes) below the harness's
+    // private scratch tree when rust_tests.sh supplies one. That lets its EXIT
+    // trap find a relay even if the Rust process itself is interrupted.
+    let base = std::env::var_os("REMUDA_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let dir = base.join(format!("remuda-t{}-{tag}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     dir
 }
@@ -950,7 +956,7 @@ fn the_daemon_names_the_build_it_was_started_from() {
 /// A daemon as its own PROCESS, with its streams pointed at nothing. Inheriting
 /// the harness's stdout would let a leaked daemon hold cargo's pipe open, which
 /// turns any failure below into a hung job instead of a red one.
-struct Daemon(std::process::Child);
+struct Daemon(std::process::Child, PathBuf);
 
 /// Snapshot the exact descendant PIDs owned by this harness daemon. Teardown
 /// signals those IDs individually instead of using a process-name or group kill.
@@ -1004,6 +1010,7 @@ impl Daemon {
         let child = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
             .args(["-s", "s", "daemon"])
             .env("REMUDA_RUNTIME_DIR", dir)
+            .current_dir(dir)
             .process_group(0)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -1016,7 +1023,7 @@ impl Daemon {
             assert!(Instant::now() < deadline, "daemon never bound {path:?}");
             std::thread::sleep(Duration::from_millis(10));
         }
-        Self(child)
+        Self(child, dir.to_path_buf())
     }
 
     /// Like `spawn`, but pins the daemon process's own `PWD` -- `None` unsets
@@ -1027,6 +1034,7 @@ impl Daemon {
         let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"));
         cmd.args(["-s", "s", "daemon"])
             .env("REMUDA_RUNTIME_DIR", dir)
+            .current_dir(dir)
             .process_group(0);
         match pwd {
             Some(p) => cmd.env("PWD", p),
@@ -1044,7 +1052,7 @@ impl Daemon {
             assert!(Instant::now() < deadline, "daemon never bound {path:?}");
             std::thread::sleep(Duration::from_millis(10));
         }
-        Self(child)
+        Self(child, dir.to_path_buf())
     }
 
     /// Like `spawn`, but layers extra environment variables onto the daemon
@@ -1057,6 +1065,7 @@ impl Daemon {
         let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"));
         cmd.args(["-s", "s", "daemon"])
             .env("REMUDA_RUNTIME_DIR", dir)
+            .current_dir(dir)
             .process_group(0);
         for (k, v) in extra_env {
             cmd.env(k, v);
@@ -1073,7 +1082,7 @@ impl Daemon {
             assert!(Instant::now() < deadline, "daemon never bound {path:?}");
             std::thread::sleep(Duration::from_millis(10));
         }
-        Self(child)
+        Self(child, dir.to_path_buf())
     }
 
     /// Like `spawn_with_env`, but for the birth-environment-poisoning
@@ -1087,6 +1096,7 @@ impl Daemon {
         let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"));
         cmd.args(["-s", "s", "daemon"])
             .env("REMUDA_RUNTIME_DIR", dir)
+            .current_dir(dir)
             .process_group(0)
             .env("HOME", home)
             .env_remove("XDG_CONFIG_HOME")
@@ -1104,7 +1114,7 @@ impl Daemon {
             assert!(Instant::now() < deadline, "daemon never bound {path:?}");
             std::thread::sleep(Duration::from_millis(10));
         }
-        Self(child)
+        Self(child, dir.to_path_buf())
     }
 
     /// Bounded on purpose: an unbounded `wait` on a daemon that did not stop is
@@ -1123,6 +1133,32 @@ impl Daemon {
 
 impl Drop for Daemon {
     fn drop(&mut self) {
+        // Safety net for legacy test runs that still started the detached
+        // Python relay. Match both its source marker and this test's cwd so
+        // the live Butler relay can never be selected.
+        let mut relays = matrix_relays_in_directory(&self.1);
+        for pid in &relays {
+            unsafe {
+                libc::kill(*pid, libc::SIGTERM);
+            }
+        }
+        let graceful_deadline = Instant::now() + Duration::from_millis(500);
+        while !relays.is_empty() && Instant::now() < graceful_deadline {
+            std::thread::sleep(Duration::from_millis(20));
+            relays = matrix_relays_in_directory(&self.1);
+        }
+        for pid in &relays {
+            unsafe {
+                libc::kill(*pid, libc::SIGKILL);
+            }
+        }
+        let forced_deadline = Instant::now() + Duration::from_millis(500);
+        while !relays.is_empty() && Instant::now() < forced_deadline {
+            std::thread::sleep(Duration::from_millis(20));
+            relays = matrix_relays_in_directory(&self.1);
+        }
+
+        // Stop children individually while their daemon can still reap them.
         let daemon_pid = self.0.id() as i32;
         for pid in descendant_pids_of(daemon_pid).into_iter().rev() {
             unsafe { libc::kill(pid, libc::SIGKILL); }
@@ -1130,7 +1166,69 @@ impl Drop for Daemon {
         unsafe { libc::kill(daemon_pid, libc::SIGKILL); }
         let _ = self.0.kill();
         let _ = self.0.wait();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !relays.is_empty() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+            relays = matrix_relays_in_directory(&self.1);
+        }
+        if !relays.is_empty() {
+            if std::thread::panicking() {
+                eprintln!("legacy Matrix relay survived private daemon teardown: {relays:?}");
+            } else {
+                panic!("legacy Matrix relay survived private daemon teardown: {relays:?}");
+            }
+        }
     }
+}
+
+fn matrix_relays_in_directory(dir: &Path) -> Vec<i32> {
+    const RELAY_MARKER: &str = "MAX_PROCESSED_EVENT_IDS = 5000";
+    let Ok(dir) = std::fs::canonicalize(dir) else {
+        return Vec::new();
+    };
+    let output = std::process::Command::new("ps")
+        .args(["-ww", "-axo", "pid=,command="])
+        .output()
+        .expect("scan processes for Matrix relays under test scratch");
+    assert!(
+        output.status.success(),
+        "ps failed while checking test relay cleanup"
+    );
+    let mut relays = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let Some((pid, command)) = line.trim_start().split_once(char::is_whitespace) else {
+            continue;
+        };
+        if !command.contains(RELAY_MARKER) {
+            continue;
+        }
+        let Ok(pid) = pid.trim().parse::<i32>() else {
+            continue;
+        };
+        if process_cwd(pid).is_some_and(|cwd| cwd.starts_with(&dir)) {
+            relays.push(pid);
+        }
+    }
+    relays
+}
+
+fn process_cwd(pid: i32) -> Option<PathBuf> {
+    // Linux exposes cwd directly; macOS uses lsof. If the process exited
+    // between enumeration and inspection, treat it as already cleaned up.
+    if let Ok(cwd) = std::fs::read_link(format!("/proc/{pid}/cwd")) {
+        return Some(cwd);
+    }
+    let output = std::process::Command::new("lsof")
+        .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix('n').map(PathBuf::from))
 }
 
 /// What a person types, with its own pipes and no terminal — so `restart`
@@ -1139,6 +1237,7 @@ fn remuda(dir: &Path, args: &[&str]) -> std::process::Output {
     std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
         .args(args)
         .env("REMUDA_RUNTIME_DIR", dir)
+        .current_dir(dir)
         .env("REMUDA_NO_UPDATE_CHECK", "1")
         .output()
         .expect("run remuda")
@@ -1151,6 +1250,7 @@ fn remuda_timed(dir: &Path, args: &[&str]) -> std::process::Output {
         .args(args)
         .env("REMUDA_RUNTIME_DIR", dir)
         .env("REMUDA_NO_UPDATE_CHECK", "1")
+        .current_dir(dir)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
