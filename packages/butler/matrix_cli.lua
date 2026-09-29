@@ -136,6 +136,10 @@ local function event_line(event)
   return sender .. ": " .. (matrix.encode_json(event) or "<event>")
 end
 
+local function terminal_safe(value)
+  return tostring(value or ""):gsub("[%c]", " "):gsub("\194[\128-\159]", " ")
+end
+
 local function render_human(verb, options, result)
   local data = result.json or result
   if verb == "rooms" then
@@ -156,15 +160,16 @@ local function render_human(verb, options, result)
     return event_line(data) .. "\n"
   elseif verb == "quarantine" then
     if data.id then
-      return table.concat({ "Event: " .. tostring(data.event_id or data.id),
-        "Reason: " .. tostring(data.reason), "Sender: " .. tostring(data.sender),
-        "Room: " .. tostring(data.room_id), "Time: " .. tostring(data.created_at),
-        "Preview: " .. tostring(data.preview or "") }, "\n") .. "\n"
+      return table.concat({ "Event: " .. terminal_safe(data.event_id or data.id),
+        "Reason: " .. terminal_safe(data.reason), "Sender: " .. terminal_safe(data.sender),
+        "Room: " .. terminal_safe(data.room_id), "Time: " .. terminal_safe(data.created_at),
+        "Preview: " .. terminal_safe(data.preview) }, "\n") .. "\n"
     end
     local lines = {}
     for _, item in ipairs(data) do
-      lines[#lines + 1] = table.concat({ tostring(item.event_id ~= "" and item.event_id or item.id),
-        tostring(item.reason), tostring(item.sender) }, "\t")
+      lines[#lines + 1] = table.concat({
+        terminal_safe(item.event_id ~= "" and item.event_id or item.id),
+        terminal_safe(item.reason), terminal_safe(item.sender) }, "\t")
     end
     return #lines == 0 and "No quarantined Matrix events\n" or table.concat(lines, "\n") .. "\n"
   elseif verb == "download" then
@@ -189,6 +194,12 @@ local function finish(reply, cancelled, completed, verb, options, result)
   if type(result) ~= "table" then result = { error = "Matrix command returned no result" } end
   if result.error then
     return reply:resolve(1, "", tostring(result.error) .. "\n")
+  end
+  if verb == "reply" and result.event_ids and #result.event_ids > 0 then
+    local relay = matrix.relay and matrix.relay.instance
+    if relay and relay.record_outgoing_reply then
+      relay:record_outgoing_reply(options.event_id, result.event_ids[#result.event_ids])
+    end
   end
   local stdout, encode_error
   if options.json then stdout, encode_error = matrix.encode_json(result)
@@ -225,6 +236,15 @@ function matrix.cli(args, agent)
     if active and active.cancel then active:cancel() end
   end })
   local callback = function(result) finish(reply, cancelled, completed, verb, options, result) end
+  if verb == "reply" and matrix.relay and matrix.relay.instance then
+    local relay = matrix.relay.instance
+    if relay.can_reply_to and not relay:can_reply_to(options.event_id) then
+      finish(reply, cancelled, completed, verb, options,
+        { error = "Butler-to-Butler replies are disabled" })
+      return reply
+    end
+    if relay.thread_root_for_event then options.thread_root = relay:thread_root_for_event(options.event_id) end
+  end
   local called, handle = pcall(matrix[verb], options, callback, agent)
   if not called then
     finish(reply, cancelled, completed, verb, options, { error = tostring(handle) })

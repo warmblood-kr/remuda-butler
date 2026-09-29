@@ -39,20 +39,6 @@ local function decode(value)
   return json.decode(value)
 end
 
-local function shell_quote(value)
-  return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
-end
-
-local function protect_state_file(path)
-  -- On Windows, new files inherit the current user's profile ACL. Unix files
-  -- need an explicit mode because quarantine previews can contain private text.
-  if package.config:sub(1, 1) == "\\" then return true end
-  if type(os.execute) ~= "function" then return nil, "cannot enforce private Matrix state file mode" end
-  local ok, kind, code = os.execute("chmod 600 " .. shell_quote(path))
-  if ok == true or ok == 0 or code == 0 then return true end
-  return nil, "chmod 600 failed for Matrix state file (" .. tostring(kind) .. ":" .. tostring(code) .. ")"
-end
-
 local function percent_encode(value)
   return (tostring(value):gsub("([^%w%-%._~])", function(char)
     return string.format("%%%02X", char:byte())
@@ -132,6 +118,14 @@ local function relation_fields(content)
   return root, reply
 end
 
+local function mentions(content, body, mxid)
+  local mentions = content and content["m.mentions"]
+  if type(mentions) == "table" and type(mentions.user_ids) == "table" then
+    for _, user in ipairs(mentions.user_ids) do if user == mxid then return true end end
+  end
+  return type(body) == "string" and body:find(mxid, 1, true) ~= nil
+end
+
 local function media_uri(content)
   if type(content) ~= "table" then return nil end
   if type(content.url) == "string" then return content.url end
@@ -173,33 +167,15 @@ end
 local function empty_state()
   return { since = nil, messages_since = nil, processed = {}, processed_order = {},
     pending = json.object({}), quarantine = json.array({}), routes = json.object({}),
+    direct_rooms = json.object({}),
     reply_outbox = json.object({}), reply_results = json.object({}) }
 end
 
 local function load_state(path)
   local file = io.open(path, "rb")
-  local backup = path .. ".bak"
-  local recovered = false
-  if file then
-    file:close()
-    local private, private_error = protect_state_file(path)
-    if not private then return empty_state(), private_error end
-    file = io.open(path, "rb")
-  end
-  if not file then
-    file = io.open(backup, "rb")
-    recovered = file ~= nil
-    if file then
-      file:close()
-      local private, private_error = protect_state_file(backup)
-      if not private then return empty_state(), private_error end
-      file = io.open(backup, "rb")
-    end
-  end
   if not file then return empty_state() end
   local text = file:read("*a")
   file:close()
-  if recovered then os.rename(backup, path) end
   local value, err = decode(text)
   if type(value) ~= "table" or value == json.null or getmetatable(value) == JSON_ARRAY_MT then
     return empty_state(), err or "invalid state root"
@@ -214,6 +190,7 @@ local function load_state(path)
   local routes = value.matrix_mail_routes or json.object({})
   local reply_outbox = value.matrix_reply_outbox or json.object({})
   local reply_results = value.matrix_reply_results or json.object({})
+  local direct_rooms = value.matrix_direct_rooms or json.object({})
   if (since ~= nil and type(since) ~= "string")
     or (messages_since ~= nil and type(messages_since) ~= "string")
     or type(processed_ids) ~= "table" or processed_ids == json.null
@@ -232,6 +209,13 @@ local function load_state(path)
   state.since, state.messages_since = since, messages_since
   state.quarantine, state.routes = json.array({}), json.object({})
   state.reply_outbox, state.reply_results = json.object({}), json.object({})
+  if type(direct_rooms) == "table" and direct_rooms ~= json.null and getmetatable(direct_rooms) ~= JSON_ARRAY_MT then
+    for room_id, senders in pairs(direct_rooms) do
+      if type(room_id) == "string" and type(senders) == "table" then
+        state.direct_rooms[room_id] = senders
+      end
+    end
+  end
   for _, id in ipairs(processed_ids) do
     if type(id) ~= "string" then return empty_state(), "invalid processed event ID" end
     if id ~= "" then add_processed(state, id) end
@@ -287,40 +271,9 @@ local function save_state(path, state)
   local json = encode({ since = state.since, processed_event_ids = processed,
     messages_since = state.messages_since, pending_events = state.pending,
     quarantine = state.quarantine, matrix_mail_routes = state.routes,
-    matrix_reply_outbox = state.reply_outbox, matrix_reply_results = state.reply_results })
-  local temp = path .. ".tmp"
-  local existing = io.open(path, "rb")
-  if existing then
-    existing:close()
-    local private, private_error = protect_state_file(path)
-    if not private then return nil, private_error end
-  end
-  local file, err = io.open(temp, "wb")
-  if not file then return nil, err end
-  local private, private_error = protect_state_file(temp)
-  if not private then file:close(); os.remove(temp); return nil, private_error end
-  local ok, write_err = file:write(json)
-  local closed, close_err = file:close()
-  if not ok or not closed then os.remove(temp); return nil, write_err or close_err end
-  local renamed, rename_err = os.rename(temp, path)
-  if renamed then
-    os.remove(path .. ".bak")
-    return true
-  end
-  -- Windows rename does not replace an existing destination. Keep a recoverable
-  -- old state around the replace window; load_state restores it after a crash.
-  local backup = path .. ".bak"
-  os.remove(backup)
-  local moved_old, move_err = os.rename(path, backup)
-  if not moved_old then os.remove(temp); return nil, move_err or rename_err end
-  renamed, rename_err = os.rename(temp, path)
-  if not renamed then
-    os.rename(backup, path)
-    os.remove(temp)
-    return nil, rename_err
-  end
-  os.remove(backup)
-  return true
+    matrix_reply_outbox = state.reply_outbox, matrix_reply_results = state.reply_results,
+    matrix_direct_rooms = state.direct_rooms })
+  return remuda.fs.write_atomic(path, json, { private = true })
 end
 
 function relay.new(options)
@@ -341,9 +294,10 @@ function relay.new(options)
     if not saved then warn_once("quarantine", state_path .. "\0expiry",
       "butler could not remove expired Matrix quarantine records: " .. tostring(save_error)) end
   end
-  local active, request_handle, retry_timer, backfill_timer = false, nil, nil, nil
+  local active, request_handle, request_token, retry_timer, backfill_timer = false, nil, nil, nil, nil
   local delivery_retry_waiting, delivery_retry_timers = {}, {}
   local reply_retry_timers, reply_in_flight = {}, {}
+  local generation = 0
   local failures = 0
   local instance = {}
   local function persist()
@@ -375,6 +329,15 @@ function relay.new(options)
 
   function instance:quarantine_list()
     local result = {}
+    local now, changed = os.date("!%Y-%m-%dT%H:%M:%SZ"), false
+    for index = #state.quarantine, 1, -1 do
+      local expires = state.quarantine[index].expires_at
+      if type(expires) == "string" and expires < now then
+        table.remove(state.quarantine, index)
+        changed = true
+      end
+    end
+    if changed then persist() end
     for _, item in ipairs(state.quarantine) do
       local copy = {}
       for key, value in pairs(item) do copy[key] = value end
@@ -384,7 +347,7 @@ function relay.new(options)
   end
 
   function instance:quarantine_get(id)
-    for _, item in ipairs(state.quarantine) do
+    for _, item in ipairs(self:quarantine_list()) do
       if item.id == id or item.event_id == id then
         local copy = {}
         for key, value in pairs(item) do copy[key] = value end
@@ -401,10 +364,58 @@ function relay.new(options)
       event_id = route.last_reply_event_id }
   end
 
+  function instance:mail_route_for_event(room_id, thread_root, in_reply_to)
+    local fallback
+    for mail_id, route in pairs(state.routes) do
+      if route.room_id == room_id then
+        if in_reply_to and (route.last_reply_event_id == in_reply_to or route.event_id == in_reply_to) then
+          return mail_id
+        end
+        if thread_root and (route.last_reply_event_id == thread_root
+          or route.thread_root == thread_root or route.event_id == thread_root) then
+          fallback = fallback or mail_id
+        end
+      end
+    end
+    return fallback
+  end
+
+  function instance:record_outgoing_reply(event_id, sent_id)
+    if type(event_id) ~= "string" or type(sent_id) ~= "string" or sent_id == "" then return false end
+    for _, route in pairs(state.routes) do
+      if route.event_id == event_id or route.last_reply_event_id == event_id then
+        if route.from_butler then return false end
+        route.last_reply_event_id = sent_id
+        persist()
+        return true
+      end
+    end
+    return false
+  end
+
+  function instance:can_reply_to(event_id)
+    for _, route in pairs(state.routes) do
+      if route.event_id == event_id or route.last_reply_event_id == event_id then
+        return not route.from_butler
+      end
+    end
+    return true
+  end
+
+  function instance:thread_root_for_event(event_id)
+    for _, route in pairs(state.routes) do
+      if route.event_id == event_id or route.last_reply_event_id == event_id then
+        return route.thread_root or route.event_id
+      end
+    end
+    return event_id
+  end
+
   local function schedule_reply_retry(reply_id, delay)
+    local retry_generation = generation
     local timer
     timer = remuda.schedule({ every = 1, run = function()
-      if reply_retry_timers[reply_id] ~= timer then return end
+      if not active or generation ~= retry_generation or reply_retry_timers[reply_id] ~= timer then return end
       delay = delay - 1
       if delay > 0 then return end
       remuda.cancel(timer)
@@ -419,9 +430,12 @@ function relay.new(options)
     if not item or reply_in_flight[reply_id] then return end
     item.attempts = (tonumber(item.attempts) or 0) + 1
     persist()
-    reply_in_flight[reply_id] = true
-    api.reply({ room = item.room_id, event_id = item.event_id, text = item.text,
+    local send_generation = generation
+    local token = { generation = send_generation }
+    reply_in_flight[reply_id] = token
+    token.handle = api.reply({ room = item.room_id, event_id = item.event_id, text = item.text,
       thread_root = item.thread_root, txn_id = item.txn_id }, function(result)
+      if reply_in_flight[reply_id] ~= token or generation ~= send_generation then return end
       reply_in_flight[reply_id] = nil
       if type(result) == "table" and not result.error then
         local ids = result.event_ids or {}
@@ -444,7 +458,12 @@ function relay.new(options)
         end
       end
       item.last_error = tostring(result and result.error or "Matrix reply failed")
-      if item.attempts >= 8 then item.status = "failed"
+      if item.attempts >= 8 then
+        state.reply_results[reply_id] = { source_mail_id = item.source_mail_id,
+          reply_mail_id = reply_id, room_id = item.room_id, thread_root = item.thread_root,
+          event_id = "", error = item.last_error, completed_at = os.date("!%Y-%m-%dT%H:%M:%SZ") }
+        state.reply_outbox[reply_id] = nil
+        trim_map(state.reply_results, MAX_REPLY_RESULTS, "completed_at")
       else
         item.status = "pending"
         schedule_reply_retry(reply_id, math.min(60, 2 ^ math.min(6, item.attempts - 1)))
@@ -467,6 +486,7 @@ function relay.new(options)
     end
     local route = state.routes[source_id] or opts.route
     if not route then return nil, "Matrix route for Butler mail " .. source_id .. " was not found" end
+    if route.from_butler then return nil, "Butler-to-Butler replies are disabled" end
     if not state.routes[source_id] then
       if type(route.room_id) ~= "string" or type(route.event_id) ~= "string" then
         return nil, "Matrix reply route is incomplete"
@@ -561,6 +581,7 @@ function relay.new(options)
             if type(result) == "table" and type(result.id) == "string" and result.id ~= "" then
               state.routes[result.id] = { room_id = event.room_id, event_id = event.event_id,
                 thread_root = event.thread_root, in_reply_to = event.in_reply_to,
+                context_mail_id = event.context_mail_id, from_butler = event.from_butler,
                 created_at = event.created_at }
               trim_map(state.routes, MAX_MAIL_ROUTES, "created_at")
               persist()
@@ -615,7 +636,7 @@ function relay.new(options)
     schedule(delay, "retry", function() if active then poll() end end)
   end
 
-  local function accept_events(events, cursor)
+  local function accept_events(events, cursor, room_id)
     local added = {}
     for _, ev in ipairs(type(events) == "table" and events or {}) do
       if type(ev) == "table" then
@@ -624,7 +645,8 @@ function relay.new(options)
           and ev.sender ~= cfg.self_mxid then
           local content = type(ev.content) == "table" and ev.content or {}
           local reason
-          if ev.type ~= "m.room.message" then reason = "unsupported_event_type"
+          if event_id == "" then reason = "missing_event_id"
+          elseif ev.type ~= "m.room.message" then reason = "unsupported_event_type"
           elseif type(ev.sender) ~= "string" or ev.sender == "" then reason = "missing_sender"
           elseif not cfg.allowed_senders[ev.sender] then reason = "sender_not_allowlisted"
           elseif content.msgtype ~= "m.text" and content.msgtype ~= "m.notice" and content.msgtype ~= "m.emote" then
@@ -634,10 +656,21 @@ function relay.new(options)
             quarantine_event(ev, reason)
           else
           local thread_root, in_reply_to = relation_fields(content)
+          local actual_room = room_id or cfg.room
+          local direct_senders = state.direct_rooms[actual_room]
+          local is_direct = type(direct_senders) == "table" and direct_senders[ev.sender] == true
+          local route_mail_id = instance:mail_route_for_event(actual_room, thread_root, in_reply_to)
+          local addressed = is_direct or mentions(content, content.body, cfg.self_mxid) or route_mail_id ~= nil
+          local is_other_butler = cfg.butler_senders[ev.sender] == true
+          if not addressed or (is_other_butler and not mentions(content, content.body, cfg.self_mxid)) then
+            add_processed(state, ev.event_id)
+            if cursor then state.since = cursor end
+          else
           state.pending[ev.event_id] = {
-            sender = ev.sender, room_id = cfg.room, event_id = ev.event_id,
+            sender = ev.sender, room_id = actual_room, event_id = ev.event_id,
             created_at = timestamp(ev), body = cap_body(content.body),
             thread_root = thread_root, in_reply_to = in_reply_to, mxc = media_uri(content),
+            context_mail_id = route_mail_id, from_butler = is_other_butler,
           }
           added[#added + 1] = ev.event_id
           if cursor then state.since = cursor end
@@ -646,18 +679,23 @@ function relay.new(options)
         end
       end
     end
+    end
     return added
   end
 
   local function begin_request(path, params, timeout)
     if not active then return end
+    local request_generation = generation
+    local token = {}
+    request_token = token
     local args = { method = "GET", path = query(path, params), room = cfg.room,
       timeout = timeout, max_bytes = 1024 * 1024 }
     local callback_seen = false
     local handle = api.request_json(args, function(result)
       callback_seen = true
+      if request_token ~= token or generation ~= request_generation or not active then return end
+      request_token = nil
       request_handle = nil
-      if not active then return end
       if type(result) ~= "table" or result.error or type(result.json) ~= "table" then
         if type(result) == "table" and type(result.error) == "string" then
           if result.error:find("outside the configured Matrix allowlist", 1, true) then
@@ -674,10 +712,38 @@ function relay.new(options)
       local ok = pcall(function() instance._response(result.json, path) end)
       if not ok and active then failed() end
     end)
-    if not callback_seen then request_handle = handle end
+    if not callback_seen and request_token == token and generation == request_generation then
+      request_handle = handle
+    end
+  end
+
+  local function update_direct_rooms(response)
+    local account_events = response.account_data and response.account_data.events or {}
+    local changed = false
+    for _, account_event in ipairs(account_events) do
+      if account_event.type == "m.direct" and type(account_event.content) == "table" then
+        state.direct_rooms = json.object({})
+        changed = true
+        for sender, rooms in pairs(account_event.content) do
+          if type(rooms) == "table" then
+            for _, room_id in ipairs(rooms) do
+              if type(room_id) == "string" then
+                state.direct_rooms[room_id] = state.direct_rooms[room_id] or json.object({})
+                if state.direct_rooms[room_id][sender] ~= true then
+                  state.direct_rooms[room_id][sender] = true
+                  changed = true
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+    if changed then persist() end
   end
 
   function instance._response(response, path)
+    if path == SYNC_PATH then update_direct_rooms(response) end
     if path == SYNC_PATH and state.since == nil then
       if type(response.next_batch) ~= "string" then failed(); return end
       state.since = response.next_batch
@@ -687,9 +753,14 @@ function relay.new(options)
       return
     end
     if path == SYNC_PATH then
-      local room = response.rooms and response.rooms.join and response.rooms.join[cfg.room]
-      local events = room and room.timeline and room.timeline.events or {}
-      local added = accept_events(events)
+      local added = {}
+      local joined = response.rooms and response.rooms.join or {}
+      for room_id, room in pairs(joined) do
+        if room_id == cfg.room or state.direct_rooms[room_id] then
+          local room_added = accept_events(room and room.timeline and room.timeline.events, nil, room_id)
+          for _, id in ipairs(room_added) do added[#added + 1] = id end
+        end
+      end
       if type(response.next_batch) == "string" then state.since = response.next_batch end
       persist()
       deliver_pending(added)
@@ -733,6 +804,7 @@ function relay.new(options)
 
   function instance:start()
     if active then return false end
+    generation = generation + 1
     active = true
     for id, item in pairs(state.reply_outbox) do
       if item.status ~= "failed" then instance._send_reply(id) end
@@ -742,9 +814,15 @@ function relay.new(options)
   end
 
   function instance:stop()
+    generation = generation + 1
     active = false
     if request_handle and request_handle.cancel then pcall(function() request_handle:cancel() end) end
     request_handle = nil
+    request_token = nil
+    for _, token in pairs(reply_in_flight) do
+      if token.handle and token.handle.cancel then pcall(function() token.handle:cancel() end) end
+    end
+    reply_in_flight = {}
     if retry_timer then pcall(remuda.cancel, retry_timer) end
     if backfill_timer then pcall(remuda.cancel, backfill_timer) end
     for _, timer in pairs(delivery_retry_timers) do pcall(remuda.cancel, timer) end
@@ -772,11 +850,14 @@ function relay.start(config)
     deliver = function(event)
       local delivered = remuda.emit_until_success("butler/deliver", {
         from = { host = "matrix", id = "", alias = event.sender, session = event.sender,
-          kind = "matrix", leader = "" },
-        to = "butler", text = event.body, subject = "Matrix message from " .. event.sender,
-        matrix = { sender = event.sender, room_id = event.room_id, event_id = event.event_id,
+          kind = event.from_butler and "matrix-butler" or "matrix", leader = "" },
+        to = "butler", text = event.body, in_reply_to = event.context_mail_id,
+        subject = event.context_mail_id and ("Matrix thread reply from " .. event.sender)
+          or ("Matrix message from " .. event.sender),
+      matrix = { sender = event.sender, room_id = event.room_id, event_id = event.event_id,
           created_at = event.created_at, thread_root = event.thread_root,
-          in_reply_to = event.in_reply_to, mxc = event.mxc },
+          in_reply_to = event.in_reply_to, context_mail_id = event.context_mail_id,
+          from_butler = event.from_butler, mxc = event.mxc },
       })
       if type(delivered) == "table" and delivered.__butler_delivery_hook_error then
         error(delivered.__butler_delivery_hook_error, 0)
@@ -795,6 +876,7 @@ function relay.stop()
 end
 
 function matrix.quarantine_list()
+  if relay.instance then return relay.instance:quarantine_list() end
   local paths = remuda._butler_matrix_config
   if not paths or not paths.config_path then return nil, "Matrix is not configured" end
   local state_path = paths.config_path .. ".since"
@@ -809,6 +891,11 @@ end
 
 function matrix.quarantine_get(id)
   if type(id) ~= "string" or id == "" then return nil, "quarantine id is required" end
+  if relay.instance then
+    local result = relay.instance:quarantine_get(id)
+    if result then return result end
+    return nil, "no quarantined Matrix event " .. id
+  end
   local rows, err = matrix.quarantine_list()
   if not rows then return nil, err end
   for _, item in ipairs(rows) do

@@ -4,10 +4,12 @@ Butler is Remuda's local session manager. It starts and coordinates one agent
 session through the same Lua runtime and Remuda protocol used by other
 extensions. It works without Matrix configuration.
 
-When Matrix credentials are configured, Butler connects to one configured
-room. It stores inbound text as Butler mail, including the Matrix sender,
-room, event ID, and UTC timestamp. Without Matrix config, it starts no Matrix
-relay.
+When Matrix credentials are configured, Butler listens in its configured room
+and its account's Matrix direct-message rooms. In a shared room, it takes a
+message only when addressed by its exact MXID mention or when the message
+replies in a thread to one of its own messages. Unaddressed room messages are
+ignored, so multiple Butler accounts do not duplicate mail. Accepted messages
+become Butler mail with Matrix sender, room, event, and thread context.
 
 If the saved `.since` state is unreadable or has invalid field types, the relay
 starts with a fresh sync baseline. It does not replay room history; messages
@@ -66,6 +68,9 @@ file contains:
 6. Optional sync timeout in milliseconds; blank defaults to `30000`.
 7. Optional transport settings, one `key=value` per line: `ca_file=PATH`
    trusts a custom CA, and `pin_sha256=HEX` pins the homeserver's leaf key.
+   `butler_senders=@id:server,...` identifies other Butler accounts; messages
+   from those accounts are ignored unless they mention this Butler. Replies to
+   another Butler are blocked to prevent reply loops.
 
 `pin_sha256` is the 64-character hexadecimal SHA-256 digest of the leaf
 certificate's SubjectPublicKeyInfo (SPKI), not the certificate file. Compute
@@ -88,7 +93,7 @@ Matrix sends and replies are split at UTF-8 boundaries into chunks of at most
 
 The relay resumes from its saved sync cursor and deduplicates by Matrix event
 ID. It records cursor, processed IDs, pending deliveries, quarantine records,
-mail-to-Matrix reply routes, and pending/sent replies in the
+event-to-mail/thread correlation, and pending/sent replies in the
 `<config>.since` state file. After Butler mail accepts an event, its ID is
 appended to `<config>.acks`; the relay folds acknowledgements into the state
 file and removes completed pending entries. Together with mail's event-ID
@@ -97,11 +102,12 @@ the state file is unreadable or has invalid field types, the relay starts from
 a fresh sync baseline; it does not replay room history, and pending deliveries
 in the damaged state cannot be recovered.
 
-`remuda butler reply MESSAGE_ID TEXT` can reply to a Matrix-originated Butler
-mail. Butler records the source mail's Matrix room, event, and thread relation,
-then queues the reply durably with a stable Matrix transaction ID. Transient
-failures retry with backoff; the returned Matrix event ID is saved with the
-reply correlation so duplicate dispatches do not send it twice.
+`remuda butler matrix reply EVENT_ID TEXT` sends a threaded reply. The relay
+records the returned event ID against the originating Butler mail. A human
+replying in that thread needs no mention: the event-to-mail correlation routes
+the follow-up to Butler and sets its mail `in_reply_to` to the original mail.
+That correlation survives a relay restart. Butler does not reply to messages
+from another configured Butler account.
 
 Butler topics use stable session names and are delivered through the Butler
 message queue. The extraction boundary, runtime dependencies, and migration

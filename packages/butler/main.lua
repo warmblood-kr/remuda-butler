@@ -874,6 +874,9 @@ local function deliver_message(message)
     end
     return delivered
   end
+  if message.kind == "matrix_reply" then
+    error("Matrix reply delivery requires the Butler delivery event hook", 0)
+  end
   local delivered, why
   if message.kind == "forward" then
     delivered, why = mail.forward_delivery(message)

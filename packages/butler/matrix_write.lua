@@ -127,11 +127,15 @@ function matrix.reply(opts, on_done)
   if type(opts.text) ~= "string" or opts.text == "" then
     return error_result(done, "message text must not be empty")
   end
+  local relay = matrix.relay and matrix.relay.instance
+  if relay and relay.can_reply_to and not relay:can_reply_to(opts.event_id) then
+    return error_result(done, "Butler-to-Butler replies are disabled")
+  end
   return same_room_then(room, opts.event_id, done, function(reply_done)
-    local relation = { ["m.in_reply_to"] = { event_id = opts.event_id } }
-    if type(opts.thread_root) == "string" and opts.thread_root ~= "" then
-      relation.rel_type, relation.event_id = "m.thread", opts.thread_root
-    end
+    local root = type(opts.thread_root) == "string" and opts.thread_root ~= ""
+      and opts.thread_root or opts.event_id
+    local relation = { rel_type = "m.thread", event_id = root,
+      ["m.in_reply_to"] = { event_id = opts.event_id } }
     return send_chunks(room, opts.text, relation, reply_done, opts.txn_id)
   end)
 end

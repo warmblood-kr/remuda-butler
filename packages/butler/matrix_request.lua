@@ -78,8 +78,14 @@ function matrix.read_config(path)
     end
     pin = "sha256/" .. table.concat(encoded)
   end
+  local butler_senders = {}
+  for sender in ((opts.butler_senders or "") .. ","):gmatch("([^,]*),") do
+    sender = trim(sender)
+    if sender ~= "" then butler_senders[sender] = true end
+  end
   return {
     base = base, room = lines[2], self_mxid = lines[3], allowed_senders = allowed,
+    butler_senders = butler_senders,
     use_messages = mode == "1" or mode == "true" or mode == "messages" or mode == "fallback",
     timeout_ms = math.max(1, timeout), ca_file = ca_file, pin = pin,
   }
