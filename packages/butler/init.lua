@@ -160,6 +160,8 @@ Start by running `remuda butler inbox` to read your welcome message.
   Quote the message: a second unquoted word makes it `send FROM TO ...`.
 - `remuda butler send-to-leader RESULT...` reports a completed work loop.
 - `remuda butler sessions` shows the household.
+- `remuda butler reply MESSAGE-ID "TEXT"` answers a message in its thread (prefer this over send when answering)
+- `remuda butler forward MESSAGE-ID MEMBER [NOTE]` passes a message on with an optional note
 
 ]]
         end,
@@ -205,7 +207,7 @@ the normal way for a member to communicate.
         prompt = function(_, ctx) return "Your leader is " .. ctx.parent .. "." end },
     },
     ["butler.command"] = {
-      { id = "compact", order = 16, verb = "compact", usage = "  remuda butler compact <session> [--dry-run]",
+      { id = "compact", order = 16, verb = "compact", usage = "  remuda butler compact <session> [--dry-run|--force]",
         run = function(_, args)
           if not args[2] or args[2] == "" then return nil end
           if not host._butler_compaction_has_session(args[2]) then
@@ -216,8 +218,11 @@ the normal way for a member to communicate.
           if #args == 3 and args[3] == "--dry-run" then
             return host._butler_compaction_tick(args[2], true)
           end
+          if #args == 3 and args[3] == "--force" then
+            return host.butler.compact(args[2], true)
+          end
           if #args ~= 2 then return nil end
-          return host.butler.compact(args[2])
+          return host.butler.compact(args[2], false)
         end },
       { id = "sessions", order = 10, verb = "sessions", usage = "  remuda butler sessions",
         run = function(_, args, caller) return host._butler_command_run("sessions", args, caller) end },
