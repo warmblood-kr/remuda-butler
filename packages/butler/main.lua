@@ -1074,7 +1074,8 @@ local function choose(candidates, opts, done)
     local dialogs = type(entry.dialogs) == "function" and select(2, call_callback(entry.dialogs)) or entry.dialogs or {}
     local known = false
     for dialog_index, dialog in ipairs(dialogs) do
-      if screen:lower():find(dialog.match:lower(), 1, true) then
+      local lower_screen = screen:lower()
+      if lower_screen:find(dialog.match:lower(), 1, true) then
         known, state.dialog_seen = true, dialog.match
         -- Codex's update is an actionable startup state. Hand it to the
         -- member launch flow, which owns the shared update lock and relaunch.
@@ -1087,6 +1088,13 @@ local function choose(candidates, opts, done)
           state.handled[dialog_index] = true
           for _, key in ipairs(dialog.keys or {}) do pcall(remuda.key, state.name, key) end
         end
+        break
+      elseif dialog.pending_match and lower_screen:find(dialog.pending_match:lower(), 1, true) then
+        -- Claude paints the trust explanation before the selectable options.
+        -- Keep polling that known startup state until its affirmative option
+        -- is visible; the broad unknown-dialog check below would otherwise
+        -- reject the partial frame before the label handler can run.
+        known, state.dialog_seen = true, dialog.pending_match
         break
       end
     end
