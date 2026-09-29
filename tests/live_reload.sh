@@ -58,6 +58,7 @@ cleanup() {
   done
   rm -rf "$T"
   echo "resources cleaned: $killed killed / $left left"
+  [[ $left -eq 0 ]] || { echo "FAIL: tracked process PIDs remain after cleanup" >&2; return 1; }
 }
 trap cleanup EXIT
 
@@ -73,6 +74,35 @@ start_daemon() {
   DAEMON_PIDS+=("$DAEMON_PID")
   for _ in $(seq 50); do [[ -S $REMUDA_RUNTIME_DIR/remuda/$S.sock ]] && return; sleep 0.1; done
   fail "daemon never bound"
+}
+record_autostart_daemon_pid() {
+  [[ -n ${AUTOSTART:-} ]] || return 0
+  local socket=$REMUDA_RUNTIME_DIR/remuda/$S.sock pid
+  for _ in $(seq 50); do
+    # The daemon holds the socket lock for its whole lifetime. lsof on the
+    # socket path itself lists every Unix socket; the lock path identifies
+    # only the daemon process that owns this endpoint.
+    pid=$(lsof -t "$socket.lock" 2>/dev/null | head -n 1 || true)
+    if [[ -n $pid ]]; then
+      DAEMON_PID=$pid
+      DAEMON_PIDS+=("$pid")
+      return 0
+    fi
+    sleep 0.1
+  done
+  fail "could not identify the AUTOSTART daemon PID for $socket"
+}
+assert_daemon_pids_gone() {
+  local context=$1 pid alive
+  for _ in $(seq 50); do
+    alive=
+    for pid in "${DAEMON_PIDS[@]}"; do
+      if [[ -n $pid ]] && kill -0 "$pid" >/dev/null 2>&1; then alive+="$pid "; fi
+    done
+    [[ -z $alive ]] && return 0
+    sleep 0.1
+  done
+  fail "$context: daemon PIDs still alive: $alive"
 }
 
 SNAPSHOT='
@@ -119,6 +149,7 @@ if [[ -z ${AUTOSTART:-} ]] && [[ $(lua 'return tostring(type(remuda.http) == "ta
   RELAY_EXPECT=true
 fi
 lua "remuda._butler_argv = {'sleep', '${ID}1'}; remuda._butler_reconcile_interval = 0.5"
+record_autostart_daemon_pid
 remuda -s "$S" butler --headless
 # The old relay starts asynchronously; give it a bounded moment to appear.
 for _ in $(seq 1 50); do
@@ -221,13 +252,19 @@ check "tight x10" "boots=$((BASE_BOOT + 15)) $EXPECT_NEW_EMPTY"
 
 echo "== cold boot through remuda butler"
 [[ ${REMUDA_RUNTIME_DIR:-} == "$T/run" ]] || fail "refusing to stop daemon outside scratch runtime"
-remuda -s "$S" stop -f >/dev/null 2>&1
+remuda -s "$S" stop -f >/dev/null 2>&1 || fail "daemon stop command failed"
 wait "$DAEMON_PID" 2>/dev/null || true
+assert_daemon_pids_gone "mid-run stop"
 DAEMON_PID=
+DAEMON_PIDS=()
 start_daemon
 lua "remuda._butler_argv = {'sleep', '${ID}1'}"
+record_autostart_daemon_pid
 remuda -s "$S" butler --headless; settle
 COLD=$(lua "$SNAPSHOT")
 [[ "$COLD" == *"boots=1 hooks=1,1,1 legacy_matrix_hooks=0,0 schedules=3 sessions=butler member=false mail=0 relay=$RELAY_EXPECT bus="* ]] || \
   fail "cold boot: $COLD"
+remuda -s "$S" stop -f >/dev/null 2>&1 || fail "final daemon stop command failed"
+wait "$DAEMON_PID" 2>/dev/null || true
+assert_daemon_pids_gone "final stop"
 echo PASS
