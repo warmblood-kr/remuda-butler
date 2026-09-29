@@ -1892,7 +1892,10 @@ function remuda._butler_notify_policy(session, now)
       local current = remuda.session(session)
       return current and current.is_busy
     end)
-    if not checked or type(busy) ~= "boolean" or busy then return false end
+    -- Older cores and synthetic rows can lack a Session object, and some
+    -- Session metatables can fail while computing is_busy. Unknown busy state
+    -- falls through to the prompt parser; only an explicit busy state defers.
+    if checked and busy == true then return false end
   end
   local seen = bus.notice_screens[session] or {}
   bus.notice_screens[session] = seen

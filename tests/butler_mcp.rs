@@ -318,6 +318,10 @@ fn notify_policy_types_only_into_a_detached_or_quiet_empty_prompt() {
             r[#r + 1] = 'detached=' .. tostring(policy('p1', t + 500))
             screen = 'x\n> '
             r[#r + 1] = 'detached_empty=' .. tostring(policy('p1', t + 501))
+            remuda.session = function() return nil end
+            r[#r + 1] = 'detached_unknown=' .. tostring(policy('p1', t + 502))
+            remuda.session = function() error('busy state unavailable') end
+            r[#r + 1] = 'detached_busy_error=' .. tostring(policy('p1', t + 503))
             remuda.ls, remuda.capture, remuda.capture_styled, remuda.session = real_ls, real_capture, real_capture_styled, real_session
             return table.concat(r, ' ')"#
         ),
@@ -325,7 +329,7 @@ fn notify_policy_types_only_into_a_detached_or_quiet_empty_prompt() {
     assert_eq!(
         got,
         "half=false empty_stable=true claude_box=true claude_nbsp=true claude_nbsp_typed=false empty_changing=false unparseable=false \
-         codex_placeholder=true codex_typed=false detached=false detached_empty=true"
+         codex_placeholder=true codex_typed=false detached=false detached_empty=true detached_unknown=true detached_busy_error=true"
     );
     let log = std::fs::read_to_string(&trace).unwrap_or_default();
     assert!(log.contains("notice_prompt\tp1  NON-EMPTY co"), "{log}");
