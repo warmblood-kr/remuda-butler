@@ -2941,6 +2941,17 @@ fn butler_matrix_reply_thread_returns_to_original_mail_after_relay_restart() {
       local sent_ok, sent_error = pcall(remuda._butler_reply, "butler", agent_id, "must refuse")
       if sent_ok or not tostring(sent_error):find("Butler-to-Butler replies are disabled", 1, true)
         or #remuda.http.calls ~= before then return "agent-mail-reply-not-refused" end
+      local source_message = remuda._butler_bus.messages[source_id]
+      local saved_sender = source_message.matrix.sender
+      local saved_route = relay:state().routes[source_id]
+      source_message.matrix.sender = nil
+      relay:state().routes[source_id] = nil
+      local nil_sender_before = #remuda.http.calls
+      local nil_sender_ok, nil_sender_error = pcall(remuda._butler_reply, "butler", source_id, "must refuse unknown sender")
+      if nil_sender_ok or not tostring(nil_sender_error):find("Butler-to-Butler replies are disabled", 1, true)
+        or #remuda.http.calls ~= nil_sender_before then return "unknown-sender-mail-reply-not-refused" end
+      source_message.matrix.sender = saved_sender
+      relay:state().routes[source_id] = saved_route
       local queued_reply = remuda._butler_reply("butler", source_id, "answer")
       for _=1,4 do remuda.http.tick() end
       if relay:state().routes[source_id].last_reply_event_id ~= "$butler-reply" then
