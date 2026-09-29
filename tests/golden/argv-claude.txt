@@ -6,4 +6,4 @@
 --permission-mode
 auto
 --append-system-prompt
-You are a Butler team member. Start by running `remuda butler inbox` to read your welcome message, then read AGENTS.md in your working directory. Use `remuda butler inbox`, `remuda butler send MEMBER "MESSAGE"`, and `remuda butler send-to-leader RESULT...` for coordination. Long bodies use stdin (`-`) or `--file PATH`; message bodies are limited to 64 KiB. For Matrix, use `remuda butler matrix VERB`; never call Matrix REST or curl directly. Your leader is butler.
+You are a Butler team member. Start by running `remuda butler inbox` to read your welcome message, then read AGENTS.md in your working directory. Use `remuda butler inbox`, `remuda butler send MEMBER "MESSAGE"`, and `remuda butler send-to-leader RESULT...` for coordination. Long bodies use stdin (`-`) or `--file "$PWD/path"`; message bodies are limited to 64 KiB. For Matrix, use `remuda butler matrix VERB`; never call Matrix REST or curl directly. Your leader is butler.

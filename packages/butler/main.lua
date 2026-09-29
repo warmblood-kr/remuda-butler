@@ -1193,8 +1193,8 @@ remuda._butler_contribute("butler.guidance", "cli", { order = 20,
 
 - `remuda butler inbox` reads your own queued messages.
 - `remuda butler send MEMBER "MESSAGE"` sends a message; your sender is inferred.
-- For long bodies, use `cat <<'EOF' | remuda butler send MEMBER -` or `--file PATH`.
-- `send-to-leader` and `reply MESSAGE_ID` accept `-` and `--file PATH` too.
+- For long bodies, use `cat <<'EOF' | remuda butler send MEMBER -` or `--file "$PWD/path"`.
+- `send-to-leader` and `reply MESSAGE_ID` accept `-` and `--file "$PWD/path"` too.
 - Message bodies are limited to 64 KiB; short quoted messages can stay positional.
 - `remuda butler send-to-leader RESULT...` reports a completed work loop.
 - `remuda butler sessions` shows the household.
@@ -1204,7 +1204,7 @@ remuda._butler_contribute("butler.guidance", "cli", { order = 20,
   prompt = function()
     return "Use `remuda butler inbox`, `remuda butler send MEMBER \"MESSAGE\"`, and "
       .. "`remuda butler send-to-leader RESULT...` for coordination. Long bodies use "
-      .. "stdin (`-`) or `--file PATH`; message bodies are limited to 64 KiB. "
+      .. 'stdin (`-`) or `--file "$PWD/path"`; message bodies are limited to 64 KiB. '
   end })
 remuda._butler_contribute("butler.guidance", "old-core", { order = 30,
   agents_md = function()
@@ -2520,7 +2520,7 @@ local USAGE_NOTES = [[
 Agent sessions receive REMUDA_BUTLER_AGENT_ID and REMUDA_BUTLER_LEADER_ID.
 In an agent session, use `inbox`, `send <to> "..."`, and `send-to-leader ...`;
 the identity comes from the caller's environment. For a long message, use
-`cat <<'EOF' | remuda butler send MEMBER -` or `--file PATH`; `reply` accepts
+`cat <<'EOF' | remuda butler send MEMBER -` or `--file "$PWD/path"`; `reply` accepts
 the same forms. Bodies are limited to 64 KiB. Without a forwarded Butler
 identity (a plain shell, or a core that does not forward the caller's env),
 `send` is from "operator" and `inbox` needs a name (`inbox <name>`).
@@ -2542,6 +2542,32 @@ local function words_after(args, first)
 end
 
 local MAX_MESSAGE_BYTES = 64 * 1024
+local MESSAGE_FILE_READER = [==[
+import os, stat, sys
+
+path = sys.argv[1]
+try:
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            print("message file must be a regular file", file=sys.stderr)
+            sys.exit(2)
+        body = bytearray()
+        while len(body) <= 65536:
+            chunk = os.read(fd, 65537 - len(body))
+            if not chunk:
+                break
+            body.extend(chunk)
+        if len(body) > 65536:
+            print("message body exceeds the 64 KiB limit", file=sys.stderr)
+            sys.exit(2)
+        sys.stdout.buffer.write(body)
+    finally:
+        os.close(fd)
+except OSError as exc:
+    print("cannot read message file: " + (exc.strerror or "I/O error"), file=sys.stderr)
+    sys.exit(2)
+]==]
 local function checked_message_body(body)
   if type(body) ~= "string" or #body == 0 then error("message body must not be empty", 0) end
   if #body > MAX_MESSAGE_BYTES then error("message body exceeds the 64 KiB limit", 0) end
@@ -2560,13 +2586,20 @@ local function message_body(args, first, caller)
       error("expected one path after --file", 0)
     end
     local path = args[first + 1]
-    local file, open_error = io.open(path, "rb")
-    if not file then error("cannot read message file " .. path .. ": " .. tostring(open_error), 0) end
-    local body, read_error = file:read(MAX_MESSAGE_BYTES + 1)
-    file:close()
-    if body == nil and read_error ~= nil then error("cannot read message file " .. path .. ": " .. tostring(read_error), 0) end
-    if body == nil then body = "" end
-    return checked_message_body(body)
+    local absolute = path:sub(1, 1) == "/" or path:sub(1, 1) == "\\"
+      or path:match("^%a:[/\\]") ~= nil
+    if not absolute then error('message file path must be absolute; use `--file "$PWD/path"`', 0) end
+    if type(remuda.process) ~= "table" or type(remuda.process.run) ~= "function" then
+      error("`--file` requires Remuda core process support (#250)", 0)
+    end
+    local result = remuda.process.run({
+      argv = { "python3", "-c", MESSAGE_FILE_READER, path }, timeout = 3,
+    })
+    if result.timed_out then error("reading message file timed out", 0) end
+    if result.code ~= 0 then
+      error((result.stderr or "cannot read message file"):gsub("%s+$", ""), 0)
+    end
+    return checked_message_body(result.stdout or "")
   end
   return checked_message_body(words_after(args, first))
 end
@@ -2657,7 +2690,8 @@ end)
 command(50, "send-to-leader", "  remuda butler send-to-leader <message...> | - | --file PATH", function(args, caller)
   if #args < 2 then return nil end
   return cli_result(function()
-    local from = assert(current_agent(caller), OPERATOR .. " has no leader; send-to-leader is for Butler agents")
+    local from = current_agent(caller)
+    if not from then error(OPERATOR .. " has no leader; send-to-leader is for Butler agents", 0) end
     return remuda._butler_report(from, message_body(args, 2, caller))
   end)
 end)
@@ -2831,7 +2865,7 @@ leader, when you have one, is `REMUDA_BUTLER_LEADER_ID`. Use the short forms:
 - `remuda butler inbox` to read your own inbox.
 - `remuda butler send MEMBER "MESSAGE"` to direct a member; your sender is inferred.
 - `remuda butler send-to-leader MESSAGE...` to report a completed work loop.
-- For long bodies, use `cat <<'EOF' | remuda butler send MEMBER -` or `--file PATH`;
+- For long bodies, use `cat <<'EOF' | remuda butler send MEMBER -` or `--file "$PWD/path"`;
   `send-to-leader` and `reply MESSAGE_ID` accept those forms too. The limit is 64 KiB.
 
 If `inbox` says "no Butler identity in your env", your Remuda core predates

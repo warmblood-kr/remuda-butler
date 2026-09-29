@@ -6,3 +6,4 @@ packages/butler/init.lua|1|  local expected_script = mod_dir .. "/packages/butle
 tests/live_reload.sh|1|OWN_SCRIPT=$MOD/packages/butler/matrix_relay.py
 tests/live_reload.sh|1|FOREIGN_SCRIPT=$T/foreign/matrix_relay.py
 tests/butler_mcp.rs|2|    let mut helper = Command::new("python3")
+packages/butler/main.lua|1|      argv = { "python3", "-c", MESSAGE_FILE_READER, path }, timeout = 3,

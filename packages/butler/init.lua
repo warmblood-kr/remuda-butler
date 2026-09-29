@@ -157,8 +157,8 @@ Start by running `remuda butler inbox` to read your welcome message.
 
 - `remuda butler inbox` reads your own queued messages.
 - `remuda butler send MEMBER "MESSAGE"` sends a message; your sender is inferred.
-- For long bodies, use `cat <<'EOF' | remuda butler send MEMBER -` or `--file PATH`.
-- `send-to-leader` and `reply MESSAGE_ID` accept `-` and `--file PATH` too.
+- For long bodies, use `cat <<'EOF' | remuda butler send MEMBER -` or `--file "$PWD/path"`.
+- `send-to-leader` and `reply MESSAGE_ID` accept `-` and `--file "$PWD/path"` too.
 - Message bodies are limited to 64 KiB; short quoted messages can stay positional.
 - `remuda butler send-to-leader RESULT...` reports a completed work loop.
 - `remuda butler sessions` shows the household.
@@ -168,7 +168,7 @@ Start by running `remuda butler inbox` to read your welcome message.
         prompt = function()
           return "Use `remuda butler inbox`, `remuda butler send MEMBER \"MESSAGE\"`, and "
             .. "`remuda butler send-to-leader RESULT...` for coordination. Long bodies use "
-            .. "stdin (`-`) or `--file PATH`; message bodies are limited to 64 KiB. "
+            .. 'stdin (`-`) or `--file "$PWD/path"`; message bodies are limited to 64 KiB. '
         end },
       { id = "old-core", order = 30,
         agents_md = function()
