@@ -2280,7 +2280,7 @@ local function tick_notice_recovery(session, state)
     local agent = bus.agents[session]
     local non_tui_echo = decision == "UNPARSEABLE" and agent
       and agent.kind ~= "claude" and agent.kind ~= "codex" and notice_visible
-    if (decision == "EMPTY" and state.saw_notice)
+    if (decision == "EMPTY" and (state.saw_notice or busy))
         or (state.saw_notice and notice_visible and not notice_in_composer) or non_tui_echo then
       return complete_notice_recovery(session, state)
     end
