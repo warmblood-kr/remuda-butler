@@ -2072,6 +2072,21 @@ local function notice_matches_composer(session, screen, text, expected)
   return (safe and compact_composer(composer) == expected_compact)
     or compact_composer(text) == expected_compact
 end
+local function notice_log_value(value)
+  local raw = tostring(value or "")
+  local length = #raw
+  if length > 8192 then
+    raw = raw:sub(1, 8192) .. ("<truncated; %d bytes total>"):format(length)
+  end
+  return string.format("%q", raw)
+end
+local function log_notice_verify_mismatch(session, screen, text, expected)
+  -- Failure-only trace data; never display diagnostic captures in an agent pane.
+  _butler_session_trace("notice_verify_mismatch", session
+    .. " capture=" .. notice_log_value(screen)
+    .. " composer=" .. notice_log_value(text)
+    .. " expected=" .. notice_log_value(expected))
+end
 local function recovery_composer_empty(session, screen, decision, text)
   if decision ~= "EMPTY" then return false end
   local agent = bus.agents[session]
@@ -2207,18 +2222,19 @@ local function tick_notice_recovery(session, state)
   elseif state.phase == "verify_notice" then
     local notice_head = tostring(state.notice or ""):gsub("%s+", ""):sub(1, 32)
     local notice_visible = notice_head ~= "" and normalized:gsub("%s+", ""):find(notice_head, 1, true) ~= nil
-    if notice_visible or (decision == "NON-EMPTY"
-        and notice_matches_composer(session, screen, text, state.notice)) then
+    local notice_in_composer = decision == "NON-EMPTY"
+      and notice_matches_composer(session, screen, text, state.notice)
+    if notice_visible or notice_in_composer then
       state.saw_notice = true
     end
     local agent = bus.agents[session]
     local non_tui_echo = decision == "UNPARSEABLE" and agent
       and agent.kind ~= "claude" and agent.kind ~= "codex" and notice_visible
-    if (decision == "EMPTY" and state.saw_notice) or non_tui_echo then
+    if (decision == "EMPTY" and state.saw_notice)
+        or (state.saw_notice and notice_visible and not notice_in_composer) or non_tui_echo then
       return complete_notice_recovery(session, state)
     end
-    if decision == "NON-EMPTY" and notice_matches_composer(session, screen, text, state.notice)
-        and not state.return_retried then
+    if notice_in_composer and not state.return_retried then
       if not recovery_human_safe(session) then return false end
       local pressed, why = pcall(remuda.key, session, "RET")
       if not pressed then return notice_recovery_error(session, state, "the notice Return failed: " .. tostring(why)) end
@@ -2226,6 +2242,7 @@ local function tick_notice_recovery(session, state)
       return false
     end
     if state.checks >= 12 then
+      log_notice_verify_mismatch(session, screen, text, state.notice)
       return notice_recovery_error(session, state, "the notice submit could not be verified")
     end
     return false
