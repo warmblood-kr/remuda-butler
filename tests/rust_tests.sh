@@ -15,9 +15,9 @@ set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 CORE_URL=${CORE_URL:-https://github.com/warmblood-kr/remuda.git}
-# Core with delivery channel hooks. Bump deliberately; a core change must not
-# redden Butler PRs.
-CORE_REF=${CORE_REF:-355e8b2}
+# Core with delivery channel hooks, extension-command stdin, and fs.write_atomic.
+# Bump deliberately; a core change must not redden Butler PRs.
+CORE_REF=${CORE_REF:-7447a1d}
 
 scratch=$(mktemp -d /tmp/butler-rust.XXXXXX)
 trap 'rm -rf "$scratch"' EXIT

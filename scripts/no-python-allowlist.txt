@@ -1,8 +1,6 @@
 .github/workflows/tests.yml|1|      - run: scripts/check-no-python.sh
 README.md|1|- `packages/butler/matrix.lua` and `matrix_relay.py`: the inbound Matrix
 README.md|1|- `scripts/check-no-python.sh`: CI guard for Python files and invocations;
-packages/butler/main.lua|1|    .. json_quote("python3 " .. shell_quote(helper_path) .. " " .. shell_quote(path))
-packages/butler/main.lua|1|  local helper_path = path .. ".py"
 packages/butler/main.lua|1|BODY_JSON="$(python3 -c 'import json,sys; print(json.dumps({"msgtype":"m.text","body":sys.argv[1]}))' "$TEXT")"
 packages/butler/main.lua|1|ENC_ROOM="$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$ROOM_ID")"
 packages/butler/matrix.lua|1|      argv = { "python3", "-c", source, config.token_path, config.config_path },
@@ -25,5 +23,4 @@ tests/butler_daemon.rs|2|        .join("../packages/butler/matrix_relay.py");
 tests/butler_daemon.rs|1|        let mut child = std::process::Command::new("python3")
 tests/butler_daemon.rs|2|    let result = std::process::Command::new("python3").arg("-c").arg(probe).status().unwrap();
 tests/butler_daemon.rs|1|// (`tests/support/matrix_stub_server.py`), never a real Matrix homeserver.
-tests/butler_mcp.rs|2|    let mut helper = Command::new("python3")
 tests/rust_tests.sh|1|cp "$REPO/tests/support/matrix_stub_server.py" "$CORE_DIR/native/tests/support/"

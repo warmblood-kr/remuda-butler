@@ -168,6 +168,8 @@ the normal way for a member to communicate.
         run = function(_, args, caller) return host._butler_command_run("reply", args, caller) end },
       { id = "forward", order = 80, verb = "forward", usage = "  remuda butler forward <message-id> <member> [note...]",
         run = function(_, args, caller) return host._butler_command_run("forward", args, caller) end },
+      { id = "statusline", order = 90, verb = "statusline", usage = "  remuda --stdin butler statusline <status-file>",
+        run = function(_, args, caller) return host._butler_command_run("statusline", args, caller) end },
     },
   },
 }

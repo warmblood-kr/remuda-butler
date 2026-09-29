@@ -24,62 +24,91 @@ printf 'header = "Authorization: Bearer %s"\n' "$TOKEN" | curl -sf -K - -X PUT \
   -d "$BODY_JSON" >/dev/null
 ]==]
 
--- Claude calls statusLine commands with a JSON snapshot on stdin.  This
--- helper is deliberately the sole producer of Butler's telemetry: it emits a
--- fixed marker for people in the terminal and atomically publishes that exact
--- marker to a private file for `butler_status`.  Reading Claude's terminal
--- would make the latter depend on escape sequences and layout rather than the
--- protocol Claude itself supplies.
-local STATUSLINE_SRC = [==[
-import json
-import os
-import re
-import sys
+-- Claude supplies statusLine as JSON on stdin. Keep the terminal marker small
+-- and stable while the file carries fields that callers may inspect later.
+local function status_object(value)
+  return type(value) == "table" and value or {}
+end
 
-path = sys.argv[1]
+local function status_number(value)
+  if type(value) == "number" then return value end
+  if type(value) == "boolean" then return value and 1 or 0 end
+end
 
-def tag(value):
-    if not isinstance(value, str) or not value:
-        return "?"
-    value = re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-")
-    return value or "?"
+local function status_integer(value)
+  value = status_number(value)
+  if value == nil then return "?" end
+  local whole = math.modf(value)
+  return string.format("%.0f", whole)
+end
 
-def integer(value):
-    return str(int(value)) if isinstance(value, (int, float)) else "?"
+local function status_tag(value)
+  if type(value) ~= "string" or value == "" then return "?" end
+  local out, replacing = {}, false
+  for i = 1, #value do
+    local byte = value:byte(i)
+    local allowed = (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122)
+      or (byte >= 48 and byte <= 57) or byte == 95 or byte == 46 or byte == 45
+    if allowed then
+      out[#out + 1] = string.char(byte)
+      replacing = false
+    elseif not replacing then
+      out[#out + 1] = "-"
+      replacing = true
+    end
+  end
+  local tag = table.concat(out):gsub("^%-+", ""):gsub("%-+$", "")
+  return tag ~= "" and tag or "?"
+end
 
-try:
-    snapshot = json.load(sys.stdin)
-except Exception:
-    snapshot = {}
+local function statusline_record(input)
+  local snapshot = {}
+  local ok, decoded = pcall(remuda.json.decode, input or "")
+  if ok and type(decoded) == "table" then snapshot = decoded end
 
-window = snapshot.get("context_window") or {}
-used = window.get("total_input_tokens")
-if not isinstance(used, (int, float)):
-    current = window.get("current_usage") or {}
-    parts = [current.get(key) for key in (
-        "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")]
-    parts = [part for part in parts if isinstance(part, (int, float))]
-    used = sum(parts) if parts else None
+  local window = status_object(snapshot.context_window)
+  local used = window.total_input_tokens
+  if status_number(used) == nil then
+    local current = status_object(window.current_usage)
+    local parts = {}
+    for _, key in ipairs({ "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens" }) do
+      local number = status_number(current[key])
+      if number ~= nil then parts[#parts + 1] = number end
+    end
+    if #parts > 0 then
+      used = 0
+      for _, number in ipairs(parts) do used = used + number end
+    else
+      used = nil
+    end
+  end
 
-model = snapshot.get("model") or {}
-line = "MODEL:{model} CTX:{used} CTXWIN:{capacity} CTXPCT:{percent}".format(
-    model=tag(model.get("display_name") or model.get("id")),
-    used=integer(used),
-    capacity=integer(window.get("context_window_size")),
-    percent=integer(window.get("used_percentage")),
-)
+  local model = status_object(snapshot.model)
+  local display_name = model.display_name
+  if display_name == nil or display_name == false or display_name == 0 or display_name == "" then
+    display_name = model.id
+  end
+  local line = "MODEL:" .. status_tag(display_name)
+    .. " CTX:" .. status_integer(used)
+    .. " CTXWIN:" .. status_integer(window.context_window_size)
+    .. " CTXPCT:" .. status_integer(window.used_percentage)
+  local record = {
+    marker = line,
+    model_id = type(model.id) == "string" and model.id or remuda.json.null,
+    model_name = type(display_name) == "string" and display_name or remuda.json.null,
+    context = {
+      used = status_number(used) or remuda.json.null,
+      capacity = status_number(window.context_window_size) or remuda.json.null,
+      percentage = status_number(window.used_percentage) or remuda.json.null,
+    },
+  }
+  return line, record
+end
 
-try:
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as out:
-        out.write(line + "\n")
-    os.replace(tmp, path)
-except Exception:
-    # A status line must never make Claude's UI fail merely because its
-    # observer cannot write (for example a cleaned-up temporary directory).
-    pass
-print(line)
-]==]
+local function atomic_status_write(path, record)
+  local encoded = remuda.json.encode(record)
+  return remuda.fs.write_atomic(path, encoded)
+end
 
 -- This is the one service session installed by the package, not an ordinary
 -- user-created session. Its stable name is its public control surface:
@@ -89,10 +118,8 @@ local function initial_butler_name()
   return "butler"
 end
 
--- Exposed so tests can inspect the daemon-local MCP helper without starting a
--- real process/session (this harness does not have a real agent CLI).
+-- Exposed so tests can inspect package state without starting a real agent.
 remuda._butler_reply_src = REPLY_SRC
-remuda._butler_statusline_src = STATUSLINE_SRC
 remuda._butler_initial_name = initial_butler_name()
 
 -- The command handler runs in the daemon, so identity comes only from the
@@ -382,15 +409,13 @@ local function json_quote(s)
     :gsub('\r', '\\r'):gsub('\n', '\\n'):gsub('\t', '\\t') .. '"'
 end
 local function status_settings(path)
-  -- TODO core #213: remove this Python statusLine helper once the core JSON/stdin boundary is settled.
-  local helper_path = path .. ".py"
   local settings_path = path .. ".settings.json"
-  local helper = assert(io.open(helper_path, "w"))
-  helper:write(STATUSLINE_SRC)
-  helper:close()
+  local command = "remuda "
+  if server ~= "default" then command = command .. "-s " .. shell_quote(server) .. " " end
+  command = command .. "--stdin butler statusline " .. shell_quote(path)
   local settings = assert(io.open(settings_path, "w"))
   settings:write('{"statusLine":{"type":"command","command":'
-    .. json_quote("python3 " .. shell_quote(helper_path) .. " " .. shell_quote(path))
+    .. json_quote(command)
     .. ',"refreshInterval":2}}')
   settings:close()
   return settings_path
@@ -412,14 +437,24 @@ remuda.tool{
     if not f then
       return "MODEL:? CTX:? CTXWIN:? CTXPCT:? (no status reading yet)" .. launch
     end
-    local line = f:read("*l")
+    local contents = f:read("*a")
     f:close()
-    -- The helper owns this file.  Refuse a malformed or externally replaced
-    -- record instead of presenting arbitrary file contents as Claude status.
+    local line, model_id
+    if contents:sub(1, 1) == "{" then
+      local ok, record = pcall(remuda.json.decode, contents)
+      if ok and type(record) == "table" and type(record.marker) == "string" then
+        line, model_id = record.marker, record.model_id
+      end
+    else
+      line = contents:match("^([^\r\n]*)")
+    end
+    -- Refuse malformed or externally replaced records instead of presenting
+    -- arbitrary file contents as Claude status.
     if not line or not line:match("^MODEL:[A-Za-z0-9_.%-?]+ CTX:[0-9?]+ CTXWIN:[0-9?]+ CTXPCT:[0-9?]+$") then
       error("butler status record is malformed", 0)
     end
-    return line .. launch
+    local model_suffix = type(model_id) == "string" and (" MODEL_ID:" .. model_id) or ""
+    return line .. model_suffix .. launch
   end,
 }
 
@@ -2451,6 +2486,12 @@ command(80, "forward", "  remuda butler forward <message-id> <member> [note...]"
   if #args < 3 then return nil end
   return remuda._butler_forward(current_agent(caller) or OPERATOR, args[2], args[3],
     #args >= 4 and words_after(args, 4) or nil)
+end)
+command(90, "statusline", "  remuda --stdin butler statusline <status-file>", function(args, caller)
+  if #args ~= 2 or args[2] == "" then return nil end
+  local line, record = statusline_record(caller and caller.stdin)
+  pcall(atomic_status_write, args[2], record)
+  return line
 end)
 remuda._butler_command_run = function(verb, args, caller)
   local entry = command_entries[verb]

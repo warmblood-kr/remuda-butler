@@ -75,62 +75,68 @@ fn listed(path: &Path) -> Vec<String> {
 }
 
 #[test]
-fn butler_status_is_a_live_mcp_tool_not_a_terminal_scrape() {
-    // Run the real built-in package, but substitute a harmless long-lived
-    // process for Claude.  This exercises the same package registration and
-    // MCP registry path without needing an authenticated Claude account.
-    let dir = scratch("butler-status");
-    let path = daemon::socket_path_in(&dir, "s");
+fn butler_statusline_reads_stdin_and_keeps_legacy_status_files() {
+    let dir = scratch("butler-statusline");
+    let path = daemon::socket_path_in(&dir, "default");
     let _daemon = daemon_at(&path);
-    let status_path = match client::request(
+    let status_path = eval(
         &path,
-        &Request::Eval {
-            code: "remuda._butler_argv = {'sh'}; remuda.exec('butler'); return remuda._butler_status_path".into(),
-            name: None,
-        },
-    )
-    .expect("load butler")
-    {
-        Response::Value(value) => value,
-        other => panic!("butler did not return its status path: {other:?}"),
-    };
-
+        "remuda._butler_argv = {'sh'}; remuda.exec('butler'); return remuda._butler_status_path",
+    );
     assert!(listed(&path).contains(&"butler_status".to_string()));
-    let source = match client::request(
+
+    let settings_path = eval(
         &path,
-        &Request::Eval {
-            code: "return remuda._butler_statusline_src".into(),
-            name: None,
-        },
+        &format!(
+            "return remuda._butler_agent_support.status_settings({})",
+            serde_json::to_string(&status_path).unwrap()
+        ),
+    );
+    let settings: Value = serde_json::from_slice(
+        &std::fs::read(&settings_path).expect("read Claude statusLine settings"),
     )
-    .expect("read embedded status helper")
-    {
-        Response::Value(value) => value,
-        other => panic!("butler has no embedded status helper: {other:?}"),
-    };
-    let mut helper = Command::new("python3")
-        .args(["-c", &source, &status_path])
+    .expect("statusLine settings are JSON");
+    assert_eq!(
+        settings["statusLine"]["command"].as_str(),
+        Some(&format!("remuda --stdin butler statusline '{status_path}'")[..])
+    );
+
+    // These byte strings were captured from the previous helper with the same
+    // snapshots before replacing it. Keep both outputs frozen.
+    const NORMAL_GOLDEN: &[u8] =
+        b"MODEL:Claude-Opus-4.6 CTX:12345 CTXWIN:200000 CTXPCT:6\n";
+    const FALLBACK_GOLDEN: &[u8] = b"MODEL:sonnet CTX:? CTXWIN:? CTXPCT:?\n";
+    let mut statusline = Command::new(env!("CARGO_BIN_EXE_remuda"))
+        .args(["--stdin", "butler", "statusline", &status_path])
+        .env("REMUDA_RUNTIME_DIR", &dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
-        .expect("start embedded status helper");
-    helper
+        .expect("start the remuda statusLine command");
+    statusline
         .stdin
         .take()
-        .expect("helper stdin")
-        .write_all(br#"{"model":{"display_name":"Claude Opus 4.6"},"context_window":{"total_input_tokens":12345,"context_window_size":200000,"used_percentage":6}}"#)
+        .expect("statusLine stdin")
+        .write_all(br#"{"model":{"id":"claude-opus-4-6-20250201","display_name":"Claude Opus 4.6"},"context_window":{"total_input_tokens":12345,"context_window_size":200000,"used_percentage":6}}"#)
         .expect("write Claude status snapshot");
-    let output = helper.wait_with_output().expect("wait for status helper");
-    assert!(output.status.success(), "status helper failed: {output:?}");
+    let output = statusline.wait_with_output().expect("wait for statusLine");
+    assert!(output.status.success(), "statusLine failed: {output:?}");
+    assert_eq!(output.stdout, NORMAL_GOLDEN);
+    let record: Value = serde_json::from_slice(
+        &std::fs::read(&status_path).expect("read structured status record"),
+    )
+    .expect("status record is JSON");
     assert_eq!(
-        String::from_utf8_lossy(&output.stdout).trim(),
+        record["marker"],
         "MODEL:Claude-Opus-4.6 CTX:12345 CTXWIN:200000 CTXPCT:6"
     );
+    assert_eq!(record["model_id"], "claude-opus-4-6-20250201");
     let reply = call(&path, "butler_status", json!({}));
     assert_eq!(reply["result"]["isError"], false, "status failed: {reply}");
     assert_eq!(
         text_of(&reply),
-        "MODEL:Claude-Opus-4.6 CTX:12345 CTXWIN:200000 CTXPCT:6 AGENT:claude"
+        "MODEL:Claude-Opus-4.6 CTX:12345 CTXWIN:200000 CTXPCT:6 MODEL_ID:claude-opus-4-6-20250201 AGENT:claude"
     );
     eval(
         &path,
@@ -138,29 +144,43 @@ fn butler_status_is_a_live_mcp_tool_not_a_terminal_scrape() {
     );
     assert_eq!(
         text_of(&call(&path, "butler_status", json!({}))),
-        "MODEL:Claude-Opus-4.6 CTX:12345 CTXWIN:200000 CTXPCT:6 AGENT:codex SKIPPED:claude=login"
+        "MODEL:Claude-Opus-4.6 CTX:12345 CTXWIN:200000 CTXPCT:6 MODEL_ID:claude-opus-4-6-20250201 AGENT:codex SKIPPED:claude=login"
     );
     eval(&path, "remuda._butler_bus.agents.butler.kind='claude'; remuda._butler_attempts={}");
+    assert!(!std::path::Path::new(&format!("{status_path}{}", concat!(".", "py"))).exists());
 
-    // Missing context data remains explicit rather than being invented from
-    // launch arguments or terminal rendering.
-    let mut helper = Command::new("python3")
-        .args(["-c", &source, &status_path])
+    let mut statusline = Command::new(env!("CARGO_BIN_EXE_remuda"))
+        .args(["--stdin", "butler", "statusline", &status_path])
+        .env("REMUDA_RUNTIME_DIR", &dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
-        .expect("start status helper without context data");
-    helper
+        .expect("start the remuda statusLine fallback command");
+    statusline
         .stdin
         .take()
-        .expect("helper stdin")
+        .expect("fallback statusLine stdin")
         .write_all(br#"{"model":{"id":"sonnet"},"context_window":{}}"#)
         .expect("write partial Claude status snapshot");
-    let output = helper.wait_with_output().expect("wait for status helper");
-    assert!(output.status.success(), "status helper failed: {output:?}");
+    let output = statusline.wait_with_output().expect("wait for fallback statusLine");
+    assert!(output.status.success(), "fallback statusLine failed: {output:?}");
+    assert_eq!(output.stdout, FALLBACK_GOLDEN);
     assert_eq!(
         text_of(&call(&path, "butler_status", json!({}))),
-        "MODEL:sonnet CTX:? CTXWIN:? CTXPCT:? AGENT:claude"
+        "MODEL:sonnet CTX:? CTXWIN:? CTXPCT:? MODEL_ID:sonnet AGENT:claude"
+    );
+    assert!(!std::path::Path::new(&format!("{status_path}.tmp")).exists());
+
+    // Members already running the previous launcher write a plain marker.
+    std::fs::write(
+        &status_path,
+        "MODEL:Claude-Opus-4.6 CTX:12345 CTXWIN:200000 CTXPCT:6\n",
+    )
+    .expect("write legacy status record");
+    assert_eq!(
+        text_of(&call(&path, "butler_status", json!({}))),
+        "MODEL:Claude-Opus-4.6 CTX:12345 CTXWIN:200000 CTXPCT:6 AGENT:claude"
     );
 }
 
@@ -527,7 +547,8 @@ fn notice_recovery_preserves_idle_draft_and_respects_attached_human() {
 
 #[test]
 fn partial_clear_escalation_keeps_the_full_parsed_draft() {
-    let (path, _daemon) = butler_with_member("notice-recovery-partial-clear");
+    // Keep the macOS socket path below sockaddr_un.sun_path's limit.
+    let (path, _daemon) = butler_with_member("partial-clear");
     eval(
         &path,
         r#"
