@@ -1293,6 +1293,28 @@ fn remuda_timed_stdin(dir: &Path, args: &[&str], stdin: &[u8]) -> std::process::
     child.wait_with_output().expect("collect remuda output")
 }
 
+fn remuda_timed_without_butler_identity(dir: &Path, args: &[&str]) -> std::process::Output {
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
+        .args(args)
+        .env("REMUDA_RUNTIME_DIR", dir)
+        .env("REMUDA_NO_UPDATE_CHECK", "1")
+        .env_remove("REMUDA_BUTLER_AGENT_ID")
+        .env_remove("REMUDA_BUTLER_SESSION_NAME")
+        .env_remove("REMUDA_BUTLER_LEADER_ID")
+        .current_dir(dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn remuda without Butler identity");
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        if let Ok(Some(_)) = child.try_wait() { break; }
+        assert!(Instant::now() < deadline, "{args:?} did not exit within PATIENCE");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    child.wait_with_output().expect("collect remuda output")
+}
+
 /// `restart` drives the SHIPPED BINARY, not `daemon::serve` on a thread: the
 /// stop is a `process::exit`, so an in-process daemon would take the test
 /// runner with it — which is also why this is the only honest way to test it.
@@ -2283,14 +2305,6 @@ fn butler_message_bodies_preserve_stdin_and_file_content_and_enforce_limits() {
     let responsive = remuda_timed(&dir, &["-s", "s", "butler", "sessions"]);
     assert!(responsive.status.success(), "daemon stopped responding after FIFO rejection");
 
-    let missing_identity = eval(&path, r#"
-      local ok, result = pcall(function()
-        return remuda._butler_command_run("send-to-leader", {"send-to-leader", "hello"}, {env={}})
-      end)
-      return tostring(ok) .. "|" .. tostring(result)
-    "#);
-    assert!(missing_identity.contains("operator has no leader; send-to-leader is for Butler agents"), "{missing_identity}");
-    assert!(!missing_identity.contains("[string"), "{missing_identity}");
 }
 
 #[test]
@@ -2309,6 +2323,16 @@ fn butler_send_dash_forwards_real_cli_stdin_byte_exactly() {
 fn butler_cli_unknown_recipient_and_inbox_help_are_plain_errors() {
     let dir = scratch_dir("butler-cli-errors");
     let (_daemon, _path) = butler_cli_test_daemon(&dir);
+    let no_leader = remuda_timed_without_butler_identity(
+        &dir,
+        &["-s", "s", "butler", "send-to-leader", "hello"],
+    );
+    assert!(!no_leader.status.success());
+    let no_leader_stderr = String::from_utf8_lossy(&no_leader.stderr);
+    assert!(no_leader_stderr.contains("operator has no leader; send-to-leader is for Butler agents"), "{no_leader_stderr}");
+    assert!(!no_leader_stderr.contains("stack traceback"), "{no_leader_stderr}");
+    assert!(!no_leader_stderr.contains("main.lua"), "{no_leader_stderr}");
+
     let unknown = remuda_timed(&dir, &["-s", "s", "butler", "send", "no-such-member", "hello"]);
     assert!(!unknown.status.success());
     let stderr = String::from_utf8_lossy(&unknown.stderr);

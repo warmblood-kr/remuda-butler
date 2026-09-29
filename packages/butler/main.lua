@@ -2689,9 +2689,13 @@ command(40, "send", '  remuda butler send <to> "<message>" | <to> - | <to> --fil
 end)
 command(50, "send-to-leader", "  remuda butler send-to-leader <message...> | - | --file PATH", function(args, caller)
   if #args < 2 then return nil end
+  local from = current_agent(caller)
+  if not from then
+    local message = OPERATOR .. " has no leader; send-to-leader is for Butler agents"
+    if type(remuda.fail) == "function" then return remuda.fail(message, 1) end
+    error(message, 0)
+  end
   return cli_result(function()
-    local from = current_agent(caller)
-    if not from then error(OPERATOR .. " has no leader; send-to-leader is for Butler agents", 0) end
     return remuda._butler_report(from, message_body(args, 2, caller))
   end)
 end)
