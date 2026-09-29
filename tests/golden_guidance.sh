@@ -22,7 +22,7 @@ GOLDEN=$REPO/tests/golden
 CORE_URL=${CORE_URL:-https://github.com/warmblood-kr/remuda.git}
 # Keep in step with tests/rust_tests.sh.
 CORE_REF=${CORE_REF:-355e8b2}
-T=$(mktemp -d /tmp/bgg.XXXXXX) S=bgg
+T=$(cd "$(mktemp -d /tmp/bgg.XXXXXX)" && pwd -P) S=bgg
 DAEMON_PID=
 source_home=${HOME:-/tmp}
 export CARGO_HOME=${CARGO_HOME:-$source_home/.cargo}

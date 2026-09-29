@@ -3,7 +3,7 @@ set -euo pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 REMUDA_BIN=${REMUDA_BIN:-remuda}
 REMUDA_BIN=$(command -v "$REMUDA_BIN")
-SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/bf.XXXXXX")
+SCRATCH=$(cd "$(mktemp -d "${TMPDIR:-/tmp}/bf.XXXXXX")" && pwd -P)
 SERVER=butler-fallback
 export HOME=$SCRATCH/home XDG_CONFIG_HOME=$SCRATCH/config XDG_DATA_HOME=$SCRATCH/data
 export REMUDA_RUNTIME_DIR=$SCRATCH/r REMUDA_NO_UPDATE_CHECK=1 REMUDA_BUTLER_PROJECT_HOME=$SCRATCH/projects

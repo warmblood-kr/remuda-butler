@@ -5,7 +5,7 @@ set -eu
 BUTLER_TREE_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 REMUDA_BIN=${REMUDA_BIN:-remuda}
 EXPECT=${EXPECT:-green}
-SCRATCH_ROOT=$(mktemp -d /tmp/butler-tree.XXXXXX)
+SCRATCH_ROOT=$(cd "$(mktemp -d /tmp/butler-tree.XXXXXX)" && pwd -P)
 SERVER=$(basename "$SCRATCH_ROOT")
 SOCKET="$SCRATCH_ROOT/runtime/remuda/$SERVER.sock"
 DAEMON_LOG="$SCRATCH_ROOT/daemon.log"

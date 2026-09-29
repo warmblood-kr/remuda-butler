@@ -4,7 +4,7 @@ set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 REMUDA_BIN=${REMUDA_BIN:-remuda}
-SCRATCH_ROOT=$(mktemp -d /tmp/butler-mail-id.XXXXXX)
+SCRATCH_ROOT=$(cd "$(mktemp -d /tmp/butler-mail-id.XXXXXX)" && pwd -P)
 DAEMON_PID=
 SERVER=mail-id
 INSTANCE="$SCRATCH_ROOT/one"

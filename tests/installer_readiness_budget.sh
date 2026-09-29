@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-SCRATCH=$(mktemp -d /tmp/butler-installer-budget.XXXXXX)
+SCRATCH=$(cd "$(mktemp -d /tmp/butler-installer-budget.XXXXXX)" && pwd -P)
 trap 'rm -rf "$SCRATCH"' EXIT INT TERM
 mkdir -p "$SCRATCH/bin" "$SCRATCH/home/.config/remuda/butler"
 printf token >"$SCRATCH/home/.config/remuda/butler/token"
