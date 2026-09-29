@@ -1160,6 +1160,8 @@ remuda._butler_contribute("butler.guidance", "cli", { order = 20,
   Quote the message: a second unquoted word makes it `send FROM TO ...`.
 - `remuda butler send-to-leader RESULT...` reports a completed work loop.
 - `remuda butler sessions` shows the household.
+- `remuda butler reply MESSAGE-ID "TEXT"` answers a message in its thread (prefer this over send when answering)
+- `remuda butler forward MESSAGE-ID MEMBER [NOTE]` passes a message on with an optional note
 
 ]]
   end,
