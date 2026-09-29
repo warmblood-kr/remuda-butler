@@ -563,6 +563,17 @@ local function unread(name)
   return #mailbox(name)
 end
 
+local function is_unread(name, id)
+  load_inbox(name)
+  retry_unreadable(name)
+  for _, message_id in ipairs(mailbox(name)) do
+    if message_id == id then return true end
+  end
+  for _, message_id in ipairs(bus.mail_unreadable[name] or {}) do
+    if message_id == id then return true end
+  end
+  return false
+end
+
 remuda._butler_mail = { mailbox = mailbox, queue = queue, reply = reply, forward = forward, forward_delivery = deliver_forward, inbox = inbox, unread = unread, append = append,
-  find_message = find_message,
-  migrate_legacy = migrate_legacy }
+  find_message = find_message, is_unread = is_unread, migrate_legacy = migrate_legacy }

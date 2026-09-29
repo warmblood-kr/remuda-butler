@@ -107,9 +107,9 @@ remuda._butler_current_agent = current_agent
 
 local DEFAULT_COMPACTION_CONFIG = {
   watch = 400000, warn = 600000, critical = 800000, critical_pct = 90,
-  cooldown_ticks = 4, capture_gap = 3, dialog_timeout = 30,
-  completion_timeout = 45, verification_timeout = 45, input_settle = 0.15,
-  idle_wait_timeout = 12, restore_attempts = 2, failure_cooldown_ticks = 12,
+  cooldown_ticks = 4, capture_gap = 3, completion_timeout = 45,
+  claude_completion_timeout = 180, failure_cooldown_seconds = 600,
+  input_settle = 0.15,
 }
 local function compaction_config()
   local configured = remuda._butler_compaction_config or {}
@@ -165,9 +165,9 @@ function remuda.butler.is_idle(name)
   if not empty or decision ~= "EMPTY" then return false, "composer not empty" end
   return true, "idle"
 end
-function remuda.butler.compact(name)
+function remuda.butler.compact(name, force)
   if not remuda._butler_compaction_execute then return "compaction procedure unavailable" end
-  local result = remuda._butler_compaction_execute(name)
+  local result = remuda._butler_compaction_execute(name, force == true)
   return result or "started"
 end
 function remuda._butler_compaction_has_session(name)
@@ -224,18 +224,18 @@ function remuda._butler_compaction_reset_idle(st)
   st.idle_ticks = 0
 end
 
-function remuda._butler_compaction_action_guard(session_name)
-  local found, session = pcall(remuda.session, session_name)
-  if not found or not session then return "session unavailable" end
-  if session.attached then return "human attached" end
-  if type(remuda.ls) == "function" then
-    local listed, rows = pcall(remuda.ls)
-    if not listed then return "session list unavailable" end
-    for _, row in ipairs(rows or {}) do
-      if row.name == session_name and row.attached then return "human attached" end
-    end
+function remuda._butler_compaction_failure_cooldown(state, now, force)
+  state.failure_cooldown = nil
+  local until_at = tonumber(state.failure_cooldown_until)
+  if force or not until_at or until_at <= (tonumber(now) or os.time()) then
+    state.failure_cooldown_until = nil
+    return false
   end
-  return nil
+  return true, until_at
+end
+
+function remuda._butler_compaction_action_guard(session_name)
+  return remuda._butler_compaction_preflight(session_name)
 end
 
 function remuda._butler_compaction_preflight(session_name)
@@ -256,7 +256,7 @@ function remuda._butler_compaction_preflight(session_name)
     return "queued mail"
   end
   local captured, screen = pcall(remuda.capture, session_name)
-  if not captured then return "session unavailable" end
+  if not captured or type(screen) ~= "string" then return "session unavailable" end
   local agent = remuda._butler_bus.agents[session_name] or {}
   local registered = registered_agent_kind(agent.kind)
   if registered and registered.working then
@@ -264,6 +264,8 @@ function remuda._butler_compaction_preflight(session_name)
     if not checked then return "busy state unknown" end
     if working then return "busy" end
   end
+  local checked, composer = pcall(remuda._butler_prompt_is_empty, agent.kind or "", screen)
+  if not checked or composer ~= "EMPTY" then return "composer not empty" end
   return nil
 end
 
@@ -271,19 +273,6 @@ function remuda._butler_compaction_submit_matches(decision, text)
   return decision == "NON-EMPTY" and text == "/compact"
 end
 
-local function compaction_model(screen)
-  if type(screen) ~= "string" then return nil end
-  local model = screen:match("MODEL:(.-)%s+CTX:") or screen:match("MODEL:([^\r\n]+)")
-  return model and model:gsub("%s+$", "") or nil
-end
-local function compaction_family(value)
-  if type(value) ~= "string" then return nil end
-  local lower = value:lower()
-  for _, family in ipairs({ "opus", "sonnet", "haiku" }) do
-    if lower == family or lower:match("^" .. family .. "[%s%-%d]")
-      or lower:match("^claude%-" .. family .. "%-") then return family end
-  end
-end
 local function numbered_option(line)
   local trimmed = line:gsub("^%s+", "")
   for _, marker in ipairs({ "❯", "›", ">" }) do
@@ -294,34 +283,8 @@ local function numbered_option(line)
   end
   return trimmed:match("^(%d+)[%.)]%s*(.-)%s*$"), trimmed:match("^%d+[%.)]%s*(.-)%s*$")
 end
-local function compaction_yes_option(screen)
-  local matches = {}
-  for line in (screen .. "\n"):gmatch("(.-)\n") do
-    local number, label = numbered_option(line)
-    local lower = label and label:lower() or ""
-    if lower:find("yes", 1, true) and lower:find("switch", 1, true) then
-      matches[#matches + 1] = number
-    end
-  end
-  if #matches == 1 then return matches[1] end
-end
-remuda._butler_compaction_yes_option = compaction_yes_option
-local function compaction_is_switch_dialog(screen)
-  if type(screen) ~= "string" then return false end
-  local lines = {}
-  for line in (screen .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
-  for i, line in ipairs(lines) do
-    if line:gsub("^%s+", ""):gsub("%s+$", ""):lower() == "switch model?" then
-      for j = i + 1, math.min(#lines, i + 4) do
-        if numbered_option(lines[j]) then return true end
-      end
-    end
-  end
-  return false
-end
 function remuda._butler_compaction_is_unknown_dialog(screen)
   if type(screen) ~= "string" then return false end
-  if compaction_is_switch_dialog(screen) then return false end
   local lines = {}
   for line in (screen .. "\n"):gmatch("(.-)\n") do
     lines[#lines + 1] = line
@@ -346,23 +309,16 @@ function remuda._butler_compaction_is_unknown_dialog(screen)
     or (option_line and prompt_line and prompt_line > option_line and prompt_line - option_line <= 2)
     or false
 end
-function remuda._butler_compaction_visible_answer(kind, screen, target)
-  if kind == "claude" and compaction_is_switch_dialog(screen) then
-    local option = remuda.expect_option and remuda.expect_option(screen, function(label)
-      local lower = label:lower()
-      return lower:find("yes", 1, true) and lower:find("switch", 1, true)
-    end) or compaction_yes_option(screen)
-    if option then return option, "dialog" end
-    return nil, "unknown"
-  end
-  local model = compaction_model(screen)
-  if model and target and model:lower():find(target:lower(), 1, true) then return nil, "ready" end
-  if remuda._butler_compaction_is_unknown_dialog(screen) then return nil, "unknown" end
-  return nil, "waiting"
+function remuda._butler_compaction_sequence()
+  return { "/compact" }
 end
-function remuda._butler_compaction_sequence(kind, prior, low)
-  if kind == "codex" then return { "/compact" } end
-  return { "/model " .. low, "/compact", "/model " .. prior }
+
+local function clear_legacy_restore_state(state)
+  for _, key in ipairs({ "pending_restore_model", "pending_restore_model_fallback",
+    "pending_restore_model_unavailable", "pending_restore_display",
+    "pending_restore_context_window", "pending_restore_notice_sent",
+    "pending_restore_mismatch_notice_sent", "pending_restore_blocked",
+    "restore_retry_in_progress" }) do state[key] = nil end
 end
 
 if remuda._butler_test_mode == true then
@@ -392,6 +348,13 @@ if not remuda._butler_state then
   remuda._butler_compaction_state = remuda._butler_compaction_state or {}
 end
 remuda._butler_compaction_reset_idle(remuda._butler_state or remuda._butler_compaction_state)
+do
+  local lifecycle = remuda._butler_state or remuda._butler_compaction_state or {}
+  local members = lifecycle.compaction_members or remuda._butler_compaction_members_state or {}
+  for _, member_state in pairs(members) do clear_legacy_restore_state(member_state) end
+  lifecycle.compaction_members = members
+  remuda._butler_compaction_members_state = members
+end
 
 -- `os.getenv` here reads the *daemon's own* environment, fixed forever at
 -- whichever moment first birthed that daemon (see docs/install-butler.sh's
@@ -553,6 +516,27 @@ local status_path = remuda._butler_status_path
   or (config_path and (config_path .. ".status") or (os.tmpname() .. ".status"))
 local function shell_quote(s)
   return "'" .. s:gsub("'", "'\\\"'\\\"'") .. "'"
+end
+local function valid_child_name(name, what)
+  if type(name) ~= "string" or name == "" or name:sub(1, 1) == "."
+      or name:find("/", 1, true) or name:find("\\", 1, true)
+      or name:find("..", 1, true) or name:find("%c") then
+    error((what or "name") .. " must be a single path component without separators, '..', or a leading dot", 0)
+  end
+  return name
+end
+local function create_fresh_directory(path)
+  if not (remuda.fs and remuda.fs.mkdir_new) then return false end
+  local parent = path:match("^(.*)/[^/]+$")
+  if not parent then return false end
+  remuda.mkdir(parent)
+  local created, reason = remuda.fs.mkdir_new(path)
+  return created == true
+end
+local function directory_is_under(path, root)
+  if type(path) ~= "string" or type(root) ~= "string" or path == root then return false end
+  local prefix = root:sub(-1) == "/" and root or (root .. "/")
+  return path:sub(1, #prefix) == prefix
 end
 local function json_quote(s)
   return '"' .. s:gsub('\\', '\\\\'):gsub('"', '\\"')
@@ -961,6 +945,8 @@ local function readiness_timeout()
   if configured and configured > 0 then return configured end
   return 15
 end
+local startup_action_safe
+local trust_modal_state
 -- The one generic launch chooser serves Butler and every managed member. Kinds
 -- are lifecycle contributions; the chooser only reads their data and callbacks.
 -- Member launches must not hold the daemon image while an agent paints its
@@ -1045,7 +1031,9 @@ local function choose(candidates, opts, done)
       handled = {}, last_screen = "", dialog_seen = nil }
     local test_builder = remuda._butler_agent_builders[id]
       and remuda._butler_agent_builders[id] ~= BUILTIN_AGENT_BUILDERS[id]
-    if opts.skip_probe or test_builder then
+    local force_test_probe = type(remuda._butler_test_force_launch_probe) == "table"
+      and remuda._butler_test_force_launch_probe[opts.name] == true
+    if opts.skip_probe or (test_builder and not force_test_probe) then
       attempt.reason, attempt.session = "ready", name
       callback(name, id)
     end
@@ -1087,8 +1075,39 @@ local function choose(candidates, opts, done)
     local dialogs = type(entry.dialogs) == "function" and select(2, call_callback(entry.dialogs)) or entry.dialogs or {}
     local known = false
     for dialog_index, dialog in ipairs(dialogs) do
-      if screen:lower():find(dialog.match:lower(), 1, true) then
+      local lower_screen = screen:lower()
+      local trust_state = dialog.trust and trust_modal_state(dialog, screen) or nil
+      local matched = dialog.trust and trust_state ~= "absent"
+        or (dialog.match and lower_screen:find(dialog.match:lower(), 1, true))
+      if matched then
         known, state.dialog_seen = true, dialog.match
+        if dialog.trust then
+          if state.trust_screen == screen then state.trust_ticks = (state.trust_ticks or 0) + 1
+          else state.trust_screen, state.trust_ticks = screen, 1 end
+          if state.trust_ticks < 2 then break end
+          if trust_state == "pending" and opts.auto_trust then break end
+          if trust_state == "safe" and opts.auto_trust and bus.trusted_launch_dirs
+              and bus.trusted_launch_dirs[opts.cwd] == true and startup_action_safe
+              and startup_action_safe(state.name) then
+            if not state.handled[dialog_index] then
+              state.handled[dialog_index] = true
+              local answered = true
+              for _, key in ipairs(dialog.keys or {}) do
+                local ok, result = pcall(remuda.key, state.name, key)
+                if not ok or result == false then answered = false end
+              end
+              if answered then
+                state.attempt.trust_answered = true
+                bus.trusted_launch_dirs[opts.cwd] = nil
+              end
+            end
+            break
+          end
+          state.attempt.reason, state.attempt.session = "waiting_for_human_trust", state.name
+          state.attempt.trust_path = opts.cwd
+          callback(state.name, id)
+          return
+        end
         -- Codex's update is an actionable startup state. Hand it to the
         -- member launch flow, which owns the shared update lock and relaunch.
         if dialog.update then
@@ -1101,13 +1120,31 @@ local function choose(candidates, opts, done)
           for _, key in ipairs(dialog.keys or {}) do pcall(remuda.key, state.name, key) end
         end
         break
+      elseif dialog.pending_match and lower_screen:find(dialog.pending_match:lower(), 1, true) then
+        -- Claude paints the trust explanation before the selectable options.
+        -- Keep polling that known startup state until its affirmative option
+        -- is visible; the broad unknown-dialog check below would otherwise
+        -- reject the partial frame before the label handler can run.
+        known, state.dialog_seen = true, dialog.pending_match
+        break
       end
     end
-    local lower = screen:lower()
-    if not known and (lower:find("trust", 1, true) or lower:find("continue", 1, true)
+    if known then
+      state.unknown_dialog_screen, state.unknown_dialog_since = nil, nil
+    else
+      local lower = screen:lower()
+      local suspicious = lower:find("trust", 1, true) or lower:find("continue", 1, true)
         or lower:find("press enter", 1, true) or lower:find("select an option", 1, true)
-        or lower:find("terms of service", 1, true) or lower:find("confirm", 1, true)) then
-      fail_candidate("dialog", one_line(screen)); return
+        or lower:find("terms of service", 1, true) or lower:find("confirm", 1, true)
+      if suspicious then
+        if state.unknown_dialog_screen ~= screen then
+          state.unknown_dialog_screen, state.unknown_dialog_since = screen, os.time()
+        elseif os.time() - state.unknown_dialog_since >= 2 then
+          fail_candidate("dialog", one_line(screen)); return
+        end
+      else
+        state.unknown_dialog_screen, state.unknown_dialog_since = nil, nil
+      end
     end
     if os.time() - state.started >= state.timeout then
       local prefix = state.dialog_seen and ("dialog remained after its handler: " .. state.dialog_seen .. "; ") or ""
@@ -1257,7 +1294,6 @@ local function write_agent_guidance(root, text, replace)
   f:close()
 end
 local _butler_session_trace -- defined below; the task poke fires later
-local startup_action_safe
 local function option_number(screen, matches)
   -- Parse the visible chooser ourselves. Core versions that strip a UTF-8
   -- selection glyph as a byte-class can leave stray bytes before its label.
@@ -1295,10 +1331,58 @@ end
 local function startup_modal_timeout_seconds()
   return tonumber(remuda._butler_modal_timeout or remuda._butler_modal_attempts or remuda._butler_task_poke_attempts) or 60
 end
+trust_modal_state = function(modal, screen)
+  local lines, title, affirmative, selected_no, selected_index, selected_codex = {}, false, false, false, nil, false
+  for line in (tostring(screen or "") .. "\n"):gmatch("(.-)\n") do
+    lines[#lines + 1] = line
+    local trimmed = line:gsub("^%s+", "")
+    if trimmed:find("Accessing workspace:", 1, true) then title = true end
+    if trimmed:match("^❯%s*No, exit") then selected_no, selected_index = true, #lines end
+    if trimmed:match("^Yes, I trust this folder%s*$") then affirmative = true end
+    if trimmed:match("^[›❯]%s*1[.)]%s*Trust and continue%s*$") then selected_codex = true end
+  end
+  local lower = tostring(screen or ""):lower()
+  if modal.trust == "claude" then
+    if not title then
+      if lower:find("quick safety check:", 1, true) then return "pending" end
+      return "absent"
+    end
+    if not lower:find("no, exit", 1, true) or not lower:find("yes, i trust this folder", 1, true) then
+      if lower:find("quick safety check:", 1, true) then return "pending" end
+      return "human"
+    end
+    if not selected_no or not selected_index then return "human" end
+    local options = 0
+    for _, line in ipairs(lines) do
+      if line:match("^%s*[❯›]%s*%S") or line:match("^%s%s%S") then options = options + 1 end
+    end
+    if affirmative and selected_no and options == 2 then return "safe" end
+    return "human"
+  elseif modal.trust == "codex" then
+    if not lower:find("trust this folder?", 1, true) then return "absent" end
+    local options = 0
+    local no_option = false
+    for _, line in ipairs(lines) do
+      if line:match("^%s*[❯›]%s+") or line:match("^%s*%d+[.)]%s+") then
+        options = options + 1
+        if line:lower():find("don't trust", 1, true) or line:lower():find("do not trust", 1, true) then no_option = true end
+      end
+    end
+    if selected_codex and no_option and options == 2 then return "safe" end
+    return "human"
+  end
+  return "human"
+end
 local function startup_modal(startup, screen)
-  local lower = screen:lower()
+  local lower = tostring(screen or ""):lower()
   for _, modal in ipairs(startup.modals or {}) do
-    if modal.match and lower:find(modal.match:lower(), 1, true) then return modal end
+    if modal.trust then
+      if trust_modal_state(modal, screen) ~= "absent" then return modal end
+    elseif modal.match and lower:find(modal.match:lower(), 1, true) then
+      return modal
+    elseif modal.pending_match and lower:find(modal.pending_match:lower(), 1, true) then
+      return modal
+    end
   end
 end
 local function known_startup_modal(startup, screen)
@@ -1334,10 +1418,13 @@ local function capture_update_evidence(session, screen)
   end
   return evidence
 end
-local function launch_agent(kind, requested_name, cwd, model, parent, task, relaunch_identity)
+local function launch_agent(kind, requested_name, cwd, model, parent, task, relaunch_identity, fresh_trusted_cwd)
   local candidates = kind and { kind } or configured_agent_order()
   kind = kind or candidates[1]
-  local name = requested_name or kind or "agent"
+  local name = valid_child_name(requested_name or kind or "agent", "agent name")
+  if cwd ~= nil and (type(cwd) ~= "string" or cwd:find("%c")) then
+    error("cwd must be a string without control characters", 0)
+  end
   if bus.agents[name] then
     error("alias " .. name .. " is live as " .. tostring(bus.agents[name].id) .. "; pick another alias", 0)
   end
@@ -1349,17 +1436,27 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
     identity.ended_at, identity.reason = nil, nil
     identity_record(identity)
   end
+  local auto_trust = fresh_trusted_cwd == true
   if not cwd and data_home then
-    cwd = data_home .. "/remuda/butler/sessions/" .. name
-    remuda.mkdir(cwd)
+    local sessions_root = data_home .. "/remuda/butler/sessions"
+    cwd = sessions_root .. "/" .. name
+    local created_now = create_fresh_directory(cwd)
+    if created_now then
+      bus.trusted_launch_dirs = bus.trusted_launch_dirs or {}
+      bus.trusted_launch_dirs[cwd] = true
+    end
+    if not created_now then remuda.mkdir(cwd) end
+    auto_trust = created_now and directory_is_under(sessions_root, data_home)
+      and directory_is_under(cwd, sessions_root)
   end
-  if cwd and parent then write_agent_guidance(cwd, team_member_guidance(parent)) end
+  local launch_cwd = cwd or "."
+  if cwd and parent and auto_trust then write_agent_guidance(cwd, team_member_guidance(parent)) end
   local token = next_token(name)
   local telemetry_by_kind = {}
   local agent_telemetry = setup_telemetry(kind, { name = name, model = model })
   telemetry_by_kind[kind] = agent_telemetry
   local choose_opts = {
-    name = name, cwd = cwd,
+    name = name, cwd = launch_cwd, auto_trust = auto_trust,
     spec = function(candidate_kind)
       local telemetry = telemetry_by_kind[candidate_kind]
         or setup_telemetry(candidate_kind, { name = name, model = model })
@@ -1378,6 +1475,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   }
   local function finish(actual, selected_kind, attempts)
   if not actual then
+    if bus.trusted_launch_dirs then bus.trusted_launch_dirs[launch_cwd] = nil end
     local errors = {}
     for _, a in ipairs(attempts) do errors[#errors + 1] = a.kind .. ": " .. a.reason .. " (" .. (a.detail or "") .. ")" end
     local message = "no agent candidate became ready: " .. table.concat(errors, "; ")
@@ -1390,11 +1488,19 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   agent_telemetry = telemetry_by_kind[kind]
   identity.kind = kind
   identity_record(identity)
+  local waiting_for_trust, trust_answered = false, false
+  for _, attempt in ipairs(attempts or {}) do
+    if attempt.session == actual and attempt.reason == "waiting_for_human_trust" then
+      waiting_for_trust = true
+    end
+    if attempt.session == actual and attempt.trust_answered then trust_answered = true end
+  end
   bus.tokens[token] = actual
   bus.agents[actual] = {
     kind = kind, token = token, model = model, telemetry = agent_telemetry,
     parent = parent, children = {}, id = identity.id, alias = actual, session_name = actual,
-    cwd = cwd, task = task, launch_attempts = attempts,
+    cwd = launch_cwd, task = task, launch_attempts = attempts, trust_allowed = auto_trust,
+    trust_reported = waiting_for_trust, trust_answered = trust_answered,
   }
   if parent and bus.agents[parent] then
     local children = bus.agents[parent].children
@@ -1403,6 +1509,10 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   local migrated, migration_error = migrate_legacy_mail(actual, identity.id)
   if not migrated then error("cannot migrate legacy Butler mail: " .. tostring(migration_error), 0) end
   mailbox(identity.id)
+  if waiting_for_trust then
+    pcall(remuda._butler_send, "butler", parent or "butler",
+      "waiting for a human: trust dialog in " .. tostring(launch_cwd or "unknown directory"))
+  end
   -- A failed welcome write must not prevent the agent from starting.
   if not relaunch_identity then
     pcall(queue_message, mail_address(parent or "butler"), mail_address(actual),
@@ -1502,6 +1612,34 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       end
       if attempts < settle then return end -- let an answered modal repaint
       local modal = startup_modal(startup, screen)
+      if modal and modal.trust then
+        local trust_state = trust_modal_state(modal, screen)
+        local agent = bus.agents[actual]
+        if trust_state == "safe" and agent.trust_answered then return end
+        if agent.last_trust_screen == screen then agent.trust_ticks = (agent.trust_ticks or 0) + 1
+        else agent.last_trust_screen, agent.trust_ticks = screen, 1 end
+        if agent.trust_ticks < 2 then return end
+        if trust_state == "safe" and agent.trust_allowed and bus.trusted_launch_dirs
+            and bus.trusted_launch_dirs[agent.cwd] == true and startup_action_safe
+            and startup_action_safe(actual) then
+          if not agent.trust_answered then
+            local answered = true
+            for _, key in ipairs(modal.keys or {}) do
+              local ok, result = pcall(remuda.key, actual, key)
+              if not ok or result == false then answered = false end
+            end
+            if answered then
+              agent.trust_answered = true
+              bus.trusted_launch_dirs[agent.cwd] = nil
+            end
+          end
+        elseif not agent.trust_reported then
+          agent.trust_reported = true
+          pcall(remuda._butler_send, "butler", parent or "butler",
+            "waiting for a human: trust dialog in " .. tostring(agent.cwd or "unknown directory"))
+        end
+        return
+      end
       if update_waiting and update_relaunch_record_ref and codex_update_complete(screen) then
         update_relaunch_record_ref.update_complete_seen = true
       end
@@ -1726,6 +1864,10 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
     PROMPT_DELIVERY.schedule(remuda, kind, actual, name, parent, task, {
       ready = startup.ready,
       modals = startup.modals,
+      trust_dialog = function(screen)
+        local modal = startup_modal(startup, screen)
+        return modal ~= nil and modal.trust ~= nil
+      end,
       allowed = function(retrying)
         if retrying then return remuda._butler_task_retry_policy(actual) end
         return remuda._butler_notify_policy(actual)
@@ -1766,9 +1908,19 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
 end
 
 local function make_topic(name, template, kind, parent, task, model)
+  valid_child_name(name, "topic name")
   load_topic_config()
   local root = topic_config.project_home .. "/" .. name
-  remuda.mkdir(root)
+  local created_now = create_fresh_directory(root)
+  if created_now then
+    bus.trusted_launch_dirs = bus.trusted_launch_dirs or {}
+    bus.trusted_launch_dirs[root] = true
+  end
+  if not created_now then remuda.mkdir(root) end
+  if template and not created_now then
+    error("topic directory already exists; templates require a fresh topic name", 0)
+  end
+  local auto_trust = created_now and not template and directory_is_under(root, topic_config.project_home)
   local topic = { name = name, root = root }
   function topic.write(relative_path, contents)
     local f = assert(io.open(root .. "/" .. relative_path, "w"))
@@ -1789,8 +1941,8 @@ local function make_topic(name, template, kind, parent, task, model)
     assert(type(setup) == "function", "Butler topic template must be a function: " .. template)
     setup(topic)
   end
-  write_agent_guidance(root, team_member_guidance(parent or "butler"))
-  return launch_agent(kind, name, root, model, parent, task)
+  if created_now and not template then write_agent_guidance(root, team_member_guidance(parent or "butler")) end
+  return launch_agent(kind, name, root, model, parent, task, nil, auto_trust)
 end
 
 -- Shell-facing doors into the same deliberately mutable bus.  These are not
@@ -1815,6 +1967,7 @@ end
 -- the declared `butler-notices` schedule (init.lua) retries every second.
 bus.notices = bus.notices or {}
 bus.notice_screens = bus.notice_screens or {}
+bus.notice_seen = bus.notice_seen or {}
 local NOTICE_STABLE_SECONDS = 3
 
 -- The composer's text starts after the last prompt glyph and includes its
@@ -1877,6 +2030,19 @@ function remuda._butler_notify_policy(session, now)
   end
   if not row or not row.alive then return false end
   local attached = row.attached
+  -- Attached panes use the human idle clock or screen stability below. Only
+  -- detached panes need the core busy bit, whose Session metatable may throw
+  -- when older cores lack output_idle data.
+  if not attached and remuda.session then
+    local checked, busy = pcall(function()
+      local current = remuda.session(session)
+      return current and current.is_busy
+    end)
+    -- Older cores and synthetic rows can lack a Session object, and some
+    -- Session metatables can fail while computing is_busy. Unknown busy state
+    -- falls through to the prompt parser; only an explicit busy state defers.
+    if checked and busy == true then return false end
+  end
   local seen = bus.notice_screens[session] or {}
   bus.notice_screens[session] = seen
   local screen
@@ -2016,6 +2182,37 @@ local function pending_notice_text(pending)
   return pending.count == 1 and pending.text
     or (pending.count .. " new Butler messages arrived. Read them: remuda butler inbox")
 end
+local notice_recovery_error
+local function input_was_busy(ok, result, detail)
+  local message = tostring(ok and (detail or result) or result or "")
+  return message == "a session input write is already in flight"
+    or message == "runtime error: a session input write is already in flight"
+end
+local function refresh_pending_notice(session, pending)
+  if not pending.message_order then return pending end
+  local agent = bus.agents[session]
+  local identity = agent and agent.id
+  local order, notices = {}, {}
+  for _, id in ipairs(pending.message_order) do
+    local notice = pending.message_ids and pending.message_ids[id]
+    if notice and identity and mail.is_unread(identity, id) then
+      order[#order + 1], notices[id] = id, notice
+    end
+  end
+  pending.message_order, pending.message_ids = order, notices
+  pending.count = #order
+  pending.text = order[#order] and notices[order[#order]] or nil
+  if pending.count == 0 then
+    local recovery = bus.notice_recoveries[session]
+    if recovery and recovery.draft and recovery.draft ~= "" then
+      notice_recovery_error(session, recovery, "mail was read while notice recovery was active; draft preserved")
+    else
+      bus.notices[session], bus.notice_recoveries[session] = nil, nil
+    end
+    return nil
+  end
+  return pending
+end
 local function recovery_screen(session)
   local ok, screen = pcall(remuda.capture, session)
   if not ok then return nil end
@@ -2087,13 +2284,28 @@ local function notice_matches_composer(session, screen, text, expected)
   return (safe and compact_composer(composer) == expected_compact)
     or compact_composer(text) == expected_compact
 end
+local function notice_log_value(value)
+  local raw = tostring(value or "")
+  local length = #raw
+  if length > 8192 then
+    raw = raw:sub(1, 8192) .. ("<truncated; %d bytes total>"):format(length)
+  end
+  return string.format("%q", raw)
+end
+local function log_notice_verify_mismatch(session, screen, text, expected)
+  -- Failure-only trace data; never display diagnostic captures in an agent pane.
+  _butler_session_trace("notice_verify_mismatch", session
+    .. " capture=" .. notice_log_value(screen)
+    .. " composer=" .. notice_log_value(text)
+    .. " expected=" .. notice_log_value(expected))
+end
 local function recovery_composer_empty(session, screen, decision, text)
   if decision ~= "EMPTY" then return false end
   local agent = bus.agents[session]
   local composer, safe = recovery_draft(agent and agent.kind or "", screen, "")
   return safe and normalized_composer(composer) == ""
 end
-local function notice_recovery_error(session, state, reason)
+notice_recovery_error = function(session, state, reason)
   state.failed = true
   local agent = bus.agents[session]
   local parent = agent and agent.parent or "butler"
@@ -2102,18 +2314,32 @@ local function notice_recovery_error(session, state, reason)
     "Could not safely deliver queued Butler mail to " .. session .. ": " .. reason
     .. ". Inspect the composer and resend the notice."
     .. (state.draft and (" Parsed composer draft: " .. state.draft) or ""))
+  bus.notices[session] = nil
+  bus.notice_recoveries[session] = nil
   return false
 end
 local function complete_notice_recovery(session, state)
   local pending = bus.notices[session]
   if pending then
-    pending.count = pending.count - state.count
+    if state.message_ids and pending.message_order then
+      local submitted = {}
+      for _, id in ipairs(state.message_ids) do submitted[id] = true end
+      local order = {}
+      for _, id in ipairs(pending.message_order) do
+        if not submitted[id] then order[#order + 1] = id end
+      end
+      pending.message_order = order
+      pending.count = #order
+      pending.text = order[#order] and pending.message_ids[order[#order]] or nil
+    else
+      pending.count = pending.count - state.count
+    end
     if pending.count <= 0 then bus.notices[session] = nil end
   end
   bus.notice_recoveries[session] = nil
   return true
 end
-local function recovery_human_safe(session)
+local function recovery_human_safe(session, allow_busy)
   local session_row
   for _, candidate in ipairs(remuda.ls()) do
     if candidate.name == session then session_row = candidate end
@@ -2121,8 +2347,11 @@ local function recovery_human_safe(session)
   if not session_row or not session_row.alive or session_row.attached then return false end
   if remuda._butler_human_active(session) then return false end
   if remuda.session then
-    local ok, row = pcall(remuda.session, session)
-    if not ok or not row or row.is_busy then return false end
+    local ok, busy = pcall(function()
+      local row = remuda.session(session)
+      return row and row.is_busy
+    end)
+    if ok and busy == true and not allow_busy then return false end
   end
   return true
 end
@@ -2131,24 +2360,43 @@ local function begin_notice_submit(session, state, draft)
   if not pending then bus.notice_recoveries[session] = nil; return true end
   state.draft = draft
   state.count = pending.count
+  state.message_ids = {}
+  for _, id in ipairs(pending.message_order or {}) do state.message_ids[#state.message_ids + 1] = id end
   state.notice = pending_notice_text(pending)
   if draft and draft ~= "" then
     state.notice = state.notice .. "\n\nYour unsent draft was: " .. draft
   end
   bus.notice_recoveries[session] = state
-  local typed, why = pcall(remuda.type_text, session, state.notice, 0.1)
-  if not typed then return notice_recovery_error(session, state, "the notice could not be typed: " .. tostring(why)) end
+  local typed, result, why = pcall(remuda.type_text, session, state.notice, 0.1)
+  if input_was_busy(typed, result, why) then
+    state.phase = "retry_type"
+    return false
+  end
+  if not typed then return notice_recovery_error(session, state,
+    "the notice could not be typed: " .. tostring(why or result)) end
   state.phase, state.checks, state.saw_notice = "verify_notice", 0, false
   return false
 end
 local function tick_notice_recovery(session, state)
   if state.failed then return false end
-  if not recovery_human_safe(session) then return false end
-  state.checks = (state.checks or 0) + 1
+  local observing_submit = state.phase == "verify_notice" or state.phase == "verify_existing"
+  if not recovery_human_safe(session, observing_submit) then return false end
+  local busy = false
+  if remuda.session then
+    local checked, value = pcall(function()
+      local row = remuda.session(session)
+      return row and row.is_busy
+    end)
+    busy = checked and value == true
+  end
+  if not busy then state.checks = (state.checks or 0) + 1 end
   if state.checks > 40 then return notice_recovery_error(session, state, "verification timed out") end
   local screen, decision, text = recovery_screen(session)
   if not screen then return notice_recovery_error(session, state, "the pane could not be captured") end
   local normalized = tostring(screen):gsub("\r\n", "\n"):gsub("\r", "\n")
+  if state.phase == "retry_type" then
+    return begin_notice_submit(session, state, state.draft)
+  end
   if state.phase == "probe" then
     if state.last_screen == normalized then state.stable = (state.stable or 0) + 1
     else state.last_screen, state.stable = normalized, 1 end
@@ -2184,9 +2432,15 @@ local function tick_notice_recovery(session, state)
     end
     local current_notice = pending_notice_text(bus.notices[session] or { count = 0, text = "" })
     if notice_matches_composer(session, screen, text, current_notice) then
-      local pressed, why = pcall(remuda.key, session, "RET")
-      if not pressed then return notice_recovery_error(session, state, "the existing Butler notice could not be submitted: " .. tostring(why)) end
-      state.phase, state.checks = "verify_existing", 0
+      local pressed, result, why = pcall(remuda.key, session, "RET")
+      if input_was_busy(pressed, result, why) then return false end
+      if not pressed then return notice_recovery_error(session, state,
+        "the existing Butler notice could not be submitted: " .. tostring(why or result)) end
+      state.phase, state.checks, state.notice = "verify_existing", 0, current_notice
+      state.message_ids = {}
+      for _, id in ipairs((bus.notices[session] or {}).message_order or {}) do
+        state.message_ids[#state.message_ids + 1] = id
+      end
       return false
     end
     local agent = bus.agents[session]
@@ -2210,9 +2464,14 @@ local function tick_notice_recovery(session, state)
     end
     return begin_notice_submit(session, state, state.draft)
   elseif state.phase == "verify_existing" then
-    if decision == "EMPTY" then
+    local notice_visible = state.notice and tostring(screen):gsub("%s+", "")
+      :find(tostring(state.notice):gsub("%s+", ""):sub(1, 32), 1, true) ~= nil
+    local notice_in_composer = decision == "NON-EMPTY"
+      and notice_matches_composer(session, screen, text, state.notice)
+    if decision == "EMPTY" or (notice_visible and not notice_in_composer) then
       return complete_notice_recovery(session, state)
     end
+    if busy then return false end
     if state.checks >= 6 then
       return notice_recovery_error(session, state, "the existing Butler notice did not leave the composer")
     end
@@ -2220,25 +2479,29 @@ local function tick_notice_recovery(session, state)
   elseif state.phase == "verify_notice" then
     local notice_head = tostring(state.notice or ""):gsub("%s+", ""):sub(1, 32)
     local notice_visible = notice_head ~= "" and normalized:gsub("%s+", ""):find(notice_head, 1, true) ~= nil
-    if notice_visible or (decision == "NON-EMPTY"
-        and notice_matches_composer(session, screen, text, state.notice)) then
+    local notice_in_composer = decision == "NON-EMPTY"
+      and notice_matches_composer(session, screen, text, state.notice)
+    if notice_visible or notice_in_composer then
       state.saw_notice = true
     end
     local agent = bus.agents[session]
     local non_tui_echo = decision == "UNPARSEABLE" and agent
       and agent.kind ~= "claude" and agent.kind ~= "codex" and notice_visible
-    if (decision == "EMPTY" and state.saw_notice) or non_tui_echo then
+    if (decision == "EMPTY" and (state.saw_notice or busy))
+        or (state.saw_notice and notice_visible and not notice_in_composer) or non_tui_echo then
       return complete_notice_recovery(session, state)
     end
-    if decision == "NON-EMPTY" and notice_matches_composer(session, screen, text, state.notice)
-        and not state.return_retried then
+    if notice_in_composer and not state.return_retried then
       if not recovery_human_safe(session) then return false end
-      local pressed, why = pcall(remuda.key, session, "RET")
-      if not pressed then return notice_recovery_error(session, state, "the notice Return failed: " .. tostring(why)) end
+      local pressed, result, why = pcall(remuda.key, session, "RET")
+      if input_was_busy(pressed, result, why) then return false end
+      if not pressed then return notice_recovery_error(session, state,
+        "the notice Return failed: " .. tostring(why or result)) end
       state.return_retried = true
       return false
     end
     if state.checks >= 12 then
+      log_notice_verify_mismatch(session, screen, text, state.notice)
       return notice_recovery_error(session, state, "the notice submit could not be verified")
     end
     return false
@@ -2247,6 +2510,8 @@ local function tick_notice_recovery(session, state)
 end
 local function deliver_notice(session)
   local pending = bus.notices[session]
+  if not pending then return true end
+  pending = refresh_pending_notice(session, pending)
   if not pending then return true end
   if bus.pending_tasks[session] then return false end
   local recovering = bus.notice_recoveries[session]
@@ -2261,8 +2526,11 @@ local function deliver_notice(session)
   end
   if remuda._butler_notify_policy(session) then
     local state = { phase = "verify_notice", count = pending.count, notice = pending_notice_text(pending), checks = 0 }
-    local typed, why = pcall(remuda.type_text, session, state.notice, 0.1)
-    if not typed then return false, why end
+    state.message_ids = {}
+    for _, id in ipairs(pending.message_order or {}) do state.message_ids[#state.message_ids + 1] = id end
+    local typed, result, why = pcall(remuda.type_text, session, state.notice, 0.1)
+    if input_was_busy(typed, result, why) then return false, "busy" end
+    if not typed then return false, why or result end
     bus.notice_recoveries[session] = state
     return false
   end
@@ -2272,8 +2540,23 @@ local function deliver_notice(session)
   bus.notice_recoveries[session] = state
   return tick_notice_recovery(session, state)
 end
-function remuda._butler_notify(alias, notice)
+function remuda._butler_notify(alias, notice, message_id)
+  local _, recipient = mail_id(alias, false)
+  if message_id and not mail.is_unread(recipient.id, message_id) then return true end
+  if message_id then
+    local seen = bus.notice_seen[recipient.id] or {}
+    bus.notice_seen[recipient.id] = seen
+    if seen[message_id] then return false end
+    seen[message_id] = true
+  end
   local pending = bus.notices[alias] or { count = 0 }
+  if message_id then
+    pending.message_ids = pending.message_ids or {}
+    pending.message_order = pending.message_order or {}
+    if pending.message_ids[message_id] then return false end
+    pending.message_ids[message_id] = notice
+    pending.message_order[#pending.message_order + 1] = message_id
+  end
   pending.count, pending.text = pending.count + 1, notice
   bus.notices[alias] = pending
   return deliver_notice(alias)
@@ -2292,7 +2575,7 @@ function remuda._butler_send(from, to, text)
   local message = deliver_message({ from = sender, to = mail_address(recipient.alias), text = text })
   local notice = "Butler message " .. message.id .. " from " .. sender.session
     .. " arrived. Read it: remuda butler inbox"
-  local delivered, why = remuda._butler_notify(recipient.alias, notice)
+  local delivered, why = remuda._butler_notify(recipient.alias, notice, message.id)
   if delivered then return "queued " .. message.id .. " and notified " .. recipient.alias end
   if why then
     return "queued " .. message.id .. " for " .. recipient.alias .. "; terminal delivery deferred: " .. tostring(why)
@@ -2310,7 +2593,7 @@ local function notify_queued(message, alias, what)
   local live = pcall(mail_id, alias, false)
   if not live then return "queued " .. message.id .. " for " .. alias .. "; it is not live, so no notice" end
   local delivered, why = remuda._butler_notify(alias, "Butler message " .. message.id .. " " .. what
-    .. " arrived. Read it: remuda butler inbox")
+    .. " arrived. Read it: remuda butler inbox", message.id)
   if delivered then return "queued " .. message.id .. " and notified " .. alias end
   return "queued " .. message.id .. " for " .. alias .. "; notice deferred"
     .. (why and (": " .. tostring(why)) or " until its pane is free")
@@ -2333,7 +2616,26 @@ function remuda._butler_forward(from, message_id, member, note)
 end
 function remuda._butler_inbox(name)
   local id = mail_id(name, true)
-  return mail.inbox(id)
+  local result = mail.inbox(id)
+  if mail.unread(id) == 0 then
+    for alias, agent in pairs(bus.agents) do
+      if agent.id == id then
+        local recovery = bus.notice_recoveries[alias]
+        if recovery and recovery.draft and recovery.draft ~= "" then
+          notice_recovery_error(alias, recovery, "mail was read while notice recovery was active; draft preserved")
+        else
+          bus.notices[alias], bus.notice_recoveries[alias] = nil, nil
+        end
+      end
+    end
+    local seen = bus.notice_seen[id]
+    if seen then
+      for message_id in pairs(seen) do
+        if not mail.is_unread(id, message_id) then seen[message_id] = nil end
+      end
+    end
+  end
+  return result
 end
 function remuda._butler_report(from, text)
   from = resolve(from)
@@ -2445,6 +2747,7 @@ function remuda._butler_sessions()
       local details = {}
       for _, attempt in ipairs(report.attempts or {}) do
         details[#details + 1] = attempt.kind .. ": " .. attempt.reason
+          .. (attempt.detail and (" (" .. attempt.detail:gsub("\n", " ") .. ")") or "")
       end
       failed[#failed + 1] = name .. ": " .. (#details > 0 and table.concat(details, ", ") or report.error)
     end
@@ -3007,44 +3310,31 @@ function remuda._butler_compaction_tick(target_name, dry_run)
       local agent = remuda._butler_bus.agents[session_name] or {}
       local state_key = tostring(agent.id or session_name)
       local state = members[state_key] or {}
+      if dry_run then
+        local snapshot = {}
+        for key, value in pairs(state) do snapshot[key] = value end
+        state = snapshot
+      end
       if not dry_run then
         members[state_key] = state
         remuda._butler_compaction_members_state = members
       end
+      if agent.kind == "claude" then clear_legacy_restore_state(state) end
+      local cooling = remuda._butler_compaction_failure_cooldown(
+        state, (remuda._butler_compaction_now or os.time)())
       if state.compaction_in_progress then
         results[#results + 1] = session_name .. ":compaction_in_progress"
       elseif owner_state.compaction_fleet_active and owner_state.compaction_fleet_active ~= state_key then
         results[#results + 1] = session_name .. ":fleet_busy"
-      elseif state.pending_restore_blocked then
-        results[#results + 1] = session_name .. ":restore_blocked"
-      elseif state.pending_restore_model_unavailable then
-        results[#results + 1] = session_name .. ":restore_needs_model_family"
-      elseif state.pending_restore_model then
-        if dry_run then
-          results[#results + 1] = session_name .. ":pending_restore"
-        elseif (state.cooldown_ticks or 0) > 0 then
-          state.cooldown_ticks = state.cooldown_ticks - 1
-          results[#results + 1] = session_name .. ":restore_pending_cooldown"
-        elseif type(remuda.expect) == "function" then
-          results[#results + 1] = remuda.butler.compact(session_name)
-        else
-          results[#results + 1] = session_name .. ":restore_pending_core_lacks_expect"
-        end
+      elseif cooling then
+        results[#results + 1] = session_name .. ":skipped_cooldown"
       else
         local should_send, event, ctx = remuda.butler.compaction_policy(session_name, state, dry_run)
         if dry_run then
-          local telemetry = remuda._butler_telemetry_for(agent) or {}
-          local family = compaction_family(telemetry.model) or compaction_family(agent.model)
-          if should_send and agent.kind == "claude" and not family then
-            results[#results + 1] = table.concat({ session_name, "skip: model family unknown",
-              "ctx=" .. tostring(ctx), "idle_captures=" .. tostring(state.idle_ticks or 0) }, "; ")
-          else
-            local sequence = remuda._butler_compaction_sequence(agent.kind or "claude", family,
-              remuda._butler_compaction_model or "sonnet")
-            results[#results + 1] = table.concat({ session_name, "decision=" .. tostring(event),
-              "ctx=" .. tostring(ctx), "idle_captures=" .. tostring(state.idle_ticks or 0),
-              "keys=" .. table.concat(sequence, " -> ") .. " -> visible switch option (if prompted)" }, "; ")
-          end
+          local sequence = remuda._butler_compaction_sequence()
+          results[#results + 1] = table.concat({ session_name, "decision=" .. tostring(event),
+            "ctx=" .. tostring(ctx), "idle_captures=" .. tostring(state.idle_ticks or 0),
+            "keys=" .. table.concat(sequence, " -> ") .. " -> RET" }, "; ")
         elseif should_send then
           if type(remuda.expect) ~= "function" then
             if not remuda._butler_compaction_core_missing then
@@ -3056,12 +3346,12 @@ function remuda._butler_compaction_tick(target_name, dry_run)
           else
             results[#results + 1] = remuda.butler.compact(session_name)
           end
-      else
-        if event ~= state.last_trace_event then
-          _butler_trace(event, "ctx=" .. tostring(ctx))
-          state.last_trace_event = event
-        end
-        results[#results + 1] = session_name .. ":" .. tostring(event)
+        else
+          if event ~= state.last_trace_event then
+            _butler_trace(event, "ctx=" .. tostring(ctx))
+            state.last_trace_event = event
+          end
+          results[#results + 1] = session_name .. ":" .. tostring(event)
         end
       end
     end
@@ -3071,7 +3361,7 @@ function remuda._butler_compaction_tick(target_name, dry_run)
   return nil
 end
 
-function remuda._butler_compaction_execute(session_name)
+function remuda._butler_compaction_execute(session_name, force)
   if not session_name then return "no session" end
   if not remuda._butler_compaction_has_session(session_name) then
     return "unknown session: " .. tostring(session_name)
@@ -3080,491 +3370,130 @@ function remuda._butler_compaction_execute(session_name)
   owner_state.compaction_members = owner_state.compaction_members or remuda._butler_compaction_members_state or {}
   remuda._butler_compaction_members_state = owner_state.compaction_members
   local agent = remuda._butler_bus.agents[session_name] or {}
+  if agent.kind ~= "claude" and agent.kind ~= "codex" then
+    local message = "compaction skipped: unsupported agent kind " .. tostring(agent.kind)
+    pcall(remuda._butler_send, session_name, agent.parent or "butler", message)
+    return "skipped_unsupported_kind"
+  end
   local state_key = tostring(agent.id or session_name)
   local state = owner_state.compaction_members[state_key] or {}
   owner_state.compaction_members[state_key] = state
+  if agent.kind == "claude" then clear_legacy_restore_state(state) end
   if state.compaction_in_progress then return "compaction_in_progress" end
   if owner_state.compaction_fleet_active and owner_state.compaction_fleet_active ~= state_key then return "fleet_busy" end
-  local level = remuda.butler.ctx_level(session_name)
-  local ctx = level.used or "?"
-  local detail = "ctx=" .. tostring(ctx)
+  local now = (remuda._butler_compaction_now or os.time)()
+  if remuda._butler_compaction_failure_cooldown(state, now, force == true) then
+    return "skipped_cooldown"
+  end
+  local blocked = remuda._butler_compaction_preflight(session_name)
+  if blocked then
+    local statuses = {
+      busy = "skipped_busy", ["busy state unknown"] = "skipped_busy",
+      ["human attached"] = "skipped_attached", ["composer not empty"] = "skipped_composer",
+      ["queued mail"] = "skipped_queued", ["session unavailable"] = "skipped_unknown",
+    }
+    return statuses[blocked] or "skipped_unknown"
+  end
+  local action_blocked = remuda._butler_compaction_action_guard(session_name)
+  if action_blocked then
+    if action_blocked == "human attached" then return "skipped_attached" end
+    if action_blocked == "busy" then return "skipped_busy" end
+    return "skipped_unknown"
+  end
+  if type(remuda.expect) ~= "function" then return "compaction disabled: core lacks remuda.expect" end
+
   local config = compaction_config()
+  local level = remuda.butler.ctx_level(session_name)
+  local detail = "ctx=" .. tostring(level.used or "?")
+  local ctx_before = tonumber(level.used)
+  local function release_lock()
+    state.compaction_in_progress = false
+    if owner_state.compaction_fleet_active == state_key then owner_state.compaction_fleet_active = nil end
+  end
+  local function fail(reason)
+    release_lock()
+    state.failure_cooldown_until = (remuda._butler_compaction_now or os.time)()
+      + config.failure_cooldown_seconds
+    state.cooldown_ticks = 0
+    _butler_trace("error", detail .. " reason=" .. tostring(reason))
+    pcall(remuda._butler_send, session_name, agent.parent or "butler",
+      "Compaction failed: " .. tostring(reason))
+  end
+  local function finish_success(event)
+    release_lock()
+    state.failure_cooldown_until = nil
+    state.cooldown_ticks = config.cooldown_ticks
+    state.compaction_still_running_notice_sent = nil
+    clear_legacy_restore_state(state)
+    _butler_trace(event or "verified", detail)
+  end
+  local function pane_busy()
+    local found, session = pcall(remuda.session, session_name)
+    if not found or not session then return nil end
+    if session.is_busy ~= false then return true end
+    local captured, screen = pcall(remuda.capture, session_name)
+    if not captured or type(screen) ~= "string" then return nil end
+    local registered = registered_agent_kind(agent.kind)
+    if registered and registered.working then
+      local checked, working = registered_agent_working(registered, screen)
+      if not checked then return nil end
+      return working == true
+    end
+    return false
+  end
+  local function monitor_until_idle()
+    local warned = pcall(remuda._butler_send, session_name, agent.parent or "butler",
+      "Compaction is still running; the fleet lock remains held until this session is idle.")
+    state.compaction_still_running_notice_sent = warned and true or false
+    local monitor_ok, monitor = pcall(remuda.schedule, { every = 1, run = function()
+      local found, session = pcall(remuda.session, session_name)
+      if not found or not session then
+        if state.compaction_monitor then remuda.cancel(state.compaction_monitor) end
+        state.compaction_monitor = nil
+        fail("session unavailable after compaction timeout")
+      elseif pane_busy() == false then
+        if state.compaction_monitor then remuda.cancel(state.compaction_monitor) end
+        state.compaction_monitor = nil
+        state.compaction_still_running_notice_sent = nil
+        finish_success("completed_after_timeout")
+      end
+    end })
+    if monitor_ok then state.compaction_monitor = monitor end
+  end
+
   state.compaction_in_progress = true
+  state.failure_cooldown_until = nil
   owner_state.compaction_fleet_active = state_key
-    local function report(reason, suppress_notice, keep_fleet)
-      state.compaction_in_progress = false
-      if not keep_fleet and owner_state.compaction_fleet_active == state_key then owner_state.compaction_fleet_active = nil end
-      state.cooldown_ticks = config.failure_cooldown_ticks
-      if keep_fleet then state.cooldown_ticks = 0 end
-      _butler_trace("error", detail .. " reason=" .. tostring(reason))
-      if not suppress_notice then
-        pcall(remuda._butler_send, session_name, agent.parent or "butler", "Compaction failed: " .. tostring(reason))
-      end
-    end
-    local screen_ok, screen = pcall(remuda.capture, session_name)
-    local agent = remuda._butler_bus.agents[session_name] or {}
-    local initial_telemetry = remuda._butler_telemetry_for(agent) or {}
-    local restore_only = state.pending_restore_model ~= nil or state.pending_restore_model_unavailable == true
-    local prior_display = state.pending_restore_display or initial_telemetry.model
-    local prior = state.pending_restore_model or compaction_family(initial_telemetry.model)
-      or compaction_family(agent.model)
-    local prior_command = prior
-    local prior_window = tonumber(state.pending_restore_context_window or initial_telemetry.context_window)
-    local low = remuda._butler_compaction_model or "sonnet"
-    if agent.kind == "claude" and not restore_only and not prior then
-      state.compaction_in_progress = false
-      if owner_state.compaction_fleet_active == state_key then owner_state.compaction_fleet_active = nil end
-      state.cooldown_ticks = config.failure_cooldown_ticks
-      if not state.pending_restore_notice_sent then
-        state.pending_restore_notice_sent = true
-        pcall(remuda._butler_send, session_name, agent.parent or "butler",
-          "compaction skipped: model family is unknown; cannot safely restore after switching to Sonnet")
-      end
-      _butler_trace("skipped", detail .. " reason=unknown_model_family")
-      return "skipped_unknown_model_family"
-    end
-    _butler_trace("sent", detail)
-    local dialog_timeout = math.max(1, config.dialog_timeout)
-    local failure_reason, compact_sent, restore_attempt_count, verification_failed
-    local verify, request_restore, watch_restore, restore_after_unknown
-    local function watch(branches, options, restore_on_error)
-      local ok, handle = pcall(remuda.expect, session_name, branches, options)
-      if not ok then
-        if restore_on_error then request_restore("could not start restore watcher: " .. tostring(handle))
-        else report("could not start verification watcher: " .. tostring(handle)) end
-        return nil
-      end
-      return handle
-    end
-    if not screen_ok or type(screen) ~= "string" then report("could not capture model status"); return end
-    local ctx_before = tonumber(ctx)
-    local function is_switch_dialog(value)
-      return compaction_is_switch_dialog(value)
-    end
-    local is_unknown_dialog = remuda._butler_compaction_is_unknown_dialog
-    local function register_unknown_dialog(value)
-      remuda._butler_compaction_dialog_registry = remuda._butler_compaction_dialog_registry or {}
-      local registry = remuda._butler_compaction_dialog_registry
-      if #registry >= 50 then table.remove(registry, 1) end
-      table.insert(registry, { session = session_name, kind = "unknown_dialog", at = os.time() })
-    end
-    local function wait_until_output_idle(callback)
-      local deadline = os.time() + math.max(1, math.ceil(config.idle_wait_timeout))
-      local timer, finished
-      local function poll()
-        if finished then return end
-        local ok, current = pcall(remuda.session, session_name)
-        if not ok or not current then
-          finished = true
-          if timer then remuda.cancel(timer) end
-          callback("session unavailable")
-        elseif current.attached then
-          finished = true
-          if timer then remuda.cancel(timer) end
-          callback("human attached")
-        elseif current.is_busy == false then
-          finished = true
-          if timer then remuda.cancel(timer) end
-          callback(nil)
-        elseif os.time() >= deadline then
-          finished = true
-          if timer then remuda.cancel(timer) end
-          callback("output idle timeout")
-        end
-      end
-      poll()
-      if not finished then timer = remuda.schedule({ every = 0.25, run = poll }) end
-    end
-    local function wait_until_switch_closed(callback)
-      local deadline = os.time() + math.max(1, math.ceil(config.dialog_timeout))
-      local timer, finished
-      local function poll()
-        if finished then return end
-        local ok, current = pcall(remuda.capture, session_name)
-        if ok and type(current) == "string" and not is_switch_dialog(current) then
-          finished = true
-          if timer then remuda.cancel(timer) end
-          wait_until_output_idle(callback)
-        elseif os.time() >= deadline then
-          finished = true
-          if timer then remuda.cancel(timer) end
-          callback("switch dialog did not close")
-        end
-      end
-      poll()
-      if not finished then timer = remuda.schedule({ every = 0.25, run = poll }) end
-    end
-    local function answer_switch_dialog(_, on_answered)
-      wait_until_output_idle(function(idle_error)
-        if idle_error then
-          if idle_error == "human attached" then report("aborted: human attached; restore suppressed")
-          else
-            failure_reason = "switch dialog did not become idle: " .. idle_error
-            restore_after_unknown(failure_reason)
-          end
-          return
-        end
-        local captured, current = pcall(remuda.capture, session_name)
-        if not captured or type(current) ~= "string" then
-          failure_reason = "could not capture switch dialog"
-          request_restore(failure_reason)
-          return
-        end
-        if not is_switch_dialog(current) then
-          on_answered()
-          return
-        end
-        local answer = remuda.expect_option(current, function(label)
-          local lower = label:lower()
-          return lower:find("yes", 1, true) and lower:find("switch", 1, true)
-        end)
-        if not answer then
-          register_unknown_dialog(current)
-          failure_reason = "switch dialog had no unique yes/switch option"
-          restore_after_unknown(failure_reason)
-          return
-        end
-        local safe = remuda._butler_compaction_action_guard(session_name)
-        if safe then
-          if safe == "human attached" then report("aborted: human attached; restore suppressed")
-          else request_restore("aborted: " .. safe) end
-          return
-        end
-        local ok, err = pcall(remuda.key, session_name, answer)
-        if not ok then
-          failure_reason = "switch dialog answer failed: " .. tostring(err)
-          restore_after_unknown(failure_reason)
-          return
-        end
-        wait_until_switch_closed(function(close_error)
-          if close_error then
-            if close_error == "human attached" then
-              report("aborted: human attached; restore suppressed")
-            else
-              failure_reason = close_error
-              restore_after_unknown(close_error)
-            end
-          else
-            on_answered()
-          end
-        end)
-      end)
-    end
-    local function after_restored()
-      if compact_sent then
-        if verification_failed then report(failure_reason or "verification failed after model restore")
-        else verify() end
-      elseif restore_only then
-        state.pending_restore_model = nil
-        state.pending_restore_model_unavailable = nil
-        state.pending_restore_display = nil
-        state.pending_restore_context_window = nil
-        state.pending_restore_notice_sent = nil
-        state.pending_restore_mismatch_notice_sent = nil
-        state.pending_restore_blocked = nil
-        state.restore_retry_in_progress = nil
-        state.compaction_in_progress = false
-        state.cooldown_ticks = config.cooldown_ticks
-        if owner_state.compaction_fleet_active == state_key then owner_state.compaction_fleet_active = nil end
-        _butler_trace("restored", detail .. " retry=confirmed")
-      else
-        state.pending_restore_model = nil
-        state.pending_restore_model_fallback = nil
-        state.pending_restore_model_unavailable = nil
-        state.pending_restore_display = nil
-        state.pending_restore_context_window = nil
-        state.pending_restore_blocked = nil
-        report(failure_reason or "compaction aborted before /compact")
-      end
-    end
-    local function finish_failed_restore(reason)
-      report((failure_reason and (failure_reason .. "; ") or "") .. tostring(reason))
-    end
-    local function start_verification()
-      watch({
-        { id = "verified", match = function()
-          local current = remuda._butler_telemetry_for(agent)
-          local used = tonumber(current.context_used)
-          return used and ctx_before and used < ctx_before
-            and (agent.kind ~= "claude" or (compaction_family(current.model) == prior
-              and (not prior_window or tonumber(current.context_window) == prior_window)))
-        end, action = function()
-          if failure_reason then report(failure_reason)
-          else
-            state.compaction_in_progress = false
-            state.pending_restore_model = nil
-            state.pending_restore_model_fallback = nil
-            state.pending_restore_model_unavailable = nil
-            state.pending_restore_display = nil
-            state.pending_restore_context_window = nil
-            state.pending_restore_notice_sent = nil
-            state.pending_restore_mismatch_notice_sent = nil
-            state.pending_restore_blocked = nil
-            state.restore_retry_in_progress = nil
-            state.cooldown_ticks = compaction_config().cooldown_ticks
-            if owner_state.compaction_fleet_active == state_key then owner_state.compaction_fleet_active = nil end
-            _butler_trace("verified", detail)
-          end
-        end },
-      }, { timeout = config.verification_timeout, on_timeout = function()
-        verification_failed = true
-        failure_reason = failure_reason or "verification failed: CTX did not drop and model was not restored"
-        request_restore(failure_reason)
-      end, unknown = is_unknown_dialog,
-        on_unknown = function(value)
-          register_unknown_dialog(value)
-          failure_reason = "unrecognized dialog during verification"
-          restore_after_unknown(failure_reason)
-        end,
-        on_error = function(err)
-          verification_failed = true
-          failure_reason = "verification error: " .. tostring(err)
-          request_restore(failure_reason)
-        end }, false)
-    end
-    verify = start_verification
-    local function restore_match(value)
+  _butler_trace("sent", detail)
+  local sent, send_err = pcall(remuda.type_text, session_name, "/compact", config.input_settle)
+  if not sent then fail("compact command failed: " .. tostring(send_err)); return "failed" end
+  local completion_timeout = agent.kind == "claude"
+    and config.claude_completion_timeout or config.completion_timeout
+  local watch_ok, handle = pcall(remuda.expect, session_name, {
+    { id = "compact-complete", match = function()
       local current = remuda._butler_telemetry_for(agent) or {}
-      return compaction_family(current.model) == prior
-        and (not prior_window or tonumber(current.context_window) == prior_window)
-    end
-    watch_restore = function(ignore_unknown)
-      watch({
-        { id = "restore-dialog", match = is_switch_dialog, action = function(value)
-          answer_switch_dialog(value, function() watch_restore() end)
-        end },
-        { id = "restore-prior", match = restore_match, action = after_restored },
-      }, { timeout = dialog_timeout, unknown = function(value)
-          if not is_unknown_dialog(value) then return false end
-          return not (ignore_unknown and is_unknown_dialog(ignore_unknown)
-            and compaction_model(value) == compaction_model(ignore_unknown))
-        end,
-        on_unknown = function(value)
-          register_unknown_dialog(value)
-          restore_after_unknown("unrecognized dialog during restore")
-        end,
-        on_timeout = function() request_restore("restore confirmation timed out") end,
-        on_error = function(err) request_restore("restore confirmation error: " .. tostring(err)) end }, true)
-    end
-    request_restore = function(reason)
-      failure_reason = reason or failure_reason
-      local captured, current_screen = pcall(remuda.capture, session_name)
-      if not captured or type(current_screen) ~= "string" then
-        finish_failed_restore("could not read model status during restore")
-        return
-      end
-      local current_model = compaction_model(current_screen)
-      if not prior then
-        if current_model and current_model:lower():find(low:lower(), 1, true) then
-          state.pending_restore_model_unavailable = true
-          state.pending_restore_display = prior_display or "unknown model"
-          state.restore_retry_in_progress = nil
-          local shown = tostring(state.pending_restore_display):gsub("[%c]", " ")
-          report("restore skipped: model family unavailable", true)
-          if not state.pending_restore_notice_sent then
-            state.pending_restore_notice_sent = true
-            pcall(remuda._butler_send, session_name, agent.parent or "butler",
-              "compaction left " .. shown .. " on Sonnet; restore needs a known model family")
-          end
+      local used = tonumber(current.context_used)
+      return used and ctx_before and used < ctx_before
+    end, action = function() finish_success("verified") end },
+  }, { timeout = completion_timeout,
+    unknown = remuda._butler_compaction_is_unknown_dialog,
+    on_unknown = function()
+      fail("unrecognized dialog after compaction")
+    end,
+    on_timeout = function()
+      if agent.kind == "claude" then
+        if pane_busy() ~= false then
+          monitor_until_idle()
         else
-          state.pending_restore_model_unavailable = nil
-          state.pending_restore_display = nil
-          report("restore skipped: model family unavailable", true)
+          fail("compaction context did not drop")
         end
-        return
-      end
-      if is_switch_dialog(current_screen) then
-        if not compact_sent and (restore_attempt_count or 0) == 0 then
-          restore_after_unknown(failure_reason or "aborting before compaction")
-          return
-        end
-        answer_switch_dialog(current_screen, function() watch_restore() end)
-        return
-      end
-      if restore_match(current_screen) then after_restored(); return end
-      local current_telemetry = remuda._butler_telemetry_for(agent) or {}
-      if prior_window and compaction_family(current_telemetry.model) == prior
-        and tonumber(current_telemetry.context_window) ~= prior_window then
-        state.pending_restore_model = prior
-        state.pending_restore_blocked = true
-        if not state.pending_restore_mismatch_notice_sent then
-          state.pending_restore_mismatch_notice_sent = true
-          pcall(remuda._butler_send, session_name, agent.parent or "butler",
-            "compaction restore mismatch for " .. session_name .. ": expected " .. prior
-              .. " CTXWIN " .. tostring(prior_window) .. ", got "
-              .. tostring(current_telemetry.context_window or "unknown"))
-        end
-        report("restore confirmation had a different context window", true)
-        return
-      end
-      if current_model and current_model:lower():find(low:lower(), 1, true) then
-        if (restore_attempt_count or 0) >= config.restore_attempts then
-          finish_failed_restore("prior model restore attempts exhausted while model remains " .. current_model)
-          return
-        end
-        wait_until_output_idle(function(idle_error)
-          if idle_error then
-            state.pending_restore_model = prior
-            state.restore_retry_in_progress = true
-            state.cooldown_ticks = 0
-            report("restore deferred until the member is unattached and idle", true, true)
-            return
-          end
-          local idle, idle_reason = remuda.butler.is_idle(session_name)
-          if not idle then
-            if idle_reason == "human attached" or idle_reason == "busy" then
-              state.pending_restore_model = prior
-              state.restore_retry_in_progress = true
-              state.cooldown_ticks = 0
-              report("restore deferred until the member is unattached and idle", true, true)
-            else report("restore aborted: " .. tostring(idle_reason), true, true) end
-            return
-          end
-          restore_attempt_count = (restore_attempt_count or 0) + 1
-          local safe = remuda._butler_compaction_action_guard(session_name)
-          if safe then
-            if safe == "human attached" then
-              state.pending_restore_model = prior
-              state.restore_retry_in_progress = true
-              state.cooldown_ticks = 0
-            end
-            report("restore aborted: " .. safe, true, state.pending_restore_model ~= nil)
-            return
-          end
-          state.pending_restore_model = prior
-          local sent, err = pcall(remuda.type_text, session_name, "/model " .. prior_command, config.input_settle)
-          if not sent then finish_failed_restore("could not request prior model: " .. tostring(err)); return end
-          watch_restore(is_unknown_dialog(current_screen) and current_screen or nil)
-        end)
-        return
-      end
-      finish_failed_restore("model status is neither prior nor low; restore was not sent")
-    end
-    restore_after_unknown = function(reason)
-      failure_reason = reason or failure_reason
-      local safe = remuda._butler_compaction_action_guard(session_name)
-      if safe then finish_failed_restore("could not dismiss unknown dialog: " .. safe); return end
-      local ok, err = pcall(remuda.key, session_name, "ESC")
-      if not ok then finish_failed_restore("could not dismiss unknown dialog: " .. tostring(err)); return end
-      local deadline = os.time() + math.max(2, math.ceil(config.idle_wait_timeout))
-      local timer
-      local finished = false
-      local function poll()
-        if finished then return end
-        local captured, current = pcall(remuda.capture, session_name)
-        if not captured or type(current) ~= "string" then
-          finished = true
-          remuda.cancel(timer)
-          finish_failed_restore("could not verify unknown dialog dismissal")
-        elseif not is_unknown_dialog(current) and not is_switch_dialog(current) then
-          finished = true
-          remuda.cancel(timer)
-          request_restore(failure_reason)
-        elseif os.time() >= deadline then
-          finished = true
-          remuda.cancel(timer)
-          finish_failed_restore("unknown dialog did not close after Escape")
-        end
-      end
-      timer = remuda.schedule({ every = 0.25, run = poll })
-      poll()
-    end
-    local function unknown_dialog(value)
-      register_unknown_dialog(value)
-      failure_reason = "unrecognized dialog"
-      restore_after_unknown(failure_reason)
-    end
-    local function after_switch()
-      local blocked = remuda._butler_compaction_preflight(session_name)
-      if blocked then
-        failure_reason = "aborted: " .. blocked
-        request_restore(failure_reason)
-        return
-      end
-      if agent.kind == "codex" then
-        local safe = remuda._butler_compaction_preflight(session_name)
-        if safe then request_restore("aborted: " .. safe); return end
-        safe = remuda._butler_compaction_action_guard(session_name)
-        if safe then request_restore("aborted: " .. safe); return end
-        local sent, err = pcall(remuda.type_text, session_name, "/compact", config.input_settle)
-        if not sent then report("Codex compact command failed: " .. tostring(err)); return end
-        compact_sent = true
-        verify()
-        return
-      end
-      local safe = remuda._butler_compaction_preflight(session_name)
-      if safe then request_restore("aborted: " .. safe); return end
-      safe = remuda._butler_compaction_action_guard(session_name)
-      if safe then request_restore("aborted: " .. safe); return end
-      local compact_ok, compact_err = pcall(remuda.type_text, session_name, "/compact", config.input_settle)
-      if not compact_ok then
-        failure_reason = "compact command failed: " .. tostring(compact_err)
-        request_restore(failure_reason)
-        return
-      end
-      compact_sent = true
-      watch({
-        { id = "compact-complete", match = function()
-          local current = remuda._butler_telemetry_for(agent)
-          local used = tonumber(current.context_used)
-          return used and ctx_before and used < ctx_before
-        end, action = function() request_restore() end },
-      }, { timeout = config.completion_timeout, unknown = is_unknown_dialog,
-        on_unknown = function(value)
-          register_unknown_dialog(value)
-          restore_after_unknown("unrecognized dialog after compaction")
-        end,
-        on_timeout = function() request_restore("compaction context did not drop") end,
-        on_error = function(err) request_restore("compaction completion error: " .. tostring(err)) end }, true)
-    end
-    if restore_only then
-      if not prior then
-        request_restore("retrying pending restore")
       else
-        local idle = remuda.butler.is_idle(session_name)
-        if not idle then
-          report("restore deferred until the member is unattached and idle", true, true)
-          state.cooldown_ticks = 0
-        else
-          state.restore_retry_in_progress = true
-          request_restore("retrying pending restore")
-        end
+        fail("compaction context did not drop")
       end
-      return
-    end
-    if agent.kind == "codex" then
-      after_switch()
-    else
-      local safe = remuda._butler_compaction_preflight(session_name)
-      if safe then report("aborted: " .. safe); return end
-      safe = remuda._butler_compaction_action_guard(session_name)
-      if safe then report("aborted: " .. safe); return end
-      state.pending_restore_model = prior
-      state.pending_restore_model_unavailable = not prior
-      state.pending_restore_display = prior_display
-      state.pending_restore_context_window = prior_window
-      local sent, send_err = pcall(remuda.type_text, session_name, "/model " .. low, config.input_settle)
-      if not sent then request_restore("could not request low model: " .. tostring(send_err)); return end
-      watch({
-        { id = "switch-confirm", match = is_switch_dialog, action = function(value)
-          answer_switch_dialog(value, after_switch)
-        end },
-        { id = "already-low", match = function(value)
-          local model = compaction_model(value)
-          return not is_unknown_dialog(value)
-            and model and model:lower():find(low:lower(), 1, true) ~= nil
-        end, action = function()
-          wait_until_output_idle(function(idle_error)
-            if idle_error then request_restore("aborted: " .. idle_error)
-            else after_switch() end
-          end)
-        end },
-      }, { timeout = dialog_timeout, unknown = is_unknown_dialog,
-        on_unknown = unknown_dialog,
-        on_timeout = function() request_restore("first model dialog timed out") end,
-        on_error = function(err) request_restore("first model dialog error: " .. tostring(err)) end }, true)
-    end
-    _butler_trace("started", detail .. " model=" .. tostring(prior))
+    end,
+    on_error = function(err) fail("compaction completion error: " .. tostring(err)) end }, false)
+  if not watch_ok then fail("could not start compaction watcher: " .. tostring(handle)); return "failed" end
+  return "started"
 end
 
 -- remuda._butler_session_trace_path lets a test redirect this to a throwaway
@@ -3664,6 +3593,9 @@ function remuda._butler_session_exited(name, info)
   bus.notices[name], bus.notice_screens[name], bus.pending_tasks[name] = nil, nil, nil
   bus.notice_recoveries[name], bus.task_retry_screens[name], bus.human_activity_screens[name] = nil, nil, nil
   local exited = bus.agents[name]
+  if exited and exited.cwd and bus.trusted_launch_dirs then
+    bus.trusted_launch_dirs[exited.cwd] = nil
+  end
   if exited and name ~= "butler" then
     local ended = bus.identity_ids[exited.id] or exited
     ended.alias, ended.kind = exited.alias or name, exited.kind

@@ -71,6 +71,23 @@ assert(idle and idle_reason == "idle", "is_idle should accept idle session with 
 local preflight = remuda._butler_compaction_preflight("butler")
 assert(preflight == nil,
   "preflight should call the registered bound working predicate with the screen")
+composer_empty = false
+preflight = remuda._butler_compaction_preflight("butler")
+assert(preflight == "composer not empty", "direct compaction must not append to a draft")
+composer_empty = true
+preflight = remuda._butler_compaction_preflight("butler")
+assert(preflight == nil, "empty composer should pass direct compaction preflight")
+
+local cooldown_state = { failure_cooldown_until = 200 }
+local active, expires_at = remuda._butler_compaction_failure_cooldown(cooldown_state, 199)
+assert(active and expires_at == 200, "failure cooldown should use a wall-clock expiry")
+active = remuda._butler_compaction_failure_cooldown(cooldown_state, 199, true)
+assert(not active and cooldown_state.failure_cooldown_until == nil,
+  "force should clear and bypass the failure cooldown")
+cooldown_state.failure_cooldown_until = 200
+active = remuda._butler_compaction_failure_cooldown(cooldown_state, 200)
+assert(not active and cooldown_state.failure_cooldown_until == nil,
+  "failure cooldown should expire without a scheduled tick")
 local state, sends, fake_now = {}, 0, 100
 remuda._butler_compaction_now = function() return fake_now end
 local function tick(ctx, is_busy)
@@ -170,41 +187,20 @@ send, reason = tick("600000", false)
 assert(not send and reason == "skipped_queued", "queued mail must prevent compaction")
 queued = false
 
-local answer, phase = remuda._butler_compaction_visible_answer(
-  "claude", "Switch model?\n2. No, keep current model\n3. Yes, switch to Sonnet", "sonnet")
-assert(answer == "3" and phase == "dialog", "dialog answer must be parsed from the yes/switch option label")
-answer, phase = remuda._butler_compaction_visible_answer(
-  "claude", "Switch model?\n1. Yes, switch to Sonnet\n2. No", "sonnet")
-assert(answer == "1" and phase == "dialog", "dialog option order may vary")
-assert(remuda._butler_compaction_yes_option(
-  "Switch model?\n1. No\n❯ 2. Yes, switch to Sonnet") == "2",
-  "the local option parser must retain the number from a highlighted Unicode option")
-answer, phase = remuda._butler_compaction_visible_answer(
-  "claude", "Switch model?\n1. No\n2. Keep current model", "sonnet")
-assert(answer == nil and phase == "unknown", "dialog without a yes/switch label must be unknown")
-answer, phase = remuda._butler_compaction_visible_answer(
-  "claude", "MODEL:Sonnet-4.5 CTX:500000\n❯", "sonnet")
-assert(answer == nil and phase == "ready", "already-switched statusline must advance without a stray key")
-answer, phase = remuda._butler_compaction_visible_answer(
-  "claude", "Mystery chooser\n1. Continue\n❯", "sonnet")
-assert(answer == nil and phase == "unknown", "unrecognized dialog must be reported, never answered blindly")
 assert(remuda._butler_compaction_is_unknown_dialog("Mystery chooser\n1. Continue\n❯"),
   "numbered option immediately above the prompt should be an active unknown dialog")
 assert(remuda._butler_compaction_is_unknown_dialog("Mystery chooser\n❯ 1. Continue\n2. Cancel"),
   "a highlighted numbered option should identify an active modal")
-assert(not remuda._butler_compaction_is_unknown_dialog(
-  "Switch model?\n❯ 1. Yes, switch to Sonnet\n2. No"),
-  "the known model switch dialog must remain in the switch handler")
 assert(not remuda._butler_compaction_is_unknown_dialog("Earlier the dialog said press 1 to continue"),
   "transcript prose must not be mistaken for an active dialog")
 assert(not remuda._butler_compaction_is_unknown_dialog(
   "1. Fix the modal dialog detection in the last 8 lines"),
   "dialog words in transcript text must not be mistaken for a modal")
 
-local claude_sequence = remuda._butler_compaction_sequence("claude", "opus", "sonnet")
-assert(table.concat(claude_sequence, "|") == "/model sonnet|/compact|/model opus",
-  "Claude sequence must queue low model, compact, then restore prior model")
-local codex_sequence = remuda._butler_compaction_sequence("codex", "gpt-5.6-terra", "sonnet")
+local claude_sequence = remuda._butler_compaction_sequence()
+assert(table.concat(claude_sequence, "|") == "/compact",
+  "Claude sequence must compact on the current model without switching or restoring")
+local codex_sequence = remuda._butler_compaction_sequence()
 assert(table.concat(codex_sequence, "|") == "/compact",
   "Codex sequence must submit compact exactly once without switching models")
 
