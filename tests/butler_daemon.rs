@@ -3452,6 +3452,9 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
             return policy(n, now)
           end
           local leader = remuda._butler_initial_name
+          local trust_dialogs = remuda._butler_agent_startup.claude.modals
+          assert(#trust_dialogs > 0 and trust_dialogs[1].match:find("Do you trust the files in this folder?", 1, true),
+            "Claude launch must recognize the trust dialog by its title label")
           local update_screen = screens["t-codex"][1]
           assert(not remuda._butler_agent_startup.codex.ready(update_screen), "update dialog counted as ready")
           remuda._butler_topic_delegate("t-claude", "task one", nil, "claude", leader)
@@ -3503,6 +3506,8 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
         }
     }
     assert!(!log.contains("t-stuck "), "typed into an unknown dialog: {log}");
+    assert!(std::fs::read_to_string(&trace).unwrap_or_default().contains("Some unknown dialog"),
+        "launch failure did not preserve the unknown dialog label");
     assert!(log.contains(" type Butler message "), "the leader is told about t-stuck: {log}");
     assert_eq!(log.lines().filter(|l| l.starts_with("t-codex-unanswerable key ")).count(), 0, "an unknown update menu was answered: {log}");
     assert_eq!(log.lines().filter(|l| l.starts_with("t-codex-human key ")).count(), 0, "a human-attached pane was changed: {log}");

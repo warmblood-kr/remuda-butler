@@ -12,7 +12,10 @@ use std::time::{Duration, Instant};
 const PATIENCE: Duration = Duration::from_secs(10);
 
 fn scratch(tag: &str) -> PathBuf {
-    let base = std::fs::canonicalize(std::env::temp_dir()).unwrap_or_else(|_| std::env::temp_dir());
+    let configured = std::env::var_os("REMUDA_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let base = std::fs::canonicalize(&configured).unwrap_or(configured);
     let dir = base.join(format!("remuda-m{}-{tag}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     dir
@@ -20,6 +23,9 @@ fn scratch(tag: &str) -> PathBuf {
 
 /// Start a daemon and return once it actually answers, not once it was spawned.
 fn daemon_at(path: &Path) -> impl Drop {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     let serving = path.to_path_buf();
     std::thread::spawn(move || {
         let _ = daemon::serve(&serving);
@@ -377,6 +383,39 @@ fn a_notice_that_fails_to_type_stays_queued() {
         std::thread::sleep(Duration::from_millis(100));
     }
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1)"), "nil");
+}
+
+/// #82: when a submitted notice remains in the composer, press Return once;
+/// if that bounded retry still cannot be verified, release its pending count.
+#[test]
+fn a_failed_notice_return_retry_clears_the_pending_count() {
+    let (path, _daemon) = butler_with_member("notice-return-retry-fails");
+    eval(
+        &path,
+        r#"
+        remuda._butler_notify_policy = function() return true end
+        remuda.capture_styled = nil
+        remuda.capture = function()
+          local pending = remuda._butler_bus.notices.m1
+          return '› ' .. (pending and pending.text or '')
+        end
+        remuda.session = function() return { is_busy = false } end
+        remuda.key = function(_, key)
+          remuda._notice_retry_keys = remuda._notice_retry_keys or {}
+          table.insert(remuda._notice_retry_keys, key)
+        end
+        remuda.type_text = function() end
+        remuda._butler_notify('operator', 'm1', 'retry this notice')
+        "#,
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while eval(&path, "remuda._butler_deliver_notices(); return tostring(remuda._butler_bus.notice_recoveries.m1 and remuda._butler_bus.notice_recoveries.m1.failed)") != "true" {
+        assert!(Instant::now() < deadline, "notice retry did not reach a bounded failure");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(eval(&path, "return table.concat(remuda._notice_retry_keys or {}, ',')"), "RET");
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1 == nil)"), "true",
+        "failed notice recovery left its pending count queued");
 }
 
 /// #64: an idle non-empty composer is redrawn, its draft is preserved,
