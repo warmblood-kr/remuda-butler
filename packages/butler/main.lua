@@ -1,28 +1,5 @@
--- remuda-butler: runs one Claude Code session, optionally bridged to Matrix
--- and replying there via an MCP tool. See docs/design.md.
-
--- TODO M2: remove this Python reply helper with the Matrix relay extraction.
-local REPLY_SRC = [==[
-set -euo pipefail
-
-TOKEN="$(cat "$1")"
-HOMESERVER="$(sed -n '1p' "$2")"
-ROOM_ID="$(sed -n '2p' "$2")"
-TEXT="$3"
-
-TXN_ID="remuda-butler-$(date +%s%N)"
-BODY_JSON="$(python3 -c 'import json,sys; print(json.dumps({"msgtype":"m.text","body":sys.argv[1]}))' "$TEXT")"
-ENC_ROOM="$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$ROOM_ID")"
-
-# The Authorization header carries the bearer token; passing it via -H would
-# put the token in this process's own argv, visible to any other user via
-# `ps`. -K - reads curl's config (here, just the one header) from stdin
-# instead, which never appears in argv.
-printf 'header = "Authorization: Bearer %s"\n' "$TOKEN" | curl -sf -K - -X PUT \
-  "$HOMESERVER/_matrix/client/v3/rooms/$ENC_ROOM/send/m.room.message/$TXN_ID" \
-  -H "Content-Type: application/json" \
-  -d "$BODY_JSON" >/dev/null
-]==]
+-- remuda-butler: runs one Claude Code session, optionally bridged to Matrix.
+-- Matrix commands and the MCP reply tool share the Lua async request vocabulary.
 
 -- Claude calls statusLine commands with a JSON snapshot on stdin.  This
 -- helper is deliberately the sole producer of Butler's telemetry: it emits a
@@ -91,7 +68,6 @@ end
 
 -- Exposed so tests can inspect the daemon-local MCP helper without starting a
 -- real process/session (this harness does not have a real agent CLI).
-remuda._butler_reply_src = REPLY_SRC
 remuda._butler_statusline_src = STATUSLINE_SRC
 remuda._butler_initial_name = initial_butler_name()
 
@@ -385,11 +361,12 @@ if remuda._butler_test_mode == true then
   return
 end
 
--- The 4bbd90f lifecycle host does not yet call a module `stop` method on
--- reload. Stop an existing Matrix child here as well, before new config is
--- resolved; matrix.lua will start exactly one relay after the new config is
--- installed. Newer hosts can also stop it through init.lua's stop callback.
-if remuda._butler_matrix_stop then pcall(remuda._butler_matrix_stop) end
+-- Cancel the existing Matrix relay before resolving new config;
+-- matrix.lua will start exactly one relay after the new config is installed.
+local old_matrix = remuda.butler and remuda.butler.matrix
+local old_relay = old_matrix and old_matrix.relay
+if old_relay and old_relay.stop then pcall(old_relay.stop)
+end
 
 -- Replace handles created imperatively by the previous Butler version. The
 -- lifecycle declaration owns these schedules from this activation onward.
@@ -542,6 +519,7 @@ else
 end
 -- This internal module is the single inbound Matrix entry point. It registers
 -- only the optional relay and remains inert when credentials are absent.
+remuda.exec("butler/matrix_request")
 remuda.exec("butler/matrix")
 
 -- The session needs an `--mcp-config` pointing back at this same daemon, or
@@ -2637,6 +2615,9 @@ command(80, "forward", "  remuda butler forward <message-id> <member> [note...]"
   return remuda._butler_forward(current_agent(caller) or OPERATOR, args[2], args[3],
     #args >= 4 and words_after(args, 4) or nil)
 end)
+command(100, "matrix", remuda.butler.matrix.cli_usage(), function(args, caller)
+  return remuda.butler.matrix.cli(args, current_agent(caller))
+end)
 remuda._butler_command_run = function(verb, args, caller)
   local entry = command_entries[verb]
   if entry then return entry.run(args, caller) end
@@ -3719,10 +3700,16 @@ remuda.tool{
   args = { text = "The reply text to send." },
   needs = { "text" },
   run = function(a)
-    remuda.process{
-      argv = {"bash", "-c", REPLY_SRC, "_", token_path, config_path, a.text},
-      on_exit = "butler-matrix-reply-exit",
-    }
+    local synchronous, invoking = nil, true
+    remuda.butler.matrix.send({ text = a.text }, function(result)
+      if invoking then synchronous = result
+      elseif result and result.error then
+        remuda.emit("butler-matrix-error", "send", result.error)
+        io.stderr:write("butler Matrix send failed: " .. tostring(result.error) .. "\n")
+      end
+    end)
+    invoking = false
+    if synchronous and synchronous.error then error(synchronous.error, 0) end
     return "queued"
   end,
 }
