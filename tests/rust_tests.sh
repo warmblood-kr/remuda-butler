@@ -20,7 +20,34 @@ CORE_URL=${CORE_URL:-https://github.com/warmblood-kr/remuda.git}
 CORE_REF=${CORE_REF:-355e8b2}
 
 scratch=$(mktemp -d /tmp/butler-rust.XXXXXX)
-trap 'rm -rf "$scratch"' EXIT
+scratch=$(cd "$scratch" && pwd -P)
+
+relay_pids_under_scratch() {
+  ps -ww -axo pid=,command= | awk '/MAX_PROCESSED_EVENT_IDS = 5000/ { print $1 }' |
+    while read -r pid; do
+      [[ -n $pid ]] || continue
+      cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)
+      case "$cwd" in
+        "$scratch"|"$scratch"/*) printf '%s\n' "$pid" ;;
+      esac
+    done
+}
+
+stop_scratch_relays() {
+  local pid deadline
+  for pid in $(relay_pids_under_scratch); do kill -TERM "$pid" 2>/dev/null || true; done
+  deadline=$((SECONDS + 2))
+  while [[ $SECONDS -lt $deadline ]] && [[ -n $(relay_pids_under_scratch) ]]; do sleep 0.05; done
+  for pid in $(relay_pids_under_scratch); do kill -KILL "$pid" 2>/dev/null || true; done
+  deadline=$((SECONDS + 2))
+  while [[ $SECONDS -lt $deadline ]] && [[ -n $(relay_pids_under_scratch) ]]; do sleep 0.05; done
+}
+
+cleanup() {
+  stop_scratch_relays
+  rm -rf "$scratch"
+}
+trap cleanup EXIT
 
 source_home=${HOME:-/tmp}
 export CARGO_HOME=${CARGO_HOME:-$source_home/.cargo}
@@ -53,3 +80,9 @@ cd "$CORE_DIR"
 cargo test -p remuda-native --test butler_mcp
 # a_fresh_daemon_* stay in core's daemon.rs; everything else matching is Butler's.
 cargo test -p remuda-native --test butler_daemon -- butler matrix_reply --skip a_fresh_daemon
+
+remaining_relays=$(relay_pids_under_scratch)
+if [[ -n $remaining_relays ]]; then
+  echo "Matrix relay processes remain under test scratch $scratch: $remaining_relays" >&2
+  exit 1
+fi
