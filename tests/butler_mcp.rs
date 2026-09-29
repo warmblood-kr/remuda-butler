@@ -390,6 +390,30 @@ fn a_notice_that_fails_to_type_stays_queued() {
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1)"), "nil");
 }
 
+#[test]
+fn a_busy_notice_input_retries_on_the_next_tick() {
+    let (path, _daemon) = butler_with_member("notice-input-busy-retry");
+    eval(
+        &path,
+        r#"
+        remuda._butler_notify_policy = function() return true end
+        remuda._notice_busy_calls = 0
+        remuda.type_text = function(_, text)
+          remuda._notice_busy_calls = remuda._notice_busy_calls + 1
+          if remuda._notice_busy_calls == 1 then return nil, 'Busy' end
+          remuda._notice_typed = text
+          return true
+        end
+        remuda._butler_send('operator', 'm1', 'retry me')
+        "#,
+    );
+    assert_eq!(eval(&path, "return tostring(remuda._notice_busy_calls)"), "1");
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1.count)"), "1");
+    eval(&path, "remuda._butler_deliver_notices()");
+    assert_eq!(eval(&path, "return tostring(remuda._notice_busy_calls)"), "2");
+    assert_ne!(eval(&path, "return tostring(remuda._notice_typed)"), "nil");
+}
+
 /// #82: notice submit verification accepts Claude's soft-wrapped composer in
 /// a narrow 27-column pane, then retries Return once if the draft remains.
 #[test]
@@ -1144,6 +1168,132 @@ fn notify_policy_uses_human_idle_and_dim_spans_when_the_core_has_them() {
         got,
         "typing=false ghost=true ghost_words=true typed=false never=true off_prompt=false detached_typed=false detached_empty=true knob=false"
     );
+}
+
+#[test]
+fn topic_names_cannot_escape_the_project_home() {
+    let dir = scratch("topic-name-escape");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+    let projects = dir.join("projects");
+    let got = eval(
+        &path,
+        &format!(
+            "remuda.butler.project_home({projects:?}); \
+             remuda._butler_agent_builders.fake = function() return {{'sleep','20'}} end; \
+             local rejected = {{}} \
+             for _, name in ipairs({{'../escape', 'back\\\\slash', '.hidden'}}) do \
+               local ok = pcall(remuda._butler_topic_new, name, nil, 'fake'); \
+               rejected[#rejected + 1] = tostring(not ok) \
+             end \
+             return table.concat(rejected, ',')"
+        ),
+    );
+    assert_eq!(got, "true,true,true", "unsafe topic name was accepted: {got}");
+    assert!(
+        !dir.join("escape").exists(),
+        "traversal topic created a directory outside project_home"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn trust_dialogs_on_external_or_reused_directories_wait_for_a_human() {
+    let dir = scratch("untrusted-launch-cwd");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    eval(&path, "remuda._butler_argv = {'sh', '-c', 'sleep 30'}; remuda.exec('butler')");
+    let projects = dir.join("projects");
+    let reused = projects.join("reused");
+    let external = dir.join("external");
+    std::fs::create_dir_all(&reused).expect("pre-existing topic directory");
+    std::fs::create_dir_all(&external).expect("external cwd");
+    eval(
+        &path,
+        &format!(
+            r#"remuda.butler.project_home({projects:?})
+            remuda._butler_readiness_timeout = 30
+            remuda._butler_test_force_launch_probe = {{ outside = true, outside_codex = true, reused = true, three = true, templated = true }}
+            remuda._butler_agent_builders.claude = function() return {{'sh', '-c', 'sleep 20'}} end
+            remuda._butler_agent_builders.codex = function() return {{'sh', '-c', 'sleep 20'}} end
+            local selected_yes = "Accessing workspace:\n❯ Yes, I trust this folder\n  No, exit"
+            local safe_modal = "Accessing workspace:\n❯ No, exit\n  Yes, I trust this folder"
+            local three_options = safe_modal .. "\n  Inspect first"
+            local codex_modal = "Trust this folder?\n› 1. Trust and continue\n  2. Don't trust"
+            remuda.capture = function(name)
+              if name == 'outside' then return selected_yes end
+              if name == 'outside_codex' then return codex_modal end
+              if name == 'reused' then return safe_modal end
+              return three_options
+            end
+            remuda._trust_test_keys, remuda._trust_test_reports = {{}}, {{}}
+            remuda.key = function(name, key) table.insert(remuda._trust_test_keys, name .. ':' .. key) end
+            remuda._butler_send = function(_, _, text) table.insert(remuda._trust_test_reports, text); return 'captured' end
+            local cap = remuda._butler_bus.agents.butler.token
+            remuda._call('butler_launch', {{ kind = 'claude', name = 'outside', cwd = {external:?} }}, {{ capability = cap }})
+            remuda._call('butler_launch', {{ kind = 'codex', name = 'outside_codex', cwd = {external:?} }}, {{ capability = cap }})
+            remuda._butler_topic_new('reused', nil, 'claude')
+            remuda._butler_topic_new('three', nil, 'claude')
+            remuda.butler.template('clone', function(topic) topic.write('repo.txt', 'third-party source') end)
+            remuda._butler_topic_new('templated', 'clone', 'claude')"#
+        ),
+    );
+    std::thread::sleep(Duration::from_secs(2));
+    let keys = eval(&path, "return table.concat(remuda._trust_test_keys, '\\n')");
+    assert!(keys.is_empty(), "a human trust dialog was answered automatically: {keys}");
+    let reports = eval(&path, "return table.concat(remuda._trust_test_reports, '\\n')");
+    assert!(reports.contains("waiting for a human: trust dialog"), "leader was not asked for human trust: {reports}");
+    assert!(reports.contains(&external.to_string_lossy().to_string()), "external cwd missing from trust report: {reports}");
+    assert!(reports.contains(&reused.to_string_lossy().to_string()), "reused topic path missing from trust report: {reports}");
+    assert!(reports.contains(&projects.join("three").to_string_lossy().to_string()), "three-option topic path missing from trust report: {reports}");
+    assert!(reports.contains(&projects.join("templated").to_string_lossy().to_string()), "template topic path missing from trust report: {reports}");
+}
+
+#[test]
+fn unknown_busy_state_advances_notice_recovery_timeout() {
+    let (path, _daemon) = butler_with_member("unknown-busy-recovery");
+    eval(
+        &path,
+        r#"
+        local row = { name = 'm1', alive = true, attached = false }
+        remuda.ls = function() return { row } end
+        remuda.session = function() error('output idle unavailable') end
+        remuda.capture = function() return '› Butler message pending' end
+        remuda._butler_bus.notices.m1 = { count = 1, text = 'Butler message pending' }
+        remuda._butler_bus.notice_recoveries.m1 = {
+          phase = 'verify_notice', checks = 0, notice = 'Butler message pending', count = 1,
+        }
+        remuda._butler_deliver_notices()
+        "#,
+    );
+    let checks = eval(&path, "return tostring(remuda._butler_bus.notice_recoveries.m1.checks)");
+    assert_eq!(checks, "1", "unknown busy state stalled notice verification");
+}
+
+#[test]
+fn reading_mail_mid_notice_recovery_reports_the_cleared_draft() {
+    let (path, _daemon) = butler_with_member("notice-read-mid-recovery");
+    eval(
+        &path,
+        r#"
+        remuda._butler_send('operator', 'm1', 'notice whose recovery is active')
+        remuda._butler_bus.notice_recoveries.m1 = {
+          phase = 'verify_notice', checks = 1, notice = 'notice', count = 1,
+          draft = 'important unsent draft',
+        }
+        local send = remuda._butler_send
+        remuda._notice_read_recovery_report = nil
+        remuda._butler_send = function(from, to, text)
+          if to == 'm1' then return send(from, to, text) end
+          remuda._notice_read_recovery_report = text
+          return 'captured report'
+        end
+        remuda._butler_inbox('m1')
+        "#,
+    );
+    let report = eval(&path, "return tostring(remuda._notice_read_recovery_report)");
+    assert!(report.contains("important unsent draft"), "read cleared recovery without reporting its draft: {report}");
 }
 
 /// #23a: an ended member's unread mail stays readable by its alias, not only

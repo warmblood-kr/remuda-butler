@@ -3328,7 +3328,9 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
           remuda._butler_session_trace_path = {trace:?}
           remuda._butler_task_poke_attempts = 6
           remuda._butler_test_force_launch_probe = {{
+            ["t-claude"] = true,
             ["t-claude-launch"] = true,
+            ["t-claude-human-trust"] = true,
             ["t-claude-launch-unknown"] = true,
             ["t-claude-launch-transient"] = true,
           }}
@@ -3338,12 +3340,19 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
           local screens = {{
             ["t-claude"] = {{
               rule .. "\n Accessing workspace:\n\n ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm · Esc to cancel",
+              rule .. "\n Accessing workspace:\n\n ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm · Esc to cancel",
               rule .. "\n❯ \n" .. rule,
             }},
             ["t-claude-launch"] = {{
               "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n"
                 .. " Accessing workspace:\n\n /private/tmp/t3qa/untrusted-13690\n\n"
                 .. " Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source",
+              "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n"
+                .. " Accessing workspace:\n\n /private/tmp/t3qa/untrusted-13690\n\n"
+                .. " Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source\n"
+                .. " project, or work from your team). If not, take a moment to review what's in this folder first.\n\n"
+                .. " Claude Code'll be able to read, edit, and execute files here.\n\n Security guide\n\n"
+                .. " ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm · Esc to cancel",
               "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n"
                 .. " Accessing workspace:\n\n /private/tmp/t3qa/untrusted-13690\n\n"
                 .. " Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source\n"
