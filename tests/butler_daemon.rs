@@ -1342,7 +1342,7 @@ fn butler_lifecycle_reload_replaces_hooks_and_schedules_and_rolls_back() {
     "#;
     let initial = eval(&path, counts);
     assert!(
-        initial == "1|7|1|1|1|15" || initial == "1|7|1|1|1|-1",
+        initial == "1|7|1|1|1|16" || initial == "1|7|1|1|1|-1",
         "unexpected Butler lifecycle registrations: {initial}"
     );
 
@@ -5402,6 +5402,7 @@ done
       local original_session = remuda.session
       remuda._fake_attached = {{}}
       remuda._fake_busy_after_key = {{}}
+      remuda._fake_busy_on_ctx_drop = {{}}
       remuda._fake_busy_until = {{}}
       remuda._fake_attach_on_ctx_drop = {{}}
       remuda._fake_no_family = {{}}
@@ -5434,6 +5435,10 @@ done
         if remuda._fake_attach_on_ctx_drop[agent.session_name] and used == "200000" then
           remuda._fake_attached[agent.session_name] = true
           remuda._fake_attach_on_ctx_drop[agent.session_name] = nil
+        end
+        if remuda._fake_busy_on_ctx_drop[agent.session_name] and used == "200000" then
+          remuda._fake_busy_until[agent.session_name] = os.time() + 2
+          remuda._fake_busy_on_ctx_drop[agent.session_name] = nil
         end
         return {{context_used=used,
           context_window=(not sonnet and used == "200000"
@@ -5472,6 +5477,11 @@ done
             "CMD:/model sonnet\nKEY:1\nCMD:/compact\nCMD:/model opus\nKEY:1\n",
         ),
         (
+            "fake-busy-after-compact",
+            "happy",
+            "CMD:/model sonnet\nKEY:1\nCMD:/compact\nCMD:/model opus\nKEY:1\n",
+        ),
+        (
             "fake-unknown",
             "unknown",
             "CMD:/model sonnet\nKEY:\x1b\nCMD:/model opus\nKEY:1\n",
@@ -5500,7 +5510,7 @@ done
         (
             "fake-no-family",
             "happy",
-            "CMD:/model sonnet\nKEY:1\nCMD:/compact\n",
+            "",
         ),
         (
             "fake-window-mismatch",
@@ -5525,6 +5535,9 @@ done
                 &path,
                 &format!("remuda._fake_busy_after_key[{name:?}] = true"),
             );
+        }
+        if name == "fake-busy-after-compact" {
+            eval(&path, &format!("remuda._fake_busy_on_ctx_drop[{name:?}] = true"));
         }
         if name == "fake-attach-mid" {
             eval(&path, &format!("remuda._fake_attach_on_ctx_drop[{name:?}] = true"));
@@ -5559,6 +5572,17 @@ done
                     eval(&path, &format!("return remuda._butler_compaction_members_state[{name:?}].pending_restore_model")),
                     "opus",
                     "mid-compaction attach must preserve the pending family"
+                );
+                assert_eq!(
+                    eval(&path, "local s = remuda._butler_state or remuda._butler_compaction_state; return s.compaction_fleet_active"),
+                    name,
+                    "fleet lock must stay with the member while restore is pending"
+                );
+                eval(&path, "remuda._butler_bus.agents['fake-member-b'] = {id='fake-member-b', kind='claude', session_name='fake-member-b'}");
+                assert_eq!(
+                    eval(&path, "return remuda._butler_compaction_execute('fake-member-b')"),
+                    "fleet_busy",
+                    "another member must not start compaction while restore is pending"
                 );
                 eval(&path, &format!("remuda._butler_compaction_tick({name:?}, false)"));
                 std::thread::sleep(Duration::from_millis(250));
@@ -5627,15 +5651,20 @@ done
                 "true",
                 "confirmed restore should clear pending state"
             );
+            assert_eq!(
+                eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].cooldown_ticks >= 4)")),
+                "true",
+                "confirmed pending restore should re-arm the success cooldown"
+            );
         }
         if name == "fake-no-family" {
             let reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
-            let message = "compaction left Experimental-Model on Sonnet; restore needs a known model family";
+            let message = "compaction skipped: model family is unknown";
             assert_eq!(reports.matches(message).count(), 1, "expected one missing-family notice: {reports:?}");
             assert_eq!(
-                eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].pending_restore_model_unavailable)")),
-                "true",
-                "unknown-family restore state must remain visible"
+                eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].pending_restore_model_unavailable == true)")),
+                "false",
+                "unknown-family compaction should be skipped before switching models"
             );
         }
         if name == "fake-window-mismatch" {

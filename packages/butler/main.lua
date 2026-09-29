@@ -3067,17 +3067,18 @@ function remuda._butler_compaction_execute(session_name)
   local state = owner_state.compaction_members[state_key] or {}
   owner_state.compaction_members[state_key] = state
   if state.compaction_in_progress then return "compaction_in_progress" end
-  if owner_state.compaction_fleet_active then return "fleet_busy" end
+  if owner_state.compaction_fleet_active and owner_state.compaction_fleet_active ~= state_key then return "fleet_busy" end
   local level = remuda.butler.ctx_level(session_name)
   local ctx = level.used or "?"
   local detail = "ctx=" .. tostring(ctx)
   local config = compaction_config()
   state.compaction_in_progress = true
   owner_state.compaction_fleet_active = state_key
-    local function report(reason, suppress_notice)
+    local function report(reason, suppress_notice, keep_fleet)
       state.compaction_in_progress = false
-      if owner_state.compaction_fleet_active == state_key then owner_state.compaction_fleet_active = nil end
+      if not keep_fleet and owner_state.compaction_fleet_active == state_key then owner_state.compaction_fleet_active = nil end
       state.cooldown_ticks = config.failure_cooldown_ticks
+      if keep_fleet then state.cooldown_ticks = 0 end
       _butler_trace("error", detail .. " reason=" .. tostring(reason))
       if not suppress_notice then
         pcall(remuda._butler_send, session_name, agent.parent or "butler", "Compaction failed: " .. tostring(reason))
@@ -3093,6 +3094,18 @@ function remuda._butler_compaction_execute(session_name)
     local prior_command = prior
     local prior_window = tonumber(state.pending_restore_context_window or initial_telemetry.context_window)
     local low = remuda._butler_compaction_model or "sonnet"
+    if agent.kind == "claude" and not restore_only and not prior then
+      state.compaction_in_progress = false
+      if owner_state.compaction_fleet_active == state_key then owner_state.compaction_fleet_active = nil end
+      state.cooldown_ticks = config.failure_cooldown_ticks
+      if not state.pending_restore_notice_sent then
+        state.pending_restore_notice_sent = true
+        pcall(remuda._butler_send, session_name, agent.parent or "butler",
+          "compaction skipped: model family is unknown; cannot safely restore after switching to Sonnet")
+      end
+      _butler_trace("skipped", detail .. " reason=unknown_model_family")
+      return "skipped_unknown_model_family"
+    end
     _butler_trace("sent", detail)
     local dialog_timeout = math.max(1, config.dialog_timeout)
     local failure_reason, compact_sent, restore_attempt_count, verification_failed
@@ -3234,6 +3247,7 @@ function remuda._butler_compaction_execute(session_name)
         state.pending_restore_blocked = nil
         state.restore_retry_in_progress = nil
         state.compaction_in_progress = false
+        state.cooldown_ticks = config.cooldown_ticks
         if owner_state.compaction_fleet_active == state_key then owner_state.compaction_fleet_active = nil end
         _butler_trace("restored", detail .. " retry=confirmed")
       else
@@ -3270,6 +3284,7 @@ function remuda._butler_compaction_execute(session_name)
             state.pending_restore_mismatch_notice_sent = nil
             state.pending_restore_blocked = nil
             state.restore_retry_in_progress = nil
+            state.cooldown_ticks = compaction_config().cooldown_ticks
             if owner_state.compaction_fleet_active == state_key then owner_state.compaction_fleet_active = nil end
             _butler_trace("verified", detail)
           end
@@ -3370,33 +3385,40 @@ function remuda._butler_compaction_execute(session_name)
           finish_failed_restore("prior model restore attempts exhausted while model remains " .. current_model)
           return
         end
-        local idle, idle_reason = remuda.butler.is_idle(session_name)
-        if not idle then
-          if idle_reason == "human attached" or idle_reason == "busy" then
+        wait_until_output_idle(function(idle_error)
+          if idle_error then
             state.pending_restore_model = prior
             state.restore_retry_in_progress = true
             state.cooldown_ticks = 0
+            report("restore deferred until the member is unattached and idle", true, true)
+            return
           end
-          report("restore aborted: " .. tostring(idle_reason), true)
-          state.cooldown_ticks = 0
-          return
-        end
-        restore_attempt_count = (restore_attempt_count or 0) + 1
-        local safe = remuda._butler_compaction_action_guard(session_name)
-        if safe then
-          if safe == "human attached" then
-            state.pending_restore_model = prior
-            state.restore_retry_in_progress = true
-            state.cooldown_ticks = 0
+          local idle, idle_reason = remuda.butler.is_idle(session_name)
+          if not idle then
+            if idle_reason == "human attached" or idle_reason == "busy" then
+              state.pending_restore_model = prior
+              state.restore_retry_in_progress = true
+              state.cooldown_ticks = 0
+              report("restore deferred until the member is unattached and idle", true, true)
+            else report("restore aborted: " .. tostring(idle_reason), true, true) end
+            return
           end
-          report("restore aborted: " .. safe, true)
-          state.cooldown_ticks = 0
-          return
-        end
-        state.pending_restore_model = prior
-        local sent, err = pcall(remuda.type_text, session_name, "/model " .. prior_command, config.input_settle)
-        if not sent then finish_failed_restore("could not request prior model: " .. tostring(err)); return end
-        watch_restore(is_unknown_dialog(current_screen) and current_screen or nil)
+          restore_attempt_count = (restore_attempt_count or 0) + 1
+          local safe = remuda._butler_compaction_action_guard(session_name)
+          if safe then
+            if safe == "human attached" then
+              state.pending_restore_model = prior
+              state.restore_retry_in_progress = true
+              state.cooldown_ticks = 0
+            end
+            report("restore aborted: " .. safe, true, state.pending_restore_model ~= nil)
+            return
+          end
+          state.pending_restore_model = prior
+          local sent, err = pcall(remuda.type_text, session_name, "/model " .. prior_command, config.input_settle)
+          if not sent then finish_failed_restore("could not request prior model: " .. tostring(err)); return end
+          watch_restore(is_unknown_dialog(current_screen) and current_screen or nil)
+        end)
         return
       end
       finish_failed_restore("model status is neither prior nor low; restore was not sent")
@@ -3484,7 +3506,7 @@ function remuda._butler_compaction_execute(session_name)
       else
         local idle = remuda.butler.is_idle(session_name)
         if not idle then
-          report("restore deferred until the member is unattached and idle", true)
+          report("restore deferred until the member is unattached and idle", true, true)
           state.cooldown_ticks = 0
         else
           state.restore_retry_in_progress = true
