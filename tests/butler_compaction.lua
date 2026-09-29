@@ -24,6 +24,11 @@ assert(type(remuda.butler) == "table", "composable compaction API must be export
 local level = remuda.butler.ctx_level("butler")
 assert(level.level == "watch" and level.used == 500000,
   "ctx_level must classify threshold context and retain usage")
+remuda._butler_bus.agents.butler.native_autocompact = true
+local native_skip, native_reason = remuda.butler.compaction_policy("butler", {})
+assert(not native_skip and native_reason == "skipped_native_autocompact",
+  "scheduled compaction must skip a session using native Claude autocompact")
+remuda._butler_bus.agents.butler.native_autocompact = nil
 assert(type(remuda.butler.is_idle) == "function" and type(remuda.butler.compact) == "function"
   and type(remuda.butler.compaction_policy) == "function",
   "compaction must expose idle, per-agent action and composite policy units")
