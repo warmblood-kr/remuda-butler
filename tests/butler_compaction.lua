@@ -24,6 +24,12 @@ assert(type(remuda.butler) == "table", "composable compaction API must be export
 local level = remuda.butler.ctx_level("butler")
 assert(level.level == "watch" and level.used == 500000,
   "ctx_level must classify threshold context and retain usage")
+remuda._butler_prompt_is_empty = function() return "EMPTY" end
+remuda._butler_bus.agents.butler.native_autocompact = true
+local native_skip, native_reason = remuda.butler.compaction_policy("butler", {})
+assert(not native_skip and native_reason == "skipped_idle",
+  "native autocompact must remain a safety net while the scheduler stays primary")
+remuda._butler_bus.agents.butler.native_autocompact = nil
 assert(type(remuda.butler.is_idle) == "function" and type(remuda.butler.compact) == "function"
   and type(remuda.butler.compaction_policy) == "function",
   "compaction must expose idle, per-agent action and composite policy units")
@@ -198,8 +204,28 @@ assert(not remuda._butler_compaction_is_unknown_dialog(
   "dialog words in transcript text must not be mistaken for a modal")
 
 local claude_sequence = remuda._butler_compaction_sequence()
-assert(table.concat(claude_sequence, "|") == "/compact",
-  "Claude sequence must compact on the current model without switching or restoring")
+assert(remuda._butler_compaction_valid_model("opus"), "opus is an allowed model")
+assert(remuda._butler_compaction_valid_model("claude-opus-4-7[1m]"), "Claude model ids with the 1m suffix are allowed")
+assert(not remuda._butler_compaction_valid_model("opus; /compact"), "model strings must not permit command injection")
+assert(not remuda._butler_compaction_valid_model("claude-opus-4-7[1m]x"), "only the optional 1m suffix is accepted")
+assert(remuda._butler_compaction_statusline_model_matches("Opus", "claude-opus-4-7"),
+  "statusline matching should find the model family anywhere in the expected id")
+assert(table.concat(remuda._butler_compaction_sequence("opus"), "|")
+  == "/model sonnet|/compact|/model opus",
+  "Claude compaction should use sonnet, compact, then restore the prior model")
+local settings_after_model = { model = "sonnet", theme = "dark" }
+local matches_model, actual_model, verify_status = remuda._butler_compaction_verify_settings_model(settings_after_model, "opus")
+assert(matches_model == false and actual_model == "sonnet" and verify_status == nil
+  and settings_after_model.model == "sonnet" and settings_after_model.theme == "dark",
+  "settings.json verification reports a mismatch without changing the decoded settings")
+local missing_model_match, missing_model_actual, missing_model_status =
+  remuda._butler_compaction_verify_settings_model({ theme = "dark" }, "opus")
+assert(missing_model_match == nil and missing_model_actual == nil and missing_model_status == "model_missing",
+  "a missing settings.json model key is unverified rather than a mismatch")
+local unavailable_match, unavailable_actual, unavailable_status =
+  remuda._butler_compaction_verify_settings_model(nil, "opus")
+assert(unavailable_match == nil and unavailable_actual == nil and unavailable_status == "unavailable",
+  "missing or invalid settings.json is unverified rather than a mismatch")
 local codex_sequence = remuda._butler_compaction_sequence()
 assert(table.concat(codex_sequence, "|") == "/compact",
   "Codex sequence must submit compact exactly once without switching models")
@@ -233,7 +259,10 @@ end
 remuda.cancel = function() end
 remuda.exec = function() end
 remuda.emit = function() end
-remuda._butler_bus = { agents = { codex_member = { kind = "codex" } }, pending_tasks = {}, notices = {} }
+remuda._butler_bus = { agents = {
+  codex_member = { kind = "codex" },
+  claude_member = { kind = "claude", native_autocompact = true },
+}, pending_tasks = {}, notices = {} }
 remuda._butler_telemetry_for = function()
   return { context_used = "600000" }
 end
@@ -242,9 +271,11 @@ remuda.send = function(name, command)
   scheduled_commands[#scheduled_commands + 1] = { name = name, command = command }
 end
 remuda._butler_compaction_tick = function()
-  local member_state = {}
-  local should_send = remuda.butler.compaction_policy("codex_member", member_state)
-  if should_send then remuda.send("codex_member", "/compact") end
+  for _, name in ipairs({ "claude_member", "codex_member" }) do
+    local member_state = {}
+    local should_send = remuda.butler.compaction_policy(name, member_state)
+    if should_send then remuda.send(name, "/compact") end
+  end
 end
 local prior_mt = getmetatable(_G)
 setmetatable(_G, { __index = { remuda = remuda } })
@@ -258,9 +289,11 @@ for _, spec in ipairs(lifecycle.schedules) do
 end
 assert(compaction_schedule, "init.lua must declare the compaction schedule")
 compaction_schedule.run()
-assert(#scheduled_commands == 1 and scheduled_commands[1].name == "codex_member"
-  and scheduled_commands[1].command == "/compact",
-  "one enabled lifecycle tick must compact an idle Codex member at warn level")
+assert(#scheduled_commands == 2 and scheduled_commands[1].name == "claude_member"
+  and scheduled_commands[1].command == "/compact"
+  and scheduled_commands[2].name == "codex_member"
+  and scheduled_commands[2].command == "/compact",
+  "one enabled lifecycle tick must keep scheduled compaction primary for Claude and Codex")
 remuda._butler_bus, remuda._butler_telemetry_for = saved_bus, saved_telemetry
 remuda.schedule, remuda.cancel, remuda.exec, remuda.emit =
   saved_schedule, saved_cancel, saved_exec, saved_emit
