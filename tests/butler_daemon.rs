@@ -4983,7 +4983,11 @@ fn butler_session_exited_hook_relaunches_via_the_shared_launch_function() {
     );
     assert!(
         init_lua.contains("event = \"session_exited\", id = \"identity\"")
+            && init_lua.contains("host._butler_session_exited(name, info)")
             && main_lua.contains("function remuda._butler_session_exited(name, info)")
+            && main_lua.contains("type(info) == \"table\" and info.instance_id or nil")
+            && main_lua.contains("stale_session_exit(name, instance_id)")
+            && main_lua.contains("session.instance_id ~= instance_id")
             && main_lua[launch_fn_idx..].contains("remuda._butler_reconcile()"),
         "the declared session-exit hook must use the shared reconciler"
     );
@@ -4991,6 +4995,54 @@ fn butler_session_exited_hook_relaunches_via_the_shared_launch_function() {
         init_lua.contains("name = \"butler-reconcile\"")
             && init_lua.contains("host._butler_reconcile then host._butler_reconcile()"),
         "butler needs a periodic reconciler as well as an exit event hook"
+    );
+}
+
+#[test]
+fn butler_session_exited_ignores_stale_instance_and_handles_current_instance() {
+    let dir = scratch_dir("butler-session-exit-instance-id");
+    let (_daemon, path) = butler_cli_test_daemon(&dir);
+    let result = eval(
+        &path,
+        r#"
+          local name = "reused-session"
+          local bus = remuda._butler_bus
+          local original_ls = remuda.ls
+          remuda.ls = function()
+            return {{ name = name, alive = true, instance_id = "new-instance" }}
+          end
+          bus.notices[name] = "pending notice"
+          bus.notice_screens[name] = "notice screen"
+          bus.pending_tasks[name] = "pending task"
+
+          remuda.emit("session_exited", name,
+            { reason = "exited", instance_id = "old-instance" })
+          local stale_ignored = bus.notices[name] == "pending notice"
+            and bus.notice_screens[name] == "notice screen"
+            and bus.pending_tasks[name] == "pending task"
+
+          remuda.emit("session_exited", name,
+            { reason = "closed", instance_id = "new-instance" })
+          local current_handled = bus.notices[name] == nil
+            and bus.notice_screens[name] == nil
+            and bus.pending_tasks[name] == nil
+
+          bus.notices[name] = "legacy notice"
+          bus.notice_screens[name] = "legacy screen"
+          bus.pending_tasks[name] = "legacy task"
+          remuda.emit("session_exited", name, { reason = "closed" })
+          local missing_id_falls_back = bus.notices[name] == nil
+            and bus.notice_screens[name] == nil
+            and bus.pending_tasks[name] == nil
+          remuda.ls = original_ls
+          return tostring(stale_ignored) .. ":" .. tostring(current_handled)
+            .. ":" .. tostring(missing_id_falls_back)
+        "#,
+    );
+    assert_eq!(
+        result,
+        "true:true:true",
+        "stale exits are ignored; current and missing-id exits are handled"
     );
 }
 
