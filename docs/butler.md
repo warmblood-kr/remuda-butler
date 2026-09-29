@@ -35,6 +35,7 @@ remuda butler matrix [--json] [--room ROOM] upload PATH
 remuda butler matrix [--json] [--room ROOM] redact EVENT_ID [--reason TEXT]
 remuda butler matrix [--json] join ROOM
 remuda butler matrix [--json] leave ROOM
+remuda butler matrix [--json] quarantine [--id EVENT_ID]
 ```
 
 `event` and `get` are aliases for the same read. `rooms` is read-only. The
@@ -45,6 +46,12 @@ the allowlist. Change the config explicitly to use a different room. The
 `join` and `leave` change room membership and are operator-only. Until core
 #218 enforces caller identity, this is best-effort policy: another local
 process running as the same user may still invoke those verbs.
+
+`quarantine` lists rejected inbound Matrix message events; add `--id EVENT_ID`
+to inspect one. It is operator-only under the same caller policy. The relay
+stores at most 200 records, with a body preview capped at 1 KiB and a 30-day
+expiry. Quarantined events are never delivered through Butler mail. The relay
+state file containing these records is mode 600 on Unix hosts.
 
 The token is stored in a separate token file. The newline-delimited config
 file contains:
@@ -80,7 +87,8 @@ Matrix sends and replies are split at UTF-8 boundaries into chunks of at most
 1 MiB; media downloads may use the full 20 MiB limit.
 
 The relay resumes from its saved sync cursor and deduplicates by Matrix event
-ID. It records cursor, processed IDs, and pending deliveries in the
+ID. It records cursor, processed IDs, pending deliveries, quarantine records,
+mail-to-Matrix reply routes, and pending/sent replies in the
 `<config>.since` state file. After Butler mail accepts an event, its ID is
 appended to `<config>.acks`; the relay folds acknowledgements into the state
 file and removes completed pending entries. Together with mail's event-ID
@@ -88,6 +96,12 @@ deduplication, this provides exactly-once delivery across relay restarts. If
 the state file is unreadable or has invalid field types, the relay starts from
 a fresh sync baseline; it does not replay room history, and pending deliveries
 in the damaged state cannot be recovered.
+
+`remuda butler reply MESSAGE_ID TEXT` can reply to a Matrix-originated Butler
+mail. Butler records the source mail's Matrix room, event, and thread relation,
+then queues the reply durably with a stable Matrix transaction ID. Transient
+failures retry with backoff; the returned Matrix event ID is saved with the
+reply correlation so duplicate dispatches do not send it twice.
 
 Butler topics use stable session names and are delivered through the Butler
 message queue. The extraction boundary, runtime dependencies, and migration

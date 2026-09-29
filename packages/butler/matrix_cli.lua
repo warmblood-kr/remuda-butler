@@ -13,10 +13,11 @@ local USAGE = [[  remuda butler matrix [--json] status
   remuda butler matrix [--json] [--room ROOM] upload PATH
   remuda butler matrix [--json] [--room ROOM] redact EVENT_ID [--reason TEXT]
   remuda butler matrix [--json] join ROOM (operator)
-  remuda butler matrix [--json] leave ROOM (operator)]]
+  remuda butler matrix [--json] leave ROOM (operator)
+  remuda butler matrix [--json] quarantine [--id EVENT_ID] (operator)]]
 
 local VERBS = {
-  status = true, rooms = true, history = true, event = true, get = true,
+  status = true, rooms = true, history = true, event = true, get = true, quarantine = true,
   thread = true, download = true, send = true, reply = true, react = true,
   upload = true, redact = true, join = true, leave = true,
 }
@@ -35,6 +36,10 @@ local function parse(args)
     if value == "--room" then
       if not args[at + 1] then error("--room requires a room ID", 0) end
       options.room = args[at + 1]; return 2
+    end
+    if value == "--id" then
+      if not args[at + 1] then error("--id requires a Matrix event ID", 0) end
+      options.id = args[at + 1]; return 2
     end
     return nil
   end
@@ -60,7 +65,7 @@ local function parse(args)
     if not positional and value == "--" then
       positional = true
       at = at + 1
-    elseif not positional and (value == "--json" or value == "--room") then
+    elseif not positional and (value == "--json" or value == "--room" or value == "--id") then
       local width = option(value)
       at = at + width
     elseif not positional and verb == "history" and value == "-n" then
@@ -89,6 +94,7 @@ local function parse(args)
   if options.n and method ~= "history" then return nil end
   if options.output and method ~= "download" then return nil end
   if options.reason and method ~= "redact" then return nil end
+  if options.id and method ~= "quarantine" then return nil end
   if method == "send" then
     options.text = join_words(values, 1)
     if #values == 0 then return nil end
@@ -115,7 +121,7 @@ local function parse(args)
   elseif method == "download" then
     if #values ~= 1 then return nil end
     options.mxc = values[1]
-  elseif method == "status" or method == "rooms" then
+  elseif method == "quarantine" or method == "status" or method == "rooms" then
     if #values ~= 0 then return nil end
   end
   return method, options
@@ -148,6 +154,19 @@ local function render_human(verb, options, result)
     return table.concat(lines, "\n") .. "\n"
   elseif verb == "event" then
     return event_line(data) .. "\n"
+  elseif verb == "quarantine" then
+    if data.id then
+      return table.concat({ "Event: " .. tostring(data.event_id or data.id),
+        "Reason: " .. tostring(data.reason), "Sender: " .. tostring(data.sender),
+        "Room: " .. tostring(data.room_id), "Time: " .. tostring(data.created_at),
+        "Preview: " .. tostring(data.preview or "") }, "\n") .. "\n"
+    end
+    local lines = {}
+    for _, item in ipairs(data) do
+      lines[#lines + 1] = table.concat({ tostring(item.event_id ~= "" and item.event_id or item.id),
+        tostring(item.reason), tostring(item.sender) }, "\t")
+    end
+    return #lines == 0 and "No quarantined Matrix events\n" or table.concat(lines, "\n") .. "\n"
   elseif verb == "download" then
     return string.format("Downloaded %d bytes to %s\n", result.bytes or 0, result.path or "")
   elseif verb == "send" or verb == "reply" then

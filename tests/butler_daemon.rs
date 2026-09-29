@@ -2559,6 +2559,7 @@ fn matrix_relay_quarantines_rejected_events_for_operator_inspection() {
         lua_raw_string(&token_path.to_string_lossy()), lua_raw_string(&config_path.to_string_lossy())));
     let result = eval(&path, &format!(r#"
       local matrix = remuda.butler.matrix
+      local room = {room}
       local relay = matrix.relay.new({{config_path={config}, matrix=matrix, deliver=function() return true end}})
       relay._response({{next_batch="s0"}}, "/_matrix/client/v3/sync")
       relay._response(assert(matrix.decode_json({response})), "/_matrix/client/v3/sync")
@@ -2566,16 +2567,59 @@ fn matrix_relay_quarantines_rejected_events_for_operator_inspection() {
       if #rows ~= 2 then return "count:" .. #rows end
       if rows[1].event_id == rows[2].event_id then return "duplicate" end
       if rows[1].reason == nil or rows[2].reason == nil then return "reason-missing" end
+      local denied
+      matrix.quarantine({{id=rows[1].event_id}}, function(result) denied=result.error end, "codex")
+      if not denied or not denied:find("operator-only", 1, true) then return "agent-inspection-not-denied" end
       local root = remuda._butler_bus.agents.butler
       for _, id in ipairs(remuda._butler_mail.mailbox(root.id)) do
         local message = remuda._butler_bus.messages[id]
         if message and message.matrix and message.matrix.event_id ~= nil then return "quarantine-leaked-to-mail" end
       end
+      local more = {{}}
+      for i=1,205 do more[i] = {{type="m.room.message", event_id="$bulk-" .. i,
+        sender="@mallory:example.org", origin_server_ts=i,
+        content={{msgtype="m.text", body=string.rep("p", 2048)}}}} end
+      local batch = {{rooms={{join={{}}}}}}; batch.rooms.join[room]={{timeline={{events=more}}}}
+      relay._response(batch, "/_matrix/client/v3/sync")
+      local bounded = assert(matrix.quarantine_list())
+      if #bounded ~= 200 then return "unbounded-count:" .. #bounded end
+      for _, item in ipairs(bounded) do if #item.preview > 1024 then return "preview-unbounded" end end
       return "ok"
     "#,
       config=lua_raw_string(&config_path.to_string_lossy()),
-      response=lua_raw_string(&response.to_string())));
+      response=lua_raw_string(&response.to_string()), room=lua_raw_string(room)));
     assert_eq!(result, "ok", "rejected Matrix events must be privately inspectable and never enter mail: {result}");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
+        .args(["-s", "s", "butler", "matrix", "--json", "quarantine"])
+        .env("REMUDA_RUNTIME_DIR", &dir)
+        .env("REMUDA_NO_UPDATE_CHECK", "1")
+        .env_remove("REMUDA_BUTLER_AGENT_ID")
+        .env_remove("REMUDA_BUTLER_SESSION_NAME")
+        .current_dir(&dir)
+        .output()
+        .expect("run operator quarantine verb");
+    assert!(output.status.success(), "operator quarantine verb failed: {}", String::from_utf8_lossy(&output.stderr));
+    let listing: serde_json::Value = serde_json::from_slice(&output.stdout).expect("parse quarantine JSON");
+    assert_eq!(listing["json"].as_array().map(Vec::len), Some(200));
+    let inspected = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
+        .args(["-s", "s", "butler", "matrix", "--json", "quarantine", "--id", "$bulk-205"])
+        .env("REMUDA_RUNTIME_DIR", &dir)
+        .env("REMUDA_NO_UPDATE_CHECK", "1")
+        .env_remove("REMUDA_BUTLER_AGENT_ID")
+        .env_remove("REMUDA_BUTLER_SESSION_NAME")
+        .current_dir(&dir)
+        .output()
+        .expect("run operator quarantine detail verb");
+    assert!(inspected.status.success(), "quarantine detail verb failed: {}", String::from_utf8_lossy(&inspected.stderr));
+    let detail: serde_json::Value = serde_json::from_slice(&inspected.stdout).expect("parse quarantine detail JSON");
+    assert_eq!(detail["json"]["event_id"], "$bulk-205");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let state_path = PathBuf::from(format!("{}.since", config_path.display()));
+        let mode = std::fs::metadata(state_path).expect("read Matrix state mode").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "quarantine previews must be stored in a private state file");
+    }
 }
 
 #[test]
@@ -2616,12 +2660,37 @@ fn matrix_mail_reply_is_correlated_and_sent_id_is_durable() {
         local count=0; for _ in pairs(state.pending) do count=count+1 end
         return "mail-not-delivered|pending=" .. tostring(count) .. "|processed=" .. tostring(state.processed["$incoming"])
       end
-      remuda.http.respond("PUT", "http://matrix.example.org/_matrix/client/v3/rooms/%21reply%3Aexample.org/send/m.room.message/reply-test",
+      matrix.relay.instance = relay
+      remuda.http.respond("GET", "http://matrix.example.org/_matrix/client/v3/rooms/%21reply%3Aexample.org/context/%24incoming",
+        {{error="temporary Matrix context failure"}})
+      remuda.http.respond("GET", "http://matrix.example.org/_matrix/client/v3/rooms/%21reply%3Aexample.org/context/%24incoming",
+        {{status=200, headers={{}}, body='{{"event":{{"room_id":"!reply:example.org"}}}}'}})
+      remuda.http.respond_prefix("PUT", "http://matrix.example.org/_matrix/client/v3/rooms/%21reply%3Aexample.org/send/m.room.message/",
         {{status=200, headers={{}}, body='{{"event_id":"$outgoing"}}'}})
-      local queued, err = matrix.mail_reply({{mail_id=remuda.source_mail_id, text="answer", txn_id="reply-test"}}, function(value) remuda.reply_result=value end)
-      if err then return "reply-error:" .. err end
-      remuda.http.tick()
-      if not remuda.reply_result or remuda.reply_result.event_id ~= "$outgoing" then return "send-not-recorded" end
+      local queued = remuda._butler_reply("butler", remuda.source_mail_id, "answer")
+      if not queued:find("queued Matrix reply", 1, true) then return "reply-not-queued:" .. tostring(queued) end
+      for _=1,4 do remuda.http.tick() end
+      local found_body = false
+      for _, call in ipairs(remuda.http.calls) do
+        if call.method == "PUT" and call.url:find("/send/m.room.message/", 1, true) then
+          local body = assert(matrix.decode_json(call.body))
+          local relation = body["m.relates_to"] or {{}}
+          if relation.rel_type == "m.thread" and relation.event_id == "$root"
+            and relation["m.in_reply_to"].event_id == "$incoming" then found_body = true end
+        end
+      end
+      if not found_body then return "thread-relation-not-sent" end
+      local reply_id = queued:match("queued Matrix reply ([%w_%-]+) for")
+      if not reply_id then return "reply-id-missing" end
+      local puts = 0
+      for _, call in ipairs(remuda.http.calls) do if call.method == "PUT" then puts=puts+1 end end
+      local duplicate_result
+      matrix.mail_reply({{mail_id=remuda.source_mail_id, reply_mail_id=reply_id, text="answer"}},
+        function(value) duplicate_result=value end)
+      local after = 0
+      for _, call in ipairs(remuda.http.calls) do if call.method == "PUT" then after=after+1 end end
+      if puts ~= after or not duplicate_result or duplicate_result.event_id ~= "$outgoing" then return "duplicate-was-not-deduped" end
+      matrix.relay.instance = nil
       local status = matrix.mail_reply_status(remuda.source_mail_id)
       return status and status.event_id == "$outgoing" and status.thread_root == "$root" and "ok" or "mapping-not-durable"
     "#,

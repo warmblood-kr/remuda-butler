@@ -425,8 +425,11 @@ local function reply(caller, parent_id, text, as_operator, deliver)
   if not allowed then return nil, why end
   local parent = find_message(parent_id)
   if not parent then return nil, "message " .. parent_id .. " cannot be read" end
-  local to = parent.reply_to or parent.from
-  if not to.id or to.id == "" then
+  local matrix_parent = parent.matrix and parent.matrix.event_id and parent.matrix.room_id
+  local to = matrix_parent and { host = "matrix", id = parent_id,
+    alias = parent.matrix.sender or "Matrix", session = parent.matrix.sender or "Matrix" }
+    or parent.reply_to or parent.from
+  if not matrix_parent and (not to.id or to.id == "") then
     return nil, "cannot reply: message " .. parent_id .. " is from " .. tostring(to.alias or to.session)
       .. ", which has no Butler inbox"
   end
@@ -440,9 +443,15 @@ local function reply(caller, parent_id, text, as_operator, deliver)
   local subject = parent.subject or "Message"
   if not subject:match("^Re: ") then subject = "Re: " .. subject end
   local message = {
-    kind = "mail", from = caller, to = to, text = text, subject = subject,
+    kind = matrix_parent and "matrix_reply" or "mail", from = caller, to = to, text = text, subject = subject,
     in_reply_to = parent_id, references = references,
   }
+  if matrix_parent then
+    message.reply_id = message_id()
+    message.matrix_route = { room_id = parent.matrix.room_id, event_id = parent.matrix.event_id,
+      thread_root = parent.matrix.thread_root, in_reply_to = parent.matrix.in_reply_to }
+  end
+  if matrix_parent and not deliver then return nil, "Matrix replies require durable relay delivery" end
   if deliver then return deliver(message), nil, to end
   return queue(caller, to, text, subject, parent_id, references)
 end
@@ -555,4 +564,5 @@ local function unread(name)
 end
 
 remuda._butler_mail = { mailbox = mailbox, queue = queue, reply = reply, forward = forward, forward_delivery = deliver_forward, inbox = inbox, unread = unread, append = append,
+  find_message = find_message,
   migrate_legacy = migrate_legacy }

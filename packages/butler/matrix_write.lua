@@ -61,7 +61,7 @@ local function split_utf8(text)
   return chunks
 end
 
-local function send_chunks(room, text, relation, on_done)
+local function send_chunks(room, text, relation, on_done, txn_prefix)
   local done = once(on_done)
   if type(text) ~= "string" or text == "" then
     return error_result(done, "message text must not be empty")
@@ -81,10 +81,10 @@ local function send_chunks(room, text, relation, on_done)
     if relation then content["m.relates_to"] = relation end
     local body, encode_error = matrix.encode_json(content)
     if not body then return done({ error = encode_error }) end
-    local txn = next_txn()
+    local txn = txn_prefix and (txn_prefix .. "_" .. tostring(index)) or next_txn()
     current = matrix.request_json({ method = "PUT",
       path = "/_matrix/client/v3/rooms/" .. path_component(room)
-        .. "/send/m.room.message/" .. txn,
+        .. "/send/m.room.message/" .. path_component(txn),
       room = room, body = body, headers = { ["Content-Type"] = "application/json" },
     }, function(result)
       if result.error then return done(result) end
@@ -128,8 +128,11 @@ function matrix.reply(opts, on_done)
     return error_result(done, "message text must not be empty")
   end
   return same_room_then(room, opts.event_id, done, function(reply_done)
-    return send_chunks(room, opts.text,
-      { ["m.in_reply_to"] = { event_id = opts.event_id } }, reply_done)
+    local relation = { ["m.in_reply_to"] = { event_id = opts.event_id } }
+    if type(opts.thread_root) == "string" and opts.thread_root ~= "" then
+      relation.rel_type, relation.event_id = "m.thread", opts.thread_root
+    end
+    return send_chunks(room, opts.text, relation, reply_done, opts.txn_id)
   end)
 end
 
