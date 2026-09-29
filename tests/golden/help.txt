@@ -13,6 +13,7 @@ remuda butler — coordination for managed agents
   remuda butler inbox [name]
   remuda butler reply <message-id> <message...>
   remuda butler forward <message-id> <member> [note...]
+  remuda --stdin butler statusline <status-file>
   remuda butler matrix [--json] status
   remuda butler matrix [--json] rooms
   remuda butler matrix [--json] [--room ROOM] [-n N] history
