@@ -361,8 +361,7 @@ function remuda._butler_compaction_visible_answer(kind, screen, target)
   return nil, "waiting"
 end
 function remuda._butler_compaction_sequence(kind, prior, low)
-  if kind == "codex" then return { "/compact" } end
-  return { "/model " .. low, "/compact", "/model " .. prior }
+  return { "/compact" }
 end
 
 if remuda._butler_test_mode == true then
@@ -3100,18 +3099,6 @@ function remuda._butler_compaction_execute(session_name)
     local prior_command = prior
     local prior_window = tonumber(state.pending_restore_context_window or initial_telemetry.context_window)
     local low = remuda._butler_compaction_model or "sonnet"
-    if agent.kind == "claude" and not restore_only and not prior then
-      state.compaction_in_progress = false
-      if owner_state.compaction_fleet_active == state_key then owner_state.compaction_fleet_active = nil end
-      state.cooldown_ticks = config.failure_cooldown_ticks
-      if not state.pending_restore_notice_sent then
-        state.pending_restore_notice_sent = true
-        pcall(remuda._butler_send, session_name, agent.parent or "butler",
-          "compaction skipped: model family is unknown; cannot safely restore after switching to Sonnet")
-      end
-      _butler_trace("skipped", detail .. " reason=unknown_model_family")
-      return "skipped_unknown_model_family"
-    end
     _butler_trace("sent", detail)
     local dialog_timeout = math.max(1, config.dialog_timeout)
     local failure_reason, compact_sent, restore_attempt_count, verification_failed
@@ -3506,7 +3493,45 @@ function remuda._butler_compaction_execute(session_name)
         on_timeout = function() request_restore("compaction context did not drop") end,
         on_error = function(err) request_restore("compaction completion error: " .. tostring(err)) end }, true)
     end
-    if restore_only then
+    if agent.kind == "claude" then
+      -- Older state may contain a pending model restore from a prior policy.
+      -- Claude compaction now keeps the current model, so discard that stale intent.
+      state.pending_restore_model = nil
+      state.pending_restore_model_unavailable = nil
+      state.pending_restore_display = nil
+      state.pending_restore_context_window = nil
+      state.restore_retry_in_progress = nil
+      local blocked = remuda._butler_compaction_preflight(session_name)
+      if blocked then report("aborted: " .. blocked); return end
+      local safe = remuda._butler_compaction_action_guard(session_name)
+      if safe then report("aborted: " .. safe); return end
+      local sent, send_err = pcall(remuda.type_text, session_name, "/compact", config.input_settle)
+      if not sent then report("compact command failed: " .. tostring(send_err)); return end
+      compact_sent = true
+      watch({
+        { id = "compact-complete", match = function()
+          local current = remuda._butler_telemetry_for(agent)
+          local used = tonumber(current.context_used)
+          return used and ctx_before and used < ctx_before
+        end, action = function()
+          state.compaction_in_progress = false
+          state.pending_restore_model = nil
+          state.pending_restore_model_unavailable = nil
+          state.pending_restore_display = nil
+          state.pending_restore_context_window = nil
+          state.cooldown_ticks = config.cooldown_ticks
+          state.failure_cooldown = nil
+          if owner_state.compaction_fleet_active == state_key then owner_state.compaction_fleet_active = nil end
+          _butler_trace("verified", detail)
+        end },
+      }, { timeout = config.completion_timeout, unknown = is_unknown_dialog,
+        on_unknown = function(value)
+          register_unknown_dialog(value)
+          report("unrecognized dialog after compaction")
+        end,
+        on_timeout = function() report("compaction context did not drop") end,
+        on_error = function(err) report("compaction completion error: " .. tostring(err)) end }, false)
+    elseif restore_only then
       if not prior then
         request_restore("retrying pending restore")
       else

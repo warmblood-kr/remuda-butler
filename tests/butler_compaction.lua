@@ -202,8 +202,8 @@ assert(not remuda._butler_compaction_is_unknown_dialog(
   "dialog words in transcript text must not be mistaken for a modal")
 
 local claude_sequence = remuda._butler_compaction_sequence("claude", "opus", "sonnet")
-assert(table.concat(claude_sequence, "|") == "/model sonnet|/compact|/model opus",
-  "Claude sequence must queue low model, compact, then restore prior model")
+assert(table.concat(claude_sequence, "|") == "/compact",
+  "Claude sequence must compact on the current model without switching or restoring")
 local codex_sequence = remuda._butler_compaction_sequence("codex", "gpt-5.6-terra", "sonnet")
 assert(table.concat(codex_sequence, "|") == "/compact",
   "Codex sequence must submit compact exactly once without switching models")

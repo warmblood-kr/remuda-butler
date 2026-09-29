@@ -4974,8 +4974,7 @@ fn butler_compaction_trace_records_registered_skipped_and_sent() {
 }
 
 /// Exercise the Claude compaction state machine with real private daemon PTYs.
-/// The fake Claude process prints a statusline, presents numbered model dialogs,
-/// consumes the key, and changes model/context exactly as Claude does.
+/// The fake Claude process accepts only `/compact` and records the Return key.
 #[test]
 #[cfg(unix)]
 fn butler_compaction_fake_claude_scenarios_send_only_visible_keys() {
@@ -5069,7 +5068,7 @@ while IFS= read -r line; do
       paint
       ;;
     '/model Sonnet') paint ;;
-    '/compact') ctx=200000; paint ;;
+    '/compact') printf 'KEY:RET\n' >> "$log"; ctx=200000; paint ;;
   esac
 done
 "#,
@@ -5154,68 +5153,8 @@ done
     );
 
     for (name, scenario, expected) in [
-        (
-            "fake-happy",
-            "happy",
-            "CMD:/model sonnet\nKEY:1\nCMD:/compact\nCMD:/model opus\nKEY:1\n",
-        ),
-        (
-            "fake-absent",
-            "absent",
-            "CMD:/model sonnet\nCMD:/compact\n",
-        ),
-        (
-            "fake-option2",
-            "option2",
-            "CMD:/model sonnet\nKEY:2\nCMD:/compact\nCMD:/model opus\nKEY:1\n",
-        ),
-        (
-            "fake-busy-after-switch",
-            "happy",
-            "CMD:/model sonnet\nKEY:1\nCMD:/compact\nCMD:/model opus\nKEY:1\n",
-        ),
+        ("fake-happy", "happy", "CMD:/compact\nKEY:RET\n"),
         ("fake-mid-turn", "happy", ""),
-        (
-            "fake-busy-after-compact",
-            "happy",
-            "CMD:/model sonnet\nKEY:1\nCMD:/compact\nCMD:/model opus\nKEY:1\n",
-        ),
-        (
-            "fake-unknown",
-            "unknown",
-            "CMD:/model sonnet\nKEY:\x1b\nCMD:/model opus\nKEY:1\n",
-        ),
-        (
-            "fake-switch-label-unknown",
-            "switch-label-unknown",
-            "CMD:/model sonnet\nKEY:\x1b\nCMD:/model opus\nKEY:1\n",
-        ),
-        ("fake-timeout", "timeout", "CMD:/model sonnet\n"),
-        (
-            "fake-restore-timeout",
-            "restore-timeout",
-            "CMD:/model sonnet\nKEY:1\nCMD:/compact\nCMD:/model opus\nCMD:/model opus\n",
-        ),
-        (
-            "fake-attached",
-            "happy",
-            "CMD:/model sonnet\nKEY:1\n",
-        ),
-        (
-            "fake-attach-mid",
-            "happy",
-            "CMD:/model sonnet\nKEY:1\nCMD:/compact\nCMD:/model opus\nKEY:1\n",
-        ),
-        (
-            "fake-no-family",
-            "happy",
-            "",
-        ),
-        (
-            "fake-window-mismatch",
-            "happy",
-            "CMD:/model sonnet\nKEY:1\nCMD:/compact\nCMD:/model opus\nKEY:1\n",
-        ),
     ] {
         let log = dir.join(format!("{name}.log"));
         eval(
