@@ -1849,69 +1849,217 @@ function remuda._butler_prompt_is_empty(kind, screen)
   return "NON-EMPTY", text
 end
 
--- The one delivery policy: may Butler type into SESSION now? Every pane needs
--- a known empty prompt. An attached pane also needs the human to pause
--- (human_idle >= remuda._butler_notice_human_idle, default 10s) or, on a core
--- without human_idle, a screen unchanged for NOTICE_STABLE_SECONDS. Anything
--- unrecognised defers.
+local function styled_capture_key(styled)
+  if type(styled) ~= "table" or type(styled.rows) ~= "table"
+      or type(styled.cursor) ~= "table" then return nil end
+  local cursor = styled.cursor
+  if type(cursor.row) ~= "number" or cursor.row < 1 or cursor.row % 1 ~= 0
+      or type(cursor.col) ~= "number" or cursor.col < 1 or cursor.col % 1 ~= 0
+      or type(cursor.visible) ~= "boolean" or cursor.row > #styled.rows then return nil end
+  local parts = { tostring(cursor.row), tostring(cursor.col), tostring(cursor.visible) }
+  for row_index, spans in ipairs(styled.rows) do
+    if type(spans) ~= "table" then return nil end
+    parts[#parts + 1] = "r" .. row_index .. ":" .. #spans
+    for _, span in ipairs(spans) do
+      if type(span) ~= "table" or type(span.text) ~= "string"
+          or type(span.dim) ~= "boolean" then return nil end
+      local text = span.text:gsub("\194\160", " ")
+      parts[#parts + 1] = #text .. ":" .. text .. (span.dim and "d" or "p")
+    end
+  end
+  return table.concat(parts, "\0")
+end
+
+local function normalized_spans(spans)
+  local parts, text = {}, {}
+  for _, span in ipairs(spans) do
+    local normalized = span.text:gsub("\194\160", " ")
+    parts[#parts + 1] = { text = normalized, dim = span.dim }
+    text[#text + 1] = normalized
+  end
+  return parts, table.concat(text)
+end
+
+local function prompt_marker_end(line, kind)
+  local marker = kind == "claude" and "❯" or kind == "codex" and "›"
+  if not marker then return nil end
+  local offset = #(line:match("^%s*") or "")
+  local boxed = kind == "claude" and line:sub(offset + 1, offset + 3) == "│"
+  if boxed then
+    offset = offset + 3
+    offset = offset + #(line:sub(offset + 1):match("^%s*") or "")
+  end
+  if line:sub(offset + 1, offset + #marker) ~= marker then return nil end
+  return offset + #marker, boxed
+end
+
+local function row_range(line, boxed)
+  local first = #(line:match("^%s*") or "") + 1
+  if boxed and line:sub(first, first + 2) == "│" then
+    first = first + 3
+    first = first + #(line:sub(first):match("^%s*") or "")
+  end
+  local last = #line
+  while last >= first and line:sub(last, last):match("%s") do last = last - 1 end
+  if boxed and line:sub(last - 2, last) == "│" then
+    last = last - 3
+    while last >= first and line:sub(last, last):match("%s") do last = last - 1 end
+  end
+  return first, last
+end
+
+local function range_text(spans, first, last)
+  local offset, parts, has_typed = 0, {}, false
+  for _, span in ipairs(spans) do
+    local next_offset = offset + #span.text
+    local start_at, end_at = math.max(first, offset + 1), math.min(last, next_offset)
+    if start_at <= end_at then
+      local text = span.text:sub(start_at - offset, end_at - offset)
+      parts[#parts + 1] = text
+      if not span.dim and text:find("%S") then has_typed = true end
+    end
+    offset = next_offset
+  end
+  return has_typed, table.concat(parts)
+end
+
+local function bytes_before_cursor(line, column)
+  local cells, bytes, index = 0, 0, 1
+  local limit = column - 1
+  while index <= #line and cells < limit do
+    local lead = line:byte(index)
+    local size = lead < 0x80 and 1 or lead < 0xE0 and 2 or lead < 0xF0 and 3 or 4
+    if index + size - 1 > #line then break end
+    local width = 1
+    if size == 3 or size == 4 then
+      local b2, b3 = line:byte(index + 1, index + 2)
+      local cp = size == 3
+        and (lead % 16) * 4096 + (b2 - 128) * 64 + (b3 - 128)
+        or (lead % 8) * 262144 + (b2 - 128) * 4096 + (b3 - 128) * 64
+          + (line:byte(index + 3) - 128)
+      if cp >= 0x1100 and (cp <= 0x115F or cp >= 0x2E80 and cp <= 0xA4CF
+          or cp >= 0xAC00 and cp <= 0xD7A3 or cp >= 0xF900 and cp <= 0xFAFF
+          or cp >= 0xFE10 and cp <= 0xFE6F or cp >= 0xFF00 and cp <= 0xFF60
+          or cp >= 0x1F300 and cp <= 0x1FAFF) then width = 2 end
+    end
+    if cells + width > limit then break end
+    cells, bytes, index = cells + width, index + size - 1, index + size
+  end
+  return bytes
+end
+
+-- Returns true, false, or nil when the styled cursor row cannot be parsed.
+function remuda._butler_input_line_empty(kind, styled)
+  if not styled_capture_key(styled) or styled.cursor.visible ~= true then return nil, "" end
+  local prompt_row, marker_end, boxed
+  for row_index = styled.cursor.row, 1, -1 do
+    local _, line = normalized_spans(styled.rows[row_index])
+    local ending, framed = prompt_marker_end(line, kind)
+    if ending then prompt_row, marker_end, boxed = row_index, ending, framed; break end
+  end
+  if not prompt_row then return nil, "" end
+  local _, prompt_line = normalized_spans(styled.rows[prompt_row])
+  if prompt_row == styled.cursor.row
+      and bytes_before_cursor(prompt_line, styled.cursor.col) < marker_end then
+    return nil, ""
+  end
+
+  local composer = {}
+  for row_index = prompt_row, styled.cursor.row do
+    local spans, line = normalized_spans(styled.rows[row_index])
+    local first, last
+    if row_index == prompt_row then
+      first = marker_end + 1
+      last = #line
+      while last >= first and line:sub(last, last):match("%s") do last = last - 1 end
+      if boxed and line:sub(last - 2, last) == "│" then
+        last = last - 3
+        while last >= first and line:sub(last, last):match("%s") do last = last - 1 end
+      end
+    else
+      first, last = row_range(line, kind == "claude")
+    end
+    if row_index == styled.cursor.row then
+      last = math.min(last, bytes_before_cursor(line, styled.cursor.col))
+    end
+    local typed, text = range_text(spans, first, last)
+    composer[#composer + 1] = text
+    if typed then return false, table.concat(composer, "\n") end
+  end
+  return true, table.concat(composer, "\n")
+end
+
+local function stable_capture(session, capture)
+  local first_ok, first = pcall(capture, session)
+  if not first_ok then return nil end
+  local first_key = type(first) == "string" and first or styled_capture_key(first)
+  if not first_key then return nil end
+  local second_ok, second = pcall(capture, session)
+  if not second_ok then return nil end
+  local second_key = type(second) == "string" and second or styled_capture_key(second)
+  if not second_key or first_key ~= second_key then return nil end
+  return second
+end
+
+-- The one delivery policy: notices go only to an attached, idle pane whose
+-- composer is known to be empty. Anything changing or unrecognised defers.
 function remuda._butler_notify_policy(session, now)
   now = now or os.time()
   local row
   for _, candidate in ipairs(remuda.ls()) do
     if candidate.name == session then row = candidate end
   end
-  if not row or not row.alive then return false end
-  local attached = row.attached
+  if not row or not row.alive or row.attached ~= true then return false end
   local seen = bus.notice_screens[session] or {}
   bus.notice_screens[session] = seen
+  local agent = bus.agents[session]
+  local kind = agent and agent.kind or ""
   local screen
-  if attached and row.human_idle ~= nil then
+  if row.human_idle ~= nil then
     -- A core with remuda#136 says when the human last typed (math.huge if
     -- never); wait for them to pause instead of guessing from the screen.
     if row.human_idle < (remuda._butler_notice_human_idle or 10) then return false end
-  elseif attached then
+  else
     -- Older core: a screen unchanged for NOTICE_STABLE_SECONDS stands in.
-    local captured
-    captured, screen = pcall(remuda.capture, session)
-    if not captured then return false end
+    screen = stable_capture(session, remuda.capture)
+    if not screen then return false end
     if seen.screen ~= screen then
       seen.screen, seen.since = screen, now
       return false
     end
     if now - seen.since < NOTICE_STABLE_SECONDS then return false end
   end
-  local full_screen, prompt_screen = screen, screen
-  if remuda.capture_styled then
-    -- A core with remuda#137 marks dim text: parse only the cursor row, and
-    -- drop a TUI's dim ghost suggestion so it reads as the empty prompt it is.
-    local captured, styled = pcall(remuda.capture_styled, session)
-    if not captured then return false end
+  local full_screen, decision, text
+  if type(remuda.capture_styled) == "function" then
+    -- Two identical captures keep typing away from a screen that is changing.
+    local styled = stable_capture(session, remuda.capture_styled)
+    if not styled then return false end
     local rows = {}
-    for row_index, spans in ipairs(styled.rows or {}) do
+    for row_index, spans in ipairs(styled.rows) do
       local parts = {}
       for _, span in ipairs(spans) do parts[#parts + 1] = span.text end
       rows[row_index] = table.concat(parts)
     end
-    if not full_screen then full_screen = table.concat(rows, "\n") end
-    local cursor_parts = {}
-    for _, span in ipairs(styled.rows[styled.cursor.row] or {}) do
-      if not span.dim then cursor_parts[#cursor_parts + 1] = span.text end
+    full_screen = table.concat(rows, "\n")
+    local parsed, empty, composer = pcall(remuda._butler_input_line_empty, kind, styled)
+    if parsed then
+      text = composer
+      if empty == true then decision = "EMPTY"
+      elseif empty == false then decision = "NON-EMPTY"
+      end
     end
-    prompt_screen = table.concat(cursor_parts)
+  else
+    screen = screen or stable_capture(session, remuda.capture)
+    if type(screen) ~= "string" then return false end
+    full_screen = screen
+    local parsed, result, composer = pcall(remuda._butler_prompt_is_empty, kind, screen)
+    if parsed then decision, text = result, composer end
   end
-  if not full_screen then
-    local captured
-    captured, full_screen = pcall(remuda.capture, session)
-    if not captured then return false end
-  end
-  prompt_screen = prompt_screen or full_screen
-  local agent = bus.agents[session]
-  local kind = agent and agent.kind or ""
   if known_startup_modal(remuda._butler_agent_startup[kind] or {}, full_screen) then
     _butler_session_trace("notice_deferred_modal", session .. " " .. kind)
     return false
   end
-  local decision, text = remuda._butler_prompt_is_empty(kind, prompt_screen)
+  decision, text = decision or "UNPARSEABLE", text or ""
   if seen.decision ~= decision then -- once per change, not every retry
     seen.decision = decision
     _butler_session_trace("notice_prompt", session .. " " .. kind .. " " .. decision .. " " .. text)

@@ -277,7 +277,7 @@ fn mail_notices_wait_for_the_policy_and_coalesce() {
 /// #29: one case per branch of `remuda._butler_notify_policy`, with `ls` and
 /// `capture` stubbed and the clock passed in.
 #[test]
-fn notify_policy_types_only_into_a_detached_or_quiet_empty_prompt() {
+fn notify_policy_types_only_into_an_attached_quiet_empty_prompt() {
     let dir = scratch("notice-policy");
     let path = daemon::socket_path_in(&dir, "s");
     let _daemon = daemon_at(&path);
@@ -318,7 +318,7 @@ fn notify_policy_types_only_into_a_detached_or_quiet_empty_prompt() {
     assert_eq!(
         got,
         "half=false empty_stable=true claude_box=true claude_nbsp=true claude_nbsp_typed=false empty_changing=false unparseable=false \
-         codex_placeholder=true codex_typed=false detached=false detached_empty=true"
+         codex_placeholder=true codex_typed=false detached=false detached_empty=false"
     );
     let log = std::fs::read_to_string(&trace).unwrap_or_default();
     assert!(log.contains("notice_prompt\tp1  NON-EMPTY co"), "{log}");
@@ -387,7 +387,7 @@ fn notice_recovery_preserves_idle_draft_and_respects_attached_human() {
     eval(
         &path,
         r#"
-        local row = { name = 'm1', alive = true, attached = false }
+        local row = { name = 'm1', alive = true, attached = true, human_idle = 15 }
         remuda.ls = function() return { row } end
         remuda.capture_styled = nil
         remuda._butler_bus.agents.m1.kind = 'codex'
@@ -779,11 +779,9 @@ fn a_topic_task_retries_a_dropped_return_before_delivering_a_notice() {
     );
 }
 
-/// #29(3): on a core with `ls().human_idle` (#136) and `capture_styled`
-/// (#137), the policy waits on the human's own idle time and reads the cursor
-/// row without dim ghost text. The old-core path is the test above.
+/// #137: the composer probe reads agent markers, dim spans, and wrapped rows.
 #[test]
-fn notify_policy_uses_human_idle_and_dim_spans_when_the_core_has_them() {
+fn notify_policy_uses_stable_styled_captures_and_agent_composer_probe() {
     let dir = scratch("notice-policy-new-core");
     let path = daemon::socket_path_in(&dir, "s");
     let _daemon = daemon_at(&path);
@@ -792,13 +790,19 @@ fn notify_policy_uses_human_idle_and_dim_spans_when_the_core_has_them() {
         &path,
         r#"local real_ls, real_capture, real_styled = remuda.ls, remuda.capture, remuda.capture_styled
         local row, spans = { name = 'p1', alive = true, attached = true }, {}
+        remuda._butler_bus.agents.p1 = { kind = 'claude' }
         remuda.ls = function() return { row } end
         remuda.capture = function() error('the new-core path must not need plain capture') end
+        local captures, unstable, cursor_col = 0, false, 100
         remuda.capture_styled = function()
-          return { rows = { { { text = 'history', dim = false } }, spans }, cursor = { row = 2, col = 3, visible = true } }
+          captures = captures + 1
+          local current = spans
+          if unstable and captures == 2 then current = { { text = '❯ draft', dim = false } } end
+          return { rows = { { { text = 'history', dim = false } }, current }, cursor = { row = 2, col = cursor_col, visible = true } }
         end
         local function case(idle, ...)
           row.human_idle = idle
+          captures = 0
           for i = #spans, 1, -1 do spans[i] = nil end
           for i, span in ipairs({ ... }) do spans[i] = span end
           return tostring(remuda._butler_notify_policy('p1'))
@@ -812,20 +816,39 @@ fn notify_policy_uses_human_idle_and_dim_spans_when_the_core_has_them() {
         -- between them, NBSP after the glyph.
         r[#r + 1] = 'ghost_words=' .. case(12, plain('❯\u{A0}'), dim('Try'), plain(' '), dim('"fix'), plain(' '), dim('typecheck'), plain(' '), dim('errors"'))
         r[#r + 1] = 'typed=' .. case(12, plain('❯ co'))
+        cursor_col = 3
+        r[#r + 1] = 'after_cursor=' .. case(12, plain('❯ co'))
+        cursor_col = 100
         r[#r + 1] = 'never=' .. case(math.huge, plain('❯ '))
         r[#r + 1] = 'off_prompt=' .. case(12, plain('some output'))
+        unstable = true
+        r[#r + 1] = 'unstable=' .. case(12, plain('❯ ')) .. ':' .. tostring(captures)
+        unstable = false
+        remuda._butler_bus.agents.p1 = { kind = 'codex' }
+        local wrapped = remuda._butler_input_line_empty('codex', {
+          rows = { { plain('history') }, { plain('› draft') }, { plain('continued') } },
+          cursor = { row = 3, col = 5, visible = true },
+        })
+        local unknown = remuda._butler_input_line_empty('codex', {
+          rows = { { plain('unrecognized layout') } },
+          cursor = { row = 1, col = 5, visible = true },
+        })
+        r[#r + 1] = 'wrapped=' .. tostring(wrapped) .. ' unknown=' .. tostring(unknown)
         row.attached = false
-        r[#r + 1] = 'detached_typed=' .. case(math.huge, plain('❯ co'))
-        r[#r + 1] = 'detached_empty=' .. case(0, plain('❯ '))
+        r[#r + 1] = 'detached_typed=' .. case(math.huge, plain('› co'))
+        r[#r + 1] = 'detached_empty=' .. case(0, plain('› '))
+        row.attached = true
+        r[#r + 1] = 'codex_placeholder=' .. case(math.huge, plain('› '), dim('Ask Codex to do anything'))
+        r[#r + 1] = 'codex_typed=' .. case(math.huge, plain('› Ask Codex to do anything else'))
         remuda._butler_notice_human_idle = 20
         row.attached = true
-        r[#r + 1] = 'knob=' .. case(12, plain('❯ '))
+        r[#r + 1] = 'knob=' .. case(12, plain('› '))
         remuda.ls, remuda.capture, remuda.capture_styled = real_ls, real_capture, real_styled
         return table.concat(r, ' ')"#,
     );
     assert_eq!(
         got,
-        "typing=false ghost=true ghost_words=true typed=false never=true off_prompt=false detached_typed=false detached_empty=true knob=false"
+        "typing=false ghost=true ghost_words=true typed=false after_cursor=true never=true off_prompt=false unstable=false:2 wrapped=false unknown=nil detached_typed=false detached_empty=false codex_placeholder=true codex_typed=false knob=false"
     );
 }
 
