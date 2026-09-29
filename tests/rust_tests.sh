@@ -92,7 +92,7 @@ fi
 if [[ -n ${BUTLER_TEST_FILTER:-} ]]; then
   cargo test -p remuda-native --test butler_daemon "$BUTLER_TEST_FILTER" -- --nocapture
 else
-  cargo test -p remuda-native --test butler_daemon -- butler matrix_reply --skip a_fresh_daemon
+  cargo test -p remuda-native --test butler_daemon -- butler matrix_reply
 fi
 
 remaining_relays=$(relay_pids_under_scratch)
