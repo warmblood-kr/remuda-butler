@@ -23,6 +23,29 @@ telemetry.claude = {
 
 builders.claude = function(spec)
   local argv = { "claude" }
+  local config = remuda._butler_compaction_config or {}
+  local configured = remuda._butler_claude_autocompact or config.claude_autocompact or "400k"
+  if type(configured) ~= "string" or (configured ~= "auto"
+      and not configured:match("^%d+k$") ) then configured = "400k" end
+  if configured ~= "auto" then
+    local amount = tonumber(configured:match("^(%d+)k$"))
+    if not amount or amount < 100 or amount > 1000 then configured = "400k" end
+  end
+  local supported = remuda._butler_claude_autocompact_supported
+  if supported == nil then
+    local ok, result = false, "process.run unavailable"
+    if remuda.process and type(remuda.process.run) == "function" then
+      ok, result = pcall(remuda.process.run, { argv = { "claude", "--help" }, timeout = 5 })
+    end
+    local output = ok and result and ((result.stdout or "") .. "\n" .. (result.stderr or "")) or ""
+    supported = ok and output:find("--autocompact", 1, true) ~= nil
+    remuda._butler_claude_autocompact_supported = supported
+    if not ok and remuda.log then remuda.log("warn", "Claude --autocompact help probe failed: " .. tostring(result)) end
+  end
+  spec.native_autocompact = supported == true
+  if spec.native_autocompact then
+    argv[#argv + 1] = "--autocompact"; argv[#argv + 1] = configured
+  end
   if spec.settings_path then argv[#argv + 1] = "--settings"; argv[#argv + 1] = spec.settings_path end
   argv[#argv + 1] = "--mcp-config"; argv[#argv + 1] = spec.mcp_config_path or support.mcp_config_path(spec.name, spec.token)
   argv[#argv + 1] = "--strict-mcp-config"

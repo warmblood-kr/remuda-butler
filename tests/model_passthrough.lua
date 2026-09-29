@@ -22,7 +22,8 @@ assert(tail(build.claude({ name = "c", system_prompt = "p", model = "opus" }), 2
 -- Native autocompact is opt-in to the installed Claude CLI capability. The
 -- probe is argv-only, cached, and does not affect Codex launches.
 local probes = 0
-remuda._butler_claude_autocompact = "400k"
+remuda._butler_compaction_config = { claude_autocompact = "400k" }
+remuda._butler_claude_autocompact_supported = nil
 remuda.process = { run = function(spec)
   probes = probes + 1
   assert(spec.argv[1] == "claude" and spec.argv[2] == "--help")
@@ -42,7 +43,8 @@ assert(probes == 1 and contains_pair(unsupported_argv, "--autocompact", "400k"),
 local codex_argv = build.codex({ telemetry = telemetry })
 assert(not contains_pair(codex_argv, "--autocompact", "400k"),
   "Codex launch must never receive Claude autocompact")
-remuda._butler_claude_autocompact = nil
+remuda._butler_compaction_config = { claude_autocompact = "400k" }
+remuda._butler_claude_autocompact_supported = nil
 remuda.process = { run = function() probes = probes + 1; return { stdout = "help" } end }
 assert(not contains_pair(build.claude({ name = "c", system_prompt = "p" }), "--autocompact", "400k"),
   "unsupported Claude CLI should omit native autocompact")

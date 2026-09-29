@@ -186,6 +186,9 @@ function remuda.butler.compaction_policy(name, state, dry_run)
     for key, value in pairs(state) do current[key] = value end
   end
   current.idle_ticks = current.idle_ticks or 0
+  local named_agent = (remuda._butler_bus and remuda._butler_bus.agents
+    and remuda._butler_bus.agents[name]) or {}
+  if named_agent.native_autocompact then return false, "skipped_native_autocompact" end
   local level = remuda.butler.ctx_level(name)
   if level.level == "ok" then
     current.idle_ticks, current.cooldown_ticks, current.last_idle_capture_at = 0, 0, nil
@@ -996,6 +999,7 @@ local function choose(candidates, opts, done)
     local argv = (type(opts.argv) == "function" and opts.argv(id, spec)) or opts.argv
       or (type(entry.argv) == "function" and select(2, call_callback(entry.argv, spec))) or entry.argv
       or (entry.build and entry.build(spec))
+    attempt.native_autocompact = id == "claude" and spec.native_autocompact == true
     local builder_override = remuda._butler_agent_builders[id]
       and remuda._butler_agent_builders[id] ~= BUILTIN_AGENT_BUILDERS[id]
     local executable = (builder_override and argv and argv[1])
@@ -1476,11 +1480,13 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   identity.kind = kind
   identity_record(identity)
   local waiting_for_trust, trust_answered = false, false
+  local native_autocompact = false
   for _, attempt in ipairs(attempts or {}) do
     if attempt.session == actual and attempt.reason == "waiting_for_human_trust" then
       waiting_for_trust = true
     end
     if attempt.session == actual and attempt.trust_answered then trust_answered = true end
+    if attempt.session == actual then native_autocompact = attempt.native_autocompact == true end
   end
   bus.tokens[token] = actual
   bus.agents[actual] = {
@@ -1488,6 +1494,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
     parent = parent, children = {}, id = identity.id, alias = actual, session_name = actual,
     cwd = launch_cwd, task = task, launch_attempts = attempts, trust_allowed = auto_trust,
     trust_reported = waiting_for_trust, trust_answered = trust_answered,
+    native_autocompact = native_autocompact,
   }
   if parent and bus.agents[parent] then
     local children = bus.agents[parent].children
@@ -3356,6 +3363,7 @@ function remuda._butler_compaction_execute(session_name, force)
   owner_state.compaction_members = owner_state.compaction_members or remuda._butler_compaction_members_state or {}
   remuda._butler_compaction_members_state = owner_state.compaction_members
   local agent = remuda._butler_bus.agents[session_name] or {}
+  if agent.native_autocompact then return "skipped_native_autocompact" end
   if agent.kind ~= "claude" and agent.kind ~= "codex" then
     local message = "compaction skipped: unsupported agent kind " .. tostring(agent.kind)
     pcall(remuda._butler_send, session_name, agent.parent or "butler", message)
