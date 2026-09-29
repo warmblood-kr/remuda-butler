@@ -379,30 +379,46 @@ fn a_notice_that_fails_to_type_stays_queued() {
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1)"), "nil");
 }
 
-/// #82: notice submit verification accepts Codex's soft-wrapped composer in a
-/// narrow 27-column pane, then retries Return once if the draft remains.
+/// #82: notice submit verification accepts Claude's soft-wrapped composer in
+/// a narrow 27-column pane, then retries Return once if the draft remains.
 #[test]
-fn narrow_wrapped_notice_is_verified_and_submitted() {
+fn narrow_claude_wrapped_notice_is_verified_and_submitted() {
     let (path, _daemon) = butler_with_member("notice-narrow-wrap");
     eval(
         &path,
         r#"
         local row = { name = 'm1', alive = true, attached = false }
-        local state = { columns = 27, events = {}, screen = 'Ask Codex\n› \n? for shortcuts' }
+        local state = { columns = 27, events = {}, screen = '❯ \n', submitted = false }
         remuda._notice_test_state = state
-        remuda._butler_bus.agents.m1.kind = 'codex'
+        remuda._butler_bus.agents.m1.kind = 'claude'
         remuda.capture_styled = nil
         remuda.ls = function() return { row } end
         remuda.session = function() return { is_busy = false } end
         remuda.capture = function() return state.screen end
         remuda._butler_notify_policy = function() return true end
         local function render_notice(text)
-          local rows, width = {}, state.columns - 2 -- the prompt occupies two columns
-          for first = 1, #text, width do
-            local chunk = text:sub(first, first + width - 1)
-            rows[#rows + 1] = (first == 1 and '› ' or '  ') .. chunk
+          local rows, width, line = {}, state.columns - 2, '' -- ❯ and continuation indent each occupy two columns
+          local function push(prefix, value)
+            rows[#rows + 1] = prefix .. value .. string.rep(' ', state.columns - 2 - #value)
           end
-          return 'Ask Codex\n' .. table.concat(rows, '\n') .. '\n? for shortcuts\n98% context left'
+          local function append_word(word)
+            while #word > width do
+              if line ~= '' then push(#rows == 0 and '❯ ' or '  ', line); line = '' end
+              push(#rows == 0 and '❯ ' or '  ', word:sub(1, width))
+              word = word:sub(width + 1)
+            end
+            if line == '' then line = word
+            elseif #line + 1 + #word <= width then line = line .. ' ' .. word
+            else push(#rows == 0 and '❯ ' or '  ', line); line = word end
+          end
+          for word in text:gmatch('%S+') do append_word(word) end
+          push(#rows == 0 and '❯ ' or '  ', line)
+          local rule = string.rep('─', state.columns)
+          local empty_prompt = '❯ ' .. string.rep(' ', state.columns - 2)
+          local status = '  MODEL:Opus-5.5 CTX:13925…\n  ⏵⏵ auto mode on      · ←…'
+          local screen = rule .. '\n' .. table.concat(rows, '\n') .. '\n' .. rule
+          if state.submitted then screen = screen .. '\n' .. empty_prompt .. '\n' .. rule end
+          return screen .. '\n' .. status
         end
         remuda.type_text = function(_, text)
           table.insert(state.events, 'type')
@@ -410,7 +426,8 @@ fn narrow_wrapped_notice_is_verified_and_submitted() {
         end
         remuda.key = function(_, key)
           table.insert(state.events, 'key ' .. key)
-          if key == 'RET' then state.screen = 'Ask Codex\n› \n? for shortcuts\n98% context left' end
+          if key == 'RET' then state.screen = '❯ ' .. string.rep(' ', state.columns - 2)
+            .. '\n' .. string.rep('─', state.columns) .. '\n  MODEL:Opus-5.5 CTX:13925…' end
         end
         remuda._butler_send('operator', 'm1', 'narrow pane notice')
         "#,
@@ -427,6 +444,22 @@ fn narrow_wrapped_notice_is_verified_and_submitted() {
     assert_eq!(events.matches("type").count(), 1, "wrapped notice was retyped instead of verified: {events}");
     assert_eq!(events.matches("key RET").count(), 1, "notice submit used more than one Return retry: {events}");
     assert!(!events.contains("key C-u"), "recovery erased its own wrapped notice: {events}");
+
+    eval(
+        &path,
+        r#"local state = remuda._notice_test_state
+        state.events, state.submitted = {}, true
+        remuda._butler_send('operator', 'm1', 'history layout notice')"#,
+    );
+    let deadline = Instant::now() + PATIENCE;
+    while eval(&path, "return tostring(remuda._butler_bus.notices.m1 ~= nil)") != "false" {
+        eval(&path, "remuda._butler_deliver_notices()");
+        assert!(Instant::now() < deadline, "wrapped notice in history was not verified: {}", eval(&path, "return table.concat(remuda._notice_test_state.events, ',')"));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let events = eval(&path, "return table.concat(remuda._notice_test_state.events, ',')");
+    assert_eq!(events.matches("type").count(), 1, "history notice was retyped: {events}");
+    assert!(!events.contains("key RET"), "already-submitted history notice was submitted twice: {events}");
 }
 
 /// #64: an idle non-empty composer is redrawn, its draft is preserved,
