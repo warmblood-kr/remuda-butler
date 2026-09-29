@@ -13,12 +13,21 @@ local function load_main()
   main_loaded = true
   host.exec("butler/main")
 end
+local function start_matrix_relay()
+  local matrix = host.butler and host.butler.matrix
+  if host._butler_matrix_config and matrix and matrix.relay and not host._butler_skip_relay
+    and type(host.http) == "table" and type(host.http.request) == "function" then
+    matrix.relay.start(host._butler_matrix_config)
+  end
+end
+
 local function boot()
   if booted then return end
   booted = true
   load_main()
   if host._butler_bootstrap and host._butler_test_mode ~= "lifecycle" then host._butler_bootstrap() end
   host.emit("butler-start")
+  start_matrix_relay()
 end
 
 -- Retire only the process handle recorded by the legacy Matrix relay. The
@@ -80,11 +89,6 @@ return {
     host._butler_state = state
     boot()
     stop_legacy_matrix_relay()
-    local matrix = host.butler and host.butler.matrix
-    if matrix and matrix.relay and not host._butler_skip_relay
-      and type(host.http) == "table" and type(host.http.request) == "function" then
-      matrix.relay.start(host._butler_matrix_config)
-    end
   end,
   stop = function(state)
     if host._butler_cancel_active_choosers then host._butler_cancel_active_choosers(state) end
