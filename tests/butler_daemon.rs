@@ -5196,7 +5196,7 @@ done
           screen = screen:gsub(" esc to interrupt", "")
         end
         if remuda._fake_clear_unknown[name] then
-          screen = screen:gsub("Mystery chooser\n1%. Continue\n❯\n", "")
+          screen = screen:gsub("Mystery chooser\n1%. Continue\n❯\n?", "")
         end
         return screen
       end
@@ -5304,7 +5304,7 @@ done
                 std::thread::sleep(Duration::from_millis(100));
             }
         }
-        if name == "fake-unknown" || name == "fake-force" || name == "fake-stale-flags" || name == "fake-happy" {
+        if name == "fake-stale-flags" || name == "fake-happy" {
             let deadline = Instant::now() + Duration::from_secs(8);
             loop {
                 let in_progress = eval(&path, &format!(
@@ -5329,23 +5329,35 @@ done
             assert!(reports.contains("unsupported agent kind"), "unknown kind should be reported: {reports:?}");
         }
         if name == "fake-unknown" {
+            let deadline = Instant::now() + Duration::from_secs(8);
+            loop {
+                let in_progress = eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].compaction_in_progress == true)"));
+                let reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
+                if in_progress == "false" && reports.contains("unrecognized dialog") { break; }
+                assert!(Instant::now() < deadline, "unknown-dialog setup did not fail as expected: {reports:?}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
             let before = std::fs::read_to_string(&log).unwrap();
-            assert_eq!(eval(&path, &format!("return remuda.butler.compact({name:?})")), "skipped_cooldown");
-            assert_eq!(eval(&path, &format!("return remuda._butler_compaction_tick({name:?}, false)")), format!("{name}:skipped_cooldown"));
-            assert_eq!(std::fs::read_to_string(&log).unwrap(), before, "retries before expiry must not send commands");
+            assert_eq!(before, "CMD:/model sonnet\nKEY:RET\nCMD:/compact\nKEY:RET\n",
+                "never type into the unknown dialog or attempt a model restore while it is visible");
+            assert_eq!(eval(&path, &format!("return remuda._butler_compaction_members_state[{name:?}].restore_pending")), "opus",
+                "remember prior model for idle recovery");
+            eval(&path, &format!("return remuda._butler_compaction_tick({name:?}, false)"));
+            assert_eq!(std::fs::read_to_string(&log).unwrap(), before,
+                "recovery must wait while the unknown dialog is still visible");
             eval(&path, &format!("remuda._fake_clear_unknown[{name:?}] = true"));
-            eval(&path, "remuda._fake_now(1010)");
-            assert_eq!(eval(&path, &format!("return remuda.butler.compact({name:?})")), "started");
+            assert_eq!(eval(&path, &format!("return tostring(remuda._butler_compaction_is_unknown_dialog(remuda.capture({name:?})))")), "false",
+                "fake dialog clear must return the pane to the recognized composer");
+            eval(&path, &format!("return remuda._butler_compaction_tick({name:?}, false)"));
             let deadline = Instant::now() + Duration::from_secs(8);
             loop {
                 let got = std::fs::read_to_string(&log).unwrap_or_default();
-                let in_progress = eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].compaction_in_progress == true)"));
-                if in_progress == "false" && got.matches("CMD:/compact\nKEY:RET\n").count() == 2 { break; }
-                assert!(Instant::now() < deadline, "expired cooldown retry stalled: {got:?}");
+                let pending = eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].restore_pending)"));
+                if pending == "nil" && got.ends_with("CMD:/model opus\nKEY:RET\n") { break; }
+                assert!(Instant::now() < deadline, "deferred model restore stalled: {got:?}");
                 std::thread::sleep(Duration::from_millis(50));
             }
-            assert_eq!(std::fs::read_to_string(&log).unwrap(),
-                "CMD:/model sonnet\nKEY:RET\nCMD:/compact\nKEY:RET\nCMD:/model sonnet\nKEY:RET\nCMD:/compact\nKEY:RET\nCMD:/model opus\nKEY:RET\n");
+            assert_eq!(std::fs::read_to_string(&log).unwrap(), format!("{before}CMD:/model opus\nKEY:RET\n"));
         }
         if name == "fake-force" {
             let deadline = Instant::now() + Duration::from_secs(8);
@@ -5362,13 +5374,13 @@ done
             let deadline = Instant::now() + Duration::from_secs(8);
             loop {
                 let got = std::fs::read_to_string(&log).unwrap_or_default();
-                let in_progress = eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].compaction_in_progress == true)"));
-                if in_progress == "false" && got.matches("CMD:/compact\nKEY:RET\n").count() == 2 { break; }
-                assert!(Instant::now() < deadline, "forced retry stalled: {got:?}");
+                let pending = eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].restore_pending)"));
+                if pending == "nil" && got.ends_with("CMD:/model opus\nKEY:RET\n") { break; }
+                assert!(Instant::now() < deadline, "forced model restore stalled: {got:?}");
                 std::thread::sleep(Duration::from_millis(50));
             }
             assert_eq!(std::fs::read_to_string(&log).unwrap(),
-                "CMD:/model sonnet\nKEY:RET\nCMD:/compact\nKEY:RET\nCMD:/model sonnet\nKEY:RET\nCMD:/compact\nKEY:RET\nCMD:/model opus\nKEY:RET\n");
+                "CMD:/model sonnet\nKEY:RET\nCMD:/compact\nKEY:RET\nCMD:/model opus\nKEY:RET\n");
         }
     }
     drop(daemon);

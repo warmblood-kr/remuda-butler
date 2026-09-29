@@ -3384,6 +3384,8 @@ function remuda._butler_compaction_tick(target_name, dry_run)
         results[#results + 1] = session_name .. ":compaction_in_progress"
       elseif owner_state.compaction_fleet_active and owner_state.compaction_fleet_active ~= state_key then
         results[#results + 1] = session_name .. ":fleet_busy"
+      elseif state.restore_pending and not dry_run then
+        results[#results + 1] = remuda._butler_compaction_execute(session_name)
       elseif cooling then
         results[#results + 1] = session_name .. ":skipped_cooldown"
       else
@@ -3439,13 +3441,15 @@ function remuda._butler_compaction_execute(session_name, force)
   local state = owner_state.compaction_members[state_key] or {}
   owner_state.compaction_members[state_key] = state
   if agent.kind == "claude" then clear_legacy_restore_state(state) end
+  local restore_pending = agent.kind == "claude" and type(state.restore_pending) == "string"
+    and state.restore_pending ~= "" and state.restore_pending or nil
   if state.compaction_in_progress then return "compaction_in_progress" end
   if owner_state.compaction_fleet_active and owner_state.compaction_fleet_active ~= state_key then return "fleet_busy" end
   local now = (remuda._butler_compaction_now or os.time)()
-  if remuda._butler_compaction_failure_cooldown(state, now, force == true) then
+  if not restore_pending and remuda._butler_compaction_failure_cooldown(state, now, force == true) then
     return "skipped_cooldown"
   end
-  local blocked = remuda._butler_compaction_preflight(session_name)
+  local blocked = not restore_pending and remuda._butler_compaction_preflight(session_name)
   if blocked then
     local statuses = {
       busy = "skipped_busy", ["busy state unknown"] = "skipped_busy",
@@ -3454,7 +3458,7 @@ function remuda._butler_compaction_execute(session_name, force)
     }
     return statuses[blocked] or "skipped_unknown"
   end
-  local action_blocked = remuda._butler_compaction_action_guard(session_name)
+  local action_blocked = not restore_pending and remuda._butler_compaction_action_guard(session_name)
   if action_blocked then
     if action_blocked == "human attached" then return "skipped_attached" end
     if action_blocked == "busy" then return "skipped_busy" end
@@ -3468,7 +3472,7 @@ function remuda._butler_compaction_execute(session_name, force)
   local ctx_before = tonumber(level.used)
   local prior_model, settings_path, prior_settings_model
   if agent.kind == "claude" then
-    prior_model = remuda._butler_claude_model_for(agent)
+    prior_model = restore_pending or remuda._butler_claude_model_for(agent)
     settings_path = (os.getenv("HOME") or "") .. "/.claude/settings.json"
     local settings = read_claude_settings(settings_path)
     prior_settings_model = settings and type(settings.model) == "string"
@@ -3501,6 +3505,7 @@ function remuda._butler_compaction_execute(session_name, force)
     state.failure_cooldown_until = nil
     state.cooldown_ticks = config.cooldown_ticks
     state.compaction_still_running_notice_sent = nil
+    state.restore_pending = nil
     clear_legacy_restore_state(state)
     _butler_trace(event or "verified", detail)
   end
@@ -3527,7 +3532,12 @@ function remuda._butler_compaction_execute(session_name, force)
     local ok, handle = pcall(remuda.expect, session_name, {
       { id = id, match = matcher, action = action },
     }, { timeout = timeout, unknown = remuda._butler_compaction_is_unknown_dialog,
-      on_unknown = function() fail("unrecognized dialog during " .. id) end,
+      on_unknown = function()
+        if agent.kind == "claude" and (id == "model-sonnet" or id == "compact-complete") then
+          state.restore_pending = prior_model
+        end
+        fail("unrecognized dialog during " .. id)
+      end,
       on_timeout = on_timeout or function() fail("timed out waiting for " .. id) end,
       on_error = function(err) fail("compaction watcher error: " .. tostring(err)) end }, false)
     if not ok then fail("could not start " .. id .. " watcher: " .. tostring(handle)) end
@@ -3565,10 +3575,6 @@ function remuda._butler_compaction_execute(session_name, force)
     if monitor_ok then state.compaction_monitor = monitor end
   end
 
-  state.compaction_in_progress = true
-  state.failure_cooldown_until = nil
-  owner_state.compaction_fleet_active = state_key
-  _butler_trace("sent", detail)
   local function compact()
     if not send_command("/compact") then return end
     wait_for("compact-complete", function()
@@ -3590,6 +3596,22 @@ function remuda._butler_compaction_execute(session_name, force)
       end
     end)
   end
+  if restore_pending then
+    local captured, screen = pcall(remuda.capture, session_name)
+    if pane_busy() ~= false or not captured or type(screen) ~= "string"
+        or remuda._butler_compaction_is_unknown_dialog(screen) then
+      return "restore_pending"
+    end
+    state.compaction_in_progress = true
+    state.failure_cooldown_until = nil
+    owner_state.compaction_fleet_active = state_key
+    restore_model("restored_after_dialog")
+    return "restoring_model"
+  end
+  state.compaction_in_progress = true
+  state.failure_cooldown_until = nil
+  owner_state.compaction_fleet_active = state_key
+  _butler_trace("sent", detail)
   if agent.kind == "claude" then
     if not send_command("/model sonnet") then return "failed" end
     wait_for("model-sonnet", function()
