@@ -1,0 +1,10 @@
+.github/workflows/tests.yml|1|      - run: scripts/check-no-python.sh
+README.md|1|- `scripts/check-no-python.sh`: CI guard for Python files and invocations;
+packages/butler/main.lua|1|    .. json_quote("python3 " .. shell_quote(helper_path) .. " " .. shell_quote(path))
+packages/butler/main.lua|1|  local helper_path = path .. ".py"
+packages/butler/init.lua|1|  local expected_script = mod_dir .. "/packages/butler/matrix_relay.py"
+tests/live_reload.sh|1|OWN_SCRIPT=$MOD/packages/butler/matrix_relay.py
+tests/live_reload.sh|1|FOREIGN_SCRIPT=$T/foreign/matrix_relay.py
+tests/live_reload.sh|1|OWN_RELAY_ID=$(lua "remuda._butler_matrix_relay = remuda.process{argv={'python3', '$OWN_SCRIPT'}}; remuda._butler_matrix_relay_script_path = '$OWN_SCRIPT'; return remuda._butler_matrix_relay")
+tests/live_reload.sh|1|FOREIGN_RELAY_ID=$(lua "remuda._butler_foreign_matrix_relay = remuda.process{argv={'python3', '$FOREIGN_SCRIPT'}}; return remuda._butler_foreign_matrix_relay")
+tests/butler_mcp.rs|2|    let mut helper = Command::new("python3")

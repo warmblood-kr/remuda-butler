@@ -14,25 +14,60 @@
 #   REMUDA_BIN=~/.local/bin/remuda tests/golden_guidance.sh
 #   GOLDEN_UPDATE=1 tests/golden_guidance.sh  # a DELIBERATE guidance change: rewrite
 #                                             # tests/golden/ and commit the diff with it
-# Needs: bash, git, python3 (and cargo when REMUDA_BIN is unset).
+# Needs: bash, git, awk, and cargo when REMUDA_BIN is unset.
 set -euo pipefail
+export LC_ALL=C
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 GOLDEN=$REPO/tests/golden
 CORE_URL=${CORE_URL:-https://github.com/warmblood-kr/remuda.git}
 # Keep in step with tests/rust_tests.sh.
-CORE_REF=${CORE_REF:-b6c1389}
+CORE_REF=${CORE_REF:-355e8b2}
 T=$(mktemp -d /tmp/bgg.XXXXXX) S=bgg
+DAEMON_PID=
 source_home=${HOME:-/tmp}
 export CARGO_HOME=${CARGO_HOME:-$source_home/.cargo}
 export RUSTUP_HOME=${RUSTUP_HOME:-$source_home/.rustup}
 cleanup() {
+  local pid killed=0 left=0
+  local descendants=()
+  if [[ -n "$DAEMON_PID" ]]; then
+    while IFS= read -r pid; do [[ -n "$pid" ]] && descendants+=("$pid"); done < <(
+      ps -axo pid=,ppid= | awk -v root="$DAEMON_PID" '
+        { ppid[$1]=$2; rows[NR]=$1 }
+        END {
+          found[root]=1
+          do {
+            changed=0
+            for (i=1; i<=NR; i++) if (!found[rows[i]] && found[ppid[rows[i]]]) {
+              found[rows[i]]=1; changed=1
+            }
+          } while (changed)
+          for (i=1; i<=NR; i++) if (rows[i] != root && found[rows[i]]) print rows[i]
+        }')
+  fi
   if [[ ${REMUDA_RUNTIME_DIR:-} == "$T/run" ]]; then
     remuda -s "$S" stop -f >/dev/null 2>&1 || true
   else
     echo "refusing to stop golden daemon outside its scratch runtime" >&2
   fi
-  pkill -f "$T/" 2>/dev/null || true
+  for pid in "${descendants[@]}" "$DAEMON_PID"; do
+    [[ -n "$pid" ]] || continue
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      kill "$pid" >/dev/null 2>&1 || true
+      killed=$((killed + 1))
+    fi
+  done
+  [[ -n "$DAEMON_PID" ]] && wait "$DAEMON_PID" 2>/dev/null || true
+  for _ in $(seq 20); do
+    left=0
+    for pid in "${descendants[@]}"; do
+      [[ -n "$pid" ]] && kill -0 "$pid" >/dev/null 2>&1 && left=$((left + 1))
+    done
+    [[ $left == 0 ]] && break
+    sleep 0.05
+  done
   rm -rf "$T"
+  echo "resources cleaned: $killed killed / $left left"
 }
 trap cleanup EXIT
 
@@ -46,6 +81,7 @@ fi
 export HOME=$T/home REMUDA_RUNTIME_DIR=$T/run XDG_DATA_HOME=$T/data XDG_CONFIG_HOME=$T/config
 export XDG_CACHE_HOME=$T/cache XDG_STATE_HOME=$T/state XDG_RUNTIME_DIR=$T/xdg-run
 export REMUDA_BUTLER_PROJECT_HOME=$T/projects REMUDA_BUTLER_SERVER=$S REMUDA_NO_UPDATE_CHECK=1
+export REMUDA_BUTLER_REPO_ROOT=$REPO
 unset REMUDA_BUTLER_TOKEN REMUDA_BUTLER_CONFIG REMUDA_BUTLER_AGENT_ID REMUDA_BUTLER_LEADER_ID \
   REMUDA_BUTLER_SESSION_NAME REMUDA_BUTLER_AGENT_ALIAS REMUDA_BUTLER_AGENT_KIND REMUDA_SESSION_CAPABILITY
 mkdir -p "$HOME" "$XDG_CACHE_HOME" "$XDG_STATE_HOME" "$XDG_RUNTIME_DIR" \
@@ -54,11 +90,12 @@ cp "$REMUDA_BIN" "$T/bin/remuda"
 cp -R "$REPO/extension.toml" "$REPO/packages" "$XDG_DATA_HOME/remuda/mods/butler/"
 # A fake claude: records its argv, one argument per NUL-free line, and stays up.
 cat >"$T/bin/claude" <<EOF
-#!/usr/bin/env python3
-import os, sys, time
-open("$T/argv/" + os.environ.get("REMUDA_BUTLER_SESSION_NAME", "x"), "w").write("\n".join(sys.argv[1:]) + "\n")
-print("─\n❯", flush=True)
-while True: time.sleep(1)
+#!/bin/sh
+dest="$T/argv/\${REMUDA_BUTLER_SESSION_NAME:-x}"
+: >"\$dest"
+for arg do printf '%s\\n' "\$arg" >>"\$dest"; done
+printf '─\\n❯\\n'
+while :; do sleep 1; done
 EOF
 chmod +x "$T/bin/claude"
 export PATH=$T/bin:$PATH
@@ -74,6 +111,13 @@ wait_welcome() {
   echo "welcome was not queued for lead1" >&2
   return 1
 }
+
+R daemon </dev/null >>"$T/daemon.log" 2>&1 &
+DAEMON_PID=$!
+for _ in $(seq 80); do [[ -S $REMUDA_RUNTIME_DIR/remuda/$S.sock ]] && break; sleep 0.1; done
+[[ -S $REMUDA_RUNTIME_DIR/remuda/$S.sock ]] || { cat "$T/daemon.log" >&2; exit 1; }
+
+R -e "if not dofile('$REPO/scripts/check-butler-path-convention.lua') then error('path convention check failed', 0) end"
 
 R -e 'remuda._butler_argv = {"sh", "-c", "while :; do sleep 1; done"}' >/dev/null   # root session: no agent
 R butler --headless >/dev/null
@@ -94,31 +138,24 @@ if grep -F 'Welcome to Butler' "$T/welcome-second-inbox.txt" >/dev/null; then
   echo "duplicate welcome queued for lead1" >&2
   exit 1
 fi
-cat "$T/welcome-inbox.txt" | python3 -c '
-import re, sys
-text = sys.stdin.read()
-m = re.search(r"^\[[^\]]*\] Welcome to Butler\n(.*?)(?=^\[message-|^\[[0-9A-HJKMNP-TV-Z]{26} from |\Z)", text, re.S | re.M)
-sys.stdout.write(m.group(1) if m else "NO WELCOME MESSAGE\n" + text)' >"$OUT/welcome.txt"
+if grep -F 'Welcome to Butler' "$T/welcome-inbox.txt" >/dev/null; then
+  awk '
+    /^\[[^]]+\] Welcome to Butler$/ { body=1; found=1; next }
+    body && /^\[message-/ { exit }
+    body && /^\[[^]]+ from / { exit }
+    body { print }
+  ' "$T/welcome-inbox.txt" >"$OUT/welcome.txt"
+else
+  { printf '%s\n' 'NO WELCOME MESSAGE'; cat "$T/welcome-inbox.txt"; } >"$OUT/welcome.txt"
+fi
 cp "$T/argv/lead1" "$OUT/argv-claude.txt"
 
 # Normalise run-specific values so only guidance text is compared.
-python3 - "$OUT" "$T" <<'PY'
-import os, re, sys
-out, t = sys.argv[1], sys.argv[2]
-subs = [
-    (re.escape(os.path.realpath(t)), "<T>"), (re.escape(t), "<T>"),
-    (r"/(?:private/)?(?:tmp|var/folders)/[^\s\"']*lua_[A-Za-z0-9]+[^\s\"']*", "<TMPFILE>"),
-    (r"message-[0-9a-f]+-[0-9a-f]+-lua_[A-Za-z0-9]+", "<MSGID>"),
-    (r"\b[0-9A-HJKMNP-TV-Z]{26}\b", "<ULID>"),
-    (r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z", "<TIME>"),
-    (r'("REMUDA_SESSION_CAPABILITY"\s*:\s*")[^"]+', r"\1<CAP>"),
-    (r"(REMUDA_SESSION_CAPABILITY=\"?)[A-Za-z0-9_-]+", r"\1<CAP>"),
-]
-for name in sorted(os.listdir(out)):
-    p = os.path.join(out, name); s = open(p).read()
-    for pat, rep in subs: s = re.sub(pat, rep, s)
-    open(p, "w").write(s)
-PY
+NORMALIZE_ROOT=$(cd "$T" && pwd -P)
+for file in "$OUT"/*; do
+  awk -v t="$T" -v real_t="$NORMALIZE_ROOT" -f "$REPO/tests/normalize-guidance.awk" "$file" >"$file.tmp"
+  mv "$file.tmp" "$file"
+done
 
 if [[ ${GOLDEN_UPDATE:-} == 1 ]]; then
   mkdir -p "$GOLDEN"

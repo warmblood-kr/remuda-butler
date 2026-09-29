@@ -60,6 +60,18 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
     if attempts == 0 then
       for index, modal in ipairs(options.modals or {}) do
         if screen:find(modal.match, 1, true) then
+          local human_active = false
+          if options.human_active then
+            local checked, active = pcall(options.human_active, screen)
+            human_active = checked and active == true
+          end
+          if human_active then
+            startup_ticks = startup_ticks + 1
+            if startup_ticks >= (options.ready_timeout or 60) then
+              finish(false, "human active during startup modal")
+            end
+            return
+          end
           if not handled_modals[index] then
             handled_modals[index] = true
             for _, key in ipairs(modal.keys or {}) do pcall(remuda.key, actual, key) end

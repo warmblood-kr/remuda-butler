@@ -1,27 +1,5 @@
--- remuda-butler: runs one Claude Code session, optionally bridged to Matrix
--- and replying there via an MCP tool. See docs/design.md.
-
-local REPLY_SRC = [==[
-set -euo pipefail
-
-TOKEN="$(cat "$1")"
-HOMESERVER="$(sed -n '1p' "$2")"
-ROOM_ID="$(sed -n '2p' "$2")"
-TEXT="$3"
-
-TXN_ID="remuda-butler-$(date +%s%N)"
-BODY_JSON="$(python3 -c 'import json,sys; print(json.dumps({"msgtype":"m.text","body":sys.argv[1]}))' "$TEXT")"
-ENC_ROOM="$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$ROOM_ID")"
-
-# The Authorization header carries the bearer token; passing it via -H would
-# put the token in this process's own argv, visible to any other user via
-# `ps`. -K - reads curl's config (here, just the one header) from stdin
-# instead, which never appears in argv.
-printf 'header = "Authorization: Bearer %s"\n' "$TOKEN" | curl -sf -K - -X PUT \
-  "$HOMESERVER/_matrix/client/v3/rooms/$ENC_ROOM/send/m.room.message/$TXN_ID" \
-  -H "Content-Type: application/json" \
-  -d "$BODY_JSON" >/dev/null
-]==]
+-- remuda-butler: runs one Claude Code session, optionally bridged to Matrix.
+-- Matrix commands and the MCP reply tool share the Lua async request vocabulary.
 
 -- Claude calls statusLine commands with a JSON snapshot on stdin.  This
 -- helper is deliberately the sole producer of Butler's telemetry: it emits a
@@ -90,7 +68,6 @@ end
 
 -- Exposed so tests can inspect the daemon-local MCP helper without starting a
 -- real process/session (this harness does not have a real agent CLI).
-remuda._butler_reply_src = REPLY_SRC
 remuda._butler_statusline_src = STATUSLINE_SRC
 remuda._butler_initial_name = initial_butler_name()
 
@@ -193,11 +170,12 @@ if remuda._butler_test_mode == true then
   return
 end
 
--- The 4bbd90f lifecycle host does not yet call a module `stop` method on
--- reload. Stop an existing Matrix child here as well, before new config is
--- resolved; matrix.lua will start exactly one relay after the new config is
--- installed. Newer hosts can also stop it through init.lua's stop callback.
-if remuda._butler_matrix_stop then pcall(remuda._butler_matrix_stop) end
+-- Cancel the existing Matrix relay before resolving new config;
+-- matrix.lua will start exactly one relay after the new config is installed.
+local old_matrix = remuda.butler and remuda.butler.matrix
+local old_relay = old_matrix and old_matrix.relay
+if old_relay and old_relay.stop then pcall(old_relay.stop)
+end
 
 -- Replace handles created imperatively by the previous Butler version. The
 -- lifecycle declaration owns these schedules from this activation onward.
@@ -232,7 +210,7 @@ remuda._butler_compaction_reset_idle(remuda._butler_state or remuda._butler_comp
 -- `Daemon::spawn_with_env` unchanged. Mirrors install-butler.sh's own
 -- `${XDG_CONFIG_HOME:-$HOME/.config}/remuda/butler/{token,config}` exactly,
 -- kept in sync with install-butler.sh's own default by
--- scripts/check-butler-path-convention.py, which fails if the two diverge.
+-- scripts/check-butler-path-convention.lua, which fails if the two diverge.
 local function default_config_home()
   local xdg = os.getenv("XDG_CONFIG_HOME")
   if xdg and xdg ~= "" then
@@ -350,6 +328,7 @@ else
 end
 -- This internal module is the single inbound Matrix entry point. It registers
 -- only the optional relay and remains inert when credentials are absent.
+remuda.exec("butler/matrix_request")
 remuda.exec("butler/matrix")
 
 -- The session needs an `--mcp-config` pointing back at this same daemon, or
@@ -381,6 +360,7 @@ local function json_quote(s)
     :gsub('\r', '\\r'):gsub('\n', '\\n'):gsub('\t', '\\t') .. '"'
 end
 local function status_settings(path)
+  -- TODO core #213: remove this Python statusLine helper once the core JSON/stdin boundary is settled.
   local helper_path = path .. ".py"
   local settings_path = path .. ".settings.json"
   local helper = assert(io.open(helper_path, "w"))
@@ -430,6 +410,10 @@ remuda._butler_bus = remuda._butler_bus or {
 }
 local bus = remuda._butler_bus
 bus.pending_tasks = bus.pending_tasks or {}
+bus.codex_update_state = bus.codex_update_state or { claimed = false, done = false }
+bus.codex_update_relaunches = bus.codex_update_relaunches or {}
+bus.codex_update_state.waiting = bus.codex_update_state.waiting or {}
+bus.codex_update_state.restart_waiting = bus.codex_update_state.restart_waiting or {}
 
 -- Contribution points (hook-design §4): core's owned registry when this core
 -- has one (remuda#141), else Butler's own with the same order rules, on bus.
@@ -897,8 +881,15 @@ local function choose(candidates, opts, done)
     local dialogs = type(entry.dialogs) == "function" and select(2, call_callback(entry.dialogs)) or entry.dialogs or {}
     local known = false
     for dialog_index, dialog in ipairs(dialogs) do
-      if screen:find(dialog.match, 1, true) then
+      if screen:lower():find(dialog.match:lower(), 1, true) then
         known, state.dialog_seen = true, dialog.match
+        -- Codex's update is an actionable startup state. Hand it to the
+        -- member launch flow, which owns the shared update lock and relaunch.
+        if dialog.update then
+          state.attempt.reason, state.attempt.session = "startup_dialog", state.name
+          callback(state.name, id)
+          return
+        end
         if not state.handled[dialog_index] then
           state.handled[dialog_index] = true
           for _, key in ipairs(dialog.keys or {}) do pcall(remuda.key, state.name, key) end
@@ -1058,7 +1049,84 @@ local function write_agent_guidance(root, text, replace)
   f:close()
 end
 local _butler_session_trace -- defined below; the task poke fires later
-local function launch_agent(kind, requested_name, cwd, model, parent, task)
+local startup_action_safe
+local function option_number(screen, matches)
+  -- Parse the visible chooser ourselves. Core versions that strip a UTF-8
+  -- selection glyph as a byte-class can leave stray bytes before its label.
+  local found
+  for line in (tostring(screen or "") .. "\n"):gmatch("(.-)\n") do
+    line = line:gsub("^%s*", "")
+    for _, marker in ipairs({ "│", "┃", "❯", "›", ">" }) do
+      if line:sub(1, #marker) == marker then
+        line = line:sub(#marker + 1):gsub("^%s*", "")
+        break
+      end
+    end
+    local number, label = line:match("^%s*(%d+)[%.)]%s*(.-)%s*$")
+    if number and matches(label) then
+      if found then return nil end
+      found = number
+    end
+  end
+  return found
+end
+local function codex_update_version(screen)
+  local from, to = tostring(screen or ""):match("(%d+%.%d+%.%d+)%s*→%s*(%d+%.%d+%.%d+)")
+  if from and to then return from .. "->" .. to end
+end
+local function skip_option_number(screen)
+  local number = option_number(screen, function(label) return label:lower() == "skip" end)
+  if number then return number end
+  number = option_number(screen, function(label)
+    local lower = label:lower()
+    return lower:sub(1, 5) == "skip " and lower ~= "skip until next version"
+  end)
+  if number then return number end
+  return option_number(screen, function(label) return label:lower() == "skip until next version" end)
+end
+local function startup_modal_timeout_seconds()
+  return tonumber(remuda._butler_modal_timeout or remuda._butler_modal_attempts or remuda._butler_task_poke_attempts) or 60
+end
+local function startup_modal(startup, screen)
+  local lower = screen:lower()
+  for _, modal in ipairs(startup.modals or {}) do
+    if modal.match and lower:find(modal.match:lower(), 1, true) then return modal end
+  end
+end
+local function known_startup_modal(startup, screen)
+  if startup_modal(startup, screen) then return true end
+  local lower = tostring(screen or ""):lower()
+  return lower:find("updating codex", 1, true) ~= nil
+    or lower:find("installing codex update", 1, true) ~= nil
+end
+local function codex_update_complete(screen)
+  local lower = tostring(screen or ""):lower()
+  return lower:find("update complete", 1, true) ~= nil
+    or lower:find("update successful", 1, true) ~= nil
+    or lower:find("update ran successfully", 1, true) ~= nil
+    or lower:find("codex was updated", 1, true) ~= nil
+    or lower:find("codex has been updated", 1, true) ~= nil
+    or lower:find("restarting codex", 1, true) ~= nil
+end
+local function capture_update_evidence(session, screen)
+  local evidence = tostring(screen or "")
+  -- Some hosts may expose scrollback separately; core 355e8b2 only exposes
+  -- the current screen through remuda.capture.
+  if type(remuda.capture_scrollback) == "function" then
+    local ok, scrollback = pcall(remuda.capture_scrollback, session)
+    if ok and scrollback then
+      if type(scrollback) == "table" then
+        local rows = {}
+        for _, row in ipairs(scrollback) do rows[#rows + 1] = tostring(row) end
+        evidence = table.concat(rows, "\n") .. "\n" .. evidence
+      else
+        evidence = tostring(scrollback) .. "\n" .. evidence
+      end
+    end
+  end
+  return evidence
+end
+local function launch_agent(kind, requested_name, cwd, model, parent, task, relaunch_identity)
   local candidates = kind and { kind } or configured_agent_order()
   kind = kind or candidates[1]
   local name = requested_name or kind or "agent"
@@ -1066,7 +1134,13 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
     error("alias " .. name .. " is live as " .. tostring(bus.agents[name].id) .. "; pick another alias", 0)
   end
   local parent_identity = parent and bus.agents[parent]
-  local identity = register_identity(name, kind, parent_identity and parent_identity.id or "")
+  local identity = relaunch_identity and (bus.identity_ids[relaunch_identity] or bus.identities[name])
+    or register_identity(name, kind, parent_identity and parent_identity.id or "")
+  if relaunch_identity then
+    identity.kind, identity.leader_id, identity.state = kind, parent_identity and parent_identity.id or "", "running"
+    identity.ended_at, identity.reason = nil, nil
+    identity_record(identity)
+  end
   if not cwd and data_home then
     cwd = data_home .. "/remuda/butler/sessions/" .. name
     remuda.mkdir(cwd)
@@ -1112,7 +1186,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
   bus.agents[actual] = {
     kind = kind, token = token, model = model, telemetry = agent_telemetry,
     parent = parent, children = {}, id = identity.id, alias = actual, session_name = actual,
-    launch_attempts = attempts,
+    cwd = cwd, task = task, launch_attempts = attempts,
   }
   if parent and bus.agents[parent] then
     local children = bus.agents[parent].children
@@ -1122,13 +1196,325 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
   if not migrated then error("cannot migrate legacy Butler mail: " .. tostring(migration_error), 0) end
   mailbox(identity.id)
   -- A failed welcome write must not prevent the agent from starting.
-  pcall(queue_message, mail_address(parent or "butler"), mail_address(actual),
-    team_member_guidance(parent or "butler"), "Welcome to Butler")
+  if not relaunch_identity then
+    pcall(queue_message, mail_address(parent or "butler"), mail_address(actual),
+      team_member_guidance(parent or "butler"), "Welcome to Butler")
+  end
   if task and task ~= "" then
     -- Keep an immediate mail notice out of the child's first prompt until the
     -- delegated task has been submitted.
     bus.pending_tasks[actual] = true
     local startup = remuda._butler_agent_startup[kind] or {}
+    if kind == "codex" then
+    local poke, confirm, attempts, settle, deferred = nil, nil, 0, 0, 0
+    local update_waiting, waiting_for_update, update_deadline = false, false, 0
+    local modal_wait_started, update_timeout_reported, update_version = nil, false, nil
+    local function modal_wait_expired()
+      modal_wait_started = modal_wait_started or os.time()
+      return os.time() - modal_wait_started >= startup_modal_timeout_seconds()
+    end
+    local update_relaunch_record_ref
+    local function update_relaunch_record()
+      local agent = bus.agents[actual] or {}
+      return {
+        kind = kind, name = actual, cwd = agent.cwd, model = agent.model,
+        parent = agent.parent, task = task, identity = agent.id,
+        update_pressed = false, last_screen = agent.last_screen,
+      }
+    end
+    local function relaunch_after_update()
+      if update_relaunch_record_ref and update_relaunch_record_ref.relaunched then
+        remuda.cancel(poke)
+        return true
+      end
+      if not startup_action_safe or not startup_action_safe(actual) then return false end
+      bus.codex_update_relaunches[actual] = update_relaunch_record()
+      update_relaunch_record_ref = bus.codex_update_relaunches[actual]
+      update_relaunch_record_ref.version = update_version
+      update_relaunch_record_ref.expected_close = true
+      if bus.codex_update_state.waiting then bus.codex_update_state.waiting[actual] = nil end
+      if bus.codex_update_state.restart_waiting then bus.codex_update_state.restart_waiting[actual] = nil end
+      local closed, result = pcall(remuda.close, actual)
+      if not closed or result == false then
+        bus.codex_update_relaunches[actual] = nil
+        update_relaunch_record_ref = nil
+        return false
+      end
+      remuda.cancel(poke)
+      return true
+    end
+    local function finish_update()
+      local state = bus.codex_update_state
+      state.done, state.claimed, state.done_version, state.owner = true, false, update_version, nil
+      state.restart_waiting = state.restart_waiting or {}
+      for member in pairs(state.waiting or {}) do state.restart_waiting[member] = true end
+      state.waiting = {}
+    end
+    -- Either timeout means the task never reached the agent: say so to its
+    -- leader rather than only in the trace (#29).
+    local function give_up(detail)
+      remuda.cancel(poke)
+      if confirm then remuda.cancel(confirm) end
+      bus.pending_tasks[actual] = nil
+      if bus.codex_update_state.waiting then bus.codex_update_state.waiting[actual] = nil end
+      if bus.codex_update_state.restart_waiting then bus.codex_update_state.restart_waiting[actual] = nil end
+      _butler_session_trace("task_poke_timeout", actual .. detail)
+      pcall(remuda._butler_send, "butler", parent or "butler", "Task for " .. actual
+        .. " was not delivered: its pane never became ready or free to type into."
+        .. " Resend it with `remuda butler send " .. actual .. " TASK` once it is.")
+    end
+    local function report_update_timeout(detail)
+      if update_timeout_reported then return end
+      update_timeout_reported = true
+      bus.pending_tasks[actual] = nil
+      _butler_session_trace("codex_update_timeout", actual .. detail)
+      pcall(remuda._butler_send, "butler", parent or "butler", "Codex update wait limit reached for " .. actual
+        .. ". Its pane was left open; task delivery will resume when the pane is safe to relaunch.")
+    end
+    poke = remuda.schedule({ every = 0.5, run = function()
+      if update_relaunch_record_ref and (update_relaunch_record_ref.relaunched or update_relaunch_record_ref.cancelled) then
+        remuda.cancel(poke)
+        bus.pending_tasks[actual] = nil
+        return
+      end
+      attempts = attempts + 1
+      -- A short-lived launcher (or a failed executable) can disappear before
+      -- the agent has painted its composer. A deferred poke is best-effort; it
+      -- must not leave a throwing callback in the daemon's shared Lua image.
+      local captured, screen = pcall(remuda.capture, actual)
+      if not captured then
+        remuda.cancel(poke)
+        bus.pending_tasks[actual] = nil
+        return
+      end
+      local agent = bus.agents[actual]
+      if agent then agent.last_screen = capture_update_evidence(actual, screen) end
+      if update_relaunch_record_ref then
+        update_relaunch_record_ref.last_screen = agent and agent.last_screen or capture_update_evidence(actual, screen)
+      end
+      if attempts < settle then return end -- let an answered modal repaint
+      local modal = startup_modal(startup, screen)
+      if update_waiting and update_relaunch_record_ref and codex_update_complete(screen) then
+        update_relaunch_record_ref.update_complete_seen = true
+      end
+      if update_waiting then
+        if not modal and startup.ready and startup.ready(screen) then
+          -- The update completed in place. Restart the same alias with the
+          -- same identity so the task is submitted only by its fresh pane.
+          finish_update()
+          if not relaunch_after_update() then
+            if modal_wait_expired(screen) then
+              bus.codex_update_state.restart_waiting[actual] = true
+              report_update_timeout(" update completed while human attached")
+            end
+          end
+          return
+        end
+        if os.time() >= update_deadline then
+          local skip = modal and modal.update and skip_option_number(screen)
+          if skip and startup_action_safe and startup_action_safe(actual) then
+            pcall(remuda.key, actual, skip)
+            local update_state = bus.codex_update_state
+            if update_state.owner == actual then
+              update_state.claimed, update_state.owner = false, nil
+              update_state.aborted_version = update_version
+              update_state.waiting, update_state.restart_waiting = {}, {}
+            end
+            bus.codex_update_relaunches[actual] = nil
+            update_relaunch_record_ref = nil
+            update_waiting, settle = false, attempts + 3
+            return
+          end
+          -- Never close a pane while brew may still be replacing Codex.
+          report_update_timeout(" still updating")
+          return
+        end
+        return
+      end
+      local update_state = bus.codex_update_state
+      if update_state.done and update_state.waiting and update_state.waiting[actual] then
+        update_version, waiting_for_update = update_state.done_version, true
+        if relaunch_after_update() then return end
+        if modal_wait_expired(screen) then give_up(" update completed while human attached") end
+        return
+      end
+      if update_state.done and update_state.restart_waiting and update_state.restart_waiting[actual] then
+        update_version, waiting_for_update = update_state.done_version, true
+        if relaunch_after_update() then update_state.restart_waiting[actual] = nil; return end
+        if modal_wait_expired(screen) then give_up(" update completed while human attached") end
+        return
+      end
+      if update_state.claimed and update_state.owner ~= actual
+          and update_state.waiting and update_state.waiting[actual] then
+        waiting_for_update = true
+        if update_deadline == 0 then
+          update_deadline = os.time() + (tonumber(remuda._butler_codex_update_timeout) or 300)
+        end
+        if os.time() >= update_deadline then
+          local skip = modal and modal.update and skip_option_number(screen)
+          if skip and startup_action_safe and startup_action_safe(actual) then
+            pcall(remuda.key, actual, skip)
+            waiting_for_update, settle = false, attempts + 3
+            update_state.waiting[actual] = nil
+          else
+            give_up(" waiting for Codex update")
+          end
+        end
+        return
+      end
+      local version = modal and modal.update and (codex_update_version(screen) or "unknown") or nil
+      if version and version ~= "unknown" then
+        if update_state.version and update_state.version ~= version and not update_state.claimed then
+          update_state.done, update_state.done_version = false, nil
+          update_state.waiting, update_state.restart_waiting = {}, {}
+        end
+        update_state.version = version
+        update_version = version
+      end
+      if modal then
+        _butler_session_trace("startup_modal", actual .. " " .. modal.match)
+        if modal.update then
+          if update_state.done and update_state.done_version == version
+              and update_state.waiting and update_state.waiting[actual] then
+            waiting_for_update = true
+          end
+          if update_state.claimed and update_state.owner ~= actual then
+            waiting_for_update = true
+            update_state.waiting[actual] = true
+            if update_deadline == 0 then
+              update_deadline = os.time() + (tonumber(remuda._butler_codex_update_timeout) or 300)
+            end
+            if update_state.done and update_state.done_version == version then
+              if relaunch_after_update() then return end
+              if modal_wait_expired(screen) then give_up(" modal human attached") end
+              return
+            end
+            if os.time() >= update_deadline then
+              local skip = skip_option_number(screen)
+              if skip and startup_action_safe and startup_action_safe(actual) then
+                pcall(remuda.key, actual, skip)
+                waiting_for_update, settle = false, attempts + 3
+                update_state.waiting[actual] = nil
+                return
+              end
+            end
+            if modal_wait_expired(screen) then give_up(" waiting for Codex update") end
+            return
+          end
+          if waiting_for_update and update_state.done and update_state.done_version == version then
+            if relaunch_after_update() then return end
+          end
+          if update_state.aborted_version == version then
+            local skip = skip_option_number(screen)
+            if skip and startup_action_safe and startup_action_safe(actual) then
+              pcall(remuda.key, actual, skip)
+              settle = attempts + 3
+              return
+            end
+          elseif update_state.done and update_state.done_version == version then
+            local skip = skip_option_number(screen)
+            if skip and startup_action_safe and startup_action_safe(actual) then
+              pcall(remuda.key, actual, skip)
+              settle = attempts + 3
+              return
+            end
+          elseif not update_state.claimed then
+            local update = option_number(screen, function(label)
+              return label:lower():find("update now", 1, true) ~= nil
+            end)
+            if update and startup_action_safe and startup_action_safe(actual) then
+              update_state.claimed, update_state.owner = true, actual
+              update_waiting = true
+              update_deadline = os.time() + (tonumber(remuda._butler_codex_update_timeout) or 300)
+              update_state.waiting = update_state.waiting or {}
+              bus.codex_update_relaunches[actual] = update_relaunch_record()
+              update_relaunch_record_ref = bus.codex_update_relaunches[actual]
+              update_relaunch_record_ref.version = update_version
+              update_relaunch_record_ref.update_pressed = true
+              local pressed = pcall(remuda.key, actual, update)
+              if pressed then
+                return
+              end
+              update_relaunch_record_ref.update_pressed = false
+              bus.codex_update_relaunches[actual] = nil
+              update_relaunch_record_ref = nil
+              update_state.claimed, update_state.owner = false, nil
+            end
+          end
+          local skip = skip_option_number(screen)
+          if skip and startup_action_safe and startup_action_safe(actual) then
+            pcall(remuda.key, actual, skip)
+            settle = attempts + 3
+          else
+            if modal_wait_expired(screen) then give_up(" update dialog") end
+          end
+          return
+        end
+        if modal_wait_expired(screen) then give_up(" modal"); return end
+        if startup_action_safe and not startup_action_safe(actual) then return end
+        for _, key in ipairs(modal.keys or {}) do pcall(remuda.key, actual, key) end
+        settle = attempts + 3
+        return
+      end
+      if not startup.ready or startup.ready(screen) then
+        -- #29: never type the task over a human's line. Waiting is bounded
+        -- separately (default 600 ticks = 300s); then the leader is told.
+        if not remuda._butler_notify_policy(actual) then
+          attempts, deferred = attempts - 1, deferred + 1
+          if deferred >= (remuda._butler_task_poke_deferrals or 600) then give_up(" deferred") end
+          return
+        end
+        remuda.cancel(poke)
+        local typed = pcall(remuda.type_text, actual, task)
+        if not typed then
+          give_up(" type failed")
+          return
+        end
+
+        -- A terminal write succeeding does not mean the agent accepted its
+        -- Return. Keep notices out until the composer releases the task, and
+        -- retry Return if the same task remains in the composer.
+        bus.pending_tasks[actual] = task
+        local task_line = task:gsub("^%s+", ""):match("^[^\n]*") or ""
+        local checks, empty_checks = 0, 0
+        confirm = remuda.schedule({ every = 0.5, run = function()
+          checks = checks + 1
+          local seen, latest = pcall(remuda.capture, actual)
+          if not seen then
+            remuda.cancel(confirm)
+            bus.pending_tasks[actual] = nil
+            return
+          end
+          local decision, text = remuda._butler_prompt_is_empty(kind, latest)
+          local busy = remuda.session(actual).is_busy == true
+          local task_in_composer = #task_line > 0 and (text == task_line
+            or (#text > 0 and task_line:sub(1, #text) == text))
+          if not task_in_composer and decision == "EMPTY" then
+            empty_checks = empty_checks + 1
+          else
+            empty_checks = 0
+          end
+          -- The task can be accepted between type_text and this first poll.
+          -- A fast TUI may also still be painting the text on its first empty
+          -- poll, so require two consecutive empty captures. Busy is definitive.
+          if busy or empty_checks >= 2 then
+            remuda.cancel(confirm)
+            bus.pending_tasks[actual] = nil
+            return
+          end
+          -- Give the UI time to consume the first Return before retrying.
+          if decision == "NON-EMPTY" and task_in_composer and checks >= 4 and checks % 4 == 0 then
+            pcall(remuda.key, actual, "RET")
+          end
+          if checks >= (remuda._butler_task_poke_deferrals or 600) then
+            give_up(" submit")
+          end
+        end })
+        return
+      end
+      if attempts >= (remuda._butler_task_poke_attempts or 60) then give_up("") end
+    end })
+    else
     PROMPT_DELIVERY.schedule(remuda, kind, actual, name, parent, task, {
       ready = startup.ready,
       modals = startup.modals,
@@ -1154,6 +1540,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task)
           .. ". Resend it with `remuda butler send " .. actual .. " TASK` once it is.")
       end,
     })
+    end
   end
   return actual
   end
@@ -1222,10 +1609,10 @@ bus.notices = bus.notices or {}
 bus.notice_screens = bus.notice_screens or {}
 local NOTICE_STABLE_SECONDS = 3
 
--- The composer's text: the last line led (after an optional box edge) by a
--- prompt glyph. Returns "EMPTY" (nothing, or exactly one of the kind's
--- `placeholders`), "NON-EMPTY" or "UNPARSEABLE", plus the text. Capture is
--- plain text, so a dim ghost suggestion reads as NON-EMPTY and defers (#137).
+-- The composer's text starts after the last prompt glyph and includes its
+-- continuation rows up to the TUI footer. Returns "EMPTY" (nothing, or
+-- exactly one of the kind's `placeholders`), "NON-EMPTY" or "UNPARSEABLE",
+-- plus the text. Dim ghost suggestions stay NON-EMPTY and defer (#137).
 local PROMPT_GLYPHS = { "❯", ">", "›" }
 function remuda._butler_prompt_is_empty(kind, screen)
   local text, prompt_at
@@ -1300,29 +1687,68 @@ function remuda._butler_notify_policy(session, now)
     end
     if now - seen.since < NOTICE_STABLE_SECONDS then return false end
   end
+  local full_screen, prompt_screen = screen, screen
   if remuda.capture_styled then
     -- A core with remuda#137 marks dim text: parse only the cursor row, and
     -- drop a TUI's dim ghost suggestion so it reads as the empty prompt it is.
     local captured, styled = pcall(remuda.capture_styled, session)
     if not captured then return false end
-    local parts = {}
-    for _, span in ipairs(styled.rows[styled.cursor.row] or {}) do
-      if not span.dim then parts[#parts + 1] = span.text end
+    local rows = {}
+    for row_index, spans in ipairs(styled.rows or {}) do
+      local parts = {}
+      for _, span in ipairs(spans) do parts[#parts + 1] = span.text end
+      rows[row_index] = table.concat(parts)
     end
-    screen = table.concat(parts)
-  elseif not screen then
+    if not full_screen then full_screen = table.concat(rows, "\n") end
+    local cursor_parts = {}
+    for _, span in ipairs(styled.rows[styled.cursor.row] or {}) do
+      if not span.dim then cursor_parts[#cursor_parts + 1] = span.text end
+    end
+    prompt_screen = table.concat(cursor_parts)
+  end
+  if not full_screen then
     local captured
-    captured, screen = pcall(remuda.capture, session)
+    captured, full_screen = pcall(remuda.capture, session)
     if not captured then return false end
   end
+  prompt_screen = prompt_screen or full_screen
   local agent = bus.agents[session]
   local kind = agent and agent.kind or ""
-  local decision, text = remuda._butler_prompt_is_empty(kind, screen)
+  if known_startup_modal(remuda._butler_agent_startup[kind] or {}, full_screen) then
+    _butler_session_trace("notice_deferred_modal", session .. " " .. kind)
+    return false
+  end
+  local decision, text = remuda._butler_prompt_is_empty(kind, prompt_screen)
   if seen.decision ~= decision then -- once per change, not every retry
     seen.decision = decision
     _butler_session_trace("notice_prompt", session .. " " .. kind .. " " .. decision .. " " .. text)
   end
   return decision == "EMPTY"
+end
+
+-- Startup dialogs are not empty prompts, so task/notice policy cannot be used
+-- to decide whether a key or close is safe. Protect attached human panes using
+-- the same idle/stable-screen rule, while allowing detached panes to proceed.
+startup_action_safe = function(session, now)
+  now = now or os.time()
+  for _, row in ipairs(remuda.ls()) do
+    if row.name == session and row.alive then
+      if not row.attached then return true end
+      if row.human_idle ~= nil then
+        return row.human_idle >= (remuda._butler_notice_human_idle or 10)
+      end
+      local captured, screen = pcall(remuda.capture, session)
+      if not captured then return false end
+      local seen = bus.notice_screens[session] or {}
+      bus.notice_screens[session] = seen
+      if seen.startup_screen ~= screen then
+        seen.startup_screen, seen.startup_since = screen, now
+        return false
+      end
+      return now - (seen.startup_since or now) >= NOTICE_STABLE_SECONDS
+    end
+  end
+  return false
 end
 
 -- A Return retry happens while the delegated task is still in the composer,
@@ -1375,20 +1801,268 @@ function remuda._butler_human_active(session, now)
   return now - seen.since < NOTICE_STABLE_SECONDS
 end
 
--- `_butler_notify` is the seam: queue NOTICE for ALIAS and type it (with any
--- still pending) if the policy allows. Returns delivered, type_text error.
+-- `_butler_notify` queues each notice. Delivery verifies an empty composer;
+-- for an idle stuck composer it uses the bounded, draft-preserving recovery below.
+bus.notice_recoveries = bus.notice_recoveries or {}
+local function pending_notice_text(pending)
+  return pending.count == 1 and pending.text
+    or (pending.count .. " new Butler messages arrived. Read them: remuda butler inbox")
+end
+local function recovery_screen(session)
+  local ok, screen = pcall(remuda.capture, session)
+  if not ok then return nil end
+  local agent = bus.agents[session]
+  local kind = agent and agent.kind or ""
+  local decision, text = remuda._butler_prompt_is_empty(kind, tostring(screen or ""))
+  return screen, decision, text
+end
+local function recovery_draft(kind, screen, first_line)
+  local lines, prompt_at = {}, nil
+  screen = tostring(screen or ""):gsub("\194\160", " "):gsub("\r\n", "\n")
+  for line in (screen .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
+  local composer_text = tostring(first_line or "")
+  local composer_lines = {}
+  for line in (composer_text .. "\n"):gmatch("(.-)\n") do
+    composer_lines[line:match("^%s*(.-)%s*$")] = true
+  end
+  local composer_is_multiline = composer_text:find("\n", 1, true) ~= nil
+  local glyphs = { "❯", ">", "›" }
+  for index, line in ipairs(lines) do
+    local rest = line:gsub("^%s+", "")
+    if rest:sub(1, 3) == "│" then rest = rest:sub(4):gsub("^%s+", "") end
+    for _, glyph in ipairs(glyphs) do
+      if rest:sub(1, #glyph) == glyph then prompt_at = index end
+    end
+  end
+  if not prompt_at then return nil, false end
+  local parts = { composer_text }
+  for index = prompt_at + 1, #lines do
+    local rest = lines[index]:gsub("^%s+", "")
+    if rest == "" then
+      -- Empty rows can separate a boxed prompt from its lower border.
+    elseif rest:sub(1, 3) == "╰" or rest:sub(1, 3) == "└" or rest:sub(1, 3) == "─" then
+      break
+    elseif kind == "claude" and rest:sub(1, 3) == "│" then
+      local continuation = rest:sub(4):gsub("│%s*$", ""):match("^%s*(.-)%s*$")
+      if continuation ~= "" then
+        if composer_is_multiline then
+          if not composer_lines[continuation] then return nil, false end
+        else
+          parts[#parts + 1] = continuation
+        end
+      end
+    elseif kind == "codex" and (rest:match("^%? for shortcuts")
+        or rest:lower():find("context left", 1, true)
+        or rest:match("^[^%s]+%s+[^%s]+%s+·")) then
+      -- Known Codex model/path and help footer rows are outside the composer.
+    elseif composer_is_multiline and composer_lines[rest:match("^%s*(.-)%s*$")] then
+      -- This row was already parsed into the full composer text.
+    else
+      -- Don't erase a multiline draft when the TUI's continuation rows
+      -- cannot be distinguished from footer text.
+      return nil, false
+    end
+  end
+  return table.concat(parts, "\n"), true
+end
+local function normalized_composer(text)
+  return tostring(text or ""):gsub("\194\160", " "):gsub("\r\n", "\n"):gsub("\r", "\n")
+    :match("^%s*(.-)%s*$")
+end
+local function compact_composer(text)
+  return tostring(text or ""):gsub("\194\160", " "):gsub("%s+", "")
+end
+local function notice_matches_composer(session, screen, text, expected)
+  local agent = bus.agents[session]
+  local composer, safe = recovery_draft(agent and agent.kind or "", screen, text)
+  local expected_compact = compact_composer(expected)
+  return (safe and compact_composer(composer) == expected_compact)
+    or compact_composer(text) == expected_compact
+end
+local function recovery_composer_empty(session, screen, decision, text)
+  if decision ~= "EMPTY" then return false end
+  local agent = bus.agents[session]
+  local composer, safe = recovery_draft(agent and agent.kind or "", screen, "")
+  return safe and normalized_composer(composer) == ""
+end
+local function notice_recovery_error(session, state, reason)
+  state.failed = true
+  local agent = bus.agents[session]
+  local parent = agent and agent.parent or "butler"
+  _butler_session_trace("notice_recovery_failed", session .. " " .. reason)
+  pcall(remuda._butler_send, "butler", parent,
+    "Could not safely deliver queued Butler mail to " .. session .. ": " .. reason
+    .. ". Inspect the composer and resend the notice."
+    .. (state.draft and (" Parsed composer draft: " .. state.draft) or ""))
+  return false
+end
+local function complete_notice_recovery(session, state)
+  local pending = bus.notices[session]
+  if pending then
+    pending.count = pending.count - state.count
+    if pending.count <= 0 then bus.notices[session] = nil end
+  end
+  bus.notice_recoveries[session] = nil
+  return true
+end
+local function recovery_human_safe(session)
+  local session_row
+  for _, candidate in ipairs(remuda.ls()) do
+    if candidate.name == session then session_row = candidate end
+  end
+  if not session_row or not session_row.alive or session_row.attached then return false end
+  if remuda._butler_human_active(session) then return false end
+  if remuda.session then
+    local ok, row = pcall(remuda.session, session)
+    if not ok or not row or row.is_busy then return false end
+  end
+  return true
+end
+local function begin_notice_submit(session, state, draft)
+  local pending = bus.notices[session]
+  if not pending then bus.notice_recoveries[session] = nil; return true end
+  state.draft = draft
+  state.count = pending.count
+  state.notice = pending_notice_text(pending)
+  if draft and draft ~= "" then
+    state.notice = state.notice .. "\n\nYour unsent draft was: " .. draft
+  end
+  bus.notice_recoveries[session] = state
+  local typed, why = pcall(remuda.type_text, session, state.notice, 0.1)
+  if not typed then return notice_recovery_error(session, state, "the notice could not be typed: " .. tostring(why)) end
+  state.phase, state.checks, state.saw_notice = "verify_notice", 0, false
+  return false
+end
+local function tick_notice_recovery(session, state)
+  if state.failed then return false end
+  if not recovery_human_safe(session) then return false end
+  state.checks = (state.checks or 0) + 1
+  if state.checks > 40 then return notice_recovery_error(session, state, "verification timed out") end
+  local screen, decision, text = recovery_screen(session)
+  if not screen then return notice_recovery_error(session, state, "the pane could not be captured") end
+  local normalized = tostring(screen):gsub("\r\n", "\n"):gsub("\r", "\n")
+  if state.phase == "probe" then
+    if state.last_screen == normalized then state.stable = (state.stable or 0) + 1
+    else state.last_screen, state.stable = normalized, 1 end
+    if state.stable < 2 then return false end
+    if decision == "EMPTY" then
+      bus.notice_recoveries[session] = nil
+      return begin_notice_submit(session, state)
+    end
+    state.pre_redraw_decision, state.pre_redraw_screen, state.pre_redraw_text = decision, screen, text
+    local redrawn, why = pcall(remuda.key, session, "C-l")
+    if not redrawn then return notice_recovery_error(session, state, "Ctrl-L redraw failed: " .. tostring(why)) end
+    state.phase = "redrawn"
+    return false
+  elseif state.phase == "redrawn" then
+    if decision == "EMPTY" then
+      if state.pre_redraw_decision == "NON-EMPTY" then
+        local pending = pending_notice_text(bus.notices[session] or { count = 0, text = "" })
+        if notice_matches_composer(session, state.pre_redraw_screen, state.pre_redraw_text, pending) then
+          return begin_notice_submit(session, state)
+        end
+        local agent = bus.agents[session]
+        local draft, safe = recovery_draft(agent and agent.kind or "", state.pre_redraw_screen,
+          state.pre_redraw_text)
+        if not safe then
+          return notice_recovery_error(session, state, "the pre-redraw draft could not be preserved")
+        end
+        return begin_notice_submit(session, state, draft)
+      end
+      return begin_notice_submit(session, state)
+    end
+    if decision == "UNPARSEABLE" or not text or text == "" then
+      return notice_recovery_error(session, state, "the composer remained unparseable after Ctrl-L")
+    end
+    local current_notice = pending_notice_text(bus.notices[session] or { count = 0, text = "" })
+    if notice_matches_composer(session, screen, text, current_notice) then
+      local pressed, why = pcall(remuda.key, session, "RET")
+      if not pressed then return notice_recovery_error(session, state, "the existing Butler notice could not be submitted: " .. tostring(why)) end
+      state.phase, state.checks = "verify_existing", 0
+      return false
+    end
+    local agent = bus.agents[session]
+    local startup = remuda._butler_agent_startup[agent and agent.kind or ""] or {}
+    local draft, safe = recovery_draft(agent and agent.kind or "", screen, text)
+    if not safe then
+      return notice_recovery_error(session, state, "the draft spans unrecognized composer rows")
+    end
+    if not startup.clear_input then
+      state.draft = draft
+      return notice_recovery_error(session, state, "this agent has no verified composer clear key")
+    end
+    state.draft = draft
+    local cleared, why = pcall(remuda.key, session, startup.clear_input)
+    if not cleared then return notice_recovery_error(session, state, "the draft clear key failed: " .. tostring(why)) end
+    state.phase, state.checks = "verify_clear", 0
+    return false
+  elseif state.phase == "verify_clear" then
+    if not recovery_composer_empty(session, screen, decision, text) then
+      return notice_recovery_error(session, state, "the composer did not become empty after the clear key")
+    end
+    return begin_notice_submit(session, state, state.draft)
+  elseif state.phase == "verify_existing" then
+    if decision == "EMPTY" then
+      return complete_notice_recovery(session, state)
+    end
+    if state.checks >= 6 then
+      return notice_recovery_error(session, state, "the existing Butler notice did not leave the composer")
+    end
+    return false
+  elseif state.phase == "verify_notice" then
+    local notice_head = tostring(state.notice or ""):gsub("%s+", ""):sub(1, 32)
+    local notice_visible = notice_head ~= "" and normalized:gsub("%s+", ""):find(notice_head, 1, true) ~= nil
+    if notice_visible or (decision == "NON-EMPTY"
+        and notice_matches_composer(session, screen, text, state.notice)) then
+      state.saw_notice = true
+    end
+    local agent = bus.agents[session]
+    local non_tui_echo = decision == "UNPARSEABLE" and agent
+      and agent.kind ~= "claude" and agent.kind ~= "codex" and notice_visible
+    if (decision == "EMPTY" and state.saw_notice) or non_tui_echo then
+      return complete_notice_recovery(session, state)
+    end
+    if decision == "NON-EMPTY" and notice_matches_composer(session, screen, text, state.notice)
+        and not state.return_retried then
+      if not recovery_human_safe(session) then return false end
+      local pressed, why = pcall(remuda.key, session, "RET")
+      if not pressed then return notice_recovery_error(session, state, "the notice Return failed: " .. tostring(why)) end
+      state.return_retried = true
+      return false
+    end
+    if state.checks >= 12 then
+      return notice_recovery_error(session, state, "the notice submit could not be verified")
+    end
+    return false
+  end
+  return notice_recovery_error(session, state, "unknown recovery state")
+end
 local function deliver_notice(session)
   local pending = bus.notices[session]
   if not pending then return true end
   if bus.pending_tasks[session] then return false end
-  if not remuda._butler_notify_policy(session) then return false end
-  local text = pending.count == 1 and pending.text
-    or (pending.count .. " new Butler messages arrived. Read them: remuda butler inbox")
-  local typed, why = pcall(remuda.type_text, session, text)
-  -- Keep a notice that failed to type for the next retry; the exit hook
-  -- drops it if the session is gone.
-  if typed then bus.notices[session] = nil end
-  return typed, why
+  local recovering = bus.notice_recoveries[session]
+  if recovering then
+    if (recovering.failed or recovering.phase == "probe" or recovering.phase == "redrawn")
+        and remuda._butler_notify_policy(session) then
+      bus.notice_recoveries[session] = nil
+      recovering = nil
+    else
+      return tick_notice_recovery(session, recovering)
+    end
+  end
+  if remuda._butler_notify_policy(session) then
+    local state = { phase = "verify_notice", count = pending.count, notice = pending_notice_text(pending), checks = 0 }
+    local typed, why = pcall(remuda.type_text, session, state.notice, 0.1)
+    if not typed then return false, why end
+    bus.notice_recoveries[session] = state
+    return false
+  end
+  local screen, decision = recovery_screen(session)
+  if not screen or decision == "EMPTY" then return false end
+  local state = { phase = "probe", count = pending.count, checks = 0 }
+  bus.notice_recoveries[session] = state
+  return tick_notice_recovery(session, state)
 end
 function remuda._butler_notify(alias, notice)
   local pending = bus.notices[alias] or { count = 0 }
@@ -1755,6 +2429,9 @@ command(80, "forward", "  remuda butler forward <message-id> <member> [note...]"
   if #args < 3 then return nil end
   return remuda._butler_forward(current_agent(caller) or OPERATOR, args[2], args[3],
     #args >= 4 and words_after(args, 4) or nil)
+end)
+command(100, "matrix", remuda.butler.matrix.cli_usage(), function(args, caller)
+  return remuda.butler.matrix.cli(args, current_agent(caller))
 end)
 remuda._butler_command_run = function(verb, args, caller)
   local entry = command_entries[verb]
@@ -2141,9 +2818,8 @@ function remuda._butler_reconcile()
   end
   return result
 end
--- The session_exited hook only carries the session name. Remember an explicit
--- remuda.close call long enough for the hook to distinguish it from an agent
--- process ending on its own.
+-- Remember an explicit remuda.close call for older cores whose session_exited
+-- event carries only the session name.
 if not bus.close_wrapper_installed and type(remuda.close) == "function" then
   local close_session = remuda.close
   bus.close_wrapper_installed = true
@@ -2159,10 +2835,55 @@ if not bus.close_wrapper_installed and type(remuda.close) == "function" then
     return a, b, c
   end
 end
-function remuda._butler_session_exited(name)
+local function report_update_task_not_relaunched(record, reason)
+  if not record or not record.task or record.task == "" then return end
+  pcall(remuda._butler_send, "butler", record.parent or "butler",
+    "Task for " .. record.name .. " was not delivered because its Codex update ended without a safe relaunch ("
+      .. tostring(reason or "update aborted") .. "). Resend it with `remuda butler send "
+      .. record.name .. " TASK` when the pane is ready.")
+end
+function remuda._butler_session_exited(name, info)
   _butler_session_trace("session_exited", name)
+  local update_restart = bus.codex_update_relaunches[name]
+  local explicitly_closed = bus.close_requested and bus.close_requested[name]
+  local reason = type(info) == "table" and info.reason or nil
+  local exit_code = type(info) == "table" and tonumber(info.exit_code) or nil
+  local saw_success = update_restart and (update_restart.update_complete_seen
+    or codex_update_complete(update_restart.last_screen))
+  local exited_successfully = update_restart and update_restart.update_pressed
+    and reason == "exited" and exit_code == 0
+  local closed_by_person = explicitly_closed or reason == "closed"
+  if update_restart and not update_restart.expected_close
+      and (closed_by_person or not saw_success and not exited_successfully) then
+    -- Older cores carry only the name; newer cores report reason and exit code.
+    -- A human close always wins, while successful exits can use either signal.
+    update_restart.cancelled = true
+    bus.codex_update_relaunches[name] = nil
+    if bus.codex_update_state.waiting then bus.codex_update_state.waiting[name] = nil end
+    if bus.codex_update_state.owner == name then
+      bus.codex_update_state.claimed, bus.codex_update_state.owner = false, nil
+      bus.codex_update_state.done, bus.codex_update_state.done_version = false, nil
+      bus.codex_update_state.aborted_version = update_restart.version
+      bus.codex_update_state.waiting, bus.codex_update_state.restart_waiting = {}, {}
+    end
+    _butler_session_trace("codex_update_exit_unconfirmed", name)
+    report_update_task_not_relaunched(update_restart, closed_by_person and "closed by a person" or "update did not report success")
+    update_restart = nil
+  end
+  if update_restart then
+    update_restart.relaunched = true
+    bus.codex_update_relaunches[name] = nil
+    local update_state = bus.codex_update_state
+    update_state.done, update_state.claimed = true, false
+    update_state.done_version = update_restart.version
+    update_state.owner = nil
+    update_state.restart_waiting = update_state.restart_waiting or {}
+    for member in pairs(update_state.waiting or {}) do update_state.restart_waiting[member] = true end
+    update_state.waiting = {}
+  end
   -- #29: the mail stays in the inbox; only the pending pane notice goes.
   bus.notices[name], bus.notice_screens[name], bus.pending_tasks[name] = nil, nil, nil
+  bus.notice_recoveries[name], bus.task_retry_screens[name], bus.human_activity_screens[name] = nil, nil, nil
   local exited = bus.agents[name]
   if exited and name ~= "butler" then
     local ended = bus.identity_ids[exited.id] or exited
@@ -2184,6 +2905,17 @@ function remuda._butler_session_exited(name)
   if name == butler_name then
     _butler_session_trace("relaunching", name)
     remuda._butler_reconcile()
+  end
+  if update_restart then
+    _butler_session_trace("codex_updated_relaunch", name)
+    local ok, err = pcall(launch_agent, update_restart.kind, update_restart.name,
+      update_restart.cwd, update_restart.model, update_restart.parent, update_restart.task,
+      update_restart.identity)
+    if not ok then
+      _butler_session_trace("codex_updated_relaunch_failed", name .. ": " .. tostring(err))
+      pcall(remuda._butler_send, "butler", update_restart.parent or "butler",
+        "Codex update completed but " .. name .. " could not be relaunched: " .. tostring(err))
+    end
   end
 end
 
@@ -2225,10 +2957,16 @@ remuda.tool{
   args = { text = "The reply text to send." },
   needs = { "text" },
   run = function(a)
-    remuda.process{
-      argv = {"bash", "-c", REPLY_SRC, "_", token_path, config_path, a.text},
-      on_exit = "butler-matrix-reply-exit",
-    }
+    local synchronous, invoking = nil, true
+    remuda.butler.matrix.send({ text = a.text }, function(result)
+      if invoking then synchronous = result
+      elseif result and result.error then
+        remuda.emit("butler-matrix-error", "send", result.error)
+        io.stderr:write("butler Matrix send failed: " .. tostring(result.error) .. "\n")
+      end
+    end)
+    invoking = false
+    if synchronous and synchronous.error then error(synchronous.error, 0) end
     return "queued"
   end,
 }

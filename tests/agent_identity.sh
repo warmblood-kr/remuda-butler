@@ -48,7 +48,7 @@ start_private_daemon() {
   "$REMUDA_BIN" -s "$SERVER" daemon >"$INSTANCE/daemon.log" 2>&1 &
   DAEMON_PID=$!
   ATTEMPT=0
-  while ! python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.settimeout(.1); s.connect(sys.argv[1])' "$SOCKET" >/dev/null 2>&1; do
+  while [ ! -S "$SOCKET" ] || ! "$REMUDA_BIN" -s "$SERVER" ls >/dev/null 2>&1; do
     ATTEMPT=$((ATTEMPT + 1))
     if [ "$ATTEMPT" -ge 100 ] || ! kill -0 "$DAEMON_PID" >/dev/null 2>&1; then
       cat "$INSTANCE/daemon.log" >&2
@@ -59,6 +59,7 @@ start_private_daemon() {
 }
 
 stop_private_daemon() {
+  [ "$REMUDA_RUNTIME_DIR" = "$INSTANCE/runtime" ] || fail "refusing to stop outside the current scratch runtime"
   "$REMUDA_BIN" -s "$SERVER" stop -f >/dev/null 2>&1 || true
   if [ -n "$DAEMON_PID" ]; then
     wait "$DAEMON_PID" >/dev/null 2>&1 || true
@@ -105,15 +106,10 @@ echo "ok - ULIDs increase within the same second"
 lua 'remuda._butler_agent_builders.fake = function() return {"sh", "-c", "env | grep ^REMUDA_BUTLER_; sleep 8"} end; remuda._butler_launch("fake", "member")' >/dev/null
 MEMBER_ID=$(lua 'return remuda._butler_bus.agents.member.id or ""')
 expect_ulid "member id" "$MEMBER_ID"
-RUNNING_ROW=$(python3 - "$REGISTRY" "$MEMBER_ID" <<'PY'
-import json, sys
-rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
-row = next(row for row in reversed(rows) if row["id"] == sys.argv[2])
-print(json.dumps(row))
-PY
-)
-[[ $RUNNING_ROW == *'"state": "running"'* ]] || fail "launch row lacks state=running: $RUNNING_ROW"
-CREATED_AT=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["created_at"])' "$RUNNING_ROW")
+RUNNING_ROW=$(awk -v id="$MEMBER_ID" 'index($0, "\"id\":\"" id "\"") { row=$0 } END { print row }' "$REGISTRY")
+[[ $RUNNING_ROW == *'"state":"running"'* ]] || fail "launch row lacks state=running: $RUNNING_ROW"
+CREATED_AT=$(printf '%s\n' "$RUNNING_ROW" | sed -n 's/.*"created_at":"\([^"]*\)".*/\1/p')
+[[ -n $CREATED_AT ]] || fail "running row has no created_at: $RUNNING_ROW"
 AGENTS=$("$REMUDA_BIN" -s "$SERVER" butler agents)
 [[ $AGENTS == *$'ID\tALIAS\tKIND\tLEADER\tSTATE\tREASON\tCREATED\tENDED'* ]] || fail "agents command has no expected header: $AGENTS"
 [[ $AGENTS == *"$MEMBER_ID"* && $AGENTS == *$'running'* ]] || fail "agents command omits the running member: $AGENTS"
@@ -152,15 +148,10 @@ for _ in $(seq 100); do
   sleep 0.1
 done
 lua 'return remuda._butler_bus.agents.member == nil' | grep -qx true || fail "exited member remained live"
-ENDED_ROW=$(python3 - "$REGISTRY" "$MEMBER_ID" <<'PY'
-import json, sys
-rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
-row = next(row for row in reversed(rows) if row["id"] == sys.argv[2])
-print(json.dumps(row))
-PY
-)
-[[ $ENDED_ROW == *'"state": "ended"'* && $ENDED_ROW == *'"reason": "exited"'* ]] || fail "exit row lacks lifecycle state/reason: $ENDED_ROW"
-ENDED_CREATED_AT=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["created_at"])' "$ENDED_ROW")
+ENDED_ROW=$(awk -v id="$MEMBER_ID" 'index($0, "\"id\":\"" id "\"") { row=$0 } END { print row }' "$REGISTRY")
+[[ $ENDED_ROW == *'"state":"ended"'* && $ENDED_ROW == *'"reason":"exited"'* ]] || fail "exit row lacks lifecycle state/reason: $ENDED_ROW"
+ENDED_CREATED_AT=$(printf '%s\n' "$ENDED_ROW" | sed -n 's/.*"created_at":"\([^"]*\)".*/\1/p')
+[[ -n $ENDED_CREATED_AT ]] || fail "ended row has no created_at: $ENDED_ROW"
 [[ $CREATED_AT == "$ENDED_CREATED_AT" ]] || fail "ended row rewrote created_at: $CREATED_AT -> $ENDED_CREATED_AT"
 [[ $("$REMUDA_BIN" -s "$SERVER" butler agents) != *"$MEMBER_ID"* ]] || fail "agents without --all included an ended member"
 [[ $("$REMUDA_BIN" -s "$SERVER" butler agents --all) == *"$MEMBER_ID"* ]] || fail "agents --all omitted an ended member"
@@ -172,14 +163,8 @@ for _ in $(seq 50); do
   if lua 'return remuda._butler_bus.agents.closer == nil' | grep -qx true; then break; fi
   sleep 0.1
 done
-CLOSED_ROW=$(python3 - "$REGISTRY" "$CLOSER_ID" <<'PY'
-import json, sys
-rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
-row = next(row for row in reversed(rows) if row["id"] == sys.argv[2])
-print(json.dumps(row))
-PY
-)
-[[ $CLOSED_ROW == *'"reason": "closed"'* ]] || fail "explicit close was not recorded as closed: $CLOSED_ROW"
+CLOSED_ROW=$(awk -v id="$CLOSER_ID" 'index($0, "\"id\":\"" id "\"") { row=$0 } END { print row }' "$REGISTRY")
+[[ $CLOSED_ROW == *'"reason":"closed"'* ]] || fail "explicit close was not recorded as closed: $CLOSED_ROW"
 echo "ok - explicit remuda.close is recorded as closed"
 lua 'remuda._butler_agent_builders.fake = function() return {"sleep", "30"} end' >/dev/null
 lua 'remuda._butler_launch("fake", "member")' >/dev/null
@@ -196,14 +181,8 @@ start_private_daemon
 load_butler
 ROOT_ID_AFTER_RESTART=$(lua 'return remuda._butler_bus.agents.butler.id or ""')
 [[ $ROOT_ID_AFTER_RESTART == "$ROOT_ID" ]] || fail "root id changed across daemon restart: $ROOT_ID -> $ROOT_ID_AFTER_RESTART"
-RESTART_ROW=$(python3 - "$REGISTRY" "$MEMBER_ID_2" <<'PY'
-import json, sys
-rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
-row = next(row for row in reversed(rows) if row["id"] == sys.argv[2])
-print(json.dumps(row))
-PY
-)
-[[ $RESTART_ROW == *'"state": "ended"'* && $RESTART_ROW == *'"reason": "daemon_restart"'* && $RESTART_ROW == *'"ended_at_estimate": true'* ]] || \
+RESTART_ROW=$(awk -v id="$MEMBER_ID_2" 'index($0, "\"id\":\"" id "\"") { row=$0 } END { print row }' "$REGISTRY")
+[[ $RESTART_ROW == *'"state":"ended"'* && $RESTART_ROW == *'"reason":"daemon_restart"'* && $RESTART_ROW == *'"ended_at_estimate":true'* ]] || \
   fail "restart row lacks estimated daemon_restart state: $RESTART_ROW"
 echo "ok - root Butler id survives a daemon restart"
 stop_private_daemon

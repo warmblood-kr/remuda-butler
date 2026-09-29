@@ -22,7 +22,7 @@ surfaces:
   package loading, Matrix helper, mail, telemetry, agent, topic, and recovery
   tests. These tests should be split into focused Butler tests during the
   extraction; the non-Butler daemon tests remain in Remuda core.
-- `scripts/check-butler-path-convention.py` — currently cross-checks Butler
+- `scripts/check-butler-path-convention.lua` — cross-checks Butler
   installer paths against the package and daemon loader. It should move here
   with its core-side check reduced to a documented compatibility contract.
 

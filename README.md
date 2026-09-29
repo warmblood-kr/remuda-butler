@@ -64,8 +64,10 @@ until the generic external CLI/client contract is implemented in Remuda core.
 ## Contents
 
 - `packages/butler/`: Butler core, mail, telemetry, and agent adapters.
-- `packages/butler/matrix.lua` and `matrix_relay.py`: the inbound Matrix
-  channel behind one internal entry point, shaped for a later extraction.
+- `packages/butler/matrix.lua`, `matrix_request.lua`, `matrix_read.lua`,
+  `matrix_write.lua`, and `matrix_relay.lua`: the Matrix relay and command
+  composites. See the [Matrix command and configuration
+  reference](docs/butler.md#matrix-commands-and-configuration).
 - `cli/butler_cli.rs`: current Butler command shim to extract into a standalone
   CLI.
 - `install/install-butler.sh`: config validation, bootstrap, loader, and
@@ -74,8 +76,10 @@ until the generic external CLI/client contract is implemented in Remuda core.
 - `tests/butler_daemon.rs`, `tests/butler_mcp.rs` and `tests/support/`: Butler's
   Rust integration tests. `tests/rust_tests.sh` builds them inside a pinned
   Remuda core checkout and runs the Butler ones; CI runs it on every PR.
-- `scripts/check-butler-path-convention.py`: path consistency check spanning
+- `scripts/check-butler-path-convention.lua`: path consistency check spanning
   the Butler installer and the Remuda daemon loader.
+- `scripts/check-no-python.sh`: CI guard for Python files and invocations;
+  its Matrix and statusLine exceptions have explicit ownership TODOs.
 - `BUTLER_MIGRATION.md`: boundary, retained core responsibilities, risks, and
   extraction sequence.
 

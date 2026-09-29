@@ -21,6 +21,44 @@ local function boot()
   host.emit("butler-start")
 end
 
+-- Retire only the process handle recorded by the legacy Matrix relay. The
+-- handle is scoped to this Remuda image; require its old script location to
+-- match the exact path that the Butler module used under its install dir.
+local function stop_legacy_matrix_relay()
+  -- The pre-extraction Butler stored its relay in this host slot.
+  -- It has no script-path argv to verify; the daemon-owned handle and current
+  -- process membership are the identity boundary for this one-time upgrade stop.
+  local old_id = host._butler_relay
+  if old_id ~= nil then
+    if type(host.processes) == "function" and type(host.kill) == "function" then
+      for _, running_id in ipairs(host.processes()) do
+        if running_id == old_id then
+          pcall(host.kill, old_id)
+          break
+        end
+      end
+    end
+    host._butler_relay = nil
+  end
+
+  local id = host._butler_matrix_relay
+  if id == nil or type(host.processes) ~= "function" or type(host.kill) ~= "function" then return end
+  local data_home = os.getenv("XDG_DATA_HOME")
+  if not data_home or data_home == "" then data_home = (os.getenv("HOME") or "") .. "/.local/share" end
+  local mod_dir = data_home .. "/remuda/mods/butler"
+  local expected_script = mod_dir .. "/packages/butler/matrix_relay.py"
+  local script = host._butler_matrix_relay_script_path or expected_script
+  if script ~= expected_script or not script:match("^" .. mod_dir:gsub("([^%w])", "%%%1") .. "/") then return end
+  for _, running_id in ipairs(host.processes()) do
+    if running_id == id then
+      pcall(host.kill, id)
+      break
+    end
+  end
+  host._butler_matrix_relay = nil
+  host._butler_matrix_relay_script_path = nil
+end
+
 local fallback
 if host._butler_start_fallback then host.cancel(host._butler_start_fallback) end
 fallback = host.schedule({ name = "butler-start-fallback", every = 0.05, run = function()
@@ -41,32 +79,34 @@ return {
   start = function(state)
     host._butler_state = state
     boot()
-    if host._butler_matrix_start then host._butler_matrix_start() end
+    stop_legacy_matrix_relay()
+    local matrix = host.butler and host.butler.matrix
+    if matrix and matrix.relay and not host._butler_skip_relay
+      and type(host.http) == "table" and type(host.http.request) == "function" then
+      matrix.relay.start(host._butler_matrix_config)
+    end
   end,
   stop = function(state)
     if host._butler_cancel_active_choosers then host._butler_cancel_active_choosers(state) end
-    if host._butler_matrix_stop then pcall(host._butler_matrix_stop) end
-    local relay = state.relay or host._butler_relay
-    if relay then pcall(host.kill, relay) end
-    state.relay = nil
-    host._butler_relay = nil
+    local matrix = host.butler and host.butler.matrix
+    if matrix and matrix.relay then pcall(matrix.relay.stop)
+    end
+    stop_legacy_matrix_relay()
     if host._butler_start_fallback then host.cancel(host._butler_start_fallback) end
     host._butler_start_fallback = nil
   end,
   hooks = {
     { event = "butler-start", id = "boot", run = load_main },
     { event = "butler/deliver", id = "inbox", depth = 0,
-      run = function(_, message) return host._butler_inbox_delivery(message) end },
+      run = function(_, message)
+        local ok, result = pcall(host._butler_inbox_delivery, message)
+        if not ok then return { __butler_delivery_hook_error = tostring(result) } end
+        return result
+      end },
     { event = "session_exited", id = "identity", depth = -50,
-      run = function(_, name) return host._butler_session_exited(name) end },
+      run = function(_, name, info) return host._butler_session_exited(name, info) end },
     { event = "butler-compaction-submit", id = "submit",
       run = function() return host._butler_compaction_submit() end },
-    { event = "butler-matrix-line", id = "matrix-line",
-      run = function(_, line) return host._butler_matrix_line(line) end },
-    { event = "butler-matrix-submit", id = "matrix-submit",
-      run = function() return host._butler_matrix_submit() end },
-    { event = "butler-matrix-sync-exit", id = "matrix-supervisor",
-      run = function(_, code) return host._butler_matrix_sync_exit(code) end },
   },
   schedules = {
     { name = "butler-notices", every = 1, run = function()
@@ -143,6 +183,23 @@ team members. `remuda butler send FROM TO MESSAGE...` is an operator form, not
 the normal way for a member to communicate.
 ]]
         end },
+      { id = "matrix", order = 50,
+        agents_md = function()
+          return [[Matrix is the human-facing adapter: never call the homeserver REST API or curl directly; use `remuda butler matrix [OPTIONS] VERB ARGS`. Options go BEFORE the verb (`--json` for machine output; `--room ROOM` defaults to the configured room).
+- `status`: whoami, joined rooms, and the sync cursor.
+- `[-n N] history`: recent messages in the room.
+- `rooms`: joined rooms (read-only).
+- `thread EVENT_ID`: all replies in a thread.
+- `event EVENT_ID` (alias `get`): one event.
+- `send TEXT`: post a message (long text is split, rate-limited); `send -` is refused until core #213.
+- `reply EVENT_ID TEXT` / `react EVENT_ID KEY`: answer or react (same room only).
+- `upload PATH`: post a file (up to 20 MB). `[-o PATH] download MXC`: fetch media.
+- `redact EVENT_ID [--reason TEXT]`: remove your message.
+]]
+        end,
+        prompt = function()
+          return "For Matrix, use `remuda butler matrix VERB`; never call Matrix REST or curl directly. "
+        end },
       { id = "leader", order = 90,
         prompt = function(_, ctx) return "Your leader is " .. ctx.parent .. "." end },
     },
@@ -168,6 +225,21 @@ the normal way for a member to communicate.
         run = function(_, args, caller) return host._butler_command_run("reply", args, caller) end },
       { id = "forward", order = 80, verb = "forward", usage = "  remuda butler forward <message-id> <member> [note...]",
         run = function(_, args, caller) return host._butler_command_run("forward", args, caller) end },
+      { id = "matrix", order = 100, verb = "matrix",
+        usage = [[  remuda butler matrix [--json] status
+  remuda butler matrix [--json] rooms
+  remuda butler matrix [--json] [--room ROOM] [-n N] history
+  remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
+  remuda butler matrix [--json] [-o PATH] download MXC
+  remuda butler matrix [--json] [--room ROOM] send TEXT
+  remuda butler matrix [--json] [--room ROOM] reply EVENT_ID TEXT
+  remuda butler matrix [--json] [--room ROOM] react EVENT_ID KEY
+  remuda butler matrix [--json] [--room ROOM] upload PATH
+  remuda butler matrix [--json] [--room ROOM] redact EVENT_ID [--reason TEXT]
+  remuda butler matrix [--json] join ROOM (operator)
+  remuda butler matrix [--json] leave ROOM (operator)]],
+        run = function(_, args, caller) return host._butler_command_run("matrix", args, caller) end },
     },
   },
 }
