@@ -394,12 +394,12 @@ fn narrow_claude_wrapped_notice_is_verified_and_submitted() {
         &path,
         r#"
         local row = { name = 'm1', alive = true, attached = false }
-        local state = { columns = 27, events = {}, screen = '❯ \n', submitted = false }
+        local state = { columns = 27, events = {}, screen = '❯ \n', submitted = false, busy = false }
         remuda._notice_test_state = state
         remuda._butler_bus.agents.m1.kind = 'claude'
         remuda.capture_styled = nil
         remuda.ls = function() return { row } end
-        remuda.session = function() return { is_busy = false } end
+        remuda.session = function() return { is_busy = state.busy } end
         remuda.capture = function() return state.screen end
         remuda._butler_notify_policy = function() return true end
         local function render_notice(text)
@@ -432,7 +432,9 @@ fn narrow_claude_wrapped_notice_is_verified_and_submitted() {
         end
         remuda.key = function(_, key)
           table.insert(state.events, 'key ' .. key)
-          if key == 'RET' then state.screen = '❯ ' .. string.rep(' ', state.columns - 2)
+          if key == 'RET' then
+            state.submitted, state.busy = true, true
+            state.screen = '❯ ' .. string.rep(' ', state.columns - 2)
             .. '\n' .. string.rep('─', state.columns) .. '\n  MODEL:Opus-5.5 CTX:13925…' end
         end
         remuda._butler_send('operator', 'm1', 'narrow pane notice')
