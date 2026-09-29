@@ -2372,7 +2372,8 @@ local function begin_notice_submit(session, state, draft)
     state.phase = "retry_type"
     return false
   end
-  if not typed then return notice_recovery_error(session, state, "the notice could not be typed: " .. tostring(why)) end
+  if not typed then return notice_recovery_error(session, state,
+    "the notice could not be typed: " .. tostring(why or result)) end
   state.phase, state.checks, state.saw_notice = "verify_notice", 0, false
   return false
 end
@@ -2433,7 +2434,8 @@ local function tick_notice_recovery(session, state)
     if notice_matches_composer(session, screen, text, current_notice) then
       local pressed, result, why = pcall(remuda.key, session, "RET")
       if input_was_busy(pressed, result, why) then return false end
-      if not pressed then return notice_recovery_error(session, state, "the existing Butler notice could not be submitted: " .. tostring(why)) end
+      if not pressed then return notice_recovery_error(session, state,
+        "the existing Butler notice could not be submitted: " .. tostring(why or result)) end
       state.phase, state.checks, state.notice = "verify_existing", 0, current_notice
       state.message_ids = {}
       for _, id in ipairs((bus.notices[session] or {}).message_order or {}) do
@@ -2493,7 +2495,8 @@ local function tick_notice_recovery(session, state)
       if not recovery_human_safe(session) then return false end
       local pressed, result, why = pcall(remuda.key, session, "RET")
       if input_was_busy(pressed, result, why) then return false end
-      if not pressed then return notice_recovery_error(session, state, "the notice Return failed: " .. tostring(why)) end
+      if not pressed then return notice_recovery_error(session, state,
+        "the notice Return failed: " .. tostring(why or result)) end
       state.return_retried = true
       return false
     end
@@ -2527,7 +2530,7 @@ local function deliver_notice(session)
     for _, id in ipairs(pending.message_order or {}) do state.message_ids[#state.message_ids + 1] = id end
     local typed, result, why = pcall(remuda.type_text, session, state.notice, 0.1)
     if input_was_busy(typed, result, why) then return false, "busy" end
-    if not typed then return false, why end
+    if not typed then return false, why or result end
     bus.notice_recoveries[session] = state
     return false
   end
