@@ -2087,6 +2087,8 @@ local function notice_recovery_error(session, state, reason)
     "Could not safely deliver queued Butler mail to " .. session .. ": " .. reason
     .. ". Inspect the composer and resend the notice."
     .. (state.draft and (" Parsed composer draft: " .. state.draft) or ""))
+  bus.notices[session] = nil
+  bus.notice_recoveries[session] = nil
   return false
 end
 local function complete_notice_recovery(session, state)
@@ -2429,6 +2431,7 @@ function remuda._butler_sessions()
       local details = {}
       for _, attempt in ipairs(report.attempts or {}) do
         details[#details + 1] = attempt.kind .. ": " .. attempt.reason
+          .. (attempt.detail and (" (" .. attempt.detail:gsub("\n", " ") .. ")") or "")
       end
       failed[#failed + 1] = name .. ": " .. (#details > 0 and table.concat(details, ", ") or report.error)
     end
