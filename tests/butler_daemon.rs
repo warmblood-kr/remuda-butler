@@ -3327,6 +3327,11 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
           remuda.butler.project_home({home:?})
           remuda._butler_session_trace_path = {trace:?}
           remuda._butler_task_poke_attempts = 6
+          remuda._butler_test_force_launch_probe = {
+            ["t-claude-launch"] = true,
+            ["t-claude-launch-unknown"] = true,
+            ["t-claude-launch-transient"] = true,
+          }
           remuda._butler_agent_builders.claude = function() return {{"sh"}} end
           remuda._butler_agent_builders.codex = function() return {{"sh", "-c", "sleep 30"}} end
           local rule = string.rep("─", 20)
