@@ -32,6 +32,7 @@ remuda butler — lightweight coordination for managed agents
   remuda butler send <to> <message...>
   remuda butler send <from> <to> <message...>
   remuda butler send-to-leader <message...>
+  remuda butler compact <name> [--dry-run]
   remuda butler inbox [name]
 
 Butler is live state in the remuda daemon. Start it with:
@@ -47,6 +48,24 @@ fn butler_command(server: &str, path: &Path, args: &[&str]) -> ExitCode {
         }
         ["sessions"] => with_daemon(server, path, |path| {
             eval(path, "return remuda._butler_sessions()")
+        }),
+        ["compact", name] => with_daemon(server, path, |path| {
+            eval(
+                path,
+                &format!(
+                    "return remuda._butler_compaction_tick({})",
+                    lua_string(name)
+                ),
+            )
+        }),
+        ["compact", name, "--dry-run"] => with_daemon(server, path, |path| {
+            eval(
+                path,
+                &format!(
+                    "return remuda._butler_compaction_tick({}, true)",
+                    lua_string(name)
+                ),
+            )
         }),
         ["launch", kind] => with_daemon(server, path, |path| {
             eval(
