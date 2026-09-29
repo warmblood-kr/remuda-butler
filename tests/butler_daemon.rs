@@ -2252,14 +2252,13 @@ fn butler_compact_cli_rejects_unknown_sessions_and_previews_safe_keys() {
     let opus = remuda_timed(&dir, &["-s", "s", "butler", "compact", "preview-opus", "--dry-run"]);
     assert!(opus.status.success(), "known-family preview failed: {}", String::from_utf8_lossy(&opus.stderr));
     let preview = String::from_utf8_lossy(&opus.stdout);
-    assert!(preview.contains("/model opus"), "preview omitted the model-family alias: {preview}");
+    assert!(preview.contains("/compact -> RET"), "preview omitted the current-model compact keys: {preview}");
     assert!(!preview.contains("Opus-4.7"), "preview exposed the display tag: {preview}");
 
     let unknown = remuda_timed(&dir, &["-s", "s", "butler", "compact", "preview-unknown", "--dry-run"]);
     assert!(unknown.status.success(), "unknown-family preview failed: {}", String::from_utf8_lossy(&unknown.stderr));
     let preview = String::from_utf8_lossy(&unknown.stdout);
-    assert!(preview.contains("skip: model family unknown"), "preview omitted the safety skip: {preview}");
-    assert!(!preview.contains("keys="), "unknown-family preview showed an unsafe key sequence: {preview}");
+    assert!(preview.contains("/compact -> RET"), "unknown model family should still compact on the current model: {preview}");
 }
 
 
@@ -5010,8 +5009,7 @@ fn butler_compaction_trace_records_registered_skipped_and_sent() {
 }
 
 /// Exercise the Claude compaction state machine with real private daemon PTYs.
-/// The fake Claude process prints a statusline, presents numbered model dialogs,
-/// consumes the key, and changes model/context exactly as Claude does.
+/// The fake Claude process accepts only `/compact` and records the Return key.
 #[test]
 #[cfg(unix)]
 fn butler_compaction_fake_claude_scenarios_send_only_visible_keys() {
@@ -5038,12 +5036,22 @@ fn butler_compaction_fake_claude_scenarios_send_only_visible_keys() {
     let path = daemon::socket_path_in(&dir, "s");
     eval(&path, r#"remuda._butler_argv = {"sh", "-c", "while read line; do :; done"}"#);
     eval(&path, "remuda._butler_skip_relay = true");
+    eval(&path, r#"
+      remuda._butler_state = remuda._butler_state or {}
+      remuda._butler_state.compaction_members = {legacy={pending_restore_blocked=true,
+        pending_restore_model_unavailable=true, pending_restore_model="opus"}}
+    "#);
     let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(
         eval(&path, "return type(remuda._butler_compaction_tick)"),
         "function",
         "loading the Butler module must define the scheduled compaction tick"
+    );
+    assert_eq!(
+        eval(&path, "local s = remuda._butler_state or {}; local m = s.compaction_members.legacy or {}; return tostring(m.pending_restore_blocked == nil and m.pending_restore_model_unavailable == nil and m.pending_restore_model == nil)"),
+        "true",
+        "loading must clear stale model-restore state"
     );
     eval(&path, "remuda._butler_compaction_interval = 45");
     let trace_path = dir.join("compaction-trace.log");
@@ -5063,49 +5071,30 @@ log=$1
 scenario=$2
 model='Opus 4.7 (1M context)'
 ctx=500000
-first=1
-if [ "$scenario" = absent ]; then model=Sonnet; fi
-paint() { printf '\033[H\033[2JMODEL:%s CTX:%s\n' "$model" "$ctx"; }
+failed=0
+paint() {
+  printf '\033[H\033[2JMODEL:%s CTX:%s' "$model" "$ctx"
+  if [ "$scenario" = busy-screen ] || { [ "$scenario" = hang ] && [ "$failed" = 1 ]; }; then
+    printf ' esc to interrupt'
+  fi
+  if [ "$scenario" = draft ]; then printf ' DRAFT: unsent words'; fi
+  printf '\n'
+}
 paint
 while IFS= read -r line; do
   printf 'CMD:%s\n' "$line" >> "$log"
   case "$line" in
-    '/model sonnet')
-      if [ "$scenario" = timeout ]; then continue; fi
-      if [ "$scenario" = switch-label-unknown ] && [ "$first" = 1 ]; then
-        first=0; model=Sonnet; paint
-        printf 'Switch model?\n1. Apply using an unknown label\n2. Cancel\n'
-        IFS= read -r -n 1 answer || exit 0
-        printf 'KEY:%s\n' "$answer" >> "$log"
-        paint; continue
-      fi
-      if [ "$scenario" = unknown ] && [ "$first" = 1 ]; then
-        first=0; model=Sonnet; paint; printf 'Mystery chooser\n1. Continue\n❯\n'
-        IFS= read -r -n 1 answer || exit 0
-        printf 'KEY:%s\n' "$answer" >> "$log"
-        paint; continue
-      fi
-      if [ "$model" = Sonnet ]; then paint; continue; fi
-      if [ "$scenario" = option2 ]; then
-        printf 'Switch model?\n1. No\n❯ 2. Yes, switch to Sonnet\n'
+    '/compact')
+      printf 'KEY:RET\n' >> "$log"
+      if [ "$scenario" = unknown ] && [ "$failed" = 0 ]; then
+        failed=1
+        printf 'Mystery chooser\n1. Continue\n❯\n'
+      elif [ "$scenario" = hang ]; then
+        failed=1; paint
       else
-        printf 'Switch model?\n❯ 1. Yes, switch to Sonnet\n2. No\n'
+        ctx=200000; paint
       fi
-      IFS= read -r -n 1 answer || exit 0
-      printf 'KEY:%s\n' "$answer" >> "$log"
-      case "$answer" in 1|2) model=Sonnet ;; esac
-      paint
       ;;
-    '/model opus')
-      if [ "$scenario" = restore-timeout ]; then continue; fi
-      printf 'Switch model?\n❯ 1. Yes, switch to Opus\n2. No\n'
-      IFS= read -r -n 1 answer || exit 0
-      printf 'KEY:%s\n' "$answer" >> "$log"
-      case "$answer" in 1|2) model='Opus 4.7 (1M context)' ;; esac
-      paint
-      ;;
-    '/model Sonnet') paint ;;
-    '/compact') ctx=200000; paint ;;
   esac
 done
 "#,
@@ -5118,68 +5107,61 @@ done
         &path,
         &format!(
             r#"
-      remuda._butler_compaction_model = "sonnet"
-      remuda._butler_compaction_config = {{dialog_timeout=1, completion_timeout=2, verification_timeout=2, input_settle=0.01}}
+      local fake_now = 1000
+      remuda._butler_compaction_now = function() return fake_now end
+      remuda._fake_now = function(value) fake_now = value end
+      remuda._butler_compaction_config = {{critical=400000, cooldown_ticks=0, capture_gap=0,
+        completion_timeout=1, claude_completion_timeout=0.2, failure_cooldown_seconds=10, input_settle=0.01}}
       remuda._butler_bus = remuda._butler_bus or {{agents={{}}, pending_tasks={{}}, notices={{}}}}
       local prior_contributions = remuda.contributions
       remuda.contributions = function(point)
         if point == "butler.agent" then
-          return {{{{id="claude", entry={{working=function(_, _) return false end}}}}}}
+          return {{{{id="claude", entry={{working=function(_, screen)
+            return screen:find("esc to interrupt", 1, true) ~= nil
+          end}}}}}}
         end
         return prior_contributions(point)
       end
-      remuda._butler_prompt_is_empty = function() return "EMPTY" end
+      remuda._butler_prompt_is_empty = function(_, screen)
+        return screen:find("DRAFT:", 1, true) and "NON-EMPTY" or "EMPTY"
+      end
+      local original_capture = remuda.capture
+      remuda.capture = function(name)
+        local screen = original_capture(name)
+        if name == "fake-hang" and remuda._fake_busy[name] ~= true then
+          screen = screen:gsub(" esc to interrupt", "")
+        end
+        if remuda._fake_clear_unknown[name] then
+          screen = screen:gsub("Mystery chooser\n1%. Continue\n❯\n", "")
+        end
+        return screen
+      end
+      local original_preflight = remuda._butler_compaction_preflight
+      remuda._butler_compaction_preflight = function(name)
+        local blocked = original_preflight(name)
+        if name == "fake-attach-mid" and not blocked then remuda._fake_attached[name] = true end
+        return blocked
+      end
       remuda._butler_send = function(_, _, message)
         remuda._fake_compaction_reports = remuda._fake_compaction_reports or {{}}
         table.insert(remuda._fake_compaction_reports, message)
       end
-      local original_session = remuda.session
       remuda._fake_attached = {{}}
-      remuda._fake_busy_after_key = {{}}
-      remuda._fake_busy_on_ctx_drop = {{}}
-      remuda._fake_busy_until = {{}}
-      remuda._fake_attach_on_ctx_drop = {{}}
-      remuda._fake_no_family = {{}}
-      remuda._fake_wrong_restored_window = {{}}
+      remuda._fake_busy = {{}}
+      remuda._fake_clear_unknown = {{}}
       remuda.session = function(name)
-        return {{is_busy=remuda._fake_busy_until[name] and os.time() < remuda._fake_busy_until[name] or false,
+        return {{is_busy=remuda._fake_busy[name] == true,
           attached=remuda._fake_attached[name] == true}}
       end
-      local original_key = remuda.key
-      remuda.key = function(name, key)
-        original_key(name, key)
-        if remuda._fake_busy_after_key[name] then
-          remuda._fake_busy_after_key[name] = nil
-          remuda._fake_busy_until[name] = os.time() + 2
-        end
-        if remuda._fake_attach_after_first_key == name then
-          local deadline = os.time() + 3
-          repeat
-            if remuda.capture(name):find("MODEL:Sonnet", 1, true) then break end
-            remuda.sleep(0.05)
-          until os.time() >= deadline
-          remuda._fake_attached[name] = true
-          remuda._fake_attach_after_first_key = nil
-        end
+      local original_type_text = remuda.type_text
+      remuda.type_text = function(name, value, settle)
+        if name == "fake-hang" then remuda._fake_busy[name] = true end
+        return original_type_text(name, value, settle)
       end
       remuda._butler_telemetry_for = function(agent)
         local screen = remuda.capture(agent.session_name)
-        local sonnet = screen:find("MODEL:Sonnet", 1, true) ~= nil
         local used = screen:match("CTX:%s*(%d+)")
-        if remuda._fake_attach_on_ctx_drop[agent.session_name] and used == "200000" then
-          remuda._fake_attached[agent.session_name] = true
-          remuda._fake_attach_on_ctx_drop[agent.session_name] = nil
-        end
-        if remuda._fake_busy_on_ctx_drop[agent.session_name] and used == "200000" then
-          remuda._fake_busy_until[agent.session_name] = os.time() + 2
-          remuda._fake_busy_on_ctx_drop[agent.session_name] = nil
-        end
-        return {{context_used=used,
-          context_window=(not sonnet and used == "200000"
-              and remuda._fake_wrong_restored_window[agent.session_name])
-            and "200000" or (sonnet and "200000" or "1000000"),
-          model=remuda._fake_no_family[agent.session_name] and "Experimental-Model"
-            or (sonnet and "Sonnet-4.5" or "Opus-4.7-1M-context")}}
+        return {{context_used=used, model="current-model"}}
       end
       remuda._fake_setup_compaction = function(name, kind, log, scenario)
         remuda.new(name, {{"bash", {script:?}, log, scenario}}, nil, {{}})
@@ -5189,227 +5171,137 @@ done
         ),
     );
 
-    for (name, scenario, expected) in [
-        (
-            "fake-happy",
-            "happy",
-            "CMD:/model sonnet\nKEY:1\nCMD:/compact\nCMD:/model opus\nKEY:1\n",
-        ),
-        (
-            "fake-absent",
-            "absent",
-            "CMD:/model sonnet\nCMD:/compact\n",
-        ),
-        (
-            "fake-option2",
-            "option2",
-            "CMD:/model sonnet\nKEY:2\nCMD:/compact\nCMD:/model opus\nKEY:1\n",
-        ),
-        (
-            "fake-busy-after-switch",
-            "happy",
-            "CMD:/model sonnet\nKEY:1\nCMD:/compact\nCMD:/model opus\nKEY:1\n",
-        ),
-        (
-            "fake-busy-after-compact",
-            "happy",
-            "CMD:/model sonnet\nKEY:1\nCMD:/compact\nCMD:/model opus\nKEY:1\n",
-        ),
-        (
-            "fake-unknown",
-            "unknown",
-            "CMD:/model sonnet\nKEY:\x1b\nCMD:/model opus\nKEY:1\n",
-        ),
-        (
-            "fake-switch-label-unknown",
-            "switch-label-unknown",
-            "CMD:/model sonnet\nKEY:\x1b\nCMD:/model opus\nKEY:1\n",
-        ),
-        ("fake-timeout", "timeout", "CMD:/model sonnet\n"),
-        (
-            "fake-restore-timeout",
-            "restore-timeout",
-            "CMD:/model sonnet\nKEY:1\nCMD:/compact\nCMD:/model opus\nCMD:/model opus\n",
-        ),
-        (
-            "fake-attached",
-            "happy",
-            "CMD:/model sonnet\nKEY:1\n",
-        ),
-        (
-            "fake-attach-mid",
-            "happy",
-            "CMD:/model sonnet\nKEY:1\nCMD:/compact\nCMD:/model opus\nKEY:1\n",
-        ),
-        (
-            "fake-no-family",
-            "happy",
-            "",
-        ),
-        (
-            "fake-window-mismatch",
-            "happy",
-            "CMD:/model sonnet\nKEY:1\nCMD:/compact\nCMD:/model opus\nKEY:1\n",
-        ),
+    for (name, kind, scenario) in [
+        ("fake-happy", "claude", "happy"),
+        ("fake-mid-turn", "claude", "happy"),
+        ("fake-busy-screen", "claude", "busy-screen"),
+        ("fake-attached", "claude", "happy"),
+        ("fake-attach-mid", "claude", "happy"),
+        ("fake-draft", "claude", "draft"),
+        ("fake-unknown-kind", "future", "happy"),
+        ("fake-stale-flags", "claude", "happy"),
+        ("fake-unknown", "claude", "unknown"),
+        ("fake-force", "claude", "unknown"),
+        ("fake-hang", "claude", "hang"),
     ] {
         let log = dir.join(format!("{name}.log"));
         eval(
             &path,
-            &format!("remuda._fake_setup_compaction({name:?}, 'claude', {log:?}, {scenario:?})"),
+            &format!("remuda._fake_setup_compaction({name:?}, {kind:?}, {log:?}, {scenario:?})"),
         );
         wait_for(&path, name, "MODEL:");
+        if name == "fake-mid-turn" {
+            eval(&path, &format!("remuda._fake_busy[{name:?}] = true"));
+        }
         if name == "fake-attached" {
-            eval(
-                &path,
-                &format!("remuda._fake_attach_after_first_key = {name:?}"),
-            );
+            eval(&path, &format!("remuda._fake_attached[{name:?}] = true"));
         }
-        if name == "fake-busy-after-switch" {
-            eval(
-                &path,
-                &format!("remuda._fake_busy_after_key[{name:?}] = true"),
-            );
+        if name == "fake-stale-flags" {
+            eval(&path, &format!(r#"
+              local members = remuda._butler_compaction_members_state
+              members[{name:?}] = {{pending_restore_blocked=true, pending_restore_model_unavailable=true,
+                pending_restore_model="opus", restore_retry_in_progress=true}}
+            "#));
         }
-        if name == "fake-busy-after-compact" {
-            eval(&path, &format!("remuda._fake_busy_on_ctx_drop[{name:?}] = true"));
+        let result = if name == "fake-stale-flags" {
+            eval(&path, &format!("return remuda._butler_compaction_tick({name:?}, false)"))
+        } else {
+            eval(&path, &format!("return remuda.butler.compact({name:?})"))
+        };
+        match name {
+            "fake-mid-turn" | "fake-busy-screen" => assert_eq!(result, "skipped_busy"),
+            "fake-attached" => assert_eq!(result, "skipped_attached"),
+            "fake-attach-mid" => assert_eq!(result, "skipped_attached"),
+            "fake-draft" => assert_eq!(result, "skipped_composer"),
+            "fake-unknown-kind" => assert_eq!(result, "skipped_unsupported_kind"),
+            _ => assert_eq!(result, "started"),
         }
-        if name == "fake-attach-mid" {
-            eval(&path, &format!("remuda._fake_attach_on_ctx_drop[{name:?}] = true"));
-        }
-        if name == "fake-no-family" {
-            eval(&path, &format!("remuda._fake_no_family[{name:?}] = true"));
-        }
-        if name == "fake-window-mismatch" {
-            eval(&path, &format!("remuda._fake_wrong_restored_window[{name:?}] = true"));
-        }
-        eval(
-            &path,
-            &format!("remuda.butler.compact({name:?})"),
-        );
-        let deadline = Instant::now() + Duration::from_secs(20);
-        let mut attach_retry_started = false;
-        loop {
-            let in_progress = eval(&path, &format!(
-                "return tostring(remuda._butler_compaction_members_state[{name:?}].compaction_in_progress == true)"
-            ));
-            let log_text = std::fs::read_to_string(&log).unwrap_or_default();
-            if name == "fake-attach-mid" && !attach_retry_started
-                && in_progress == "false"
-                && log_text == "CMD:/model sonnet\nKEY:1\nCMD:/compact\n"
-            {
-                assert_eq!(
-                    eval(&path, &format!("return tostring(remuda._fake_attached[{name:?}])")),
-                    "true",
-                    "human should attach after compact completes"
-                );
-                assert_eq!(
-                    eval(&path, &format!("return remuda._butler_compaction_members_state[{name:?}].pending_restore_model")),
-                    "opus",
-                    "mid-compaction attach must preserve the pending family"
-                );
-                assert_eq!(
-                    eval(&path, "local s = remuda._butler_state or remuda._butler_compaction_state; return s.compaction_fleet_active"),
-                    name,
-                    "fleet lock must stay with the member while restore is pending"
-                );
-                eval(&path, "remuda._butler_bus.agents['fake-member-b'] = {id='fake-member-b', kind='claude', session_name='fake-member-b'}");
-                assert_eq!(
-                    eval(&path, "return remuda._butler_compaction_execute('fake-member-b')"),
-                    "fleet_busy",
-                    "another member must not start compaction while restore is pending"
-                );
-                eval(&path, &format!("remuda._butler_compaction_tick({name:?}, false)"));
-                std::thread::sleep(Duration::from_millis(250));
-                assert_eq!(std::fs::read_to_string(&log).unwrap(), log_text,
-                    "restore must send no command or key while attached");
-                eval(&path, &format!("remuda._fake_attached[{name:?}] = false"));
-                eval(&path, &format!("remuda._butler_compaction_tick({name:?}, false)"));
-                attach_retry_started = true;
-                continue;
+        if name == "fake-hang" {
+            let deadline = Instant::now() + Duration::from_secs(8);
+            loop {
+                let messages = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
+                if messages.contains("still running") { break; }
+                assert!(Instant::now() < deadline, "timeout did not report still-running state: {messages:?}");
+                std::thread::sleep(Duration::from_millis(50));
             }
-            if in_progress == "false" && log_text == expected {
-                break;
+            assert_eq!(
+                eval(&path, "local s = remuda._butler_state or remuda._butler_compaction_state; return s.compaction_fleet_active"),
+                name,
+                "a timed-out but busy Claude pane must keep the fleet lock"
+            );
+            eval(&path, "remuda._butler_bus.agents['fake-other'] = {id='fake-other', kind='codex', session_name='fake-other'}");
+            assert_eq!(eval(&path, "return remuda._butler_compaction_execute('fake-other')"), "fleet_busy");
+            eval(&path, &format!("remuda._fake_busy[{name:?}] = false"));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let lock = eval(&path, "local s = remuda._butler_state or remuda._butler_compaction_state; return tostring(s.compaction_fleet_active)");
+                if lock == "nil" { break; }
+                assert!(Instant::now() < deadline, "idle monitor failed to release fleet lock: {lock}");
+                std::thread::sleep(Duration::from_millis(100));
             }
-            assert!(
-                Instant::now() < deadline,
-                "fake scenario {scenario} stalled; log={log_text:?}"
-            );
-            std::thread::sleep(Duration::from_millis(50));
         }
-        let got = std::fs::read_to_string(&log).unwrap_or_default();
-        assert_eq!(got, expected, "unexpected commands/keys for {scenario}");
-        assert!(!got.contains("CMD:/model Opus"), "must not send a display tag: {got:?}");
-        assert!(!got.contains("CMD:/model claude-opus"), "must not send a raw model id: {got:?}");
-        if scenario == "unknown" || scenario == "switch-label-unknown" || scenario == "timeout" || scenario == "restore-timeout"
-            || name == "fake-attached"
-        {
-            let reports = eval(
-                &path,
-                "return table.concat(remuda._fake_compaction_reports or {}, '\\n')",
-            );
-            let marker = match scenario {
-                "unknown" => "unrecognized dialog",
-                "switch-label-unknown" => "no unique yes/switch option",
-                "timeout" => "first model dialog timed out",
-                "restore-timeout" => "restore attempts exhausted",
-                _ => "aborted: human attached",
-            };
-            assert!(
-                reports.contains(marker),
-                "expected report {marker:?}, got {reports:?}"
-            );
+        if name == "fake-unknown" || name == "fake-force" || name == "fake-stale-flags" || name == "fake-happy" {
+            let deadline = Instant::now() + Duration::from_secs(8);
+            loop {
+                let in_progress = eval(&path, &format!(
+                    "return tostring(remuda._butler_compaction_members_state[{name:?}].compaction_in_progress == true)"
+                ));
+                let got = std::fs::read_to_string(&log).unwrap_or_default();
+                if in_progress == "false" && got.matches("CMD:/compact\nKEY:RET\n").count() >= 1 { break; }
+                assert!(Instant::now() < deadline, "scenario {name} stalled: {got:?}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let got = std::fs::read_to_string(&log).unwrap_or_default();
+            assert_eq!(got, "CMD:/compact\nKEY:RET\n", "Claude must receive only /compact and Return: {got:?}");
         }
-        if scenario == "restore-timeout" {
-            assert_eq!(
-                eval(
-                    &path,
-                    &format!("return remuda._butler_compaction_members_state[{name:?}].pending_restore_model"),
-                ),
-                "opus",
-                "failed restore must retain the original model family for the next policy attempt"
-            );
-            assert!(
-                eval(
-                    &path,
-                    &format!("return remuda._butler_compaction_members_state[{name:?}].cooldown_ticks >= 12"),
-                ) == "true",
-                "failed compaction must set a retry backoff"
-            );
+        if name == "fake-stale-flags" {
+            assert_eq!(eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].pending_restore_blocked == nil and remuda._butler_compaction_members_state[{name:?}].pending_restore_model_unavailable == nil)")), "true");
         }
-        if name == "fake-attach-mid" {
-            let got = std::fs::read_to_string(&log).unwrap();
-            assert_eq!(got.matches("CMD:/model opus\n").count(), 1,
-                "detaching should retry the pending restore exactly once: {got:?}");
-            assert_eq!(
-                eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].pending_restore_model == nil)")),
-                "true",
-                "confirmed restore should clear pending state"
-            );
-            assert_eq!(
-                eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].cooldown_ticks >= 4)")),
-                "true",
-                "confirmed pending restore should re-arm the success cooldown"
-            );
-        }
-        if name == "fake-no-family" {
+        if name == "fake-unknown-kind" {
+            assert!(std::fs::read_to_string(&log).unwrap_or_default().is_empty(),
+                "unknown agent kinds must not receive commands");
             let reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
-            let message = "compaction skipped: model family is unknown";
-            assert_eq!(reports.matches(message).count(), 1, "expected one missing-family notice: {reports:?}");
-            assert_eq!(
-                eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].pending_restore_model_unavailable == true)")),
-                "false",
-                "unknown-family compaction should be skipped before switching models"
-            );
+            assert!(reports.contains("unsupported agent kind"), "unknown kind should be reported: {reports:?}");
         }
-        if name == "fake-window-mismatch" {
+        if name == "fake-unknown" {
             let before = std::fs::read_to_string(&log).unwrap();
-            eval(&path, &format!("remuda._butler_compaction_tick({name:?}, false)"));
-            std::thread::sleep(Duration::from_millis(250));
-            assert_eq!(std::fs::read_to_string(&log).unwrap(), before,
-                "a context-window mismatch must not retry the restore");
-            let reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
-            assert_eq!(reports.matches("compaction restore mismatch").count(), 1,
-                "expected one context-window mismatch notice: {reports:?}");
+            assert_eq!(eval(&path, &format!("return remuda.butler.compact({name:?})")), "skipped_cooldown");
+            assert_eq!(eval(&path, &format!("return remuda._butler_compaction_tick({name:?}, false)")), format!("{name}:skipped_cooldown"));
+            assert_eq!(std::fs::read_to_string(&log).unwrap(), before, "retries before expiry must not send commands");
+            eval(&path, &format!("remuda._fake_clear_unknown[{name:?}] = true"));
+            eval(&path, "remuda._fake_now(1010)");
+            assert_eq!(eval(&path, &format!("return remuda.butler.compact({name:?})")), "started");
+            let deadline = Instant::now() + Duration::from_secs(8);
+            loop {
+                let got = std::fs::read_to_string(&log).unwrap_or_default();
+                let in_progress = eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].compaction_in_progress == true)"));
+                if in_progress == "false" && got.matches("CMD:/compact\nKEY:RET\n").count() == 2 { break; }
+                assert!(Instant::now() < deadline, "expired cooldown retry stalled: {got:?}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            assert_eq!(std::fs::read_to_string(&log).unwrap(), "CMD:/compact\nKEY:RET\nCMD:/compact\nKEY:RET\n");
+        }
+        if name == "fake-force" {
+            let deadline = Instant::now() + Duration::from_secs(8);
+            loop {
+                let in_progress = eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].compaction_in_progress == true)"));
+                let reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
+                if in_progress == "false" && reports.contains("unrecognized dialog") { break; }
+                assert!(Instant::now() < deadline, "force setup did not fail as expected: {reports:?}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            eval(&path, &format!("remuda._fake_clear_unknown[{name:?}] = true"));
+            let forced = remuda_timed(&dir, &["-s", "s", "butler", "compact", name, "--force"]);
+            assert!(forced.status.success(), "--force CLI failed: {}", String::from_utf8_lossy(&forced.stderr));
+            let deadline = Instant::now() + Duration::from_secs(8);
+            loop {
+                let got = std::fs::read_to_string(&log).unwrap_or_default();
+                let in_progress = eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].compaction_in_progress == true)"));
+                if in_progress == "false" && got.matches("CMD:/compact\nKEY:RET\n").count() == 2 { break; }
+                assert!(Instant::now() < deadline, "forced retry stalled: {got:?}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            assert_eq!(std::fs::read_to_string(&log).unwrap(), "CMD:/compact\nKEY:RET\nCMD:/compact\nKEY:RET\n");
         }
     }
     drop(daemon);
