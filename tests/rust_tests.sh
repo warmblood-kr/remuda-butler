@@ -75,10 +75,11 @@ cp "$REPO/tests/support/fake_http.lua" "$CORE_DIR/native/tests/support/"
 ln -sfn "$REPO/packages" "$CORE_DIR/packages"
 
 export XDG_DATA_HOME=$scratch/data
-export HOME=$scratch/home
 export XDG_CONFIG_HOME=$scratch/config
+export TMPDIR=$scratch/tmp
+export HOME=$scratch/home
 export REMUDA_RUNTIME_DIR=$scratch/run
-mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$REMUDA_RUNTIME_DIR" "$XDG_DATA_HOME/remuda/mods/butler"
+mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$REMUDA_RUNTIME_DIR" "$TMPDIR" "$XDG_DATA_HOME/remuda/mods/butler"
 cp -R "$REPO/extension.toml" "$REPO/packages" "$XDG_DATA_HOME/remuda/mods/butler/"
 unset REMUDA_SERVER REMUDA_BUTLER_TOKEN REMUDA_BUTLER_CONFIG
 

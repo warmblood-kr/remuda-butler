@@ -7,6 +7,7 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 source "$REPO/tests/awk-timeout.sh"
 REMUDA_BIN=${REMUDA_BIN:-remuda}
 SCRATCH_ROOT=$(mktemp -d /tmp/butler-id.XXXXXX)
+SCRATCH_ROOT=$(cd "$SCRATCH_ROOT" && pwd -P)
 FAKE_AGENT="$SCRATCH_ROOT/fake-agent"
 DAEMON_PID=
 SERVER=

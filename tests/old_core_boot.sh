@@ -8,6 +8,7 @@ set -euo pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 source "$REPO/tests/awk-timeout.sh"
 T=$(mktemp -d /tmp/boc.XXXXXX)
+T=$(cd "$T" && pwd -P)
 S=boc
 ID=$((RANDOM % 90000 + 10000))  # this run's own fake-session sleep
 DAEMON_PID=

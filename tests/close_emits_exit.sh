@@ -8,6 +8,7 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 source "$REPO/tests/awk-timeout.sh"
 REMUDA_BIN=${REMUDA_BIN:-remuda}
 SCRATCH=$(mktemp -d /tmp/bcee.XXXXXX)
+SCRATCH=$(cd "$SCRATCH" && pwd -P)
 SERVER=bcee
 DAEMON_PID=
 export HOME=$SCRATCH/home XDG_CONFIG_HOME=$SCRATCH/config XDG_DATA_HOME=$SCRATCH/data
