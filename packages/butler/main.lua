@@ -84,6 +84,12 @@ end
 
 local function atomic_status_write(path, record)
   local encoded = remuda.json.encode(record)
+  local current = io.open(path, "rb")
+  if current then
+    local previous = current:read("*a")
+    current:close()
+    if previous == encoded then return true end
+  end
   return remuda.fs.write_atomic(path, encoded)
 end
 
@@ -586,9 +592,10 @@ local function json_quote(s)
 end
 local function status_settings(path)
   local settings_path = path .. ".settings.json"
-  local command = "remuda "
+  local command = "REMUDA_NO_AUTOSTART=1 REMUDA_CLIENT_TIMEOUT_MS=500 remuda "
   if server ~= "default" then command = command .. "-s " .. shell_quote(server) .. " " end
   command = command .. "--stdin butler statusline " .. shell_quote(path)
+    .. " || printf 'MODEL:? CTX:? CTXWIN:? CTXPCT:?\\n'"
   local settings = assert(io.open(settings_path, "w"))
   settings:write('{"statusLine":{"type":"command","command":'
     .. json_quote(command)

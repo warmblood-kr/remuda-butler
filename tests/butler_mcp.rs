@@ -5,6 +5,7 @@ use remuda_core::protocol::{Request, Response};
 use remuda_native::{client, daemon, mcp};
 use serde_json::{json, Value};
 use std::io::Write;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -99,11 +100,63 @@ fn butler_statusline_reads_stdin_and_keeps_legacy_status_files() {
     .expect("statusLine settings are JSON");
     assert_eq!(
         settings["statusLine"]["command"].as_str(),
-        Some(&format!("remuda --stdin butler statusline '{status_path}'")[..])
+        Some(
+            &format!(
+                "REMUDA_NO_AUTOSTART=1 REMUDA_CLIENT_TIMEOUT_MS=500 remuda --stdin butler statusline '{status_path}' || printf 'MODEL:? CTX:? CTXWIN:? CTXPCT:?\\n'"
+            )[..]
+        )
     );
+    let slow_dir = scratch("butler-statusline-slow");
+    let slow_path = daemon::socket_path_in(&slow_dir, "default");
+    let listener = remuda_native::ipc::listen(&slow_path).expect("bind slow fake daemon");
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let slow_daemon = std::thread::spawn(move || {
+        use interprocess::local_socket::traits::ListenerExt;
+        let _stream = listener
+            .incoming()
+            .next()
+            .expect("accept statusline")
+            .expect("fake daemon connection");
+        release_rx.recv().expect("release fake daemon");
+    });
+    let slow_status = slow_dir.join("status");
+    let binary = env!("CARGO_BIN_EXE_remuda");
+    let slow_command = settings["statusLine"]["command"]
+        .as_str()
+        .unwrap()
+        .replace("remuda ", &format!("{binary} "))
+        .replace(&status_path, &slow_status.display().to_string());
+    let started = Instant::now();
+    let mut slow = Command::new("sh")
+        .arg("-c")
+        .arg(slow_command)
+        .env("REMUDA_RUNTIME_DIR", &slow_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start slow-daemon fallback command");
+    slow.stdin.take().unwrap().write_all(b"{}").unwrap();
+    let slow_output = slow
+        .wait_with_output()
+        .expect("wait for slow-daemon fallback");
+    let elapsed = started.elapsed();
+    release_tx.send(()).expect("release fake daemon");
+    slow_daemon.join().expect("fake daemon thread");
+    assert!(
+        slow_output.status.success(),
+        "slow-daemon fallback failed: {slow_output:?}"
+    );
+    assert_eq!(slow_output.stdout, b"MODEL:? CTX:? CTXWIN:? CTXPCT:?\n");
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "statusLine exceeded its short deadline: {elapsed:?}"
+    );
+    let _ = std::fs::remove_dir_all(slow_dir);
 
-    // These byte strings were captured from the previous helper with the same
-    // snapshots before replacing it. Keep both outputs frozen.
+    // The string display-name cases preserve the previous helper's output.
+    // Non-string display_name now falls back to model.id, so that behavior is
+    // covered separately below.
     const NORMAL_GOLDEN: &[u8] =
         b"MODEL:Claude-Opus-4.6 CTX:12345 CTXWIN:200000 CTXPCT:6\n";
     const FALLBACK_GOLDEN: &[u8] = b"MODEL:sonnet CTX:? CTXWIN:? CTXPCT:?\n";
@@ -133,6 +186,31 @@ fn butler_statusline_reads_stdin_and_keeps_legacy_status_files() {
         "MODEL:Claude-Opus-4.6 CTX:12345 CTXWIN:200000 CTXPCT:6"
     );
     assert_eq!(record["model_id"], "claude-opus-4-6-20250201");
+    let status_inode = std::fs::metadata(&status_path).unwrap().ino();
+    let mut unchanged = Command::new(env!("CARGO_BIN_EXE_remuda"))
+        .args(["--stdin", "butler", "statusline", &status_path])
+        .env("REMUDA_RUNTIME_DIR", &dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start unchanged statusLine command");
+    unchanged
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"model":{"id":"claude-opus-4-6-20250201","display_name":"Claude Opus 4.6"},"context_window":{"total_input_tokens":12345,"context_window_size":200000,"used_percentage":6}}"#)
+        .unwrap();
+    let unchanged_output = unchanged.wait_with_output().unwrap();
+    assert!(
+        unchanged_output.status.success(),
+        "unchanged statusLine failed: {unchanged_output:?}"
+    );
+    assert_eq!(
+        std::fs::metadata(&status_path).unwrap().ino(),
+        status_inode,
+        "identical record was atomically rewritten"
+    );
     let reply = call(&path, "butler_status", json!({}));
     assert_eq!(reply["result"]["isError"], false, "status failed: {reply}");
     assert_eq!(
@@ -217,6 +295,39 @@ fn butler_statusline_reads_stdin_and_keeps_legacy_status_files() {
             "display_name={display_name}"
         );
     }
+}
+
+#[test]
+fn butler_statusline_shell_fallback_covers_oversized_stdin_without_starting_daemon() {
+    let dir = scratch("butler-statusline-down");
+    let status_path = dir.join("status");
+    let command = format!(
+        "REMUDA_NO_AUTOSTART=1 REMUDA_CLIENT_TIMEOUT_MS=500 {} --stdin butler statusline '{}' || printf 'MODEL:? CTX:? CTXWIN:? CTXPCT:?\\n'",
+        env!("CARGO_BIN_EXE_remuda"),
+        status_path.display(),
+    );
+    for input in [b"{}".to_vec(), vec![b'x'; 1024 * 1024 + 1]] {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(&command)
+            .env("REMUDA_RUNTIME_DIR", &dir)
+            .env("XDG_DATA_HOME", dir.join("data"))
+            .env("HOME", &dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start installed fallback command");
+        child.stdin.take().unwrap().write_all(&input).unwrap();
+        let output = child.wait_with_output().expect("wait for shell fallback");
+        assert!(output.status.success(), "fallback failed: {output:?}");
+        assert_eq!(output.stdout, b"MODEL:? CTX:? CTXWIN:? CTXPCT:?\n");
+    }
+    assert!(
+        !daemon::socket_path_in(&dir, "default").exists(),
+        "statusLine started a daemon"
+    );
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 fn eval(path: &Path, code: &str) -> String {
