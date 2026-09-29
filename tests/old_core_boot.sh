@@ -9,37 +9,64 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 source "$REPO/tests/awk-timeout.sh"
 T=$(mktemp -d /tmp/boc.XXXXXX)
 S=boc
+ID=$((RANDOM % 90000 + 10000))  # this run's own fake-session sleep
 DAEMON_PID=
 export REMUDA_RUNTIME_DIR=$T/run XDG_DATA_HOME=$T/data XDG_CONFIG_HOME=$T/config
 export HOME=$T/home REMUDA_BUTLER_PROJECT_HOME=$T/projects REMUDA_BUTLER_SERVER=$S
 unset REMUDA_BUTLER_TOKEN REMUDA_BUTLER_CONFIG
 MOD=$XDG_DATA_HOME/remuda/mods/butler
-mkdir -p "$MOD" "$HOME" "$XDG_CONFIG_HOME/remuda/butler"
-mkdir -p "$T/bin"
-cat >"$T/bin/fake-session" <<EOF
+mkdir -p "$MOD" "$HOME" "$XDG_CONFIG_HOME/remuda/butler" "$T/bin"
+cat >"$T/bin/fake-session" <<EOF_SESSION
 #!/bin/sh
 echo "\$\$" >>"$T/child-pids"
-exec /bin/sleep 3600
-EOF
+exec /bin/sleep "$ID"
+EOF_SESSION
 chmod +x "$T/bin/fake-session"
 cleanup() {
-  status=$?
+  local status=$? pid killed=0 left=0
+  local descendants=() session_pids=()
+  if [[ -n "$DAEMON_PID" ]]; then
+    while IFS= read -r pid; do [[ -n "$pid" ]] && descendants+=("$pid"); done < <(
+      ps -axo pid=,ppid= | awk -v root="$DAEMON_PID" '
+        { ppid[$1]=$2; rows[NR]=$1 }
+        END {
+          found[root]=1
+          do {
+            changed=0
+            for (i=1; i<=NR; i++) if (!found[rows[i]] && found[ppid[rows[i]]]) {
+              found[rows[i]]=1; changed=1
+            }
+          } while (changed)
+          for (i=1; i<=NR; i++) if (rows[i] != root && found[rows[i]]) print rows[i]
+        }')
+  fi
+  if [[ -f $T/child-pids ]]; then
+    while IFS= read -r pid; do [[ -n "$pid" ]] && session_pids+=("$pid"); done <"$T/child-pids"
+  fi
   if [[ ${REMUDA_RUNTIME_DIR:-} == "$T/run" ]]; then
     remuda -s "$S" stop -f >/dev/null 2>&1 || true
   else
     echo "refusing to stop old-core daemon outside its scratch runtime" >&2
   fi
-  if [[ -f $T/child-pids ]]; then
-    while IFS= read -r pid; do
-      [[ -n $pid ]] || continue
+  for pid in "${descendants[@]}" "${session_pids[@]}" "$DAEMON_PID"; do
+    [[ -n "$pid" ]] || continue
+    if kill -0 "$pid" >/dev/null 2>&1; then
       kill "$pid" >/dev/null 2>&1 || true
-    done <"$T/child-pids"
-  fi
-  if [[ -n $DAEMON_PID ]]; then
-    kill "$DAEMON_PID" >/dev/null 2>&1 || true
-    wait "$DAEMON_PID" >/dev/null 2>&1 || true
-  fi
+      killed=$((killed + 1))
+    fi
+  done
+  [[ -n "$DAEMON_PID" ]] && wait "$DAEMON_PID" 2>/dev/null || true
+  for _ in $(seq 20); do
+    left=0
+    for pid in "${descendants[@]}" "${session_pids[@]}"; do
+      [[ -n "$pid" ]] && kill -0 "$pid" >/dev/null 2>&1 && left=$((left + 1))
+    done
+    [[ $left == 0 ]] && break
+    sleep 0.05
+  done
   rm -rf "$T"
+  echo "resources cleaned: $killed killed / $left left"
+  trap - EXIT INT TERM
   exit "$status"
 }
 trap cleanup EXIT INT TERM

@@ -527,7 +527,7 @@ fn notice_recovery_preserves_idle_draft_and_respects_attached_human() {
 
 #[test]
 fn partial_clear_escalation_keeps_the_full_parsed_draft() {
-    let (path, _daemon) = butler_with_member("notice-recovery-partial-clear");
+    let (path, _daemon) = butler_with_member("partial-clear");
     eval(
         &path,
         r#"

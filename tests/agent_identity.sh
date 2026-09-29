@@ -130,7 +130,12 @@ AGENTS=$("$REMUDA_BIN" -s "$SERVER" butler agents)
 [[ $AGENTS == *"$MEMBER_ID"* && $AGENTS == *$'running'* ]] || fail "agents command omits the running member: $AGENTS"
 echo "ok - registry launch row and agents command show a running identity"
 
-MEMBER_ENV=$(lua 'return remuda.capture("member")')
+MEMBER_ENV=
+for _ in $(seq 50); do
+  MEMBER_ENV=$(lua 'return remuda.capture("member")')
+  [[ $MEMBER_ENV == *"REMUDA_BUTLER_AGENT_ID=$MEMBER_ID"* ]] && break
+  sleep 0.1
+done
 [[ $MEMBER_ENV == *"REMUDA_BUTLER_AGENT_ID=$MEMBER_ID"* ]] || fail "member env lacks its ULID: $MEMBER_ENV"
 [[ $MEMBER_ENV == *"REMUDA_BUTLER_AGENT_ALIAS=member"* ]] || fail "member env lacks its alias: $MEMBER_ENV"
 [[ $MEMBER_ENV == *"REMUDA_BUTLER_LEADER_ID=$ROOT_ID"* ]] || fail "member env lacks its leader ULID: $MEMBER_ENV"
