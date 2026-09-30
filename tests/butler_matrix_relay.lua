@@ -655,6 +655,18 @@ local function test_joined_room_survives_restart()
   os.execute("rm -rf " .. string.format("%q", dir))
 end
 
+local function test_running_relay_picks_up_operator_join_from_config()
+  local dir, path = invite_fixture()
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  assert(matrix.config_add_room(path, NEW, "operator"), "could not add operator room config line")
+  client:sync({ json = { next_batch = "s1", rooms = { join = owner_message(NEW, "$operator-joined") } } })
+  assert(delivered_ids(delivered, "$operator-joined"),
+    "a running relay must listen in a room added to config without restarting")
+  relay:stop()
+  os.execute("rm -rf " .. string.format("%q", dir))
+end
+
 local function test_leave_removes_room_home_and_all_refused()
   local dir, path = invite_fixture(nil, "room=" .. NEW .. " how=operator\n")
   with_operator_config(path, 200, function(calls)
@@ -672,6 +684,18 @@ local function test_leave_removes_room_home_and_all_refused()
       "leave must POST leave for the joined room")
     assert(room_line(path, NEW) == nil, "leave must remove the room line")
     assert(read_text(path):find("all_room=" .. ALL, 1, true), "leave must keep the other config lines")
+  end)
+  os.execute("rm -rf " .. string.format("%q", dir))
+end
+
+local function test_leave_unconfigured_room_is_refused()
+  local dir, path = invite_fixture()
+  with_operator_config(path, 200, function(calls)
+    local result
+    matrix.leave({ room = NEW }, function(value) result = value end)
+    assert(result and result.error == NEW .. " is not a configured Matrix room.",
+      "leaving an unconfigured room must explain that it is not configured")
+    assert(#calls == 0, "leaving an unconfigured room must not make an HTTP request")
   end)
   os.execute("rm -rf " .. string.format("%q", dir))
 end
@@ -720,7 +744,9 @@ for _, case in ipairs({
   { "test_agent_invite_is_not_joined", test_agent_invite_is_not_joined },
   { "test_join_failure_rolls_back_room_line", test_join_failure_rolls_back_room_line },
   { "test_joined_room_survives_restart", test_joined_room_survives_restart },
+  { "test_running_relay_picks_up_operator_join_from_config", test_running_relay_picks_up_operator_join_from_config },
   { "test_leave_removes_room_home_and_all_refused", test_leave_removes_room_home_and_all_refused },
+  { "test_leave_unconfigured_room_is_refused", test_leave_unconfigured_room_is_refused },
   { "test_unconfigured_room_request_is_refused", test_unconfigured_room_request_is_refused },
 }) do
   local ok, err = pcall(case[2])

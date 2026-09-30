@@ -327,6 +327,9 @@ function matrix.leave(opts, on_done, agent)
   if conf.rooms[room] == "home" or conf.rooms[room] == "all" then
     return error_result(done, "HOME and ALL rooms can't be removed")
   end
+  if conf.rooms[room] == nil then
+    return error_result(done, room .. " is not a configured Matrix room.")
+  end
   return matrix.request_json({ method = "POST",
     path = "/_matrix/client/v3/rooms/" .. path_component(room) .. "/leave",
     room = room, body = "{}", headers = { ["Content-Type"] = "application/json" },

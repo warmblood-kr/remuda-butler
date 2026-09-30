@@ -839,6 +839,12 @@ function relay.new(options)
   end
 
   function instance._response(response, path)
+    if path == SYNC_PATH then
+      local refreshed = read_config(config_path)
+      if refreshed then
+        cfg.rooms, cfg.room_how = refreshed.rooms, refreshed.room_how
+      end
+    end
     if path == SYNC_PATH and state.since == nil then
       if type(response.next_batch) ~= "string" then failed(); return end
       state.since = response.next_batch
