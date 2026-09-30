@@ -602,6 +602,100 @@ fn restart_seeds_three_unread_mails_only_when_the_pane_is_ready() {
 }
 
 #[test]
+fn a_relaunch_replays_already_noticed_unread_mail_once() {
+    let (path, _daemon) = butler_with_member("notice-unread-relaunch-instance");
+    setup_mail_notice_clock(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        local rows = {
+          { name = 'm1', alive = true, attached = false, instance_id = 'instance-a' },
+          { name = 'butler', alive = true, attached = false, instance_id = 'root-instance' },
+        }
+        remuda.ls = function() return rows end
+        remuda.capture = function() return state.screen or '> ' end
+        remuda.type_text = function(_, text)
+          state.typed[#state.typed + 1] = { at = state.now, text = text }
+          state.screen = text .. '\n> '
+          return true
+        end
+        remuda._notice_test_send('m1', 'already noticed but unread')
+        state.now = 2
+        remuda._butler_deliver_notices()
+        state.now = 3
+        remuda._butler_deliver_notices() -- verify the first notice left the composer
+        local id = state.typed[1].text:match('Butler message ([^ ]+)')
+        local seen_a = remuda._butler_bus.notice_seen[remuda._butler_bus.agents.m1.id][id]
+        local typed_a = #state.typed
+        rows[1].instance_id = 'instance-b'
+        state.screen = '> '
+        state.now = 4
+        remuda._butler_deliver_notices()
+        local typed_before_debounce = #state.typed
+        state.now = 6
+        remuda._butler_deliver_notices()
+        state.now = 7
+        remuda._butler_deliver_notices() -- verify the replayed notice
+        state.now = 8
+        remuda._butler_deliver_notices()
+        state.now = 20
+        remuda._butler_deliver_notices()
+        return table.concat({ tostring(typed_a), tostring(seen_a),
+          tostring(typed_before_debounce), tostring(#state.typed),
+          tostring(state.typed[2] and state.typed[2].text),
+          tostring(remuda._butler_bus.unread_seeded.m1 == 'instance-b') }, '|')
+        "#,
+    );
+    assert!(got.starts_with("1|true|1|2|Butler message "), "relaunch replay: {got}");
+    assert!(got.contains("|true"), "relaunch instance was not marked seeded: {got}");
+}
+
+#[test]
+fn unread_seed_waits_for_pending_task_and_codex_update_handoffs() {
+    let (path, _daemon) = butler_with_member("notice-unread-seed-gates");
+    setup_mail_notice_clock(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        local bus = remuda._butler_bus
+        remuda._notice_test_send('m1', 'waiting for startup gates')
+        bus.notices, bus.notice_seen, bus.unread_seeded = {}, {}, {}
+        local blocked = {}
+        bus.pending_tasks.m1 = 'pending task'
+        remuda._butler_deliver_notices()
+        blocked[#blocked + 1] = #state.typed == 0 and bus.unread_seeded.m1 == nil
+        bus.pending_tasks.m1 = nil
+        bus.codex_update_state.owner = 'm1'
+        remuda._butler_deliver_notices()
+        blocked[#blocked + 1] = #state.typed == 0 and bus.unread_seeded.m1 == nil
+        bus.codex_update_state.owner = nil
+        bus.codex_update_state.waiting.m1 = true
+        remuda._butler_deliver_notices()
+        blocked[#blocked + 1] = #state.typed == 0 and bus.unread_seeded.m1 == nil
+        bus.codex_update_state.waiting.m1 = nil
+        bus.codex_update_state.restart_waiting.m1 = true
+        remuda._butler_deliver_notices()
+        blocked[#blocked + 1] = #state.typed == 0 and bus.unread_seeded.m1 == nil
+        bus.codex_update_state.restart_waiting.m1 = nil
+        bus.codex_update_relaunches.m1 = { version = 'test handoff' }
+        remuda._butler_deliver_notices()
+        blocked[#blocked + 1] = #state.typed == 0 and bus.unread_seeded.m1 == nil
+        bus.codex_update_relaunches.m1 = nil
+        remuda._butler_deliver_notices()
+        state.now = 2
+        remuda._butler_deliver_notices()
+        local all_blocked = true
+        for _, value in ipairs(blocked) do all_blocked = all_blocked and value end
+        return tostring(all_blocked) .. '|' .. tostring(#state.typed) .. '|'
+          .. tostring(state.typed[1] and state.typed[1].text)
+        "#,
+    );
+    assert!(got.starts_with("true|1|Butler message "), "seed handoff gates: {got}");
+}
+
+#[test]
 fn a_new_member_gets_waiting_mail_after_its_launch_brief() {
     let (path, _daemon) = butler_with_member("notice-unread-new-member");
     eval(&path, "remuda._butler_inbox('m1')");
