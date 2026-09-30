@@ -21,6 +21,8 @@ remuda = {
     return queued and 1 or 0
   end },
   capture = function() return screen end,
+  -- main.lua loads its modules with exec; resolve them the way the daemon does.
+  exec = function(name) return dofile("packages/butler/" .. name:gsub("^butler/", "") .. ".lua") end,
 }
 dofile("packages/butler/main.lua")
 used = "500000"
