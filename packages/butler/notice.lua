@@ -20,6 +20,8 @@ bus.notices = bus.notices or {}
 bus.notice_screens = bus.notice_screens or {}
 bus.notice_seen = bus.notice_seen or {}
 bus.notice_retry_reasons = bus.notice_retry_reasons or {}
+bus.notice_fallbacks = bus.notice_fallbacks or {}
+bus.notice_failure_alerts = bus.notice_failure_alerts or {}
 local NOTICE_STABLE_SECONDS = 3
 local NOTICE_QUIET_S = 2
 local NOTICE_MAX_WAIT_S = 10
@@ -33,7 +35,7 @@ end
 
 local function codex_trace_row(text)
   return tostring(text or ""):match(
-    "^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d[%.,]?%d*Z?%s+%u+%s+[%w_%.:]+:") ~= nil
+    "^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d[%.,]?%d*Z?%s+%u+%s+[%w_%.:]+:.*$") ~= nil
 end
 
 -- The composer's text starts after the last prompt glyph and includes its
@@ -75,7 +77,13 @@ function remuda._butler_prompt_is_empty(kind, screen)
     parts[#parts + 1] = rest
   end
   text = table.concat(parts, "\n"):match("^%s*(.-)%s*$")
-  if kind == "codex" and codex_trace_row(text) then return "EMPTY", "" end
+  if kind == "codex" then
+    local remaining = {}
+    for row in (text .. "\n"):gmatch("(.-)\n") do
+      if not codex_trace_row(row) then remaining[#remaining + 1] = row end
+    end
+    text = table.concat(remaining, "\n"):match("^%s*(.-)%s*$")
+  end
   if text == "" then return "EMPTY", text end
   local startup = remuda._butler_agent_startup[kind] or {}
   for _, placeholder in ipairs(startup.placeholders or {}) do
@@ -162,7 +170,10 @@ function remuda._butler_notify_policy(session, now)
   local decision, text = remuda._butler_prompt_is_empty(kind, prompt_screen)
   if seen.decision ~= decision then -- once per change, not every retry
     seen.decision = decision
-    _butler_session_trace("notice_prompt", session .. " " .. kind .. " " .. decision .. " " .. text)
+    _butler_session_trace("notice_prompt", "message_ids="
+      .. table.concat(bus.notices[session] and bus.notices[session].message_order or {}, ",")
+      .. " session=" .. session .. " kind=" .. kind .. " decision=" .. decision
+      .. " composer_bytes=" .. tostring(#text))
   end
   return decision == "EMPTY"
 end
@@ -268,12 +279,19 @@ local function refresh_pending_notice(session, pending)
     end
   end
   pending.message_order, pending.message_ids, pending.message_times = order, notices, message_times
+  local fallback = bus.notice_fallbacks[session]
+  if fallback then
+    for id in pairs(fallback) do
+      if not notices[id] then fallback[id] = nil end
+    end
+    if next(fallback) == nil then bus.notice_fallbacks[session] = nil end
+  end
   pending.count = #order
   pending.text = order[#order] and notices[order[#order]] or nil
   if pending.count == 0 then
     local recovery = bus.notice_recoveries[session]
     if recovery and recovery.draft and recovery.draft ~= "" then
-      notice_recovery_error(session, recovery, "mail was read while notice recovery was active; draft preserved")
+      notice_recovery_error(session, recovery, "mail read during notice recovery")
     else
       bus.notices[session], bus.notice_recoveries[session] = nil, nil
     end
@@ -359,20 +377,35 @@ local function trace_notice_retry(session, pending, reason)
     .. table.concat(pending and pending.message_order or {}, ",")
     .. " session=" .. session .. " reason=" .. tostring(reason))
 end
-local function notice_log_value(value)
-  local raw = tostring(value or "")
-  local length = #raw
-  if length > 8192 then
-    raw = raw:sub(1, 8192) .. ("<truncated; %d bytes total>"):format(length)
-  end
-  return string.format("%q", raw)
+local function notice_byte_length(value)
+  return #tostring(value or "")
 end
-local function log_notice_verify_mismatch(session, screen, text, expected)
-  -- Failure-only trace data; never display diagnostic captures in an agent pane.
-  _butler_session_trace("notice_verify_mismatch", session
-    .. " capture=" .. notice_log_value(screen)
-    .. " composer=" .. notice_log_value(text)
-    .. " expected=" .. notice_log_value(expected))
+local function log_notice_verify_mismatch(session, state, screen, text, expected, reason)
+  _butler_session_trace("notice_verify_mismatch", "message_ids="
+    .. table.concat(state.message_ids or {}, ",") .. " session=" .. session
+    .. " reason=" .. reason .. " capture_bytes=" .. tostring(notice_byte_length(screen))
+    .. " composer_bytes=" .. tostring(notice_byte_length(text))
+    .. " expected_bytes=" .. tostring(notice_byte_length(expected)))
+end
+local function clear_notice_fallbacks(session, ids)
+  local fallback = bus.notice_fallbacks[session]
+  if not fallback then return end
+  for _, id in ipairs(ids or {}) do fallback[id] = nil end
+  if next(fallback) == nil then bus.notice_fallbacks[session] = nil end
+end
+local function notice_fallback_or_fail(session, state, pending, reason)
+  local ids = pending and pending.message_order or state.message_ids or {}
+  local fallback = bus.notice_fallbacks[session] or {}
+  for _, id in ipairs(ids) do
+    if fallback[id] then
+      return notice_recovery_error(session, state, "notice fallback retry limit reached")
+    end
+  end
+  for _, id in ipairs(ids) do fallback[id] = true end
+  bus.notice_fallbacks[session] = fallback
+  trace_notice_retry(session, pending, reason)
+  bus.notice_recoveries[session] = nil
+  return true
 end
 local function recovery_composer_empty(session, screen, decision, text)
   if decision ~= "EMPTY" then return false end
@@ -385,12 +418,20 @@ notice_recovery_error = function(session, state, reason)
   local agent = bus.agents[session]
   local parent = agent and agent.parent or "butler"
   _butler_session_trace("notice_recovery_failed", "message_ids="
-    .. table.concat(state.message_ids or {}, ",") .. " session=" .. session .. " reason=" .. reason)
+    .. table.concat(state.message_ids or {}, ",") .. " session=" .. session .. " reason=" .. reason
+    .. " draft_bytes=" .. tostring(notice_byte_length(state.draft)))
   bus.notice_retry_reasons[session] = nil
-  pcall(remuda._butler_send, "butler", parent,
-    "Could not safely deliver queued Butler mail to " .. session .. ": " .. reason
-    .. ". Inspect the composer and resend the notice."
-    .. (state.draft and (" Parsed composer draft: " .. state.draft) or ""))
+  local alerts = bus.notice_failure_alerts[session] or {}
+  bus.notice_failure_alerts[session] = alerts
+  if not alerts[reason] then
+    alerts[reason] = true
+    pcall(remuda._butler_send, "butler", parent,
+      "Could not safely deliver queued Butler mail to " .. session .. ": " .. reason
+      .. ". Inspect the composer and resend the notice. Message IDs: "
+      .. table.concat(state.message_ids or {}, ",") .. "; draft bytes: "
+      .. tostring(notice_byte_length(state.draft)) .. ".")
+  end
+  clear_notice_fallbacks(session, state.message_ids)
   bus.notices[session] = nil
   bus.notice_recoveries[session] = nil
   return false
@@ -433,6 +474,8 @@ local function complete_notice_recovery(session, state)
   end
   bus.notice_recoveries[session] = nil
   bus.notice_retry_reasons[session] = nil
+  bus.notice_failure_alerts[session] = nil
+  clear_notice_fallbacks(session, state.message_ids)
   return true
 end
 local function recovery_human_safe(session, allow_busy)
@@ -475,8 +518,13 @@ local function begin_notice_submit(session, state, draft)
     state.phase = "retry_type"
     return false
   end
-  if not typed then return notice_recovery_error(session, state,
-    "the notice could not be typed: " .. tostring(why or result)) end
+  if not typed then
+    local fallback = bus.notice_fallbacks[session] or {}
+    for _, id in ipairs(state.message_ids) do
+      if fallback[id] then return notice_recovery_error(session, state, "fallback notice typing failed") end
+    end
+    return notice_recovery_error(session, state, "the notice could not be typed")
+  end
   state.phase, state.checks, state.saw_notice = "verify_notice", 0, false
   return false
 end
@@ -516,7 +564,7 @@ local function tick_notice_recovery(session, state)
     end
     state.pre_redraw_decision, state.pre_redraw_screen, state.pre_redraw_text = decision, screen, text
     local redrawn, why = pcall(remuda.key, session, "C-l")
-    if not redrawn then return notice_recovery_error(session, state, "Ctrl-L redraw failed: " .. tostring(why)) end
+    if not redrawn then return notice_recovery_error(session, state, "Ctrl-L redraw failed") end
     state.phase = "redrawn"
     return false
   elseif state.phase == "redrawn" then
@@ -544,7 +592,7 @@ local function tick_notice_recovery(session, state)
       local pressed, result, why = pcall(remuda.key, session, "RET")
       if input_was_busy(pressed, result, why) then return false end
       if not pressed then return notice_recovery_error(session, state,
-        "the existing Butler notice could not be submitted: " .. tostring(why or result)) end
+        "the existing Butler notice could not be submitted") end
       state.phase, state.checks, state.notice = "verify_existing", 0, current_notice
       state.message_ids = {}
       for _, id in ipairs((bus.notices[session] or {}).message_order or {}) do
@@ -564,7 +612,7 @@ local function tick_notice_recovery(session, state)
     end
     state.draft = draft
     local cleared, why = pcall(remuda.key, session, startup.clear_input)
-    if not cleared then return notice_recovery_error(session, state, "the draft clear key failed: " .. tostring(why)) end
+    if not cleared then return notice_recovery_error(session, state, "the draft clear key failed") end
     state.phase, state.checks = "verify_clear", 0
     return false
   elseif state.phase == "verify_clear" then
@@ -582,13 +630,8 @@ local function tick_notice_recovery(session, state)
     end
     if busy then return false end
     if state.checks >= 6 then
-      if decision == "EMPTY" then
-        trace_notice_retry(session, pending, "cap reached; prompt-empty; falling back to normal delivery")
-        bus.notice_recoveries[session] = nil
-        bus.notice_retry_reasons[session] = nil
-        return false
-      end
-      log_notice_verify_mismatch(session, screen, text, state.notice)
+      log_notice_verify_mismatch(session, state, screen, text, state.notice,
+        "existing notice did not leave composer")
       return notice_recovery_error(session, state, "the existing Butler notice did not leave the composer")
     end
     return false
@@ -612,18 +655,18 @@ local function tick_notice_recovery(session, state)
       local pressed, result, why = pcall(remuda.key, session, "RET")
       if input_was_busy(pressed, result, why) then return false end
       if not pressed then return notice_recovery_error(session, state,
-        "the notice Return failed: " .. tostring(why or result)) end
+        "the notice Return failed") end
       state.return_retried = true
       return false
     end
     if state.checks >= 12 then
       if decision == "EMPTY" then
-        trace_notice_retry(session, pending, "cap reached; prompt-empty; falling back to normal delivery")
-        bus.notice_recoveries[session] = nil
-        bus.notice_retry_reasons[session] = nil
+        notice_fallback_or_fail(session, state, pending,
+          "cap reached; prompt-empty; falling back to normal delivery")
         return false
       end
-      log_notice_verify_mismatch(session, screen, text, state.notice)
+      log_notice_verify_mismatch(session, state, screen, text, state.notice,
+        "notice submit could not be verified")
       return notice_recovery_error(session, state, "the notice submit could not be verified")
     end
     return false
@@ -641,8 +684,8 @@ local function deliver_notice(session)
     recovering.started_at = recovering.started_at or notice_now()
     if notice_now() - recovering.started_at >= NOTICE_RECOVERY_TIMEOUT_S then
       if remuda._butler_notify_policy(session) then
-        trace_notice_retry(session, pending, "recovery-timeout; prompt-empty; falling-back-to-normal-delivery")
-        bus.notice_recoveries[session] = nil
+        if not notice_fallback_or_fail(session, recovering, pending,
+            "recovery-timeout; prompt-empty; falling-back-to-normal-delivery") then return false end
         recovering = nil
       else
         return notice_recovery_error(session, recovering, "recovery timed out after 20 seconds")

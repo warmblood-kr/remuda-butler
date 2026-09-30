@@ -601,8 +601,8 @@ fn notify_policy_types_only_into_a_detached_or_quiet_empty_prompt() {
          codex_placeholder=true codex_typed=false detached=false detached_empty=true detached_unknown=true detached_busy_error=true"
     );
     let log = std::fs::read_to_string(&trace).unwrap_or_default();
-    assert!(log.contains("notice_prompt\tp1  NON-EMPTY co"), "{log}");
-    assert!(log.contains("notice_prompt\tp1  UNPARSEABLE"), "{log}");
+    assert!(log.contains("notice_prompt\tmessage_ids= session=p1 kind= decision=NON-EMPTY composer_bytes=2"), "{log}");
+    assert!(log.contains("notice_prompt\tmessage_ids= session=p1 kind= decision=UNPARSEABLE composer_bytes=0"), "{log}");
 }
 
 #[test]
@@ -785,9 +785,11 @@ fn a_non_busy_error_containing_busy_is_not_retried_as_input_lock() {
     assert_eq!(eval(&path, "return tostring(remuda._notice_busy_error_calls)"), "1");
     assert_eq!(eval(&path, "return tostring(remuda._notice_recovery_failed)"), "true");
     assert!(
-        eval(&path, "return tostring(remuda._notice_busy_error_report)").contains("disk is busy"),
-        "non-Busy type_text error was not reported"
+        eval(&path, "return tostring(remuda._notice_busy_error_report)")
+            .contains("the notice could not be typed"),
+        "non-Busy type_text failure was not reported"
     );
+    assert!(!eval(&path, "return tostring(remuda._notice_busy_error_report)").contains("disk is busy"));
 }
 
 /// #82: notice submit verification accepts Claude's soft-wrapped composer in
@@ -1054,10 +1056,9 @@ fn claude_notice_still_in_composer_is_retried_once_then_reported() {
     assert!(eval(&path, "return remuda._notice_stuck_test_state.report").contains("could not be verified"));
 }
 
-/// #82: failed comparisons write a bounded capture record to the private
-/// session trace; the diagnostic is never typed into the member pane.
+/// #82: failed comparisons log sizes and a fixed reason, never pane or notice text.
 #[test]
-fn notice_verify_mismatch_logs_bounded_capture_and_expected_text() {
+fn notice_verify_mismatch_logs_only_lengths_and_reason() {
     let (path, _daemon) = butler_with_member("notice-verify-trace");
     let trace = path.parent().unwrap().join("session-trace.log");
     eval(
@@ -1083,9 +1084,12 @@ fn notice_verify_mismatch_logs_bounded_capture_and_expected_text() {
         eval(&path, "remuda._butler_deliver_notices()");
     }
     let log = std::fs::read_to_string(&trace).expect("notice diagnostic trace");
-    assert!(log.contains("notice_verify_mismatch\tm1 capture=\""), "{log}");
-    assert!(log.contains("<truncated; 9027 bytes total>"), "{log}");
-    assert!(log.contains("expected=\"Butler message"), "{log}");
+    assert!(log.contains("notice_verify_mismatch\tmessage_ids="), "{log}");
+    assert!(log.contains("session=m1 reason=notice submit could not be verified"), "{log}");
+    assert!(log.contains("capture_bytes=9027 composer_bytes=18 expected_bytes="), "{log}");
+    assert!(!log.contains("unrelated composer"), "{log}");
+    assert!(!log.contains("Butler message"), "{log}");
+    assert!(!log.contains(&"x".repeat(64)), "{log}");
     assert!(
         log.len() < 40_000,
         "notice diagnostic was not bounded: {} bytes",
@@ -1256,7 +1260,7 @@ fn notice_recovery_preserves_idle_draft_and_respects_attached_human() {
 }
 
 #[test]
-fn partial_clear_escalation_keeps_the_full_parsed_draft() {
+fn partial_clear_escalation_reports_draft_length_without_draft_text() {
     let (path, _daemon) = butler_with_member("partial-clear");
     eval(
         &path,
@@ -1292,7 +1296,8 @@ fn partial_clear_escalation_keeps_the_full_parsed_draft() {
         std::thread::sleep(Duration::from_millis(100));
     }
     let escalation = eval(&path, "return remuda._partial_clear_state.escalation");
-    assert!(escalation.contains("Parsed composer draft: first draft line\nsecond draft line"), "escalation lost the full original draft: {escalation}");
+    assert!(escalation.contains("draft bytes: 34"), "escalation omitted draft length: {escalation}");
+    assert!(!escalation.contains("first draft line"), "escalation leaked draft text: {escalation}");
     assert!(escalation.contains("composer did not become empty"), "partial clear reason was missing: {escalation}");
 }
 
@@ -1871,6 +1876,137 @@ fn attached_notice_recovery_progresses_or_times_out_with_a_reason() {
 }
 
 #[test]
+fn empty_prompt_fallback_types_once_per_notice_then_alerts() {
+    let (path, _daemon) = butler_with_member("notice-fallback-once");
+    eval(
+        &path,
+        r#"
+        local state = { now = 0, typed = 0, alerts = {} }
+        local row = { name = 'm1', alive = true, attached = false }
+        remuda._notice_fallback_test = state
+        remuda._butler_notice_clock = function() return state.now end
+        remuda.ls = function() return { row } end
+        remuda.capture = function() return '› ' end
+        remuda.capture_styled = nil
+        remuda.session = function() return { is_busy = false } end
+        remuda._butler_human_active = function() return false end
+        remuda._butler_notify_policy = function() return true end
+        remuda.type_text = function() state.typed = state.typed + 1; return true end
+        local send = remuda._butler_send
+        remuda._butler_send = function(from, to, text)
+          if from == 'butler' then table.insert(state.alerts, text); return 'alerted' end
+          return send(from, to, text)
+        end
+        remuda._butler_send('operator', 'm1', 'fallback bound test')
+        state.now = 2
+        remuda._butler_deliver_notices()
+        "#,
+    );
+    for _ in 0..30 {
+        eval(
+            &path,
+            "remuda._notice_fallback_test.now = remuda._notice_fallback_test.now + 1; remuda._butler_deliver_notices()",
+        );
+    }
+    assert_eq!(
+        eval(&path, "return tostring(remuda._notice_fallback_test.typed)"),
+        "2",
+        "notice was typed more than once after initial delivery plus its one fallback",
+    );
+    assert_eq!(
+        eval(&path, "return tostring(#remuda._notice_fallback_test.alerts)"),
+        "1",
+        "fallback exhaustion must send one leader alert",
+    );
+    assert_eq!(
+        eval(&path, "return tostring(remuda._butler_bus.notices.m1 == nil)"),
+        "true",
+    );
+}
+
+#[test]
+fn recovery_alert_dedupes_until_a_notice_is_delivered() {
+    let (path, _daemon) = butler_with_member("notice-alert-dedupe");
+    eval(
+        &path,
+        r#"
+        local state = { now = 0, alerts = {}, screen = '' }
+        local row = { name = 'm1', alive = true, attached = false }
+        remuda._notice_alert_test = state
+        remuda._butler_bus.pending_tasks.m1 = nil
+        remuda._butler_notice_clock = function() return state.now end
+        remuda.ls = function() return { row } end
+        remuda.capture = function()
+          if state.screen == 'error' then error('private capture detail') end
+          return state.screen
+        end
+        remuda.capture_styled = nil
+        remuda.session = function() return { is_busy = false } end
+        remuda._butler_human_active = function() return false end
+        remuda._butler_notify_policy = function() return state.screen ~= 'error' end
+        remuda.type_text = function(_, text)
+          state.screen = text .. '\n❯ '
+          return true
+        end
+        local send = remuda._butler_send
+        remuda._butler_send = function(from, to, text)
+          if from == 'butler' then table.insert(state.alerts, text); return 'alerted' end
+          return send(from, to, text)
+        end
+        state.screen = 'error'
+        local first = remuda._butler_send('operator', 'm1', 'first recovery failure')
+        local first_id = first:match('queued ([^ ]+)')
+        remuda._butler_bus.notice_recoveries.m1 = { phase = 'verify_notice', checks = 0,
+          message_ids = { first_id }, started_at = 0 }
+        state.now = 2
+        remuda._butler_deliver_notices()
+        state.now = 3
+        local second = remuda._butler_send('operator', 'm1', 'same recovery failure')
+        local second_id = second:match('queued ([^ ]+)')
+        remuda._butler_bus.notice_recoveries.m1 = { phase = 'verify_notice', checks = 0,
+          message_ids = { second_id }, started_at = 3 }
+        state.now = 5
+        remuda._butler_deliver_notices()
+        "#,
+    );
+    let first_alerts = eval(&path, "return tostring(#remuda._notice_alert_test.alerts)");
+    assert_eq!(first_alerts, "1", "the same session and reason should alert only once");
+    eval(
+        &path,
+        r#"
+        remuda._notice_alert_test.screen = ''
+        remuda._butler_notify_policy = function() return true end
+        remuda._notice_alert_test.now = 6
+        remuda._butler_send('operator', 'm1', 'successful recovery')
+        remuda._notice_alert_test.now = 8
+        remuda._butler_deliver_notices()
+        remuda._butler_deliver_notices()
+        "#,
+    );
+    eval(
+        &path,
+        r#"
+        remuda._notice_alert_test.screen = 'error'
+        remuda._notice_alert_test.now = 10
+        local sent = remuda._butler_send('operator', 'm1', 'new recovery after delivery')
+        local id = sent:match('queued ([^ ]+)')
+        remuda._butler_bus.notice_recoveries.m1 = { phase = 'verify_notice', checks = 0,
+          message_ids = { id }, started_at = 10 }
+        remuda._notice_alert_test.now = 12
+        remuda._butler_deliver_notices()
+        "#,
+    );
+    assert_eq!(
+        eval(&path, "return tostring(#remuda._notice_alert_test.alerts)"),
+        "2",
+        "a delivered notice should reset the alert dedupe window",
+    );
+    let alert = eval(&path, r#"return table.concat(remuda._notice_alert_test.alerts, '\n')"#);
+    assert!(!alert.contains("private capture detail"), "alert leaked capture error text: {alert}");
+    assert!(!alert.contains("first recovery failure"), "alert leaked message text: {alert}");
+}
+
+#[test]
 fn unknown_busy_state_advances_notice_recovery_timeout() {
     let (path, _daemon) = butler_with_member("unknown-busy-recovery");
     eval(
@@ -1892,7 +2028,7 @@ fn unknown_busy_state_advances_notice_recovery_timeout() {
 }
 
 #[test]
-fn reading_mail_mid_notice_recovery_reports_the_cleared_draft() {
+fn reading_mail_mid_notice_recovery_reports_draft_length_without_text() {
     let (path, _daemon) = butler_with_member("notice-read-mid-recovery");
     eval(
         &path,
@@ -1913,7 +2049,8 @@ fn reading_mail_mid_notice_recovery_reports_the_cleared_draft() {
         "#,
     );
     let report = eval(&path, "return tostring(remuda._notice_read_recovery_report)");
-    assert!(report.contains("important unsent draft"), "read cleared recovery without reporting its draft: {report}");
+    assert!(report.contains("draft bytes: 22"), "read cleared recovery without reporting draft length: {report}");
+    assert!(!report.contains("important unsent draft"), "read recovery alert leaked draft text: {report}");
 }
 
 /// #23a: an ended member's unread mail stays readable by its alias, not only
