@@ -5474,6 +5474,7 @@ fn butler_compaction_schedule_sends_compact_when_idle_but_not_when_busy() {
     );
 
     let butler_name = eval(&path, "return remuda._butler_initial_name");
+    eval(&path, &format!("remuda._butler_inbox({butler_name:?})"));
     eval(
         &path,
         &format!("remuda._butler_bus.agents[{butler_name:?}].kind = 'codex'"),
@@ -5632,6 +5633,7 @@ fn butler_compaction_trace_records_registered_skipped_and_sent() {
     );
 
     let butler_name = eval(&path, "return remuda._butler_initial_name");
+    eval(&path, &format!("remuda._butler_inbox({butler_name:?})"));
     eval(&path, FAKE_COMPACTION_EXPECT);
 
     // Simulates the launched session's own one-time `run_script` call the

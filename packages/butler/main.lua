@@ -119,6 +119,16 @@ local function compaction_config()
   end
   return out
 end
+local function compaction_has_queued_mail(name)
+  local agents = (remuda._butler_bus or {}).agents or {}
+  local agent = agents[name]
+  local mail = remuda._butler_mail
+  if not (agent and agent.id and type(mail) == "table" and type(mail.unread) == "function") then
+    return false
+  end
+  local read, unread = pcall(mail.unread, agent.id)
+  return not read or (tonumber(unread) or 0) > 0
+end
 
 -- Public compaction units. These stay above the test-mode return so the
 -- standalone Lua acceptance test exercises the same policy primitives.
@@ -148,8 +158,7 @@ function remuda.butler.is_idle(name)
     end
   end
   local bus = remuda._butler_bus or {}
-  if (remuda._butler_compaction_has_queued_mail and remuda._butler_compaction_has_queued_mail(name))
-    or ((bus.pending_tasks or {})[name]) or ((bus.notices or {})[name]) then
+  if compaction_has_queued_mail(name) or ((bus.pending_tasks or {})[name]) or ((bus.notices or {})[name]) then
     return false, "queued work"
   end
   local captured, screen = pcall(remuda.capture, name)
@@ -252,9 +261,7 @@ function remuda._butler_compaction_preflight(session_name)
   end
   if attached then return "human attached" end
   if session.is_busy ~= false then return "busy" end
-  if remuda._butler_compaction_has_queued_mail and remuda._butler_compaction_has_queued_mail(session_name) then
-    return "queued mail"
-  end
+  if compaction_has_queued_mail(session_name) then return "queued mail" end
   local captured, screen = pcall(remuda.capture, session_name)
   if not captured or type(screen) ~= "string" then return "session unavailable" end
   local agent = remuda._butler_bus.agents[session_name] or {}
@@ -1094,12 +1101,6 @@ local function choose(candidates, opts, done)
   local chooser_record = { id = chooser_id, name = opts.name }
   lifecycle.active_choosers[chooser_id] = chooser_record
   local cancelled = false
-  local function trace(attempt)
-    if remuda._butler_session_trace then
-      remuda._butler_session_trace("candidate", attempt.kind .. ": " .. attempt.reason
-        .. ": " .. (attempt.detail or ""))
-    end
-  end
   local function callback(name, kind)
     if cancelled then return end
     if schedule then remuda.cancel(schedule); schedule = nil end
@@ -1136,7 +1137,7 @@ local function choose(candidates, opts, done)
     attempts[#attempts + 1] = attempt
     if not entry then
       attempt.reason, attempt.detail = "not_found", "agent kind is not registered"
-      trace(attempt); start_next(); return
+      start_next(); return
     end
     local spec = opts.spec(id)
     local argv = (type(opts.argv) == "function" and opts.argv(id, spec)) or opts.argv
@@ -1151,13 +1152,13 @@ local function choose(candidates, opts, done)
       local found = os.execute("command -v " .. quoted .. " >/dev/null 2>&1")
       if found ~= true and found ~= 0 then
         attempt.reason, attempt.detail = "not_found", executable .. " not found in PATH"
-        trace(attempt); start_next(); return
+        start_next(); return
       end
     end
     local ok, name = pcall(remuda.new, opts.name, argv, opts.cwd, opts.env(id, spec))
     if not ok then
       attempt.reason, attempt.detail = "spawn_error", one_line(name)
-      trace(attempt); start_next(); return
+      start_next(); return
     end
     state = { id = id, entry = entry, attempt = attempt, name = name,
       started = os.time(), timeout = opts.timeout or readiness_timeout(),
@@ -1176,12 +1177,12 @@ local function choose(candidates, opts, done)
     if state.closing then
       state.close_ticks = state.close_ticks + 1
       if not alive(state.name) then
-        trace(state.attempt); state = nil; start_next()
+        state = nil; start_next()
       elseif state.close_ticks >= 10 then
         state.attempt.reason = "spawn_error"
         state.attempt.detail = (state.attempt.detail or "") .. "; failed to kill failed session"
           .. (state.close_error and (": " .. tostring(state.close_error)) or "")
-        trace(state.attempt); callback(nil, nil)
+        callback(nil, nil)
       end
       return
     end

@@ -8,14 +8,14 @@ remuda = {
     watch = 400000, warn = 600000, critical = 800000, critical_pct = 90,
     capture_gap = 3, cooldown_ticks = 2,
   },
-  _butler_bus = { agents = { butler = { kind = "claude" } } },
+  _butler_bus = { agents = { butler = { id = "butler", kind = "claude" } } },
   _butler_telemetry_for = function() return { context_used = used, context_pct = used_pct } end,
   session = function()
     if session_failure then error("session is no longer alive") end
     return { is_busy = busy, attached = attached }
   end,
   ls = function() return { { name = "butler", alive = true, attached = attached } } end,
-  _butler_compaction_has_queued_mail = function() return queued end,
+  _butler_mail = { unread = function() return queued and 1 or 0 end },
   capture = function() return screen end,
 }
 dofile("packages/butler/main.lua")
