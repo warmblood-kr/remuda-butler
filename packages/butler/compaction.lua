@@ -7,7 +7,7 @@ local registered_agent_kind = assert(config.registered_agent_kind)
 local registered_agent_working = assert(config.registered_agent_working)
 local DEFAULT_COMPACTION_CONFIG = {
   watch = 300000, warn = 400000, critical = 800000, critical_pct = 90,
-  cooldown_ticks = 4, capture_gap = 3, completion_timeout = 45,
+  cooldown_ticks = 4, capture_gap = 3, completion_timeout = 180,
   claude_completion_timeout = 180, failure_cooldown_seconds = 600,
   input_settle = 0.15,
 }
