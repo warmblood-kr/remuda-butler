@@ -1,5 +1,6 @@
 -- L2 Matrix write composites over remuda.butler.matrix.request.
 local matrix = assert(remuda.butler and remuda.butler.matrix, "Matrix request word is unavailable")
+local approval = assert(remuda.butler.approval, "load butler/approval before butler/matrix_write")
 -- Trust words are bound at load (main.lua execs matrix_request before
 -- this file), so a later redefinition of the public entry cannot change them.
 local is_agent_mxid = matrix.is_agent_mxid
@@ -268,7 +269,7 @@ function matrix.upload(opts, on_done)
 end
 
 local function operator_room(verb, opts, agent, callback)
-  if agent then
+  if agent and verb ~= "join" then
     callback({ error = "matrix " .. verb .. " is operator-only (advisory at the same UID until core #218)" })
     return nil
   end
@@ -361,9 +362,149 @@ local function find_public_matches(name, base, callback)
     local has_next_page = type(result.json) == "table"
       and type(result.json.next_batch) == "string" and result.json.next_batch ~= ""
     if #rows > 1 or has_next_page then return callback({ matches = rows, ambiguous = true }) end
-    callback({ room_id = rows[1].room_id, alias = rows[1].alias, name = rows[1].name })
+    callback({ room_id = rows[1].room_id, alias = rows[1].alias, name = rows[1].name,
+      public = true, members = rows[1].members })
   end)
 end
+
+local function utf8_length(text)
+  local count, at = 0, 1
+  while at <= #text do
+    local byte = text:byte(at)
+    at = at + (byte < 0x80 and 1 or (byte < 0xe0 and 2 or (byte < 0xf0 and 3 or 4)))
+    count = count + 1
+  end
+  return count
+end
+
+local function approval_summary(room, alias, display_name, is_public, members)
+  local clean = sanitize_directory_text
+  local room_id = clean(room)
+  local target = clean(alias or display_name or room)
+  local prefix = "join " .. target
+  if display_name then
+    local name = clean(display_name)
+    local detail = ' ("' .. name .. '"'
+    if is_public then detail = detail .. ", public, " .. tostring(tonumber(members) or 0) .. " members" end
+    prefix = prefix .. detail .. ")"
+  end
+  if not alias and not display_name then return clean(prefix, 128) end
+  local suffix = " (" .. room_id .. ")"
+  local room_chars = utf8_length(suffix)
+  local head = clean(prefix, math.max(1, 128 - room_chars))
+  return head .. clean(suffix, math.max(1, 128 - utf8_length(head)))
+end
+
+local function file_request(room, alias, display_name, is_public, members, asker, callback)
+  local summary = approval_summary(room, alias, display_name, is_public, members)
+  local label = sanitize_directory_text(alias or display_name or room)
+  return approval.request({ kind = "join", key = room, summary = summary, asker = tostring(asker),
+    ttl_s = 600, data = { room_id = room, alias = alias, name = display_name } }, function(id, why)
+      if not id then return callback({ error = why or "Could not file approval request" }) end
+      callback({ approval_request_id = id, room_id = room, room_alias = alias,
+        room_name = display_name, approval_label = label })
+    end)
+end
+
+local function approval_label(rec)
+  local data = type(rec.data) == "table" and rec.data or {}
+  return sanitize_directory_text(data.alias or data.name or data.room_id or "the Matrix room")
+end
+
+local function approval_mail(rec, text)
+  if type(remuda._butler_send) == "function" then
+    pcall(remuda._butler_send, "butler", rec.asker, text)
+  end
+end
+
+local function approval_thread(rec, text)
+  pcall(approval.reply, rec, text)
+end
+
+local function approval_join_failed(rec, err, done)
+  err = tostring(err or "unknown Matrix error")
+  local data = type(rec.data) == "table" and rec.data or {}
+  local room = sanitize_directory_text(data.room_id or "unknown room")
+  approval_mail(rec, "Approved, but the join failed: " .. err
+    .. " (request " .. tostring(rec.id) .. ", " .. room
+    .. "). Next: ask the owner to invite the bot, then run the join again.")
+  approval_thread(rec, "Approved by " .. tostring(rec.answered_by or "the owner") .. "; join failed: " .. err)
+  done(false, err)
+end
+
+local function join_as(config_path, conf, room, how, alias, display_name, callback)
+  local added = false
+  if conf.rooms[room] ~= "home" and conf.rooms[room] ~= "all" then
+    local ok, wrote_or_error = matrix.config_add_room(config_path, room, how, alias)
+    if not ok then return error_result(callback, wrote_or_error) end
+    added = wrote_or_error == true
+  end
+  return matrix.request_json({ method = "POST",
+    path = "/_matrix/client/v3/rooms/" .. path_component(room) .. "/join",
+    room = room, body = "{}", headers = { ["Content-Type"] = "application/json" },
+  }, function(result)
+    if type(result) ~= "table" or result.error then
+      local failure = type(result) == "table" and result.error or "Matrix join returned no result"
+      if added then
+        local removed, remove_error = matrix.config_remove_room(config_path, room)
+        if not removed then
+          failure = tostring(failure) .. "; config rollback failed: " .. tostring(remove_error)
+        end
+      end
+      if failure:find("(M_FORBIDDEN)", 1, true) then
+        local next_line = "Next: invite the bot (" .. conf.self_mxid .. ") to " .. room
+          .. " from Element, then retry."
+        local replaced
+        failure, replaced = failure:gsub("Next:[^\r\n]*", function() return next_line end)
+        if replaced == 0 then failure = failure .. "\n" .. next_line end
+      end
+      return callback({ error = failure })
+    end
+    result.room_id = room
+    result.room_alias = alias and sanitize_directory_text(alias) or nil
+    result.room_name = display_name and sanitize_directory_text(display_name) or nil
+    callback(result)
+  end)
+end
+
+local function join_approved(rec, done)
+  local data = type(rec.data) == "table" and rec.data or {}
+  local room, alias = data.room_id, data.alias
+  if not room_id_valid(room) then return approval_join_failed(rec, "invalid stored room ID", done) end
+  local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths or {}
+  local config_path = paths.config_path
+  if type(config_path) ~= "string" or config_path == "" then
+    return approval_join_failed(rec, "Matrix config path is unavailable", done)
+  end
+  local conf, config_error = matrix.read_config(config_path)
+  if not conf then return approval_join_failed(rec, config_error, done) end
+  return join_as(config_path, conf, room, "approved", alias, data.name, function(result)
+    if result.error then return approval_join_failed(rec, result.error, done) end
+    local label = approval_label(rec)
+    approval_mail(rec, "Approved; joined " .. label .. " (request "
+      .. tostring(rec.id) .. ", " .. room .. ").")
+    approval_thread(rec, "Approved by " .. tostring(rec.answered_by or "the owner") .. "; joined.")
+    done(true)
+  end)
+end
+
+approval.handler("join", {
+  approve = join_approved,
+  deny = function(rec)
+    local data = type(rec.data) == "table" and rec.data or {}
+    local room = sanitize_directory_text(data.room_id or "unknown room")
+    approval_mail(rec, "Denied by the owner (request " .. tostring(rec.id) .. ", " .. room
+      .. "). Next: ask the owner in HOME why, or pick another room.")
+    approval_thread(rec, "Denied by " .. tostring(rec.answered_by or "the owner") .. ".")
+  end,
+  expire = function(rec)
+    local data = type(rec.data) == "table" and rec.data or {}
+    local room = sanitize_directory_text(data.room_id or "unknown room")
+    approval_mail(rec, "No answer in 10 minutes; not joined (request " .. tostring(rec.id)
+      .. ", " .. room .. "). Next: run the join again to re-ask.")
+    approval_thread(rec, "Expired.")
+  end,
+})
 
 function matrix.join(opts, on_done, agent)
   opts = opts or {}
@@ -378,38 +519,16 @@ function matrix.join(opts, on_done, agent)
   local conf, config_error = matrix.read_config(config_path)
   if not conf then return error_result(done, config_error) end
   local current
-  local function join_room(room, alias, display_name)
-    local added = false
-    if conf.rooms[room] ~= "home" and conf.rooms[room] ~= "all" then
-      local ok, wrote_or_error = matrix.config_add_room(config_path, room, "operator", alias)
-      local add_error = not ok and wrote_or_error or nil
-      if not ok then return error_result(done, add_error) end
-      added = wrote_or_error == true
+  local function join_room(room, alias, display_name, is_public, members)
+    if not room_id_valid(room) then
+      return error_result(done, "invalid Matrix room ID: room IDs start with ! (Element: Room settings > Advanced tab (not General) > Internal room ID. Element X may not show it; use the #alias instead.).")
     end
-    current = matrix.request_json({ method = "POST",
-      path = "/_matrix/client/v3/rooms/" .. path_component(room) .. "/join",
-      room = room, body = "{}", headers = { ["Content-Type"] = "application/json" },
-    }, function(result)
-      if result.error and added then
-        local removed, remove_error = matrix.config_remove_room(config_path, room)
-        if not removed then
-          result.error = tostring(result.error) .. "; config rollback failed: " .. tostring(remove_error)
-        end
-      end
-      if result.error and result.error:find("(M_FORBIDDEN)", 1, true) then
-        local next_line = "Next: invite the bot (" .. conf.self_mxid .. ") to " .. room
-          .. " from Element, then retry."
-        local replaced
-        result.error, replaced = result.error:gsub("Next:[^\r\n]*", function() return next_line end)
-        if replaced == 0 then result.error = result.error .. "\n" .. next_line end
-      end
-      if not result.error then
-        result.room_id = room
-        result.room_alias = alias and sanitize_directory_text(alias) or nil
-        result.room_name = display_name and sanitize_directory_text(display_name) or nil
-      end
-      done(result)
-    end)
+    if agent then
+      current = file_request(room, alias, display_name, is_public, members, agent, done)
+      return current
+    end
+    current = join_as(config_path, conf, room, "operator", alias, display_name, done)
+    return current
   end
   if requested:sub(1, 1) == "#" then
     current = resolve_alias(requested, conf.base, function(resolved)
@@ -424,7 +543,7 @@ function matrix.join(opts, on_done, agent)
     end
     current = find_public_matches(requested, conf.base, function(found)
       if found.error or found.ambiguous then return done(found) end
-      join_room(found.room_id, found.alias, found.name)
+      join_room(found.room_id, found.alias, found.name, found.public, found.members)
     end)
   end
   return { cancel = function() if current and current.cancel then current:cancel() end end }

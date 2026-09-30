@@ -1502,7 +1502,7 @@ fn butler_lifecycle_reload_replaces_hooks_and_schedules_and_rolls_back() {
     "#;
     let initial = eval(&path, counts);
     assert!(
-        initial == "1|4|1|1|1|19" || initial == "1|4|1|1|1|-1",
+        initial == "1|4|1|1|1|22" || initial == "1|4|1|1|1|-1",
         "unexpected Butler lifecycle registrations: {initial}"
     );
 
@@ -8697,6 +8697,24 @@ fn butler_matrix_cli_client_disconnect_cancels_active_word() {
 fn butler_matrix_cli_refuses_send_dash_and_fails_cleanly_without_pending() {
     let dir = scratch_dir("butler-matrix-cli-compat");
     let (_daemon, path) = butler_cli_test_daemon(&dir);
+    for verb in ["approve", "deny"] {
+        let result = remuda_timed_without_butler_identity(&dir, &["-s", "s", "butler", verb, "X"]);
+        assert!(!result.status.success(), "{} without Matrix config must fail", verb);
+        assert!(String::from_utf8_lossy(&result.stderr).contains("Matrix relay is not running."),
+            "{} without Matrix config must report the relay error: {}", verb,
+            String::from_utf8_lossy(&result.stderr));
+        assert!(!String::from_utf8_lossy(&result.stdout).contains("remuda butler — coordination"),
+            "{} without Matrix config must not fall back to generic Butler usage: {}", verb,
+            String::from_utf8_lossy(&result.stdout));
+    }
+    let approval_help = remuda_timed_without_butler_identity(&dir,
+        &["-s", "s", "butler", "approvals", "--help"]);
+    assert!(approval_help.status.success(), "approvals --help must succeed");
+    assert!(String::from_utf8_lossy(&approval_help.stdout).contains("Usage: remuda butler approvals"),
+        "approvals --help must show its own usage: {}", String::from_utf8_lossy(&approval_help.stdout));
+    assert!(!String::from_utf8_lossy(&approval_help.stdout).contains("remuda butler — coordination"),
+        "approvals --help must not fall back to generic Butler usage: {}",
+        String::from_utf8_lossy(&approval_help.stdout));
     let room = "!cli:example.org";
     let (token_path, config_path) = butler_config(&dir, "cli", "http://matrix.example.org",
         room, "@bot:example.org", "");
@@ -8709,22 +8727,47 @@ fn butler_matrix_cli_refuses_send_dash_and_fails_cleanly_without_pending() {
     let help = String::from_utf8_lossy(&help.stdout);
     assert!(help.contains("event|get EVENT_ID"), "help omitted the event alias row");
     assert!(help.contains("join ROOM (operator)"), "help omitted operator guidance");
+    let approvals = remuda_timed(&dir, &["-s", "s", "butler", "approvals"]);
+    assert!(approvals.status.success(), "operator approvals failed: {}",
+        String::from_utf8_lossy(&approvals.stderr));
+    assert!(String::from_utf8_lossy(&approvals.stdout).contains("No open approval requests."),
+        "operator approvals fell through to generic usage: {}", String::from_utf8_lossy(&approvals.stdout));
+    let agent_approve = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
+        .args(["-s", "s", "butler", "approve", "X"])
+        .env("REMUDA_RUNTIME_DIR", &dir)
+        .env("REMUDA_NO_UPDATE_CHECK", "1")
+        .env("REMUDA_BUTLER_AGENT_ID", "agent1")
+        .output().expect("run agent approve command");
+    assert!(!agent_approve.status.success(), "agent approve must fail");
+    assert!(String::from_utf8_lossy(&agent_approve.stderr).contains(
+        "approve is operator-only. Next: wait for the owner's answer by mail; remuda butler inbox"),
+        "unexpected agent approve error: {}", String::from_utf8_lossy(&agent_approve.stderr));
     let dash = remuda_timed(&dir, &["-s", "s", "butler", "matrix", "send", "-"]);
     assert!(!dash.status.success(), "send - must be refused by CLI glue");
     assert!(String::from_utf8_lossy(&dash.stderr).contains("stdin"), "unexpected send - error: {}",
         String::from_utf8_lossy(&dash.stderr));
     assert_eq!(eval(&path, "return #remuda.http.calls"), "0", "send - unexpectedly touched Matrix");
 
+    let agent_leave = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
+        .args(["-s", "s", "butler", "matrix", "leave", room])
+        .env("REMUDA_RUNTIME_DIR", &dir)
+        .env("REMUDA_NO_UPDATE_CHECK", "1")
+        .env("REMUDA_BUTLER_AGENT_ID", "agent1")
+        .output().expect("run agent leave command");
+    assert!(!agent_leave.status.success(), "leave must be operator-only");
+    assert!(String::from_utf8_lossy(&agent_leave.stderr).contains("operator-only"),
+        "unexpected agent leave error: {}", String::from_utf8_lossy(&agent_leave.stderr));
+    // An agent join files an owner approval request; with no relay it fails before any HTTP.
     let agent_join = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
         .args(["-s", "s", "butler", "matrix", "join", room])
         .env("REMUDA_RUNTIME_DIR", &dir)
         .env("REMUDA_NO_UPDATE_CHECK", "1")
         .env("REMUDA_BUTLER_AGENT_ID", "agent1")
         .output().expect("run agent join command");
-    assert!(!agent_join.status.success(), "join must be operator-only");
-    assert!(String::from_utf8_lossy(&agent_join.stderr).contains("operator-only"),
+    assert!(!agent_join.status.success(), "agent join without a relay must fail");
+    assert!(String::from_utf8_lossy(&agent_join.stderr).contains("Next:"),
         "unexpected agent join error: {}", String::from_utf8_lossy(&agent_join.stderr));
-    assert_eq!(eval(&path, "return #remuda.http.calls"), "0", "agent join reached the network");
+    assert_eq!(eval(&path, "return #remuda.http.calls"), "0", "agent join or leave reached the network");
 
     eval(&path, "remuda.pending = nil");
     let old_core = remuda_timed(&dir, &["-s", "s", "butler", "matrix", "--json", "rooms"]);

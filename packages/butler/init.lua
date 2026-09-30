@@ -257,6 +257,12 @@ the normal way for a member to communicate.
         run = function(_, args, caller) return host._butler_command_run("reply", args, caller) end },
       { id = "forward", order = 80, verb = "forward", usage = "  remuda butler forward <message-id> <member> [note...]",
         run = function(_, args, caller) return host._butler_command_run("forward", args, caller) end },
+      { id = "approvals", order = 90, verb = "approvals", usage = "  remuda butler approvals",
+        run = function(_, args, caller) return host._butler_command_run("approvals", args, caller) end },
+      { id = "approve", order = 91, verb = "approve", usage = "  remuda butler approve <ID>",
+        run = function(_, args, caller) return host._butler_command_run("approve", args, caller) end },
+      { id = "deny", order = 92, verb = "deny", usage = "  remuda butler deny <ID>",
+        run = function(_, args, caller) return host._butler_command_run("deny", args, caller) end },
       { id = "matrix", order = 100, verb = "matrix",
         usage = [[  remuda butler matrix [--json] status
   remuda butler matrix [--json] rooms

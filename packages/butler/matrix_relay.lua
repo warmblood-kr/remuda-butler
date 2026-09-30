@@ -171,6 +171,32 @@ local function relation_fields(content)
   return root, reply
 end
 
+local function approval_answer_fields(ev)
+  local content = type(ev.content) == "table" and ev.content or {}
+  if ev.type == "m.reaction" then
+    local rel = content["m.relates_to"]
+    if type(rel) ~= "table" or rel.rel_type ~= "m.annotation" then return {}, nil end
+    local verdict
+    if rel.key == "✅" or rel.key == "✅\239\184\143" then verdict = "approve"
+    elseif rel.key == "❌" then verdict = "deny" end
+    return { rel.event_id }, verdict
+  end
+  if ev.type ~= "m.room.message" then return {}, nil end
+  local thread_root, in_reply_to = relation_fields(content)
+  local targets = {}
+  if in_reply_to then targets[#targets + 1] = in_reply_to end
+  if thread_root and thread_root ~= in_reply_to then targets[#targets + 1] = thread_root end
+  local body = type(content.body) == "string" and strip_reply_fallback(content.body) or ""
+  -- strip_reply_fallback retains a compact quote for ordinary mail. Drop that
+  -- generated line for exact approval words while leaving delivery untouched.
+  local prefix_end = body:match("^> [^\n]*()\n")
+  if prefix_end then body = body:sub(prefix_end + 1) end
+  body = body:match("^%s*(.-)%s*$") or ""
+  body = body:lower()
+  local verdict = body == "yes" and "approve" or body == "no" and "deny" or nil
+  return targets, verdict
+end
+
 local function mentions(content, body, mxid)
   local mentions = content and content["m.mentions"]
   if type(mentions) == "table" and type(mentions.user_ids) == "table" then
@@ -292,7 +318,7 @@ local function empty_state()
     pending = json.object({}), quarantine = json.array({}), routes = json.object({}),
     subscriptions = json.object({}),
     auto_join_timestamps = json.array({}),
-    reply_outbox = json.object({}), reply_results = json.object({}) }
+    reply_outbox = json.object({}), reply_results = json.object({}), approvals = json.object({}) }
 end
 
 local function load_state(path)
@@ -320,6 +346,7 @@ local function load_state(path)
   local reply_outbox = value.matrix_reply_outbox or json.object({})
   local reply_results = value.matrix_reply_results or json.object({})
   local subscriptions = value.matrix_thread_subscriptions or json.object({})
+  local approvals = value.approvals or json.object({})
   local auto_join_timestamps = value.auto_join_timestamps or json.array({})
   if (since ~= nil and type(since) ~= "string")
     or (messages_since ~= nil and type(messages_since) ~= "string")
@@ -332,7 +359,8 @@ local function load_state(path)
     or type(routes) ~= "table" or routes == json.null or getmetatable(routes) == JSON_ARRAY_MT
     or type(reply_outbox) ~= "table" or reply_outbox == json.null or getmetatable(reply_outbox) == JSON_ARRAY_MT
     or type(reply_results) ~= "table" or reply_results == json.null or getmetatable(reply_results) == JSON_ARRAY_MT
-    or type(subscriptions) ~= "table" or subscriptions == json.null or getmetatable(subscriptions) == JSON_ARRAY_MT then
+    or type(subscriptions) ~= "table" or subscriptions == json.null or getmetatable(subscriptions) == JSON_ARRAY_MT
+    or type(approvals) ~= "table" or approvals == json.null or getmetatable(approvals) == JSON_ARRAY_MT then
     return empty_state(), "invalid Matrix relay state fields"
   end
   if type(auto_join_timestamps) ~= "table" or auto_join_timestamps == json.null
@@ -344,6 +372,15 @@ local function load_state(path)
   state.since, state.messages_since = since, messages_since
   state.quarantine, state.routes = json.array({}), json.object({})
   state.reply_outbox, state.reply_results = json.object({}), json.object({})
+  state.approvals = approvals
+  local approval_cutoff = math.floor(os.time() * 1000) - 24 * 60 * 60 * 1000
+  for id, rec in pairs(state.approvals) do
+    if type(rec) == "table" and (rec.status == "applied" or rec.status == "failed"
+      or rec.status == "denied" or rec.status == "expired")
+      and tonumber(rec.answered_at) and tonumber(rec.answered_at) < approval_cutoff then
+      state.approvals[id] = nil
+    end
+  end
   for _, item in ipairs(auto_join_timestamps) do
     if type(item) == "table" and valid_room_id(item.room_id)
       and type(item.at) == "number" and item.at >= 1 and item.at % 1 == 0 then
@@ -438,7 +475,7 @@ local function save_state(path, state)
     messages_since = state.messages_since, pending_events = state.pending,
     quarantine = state.quarantine, matrix_mail_routes = state.routes,
     matrix_reply_outbox = state.reply_outbox, matrix_reply_results = state.reply_results,
-    matrix_thread_subscriptions = state.subscriptions,
+    matrix_thread_subscriptions = state.subscriptions, approvals = state.approvals,
     auto_join_timestamps = state.auto_join_timestamps })
   return remuda.fs.write_atomic(path, json, { private = true })
 end
@@ -461,7 +498,8 @@ function relay.new(options)
     if not saved then warn_once("quarantine", state_path .. "\0expiry",
       "butler could not remove expired Matrix quarantine records: " .. tostring(save_error)) end
   end
-  local active, request_handle, request_token, retry_timer, backfill_timer = false, nil, nil, nil, nil
+  local active, request_handle, request_token, retry_timer, backfill_timer, approval_timer =
+    false, nil, nil, nil, nil, nil
   local delivery_retry_waiting, delivery_retry_timers = {}, {}
   local reply_retry_timers, reply_in_flight = {}, {}
   local joining = {}
@@ -486,6 +524,30 @@ function relay.new(options)
         warn_once(warn_kind, warn_key, "butler Matrix invite notice failed for "
           .. terminal_safe_field(room, 512) .. ": " .. terminal_safe_field(tostring(detail), 512))
       end
+    end)
+  end
+
+  local approval = remuda.butler and remuda.butler.approval
+  if approval and type(approval.attach) == "function" then
+    approval.attach(state, persist, function(text, relation, callback)
+      local body, encode_error = encode({ msgtype = "m.notice", body = text,
+        ["m.relates_to"] = relation })
+      if not body then
+        callback({ error = encode_error })
+        return { cancel = function() end }
+      end
+      return api.request_json({ method = "PUT",
+        path = "/_matrix/client/v3/rooms/" .. percent_encode(cfg.home_room)
+          .. "/send/m.room.message/" .. percent_encode("approval-" .. tostring(remuda._butler_new_ulid())),
+        room = cfg.home_room, body = body,
+        headers = { ["Content-Type"] = "application/json" },
+      }, function(result)
+        if type(result) ~= "table" or result.error then
+          callback({ error = type(result) == "table" and result.error or "Matrix approval post failed" })
+        else
+          callback({ event_id = result.json and result.json.event_id })
+        end
+      end)
     end)
   end
 
@@ -886,6 +948,36 @@ function relay.new(options)
         if (event_id == "" or (not state.processed[event_id] and not state.pending[event_id]))
           and ev.sender ~= cfg.self_mxid then
           local content = type(ev.content) == "table" and ev.content or {}
+          local approval_record, approval_verdict
+          if approval then
+            local targets, verdict = approval_answer_fields(ev)
+            if verdict then
+              for _, target in ipairs(targets) do
+                approval_record = approval.for_event(target)
+                if approval_record then approval_verdict = verdict; break end
+              end
+            end
+          end
+          if approval_record then
+            if event_id ~= "" then add_processed(state, event_id) end
+            if cursor then state.since = cursor end
+            local origin_ms = tonumber(ev.origin_server_ts)
+            local counts = approval_verdict ~= nil and (room_id or cfg.room) == cfg.home_room
+              and type(ev.sender) == "string" and cfg.allowed_senders[ev.sender]
+              and member_kind(ev.sender, cfg) == "HUMAN"
+              and origin_ms ~= nil and tonumber(approval_record.created_ms) ~= nil
+              and origin_ms >= tonumber(approval_record.created_ms) - 30000
+            if counts then
+              if approval_record.status == "open" then
+                pcall(approval.answer, approval_record.event_id, approval_verdict, ev.sender)
+              elseif approval_record.status == "expired" then
+                pcall(approval.reply, approval_record, "Expired.")
+              else
+                pcall(approval.reply, approval_record, "Already answered.")
+              end
+            end
+            persist()
+          else
           local reason
           if event_id == "" then reason = "missing_event_id"
           elseif ev.type ~= "m.room.message" then reason = "unsupported_event_type"
@@ -945,8 +1037,9 @@ function relay.new(options)
           if cursor then state.since = cursor end
           persist()
           end
+          end
+          end
         end
-      end
     end
     end
     return added
@@ -1330,6 +1423,13 @@ function relay.new(options)
     if active then return false end
     generation = generation + 1
     active = true
+    if approval and type(approval.reapply_approved) == "function" then approval.reapply_approved() end
+    if approval and type(approval.sweep) == "function" and type(remuda.schedule) == "function" then
+      -- ponytail: move to remuda.after when team-3 lands it.
+      approval_timer = remuda.schedule({ every = 1, run = function()
+        if active then approval.sweep() end
+      end })
+    end
     for id, item in pairs(state.reply_outbox) do
       if item.status ~= "failed" then instance._send_reply(id) end
     end
@@ -1349,10 +1449,11 @@ function relay.new(options)
     reply_in_flight = {}
     if retry_timer then pcall(remuda.cancel, retry_timer) end
     if backfill_timer then pcall(remuda.cancel, backfill_timer) end
+    if approval_timer then pcall(remuda.cancel, approval_timer) end
     for _, timer in pairs(delivery_retry_timers) do pcall(remuda.cancel, timer) end
     for _, timer in pairs(reply_retry_timers) do pcall(remuda.cancel, timer) end
     delivery_retry_timers, delivery_retry_waiting, reply_retry_timers = {}, {}, {}
-    retry_timer, backfill_timer = nil, nil
+    retry_timer, backfill_timer, approval_timer = nil, nil, nil
     return true
   end
 

@@ -412,7 +412,7 @@ function matrix.config_add_room(path, room, how, alias, inviter)
   if room == conf.home_room or room == conf.all_room then
     return nil, "HOME and ALL rooms can't be added"
   end
-  if how ~= "owner-invite" and how ~= "operator" and how ~= "invite" then how = nil end
+  if how ~= "owner-invite" and how ~= "operator" and how ~= "invite" and how ~= "approved" then how = nil end
   local new_how = how or "operator"
   if conf.rooms[room] ~= nil then
     if conf.rooms[room] == "joined" and ((alias and conf.room_aliases[room] ~= alias)
