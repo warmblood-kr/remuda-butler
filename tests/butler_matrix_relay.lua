@@ -2349,6 +2349,8 @@ local function test_unconfigured_room_request_is_refused()
     for _, r in ipairs(results) do
       assert(r.error and r.error:find("outside the configured Matrix allowlist", 1, true),
         "unconfigured-room refusal changed: " .. tostring(r.error))
+      assert(r.error:match("\nNext: [^\r\n]+$") ~= nil,
+        "unconfigured-room refusal must end with a Next line: " .. tostring(r.error))
     end
     local joined
     matrix.request_json({ method = "GET",
