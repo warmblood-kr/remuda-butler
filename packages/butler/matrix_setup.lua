@@ -1,5 +1,4 @@
--- S2 Matrix setup argument parsing and local safety checks. Network and
--- credential-file creation are added in later setup steps.
+-- Matrix setup argument parsing and staged setup actions.
 local matrix = assert(remuda.butler and remuda.butler.matrix, "Matrix request word is unavailable")
 
 local USAGE = [[Usage: remuda butler matrix setup --homeserver URL --owner MXID
@@ -96,19 +95,21 @@ local function validate_secret(path, kind)
   return first_line
 end
 
-local function create_output_directory(path, options)
-  if type(remuda.fs) ~= "table" or type(remuda.fs.mkdir_new) ~= "function" then
-    return nil, "core does not provide remuda.fs.mkdir_new"
+local function transport_pin(hex)
+  if type(hex) ~= "string" then return nil end
+  local binary = hex:gsub("..", function(pair) return string.char(tonumber(pair, 16)) end)
+  local alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+  local encoded = {}
+  for index = 1, #binary, 3 do
+    local a, b, c = binary:byte(index, index + 2)
+    b, c = b or 0, c or 0
+    local value = a * 65536 + b * 256 + c
+    encoded[#encoded + 1] = alphabet:sub(math.floor(value / 262144) % 64 + 1, math.floor(value / 262144) % 64 + 1)
+      .. alphabet:sub(math.floor(value / 4096) % 64 + 1, math.floor(value / 4096) % 64 + 1)
+      .. (index + 1 <= #binary and alphabet:sub(math.floor(value / 64) % 64 + 1, math.floor(value / 64) % 64 + 1) or "=")
+      .. (index + 2 <= #binary and alphabet:sub(value % 64 + 1, value % 64 + 1) or "=")
   end
-  local parent = path:match("^(.*)/[^/]+$")
-  if parent and type(remuda.mkdir) == "function" then remuda.mkdir(parent) end
-  local created, reason = remuda.fs.mkdir_new(path)
-  if created == true then return true end
-  if reason == "exists" and (options.force or options.dir) then return false end
-  if reason == "exists" then
-    return nil, "default output directory already exists; pass --force or choose an existing --dir"
-  end
-  return nil, "cannot create private output directory: " .. tostring(reason or "unknown error")
+  return "sha256/" .. table.concat(encoded)
 end
 
 local function resolve_outputs(options)
@@ -141,21 +142,7 @@ local function resolve_outputs(options)
       if file_exists(path) then return nil, "output file already exists; pass --force: " .. path end
     end
   end
-  -- Atomic replacement does not follow an output symlink. A symlinked parent
-  -- cannot be detected without lstat, so the caller owns the selected path.
-  local directories = {}
-  local function add_directory(path)
-    if path and not directories[path] then directories[path] = true end
-  end
-  if dir then add_directory(dir)
-  else
-    add_directory(token_path:match("^(.*)/[^/]+$"))
-    add_directory(config_path:match("^(.*)/[^/]+$"))
-  end
-  for path in pairs(directories) do
-    local made, make_error = create_output_directory(path, options)
-    if made == nil then return nil, make_error end
-  end
+  -- Validation must not touch output paths; S4 creates the directory at write time.
   return { token_path = token_path, config_path = config_path, dir = dir }
 end
 
@@ -253,6 +240,122 @@ function matrix.setup_prepare(args)
     outputs.config_path, outputs.dir
   options.password_file, options.token_file = nil, nil
   return options
+end
+
+function matrix.setup_network(options, on_done)
+  local done_called, cancelled, active = false, false, nil
+  local function done(result)
+    if done_called or cancelled then return end
+    done_called = true
+    if on_done then on_done(result) end
+  end
+  local function fail(message)
+    done({ error = message })
+  end
+  local base = options and options.homeserver
+  if type(base) ~= "string" or type(options.secret) ~= "string" then
+    fail("Matrix setup plan is incomplete")
+    return { cancel = function() cancelled = true end }
+  end
+
+  local function send(stage, method, path, token, payload, callback)
+    local body
+    if payload then
+      body = matrix.encode_json(payload)
+      if not body then return fail("Matrix setup could not encode a request") end
+    end
+    local headers = { Accept = "application/json" }
+    if body then headers["Content-Type"] = "application/json" end
+    if token then headers.Authorization = "Bearer " .. token end
+    local spec = {
+      method = method, url = base .. path, headers = headers, body = body,
+      timeout = 15, connect_timeout = 10, max_bytes = 1024 * 1024,
+      ca_file = options.ca_file, pin = transport_pin(options.pin),
+      callback = function(response)
+        if done_called or cancelled then return end
+        if type(response) ~= "table" or response.error then
+          return fail("Matrix setup " .. stage .. " request failed")
+        end
+        local status = tonumber(response.status)
+        if not status or status < 200 or status >= 300 then
+          return fail("Matrix setup " .. stage .. " request failed"
+            .. (status and (" (HTTP " .. tostring(status) .. ")") or ""))
+        end
+        local decoded, decode_error
+        if type(response.body) == "string" and response.body ~= "" then
+          decoded, decode_error = matrix.decode_json(response.body)
+        else
+          decoded = {}
+        end
+        if type(decoded) ~= "table" or decode_error then
+          return fail("Matrix setup received an invalid " .. stage .. " response")
+        end
+        callback(decoded)
+      end,
+    }
+    local ok, handle = pcall(remuda.http.request, spec)
+    if not ok or not handle then return fail("Matrix setup " .. stage .. " request failed") end
+    active = handle
+  end
+
+  local function create_rooms(token, user_id)
+    local rooms = {}
+    local room_specs = { { key = "home_room" } }
+    if options.create_all then room_specs[#room_specs + 1] = { key = "all_room" } end
+    local at = 1
+    local function create_next()
+      local room = room_specs[at]
+      if not room then
+        return done({ user_id = user_id, token = token,
+          home_room = rooms.home_room, all_room = rooms.all_room })
+      end
+      local request_body = { preset = "private_chat", invite = { options.owner_mxid } }
+      send("createRoom", "POST", "/_matrix/client/v3/createRoom", token, request_body,
+        function(response)
+          if type(response.room_id) ~= "string" or response.room_id == "" then
+            return fail("Matrix setup createRoom response did not include a room ID")
+          end
+          rooms[room.key] = response.room_id
+          at = at + 1
+          create_next()
+        end)
+    end
+    create_next()
+  end
+
+  local function whoami(token)
+    send("whoami", "GET", "/_matrix/client/v3/account/whoami", token, nil, function(response)
+      local user_id = response.user_id
+      if not valid_mxid(user_id, "whoami user") then
+        return fail("Matrix setup whoami response did not include a valid user ID")
+      end
+      if options.bot_mxid and options.bot_mxid ~= user_id then
+        return fail("Matrix setup login user does not match --bot")
+      end
+      create_rooms(token, user_id)
+    end)
+  end
+
+  if options.secret_kind == "password" then
+    send("login", "POST", "/_matrix/client/v3/login", nil, {
+      type = "m.login.password",
+      identifier = { type = "m.id.user", user = options.bot_mxid },
+      password = options.secret,
+    }, function(response)
+      if type(response.access_token) ~= "string" or response.access_token == "" then
+        return fail("Matrix setup login response did not include an access token")
+      end
+      whoami(response.access_token)
+    end)
+  else
+    whoami(options.secret)
+  end
+
+  return { cancel = function()
+    if done_called or cancelled then return end
+    cancelled = true
+    if active and active.cancel then active:cancel() end
+  end }
 end
 
 return matrix

@@ -230,8 +230,30 @@ function matrix.cli(args, agent)
       error(setup_error, 0)
     end
     if plan.help then return plan.usage end
-    return "Matrix setup inputs validated; no network requests were sent.\n"
-      .. "Next: delete the password or token file after setup.\n"
+    if type(remuda.pending) ~= "function" then
+      local message = "Matrix setup requires a remuda core with deferred replies"
+      if type(remuda.fail) == "function" then return remuda.fail(message, 1) end
+      error(message, 0)
+    end
+    local cancelled, completed, active = { value = false }, { value = false }, nil
+    local reply = remuda.pending({ timeout = 90, on_cancel = function()
+      cancelled.value = true
+      if active and active.cancel then active:cancel() end
+    end })
+    local function finish_setup(result)
+      if cancelled.value or completed.value then return end
+      completed.value = true
+      if type(result) ~= "table" then result = { error = "Matrix setup returned no result" } end
+      if result.error then return reply:resolve(1, "", tostring(result.error) .. "\n") end
+      local lines = { "Matrix login verified as " .. terminal_safe(result.user_id) }
+      if result.home_room then lines[#lines + 1] = "HOME room: " .. terminal_safe(result.home_room) end
+      if result.all_room then lines[#lines + 1] = "ALL-BUTLERS room: " .. terminal_safe(result.all_room) end
+      lines[#lines + 1] = "Next: write the Matrix token and config files."
+      reply:resolve(0, table.concat(lines, "\n") .. "\n", "")
+    end
+    active = matrix.setup_network(plan, finish_setup)
+    if cancelled.value and active and active.cancel then active:cancel() end
+    return reply
   end
   local ok, verb, options = pcall(parse, args)
   if not ok then
