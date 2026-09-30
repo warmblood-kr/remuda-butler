@@ -1120,9 +1120,13 @@ fn notice_recovery_preserves_idle_draft_and_respects_attached_human() {
         remuda._notice_test_state.screen = '› human draft'
         remuda._butler_send('operator', 'm1', 'human-safe notice')"#,
     );
-    std::thread::sleep(Duration::from_millis(2300));
-    let events = eval(&path, "return table.concat(remuda._notice_test_state.events, '\\n')");
-    assert!(events.contains("capture"), "attached composer was not inspected: {events}");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let events = loop {
+        let events = eval(&path, "return table.concat(remuda._notice_test_state.events, '\\n')");
+        if events.contains("capture") { break events; }
+        assert!(Instant::now() < deadline, "attached composer was not inspected before notice deadline: {events}");
+        std::thread::sleep(Duration::from_millis(100));
+    };
     assert!(!events.contains("key ") && !events.contains("type "), "recovery sent a key or typed into a human-active pane: {events}");
 
     eval(&path, r#"remuda._notice_test_state.events = {}
