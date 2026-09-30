@@ -2242,7 +2242,7 @@ local function test_terminal_approve_operator_only()
         "an empty approval list must give the idle Next instruction")
       failed = nil
       cli({ "deny", id }, nil)
-      assert(failed and failed.message == "Request " .. id .. " was already applied.",
+      assert(failed and failed.message == "Request " .. id .. " was already applied.\nNext: remuda butler approvals",
         "an answered request must report its current status: " .. tostring(failed and failed.message))
     end)
     remuda.fail = old_fail

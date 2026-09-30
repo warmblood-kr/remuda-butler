@@ -341,13 +341,17 @@ function approval.cli(args, agent)
     end
     local ok, err, rec = approval.answer(args[2], verb, "operator (terminal)")
     if not ok then
-      if rec then return fail("Request " .. tostring(rec.id) .. " was already " .. tostring(rec.status) .. ".") end
+      if rec then
+        return fail("Request " .. tostring(rec.id) .. " was already " .. tostring(rec.status) .. ".\nNext: remuda butler approvals")
+      end
       return fail(tostring(err) .. "\nNext: remuda butler approvals")
     end
     if verb == "approve" then
       return "Approved request " .. tostring(rec.id) .. " (" .. tostring(rec.summary) .. "); joining now. The result goes to the HOME thread and the asker's mail."
+        .. "\nNext: remuda butler approvals"
     end
     return "Denied request " .. tostring(rec.id) .. " (" .. tostring(rec.summary) .. ")."
+      .. "\nNext: remuda butler approvals"
   end
   return fail("Unknown approval command. Next: remuda butler approvals")
 end

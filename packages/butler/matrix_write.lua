@@ -481,7 +481,7 @@ local function join_approved(rec, done)
   return join_as(config_path, conf, room, "approved", alias, data.name, function(result)
     if result.error then return approval_join_failed(rec, result.error, done) end
     local label = approval_label(rec)
-    approval_mail(rec, "Approved; joined " .. label .. " (" .. room .. ") (request "
+    approval_mail(rec, "Approved; joined " .. label .. " (request "
       .. tostring(rec.id) .. ", " .. room .. ").")
     approval_thread(rec, "Approved by " .. tostring(rec.answered_by or "the owner") .. "; joined.")
     done(true)
