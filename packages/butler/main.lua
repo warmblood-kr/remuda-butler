@@ -1038,7 +1038,7 @@ end
 local function notify_mail_delivery(message, delivered)
   local result = {}
   local recipient_ref = type(message.to) == "table" and message.to.alias or message.to
-  local recipient_ok, recipient = pcall(mail_id, recipient_ref, false)
+  local recipient_ok, _, recipient = pcall(mail_id, recipient_ref, false)
   result.recipient_live = recipient_ok
   if recipient_ok then
     local sender = message.from.alias or message.from.session or "outside"
