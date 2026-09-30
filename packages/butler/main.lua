@@ -831,6 +831,51 @@ local queue_message = mail.queue
 local migrate_legacy_mail = mail.migrate_legacy
 remuda._butler_migrate_legacy_mail = migrate_legacy_mail
 local delivery_events = type(remuda.emit_until_success) == "function"
+local delivery_notice_results = {}
+local function delivery_notice_key(message_id, alias)
+  return tostring(message_id) .. "\0" .. tostring(alias)
+end
+local function take_delivery_notice_result(message, alias)
+  local key = delivery_notice_key(message.id, alias)
+  local result = delivery_notice_results[key]
+  delivery_notice_results[key] = nil
+  return result
+end
+local function notify_mail_delivery(message, delivered, recipient_alias, what)
+  local result = {}
+  local recipient_ref = recipient_alias or (type(message.to) == "table" and message.to.alias or message.to)
+  local recipient_ok, _, recipient = pcall(mail_id, recipient_ref, false)
+  result.recipient_live = recipient_ok
+  if recipient_ok then
+    local notice
+    if what then
+      notice = "Butler message " .. delivered.id .. " " .. what
+    else
+      local sender = message.from.alias or message.from.session or "outside"
+      if message.kind == "forward" then
+        notice = "Butler message " .. delivered.id .. " forwarded by " .. sender
+      elseif message.in_reply_to then
+        notice = "Butler message " .. delivered.id .. " (reply) from " .. sender
+      else
+        sender = message.matrix and message.matrix.sender or message.from.session or sender
+        notice = "Butler message " .. delivered.id .. " from " .. sender
+      end
+    end
+    notice = notice .. " arrived. Read it: remuda butler inbox"
+    local notify_ok, notified, notify_error =
+      pcall(remuda._butler_notify, recipient.alias, notice, delivered.id)
+    if notify_ok then
+      result.delivered, result.error = notified, notify_error
+    else
+      result.error = notified
+      _butler_session_trace("notice_delivery_error", recipient.alias .. " " .. tostring(notified))
+    end
+  end
+  if message.from.host ~= "matrix" then
+    delivery_notice_results[delivery_notice_key(delivered.id, recipient_ok and recipient.alias or recipient_ref)] = result
+  end
+  return delivered
+end
 local function inbox_delivery(message)
   local delivered, why
   if message.kind == "matrix_reply" then
@@ -853,7 +898,7 @@ local function inbox_delivery(message)
     message.delivery_error = why
     return nil
   end
-  return delivered
+  return notify_mail_delivery(message, delivered)
 end
 remuda._butler_inbox_delivery = inbox_delivery
 local function deliver_message(message)
@@ -875,7 +920,7 @@ local function deliver_message(message)
       message.in_reply_to, message.references, message.matrix)
   end
   if not delivered then error(why or "no Butler channel installed (try remuda-butler-inbox)", 0) end
-  return delivered
+  return notify_mail_delivery(message, delivered)
 end
 local function agent_mcp_json(token)
   local env = '"REMUDA_SESSION_CAPABILITY":"' .. token .. '"'
@@ -970,6 +1015,14 @@ bus.notices = bus.notices or {}
 bus.notice_screens = bus.notice_screens or {}
 bus.notice_seen = bus.notice_seen or {}
 local NOTICE_STABLE_SECONDS = 3
+local NOTICE_QUIET_S = 2
+local NOTICE_MAX_WAIT_S = 10
+-- os.time is whole seconds: quiet is 1-2 s, plus up to 1 s for the notice tick.
+local function notice_now()
+  local clock = remuda._butler_notice_clock
+  if type(clock) == "function" then return clock() end
+  return os.time()
+end
 
 -- The composer's text starts after the last prompt glyph and includes its
 -- continuation rows up to the TUI footer. Returns "EMPTY" (nothing, or
@@ -1193,14 +1246,15 @@ local function refresh_pending_notice(session, pending)
   if not pending.message_order then return pending end
   local agent = bus.agents[session]
   local identity = agent and agent.id
-  local order, notices = {}, {}
+  local order, notices, message_times = {}, {}, {}
   for _, id in ipairs(pending.message_order) do
     local notice = pending.message_ids and pending.message_ids[id]
     if notice and identity and mail.is_unread(identity, id) then
       order[#order + 1], notices[id] = id, notice
+      message_times[id] = pending.message_times and pending.message_times[id]
     end
   end
-  pending.message_order, pending.message_ids = order, notices
+  pending.message_order, pending.message_ids, pending.message_times = order, notices, message_times
   pending.count = #order
   pending.text = order[#order] and notices[order[#order]] or nil
   if pending.count == 0 then
@@ -1332,10 +1386,28 @@ local function complete_notice_recovery(session, state)
       pending.message_order = order
       pending.count = #order
       pending.text = order[#order] and pending.message_ids[order[#order]] or nil
+      for _, id in ipairs(state.message_ids) do
+        if pending.message_times then pending.message_times[id] = nil end
+      end
     else
       pending.count = pending.count - state.count
     end
-    if pending.count <= 0 then bus.notices[session] = nil end
+    if pending.count <= 0 then
+      bus.notices[session] = nil
+    else
+      local first_at, last_at
+      for _, id in ipairs(pending.message_order or {}) do
+        local arrived_at = pending.message_times and pending.message_times[id]
+        if arrived_at then
+          first_at = first_at and math.min(first_at, arrived_at) or arrived_at
+          last_at = last_at and math.max(last_at, arrived_at) or arrived_at
+        end
+      end
+      pending.first_at = first_at or pending.last_at or notice_now()
+      pending.last_at = last_at or pending.last_at or pending.first_at
+      pending.due_at = math.min(pending.last_at + NOTICE_QUIET_S,
+        pending.first_at + NOTICE_MAX_WAIT_S)
+    end
   end
   bus.notice_recoveries[session] = nil
   return true
@@ -1544,6 +1616,7 @@ end
 function remuda._butler_notify(alias, notice, message_id)
   local _, recipient = mail_id(alias, false)
   if message_id and not mail.is_unread(recipient.id, message_id) then return true end
+  local now = notice_now()
   if message_id then
     local seen = bus.notice_seen[recipient.id] or {}
     bus.notice_seen[recipient.id] = seen
@@ -1557,29 +1630,44 @@ function remuda._butler_notify(alias, notice, message_id)
     if pending.message_ids[message_id] then return false end
     pending.message_ids[message_id] = notice
     pending.message_order[#pending.message_order + 1] = message_id
+    pending.message_times = pending.message_times or {}
+    pending.message_times[message_id] = now
   end
+  pending.first_at = pending.first_at or now
+  pending.last_at = now
+  pending.due_at = math.min(now + NOTICE_QUIET_S, pending.first_at + NOTICE_MAX_WAIT_S)
   pending.count, pending.text = pending.count + 1, notice
   bus.notices[alias] = pending
-  return deliver_notice(alias)
+  return false
 end
 function remuda._butler_deliver_notices()
   local sessions = {}
   for session in pairs(bus.notices) do sessions[#sessions + 1] = session end
+  local now = notice_now()
   for _, session in ipairs(sessions) do
-    if bus.agents[session] then deliver_notice(session) else bus.notices[session] = nil end
+    local pending = bus.notices[session]
+    if not bus.agents[session] then
+      bus.notices[session] = nil
+    elseif bus.notice_recoveries[session]
+        or not pending or pending.due_at == nil or now >= pending.due_at then
+      deliver_notice(session)
+    end
   end
 end
 function remuda._butler_send(from, to, text)
   local _, recipient = mail_id(to, false)
   local sender = (from == "operator" or from == "outside") and mail_address(from)
     or mail_address(resolve(from))
-  local message = deliver_message({ from = sender, to = mail_address(recipient.alias), text = text })
-  local notice = "Butler message " .. message.id .. " from " .. sender.session
-    .. " arrived. Read it: remuda butler inbox"
-  local delivered, why = remuda._butler_notify(recipient.alias, notice, message.id)
-  if delivered then return "queued " .. message.id .. " and notified " .. recipient.alias end
-  if why then
-    return "queued " .. message.id .. " for " .. recipient.alias .. "; terminal delivery deferred: " .. tostring(why)
+  local envelope = { from = sender, to = mail_address(recipient.alias), text = text }
+  local message = deliver_message(envelope)
+  local notice = take_delivery_notice_result(message, recipient.alias)
+  if not notice then
+    notify_mail_delivery(envelope, message)
+    notice = take_delivery_notice_result(message, recipient.alias)
+  end
+  if notice and notice.delivered then return "queued " .. message.id .. " and notified " .. recipient.alias end
+  if notice and notice.error then
+    return "queued " .. message.id .. " for " .. recipient.alias .. "; terminal delivery deferred: " .. tostring(notice.error)
   end
   return "queued " .. message.id .. " for " .. recipient.alias .. "; notice deferred until its pane is free"
 end
@@ -1591,13 +1679,15 @@ local function sender_address(from)
   return mail_address(resolve(from))
 end
 local function notify_queued(message, alias, what)
-  local live = pcall(mail_id, alias, false)
-  if not live then return "queued " .. message.id .. " for " .. alias .. "; it is not live, so no notice" end
-  local delivered, why = remuda._butler_notify(alias, "Butler message " .. message.id .. " " .. what
-    .. " arrived. Read it: remuda butler inbox", message.id)
-  if delivered then return "queued " .. message.id .. " and notified " .. alias end
+  local notice = take_delivery_notice_result(message, alias)
+  if not notice then
+    notify_mail_delivery(message, message, alias, what)
+    notice = take_delivery_notice_result(message, alias)
+  end
+  if notice and notice.delivered then return "queued " .. message.id .. " and notified " .. alias end
+  if notice and not notice.recipient_live then return "queued " .. message.id .. " for " .. alias .. "; it is not live, so no notice" end
   return "queued " .. message.id .. " for " .. alias .. "; notice deferred"
-    .. (why and (": " .. tostring(why)) or " until its pane is free")
+    .. (notice and notice.error and (": " .. tostring(notice.error)) or " until its pane is free")
 end
 function remuda._butler_reply(from, message_id, text)
   local sender = sender_address(from)
