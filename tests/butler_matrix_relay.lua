@@ -271,6 +271,31 @@ local function test_allowlisted_media_without_url_is_quarantined()
   cleanup_fixture(dir, config_path)
 end
 
+local function test_quarantine_sender_cap_preserves_utf8()
+  local dir, config_path = fixture()
+  local client = scripted_client()
+  local relay = relay_module.new({ config_path = config_path, matrix = client,
+    deliver = function() return true end,
+  })
+  local sender = "@x" .. string.rep("한", 85) .. ":example.org"
+  local expected = "@x" .. string.rep("한", 84)
+  assert(relay:start())
+  client:complete(1, { json = { next_batch = "s0" } })
+  client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+    ["!room:example.org"] = { timeline = { events = {
+      { type = "m.room.message", event_id = "$korean-sender", sender = sender,
+        content = { msgtype = "m.text", body = "blocked" } },
+    } } },
+  } } } })
+  local quarantined = relay:quarantine_list()
+  assert(quarantined[1] and quarantined[1].reason == "sender_not_allowlisted"
+      and quarantined[1].sender == expected and #quarantined[1].sender <= 256
+      and utf8.len(quarantined[1].sender) ~= nil,
+    "a Korean quarantine sender cut at 256 bytes must remain valid UTF-8")
+  relay:stop()
+  cleanup_fixture(dir, config_path)
+end
+
 local function test_media_field_cap_preserves_utf8()
   local dir, config_path = fixture()
   local client, delivered = scripted_client(), {}
@@ -2578,6 +2603,7 @@ test_baseline_resume_filters_and_envelope()
 test_allowlisted_media_types_and_sender_filter()
 test_media_field_cap_preserves_utf8()
 test_allowlisted_media_without_url_is_quarantined()
+test_quarantine_sender_cap_preserves_utf8()
 test_download_next_command("media: image\nfilename: chart.png\nmimetype: image/png\n"
   .. "size: 12345 bytes\nmxc: mxc://example.org/chart\n"
   .. "Next: remuda butler matrix -o PATH download mxc://example.org/chart")

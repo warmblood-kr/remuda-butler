@@ -5,7 +5,7 @@ remuda.butler = butler
 local matrix = butler.matrix or {}
 butler.matrix = matrix
 
-matrix.utf8_prefix = matrix.utf8_prefix or function(value, limit)
+matrix.utf8_prefix = function(value, limit)
   local cut = limit
   while cut > 0 do
     local byte = value:byte(cut + 1) or 0

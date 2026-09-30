@@ -71,7 +71,7 @@ local function valid_url(value)
 end
 
 local function safe_user_id_echo(value)
-  return (value:gsub("[%c]", "?"):sub(1, 64))
+  return matrix.utf8_prefix(value:gsub("[%c]", "?"), 64)
 end
 
 local function invalid_user_id(value, option)

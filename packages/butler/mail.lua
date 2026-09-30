@@ -353,12 +353,8 @@ local function cap_matrix_body(text)
   if #text <= MATRIX_BODY_MAX_BYTES then return text end
   local keep = MATRIX_BODY_MAX_BYTES
   while true do
-    while keep > 0 do
-      local next_byte = text:byte(keep + 1)
-      if not next_byte or next_byte < 0x80 or next_byte >= 0xc0 then break end
-      keep = keep - 1
-    end
-    local prefix = text:sub(1, keep)
+    local prefix = remuda.butler.matrix.utf8_prefix(text, keep)
+    keep = #prefix
     local suffix = "[truncated " .. tostring(#text - #prefix) .. " bytes]"
     local next_keep = MATRIX_BODY_MAX_BYTES - #suffix
     if next_keep == keep then return prefix .. suffix end
