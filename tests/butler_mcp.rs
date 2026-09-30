@@ -2898,6 +2898,21 @@ fn setup_renotice(path: &Path, alias: &str) {
           return {{ context_used = state.ctx[agent and agent.alias or ''] }}
         end
         remuda._rn_tick = function(now) state.now = now; remuda._butler_deliver_notices() end
+        -- Notices typed into this member's pane only (the stub records every pane).
+        state.to = {{}}
+        local prior_type = remuda.type_text
+        remuda.type_text = function(name, text)
+          local ok = prior_type(name, text)
+          state.to[#state.typed] = name
+          return ok
+        end
+        remuda._rn_mine = function()
+          local mine = {{}}
+          for i, entry in ipairs(state.typed) do
+            if state.to[i] == alias then mine[#mine + 1] = entry.text end
+          end
+          return mine
+        end
         remuda._rn_lead = function(text)
           return (remuda._butler_send('butler', alias, text):match('^queued (%S+)'))
         end
@@ -2993,16 +3008,23 @@ fn unread_leader_mail_is_renoticed_once_after_a_compaction() {
         local state = remuda._notice_test_state
         state.ctx.cx1 = 170000
         local id = remuda._rn_lead('unread task')
-        remuda._rn_tick(0); remuda._rn_tick(2); remuda._rn_tick(3)
+        -- Settle: the arrival notice and any follow-up typing happen here.
+        for t = 0, 20 do remuda._rn_tick(t) end
+        local settled = #remuda._rn_mine()
+        -- Control window, no drop: nothing more for the still-unread mail.
+        for t = 21, 40 do remuda._rn_tick(t) end
+        local control = #remuda._rn_mine() - settled
         state.ctx.cx1 = 60000
-        for t = 4, 20 do remuda._rn_tick(t) end
-        local text = tostring(state.typed[2] and state.typed[2].text)
-        return table.concat({ tostring(#state.typed), tostring(text:find(id, 1, true) ~= nil),
-          tostring(text:find('re-shown', 1, true) == nil),
+        for t = 41, 60 do remuda._rn_tick(t) end
+        local mine = remuda._rn_mine()
+        local text = tostring(mine[settled + control + 1])
+        return table.concat({ tostring(control), tostring(#mine - settled - control),
+          tostring(text:find(id, 1, true) ~= nil), tostring(text:find('re-shown', 1, true) == nil),
           tostring(text:sub(-#'remuda butler inbox') == 'remuda butler inbox') }, '|')
         "#,
     );
-    assert_eq!(got, "2|true|true|true", "unread mail after compaction: one plain re-notice: {got}");
+    assert_eq!(got, "0|1|true|true|true",
+        "unread mail: no notice without a drop, exactly one plain re-notice after it: {got}");
 }
 
 // A leader message the member already answered is not re-shown.
@@ -3019,13 +3041,14 @@ fn an_answered_leader_message_is_not_reshown_after_a_compaction() {
         remuda._rn_tick(0); remuda._rn_tick(2)
         remuda._butler_inbox('cx1')
         remuda._butler_reply('cx1', id, 'done')
-        remuda._rn_tick(3)
+        for t = 3, 20 do remuda._rn_tick(t) end
+        local settled = #remuda._rn_mine()
         state.ctx.cx1 = 60000
-        for t = 4, 20 do remuda._rn_tick(t) end
-        return tostring(#state.typed) .. '|' .. tostring(remuda._butler_notice_compacted ~= nil)
+        for t = 21, 40 do remuda._rn_tick(t) end
+        return tostring(#remuda._rn_mine() - settled) .. '|' .. tostring(remuda._butler_notice_compacted ~= nil)
         "#,
     );
-    assert_eq!(got, "1|true", "an answered leader message must not be re-shown");
+    assert_eq!(got, "0|true", "an answered leader message must not be re-shown after the drop: {got}");
 }
 
 // Restart: the read leader message is re-shown once, coalesced with the
