@@ -3678,34 +3678,8 @@ function remuda._butler_compaction_execute(session_name, force)
         id = "claude-model-confirm",
         match = function(screen)
           if type(screen) ~= "string" then return false end
-          local yes, no, selected_yes = false, false, false
-          for line in (screen .. "\n"):gmatch("(.-)\n") do
-            local trimmed = line:gsub("^%s+", "")
-            for _, border in ipairs({ "│", "║", "|" }) do
-              if trimmed:sub(1, #border) == border then
-                trimmed = trimmed:sub(#border + 1):gsub("^%s+", "")
-              end
-              if trimmed:sub(-#border) == border then
-                trimmed = trimmed:sub(1, -#border - 1):gsub("%s+$", "")
-              end
-            end
-            local selected = trimmed:sub(1, #"❯") == "❯"
-              or trimmed:sub(1, #"›") == "›" or trimmed:sub(1, 1) == ">"
-            local option = trimmed
-            for _, marker in ipairs({ "❯", "›", ">" }) do
-              if option:sub(1, #marker) == marker then
-                option = option:sub(#marker + 1):gsub("^%s+", "")
-                break
-              end
-            end
-            if option:match("^1%.%s+Yes%s*$") then
-              yes = true
-              if selected then selected_yes = true end
-            elseif option:match("^%d+%.%s+No, go back%s*$") then
-              no = true
-            end
-          end
-          return yes and no and selected_yes
+          return screen:find("❯%s*1%.%s+Yes") ~= nil
+            and screen:find("%d%.%s+No, go back") ~= nil
         end,
         action = function()
           if not confirmation_sent then
