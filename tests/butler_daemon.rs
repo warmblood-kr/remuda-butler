@@ -5852,6 +5852,9 @@ done
         if name == "fake-unsafe-model" {
             eval(&path, "remuda._butler_bus.agents['fake-unsafe-model'].model = 'opus; /compact'");
         }
+        if name == "fake-model-confirm" {
+            eval(&path, "remuda._butler_compaction_config.claude_completion_timeout = 2");
+        }
         wait_for(&path, name, "MODEL:");
         if name == "fake-mid-turn" {
             eval(&path, &format!("remuda._fake_busy[{name:?}] = true"));
@@ -6071,6 +6074,7 @@ done
             assert!(got.ends_with("CMD:/model opus\nKEY:RET\n"), "prior model should be restored: {got:?}");
             assert_eq!(got.matches("KEY:RET\n").count(), 4,
                 "the selected Yes option should be confirmed exactly once: {got:?}");
+            eval(&path, "remuda._butler_compaction_config.claude_completion_timeout = 0.2");
         }
         if name == "fake-stale-model-confirm" {
             let deadline = Instant::now() + Duration::from_secs(8);
