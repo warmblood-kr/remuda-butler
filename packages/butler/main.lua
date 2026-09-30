@@ -290,9 +290,16 @@ local function bottom_screen_lines(screen, limit)
   local lines = {}
   for line in (screen .. "\n"):gmatch("(.-)\n") do
     lines[#lines + 1] = line
-    if #lines > limit then table.remove(lines, 1) end
   end
-  return lines
+  while #lines > 0 and lines[#lines]:match("^%s*$") do
+    lines[#lines] = nil
+  end
+  local first = math.max(1, #lines - limit + 1)
+  local bottom = {}
+  for index = first, #lines do
+    bottom[#bottom + 1] = lines[index]
+  end
+  return bottom
 end
 function remuda._butler_compaction_is_unknown_dialog(screen)
   if type(screen) ~= "string" then return false end
@@ -1508,7 +1515,7 @@ trust_modal_state = function(modal, screen)
     if affirmative and selected_no and options == 2 then return "safe" end
     return "human"
   elseif modal.trust == "codex" then
-    local visible_lines = bottom_screen_lines(screen, 8)
+    local visible_lines = bottom_screen_lines(screen, 12)
     local visible_lower = table.concat(visible_lines, "\n"):lower()
     if not visible_lower:find("trust this folder?", 1, true) then return "absent" end
     local options, selected_codex = 0, false

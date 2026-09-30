@@ -3786,7 +3786,11 @@ fn butler_codex_trust_dialog_only_auto_trusts_butler_created_directories() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let fixture = include_str!("fixtures/codex-trust-dialog.txt");
+    let fixture = format!(
+        "{}{}",
+        include_str!("fixtures/codex-trust-dialog.txt").trim_end(),
+        "\n".repeat(8)
+    );
     eval(
         &path,
         &format!(
