@@ -533,6 +533,7 @@ remuda.exec("butler/doctor")
 -- CLI verbs and the argv parser live in commands.lua.
 remuda._butler_commands_config = { current_agent = current_agent, OPERATOR = OPERATOR,
   contributions = contributions, registry_list = registry_list, statusline = statusline,
+  resolve = resolve, mail = mail,
 }
 remuda.exec("butler/commands")
 
@@ -606,6 +607,18 @@ remuda.tool{
   about = "List Butler-managed Claude Code and Codex agent sessions and their adapter kinds.",
   run = function()
     return remuda._butler_sessions()
+  end,
+}
+remuda.tool{
+  name = "butler_close",
+  about = "Close one of your direct Butler members. Refuses unread mail or a busy member unless force is true; force never bypasses ownership.",
+  args = { name = "Name or ID of one of your direct Butler members.", force = "Set true to skip unread-mail and idle checks." },
+  needs = { "name" },
+  run = function(a, caller)
+    if a.force ~= nil and type(a.force) ~= "boolean" then error("force must be a boolean.\nNext: set force to true or omit it", 0) end
+    local ok, leader = pcall(caller_leader, caller)
+    if not ok then error(tostring(leader) .. "\nNext: run from a Butler member session", 0) end
+    return remuda._butler_close_member(a.name, leader, a.force == true)
   end,
 }
 

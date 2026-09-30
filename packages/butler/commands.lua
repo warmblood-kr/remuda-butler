@@ -7,6 +7,8 @@ local OPERATOR = assert(config.OPERATOR)
 local contributions = assert(config.contributions)
 local registry_list = assert(config.registry_list)
 local statusline = assert(config.statusline)
+local resolve = assert(config.resolve)
+local mail = assert(config.mail)
 local USAGE_NOTES = [[
 Agent sessions receive REMUDA_BUTLER_AGENT_ID and REMUDA_BUTLER_LEADER_ID.
 In an agent session, use `inbox`, `send <to> "..."`, and `send-to-leader ...`;
@@ -89,6 +91,67 @@ command(5, "doctor", "  remuda butler doctor", function(args)
     local doctor = remuda._butler_doctor
     return table.concat(doctor.render(doctor.probe()), "\n")
   end
+end)
+local CLOSE_USAGE = "Usage: remuda butler close <name> [--force]\nExample: remuda butler close worker-1"
+local function close_member(name, leader, force)
+  local ok, alias = pcall(resolve, name)
+  if not ok then error("cannot close " .. tostring(name) .. ": unknown Butler member.\nNext: remuda butler sessions", 0) end
+  local agents = remuda._butler_bus and remuda._butler_bus.agents or {}
+  local agent = agents[alias]
+  if not agent or agent.parent ~= leader then
+    error("cannot close " .. tostring(alias) .. ": only your direct members can be closed (you and your leader are excluded).\nNext: remuda butler sessions", 0)
+  end
+  if not force then
+    local unread_ok, unread = pcall(mail.unread, agent.id)
+    if not unread_ok or type(unread) ~= "number" then
+      error("cannot check unread Butler mail for " .. alias .. ".\nNext: inspect the member inbox and retry", 0)
+    end
+    if unread > 0 then
+      error(alias .. " has unread Butler mail (" .. tostring(unread) .. " message(s)).\nNext: read the inbox, or use --force", 0)
+    end
+    local idle_ok, idle, reason = pcall(remuda.butler.is_idle, alias)
+    if not idle_ok or idle ~= true then
+      local detail = idle_ok and (": " .. tostring(reason or "state unknown")) or " (state check failed)"
+      local status = idle_ok and reason == "busy" and " is busy" or " is not idle"
+      error(alias .. status .. detail .. ".\nNext: wait for it to become idle, or use --force", 0)
+    end
+  end
+  local closed, result = pcall(remuda.close, alias)
+  if not closed then error("could not close " .. alias .. ": " .. tostring(result) .. ".\nNext: retry remuda butler close " .. alias, 0) end
+  return "Closed " .. alias .. ".\nNext: remuda butler sessions"
+end
+remuda._butler_close_member = close_member
+
+local function close_caller_leader()
+  local function refuse()
+    error("cannot identify the Butler caller.\nNext: run from a Butler member session", 0)
+  end
+  if type(remuda.caller) ~= "function" then refuse() end
+  local ok, caller = pcall(remuda.caller)
+  if not ok or type(caller) ~= "table" then refuse() end
+  if caller.kind == "outside" then return "butler" end
+  if caller.kind ~= "session" or type(caller.session) ~= "string" or caller.session == "" then refuse() end
+  local agents = remuda._butler_bus and remuda._butler_bus.agents
+  if type(agents) ~= "table" then refuse() end
+  local leader
+  for alias, agent in pairs(agents) do
+    if type(agent) == "table" and agent.session_name == caller.session then
+      if leader then refuse() end
+      leader = alias
+    end
+  end
+  if not leader then refuse() end
+  return leader
+end
+
+command(8, "close", "  remuda butler close <name> [--force]", function(args, caller)
+  if args[2] == "--help" or args[2] == "-h" then return CLOSE_USAGE end
+  if #args < 2 or #args > 3 or (args[3] ~= nil and args[3] ~= "--force") then
+    error(CLOSE_USAGE .. "\nNext: remuda butler sessions", 0)
+  end
+  return cli_result(function()
+    return close_member(args[2], close_caller_leader(), args[3] == "--force")
+  end)
 end)
 command(10, "sessions", "  remuda butler sessions", function(args)
   if #args == 1 then return remuda._butler_sessions() end
