@@ -313,6 +313,9 @@ fn butler_close_is_limited_to_own_idle_members_unless_forced() {
       remuda._butler_launch('fake', 'kid', nil, 'lead')
       remuda._butler_launch('fake', 'other')
       remuda._butler_close_test_calls = {}
+      remuda._butler_close_test_unread = 0
+      remuda._butler_mail.unread = function() return remuda._butler_close_test_unread end
+      remuda.fail = function(message) return message end
       remuda.close = function(name)
         table.insert(remuda._butler_close_test_calls, name)
         return 'closed ' .. name
@@ -337,6 +340,7 @@ fn butler_close_is_limited_to_own_idle_members_unless_forced() {
     assert_eq!(eval(&path, "return #remuda._butler_close_test_calls"), "0");
 
     eval(&path, "remuda._butler_send('butler', 'kid', 'unread close guard')");
+    eval(&path, "remuda._butler_close_test_unread = 1");
     eval(&path, "remuda._butler_close_test_idle = true");
     let unread = cli(&leader_id, "'kid'");
     assert!(unread.contains("unread Butler mail") && unread.ends_with("Next: read the inbox, or use --force"), "{unread}");
@@ -346,7 +350,7 @@ fn butler_close_is_limited_to_own_idle_members_unless_forced() {
     assert!(forced.contains("only your direct members"), "--force bypassed ownership: {forced}");
     assert_eq!(eval(&path, "return #remuda._butler_close_test_calls"), "0");
     let forced = cli(&leader_id, "'kid', '--force'");
-    assert_eq!(forced, "closed kid");
+    assert_eq!(forced, "Closed kid.\nNext: remuda butler sessions");
     assert_eq!(eval(&path, "return remuda._butler_close_test_calls[1]"), "kid");
 
     for name in ["lead", "butler", "missing"] {
