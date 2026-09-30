@@ -4168,6 +4168,9 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
           remuda._butler_bus.codex_update_state = {{claimed=false, done=false}}
           remuda._butler_codex_update_timeout = 2
           remuda._butler_modal_timeout = 3
+          -- Hold the notice clock until every give-up is queued, so the
+          -- leader's notices always batch (#126).
+          remuda._butler_notice_clock = function() return 0 end
           local native_close = remuda.close
           -- remuda.close is reported as reason "closed" by cores with #258; a
           -- simulated natural exit substitutes the exit the real process would report.
@@ -4284,6 +4287,11 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
         // The leader's "task not delivered" notice is typed too; count only
         // the topic sessions' own lines.
         let typed = log.lines().filter(|l| l.starts_with("t-") && l.contains(" type ")).count();
+        if ["t-stuck", "t-codex-unanswerable", "t-codex-human", "t-claude-human-trust"]
+            .iter().all(|n| traced.contains(&format!("task_poke_timeout\t{n}")))
+            && traced.contains("launch_failed\tt-claude-launch-unknown") {
+            eval(&path, "remuda._butler_notice_clock = nil");
+        }
         if typed == 3 && traced.contains("task_poke_timeout\tt-stuck")
             && log.contains(" type Butler message ")
             && eval(&path, "return tostring(remuda._butler_bus.agents['t-claude-launch'] ~= nil)") == "true"
