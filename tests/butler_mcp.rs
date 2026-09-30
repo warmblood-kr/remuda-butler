@@ -1628,6 +1628,7 @@ fn trust_dialogs_on_external_or_reused_directories_wait_for_a_human() {
     let projects = dir.join("projects");
     let reused = projects.join("reused");
     let external = dir.join("external");
+    let fresh = projects.join("fresh");
     std::fs::create_dir_all(&reused).expect("pre-existing topic directory");
     std::fs::create_dir_all(&external).expect("external cwd");
     eval(
@@ -1652,7 +1653,7 @@ fn trust_dialogs_on_external_or_reused_directories_wait_for_a_human() {
               if name == 'outside' then return selected_yes end
               if name == 'outside_codex' then return codex_modal end
               if name == 'reused' then return safe_modal end
-              if name == 'fresh' then return safe_modal end
+              if name == 'fresh' then return "Accessing workspace:\n" .. {fresh:?} .. "\n❯ No, exit\n  Yes, I trust this folder" end
               return three_options
             end
             remuda._trust_test_keys, remuda._trust_test_reports = {{}}, {{}}
