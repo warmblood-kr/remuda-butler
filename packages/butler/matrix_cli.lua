@@ -3,6 +3,7 @@ local matrix = assert(remuda.butler and remuda.butler.matrix, "Matrix request wo
 
 local USAGE = [[  remuda butler matrix [--json] status
   remuda butler matrix [--json] rooms
+  remuda butler matrix [--json] rooms --public [TERM]
   remuda butler matrix [--json] [--room ROOM] [-n N] history
   remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
   remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
@@ -12,7 +13,7 @@ local USAGE = [[  remuda butler matrix [--json] status
   remuda butler matrix [--json] [--room ROOM] react EVENT_ID KEY
   remuda butler matrix [--json] [--room ROOM] upload PATH
   remuda butler matrix [--json] [--room ROOM] redact EVENT_ID [--reason TEXT]
-  remuda butler matrix [--json] join ROOM (operator)
+  remuda butler matrix [--json] join ROOM (ID, #alias, or public name; operator)
   remuda butler matrix [--json] leave ROOM (operator)
   remuda butler matrix setup [OPTIONS]
   remuda butler matrix [--json] quarantine [--id EVENT_ID] (operator)
@@ -68,6 +69,9 @@ local function parse(args)
     if not positional and value == "--" then
       positional = true
       at = at + 1
+    elseif not positional and verb == "rooms" and value == "--public" then
+      options.public = true
+      at = at + 1
     elseif not positional and (value == "--json" or value == "--room" or value == "--id") then
       local width = option(value)
       at = at + width
@@ -98,6 +102,7 @@ local function parse(args)
   if options.output and method ~= "download" then return nil end
   if options.reason and method ~= "redact" then return nil end
   if options.id and method ~= "quarantine" then return nil end
+  if options.public and method ~= "rooms" then return nil end
   if method == "send" then
     options.text = join_words(values, 1)
     if #values == 0 then return nil end
@@ -124,7 +129,14 @@ local function parse(args)
   elseif method == "download" then
     if #values ~= 1 then return nil end
     options.mxc = values[1]
-  elseif method == "quarantine" or method == "status" or method == "rooms" then
+  elseif method == "rooms" then
+    if options.public then
+      if #values > 1 then return nil end
+      options.public_term = values[1]
+    elseif #values ~= 0 then
+      return nil
+    end
+  elseif method == "quarantine" or method == "status" then
     if #values ~= 0 then return nil end
   end
   return method, options
@@ -142,25 +154,50 @@ end
 local function terminal_safe(value)
   return tostring(value or ""):gsub("[%c]", " "):gsub("\194[\128-\159]", " ")
 end
+local function shell_quote(value)
+  return matrix.shell_quote(tostring(value))
+end
 
 local function render_human(verb, options, result)
   local data = result.json or result
   if verb == "rooms" then
-    local rooms, lines, leave_room, safe_rooms, safe_kinds, room_width, kind_width = data.rooms or {}, {}, false, {}, {}, 0, 0
+    if options.public or result.public or data.public then
+      local rows, lines = data.public_rooms or {}, {}
+      for _, item in ipairs(rows) do
+        lines[#lines + 1] = terminal_safe(item.name) .. "  "
+          .. terminal_safe(item.alias or "(no alias)") .. "  "
+          .. tostring(item.members or 0) .. " members  " .. terminal_safe(item.room_id)
+      end
+      if #lines == 0 then lines[#lines + 1] = "No public Matrix rooms found" end
+      lines[#lines + 1] = options.public_term
+        and ("Next: remuda butler matrix join " .. shell_quote(terminal_safe(options.public_term)))
+        or "Next: remuda butler matrix join ROOM"
+      return table.concat(lines, "\n") .. "\n"
+    end
+    local rooms, lines, leave_room, safe_rooms, safe_kinds, safe_hows, room_width, kind_width =
+      data.rooms or {}, { "Rooms mode: " .. terminal_safe(data.mode or "allowlist") },
+      false, {}, {}, {}, 0, 0
     for _, item in ipairs(rooms) do
       local room = terminal_safe(item.room)
+      if item.alias then room = room .. " (" .. terminal_safe(item.alias) .. ")" end
       local kind = terminal_safe(item.kind)
+      local how = terminal_safe(item.how or "config")
+      if item.inviter then how = how .. "; inviter " .. terminal_safe(item.inviter) end
       safe_rooms[#safe_rooms + 1] = room
       safe_kinds[#safe_kinds + 1] = kind
+      safe_hows[#safe_hows + 1] = how
       room_width = math.max(room_width, #room)
       kind_width = math.max(kind_width, #kind)
       if item.kind == "joined" then leave_room = true end
     end
     for index, item in ipairs(rooms) do
       lines[#lines + 1] = safe_rooms[index] .. string.rep(" ", room_width - #safe_rooms[index] + 2)
-        .. safe_kinds[index] .. string.rep(" ", kind_width - #safe_kinds[index] + 2) .. terminal_safe(item.how)
+        .. safe_kinds[index] .. string.rep(" ", kind_width - #safe_kinds[index] + 2) .. safe_hows[index]
     end
-    if #lines == 0 then lines[#lines + 1] = "No configured Matrix rooms" end
+    for _, deny_line in ipairs(data.deny_lines or {}) do
+      lines[#lines + 1] = "Deny: " .. terminal_safe(deny_line)
+    end
+    if #rooms == 0 then lines[#lines + 1] = "No configured Matrix rooms" end
     if leave_room then
       lines[#lines + 1] = "Next: remuda butler matrix leave ROOM"
     else
@@ -213,8 +250,33 @@ local function render_human(verb, options, result)
   elseif verb == "upload" then
     return "Uploaded as " .. tostring(result.content_uri or "") .. " (" .. tostring(result.event_id or "") .. ")\n"
   elseif verb == "join" or verb == "leave" then
-    return (verb == "join" and "Joined " or "Left ") .. terminal_safe(options.room or "the Matrix room")
-      .. "\nNext: remuda butler matrix rooms\n"
+    if verb == "join" and result.approval_request_id then
+      return "Asked the owner to approve joining " .. terminal_safe(result.approval_label or "the Matrix room")
+        .. " (request " .. terminal_safe(result.approval_request_id)
+        .. "). You get mail when they answer (expires in 10 min).\nNext: remuda butler inbox\n"
+    end
+    if verb == "join" and (result.ambiguous or data.ambiguous)
+      and type(result.matches or data.matches) == "table" then
+      local matches = result.matches or data.matches
+      local lines = {}
+      for _, item in ipairs(matches) do
+        lines[#lines + 1] = terminal_safe(item.name) .. "  "
+          .. terminal_safe(item.alias or "(no alias)") .. "  "
+          .. tostring(item.members or 0) .. " members  " .. terminal_safe(item.display_room_id or item.room_id)
+      end
+      lines[#lines + 1] = "Next: remuda butler matrix join #alias:server"
+      return table.concat(lines, "\n") .. "\n"
+    end
+    local id = result.room_id or data.room_id
+    local room_name, room_alias = result.room_name or data.room_name, result.room_alias or data.room_alias
+    local label = verb == "join" and (room_name or room_alias) or room_alias
+    label = label or options.room or "the Matrix room"
+    label = terminal_safe(label)
+    local suffix = id and id ~= label and (" (" .. terminal_safe(id) .. ")") or ""
+    local next_line = verb == "join"
+      and "Next: write to the Butler in that room, or remuda butler matrix rooms"
+      or "Next: remuda butler matrix rooms"
+    return (verb == "join" and "Joined " or "Left ") .. label .. suffix .. "\n" .. next_line .. "\n"
   end
   return (matrix.encode_json(result) or "{}") .. "\n"
 end
@@ -271,149 +333,246 @@ function matrix.cli(args, agent)
       error(message, 0)
     end
     local cancelled, completed, active = { value = false }, { value = false }, nil
-    local reply = remuda.pending({ timeout = plan.prompt_registration_token and 300 or 90, on_cancel = function()
+    local reply = remuda.pending({ timeout = (plan.wizard or plan.prompt_registration_token) and 300 or 90, on_cancel = function()
       cancelled.value = true
       if active and active.cancel then active:cancel() end
     end })
-    local prompt_attempts, prompt_notice = 0, nil
-    local prompt_label = "Registration token for " .. plan.homeserver
-      .. ", from its admin (hidden). This is not an access token:"
-    local rejected_registration_token = matrix.REJECTED_REGISTRATION_TOKEN
-    local original_bot_mxid = plan.bot_mxid
-    local ask_registration_token
-    local function fail_registration_prompt(message, needs_terminal, next_line)
+    local function prompt_failure(message, next_line)
       if cancelled.value or completed.value then return end
       completed.value = true
-      local lines = {}
-      if message and message ~= "" then lines[#lines + 1] = message end
-      if needs_terminal then lines[#lines + 1] = "The hidden registration token prompt needs a terminal." end
-      lines[#lines + 1] = "Nothing was written."
-      lines[#lines + 1] = next_line
-        or "Next: rerun with --registration-token-file PATH"
-      reply:resolve(1, "", table.concat(lines, "\n") .. "\n")
+      reply:resolve(1, "", message .. "\nNothing was written.\n"
+        .. (next_line or "Next: rerun remuda butler matrix setup.") .. "\n")
     end
-    local function finish_setup(result)
-      if cancelled.value or completed.value then return end
-      if plan.prompt_registration_token and type(result) == "table"
-        and result.error == rejected_registration_token then
-        if prompt_attempts < 3 then
-          prompt_notice = rejected_registration_token
-          return ask_registration_token()
-        end
-        return fail_registration_prompt(rejected_registration_token)
+    local function prompt_line(label, default, callback)
+      if type(reply.prompt_line) ~= "function" then
+        return prompt_failure("The Matrix setup wizard needs a Remuda core with prompt_line; upgrade Remuda first.")
       end
-      completed.value = true
-      if type(result) ~= "table" then result = { error = "Matrix setup returned no result" } end
-      if result.error then return reply:resolve(1, "", tostring(result.error) .. "\n") end
-      local files, write_error = matrix.setup_write(plan, result)
-      if not files then return reply:resolve(1, "", tostring(write_error) .. "\n") end
-      local relay_started, relay_error
-      if plan.default then
-        -- Match main.lua's boot config shape using the resolved paths that
-        -- setup just wrote; the relay remains the only live component changed.
-        remuda._butler_matrix_config = {
-          token_path = files.token_path,
-          config_path = files.config_path,
-        }
-        local relay = matrix.relay
-        if relay and type(relay.stop) == "function" and type(relay.start) == "function" then
-          pcall(relay.stop)
-          local ok, started = pcall(relay.start, remuda._butler_matrix_config)
-          relay_started = ok and started == true
-          if not relay_started then
-            relay_error = ok and (started == false and "relay.start returned false"
-              or started == nil and "relay.start returned no result"
-              or "relay.start did not return true") or terminal_safe(started)
-          end
-        else
-          relay_error = "Matrix relay start is unavailable"
-        end
-      end
-      active = matrix.status({}, function(status_result)
-        if cancelled.value then return end
-        if type(status_result) ~= "table" then status_result = { error = "Matrix status returned no result" } end
-        local lines = { plan.secret_kind == "registration"
-          and ("Created bot account " .. terminal_safe(result.user_id))
-          or ("Matrix login verified as " .. terminal_safe(result.user_id)) }
-        if result.home_room then lines[#lines + 1] = "HOME room: " .. terminal_safe(result.home_room) end
-        if result.all_room then lines[#lines + 1] = "ALL-BUTLERS room: " .. terminal_safe(result.all_room) end
-        lines[#lines + 1] = "Token file: " .. terminal_safe(files.token_path)
-        if files.password_path then
-          lines[#lines + 1] = "Bot account password saved privately: " .. terminal_safe(files.password_path)
-        end
-        lines[#lines + 1] = "Config file: " .. terminal_safe(files.config_path)
-        if status_result.error then
-          lines[#lines + 1] = "Status check failed: " .. terminal_safe(status_result.error)
-        else
-          lines[#lines + 1] = "Status: " .. terminal_safe(render_human("status", {}, status_result):gsub("\n", "; "):gsub("; $", ""))
-        end
-        if plan.default then
-          if relay_started then
-            lines[#lines + 1] = "Next: accept the invite in Element; the relay is running, so write to the Butler there."
-          else
-            lines[#lines + 1] = "Next: Accept the invite in Element, then write in the room."
-            lines[#lines + 1] = "Relay failed to start: " .. terminal_safe(relay_error or "unknown relay start error")
-            lines[#lines + 1] = "Next: fix the config, then rerun remuda butler matrix setup ... --default --force"
-          end
-        else
-          local function shell_quote(value)
-            return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
-          end
-          lines[#lines + 1] = "Accept the invite in Element before starting this separate Butler."
-          lines[#lines + 1] = "Next: REMUDA_BUTLER_TOKEN=" .. shell_quote(files.token_path)
-            .. " REMUDA_BUTLER_CONFIG=" .. shell_quote(files.config_path)
-            .. " remuda -s matrix-test daemon"
-        end
-        reply:resolve(0, table.concat(lines, "\n") .. "\n", "")
-      end, agent)
-    end
-    ask_registration_token = function()
-      if cancelled.value or completed.value then return end
-      if type(reply.prompt_secret) ~= "function" then
-        return fail_registration_prompt(nil, false,
-          "Next: rerun with --registration-token-file PATH (this remuda core has no hidden prompt; upgrade with remuda upgrade)")
-      end
-      prompt_attempts = prompt_attempts + 1
-      local label = prompt_notice and (prompt_notice .. " " .. prompt_label) or prompt_label
-      reply:prompt_secret({ label = label, callback = function(secret, prompt_error)
+      reply:prompt_line({ label = label, default = default, callback = function(line, prompt_error)
         if cancelled.value or completed.value then return end
         if prompt_error then
           local message
           if prompt_error == "not_a_terminal" then
-            message = "The registration token prompt cannot read a hidden answer."
+            message = "The Matrix setup wizard needs a terminal."
           elseif prompt_error == "too_long" then
-            message = "The registration token exceeds 4 KiB."
+            message = "That answer is too long."
           elseif prompt_error == "cancelled" then
-            message = "The registration token prompt was cancelled."
+            message = "The Matrix setup wizard was cancelled."
           else
-            message = "The registration token prompt was refused."
+            message = "The Matrix setup prompt was refused."
           end
-          return fail_registration_prompt(message, prompt_error == "not_a_terminal")
+          return prompt_failure(message)
         end
-        local token, token_error = matrix.normalize_secret(secret)
-        if not token then
-          if token_error == "empty" then
-            if prompt_attempts < 3 then
-              prompt_notice = "The registration token was empty."
-              return ask_registration_token()
-            end
-            return fail_registration_prompt("The registration token was empty.")
-          end
-          return fail_registration_prompt("The registration token could not be validated.")
-        end
-        plan.secret = token
-        prompt_notice = nil
-        plan.bot_mxid = original_bot_mxid
-        active = matrix.setup_network(plan, finish_setup)
-        if cancelled.value and active and active.cancel then active:cancel() end
+        callback(line)
       end })
     end
-    if plan.prompt_registration_token then
-      ask_registration_token()
-    else
-      active = matrix.setup_network(plan, finish_setup)
+    local execute_setup
+    local function begin_wizard()
+      prompt_line("Matrix homeserver URL:", nil, function(homeserver)
+        local normalized, scheme_or_error = matrix.setup_validate_homeserver(homeserver)
+        if not normalized then return prompt_failure(tostring(scheme_or_error)) end
+        local flags = { "--homeserver", normalized, "--owner" }
+        prompt_line("Your Matrix user ID (for example @alice:example.org):", nil, function(owner)
+          local valid_owner, owner_error = matrix.setup_validate_mxid(owner, "--owner")
+          if not valid_owner then return prompt_failure(tostring(owner_error)) end
+          flags[4] = valid_owner
+          flags[5], flags[6], flags[7], flags[8] = "--register", "--default", "--rooms", "open"
+          local function confirm_setup()
+            local wizard_plan, validation_error = matrix.setup_prepare(flags)
+            if not wizard_plan then
+              local safe_error = terminal_safe(validation_error)
+              local next_line = safe_error:find("output file already exists", 1, true)
+                and "Next: back up or move the existing Matrix setup files, then rerun remuda butler matrix setup."
+                or nil
+              return prompt_failure(safe_error, next_line)
+            end
+            local lines = {
+              "Matrix setup will:",
+              "  Homeserver: " .. terminal_safe(wizard_plan.homeserver),
+              "  Owner: " .. terminal_safe(wizard_plan.owner_mxid),
+              "  Rooms: open (anyone can invite this Butler). Restrict: set rooms=allowlist or add deny_room/deny_server in "
+                .. terminal_safe(wizard_plan.config_path) .. ". The sender allowlist still decides whose messages are trusted.",
+              "  Account: create a Butler bot (you will need its server registration token)",
+              "  Bot: " .. terminal_safe(wizard_plan.bot_mxid),
+              "  Save private token and config files in: " .. terminal_safe(wizard_plan.output_dir),
+              "  Start the relay for this Butler with this config (replaces its current Matrix relay config)",
+            }
+            if wizard_plan.pin then
+              lines[#lines + 1] = "  HTTPS certificate pin: " .. wizard_plan.pin
+            elseif wizard_plan.ca_file then
+              lines[#lines + 1] = "  HTTPS CA file: " .. terminal_safe(wizard_plan.ca_file)
+            end
+            prompt_line(table.concat(lines, "\n") .. "\nContinue? Type Y to continue, or N to cancel [N]:",
+              "N", function(answer)
+                answer = type(answer) == "string" and answer:lower() or ""
+                if answer ~= "y" and answer ~= "yes" then
+                  return prompt_failure("Matrix setup was not confirmed.")
+                end
+                execute_setup(wizard_plan)
+              end)
+          end
+          local function ask_transport_trust()
+            if scheme_or_error == "https" then
+              prompt_line("HTTPS trust: enter a 64-character SHA-256 certificate pin or an absolute CA file path:",
+                nil, function(trust)
+                  if type(trust) ~= "string" then
+                    return prompt_failure("The HTTPS trust answer must be a certificate pin or CA file path.")
+                  end
+                  if #trust == 64 and trust:match("^%x+$") then
+                    flags[#flags + 1] = "--pin"
+                    flags[#flags + 1] = trust
+                  else
+                    flags[#flags + 1] = "--ca-file"
+                    flags[#flags + 1] = trust
+                  end
+                  confirm_setup()
+                end)
+            else
+              confirm_setup()
+            end
+          end
+          ask_transport_trust()
+        end)
+      end)
     end
-    if cancelled.value and active and active.cancel then active:cancel() end
+    execute_setup = function(plan)
+      local prompt_attempts, prompt_notice = 0, nil
+      local prompt_label = "Registration token for " .. plan.homeserver
+        .. ", from its admin (hidden). This is not an access token:"
+      local rejected_registration_token = matrix.REJECTED_REGISTRATION_TOKEN
+      local original_bot_mxid = plan.bot_mxid
+      local ask_registration_token
+      local function fail_registration_prompt(message, needs_terminal, next_line)
+        if cancelled.value or completed.value then return end
+        completed.value = true
+        local lines = {}
+        if message and message ~= "" then lines[#lines + 1] = message end
+        if needs_terminal then lines[#lines + 1] = "The hidden registration token prompt needs a terminal." end
+        lines[#lines + 1] = "Nothing was written."
+        lines[#lines + 1] = next_line
+          or "Next: rerun with --registration-token-file PATH"
+        reply:resolve(1, "", table.concat(lines, "\n") .. "\n")
+      end
+      local function finish_setup(result)
+        if cancelled.value or completed.value then return end
+        if plan.prompt_registration_token and type(result) == "table"
+          and result.error == rejected_registration_token then
+          if prompt_attempts < 3 then
+            prompt_notice = rejected_registration_token
+            return ask_registration_token()
+          end
+          return fail_registration_prompt(rejected_registration_token)
+        end
+        completed.value = true
+        if type(result) ~= "table" then result = { error = "Matrix setup returned no result" } end
+        if result.error then return reply:resolve(1, "", tostring(result.error) .. "\n") end
+        local files, write_error = matrix.setup_write(plan, result)
+        if not files then return reply:resolve(1, "", tostring(write_error) .. "\n") end
+        local relay_started, relay_error
+        if plan.default then
+          -- Match main.lua's boot config shape using the resolved paths that
+          -- setup just wrote; the relay remains the only live component changed.
+          remuda._butler_matrix_config = {
+            token_path = files.token_path,
+            config_path = files.config_path,
+          }
+          local relay = matrix.relay
+          if relay and type(relay.stop) == "function" and type(relay.start) == "function" then
+            pcall(relay.stop)
+            local ok, started = pcall(relay.start, remuda._butler_matrix_config)
+            relay_started = ok and started == true
+            if not relay_started then
+              relay_error = ok and (started == false and "relay.start returned false"
+                or started == nil and "relay.start returned no result"
+                or "relay.start did not return true") or terminal_safe(started)
+            end
+          else
+            relay_error = "Matrix relay start is unavailable"
+          end
+        end
+        active = matrix.status({}, function(status_result)
+          if cancelled.value then return end
+          if type(status_result) ~= "table" then status_result = { error = "Matrix status returned no result" } end
+          local lines = { plan.secret_kind == "registration"
+            and ("Created bot account " .. terminal_safe(result.user_id))
+            or ("Matrix login verified as " .. terminal_safe(result.user_id)) }
+          if result.home_room then lines[#lines + 1] = "HOME room: " .. terminal_safe(result.home_room) end
+          if result.all_room then lines[#lines + 1] = "ALL-BUTLERS room: " .. terminal_safe(result.all_room) end
+          lines[#lines + 1] = "Token file: " .. terminal_safe(files.token_path)
+          if files.password_path then
+            lines[#lines + 1] = "Bot account password saved privately: " .. terminal_safe(files.password_path)
+          end
+          lines[#lines + 1] = "Config file: " .. terminal_safe(files.config_path)
+          if status_result.error then
+            lines[#lines + 1] = "Status check failed: " .. terminal_safe(status_result.error)
+          else
+            lines[#lines + 1] = "Status: " .. terminal_safe(render_human("status", {}, status_result):gsub("\n", "; "):gsub("; $", ""))
+          end
+          if plan.default then
+            if relay_started then
+              lines[#lines + 1] = "Next: accept the invite in Element; the relay is running, so write to the Butler there."
+            else
+              lines[#lines + 1] = "Next: Accept the invite in Element, then write in the room."
+              lines[#lines + 1] = "Relay failed to start: " .. terminal_safe(relay_error or "unknown relay start error")
+              lines[#lines + 1] = "Next: fix the config, then rerun remuda butler matrix setup ... --default --force"
+            end
+          else
+            lines[#lines + 1] = "Accept the invite in Element before starting this separate Butler."
+            lines[#lines + 1] = "Next: REMUDA_BUTLER_TOKEN=" .. shell_quote(files.token_path)
+              .. " REMUDA_BUTLER_CONFIG=" .. shell_quote(files.config_path)
+              .. " remuda -s matrix-test daemon"
+          end
+          reply:resolve(0, table.concat(lines, "\n") .. "\n", "")
+        end, agent)
+      end
+      ask_registration_token = function()
+        if cancelled.value or completed.value then return end
+        if type(reply.prompt_secret) ~= "function" then
+          return fail_registration_prompt(nil, false,
+            "Next: rerun with --registration-token-file PATH (this remuda core has no hidden prompt; upgrade with remuda upgrade)")
+        end
+        prompt_attempts = prompt_attempts + 1
+        local label = prompt_notice and (prompt_notice .. " " .. prompt_label) or prompt_label
+        reply:prompt_secret({ label = label, callback = function(secret, prompt_error)
+          if cancelled.value or completed.value then return end
+          if prompt_error then
+            local message
+            if prompt_error == "not_a_terminal" then
+              message = "The registration token prompt cannot read a hidden answer."
+            elseif prompt_error == "too_long" then
+              message = "The registration token exceeds 4 KiB."
+            elseif prompt_error == "cancelled" then
+              message = "The registration token prompt was cancelled."
+            else
+              message = "The registration token prompt was refused."
+            end
+            return fail_registration_prompt(message, prompt_error == "not_a_terminal")
+          end
+          local token, token_error = matrix.normalize_secret(secret)
+          if not token then
+            if token_error == "empty" then
+              if prompt_attempts < 3 then
+                prompt_notice = "The registration token was empty."
+                return ask_registration_token()
+              end
+              return fail_registration_prompt("The registration token was empty.")
+            end
+            return fail_registration_prompt("The registration token could not be validated.")
+          end
+          plan.secret = token
+          prompt_notice = nil
+          plan.bot_mxid = original_bot_mxid
+          active = matrix.setup_network(plan, finish_setup)
+          if cancelled.value and active and active.cancel then active:cancel() end
+        end })
+      end
+      if plan.prompt_registration_token then
+        ask_registration_token()
+      else
+        active = matrix.setup_network(plan, finish_setup)
+      end
+      if cancelled.value and active and active.cancel then active:cancel() end
+    end
+    if plan.wizard then begin_wizard() else execute_setup(plan) end
     return reply
   end
   local ok, verb, options = pcall(parse, args)

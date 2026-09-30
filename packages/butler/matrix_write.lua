@@ -1,5 +1,6 @@
 -- L2 Matrix write composites over remuda.butler.matrix.request.
 local matrix = assert(remuda.butler and remuda.butler.matrix, "Matrix request word is unavailable")
+local approval = assert(remuda.butler.approval, "load butler/approval before butler/matrix_write")
 -- Trust words are bound at load (main.lua execs matrix_request before
 -- this file), so a later redefinition of the public entry cannot change them.
 local is_agent_mxid = matrix.is_agent_mxid
@@ -269,7 +270,14 @@ end
 
 local function operator_room(verb, opts, agent, callback)
   if agent then
-    callback({ error = "matrix " .. verb .. " is operator-only (advisory at the same UID until core #218)" })
+    if verb ~= "join" then
+      callback({ error = "matrix " .. verb .. " is operator-only"
+        .. "\nNext: ask the owner to run remuda butler matrix " .. verb .. " ROOM from their terminal" })
+      return nil
+    end
+  elseif not approval.operator_caller() then
+    callback({ error = "matrix " .. verb .. " is operator-only; run it from an outside terminal caller"
+      .. "\nNext: run remuda butler matrix " .. verb .. " ROOM from your own terminal, outside an agent session" })
     return nil
   end
   if not opts.room or opts.room == "" then
@@ -279,51 +287,237 @@ local function operator_room(verb, opts, agent, callback)
   return opts.room
 end
 
-function matrix.join(opts, on_done, agent)
-  opts = opts or {}
-  local done = once(on_done)
-  local room = operator_room("join", opts, agent, done)
-  if not room then return { cancel = function() end } end
-  local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths or {}
-  local config_path = paths.config_path
-  if type(config_path) ~= "string" or config_path == "" then
-    return error_result(done, "Matrix config path is unavailable")
+local sanitize_directory_text = matrix.sanitize_directory_text
+
+local function room_id_valid(room)
+  return type(matrix.valid_room_id) == "function" and matrix.valid_room_id(room)
+    or type(room) == "string" and room:match("^!%S+:%S+$") ~= nil
+end
+
+local function room_alias_valid(alias)
+  return type(matrix.valid_room_alias) == "function" and matrix.valid_room_alias(alias)
+    and sanitize_directory_text(alias) == alias
+end
+
+local function public_room_record(item)
+  if type(item) ~= "table" or not room_id_valid(item.room_id)
+    or sanitize_directory_text(item.room_id) ~= item.room_id then return nil end
+  local alias = room_alias_valid(item.canonical_alias) and item.canonical_alias or nil
+  local name = sanitize_directory_text(item.name)
+  local localpart = alias and alias:match("^#([^:]+):") or nil
+  local members = tonumber(item.num_joined_members)
+  if not members or members < 0 or members ~= math.floor(members) then members = 0 end
+  return { room_id = item.room_id, display_room_id = sanitize_directory_text(item.room_id), name = name,
+    alias = alias and sanitize_directory_text(alias) or nil, alias_localpart = localpart,
+    members = members, topic = sanitize_directory_text(item.topic) }
+end
+
+local function homeserver_name(base)
+  local authority = type(base) == "string" and base:match("^https?://([^/%?#]+)") or "the homeserver"
+  return sanitize_directory_text(authority or "the homeserver")
+end
+
+local function resolve_alias(alias, base, callback)
+  if not room_alias_valid(alias) then
+    callback({ error = "invalid Matrix room alias: expected #localpart:server (no whitespace or slash; max 255 bytes)" })
+    return { cancel = function() end }
   end
-  local conf, config_error = matrix.read_config(config_path)
-  if not conf then return error_result(done, config_error) end
+  return matrix.request_json({ method = "GET",
+    path = "/_matrix/client/v3/directory/room/" .. path_component(alias),
+  }, function(result)
+    if result.error then
+      if result.status == 404 or tostring(result.error):find("M_NOT_FOUND", 1, true) then
+        local server = sanitize_directory_text(alias:match("^#[^:]+:(.+)$") or homeserver_name(base))
+        return callback({ error = "No room " .. alias .. " on " .. server
+          .. ".\nNext: check the spelling, or ask the room admin for an invite." })
+      end
+      return callback(result)
+    end
+    local room = result.json and result.json.room_id
+    if not room_id_valid(room) or sanitize_directory_text(room) ~= room then
+      return callback({ error = "invalid Matrix room ID in room directory response" })
+    end
+    callback({ room_id = room, alias = alias })
+  end)
+end
+
+local function find_public_matches(name, base, callback)
+  local body, encode_error = matrix.encode_json({ filter = { generic_search_term = name }, limit = 20 })
+  if not body then callback({ error = encode_error }); return { cancel = function() end } end
+  return matrix.request_json({ method = "POST", path = "/_matrix/client/v3/publicRooms",
+    body = body, headers = { ["Content-Type"] = "application/json" },
+  }, function(result)
+    if result.error then return callback(result) end
+    local rows, by_id = {}, {}
+    for _, item in ipairs(type(result.json) == "table" and result.json.chunk or {}) do
+      local record = public_room_record(item)
+      if record and (record.name == name or record.alias_localpart == name) and not by_id[record.room_id] then
+        by_id[record.room_id] = true
+        rows[#rows + 1] = record
+      end
+    end
+    table.sort(rows, function(a, b)
+      if a.name == b.name then return a.room_id < b.room_id end
+      return a.name < b.name
+    end)
+    if #rows == 0 then
+      return callback({ error = "No public room named " .. sanitize_directory_text(name)
+        .. " on " .. homeserver_name(base)
+        .. ".\nNext: remuda butler matrix rooms --public " .. matrix.shell_quote(sanitize_directory_text(name))
+        .. ", or ask for an invite." })
+    end
+    local has_next_page = type(result.json) == "table"
+      and type(result.json.next_batch) == "string" and result.json.next_batch ~= ""
+    if #rows > 1 or has_next_page then return callback({ matches = rows, ambiguous = true }) end
+    callback({ room_id = rows[1].room_id, alias = rows[1].alias, name = rows[1].name,
+      public = true, members = rows[1].members })
+  end)
+end
+
+local function utf8_length(text)
+  local count, at = 0, 1
+  while at <= #text do
+    local byte = text:byte(at)
+    at = at + (byte < 0x80 and 1 or (byte < 0xe0 and 2 or (byte < 0xf0 and 3 or 4)))
+    count = count + 1
+  end
+  return count
+end
+
+local function approval_summary(room, alias, display_name, is_public, members)
+  local clean = sanitize_directory_text
+  local room_id = clean(room)
+  local target = clean(alias or display_name or room)
+  local prefix = "join " .. target
+  if display_name then
+    local name = clean(display_name)
+    local detail = ' ("' .. name .. '"'
+    if is_public then detail = detail .. ", public, " .. tostring(tonumber(members) or 0) .. " members" end
+    prefix = prefix .. detail .. ")"
+  end
+  if not alias and not display_name then return clean(prefix, 128) end
+  local suffix = " (" .. room_id .. ")"
+  local room_chars = utf8_length(suffix)
+  local head = clean(prefix, math.max(1, 128 - room_chars))
+  return head .. clean(suffix, math.max(1, 128 - utf8_length(head)))
+end
+
+local function file_request(room, alias, display_name, is_public, members, asker, callback)
+  local summary = approval_summary(room, alias, display_name, is_public, members)
+  local label = sanitize_directory_text(alias or display_name or room)
+  return approval.request({ kind = "join", key = room, summary = summary, asker = tostring(asker),
+    ttl_s = 600, data = { room_id = room, alias = alias, name = display_name } }, function(id, why)
+      if not id then return callback({ error = why or "Could not file approval request" }) end
+      callback({ approval_request_id = id, room_id = room, room_alias = alias,
+        room_name = display_name, approval_label = label })
+    end)
+end
+
+local function approval_label(rec)
+  local data = type(rec.data) == "table" and rec.data or {}
+  return sanitize_directory_text(data.alias or data.name or data.room_id or "the Matrix room")
+end
+
+local function approval_mail(rec, text)
+  if type(remuda._butler_send) == "function" then
+    pcall(remuda._butler_send, "butler", rec.asker, text)
+  end
+end
+
+local function approval_thread(rec, text)
+  pcall(approval.reply, rec, text)
+end
+
+local function approval_join_failed(rec, err, done)
+  err = tostring(err or "unknown Matrix error")
+  local data = type(rec.data) == "table" and rec.data or {}
+  local room = sanitize_directory_text(data.room_id or "unknown room")
+  approval_mail(rec, "Approved, but the join failed: " .. err
+    .. " (request " .. tostring(rec.id) .. ", " .. room
+    .. "). Next: ask the owner to invite the bot, then run the join again.")
+  approval_thread(rec, "Approved by " .. tostring(rec.answered_by or "the owner") .. "; join failed: " .. err)
+  done(false, err)
+end
+
+local function join_as(config_path, conf, room, how, alias, display_name, callback)
   local added = false
   if conf.rooms[room] ~= "home" and conf.rooms[room] ~= "all" then
-    local ok, wrote_or_error = matrix.config_add_room(config_path, room, "operator")
-    local add_error = not ok and wrote_or_error or nil
-    if not ok then return error_result(done, add_error) end
+    local ok, wrote_or_error = matrix.config_add_room(config_path, room, how, alias)
+    if not ok then return error_result(callback, wrote_or_error) end
     added = wrote_or_error == true
   end
   return matrix.request_json({ method = "POST",
     path = "/_matrix/client/v3/rooms/" .. path_component(room) .. "/join",
     room = room, body = "{}", headers = { ["Content-Type"] = "application/json" },
   }, function(result)
-    if result.error and added then
-      local removed, remove_error = matrix.config_remove_room(config_path, room)
-      if not removed then
-        result.error = tostring(result.error) .. "; config rollback failed: " .. tostring(remove_error)
+    if type(result) ~= "table" or result.error then
+      local failure = type(result) == "table" and result.error or "Matrix join returned no result"
+      if added then
+        local removed, remove_error = matrix.config_remove_room(config_path, room)
+        if not removed then
+          failure = tostring(failure) .. "; config rollback failed: " .. tostring(remove_error)
+        end
       end
+      if failure:find("(M_FORBIDDEN)", 1, true) then
+        local next_line = "Next: invite the bot (" .. conf.self_mxid .. ") to " .. room
+          .. " from Element, then retry."
+        local replaced
+        failure, replaced = failure:gsub("Next:[^\r\n]*", function() return next_line end)
+        if replaced == 0 then failure = failure .. "\n" .. next_line end
+      end
+      return callback({ error = failure })
     end
-    if result.error and result.error:find("(M_FORBIDDEN)", 1, true) then
-      local next_line = "Next: invite the bot (" .. conf.self_mxid .. ") to " .. room
-        .. " from Element, then retry."
-      local replaced
-      result.error, replaced = result.error:gsub("Next:[^\r\n]*", function() return next_line end)
-      if replaced == 0 then result.error = result.error .. "\n" .. next_line end
-    end
-    done(result)
+    result.room_id = room
+    result.room_alias = alias and sanitize_directory_text(alias) or nil
+    result.room_name = display_name and sanitize_directory_text(display_name) or nil
+    callback(result)
   end)
 end
 
-function matrix.leave(opts, on_done, agent)
+local function join_approved(rec, done)
+  local data = type(rec.data) == "table" and rec.data or {}
+  local room, alias = data.room_id, data.alias
+  if not room_id_valid(room) then return approval_join_failed(rec, "invalid stored room ID", done) end
+  local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths or {}
+  local config_path = paths.config_path
+  if type(config_path) ~= "string" or config_path == "" then
+    return approval_join_failed(rec, "Matrix config path is unavailable", done)
+  end
+  local conf, config_error = matrix.read_config(config_path)
+  if not conf then return approval_join_failed(rec, config_error, done) end
+  return join_as(config_path, conf, room, "approved", alias, data.name, function(result)
+    if result.error then return approval_join_failed(rec, result.error, done) end
+    local label = approval_label(rec)
+    approval_mail(rec, "Approved; joined " .. label .. " (request "
+      .. tostring(rec.id) .. ", " .. room .. ").")
+    approval_thread(rec, "Approved by " .. tostring(rec.answered_by or "the owner") .. "; joined.")
+    done(true)
+  end)
+end
+
+approval.handler("join", {
+  approve = join_approved,
+  deny = function(rec)
+    local data = type(rec.data) == "table" and rec.data or {}
+    local room = sanitize_directory_text(data.room_id or "unknown room")
+    approval_mail(rec, "Denied by the owner (request " .. tostring(rec.id) .. ", " .. room
+      .. "). Next: ask the owner in HOME why, or pick another room.")
+    approval_thread(rec, "Denied by " .. tostring(rec.answered_by or "the owner") .. ".")
+  end,
+  expire = function(rec)
+    local data = type(rec.data) == "table" and rec.data or {}
+    local room = sanitize_directory_text(data.room_id or "unknown room")
+    approval_mail(rec, "No answer in 10 minutes; not joined (request " .. tostring(rec.id)
+      .. ", " .. room .. "). Next: run the join again to re-ask.")
+    approval_thread(rec, "Expired.")
+  end,
+})
+
+function matrix.join(opts, on_done, agent)
   opts = opts or {}
   local done = once(on_done)
-  local room = operator_room("leave", opts, agent, done)
-  if not room then return { cancel = function() end } end
+  local requested = operator_room("join", opts, agent, done)
+  if not requested then return { cancel = function() end } end
   local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths or {}
   local config_path = paths.config_path
   if type(config_path) ~= "string" or config_path == "" then
@@ -331,27 +525,98 @@ function matrix.leave(opts, on_done, agent)
   end
   local conf, config_error = matrix.read_config(config_path)
   if not conf then return error_result(done, config_error) end
-  if conf.rooms[room] == "home" or conf.rooms[room] == "all" then
-    return error_result(done,
-      "HOME and ALL rooms can't be left.\nNext: remuda butler matrix setup (to change HOME or ALL).")
-  end
-  if conf.rooms[room] == nil then
-    return error_result(done, room .. " is not a configured Matrix room.")
-  end
-  return matrix.request_json({ method = "POST",
-    path = "/_matrix/client/v3/rooms/" .. path_component(room) .. "/leave",
-    room = room, body = "{}", headers = { ["Content-Type"] = "application/json" },
-  }, function(result)
-    local removed, remove_error = matrix.config_remove_room(config_path, room)
-    if not removed then
-      local detail = result.error and (tostring(result.error) .. "; ") or ""
-      result.error = detail .. "could not remove Matrix room config line: " .. tostring(remove_error)
-    elseif result.error then
-      local base = tostring(result.error):gsub("\n?Next:[^\r\n]*", "")
-      result.error = base .. "; the room was removed from the local config.\nNext: remuda butler matrix rooms"
+  local current
+  local function join_room(room, alias, display_name, is_public, members)
+    if not room_id_valid(room) then
+      return error_result(done, "invalid Matrix room ID: room IDs start with ! (Element: Room settings > Advanced tab (not General) > Internal room ID. Element X may not show it; use the #alias instead.).")
     end
-    done(result)
-  end)
+    if agent then
+      current = file_request(room, alias, display_name, is_public, members, agent, done)
+      return current
+    end
+    current = join_as(config_path, conf, room, "operator", alias, display_name, done)
+    return current
+  end
+  if requested:sub(1, 1) == "#" then
+    current = resolve_alias(requested, conf.base, function(resolved)
+      if resolved.error then return done(resolved) end
+      join_room(resolved.room_id, resolved.alias)
+    end)
+  elseif requested:sub(1, 1) == "!" then
+    join_room(requested)
+  else
+    if requested == "" or requested:find("[%c]") then
+      return error_result(done, "public room name must not be empty or contain control characters")
+    end
+    current = find_public_matches(requested, conf.base, function(found)
+      if found.error or found.ambiguous then return done(found) end
+      join_room(found.room_id, found.alias, found.name, found.public, found.members)
+    end)
+  end
+  return { cancel = function() if current and current.cancel then current:cancel() end end }
+end
+
+function matrix.leave(opts, on_done, agent)
+  opts = opts or {}
+  local done = once(on_done)
+  local requested = operator_room("leave", opts, agent, done)
+  if not requested then return { cancel = function() end } end
+  local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths or {}
+  local config_path = paths.config_path
+  if type(config_path) ~= "string" or config_path == "" then
+    return error_result(done, "Matrix config path is unavailable")
+  end
+  local conf, config_error = matrix.read_config(config_path)
+  if not conf then return error_result(done, config_error) end
+  local current
+  local function leave_room(room)
+    if conf.rooms[room] == "home" or conf.rooms[room] == "all" then
+      return error_result(done,
+        "HOME and ALL rooms can't be left.\nNext: remuda butler matrix setup (to change HOME or ALL).")
+    end
+    if conf.rooms[room] == nil then
+      return error_result(done, room .. " is not a configured Matrix room.")
+    end
+    current = matrix.request_json({ method = "POST",
+      path = "/_matrix/client/v3/rooms/" .. path_component(room) .. "/leave",
+      room = room, body = "{}", headers = { ["Content-Type"] = "application/json" },
+    }, function(result)
+      local removed, remove_error = matrix.config_remove_room(config_path, room)
+      if not removed then
+        local detail = result.error and (tostring(result.error) .. "; ") or ""
+        result.error = detail .. "could not remove Matrix room config line: " .. tostring(remove_error)
+      elseif result.error then
+        local base = tostring(result.error):gsub("\n?Next:[^\r\n]*", "")
+        result.error = base .. "; the room was removed from the local config.\nNext: remuda butler matrix rooms"
+      end
+      if not result.error then
+        result.room_id = room
+        result.room_alias = requested:sub(1, 1) == "#" and sanitize_directory_text(requested) or nil
+      end
+      done(result)
+    end)
+  end
+  if requested:sub(1, 1) == "#" then
+    local labeled = {}
+    for room, alias in pairs(conf.room_aliases or {}) do
+      if alias == requested and conf.rooms[room] then labeled[#labeled + 1] = room end
+    end
+    table.sort(labeled)
+    if #labeled > 1 then
+      return error_result(done, "more than one configured Matrix room uses " .. sanitize_directory_text(requested)
+        .. ".\nNext: run remuda butler matrix rooms and choose a room ID.")
+    elseif #labeled == 1 then
+      leave_room(labeled[1])
+    else
+      current = resolve_alias(requested, conf.base, function(resolved)
+        if resolved.error then return done(resolved) end
+        leave_room(resolved.room_id)
+      end)
+    end
+  else
+    leave_room(requested)
+  end
+  return { cancel = function() if current and current.cancel then current:cancel() end end }
 end
 
 return matrix

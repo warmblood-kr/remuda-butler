@@ -13,6 +13,7 @@ local USAGE = [[Usage: remuda butler matrix setup [OPTIONS]
   --default              Save to the default live Butler config directory.
   --force                Replace existing token or config files.
   --all                  Also create the optional ALL-BUTLERS room.
+  --rooms open|allowlist Room invites: open (anyone) or allowlist (default; allowlisted senders only).
   --pin SHA256HEX         Trust this HTTPS certificate fingerprint.
   --ca-file PATH         Trust the HTTPS certificate authority in this file.
 
@@ -105,6 +106,9 @@ local function valid_mxid(value, option)
   return value
 end
 
+matrix.setup_validate_homeserver = valid_url
+matrix.setup_validate_mxid = valid_mxid
+
 local function readable_file(path)
   if not absolute(path) then return false end
   local file = io.open(path, "rb")
@@ -149,6 +153,7 @@ local function setup_command(options, destination)
   if options.create_all then parts[#parts + 1] = "--all" end
   if options.pin then add("--pin", options.pin) end
   if options.ca_file then add("--ca-file", options.ca_file) end
+  if options.rooms_mode == "open" then add("--rooms", "open") end
   if destination == "default" then
     parts[#parts + 1] = "--default"
   else
@@ -291,6 +296,7 @@ local VALUE_OPTIONS = {
   ["--password-file"] = "password_file", ["--token-file"] = "token_file",
   ["--registration-token-file"] = "registration_token_file",
   ["--dir"] = "dir", ["--pin"] = "pin", ["--ca-file"] = "ca_file",
+  ["--rooms"] = "rooms_mode",
 }
 
 function matrix.setup_usage()
@@ -299,7 +305,8 @@ end
 
 function matrix.setup_prepare(args)
   if type(args) ~= "table" then return nil, "Matrix setup arguments must be a list" end
-  if #args == 0 or (#args == 1 and (args[1] == "--help" or args[1] == "-h")) then
+  if #args == 0 then return { wizard = true } end
+  if #args == 1 and (args[1] == "--help" or args[1] == "-h") then
     return { help = true, usage = USAGE }
   end
   local options, seen = {}, {}
@@ -324,6 +331,11 @@ function matrix.setup_prepare(args)
     else
       return nil, "unexpected setup argument " .. name
     end
+  end
+
+  options.rooms_mode = options.rooms_mode or "allowlist"
+  if options.rooms_mode ~= "open" and options.rooms_mode ~= "allowlist" then
+    return nil, "rooms must be open or allowlist"
   end
 
   local homeserver, scheme_or_error = valid_url(options.homeserver)
@@ -776,6 +788,7 @@ function matrix.setup_write(options, result)
     options.homeserver, result.home_room, result.user_id, options.owner_mxid, "", "30000",
   }
   if result.all_room then config_lines[#config_lines + 1] = "all_room=" .. result.all_room end
+  if options.rooms_mode == "open" then config_lines[#config_lines + 1] = "rooms=open" end
   if options.pin then config_lines[#config_lines + 1] = "pin_sha256=" .. options.pin end
   if options.ca_file then config_lines[#config_lines + 1] = "ca_file=" .. options.ca_file end
   contents[options.config_path] = table.concat(config_lines, "\n") .. "\n"

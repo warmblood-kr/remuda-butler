@@ -12,9 +12,15 @@ function remuda.schedule(spec)
 end
 function remuda.cancel(timer) if timer then timer.cancelled = true end end
 local matrix = dofile("packages/butler/matrix_request.lua")
+local ASKER = "team-1-mx"
 dofile("packages/butler/matrix_setup.lua")
+dofile("packages/butler/matrix_read.lua")
 dofile("packages/butler/matrix_cli.lua")
 local setup_tests = dofile("tests/butler_matrix_setup.lua")
+-- approval.lua loads before the relay (relay.new attaches it) and before
+-- matrix_write (which registers the join handler). Absent until step a.
+local approval_file = io.open("packages/butler/approval.lua", "r")
+if approval_file then approval_file:close(); dofile("packages/butler/approval.lua") end
 local relay_module = dofile("packages/butler/matrix_relay.lua")
 
 local function remove_dir(dir)
@@ -574,6 +580,126 @@ local function test_thread_root_mail_references_are_stable()
   cleanup_fixture(dir, config_path)
 end
 
+local function test_cli_matrix_mail_replies_keep_room_and_relation()
+  local home_room, joined_room = "!room:example.org", "!joined:example.org"
+  local dir, config_path = fixture()
+  local config = assert(io.open(config_path, "w"))
+  config:write("http://matrix.invalid\n", home_room, "\n@bot:example.org\n@alice:example.org\n",
+    "false\n30000\nroom=", joined_room, " how=operator\n")
+  config:close()
+  local token_path = config_path .. ".token"
+  local token = assert(io.open(token_path, "w")); token:write("fake-token"); token:close()
+
+  local bus = { inboxes = {}, messages = {}, objects = {} }
+  local old_mail_config, old_mail, old_matrix_config = remuda._butler_mail_config,
+    remuda._butler_mail, remuda._butler_matrix_config
+  local old_ulid = remuda._butler_new_ulid
+  local old_instance, old_request_json = matrix.relay.instance, matrix.request_json
+  local next_id, sync_callbacks, sent, mail_ids = 0, {}, {}, {}
+  remuda._butler_new_ulid = function()
+    local id = "M" .. tostring(next_id)
+    next_id = next_id + 1
+    return id
+  end
+  remuda._butler_mail_config = { bus = bus }
+  remuda._butler_matrix_config = { token_path = token_path, config_path = config_path }
+  dofile("packages/butler/mail.lua")
+  local client = {}
+  function client.request_json(args, callback)
+    assert(args.path:find("/_matrix/client/v3/sync", 1, true), "only relay sync requests use this fake")
+    sync_callbacks[#sync_callbacks + 1] = callback
+    return { cancel = function() end }
+  end
+  function client.reply(opts, callback)
+    sent[#sent + 1] = { room_id = opts.room, text = opts.text,
+      thread_root = opts.thread_root,
+      relates_to = { rel_type = "m.thread", event_id = opts.thread_root or opts.event_id,
+        ["m.in_reply_to"] = { event_id = opts.event_id } } }
+    local sent_id = "$butler-sent-" .. tostring(#sent)
+    callback({ event_id = sent_id, event_ids = matrix.json_array({ sent_id }) })
+    return { cancel = function() end }
+  end
+  local function deliver(event)
+    local sender = event.sender
+    local delivered = remuda._butler_mail.queue(
+      { host = "matrix", id = "", alias = sender, session = sender, kind = "matrix" },
+      { id = "butler", alias = "butler" }, event.body,
+      event.context_mail_id and ("Matrix thread reply from " .. sender) or ("Matrix message from " .. sender),
+      event.context_mail_id, event.references, { sender = sender, room_id = event.room_id,
+        event_id = event.event_id, thread_root = event.thread_root, in_reply_to = event.in_reply_to,
+        room = event.room, room_kind = event.room_kind })
+    assert(delivered, "fake Butler mail delivery failed")
+    mail_ids[event.event_id] = delivered.id
+    return delivered
+  end
+  matrix.request_json = client.request_json
+  local relay = relay_module.new({ config_path = config_path, matrix = client,
+    deliver = deliver,
+  })
+  matrix.relay.instance = relay
+  assert(relay:start())
+
+  local function sync(response)
+    local callback = table.remove(sync_callbacks, 1)
+    assert(callback, "fake homeserver has no pending sync request")
+    callback({ json = response })
+  end
+  local function event(room_id, event_id, relation)
+    local content = { msgtype = "m.text", body = "incoming" }
+    if relation then content["m.relates_to"] = relation end
+    sync({ next_batch = "s" .. tostring(next_id + 10), rooms = { join = {
+      [room_id] = { timeline = { events = { { type = "m.room.message", event_id = event_id,
+        sender = "@alice:example.org", content = content } } } },
+    } } })
+    return assert(mail_ids[event_id], "fake homeserver event did not deposit a mail")
+  end
+  sync({ next_batch = "s0" })
+  local joined_top = event(joined_room, "$joined-top")
+  event(joined_room, "$thread-root")
+  local thread_mail = event(joined_room, "$thread-reply", { rel_type = "m.thread",
+    event_id = "$thread-root", ["m.in_reply_to"] = { event_id = "$thread-root" } })
+  local plain_reply = event(joined_room, "$plain-reply", {
+    ["m.in_reply_to"] = { event_id = "$plain-parent" } })
+  local home_top = event(home_room, "$home-top")
+
+  local function cli_reply(mail_id)
+    local result = remuda._butler_mail.reply({ id = "operator", alias = "operator" }, mail_id,
+      "answer", true, function(message)
+        return matrix.mail_reply({ mail_id = message.in_reply_to, reply_mail_id = message.reply_id,
+          text = message.text, route = message.matrix_route })
+      end)
+    assert(result, "CLI reply backend must queue the Matrix reply")
+  end
+  cli_reply(joined_top)
+  cli_reply(thread_mail)
+  cli_reply(plain_reply)
+  cli_reply(home_top)
+
+  assert(#sent == 4, "four CLI mail replies should reach the fake homeserver")
+  assert(sent[1].room_id == joined_room and sent[1].thread_root == nil
+      and sent[1].relates_to.event_id == "$joined-top",
+    "a top-level mail from a joined room must reply in that room")
+  assert(sent[2].room_id == joined_room and sent[2].thread_root == "$thread-root"
+      and sent[2].relates_to.event_id == "$thread-root"
+      and sent[2].relates_to["m.in_reply_to"].event_id == "$thread-reply",
+    "a thread reply must preserve its room, thread root, and direct event target")
+  assert(sent[3].room_id == joined_room and sent[3].thread_root == nil
+      and sent[3].relates_to["m.in_reply_to"].event_id == "$plain-reply",
+    "a reply to Matrix mail that is itself a reply must target that event")
+  assert(sent[4].room_id == home_room and sent[4].relates_to.event_id == "$home-top",
+    "HOME mail replies must keep their existing room")
+
+  relay:stop()
+  matrix.relay.instance, matrix.request_json = old_instance, old_request_json
+  remuda._butler_new_ulid = old_ulid
+  remuda._butler_mail, remuda._butler_mail_config = old_mail, old_mail_config
+  remuda._butler_matrix_config = old_matrix_config
+  for _, suffix in ipairs({ "", ".since", ".since.bak", ".acks", ".acks.drain", ".token" }) do
+    os.remove(config_path .. suffix)
+  end
+  remove_dir(dir)
+end
+
 local function test_thread_reply_in_same_sync_batch_gets_root_reference()
   local dir, config_path = fixture()
   local client, delivered = scripted_client(), {}
@@ -673,6 +799,10 @@ local function invite_fixture(senders, extra)
   return dir, path
 end
 
+local function open_invite_fixture(extra)
+  return invite_fixture(OWNER, "rooms=open\n" .. (extra or ""))
+end
+
 local function read_text(path)
   local file = assert(io.open(path, "rb"))
   local text = file:read("a")
@@ -684,6 +814,78 @@ local function room_line(path, room)
   for line in read_text(path):gmatch("[^\n]+") do
     if line:match("^room=(%S+)") == room then return line end
   end
+end
+
+local function test_open_room_config_and_deny_matching()
+  local default_dir, default_path = invite_fixture()
+  local default_conf = assert(matrix.read_config(default_path))
+  assert(default_conf.rooms_mode == "allowlist", "missing rooms config must default to allowlist")
+  remove_dir(default_dir)
+
+  local dir, path = open_invite_fixture(table.concat({
+    "deny_room=!blocked:example.org",
+    "deny_room=#blocked:example.org",
+    "deny_server=room-denied.example",
+    "deny_server=inviter-denied.example",
+    "deny_server=alias-denied.example",
+    "deny_server=ported-denied.example",
+    "deny_server=[abcd::1]",
+  }, "\n") .. "\n")
+  local conf, err = matrix.read_config(path)
+  assert(conf, "valid open-room config must parse: " .. tostring(err))
+  assert(conf.rooms_mode == "open", "rooms=open must select open mode")
+  assert(conf.deny_room_ids["!blocked:example.org"], "deny_room room IDs must be recorded")
+  assert(conf.deny_room_aliases["#blocked:example.org"], "deny_room aliases must be recorded")
+  assert(conf.deny_servers["room-denied.example"], "deny_server hosts must be recorded")
+  assert(matrix.invite_is_denied(conf, "!blocked:example.org", nil, STRANGER),
+    "the denied room ID must match")
+  assert(matrix.invite_is_denied(conf, NEW, "#blocked:example.org", STRANGER),
+    "the denied canonical alias must match")
+  assert(matrix.invite_is_denied(conf, NEW, "#blocked:EXAMPLE.ORG", STRANGER),
+    "the alias deny server comparison must ignore case")
+  assert(matrix.invite_is_denied(conf, "!x:room-denied.example", nil, STRANGER),
+    "the room server must match")
+  assert(matrix.invite_is_denied(conf, NEW, nil, "@mallory:inviter-denied.example"),
+    "the inviter server must match")
+  assert(matrix.invite_is_denied(conf, NEW, "#x:alias-denied.example", STRANGER),
+    "the alias server must match")
+  assert(matrix.invite_is_denied(conf, NEW, "#x:ALIAS-DENIED.EXAMPLE", STRANGER),
+    "the alias server comparison must ignore case")
+  assert(matrix.invite_is_denied(conf, "!x:ROOM-DENIED.EXAMPLE.", nil, STRANGER),
+    "a trailing dot on the room server must not bypass deny_server")
+  assert(matrix.invite_is_denied(conf, NEW, nil, "@x:INVITER-DENIED.EXAMPLE."),
+    "a trailing dot on the inviter server must not bypass deny_server")
+  assert(matrix.invite_is_denied(conf, NEW, "#x:ALIAS-DENIED.EXAMPLE.", STRANGER),
+    "a trailing dot on the alias server must not bypass deny_server")
+  assert(matrix.invite_is_denied(conf, "!x:[ABCD::1]", nil, STRANGER),
+    "IPv6 server deny comparison must ignore case")
+  assert(matrix.invite_is_denied(conf, "!x:ported-denied.example:8448", nil, STRANGER),
+    "deny_server without a port must match a room server with a port")
+  assert(matrix.invite_is_denied(conf, NEW, nil, "@x:ported-denied.example:8448"),
+    "deny_server without a port must match an inviter server with a port")
+  assert(not matrix.invite_is_denied(conf, "!Blocked:example.org", nil, STRANGER),
+    "room ID deny matching must remain exact")
+  assert(not matrix.invite_is_denied(conf, NEW, "#x:allowed.example", STRANGER),
+    "a non-denied room and server must not match")
+  remove_dir(dir)
+end
+
+local function test_invalid_open_room_config_lines_are_ignored_with_one_warning()
+  local dir, path = invite_fixture(OWNER,
+    "rooms=unrecognized\n deny_room=!bad value\ndeny_room=#invalid:\n"
+      .. "deny_server=bad\27[31mhost\ndeny_server=example.org:\n")
+  local original_stderr, warnings = io.stderr, {}
+  io.stderr = { write = function(_, message) warnings[#warnings + 1] = message; return true end }
+  local conf, err = matrix.read_config(path)
+  local again, again_err = matrix.read_config(path)
+  io.stderr = original_stderr
+  assert(conf and again, "invalid optional lines must not invalidate the config: " .. tostring(err or again_err))
+  assert(conf.rooms_mode == "allowlist", "an invalid rooms value must leave the safe default")
+  assert(next(conf.deny_room_ids) == nil and next(conf.deny_room_aliases) == nil
+    and next(conf.deny_servers) == nil, "invalid deny values must not widen a match")
+  assert(#warnings == 5, "each invalid line must warn once across config reloads")
+  assert(not table.concat(warnings):find("\27", 1, true), "warning text must be terminal-sanitized")
+  remove_dir(dir)
 end
 
 local function test_config_add_room_pads_short_config()
@@ -1000,6 +1202,27 @@ local function test_bidi_invite_room_is_quarantined_without_home_notice()
   assert(ok, err)
 end
 
+local function test_open_mode_room_id_unicode_separators_are_refused()
+  for index, char in ipairs({ "\226\128\168", "\226\128\169", "\226\128\139" }) do
+    local room = "!unsafe" .. char .. "room:example.org"
+    local dir, path = open_invite_fixture()
+    local client, delivered = invite_client(), {}
+    local relay = started_relay(path, client, delivered)
+    client:sync({ json = { next_batch = "s" .. index,
+      rooms = { invite = invite(room, STRANGER) } } })
+    client:pump()
+    assert(client:joins(room) == 0,
+      "room IDs containing line separators or zero-width characters must not be joined")
+    local item
+    for _, q in ipairs(relay:quarantine_list()) do
+      if q.room_id == room and q.reason == "invite_not_allowlisted" then item = q end
+    end
+    assert(item, "an unsafe Unicode room ID must be quarantined as not allowlisted")
+    relay:stop()
+    remove_dir(dir)
+  end
+end
+
 local function test_long_invite_identifiers_dedupe_home_notice()
   local dir, path = invite_fixture()
   local long_room = "!" .. string.rep("r", 298) .. ":" .. string.rep("s", 300)
@@ -1068,6 +1291,369 @@ local function test_agent_invite_is_not_joined()
   remove_dir(dir)
 end
 
+local function invite_with_state(room, inviter, alias)
+  local events = {
+    { type = "m.room.member", sender = inviter, state_key = "@bot:example.org",
+      content = { membership = "invite" } },
+  }
+  if alias then
+    table.insert(events, 1, { type = "m.room.canonical_alias", sender = inviter,
+      state_key = "", content = { alias = alias } })
+  end
+  return { [room] = { invite_state = { events = events } } }
+end
+
+local function test_open_mode_stranger_invite_joins_and_notifies_once()
+  local dir, path = open_invite_fixture()
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  local alias = "#open:example.org"
+  local invitation = invite_with_state(NEW, STRANGER, alias)
+  client:sync({ json = { next_batch = "s1", rooms = { invite = invitation } } })
+  client:pump()
+  assert(client:joins(NEW) == 1, "open mode must join a stranger invite exactly once")
+  local line = room_line(path, NEW)
+  assert(line and line:find("how=invite", 1, true)
+    and line:find("inviter=" .. STRANGER, 1, true),
+    "open mode must record how=invite and the inviter in config")
+  assert(client:messages(HOME, "Joined " .. NEW .. " (" .. alias .. ") from " .. STRANGER .. " invite.") == 1,
+    "open mode must post one HOME line with the room, canonical alias, and inviter")
+  client:sync({ json = { next_batch = "s2", rooms = { invite = invitation } } })
+  client:pump()
+  assert(client:messages(HOME, "Joined " .. NEW) == 1, "a repeated invite must not repeat the HOME line")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function test_open_mode_denies_room_alias_room_server_and_inviter_server()
+  local cases = {
+    { name = "room id", room = NEW, inviter = STRANGER, alias = "#safe:example.org",
+      deny = "deny_room=" .. NEW },
+    { name = "canonical alias", room = NEW, inviter = STRANGER, alias = "#denied:example.org",
+      deny = "deny_room=#denied:example.org" },
+    { name = "room server", room = "!other:denied.example", inviter = STRANGER,
+      alias = "#safe:example.org", deny = "deny_server=denied.example" },
+    { name = "inviter server", room = NEW, inviter = "@mallory:denied.example",
+      alias = "#safe:example.org", deny = "deny_server=denied.example" },
+  }
+  local failures = {}
+  for index, spec in ipairs(cases) do
+    local dir, path = open_invite_fixture(spec.deny .. "\n")
+    local client, delivered = invite_client(), {}
+    local relay = started_relay(path, client, delivered)
+    local invitation = invite_with_state(spec.room, spec.inviter, spec.alias)
+    client:sync({ json = { next_batch = "s" .. index, rooms = { invite = invitation } } })
+    client:pump()
+    local case_ok, case_err = pcall(function()
+      assert(client:joins(spec.room) == 0, spec.name .. " denial must refuse the invite before POST join")
+      local item
+      for _, q in ipairs(relay:quarantine_list()) do
+        if q.reason == "invite_denied" then item = q end
+      end
+      assert(item and item.room_id == spec.room,
+        spec.name .. " denial must quarantine as invite_denied")
+    end)
+    if not case_ok then failures[#failures + 1] = spec.name .. ": " .. tostring(case_err) end
+    relay:stop()
+    remove_dir(dir)
+  end
+  assert(#failures == 0, table.concat(failures, "\n"))
+end
+
+local function test_open_mode_refuses_truncated_denied_inviter()
+  local dir, path = open_invite_fixture("deny_server=evil.org\n")
+  local long_inviter = "@" .. string.rep("a", 120) .. ":evil.org"
+  assert(#long_inviter == 130, "fixture inviter must exercise truncation")
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  client:sync({ json = { next_batch = "s1",
+    rooms = { invite = invite_with_state(NEW, long_inviter, "#safe:example.org") } } })
+  client:pump()
+  assert(client:joins(NEW) == 0, "a truncated inviter from a denied server must not join")
+  local item
+  for _, q in ipairs(relay:quarantine_list()) do
+    if q.room_id == NEW then item = q end
+  end
+  assert(item and item.reason == "invite_not_allowlisted",
+    "a sanitized/truncated inviter must be refused as not allowlisted")
+  local conf = assert(matrix.read_config(path))
+  assert(conf.rooms[NEW] == nil, "a truncated inviter must not be written as room metadata")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function test_open_mode_refuses_truncated_alias()
+  local dir, path = open_invite_fixture("deny_server=evil.org\n")
+  local long_alias = "#" .. string.rep("a", 120) .. ":evil.org"
+  assert(#long_alias == 130, "fixture alias must exercise truncation")
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  client:sync({ json = { next_batch = "s1",
+    rooms = { invite = invite_with_state(NEW, STRANGER, long_alias) } } })
+  client:pump()
+  assert(client:joins(NEW) == 0, "an invite with a truncated canonical alias must not join")
+  local item
+  for _, q in ipairs(relay:quarantine_list()) do
+    if q.room_id == NEW then item = q end
+  end
+  assert(item and item.reason == "invite_not_allowlisted",
+    "a sanitized/truncated alias must refuse the invite as not allowlisted")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function test_open_mode_sender_allowlist_still_quarantines()
+  local dir, path = open_invite_fixture("room=" .. NEW .. " how=invite inviter=" .. STRANGER .. "\n")
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  client:sync({ json = { next_batch = "s1", rooms = { join = {
+    [NEW] = { timeline = { events = {
+      { type = "m.room.message", event_id = "$open-blocked", sender = STRANGER,
+        content = { msgtype = "m.text", body = "not allowed" } },
+    } } },
+  } } } })
+  assert(not delivered_ids(delivered, "$open-blocked"), "a non-allowlisted sender must never become mail")
+  local item
+  for _, q in ipairs(relay:quarantine_list()) do
+    if q.event_id == "$open-blocked" then item = q end
+  end
+  assert(item and item.reason == "sender_not_allowlisted",
+    "a non-allowlisted sender in an open-mode room must be quarantined")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function test_open_mode_daily_join_cap_quarantines_twenty_first_invite()
+  local dir, path = open_invite_fixture()
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  local invites = {}
+  for index = 1, 20 do
+    local room = "!cap" .. index .. ":example.org"
+    invites[room] = invite(room, STRANGER)[room]
+  end
+  client:sync({ json = { next_batch = "s1", rooms = { invite = invites } } })
+  client:pump()
+  local joined = 0
+  for index = 1, 20 do
+    if client:joins("!cap" .. index .. ":example.org") > 0 then joined = joined + 1 end
+  end
+  assert(joined == 20, "open mode must auto-join at most 20 distinct rooms per rolling day")
+  relay:stop()
+
+  local restarted_client, restarted_delivered = invite_client(), {}
+  relay = started_relay(path, restarted_client, restarted_delivered)
+  local twenty_first = "!cap21:example.org"
+  restarted_client:sync({ json = { next_batch = "s2", rooms = { invite = invite(twenty_first, STRANGER) } } })
+  restarted_client:pump()
+  assert(restarted_client:joins(twenty_first) == 0,
+    "the persisted rolling-day budget must refuse a 21st invite after restart")
+  local capped
+  for _, q in ipairs(relay:quarantine_list()) do
+    if q.reason == "invite_cap" then capped = q end
+  end
+  assert(capped, "the 21st open-mode invite must be quarantined as invite_cap")
+  assert(restarted_client:messages(HOME, "Auto-join cap reached (20/day); 1 invites quarantined.") == 1,
+    "a sync that hits the cap must post one cap summary to HOME")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function test_open_mode_future_join_timestamps_remain_counted()
+  local dir, path = open_invite_fixture()
+  local timestamps = matrix.json_array({})
+  for index = 1, 20 do
+    timestamps[index] = { room_id = "!future" .. index .. ":example.org", at = os.time() + 3600 }
+  end
+  local state_file = assert(io.open(path .. ".since", "wb"))
+  state_file:write(assert(matrix.encode_json({ auto_join_timestamps = timestamps })))
+  state_file:close()
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  assert(#relay:state().auto_join_timestamps == 20,
+    "future join timestamps must remain counted when the clock moves backward")
+  local room = "!clock-back:example.org"
+  client:sync({ json = { next_batch = "s1",
+    rooms = { invite = invite_with_state(room, STRANGER, "#clock:example.org") } } })
+  client:pump()
+  assert(client:joins(room) == 0, "future timestamps must keep the daily join cap full")
+  local capped
+  for _, item in ipairs(relay:quarantine_list()) do
+    if item.room_id == room and item.reason == "invite_cap" then capped = item end
+  end
+  assert(capped, "an invite while future timestamps remain must be quarantined at the cap")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function test_open_mode_configured_room_invite_rejoins_and_preserves_line()
+  local original = "room=" .. NEW .. " how=operator\n"
+  local dir, path = open_invite_fixture(original)
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  client:sync({ json = { next_batch = "s1",
+    rooms = { invite = invite_with_state(NEW, STRANGER, "#open:example.org") } } })
+  client:pump()
+  assert(client:joins(NEW) == 1,
+    "an open-mode invite for a configured room must run the rejoin path")
+  assert(read_text(path):find(original, 1, true),
+    "a rejoin must preserve the existing room config line")
+  assert(client:messages(HOME, "Joined " .. NEW) == 1,
+    "a successful rejoin must notify HOME as usual")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function test_open_mode_configured_room_rejoin_honors_deny_cap_and_rollback()
+  do
+    local original = "room=" .. NEW .. " how=operator\n"
+    local dir, path = open_invite_fixture(original .. "deny_room=" .. NEW .. "\n")
+    local client, delivered = invite_client(), {}
+    local relay = started_relay(path, client, delivered)
+    client:sync({ json = { next_batch = "s1",
+      rooms = { invite = invite_with_state(NEW, STRANGER, "#open:example.org") } } })
+    client:pump()
+    assert(client:joins(NEW) == 0, "configured room rejoin must still check deny rules")
+    assert(room_line(path, NEW) == original:gsub("\n$", ""), "denial must preserve the configured room line")
+    local denied
+    for _, item in ipairs(relay:quarantine_list()) do
+      if item.room_id == NEW and item.reason == "invite_denied" then denied = item end
+    end
+    assert(denied, "a denied configured-room re-invite must be quarantined")
+    relay:stop()
+    remove_dir(dir)
+  end
+
+  do
+    local original = "room=" .. NEW .. " how=operator\n"
+    local dir, path = open_invite_fixture(original)
+    local timestamps = matrix.json_array({})
+    for index = 1, 20 do
+      timestamps[index] = { room_id = "!used" .. index .. ":example.org", at = os.time() }
+    end
+    local state_file = assert(io.open(path .. ".since", "wb"))
+    state_file:write(assert(matrix.encode_json({ auto_join_timestamps = timestamps })))
+    state_file:close()
+    local client, delivered = invite_client(), {}
+    local relay = started_relay(path, client, delivered)
+    client:sync({ json = { next_batch = "s1",
+      rooms = { invite = invite_with_state(NEW, STRANGER, "#open:example.org") } } })
+    client:pump()
+    assert(client:joins(NEW) == 0, "configured room rejoin must honor the daily cap")
+    assert(room_line(path, NEW) == original:gsub("\n$", ""), "cap refusal must preserve the configured room line")
+    local capped
+    for _, item in ipairs(relay:quarantine_list()) do
+      if item.room_id == NEW and item.reason == "invite_cap" then capped = item end
+    end
+    assert(capped, "a capped configured-room re-invite must be quarantined")
+    relay:stop()
+    remove_dir(dir)
+  end
+
+  do
+    local original = "room=" .. NEW .. " how=operator\n"
+    local dir, path = open_invite_fixture(original)
+    local client, delivered = invite_client(), {}
+    local relay = started_relay(path, client, delivered)
+    client:sync({ json = { next_batch = "s1",
+      rooms = { invite = invite_with_state(NEW, STRANGER, "#open:example.org") } } })
+    client:pump({ error = "M_FORBIDDEN" })
+    assert(client:joins(NEW) == 1, "configured room rejoin must issue the join request")
+    assert(room_line(path, NEW) == original:gsub("\n$", ""), "failed rejoin rollback must preserve the configured room line")
+    relay:stop()
+    remove_dir(dir)
+  end
+end
+
+local function test_open_mode_repeated_invite_for_joined_room_rejoins_once()
+  local dir, path = open_invite_fixture("room=" .. NEW .. " how=invite inviter=" .. OWNER .. "\n")
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  local invitation = invite(NEW, OWNER)
+  client:sync({ json = { next_batch = "s1", rooms = { invite = invitation } } })
+  client:pump()
+  client:sync({ json = { next_batch = "s2", rooms = { invite = invitation } } })
+  client:pump()
+  assert(client:joins(NEW) == 1, "a configured room invite must rejoin once and dedupe its repeat")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function test_open_mode_failed_join_rolls_back_config_but_counts_against_cap()
+  local dir, path = open_invite_fixture()
+  local timestamps = matrix.json_array({})
+  for index = 1, 19 do
+    timestamps[index] = { room_id = "!used" .. index .. ":example.org", at = os.time() }
+  end
+  local state_file = assert(io.open(path .. ".since", "wb"))
+  state_file:write(assert(matrix.encode_json({ auto_join_timestamps = timestamps })))
+  state_file:close()
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  local invitation = invite_with_state(NEW, STRANGER, "#open:example.org")
+  client:sync({ json = { next_batch = "s1", rooms = { invite = invitation } } })
+  client:pump({ error = "M_FORBIDDEN" })
+  assert(room_line(path, NEW) == nil, "a failed open-mode join must still roll back its config line")
+  assert(#relay:state().auto_join_timestamps == 20,
+    "a failed open-mode join must retain its timestamp in the daily budget")
+  local next_room = "!after-failure:example.org"
+  client:sync({ json = { next_batch = "s2",
+    rooms = { invite = invite_with_state(next_room, STRANGER, "#after:example.org") } } })
+  client:pump()
+  assert(client:joins(NEW) == 1 and client:joins(next_room) == 0,
+    "the failed 20th join must cause the next room invite to hit the cap")
+  local capped
+  for _, item in ipairs(relay:quarantine_list()) do
+    if item.room_id == next_room and item.reason == "invite_cap" then capped = item end
+  end
+  assert(capped, "the next invite after a failed 20th join must be quarantined at the cap")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function test_open_mode_hostile_invite_state_is_refused()
+  local dir, path = open_invite_fixture()
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  local hostile_inviter = "@ali\27ce:example.org"
+  local hostile_alias = "#room\226\128\174:example.org"
+  local invitation = invite_with_state(NEW, hostile_inviter, hostile_alias)
+  client:sync({ json = { next_batch = "s1", rooms = { invite = invitation } } })
+  client:pump()
+  assert(room_line(path, NEW) == nil, "hostile invite fields must not be written to config")
+  assert(client:joins(NEW) == 0, "invite fields changed by sanitization must not be joined")
+  local quarantined
+  for _, item in ipairs(relay:quarantine_list()) do
+    if item.room_id == NEW then quarantined = item end
+  end
+  assert(quarantined and quarantined.reason == "invite_not_allowlisted",
+    "hostile invite fields must be quarantined as not allowlisted")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function test_open_mode_conflicting_inviter_events_remain_refused()
+  local dir, path = open_invite_fixture()
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  local invitation = { [NEW] = { invite_state = { events = {
+    { type = "m.room.member", sender = OWNER, state_key = "@bot:example.org",
+      content = { membership = "invite" } },
+    { type = "m.room.member", sender = STRANGER, state_key = "@bot:example.org",
+      content = { membership = "invite" } },
+  } } } }
+  client:sync({ json = { next_batch = "s1", rooms = { invite = invitation } } })
+  client:pump()
+  assert(client:joins(NEW) == 0, "conflicting invite events must never be joined in open mode")
+  local item
+  for _, q in ipairs(relay:quarantine_list()) do
+    if q.reason == "invite_not_allowlisted" then item = q end
+  end
+  assert(item and item.room_id == NEW, "conflicting invite events must remain quarantined")
+  relay:stop()
+  remove_dir(dir)
+end
+
 local function http_fake(status, calls)
   return { request = function(spec)
     calls[#calls + 1] = spec
@@ -1083,14 +1669,523 @@ local function with_operator_config(path, status, run)
   dofile("packages/butler/matrix_write.lua")
   local token = path .. ".token"
   local file = assert(io.open(token, "w")); file:write("access-token"); file:close()
-  local saved_http, saved_conf = remuda.http, remuda._butler_matrix_config
+  local saved_http, saved_conf, saved_caller = remuda.http, remuda._butler_matrix_config, remuda.caller
   local calls = {}
   remuda.http = http_fake(status, calls)
+  remuda.caller = function() return { kind = "outside" } end
   remuda._butler_matrix_config = { token_path = token, config_path = path }
   remuda._butler_matrix_paths = remuda._butler_matrix_config
   local ok, err = pcall(run, calls)
-  remuda.http, remuda._butler_matrix_config, remuda._butler_matrix_paths = saved_http, saved_conf, nil
+  remuda.http, remuda._butler_matrix_config, remuda._butler_matrix_paths, remuda.caller =
+    saved_http, saved_conf, nil, saved_caller
   if not ok then error(err, 0) end
+end
+
+local function with_alias_http(path, handler, run)
+  dofile("packages/butler/matrix_request.lua") -- fresh rate-limit bucket
+  dofile("packages/butler/matrix_write.lua")
+  local token = path .. ".token"
+  local file = assert(io.open(token, "w")); file:write("access-token"); file:close()
+  local saved_http, saved_conf, saved_caller = remuda.http, remuda._butler_matrix_config, remuda.caller
+  local calls = {}
+  remuda.http = { request = function(spec)
+    calls[#calls + 1] = spec
+    local response = handler(spec, #calls) or { status = 200, body = "{}" }
+    spec.callback(response)
+    return { cancel = function() end }
+  end }
+  remuda.caller = function() return { kind = "outside" } end
+  remuda._butler_matrix_config = { token_path = token, config_path = path }
+  remuda._butler_matrix_paths = remuda._butler_matrix_config
+  local ok, err = pcall(run, calls)
+  remuda.http, remuda._butler_matrix_config, remuda._butler_matrix_paths, remuda.caller =
+    saved_http, saved_conf, nil, saved_caller
+  os.remove(token)
+  if not ok then error(err, 0) end
+end
+
+local function with_caller_kind(kind, run)
+  local saved_caller = remuda.caller
+  if kind == "missing" then
+    remuda.caller = nil
+  else
+    remuda.caller = function() return { kind = kind } end
+  end
+  local ok, err = pcall(run)
+  remuda.caller = saved_caller
+  if not ok then error(err, 0) end
+end
+
+local function test_matrix_join_leave_require_outside_caller()
+  for _, verb in ipairs({ "join", "leave" }) do
+    for _, kind in ipairs({ "session", "unknown", "missing" }) do
+      local room_config = verb == "leave" and ("room=" .. NEW .. " how=operator\n") or ""
+      local dir, path = invite_fixture(nil, room_config)
+      local before = read_text(path)
+      with_operator_config(path, 200, function(calls)
+        with_caller_kind(kind, function()
+          local result
+          matrix[verb]({ room = NEW }, function(value) result = value end)
+          assert(result and result.error and result.error:find("operator-only", 1, true),
+            "matrix " .. verb .. " must refuse caller kind " .. kind)
+          assert(#calls == 0 and read_text(path) == before,
+            "matrix " .. verb .. " refusal must not make an HTTP request or change config")
+        end)
+      end)
+      remove_dir(dir)
+    end
+  end
+
+  do
+    local dir, path = invite_fixture(nil, "room=" .. NEW .. " how=operator\n")
+    local before = read_text(path)
+    with_operator_config(path, 200, function(calls)
+      local result
+      matrix.leave({ room = NEW }, function(value) result = value end, ASKER)
+      assert(result and result.error and result.error:find("operator-only", 1, true)
+        and result.error:find("Next: ask the owner to run remuda butler matrix leave ROOM from their terminal", 1, true),
+        "an agent matrix leave must be refused with owner guidance")
+      assert(#calls == 0 and read_text(path) == before,
+        "an agent matrix leave refusal must not make an HTTP request or change config")
+    end)
+    remove_dir(dir)
+  end
+
+  do
+    local dir, path = invite_fixture()
+    with_operator_config(path, 200, function(calls)
+      with_caller_kind("outside", function()
+        local result
+        matrix.join({ room = NEW }, function(value) result = value end)
+        assert(result and not result.error and #calls == 1 and calls[1].url:find("/join", 1, true),
+          "matrix join must allow an outside terminal caller")
+      end)
+    end)
+    assert(room_line(path, NEW), "an outside matrix join must add its room config line")
+    remove_dir(dir)
+  end
+
+  do
+    local dir, path = invite_fixture(nil, "room=" .. NEW .. " how=operator\n")
+    with_operator_config(path, 200, function(calls)
+      with_caller_kind("outside", function()
+        local result
+        matrix.leave({ room = NEW }, function(value) result = value end)
+        assert(result and not result.error and #calls == 1 and calls[1].url:find("/leave", 1, true),
+          "matrix leave must allow an outside terminal caller")
+      end)
+    end)
+    assert(room_line(path, NEW) == nil, "an outside matrix leave must remove its room config line")
+    remove_dir(dir)
+  end
+end
+
+local ALIAS = "#room:example.org"
+local function directory_response(room_id)
+  return { status = 200, body = '{"room_id":"' .. room_id .. '"}' }
+end
+
+local function public_rooms_response(chunk)
+  return { status = 200, body = assert(matrix.encode_json({
+    chunk = matrix.json_array(chunk), total_room_count = #chunk,
+  })) }
+end
+
+local function capture_matrix_cli(args, agent)
+  local old_pending, old_guidance, captured = remuda.pending, matrix.configuration_guidance, nil
+  remuda.pending = function()
+    return { resolve = function(_, code, stdout, stderr)
+      captured = { code = code, stdout = stdout, stderr = stderr }
+    end }
+  end
+  matrix.configuration_guidance = function() return nil end
+  local returned = matrix.cli(args, agent)
+  tick_timers(1)
+  remuda.pending, matrix.configuration_guidance = old_pending, old_guidance
+  if not captured and type(returned) == "string" then captured = { code = 0, stdout = returned, stderr = "" } end
+  return captured
+end
+
+local function test_alias_directory_room_id_terminal_controls_are_refused()
+  local dir, path = invite_fixture()
+  local before = read_text(path)
+  for _, bad_id in ipairs({ "!\27[2J:x", "!a\226\128\174b:x" }) do
+    with_alias_http(path, function() return directory_response(bad_id) end, function(calls)
+      local result = capture_matrix_cli({ "matrix", "join", ALIAS })
+      assert(#calls == 1 and read_text(path) == before,
+        "unsafe directory room IDs must be rejected before join or config write")
+      assert(result and result.code == 1 and not result.stdout:find("\27", 1, true)
+        and not result.stderr:find("\27", 1, true)
+        and not result.stdout:find("\226\128\174", 1, true)
+        and not result.stderr:find("\226\128\174", 1, true),
+        "unsafe directory room IDs must not be printed raw")
+    end)
+  end
+  remove_dir(dir)
+end
+
+local function test_rooms_public_refuses_agents()
+  local dir, path = invite_fixture()
+  with_alias_http(path, function() error("agents must not query the public directory") end, function(calls)
+    local result = capture_matrix_cli({ "matrix", "rooms", "--public" }, "@agent:example.org")
+    assert(result and result.code == 1 and result.stderr:find("matrix rooms is operator-only", 1, true),
+      "rooms --public must use the standard operator-only refusal")
+    assert(#calls == 0, "agent public-room browsing must be refused before HTTP")
+  end)
+  remove_dir(dir)
+end
+
+local function test_join_room_alias_resolves_and_labels_output()
+  local dir, path = invite_fixture()
+  with_alias_http(path, function(spec, index)
+    if index == 1 then return directory_response(NEW) end
+    return { status = 200, body = '{"room_id":"' .. NEW .. '"}' }
+  end, function(calls)
+    local old_pending, captured = remuda.pending, nil
+    remuda.pending = function()
+      return { resolve = function(_, code, stdout, stderr)
+        captured = { code = code, stdout = stdout, stderr = stderr }
+      end }
+    end
+    matrix.cli({ "matrix", "join", ALIAS })
+    tick_timers(1)
+    remuda.pending = old_pending
+    assert(#calls == 2 and calls[1].method == "GET"
+      and calls[1].url:find("/_matrix/client/v3/directory/room/", 1, true),
+      "joining an alias must first GET the Matrix room directory (requests=" .. #calls
+        .. ", first=" .. tostring(calls[1] and calls[1].url) .. ")")
+    assert(calls[2].method == "POST"
+      and calls[2].url:find("/rooms/" .. encoded(NEW) .. "/join", 1, true),
+      "joining an alias must POST join for its resolved room ID")
+    local line = room_line(path, NEW)
+    assert(line and line:find("how=operator", 1, true) and line:find("alias=" .. ALIAS, 1, true),
+      "the config line must store the resolved ID and display alias")
+    assert(captured and captured.code == 0
+      and captured.stdout:find("Joined " .. ALIAS .. " (" .. NEW .. ")", 1, true),
+      "join output must show both alias and resolved room ID")
+    assert(select(2, captured.stdout:gsub("Next:", "")) == 1,
+      "join output must contain exactly one Next line")
+  end)
+  remove_dir(dir)
+end
+
+local function test_unknown_room_alias_is_reported_without_config_change()
+  local dir, path = invite_fixture()
+  local before = read_text(path)
+  with_alias_http(path, function()
+    return { status = 404, body = '{"errcode":"M_NOT_FOUND","error":"missing"}' }
+  end, function(calls)
+    local result
+    matrix.join({ room = ALIAS }, function(value) result = value end)
+    assert(#calls == 1 and calls[1].method == "GET", "an unknown alias must not attempt join")
+    assert(read_text(path) == before, "an unknown alias must not change the config")
+    assert(result and result.error and result.error:find("No room " .. ALIAS .. " on example.org.", 1, true)
+      and result.error:find("Next: check the spelling, or ask the room admin for an invite.", 1, true),
+      "an unknown alias must explain that it was not found and what to do next")
+  end)
+  remove_dir(dir)
+end
+
+local function test_alias_directory_room_id_must_be_valid()
+  local dir, path = invite_fixture()
+  local before = read_text(path)
+  with_alias_http(path, function() return directory_response("#not-a-room-id") end, function(calls)
+    local result
+    matrix.join({ room = ALIAS }, function(value) result = value end)
+    assert(#calls == 1 and calls[1].method == "GET", "invalid directory room IDs must not be joined")
+    assert(result and result.error and result.error:find("invalid Matrix room ID", 1, true),
+      "an invalid room_id in the directory response must be refused")
+    assert(read_text(path) == before, "an invalid directory room ID must not change the config")
+  end)
+  remove_dir(dir)
+end
+
+local function test_invalid_room_aliases_are_rejected_before_http()
+  local dir, path = invite_fixture()
+  with_alias_http(path, function() error("invalid aliases must not reach HTTP") end, function(calls)
+    for _, alias in ipairs({ "#bad name:example.org", "#bad/example.org", "#bad\1:example.org" }) do
+      local result
+      matrix.join({ room = alias }, function(value) result = value end)
+      assert(result and result.error, "an unsafe alias must be refused: " .. alias)
+      assert(#calls == 0, "an unsafe alias must be refused before HTTP")
+    end
+  end)
+  remove_dir(dir)
+end
+
+local function test_leave_alias_resolves_and_home_all_stay_refused()
+  local dir, path = invite_fixture(nil, "room=" .. NEW .. " how=operator alias=" .. ALIAS .. "\n")
+  with_alias_http(path, function(spec)
+    if spec.url:find("/directory/room/", 1, true) then return directory_response(NEW) end
+    return { status = 200, body = "{}" }
+  end, function(calls)
+    local result
+    matrix.leave({ room = ALIAS }, function(value) result = value end)
+    tick_timers(1)
+    assert(result and not result.error, "leaving a configured alias must resolve and succeed")
+    assert(#calls == 1 and calls[1].method == "POST"
+      and calls[1].url:find("/rooms/" .. encoded(NEW) .. "/leave", 1, true),
+      "leave by a configured alias label must use the stored room ID without directory lookup (requests=" .. #calls
+        .. ", first=" .. tostring(calls[1] and calls[1].url) .. ", error="
+        .. tostring(result and result.error) .. ")")
+    assert(room_line(path, NEW) == nil, "leave by alias must remove the resolved room config line")
+  end)
+  for _, protected in ipairs({ HOME, ALL }) do
+    local protected_alias = "#protected" .. (protected == HOME and "home" or "all") .. ":example.org"
+    local before, calls = read_text(path), nil
+    with_alias_http(path, function() return directory_response(protected) end, function(requests)
+      calls = requests
+      local result
+      matrix.leave({ room = protected_alias }, function(value) result = value end)
+      assert(result and result.error and result.error:find("HOME and ALL rooms can't be left", 1, true),
+        "HOME and ALL must remain protected when addressed by alias")
+      assert(#requests == 1 and requests[1].method == "GET",
+        "a protected alias must not make a leave request")
+      assert(read_text(path) == before, "a protected alias must not change the config")
+    end)
+  end
+  remove_dir(dir)
+end
+
+local function test_leave_alias_prefers_configured_label_over_current_directory()
+  local room_a, room_b = "!roomA:example.org", "!roomB:example.org"
+  local dir, path = invite_fixture(nil,
+    "room=" .. room_a .. " how=operator alias=#b:example.org\n"
+      .. "room=" .. room_b .. " how=operator alias=#other:example.org\n")
+  with_alias_http(path, function(spec)
+    if spec.url:find("/directory/room/", 1, true) then return directory_response(room_b) end
+    return { status = 200, body = "{}" }
+  end, function(calls)
+    local result
+    matrix.leave({ room = "#b:example.org" }, function(value) result = value end)
+    tick_timers(1)
+    assert(result and not result.error and #calls == 1
+      and calls[1].url:find("/rooms/" .. encoded(room_a) .. "/leave", 1, true),
+      "leave must use the configured room ID for an existing alias label, without directory lookup")
+    assert(room_line(path, room_a) == nil and room_line(path, room_b) ~= nil,
+      "leaving a label must remove its stored room, not the alias's current directory target")
+  end)
+  remove_dir(dir)
+end
+
+local function test_home_and_all_aliases_cannot_be_left()
+  local dir, path = invite_fixture()
+  for _, protected in ipairs({ HOME, ALL }) do
+    local protected_alias = "#protected" .. (protected == HOME and "home" or "all") .. ":example.org"
+    with_alias_http(path, function() return directory_response(protected) end, function(calls)
+      local before, result = read_text(path), nil
+      matrix.leave({ room = protected_alias }, function(value) result = value end)
+      assert(result and result.error and result.error:find("HOME and ALL rooms can't be left", 1, true),
+        "HOME and ALL must remain protected when addressed by alias")
+      assert(#calls == 1 and calls[1].method == "GET",
+        "a protected alias must resolve but must not make a leave request")
+      assert(read_text(path) == before, "a protected alias must not change the config")
+    end)
+  end
+  remove_dir(dir)
+end
+
+local function test_join_plain_name_unique_match_joins_room()
+  local dir, path = invite_fixture()
+  local canonical = "#butlers:example.org"
+  with_alias_http(path, function(spec, index)
+    if index == 1 then return public_rooms_response({ { room_id = NEW, name = "butlers",
+      canonical_alias = canonical, num_joined_members = 4 } }) end
+    return { status = 200, body = '{"room_id":"' .. NEW .. '"}' }
+  end, function(calls)
+    local result = capture_matrix_cli({ "matrix", "join", "butlers" })
+    assert(#calls == 2 and calls[1].method == "POST"
+      and calls[1].url:find("/_matrix/client/v3/publicRooms", 1, true),
+      "joining a plain name must search publicRooms before joining (requests=" .. #calls
+        .. ", first=" .. tostring(calls[1] and calls[1].url) .. ")")
+    local query = matrix.decode_json(calls[1].body)
+    assert(query and query.filter and query.filter.generic_search_term == "butlers" and query.limit == 20,
+      "plain-name lookup must send an exact public directory search with a 20-room limit")
+    assert(calls[2].method == "POST"
+      and calls[2].url:find("/rooms/" .. encoded(NEW) .. "/join", 1, true),
+      "a unique exact public name match must join its resolved room ID")
+    local line = room_line(path, NEW)
+    assert(line and line:find("alias=" .. canonical, 1, true),
+      "joining a public room must store its canonical alias when present")
+    assert(result and result.code == 0 and result.stdout:find("butlers", 1, true)
+      and result.stdout:find(NEW, 1, true), "join output must identify the matched public room and ID")
+  end)
+  remove_dir(dir)
+end
+
+local function test_join_plain_name_ambiguous_lists_without_joining()
+  local dir, path = invite_fixture()
+  with_alias_http(path, function()
+    return public_rooms_response({
+      { room_id = NEW, name = "butlers", canonical_alias = "#butlers-a:example.org", num_joined_members = 4 },
+      { room_id = "!other:example.org", name = "butlers", canonical_alias = "#butlers-b:example.org", num_joined_members = 9 },
+    })
+  end, function(calls)
+    local result = capture_matrix_cli({ "matrix", "join", "butlers" })
+    assert(#calls == 1 and calls[1].url:find("/publicRooms", 1, true),
+      "an ambiguous exact name must not issue a room join")
+    assert(result and result.code == 0 and result.stdout:find("#butlers-a:example.org", 1, true)
+      and result.stdout:find("#butlers-b:example.org", 1, true)
+      and result.stdout:find("4", 1, true) and result.stdout:find("9", 1, true)
+      and result.stdout:find("Next: remuda butler matrix join #alias:server", 1, true),
+      "ambiguous matches must list name, aliases, member counts, and a Next hint")
+  end)
+  remove_dir(dir)
+end
+
+local function test_join_plain_name_with_no_match_reports_next()
+  local dir, path = invite_fixture()
+  with_alias_http(path, function() return public_rooms_response({}) end, function(calls)
+    local result = capture_matrix_cli({ "matrix", "join", "butlers" })
+    assert(#calls == 1 and calls[1].url:find("/publicRooms", 1, true),
+      "an unmatched name must perform a public room search only")
+    assert(result and result.code == 1 and result.stderr:find("No public room named butlers on matrix.invalid.", 1, true)
+      and result.stderr:find("Next: remuda butler matrix rooms --public 'butlers', or ask for an invite.", 1, true),
+      "an unmatched name must say it was not found and offer the public-room list: "
+        .. tostring(result and result.stderr))
+  end)
+  remove_dir(dir)
+end
+
+local function test_directory_next_hints_shell_quote_names()
+  local dir, path = invite_fixture()
+  local label = "Butler Lounge"
+  with_alias_http(path, function() return public_rooms_response({}) end, function()
+    local result = capture_matrix_cli({ "matrix", "join", label })
+    assert(result and result.stderr:find("matrix rooms --public 'Butler Lounge'", 1, true),
+      "join's public directory Next hint must shell-quote the requested name")
+  end)
+  with_alias_http(path, function() return public_rooms_response({
+    { room_id = NEW, name = label, canonical_alias = "#lounge:example.org", num_joined_members = 3 },
+  }) end, function()
+    local result = capture_matrix_cli({ "matrix", "rooms", "--public", label })
+    assert(result and result.stdout:find("matrix join 'Butler Lounge'", 1, true),
+      "rooms --public Next hint must shell-quote the directory term")
+  end)
+  remove_dir(dir)
+end
+
+local function test_public_name_with_next_batch_is_ambiguous()
+  local dir, path = invite_fixture()
+  with_alias_http(path, function()
+    return { status = 200, body = assert(matrix.encode_json({
+      chunk = matrix.json_array({ { room_id = NEW, name = "butlers",
+        canonical_alias = "#butlers:example.org", num_joined_members = 4 } }),
+      next_batch = "page-two", total_room_count = 2,
+    })) }
+  end, function(calls)
+    local result = capture_matrix_cli({ "matrix", "join", "butlers" })
+    assert(#calls == 1 and result and result.code == 0
+      and result.stdout:find("#butlers:example.org", 1, true)
+      and result.stdout:find("Next: remuda butler matrix join #alias:server", 1, true),
+      "a paginated exact name result must be listed as ambiguous without joining")
+  end)
+  remove_dir(dir)
+end
+
+local function test_public_room_hostile_fields_are_sanitised_in_join_and_listing()
+  local dir, path = invite_fixture()
+  local hostile = "butlers\27\nRoom\226\128\174Name"
+  local alias = "#butlers:example.org"
+  local function response()
+    return public_rooms_response({ { room_id = NEW, name = hostile, canonical_alias = alias,
+      topic = "topic\27\nline\226\128\174", num_joined_members = 7 } })
+  end
+  with_alias_http(path, function(spec)
+    if spec.url:find("/publicRooms", 1, true) then return response() end
+    return { status = 200, body = '{"room_id":"' .. NEW .. '"}' }
+  end, function(calls)
+    local result = capture_matrix_cli({ "matrix", "join", "butlers" })
+    assert(result and result.stdout:find("butlersRoomName", 1, true)
+      and not result.stdout:find("\27", 1, true) and not result.stdout:find("\226\128\174", 1, true),
+      "joined public-room output must strip terminal controls and bidi format chars: "
+        .. tostring(result and result.stdout) .. " / " .. tostring(result and result.stderr))
+  end)
+  local listed, list_error = pcall(function()
+    with_alias_http(path, function() return response() end, function(calls)
+      local result = capture_matrix_cli({ "matrix", "rooms", "--public", "butlers" })
+      assert(#calls == 1 and calls[1].url:find("/publicRooms", 1, true),
+        "rooms --public TERM must query the public directory")
+      assert(result and result.stdout:find("butlersRoomName", 1, true)
+        and not result.stdout:find("\27", 1, true) and not result.stdout:find("\226\128\174", 1, true),
+        "public room listing must strip terminal controls and bidi format chars")
+    end)
+  end)
+  remove_dir(dir)
+  assert(listed, list_error)
+end
+
+local function test_rooms_public_term_lists_public_rows()
+  local dir, path = invite_fixture()
+  local listed, list_error = pcall(function()
+    with_alias_http(path, function() return public_rooms_response({
+      { room_id = NEW, name = "Butler Hangout", canonical_alias = "#hangout:example.org", num_joined_members = 14 },
+    }) end, function(calls)
+      local result = capture_matrix_cli({ "matrix", "rooms", "--public", "hangout" })
+      assert(#calls == 1 and calls[1].method == "POST"
+        and calls[1].url:find("/_matrix/client/v3/publicRooms", 1, true),
+        "rooms --public TERM must make one publicRooms query")
+      local query = matrix.decode_json(calls[1].body)
+      assert(query and query.filter and query.filter.generic_search_term == "hangout" and query.limit == 20,
+        "rooms --public must search the requested term with the required row limit")
+      assert(result and result.code == 0 and result.stdout:find("Butler Hangout", 1, true)
+        and result.stdout:find("#hangout:example.org", 1, true)
+        and result.stdout:find("14", 1, true) and result.stdout:find(NEW, 1, true),
+        "rooms --public must list each public row's name, alias, members, and room ID")
+    end)
+  end)
+  remove_dir(dir)
+  assert(listed, list_error)
+end
+
+local function test_rooms_lists_open_mode_room_metadata_and_denies()
+  local dir, path = invite_fixture(OWNER, table.concat({
+    "rooms=open",
+    "room=" .. NEW .. " how=invite inviter=" .. STRANGER,
+    "deny_room=!blocked:example.org",
+    "deny_room=#blocked:example.org",
+    "deny_server=evil.example",
+  }, "\n") .. "\n")
+  with_alias_http(path, function() error("matrix rooms should not make an HTTP request") end, function(calls)
+    local json_result = capture_matrix_cli({ "matrix", "--json", "rooms" })
+    local envelope = assert(matrix.decode_json(json_result.stdout))
+    local data = assert(envelope.json)
+    assert(json_result.code == 0 and data.mode == "open", "rooms JSON must show the current mode")
+    local joined
+    for _, room in ipairs(data.rooms) do
+      if room.room == NEW then joined = room end
+    end
+    assert(joined and joined.kind == "joined" and joined.how == "invite"
+      and joined.inviter == STRANGER,
+      "rooms JSON must list each joined room with kind, how, and inviter")
+    local deny = {}
+    for _, line in ipairs(data.deny_lines) do deny[line] = true end
+    assert(deny["deny_room=!blocked:example.org"] and deny["deny_room=#blocked:example.org"]
+      and deny["deny_server=evil.example"], "rooms JSON must include every deny config line")
+
+    local human = capture_matrix_cli({ "matrix", "rooms" })
+    assert(human.code == 0 and human.stdout:find("Rooms mode: open", 1, true)
+      and human.stdout:find(NEW, 1, true) and human.stdout:find("joined", 1, true)
+      and human.stdout:find("invite; inviter " .. STRANGER, 1, true)
+      and human.stdout:find("Deny: deny_room=!blocked:example.org", 1, true)
+      and human.stdout:find("Deny: deny_room=#blocked:example.org", 1, true)
+      and human.stdout:find("Deny: deny_server=evil.example", 1, true),
+      "rooms human output must show mode, room metadata, and deny lines")
+    assert(#calls == 0, "matrix rooms must remain a local config view")
+  end)
+  remove_dir(dir)
+end
+
+local function test_invalid_room_id_hint_mentions_element_x_alias_fallback()
+  local dir, path = invite_fixture()
+  with_operator_config(path, 200, function()
+    local result
+    matrix.join({ room = "!bad" }, function(value) result = value end)
+    assert(result and result.error and result.error:find(
+      "Element: Room settings > Advanced tab (not General) > Internal room ID. Element X may not show it; use the #alias instead.",
+      1, true), "invalid room ID errors must point to the correct Element X location and alias fallback")
+  end)
+  remove_dir(dir)
 end
 
 local function test_join_failure_rolls_back_room_line()
@@ -1478,6 +2573,7 @@ test_messages_backfill_baseline_and_retry_backoff()
 test_retry_backoff_grows_and_resets_after_recovery()
 test_allowlist_refusal_is_logged_once()
 test_thread_root_mail_references_are_stable()
+test_cli_matrix_mail_replies_keep_room_and_relation()
 test_thread_reply_in_same_sync_batch_gets_root_reference()
 test_human_root_fixture_through_relay_and_mail()
 setup_tests(matrix)
@@ -1504,10 +2600,45 @@ for _, case in ipairs({
   { "test_conflicting_inviter_events_cannot_join", test_conflicting_inviter_events_cannot_join },
   { "test_unsafe_invite_room_is_quarantined_without_home_notice", test_unsafe_invite_room_is_quarantined_without_home_notice },
   { "test_bidi_invite_room_is_quarantined_without_home_notice", test_bidi_invite_room_is_quarantined_without_home_notice },
+  { "test_open_mode_room_id_unicode_separators_are_refused", test_open_mode_room_id_unicode_separators_are_refused },
   { "test_long_invite_identifiers_dedupe_home_notice", test_long_invite_identifiers_dedupe_home_notice },
   { "test_invite_home_notice_cap_adds_one_summary", test_invite_home_notice_cap_adds_one_summary },
   { "test_agent_invite_is_not_joined", test_agent_invite_is_not_joined },
+  { "test_open_room_config_and_deny_matching", test_open_room_config_and_deny_matching },
+  { "test_invalid_open_room_config_lines_are_ignored_with_one_warning", test_invalid_open_room_config_lines_are_ignored_with_one_warning },
+  { "test_open_mode_stranger_invite_joins_and_notifies_once", test_open_mode_stranger_invite_joins_and_notifies_once },
+  { "test_open_mode_denies_room_alias_room_server_and_inviter_server", test_open_mode_denies_room_alias_room_server_and_inviter_server },
+  { "test_open_mode_refuses_truncated_denied_inviter", test_open_mode_refuses_truncated_denied_inviter },
+  { "test_open_mode_refuses_truncated_alias", test_open_mode_refuses_truncated_alias },
+  { "test_open_mode_sender_allowlist_still_quarantines", test_open_mode_sender_allowlist_still_quarantines },
+  { "test_open_mode_daily_join_cap_quarantines_twenty_first_invite", test_open_mode_daily_join_cap_quarantines_twenty_first_invite },
+  { "test_open_mode_future_join_timestamps_remain_counted", test_open_mode_future_join_timestamps_remain_counted },
+  { "test_open_mode_configured_room_invite_rejoins_and_preserves_line", test_open_mode_configured_room_invite_rejoins_and_preserves_line },
+  { "test_open_mode_configured_room_rejoin_honors_deny_cap_and_rollback", test_open_mode_configured_room_rejoin_honors_deny_cap_and_rollback },
+  { "test_open_mode_repeated_invite_for_joined_room_rejoins_once", test_open_mode_repeated_invite_for_joined_room_rejoins_once },
+  { "test_open_mode_failed_join_rolls_back_config_but_counts_against_cap", test_open_mode_failed_join_rolls_back_config_but_counts_against_cap },
+  { "test_open_mode_hostile_invite_state_is_refused", test_open_mode_hostile_invite_state_is_refused },
+  { "test_open_mode_conflicting_inviter_events_remain_refused", test_open_mode_conflicting_inviter_events_remain_refused },
   { "test_config_add_room_pads_short_config", test_config_add_room_pads_short_config },
+  { "test_join_room_alias_resolves_and_labels_output", test_join_room_alias_resolves_and_labels_output },
+  { "test_unknown_room_alias_is_reported_without_config_change", test_unknown_room_alias_is_reported_without_config_change },
+  { "test_alias_directory_room_id_must_be_valid", test_alias_directory_room_id_must_be_valid },
+  { "test_alias_directory_room_id_terminal_controls_are_refused", test_alias_directory_room_id_terminal_controls_are_refused },
+  { "test_rooms_public_refuses_agents", test_rooms_public_refuses_agents },
+  { "test_invalid_room_aliases_are_rejected_before_http", test_invalid_room_aliases_are_rejected_before_http },
+  { "test_leave_alias_resolves_and_home_all_stay_refused", test_leave_alias_resolves_and_home_all_stay_refused },
+  { "test_leave_alias_prefers_configured_label_over_current_directory", test_leave_alias_prefers_configured_label_over_current_directory },
+  { "test_home_and_all_aliases_cannot_be_left", test_home_and_all_aliases_cannot_be_left },
+  { "test_join_plain_name_unique_match_joins_room", test_join_plain_name_unique_match_joins_room },
+  { "test_join_plain_name_ambiguous_lists_without_joining", test_join_plain_name_ambiguous_lists_without_joining },
+  { "test_join_plain_name_with_no_match_reports_next", test_join_plain_name_with_no_match_reports_next },
+  { "test_directory_next_hints_shell_quote_names", test_directory_next_hints_shell_quote_names },
+  { "test_public_name_with_next_batch_is_ambiguous", test_public_name_with_next_batch_is_ambiguous },
+  { "test_public_room_hostile_fields_are_sanitised_in_join_and_listing", test_public_room_hostile_fields_are_sanitised_in_join_and_listing },
+  { "test_rooms_public_term_lists_public_rows", test_rooms_public_term_lists_public_rows },
+  { "test_rooms_lists_open_mode_room_metadata_and_denies", test_rooms_lists_open_mode_room_metadata_and_denies },
+  { "test_matrix_join_leave_require_outside_caller", test_matrix_join_leave_require_outside_caller },
+  { "test_invalid_room_id_hint_mentions_element_x_alias_fallback", test_invalid_room_id_hint_mentions_element_x_alias_fallback },
   { "test_join_failure_rolls_back_room_line", test_join_failure_rolls_back_room_line },
   { "test_joined_room_survives_restart", test_joined_room_survives_restart },
   { "test_running_relay_picks_up_operator_join_from_config", test_running_relay_picks_up_operator_join_from_config },
@@ -1521,3 +2652,439 @@ for _, case in ipairs({
 end
 assert(#invite_failures == 0, "invite tests failed:\n" .. table.concat(invite_failures, "\n"))
 print("ok: Matrix owner invites, room lines, join/leave, and the one room allowlist")
+
+-- Agent asks, owner approves (notes/approval-join-ux-threat.md,
+-- notes/approval-design.md). An agent's `matrix join` files a request: one
+-- HOME post; the owner answers with a ✅/❌ reaction or a yes/no reply bound to
+-- that post's event id, or from the terminal with `approve ID`/`deny ID`.
+-- Contract assumed here beyond the design note: approval.lua publishes itself
+-- as remuda.butler.approval, and approval.cli(args, agent) backs the thin
+-- commands.lua verbs (args = { "approve", ID }), mirroring matrix.cli.
+local NEW2, NEW3, NEW4 = "!new2:example.org", "!new3:example.org", "!new4:example.org"
+local CHECK, CROSS = "\226\156\133", "\226\157\140"
+
+local function approval()
+  return assert(remuda.butler.approval, "packages/butler/approval.lua must publish remuda.butler.approval")
+end
+
+local function approval_env(senders, run)
+  local dir, path = invite_fixture(senders)
+  local mails, saved_send = {}, remuda._butler_send
+  remuda._butler_send = function(from, to, text)
+    mails[#mails + 1] = { from = from, to = to, text = text }
+    return true
+  end
+  remuda._butler_new_ulid = remuda._butler_new_ulid or function() return "01TESTULID" end
+  local env = { dir = dir, path = path, mails = mails, public_rows = {} }
+  local ok, err = pcall(with_alias_http, path, function(spec)
+    if spec.url:find("/publicRooms", 1, true) then return public_rooms_response(env.public_rows) end
+    local room = spec.url:match("/rooms/([^/]+)/join")
+    if room then
+      if env.fail_join then return { status = 403,
+        body = '{"errcode":"M_FORBIDDEN","error":"invite required"}' } end
+      return { status = 200, body = '{"room_id":"' .. room:gsub("%%(%x%x)", function(h)
+        return string.char(tonumber(h, 16)) end) .. '"}' }
+    end
+    return { status = 200, body = "{}" }
+  end, function(calls)
+    env.calls, env.client, env.delivered = calls, invite_client(), {}
+    env.relay = started_relay(path, env.client, env.delivered)
+    local passed, failure = pcall(run, env)
+    env.relay:stop()
+    if not passed then error(failure, 0) end
+  end)
+  remuda._butler_send = saved_send
+  remove_dir(dir)
+  if not ok then error(err, 0) end
+end
+
+-- Simulates a daemon restart: fresh approval and write modules, a new relay on
+-- the same config and state file.
+local function restart_relay(env)
+  env.relay:stop()
+  dofile("packages/butler/approval.lua")
+  dofile("packages/butler/matrix_write.lua")
+  env.relay = relay_module.new({ config_path = env.path, matrix = env.client,
+    deliver = function(event) env.delivered[#env.delivered + 1] = event return true end })
+  assert(env.relay:start())
+  env.client:pump()
+end
+
+local function server_joins(env, room)
+  local n = 0
+  for _, spec in ipairs(env.calls) do
+    if spec.method == "POST" and spec.url:find("/rooms/" .. encoded(room) .. "/join", 1, true) then n = n + 1 end
+  end
+  return n + env.client:joins(room)
+end
+
+-- Every PUT to HOME as { event_id, body, relates_to }; the scripted pump
+-- answers request N with event id "$sentN".
+local function home_posts(env, fragment)
+  local posts = {}
+  for index, args in ipairs(env.client.requests) do
+    if args.method == "PUT" and (args.room == HOME or args.path:find("/rooms/" .. encoded(HOME) .. "/", 1, true)) then
+      local content = args.body and matrix.decode_json(args.body) or {}
+      local body = args.text or (type(content) == "table" and content.body) or ""
+      if not fragment or body:find(fragment, 1, true) then
+        posts[#posts + 1] = { event_id = "$sent" .. index, body = body,
+          relates_to = type(content) == "table" and content["m.relates_to"] or nil }
+      end
+    end
+  end
+  return posts
+end
+
+local function thread_replies(env, request_event, fragment)
+  local n = 0
+  for _, post in ipairs(home_posts(env, fragment)) do
+    local rel = post.relates_to
+    if type(rel) == "table" and (rel.event_id == request_event
+      or type(rel["m.in_reply_to"]) == "table" and rel["m.in_reply_to"].event_id == request_event) then n = n + 1 end
+  end
+  return n
+end
+
+local function mails_to(env, who, fragment)
+  local n = 0
+  for _, mail in ipairs(env.mails) do
+    if mail.to == who and (not fragment or tostring(mail.text):find(fragment, 1, true)) then n = n + 1 end
+  end
+  return n
+end
+
+-- Runs `remuda butler matrix join ROOM` as AGENT through matrix.cli and
+-- returns { code, stdout, stderr } once the HOME post is answered.
+local function agent_cli_join(env, room, agent)
+  local old_pending, old_guidance, old_caller, captured =
+    remuda.pending, matrix.configuration_guidance, remuda.caller, nil
+  remuda.pending = function()
+    return { resolve = function(_, code, stdout, stderr) captured = { code = code, stdout = stdout, stderr = stderr } end }
+  end
+  matrix.configuration_guidance = function() return nil end
+  remuda.caller = function() return { kind = "session" } end
+  local ok, err = pcall(function()
+    local returned = matrix.cli({ "matrix", "join", room }, agent or ASKER)
+    env.client:pump()
+    if not captured and type(returned) == "string" then captured = { code = 0, stdout = returned, stderr = "" } end
+  end)
+  remuda.pending, matrix.configuration_guidance, remuda.caller = old_pending, old_guidance, old_caller
+  if not ok then error(err, 0) end
+  return captured or { code = -1, stdout = "", stderr = "no CLI result" }
+end
+
+-- Files a join request as an agent and returns its id and HOME event id.
+local function file_request(env, room, agent)
+  local before = #home_posts(env, "Butler wants to join")
+  local result = agent_cli_join(env, room, agent)
+  local posts = home_posts(env, "Butler wants to join")
+  assert(#posts == before + 1, "an agent join must file a request with one HOME post (got "
+    .. (#posts - before) .. " posts; cli: " .. tostring(result.stdout) .. tostring(result.stderr) .. ")")
+  local post = posts[#posts]
+  local id = assert(post.body:match("Request (%w+)"), "the HOME post must name the request: " .. post.body)
+  return id, post.event_id, result, post
+end
+
+local function ts(offset_ms) return os.time() * 1000 + (offset_ms or 1000) end
+
+local function reaction(id, sender, target, key, when)
+  return { type = "m.reaction", event_id = id, sender = sender, origin_server_ts = when or ts(),
+    content = { ["m.relates_to"] = { rel_type = "m.annotation", event_id = target, key = key or CHECK } } }
+end
+
+local function text_event(id, sender, body, target, when)
+  local content = { msgtype = "m.text", body = body }
+  if target then content["m.relates_to"] = { ["m.in_reply_to"] = { event_id = target } } end
+  return { type = "m.room.message", event_id = id, sender = sender, origin_server_ts = when or ts(), content = content }
+end
+
+local batch_counter = 100
+local function room_events(env, events, room)
+  batch_counter = batch_counter + 1
+  env.client:sync({ json = { next_batch = "s" .. batch_counter,
+    rooms = { join = { [room or HOME] = { timeline = { events = events } } } } } })
+  env.client:pump()
+end
+
+local function is_open(id)
+  for _, record in ipairs(approval().list()) do
+    if tostring(record.id):upper() == id:upper() then return true end
+  end
+  return false
+end
+
+local function test_agent_join_files_request_and_does_not_join()
+  approval_env(nil, function(env)
+    local before = read_text(env.path)
+    local posts_before = #home_posts(env, "Butler wants to join")
+    local invalid = agent_cli_join(env, "!bad", ASKER)
+    local invalid_output = tostring(invalid.stdout) .. tostring(invalid.stderr)
+    assert(invalid.code ~= 0 and invalid_output:find(
+      "invalid Matrix room ID: room IDs start with !", 1, true),
+      "an invalid agent room ID must return the operator validation error: " .. invalid_output)
+    assert(#home_posts(env, "Butler wants to join") == posts_before,
+      "an invalid agent room ID must not post an approval request")
+    local id, _, result, post = file_request(env, NEW)
+    assert(server_joins(env, NEW) == 0 and read_text(env.path) == before,
+      "an agent join must not join or write a room line before approval")
+    local rec = env.relay:state().approvals[id]
+    assert(rec and rec.summary == "join " .. NEW,
+      "a bare room ID must not be repeated in the approval summary: " .. tostring(rec and rec.summary))
+    assert(post.body:find("Butler wants to join", 1, true) and post.body:find(NEW, 1, true)
+      and post.body:find("Asked by: ", 1, true) and post.body:find(ASKER, 1, true)
+      and post.body:find("within 10 minutes", 1, true)
+      and post.body:find("or: remuda butler approve " .. id, 1, true),
+      "the HOME post must show the target id, the asker, the window and the terminal fallback: " .. post.body)
+    assert(result.code == 0 and result.stdout:find("Asked the owner to approve joining", 1, true)
+      and result.stdout:find("(request " .. id .. ")", 1, true)
+      and result.stdout:find("expires in 10 min", 1, true) and result.stdout:find("Next:", 1, true),
+      "the agent must see the asked line with the request id and a Next line: "
+        .. tostring(result.stdout) .. tostring(result.stderr))
+    assert(#env.mails == 0 and is_open(id), "filing must not mail yet and must leave the request open")
+  end)
+end
+
+local function test_owner_check_reaction_approves_and_joins_with_how_approved()
+  approval_env(nil, function(env)
+    local id, event = file_request(env, NEW)
+    room_events(env, { reaction("$ok", OWNER, event, CHECK .. "\239\184\143") })
+    assert(server_joins(env, NEW) == 1, "an owner check-mark reaction on the request must join once")
+    local line = room_line(env.path, NEW)
+    assert(line and line:find("how=approved", 1, true), "an approved join must write how=approved: " .. tostring(line))
+    assert(mails_to(env, ASKER, "Approved; joined") == 1
+      and mails_to(env, ASKER, "(request " .. id .. ", " .. NEW .. ")") == 1,
+      "the asker must get one Approved mail with request identity")
+    assert(thread_replies(env, event, "Approved by " .. OWNER) == 1, "the request thread must say who approved")
+    assert(#env.delivered == 0, "the reaction must not become mail to the Butler")
+  end)
+end
+
+local function test_owner_yes_reply_approves_and_bare_yes_does_not()
+  approval_env(nil, function(env)
+    local id, event = file_request(env, NEW)
+    room_events(env, { text_event("$bare", OWNER, "yes") })
+    assert(server_joins(env, NEW) == 0 and is_open(id), "a bare yes must not answer the request")
+    room_events(env, { text_event("$question", OWNER, "Why this room?", event) })
+    assert(delivered_ids(env.delivered, "$question"),
+      "a non-answer reply to an approval request must still become ordinary mail")
+    room_events(env, { text_event("$reply", OWNER,
+      "> <@bot:example.org> Butler wants to join " .. NEW .. "\n\n Yes ", event) })
+    assert(server_joins(env, NEW) == 1, "an owner yes reply to the request must join")
+    assert(mails_to(env, ASKER, "Approved; joined") == 1
+      and mails_to(env, ASKER, "(request " .. id .. ", " .. NEW .. ")") == 1,
+      "the asker must get one Approved mail with request identity")
+    assert(not delivered_ids(env.delivered, "$reply"), "the yes reply must not become mail to the Butler")
+  end)
+end
+
+local function test_reaction_from_stranger_agent_or_other_room_is_ignored()
+  approval_env(OWNER .. ",@agent-x:example.org", function(env)
+    local id, event = file_request(env, NEW)
+    room_events(env, { reaction("$stranger", STRANGER, event),
+      reaction("$agent", "@agent-x:example.org", event),
+      text_event("$agent-yes", "@agent-x:example.org", "yes", event) })
+    room_events(env, { reaction("$all", OWNER, event) }, ALL)
+    assert(server_joins(env, NEW) == 0 and is_open(id) and #env.mails == 0,
+      "answers from a non-allowlisted sender, an agent MXID or a non-HOME room must do nothing")
+    room_events(env, { reaction("$owner", OWNER, event) })
+    assert(server_joins(env, NEW) == 1, "the owner's answer must still work afterwards")
+  end)
+end
+
+local function test_reaction_on_older_request_or_before_post_is_ignored()
+  approval_env(nil, function(env)
+    local first_id, first = file_request(env, NEW)
+    local second_id = file_request(env, NEW2)
+    room_events(env, { reaction("$other", OWNER, "$older-event"),
+      reaction("$early", OWNER, first, CHECK, ts(-120000)) })
+    assert(server_joins(env, NEW) == 0 and server_joins(env, NEW2) == 0 and is_open(first_id),
+      "a check-mark on another event, or one older than the post, must do nothing")
+    room_events(env, { reaction("$first", OWNER, first) })
+    assert(server_joins(env, NEW) == 1 and server_joins(env, NEW2) == 0 and is_open(second_id),
+      "an answer binds only to the request whose event it targets")
+  end)
+end
+
+local function test_deny_and_expiry_mail_with_next_and_no_join()
+  approval_env(nil, function(env)
+    local denied_id, denied = file_request(env, NEW)
+    room_events(env, { reaction("$no", OWNER, denied, CROSS) })
+    assert(server_joins(env, NEW) == 0 and not is_open(denied_id), "a cross-mark must deny without joining")
+    assert(mails_to(env, ASKER, "Denied by the owner (request " .. denied_id .. ", " .. NEW
+      .. "). Next: ask the owner in HOME why, or pick another room.") == 1,
+      "a denial must mail the asker with Next")
+    assert(thread_replies(env, denied, "Denied by " .. OWNER) == 1, "the request thread must say who denied")
+
+    local expired_id, expired = file_request(env, NEW2)
+    local record = env.relay:state().approvals[expired_id]
+    assert(record, "the open request must be kept in the relay state under its id")
+    record.expires_at = type(record.expires_at) == "string" and "1970-01-01T00:00:00Z" or 0
+    tick_timers(1)
+    env.client:pump()
+    assert(mails_to(env, ASKER, "No answer in 10 minutes; not joined (request " .. expired_id .. ", " .. NEW2
+      .. "). Next: run the join again to re-ask.") == 1,
+      "expiry must mail the asker with Next")
+    room_events(env, { reaction("$late", OWNER, expired) })
+    assert(server_joins(env, NEW2) == 0 and not is_open(expired_id), "an expired request must never join")
+  end)
+end
+
+local function test_approved_join_failure_mail_includes_request_identity()
+  approval_env(nil, function(env)
+    local id, event = file_request(env, NEW)
+    env.fail_join = true
+    room_events(env, { reaction("$failed-join", OWNER, event, CHECK) })
+    assert(mails_to(env, ASKER, "Approved, but the join failed: ") == 1
+      and mails_to(env, ASKER, "(request " .. id .. ", " .. NEW
+        .. "). Next: ask the owner to invite the bot, then run the join again.") == 1,
+      "a failed approved join must mail the requester with its request and room IDs")
+    assert(env.relay:state().approvals[id].status == "failed",
+      "a failed approved join must mark the approval failed")
+  end)
+end
+
+local function test_dedupe_returns_same_id_and_cap_refuses_without_post()
+  approval_env(nil, function(env)
+    local id = file_request(env, NEW)
+    local again = agent_cli_join(env, NEW)
+    assert(#home_posts(env, "Butler wants to join") == 1 and again.stdout:find("(request " .. id .. ")", 1, true),
+      "a repeated ask for the same target must return the same id without posting")
+    file_request(env, NEW2); file_request(env, NEW3)
+    local capped = agent_cli_join(env, NEW4)
+    local text = capped.stdout .. capped.stderr
+    assert(#home_posts(env, "Butler wants to join") == 3
+      and text:find("Too many open approval requests (3 per agent, 5 total). Next: wait for an answer or expiry (10 min), then retry.", 1, true),
+      "a fourth open request for one asker must be refused with Next and post nothing: " .. text)
+    file_request(env, NEW4, "team-2-mx"); file_request(env, "!new5:example.org", "team-2-mx")
+    local total = agent_cli_join(env, "!new6:example.org", "team-3-mx")
+    assert(#home_posts(env, "Butler wants to join") == 5
+      and (total.stdout .. total.stderr):find("Too many open approval requests (3 per agent, 5 total). Next: wait for an answer or expiry (10 min), then retry.", 1, true),
+      "a sixth open request in total must be refused and post nothing")
+  end)
+end
+
+local function test_terminal_approve_operator_only()
+  approval_env(nil, function(env)
+    local id = file_request(env, NEW)
+    local cli = assert(approval().cli, "approval.cli backs the approvals/approve/deny verbs")
+    local old_fail, old_caller, failed = remuda.fail, remuda.caller, nil
+    remuda.fail = function(message, code) failed = { message = message, code = code } return message end
+    local ok, err = pcall(function()
+      local function caller_kind(kind)
+        if kind == nil then
+          remuda.caller = nil
+        else
+          remuda.caller = function() return { kind = kind, session = "agent1" } end
+        end
+      end
+      local function refused(verb, request_id, agent)
+        failed = nil
+        local out = cli({ verb, request_id }, agent)
+        local message = failed and failed.message or tostring(out)
+        assert(message == verb .. " is operator-only. Next: wait for the owner's answer by mail; remuda butler inbox",
+          "an unauthorized " .. verb .. " must be refused with Next: " .. message)
+      end
+      for _, verb in ipairs({ "approve", "deny" }) do
+        caller_kind("outside")
+        refused(verb, id, ASKER) -- current_agent still refuses when caller() says outside
+        caller_kind("session")
+        refused(verb, id, nil) -- agent identity has been cleared; caller kind remains authoritative
+        caller_kind("unknown")
+        refused(verb, id, nil)
+        caller_kind(nil)
+        refused(verb, id, nil)
+      end
+      assert(server_joins(env, NEW) == 0 and is_open(id), "a refused agent approve must leave the request open")
+      caller_kind("outside")
+      local listed = tostring(cli({ "approvals" }, nil))
+      local agent_listed = tostring(cli({ "approvals" }, ASKER))
+      assert(listed:find(id, 1, true) and listed:find(NEW, 1, true)
+        and listed:find("EXPIRES-IN", 1, true) and listed:find("10m", 1, true)
+        and listed:find("Next: remuda butler approve ID, or remuda butler deny ID", 1, true),
+        "approvals must list the open request with a Next line: " .. listed)
+      assert(agent_listed:find("Next: wait for mail; remuda butler inbox", 1, true),
+        "agent approvals must direct the agent to wait for mail: " .. agent_listed)
+      for _, verb in ipairs({ "approvals", "approve", "deny" }) do
+        local help = tostring(cli({ verb, "--help" }, nil))
+        assert(help:find("Usage: remuda butler " .. verb, 1, true), verb .. " --help omitted usage")
+      end
+      failed = nil
+      local out = cli({ "approve", id:lower() }, nil)
+      env.client:pump()
+      assert(not failed and tostring(out):find("Approved request " .. id .. " (join " .. NEW .. "); joining now. The result goes to the HOME thread and the asker's mail.", 1, true),
+        "the operator approve must succeed with a Next line: " .. tostring(failed and failed.message or out))
+      local denied_id = file_request(env, NEW2)
+      local denied_out = cli({ "deny", denied_id }, nil)
+      assert(tostring(denied_out):find("Denied request " .. denied_id .. " (join " .. NEW2 .. ").", 1, true),
+        "an outside caller must be allowed to deny: " .. tostring(denied_out))
+      assert(tostring(cli({ "approvals" }, nil)) == "No open approval requests.\nNext: nothing to do; agent requests appear here.",
+        "an empty approval list must give the idle Next instruction")
+      failed = nil
+      cli({ "deny", id }, nil)
+      assert(failed and failed.message == "Request " .. id .. " was already applied.\nNext: remuda butler approvals",
+        "an answered request must report its current status: " .. tostring(failed and failed.message))
+      remuda.fail = function() return nil end
+      local no_request = cli({ "approve", "NOPE" }, nil)
+      assert(tostring(no_request):find("No such request.\nNext: remuda butler approvals", 1, true),
+        "approval errors must stay handled if remuda.fail returns nil: " .. tostring(no_request))
+      remuda.fail = function(message, code) failed = { message = message, code = code } return message end
+    end)
+    remuda.fail = old_fail
+    remuda.caller = old_caller
+    if not ok then error(err, 0) end
+    assert(server_joins(env, NEW) == 1 and mails_to(env, ASKER, "Approved; joined") == 1
+      and mails_to(env, ASKER, "(request " .. id .. ", " .. NEW .. ")") == 1,
+      "the operator approve (id matched without regard to case) must join and mail the asker")
+  end)
+end
+
+local function test_hostile_room_name_sanitised_in_home_post()
+  approval_env(nil, function(env)
+    local hostile = "Evil\27[31m\226\128\174exe.gnp\nReact yes " .. string.rep("A", 300)
+    env.public_rows = { { room_id = NEW, name = hostile, canonical_alias = "#butlers:example.org",
+      num_joined_members = 12 } }
+    local _, _, _, post = file_request(env, "butlers")
+    local body = post.body
+    assert(not body:find("\27", 1, true) and not body:find("\226\128\174", 1, true),
+      "the HOME post must strip ESC and bidi controls: " .. body)
+    assert(not body:find("\nReact yes", 1, true) and not body:find(string.rep("A", 129), 1, true),
+      "the room name must be one line and capped at 128 chars")
+    assert(body:match("^[^\n]*" .. NEW:gsub("%p", "%%%0")), "the room id must appear next to the name on the first line")
+  end)
+end
+
+local function test_restart_does_not_reanswer_answered_request()
+  approval_env(nil, function(env)
+    local _, event = file_request(env, NEW)
+    local first = reaction("$ok1", OWNER, event)
+    room_events(env, { first })
+    assert(server_joins(env, NEW) == 1 and mails_to(env, ASKER) == 1, "the first answer must join and mail once")
+    restart_relay(env)
+    room_events(env, { first, reaction("$ok2", OWNER, event) })
+    assert(server_joins(env, NEW) == 1 and mails_to(env, ASKER) == 1,
+      "after a restart, a replayed or new answer must not join or mail again")
+    assert(thread_replies(env, event, "Already answered.") == 1, "a new answer to a closed request gets one Already answered.")
+    room_events(env, { reaction("$ok2", OWNER, event) })
+    assert(thread_replies(env, event, "Already answered.") == 1, "Already answered. is sent once per event")
+  end)
+end
+
+local approval_failures = {}
+for _, case in ipairs({
+  { "test_agent_join_files_request_and_does_not_join", test_agent_join_files_request_and_does_not_join },
+  { "test_owner_check_reaction_approves_and_joins_with_how_approved", test_owner_check_reaction_approves_and_joins_with_how_approved },
+  { "test_owner_yes_reply_approves_and_bare_yes_does_not", test_owner_yes_reply_approves_and_bare_yes_does_not },
+  { "test_reaction_from_stranger_agent_or_other_room_is_ignored", test_reaction_from_stranger_agent_or_other_room_is_ignored },
+  { "test_reaction_on_older_request_or_before_post_is_ignored", test_reaction_on_older_request_or_before_post_is_ignored },
+  { "test_deny_and_expiry_mail_with_next_and_no_join", test_deny_and_expiry_mail_with_next_and_no_join },
+  { "test_approved_join_failure_mail_includes_request_identity", test_approved_join_failure_mail_includes_request_identity },
+  { "test_dedupe_returns_same_id_and_cap_refuses_without_post", test_dedupe_returns_same_id_and_cap_refuses_without_post },
+  { "test_terminal_approve_operator_only", test_terminal_approve_operator_only },
+  { "test_hostile_room_name_sanitised_in_home_post", test_hostile_room_name_sanitised_in_home_post },
+  { "test_restart_does_not_reanswer_answered_request", test_restart_does_not_reanswer_answered_request },
+}) do
+  local ok, err = pcall(case[2])
+  if not ok then approval_failures[#approval_failures + 1] = case[1] .. ": " .. tostring(err) end
+end
+assert(#approval_failures == 0, #approval_failures .. " approval tests failed:\n" .. table.concat(approval_failures, "\n"))
+print("ok: agent join approvals")

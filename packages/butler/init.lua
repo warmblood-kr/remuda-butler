@@ -168,14 +168,15 @@ Start by running `remuda butler inbox` to read your welcome message.
 - Message bodies are limited to 64 KiB; short quoted messages can stay positional.
 - `remuda butler send-to-leader RESULT...` reports a completed work loop.
 - `remuda butler sessions` shows the household.
-- `remuda butler reply MESSAGE-ID "TEXT"` answers a message in its thread (prefer this over send when answering)
+- `remuda butler reply MESSAGE-ID -` (or `--file PATH`) answers a message in its thread; for Matrix mail it keeps the room and thread (prefer this over send when answering); answers to Matrix mail ALWAYS use this, never `remuda butler matrix send`.
 - `remuda butler forward MESSAGE-ID MEMBER [NOTE]` passes a message on with an optional note
 
 ]]
         end,
         prompt = function()
           return "Use `remuda butler inbox`, `remuda butler send MEMBER \"MESSAGE\"`, and "
-            .. "`remuda butler send-to-leader RESULT...` for coordination. Long bodies use "
+            .. "`remuda butler send-to-leader RESULT...` for coordination; answer mail with "
+            .. "`remuda butler reply MESSAGE-ID -` (or `--file PATH`). Long bodies use "
             .. 'stdin (`-`) or `--file "$PWD/path"`; message bodies are limited to 64 KiB. '
         end },
       { id = "old-core", order = 30,
@@ -203,19 +204,23 @@ the normal way for a member to communicate.
 - `rooms`: joined rooms (read-only).
 - `thread EVENT_ID`: all replies in a thread.
 - `event EVENT_ID` (alias `get`): one event.
-- `send TEXT`: post a message (long text is split, rate-limited); `send -` is refused until core #213.
+- `send TEXT`: start a NEW post only (name the room with `--room ROOM`); long text is split, rate-limited; `send -` is refused until core #213. Answers ALWAYS go via `remuda butler reply MESSAGE-ID -`, never send.
 - `reply EVENT_ID TEXT` / `react EVENT_ID KEY`: answer or react (same room only).
 - `upload PATH`: post a file (up to 20 MB). `[-o PATH] download MXC`: fetch media.
 - `redact EVENT_ID [--reason TEXT]`: remove your message.
 ]]
         end,
         prompt = function()
-          return "For Matrix, use `remuda butler matrix VERB`; never call Matrix REST or curl directly. "
+          return "For Matrix, use `remuda butler matrix VERB`; never call Matrix REST or curl directly. `send TEXT` starts a NEW post only (name the room with `--room ROOM`); long text is split, rate-limited; `send -` is refused until core #213. Answers ALWAYS go via `remuda butler reply MESSAGE-ID -`, never send. "
         end },
       { id = "leader", order = 90,
         prompt = function(_, ctx) return "Your leader is " .. ctx.parent .. "." end },
     },
     ["butler.command"] = {
+      { id = "close", order = 8, verb = "close", usage = "  remuda butler close <name> [--force]",
+        run = function(_, args, caller) return host._butler_command_run("close", args, caller) end },
+      { id = "doctor", order = 5, verb = "doctor", usage = "  remuda butler doctor",
+        run = function(_, args, caller) return host._butler_command_run("doctor", args, caller) end },
       { id = "compact", order = 16, verb = "compact", usage = "  remuda butler compact <session> [--dry-run|--force]",
         run = function(_, args)
           if not args[2] or args[2] == "" then return nil end
@@ -255,6 +260,12 @@ the normal way for a member to communicate.
         run = function(_, args, caller) return host._butler_command_run("reply", args, caller) end },
       { id = "forward", order = 80, verb = "forward", usage = "  remuda butler forward <message-id> <member> [note...]",
         run = function(_, args, caller) return host._butler_command_run("forward", args, caller) end },
+      { id = "approvals", order = 90, verb = "approvals", usage = "  remuda butler approvals",
+        run = function(_, args, caller) return host._butler_command_run("approvals", args, caller) end },
+      { id = "approve", order = 91, verb = "approve", usage = "  remuda butler approve <ID>",
+        run = function(_, args, caller) return host._butler_command_run("approve", args, caller) end },
+      { id = "deny", order = 92, verb = "deny", usage = "  remuda butler deny <ID>",
+        run = function(_, args, caller) return host._butler_command_run("deny", args, caller) end },
       { id = "matrix", order = 100, verb = "matrix",
         usage = [[  remuda butler matrix [--json] status
   remuda butler matrix [--json] rooms

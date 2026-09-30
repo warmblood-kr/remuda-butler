@@ -28,6 +28,23 @@ starts with a fresh sync baseline. It does not replay room history; messages
 sent while the relay was down can be missed, and pending deliveries recorded
 only in the damaged state file cannot be recovered.
 
+## Installation and sign-in check
+
+Run `remuda butler doctor` to check whether Claude Code and Codex CLI are on
+`PATH` and whether each CLI reports an active login. The check runs
+`claude auth status` and `codex login status`; it discards their output and
+prints only installed and sign-in states. It does not start an agent session.
+
+When a CLI is missing or signed out, the doctor prints the corresponding next
+command. Claude Code uses its shell installer on macOS and Linux and its
+PowerShell installer on Windows. Codex CLI can be installed with
+`npm install -g @openai/codex`. To sign in, run `claude auth login` or
+`codex login`. Once both CLIs are installed and signed in, the doctor points to
+`remuda butler matrix setup` for the optional Matrix bridge.
+
+`remuda butler --help` includes the doctor command with the other installed
+Butler verbs.
+
 ## Matrix commands and configuration
 
 Use `remuda butler matrix` for Matrix reads and writes. Options come before
@@ -62,20 +79,64 @@ relay alone. Start that Butler with
 replacing `PATH` with the chosen directory.
 
 `event` and `get` are aliases for the same read.
-The `remuda butler matrix rooms` command lists configured rooms and how each was added; server-side memberships show in `remuda butler matrix status`.
-The config file remains the
-single room boundary: an invite from an allowlisted human
-owner adds `room=ROOM_ID how=owner-invite`, and operator `join` adds
-`room=ROOM_ID how=operator`. Invites from other senders are not joined and are
-reported to HOME; joined rooms use the HOME sender rules. The inviter check
-relies on the homeserver appending the real invite event to `invite_state`
-(Synapse does). `leave` removes a
-joined room, while HOME and ALL-BUTLERS cannot be left or removed. The
-`send -` stdin form is unsupported until core #213.
+The `remuda butler matrix rooms` command lists configured rooms, saved aliases,
+its kind, how it was added, and its inviter; it also shows the room mode and
+deny rules. Server-side memberships show in `remuda butler matrix status`.
+Use `remuda butler matrix rooms --public [TERM]` to browse up to 20 public
+rooms, optionally filtered by a search term.
 
-`join` and `leave` change room membership and are operator-only. Until core
-#218 enforces caller identity, this is best-effort policy: another local
-process running as the same user may still invoke those verbs.
+The config file is the single room boundary. `rooms=open` lets any HUMAN
+account invite the Butler; the relay joins unless a room or server matches a
+deny rule. If `rooms` is omitted, the mode defaults to allowlist and preserves
+the existing behavior of joining only invites from allowlisted HUMAN accounts.
+In either mode, the sender allowlist still controls which room messages can
+become mail.
+Messages from other senders stay quarantined, and agent messages still need a
+mention. Open mode refuses invites from `agent-` and `butler-` MXIDs because
+they are not HUMAN accounts. Duplicate delivery of the same invite event is
+ignored; a new invite can retry a configured room, subject to deny checks and
+the budget. Open mode allows at most 20 automatic join attempts per rolling
+day. Owner invites count toward the cap, and failed join attempts remain
+counted.
+
+Add `deny_room=!ROOM_ID` or `deny_room=#alias:server` for each denied room, and
+`deny_server=host` for each denied server. Room IDs, canonical aliases, room
+servers, inviter servers, and alias servers are checked against these rules.
+An alias deny matches only when the invite carries that canonical alias; use
+`deny_room=!ROOM_ID` or `deny_server=host` for a hard block. Invalid deny lines
+are ignored with a warning. An open-mode join records
+`room=ROOM_ID how=invite inviter=@user:server`; allowlist-mode owner invites
+record `how=owner-invite`, and operator `join` records `how=operator`.
+Operators can join with a room ID, `#alias:server`, or a public room name. An
+alias is saved as a display label; it does not grant trust. A public name joins
+only when exactly one public room matches; multiple matches are listed for the
+operator to choose from. The inviter check relies on the homeserver appending
+the real invite event to `invite_state` (Synapse does). `leave` removes a joined
+room by ID or alias, while HOME and ALL-BUTLERS cannot be left or removed. The
+interactive setup wizard writes `rooms=open` without asking; flag-based setup
+defaults to allowlist unless given `--rooms open`. The `send -` stdin form is
+unsupported until core #213.
+
+`join` and `leave` change room membership and require an outside terminal
+caller; session, unknown, and missing callers are refused. Clearing
+`REMUDA_BUTLER_*` environment variables does not bypass this check. This is
+still advisory within one UID: another local process running as the same user
+may invoke those verbs from an outside terminal caller.
+
+Approvals: when an agent runs `matrix join`, Butler resolves the room and
+posts one request to HOME instead of joining. The owner answers with a ✅ or
+❌ reaction, or a `yes`/`no` reply, to that exact message within 10 minutes.
+Only an allowlisted human sender in HOME counts. A bare `yes` does nothing.
+The owner can also answer from the terminal: `remuda butler approvals` lists
+the open requests, and `remuda butler approve ID` or `deny ID` answers one
+(operator-only). Terminal approve/deny require a caller outside any Remuda
+session (core caller identity); clearing the environment no longer passes,
+and this remains a same-UID policy, not an OS boundary. The Matrix answer path
+is bound to the owner's MXID. An approved request joins the room ID resolved
+at request time and writes `room=ID how=approved`. The asker gets mail for every outcome:
+approved, denied or expired. A repeat ask for the same room returns the same
+request. Each agent may have 3 open requests, and there may be 5 in total.
+Requests live in the relay state file.
 
 `quarantine` lists rejected inbound Matrix message events; add `--id EVENT_ID`
 to inspect one. It is operator-only under the same caller policy. The relay
@@ -85,7 +146,8 @@ state file containing these records is mode 600 on Unix hosts.
 
 Run `remuda butler matrix setup` to configure Butler; with `--register` and no
 `--registration-token-file`, setup asks for the homeserver registration token
-using a hidden prompt.
+using a hidden prompt. `--rooms open|allowlist` sets the invite mode written to
+the config; flag-based setup defaults to allowlist.
 
 ```text
 remuda butler matrix setup --homeserver https://matrix.example.org --owner @alice:example.org --register --pin <64-hex-sha256> --default
@@ -105,6 +167,9 @@ file contains:
 6. Optional sync timeout in milliseconds; blank defaults to `30000`.
 7. Optional transport and room settings, one `key=value` per line:
    `all_room=ROOM_ID` configures the shared ALL-BUTLERS room;
+   `rooms=open` or `rooms=allowlist` selects invite behavior, with allowlist as
+   the default; repeat `deny_room=ROOM_ID`, `deny_room=#alias:server`, or
+   `deny_server=host` lines to refuse matching invites;
    `ca_file=PATH` trusts a custom CA, and `pin_sha256=HEX` pins the
    homeserver's leaf key. `butler_senders=@id:server,...` remains accepted for
    older accounts that do not use the prefix convention; `agent-` and
@@ -160,6 +225,11 @@ also applies to delegates without an explicit kind. Each candidate waits up to
 15 seconds by default; set `REMUDA_BUTLER_READINESS_TIMEOUT` to change that
 per-candidate timeout. `remuda butler sessions` shows the selected kind and
 the reason each earlier candidate was skipped.
+
+On each fresh agent-session start—first launch, resume, or a relaunch or
+respawn after a Butler or daemon restart—Butler checks for unread mail. If any
+is unread, it queues one notice with the count, using the normal debounce; it
+does not duplicate a notice that is already pending.
 
 `remuda butler status` prints `butler: up (<kind>)` and exits 0 when the root
 Butler is ready. During launch it exits 75 and writes `launching` plus one

@@ -39,6 +39,56 @@ end
 local function shell_quote(value)
   return "'" .. value:gsub("'", "'\\''") .. "'"
 end
+matrix.shell_quote = shell_quote
+
+local function format_character(cp)
+  return cp == 0x00ad or cp == 0x061c or (cp >= 0x0600 and cp <= 0x0605)
+    or cp == 0x06dd or cp == 0x070f or (cp >= 0x0890 and cp <= 0x0891)
+    or cp == 0x08e2 or cp == 0x180e or (cp >= 0x200b and cp <= 0x200f)
+    or (cp >= 0x202a and cp <= 0x202e) or cp == 0x2028 or cp == 0x2029
+    or cp == 0x2060 or (cp >= 0x2061 and cp <= 0x206f) or cp == 0xfeff
+    or (cp >= 0xfff9 and cp <= 0xfffb) or cp == 0x110bd or cp == 0x110cd
+    or (cp >= 0x13430 and cp <= 0x1343f) or (cp >= 0x1bca0 and cp <= 0x1bca3)
+    or (cp >= 0x1d173 and cp <= 0x1d17a) or cp == 0xe0001
+    or (cp >= 0xe0020 and cp <= 0xe007f)
+end
+
+local function sanitize_directory_text(value, limit)
+  if type(value) ~= "string" then value = tostring(value or "") end
+  limit = limit or 128
+  local out, count, at = {}, 0, 1
+  while at <= #value and count < limit do
+    local first = value:byte(at)
+    local width, cp
+    if first < 0x80 then width, cp = 1, first
+    elseif first >= 0xc2 and first <= 0xdf then width, cp = 2, first - 0xc0
+    elseif first >= 0xe0 and first <= 0xef then width, cp = 3, first - 0xe0
+    elseif first >= 0xf0 and first <= 0xf4 then width, cp = 4, first - 0xf0
+    else width, cp = 1, 0xfffd end
+    if width > 1 then
+      if at + width - 1 > #value then width, cp = 1, 0xfffd
+      else
+        for offset = 1, width - 1 do
+          local byte = value:byte(at + offset)
+          if byte < 0x80 or byte > 0xbf then width, cp = 1, 0xfffd; break end
+          cp = cp * 64 + byte - 0x80
+        end
+        if (width == 2 and cp < 0x80) or (width == 3 and cp < 0x800)
+          or (width == 4 and (cp < 0x10000 or cp > 0x10ffff))
+          or (cp >= 0xd800 and cp <= 0xdfff) then
+          width, cp = 1, 0xfffd
+        end
+      end
+    end
+    if not (cp < 0x20 or (cp >= 0x7f and cp <= 0x9f) or format_character(cp)) then
+      out[#out + 1] = value:sub(at, at + width - 1)
+      count = count + 1
+    end
+    at = at + width
+  end
+  return table.concat(out)
+end
+matrix.sanitize_directory_text = sanitize_directory_text
 
 local function shown_path(path, override)
   if type(path) == "string" and path ~= "" then return path end
@@ -78,6 +128,74 @@ end
 -- The request client and inbound relay must interpret the same on-disk
 -- settings. Normalize every line here so CRLF and surrounding whitespace do
 -- not change room or sender authorization decisions.
+local warned_config_lines = {}
+local function warn_invalid_config_line(path, line_number, key, value)
+  local warning_key = tostring(path) .. "\0" .. tostring(line_number) .. "\0" .. key .. "\0" .. value
+  if warned_config_lines[warning_key] then return end
+  warned_config_lines[warning_key] = true
+  local safe_value = sanitize_directory_text(value, 128)
+  pcall(function()
+    io.stderr:write("butler ignored invalid Matrix config line " .. tostring(line_number)
+      .. " (" .. key .. "=" .. safe_value .. ")\n")
+  end)
+end
+
+local function config_valid_room_id(value)
+  return type(value) == "string" and value:match("^!%S+:%S+$") ~= nil
+end
+
+local function config_valid_room_alias(value)
+  if type(value) ~= "string" or #value > 255 or value:find("[%c%s/]") then return false end
+  local localpart, server = value:match("^#([^:]+):(.+)$")
+  return localpart ~= nil and localpart ~= "" and server ~= nil and server ~= ""
+end
+
+local function config_valid_server(value)
+  if type(value) ~= "string" or value == "" or #value > 260 or value:find("[%c%s/@#?]") then return false end
+  local address, port = value:match("^%[([%x:]+)%]:(%d+)$")
+  if not address then address = value:match("^%[([%x:]+)%]$") end
+  if address then
+    if not address:find(":", 1, true) then return false end
+    if port and (tonumber(port) < 1 or tonumber(port) > 65535) then return false end
+    return true
+  end
+  local host, numeric_port = value:match("^([^:]+):(%d+)$")
+  if not host then
+    host = value:match("^([^:]+)$")
+    numeric_port = ""
+  end
+  if not host or host == "" or #host > 253 or host:find("%.%.") then return false end
+  if host:sub(1, 1) == "." or host:sub(-1) == "." then return false end
+  if numeric_port ~= "" and (tonumber(numeric_port) < 1 or tonumber(numeric_port) > 65535) then return false end
+  for label in host:gmatch("[^.]+") do
+    if #label > 63 or (not label:match("^[A-Za-z0-9][A-Za-z0-9%-]*[A-Za-z0-9]$")
+      and not label:match("^[A-Za-z0-9]$")) then return false end
+  end
+  return true
+end
+
+local function normalize_server_name(value)
+  if type(value) ~= "string" then return value end
+  local host, port
+  if value:sub(1, 1) == "[" then
+    host, port = value:match("^(%b[]):(%d+)$")
+    if not host then host = value end
+  else
+    host, port = value:match("^([^:]+):(%d+)$")
+    if not host then host = value end
+  end
+  host = host:lower()
+  if host:sub(-1) == "." then host = host:sub(1, -2) end
+  -- IPv6 literals are compared textually after lowercasing; equivalent spellings are not canonicalized.
+  return port and (host .. ":" .. port) or host
+end
+local function config_valid_mxid(value)
+  if type(value) ~= "string" or #value > 512 then return false end
+  local localpart, server = value:match("^@([^:%s]+):([^%s]+)$")
+  return localpart ~= nil and localpart ~= "" and server ~= nil and config_valid_server(server)
+end
+matrix.valid_server_name = config_valid_server
+
 local function read_config(path)
   local contents, err = read_file(path, "config")
   if not contents then return nil, err end
@@ -95,7 +213,8 @@ local function read_config(path)
     sender = trim(sender)
     if sender ~= "" then allowed[sender] = true end
   end
-  local opts, extra_rooms = {}, {}
+  local opts, extra_rooms, deny_room_ids, deny_room_aliases, deny_servers = {}, {}, {}, {}, {}
+  local room_mode = "allowlist"
   for i = 5, #lines do
     local key, value = lines[i]:match("^([^=]+)=(.*)$")
     if key then
@@ -103,8 +222,33 @@ local function read_config(path)
       if key == "room" then
         local room = value:match("^(%S+)")
         local how = value:match("%s+how=(%S+)") or "operator"
-        if room and room:match("^!%S+:%S+$") then
-          extra_rooms[#extra_rooms + 1] = { room = room, how = how }
+        local alias = value:match("%s+alias=(%S+)")
+        local inviter = value:match("%s+inviter=(%S+)")
+        if inviter then inviter = sanitize_directory_text(inviter, 128) end
+        if inviter and not config_valid_mxid(inviter) then inviter = nil end
+        if room and config_valid_room_id(room) then
+          extra_rooms[#extra_rooms + 1] = { room = room, how = how, alias = alias, inviter = inviter }
+        end
+      elseif key == "rooms" then
+        if value == "open" or value == "allowlist" then
+          room_mode = value
+        else
+          warn_invalid_config_line(path, i, key, value)
+        end
+      elseif key == "deny_room" then
+        if config_valid_room_id(value) then
+          deny_room_ids[value] = true
+        elseif config_valid_room_alias(value) then
+          deny_room_aliases[value] = true
+        else
+          warn_invalid_config_line(path, i, key, value)
+        end
+      elseif key == "deny_server" then
+        local server = normalize_server_name(value)
+        if config_valid_server(server) then
+          deny_servers[server] = true
+        else
+          warn_invalid_config_line(path, i, key, value)
         end
       else
         opts[key] = value
@@ -145,7 +289,7 @@ local function read_config(path)
   if all_room == "" then all_room = nil end
   if all_room == lines[2] then return nil, "HOME and ALL-BUTLERS rooms must be different" end
   local rooms = { [lines[2]] = "home" }
-  local room_how = {}
+  local room_how, room_aliases, room_inviters = {}, {}, {}
   if all_room then
     if mode == "1" or mode == "true" or mode == "messages" or mode == "fallback" then
       return nil, "ALL-BUTLERS room requires /sync; messages fallback supports HOME only"
@@ -156,11 +300,17 @@ local function read_config(path)
     if extra.room ~= lines[2] and extra.room ~= all_room then
       rooms[extra.room] = "joined"
       room_how[extra.room] = extra.how
+      room_inviters[extra.room] = extra.inviter
+      if extra.alias and type(matrix.valid_room_alias) == "function" and matrix.valid_room_alias(extra.alias) then
+        room_aliases[extra.room] = extra.alias
+      end
     end
   end
   return {
     base = base, room = lines[2], home_room = lines[2], all_room = all_room,
-    rooms = rooms, room_how = room_how,
+    rooms = rooms, room_how = room_how, room_aliases = room_aliases, room_inviters = room_inviters,
+    rooms_mode = room_mode, deny_room_ids = deny_room_ids,
+    deny_room_aliases = deny_room_aliases, deny_servers = deny_servers,
     self_mxid = lines[3], allowed_senders = allowed,
     butler_senders = butler_senders,
     use_messages = mode == "1" or mode == "true" or mode == "messages" or mode == "fallback",
@@ -171,6 +321,55 @@ matrix.read_config = read_config
 
 local function valid_room_id(room)
   return type(room) == "string" and room:match("^!%S+:%S+$") ~= nil
+end
+matrix.valid_room_id = valid_room_id
+
+local function valid_room_alias(alias)
+  if type(alias) ~= "string" or #alias > 255 or alias:find("[%c%s/]" ) then return false end
+  local localpart, server = alias:match("^#([^:]+):(.+)$")
+  return localpart ~= nil and localpart ~= "" and server ~= nil and server ~= ""
+end
+matrix.valid_room_alias = valid_room_alias
+
+local function server_parts(value, prefix)
+  if type(value) ~= "string" then return nil end
+  local server = value:match("^" .. prefix .. "[^:]+:(.+)$")
+  if not server or server == "" then return nil end
+  local host
+  if server:sub(1, 1) == "[" then
+    host = server:match("^(%b[]):%d+$") or server
+  else
+    host = server:match("^([^:]+):%d+$") or server
+  end
+  return normalize_server_name(server), normalize_server_name(host)
+end
+
+function matrix.invite_is_denied(conf, room_id, alias, inviter)
+  if type(conf) ~= "table" then return false end
+  local deny_room_ids = type(conf.deny_room_ids) == "table" and conf.deny_room_ids or {}
+  local deny_room_aliases = type(conf.deny_room_aliases) == "table" and conf.deny_room_aliases or {}
+  local deny_servers = type(conf.deny_servers) == "table" and conf.deny_servers or {}
+  if type(room_id) == "string" and deny_room_ids[room_id] then return true end
+  if type(alias) == "string" and deny_room_aliases[alias] then return true end
+  if type(alias) == "string" then
+    local alias_localpart, alias_server = alias:match("^#([^:]+):(.+)$")
+    if alias_localpart and alias_server then
+      for denied_alias in pairs(deny_room_aliases) do
+        local denied_localpart, denied_server = denied_alias:match("^#([^:]+):(.+)$")
+        if denied_localpart == alias_localpart and denied_server
+          and normalize_server_name(denied_server) == normalize_server_name(alias_server) then
+          return true
+        end
+      end
+    end
+  end
+  local room_server, room_host = server_parts(room_id, "!")
+  local inviter_server, inviter_host = server_parts(inviter, "@")
+  local alias_server, alias_host = server_parts(alias, "#")
+  if (room_server and (deny_servers[room_server] or deny_servers[room_host]))
+    or (inviter_server and (deny_servers[inviter_server] or deny_servers[inviter_host]))
+    or (alias_server and (deny_servers[alias_server] or deny_servers[alias_host])) then return true end
+  return false
 end
 
 local function write_config_text(path, text)
@@ -199,17 +398,46 @@ local function room_line_id(line)
   return line:match("^%s*room=(%S+)")
 end
 
-function matrix.config_add_room(path, room, how)
+function matrix.config_add_room(path, room, how, alias, inviter)
   if not valid_room_id(room) then
-    return nil, "invalid Matrix room ID: room IDs start with ! (Element: Room settings > Advanced > Internal room ID)."
+    return nil, "invalid Matrix room ID: room IDs start with ! (Element: Room settings > Advanced tab (not General) > Internal room ID. Element X may not show it; use the #alias instead.)."
+  end
+  if alias ~= nil and not valid_room_alias(alias) then return nil, "invalid Matrix room alias" end
+  if inviter ~= nil then
+    inviter = sanitize_directory_text(inviter, 128)
+    if not config_valid_mxid(inviter) then return nil, "invalid Matrix inviter ID" end
   end
   local conf, err = read_config(path)
   if not conf then return nil, err end
   if room == conf.home_room or room == conf.all_room then
     return nil, "HOME and ALL rooms can't be added"
   end
-  if conf.rooms[room] ~= nil then return true, false end
-  if how ~= "owner-invite" and how ~= "operator" then how = "operator" end
+  if how ~= "owner-invite" and how ~= "operator" and how ~= "invite" and how ~= "approved" then how = nil end
+  local new_how = how or "operator"
+  if conf.rooms[room] ~= nil then
+    if conf.rooms[room] == "joined" and ((alias and conf.room_aliases[room] ~= alias)
+      or (inviter and conf.room_inviters[room] ~= inviter)) then
+      local contents
+      contents, err = read_file(path, "config")
+      if not contents then return nil, err end
+      local kept = {}
+      each_raw_line(contents, function(raw, line, ending)
+        if room_line_id(line) == room then
+          local current_how = line:match("%s+how=(%S+)") or conf.room_how[room] or "operator"
+          local current_alias = alias or conf.room_aliases[room]
+          local current_inviter = inviter or conf.room_inviters[room]
+          local label = current_alias and (" alias=" .. current_alias) or ""
+          local inviter_field = current_inviter and (" inviter=" .. current_inviter) or ""
+          kept[#kept + 1] = "room=" .. room .. " how=" .. current_how .. label .. inviter_field .. ending
+        else
+          kept[#kept + 1] = raw .. ending
+        end
+      end)
+      local wrote, write_error = write_config_text(path, table.concat(kept))
+      if not wrote then return nil, write_error end
+    end
+    return true, false
+  end
   local contents
   contents, err = read_file(path, "config")
   if not contents then return nil, err end
@@ -222,7 +450,10 @@ function matrix.config_add_room(path, room, how)
     padded = padded .. "\n"
     line_count = line_count + 1
   end
-  local wrote, write_error = write_config_text(path, padded .. "room=" .. room .. " how=" .. how .. "\n")
+  local label = alias and (" alias=" .. alias) or ""
+  local inviter_field = inviter and (" inviter=" .. inviter) or ""
+  local wrote, write_error = write_config_text(path,
+    padded .. "room=" .. room .. " how=" .. new_how .. label .. inviter_field .. "\n")
   if not wrote then return nil, write_error end
   return true, true
 end

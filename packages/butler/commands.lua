@@ -7,6 +7,8 @@ local OPERATOR = assert(config.OPERATOR)
 local contributions = assert(config.contributions)
 local registry_list = assert(config.registry_list)
 local statusline = assert(config.statusline)
+local resolve = assert(config.resolve)
+local mail = assert(config.mail)
 local USAGE_NOTES = [[
 Agent sessions receive REMUDA_BUTLER_AGENT_ID and REMUDA_BUTLER_LEADER_ID.
 In an agent session, use `inbox`, `send <to> "..."`, and `send-to-leader ...`;
@@ -84,6 +86,73 @@ local function command(order, verb, usage, run)
   command_entries[verb] = entry
   if not remuda.contribute then remuda._butler_contribute("butler.command", verb, entry) end
 end
+command(5, "doctor", "  remuda butler doctor", function(args)
+  if #args == 1 then
+    local doctor = remuda._butler_doctor
+    return table.concat(doctor.render(doctor.probe()), "\n")
+  end
+end)
+local CLOSE_USAGE = "Usage: remuda butler close <name> [--force]\nExample: remuda butler close worker-1"
+local function close_member(name, leader, force)
+  local ok, alias = pcall(resolve, name)
+  if not ok then error("cannot close " .. tostring(name) .. ": unknown Butler member.\nNext: remuda butler sessions", 0) end
+  local agents = remuda._butler_bus and remuda._butler_bus.agents or {}
+  local agent = agents[alias]
+  if not agent or agent.parent ~= leader then
+    error("cannot close " .. tostring(alias) .. ": only your direct members can be closed (you and your leader are excluded).\nNext: remuda butler sessions", 0)
+  end
+  if not force then
+    local unread_ok, unread = pcall(mail.unread, agent.id)
+    if not unread_ok or type(unread) ~= "number" then
+      error("cannot check unread Butler mail for " .. alias .. ".\nNext: inspect the member inbox and retry", 0)
+    end
+    if unread > 0 then
+      error(alias .. " has unread Butler mail (" .. tostring(unread) .. " message(s)).\nNext: read the inbox, or use --force", 0)
+    end
+    local idle_ok, idle, reason = pcall(remuda.butler.is_idle, alias)
+    if not idle_ok or idle ~= true then
+      local detail = idle_ok and (": " .. tostring(reason or "state unknown")) or " (state check failed)"
+      local status = idle_ok and reason == "busy" and " is busy" or " is not idle"
+      error(alias .. status .. detail .. ".\nNext: wait for it to become idle, or use --force", 0)
+    end
+  end
+  local closed, result = pcall(remuda.close, alias)
+  if not closed then error("could not close " .. alias .. ": " .. tostring(result) .. ".\nNext: retry remuda butler close " .. alias, 0) end
+  return "Closed " .. alias .. ".\nNext: remuda butler sessions"
+end
+remuda._butler_close_member = close_member
+
+local function close_caller_leader()
+  local function refuse()
+    error("cannot identify the Butler caller.\nNext: run from a Butler member session", 0)
+  end
+  if type(remuda.caller) ~= "function" then refuse() end
+  local ok, caller = pcall(remuda.caller)
+  if not ok or type(caller) ~= "table" then refuse() end
+  if caller.kind == "outside" then return "butler" end
+  if caller.kind ~= "session" or type(caller.session) ~= "string" or caller.session == "" then refuse() end
+  local agents = remuda._butler_bus and remuda._butler_bus.agents
+  if type(agents) ~= "table" then refuse() end
+  local leader
+  for alias, agent in pairs(agents) do
+    if type(agent) == "table" and agent.session_name == caller.session then
+      if leader then refuse() end
+      leader = alias
+    end
+  end
+  if not leader then refuse() end
+  return leader
+end
+
+command(8, "close", "  remuda butler close <name> [--force]", function(args, caller)
+  if args[2] == "--help" or args[2] == "-h" then return CLOSE_USAGE end
+  if #args < 2 or #args > 3 or (args[3] ~= nil and args[3] ~= "--force") then
+    error(CLOSE_USAGE .. "\nNext: remuda butler sessions", 0)
+  end
+  return cli_result(function()
+    return close_member(args[2], close_caller_leader(), args[3] == "--force")
+  end)
+end)
 command(10, "sessions", "  remuda butler sessions", function(args)
   if #args == 1 then return remuda._butler_sessions() end
 end)
@@ -114,7 +183,7 @@ command(20, "launch", "  remuda butler launch <claude|codex> [name] [--model M]"
   if #args == 3 then return remuda._butler_launch(args[2], args[3], model, parent) end
 end)
 command(30, "topic", "  remuda butler topic new <name> [--template T] [--agent A] [--model M]\n"
-  .. "  remuda butler topic delegate <name> [--agent A] [--leader L] [--model M] <task...>", function(args, caller)
+  .. "  remuda butler topic delegate <name> [--agent A] [--leader L] [--model M] [--cwd DIR] <task...>", function(args, caller)
   if args[2] == "new" and args[3] then
     local template, kind, model, i = nil, nil, nil, 4
     while i <= #args do
@@ -127,14 +196,16 @@ command(30, "topic", "  remuda butler topic new <name> [--template T] [--agent A
     return remuda._butler_topic_new(args[3], template, kind, model)
   end
   if args[2] == "delegate" and args[3] then
-    local kind, parent, model, i = nil, current_agent(caller) or "butler", nil, 4
-    while i <= #args and (args[i] == "--agent" or args[i] == "--leader" or args[i] == "--model") do
+    local kind, parent, model, cwd, i = nil, current_agent(caller) or "butler", nil, nil, 4
+    while i <= #args and (args[i] == "--agent" or args[i] == "--leader" or args[i] == "--model" or args[i] == "--cwd") do
       if args[i] == "--agent" then kind = args[i + 1]
       elseif args[i] == "--model" then model = args[i + 1]
+      elseif args[i] == "--cwd" then cwd = args[i + 1]
       else parent = args[i + 1] end
+      if not args[i + 1] or args[i + 1] == "" then return nil end
       i = i + 2
     end
-    if i <= #args then return remuda._butler_topic_delegate(args[3], words_after(args, i), nil, kind, parent, model) end
+    if i <= #args then return remuda._butler_topic_delegate(args[3], words_after(args, i), nil, kind, parent, model, cwd) end
   end
 end)
 command(40, "send", '  remuda butler send <to> "<message>" | <to> - | <to> --file PATH\n'
@@ -183,6 +254,15 @@ command(80, "forward", "  remuda butler forward <message-id> <member> [note...]"
     return remuda._butler_forward(current_agent(caller) or OPERATOR, args[2], args[3],
       #args >= 4 and words_after(args, 4) or nil)
   end)
+end)
+command(90, "approvals", "  remuda butler approvals", function(args, caller)
+  return remuda.butler.approval.cli(args, current_agent(caller))
+end)
+command(91, "approve", "  remuda butler approve <ID>", function(args, caller)
+  return remuda.butler.approval.cli(args, current_agent(caller))
+end)
+command(92, "deny", "  remuda butler deny <ID>", function(args, caller)
+  return remuda.butler.approval.cli(args, current_agent(caller))
 end)
 command(100, "matrix", remuda.butler.matrix.cli_usage(), function(args, caller)
   return remuda.butler.matrix.cli(args, current_agent(caller))

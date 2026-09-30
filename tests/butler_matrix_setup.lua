@@ -3,7 +3,9 @@ return function(matrix)
   assert(type(matrix.setup_network) == "function", "Matrix setup network stage is unavailable")
   assert(type(matrix.setup_write) == "function", "Matrix setup file writer is unavailable")
   assert(type(matrix.cli) == "function", "Matrix CLI router is unavailable")
-  assert(matrix.cli({ "matrix", "setup" }) == matrix.setup_usage())
+  local no_flag_plan = matrix.setup_prepare({})
+  assert(no_flag_plan and no_flag_plan.wizard == true,
+    "no setup flags should select the interactive wizard")
   assert(matrix.cli({ "matrix", "setup", "--help" }) == matrix.setup_usage())
   local setup_help = matrix.setup_usage()
   assert(not setup_help:find("MXID", 1, true)
@@ -64,6 +66,30 @@ return function(matrix)
     for _, value in ipairs(extra or {}) do values[#values + 1] = value end
     return values
   end
+  write(token, "access-token-secret")
+  local function written_room_config(room_mode, destination)
+    local values = { "--homeserver", "http://matrix.invalid", "--owner", "@alice:example.org",
+      "--token-file", token, "--bot", "@butler-demo:example.org", "--dir", destination }
+    if room_mode then
+      values[#values + 1] = "--rooms"
+      values[#values + 1] = room_mode
+    end
+    local plan, prepare_error = matrix.setup_prepare(values)
+    assert(plan, "room policy setup should validate: " .. tostring(prepare_error))
+    assert(plan.rooms_mode == (room_mode or "allowlist"), "room policy should default to allowlist")
+    local files, write_error = matrix.setup_write(plan, {
+      token = "created-access-token", user_id = "@butler-demo:example.org", home_room = "!home:example.org",
+    })
+    assert(files, "room policy setup should write its config: " .. tostring(write_error))
+    return read(files.config_path)
+  end
+  local default_rooms_config = written_room_config(nil, root .. "/default-rooms")
+  assert(not default_rooms_config:find("rooms=", 1, true),
+    "default allowlist policy should preserve the legacy config without a rooms line")
+  local open_rooms_config = written_room_config("open", root .. "/open-rooms")
+  assert(open_rooms_config:find("\nrooms=open\n", 1, true),
+    "open room policy should serialize as rooms=open")
+  mkdir_calls = 0
   local function rejected(values, fragment)
     local plan, err = matrix.setup_prepare(values)
     assert(not plan and tostring(err):find(fragment, 1, true),
@@ -205,6 +231,8 @@ return function(matrix)
     { "--bot", "@butler-demo:example.org", "--token-file", token }), "choose one")
   rejected(args("--password-file", password,
     { "--bot", "@butler-demo:example.org", "--mystery" }), "unknown option")
+  rejected(args("--password-file", password,
+    { "--bot", "@butler-demo:example.org", "--rooms", "anyone" }), "rooms must be open or allowlist")
   rejected(args("--password-file", password,
     { "--bot", "not-an-mxid" }), "--bot 'not-an-mxid' is not a Matrix user ID")
   rejected({ "--homeserver", "https://matrix.invalid", "--owner", "@alice:example.org",
@@ -378,6 +406,7 @@ return function(matrix)
   requests = {}
   local resolved
   local prompt_specs = {}
+  local line_specs = {}
   local pending_timeout
   remuda.pending = function(options)
     pending_timeout = options and options.timeout
@@ -385,11 +414,165 @@ return function(matrix)
       resolved = { status = status, stdout = stdout, stderr = stderr }
     end }
     function reply:prompt_secret(spec) prompt_specs[#prompt_specs + 1] = spec end
+    function reply:prompt_line(spec)
+      line_specs[#line_specs + 1] = spec
+    end
     return reply
   end
+  requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+  local wizard_reply = matrix.cli({ "matrix", "setup" })
+  assert(wizard_reply and pending_timeout == 300 and #line_specs == 1 and not resolved
+    and line_specs[1].label == "Matrix homeserver URL:",
+    "no-flag setup should begin an interactive wizard")
+  line_specs[1].callback("http://matrix.invalid", nil)
+  assert(#line_specs == 2
+    and line_specs[2].label == "Your Matrix user ID (for example @alice:example.org):",
+    "the wizard should ask for the owner after the homeserver")
+  line_specs[2].callback("@alice:example.org", nil)
+  assert(#line_specs == 3 and line_specs[3].label:find("Continue? Type Y", 1, true)
+    and line_specs[3].label:find("Bot: @butler%-")
+    and line_specs[3].label:find("\n  Rooms: open (anyone can invite this Butler). Restrict: set rooms=allowlist or add deny_room/deny_server in "
+      .. default_paths.config_path .. ". The sender allowlist still decides whose messages are trusted.\n", 1, true)
+    and not line_specs[3].label:find("quarantined", 1, true)
+    and not line_specs[3].label:find("Room access", 1, true)
+    and line_specs[3].label:find("replaces its current Matrix relay config", 1, true),
+    "the wizard should set open rooms and summarize the real config path")
+  assert(line_specs[3].default == "N", "wizard confirmation should default to no")
+  line_specs[3].callback("n", nil)
+  assert(resolved and resolved.status == 1 and resolved.stderr:find("Nothing was written.", 1, true)
+    and select(2, resolved.stderr:gsub("Next:", "")) == 1
+    and #requests == 0 and #prompt_specs == 0,
+    "declining the summary should stop before registration or network work")
+
+  requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+  wizard_reply = matrix.cli({ "matrix", "setup" })
+  line_specs[1].callback("http://matrix.invalid", nil)
+  line_specs[2].callback("@alice:example.org", nil)
+  line_specs[3].callback("Y", nil)
+  assert(#prompt_specs == 1 and prompt_specs[1].label
+    == "Registration token for http://matrix.invalid, from its admin (hidden). This is not an access token:"
+    and #requests == 0 and not resolved,
+    "confirming the summary should enter the existing hidden registration-token flow")
+  local wizard_bot = assert(line_specs[3].label:match("Bot: (@%S+)"), "wizard summary should name the bot")
+  local wizard_relay, wizard_config, wizard_status = matrix.relay, remuda._butler_matrix_config, matrix.status
+  matrix.relay = { stop = function() end, start = function() return true end }
+  matrix.status = function(_, callback) callback({}) end
+  prompt_specs[1].callback("wizard-registration-token", nil)
+  requests[1].callback({ status = 401,
+    body = '{"session":"wizard-session","flows":[{"stages":["m.login.registration_token"]}]}' })
+  requests[2].callback({ status = 200,
+    body = '{"access_token":"wizard-access-token","user_id":"' .. wizard_bot .. '"}' })
+  requests[3].callback({ status = 200, body = '{"user_id":"' .. wizard_bot .. '"}' })
+  requests[4].callback({ status = 200, body = '{"room_id":"!wizard-home:example.org"}' })
+  matrix.relay, matrix.status = wizard_relay, wizard_status
+  assert(resolved and resolved.status == 0 and read(default_paths.config_path):find("\nrooms=open\n", 1, true),
+    "the confirmed wizard should write rooms=open to the config")
+  for _, path in ipairs({ default_paths.token_path, default_paths.config_path,
+    default_paths.config_path:gsub("/config$", "/password") }) do os.remove(path) end
+  remuda._butler_matrix_config = wizard_config
+
+  requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+  wizard_reply = matrix.cli({ "matrix", "setup" })
+  line_specs[1].callback("https://matrix.invalid", nil)
+  line_specs[2].callback("@alice:example.org", nil)
+  assert(#line_specs == 3
+    and line_specs[3].label:find("64-character SHA-256 certificate pin", 1, true),
+    "HTTPS setup should prompt explicitly for a certificate pin or CA file")
+  line_specs[3].callback(string.rep("a", 64), nil)
+  assert(#line_specs == 4 and line_specs[4].label:find("HTTPS certificate pin: " .. string.rep("a", 64), 1, true)
+    and line_specs[4].label:find("Continue? Type Y", 1, true),
+    "the HTTPS summary should show the validated trust pin before confirmation")
+  line_specs[4].callback("N", nil)
+  assert(resolved and resolved.status == 1 and #requests == 0 and #prompt_specs == 0,
+    "declining an HTTPS wizard should not start registration")
+
+  requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+  wizard_reply = matrix.cli({ "matrix", "setup" })
+  line_specs[1].callback("https://matrix.invalid", nil)
+  line_specs[2].callback("@alice:example.org", nil)
+  local bad_ca_path = root .. "/missing\nca.pem"
+  line_specs[3].callback(bad_ca_path, nil)
+  assert(resolved and not resolved.stderr:find(bad_ca_path, 1, true)
+    and resolved.stderr:find(bad_ca_path:gsub("\n", " "), 1, true),
+    "wizard validation errors should sanitize control characters from entered paths")
+
+  requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+  wizard_reply = matrix.cli({ "matrix", "setup" })
+  line_specs[1].callback("https://matrix.invalid", nil)
+  line_specs[2].callback("@alice:example.org", nil)
+  line_specs[3].callback(nil, nil)
+  assert(resolved and resolved.status == 1 and resolved.stderr:find("Nothing was written.", 1, true)
+    and select(2, resolved.stderr:gsub("Next:", "")) == 1 and #requests == 0,
+    "a non-string HTTPS trust answer should fail safely instead of throwing")
+
+  write(default_paths.token_path, "existing default token")
+  requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+  wizard_reply = matrix.cli({ "matrix", "setup" })
+  line_specs[1].callback("http://matrix.invalid", nil)
+  line_specs[2].callback("@alice:example.org", nil)
+  assert(resolved and resolved.stderr:find("output file already exists", 1, true)
+    and resolved.stderr:match("([^\n]+)\n$") == "Next: back up or move the existing Matrix setup files, then rerun remuda butler matrix setup.",
+    "an existing output refusal should end with an actionable wizard next step")
+  os.remove(default_paths.token_path)
+
   local prompt_output = root .. "/prompted-registration"
   assert(real_mkdir_new(prompt_output))
   local prompt_token = "prompted-registration-token"
+
+  requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+  wizard_reply = matrix.cli({ "matrix", "setup" })
+  line_specs[1].callback("ftp://matrix.invalid", nil)
+  assert(resolved and resolved.status == 1
+    and resolved.stderr:find("Matrix setup arguments", 1, true) == nil
+    and resolved.stderr:find("must be an absolute http:// or https:// URL", 1, true)
+    and #line_specs == 1 and #requests == 0,
+    "the wizard should reject an invalid homeserver URL before asking for more values: "
+      .. tostring(resolved and resolved.stderr) .. " line prompts=" .. tostring(#line_specs))
+
+  requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+  wizard_reply = matrix.cli({ "matrix", "setup" })
+  line_specs[1].callback("http://matrix.invalid", nil)
+  line_specs[2].callback("alice", nil)
+  assert(resolved and resolved.status == 1
+    and resolved.stderr:find("is not a Matrix user ID", 1, true)
+    and #line_specs == 2 and #requests == 0,
+    "the wizard should reject a malformed owner MXID before continuing")
+
+  local old_pending = remuda.pending
+  remuda.pending = function()
+    return { resolve = function(_, status, stdout, stderr)
+      resolved = { status = status, stdout = stdout, stderr = stderr }
+    end }
+  end
+  resolved = nil
+  matrix.cli({ "matrix", "setup" })
+  remuda.pending = old_pending
+  assert(resolved and resolved.status == 1
+    and resolved.stderr:find("needs a Remuda core with prompt_line", 1, true)
+    and select(2, resolved.stderr:gsub("Next:", "")) == 1,
+    "an older core without prompt_line should refuse the wizard with an upgrade hint")
+
+  for _, prompt_error in ipairs({ "not_a_terminal", "too_long", "cancelled" }) do
+    requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+    wizard_reply = matrix.cli({ "matrix", "setup" })
+    line_specs[1].callback(nil, prompt_error)
+    assert(resolved and resolved.status == 1 and resolved.stderr:find("Nothing was written.", 1, true)
+      and select(2, resolved.stderr:gsub("Next:", "")) == 1 and #requests == 0,
+      "wizard prompt errors should refuse safely: " .. prompt_error)
+  end
+
+  requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+  wizard_reply = matrix.cli({ "matrix", "setup" })
+  line_specs[1].callback("https://matrix.invalid", nil)
+  line_specs[2].callback("@alice:example.org", nil)
+  line_specs[3].callback(ca_file, nil)
+  assert(#line_specs == 4 and line_specs[4].label:find("HTTPS CA file: " .. ca_file, 1, true)
+    and line_specs[4].label:find("Continue? Type Y", 1, true),
+    "the wizard should validate and summarize an HTTPS CA file path")
+  line_specs[4].callback("N", nil)
+  assert(resolved and resolved.status == 1 and #requests == 0,
+    "declining the CA-file wizard should not start registration")
+
   requests, resolved, prompt_specs = {}, nil, {}
   local prompt_reply = matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
     "--owner", "@alice:example.org", "--register", "--bot", "@butler-prompt:example.org",
