@@ -6212,6 +6212,17 @@ done
                 if name == "fake-settings-mismatch" {
                     assert_eq!(reports.matches("settings.json model is sonnet, expected opus").count(), 1,
                         "a valid differing model should alert the parent exactly once: {reports:?}");
+                    assert_eq!(eval(&path, &format!(
+                        "return tostring(remuda._butler_compaction_members_state[{name:?}].restore_pending)")), "opus",
+                        "settings.json still on sonnet must keep the prior model restore pending");
+                    eval(&path, &format!("return remuda._butler_compaction_execute({name:?})"));
+                    let deadline = Instant::now() + Duration::from_secs(8);
+                    loop {
+                        let got = std::fs::read_to_string(&log).unwrap_or_default();
+                        if got.matches("CMD:/model opus\n").count() >= 2 { break; }
+                        assert!(Instant::now() < deadline, "next tick must retype the prior model: {got:?}");
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
                 } else {
                     assert!(!reports.contains("settings.json model is"),
                         "missing, keyless, or invalid settings.json must not alert for {name}: {reports:?}");
