@@ -1528,29 +1528,33 @@ local function seed_unread_notices(alias, previous_instance, instance)
     if mail.is_unread(agent.id, message_id) then
       local seen = bus.notice_seen[agent.id]
       local pending = bus.notices[alias]
+      local already_pending = pending and pending.message_ids and pending.message_ids[message_id]
+      local already_seen = seen and seen[message_id]
       if previous_instance ~= nil and previous_instance ~= instance
-          and seen and seen[message_id]
-          and not (pending and pending.message_ids and pending.message_ids[message_id]) then
+          and already_seen and not already_pending then
         -- A prior session may have recorded the deposit notice before its
         -- queue was cleared at exit. Replay that unread mail for this session.
         seen[message_id] = nil
+        already_seen = false
       end
-      local message = mail.find_message(message_id) or {}
-      local sender = message.from and (message.from.alias or message.from.session) or "outside"
-      local resent = bus.mail_resent[agent.id] and bus.mail_resent[agent.id][message_id]
-      local detail
-      if resent then
-        local by = resent.from and (resent.from.alias or resent.from.session) or "outside"
-        detail = "forwarded by " .. by
-      elseif message.in_reply_to then
-        detail = "(reply) from " .. sender
-      else
-        sender = message.matrix and message.matrix.sender or (message.from and message.from.session) or sender
-        detail = "from " .. sender
+      if not already_pending and not already_seen then
+        local message = mail.find_message(message_id) or {}
+        local sender = message.from and (message.from.alias or message.from.session) or "outside"
+        local resent = bus.mail_resent[agent.id] and bus.mail_resent[agent.id][message_id]
+        local detail
+        if resent then
+          local by = resent.from and (resent.from.alias or resent.from.session) or "outside"
+          detail = "forwarded by " .. by
+        elseif message.in_reply_to then
+          detail = "(reply) from " .. sender
+        else
+          sender = message.matrix and message.matrix.sender or (message.from and message.from.session) or sender
+          detail = "from " .. sender
+        end
+        local notice = "Butler message " .. message_id .. " " .. detail
+          .. " arrived. Read it: remuda butler inbox"
+        remuda._butler_notify(alias, notice, message_id)
       end
-      local notice = "Butler message " .. message_id .. " " .. detail
-        .. " arrived. Read it: remuda butler inbox"
-      remuda._butler_notify(alias, notice, message_id)
     end
   end
   return true

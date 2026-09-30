@@ -545,10 +545,11 @@ fn a_pending_deposit_notice_is_not_duplicated_by_unread_seeding() {
         remuda._butler_deliver_notices()
         local text = state.typed[1] and state.typed[1].text
         return table.concat({ tostring(count_before), tostring(calls), tostring(#state.typed),
-          tostring(text and text:match('^Butler message .+ from operator arrived%. Read it: remuda butler inbox$') ~= nil) }, '|')
+          tostring(text and text:match('^Butler message .+ from operator arrived%. Read it: remuda butler inbox$') ~= nil),
+          tostring(remuda._butler_bus.unread_seeded.m1 ~= nil) }, '|')
         "#,
     );
-    assert_eq!(got, "1|1|1|true");
+    assert_eq!(got, "1|0|1|true|true");
 }
 
 #[test]
