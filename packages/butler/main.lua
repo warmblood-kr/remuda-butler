@@ -561,8 +561,8 @@ local function clear_compaction_restore(key, legacy_session)
     if name ~= key and name ~= legacy_session then next_record[name] = prior end
   end
   if next(next_record) == nil then
-    local removed, remove_err = os.remove(compaction_restore_path)
-    if not removed and remove_err then return nil, remove_err end
+    local removed, remove_err, remove_errno = os.remove(compaction_restore_path)
+    if not removed and remove_errno ~= 2 then return nil, remove_err end
   else
     return write_compaction_restore_record(next_record)
   end

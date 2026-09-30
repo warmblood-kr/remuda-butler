@@ -5771,7 +5771,8 @@ while IFS= read -r line; do
       elif [ "$scenario" = hang ]; then
         failed=1; paint
       else
-        ctx=200000; paint
+        if [ "$scenario" = codex-no-record ]; then ctx=$((ctx - 100000)); else ctx=200000; fi
+        paint
       fi
       ;;
     '/model opus')
@@ -5889,6 +5890,7 @@ done
         ("fake-attach-mid", "claude", "happy"),
         ("fake-draft", "claude", "draft"),
         ("fake-unknown-kind", "future", "happy"),
+        ("fake-codex-no-record", "codex", "codex-no-record"),
         ("fake-stale-flags", "claude", "happy"),
         ("fake-settings-missing", "claude", "happy"),
         ("fake-settings-no-model", "claude", "happy"),
@@ -6071,6 +6073,41 @@ done
                 "unknown agent kinds must not receive commands");
             let reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
             assert!(reports.contains("unsupported agent kind"), "unknown kind should be reported: {reports:?}");
+        }
+        if name == "fake-codex-no-record" {
+            let deadline = Instant::now() + Duration::from_secs(8);
+            loop {
+                let in_progress = eval(&path, &format!(
+                    "return tostring(remuda._butler_compaction_members_state[{name:?}].compaction_in_progress == true)"
+                ));
+                let got = std::fs::read_to_string(&log).unwrap_or_default();
+                if in_progress == "false" && got.matches("CMD:/compact\nKEY:RET\n").count() == 1 { break; }
+                assert!(Instant::now() < deadline, "first Codex compaction stalled: {got:?}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            assert!(!std::path::Path::new(&eval(&path, "return remuda._fake_restore_file")).exists(),
+                "Codex compaction must not create a model restore record");
+            assert_eq!(eval(&path, &format!("return remuda.butler.compact({name:?})")), "started",
+                "the same Codex session must be able to compact again");
+            let deadline = Instant::now() + Duration::from_secs(8);
+            loop {
+                let in_progress = eval(&path, &format!(
+                    "return tostring(remuda._butler_compaction_members_state[{name:?}].compaction_in_progress == true)"
+                ));
+                let got = std::fs::read_to_string(&log).unwrap_or_default();
+                if in_progress == "false" && got.matches("CMD:/compact\nKEY:RET\n").count() == 2 { break; }
+                assert!(Instant::now() < deadline, "second Codex compaction stalled: {got:?}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let got = std::fs::read_to_string(&log).unwrap_or_default();
+            assert_eq!(got, "CMD:/compact\nKEY:RET\nCMD:/compact\nKEY:RET\n",
+                "Codex compaction must never send a stale Claude model restore command: {got:?}");
+            let reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
+            assert!(!reports.contains("model was restored, but its recovery record could not be cleared"),
+                "missing restore record must not send a clear-failure mail: {reports:?}");
+            let trace = std::fs::read_to_string(&trace_path).unwrap_or_default();
+            assert!(!trace.contains("restore_record_clear_failed"),
+                "missing restore record must not create a clear-failure trace: {trace:?}");
         }
         if name == "fake-legacy-record" {
             let deadline = Instant::now() + Duration::from_secs(5);
