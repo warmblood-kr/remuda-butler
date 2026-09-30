@@ -119,7 +119,7 @@ remuda.exec("butler/matrix_request")
 remuda.exec("butler/matrix")
 
 -- The session needs an `--mcp-config` pointing back at this same daemon, or
--- it has no way to reach `matrix_reply` at all — a bare `remuda.new(nil,
+-- it has no way to reach the Butler MCP tools at all — a bare `remuda.new(nil,
 -- {"claude"})` starts a session with no MCP server configured. `claude`
 -- only accepts that config as a file path, never inline JSON, so this is a
 -- legitimate, unavoidable use of `io`/`os` (unlike embedding a companion
@@ -1036,28 +1036,4 @@ function remuda._butler_compaction_submit()
     return false
   end
   return true
-end
-
-if token_path then
-remuda.tool{
-  name = "matrix_reply",
-  about = "Send a text reply into the bridged Matrix room. Fire-and-forget: "
-    .. "returns once the send is queued, not once it is delivered — check "
-    .. "for delivery failure separately if that matters.",
-  args = { text = "The reply text to send." },
-  needs = { "text" },
-  run = function(a)
-    local synchronous, invoking = nil, true
-    remuda.butler.matrix.send({ text = a.text }, function(result)
-      if invoking then synchronous = result
-      elseif result and result.error then
-        remuda.emit("butler-matrix-error", "send", result.error)
-        io.stderr:write("butler Matrix send failed: " .. tostring(result.error) .. "\n")
-      end
-    end)
-    invoking = false
-    if synchronous and synchronous.error then error(synchronous.error, 0) end
-    return "queued"
-  end,
-}
 end

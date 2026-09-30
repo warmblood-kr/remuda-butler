@@ -14,7 +14,7 @@ Use Butler's CLI for communication:
 - Message bodies are limited to 64 KiB; short quoted messages can stay positional.
 - `remuda butler send-to-leader RESULT...` reports a completed work loop.
 - `remuda butler sessions` shows the household.
-- `remuda butler reply MESSAGE-ID "TEXT"` answers a message in its thread (prefer this over send when answering)
+- `remuda butler reply MESSAGE-ID -` (or `--file PATH`) answers a message in its thread; for Matrix mail it keeps the room and thread (prefer this over send when answering).
 - `remuda butler forward MESSAGE-ID MEMBER [NOTE]` passes a message on with an optional note
 
 If `inbox` says "no Butler identity in your env", your Remuda core predates

@@ -3915,63 +3915,6 @@ fn butler_matrix_relay_logs_distinct_transport_misconfigurations_once() {
     assert_eq!(result, "ok", "relay should log one warning per distinct invalid transport configuration: {result}");
 }
 
-// The Matrix MCP tool now uses the daemon's async request word directly.
-#[test]
-fn matrix_reply_tool_uses_async_matrix_request_without_subprocess() {
-    let dir = scratch_dir("butler-matrix-reply-tool");
-    let room = "!reply:example.org";
-    let (token_path, config_path) = butler_config(
-        &dir, "reply", "http://matrix.example.org", room, "@bot:example.org", "");
-    let token_env = token_path.to_string_lossy().into_owned();
-    let config_env = config_path.to_string_lossy().into_owned();
-    let _daemon = Daemon::spawn_with_env(&dir, &[
-        ("REMUDA_BUTLER_TOKEN", token_env.as_str()),
-        ("REMUDA_BUTLER_CONFIG", config_env.as_str()),
-    ]);
-    let path = daemon::socket_path_in(&dir, "s");
-    eval(&path, "remuda._butler_test_mode = 'lifecycle'; remuda._butler_skip_relay = true");
-    eval(&path, include_str!("support/fake_http.lua"));
-    let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    eval(&path, r#"
-      remuda.http.respond_prefix("PUT",
-        "http://matrix.example.org/_matrix/client/v3/rooms/%21reply%3Aexample.org/send/m.room.message/",
-        { status = 200, headers = {}, body = '{"event_id":"$reply"}' })
-    "#);
-    let process_count = read_count(&path, "return #remuda.processes()");
-
-    let tools: serde_json::Value = serde_json::from_str(
-        &mcp::handle(&path, r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#)
-            .expect("list MCP tools"),
-    ).expect("parse tools/list response");
-    let tool = tools["result"]["tools"].as_array().unwrap().iter()
-        .find(|tool| tool["name"] == "matrix_reply").expect("matrix_reply tool");
-    assert_eq!(tool["inputSchema"]["required"], serde_json::json!(["text"]));
-    let reply = mcp::handle(
-        &path,
-        &serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
-            "params":{"name":"matrix_reply","arguments":{"text":"hello"}}}).to_string(),
-    ).expect("call matrix_reply");
-    let reply: serde_json::Value = serde_json::from_str(&reply).expect("parse tool result");
-    assert_eq!(reply["result"]["content"][0]["text"], "queued");
-    assert_eq!(reply["result"]["isError"], false);
-    assert_eq!(read_count(&path, "return #remuda.processes()"), process_count,
-        "matrix_reply must not launch a subprocess");
-
-    let request = eval(&path, r#"
-      local spec = remuda.http.calls[1]
-      if not spec then return "missing-request" end
-      local decoded = remuda.butler.matrix.decode_json(spec.body)
-      return table.concat({spec.headers.Authorization, spec.url, decoded.body}, "\n")
-    "#);
-    let fields: Vec<_> = request.lines().collect();
-    assert_eq!(fields[0], "Bearer test-token");
-    assert!(fields[1].starts_with("http://matrix.example.org/"));
-    assert_eq!(fields[2], "hello");
-    assert!(!request.contains("sensitive-token"), "token leaked outside the Authorization header");
-    eval(&path, "remuda.http.tick()");
-}
-
 #[test]
 fn butler_claude_builder_keeps_its_noninteractive_cli_hint() {
     let adapter = include_str!("../../packages/butler/agents/claudecode.lua");
