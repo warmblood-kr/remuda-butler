@@ -180,6 +180,22 @@ local function media_uri(content)
   if type(content.file) == "table" and type(content.file.url) == "string" then return content.file.url end
 end
 
+local MEDIA_MSGTYPES = {
+  ["m.image"] = "image", ["m.file"] = "file",
+  ["m.video"] = "video", ["m.audio"] = "audio",
+}
+
+local function media_mail_body(content, kind)
+  local info = type(content.info) == "table" and content.info or {}
+  local filename = type(content.filename) == "string" and content.filename or content.body
+  local mimetype = type(info.mimetype) == "string" and info.mimetype or "unknown"
+  local size = type(info.size) == "number" and tostring(info.size) .. " bytes" or "unknown"
+  local mxc = media_uri(content) or "unavailable"
+  return table.concat({ "media: " .. kind, "filename: " .. filename,
+    "mimetype: " .. mimetype, "size: " .. size, "mxc: " .. mxc,
+    "Next: remuda butler matrix download " .. mxc .. " -o PATH" }, "\n")
+end
+
 local function add_processed(state, id)
   if not id or id == "" then return end
   if state.processed[id] then
@@ -778,14 +794,16 @@ function relay.new(options)
           elseif ev.type ~= "m.room.message" then reason = "unsupported_event_type"
           elseif type(ev.sender) ~= "string" or ev.sender == "" then reason = "missing_sender"
           elseif not cfg.allowed_senders[ev.sender] then reason = "sender_not_allowlisted"
-          elseif content.msgtype ~= "m.text" and content.msgtype ~= "m.notice" and content.msgtype ~= "m.emote" then
+          elseif content.msgtype ~= "m.text" and content.msgtype ~= "m.notice" and content.msgtype ~= "m.emote"
+              and not MEDIA_MSGTYPES[content.msgtype] then
             reason = "unsupported_message_type"
           elseif type(content.body) ~= "string" then reason = "missing_text_body" end
           if reason then
             quarantine_event(ev, reason)
           else
           local thread_root, in_reply_to = relation_fields(content)
-          local body = mail_body(content.body)
+          local media_kind = MEDIA_MSGTYPES[content.msgtype]
+          local body = media_kind and mail_body(media_mail_body(content, media_kind)) or mail_body(content.body)
           if in_reply_to and not thread_root then body = strip_reply_fallback(body) end
           local actual_room = room_id or cfg.room
           local sender_kind = member_kind(ev.sender, cfg)

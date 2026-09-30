@@ -88,7 +88,7 @@ local function test_baseline_resume_filters_and_envelope()
         { type = "m.room.message", event_id = "$bad-sender", sender = "@mallory:example.org",
           content = { msgtype = "m.text", body = "blocked" } },
         { type = "m.room.message", event_id = "$bad-type", sender = "@alice:example.org",
-          content = { msgtype = "m.image", body = "blocked" } },
+          content = { msgtype = "m.location", body = "blocked" } },
         { type = "m.room.message", event_id = "$notice", sender = "@alice:example.org",
           content = { msgtype = "m.notice", body = "notice" } },
         { type = "m.room.message", event_id = "$emote", sender = "@alice:example.org",
@@ -133,6 +133,60 @@ local function test_baseline_resume_filters_and_envelope()
   assert(fallback_time and fallback_time:match("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%dZ$"),
     "missing or invalid event time must fall back to UTC")
 
+  relay:stop()
+  os.execute("rm -rf " .. string.format("%q", dir))
+end
+
+local function test_allowlisted_media_types_and_sender_filter()
+  local dir, config_path = fixture()
+  local client, delivered = scripted_client(), {}
+  local relay = relay_module.new({ config_path = config_path, matrix = client,
+    deliver = function(event) delivered[#delivered + 1] = event return true end,
+  })
+  relay:start()
+  client:complete(1, { json = { next_batch = "s0" } })
+  client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+    ["!room:example.org"] = { timeline = { events = {
+      { type = "m.room.message", event_id = "$image", sender = "@alice:example.org",
+        content = { msgtype = "m.image", body = "chart.png", url = "mxc://example.org/chart",
+          info = { mimetype = "image/png", size = 12345 } } },
+      { type = "m.room.message", event_id = "$file", sender = "@alice:example.org",
+        content = { msgtype = "m.file", body = "report.pdf",
+          file = { url = "mxc://example.org/report" },
+          info = { mimetype = "application/pdf", size = 23456 } } },
+      { type = "m.room.message", event_id = "$video", sender = "@alice:example.org",
+        content = { msgtype = "m.video", body = "clip.mp4", url = "mxc://example.org/clip",
+          info = { mimetype = "video/mp4", size = 34567 } } },
+      { type = "m.room.message", event_id = "$audio", sender = "@alice:example.org",
+        content = { msgtype = "m.audio", body = "song.ogg",
+          file = { url = "mxc://example.org/song" },
+          info = { mimetype = "audio/ogg", size = 45678 } } },
+      { type = "m.room.message", event_id = "$blocked-image", sender = "@mallory:example.org",
+        content = { msgtype = "m.image", body = "blocked.png", url = "mxc://example.org/blocked" } },
+    } } },
+  } } } })
+  assert(#delivered == 4, "all four media types should deliver from the allowlisted sender")
+  local by_id = {}
+  for _, event in ipairs(delivered) do by_id[event.event_id] = event end
+  for _, spec in ipairs({
+    { "$image", "image", "chart.png", "image/png", "12345", "mxc://example.org/chart" },
+    { "$file", "file", "report.pdf", "application/pdf", "23456", "mxc://example.org/report" },
+    { "$video", "video", "clip.mp4", "video/mp4", "34567", "mxc://example.org/clip" },
+    { "$audio", "audio", "song.ogg", "audio/ogg", "45678", "mxc://example.org/song" },
+  }) do
+    local event = assert(by_id[spec[1]], "allowlisted " .. spec[1] .. " did not deliver")
+    for _, expected in ipairs({ "media: " .. spec[2], "filename: " .. spec[3],
+        "mimetype: " .. spec[4], "size: " .. spec[5] .. " bytes", "mxc: " .. spec[6],
+        "Next: remuda butler matrix download " .. spec[6] .. " -o PATH" }) do
+      assert(event.body:find(expected, 1, true), spec[1] .. " omitted " .. expected)
+    end
+  end
+  local blocked
+  for _, item in ipairs(relay:quarantine_list()) do
+    if item.event_id == "$blocked-image" then blocked = item end
+  end
+  assert(blocked and blocked.reason == "sender_not_allowlisted",
+    "media from a non-allowlisted sender must remain quarantined")
   relay:stop()
   os.execute("rm -rf " .. string.format("%q", dir))
 end
@@ -548,15 +602,32 @@ local function test_plain_reply_fixture()
 end
 
 local function test_image_fixture()
+  local dir, config_path = fixture()
+  local client, received = scripted_client(), {}
+  local relay = relay_module.new({ config_path = config_path, matrix = client,
+    deliver = function(event) received[#received + 1] = event return true end,
+  })
+  relay:start()
+  client:complete(1, { json = { next_batch = "s0" } })
+  client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+    ["!room:example.org"] = { timeline = { events = {
+      { type = "m.room.message", event_id = "$image", sender = "@alice:example.org",
+        content = { msgtype = "m.image", body = "chart.png", url = "mxc://example.org/chart",
+          info = { mimetype = "image/png", size = 12345 } } },
+    } } },
+  } } } })
+  assert(received[1] and received[1].body, "allowlisted image should be deposited")
+  relay:stop()
+  os.execute("rm -rf " .. string.format("%q", dir))
   render_fixture("matrix-mail-image.txt", {
     { id = "MAIL-IMAGE", created_at = "2026-09-30T10:04:00Z",
-      subject = "Matrix message from @alice:example.org", body = "",
-      matrix = { event_id = "$image", media = { kind = "image", filename = "chart.png",
-        mimetype = "image/png", size = 12345, mxc = "mxc://example.org/chart" } } },
+      subject = "Matrix message from @alice:example.org", body = received[1].body,
+      matrix = { event_id = "$image" } },
   })
 end
 
 test_baseline_resume_filters_and_envelope()
+test_allowlisted_media_types_and_sender_filter()
 test_state_restart_corruption_and_processed_cap()
 test_pending_delivery_retries_safely_after_restart()
 test_ack_reconcile_and_utf8_body_cap()
