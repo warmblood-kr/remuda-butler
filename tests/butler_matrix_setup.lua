@@ -1208,6 +1208,24 @@ return function(matrix)
     "failed forced write must restore pre-existing output files")
   remuda.fs.write_atomic = real_write_atomic
 
+  write(output .. "/config", "previous-config\ndeny_room=!blocked:example.org\n"
+    .. "deny_room=#spam:example.org\ndeny_server=evil.example.org\nrooms=open\n"
+    .. "  deny_room = !indented:example.org\n")
+  local kept, kept_error = matrix.setup_write(forced_plan, {
+    token = "replacement-token", user_id = "@butler-demo:example.org",
+    home_room = "!kept-home:example.org",
+  })
+  assert(kept, kept_error)
+  local kept_config = read(output .. "/config")
+  assert(kept_config:find("\ndeny_room=!blocked:example.org\n", 1, true)
+    and kept_config:find("\ndeny_room=#spam:example.org\n", 1, true)
+    and kept_config:find("\ndeny_server=evil.example.org\n", 1, true)
+    and kept_config:find("\n  deny_room = !indented:example.org\n", 1, true)
+    and not kept_config:find("previous-config", 1, true),
+    "--force must keep hand-added deny_room=/deny_server= lines: " .. kept_config)
+  write(output .. "/token", "previous-token\n")
+  write(output .. "/config", "previous-config\n")
+
   local rollback_dir = root .. "/rollback/child"
   local rollback_plan = matrix.setup_prepare({ "--homeserver", "http://matrix.invalid",
     "--owner", "@alice:example.org", "--bot", "@butler-demo:example.org",

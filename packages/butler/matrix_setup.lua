@@ -861,6 +861,14 @@ function matrix.setup_write(options, result)
     end
   end
 
+  -- Hand-added deny rules outlive a --force rewrite (#146).
+  for line in (backups[options.config_path] or ""):gmatch("[^\r\n]+") do
+    -- Mirror the config parser: the key before the first "=" is trimmed.
+    if line:match("^%s*deny_room%s*=") or line:match("^%s*deny_server%s*=") then
+      contents[options.config_path] = contents[options.config_path] .. line .. "\n"
+    end
+  end
+
   local written = {}
   for _, path in ipairs(paths) do
     local ok, wrote = pcall(remuda.fs.write_atomic, path, contents[path], { private = true })
