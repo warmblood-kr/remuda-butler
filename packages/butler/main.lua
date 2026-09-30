@@ -3680,7 +3680,6 @@ function remuda._butler_compaction_execute(session_name, force)
     pcall(remuda._butler_send, session_name, agent.parent or "butler",
       "Compaction failed: " .. tostring(reason))
   end
-  local settings_model_alert_sent = false
   local function finish_success(event)
     if agent.kind == "claude" then
       local settings = read_claude_settings(settings_path)
@@ -3690,11 +3689,17 @@ function remuda._butler_compaction_execute(session_name, force)
       elseif not matches then
         _butler_trace("settings_model_mismatch", detail .. " model=" .. tostring(actual)
           .. " expected=" .. tostring(prior_model))
-        if not settings_model_alert_sent then
-          settings_model_alert_sent = true
+        if not state.settings_model_alert_sent then
+          state.settings_model_alert_sent = true
           pcall(remuda._butler_send, session_name, agent.parent or "butler",
             "settings.json model is " .. tostring(actual) .. ", expected " .. tostring(prior_model))
         end
+        -- The prior model is not back yet: keep the durable record so the
+        -- next tick types /model again (bounded by restore attempts).
+        state.restore_pending = prior_model
+        state.restore_pending_attempt_active = true
+        fail("settings.json model is " .. tostring(actual))
+        return
       else
         _butler_trace("settings_model_verified", detail .. " model=" .. tostring(actual))
       end
@@ -3708,6 +3713,7 @@ function remuda._butler_compaction_execute(session_name, force)
     state.restore_pending_attempt_active = nil
     state.restore_pending_failure_notified = nil
     state.restore_pending_exhausted = nil
+    state.settings_model_alert_sent = nil
     clear_legacy_restore_state(state)
     local cleared, clear_err = clear_compaction_restore(compaction_agent_key(agent, session_name), session_name)
     if not cleared then
