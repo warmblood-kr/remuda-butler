@@ -1047,7 +1047,27 @@ local function inbox_delivery(message)
     message.delivery_error = why
     return nil
   end
-  return delivered
+  local result = {}
+  for key, value in pairs(delivered) do result[key] = value end
+  local recipient_ref = type(message.to) == "table" and message.to.alias or message.to
+  local recipient_ok, recipient = pcall(mail_id, recipient_ref, false)
+  result.notice_recipient_live = recipient_ok
+  if recipient_ok then
+    local sender = message.from.alias or message.from.session or "outside"
+    local notice
+    if message.kind == "forward" then
+      notice = "Butler message " .. delivered.id .. " forwarded by " .. sender
+    elseif message.in_reply_to then
+      notice = "Butler message " .. delivered.id .. " (reply) from " .. sender
+    else
+      sender = message.matrix and message.matrix.sender or message.from.session or sender
+      notice = "Butler message " .. delivered.id .. " from " .. sender
+    end
+    notice = notice .. " arrived. Read it: remuda butler inbox"
+    result.notice_delivered, result.notice_error =
+      remuda._butler_notify(recipient.alias, notice, delivered.id)
+  end
+  return result
 end
 remuda._butler_inbox_delivery = inbox_delivery
 local function deliver_message(message)
@@ -2776,12 +2796,9 @@ function remuda._butler_send(from, to, text)
   local sender = (from == "operator" or from == "outside") and mail_address(from)
     or mail_address(resolve(from))
   local message = deliver_message({ from = sender, to = mail_address(recipient.alias), text = text })
-  local notice = "Butler message " .. message.id .. " from " .. sender.session
-    .. " arrived. Read it: remuda butler inbox"
-  local delivered, why = remuda._butler_notify(recipient.alias, notice, message.id)
-  if delivered then return "queued " .. message.id .. " and notified " .. recipient.alias end
-  if why then
-    return "queued " .. message.id .. " for " .. recipient.alias .. "; terminal delivery deferred: " .. tostring(why)
+  if message.notice_delivered then return "queued " .. message.id .. " and notified " .. recipient.alias end
+  if message.notice_error then
+    return "queued " .. message.id .. " for " .. recipient.alias .. "; terminal delivery deferred: " .. tostring(message.notice_error)
   end
   return "queued " .. message.id .. " for " .. recipient.alias .. "; notice deferred until its pane is free"
 end
@@ -2793,13 +2810,10 @@ local function sender_address(from)
   return mail_address(resolve(from))
 end
 local function notify_queued(message, alias, what)
-  local live = pcall(mail_id, alias, false)
-  if not live then return "queued " .. message.id .. " for " .. alias .. "; it is not live, so no notice" end
-  local delivered, why = remuda._butler_notify(alias, "Butler message " .. message.id .. " " .. what
-    .. " arrived. Read it: remuda butler inbox", message.id)
-  if delivered then return "queued " .. message.id .. " and notified " .. alias end
+  if message.notice_delivered then return "queued " .. message.id .. " and notified " .. alias end
+  if not message.notice_recipient_live then return "queued " .. message.id .. " for " .. alias .. "; it is not live, so no notice" end
   return "queued " .. message.id .. " for " .. alias .. "; notice deferred"
-    .. (why and (": " .. tostring(why)) or " until its pane is free")
+    .. (message.notice_error and (": " .. tostring(message.notice_error)) or " until its pane is free")
 end
 function remuda._butler_reply(from, message_id, text)
   local sender = sender_address(from)
