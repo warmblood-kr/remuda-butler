@@ -1,5 +1,8 @@
 -- L2 Matrix write composites over remuda.butler.matrix.request.
 local matrix = assert(remuda.butler and remuda.butler.matrix, "Matrix request word is unavailable")
+-- Trust words are bound at load (main.lua execs matrix_request before
+-- this file), so a later redefinition of the public entry cannot change them.
+local is_agent_mxid = matrix.is_agent_mxid
 
 local MAX_CHUNK_BYTES = 4000
 local MAX_UPLOAD_BYTES = 20 * 1024 * 1024
@@ -43,9 +46,9 @@ local function next_txn()
 end
 
 local function mentions_agent(text)
-  if type(text) ~= "string" or type(matrix.is_agent_mxid) ~= "function" then return false end
+  if type(text) ~= "string" or type(is_agent_mxid) ~= "function" then return false end
   for mentioned in text:gmatch("@[%w._=/%-]+:[%w.%-]+") do
-    if matrix.is_agent_mxid(mentioned) then return true end
+    if is_agent_mxid(mentioned) then return true end
   end
   return false
 end

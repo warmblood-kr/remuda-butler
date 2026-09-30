@@ -1,5 +1,8 @@
 local config = assert(remuda._butler_mail_config)
 local bus = assert(config.bus)
+-- Trust words are bound at load (main.lua execs matrix_request before
+-- this file), so a later redefinition of the public entry cannot change them.
+local is_agent_mxid = remuda.butler and remuda.butler.matrix and remuda.butler.matrix.is_agent_mxid
 bus.mail_loaded = bus.mail_loaded or {}
 bus.mail_read = bus.mail_read or {}
 bus.mail_unreadable = bus.mail_unreadable or {}
@@ -459,7 +462,7 @@ local function reply(caller, parent_id, text, as_operator, deliver)
     message.matrix_route = { room_id = parent.matrix.room_id, event_id = parent.matrix.event_id,
       thread_root = parent.matrix.thread_root, in_reply_to = parent.matrix.in_reply_to,
       room_kind = parent.matrix.room or parent.matrix.room_kind,
-      from_agent = parent.matrix.sender == nil or remuda.butler.matrix.is_agent_mxid(parent.matrix.sender) }
+      from_agent = parent.matrix.sender == nil or is_agent_mxid(parent.matrix.sender) }
   end
   if matrix_parent and not deliver then return nil, "Matrix replies require durable relay delivery" end
   if deliver then return deliver(message), nil, to end

@@ -275,21 +275,35 @@ end
 
 local function numbered_option(line)
   local trimmed = line:gsub("^%s+", "")
+  local selected = false
   for _, marker in ipairs({ "❯", "›", ">" }) do
     if trimmed:sub(1, #marker) == marker then
+      selected = true
       trimmed = trimmed:sub(#marker + 1):gsub("^%s+", "")
       break
     end
   end
-  return trimmed:match("^(%d+)[%.)]%s*(.-)%s*$"), trimmed:match("^%d+[%.)]%s*(.-)%s*$")
+  local number, label = trimmed:match("^(%d+)[%.)]%s*(.-)%s*$")
+  return number, label, selected
 end
-function remuda._butler_compaction_is_unknown_dialog(screen)
-  if type(screen) ~= "string" then return false end
+local function bottom_screen_lines(screen, limit)
   local lines = {}
   for line in (screen .. "\n"):gmatch("(.-)\n") do
     lines[#lines + 1] = line
-    if #lines > 8 then table.remove(lines, 1) end
   end
+  while #lines > 0 and lines[#lines]:match("^%s*$") do
+    lines[#lines] = nil
+  end
+  local first = math.max(1, #lines - limit + 1)
+  local bottom = {}
+  for index = first, #lines do
+    bottom[#bottom + 1] = lines[index]
+  end
+  return bottom
+end
+function remuda._butler_compaction_is_unknown_dialog(screen)
+  if type(screen) ~= "string" then return false end
+  local lines = bottom_screen_lines(screen, 8)
   local top_border, bottom_border, selected_option, option_line, prompt_line = false, false, false, nil, nil
   for i, line in ipairs(lines) do
     local trimmed = line:gsub("^%s+", "")
@@ -544,8 +558,8 @@ local function clear_compaction_restore(key, legacy_session)
     if name ~= key and name ~= legacy_session then next_record[name] = prior end
   end
   if next(next_record) == nil then
-    local removed, remove_err = os.remove(compaction_restore_path)
-    if not removed and remove_err then return nil, remove_err end
+    local removed, remove_err, remove_errno = os.remove(compaction_restore_path)
+    if not removed and remove_errno ~= 2 then return nil, remove_err end
   else
     return write_compaction_restore_record(next_record)
   end
@@ -1451,14 +1465,13 @@ local function startup_modal_timeout_seconds()
   return tonumber(remuda._butler_modal_timeout or remuda._butler_modal_attempts or remuda._butler_task_poke_attempts) or 60
 end
 trust_modal_state = function(modal, screen)
-  local lines, title, affirmative, selected_no, selected_index, selected_codex = {}, false, false, false, nil, false
+  local lines, title, affirmative, selected_no, selected_index = {}, false, false, false, nil
   for line in (tostring(screen or "") .. "\n"):gmatch("(.-)\n") do
     lines[#lines + 1] = line
     local trimmed = line:gsub("^%s+", "")
     if trimmed:find("Accessing workspace:", 1, true) then title = true end
     if trimmed:match("^❯%s*No, exit") then selected_no, selected_index = true, #lines end
     if trimmed:match("^Yes, I trust this folder%s*$") then affirmative = true end
-    if trimmed:match("^[›❯]%s*1[.)]%s*Trust and continue%s*$") then selected_codex = true end
   end
   local lower = tostring(screen or ""):lower()
   if modal.trust == "claude" then
@@ -1478,16 +1491,21 @@ trust_modal_state = function(modal, screen)
     if affirmative and selected_no and options == 2 then return "safe" end
     return "human"
   elseif modal.trust == "codex" then
-    if not lower:find("trust this folder?", 1, true) then return "absent" end
-    local options = 0
-    local no_option = false
-    for _, line in ipairs(lines) do
-      if line:match("^%s*[❯›]%s+") or line:match("^%s*%d+[.)]%s+") then
-        options = options + 1
-        if line:lower():find("don't trust", 1, true) or line:lower():find("do not trust", 1, true) then no_option = true end
+    local visible_lines = bottom_screen_lines(screen, 12)
+    local visible_lower = table.concat(visible_lines, "\n"):lower()
+    if not visible_lower:find("trust this folder?", 1, true) then return "absent" end
+    local options, selected_codex = 0, false
+    for index, line in ipairs(visible_lines) do
+      local number, label, selected = numbered_option(line)
+      if number then options = options + 1 end
+      local next_number, next_label = numbered_option(visible_lines[index + 1] or "")
+      if number == "1" and label == "Trust and continue" and selected and next_number == "2" then
+        for _, back_option in ipairs(modal.back_options or {}) do
+          if next_label:lower() == back_option:lower() then selected_codex = true end
+        end
       end
     end
-    if selected_codex and no_option and options == 2 then return "safe" end
+    if selected_codex and options == 2 then return "safe" end
     return "human"
   end
   return "human"
@@ -3647,9 +3665,41 @@ function remuda._butler_compaction_execute(session_name, force)
     return true
   end
   local function wait_for(id, matcher, action, timeout, on_timeout)
-    local ok, handle = pcall(remuda.expect, session_name, {
-      { id = id, match = matcher, action = action },
-    }, { timeout = timeout, unknown = remuda._butler_compaction_is_unknown_dialog,
+    local branches = { { id = id, match = matcher, action = action } }
+    if agent.kind == "claude" and (id == "model-sonnet" or id == "model-restored") then
+      local confirmation_sent = false
+      table.insert(branches, {
+        id = "claude-model-confirm",
+        match = function(screen)
+          if type(screen) ~= "string" then return false end
+          local lines = bottom_screen_lines(screen, 18)
+          for index = 1, #lines - 1 do
+            if index > #lines - 8
+                and lines[index]:find("❯%s*1%.%s+Yes")
+                and lines[index + 1]:find("%d%.%s+No, go back") then
+              for title_row = math.max(1, index - 10), index - 1 do
+                if lines[title_row]:find("Switch model?", 1, true) then
+                  return true
+                end
+              end
+            end
+          end
+          return false
+        end,
+        action = function()
+          if not confirmation_sent then
+            confirmation_sent = true
+            local pressed, press_err = pcall(remuda.key, session_name, "RET")
+            if not pressed then error(press_err, 0) end
+          end
+        end,
+        continue = true,
+      })
+    end
+    local ok, handle = pcall(remuda.expect, session_name, branches,
+      -- This prompt is accepted only during the Claude model-switch watchers.
+      -- All other unknown screens continue through the existing fail path.
+      { timeout = timeout, unknown = remuda._butler_compaction_is_unknown_dialog,
       on_unknown = function()
         if agent.kind == "claude" and (id == "model-sonnet" or id == "compact-complete") then
           state.restore_pending = prior_model
