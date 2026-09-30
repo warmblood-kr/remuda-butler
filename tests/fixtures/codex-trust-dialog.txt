@@ -1,0 +1,8 @@
+Folder access
+
+Trust this folder?
+
+› 1. Trust and continue
+  2. Back to Agent Command Center
+
+enter continue · esc back
