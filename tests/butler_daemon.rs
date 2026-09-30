@@ -8106,3 +8106,160 @@ fn butler_matrix_guidance_covers_each_member_verb_and_omits_operator_verbs() {
     assert!(!guidance.contains("join ROOM"), "operator join leaked into member guidance");
     assert!(!guidance.contains("leave ROOM"), "operator leave leaked into member guidance");
 }
+
+fn doctor_render(probes: &str, platform: &str) -> String {
+    let dir = scratch_dir("butler-doctor-render");
+    let (_daemon, path) = butler_cli_test_daemon(&dir);
+    let module = std::env::current_dir()
+        .expect("core checkout")
+        .join("../packages/butler/doctor.lua");
+    let module = lua_raw_string(&module.to_string_lossy());
+    let platform = lua_raw_string(platform);
+    let code = format!(
+        "local doctor = dofile({module}); return table.concat(doctor.render({probes}, {platform}), '\\n')"
+    );
+    eval(&path, &code)
+}
+
+fn doctor_status(installed: bool, logged_in: bool) -> String {
+    format!("{{ installed = {installed}, logged_in = {logged_in} }}")
+}
+
+fn doctor_stub_dir(dir: &Path) -> PathBuf {
+    let bin = dir.join("doctor-bin");
+    std::fs::create_dir_all(&bin).expect("create doctor stub directory");
+    bin
+}
+
+fn doctor_write_stub(bin: &Path, name: &str, output: &str, exit_code: i32) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = bin.join(name);
+    std::fs::write(
+        &path,
+        format!("#!/bin/sh\nprintf '%s\\n' '{}'\nexit {exit_code}\n", output),
+    )
+    .expect("write agent stub");
+    let mut permissions = std::fs::metadata(&path).expect("stat agent stub").permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(path, permissions).expect("make agent stub executable");
+}
+
+fn butler_doctor_test_daemon(dir: &Path, path_env: &str) -> (Daemon, PathBuf) {
+    let daemon = Daemon::spawn_with_env(dir, &[("PATH", path_env)]);
+    let path = daemon::socket_path_in(dir, "s");
+    eval(&path, "remuda._butler_test_mode = 'lifecycle'; remuda._butler_skip_relay = true");
+    let out = remuda_timed(dir, &["-s", "s", "butler", "--headless"]);
+    assert!(out.status.success(), "load Butler CLI: {}", String::from_utf8_lossy(&out.stderr));
+    (daemon, path)
+}
+
+#[test]
+fn doctor_reports_all_good() {
+    let probes = format!(
+        "{{ claude = {}, codex = {} }}",
+        doctor_status(true, true),
+        doctor_status(true, true)
+    );
+    assert_eq!(
+        doctor_render(&probes, "macos"),
+        "Claude Code: installed, logged in\nCodex CLI: installed, logged in\nNext: remuda butler matrix setup"
+    );
+}
+
+#[test]
+fn doctor_reports_missing_claude_posix() {
+    let probes = format!(
+        "{{ claude = {}, codex = {} }}",
+        doctor_status(false, false),
+        doctor_status(true, true)
+    );
+    let expected = "Claude Code: missing\nCodex CLI: installed, logged in\nNext: curl -fsSL https://claude.ai/install.sh | bash";
+    assert_eq!(doctor_render(&probes, "macos"), expected);
+    assert_eq!(doctor_render(&probes, "linux"), expected);
+}
+
+#[test]
+fn doctor_reports_missing_claude_windows() {
+    let probes = format!(
+        "{{ claude = {}, codex = {} }}",
+        doctor_status(false, false),
+        doctor_status(true, true)
+    );
+    assert_eq!(
+        doctor_render(&probes, "windows"),
+        "Claude Code: missing\nCodex CLI: installed, logged in\nNext: irm https://claude.ai/install.ps1 | iex"
+    );
+}
+
+#[test]
+fn doctor_reports_codex_logged_out() {
+    let probes = format!(
+        "{{ claude = {}, codex = {} }}",
+        doctor_status(true, true),
+        doctor_status(true, false)
+    );
+    assert_eq!(
+        doctor_render(&probes, "macos"),
+        "Claude Code: installed, logged in\nCodex CLI: installed, not logged in\nNext: codex login"
+    );
+}
+
+#[test]
+fn doctor_reports_both_missing_with_two_next_lines() {
+    let probes = format!(
+        "{{ claude = {}, codex = {} }}",
+        doctor_status(false, false),
+        doctor_status(false, false)
+    );
+    assert_eq!(
+        doctor_render(&probes, "linux"),
+        "Claude Code: missing\nCodex CLI: missing\nNext: curl -fsSL https://claude.ai/install.sh | bash\nNext: npm install -g @openai/codex"
+    );
+}
+
+#[test]
+fn doctor_cli_all_good_never_echoes_agent_output() {
+    let dir = scratch_dir("butler-doctor-cli-good");
+    let bin = doctor_stub_dir(&dir);
+    doctor_write_stub(
+        &bin,
+        "claude",
+        r#"{"status":"logged-in","token":"DOCTOR_SECRET_CLAUDE"}"#,
+        0,
+    );
+    doctor_write_stub(
+        &bin,
+        "codex",
+        "Logged in using ChatGPT; DOCTOR_SECRET_CODEX",
+        0,
+    );
+    let path_env = bin.to_str().expect("PATH is UTF-8");
+    let (_daemon, _path) = butler_doctor_test_daemon(&dir, path_env);
+    let out = remuda_timed(&dir, &["-s", "s", "butler", "doctor"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stdout.contains("Claude Code: installed, logged in"), "{stdout}");
+    assert!(stdout.contains("Codex CLI: installed, logged in"), "{stdout}");
+    assert!(stdout.contains("Next: remuda butler matrix setup"), "{stdout}");
+    for secret in ["DOCTOR_SECRET_CLAUDE", "DOCTOR_SECRET_CODEX", "logged-in"] {
+        assert!(!stdout.contains(secret), "doctor leaked {secret}: {stdout}");
+        assert!(!stderr.contains(secret), "doctor leaked {secret}: {stderr}");
+    }
+}
+
+#[test]
+fn doctor_cli_both_missing_prints_two_next_commands() {
+    let dir = scratch_dir("butler-doctor-cli-missing");
+    let bin = doctor_stub_dir(&dir);
+    let path_env = bin.to_str().expect("PATH is UTF-8");
+    let (_daemon, _path) = butler_doctor_test_daemon(&dir, path_env);
+    let out = remuda_timed(&dir, &["-s", "s", "butler", "doctor"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "Claude Code: missing\nCodex CLI: missing\nNext: curl -fsSL https://claude.ai/install.sh | bash\nNext: npm install -g @openai/codex"
+    );
+}
