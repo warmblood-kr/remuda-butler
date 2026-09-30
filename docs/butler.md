@@ -117,9 +117,11 @@ interactive setup wizard writes `rooms=open` without asking; flag-based setup
 defaults to allowlist unless given `--rooms open`. The `send -` stdin form is
 unsupported until core #213.
 
-`join` and `leave` change room membership and are operator-only. Until core
-#218 enforces caller identity, this is best-effort policy: another local
-process running as the same user may still invoke those verbs.
+`join` and `leave` change room membership and require an outside terminal
+caller; session, unknown, and missing callers are refused. Clearing
+`REMUDA_BUTLER_*` environment variables does not bypass this check. This is
+still advisory within one UID: another local process running as the same user
+may invoke those verbs from an outside terminal caller.
 
 Approvals: when an agent runs `matrix join`, Butler resolves the room and
 posts one request to HOME instead of joining. The owner answers with a ✅ or
