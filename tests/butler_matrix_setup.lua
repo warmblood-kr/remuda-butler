@@ -414,6 +414,10 @@ return function(matrix)
     if attempt < 3 then
       assert(not resolved and #prompt_specs == attempt + 1,
         "a rejected registration token should prompt again up to three total attempts")
+      assert(prompt_specs[attempt + 1].label
+        == "The server rejected that registration token. Nothing was created or written. "
+          .. "Registration token for http://matrix.invalid, from its admin (hidden). This is not an access token:",
+        "the retry notice should be separated from the prompt label with a space")
     end
   end
   assert(resolved and resolved.status == 1
