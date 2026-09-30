@@ -95,6 +95,28 @@ local function mail_body(body)
   return (body:gsub("\194[\128-\159]", ""))
 end
 
+local function utf8_prefix(value, limit)
+  if #value <= limit then return value end
+  local cut = limit
+  local byte = value:byte(cut)
+  if byte >= 0x80 and byte <= 0xbf then
+    local lead = cut
+    while lead > 1 do
+      local current = value:byte(lead)
+      if current < 0x80 or current > 0xbf then break end
+      lead = lead - 1
+    end
+    local first = value:byte(lead)
+    local width = first >= 0xf0 and first <= 0xf4 and 4
+      or first >= 0xe0 and first <= 0xef and 3
+      or first >= 0xc2 and first <= 0xdf and 2 or 1
+    if width > cut - lead + 1 then cut = lead - 1 end
+  elseif byte >= 0xc0 then
+    cut = cut - 1
+  end
+  return value:sub(1, cut)
+end
+
 local function strip_reply_fallback(body)
   local lines = {}
   for line in (body .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
@@ -108,7 +130,7 @@ local function strip_reply_fallback(body)
   if reply[#reply] == "" then table.remove(reply) end
   local text = table.concat(reply, "\n")
   if text:match("^%s*$") then return body end
-  return "> " .. quote:sub(1, 120) .. "\n" .. text
+  return "> " .. utf8_prefix(quote, 120) .. "\n" .. text
 end
 
 local function timestamp(event)
@@ -207,7 +229,7 @@ end
 local function safe_media_field(value)
   value = type(value) == "string" and value or "unknown"
   value = value:gsub("[%z\1-\31\127]", ""):gsub("\194[\128-\159]", "")
-  return value:sub(1, 256)
+  return utf8_prefix(value, 256)
 end
 
 local function valid_media_uri(value)

@@ -260,6 +260,28 @@ local function test_allowlisted_media_without_url_is_quarantined()
   cleanup_fixture(dir, config_path)
 end
 
+local function test_media_field_cap_preserves_utf8()
+  local dir, config_path = fixture()
+  local client, delivered = scripted_client(), {}
+  local relay = relay_module.new({ config_path = config_path, matrix = client,
+    deliver = function(event) delivered[#delivered + 1] = event return true end,
+  })
+  assert(relay:start())
+  client:complete(1, { json = { next_batch = "s0" } })
+  client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+    ["!room:example.org"] = { timeline = { events = {
+      { type = "m.room.message", event_id = "$utf8-media", sender = "@alice:example.org",
+        content = { msgtype = "m.file", body = "file", filename = string.rep("a", 255) .. "한",
+          url = "mxc://example.org/utf8", info = { mimetype = "text/plain", size = 12 } } },
+    } } },
+  } } } })
+  assert(#delivered == 1 and delivered[1].body:find("filename: " .. string.rep("a", 255), 1, true)
+      and not delivered[1].body:find("한", 1, true) and utf8.len(delivered[1].body) ~= nil,
+    "media field caps must back off to a complete UTF-8 character")
+  relay:stop()
+  cleanup_fixture(dir, config_path)
+end
+
 local function test_download_next_command(body)
   local line = assert(body:match("Next: ([^\n]+)"), "media output has no download Next line")
   assert(matrix.cli_usage():find("[-o PATH] download MXC", 1, true),
@@ -1246,8 +1268,9 @@ local function render_fixture(name, specs)
 end
 
 local function test_matrix_event_id_is_sanitized_and_capped()
-  local bus = { inboxes = { butler = { "M1", "M2" } }, messages = {}, objects = {} }
-  for index, event_id in ipairs({ "$e\27[31m", "$" .. string.rep("a", 5000) }) do
+  local bus = { inboxes = { butler = { "M1", "M2", "M3" } }, messages = {}, objects = {} }
+  for index, event_id in ipairs({ "$e\27[31m", "$" .. string.rep("a", 5000),
+      "$" .. string.rep("a", 254) .. "한" }) do
     local id, object_id = "M" .. tostring(index), "object-" .. tostring(index)
     bus.messages[id] = { id = id,
       from = { host = "matrix", session = "@alice:example.org" },
@@ -1263,6 +1286,8 @@ local function test_matrix_event_id_is_sanitized_and_capped()
   assert(event_ids[1] == "$e[31m", "ESC in an event id must be stripped before rendering")
   assert(#event_ids[2] == 256 and event_ids[2] == "$" .. string.rep("a", 255),
     "a long event id must be capped at 256 bytes in the header")
+  assert(event_ids[3] == "$" .. string.rep("a", 254) and utf8.len(event_ids[3]) ~= nil,
+    "an event id cap inside a UTF-8 character must back off to a complete character")
 end
 
 local function test_thread_first_fixtures()
@@ -1356,10 +1381,22 @@ local function test_plain_reply_fixture()
       { type = "m.room.message", event_id = "$plain-reply", sender = "@alice:example.org",
         content = { msgtype = "m.text", body = "> <@alice:example.org> original\n\nYes, it is ready.",
           ["m.relates_to"] = { ["m.in_reply_to"] = { event_id = "$plain-target" } } } },
+      { type = "m.room.message", event_id = "$utf8-quote-50", sender = "@alice:example.org",
+        content = { msgtype = "m.text", body = "> <@alice:example.org> " .. string.rep("한", 50)
+          .. "\n\nReply", ["m.relates_to"] = { ["m.in_reply_to"] = { event_id = "$target" } } } },
+      { type = "m.room.message", event_id = "$utf8-quote-cut", sender = "@alice:example.org",
+        content = { msgtype = "m.text", body = "> <@alice:example.org> " .. string.rep("a", 118)
+          .. "한\n\nReply", ["m.relates_to"] = { ["m.in_reply_to"] = { event_id = "$target" } } } },
     } } },
   } } } })
   assert(received[1] and received[1].body == "> original\nYes, it is ready.",
     "plain replies should retain only the first quoted fallback line and the reply")
+  assert(received[2] and received[2].body == "> " .. string.rep("한", 40) .. "\nReply"
+      and #string.rep("한", 40) == 120 and utf8.len(received[2].body) ~= nil,
+    "a 120-byte quote cap must retain 40 Korean characters as valid UTF-8")
+  assert(received[3] and received[3].body == "> " .. string.rep("a", 118) .. "\nReply"
+      and utf8.len(received[3].body) ~= nil,
+    "a 121-byte quote cut at byte 120 inside a character must back off to the preceding complete character")
   relay:stop()
   cleanup_fixture(dir, config_path)
   render_fixture("matrix-mail-plain-reply.txt", {
@@ -1429,6 +1466,7 @@ end
 
 test_baseline_resume_filters_and_envelope()
 test_allowlisted_media_types_and_sender_filter()
+test_media_field_cap_preserves_utf8()
 test_allowlisted_media_without_url_is_quarantined()
 test_download_next_command("media: image\nfilename: chart.png\nmimetype: image/png\n"
   .. "size: 12345 bytes\nmxc: mxc://example.org/chart\n"

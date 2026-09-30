@@ -530,6 +530,28 @@ local function retry_unreadable(name)
   bus.mail_unreadable[name] = still
 end
 
+local function utf8_prefix(value, limit)
+  if #value <= limit then return value end
+  local cut = limit
+  local byte = value:byte(cut)
+  if byte >= 0x80 and byte <= 0xbf then
+    local lead = cut
+    while lead > 1 do
+      local current = value:byte(lead)
+      if current < 0x80 or current > 0xbf then break end
+      lead = lead - 1
+    end
+    local first = value:byte(lead)
+    local width = first >= 0xf0 and first <= 0xf4 and 4
+      or first >= 0xe0 and first <= 0xef and 3
+      or first >= 0xc2 and first <= 0xdf and 2 or 1
+    if width > cut - lead + 1 then cut = lead - 1 end
+  elseif byte >= 0xc0 then
+    cut = cut - 1
+  end
+  return value:sub(1, cut)
+end
+
 local function inbox(name)
   load_inbox(name)
   retry_unreadable(name)
@@ -544,7 +566,8 @@ local function inbox(name)
         .. message.from.session .. " · " .. message.created_at .. "] " .. message.subject }
       if message.matrix and message.matrix.event_id then
         local event_id = message.matrix.event_id:gsub("[%z\1-\31\127]", "")
-          :gsub("\194[\128-\159]", ""):sub(1, 256)
+          :gsub("\194[\128-\159]", "")
+        event_id = utf8_prefix(event_id, 256)
         lines[#lines + 1] = "  Matrix event " .. event_id
       end
       if message.in_reply_to then
