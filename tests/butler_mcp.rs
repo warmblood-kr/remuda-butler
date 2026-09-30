@@ -440,6 +440,43 @@ fn a_single_mail_notice_waits_for_two_quiet_seconds() {
 }
 
 #[test]
+fn root_butler_seeds_three_unread_mails_when_its_pane_is_ready() {
+    let dir = scratch("notice-unread-root");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+    setup_mail_notice_clock(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        state.busy.butler = true
+        for i = 1, 3 do remuda._notice_test_send('butler', 'root restart ' .. i) end
+        -- Fresh daemon state has lost the deposit notice, but not mailbox mail.
+        remuda._butler_bus.notices = {}
+        remuda._butler_bus.notice_seen = {}
+        remuda._butler_bus.unread_seeded = {}
+        remuda._butler_deliver_notices()
+        local before_ready = #state.typed
+        state.busy.butler = false
+        remuda._butler_deliver_notices()
+        local before_debounce = #state.typed
+        state.now = 1.99
+        remuda._butler_deliver_notices()
+        local early = #state.typed
+        state.now = 2
+        remuda._butler_deliver_notices()
+        return table.concat({ tostring(before_ready), tostring(before_debounce), tostring(early),
+          tostring(#state.typed), tostring(state.typed[1] and state.typed[1].text) }, '|')
+        "#,
+    );
+    assert_eq!(
+        got,
+        "0|0|0|1|3 new Butler messages arrived. Read them: remuda butler inbox"
+    );
+}
+
+#[test]
 fn restart_seeds_three_unread_mails_only_when_the_pane_is_ready() {
     let (path, _daemon) = butler_with_member("notice-unread-restart");
     eval(&path, "remuda._butler_inbox('m1')");
