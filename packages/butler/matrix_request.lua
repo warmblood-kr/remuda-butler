@@ -128,6 +128,52 @@ end
 -- The request client and inbound relay must interpret the same on-disk
 -- settings. Normalize every line here so CRLF and surrounding whitespace do
 -- not change room or sender authorization decisions.
+local warned_config_lines = {}
+local function warn_invalid_config_line(path, line_number, key, value)
+  local warning_key = tostring(path) .. "\0" .. tostring(line_number) .. "\0" .. key .. "\0" .. value
+  if warned_config_lines[warning_key] then return end
+  warned_config_lines[warning_key] = true
+  local safe_value = sanitize_directory_text(value, 128)
+  pcall(function()
+    io.stderr:write("butler ignored invalid Matrix config line " .. tostring(line_number)
+      .. " (" .. key .. "=" .. safe_value .. ")\n")
+  end)
+end
+
+local function config_valid_room_id(value)
+  return type(value) == "string" and value:match("^!%S+:%S+$") ~= nil
+end
+
+local function config_valid_room_alias(value)
+  if type(value) ~= "string" or #value > 255 or value:find("[%c%s/]") then return false end
+  local localpart, server = value:match("^#([^:]+):(.+)$")
+  return localpart ~= nil and localpart ~= "" and server ~= nil and server ~= ""
+end
+
+local function config_valid_server(value)
+  if type(value) ~= "string" or value == "" or #value > 260 or value:find("[%c%s/@#?]") then return false end
+  local address, port = value:match("^%[([%x:]+)%]:(%d+)$")
+  if not address then address = value:match("^%[([%x:]+)%]$") end
+  if address then
+    if not address:find(":", 1, true) then return false end
+    if port and (tonumber(port) < 1 or tonumber(port) > 65535) then return false end
+    return true
+  end
+  local host, numeric_port = value:match("^([^:]+):(%d+)$")
+  if not host then
+    host = value:match("^([^:]+)$")
+    numeric_port = ""
+  end
+  if not host or host == "" or #host > 253 or host:find("%.%.") then return false end
+  if host:sub(1, 1) == "." or host:sub(-1) == "." then return false end
+  if numeric_port ~= "" and (tonumber(numeric_port) < 1 or tonumber(numeric_port) > 65535) then return false end
+  for label in host:gmatch("[^.]+") do
+    if #label > 63 or (not label:match("^[A-Za-z0-9][A-Za-z0-9%-]*[A-Za-z0-9]$")
+      and not label:match("^[A-Za-z0-9]$")) then return false end
+  end
+  return true
+end
+
 local function read_config(path)
   local contents, err = read_file(path, "config")
   if not contents then return nil, err end
@@ -145,7 +191,8 @@ local function read_config(path)
     sender = trim(sender)
     if sender ~= "" then allowed[sender] = true end
   end
-  local opts, extra_rooms = {}, {}
+  local opts, extra_rooms, deny_room_ids, deny_room_aliases, deny_servers = {}, {}, {}, {}, {}
+  local room_mode = "allowlist"
   for i = 5, #lines do
     local key, value = lines[i]:match("^([^=]+)=(.*)$")
     if key then
@@ -154,8 +201,28 @@ local function read_config(path)
         local room = value:match("^(%S+)")
         local how = value:match("%s+how=(%S+)") or "operator"
         local alias = value:match("%s+alias=(%S+)")
-        if room and room:match("^!%S+:%S+$") then
+        if room and config_valid_room_id(room) then
           extra_rooms[#extra_rooms + 1] = { room = room, how = how, alias = alias }
+        end
+      elseif key == "rooms" then
+        if value == "open" or value == "allowlist" then
+          room_mode = value
+        else
+          warn_invalid_config_line(path, i, key, value)
+        end
+      elseif key == "deny_room" then
+        if config_valid_room_id(value) then
+          deny_room_ids[value] = true
+        elseif config_valid_room_alias(value) then
+          deny_room_aliases[value] = true
+        else
+          warn_invalid_config_line(path, i, key, value)
+        end
+      elseif key == "deny_server" then
+        if config_valid_server(value) then
+          deny_servers[value:lower()] = true
+        else
+          warn_invalid_config_line(path, i, key, value)
         end
       else
         opts[key] = value
@@ -215,6 +282,8 @@ local function read_config(path)
   return {
     base = base, room = lines[2], home_room = lines[2], all_room = all_room,
     rooms = rooms, room_how = room_how, room_aliases = room_aliases,
+    rooms_mode = room_mode, deny_room_ids = deny_room_ids,
+    deny_room_aliases = deny_room_aliases, deny_servers = deny_servers,
     self_mxid = lines[3], allowed_senders = allowed,
     butler_senders = butler_senders,
     use_messages = mode == "1" or mode == "true" or mode == "messages" or mode == "fallback",
@@ -234,6 +303,29 @@ local function valid_room_alias(alias)
   return localpart ~= nil and localpart ~= "" and server ~= nil and server ~= ""
 end
 matrix.valid_room_alias = valid_room_alias
+
+local function server_part(value, prefix)
+  if type(value) ~= "string" then return nil end
+  local server = value:match("^" .. prefix .. "[^:]+:(.+)$")
+  if server and server ~= "" then return server:lower() end
+  return nil
+end
+
+function matrix.invite_is_denied(conf, room_id, alias, inviter)
+  if type(conf) ~= "table" then return false end
+  local deny_room_ids = type(conf.deny_room_ids) == "table" and conf.deny_room_ids or {}
+  local deny_room_aliases = type(conf.deny_room_aliases) == "table" and conf.deny_room_aliases or {}
+  local deny_servers = type(conf.deny_servers) == "table" and conf.deny_servers or {}
+  if type(room_id) == "string" and deny_room_ids[room_id] then return true end
+  if type(alias) == "string" and deny_room_aliases[alias] then return true end
+  local room_server = server_part(room_id, "!")
+  local inviter_server = server_part(inviter, "@")
+  local alias_server = server_part(alias, "#")
+  if (room_server and deny_servers[room_server])
+    or (inviter_server and deny_servers[inviter_server])
+    or (alias_server and deny_servers[alias_server]) then return true end
+  return false
+end
 
 local function write_config_text(path, text)
   if not remuda.fs or type(remuda.fs.write_atomic) ~= "function" then

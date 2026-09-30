@@ -652,6 +652,10 @@ local function invite_fixture(senders, extra)
   return dir, path
 end
 
+local function open_invite_fixture(extra)
+  return invite_fixture(OWNER, "rooms=open\n" .. (extra or ""))
+end
+
 local function read_text(path)
   local file = assert(io.open(path, "rb"))
   local text = file:read("a")
@@ -663,6 +667,58 @@ local function room_line(path, room)
   for line in read_text(path):gmatch("[^\n]+") do
     if line:match("^room=(%S+)") == room then return line end
   end
+end
+
+local function test_open_room_config_and_deny_matching()
+  local default_dir, default_path = invite_fixture()
+  local default_conf = assert(matrix.read_config(default_path))
+  assert(default_conf.rooms_mode == "allowlist", "missing rooms config must default to allowlist")
+  remove_dir(default_dir)
+
+  local dir, path = open_invite_fixture(table.concat({
+    "deny_room=!blocked:example.org",
+    "deny_room=#blocked:example.org",
+    "deny_server=room-denied.example",
+    "deny_server=inviter-denied.example",
+    "deny_server=alias-denied.example",
+  }, "\n") .. "\n")
+  local conf, err = matrix.read_config(path)
+  assert(conf, "valid open-room config must parse: " .. tostring(err))
+  assert(conf.rooms_mode == "open", "rooms=open must select open mode")
+  assert(conf.deny_room_ids["!blocked:example.org"], "deny_room room IDs must be recorded")
+  assert(conf.deny_room_aliases["#blocked:example.org"], "deny_room aliases must be recorded")
+  assert(conf.deny_servers["room-denied.example"], "deny_server hosts must be recorded")
+  assert(matrix.invite_is_denied(conf, "!blocked:example.org", nil, STRANGER),
+    "the denied room ID must match")
+  assert(matrix.invite_is_denied(conf, NEW, "#blocked:example.org", STRANGER),
+    "the denied canonical alias must match")
+  assert(matrix.invite_is_denied(conf, "!x:room-denied.example", nil, STRANGER),
+    "the room server must match")
+  assert(matrix.invite_is_denied(conf, NEW, nil, "@mallory:inviter-denied.example"),
+    "the inviter server must match")
+  assert(matrix.invite_is_denied(conf, NEW, "#x:alias-denied.example", STRANGER),
+    "the alias server must match")
+  assert(not matrix.invite_is_denied(conf, NEW, "#x:allowed.example", STRANGER),
+    "a non-denied room and server must not match")
+  remove_dir(dir)
+end
+
+local function test_invalid_open_room_config_lines_are_ignored_with_one_warning()
+  local dir, path = invite_fixture(OWNER,
+    "rooms=unrecognized\n deny_room=!bad value\ndeny_room=#invalid:\n"
+      .. "deny_server=bad\27[31mhost\ndeny_server=example.org:\n")
+  local original_stderr, warnings = io.stderr, {}
+  io.stderr = { write = function(_, message) warnings[#warnings + 1] = message; return true end }
+  local conf, err = matrix.read_config(path)
+  local again, again_err = matrix.read_config(path)
+  io.stderr = original_stderr
+  assert(conf and again, "invalid optional lines must not invalidate the config: " .. tostring(err or again_err))
+  assert(conf.rooms_mode == "allowlist", "an invalid rooms value must leave the safe default")
+  assert(next(conf.deny_room_ids) == nil and next(conf.deny_room_aliases) == nil
+    and next(conf.deny_servers) == nil, "invalid deny values must not widen a match")
+  assert(#warnings == 5, "each invalid line must warn once across config reloads")
+  assert(not table.concat(warnings):find("\27", 1, true), "warning text must be terminal-sanitized")
+  remove_dir(dir)
 end
 
 local function test_config_add_room_pads_short_config()
@@ -1045,10 +1101,6 @@ local function test_agent_invite_is_not_joined()
   assert(read_text(path) == before, "an agent invite must not change the config")
   relay:stop()
   remove_dir(dir)
-end
-
-local function open_invite_fixture(extra)
-  return invite_fixture(OWNER, "rooms=open\n" .. (extra or ""))
 end
 
 local function invite_with_state(room, inviter, alias)
@@ -2044,6 +2096,8 @@ for _, case in ipairs({
   { "test_long_invite_identifiers_dedupe_home_notice", test_long_invite_identifiers_dedupe_home_notice },
   { "test_invite_home_notice_cap_adds_one_summary", test_invite_home_notice_cap_adds_one_summary },
   { "test_agent_invite_is_not_joined", test_agent_invite_is_not_joined },
+  { "test_open_room_config_and_deny_matching", test_open_room_config_and_deny_matching },
+  { "test_invalid_open_room_config_lines_are_ignored_with_one_warning", test_invalid_open_room_config_lines_are_ignored_with_one_warning },
   { "test_open_mode_stranger_invite_joins_and_notifies_once", test_open_mode_stranger_invite_joins_and_notifies_once },
   { "test_open_mode_denies_room_alias_room_server_and_inviter_server", test_open_mode_denies_room_alias_room_server_and_inviter_server },
   { "test_open_mode_sender_allowlist_still_quarantines", test_open_mode_sender_allowlist_still_quarantines },
