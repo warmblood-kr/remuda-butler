@@ -95,10 +95,21 @@ local function read_config(path)
     sender = trim(sender)
     if sender ~= "" then allowed[sender] = true end
   end
-  local opts = {}
+  local opts, extra_rooms = {}, {}
   for i = 5, #lines do
     local key, value = lines[i]:match("^([^=]+)=(.*)$")
-    if key then opts[trim(key)] = trim(value) end
+    if key then
+      key, value = trim(key), trim(value)
+      if key == "room" then
+        local room = value:match("^(%S+)")
+        local how = value:match("%s+how=(%S+)") or "operator"
+        if room and room:match("^!%S+:%S+$") then
+          extra_rooms[#extra_rooms + 1] = { room = room, how = how }
+        end
+      else
+        opts[key] = value
+      end
+    end
   end
   local mode = (lines[5] or ""):lower()
   local timeout = tonumber(lines[6]) or 30000
@@ -134,15 +145,22 @@ local function read_config(path)
   if all_room == "" then all_room = nil end
   if all_room == lines[2] then return nil, "HOME and ALL-BUTLERS rooms must be different" end
   local rooms = { [lines[2]] = "home" }
+  local room_how = {}
   if all_room then
     if mode == "1" or mode == "true" or mode == "messages" or mode == "fallback" then
       return nil, "ALL-BUTLERS room requires /sync; messages fallback supports HOME only"
     end
     rooms[all_room] = "all"
   end
+  for _, extra in ipairs(extra_rooms) do
+    if extra.room ~= lines[2] and extra.room ~= all_room then
+      rooms[extra.room] = "joined"
+      room_how[extra.room] = extra.how
+    end
+  end
   return {
     base = base, room = lines[2], home_room = lines[2], all_room = all_room,
-    rooms = rooms,
+    rooms = rooms, room_how = room_how,
     self_mxid = lines[3], allowed_senders = allowed,
     butler_senders = butler_senders,
     use_messages = mode == "1" or mode == "true" or mode == "messages" or mode == "fallback",
@@ -150,6 +168,73 @@ local function read_config(path)
   }
 end
 matrix.read_config = read_config
+
+local function valid_room_id(room)
+  return type(room) == "string" and room:match("^!%S+:%S+$") ~= nil
+end
+
+local function write_config_text(path, text)
+  if not remuda.fs or type(remuda.fs.write_atomic) ~= "function" then
+    return nil, "atomic Matrix config writes are unavailable"
+  end
+  local ok, wrote, err = pcall(remuda.fs.write_atomic, path, text, { private = true })
+  if not ok then return nil, tostring(wrote) end
+  if not wrote then return nil, tostring(err or "could not write Matrix config") end
+  return true
+end
+
+local function each_raw_line(contents, visit)
+  local start = 1
+  while start <= #contents do
+    local newline = contents:find("\n", start, true)
+    local finish = newline or (#contents + 1)
+    local raw = contents:sub(start, finish - 1)
+    local line = raw:gsub("\r$", "")
+    visit(raw, line, newline and "\n" or "")
+    start = finish + 1
+  end
+end
+
+local function room_line_id(line)
+  return line:match("^%s*room=(%S+)")
+end
+
+function matrix.config_add_room(path, room, how)
+  if not valid_room_id(room) then return nil, "invalid Matrix room ID" end
+  local conf, err = read_config(path)
+  if not conf then return nil, err end
+  if room == conf.home_room or room == conf.all_room then
+    return nil, "HOME and ALL rooms can't be added"
+  end
+  if conf.rooms[room] ~= nil then return true end
+  if how ~= "owner-invite" and how ~= "operator" then how = "operator" end
+  local contents
+  contents, err = read_file(path, "config")
+  if not contents then return nil, err end
+  local suffix = (#contents > 0 and contents:sub(-1) ~= "\n") and "\n" or ""
+  return write_config_text(path, contents .. suffix .. "room=" .. room .. " how=" .. how .. "\n")
+end
+
+function matrix.config_remove_room(path, room)
+  local conf, err = read_config(path)
+  if not conf then return nil, err end
+  if room == conf.home_room or room == conf.all_room then
+    return nil, "HOME and ALL rooms can't be removed"
+  end
+  local contents
+  contents, err = read_file(path, "config")
+  if not contents then return nil, err end
+  local kept, removed = {}, false
+  each_raw_line(contents, function(raw, line, ending)
+    if room_line_id(line) == room then
+      removed = true
+    else
+      kept[#kept + 1] = raw .. ending
+    end
+  end)
+  if not removed then return true end
+  return write_config_text(path, table.concat(kept))
+end
 
 local function config()
   local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths
@@ -180,7 +265,7 @@ end
 function matrix.room_allowed(room)
   local conf, err = config()
   if not conf then return false, err end
-  return room == conf.home_room or (conf.all_room ~= nil and room == conf.all_room)
+  return conf.rooms[room] ~= nil
 end
 
 function matrix.room_kind(room)
@@ -356,12 +441,12 @@ function matrix.request(args, on_done)
   local encoded_room = path:match("/rooms/([^/?]+)")
   if encoded_room then
     local path_room = percent_decode(encoded_room)
-    if not path_room or (path_room ~= conf.home_room and path_room ~= conf.all_room) then
+    if not path_room or conf.rooms[path_room] == nil then
       report_error(done, "room is outside the configured Matrix allowlist")
       return { cancel = function() end }
     end
   end
-  if args.room ~= nil and args.room ~= conf.home_room and args.room ~= conf.all_room then
+  if args.room ~= nil and conf.rooms[args.room] == nil then
     report_error(done, "room is outside the configured Matrix allowlist")
     return { cancel = function() end }
   end
@@ -430,7 +515,7 @@ function matrix.same_room(room, event_id, on_done)
     report_error(done, conf_error)
     return { cancel = function() end }
   end
-  if room ~= conf.home_room and room ~= conf.all_room then
+  if conf.rooms[room] == nil then
     report_error(done, "room is outside the configured Matrix allowlist")
     return { cancel = function() end }
   end
