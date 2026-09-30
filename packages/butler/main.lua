@@ -593,11 +593,16 @@ end
 -- when absent so the CLI can explain what is missing. Start the relay only
 -- when both credential files are readable; otherwise it stays inactive and
 -- the CLI can guide the owner through setup.
-local token_path = resolve_path("REMUDA_BUTLER_TOKEN", "token", "token file")
-local config_path = resolve_path("REMUDA_BUTLER_CONFIG", "config", "config file")
+local resolved_token_path = resolve_path("REMUDA_BUTLER_TOKEN", "token", "token file")
+local resolved_config_path = resolve_path("REMUDA_BUTLER_CONFIG", "config", "config file")
+remuda._butler_matrix_paths = {
+  token_path = resolved_token_path,
+  config_path = resolved_config_path,
+}
 
-remuda._butler_matrix_paths = { token_path = token_path, config_path = config_path }
-if file_exists(token_path) and file_exists(config_path) then
+local token_path, config_path = nil, nil
+if file_exists(resolved_token_path) and file_exists(resolved_config_path) then
+  token_path, config_path = resolved_token_path, resolved_config_path
   remuda._butler_matrix_config = { token_path = token_path, config_path = config_path }
 else
   remuda._butler_matrix_config = nil
