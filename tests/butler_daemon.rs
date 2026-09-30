@@ -7281,6 +7281,146 @@ done
     drop(daemon);
 }
 
+/// A fake Codex already on gpt-6-luna whose /compact runs longer than the
+/// completion timeout (as on 2026-09-30: 45-55 s against a 45 s budget).
+/// "slow" stays working, then drops the context; "stuck" goes idle without a
+/// drop. Butler must wait out the slow one without a fail mail, and must not
+/// call the stuck one a failure: its outcome is only not confirmed.
+#[test]
+#[cfg(unix)]
+fn butler_codex_compaction_waits_for_a_slow_compact_instead_of_failing() {
+    let dir = scratch_dir("butler-slow-codex");
+    let (token_path, config_path) =
+        butler_config(&dir, "slow-codex", "http://127.0.0.1:1", "!room:example.org", "@butler:example.org", "");
+    let token_str = token_path.to_string_lossy().to_string();
+    let config_str = config_path.to_string_lossy().to_string();
+    let data_home = dir.join("data");
+    let mods = PathBuf::from(std::env::var_os("XDG_DATA_HOME").expect("XDG_DATA_HOME"));
+    std::fs::create_dir_all(data_home.join("remuda/butler")).expect("data home");
+    let _ = std::os::unix::fs::symlink(mods.join("remuda/mods"), data_home.join("remuda/mods"));
+    let data_str = data_home.to_string_lossy().to_string();
+    let daemon = Daemon::spawn_with_env(
+        &dir,
+        &[
+            ("REMUDA_BUTLER_TOKEN", token_str.as_str()),
+            ("REMUDA_BUTLER_CONFIG", config_str.as_str()),
+            ("XDG_DATA_HOME", data_str.as_str()),
+            ("HOME", dir.to_string_lossy().as_ref()),
+        ],
+    );
+    let path = daemon::socket_path_in(&dir, "s");
+    eval(&path, r#"remuda._butler_argv = {"sh", "-c", "while read line; do :; done"}"#);
+    eval(&path, "remuda._butler_skip_relay = true");
+    let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let trace_path = dir.join("compaction-trace.log");
+    eval(&path, &format!("remuda._butler_compaction_trace_path = {}", lua_raw_string(&trace_path.to_string_lossy())));
+
+    let script = dir.join("slow-codex.sh");
+    std::fs::write(
+        &script,
+        r#"#!/bin/bash
+log=$1
+scenario=$2
+stty -icanon -echo min 1 time 0 2>/dev/null
+ctx=500000; busy=""; line=""
+paint() { printf '\033[H\033[2JMODEL:gpt-6-luna CTX:%s\n%s\n› Ask Codex to do anything\n\n  GPT-6-Luna high · /work\n' "$ctx" "$busy"; }
+paint
+while IFS= read -r -s -n1 -d '' c; do
+  if [ "$c" = $'\r' ] || [ "$c" = $'\n' ]; then
+    [ -z "$line" ] && continue
+    printf 'CMD:%s\n' "$line" >> "$log"
+    if [ "$line" = /compact ] && [ "$scenario" = slow ]; then
+      busy="• Compacting"; paint; sleep 3; busy=""; ctx=200000
+    fi
+    line=""; paint
+  else
+    line="$line$c"
+  fi
+done
+"#,
+    )
+    .expect("write slow fake Codex");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    eval(
+        &path,
+        &format!(
+            r#"
+      remuda._butler_compaction_config = {{critical=400000, cooldown_ticks=0, capture_gap=0,
+        completion_timeout=1, claude_completion_timeout=0.2, failure_cooldown_seconds=0, input_settle=0.01}}
+      local prior_contributions = remuda.contributions
+      remuda.contributions = function(point)
+        if point == "butler.agent" then
+          return {{{{id="codex", entry={{working=function(screen)
+            return screen:find("Compacting", 1, true) ~= nil
+          end}}}}}}
+        end
+        return prior_contributions(point)
+      end
+      remuda._butler_prompt_is_empty = function(_, screen)
+        if screen:find("Ask Codex to do anything", 1, true) then return "EMPTY" end
+        return "NON-EMPTY"
+      end
+      remuda._butler_telemetry_for = function(agent)
+        local screen = remuda.capture(agent.session_name)
+        return {{context_used=screen:match("CTX:%s*(%d+)"), model=screen:match("MODEL:([^ %c]+)")}}
+      end
+      remuda.session = function() return {{is_busy=false, attached=false}} end
+      remuda._butler_send = function(from, _, message)
+        remuda._fake_reports = remuda._fake_reports or {{}}
+        table.insert(remuda._fake_reports, from .. ": " .. message)
+      end
+      remuda._fake_codex = function(name, log, scenario)
+        remuda.new(name, {{"bash", {script:?}, log, scenario}}, nil, {{}})
+        remuda._butler_bus.agents[name] = {{id=name .. "-id", kind="codex", session_name=name}}
+      end
+    "#,
+            script = script.to_string_lossy(),
+        ),
+    );
+
+    let reports = || eval(&path, "return table.concat(remuda._fake_reports or {}, '\\n')");
+    let settle = |name: &str, done: &dyn Fn(&str) -> bool, what: &str| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let in_progress = eval(&path, &format!(
+                "local m = remuda._butler_compaction_members_state or {{}}; local s = m[{:?}] or {{}}; return tostring(s.compaction_in_progress == true)",
+                format!("{name}-id")
+            ));
+            let screen = capture(&path, name);
+            if in_progress == "false" && done(&screen) { return screen; }
+            assert!(Instant::now() < deadline, "{name}: {what} never happened. screen:\n{screen}\nreports: {}", reports());
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let start = |name: &str, scenario: &str| {
+        let log = dir.join(format!("{name}.log"));
+        eval(&path, &format!("remuda._fake_codex({name:?}, {:?}, {scenario:?})", log.to_string_lossy()));
+        wait_for(&path, name, "Ask Codex to do anything");
+    };
+
+    // 1. Slow: still compacting at the timeout, then done. No fail mail.
+    start("cx-slow", "slow");
+    assert_eq!(eval(&path, "return remuda.butler.compact('cx-slow')"), "started");
+    settle("cx-slow", &|screen| screen.contains("CTX:200000"), "the slow compaction finishing");
+    let got = reports();
+    assert!(!got.contains("Compaction failed"), "a slow compaction that finished is not a failure: {got}");
+    let trace = std::fs::read_to_string(&trace_path).unwrap_or_default();
+    assert!(trace.contains("completed_after_timeout"), "the late finish must be traced: {trace}");
+
+    // 2. Stuck: idle at the timeout, no drop seen: "not confirmed yet".
+    start("cx-stuck", "stuck");
+    assert_eq!(eval(&path, "return remuda.butler.compact('cx-stuck')"), "started");
+    settle("cx-stuck", &|_| reports().contains("cx-stuck:"), "a report for the stuck compaction");
+    let got = reports();
+    assert!(got.contains("cx-stuck: Compaction not confirmed yet: compaction context did not drop"),
+        "an unseen drop is unknown, not failed: {got}");
+    assert!(!got.contains("cx-stuck: Compaction failed"), "no fail wording for an unknown outcome: {got}");
+    drop(daemon);
+}
+
 /// Same real-process substitution as
 /// `butler_watchdog_relaunches_a_session_that_really_died`, but the witness
 /// here is the trace FILE `_butler_session_trace` in `packages/butler/init.lua`
