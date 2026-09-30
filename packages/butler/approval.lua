@@ -104,6 +104,12 @@ function approval.attach(state, persist_fn, post_fn)
   return true
 end
 
+function approval.operator_caller()
+  if type(remuda.caller) ~= "function" then return false end
+  local ok, caller = pcall(remuda.caller)
+  return ok and type(caller) == "table" and caller.kind == "outside"
+end
+
 function approval.list()
   if not attached then return {} end
   approval.sweep()
@@ -304,7 +310,10 @@ function approval.sweep(now)
 end
 
 local function fail(message)
-  if type(remuda.fail) == "function" then return remuda.fail(message, 1) end
+  if type(remuda.fail) == "function" then
+    local result = remuda.fail(message, 1)
+    if result ~= nil then return result end
+  end
   return message
 end
 
@@ -336,7 +345,7 @@ function approval.cli(args, agent)
     if #args ~= 2 or type(args[2]) ~= "string" or args[2] == "" then
       return fail(usage(verb) .. "\nNext: remuda butler approvals")
     end
-    if agent then
+    if agent or not approval.operator_caller() then
       return fail(verb .. " is operator-only. Next: wait for the owner's answer by mail; remuda butler inbox")
     end
     local ok, err, rec = approval.answer(args[2], verb, "operator (terminal)")

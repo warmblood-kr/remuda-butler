@@ -8040,6 +8040,24 @@ fn butler_matrix_cli_client_disconnect_cancels_active_word() {
 fn butler_matrix_cli_refuses_send_dash_and_fails_cleanly_without_pending() {
     let dir = scratch_dir("butler-matrix-cli-compat");
     let (_daemon, path) = butler_cli_test_daemon(&dir);
+    for verb in ["approve", "deny"] {
+        let result = remuda_timed_without_butler_identity(&dir, &["-s", "s", "butler", verb, "X"]);
+        assert!(!result.status.success(), "{} without Matrix config must fail", verb);
+        assert!(String::from_utf8_lossy(&result.stderr).contains("Matrix relay is not running."),
+            "{} without Matrix config must report the relay error: {}", verb,
+            String::from_utf8_lossy(&result.stderr));
+        assert!(!String::from_utf8_lossy(&result.stdout).contains("remuda butler — coordination"),
+            "{} without Matrix config must not fall back to generic Butler usage: {}", verb,
+            String::from_utf8_lossy(&result.stdout));
+    }
+    let approval_help = remuda_timed_without_butler_identity(&dir,
+        &["-s", "s", "butler", "approvals", "--help"]);
+    assert!(approval_help.status.success(), "approvals --help must succeed");
+    assert!(String::from_utf8_lossy(&approval_help.stdout).contains("Usage: remuda butler approvals"),
+        "approvals --help must show its own usage: {}", String::from_utf8_lossy(&approval_help.stdout));
+    assert!(!String::from_utf8_lossy(&approval_help.stdout).contains("remuda butler — coordination"),
+        "approvals --help must not fall back to generic Butler usage: {}",
+        String::from_utf8_lossy(&approval_help.stdout));
     let room = "!cli:example.org";
     let (token_path, config_path) = butler_config(&dir, "cli", "http://matrix.example.org",
         room, "@bot:example.org", "");

@@ -106,8 +106,11 @@ posts one request to HOME instead of joining. The owner answers with a ✅ or
 Only an allowlisted human sender in HOME counts. A bare `yes` does nothing.
 The owner can also answer from the terminal: `remuda butler approvals` lists
 the open requests, and `remuda butler approve ID` or `deny ID` answers one
-(operator-only). An approved request joins the room ID resolved at request
-time and writes `room=ID how=approved`. The asker gets mail for every outcome:
+(operator-only). Terminal approve/deny require a caller outside any Remuda
+session (core caller identity); clearing the environment no longer passes,
+and this remains a same-UID policy, not an OS boundary. The Matrix answer path
+is bound to the owner's MXID. An approved request joins the room ID resolved
+at request time and writes `room=ID how=approved`. The asker gets mail for every outcome:
 approved, denied or expired. A repeat ask for the same room returns the same
 request. Each agent may have 3 open requests, and there may be 5 in total.
 Requests live in the relay state file.

@@ -2210,17 +2210,35 @@ local function test_terminal_approve_operator_only()
   approval_env(nil, function(env)
     local id = file_request(env, NEW)
     local cli = assert(approval().cli, "approval.cli backs the approvals/approve/deny verbs")
-    local old_fail, failed = remuda.fail, nil
+    local old_fail, old_caller, failed = remuda.fail, remuda.caller, nil
     remuda.fail = function(message, code) failed = { message = message, code = code } return message end
     local ok, err = pcall(function()
-      for _, verb in ipairs({ "approve", "deny" }) do
+      local function caller_kind(kind)
+        if kind == nil then
+          remuda.caller = nil
+        else
+          remuda.caller = function() return { kind = kind, session = "agent1" } end
+        end
+      end
+      local function refused(verb, request_id, agent)
         failed = nil
-        local out = cli({ verb, id }, ASKER)
+        local out = cli({ verb, request_id }, agent)
         local message = failed and failed.message or tostring(out)
         assert(message == verb .. " is operator-only. Next: wait for the owner's answer by mail; remuda butler inbox",
-          "an agent " .. verb .. " must be refused with Next: " .. message)
+          "an unauthorized " .. verb .. " must be refused with Next: " .. message)
+      end
+      for _, verb in ipairs({ "approve", "deny" }) do
+        caller_kind("outside")
+        refused(verb, id, ASKER) -- current_agent still refuses when caller() says outside
+        caller_kind("session")
+        refused(verb, id, nil) -- agent identity has been cleared; caller kind remains authoritative
+        caller_kind("unknown")
+        refused(verb, id, nil)
+        caller_kind(nil)
+        refused(verb, id, nil)
       end
       assert(server_joins(env, NEW) == 0 and is_open(id), "a refused agent approve must leave the request open")
+      caller_kind("outside")
       local listed = tostring(cli({ "approvals" }, nil))
       local agent_listed = tostring(cli({ "approvals" }, ASKER))
       assert(listed:find(id, 1, true) and listed:find(NEW, 1, true)
@@ -2238,14 +2256,24 @@ local function test_terminal_approve_operator_only()
       env.client:pump()
       assert(not failed and tostring(out):find("Approved request " .. id .. " (join " .. NEW .. "); joining now. The result goes to the HOME thread and the asker's mail.", 1, true),
         "the operator approve must succeed with a Next line: " .. tostring(failed and failed.message or out))
+      local denied_id = file_request(env, NEW2)
+      local denied_out = cli({ "deny", denied_id }, nil)
+      assert(tostring(denied_out):find("Denied request " .. denied_id .. " (join " .. NEW2 .. ").", 1, true),
+        "an outside caller must be allowed to deny: " .. tostring(denied_out))
       assert(tostring(cli({ "approvals" }, nil)) == "No open approval requests.\nNext: nothing to do; agent requests appear here.",
         "an empty approval list must give the idle Next instruction")
       failed = nil
       cli({ "deny", id }, nil)
       assert(failed and failed.message == "Request " .. id .. " was already applied.\nNext: remuda butler approvals",
         "an answered request must report its current status: " .. tostring(failed and failed.message))
+      remuda.fail = function() return nil end
+      local no_request = cli({ "approve", "NOPE" }, nil)
+      assert(tostring(no_request):find("No such request.\nNext: remuda butler approvals", 1, true),
+        "approval errors must stay handled if remuda.fail returns nil: " .. tostring(no_request))
+      remuda.fail = function(message, code) failed = { message = message, code = code } return message end
     end)
     remuda.fail = old_fail
+    remuda.caller = old_caller
     if not ok then error(err, 0) end
     assert(server_joins(env, NEW) == 1 and mails_to(env, ASKER, "Approved; joined") == 1
       and mails_to(env, ASKER, "(request " .. id .. ", " .. NEW .. ")") == 1,
