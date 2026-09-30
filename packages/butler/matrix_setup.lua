@@ -266,9 +266,6 @@ local function resolve_outputs(options)
       "Start its own daemon with the setup files:",
       "  REMUDA_BUTLER_TOKEN=\"" .. test_dir .. "/token\" REMUDA_BUTLER_CONFIG=\""
         .. test_dir .. "/config\" remuda -s matrix-test daemon",
-      "The relay starts when the Butler module starts or reloads (packages/butler/init.lua:16-30, 88-91).",
-      "Trigger it now with: remuda -e \"remuda.reload('butler')\"",
-      "For the test Butler, run: remuda -s matrix-test -e \"remuda.reload('butler')\"",
     }
     return nil, table.concat(lines, "\n")
   end
