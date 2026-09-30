@@ -4133,8 +4133,8 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
           local rule = string.rep("─", 20)
           local screens = {{
             ["t-claude"] = {{
-              rule .. "\n Accessing workspace:\n\n ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm · Esc to cancel",
-              rule .. "\n Accessing workspace:\n\n ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm · Esc to cancel",
+              rule .. "\n Accessing workspace:\n\n " .. {t_claude_root:?} .. "\n\n ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm · Esc to cancel",
+              rule .. "\n Accessing workspace:\n\n " .. {t_claude_root:?} .. "\n\n ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm · Esc to cancel",
               rule .. "\n❯ \n" .. rule,
             }},
             ["t-claude-launch"] = {{
@@ -4293,6 +4293,7 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
             home = home.to_string_lossy(),
             trace = trace.to_string_lossy(),
             claude_trust_capture = claude_trust_capture,
+            t_claude_root = home.join("t-claude").to_string_lossy(),
         ),
     );
 
