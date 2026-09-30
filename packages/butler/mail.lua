@@ -543,7 +543,9 @@ local function inbox(name)
       local lines = { "[" .. message.id .. " from " .. message.from.host .. "/"
         .. message.from.session .. " · " .. message.created_at .. "] " .. message.subject }
       if message.matrix and message.matrix.event_id then
-        lines[#lines + 1] = "  Matrix event " .. message.matrix.event_id
+        local event_id = message.matrix.event_id:gsub("[%z\1-\31\127]", "")
+          :gsub("\194[\128-\159]", ""):sub(1, 256)
+        lines[#lines + 1] = "  Matrix event " .. event_id
       end
       if message.in_reply_to then
         local root = message.references and message.references[1]

@@ -98,14 +98,17 @@ end
 local function strip_reply_fallback(body)
   local lines = {}
   for line in (body .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
-  local index = 1
-  if lines[index] and lines[index]:match("^>") then
-    while lines[index] and lines[index]:match("^>") do index = index + 1 end
-    if lines[index] == "" then index = index + 1 end
-  end
+  local quote = lines[1] and lines[1]:match("^> <[@*][^>]*> (.*)$")
+  if not quote then return body end
+  local index = 2
+  while lines[index] and lines[index]:match("^>") do index = index + 1 end
+  if lines[index] == "" then index = index + 1 end
   local reply = {}
   for i = index, #lines do reply[#reply + 1] = lines[i] end
-  return table.concat(reply, "\n")
+  if reply[#reply] == "" then table.remove(reply) end
+  local text = table.concat(reply, "\n")
+  if text:match("^%s*$") then return body end
+  return "> " .. quote:sub(1, 120) .. "\n" .. text
 end
 
 local function timestamp(event)
@@ -180,6 +183,17 @@ local function media_uri(content)
   if type(content.file) == "table" and type(content.file.url) == "string" then return content.file.url end
 end
 
+local function safe_media_field(value)
+  value = type(value) == "string" and value or "unknown"
+  value = value:gsub("[%z\1-\31\127]", ""):gsub("\194[\128-\159]", "")
+  return value:sub(1, 256)
+end
+
+local function valid_media_uri(value)
+  return type(value) == "string"
+    and value:match("^mxc://[A-Za-z0-9%.:%-]+/[A-Za-z0-9_%-]+$") ~= nil
+end
+
 local MEDIA_MSGTYPES = {
   ["m.image"] = "image", ["m.file"] = "file",
   ["m.video"] = "video", ["m.audio"] = "audio",
@@ -189,11 +203,20 @@ local function media_mail_body(content, kind)
   local info = type(content.info) == "table" and content.info or {}
   local filename = type(content.filename) == "string" and content.filename or content.body
   local mimetype = type(info.mimetype) == "string" and info.mimetype or "unknown"
-  local size = type(info.size) == "number" and tostring(info.size) .. " bytes" or "unknown"
-  local mxc = media_uri(content) or "unavailable"
-  return table.concat({ "media: " .. kind, "filename: " .. filename,
-    "mimetype: " .. mimetype, "size: " .. size, "mxc: " .. mxc,
-    "Next: remuda butler matrix download " .. mxc .. " -o PATH" }, "\n")
+  filename, mimetype = safe_media_field(filename), safe_media_field(mimetype)
+  local size = info.size
+  local lines = { "media: " .. kind, "filename: " .. filename, "mimetype: " .. mimetype }
+  if type(size) == "number" and size >= 0 and size < 9007199254740992 and size % 1 == 0 then
+    lines[#lines + 1] = "size: " .. string.format("%.0f", size) .. " bytes"
+  end
+  local mxc = media_uri(content)
+  if valid_media_uri(mxc) then
+    lines[#lines + 1] = "mxc: " .. mxc
+    lines[#lines + 1] = "Next: remuda butler matrix -o PATH download " .. mxc
+  else
+    lines[#lines + 1] = "mxc: (invalid)"
+  end
+  return table.concat(lines, "\n")
 end
 
 local function add_processed(state, id)
@@ -707,6 +730,17 @@ function relay.new(options)
     delivery_retry_timers[id] = timer
   end
 
+  local function resolve_pending_thread_context(event)
+    if not event.thread_root then return end
+    local route_mail_id = instance:mail_route_for_event(event.room_id, event.thread_root, event.in_reply_to)
+    local root_mail_id = instance:thread_root_mail_for_event(event.room_id, event.thread_root)
+    local subscription = (state.subscriptions[event.room_id] or {})[event.thread_id]
+    local subscribed_mail_id = type(subscription) == "table" and subscription.mail_id or nil
+    event.context_mail_id = route_mail_id or subscribed_mail_id or event.context_mail_id
+    local reference = root_mail_id or subscribed_mail_id
+    if reference then event.references = { reference } end
+  end
+
   deliver_pending = function(only)
     local ids = only or state.pending_order
     if not ids then
@@ -717,6 +751,7 @@ function relay.new(options)
       for _, id in ipairs(ids) do
         local event = state.pending[id]
         if event and not delivery_retry_waiting[id] then
+          resolve_pending_thread_context(event)
           local ok, result = pcall(deliver, event)
           if ok and result ~= nil then
             if type(result) == "table" and type(result.id) == "string" and result.id ~= "" then
@@ -834,7 +869,8 @@ function relay.new(options)
           state.pending[ev.event_id] = {
             sender = ev.sender, room_id = actual_room, event_id = ev.event_id,
             created_at = timestamp(ev), body = body,
-            thread_root = thread_root, in_reply_to = in_reply_to, mxc = media_uri(content),
+            thread_root = thread_root, in_reply_to = in_reply_to,
+            mxc = valid_media_uri(media_uri(content)) and media_uri(content) or nil,
             room = cfg.rooms[actual_room], room_kind = cfg.rooms[actual_room], context_mail_id = context_mail_id,
             references = references and { references } or nil,
             from_agent = is_agent,

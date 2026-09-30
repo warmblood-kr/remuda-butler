@@ -5,4 +5,4 @@ filename: chart.png
 mimetype: image/png
 size: 12345 bytes
 mxc: mxc://example.org/chart
-Next: remuda butler matrix download mxc://example.org/chart -o PATH
+Next: remuda butler matrix -o PATH download mxc://example.org/chart
