@@ -1322,6 +1322,33 @@ local function test_open_mode_daily_join_cap_quarantines_twenty_first_invite()
   remove_dir(dir)
 end
 
+local function test_open_mode_future_join_timestamps_remain_counted()
+  local dir, path = open_invite_fixture()
+  local timestamps = matrix.json_array({})
+  for index = 1, 20 do
+    timestamps[index] = { room_id = "!future" .. index .. ":example.org", at = os.time() + 3600 }
+  end
+  local state_file = assert(io.open(path .. ".since", "wb"))
+  state_file:write(assert(matrix.encode_json({ auto_join_timestamps = timestamps })))
+  state_file:close()
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  assert(#relay:state().auto_join_timestamps == 20,
+    "future join timestamps must remain counted when the clock moves backward")
+  local room = "!clock-back:example.org"
+  client:sync({ json = { next_batch = "s1",
+    rooms = { invite = invite_with_state(room, STRANGER, "#clock:example.org") } } })
+  client:pump()
+  assert(client:joins(room) == 0, "future timestamps must keep the daily join cap full")
+  local capped
+  for _, item in ipairs(relay:quarantine_list()) do
+    if item.room_id == room and item.reason == "invite_cap" then capped = item end
+  end
+  assert(capped, "an invite while future timestamps remain must be quarantined at the cap")
+  relay:stop()
+  remove_dir(dir)
+end
+
 local function test_open_mode_configured_room_invite_rejoins_and_preserves_line()
   local original = "room=" .. NEW .. " how=operator\n"
   local dir, path = open_invite_fixture(original)
@@ -2805,6 +2832,7 @@ for _, case in ipairs({
   { "test_open_mode_refuses_truncated_denied_inviter", test_open_mode_refuses_truncated_denied_inviter },
   { "test_open_mode_refuses_truncated_alias", test_open_mode_refuses_truncated_alias },
   { "test_open_mode_daily_join_cap_quarantines_twenty_first_invite", test_open_mode_daily_join_cap_quarantines_twenty_first_invite },
+  { "test_open_mode_future_join_timestamps_remain_counted", test_open_mode_future_join_timestamps_remain_counted },
   { "test_open_mode_configured_room_invite_rejoins_and_preserves_line", test_open_mode_configured_room_invite_rejoins_and_preserves_line },
   { "test_open_mode_configured_room_rejoin_honors_deny_cap_and_rollback", test_open_mode_configured_room_rejoin_honors_deny_cap_and_rollback },
   { "test_open_mode_repeated_invite_for_joined_room_rejoins_once", test_open_mode_repeated_invite_for_joined_room_rejoins_once },

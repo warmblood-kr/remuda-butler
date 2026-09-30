@@ -1015,7 +1015,7 @@ function relay.new(options)
     local now, live_auto_joins = os.time(), json.array({})
     for _, item in ipairs(state.auto_join_timestamps or {}) do
       if type(item) == "table" and type(item.room_id) == "string"
-        and type(item.at) == "number" and item.at > now - AUTO_JOIN_WINDOW and item.at <= now then
+        and type(item.at) == "number" and item.at > now - AUTO_JOIN_WINDOW then
         live_auto_joins[#live_auto_joins + 1] = item
       end
     end
