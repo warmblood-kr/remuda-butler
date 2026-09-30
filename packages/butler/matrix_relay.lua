@@ -347,8 +347,11 @@ local function load_state(path)
   for _, item in ipairs(auto_join_timestamps) do
     if type(item) == "table" and valid_room_id(item.room_id)
       and type(item.at) == "number" and item.at >= 1 and item.at % 1 == 0 then
+      local invite_event_id = type(item.invite_event_id) == "string"
+        and #item.invite_event_id <= 512 and not item.invite_event_id:find("[%c%s]")
+        and item.invite_event_id ~= "" and item.invite_event_id or nil
       state.auto_join_timestamps[#state.auto_join_timestamps + 1] = {
-        room_id = item.room_id, at = item.at,
+        room_id = item.room_id, at = item.at, invite_event_id = invite_event_id,
       }
     end
   end
@@ -1021,9 +1024,17 @@ function relay.new(options)
       return false
     end
 
-    local function has_auto_joined_room(room_id)
+    local function has_auto_joined_room(room_id, invite_event_id, room_kind)
       for _, item in ipairs(state.auto_join_timestamps) do
-        if item.room_id == room_id then return true end
+        if item.room_id == room_id then
+          if item.invite_event_id and invite_event_id then
+            if item.invite_event_id == invite_event_id then return true end
+          elseif not item.invite_event_id and room_kind ~= "joined" then
+            return true
+          elseif not item.invite_event_id and not invite_event_id then
+            return true
+          end
+        end
       end
       return false
     end
@@ -1032,9 +1043,8 @@ function relay.new(options)
       local room_kind = cfg.rooms[room_id]
       local open_mode = cfg.rooms_mode == "open"
       if type(invitation) == "table" and room_kind ~= "home" and room_kind ~= "all"
-        and (not open_mode or room_kind == nil) and not joining[room_id]
-        and not (open_mode and has_auto_joined_room(room_id)) then
-        local inviter, matching_invites, same_inviter = nil, 0, true
+        and (not open_mode or room_kind == nil or room_kind == "joined") and not joining[room_id] then
+        local inviter, invite_event_id, matching_invites, same_inviter = nil, nil, 0, true
         local canonical_aliases = {}
         local changed_invite_metadata = false
         local invite_state = invitation.invite_state
@@ -1044,6 +1054,10 @@ function relay.new(options)
             if event.type == "m.room.member" and event.state_key == cfg.self_mxid
               and type(event.content) == "table" and event.content.membership == "invite" then
               matching_invites = matching_invites + 1
+              if type(event.event_id) == "string" and #event.event_id <= 512
+                and not event.event_id:find("[%c%s]") then
+                invite_event_id = event.event_id
+              end
               if type(event.sender) ~= "string" or event.sender == "" then
                 same_inviter = false
               else
@@ -1059,7 +1073,8 @@ function relay.new(options)
             end
           end
         end
-        if matching_invites > 0 or open_mode then
+        if not (open_mode and has_auto_joined_room(room_id, invite_event_id, room_kind))
+          and (matching_invites > 0 or open_mode) then
           local report_inviter = inviter or "unknown inviter"
           if open_mode then
             local raw_inviter = inviter or ""
@@ -1088,8 +1103,13 @@ function relay.new(options)
                 quarantine_invite(room_id, safe_inviter, "invite_cap")
                 auto_join_cap_hits = auto_join_cap_hits + 1
               else
-                local added_room, write_result = matrix.config_add_room(
-                  config_path, room_id, "invite", nil, safe_inviter)
+                local added_room, write_result
+                if room_kind == "joined" then
+                  added_room, write_result = true, false
+                else
+                  added_room, write_result = matrix.config_add_room(
+                    config_path, room_id, "invite", nil, safe_inviter)
+                end
                 if added_room then
                   local wrote = write_result == true
                   if wrote then
@@ -1105,7 +1125,7 @@ function relay.new(options)
                   end
                   local joined_at = os.time()
                   state.auto_join_timestamps[#state.auto_join_timestamps + 1] = {
-                    room_id = room_id, at = joined_at,
+                    room_id = room_id, at = joined_at, invite_event_id = invite_event_id,
                   }
                   local saved, save_error = pcall(persist)
                   if not saved then

@@ -1280,7 +1280,86 @@ local function test_open_mode_daily_join_cap_quarantines_twenty_first_invite()
   remove_dir(dir)
 end
 
-local function test_open_mode_repeated_invite_for_joined_room_does_not_join_again()
+local function test_open_mode_configured_room_invite_rejoins_and_preserves_line()
+  local original = "room=" .. NEW .. " how=operator\n"
+  local dir, path = open_invite_fixture(original)
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  client:sync({ json = { next_batch = "s1",
+    rooms = { invite = invite_with_state(NEW, STRANGER, "#open:example.org") } } })
+  client:pump()
+  assert(client:joins(NEW) == 1,
+    "an open-mode invite for a configured room must run the rejoin path")
+  assert(read_text(path):find(original, 1, true),
+    "a rejoin must preserve the existing room config line")
+  assert(client:messages(HOME, "Joined " .. NEW) == 1,
+    "a successful rejoin must notify HOME as usual")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function test_open_mode_configured_room_rejoin_honors_deny_cap_and_rollback()
+  do
+    local original = "room=" .. NEW .. " how=operator\n"
+    local dir, path = open_invite_fixture(original .. "deny_room=" .. NEW .. "\n")
+    local client, delivered = invite_client(), {}
+    local relay = started_relay(path, client, delivered)
+    client:sync({ json = { next_batch = "s1",
+      rooms = { invite = invite_with_state(NEW, STRANGER, "#open:example.org") } } })
+    client:pump()
+    assert(client:joins(NEW) == 0, "configured room rejoin must still check deny rules")
+    assert(room_line(path, NEW) == original:gsub("\n$", ""), "denial must preserve the configured room line")
+    local denied
+    for _, item in ipairs(relay:quarantine_list()) do
+      if item.room_id == NEW and item.reason == "invite_denied" then denied = item end
+    end
+    assert(denied, "a denied configured-room re-invite must be quarantined")
+    relay:stop()
+    remove_dir(dir)
+  end
+
+  do
+    local original = "room=" .. NEW .. " how=operator\n"
+    local dir, path = open_invite_fixture(original)
+    local timestamps = matrix.json_array({})
+    for index = 1, 20 do
+      timestamps[index] = { room_id = "!used" .. index .. ":example.org", at = os.time() }
+    end
+    local state_file = assert(io.open(path .. ".since", "wb"))
+    state_file:write(assert(matrix.encode_json({ auto_join_timestamps = timestamps })))
+    state_file:close()
+    local client, delivered = invite_client(), {}
+    local relay = started_relay(path, client, delivered)
+    client:sync({ json = { next_batch = "s1",
+      rooms = { invite = invite_with_state(NEW, STRANGER, "#open:example.org") } } })
+    client:pump()
+    assert(client:joins(NEW) == 0, "configured room rejoin must honor the daily cap")
+    assert(room_line(path, NEW) == original:gsub("\n$", ""), "cap refusal must preserve the configured room line")
+    local capped
+    for _, item in ipairs(relay:quarantine_list()) do
+      if item.room_id == NEW and item.reason == "invite_cap" then capped = item end
+    end
+    assert(capped, "a capped configured-room re-invite must be quarantined")
+    relay:stop()
+    remove_dir(dir)
+  end
+
+  do
+    local original = "room=" .. NEW .. " how=operator\n"
+    local dir, path = open_invite_fixture(original)
+    local client, delivered = invite_client(), {}
+    local relay = started_relay(path, client, delivered)
+    client:sync({ json = { next_batch = "s1",
+      rooms = { invite = invite_with_state(NEW, STRANGER, "#open:example.org") } } })
+    client:pump({ error = "M_FORBIDDEN" })
+    assert(client:joins(NEW) == 1, "configured room rejoin must issue the join request")
+    assert(room_line(path, NEW) == original:gsub("\n$", ""), "failed rejoin rollback must preserve the configured room line")
+    relay:stop()
+    remove_dir(dir)
+  end
+end
+
+local function test_open_mode_repeated_invite_for_joined_room_rejoins_once()
   local dir, path = open_invite_fixture("room=" .. NEW .. " how=invite inviter=" .. OWNER .. "\n")
   local client, delivered = invite_client(), {}
   local relay = started_relay(path, client, delivered)
@@ -1289,7 +1368,7 @@ local function test_open_mode_repeated_invite_for_joined_room_does_not_join_agai
   client:pump()
   client:sync({ json = { next_batch = "s2", rooms = { invite = invitation } } })
   client:pump()
-  assert(client:joins(NEW) == 0, "an invite for an already joined room must not auto-join again")
+  assert(client:joins(NEW) == 1, "a configured room invite must rejoin once and dedupe its repeat")
   relay:stop()
   remove_dir(dir)
 end
@@ -2214,7 +2293,9 @@ for _, case in ipairs({
   { "test_open_mode_refuses_truncated_alias", test_open_mode_refuses_truncated_alias },
   { "test_open_mode_sender_allowlist_still_quarantines", test_open_mode_sender_allowlist_still_quarantines },
   { "test_open_mode_daily_join_cap_quarantines_twenty_first_invite", test_open_mode_daily_join_cap_quarantines_twenty_first_invite },
-  { "test_open_mode_repeated_invite_for_joined_room_does_not_join_again", test_open_mode_repeated_invite_for_joined_room_does_not_join_again },
+  { "test_open_mode_configured_room_invite_rejoins_and_preserves_line", test_open_mode_configured_room_invite_rejoins_and_preserves_line },
+  { "test_open_mode_configured_room_rejoin_honors_deny_cap_and_rollback", test_open_mode_configured_room_rejoin_honors_deny_cap_and_rollback },
+  { "test_open_mode_repeated_invite_for_joined_room_rejoins_once", test_open_mode_repeated_invite_for_joined_room_rejoins_once },
   { "test_open_mode_failed_join_rolls_back_config_and_budget", test_open_mode_failed_join_rolls_back_config_and_budget },
   { "test_open_mode_hostile_invite_state_is_refused", test_open_mode_hostile_invite_state_is_refused },
   { "test_open_mode_conflicting_inviter_events_remain_refused", test_open_mode_conflicting_inviter_events_remain_refused },
