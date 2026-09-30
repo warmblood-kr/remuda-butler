@@ -478,6 +478,67 @@ fn root_butler_seeds_three_unread_mails_when_its_pane_is_ready() {
 }
 
 #[test]
+fn a_lead_session_gets_one_seeded_notice_when_ready() {
+    let (path, _daemon) = butler_with_named_agent("notice-unread-lead", "lead1", "fake");
+    eval(
+        &path,
+        "remuda._butler_topic_delegate('report1', 'task', nil, 'fake', 'lead1'); \
+         remuda._butler_inbox('report1')",
+    );
+    setup_mail_notice_clock_for(&path, "lead1");
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        state.busy.lead1 = true
+        remuda._notice_test_send('lead1', 'lead waiting mail')
+        remuda._butler_bus.notices = {}
+        remuda._butler_bus.notice_seen = {}
+        remuda._butler_bus.unread_seeded = {}
+        remuda._butler_deliver_notices()
+        local before_ready = #state.typed
+        state.busy.lead1 = false
+        remuda._butler_deliver_notices()
+        state.now = 2
+        remuda._butler_deliver_notices()
+        return tostring(before_ready) .. '|' .. #state.typed .. '|'
+          .. tostring(state.typed[1] and state.typed[1].text:match(
+            '^Butler message .+ from operator arrived%. Read it: remuda butler inbox$') ~= nil)
+          .. '|' .. #remuda._butler_bus.agents.lead1.children
+        "#,
+    );
+    assert_eq!(got, "0|1|true|1");
+}
+
+#[test]
+fn a_codex_agent_gets_one_seeded_notice_when_ready() {
+    let (path, _daemon) = butler_with_named_agent("notice-unread-codex", "codex1", "codex");
+    setup_mail_notice_clock_for(&path, "codex1");
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        state.busy.codex1 = true
+        remuda._notice_test_send('codex1', 'codex waiting mail')
+        remuda._butler_bus.notices = {}
+        remuda._butler_bus.notice_seen = {}
+        remuda._butler_bus.unread_seeded = {}
+        remuda._butler_deliver_notices()
+        local before_ready = #state.typed
+        state.busy.codex1 = false
+        remuda._butler_deliver_notices()
+        state.now = 2
+        remuda._butler_deliver_notices()
+        return tostring(before_ready) .. '|' .. #state.typed .. '|'
+          .. tostring(state.typed[1] and state.typed[1].text:match(
+            '^Butler message .+ from operator arrived%. Read it: remuda butler inbox$') ~= nil)
+          .. '|' .. remuda._butler_bus.agents.codex1.kind
+        "#,
+    );
+    assert_eq!(got, "0|1|true|codex");
+}
+
+#[test]
 fn restart_seeds_three_unread_mails_only_when_the_pane_is_ready() {
     let (path, _daemon) = butler_with_member("notice-unread-restart");
     eval(&path, "remuda._butler_inbox('m1')");
@@ -772,6 +833,23 @@ fn butler_with_member(tag: &str) -> (PathBuf, impl Drop) {
     (path, daemon)
 }
 
+fn butler_with_named_agent(tag: &str, alias: &str, kind: &str) -> (PathBuf, impl Drop) {
+    let dir = scratch(tag);
+    let path = daemon::socket_path_in(&dir, "s");
+    let daemon = daemon_at(&path);
+    exec_isolated_butler(&path);
+    let launch = format!(
+        "remuda._butler_agent_builders[{kind}] = function() return {{'sleep', '100'}} end; \
+         remuda._butler_launch({kind}, {alias})",
+        kind = serde_json::to_string(kind).unwrap(),
+        alias = serde_json::to_string(alias).unwrap(),
+    );
+    eval(&path, &launch);
+    let inbox = format!("remuda._butler_inbox({})", serde_json::to_string(alias).unwrap());
+    eval(&path, &inbox);
+    (path, daemon)
+}
+
 /// Test daemons share one process, so one XDG data home: skip loading its
 /// agents.jsonl so this root Butler gets its own identity and unread mailbox.
 fn exec_isolated_butler(path: &Path) {
@@ -813,6 +891,16 @@ fn setup_mail_notice_clock(path: &Path) {
         end
         "#,
     );
+}
+
+fn setup_mail_notice_clock_for(path: &Path, alias: &str) {
+    setup_mail_notice_clock(path);
+    let sessions = format!(
+        "remuda.ls = function() return {{ {{ name = {alias}, alive = true, attached = false }}, \
+         {{ name = 'butler', alive = true, attached = false }} }} end",
+        alias = serde_json::to_string(alias).unwrap(),
+    );
+    eval(path, &sessions);
 }
 
 #[test]
