@@ -367,6 +367,22 @@ function relay.new(options)
     if not ok then error("cannot save Matrix relay state: " .. tostring(err), 0) end
   end
 
+  local function send_notice(room, text, warn_kind, warn_key)
+    local body = encode({ msgtype = "m.notice", body = text })
+    api.request_json({ method = "PUT",
+      path = "/_matrix/client/v3/rooms/" .. percent_encode(room)
+        .. "/send/m.room.message/" .. percent_encode("invite-" .. tostring(remuda._butler_new_ulid())),
+      room = room, body = body,
+      headers = { ["Content-Type"] = "application/json" },
+    }, function(result)
+      if type(result) ~= "table" or result.error then
+        local detail = type(result) == "table" and result.error or "Matrix notice failed"
+        warn_once(warn_kind, warn_key, "butler Matrix invite notice failed for "
+          .. cap_field(room, 512) .. ": " .. tostring(detail))
+      end
+    end)
+  end
+
   local function quarantine_event(ev, reason, room_id)
     local event_id = type(ev.event_id) == "string" and ev.event_id or ""
     local valid_id = event_id ~= "" and #event_id <= 512
@@ -872,20 +888,8 @@ function relay.new(options)
                       .. cap_field(room_id, 512) .. ": " .. tostring(detail))
                     return
                   end
-                  local text = "Joined; I read messages here from the owner."
-                  local body = encode({ msgtype = "m.notice", body = text })
-                  api.request_json({ method = "PUT",
-                    path = "/_matrix/client/v3/rooms/" .. percent_encode(room_id)
-                      .. "/send/m.room.message/" .. percent_encode("invite-" .. tostring(remuda._butler_new_ulid())),
-                    room = room_id, body = body,
-                    headers = { ["Content-Type"] = "application/json" },
-                  }, function(notice_result)
-                    if type(notice_result) ~= "table" or notice_result.error then
-                      local detail = type(notice_result) == "table" and notice_result.error or "Matrix notice failed"
-                      warn_once("invite-notice", room_id, "butler Matrix owner invite notice failed for "
-                        .. cap_field(room_id, 512) .. ": " .. tostring(detail))
-                    end
-                  end)
+                  send_notice(room_id, "Joined; I read messages here from the owner.",
+                    "invite-notice", room_id)
                 end)
               else
                 warn_once("invite-config", room_id, "butler could not add Matrix owner-invited room "
@@ -898,21 +902,8 @@ function relay.new(options)
                 local safe_room = mail_body(cap_field(room_id, 512))
                 local safe_inviter = mail_body(cap_field(inviter, 256))
                 local text = "Invite to " .. safe_room .. " from " .. safe_inviter
-                  .. " was not accepted. Next: remuda butler matrix join " .. safe_room
-                local body = encode({ msgtype = "m.notice", body = text })
-                api.request_json({ method = "PUT",
-                  path = "/_matrix/client/v3/rooms/" .. percent_encode(cfg.home_room)
-                    .. "/send/m.room.message/" .. percent_encode("invite-" .. tostring(remuda._butler_new_ulid())),
-                  room = cfg.home_room, body = body,
-                  headers = { ["Content-Type"] = "application/json" },
-                }, function(notice_result)
-                  if type(notice_result) ~= "table" or notice_result.error then
-                    local detail = type(notice_result) == "table" and notice_result.error or "Matrix notice failed"
-                    warn_once("invite-home-notice", room_id .. "\0" .. inviter,
-                      "butler Matrix invite notice failed for " .. cap_field(room_id, 512)
-                        .. ": " .. tostring(detail))
-                  end
-                end)
+                  .. " was not accepted. Next: remuda butler matrix join '" .. safe_room .. "'"
+                send_notice(cfg.home_room, text, "invite-home-notice", room_id .. "\0" .. inviter)
               end
             end
           end

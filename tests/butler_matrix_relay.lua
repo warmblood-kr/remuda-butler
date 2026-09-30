@@ -562,7 +562,7 @@ local function test_stranger_invite_is_quarantined_with_home_next()
   assert(item.sender == STRANGER and item.room_id == NEW,
     "the quarantine record must name the inviter and the invited room")
   local line = "Invite to " .. NEW .. " from " .. STRANGER
-    .. " was not accepted. Next: remuda butler matrix join " .. NEW
+    .. " was not accepted. Next: remuda butler matrix join '" .. NEW .. "'"
   assert(client:messages(HOME, line) == 1, "HOME must get one line with the Next command")
   client:sync({ json = { next_batch = "s2", rooms = { invite = invite(NEW, STRANGER) } } })
   client:pump()
