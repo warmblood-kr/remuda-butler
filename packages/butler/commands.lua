@@ -114,7 +114,7 @@ command(20, "launch", "  remuda butler launch <claude|codex> [name] [--model M]"
   if #args == 3 then return remuda._butler_launch(args[2], args[3], model, parent) end
 end)
 command(30, "topic", "  remuda butler topic new <name> [--template T] [--agent A] [--model M]\n"
-  .. "  remuda butler topic delegate <name> [--agent A] [--leader L] [--model M] <task...>", function(args, caller)
+  .. "  remuda butler topic delegate <name> [--agent A] [--leader L] [--model M] [--cwd DIR] <task...>", function(args, caller)
   if args[2] == "new" and args[3] then
     local template, kind, model, i = nil, nil, nil, 4
     while i <= #args do
@@ -127,14 +127,16 @@ command(30, "topic", "  remuda butler topic new <name> [--template T] [--agent A
     return remuda._butler_topic_new(args[3], template, kind, model)
   end
   if args[2] == "delegate" and args[3] then
-    local kind, parent, model, i = nil, current_agent(caller) or "butler", nil, 4
-    while i <= #args and (args[i] == "--agent" or args[i] == "--leader" or args[i] == "--model") do
+    local kind, parent, model, cwd, i = nil, current_agent(caller) or "butler", nil, nil, 4
+    while i <= #args and (args[i] == "--agent" or args[i] == "--leader" or args[i] == "--model" or args[i] == "--cwd") do
       if args[i] == "--agent" then kind = args[i + 1]
       elseif args[i] == "--model" then model = args[i + 1]
+      elseif args[i] == "--cwd" then cwd = args[i + 1]
       else parent = args[i + 1] end
+      if not args[i + 1] or args[i + 1] == "" then return nil end
       i = i + 2
     end
-    if i <= #args then return remuda._butler_topic_delegate(args[3], words_after(args, i), nil, kind, parent, model) end
+    if i <= #args then return remuda._butler_topic_delegate(args[3], words_after(args, i), nil, kind, parent, model, cwd) end
   end
 end)
 command(40, "send", '  remuda butler send <to> "<message>" | <to> - | <to> --file PATH\n'

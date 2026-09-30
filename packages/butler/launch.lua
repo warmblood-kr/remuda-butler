@@ -532,7 +532,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   return result or ("launching " .. name)
 end
 
-local function make_topic(name, template, kind, parent, task, model)
+local function make_topic(name, template, kind, parent, task, model, cwd)
   valid_child_name(name, "topic name")
   load_topic_config()
   local root = topic_config.project_home .. "/" .. name
@@ -572,7 +572,8 @@ local function make_topic(name, template, kind, parent, task, model)
     setup(topic)
   end
   if created_now and not template then write_agent_guidance(root, team_member_guidance(parent or "butler")) end
-  return launch_agent(kind, name, root, model, parent, task, nil, auto_trust)
+  return launch_agent(kind, name, cwd or root, model, parent, task, nil,
+    auto_trust and (cwd == nil or cwd == root))
 end
 
 -- Shell-facing doors into the same deliberately mutable bus.  These are not
@@ -586,11 +587,11 @@ end
 function remuda._butler_topic_new(name, template, kind, model)
   return make_topic(name, template, kind, "butler", nil, model)
 end
-function remuda._butler_topic_delegate(name, task, template, kind, parent, model)
+function remuda._butler_topic_delegate(name, task, template, kind, parent, model, cwd)
   parent = resolve(parent or "butler")
   local leader = bus.agents[parent]
   if not leader then error("no Butler leader named " .. tostring(parent), 0) end
-  return make_topic(name, template, kind, parent, task, model)
+  return make_topic(name, template, kind, parent, task, model, cwd)
 end
 
 remuda._butler_launch_impl = { launch_agent = launch_agent }
