@@ -208,9 +208,11 @@ local function base64url(bytes)
 end
 
 local function new_password()
-  if type(matrix.random_bytes) ~= "function" then return nil end
-  local ok, bytes = pcall(matrix.random_bytes, 32)
-  if not ok or type(bytes) ~= "string" or #bytes ~= 32 then return nil end
+  local ok, file = pcall(io.open, "/dev/urandom", "rb")
+  if not ok or not file then return nil end
+  local read_ok, bytes = pcall(file.read, file, 32)
+  pcall(file.close, file)
+  if not read_ok or type(bytes) ~= "string" or #bytes ~= 32 then return nil end
   return base64url(bytes)
 end
 
@@ -526,7 +528,9 @@ function matrix.setup_network(options, on_done)
     end)
   elseif options.secret_kind == "registration" then
     registration_password = new_password()
-    if not registration_password then return fail("Matrix setup could not generate a private bot password") end
+    if not registration_password then
+      return fail("This system has no secure random source for a bot password. Next: rerun with --password-file PATH (a password you choose)")
+    end
     local base_bot = options.bot_mxid
     local localpart, server = base_bot:match("^@([^:]+):(.+)$")
     local attempt = 1

@@ -370,11 +370,7 @@ return function(matrix)
   end
   local registration_output = root .. "/registered-output"
   assert(remuda.fs.mkdir_new(registration_output))
-  local real_random_bytes, requested_random_length = matrix.random_bytes, nil
-  matrix.random_bytes = function(count)
-    requested_random_length = count
-    return string.rep(string.char(251), count)
-  end
+  local requested_random_length
   local password_status = matrix.status
   matrix.status = function(_, callback)
     local generated_password = read(registration_output .. "/password")
@@ -385,6 +381,60 @@ return function(matrix)
     callback({ status = 200, json = { user_id = "@butler-demo-2:example.org",
       joined_rooms = { "!registered-home:example.org" } } })
     return { cancel = function() end }
+  end
+  local no_rng_output = root .. "/no-secure-random"
+  local real_io_open = io.open
+  io.open = function(path, mode)
+    if path == "/dev/urandom" then return nil, "simulated unavailable random source" end
+    return real_io_open(path, mode)
+  end
+  requests, resolved = {}, nil
+  local no_rng_reply = matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--register", "--registration-token-file",
+    registration_token_file, "--bot", "@butler-no-rng:example.org", "--dir", no_rng_output })
+  io.open = real_io_open
+  assert(no_rng_reply and resolved and resolved.status == 1
+    and resolved.stderr:find("This system has no secure random source for a bot password. Next: rerun with --password-file PATH (a password you choose)", 1, true)
+    and #requests == 0
+    and read(no_rng_output .. "/token") == nil
+    and read(no_rng_output .. "/password") == nil
+    and read(no_rng_output .. "/config") == nil,
+    "registration must fail closed without secure randomness before network or file writes")
+  local no_rng_dir_created = remuda.fs.mkdir_new(no_rng_output)
+  assert(no_rng_dir_created, "secure-random failure must not create the output directory")
+  os.remove(no_rng_output)
+
+  local short_rng_output = root .. "/short-secure-random"
+  io.open = function(path, mode)
+    if path == "/dev/urandom" then
+      return { read = function() return string.rep("x", 31) end, close = function() end }
+    end
+    return real_io_open(path, mode)
+  end
+  requests, resolved = {}, nil
+  matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--register", "--registration-token-file",
+    registration_token_file, "--bot", "@butler-short-rng:example.org", "--dir", short_rng_output })
+  io.open = real_io_open
+  assert(resolved and resolved.status == 1
+    and resolved.stderr:find("This system has no secure random source for a bot password", 1, true)
+    and #requests == 0 and read(short_rng_output .. "/password") == nil,
+    "a short secure-random read must also fail closed before network or file writes")
+  local short_rng_dir_created = remuda.fs.mkdir_new(short_rng_output)
+  assert(short_rng_dir_created, "short secure-random read must not create the output directory")
+  os.remove(short_rng_output)
+
+  io.open = function(path, mode)
+    if path == "/dev/urandom" then
+      return {
+        read = function(_, count)
+          requested_random_length = count
+          return string.rep(string.char(251), count)
+        end,
+        close = function() end,
+      }
+    end
+    return real_io_open(path, mode)
   end
   requests, resolved = {}, nil
   local registration_reply = matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
@@ -439,7 +489,7 @@ return function(matrix)
     and atomic_writes[2].private and atomic_writes[3].private,
     "registration token, generated password, and config must use private atomic writes")
   matrix.status = password_status
-  matrix.random_bytes = real_random_bytes
+  io.open = real_io_open
   requests, resolved, atomic_writes = {}, nil, {}
   os.remove(registration_output .. "/token")
   os.remove(registration_output .. "/password")
@@ -450,7 +500,6 @@ return function(matrix)
     "--owner", "@alice:example.org", "--register", "--registration-token-file",
     registration_token_file, "--bot", "@butler-busy:example.org", "--dir", root .. "/collision-output" })
   assert(collision_plan)
-  matrix.random_bytes = function(count) return string.rep("r", count) end
   requests, resolved = {}, nil
   remuda.http = { request = function(spec)
     requests[#requests + 1] = spec
@@ -469,7 +518,6 @@ return function(matrix)
     == "Bot account names ending in -2 through -5 are also in use. Pass --bot with another name. Nothing was created or written."
     and #requests == 5,
     "registration should stop after five taken names with clear guidance")
-  matrix.random_bytes = real_random_bytes
   remuda.http = setup_http
   requests, resolved = {}, nil
 
