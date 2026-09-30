@@ -16,7 +16,7 @@ local USAGE = [[Usage: remuda butler matrix setup [OPTIONS]
   --pin SHA256HEX         Trust this HTTPS certificate fingerprint.
   --ca-file PATH         Trust the HTTPS certificate authority in this file.
 
-Example: remuda butler matrix setup --homeserver https://matrix.example.org --owner @alice:example.org --register --registration-token-file /path/to/server-registration-token --dir /path/to/private/butler --pin <64-hex-sha256>]]
+Example: remuda butler matrix setup --homeserver https://matrix.example.org --owner @alice:example.org --register --registration-token-file /path/to/server-registration-token --password-file /path/to/chosen-password --dir /path/to/private/butler --pin <64-hex-sha256>]]
 
 local function absolute(path)
   return type(path) == "string" and (path:sub(1, 1) == "/" or path:match("^%a:[/\\]") ~= nil)
@@ -371,14 +371,10 @@ function matrix.setup_prepare(args)
       return nil, "cannot derive a bot account name from this computer; pass --bot"
     end
     options.bot_mxid = "@butler-" .. slug .. ":" .. server
-  elseif options.bot_mxid then
-    local bot, bot_error = valid_mxid(options.bot_mxid, "--bot")
-    if not bot then return nil, bot_error end
-    options.bot_mxid = bot
-  elseif options.password_file then
+  elseif options.password_file and not options.bot_mxid then
     return nil, "--bot is required when using --password-file"
   end
-  if options.register or options.password_file then
+  if options.register or options.password_file or options.bot_mxid then
     local bot, bot_error = valid_mxid(options.bot_mxid, "--bot")
     if not bot then return nil, bot_error end
     options.bot_mxid = bot
