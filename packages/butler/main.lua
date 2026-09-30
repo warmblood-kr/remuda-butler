@@ -961,6 +961,7 @@ function remuda._butler_session_exited(name, info)
     update_state.waiting = {}
   end
   -- #29: the mail stays in the inbox; only the pending pane notice goes.
+  bus.unread_seeded[name] = "exited"
   bus.notices[name], bus.notice_screens[name], bus.pending_tasks[name] = nil, nil, nil
   bus.notice_recoveries[name], bus.task_retry_screens[name], bus.human_activity_screens[name] = nil, nil, nil
   local exited = bus.agents[name]

@@ -505,6 +505,49 @@ fn root_butler_seeds_three_unread_mails_when_its_pane_is_ready() {
 }
 
 #[test]
+fn root_butler_reseeds_after_in_daemon_relaunch_without_instance_ids() {
+    let dir = scratch("notice-unread-root-relaunch");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    exec_isolated_butler(&path);
+    setup_mail_notice_clock(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        remuda.capture = function() return state.screen or '> ' end
+        remuda.type_text = function(_, text)
+          state.typed[#state.typed + 1] = { at = state.now, text = text }
+          state.screen = text .. '\n> '
+          return true
+        end
+        remuda._notice_test_send('butler', 'root unread mail')
+        state.now = 2
+        remuda._butler_deliver_notices()
+        state.now = 3
+        remuda._butler_deliver_notices()
+        local first_count = #state.typed
+        remuda._butler_reconcile = function() end
+        remuda._butler_session_exited('butler')
+        local exit_marker = remuda._butler_bus.unread_seeded.butler
+        state.screen = '> '
+        state.now = 4
+        remuda._butler_deliver_notices()
+        local after_exit_tick = #state.typed
+        state.now = 6
+        remuda._butler_deliver_notices()
+        state.now = 7
+        remuda._butler_deliver_notices()
+        state.now = 20
+        remuda._butler_deliver_notices()
+        return table.concat({ tostring(first_count), tostring(exit_marker),
+          tostring(after_exit_tick), tostring(#state.typed) }, '|')
+        "#,
+    );
+    assert!(got.starts_with("1|exited|1|2"), "root relaunch should re-seed exactly once: {got}");
+}
+
+#[test]
 fn a_lead_session_gets_one_seeded_notice_when_ready() {
     let (path, _daemon) = butler_with_named_agent("notice-unread-lead", "lead1", "fake");
     eval(
