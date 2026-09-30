@@ -662,10 +662,9 @@ function remuda._butler_notify(alias, notice, message_id)
   bus.notices[alias] = pending
   return false
 end
-local function seed_unread_notices(alias, previous_instance, instance)
+local function seed_unread_notices(alias, previous_instance, instance, unread)
   local agent = bus.agents[alias]
   if not agent or not agent.id then return false end
-  local unread = mail.unread(agent.id)
   if unread <= 0 then return true end
   for _, message_id in ipairs(mailbox(agent.id)) do
     if mail.is_unread(agent.id, message_id) then
@@ -735,10 +734,17 @@ function remuda._butler_deliver_notices()
       -- A ready-looking prompt during a Codex update handoff belongs to the
       -- relaunch check. Seeding here can type over it after a task-poke timeout.
       -- A delegated task's startup probe owns the pane until the task clears.
-      if previous_instance ~= instance and not bus.pending_tasks[alias] and not update_handoff
-          and remuda._butler_notify_policy(alias, now) then
-        local seeded, result = pcall(seed_unread_notices, alias, previous_instance, instance)
-        if seeded and result then bus.unread_seeded[alias] = instance end
+      if previous_instance ~= instance and agent.id then
+        local counted, unread = pcall(mail.unread, agent.id)
+        if counted then
+          if unread <= 0 then
+            bus.unread_seeded[alias] = instance
+          elseif not bus.pending_tasks[alias] and not update_handoff
+              and remuda._butler_notify_policy(alias, now) then
+            local seeded, result = pcall(seed_unread_notices, alias, previous_instance, instance, unread)
+            if seeded and result then bus.unread_seeded[alias] = instance end
+          end
+        end
       end
     end
   end

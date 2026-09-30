@@ -792,13 +792,24 @@ fn no_unread_mail_does_not_seed_a_notice() {
         &path,
         r#"
         local state = remuda._notice_test_state
+        local policies, captures = 0, 0
+        remuda.capture = function()
+          captures = captures + 1
+          return '> '
+        end
+        remuda._butler_notify_policy = function()
+          policies = policies + 1
+          remuda.capture()
+          return true
+        end
         remuda._butler_deliver_notices()
         state.now = 10
         remuda._butler_deliver_notices()
-        return tostring(#state.typed) .. '|' .. tostring(remuda._butler_bus.notices.m1)
+        return table.concat({ tostring(#state.typed), tostring(remuda._butler_bus.notices.m1),
+          tostring(policies), tostring(captures) }, '|')
         "#,
     );
-    assert_eq!(got, "0|nil");
+    assert_eq!(got, "0|nil|0|0", "zero-unread startup should skip the pane policy: {got}");
 }
 
 #[test]
