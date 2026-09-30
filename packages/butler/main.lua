@@ -283,13 +283,17 @@ local function numbered_option(line)
   end
   return trimmed:match("^(%d+)[%.)]%s*(.-)%s*$"), trimmed:match("^%d+[%.)]%s*(.-)%s*$")
 end
-function remuda._butler_compaction_is_unknown_dialog(screen)
-  if type(screen) ~= "string" then return false end
+local function bottom_screen_lines(screen, limit)
   local lines = {}
   for line in (screen .. "\n"):gmatch("(.-)\n") do
     lines[#lines + 1] = line
-    if #lines > 8 then table.remove(lines, 1) end
+    if #lines > limit then table.remove(lines, 1) end
   end
+  return lines
+end
+function remuda._butler_compaction_is_unknown_dialog(screen)
+  if type(screen) ~= "string" then return false end
+  local lines = bottom_screen_lines(screen, 8)
   local top_border, bottom_border, selected_option, option_line, prompt_line = false, false, false, nil, nil
   for i, line in ipairs(lines) do
     local trimmed = line:gsub("^%s+", "")
@@ -3678,8 +3682,14 @@ function remuda._butler_compaction_execute(session_name, force)
         id = "claude-model-confirm",
         match = function(screen)
           if type(screen) ~= "string" then return false end
-          return screen:find("❯%s*1%.%s+Yes") ~= nil
-            and screen:find("%d%.%s+No, go back") ~= nil
+          local lines = bottom_screen_lines(screen, 8)
+          for index = 1, #lines - 1 do
+            if lines[index]:find("❯%s*1%.%s+Yes")
+                and lines[index + 1]:find("%d%.%s+No, go back") then
+              return true
+            end
+          end
+          return false
         end,
         action = function()
           if not confirmation_sent then

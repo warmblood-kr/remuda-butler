@@ -5783,7 +5783,7 @@ done
         return {{context_used=used, model=screen:match("MODEL:([^ %c]+)") or "current-model"}}
       end
       remuda._fake_setup_compaction = function(name, kind, log, scenario)
-      remuda.new(name, {{"bash", {script:?}, log, scenario, {model_confirm_fixture:?}, {stale_model_confirm_fixture:?}}}, nil, {{}})
+        remuda.new(name, {{"bash", {script:?}, log, scenario, {model_confirm_fixture:?}, {stale_model_confirm_fixture:?}}}, nil, {{}})
         local id = name
         if name == "fake-stable-id" then id = "stable-agent-17" end
         if name == "fake-empty-id" then id = "" end
