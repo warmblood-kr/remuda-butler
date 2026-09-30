@@ -7691,7 +7691,7 @@ fn butler_matrix_cli_guides_unconfigured_status_and_send_without_exposing_token(
             "!<room-id>:<server-name>",
             "@<your-user>:<server-name>",
             "@<allowed-sender>:<server-name>",
-            "Next: create both files, then run: remuda butler matrix status",
+            "Next: remuda butler matrix setup",
         ] {
             assert!(text.contains(line), "{verb} omitted {line:?}: {text}");
         }
