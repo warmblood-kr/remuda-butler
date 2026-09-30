@@ -350,7 +350,8 @@ function remuda._butler_compaction_execute(session_name, force)
     state.compaction_in_progress = false
     if owner_state.compaction_fleet_active == state_key then owner_state.compaction_fleet_active = nil end
   end
-  local function fail(reason)
+  -- `wording` replaces "Compaction failed" when the outcome is unknown.
+  local function fail(reason, wording)
     release_lock()
     if state.restore_pending_attempt_active then
       state.restore_pending_attempt_active = nil
@@ -377,7 +378,7 @@ function remuda._butler_compaction_execute(session_name, force)
     state.cooldown_ticks = 0
     _butler_trace("error", detail .. " reason=" .. tostring(reason))
     pcall(remuda._butler_send, session_name, agent.parent or "butler",
-      "Compaction failed: " .. tostring(reason))
+      (wording or "Compaction failed") .. ": " .. tostring(reason))
   end
   local function finish_success(event)
     if agent.kind == "claude" then
@@ -716,6 +717,7 @@ function remuda._butler_compaction_execute(session_name, force)
         state.compaction_monitor = nil
         state.compaction_still_running_notice_sent = nil
         if agent.kind == "claude" then restore_model("completed_after_timeout")
+        elseif codex_prior then codex_restore("completed_after_timeout")
         else finish_success("completed_after_timeout") end
       end
     end })
@@ -739,13 +741,15 @@ function remuda._butler_compaction_execute(session_name, force)
         else
           restore_model(nil, function() fail("compaction context did not drop") end)
         end
+      elseif pane_busy() ~= false then
+        monitor_until_idle()
       elseif codex_prior then
         codex_restore(nil, function()
           forget_codex_prior()
-          fail("compaction context did not drop")
+          fail("compaction context did not drop", "Compaction not confirmed yet")
         end)
       else
-        fail("compaction context did not drop")
+        fail("compaction context did not drop", "Compaction not confirmed yet")
       end
     end)
   end
