@@ -695,6 +695,68 @@ fn a_relaunch_replays_already_noticed_unread_mail_once() {
 }
 
 #[test]
+fn an_exit_tick_keeps_the_unread_seed_for_a_same_id_relaunch() {
+    let (path, _daemon) = butler_with_member("notice-unread-exit-tick-relaunch");
+    setup_mail_notice_clock(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        local bus = remuda._butler_bus
+        local rows = {
+          { name = 'm1', alive = true, attached = false, instance_id = 'instance-a' },
+          { name = 'butler', alive = true, attached = false, instance_id = 'root-instance' },
+        }
+        remuda.ls = function() return rows end
+        remuda.capture = function() return state.screen or '> ' end
+        remuda.type_text = function(_, text)
+          state.typed[#state.typed + 1] = { at = state.now, text = text }
+          state.screen = text .. '\n> '
+          return true
+        end
+        remuda._notice_test_send('m1', 'same-id relaunch unread mail')
+        state.now = 2
+        remuda._butler_deliver_notices()
+        state.now = 3
+        remuda._butler_deliver_notices() -- verify the first notice left the composer
+        local id = state.typed[1].text:match('Butler message ([^ ]+)')
+        local saved_agent = bus.agents.m1
+        local first_notice = #state.typed
+
+        -- A real member exit clears its agent record and preserves this marker.
+        bus.agents.m1 = nil
+        bus.unread_seeded.m1 = 'exited'
+        bus.notices.m1, bus.notice_screens.m1, bus.pending_tasks.m1 = nil, nil, nil
+        bus.notice_recoveries.m1, bus.task_retry_screens.m1, bus.human_activity_screens.m1 = nil, nil, nil
+        rows[1] = nil
+        state.now = 4
+        remuda._butler_deliver_notices() -- one tick during the relaunch gap
+
+        -- Codex update restarts the member under the same Butler identity id.
+        bus.agents.m1 = {
+          id = saved_agent.id, alias = saved_agent.alias, kind = saved_agent.kind,
+          parent = saved_agent.parent, children = {}, session_instance_id = 'instance-b',
+        }
+        rows[1] = { name = 'm1', alive = true, attached = false, instance_id = 'instance-b' }
+        state.screen = '> '
+        state.now = 8
+        remuda._butler_deliver_notices()
+        state.now = 10
+        remuda._butler_deliver_notices()
+        state.now = 11
+        remuda._butler_deliver_notices() -- verify the replayed notice
+        local second_notice = #state.typed
+        local replay_id = state.typed[2] and state.typed[2].text:match('Butler message ([^ ]+)')
+        local unread = remuda._butler_mail.unread(bus.agents.m1.id)
+        return table.concat({ tostring(first_notice), tostring(second_notice),
+          tostring(id == replay_id), tostring(bus.unread_seeded.m1 == 'instance-b'),
+          tostring(unread), tostring(bus.notice_seen[bus.agents.m1.id][id]) }, '|')
+        "#,
+    );
+    assert_eq!(got, "1|2|true|true|1|true", "same-id relaunch replay: {got}");
+}
+
+#[test]
 fn unread_seed_waits_for_pending_task_and_codex_update_handoffs() {
     let (path, _daemon) = butler_with_member("notice-unread-seed-gates");
     setup_mail_notice_clock(&path);

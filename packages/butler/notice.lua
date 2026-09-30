@@ -36,6 +36,7 @@ bus.notices = bus.notices or {}
 bus.notice_screens = bus.notice_screens or {}
 bus.notice_seen = bus.notice_seen or {}
 bus.unread_seeded = bus.unread_seeded or {}
+bus.unread_seeded_exited_at = bus.unread_seeded_exited_at or {}
 bus.notice_retry_reasons = bus.notice_retry_reasons or {}
 bus.notice_fallbacks = bus.notice_fallbacks or {}
 bus.notice_failure_alerts = bus.notice_failure_alerts or {}
@@ -811,9 +812,6 @@ local function notice_session_instance(alias, agent, session_instances)
 end
 function remuda._butler_deliver_notices()
   local now = notice_now()
-  for alias in pairs(bus.unread_seeded) do
-    if not bus.agents[alias] then bus.unread_seeded[alias] = nil end
-  end
   local session_instances = {}
   local listed, sessions = pcall(remuda.ls)
   if listed and type(sessions) == "table" then
@@ -821,6 +819,25 @@ function remuda._butler_deliver_notices()
       if session.alive and type(session.name) == "string"
           and type(session.instance_id) == "string" and session.instance_id ~= "" then
         session_instances[session.name] = session.instance_id
+      end
+    end
+  end
+  -- Keep an exit marker through the gap before a member is relaunched. In
+  -- particular, a Codex update reuses the same identity id, so losing this
+  -- marker would make already-seen, still-unread mail look fully seeded.
+  for alias, seeded in pairs(bus.unread_seeded) do
+    if not bus.agents[alias] then
+      if seeded ~= "exited" then
+        bus.unread_seeded[alias] = "exited"
+        bus.unread_seeded_exited_at[alias] = now
+      else
+        local since = bus.unread_seeded_exited_at[alias]
+        if since == nil then
+          bus.unread_seeded_exited_at[alias] = now
+        elseif not session_instances[alias] and now - since >= 30 * 24 * 60 * 60 then
+          bus.unread_seeded[alias] = nil
+          bus.unread_seeded_exited_at[alias] = nil
+        end
       end
     end
   end
@@ -842,10 +859,14 @@ function remuda._butler_deliver_notices()
         if counted then
           if unread <= 0 then
             bus.unread_seeded[alias] = instance
+            bus.unread_seeded_exited_at[alias] = nil
           elseif not bus.pending_tasks[alias] and not update_handoff
               and remuda._butler_notify_policy(alias, now) then
             local seeded, result = pcall(seed_unread_notices, alias, previous_instance, instance, unread)
-            if seeded and result then bus.unread_seeded[alias] = instance end
+            if seeded and result then
+              bus.unread_seeded[alias] = instance
+              bus.unread_seeded_exited_at[alias] = nil
+            end
           end
         end
       end
