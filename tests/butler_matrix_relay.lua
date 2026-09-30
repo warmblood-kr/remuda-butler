@@ -681,6 +681,7 @@ local function test_open_room_config_and_deny_matching()
     "deny_server=room-denied.example",
     "deny_server=inviter-denied.example",
     "deny_server=alias-denied.example",
+    "deny_server=ported-denied.example",
   }, "\n") .. "\n")
   local conf, err = matrix.read_config(path)
   assert(conf, "valid open-room config must parse: " .. tostring(err))
@@ -698,6 +699,14 @@ local function test_open_room_config_and_deny_matching()
     "the inviter server must match")
   assert(matrix.invite_is_denied(conf, NEW, "#x:alias-denied.example", STRANGER),
     "the alias server must match")
+  assert(matrix.invite_is_denied(conf, NEW, "#x:ALIAS-DENIED.EXAMPLE", STRANGER),
+    "the alias server comparison must ignore case")
+  assert(matrix.invite_is_denied(conf, "!x:ported-denied.example:8448", nil, STRANGER),
+    "deny_server without a port must match a room server with a port")
+  assert(matrix.invite_is_denied(conf, NEW, nil, "@x:ported-denied.example:8448"),
+    "deny_server without a port must match an inviter server with a port")
+  assert(not matrix.invite_is_denied(conf, "!Blocked:example.org", nil, STRANGER),
+    "room ID deny matching must remain exact")
   assert(not matrix.invite_is_denied(conf, NEW, "#x:allowed.example", STRANGER),
     "a non-denied room and server must not match")
   remove_dir(dir)
@@ -1198,23 +1207,32 @@ local function test_open_mode_daily_join_cap_quarantines_twenty_first_invite()
   local client, delivered = invite_client(), {}
   local relay = started_relay(path, client, delivered)
   local invites = {}
-  for index = 1, 21 do
+  for index = 1, 20 do
     local room = "!cap" .. index .. ":example.org"
     invites[room] = invite(room, STRANGER)[room]
   end
   client:sync({ json = { next_batch = "s1", rooms = { invite = invites } } })
   client:pump()
   local joined = 0
-  for index = 1, 21 do
+  for index = 1, 20 do
     if client:joins("!cap" .. index .. ":example.org") > 0 then joined = joined + 1 end
   end
   assert(joined == 20, "open mode must auto-join at most 20 distinct rooms per rolling day")
+  relay:stop()
+
+  local restarted_client, restarted_delivered = invite_client(), {}
+  relay = started_relay(path, restarted_client, restarted_delivered)
+  local twenty_first = "!cap21:example.org"
+  restarted_client:sync({ json = { next_batch = "s2", rooms = { invite = invite(twenty_first, STRANGER) } } })
+  restarted_client:pump()
+  assert(restarted_client:joins(twenty_first) == 0,
+    "the persisted rolling-day budget must refuse a 21st invite after restart")
   local capped
   for _, q in ipairs(relay:quarantine_list()) do
     if q.reason == "invite_cap" then capped = q end
   end
   assert(capped, "the 21st open-mode invite must be quarantined as invite_cap")
-  assert(client:messages(HOME, "Auto-join cap reached (20/day); 1 invites quarantined.") == 1,
+  assert(restarted_client:messages(HOME, "Auto-join cap reached (20/day); 1 invites quarantined.") == 1,
     "a sync that hits the cap must post one cap summary to HOME")
   relay:stop()
   remove_dir(dir)
@@ -1230,6 +1248,23 @@ local function test_open_mode_repeated_invite_for_joined_room_does_not_join_agai
   client:sync({ json = { next_batch = "s2", rooms = { invite = invitation } } })
   client:pump()
   assert(client:joins(NEW) == 0, "an invite for an already joined room must not auto-join again")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function test_open_mode_failed_join_rolls_back_config_and_budget()
+  local dir, path = open_invite_fixture()
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  local invitation = invite_with_state(NEW, STRANGER, "#open:example.org")
+  client:sync({ json = { next_batch = "s1", rooms = { invite = invitation } } })
+  client:pump({ error = "M_FORBIDDEN" })
+  assert(room_line(path, NEW) == nil, "a failed open-mode join must remove its config line")
+  client:sync({ json = { next_batch = "s2", rooms = { invite = invitation } } })
+  client:pump()
+  assert(client:joins(NEW) == 2, "a failed join must release the room dedupe and budget reservation")
+  assert(room_line(path, NEW) and client:messages(HOME, "Joined " .. NEW) == 1,
+    "a later successful invite must write config and notify HOME")
   relay:stop()
   remove_dir(dir)
 end
@@ -2103,6 +2138,7 @@ for _, case in ipairs({
   { "test_open_mode_sender_allowlist_still_quarantines", test_open_mode_sender_allowlist_still_quarantines },
   { "test_open_mode_daily_join_cap_quarantines_twenty_first_invite", test_open_mode_daily_join_cap_quarantines_twenty_first_invite },
   { "test_open_mode_repeated_invite_for_joined_room_does_not_join_again", test_open_mode_repeated_invite_for_joined_room_does_not_join_again },
+  { "test_open_mode_failed_join_rolls_back_config_and_budget", test_open_mode_failed_join_rolls_back_config_and_budget },
   { "test_open_mode_hostile_invite_state_is_sanitized", test_open_mode_hostile_invite_state_is_sanitized },
   { "test_open_mode_conflicting_inviter_events_remain_refused", test_open_mode_conflicting_inviter_events_remain_refused },
   { "test_config_add_room_pads_short_config", test_config_add_room_pads_short_config },

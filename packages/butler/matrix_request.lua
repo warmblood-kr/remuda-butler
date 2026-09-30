@@ -173,6 +173,12 @@ local function config_valid_server(value)
   end
   return true
 end
+local function config_valid_mxid(value)
+  if type(value) ~= "string" or #value > 512 then return false end
+  local localpart, server = value:match("^@([^:%s]+):([^%s]+)$")
+  return localpart ~= nil and localpart ~= "" and server ~= nil and config_valid_server(server)
+end
+matrix.valid_server_name = config_valid_server
 
 local function read_config(path)
   local contents, err = read_file(path, "config")
@@ -201,8 +207,11 @@ local function read_config(path)
         local room = value:match("^(%S+)")
         local how = value:match("%s+how=(%S+)") or "operator"
         local alias = value:match("%s+alias=(%S+)")
+        local inviter = value:match("%s+inviter=(%S+)")
+        if inviter then inviter = sanitize_directory_text(inviter, 128) end
+        if inviter and not config_valid_mxid(inviter) then inviter = nil end
         if room and config_valid_room_id(room) then
-          extra_rooms[#extra_rooms + 1] = { room = room, how = how, alias = alias }
+          extra_rooms[#extra_rooms + 1] = { room = room, how = how, alias = alias, inviter = inviter }
         end
       elseif key == "rooms" then
         if value == "open" or value == "allowlist" then
@@ -263,7 +272,7 @@ local function read_config(path)
   if all_room == "" then all_room = nil end
   if all_room == lines[2] then return nil, "HOME and ALL-BUTLERS rooms must be different" end
   local rooms = { [lines[2]] = "home" }
-  local room_how, room_aliases = {}, {}
+  local room_how, room_aliases, room_inviters = {}, {}, {}
   if all_room then
     if mode == "1" or mode == "true" or mode == "messages" or mode == "fallback" then
       return nil, "ALL-BUTLERS room requires /sync; messages fallback supports HOME only"
@@ -274,6 +283,7 @@ local function read_config(path)
     if extra.room ~= lines[2] and extra.room ~= all_room then
       rooms[extra.room] = "joined"
       room_how[extra.room] = extra.how
+      room_inviters[extra.room] = extra.inviter
       if extra.alias and type(matrix.valid_room_alias) == "function" and matrix.valid_room_alias(extra.alias) then
         room_aliases[extra.room] = extra.alias
       end
@@ -281,7 +291,7 @@ local function read_config(path)
   end
   return {
     base = base, room = lines[2], home_room = lines[2], all_room = all_room,
-    rooms = rooms, room_how = room_how, room_aliases = room_aliases,
+    rooms = rooms, room_how = room_how, room_aliases = room_aliases, room_inviters = room_inviters,
     rooms_mode = room_mode, deny_room_ids = deny_room_ids,
     deny_room_aliases = deny_room_aliases, deny_servers = deny_servers,
     self_mxid = lines[3], allowed_senders = allowed,
@@ -304,11 +314,17 @@ local function valid_room_alias(alias)
 end
 matrix.valid_room_alias = valid_room_alias
 
-local function server_part(value, prefix)
+local function server_parts(value, prefix)
   if type(value) ~= "string" then return nil end
   local server = value:match("^" .. prefix .. "[^:]+:(.+)$")
-  if server and server ~= "" then return server:lower() end
-  return nil
+  if not server or server == "" then return nil end
+  local host
+  if server:sub(1, 1) == "[" then
+    host = server:match("^(%b[]):%d+$") or server
+  else
+    host = server:match("^([^:]+):%d+$") or server
+  end
+  return server:lower(), host:lower()
 end
 
 function matrix.invite_is_denied(conf, room_id, alias, inviter)
@@ -318,12 +334,12 @@ function matrix.invite_is_denied(conf, room_id, alias, inviter)
   local deny_servers = type(conf.deny_servers) == "table" and conf.deny_servers or {}
   if type(room_id) == "string" and deny_room_ids[room_id] then return true end
   if type(alias) == "string" and deny_room_aliases[alias] then return true end
-  local room_server = server_part(room_id, "!")
-  local inviter_server = server_part(inviter, "@")
-  local alias_server = server_part(alias, "#")
-  if (room_server and deny_servers[room_server])
-    or (inviter_server and deny_servers[inviter_server])
-    or (alias_server and deny_servers[alias_server]) then return true end
+  local room_server, room_host = server_parts(room_id, "!")
+  local inviter_server, inviter_host = server_parts(inviter, "@")
+  local alias_server, alias_host = server_parts(alias, "#")
+  if (room_server and (deny_servers[room_server] or deny_servers[room_host]))
+    or (inviter_server and (deny_servers[inviter_server] or deny_servers[inviter_host]))
+    or (alias_server and (deny_servers[alias_server] or deny_servers[alias_host])) then return true end
   return false
 end
 
@@ -353,19 +369,25 @@ local function room_line_id(line)
   return line:match("^%s*room=(%S+)")
 end
 
-function matrix.config_add_room(path, room, how, alias)
+function matrix.config_add_room(path, room, how, alias, inviter)
   if not valid_room_id(room) then
     return nil, "invalid Matrix room ID: room IDs start with ! (Element: Room settings > Advanced tab (not General) > Internal room ID. Element X may not show it; use the #alias instead.)."
   end
   if alias ~= nil and not valid_room_alias(alias) then return nil, "invalid Matrix room alias" end
+  if inviter ~= nil then
+    inviter = sanitize_directory_text(inviter, 128)
+    if not config_valid_mxid(inviter) then return nil, "invalid Matrix inviter ID" end
+  end
   local conf, err = read_config(path)
   if not conf then return nil, err end
   if room == conf.home_room or room == conf.all_room then
     return nil, "HOME and ALL rooms can't be added"
   end
-  if how ~= "owner-invite" and how ~= "operator" then how = "operator" end
+  if how ~= "owner-invite" and how ~= "operator" and how ~= "invite" then how = nil end
+  local new_how = how or "operator"
   if conf.rooms[room] ~= nil then
-    if alias and conf.rooms[room] == "joined" and conf.room_aliases[room] ~= alias then
+    if conf.rooms[room] == "joined" and ((alias and conf.room_aliases[room] ~= alias)
+      or (inviter and conf.room_inviters[room] ~= inviter)) then
       local contents
       contents, err = read_file(path, "config")
       if not contents then return nil, err end
@@ -373,7 +395,11 @@ function matrix.config_add_room(path, room, how, alias)
       each_raw_line(contents, function(raw, line, ending)
         if room_line_id(line) == room then
           local current_how = line:match("%s+how=(%S+)") or conf.room_how[room] or "operator"
-          kept[#kept + 1] = "room=" .. room .. " how=" .. current_how .. " alias=" .. alias .. ending
+          local current_alias = alias or conf.room_aliases[room]
+          local current_inviter = inviter or conf.room_inviters[room]
+          local label = current_alias and (" alias=" .. current_alias) or ""
+          local inviter_field = current_inviter and (" inviter=" .. current_inviter) or ""
+          kept[#kept + 1] = "room=" .. room .. " how=" .. current_how .. label .. inviter_field .. ending
         else
           kept[#kept + 1] = raw .. ending
         end
@@ -396,7 +422,9 @@ function matrix.config_add_room(path, room, how, alias)
     line_count = line_count + 1
   end
   local label = alias and (" alias=" .. alias) or ""
-  local wrote, write_error = write_config_text(path, padded .. "room=" .. room .. " how=" .. how .. label .. "\n")
+  local inviter_field = inviter and (" inviter=" .. inviter) or ""
+  local wrote, write_error = write_config_text(path,
+    padded .. "room=" .. room .. " how=" .. new_how .. label .. inviter_field .. "\n")
   if not wrote then return nil, write_error end
   return true, true
 end
