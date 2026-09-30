@@ -7,6 +7,7 @@ butler.matrix = matrix
 
 if not matrix.request_json then remuda.exec("butler/matrix_request") end
 remuda.exec("butler/matrix_read")
+remuda.exec("butler/approval")
 if not matrix.send then remuda.exec("butler/matrix_write") end
 remuda.exec("butler/matrix_setup")
 remuda.exec("butler/matrix_cli")
