@@ -5855,7 +5855,7 @@ while IFS= read -r line; do
   printf 'CMD:%s\n' "$line" >> "$log"
   case "$line" in
     '')
-      if [ "$scenario" = model-confirm ] || [ "$scenario" = model-confirm-with-status ]; then
+      if [ "$scenario" = model-confirm ] || [ "$scenario" = model-confirm-with-status ] || [ "$scenario" = model-confirm-transient ]; then
         printf 'KEY:RET\n' >> "$log"
         model='sonnet'; paint
       fi
@@ -5866,6 +5866,10 @@ while IFS= read -r line; do
         cat "$model_confirm_fixture"
       elif [ "$scenario" = model-confirm-with-status ]; then
         cat "$status_model_confirm_fixture"
+      elif [ "$scenario" = model-confirm-transient ]; then
+        printf 'MODEL:%s CTX:%s\n❯ 1. Yes, switch to Sonnet 5.5\n  2. No, go back\n' "$model" "$ctx"
+        sleep 0.3
+        cat "$model_confirm_fixture"
       elif [ "$scenario" = stale-model-confirm ]; then
         cat "$stale_model_confirm_fixture"
       elif [ "$scenario" = wrong-title-model-confirm ]; then
@@ -6018,6 +6022,7 @@ done
         ("fake-unknown", "claude", "unknown"),
         ("fake-model-confirm-wrong-title", "claude", "wrong-title-model-confirm"),
         ("fake-model-confirm", "claude", "model-confirm"),
+        ("fake-model-confirm-transient", "claude", "model-confirm-transient"),
         ("fake-model-confirm-with-status", "claude", "model-confirm-with-status"),
         ("fake-stale-model-confirm", "claude", "stale-model-confirm"),
         ("fake-restore-fails", "claude", "unknown-restore-fails"),
@@ -6056,7 +6061,7 @@ done
         if name == "fake-unsafe-model" {
             eval(&path, "remuda._butler_bus.agents['fake-unsafe-model'].model = 'opus; /compact'");
         }
-        if name == "fake-model-confirm" {
+        if name == "fake-model-confirm" || name == "fake-model-confirm-transient" {
             eval(&path, "remuda._butler_compaction_config.claude_completion_timeout = 2");
         }
         wait_for(&path, name, "MODEL:");
@@ -6304,7 +6309,7 @@ done
             assert_eq!(got, "CMD:/model sonnet\nKEY:RET\n",
                 "same options under a different dialog title must not receive Return: {got:?}");
         }
-        if name == "fake-model-confirm" || name == "fake-model-confirm-with-status" {
+        if name == "fake-model-confirm" || name == "fake-model-confirm-transient" || name == "fake-model-confirm-with-status" {
             let prior_reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
             let prior_report_count = prior_reports.lines().count();
             let deadline = Instant::now() + Duration::from_secs(8);
