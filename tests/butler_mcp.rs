@@ -360,6 +360,77 @@ fn butler_close_is_limited_to_own_idle_members_unless_forced() {
 }
 
 #[test]
+fn butler_close_cli_uses_core_caller_not_forwarded_env() {
+    let dir = scratch("butler-close-caller");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+    eval(&path, r#"
+      remuda._butler_agent_builders.fake = function() return {'sleep', '100'} end
+      remuda._butler_launch('fake', 'lead')
+      remuda._butler_launch('fake', 'kid', nil, 'lead')
+      remuda._butler_launch('fake', 'other')
+      remuda._butler_mail.unread = function() return 0 end
+      remuda.butler.is_idle = function() return true end
+      remuda._butler_close_test_calls = {}
+      remuda.close = function(name)
+        table.insert(remuda._butler_close_test_calls, name)
+        return 'closed ' .. name
+      end
+      remuda.fail = function(message) return message end
+    "#);
+    let lead_id = eval(&path, "return remuda._butler_bus.agents.lead.id");
+    let other_id = eval(&path, "return remuda._butler_bus.agents.other.id");
+    let cli = |kind: &str, session: &str, env_id: &str, name: &str| {
+        let env = if env_id.is_empty() { "{}".to_string() } else {
+            format!("{{REMUDA_BUTLER_AGENT_ID={env_id:?}}}")
+        };
+        eval(&path, &format!(
+            "local old=remuda.caller; remuda.caller=function() return {{kind={kind:?}, session={session:?}}} end; \
+             local result=remuda._extension_commands.butler({{'close', {name:?}, '--force'}}, {{env={env}}}); \
+             remuda.caller=old; return result"
+        ))
+    };
+
+    let cleared = cli("session", "lead", "", "lead");
+    assert!(cleared.contains("only your direct members"), "cleared env bypassed ownership: {cleared}");
+    let spoofed = cli("session", "lead", &other_id, "other");
+    assert!(spoofed.contains("only your direct members"), "spoofed env bypassed ownership: {spoofed}");
+    let unknown = cli("unknown", "", &lead_id, "kid");
+    assert!(unknown.contains("unknown Butler caller") || unknown.contains("run from a Butler member session"),
+        "unknown caller was not refused: {unknown}");
+    assert_eq!(eval(&path, "return #remuda._butler_close_test_calls"), "0");
+
+    let outside = eval(&path, &format!(
+        "local old=remuda.caller; remuda.caller=function() return {{kind='outside'}} end; \
+         local result=remuda._extension_commands.butler({{'close', 'lead', '--force'}}, {{env={{}}}}); \
+         remuda.caller=old; return result"
+    ));
+    assert_eq!(outside, "Closed lead.\nNext: remuda butler sessions");
+    assert_eq!(eval(&path, "return remuda._butler_close_test_calls[1]"), "lead");
+}
+
+#[test]
+fn butler_close_cli_invokes_real_close_path() {
+    let dir = scratch("butler-close-real");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+    eval(&path, r#"
+      remuda._butler_agent_builders.fake = function() return {'sleep', '100'} end
+      remuda._butler_launch('fake', 'real-kid')
+      remuda._butler_mail.unread = function() return 0 end
+      remuda.butler.is_idle = function() return true end
+      remuda.caller = function() return {kind='outside'} end
+    "#);
+    let result = eval(&path,
+        "return remuda._extension_commands.butler({'close', 'real-kid', '--force'}, {env={}})");
+    assert_eq!(result, "Closed real-kid.\nNext: remuda butler sessions");
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.agents['real-kid'] == nil)"), "true",
+        "the real remuda.close path must remove the closed member from bus.agents");
+}
+
+#[test]
 fn butler_close_is_registered_and_unknown_mcp_caller_cannot_close() {
     let dir = scratch("butler-close-tool");
     let path = daemon::socket_path_in(&dir, "s");
