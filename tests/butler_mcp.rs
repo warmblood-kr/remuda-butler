@@ -233,6 +233,56 @@ fn butler_status_is_a_live_mcp_tool_not_a_terminal_scrape() {
     );
 }
 
+#[test]
+fn matrix_reply_is_not_registered_as_a_text_only_mcp_tool() {
+    let dir = scratch("matrix-reply-tool");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    let token_path = dir.join("matrix-token");
+    let config_path = dir.join("matrix-config");
+    std::fs::write(&token_path, "fake-token").expect("write fake Matrix token");
+    std::fs::write(
+        &config_path,
+        "http://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\n",
+    )
+    .expect("write fake Matrix config");
+    let code = format!(
+        r#"local getenv = os.getenv
+        os.getenv = function(key)
+          if key == 'REMUDA_BUTLER_TOKEN' then return {token_path} end
+          if key == 'REMUDA_BUTLER_CONFIG' then return {config_path} end
+          return getenv(key)
+        end
+        local http, request = remuda.http, remuda.http.request
+        http.request = function(spec)
+          spec.callback({{error='fake homeserver'}})
+          return {{cancel=function() end}}
+        end
+        remuda._butler_argv = {{'sh'}}
+        remuda.exec('butler')
+        http.request = request
+        os.getenv = getenv
+        return 'loaded'"#,
+        token_path = serde_json::to_string(&token_path.to_string_lossy()).unwrap(),
+        config_path = serde_json::to_string(&config_path.to_string_lossy()).unwrap(),
+    );
+    assert_eq!(eval(&path, &code), "loaded");
+    assert_eq!(
+        eval(&path, "return tostring(remuda.butler and remuda.butler.matrix and remuda.butler.matrix.relay ~= nil)"),
+        "true",
+        "Matrix config must load its relay before checking matrix_reply absence"
+    );
+    let names = listed(&path);
+    assert!(
+        !names.contains(&"matrix_reply".to_string()),
+        "the text-only matrix_reply MCP tool must not be registered: {names:?}"
+    );
+    eval(
+        &path,
+        "if remuda.butler and remuda.butler.matrix and remuda.butler.matrix.relay then remuda.butler.matrix.relay.stop() end; return 'stopped'",
+    );
+}
+
 fn eval(path: &Path, code: &str) -> String {
     match client::request(path, &Request::Eval { code: code.into(), name: None }).expect("eval") {
         Response::Value(value) => value,
