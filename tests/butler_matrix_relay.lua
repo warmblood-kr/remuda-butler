@@ -13,6 +13,7 @@ end
 function remuda.cancel(timer) if timer then timer.cancelled = true end end
 local matrix = dofile("packages/butler/matrix_request.lua")
 dofile("packages/butler/matrix_setup.lua")
+dofile("packages/butler/matrix_read.lua")
 dofile("packages/butler/matrix_cli.lua")
 local setup_tests = dofile("tests/butler_matrix_setup.lua")
 local relay_module = dofile("packages/butler/matrix_relay.lua")

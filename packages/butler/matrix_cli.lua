@@ -3,6 +3,7 @@ local matrix = assert(remuda.butler and remuda.butler.matrix, "Matrix request wo
 
 local USAGE = [[  remuda butler matrix [--json] status
   remuda butler matrix [--json] rooms
+  remuda butler matrix [--json] rooms --public [TERM]
   remuda butler matrix [--json] [--room ROOM] [-n N] history
   remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
   remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
@@ -68,6 +69,9 @@ local function parse(args)
     if not positional and value == "--" then
       positional = true
       at = at + 1
+    elseif not positional and verb == "rooms" and value == "--public" then
+      options.public = true
+      at = at + 1
     elseif not positional and (value == "--json" or value == "--room" or value == "--id") then
       local width = option(value)
       at = at + width
@@ -98,6 +102,7 @@ local function parse(args)
   if options.output and method ~= "download" then return nil end
   if options.reason and method ~= "redact" then return nil end
   if options.id and method ~= "quarantine" then return nil end
+  if options.public and method ~= "rooms" then return nil end
   if method == "send" then
     options.text = join_words(values, 1)
     if #values == 0 then return nil end
@@ -124,7 +129,14 @@ local function parse(args)
   elseif method == "download" then
     if #values ~= 1 then return nil end
     options.mxc = values[1]
-  elseif method == "quarantine" or method == "status" or method == "rooms" then
+  elseif method == "rooms" then
+    if options.public then
+      if #values > 1 then return nil end
+      options.public_term = values[1]
+    elseif #values ~= 0 then
+      return nil
+    end
+  elseif method == "quarantine" or method == "status" then
     if #values ~= 0 then return nil end
   end
   return method, options
@@ -146,9 +158,23 @@ end
 local function render_human(verb, options, result)
   local data = result.json or result
   if verb == "rooms" then
+    if options.public or result.public or data.public then
+      local rows, lines = data.public_rooms or {}, {}
+      for _, item in ipairs(rows) do
+        lines[#lines + 1] = terminal_safe(item.name) .. "  "
+          .. terminal_safe(item.alias or "(no alias)") .. "  "
+          .. tostring(item.members or 0) .. " members  " .. terminal_safe(item.room_id)
+      end
+      if #lines == 0 then lines[#lines + 1] = "No public Matrix rooms found" end
+      lines[#lines + 1] = options.public_term
+        and ("Next: remuda butler matrix join " .. terminal_safe(options.public_term))
+        or "Next: remuda butler matrix join ROOM"
+      return table.concat(lines, "\n") .. "\n"
+    end
     local rooms, lines, leave_room, safe_rooms, safe_kinds, room_width, kind_width = data.rooms or {}, {}, false, {}, {}, 0, 0
     for _, item in ipairs(rooms) do
       local room = terminal_safe(item.room)
+      if item.alias then room = room .. " (" .. terminal_safe(item.alias) .. ")" end
       local kind = terminal_safe(item.kind)
       safe_rooms[#safe_rooms + 1] = room
       safe_kinds[#safe_kinds + 1] = kind
