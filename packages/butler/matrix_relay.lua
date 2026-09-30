@@ -95,6 +95,22 @@ local function mail_body(body)
   return (body:gsub("\194[\128-\159]", ""))
 end
 
+local function strip_reply_fallback(body)
+  local lines = {}
+  for line in (body .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
+  local quote = lines[1] and lines[1]:match("^> <[@*][^>]*> (.*)$")
+  if not quote then return body end
+  local index = 2
+  while lines[index] and lines[index]:match("^>") do index = index + 1 end
+  if lines[index] == "" then index = index + 1 end
+  local reply = {}
+  for i = index, #lines do reply[#reply + 1] = lines[i] end
+  if reply[#reply] == "" then table.remove(reply) end
+  local text = table.concat(reply, "\n")
+  if text:match("^%s*$") then return body end
+  return "> " .. quote:sub(1, 120) .. "\n" .. text
+end
+
 local function timestamp(event)
   local ms = event and tonumber(event.origin_server_ts)
   if ms and ms >= 0 and ms < 253402300800000 then
@@ -165,6 +181,42 @@ local function media_uri(content)
   if type(content) ~= "table" then return nil end
   if type(content.url) == "string" then return content.url end
   if type(content.file) == "table" and type(content.file.url) == "string" then return content.file.url end
+end
+
+local function safe_media_field(value)
+  value = type(value) == "string" and value or "unknown"
+  value = value:gsub("[%z\1-\31\127]", ""):gsub("\194[\128-\159]", "")
+  return value:sub(1, 256)
+end
+
+local function valid_media_uri(value)
+  return type(value) == "string"
+    and value:match("^mxc://[A-Za-z0-9%.:%-]+/[A-Za-z0-9_%-]+$") ~= nil
+end
+
+local MEDIA_MSGTYPES = {
+  ["m.image"] = "image", ["m.file"] = "file",
+  ["m.video"] = "video", ["m.audio"] = "audio",
+}
+
+local function media_mail_body(content, kind)
+  local info = type(content.info) == "table" and content.info or {}
+  local filename = type(content.filename) == "string" and content.filename or content.body
+  local mimetype = type(info.mimetype) == "string" and info.mimetype or "unknown"
+  filename, mimetype = safe_media_field(filename), safe_media_field(mimetype)
+  local size = info.size
+  local lines = { "media: " .. kind, "filename: " .. filename, "mimetype: " .. mimetype }
+  if type(size) == "number" and size >= 0 and size < 9007199254740992 and size % 1 == 0 then
+    lines[#lines + 1] = "size: " .. string.format("%.0f", size) .. " bytes"
+  end
+  local mxc = media_uri(content)
+  if valid_media_uri(mxc) then
+    lines[#lines + 1] = "mxc: " .. mxc
+    lines[#lines + 1] = "Next: remuda butler matrix -o PATH download " .. mxc
+  else
+    lines[#lines + 1] = "mxc: (invalid)"
+  end
+  return table.concat(lines, "\n")
 end
 
 local function add_processed(state, id)
@@ -284,6 +336,14 @@ local function load_state(path)
       and type(event.sender) == "string" and type(event.room_id) == "string"
       and type(event.created_at) == "string" and type(event.body) == "string" then
       event.event_id = event.event_id or id
+      local references = event.references
+      if type(references) == "table" and references ~= json.null
+        and getmetatable(references) == JSON_ARRAY_MT and #references == 1
+        and type(references[1]) == "string" and references[1] ~= "" then
+        event.references = { cap_field(references[1], 512) }
+      else
+        event.references = nil
+      end
       state.pending[id] = event
     end
   end
@@ -436,6 +496,25 @@ function relay.new(options)
         if thread_root and (route.last_reply_event_id == thread_root
           or route.thread_root == thread_root or route.event_id == thread_root) then
           fallback = fallback or mail_id
+        end
+      end
+    end
+    return fallback
+  end
+
+  function instance:thread_root_mail_for_event(room_id, thread_root)
+    local fallback, fallback_time
+    for mail_id, route in pairs(state.routes) do
+      if route.room_id == room_id then
+        if route.event_id == thread_root or route.last_reply_event_id == thread_root then
+          return mail_id
+        end
+        if route.thread_root == thread_root then
+          local created_at = type(route.created_at) == "string" and route.created_at or ""
+          if not fallback or created_at < fallback_time
+            or (created_at == fallback_time and mail_id < fallback) then
+            fallback, fallback_time = mail_id, created_at
+          end
         end
       end
     end
@@ -651,6 +730,17 @@ function relay.new(options)
     delivery_retry_timers[id] = timer
   end
 
+  local function resolve_pending_thread_context(event)
+    if not event.thread_root then return end
+    local route_mail_id = instance:mail_route_for_event(event.room_id, event.thread_root, event.in_reply_to)
+    local root_mail_id = instance:thread_root_mail_for_event(event.room_id, event.thread_root)
+    local subscription = (state.subscriptions[event.room_id] or {})[event.thread_id]
+    local subscribed_mail_id = type(subscription) == "table" and subscription.mail_id or nil
+    event.context_mail_id = route_mail_id or subscribed_mail_id or event.context_mail_id
+    local reference = root_mail_id or subscribed_mail_id
+    if reference then event.references = { reference } end
+  end
+
   deliver_pending = function(only)
     local ids = only or state.pending_order
     if not ids then
@@ -661,6 +751,7 @@ function relay.new(options)
       for _, id in ipairs(ids) do
         local event = state.pending[id]
         if event and not delivery_retry_waiting[id] then
+          resolve_pending_thread_context(event)
           local ok, result = pcall(deliver, event)
           if ok and result ~= nil then
             if type(result) == "table" and type(result.id) == "string" and result.id ~= "" then
@@ -738,13 +829,19 @@ function relay.new(options)
           elseif ev.type ~= "m.room.message" then reason = "unsupported_event_type"
           elseif type(ev.sender) ~= "string" or ev.sender == "" then reason = "missing_sender"
           elseif not cfg.allowed_senders[ev.sender] then reason = "sender_not_allowlisted"
-          elseif content.msgtype ~= "m.text" and content.msgtype ~= "m.notice" and content.msgtype ~= "m.emote" then
+          elseif MEDIA_MSGTYPES[content.msgtype] and media_uri(content) == nil then
+            reason = "unsupported_message_type"
+          elseif content.msgtype ~= "m.text" and content.msgtype ~= "m.notice" and content.msgtype ~= "m.emote"
+              and not MEDIA_MSGTYPES[content.msgtype] then
             reason = "unsupported_message_type"
           elseif type(content.body) ~= "string" then reason = "missing_text_body" end
           if reason then
             quarantine_event(ev, reason)
           else
           local thread_root, in_reply_to = relation_fields(content)
+          local media_kind = MEDIA_MSGTYPES[content.msgtype]
+          local body = media_kind and mail_body(media_mail_body(content, media_kind)) or mail_body(content.body)
+          if in_reply_to and not thread_root then body = strip_reply_fallback(body) end
           local actual_room = room_id or cfg.room
           local sender_kind = member_kind(ev.sender, cfg)
           local is_mention = mentions(content, content.body, cfg.self_mxid)
@@ -761,18 +858,23 @@ function relay.new(options)
               (not is_threaded or is_mention or is_subscribed))))
           local route_mail_id = thread_id
             and instance:mail_route_for_event(actual_room, thread_root, in_reply_to) or nil
+          local thread_root_mail_id = thread_root
+            and instance:thread_root_mail_for_event(actual_room, thread_root) or nil
           local subscription = thread_id and subscriptions[thread_id]
           local subscribed_mail_id = type(subscription) == "table" and subscription.mail_id or nil
           local context_mail_id = route_mail_id or subscribed_mail_id
+          local references = thread_root and (thread_root_mail_id or subscribed_mail_id) or nil
           if not accepted then
             add_processed(state, ev.event_id)
             if cursor then state.since = cursor end
           else
           state.pending[ev.event_id] = {
             sender = ev.sender, room_id = actual_room, event_id = ev.event_id,
-            created_at = timestamp(ev), body = mail_body(content.body),
-            thread_root = thread_root, in_reply_to = in_reply_to, mxc = media_uri(content),
+            created_at = timestamp(ev), body = body,
+            thread_root = thread_root, in_reply_to = in_reply_to,
+            mxc = valid_media_uri(media_uri(content)) and media_uri(content) or nil,
             room = cfg.rooms[actual_room], room_kind = cfg.rooms[actual_room], context_mail_id = context_mail_id,
+            references = references and { references } or nil,
             from_agent = is_agent,
             subscribe_thread = is_all and is_threaded and is_mention,
             thread_id = thread_id,
@@ -938,6 +1040,7 @@ function relay.start(config)
           in_reply_to = event.in_reply_to, thread_id = event.thread_id,
           room = event.room, room_kind = event.room_kind,
           context_mail_id = event.context_mail_id, from_agent = event.from_agent, mxc = event.mxc },
+        references = event.references,
       })
       if type(delivered) == "table" and delivered.__butler_delivery_hook_error then
         error(delivered.__butler_delivery_hook_error, 0)
