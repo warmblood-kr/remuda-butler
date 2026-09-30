@@ -588,7 +588,31 @@ function remuda._butler_topic_new(name, template, kind, model)
   return make_topic(name, template, kind, "butler", nil, model)
 end
 function remuda._butler_topic_delegate(name, task, template, kind, parent, model, cwd)
-  parent = resolve(parent or "butler")
+  local requested_parent = parent or "butler"
+  local resolved, leader = pcall(resolve, requested_parent)
+  if resolved then
+    parent = leader
+  else
+    local session_live = false
+    for _, row in ipairs(remuda.ls()) do
+      if row.name == requested_parent and row.alive then session_live = true; break end
+    end
+    if not session_live then error(leader, 0) end
+    if type(remuda.expect) ~= "function" then
+      error("Butler leader " .. tostring(requested_parent) .. " is still starting.\n"
+        .. "Next: wait for the leader to become ready, then retry delegation.", 0)
+    end
+    local timeout = tonumber(remuda._butler_leader_ready_timeout) or 10
+    if timeout <= 0 then timeout = 10 end
+    pcall(remuda.expect, requested_parent, {
+      { id = "butler-leader-ready", match = function() return bus.agents[requested_parent] ~= nil end },
+    }, { timeout = timeout, interval = 0.1 })
+    if not bus.agents[requested_parent] then
+      error("Butler leader " .. tostring(requested_parent) .. " is still starting; wait before delegating.\n"
+        .. "Next: retry the delegation after the leader appears in `remuda butler agents`.", 0)
+    end
+    parent = requested_parent
+  end
   local leader = bus.agents[parent]
   if not leader then error("no Butler leader named " .. tostring(parent), 0) end
   return make_topic(name, template, kind, parent, task, model, cwd)
