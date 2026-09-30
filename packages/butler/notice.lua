@@ -19,6 +19,7 @@ local startup_action_safe
 bus.notices = bus.notices or {}
 bus.notice_screens = bus.notice_screens or {}
 bus.notice_seen = bus.notice_seen or {}
+bus.notice_retry_reasons = bus.notice_retry_reasons or {}
 local NOTICE_STABLE_SECONDS = 3
 local NOTICE_QUIET_S = 2
 local NOTICE_MAX_WAIT_S = 10
@@ -352,9 +353,26 @@ local function notice_matches_composer(session, screen, text, expected)
     or compact_composer(text) == expected_compact
 end
 local function trace_notice_retry(session, pending, reason)
+  if bus.notice_retry_reasons[session] == reason then return end
+  bus.notice_retry_reasons[session] = reason
   _butler_session_trace("notice_retry", "message_ids="
     .. table.concat(pending and pending.message_order or {}, ",")
     .. " session=" .. session .. " reason=" .. tostring(reason))
+end
+local function notice_log_value(value)
+  local raw = tostring(value or "")
+  local length = #raw
+  if length > 8192 then
+    raw = raw:sub(1, 8192) .. ("<truncated; %d bytes total>"):format(length)
+  end
+  return string.format("%q", raw)
+end
+local function log_notice_verify_mismatch(session, screen, text, expected)
+  -- Failure-only trace data; never display diagnostic captures in an agent pane.
+  _butler_session_trace("notice_verify_mismatch", session
+    .. " capture=" .. notice_log_value(screen)
+    .. " composer=" .. notice_log_value(text)
+    .. " expected=" .. notice_log_value(expected))
 end
 local function recovery_composer_empty(session, screen, decision, text)
   if decision ~= "EMPTY" then return false end
@@ -368,6 +386,7 @@ notice_recovery_error = function(session, state, reason)
   local parent = agent and agent.parent or "butler"
   _butler_session_trace("notice_recovery_failed", "message_ids="
     .. table.concat(state.message_ids or {}, ",") .. " session=" .. session .. " reason=" .. reason)
+  bus.notice_retry_reasons[session] = nil
   pcall(remuda._butler_send, "butler", parent,
     "Could not safely deliver queued Butler mail to " .. session .. ": " .. reason
     .. ". Inspect the composer and resend the notice."
@@ -413,6 +432,7 @@ local function complete_notice_recovery(session, state)
     end
   end
   bus.notice_recoveries[session] = nil
+  bus.notice_retry_reasons[session] = nil
   return true
 end
 local function recovery_human_safe(session, allow_busy)
@@ -482,8 +502,7 @@ local function tick_notice_recovery(session, state)
   if not screen then return notice_recovery_error(session, state, "the pane could not be captured") end
   local normalized = tostring(screen):gsub("\r\n", "\n"):gsub("\r", "\n")
   local pending = bus.notices[session]
-  trace_notice_retry(session, pending, "prompt-" .. decision
-    .. (text and text ~= "" and (":" .. text) or ""))
+  trace_notice_retry(session, pending, "prompt-" .. decision)
   if state.phase == "retry_type" then
     return begin_notice_submit(session, state, state.draft)
   end
@@ -562,8 +581,16 @@ local function tick_notice_recovery(session, state)
       return complete_notice_recovery(session, state)
     end
     if busy then return false end
-    -- Let the recovery deadline below own the timeout so an attached pane can
-    -- return to the ordinary empty-prompt delivery path when it becomes idle.
+    if state.checks >= 6 then
+      if decision == "EMPTY" then
+        trace_notice_retry(session, pending, "cap reached; prompt-empty; falling back to normal delivery")
+        bus.notice_recoveries[session] = nil
+        bus.notice_retry_reasons[session] = nil
+        return false
+      end
+      log_notice_verify_mismatch(session, screen, text, state.notice)
+      return notice_recovery_error(session, state, "the existing Butler notice did not leave the composer")
+    end
     return false
   elseif state.phase == "verify_notice" then
     local notice_head = tostring(state.notice or ""):gsub("%s+", ""):sub(1, 32)
@@ -589,8 +616,16 @@ local function tick_notice_recovery(session, state)
       state.return_retried = true
       return false
     end
-    -- The bounded recovery deadline below reports the failure with message
-    -- context and first gives an empty prompt a chance to use normal delivery.
+    if state.checks >= 12 then
+      if decision == "EMPTY" then
+        trace_notice_retry(session, pending, "cap reached; prompt-empty; falling back to normal delivery")
+        bus.notice_recoveries[session] = nil
+        bus.notice_retry_reasons[session] = nil
+        return false
+      end
+      log_notice_verify_mismatch(session, screen, text, state.notice)
+      return notice_recovery_error(session, state, "the notice submit could not be verified")
+    end
     return false
   end
   return notice_recovery_error(session, state, "unknown recovery state")
@@ -653,6 +688,7 @@ function remuda._butler_notify(alias, notice, message_id)
     seen[message_id] = true
   end
   local pending = bus.notices[alias] or { count = 0 }
+  bus.notice_retry_reasons[alias] = nil
   if message_id then
     pending.message_ids = pending.message_ids or {}
     pending.message_order = pending.message_order or {}

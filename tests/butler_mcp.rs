@@ -1825,13 +1825,22 @@ fn attached_notice_recovery_progresses_or_times_out_with_a_reason() {
     let recovery = eval(&path, "return tostring(remuda._butler_bus.notice_recoveries.m1 ~= nil)");
     let id = eval(&path, "return remuda._notice_test_state.id");
     let trace_contents = std::fs::read_to_string(trace).unwrap_or_default();
-    let failed_with_reason = trace_contents.contains("notice_recovery_failed")
-        && trace_contents.contains("m1")
-        && trace_contents.contains(&id);
+    assert!(trace_contents.contains("cap reached; prompt-empty; falling back to normal delivery"),
+        "empty prompt at the check cap did not fall back to normal delivery: {trace_contents}");
+    assert!(!trace_contents.contains("notice_verify_mismatch"),
+        "successful empty-prompt fallback emitted a failure diagnostic: {trace_contents}");
+    assert!(trace_contents.matches("notice_retry").count() <= 4,
+        "routine retries should log only when the reason changes: {trace_contents}");
+    assert!(!trace_contents.contains("attached recovery notice"),
+        "routine retry traces must not include composer or message text: {trace_contents}");
+    assert!(!trace_contents.contains("reason=prompt-NON-EMPTY:"),
+        "routine retry trace included prompt text after the decision: {trace_contents}");
     assert!(
-        pending == "false" || recovery == "false" || failed_with_reason,
+        pending == "false" && recovery == "false",
         "attached recovery remained pending without progress or a logged reason; pending={pending}, recovery={recovery}, trace={trace_contents}"
     );
+    assert!(trace_contents.contains(&id) && trace_contents.contains("session=m1"),
+        "retry trace omitted message ID or session: {trace_contents}");
 }
 
 #[test]
