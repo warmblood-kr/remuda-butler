@@ -622,6 +622,34 @@ local function test_owner_invite_in_baseline_sync_joins_and_writes_line()
   assert(ok, err)
 end
 
+local function test_owner_invite_failure_preserves_concurrent_room_line()
+  local dir, path = invite_fixture()
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  local config_add_room = matrix.config_add_room
+  local injected = false
+  matrix.config_add_room = function(config_path, room, how)
+    if config_path == path and room == NEW and not injected then
+      injected = true
+      local ok, err = config_add_room(config_path, room, "operator")
+      assert(ok, "could not write the concurrent operator room line: " .. tostring(err))
+    end
+    return config_add_room(config_path, room, how)
+  end
+  local ok, err = pcall(function()
+    client:sync({ json = { next_batch = "s1", rooms = { invite = invite(NEW, OWNER) } } })
+    client:pump({ error = "M_FORBIDDEN" })
+    local line = room_line(path, NEW)
+    assert(injected and client:joins(NEW) == 1, "the invite must try joining after the concurrent config write")
+    assert(line and line:find("how=operator", 1, true),
+      "a failed owner invite must preserve an operator room line written after the relay cached config")
+  end)
+  matrix.config_add_room = config_add_room
+  relay:stop()
+  remove_dir(dir)
+  assert(ok, err)
+end
+
 local function test_stranger_invite_is_quarantined_with_home_next()
   local dir, path = invite_fixture()
   local before = read_text(path)
@@ -698,6 +726,27 @@ local function test_unsafe_invite_room_is_quarantined_without_home_notice()
     end
     assert(item and item.room_id == hostile_room, "the unsafe invite must still be quarantined")
     assert(client:messages(HOME, "Invite to") == 0, "an unsafe room ID must not appear in a HOME command")
+  end)
+  relay:stop()
+  remove_dir(dir)
+  assert(ok, err)
+end
+
+local function test_bidi_invite_room_is_quarantined_without_home_notice()
+  local dir, path = invite_fixture()
+  local bidi_room = "!room\226\128\174:example.org"
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  local ok, err = pcall(function()
+    client:sync({ json = { next_batch = "s1", rooms = { invite = invite(bidi_room, STRANGER) } } })
+    client:pump()
+    local item
+    for _, q in ipairs(relay:quarantine_list()) do
+      if q.reason == "invite_not_allowlisted" and q.room_id == bidi_room then item = q end
+    end
+    assert(item and item.sender == STRANGER, "a bidi room invite must still be quarantined")
+    assert(client:messages(HOME, "Invite to") == 0,
+      "a bidi room ID must not appear in a HOME invite notice")
   end)
   relay:stop()
   remove_dir(dir)
@@ -956,9 +1005,11 @@ for _, case in ipairs({
   { "test_owner_invite_joins_writes_line_and_notices_once", test_owner_invite_joins_writes_line_and_notices_once },
   { "test_configured_joined_room_owner_invite_retries_without_config_or_notice", test_configured_joined_room_owner_invite_retries_without_config_or_notice },
   { "test_owner_invite_in_baseline_sync_joins_and_writes_line", test_owner_invite_in_baseline_sync_joins_and_writes_line },
+  { "test_owner_invite_failure_preserves_concurrent_room_line", test_owner_invite_failure_preserves_concurrent_room_line },
   { "test_stranger_invite_is_quarantined_with_home_next", test_stranger_invite_is_quarantined_with_home_next },
   { "test_conflicting_inviter_events_cannot_join", test_conflicting_inviter_events_cannot_join },
   { "test_unsafe_invite_room_is_quarantined_without_home_notice", test_unsafe_invite_room_is_quarantined_without_home_notice },
+  { "test_bidi_invite_room_is_quarantined_without_home_notice", test_bidi_invite_room_is_quarantined_without_home_notice },
   { "test_long_invite_identifiers_dedupe_home_notice", test_long_invite_identifiers_dedupe_home_notice },
   { "test_invite_home_notice_cap_adds_one_summary", test_invite_home_notice_cap_adds_one_summary },
   { "test_agent_invite_is_not_joined", test_agent_invite_is_not_joined },

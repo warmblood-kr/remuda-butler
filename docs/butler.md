@@ -67,7 +67,9 @@ The config file remains the
 single room boundary: an invite from an allowlisted human
 owner adds `room=ROOM_ID how=owner-invite`, and operator `join` adds
 `room=ROOM_ID how=operator`. Invites from other senders are not joined and are
-reported to HOME; joined rooms use the HOME sender rules. `leave` removes a
+reported to HOME; joined rooms use the HOME sender rules. The inviter check
+relies on the homeserver appending the real invite event to `invite_state`
+(Synapse does). `leave` removes a
 joined room, while HOME and ALL-BUTLERS cannot be left or removed. The
 `send -` stdin form is unsupported until core #213.
 

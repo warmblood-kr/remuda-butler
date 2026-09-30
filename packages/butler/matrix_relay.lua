@@ -128,6 +128,11 @@ local function valid_mxid(value)
   return type(value) == "string" and value:match("^@[^:%s]+:%S+$") ~= nil
 end
 
+local function has_bidi_format(value)
+  return type(value) == "string" and (value:find("\226\128[\142\143\170-\174]") ~= nil
+    or value:find("\226\129[\166-\169]") ~= nil)
+end
+
 local function shell_quote(value)
   return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
 end
@@ -883,12 +888,16 @@ function relay.new(options)
           local report_inviter = inviter or "unknown inviter"
           if same_inviter and inviter and cfg.allowed_senders[inviter]
             and member_kind(inviter, cfg) == "HUMAN" then
-            local added_room, add_error = room_kind == "joined", nil
+            local added_room, add_error, wrote = room_kind == "joined", nil, false
             if room_kind == nil then
-              added_room, add_error = matrix.config_add_room(config_path, room_id, "owner-invite")
+              local write_result
+              added_room, write_result = matrix.config_add_room(config_path, room_id, "owner-invite")
               if added_room then
+                wrote = write_result == true
                 cfg.rooms[room_id] = "joined"
                 cfg.room_how[room_id] = "owner-invite"
+              else
+                add_error = write_result
               end
             end
             if added_room then
@@ -899,7 +908,7 @@ function relay.new(options)
               }, function(result)
                 joining[room_id] = nil
                 if type(result) ~= "table" or result.error then
-                  if room_kind == nil then
+                  if wrote then
                     local removed, remove_error = matrix.config_remove_room(config_path, room_id)
                     cfg.rooms[room_id], cfg.room_how[room_id] = nil, nil
                     local detail = type(result) == "table" and result.error or "Matrix join failed"
@@ -927,7 +936,8 @@ function relay.new(options)
               sender = report_inviter, type = "m.room.member", content = {} }
             if quarantine_event(ev, "invite_not_allowlisted", room_id) then
               local safe_to_notice = valid_room_id(room_id) and not room_id:find("'", 1, true)
-                and valid_mxid(report_inviter)
+                and valid_mxid(report_inviter) and not has_bidi_format(room_id)
+                and not has_bidi_format(report_inviter)
               if safe_to_notice then
                 local safe_room = terminal_safe_field(room_id, 512)
                 local safe_inviter = terminal_safe_field(report_inviter, 256)
