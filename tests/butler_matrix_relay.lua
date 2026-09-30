@@ -1181,6 +1181,48 @@ local function test_open_mode_denies_room_alias_room_server_and_inviter_server()
   assert(#failures == 0, table.concat(failures, "\n"))
 end
 
+local function test_open_mode_refuses_truncated_denied_inviter()
+  local dir, path = open_invite_fixture("deny_server=evil.org\n")
+  local long_inviter = "@" .. string.rep("a", 120) .. ":evil.org"
+  assert(#long_inviter == 130, "fixture inviter must exercise truncation")
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  client:sync({ json = { next_batch = "s1",
+    rooms = { invite = invite_with_state(NEW, long_inviter, "#safe:example.org") } } })
+  client:pump()
+  assert(client:joins(NEW) == 0, "a truncated inviter from a denied server must not join")
+  local item
+  for _, q in ipairs(relay:quarantine_list()) do
+    if q.room_id == NEW then item = q end
+  end
+  assert(item and item.reason == "invite_not_allowlisted",
+    "a sanitized/truncated inviter must be refused as not allowlisted")
+  local conf = assert(matrix.read_config(path))
+  assert(conf.rooms[NEW] == nil, "a truncated inviter must not be written as room metadata")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function test_open_mode_refuses_truncated_alias()
+  local dir, path = open_invite_fixture("deny_server=evil.org\n")
+  local long_alias = "#" .. string.rep("a", 120) .. ":evil.org"
+  assert(#long_alias == 130, "fixture alias must exercise truncation")
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  client:sync({ json = { next_batch = "s1",
+    rooms = { invite = invite_with_state(NEW, STRANGER, long_alias) } } })
+  client:pump()
+  assert(client:joins(NEW) == 0, "an invite with a truncated canonical alias must not join")
+  local item
+  for _, q in ipairs(relay:quarantine_list()) do
+    if q.room_id == NEW then item = q end
+  end
+  assert(item and item.reason == "invite_not_allowlisted",
+    "a sanitized/truncated alias must refuse the invite as not allowlisted")
+  relay:stop()
+  remove_dir(dir)
+end
+
 local function test_open_mode_sender_allowlist_still_quarantines()
   local dir, path = open_invite_fixture("room=" .. NEW .. " how=invite inviter=" .. STRANGER .. "\n")
   local client, delivered = invite_client(), {}
@@ -1269,7 +1311,7 @@ local function test_open_mode_failed_join_rolls_back_config_and_budget()
   remove_dir(dir)
 end
 
-local function test_open_mode_hostile_invite_state_is_sanitized()
+local function test_open_mode_hostile_invite_state_is_refused()
   local dir, path = open_invite_fixture()
   local client, delivered = invite_client(), {}
   local relay = started_relay(path, client, delivered)
@@ -1278,19 +1320,14 @@ local function test_open_mode_hostile_invite_state_is_sanitized()
   local invitation = invite_with_state(NEW, hostile_inviter, hostile_alias)
   client:sync({ json = { next_batch = "s1", rooms = { invite = invitation } } })
   client:pump()
-  local line = room_line(path, NEW)
-  assert(line and line:find("inviter=@alice:example.org", 1, true)
-    and not line:find("\27", 1, true), "the config inviter field must be sanitized")
-  local joined = client
-  local home_message
-  for _, args in ipairs(client.requests) do
-    local body = args.text or args.body or ""
-    if args.room == HOME and body:find("Joined " .. NEW, 1, true) then home_message = body end
+  assert(room_line(path, NEW) == nil, "hostile invite fields must not be written to config")
+  assert(client:joins(NEW) == 0, "invite fields changed by sanitization must not be joined")
+  local quarantined
+  for _, item in ipairs(relay:quarantine_list()) do
+    if item.room_id == NEW then quarantined = item end
   end
-  assert(home_message and home_message:find("#room:example.org", 1, true)
-    and not home_message:find("\226\128\174", 1, true)
-    and not home_message:find("\27", 1, true), "HOME invite text must strip ESC and bidi controls")
-  assert(joined:joins(NEW) == 1, "sanitized invite fields must still permit a valid open-mode invite")
+  assert(quarantined and quarantined.reason == "invite_not_allowlisted",
+    "hostile invite fields must be quarantined as not allowlisted")
   relay:stop()
   remove_dir(dir)
 end
@@ -2173,11 +2210,13 @@ for _, case in ipairs({
   { "test_invalid_open_room_config_lines_are_ignored_with_one_warning", test_invalid_open_room_config_lines_are_ignored_with_one_warning },
   { "test_open_mode_stranger_invite_joins_and_notifies_once", test_open_mode_stranger_invite_joins_and_notifies_once },
   { "test_open_mode_denies_room_alias_room_server_and_inviter_server", test_open_mode_denies_room_alias_room_server_and_inviter_server },
+  { "test_open_mode_refuses_truncated_denied_inviter", test_open_mode_refuses_truncated_denied_inviter },
+  { "test_open_mode_refuses_truncated_alias", test_open_mode_refuses_truncated_alias },
   { "test_open_mode_sender_allowlist_still_quarantines", test_open_mode_sender_allowlist_still_quarantines },
   { "test_open_mode_daily_join_cap_quarantines_twenty_first_invite", test_open_mode_daily_join_cap_quarantines_twenty_first_invite },
   { "test_open_mode_repeated_invite_for_joined_room_does_not_join_again", test_open_mode_repeated_invite_for_joined_room_does_not_join_again },
   { "test_open_mode_failed_join_rolls_back_config_and_budget", test_open_mode_failed_join_rolls_back_config_and_budget },
-  { "test_open_mode_hostile_invite_state_is_sanitized", test_open_mode_hostile_invite_state_is_sanitized },
+  { "test_open_mode_hostile_invite_state_is_refused", test_open_mode_hostile_invite_state_is_refused },
   { "test_open_mode_conflicting_inviter_events_remain_refused", test_open_mode_conflicting_inviter_events_remain_refused },
   { "test_config_add_room_pads_short_config", test_config_add_room_pads_short_config },
   { "test_join_room_alias_resolves_and_labels_output", test_join_room_alias_resolves_and_labels_output },

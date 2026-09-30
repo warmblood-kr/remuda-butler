@@ -1036,6 +1036,7 @@ function relay.new(options)
         and not (open_mode and has_auto_joined_room(room_id)) then
         local inviter, matching_invites, same_inviter = nil, 0, true
         local canonical_aliases = {}
+        local changed_invite_metadata = false
         local invite_state = invitation.invite_state
         local events = type(invite_state) == "table" and invite_state.events or nil
         for _, event in ipairs(type(events) == "table" and events or {}) do
@@ -1051,26 +1052,32 @@ function relay.new(options)
               end
             elseif event.type == "m.room.canonical_alias" and event.state_key == ""
               and type(event.content) == "table" and type(event.content.alias) == "string" then
-              local alias = matrix.sanitize_directory_text(event.content.alias, 128)
-              if matrix.valid_room_alias(alias) then canonical_aliases[alias] = true end
+              local raw_alias = event.content.alias
+              local alias = matrix.sanitize_directory_text(raw_alias, 128)
+              if alias ~= raw_alias then changed_invite_metadata = true end
+              if matrix.valid_room_alias(raw_alias) then canonical_aliases[raw_alias] = true end
             end
           end
         end
         if matching_invites > 0 or open_mode then
           local report_inviter = inviter or "unknown inviter"
           if open_mode then
-            local safe_inviter = matrix.sanitize_directory_text(inviter or "", 128)
+            local raw_inviter = inviter or ""
+            local safe_inviter = matrix.sanitize_directory_text(raw_inviter, 128)
+            if safe_inviter ~= raw_inviter then changed_invite_metadata = true end
             local aliases = {}
             for alias in pairs(canonical_aliases) do aliases[#aliases + 1] = alias end
             table.sort(aliases)
             local notice_alias = #aliases == 1 and aliases[1] or nil
             local room_is_safe = valid_room_id(room_id) and #room_id <= 500
               and mail_body(room_id) == room_id and not has_bidi_format(room_id)
-            local denied = matrix.invite_is_denied(cfg, room_id, nil, safe_inviter)
+            local denied = matrix.invite_is_denied(cfg, room_id, nil, raw_inviter)
             for _, alias in ipairs(aliases) do
-              if matrix.invite_is_denied(cfg, room_id, alias, safe_inviter) then denied = true end
+              if matrix.invite_is_denied(cfg, room_id, alias, raw_inviter) then denied = true end
             end
-            if denied then
+            if changed_invite_metadata then
+              quarantine_invite(room_id, safe_inviter, "invite_not_allowlisted")
+            elseif denied then
               quarantine_invite(room_id, safe_inviter, "invite_denied")
             elseif not room_is_safe or matching_invites == 0 or not same_inviter
               or not valid_open_mxid(safe_inviter) or member_kind(safe_inviter, cfg) ~= "HUMAN" then
