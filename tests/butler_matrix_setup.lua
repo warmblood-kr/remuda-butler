@@ -444,7 +444,7 @@ return function(matrix)
     "the first register request must not send the registration token")
   requests[1].callback({ status = 403, body = '{"errcode":"M_FORBIDDEN","error":"Registration has been disabled"}' })
   assert(resolved and resolved.status == 1 and #prompt_specs == 1
-    and resolved.stderr:find("registration is disabled", 1, true)
+    and resolved.stderr:find("Account registration is disabled on this server. Nothing was created or written. Next: ask the server admin for a bot account, then rerun with --token-file PATH (the bot access token).", 1, true)
     and not resolved.stderr:find(disabled_token, 1, true),
     "a 403 before token submission should report disabled registration without prompting again")
 

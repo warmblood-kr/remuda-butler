@@ -594,7 +594,7 @@ end
 function matrix.setup_register(options, on_done)
   local done_called, cancelled, active = false, false, nil
   local rejected_token = matrix.REJECTED_REGISTRATION_TOKEN
-  local registration_disabled = "Account registration is disabled on this server. Nothing was created or written."
+  local registration_disabled = "Account registration is disabled on this server. Nothing was created or written. Next: ask the server admin for a bot account, then rerun with --token-file PATH (the bot access token)."
   local missing_flow = "This server does not accept registration tokens. Next: this server needs an admin-created bot; run setup with --token-file PATH (the bot access token)."
   local function done(result)
     if done_called or cancelled then return end
