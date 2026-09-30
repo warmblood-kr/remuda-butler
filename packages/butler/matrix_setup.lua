@@ -327,7 +327,7 @@ function matrix.setup_prepare(args)
     if has_token then
       return nil, "--register creates a bot; use --registration-token-file instead of --token-file"
     end
-    if not has_registration then return nil, "--register requires --registration-token-file" end
+    options.prompt_registration_token = not has_registration
   elseif has_registration then
     return nil, "--registration-token-file requires --register"
   elseif has_password and has_token then
@@ -339,9 +339,11 @@ function matrix.setup_prepare(args)
     or (options.password_file and "password" or "token")
   options.secret_path = options.register and options.registration_token_file
     or options.password_file or options.token_file
-  local secret_ok, secret_error = validate_secret(options.secret_path, options.secret_kind)
-  if not secret_ok then return nil, secret_error end
-  options.secret = secret_ok
+  if not options.prompt_registration_token then
+    local secret_ok, secret_error = validate_secret(options.secret_path, options.secret_kind)
+    if not secret_ok then return nil, secret_error end
+    options.secret = secret_ok
+  end
   if options.register and options.password_file then
     if options.password_file == options.registration_token_file then
       return nil, "use separate files for the bot password and the homeserver registration token"
