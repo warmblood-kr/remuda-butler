@@ -116,9 +116,11 @@ room by ID or alias, while HOME and ALL-BUTLERS cannot be left or removed. The
 interactive setup wizard does not ask for the rooms mode yet. The `send -`
 stdin form is unsupported until core #213.
 
-`join` and `leave` change room membership and are operator-only. Until core
-#218 enforces caller identity, this is best-effort policy: another local
-process running as the same user may still invoke those verbs.
+`join` and `leave` change room membership and require an outside terminal
+caller; session, unknown, and missing callers are refused. Clearing
+`REMUDA_BUTLER_*` environment variables does not bypass this check. This is
+still advisory within one UID: another local process running as the same user
+may invoke those verbs from an outside terminal caller.
 
 Approvals: when an agent runs `matrix join`, Butler resolves the room and
 posts one request to HOME instead of joining. The owner answers with a ✅ or
