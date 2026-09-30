@@ -28,10 +28,57 @@ local function read_file(path, what)
   return value
 end
 
+local function file_readable(path)
+  if type(path) ~= "string" or path == "" then return false end
+  local file = io.open(path, "rb")
+  if not file then return false end
+  file:close()
+  return true
+end
+
+local function shell_quote(value)
+  return "'" .. value:gsub("'", "'\\''") .. "'"
+end
+
+local function shown_path(path, override)
+  if type(path) == "string" and path ~= "" then return path end
+  return "<unresolved; set " .. override .. " or HOME/XDG_CONFIG_HOME>"
+end
+
+function matrix.configuration_guidance()
+  local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths or {}
+  local token_path, config_path = paths.token_path, paths.config_path
+  local missing = {}
+  if not file_readable(token_path) then
+    missing[#missing + 1] = "  Missing token file: " .. shown_path(token_path, "REMUDA_BUTLER_TOKEN")
+  end
+  if not file_readable(config_path) then
+    missing[#missing + 1] = "  Missing config file: " .. shown_path(config_path, "REMUDA_BUTLER_CONFIG")
+  end
+  if #missing == 0 then return nil end
+
+  local token_display = type(token_path) == "string" and token_path ~= "" and shell_quote(token_path) or "<token-path>"
+  local config_display = type(config_path) == "string" and config_path ~= "" and shell_quote(config_path) or "<config-path>"
+  local lines = {
+    "Matrix setup is incomplete; resolved paths use REMUDA_BUTLER_TOKEN/REMUDA_BUTLER_CONFIG or the XDG default:",
+    table.concat(missing, "\n"),
+    "Minimal config example (one item per line):",
+    "  https://<homeserver-url>",
+    "  !<room-id>:<server-name>",
+    "  @<your-user>:<server-name>",
+    "  @<allowed-sender>:<server-name>",
+    "Lines 1-4 are homeserver URL, room ID, own MXID, and comma-separated allowed senders.",
+    "Further config lines are optional; see docs/butler.md.",
+    "Protect both files: chmod 600 " .. token_display .. " " .. config_display,
+    "Next: remuda butler matrix setup",
+  }
+  return table.concat(lines, "\n")
+end
+
 -- The request client and inbound relay must interpret the same on-disk
 -- settings. Normalize every line here so CRLF and surrounding whitespace do
 -- not change room or sender authorization decisions.
-function matrix.read_config(path)
+local function read_config(path)
   local contents, err = read_file(path, "config")
   if not contents then return nil, err end
   local lines = {}
@@ -78,23 +125,42 @@ function matrix.read_config(path)
     end
     pin = "sha256/" .. table.concat(encoded)
   end
+  local butler_senders = {}
+  for sender in ((opts.butler_senders or "") .. ","):gmatch("([^,]*),") do
+    sender = trim(sender)
+    if sender ~= "" then butler_senders[sender] = true end
+  end
+  local all_room = opts.all_room
+  if all_room == "" then all_room = nil end
+  if all_room == lines[2] then return nil, "HOME and ALL-BUTLERS rooms must be different" end
+  local rooms = { [lines[2]] = "home" }
+  if all_room then
+    if mode == "1" or mode == "true" or mode == "messages" or mode == "fallback" then
+      return nil, "ALL-BUTLERS room requires /sync; messages fallback supports HOME only"
+    end
+    rooms[all_room] = "all"
+  end
   return {
-    base = base, room = lines[2], self_mxid = lines[3], allowed_senders = allowed,
+    base = base, room = lines[2], home_room = lines[2], all_room = all_room,
+    rooms = rooms,
+    self_mxid = lines[3], allowed_senders = allowed,
+    butler_senders = butler_senders,
     use_messages = mode == "1" or mode == "true" or mode == "messages" or mode == "fallback",
     timeout_ms = math.max(1, timeout), ca_file = ca_file, pin = pin,
   }
 end
+matrix.read_config = read_config
 
 local function config()
-  local paths = remuda._butler_matrix_config
-  if not paths or not paths.token_path or not paths.config_path then
-    return nil, "Matrix is not configured"
-  end
+  local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths
+  local guidance = matrix.configuration_guidance()
+  if guidance then return nil, guidance end
+  if not paths or not paths.token_path or not paths.config_path then return nil, "Matrix is not configured" end
   local token, token_error = read_file(paths.token_path, "token")
   if not token then return nil, token_error end
   token = trim(token)
   if token == "" then return nil, "Matrix token is empty" end
-  local parsed, config_error = matrix.read_config(paths.config_path)
+  local parsed, config_error = read_config(paths.config_path)
   if not parsed then return nil, config_error end
   if parsed.base:match("^https://") and not parsed.ca_file and not parsed.pin then
     return nil, "HTTPS Matrix homeserver requires ca_file=PATH or pin_sha256=HEX"
@@ -110,6 +176,28 @@ function matrix.configured_room()
   if not conf then return nil, err end
   return conf.room
 end
+
+function matrix.room_allowed(room)
+  local conf, err = config()
+  if not conf then return false, err end
+  return room == conf.home_room or (conf.all_room ~= nil and room == conf.all_room)
+end
+
+function matrix.room_kind(room)
+  local conf, err = config()
+  if not conf then return nil, err end
+  return conf.rooms[room]
+end
+
+local function is_agent_mxid(mxid)
+  local localpart = type(mxid) == "string" and mxid:match("^@([^:]+):")
+  if localpart and (localpart:sub(1, 6):lower() == "agent-"
+    or localpart:sub(1, 7):lower() == "butler-") then return true end
+  local conf = config()
+  if not conf then return nil end
+  return type(mxid) == "string" and (mxid == conf.self_mxid or conf.butler_senders[mxid] == true)
+end
+matrix.is_agent_mxid = is_agent_mxid
 
 matrix.once = matrix.once or function(callback)
   local called = false
@@ -139,6 +227,32 @@ end
 
 local function report_error(callback, message)
   callback({ error = message })
+end
+
+local ERR_HINTS = {
+  M_FORBIDDEN = "check --password-file",
+  M_LIMIT_EXCEEDED = "wait before retrying",
+  M_USER_IN_USE = "choose a different --bot MXID",
+  M_UNKNOWN_TOKEN = "rerun setup with a valid --password-file",
+  M_MISSING_TOKEN = "rerun setup with a valid --password-file",
+  M_NOT_FOUND = "check the room or event ID",
+  M_INVALID_PARAM = "check the command arguments",
+  M_UNRECOGNIZED = "check that the homeserver supports this Matrix API",
+}
+
+local function matrix_http_error(status, body)
+  local errcode
+  if type(body) == "string" and body ~= "" then
+    local ok, response = pcall(json.decode, body)
+    if ok and type(response) == "table" and type(response.errcode) == "string"
+      and response.errcode:match("^M_[A-Z0-9_]+$") then
+      errcode = response.errcode
+    end
+  end
+  local message = "Matrix HTTP " .. tostring(status)
+  if errcode then message = message .. " (" .. errcode .. ")" end
+  local hint = errcode and ERR_HINTS[errcode] or "check the homeserver settings and retry"
+  return message .. "\nNext: " .. hint
 end
 
 -- Keep the Matrix result convention while delegating the actual codec to core.
@@ -242,12 +356,12 @@ function matrix.request(args, on_done)
   local encoded_room = path:match("/rooms/([^/?]+)")
   if encoded_room then
     local path_room = percent_decode(encoded_room)
-    if not path_room or path_room ~= conf.room then
+    if not path_room or (path_room ~= conf.home_room and path_room ~= conf.all_room) then
       report_error(done, "room is outside the configured Matrix allowlist")
       return { cancel = function() end }
     end
   end
-  if args.room ~= nil and args.room ~= conf.room then
+  if args.room ~= nil and args.room ~= conf.home_room and args.room ~= conf.all_room then
     report_error(done, "room is outside the configured Matrix allowlist")
     return { cancel = function() end }
   end
@@ -292,8 +406,8 @@ function matrix.request(args, on_done)
       if result.error then return done({ error = result.error }) end
       result.headers = json.object(type(result.headers) == "table" and result.headers or {})
       if result.status and (result.status < 200 or result.status >= 300) then
-        return done({ error = "Matrix HTTP " .. result.status, status = result.status,
-          headers = result.headers, body = result.body })
+        return done({ error = matrix_http_error(result.status, result.body), status = result.status,
+          headers = result.headers })
       end
       done(result)
     end,
@@ -316,7 +430,7 @@ function matrix.same_room(room, event_id, on_done)
     report_error(done, conf_error)
     return { cancel = function() end }
   end
-  if room ~= conf.room then
+  if room ~= conf.home_room and room ~= conf.all_room then
     report_error(done, "room is outside the configured Matrix allowlist")
     return { cancel = function() end }
   end

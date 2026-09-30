@@ -1,6 +1,7 @@
 -- Run from the repo root: luajit tests/butler_compaction.lua
 -- Exercise the scheduled tick's shared compaction gate without a daemon.
-local used, used_pct, busy, composer_empty, session_failure, attached, queued = "?", nil, false, true, false, false, false
+local used, used_pct, busy, composer_empty, session_failure, attached, queued, mail_lookup_error =
+  "?", nil, false, true, false, false, false, false
 local screen = "mock idle screen"
 remuda = {
   _butler_test_mode = true,
@@ -8,14 +9,17 @@ remuda = {
     watch = 400000, warn = 600000, critical = 800000, critical_pct = 90,
     capture_gap = 3, cooldown_ticks = 2,
   },
-  _butler_bus = { agents = { butler = { kind = "claude" } } },
+  _butler_bus = { agents = { butler = { id = "butler", kind = "claude" } } },
   _butler_telemetry_for = function() return { context_used = used, context_pct = used_pct } end,
   session = function()
     if session_failure then error("session is no longer alive") end
     return { is_busy = busy, attached = attached }
   end,
   ls = function() return { { name = "butler", alive = true, attached = attached } } end,
-  _butler_compaction_has_queued_mail = function() return queued end,
+  _butler_mail = { unread = function()
+    if mail_lookup_error then error("mail read failed") end
+    return queued and 1 or 0
+  end },
   capture = function() return screen end,
 }
 dofile("packages/butler/main.lua")
@@ -24,6 +28,12 @@ assert(type(remuda.butler) == "table", "composable compaction API must be export
 local level = remuda.butler.ctx_level("butler")
 assert(level.level == "watch" and level.used == 500000,
   "ctx_level must classify threshold context and retain usage")
+remuda._butler_prompt_is_empty = function() return "EMPTY" end
+remuda._butler_bus.agents.butler.native_autocompact = true
+local native_skip, native_reason = remuda.butler.compaction_policy("butler", {})
+assert(not native_skip and native_reason == "skipped_idle",
+  "native autocompact must remain a safety net while the scheduler stays primary")
+remuda._butler_bus.agents.butler.native_autocompact = nil
 assert(type(remuda.butler.is_idle) == "function" and type(remuda.butler.compact) == "function"
   and type(remuda.butler.compaction_policy) == "function",
   "compaction must expose idle, per-agent action and composite policy units")
@@ -71,6 +81,23 @@ assert(idle and idle_reason == "idle", "is_idle should accept idle session with 
 local preflight = remuda._butler_compaction_preflight("butler")
 assert(preflight == nil,
   "preflight should call the registered bound working predicate with the screen")
+composer_empty = false
+preflight = remuda._butler_compaction_preflight("butler")
+assert(preflight == "composer not empty", "direct compaction must not append to a draft")
+composer_empty = true
+preflight = remuda._butler_compaction_preflight("butler")
+assert(preflight == nil, "empty composer should pass direct compaction preflight")
+
+local cooldown_state = { failure_cooldown_until = 200 }
+local active, expires_at = remuda._butler_compaction_failure_cooldown(cooldown_state, 199)
+assert(active and expires_at == 200, "failure cooldown should use a wall-clock expiry")
+active = remuda._butler_compaction_failure_cooldown(cooldown_state, 199, true)
+assert(not active and cooldown_state.failure_cooldown_until == nil,
+  "force should clear and bypass the failure cooldown")
+cooldown_state.failure_cooldown_until = 200
+active = remuda._butler_compaction_failure_cooldown(cooldown_state, 200)
+assert(not active and cooldown_state.failure_cooldown_until == nil,
+  "failure cooldown should expire without a scheduled tick")
 local state, sends, fake_now = {}, 0, 100
 remuda._butler_compaction_now = function() return fake_now end
 local function tick(ctx, is_busy)
@@ -170,41 +197,82 @@ send, reason = tick("600000", false)
 assert(not send and reason == "skipped_queued", "queued mail must prevent compaction")
 queued = false
 
-local answer, phase = remuda._butler_compaction_visible_answer(
-  "claude", "Switch model?\n2. No, keep current model\n3. Yes, switch to Sonnet", "sonnet")
-assert(answer == "3" and phase == "dialog", "dialog answer must be parsed from the yes/switch option label")
-answer, phase = remuda._butler_compaction_visible_answer(
-  "claude", "Switch model?\n1. Yes, switch to Sonnet\n2. No", "sonnet")
-assert(answer == "1" and phase == "dialog", "dialog option order may vary")
-assert(remuda._butler_compaction_yes_option(
-  "Switch model?\n1. No\n❯ 2. Yes, switch to Sonnet") == "2",
-  "the local option parser must retain the number from a highlighted Unicode option")
-answer, phase = remuda._butler_compaction_visible_answer(
-  "claude", "Switch model?\n1. No\n2. Keep current model", "sonnet")
-assert(answer == nil and phase == "unknown", "dialog without a yes/switch label must be unknown")
-answer, phase = remuda._butler_compaction_visible_answer(
-  "claude", "MODEL:Sonnet-4.5 CTX:500000\n❯", "sonnet")
-assert(answer == nil and phase == "ready", "already-switched statusline must advance without a stray key")
-answer, phase = remuda._butler_compaction_visible_answer(
-  "claude", "Mystery chooser\n1. Continue\n❯", "sonnet")
-assert(answer == nil and phase == "unknown", "unrecognized dialog must be reported, never answered blindly")
+-- Unread mail may defer compaction, but the bound and critical threshold must
+-- keep unread or unreadable mail from preventing compaction forever.
+local saved_compact, saved_butler_send = remuda.butler.compact, remuda._butler_send
+local compacted, parent_alerts = 0, 0
+remuda.butler.compact = function() compacted = compacted + 1; return "sent" end
+remuda._butler_send = function(_, recipient, message)
+  if recipient == "parent" and message:find("unread Butler mail", 1, true) then
+    parent_alerts = parent_alerts + 1
+  end
+end
+remuda._butler_bus.agents.butler.parent = "parent"
+queued, mail_lookup_error, used, used_pct, busy, attached, composer_empty =
+  true, true, "600000", nil, false, false, true
+fake_now = 1000
+local mail_state = {}
+local function run_mail_policy()
+  local should_compact, event = remuda.butler.compaction_policy("butler", mail_state)
+  if should_compact then remuda.butler.compact("butler") end
+  return should_compact, event
+end
+local first_mail_should_compact, first_mail_event = run_mail_policy()
+assert(not first_mail_should_compact and first_mail_event == "skipped_queued" and compacted == 0,
+  "mail lookup errors should initially defer compaction")
+assert(parent_alerts == 0, "mail deferral should not alert before compaction is allowed")
+fake_now = fake_now + 601
+local expired_mail_should_compact, expired_mail_event = run_mail_policy()
+assert(expired_mail_should_compact and expired_mail_event == "sent" and compacted == 1 and parent_alerts == 1,
+  "mail lookup errors must not defer beyond the bound; compact and alert parent once")
+fake_now = fake_now + 3
+run_mail_policy()
+assert(parent_alerts == 1, "an expired mail deferral should alert the parent only once")
+
+compacted, parent_alerts = 0, 0
+mail_state = {}
+mail_lookup_error, used, used_pct = false, "800000", nil
+local critical_mail_should_compact, critical_mail_event = run_mail_policy()
+assert(critical_mail_should_compact and critical_mail_event == "sent" and compacted == 1 and parent_alerts == 1,
+  "critical context must compact despite unread mail and alert the parent once")
+queued, mail_lookup_error = false, false
+remuda._butler_bus.agents.butler.parent = nil
+remuda.butler.compact, remuda._butler_send = saved_compact, saved_butler_send
+
 assert(remuda._butler_compaction_is_unknown_dialog("Mystery chooser\n1. Continue\n❯"),
   "numbered option immediately above the prompt should be an active unknown dialog")
 assert(remuda._butler_compaction_is_unknown_dialog("Mystery chooser\n❯ 1. Continue\n2. Cancel"),
   "a highlighted numbered option should identify an active modal")
-assert(not remuda._butler_compaction_is_unknown_dialog(
-  "Switch model?\n❯ 1. Yes, switch to Sonnet\n2. No"),
-  "the known model switch dialog must remain in the switch handler")
 assert(not remuda._butler_compaction_is_unknown_dialog("Earlier the dialog said press 1 to continue"),
   "transcript prose must not be mistaken for an active dialog")
 assert(not remuda._butler_compaction_is_unknown_dialog(
   "1. Fix the modal dialog detection in the last 8 lines"),
   "dialog words in transcript text must not be mistaken for a modal")
 
-local claude_sequence = remuda._butler_compaction_sequence("claude", "opus", "sonnet")
-assert(table.concat(claude_sequence, "|") == "/model sonnet|/compact|/model opus",
-  "Claude sequence must queue low model, compact, then restore prior model")
-local codex_sequence = remuda._butler_compaction_sequence("codex", "gpt-5.6-terra", "sonnet")
+local claude_sequence = remuda._butler_compaction_sequence()
+assert(remuda._butler_compaction_valid_model("opus"), "opus is an allowed model")
+assert(remuda._butler_compaction_valid_model("claude-opus-4-7[1m]"), "Claude model ids with the 1m suffix are allowed")
+assert(not remuda._butler_compaction_valid_model("opus; /compact"), "model strings must not permit command injection")
+assert(not remuda._butler_compaction_valid_model("claude-opus-4-7[1m]x"), "only the optional 1m suffix is accepted")
+assert(remuda._butler_compaction_statusline_model_matches("Opus", "claude-opus-4-7"),
+  "statusline matching should find the model family anywhere in the expected id")
+assert(table.concat(remuda._butler_compaction_sequence("opus"), "|")
+  == "/model sonnet|/compact|/model opus",
+  "Claude compaction should use sonnet, compact, then restore the prior model")
+local settings_after_model = { model = "sonnet", theme = "dark" }
+local matches_model, actual_model, verify_status = remuda._butler_compaction_verify_settings_model(settings_after_model, "opus")
+assert(matches_model == false and actual_model == "sonnet" and verify_status == nil
+  and settings_after_model.model == "sonnet" and settings_after_model.theme == "dark",
+  "settings.json verification reports a mismatch without changing the decoded settings")
+local missing_model_match, missing_model_actual, missing_model_status =
+  remuda._butler_compaction_verify_settings_model({ theme = "dark" }, "opus")
+assert(missing_model_match == nil and missing_model_actual == nil and missing_model_status == "model_missing",
+  "a missing settings.json model key is unverified rather than a mismatch")
+local unavailable_match, unavailable_actual, unavailable_status =
+  remuda._butler_compaction_verify_settings_model(nil, "opus")
+assert(unavailable_match == nil and unavailable_actual == nil and unavailable_status == "unavailable",
+  "missing or invalid settings.json is unverified rather than a mismatch")
+local codex_sequence = remuda._butler_compaction_sequence()
 assert(table.concat(codex_sequence, "|") == "/compact",
   "Codex sequence must submit compact exactly once without switching models")
 
@@ -237,7 +305,10 @@ end
 remuda.cancel = function() end
 remuda.exec = function() end
 remuda.emit = function() end
-remuda._butler_bus = { agents = { codex_member = { kind = "codex" } }, pending_tasks = {}, notices = {} }
+remuda._butler_bus = { agents = {
+  codex_member = { kind = "codex" },
+  claude_member = { kind = "claude", native_autocompact = true },
+}, pending_tasks = {}, notices = {} }
 remuda._butler_telemetry_for = function()
   return { context_used = "600000" }
 end
@@ -246,9 +317,11 @@ remuda.send = function(name, command)
   scheduled_commands[#scheduled_commands + 1] = { name = name, command = command }
 end
 remuda._butler_compaction_tick = function()
-  local member_state = {}
-  local should_send = remuda.butler.compaction_policy("codex_member", member_state)
-  if should_send then remuda.send("codex_member", "/compact") end
+  for _, name in ipairs({ "claude_member", "codex_member" }) do
+    local member_state = {}
+    local should_send = remuda.butler.compaction_policy(name, member_state)
+    if should_send then remuda.send(name, "/compact") end
+  end
 end
 local prior_mt = getmetatable(_G)
 setmetatable(_G, { __index = { remuda = remuda } })
@@ -262,9 +335,11 @@ for _, spec in ipairs(lifecycle.schedules) do
 end
 assert(compaction_schedule, "init.lua must declare the compaction schedule")
 compaction_schedule.run()
-assert(#scheduled_commands == 1 and scheduled_commands[1].name == "codex_member"
-  and scheduled_commands[1].command == "/compact",
-  "one enabled lifecycle tick must compact an idle Codex member at warn level")
+assert(#scheduled_commands == 2 and scheduled_commands[1].name == "claude_member"
+  and scheduled_commands[1].command == "/compact"
+  and scheduled_commands[2].name == "codex_member"
+  and scheduled_commands[2].command == "/compact",
+  "one enabled lifecycle tick must keep scheduled compaction primary for Claude and Codex")
 remuda._butler_bus, remuda._butler_telemetry_for = saved_bus, saved_telemetry
 remuda.schedule, remuda.cancel, remuda.exec, remuda.emit =
   saved_schedule, saved_cancel, saved_exec, saved_emit

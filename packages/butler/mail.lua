@@ -1,5 +1,8 @@
 local config = assert(remuda._butler_mail_config)
 local bus = assert(config.bus)
+-- Trust words are bound at load (main.lua execs matrix_request before
+-- this file), so a later redefinition of the public entry cannot change them.
+local is_agent_mxid = remuda.butler and remuda.butler.matrix and remuda.butler.matrix.is_agent_mxid
 bus.mail_loaded = bus.mail_loaded or {}
 bus.mail_read = bus.mail_read or {}
 bus.mail_unreadable = bus.mail_unreadable or {}
@@ -135,9 +138,12 @@ local function envelope_json(message, object)
     for i, url in ipairs(message.matrix.media or {}) do media[i] = config.json_quote(url) end
     matrix = ',"matrix":{"sender":' .. config.json_quote(message.matrix.sender)
       .. ',"room_id":' .. config.json_quote(message.matrix.room_id)
+      .. (message.matrix.room and ',"room":' .. config.json_quote(message.matrix.room) or "")
       .. ',"event_id":' .. config.json_quote(message.matrix.event_id)
       .. (message.matrix.thread_root and ',"thread_root":' .. config.json_quote(message.matrix.thread_root) or "")
+      .. (message.matrix.thread_id and ',"thread_id":' .. config.json_quote(message.matrix.thread_id) or "")
       .. (message.matrix.in_reply_to and ',"in_reply_to":' .. config.json_quote(message.matrix.in_reply_to) or "")
+      .. (message.matrix.room_kind and ',"room_kind":' .. config.json_quote(message.matrix.room_kind) or "")
       .. (message.matrix.mxc and ',"mxc":' .. config.json_quote(message.matrix.mxc) or "")
       .. ',"media":[' .. table.concat(media, ",") .. ']}'
   end
@@ -203,8 +209,11 @@ local function load_message(disk, id)
       sender = matrix:match('"sender":"(.-)"'),
       room_id = matrix:match('"room_id":"(.-)"'),
       event_id = matrix:match('"event_id":"(.-)"'),
+      room = matrix:match('"room":"(.-)"'),
       thread_root = matrix:match('"thread_root":"(.-)"'),
+      thread_id = matrix:match('"thread_id":"(.-)"'),
       in_reply_to = matrix:match('"in_reply_to":"(.-)"'),
+      room_kind = matrix:match('"room_kind":"(.-)"'),
       mxc = matrix:match('"mxc":"(.-)"'),
       media = {},
     }
@@ -384,7 +393,9 @@ local function queue(from, to, text, subject, in_reply_to, references, matrix)
     in_reply_to = in_reply_to, references = references, content_type = "text/plain; charset=utf-8",
     body = { object_id = object_id }, matrix = matrix and {
       sender = matrix.sender, room_id = matrix.room_id, event_id = matrix.event_id,
+      room = matrix.room or matrix.room_kind, thread_id = matrix.thread_id,
       thread_root = matrix.thread_root, in_reply_to = matrix.in_reply_to,
+      room_kind = matrix.room_kind,
       mxc = matrix.mxc, media = matrix.media or {},
     } or nil }
   local disk = paths(recipient_id)
@@ -425,8 +436,11 @@ local function reply(caller, parent_id, text, as_operator, deliver)
   if not allowed then return nil, why end
   local parent = find_message(parent_id)
   if not parent then return nil, "message " .. parent_id .. " cannot be read" end
-  local to = parent.reply_to or parent.from
-  if not to.id or to.id == "" then
+  local matrix_parent = parent.matrix and parent.matrix.event_id and parent.matrix.room_id
+  local to = matrix_parent and { host = "matrix", id = parent_id,
+    alias = parent.matrix.sender or "Matrix", session = parent.matrix.sender or "Matrix" }
+    or parent.reply_to or parent.from
+  if not matrix_parent and (not to.id or to.id == "") then
     return nil, "cannot reply: message " .. parent_id .. " is from " .. tostring(to.alias or to.session)
       .. ", which has no Butler inbox"
   end
@@ -440,9 +454,17 @@ local function reply(caller, parent_id, text, as_operator, deliver)
   local subject = parent.subject or "Message"
   if not subject:match("^Re: ") then subject = "Re: " .. subject end
   local message = {
-    kind = "mail", from = caller, to = to, text = text, subject = subject,
+    kind = matrix_parent and "matrix_reply" or "mail", from = caller, to = to, text = text, subject = subject,
     in_reply_to = parent_id, references = references,
   }
+  if matrix_parent then
+    message.reply_id = message_id()
+    message.matrix_route = { room_id = parent.matrix.room_id, event_id = parent.matrix.event_id,
+      thread_root = parent.matrix.thread_root, in_reply_to = parent.matrix.in_reply_to,
+      room_kind = parent.matrix.room or parent.matrix.room_kind,
+      from_agent = parent.matrix.sender == nil or is_agent_mxid(parent.matrix.sender) }
+  end
+  if matrix_parent and not deliver then return nil, "Matrix replies require durable relay delivery" end
   if deliver then return deliver(message), nil, to end
   return queue(caller, to, text, subject, parent_id, references)
 end
@@ -554,5 +576,17 @@ local function unread(name)
   return #mailbox(name)
 end
 
+local function is_unread(name, id)
+  load_inbox(name)
+  retry_unreadable(name)
+  for _, message_id in ipairs(mailbox(name)) do
+    if message_id == id then return true end
+  end
+  for _, message_id in ipairs(bus.mail_unreadable[name] or {}) do
+    if message_id == id then return true end
+  end
+  return false
+end
+
 remuda._butler_mail = { mailbox = mailbox, queue = queue, reply = reply, forward = forward, forward_delivery = deliver_forward, inbox = inbox, unread = unread, append = append,
-  migrate_legacy = migrate_legacy }
+  find_message = find_message, is_unread = is_unread, migrate_legacy = migrate_legacy }

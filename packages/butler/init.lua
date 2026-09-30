@@ -13,12 +13,21 @@ local function load_main()
   main_loaded = true
   host.exec("butler/main")
 end
+local function start_matrix_relay()
+  local matrix = host.butler and host.butler.matrix
+  if host._butler_matrix_config and matrix and matrix.relay and not host._butler_skip_relay
+    and type(host.http) == "table" and type(host.http.request) == "function" then
+    matrix.relay.start(host._butler_matrix_config)
+  end
+end
+
 local function boot()
   if booted then return end
   booted = true
   load_main()
   if host._butler_bootstrap and host._butler_test_mode ~= "lifecycle" then host._butler_bootstrap() end
   host.emit("butler-start")
+  start_matrix_relay()
 end
 
 -- Retire only the process handle recorded by the legacy Matrix relay. The
@@ -80,11 +89,6 @@ return {
     host._butler_state = state
     boot()
     stop_legacy_matrix_relay()
-    local matrix = host.butler and host.butler.matrix
-    if matrix and matrix.relay and not host._butler_skip_relay
-      and type(host.http) == "table" and type(host.http.request) == "function" then
-      matrix.relay.start(host._butler_matrix_config)
-    end
   end,
   stop = function(state)
     if host._butler_cancel_active_choosers then host._butler_cancel_active_choosers(state) end
@@ -104,7 +108,9 @@ return {
         return result
       end },
     { event = "session_exited", id = "identity", depth = -50,
-      run = function(_, name, info) return host._butler_session_exited(name, info) end },
+      run = function(_, name, info)
+        return host._butler_session_exited(name, info)
+      end },
     { event = "butler-compaction-submit", id = "submit",
       run = function() return host._butler_compaction_submit() end },
   },
@@ -162,6 +168,8 @@ Start by running `remuda butler inbox` to read your welcome message.
 - Message bodies are limited to 64 KiB; short quoted messages can stay positional.
 - `remuda butler send-to-leader RESULT...` reports a completed work loop.
 - `remuda butler sessions` shows the household.
+- `remuda butler reply MESSAGE-ID "TEXT"` answers a message in its thread (prefer this over send when answering)
+- `remuda butler forward MESSAGE-ID MEMBER [NOTE]` passes a message on with an optional note
 
 ]]
         end,
@@ -208,7 +216,7 @@ the normal way for a member to communicate.
         prompt = function(_, ctx) return "Your leader is " .. ctx.parent .. "." end },
     },
     ["butler.command"] = {
-      { id = "compact", order = 16, verb = "compact", usage = "  remuda butler compact <session> [--dry-run]",
+      { id = "compact", order = 16, verb = "compact", usage = "  remuda butler compact <session> [--dry-run|--force]",
         run = function(_, args)
           if not args[2] or args[2] == "" then return nil end
           if not host._butler_compaction_has_session(args[2]) then
@@ -219,8 +227,11 @@ the normal way for a member to communicate.
           if #args == 3 and args[3] == "--dry-run" then
             return host._butler_compaction_tick(args[2], true)
           end
+          if #args == 3 and args[3] == "--force" then
+            return host.butler.compact(args[2], true)
+          end
           if #args ~= 2 then return nil end
-          return host.butler.compact(args[2])
+          return host.butler.compact(args[2], false)
         end },
       { id = "sessions", order = 10, verb = "sessions", usage = "  remuda butler sessions",
         run = function(_, args, caller) return host._butler_command_run("sessions", args, caller) end },

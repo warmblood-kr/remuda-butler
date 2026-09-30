@@ -1,5 +1,8 @@
 -- L2 Matrix write composites over remuda.butler.matrix.request.
 local matrix = assert(remuda.butler and remuda.butler.matrix, "Matrix request word is unavailable")
+-- Trust words are bound at load (main.lua execs matrix_request before
+-- this file), so a later redefinition of the public entry cannot change them.
+local is_agent_mxid = matrix.is_agent_mxid
 
 local MAX_CHUNK_BYTES = 4000
 local MAX_UPLOAD_BYTES = 20 * 1024 * 1024
@@ -42,6 +45,14 @@ local function next_txn()
   return "t" .. tostring(os.time()) .. "_" .. process_tag .. "_" .. tostring(txn_counter)
 end
 
+local function mentions_agent(text)
+  if type(text) ~= "string" or type(is_agent_mxid) ~= "function" then return false end
+  for mentioned in text:gmatch("@[%w._=/%-]+:[%w.%-]+") do
+    if is_agent_mxid(mentioned) then return true end
+  end
+  return false
+end
+
 local function split_utf8(text)
   local chunks, chunk, bytes = {}, {}, 0
   local at = 1
@@ -61,7 +72,7 @@ local function split_utf8(text)
   return chunks
 end
 
-local function send_chunks(room, text, relation, on_done)
+local function send_chunks(room, text, relation, on_done, txn_prefix)
   local done = once(on_done)
   if type(text) ~= "string" or text == "" then
     return error_result(done, "message text must not be empty")
@@ -81,10 +92,10 @@ local function send_chunks(room, text, relation, on_done)
     if relation then content["m.relates_to"] = relation end
     local body, encode_error = matrix.encode_json(content)
     if not body then return done({ error = encode_error }) end
-    local txn = next_txn()
+    local txn = txn_prefix and (txn_prefix .. "_" .. tostring(index)) or next_txn()
     current = matrix.request_json({ method = "PUT",
       path = "/_matrix/client/v3/rooms/" .. path_component(room)
-        .. "/send/m.room.message/" .. txn,
+        .. "/send/m.room.message/" .. path_component(txn),
       room = room, body = body, headers = { ["Content-Type"] = "application/json" },
     }, function(result)
       if result.error then return done(result) end
@@ -102,6 +113,7 @@ function matrix.send(opts, on_done)
   local done = once(on_done)
   local room = configured_room(opts, done)
   if not room then return { cancel = function() end } end
+  if mentions_agent(opts.text) then return error_result(done, "Butler-to-Butler sends are disabled") end
   return send_chunks(room, opts.text, nil, done)
 end
 
@@ -127,9 +139,20 @@ function matrix.reply(opts, on_done)
   if type(opts.text) ~= "string" or opts.text == "" then
     return error_result(done, "message text must not be empty")
   end
+  if mentions_agent(opts.text) then return error_result(done, "Butler-to-Butler sends are disabled") end
+  local relay = matrix.relay and matrix.relay.instance
+  if not relay or type(relay.can_reply_to) ~= "function" then
+    return error_result(done, "Matrix relay is not running; event sender cannot be verified")
+  end
+  if not relay:can_reply_to(opts.event_id) then
+    return error_result(done, "Butler-to-Butler replies are disabled")
+  end
   return same_room_then(room, opts.event_id, done, function(reply_done)
-    return send_chunks(room, opts.text,
-      { ["m.in_reply_to"] = { event_id = opts.event_id } }, reply_done)
+    local root = type(opts.thread_root) == "string" and opts.thread_root ~= ""
+      and opts.thread_root or opts.event_id
+    local relation = { rel_type = "m.thread", event_id = root,
+      ["m.in_reply_to"] = { event_id = opts.event_id } }
+    return send_chunks(room, opts.text, relation, reply_done, opts.txn_id)
   end)
 end
 

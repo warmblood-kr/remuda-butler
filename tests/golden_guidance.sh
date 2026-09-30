@@ -14,14 +14,15 @@
 #   REMUDA_BIN=~/.local/bin/remuda tests/golden_guidance.sh
 #   GOLDEN_UPDATE=1 tests/golden_guidance.sh  # a DELIBERATE guidance change: rewrite
 #                                             # tests/golden/ and commit the diff with it
-# Needs: bash, git, awk, and cargo when REMUDA_BIN is unset.
+# Needs: bash, git, awk, perl, and cargo when REMUDA_BIN is unset.
 set -euo pipefail
 export LC_ALL=C
 REPO=$(cd "$(dirname "$0")/.." && pwd)
+source "$REPO/tests/awk-timeout.sh"
 GOLDEN=$REPO/tests/golden
 CORE_URL=${CORE_URL:-https://github.com/warmblood-kr/remuda.git}
 # Keep in step with tests/rust_tests.sh.
-CORE_REF=${CORE_REF:-a7a7add}
+CORE_REF=${CORE_REF:-ed909d8}
 T=$(mktemp -d /tmp/bgg.XXXXXX)
 T=$(cd "$T" && pwd -P)
 S=bgg
@@ -32,6 +33,7 @@ export RUSTUP_HOME=${RUSTUP_HOME:-$source_home/.rustup}
 cleanup() {
   local pid killed=0 left=0
   local descendants=()
+  local fake_pids=()
   if [[ -n "$DAEMON_PID" ]]; then
     while IFS= read -r pid; do [[ -n "$pid" ]] && descendants+=("$pid"); done < <(
       ps -axo pid=,ppid= | awk -v root="$DAEMON_PID" '
@@ -43,16 +45,19 @@ cleanup() {
             for (i=1; i<=NR; i++) if (!found[rows[i]] && found[ppid[rows[i]]]) {
               found[rows[i]]=1; changed=1
             }
-          } while (changed)
+        } while (changed)
           for (i=1; i<=NR; i++) if (rows[i] != root && found[rows[i]]) print rows[i]
         }')
+  fi
+  if [[ -f $T/fake-pids ]]; then
+    while IFS= read -r pid; do [[ -n "$pid" ]] && fake_pids+=("$pid"); done <"$T/fake-pids"
   fi
   if [[ ${REMUDA_RUNTIME_DIR:-} == "$T/run" ]]; then
     remuda -s "$S" stop -f >/dev/null 2>&1 || true
   else
     echo "refusing to stop golden daemon outside its scratch runtime" >&2
   fi
-  for pid in "${descendants[@]}" "$DAEMON_PID"; do
+  for pid in "${descendants[@]}" "${fake_pids[@]}" "$DAEMON_PID"; do
     [[ -n "$pid" ]] || continue
     if kill -0 "$pid" >/dev/null 2>&1; then
       kill "$pid" >/dev/null 2>&1 || true
@@ -62,7 +67,7 @@ cleanup() {
   [[ -n "$DAEMON_PID" ]] && wait "$DAEMON_PID" 2>/dev/null || true
   for _ in $(seq 20); do
     left=0
-    for pid in "${descendants[@]}"; do
+    for pid in "${descendants[@]}" "${fake_pids[@]}"; do
       [[ -n "$pid" ]] && kill -0 "$pid" >/dev/null 2>&1 && left=$((left + 1))
     done
     [[ $left == 0 ]] && break
@@ -97,9 +102,16 @@ dest="$T/argv/\${REMUDA_BUTLER_SESSION_NAME:-x}"
 : >"\$dest"
 for arg do printf '%s\\n' "\$arg" >>"\$dest"; done
 printf '─\\n❯\\n'
-while :; do sleep 1; done
+echo "\$\$" >>"$T/fake-pids"
+exec sleep 3600
 EOF
 chmod +x "$T/bin/claude"
+cat >"$T/bin/fake-root" <<EOF
+#!/bin/sh
+echo "\$\$" >>"$T/fake-pids"
+exec /bin/sleep 3600
+EOF
+chmod +x "$T/bin/fake-root"
 export PATH=$T/bin:$PATH
 R() { remuda -s "$S" "$@"; }
 wait_live() { for _ in $(seq 80); do R ls 2>/dev/null | grep -q "^$1 .*live" && return 0; sleep 0.25; done; echo "never came up: $1" >&2; return 1; }
@@ -114,14 +126,16 @@ wait_welcome() {
   return 1
 }
 
-R daemon </dev/null >>"$T/daemon.log" 2>&1 &
+R daemon >"$T/daemon.log" 2>&1 &
 DAEMON_PID=$!
-for _ in $(seq 80); do [[ -S $REMUDA_RUNTIME_DIR/remuda/$S.sock ]] && break; sleep 0.1; done
-[[ -S $REMUDA_RUNTIME_DIR/remuda/$S.sock ]] || { cat "$T/daemon.log" >&2; exit 1; }
-
+for _ in $(seq 80); do
+  [[ -S "$REMUDA_RUNTIME_DIR/remuda/$S.sock" ]] && break
+  sleep 0.25
+done
+[[ -S "$REMUDA_RUNTIME_DIR/remuda/$S.sock" ]] || { cat "$T/daemon.log" >&2; echo "golden daemon failed to bind" >&2; exit 1; }
 R -e "if not dofile('$REPO/scripts/check-butler-path-convention.lua') then error('path convention check failed', 0) end"
 
-R -e 'remuda._butler_argv = {"sh", "-c", "while :; do sleep 1; done"}' >/dev/null   # root session: no agent
+R -e "remuda._butler_argv = {'$T/bin/fake-root'}" >/dev/null   # root session: no agent
 R butler --headless >/dev/null
 wait_live butler
 R butler topic delegate lead1 --agent claude "golden task" >/dev/null
@@ -141,7 +155,7 @@ if grep -F 'Welcome to Butler' "$T/welcome-second-inbox.txt" >/dev/null; then
   exit 1
 fi
 if grep -F 'Welcome to Butler' "$T/welcome-inbox.txt" >/dev/null; then
-  awk '
+  bounded_awk '
     /^\[[^]]+\] Welcome to Butler$/ { body=1; found=1; next }
     body && /^\[message-/ { exit }
     body && /^\[[^]]+ from / { exit }
@@ -155,7 +169,7 @@ cp "$T/argv/lead1" "$OUT/argv-claude.txt"
 # Normalise run-specific values so only guidance text is compared.
 NORMALIZE_ROOT=$(cd "$T" && pwd -P)
 for file in "$OUT"/*; do
-  awk -v t="$T" -v real_t="$NORMALIZE_ROOT" -f "$REPO/tests/normalize-guidance.awk" "$file" >"$file.tmp"
+  bounded_awk -v t="$T" -v real_t="$NORMALIZE_ROOT" -f "$REPO/tests/normalize-guidance.awk" "$file" >"$file.tmp"
   mv "$file.tmp" "$file"
 done
 

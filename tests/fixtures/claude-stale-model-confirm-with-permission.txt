@@ -1,0 +1,11 @@
+Switch model mid-conversation?
+❯ 1. Yes
+  2. No, go back
+
+
+
+Requesting tool permission
+Bash command
+printf permission-required
+❯ 1. Yes
+  2. No

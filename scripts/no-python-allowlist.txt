@@ -1,9 +1,15 @@
-.github/workflows/tests.yml|1|      - run: scripts/check-no-python.sh
-README.md|1|- `scripts/check-no-python.sh`: CI guard for Python files and invocations;
-packages/butler/main.lua|1|    .. json_quote("python3 " .. shell_quote(helper_path) .. " " .. shell_quote(path))
-packages/butler/main.lua|1|  local helper_path = path .. ".py"
-packages/butler/init.lua|1|  local expected_script = mod_dir .. "/packages/butler/matrix_relay.py"
-tests/live_reload.sh|1|OWN_SCRIPT=$MOD/packages/butler/matrix_relay.py
-tests/live_reload.sh|1|FOREIGN_SCRIPT=$T/foreign/matrix_relay.py
-tests/butler_mcp.rs|2|    let mut helper = Command::new("python3")
-packages/butler/main.lua|1|      argv = { "python3", "-c", MESSAGE_FILE_READER, path }, timeout = 3,
+.github/workflows/tests.yml|1|CI TODO: retain explicit guard invocation|      - run: scripts/check-no-python.sh
+README.md|1|DOCS TODO: update boundary wording after migrations|- `scripts/check-no-python.sh`: CI guard for Python files and invocations;
+packages/butler/init.lua|1|M2 TODO: remove legacy relay path after old installs age out|  local expected_script = mod_dir .. "/packages/butler/matrix_relay.py"
+packages/butler/main.lua|1|core #213 TODO: remove statusLine helper|    .. json_quote("python3 " .. shell_quote(helper_path) .. " " .. shell_quote(path))
+packages/butler/main.lua|1|core #213 TODO: remove statusLine helper|  local helper_path = path .. ".py"
+packages/butler/main.lua|1|core #213 TODO: remove statusLine helper|  -- TODO core #213: remove this Python statusLine helper once the core JSON/stdin boundary is settled.
+tests/live_reload.sh|1|M2 TODO: remove legacy Matrix relay process fixtures|  echo "SKIP: old Butler started no legacy Matrix relay; retirement not asserted"
+tests/live_reload.sh|1|M2 TODO: remove legacy Matrix relay process fixtures|OWN_SCRIPT=$MOD/packages/butler/matrix_relay.py
+tests/live_reload.sh|1|M2 TODO: remove legacy Matrix relay process fixtures|FOREIGN_SCRIPT=$T/foreign/matrix_relay.py
+tests/live_reload.sh|1|M2 TODO: remove legacy Matrix relay process fixtures|      fail "real old Python relay survived reload 1 as PID $OLD_RELAY_PID detail=$(ps -p "$OLD_RELAY_PID" -o pid=,ppid=,stat=,command=) slot=$(lua 'return tostring(remuda._butler_relay)') processes=$(lua 'return table.concat(remuda.processes(), ",")')"
+tests/live_reload.sh|1|M2 TODO: remove legacy Matrix relay process fixtures|    lua "local ids = {}; for _, id in ipairs(remuda.processes()) do ids[id] = true end; assert(not ids[$OWN_RELAY_ID], 'legacy Python relay survived reload 1'); assert(ids[$FOREIGN_RELAY_ID], 'foreign same-named relay was killed')"
+tests/live_reload.sh|1|M2 TODO: remove legacy Matrix relay process fixtures|if [[ -n "$OLD_RELAY_PID" ]] && kill -0 "$OLD_RELAY_PID" 2>/dev/null; then fail "rollback Python relay survived roll-forward"; fi
+tests/butler_mcp.rs|2|core #213 TODO: remove statusLine test helper|    let mut helper = Command::new("python3")
+tests/butler_daemon.rs|1|M2 TODO: remove legacy Matrix relay test cleanup|        // Python relay. Match both its source marker and this test's cwd so
+packages/butler/main.lua|1|core #213 TODO: replace message file reader with Lua|      argv = { "python3", "-c", MESSAGE_FILE_READER, path }, timeout = 3,

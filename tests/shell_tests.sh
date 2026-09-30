@@ -6,13 +6,13 @@
 #   REMUDA_BIN=~/.local/bin/remuda tests/shell_tests.sh
 #
 # Needs: bash, git (full history: live_reload.sh archives an old ref),
-# awk, luajit, and cargo when REMUDA_BIN is unset.
+# awk, perl, luajit, and cargo when REMUDA_BIN is unset.
 set -uo pipefail
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 CORE_URL=${CORE_URL:-https://github.com/warmblood-kr/remuda.git}
 # Keep in step with tests/rust_tests.sh and tests/golden_guidance.sh.
-CORE_REF=${CORE_REF:-355e8b2}
+CORE_REF=${CORE_REF:-ed909d8}
 T=$(mktemp -d /tmp/bst.XXXXXX)
 T=$(cd "$T" && pwd -P)
 trap 'rm -rf "$T"' EXIT

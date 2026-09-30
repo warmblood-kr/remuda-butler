@@ -2382,7 +2382,7 @@ fn butler_compact_cli_rejects_unknown_sessions_and_previews_safe_keys() {
 
     eval(&path, r#"
       remuda._butler_bus.agents["preview-opus"] = {
-        id = "preview-opus", kind = "claude", session_name = "preview-opus", model = "Opus-4.7"
+        id = "preview-opus", kind = "claude", session_name = "preview-opus", model = "opus"
       }
       remuda._butler_bus.agents["preview-unknown"] = {
         id = "preview-unknown", kind = "claude", session_name = "preview-unknown", model = "Experimental-Model"
@@ -2397,14 +2397,107 @@ fn butler_compact_cli_rejects_unknown_sessions_and_previews_safe_keys() {
     let opus = remuda_timed(&dir, &["-s", "s", "butler", "compact", "preview-opus", "--dry-run"]);
     assert!(opus.status.success(), "known-family preview failed: {}", String::from_utf8_lossy(&opus.stderr));
     let preview = String::from_utf8_lossy(&opus.stdout);
-    assert!(preview.contains("/model opus"), "preview omitted the model-family alias: {preview}");
-    assert!(!preview.contains("Opus-4.7"), "preview exposed the display tag: {preview}");
+    assert!(preview.contains("/model sonnet -> /compact -> /model opus -> RET"),
+        "preview omitted the owner model-switch sequence: {preview}");
 
     let unknown = remuda_timed(&dir, &["-s", "s", "butler", "compact", "preview-unknown", "--dry-run"]);
     assert!(unknown.status.success(), "unknown-family preview failed: {}", String::from_utf8_lossy(&unknown.stderr));
     let preview = String::from_utf8_lossy(&unknown.stdout);
-    assert!(preview.contains("skip: model family unknown"), "preview omitted the safety skip: {preview}");
-    assert!(!preview.contains("keys="), "unknown-family preview showed an unsafe key sequence: {preview}");
+    assert!(preview.contains("/model sonnet -> /compact -> /model Experimental-Model -> RET"),
+        "unknown model should be restored from the assigned model value: {preview}");
+}
+
+#[test]
+fn butler_compaction_defers_for_mail_queued_through_the_cli() {
+    let dir = scratch_dir("butler-compaction-queued-mail");
+    let (_daemon, path) = butler_cli_test_daemon(&dir);
+
+    // Model a live session name that differs from its Butler mailbox alias.
+    // This keeps the separate terminal-notice queue out of the assertion: the
+    // compaction guard must inspect the real unread mailbox for this agent.
+    eval(&path, r#"
+      remuda._butler_state.compaction_enabled = false
+      local root = remuda._butler_bus.agents.butler
+      remuda._butler_bus.agents["mail-compaction"] = {
+        id = root.id, alias = root.alias, kind = "codex",
+        session_name = "mail-compaction"
+      }
+      remuda.session = function(name)
+        if name == "mail-compaction" then return { is_busy = false, attached = false } end
+        return nil
+      end
+      remuda.ls = function()
+        return {{ name = "mail-compaction", alive = true, attached = false }}
+      end
+      remuda.capture = function(name)
+        if name == "mail-compaction" then return "❯" end
+        error("no such session: " .. tostring(name))
+      end
+      remuda._butler_prompt_is_empty = function() return "EMPTY", "" end
+    "#);
+
+    // Other integration tests share the suite's XDG data home and can leave
+    // old mail for the persistent root identity; assert this send's delta.
+    let unread_before_send = eval(
+        &path,
+        r#"
+      local id = remuda._butler_bus.agents["mail-compaction"].id
+      return tostring(remuda._butler_mail.unread(id))
+    "#,
+    )
+    .parse::<u32>()
+    .expect("unread count before send");
+
+    let queued = remuda_timed(
+        &dir,
+        &[
+            "-s", "s", "butler", "send", "operator", "butler",
+            "\"mail must be read before compaction\"",
+        ],
+    );
+    assert!(queued.status.success(), "butler send failed: {}",
+        String::from_utf8_lossy(&queued.stderr));
+    assert!(String::from_utf8_lossy(&queued.stdout).contains("queued "),
+        "butler send did not queue a message: {}", String::from_utf8_lossy(&queued.stdout));
+
+    let unread_after_send = eval(
+        &path,
+        r#"
+          local id = remuda._butler_bus.agents["mail-compaction"].id
+          return tostring(remuda._butler_mail.unread(id))
+        "#,
+    )
+    .parse::<u32>()
+    .expect("unread count after send");
+    assert_eq!(
+        unread_after_send,
+        unread_before_send + 1,
+        "the public send command must leave exactly one new unread mailbox entry"
+    );
+
+    assert_eq!(
+        eval(
+            &path,
+            "return remuda._butler_compaction_preflight('mail-compaction') or 'nil'",
+        ),
+        "queued mail",
+        "ordinary compaction preflight must keep deferring unread mail"
+    );
+    assert_eq!(
+        eval(
+            &path,
+            "return remuda._butler_compaction_preflight('mail-compaction', true) or 'nil'",
+        ),
+        "nil",
+        "the bounded/critical override must pass only the unread-mail preflight"
+    );
+
+    let compact = remuda_timed(&dir, &["-s", "s", "butler", "compact", "mail-compaction"]);
+    assert!(compact.status.success(), "compaction command failed: {}",
+        String::from_utf8_lossy(&compact.stderr));
+    assert!(String::from_utf8_lossy(&compact.stdout).contains("skipped_queued"),
+        "compaction must defer while the session mailbox has unread mail: {}",
+        String::from_utf8_lossy(&compact.stdout));
 }
 
 
@@ -2652,7 +2745,7 @@ fn butler_matrix_relay_persists_matrix_event_time_through_real_mail_delivery() {
     let sync = "http://matrix.example.org/_matrix/client/v3/sync?since=s0&timeout=100";
     let event = serde_json::json!({"type":"m.room.message","event_id":"$mail-time",
         "sender":"@alice:example.org","origin_server_ts":0,
-        "content":{"msgtype":"m.text","body":"dated by Matrix"}});
+        "content":{"msgtype":"m.text","body":"dated \u{1b}[31mby Matrix\u{9b}2J"}});
     let response = serde_json::json!({"next_batch":"s1","rooms":{"join":{room:{"timeline":{"events":[event]}}}}});
     let result = eval(&path, &format!(r#"
       local matrix = remuda.butler.matrix
@@ -2670,7 +2763,9 @@ fn butler_matrix_relay_persists_matrix_event_time_through_real_mail_delivery() {
       for _, id in ipairs(remuda._butler_mail.mailbox(root.id)) do
         local message = bus.messages[id]
         if message and message.matrix and message.matrix.event_id == "$mail-time" then
-          return message.created_at
+          local body = bus.objects[message.body.object_id].content
+          return message.created_at .. "|" .. tostring(message.matrix.room)
+            .. "|" .. tostring(message.matrix.event_id) .. "|" .. body
         end
       end
       local state = matrix.relay.instance:state()
@@ -2679,7 +2774,473 @@ fn butler_matrix_relay_persists_matrix_event_time_through_real_mail_delivery() {
         .. "|inbox=" .. #remuda._butler_mail.mailbox(root.id)
     "#,
         baseline=lua_raw_string(baseline), sync=lua_raw_string(sync), response=lua_raw_string(&response.to_string())));
-    assert_eq!(result, "1970-01-01T00:00:00Z", "relay-to-mail delivery must preserve Matrix event time: {result}");
+    assert_eq!(result, "1970-01-01T00:00:00Z|home|$mail-time|dated [31mby Matrix2J",
+        "relay-to-mail delivery must preserve metadata and strip control characters: {result}");
+}
+
+#[test]
+fn butler_matrix_reply_quarantines_rejected_events_for_operator_inspection() {
+    let dir = scratch_dir("matrix-quarantine-red");
+    let (_daemon, path) = butler_cli_test_daemon(&dir);
+    let room = "!quarantine:example.org";
+    let (token_path, config_path) = butler_config(
+        &dir, "quarantine", "http://matrix.example.org", room, "@bot:example.org", "@alice:example.org");
+    let room_events = serde_json::json!({"timeline":{"events":[
+        {"type":"m.room.message","event_id":"$not-allowed","sender":"@mallory\u{1b}[2J:example.org",
+         "origin_server_ts":0,"content":{"msgtype":"m.text","body":"private rejected \u{1b}[31mtext\u{009b}2J"}},
+        {"type":"m.room.message","event_id":"$unsafe","sender":"@alice:example.org",
+         "origin_server_ts":1,"content":{"msgtype":"m.image","body":"unsafe image"}},
+        {"type":"m.room.message","sender":"@alice:example.org","origin_server_ts":2,
+         "content":{"msgtype":"m.text","body":"missing event id"}}
+    ]}});
+    let mut joined = serde_json::Map::new();
+    joined.insert(room.to_string(), room_events);
+    let response = serde_json::json!({"rooms":{"join":joined}});
+    eval(&path, include_str!("support/fake_http.lua"));
+    eval(&path, &format!(
+        "remuda._butler_matrix_config={{token_path={},config_path={}}}; remuda.exec('butler/matrix_request'); remuda.exec('butler/matrix')",
+        lua_raw_string(&token_path.to_string_lossy()), lua_raw_string(&config_path.to_string_lossy())));
+    let result = eval(&path, &format!(r#"
+      local matrix = remuda.butler.matrix
+      local room = {room}
+      local delivered = 0
+      local relay = matrix.relay.new({{config_path={config}, matrix=matrix, deliver=function()
+        delivered = delivered + 1; return true
+      end}})
+      relay._response({{next_batch="s0"}}, "/_matrix/client/v3/sync")
+      relay._response(assert(matrix.decode_json({response})), "/_matrix/client/v3/sync")
+      local rows = assert(matrix.quarantine_list())
+      if #rows ~= 3 then return "count:" .. #rows end
+      if rows[1].event_id == rows[2].event_id then return "duplicate" end
+      if rows[1].reason == nil or rows[2].reason == nil then return "reason-missing" end
+      local missing_id = false
+      for _, item in ipairs(rows) do if item.reason == "missing_event_id" then missing_id = true end end
+      if not missing_id then return "missing-event-id-not-quarantined" end
+      if delivered ~= 0 then return "quarantine-leaked-to-mail:" .. delivered end
+      local denied
+      matrix.quarantine({{id=rows[1].event_id}}, function(result) denied=result.error end, "codex")
+      if not denied or not denied:find("operator-only", 1, true) then return "agent-inspection-not-denied" end
+      local root = remuda._butler_bus.agents.butler
+      for _, id in ipairs(remuda._butler_mail.mailbox(root.id)) do
+        local message = remuda._butler_bus.messages[id]
+        if message and message.matrix and message.matrix.event_id ~= nil then return "quarantine-leaked-to-mail" end
+      end
+      local more = {{}}
+      for i=1,205 do more[i] = {{type="m.room.message", event_id="$bulk-" .. i,
+        sender="@mallory:example.org", origin_server_ts=i,
+        content={{msgtype="m.text", body=i == 205
+          and (string.char(27) .. "[31mprivate" .. string.char(194,155) .. "2J")
+          or string.rep("p", 2048)}}}} end
+      local batch = {{rooms={{join={{}}}}}}; batch.rooms.join[room]={{timeline={{events=more}}}}
+      relay._response(batch, "/_matrix/client/v3/sync")
+      local bounded = assert(matrix.quarantine_list())
+      if #bounded ~= 200 then return "unbounded-count:" .. #bounded end
+      for _, item in ipairs(bounded) do if #item.preview > 1024 then return "preview-unbounded" end end
+      return "ok"
+    "#,
+      config=lua_raw_string(&config_path.to_string_lossy()),
+      response=lua_raw_string(&response.to_string()), room=lua_raw_string(room)));
+    assert_eq!(result, "ok", "rejected Matrix events must be privately inspectable and never enter mail: {result}");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
+        .args(["-s", "s", "butler", "matrix", "--json", "quarantine"])
+        .env("REMUDA_RUNTIME_DIR", &dir)
+        .env("REMUDA_NO_UPDATE_CHECK", "1")
+        .env_remove("REMUDA_BUTLER_AGENT_ID")
+        .env_remove("REMUDA_BUTLER_SESSION_NAME")
+        .current_dir(&dir)
+        .output()
+        .expect("run operator quarantine verb");
+    assert!(output.status.success(), "operator quarantine verb failed: {}", String::from_utf8_lossy(&output.stderr));
+    let listing: serde_json::Value = serde_json::from_slice(&output.stdout).expect("parse quarantine JSON");
+    assert_eq!(listing["json"].as_array().map(Vec::len), Some(200));
+    let inspected = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
+        .args(["-s", "s", "butler", "matrix", "--json", "quarantine", "--id", "$bulk-205"])
+        .env("REMUDA_RUNTIME_DIR", &dir)
+        .env("REMUDA_NO_UPDATE_CHECK", "1")
+        .env_remove("REMUDA_BUTLER_AGENT_ID")
+        .env_remove("REMUDA_BUTLER_SESSION_NAME")
+        .current_dir(&dir)
+        .output()
+        .expect("run operator quarantine detail verb");
+    assert!(inspected.status.success(), "quarantine detail verb failed: {}", String::from_utf8_lossy(&inspected.stderr));
+    let detail: serde_json::Value = serde_json::from_slice(&inspected.stdout).expect("parse quarantine detail JSON");
+    assert_eq!(detail["json"]["event_id"], "$bulk-205");
+    let human = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
+        .args(["-s", "s", "butler", "matrix", "quarantine", "--id", "$bulk-205"])
+        .env("REMUDA_RUNTIME_DIR", &dir)
+        .env("REMUDA_NO_UPDATE_CHECK", "1")
+        .env_remove("REMUDA_BUTLER_AGENT_ID")
+        .env_remove("REMUDA_BUTLER_SESSION_NAME")
+        .current_dir(&dir)
+        .output()
+        .expect("run human operator quarantine detail verb");
+    assert!(human.status.success(), "human quarantine verb failed: {}", String::from_utf8_lossy(&human.stderr));
+    let human = String::from_utf8_lossy(&human.stdout);
+    assert!(!human.contains('\u{1b}') && !human.contains('\u{009b}'),
+        "human quarantine output must strip terminal control characters: {human:?}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let state_path = PathBuf::from(format!("{}.since", config_path.display()));
+        let mode = std::fs::metadata(state_path).expect("read Matrix state mode").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "quarantine previews must be stored in a private state file");
+    }
+}
+
+#[test]
+fn butler_matrix_reply_is_correlated_and_sent_id_is_durable() {
+    let dir = scratch_dir("matrix-mail-reply-red");
+    let (_daemon, path) = butler_cli_test_daemon(&dir);
+    let room = "!reply:example.org";
+    let (token_path, config_path) = butler_config(
+        &dir, "reply", "http://matrix.example.org", room, "@bot:example.org", "@alice:example.org");
+    let room_events = serde_json::json!({"timeline":{"events":[
+        {"type":"m.room.message","event_id":"$incoming","sender":"@alice:example.org",
+         "origin_server_ts":0,"content":{"msgtype":"m.text","body":"@bot:example.org question",
+           "m.relates_to":{"rel_type":"m.thread","event_id":"$root"}}}
+    ]}});
+    let mut joined = serde_json::Map::new();
+    joined.insert(room.to_string(), room_events);
+    let response = serde_json::json!({"rooms":{"join":joined}});
+    eval(&path, include_str!("support/fake_http.lua"));
+    eval(&path, &format!(
+        "remuda._butler_matrix_config={{token_path={},config_path={}}}; remuda.exec('butler/matrix_request'); remuda.exec('butler/matrix')",
+        lua_raw_string(&token_path.to_string_lossy()), lua_raw_string(&config_path.to_string_lossy())));
+    let result = eval(&path, &format!(r#"
+      local matrix = remuda.butler.matrix
+      local room = {room}
+      local payload = assert(matrix.decode_json({response}))
+      if not payload.rooms or not payload.rooms.join or not payload.rooms.join[room] then return "room-key-missing" end
+      local relay = matrix.relay.new({{config_path={config}, matrix=matrix, deliver=function(event)
+        local delivered = remuda._butler_inbox_delivery({{from={{host="matrix", alias=event.sender,
+          session=event.sender, kind="matrix", id="", leader=""}}, to="butler", text=event.body,
+          subject="Matrix", matrix=event}})
+        remuda.source_mail_id = delivered and delivered.id
+        return delivered
+      end}})
+      relay._response({{next_batch="s0"}}, "/_matrix/client/v3/sync")
+      relay._response(payload, "/_matrix/client/v3/sync")
+      if not remuda.source_mail_id then
+        local state=relay:state()
+        local count=0; for _ in pairs(state.pending) do count=count+1 end
+        return "mail-not-delivered|pending=" .. tostring(count) .. "|processed=" .. tostring(state.processed["$incoming"])
+      end
+      matrix.relay.instance = relay
+      remuda.http.respond("GET", "http://matrix.example.org/_matrix/client/v3/rooms/%21reply%3Aexample.org/context/%24incoming",
+        {{status=200, headers={{}}, body='{{"event":{{"room_id":"!reply:example.org"}}}}'}})
+      remuda.http.respond_prefix("PUT", "http://matrix.example.org/_matrix/client/v3/rooms/%21reply%3Aexample.org/send/m.room.message/",
+        {{status=200, headers={{}}, body='{{"event_id":"$outgoing"}}'}})
+      local queued = remuda._butler_reply("butler", remuda.source_mail_id, "answer")
+      if not queued:find("queued Matrix reply", 1, true) then return "reply-not-queued:" .. tostring(queued) end
+      for _=1,4 do remuda.http.tick() end
+      local found_body = false
+      for _, call in ipairs(remuda.http.calls) do
+        if call.method == "PUT" and call.url:find("/send/m.room.message/", 1, true) then
+          local body = assert(matrix.decode_json(call.body))
+          local relation = body["m.relates_to"] or {{}}
+          if relation.rel_type == "m.thread" and relation.event_id == "$root"
+            and relation["m.in_reply_to"].event_id == "$incoming" then found_body = true end
+        end
+      end
+      if not found_body then return "thread-relation-not-sent" end
+      local reply_id = queued:match("queued Matrix reply ([%w_%-]+) for")
+      if not reply_id then return "reply-id-missing" end
+      local puts = 0
+      for _, call in ipairs(remuda.http.calls) do if call.method == "PUT" then puts=puts+1 end end
+      local duplicate_result
+      matrix.mail_reply({{mail_id=remuda.source_mail_id, reply_mail_id=reply_id, text="answer"}},
+        function(value) duplicate_result=value end)
+      local after = 0
+      for _, call in ipairs(remuda.http.calls) do if call.method == "PUT" then after=after+1 end end
+      if puts ~= after or not duplicate_result or duplicate_result.event_id ~= "$outgoing" then return "duplicate-was-not-deduped" end
+      matrix.relay.instance = nil
+      local status = matrix.mail_reply_status(remuda.source_mail_id)
+      return status and status.event_id == "$outgoing" and status.thread_root == "$root" and "ok" or "mapping-not-durable"
+    "#,
+      config=lua_raw_string(&config_path.to_string_lossy()),
+      response=lua_raw_string(&response.to_string()), room=lua_raw_string(room)));
+    assert_eq!(result, "ok", "a Butler mail reply must route to its Matrix thread and durably record the sent event: {result}");
+}
+
+#[test]
+fn butler_matrix_reply_home_all_roster_subscriptions_survive_restart() {
+    let dir = scratch_dir("matrix-home-all");
+    let (_daemon, path) = butler_cli_test_daemon(&dir);
+    let home_a = "!home-a:example.org";
+    let home_b = "!home-b:example.org";
+    let all = "!all:example.org";
+    let (a_token, a_config) = butler_config(&dir, "butler-a", "http://matrix.example.org",
+        home_a, "@butler-a:example.org", "@human:example.org,@agent-bot:example.org");
+    let (_b_token, b_config) = butler_config(&dir, "butler-b", "http://matrix.example.org",
+        home_b, "@butler-b:example.org", "@human:example.org,@agent-bot:example.org");
+    for config in [&a_config, &b_config] {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new().append(true).open(config).unwrap();
+        writeln!(file, "all_room={all}").unwrap();
+    }
+    eval(&path, include_str!("support/fake_http.lua"));
+    eval(&path, "remuda.exec('butler/matrix')");
+    let result = eval(&path, &format!(r#"
+      local matrix = remuda.butler.matrix
+      local home_a, home_b, all = {home_a}, {home_b}, {all}
+      local config_a, config_b = {a_config}, {b_config}
+      local a, b = {{}}, {{}}
+      local function deliver(target, label)
+        return function(e)
+          target[#target+1] = e
+          local mail_id = label .. "-mail-" .. tostring(#target)
+          e.test_mail_id = mail_id
+          return {{id=mail_id}}
+        end
+      end
+      local ra = matrix.relay.new({{config_path=config_a, matrix=matrix, deliver=deliver(a, "a")}})
+      local rb = matrix.relay.new({{config_path=config_b, matrix=matrix, deliver=deliver(b, "b")}})
+      local function ev(id, sender, body, root, reply)
+        local content = {{msgtype="m.text", body=body}}
+        if root then content["m.relates_to"] = {{rel_type="m.thread", event_id=root,
+          ["m.in_reply_to"]={{event_id=reply or root}}}} end
+        return {{type="m.room.message", event_id=id, sender=sender, content=content}}
+      end
+      local function room(events)
+        return {{timeline={{events=events}}, state={{events={{
+          {{type="m.room.member", state_key="@human:example.org", content={{membership="join"}}}},
+          {{type="m.room.member", state_key="@agent-bot:example.org", content={{membership="join"}}}},
+          {{type="m.room.member", state_key="@butler-a:example.org", content={{membership="join"}}}},
+          {{type="m.room.member", state_key="@butler-b:example.org", content={{membership="join"}}}},
+        }}}}}}
+      end
+      local function response(cursor, events_a, events_b, events_all)
+        return {{next_batch=cursor, rooms={{join={{
+          [home_a]=room(events_a or {{}}), [home_b]=room(events_b or {{}}), [all]=room(events_all or {{}}),
+        }}}}}}
+      end
+      ra._response({{next_batch="base-a"}}, "/_matrix/client/v3/sync")
+      rb._response({{next_batch="base-b"}}, "/_matrix/client/v3/sync")
+      ra._response(response("cursor-1", {{ev("$home-a", "@human:example.org", "home A")}}, nil, {{
+        ev("$top", "@human:example.org", "top level"),
+        ev("$unsub", "@human:example.org", "unsubscribed", "$other-thread"),
+        ev("$mention-a", "@human:example.org", "@butler-a:example.org join", "$mention-thread"),
+        ev("$agent-quiet", "@agent-bot:example.org", "quiet"),
+        ev("$agent-mention", "@agent-bot:example.org", "@butler-a:example.org inspect", "$agent-thread"),
+      }}), "/_matrix/client/v3/sync")
+      rb._response(response("cursor-1", nil, {{ev("$home-b", "@human:example.org", "home B")}}, {{
+        ev("$top", "@human:example.org", "top level"),
+        ev("$unsub", "@human:example.org", "unsubscribed", "$other-thread"),
+        ev("$mention-a", "@human:example.org", "@butler-a:example.org join", "$mention-thread"),
+        ev("$agent-quiet", "@agent-bot:example.org", "quiet"),
+        ev("$agent-mention", "@agent-bot:example.org", "@butler-a:example.org inspect", "$agent-thread"),
+      }}), "/_matrix/client/v3/sync")
+      local function has(target, id)
+        for _, item in ipairs(target) do if item.event_id == id then return item end end
+      end
+      if not has(a, "$home-a") or has(b, "$home-a") then return "home-routing-failed" end
+      if not has(b, "$home-b") or has(a, "$home-b") then return "other-home-routing-failed" end
+      if not has(a, "$top") or not has(b, "$top") then return "all-top-level-missed" end
+      if has(a, "$unsub") or has(b, "$unsub") or has(b, "$mention-a") then return "thread-routing-failed" end
+      local top = has(a, "$top")
+      if top.room ~= "all" or top.event_id ~= "$top" then return "mail-room-metadata-missing" end
+      if has(a, "$mention-a").thread_id ~= "$mention-thread" then return "thread-id-metadata-missing" end
+      if has(a, "$agent-quiet") or has(b, "$agent-quiet") then return "unmentioned-agent-delivered" end
+      if not has(a, "$agent-mention") or has(b, "$agent-mention") then return "agent-mention-routing-failed" end
+      if ra:can_reply_to("$agent-mention") or ra:can_reply_to("$unknown-event") then return "reply-guard-failed-open" end
+      remuda._butler_matrix_config = {{token_path={a_token}, config_path=config_a}}
+      local send_error
+      matrix.send({{room=all, text="@butler-b:example.org please reply"}},
+        function(result) send_error=result.error end)
+      if not send_error or not send_error:find("Butler-to-Butler", 1, true) then return "send-loop-not-blocked" end
+      local send_completion
+      remuda.pending = function()
+        return {{resolve=function(_, code, stdout, stderr)
+          send_completion={{code=code, stdout=stdout, stderr=stderr}}
+        end}}
+      end
+      local send_path = "http://matrix.example.org/_matrix/client/v3/rooms/"
+        .. matrix.path_component(all) .. "/send/m.room.message/"
+      remuda.http.respond_prefix("PUT", send_path,
+        {{status=200,headers={{}},body='{{"event_id":"$a-send"}}'}})
+      matrix.relay.instance = ra
+      matrix.cli({{"matrix", "--room", all, "send", "fleet note"}}, nil)
+      for _=1,4 do remuda.http.tick() end
+      if not send_completion or send_completion.code ~= 0 then return "all-room-send-failed" end
+      if not ra:state().subscriptions[all]["$a-send"] then return "send-did-not-subscribe" end
+      local mention_mail_id = has(a, "$mention-a").test_mail_id
+      if not ra:state().subscriptions[all]["$mention-thread"]
+        or ra:state().subscriptions[all]["$mention-thread"].mail_id ~= mention_mail_id then
+        return "mention-subscription-missing"
+      end
+      ra:state().routes[mention_mail_id] = nil
+      if not ra:record_outgoing_reply("$top", "$a-post") then return "post-route-missing" end
+      if ra:state().routes[mention_mail_id] then return "mention-route-not-removed" end
+      ra:stop()
+      ra = matrix.relay.new({{config_path=config_a, matrix=matrix, deliver=deliver(a, "a")}})
+      if ra:state().since ~= "cursor-1" then return "cursor-not-restored" end
+      local followups = {{
+        ev("$mention-followup", "@human:example.org", "continued", "$mention-thread"),
+        ev("$post-followup", "@human:example.org", "reply to A post", "$top", "$a-post"),
+        ev("$send-followup", "@human:example.org", "reply to send", "$a-send"),
+        ev("$agent-thread-followup", "@human:example.org", "agent thread continuation", "$agent-thread"),
+        ev("$agent-quiet-2", "@agent-bot:example.org", "quiet again", "$mention-thread"),
+        ev("$agent-mention-2", "@agent-bot:example.org", "@butler-a:example.org again", "$mention-thread"),
+      }}
+      ra._response(response("cursor-2", nil, nil, followups), "/_matrix/client/v3/sync")
+      rb._response(response("cursor-2", nil, nil, followups), "/_matrix/client/v3/sync")
+      if not has(a, "$mention-followup") or not has(a, "$post-followup") or not has(a, "$send-followup")
+        or not has(a, "$agent-thread-followup") then return "subscription-not-restored" end
+      if has(a, "$mention-followup").context_mail_id ~= has(a, "$mention-a").test_mail_id
+        or has(a, "$post-followup").context_mail_id ~= has(a, "$top").test_mail_id then
+        return "thread-context-mail-lost:" .. tostring(has(a, "$mention-followup").context_mail_id)
+          .. ":" .. tostring(has(a, "$post-followup").context_mail_id)
+      end
+      if has(b, "$mention-followup") or has(b, "$post-followup") or has(b, "$send-followup")
+        or has(b, "$agent-thread-followup") then return "thread-leaked-to-B" end
+      if has(a, "$agent-quiet-2") or has(b, "$agent-quiet-2") then return "agent-without-mention-delivered" end
+      if not has(a, "$agent-mention-2") or has(b, "$agent-mention-2") then return "agent-mention-followup-routing-failed" end
+      if ra:can_reply_to("$agent-mention-2") then return "agent-reply-allowed" end
+      local before = #a + #b
+      ra._response(response("cursor-3", nil, nil, followups), "/_matrix/client/v3/sync")
+      rb._response(response("cursor-3", nil, nil, followups), "/_matrix/client/v3/sync")
+      if #a + #b ~= before then return "duplicate-after-replay" end
+      return "ok"
+    "#,
+      home_a=lua_raw_string(home_a), home_b=lua_raw_string(home_b), all=lua_raw_string(all),
+      a_config=lua_raw_string(&a_config.to_string_lossy()), b_config=lua_raw_string(&b_config.to_string_lossy()),
+      a_token=lua_raw_string(&a_token.to_string_lossy())));
+    assert_eq!(result, "ok", "home/all routing, roster, thread subscriptions, and restart contract: {result}");
+}
+
+#[test]
+fn butler_matrix_reply_thread_returns_to_original_mail_after_relay_restart() {
+    let dir = scratch_dir("matrix-thread-restart");
+    let (_daemon, path) = butler_cli_test_daemon(&dir);
+    let home = "!thread-restart-home:example.org";
+    let room = "!thread-restart-all:example.org";
+    let (token_path, config_path) = butler_config(
+        &dir, "thread-restart", "http://matrix.example.org", home,
+        "@butler:example.org", "@human:example.org,@agent-helper:example.org");
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new().append(true).open(&config_path).unwrap();
+        writeln!(file, "all_room={room}").unwrap();
+    }
+    eval(&path, include_str!("support/fake_http.lua"));
+    eval(&path, &format!(
+        "remuda._butler_matrix_config={{token_path={},config_path={}}}; remuda.exec('butler/matrix')",
+        lua_raw_string(&token_path.to_string_lossy()), lua_raw_string(&config_path.to_string_lossy())));
+    let result = eval(&path, &format!(r#"
+      local matrix, room = remuda.butler.matrix, {room}
+      local config_path = {config}
+      local parsed = assert(matrix.read_config(config_path))
+      if parsed.all_room ~= room then return "all-room-config-missing:" .. tostring(parsed.all_room) end
+      local function payload(cursor, events)
+        return {{next_batch=cursor, rooms={{join={{[room]={{timeline={{events=events}}}}}}}}}}
+      end
+      local function deliver(event)
+        return remuda._butler_inbox_delivery({{
+          from={{host="matrix", id="", alias=event.sender, session=event.sender,
+            kind=event.from_agent and "matrix-agent" or "matrix", leader=""}},
+          to="butler", text=event.body, in_reply_to=event.context_mail_id,
+          subject="Matrix", matrix=event,
+        }})
+      end
+      local relay = matrix.relay.new({{config_path=config_path, matrix=matrix, deliver=deliver}})
+      relay._response({{next_batch="s0"}}, "/_matrix/client/v3/sync")
+      relay._response(payload("s1", {{{{type="m.room.message", event_id="$human-root",
+        sender="@human:example.org", content={{msgtype="m.text", body="please help"}}}},
+        {{type="m.room.message", event_id="$agent-root", sender="@agent-helper:example.org",
+          content={{msgtype="m.text", body="@butler:example.org check this"}}}}}}),
+        "/_matrix/client/v3/sync")
+      local source_id, agent_id
+      for mail_id, route in pairs(relay:state().routes) do
+        if route.event_id == "$human-root" then source_id=mail_id end
+        if route.event_id == "$agent-root" then agent_id=mail_id end
+      end
+      if not source_id then return "source-mail-route-missing" end
+      if not agent_id then return "agent-mail-route-missing" end
+      if not matrix.room_allowed(room) then return "request-config-does-not-allow-all-room" end
+
+      remuda.http.respond("GET",
+        "http://matrix.example.org/_matrix/client/v3/rooms/%21thread-restart-all%3Aexample.org/context/%24human-root",
+        {{status=200, headers={{}}, body='{{"event":{{"room_id":"!thread-restart-all:example.org"}}}}'}})
+      remuda.http.respond_prefix("PUT",
+        "http://matrix.example.org/_matrix/client/v3/rooms/%21thread-restart-all%3Aexample.org/send/m.room.message/",
+        {{status=200, headers={{}}, body='{{"event_id":"$butler-reply"}}'}})
+      matrix.relay.instance = relay
+      local completion, cli_completion
+      remuda.pending = function()
+        return {{resolve=function(_, code, stdout, stderr)
+          cli_completion={{code=code, stdout=stdout, stderr=stderr}}
+        end}}
+      end
+      matrix.relay.instance = nil
+      matrix.cli({{"matrix", "reply", "$human-root", "no relay"}}, nil)
+      if not cli_completion or cli_completion.code == 0
+        or not cli_completion.stderr:find("relay is not running", 1, true) then return "cli-failed-open-without-relay" end
+      matrix.relay.instance = relay
+      local before = #remuda.http.calls
+      local sent_ok, sent_error = pcall(remuda._butler_reply, "butler", agent_id, "must refuse")
+      if sent_ok or not tostring(sent_error):find("Butler-to-Butler replies are disabled", 1, true)
+        or #remuda.http.calls ~= before then return "agent-mail-reply-not-refused" end
+      local source_message = remuda._butler_bus.messages[source_id]
+      local saved_sender = source_message.matrix.sender
+      local saved_route = relay:state().routes[source_id]
+      source_message.matrix.sender = nil
+      relay:state().routes[source_id] = nil
+      local nil_sender_before = #remuda.http.calls
+      local nil_sender_ok, nil_sender_error = pcall(remuda._butler_reply, "butler", source_id, "must refuse unknown sender")
+      if nil_sender_ok or not tostring(nil_sender_error):find("Butler-to-Butler replies are disabled", 1, true)
+        or #remuda.http.calls ~= nil_sender_before then return "unknown-sender-mail-reply-not-refused" end
+      source_message.matrix.sender = saved_sender
+      relay:state().routes[source_id] = saved_route
+      local queued_reply = remuda._butler_reply("butler", source_id, "answer")
+      for _=1,4 do remuda.http.tick() end
+      if relay:state().routes[source_id].last_reply_event_id ~= "$butler-reply" then
+        local pending = false
+        for _, item in pairs(relay:state().reply_outbox) do pending = item.last_error or item.status end
+        return "sent-event-not-correlated:" .. tostring(queued_reply) .. ":"
+          .. tostring(relay:state().routes[source_id].last_reply_event_id) .. ":"
+          .. tostring(pending) .. ":calls=" .. tostring(#remuda.http.calls)
+      end
+      local subscribed = relay:state().subscriptions[room]["$human-root"]
+      if type(subscribed) ~= "table" or subscribed.mail_id ~= source_id then return "mail-reply-did-not-subscribe" end
+      local threaded = false
+      for _, call in ipairs(remuda.http.calls) do
+        if call.method == "PUT" then
+          local body=assert(matrix.decode_json(call.body))
+          local rel=body["m.relates_to"] or {{}}
+          if rel.rel_type=="m.thread" and rel.event_id=="$human-root"
+            and rel["m.in_reply_to"].event_id=="$human-root" then threaded=true end
+        end
+      end
+      if not threaded then return "butler-reply-was-not-threaded" end
+
+      relay:stop()
+      local restarted = matrix.relay.new({{config_path=config_path, matrix=matrix, deliver=deliver}})
+      matrix.relay.instance = restarted
+      local persisted = restarted:state().subscriptions[room]["$human-root"]
+      if type(persisted) ~= "table" or persisted.mail_id ~= source_id then return "reply-subscription-not-persisted" end
+      local followup={{{{type="m.room.message", event_id="$human-followup",
+        sender="@human:example.org", content={{msgtype="m.text", body="thanks",
+          ["m.relates_to"]={{rel_type="m.thread", event_id="$human-root",
+            ["m.in_reply_to"]={{event_id="$butler-reply"}}}}}}}}}}
+      restarted._response(payload("s2", followup), "/_matrix/client/v3/sync")
+      local found
+      for _, mail_id in ipairs(remuda._butler_mail.mailbox(remuda._butler_bus.agents.butler.id)) do
+        local message=remuda._butler_bus.messages[mail_id]
+        if message and message.matrix and message.matrix.event_id=="$human-followup" then found=message end
+      end
+      if not found then return "thread-followup-not-delivered" end
+      if found.in_reply_to ~= source_id then return "original-context-lost:" .. tostring(found.in_reply_to) end
+      restarted._response(payload("s3", followup), "/_matrix/client/v3/sync")
+      local count=0
+      for _, mail_id in ipairs(remuda._butler_mail.mailbox(remuda._butler_bus.agents.butler.id)) do
+        local message=remuda._butler_bus.messages[mail_id]
+        if message and message.matrix and message.matrix.event_id=="$human-followup" then count=count+1 end
+      end
+      return count==1 and "ok" or "duplicate-count:" .. tostring(count)
+    "#,
+      room=lua_raw_string(room), config=lua_raw_string(&config_path.to_string_lossy())));
+    assert_eq!(result, "ok",
+        "a no-mention Matrix thread reply after restart must return to Butler with original mail context: {result}");
 }
 
 #[test]
@@ -3441,6 +4002,87 @@ fn butler_codex_builder_uses_automatic_approval() {
         .any(|pair| pair == ["--status", "/tmp/status"]));
 }
 
+/// Codex folder trust is automatic only for directories Butler created.
+#[test]
+#[cfg(unix)]
+fn butler_codex_trust_dialog_only_auto_trusts_butler_created_directories() {
+    let dir = scratch_dir("butler-codex-trust");
+    let home = dir.join("home");
+    let project_home = dir.join("projects");
+    let existing_dir = project_home.join("existing-trust");
+    std::fs::create_dir_all(&home).expect("test home");
+    std::fs::create_dir_all(&existing_dir).expect("pre-existing topic directory");
+    let daemon = Daemon::spawn_with_home(&dir, &home);
+    let path = daemon::socket_path_in(&dir, "s");
+    eval(
+        &path,
+        r#"remuda._butler_argv = {"sh", "-c", "sleep 30"}; remuda._butler_skip_relay = true"#,
+    );
+    let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let fixture = format!(
+        "{}{}",
+        include_str!("fixtures/codex-trust-dialog.txt").trim_end(),
+        "\n".repeat(8)
+    );
+    eval(
+        &path,
+        &format!(
+            r#"
+          remuda.butler.project_home({project_home:?})
+          remuda._butler_agent_builders.codex = function() return {{"sh", "-c", "sleep 30"}} end
+          remuda._butler_test_force_launch_probe = {{["created-trust"] = true, ["existing-trust"] = true}}
+          local dialog = {fixture:?}
+          local screens = {{["created-trust"] = dialog, ["existing-trust"] = dialog}}
+          local actions, reports = {{}}, {{}}
+          remuda.capture = function(name) return screens[name] or "" end
+          remuda.key = function(name, key)
+            actions[#actions + 1] = name .. " key " .. key
+            if name == "created-trust" and key == "1" then
+              screens[name] = "› Ask Codex to do anything"
+            end
+          end
+          remuda._butler_send = function(_, _, message) reports[#reports + 1] = message end
+          remuda._butler_topic_new("created-trust", nil, "codex")
+          remuda._butler_topic_new("existing-trust", nil, "codex")
+          remuda._codex_trust_actions = actions
+          remuda._codex_trust_reports = reports
+        "#,
+            project_home = project_home.to_string_lossy(),
+            fixture = fixture,
+        ),
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let actions = eval(&path, "return table.concat(remuda._codex_trust_actions, '\\n')");
+        let reports = eval(&path, "return table.concat(remuda._codex_trust_reports, '\\n')");
+        let ready = eval(&path, "return tostring(remuda._butler_bus.agents['created-trust'] ~= nil and remuda._butler_bus.agents['existing-trust'] ~= nil)");
+        if ready == "true" && reports.contains(&existing_dir.to_string_lossy().to_string()) {
+            assert!(
+                actions.lines().any(|line| line == "created-trust key 1"),
+                "a Butler-created directory should select Trust and continue; actions={actions:?}; reports={reports:?}"
+            );
+            assert!(
+                !actions.lines().any(|line| line.starts_with("existing-trust key ")),
+                "an existing directory must not receive a key: {actions:?}"
+            );
+            assert!(
+                reports.contains("waiting for a human: trust dialog in"),
+                "the pre-existing directory should alert its leader: {reports:?}"
+            );
+            break;
+        }
+        assert!(Instant::now() < deadline, "Codex trust launch did not settle: actions={actions:?}; reports={reports:?}; ready={ready}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    drop(daemon);
+}
+
 /// A delegated task must survive the agent's startup dialogs: Butler answers
 /// each kind's known modals (agents/*.lua) and types the task only once the
 /// composer is ready. Screens are real captures (Claude's workspace-trust
@@ -3450,6 +4092,7 @@ fn butler_codex_builder_uses_automatic_approval() {
 #[cfg(unix)]
 fn butler_task_poke_answers_startup_modals_before_typing() {
     let dir = scratch_dir("butler-startup-modals");
+    let claude_trust_capture = include_str!("fixtures/claude-trust-dialog.txt");
     let home = dir.join("home");
     std::fs::create_dir_all(&home).expect("test home");
     let daemon = Daemon::spawn_with_home(&dir, &home);
@@ -3472,14 +4115,32 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
           remuda.butler.project_home({home:?})
           remuda._butler_session_trace_path = {trace:?}
           remuda._butler_task_poke_attempts = 6
+          remuda._butler_test_force_launch_probe = {{
+            ["t-claude"] = true,
+            ["t-claude-launch"] = true,
+            ["t-claude-human-trust"] = true,
+            ["t-claude-launch-unknown"] = true,
+            ["t-claude-launch-transient"] = true,
+          }}
           remuda._butler_agent_builders.claude = function() return {{"sh"}} end
           remuda._butler_agent_builders.codex = function() return {{"sh", "-c", "sleep 30"}} end
           local rule = string.rep("─", 20)
           local screens = {{
             ["t-claude"] = {{
               rule .. "\n Accessing workspace:\n\n ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm · Esc to cancel",
+              rule .. "\n Accessing workspace:\n\n ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm · Esc to cancel",
               rule .. "\n❯ \n" .. rule,
             }},
+            ["t-claude-launch"] = {{
+              "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n"
+                .. " Accessing workspace:\n\n /private/tmp/t3qa/untrusted-13690\n\n"
+                .. " Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source",
+              {claude_trust_capture:?},
+              {claude_trust_capture:?},
+              rule .. "\n❯ \n" .. rule,
+            }},
+            ["t-claude-launch-unknown"] = {{ "Workspace access changed\n ❯ 1. Continue\n   2. Cancel" }},
+            ["t-claude-launch-transient"] = {{ "Continue setup", rule .. "\n❯ \n" .. rule }},
             ["t-codex"] = {{
               "  Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip\n  3. Skip until next version\n› Ask Codex to do anything",
               "› Ask Codex to do anything",
@@ -3558,7 +4219,9 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
           remuda.capture_styled = nil
           remuda.key = function(n, k)
             log[#log + 1] = n .. " key " .. k
-            if (n == "t-codex" or n == "t-codex-peer") and k == "1" then
+            if n == "t-claude-launch" and k == "RET" then
+              screens[n] = {{ rule .. "\n❯ \n" .. rule }}
+            elseif (n == "t-codex" or n == "t-codex-peer") and k == "1" then
               screens[n] = {{ "› Ask Codex to do anything" }}
             elseif (n == "t-codex" or n == "t-codex-peer") and k == "2" then
               screens[n] = {{ "› Ask Codex to do anything" }}
@@ -3607,9 +4270,13 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
           remuda._butler_topic_delegate("t-codex-human", "task human", nil, "codex", leader)
           remuda._butler_topic_delegate("t-claude-human-trust", "task human trust", nil, "claude", leader)
           remuda._butler_topic_delegate("t-stuck", "task three", nil, "claude", leader)
+          remuda._butler_launch("claude", "t-claude-launch")
+          remuda._butler_launch("claude", "t-claude-launch-unknown")
+          remuda._butler_launch("claude", "t-claude-launch-transient")
         "#,
             home = home.to_string_lossy(),
             trace = trace.to_string_lossy(),
+            claude_trust_capture = claude_trust_capture,
         ),
     );
 
@@ -3621,6 +4288,10 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
         // the topic sessions' own lines.
         let typed = log.lines().filter(|l| l.starts_with("t-") && l.contains(" type ")).count();
         if typed == 3 && traced.contains("task_poke_timeout\tt-stuck")
+            && eval(&path, "return tostring(remuda._butler_bus.agents['t-claude-launch'] ~= nil)") == "true"
+            && eval(&path, "return tostring(remuda._butler_bus.agents['t-claude-launch-transient'] ~= nil)") == "true"
+            && eval(&path, "return remuda._butler_sessions()")
+                .contains("Workspace access changed")
             && eval(&path, "return tostring(remuda._butler_bus.pending_tasks['t-codex-unanswerable'] == nil and remuda._butler_bus.pending_tasks['t-codex-human'] == nil)") == "true" {
             break log;
         }
@@ -3632,6 +4303,14 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
     };
     let claude: Vec<&str> = log.lines().filter(|l| l.starts_with("t-claude ")).collect();
     assert_eq!(claude, ["t-claude key <down>", "t-claude key RET", "t-claude type task one"]);
+    let launch_rows: Vec<&str> = log.lines().filter(|l| l.starts_with("t-claude-launch key ")).collect();
+    assert_eq!(launch_rows, ["t-claude-launch key <down>", "t-claude-launch key RET"],
+        "launch did not answer the exact captured trust dialog: {log}");
+    let launch_report = eval(&path, "return remuda._butler_sessions()");
+    assert!(launch_report.contains("Workspace access changed"),
+        "failed launch omitted the unknown dialog's label: {launch_report}");
+    assert!(!launch_report.contains("t-claude-launch-transient: claude: dialog"),
+        "a changing partial screen was rejected as an unknown dialog: {launch_report}");
     let codex_key_one = log.lines().find(|l| l.ends_with(" key 1")).unwrap();
     let update_owner = codex_key_one.split_whitespace().next().unwrap();
     assert_eq!(log.lines().filter(|l| l.ends_with(" key 1")).count(), 1, "more than one member upgraded: {log}");
@@ -3648,6 +4327,8 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
         }
     }
     assert!(!log.contains("t-stuck "), "typed into an unknown dialog: {log}");
+    assert!(std::fs::read_to_string(&trace).unwrap_or_default().contains("Workspace access changed"),
+        "launch failure did not preserve the unknown dialog label");
     assert!(log.contains(" type Butler message "), "the leader is told about t-stuck: {log}");
     assert_eq!(log.lines().filter(|l| l.starts_with("t-codex-unanswerable key ")).count(), 0, "an unknown update menu was answered: {log}");
     assert_eq!(log.lines().filter(|l| l.starts_with("t-codex-human key ")).count(), 0, "a human-attached pane was changed: {log}");
@@ -4587,6 +5268,46 @@ fn butler_initializes_mail_and_persists_a_sent_message() {
     drop(daemon);
 }
 
+#[test]
+fn butler_matrix_relay_starts_on_fallback_boot_and_only_once() {
+    let dir = scratch_dir("matrix-fallback-boot");
+    let room = "!fallback-boot:example.org";
+    let (token_path, config_path) = butler_config(
+        &dir, "fallback-boot", "http://matrix.example.org", room, "@bot:example.org", "");
+    let token = token_path.to_string_lossy().into_owned();
+    let config = config_path.to_string_lossy().into_owned();
+    let _daemon = Daemon::spawn_with_env(&dir, &[
+        ("REMUDA_BUTLER_TOKEN", token.as_str()),
+        ("REMUDA_BUTLER_CONFIG", config.as_str()),
+    ]);
+    let path = daemon::socket_path_in(&dir, "s");
+    eval(&path, include_str!("support/fake_http.lua"));
+    let init = include_str!("../../packages/butler/init.lua");
+    let result = eval(&path, &format!(r#"
+      remuda._butler_test_mode = "lifecycle"
+      local fallback
+      local original_schedule = remuda.schedule
+      remuda.schedule = function(spec)
+        if spec.name == "butler-start-fallback" then fallback = spec end
+        return original_schedule(spec)
+      end
+      local old_metatable = getmetatable(_G)
+      setmetatable(_G, {{ __index = {{ remuda = remuda }} }})
+      local module = (function()
+{init}
+      end)()
+      setmetatable(_G, old_metatable)
+      remuda.schedule = original_schedule
+      if not fallback then return "fallback-schedule-missing" end
+      fallback.run()
+      local after_fallback = #remuda.http.calls
+      module.start(module.initialize())
+      return after_fallback .. "|" .. #remuda.http.calls
+    "#));
+    assert_eq!(result, "1|1",
+        "fallback boot must start the Matrix relay once, and lifecycle startup must not duplicate it: {result}");
+}
+
 /// Same live-`claude` limitation as the test above blocks a real kill-and-
 /// watch-it-come-back test for the respawn watchdog. This checks, at the
 /// source level, that the lifecycle-owned watchdog reuses one launch
@@ -4622,7 +5343,11 @@ fn butler_session_exited_hook_relaunches_via_the_shared_launch_function() {
     );
     assert!(
         init_lua.contains("event = \"session_exited\", id = \"identity\"")
+            && init_lua.contains("host._butler_session_exited(name, info)")
             && main_lua.contains("function remuda._butler_session_exited(name, info)")
+            && main_lua.contains("type(info) == \"table\" and info.instance_id or nil")
+            && main_lua.contains("stale_session_exit(name, instance_id)")
+            && main_lua.contains("session.instance_id ~= instance_id")
             && main_lua[launch_fn_idx..].contains("remuda._butler_reconcile()"),
         "the declared session-exit hook must use the shared reconciler"
     );
@@ -4630,6 +5355,54 @@ fn butler_session_exited_hook_relaunches_via_the_shared_launch_function() {
         init_lua.contains("name = \"butler-reconcile\"")
             && init_lua.contains("host._butler_reconcile then host._butler_reconcile()"),
         "butler needs a periodic reconciler as well as an exit event hook"
+    );
+}
+
+#[test]
+fn butler_session_exited_ignores_stale_instance_and_handles_current_instance() {
+    let dir = scratch_dir("butler-session-exit-instance-id");
+    let (_daemon, path) = butler_cli_test_daemon(&dir);
+    let result = eval(
+        &path,
+        r#"
+          local name = "reused-session"
+          local bus = remuda._butler_bus
+          local original_ls = remuda.ls
+          remuda.ls = function()
+            return {{ name = name, alive = true, instance_id = "new-instance" }}
+          end
+          bus.notices[name] = "pending notice"
+          bus.notice_screens[name] = "notice screen"
+          bus.pending_tasks[name] = "pending task"
+
+          remuda.emit("session_exited", name,
+            { reason = "exited", instance_id = "old-instance" })
+          local stale_ignored = bus.notices[name] == "pending notice"
+            and bus.notice_screens[name] == "notice screen"
+            and bus.pending_tasks[name] == "pending task"
+
+          remuda.emit("session_exited", name,
+            { reason = "closed", instance_id = "new-instance" })
+          local current_handled = bus.notices[name] == nil
+            and bus.notice_screens[name] == nil
+            and bus.pending_tasks[name] == nil
+
+          bus.notices[name] = "legacy notice"
+          bus.notice_screens[name] = "legacy screen"
+          bus.pending_tasks[name] = "legacy task"
+          remuda.emit("session_exited", name, { reason = "closed" })
+          local missing_id_falls_back = bus.notices[name] == nil
+            and bus.notice_screens[name] == nil
+            and bus.pending_tasks[name] == nil
+          remuda.ls = original_ls
+          return tostring(stale_ignored) .. ":" .. tostring(current_handled)
+            .. ":" .. tostring(missing_id_falls_back)
+        "#,
+    );
+    assert_eq!(
+        result,
+        "true:true:true",
+        "stale exits are ignored; current and missing-id exits are handled"
     );
 }
 
@@ -4882,6 +5655,7 @@ fn butler_compaction_schedule_sends_compact_when_idle_but_not_when_busy() {
     );
 
     let butler_name = eval(&path, "return remuda._butler_initial_name");
+    eval(&path, &format!("remuda._butler_inbox({butler_name:?})"));
     eval(
         &path,
         &format!("remuda._butler_bus.agents[{butler_name:?}].kind = 'codex'"),
@@ -5040,6 +5814,7 @@ fn butler_compaction_trace_records_registered_skipped_and_sent() {
     );
 
     let butler_name = eval(&path, "return remuda._butler_initial_name");
+    eval(&path, &format!("remuda._butler_inbox({butler_name:?})"));
     eval(&path, FAKE_COMPACTION_EXPECT);
 
     // Simulates the launched session's own one-time `run_script` call the
@@ -5119,12 +5894,12 @@ fn butler_compaction_trace_records_registered_skipped_and_sent() {
 }
 
 /// Exercise the Claude compaction state machine with real private daemon PTYs.
-/// The fake Claude process prints a statusline, presents numbered model dialogs,
-/// consumes the key, and changes model/context exactly as Claude does.
+/// The fake Claude process accepts Butler's cheaper-model compaction sequence.
 #[test]
 #[cfg(unix)]
 fn butler_compaction_fake_claude_scenarios_send_only_visible_keys() {
     let dir = scratch_dir("butler-fake-claude");
+    std::fs::create_dir_all(dir.join(".claude")).unwrap();
     let (token_path, config_path) = butler_config(
         &dir,
         "fake-claude",
@@ -5142,17 +5917,28 @@ fn butler_compaction_fake_claude_scenarios_send_only_visible_keys() {
             ("REMUDA_BUTLER_TOKEN", token_str.as_str()),
             ("REMUDA_BUTLER_CONFIG", config_str.as_str()),
             ("XDG_DATA_HOME", data_str.as_str()),
+            ("HOME", dir.to_string_lossy().as_ref()),
         ],
     );
     let path = daemon::socket_path_in(&dir, "s");
     eval(&path, r#"remuda._butler_argv = {"sh", "-c", "while read line; do :; done"}"#);
     eval(&path, "remuda._butler_skip_relay = true");
+    eval(&path, r#"
+      remuda._butler_state = remuda._butler_state or {}
+      remuda._butler_state.compaction_members = {legacy={pending_restore_blocked=true,
+        pending_restore_model_unavailable=true, pending_restore_model="opus"}}
+    "#);
     let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(
         eval(&path, "return type(remuda._butler_compaction_tick)"),
         "function",
         "loading the Butler module must define the scheduled compaction tick"
+    );
+    assert_eq!(
+        eval(&path, "local s = remuda._butler_state or {}; local m = s.compaction_members.legacy or {}; return tostring(m.pending_restore_blocked == nil and m.pending_restore_model_unavailable == nil and m.pending_restore_model == nil)"),
+        "true",
+        "loading must clear stale model-restore state"
     );
     eval(&path, "remuda._butler_compaction_interval = 45");
     let trace_path = dir.join("compaction-trace.log");
@@ -5165,56 +5951,110 @@ fn butler_compaction_fake_claude_scenarios_send_only_visible_keys() {
     );
 
     let script = dir.join("fake-claude.sh");
+    let model_confirm_fixture = dir.join("claude-model-confirm-dialog.txt");
+    let status_model_confirm_fixture = dir.join("claude-model-confirm-dialog-with-status.txt");
+    let changing_status_model_confirm_fixture = dir.join("claude-model-confirm-dialog-changing-status.txt");
+    let wrong_title_model_confirm_fixture = dir.join("claude-model-confirm-wrong-title.txt");
+    let stale_model_confirm_fixture = dir.join("claude-stale-model-confirm-with-permission.txt");
+    std::fs::write(
+        &model_confirm_fixture,
+        include_str!("fixtures/claude-model-confirm-dialog.txt"),
+    )
+    .expect("write captured Claude model confirmation fixture");
+    std::fs::write(
+        &status_model_confirm_fixture,
+        include_str!("fixtures/claude-model-confirm-dialog-with-status.txt"),
+    )
+    .expect("write model confirmation fixture with trailing status rows");
+    std::fs::write(
+        &changing_status_model_confirm_fixture,
+        include_str!("fixtures/claude-model-confirm-dialog-changing-status.txt"),
+    )
+    .expect("write model confirmation fixture with a changing status row");
+    std::fs::write(
+        &wrong_title_model_confirm_fixture,
+        include_str!("fixtures/claude-model-confirm-wrong-title.txt"),
+    )
+    .expect("write wrong-title model confirmation fixture");
+    std::fs::write(
+        &stale_model_confirm_fixture,
+        include_str!("fixtures/claude-stale-model-confirm-with-permission.txt"),
+    )
+    .expect("write stale model confirmation plus tool permission fixture");
     std::fs::write(
         &script,
         r#"#!/bin/bash
 log=$1
 scenario=$2
-model='Opus 4.7 (1M context)'
+model_confirm_fixture=$3
+stale_model_confirm_fixture=$4
+wrong_title_model_confirm_fixture=$5
+status_model_confirm_fixture=$6
+changing_status_model_confirm_fixture=$7
+model='current-model'
 ctx=500000
-first=1
-if [ "$scenario" = absent ]; then model=Sonnet; fi
-paint() { printf '\033[H\033[2JMODEL:%s CTX:%s\n' "$model" "$ctx"; }
+failed=0
+paint() {
+  printf '\033[H\033[2JMODEL:%s CTX:%s' "$model" "$ctx"
+  if [ "$scenario" = busy-screen ] || { [ "$scenario" = hang ] && [ "$failed" = 1 ]; }; then
+    printf ' esc to interrupt'
+  fi
+  if [ "$scenario" = draft ]; then printf ' DRAFT: unsent words'; fi
+  printf '\n'
+}
 paint
 while IFS= read -r line; do
   printf 'CMD:%s\n' "$line" >> "$log"
   case "$line" in
+    '')
+      if [ "$scenario" = model-confirm ] || [ "$scenario" = model-confirm-with-status ] \
+          || [ "$scenario" = model-confirm-transient ] || [ "$scenario" = model-confirm-changing-status ] \
+          || [ "$scenario" = model-confirm-static ]; then
+        printf 'KEY:RET\n' >> "$log"
+        model='sonnet'
+        if [ "$scenario" != model-confirm-static ]; then paint; fi
+      fi
+      ;;
     '/model sonnet')
-      if [ "$scenario" = timeout ]; then continue; fi
-      if [ "$scenario" = switch-label-unknown ] && [ "$first" = 1 ]; then
-        first=0; model=Sonnet; paint
-        printf 'Switch model?\n1. Apply using an unknown label\n2. Cancel\n'
-        IFS= read -r -n 1 answer || exit 0
-        printf 'KEY:%s\n' "$answer" >> "$log"
-        paint; continue
-      fi
-      if [ "$scenario" = unknown ] && [ "$first" = 1 ]; then
-        first=0; model=Sonnet; paint; printf 'Mystery chooser\n1. Continue\n❯\n'
-        IFS= read -r -n 1 answer || exit 0
-        printf 'KEY:%s\n' "$answer" >> "$log"
-        paint; continue
-      fi
-      if [ "$model" = Sonnet ]; then paint; continue; fi
-      if [ "$scenario" = option2 ]; then
-        printf 'Switch model?\n1. No\n❯ 2. Yes, switch to Sonnet\n'
+      printf 'KEY:RET\n' >> "$log"
+      if [ "$scenario" = model-confirm ]; then
+        cat "$model_confirm_fixture"
+      elif [ "$scenario" = model-confirm-with-status ]; then
+        cat "$status_model_confirm_fixture"
+      elif [ "$scenario" = model-confirm-transient ]; then
+        printf 'MODEL:%s CTX:%s\n❯ 1. Yes, switch to Sonnet 5.5\n  2. No, go back\n' "$model" "$ctx"
+        sleep 0.3
+        cat "$model_confirm_fixture"
+      elif [ "$scenario" = model-confirm-changing-status ]; then
+        cat "$changing_status_model_confirm_fixture"
+      elif [ "$scenario" = model-confirm-static ]; then
+        cat "$model_confirm_fixture"
+      elif [ "$scenario" = stale-model-confirm ]; then
+        cat "$stale_model_confirm_fixture"
+      elif [ "$scenario" = wrong-title-model-confirm ]; then
+        cat "$wrong_title_model_confirm_fixture"
       else
-        printf 'Switch model?\n❯ 1. Yes, switch to Sonnet\n2. No\n'
+        model='sonnet'; paint
       fi
-      IFS= read -r -n 1 answer || exit 0
-      printf 'KEY:%s\n' "$answer" >> "$log"
-      case "$answer" in 1|2) model=Sonnet ;; esac
-      paint
+      if [ "$scenario" = settings-mismatch ]; then printf '{"model":"sonnet","theme":"dark"}\n' > "$HOME/.claude/settings.json"; fi
+      ;;
+    '/compact')
+      printf 'KEY:RET\n' >> "$log"
+      if { [ "$scenario" = unknown ] || [ "$scenario" = unknown-restore-fails ]; } && [ "$failed" = 0 ]; then
+        failed=1
+        printf 'Mystery chooser\n1. Continue\n❯\n'
+      elif [ "$scenario" = hang ]; then
+        failed=1; paint
+      else
+        if [ "$scenario" = codex-no-record ]; then ctx=$((ctx - 100000)); else ctx=200000; fi
+        paint
+      fi
       ;;
     '/model opus')
-      if [ "$scenario" = restore-timeout ]; then continue; fi
-      printf 'Switch model?\n❯ 1. Yes, switch to Opus\n2. No\n'
-      IFS= read -r -n 1 answer || exit 0
-      printf 'KEY:%s\n' "$answer" >> "$log"
-      case "$answer" in 1|2) model='Opus 4.7 (1M context)' ;; esac
+      printf 'KEY:RET\n' >> "$log"
+      if [ "$scenario" != unknown-restore-fails ]; then model='opus'; fi
       paint
       ;;
-    '/model Sonnet') paint ;;
-    '/compact') ctx=200000; paint ;;
   esac
 done
 "#,
@@ -5227,298 +6067,559 @@ done
         &path,
         &format!(
             r#"
-      remuda._butler_compaction_model = "sonnet"
-      remuda._butler_compaction_config = {{dialog_timeout=1, completion_timeout=2, verification_timeout=2, input_settle=0.01}}
+      local fake_now = 1000
+      remuda._butler_compaction_now = function() return fake_now end
+      remuda._fake_now = function(value) fake_now = value end
+      remuda._butler_compaction_config = {{critical=400000, cooldown_ticks=0, capture_gap=0,
+        completion_timeout=1, claude_completion_timeout=0.2, failure_cooldown_seconds=10, input_settle=0.01}}
       remuda._butler_bus = remuda._butler_bus or {{agents={{}}, pending_tasks={{}}, notices={{}}}}
       local prior_contributions = remuda.contributions
       remuda.contributions = function(point)
         if point == "butler.agent" then
-          return {{{{id="claude", entry={{working=function(_, _) return false end}}}}}}
+          return {{{{id="claude", entry={{working=function(_, screen)
+            return screen:find("esc to interrupt", 1, true) ~= nil
+          end}}}}}}
         end
         return prior_contributions(point)
       end
-      remuda._butler_prompt_is_empty = function() return "EMPTY" end
+      remuda._butler_prompt_is_empty = function(_, screen)
+        return screen:find("DRAFT:", 1, true) and "NON-EMPTY" or "EMPTY"
+      end
+      local original_capture = remuda.capture
+      remuda.capture = function(name)
+        local screen = original_capture(name)
+        if name == "fake-model-confirm-changing-status" then
+          remuda._fake_model_confirm_status_tick = (remuda._fake_model_confirm_status_tick or 0) + 1
+          screen = screen:gsub("Status tick: %d+", "Status tick: " .. remuda._fake_model_confirm_status_tick)
+        end
+        if name == "fake-model-confirm" or name == "fake-model-confirm-transient"
+            or name == "fake-model-confirm-static"
+            or name == "fake-model-confirm-with-status" or name == "fake-model-confirm-changing-status" then
+          remuda._fake_model_confirm_screen = screen
+          if name == "fake-model-confirm-with-status"
+              and screen:find("Session status: active", 1, true)
+              and screen:find("Model status: current-model", 1, true) then
+            remuda._fake_model_confirm_status_seen = true
+          end
+        end
+        if name == "fake-hang" and remuda._fake_busy[name] ~= true then
+          screen = screen:gsub(" esc to interrupt", "")
+        end
+        if remuda._fake_clear_unknown[name] then
+          screen = screen:gsub("Mystery chooser\n1%. Continue\n❯\n?", "")
+        end
+        return screen
+      end
+      local original_preflight = remuda._butler_compaction_preflight
+      remuda._butler_compaction_preflight = function(name)
+        local blocked = original_preflight(name)
+        if name == "fake-attach-mid" and not blocked then remuda._fake_attached[name] = true end
+        return blocked
+      end
       remuda._butler_send = function(_, _, message)
         remuda._fake_compaction_reports = remuda._fake_compaction_reports or {{}}
         table.insert(remuda._fake_compaction_reports, message)
       end
-      local original_session = remuda.session
       remuda._fake_attached = {{}}
-      remuda._fake_busy_after_key = {{}}
-      remuda._fake_busy_on_ctx_drop = {{}}
-      remuda._fake_busy_until = {{}}
-      remuda._fake_attach_on_ctx_drop = {{}}
-      remuda._fake_no_family = {{}}
-      remuda._fake_wrong_restored_window = {{}}
+      remuda._fake_busy = {{}}
+      remuda._fake_clear_unknown = {{}}
       remuda.session = function(name)
-        return {{is_busy=remuda._fake_busy_until[name] and os.time() < remuda._fake_busy_until[name] or false,
+        return {{is_busy=remuda._fake_busy[name] == true,
           attached=remuda._fake_attached[name] == true}}
       end
-      local original_key = remuda.key
-      remuda.key = function(name, key)
-        original_key(name, key)
-        if remuda._fake_busy_after_key[name] then
-          remuda._fake_busy_after_key[name] = nil
-          remuda._fake_busy_until[name] = os.time() + 2
+      local original_type_text = remuda.type_text
+      local original_write_atomic = remuda.fs.write_atomic
+      remuda.fs.write_atomic = function(path, bytes)
+        if remuda._fake_fail_restore_write then return nil, "fake write failure" end
+        return original_write_atomic(path, bytes)
+      end
+      remuda.type_text = function(name, value, settle)
+        if name == "fake-hang" then remuda._fake_busy[name] = true end
+        if value == "/model sonnet" then
+          local f = io.open(remuda._fake_restore_file, "r")
+          remuda._fake_restore_record_before_sonnet = f ~= nil
+          if f then remuda._fake_restore_record_bytes = f:read("*a"); f:close() end
         end
-        if remuda._fake_attach_after_first_key == name then
-          local deadline = os.time() + 3
-          repeat
-            if remuda.capture(name):find("MODEL:Sonnet", 1, true) then break end
-            remuda.sleep(0.05)
-          until os.time() >= deadline
-          remuda._fake_attached[name] = true
-          remuda._fake_attach_after_first_key = nil
+        if value == "/model opus" then
+          local f = io.open(remuda._fake_restore_file, "r")
+          remuda._fake_restore_record_before_restore = f and f:read("*a") or ""
+          if f then f:close() end
         end
+        return original_type_text(name, value, settle)
       end
       remuda._butler_telemetry_for = function(agent)
         local screen = remuda.capture(agent.session_name)
-        local sonnet = screen:find("MODEL:Sonnet", 1, true) ~= nil
         local used = screen:match("CTX:%s*(%d+)")
-        if remuda._fake_attach_on_ctx_drop[agent.session_name] and used == "200000" then
-          remuda._fake_attached[agent.session_name] = true
-          remuda._fake_attach_on_ctx_drop[agent.session_name] = nil
-        end
-        if remuda._fake_busy_on_ctx_drop[agent.session_name] and used == "200000" then
-          remuda._fake_busy_until[agent.session_name] = os.time() + 2
-          remuda._fake_busy_on_ctx_drop[agent.session_name] = nil
-        end
-        return {{context_used=used,
-          context_window=(not sonnet and used == "200000"
-              and remuda._fake_wrong_restored_window[agent.session_name])
-            and "200000" or (sonnet and "200000" or "1000000"),
-          model=remuda._fake_no_family[agent.session_name] and "Experimental-Model"
-            or (sonnet and "Sonnet-4.5" or "Opus-4.7-1M-context")}}
+        return {{context_used=used, model=screen:match("MODEL:([^ %c]+)") or "current-model"}}
       end
       remuda._fake_setup_compaction = function(name, kind, log, scenario)
-        remuda.new(name, {{"bash", {script:?}, log, scenario}}, nil, {{}})
-        remuda._butler_bus.agents[name] = {{id=name, kind=kind, session_name=name}}
+        remuda.new(name, {{"bash", {script:?}, log, scenario, {model_confirm_fixture:?}, {stale_model_confirm_fixture:?}, {wrong_title_model_confirm_fixture:?}, {status_model_confirm_fixture:?}, {changing_status_model_confirm_fixture:?}}}, nil, {{}})
+        local id = name
+        if name == "fake-stable-id" then id = "stable-agent-17" end
+        if name == "fake-empty-id" then id = "" end
+        if name == "fake-legacy-record" then id = "stable-agent-legacy" end
+        remuda._butler_bus.agents[name] = {{id=id, kind=kind, session_name=name}}
       end
+      remuda._fake_restore_file = {data_str:?} .. "/remuda/butler/mail/compaction-restore.json"
     "#
         ),
     );
 
-    for (name, scenario, expected) in [
-        (
-            "fake-happy",
-            "happy",
-            "CMD:/model sonnet\nKEY:1\nCMD:/compact\nCMD:/model opus\nKEY:1\n",
-        ),
-        (
-            "fake-absent",
-            "absent",
-            "CMD:/model sonnet\nCMD:/compact\n",
-        ),
-        (
-            "fake-option2",
-            "option2",
-            "CMD:/model sonnet\nKEY:2\nCMD:/compact\nCMD:/model opus\nKEY:1\n",
-        ),
-        (
-            "fake-busy-after-switch",
-            "happy",
-            "CMD:/model sonnet\nKEY:1\nCMD:/compact\nCMD:/model opus\nKEY:1\n",
-        ),
-        (
-            "fake-busy-after-compact",
-            "happy",
-            "CMD:/model sonnet\nKEY:1\nCMD:/compact\nCMD:/model opus\nKEY:1\n",
-        ),
-        (
-            "fake-unknown",
-            "unknown",
-            "CMD:/model sonnet\nKEY:\x1b\nCMD:/model opus\nKEY:1\n",
-        ),
-        (
-            "fake-switch-label-unknown",
-            "switch-label-unknown",
-            "CMD:/model sonnet\nKEY:\x1b\nCMD:/model opus\nKEY:1\n",
-        ),
-        ("fake-timeout", "timeout", "CMD:/model sonnet\n"),
-        (
-            "fake-restore-timeout",
-            "restore-timeout",
-            "CMD:/model sonnet\nKEY:1\nCMD:/compact\nCMD:/model opus\nCMD:/model opus\n",
-        ),
-        (
-            "fake-attached",
-            "happy",
-            "CMD:/model sonnet\nKEY:1\n",
-        ),
-        (
-            "fake-attach-mid",
-            "happy",
-            "CMD:/model sonnet\nKEY:1\nCMD:/compact\nCMD:/model opus\nKEY:1\n",
-        ),
-        (
-            "fake-no-family",
-            "happy",
-            "",
-        ),
-        (
-            "fake-window-mismatch",
-            "happy",
-            "CMD:/model sonnet\nKEY:1\nCMD:/compact\nCMD:/model opus\nKEY:1\n",
-        ),
+    for (name, kind, scenario) in [
+        ("fake-happy", "claude", "happy"),
+        ("fake-persist", "claude", "happy"),
+        ("fake-persist-fails", "claude", "happy"),
+        ("fake-stable-id", "claude", "happy"),
+        ("fake-empty-id", "claude", "happy"),
+        ("fake-legacy-record", "claude", "happy"),
+        ("fake-mid-turn", "claude", "happy"),
+        ("fake-busy-screen", "claude", "busy-screen"),
+        ("fake-attached", "claude", "happy"),
+        ("fake-attach-mid", "claude", "happy"),
+        ("fake-draft", "claude", "draft"),
+        ("fake-unknown-kind", "future", "happy"),
+        ("fake-codex-no-record", "codex", "codex-no-record"),
+        ("fake-stale-flags", "claude", "happy"),
+        ("fake-settings-missing", "claude", "happy"),
+        ("fake-settings-no-model", "claude", "happy"),
+        ("fake-settings-invalid", "claude", "happy"),
+        ("fake-settings-mismatch", "claude", "settings-mismatch"),
+        ("fake-unknown", "claude", "unknown"),
+        ("fake-model-confirm-wrong-title", "claude", "wrong-title-model-confirm"),
+        ("fake-model-confirm", "claude", "model-confirm"),
+        ("fake-model-confirm-static", "claude", "model-confirm-static"),
+        ("fake-model-confirm-transient", "claude", "model-confirm-transient"),
+        ("fake-model-confirm-changing-status", "claude", "model-confirm-changing-status"),
+        ("fake-model-confirm-with-status", "claude", "model-confirm-with-status"),
+        ("fake-stale-model-confirm", "claude", "stale-model-confirm"),
+        ("fake-restore-fails", "claude", "unknown-restore-fails"),
+        ("fake-unsafe-model", "claude", "happy"),
+        ("fake-force", "claude", "unknown"),
+        ("fake-hang", "claude", "hang"),
     ] {
+        let settings_path = dir.join(".claude/settings.json");
+        let settings_before: Option<&[u8]> = match name {
+            "fake-settings-no-model" => Some(b"{\"theme\":\"dark\",\"extra\":[1,2]}\n"),
+            "fake-settings-invalid" => Some(b"{ invalid settings json\n"),
+            "fake-settings-mismatch" => Some(b"{\"model\":\"opus\",\"theme\":\"dark\"}\n"),
+            _ => None,
+        };
+        if let Some(bytes) = settings_before {
+            std::fs::write(&settings_path, bytes).unwrap();
+        } else {
+            let _ = std::fs::remove_file(&settings_path);
+        }
         let log = dir.join(format!("{name}.log"));
         eval(
             &path,
-            &format!("remuda._fake_setup_compaction({name:?}, 'claude', {log:?}, {scenario:?})"),
+            &format!("remuda._fake_setup_compaction({name:?}, {kind:?}, {log:?}, {scenario:?})"),
         );
+        if name == "fake-legacy-record" {
+            eval(&path, r#"
+              local f = assert(io.open(remuda._fake_restore_file, 'w'))
+              f:write('{"fake-legacy-record":"opus"}')
+              f:close()
+              remuda._butler_compaction_load_restore_record()
+            "#);
+        }
+        if name == "fake-persist-fails" {
+            eval(&path, "remuda._fake_fail_restore_write = true");
+        }
+        if name == "fake-unsafe-model" {
+            eval(&path, "remuda._butler_bus.agents['fake-unsafe-model'].model = 'opus; /compact'");
+        }
+        if name == "fake-model-confirm" || name == "fake-model-confirm-static"
+            || name == "fake-model-confirm-transient"
+            || name == "fake-model-confirm-changing-status" || name == "fake-model-confirm-with-status" {
+            eval(&path, "remuda._butler_compaction_config.claude_completion_timeout = 6");
+        }
         wait_for(&path, name, "MODEL:");
+        if name == "fake-mid-turn" {
+            eval(&path, &format!("remuda._fake_busy[{name:?}] = true"));
+        }
         if name == "fake-attached" {
-            eval(
-                &path,
-                &format!("remuda._fake_attach_after_first_key = {name:?}"),
-            );
+            eval(&path, &format!("remuda._fake_attached[{name:?}] = true"));
         }
-        if name == "fake-busy-after-switch" {
-            eval(
-                &path,
-                &format!("remuda._fake_busy_after_key[{name:?}] = true"),
-            );
+        if name == "fake-stale-flags" {
+            eval(&path, &format!(r#"
+              local members = remuda._butler_compaction_members_state
+              members[{name:?}] = {{pending_restore_blocked=true, pending_restore_model_unavailable=true,
+                pending_restore_model="opus", restore_retry_in_progress=true}}
+            "#));
         }
-        if name == "fake-busy-after-compact" {
-            eval(&path, &format!("remuda._fake_busy_on_ctx_drop[{name:?}] = true"));
+        let result = if name == "fake-stale-flags" {
+            eval(&path, &format!("return remuda._butler_compaction_tick({name:?}, false)"))
+        } else if name == "fake-legacy-record" {
+            eval(&path, &format!("return remuda.butler.compact({name:?})"))
+        } else {
+            eval(&path, &format!("return remuda.butler.compact({name:?})"))
+        };
+        match name {
+            "fake-mid-turn" | "fake-busy-screen" => assert_eq!(result, "skipped_busy"),
+            "fake-attached" => assert_eq!(result, "skipped_attached"),
+            "fake-attach-mid" => assert_eq!(result, "skipped_attached"),
+            "fake-draft" => assert_eq!(result, "skipped_composer"),
+            "fake-unknown-kind" => assert_eq!(result, "skipped_unsupported_kind"),
+            "fake-persist-fails" => assert_eq!(result, "failed"),
+            "fake-unsafe-model" => assert_eq!(result, "failed"),
+            "fake-legacy-record" => assert_eq!(result, "restoring_model"),
+            _ => assert_eq!(result, "started", "unexpected result for {name}"),
         }
-        if name == "fake-attach-mid" {
-            eval(&path, &format!("remuda._fake_attach_on_ctx_drop[{name:?}] = true"));
+        if name == "fake-persist-fails" {
+            assert_eq!(eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].restore_pending)")), "nil",
+                "a failed durable write must clear the in-memory restore request");
+            assert!(std::fs::read_to_string(&log).unwrap_or_default().is_empty(),
+                "a failed durable write must prevent model changes");
+            eval(&path, &format!("return remuda._butler_compaction_tick({name:?}, false)"));
+            assert!(std::fs::read_to_string(&log).unwrap_or_default().is_empty(),
+                "the following tick must not send a needless restore command");
+            eval(&path, "remuda._fake_fail_restore_write = false");
         }
-        if name == "fake-no-family" {
-            eval(&path, &format!("remuda._fake_no_family[{name:?}] = true"));
-        }
-        if name == "fake-window-mismatch" {
-            eval(&path, &format!("remuda._fake_wrong_restored_window[{name:?}] = true"));
-        }
-        eval(
-            &path,
-            &format!("remuda.butler.compact({name:?})"),
-        );
-        let deadline = Instant::now() + Duration::from_secs(20);
-        let mut attach_retry_started = false;
-        loop {
-            let in_progress = eval(&path, &format!(
-                "return tostring(remuda._butler_compaction_members_state[{name:?}].compaction_in_progress == true)"
-            ));
-            let log_text = std::fs::read_to_string(&log).unwrap_or_default();
-            if name == "fake-attach-mid" && !attach_retry_started
-                && in_progress == "false"
-                && log_text == "CMD:/model sonnet\nKEY:1\nCMD:/compact\n"
-            {
-                assert_eq!(
-                    eval(&path, &format!("return tostring(remuda._fake_attached[{name:?}])")),
-                    "true",
-                    "human should attach after compact completes"
-                );
-                assert_eq!(
-                    eval(&path, &format!("return remuda._butler_compaction_members_state[{name:?}].pending_restore_model")),
-                    "opus",
-                    "mid-compaction attach must preserve the pending family"
-                );
-                assert_eq!(
-                    eval(&path, "local s = remuda._butler_state or remuda._butler_compaction_state; return s.compaction_fleet_active"),
-                    name,
-                    "fleet lock must stay with the member while restore is pending"
-                );
-                eval(&path, "remuda._butler_bus.agents['fake-member-b'] = {id='fake-member-b', kind='claude', session_name='fake-member-b'}");
-                assert_eq!(
-                    eval(&path, "return remuda._butler_compaction_execute('fake-member-b')"),
-                    "fleet_busy",
-                    "another member must not start compaction while restore is pending"
-                );
-                eval(&path, &format!("remuda._butler_compaction_tick({name:?}, false)"));
-                std::thread::sleep(Duration::from_millis(250));
-                assert_eq!(std::fs::read_to_string(&log).unwrap(), log_text,
-                    "restore must send no command or key while attached");
-                eval(&path, &format!("remuda._fake_attached[{name:?}] = false"));
-                eval(&path, &format!("remuda._butler_compaction_tick({name:?}, false)"));
-                attach_retry_started = true;
-                continue;
+        if name == "fake-unsafe-model" {
+            for _ in 0..3 {
+                eval(&path, "return remuda.butler.compact('fake-unsafe-model')");
             }
-            if in_progress == "false" && log_text == expected {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "fake scenario {scenario} stalled; log={log_text:?}"
-            );
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        let got = std::fs::read_to_string(&log).unwrap_or_default();
-        assert_eq!(got, expected, "unexpected commands/keys for {scenario}");
-        assert!(!got.contains("CMD:/model Opus"), "must not send a display tag: {got:?}");
-        assert!(!got.contains("CMD:/model claude-opus"), "must not send a raw model id: {got:?}");
-        if scenario == "unknown" || scenario == "switch-label-unknown" || scenario == "timeout" || scenario == "restore-timeout"
-            || name == "fake-attached"
-        {
-            let reports = eval(
-                &path,
-                "return table.concat(remuda._fake_compaction_reports or {}, '\\n')",
-            );
-            let marker = match scenario {
-                "unknown" => "unrecognized dialog",
-                "switch-label-unknown" => "no unique yes/switch option",
-                "timeout" => "first model dialog timed out",
-                "restore-timeout" => "restore attempts exhausted",
-                _ => "aborted: human attached",
-            };
-            assert!(
-                reports.contains(marker),
-                "expected report {marker:?}, got {reports:?}"
-            );
-        }
-        if scenario == "restore-timeout" {
-            assert_eq!(
-                eval(
-                    &path,
-                    &format!("return remuda._butler_compaction_members_state[{name:?}].pending_restore_model"),
-                ),
-                "opus",
-                "failed restore must retain the original model family for the next policy attempt"
-            );
-            assert!(
-                eval(
-                    &path,
-                    &format!("return remuda._butler_compaction_members_state[{name:?}].cooldown_ticks >= 12"),
-                ) == "true",
-                "failed compaction must set a retry backoff"
-            );
-        }
-        if name == "fake-attach-mid" {
-            let got = std::fs::read_to_string(&log).unwrap();
-            assert_eq!(got.matches("CMD:/model opus\n").count(), 1,
-                "detaching should retry the pending restore exactly once: {got:?}");
-            assert_eq!(
-                eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].pending_restore_model == nil)")),
-                "true",
-                "confirmed restore should clear pending state"
-            );
-            assert_eq!(
-                eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].cooldown_ticks >= 4)")),
-                "true",
-                "confirmed pending restore should re-arm the success cooldown"
-            );
-        }
-        if name == "fake-no-family" {
+            assert!(std::fs::read_to_string(&log).unwrap_or_default().is_empty(),
+                "an invalid model value must never produce pane input");
             let reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
-            let message = "compaction skipped: model family is unknown";
-            assert_eq!(reports.matches(message).count(), 1, "expected one missing-family notice: {reports:?}");
-            assert_eq!(
-                eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].pending_restore_model_unavailable == true)")),
-                "false",
-                "unknown-family compaction should be skipped before switching models"
-            );
+            assert!(reports.contains("unsafe Claude model"), "unsafe model should alert the parent: {reports:?}");
         }
-        if name == "fake-window-mismatch" {
+        if name == "fake-hang" {
+            let deadline = Instant::now() + Duration::from_secs(8);
+            loop {
+                let messages = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
+                if messages.contains("still running") { break; }
+                assert!(Instant::now() < deadline, "timeout did not report still-running state: {messages:?}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            assert_eq!(
+                eval(&path, "local s = remuda._butler_state or remuda._butler_compaction_state; return s.compaction_fleet_active"),
+                name,
+                "a timed-out but busy Claude pane must keep the fleet lock"
+            );
+            eval(&path, "remuda._butler_bus.agents['fake-other'] = {id='fake-other', kind='codex', session_name='fake-other'}");
+            assert_eq!(eval(&path, "return remuda._butler_compaction_execute('fake-other')"), "fleet_busy");
+            eval(&path, &format!("remuda._fake_busy[{name:?}] = false"));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let lock = eval(&path, "local s = remuda._butler_state or remuda._butler_compaction_state; return tostring(s.compaction_fleet_active)");
+                if lock == "nil" { break; }
+                assert!(Instant::now() < deadline, "idle monitor failed to release fleet lock: {lock}");
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+        if name == "fake-stale-flags" || name == "fake-happy" || name == "fake-persist" || name == "fake-stable-id" || name == "fake-empty-id" || name.starts_with("fake-settings-") {
+            let state_key = if name == "fake-stable-id" { "stable-agent-17" } else { name };
+            let deadline = Instant::now() + Duration::from_secs(8);
+            loop {
+                let in_progress = eval(&path, &format!(
+                    "return tostring(remuda._butler_compaction_members_state[{state_key:?}].compaction_in_progress == true)"
+                ));
+                let got = std::fs::read_to_string(&log).unwrap_or_default();
+                if in_progress == "false" && got.matches("CMD:/compact\nKEY:RET\n").count() >= 1 { break; }
+                assert!(Instant::now() < deadline, "scenario {name} stalled: {got:?}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let got = std::fs::read_to_string(&log).unwrap_or_default();
+            assert_eq!(got, "CMD:/model sonnet\nKEY:RET\nCMD:/compact\nKEY:RET\nCMD:/model opus\nKEY:RET\n",
+                "Claude should compact on sonnet and restore its prior model: {got:?}");
+            if name == "fake-persist" {
+                assert_eq!(eval(&path, "return tostring(remuda._fake_restore_record_before_sonnet)"), "true",
+                    "the prior model record must be durable before typing /model sonnet");
+                assert!(eval(&path, "return remuda._fake_restore_record_bytes").contains("opus"),
+                    "the durable record must map this session to its prior model");
+                assert!(!std::path::Path::new(&eval(&path, "return remuda._fake_restore_file")).exists(),
+                    "verified restore must delete the durable record");
+            }
+            if name == "fake-stable-id" {
+                assert!(eval(&path, "return remuda._fake_restore_record_bytes").contains("stable-agent-17"),
+                    "durable records must use a non-empty stable agent id");
+                assert!(!eval(&path, "return remuda._fake_restore_record_bytes").contains("fake-stable-id"),
+                    "durable records must not use the session key when a stable id exists");
+            }
+            if name == "fake-empty-id" {
+                assert!(eval(&path, "return remuda._fake_restore_record_bytes").contains("fake-empty-id"),
+                    "empty agent ids must fall back to the session name");
+            }
+            if name.starts_with("fake-settings-") {
+                let settings_after = if name == "fake-settings-mismatch" {
+                    Some(b"{\"model\":\"sonnet\",\"theme\":\"dark\"}\n" as &[u8])
+                } else {
+                    settings_before
+                };
+                if let Some(expected) = settings_after {
+                    assert_eq!(std::fs::read(&settings_path).unwrap(), expected,
+                        "Butler must leave existing settings.json bytes unchanged for {name}");
+                } else {
+                    assert!(!settings_path.exists(), "missing settings.json must remain missing for {name}");
+                }
+                let reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
+                if name == "fake-settings-mismatch" {
+                    assert_eq!(reports.matches("settings.json model is sonnet, expected opus").count(), 1,
+                        "a valid differing model should alert the parent exactly once: {reports:?}");
+                    assert_eq!(eval(&path, &format!(
+                        "return tostring(remuda._butler_compaction_members_state[{name:?}].restore_pending)")), "opus",
+                        "settings.json still on sonnet must keep the prior model restore pending");
+                    eval(&path, &format!("return remuda._butler_compaction_execute({name:?})"));
+                    let deadline = Instant::now() + Duration::from_secs(8);
+                    loop {
+                        let got = std::fs::read_to_string(&log).unwrap_or_default();
+                        if got.matches("CMD:/model opus\n").count() >= 2 { break; }
+                        assert!(Instant::now() < deadline, "next tick must retype the prior model: {got:?}");
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                } else {
+                    assert!(!reports.contains("settings.json model is"),
+                        "missing, keyless, or invalid settings.json must not alert for {name}: {reports:?}");
+                }
+            }
+        }
+        if name == "fake-stale-flags" {
+            assert_eq!(eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].pending_restore_blocked == nil and remuda._butler_compaction_members_state[{name:?}].pending_restore_model_unavailable == nil)")), "true");
+        }
+        if name == "fake-unknown-kind" {
+            assert!(std::fs::read_to_string(&log).unwrap_or_default().is_empty(),
+                "unknown agent kinds must not receive commands");
+            let reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
+            assert!(reports.contains("unsupported agent kind"), "unknown kind should be reported: {reports:?}");
+        }
+        if name == "fake-codex-no-record" {
+            let deadline = Instant::now() + Duration::from_secs(8);
+            loop {
+                let in_progress = eval(&path, &format!(
+                    "return tostring(remuda._butler_compaction_members_state[{name:?}].compaction_in_progress == true)"
+                ));
+                let got = std::fs::read_to_string(&log).unwrap_or_default();
+                if in_progress == "false" && got.matches("CMD:/compact\nKEY:RET\n").count() == 1 { break; }
+                assert!(Instant::now() < deadline, "first Codex compaction stalled: {got:?}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            assert!(!std::path::Path::new(&eval(&path, "return remuda._fake_restore_file")).exists(),
+                "Codex compaction must not create a model restore record");
+            assert_eq!(eval(&path, &format!("return remuda.butler.compact({name:?})")), "started",
+                "the same Codex session must be able to compact again");
+            let deadline = Instant::now() + Duration::from_secs(8);
+            loop {
+                let in_progress = eval(&path, &format!(
+                    "return tostring(remuda._butler_compaction_members_state[{name:?}].compaction_in_progress == true)"
+                ));
+                let got = std::fs::read_to_string(&log).unwrap_or_default();
+                if in_progress == "false" && got.matches("CMD:/compact\nKEY:RET\n").count() == 2 { break; }
+                assert!(Instant::now() < deadline, "second Codex compaction stalled: {got:?}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let got = std::fs::read_to_string(&log).unwrap_or_default();
+            assert_eq!(got, "CMD:/compact\nKEY:RET\nCMD:/compact\nKEY:RET\n",
+                "Codex compaction must never send a stale Claude model restore command: {got:?}");
+            let reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
+            assert!(!reports.contains("model was restored, but its recovery record could not be cleared"),
+                "missing restore record must not send a clear-failure mail: {reports:?}");
+            let trace = std::fs::read_to_string(&trace_path).unwrap_or_default();
+            assert!(!trace.contains("restore_record_clear_failed"),
+                "missing restore record must not create a clear-failure trace: {trace:?}");
+        }
+        if name == "fake-legacy-record" {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let got = std::fs::read_to_string(&log).unwrap_or_default();
+                if got.contains("CMD:/model opus\nKEY:RET\n") { break; }
+                assert!(Instant::now() < deadline, "legacy session-keyed restore was not resumed: {got:?}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let prior_record = eval(&path, "return remuda._fake_restore_record_before_restore");
+            assert!(prior_record.contains("stable-agent-legacy"),
+                "legacy session-keyed records must migrate to the stable agent id before restore");
+            assert!(!prior_record.contains("fake-legacy-record"),
+                "migration must remove the old session key");
+        }
+        if name == "fake-unknown" {
+            let deadline = Instant::now() + Duration::from_secs(8);
+            loop {
+                let in_progress = eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].compaction_in_progress == true)"));
+                let reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
+                if in_progress == "false" && reports.contains("unrecognized dialog") { break; }
+                assert!(Instant::now() < deadline, "unknown-dialog setup did not fail as expected: {reports:?}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
             let before = std::fs::read_to_string(&log).unwrap();
-            eval(&path, &format!("remuda._butler_compaction_tick({name:?}, false)"));
-            std::thread::sleep(Duration::from_millis(250));
+            assert_eq!(before, "CMD:/model sonnet\nKEY:RET\nCMD:/compact\nKEY:RET\n",
+                "never type into the unknown dialog or attempt a model restore while it is visible");
+            assert_eq!(eval(&path, &format!("return remuda._butler_compaction_members_state[{name:?}].restore_pending")), "opus",
+                "remember prior model for idle recovery");
+            assert!(std::path::Path::new(&eval(&path, "return remuda._fake_restore_file")).exists(),
+                "an interrupted compaction must leave a durable prior-model record");
+            eval(&path, &format!(r#"
+              remuda._butler_compaction_members_state[{name:?}].restore_pending = nil
+              remuda._butler_compaction_load_restore_record()
+              return remuda._butler_compaction_tick({name:?}, false)
+            "#));
+            assert_eq!(eval(&path, &format!("return remuda._butler_compaction_members_state[{name:?}].restore_pending")), "opus",
+                "the next tick must reload and resume a durable restore");
+            eval(&path, &format!("return remuda._butler_compaction_tick({name:?}, false)"));
             assert_eq!(std::fs::read_to_string(&log).unwrap(), before,
-                "a context-window mismatch must not retry the restore");
+                "recovery must wait while the unknown dialog is still visible");
+            eval(&path, &format!("remuda._fake_attached[{name:?}] = true"));
+            eval(&path, &format!("remuda._fake_clear_unknown[{name:?}] = true"));
+            assert_eq!(eval(&path, &format!("return tostring(remuda._butler_compaction_is_unknown_dialog(remuda.capture({name:?})))")), "false",
+                "fake dialog clear must return the pane to the recognized composer");
+            eval(&path, &format!("return remuda._butler_compaction_tick({name:?}, false)"));
+            assert_eq!(std::fs::read_to_string(&log).unwrap(), before,
+                "recovery must not type while a human is attached");
+            eval(&path, &format!("remuda._fake_attached[{name:?}] = false"));
+            eval(&path, &format!("return remuda._butler_compaction_tick({name:?}, false)"));
+            let deadline = Instant::now() + Duration::from_secs(8);
+            loop {
+                let got = std::fs::read_to_string(&log).unwrap_or_default();
+                let pending = eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].restore_pending)"));
+                if pending == "nil" && got.ends_with("CMD:/model opus\nKEY:RET\n") { break; }
+                assert!(Instant::now() < deadline, "deferred model restore stalled: {got:?}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            assert_eq!(std::fs::read_to_string(&log).unwrap(), format!("{before}CMD:/model opus\nKEY:RET\n"));
+        }
+        if name == "fake-model-confirm-wrong-title" {
+            let deadline = Instant::now() + Duration::from_secs(8);
+            loop {
+                let in_progress = eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].compaction_in_progress == true)"));
+                if in_progress == "false" { break; }
+                assert!(Instant::now() < deadline, "wrong-title confirmation watcher did not finish");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let got = std::fs::read_to_string(&log).unwrap_or_default();
+            assert_eq!(got, "CMD:/model sonnet\nKEY:RET\n",
+                "same options under a different dialog title must not receive Return: {got:?}");
+        }
+        if name == "fake-model-confirm" || name == "fake-model-confirm-static"
+            || name == "fake-model-confirm-transient"
+            || name == "fake-model-confirm-changing-status" || name == "fake-model-confirm-with-status" {
+            let prior_reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
+            let prior_report_count = prior_reports.lines().count();
+            let deadline = Instant::now() + Duration::from_secs(8);
+            loop {
+                let in_progress = eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].compaction_in_progress == true)"));
+                let reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
+                let new_reports = reports.lines().skip(prior_report_count).collect::<Vec<_>>().join("\\n");
+                assert!(!new_reports.contains("unrecognized dialog"),
+                    "the model confirmation dialog should be accepted for {name}: {new_reports:?}");
+                if in_progress == "false" { break; }
+                assert!(Instant::now() < deadline, "compaction did not proceed past model confirmation: {new_reports:?}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let got = std::fs::read_to_string(&log).unwrap();
+            let screen = eval(&path, "return remuda._fake_model_confirm_screen or ''");
             let reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
-            assert_eq!(reports.matches("compaction restore mismatch").count(), 1,
-                "expected one context-window mismatch notice: {reports:?}");
+            let last_screen = eval(&path, &format!("return remuda.capture({name:?})"));
+            if name == "fake-model-confirm-with-status" {
+                assert_eq!(eval(&path, "return tostring(remuda._fake_model_confirm_status_seen == true)"), "true",
+                    "both status rows below the dialog footer must be present in the captured screen");
+            }
+            assert!(got.contains("CMD:/compact\n"), "compaction should follow model confirmation: got={got:?}; reports={reports:?}; last screen={last_screen:?}; confirmation screen={screen:?}");
+            assert!(got.ends_with("CMD:/model opus\nKEY:RET\n"), "prior model should be restored: {got:?}");
+            assert_eq!(got.matches("KEY:RET\n").count(), 4,
+                "the selected Yes option should be confirmed exactly once: {got:?}");
+            eval(&path, "remuda._butler_compaction_config.claude_completion_timeout = 0.2");
+        }
+        if name == "fake-stale-model-confirm" {
+            let deadline = Instant::now() + Duration::from_secs(8);
+            loop {
+                let in_progress = eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].compaction_in_progress == true)"));
+                if in_progress == "false" { break; }
+                assert!(Instant::now() < deadline, "stale-confirm setup did not fail as expected");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
+            let got = std::fs::read_to_string(&log).unwrap();
+            assert!(reports.contains("unrecognized dialog during model-sonnet")
+                    && got == "CMD:/model sonnet\nKEY:RET\n",
+                "the bottom permission dialog must follow the unknown path without Return; reports={reports:?}; log={got:?}");
+        }
+        if name == "fake-restore-fails" {
+            let deadline = Instant::now() + Duration::from_secs(8);
+            loop {
+                let in_progress = eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].compaction_in_progress == true)"));
+                let reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
+                if in_progress == "false" && reports.contains("unrecognized dialog") { break; }
+                assert!(Instant::now() < deadline, "restore-failure setup did not fail as expected: {reports:?}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let before = std::fs::read_to_string(&log).unwrap();
+            assert_eq!(before, "CMD:/model sonnet\nKEY:RET\nCMD:/compact\nKEY:RET\n");
+            eval(&path, &format!("remuda._fake_clear_unknown[{name:?}] = true"));
+            for attempt in 1..=3 {
+                eval(&path, &format!("return remuda._butler_compaction_tick({name:?}, false)"));
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    let attempts = eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].restore_pending_attempts)"));
+                    let in_progress = eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].compaction_in_progress == true)"));
+                    if attempts == attempt.to_string() && in_progress == "false" { break; }
+                    assert!(Instant::now() < deadline, "restore attempt {attempt} stalled: {attempts}, {in_progress}");
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                let pending = eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].restore_pending)"));
+                assert_eq!(pending, "opus", "failed verification must retain recovery state after attempt {attempt}");
+            }
+            let got = std::fs::read_to_string(&log).unwrap();
+            assert_eq!(got.matches("CMD:/model opus\nKEY:RET\n").count(), 3, "attempt exactly three verified restores");
+            assert!(std::path::Path::new(&eval(&path, "return remuda._fake_restore_file")).exists(),
+                "failed restore must retain its durable recovery record");
+            let reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
+            assert_eq!(reports.matches("model restore failed; member may still be on sonnet").count(), 1,
+                "notify the parent once after the final failed restore");
+            eval(&path, &format!("return remuda._butler_compaction_tick({name:?}, false)"));
+            assert_eq!(std::fs::read_to_string(&log).unwrap(), got, "exhausted recovery must stop sending restore commands");
+            eval(&path, "remuda._fake_now(1011); return remuda._butler_compaction_tick('fake-restore-fails', false)");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let got_after_cooldown = std::fs::read_to_string(&log).unwrap_or_default();
+                let in_progress = eval(&path, "return tostring(remuda._butler_compaction_members_state['fake-restore-fails'].compaction_in_progress == true)");
+                if got_after_cooldown.matches("CMD:/model opus\nKEY:RET\n").count() == 4 && in_progress == "false" { break; }
+                assert!(Instant::now() < deadline, "restore retry did not resume after cooldown: {got_after_cooldown:?}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            eval(&path, "return remuda._butler_compaction_tick('fake-restore-fails', false)");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let got_after_cooldown = std::fs::read_to_string(&log).unwrap_or_default();
+                let in_progress = eval(&path, "return tostring(remuda._butler_compaction_members_state['fake-restore-fails'].compaction_in_progress == true)");
+                if got_after_cooldown.matches("CMD:/model opus\nKEY:RET\n").count() == 5 && in_progress == "false" { break; }
+                assert!(Instant::now() < deadline, "cooldown retry batch did not finish: {got_after_cooldown:?}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            eval(&path, "return remuda._butler_compaction_tick('fake-restore-fails', false)");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let got_after_cooldown = std::fs::read_to_string(&log).unwrap_or_default();
+                let in_progress = eval(&path, "return tostring(remuda._butler_compaction_members_state['fake-restore-fails'].compaction_in_progress == true)");
+                if got_after_cooldown.matches("CMD:/model opus\nKEY:RET\n").count() == 6 && in_progress == "false" { break; }
+                assert!(Instant::now() < deadline, "third retry attempt did not finish: {got_after_cooldown:?}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let reports_after = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
+            assert_eq!(reports_after.matches("model restore failed; member may still be on sonnet").count(), 2,
+                "notify once for each exhausted three-attempt cooldown batch");
+        }
+        if name == "fake-force" {
+            let deadline = Instant::now() + Duration::from_secs(8);
+            loop {
+                let in_progress = eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].compaction_in_progress == true)"));
+                let reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
+                if in_progress == "false" && reports.contains("unrecognized dialog") { break; }
+                assert!(Instant::now() < deadline, "force setup did not fail as expected: {reports:?}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            eval(&path, &format!("remuda._fake_clear_unknown[{name:?}] = true"));
+            let forced = remuda_timed(&dir, &["-s", "s", "butler", "compact", name, "--force"]);
+            assert!(forced.status.success(), "--force CLI failed: {}", String::from_utf8_lossy(&forced.stderr));
+            let deadline = Instant::now() + Duration::from_secs(8);
+            loop {
+                let got = std::fs::read_to_string(&log).unwrap_or_default();
+                let pending = eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].restore_pending)"));
+                if pending == "nil" && got.ends_with("CMD:/model opus\nKEY:RET\n") { break; }
+                assert!(Instant::now() < deadline, "forced model restore stalled: {got:?}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            assert_eq!(std::fs::read_to_string(&log).unwrap(),
+                "CMD:/model sonnet\nKEY:RET\nCMD:/compact\nKEY:RET\nCMD:/model opus\nKEY:RET\n");
         }
     }
     drop(daemon);
@@ -5818,9 +6919,8 @@ fn a_daemon_restart_does_not_relaunch_the_butler_session() {
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    // Same restart path as `restart_stops_a_daemon_and_leaves_the_next_command_free_to_start_one`,
-    // with `-f`: the live butler session makes a bare `restart` refuse (see
-    // `restart_refuses_to_kill_a_live_session_without_being_told_twice`).
+    // Stop with `-f` on the pinned core; the live butler session makes a bare
+    // stop refuse. The next check starts a fresh daemon on the same runtime.
     let out = remuda(&dir, &["-s", "s", "stop", "-f"]);
     assert!(
         out.status.success(),
@@ -6138,9 +7238,9 @@ fn a_fresh_daemon_auto_loads_the_user_config_and_registers_butler_with_no_human_
         std::thread::sleep(Duration::from_millis(50));
     };
 
-    // Restart leg. `-f`: a live butler session makes a bare `restart` refuse
-    // (see `restart_refuses_to_kill_a_live_session_without_being_told_twice`).
-    let out = remuda(&dir, &["-s", "s", "restart", "-f"]);
+    // Restart leg using the stop command available on the pinned core; a live
+    // butler session makes a bare stop refuse without `-f`.
+    let out = remuda(&dir, &["-s", "s", "stop", "-f"]);
     assert!(
         out.status.success(),
         "{}",
@@ -6678,6 +7778,14 @@ fn butler_matrix_reply_react_upload_redact_join_and_leave_compose_request() {
       matrix.join({{ room = room }}, function(value) agent_error = value end, "agent1")
       if not agent_error or not agent_error.error or #remuda.http.calls ~= 0 then return "agent-join-not-refused" end
       local outside, before_outside = nil, #remuda.http.calls
+      matrix.relay.instance = nil
+      local no_relay
+      matrix.reply({{room=room, event_id="$outside", text="must fail closed"}},
+        function(value) no_relay=value end)
+      if not no_relay or not no_relay.error or #remuda.http.calls ~= before_outside then
+        return "low-level-reply-failed-open-without-relay"
+      end
+      matrix.relay.instance = {{can_reply_to=function() return true end}}
       remuda.http.respond("GET", "https://matrix.example.org/_matrix/client/v3/rooms/%21write%3Aexample.org/context/%24outside",
         response('{{"event":{{"room_id":"!other:example.org"}}}}'))
       matrix.reply({{ room = room, event_id = "$outside", text = "must not send" }}, function(value) outside = value end)
@@ -6828,6 +7936,57 @@ fn butler_matrix_cli_pending_routes_async_send_and_serializes_json() {
     assert!(output.status.success(), "event|get failed: {}", String::from_utf8_lossy(&output.stderr));
     let event: serde_json::Value = serde_json::from_slice(&output.stdout).expect("parse event alias JSON");
     assert_eq!(event["json"]["event_id"], "$event");
+}
+
+#[test]
+#[cfg(unix)]
+fn butler_matrix_cli_guides_unconfigured_status_and_send_without_exposing_token() {
+    let dir = scratch_dir("butler-matrix-cli-unconfigured");
+    let home = dir.join("home-empty");
+    std::fs::create_dir_all(home.join(".config/remuda/butler")).expect("mkdir empty Butler config");
+    let token_path = home.join(".config/remuda/butler/token");
+    let config_path = home.join(".config/remuda/butler/config");
+    std::fs::write(&token_path, "secret-token-sentinel\n").expect("write token sentinel");
+    let daemon = Daemon::spawn_with_home(&dir, &home);
+    let path = daemon::socket_path_in(&dir, "s");
+    eval(&path, "remuda._butler_test_mode = 'lifecycle'");
+    let loaded = remuda_timed(&dir, &["-s", "s", "butler", "--headless"]);
+    assert!(loaded.status.success(), "load Butler CLI: {}", String::from_utf8_lossy(&loaded.stderr));
+    assert_eq!("true", eval(&path,
+        "return tostring(remuda.butler.matrix.relay.instance == nil)"),
+        "a half-configured Matrix setup must not start the relay");
+
+    let status = remuda_timed(&dir, &["-s", "s", "butler", "matrix", "status"]);
+    assert!(!status.status.success(), "unconfigured Matrix status must fail");
+    let status_text = format!("{}{}", String::from_utf8_lossy(&status.stdout),
+        String::from_utf8_lossy(&status.stderr));
+
+    let send = remuda_timed(&dir, &["-s", "s", "butler", "matrix", "send", "hello"]);
+    assert!(!send.status.success(), "send without a config file must fail");
+    let send_text = format!("{}{}", String::from_utf8_lossy(&send.stdout),
+        String::from_utf8_lossy(&send.stderr));
+
+    for (verb, text) in [("status", status_text.as_str()), ("send", send_text.as_str())] {
+        assert!(text.contains(token_path.to_string_lossy().as_ref()), "{verb} omitted token path: {text}");
+        assert!(text.contains(config_path.to_string_lossy().as_ref()), "{verb} omitted config path: {text}");
+        for line in [
+            "https://<homeserver-url>",
+            "!<room-id>:<server-name>",
+            "@<your-user>:<server-name>",
+            "@<allowed-sender>:<server-name>",
+            "Next: remuda butler matrix setup",
+        ] {
+            assert!(text.contains(line), "{verb} omitted {line:?}: {text}");
+        }
+        assert!(text.contains("chmod 600"), "{verb} omitted file permission guidance: {text}");
+        assert!(text.lines().count() <= 12, "{verb} setup guidance exceeded 12 lines: {text}");
+        assert!(!text.contains("secret-token-sentinel"), "{verb} leaked token contents: {text}");
+    }
+    assert!(status_text.contains("Missing config file"), "status did not identify missing config: {status_text}");
+    assert!(!status_text.contains("Missing token file"), "status marked present token missing: {status_text}");
+    assert!(send_text.contains("Missing config file"), "send did not identify missing config: {send_text}");
+    assert!(!send_text.contains("Missing token file"), "send incorrectly marked present token missing: {send_text}");
+    drop(daemon);
 }
 
 #[test]
