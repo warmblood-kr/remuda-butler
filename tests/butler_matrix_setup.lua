@@ -5,12 +5,22 @@ return function(matrix)
   assert(type(matrix.cli) == "function", "Matrix CLI router is unavailable")
   assert(matrix.cli({ "matrix", "setup" }) == matrix.setup_usage())
   assert(matrix.cli({ "matrix", "setup", "--help" }) == matrix.setup_usage())
+  assert(matrix.cli_usage():find("Example:", 1, true)
+    and matrix.cli_usage():find("https://<homeserver>", 1, true)
+    and matrix.cli_usage():find("--password-file <path>", 1, true),
+    "Matrix usage should include one complete placeholder setup example")
 
   assert(remuda.fs and remuda.fs.mkdir_new and remuda.fs.write_atomic,
     "run setup tests with the Remuda filesystem helpers")
   local root = os.tmpname()
   os.remove(root)
   assert(remuda.fs.mkdir_new(root))
+  local saved_paths = remuda._butler_matrix_config
+  remuda._butler_matrix_config = { token_path = root .. "/missing-token", config_path = root .. "/missing-config" }
+  local default_guidance = matrix.configuration_guidance()
+  assert(default_guidance and default_guidance:find("Next: remuda butler matrix setup", 1, true),
+    "unconfigured guidance should point to setup")
+  remuda._butler_matrix_config = saved_paths
   local password, token = root .. "/password", root .. "/token"
   local output = root .. "/output"
   assert(remuda.fs.mkdir_new(output))
@@ -64,6 +74,42 @@ return function(matrix)
   assert(io.open(plan.token_path, "rb") == nil and io.open(plan.config_path, "rb") == nil,
     "setup validation must not create the output files")
   remuda.http = fake_http
+
+  -- An HTTP error may expose only its safe Matrix errcode and a matching Next
+  -- hint, never any text from the server response body.
+  write(token, "access-token")
+  local error_config = root .. "/request-config"
+  write(error_config, "http://matrix.invalid\n!room:example.org\n@alice:example.org\n")
+  remuda._butler_matrix_config = { token_path = token, config_path = error_config }
+  local request_http = remuda.http
+  local delivered
+  remuda.http = { request = function(spec)
+    spec.callback({ status = 403, headers = {}, body = '{"errcode":"M_FORBIDDEN","error":"body-secret"}' })
+    return { cancel = function() end }
+  end }
+  matrix.request({ method = "GET", path = "/_matrix/client/v3/account/whoami" }, function(result)
+    delivered = result
+  end)
+  assert(delivered and delivered.error and delivered.error:find("M_FORBIDDEN", 1, true)
+    and delivered.error:find("Next: check --password-file", 1, true)
+    and not delivered.error:find("body-secret", 1, true) and delivered.body == nil,
+    "HTTP errors should show safe errcode guidance without response body text")
+  -- Reload to reset the client's rate-limit bucket between independent cases.
+  dofile("packages/butler/matrix_request.lua")
+  remuda.http = { request = function(spec)
+    spec.callback({ status = 429, headers = {}, body = '{"errcode":"M_LIMIT_EXCEEDED","error":"private detail"}' })
+    return { cancel = function() end }
+  end }
+  delivered = nil
+  matrix.request({ method = "GET", path = "/_matrix/client/v3/account/whoami" }, function(result)
+    delivered = result
+  end)
+  assert(delivered and delivered.error:find("M_LIMIT_EXCEEDED", 1, true)
+    and delivered.error:find("Next: wait before retrying", 1, true)
+    and not delivered.error:find("private detail", 1, true),
+    "rate limits should include the wait hint without response body text")
+  remuda.http = request_http
+  remuda._butler_matrix_config = nil
 
   local empty = root .. "/empty"
   write(empty, "  \nignored")
@@ -151,6 +197,14 @@ return function(matrix)
     atomic_writes[#atomic_writes + 1] = { path = path, private = opts and opts.private }
     return real_write_atomic(path, contents, opts)
   end
+  local real_status = matrix.status
+  matrix.status = function(_, callback)
+    assert(read(output .. "/token") == "temporary-access-token\n"
+      and read(output .. "/config"), "setup must write credentials before checking status")
+    callback({ status = 200, json = { user_id = "@butler-demo:example.org",
+      joined_rooms = { "!home:example.org", "!all:example.org" } } })
+    return { cancel = function() end }
+  end
   local reply = matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
     "--owner", "@alice:example.org", "--bot", "@butler-demo:example.org",
     "--password-file", password, "--dir", output, "--all" })
@@ -178,9 +232,12 @@ return function(matrix)
     and not requests[4].body:find("m.room.encryption", 1, true),
     "ALL-BUTLERS createRoom must invite owner without enabling encryption")
   requests[4].callback({ status = 200, body = '{"room_id":"!all:example.org"}' })
+  matrix.status = real_status
   assert(resolved and resolved.status == 0 and resolved.stdout:find("!home:example.org", 1, true)
     and resolved.stdout:find("!all:example.org", 1, true)
-    and resolved.stdout:find("Next: delete the password or token input file", 1, true)
+    and resolved.stdout:find("Status: User: @butler-demo:example.org; Joined rooms: 2", 1, true)
+    and resolved.stdout:find("Next: accept the invite on your phone and say hi", 1, true)
+    and resolved.stdout:find("Next: delete the password file", 1, true)
     and not resolved.stdout:find("password-secret", 1, true)
     and not resolved.stdout:find("temporary-access-token", 1, true),
     "setup CLI output must report saved rooms without secrets")

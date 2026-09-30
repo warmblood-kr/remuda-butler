@@ -15,7 +15,9 @@ local USAGE = [[  remuda butler matrix [--json] status
   remuda butler matrix [--json] join ROOM (operator)
   remuda butler matrix [--json] leave ROOM (operator)
   remuda butler matrix setup [OPTIONS]
-  remuda butler matrix [--json] quarantine [--id EVENT_ID] (operator)]]
+  remuda butler matrix [--json] quarantine [--id EVENT_ID] (operator)
+
+Example: remuda butler matrix setup --homeserver https://<homeserver> --owner @<owner>:<server> --bot @<bot>:<server> --password-file <path> --pin <sha256-hex>]]
 
 local VERBS = {
   status = true, rooms = true, history = true, event = true, get = true, quarantine = true,
@@ -247,13 +249,24 @@ function matrix.cli(args, agent)
       if result.error then return reply:resolve(1, "", tostring(result.error) .. "\n") end
       local files, write_error = matrix.setup_write(plan, result)
       if not files then return reply:resolve(1, "", tostring(write_error) .. "\n") end
-      local lines = { "Matrix login verified as " .. terminal_safe(result.user_id) }
-      if result.home_room then lines[#lines + 1] = "HOME room: " .. terminal_safe(result.home_room) end
-      if result.all_room then lines[#lines + 1] = "ALL-BUTLERS room: " .. terminal_safe(result.all_room) end
-      lines[#lines + 1] = "Token file: " .. terminal_safe(files.token_path)
-      lines[#lines + 1] = "Config file: " .. terminal_safe(files.config_path)
-      lines[#lines + 1] = "Next: delete the password or token input file, then run: remuda butler matrix status"
-      reply:resolve(0, table.concat(lines, "\n") .. "\n", "")
+      active = matrix.status({}, function(status_result)
+        if cancelled.value then return end
+        if type(status_result) ~= "table" then status_result = { error = "Matrix status returned no result" } end
+        local lines = { "Matrix login verified as " .. terminal_safe(result.user_id) }
+        if result.home_room then lines[#lines + 1] = "HOME room: " .. terminal_safe(result.home_room) end
+        if result.all_room then lines[#lines + 1] = "ALL-BUTLERS room: " .. terminal_safe(result.all_room) end
+        lines[#lines + 1] = "Token file: " .. terminal_safe(files.token_path)
+        lines[#lines + 1] = "Config file: " .. terminal_safe(files.config_path)
+        if status_result.error then
+          lines[#lines + 1] = "Status check failed: " .. terminal_safe(status_result.error)
+        else
+          lines[#lines + 1] = "Status: " .. terminal_safe(render_human("status", {}, status_result):gsub("\n", "; "):gsub("; $", ""))
+        end
+        lines[#lines + 1] = "Next: accept the invite on your phone and say hi"
+        lines[#lines + 1] = plan.secret_kind == "password"
+          and "Next: delete the password file" or "Next: delete the token input file"
+        reply:resolve(0, table.concat(lines, "\n") .. "\n", "")
+      end, agent)
     end
     active = matrix.setup_network(plan, finish_setup)
     if cancelled.value and active and active.cancel then active:cancel() end
