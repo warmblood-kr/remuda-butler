@@ -7,22 +7,16 @@ local is_agent_mxid = matrix.is_agent_mxid
 local MAX_CHUNK_BYTES = 4000
 local MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 local txn_counter = 0
-local function random_bytes(count)
+local function random_tag()
   local file = io.open("/dev/urandom", "rb")
-  local bytes = file and file:read(count)
+  local bytes = file and file:read(16)
   if file then file:close() end
-  if not bytes or #bytes < count then
+  if not bytes or #bytes < 16 then
     math.randomseed(os.time() + math.floor(os.clock() * 1000000))
     local out = {}
-    for i = 1, count do out[i] = string.char(math.random(0, 255)) end
+    for i = 1, 16 do out[i] = string.char(math.random(0, 255)) end
     bytes = table.concat(out)
   end
-  return bytes
-end
-matrix.random_bytes = matrix.random_bytes or random_bytes
-
-local function random_tag()
-  local bytes = matrix.random_bytes(16)
   local hex = {}
   for i = 1, #bytes do hex[i] = string.format("%02x", bytes:byte(i)) end
   return table.concat(hex)
