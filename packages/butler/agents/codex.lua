@@ -51,6 +51,8 @@ remuda._butler_agent_startup.codex = {
     { match = "Codex update available", update = true },
     { match = "Update now", update = true },
     { match = "Skip until next version", update = true },
-    { trust = "codex", keys = { "1" } }, -- only a stable, exact two-option trust modal is actionable
+    { trust = "codex", keys = { "1" }, back_options = {
+      "Back to Agent Command Center", "Don't trust", "Do not trust",
+    } }, -- only a stable, exact two-option trust modal is actionable
   },
 }
