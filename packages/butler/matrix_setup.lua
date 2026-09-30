@@ -116,6 +116,36 @@ local function file_exists(path)
   return true
 end
 
+local function shell_quote(value)
+  return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
+end
+
+local function setup_command(options, destination)
+  local parts = { "remuda butler matrix setup" }
+  local function add(flag, value)
+    parts[#parts + 1] = flag .. " " .. shell_quote(value)
+  end
+  add("--homeserver", options.homeserver)
+  add("--owner", options.owner_mxid)
+  if options.secret_kind == "password" then
+    add("--password-file", options.secret_path)
+    add("--bot", options.bot_mxid)
+  else
+    add("--token-file", options.secret_path)
+    if options.bot_mxid then add("--bot", options.bot_mxid) end
+  end
+  if options.force then parts[#parts + 1] = "--force" end
+  if options.create_all then parts[#parts + 1] = "--all" end
+  if options.pin then add("--pin", options.pin) end
+  if options.ca_file then add("--ca-file", options.ca_file) end
+  if destination == "default" then
+    parts[#parts + 1] = "--default"
+  else
+    parts[#parts + 1] = '--dir "$HOME/.config/remuda/matrix-test"'
+  end
+  return table.concat(parts, " ")
+end
+
 local function validate_secret(path, kind)
   if not absolute(path) then return nil, "--" .. kind .. "-file must be an absolute path" end
   if not readable_file(path) then
@@ -171,7 +201,21 @@ local function resolve_outputs(options)
 
   local touches_default = resolved and (token_path == resolved.token_path or config_path == resolved.config_path)
   if touches_default and not options.default then
-    return nil, "writing the default Matrix files enables the live daemon; pass --default"
+    local test_dir = "$HOME/.config/remuda/matrix-test"
+    local lines = {
+      "Nothing was written.",
+      "To enable Matrix for this Butler (the running remuda), rerun:",
+      "  " .. setup_command(options, "default"),
+      "To set up a separate test Butler, rerun:",
+      "  " .. setup_command(options, "test"),
+      "Start its own daemon with the setup files:",
+      "  REMUDA_BUTLER_TOKEN=\"" .. test_dir .. "/token\" REMUDA_BUTLER_CONFIG=\""
+        .. test_dir .. "/config\" remuda -s matrix-test daemon",
+      "The relay starts when the Butler module starts or reloads (packages/butler/init.lua:16-30, 88-91).",
+      "Trigger it now with: remuda -e \"remuda.reload('butler')\"",
+      "For the test Butler, run: remuda -s matrix-test -e \"remuda.reload('butler')\"",
+    }
+    return nil, table.concat(lines, "\n")
   end
   if options.default and options.dir then return nil, "--default and --dir cannot be combined" end
 

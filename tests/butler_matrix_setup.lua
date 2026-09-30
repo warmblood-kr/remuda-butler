@@ -197,8 +197,26 @@ return function(matrix)
   local default_paths = { token_path = default_dir .. "/remuda/butler/token",
     config_path = default_dir .. "/remuda/butler/config" }
   remuda._butler_matrix_paths = default_paths
-  rejected({ "--homeserver", "http://matrix.invalid", "--owner", "@alice:example.org",
-    "--bot", "@butler-demo:example.org", "--password-file", password }, "--default")
+  local _, default_refusal = matrix.setup_prepare({ "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--bot", "@butler-demo:example.org", "--password-file", password })
+  local setup_prefix = "remuda butler matrix setup --homeserver 'http://matrix.invalid'"
+    .. " --owner '@alice:example.org' --password-file '" .. password
+    .. "' --bot '@butler-demo:example.org'"
+  assert(default_refusal and default_refusal:find("Nothing was written.", 1, true)
+    and default_refusal:find(setup_prefix .. " --default", 1, true)
+    and default_refusal:find(setup_prefix .. " --dir \"$HOME/.config/remuda/matrix-test\"", 1, true)
+    and default_refusal:find("--dir \"$HOME/.config/remuda/matrix-test\"", 1, true)
+    and default_refusal:find("REMUDA_BUTLER_TOKEN=", 1, true)
+    and default_refusal:find("REMUDA_BUTLER_CONFIG=", 1, true)
+    and default_refusal:find("remuda -s matrix-test daemon", 1, true)
+    and default_refusal:find("packages/butler/init.lua:16-30, 88-91", 1, true)
+    and default_refusal:find("remuda -e \"remuda.reload('butler')\"", 1, true),
+    "default refusal should explain both safe choices and when to start the relay")
+  assert(not default_refusal:find("password-secret", 1, true),
+    "default refusal must not reveal the secret contents")
+  assert(io.open(default_paths.token_path, "rb") == nil
+    and io.open(default_paths.config_path, "rb") == nil,
+    "refused default setup must not write token or config files")
   local default_dir_path = default_paths.config_path:match("^(.*)/[^/]+$")
   remuda.mkdir(default_dir_path:match("^(.*)/[^/]+$"))
   local default_made, default_error = remuda.fs.mkdir_new(default_dir_path)
