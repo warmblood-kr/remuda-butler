@@ -14,6 +14,7 @@ local USAGE = [[  remuda butler matrix [--json] status
   remuda butler matrix [--json] [--room ROOM] redact EVENT_ID [--reason TEXT]
   remuda butler matrix [--json] join ROOM (operator)
   remuda butler matrix [--json] leave ROOM (operator)
+  remuda butler matrix setup [OPTIONS]
   remuda butler matrix [--json] quarantine [--id EVENT_ID] (operator)]]
 
 local VERBS = {
@@ -220,6 +221,17 @@ function matrix.cli_usage()
 end
 
 function matrix.cli(args, agent)
+  if type(args) == "table" and args[1] == "matrix" and args[2] == "setup" then
+    local setup_args = {}
+    for index = 3, #args do setup_args[#setup_args + 1] = args[index] end
+    local plan, setup_error = matrix.setup_prepare(setup_args)
+    if not plan then
+      if type(remuda.fail) == "function" then return remuda.fail(setup_error, 2) end
+      error(setup_error, 0)
+    end
+    if plan.help then return plan.usage end
+    return "Matrix setup inputs validated; no network requests were sent.\n"
+  end
   local ok, verb, options = pcall(parse, args)
   if not ok then
     if type(remuda.fail) == "function" then return remuda.fail(tostring(verb), 2) end
