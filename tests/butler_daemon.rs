@@ -7567,6 +7567,7 @@ while IFS= read -r -s -n1 -d '' c; do
         case "$line" in
           /model) mode=model; cursor=$(index_of "$model") ;;
           /compact) case "$scenario" in forever*) busy="• Compacting" ;; *) ctx=200000 ;; esac ;;
+          /idle) busy="" ;;
           *) printf 'PROMPT:%s\n' "$line" >> "$log" ;;
         esac
         line=''; paint
@@ -7679,10 +7680,26 @@ done
             reports(), capture(&path, "cx-sol"));
         std::thread::sleep(Duration::from_millis(100));
     }
-    let screen = capture(&path, "cx-sol");
-    assert!(screen.contains("GPT-5.6-Sol high"), "the prior model must be restored at the ceiling:\n{screen}");
-    let log = std::fs::read_to_string(dir.join("cx-sol.log")).unwrap_or_default();
-    assert!(log.contains("CMD:/compact\nCMD:/model"), "restore after the compact, session-only: {log}");
+    assert!(reports().contains("the model is restored when the session is idle"), "{}", reports());
+    // Still busy: ticks keep the restore pending and type nothing.
+    let log_of = || std::fs::read_to_string(dir.join("cx-sol.log")).unwrap_or_default();
+    for _ in 0..3 {
+        eval(&path, "return remuda._butler_compaction_tick('cx-sol', false)");
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    assert!(log_of().ends_with("CMD:/compact\n"), "no /model may be typed into a busy pane: {}", log_of());
+    // Idle: a later tick restores the prior model for the session.
+    eval(&path, "remuda.type_text('cx-sol', '/idle')");
+    let deadline = Instant::now() + Duration::from_secs(40);
+    while !capture(&path, "cx-sol").contains("GPT-5.6-Sol high") {
+        assert!(Instant::now() < deadline, "the pending restore never ran once idle. log:\n{}\nscreen:\n{}",
+            log_of(), capture(&path, "cx-sol"));
+        eval(&path, "return remuda._butler_compaction_tick('cx-sol', false)");
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    let log = log_of();
+    assert!(log.contains("CMD:/compact\nCMD:/idle\nCMD:/model"), "restore only after idle: {log}");
+    assert!(log.ends_with("KEY:s\n"), "the restore is session-only: {log}");
     drop(daemon);
 }
 

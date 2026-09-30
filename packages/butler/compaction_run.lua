@@ -707,19 +707,20 @@ function remuda._butler_compaction_execute(session_name, force)
       "Compaction is still running; the fleet lock remains held until this session is idle.")
     state.compaction_still_running_notice_sent = warned and true or false
     -- #158: the monitor holds the fleet lock, so it gives up at a ceiling.
+    -- The pane is still busy there, so no /model is typed: a pending restore
+    -- (state and durable record) stays for the tick to apply once idle.
     local ceiling = config.monitor_ceiling_seconds
-    local give_up_at = os.time() + ceiling
+    local now = remuda._butler_compaction_now or os.time
+    local give_up_at = now() + ceiling
     local monitor_ok, monitor = pcall(remuda.schedule, { every = 1, run = function()
       local found, session = pcall(remuda.session, session_name)
-      if os.time() >= give_up_at then
+      if now() >= give_up_at then
         if state.compaction_monitor then remuda.cancel(state.compaction_monitor) end
         state.compaction_monitor = nil
         state.compaction_still_running_notice_sent = nil
         local reason = "still busy after " .. math.ceil(ceiling / 60) .. " min"
-        local function give_up() fail(reason, "Compaction not confirmed yet") end
-        if agent.kind == "claude" then restore_model(nil, give_up)
-        elseif codex_prior then codex_restore(nil, function() forget_codex_prior(); give_up() end)
-        else give_up() end
+        if state.restore_pending then reason = reason .. "; the model is restored when the session is idle" end
+        fail(reason, "Compaction not confirmed yet")
       elseif not found or not session then
         if state.compaction_monitor then remuda.cancel(state.compaction_monitor) end
         state.compaction_monitor = nil
