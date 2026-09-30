@@ -5658,7 +5658,10 @@ while IFS= read -r line; do
   printf 'CMD:%s\n' "$line" >> "$log"
   case "$line" in
     '')
-      if [ "$scenario" = model-confirm ]; then model='sonnet'; paint; fi
+      if [ "$scenario" = model-confirm ]; then
+        printf 'KEY:RET\n' >> "$log"
+        model='sonnet'; paint
+      fi
       ;;
     '/model sonnet')
       printf 'KEY:RET\n' >> "$log"
@@ -5718,6 +5721,7 @@ done
       local original_capture = remuda.capture
       remuda.capture = function(name)
         local screen = original_capture(name)
+        if name == "fake-model-confirm" then remuda._fake_model_confirm_screen = screen end
         if name == "fake-hang" and remuda._fake_busy[name] ~= true then
           screen = screen:gsub(" esc to interrupt", "")
         end
@@ -6050,8 +6054,12 @@ done
                 std::thread::sleep(Duration::from_millis(50));
             }
             let got = std::fs::read_to_string(&log).unwrap();
-            assert!(got.contains("CMD:/compact\n"), "compaction should follow model confirmation: {got:?}");
+            let screen = eval(&path, "return remuda._fake_model_confirm_screen or ''");
+            let reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
+            assert!(got.contains("CMD:/compact\n"), "compaction should follow model confirmation: {got:?}; screen={screen:?}; reports={reports:?}");
             assert!(got.ends_with("CMD:/model opus\nKEY:RET\n"), "prior model should be restored: {got:?}");
+            assert_eq!(got.matches("KEY:RET\n").count(), 4,
+                "the selected Yes option should be confirmed exactly once: {got:?}");
         }
         if name == "fake-restore-fails" {
             let deadline = Instant::now() + Duration::from_secs(8);
