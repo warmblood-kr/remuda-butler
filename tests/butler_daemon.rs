@@ -4292,8 +4292,10 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
             && traced.contains("launch_failed\tt-claude-launch-unknown") {
             eval(&path, "remuda._butler_notice_clock = nil");
         }
+        // Notices batch: one "Butler message ID ..." or "N new Butler messages".
+        let leader_noticed = log.lines().any(|l| l.starts_with("butler type ") && l.contains("Butler message"));
         if typed == 3 && traced.contains("task_poke_timeout\tt-stuck")
-            && log.contains(" type Butler message ")
+            && leader_noticed
             && eval(&path, "return tostring(remuda._butler_bus.agents['t-claude-launch'] ~= nil)") == "true"
             && eval(&path, "return tostring(remuda._butler_bus.agents['t-claude-launch-transient'] ~= nil)") == "true"
             && eval(&path, "return remuda._butler_sessions()")
@@ -4335,7 +4337,8 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
     assert!(!log.contains("t-stuck "), "typed into an unknown dialog: {log}");
     assert!(std::fs::read_to_string(&trace).unwrap_or_default().contains("Workspace access changed"),
         "launch failure did not preserve the unknown dialog label");
-    assert!(log.contains(" type Butler message "), "the leader is told about t-stuck: {log}");
+    let leader_mail = eval(&path, "local out = {} for _, m in ipairs(remuda._butler_mail.mailbox(remuda._butler_bus.agents[remuda._butler_initial_name].id)) do local b = remuda._butler_bus local msg = b.messages[m] local o = msg and b.objects[msg.body.object_id] out[#out + 1] = o and o.content or '' end return table.concat(out, '\\n')");
+    assert!(leader_mail.contains("Task for t-stuck was not delivered"), "the leader is told about t-stuck: {leader_mail}");
     assert_eq!(log.lines().filter(|l| l.starts_with("t-codex-unanswerable key ")).count(), 0, "an unknown update menu was answered: {log}");
     assert_eq!(log.lines().filter(|l| l.starts_with("t-codex-human key ")).count(), 0, "a human-attached pane was changed: {log}");
     assert_eq!(log.lines().filter(|l| l.starts_with("t-claude-human-trust key ")).count(), 0, "modal keys were pressed after give_up: {log}");
