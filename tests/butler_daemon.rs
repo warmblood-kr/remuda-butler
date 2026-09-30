@@ -3764,6 +3764,87 @@ fn butler_codex_builder_uses_automatic_approval() {
         .any(|pair| pair == ["--status", "/tmp/status"]));
 }
 
+/// Codex folder trust is automatic only for directories Butler created.
+#[test]
+#[cfg(unix)]
+fn butler_codex_trust_dialog_only_auto_trusts_butler_created_directories() {
+    let dir = scratch_dir("butler-codex-trust");
+    let home = dir.join("home");
+    let project_home = dir.join("projects");
+    let existing_dir = project_home.join("existing-trust");
+    std::fs::create_dir_all(&home).expect("test home");
+    std::fs::create_dir_all(&existing_dir).expect("pre-existing topic directory");
+    let daemon = Daemon::spawn_with_home(&dir, &home);
+    let path = daemon::socket_path_in(&dir, "s");
+    eval(
+        &path,
+        r#"remuda._butler_argv = {"sh", "-c", "sleep 30"}; remuda._butler_skip_relay = true"#,
+    );
+    let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let fixture = format!(
+        "{}{}",
+        include_str!("fixtures/codex-trust-dialog.txt").trim_end(),
+        "\n".repeat(8)
+    );
+    eval(
+        &path,
+        &format!(
+            r#"
+          remuda.butler.project_home({project_home:?})
+          remuda._butler_agent_builders.codex = function() return {{"sh", "-c", "sleep 30"}} end
+          remuda._butler_test_force_launch_probe = {{["created-trust"] = true, ["existing-trust"] = true}}
+          local dialog = {fixture:?}
+          local screens = {{["created-trust"] = dialog, ["existing-trust"] = dialog}}
+          local actions, reports = {{}}, {{}}
+          remuda.capture = function(name) return screens[name] or "" end
+          remuda.key = function(name, key)
+            actions[#actions + 1] = name .. " key " .. key
+            if name == "created-trust" and key == "1" then
+              screens[name] = "› Ask Codex to do anything"
+            end
+          end
+          remuda._butler_send = function(_, _, message) reports[#reports + 1] = message end
+          remuda._butler_topic_new("created-trust", nil, "codex")
+          remuda._butler_topic_new("existing-trust", nil, "codex")
+          remuda._codex_trust_actions = actions
+          remuda._codex_trust_reports = reports
+        "#,
+            project_home = project_home.to_string_lossy(),
+            fixture = fixture,
+        ),
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let actions = eval(&path, "return table.concat(remuda._codex_trust_actions, '\\n')");
+        let reports = eval(&path, "return table.concat(remuda._codex_trust_reports, '\\n')");
+        let ready = eval(&path, "return tostring(remuda._butler_bus.agents['created-trust'] ~= nil and remuda._butler_bus.agents['existing-trust'] ~= nil)");
+        if ready == "true" && reports.contains(&existing_dir.to_string_lossy().to_string()) {
+            assert!(
+                actions.lines().any(|line| line == "created-trust key 1"),
+                "a Butler-created directory should select Trust and continue; actions={actions:?}; reports={reports:?}"
+            );
+            assert!(
+                !actions.lines().any(|line| line.starts_with("existing-trust key ")),
+                "an existing directory must not receive a key: {actions:?}"
+            );
+            assert!(
+                reports.contains("waiting for a human: trust dialog in"),
+                "the pre-existing directory should alert its leader: {reports:?}"
+            );
+            break;
+        }
+        assert!(Instant::now() < deadline, "Codex trust launch did not settle: actions={actions:?}; reports={reports:?}; ready={ready}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    drop(daemon);
+}
+
 /// A delegated task must survive the agent's startup dialogs: Butler answers
 /// each kind's known modals (agents/*.lua) and types the task only once the
 /// composer is ready. Screens are real captures (Claude's workspace-trust
