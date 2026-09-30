@@ -51,11 +51,14 @@ remuda butler matrix [--json] leave ROOM
 remuda butler matrix [--json] quarantine [--id EVENT_ID]
 ```
 
-`event` and `get` are aliases for the same read. `rooms` is read-only. The
-configured HOME and ALL-BUTLERS rooms are the security boundary: no verb adds a
-room to them or widens the allowlist. Change the config explicitly to use
-different rooms. The
-`send -` stdin form is unsupported until core #213.
+`event` and `get` are aliases for the same read. `rooms` lists the configured
+HOME, ALL-BUTLERS, and joined rooms with how each room was added. The config
+file remains the single room boundary: an invite from an allowlisted human
+owner adds `room=ROOM_ID how=owner-invite`, and operator `join` adds
+`room=ROOM_ID how=operator`. Invites from other senders are not joined and are
+reported to HOME; joined rooms use the HOME sender rules. `leave` removes a
+joined room, while HOME and ALL-BUTLERS cannot be removed. The `send -` stdin
+form is unsupported until core #213.
 
 `join` and `leave` change room membership and are operator-only. Until core
 #218 enforces caller identity, this is best-effort policy: another local

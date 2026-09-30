@@ -143,12 +143,26 @@ local function terminal_safe(value)
   return tostring(value or ""):gsub("[%c]", " "):gsub("\194[\128-\159]", " ")
 end
 
+local function shell_quote(value)
+  return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
+end
+
 local function render_human(verb, options, result)
   local data = result.json or result
   if verb == "rooms" then
-    local rooms = data.joined_rooms or {}
-    if #rooms == 0 then return "No joined Matrix rooms\n" end
-    return table.concat(rooms, "\n") .. "\n"
+    local rooms, lines, leave_room = data.rooms or {}, {}, nil
+    for _, item in ipairs(rooms) do
+      lines[#lines + 1] = terminal_safe(item.room) .. "  "
+        .. terminal_safe(item.kind) .. "  " .. terminal_safe(item.how)
+      if item.kind == "joined" and not leave_room then leave_room = item.room end
+    end
+    if #lines == 0 then lines[#lines + 1] = "No configured Matrix rooms" end
+    if leave_room then
+      lines[#lines + 1] = "Next: remuda butler matrix leave " .. shell_quote(terminal_safe(leave_room))
+    else
+      lines[#lines + 1] = "Next: invite the bot to a room as an allowlisted owner."
+    end
+    return table.concat(lines, "\n") .. "\n"
   elseif verb == "status" then
     local rooms = data.joined_rooms or {}
     return table.concat({ "User: " .. tostring(data.user_id or "unknown"),
@@ -186,7 +200,8 @@ local function render_human(verb, options, result)
   elseif verb == "upload" then
     return "Uploaded as " .. tostring(result.content_uri or "") .. " (" .. tostring(result.event_id or "") .. ")\n"
   elseif verb == "join" or verb == "leave" then
-    return (verb == "join" and "Joined " or "Left ") .. tostring(options.room or "the Matrix room") .. "\n"
+    return (verb == "join" and "Joined " or "Left ") .. terminal_safe(options.room or "the Matrix room")
+      .. "\nNext: remuda butler matrix rooms\n"
   end
   return (matrix.encode_json(result) or "{}") .. "\n"
 end
@@ -196,7 +211,10 @@ local function finish(reply, cancelled, completed, verb, options, result)
   completed.value = true
   if type(result) ~= "table" then result = { error = "Matrix command returned no result" } end
   if result.error then
-    return reply:resolve(1, "", tostring(result.error) .. "\n")
+    local message = tostring(result.error)
+    if verb == "join" or verb == "leave" then message = message .. "\nNext: remuda butler matrix rooms" end
+    if verb == "rooms" then message = message .. "\nNext: remuda butler matrix setup" end
+    return reply:resolve(1, "", message .. "\n")
   end
   if verb == "reply" and result.event_ids and #result.event_ids > 0 then
     local relay = matrix.relay and matrix.relay.instance

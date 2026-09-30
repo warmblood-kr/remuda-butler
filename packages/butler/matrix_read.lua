@@ -24,11 +24,19 @@ local function json_get(path, room, callback, extras)
 end
 
 function matrix.rooms(args, callback)
-  return json_get("/_matrix/client/v3/joined_rooms", nil, function(result)
-    if result.error then return callback(result) end
-    local body = result.json or {}
-    callback({ status = result.status, json = { joined_rooms = body.joined_rooms or {} } })
-  end)
+  local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths or {}
+  if type(paths.config_path) ~= "string" or paths.config_path == "" then
+    return done_error(callback, "Matrix config path is unavailable")
+  end
+  local conf, err = matrix.read_config(paths.config_path)
+  if not conf then return done_error(callback, err) end
+  local rooms = {}
+  for room, kind in pairs(conf.rooms) do
+    rooms[#rooms + 1] = { room = room, kind = kind,
+      how = conf.room_how[room] or "config" }
+  end
+  table.sort(rooms, function(a, b) return a.room < b.room end)
+  return callback({ rooms = matrix.json_array(rooms) })
 end
 
 function matrix.status(args, callback)
