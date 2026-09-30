@@ -28,6 +28,53 @@ local function read_file(path, what)
   return value
 end
 
+local function file_readable(path)
+  if type(path) ~= "string" or path == "" then return false end
+  local file = io.open(path, "rb")
+  if not file then return false end
+  file:close()
+  return true
+end
+
+local function shell_quote(value)
+  return "'" .. value:gsub("'", "'\\''") .. "'"
+end
+
+local function shown_path(path, override)
+  if type(path) == "string" and path ~= "" then return path end
+  return "<unresolved; set " .. override .. " or HOME/XDG_CONFIG_HOME>"
+end
+
+function matrix.configuration_guidance()
+  local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths or {}
+  local token_path, config_path = paths.token_path, paths.config_path
+  local missing = {}
+  if not file_readable(token_path) then
+    missing[#missing + 1] = "  Missing token file: " .. shown_path(token_path, "REMUDA_BUTLER_TOKEN")
+  end
+  if not file_readable(config_path) then
+    missing[#missing + 1] = "  Missing config file: " .. shown_path(config_path, "REMUDA_BUTLER_CONFIG")
+  end
+  if #missing == 0 then return nil end
+
+  local token_display = type(token_path) == "string" and token_path ~= "" and shell_quote(token_path) or "<token-path>"
+  local config_display = type(config_path) == "string" and config_path ~= "" and shell_quote(config_path) or "<config-path>"
+  local lines = {
+    "Matrix setup is incomplete; resolved paths use REMUDA_BUTLER_TOKEN/REMUDA_BUTLER_CONFIG or the XDG default:",
+    table.concat(missing, "\n"),
+    "Minimal config example (one item per line):",
+    "  https://<homeserver-url>",
+    "  !<room-id>:<server-name>",
+    "  @<your-user>:<server-name>",
+    "  @<allowed-sender>:<server-name>",
+    "Lines 1-4 are homeserver URL, room ID, own MXID, and comma-separated allowed senders.",
+    "Further config lines are optional; see docs/butler.md.",
+    "Protect both files: chmod 600 " .. token_display .. " " .. config_display,
+    "Next: create both files, then run: remuda butler matrix status",
+  }
+  return table.concat(lines, "\n")
+end
+
 -- The request client and inbound relay must interpret the same on-disk
 -- settings. Normalize every line here so CRLF and surrounding whitespace do
 -- not change room or sender authorization decisions.
@@ -104,10 +151,10 @@ function matrix.read_config(path)
 end
 
 local function config()
-  local paths = remuda._butler_matrix_config
-  if not paths or not paths.token_path or not paths.config_path then
-    return nil, "Matrix is not configured"
-  end
+  local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths
+  local guidance = matrix.configuration_guidance()
+  if guidance then return nil, guidance end
+  if not paths or not paths.token_path or not paths.config_path then return nil, "Matrix is not configured" end
   local token, token_error = read_file(paths.token_path, "token")
   if not token then return nil, token_error end
   token = trim(token)

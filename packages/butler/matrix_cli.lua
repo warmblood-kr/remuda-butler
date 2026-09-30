@@ -226,6 +226,13 @@ function matrix.cli(args, agent)
     error(tostring(verb), 0)
   end
   if not verb then return USAGE end
+  if verb ~= "join" and verb ~= "leave" and type(matrix.configuration_guidance) == "function" then
+    local guidance = matrix.configuration_guidance()
+    if guidance then
+      if type(remuda.fail) == "function" then return remuda.fail(guidance, 1) end
+      error(guidance, 0)
+    end
+  end
   if type(remuda.pending) ~= "function" then
     local message = "Matrix CLI requires a remuda core with deferred replies (core #213/#239)"
     if type(remuda.fail) == "function" then return remuda.fail(message, 1) end
