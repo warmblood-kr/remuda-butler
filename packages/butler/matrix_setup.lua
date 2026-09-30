@@ -4,9 +4,11 @@ local matrix = assert(remuda.butler and remuda.butler.matrix, "Matrix request wo
 local USAGE = [[Usage: remuda butler matrix setup [OPTIONS]
   --homeserver URL       Your Matrix server address, like https://matrix.example.org.
   --owner ID             Your Matrix user ID, like @alice:example.org (in Element: click your avatar, top left).
-  --password-file PATH   Read the bot account password from this file.
+  --password-file PATH   Use this chosen bot password; with --register it is saved privately. If omitted, one is generated and saved privately.
   --bot ID               The bot's Matrix user ID, like @butler-home:example.org (the account setup logs in as).
   --token-file PATH      Use an existing access token from this file instead of a password.
+  --register             Create the bot account on a server that allows registration tokens.
+  --registration-token-file PATH  Read the homeserver registration token from this file (ask the server admin; this is not a bot access token).
   --dir PATH             Save the private token and config files in this directory.
   --default              Save to the default live Butler config directory.
   --force                Replace existing token or config files.
@@ -14,7 +16,7 @@ local USAGE = [[Usage: remuda butler matrix setup [OPTIONS]
   --pin SHA256HEX         Trust this HTTPS certificate fingerprint.
   --ca-file PATH         Trust the HTTPS certificate authority in this file.
 
-Example: remuda butler matrix setup --homeserver https://matrix.example.org --owner @alice:example.org --bot @butler-home:example.org --password-file /path/to/password --dir /path/to/private/butler --pin <64-hex-sha256>]]
+Example: remuda butler matrix setup --homeserver https://matrix.example.org --owner @alice:example.org --register --registration-token-file /path/to/server-registration-token --dir /path/to/private/butler --pin <64-hex-sha256>]]
 
 local function absolute(path)
   return type(path) == "string" and (path:sub(1, 1) == "/" or path:match("^%a:[/\\]") ~= nil)
@@ -130,6 +132,7 @@ local function setup_command(options, destination)
   if options.secret_kind == "registration" then
     parts[#parts + 1] = "--register"
     add("--registration-token-file", options.secret_path)
+    if options.password_input_path then add("--password-file", options.password_input_path) end
     add("--bot", options.bot_mxid)
   elseif options.secret_kind == "password" then
     add("--password-file", options.secret_path)
@@ -321,8 +324,8 @@ function matrix.setup_prepare(args)
   local has_password, has_token, has_registration = options.password_file ~= nil,
     options.token_file ~= nil, options.registration_token_file ~= nil
   if options.register then
-    if has_password or has_token then
-      return nil, "--register uses --registration-token-file; choose one setup method"
+    if has_token then
+      return nil, "--register creates a bot; use --registration-token-file instead of --token-file"
     end
     if not has_registration then return nil, "--register requires --registration-token-file" end
   elseif has_registration then
@@ -334,10 +337,20 @@ function matrix.setup_prepare(args)
   end
   options.secret_kind = options.register and "registration"
     or (options.password_file and "password" or "token")
-  options.secret_path = options.password_file or options.token_file or options.registration_token_file
+  options.secret_path = options.register and options.registration_token_file
+    or options.password_file or options.token_file
   local secret_ok, secret_error = validate_secret(options.secret_path, options.secret_kind)
   if not secret_ok then return nil, secret_error end
   options.secret = secret_ok
+  if options.register and options.password_file then
+    if options.password_file == options.registration_token_file then
+      return nil, "use separate files for the bot password and the homeserver registration token"
+    end
+    local chosen_password, password_error = validate_secret(options.password_file, "password")
+    if not chosen_password then return nil, password_error end
+    options.password_secret = chosen_password
+    options.password_input_path = options.password_file
+  end
 
   if options.register and not options.bot_mxid then
     local hostname = os.getenv("HOSTNAME") or os.getenv("COMPUTERNAME") or ""
@@ -527,7 +540,7 @@ function matrix.setup_network(options, on_done)
       whoami(response.access_token)
     end)
   elseif options.secret_kind == "registration" then
-    registration_password = new_password()
+    registration_password = options.password_secret or new_password()
     if not registration_password then
       return fail("This system has no secure random source for a bot password. Next: rerun with --password-file PATH (a password you choose)")
     end

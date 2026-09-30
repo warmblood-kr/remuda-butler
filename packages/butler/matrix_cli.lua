@@ -252,12 +252,14 @@ function matrix.cli(args, agent)
       active = matrix.status({}, function(status_result)
         if cancelled.value then return end
         if type(status_result) ~= "table" then status_result = { error = "Matrix status returned no result" } end
-        local lines = { "Matrix login verified as " .. terminal_safe(result.user_id) }
+        local lines = { plan.secret_kind == "registration"
+          and ("Created bot account " .. terminal_safe(result.user_id))
+          or ("Matrix login verified as " .. terminal_safe(result.user_id)) }
         if result.home_room then lines[#lines + 1] = "HOME room: " .. terminal_safe(result.home_room) end
         if result.all_room then lines[#lines + 1] = "ALL-BUTLERS room: " .. terminal_safe(result.all_room) end
         lines[#lines + 1] = "Token file: " .. terminal_safe(files.token_path)
         if files.password_path then
-          lines[#lines + 1] = "Bot password file: " .. terminal_safe(files.password_path)
+          lines[#lines + 1] = "Bot account password saved privately: " .. terminal_safe(files.password_path)
         end
         lines[#lines + 1] = "Config file: " .. terminal_safe(files.config_path)
         if status_result.error then
@@ -265,9 +267,7 @@ function matrix.cli(args, agent)
         else
           lines[#lines + 1] = "Status: " .. terminal_safe(render_human("status", {}, status_result):gsub("\n", "; "):gsub("; $", ""))
         end
-        lines[#lines + 1] = "Next: accept the invite on your phone and say hi"
-        lines[#lines + 1] = plan.secret_kind == "password"
-          and "Next: delete the password file" or "Next: delete the token input file"
+        lines[#lines + 1] = "Next: Accept the invite in Element, then write in the room."
         reply:resolve(0, table.concat(lines, "\n") .. "\n", "")
       end, agent)
     end

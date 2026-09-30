@@ -10,6 +10,9 @@ return function(matrix)
     and setup_help:find("Your Matrix server address", 1, true)
     and setup_help:find("in Element: click your avatar, top left", 1, true)
     and setup_help:find("the account setup logs in as", 1, true)
+    and setup_help:find("--register", 1, true)
+    and setup_help:find("homeserver registration token", 1, true)
+    and setup_help:find("generated and saved privately", 1, true)
     and setup_help:find("Example: remuda butler matrix setup", 1, true),
     "setup usage should explain each option in plain words and show a full example")
   assert(matrix.cli_usage():find("Example:", 1, true)
@@ -96,6 +99,15 @@ return function(matrix)
     and registration_plan.bot_mxid == "@butler-demo:example.org"
     and registration_plan.password_path == output .. "/password",
     "--register should validate the homeserver token and reserve a private password output path")
+  local chosen_password_plan = matrix.setup_prepare({ "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--register", "--registration-token-file",
+    registration_token_file, "--password-file", password, "--bot", "@butler-demo:example.org",
+    "--dir", output })
+  assert(chosen_password_plan and chosen_password_plan.secret_kind == "registration"
+    and chosen_password_plan.secret == "homeserver-registration-token"
+    and chosen_password_plan.password_secret == "password-secret"
+    and chosen_password_plan.password_path == output .. "/password",
+    "--register should accept a chosen password file while preserving the registration token separately")
   local default_registration = matrix.setup_prepare({ "--homeserver", "http://matrix.invalid",
     "--owner", "@alice:example.org", "--register", "--registration-token-file",
     registration_token_file, "--dir", output })
@@ -496,6 +508,63 @@ return function(matrix)
   os.remove(registration_output .. "/config")
   os.remove(registration_output)
 
+  local chosen_output = root .. "/chosen-password-output"
+  assert(remuda.fs.mkdir_new(chosen_output))
+  local chosen_status = matrix.status
+  matrix.status = function(_, callback)
+    assert(read(chosen_output .. "/password") == "password-secret\n"
+      and read(chosen_output .. "/token") == "chosen-access-token\n",
+      "chosen password and access token should be saved before status")
+    callback({ status = 200, json = { user_id = "@butler-chosen:example.org",
+      joined_rooms = { "!chosen-home:example.org" } } })
+    return { cancel = function() end }
+  end
+  local secure_random_attempts = 0
+  io.open = function(path, mode)
+    if path == "/dev/urandom" then
+      secure_random_attempts = secure_random_attempts + 1
+      return nil, "chosen password should not need generated randomness"
+    end
+    return real_io_open(path, mode)
+  end
+  requests, resolved = {}, nil
+  local chosen_reply = matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--register", "--registration-token-file",
+    registration_token_file, "--password-file", password, "--bot", "@butler-chosen:example.org",
+    "--dir", chosen_output })
+  assert(chosen_reply and #requests == 1 and requests[1].url:match("/register$"))
+  local chosen_initial = request_json(requests[1])
+  assert(chosen_initial.password == "password-secret" and chosen_initial.username == "butler-chosen",
+    "--register --password-file should submit the caller's chosen password")
+  requests[1].callback({ status = 401,
+    body = '{"session":"chosen-session","flows":[{"stages":["m.login.registration_token"]}]}' })
+  local chosen_auth = request_json(requests[2])
+  assert(chosen_auth.password == "password-secret"
+    and chosen_auth.auth.token == "homeserver-registration-token"
+    and chosen_auth.auth.session == "chosen-session")
+  requests[2].callback({ status = 200,
+    body = '{"access_token":"chosen-access-token","user_id":"@butler-chosen:example.org"}' })
+  requests[3].callback({ status = 200, body = '{"user_id":"@butler-chosen:example.org"}' })
+  requests[4].callback({ status = 200, body = '{"room_id":"!chosen-home:example.org"}' })
+  assert(resolved and resolved.status == 0
+    and resolved.stdout:find("Next: Accept the invite in Element, then write in the room.", 1, true)
+    and not resolved.stdout:find("password-secret", 1, true)
+    and not resolved.stdout:find("homeserver-registration-token", 1, true)
+    and not resolved.stdout:find("chosen-access-token", 1, true)
+    and read(chosen_output .. "/password") == "password-secret\n"
+    and secure_random_attempts == 0,
+    "chosen-password registration should save privately, avoid secrets in output, and print a real next step")
+  assert(#atomic_writes == 3 and atomic_writes[1].private
+    and atomic_writes[2].private and atomic_writes[3].private,
+    "chosen password, token, and config must all use private atomic writes")
+  io.open = real_io_open
+  matrix.status = chosen_status
+  requests, resolved, atomic_writes = {}, nil, {}
+  os.remove(chosen_output .. "/token")
+  os.remove(chosen_output .. "/password")
+  os.remove(chosen_output .. "/config")
+  os.remove(chosen_output)
+
   local collision_plan = matrix.setup_prepare({ "--homeserver", "http://matrix.invalid",
     "--owner", "@alice:example.org", "--register", "--registration-token-file",
     registration_token_file, "--bot", "@butler-busy:example.org", "--dir", root .. "/collision-output" })
@@ -552,8 +621,8 @@ return function(matrix)
   assert(resolved and resolved.status == 0 and resolved.stdout:find("!home:example.org", 1, true)
     and resolved.stdout:find("!all:example.org", 1, true)
     and resolved.stdout:find("Status: User: @butler-demo:example.org; Joined rooms: 2", 1, true)
-    and resolved.stdout:find("Next: accept the invite on your phone and say hi", 1, true)
-    and resolved.stdout:find("Next: delete the password file", 1, true)
+    and resolved.stdout:find("Next: Accept the invite in Element, then write in the room.", 1, true)
+    and not resolved.stdout:find("Next: delete", 1, true)
     and not resolved.stdout:find("password-secret", 1, true)
     and not resolved.stdout:find("temporary-access-token", 1, true),
     "setup CLI output must report saved rooms without secrets")
