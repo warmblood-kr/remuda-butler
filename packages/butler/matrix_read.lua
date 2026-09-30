@@ -23,7 +23,42 @@ local function json_get(path, room, callback, extras)
   return matrix.request_json(request, callback)
 end
 
-function matrix.rooms(args, callback)
+function matrix.rooms(args, callback, agent)
+  args = args or {}
+  if args.public then
+    if agent then
+      return done_error(callback, "matrix rooms is operator-only (advisory at the same UID until core #218)")
+    end
+    local term = args.public_term
+    local body_args = { limit = 20 }
+    if term ~= nil then body_args.filter = { generic_search_term = term } end
+    local body, encode_error = matrix.encode_json(body_args)
+    if not body then return done_error(callback, encode_error) end
+    return matrix.request_json({ method = "POST", path = "/_matrix/client/v3/publicRooms",
+      body = body, headers = { ["Content-Type"] = "application/json" },
+    }, function(result)
+      if result.error then return callback(result) end
+      local sanitize = matrix.sanitize_directory_text
+      local rows = {}
+      for _, item in ipairs((result.json or {}).chunk or {}) do
+        if #rows >= 20 then break end
+        if type(item) == "table" and type(matrix.valid_room_id) == "function"
+          and matrix.valid_room_id(item.room_id) then
+          local alias = item.canonical_alias
+          if type(matrix.valid_room_alias) ~= "function" or not matrix.valid_room_alias(alias)
+            or sanitize(alias) ~= alias then alias = nil end
+          local members = tonumber(item.num_joined_members)
+          if not members or members < 0 or members ~= math.floor(members) then members = 0 end
+          rows[#rows + 1] = {
+            name = sanitize(item.name), alias = alias and sanitize(alias) or nil,
+            members = members, room_id = sanitize(item.room_id),
+            topic = sanitize(item.topic),
+          }
+        end
+      end
+      callback({ status = 200, json = { public = true, public_rooms = matrix.json_array(rows) } })
+    end)
+  end
   local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths or {}
   if type(paths.config_path) ~= "string" or paths.config_path == "" then
     return done_error(callback, "Matrix config path is unavailable")
@@ -32,7 +67,7 @@ function matrix.rooms(args, callback)
   if not conf then return done_error(callback, err) end
   local rooms = {}
   for room, kind in pairs(conf.rooms) do
-    rooms[#rooms + 1] = { room = room, kind = kind,
+    rooms[#rooms + 1] = { room = room, alias = conf.room_aliases[room], kind = kind,
       how = conf.room_how[room] or "config" }
   end
   local order = { home = 1, all = 2, joined = 3 }

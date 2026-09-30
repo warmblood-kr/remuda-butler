@@ -62,15 +62,21 @@ relay alone. Start that Butler with
 replacing `PATH` with the chosen directory.
 
 `event` and `get` are aliases for the same read.
-The `remuda butler matrix rooms` command lists configured rooms and how each was added; server-side memberships show in `remuda butler matrix status`.
+The `remuda butler matrix rooms` command lists configured rooms, saved aliases,
+and how each room was added; server-side memberships show in
+`remuda butler matrix status`. Use `remuda butler matrix rooms --public [TERM]`
+to browse up to 20 public rooms, optionally filtered by a search term.
 The config file remains the
 single room boundary: an invite from an allowlisted human
 owner adds `room=ROOM_ID how=owner-invite`, and operator `join` adds
-`room=ROOM_ID how=operator`. Invites from other senders are not joined and are
+`room=ROOM_ID how=operator`. Operators can join with a room ID, `#alias:server`,
+or a public room name. An alias is saved as a display label on the room line;
+it does not grant trust. A public name joins only when exactly one public room
+matches; multiple matches are listed for the operator to choose from. Invites from other senders are not joined and are
 reported to HOME; joined rooms use the HOME sender rules. The inviter check
 relies on the homeserver appending the real invite event to `invite_state`
 (Synapse does). `leave` removes a
-joined room, while HOME and ALL-BUTLERS cannot be left or removed. The
+joined room by ID or alias, while HOME and ALL-BUTLERS cannot be left or removed. The
 `send -` stdin form is unsupported until core #213.
 
 `join` and `leave` change room membership and are operator-only. Until core
