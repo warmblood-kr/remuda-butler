@@ -66,6 +66,30 @@ return function(matrix)
     for _, value in ipairs(extra or {}) do values[#values + 1] = value end
     return values
   end
+  write(token, "access-token-secret")
+  local function written_room_config(room_mode, destination)
+    local values = { "--homeserver", "http://matrix.invalid", "--owner", "@alice:example.org",
+      "--token-file", token, "--bot", "@butler-demo:example.org", "--dir", destination }
+    if room_mode then
+      values[#values + 1] = "--rooms"
+      values[#values + 1] = room_mode
+    end
+    local plan, prepare_error = matrix.setup_prepare(values)
+    assert(plan, "room policy setup should validate: " .. tostring(prepare_error))
+    assert(plan.rooms_mode == (room_mode or "allowlist"), "room policy should default to allowlist")
+    local files, write_error = matrix.setup_write(plan, {
+      token = "created-access-token", user_id = "@butler-demo:example.org", home_room = "!home:example.org",
+    })
+    assert(files, "room policy setup should write its config: " .. tostring(write_error))
+    return read(files.config_path)
+  end
+  local default_rooms_config = written_room_config(nil, root .. "/default-rooms")
+  assert(not default_rooms_config:find("rooms=", 1, true),
+    "default allowlist policy should preserve the legacy config without a rooms line")
+  local open_rooms_config = written_room_config("open", root .. "/open-rooms")
+  assert(open_rooms_config:find("\nrooms=open\n", 1, true),
+    "open room policy should serialize as rooms=open")
+  mkdir_calls = 0
   local function rejected(values, fragment)
     local plan, err = matrix.setup_prepare(values)
     assert(not plan and tostring(err):find(fragment, 1, true),
@@ -207,6 +231,8 @@ return function(matrix)
     { "--bot", "@butler-demo:example.org", "--token-file", token }), "choose one")
   rejected(args("--password-file", password,
     { "--bot", "@butler-demo:example.org", "--mystery" }), "unknown option")
+  rejected(args("--password-file", password,
+    { "--bot", "@butler-demo:example.org", "--rooms", "anyone" }), "rooms must be open or allowlist")
   rejected(args("--password-file", password,
     { "--bot", "not-an-mxid" }), "--bot 'not-an-mxid' is not a Matrix user ID")
   rejected({ "--homeserver", "https://matrix.invalid", "--owner", "@alice:example.org",
@@ -382,13 +408,19 @@ return function(matrix)
   local prompt_specs = {}
   local line_specs = {}
   local pending_timeout
+  local capture_rooms_prompt = true
   remuda.pending = function(options)
     pending_timeout = options and options.timeout
     local reply = { resolve = function(_, status, stdout, stderr)
       resolved = { status = status, stdout = stdout, stderr = stderr }
     end }
     function reply:prompt_secret(spec) prompt_specs[#prompt_specs + 1] = spec end
-    function reply:prompt_line(spec) line_specs[#line_specs + 1] = spec end
+    function reply:prompt_line(spec)
+      if spec.label == "Room access (allowlist or open) [allowlist]:" and not capture_rooms_prompt then
+        return spec.callback(spec.default, nil)
+      end
+      line_specs[#line_specs + 1] = spec
+    end
     return reply
   end
   requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
@@ -401,17 +433,23 @@ return function(matrix)
     and line_specs[2].label == "Your Matrix user ID (for example @alice:example.org):",
     "the wizard should ask for the owner after the homeserver")
   line_specs[2].callback("@alice:example.org", nil)
-  assert(#line_specs == 3 and line_specs[3].label:find("Continue? Type Y", 1, true)
-    and line_specs[3].label:find("Bot: @butler%-")
-    and line_specs[3].label:find("replaces its current Matrix relay config", 1, true),
+  assert(#line_specs == 3 and line_specs[3].label == "Room access (allowlist or open) [allowlist]:"
+    and line_specs[3].default == "allowlist",
+    "the wizard should ask for a room policy and default to allowlist")
+  line_specs[3].callback("open", nil)
+  assert(#line_specs == 4 and line_specs[4].label:find("Continue? Type Y", 1, true)
+    and line_specs[4].label:find("Bot: @butler%-")
+    and line_specs[4].label:find("Room access: open", 1, true)
+    and line_specs[4].label:find("replaces its current Matrix relay config", 1, true),
     "the wizard should summarize validated details and ask for confirmation")
-  assert(line_specs[3].default == "N", "wizard confirmation should default to no")
-  line_specs[3].callback("n", nil)
+  assert(line_specs[4].default == "N", "wizard confirmation should default to no")
+  line_specs[4].callback("n", nil)
   assert(resolved and resolved.status == 1 and resolved.stderr:find("Nothing was written.", 1, true)
     and select(2, resolved.stderr:gsub("Next:", "")) == 1
     and #requests == 0 and #prompt_specs == 0,
     "declining the summary should stop before registration or network work")
 
+  capture_rooms_prompt = false
   requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
   wizard_reply = matrix.cli({ "matrix", "setup" })
   line_specs[1].callback("http://matrix.invalid", nil)

@@ -376,6 +376,7 @@ function matrix.cli(args, agent)
               "Matrix setup will:",
               "  Homeserver: " .. terminal_safe(wizard_plan.homeserver),
               "  Owner: " .. terminal_safe(wizard_plan.owner_mxid),
+              "  Room access: " .. terminal_safe(wizard_plan.rooms_mode),
               "  Account: create a Butler bot (you will need its server registration token)",
               "  Bot: " .. terminal_safe(wizard_plan.bot_mxid),
               "  Save private token and config files in: " .. terminal_safe(wizard_plan.output_dir),
@@ -395,24 +396,36 @@ function matrix.cli(args, agent)
                 execute_setup(wizard_plan)
               end)
           end
-          if scheme_or_error == "https" then
-            prompt_line("HTTPS trust: enter a 64-character SHA-256 certificate pin or an absolute CA file path:",
-              nil, function(trust)
-                if type(trust) ~= "string" then
-                  return prompt_failure("The HTTPS trust answer must be a certificate pin or CA file path.")
-                end
-                if #trust == 64 and trust:match("^%x+$") then
-                  flags[#flags + 1] = "--pin"
-                  flags[#flags + 1] = trust
-                else
-                  flags[#flags + 1] = "--ca-file"
-                  flags[#flags + 1] = trust
-                end
-                confirm_setup()
-              end)
-          else
-            confirm_setup()
+          local function ask_transport_trust()
+            if scheme_or_error == "https" then
+              prompt_line("HTTPS trust: enter a 64-character SHA-256 certificate pin or an absolute CA file path:",
+                nil, function(trust)
+                  if type(trust) ~= "string" then
+                    return prompt_failure("The HTTPS trust answer must be a certificate pin or CA file path.")
+                  end
+                  if #trust == 64 and trust:match("^%x+$") then
+                    flags[#flags + 1] = "--pin"
+                    flags[#flags + 1] = trust
+                  else
+                    flags[#flags + 1] = "--ca-file"
+                    flags[#flags + 1] = trust
+                  end
+                  confirm_setup()
+                end)
+            else
+              confirm_setup()
+            end
           end
+          prompt_line("Room access (allowlist or open) [allowlist]:", "allowlist", function(room_mode)
+            room_mode = type(room_mode) == "string" and room_mode:lower() or ""
+            if room_mode ~= "open" and room_mode ~= "allowlist" then
+              return prompt_failure("Room access must be open or allowlist.")
+            end
+            if room_mode == "open" then
+              flags[#flags + 1], flags[#flags + 2] = "--rooms", "open"
+            end
+            ask_transport_trust()
+          end)
         end)
       end)
     end

@@ -152,6 +152,7 @@ local function setup_command(options, destination)
   if options.create_all then parts[#parts + 1] = "--all" end
   if options.pin then add("--pin", options.pin) end
   if options.ca_file then add("--ca-file", options.ca_file) end
+  if options.rooms_mode == "open" then add("--rooms", "open") end
   if destination == "default" then
     parts[#parts + 1] = "--default"
   else
@@ -294,6 +295,7 @@ local VALUE_OPTIONS = {
   ["--password-file"] = "password_file", ["--token-file"] = "token_file",
   ["--registration-token-file"] = "registration_token_file",
   ["--dir"] = "dir", ["--pin"] = "pin", ["--ca-file"] = "ca_file",
+  ["--rooms"] = "rooms_mode",
 }
 
 function matrix.setup_usage()
@@ -328,6 +330,11 @@ function matrix.setup_prepare(args)
     else
       return nil, "unexpected setup argument " .. name
     end
+  end
+
+  options.rooms_mode = options.rooms_mode or "allowlist"
+  if options.rooms_mode ~= "open" and options.rooms_mode ~= "allowlist" then
+    return nil, "rooms must be open or allowlist"
   end
 
   local homeserver, scheme_or_error = valid_url(options.homeserver)
@@ -780,6 +787,7 @@ function matrix.setup_write(options, result)
     options.homeserver, result.home_room, result.user_id, options.owner_mxid, "", "30000",
   }
   if result.all_room then config_lines[#config_lines + 1] = "all_room=" .. result.all_room end
+  if options.rooms_mode == "open" then config_lines[#config_lines + 1] = "rooms=open" end
   if options.pin then config_lines[#config_lines + 1] = "pin_sha256=" .. options.pin end
   if options.ca_file then config_lines[#config_lines + 1] = "ca_file=" .. options.ca_file end
   contents[options.config_path] = table.concat(config_lines, "\n") .. "\n"
