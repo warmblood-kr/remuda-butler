@@ -1,0 +1,10 @@
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ Switch model mid-conversation?                                              │
+│                                                                              │
+│ Claude Code may change behavior when switching models.                      │
+│                                                                              │
+│ ❯ 1. Yes                                                                     │
+│   2. No, go back                                                             │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+Enter to confirm · Esc to cancel

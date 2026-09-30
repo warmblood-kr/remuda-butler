@@ -283,13 +283,17 @@ local function numbered_option(line)
   end
   return trimmed:match("^(%d+)[%.)]%s*(.-)%s*$"), trimmed:match("^%d+[%.)]%s*(.-)%s*$")
 end
-function remuda._butler_compaction_is_unknown_dialog(screen)
-  if type(screen) ~= "string" then return false end
+local function bottom_screen_lines(screen, limit)
   local lines = {}
   for line in (screen .. "\n"):gmatch("(.-)\n") do
     lines[#lines + 1] = line
-    if #lines > 8 then table.remove(lines, 1) end
+    if #lines > limit then table.remove(lines, 1) end
   end
+  return lines
+end
+function remuda._butler_compaction_is_unknown_dialog(screen)
+  if type(screen) ~= "string" then return false end
+  local lines = bottom_screen_lines(screen, 8)
   local top_border, bottom_border, selected_option, option_line, prompt_line = false, false, false, nil, nil
   for i, line in ipairs(lines) do
     local trimmed = line:gsub("^%s+", "")
@@ -3671,9 +3675,36 @@ function remuda._butler_compaction_execute(session_name, force)
     return true
   end
   local function wait_for(id, matcher, action, timeout, on_timeout)
-    local ok, handle = pcall(remuda.expect, session_name, {
-      { id = id, match = matcher, action = action },
-    }, { timeout = timeout, unknown = remuda._butler_compaction_is_unknown_dialog,
+    local branches = { { id = id, match = matcher, action = action } }
+    if agent.kind == "claude" and (id == "model-sonnet" or id == "model-restored") then
+      local confirmation_sent = false
+      table.insert(branches, {
+        id = "claude-model-confirm",
+        match = function(screen)
+          if type(screen) ~= "string" then return false end
+          local lines = bottom_screen_lines(screen, 8)
+          for index = 1, #lines - 1 do
+            if lines[index]:find("❯%s*1%.%s+Yes")
+                and lines[index + 1]:find("%d%.%s+No, go back") then
+              return true
+            end
+          end
+          return false
+        end,
+        action = function()
+          if not confirmation_sent then
+            confirmation_sent = true
+            local pressed, press_err = pcall(remuda.key, session_name, "RET")
+            if not pressed then error(press_err, 0) end
+          end
+        end,
+        continue = true,
+      })
+    end
+    local ok, handle = pcall(remuda.expect, session_name, branches,
+      -- This prompt is accepted only during the Claude model-switch watchers.
+      -- All other unknown screens continue through the existing fail path.
+      { timeout = timeout, unknown = remuda._butler_compaction_is_unknown_dialog,
       on_unknown = function()
         if agent.kind == "claude" and (id == "model-sonnet" or id == "compact-complete") then
           state.restore_pending = prior_model
