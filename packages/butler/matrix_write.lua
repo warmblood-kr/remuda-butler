@@ -1,5 +1,6 @@
 -- L2 Matrix write composites over remuda.butler.matrix.request.
 local matrix = assert(remuda.butler and remuda.butler.matrix, "Matrix request word is unavailable")
+local approval = assert(remuda.butler.approval, "load butler/approval before butler/matrix_write")
 -- Trust words are bound at load (main.lua execs matrix_request before
 -- this file), so a later redefinition of the public entry cannot change them.
 local is_agent_mxid = matrix.is_agent_mxid
@@ -268,7 +269,7 @@ function matrix.upload(opts, on_done)
 end
 
 local function operator_room(verb, opts, agent, callback)
-  if agent then
+  if agent and verb ~= "join" then
     callback({ error = "matrix " .. verb .. " is operator-only (advisory at the same UID until core #218)" })
     return nil
   end
@@ -361,9 +362,52 @@ local function find_public_matches(name, base, callback)
     local has_next_page = type(result.json) == "table"
       and type(result.json.next_batch) == "string" and result.json.next_batch ~= ""
     if #rows > 1 or has_next_page then return callback({ matches = rows, ambiguous = true }) end
-    callback({ room_id = rows[1].room_id, alias = rows[1].alias, name = rows[1].name })
+    callback({ room_id = rows[1].room_id, alias = rows[1].alias, name = rows[1].name,
+      public = true, members = rows[1].members })
   end)
 end
+
+local function utf8_length(text)
+  local count, at = 0, 1
+  while at <= #text do
+    local byte = text:byte(at)
+    at = at + (byte < 0x80 and 1 or (byte < 0xe0 and 2 or (byte < 0xf0 and 3 or 4)))
+    count = count + 1
+  end
+  return count
+end
+
+local function approval_summary(room, alias, display_name, is_public, members)
+  local clean = sanitize_directory_text
+  local room_id = clean(room)
+  local target = clean(alias or display_name or room)
+  local prefix = "join " .. target
+  if display_name then
+    local name = clean(display_name)
+    local detail = ' ("' .. name .. '"'
+    if is_public then detail = detail .. ", public, " .. tostring(tonumber(members) or 0) .. " members" end
+    prefix = prefix .. detail .. ")"
+  end
+  local suffix = " (" .. room_id .. ")"
+  local room_chars = utf8_length(suffix)
+  local head = clean(prefix, math.max(1, 128 - room_chars))
+  return head .. clean(suffix, math.max(1, 128 - utf8_length(head)))
+end
+
+local function file_request(room, alias, display_name, is_public, members, asker, callback)
+  local summary = approval_summary(room, alias, display_name, is_public, members)
+  local label = sanitize_directory_text(alias or display_name or room)
+  return approval.request({ kind = "join", key = room, summary = summary, asker = tostring(asker),
+    ttl_s = 600, data = { room_id = room, alias = alias, name = display_name } }, function(id, why)
+      if not id then return callback({ error = why or "Could not file approval request" }) end
+      callback({ approval_request_id = id, room_id = room, room_alias = alias,
+        room_name = display_name, approval_label = label })
+    end)
+end
+
+approval.handler("join", {
+  approve = function(_, done) done(false, "not yet") end,
+})
 
 function matrix.join(opts, on_done, agent)
   opts = opts or {}
@@ -378,7 +422,11 @@ function matrix.join(opts, on_done, agent)
   local conf, config_error = matrix.read_config(config_path)
   if not conf then return error_result(done, config_error) end
   local current
-  local function join_room(room, alias, display_name)
+  local function join_room(room, alias, display_name, is_public, members)
+    if agent then
+      current = file_request(room, alias, display_name, is_public, members, agent, done)
+      return current
+    end
     local added = false
     if conf.rooms[room] ~= "home" and conf.rooms[room] ~= "all" then
       local ok, wrote_or_error = matrix.config_add_room(config_path, room, "operator", alias)
@@ -424,7 +472,7 @@ function matrix.join(opts, on_done, agent)
     end
     current = find_public_matches(requested, conf.base, function(found)
       if found.error or found.ambiguous then return done(found) end
-      join_room(found.room_id, found.alias, found.name)
+      join_room(found.room_id, found.alias, found.name, found.public, found.members)
     end)
   end
   return { cancel = function() if current and current.cancel then current:cancel() end end }

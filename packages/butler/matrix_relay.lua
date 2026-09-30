@@ -285,7 +285,7 @@ local function empty_state()
   return { since = nil, messages_since = nil, processed = {}, processed_order = {},
     pending = json.object({}), quarantine = json.array({}), routes = json.object({}),
     subscriptions = json.object({}),
-    reply_outbox = json.object({}), reply_results = json.object({}) }
+    reply_outbox = json.object({}), reply_results = json.object({}), approvals = json.object({}) }
 end
 
 local function load_state(path)
@@ -313,6 +313,7 @@ local function load_state(path)
   local reply_outbox = value.matrix_reply_outbox or json.object({})
   local reply_results = value.matrix_reply_results or json.object({})
   local subscriptions = value.matrix_thread_subscriptions or json.object({})
+  local approvals = value.approvals or json.object({})
   if (since ~= nil and type(since) ~= "string")
     or (messages_since ~= nil and type(messages_since) ~= "string")
     or type(processed_ids) ~= "table" or processed_ids == json.null
@@ -324,7 +325,8 @@ local function load_state(path)
     or type(routes) ~= "table" or routes == json.null or getmetatable(routes) == JSON_ARRAY_MT
     or type(reply_outbox) ~= "table" or reply_outbox == json.null or getmetatable(reply_outbox) == JSON_ARRAY_MT
     or type(reply_results) ~= "table" or reply_results == json.null or getmetatable(reply_results) == JSON_ARRAY_MT
-    or type(subscriptions) ~= "table" or subscriptions == json.null or getmetatable(subscriptions) == JSON_ARRAY_MT then
+    or type(subscriptions) ~= "table" or subscriptions == json.null or getmetatable(subscriptions) == JSON_ARRAY_MT
+    or type(approvals) ~= "table" or approvals == json.null or getmetatable(approvals) == JSON_ARRAY_MT then
     return empty_state(), "invalid Matrix relay state fields"
   end
   local state = empty_state()
@@ -332,6 +334,7 @@ local function load_state(path)
   state.since, state.messages_since = since, messages_since
   state.quarantine, state.routes = json.array({}), json.object({})
   state.reply_outbox, state.reply_results = json.object({}), json.object({})
+  state.approvals = approvals
   for room_id, roots in pairs(subscriptions) do
     if type(room_id) == "string" and type(roots) == "table" and getmetatable(roots) ~= JSON_ARRAY_MT then
       local valid_roots = json.object({})
@@ -415,7 +418,7 @@ local function save_state(path, state)
     messages_since = state.messages_since, pending_events = state.pending,
     quarantine = state.quarantine, matrix_mail_routes = state.routes,
     matrix_reply_outbox = state.reply_outbox, matrix_reply_results = state.reply_results,
-    matrix_thread_subscriptions = state.subscriptions })
+    matrix_thread_subscriptions = state.subscriptions, approvals = state.approvals })
   return remuda.fs.write_atomic(path, json, { private = true })
 end
 
@@ -462,6 +465,30 @@ function relay.new(options)
         warn_once(warn_kind, warn_key, "butler Matrix invite notice failed for "
           .. terminal_safe_field(room, 512) .. ": " .. terminal_safe_field(tostring(detail), 512))
       end
+    end)
+  end
+
+  local approval = remuda.butler and remuda.butler.approval
+  if approval and type(approval.attach) == "function" then
+    approval.attach(state, persist, function(text, relation, callback)
+      local body, encode_error = encode({ msgtype = "m.notice", body = text,
+        ["m.relates_to"] = relation })
+      if not body then
+        callback({ error = encode_error })
+        return { cancel = function() end }
+      end
+      return api.request_json({ method = "PUT",
+        path = "/_matrix/client/v3/rooms/" .. percent_encode(cfg.home_room)
+          .. "/send/m.room.message/" .. percent_encode("approval-" .. tostring(remuda._butler_new_ulid())),
+        room = cfg.home_room, body = body,
+        headers = { ["Content-Type"] = "application/json" },
+      }, function(result)
+        if type(result) ~= "table" or result.error then
+          callback({ error = type(result) == "table" and result.error or "Matrix approval post failed" })
+        else
+          callback({ event_id = result.json and result.json.event_id })
+        end
+      end)
     end)
   end
 

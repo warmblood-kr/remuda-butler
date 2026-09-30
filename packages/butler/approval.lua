@@ -7,6 +7,16 @@ butler.approval = approval
 local handlers = approval._handlers or {}
 approval._handlers = handlers
 local attached
+local function safe_line(value, limit)
+  value = tostring(value or "")
+  local matrix = butler.matrix
+  if matrix and type(matrix.sanitize_directory_text) == "function" then
+    value = matrix.sanitize_directory_text(value, limit or 128)
+  else
+    value = value:gsub("[%c]", " "):gsub("\194[\128-\159]", " ")
+  end
+  return (value:gsub("[\r\n]+", " "))
+end
 
 local CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 local function random_bytes(n)
@@ -87,37 +97,66 @@ function approval.list()
   return open_records(attached.state)
 end
 
-function approval.request(request)
-  if not attached then return nil, "Matrix relay is not running. Next: remuda butler matrix status" end
+function approval.request(request, done)
+  done = type(done) == "function" and done or function() end
+  local completed = false
+  local function finish(id, why)
+    if completed then return end
+    completed = true
+    done(id, why)
+  end
+  if not attached then
+    finish(nil, "Matrix relay is not running. Next: remuda butler matrix status")
+    return nil
+  end
   if type(request) ~= "table" or type(request.kind) ~= "string"
     or type(request.asker) ~= "string" or type(request.summary) ~= "string" then
-    return nil, "Invalid approval request. Next: check the approval request details"
+    finish(nil, "Invalid approval request. Next: check the approval request details")
+    return nil
   end
   if type(attached.post) ~= "function" then
-    return nil, "Matrix relay is not running. Next: remuda butler matrix status"
+    finish(nil, "Matrix relay is not running. Next: remuda butler matrix status")
+    return nil
   end
+  local summary, asker = safe_line(request.summary, 128), safe_line(request.asker, 128)
   local id = random_id(attached.state)
   local nonce = random_bytes(16)
-  if not id or not nonce then return nil, "Secure randomness is unavailable. Next: contact the owner" end
+  if not id or not nonce then
+    finish(nil, "Secure randomness is unavailable. Next: contact the owner")
+    return nil
+  end
   local created_ms = math.floor(os.time() * 1000)
-  local rec = { id = id, kind = request.kind, key = request.key, asker = request.asker,
-    summary = request.summary, data = request.data, nonce = hex(nonce), created_ms = created_ms,
+  local rec = { id = id, kind = request.kind, key = request.key, asker = asker,
+    summary = summary, data = request.data, nonce = hex(nonce), created_ms = created_ms,
     expires_at = created_ms + math.max(1, tonumber(request.ttl_s) or 600) * 1000,
     event_id = nil, status = "open" }
-  local posted, post_error
-  attached.post(request.summary .. "\nRequest " .. id, nil, function(result)
-    if type(result) == "table" and result.error then post_error = tostring(result.error)
-    else posted = type(result) == "table" and result.event_id or nil end
-    if posted and posted ~= "" then
-      rec.event_id = posted
-      attached.state.approvals[id] = rec
-      persist()
+  local ttl_minutes = math.max(1, math.ceil((tonumber(request.ttl_s) or 600) / 60))
+  local text = table.concat({ "Butler wants to " .. summary,
+    "Asked by: " .. asker,
+    "React ✅ or reply yes to THIS message within " .. tostring(ttl_minutes)
+      .. " minutes. ❌ or no denies.",
+    "Request " .. id,
+    "or: remuda butler approve " .. id }, "\n")
+  local ok, handle = pcall(attached.post, text, nil, function(result)
+    if type(result) ~= "table" or result.error then
+      return finish(nil, "Could not post to HOME: "
+        .. tostring(type(result) == "table" and result.error or "Matrix post returned no result"))
     end
+    local event_id = result.event_id
+    if type(event_id) ~= "string" or event_id == "" then
+      return finish(nil, "Could not post to HOME: response omitted event_id")
+    end
+    rec.event_id = event_id
+    attached.state.approvals[id] = rec
+    local saved, save_error = pcall(persist)
+    if not saved then
+      attached.state.approvals[id] = nil
+      return finish(nil, "Could not save approval request: " .. tostring(save_error))
+    end
+    finish(id)
   end)
-  if post_error then return nil, "Could not post to HOME: " .. post_error end
-  -- Matrix requests complete asynchronously; the id is useful immediately.
-  -- The relay callback records the request only once the event id is known.
-  return id
+  if not ok then finish(nil, "Could not post to HOME: " .. tostring(handle)) end
+  return handle
 end
 
 function approval.answer(id_or_event, verdict, who)

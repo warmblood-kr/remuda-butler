@@ -242,6 +242,11 @@ local function render_human(verb, options, result)
   elseif verb == "upload" then
     return "Uploaded as " .. tostring(result.content_uri or "") .. " (" .. tostring(result.event_id or "") .. ")\n"
   elseif verb == "join" or verb == "leave" then
+    if verb == "join" and result.approval_request_id then
+      return "Asked the owner to approve joining " .. terminal_safe(result.approval_label or "the Matrix room")
+        .. " (request " .. terminal_safe(result.approval_request_id)
+        .. "). You get mail when they answer (expires in 10 min).\nNext: remuda butler inbox\n"
+    end
     if verb == "join" and (result.ambiguous or data.ambiguous)
       and type(result.matches or data.matches) == "table" then
       local matches = result.matches or data.matches
