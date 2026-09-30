@@ -442,6 +442,25 @@ function relay.new(options)
     return fallback
   end
 
+  function instance:thread_root_mail_for_event(room_id, thread_root)
+    local fallback, fallback_time
+    for mail_id, route in pairs(state.routes) do
+      if route.room_id == room_id then
+        if route.event_id == thread_root or route.last_reply_event_id == thread_root then
+          return mail_id
+        end
+        if route.thread_root == thread_root then
+          local created_at = type(route.created_at) == "string" and route.created_at or ""
+          if not fallback or created_at < fallback_time
+            or (created_at == fallback_time and mail_id < fallback) then
+            fallback, fallback_time = mail_id, created_at
+          end
+        end
+      end
+    end
+    return fallback
+  end
+
   function instance:record_outgoing_reply(event_id, sent_id)
     if type(event_id) ~= "string" or type(sent_id) ~= "string" or sent_id == "" then return false end
     for source_mail_id, route in pairs(state.routes) do
@@ -761,9 +780,12 @@ function relay.new(options)
               (not is_threaded or is_mention or is_subscribed))))
           local route_mail_id = thread_id
             and instance:mail_route_for_event(actual_room, thread_root, in_reply_to) or nil
+          local thread_root_mail_id = thread_root
+            and instance:thread_root_mail_for_event(actual_room, thread_root) or nil
           local subscription = thread_id and subscriptions[thread_id]
           local subscribed_mail_id = type(subscription) == "table" and subscription.mail_id or nil
           local context_mail_id = route_mail_id or subscribed_mail_id
+          local references = thread_root and (thread_root_mail_id or subscribed_mail_id) or nil
           if not accepted then
             add_processed(state, ev.event_id)
             if cursor then state.since = cursor end
@@ -773,6 +795,7 @@ function relay.new(options)
             created_at = timestamp(ev), body = mail_body(content.body),
             thread_root = thread_root, in_reply_to = in_reply_to, mxc = media_uri(content),
             room = cfg.rooms[actual_room], room_kind = cfg.rooms[actual_room], context_mail_id = context_mail_id,
+            references = references and { references } or nil,
             from_agent = is_agent,
             subscribe_thread = is_all and is_threaded and is_mention,
             thread_id = thread_id,
@@ -938,6 +961,7 @@ function relay.start(config)
           in_reply_to = event.in_reply_to, thread_id = event.thread_id,
           room = event.room, room_kind = event.room_kind,
           context_mail_id = event.context_mail_id, from_agent = event.from_agent, mxc = event.mxc },
+        references = event.references,
       })
       if type(delivered) == "table" and delivered.__butler_delivery_hook_error then
         error(delivered.__butler_delivery_hook_error, 0)

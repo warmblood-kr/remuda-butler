@@ -355,6 +355,51 @@ local function test_allowlist_refusal_is_logged_once()
   os.execute("rm -rf " .. string.format("%q", dir))
 end
 
+local function test_thread_root_mail_references_are_stable()
+  local dir, config_path = fixture()
+  local client, delivered = scripted_client(), {}
+  local relay = relay_module.new({ config_path = config_path, matrix = client,
+    deliver = function(event)
+      delivered[#delivered + 1] = event
+      return { id = "M" .. tostring(#delivered - 1) }
+    end,
+  })
+  local function event(id, relates_to, body)
+    return { type = "m.room.message", event_id = id, sender = "@alice:example.org",
+      content = { msgtype = "m.text", body = body, ["m.relates_to"] = relates_to } }
+  end
+  local function sync(index, since, events)
+    client:complete(index, { json = { next_batch = since, rooms = { join = {
+      ["!room:example.org"] = { timeline = { events = events } },
+    } } } })
+  end
+
+  relay:start()
+  client:complete(1, { json = { next_batch = "s0" } })
+  sync(2, "s1", { event("$human-root", nil, "Root mail.") })
+  assert(delivered[1] and delivered[1].event_id == "$human-root")
+  assert(relay:record_outgoing_reply("$human-root", "$butler-sent"),
+    "the Butler's Matrix reply event should map back to its answered mail")
+
+  sync(3, "s2", { event("$thread-first-response", {
+    rel_type = "m.thread", event_id = "$butler-sent",
+    ["m.in_reply_to"] = { event_id = "$butler-sent" },
+  }, "Thread starts here.") })
+  assert(delivered[2].context_mail_id == "M0", "the first thread mail should target the mail answered by the Butler")
+  assert(delivered[2].references and delivered[2].references[1] == "M0",
+    "the first thread mail should reference the stable root mail")
+
+  sync(4, "s3", { event("$thread-second-response", {
+    rel_type = "m.thread", event_id = "$butler-sent",
+    ["m.in_reply_to"] = { event_id = "$thread-first-response" },
+  }, "Second response.") })
+  assert(delivered[3].context_mail_id == "M1", "a later thread mail should retain its direct reply target")
+  assert(delivered[3].references and delivered[3].references[1] == "M0",
+    "later thread mail should keep the original root mail reference")
+  relay:stop()
+  os.execute("rm -rf " .. string.format("%q", dir))
+end
+
 
 -- A mod that redefines the public read_config/is_agent_mxid words must not
 -- widen the sender allowlist or reclassify agents: the relay, write and mail
@@ -495,6 +540,7 @@ test_ack_reconcile_and_utf8_body_cap()
 test_messages_backfill_baseline_and_retry_backoff()
 test_retry_backoff_grows_and_resets_after_recovery()
 test_allowlist_refusal_is_logged_once()
+test_thread_root_mail_references_are_stable()
 setup_tests(matrix)
 test_redefined_public_words_do_not_change_trust()
 local fixture_failures = {}

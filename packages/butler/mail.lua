@@ -545,6 +545,8 @@ local function inbox(name)
       if message.in_reply_to then
         local root = message.references and message.references[1] or message.in_reply_to
         lines[#lines + 1] = "  in reply to " .. message.in_reply_to .. " (thread " .. root .. ")"
+      elseif message.references and message.references[1] then
+        lines[#lines + 1] = "  thread " .. message.references[1]
       end
       local resent = bus.mail_resent[name] and bus.mail_resent[name][id]
       if resent then
