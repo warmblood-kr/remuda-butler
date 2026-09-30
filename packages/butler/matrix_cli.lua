@@ -366,6 +366,7 @@ function matrix.cli(args, agent)
               "  Account: create a Butler bot (you will need its server registration token)",
               "  Bot: " .. terminal_safe(wizard_plan.bot_mxid),
               "  Save private token and config files in: " .. terminal_safe(wizard_plan.output_dir),
+              "  Start the relay for this Butler with this config (replaces its current Matrix relay config)",
             }
             if wizard_plan.pin then
               lines[#lines + 1] = "  HTTPS certificate pin: " .. wizard_plan.pin

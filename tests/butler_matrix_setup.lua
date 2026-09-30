@@ -402,7 +402,8 @@ return function(matrix)
     "the wizard should ask for the owner after the homeserver")
   line_specs[2].callback("@alice:example.org", nil)
   assert(#line_specs == 3 and line_specs[3].label:find("Continue? Type Y", 1, true)
-    and line_specs[3].label:find("Bot: @butler%-"),
+    and line_specs[3].label:find("Bot: @butler%-")
+    and line_specs[3].label:find("replaces its current Matrix relay config", 1, true),
     "the wizard should summarize validated details and ask for confirmation")
   assert(line_specs[3].default == "N", "wizard confirmation should default to no")
   line_specs[3].callback("n", nil)
