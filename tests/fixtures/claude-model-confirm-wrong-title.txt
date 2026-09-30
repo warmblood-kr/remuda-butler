@@ -1,4 +1,4 @@
-Switch model?
+Confirm session action?
 
 Your next response will be slower and use more tokens
 

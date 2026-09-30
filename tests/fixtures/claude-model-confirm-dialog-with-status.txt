@@ -9,3 +9,5 @@ the full history gets re-read on your next message.
   2. No, go back
 
 Enter to confirm · Esc to cancel
+Session status: active
+Model status: current-model

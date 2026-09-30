@@ -3672,11 +3672,16 @@ function remuda._butler_compaction_execute(session_name, force)
         id = "claude-model-confirm",
         match = function(screen)
           if type(screen) ~= "string" then return false end
-          local lines = bottom_screen_lines(screen, 8)
+          local lines = bottom_screen_lines(screen, 18)
           for index = 1, #lines - 1 do
-            if lines[index]:find("❯%s*1%.%s+Yes")
+            if index > #lines - 8
+                and lines[index]:find("❯%s*1%.%s+Yes")
                 and lines[index + 1]:find("%d%.%s+No, go back") then
-              return true
+              for title_row = math.max(1, index - 10), index - 1 do
+                if lines[title_row]:find("Switch model?", 1, true) then
+                  return true
+                end
+              end
             end
           end
           return false
