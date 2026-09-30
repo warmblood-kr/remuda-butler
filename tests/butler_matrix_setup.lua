@@ -408,7 +408,6 @@ return function(matrix)
   local prompt_specs = {}
   local line_specs = {}
   local pending_timeout
-  local capture_rooms_prompt = true
   remuda.pending = function(options)
     pending_timeout = options and options.timeout
     local reply = { resolve = function(_, status, stdout, stderr)
@@ -416,9 +415,6 @@ return function(matrix)
     end }
     function reply:prompt_secret(spec) prompt_specs[#prompt_specs + 1] = spec end
     function reply:prompt_line(spec)
-      if spec.label == "Room access (allowlist or open) [allowlist]:" and not capture_rooms_prompt then
-        return spec.callback(spec.default, nil)
-      end
       line_specs[#line_specs + 1] = spec
     end
     return reply
@@ -433,23 +429,20 @@ return function(matrix)
     and line_specs[2].label == "Your Matrix user ID (for example @alice:example.org):",
     "the wizard should ask for the owner after the homeserver")
   line_specs[2].callback("@alice:example.org", nil)
-  assert(#line_specs == 3 and line_specs[3].label == "Room access (allowlist or open) [allowlist]:"
-    and line_specs[3].default == "allowlist",
-    "the wizard should ask for a room policy and default to allowlist")
-  line_specs[3].callback("open", nil)
-  assert(#line_specs == 4 and line_specs[4].label:find("Continue? Type Y", 1, true)
-    and line_specs[4].label:find("Bot: @butler%-")
-    and line_specs[4].label:find("Room access: open", 1, true)
-    and line_specs[4].label:find("replaces its current Matrix relay config", 1, true),
-    "the wizard should summarize validated details and ask for confirmation")
-  assert(line_specs[4].default == "N", "wizard confirmation should default to no")
-  line_specs[4].callback("n", nil)
+  assert(#line_specs == 3 and line_specs[3].label:find("Continue? Type Y", 1, true)
+    and line_specs[3].label:find("Bot: @butler%-")
+    and line_specs[3].label:find("\n  Rooms: open (anyone can invite this Butler). Restrict later: edit deny_room/deny_server in "
+      .. default_paths.config_path .. "\n", 1, true)
+    and not line_specs[3].label:find("Room access", 1, true)
+    and line_specs[3].label:find("replaces its current Matrix relay config", 1, true),
+    "the wizard should set open rooms and summarize the real config path")
+  assert(line_specs[3].default == "N", "wizard confirmation should default to no")
+  line_specs[3].callback("n", nil)
   assert(resolved and resolved.status == 1 and resolved.stderr:find("Nothing was written.", 1, true)
     and select(2, resolved.stderr:gsub("Next:", "")) == 1
     and #requests == 0 and #prompt_specs == 0,
     "declining the summary should stop before registration or network work")
 
-  capture_rooms_prompt = false
   requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
   wizard_reply = matrix.cli({ "matrix", "setup" })
   line_specs[1].callback("http://matrix.invalid", nil)

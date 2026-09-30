@@ -370,7 +370,7 @@ function matrix.cli(args, agent)
           local valid_owner, owner_error = matrix.setup_validate_mxid(owner, "--owner")
           if not valid_owner then return prompt_failure(tostring(owner_error)) end
           flags[4] = valid_owner
-          flags[5], flags[6] = "--register", "--default"
+          flags[5], flags[6], flags[7], flags[8] = "--register", "--default", "--rooms", "open"
           local function confirm_setup()
             local wizard_plan, validation_error = matrix.setup_prepare(flags)
             if not wizard_plan then
@@ -384,7 +384,8 @@ function matrix.cli(args, agent)
               "Matrix setup will:",
               "  Homeserver: " .. terminal_safe(wizard_plan.homeserver),
               "  Owner: " .. terminal_safe(wizard_plan.owner_mxid),
-              "  Room access: " .. terminal_safe(wizard_plan.rooms_mode),
+              "  Rooms: open (anyone can invite this Butler). Restrict later: edit deny_room/deny_server in "
+                .. terminal_safe(wizard_plan.config_path),
               "  Account: create a Butler bot (you will need its server registration token)",
               "  Bot: " .. terminal_safe(wizard_plan.bot_mxid),
               "  Save private token and config files in: " .. terminal_safe(wizard_plan.output_dir),
@@ -424,16 +425,7 @@ function matrix.cli(args, agent)
               confirm_setup()
             end
           end
-          prompt_line("Room access (allowlist or open) [allowlist]:", "allowlist", function(room_mode)
-            room_mode = type(room_mode) == "string" and room_mode:lower() or ""
-            if room_mode ~= "open" and room_mode ~= "allowlist" then
-              return prompt_failure("Room access must be open or allowlist.")
-            end
-            if room_mode == "open" then
-              flags[#flags + 1], flags[#flags + 2] = "--rooms", "open"
-            end
-            ask_transport_trust()
-          end)
+          ask_transport_trust()
         end)
       end)
     end
