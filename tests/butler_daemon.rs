@@ -1493,7 +1493,7 @@ fn butler_lifecycle_reload_replaces_hooks_and_schedules_and_rolls_back() {
     "#;
     let initial = eval(&path, counts);
     assert!(
-        initial == "1|4|1|1|1|19" || initial == "1|4|1|1|1|-1",
+        initial == "1|4|1|1|1|22" || initial == "1|4|1|1|1|-1",
         "unexpected Butler lifecycle registrations: {initial}"
     );
 
