@@ -274,6 +274,28 @@ function matrix.cli(args, agent)
       if result.error then return reply:resolve(1, "", tostring(result.error) .. "\n") end
       local files, write_error = matrix.setup_write(plan, result)
       if not files then return reply:resolve(1, "", tostring(write_error) .. "\n") end
+      local relay_started, relay_error
+      if plan.default then
+        -- Match main.lua's boot config shape using the resolved paths that
+        -- setup just wrote; the relay remains the only live component changed.
+        remuda._butler_matrix_config = {
+          token_path = files.token_path,
+          config_path = files.config_path,
+        }
+        local relay = matrix.relay
+        if relay and type(relay.stop) == "function" and type(relay.start) == "function" then
+          pcall(relay.stop)
+          local ok, started = pcall(relay.start, remuda._butler_matrix_config)
+          relay_started = ok and started == true
+          if not relay_started then
+            relay_error = ok and (started == false and "relay.start returned false"
+              or started == nil and "relay.start returned no result"
+              or "relay.start did not return true") or terminal_safe(started)
+          end
+        else
+          relay_error = "Matrix relay start is unavailable"
+        end
+      end
       active = matrix.status({}, function(status_result)
         if cancelled.value then return end
         if type(status_result) ~= "table" then status_result = { error = "Matrix status returned no result" } end
@@ -292,7 +314,23 @@ function matrix.cli(args, agent)
         else
           lines[#lines + 1] = "Status: " .. terminal_safe(render_human("status", {}, status_result):gsub("\n", "; "):gsub("; $", ""))
         end
-        lines[#lines + 1] = "Next: Accept the invite in Element, then write in the room."
+        if plan.default then
+          if relay_started then
+            lines[#lines + 1] = "Next: accept the invite in Element; the relay is running, so write to the Butler there."
+          else
+            lines[#lines + 1] = "Next: Accept the invite in Element, then write in the room."
+            lines[#lines + 1] = "Relay failed to start: " .. terminal_safe(relay_error or "unknown relay start error")
+            lines[#lines + 1] = "Next: fix the config, then rerun remuda butler matrix setup ... --default --force"
+          end
+        else
+          local function shell_quote(value)
+            return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
+          end
+          lines[#lines + 1] = "Accept the invite in Element before starting this separate Butler."
+          lines[#lines + 1] = "Next: REMUDA_BUTLER_TOKEN=" .. shell_quote(files.token_path)
+            .. " REMUDA_BUTLER_CONFIG=" .. shell_quote(files.config_path)
+            .. " remuda -s matrix-test daemon"
+        end
         reply:resolve(0, table.concat(lines, "\n") .. "\n", "")
       end, agent)
     end
