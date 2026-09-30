@@ -61,9 +61,10 @@ relay alone. Start that Butler with
 `REMUDA_BUTLER_TOKEN=PATH/token REMUDA_BUTLER_CONFIG=PATH/config remuda -s matrix-test daemon`,
 replacing `PATH` with the chosen directory.
 
-`event` and `get` are aliases for the same read. `rooms` lists the configured
-HOME, ALL-BUTLERS, and joined rooms with how each room was added. The config
-file remains the single room boundary: an invite from an allowlisted human
+`event` and `get` are aliases for the same read.
+The `remuda butler matrix rooms` command lists configured rooms and how each was added; server-side memberships show in `remuda butler matrix status`.
+The config file remains the
+single room boundary: an invite from an allowlisted human
 owner adds `room=ROOM_ID how=owner-invite`, and operator `join` adds
 `room=ROOM_ID how=operator`. Invites from other senders are not joined and are
 reported to HOME; joined rooms use the HOME sender rules. `leave` removes a

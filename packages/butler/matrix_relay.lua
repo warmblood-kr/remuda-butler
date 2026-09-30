@@ -857,12 +857,15 @@ function relay.new(options)
 
   local function handle_invites(response)
     local home_invite_notices, additional_invites = 0, 0
-    local invites = response.rooms and response.rooms.invite or {}
+    local rooms = type(response) == "table" and type(response.rooms) == "table" and response.rooms or {}
+    local invites = type(rooms.invite) == "table" and rooms.invite or {}
     for room_id, invitation in pairs(invites) do
       local room_kind = cfg.rooms[room_id]
-      if room_kind ~= "home" and room_kind ~= "all" and not joining[room_id] then
+      if type(invitation) == "table" and room_kind ~= "home" and room_kind ~= "all"
+        and not joining[room_id] then
         local inviter, matching_invites, same_inviter = nil, 0, true
-        local events = invitation and invitation.invite_state and invitation.invite_state.events
+        local invite_state = invitation.invite_state
+        local events = type(invite_state) == "table" and invite_state.events or nil
         for _, event in ipairs(type(events) == "table" and events or {}) do
           if type(event) == "table" and event.type == "m.room.member"
             and event.state_key == cfg.self_mxid
@@ -968,7 +971,8 @@ function relay.new(options)
     end
     if path == SYNC_PATH then
       local added = {}
-      local joined = response.rooms and response.rooms.join or {}
+      local rooms = type(response.rooms) == "table" and response.rooms or {}
+      local joined = type(rooms.join) == "table" and rooms.join or {}
       for room_id, room in pairs(joined) do
         if cfg.rooms[room_id] then
           local room_added = accept_events(room and room.timeline and room.timeline.events, nil, room_id)

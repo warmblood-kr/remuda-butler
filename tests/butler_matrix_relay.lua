@@ -439,6 +439,28 @@ local function room_line(path, room)
   end
 end
 
+local function test_config_add_room_pads_short_config()
+  local dir, path = fixture()
+  local file = assert(io.open(path, "w"))
+  file:write("http://matrix.invalid\n", HOME, "\n@bot:example.org\n")
+  file:close()
+  local ok, added = matrix.config_add_room(path, NEW, "operator")
+  local passed, err = pcall(function()
+    assert(ok, "adding a room to a short config must succeed")
+    local conf = assert(matrix.read_config(path))
+    assert(conf.use_messages == false and conf.timeout_ms == 30000 and not conf.allowed_senders[OWNER],
+      "padding a short config must preserve the defaults for missing mode, timeout, and allowed senders")
+    assert(conf.rooms[NEW] == "joined", "the room added to a short config must remain configured")
+    local lines = {}
+    for line in (read_text(path) .. "\n"):gmatch("([^\n]*)\n") do lines[#lines + 1] = line end
+    assert(lines[4] == "" and lines[5] == "" and lines[6] == "" and lines[7]:match("^room=" .. NEW),
+      "room= must follow the sixth positional config line")
+    assert(added == true, "adding a room to a short config must report that it wrote the line")
+  end)
+  remove_dir(dir)
+  assert(passed, err)
+end
+
 local function encoded(room)
   return (room:gsub("([^%w%-%._~])", function(c) return string.format("%%%02X", c:byte()) end))
 end
@@ -804,6 +826,16 @@ local function test_join_failure_rolls_back_room_line()
     local line = room_line(path, NEW)
     assert(line and line:find("how=operator", 1, true), "matrix join must append how=operator")
   end)
+  local added_ok, was_added = matrix.config_add_room(path, NEW, "operator")
+  assert(added_ok and was_added == false, "an existing room line must report added=false")
+  local existing_text = read_text(path)
+  with_operator_config(path, 403, function(calls)
+    local result
+    matrix.join({ room = NEW }, function(value) result = value end)
+    assert(result and result.error and #calls == 1, "an existing configured room must still attempt join")
+    assert(read_text(path) == existing_text,
+      "a failed join for an already configured room must retain its room line")
+  end)
   remove_dir(dir)
 end
 
@@ -912,6 +944,7 @@ for _, case in ipairs({
   { "test_long_invite_identifiers_dedupe_home_notice", test_long_invite_identifiers_dedupe_home_notice },
   { "test_invite_home_notice_cap_adds_one_summary", test_invite_home_notice_cap_adds_one_summary },
   { "test_agent_invite_is_not_joined", test_agent_invite_is_not_joined },
+  { "test_config_add_room_pads_short_config", test_config_add_room_pads_short_config },
   { "test_join_failure_rolls_back_room_line", test_join_failure_rolls_back_room_line },
   { "test_joined_room_survives_restart", test_joined_room_survives_restart },
   { "test_running_relay_picks_up_operator_join_from_config", test_running_relay_picks_up_operator_join_from_config },

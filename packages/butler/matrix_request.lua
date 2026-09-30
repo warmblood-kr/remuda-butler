@@ -208,13 +208,23 @@ function matrix.config_add_room(path, room, how)
   if room == conf.home_room or room == conf.all_room then
     return nil, "HOME and ALL rooms can't be added"
   end
-  if conf.rooms[room] ~= nil then return true end
+  if conf.rooms[room] ~= nil then return true, false end
   if how ~= "owner-invite" and how ~= "operator" then how = "operator" end
   local contents
   contents, err = read_file(path, "config")
   if not contents then return nil, err end
   local suffix = (#contents > 0 and contents:sub(-1) ~= "\n") and "\n" or ""
-  return write_config_text(path, contents .. suffix .. "room=" .. room .. " how=" .. how .. "\n")
+  local padded = contents .. suffix
+  local line_count = 0
+  for _ in contents:gmatch("\n") do line_count = line_count + 1 end
+  if #contents > 0 and contents:sub(-1) ~= "\n" then line_count = line_count + 1 end
+  while line_count < 6 do
+    padded = padded .. "\n"
+    line_count = line_count + 1
+  end
+  local wrote, write_error = write_config_text(path, padded .. "room=" .. room .. " how=" .. how .. "\n")
+  if not wrote then return nil, write_error end
+  return true, true
 end
 
 function matrix.config_remove_room(path, room)

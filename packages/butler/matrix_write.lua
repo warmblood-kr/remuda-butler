@@ -291,12 +291,12 @@ function matrix.join(opts, on_done, agent)
   end
   local conf, config_error = matrix.read_config(config_path)
   if not conf then return error_result(done, config_error) end
-  local existing_kind = conf.rooms[room]
   local added = false
-  if existing_kind ~= "home" and existing_kind ~= "all" then
-    local ok, add_error = matrix.config_add_room(config_path, room, "operator")
+  if conf.rooms[room] ~= "home" and conf.rooms[room] ~= "all" then
+    local ok, wrote_or_error = matrix.config_add_room(config_path, room, "operator")
+    local add_error = not ok and wrote_or_error or nil
     if not ok then return error_result(done, add_error) end
-    added = existing_kind == nil
+    added = wrote_or_error == true
   end
   return matrix.request_json({ method = "POST",
     path = "/_matrix/client/v3/rooms/" .. path_component(room) .. "/join",
