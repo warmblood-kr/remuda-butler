@@ -398,6 +398,9 @@ function matrix.cli(args, agent)
           if scheme_or_error == "https" then
             prompt_line("HTTPS trust: enter a 64-character SHA-256 certificate pin or an absolute CA file path:",
               nil, function(trust)
+                if type(trust) ~= "string" then
+                  return prompt_failure("The HTTPS trust answer must be a certificate pin or CA file path.")
+                end
                 if #trust == 64 and trust:match("^%x+$") then
                   flags[#flags + 1] = "--pin"
                   flags[#flags + 1] = trust

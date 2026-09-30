@@ -447,6 +447,15 @@ return function(matrix)
     and resolved.stderr:find(bad_ca_path:gsub("\n", " "), 1, true),
     "wizard validation errors should sanitize control characters from entered paths")
 
+  requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+  wizard_reply = matrix.cli({ "matrix", "setup" })
+  line_specs[1].callback("https://matrix.invalid", nil)
+  line_specs[2].callback("@alice:example.org", nil)
+  line_specs[3].callback(nil, nil)
+  assert(resolved and resolved.status == 1 and resolved.stderr:find("Nothing was written.", 1, true)
+    and select(2, resolved.stderr:gsub("Next:", "")) == 1 and #requests == 0,
+    "a non-string HTTPS trust answer should fail safely instead of throwing")
+
   write(default_paths.token_path, "existing default token")
   requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
   wizard_reply = matrix.cli({ "matrix", "setup" })
