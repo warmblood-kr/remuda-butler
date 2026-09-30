@@ -422,25 +422,14 @@ remuda._butler_chooser_config = { bus = bus, call_callback = call_callback, numb
   startup_action_safe = function(...) return startup_action_safe(...) end }
 remuda.exec("butler/agents_launch")
 local chooser = remuda._butler_chooser
-local PROMPT_DELIVERY = chooser.PROMPT_DELIVERY
 local build_agent_argv = chooser.build_agent_argv
 local one_line = chooser.one_line
-local trust_modal_state = chooser.trust_modal_state
 local choose = chooser.choose
 local configured_agent_order = chooser.configured_agent_order
 local readiness_chain_budget = chooser.readiness_chain_budget
 local setup_telemetry = chooser.setup_telemetry
-local team_member_guidance = chooser.team_member_guidance
-local team_member_prompt = chooser.team_member_prompt
 local write_agent_guidance = chooser.write_agent_guidance
-local option_number = chooser.option_number
-local codex_update_version = chooser.codex_update_version
-local skip_option_number = chooser.skip_option_number
-local startup_modal_timeout_seconds = chooser.startup_modal_timeout_seconds
-local startup_modal = chooser.startup_modal
-local known_startup_modal = chooser.known_startup_modal
 local codex_update_complete = chooser.codex_update_complete
-local capture_update_evidence = chooser.capture_update_evidence
 -- Member launch and topic creation live in launch.lua.
 remuda._butler_launch_config = { bus = bus,
   topic_config = topic_config,
