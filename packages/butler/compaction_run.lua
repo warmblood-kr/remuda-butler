@@ -53,7 +53,7 @@ end
 local function write_compaction_restore_record(record)
   local ok, encoded = pcall(remuda.json.encode, record)
   if not ok then return nil, encoded end
-  local wrote, write_err = remuda.fs.write_atomic(compaction_restore_path, encoded)
+  local wrote, write_err = remuda.fs.write_atomic(compaction_restore_path, encoded, { private = true })
   if not wrote then return nil, write_err end
   compaction_restore_sessions = record
   remuda._butler_compaction_restore_sessions = compaction_restore_sessions
@@ -441,7 +441,8 @@ function remuda._butler_compaction_execute(session_name, force)
     if not sent then fail("compaction command failed: " .. tostring(send_err)); return false end
     return true
   end
-  local function wait_for(id, matcher, action, timeout, on_timeout)
+  local function wait_for(id, matcher, action, timeout, on_timeout, on_fail)
+    local fail = on_fail or fail
     local confirmation_sent = false
     local handle
     local action_started = false
@@ -618,57 +619,80 @@ function remuda._butler_compaction_execute(session_name, force)
     if not cleared then _butler_trace("restore_record_clear_failed", detail .. " reason=" .. tostring(clear_err)) end
   end
   -- Pick `model` at `effort` for this Codex session only, reading each picker
-  -- row from the screen. A missing row closes the picker and calls on_abort.
+  -- row from the screen. Every failure closes the picker, then calls on_abort.
   local function codex_select(model, effort, on_done, on_abort)
     local row_label = CODEX_EFFORT_ROWS[effort] or effort
     local picker_timeout = math.max(completion_timeout, 15)
+    local effort_title = "select reasoning level for " .. model
+    local function picker_open(screen)
+      if codex_picker_rows(screen, "select reasoning level for ") then return "effort" end
+      if codex_picker_rows(screen, "select model and effort") then return "model" end
+      if codex_footer(screen) then return "closed" end
+    end
+    -- One ESC per screen, each confirmed from the screen before the next,
+    -- so two ESCs never merge and none lands in the composer.
+    local function escape(reason, escapes)
+      local function left_open() on_abort(reason .. "; the Codex model picker was left open") end
+      wait_for("codex-picker-escape", function(screen) return picker_open(screen) ~= nil end, function(screen)
+        local open = picker_open(screen)
+        if open == "closed" then on_abort(reason); return end
+        if escapes >= 2 or not pcall(remuda.key, session_name, "ESC") then left_open(); return end
+        wait_for("codex-" .. open .. "-picker-closed", function(next_screen)
+          local now = picker_open(next_screen)
+          return now ~= nil and now ~= open
+        end, function() escape(reason, escapes + 1) end, picker_timeout, nil, left_open)
+      end, picker_timeout, nil, left_open)
+    end
+    local function abort(reason) escape(reason, 0) end
+    local function key(name, what)
+      local pressed, press_err = pcall(remuda.key, session_name, name)
+      if not pressed then abort(what .. " key failed: " .. tostring(press_err)) end
+      return pressed
+    end
     if not send_command("/model") then return end
+    -- The row, or the same rows on 3 captures (not a half-painted list).
+    local seen, seen_count = nil, 0
     wait_for("codex-model-picker", function(screen)
-      return codex_row(codex_picker_rows(screen, "select model and effort"), model) ~= nil
+      local rows = codex_picker_rows(screen, "select model and effort")
+      if not rows or #rows == 0 then seen, seen_count = nil, 0; return false end
+      if codex_row(rows, model) then return true end
+      local labels = {}
+      for _, row in ipairs(rows) do labels[#labels + 1] = row.label end
+      labels = table.concat(labels, "\n")
+      seen_count = labels == seen and seen_count + 1 or 1
+      seen = labels
+      return seen_count >= 3
     end, function(screen)
       local _, row = codex_row(codex_picker_rows(screen, "select model and effort"), model)
-      local pressed, press_err = pcall(remuda.key, session_name, row.number)
-      if not pressed then fail("model picker key failed: " .. tostring(press_err)); return end
-      local title = "select reasoning level for " .. model
+      if not row then abort("no " .. model .. " row in the Codex model picker"); return end
+      if not key(row.number, "model picker") then return end
+      local function effort_rows(effort_screen)
+        local rows = codex_picker_rows(effort_screen, effort_title)
+        for index, candidate in ipairs(rows or {}) do if candidate.cursor then return rows, index end end
+      end
       wait_for("codex-effort-picker", function(effort_screen)
-        local rows = codex_picker_rows(effort_screen, title)
-        if not rows then return false end
-        for _, candidate in ipairs(rows) do if candidate.cursor then return true end end
-        return false
+        return effort_rows(effort_screen) ~= nil
       end, function(effort_screen)
-        local rows = codex_picker_rows(effort_screen, title)
+        local rows, cursor = effort_rows(effort_screen)
         local target = codex_row(rows, row_label)
-        if not target then
-          -- One ESC per screen: back to the model list, then out of it.
-          local reason = "no '" .. effort .. "' effort row for " .. model
-          pcall(remuda.key, session_name, "ESC")
-          wait_for("codex-effort-closed", function(back_screen)
-            return codex_picker_rows(back_screen, "select model and effort") ~= nil
-          end, function()
-            pcall(remuda.key, session_name, "ESC")
-            wait_for("codex-picker-closed", function(closed_screen)
-              return codex_footer(closed_screen) ~= nil
-                and codex_picker_rows(closed_screen, "select model and effort") == nil
-            end, function() on_abort(reason) end, picker_timeout,
-              function() on_abort(reason .. "; the model picker did not close") end)
-          end, picker_timeout, function() on_abort(reason .. "; the effort picker did not close") end)
-          return
-        end
-        local cursor = 1
-        for index, candidate in ipairs(rows) do if candidate.cursor then cursor = index end end
+        if not target then abort("no '" .. effort .. "' effort row for " .. model); return end
         local step = target > cursor and "<down>" or "<up>"
         for _ = 1, math.abs(target - cursor) do
-          local moved, move_err = pcall(remuda.key, session_name, step)
-          if not moved then fail("effort picker key failed: " .. tostring(move_err)); return end
+          if not key(step, "effort picker") then return end
         end
-        local applied, apply_err = pcall(remuda.key, session_name, "s")
-        if not applied then fail("session-only model key failed: " .. tostring(apply_err)); return end
-        wait_for("codex-model-set", function(set_screen)
-          local current, current_effort = codex_footer(set_screen)
-          return current == model and current_effort == effort
-        end, on_done, picker_timeout)
-      end, picker_timeout)
-    end, picker_timeout)
+        -- Only apply once the cursor is seen on the target row.
+        wait_for("codex-effort-row", function(row_screen)
+          local _, at = effort_rows(row_screen)
+          return at == target
+        end, function()
+          if not key("s", "session-only model") then return end
+          wait_for("codex-model-set", function(set_screen)
+            local current, current_effort = codex_footer(set_screen)
+            return current == model and current_effort == effort
+          end, on_done, picker_timeout, nil, abort)
+        end, picker_timeout, nil, abort)
+      end, picker_timeout, nil, abort)
+    end, picker_timeout, nil, abort)
   end
   local function codex_restore(event, after_restore)
     local model, effort = tostring(codex_prior):match("^codex:(%S+) (%S+)$")
