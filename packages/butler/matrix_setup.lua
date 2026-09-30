@@ -131,7 +131,9 @@ local function setup_command(options, destination)
   add("--owner", options.owner_mxid)
   if options.secret_kind == "registration" then
     parts[#parts + 1] = "--register"
-    add("--registration-token-file", options.secret_path)
+    if not options.prompt_registration_token then
+      add("--registration-token-file", options.secret_path)
+    end
     if options.password_input_path then add("--password-file", options.password_input_path) end
     add("--bot", options.bot_mxid)
   elseif options.secret_kind == "password" then
@@ -153,6 +155,17 @@ local function setup_command(options, destination)
   return table.concat(parts, " ")
 end
 
+local function normalize_secret(contents)
+  if type(contents) ~= "string" then return nil, "invalid" end
+  if #contents > 4096 then return nil, "too_long" end
+  local first_line = contents:match("^([^\r\n]*)") or ""
+  first_line = first_line:gsub("^%s+", ""):gsub("%s+$", "")
+  if first_line == "" then return nil, "empty" end
+  return first_line
+end
+
+matrix.normalize_secret = normalize_secret
+
 local function validate_secret(path, kind)
   local option = kind == "registration" and "--registration-token-file"
     or "--" .. kind .. "-file"
@@ -164,11 +177,11 @@ local function validate_secret(path, kind)
   if not file then return nil, "cannot read secret input file: " .. path end
   local contents = file:read(4097) or ""
   file:close()
-  if #contents > 4096 then return nil, "secret input file exceeds 4 KiB: " .. path end
-  local first_line = contents:match("^([^\r\n]*)") or ""
-  first_line = first_line:gsub("^%s+", ""):gsub("%s+$", "")
-  if first_line == "" then return nil, "secret input file is empty: " .. path end
-  return first_line
+  local secret, secret_error = normalize_secret(contents)
+  if secret_error == "too_long" then return nil, "secret input file exceeds 4 KiB: " .. path end
+  if secret_error == "empty" then return nil, "secret input file is empty: " .. path end
+  if not secret then return nil, "secret input file is invalid: " .. path end
+  return secret
 end
 
 local function transport_pin(hex)

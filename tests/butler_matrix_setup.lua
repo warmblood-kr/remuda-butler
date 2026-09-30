@@ -420,7 +420,7 @@ return function(matrix)
     and resolved.stderr:find("The server rejected that registration token. Nothing was created or written.", 1, true)
     and resolved.stderr:find("Next: rerun with --registration-token-file PATH", 1, true)
     and not resolved.stderr:find(prompt_token, 1, true)
-    and #requests == 3 and #prompt_specs == 3,
+    and #requests == 6 and #prompt_specs == 3,
     "three token rejections should stop safely without exposing a token")
 
   for _, prompt_error in ipairs({ "not_a_terminal", "refused", "too_long", "cancelled" }) do
@@ -446,6 +446,31 @@ return function(matrix)
     assert(read(error_output .. "/token") == nil and read(error_output .. "/config") == nil,
       "prompt errors must leave setup files unwritten")
   end
+  prompt_specs, requests, resolved = {}, {}, nil
+  local empty_output = root .. "/prompt-empty"
+  local empty_reply = matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--register", "--bot", "@butler-empty:example.org",
+    "--dir", empty_output })
+  assert(empty_reply and #prompt_specs == 1 and not resolved,
+    "registration setup should start with a hidden prompt")
+  for attempt = 1, 3 do
+    prompt_specs[attempt].callback(" \t\r\n ", nil)
+    if attempt < 3 then
+      assert(not resolved and #prompt_specs == attempt + 1,
+        "an empty token answer should ask again and consume one of the three tries")
+      assert(prompt_specs[attempt + 1].label:find("registration token is empty", 1, true),
+        "the retry prompt should explain that the registration token is empty")
+    end
+  end
+  assert(resolved and resolved.status == 1
+    and resolved.stderr:find("registration token is empty", 1, true)
+    and resolved.stderr:find("Nothing was written.", 1, true)
+    and resolved.stderr:find("Next: rerun with --registration-token-file PATH", 1, true)
+    and #prompt_specs == 3 and #requests == 0,
+    "three empty answers should stop without network work and show safe guidance")
+  assert(read(empty_output .. "/token") == nil and read(empty_output .. "/config") == nil,
+    "empty prompted answers must leave setup files unwritten")
+
   local real_write_atomic, atomic_writes = remuda.fs.write_atomic, {}
   local setup_http = remuda.http
   remuda.fs.write_atomic = function(path, contents, opts)

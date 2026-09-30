@@ -242,8 +242,31 @@ function matrix.cli(args, agent)
       cancelled.value = true
       if active and active.cancel then active:cancel() end
     end })
+    local prompt_attempts, prompt_notice = 0, nil
+    local prompt_label = "Registration token for " .. plan.homeserver
+      .. ", from its admin (hidden). This is not an access token:"
+    local rejected_registration_token = "The server rejected that registration token. Nothing was created or written."
+    local ask_registration_token
+    local function fail_registration_prompt(message, needs_terminal)
+      if cancelled.value or completed.value then return end
+      completed.value = true
+      local lines = {}
+      if message and message ~= "" then lines[#lines + 1] = message end
+      if needs_terminal then lines[#lines + 1] = "The hidden registration token prompt needs a terminal." end
+      lines[#lines + 1] = "Nothing was written."
+      lines[#lines + 1] = "Next: rerun with --registration-token-file PATH"
+      reply:resolve(1, "", table.concat(lines, "\n") .. "\n")
+    end
     local function finish_setup(result)
       if cancelled.value or completed.value then return end
+      if plan.prompt_registration_token and type(result) == "table"
+        and result.error == rejected_registration_token then
+        if prompt_attempts < 3 then
+          prompt_notice = rejected_registration_token
+          return ask_registration_token()
+        end
+        return fail_registration_prompt(rejected_registration_token)
+      end
       completed.value = true
       if type(result) ~= "table" then result = { error = "Matrix setup returned no result" } end
       if result.error then return reply:resolve(1, "", tostring(result.error) .. "\n") end
@@ -271,7 +294,47 @@ function matrix.cli(args, agent)
         reply:resolve(0, table.concat(lines, "\n") .. "\n", "")
       end, agent)
     end
-    active = matrix.setup_network(plan, finish_setup)
+    ask_registration_token = function()
+      if cancelled.value or completed.value then return end
+      prompt_attempts = prompt_attempts + 1
+      local label = prompt_notice and (prompt_notice .. "\n" .. prompt_label) or prompt_label
+      reply:prompt_secret({ label = label, callback = function(secret, prompt_error)
+        if cancelled.value or completed.value then return end
+        if prompt_error then
+          local message
+          if prompt_error == "not_a_terminal" then
+            message = "The registration token prompt cannot read a hidden answer."
+          elseif prompt_error == "too_long" then
+            message = "The registration token exceeds 4 KiB."
+          elseif prompt_error == "cancelled" then
+            message = "The registration token prompt was cancelled."
+          else
+            message = "The registration token prompt was refused."
+          end
+          return fail_registration_prompt(message, prompt_error == "not_a_terminal")
+        end
+        local token, token_error = matrix.normalize_secret(secret)
+        if not token then
+          if token_error == "empty" then
+            if prompt_attempts < 3 then
+              prompt_notice = "registration token is empty"
+              return ask_registration_token()
+            end
+            return fail_registration_prompt("registration token is empty")
+          end
+          return fail_registration_prompt("The registration token exceeds 4 KiB.")
+        end
+        plan.secret = token
+        prompt_notice = nil
+        active = matrix.setup_network(plan, finish_setup)
+        if cancelled.value and active and active.cancel then active:cancel() end
+      end })
+    end
+    if plan.prompt_registration_token then
+      ask_registration_token()
+    else
+      active = matrix.setup_network(plan, finish_setup)
+    end
     if cancelled.value and active and active.cancel then active:cancel() end
     return reply
   end
