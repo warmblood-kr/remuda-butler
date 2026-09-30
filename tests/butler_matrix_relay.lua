@@ -656,6 +656,10 @@ local function invite_fixture(senders, extra)
   return dir, path
 end
 
+local function open_invite_fixture(extra)
+  return invite_fixture(OWNER, "rooms=open\n" .. (extra or ""))
+end
+
 local function read_text(path)
   local file = assert(io.open(path, "rb"))
   local text = file:read("a")
@@ -667,6 +671,78 @@ local function room_line(path, room)
   for line in read_text(path):gmatch("[^\n]+") do
     if line:match("^room=(%S+)") == room then return line end
   end
+end
+
+local function test_open_room_config_and_deny_matching()
+  local default_dir, default_path = invite_fixture()
+  local default_conf = assert(matrix.read_config(default_path))
+  assert(default_conf.rooms_mode == "allowlist", "missing rooms config must default to allowlist")
+  remove_dir(default_dir)
+
+  local dir, path = open_invite_fixture(table.concat({
+    "deny_room=!blocked:example.org",
+    "deny_room=#blocked:example.org",
+    "deny_server=room-denied.example",
+    "deny_server=inviter-denied.example",
+    "deny_server=alias-denied.example",
+    "deny_server=ported-denied.example",
+    "deny_server=[abcd::1]",
+  }, "\n") .. "\n")
+  local conf, err = matrix.read_config(path)
+  assert(conf, "valid open-room config must parse: " .. tostring(err))
+  assert(conf.rooms_mode == "open", "rooms=open must select open mode")
+  assert(conf.deny_room_ids["!blocked:example.org"], "deny_room room IDs must be recorded")
+  assert(conf.deny_room_aliases["#blocked:example.org"], "deny_room aliases must be recorded")
+  assert(conf.deny_servers["room-denied.example"], "deny_server hosts must be recorded")
+  assert(matrix.invite_is_denied(conf, "!blocked:example.org", nil, STRANGER),
+    "the denied room ID must match")
+  assert(matrix.invite_is_denied(conf, NEW, "#blocked:example.org", STRANGER),
+    "the denied canonical alias must match")
+  assert(matrix.invite_is_denied(conf, NEW, "#blocked:EXAMPLE.ORG", STRANGER),
+    "the alias deny server comparison must ignore case")
+  assert(matrix.invite_is_denied(conf, "!x:room-denied.example", nil, STRANGER),
+    "the room server must match")
+  assert(matrix.invite_is_denied(conf, NEW, nil, "@mallory:inviter-denied.example"),
+    "the inviter server must match")
+  assert(matrix.invite_is_denied(conf, NEW, "#x:alias-denied.example", STRANGER),
+    "the alias server must match")
+  assert(matrix.invite_is_denied(conf, NEW, "#x:ALIAS-DENIED.EXAMPLE", STRANGER),
+    "the alias server comparison must ignore case")
+  assert(matrix.invite_is_denied(conf, "!x:ROOM-DENIED.EXAMPLE.", nil, STRANGER),
+    "a trailing dot on the room server must not bypass deny_server")
+  assert(matrix.invite_is_denied(conf, NEW, nil, "@x:INVITER-DENIED.EXAMPLE."),
+    "a trailing dot on the inviter server must not bypass deny_server")
+  assert(matrix.invite_is_denied(conf, NEW, "#x:ALIAS-DENIED.EXAMPLE.", STRANGER),
+    "a trailing dot on the alias server must not bypass deny_server")
+  assert(matrix.invite_is_denied(conf, "!x:[ABCD::1]", nil, STRANGER),
+    "IPv6 server deny comparison must ignore case")
+  assert(matrix.invite_is_denied(conf, "!x:ported-denied.example:8448", nil, STRANGER),
+    "deny_server without a port must match a room server with a port")
+  assert(matrix.invite_is_denied(conf, NEW, nil, "@x:ported-denied.example:8448"),
+    "deny_server without a port must match an inviter server with a port")
+  assert(not matrix.invite_is_denied(conf, "!Blocked:example.org", nil, STRANGER),
+    "room ID deny matching must remain exact")
+  assert(not matrix.invite_is_denied(conf, NEW, "#x:allowed.example", STRANGER),
+    "a non-denied room and server must not match")
+  remove_dir(dir)
+end
+
+local function test_invalid_open_room_config_lines_are_ignored_with_one_warning()
+  local dir, path = invite_fixture(OWNER,
+    "rooms=unrecognized\n deny_room=!bad value\ndeny_room=#invalid:\n"
+      .. "deny_server=bad\27[31mhost\ndeny_server=example.org:\n")
+  local original_stderr, warnings = io.stderr, {}
+  io.stderr = { write = function(_, message) warnings[#warnings + 1] = message; return true end }
+  local conf, err = matrix.read_config(path)
+  local again, again_err = matrix.read_config(path)
+  io.stderr = original_stderr
+  assert(conf and again, "invalid optional lines must not invalidate the config: " .. tostring(err or again_err))
+  assert(conf.rooms_mode == "allowlist", "an invalid rooms value must leave the safe default")
+  assert(next(conf.deny_room_ids) == nil and next(conf.deny_room_aliases) == nil
+    and next(conf.deny_servers) == nil, "invalid deny values must not widen a match")
+  assert(#warnings == 5, "each invalid line must warn once across config reloads")
+  assert(not table.concat(warnings):find("\27", 1, true), "warning text must be terminal-sanitized")
+  remove_dir(dir)
 end
 
 local function test_config_add_room_pads_short_config()
@@ -983,6 +1059,27 @@ local function test_bidi_invite_room_is_quarantined_without_home_notice()
   assert(ok, err)
 end
 
+local function test_open_mode_room_id_unicode_separators_are_refused()
+  for index, char in ipairs({ "\226\128\168", "\226\128\169", "\226\128\139" }) do
+    local room = "!unsafe" .. char .. "room:example.org"
+    local dir, path = open_invite_fixture()
+    local client, delivered = invite_client(), {}
+    local relay = started_relay(path, client, delivered)
+    client:sync({ json = { next_batch = "s" .. index,
+      rooms = { invite = invite(room, STRANGER) } } })
+    client:pump()
+    assert(client:joins(room) == 0,
+      "room IDs containing line separators or zero-width characters must not be joined")
+    local item
+    for _, q in ipairs(relay:quarantine_list()) do
+      if q.room_id == room and q.reason == "invite_not_allowlisted" then item = q end
+    end
+    assert(item, "an unsafe Unicode room ID must be quarantined as not allowlisted")
+    relay:stop()
+    remove_dir(dir)
+  end
+end
+
 local function test_long_invite_identifiers_dedupe_home_notice()
   local dir, path = invite_fixture()
   local long_room = "!" .. string.rep("r", 298) .. ":" .. string.rep("s", 300)
@@ -1047,6 +1144,369 @@ local function test_agent_invite_is_not_joined()
     assert(client:joins(room) == 0, "an agent-MXID invite must not be joined: " .. agent)
   end
   assert(read_text(path) == before, "an agent invite must not change the config")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function invite_with_state(room, inviter, alias)
+  local events = {
+    { type = "m.room.member", sender = inviter, state_key = "@bot:example.org",
+      content = { membership = "invite" } },
+  }
+  if alias then
+    table.insert(events, 1, { type = "m.room.canonical_alias", sender = inviter,
+      state_key = "", content = { alias = alias } })
+  end
+  return { [room] = { invite_state = { events = events } } }
+end
+
+local function test_open_mode_stranger_invite_joins_and_notifies_once()
+  local dir, path = open_invite_fixture()
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  local alias = "#open:example.org"
+  local invitation = invite_with_state(NEW, STRANGER, alias)
+  client:sync({ json = { next_batch = "s1", rooms = { invite = invitation } } })
+  client:pump()
+  assert(client:joins(NEW) == 1, "open mode must join a stranger invite exactly once")
+  local line = room_line(path, NEW)
+  assert(line and line:find("how=invite", 1, true)
+    and line:find("inviter=" .. STRANGER, 1, true),
+    "open mode must record how=invite and the inviter in config")
+  assert(client:messages(HOME, "Joined " .. NEW .. " (" .. alias .. ") from " .. STRANGER .. " invite.") == 1,
+    "open mode must post one HOME line with the room, canonical alias, and inviter")
+  client:sync({ json = { next_batch = "s2", rooms = { invite = invitation } } })
+  client:pump()
+  assert(client:messages(HOME, "Joined " .. NEW) == 1, "a repeated invite must not repeat the HOME line")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function test_open_mode_denies_room_alias_room_server_and_inviter_server()
+  local cases = {
+    { name = "room id", room = NEW, inviter = STRANGER, alias = "#safe:example.org",
+      deny = "deny_room=" .. NEW },
+    { name = "canonical alias", room = NEW, inviter = STRANGER, alias = "#denied:example.org",
+      deny = "deny_room=#denied:example.org" },
+    { name = "room server", room = "!other:denied.example", inviter = STRANGER,
+      alias = "#safe:example.org", deny = "deny_server=denied.example" },
+    { name = "inviter server", room = NEW, inviter = "@mallory:denied.example",
+      alias = "#safe:example.org", deny = "deny_server=denied.example" },
+  }
+  local failures = {}
+  for index, spec in ipairs(cases) do
+    local dir, path = open_invite_fixture(spec.deny .. "\n")
+    local client, delivered = invite_client(), {}
+    local relay = started_relay(path, client, delivered)
+    local invitation = invite_with_state(spec.room, spec.inviter, spec.alias)
+    client:sync({ json = { next_batch = "s" .. index, rooms = { invite = invitation } } })
+    client:pump()
+    local case_ok, case_err = pcall(function()
+      assert(client:joins(spec.room) == 0, spec.name .. " denial must refuse the invite before POST join")
+      local item
+      for _, q in ipairs(relay:quarantine_list()) do
+        if q.reason == "invite_denied" then item = q end
+      end
+      assert(item and item.room_id == spec.room,
+        spec.name .. " denial must quarantine as invite_denied")
+    end)
+    if not case_ok then failures[#failures + 1] = spec.name .. ": " .. tostring(case_err) end
+    relay:stop()
+    remove_dir(dir)
+  end
+  assert(#failures == 0, table.concat(failures, "\n"))
+end
+
+local function test_open_mode_refuses_truncated_denied_inviter()
+  local dir, path = open_invite_fixture("deny_server=evil.org\n")
+  local long_inviter = "@" .. string.rep("a", 120) .. ":evil.org"
+  assert(#long_inviter == 130, "fixture inviter must exercise truncation")
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  client:sync({ json = { next_batch = "s1",
+    rooms = { invite = invite_with_state(NEW, long_inviter, "#safe:example.org") } } })
+  client:pump()
+  assert(client:joins(NEW) == 0, "a truncated inviter from a denied server must not join")
+  local item
+  for _, q in ipairs(relay:quarantine_list()) do
+    if q.room_id == NEW then item = q end
+  end
+  assert(item and item.reason == "invite_not_allowlisted",
+    "a sanitized/truncated inviter must be refused as not allowlisted")
+  local conf = assert(matrix.read_config(path))
+  assert(conf.rooms[NEW] == nil, "a truncated inviter must not be written as room metadata")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function test_open_mode_refuses_truncated_alias()
+  local dir, path = open_invite_fixture("deny_server=evil.org\n")
+  local long_alias = "#" .. string.rep("a", 120) .. ":evil.org"
+  assert(#long_alias == 130, "fixture alias must exercise truncation")
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  client:sync({ json = { next_batch = "s1",
+    rooms = { invite = invite_with_state(NEW, STRANGER, long_alias) } } })
+  client:pump()
+  assert(client:joins(NEW) == 0, "an invite with a truncated canonical alias must not join")
+  local item
+  for _, q in ipairs(relay:quarantine_list()) do
+    if q.room_id == NEW then item = q end
+  end
+  assert(item and item.reason == "invite_not_allowlisted",
+    "a sanitized/truncated alias must refuse the invite as not allowlisted")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function test_open_mode_sender_allowlist_still_quarantines()
+  local dir, path = open_invite_fixture("room=" .. NEW .. " how=invite inviter=" .. STRANGER .. "\n")
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  client:sync({ json = { next_batch = "s1", rooms = { join = {
+    [NEW] = { timeline = { events = {
+      { type = "m.room.message", event_id = "$open-blocked", sender = STRANGER,
+        content = { msgtype = "m.text", body = "not allowed" } },
+    } } },
+  } } } })
+  assert(not delivered_ids(delivered, "$open-blocked"), "a non-allowlisted sender must never become mail")
+  local item
+  for _, q in ipairs(relay:quarantine_list()) do
+    if q.event_id == "$open-blocked" then item = q end
+  end
+  assert(item and item.reason == "sender_not_allowlisted",
+    "a non-allowlisted sender in an open-mode room must be quarantined")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function test_open_mode_daily_join_cap_quarantines_twenty_first_invite()
+  local dir, path = open_invite_fixture()
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  local invites = {}
+  for index = 1, 20 do
+    local room = "!cap" .. index .. ":example.org"
+    invites[room] = invite(room, STRANGER)[room]
+  end
+  client:sync({ json = { next_batch = "s1", rooms = { invite = invites } } })
+  client:pump()
+  local joined = 0
+  for index = 1, 20 do
+    if client:joins("!cap" .. index .. ":example.org") > 0 then joined = joined + 1 end
+  end
+  assert(joined == 20, "open mode must auto-join at most 20 distinct rooms per rolling day")
+  relay:stop()
+
+  local restarted_client, restarted_delivered = invite_client(), {}
+  relay = started_relay(path, restarted_client, restarted_delivered)
+  local twenty_first = "!cap21:example.org"
+  restarted_client:sync({ json = { next_batch = "s2", rooms = { invite = invite(twenty_first, STRANGER) } } })
+  restarted_client:pump()
+  assert(restarted_client:joins(twenty_first) == 0,
+    "the persisted rolling-day budget must refuse a 21st invite after restart")
+  local capped
+  for _, q in ipairs(relay:quarantine_list()) do
+    if q.reason == "invite_cap" then capped = q end
+  end
+  assert(capped, "the 21st open-mode invite must be quarantined as invite_cap")
+  assert(restarted_client:messages(HOME, "Auto-join cap reached (20/day); 1 invites quarantined.") == 1,
+    "a sync that hits the cap must post one cap summary to HOME")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function test_open_mode_future_join_timestamps_remain_counted()
+  local dir, path = open_invite_fixture()
+  local timestamps = matrix.json_array({})
+  for index = 1, 20 do
+    timestamps[index] = { room_id = "!future" .. index .. ":example.org", at = os.time() + 3600 }
+  end
+  local state_file = assert(io.open(path .. ".since", "wb"))
+  state_file:write(assert(matrix.encode_json({ auto_join_timestamps = timestamps })))
+  state_file:close()
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  assert(#relay:state().auto_join_timestamps == 20,
+    "future join timestamps must remain counted when the clock moves backward")
+  local room = "!clock-back:example.org"
+  client:sync({ json = { next_batch = "s1",
+    rooms = { invite = invite_with_state(room, STRANGER, "#clock:example.org") } } })
+  client:pump()
+  assert(client:joins(room) == 0, "future timestamps must keep the daily join cap full")
+  local capped
+  for _, item in ipairs(relay:quarantine_list()) do
+    if item.room_id == room and item.reason == "invite_cap" then capped = item end
+  end
+  assert(capped, "an invite while future timestamps remain must be quarantined at the cap")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function test_open_mode_configured_room_invite_rejoins_and_preserves_line()
+  local original = "room=" .. NEW .. " how=operator\n"
+  local dir, path = open_invite_fixture(original)
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  client:sync({ json = { next_batch = "s1",
+    rooms = { invite = invite_with_state(NEW, STRANGER, "#open:example.org") } } })
+  client:pump()
+  assert(client:joins(NEW) == 1,
+    "an open-mode invite for a configured room must run the rejoin path")
+  assert(read_text(path):find(original, 1, true),
+    "a rejoin must preserve the existing room config line")
+  assert(client:messages(HOME, "Joined " .. NEW) == 1,
+    "a successful rejoin must notify HOME as usual")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function test_open_mode_configured_room_rejoin_honors_deny_cap_and_rollback()
+  do
+    local original = "room=" .. NEW .. " how=operator\n"
+    local dir, path = open_invite_fixture(original .. "deny_room=" .. NEW .. "\n")
+    local client, delivered = invite_client(), {}
+    local relay = started_relay(path, client, delivered)
+    client:sync({ json = { next_batch = "s1",
+      rooms = { invite = invite_with_state(NEW, STRANGER, "#open:example.org") } } })
+    client:pump()
+    assert(client:joins(NEW) == 0, "configured room rejoin must still check deny rules")
+    assert(room_line(path, NEW) == original:gsub("\n$", ""), "denial must preserve the configured room line")
+    local denied
+    for _, item in ipairs(relay:quarantine_list()) do
+      if item.room_id == NEW and item.reason == "invite_denied" then denied = item end
+    end
+    assert(denied, "a denied configured-room re-invite must be quarantined")
+    relay:stop()
+    remove_dir(dir)
+  end
+
+  do
+    local original = "room=" .. NEW .. " how=operator\n"
+    local dir, path = open_invite_fixture(original)
+    local timestamps = matrix.json_array({})
+    for index = 1, 20 do
+      timestamps[index] = { room_id = "!used" .. index .. ":example.org", at = os.time() }
+    end
+    local state_file = assert(io.open(path .. ".since", "wb"))
+    state_file:write(assert(matrix.encode_json({ auto_join_timestamps = timestamps })))
+    state_file:close()
+    local client, delivered = invite_client(), {}
+    local relay = started_relay(path, client, delivered)
+    client:sync({ json = { next_batch = "s1",
+      rooms = { invite = invite_with_state(NEW, STRANGER, "#open:example.org") } } })
+    client:pump()
+    assert(client:joins(NEW) == 0, "configured room rejoin must honor the daily cap")
+    assert(room_line(path, NEW) == original:gsub("\n$", ""), "cap refusal must preserve the configured room line")
+    local capped
+    for _, item in ipairs(relay:quarantine_list()) do
+      if item.room_id == NEW and item.reason == "invite_cap" then capped = item end
+    end
+    assert(capped, "a capped configured-room re-invite must be quarantined")
+    relay:stop()
+    remove_dir(dir)
+  end
+
+  do
+    local original = "room=" .. NEW .. " how=operator\n"
+    local dir, path = open_invite_fixture(original)
+    local client, delivered = invite_client(), {}
+    local relay = started_relay(path, client, delivered)
+    client:sync({ json = { next_batch = "s1",
+      rooms = { invite = invite_with_state(NEW, STRANGER, "#open:example.org") } } })
+    client:pump({ error = "M_FORBIDDEN" })
+    assert(client:joins(NEW) == 1, "configured room rejoin must issue the join request")
+    assert(room_line(path, NEW) == original:gsub("\n$", ""), "failed rejoin rollback must preserve the configured room line")
+    relay:stop()
+    remove_dir(dir)
+  end
+end
+
+local function test_open_mode_repeated_invite_for_joined_room_rejoins_once()
+  local dir, path = open_invite_fixture("room=" .. NEW .. " how=invite inviter=" .. OWNER .. "\n")
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  local invitation = invite(NEW, OWNER)
+  client:sync({ json = { next_batch = "s1", rooms = { invite = invitation } } })
+  client:pump()
+  client:sync({ json = { next_batch = "s2", rooms = { invite = invitation } } })
+  client:pump()
+  assert(client:joins(NEW) == 1, "a configured room invite must rejoin once and dedupe its repeat")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function test_open_mode_failed_join_rolls_back_config_but_counts_against_cap()
+  local dir, path = open_invite_fixture()
+  local timestamps = matrix.json_array({})
+  for index = 1, 19 do
+    timestamps[index] = { room_id = "!used" .. index .. ":example.org", at = os.time() }
+  end
+  local state_file = assert(io.open(path .. ".since", "wb"))
+  state_file:write(assert(matrix.encode_json({ auto_join_timestamps = timestamps })))
+  state_file:close()
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  local invitation = invite_with_state(NEW, STRANGER, "#open:example.org")
+  client:sync({ json = { next_batch = "s1", rooms = { invite = invitation } } })
+  client:pump({ error = "M_FORBIDDEN" })
+  assert(room_line(path, NEW) == nil, "a failed open-mode join must still roll back its config line")
+  assert(#relay:state().auto_join_timestamps == 20,
+    "a failed open-mode join must retain its timestamp in the daily budget")
+  local next_room = "!after-failure:example.org"
+  client:sync({ json = { next_batch = "s2",
+    rooms = { invite = invite_with_state(next_room, STRANGER, "#after:example.org") } } })
+  client:pump()
+  assert(client:joins(NEW) == 1 and client:joins(next_room) == 0,
+    "the failed 20th join must cause the next room invite to hit the cap")
+  local capped
+  for _, item in ipairs(relay:quarantine_list()) do
+    if item.room_id == next_room and item.reason == "invite_cap" then capped = item end
+  end
+  assert(capped, "the next invite after a failed 20th join must be quarantined at the cap")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function test_open_mode_hostile_invite_state_is_refused()
+  local dir, path = open_invite_fixture()
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  local hostile_inviter = "@ali\27ce:example.org"
+  local hostile_alias = "#room\226\128\174:example.org"
+  local invitation = invite_with_state(NEW, hostile_inviter, hostile_alias)
+  client:sync({ json = { next_batch = "s1", rooms = { invite = invitation } } })
+  client:pump()
+  assert(room_line(path, NEW) == nil, "hostile invite fields must not be written to config")
+  assert(client:joins(NEW) == 0, "invite fields changed by sanitization must not be joined")
+  local quarantined
+  for _, item in ipairs(relay:quarantine_list()) do
+    if item.room_id == NEW then quarantined = item end
+  end
+  assert(quarantined and quarantined.reason == "invite_not_allowlisted",
+    "hostile invite fields must be quarantined as not allowlisted")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function test_open_mode_conflicting_inviter_events_remain_refused()
+  local dir, path = open_invite_fixture()
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  local invitation = { [NEW] = { invite_state = { events = {
+    { type = "m.room.member", sender = OWNER, state_key = "@bot:example.org",
+      content = { membership = "invite" } },
+    { type = "m.room.member", sender = STRANGER, state_key = "@bot:example.org",
+      content = { membership = "invite" } },
+  } } } }
+  client:sync({ json = { next_batch = "s1", rooms = { invite = invitation } } })
+  client:pump()
+  assert(client:joins(NEW) == 0, "conflicting invite events must never be joined in open mode")
+  local item
+  for _, q in ipairs(relay:quarantine_list()) do
+    if q.reason == "invite_not_allowlisted" then item = q end
+  end
+  assert(item and item.room_id == NEW, "conflicting invite events must remain quarantined")
   relay:stop()
   remove_dir(dir)
 end
@@ -1453,6 +1913,44 @@ local function test_rooms_public_term_lists_public_rows()
   end)
   remove_dir(dir)
   assert(listed, list_error)
+end
+
+local function test_rooms_lists_open_mode_room_metadata_and_denies()
+  local dir, path = invite_fixture(OWNER, table.concat({
+    "rooms=open",
+    "room=" .. NEW .. " how=invite inviter=" .. STRANGER,
+    "deny_room=!blocked:example.org",
+    "deny_room=#blocked:example.org",
+    "deny_server=evil.example",
+  }, "\n") .. "\n")
+  with_alias_http(path, function() error("matrix rooms should not make an HTTP request") end, function(calls)
+    local json_result = capture_matrix_cli({ "matrix", "--json", "rooms" })
+    local envelope = assert(matrix.decode_json(json_result.stdout))
+    local data = assert(envelope.json)
+    assert(json_result.code == 0 and data.mode == "open", "rooms JSON must show the current mode")
+    local joined
+    for _, room in ipairs(data.rooms) do
+      if room.room == NEW then joined = room end
+    end
+    assert(joined and joined.kind == "joined" and joined.how == "invite"
+      and joined.inviter == STRANGER,
+      "rooms JSON must list each joined room with kind, how, and inviter")
+    local deny = {}
+    for _, line in ipairs(data.deny_lines) do deny[line] = true end
+    assert(deny["deny_room=!blocked:example.org"] and deny["deny_room=#blocked:example.org"]
+      and deny["deny_server=evil.example"], "rooms JSON must include every deny config line")
+
+    local human = capture_matrix_cli({ "matrix", "rooms" })
+    assert(human.code == 0 and human.stdout:find("Rooms mode: open", 1, true)
+      and human.stdout:find(NEW, 1, true) and human.stdout:find("joined", 1, true)
+      and human.stdout:find("invite; inviter " .. STRANGER, 1, true)
+      and human.stdout:find("Deny: deny_room=!blocked:example.org", 1, true)
+      and human.stdout:find("Deny: deny_room=#blocked:example.org", 1, true)
+      and human.stdout:find("Deny: deny_server=evil.example", 1, true),
+      "rooms human output must show mode, room metadata, and deny lines")
+    assert(#calls == 0, "matrix rooms must remain a local config view")
+  end)
+  remove_dir(dir)
 end
 
 local function test_invalid_room_id_hint_mentions_element_x_alias_fallback()
@@ -1862,9 +2360,25 @@ for _, case in ipairs({
   { "test_conflicting_inviter_events_cannot_join", test_conflicting_inviter_events_cannot_join },
   { "test_unsafe_invite_room_is_quarantined_without_home_notice", test_unsafe_invite_room_is_quarantined_without_home_notice },
   { "test_bidi_invite_room_is_quarantined_without_home_notice", test_bidi_invite_room_is_quarantined_without_home_notice },
+  { "test_open_mode_room_id_unicode_separators_are_refused", test_open_mode_room_id_unicode_separators_are_refused },
   { "test_long_invite_identifiers_dedupe_home_notice", test_long_invite_identifiers_dedupe_home_notice },
   { "test_invite_home_notice_cap_adds_one_summary", test_invite_home_notice_cap_adds_one_summary },
   { "test_agent_invite_is_not_joined", test_agent_invite_is_not_joined },
+  { "test_open_room_config_and_deny_matching", test_open_room_config_and_deny_matching },
+  { "test_invalid_open_room_config_lines_are_ignored_with_one_warning", test_invalid_open_room_config_lines_are_ignored_with_one_warning },
+  { "test_open_mode_stranger_invite_joins_and_notifies_once", test_open_mode_stranger_invite_joins_and_notifies_once },
+  { "test_open_mode_denies_room_alias_room_server_and_inviter_server", test_open_mode_denies_room_alias_room_server_and_inviter_server },
+  { "test_open_mode_refuses_truncated_denied_inviter", test_open_mode_refuses_truncated_denied_inviter },
+  { "test_open_mode_refuses_truncated_alias", test_open_mode_refuses_truncated_alias },
+  { "test_open_mode_sender_allowlist_still_quarantines", test_open_mode_sender_allowlist_still_quarantines },
+  { "test_open_mode_daily_join_cap_quarantines_twenty_first_invite", test_open_mode_daily_join_cap_quarantines_twenty_first_invite },
+  { "test_open_mode_future_join_timestamps_remain_counted", test_open_mode_future_join_timestamps_remain_counted },
+  { "test_open_mode_configured_room_invite_rejoins_and_preserves_line", test_open_mode_configured_room_invite_rejoins_and_preserves_line },
+  { "test_open_mode_configured_room_rejoin_honors_deny_cap_and_rollback", test_open_mode_configured_room_rejoin_honors_deny_cap_and_rollback },
+  { "test_open_mode_repeated_invite_for_joined_room_rejoins_once", test_open_mode_repeated_invite_for_joined_room_rejoins_once },
+  { "test_open_mode_failed_join_rolls_back_config_but_counts_against_cap", test_open_mode_failed_join_rolls_back_config_but_counts_against_cap },
+  { "test_open_mode_hostile_invite_state_is_refused", test_open_mode_hostile_invite_state_is_refused },
+  { "test_open_mode_conflicting_inviter_events_remain_refused", test_open_mode_conflicting_inviter_events_remain_refused },
   { "test_config_add_room_pads_short_config", test_config_add_room_pads_short_config },
   { "test_join_room_alias_resolves_and_labels_output", test_join_room_alias_resolves_and_labels_output },
   { "test_unknown_room_alias_is_reported_without_config_change", test_unknown_room_alias_is_reported_without_config_change },
@@ -1882,6 +2396,7 @@ for _, case in ipairs({
   { "test_public_name_with_next_batch_is_ambiguous", test_public_name_with_next_batch_is_ambiguous },
   { "test_public_room_hostile_fields_are_sanitised_in_join_and_listing", test_public_room_hostile_fields_are_sanitised_in_join_and_listing },
   { "test_rooms_public_term_lists_public_rows", test_rooms_public_term_lists_public_rows },
+  { "test_rooms_lists_open_mode_room_metadata_and_denies", test_rooms_lists_open_mode_room_metadata_and_denies },
   { "test_invalid_room_id_hint_mentions_element_x_alias_fallback", test_invalid_room_id_hint_mentions_element_x_alias_fallback },
   { "test_join_failure_rolls_back_room_line", test_join_failure_rolls_back_room_line },
   { "test_joined_room_survives_restart", test_joined_room_survives_restart },

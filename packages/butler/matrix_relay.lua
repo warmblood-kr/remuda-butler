@@ -144,6 +144,12 @@ local function valid_mxid(value)
   return type(value) == "string" and value:match("^@[^:%s]+:%S+$") ~= nil
 end
 
+local function valid_open_mxid(value)
+  if not valid_mxid(value) then return false end
+  local server = value:match("^@[^:]+:(.+)$")
+  return type(matrix.valid_server_name) ~= "function" or matrix.valid_server_name(server)
+end
+
 local function has_bidi_format(value)
   return type(value) == "string" and (value:find("\226\128[\142\143\170-\174]") ~= nil
     or value:find("\226\129[\166-\169]") ~= nil)
@@ -311,6 +317,7 @@ local function empty_state()
   return { since = nil, messages_since = nil, processed = {}, processed_order = {},
     pending = json.object({}), quarantine = json.array({}), routes = json.object({}),
     subscriptions = json.object({}),
+    auto_join_timestamps = json.array({}),
     reply_outbox = json.object({}), reply_results = json.object({}), approvals = json.object({}) }
 end
 
@@ -340,6 +347,7 @@ local function load_state(path)
   local reply_results = value.matrix_reply_results or json.object({})
   local subscriptions = value.matrix_thread_subscriptions or json.object({})
   local approvals = value.approvals or json.object({})
+  local auto_join_timestamps = value.auto_join_timestamps or json.array({})
   if (since ~= nil and type(since) ~= "string")
     or (messages_since ~= nil and type(messages_since) ~= "string")
     or type(processed_ids) ~= "table" or processed_ids == json.null
@@ -355,6 +363,10 @@ local function load_state(path)
     or type(approvals) ~= "table" or approvals == json.null or getmetatable(approvals) == JSON_ARRAY_MT then
     return empty_state(), "invalid Matrix relay state fields"
   end
+  if type(auto_join_timestamps) ~= "table" or auto_join_timestamps == json.null
+    or getmetatable(auto_join_timestamps) ~= JSON_ARRAY_MT then
+    return empty_state(), "invalid Matrix relay auto-join timestamps"
+  end
   local state = empty_state()
   local quarantine_pruned = false
   state.since, state.messages_since = since, messages_since
@@ -367,6 +379,17 @@ local function load_state(path)
       or rec.status == "denied" or rec.status == "expired")
       and tonumber(rec.answered_at) and tonumber(rec.answered_at) < approval_cutoff then
       state.approvals[id] = nil
+    end
+  end
+  for _, item in ipairs(auto_join_timestamps) do
+    if type(item) == "table" and valid_room_id(item.room_id)
+      and type(item.at) == "number" and item.at >= 1 and item.at % 1 == 0 then
+      local invite_event_id = type(item.invite_event_id) == "string"
+        and #item.invite_event_id <= 512 and not item.invite_event_id:find("[%c%s]")
+        and item.invite_event_id ~= "" and item.invite_event_id or nil
+      state.auto_join_timestamps[#state.auto_join_timestamps + 1] = {
+        room_id = item.room_id, at = item.at, invite_event_id = invite_event_id,
+      }
     end
   end
   for room_id, roots in pairs(subscriptions) do
@@ -452,7 +475,8 @@ local function save_state(path, state)
     messages_since = state.messages_since, pending_events = state.pending,
     quarantine = state.quarantine, matrix_mail_routes = state.routes,
     matrix_reply_outbox = state.reply_outbox, matrix_reply_results = state.reply_results,
-    matrix_thread_subscriptions = state.subscriptions, approvals = state.approvals })
+    matrix_thread_subscriptions = state.subscriptions, approvals = state.approvals,
+    auto_join_timestamps = state.auto_join_timestamps })
   return remuda.fs.write_atomic(path, json, { private = true })
 end
 
@@ -1056,32 +1080,195 @@ function relay.new(options)
   end
 
   local function handle_invites(response)
-    local home_invite_notices, additional_invites = 0, 0
+    local home_invite_notices, additional_invites, auto_join_cap_hits = 0, 0, 0
+    local AUTO_JOIN_LIMIT, AUTO_JOIN_WINDOW = 20, 24 * 60 * 60
     local rooms = type(response) == "table" and type(response.rooms) == "table" and response.rooms or {}
     local invites = type(rooms.invite) == "table" and rooms.invite or {}
+    local now, live_auto_joins = os.time(), json.array({})
+    for _, item in ipairs(state.auto_join_timestamps or {}) do
+      if type(item) == "table" and type(item.room_id) == "string"
+        and type(item.at) == "number" and item.at > now - AUTO_JOIN_WINDOW then
+        live_auto_joins[#live_auto_joins + 1] = item
+      end
+    end
+    if #live_auto_joins ~= #(state.auto_join_timestamps or {}) then
+      state.auto_join_timestamps = live_auto_joins
+      persist()
+    end
+
+    local function invite_state_id(room_id)
+      return "invite:" .. cap_field(room_id, 500)
+    end
+
+    local function quarantine_invite(room_id, inviter, reason)
+      local ev = { event_id = invite_state_id(room_id),
+        sender = terminal_safe_field(inviter, 128), type = "m.room.member", content = {} }
+      return quarantine_event(ev, reason, room_id)
+    end
+
+    local function remove_auto_join(room_id, at)
+      for index = #state.auto_join_timestamps, 1, -1 do
+        local item = state.auto_join_timestamps[index]
+        if item.room_id == room_id and item.at == at then
+          table.remove(state.auto_join_timestamps, index)
+          return true
+        end
+      end
+      return false
+    end
+
+    local function has_auto_joined_room(room_id, invite_event_id, room_kind)
+      for _, item in ipairs(state.auto_join_timestamps) do
+        if item.room_id == room_id then
+          if item.invite_event_id and invite_event_id then
+            if item.invite_event_id == invite_event_id then return true end
+          elseif not item.invite_event_id and room_kind ~= "joined" then
+            return true
+          elseif not item.invite_event_id and not invite_event_id then
+            return true
+          end
+        end
+      end
+      return false
+    end
+
     for room_id, invitation in pairs(invites) do
       local room_kind = cfg.rooms[room_id]
+      local open_mode = cfg.rooms_mode == "open"
       if type(invitation) == "table" and room_kind ~= "home" and room_kind ~= "all"
-        and not joining[room_id] then
-        local inviter, matching_invites, same_inviter = nil, 0, true
+        and (not open_mode or room_kind == nil or room_kind == "joined") and not joining[room_id] then
+        local inviter, invite_event_id, matching_invites, same_inviter = nil, nil, 0, true
+        local canonical_aliases = {}
+        local changed_invite_metadata = false
         local invite_state = invitation.invite_state
         local events = type(invite_state) == "table" and invite_state.events or nil
         for _, event in ipairs(type(events) == "table" and events or {}) do
-          if type(event) == "table" and event.type == "m.room.member"
-            and event.state_key == cfg.self_mxid
-            and type(event.content) == "table" and event.content.membership == "invite" then
-            matching_invites = matching_invites + 1
-            if type(event.sender) ~= "string" or event.sender == "" then
-              same_inviter = false
-            else
-              if inviter and inviter ~= event.sender then same_inviter = false end
-              inviter = event.sender
+          if type(event) == "table" then
+            if event.type == "m.room.member" and event.state_key == cfg.self_mxid
+              and type(event.content) == "table" and event.content.membership == "invite" then
+              matching_invites = matching_invites + 1
+              if type(event.event_id) == "string" and #event.event_id <= 512
+                and not event.event_id:find("[%c%s]") then
+                invite_event_id = event.event_id
+              end
+              if type(event.sender) ~= "string" or event.sender == "" then
+                same_inviter = false
+              else
+                if inviter and inviter ~= event.sender then same_inviter = false end
+                inviter = event.sender
+              end
+            elseif event.type == "m.room.canonical_alias" and event.state_key == ""
+              and type(event.content) == "table" and type(event.content.alias) == "string" then
+              local raw_alias = event.content.alias
+              local alias = matrix.sanitize_directory_text(raw_alias, 128)
+              if alias ~= raw_alias then changed_invite_metadata = true end
+              if matrix.valid_room_alias(raw_alias) then canonical_aliases[raw_alias] = true end
             end
           end
         end
-        if matching_invites > 0 then
+        if not (open_mode and has_auto_joined_room(room_id, invite_event_id, room_kind))
+          and (matching_invites > 0 or open_mode) then
           local report_inviter = inviter or "unknown inviter"
-          if same_inviter and inviter and cfg.allowed_senders[inviter]
+          if open_mode then
+            local raw_inviter = inviter or ""
+            local safe_inviter = matrix.sanitize_directory_text(raw_inviter, 128)
+            if safe_inviter ~= raw_inviter then changed_invite_metadata = true end
+            local aliases = {}
+            for alias in pairs(canonical_aliases) do aliases[#aliases + 1] = alias end
+            table.sort(aliases)
+            local notice_alias = #aliases == 1 and aliases[1] or nil
+            local room_is_safe = valid_room_id(room_id) and #room_id <= 500
+              and mail_body(room_id) == room_id and not has_bidi_format(room_id)
+              and matrix.sanitize_directory_text(room_id, 500) == room_id
+            local denied = matrix.invite_is_denied(cfg, room_id, nil, raw_inviter)
+            for _, alias in ipairs(aliases) do
+              if matrix.invite_is_denied(cfg, room_id, alias, raw_inviter) then denied = true end
+            end
+            if changed_invite_metadata then
+              quarantine_invite(room_id, safe_inviter, "invite_not_allowlisted")
+            elseif denied then
+              quarantine_invite(room_id, safe_inviter, "invite_denied")
+            elseif not room_is_safe or matching_invites == 0 or not same_inviter
+              or not valid_open_mxid(safe_inviter) or member_kind(safe_inviter, cfg) ~= "HUMAN" then
+              quarantine_invite(room_id, safe_inviter, "invite_not_allowlisted")
+            else
+              local joined_count = #state.auto_join_timestamps
+              if joined_count >= AUTO_JOIN_LIMIT then
+                quarantine_invite(room_id, safe_inviter, "invite_cap")
+                auto_join_cap_hits = auto_join_cap_hits + 1
+              else
+                local added_room, write_result
+                if room_kind == "joined" then
+                  added_room, write_result = true, false
+                else
+                  added_room, write_result = matrix.config_add_room(
+                    config_path, room_id, "invite", nil, safe_inviter)
+                end
+                if added_room then
+                  local wrote = write_result == true
+                  if wrote then
+                    cfg.rooms[room_id] = "joined"
+                    cfg.room_how[room_id] = "invite"
+                    cfg.room_inviters[room_id] = safe_inviter
+                  else
+                    local refreshed = read_config(config_path)
+                    if refreshed then
+                      cfg.rooms, cfg.room_how = refreshed.rooms, refreshed.room_how
+                      cfg.room_inviters = refreshed.room_inviters
+                    end
+                  end
+                  local joined_at = os.time()
+                  state.auto_join_timestamps[#state.auto_join_timestamps + 1] = {
+                    room_id = room_id, at = joined_at, invite_event_id = invite_event_id,
+                  }
+                  local saved, save_error = pcall(persist)
+                  if not saved then
+                    remove_auto_join(room_id, joined_at)
+                    if wrote then
+                      matrix.config_remove_room(config_path, room_id)
+                      cfg.rooms[room_id], cfg.room_how[room_id], cfg.room_inviters[room_id] = nil, nil, nil
+                    end
+                    warn_once("invite-state", room_id, "butler could not save open Matrix invite budget for "
+                      .. terminal_safe_field(room_id, 512) .. ": " .. terminal_safe_field(tostring(save_error), 512))
+                  else
+                    joining[room_id] = true
+                    api.request_json({ method = "POST",
+                      path = "/_matrix/client/v3/rooms/" .. percent_encode(room_id) .. "/join",
+                      room = room_id, body = "{}", headers = { ["Content-Type"] = "application/json" },
+                    }, function(result)
+                      joining[room_id] = nil
+                      if type(result) ~= "table" or result.error then
+                        if wrote then
+                          local removed, remove_error = matrix.config_remove_room(config_path, room_id)
+                          cfg.rooms[room_id], cfg.room_how[room_id], cfg.room_inviters[room_id] = nil, nil, nil
+                          if not removed then
+                            warn_once("invite-rollback", room_id,
+                              "butler could not roll back open Matrix invite config for "
+                                .. terminal_safe_field(room_id, 512) .. ": "
+                                .. terminal_safe_field(tostring(remove_error), 512))
+                          end
+                        end
+                        local detail = type(result) == "table" and result.error or "Matrix join failed"
+                        warn_once("invite-join", room_id, "butler Matrix open invite join failed for "
+                          .. terminal_safe_field(room_id, 512) .. ": " .. terminal_safe_field(tostring(detail), 512))
+                        pcall(persist)
+                        return
+                      end
+                      local shown_alias = notice_alias and ("(" .. notice_alias .. ")") or "(no canonical alias)"
+                      local text = "Joined " .. room_id .. " " .. shown_alias .. " from " .. safe_inviter
+                        .. " invite. Undo: remuda butler matrix leave " .. shell_quote(room_id)
+                        .. "; block: add deny_room=" .. room_id
+                      send_notice(cfg.home_room, text, "invite-home-joined", room_id)
+                    end)
+                  end
+                else
+                  warn_once("invite-config", room_id, "butler could not add Matrix invited room "
+                    .. terminal_safe_field(room_id, 512) .. ": "
+                    .. terminal_safe_field(tostring(write_result), 512))
+                end
+              end
+            end
+          elseif same_inviter and inviter and cfg.allowed_senders[inviter]
             and member_kind(inviter, cfg) == "HUMAN" then
             local added_room, add_error, wrote = room_kind == "joined", nil, false
             if room_kind == nil then
@@ -1149,6 +1336,12 @@ function relay.new(options)
           end
         end
       end
+    end
+    if auto_join_cap_hits > 0 then
+      send_notice(cfg.home_room,
+        "Auto-join cap reached (20/day); " .. tostring(auto_join_cap_hits)
+          .. " invites quarantined. Next: remuda butler matrix quarantine",
+        "invite-cap-notice", tostring(response.next_batch or state.since or "sync"))
     end
     if additional_invites > 0 then
       local text = tostring(additional_invites)

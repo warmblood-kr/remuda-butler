@@ -80,21 +80,41 @@ replacing `PATH` with the chosen directory.
 
 `event` and `get` are aliases for the same read.
 The `remuda butler matrix rooms` command lists configured rooms, saved aliases,
-and how each room was added; server-side memberships show in
-`remuda butler matrix status`. Use `remuda butler matrix rooms --public [TERM]`
-to browse up to 20 public rooms, optionally filtered by a search term.
-The config file remains the
-single room boundary: an invite from an allowlisted human
-owner adds `room=ROOM_ID how=owner-invite`, and operator `join` adds
-`room=ROOM_ID how=operator`. Operators can join with a room ID, `#alias:server`,
-or a public room name. An alias is saved as a display label on the room line;
-it does not grant trust. A public name joins only when exactly one public room
-matches; multiple matches are listed for the operator to choose from. Invites from other senders are not joined and are
-reported to HOME; joined rooms use the HOME sender rules. The inviter check
-relies on the homeserver appending the real invite event to `invite_state`
-(Synapse does). `leave` removes a
-joined room by ID or alias, while HOME and ALL-BUTLERS cannot be left or removed. The
-`send -` stdin form is unsupported until core #213.
+its kind, how it was added, and its inviter; it also shows the room mode and
+deny rules. Server-side memberships show in `remuda butler matrix status`.
+Use `remuda butler matrix rooms --public [TERM]` to browse up to 20 public
+rooms, optionally filtered by a search term.
+
+The config file is the single room boundary. `rooms=open` lets any HUMAN
+account invite the Butler; the relay joins unless a room or server matches a
+deny rule. If `rooms` is omitted, the mode defaults to allowlist and preserves
+the existing behavior of joining only invites from allowlisted HUMAN accounts.
+In either mode, the sender allowlist still controls which room messages can
+become mail.
+Messages from other senders stay quarantined, and agent messages still need a
+mention. Open mode refuses invites from `agent-` and `butler-` MXIDs because
+they are not HUMAN accounts. Duplicate delivery of the same invite event is
+ignored; a new invite can retry a configured room, subject to deny checks and
+the budget. Open mode allows at most 20 automatic join attempts per rolling
+day. Owner invites count toward the cap, and failed join attempts remain
+counted.
+
+Add `deny_room=!ROOM_ID` or `deny_room=#alias:server` for each denied room, and
+`deny_server=host` for each denied server. Room IDs, canonical aliases, room
+servers, inviter servers, and alias servers are checked against these rules.
+An alias deny matches only when the invite carries that canonical alias; use
+`deny_room=!ROOM_ID` or `deny_server=host` for a hard block. Invalid deny lines
+are ignored with a warning. An open-mode join records
+`room=ROOM_ID how=invite inviter=@user:server`; allowlist-mode owner invites
+record `how=owner-invite`, and operator `join` records `how=operator`.
+Operators can join with a room ID, `#alias:server`, or a public room name. An
+alias is saved as a display label; it does not grant trust. A public name joins
+only when exactly one public room matches; multiple matches are listed for the
+operator to choose from. The inviter check relies on the homeserver appending
+the real invite event to `invite_state` (Synapse does). `leave` removes a joined
+room by ID or alias, while HOME and ALL-BUTLERS cannot be left or removed. The
+interactive setup wizard does not ask for the rooms mode yet. The `send -`
+stdin form is unsupported until core #213.
 
 `join` and `leave` change room membership and are operator-only. Until core
 #218 enforces caller identity, this is best-effort policy: another local
@@ -143,6 +163,9 @@ file contains:
 6. Optional sync timeout in milliseconds; blank defaults to `30000`.
 7. Optional transport and room settings, one `key=value` per line:
    `all_room=ROOM_ID` configures the shared ALL-BUTLERS room;
+   `rooms=open` or `rooms=allowlist` selects invite behavior, with allowlist as
+   the default; repeat `deny_room=ROOM_ID`, `deny_room=#alias:server`, or
+   `deny_server=host` lines to refuse matching invites;
    `ca_file=PATH` trusts a custom CA, and `pin_sha256=HEX` pins the
    homeserver's leaf key. `butler_senders=@id:server,...` remains accepted for
    older accounts that do not use the prefix convention; `agent-` and
