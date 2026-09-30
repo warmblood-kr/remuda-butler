@@ -865,18 +865,25 @@ function relay.new(options)
       local invites = response.rooms and response.rooms.invite or {}
       for room_id, invitation in pairs(invites) do
         if cfg.rooms[room_id] == nil then
-          local inviter
+          local inviter, matching_invites, same_inviter = nil, 0, true
           local events = invitation and invitation.invite_state and invitation.invite_state.events
           for _, event in ipairs(type(events) == "table" and events or {}) do
             if type(event) == "table" and event.type == "m.room.member"
               and event.state_key == cfg.self_mxid
               and type(event.content) == "table" and event.content.membership == "invite" then
-              inviter = event.sender
-              break
+              matching_invites = matching_invites + 1
+              if type(event.sender) ~= "string" or event.sender == "" then
+                same_inviter = false
+              else
+                if inviter and inviter ~= event.sender then same_inviter = false end
+                inviter = event.sender
+              end
             end
           end
-          if type(inviter) == "string" and inviter ~= "" then
-            if cfg.allowed_senders[inviter] and member_kind(inviter, cfg) == "HUMAN" then
+          if matching_invites > 0 then
+            local report_inviter = inviter or "unknown inviter"
+            if same_inviter and inviter and cfg.allowed_senders[inviter]
+              and member_kind(inviter, cfg) == "HUMAN" then
               local added_room, add_error = matrix.config_add_room(config_path, room_id, "owner-invite")
               if added_room then
                 cfg.rooms[room_id] = "joined"
@@ -902,14 +909,14 @@ function relay.new(options)
                   .. cap_field(room_id, 512) .. ": " .. tostring(add_error))
               end
             else
-              local ev = { event_id = "invite:" .. room_id .. "|" .. inviter,
-                sender = inviter, type = "m.room.member", content = {} }
+              local ev = { event_id = "invite:" .. room_id .. "|" .. report_inviter,
+                sender = report_inviter, type = "m.room.member", content = {} }
               if quarantine_event(ev, "invite_not_allowlisted", room_id) then
                 local safe_room = mail_body(cap_field(room_id, 512))
-                local safe_inviter = mail_body(cap_field(inviter, 256))
+                local safe_inviter = mail_body(cap_field(report_inviter, 256))
                 local text = "Invite to " .. safe_room .. " from " .. safe_inviter
                   .. " was not accepted. Next: remuda butler matrix join '" .. safe_room .. "'"
-                send_notice(cfg.home_room, text, "invite-home-notice", room_id .. "\0" .. inviter)
+                send_notice(cfg.home_room, text, "invite-home-notice", room_id .. "\0" .. report_inviter)
               end
             end
           end
