@@ -401,6 +401,43 @@ fn mail_arriving_each_second_fires_by_the_ten_second_maximum() {
 }
 
 #[test]
+fn notices_arriving_during_verification_get_a_fresh_debounce_window() {
+    let (path, _daemon) = butler_with_member("notice-verification-next-batch");
+    setup_mail_notice_clock(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        state.screen = '> '
+        remuda.capture = function() return state.screen end
+        remuda.type_text = function(_, text)
+          state.typed[#state.typed + 1] = { at = state.now, text = text }
+          state.screen = text .. '\n> '
+          return true
+        end
+        remuda._notice_test_send('m1', 'first batch')
+        state.now = 2
+        remuda._butler_deliver_notices()
+        state.now = 9
+        remuda._notice_test_send('m1', 'during verification')
+        remuda._butler_deliver_notices()
+        local pending = remuda._butler_bus.notices.m1
+        local first_at, due_at = pending.first_at, pending.due_at
+        state.now = 9.5
+        remuda._notice_test_send('m1', 'trailing mail')
+        state.now = 10
+        remuda._butler_deliver_notices()
+        local before_due = #state.typed
+        state.now = 11.5
+        remuda._butler_deliver_notices()
+        return table.concat({ tostring(#state.typed - 1), tostring(first_at), tostring(due_at),
+          tostring(before_due), tostring(#state.typed), tostring(state.typed[2] and state.typed[2].text) }, '|')
+        "#,
+    );
+    assert_eq!(got, "1|9|11|1|2|2 new Butler messages arrived. Read them: remuda butler inbox");
+}
+
+#[test]
 fn five_relay_mails_wait_until_a_busy_pane_is_free_and_coalesce() {
     let (path, _daemon) = butler_with_member("notice-relay-busy");
     setup_mail_notice_clock(&path);

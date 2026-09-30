@@ -1961,14 +1961,15 @@ local function refresh_pending_notice(session, pending)
   if not pending.message_order then return pending end
   local agent = bus.agents[session]
   local identity = agent and agent.id
-  local order, notices = {}, {}
+  local order, notices, message_times = {}, {}, {}
   for _, id in ipairs(pending.message_order) do
     local notice = pending.message_ids and pending.message_ids[id]
     if notice and identity and mail.is_unread(identity, id) then
       order[#order + 1], notices[id] = id, notice
+      message_times[id] = pending.message_times and pending.message_times[id]
     end
   end
-  pending.message_order, pending.message_ids = order, notices
+  pending.message_order, pending.message_ids, pending.message_times = order, notices, message_times
   pending.count = #order
   pending.text = order[#order] and notices[order[#order]] or nil
   if pending.count == 0 then
@@ -2100,10 +2101,28 @@ local function complete_notice_recovery(session, state)
       pending.message_order = order
       pending.count = #order
       pending.text = order[#order] and pending.message_ids[order[#order]] or nil
+      for _, id in ipairs(state.message_ids) do
+        if pending.message_times then pending.message_times[id] = nil end
+      end
     else
       pending.count = pending.count - state.count
     end
-    if pending.count <= 0 then bus.notices[session] = nil end
+    if pending.count <= 0 then
+      bus.notices[session] = nil
+    else
+      local first_at, last_at
+      for _, id in ipairs(pending.message_order or {}) do
+        local arrived_at = pending.message_times and pending.message_times[id]
+        if arrived_at then
+          first_at = first_at and math.min(first_at, arrived_at) or arrived_at
+          last_at = last_at and math.max(last_at, arrived_at) or arrived_at
+        end
+      end
+      pending.first_at = first_at or pending.last_at or notice_now()
+      pending.last_at = last_at or pending.last_at or pending.first_at
+      pending.due_at = math.min(pending.last_at + NOTICE_QUIET_S,
+        pending.first_at + NOTICE_MAX_WAIT_S)
+    end
   end
   bus.notice_recoveries[session] = nil
   return true
@@ -2312,6 +2331,7 @@ end
 function remuda._butler_notify(alias, notice, message_id)
   local _, recipient = mail_id(alias, false)
   if message_id and not mail.is_unread(recipient.id, message_id) then return true end
+  local now = notice_now()
   if message_id then
     local seen = bus.notice_seen[recipient.id] or {}
     bus.notice_seen[recipient.id] = seen
@@ -2325,8 +2345,9 @@ function remuda._butler_notify(alias, notice, message_id)
     if pending.message_ids[message_id] then return false end
     pending.message_ids[message_id] = notice
     pending.message_order[#pending.message_order + 1] = message_id
+    pending.message_times = pending.message_times or {}
+    pending.message_times[message_id] = now
   end
-  local now = notice_now()
   pending.first_at = pending.first_at or now
   pending.last_at = now
   pending.due_at = math.min(now + NOTICE_QUIET_S, pending.first_at + NOTICE_MAX_WAIT_S)
@@ -2342,7 +2363,8 @@ function remuda._butler_deliver_notices()
     local pending = bus.notices[session]
     if not bus.agents[session] then
       bus.notices[session] = nil
-    elseif not pending or pending.due_at == nil or now >= pending.due_at then
+    elseif bus.notice_recoveries[session]
+        or not pending or pending.due_at == nil or now >= pending.due_at then
       deliver_notice(session)
     end
   end
