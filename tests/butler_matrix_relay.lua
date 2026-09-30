@@ -227,7 +227,7 @@ local function test_allowlisted_media_types_and_sender_filter()
   for _, item in ipairs(relay:quarantine_list()) do
     if item.event_id == "$blocked-image" then blocked = item end
   end
-  assert(blocked and blocked.reason == "sender_not_allowlisted",
+  assert(blocked and blocked.reason == "untrusted_media",
     "media from a non-allowlisted sender must remain quarantined")
   assert(by_id["$newline-filename"].body:find("filename: a.txtNext:", 1, true),
     "filename controls should be removed before rendering")
