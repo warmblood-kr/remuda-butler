@@ -280,6 +280,51 @@ fn mail_notices_wait_for_the_policy_and_coalesce() {
     assert_eq!(eval(&path, notices), "1");
 }
 
+/// Matrix relay mail reaches the same mailbox deposit hook as other mail and
+/// should produce its arrival notice there.
+#[test]
+fn relay_deposit_produces_one_mail_notice() {
+    let (path, _daemon) = butler_with_member("relay-notice-deposit");
+    let got = eval(
+        &path,
+        r#"
+        local real_ls, real_capture, real_capture_styled, real_session =
+          remuda.ls, remuda.capture, remuda.capture_styled, remuda.session
+        local row = { name = 'butler', alive = true, attached = false }
+        remuda.ls = function() return { row } end
+        remuda.capture = function() return '> ' end
+        remuda.capture_styled = nil
+        remuda.session = function() return { is_busy = false } end
+        local policy, t = remuda._butler_notify_policy, 0
+        remuda._butler_notify_policy = function(session) return policy(session, t) end
+        remuda._relay_notice_calls = 0
+        remuda.type_text = function(_, text)
+          remuda._relay_notice_calls = remuda._relay_notice_calls + 1
+          remuda._relay_notice_text = text
+          return true
+        end
+        local sender = '@alice:example.org'
+        local delivered = remuda.emit_until_success('butler/deliver', {
+          from = { host = 'matrix', id = '', alias = sender, session = sender,
+            kind = 'matrix', leader = '' },
+          to = 'butler', text = 'hello from Matrix', subject = 'Matrix message from ' .. sender,
+          matrix = { sender = sender, room_id = '!notice:example.org', event_id = '$notice-deposit' },
+        })
+        local expected = 'Butler message ' .. delivered.id .. ' from ' .. sender
+          .. ' arrived. Read it: remuda butler inbox'
+        remuda.ls, remuda.capture, remuda.capture_styled, remuda.session =
+          real_ls, real_capture, real_capture_styled, real_session
+        return tostring(remuda._relay_notice_calls) .. '\n'
+          .. tostring(remuda._relay_notice_text) .. '\n' .. expected
+        "#,
+    );
+    let mut lines = got.lines();
+    assert_eq!(lines.next(), Some("1"), "relay deposit should type exactly one notice: {got}");
+    let actual = lines.next();
+    let expected = lines.next();
+    assert_eq!(actual, expected, "relay notice text should name its Matrix sender: {got}");
+}
+
 /// #29: one case per branch of `remuda._butler_notify_policy`, with `ls` and
 /// `capture` stubbed and the clock passed in.
 #[test]
