@@ -437,6 +437,16 @@ return function(matrix)
   assert(resolved and resolved.status == 1 and #requests == 0 and #prompt_specs == 0,
     "declining an HTTPS wizard should not start registration")
 
+  requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+  wizard_reply = matrix.cli({ "matrix", "setup" })
+  line_specs[1].callback("https://matrix.invalid", nil)
+  line_specs[2].callback("@alice:example.org", nil)
+  local bad_ca_path = root .. "/missing\nca.pem"
+  line_specs[3].callback(bad_ca_path, nil)
+  assert(resolved and not resolved.stderr:find(bad_ca_path, 1, true)
+    and resolved.stderr:find(bad_ca_path:gsub("\n", " "), 1, true),
+    "wizard validation errors should sanitize control characters from entered paths")
+
   local prompt_output = root .. "/prompted-registration"
   assert(real_mkdir_new(prompt_output))
   local prompt_token = "prompted-registration-token"

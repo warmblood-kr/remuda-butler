@@ -358,7 +358,7 @@ function matrix.cli(args, agent)
           local flags = { "--homeserver", homeserver, "--owner", owner, "--register", "--default" }
           local function confirm_setup()
             local wizard_plan, validation_error = matrix.setup_prepare(flags)
-            if not wizard_plan then return prompt_failure(tostring(validation_error)) end
+            if not wizard_plan then return prompt_failure(terminal_safe(validation_error)) end
             local lines = {
               "Matrix setup will:",
               "  Homeserver: " .. terminal_safe(wizard_plan.homeserver),
