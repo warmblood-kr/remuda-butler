@@ -14,6 +14,7 @@
 use remuda_core::protocol::{Request, Response};
 use remuda_core::{Session, Size};
 use remuda_native::{client, daemon, ipc, mcp, CommandBuilder, PtyAgent, SystemClock};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::os::unix::process::CommandExt;
 use std::sync::Arc;
@@ -1271,6 +1272,49 @@ fn remuda_timed(dir: &Path, args: &[&str]) -> std::process::Output {
     child.wait_with_output().expect("collect output")
 }
 
+fn remuda_timed_stdin(dir: &Path, args: &[&str], stdin: &[u8]) -> std::process::Output {
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
+        .args(args)
+        .env("REMUDA_RUNTIME_DIR", dir)
+        .env("REMUDA_NO_UPDATE_CHECK", "1")
+        .current_dir(dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn remuda with stdin");
+    child.stdin.take().expect("child stdin").write_all(stdin).expect("write stdin");
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        if let Ok(Some(_)) = child.try_wait() { break; }
+        assert!(Instant::now() < deadline, "{args:?} did not exit within PATIENCE");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    child.wait_with_output().expect("collect remuda output")
+}
+
+fn remuda_timed_without_butler_identity(dir: &Path, args: &[&str]) -> std::process::Output {
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
+        .args(args)
+        .env("REMUDA_RUNTIME_DIR", dir)
+        .env("REMUDA_NO_UPDATE_CHECK", "1")
+        .env_remove("REMUDA_BUTLER_AGENT_ID")
+        .env_remove("REMUDA_BUTLER_SESSION_NAME")
+        .env_remove("REMUDA_BUTLER_LEADER_ID")
+        .current_dir(dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn remuda without Butler identity");
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        if let Ok(Some(_)) = child.try_wait() { break; }
+        assert!(Instant::now() < deadline, "{args:?} did not exit within PATIENCE");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    child.wait_with_output().expect("collect remuda output")
+}
+
 /// `restart` drives the SHIPPED BINARY, not `daemon::serve` on a thread: the
 /// stop is a `process::exit`, so an in-process daemon would take the test
 /// runner with it — which is also why this is the only honest way to test it.
@@ -2198,6 +2242,104 @@ fn butler_cli_test_daemon(dir: &Path) -> (Daemon, PathBuf) {
     let out = remuda_timed(dir, &["-s", "s", "butler", "--headless"]);
     assert!(out.status.success(), "load Butler CLI: {}", String::from_utf8_lossy(&out.stderr));
     (daemon, path)
+}
+
+#[test]
+fn butler_message_bodies_preserve_stdin_and_file_content_and_enforce_limits() {
+    let dir = scratch_dir("butler-message-body");
+    let (_daemon, path) = butler_cli_test_daemon(&dir);
+    let body = "backticks `here`; literal $(never_run); \"quoted\"\nsecond line\n";
+    let body_lua = lua_raw_string(body);
+    let stdin_result = eval(&path, &format!(r#"
+      remuda._butler_send = function(_, _, text) remuda._test_body = text; return "captured" end
+      local result = remuda._butler_command_run("send", {{"send", "member", "-"}}, {{env={{}}, stdin={body_lua}}})
+      assert(result == "captured")
+      return remuda._test_body
+    "#));
+    assert_eq!(stdin_result, body);
+
+    let file = dir.join("message.txt");
+    std::fs::write(&file, body).expect("write body file");
+    let file_lua = lua_raw_string(&file.to_string_lossy());
+    let file_result = eval(&path, &format!(r#"
+      local result = remuda._butler_command_run("send", {{"send", "member", "--file", {file_lua}}}, {{env={{}}}})
+      assert(result == "captured")
+      return remuda._test_body
+    "#));
+    assert_eq!(file_result, body);
+
+    let empty_stdin = eval(&path, r#"
+      local ok, err = pcall(function()
+        remuda._butler_command_run("send", {"send", "member", "-"}, {env={}, stdin=""})
+      end)
+      assert(not ok)
+      return tostring(err)
+    "#);
+    assert!(empty_stdin.contains("message body must not be empty"), "{empty_stdin}");
+
+    let oversized = "x".repeat(65_537);
+    for (content, expected) in [("", "message body must not be empty"), (oversized.as_str(), "message body exceeds the 64 KiB limit")] {
+        std::fs::write(&file, content).expect("write invalid body file");
+        let code = format!(r#"
+          local ok, err = pcall(function()
+            remuda._butler_command_run("send", {{"send", "member", "--file", {file_lua}}}, {{env={{}}}})
+          end)
+          assert(not ok)
+          return tostring(err)
+        "#);
+        assert!(eval(&path, &code).contains(expected));
+    }
+
+    let relative = remuda_timed(&dir, &["-s", "s", "butler", "send", "member", "--file", "message.txt"]);
+    assert!(!relative.status.success());
+    assert!(String::from_utf8_lossy(&relative.stderr).contains("message file path must be absolute"));
+
+    let started = Instant::now();
+    let non_regular = remuda_timed(&dir, &["-s", "s", "butler", "send", "member", "--file", "/dev/stdin"]);
+    assert!(started.elapsed() < Duration::from_secs(5), "/dev/stdin read blocked too long");
+    assert!(!non_regular.status.success());
+    assert!(String::from_utf8_lossy(&non_regular.stderr).contains("--file must be a regular file; for a pipe, use -"));
+    let responsive = remuda_timed(&dir, &["-s", "s", "butler", "sessions"]);
+    assert!(responsive.status.success(), "daemon stopped responding after /dev/stdin rejection");
+
+}
+
+#[test]
+fn butler_send_dash_forwards_real_cli_stdin_byte_exactly() {
+    let dir = scratch_dir("butler-cli-stdin");
+    let (_daemon, path) = butler_cli_test_daemon(&dir);
+    eval(&path, "remuda._butler_send = function(_, _, text) remuda._test_cli_stdin = text; return 'captured' end");
+    let body = b"literal `ticks`, $(not executed), \"quotes\"\nsecond line\n";
+    let out = remuda_timed_stdin(&dir, &["-s", "s", "butler", "send", "member", "-"], body);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("captured"));
+    assert_eq!(eval(&path, "return remuda._test_cli_stdin"), String::from_utf8_lossy(body));
+}
+
+#[test]
+fn butler_cli_unknown_recipient_and_inbox_help_are_plain_errors() {
+    let dir = scratch_dir("butler-cli-errors");
+    let (_daemon, _path) = butler_cli_test_daemon(&dir);
+    let no_leader = remuda_timed_without_butler_identity(
+        &dir,
+        &["-s", "s", "butler", "send-to-leader", "hello"],
+    );
+    assert!(!no_leader.status.success());
+    let no_leader_stderr = String::from_utf8_lossy(&no_leader.stderr);
+    assert!(no_leader_stderr.contains("operator has no leader; send-to-leader is for Butler agents"), "{no_leader_stderr}");
+    assert!(!no_leader_stderr.contains("stack traceback"), "{no_leader_stderr}");
+    assert!(!no_leader_stderr.contains("main.lua"), "{no_leader_stderr}");
+
+    let unknown = remuda_timed(&dir, &["-s", "s", "butler", "send", "no-such-member", "hello"]);
+    assert!(!unknown.status.success());
+    let stderr = String::from_utf8_lossy(&unknown.stderr);
+    assert!(stderr.contains("unknown member: no-such-member"), "{stderr}");
+    assert!(stderr.contains("remuda butler agents"), "{stderr}");
+    assert!(!stderr.contains("runtime error"), "{stderr}");
+
+    let help = remuda_timed(&dir, &["-s", "s", "butler", "inbox", "--help"]);
+    assert!(help.status.success(), "{}", String::from_utf8_lossy(&help.stderr));
+    assert!(String::from_utf8_lossy(&help.stdout).contains("Usage: remuda butler inbox [name]"));
 }
 
 #[test]
