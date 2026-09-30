@@ -3,7 +3,9 @@ return function(matrix)
   assert(type(matrix.setup_network) == "function", "Matrix setup network stage is unavailable")
   assert(type(matrix.setup_write) == "function", "Matrix setup file writer is unavailable")
   assert(type(matrix.cli) == "function", "Matrix CLI router is unavailable")
-  assert(matrix.cli({ "matrix", "setup" }) == matrix.setup_usage())
+  local no_flag_plan = matrix.setup_prepare({})
+  assert(no_flag_plan and no_flag_plan.wizard == true,
+    "no setup flags should select the interactive wizard")
   assert(matrix.cli({ "matrix", "setup", "--help" }) == matrix.setup_usage())
   local setup_help = matrix.setup_usage()
   assert(not setup_help:find("MXID", 1, true)
@@ -378,6 +380,7 @@ return function(matrix)
   requests = {}
   local resolved
   local prompt_specs = {}
+  local line_specs = {}
   local pending_timeout
   remuda.pending = function(options)
     pending_timeout = options and options.timeout
@@ -385,8 +388,54 @@ return function(matrix)
       resolved = { status = status, stdout = stdout, stderr = stderr }
     end }
     function reply:prompt_secret(spec) prompt_specs[#prompt_specs + 1] = spec end
+    function reply:prompt_line(spec) line_specs[#line_specs + 1] = spec end
     return reply
   end
+  requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+  local wizard_reply = matrix.cli({ "matrix", "setup" })
+  assert(wizard_reply and pending_timeout == 300 and #line_specs == 1 and not resolved
+    and line_specs[1].label == "Matrix homeserver URL:",
+    "no-flag setup should begin an interactive wizard")
+  line_specs[1].callback("http://matrix.invalid", nil)
+  assert(#line_specs == 2
+    and line_specs[2].label == "Your Matrix user ID (for example @alice:example.org):",
+    "the wizard should ask for the owner after the homeserver")
+  line_specs[2].callback("@alice:example.org", nil)
+  assert(#line_specs == 3 and line_specs[3].label:find("Continue? Type Y", 1, true)
+    and line_specs[3].label:find("Bot: @butler%-"),
+    "the wizard should summarize validated details and ask for confirmation")
+  assert(line_specs[3].default == "N", "wizard confirmation should default to no")
+  line_specs[3].callback("n", nil)
+  assert(resolved and resolved.status == 1 and resolved.stderr:find("Nothing was written.", 1, true)
+    and select(2, resolved.stderr:gsub("Next:", "")) == 1
+    and #requests == 0 and #prompt_specs == 0,
+    "declining the summary should stop before registration or network work")
+
+  requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+  wizard_reply = matrix.cli({ "matrix", "setup" })
+  line_specs[1].callback("http://matrix.invalid", nil)
+  line_specs[2].callback("@alice:example.org", nil)
+  line_specs[3].callback("Y", nil)
+  assert(#prompt_specs == 1 and prompt_specs[1].label
+    == "Registration token for http://matrix.invalid, from its admin (hidden). This is not an access token:"
+    and #requests == 0 and not resolved,
+    "confirming the summary should enter the existing hidden registration-token flow")
+
+  requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+  wizard_reply = matrix.cli({ "matrix", "setup" })
+  line_specs[1].callback("https://matrix.invalid", nil)
+  line_specs[2].callback("@alice:example.org", nil)
+  assert(#line_specs == 3
+    and line_specs[3].label:find("64-character SHA-256 certificate pin", 1, true),
+    "HTTPS setup should prompt explicitly for a certificate pin or CA file")
+  line_specs[3].callback(string.rep("a", 64), nil)
+  assert(#line_specs == 4 and line_specs[4].label:find("HTTPS certificate pin: " .. string.rep("a", 64), 1, true)
+    and line_specs[4].label:find("Continue? Type Y", 1, true),
+    "the HTTPS summary should show the validated trust pin before confirmation")
+  line_specs[4].callback("N", nil)
+  assert(resolved and resolved.status == 1 and #requests == 0 and #prompt_specs == 0,
+    "declining an HTTPS wizard should not start registration")
+
   local prompt_output = root .. "/prompted-registration"
   assert(real_mkdir_new(prompt_output))
   local prompt_token = "prompted-registration-token"
