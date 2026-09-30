@@ -6326,11 +6326,12 @@ done
             let got = std::fs::read_to_string(&log).unwrap();
             let screen = eval(&path, "return remuda._fake_model_confirm_screen or ''");
             let reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
+            let last_screen = eval(&path, &format!("return remuda.capture({name:?})"));
             if name == "fake-model-confirm-with-status" {
                 assert_eq!(eval(&path, "return tostring(remuda._fake_model_confirm_status_seen == true)"), "true",
                     "both status rows below the dialog footer must be present in the captured screen");
             }
-            assert!(got.contains("CMD:/compact\n"), "compaction should follow model confirmation: {got:?}; screen={screen:?}; reports={reports:?}");
+            assert!(got.contains("CMD:/compact\n"), "compaction should follow model confirmation: got={got:?}; reports={reports:?}; last screen={last_screen:?}; confirmation screen={screen:?}");
             assert!(got.ends_with("CMD:/model opus\nKEY:RET\n"), "prior model should be restored: {got:?}");
             assert_eq!(got.matches("KEY:RET\n").count(), 4,
                 "the selected Yes option should be confirmed exactly once: {got:?}");
