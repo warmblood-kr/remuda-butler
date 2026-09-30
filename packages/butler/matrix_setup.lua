@@ -105,6 +105,9 @@ local function valid_mxid(value, option)
   return value
 end
 
+matrix.setup_validate_homeserver = valid_url
+matrix.setup_validate_mxid = valid_mxid
+
 local function readable_file(path)
   if not absolute(path) then return false end
   local file = io.open(path, "rb")
@@ -299,7 +302,8 @@ end
 
 function matrix.setup_prepare(args)
   if type(args) ~= "table" then return nil, "Matrix setup arguments must be a list" end
-  if #args == 0 or (#args == 1 and (args[1] == "--help" or args[1] == "-h")) then
+  if #args == 0 then return { wizard = true } end
+  if #args == 1 and (args[1] == "--help" or args[1] == "-h") then
     return { help = true, usage = USAGE }
   end
   local options, seen = {}, {}
