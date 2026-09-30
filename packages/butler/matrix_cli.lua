@@ -143,24 +143,34 @@ local function terminal_safe(value)
   return tostring(value or ""):gsub("[%c]", " "):gsub("\194[\128-\159]", " ")
 end
 
-local function shell_quote(value)
-  return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
-end
-
 local function render_human(verb, options, result)
   local data = result.json or result
   if verb == "rooms" then
-    local rooms, lines, leave_room = data.rooms or {}, {}, nil
+    local rooms, lines, leave_room, safe_rooms, room_width = data.rooms or {}, {}, false, {}, 0
     for _, item in ipairs(rooms) do
-      lines[#lines + 1] = terminal_safe(item.room) .. "  "
+      local room = terminal_safe(item.room)
+      safe_rooms[#safe_rooms + 1] = room
+      room_width = math.max(room_width, #room)
+      if item.kind == "joined" then leave_room = true end
+    end
+    for index, item in ipairs(rooms) do
+      lines[#lines + 1] = safe_rooms[index] .. string.rep(" ", room_width - #safe_rooms[index] + 2)
         .. terminal_safe(item.kind) .. "  " .. terminal_safe(item.how)
-      if item.kind == "joined" and not leave_room then leave_room = item.room end
     end
     if #lines == 0 then lines[#lines + 1] = "No configured Matrix rooms" end
     if leave_room then
-      lines[#lines + 1] = "Next: remuda butler matrix leave " .. shell_quote(terminal_safe(leave_room))
+      lines[#lines + 1] = "Next: remuda butler matrix leave ROOM"
     else
-      lines[#lines + 1] = "Next: invite the bot to a room as an allowlisted owner."
+      local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths or {}
+      local conf = type(paths.config_path) == "string" and matrix.read_config(paths.config_path) or nil
+      local allowed = {}
+      for mxid in pairs(conf and conf.allowed_senders or {}) do
+        allowed[#allowed + 1] = terminal_safe(mxid)
+      end
+      table.sort(allowed)
+      local allowlist = #allowed > 0 and table.concat(allowed, ", ") or "none"
+      lines[#lines + 1] = "Next: invite " .. terminal_safe(conf and conf.self_mxid or "the Butler")
+        .. " to a room from an allowlisted account (" .. allowlist .. ")."
     end
     return table.concat(lines, "\n") .. "\n"
   elseif verb == "status" then
@@ -212,8 +222,10 @@ local function finish(reply, cancelled, completed, verb, options, result)
   if type(result) ~= "table" then result = { error = "Matrix command returned no result" } end
   if result.error then
     local message = tostring(result.error)
-    if verb == "join" or verb == "leave" then message = message .. "\nNext: remuda butler matrix rooms" end
-    if verb == "rooms" then message = message .. "\nNext: remuda butler matrix setup" end
+    if not message:find("Next:", 1, true) then
+      if verb == "join" or verb == "leave" then message = message .. "\nNext: remuda butler matrix rooms" end
+      if verb == "rooms" then message = message .. "\nNext: remuda butler matrix setup" end
+    end
     return reply:resolve(1, "", message .. "\n")
   end
   if verb == "reply" and result.event_ids and #result.event_ids > 0 then

@@ -200,7 +200,9 @@ local function room_line_id(line)
 end
 
 function matrix.config_add_room(path, room, how)
-  if not valid_room_id(room) then return nil, "invalid Matrix room ID" end
+  if not valid_room_id(room) then
+    return nil, "invalid Matrix room ID: room IDs start with ! (Element: Room settings > Advanced > Internal room ID)."
+  end
   local conf, err = read_config(path)
   if not conf then return nil, err end
   if room == conf.home_room or room == conf.all_room then

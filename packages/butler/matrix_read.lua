@@ -35,7 +35,12 @@ function matrix.rooms(args, callback)
     rooms[#rooms + 1] = { room = room, kind = kind,
       how = conf.room_how[room] or "config" }
   end
-  table.sort(rooms, function(a, b) return a.room < b.room end)
+  local order = { home = 1, all = 2, joined = 3 }
+  table.sort(rooms, function(a, b)
+    local a_order, b_order = order[a.kind] or 4, order[b.kind] or 4
+    if a_order ~= b_order then return a_order < b_order end
+    return a.room < b.room
+  end)
   return callback({ rooms = matrix.json_array(rooms) })
 end
 

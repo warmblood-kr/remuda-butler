@@ -636,6 +636,8 @@ local function test_join_failure_rolls_back_room_line()
     assert(#calls == 1 and calls[1].method == "POST" and calls[1].url:find("/join", 1, true),
       "matrix join must POST join for a new room (the room line allows it)")
     assert(result and result.error, "a failed operator join must report the error")
+    assert(result.error:find("Next: invite the bot (@bot:example.org) to " .. NEW
+      .. " from Element, then retry.", 1, true), "a forbidden join must explain how to invite the bot")
     assert(read_text(path) == before, "a failed operator join must remove the room line again")
   end)
   with_operator_config(path, 200, function()
@@ -677,7 +679,8 @@ local function test_leave_removes_room_home_and_all_refused()
     for _, room in ipairs({ HOME, ALL }) do
       local before, result = read_text(path), nil
       matrix.leave({ room = room }, function(value) result = value end)
-      assert(result and result.error and result.error:find("can't be removed", 1, true),
+      assert(result and result.error and result.error:find("can't be left", 1, true)
+        and result.error:find("Next: remuda butler matrix setup (to change HOME or ALL)", 1, true),
         "leaving HOME/ALL must be refused: " .. room)
       assert(#calls == 0 and read_text(path) == before, "a refused leave must not call or edit")
     end

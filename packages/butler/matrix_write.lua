@@ -308,6 +308,13 @@ function matrix.join(opts, on_done, agent)
         result.error = tostring(result.error) .. "; config rollback failed: " .. tostring(remove_error)
       end
     end
+    if result.error and result.error:find("(M_FORBIDDEN)", 1, true) then
+      local next_line = "Next: invite the bot (" .. conf.self_mxid .. ") to " .. room
+        .. " from Element, then retry."
+      local replaced
+      result.error, replaced = result.error:gsub("Next:[^\r\n]*", function() return next_line end)
+      if replaced == 0 then result.error = result.error .. "\n" .. next_line end
+    end
     done(result)
   end)
 end
@@ -325,7 +332,8 @@ function matrix.leave(opts, on_done, agent)
   local conf, config_error = matrix.read_config(config_path)
   if not conf then return error_result(done, config_error) end
   if conf.rooms[room] == "home" or conf.rooms[room] == "all" then
-    return error_result(done, "HOME and ALL rooms can't be removed")
+    return error_result(done,
+      "HOME and ALL rooms can't be left. Next: remuda butler matrix setup (to change HOME or ALL).")
   end
   if conf.rooms[room] == nil then
     return error_result(done, room .. " is not a configured Matrix room.")
