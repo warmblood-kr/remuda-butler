@@ -275,7 +275,8 @@ local function operator_room(verb, opts, agent, callback)
       return nil
     end
   elseif not approval.operator_caller() then
-    callback({ error = "matrix " .. verb .. " is operator-only; run it from an outside terminal caller" })
+    callback({ error = "matrix " .. verb .. " is operator-only; run it from an outside terminal caller"
+      .. "\nNext: run remuda butler matrix " .. verb .. " ROOM from your own terminal, outside an agent session" })
     return nil
   end
   if not opts.room or opts.room == "" then
