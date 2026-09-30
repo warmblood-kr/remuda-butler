@@ -1,0 +1,207 @@
+-- CLI verbs: the usage text, every `butler.command` verb, _butler_command_run
+-- and the `remuda butler` argv parser. main.lua passes its locals in (the
+-- mail.lua pattern).
+local config = assert(remuda._butler_commands_config)
+local current_agent = assert(config.current_agent)
+local OPERATOR = assert(config.OPERATOR)
+local contributions = assert(config.contributions)
+local registry_list = assert(config.registry_list)
+local statusline = assert(config.statusline)
+local USAGE_NOTES = [[
+Agent sessions receive REMUDA_BUTLER_AGENT_ID and REMUDA_BUTLER_LEADER_ID.
+In an agent session, use `inbox`, `send <to> "..."`, and `send-to-leader ...`;
+the identity comes from the caller's environment. For a long message, use
+`cat <<'EOF' | remuda butler send MEMBER -` or `--file "$PWD/path"`; `reply` accepts
+the same forms. Bodies are limited to 64 KiB. Without a forwarded Butler
+identity (a plain shell, or a core that does not forward the caller's env),
+`send` is from "operator" and `inbox` needs a name (`inbox <name>`).
+`reply` answers a message's original sender, even when it was forwarded to you;
+`forward` re-delivers a message you received, keeping its sender, with a note.
+]]
+-- Help lists every `butler.command` entry's usage in order, so it names only
+-- the verbs that are installed.
+local function butler_usage()
+  local lines = {}
+  for _, item in ipairs(contributions("butler.command")) do lines[#lines + 1] = item.entry.usage end
+  return "remuda butler — coordination for managed agents\n\n" .. table.concat(lines, "\n") .. "\n\n" .. USAGE_NOTES
+end
+
+local function words_after(args, first)
+  local words = {}
+  for i = first, #args do words[#words + 1] = args[i] end
+  return table.concat(words, " ")
+end
+
+local MAX_MESSAGE_BYTES = 64 * 1024
+local function checked_message_body(body)
+  if type(body) ~= "string" or #body == 0 then error("message body must not be empty", 0) end
+  if #body > MAX_MESSAGE_BYTES then error("message body exceeds the 64 KiB limit", 0) end
+  return body
+end
+local function message_body(args, first, caller)
+  if args[first] == "-" then
+    if #args ~= first then error("stdin message form takes no extra arguments", 0) end
+    local body = caller and caller.stdin
+    if type(body) ~= "string" then
+      error("no message body received on stdin; use `--file PATH` or a Remuda core with caller stdin support", 0)
+    end
+    return checked_message_body(body)
+  elseif args[first] == "--file" then
+    if #args ~= first + 1 or not args[first + 1] or args[first + 1] == "" then
+      error("expected one path after --file", 0)
+    end
+    local path = args[first + 1]
+    local absolute = path:sub(1, 1) == "/" or path:sub(1, 1) == "\\"
+      or path:match("^%a:[/\\]") ~= nil
+    if not absolute then error('message file path must be absolute; use `--file "$PWD/path"`', 0) end
+    -- ponytail: io.open blocks on a named FIFO outside /dev and /proc and would
+    -- hang the daemon; upgrade to a core non-blocking fs read word when it exists.
+    if path:match("^/dev/") or path:match("^/proc/") then
+      error("--file must be a regular file; for a pipe, use - and redirect stdin (Next: remuda butler send NAME - < FILE)", 0)
+    end
+    local file, open_err = io.open(path, "rb")
+    if not file then error("cannot read message file: " .. tostring(open_err), 0) end
+    local body, read_err = file:read(MAX_MESSAGE_BYTES + 1)
+    file:close()
+    if read_err then error("cannot read message file: " .. tostring(read_err), 0) end
+    return checked_message_body(body or "")
+  end
+  return checked_message_body(words_after(args, first))
+end
+local function cli_result(callback)
+  local ok, result = pcall(callback)
+  if ok then return result end
+  local message = tostring(result)
+  if type(remuda.fail) == "function" then return remuda.fail(message, 1) end
+  error(message, 0)
+end
+
+-- Each verb is a `butler.command` entry (hook-design §4.1); `run` returns nil
+-- when its arguments do not fit, and the caller gets the usage text.
+local command_entries = {}
+local function command(order, verb, usage, run)
+  local entry = { id = verb, order = order, verb = verb, usage = usage, run = run }
+  command_entries[verb] = entry
+  if not remuda.contribute then remuda._butler_contribute("butler.command", verb, entry) end
+end
+command(10, "sessions", "  remuda butler sessions", function(args)
+  if #args == 1 then return remuda._butler_sessions() end
+end)
+command(12, "status", "  remuda butler status  (0=up, 75=launching, 1=failed)", function(args)
+  if #args == 1 then
+    local message, code = remuda._butler_status()
+    if code ~= 0 then
+      if type(remuda.fail) == "function" then return remuda.fail(message, code) end
+      error(message, 0)
+    end
+    return message
+  end
+end)
+command(15, "agents", "  remuda butler agents [--all]", function(args)
+  if #args == 1 then return registry_list(false) end
+  if #args == 2 and args[2] == "--all" then return registry_list(true) end
+end)
+command(20, "launch", "  remuda butler launch <claude|codex> [name] [--model M]", function(args, caller)
+  if not args[2] then return nil end
+  local registered = false
+  for _, row in ipairs(contributions("butler.agent")) do if row.id == args[2] then registered = true end end
+  if not registered then return nil end
+  local model
+  if args[#args - 1] == "--model" then model = args[#args]; args[#args] = nil; args[#args] = nil end
+  -- The calling member leads the child; only the operator's falls to butler (#24).
+  local parent = current_agent(caller)
+  if #args == 2 then return remuda._butler_launch(args[2], nil, model, parent) end
+  if #args == 3 then return remuda._butler_launch(args[2], args[3], model, parent) end
+end)
+command(30, "topic", "  remuda butler topic new <name> [--template T] [--agent A] [--model M]\n"
+  .. "  remuda butler topic delegate <name> [--agent A] [--leader L] [--model M] <task...>", function(args, caller)
+  if args[2] == "new" and args[3] then
+    local template, kind, model, i = nil, nil, nil, 4
+    while i <= #args do
+      if args[i] == "--template" then template = args[i + 1]
+      elseif args[i] == "--agent" then kind = args[i + 1]
+      elseif args[i] == "--model" then model = args[i + 1]
+      else return nil end
+      i = i + 2
+    end
+    return remuda._butler_topic_new(args[3], template, kind, model)
+  end
+  if args[2] == "delegate" and args[3] then
+    local kind, parent, model, i = nil, current_agent(caller) or "butler", nil, 4
+    while i <= #args and (args[i] == "--agent" or args[i] == "--leader" or args[i] == "--model") do
+      if args[i] == "--agent" then kind = args[i + 1]
+      elseif args[i] == "--model" then model = args[i + 1]
+      else parent = args[i + 1] end
+      i = i + 2
+    end
+    if i <= #args then return remuda._butler_topic_delegate(args[3], words_after(args, i), nil, kind, parent, model) end
+  end
+end)
+command(40, "send", '  remuda butler send <to> "<message>" | <to> - | <to> --file PATH\n'
+  .. '  remuda butler send <from> <to> <message...> | <from> <to> - | <from> <to> --file PATH', function(args, caller)
+  if #args < 3 then return nil end
+  local from, to, first = current_agent(caller) or OPERATOR, args[2], 3
+  if args[3] ~= "-" and args[3] ~= "--file" and #args >= 4 then
+    from, to, first = args[2], args[3], 4
+  elseif args[3] ~= "-" and args[3] ~= "--file" and #args < 4 then
+    -- Positional short messages retain the caller-inferred sender form.
+  elseif args[4] == "-" or args[4] == "--file" then
+    from, to, first = args[2], args[3], 4
+  end
+  return cli_result(function()
+    return remuda._butler_send(from, to, message_body(args, first, caller))
+  end)
+end)
+command(50, "send-to-leader", "  remuda butler send-to-leader <message...> | - | --file PATH", function(args, caller)
+  if #args < 2 then return nil end
+  local from = current_agent(caller)
+  if not from then
+    local message = OPERATOR .. " has no leader; send-to-leader is for Butler agents"
+    if type(remuda.fail) == "function" then return remuda.fail(message, 1) end
+    error(message, 0)
+  end
+  return cli_result(function()
+    return remuda._butler_report(from, message_body(args, 2, caller))
+  end)
+end)
+command(60, "inbox", "  remuda butler inbox [name]", function(args, caller)
+  if args[2] == "--help" or args[2] == "-h" then return "Usage: remuda butler inbox [name]\n" end
+  if #args > 2 then return nil end
+  return cli_result(function()
+    return remuda._butler_inbox(args[2] or assert(current_agent(caller), "no Butler identity in your env; use `inbox <name>`"))
+  end)
+end)
+command(70, "reply", "  remuda butler reply <message-id> <message...> | - | --file PATH", function(args, caller)
+  if #args < 3 then return nil end
+  return cli_result(function()
+    return remuda._butler_reply(current_agent(caller) or OPERATOR, args[2], message_body(args, 3, caller))
+  end)
+end)
+command(80, "forward", "  remuda butler forward <message-id> <member> [note...]", function(args, caller)
+  if #args < 3 then return nil end
+  return cli_result(function()
+    return remuda._butler_forward(current_agent(caller) or OPERATOR, args[2], args[3],
+      #args >= 4 and words_after(args, 4) or nil)
+  end)
+end)
+command(100, "matrix", remuda.butler.matrix.cli_usage(), function(args, caller)
+  return remuda.butler.matrix.cli(args, current_agent(caller))
+end)
+remuda._butler_command_run = function(verb, args, caller)
+  local entry = command_entries[verb]
+  if entry then return entry.run(args, caller) end
+end
+
+-- The generic Remuda extension-command bridge passes an argv-like Lua table.
+-- This parser lives with Butler, not in the Remuda executable.
+remuda.extension_command("butler", function(args, caller)
+  if #args == 0 or args[1] == "help" or args[1] == "-h" or args[1] == "--help" then return butler_usage() end
+  if args[1] == "statusline" then return statusline(args, caller) end
+  for _, item in ipairs(contributions("butler.command")) do
+    if item.entry.verb == args[1] then
+      local result = item.entry.run(args, caller)
+      if result ~= nil then return result end
+    end
+  end
+  return butler_usage()
+end)
