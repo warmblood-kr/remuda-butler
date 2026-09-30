@@ -113,7 +113,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   identity_record(identity)
   local waiting_for_trust, trust_answered = false, false
   for _, attempt in ipairs(attempts or {}) do
-    if attempt.session == actual and attempt.reason == "waiting_for_human_trust" then
+    if attempt.session == actual and tostring(attempt.reason):match("^waiting_for_human_trust") then
       waiting_for_trust = true
     end
     if attempt.session == actual and attempt.trust_answered then trust_answered = true end
@@ -134,7 +134,8 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   mailbox(identity.id)
   if waiting_for_trust then
     pcall(remuda._butler_send, "butler", parent or "butler",
-      "waiting for a human: trust dialog in " .. tostring(launch_cwd or "unknown directory"))
+      "waiting for a human: trust dialog in " .. tostring(launch_cwd or "unknown directory")
+        .. ". Next: review the folder and approve it in the member session.")
   end
   -- A failed welcome write must not prevent the agent from starting.
   if not relaunch_identity then
@@ -259,7 +260,8 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
         elseif not agent.trust_reported then
           agent.trust_reported = true
           pcall(remuda._butler_send, "butler", parent or "butler",
-            "waiting for a human: trust dialog in " .. tostring(agent.cwd or "unknown directory"))
+            "waiting for a human: trust dialog in " .. tostring(agent.cwd or "unknown directory")
+              .. ". Next: review the folder and approve it in the member session.")
         end
         return
       end
@@ -535,15 +537,20 @@ local function make_topic(name, template, kind, parent, task, model)
   load_topic_config()
   local root = topic_config.project_home .. "/" .. name
   local created_now = create_fresh_directory(root)
-  if created_now then
-    bus.trusted_launch_dirs = bus.trusted_launch_dirs or {}
-    bus.trusted_launch_dirs[root] = true
-  end
   if not created_now then remuda.mkdir(root) end
   if template and not created_now then
     error("topic directory already exists; templates require a fresh topic name", 0)
   end
-  local auto_trust = created_now and not template and directory_is_under(root, topic_config.project_home)
+  local home = os.getenv("HOME")
+  local projects_root = home and (home .. "/projects") or nil
+  local allowed_trust_path = projects_root and directory_is_under(root, projects_root)
+  local auto_trust = created_now and not template
+    and directory_is_under(root, topic_config.project_home)
+    and (kind ~= "claude" or allowed_trust_path)
+  if auto_trust then
+    bus.trusted_launch_dirs = bus.trusted_launch_dirs or {}
+    bus.trusted_launch_dirs[root] = true
+  end
   local topic = { name = name, root = root }
   function topic.write(relative_path, contents)
     local f = assert(io.open(root .. "/" .. relative_path, "w"))

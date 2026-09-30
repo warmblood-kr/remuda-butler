@@ -178,24 +178,49 @@ local function choose(candidates, opts, done)
           else state.trust_screen, state.trust_ticks = screen, 1 end
           if state.trust_ticks < 2 then break end
           if trust_state == "pending" and opts.auto_trust then break end
-          if trust_state == "safe" and opts.auto_trust and bus.trusted_launch_dirs
-              and bus.trusted_launch_dirs[opts.cwd] == true and startup_action_safe
-              and startup_action_safe(state.name) then
-            if not state.handled[dialog_index] then
-              state.handled[dialog_index] = true
-              local answered = true
-              for _, key in ipairs(dialog.keys or {}) do
-                local ok, result = pcall(remuda.key, state.name, key)
-                if not ok or result == false then answered = false end
-              end
-              if answered then
-                state.attempt.trust_answered = true
-                bus.trusted_launch_dirs[opts.cwd] = nil
+          local may_auto_trust = opts.auto_trust and bus.trusted_launch_dirs
+            and bus.trusted_launch_dirs[opts.cwd] == true and startup_action_safe
+            and startup_action_safe(state.name)
+          if dialog.trust == "claude" and may_auto_trust
+              and trust_state == "safe" and not state.handled[dialog_index] then
+            local ok, result = pcall(remuda.key, state.name, "<down>")
+            if ok and result ~= false then
+              state.handled[dialog_index] = "selection_pending"
+              state.attempt.trust_selection_moved = true
+              local captured, selected_screen = pcall(remuda.capture, state.name)
+              if captured then
+                selected_screen = tostring(selected_screen or ""):gsub("\r\n", "\n"):gsub("\r", "\n")
+                if trust_modal_state(dialog, selected_screen) == "safe_selected" then
+                  state.trust_screen, state.trust_ticks = selected_screen, 1
+                end
               end
             end
             break
+          elseif dialog.trust == "claude" and may_auto_trust and trust_state == "safe_selected"
+              and state.handled[dialog_index] == "selection_pending" then
+            local ok, result = pcall(remuda.key, state.name, "RET")
+            if ok and result ~= false then
+              state.handled[dialog_index] = "confirmed"
+              state.attempt.trust_answered = true
+              bus.trusted_launch_dirs[opts.cwd] = nil
+            end
+            break
+          elseif dialog.trust ~= "claude" and may_auto_trust
+              and trust_state == "safe" and not state.handled[dialog_index] then
+            state.handled[dialog_index] = true
+            local answered = true
+            for _, key in ipairs(dialog.keys or {}) do
+              local ok, result = pcall(remuda.key, state.name, key)
+              if not ok or result == false then answered = false end
+            end
+            if answered then
+              state.attempt.trust_answered = true
+              bus.trusted_launch_dirs[opts.cwd] = nil
+            end
+            break
           end
-          state.attempt.reason, state.attempt.session = "waiting_for_human_trust", state.name
+          state.attempt.reason, state.attempt.session =
+            "waiting_for_human_trust (Next: review the folder and approve it in the member session)", state.name
           state.attempt.trust_path = opts.cwd
           callback(state.name, id)
           return
@@ -427,13 +452,15 @@ local function startup_modal_timeout_seconds()
   return tonumber(remuda._butler_modal_timeout or remuda._butler_modal_attempts or remuda._butler_task_poke_attempts) or 60
 end
 trust_modal_state = function(modal, screen)
-  local lines, title, affirmative, selected_no, selected_index = {}, false, false, false, nil
+  local lines, title, affirmative, selected_no, selected_index, selected_yes = {}, false, false, false, nil, false
   for line in (tostring(screen or "") .. "\n"):gmatch("(.-)\n") do
     lines[#lines + 1] = line
     local trimmed = line:gsub("^%s+", "")
+    local option_label = trimmed:gsub("^❯%s*", ""):gsub("^›%s*", "")
     if trimmed:find("Accessing workspace:", 1, true) then title = true end
     if trimmed:match("^❯%s*No, exit") then selected_no, selected_index = true, #lines end
-    if trimmed:match("^Yes, I trust this folder%s*$") then affirmative = true end
+    if trimmed:match("^❯%s*Yes, I trust this folder%s*$") then selected_yes = true end
+    if option_label:match("^Yes, I trust this folder%s*$") then affirmative = true end
   end
   local lower = tostring(screen or ""):lower()
   if modal.trust == "claude" then
@@ -445,12 +472,14 @@ trust_modal_state = function(modal, screen)
       if lower:find("quick safety check:", 1, true) then return "pending" end
       return "human"
     end
-    if not selected_no or not selected_index then return "human" end
     local options = 0
     for _, line in ipairs(lines) do
       if line:match("^%s*[❯›]%s*%S") or line:match("^%s%s%S") then options = options + 1 end
     end
-    if affirmative and selected_no and options == 2 then return "safe" end
+    if affirmative and options == 2 then
+      if selected_no and selected_index then return "safe" end
+      if selected_yes then return "safe_selected" end
+    end
     return "human"
   elseif modal.trust == "codex" then
     local visible_lines = bottom_screen_lines(screen, 12)
