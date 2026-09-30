@@ -813,12 +813,15 @@ end
 function remuda._butler_deliver_notices()
   local now = notice_now()
   local session_instances = {}
+  local live_sessions = {}
   local listed, sessions = pcall(remuda.ls)
   if listed and type(sessions) == "table" then
     for _, session in ipairs(sessions) do
-      if session.alive and type(session.name) == "string"
-          and type(session.instance_id) == "string" and session.instance_id ~= "" then
-        session_instances[session.name] = session.instance_id
+      if session.alive and type(session.name) == "string" then
+        live_sessions[session.name] = true
+        if type(session.instance_id) == "string" and session.instance_id ~= "" then
+          session_instances[session.name] = session.instance_id
+        end
       end
     end
   end
@@ -834,7 +837,7 @@ function remuda._butler_deliver_notices()
         local since = bus.unread_seeded_exited_at[alias]
         if since == nil then
           bus.unread_seeded_exited_at[alias] = now
-        elseif not session_instances[alias] and now - since >= 30 * 24 * 60 * 60 then
+        elseif not live_sessions[alias] and now - since >= 30 * 24 * 60 * 60 then
           bus.unread_seeded[alias] = nil
           bus.unread_seeded_exited_at[alias] = nil
         end

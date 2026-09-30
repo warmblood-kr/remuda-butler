@@ -810,10 +810,15 @@ fn unread_seed_tokens_are_pruned_when_an_agent_disappears() {
         local bus = remuda._butler_bus
         bus.unread_seeded.gone = 'old agent record'
         remuda._butler_deliver_notices()
-        return tostring(bus.unread_seeded.gone)
+        local after_exit = bus.unread_seeded.gone
+        local agent_record = bus.agents.gone
+        remuda._notice_test_state.now = 30 * 24 * 60 * 60 + 1
+        remuda._butler_deliver_notices()
+        return table.concat({ tostring(after_exit), tostring(agent_record),
+          tostring(bus.unread_seeded.gone), tostring(bus.agents.gone) }, '|')
         "#,
     );
-    assert_eq!(got, "nil", "stale seed token must not retain an exited agent record");
+    assert_eq!(got, "exited|nil|nil|nil", "exit marker cleanup: {got}");
 }
 
 #[test]
