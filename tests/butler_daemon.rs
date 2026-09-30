@@ -8058,16 +8058,26 @@ fn butler_matrix_cli_refuses_send_dash_and_fails_cleanly_without_pending() {
         String::from_utf8_lossy(&dash.stderr));
     assert_eq!(eval(&path, "return #remuda.http.calls"), "0", "send - unexpectedly touched Matrix");
 
+    let agent_leave = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
+        .args(["-s", "s", "butler", "matrix", "leave", room])
+        .env("REMUDA_RUNTIME_DIR", &dir)
+        .env("REMUDA_NO_UPDATE_CHECK", "1")
+        .env("REMUDA_BUTLER_AGENT_ID", "agent1")
+        .output().expect("run agent leave command");
+    assert!(!agent_leave.status.success(), "leave must be operator-only");
+    assert!(String::from_utf8_lossy(&agent_leave.stderr).contains("operator-only"),
+        "unexpected agent leave error: {}", String::from_utf8_lossy(&agent_leave.stderr));
+    // An agent join files an owner approval request; with no relay it fails before any HTTP.
     let agent_join = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
         .args(["-s", "s", "butler", "matrix", "join", room])
         .env("REMUDA_RUNTIME_DIR", &dir)
         .env("REMUDA_NO_UPDATE_CHECK", "1")
         .env("REMUDA_BUTLER_AGENT_ID", "agent1")
         .output().expect("run agent join command");
-    assert!(!agent_join.status.success(), "join must be operator-only");
-    assert!(String::from_utf8_lossy(&agent_join.stderr).contains("operator-only"),
+    assert!(!agent_join.status.success(), "agent join without a relay must fail");
+    assert!(String::from_utf8_lossy(&agent_join.stderr).contains("Next:"),
         "unexpected agent join error: {}", String::from_utf8_lossy(&agent_join.stderr));
-    assert_eq!(eval(&path, "return #remuda.http.calls"), "0", "agent join reached the network");
+    assert_eq!(eval(&path, "return #remuda.http.calls"), "0", "agent join or leave reached the network");
 
     eval(&path, "remuda.pending = nil");
     let old_core = remuda_timed(&dir, &["-s", "s", "butler", "matrix", "--json", "rooms"]);
