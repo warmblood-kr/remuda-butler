@@ -896,6 +896,24 @@ local function test_leave_unconfigured_room_is_refused()
   remove_dir(dir)
 end
 
+local function test_failed_leave_reports_removed_config_and_safe_next()
+  local dir, path = invite_fixture(nil, "room=" .. NEW .. " how=operator\n")
+  with_operator_config(path, 403, function(calls)
+    local result
+    matrix.leave({ room = NEW }, function(value) result = value end)
+    assert(result and result.error and result.error:find("the room was removed from the local config", 1, true),
+      "a failed leave must say the room was removed from the local config")
+    local _, next_count = result.error:gsub("Next:", "")
+    assert(next_count == 1, "a failed leave must contain exactly one Next hint")
+    assert(not result.error:find("password", 1, true), "a failed leave must not retain the HTTP password hint")
+    assert(result.error:find("Next: remuda butler matrix rooms", 1, true),
+      "a failed leave must direct the operator to matrix rooms")
+    assert(#calls == 1 and room_line(path, NEW) == nil,
+      "a failed leave must POST and remove the configured room line")
+  end)
+  remove_dir(dir)
+end
+
 local function test_unconfigured_room_request_is_refused()
   local dir, path = invite_fixture(nil, "room=" .. NEW .. " how=operator\n")
   with_operator_config(path, 200, function(calls)
@@ -950,6 +968,7 @@ for _, case in ipairs({
   { "test_running_relay_picks_up_operator_join_from_config", test_running_relay_picks_up_operator_join_from_config },
   { "test_leave_removes_room_home_and_all_refused", test_leave_removes_room_home_and_all_refused },
   { "test_leave_unconfigured_room_is_refused", test_leave_unconfigured_room_is_refused },
+  { "test_failed_leave_reports_removed_config_and_safe_next", test_failed_leave_reports_removed_config_and_safe_next },
   { "test_unconfigured_room_request_is_refused", test_unconfigured_room_request_is_refused },
 }) do
   local ok, err = pcall(case[2])

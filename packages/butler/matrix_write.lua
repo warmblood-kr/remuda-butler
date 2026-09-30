@@ -347,12 +347,8 @@ function matrix.leave(opts, on_done, agent)
       local detail = result.error and (tostring(result.error) .. "; ") or ""
       result.error = detail .. "could not remove Matrix room config line: " .. tostring(remove_error)
     elseif result.error then
-      result.error = tostring(result.error) .. "; the room was removed from the local config"
-      local replaced
-      result.error, replaced = result.error:gsub("Next:[^\r\n]*", function()
-        return "Next: remuda butler matrix rooms"
-      end)
-      if replaced == 0 then result.error = result.error .. "\nNext: remuda butler matrix rooms" end
+      local base = tostring(result.error):gsub("\n?Next:[^\r\n]*", "")
+      result.error = base .. "; the room was removed from the local config.\nNext: remuda butler matrix rooms"
     end
     done(result)
   end)
