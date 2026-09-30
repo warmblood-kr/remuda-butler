@@ -1,27 +1,30 @@
 -- Read-only installation and authentication checks for the Butler CLI.
-local function successful(result, reason, code)
-  return result == true or result == 0 or (reason == "exit" and code == 0)
-end
-
 local function platform_name()
   return package.config:sub(1, 1) == "\\" and "windows" or "posix"
 end
 
-local function probe(execute, platform)
-  execute = execute or os.execute
-  platform = platform or platform_name()
-  local windows = platform == "windows"
-  local redirect = windows and " >NUL 2>&1" or " >/dev/null 2>&1"
-  local locate = windows and "where " or "command -v "
+local function probe_command(argv)
+  local ok, result = pcall(remuda.process.run, { argv = argv, timeout = 5 })
+  if not ok then
+    local message = tostring(result):lower()
+    if message:find("os error 2", 1, true)
+        or message:find("no such file or directory", 1, true)
+        or message:find("cannot find the file specified", 1, true) then
+      return false, false
+    end
+    error("Could not run " .. argv[1] .. " authentication check.", 0)
+  end
+  return true, result.code == 0 and not result.timed_out
+end
+
+local function probe()
   local results = {}
   for _, agent in ipairs({
-    { key = "claude", binary = "claude", check = "claude auth status" },
-    { key = "codex", binary = "codex", check = "codex login status" },
+    { key = "claude", argv = { "claude", "auth", "status" } },
+    { key = "codex", argv = { "codex", "login", "status" } },
   }) do
-    local exists = successful(execute(locate .. agent.binary .. redirect))
-    local logged_in = false
-    if exists then logged_in = successful(execute(agent.check .. redirect)) end
-    results[agent.key] = { installed = exists, logged_in = logged_in }
+    local installed, logged_in = probe_command(agent.argv)
+    results[agent.key] = { installed = installed, logged_in = installed and logged_in or false }
   end
   return results
 end
