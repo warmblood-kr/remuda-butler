@@ -184,10 +184,10 @@ also applies to delegates without an explicit kind. Each candidate waits up to
 per-candidate timeout. `remuda butler sessions` shows the selected kind and
 the reason each earlier candidate was skipped.
 
-On each fresh agent-session start—first launch, resume, relaunch or respawn
-after a Butler or daemon restart, and restart after compaction—Butler checks for
-unread mail. If any is unread, it queues one notice with the count, using the
-normal debounce; it does not duplicate a notice that is already pending.
+On each fresh agent-session start—first launch, resume, or a relaunch or
+respawn after a Butler or daemon restart—Butler checks for unread mail. If any
+is unread, it queues one notice with the count, using the normal debounce; it
+does not duplicate a notice that is already pending.
 
 `remuda butler status` prints `butler: up (<kind>)` and exits 0 when the root
 Butler is ready. During launch it exits 75 and writes `launching` plus one
