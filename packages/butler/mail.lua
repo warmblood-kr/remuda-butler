@@ -542,9 +542,16 @@ local function inbox(name)
     if message and object then
       local lines = { "[" .. message.id .. " from " .. message.from.host .. "/"
         .. message.from.session .. " · " .. message.created_at .. "] " .. message.subject }
+      if message.matrix and message.matrix.event_id then
+        lines[#lines + 1] = "  Matrix event " .. message.matrix.event_id
+      end
       if message.in_reply_to then
-        local root = message.references and message.references[1] or message.in_reply_to
-        lines[#lines + 1] = "  in reply to " .. message.in_reply_to .. " (thread " .. root .. ")"
+        local root = message.references and message.references[1]
+        if root then
+          lines[#lines + 1] = "  in reply to " .. message.in_reply_to .. " (thread " .. root .. ")"
+        else
+          lines[#lines + 1] = "  in reply to " .. message.in_reply_to
+        end
       elseif message.references and message.references[1] then
         lines[#lines + 1] = "  thread " .. message.references[1]
       end

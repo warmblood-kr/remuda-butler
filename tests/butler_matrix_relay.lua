@@ -144,12 +144,17 @@ local function test_state_restart_corruption_and_processed_cap()
   local ids = matrix.json_array({})
   for i = 1, 5003 do ids[i] = "event-" .. tostring(i) end
   local encoded = assert(matrix.encode_json({ since = "persisted", processed_event_ids = ids,
-    messages_since = matrix.json_null, pending_events = remuda.json.object({}) }))
+    messages_since = matrix.json_null, pending_events = remuda.json.object({ ["$pending"] = remuda.json.object({
+      event_id = "$pending", sender = "@alice:example.org", room_id = "!room:example.org",
+      created_at = "2026-09-30T10:00:00Z", body = "saved", references = "not-a-list",
+    }) }) }))
   local file = assert(io.open(state_path, "wb")); file:write(encoded); file:close()
 
   local relay = relay_module.new({ config_path = config_path, matrix = client, deliver = function() return true end })
   assert(#relay:state().processed_order == 5000)
   assert(relay:state().processed_order[1] == "event-4")
+  assert(relay:state().pending["$pending"].references == nil,
+    "invalid saved references should be discarded when pending state loads")
   relay:start()
   assert(client.requests[1].path == "/_matrix/client/v3/sync?since=persisted&timeout=30000",
     "restart must resume the stored cursor without running a baseline")
@@ -516,10 +521,28 @@ local function test_thread_reply_fixture()
 end
 
 local function test_plain_reply_fixture()
+  local dir, config_path = fixture()
+  local client, received = scripted_client(), {}
+  local relay = relay_module.new({ config_path = config_path, matrix = client,
+    deliver = function(event) received[#received + 1] = event return true end,
+  })
+  relay:start()
+  client:complete(1, { json = { next_batch = "s0" } })
+  client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+    ["!room:example.org"] = { timeline = { events = {
+      { type = "m.room.message", event_id = "$plain-reply", sender = "@alice:example.org",
+        content = { msgtype = "m.text", body = "> <@alice:example.org> original\n\nYes, it is ready.",
+          ["m.relates_to"] = { ["m.in_reply_to"] = { event_id = "$plain-target" } } } },
+    } } },
+  } } } })
+  assert(received[1] and received[1].body == "Yes, it is ready.",
+    "plain replies should drop the leading Matrix fallback quote and separator")
+  relay:stop()
+  os.execute("rm -rf " .. string.format("%q", dir))
   render_fixture("matrix-mail-plain-reply.txt", {
     { id = "MAIL-PLAIN-REPLY", created_at = "2026-09-30T10:03:00Z",
       subject = "Matrix message from @alice:example.org", in_reply_to = "MAIL-PLAIN-TARGET",
-      body = "> <@alice:example.org> original\n\nYes, it is ready.",
+      body = received[1].body,
       matrix = { event_id = "$plain-reply" } },
   })
 end

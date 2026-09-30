@@ -95,6 +95,19 @@ local function mail_body(body)
   return (body:gsub("\194[\128-\159]", ""))
 end
 
+local function strip_reply_fallback(body)
+  local lines = {}
+  for line in (body .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
+  local index = 1
+  if lines[index] and lines[index]:match("^>") then
+    while lines[index] and lines[index]:match("^>") do index = index + 1 end
+    if lines[index] == "" then index = index + 1 end
+  end
+  local reply = {}
+  for i = index, #lines do reply[#reply + 1] = lines[i] end
+  return table.concat(reply, "\n")
+end
+
 local function timestamp(event)
   local ms = event and tonumber(event.origin_server_ts)
   if ms and ms >= 0 and ms < 253402300800000 then
@@ -284,6 +297,14 @@ local function load_state(path)
       and type(event.sender) == "string" and type(event.room_id) == "string"
       and type(event.created_at) == "string" and type(event.body) == "string" then
       event.event_id = event.event_id or id
+      local references = event.references
+      if type(references) == "table" and references ~= json.null
+        and getmetatable(references) == JSON_ARRAY_MT and #references == 1
+        and type(references[1]) == "string" and references[1] ~= "" then
+        event.references = { cap_field(references[1], 512) }
+      else
+        event.references = nil
+      end
       state.pending[id] = event
     end
   end
@@ -764,6 +785,8 @@ function relay.new(options)
             quarantine_event(ev, reason)
           else
           local thread_root, in_reply_to = relation_fields(content)
+          local body = mail_body(content.body)
+          if in_reply_to and not thread_root then body = strip_reply_fallback(body) end
           local actual_room = room_id or cfg.room
           local sender_kind = member_kind(ev.sender, cfg)
           local is_mention = mentions(content, content.body, cfg.self_mxid)
@@ -792,7 +815,7 @@ function relay.new(options)
           else
           state.pending[ev.event_id] = {
             sender = ev.sender, room_id = actual_room, event_id = ev.event_id,
-            created_at = timestamp(ev), body = mail_body(content.body),
+            created_at = timestamp(ev), body = body,
             thread_root = thread_root, in_reply_to = in_reply_to, mxc = media_uri(content),
             room = cfg.rooms[actual_room], room_kind = cfg.rooms[actual_room], context_mail_id = context_mail_id,
             references = references and { references } or nil,
