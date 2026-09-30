@@ -9,10 +9,13 @@ local M = dofile(prompt_module)
 local main_file = assert(io.open("packages/butler/main.lua", "r"))
 local main = main_file:read("*a")
 main_file:close()
+local launch_file = assert(io.open("packages/butler/launch.lua", "r"))
+local launch = launch_file:read("*a")
+launch_file:close()
 assert(main:find('remuda.exec("butler/prompt")', 1, true), "Butler does not load prompt delivery")
-assert(main:find("PROMPT_DELIVERY.schedule(remuda, kind, actual, name, parent, task", 1, true),
+assert(launch:find("PROMPT_DELIVERY.schedule(remuda, kind, actual, name, parent, task", 1, true),
   "agent launch bypasses the verified prompt delivery path")
-assert(main:find("submit_timeout = remuda._butler_submit_timeout or 300", 1, true),
+assert(launch:find("submit_timeout = remuda._butler_submit_timeout or 300", 1, true),
   "submit verification timeout has no seconds-based Butler setting")
 
 local function count(text, needle)
