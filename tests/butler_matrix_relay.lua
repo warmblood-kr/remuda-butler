@@ -557,6 +557,123 @@ local function test_thread_root_mail_references_are_stable()
   cleanup_fixture(dir, config_path)
 end
 
+local function test_cli_matrix_mail_replies_keep_room_and_relation()
+  local home_room, joined_room = "!room:example.org", "!joined:example.org"
+  local dir, config_path = fixture()
+  local config = assert(io.open(config_path, "w"))
+  config:write("http://matrix.invalid\n", home_room, "\n@bot:example.org\n@alice:example.org\n",
+    "false\n30000\nroom=", joined_room, " how=operator\n")
+  config:close()
+  local token_path = config_path .. ".token"
+  local token = assert(io.open(token_path, "w")); token:write("fake-token"); token:close()
+
+  local bus = { inboxes = {}, messages = {}, objects = {} }
+  local old_mail_config, old_mail, old_matrix_config = remuda._butler_mail_config,
+    remuda._butler_mail, remuda._butler_matrix_config
+  local old_ulid = remuda._butler_new_ulid
+  local old_instance, old_request_json = matrix.relay.instance, matrix.request_json
+  local next_id, sync_callbacks, sent, mail_ids = 0, {}, {}, {}
+  remuda._butler_new_ulid = function()
+    local id = "M" .. tostring(next_id)
+    next_id = next_id + 1
+    return id
+  end
+  remuda._butler_mail_config = { bus = bus }
+  remuda._butler_matrix_config = { token_path = token_path, config_path = config_path }
+  dofile("packages/butler/mail.lua")
+  local client = {}
+  function client.request_json(args, callback)
+    assert(args.path:find("/_matrix/client/v3/sync", 1, true), "only relay sync requests use this fake")
+    sync_callbacks[#sync_callbacks + 1] = callback
+    return { cancel = function() end }
+  end
+  function client.reply(opts, callback)
+    sent[#sent + 1] = { room_id = opts.room, text = opts.text,
+      relates_to = { rel_type = "m.thread", event_id = opts.thread_root or opts.event_id,
+        ["m.in_reply_to"] = { event_id = opts.event_id } } }
+    local sent_id = "$butler-sent-" .. tostring(#sent)
+    callback({ event_id = sent_id, event_ids = matrix.json_array({ sent_id }) })
+    return { cancel = function() end }
+  end
+  local function deliver(event)
+    local sender = event.sender
+    local delivered = remuda._butler_mail.queue(
+      { host = "matrix", id = "", alias = sender, session = sender, kind = "matrix" },
+      { id = "butler", alias = "butler" }, event.body,
+      event.context_mail_id and ("Matrix thread reply from " .. sender) or ("Matrix message from " .. sender),
+      event.context_mail_id, event.references, { sender = sender, room_id = event.room_id,
+        event_id = event.event_id, thread_root = event.thread_root, in_reply_to = event.in_reply_to,
+        room = event.room, room_kind = event.room_kind })
+    assert(delivered, "fake Butler mail delivery failed")
+    mail_ids[event.event_id] = delivered.id
+    return delivered
+  end
+  matrix.request_json = client.request_json
+  local relay = relay_module.new({ config_path = config_path, matrix = client,
+    deliver = deliver,
+  })
+  matrix.relay.instance = relay
+  assert(relay:start())
+
+  local function sync(response)
+    local callback = table.remove(sync_callbacks, 1)
+    assert(callback, "fake homeserver has no pending sync request")
+    callback({ json = response })
+  end
+  local function event(room_id, event_id, relation)
+    local content = { msgtype = "m.text", body = "incoming" }
+    if relation then content["m.relates_to"] = relation end
+    sync({ next_batch = "s" .. tostring(next_id + 10), rooms = { join = {
+      [room_id] = { timeline = { events = { { type = "m.room.message", event_id = event_id,
+        sender = "@alice:example.org", content = content } } } },
+    } } })
+    return assert(mail_ids[event_id], "fake homeserver event did not deposit a mail")
+  end
+  sync({ next_batch = "s0" })
+  local joined_top = event(joined_room, "$joined-top")
+  event(joined_room, "$thread-root")
+  local thread_mail = event(joined_room, "$thread-reply", { rel_type = "m.thread",
+    event_id = "$thread-root", ["m.in_reply_to"] = { event_id = "$thread-root" } })
+  local plain_reply = event(joined_room, "$plain-reply", {
+    ["m.in_reply_to"] = { event_id = "$plain-parent" } })
+  local home_top = event(home_room, "$home-top")
+
+  local function cli_reply(mail_id)
+    local result = remuda._butler_mail.reply({ id = "operator", alias = "operator" }, mail_id,
+      "answer", true, function(message)
+        return matrix.mail_reply({ mail_id = message.in_reply_to, reply_mail_id = message.reply_id,
+          text = message.text, route = message.matrix_route })
+      end)
+    assert(result, "CLI reply backend must queue the Matrix reply")
+  end
+  cli_reply(joined_top)
+  cli_reply(thread_mail)
+  cli_reply(plain_reply)
+  cli_reply(home_top)
+
+  assert(#sent == 4, "four CLI mail replies should reach the fake homeserver")
+  assert(sent[1].room_id == joined_room and sent[1].relates_to.event_id == "$joined-top",
+    "a top-level mail from a joined room must reply in that room")
+  assert(sent[2].room_id == joined_room and sent[2].relates_to.event_id == "$thread-root"
+      and sent[2].relates_to["m.in_reply_to"].event_id == "$thread-reply",
+    "a thread reply must preserve its room, thread root, and direct event target")
+  assert(sent[3].room_id == joined_room
+      and sent[3].relates_to["m.in_reply_to"].event_id == "$plain-reply",
+    "a reply to Matrix mail that is itself a reply must target that event")
+  assert(sent[4].room_id == home_room and sent[4].relates_to.event_id == "$home-top",
+    "HOME mail replies must keep their existing room")
+
+  relay:stop()
+  matrix.relay.instance, matrix.request_json = old_instance, old_request_json
+  remuda._butler_new_ulid = old_ulid
+  remuda._butler_mail, remuda._butler_mail_config = old_mail, old_mail_config
+  remuda._butler_matrix_config = old_matrix_config
+  for _, suffix in ipairs({ "", ".since", ".since.bak", ".acks", ".acks.drain", ".token" }) do
+    os.remove(config_path .. suffix)
+  end
+  remove_dir(dir)
+end
+
 local function test_thread_reply_in_same_sync_batch_gets_root_reference()
   local dir, config_path = fixture()
   local client, delivered = scripted_client(), {}
@@ -2334,6 +2451,7 @@ test_messages_backfill_baseline_and_retry_backoff()
 test_retry_backoff_grows_and_resets_after_recovery()
 test_allowlist_refusal_is_logged_once()
 test_thread_root_mail_references_are_stable()
+test_cli_matrix_mail_replies_keep_room_and_relation()
 test_thread_reply_in_same_sync_batch_gets_root_reference()
 test_human_root_fixture_through_relay_and_mail()
 setup_tests(matrix)
