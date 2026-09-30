@@ -174,22 +174,30 @@ local function render_human(verb, options, result)
         or "Next: remuda butler matrix join ROOM"
       return table.concat(lines, "\n") .. "\n"
     end
-    local rooms, lines, leave_room, safe_rooms, safe_kinds, room_width, kind_width = data.rooms or {}, {}, false, {}, {}, 0, 0
+    local rooms, lines, leave_room, safe_rooms, safe_kinds, safe_hows, room_width, kind_width =
+      data.rooms or {}, { "Rooms mode: " .. terminal_safe(data.mode or "allowlist") },
+      false, {}, {}, {}, 0, 0
     for _, item in ipairs(rooms) do
       local room = terminal_safe(item.room)
       if item.alias then room = room .. " (" .. terminal_safe(item.alias) .. ")" end
       local kind = terminal_safe(item.kind)
+      local how = terminal_safe(item.how or "config")
+      if item.inviter then how = how .. "; inviter " .. terminal_safe(item.inviter) end
       safe_rooms[#safe_rooms + 1] = room
       safe_kinds[#safe_kinds + 1] = kind
+      safe_hows[#safe_hows + 1] = how
       room_width = math.max(room_width, #room)
       kind_width = math.max(kind_width, #kind)
       if item.kind == "joined" then leave_room = true end
     end
     for index, item in ipairs(rooms) do
       lines[#lines + 1] = safe_rooms[index] .. string.rep(" ", room_width - #safe_rooms[index] + 2)
-        .. safe_kinds[index] .. string.rep(" ", kind_width - #safe_kinds[index] + 2) .. terminal_safe(item.how)
+        .. safe_kinds[index] .. string.rep(" ", kind_width - #safe_kinds[index] + 2) .. safe_hows[index]
     end
-    if #lines == 0 then lines[#lines + 1] = "No configured Matrix rooms" end
+    for _, deny_line in ipairs(data.deny_lines or {}) do
+      lines[#lines + 1] = "Deny: " .. terminal_safe(deny_line)
+    end
+    if #rooms == 0 then lines[#lines + 1] = "No configured Matrix rooms" end
     if leave_room then
       lines[#lines + 1] = "Next: remuda butler matrix leave ROOM"
     else

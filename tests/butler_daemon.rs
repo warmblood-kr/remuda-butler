@@ -4170,6 +4170,9 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
           remuda._butler_bus.codex_update_state = {{claimed=false, done=false}}
           remuda._butler_codex_update_timeout = 2
           remuda._butler_modal_timeout = 3
+          -- Hold the notice clock until every give-up is queued, so the
+          -- leader's notices always batch (#126).
+          remuda._butler_notice_clock = function() return 0 end
           local native_close = remuda.close
           -- remuda.close is reported as reason "closed" by cores with #258; a
           -- simulated natural exit substitutes the exit the real process would report.
@@ -4294,8 +4297,27 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
         // The leader's "task not delivered" notice is typed too; count only
         // the topic sessions' own lines.
         let typed = log.lines().filter(|l| l.starts_with("t-") && l.contains(" type ")).count();
+        if [
+            "t-stuck",
+            "t-codex-unanswerable",
+            "t-codex-human",
+            "t-claude-human-trust",
+        ]
+        .iter()
+        .all(|n| traced.contains(&format!("task_poke_timeout\t{n}")))
+            && traced.contains("launch_failed\tt-claude-launch-unknown")
+        {
+            eval(&path, "remuda._butler_notice_clock = nil");
+        }
+        // Notices batch: one "Butler message ID ..." or "N new Butler messages".
+        let leader_noticed = log
+            .lines()
+            .any(|l| {
+                l.starts_with("butler type ")
+                    && (l.contains("Butler message") || l.contains("new Butler messages arrived"))
+            });
         if typed == 3 && traced.contains("task_poke_timeout\tt-stuck")
-            && (log.contains(" type Butler message ") || log.contains(" new Butler messages arrived"))
+            && leader_noticed
             && eval(&path, "return tostring(remuda._butler_bus.agents['t-claude-launch'] ~= nil)") == "true"
             && eval(&path, "return tostring(remuda._butler_bus.agents['t-claude-launch-transient'] ~= nil)") == "true"
             && eval(&path, "return remuda._butler_sessions()")
@@ -4341,6 +4363,24 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
         "the leader is told about t-stuck: {log}");
     assert_eq!(eval(&path, "local found=false; for _,o in pairs(remuda._butler_bus.objects) do if (o.content or ''):find('Task for t-stuck was not delivered', 1, true) then found=true end end; return tostring(found)"),
         "true", "the task-poke failure was not mailed to the leader");
+    // A batched notice does not name t-stuck; its give-up mail must.
+    let leader_mail = eval(
+        &path,
+        r#"
+          local bus, out = remuda._butler_bus, {}
+          local id = bus.agents[remuda._butler_initial_name].id
+          for _, m in ipairs(remuda._butler_mail.mailbox(id)) do
+            local message = bus.messages[m]
+            local object = message and bus.objects[message.body.object_id]
+            out[#out + 1] = object and object.content or ""
+          end
+          return table.concat(out, "\n")
+        "#,
+    );
+    assert!(
+        leader_mail.contains("Task for t-stuck was not delivered"),
+        "the leader is told about t-stuck: {leader_mail}"
+    );
     assert_eq!(log.lines().filter(|l| l.starts_with("t-codex-unanswerable key ")).count(), 0, "an unknown update menu was answered: {log}");
     assert_eq!(log.lines().filter(|l| l.starts_with("t-codex-human key ")).count(), 0, "a human-attached pane was changed: {log}");
     assert_eq!(log.lines().filter(|l| l.starts_with("t-claude-human-trust key ")).count(), 0, "modal keys were pressed after give_up: {log}");
