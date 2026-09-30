@@ -432,7 +432,7 @@ return function(matrix)
   assert(#line_specs == 3 and line_specs[3].label:find("Continue? Type Y", 1, true)
     and line_specs[3].label:find("Bot: @butler%-")
     and line_specs[3].label:find("\n  Rooms: open (anyone can invite this Butler). Restrict: set rooms=allowlist or add deny_room/deny_server in "
-      .. default_paths.config_path .. ". The sender allowlist still decides whose messages are trusted.\n", 1, true)
+      .. default_paths.config_path .. ". Only @alice:example.org (the sender allowlist) can give this Butler instructions.\n", 1, true)
     and not line_specs[3].label:find("quarantined", 1, true)
     and not line_specs[3].label:find("Room access", 1, true)
     and line_specs[3].label:find("replaces its current Matrix relay config", 1, true),
