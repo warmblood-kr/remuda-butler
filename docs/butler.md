@@ -100,6 +100,18 @@ joined room by ID or alias, while HOME and ALL-BUTLERS cannot be left or removed
 #218 enforces caller identity, this is best-effort policy: another local
 process running as the same user may still invoke those verbs.
 
+Approvals: when an agent runs `matrix join`, Butler resolves the room and
+posts one request to HOME instead of joining. The owner answers with a ✅ or
+❌ reaction, or a `yes`/`no` reply, to that exact message within 10 minutes.
+Only an allowlisted human sender in HOME counts. A bare `yes` does nothing.
+The owner can also answer from the terminal: `remuda butler approvals` lists
+the open requests, and `remuda butler approve ID` or `deny ID` answers one
+(operator-only). An approved request joins the room ID resolved at request
+time and writes `room=ID how=approved`. The asker gets mail for every outcome:
+approved, denied or expired. A repeat ask for the same room returns the same
+request. Each agent may have 3 open requests, and there may be 5 in total.
+Requests live in the relay state file.
+
 `quarantine` lists rejected inbound Matrix message events; add `--id EVENT_ID`
 to inspect one. It is operator-only under the same caller policy. The relay
 stores at most 200 records, with a body preview capped at 1 KiB and a 30-day
