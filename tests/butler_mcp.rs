@@ -1815,7 +1815,7 @@ fn attached_notice_recovery_progresses_or_times_out_with_a_reason() {
             trace = trace.to_string_lossy(),
         ),
     );
-    for _ in 0..12 {
+    for _ in 0..25 {
         eval(
             &path,
             "remuda._notice_test_state.now = remuda._notice_test_state.now + 1; remuda._butler_deliver_notices()",

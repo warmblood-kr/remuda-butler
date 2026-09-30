@@ -22,11 +22,17 @@ bus.notice_seen = bus.notice_seen or {}
 local NOTICE_STABLE_SECONDS = 3
 local NOTICE_QUIET_S = 2
 local NOTICE_MAX_WAIT_S = 10
+local NOTICE_RECOVERY_TIMEOUT_S = 20
 -- os.time is whole seconds: quiet is 1-2 s, plus up to 1 s for the notice tick.
 local function notice_now()
   local clock = remuda._butler_notice_clock
   if type(clock) == "function" then return clock() end
   return os.time()
+end
+
+local function codex_trace_row(text)
+  return tostring(text or ""):match(
+    "^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d[%.,]?%d*Z?%s+%u+%s+[%w_%.:]+:") ~= nil
 end
 
 -- The composer's text starts after the last prompt glyph and includes its
@@ -68,6 +74,7 @@ function remuda._butler_prompt_is_empty(kind, screen)
     parts[#parts + 1] = rest
   end
   text = table.concat(parts, "\n"):match("^%s*(.-)%s*$")
+  if kind == "codex" and codex_trace_row(text) then return "EMPTY", "" end
   if text == "" then return "EMPTY", text end
   local startup = remuda._butler_agent_startup[kind] or {}
   for _, placeholder in ipairs(startup.placeholders or {}) do
@@ -344,20 +351,10 @@ local function notice_matches_composer(session, screen, text, expected)
   return (safe and compact_composer(composer) == expected_compact)
     or compact_composer(text) == expected_compact
 end
-local function notice_log_value(value)
-  local raw = tostring(value or "")
-  local length = #raw
-  if length > 8192 then
-    raw = raw:sub(1, 8192) .. ("<truncated; %d bytes total>"):format(length)
-  end
-  return string.format("%q", raw)
-end
-local function log_notice_verify_mismatch(session, screen, text, expected)
-  -- Failure-only trace data; never display diagnostic captures in an agent pane.
-  _butler_session_trace("notice_verify_mismatch", session
-    .. " capture=" .. notice_log_value(screen)
-    .. " composer=" .. notice_log_value(text)
-    .. " expected=" .. notice_log_value(expected))
+local function trace_notice_retry(session, pending, reason)
+  _butler_session_trace("notice_retry", "message_ids="
+    .. table.concat(pending and pending.message_order or {}, ",")
+    .. " session=" .. session .. " reason=" .. tostring(reason))
 end
 local function recovery_composer_empty(session, screen, decision, text)
   if decision ~= "EMPTY" then return false end
@@ -369,7 +366,8 @@ notice_recovery_error = function(session, state, reason)
   state.failed = true
   local agent = bus.agents[session]
   local parent = agent and agent.parent or "butler"
-  _butler_session_trace("notice_recovery_failed", session .. " " .. reason)
+  _butler_session_trace("notice_recovery_failed", "message_ids="
+    .. table.concat(state.message_ids or {}, ",") .. " session=" .. session .. " reason=" .. reason)
   pcall(remuda._butler_send, "butler", parent,
     "Could not safely deliver queued Butler mail to " .. session .. ": " .. reason
     .. ". Inspect the composer and resend the notice."
@@ -422,7 +420,14 @@ local function recovery_human_safe(session, allow_busy)
   for _, candidate in ipairs(remuda.ls()) do
     if candidate.name == session then session_row = candidate end
   end
-  if not session_row or not session_row.alive or session_row.attached then return false end
+  if not session_row or not session_row.alive then return false end
+  if session_row.attached then
+    if session_row.human_idle ~= nil then
+      if session_row.human_idle < (remuda._butler_notice_human_idle or 10) then return false end
+    elseif remuda._butler_human_active(session) then
+      return false
+    end
+  end
   if remuda._butler_human_active(session) then return false end
   if remuda.session then
     local ok, busy = pcall(function()
@@ -457,6 +462,10 @@ local function begin_notice_submit(session, state, draft)
 end
 local function tick_notice_recovery(session, state)
   if state.failed then return false end
+  state.started_at = state.started_at or notice_now()
+  if notice_now() - state.started_at >= NOTICE_RECOVERY_TIMEOUT_S then
+    return notice_recovery_error(session, state, "recovery timed out after 20 seconds")
+  end
   local observing_submit = state.phase == "verify_notice" or state.phase == "verify_existing"
   if not recovery_human_safe(session, observing_submit) then return false end
   local busy = false
@@ -472,6 +481,9 @@ local function tick_notice_recovery(session, state)
   local screen, decision, text = recovery_screen(session)
   if not screen then return notice_recovery_error(session, state, "the pane could not be captured") end
   local normalized = tostring(screen):gsub("\r\n", "\n"):gsub("\r", "\n")
+  local pending = bus.notices[session]
+  trace_notice_retry(session, pending, "prompt-" .. decision
+    .. (text and text ~= "" and (":" .. text) or ""))
   if state.phase == "retry_type" then
     return begin_notice_submit(session, state, state.draft)
   end
@@ -550,9 +562,8 @@ local function tick_notice_recovery(session, state)
       return complete_notice_recovery(session, state)
     end
     if busy then return false end
-    if state.checks >= 6 then
-      return notice_recovery_error(session, state, "the existing Butler notice did not leave the composer")
-    end
+    -- Let the recovery deadline below own the timeout so an attached pane can
+    -- return to the ordinary empty-prompt delivery path when it becomes idle.
     return false
   elseif state.phase == "verify_notice" then
     local notice_head = tostring(state.notice or ""):gsub("%s+", ""):sub(1, 32)
@@ -578,10 +589,8 @@ local function tick_notice_recovery(session, state)
       state.return_retried = true
       return false
     end
-    if state.checks >= 12 then
-      log_notice_verify_mismatch(session, screen, text, state.notice)
-      return notice_recovery_error(session, state, "the notice submit could not be verified")
-    end
+    -- The bounded recovery deadline below reports the failure with message
+    -- context and first gives an empty prompt a chance to use normal delivery.
     return false
   end
   return notice_recovery_error(session, state, "unknown recovery state")
@@ -594,6 +603,18 @@ local function deliver_notice(session)
   if bus.pending_tasks[session] then return false end
   local recovering = bus.notice_recoveries[session]
   if recovering then
+    recovering.started_at = recovering.started_at or notice_now()
+    if notice_now() - recovering.started_at >= NOTICE_RECOVERY_TIMEOUT_S then
+      if remuda._butler_notify_policy(session) then
+        trace_notice_retry(session, pending, "recovery-timeout; prompt-empty; falling-back-to-normal-delivery")
+        bus.notice_recoveries[session] = nil
+        recovering = nil
+      else
+        return notice_recovery_error(session, recovering, "recovery timed out after 20 seconds")
+      end
+    end
+  end
+  if recovering then
     if (recovering.failed or recovering.phase == "probe" or recovering.phase == "redrawn")
         and remuda._butler_notify_policy(session) then
       bus.notice_recoveries[session] = nil
@@ -603,7 +624,8 @@ local function deliver_notice(session)
     end
   end
   if remuda._butler_notify_policy(session) then
-    local state = { phase = "verify_notice", count = pending.count, notice = pending_notice_text(pending), checks = 0 }
+    local state = { phase = "verify_notice", count = pending.count, notice = pending_notice_text(pending), checks = 0,
+      started_at = notice_now() }
     state.message_ids = {}
     for _, id in ipairs(pending.message_order or {}) do state.message_ids[#state.message_ids + 1] = id end
     local typed, result, why = pcall(remuda.type_text, session, state.notice, 0.1)
@@ -614,7 +636,9 @@ local function deliver_notice(session)
   end
   local screen, decision = recovery_screen(session)
   if not screen or decision == "EMPTY" then return false end
-  local state = { phase = "probe", count = pending.count, checks = 0 }
+  local state = { phase = "probe", count = pending.count, checks = 0, started_at = notice_now() }
+  state.message_ids = {}
+  for _, id in ipairs(pending.message_order or {}) do state.message_ids[#state.message_ids + 1] = id end
   bus.notice_recoveries[session] = state
   return tick_notice_recovery(session, state)
 end
@@ -674,7 +698,9 @@ function remuda._butler_send(from, to, text)
   if notice and notice.error then
     return "queued " .. message.id .. " for " .. recipient.alias .. "; terminal delivery deferred: " .. tostring(notice.error)
   end
-  return "queued " .. message.id .. " for " .. recipient.alias .. "; notice deferred until its pane is free"
+  return "queued " .. message.id .. " for " .. recipient.alias
+    .. "; notice deferred: session " .. recipient.alias
+    .. "; reason: waiting for the recipient's quiet delivery window"
 end
 
 remuda._butler_notice = {
