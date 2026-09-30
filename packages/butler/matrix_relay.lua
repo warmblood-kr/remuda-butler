@@ -878,6 +878,7 @@ function relay.new(options)
           for _, id in ipairs(room_added) do added[#added + 1] = id end
         end
       end
+      local home_invite_notices, additional_invites = 0, 0
       local invites = response.rooms and response.rooms.invite or {}
       for room_id, invitation in pairs(invites) do
         if cfg.rooms[room_id] == nil then
@@ -925,7 +926,7 @@ function relay.new(options)
                   .. terminal_safe_field(room_id, 512) .. ": " .. terminal_safe_field(tostring(add_error), 512))
               end
             else
-              local ev = { event_id = "invite:" .. room_id .. "|" .. report_inviter,
+              local ev = { event_id = "invite:" .. cap_field(room_id, 200) .. "|" .. cap_field(report_inviter, 200),
                 sender = report_inviter, type = "m.room.member", content = {} }
               if quarantine_event(ev, "invite_not_allowlisted", room_id) then
                 local safe_to_notice = valid_room_id(room_id) and not room_id:find("'", 1, true)
@@ -935,12 +936,23 @@ function relay.new(options)
                   local safe_inviter = terminal_safe_field(report_inviter, 256)
                   local text = "Invite to " .. safe_room .. " from " .. safe_inviter
                     .. " was not accepted. Next: remuda butler matrix join " .. shell_quote(safe_room)
-                  send_notice(cfg.home_room, text, "invite-home-notice", room_id .. "\0" .. report_inviter)
+                  if home_invite_notices < 3 then
+                    home_invite_notices = home_invite_notices + 1
+                    send_notice(cfg.home_room, text, "invite-home-notice", room_id .. "\0" .. report_inviter)
+                  else
+                    additional_invites = additional_invites + 1
+                  end
                 end
               end
             end
           end
         end
+      end
+      if additional_invites > 0 then
+        local text = tostring(additional_invites)
+          .. " more invites quarantined. Next: remuda butler matrix quarantine"
+        send_notice(cfg.home_room, text, "invite-summary-notice",
+          tostring(response.next_batch or state.since or "sync"))
       end
       if type(response.next_batch) == "string" then state.since = response.next_batch end
       persist()

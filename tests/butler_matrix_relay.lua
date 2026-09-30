@@ -631,6 +631,57 @@ local function test_unsafe_invite_room_is_quarantined_without_home_notice()
   assert(ok, err)
 end
 
+local function test_long_invite_identifiers_dedupe_home_notice()
+  local dir, path = invite_fixture()
+  local long_room = "!" .. string.rep("r", 298) .. ":" .. string.rep("s", 300)
+  local long_inviter = "@" .. string.rep("u", 298) .. ":" .. string.rep("x", 300)
+  local saved_ulid, ulid_count = remuda._butler_new_ulid, 0
+  remuda._butler_new_ulid = function()
+    ulid_count = ulid_count + 1
+    return string.format("01LONGTEST%05d", ulid_count)
+  end
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  local invitation = invite(long_room, long_inviter)
+  local ok, err = pcall(function()
+    client:sync({ json = { next_batch = "s1", rooms = { invite = invitation } } })
+    client:pump()
+    client:sync({ json = { next_batch = "s2", rooms = { invite = invitation } } })
+    client:pump()
+    assert(client:messages(HOME, "Invite to") == 1,
+      "repeated long room/inviter IDs must produce only one HOME notice")
+    assert(#relay:quarantine_list() == 1,
+      "repeated long room/inviter IDs must dedupe to one quarantine record")
+  end)
+  relay:stop()
+  remuda._butler_new_ulid = saved_ulid
+  remove_dir(dir)
+  assert(ok, err)
+end
+
+local function test_invite_home_notice_cap_adds_one_summary()
+  local dir, path = invite_fixture()
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  local invites = {}
+  for index = 1, 5 do
+    local room = "!bulk" .. tostring(index) .. ":example.org"
+    invites[room] = invite(room, STRANGER)[room]
+  end
+  local ok, err = pcall(function()
+    client:sync({ json = { next_batch = "s1", rooms = { invite = invites } } })
+    client:pump()
+    assert(client:messages(HOME, "Invite to") == 3,
+      "only three individual HOME invite notices may be sent in one sync")
+    assert(client:messages(HOME, "2 more invites quarantined. Next: remuda butler matrix quarantine") == 1,
+      "remaining HOME invite notices must be summarized once")
+    assert(#relay:quarantine_list() == 5, "all stranger invites must still be quarantined")
+  end)
+  relay:stop()
+  remove_dir(dir)
+  assert(ok, err)
+end
+
 local function test_agent_invite_is_not_joined()
   local agents = { "@agent-x:example.org", "@butler-x:example.org" }
   local dir, path = invite_fixture(OWNER .. "," .. table.concat(agents, ","))
@@ -805,6 +856,8 @@ for _, case in ipairs({
   { "test_stranger_invite_is_quarantined_with_home_next", test_stranger_invite_is_quarantined_with_home_next },
   { "test_conflicting_inviter_events_cannot_join", test_conflicting_inviter_events_cannot_join },
   { "test_unsafe_invite_room_is_quarantined_without_home_notice", test_unsafe_invite_room_is_quarantined_without_home_notice },
+  { "test_long_invite_identifiers_dedupe_home_notice", test_long_invite_identifiers_dedupe_home_notice },
+  { "test_invite_home_notice_cap_adds_one_summary", test_invite_home_notice_cap_adds_one_summary },
   { "test_agent_invite_is_not_joined", test_agent_invite_is_not_joined },
   { "test_join_failure_rolls_back_room_line", test_join_failure_rolls_back_room_line },
   { "test_joined_room_survives_restart", test_joined_room_survives_restart },
