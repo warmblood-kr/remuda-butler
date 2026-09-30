@@ -256,6 +256,9 @@ function matrix.cli(args, agent)
         if result.home_room then lines[#lines + 1] = "HOME room: " .. terminal_safe(result.home_room) end
         if result.all_room then lines[#lines + 1] = "ALL-BUTLERS room: " .. terminal_safe(result.all_room) end
         lines[#lines + 1] = "Token file: " .. terminal_safe(files.token_path)
+        if files.password_path then
+          lines[#lines + 1] = "Bot password file: " .. terminal_safe(files.password_path)
+        end
         lines[#lines + 1] = "Config file: " .. terminal_safe(files.config_path)
         if status_result.error then
           lines[#lines + 1] = "Status check failed: " .. terminal_safe(status_result.error)

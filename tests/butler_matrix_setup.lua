@@ -86,6 +86,37 @@ return function(matrix)
     and valid_id_plan.bot_mxid == "@butler-demo:example.org",
     "valid Matrix user IDs should still pass")
 
+  local registration_token_file = root .. "/registration-token"
+  write(registration_token_file, "  homeserver-registration-token  \nignored")
+  local registration_plan = matrix.setup_prepare({ "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--register", "--registration-token-file",
+    registration_token_file, "--bot", "@butler-demo:example.org", "--dir", output })
+  assert(registration_plan and registration_plan.secret_kind == "registration"
+    and registration_plan.secret == "homeserver-registration-token"
+    and registration_plan.bot_mxid == "@butler-demo:example.org"
+    and registration_plan.password_path == output .. "/password",
+    "--register should validate the homeserver token and reserve a private password output path")
+  local default_registration = matrix.setup_prepare({ "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--register", "--registration-token-file",
+    registration_token_file, "--dir", output })
+  assert(default_registration and default_registration.bot_mxid:match("^@butler%-%w[%w%-]*:example%.org$"),
+    "registration should derive a slugged butler username from the hostname when --bot is omitted")
+  local existing_password_dir = root .. "/existing-password"
+  assert(real_mkdir_new(existing_password_dir))
+  write(existing_password_dir .. "/password", "old-generated-password")
+  local _, existing_password_error = matrix.setup_prepare({ "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--register", "--registration-token-file",
+    registration_token_file, "--bot", "@butler-demo:example.org", "--dir", existing_password_dir })
+  assert(existing_password_error and existing_password_error:find("output file already exists", 1, true),
+    "validation should refuse to register before overwriting an existing password file")
+  local forced_registration = matrix.setup_prepare({ "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--register", "--registration-token-file",
+    registration_token_file, "--bot", "@butler-demo:example.org", "--dir", existing_password_dir,
+    "--force" })
+  assert(forced_registration, "--force should explicitly permit replacing an existing password file")
+  os.remove(existing_password_dir .. "/password")
+  os.remove(existing_password_dir)
+
   local fake_http = remuda.http
   local fake_pending = remuda.pending
   local calls = 0
@@ -292,9 +323,30 @@ return function(matrix)
   requests[1].callback({ status = 401,
     body = '{"session":"uia-session-3","flows":[{"stages":["m.login.dummy"]}]}' })
   assert(no_registration_flow and no_registration_flow.error
-    == "This server does not accept registration tokens. Next: --token-file for an existing bot."
+    == "This server does not accept registration tokens. Next: this server needs an admin-created bot; run setup with --token-file PATH (the bot access token)."
     and #requests == 1,
     "registration without a token flow should stop with safe existing-bot guidance")
+  requests = {}
+  local unsupported_registration_flow
+  matrix.setup_register({ homeserver = "http://matrix.invalid", username = "butler-demo",
+    password = "generated-password", registration_token = "server-registration-token" },
+    function(result) unsupported_registration_flow = result end)
+  requests[1].callback({ status = 401,
+    body = '{"session":"uia-session-4","flows":[{"stages":["m.login.dummy","m.login.terms","m.login.registration_token"]}]}' })
+  assert(unsupported_registration_flow and unsupported_registration_flow.error
+    and unsupported_registration_flow.error:find("m.login.terms", 1, true)
+    and #requests == 1,
+    "registration should name and stop on UIA stages it cannot complete")
+  requests = {}
+  local user_in_use
+  matrix.setup_register({ homeserver = "http://matrix.invalid", username = "butler-demo",
+    password = "generated-password", registration_token = "server-registration-token" },
+    function(result) user_in_use = result end)
+  requests[1].callback({ status = 400,
+    body = '{"errcode":"M_USER_IN_USE","error":"private response text"}' })
+  assert(user_in_use and user_in_use.errcode == "M_USER_IN_USE"
+    and not tostring(user_in_use.error):find("private response text", 1, true),
+    "registration should expose only the safe M_USER_IN_USE code for collision retry")
   requests = {}
   local resolved
   remuda.pending = function()
@@ -303,6 +355,7 @@ return function(matrix)
     end }
   end
   local real_write_atomic, atomic_writes = remuda.fs.write_atomic, {}
+  local setup_http = remuda.http
   remuda.fs.write_atomic = function(path, contents, opts)
     atomic_writes[#atomic_writes + 1] = { path = path, private = opts and opts.private }
     return real_write_atomic(path, contents, opts)
@@ -315,6 +368,111 @@ return function(matrix)
       joined_rooms = { "!home:example.org", "!all:example.org" } } })
     return { cancel = function() end }
   end
+  local registration_output = root .. "/registered-output"
+  assert(remuda.fs.mkdir_new(registration_output))
+  local real_random_bytes, requested_random_length = matrix.random_bytes, nil
+  matrix.random_bytes = function(count)
+    requested_random_length = count
+    return string.rep(string.char(251), count)
+  end
+  local password_status = matrix.status
+  matrix.status = function(_, callback)
+    local generated_password = read(registration_output .. "/password")
+    assert(generated_password and #generated_password == 44
+      and generated_password:sub(-1) == "\n"
+      and read(registration_output .. "/token") == "registered-access-token\n",
+      "registration must persist its generated password and access token before status")
+    callback({ status = 200, json = { user_id = "@butler-demo-2:example.org",
+      joined_rooms = { "!registered-home:example.org" } } })
+    return { cancel = function() end }
+  end
+  requests, resolved = {}, nil
+  local registration_reply = matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--register", "--registration-token-file",
+    registration_token_file, "--bot", "@butler-demo:example.org", "--dir", registration_output })
+  assert(registration_reply and #requests == 1)
+  local first_registration = request_json(requests[1])
+  assert(first_registration.username == "butler-demo"
+    and first_registration.inhibit_login == false
+    and #first_registration.password == 43
+    and first_registration.password:match("^[%w_-]+$")
+    and requested_random_length == 32,
+    "registration should make a base64url password from 32 random bytes")
+  local generated_password = first_registration.password
+  requests[1].callback({ status = 400,
+    body = '{"errcode":"M_USER_IN_USE","error":"private collision detail"}' })
+  assert(#requests == 2, "an occupied bot name should retry registration")
+  local retry_registration = request_json(requests[2])
+  assert(retry_registration.username == "butler-demo-2"
+    and retry_registration.password == generated_password,
+    "registration collision retries should append -2 and reuse the generated password")
+  requests[2].callback({ status = 401,
+    body = '{"session":"retry-session","flows":[{"stages":["m.login.registration_token"]}]}' })
+  assert(#requests == 3)
+  local token_auth = request_json(requests[3])
+  assert(token_auth.username == "butler-demo-2"
+    and token_auth.auth.type == "m.login.registration_token"
+    and token_auth.auth.session == "retry-session"
+    and token_auth.auth.token == "homeserver-registration-token")
+  requests[3].callback({ status = 200,
+    body = '{"access_token":"registered-access-token","user_id":"@butler-demo-2:example.org"}' })
+  assert(#requests == 4 and requests[4].url:match("/account/whoami$"),
+    "registration must continue through the normal whoami verification")
+  assert(requests[4].headers.Authorization == "Bearer registered-access-token")
+  requests[4].callback({ status = 200, body = '{"user_id":"@butler-demo-2:example.org"}' })
+  assert(#requests == 5 and requests[5].url:match("/createRoom$"),
+    "registration must continue to create the HOME room and invite the owner")
+  assert(requests[5].body:find("@alice:example.org", 1, true)
+    and not requests[5].body:find("m.room.encryption", 1, true))
+  requests[5].callback({ status = 200, body = '{"room_id":"!registered-home:example.org"}' })
+  assert(resolved and resolved.status == 0
+    and not resolved.stdout:find("homeserver-registration-token", 1, true)
+    and not resolved.stdout:find(generated_password, 1, true)
+    and not resolved.stdout:find("registered-access-token", 1, true)
+    and resolved.stdout:find(registration_output .. "/password", 1, true),
+    "registration success should report the private password file path without any secret")
+  assert(read(registration_output .. "/password") == generated_password .. "\n"
+    and read(registration_output .. "/token") == "registered-access-token\n"
+    and read(registration_output .. "/config"):find("@butler-demo-2:example.org", 1, true),
+    "registration setup should persist generated credentials and the selected bot ID")
+  assert(#atomic_writes == 3 and atomic_writes[1].private
+    and atomic_writes[2].private and atomic_writes[3].private,
+    "registration token, generated password, and config must use private atomic writes")
+  matrix.status = password_status
+  matrix.random_bytes = real_random_bytes
+  requests, resolved, atomic_writes = {}, nil, {}
+  os.remove(registration_output .. "/token")
+  os.remove(registration_output .. "/password")
+  os.remove(registration_output .. "/config")
+  os.remove(registration_output)
+
+  local collision_plan = matrix.setup_prepare({ "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--register", "--registration-token-file",
+    registration_token_file, "--bot", "@butler-busy:example.org", "--dir", root .. "/collision-output" })
+  assert(collision_plan)
+  matrix.random_bytes = function(count) return string.rep("r", count) end
+  requests, resolved = {}, nil
+  remuda.http = { request = function(spec)
+    requests[#requests + 1] = spec
+    return { cancel = function() end }
+  end }
+  matrix.setup_network(collision_plan, function(result) resolved = result end)
+  local expected_usernames = { "butler-busy", "butler-busy-2", "butler-busy-3",
+    "butler-busy-4", "butler-busy-5" }
+  for index, username in ipairs(expected_usernames) do
+    assert(#requests == index and request_json(requests[index]).username == username,
+      "registration should try bot usernames in order through -5")
+    requests[index].callback({ status = 400,
+      body = '{"errcode":"M_USER_IN_USE","error":"private collision detail"}' })
+  end
+  assert(resolved and resolved.error
+    == "Bot account names ending in -2 through -5 are also in use. Pass --bot with another name. Nothing was created or written."
+    and #requests == 5,
+    "registration should stop after five taken names with clear guidance")
+  matrix.random_bytes = real_random_bytes
+  remuda.http = setup_http
+  requests, resolved = {}, nil
+
   local reply = matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
     "--owner", "@alice:example.org", "--bot", "@butler-demo:example.org",
     "--password-file", password, "--dir", output, "--all" })
@@ -432,6 +590,31 @@ return function(matrix)
   assert(made_parent and made_child, "failed write must remove directories created by this run")
   os.remove(rollback_dir)
   os.remove(root .. "/rollback")
+  remuda.fs.write_atomic = real_write_atomic
+
+  local registration_rollback_dir = root .. "/registration-rollback/child"
+  local registration_rollback_plan = matrix.setup_prepare({ "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--register", "--registration-token-file",
+    registration_token_file, "--bot", "@butler-rollback:example.org",
+    "--dir", registration_rollback_dir })
+  assert(registration_rollback_plan)
+  remuda.fs.write_atomic = function(path, contents, opts)
+    if path == registration_rollback_dir .. "/config" then return nil, "simulated disk failure" end
+    return real_write_atomic(path, contents, opts)
+  end
+  local registration_rollback_result, registration_rollback_error = matrix.setup_write(
+    registration_rollback_plan, { token = "rollback-token", password = "rollback-password",
+      user_id = "@butler-rollback:example.org", home_room = "!rollback:example.org" })
+  assert(not registration_rollback_result and registration_rollback_error
+    and read(registration_rollback_dir .. "/token") == nil
+    and read(registration_rollback_dir .. "/password") == nil,
+    "failed registration config write must roll back both token and generated password")
+  local registration_rollback_parent = remuda.fs.mkdir_new(root .. "/registration-rollback")
+  local registration_rollback_child = remuda.fs.mkdir_new(registration_rollback_dir)
+  assert(registration_rollback_parent and registration_rollback_child,
+    "failed registration write must remove newly created directories")
+  os.remove(registration_rollback_dir)
+  os.remove(root .. "/registration-rollback")
   remuda.fs.write_atomic = real_write_atomic
 
   local fresh_dir = root .. "/fresh-parent/child"

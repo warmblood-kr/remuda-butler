@@ -9,6 +9,7 @@ T=$(cd "$T" && pwd -P)
 S=bmr
 export HOME=$T/home XDG_CONFIG_HOME=$T/config XDG_DATA_HOME=$T/data
 export REMUDA_RUNTIME_DIR=$T/run REMUDA_NO_UPDATE_CHECK=1
+export HOSTNAME=matrix-test-host
 mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$REMUDA_RUNTIME_DIR"
 cleanup() {
   "$REMUDA_BIN" -s "$S" stop -f >/dev/null 2>&1 || true

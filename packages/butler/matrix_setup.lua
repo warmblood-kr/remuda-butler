@@ -127,7 +127,11 @@ local function setup_command(options, destination)
   end
   add("--homeserver", options.homeserver)
   add("--owner", options.owner_mxid)
-  if options.secret_kind == "password" then
+  if options.secret_kind == "registration" then
+    parts[#parts + 1] = "--register"
+    add("--registration-token-file", options.secret_path)
+    add("--bot", options.bot_mxid)
+  elseif options.secret_kind == "password" then
     add("--password-file", options.secret_path)
     add("--bot", options.bot_mxid)
   else
@@ -147,7 +151,9 @@ local function setup_command(options, destination)
 end
 
 local function validate_secret(path, kind)
-  if not absolute(path) then return nil, "--" .. kind .. "-file must be an absolute path" end
+  local option = kind == "registration" and "--registration-token-file"
+    or "--" .. kind .. "-file"
+  if not absolute(path) then return nil, option .. " must be an absolute path" end
   if not readable_file(path) then
     return nil, "cannot read secret input file: " .. path
   end
@@ -177,6 +183,35 @@ local function transport_pin(hex)
       .. (index + 2 <= #binary and alphabet:sub(value % 64 + 1, value % 64 + 1) or "=")
   end
   return "sha256/" .. table.concat(encoded)
+end
+
+local function base64url(bytes)
+  local alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+  local encoded = {}
+  for index = 1, #bytes, 3 do
+    local a, b, c = bytes:byte(index, index + 2)
+    b, c = b or 0, c or 0
+    local value = a * 65536 + b * 256 + c
+    encoded[#encoded + 1] = alphabet:sub(math.floor(value / 262144) % 64 + 1,
+      math.floor(value / 262144) % 64 + 1)
+      .. alphabet:sub(math.floor(value / 4096) % 64 + 1,
+        math.floor(value / 4096) % 64 + 1)
+    if index + 1 <= #bytes then
+      encoded[#encoded + 1] = alphabet:sub(math.floor(value / 64) % 64 + 1,
+        math.floor(value / 64) % 64 + 1)
+    end
+    if index + 2 <= #bytes then
+      encoded[#encoded + 1] = alphabet:sub(value % 64 + 1, value % 64 + 1)
+    end
+  end
+  return table.concat(encoded)
+end
+
+local function new_password()
+  if type(matrix.random_bytes) ~= "function" then return nil end
+  local ok, bytes = pcall(matrix.random_bytes, 32)
+  if not ok or type(bytes) ~= "string" or #bytes ~= 32 then return nil end
+  return base64url(bytes)
 end
 
 local function resolve_outputs(options)
@@ -219,8 +254,14 @@ local function resolve_outputs(options)
   end
   if options.default and options.dir then return nil, "--default and --dir cannot be combined" end
 
+  local password_path = token_path:match("^(.*)/[^/]+$") .. "/password"
+  if options.register and (password_path == token_path or password_path == config_path) then
+    return nil, "Matrix password, token, and config output paths must be different"
+  end
   if not options.force then
-    for _, path in ipairs({ token_path, config_path }) do
+    local paths = { token_path, config_path }
+    if options.register then paths[#paths + 1] = password_path end
+    for _, path in ipairs(paths) do
       if file_exists(path) then return nil, "output file already exists; pass --force: " .. path end
     end
   end
@@ -231,6 +272,7 @@ end
 local VALUE_OPTIONS = {
   ["--homeserver"] = "homeserver", ["--bot"] = "bot_mxid", ["--owner"] = "owner_mxid",
   ["--password-file"] = "password_file", ["--token-file"] = "token_file",
+  ["--registration-token-file"] = "registration_token_file",
   ["--dir"] = "dir", ["--pin"] = "pin", ["--ca-file"] = "ca_file",
 }
 
@@ -244,7 +286,8 @@ function matrix.setup_prepare(args)
     return { help = true, usage = USAGE }
   end
   local options, seen = {}, {}
-  local flags = { ["--default"] = "default", ["--force"] = "force", ["--all"] = "create_all" }
+  local flags = { ["--default"] = "default", ["--force"] = "force", ["--all"] = "create_all",
+    ["--register"] = "register" }
   local at = 1
   while at <= #args do
     local name, value = args[at], args[at + 1]
@@ -273,21 +316,54 @@ function matrix.setup_prepare(args)
   if not owner then return nil, owner_error end
   options.owner_mxid = owner
 
-  if options.password_file and options.token_file then return nil, "choose one of --password-file or --token-file" end
-  if not options.password_file and not options.token_file then
-    return nil, "provide --password-file or --token-file"
+  local has_password, has_token, has_registration = options.password_file ~= nil,
+    options.token_file ~= nil, options.registration_token_file ~= nil
+  if options.register then
+    if has_password or has_token then
+      return nil, "--register uses --registration-token-file; choose one setup method"
+    end
+    if not has_registration then return nil, "--register requires --registration-token-file" end
+  elseif has_registration then
+    return nil, "--registration-token-file requires --register"
+  elseif has_password and has_token then
+    return nil, "choose one of --password-file or --token-file"
+  elseif not has_password and not has_token then
+    return nil, "provide --password-file, --token-file, or --register --registration-token-file"
   end
-  options.secret_kind = options.password_file and "password" or "token"
-  options.secret_path = options.password_file or options.token_file
+  options.secret_kind = options.register and "registration"
+    or (options.password_file and "password" or "token")
+  options.secret_path = options.password_file or options.token_file or options.registration_token_file
   local secret_ok, secret_error = validate_secret(options.secret_path, options.secret_kind)
   if not secret_ok then return nil, secret_error end
   options.secret = secret_ok
 
-  if options.password_file then
+  if options.register and not options.bot_mxid then
+    local hostname = os.getenv("HOSTNAME") or os.getenv("COMPUTERNAME") or ""
+    if hostname == "" then
+      for _, path in ipairs({ "/etc/hostname", "/var/run/hostname" }) do
+        local file = io.open(path, "rb")
+        if file then
+          hostname = file:read("*l") or ""
+          file:close()
+          if hostname ~= "" then break end
+        end
+      end
+    end
+    local slug = hostname:lower():gsub("[^a-z0-9]+", "-"):gsub("^-+", ""):gsub("-+$", "")
+    slug = slug:sub(1, 48):gsub("-+$", "")
+    local server = options.owner_mxid:match("^@[^:]+:(.+)$")
+    if slug == "" or not server or server == "" then
+      return nil, "cannot derive a bot account name from this computer; pass --bot"
+    end
+    options.bot_mxid = "@butler-" .. slug .. ":" .. server
+  elseif options.bot_mxid then
     local bot, bot_error = valid_mxid(options.bot_mxid, "--bot")
     if not bot then return nil, bot_error end
     options.bot_mxid = bot
-  elseif options.bot_mxid then
+  elseif options.password_file then
+    return nil, "--bot is required when using --password-file"
+  end
+  if options.register or options.password_file then
     local bot, bot_error = valid_mxid(options.bot_mxid, "--bot")
     if not bot then return nil, bot_error end
     options.bot_mxid = bot
@@ -320,12 +396,18 @@ function matrix.setup_prepare(args)
   if not outputs then return nil, output_error end
   options.token_path, options.config_path, options.output_dir = outputs.token_path,
     outputs.config_path, outputs.dir
+  options.password_path = outputs.dir and (outputs.dir .. "/password")
+    or outputs.token_path:match("^(.*)/[^/]+$") .. "/password"
+  if options.register and options.password_path == options.token_path then
+    return nil, "Matrix password and token output paths must be different"
+  end
   options.password_file, options.token_file = nil, nil
+  options.registration_token_file = nil
   return options
 end
 
 function matrix.setup_network(options, on_done)
-  local done_called, cancelled, active = false, false, nil
+  local done_called, cancelled, active, registration_password = false, false, nil, nil
   local registration_token_error = "This is not a valid access token for any account. If it is the server's registration token, use --register (creates the bot account). Nothing was written."
   local function done(result)
     if done_called or cancelled then return end
@@ -399,8 +481,10 @@ function matrix.setup_network(options, on_done)
     local function create_next()
       local room = room_specs[at]
       if not room then
-        return done({ user_id = user_id, token = token,
-          home_room = rooms.home_room, all_room = rooms.all_room })
+        local result = { user_id = user_id, token = token,
+          home_room = rooms.home_room, all_room = rooms.all_room }
+        if registration_password then result.password = registration_password end
+        return done(result)
       end
       local request_body = { preset = "private_chat", invite = { options.owner_mxid } }
       send("createRoom", "POST", "/_matrix/client/v3/createRoom", token, request_body,
@@ -440,6 +524,30 @@ function matrix.setup_network(options, on_done)
       end
       whoami(response.access_token)
     end)
+  elseif options.secret_kind == "registration" then
+    registration_password = new_password()
+    if not registration_password then return fail("Matrix setup could not generate a private bot password") end
+    local base_bot = options.bot_mxid
+    local localpart, server = base_bot:match("^@([^:]+):(.+)$")
+    local attempt = 1
+    local function register_bot()
+      local username = localpart .. (attempt == 1 and "" or ("-" .. tostring(attempt)))
+      options.bot_mxid = "@" .. username .. ":" .. server
+      active = matrix.setup_register({ homeserver = base, username = username,
+        password = registration_password, registration_token = options.secret,
+        ca_file = options.ca_file, pin = options.pin }, function(result)
+        if type(result) == "table" and result.errcode == "M_USER_IN_USE" then
+          if attempt < 5 then attempt = attempt + 1; return register_bot() end
+          return fail("Bot account names ending in -2 through -5 are also in use. Pass --bot with another name. Nothing was created or written.")
+        end
+        if type(result) ~= "table" or result.error then
+          return fail(type(result) == "table" and result.error
+            or "Matrix account registration failed")
+        end
+        whoami(result.access_token)
+      end)
+    end
+    register_bot()
   else
     whoami(options.secret)
   end
@@ -456,13 +564,19 @@ end
 function matrix.setup_register(options, on_done)
   local done_called, cancelled, active = false, false, nil
   local rejected_token = "The server rejected that registration token. Nothing was created or written."
-  local missing_flow = "This server does not accept registration tokens. Next: --token-file for an existing bot."
+  local missing_flow = "This server does not accept registration tokens. Next: this server needs an admin-created bot; run setup with --token-file PATH (the bot access token)."
   local function done(result)
     if done_called or cancelled then return end
     done_called = true
     if on_done then on_done(result) end
   end
-  local function fail(message) done({ error = message }) end
+  local function fail(message, errcode)
+    local result = { error = message }
+    if type(errcode) == "string" and errcode:match("^M_[A-Z0-9_]+$") then
+      result.errcode = errcode
+    end
+    done(result)
+  end
   if type(options) ~= "table" or type(options.homeserver) ~= "string"
     or type(options.username) ~= "string" or options.username == ""
     or type(options.password) ~= "string" or options.password == ""
@@ -526,7 +640,8 @@ function matrix.setup_register(options, on_done)
         return fail(rejected_token)
       end
       return fail("Matrix account registration request failed"
-        .. (status and (" (HTTP " .. tostring(status) .. ")") or ""))
+        .. (status and (" (HTTP " .. tostring(status) .. ")") or ""),
+        challenge and challenge.errcode)
     end
     local selected
     for _, flow in ipairs(challenge.flows) do
@@ -539,6 +654,15 @@ function matrix.setup_register(options, on_done)
       end
     end
     if not selected then return fail(missing_flow) end
+
+    for _, stage in ipairs(selected) do
+      if stage ~= "m.login.dummy" and stage ~= "m.login.registration_token" then
+        local safe_stage = type(stage) == "string" and stage:match("^[%w%._%-]+$")
+          and stage or "an unknown UIA stage"
+        return fail("This server requires an unsupported registration step: "
+          .. safe_stage .. ". Nothing was created or written.")
+      end
+    end
 
     local stages = {}
     for _, stage in ipairs(selected) do
@@ -569,7 +693,8 @@ function matrix.setup_register(options, on_done)
           return advance()
         end
         return fail("Matrix account registration request failed"
-          .. (stage_status and (" (HTTP " .. tostring(stage_status) .. ")") or ""))
+          .. (stage_status and (" (HTTP " .. tostring(stage_status) .. ")") or ""),
+          stage_body and stage_body.errcode)
       end)
     end
     advance()
@@ -598,6 +723,9 @@ function matrix.setup_write(options, result)
   if type(options) ~= "table" or type(result) ~= "table"
     or type(result.token) ~= "string" or result.token == ""
     or type(result.user_id) ~= "string" or type(result.home_room) ~= "string"
+    or (options.secret_kind == "registration"
+      and (type(result.password) ~= "string" or result.password == ""
+        or type(options.password_path) ~= "string"))
     or (options.create_all and type(result.all_room) ~= "string")
     or type(options.token_path) ~= "string" or type(options.config_path) ~= "string" then
     return failure("Matrix setup cannot write incomplete results")
@@ -607,7 +735,22 @@ function matrix.setup_write(options, result)
     return failure("Matrix setup requires the Remuda private filesystem helpers")
   end
 
-  local paths = { options.token_path, options.config_path }
+  local paths = { options.token_path }
+  if options.secret_kind == "registration" then paths[#paths + 1] = options.password_path end
+  paths[#paths + 1] = options.config_path
+  local path_labels = { [options.token_path] = "token", [options.config_path] = "config" }
+  local contents = { [options.token_path] = result.token .. "\n" }
+  if options.secret_kind == "registration" then
+    path_labels[options.password_path] = "password"
+    contents[options.password_path] = result.password .. "\n"
+  end
+  local config_lines = {
+    options.homeserver, result.home_room, result.user_id, options.owner_mxid, "", "30000",
+  }
+  if result.all_room then config_lines[#config_lines + 1] = "all_room=" .. result.all_room end
+  if options.pin then config_lines[#config_lines + 1] = "pin_sha256=" .. options.pin end
+  if options.ca_file then config_lines[#config_lines + 1] = "ca_file=" .. options.ca_file end
+  contents[options.config_path] = table.concat(config_lines, "\n") .. "\n"
   if not options.force then
     for _, path in ipairs(paths) do
       if file_exists(path) then return failure("Matrix output file already exists; pass --force") end
@@ -677,25 +820,19 @@ function matrix.setup_write(options, result)
     end
   end
 
-  local config_lines = {
-    options.homeserver, result.home_room, result.user_id, options.owner_mxid, "", "30000",
-  }
-  if result.all_room then config_lines[#config_lines + 1] = "all_room=" .. result.all_room end
-  if options.pin then config_lines[#config_lines + 1] = "pin_sha256=" .. options.pin end
-  if options.ca_file then config_lines[#config_lines + 1] = "ca_file=" .. options.ca_file end
-  local contents = { result.token .. "\n", table.concat(config_lines, "\n") .. "\n" }
   local written = {}
-  for index, path in ipairs(paths) do
-    local ok, wrote = pcall(remuda.fs.write_atomic, path, contents[index], { private = true })
+  for _, path in ipairs(paths) do
+    local ok, wrote = pcall(remuda.fs.write_atomic, path, contents[path], { private = true })
     if not ok or not wrote then
       local files_clean = rollback_files(written)
       rollback_dirs()
-      return failure("Matrix setup could not write its " .. (index == 1 and "token" or "config")
+      return failure("Matrix setup could not write its " .. path_labels[path]
         .. " file" .. (files_clean and "" or "; rollback was incomplete"))
     end
     written[#written + 1] = path
   end
-  return { token_path = options.token_path, config_path = options.config_path }
+  return { token_path = options.token_path, config_path = options.config_path,
+    password_path = options.secret_kind == "registration" and options.password_path or nil }
 end
 
 return matrix
