@@ -59,7 +59,8 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
     identity.ended_at, identity.reason = nil, nil
     identity_record(identity)
   end
-  local auto_trust = fresh_trusted_cwd == true
+  local topic_trust_path = fresh_trusted_cwd == true
+  local auto_trust = topic_trust_path
   if not cwd and data_home then
     local sessions_root = data_home .. "/remuda/butler/sessions"
     cwd = sessions_root .. "/" .. name
@@ -80,6 +81,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   telemetry_by_kind[kind] = agent_telemetry
   local choose_opts = {
     name = name, cwd = launch_cwd, auto_trust = auto_trust,
+    trust_path_gate = topic_trust_path,
     spec = function(candidate_kind)
       local telemetry = telemetry_by_kind[candidate_kind]
         or setup_telemetry(candidate_kind, { name = name, model = model })
@@ -113,7 +115,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   identity_record(identity)
   local waiting_for_trust, trust_answered = false, false
   for _, attempt in ipairs(attempts or {}) do
-    if attempt.session == actual and attempt.reason == "waiting_for_human_trust" then
+    if attempt.session == actual and tostring(attempt.reason):match("^waiting_for_human_trust") then
       waiting_for_trust = true
     end
     if attempt.session == actual and attempt.trust_answered then trust_answered = true end
@@ -134,7 +136,8 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   mailbox(identity.id)
   if waiting_for_trust then
     pcall(remuda._butler_send, "butler", parent or "butler",
-      "waiting for a human: trust dialog in " .. tostring(launch_cwd or "unknown directory"))
+      "waiting for a human: trust dialog in " .. tostring(launch_cwd or "unknown directory")
+        .. ". Next: review the folder and approve it in the member session.")
   end
   -- A failed welcome write must not prevent the agent from starting.
   if not relaunch_identity then
@@ -259,7 +262,8 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
         elseif not agent.trust_reported then
           agent.trust_reported = true
           pcall(remuda._butler_send, "butler", parent or "butler",
-            "waiting for a human: trust dialog in " .. tostring(agent.cwd or "unknown directory"))
+            "waiting for a human: trust dialog in " .. tostring(agent.cwd or "unknown directory")
+              .. ". Next: review the folder and approve it in the member session.")
         end
         return
       end
@@ -530,20 +534,23 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   return result or ("launching " .. name)
 end
 
-local function make_topic(name, template, kind, parent, task, model)
+local function make_topic(name, template, kind, parent, task, model, cwd)
   valid_child_name(name, "topic name")
   load_topic_config()
   local root = topic_config.project_home .. "/" .. name
   local created_now = create_fresh_directory(root)
-  if created_now then
-    bus.trusted_launch_dirs = bus.trusted_launch_dirs or {}
-    bus.trusted_launch_dirs[root] = true
-  end
   if not created_now then remuda.mkdir(root) end
   if template and not created_now then
     error("topic directory already exists; templates require a fresh topic name", 0)
   end
-  local auto_trust = created_now and not template and directory_is_under(root, topic_config.project_home)
+  local allowed_trust_path = directory_is_under(root, topic_config.project_home)
+  local auto_trust = created_now and not template
+    and directory_is_under(root, topic_config.project_home)
+    and (kind ~= "claude" or allowed_trust_path)
+  if auto_trust then
+    bus.trusted_launch_dirs = bus.trusted_launch_dirs or {}
+    bus.trusted_launch_dirs[root] = true
+  end
   local topic = { name = name, root = root }
   function topic.write(relative_path, contents)
     local f = assert(io.open(root .. "/" .. relative_path, "w"))
@@ -565,7 +572,8 @@ local function make_topic(name, template, kind, parent, task, model)
     setup(topic)
   end
   if created_now and not template then write_agent_guidance(root, team_member_guidance(parent or "butler")) end
-  return launch_agent(kind, name, root, model, parent, task, nil, auto_trust)
+  return launch_agent(kind, name, cwd or root, model, parent, task, nil,
+    auto_trust and (cwd == nil or cwd == root))
 end
 
 -- Shell-facing doors into the same deliberately mutable bus.  These are not
@@ -579,11 +587,35 @@ end
 function remuda._butler_topic_new(name, template, kind, model)
   return make_topic(name, template, kind, "butler", nil, model)
 end
-function remuda._butler_topic_delegate(name, task, template, kind, parent, model)
-  parent = resolve(parent or "butler")
+function remuda._butler_topic_delegate(name, task, template, kind, parent, model, cwd)
+  local requested_parent = parent or "butler"
+  local resolved, leader = pcall(resolve, requested_parent)
+  if resolved then
+    parent = leader
+  else
+    local session_live = false
+    for _, row in ipairs(remuda.ls()) do
+      if row.name == requested_parent and row.alive then session_live = true; break end
+    end
+    if not session_live then error(leader, 0) end
+    if type(remuda.expect) ~= "function" then
+      error("Butler leader " .. tostring(requested_parent) .. " is still starting.\n"
+        .. "Next: wait for the leader to become ready, then retry delegation.", 0)
+    end
+    local timeout = tonumber(remuda._butler_leader_ready_timeout) or 10
+    if timeout <= 0 then timeout = 10 end
+    pcall(remuda.expect, requested_parent, {
+      { id = "butler-leader-ready", match = function() return bus.agents[requested_parent] ~= nil end },
+    }, { timeout = timeout, interval = 0.1 })
+    if not bus.agents[requested_parent] then
+      error("Butler leader " .. tostring(requested_parent) .. " is still starting; wait before delegating.\n"
+        .. "Next: retry the delegation after the leader appears in `remuda butler agents`.", 0)
+    end
+    parent = requested_parent
+  end
   local leader = bus.agents[parent]
   if not leader then error("no Butler leader named " .. tostring(parent), 0) end
-  return make_topic(name, template, kind, parent, task, model)
+  return make_topic(name, template, kind, parent, task, model, cwd)
 end
 
 remuda._butler_launch_impl = { launch_agent = launch_agent }
