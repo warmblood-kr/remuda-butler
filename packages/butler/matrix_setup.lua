@@ -1,9 +1,20 @@
 -- Matrix setup argument parsing and staged setup actions.
 local matrix = assert(remuda.butler and remuda.butler.matrix, "Matrix request word is unavailable")
 
-local USAGE = [[Usage: remuda butler matrix setup --homeserver URL --owner MXID
-  (--password-file PATH --bot MXID | --token-file PATH) [--dir PATH | --default]
-  [--force] [--all] [--pin SHA256HEX | --ca-file PATH]]
+local USAGE = [[Usage: remuda butler matrix setup [OPTIONS]
+  --homeserver URL       Your Matrix server address, like https://matrix.example.org.
+  --owner ID             Your Matrix user ID, like @alice:example.org (in Element: click your avatar, top left).
+  --password-file PATH   Read the bot account password from this file.
+  --bot ID               The bot's Matrix user ID, like @butler-home:example.org (the account setup logs in as).
+  --token-file PATH      Use an existing access token from this file instead of a password.
+  --dir PATH             Save the private token and config files in this directory.
+  --default              Save to the default live Butler config directory.
+  --force                Replace existing token or config files.
+  --all                  Also create the optional ALL-BUTLERS room.
+  --pin SHA256HEX         Trust this HTTPS certificate fingerprint.
+  --ca-file PATH         Trust the HTTPS certificate authority in this file.
+
+Example: remuda butler matrix setup --homeserver https://matrix.example.org --owner @alice:example.org --bot @butler-home:example.org --password-file /path/to/password --dir /path/to/private/butler --pin <64-hex-sha256>]]
 
 local function absolute(path)
   return type(path) == "string" and (path:sub(1, 1) == "/" or path:match("^%a:[/\\]") ~= nil)
@@ -54,12 +65,38 @@ local function valid_url(value)
   return value:gsub("/+$", ""), scheme
 end
 
-local function valid_mxid(value, label)
-  if type(value) ~= "string" then return nil, label .. " MXID is required" end
+local function safe_user_id_echo(value)
+  return (value:gsub("[%c]", "?"):sub(1, 64))
+end
+
+local function invalid_user_id(value, option)
+  local echo = safe_user_id_echo(value)
+  if echo:find("%s") then
+    return option .. " '" .. echo .. "' contains spaces. It should look like @alice:example.org: an @, your name, a colon, your server."
+  end
+  if echo:sub(1, 1) ~= "@" then
+    local corrected = "@" .. echo
+    if not corrected:find(":", 2, true) then corrected = corrected .. ":example.org" end
+    return option .. " '" .. echo .. "' is not a Matrix user ID. It looks like " .. corrected
+      .. ": an @, your name, a colon, your server."
+  end
+  local localpart, server = echo:match("^@([^:]+):(.+)$")
+  if not localpart or server == "" then
+    local localpart_hint = echo:match("^@([^:]+)") or "alice"
+    return option .. " '" .. echo .. "' is missing :server. It should look like @"
+      .. localpart_hint .. ":example.org."
+  end
+  return option .. " '" .. echo .. "' is not a Matrix user ID. It should look like @alice:example.org: an @, your name, a colon, your server."
+end
+
+local function valid_mxid(value, option)
+  if type(value) ~= "string" or value == "" then
+    return nil, option .. " is required. Enter a Matrix user ID, like @alice:example.org."
+  end
   local localpart, server = value:match("^@([^:]+):(.+)$")
   if not localpart or localpart:find("[%s%c/@]") or server == ""
     or server:find("[%s%c/#?]") then
-    return nil, label .. " must be a Matrix user ID such as @user:server"
+    return nil, invalid_user_id(value, option)
   end
   return value
 end
@@ -77,6 +114,36 @@ local function file_exists(path)
   if not file then return false end
   file:close()
   return true
+end
+
+local function shell_quote(value)
+  return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
+end
+
+local function setup_command(options, destination)
+  local parts = { "remuda butler matrix setup" }
+  local function add(flag, value)
+    parts[#parts + 1] = flag .. " " .. shell_quote(value)
+  end
+  add("--homeserver", options.homeserver)
+  add("--owner", options.owner_mxid)
+  if options.secret_kind == "password" then
+    add("--password-file", options.secret_path)
+    add("--bot", options.bot_mxid)
+  else
+    add("--token-file", options.secret_path)
+    if options.bot_mxid then add("--bot", options.bot_mxid) end
+  end
+  if options.force then parts[#parts + 1] = "--force" end
+  if options.create_all then parts[#parts + 1] = "--all" end
+  if options.pin then add("--pin", options.pin) end
+  if options.ca_file then add("--ca-file", options.ca_file) end
+  if destination == "default" then
+    parts[#parts + 1] = "--default"
+  else
+    parts[#parts + 1] = '--dir "$HOME/.config/remuda/matrix-test"'
+  end
+  return table.concat(parts, " ")
 end
 
 local function validate_secret(path, kind)
@@ -134,7 +201,21 @@ local function resolve_outputs(options)
 
   local touches_default = resolved and (token_path == resolved.token_path or config_path == resolved.config_path)
   if touches_default and not options.default then
-    return nil, "writing the default Matrix files enables the live daemon; pass --default"
+    local test_dir = "$HOME/.config/remuda/matrix-test"
+    local lines = {
+      "Nothing was written.",
+      "To enable Matrix for this Butler (the running remuda), rerun:",
+      "  " .. setup_command(options, "default"),
+      "To set up a separate test Butler, rerun:",
+      "  " .. setup_command(options, "test"),
+      "Start its own daemon with the setup files:",
+      "  REMUDA_BUTLER_TOKEN=\"" .. test_dir .. "/token\" REMUDA_BUTLER_CONFIG=\""
+        .. test_dir .. "/config\" remuda -s matrix-test daemon",
+      "The relay starts when the Butler module starts or reloads (packages/butler/init.lua:16-30, 88-91).",
+      "Trigger it now with: remuda -e \"remuda.reload('butler')\"",
+      "For the test Butler, run: remuda -s matrix-test -e \"remuda.reload('butler')\"",
+    }
+    return nil, table.concat(lines, "\n")
   end
   if options.default and options.dir then return nil, "--default and --dir cannot be combined" end
 
@@ -188,7 +269,7 @@ function matrix.setup_prepare(args)
   local homeserver, scheme_or_error = valid_url(options.homeserver)
   if not homeserver then return nil, scheme_or_error end
   options.homeserver = homeserver
-  local owner, owner_error = valid_mxid(options.owner_mxid, "owner")
+  local owner, owner_error = valid_mxid(options.owner_mxid, "--owner")
   if not owner then return nil, owner_error end
   options.owner_mxid = owner
 
@@ -203,16 +284,16 @@ function matrix.setup_prepare(args)
   options.secret = secret_ok
 
   if options.password_file then
-    local bot, bot_error = valid_mxid(options.bot_mxid, "bot")
+    local bot, bot_error = valid_mxid(options.bot_mxid, "--bot")
     if not bot then return nil, bot_error end
     options.bot_mxid = bot
   elseif options.bot_mxid then
-    local bot, bot_error = valid_mxid(options.bot_mxid, "bot")
+    local bot, bot_error = valid_mxid(options.bot_mxid, "--bot")
     if not bot then return nil, bot_error end
     options.bot_mxid = bot
   end
   if options.bot_mxid and options.bot_mxid == options.owner_mxid then
-    return nil, "bot and owner MXIDs must be different"
+    return nil, "the bot and your Matrix user ID must be different"
   end
 
   if options.pin and options.ca_file then return nil, "choose one of --pin or --ca-file" end
@@ -245,6 +326,7 @@ end
 
 function matrix.setup_network(options, on_done)
   local done_called, cancelled, active = false, false, nil
+  local registration_token_error = "This is not a valid access token for any account. If it is the server's registration token, use --register (creates the bot account). Nothing was written."
   local function done(result)
     if done_called or cancelled then return end
     done_called = true
@@ -274,19 +356,29 @@ function matrix.setup_network(options, on_done)
       ca_file = options.ca_file, pin = transport_pin(options.pin),
       callback = function(response)
         if done_called or cancelled then return end
-        if type(response) ~= "table" or response.error then
+        if type(response) ~= "table" then
           return fail("Matrix setup " .. stage .. " request failed")
         end
         local status = tonumber(response.status)
+        local decoded, decode_error
+        if type(response.body) == "string" and response.body ~= "" then
+          local ok
+          ok, decoded, decode_error = pcall(matrix.decode_json, response.body)
+          if not ok then decoded, decode_error = nil, "invalid JSON" end
+        else
+          decoded = {}
+        end
+        local errcode = type(decoded) == "table" and decoded.errcode or nil
+        if (stage == "login" or stage == "whoami")
+          and (status == 401 or errcode == "M_UNKNOWN_TOKEN") then
+          return fail(registration_token_error)
+        end
+        if response.error then
+          return fail("Matrix setup " .. stage .. " request failed")
+        end
         if not status or status < 200 or status >= 300 then
           return fail("Matrix setup " .. stage .. " request failed"
             .. (status and (" (HTTP " .. tostring(status) .. ")") or ""))
-        end
-        local decoded, decode_error
-        if type(response.body) == "string" and response.body ~= "" then
-          decoded, decode_error = matrix.decode_json(response.body)
-        else
-          decoded = {}
         end
         if type(decoded) ~= "table" or decode_error then
           return fail("Matrix setup received an invalid " .. stage .. " response")

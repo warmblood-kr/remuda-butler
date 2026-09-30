@@ -5,6 +5,13 @@ return function(matrix)
   assert(type(matrix.cli) == "function", "Matrix CLI router is unavailable")
   assert(matrix.cli({ "matrix", "setup" }) == matrix.setup_usage())
   assert(matrix.cli({ "matrix", "setup", "--help" }) == matrix.setup_usage())
+  local setup_help = matrix.setup_usage()
+  assert(not setup_help:find("MXID", 1, true)
+    and setup_help:find("Your Matrix server address", 1, true)
+    and setup_help:find("in Element: click your avatar, top left", 1, true)
+    and setup_help:find("the account setup logs in as", 1, true)
+    and setup_help:find("Example: remuda butler matrix setup", 1, true),
+    "setup usage should explain each option in plain words and show a full example")
   assert(matrix.cli_usage():find("Example:", 1, true)
     and matrix.cli_usage():find("https://<homeserver>", 1, true)
     and matrix.cli_usage():find("--password-file <path>", 1, true),
@@ -41,6 +48,7 @@ return function(matrix)
     file:close()
     return contents
   end
+  write(password, "  password-secret  \nignored")
   local function args(secret_flag, secret_path, extra)
     local values = {
       "--homeserver", "http://matrix.invalid", "--owner", "@alice:example.org",
@@ -54,8 +62,30 @@ return function(matrix)
     assert(not plan and tostring(err):find(fragment, 1, true),
       "expected setup rejection containing " .. fragment .. ", got " .. tostring(err))
   end
+  local function invalid_ids(owner_id, bot_id)
+    return matrix.setup_prepare({ "--homeserver", "http://matrix.invalid",
+      "--owner", owner_id, "--password-file", password, "--bot", bot_id, "--dir", output })
+  end
+  local _, missing_at = invalid_ids("alice", "@butler-demo:example.org")
+  assert(missing_at and missing_at:find("--owner 'alice' is not a Matrix user ID. It looks like @alice:example.org: an @, your name, a colon, your server.", 1, true),
+    "missing @ should show the corrected Matrix user ID shape")
+  local _, missing_server = invalid_ids("@alice", "@butler-demo:example.org")
+  assert(missing_server and missing_server:find("--owner '@alice' is missing :server", 1, true),
+    "missing server should show a specific Matrix user ID hint")
+  local _, spaces = invalid_ids("@alice smith:example.org", "@butler-demo:example.org")
+  assert(spaces and spaces:find("--owner '@alice smith:example.org' contains spaces", 1, true),
+    "spaces should show a specific Matrix user ID hint")
+  local _, invalid_bot = invalid_ids("@alice:example.org", "butler-home:example.org")
+  assert(invalid_bot and invalid_bot:find("--bot 'butler-home:example.org' is not a Matrix user ID. It looks like @butler-home:example.org", 1, true),
+    "bot ID errors should name --bot and show the corrected shape")
+  local _, long_id = invalid_ids(string.rep("a", 80), "@butler-demo:example.org")
+  assert(long_id and not long_id:find(string.rep("a", 65), 1, true),
+    "invalid public ID echoes must be capped at 64 characters")
+  local valid_id_plan = invalid_ids("@alice:example.org", "@butler-demo:example.org")
+  assert(valid_id_plan and valid_id_plan.owner_mxid == "@alice:example.org"
+    and valid_id_plan.bot_mxid == "@butler-demo:example.org",
+    "valid Matrix user IDs should still pass")
 
-  write(password, "  password-secret  \nignored")
   local fake_http = remuda.http
   local fake_pending = remuda.pending
   local calls = 0
@@ -118,13 +148,13 @@ return function(matrix)
   write(oversized, string.rep("x", 4097))
   rejected(args("--password-file", oversized, { "--bot", "@butler-demo:example.org" }), "4 KiB")
   rejected({ "--homeserver", "http://matrix.invalid", "--owner", "@alice:example.org",
-    "--password-file", password }, "bot MXID")
+    "--password-file", password }, "--bot is required")
   rejected(args("--password-file", password,
     { "--bot", "@butler-demo:example.org", "--token-file", token }), "choose one")
   rejected(args("--password-file", password,
     { "--bot", "@butler-demo:example.org", "--mystery" }), "unknown option")
   rejected(args("--password-file", password,
-    { "--bot", "not-an-mxid" }), "bot must be")
+    { "--bot", "not-an-mxid" }), "--bot 'not-an-mxid' is not a Matrix user ID")
   rejected({ "--homeserver", "https://matrix.invalid", "--owner", "@alice:example.org",
     "--bot", "@butler-demo:example.org", "--password-file", password, "--dir", output }, "--pin")
   rejected({ "--homeserver", "https://matrix.invalid", "--owner", "@alice:example.org",
@@ -167,8 +197,26 @@ return function(matrix)
   local default_paths = { token_path = default_dir .. "/remuda/butler/token",
     config_path = default_dir .. "/remuda/butler/config" }
   remuda._butler_matrix_paths = default_paths
-  rejected({ "--homeserver", "http://matrix.invalid", "--owner", "@alice:example.org",
-    "--bot", "@butler-demo:example.org", "--password-file", password }, "--default")
+  local _, default_refusal = matrix.setup_prepare({ "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--bot", "@butler-demo:example.org", "--password-file", password })
+  local setup_prefix = "remuda butler matrix setup --homeserver 'http://matrix.invalid'"
+    .. " --owner '@alice:example.org' --password-file '" .. password
+    .. "' --bot '@butler-demo:example.org'"
+  assert(default_refusal and default_refusal:find("Nothing was written.", 1, true)
+    and default_refusal:find(setup_prefix .. " --default", 1, true)
+    and default_refusal:find(setup_prefix .. " --dir \"$HOME/.config/remuda/matrix-test\"", 1, true)
+    and default_refusal:find("--dir \"$HOME/.config/remuda/matrix-test\"", 1, true)
+    and default_refusal:find("REMUDA_BUTLER_TOKEN=", 1, true)
+    and default_refusal:find("REMUDA_BUTLER_CONFIG=", 1, true)
+    and default_refusal:find("remuda -s matrix-test daemon", 1, true)
+    and default_refusal:find("packages/butler/init.lua:16-30, 88-91", 1, true)
+    and default_refusal:find("remuda -e \"remuda.reload('butler')\"", 1, true),
+    "default refusal should explain both safe choices and when to start the relay")
+  assert(not default_refusal:find("password-secret", 1, true),
+    "default refusal must not reveal the secret contents")
+  assert(io.open(default_paths.token_path, "rb") == nil
+    and io.open(default_paths.config_path, "rb") == nil,
+    "refused default setup must not write token or config files")
   local default_dir_path = default_paths.config_path:match("^(.*)/[^/]+$")
   remuda.mkdir(default_dir_path:match("^(.*)/[^/]+$"))
   local default_made, default_error = remuda.fs.mkdir_new(default_dir_path)
@@ -248,6 +296,37 @@ return function(matrix)
   assert(#atomic_writes == 2 and atomic_writes[1].private and atomic_writes[2].private,
     "token and config must both use private atomic writes")
   remuda.fs.write_atomic = real_write_atomic
+  remuda.http = fake_http
+
+  local registration_token = root .. "/registration-token"
+  write(registration_token, "server-registration-token")
+  local token_guidance = "This is not a valid access token for any account. If it is the server's registration token, use --register (creates the bot account). Nothing was written."
+  local function failed_whoami_does_not_write(label, status, body)
+    local failed_parent = root .. "/failed-output-" .. label
+    local failed_dir = failed_parent .. "/butler"
+    requests, resolved = {}, nil
+    remuda.http = { request = function(spec) requests[#requests + 1] = spec; return {} end }
+    matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
+      "--owner", "@alice:example.org", "--token-file", registration_token, "--dir", failed_dir })
+    assert(#requests == 1 and requests[1].url == "http://matrix.invalid/_matrix/client/v3/account/whoami",
+      "token setup should verify the registration token with whoami")
+    requests[1].callback({ status = status, body = body })
+    assert(resolved and resolved.status == 1 and resolved.stderr:find(token_guidance, 1, true)
+      and not resolved.stderr:find("private response body", 1, true)
+      and not resolved.stderr:find("server-registration-token", 1, true),
+      "registration-token failure should give safe --register guidance")
+    assert(read(failed_dir .. "/token") == nil and read(failed_dir .. "/config") == nil,
+      "failed whoami must not write token or config files")
+    local parent_created, parent_error = remuda.fs.mkdir_new(failed_parent)
+    assert(parent_created, "failed whoami created output directory: " .. tostring(parent_error))
+    local child_created, child_error = remuda.fs.mkdir_new(failed_dir)
+    assert(child_created, "failed whoami created nested output directory: " .. tostring(child_error))
+    assert(os.remove(failed_dir) and os.remove(failed_parent), "failed-output test fixture cleanup failed")
+  end
+  failed_whoami_does_not_write("401", 401,
+    '{"errcode":"M_UNKNOWN_TOKEN","error":"private response body"}')
+  failed_whoami_does_not_write("errcode", 403,
+    '{"errcode":"M_UNKNOWN_TOKEN","error":"private response body"}')
   remuda.http = fake_http
 
   write(output .. "/token", "previous-token\n")
