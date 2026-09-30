@@ -12,7 +12,7 @@ local USAGE = [[  remuda butler matrix [--json] status
   remuda butler matrix [--json] [--room ROOM] react EVENT_ID KEY
   remuda butler matrix [--json] [--room ROOM] upload PATH
   remuda butler matrix [--json] [--room ROOM] redact EVENT_ID [--reason TEXT]
-  remuda butler matrix [--json] join ROOM (operator)
+  remuda butler matrix [--json] join ROOM (ID, #alias, or public name; operator)
   remuda butler matrix [--json] leave ROOM (operator)
   remuda butler matrix setup [OPTIONS]
   remuda butler matrix [--json] quarantine [--id EVENT_ID] (operator)
@@ -213,8 +213,28 @@ local function render_human(verb, options, result)
   elseif verb == "upload" then
     return "Uploaded as " .. tostring(result.content_uri or "") .. " (" .. tostring(result.event_id or "") .. ")\n"
   elseif verb == "join" or verb == "leave" then
-    return (verb == "join" and "Joined " or "Left ") .. terminal_safe(options.room or "the Matrix room")
-      .. "\nNext: remuda butler matrix rooms\n"
+    if verb == "join" and (result.ambiguous or data.ambiguous)
+      and type(result.matches or data.matches) == "table" then
+      local matches = result.matches or data.matches
+      local lines = {}
+      for _, item in ipairs(matches) do
+        lines[#lines + 1] = terminal_safe(item.name) .. "  "
+          .. terminal_safe(item.alias or "(no alias)") .. "  "
+          .. tostring(item.members or 0) .. " members  " .. terminal_safe(item.display_room_id or item.room_id)
+      end
+      lines[#lines + 1] = "Next: remuda butler matrix join #alias:server"
+      return table.concat(lines, "\n") .. "\n"
+    end
+    local id = result.room_id or data.room_id
+    local room_name, room_alias = result.room_name or data.room_name, result.room_alias or data.room_alias
+    local label = verb == "join" and (room_name or room_alias) or room_alias
+    label = label or options.room or "the Matrix room"
+    label = terminal_safe(label)
+    local suffix = id and id ~= label and (" (" .. terminal_safe(id) .. ")") or ""
+    local next_line = verb == "join"
+      and "Next: write to the Butler in that room, or remuda butler matrix rooms"
+      or "Next: remuda butler matrix rooms"
+    return (verb == "join" and "Joined " or "Left ") .. label .. suffix .. "\n" .. next_line .. "\n"
   end
   return (matrix.encode_json(result) or "{}") .. "\n"
 end

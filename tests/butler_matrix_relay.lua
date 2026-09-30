@@ -1098,7 +1098,9 @@ local function directory_response(room_id)
 end
 
 local function public_rooms_response(chunk)
-  return { status = 200, body = assert(matrix.encode_json({ chunk = chunk, total_room_count = #chunk })) }
+  return { status = 200, body = assert(matrix.encode_json({
+    chunk = matrix.json_array(chunk), total_room_count = #chunk,
+  })) }
 end
 
 local function capture_matrix_cli(args)
@@ -1110,6 +1112,7 @@ local function capture_matrix_cli(args)
   end
   matrix.configuration_guidance = function() return nil end
   local returned = matrix.cli(args)
+  tick_timers(1)
   remuda.pending, matrix.configuration_guidance = old_pending, old_guidance
   if not captured and type(returned) == "string" then captured = { code = 0, stdout = returned, stderr = "" } end
   return captured
@@ -1128,10 +1131,12 @@ local function test_join_room_alias_resolves_and_labels_output()
       end }
     end
     matrix.cli({ "matrix", "join", ALIAS })
+    tick_timers(1)
     remuda.pending = old_pending
     assert(#calls == 2 and calls[1].method == "GET"
       and calls[1].url:find("/_matrix/client/v3/directory/room/", 1, true),
-      "joining an alias must first GET the Matrix room directory")
+      "joining an alias must first GET the Matrix room directory (requests=" .. #calls
+        .. ", first=" .. tostring(calls[1] and calls[1].url) .. ")")
     assert(calls[2].method == "POST"
       and calls[2].url:find("/rooms/" .. encoded(NEW) .. "/join", 1, true),
       "joining an alias must POST join for its resolved room ID")
@@ -1199,10 +1204,13 @@ local function test_leave_alias_resolves_and_home_all_stay_refused()
   end, function(calls)
     local result
     matrix.leave({ room = ALIAS }, function(value) result = value end)
+    tick_timers(1)
     assert(result and not result.error, "leaving a configured alias must resolve and succeed")
     assert(#calls == 2 and calls[1].method == "GET"
       and calls[2].method == "POST" and calls[2].url:find("/rooms/" .. encoded(NEW) .. "/leave", 1, true),
-      "leave by alias must resolve before posting leave for the room ID")
+      "leave by alias must resolve before posting leave for the room ID (requests=" .. #calls
+        .. ", first=" .. tostring(calls[1] and calls[1].url) .. ", error="
+        .. tostring(result and result.error) .. ")")
     assert(room_line(path, NEW) == nil, "leave by alias must remove the resolved room config line")
   end)
   for _, protected in ipairs({ HOME, ALL }) do
@@ -1250,7 +1258,8 @@ local function test_join_plain_name_unique_match_joins_room()
     local result = capture_matrix_cli({ "matrix", "join", "butlers" })
     assert(#calls == 2 and calls[1].method == "POST"
       and calls[1].url:find("/_matrix/client/v3/publicRooms", 1, true),
-      "joining a plain name must search publicRooms before joining")
+      "joining a plain name must search publicRooms before joining (requests=" .. #calls
+        .. ", first=" .. tostring(calls[1] and calls[1].url) .. ")")
     local query = matrix.decode_json(calls[1].body)
     assert(query and query.filter and query.filter.generic_search_term == "butlers" and query.limit == 20,
       "plain-name lookup must send an exact public directory search with a 20-room limit")
@@ -1294,7 +1303,8 @@ local function test_join_plain_name_with_no_match_reports_next()
       "an unmatched name must perform a public room search only")
     assert(result and result.code == 1 and result.stderr:find("No public room named butlers on matrix.invalid.", 1, true)
       and result.stderr:find("Next: remuda butler matrix rooms --public butlers, or ask for an invite.", 1, true),
-      "an unmatched name must say it was not found and offer the public-room list")
+      "an unmatched name must say it was not found and offer the public-room list: "
+        .. tostring(result and result.stderr))
   end)
   remove_dir(dir)
 end
@@ -1314,44 +1324,51 @@ local function test_public_room_hostile_fields_are_sanitised_in_join_and_listing
     local result = capture_matrix_cli({ "matrix", "join", "butlers" })
     assert(result and result.stdout:find("butlersRoomName", 1, true)
       and not result.stdout:find("\27", 1, true) and not result.stdout:find("\226\128\174", 1, true),
-      "joined public-room output must strip terminal controls and bidi format chars")
+      "joined public-room output must strip terminal controls and bidi format chars: "
+        .. tostring(result and result.stdout) .. " / " .. tostring(result and result.stderr))
   end)
-  with_alias_http(path, function() return response() end, function(calls)
-    local result = capture_matrix_cli({ "matrix", "rooms", "--public", "butlers" })
-    assert(#calls == 1 and calls[1].url:find("/publicRooms", 1, true),
-      "rooms --public TERM must query the public directory")
-    assert(result and result.stdout:find("butlersRoomName", 1, true)
-      and not result.stdout:find("\27", 1, true) and not result.stdout:find("\226\128\174", 1, true),
-      "public room listing must strip terminal controls and bidi format chars")
+  local listed, list_error = pcall(function()
+    with_alias_http(path, function() return response() end, function(calls)
+      local result = capture_matrix_cli({ "matrix", "rooms", "--public", "butlers" })
+      assert(#calls == 1 and calls[1].url:find("/publicRooms", 1, true),
+        "rooms --public TERM must query the public directory")
+      assert(result and result.stdout:find("butlersRoomName", 1, true)
+        and not result.stdout:find("\27", 1, true) and not result.stdout:find("\226\128\174", 1, true),
+        "public room listing must strip terminal controls and bidi format chars")
+    end)
   end)
   remove_dir(dir)
+  assert(listed, list_error)
 end
 
 local function test_rooms_public_term_lists_public_rows()
   local dir, path = invite_fixture()
-  with_alias_http(path, function() return public_rooms_response({
-    { room_id = NEW, name = "Butler Hangout", canonical_alias = "#hangout:example.org", num_joined_members = 14 },
-  }) end, function(calls)
-    local result = capture_matrix_cli({ "matrix", "rooms", "--public", "hangout" })
-    assert(#calls == 1 and calls[1].method == "POST"
-      and calls[1].url:find("/_matrix/client/v3/publicRooms", 1, true),
-      "rooms --public TERM must make one publicRooms query")
-    local query = matrix.decode_json(calls[1].body)
-    assert(query and query.filter and query.filter.generic_search_term == "hangout" and query.limit == 20,
-      "rooms --public must search the requested term with the required row limit")
-    assert(result and result.code == 0 and result.stdout:find("Butler Hangout", 1, true)
-      and result.stdout:find("#hangout:example.org", 1, true)
-      and result.stdout:find("14", 1, true) and result.stdout:find(NEW, 1, true),
-      "rooms --public must list each public row's name, alias, members, and room ID")
+  local listed, list_error = pcall(function()
+    with_alias_http(path, function() return public_rooms_response({
+      { room_id = NEW, name = "Butler Hangout", canonical_alias = "#hangout:example.org", num_joined_members = 14 },
+    }) end, function(calls)
+      local result = capture_matrix_cli({ "matrix", "rooms", "--public", "hangout" })
+      assert(#calls == 1 and calls[1].method == "POST"
+        and calls[1].url:find("/_matrix/client/v3/publicRooms", 1, true),
+        "rooms --public TERM must make one publicRooms query")
+      local query = matrix.decode_json(calls[1].body)
+      assert(query and query.filter and query.filter.generic_search_term == "hangout" and query.limit == 20,
+        "rooms --public must search the requested term with the required row limit")
+      assert(result and result.code == 0 and result.stdout:find("Butler Hangout", 1, true)
+        and result.stdout:find("#hangout:example.org", 1, true)
+        and result.stdout:find("14", 1, true) and result.stdout:find(NEW, 1, true),
+        "rooms --public must list each public row's name, alias, members, and room ID")
+    end)
   end)
   remove_dir(dir)
+  assert(listed, list_error)
 end
 
 local function test_invalid_room_id_hint_mentions_element_x_alias_fallback()
   local dir, path = invite_fixture()
   with_operator_config(path, 200, function()
     local result
-    matrix.join({ room = "not-a-room-id" }, function(value) result = value end)
+    matrix.join({ room = "!bad" }, function(value) result = value end)
     assert(result and result.error and result.error:find(
       "Element: Room settings > Advanced tab (not General) > Internal room ID. Element X may not show it; use the #alias instead.",
       1, true), "invalid room ID errors must point to the correct Element X location and alias fallback")

@@ -103,8 +103,9 @@ local function read_config(path)
       if key == "room" then
         local room = value:match("^(%S+)")
         local how = value:match("%s+how=(%S+)") or "operator"
+        local alias = value:match("%s+alias=(%S+)")
         if room and room:match("^!%S+:%S+$") then
-          extra_rooms[#extra_rooms + 1] = { room = room, how = how }
+          extra_rooms[#extra_rooms + 1] = { room = room, how = how, alias = alias }
         end
       else
         opts[key] = value
@@ -145,7 +146,7 @@ local function read_config(path)
   if all_room == "" then all_room = nil end
   if all_room == lines[2] then return nil, "HOME and ALL-BUTLERS rooms must be different" end
   local rooms = { [lines[2]] = "home" }
-  local room_how = {}
+  local room_how, room_aliases = {}, {}
   if all_room then
     if mode == "1" or mode == "true" or mode == "messages" or mode == "fallback" then
       return nil, "ALL-BUTLERS room requires /sync; messages fallback supports HOME only"
@@ -156,11 +157,14 @@ local function read_config(path)
     if extra.room ~= lines[2] and extra.room ~= all_room then
       rooms[extra.room] = "joined"
       room_how[extra.room] = extra.how
+      if extra.alias and type(matrix.valid_room_alias) == "function" and matrix.valid_room_alias(extra.alias) then
+        room_aliases[extra.room] = extra.alias
+      end
     end
   end
   return {
     base = base, room = lines[2], home_room = lines[2], all_room = all_room,
-    rooms = rooms, room_how = room_how,
+    rooms = rooms, room_how = room_how, room_aliases = room_aliases,
     self_mxid = lines[3], allowed_senders = allowed,
     butler_senders = butler_senders,
     use_messages = mode == "1" or mode == "true" or mode == "messages" or mode == "fallback",
@@ -172,6 +176,14 @@ matrix.read_config = read_config
 local function valid_room_id(room)
   return type(room) == "string" and room:match("^!%S+:%S+$") ~= nil
 end
+matrix.valid_room_id = valid_room_id
+
+local function valid_room_alias(alias)
+  if type(alias) ~= "string" or #alias > 255 or alias:find("[%c%s/]" ) then return false end
+  local localpart, server = alias:match("^#([^:]+):(.+)$")
+  return localpart ~= nil and localpart ~= "" and server ~= nil and server ~= ""
+end
+matrix.valid_room_alias = valid_room_alias
 
 local function write_config_text(path, text)
   if not remuda.fs or type(remuda.fs.write_atomic) ~= "function" then
@@ -199,17 +211,36 @@ local function room_line_id(line)
   return line:match("^%s*room=(%S+)")
 end
 
-function matrix.config_add_room(path, room, how)
+function matrix.config_add_room(path, room, how, alias)
   if not valid_room_id(room) then
-    return nil, "invalid Matrix room ID: room IDs start with ! (Element: Room settings > Advanced > Internal room ID)."
+    return nil, "invalid Matrix room ID: room IDs start with ! (Element: Room settings > Advanced tab (not General) > Internal room ID. Element X may not show it; use the #alias instead.)."
   end
+  if alias ~= nil and not valid_room_alias(alias) then return nil, "invalid Matrix room alias" end
   local conf, err = read_config(path)
   if not conf then return nil, err end
   if room == conf.home_room or room == conf.all_room then
     return nil, "HOME and ALL rooms can't be added"
   end
-  if conf.rooms[room] ~= nil then return true, false end
   if how ~= "owner-invite" and how ~= "operator" then how = "operator" end
+  if conf.rooms[room] ~= nil then
+    if alias and conf.rooms[room] == "joined" and conf.room_aliases[room] ~= alias then
+      local contents
+      contents, err = read_file(path, "config")
+      if not contents then return nil, err end
+      local kept = {}
+      each_raw_line(contents, function(raw, line, ending)
+        if room_line_id(line) == room then
+          local current_how = line:match("%s+how=(%S+)") or conf.room_how[room] or "operator"
+          kept[#kept + 1] = "room=" .. room .. " how=" .. current_how .. " alias=" .. alias .. ending
+        else
+          kept[#kept + 1] = raw .. ending
+        end
+      end)
+      local wrote, write_error = write_config_text(path, table.concat(kept))
+      if not wrote then return nil, write_error end
+    end
+    return true, false
+  end
   local contents
   contents, err = read_file(path, "config")
   if not contents then return nil, err end
@@ -222,7 +253,8 @@ function matrix.config_add_room(path, room, how)
     padded = padded .. "\n"
     line_count = line_count + 1
   end
-  local wrote, write_error = write_config_text(path, padded .. "room=" .. room .. " how=" .. how .. "\n")
+  local label = alias and (" alias=" .. alias) or ""
+  local wrote, write_error = write_config_text(path, padded .. "room=" .. room .. " how=" .. how .. label .. "\n")
   if not wrote then return nil, write_error end
   return true, true
 end

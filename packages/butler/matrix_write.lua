@@ -279,11 +279,140 @@ local function operator_room(verb, opts, agent, callback)
   return opts.room
 end
 
+local function format_character(cp)
+  return cp == 0x00ad or cp == 0x061c or (cp >= 0x0600 and cp <= 0x0605)
+    or cp == 0x06dd or cp == 0x070f or (cp >= 0x0890 and cp <= 0x0891)
+    or cp == 0x08e2 or cp == 0x180e or (cp >= 0x200b and cp <= 0x200f)
+    or (cp >= 0x202a and cp <= 0x202e) or cp == 0x2028 or cp == 0x2029
+    or cp == 0x2060 or (cp >= 0x2061 and cp <= 0x206f) or cp == 0xfeff
+    or (cp >= 0xfff9 and cp <= 0xfffb) or cp == 0x110bd or cp == 0x110cd
+    or (cp >= 0x13430 and cp <= 0x1343f) or (cp >= 0x1bca0 and cp <= 0x1bca3)
+    or (cp >= 0x1d173 and cp <= 0x1d17a) or cp == 0xe0001
+    or (cp >= 0xe0020 and cp <= 0xe007f)
+end
+
+local function sanitize_directory_text(value, limit)
+  if type(value) ~= "string" then value = tostring(value or "") end
+  limit = limit or 128
+  local out, count, at = {}, 0, 1
+  while at <= #value and count < limit do
+    local first = value:byte(at)
+    local width, cp
+    if first < 0x80 then width, cp = 1, first
+    elseif first >= 0xc2 and first <= 0xdf then width, cp = 2, first - 0xc0
+    elseif first >= 0xe0 and first <= 0xef then width, cp = 3, first - 0xe0
+    elseif first >= 0xf0 and first <= 0xf4 then width, cp = 4, first - 0xf0
+    else width, cp = 1, 0xfffd end
+    if width > 1 then
+      if at + width - 1 > #value then width, cp = 1, 0xfffd
+      else
+        for offset = 1, width - 1 do
+          local byte = value:byte(at + offset)
+          if byte < 0x80 or byte > 0xbf then width, cp = 1, 0xfffd; break end
+          cp = cp * 64 + byte - 0x80
+        end
+        if (width == 2 and cp < 0x80) or (width == 3 and cp < 0x800)
+          or (width == 4 and (cp < 0x10000 or cp > 0x10ffff))
+          or (cp >= 0xd800 and cp <= 0xdfff) then
+          width, cp = 1, 0xfffd
+        end
+      end
+    end
+    if not (cp < 0x20 or (cp >= 0x7f and cp <= 0x9f) or format_character(cp)) then
+      out[#out + 1] = value:sub(at, at + width - 1)
+      count = count + 1
+    end
+    at = at + width
+  end
+  return table.concat(out)
+end
+matrix.sanitize_directory_text = sanitize_directory_text
+
+local function room_id_valid(room)
+  return type(matrix.valid_room_id) == "function" and matrix.valid_room_id(room)
+    or type(room) == "string" and room:match("^!%S+:%S+$") ~= nil
+end
+
+local function room_alias_valid(alias)
+  return type(matrix.valid_room_alias) == "function" and matrix.valid_room_alias(alias)
+    and sanitize_directory_text(alias) == alias
+end
+
+local function public_room_record(item)
+  if type(item) ~= "table" or not room_id_valid(item.room_id)
+    or sanitize_directory_text(item.room_id) ~= item.room_id then return nil end
+  local alias = room_alias_valid(item.canonical_alias) and item.canonical_alias or nil
+  local name = sanitize_directory_text(item.name)
+  local localpart = alias and alias:match("^#([^:]+):") or nil
+  local members = tonumber(item.num_joined_members)
+  if not members or members < 0 or members ~= math.floor(members) then members = 0 end
+  return { room_id = item.room_id, display_room_id = sanitize_directory_text(item.room_id), name = name,
+    alias = alias and sanitize_directory_text(alias) or nil, alias_localpart = localpart,
+    members = members, topic = sanitize_directory_text(item.topic) }
+end
+
+local function homeserver_name(base)
+  local authority = type(base) == "string" and base:match("^https?://([^/%?#]+)") or "the homeserver"
+  return sanitize_directory_text(authority or "the homeserver")
+end
+
+local function resolve_alias(alias, base, callback)
+  if not room_alias_valid(alias) then
+    callback({ error = "invalid Matrix room alias: expected #localpart:server (no whitespace or slash; max 255 bytes)" })
+    return { cancel = function() end }
+  end
+  return matrix.request_json({ method = "GET",
+    path = "/_matrix/client/v3/directory/room/" .. path_component(alias),
+  }, function(result)
+    if result.error then
+      if result.status == 404 or tostring(result.error):find("M_NOT_FOUND", 1, true) then
+        local server = sanitize_directory_text(alias:match("^#[^:]+:(.+)$") or homeserver_name(base))
+        return callback({ error = "No room " .. alias .. " on " .. server
+          .. ".\nNext: check the spelling, or ask the room admin for an invite." })
+      end
+      return callback(result)
+    end
+    local room = result.json and result.json.room_id
+    if not room_id_valid(room) then return callback({ error = "invalid Matrix room ID in room directory response" }) end
+    callback({ room_id = room, alias = alias })
+  end)
+end
+
+local function find_public_matches(name, base, callback)
+  local body, encode_error = matrix.encode_json({ filter = { generic_search_term = name }, limit = 20 })
+  if not body then callback({ error = encode_error }); return { cancel = function() end } end
+  return matrix.request_json({ method = "POST", path = "/_matrix/client/v3/publicRooms",
+    body = body, headers = { ["Content-Type"] = "application/json" },
+  }, function(result)
+    if result.error then return callback(result) end
+    local rows, by_id = {}, {}
+    for _, item in ipairs(type(result.json) == "table" and result.json.chunk or {}) do
+      local record = public_room_record(item)
+      if record and (record.name == name or record.alias_localpart == name) and not by_id[record.room_id] then
+        by_id[record.room_id] = true
+        rows[#rows + 1] = record
+      end
+    end
+    table.sort(rows, function(a, b)
+      if a.name == b.name then return a.room_id < b.room_id end
+      return a.name < b.name
+    end)
+    if #rows == 0 then
+      return callback({ error = "No public room named " .. sanitize_directory_text(name)
+        .. " on " .. homeserver_name(base)
+        .. ".\nNext: remuda butler matrix rooms --public " .. sanitize_directory_text(name)
+        .. ", or ask for an invite." })
+    end
+    if #rows > 1 then return callback({ matches = rows, ambiguous = true }) end
+    callback({ room_id = rows[1].room_id, alias = rows[1].alias, name = rows[1].name })
+  end)
+end
+
 function matrix.join(opts, on_done, agent)
   opts = opts or {}
   local done = once(on_done)
-  local room = operator_room("join", opts, agent, done)
-  if not room then return { cancel = function() end } end
+  local requested = operator_room("join", opts, agent, done)
+  if not requested then return { cancel = function() end } end
   local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths or {}
   local config_path = paths.config_path
   if type(config_path) ~= "string" or config_path == "" then
@@ -291,39 +420,64 @@ function matrix.join(opts, on_done, agent)
   end
   local conf, config_error = matrix.read_config(config_path)
   if not conf then return error_result(done, config_error) end
-  local added = false
-  if conf.rooms[room] ~= "home" and conf.rooms[room] ~= "all" then
-    local ok, wrote_or_error = matrix.config_add_room(config_path, room, "operator")
-    local add_error = not ok and wrote_or_error or nil
-    if not ok then return error_result(done, add_error) end
-    added = wrote_or_error == true
-  end
-  return matrix.request_json({ method = "POST",
-    path = "/_matrix/client/v3/rooms/" .. path_component(room) .. "/join",
-    room = room, body = "{}", headers = { ["Content-Type"] = "application/json" },
-  }, function(result)
-    if result.error and added then
-      local removed, remove_error = matrix.config_remove_room(config_path, room)
-      if not removed then
-        result.error = tostring(result.error) .. "; config rollback failed: " .. tostring(remove_error)
+  local current
+  local function join_room(room, alias, display_name)
+    local added = false
+    if conf.rooms[room] ~= "home" and conf.rooms[room] ~= "all" then
+      local ok, wrote_or_error = matrix.config_add_room(config_path, room, "operator", alias)
+      local add_error = not ok and wrote_or_error or nil
+      if not ok then return error_result(done, add_error) end
+      added = wrote_or_error == true
+    end
+    current = matrix.request_json({ method = "POST",
+      path = "/_matrix/client/v3/rooms/" .. path_component(room) .. "/join",
+      room = room, body = "{}", headers = { ["Content-Type"] = "application/json" },
+    }, function(result)
+      if result.error and added then
+        local removed, remove_error = matrix.config_remove_room(config_path, room)
+        if not removed then
+          result.error = tostring(result.error) .. "; config rollback failed: " .. tostring(remove_error)
+        end
       end
+      if result.error and result.error:find("(M_FORBIDDEN)", 1, true) then
+        local next_line = "Next: invite the bot (" .. conf.self_mxid .. ") to " .. room
+          .. " from Element, then retry."
+        local replaced
+        result.error, replaced = result.error:gsub("Next:[^\r\n]*", function() return next_line end)
+        if replaced == 0 then result.error = result.error .. "\n" .. next_line end
+      end
+      if not result.error then
+        result.room_id = room
+        result.room_alias = alias and sanitize_directory_text(alias) or nil
+        result.room_name = display_name and sanitize_directory_text(display_name) or nil
+      end
+      done(result)
+    end)
+  end
+  if requested:sub(1, 1) == "#" then
+    current = resolve_alias(requested, conf.base, function(resolved)
+      if resolved.error then return done(resolved) end
+      join_room(resolved.room_id, resolved.alias)
+    end)
+  elseif requested:sub(1, 1) == "!" then
+    join_room(requested)
+  else
+    if requested == "" or requested:find("[%c]") then
+      return error_result(done, "public room name must not be empty or contain control characters")
     end
-    if result.error and result.error:find("(M_FORBIDDEN)", 1, true) then
-      local next_line = "Next: invite the bot (" .. conf.self_mxid .. ") to " .. room
-        .. " from Element, then retry."
-      local replaced
-      result.error, replaced = result.error:gsub("Next:[^\r\n]*", function() return next_line end)
-      if replaced == 0 then result.error = result.error .. "\n" .. next_line end
-    end
-    done(result)
-  end)
+    current = find_public_matches(requested, conf.base, function(found)
+      if found.error or found.ambiguous then return done(found) end
+      join_room(found.room_id, found.alias, found.name)
+    end)
+  end
+  return { cancel = function() if current and current.cancel then current:cancel() end end }
 end
 
 function matrix.leave(opts, on_done, agent)
   opts = opts or {}
   local done = once(on_done)
-  local room = operator_room("leave", opts, agent, done)
-  if not room then return { cancel = function() end } end
+  local requested = operator_room("leave", opts, agent, done)
+  if not requested then return { cancel = function() end } end
   local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths or {}
   local config_path = paths.config_path
   if type(config_path) ~= "string" or config_path == "" then
@@ -331,27 +485,43 @@ function matrix.leave(opts, on_done, agent)
   end
   local conf, config_error = matrix.read_config(config_path)
   if not conf then return error_result(done, config_error) end
-  if conf.rooms[room] == "home" or conf.rooms[room] == "all" then
-    return error_result(done,
-      "HOME and ALL rooms can't be left.\nNext: remuda butler matrix setup (to change HOME or ALL).")
-  end
-  if conf.rooms[room] == nil then
-    return error_result(done, room .. " is not a configured Matrix room.")
-  end
-  return matrix.request_json({ method = "POST",
-    path = "/_matrix/client/v3/rooms/" .. path_component(room) .. "/leave",
-    room = room, body = "{}", headers = { ["Content-Type"] = "application/json" },
-  }, function(result)
-    local removed, remove_error = matrix.config_remove_room(config_path, room)
-    if not removed then
-      local detail = result.error and (tostring(result.error) .. "; ") or ""
-      result.error = detail .. "could not remove Matrix room config line: " .. tostring(remove_error)
-    elseif result.error then
-      local base = tostring(result.error):gsub("\n?Next:[^\r\n]*", "")
-      result.error = base .. "; the room was removed from the local config.\nNext: remuda butler matrix rooms"
+  local current
+  local function leave_room(room)
+    if conf.rooms[room] == "home" or conf.rooms[room] == "all" then
+      return error_result(done,
+        "HOME and ALL rooms can't be left.\nNext: remuda butler matrix setup (to change HOME or ALL).")
     end
-    done(result)
-  end)
+    if conf.rooms[room] == nil then
+      return error_result(done, room .. " is not a configured Matrix room.")
+    end
+    current = matrix.request_json({ method = "POST",
+      path = "/_matrix/client/v3/rooms/" .. path_component(room) .. "/leave",
+      room = room, body = "{}", headers = { ["Content-Type"] = "application/json" },
+    }, function(result)
+      local removed, remove_error = matrix.config_remove_room(config_path, room)
+      if not removed then
+        local detail = result.error and (tostring(result.error) .. "; ") or ""
+        result.error = detail .. "could not remove Matrix room config line: " .. tostring(remove_error)
+      elseif result.error then
+        local base = tostring(result.error):gsub("\n?Next:[^\r\n]*", "")
+        result.error = base .. "; the room was removed from the local config.\nNext: remuda butler matrix rooms"
+      end
+      if not result.error then
+        result.room_id = room
+        result.room_alias = requested:sub(1, 1) == "#" and sanitize_directory_text(requested) or nil
+      end
+      done(result)
+    end)
+  end
+  if requested:sub(1, 1) == "#" then
+    current = resolve_alias(requested, conf.base, function(resolved)
+      if resolved.error then return done(resolved) end
+      leave_room(resolved.room_id)
+    end)
+  else
+    leave_room(requested)
+  end
+  return { cancel = function() if current and current.cancel then current:cancel() end end }
 end
 
 return matrix
