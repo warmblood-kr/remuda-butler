@@ -92,8 +92,8 @@ only when exactly one public room matches; multiple matches are listed for the
 operator to choose from. The inviter check relies on the homeserver appending
 the real invite event to `invite_state` (Synapse does). `leave` removes a joined
 room by ID or alias, while HOME and ALL-BUTLERS cannot be left or removed. The
-interactive setup wizard does not ask for the rooms mode yet; that prompt is a
-follow-up for team-2. The `send -` stdin form is unsupported until core #213.
+interactive setup wizard does not ask for the rooms mode yet. The `send -`
+stdin form is unsupported until core #213.
 
 `join` and `leave` change room membership and are operator-only. Until core
 #218 enforces caller identity, this is best-effort policy: another local
