@@ -739,6 +739,22 @@ fn unread_seed_waits_for_pending_task_and_codex_update_handoffs() {
 }
 
 #[test]
+fn unread_seed_tokens_are_pruned_when_an_agent_disappears() {
+    let (path, _daemon) = butler_with_member("notice-unread-seed-prune");
+    setup_mail_notice_clock(&path);
+    let got = eval(
+        &path,
+        r#"
+        local bus = remuda._butler_bus
+        bus.unread_seeded.gone = 'old agent record'
+        remuda._butler_deliver_notices()
+        return tostring(bus.unread_seeded.gone)
+        "#,
+    );
+    assert_eq!(got, "nil", "stale seed token must not retain an exited agent record");
+}
+
+#[test]
 fn a_new_member_gets_waiting_mail_after_its_launch_brief() {
     let (path, _daemon) = butler_with_member("notice-unread-new-member");
     eval(&path, "remuda._butler_inbox('m1')");

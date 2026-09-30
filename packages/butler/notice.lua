@@ -709,6 +709,9 @@ local function notice_session_instance(alias, agent, session_instances)
 end
 function remuda._butler_deliver_notices()
   local now = notice_now()
+  for alias in pairs(bus.unread_seeded) do
+    if not bus.agents[alias] then bus.unread_seeded[alias] = nil end
+  end
   local session_instances = {}
   local listed, sessions = pcall(remuda.ls)
   if listed and type(sessions) == "table" then
