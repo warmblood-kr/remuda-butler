@@ -4431,6 +4431,190 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
     drop(daemon);
 }
 
+/// Topic delegation may answer Claude's captured trust dialog only for a
+/// workspace in the member's allowed project tree, and only after verifying
+/// that Down selected the affirmative row.
+#[test]
+#[cfg(unix)]
+fn butler_topic_delegate_checks_claude_trust_path_and_selection() {
+    let dir = scratch_dir("topic-claude-trust-policy");
+    let home = dir.join("home");
+    let projects = home.join("projects");
+    let outside = dir.join("outside-projects");
+    std::fs::create_dir_all(&projects).expect("projects");
+    std::fs::create_dir_all(&outside).expect("outside projects");
+    let daemon = Daemon::spawn_with_home(&dir, &home);
+    let path = daemon::socket_path_in(&dir, "s");
+    eval(
+        &path,
+        r#"remuda._butler_argv = {"sh", "-c", "sleep 30"}; remuda._butler_skip_relay = true"#,
+    );
+    let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let dialog = include_str!("fixtures/claude-trust-dialog.txt");
+    let allowed_root = projects.join("allowed-topic");
+    let outside_root = outside.join("outside-topic");
+    let allowed_dialog = dialog
+        .replace("/private/tmp/t3qa/untrusted-13690", &allowed_root.to_string_lossy())
+        .replace("❯ No, exit", "  No, exit")
+        .replace("   Yes, I trust this folder", "❯ Yes, I trust this folder");
+    let outside_dialog = dialog
+        .replace("/private/tmp/t3qa/untrusted-13690", &outside_root.to_string_lossy());
+    eval(
+        &path,
+        &format!(
+            r#"
+          remuda.butler.project_home({projects:?})
+          remuda._butler_task_poke_attempts = 6
+          remuda._butler_agent_builders.claude = function() return {{"sh"}} end
+          remuda._butler_test_force_launch_probe = {{["allowed-topic"] = true, ["outside-topic"] = true}}
+          local rule = string.rep("─", 20)
+          local screens = {{["allowed-topic"] = {allowed_dialog:?}, ["outside-topic"] = {outside_dialog:?}}}
+          local log, after_down_captures = {{}}, {{["allowed-topic"] = 0, ["outside-topic"] = 0}}
+          remuda.capture = function(name)
+            if name == "allowed-topic" and #log > 0 and log[#log] == "allowed-topic key <down>" then
+              after_down_captures[name] = after_down_captures[name] + 1
+            end
+            return screens[name] or ""
+          end
+          remuda.key = function(name, key)
+            log[#log + 1] = name .. " key " .. key
+            if name == "allowed-topic" and key == "<down>" then
+              screens[name] = {allowed_dialog:?}
+            elseif name == "allowed-topic" and key == "RET" then
+              screens[name] = rule .. "\n❯ \n" .. rule
+            elseif name == "outside-topic" and key == "<down>" then
+              -- Deliberately leave No selected after Down in this unexpected UI.
+              screens[name] = {outside_dialog:?}
+            end
+          end
+          remuda.type_text = function(name, text) log[#log + 1] = name .. " type " .. text end
+          remuda._butler_topic_delegate("allowed-topic", "allowed brief", nil, "claude", remuda._butler_initial_name)
+          remuda._butler_topic_delegate("outside-topic", "outside brief", nil, "claude", remuda._butler_initial_name)
+          remuda._topic_trust_log = log
+          remuda._topic_trust_captures = after_down_captures
+        "#,
+            projects = projects.to_string_lossy(),
+            allowed_dialog = allowed_dialog,
+            outside_dialog = outside_dialog,
+        ),
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let log = eval(&path, "return table.concat(remuda._topic_trust_log, '\\n')");
+        if log.contains("allowed-topic type allowed brief")
+            || Instant::now() >= deadline
+        {
+            assert!(log.contains("allowed-topic key <down>"), "no selection move: {log}");
+            assert!(log.contains("allowed-topic key RET"), "allowed trust was not confirmed: {log}");
+            assert!(
+                eval(&path, "return tostring(remuda._topic_trust_captures['allowed-topic'] > 0)") == "true",
+                "Claude's selection was not recaptured after Down"
+            );
+            assert!(
+                !log.contains("outside-topic key RET"),
+                "unverified selection was confirmed: {log}"
+            );
+            let sessions = eval(&path, "return remuda._butler_sessions()");
+            assert!(
+                sessions.contains("outside-topic") && sessions.contains("Next:"),
+                "outside workspace failure needs a clear Next step: {sessions}"
+            );
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    drop(daemon);
+}
+
+/// The delegate CLI must pass its --cwd option through to the new member.
+#[test]
+#[cfg(unix)]
+fn butler_topic_delegate_passes_cwd_to_agent_launch() {
+    let dir = scratch_dir("topic-delegate-cwd");
+    let home = dir.join("home");
+    let project_home = dir.join("projects");
+    let requested_cwd = dir.join("requested-cwd");
+    std::fs::create_dir_all(&home).expect("test home");
+    std::fs::create_dir_all(&project_home).expect("project home");
+    std::fs::create_dir_all(&requested_cwd).expect("requested cwd");
+    let daemon = Daemon::spawn_with_home(&dir, &home);
+    let path = daemon::socket_path_in(&dir, "s");
+    eval(
+        &path,
+        r#"remuda._butler_argv = {"sh", "-c", "sleep 30"}; remuda._butler_skip_relay = true"#,
+    );
+    let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    eval(
+        &path,
+        &format!(
+            r#"
+          remuda.butler.project_home({project_home:?})
+          remuda._butler_agent_builders.claude = function() return {{"sh", "-c", "sleep 30"}} end
+          remuda._butler_test_force_launch_probe = {{["cwd-topic"] = true}}
+          local native_new, rows = remuda.new, {{}}
+          remuda.new = function(name, argv, cwd, env)
+            rows[#rows + 1] = name .. " cwd " .. tostring(cwd)
+            return native_new(name, argv, cwd, env)
+          end
+          remuda._topic_cwd_rows = rows
+        "#,
+            project_home = project_home.to_string_lossy(),
+        ),
+    );
+    let cli = remuda_timed(
+        &dir,
+        &[
+            "-s",
+            "s",
+            "butler",
+            "topic",
+            "delegate",
+            "cwd-topic",
+            "--agent",
+            "claude",
+            "--cwd",
+            requested_cwd.to_str().expect("cwd path utf8"),
+            "brief",
+        ],
+    );
+    assert!(cli.status.success(), "{}", String::from_utf8_lossy(&cli.stderr));
+    let rows = eval(&path, "return table.concat(remuda._topic_cwd_rows, '\\n')");
+    assert!(
+        rows.contains(&requested_cwd.to_string_lossy().to_string()),
+        "--cwd did not reach remuda.new: {rows}"
+    );
+    drop(daemon);
+}
+
+/// An unresolved --leader must return a bounded, actionable wait error.
+#[test]
+#[cfg(unix)]
+fn butler_topic_delegate_unready_leader_error_says_wait_and_next() {
+    let dir = scratch_dir("topic-delegate-leader-wait");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).expect("test home");
+    let daemon = Daemon::spawn_with_home(&dir, &home);
+    let path = daemon::socket_path_in(&dir, "s");
+    eval(
+        &path,
+        r#"remuda._butler_argv = {"sh", "-c", "sleep 30"}; remuda._butler_skip_relay = true"#,
+    );
+    let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let result = eval(
+        &path,
+        r#"local ok, err = pcall(remuda._butler_topic_delegate, "wait-topic", "brief", nil, "claude", "just-started-leader"); return tostring(ok) .. "\n" .. tostring(err)"#,
+    );
+    assert!(result.starts_with("false\n"), "expected an actionable error: {result}");
+    assert!(
+        result.to_lowercase().contains("wait") && result.contains("Next:"),
+        "unready leader error must say wait and provide a Next step: {result}"
+    );
+    drop(daemon);
+}
+
 #[test]
 #[cfg(unix)]
 fn reexecuting_butler_keeps_the_root_telemetry_identity() {
