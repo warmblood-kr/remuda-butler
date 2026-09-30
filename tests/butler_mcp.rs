@@ -442,17 +442,19 @@ fn a_single_mail_notice_waits_for_two_quiet_seconds() {
 #[test]
 fn restart_seeds_three_unread_mails_only_when_the_pane_is_ready() {
     let (path, _daemon) = butler_with_member("notice-unread-restart");
+    eval(&path, "remuda._butler_inbox('m1')");
     setup_mail_notice_clock(&path);
     let got = eval(
         &path,
         r#"
         local state = remuda._notice_test_state
+        state.busy.m1 = true
         for i = 1, 3 do remuda._notice_test_send('m1', 'restart ' .. i) end
         -- A daemon restart loses the in-memory pending notice and dedupe state,
         -- but leaves the persisted unread mailbox intact.
         remuda._butler_bus.notices = {}
         remuda._butler_bus.notice_seen = {}
-        state.busy.m1 = true
+        remuda._butler_bus.unread_seeded = {}
         remuda._butler_deliver_notices()
         local before_ready = #state.typed
         state.busy.m1 = false
@@ -476,16 +478,18 @@ fn restart_seeds_three_unread_mails_only_when_the_pane_is_ready() {
 #[test]
 fn a_new_member_gets_waiting_mail_after_its_launch_brief() {
     let (path, _daemon) = butler_with_member("notice-unread-new-member");
+    eval(&path, "remuda._butler_inbox('m1')");
     setup_mail_notice_clock(&path);
     let got = eval(
         &path,
         r#"
         local state = remuda._notice_test_state
         -- Model mail already waiting while the launch brief keeps the pane busy.
+        state.busy.m1 = true
         remuda._notice_test_send('m1', 'waiting for launch')
         remuda._butler_bus.notices = {}
         remuda._butler_bus.notice_seen = {}
-        state.busy.m1 = true
+        remuda._butler_bus.unread_seeded = {}
         remuda._butler_deliver_notices()
         local before_brief = #state.typed
         state.busy.m1 = false -- the welcome/launch brief has settled
@@ -503,6 +507,7 @@ fn a_new_member_gets_waiting_mail_after_its_launch_brief() {
 #[test]
 fn no_unread_mail_does_not_seed_a_notice() {
     let (path, _daemon) = butler_with_member("notice-unread-empty");
+    eval(&path, "remuda._butler_inbox('m1')");
     setup_mail_notice_clock(&path);
     let got = eval(
         &path,
@@ -520,11 +525,13 @@ fn no_unread_mail_does_not_seed_a_notice() {
 #[test]
 fn a_pending_deposit_notice_is_not_duplicated_by_unread_seeding() {
     let (path, _daemon) = butler_with_member("notice-unread-pending-deposit");
+    eval(&path, "remuda._butler_inbox('m1')");
     setup_mail_notice_clock(&path);
     let got = eval(
         &path,
         r#"
         local state = remuda._notice_test_state
+        state.busy.m1 = true
         remuda._notice_test_send('m1', 'already pending')
         local count_before = remuda._butler_bus.notices.m1.count
         local notify, calls = remuda._butler_notify, 0
@@ -532,6 +539,7 @@ fn a_pending_deposit_notice_is_not_duplicated_by_unread_seeding() {
           calls = calls + 1
           return notify(...)
         end
+        state.busy.m1 = false
         remuda._butler_deliver_notices()
         state.now = 2
         remuda._butler_deliver_notices()

@@ -892,6 +892,7 @@ local launch_agent = remuda._butler_launch_impl.launch_agent
 bus.notices = bus.notices or {}
 bus.notice_screens = bus.notice_screens or {}
 bus.notice_seen = bus.notice_seen or {}
+bus.unread_seeded = bus.unread_seeded or {}
 local NOTICE_STABLE_SECONDS = 3
 local NOTICE_QUIET_S = 2
 local NOTICE_MAX_WAIT_S = 10
@@ -1518,10 +1519,73 @@ function remuda._butler_notify(alias, notice, message_id)
   bus.notices[alias] = pending
   return false
 end
+local function seed_unread_notices(alias)
+  local agent = bus.agents[alias]
+  if not agent or not agent.id then return false end
+  local unread = mail.unread(agent.id)
+  if unread <= 0 then return true end
+  for _, message_id in ipairs(mailbox(agent.id)) do
+    if mail.is_unread(agent.id, message_id) then
+      local seen = bus.notice_seen[agent.id]
+      local pending = bus.notices[alias]
+      if seen and seen[message_id]
+          and not (pending and pending.message_ids and pending.message_ids[message_id]) then
+        -- A prior session may have recorded the deposit notice before its
+        -- queue was cleared at exit. Replay that unread mail for this session.
+        seen[message_id] = nil
+      end
+      local message = mail.find_message(message_id) or {}
+      local sender = message.from and (message.from.alias or message.from.session) or "outside"
+      local resent = bus.mail_resent[agent.id] and bus.mail_resent[agent.id][message_id]
+      local detail
+      if resent then
+        local by = resent.from and (resent.from.alias or resent.from.session) or "outside"
+        detail = "forwarded by " .. by
+      elseif message.in_reply_to then
+        detail = "(reply) from " .. sender
+      else
+        sender = message.matrix and message.matrix.sender or (message.from and message.from.session) or sender
+        detail = "from " .. sender
+      end
+      local notice = "Butler message " .. message_id .. " " .. detail
+        .. " arrived. Read it: remuda butler inbox"
+      remuda._butler_notify(alias, notice, message_id)
+    end
+  end
+  return true
+end
+local function notice_session_instance(alias, agent)
+  if type(agent.session_instance_id) == "string" and agent.session_instance_id ~= "" then
+    return agent.session_instance_id
+  end
+  local ok, sessions = pcall(remuda.ls)
+  if ok and type(sessions) == "table" then
+    for _, session in ipairs(sessions) do
+      if session.name == alias and session.alive then
+        if type(session.instance_id) == "string" and session.instance_id ~= "" then
+          return session.instance_id
+        end
+        break
+      end
+    end
+  end
+  -- Agent records are replaced when Butler relaunches a member, and survive
+  -- a mod reload, so the record itself is the fallback instance token.
+  return agent
+end
 function remuda._butler_deliver_notices()
+  local now = notice_now()
+  for alias, agent in pairs(bus.agents) do
+    if agent and remuda._butler_notify_policy(alias, now) then
+      local instance = notice_session_instance(alias, agent)
+      if bus.unread_seeded[alias] ~= instance then
+        local seeded, result = pcall(seed_unread_notices, alias)
+        if seeded and result then bus.unread_seeded[alias] = instance end
+      end
+    end
+  end
   local sessions = {}
   for session in pairs(bus.notices) do sessions[#sessions + 1] = session end
-  local now = notice_now()
   for _, session in ipairs(sessions) do
     local pending = bus.notices[session]
     if not bus.agents[session] then
