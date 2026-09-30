@@ -373,14 +373,15 @@ remuda._butler_contribute("butler.guidance", "cli", { order = 20,
 - Message bodies are limited to 64 KiB; short quoted messages can stay positional.
 - `remuda butler send-to-leader RESULT...` reports a completed work loop.
 - `remuda butler sessions` shows the household.
-- `remuda butler reply MESSAGE-ID -` (or `--file PATH`) answers a message in its thread; for Matrix mail it keeps the room and thread (prefer this over send when answering).
+- `remuda butler reply MESSAGE-ID -` (or `--file PATH`) answers a message in its thread; for Matrix mail it keeps the room and thread (prefer this over send when answering); answers to Matrix mail ALWAYS use this, never `remuda butler matrix send`.
 - `remuda butler forward MESSAGE-ID MEMBER [NOTE]` passes a message on with an optional note
 
 ]]
   end,
   prompt = function()
     return "Use `remuda butler inbox`, `remuda butler send MEMBER \"MESSAGE\"`, and "
-      .. "`remuda butler send-to-leader RESULT...` for coordination. Long bodies use "
+      .. "`remuda butler send-to-leader RESULT...` for coordination; answer mail with "
+      .. "`remuda butler reply MESSAGE-ID -` (or `--file PATH`). Long bodies use "
       .. 'stdin (`-`) or `--file "$PWD/path"`; message bodies are limited to 64 KiB. '
   end })
 remuda._butler_contribute("butler.guidance", "old-core", { order = 30,

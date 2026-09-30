@@ -267,6 +267,11 @@ fn matrix_reply_is_not_registered_as_a_text_only_mcp_tool() {
         config_path = serde_json::to_string(&config_path.to_string_lossy()).unwrap(),
     );
     assert_eq!(eval(&path, &code), "loaded");
+    assert_eq!(
+        eval(&path, "return tostring(remuda.butler and remuda.butler.matrix and remuda.butler.matrix.relay ~= nil)"),
+        "true",
+        "Matrix config must load its relay before checking matrix_reply absence"
+    );
     let names = listed(&path);
     assert!(
         !names.contains(&"matrix_reply".to_string()),

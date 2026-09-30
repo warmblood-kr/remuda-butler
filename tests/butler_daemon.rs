@@ -8755,7 +8755,7 @@ fn butler_matrix_guidance_covers_each_member_verb_and_omits_operator_verbs() {
         "- `rooms`: joined rooms (read-only).",
         "- `thread EVENT_ID`: all replies in a thread.",
         "- `event EVENT_ID` (alias `get`): one event.",
-        "- `send TEXT`: post a message (long text is split, rate-limited); `send -` is refused until core #213.",
+        "- `send TEXT`: start a NEW post only (name the room with `--room ROOM`); long text is split, rate-limited; `send -` is refused until core #213. Answers ALWAYS go via `remuda butler reply MESSAGE-ID -`, never send.",
         "- `reply EVENT_ID TEXT` / `react EVENT_ID KEY`: answer or react (same room only).",
         "- `upload PATH`: post a file (up to 20 MB). `[-o PATH] download MXC`: fetch media.",
         "- `redact EVENT_ID [--reason TEXT]`: remove your message.",

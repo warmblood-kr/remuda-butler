@@ -590,6 +590,7 @@ local function test_cli_matrix_mail_replies_keep_room_and_relation()
   end
   function client.reply(opts, callback)
     sent[#sent + 1] = { room_id = opts.room, text = opts.text,
+      thread_root = opts.thread_root,
       relates_to = { rel_type = "m.thread", event_id = opts.thread_root or opts.event_id,
         ["m.in_reply_to"] = { event_id = opts.event_id } } }
     local sent_id = "$butler-sent-" .. tostring(#sent)
@@ -653,12 +654,14 @@ local function test_cli_matrix_mail_replies_keep_room_and_relation()
   cli_reply(home_top)
 
   assert(#sent == 4, "four CLI mail replies should reach the fake homeserver")
-  assert(sent[1].room_id == joined_room and sent[1].relates_to.event_id == "$joined-top",
+  assert(sent[1].room_id == joined_room and sent[1].thread_root == nil
+      and sent[1].relates_to.event_id == "$joined-top",
     "a top-level mail from a joined room must reply in that room")
-  assert(sent[2].room_id == joined_room and sent[2].relates_to.event_id == "$thread-root"
+  assert(sent[2].room_id == joined_room and sent[2].thread_root == "$thread-root"
+      and sent[2].relates_to.event_id == "$thread-root"
       and sent[2].relates_to["m.in_reply_to"].event_id == "$thread-reply",
     "a thread reply must preserve its room, thread root, and direct event target")
-  assert(sent[3].room_id == joined_room
+  assert(sent[3].room_id == joined_room and sent[3].thread_root == nil
       and sent[3].relates_to["m.in_reply_to"].event_id == "$plain-reply",
     "a reply to Matrix mail that is itself a reply must target that event")
   assert(sent[4].room_id == home_room and sent[4].relates_to.event_id == "$home-top",
