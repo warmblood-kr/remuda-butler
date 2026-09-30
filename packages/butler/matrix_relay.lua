@@ -120,6 +120,22 @@ local function cap_field(value, limit)
   return #value <= limit and value or value:sub(1, limit)
 end
 
+local function valid_room_id(value)
+  return type(value) == "string" and value:match("^!%S+:%S+$") ~= nil
+end
+
+local function valid_mxid(value)
+  return type(value) == "string" and value:match("^@[^:%s]+:%S+$") ~= nil
+end
+
+local function shell_quote(value)
+  return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
+end
+
+local function terminal_safe_field(value, limit)
+  return mail_body(cap_field(value, limit))
+end
+
 local function relation_fields(content)
   local rel = content and content["m.relates_to"]
   if type(rel) ~= "table" then return nil, nil end
@@ -378,7 +394,7 @@ function relay.new(options)
       if type(result) ~= "table" or result.error then
         local detail = type(result) == "table" and result.error or "Matrix notice failed"
         warn_once(warn_kind, warn_key, "butler Matrix invite notice failed for "
-          .. cap_field(room, 512) .. ": " .. tostring(detail))
+          .. terminal_safe_field(room, 512) .. ": " .. terminal_safe_field(tostring(detail), 512))
       end
     end)
   end
@@ -898,7 +914,7 @@ function relay.new(options)
                     local detail = type(result) == "table" and result.error or "Matrix join failed"
                     if not removed then detail = tostring(detail) .. "; config rollback failed: " .. tostring(remove_error) end
                     warn_once("invite-join", room_id, "butler Matrix owner invite join failed for "
-                      .. cap_field(room_id, 512) .. ": " .. tostring(detail))
+                      .. terminal_safe_field(room_id, 512) .. ": " .. terminal_safe_field(tostring(detail), 512))
                     return
                   end
                   send_notice(room_id, "Joined; I read messages here from the owner.",
@@ -906,17 +922,21 @@ function relay.new(options)
                 end)
               else
                 warn_once("invite-config", room_id, "butler could not add Matrix owner-invited room "
-                  .. cap_field(room_id, 512) .. ": " .. tostring(add_error))
+                  .. terminal_safe_field(room_id, 512) .. ": " .. terminal_safe_field(tostring(add_error), 512))
               end
             else
               local ev = { event_id = "invite:" .. room_id .. "|" .. report_inviter,
                 sender = report_inviter, type = "m.room.member", content = {} }
               if quarantine_event(ev, "invite_not_allowlisted", room_id) then
-                local safe_room = mail_body(cap_field(room_id, 512))
-                local safe_inviter = mail_body(cap_field(report_inviter, 256))
-                local text = "Invite to " .. safe_room .. " from " .. safe_inviter
-                  .. " was not accepted. Next: remuda butler matrix join '" .. safe_room .. "'"
-                send_notice(cfg.home_room, text, "invite-home-notice", room_id .. "\0" .. report_inviter)
+                local safe_to_notice = valid_room_id(room_id) and not room_id:find("'", 1, true)
+                  and valid_mxid(report_inviter)
+                if safe_to_notice then
+                  local safe_room = terminal_safe_field(room_id, 512)
+                  local safe_inviter = terminal_safe_field(report_inviter, 256)
+                  local text = "Invite to " .. safe_room .. " from " .. safe_inviter
+                    .. " was not accepted. Next: remuda butler matrix join " .. shell_quote(safe_room)
+                  send_notice(cfg.home_room, text, "invite-home-notice", room_id .. "\0" .. report_inviter)
+                end
               end
             end
           end
