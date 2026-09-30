@@ -4170,6 +4170,9 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
             ["t-claude-human-trust"] = {{ "Accessing workspace:\n ❯ No, exit\n   Yes, I trust this folder" }},
             ["t-stuck"] = {{ " Some unknown dialog\n ❯ 1. No, exit" }},
           }}
+          local claude_yes_selected = screens["t-claude"][1]
+            :gsub("❯ No, exit", "  No, exit")
+            :gsub("   Yes, I trust this folder", "❯ Yes, I trust this folder")
           local log = {{}}
           local human_owner_update_started = false
           local versionless_launches = 0
@@ -4225,7 +4228,11 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
           remuda.capture_styled = nil
           remuda.key = function(n, k)
             log[#log + 1] = n .. " key " .. k
-            if n == "t-claude-launch" and k == "RET" then
+            if n == "t-claude" and k == "<down>" then
+              screens[n] = {{ claude_yes_selected, claude_yes_selected, rule .. "\n❯ \n" .. rule }}
+            elseif n == "t-claude" and k == "RET" then
+              screens[n] = {{ rule .. "\n❯ \n" .. rule }}
+            elseif n == "t-claude-launch" and k == "RET" then
               screens[n] = {{ rule .. "\n❯ \n" .. rule }}
             elseif (n == "t-codex" or n == "t-codex-peer") and k == "1" then
               screens[n] = {{ "› Ask Codex to do anything" }}

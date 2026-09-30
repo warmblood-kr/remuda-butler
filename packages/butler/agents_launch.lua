@@ -45,6 +45,7 @@ end
 -- main.lua assigns startup_action_safe with the notice policy; read it late.
 local startup_action_safe = config.startup_action_safe
 local trust_modal_state
+local claude_workspace_path
 -- The one generic launch chooser serves Butler and every managed member. Kinds
 -- are lifecycle contributions; the chooser only reads their data and callbacks.
 -- Member launches must not hold the daemon image while an agent paints its
@@ -169,6 +170,9 @@ local function choose(candidates, opts, done)
     for dialog_index, dialog in ipairs(dialogs) do
       local lower_screen = screen:lower()
       local trust_state = dialog.trust and trust_modal_state(dialog, screen) or nil
+      local displayed_workspace = dialog.trust == "claude" and claude_workspace_path(screen) or nil
+      local workspace_matches_launch = not opts.trust_path_gate or not displayed_workspace
+        or displayed_workspace:gsub("/+$", "") == tostring(opts.cwd or ""):gsub("/+$", "")
       local matched = dialog.trust and trust_state ~= "absent"
         or (dialog.match and lower_screen:find(dialog.match:lower(), 1, true))
       if matched then
@@ -178,15 +182,18 @@ local function choose(candidates, opts, done)
           else state.trust_screen, state.trust_ticks = screen, 1 end
           if state.trust_ticks < 2 then break end
           if trust_state == "pending" and opts.auto_trust then break end
-          local may_auto_trust = opts.auto_trust and bus.trusted_launch_dirs
-            and bus.trusted_launch_dirs[opts.cwd] == true and startup_action_safe
-            and startup_action_safe(state.name)
-          if dialog.trust == "claude" and may_auto_trust
+          local trust_grant_available = (bus.trusted_launch_dirs
+              and bus.trusted_launch_dirs[opts.cwd] == true)
+            or state.handled[dialog_index] == "selection_pending"
+          local may_auto_trust = opts.auto_trust and trust_grant_available and startup_action_safe
+            and startup_action_safe(state.name) and workspace_matches_launch
+          if dialog.trust == "claude" and opts.trust_path_gate and may_auto_trust
               and trust_state == "safe" and not state.handled[dialog_index] then
             local ok, result = pcall(remuda.key, state.name, "<down>")
             if ok and result ~= false then
               state.handled[dialog_index] = "selection_pending"
               state.attempt.trust_selection_moved = true
+              bus.trusted_launch_dirs[opts.cwd] = nil
               local captured, selected_screen = pcall(remuda.capture, state.name)
               if captured then
                 selected_screen = tostring(selected_screen or ""):gsub("\r\n", "\n"):gsub("\r", "\n")
@@ -196,7 +203,7 @@ local function choose(candidates, opts, done)
               end
             end
             break
-          elseif dialog.trust == "claude" and may_auto_trust and trust_state == "safe_selected"
+          elseif dialog.trust == "claude" and opts.trust_path_gate and may_auto_trust and trust_state == "safe_selected"
               and state.handled[dialog_index] == "selection_pending" then
             local ok, result = pcall(remuda.key, state.name, "RET")
             if ok and result ~= false then
@@ -205,7 +212,7 @@ local function choose(candidates, opts, done)
               bus.trusted_launch_dirs[opts.cwd] = nil
             end
             break
-          elseif dialog.trust ~= "claude" and may_auto_trust
+          elseif (dialog.trust ~= "claude" or not opts.trust_path_gate) and may_auto_trust
               and trust_state == "safe" and not state.handled[dialog_index] then
             state.handled[dialog_index] = true
             local answered = true
@@ -450,6 +457,14 @@ local function skip_option_number(screen)
 end
 local function startup_modal_timeout_seconds()
   return tonumber(remuda._butler_modal_timeout or remuda._butler_modal_attempts or remuda._butler_task_poke_attempts) or 60
+end
+claude_workspace_path = function(screen)
+  local in_header = false
+  for line in (tostring(screen or "") .. "\n"):gmatch("(.-)\n") do
+    local trimmed = line:gsub("^%s+", ""):gsub("%s+$", "")
+    if in_header and (trimmed:match("^/") or trimmed:match("^%a:[/\\]")) then return trimmed end
+    if trimmed == "Accessing workspace:" then in_header = true end
+  end
 end
 trust_modal_state = function(modal, screen)
   local lines, title, affirmative, selected_no, selected_index, selected_yes = {}, false, false, false, nil, false

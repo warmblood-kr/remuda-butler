@@ -59,7 +59,8 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
     identity.ended_at, identity.reason = nil, nil
     identity_record(identity)
   end
-  local auto_trust = fresh_trusted_cwd == true
+  local topic_trust_path = fresh_trusted_cwd == true
+  local auto_trust = topic_trust_path
   if not cwd and data_home then
     local sessions_root = data_home .. "/remuda/butler/sessions"
     cwd = sessions_root .. "/" .. name
@@ -80,6 +81,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   telemetry_by_kind[kind] = agent_telemetry
   local choose_opts = {
     name = name, cwd = launch_cwd, auto_trust = auto_trust,
+    trust_path_gate = topic_trust_path,
     spec = function(candidate_kind)
       local telemetry = telemetry_by_kind[candidate_kind]
         or setup_telemetry(candidate_kind, { name = name, model = model })
@@ -541,9 +543,7 @@ local function make_topic(name, template, kind, parent, task, model, cwd)
   if template and not created_now then
     error("topic directory already exists; templates require a fresh topic name", 0)
   end
-  local home = os.getenv("HOME")
-  local projects_root = home and (home .. "/projects") or nil
-  local allowed_trust_path = projects_root and directory_is_under(root, projects_root)
+  local allowed_trust_path = directory_is_under(root, topic_config.project_home)
   local auto_trust = created_now and not template
     and directory_is_under(root, topic_config.project_home)
     and (kind ~= "claude" or allowed_trust_path)
