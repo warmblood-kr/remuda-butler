@@ -325,6 +325,101 @@ fn relay_deposit_produces_one_mail_notice() {
     assert_eq!(actual, expected, "relay notice text should name its Matrix sender: {got}");
 }
 
+#[test]
+fn a_single_mail_notice_waits_for_two_quiet_seconds() {
+    let (path, _daemon) = butler_with_member("notice-single-debounce");
+    setup_mail_notice_clock(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        remuda._notice_test_send('m1', 'one')
+        state.now = 1.99
+        remuda._butler_deliver_notices()
+        local early = #state.typed
+        state.now = 2
+        remuda._butler_deliver_notices()
+        return tostring(early) .. '|' .. #state.typed .. '|'
+          .. tostring(state.typed[1] and state.typed[1].at) .. '|'
+          .. tostring(state.typed[1] and state.typed[1].text)
+        "#,
+    );
+    assert!(got.starts_with("0|1|2|Butler message "), "single mail debounce timing: {got}");
+}
+
+#[test]
+fn five_mail_notice_waits_for_two_quiet_seconds_after_the_last_mail() {
+    let (path, _daemon) = butler_with_member("notice-burst-debounce");
+    setup_mail_notice_clock(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        for i = 1, 5 do
+          state.now = (i - 1) * 0.5
+          remuda._notice_test_send('m1', tostring(i))
+        end
+        state.now = 3.99
+        remuda._butler_deliver_notices()
+        local early = #state.typed
+        state.now = 4
+        remuda._butler_deliver_notices()
+        return tostring(early) .. '|' .. #state.typed .. '|'
+          .. tostring(state.typed[1] and state.typed[1].at) .. '|'
+          .. tostring(state.typed[1] and state.typed[1].text)
+        "#,
+    );
+    assert_eq!(got, "0|1|4|5 new Butler messages arrived. Read them: remuda butler inbox");
+}
+
+#[test]
+fn mail_arriving_each_second_fires_by_the_ten_second_maximum() {
+    let (path, _daemon) = butler_with_member("notice-max-wait");
+    setup_mail_notice_clock(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        for i = 1, 10 do
+          state.now = i - 1
+          remuda._notice_test_send('m1', tostring(i))
+        end
+        state.now = 9.99
+        remuda._butler_deliver_notices()
+        local early = #state.typed
+        state.now = 10
+        remuda._butler_deliver_notices()
+        return tostring(early) .. '|' .. #state.typed .. '|'
+          .. tostring(state.typed[1] and state.typed[1].at) .. '|'
+          .. tostring(state.typed[1] and state.typed[1].text)
+        "#,
+    );
+    assert_eq!(got, "0|1|10|10 new Butler messages arrived. Read them: remuda butler inbox");
+}
+
+#[test]
+fn five_relay_mails_wait_until_a_busy_pane_is_free_and_coalesce() {
+    let (path, _daemon) = butler_with_member("notice-relay-busy");
+    setup_mail_notice_clock(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        state.busy.butler = true
+        for i = 1, 5 do remuda._notice_test_relay('$busy-' .. i) end
+        state.now = 2
+        remuda._butler_deliver_notices()
+        local busy = #state.typed
+        state.busy.butler = false
+        remuda._butler_deliver_notices()
+        return tostring(busy) .. '|' .. #state.typed .. '|'
+          .. tostring(state.typed[1] and state.typed[1].at) .. '|'
+          .. tostring(state.typed[1] and state.typed[1].text)
+        "#,
+    );
+    assert_eq!(got, "0|1|2|5 new Butler messages arrived. Read them: remuda butler inbox");
+}
+
 /// #29: one case per branch of `remuda._butler_notify_policy`, with `ls` and
 /// `capture` stubbed and the clock passed in.
 #[test]
@@ -392,6 +487,41 @@ fn butler_with_member(tag: &str) -> (PathBuf, impl Drop) {
          remuda._butler_launch('fake', 'm1')",
     );
     (path, daemon)
+}
+
+fn setup_mail_notice_clock(path: &Path) {
+    eval(
+        path,
+        r#"
+        local state = { now = 0, busy = {}, typed = {} }
+        remuda._notice_test_state = state
+        remuda._butler_notice_clock = function() return state.now end
+        remuda.ls = function() return {
+          { name = 'm1', alive = true, attached = false },
+          { name = 'butler', alive = true, attached = false },
+        } end
+        remuda.session = function(name) return { is_busy = state.busy[name] == true } end
+        remuda.capture = function() return '> ' end
+        remuda.capture_styled = nil
+        remuda._butler_notify_policy = function(name) return state.busy[name] ~= true end
+        remuda.type_text = function(_, text)
+          state.typed[#state.typed + 1] = { at = state.now, text = text }
+          return true
+        end
+        remuda._notice_test_send = function(alias, text)
+          return remuda._butler_send('operator', alias, text)
+        end
+        remuda._notice_test_relay = function(event_id)
+          local sender = '@alice:example.org'
+          return remuda.emit_until_success('butler/deliver', {
+            from = { host = 'matrix', id = '', alias = sender, session = sender,
+              kind = 'matrix', leader = '' },
+            to = 'butler', text = 'relay ' .. event_id, subject = 'Matrix message from ' .. sender,
+            matrix = { sender = sender, room_id = '!notice:example.org', event_id = event_id },
+          })
+        end
+        "#,
+    );
 }
 
 #[test]
