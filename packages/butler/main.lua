@@ -1031,25 +1031,29 @@ local function delivery_notice_key(message_id, alias)
 end
 local function take_delivery_notice_result(message, alias)
   local key = delivery_notice_key(message.id, alias)
-  local result = delivery_notice_results[key] or {}
+  local result = delivery_notice_results[key]
   delivery_notice_results[key] = nil
   return result
 end
-local function notify_mail_delivery(message, delivered)
+local function notify_mail_delivery(message, delivered, recipient_alias, what)
   local result = {}
-  local recipient_ref = type(message.to) == "table" and message.to.alias or message.to
+  local recipient_ref = recipient_alias or (type(message.to) == "table" and message.to.alias or message.to)
   local recipient_ok, _, recipient = pcall(mail_id, recipient_ref, false)
   result.recipient_live = recipient_ok
   if recipient_ok then
-    local sender = message.from.alias or message.from.session or "outside"
     local notice
-    if message.kind == "forward" then
-      notice = "Butler message " .. delivered.id .. " forwarded by " .. sender
-    elseif message.in_reply_to then
-      notice = "Butler message " .. delivered.id .. " (reply) from " .. sender
+    if what then
+      notice = "Butler message " .. delivered.id .. " " .. what
     else
-      sender = message.matrix and message.matrix.sender or message.from.session or sender
-      notice = "Butler message " .. delivered.id .. " from " .. sender
+      local sender = message.from.alias or message.from.session or "outside"
+      if message.kind == "forward" then
+        notice = "Butler message " .. delivered.id .. " forwarded by " .. sender
+      elseif message.in_reply_to then
+        notice = "Butler message " .. delivered.id .. " (reply) from " .. sender
+      else
+        sender = message.matrix and message.matrix.sender or message.from.session or sender
+        notice = "Butler message " .. delivered.id .. " from " .. sender
+      end
     end
     notice = notice .. " arrived. Read it: remuda butler inbox"
     result.delivered, result.error = remuda._butler_notify(recipient.alias, notice, delivered.id)
@@ -2347,10 +2351,15 @@ function remuda._butler_send(from, to, text)
   local _, recipient = mail_id(to, false)
   local sender = (from == "operator" or from == "outside") and mail_address(from)
     or mail_address(resolve(from))
-  local message = deliver_message({ from = sender, to = mail_address(recipient.alias), text = text })
+  local envelope = { from = sender, to = mail_address(recipient.alias), text = text }
+  local message = deliver_message(envelope)
   local notice = take_delivery_notice_result(message, recipient.alias)
-  if notice.delivered then return "queued " .. message.id .. " and notified " .. recipient.alias end
-  if notice.error then
+  if not notice then
+    notify_mail_delivery(envelope, message)
+    notice = take_delivery_notice_result(message, recipient.alias)
+  end
+  if notice and notice.delivered then return "queued " .. message.id .. " and notified " .. recipient.alias end
+  if notice and notice.error then
     return "queued " .. message.id .. " for " .. recipient.alias .. "; terminal delivery deferred: " .. tostring(notice.error)
   end
   return "queued " .. message.id .. " for " .. recipient.alias .. "; notice deferred until its pane is free"
@@ -2364,10 +2373,14 @@ local function sender_address(from)
 end
 local function notify_queued(message, alias, what)
   local notice = take_delivery_notice_result(message, alias)
-  if notice.delivered then return "queued " .. message.id .. " and notified " .. alias end
-  if not notice.recipient_live then return "queued " .. message.id .. " for " .. alias .. "; it is not live, so no notice" end
+  if not notice then
+    notify_mail_delivery(message, message, alias, what)
+    notice = take_delivery_notice_result(message, alias)
+  end
+  if notice and notice.delivered then return "queued " .. message.id .. " and notified " .. alias end
+  if notice and not notice.recipient_live then return "queued " .. message.id .. " for " .. alias .. "; it is not live, so no notice" end
   return "queued " .. message.id .. " for " .. alias .. "; notice deferred"
-    .. (notice.error and (": " .. tostring(notice.error)) or " until its pane is free")
+    .. (notice and notice.error and (": " .. tostring(notice.error)) or " until its pane is free")
 end
 function remuda._butler_reply(from, message_id, text)
   local sender = sender_address(from)
