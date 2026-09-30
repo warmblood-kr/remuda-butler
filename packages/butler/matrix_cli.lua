@@ -249,6 +249,21 @@ function matrix.cli(args, agent)
       if result.error then return reply:resolve(1, "", tostring(result.error) .. "\n") end
       local files, write_error = matrix.setup_write(plan, result)
       if not files then return reply:resolve(1, "", tostring(write_error) .. "\n") end
+      local relay_started
+      if plan.default then
+        -- Match main.lua's boot config shape using the resolved paths that
+        -- setup just wrote; the relay remains the only live component changed.
+        remuda._butler_matrix_config = {
+          token_path = files.token_path,
+          config_path = files.config_path,
+        }
+        local relay = matrix.relay
+        if relay and type(relay.stop) == "function" and type(relay.start) == "function" then
+          pcall(relay.stop)
+          local ok, started = pcall(relay.start, remuda._butler_matrix_config)
+          relay_started = ok and started == true
+        end
+      end
       active = matrix.status({}, function(status_result)
         if cancelled.value then return end
         if type(status_result) ~= "table" then status_result = { error = "Matrix status returned no result" } end
@@ -267,7 +282,16 @@ function matrix.cli(args, agent)
         else
           lines[#lines + 1] = "Status: " .. terminal_safe(render_human("status", {}, status_result):gsub("\n", "; "):gsub("; $", ""))
         end
-        lines[#lines + 1] = "Next: Accept the invite in Element, then write in the room."
+        if plan.default then
+          if relay_started then
+            lines[#lines + 1] = "Relay started; write to the Butler in Element."
+          else
+            lines[#lines + 1] = "Relay failed to start."
+            lines[#lines + 1] = "Next: remuda butler matrix status"
+          end
+        else
+          lines[#lines + 1] = "Next: Accept the invite in Element, then write in the room."
+        end
         reply:resolve(0, table.concat(lines, "\n") .. "\n", "")
       end, agent)
     end

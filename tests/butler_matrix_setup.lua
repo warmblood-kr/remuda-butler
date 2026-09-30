@@ -252,9 +252,9 @@ return function(matrix)
     and default_refusal:find("REMUDA_BUTLER_TOKEN=", 1, true)
     and default_refusal:find("REMUDA_BUTLER_CONFIG=", 1, true)
     and default_refusal:find("remuda -s matrix-test daemon", 1, true)
-    and default_refusal:find("packages/butler/init.lua:16-30, 88-91", 1, true)
-    and default_refusal:find("remuda -e \"remuda.reload('butler')\"", 1, true),
-    "default refusal should explain both safe choices and when to start the relay")
+    and not default_refusal:find("reload", 1, true)
+    and not default_refusal:find("remuda stop", 1, true),
+    "default refusal should explain both safe choices without restart hints")
   assert(not default_refusal:find("password-secret", 1, true),
     "default refusal must not reveal the secret contents")
   assert(io.open(default_paths.token_path, "rb") == nil
