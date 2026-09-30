@@ -95,6 +95,22 @@ local function mail_body(body)
   return (body:gsub("\194[\128-\159]", ""))
 end
 
+local function strip_reply_fallback(body)
+  local lines = {}
+  for line in (body .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
+  local quote = lines[1] and lines[1]:match("^> <[@*][^>]*> (.*)$")
+  if not quote then return body end
+  local index = 2
+  while lines[index] and lines[index]:match("^>") do index = index + 1 end
+  if lines[index] == "" then index = index + 1 end
+  local reply = {}
+  for i = index, #lines do reply[#reply + 1] = lines[i] end
+  if reply[#reply] == "" then table.remove(reply) end
+  local text = table.concat(reply, "\n")
+  if text:match("^%s*$") then return body end
+  return "> " .. quote:sub(1, 120) .. "\n" .. text
+end
+
 local function timestamp(event)
   local ms = event and tonumber(event.origin_server_ts)
   if ms and ms >= 0 and ms < 253402300800000 then
@@ -118,6 +134,27 @@ end
 local function cap_field(value, limit)
   if type(value) ~= "string" then return "" end
   return #value <= limit and value or value:sub(1, limit)
+end
+
+local function valid_room_id(value)
+  return type(value) == "string" and value:match("^!%S+:%S+$") ~= nil
+end
+
+local function valid_mxid(value)
+  return type(value) == "string" and value:match("^@[^:%s]+:%S+$") ~= nil
+end
+
+local function has_bidi_format(value)
+  return type(value) == "string" and (value:find("\226\128[\142\143\170-\174]") ~= nil
+    or value:find("\226\129[\166-\169]") ~= nil)
+end
+
+local function shell_quote(value)
+  return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
+end
+
+local function terminal_safe_field(value, limit)
+  return mail_body(cap_field(value, limit))
 end
 
 local function relation_fields(content)
@@ -165,6 +202,42 @@ local function media_uri(content)
   if type(content) ~= "table" then return nil end
   if type(content.url) == "string" then return content.url end
   if type(content.file) == "table" and type(content.file.url) == "string" then return content.file.url end
+end
+
+local function safe_media_field(value)
+  value = type(value) == "string" and value or "unknown"
+  value = value:gsub("[%z\1-\31\127]", ""):gsub("\194[\128-\159]", "")
+  return value:sub(1, 256)
+end
+
+local function valid_media_uri(value)
+  return type(value) == "string"
+    and value:match("^mxc://[A-Za-z0-9%.:%-]+/[A-Za-z0-9_%-]+$") ~= nil
+end
+
+local MEDIA_MSGTYPES = {
+  ["m.image"] = "image", ["m.file"] = "file",
+  ["m.video"] = "video", ["m.audio"] = "audio",
+}
+
+local function media_mail_body(content, kind)
+  local info = type(content.info) == "table" and content.info or {}
+  local filename = type(content.filename) == "string" and content.filename or content.body
+  local mimetype = type(info.mimetype) == "string" and info.mimetype or "unknown"
+  filename, mimetype = safe_media_field(filename), safe_media_field(mimetype)
+  local size = info.size
+  local lines = { "media: " .. kind, "filename: " .. filename, "mimetype: " .. mimetype }
+  if type(size) == "number" and size >= 0 and size < 9007199254740992 and size % 1 == 0 then
+    lines[#lines + 1] = "size: " .. string.format("%.0f", size) .. " bytes"
+  end
+  local mxc = media_uri(content)
+  if valid_media_uri(mxc) then
+    lines[#lines + 1] = "mxc: " .. mxc
+    lines[#lines + 1] = "Next: remuda butler matrix -o PATH download " .. mxc
+  else
+    lines[#lines + 1] = "mxc: (invalid)"
+  end
+  return table.concat(lines, "\n")
 end
 
 local function add_processed(state, id)
@@ -284,6 +357,14 @@ local function load_state(path)
       and type(event.sender) == "string" and type(event.room_id) == "string"
       and type(event.created_at) == "string" and type(event.body) == "string" then
       event.event_id = event.event_id or id
+      local references = event.references
+      if type(references) == "table" and references ~= json.null
+        and getmetatable(references) == JSON_ARRAY_MT and #references == 1
+        and type(references[1]) == "string" and references[1] ~= "" then
+        event.references = { cap_field(references[1], 512) }
+      else
+        event.references = nil
+      end
       state.pending[id] = event
     end
   end
@@ -359,6 +440,7 @@ function relay.new(options)
   local active, request_handle, request_token, retry_timer, backfill_timer = false, nil, nil, nil, nil
   local delivery_retry_waiting, delivery_retry_timers = {}, {}
   local reply_retry_timers, reply_in_flight = {}, {}
+  local joining = {}
   local generation = 0
   local failures = 0
   local instance = {}
@@ -367,7 +449,23 @@ function relay.new(options)
     if not ok then error("cannot save Matrix relay state: " .. tostring(err), 0) end
   end
 
-  local function quarantine_event(ev, reason)
+  local function send_notice(room, text, warn_kind, warn_key)
+    local body = encode({ msgtype = "m.notice", body = text })
+    api.request_json({ method = "PUT",
+      path = "/_matrix/client/v3/rooms/" .. percent_encode(room)
+        .. "/send/m.room.message/" .. percent_encode("invite-" .. tostring(remuda._butler_new_ulid())),
+      room = room, body = body,
+      headers = { ["Content-Type"] = "application/json" },
+    }, function(result)
+      if type(result) ~= "table" or result.error then
+        local detail = type(result) == "table" and result.error or "Matrix notice failed"
+        warn_once(warn_kind, warn_key, "butler Matrix invite notice failed for "
+          .. terminal_safe_field(room, 512) .. ": " .. terminal_safe_field(tostring(detail), 512))
+      end
+    end)
+  end
+
+  local function quarantine_event(ev, reason, room_id)
     local event_id = type(ev.event_id) == "string" and ev.event_id or ""
     local valid_id = event_id ~= "" and #event_id <= 512
     local id = valid_id and event_id or ("quarantine-" .. tostring(remuda._butler_new_ulid()))
@@ -377,7 +475,7 @@ function relay.new(options)
     local content = type(ev.content) == "table" and ev.content or {}
     state.quarantine[#state.quarantine + 1] = {
       id = id, event_id = cap_field(event_id, 512), sender = cap_field(ev.sender, 256),
-      room_id = cap_field(cfg.room, 512), created_at = timestamp(ev), reason = reason,
+      room_id = cap_field(room_id or cfg.room, 512), created_at = timestamp(ev), reason = reason,
       event_type = type(ev.type) == "string" and ev.type:sub(1, 80) or "",
       msgtype = type(content.msgtype) == "string" and content.msgtype:sub(1, 80) or "",
       preview = quarantine_preview(content.body),
@@ -436,6 +534,25 @@ function relay.new(options)
         if thread_root and (route.last_reply_event_id == thread_root
           or route.thread_root == thread_root or route.event_id == thread_root) then
           fallback = fallback or mail_id
+        end
+      end
+    end
+    return fallback
+  end
+
+  function instance:thread_root_mail_for_event(room_id, thread_root)
+    local fallback, fallback_time
+    for mail_id, route in pairs(state.routes) do
+      if route.room_id == room_id then
+        if route.event_id == thread_root or route.last_reply_event_id == thread_root then
+          return mail_id
+        end
+        if route.thread_root == thread_root then
+          local created_at = type(route.created_at) == "string" and route.created_at or ""
+          if not fallback or created_at < fallback_time
+            or (created_at == fallback_time and mail_id < fallback) then
+            fallback, fallback_time = mail_id, created_at
+          end
         end
       end
     end
@@ -651,6 +768,17 @@ function relay.new(options)
     delivery_retry_timers[id] = timer
   end
 
+  local function resolve_pending_thread_context(event)
+    if not event.thread_root then return end
+    local route_mail_id = instance:mail_route_for_event(event.room_id, event.thread_root, event.in_reply_to)
+    local root_mail_id = instance:thread_root_mail_for_event(event.room_id, event.thread_root)
+    local subscription = (state.subscriptions[event.room_id] or {})[event.thread_id]
+    local subscribed_mail_id = type(subscription) == "table" and subscription.mail_id or nil
+    event.context_mail_id = route_mail_id or subscribed_mail_id or event.context_mail_id
+    local reference = root_mail_id or subscribed_mail_id
+    if reference then event.references = { reference } end
+  end
+
   deliver_pending = function(only)
     local ids = only or state.pending_order
     if not ids then
@@ -661,6 +789,7 @@ function relay.new(options)
       for _, id in ipairs(ids) do
         local event = state.pending[id]
         if event and not delivery_retry_waiting[id] then
+          resolve_pending_thread_context(event)
           local ok, result = pcall(deliver, event)
           if ok and result ~= nil then
             if type(result) == "table" and type(result.id) == "string" and result.id ~= "" then
@@ -738,17 +867,23 @@ function relay.new(options)
           elseif ev.type ~= "m.room.message" then reason = "unsupported_event_type"
           elseif type(ev.sender) ~= "string" or ev.sender == "" then reason = "missing_sender"
           elseif not cfg.allowed_senders[ev.sender] then reason = "sender_not_allowlisted"
-          elseif content.msgtype ~= "m.text" and content.msgtype ~= "m.notice" and content.msgtype ~= "m.emote" then
+          elseif MEDIA_MSGTYPES[content.msgtype] and media_uri(content) == nil then
+            reason = "unsupported_message_type"
+          elseif content.msgtype ~= "m.text" and content.msgtype ~= "m.notice" and content.msgtype ~= "m.emote"
+              and not MEDIA_MSGTYPES[content.msgtype] then
             reason = "unsupported_message_type"
           elseif type(content.body) ~= "string" then reason = "missing_text_body" end
           if reason then
             quarantine_event(ev, reason)
           else
           local thread_root, in_reply_to = relation_fields(content)
+          local media_kind = MEDIA_MSGTYPES[content.msgtype]
+          local body = media_kind and mail_body(media_mail_body(content, media_kind)) or mail_body(content.body)
+          if in_reply_to and not thread_root then body = strip_reply_fallback(body) end
           local actual_room = room_id or cfg.room
           local sender_kind = member_kind(ev.sender, cfg)
           local is_mention = mentions(content, content.body, cfg.self_mxid)
-          local is_home = actual_room == cfg.home_room
+          local is_home = actual_room == cfg.home_room or cfg.rooms[actual_room] == "joined"
           local thread_id = thread_root or in_reply_to
           local is_threaded = thread_id ~= nil
           local subscriptions = state.subscriptions[actual_room] or json.object({})
@@ -761,18 +896,23 @@ function relay.new(options)
               (not is_threaded or is_mention or is_subscribed))))
           local route_mail_id = thread_id
             and instance:mail_route_for_event(actual_room, thread_root, in_reply_to) or nil
+          local thread_root_mail_id = thread_root
+            and instance:thread_root_mail_for_event(actual_room, thread_root) or nil
           local subscription = thread_id and subscriptions[thread_id]
           local subscribed_mail_id = type(subscription) == "table" and subscription.mail_id or nil
           local context_mail_id = route_mail_id or subscribed_mail_id
+          local references = thread_root and (thread_root_mail_id or subscribed_mail_id) or nil
           if not accepted then
             add_processed(state, ev.event_id)
             if cursor then state.since = cursor end
           else
           state.pending[ev.event_id] = {
             sender = ev.sender, room_id = actual_room, event_id = ev.event_id,
-            created_at = timestamp(ev), body = mail_body(content.body),
-            thread_root = thread_root, in_reply_to = in_reply_to, mxc = media_uri(content),
+            created_at = timestamp(ev), body = body,
+            thread_root = thread_root, in_reply_to = in_reply_to,
+            mxc = valid_media_uri(media_uri(content)) and media_uri(content) or nil,
             room = cfg.rooms[actual_room], room_kind = cfg.rooms[actual_room], context_mail_id = context_mail_id,
+            references = references and { references } or nil,
             from_agent = is_agent,
             subscribe_thread = is_all and is_threaded and is_mention,
             thread_id = thread_id,
@@ -822,9 +962,119 @@ function relay.new(options)
     end
   end
 
+  local function handle_invites(response)
+    local home_invite_notices, additional_invites = 0, 0
+    local rooms = type(response) == "table" and type(response.rooms) == "table" and response.rooms or {}
+    local invites = type(rooms.invite) == "table" and rooms.invite or {}
+    for room_id, invitation in pairs(invites) do
+      local room_kind = cfg.rooms[room_id]
+      if type(invitation) == "table" and room_kind ~= "home" and room_kind ~= "all"
+        and not joining[room_id] then
+        local inviter, matching_invites, same_inviter = nil, 0, true
+        local invite_state = invitation.invite_state
+        local events = type(invite_state) == "table" and invite_state.events or nil
+        for _, event in ipairs(type(events) == "table" and events or {}) do
+          if type(event) == "table" and event.type == "m.room.member"
+            and event.state_key == cfg.self_mxid
+            and type(event.content) == "table" and event.content.membership == "invite" then
+            matching_invites = matching_invites + 1
+            if type(event.sender) ~= "string" or event.sender == "" then
+              same_inviter = false
+            else
+              if inviter and inviter ~= event.sender then same_inviter = false end
+              inviter = event.sender
+            end
+          end
+        end
+        if matching_invites > 0 then
+          local report_inviter = inviter or "unknown inviter"
+          if same_inviter and inviter and cfg.allowed_senders[inviter]
+            and member_kind(inviter, cfg) == "HUMAN" then
+            local added_room, add_error, wrote = room_kind == "joined", nil, false
+            if room_kind == nil then
+              local write_result
+              added_room, write_result = matrix.config_add_room(config_path, room_id, "owner-invite")
+              if added_room then
+                wrote = write_result == true
+                cfg.rooms[room_id] = "joined"
+                cfg.room_how[room_id] = "owner-invite"
+              else
+                add_error = write_result
+              end
+            end
+            if added_room then
+              joining[room_id] = true
+              api.request_json({ method = "POST",
+                path = "/_matrix/client/v3/rooms/" .. percent_encode(room_id) .. "/join",
+                room = room_id, body = "{}", headers = { ["Content-Type"] = "application/json" },
+              }, function(result)
+                joining[room_id] = nil
+                if type(result) ~= "table" or result.error then
+                  if wrote then
+                    local removed, remove_error = matrix.config_remove_room(config_path, room_id)
+                    cfg.rooms[room_id], cfg.room_how[room_id] = nil, nil
+                    local detail = type(result) == "table" and result.error or "Matrix join failed"
+                    if not removed then detail = tostring(detail) .. "; config rollback failed: " .. tostring(remove_error) end
+                    warn_once("invite-join", room_id, "butler Matrix owner invite join failed for "
+                      .. terminal_safe_field(room_id, 512) .. ": " .. terminal_safe_field(tostring(detail), 512))
+                  else
+                    local detail = type(result) == "table" and result.error or "Matrix join failed"
+                    warn_once("invite-join", room_id, "butler Matrix owner invite join failed for "
+                      .. terminal_safe_field(room_id, 512) .. ": " .. terminal_safe_field(tostring(detail), 512))
+                  end
+                  return
+                end
+                if room_kind == nil then
+                  send_notice(room_id, "Joined; I read messages here from the owner.",
+                    "invite-notice", room_id)
+                end
+              end)
+            elseif room_kind == nil then
+              warn_once("invite-config", room_id, "butler could not add Matrix owner-invited room "
+                .. terminal_safe_field(room_id, 512) .. ": " .. terminal_safe_field(tostring(add_error), 512))
+            end
+          else
+            local ev = { event_id = "invite:" .. cap_field(room_id, 200) .. "|" .. cap_field(report_inviter, 200),
+              sender = report_inviter, type = "m.room.member", content = {} }
+            if quarantine_event(ev, "invite_not_allowlisted", room_id) then
+              local safe_to_notice = valid_room_id(room_id) and not room_id:find("'", 1, true)
+                and valid_mxid(report_inviter) and not has_bidi_format(room_id)
+                and not has_bidi_format(report_inviter)
+              if safe_to_notice then
+                local safe_room = terminal_safe_field(room_id, 512)
+                local safe_inviter = terminal_safe_field(report_inviter, 256)
+                local text = "Invite to " .. safe_room .. " from " .. safe_inviter
+                  .. " was not accepted. Next: remuda butler matrix join " .. shell_quote(safe_room)
+                if home_invite_notices < 3 then
+                  home_invite_notices = home_invite_notices + 1
+                  send_notice(cfg.home_room, text, "invite-home-notice", room_id .. "\0" .. report_inviter)
+                else
+                  additional_invites = additional_invites + 1
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+    if additional_invites > 0 then
+      local text = tostring(additional_invites)
+        .. " more invites quarantined. Next: remuda butler matrix quarantine"
+      send_notice(cfg.home_room, text, "invite-summary-notice",
+        tostring(response.next_batch or state.since or "sync"))
+    end
+  end
+
   function instance._response(response, path)
+    if path == SYNC_PATH then
+      local refreshed = read_config(config_path)
+      if refreshed then
+        cfg.rooms, cfg.room_how = refreshed.rooms, refreshed.room_how
+      end
+    end
     if path == SYNC_PATH and state.since == nil then
       if type(response.next_batch) ~= "string" then failed(); return end
+      handle_invites(response)
       state.since = response.next_batch
       persist()
       deliver_pending()
@@ -833,13 +1083,15 @@ function relay.new(options)
     end
     if path == SYNC_PATH then
       local added = {}
-      local joined = response.rooms and response.rooms.join or {}
+      local rooms = type(response.rooms) == "table" and response.rooms or {}
+      local joined = type(rooms.join) == "table" and rooms.join or {}
       for room_id, room in pairs(joined) do
         if cfg.rooms[room_id] then
           local room_added = accept_events(room and room.timeline and room.timeline.events, nil, room_id)
           for _, id in ipairs(room_added) do added[#added + 1] = id end
         end
       end
+      handle_invites(response)
       if type(response.next_batch) == "string" then state.since = response.next_batch end
       persist()
       deliver_pending(added)
@@ -938,6 +1190,7 @@ function relay.start(config)
           in_reply_to = event.in_reply_to, thread_id = event.thread_id,
           room = event.room, room_kind = event.room_kind,
           context_mail_id = event.context_mail_id, from_agent = event.from_agent, mxc = event.mxc },
+        references = event.references,
       })
       if type(delivered) == "table" and delivered.__butler_delivery_hook_error then
         error(delivered.__butler_delivery_hook_error, 0)
