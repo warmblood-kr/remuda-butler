@@ -76,9 +76,11 @@ In either mode, the sender allowlist still controls which room messages can
 become mail.
 Messages from other senders stay quarantined, and agent messages still need a
 mention. Open mode refuses invites from `agent-` and `butler-` MXIDs because
-they are not HUMAN accounts. It also refuses repeated invites for a room
-auto-joined in the last 24 hours and allows at most 20 automatic joins per
-rolling day.
+they are not HUMAN accounts. Duplicate delivery of the same invite event is
+ignored; a new invite can retry a configured room, subject to deny checks and
+the budget. Open mode allows at most 20 automatic join attempts per rolling
+day. Owner invites count toward the cap, and failed join attempts remain
+counted.
 
 Add `deny_room=!ROOM_ID` or `deny_room=#alias:server` for each denied room, and
 `deny_server=host` for each denied server. Room IDs, canonical aliases, room
