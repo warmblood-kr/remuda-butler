@@ -324,10 +324,11 @@ function matrix.cli(args, agent)
       cancelled.value = true
       if active and active.cancel then active:cancel() end
     end })
-    local function prompt_failure(message)
+    local function prompt_failure(message, next_line)
       if cancelled.value or completed.value then return end
       completed.value = true
-      reply:resolve(1, "", message .. "\nNothing was written.\nNext: rerun remuda butler matrix setup.\n")
+      reply:resolve(1, "", message .. "\nNothing was written.\n"
+        .. (next_line or "Next: rerun remuda butler matrix setup.") .. "\n")
     end
     local function prompt_line(label, default, callback)
       if type(reply.prompt_line) ~= "function" then
@@ -358,7 +359,13 @@ function matrix.cli(args, agent)
           local flags = { "--homeserver", homeserver, "--owner", owner, "--register", "--default" }
           local function confirm_setup()
             local wizard_plan, validation_error = matrix.setup_prepare(flags)
-            if not wizard_plan then return prompt_failure(terminal_safe(validation_error)) end
+            if not wizard_plan then
+              local safe_error = terminal_safe(validation_error)
+              local next_line = safe_error:find("output file already exists", 1, true)
+                and "Next: back up or move the existing Matrix setup files, then rerun remuda butler matrix setup."
+                or nil
+              return prompt_failure(safe_error, next_line)
+            end
             local lines = {
               "Matrix setup will:",
               "  Homeserver: " .. terminal_safe(wizard_plan.homeserver),

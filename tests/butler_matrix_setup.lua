@@ -447,6 +447,16 @@ return function(matrix)
     and resolved.stderr:find(bad_ca_path:gsub("\n", " "), 1, true),
     "wizard validation errors should sanitize control characters from entered paths")
 
+  write(default_paths.token_path, "existing default token")
+  requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+  wizard_reply = matrix.cli({ "matrix", "setup" })
+  line_specs[1].callback("http://matrix.invalid", nil)
+  line_specs[2].callback("@alice:example.org", nil)
+  assert(resolved and resolved.stderr:find("output file already exists", 1, true)
+    and resolved.stderr:match("([^\n]+)\n$") == "Next: back up or move the existing Matrix setup files, then rerun remuda butler matrix setup.",
+    "an existing output refusal should end with an actionable wizard next step")
+  os.remove(default_paths.token_path)
+
   local prompt_output = root .. "/prompted-registration"
   assert(real_mkdir_new(prompt_output))
   local prompt_token = "prompted-registration-token"
