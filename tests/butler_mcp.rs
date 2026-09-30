@@ -605,6 +605,33 @@ fn notify_policy_types_only_into_a_detached_or_quiet_empty_prompt() {
     assert!(log.contains("notice_prompt\tp1  UNPARSEABLE"), "{log}");
 }
 
+#[test]
+fn codex_trace_row_followed_by_user_draft_is_not_empty_or_typed_over() {
+    let (path, _daemon) = butler_with_member("codex-trace-row-draft");
+    let got = eval(
+        &path,
+        r#"
+        local row = { name = 'm1', alive = true, attached = false }
+        local screen = '› 2026-10-01T12:00:00Z ERROR foo::bar: why?\nWhat is the status?'
+        remuda.ls = function() return { row } end
+        remuda.capture = function() return screen end
+        remuda.capture_styled = nil
+        remuda.session = function() return { is_busy = false } end
+        remuda._butler_bus.agents.m1.kind = 'codex'
+        remuda._notice_now = 0
+        remuda._butler_notice_clock = function() return remuda._notice_now end
+        remuda._notice_test_typed = 0
+        remuda.type_text = function() remuda._notice_test_typed = remuda._notice_test_typed + 1 end
+        local decision = remuda._butler_prompt_is_empty('codex', screen)
+        remuda._butler_send('operator', 'm1', 'hello')
+        remuda._notice_now = 2
+        remuda._butler_deliver_notices()
+        return decision .. '|' .. tostring(remuda._notice_test_typed)
+        "#,
+    );
+    assert_eq!(got, "NON-EMPTY|0", "a trace-looking draft must be preserved: {got}");
+}
+
 fn butler_with_member(tag: &str) -> (PathBuf, impl Drop) {
     let dir = scratch(tag);
     let path = daemon::socket_path_in(&dir, "s");
