@@ -18,6 +18,8 @@ remuda butler — coordination for managed agents
   remuda butler matrix [--json] rooms
   remuda butler matrix [--json] [--room ROOM] [-n N] history
   remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] follow EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] unfollow EVENT_ID
   remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
   remuda butler matrix [--json] [-o PATH] download MXC
   remuda butler matrix [--json] [--room ROOM] send TEXT
