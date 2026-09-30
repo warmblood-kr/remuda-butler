@@ -4483,6 +4483,72 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
     drop(daemon);
 }
 
+/// A delegated Claude trust dialog without a readable workspace path stays for
+/// the human even when its requested cwd is inside the trusted project tree.
+#[test]
+#[cfg(unix)]
+fn butler_topic_delegate_leaves_unreadable_claude_trust_path_for_human() {
+    let dir = scratch_dir("topic-claude-trust-unreadable");
+    let home = dir.join("home");
+    let projects = home.join("projects");
+    std::fs::create_dir_all(&projects).expect("projects");
+    let daemon = Daemon::spawn_with_home(&dir, &home);
+    let path = daemon::socket_path_in(&dir, "s");
+    eval(
+        &path,
+        r#"remuda._butler_argv = {"sh", "-c", "sleep 30"}; remuda._butler_skip_relay = true"#,
+    );
+    let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let root_leader = eval(&path, "return remuda._butler_initial_name");
+    wait_for_butler_agent(&path, &root_leader);
+    let dialog = include_str!("fixtures/claude-trust-dialog.txt");
+    let unreadable_dialog = dialog.replace(
+        "/private/tmp/t3qa/untrusted-13690",
+        "workspace path unavailable",
+    );
+    eval(
+        &path,
+        &format!(
+            r#"
+          remuda.butler.project_home({projects:?})
+          remuda._butler_agent_builders.claude = function() return {{"sh"}} end
+          remuda._butler_test_force_launch_probe = {{["unreadable-topic"] = true}}
+          local screens = {{["unreadable-topic"] = {unreadable_dialog:?}}}
+          local actions = {{}}
+          remuda.capture = function(name) return screens[name] or "" end
+          remuda.key = function(name, key)
+            actions[#actions + 1] = name .. " key " .. key
+          end
+          remuda.type_text = function(name, text)
+            actions[#actions + 1] = name .. " type " .. text
+          end
+          remuda._butler_send = function() end
+          remuda._butler_topic_delegate("unreadable-topic", "brief", nil, "claude", remuda._butler_initial_name)
+          remuda._unreadable_trust_actions = actions
+        "#,
+            projects = projects.to_string_lossy(),
+            unreadable_dialog = unreadable_dialog,
+        ),
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let actions = eval(&path, "return table.concat(remuda._unreadable_trust_actions, '\\n')");
+        assert!(
+            !actions.contains("unreadable-topic key "),
+            "an unparseable displayed workspace path must not be auto-trusted: {actions}"
+        );
+        let sessions = eval(&path, "return remuda._butler_sessions()");
+        if sessions.contains("unreadable-topic") && sessions.contains("Next:") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "human trust guidance did not appear: {sessions}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    drop(daemon);
+}
+
 /// Topic delegation may answer Claude's captured trust dialog only for a
 /// workspace in the member's allowed project tree, and only after verifying
 /// that Down selected the affirmative row.
