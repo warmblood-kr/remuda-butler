@@ -428,21 +428,11 @@ local function approval_join_failed(rec, err, done)
   done(false, err)
 end
 
-local function join_approved(rec, done)
-  local data = type(rec.data) == "table" and rec.data or {}
-  local room, alias = data.room_id, data.alias
-  if not room_id_valid(room) then return approval_join_failed(rec, "invalid stored room ID", done) end
-  local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths or {}
-  local config_path = paths.config_path
-  if type(config_path) ~= "string" or config_path == "" then
-    return approval_join_failed(rec, "Matrix config path is unavailable", done)
-  end
-  local conf, config_error = matrix.read_config(config_path)
-  if not conf then return approval_join_failed(rec, config_error, done) end
+local function join_as(config_path, conf, room, how, alias, display_name, callback)
   local added = false
   if conf.rooms[room] ~= "home" and conf.rooms[room] ~= "all" then
-    local ok, wrote_or_error = matrix.config_add_room(config_path, room, "approved", alias)
-    if not ok then return approval_join_failed(rec, wrote_or_error, done) end
+    local ok, wrote_or_error = matrix.config_add_room(config_path, room, how, alias)
+    if not ok then return error_result(callback, wrote_or_error) end
     added = wrote_or_error == true
   end
   return matrix.request_json({ method = "POST",
@@ -457,8 +447,35 @@ local function join_approved(rec, done)
           failure = tostring(failure) .. "; config rollback failed: " .. tostring(remove_error)
         end
       end
-      return approval_join_failed(rec, failure, done)
+      if failure:find("(M_FORBIDDEN)", 1, true) then
+        local next_line = "Next: invite the bot (" .. conf.self_mxid .. ") to " .. room
+          .. " from Element, then retry."
+        local replaced
+        failure, replaced = failure:gsub("Next:[^\r\n]*", function() return next_line end)
+        if replaced == 0 then failure = failure .. "\n" .. next_line end
+      end
+      return callback({ error = failure })
     end
+    result.room_id = room
+    result.room_alias = alias and sanitize_directory_text(alias) or nil
+    result.room_name = display_name and sanitize_directory_text(display_name) or nil
+    callback(result)
+  end)
+end
+
+local function join_approved(rec, done)
+  local data = type(rec.data) == "table" and rec.data or {}
+  local room, alias = data.room_id, data.alias
+  if not room_id_valid(room) then return approval_join_failed(rec, "invalid stored room ID", done) end
+  local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths or {}
+  local config_path = paths.config_path
+  if type(config_path) ~= "string" or config_path == "" then
+    return approval_join_failed(rec, "Matrix config path is unavailable", done)
+  end
+  local conf, config_error = matrix.read_config(config_path)
+  if not conf then return approval_join_failed(rec, config_error, done) end
+  return join_as(config_path, conf, room, "approved", alias, data.name, function(result)
+    if result.error then return approval_join_failed(rec, result.error, done) end
     local label = approval_label(rec)
     approval_mail(rec, "Approved; joined " .. label .. " (" .. room .. ").")
     approval_thread(rec, "Approved by " .. tostring(rec.answered_by or "the owner") .. "; joined.")
@@ -496,37 +513,8 @@ function matrix.join(opts, on_done, agent)
       current = file_request(room, alias, display_name, is_public, members, agent, done)
       return current
     end
-    local added = false
-    if conf.rooms[room] ~= "home" and conf.rooms[room] ~= "all" then
-      local ok, wrote_or_error = matrix.config_add_room(config_path, room, "operator", alias)
-      local add_error = not ok and wrote_or_error or nil
-      if not ok then return error_result(done, add_error) end
-      added = wrote_or_error == true
-    end
-    current = matrix.request_json({ method = "POST",
-      path = "/_matrix/client/v3/rooms/" .. path_component(room) .. "/join",
-      room = room, body = "{}", headers = { ["Content-Type"] = "application/json" },
-    }, function(result)
-      if result.error and added then
-        local removed, remove_error = matrix.config_remove_room(config_path, room)
-        if not removed then
-          result.error = tostring(result.error) .. "; config rollback failed: " .. tostring(remove_error)
-        end
-      end
-      if result.error and result.error:find("(M_FORBIDDEN)", 1, true) then
-        local next_line = "Next: invite the bot (" .. conf.self_mxid .. ") to " .. room
-          .. " from Element, then retry."
-        local replaced
-        result.error, replaced = result.error:gsub("Next:[^\r\n]*", function() return next_line end)
-        if replaced == 0 then result.error = result.error .. "\n" .. next_line end
-      end
-      if not result.error then
-        result.room_id = room
-        result.room_alias = alias and sanitize_directory_text(alias) or nil
-        result.room_name = display_name and sanitize_directory_text(display_name) or nil
-      end
-      done(result)
-    end)
+    current = join_as(config_path, conf, room, "operator", alias, display_name, done)
+    return current
   end
   if requested:sub(1, 1) == "#" then
     current = resolve_alias(requested, conf.base, function(resolved)

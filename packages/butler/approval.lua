@@ -8,6 +8,7 @@ local handlers = approval._handlers or {}
 approval._handlers = handlers
 local attached
 local applying = {}
+local pending_requests = {}
 local function safe_line(value, limit)
   value = tostring(value or "")
   local matrix = butler.matrix
@@ -49,6 +50,11 @@ local function random_id(state)
     for existing in pairs(state.approvals or {}) do
       if type(existing) == "string" and existing:upper() == id then used = true; break end
     end
+    if not used then
+      for _, pending in pairs(pending_requests) do
+        if pending.id:upper() == id then used = true; break end
+      end
+    end
     if not used then return id end
   end
   return nil
@@ -70,6 +76,11 @@ local function open_records(state)
     return tostring(a.id) < tostring(b.id)
   end)
   return rows
+end
+
+local function request_key(asker, kind, key)
+  asker, kind, key = tostring(asker), tostring(kind), tostring(key)
+  return #asker .. ":" .. asker .. #kind .. ":" .. kind .. #key .. ":" .. key
 end
 
 local function persist()
@@ -164,7 +175,8 @@ function approval.request(request, done)
     return nil
   end
   if type(request) ~= "table" or type(request.kind) ~= "string"
-    or type(request.asker) ~= "string" or type(request.summary) ~= "string" then
+    or type(request.key) ~= "string" or type(request.asker) ~= "string"
+    or type(request.summary) ~= "string" then
     finish(nil, "Invalid approval request. Next: check the approval request details")
     return nil
   end
@@ -173,6 +185,35 @@ function approval.request(request, done)
     return nil
   end
   local summary, asker = safe_line(request.summary, 128), safe_line(request.asker, 128)
+  approval.sweep()
+  for _, rec in pairs(attached.state.approvals or {}) do
+    if type(rec) == "table" and rec.status == "open" and rec.asker == asker
+      and rec.kind == request.kind and rec.key == request.key then
+      finish(rec.id)
+      return nil
+    end
+  end
+  local token = request_key(asker, request.kind, request.key)
+  local pending = pending_requests[token]
+  if pending then
+    pending.callbacks[#pending.callbacks + 1] = finish
+    return nil
+  end
+  local open_total, open_for_asker = 0, 0
+  for _, rec in pairs(attached.state.approvals or {}) do
+    if type(rec) == "table" and rec.status == "open" then
+      open_total = open_total + 1
+      if rec.asker == asker then open_for_asker = open_for_asker + 1 end
+    end
+  end
+  for _, item in pairs(pending_requests) do
+    open_total = open_total + 1
+    if item.asker == asker then open_for_asker = open_for_asker + 1 end
+  end
+  if open_for_asker >= 3 or open_total >= 5 then
+    finish(nil, "Too many open approval requests. Next: remuda butler approvals")
+    return nil
+  end
   local id = random_id(attached.state)
   local nonce = random_bytes(16)
   if not id or not nonce then
@@ -191,25 +232,32 @@ function approval.request(request, done)
       .. " minutes. ❌ or no denies.",
     "Request " .. id,
     "or: remuda butler approve " .. id }, "\n")
+  pending = { id = id, asker = asker, callbacks = { finish } }
+  pending_requests[token] = pending
+  local function complete(request_id, why)
+    if pending_requests[token] ~= pending then return end
+    pending_requests[token] = nil
+    for _, callback in ipairs(pending.callbacks) do pcall(callback, request_id, why) end
+  end
   local ok, handle = pcall(attached.post, text, nil, function(result)
     if type(result) ~= "table" or result.error then
-      return finish(nil, "Could not post to HOME: "
+      return complete(nil, "Could not post to HOME: "
         .. tostring(type(result) == "table" and result.error or "Matrix post returned no result"))
     end
     local event_id = result.event_id
     if type(event_id) ~= "string" or event_id == "" then
-      return finish(nil, "Could not post to HOME: response omitted event_id")
+      return complete(nil, "Could not post to HOME: response omitted event_id")
     end
     rec.event_id = event_id
     attached.state.approvals[id] = rec
     local saved, save_error = pcall(persist)
     if not saved then
       attached.state.approvals[id] = nil
-      return finish(nil, "Could not save approval request: " .. tostring(save_error))
+      return complete(nil, "Could not save approval request: " .. tostring(save_error))
     end
-    finish(id)
+    complete(id)
   end)
-  if not ok then finish(nil, "Could not post to HOME: " .. tostring(handle)) end
+  if not ok then complete(nil, "Could not post to HOME: " .. tostring(handle)) end
   return handle
 end
 
