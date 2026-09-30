@@ -3755,42 +3755,24 @@ function remuda._butler_compaction_execute(session_name, force)
     local branches = { { id = id, match = matcher, action = run_action } }
     local model_confirm_state = { signature = nil, captures = 0, polls = 0, started_at = nil }
     local unknown_state = { signature = nil, captures = 0, polls = 0, started_at = nil }
-    -- Poll the pane while a candidate screen is visible. Output events alone
-    -- cannot settle a static dialog; the poll cap and deadline bound this wait.
+    -- Each expect tick (native clock, about 1 s, with or without output)
+    -- captures once and counts it here; never sleep, it blocks the image.
+    -- The poll cap and deadline bound the wait; expiry fails closed.
     local stable_captures, stable_unknown_captures, stable_poll_cap, stable_timeout = 3, 10, 50, 5
-    local function stable_screen(state, signature, signature_for_screen, required_captures)
+    local function stable_screen(state, signature, required_captures)
       if not signature then
         state.signature, state.captures, state.polls, state.started_at = nil, 0, 0, nil
         return false
       end
-      required_captures = required_captures or stable_captures
       local now = os.time()
+      state.started_at = state.started_at or now
       if state.signature ~= signature then
         state.signature, state.captures = signature, 1
-        state.started_at = state.started_at or now
       else
         state.captures = state.captures + 1
       end
       state.polls = state.polls + 1
-      while state.captures < required_captures
-          and state.polls < stable_poll_cap
-          and os.time() - state.started_at < stable_timeout do
-        remuda.sleep(0.1)
-        local captured, screen = pcall(remuda.capture, session_name)
-        if not captured or type(screen) ~= "string" then return false end
-        state.polls = state.polls + 1
-        local next_signature = signature_for_screen(screen)
-        if not next_signature then
-          state.signature, state.captures = nil, 0
-          return false
-        elseif next_signature == state.signature then
-          state.captures = state.captures + 1
-        else
-          state.signature, state.captures = next_signature, 1
-        end
-      end
-      now = os.time()
-      return state.captures >= required_captures
+      return state.captures >= (required_captures or stable_captures)
         and state.polls <= stable_poll_cap
         and now - state.started_at <= stable_timeout
     end
@@ -3830,30 +3812,14 @@ function remuda._butler_compaction_execute(session_name, force)
     end
     local function settle_model_confirm(screen)
       local signature = model_confirm_signature(screen)
-      if signature then
-        return stable_screen(model_confirm_state, signature, model_confirm_signature)
-      end
+      if signature then return stable_screen(model_confirm_state, signature) end
       if not model_confirm_options_visible(screen) then
         stable_screen(model_confirm_state, nil)
         return false
       end
-      local now = os.time()
-      model_confirm_state.started_at = model_confirm_state.started_at or now
+      -- Options without the title yet (half-painted): wait, bounded by expiry.
+      model_confirm_state.started_at = model_confirm_state.started_at or os.time()
       model_confirm_state.polls = model_confirm_state.polls + 1
-      while model_confirm_state.polls < stable_poll_cap
-          and os.time() - model_confirm_state.started_at < stable_timeout do
-        remuda.sleep(0.1)
-        local captured, next_screen = pcall(remuda.capture, session_name)
-        if not captured or type(next_screen) ~= "string" then return false end
-        model_confirm_state.polls = model_confirm_state.polls + 1
-        signature = model_confirm_signature(next_screen)
-        if signature then
-          return stable_screen(model_confirm_state, signature, model_confirm_signature)
-        elseif not model_confirm_options_visible(next_screen) then
-          stable_screen(model_confirm_state, nil)
-          return false
-        end
-      end
       return false
     end
     if agent.kind == "claude" and (id == "model-sonnet" or id == "model-restored") then
@@ -3884,7 +3850,7 @@ function remuda._butler_compaction_execute(session_name, force)
         end
         stable_screen(model_confirm_state, nil)
         local unknown_signature = unknown_dialog_signature(screen)
-        return stable_screen(unknown_state, unknown_signature, unknown_dialog_signature, stable_unknown_captures)
+        return stable_screen(unknown_state, unknown_signature, stable_unknown_captures)
           or stable_wait_expired(unknown_state)
       end,
       on_unknown = function()
