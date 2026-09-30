@@ -1,63 +1,6 @@
 -- remuda-butler: runs one Claude Code session, optionally bridged to Matrix.
 -- Matrix commands and the MCP reply tool share the Lua async request vocabulary.
 
--- Claude calls statusLine commands with a JSON snapshot on stdin.  This
--- helper is deliberately the sole producer of Butler's telemetry: it emits a
--- fixed marker for people in the terminal and atomically publishes that exact
--- marker to a private file for `butler_status`.  Reading Claude's terminal
--- would make the latter depend on escape sequences and layout rather than the
--- protocol Claude itself supplies.
-local STATUSLINE_SRC = [==[
-import json
-import os
-import re
-import sys
-
-path = sys.argv[1]
-
-def tag(value):
-    if not isinstance(value, str) or not value:
-        return "?"
-    value = re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-")
-    return value or "?"
-
-def integer(value):
-    return str(int(value)) if isinstance(value, (int, float)) else "?"
-
-try:
-    snapshot = json.load(sys.stdin)
-except Exception:
-    snapshot = {}
-
-window = snapshot.get("context_window") or {}
-used = window.get("total_input_tokens")
-if not isinstance(used, (int, float)):
-    current = window.get("current_usage") or {}
-    parts = [current.get(key) for key in (
-        "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")]
-    parts = [part for part in parts if isinstance(part, (int, float))]
-    used = sum(parts) if parts else None
-
-model = snapshot.get("model") or {}
-line = "MODEL:{model} CTX:{used} CTXWIN:{capacity} CTXPCT:{percent}".format(
-    model=tag(model.get("display_name") or model.get("id")),
-    used=integer(used),
-    capacity=integer(window.get("context_window_size")),
-    percent=integer(window.get("used_percentage")),
-)
-
-try:
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as out:
-        out.write(line + "\n")
-    os.replace(tmp, path)
-except Exception:
-    # A status line must never make Claude's UI fail merely because its
-    # observer cannot write (for example a cleaned-up temporary directory).
-    pass
-print(line)
-]==]
-
 -- This is the one service session installed by the package, not an ordinary
 -- user-created session. Its stable name is its public control surface:
 -- `remuda send butler ...`, installer liveness checks, and restart recovery
@@ -66,9 +9,6 @@ local function initial_butler_name()
   return "butler"
 end
 
--- Exposed so tests can inspect the daemon-local MCP helper without starting a
--- real process/session (this harness does not have a real agent CLI).
-remuda._butler_statusline_src = STATUSLINE_SRC
 remuda._butler_initial_name = initial_butler_name()
 
 -- The command handler runs in the daemon, so identity comes only from the
@@ -743,18 +683,65 @@ local function json_quote(s)
     :gsub('\r', '\\r'):gsub('\n', '\\n'):gsub('\t', '\\t') .. '"'
 end
 local function status_settings(path)
-  -- TODO core #213: remove this Python statusLine helper once the core JSON/stdin boundary is settled.
-  local helper_path = path .. ".py"
   local settings_path = path .. ".settings.json"
-  local helper = assert(io.open(helper_path, "w"))
-  helper:write(STATUSLINE_SRC)
-  helper:close()
   local settings = assert(io.open(settings_path, "w"))
   settings:write('{"statusLine":{"type":"command","command":'
-    .. json_quote("python3 " .. shell_quote(helper_path) .. " " .. shell_quote(path))
-    .. ',"refreshInterval":2}}')
+    .. json_quote("remuda -s " .. shell_quote(server) .. " --stdin butler statusline " .. shell_quote(path))
+    .. '}}')
   settings:close()
   return settings_path
+end
+
+local function statusline_tag(value)
+  if type(value) ~= "string" or value == "" then return "?" end
+  local tag = value:gsub("[^A-Za-z0-9_.-]+", "-"):gsub("^%-+", ""):gsub("%-+$", "")
+  return tag ~= "" and tag or "?"
+end
+
+local function statusline_integer(value)
+  if type(value) ~= "number" then return "?" end
+  local integer = value < 0 and math.ceil(value) or math.floor(value)
+  if integer == 0 then return "0" end
+  return string.format("%.0f", integer)
+end
+
+local function statusline(args, caller)
+  local snapshot = {}
+  local input = caller and caller.stdin
+  if type(input) == "string" then
+    local decoded = remuda.json.decode(input)
+    if type(decoded) == "table" then snapshot = decoded end
+  end
+
+  local window = type(snapshot.context_window) == "table" and snapshot.context_window or {}
+  local used = window.total_input_tokens
+  if type(used) ~= "number" then
+    local current = type(window.current_usage) == "table" and window.current_usage or {}
+    local total, count = 0, 0
+    for _, key in ipairs({ "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens" }) do
+      local part = current[key]
+      if type(part) == "number" then total, count = total + part, count + 1 end
+    end
+    if count > 0 then used = total end
+  end
+
+  local model = type(snapshot.model) == "table" and snapshot.model or {}
+  local model_name = model.display_name
+  if not model_name or model_name == "" then model_name = model.id end
+  local line = string.format("MODEL:%s CTX:%s CTXWIN:%s CTXPCT:%s",
+    statusline_tag(model_name), statusline_integer(used),
+    statusline_integer(window.context_window_size), statusline_integer(window.used_percentage))
+
+  local path = args[2]
+  local drive_rooted = type(path) == "string" and path:match("^%a:")
+    and (path:sub(3, 3) == "/" or path:sub(3, 3) == "\\")
+  local absolute = type(path) == "string" and (
+    path:sub(1, 1) == "/" or path:sub(1, 2) == "\\\\" or drive_rooted
+  )
+  if absolute and path:match("%.status$") then
+    pcall(remuda.fs.write_atomic, path, line .. "\n")
+  end
+  return line
 end
 remuda._butler_status_path = status_path
 
@@ -2036,6 +2023,7 @@ end
 -- This parser lives with Butler, not in the Remuda executable.
 remuda.extension_command("butler", function(args, caller)
   if #args == 0 or args[1] == "help" or args[1] == "-h" or args[1] == "--help" then return butler_usage() end
+  if args[1] == "statusline" then return statusline(args, caller) end
   for _, item in ipairs(contributions("butler.command")) do
     if item.entry.verb == args[1] then
       local result = item.entry.run(args, caller)
