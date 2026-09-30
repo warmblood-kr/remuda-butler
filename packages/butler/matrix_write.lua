@@ -388,6 +388,7 @@ local function approval_summary(room, alias, display_name, is_public, members)
     if is_public then detail = detail .. ", public, " .. tostring(tonumber(members) or 0) .. " members" end
     prefix = prefix .. detail .. ")"
   end
+  if not alias and not display_name then return clean(prefix, 128) end
   local suffix = " (" .. room_id .. ")"
   local room_chars = utf8_length(suffix)
   local head = clean(prefix, math.max(1, 128 - room_chars))
@@ -422,8 +423,11 @@ end
 
 local function approval_join_failed(rec, err, done)
   err = tostring(err or "unknown Matrix error")
+  local data = type(rec.data) == "table" and rec.data or {}
+  local room = sanitize_directory_text(data.room_id or "unknown room")
   approval_mail(rec, "Approved, but the join failed: " .. err
-    .. ". Next: ask the owner to invite the bot, then run the join again.")
+    .. " (request " .. tostring(rec.id) .. ", " .. room
+    .. "). Next: ask the owner to invite the bot, then run the join again.")
   approval_thread(rec, "Approved by " .. tostring(rec.answered_by or "the owner") .. "; join failed: " .. err)
   done(false, err)
 end
@@ -477,7 +481,8 @@ local function join_approved(rec, done)
   return join_as(config_path, conf, room, "approved", alias, data.name, function(result)
     if result.error then return approval_join_failed(rec, result.error, done) end
     local label = approval_label(rec)
-    approval_mail(rec, "Approved; joined " .. label .. " (" .. room .. ").")
+    approval_mail(rec, "Approved; joined " .. label .. " (" .. room .. ") (request "
+      .. tostring(rec.id) .. ", " .. room .. ").")
     approval_thread(rec, "Approved by " .. tostring(rec.answered_by or "the owner") .. "; joined.")
     done(true)
   end)
@@ -486,11 +491,17 @@ end
 approval.handler("join", {
   approve = join_approved,
   deny = function(rec)
-    approval_mail(rec, "Denied by the owner. Next: ask the owner in HOME why, or pick another room.")
+    local data = type(rec.data) == "table" and rec.data or {}
+    local room = sanitize_directory_text(data.room_id or "unknown room")
+    approval_mail(rec, "Denied by the owner (request " .. tostring(rec.id) .. ", " .. room
+      .. "). Next: ask the owner in HOME why, or pick another room.")
     approval_thread(rec, "Denied by " .. tostring(rec.answered_by or "the owner") .. ".")
   end,
   expire = function(rec)
-    approval_mail(rec, "No answer in 10 minutes; not joined. Next: run the join again to re-ask.")
+    local data = type(rec.data) == "table" and rec.data or {}
+    local room = sanitize_directory_text(data.room_id or "unknown room")
+    approval_mail(rec, "No answer in 10 minutes; not joined (request " .. tostring(rec.id)
+      .. ", " .. room .. "). Next: run the join again to re-ask.")
     approval_thread(rec, "Expired.")
   end,
 })
@@ -509,6 +520,9 @@ function matrix.join(opts, on_done, agent)
   if not conf then return error_result(done, config_error) end
   local current
   local function join_room(room, alias, display_name, is_public, members)
+    if not room_id_valid(room) then
+      return error_result(done, "invalid Matrix room ID: room IDs start with ! (Element: Room settings > Advanced tab (not General) > Internal room ID. Element X may not show it; use the #alias instead.).")
+    end
     if agent then
       current = file_request(room, alias, display_name, is_public, members, agent, done)
       return current

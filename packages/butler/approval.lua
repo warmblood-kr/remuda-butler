@@ -211,7 +211,7 @@ function approval.request(request, done)
     if item.asker == asker then open_for_asker = open_for_asker + 1 end
   end
   if open_for_asker >= 3 or open_total >= 5 then
-    finish(nil, "Too many open approval requests. Next: remuda butler approvals")
+    finish(nil, "Too many open approval requests (3 per agent, 5 total). Next: wait for an answer or expiry (10 min), then retry.")
     return nil
   end
   local id = random_id(attached.state)
@@ -272,7 +272,7 @@ function approval.answer(id_or_event, verdict, who)
   end
   if not rec then return nil, "No such request." end
   if rec.status ~= "open" then
-    return nil, rec.status == "expired" and "Expired." or "Already answered."
+    return nil, rec.status == "expired" and "Expired." or "Already answered.", rec
   end
   local now = math.floor(os.time() * 1000)
   rec.status, rec.answered_by, rec.answered_at = verdict == "approve" and "approved" or "denied", who,
@@ -284,7 +284,7 @@ function approval.answer(id_or_event, verdict, who)
     local callback = handlers[rec.kind] and handlers[rec.kind].deny
     if callback then callback(rec) end
   end
-  return true
+  return true, nil, rec
 end
 
 function approval.sweep(now)
@@ -316,30 +316,38 @@ end
 function approval.cli(args, agent)
   local verb = args and args[1]
   if verb == "approvals" then
+    if #args == 2 and (args[2] == "--help" or args[2] == "-h") then return usage(verb) end
     if #args ~= 1 then return fail(usage(verb) .. "\nNext: remuda butler approvals") end
     local rows = approval.list()
-    if #rows == 0 then return "No open approval requests.\nNext: ask an agent to request approval" end
+    if #rows == 0 then return "No open approval requests.\nNext: nothing to do; agent requests appear here." end
     local now = math.floor(os.time() * 1000)
     local lines = { "ID  KIND  SUMMARY  ASKER  EXPIRES-IN" }
     for _, rec in ipairs(rows) do
-      local seconds = math.max(0, math.ceil(((tonumber(rec.expires_at) or now) - now) / 1000))
-      lines[#lines + 1] = string.format("%s  %s  %s  %s  %ss", tostring(rec.id), tostring(rec.kind),
-        tostring(rec.summary), tostring(rec.asker), tostring(seconds))
+      local minutes = math.max(0, math.ceil(((tonumber(rec.expires_at) or now) - now) / 60000))
+      lines[#lines + 1] = string.format("%s  %s  %s  %s  %s", tostring(rec.id), tostring(rec.kind),
+        tostring(rec.summary), tostring(rec.asker), tostring(minutes) .. "m")
     end
-    lines[#lines + 1] = "Next: remuda butler approve ID | deny ID"
+    lines[#lines + 1] = agent and "Next: wait for mail; remuda butler inbox"
+      or "Next: remuda butler approve ID, or remuda butler deny ID"
     return table.concat(lines, "\n")
   end
   if verb == "approve" or verb == "deny" then
+    if #args == 2 and (args[2] == "--help" or args[2] == "-h") then return usage(verb) end
     if #args ~= 2 or type(args[2]) ~= "string" or args[2] == "" then
       return fail(usage(verb) .. "\nNext: remuda butler approvals")
     end
     if agent then
-      return fail(verb .. " is operator-only. Next: ask the owner in the HOME room")
+      return fail(verb .. " is operator-only. Next: wait for the owner's answer by mail; remuda butler inbox")
     end
-    local ok, err = approval.answer(args[2], verb, "operator (terminal)")
-    if not ok then return fail(tostring(err) .. " Next: remuda butler approvals") end
-    return (verb == "approve" and "Approval recorded." or "Request denied.")
-      .. "\nNext: remuda butler approvals"
+    local ok, err, rec = approval.answer(args[2], verb, "operator (terminal)")
+    if not ok then
+      if rec then return fail("Request " .. tostring(rec.id) .. " was already " .. tostring(rec.status) .. ".") end
+      return fail(tostring(err) .. "\nNext: remuda butler approvals")
+    end
+    if verb == "approve" then
+      return "Approved request " .. tostring(rec.id) .. " (" .. tostring(rec.summary) .. "); joining now. The result goes to the HOME thread and the asker's mail."
+    end
+    return "Denied request " .. tostring(rec.id) .. " (" .. tostring(rec.summary) .. ")."
   end
   return fail("Unknown approval command. Next: remuda butler approvals")
 end

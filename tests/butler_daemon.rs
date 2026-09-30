@@ -8052,6 +8052,21 @@ fn butler_matrix_cli_refuses_send_dash_and_fails_cleanly_without_pending() {
     let help = String::from_utf8_lossy(&help.stdout);
     assert!(help.contains("event|get EVENT_ID"), "help omitted the event alias row");
     assert!(help.contains("join ROOM (operator)"), "help omitted operator guidance");
+    let approvals = remuda_timed(&dir, &["-s", "s", "butler", "approvals"]);
+    assert!(approvals.status.success(), "operator approvals failed: {}",
+        String::from_utf8_lossy(&approvals.stderr));
+    assert!(String::from_utf8_lossy(&approvals.stdout).contains("No open approval requests."),
+        "operator approvals fell through to generic usage: {}", String::from_utf8_lossy(&approvals.stdout));
+    let agent_approve = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
+        .args(["-s", "s", "butler", "approve", "X"])
+        .env("REMUDA_RUNTIME_DIR", &dir)
+        .env("REMUDA_NO_UPDATE_CHECK", "1")
+        .env("REMUDA_BUTLER_AGENT_ID", "agent1")
+        .output().expect("run agent approve command");
+    assert!(!agent_approve.status.success(), "agent approve must fail");
+    assert!(String::from_utf8_lossy(&agent_approve.stderr).contains(
+        "approve is operator-only. Next: wait for the owner's answer by mail; remuda butler inbox"),
+        "unexpected agent approve error: {}", String::from_utf8_lossy(&agent_approve.stderr));
     let dash = remuda_timed(&dir, &["-s", "s", "butler", "matrix", "send", "-"]);
     assert!(!dash.status.success(), "send - must be refused by CLI glue");
     assert!(String::from_utf8_lossy(&dash.stderr).contains("stdin"), "unexpected send - error: {}",

@@ -1924,8 +1924,12 @@ local function approval_env(senders, run)
   local ok, err = pcall(with_alias_http, path, function(spec)
     if spec.url:find("/publicRooms", 1, true) then return public_rooms_response(env.public_rows) end
     local room = spec.url:match("/rooms/([^/]+)/join")
-    if room then return { status = 200, body = '{"room_id":"' .. room:gsub("%%(%x%x)", function(h)
-      return string.char(tonumber(h, 16)) end) .. '"}' } end
+    if room then
+      if env.fail_join then return { status = 403,
+        body = '{"errcode":"M_FORBIDDEN","error":"invite required"}' } end
+      return { status = 200, body = '{"room_id":"' .. room:gsub("%%(%x%x)", function(h)
+        return string.char(tonumber(h, 16)) end) .. '"}' }
+    end
     return { status = 200, body = "{}" }
   end, function(calls)
     env.calls, env.client, env.delivered = calls, invite_client(), {}
@@ -2055,9 +2059,20 @@ end
 local function test_agent_join_files_request_and_does_not_join()
   approval_env(nil, function(env)
     local before = read_text(env.path)
+    local posts_before = #home_posts(env, "Butler wants to join")
+    local invalid = agent_cli_join(env, "!bad", ASKER)
+    local invalid_output = tostring(invalid.stdout) .. tostring(invalid.stderr)
+    assert(invalid.code ~= 0 and invalid_output:find(
+      "invalid Matrix room ID: room IDs start with !", 1, true),
+      "an invalid agent room ID must return the operator validation error: " .. invalid_output)
+    assert(#home_posts(env, "Butler wants to join") == posts_before,
+      "an invalid agent room ID must not post an approval request")
     local id, _, result, post = file_request(env, NEW)
     assert(server_joins(env, NEW) == 0 and read_text(env.path) == before,
       "an agent join must not join or write a room line before approval")
+    local rec = env.relay:state().approvals[id]
+    assert(rec and rec.summary == "join " .. NEW,
+      "a bare room ID must not be repeated in the approval summary: " .. tostring(rec and rec.summary))
     assert(post.body:find("Butler wants to join", 1, true) and post.body:find(NEW, 1, true)
       and post.body:find("Asked by: ", 1, true) and post.body:find(ASKER, 1, true)
       and post.body:find("within 10 minutes", 1, true)
@@ -2074,12 +2089,14 @@ end
 
 local function test_owner_check_reaction_approves_and_joins_with_how_approved()
   approval_env(nil, function(env)
-    local _, event = file_request(env, NEW)
+    local id, event = file_request(env, NEW)
     room_events(env, { reaction("$ok", OWNER, event, CHECK .. "\239\184\143") })
     assert(server_joins(env, NEW) == 1, "an owner check-mark reaction on the request must join once")
     local line = room_line(env.path, NEW)
     assert(line and line:find("how=approved", 1, true), "an approved join must write how=approved: " .. tostring(line))
-    assert(mails_to(env, ASKER, "Approved; joined") == 1, "the asker must get one Approved mail")
+    assert(mails_to(env, ASKER, "Approved; joined") == 1
+      and mails_to(env, ASKER, "(request " .. id .. ", " .. NEW .. ")") == 1,
+      "the asker must get one Approved mail with request identity")
     assert(thread_replies(env, event, "Approved by " .. OWNER) == 1, "the request thread must say who approved")
     assert(#env.delivered == 0, "the reaction must not become mail to the Butler")
   end)
@@ -2096,7 +2113,9 @@ local function test_owner_yes_reply_approves_and_bare_yes_does_not()
     room_events(env, { text_event("$reply", OWNER,
       "> <@bot:example.org> Butler wants to join " .. NEW .. "\n\n Yes ", event) })
     assert(server_joins(env, NEW) == 1, "an owner yes reply to the request must join")
-    assert(mails_to(env, ASKER, "Approved; joined") == 1, "the asker must get one Approved mail")
+    assert(mails_to(env, ASKER, "Approved; joined") == 1
+      and mails_to(env, ASKER, "(request " .. id .. ", " .. NEW .. ")") == 1,
+      "the asker must get one Approved mail with request identity")
     assert(not delivered_ids(env.delivered, "$reply"), "the yes reply must not become mail to the Butler")
   end)
 end
@@ -2134,7 +2153,8 @@ local function test_deny_and_expiry_mail_with_next_and_no_join()
     local denied_id, denied = file_request(env, NEW)
     room_events(env, { reaction("$no", OWNER, denied, CROSS) })
     assert(server_joins(env, NEW) == 0 and not is_open(denied_id), "a cross-mark must deny without joining")
-    assert(mails_to(env, ASKER, "Denied by the owner. Next: ask the owner in HOME why, or pick another room.") == 1,
+    assert(mails_to(env, ASKER, "Denied by the owner (request " .. denied_id .. ", " .. NEW
+      .. "). Next: ask the owner in HOME why, or pick another room.") == 1,
       "a denial must mail the asker with Next")
     assert(thread_replies(env, denied, "Denied by " .. OWNER) == 1, "the request thread must say who denied")
 
@@ -2144,10 +2164,25 @@ local function test_deny_and_expiry_mail_with_next_and_no_join()
     record.expires_at = type(record.expires_at) == "string" and "1970-01-01T00:00:00Z" or 0
     tick_timers(1)
     env.client:pump()
-    assert(mails_to(env, ASKER, "No answer in 10 minutes; not joined. Next: run the join again to re-ask.") == 1,
+    assert(mails_to(env, ASKER, "No answer in 10 minutes; not joined (request " .. expired_id .. ", " .. NEW2
+      .. "). Next: run the join again to re-ask.") == 1,
       "expiry must mail the asker with Next")
     room_events(env, { reaction("$late", OWNER, expired) })
     assert(server_joins(env, NEW2) == 0 and not is_open(expired_id), "an expired request must never join")
+  end)
+end
+
+local function test_approved_join_failure_mail_includes_request_identity()
+  approval_env(nil, function(env)
+    local id, event = file_request(env, NEW)
+    env.fail_join = true
+    room_events(env, { reaction("$failed-join", OWNER, event, CHECK) })
+    assert(mails_to(env, ASKER, "Approved, but the join failed: ") == 1
+      and mails_to(env, ASKER, "(request " .. id .. ", " .. NEW
+        .. "). Next: ask the owner to invite the bot, then run the join again.") == 1,
+      "a failed approved join must mail the requester with its request and room IDs")
+    assert(env.relay:state().approvals[id].status == "failed",
+      "a failed approved join must mark the approval failed")
   end)
 end
 
@@ -2161,12 +2196,12 @@ local function test_dedupe_returns_same_id_and_cap_refuses_without_post()
     local capped = agent_cli_join(env, NEW4)
     local text = capped.stdout .. capped.stderr
     assert(#home_posts(env, "Butler wants to join") == 3
-      and text:find("Too many open approval requests. Next: remuda butler approvals", 1, true),
+      and text:find("Too many open approval requests (3 per agent, 5 total). Next: wait for an answer or expiry (10 min), then retry.", 1, true),
       "a fourth open request for one asker must be refused with Next and post nothing: " .. text)
     file_request(env, NEW4, "team-2-mx"); file_request(env, "!new5:example.org", "team-2-mx")
     local total = agent_cli_join(env, "!new6:example.org", "team-3-mx")
     assert(#home_posts(env, "Butler wants to join") == 5
-      and (total.stdout .. total.stderr):find("Too many open approval requests.", 1, true),
+      and (total.stdout .. total.stderr):find("Too many open approval requests (3 per agent, 5 total). Next: wait for an answer or expiry (10 min), then retry.", 1, true),
       "a sixth open request in total must be refused and post nothing")
   end)
 end
@@ -2182,22 +2217,38 @@ local function test_terminal_approve_operator_only()
         failed = nil
         local out = cli({ verb, id }, ASKER)
         local message = failed and failed.message or tostring(out)
-        assert(message:find(verb .. " is operator-only", 1, true) and message:find("Next:", 1, true),
+        assert(message == verb .. " is operator-only. Next: wait for the owner's answer by mail; remuda butler inbox",
           "an agent " .. verb .. " must be refused with Next: " .. message)
       end
       assert(server_joins(env, NEW) == 0 and is_open(id), "a refused agent approve must leave the request open")
       local listed = tostring(cli({ "approvals" }, nil))
-      assert(listed:find(id, 1, true) and listed:find(NEW, 1, true) and listed:find("Next:", 1, true),
+      local agent_listed = tostring(cli({ "approvals" }, ASKER))
+      assert(listed:find(id, 1, true) and listed:find(NEW, 1, true)
+        and listed:find("EXPIRES-IN", 1, true) and listed:find("10m", 1, true)
+        and listed:find("Next: remuda butler approve ID, or remuda butler deny ID", 1, true),
         "approvals must list the open request with a Next line: " .. listed)
+      assert(agent_listed:find("Next: wait for mail; remuda butler inbox", 1, true),
+        "agent approvals must direct the agent to wait for mail: " .. agent_listed)
+      for _, verb in ipairs({ "approvals", "approve", "deny" }) do
+        local help = tostring(cli({ verb, "--help" }, nil))
+        assert(help:find("Usage: remuda butler " .. verb, 1, true), verb .. " --help omitted usage")
+      end
       failed = nil
       local out = cli({ "approve", id:lower() }, nil)
       env.client:pump()
-      assert(not failed and tostring(out):find("Next:", 1, true),
+      assert(not failed and tostring(out):find("Approved request " .. id .. " (join " .. NEW .. "); joining now. The result goes to the HOME thread and the asker's mail.", 1, true),
         "the operator approve must succeed with a Next line: " .. tostring(failed and failed.message or out))
+      assert(tostring(cli({ "approvals" }, nil)) == "No open approval requests.\nNext: nothing to do; agent requests appear here.",
+        "an empty approval list must give the idle Next instruction")
+      failed = nil
+      cli({ "deny", id }, nil)
+      assert(failed and failed.message == "Request " .. id .. " was already applied.",
+        "an answered request must report its current status: " .. tostring(failed and failed.message))
     end)
     remuda.fail = old_fail
     if not ok then error(err, 0) end
-    assert(server_joins(env, NEW) == 1 and mails_to(env, ASKER, "Approved; joined") == 1,
+    assert(server_joins(env, NEW) == 1 and mails_to(env, ASKER, "Approved; joined") == 1
+      and mails_to(env, ASKER, "(request " .. id .. ", " .. NEW .. ")") == 1,
       "the operator approve (id matched without regard to case) must join and mail the asker")
   end)
 end
@@ -2241,6 +2292,7 @@ for _, case in ipairs({
   { "test_reaction_from_stranger_agent_or_other_room_is_ignored", test_reaction_from_stranger_agent_or_other_room_is_ignored },
   { "test_reaction_on_older_request_or_before_post_is_ignored", test_reaction_on_older_request_or_before_post_is_ignored },
   { "test_deny_and_expiry_mail_with_next_and_no_join", test_deny_and_expiry_mail_with_next_and_no_join },
+  { "test_approved_join_failure_mail_includes_request_identity", test_approved_join_failure_mail_includes_request_identity },
   { "test_dedupe_returns_same_id_and_cap_refuses_without_post", test_dedupe_returns_same_id_and_cap_refuses_without_post },
   { "test_terminal_approve_operator_only", test_terminal_approve_operator_only },
   { "test_hostile_room_name_sanitised_in_home_post", test_hostile_room_name_sanitised_in_home_post },
