@@ -407,6 +407,87 @@ local function test_redefined_public_words_do_not_change_trust()
   matrix.read_config, matrix.is_agent_mxid = saved_read, saved_agent
 end
 
+local function render_fixture(name, specs)
+  local bus = { inboxes = {}, messages = {}, objects = {} }
+  for index, spec in ipairs(specs) do
+    local object_id = "fixture-object-" .. tostring(index)
+    bus.inboxes.butler = bus.inboxes.butler or {}
+    bus.inboxes.butler[#bus.inboxes.butler + 1] = spec.id
+    bus.messages[spec.id] = {
+      id = spec.id,
+      from = { host = "matrix", session = "@alice:example.org" },
+      created_at = spec.created_at,
+      subject = spec.subject,
+      in_reply_to = spec.in_reply_to,
+      references = spec.references,
+      matrix = spec.matrix,
+      body = { object_id = object_id },
+    }
+    bus.objects[object_id] = { content = spec.body }
+  end
+  remuda._butler_mail_config = { bus = bus }
+  dofile("packages/butler/mail.lua")
+  local actual = remuda._butler_mail.inbox("butler")
+  local file = assert(io.open("tests/fixtures/" .. name, "rb"))
+  local expected = file:read("*a")
+  file:close()
+  expected = expected:gsub("\n$", "")
+  assert(actual == expected, name .. " rendered text differs\nexpected:\n" .. expected .. "\nactual:\n" .. actual)
+end
+
+local function test_thread_first_fixtures()
+  local failures = {}
+  local cases = {
+    { "matrix-mail-thread-first.txt", {
+      { id = "MAIL-THREAD-FIRST", created_at = "2026-09-30T10:00:00Z",
+        subject = "Matrix thread reply from @alice:example.org", in_reply_to = "M0",
+        references = { "M0" }, body = "The Butler's reply started this thread.",
+        matrix = { event_id = "$thread-first-response" } },
+    } },
+    { "matrix-mail-thread-human-root.txt", {
+      { id = "MAIL-HUMAN-ROOT", created_at = "2026-09-30T09:59:00Z",
+        subject = "Matrix message from @alice:example.org", references = { "MAIL-HUMAN-ROOT" },
+        body = "Starting the human-rooted thread.", matrix = { event_id = "$human-root" } },
+    } },
+  }
+  for _, case in ipairs(cases) do
+    local ok, err = pcall(render_fixture, case[1], case[2])
+    if not ok then failures[#failures + 1] = tostring(err) end
+  end
+  assert(#failures == 0, table.concat(failures, "\n"))
+end
+
+local function test_thread_reply_fixture()
+  render_fixture("matrix-mail-thread-replies.txt", {
+    { id = "MAIL-THREAD-REPLY-1", created_at = "2026-09-30T10:01:00Z",
+      subject = "Matrix thread reply from @alice:example.org", in_reply_to = "MAIL-THREAD-ROOT",
+      references = { "MAIL-THREAD-ROOT" }, body = "I suggest the blue version.",
+      matrix = { event_id = "$thread-reply-1" } },
+    { id = "MAIL-THREAD-REPLY-2", created_at = "2026-09-30T10:02:00Z",
+      subject = "Matrix thread reply from @alice:example.org", in_reply_to = "MAIL-THREAD-REPLY-1",
+      references = { "MAIL-THREAD-ROOT" }, body = "Agreed, use blue.",
+      matrix = { event_id = "$thread-reply-2" } },
+  })
+end
+
+local function test_plain_reply_fixture()
+  render_fixture("matrix-mail-plain-reply.txt", {
+    { id = "MAIL-PLAIN-REPLY", created_at = "2026-09-30T10:03:00Z",
+      subject = "Matrix message from @alice:example.org", in_reply_to = "MAIL-PLAIN-TARGET",
+      body = "> <@alice:example.org> original\n\nYes, it is ready.",
+      matrix = { event_id = "$plain-reply" } },
+  })
+end
+
+local function test_image_fixture()
+  render_fixture("matrix-mail-image.txt", {
+    { id = "MAIL-IMAGE", created_at = "2026-09-30T10:04:00Z",
+      subject = "Matrix message from @alice:example.org", body = "",
+      matrix = { event_id = "$image", media = { kind = "image", filename = "chart.png",
+        mimetype = "image/png", size = 12345, mxc = "mxc://example.org/chart" } } },
+  })
+end
+
 test_baseline_resume_filters_and_envelope()
 test_state_restart_corruption_and_processed_cap()
 test_pending_delivery_retries_safely_after_restart()
@@ -416,4 +497,11 @@ test_retry_backoff_grows_and_resets_after_recovery()
 test_allowlist_refusal_is_logged_once()
 setup_tests(matrix)
 test_redefined_public_words_do_not_change_trust()
+local fixture_failures = {}
+for _, test in ipairs({ test_thread_first_fixtures, test_thread_reply_fixture,
+    test_plain_reply_fixture, test_image_fixture }) do
+  local ok, err = pcall(test)
+  if not ok then fixture_failures[#fixture_failures + 1] = tostring(err) end
+end
+assert(#fixture_failures == 0, "rendered mail fixture failures:\n" .. table.concat(fixture_failures, "\n"))
 print("ok: Matrix relay resume, exactly-once, filters, state, acks, caps, fallback, and backoff")

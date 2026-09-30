@@ -1,0 +1,8 @@
+[MAIL-IMAGE from matrix/@alice:example.org · 2026-09-30T10:04:00Z] Matrix message from @alice:example.org
+  Matrix event $image
+media: image
+filename: chart.png
+mimetype: image/png
+size: 12345 bytes
+mxc: mxc://example.org/chart
+Next: remuda butler matrix download mxc://example.org/chart -o PATH
