@@ -17,6 +17,10 @@ dofile("packages/butler/matrix_cli.lua")
 local setup_tests = dofile("tests/butler_matrix_setup.lua")
 local relay_module = dofile("packages/butler/matrix_relay.lua")
 
+local function remove_dir(dir)
+  os.execute("rm -rf " .. string.format("%q", dir))
+end
+
 local function fixture()
   local dir = os.tmpname()
   os.remove(dir)
@@ -134,7 +138,7 @@ local function test_baseline_resume_filters_and_envelope()
     "missing or invalid event time must fall back to UTC")
 
   relay:stop()
-  os.execute("rm -rf " .. string.format("%q", dir))
+  remove_dir(dir)
 end
 
 local function test_state_restart_corruption_and_processed_cap()
@@ -182,7 +186,7 @@ local function test_state_restart_corruption_and_processed_cap()
     "a crash-window backup should be restored before polling")
   recovered_file:close()
   recovered:stop()
-  os.execute("rm -rf " .. string.format("%q", dir))
+  remove_dir(dir)
 end
 
 local function test_pending_delivery_retries_safely_after_restart()
@@ -220,7 +224,7 @@ local function test_pending_delivery_retries_safely_after_restart()
   } } } })
   assert(successes == 1, "acknowledged event must not be delivered a second time")
   restarted:stop()
-  os.execute("rm -rf " .. string.format("%q", dir))
+  remove_dir(dir)
 end
 
 local function test_ack_reconcile_and_utf8_body_cap()
@@ -272,7 +276,7 @@ local function test_ack_reconcile_and_utf8_body_cap()
   local prefix = body:match("^(.*)%[truncated")
   assert(prefix:byte(-1) ~= nil and prefix:byte(-1) < 0x80,
     "UTF-8 truncation must not end on a partial multibyte sequence")
-  os.execute("rm -rf " .. string.format("%q", dir))
+  remove_dir(dir)
 end
 
 local function test_messages_backfill_baseline_and_retry_backoff()
@@ -306,7 +310,7 @@ local function test_messages_backfill_baseline_and_retry_backoff()
   client:complete(3, { error = "offline" })
   assert(#remuda._relay_timers > 0, "transport errors schedule a retry")
   relay:stop()
-  os.execute("rm -rf " .. string.format("%q", dir))
+  remove_dir(dir)
 end
 
 local function test_retry_backoff_grows_and_resets_after_recovery()
@@ -329,7 +333,7 @@ local function test_retry_backoff_grows_and_resets_after_recovery()
   tick_timers(1)
   assert(#client.requests == 10, "success resets the next retry to one second")
   relay:stop()
-  os.execute("rm -rf " .. string.format("%q", dir))
+  remove_dir(dir)
 end
 
 local function test_allowlist_refusal_is_logged_once()
@@ -352,7 +356,7 @@ local function test_allowlist_refusal_is_logged_once()
   assert(calls == 2, "refusal retry fixture did not exercise a repeated request")
   assert(refusals == 1, "a persistent allowlist refusal must log once per relay lifetime")
   relay:stop()
-  os.execute("rm -rf " .. string.format("%q", dir))
+  remove_dir(dir)
 end
 
 
@@ -542,7 +546,7 @@ local function test_owner_invite_joins_writes_line_and_notices_once()
   assert(delivered_ids(delivered, "$in-new"),
     "a later owner message in the joined room must become mail (HOME rules)")
   relay:stop()
-  os.execute("rm -rf " .. string.format("%q", dir))
+  remove_dir(dir)
 end
 
 local function test_stranger_invite_is_quarantined_with_home_next()
@@ -569,7 +573,7 @@ local function test_stranger_invite_is_quarantined_with_home_next()
   assert(client:joins(NEW) == 0 and client:messages(HOME, line) == 1,
     "a repeated stranger invite must not join or repeat the HOME line")
   relay:stop()
-  os.execute("rm -rf " .. string.format("%q", dir))
+  remove_dir(dir)
 end
 
 local function test_agent_invite_is_not_joined()
@@ -586,7 +590,7 @@ local function test_agent_invite_is_not_joined()
   end
   assert(read_text(path) == before, "an agent invite must not change the config")
   relay:stop()
-  os.execute("rm -rf " .. string.format("%q", dir))
+  remove_dir(dir)
 end
 
 local function http_fake(status, calls)
@@ -641,7 +645,7 @@ local function test_join_failure_rolls_back_room_line()
     local line = room_line(path, NEW)
     assert(line and line:find("how=operator", 1, true), "matrix join must append how=operator")
   end)
-  os.execute("rm -rf " .. string.format("%q", dir))
+  remove_dir(dir)
 end
 
 local function test_joined_room_survives_restart()
@@ -652,7 +656,7 @@ local function test_joined_room_survives_restart()
   assert(delivered_ids(delivered, "$after-restart"),
     "a relay started on a config with the room line must listen in that room")
   relay:stop()
-  os.execute("rm -rf " .. string.format("%q", dir))
+  remove_dir(dir)
 end
 
 local function test_running_relay_picks_up_operator_join_from_config()
@@ -664,7 +668,7 @@ local function test_running_relay_picks_up_operator_join_from_config()
   assert(delivered_ids(delivered, "$operator-joined"),
     "a running relay must listen in a room added to config without restarting")
   relay:stop()
-  os.execute("rm -rf " .. string.format("%q", dir))
+  remove_dir(dir)
 end
 
 local function test_leave_removes_room_home_and_all_refused()
@@ -685,7 +689,7 @@ local function test_leave_removes_room_home_and_all_refused()
     assert(room_line(path, NEW) == nil, "leave must remove the room line")
     assert(read_text(path):find("all_room=" .. ALL, 1, true), "leave must keep the other config lines")
   end)
-  os.execute("rm -rf " .. string.format("%q", dir))
+  remove_dir(dir)
 end
 
 local function test_leave_unconfigured_room_is_refused()
@@ -697,7 +701,7 @@ local function test_leave_unconfigured_room_is_refused()
       "leaving an unconfigured room must explain that it is not configured")
     assert(#calls == 0, "leaving an unconfigured room must not make an HTTP request")
   end)
-  os.execute("rm -rf " .. string.format("%q", dir))
+  remove_dir(dir)
 end
 
 local function test_unconfigured_room_request_is_refused()
@@ -722,7 +726,7 @@ local function test_unconfigured_room_request_is_refused()
     assert(joined and not joined.error and #calls == 1,
       "a room= line must admit that room to request_json: " .. tostring(joined and joined.error))
   end)
-  os.execute("rm -rf " .. string.format("%q", dir))
+  remove_dir(dir)
 end
 
 test_baseline_resume_filters_and_envelope()

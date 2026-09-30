@@ -1,3 +1,3 @@
 packages/butler/agents_launch.lua|1
 packages/butler/main.lua|4
-tests/butler_matrix_relay.lua|8
+tests/butler_matrix_relay.lua|2
