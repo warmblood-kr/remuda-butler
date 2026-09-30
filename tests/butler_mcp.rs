@@ -4,9 +4,7 @@
 use remuda_core::protocol::{Request, Response};
 use remuda_native::{client, daemon, mcp};
 use serde_json::{json, Value};
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 const PATIENCE: Duration = Duration::from_secs(10);
@@ -89,10 +87,14 @@ fn butler_status_is_a_live_mcp_tool_not_a_terminal_scrape() {
     let dir = scratch("butler-status");
     let path = daemon::socket_path_in(&dir, "s");
     let _daemon = daemon_at(&path);
+    let requested_status_path = dir.join("status.status").to_string_lossy().into_owned();
     let status_path = match client::request(
         &path,
         &Request::Eval {
-            code: "remuda._butler_argv = {'sh'}; remuda.exec('butler'); return remuda._butler_status_path".into(),
+            code: format!(
+                "remuda._butler_status_path = {}; remuda._butler_argv = {{'sh'}}; remuda.exec('butler'); return remuda._butler_status_path",
+                serde_json::to_string(&requested_status_path).unwrap()
+            ),
             name: None,
         },
     )
@@ -103,35 +105,85 @@ fn butler_status_is_a_live_mcp_tool_not_a_terminal_scrape() {
     };
 
     assert!(listed(&path).contains(&"butler_status".to_string()));
-    let source = match client::request(
+    let settings_path = eval(
         &path,
-        &Request::Eval {
-            code: "return remuda._butler_statusline_src".into(),
-            name: None,
-        },
+        &format!(
+            "return remuda._butler_agent_support.status_settings({})",
+            serde_json::to_string(&status_path).unwrap()
+        ),
+    );
+    let settings: Value = serde_json::from_str(
+        &std::fs::read_to_string(settings_path).expect("read generated member settings"),
     )
-    .expect("read embedded status helper")
-    {
-        Response::Value(value) => value,
-        other => panic!("butler has no embedded status helper: {other:?}"),
-    };
-    let mut helper = Command::new("python3")
-        .args(["-c", &source, &status_path])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("start embedded status helper");
-    helper
-        .stdin
-        .take()
-        .expect("helper stdin")
-        .write_all(br#"{"model":{"display_name":"Claude Opus 4.6"},"context_window":{"total_input_tokens":12345,"context_window_size":200000,"used_percentage":6}}"#)
-        .expect("write Claude status snapshot");
-    let output = helper.wait_with_output().expect("wait for status helper");
-    assert!(output.status.success(), "status helper failed: {output:?}");
+    .expect("member settings are JSON");
+    let status_settings = &settings["statusLine"];
+    assert_eq!(status_settings["type"], "command");
+    let command = status_settings["command"].as_str().expect("status command");
     assert_eq!(
-        String::from_utf8_lossy(&output.stdout).trim(),
+        command.split_whitespace().next(),
+        Some("remuda"),
+        "status command must use the Remuda stdin bridge: {command}"
+    );
+    assert!(
+        status_settings.get("refreshInterval").is_none(),
+        "status refresh must use Claude events"
+    );
+    assert!(
+        command.starts_with("remuda -s "),
+        "status command must select Butler's server: {command}"
+    );
+    assert!(
+        command.contains(" --stdin butler statusline "),
+        "status command must forward stdin: {command}"
+    );
+    assert!(
+        command.contains(&status_path),
+        "status command must name the telemetry file: {command}"
+    );
+
+    let snapshot = r#"{"model":{"display_name":"Claude Opus 4.6"},"context_window":{"total_input_tokens":12345,"context_window_size":200000,"used_percentage":6}}"#;
+    let status_line = eval(
+        &path,
+        &format!(
+            "return remuda._dispatch_extension_command('butler', {{'statusline', {}}}, {{stdin = {}}})",
+            serde_json::to_string(&status_path).unwrap(),
+            serde_json::to_string(snapshot).unwrap(),
+        ),
+    );
+    assert_eq!(
+        status_line,
         "MODEL:Claude-Opus-4.6 CTX:12345 CTXWIN:200000 CTXPCT:6"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&status_path).expect("read status file"),
+        format!("{status_line}\n")
+    );
+    let failed_write_path = dir.join("missing").join("write-fail.status");
+    let failed_write_line = eval(
+        &path,
+        &format!(
+            "return remuda._dispatch_extension_command('butler', {{'statusline', {}}}, {{stdin = {}}})",
+            serde_json::to_string(&failed_write_path.display().to_string()).unwrap(),
+            serde_json::to_string(snapshot).unwrap(),
+        ),
+    );
+    assert_eq!(
+        failed_write_line, status_line,
+        "a telemetry write failure must keep status output"
+    );
+    let non_status_path = dir.join("not-a-status-file.txt");
+    let non_status_line = eval(
+        &path,
+        &format!(
+            "return remuda._dispatch_extension_command('butler', {{'statusline', {}}}, {{stdin = {}}})",
+            serde_json::to_string(&non_status_path.display().to_string()).unwrap(),
+            serde_json::to_string(snapshot).unwrap(),
+        ),
+    );
+    assert_eq!(non_status_line, status_line);
+    assert!(
+        !non_status_path.exists(),
+        "non-.status path must not be written"
     );
     let reply = call(&path, "butler_status", json!({}));
     assert_eq!(reply["result"]["isError"], false, "status failed: {reply}");
@@ -147,24 +199,34 @@ fn butler_status_is_a_live_mcp_tool_not_a_terminal_scrape() {
         text_of(&call(&path, "butler_status", json!({}))),
         "MODEL:Claude-Opus-4.6 CTX:12345 CTXWIN:200000 CTXPCT:6 AGENT:codex SKIPPED:claude=login"
     );
-    eval(&path, "remuda._butler_bus.agents.butler.kind='claude'; remuda._butler_attempts={}");
+    eval(
+        &path,
+        "remuda._butler_bus.agents.butler.kind='claude'; remuda._butler_attempts={}",
+    );
+
+    let snapshot = r#"{"model":{"id":"sonnet"},"context_window":{"current_usage":{"input_tokens":10,"cache_creation_input_tokens":20,"cache_read_input_tokens":30},"context_window_size":200000,"used_percentage":30}}"#;
+    let status_line = eval(
+        &path,
+        &format!(
+            "return remuda._dispatch_extension_command('butler', {{'statusline', {}}}, {{stdin = {}}})",
+            serde_json::to_string(&status_path).unwrap(),
+            serde_json::to_string(snapshot).unwrap(),
+        ),
+    );
+    assert_eq!(status_line, "MODEL:sonnet CTX:60 CTXWIN:200000 CTXPCT:30");
 
     // Missing context data remains explicit rather than being invented from
     // launch arguments or terminal rendering.
-    let mut helper = Command::new("python3")
-        .args(["-c", &source, &status_path])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("start status helper without context data");
-    helper
-        .stdin
-        .take()
-        .expect("helper stdin")
-        .write_all(br#"{"model":{"id":"sonnet"},"context_window":{}}"#)
-        .expect("write partial Claude status snapshot");
-    let output = helper.wait_with_output().expect("wait for status helper");
-    assert!(output.status.success(), "status helper failed: {output:?}");
+    let snapshot = r#"{"model":{"id":"sonnet"},"context_window":{}}"#;
+    let status_line = eval(
+        &path,
+        &format!(
+            "return remuda._dispatch_extension_command('butler', {{'statusline', {}}}, {{stdin = {}}})",
+            serde_json::to_string(&status_path).unwrap(),
+            serde_json::to_string(snapshot).unwrap(),
+        ),
+    );
+    assert_eq!(status_line, "MODEL:sonnet CTX:? CTXWIN:? CTXPCT:?");
     assert_eq!(
         text_of(&call(&path, "butler_status", json!({}))),
         "MODEL:sonnet CTX:? CTXWIN:? CTXPCT:? AGENT:claude"
@@ -280,6 +342,213 @@ fn mail_notices_wait_for_the_policy_and_coalesce() {
     assert_eq!(eval(&path, notices), "1");
 }
 
+/// Matrix relay mail reaches the same mailbox deposit hook as other mail and
+/// should produce its arrival notice there.
+#[test]
+fn relay_deposit_produces_one_mail_notice() {
+    let (path, _daemon) = butler_with_member("relay-notice-deposit");
+    let got = eval(
+        &path,
+        r#"
+        local real_ls, real_capture, real_capture_styled, real_session =
+          remuda.ls, remuda.capture, remuda.capture_styled, remuda.session
+        local row = { name = 'butler', alive = true, attached = false }
+        remuda.ls = function() return { row } end
+        remuda.capture = function() return '> ' end
+        remuda.capture_styled = nil
+        remuda.session = function() return { is_busy = false } end
+        local policy, t = remuda._butler_notify_policy, 0
+        remuda._butler_notice_clock = function() return t end
+        remuda._butler_notify_policy = function(session) return policy(session, t) end
+        remuda._relay_notice_calls = 0
+        remuda.type_text = function(_, text)
+          remuda._relay_notice_calls = remuda._relay_notice_calls + 1
+          remuda._relay_notice_text = text
+          return true
+        end
+        local sender = '@alice:example.org'
+        local delivered = remuda.emit_until_success('butler/deliver', {
+          from = { host = 'matrix', id = '', alias = sender, session = sender,
+            kind = 'matrix', leader = '' },
+          to = 'butler', text = 'hello from Matrix', subject = 'Matrix message from ' .. sender,
+          matrix = { sender = sender, room_id = '!notice:example.org', event_id = '$notice-deposit' },
+        })
+        t = 2
+        remuda._butler_deliver_notices()
+        local expected = 'Butler message ' .. delivered.id .. ' from ' .. sender
+          .. ' arrived. Read it: remuda butler inbox'
+        remuda.ls, remuda.capture, remuda.capture_styled, remuda.session =
+          real_ls, real_capture, real_capture_styled, real_session
+        return tostring(remuda._relay_notice_calls) .. '\n'
+          .. tostring(remuda._relay_notice_text) .. '\n' .. expected
+        "#,
+    );
+    let mut lines = got.lines();
+    assert_eq!(lines.next(), Some("1"), "relay deposit should type exactly one notice: {got}");
+    let actual = lines.next();
+    let expected = lines.next();
+    assert_eq!(actual, expected, "relay notice text should name its Matrix sender: {got}");
+}
+
+#[test]
+fn notice_failure_does_not_fail_the_mail_deposit_hook() {
+    let (path, _daemon) = butler_with_member("notice-deposit-error");
+    let trace = path.parent().unwrap().join("session-trace.log");
+    let got = eval(
+        &path,
+        &format!(
+            r#"remuda._butler_session_trace_path = {trace:?}
+            remuda._butler_notify = function() error('notify injected error') end
+            local sender = '@alice:example.org'
+            local delivered = remuda.emit_until_success('butler/deliver', {{
+              from = {{ host = 'matrix', id = '', alias = sender, session = sender,
+                kind = 'matrix', leader = '' }},
+              to = 'butler', text = 'mail survives notice error', subject = 'Matrix message from ' .. sender,
+              matrix = {{ sender = sender, room_id = '!notice:example.org', event_id = '$notice-error' }},
+            }})
+            return tostring(delivered.id) .. '|' .. tostring(remuda._butler_mail.is_unread(
+              remuda._butler_bus.agents.butler.id, delivered.id))"#
+        ),
+    );
+    assert!(got.ends_with("|true"), "notice failure turned deposit into a hook error or lost mail: {got}");
+    let log = std::fs::read_to_string(&trace).expect("notice error trace");
+    assert_eq!(log.lines().filter(|line| {
+        line.contains("notice_delivery_error\tbutler ") && line.contains("notify injected error")
+    }).count(), 1, "{log}");
+}
+
+#[test]
+fn a_single_mail_notice_waits_for_two_quiet_seconds() {
+    let (path, _daemon) = butler_with_member("notice-single-debounce");
+    setup_mail_notice_clock(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        remuda._notice_test_send('m1', 'one')
+        state.now = 1.99
+        remuda._butler_deliver_notices()
+        local early = #state.typed
+        state.now = 2
+        remuda._butler_deliver_notices()
+        return tostring(early) .. '|' .. #state.typed .. '|'
+          .. tostring(state.typed[1] and state.typed[1].at) .. '|'
+          .. tostring(state.typed[1] and state.typed[1].text)
+        "#,
+    );
+    assert!(got.starts_with("0|1|2|Butler message "), "single mail debounce timing: {got}");
+}
+
+#[test]
+fn five_mail_notice_waits_for_two_quiet_seconds_after_the_last_mail() {
+    let (path, _daemon) = butler_with_member("notice-burst-debounce");
+    setup_mail_notice_clock(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        for i = 1, 5 do
+          state.now = (i - 1) * 0.5
+          remuda._notice_test_send('m1', tostring(i))
+        end
+        state.now = 3.99
+        remuda._butler_deliver_notices()
+        local early = #state.typed
+        state.now = 4
+        remuda._butler_deliver_notices()
+        return tostring(early) .. '|' .. #state.typed .. '|'
+          .. tostring(state.typed[1] and state.typed[1].at) .. '|'
+          .. tostring(state.typed[1] and state.typed[1].text)
+        "#,
+    );
+    assert_eq!(got, "0|1|4|5 new Butler messages arrived. Read them: remuda butler inbox");
+}
+
+#[test]
+fn mail_arriving_each_second_fires_by_the_ten_second_maximum() {
+    let (path, _daemon) = butler_with_member("notice-max-wait");
+    setup_mail_notice_clock(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        for i = 1, 10 do
+          state.now = i - 1
+          remuda._notice_test_send('m1', tostring(i))
+        end
+        state.now = 9.99
+        remuda._butler_deliver_notices()
+        local early = #state.typed
+        state.now = 10
+        remuda._butler_deliver_notices()
+        return tostring(early) .. '|' .. #state.typed .. '|'
+          .. tostring(state.typed[1] and state.typed[1].at) .. '|'
+          .. tostring(state.typed[1] and state.typed[1].text)
+        "#,
+    );
+    assert_eq!(got, "0|1|10|10 new Butler messages arrived. Read them: remuda butler inbox");
+}
+
+#[test]
+fn notices_arriving_during_verification_get_a_fresh_debounce_window() {
+    let (path, _daemon) = butler_with_member("notice-verification-next-batch");
+    setup_mail_notice_clock(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        state.screen = '> '
+        remuda.capture = function() return state.screen end
+        remuda.type_text = function(_, text)
+          state.typed[#state.typed + 1] = { at = state.now, text = text }
+          state.screen = text .. '\n> '
+          return true
+        end
+        remuda._notice_test_send('m1', 'first batch')
+        state.now = 2
+        remuda._butler_deliver_notices()
+        state.now = 9
+        remuda._notice_test_send('m1', 'during verification')
+        remuda._butler_deliver_notices()
+        local pending = remuda._butler_bus.notices.m1
+        local first_at, due_at = pending.first_at, pending.due_at
+        state.now = 9.5
+        remuda._notice_test_send('m1', 'trailing mail')
+        state.now = 10
+        remuda._butler_deliver_notices()
+        local before_due = #state.typed
+        state.now = 11.5
+        remuda._butler_deliver_notices()
+        return table.concat({ tostring(#state.typed - 1), tostring(first_at), tostring(due_at),
+          tostring(before_due), tostring(#state.typed), tostring(state.typed[2] and state.typed[2].text) }, '|')
+        "#,
+    );
+    assert_eq!(got, "1|9|11|1|2|2 new Butler messages arrived. Read them: remuda butler inbox");
+}
+
+#[test]
+fn five_relay_mails_wait_until_a_busy_pane_is_free_and_coalesce() {
+    let (path, _daemon) = butler_with_member("notice-relay-busy");
+    setup_mail_notice_clock(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        state.busy.butler = true
+        for i = 1, 5 do remuda._notice_test_relay('$busy-' .. i) end
+        state.now = 2
+        remuda._butler_deliver_notices()
+        local busy = #state.typed
+        state.busy.butler = false
+        remuda._butler_deliver_notices()
+        return tostring(busy) .. '|' .. #state.typed .. '|'
+          .. tostring(state.typed[1] and state.typed[1].at) .. '|'
+          .. tostring(state.typed[1] and state.typed[1].text)
+        "#,
+    );
+    assert_eq!(got, "0|1|2|5 new Butler messages arrived. Read them: remuda butler inbox");
+}
+
 /// #29: one case per branch of `remuda._butler_notify_policy`, with `ls` and
 /// `capture` stubbed and the clock passed in.
 #[test]
@@ -349,6 +618,41 @@ fn butler_with_member(tag: &str) -> (PathBuf, impl Drop) {
     (path, daemon)
 }
 
+fn setup_mail_notice_clock(path: &Path) {
+    eval(
+        path,
+        r#"
+        local state = { now = 0, busy = {}, typed = {} }
+        remuda._notice_test_state = state
+        remuda._butler_notice_clock = function() return state.now end
+        remuda.ls = function() return {
+          { name = 'm1', alive = true, attached = false },
+          { name = 'butler', alive = true, attached = false },
+        } end
+        remuda.session = function(name) return { is_busy = state.busy[name] == true } end
+        remuda.capture = function() return '> ' end
+        remuda.capture_styled = nil
+        remuda._butler_notify_policy = function(name) return state.busy[name] ~= true end
+        remuda.type_text = function(_, text)
+          state.typed[#state.typed + 1] = { at = state.now, text = text }
+          return true
+        end
+        remuda._notice_test_send = function(alias, text)
+          return remuda._butler_send('operator', alias, text)
+        end
+        remuda._notice_test_relay = function(event_id)
+          local sender = '@alice:example.org'
+          return remuda.emit_until_success('butler/deliver', {
+            from = { host = 'matrix', id = '', alias = sender, session = sender,
+              kind = 'matrix', leader = '' },
+            to = 'butler', text = 'relay ' .. event_id, subject = 'Matrix message from ' .. sender,
+            matrix = { sender = sender, room_id = '!notice:example.org', event_id = event_id },
+          })
+        end
+        "#,
+    );
+}
+
 #[test]
 fn prompt_parser_returns_multiline_task_and_stops_at_codex_footer() {
     let (path, _daemon) = butler_with_member("prompt-parser-multiline");
@@ -367,12 +671,15 @@ fn a_notice_that_fails_to_type_stays_queued() {
     let (path, _daemon) = butler_with_member("notice-type-fails");
     let sent = eval(
         &path,
-        "remuda._butler_notify_policy = function() return true end; \
+        "remuda._notice_now = 0; \
+         remuda._butler_notice_clock = function() return remuda._notice_now end; \
+         remuda._butler_notify_policy = function() return true end; \
          remuda._real_type_text = remuda.type_text; \
          remuda.type_text = function() error('pty write failed') end; \
-         return remuda._butler_send('operator', 'm1', 'hi')",
+         local sent = remuda._butler_send('operator', 'm1', 'hi'); \
+         remuda._notice_now = 2; remuda._butler_deliver_notices(); return sent",
     );
-    assert!(sent.contains("terminal delivery deferred"), "{sent}");
+    assert!(sent.contains("notice deferred"), "{sent}");
     assert_eq!(eval(&path, "return remuda._butler_bus.notices.m1.count"), "1");
     eval(
         &path,
@@ -397,6 +704,8 @@ fn a_busy_notice_input_retries_on_the_next_tick() {
         &path,
         r#"
         remuda._butler_notify_policy = function() return true end
+        remuda._notice_now = 0
+        remuda._butler_notice_clock = function() return remuda._notice_now end
         remuda._notice_busy_calls = 0
         remuda.type_text = function(_, text)
           remuda._notice_busy_calls = remuda._notice_busy_calls + 1
@@ -407,8 +716,10 @@ fn a_busy_notice_input_retries_on_the_next_tick() {
         remuda._butler_send('operator', 'm1', 'retry me')
         "#,
     );
-    assert_eq!(eval(&path, "return tostring(remuda._notice_busy_calls)"), "1");
+    assert_eq!(eval(&path, "return tostring(remuda._notice_busy_calls)"), "0");
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1.count)"), "1");
+    eval(&path, "remuda._notice_now = 2; remuda._butler_deliver_notices()");
+    assert_eq!(eval(&path, "return tostring(remuda._notice_busy_calls)"), "1");
     eval(&path, "remuda._butler_deliver_notices()");
     assert_eq!(eval(&path, "return tostring(remuda._notice_busy_calls)"), "2");
     assert_ne!(eval(&path, "return tostring(remuda._notice_typed)"), "nil");
@@ -726,6 +1037,8 @@ fn notice_verify_mismatch_logs_bounded_capture_and_expected_text() {
         &path,
         &format!(
             r#"remuda._butler_session_trace_path = {trace:?}
+            local now = 0
+            remuda._butler_notice_clock = function() return now end
             local state = {{screen = string.rep('x', 9000) .. '\n❯ unrelated composer\n─', keys = 0}}
             remuda._notice_log_test_state = state
             remuda._butler_bus.agents.m1.kind = 'claude'
@@ -735,10 +1048,11 @@ fn notice_verify_mismatch_logs_bounded_capture_and_expected_text() {
             remuda._butler_notify_policy = function() return true end
             remuda.type_text = function(_, expected) state.expected = expected end
             remuda.key = function() state.keys = state.keys + 1 end
-            remuda._butler_send('operator', 'm1', 'notice log fixture')"#
+            remuda._butler_send('operator', 'm1', 'notice log fixture')
+            now = 3"#
         ),
     );
-    for _ in 0..12 {
+    for _ in 0..13 {
         eval(&path, "remuda._butler_deliver_notices()");
     }
     let log = std::fs::read_to_string(&trace).expect("notice diagnostic trace");
@@ -868,9 +1182,13 @@ fn notice_recovery_preserves_idle_draft_and_respects_attached_human() {
         remuda._notice_test_state.screen = '› human draft'
         remuda._butler_send('operator', 'm1', 'human-safe notice')"#,
     );
-    std::thread::sleep(Duration::from_millis(1200));
-    let events = eval(&path, "return table.concat(remuda._notice_test_state.events, '\\n')");
-    assert!(events.contains("capture"), "attached composer was not inspected: {events}");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let events = loop {
+        let events = eval(&path, "return table.concat(remuda._notice_test_state.events, '\\n')");
+        if events.contains("capture") { break events; }
+        assert!(Instant::now() < deadline, "attached composer was not inspected before notice deadline: {events}");
+        std::thread::sleep(Duration::from_millis(100));
+    };
     assert!(!events.contains("key ") && !events.contains("type "), "recovery sent a key or typed into a human-active pane: {events}");
 
     eval(&path, r#"remuda._notice_test_state.events = {}
@@ -879,6 +1197,8 @@ fn notice_recovery_preserves_idle_draft_and_respects_attached_human() {
         remuda._butler_bus.notices.m1 = nil
         remuda._butler_bus.notice_recoveries.m1 = nil
         remuda._butler_send('operator', 'm1', 'attached empty composer notice')"#);
+    std::thread::sleep(Duration::from_millis(2200));
+    eval(&path, "remuda._butler_deliver_notices()");
     let events = eval(&path, "return table.concat(remuda._notice_test_state.events, '\\n')");
     assert!(events.contains("type Butler message"), "idle attached empty composer did not receive a normal notice: {events}");
 
@@ -892,6 +1212,10 @@ fn notice_recovery_preserves_idle_draft_and_respects_attached_human() {
         remuda._butler_bus.notices.m1 = nil
         remuda._butler_bus.notice_recoveries.m1 = nil
         remuda._butler_send('operator', 'm1', 'busy pane timeout notice')
+        "#);
+    std::thread::sleep(Duration::from_millis(2200));
+    eval(&path, "remuda._butler_deliver_notices()");
+    eval(&path, r#"
         assert(remuda._butler_bus.notice_recoveries.m1, 'busy timeout recovery was not created')
         remuda._butler_bus.notice_recoveries.m1.checks = 39
         remuda._butler_bus.notice_recoveries.m1.failed = false

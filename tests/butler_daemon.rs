@@ -4285,6 +4285,7 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
         // the topic sessions' own lines.
         let typed = log.lines().filter(|l| l.starts_with("t-") && l.contains(" type ")).count();
         if typed == 3 && traced.contains("task_poke_timeout\tt-stuck")
+            && log.contains(" type Butler message ")
             && eval(&path, "return tostring(remuda._butler_bus.agents['t-claude-launch'] ~= nil)") == "true"
             && eval(&path, "return tostring(remuda._butler_bus.agents['t-claude-launch-transient'] ~= nil)") == "true"
             && eval(&path, "return remuda._butler_sessions()")
@@ -4375,7 +4376,8 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
     let after_timeout = loop {
         let log = eval(&path, "return table.concat(remuda._t, '\\n')");
         let traced = std::fs::read_to_string(&trace).unwrap_or_default();
-        if traced.contains("codex_update_timeout\tt-codex-timeout") {
+        if traced.contains("codex_update_timeout\tt-codex-timeout")
+            && log.contains("type Butler message") {
             break log;
         }
         assert!(Instant::now() < deadline, "slow update timeout did not report while leaving its pane open: {log}");

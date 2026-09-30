@@ -10,7 +10,7 @@ if not root then
 end
 assert(root, "set REMUDA_BUTLER_REPO_ROOT or run this file by absolute path")
 local installer_path = root .. "/install/install-butler.sh"
-local main_path = root .. "/packages/butler/main.lua"
+local main_path = root .. "/packages/butler/paths.lua"
 local core_root = os.getenv("REMUDA_CORE_ROOT")
 local daemon_path = core_root and (core_root:gsub("^~/", (os.getenv("HOME") or "") .. "/") .. "/native/src/daemon.rs")
 
