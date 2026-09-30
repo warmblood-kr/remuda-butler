@@ -3397,6 +3397,119 @@ local function test_rx_untrusted_mention_does_not_follow()
   end)
 end
 
+-- Receive rules PR 2: loop guard, own post cap, untrusted per-room cap.
+-- Posts by the CLI go through remuda.http; notices may go through the relay
+-- client, so the HOME-line counts look at both.
+local function rx_cli(args)
+  local old_pending, old_guidance, captured = remuda.pending, matrix.configuration_guidance, nil
+  remuda.pending = function()
+    return { resolve = function(_, code, stdout, stderr) captured = { code = code, stdout = stdout, stderr = stderr } end }
+  end
+  matrix.configuration_guidance = function() return nil end
+  local ok, err = pcall(function()
+    local returned = matrix.cli(args)
+    for _ = 1, 8 do if captured then break end tick_timers(1) end
+    if not captured and type(returned) == "string" then captured = { code = 0, stdout = returned, stderr = "" } end
+  end)
+  remuda.pending, matrix.configuration_guidance = old_pending, old_guidance
+  if not ok then error(err, 0) end
+  return captured or { code = -1, stdout = "", stderr = "no result" }
+end
+
+local function rx_post_http(path, run)
+  local posted = 0
+  with_alias_http(path, function(spec)
+    if spec.method == "GET" and spec.url and spec.url:find("/context/", 1, true)
+      or (spec.path and spec.path:find("/context/", 1, true)) then
+      return { status = 200, body = '{"event":{"room_id":"' .. HOME .. '"}}' }
+    end
+    if spec.method == "PUT" then posted = posted + 1 end
+    return { status = 200, body = '{"event_id":"$own' .. posted .. '"}' }
+  end, function(calls) run(calls, function() return posted end) end)
+end
+
+local function rx_http_texts(calls, text)
+  local n = 0
+  for _, spec in ipairs(calls) do
+    if spec.method == "PUT" and type(spec.body) == "string" and spec.body:find(text, 1, true) then n = n + 1 end
+  end
+  return n
+end
+
+local function test_rx_b2b_turn_guard_home_line_once()
+  local dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    local relay, client, delivered = rx_relay(path)
+    relay_module.instance = relay
+    local line = "Stopped replying in thread $gt (" .. HOME .. "): 6 Butler-only turns. A human reply resumes it."
+    rx_post_http(path, function(calls)
+      rx_sync(client, HOME, { rx_msg("$gt", OWNER, "@bot:example.org and @agent-ally:example.org, talk") })
+      relay:subscribe_thread(HOME, "$gt")
+      for i = 1, 5 do rx_sync(client, HOME, { rx_msg("$gt-a" .. i, RX_ALLY, "@bot:example.org turn " .. i, rx_thread("$gt")) }) end
+      assert(rx_find(delivered, "$gt-a5"), "Butler turns in a followed thread are delivered")
+      local result = rx_cli({ "matrix", "reply", "$gt-a5", "my turn" })
+      assert(result.code == 0, "turn 6 (our own reply to a Butler) is allowed once the B2B block is lifted: "
+        .. tostring(result.stderr))
+      result = rx_cli({ "matrix", "reply", "$gt-a5", "one more" })
+      assert(result.code ~= 0 and (result.stderr .. result.stdout):find("6 Butler-only turns", 1, true),
+        "after 6 Butler-only turns a reply into the thread is refused")
+      rx_sync(client, HOME, { rx_msg("$gt-a7", RX_ALLY, "@bot:example.org turn 7", rx_thread("$gt")) })
+      result = rx_cli({ "matrix", "reply", "$gt-a7", "again" })
+      assert(result.code ~= 0, "the thread stays stopped while only Butlers talk")
+      local lines = client:messages(HOME, line) + rx_http_texts(calls, line)
+      assert(lines == 1, "exactly ONE HOME line for the stopped thread, got " .. lines)
+      rx_sync(client, HOME, { rx_msg("$gt-h", OWNER, "human here", rx_thread("$gt")) })
+      result = rx_cli({ "matrix", "reply", "$gt-h", "thanks" })
+      assert(result.code == 0, "a human reply resumes the thread: " .. tostring(result.stderr))
+    end)
+    relay:stop()
+  end)
+end
+
+local function test_rx_posts_per_hour_cap()
+  local dir, path = invite_fixture(OWNER .. "," .. RX_ALLY, "room=" .. NEW .. "\nposts_per_hour=3\n")
+  rx_with_dir(dir, function()
+    local relay = rx_relay(path)
+    relay_module.instance = relay
+    rx_post_http(path, function(_, posted)
+      for i = 1, 3 do
+        local result = rx_cli({ "matrix", "send", "post " .. i })
+        assert(result.code == 0, "post " .. i .. " is under posts_per_hour=3: " .. tostring(result.stderr))
+      end
+      local result = rx_cli({ "matrix", "send", "post 4" })
+      assert(result.code ~= 0 and (result.stderr .. result.stdout):find("Next: wait until %d%d:%d%dZ"),
+        "the 4th post in an hour is refused with Next: wait until HH:MMZ, got: " .. result.stderr .. result.stdout)
+      assert(posted() == 3, "the refused post is not sent, sent " .. posted())
+    end)
+    relay:stop()
+  end)
+end
+
+local function test_rx_untrusted_room_cap_summary_no_quarantine()
+  local dir, path = invite_fixture(OWNER, "room=" .. NEW .. "\nuntrusted_per_room_hour=2\n")
+  rx_with_dir(dir, function()
+    local relay, client, delivered = rx_relay(path)
+    local events = {}
+    for i = 1, 3 do events[#events + 1] = rx_msg("$u-thread" .. i, STRANGER, "unfollowed", rx_thread("$nope")) end
+    for i = 1, 5 do events[#events + 1] = rx_msg("$u" .. i, STRANGER, "root " .. i) end
+    events[#events + 1] = rx_msg("$u-owner", OWNER, "owner still arrives")
+    rx_sync(client, NEW, events)
+    assert(rx_find(delivered, "$u1") and rx_find(delivered, "$u2"), "the first 2 untrusted roots are delivered")
+    for i = 3, 5 do
+      assert(not rx_find(delivered, "$u" .. i), "$u" .. i .. ": past the cap the text is not delivered")
+      assert(not rx_find(relay:quarantine_list(), "$u" .. i), "$u" .. i .. ": the cap never quarantines")
+      assert(relay:state().processed["$u" .. i], "$u" .. i .. ": a capped event is marked processed")
+    end
+    assert(rx_find(delivered, "$u-owner"), "allowlisted senders are not capped")
+    local line = "3 messages from non-allowlisted senders not delivered in " .. NEW
+      .. " (rate cap). Next: remuda butler matrix --room " .. NEW .. " history"
+    assert(client:messages(HOME, line) == 1, "ONE exact HOME summary for the sync (unaccepted events do not count)")
+    rx_sync(client, NEW, { rx_msg("$u-owner2", OWNER, "quiet sync") })
+    assert(client:messages(HOME, "non-allowlisted senders not delivered") == 1, "no summary for a sync with nothing capped")
+    relay:stop()
+  end)
+end
+
 rx_tests = {
   { "test_rx_stranger_root_marked_untrusted", test_rx_stranger_root_marked_untrusted },
   { "test_rx_agent_root_without_mention", test_rx_agent_root_without_mention },
@@ -3419,6 +3532,9 @@ rx_tests = {
   { "test_rx_untrusted_room_cap_logs_once_no_post", test_rx_untrusted_room_cap_logs_once_no_post },
   { "test_rx_invalid_sender_quarantined", test_rx_invalid_sender_quarantined },
   { "test_rx_untrusted_mention_does_not_follow", test_rx_untrusted_mention_does_not_follow },
+  { "test_rx_b2b_turn_guard_home_line_once", test_rx_b2b_turn_guard_home_line_once },
+  { "test_rx_posts_per_hour_cap", test_rx_posts_per_hour_cap },
+  { "test_rx_untrusted_room_cap_summary_no_quarantine", test_rx_untrusted_room_cap_summary_no_quarantine },
 }
 end
 
