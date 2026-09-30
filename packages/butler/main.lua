@@ -3720,25 +3720,50 @@ function remuda._butler_compaction_execute(session_name, force)
   end
   local function wait_for(id, matcher, action, timeout, on_timeout)
     local branches = { { id = id, match = matcher, action = action } }
+    local model_confirm_state = { screen = nil, captures = 0, started_at = nil, last_capture_at = nil }
+    local unknown_state = { screen = nil, captures = 0, started_at = nil, last_capture_at = nil }
+    -- The daemon's periodic capture source ticks once per second. Allow a
+    -- small scheduling margin while keeping unsettled screens bounded.
+    local stable_captures, stable_timeout = 3, 3
+    local function stable_screen(state, screen, candidate)
+      if not candidate then
+        state.screen, state.captures, state.started_at, state.last_capture_at = nil, 0, nil, nil
+        return false
+      end
+      local now = os.time()
+      if state.screen ~= screen then
+        state.screen, state.captures = screen, 1
+        state.started_at = state.started_at or now
+        state.last_capture_at = now
+      elseif now > state.last_capture_at then
+        state.captures = state.captures + 1
+        state.last_capture_at = now
+      end
+      return state.captures >= stable_captures and now - state.started_at <= stable_timeout
+    end
+    local function stable_wait_expired(state)
+      return state.started_at ~= nil and os.time() - state.started_at >= stable_timeout
+    end
+    local function model_confirm_matches(screen)
+      if type(screen) ~= "string" then return false end
+      local lines = bottom_screen_lines(screen, 18)
+      for index = 1, #lines - 1 do
+        if index > #lines - 8
+            and lines[index]:find("❯%s*1%.%s+Yes")
+            and lines[index + 1]:find("%d%.%s+No, go back") then
+          for title_row = math.max(1, index - 10), index - 1 do
+            if lines[title_row]:find("Switch model?", 1, true) then return true end
+          end
+        end
+      end
+      return false
+    end
     if agent.kind == "claude" and (id == "model-sonnet" or id == "model-restored") then
       local confirmation_sent = false
       table.insert(branches, {
         id = "claude-model-confirm",
         match = function(screen)
-          if type(screen) ~= "string" then return false end
-          local lines = bottom_screen_lines(screen, 18)
-          for index = 1, #lines - 1 do
-            if index > #lines - 8
-                and lines[index]:find("❯%s*1%.%s+Yes")
-                and lines[index + 1]:find("%d%.%s+No, go back") then
-              for title_row = math.max(1, index - 10), index - 1 do
-                if lines[title_row]:find("Switch model?", 1, true) then
-                  return true
-                end
-              end
-            end
-          end
-          return false
+          return stable_screen(model_confirm_state, screen, model_confirm_matches(screen))
         end,
         action = function()
           if not confirmation_sent then
@@ -3753,7 +3778,17 @@ function remuda._butler_compaction_execute(session_name, force)
     local ok, handle = pcall(remuda.expect, session_name, branches,
       -- This prompt is accepted only during the Claude model-switch watchers.
       -- All other unknown screens continue through the existing fail path.
-      { timeout = timeout, unknown = remuda._butler_compaction_is_unknown_dialog,
+      { timeout = math.max(tonumber(timeout) or 0, stable_timeout + 1), interval = 0.1,
+      unknown = function(screen)
+        local model_watcher = agent.kind == "claude" and (id == "model-sonnet" or id == "model-restored")
+        if model_watcher and model_confirm_matches(screen) then
+          stable_screen(unknown_state, screen, false)
+          return stable_wait_expired(model_confirm_state)
+        end
+        stable_screen(model_confirm_state, screen, false)
+        local unknown = remuda._butler_compaction_is_unknown_dialog(screen)
+        return stable_screen(unknown_state, screen, unknown) or stable_wait_expired(unknown_state)
+      end,
       on_unknown = function()
         if agent.kind == "claude" and (id == "model-sonnet" or id == "compact-complete") then
           state.restore_pending = prior_model
