@@ -869,7 +869,7 @@ local function test_leave_removes_room_home_and_all_refused()
       local before, result = read_text(path), nil
       matrix.leave({ room = room }, function(value) result = value end)
       assert(result and result.error and result.error:find("can't be left", 1, true)
-        and result.error:find("Next: remuda butler matrix setup (to change HOME or ALL)", 1, true),
+        and result.error:find("HOME and ALL rooms can't be left.\nNext: remuda butler matrix setup (to change HOME or ALL)", 1, true),
         "leaving HOME/ALL must be refused: " .. room)
       assert(#calls == 0 and read_text(path) == before, "a refused leave must not call or edit")
     end

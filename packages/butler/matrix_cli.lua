@@ -146,16 +146,19 @@ end
 local function render_human(verb, options, result)
   local data = result.json or result
   if verb == "rooms" then
-    local rooms, lines, leave_room, safe_rooms, room_width = data.rooms or {}, {}, false, {}, 0
+    local rooms, lines, leave_room, safe_rooms, safe_kinds, room_width, kind_width = data.rooms or {}, {}, false, {}, {}, 0, 0
     for _, item in ipairs(rooms) do
       local room = terminal_safe(item.room)
+      local kind = terminal_safe(item.kind)
       safe_rooms[#safe_rooms + 1] = room
+      safe_kinds[#safe_kinds + 1] = kind
       room_width = math.max(room_width, #room)
+      kind_width = math.max(kind_width, #kind)
       if item.kind == "joined" then leave_room = true end
     end
     for index, item in ipairs(rooms) do
       lines[#lines + 1] = safe_rooms[index] .. string.rep(" ", room_width - #safe_rooms[index] + 2)
-        .. terminal_safe(item.kind) .. "  " .. terminal_safe(item.how)
+        .. safe_kinds[index] .. string.rep(" ", kind_width - #safe_kinds[index] + 2) .. terminal_safe(item.how)
     end
     if #lines == 0 then lines[#lines + 1] = "No configured Matrix rooms" end
     if leave_room then

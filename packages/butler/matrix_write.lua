@@ -333,7 +333,7 @@ function matrix.leave(opts, on_done, agent)
   if not conf then return error_result(done, config_error) end
   if conf.rooms[room] == "home" or conf.rooms[room] == "all" then
     return error_result(done,
-      "HOME and ALL rooms can't be left. Next: remuda butler matrix setup (to change HOME or ALL).")
+      "HOME and ALL rooms can't be left.\nNext: remuda butler matrix setup (to change HOME or ALL).")
   end
   if conf.rooms[room] == nil then
     return error_result(done, room .. " is not a configured Matrix room.")
@@ -348,6 +348,11 @@ function matrix.leave(opts, on_done, agent)
       result.error = detail .. "could not remove Matrix room config line: " .. tostring(remove_error)
     elseif result.error then
       result.error = tostring(result.error) .. "; the room was removed from the local config"
+      local replaced
+      result.error, replaced = result.error:gsub("Next:[^\r\n]*", function()
+        return "Next: remuda butler matrix rooms"
+      end)
+      if replaced == 0 then result.error = result.error .. "\nNext: remuda butler matrix rooms" end
     end
     done(result)
   end)
