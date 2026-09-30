@@ -7,11 +7,27 @@ local resolve = assert(config.resolve)
 local mail_address = assert(config.mail_address)
 local mail_id = assert(config.mail_id)
 local mail = assert(config.mail)
+local mailbox = mail.mailbox
 local take_delivery_notice_result = assert(config.take_delivery_notice_result)
 local notify_mail_delivery = assert(config.notify_mail_delivery)
 local deliver_message = assert(config.deliver_message)
 local known_startup_modal = assert(remuda._butler_chooser).known_startup_modal
 local startup_action_safe
+
+local function mail_notice_text(message, detail)
+  if not detail then
+    local sender = message.from and (message.from.alias or message.from.session) or "outside"
+    if message.kind == "forward" then
+      detail = "forwarded by " .. sender
+    elseif message.in_reply_to then
+      detail = "(reply) from " .. sender
+    else
+      sender = message.matrix and message.matrix.sender or (message.from and message.from.session) or sender
+      detail = "from " .. sender
+    end
+  end
+  return "Butler message " .. message.id .. " " .. detail .. " arrived. Read it: remuda butler inbox"
+end
 
 -- #29: a mail notice must never land on a human's half-typed line. Notices
 -- wait per recipient, coalesce, and are typed only when the policy allows;
@@ -19,6 +35,8 @@ local startup_action_safe
 bus.notices = bus.notices or {}
 bus.notice_screens = bus.notice_screens or {}
 bus.notice_seen = bus.notice_seen or {}
+bus.unread_seeded = bus.unread_seeded or {}
+bus.unread_seeded_exited_at = bus.unread_seeded_exited_at or {}
 bus.notice_retry_reasons = bus.notice_retry_reasons or {}
 bus.notice_fallbacks = bus.notice_fallbacks or {}
 bus.notice_failure_alerts = bus.notice_failure_alerts or {}
@@ -748,10 +766,117 @@ function remuda._butler_notify(alias, notice, message_id)
   bus.notices[alias] = pending
   return false
 end
+local function seed_unread_notices(alias, previous_instance, instance, unread)
+  local agent = bus.agents[alias]
+  if not agent or not agent.id then return false end
+  if unread <= 0 then return true end
+  for _, message_id in ipairs(mailbox(agent.id)) do
+    if mail.is_unread(agent.id, message_id) then
+      local seen = bus.notice_seen[agent.id]
+      local pending = bus.notices[alias]
+      local already_pending = pending and pending.message_ids and pending.message_ids[message_id]
+      local already_seen = seen and seen[message_id]
+      if previous_instance ~= nil and previous_instance ~= instance
+          and already_seen and not already_pending then
+        -- A prior session may have recorded the deposit notice before its
+        -- queue was cleared at exit. Replay that unread mail for this session.
+        seen[message_id] = nil
+        already_seen = false
+      end
+      if not already_pending and not already_seen then
+        local message = mail.find_message(message_id) or {}
+        local resent = bus.mail_resent[agent.id] and bus.mail_resent[agent.id][message_id]
+        local detail
+        if resent then
+          local by = resent.from and (resent.from.alias or resent.from.session) or "outside"
+          detail = "forwarded by " .. by
+        end
+        message.id = message.id or message_id
+        remuda._butler_notify(alias, mail_notice_text(message, detail), message_id)
+      end
+    end
+  end
+  return true
+end
+local function notice_session_instance(alias, agent, session_instances)
+  if type(agent.session_instance_id) == "string" and agent.session_instance_id ~= "" then
+    return agent.session_instance_id
+  end
+  local instance = session_instances[alias]
+  if type(instance) == "string" and instance ~= "" then
+    return instance
+  end
+  -- Agent records are replaced when Butler relaunches a member, and survive
+  -- a mod reload, so the record itself is the fallback instance token.
+  return agent
+end
 function remuda._butler_deliver_notices()
+  local now = notice_now()
+  local session_instances = {}
+  local live_sessions = {}
+  local listed, sessions = pcall(remuda.ls)
+  if listed and type(sessions) == "table" then
+    for _, session in ipairs(sessions) do
+      if session.alive and type(session.name) == "string" then
+        live_sessions[session.name] = true
+        if type(session.instance_id) == "string" and session.instance_id ~= "" then
+          session_instances[session.name] = session.instance_id
+        end
+      end
+    end
+  end
+  -- Keep an exit marker through the gap before a member is relaunched. In
+  -- particular, a Codex update reuses the same identity id, so losing this
+  -- marker would make already-seen, still-unread mail look fully seeded.
+  for alias, seeded in pairs(bus.unread_seeded) do
+    if not bus.agents[alias] then
+      if seeded ~= "exited" then
+        bus.unread_seeded[alias] = "exited"
+        bus.unread_seeded_exited_at[alias] = now
+      else
+        local since = bus.unread_seeded_exited_at[alias]
+        if since == nil then
+          bus.unread_seeded_exited_at[alias] = now
+        elseif not live_sessions[alias] and now - since >= 30 * 24 * 60 * 60 then
+          bus.unread_seeded[alias] = nil
+          bus.unread_seeded_exited_at[alias] = nil
+        end
+      end
+    end
+  end
+  for alias, agent in pairs(bus.agents) do
+    if agent then
+      local instance = notice_session_instance(alias, agent, session_instances)
+      local previous_instance = bus.unread_seeded[alias]
+      local update = bus.codex_update_state
+      local update_handoff = bus.codex_update_relaunches[alias]
+        or update.owner == alias
+        or (update.waiting and update.waiting[alias])
+        or (update.restart_waiting and update.restart_waiting[alias])
+      -- Check the policy only when unseeded: it captures the pane.
+      -- A ready-looking prompt during a Codex update handoff belongs to the
+      -- relaunch check. Seeding here can type over it after a task-poke timeout.
+      -- A delegated task's startup probe owns the pane until the task clears.
+      if previous_instance ~= instance and agent.id then
+        local counted, unread = pcall(mail.unread, agent.id)
+        if counted then
+          if unread <= 0 then
+            bus.unread_seeded[alias] = instance
+            bus.unread_seeded_exited_at[alias] = nil
+          elseif not bus.pending_tasks[alias] and not update_handoff
+              and remuda._butler_notify_policy(alias, now) then
+            local seeded, result = pcall(seed_unread_notices, alias, previous_instance, instance, unread)
+            if seeded and result then
+              bus.unread_seeded[alias] = instance
+              bus.unread_seeded_exited_at[alias] = nil
+            end
+          end
+        end
+      end
+    end
+  end
   local sessions = {}
   for session in pairs(bus.notices) do sessions[#sessions + 1] = session end
-  local now = notice_now()
   for _, session in ipairs(sessions) do
     local pending = bus.notices[session]
     if not bus.agents[session] then
@@ -783,6 +908,7 @@ function remuda._butler_send(from, to, text)
 end
 
 remuda._butler_notice = {
+  mail_notice_text = mail_notice_text,
   startup_action_safe = startup_action_safe,
   notice_recovery_error = notice_recovery_error,
 }

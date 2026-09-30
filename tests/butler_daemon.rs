@@ -4119,6 +4119,8 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
         &format!(
             r#"
           remuda.butler.project_home({home:?})
+          -- The shared data home can hold unread root mail from earlier tests.
+          remuda._butler_inbox("butler")
           remuda._butler_session_trace_path = {trace:?}
           remuda._butler_task_poke_attempts = 6
           remuda._butler_test_force_launch_probe = {{
@@ -4270,6 +4272,14 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
             local glyph = n == "t-codex" and "› " or "❯ "
             screens[n] = {{ glyph .. t, glyph }}
           end
+          -- Members' fixture Welcome mail is not under test here; keep its
+          -- unread notice out of the per-session logs.
+          local notify = remuda._butler_notify
+          remuda._butler_notify = function(alias, notice, id)
+            local m = id and remuda._butler_mail.find_message(id)
+            if m and m.subject == "Welcome to Butler" then return true end
+            return notify(alias, notice, id)
+          end
           local policy = remuda._butler_notify_policy
           remuda._butler_notify_policy = function(n, now)
             if n == "butler" then return true end
@@ -4318,7 +4328,10 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
         // Notices batch: one "Butler message ID ..." or "N new Butler messages".
         let leader_noticed = log
             .lines()
-            .any(|l| l.starts_with("butler type ") && l.contains("Butler message"));
+            .any(|l| {
+                l.starts_with("butler type ")
+                    && (l.contains("Butler message") || l.contains("new Butler messages arrived"))
+            });
         if typed == 3 && traced.contains("task_poke_timeout\tt-stuck")
             && leader_noticed
             && eval(&path, "return tostring(remuda._butler_bus.agents['t-claude-launch'] ~= nil)") == "true"
@@ -4362,6 +4375,10 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
     assert!(!log.contains("t-stuck "), "typed into an unknown dialog: {log}");
     assert!(std::fs::read_to_string(&trace).unwrap_or_default().contains("Workspace access changed"),
         "launch failure did not preserve the unknown dialog label");
+    assert!(log.contains(" type Butler message ") || log.contains(" new Butler messages arrived"),
+        "the leader is told about t-stuck: {log}");
+    assert_eq!(eval(&path, "local found=false; for _,o in pairs(remuda._butler_bus.objects) do if (o.content or ''):find('Task for t-stuck was not delivered', 1, true) then found=true end end; return tostring(found)"),
+        "true", "the task-poke failure was not mailed to the leader");
     // A batched notice does not name t-stuck; its give-up mail must.
     let leader_mail = eval(
         &path,
