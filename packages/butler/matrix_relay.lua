@@ -367,7 +367,7 @@ function relay.new(options)
     if not ok then error("cannot save Matrix relay state: " .. tostring(err), 0) end
   end
 
-  local function quarantine_event(ev, reason)
+  local function quarantine_event(ev, reason, room_id)
     local event_id = type(ev.event_id) == "string" and ev.event_id or ""
     local valid_id = event_id ~= "" and #event_id <= 512
     local id = valid_id and event_id or ("quarantine-" .. tostring(remuda._butler_new_ulid()))
@@ -377,7 +377,7 @@ function relay.new(options)
     local content = type(ev.content) == "table" and ev.content or {}
     state.quarantine[#state.quarantine + 1] = {
       id = id, event_id = cap_field(event_id, 512), sender = cap_field(ev.sender, 256),
-      room_id = cap_field(cfg.room, 512), created_at = timestamp(ev), reason = reason,
+      room_id = cap_field(room_id or cfg.room, 512), created_at = timestamp(ev), reason = reason,
       event_type = type(ev.type) == "string" and ev.type:sub(1, 80) or "",
       msgtype = type(content.msgtype) == "string" and content.msgtype:sub(1, 80) or "",
       preview = quarantine_preview(content.body),
@@ -748,7 +748,7 @@ function relay.new(options)
           local actual_room = room_id or cfg.room
           local sender_kind = member_kind(ev.sender, cfg)
           local is_mention = mentions(content, content.body, cfg.self_mxid)
-          local is_home = actual_room == cfg.home_room
+          local is_home = actual_room == cfg.home_room or cfg.rooms[actual_room] == "joined"
           local thread_id = thread_root or in_reply_to
           local is_threaded = thread_id ~= nil
           local subscriptions = state.subscriptions[actual_room] or json.object({})
@@ -838,6 +838,84 @@ function relay.new(options)
         if cfg.rooms[room_id] then
           local room_added = accept_events(room and room.timeline and room.timeline.events, nil, room_id)
           for _, id in ipairs(room_added) do added[#added + 1] = id end
+        end
+      end
+      local invites = response.rooms and response.rooms.invite or {}
+      for room_id, invitation in pairs(invites) do
+        if cfg.rooms[room_id] == nil then
+          local inviter
+          local events = invitation and invitation.invite_state and invitation.invite_state.events
+          for _, event in ipairs(type(events) == "table" and events or {}) do
+            if type(event) == "table" and event.type == "m.room.member"
+              and event.state_key == cfg.self_mxid
+              and type(event.content) == "table" and event.content.membership == "invite" then
+              inviter = event.sender
+              break
+            end
+          end
+          if type(inviter) == "string" and inviter ~= "" then
+            if cfg.allowed_senders[inviter] and member_kind(inviter, cfg) == "HUMAN" then
+              local added_room, add_error = matrix.config_add_room(config_path, room_id, "owner-invite")
+              if added_room then
+                cfg.rooms[room_id] = "joined"
+                cfg.room_how[room_id] = "owner-invite"
+                api.request_json({ method = "POST",
+                  path = "/_matrix/client/v3/rooms/" .. percent_encode(room_id) .. "/join",
+                  room = room_id, body = "{}", headers = { ["Content-Type"] = "application/json" },
+                }, function(result)
+                  if type(result) ~= "table" or result.error then
+                    local removed, remove_error = matrix.config_remove_room(config_path, room_id)
+                    cfg.rooms[room_id], cfg.room_how[room_id] = nil, nil
+                    local detail = type(result) == "table" and result.error or "Matrix join failed"
+                    if not removed then detail = tostring(detail) .. "; config rollback failed: " .. tostring(remove_error) end
+                    warn_once("invite-join", room_id, "butler Matrix owner invite join failed for "
+                      .. cap_field(room_id, 512) .. ": " .. tostring(detail))
+                    return
+                  end
+                  local text = "Joined; I read messages here from the owner."
+                  local body = encode({ msgtype = "m.notice", body = text })
+                  api.request_json({ method = "PUT",
+                    path = "/_matrix/client/v3/rooms/" .. percent_encode(room_id)
+                      .. "/send/m.room.message/" .. percent_encode("invite-" .. tostring(remuda._butler_new_ulid())),
+                    room = room_id, body = body,
+                    headers = { ["Content-Type"] = "application/json" },
+                  }, function(notice_result)
+                    if type(notice_result) ~= "table" or notice_result.error then
+                      local detail = type(notice_result) == "table" and notice_result.error or "Matrix notice failed"
+                      warn_once("invite-notice", room_id, "butler Matrix owner invite notice failed for "
+                        .. cap_field(room_id, 512) .. ": " .. tostring(detail))
+                    end
+                  end)
+                end)
+              else
+                warn_once("invite-config", room_id, "butler could not add Matrix owner-invited room "
+                  .. cap_field(room_id, 512) .. ": " .. tostring(add_error))
+              end
+            else
+              local ev = { event_id = "invite:" .. room_id .. "|" .. inviter,
+                sender = inviter, type = "m.room.member", content = {} }
+              if quarantine_event(ev, "invite_not_allowlisted", room_id) then
+                local safe_room = mail_body(cap_field(room_id, 512))
+                local safe_inviter = mail_body(cap_field(inviter, 256))
+                local text = "Invite to " .. safe_room .. " from " .. safe_inviter
+                  .. " was not accepted. Next: remuda butler matrix join " .. safe_room
+                local body = encode({ msgtype = "m.notice", body = text })
+                api.request_json({ method = "PUT",
+                  path = "/_matrix/client/v3/rooms/" .. percent_encode(cfg.home_room)
+                    .. "/send/m.room.message/" .. percent_encode("invite-" .. tostring(remuda._butler_new_ulid())),
+                  room = cfg.home_room, body = body,
+                  headers = { ["Content-Type"] = "application/json" },
+                }, function(notice_result)
+                  if type(notice_result) ~= "table" or notice_result.error then
+                    local detail = type(notice_result) == "table" and notice_result.error or "Matrix notice failed"
+                    warn_once("invite-home-notice", room_id .. "\0" .. inviter,
+                      "butler Matrix invite notice failed for " .. cap_field(room_id, 512)
+                        .. ": " .. tostring(detail))
+                  end
+                end)
+              end
+            end
+          end
         end
       end
       if type(response.next_batch) == "string" then state.since = response.next_batch end
