@@ -2090,6 +2090,9 @@ local function test_owner_yes_reply_approves_and_bare_yes_does_not()
     local id, event = file_request(env, NEW)
     room_events(env, { text_event("$bare", OWNER, "yes") })
     assert(server_joins(env, NEW) == 0 and is_open(id), "a bare yes must not answer the request")
+    room_events(env, { text_event("$question", OWNER, "Why this room?", event) })
+    assert(delivered_ids(env.delivered, "$question"),
+      "a non-answer reply to an approval request must still become ordinary mail")
     room_events(env, { text_event("$reply", OWNER,
       "> <@bot:example.org> Butler wants to join " .. NEW .. "\n\n Yes ", event) })
     assert(server_joins(env, NEW) == 1, "an owner yes reply to the request must join")

@@ -7,6 +7,7 @@ butler.approval = approval
 local handlers = approval._handlers or {}
 approval._handlers = handlers
 local attached
+local applying = {}
 local function safe_line(value, limit)
   value = tostring(value or "")
   local matrix = butler.matrix
@@ -94,6 +95,7 @@ end
 
 function approval.list()
   if not attached then return {} end
+  approval.sweep()
   return open_records(attached.state)
 end
 
@@ -112,6 +114,41 @@ function approval.reply(rec, text)
     return nil, "Approval request event is unavailable"
   end
   return attached.post(text, { rel_type = "m.thread", event_id = rec.event_id }, function() end)
+end
+
+local function apply_approved(rec)
+  if type(rec) ~= "table" or rec.status ~= "approved" or applying[rec.id] then return false end
+  local callback = handlers[rec.kind] and handlers[rec.kind].approve
+  if not callback then
+    rec.status, rec.error = "failed", "No approval handler is registered"
+    persist()
+    return nil, rec.error
+  end
+  applying[rec.id] = true
+  local completed = false
+  local function done(ok, err)
+    if completed then return end
+    completed = true
+    applying[rec.id] = nil
+    rec.status = ok and "applied" or "failed"
+    if err then rec.error = tostring(err) end
+    persist()
+  end
+  local ok, err = pcall(callback, rec, done)
+  if not ok then done(false, err) end
+  return true
+end
+
+function approval.reapply_approved()
+  if not attached then return 0 end
+  local count = 0
+  for _, rec in pairs(attached.state.approvals or {}) do
+    if type(rec) == "table" and rec.status == "approved" then
+      apply_approved(rec)
+      count = count + 1
+    end
+  end
+  return count
 end
 
 function approval.request(request, done)
@@ -179,35 +216,25 @@ end
 function approval.answer(id_or_event, verdict, who)
   if not attached then return nil, "Matrix relay is not running. Next: remuda butler matrix status" end
   if verdict ~= "approve" and verdict ~= "deny" then return nil, "Invalid approval answer." end
+  approval.sweep()
   local rec
   for id, candidate in pairs(attached.state.approvals or {}) do
     if type(candidate) == "table" and (tostring(id):upper() == tostring(id_or_event):upper()
       or candidate.event_id == id_or_event) then rec = candidate; break end
   end
   if not rec then return nil, "No such request." end
-  if rec.status ~= "open" then return nil, "Already answered." end
-  local now = math.floor(os.time() * 1000)
-  if tonumber(rec.expires_at) and now >= rec.expires_at then
-    rec.status, rec.answered_at = "expired", now
-    persist()
-    local callback = handlers[rec.kind] and handlers[rec.kind].expire
-    if callback then callback(rec) end
-    return nil, "Expired."
+  if rec.status ~= "open" then
+    return nil, rec.status == "expired" and "Expired." or "Already answered."
   end
+  local now = math.floor(os.time() * 1000)
   rec.status, rec.answered_by, rec.answered_at = verdict == "approve" and "approved" or "denied", who,
     now
   persist()
-  local callback = handlers[rec.kind] and handlers[rec.kind][verdict]
-  if callback then
-    if verdict == "approve" then
-      callback(rec, function(ok, err)
-        rec.status = ok and "applied" or "failed"
-        if err then rec.error = tostring(err) end
-        persist()
-      end)
-    else
-      callback(rec)
-    end
+  if verdict == "approve" then
+    apply_approved(rec)
+  else
+    local callback = handlers[rec.kind] and handlers[rec.kind].deny
+    if callback then callback(rec) end
   end
   return true
 end

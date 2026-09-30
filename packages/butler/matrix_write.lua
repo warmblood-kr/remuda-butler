@@ -405,8 +405,77 @@ local function file_request(room, alias, display_name, is_public, members, asker
     end)
 end
 
+local function approval_label(rec)
+  local data = type(rec.data) == "table" and rec.data or {}
+  return sanitize_directory_text(data.alias or data.name or data.room_id or "the Matrix room")
+end
+
+local function approval_mail(rec, text)
+  if type(remuda._butler_send) == "function" then
+    pcall(remuda._butler_send, "butler", rec.asker, text)
+  end
+end
+
+local function approval_thread(rec, text)
+  pcall(approval.reply, rec, text)
+end
+
+local function approval_join_failed(rec, err, done)
+  err = tostring(err or "unknown Matrix error")
+  approval_mail(rec, "Approved, but the join failed: " .. err
+    .. ". Next: ask the owner to invite the bot, then run the join again.")
+  approval_thread(rec, "Approved by " .. tostring(rec.answered_by or "the owner") .. "; join failed: " .. err)
+  done(false, err)
+end
+
+local function join_approved(rec, done)
+  local data = type(rec.data) == "table" and rec.data or {}
+  local room, alias = data.room_id, data.alias
+  if not room_id_valid(room) then return approval_join_failed(rec, "invalid stored room ID", done) end
+  local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths or {}
+  local config_path = paths.config_path
+  if type(config_path) ~= "string" or config_path == "" then
+    return approval_join_failed(rec, "Matrix config path is unavailable", done)
+  end
+  local conf, config_error = matrix.read_config(config_path)
+  if not conf then return approval_join_failed(rec, config_error, done) end
+  local added = false
+  if conf.rooms[room] ~= "home" and conf.rooms[room] ~= "all" then
+    local ok, wrote_or_error = matrix.config_add_room(config_path, room, "approved", alias)
+    if not ok then return approval_join_failed(rec, wrote_or_error, done) end
+    added = wrote_or_error == true
+  end
+  return matrix.request_json({ method = "POST",
+    path = "/_matrix/client/v3/rooms/" .. path_component(room) .. "/join",
+    room = room, body = "{}", headers = { ["Content-Type"] = "application/json" },
+  }, function(result)
+    if type(result) ~= "table" or result.error then
+      local failure = type(result) == "table" and result.error or "Matrix join returned no result"
+      if added then
+        local removed, remove_error = matrix.config_remove_room(config_path, room)
+        if not removed then
+          failure = tostring(failure) .. "; config rollback failed: " .. tostring(remove_error)
+        end
+      end
+      return approval_join_failed(rec, failure, done)
+    end
+    local label = approval_label(rec)
+    approval_mail(rec, "Approved; joined " .. label .. " (" .. room .. ").")
+    approval_thread(rec, "Approved by " .. tostring(rec.answered_by or "the owner") .. "; joined.")
+    done(true)
+  end)
+end
+
 approval.handler("join", {
-  approve = function(_, done) done(false, "not yet") end,
+  approve = join_approved,
+  deny = function(rec)
+    approval_mail(rec, "Denied by the owner. Next: ask the owner in HOME why, or pick another room.")
+    approval_thread(rec, "Denied by " .. tostring(rec.answered_by or "the owner") .. ".")
+  end,
+  expire = function(rec)
+    approval_mail(rec, "No answer in 10 minutes; not joined. Next: run the join again to re-ask.")
+    approval_thread(rec, "Expired.")
+  end,
 })
 
 function matrix.join(opts, on_done, agent)

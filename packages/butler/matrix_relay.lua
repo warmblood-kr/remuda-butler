@@ -361,6 +361,14 @@ local function load_state(path)
   state.quarantine, state.routes = json.array({}), json.object({})
   state.reply_outbox, state.reply_results = json.object({}), json.object({})
   state.approvals = approvals
+  local approval_cutoff = math.floor(os.time() * 1000) - 24 * 60 * 60 * 1000
+  for id, rec in pairs(state.approvals) do
+    if type(rec) == "table" and (rec.status == "applied" or rec.status == "failed"
+      or rec.status == "denied" or rec.status == "expired")
+      and tonumber(rec.answered_at) and tonumber(rec.answered_at) < approval_cutoff then
+      state.approvals[id] = nil
+    end
+  end
   for room_id, roots in pairs(subscriptions) do
     if type(room_id) == "string" and type(roots) == "table" and getmetatable(roots) ~= JSON_ARRAY_MT then
       local valid_roots = json.object({})
@@ -466,7 +474,8 @@ function relay.new(options)
     if not saved then warn_once("quarantine", state_path .. "\0expiry",
       "butler could not remove expired Matrix quarantine records: " .. tostring(save_error)) end
   end
-  local active, request_handle, request_token, retry_timer, backfill_timer = false, nil, nil, nil, nil
+  local active, request_handle, request_token, retry_timer, backfill_timer, approval_timer =
+    false, nil, nil, nil, nil, nil
   local delivery_retry_waiting, delivery_retry_timers = {}, {}
   local reply_retry_timers, reply_in_flight = {}, {}
   local joining = {}
@@ -918,16 +927,18 @@ function relay.new(options)
           local approval_record, approval_verdict
           if approval then
             local targets, verdict = approval_answer_fields(ev)
-            for _, target in ipairs(targets) do
-              approval_record = approval.for_event(target)
-              if approval_record then approval_verdict = verdict; break end
+            if verdict then
+              for _, target in ipairs(targets) do
+                approval_record = approval.for_event(target)
+                if approval_record then approval_verdict = verdict; break end
+              end
             end
           end
           if approval_record then
             if event_id ~= "" then add_processed(state, event_id) end
             if cursor then state.since = cursor end
             local origin_ms = tonumber(ev.origin_server_ts)
-            local counts = approval_verdict ~= nil and room_id == cfg.home_room
+            local counts = approval_verdict ~= nil and (room_id or cfg.room) == cfg.home_room
               and type(ev.sender) == "string" and cfg.allowed_senders[ev.sender]
               and member_kind(ev.sender, cfg) == "HUMAN"
               and origin_ms ~= nil and tonumber(approval_record.created_ms) ~= nil
@@ -935,6 +946,8 @@ function relay.new(options)
             if counts then
               if approval_record.status == "open" then
                 pcall(approval.answer, approval_record.event_id, approval_verdict, ev.sender)
+              elseif approval_record.status == "expired" then
+                pcall(approval.reply, approval_record, "Expired.")
               else
                 pcall(approval.reply, approval_record, "Already answered.")
               end
@@ -1217,6 +1230,13 @@ function relay.new(options)
     if active then return false end
     generation = generation + 1
     active = true
+    if approval and type(approval.reapply_approved) == "function" then approval.reapply_approved() end
+    if approval and type(approval.sweep) == "function" and type(remuda.schedule) == "function" then
+      -- ponytail: move to remuda.after when team-3 lands it.
+      approval_timer = remuda.schedule({ every = 1, run = function()
+        if active then approval.sweep() end
+      end })
+    end
     for id, item in pairs(state.reply_outbox) do
       if item.status ~= "failed" then instance._send_reply(id) end
     end
@@ -1236,10 +1256,11 @@ function relay.new(options)
     reply_in_flight = {}
     if retry_timer then pcall(remuda.cancel, retry_timer) end
     if backfill_timer then pcall(remuda.cancel, backfill_timer) end
+    if approval_timer then pcall(remuda.cancel, approval_timer) end
     for _, timer in pairs(delivery_retry_timers) do pcall(remuda.cancel, timer) end
     for _, timer in pairs(reply_retry_timers) do pcall(remuda.cancel, timer) end
     delivery_retry_timers, delivery_retry_waiting, reply_retry_timers = {}, {}, {}
-    retry_timer, backfill_timer = nil, nil
+    retry_timer, backfill_timer, approval_timer = nil, nil, nil
     return true
   end
 
