@@ -719,27 +719,27 @@ local function take_delivery_notice_result(message, alias)
   delivery_notice_results[key] = nil
   return result
 end
+local function mail_notice_text(message, detail)
+  if not detail then
+    local sender = message.from and (message.from.alias or message.from.session) or "outside"
+    if message.kind == "forward" then
+      detail = "forwarded by " .. sender
+    elseif message.in_reply_to then
+      detail = "(reply) from " .. sender
+    else
+      sender = message.matrix and message.matrix.sender or (message.from and message.from.session) or sender
+      detail = "from " .. sender
+    end
+  end
+  return "Butler message " .. message.id .. " " .. detail .. " arrived. Read it: remuda butler inbox"
+end
 local function notify_mail_delivery(message, delivered, recipient_alias, what)
   local result = {}
   local recipient_ref = recipient_alias or (type(message.to) == "table" and message.to.alias or message.to)
   local recipient_ok, _, recipient = pcall(mail_id, recipient_ref, false)
   result.recipient_live = recipient_ok
   if recipient_ok then
-    local notice
-    if what then
-      notice = "Butler message " .. delivered.id .. " " .. what
-    else
-      local sender = message.from.alias or message.from.session or "outside"
-      if message.kind == "forward" then
-        notice = "Butler message " .. delivered.id .. " forwarded by " .. sender
-      elseif message.in_reply_to then
-        notice = "Butler message " .. delivered.id .. " (reply) from " .. sender
-      else
-        sender = message.matrix and message.matrix.sender or message.from.session or sender
-        notice = "Butler message " .. delivered.id .. " from " .. sender
-      end
-    end
-    notice = notice .. " arrived. Read it: remuda butler inbox"
+    local notice = mail_notice_text(delivered, what)
     local notify_ok, notified, notify_error =
       pcall(remuda._butler_notify, recipient.alias, notice, delivered.id)
     if notify_ok then
@@ -1539,20 +1539,14 @@ local function seed_unread_notices(alias, previous_instance, instance)
       end
       if not already_pending and not already_seen then
         local message = mail.find_message(message_id) or {}
-        local sender = message.from and (message.from.alias or message.from.session) or "outside"
         local resent = bus.mail_resent[agent.id] and bus.mail_resent[agent.id][message_id]
         local detail
         if resent then
           local by = resent.from and (resent.from.alias or resent.from.session) or "outside"
           detail = "forwarded by " .. by
-        elseif message.in_reply_to then
-          detail = "(reply) from " .. sender
-        else
-          sender = message.matrix and message.matrix.sender or (message.from and message.from.session) or sender
-          detail = "from " .. sender
         end
-        local notice = "Butler message " .. message_id .. " " .. detail
-          .. " arrived. Read it: remuda butler inbox"
+        message.id = message.id or message_id
+        local notice = mail_notice_text(message, detail)
         remuda._butler_notify(alias, notice, message_id)
       end
     end
