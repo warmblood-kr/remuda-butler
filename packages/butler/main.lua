@@ -1587,8 +1587,17 @@ function remuda._butler_deliver_notices()
     if agent then
       local instance = notice_session_instance(alias, agent, session_instances)
       local previous_instance = bus.unread_seeded[alias]
+      local update = bus.codex_update_state
+      local update_handoff = bus.codex_update_relaunches[alias]
+        or update.owner == alias
+        or (update.waiting and update.waiting[alias])
+        or (update.restart_waiting and update.restart_waiting[alias])
       -- Check the policy only when unseeded: it captures the pane.
-      if previous_instance ~= instance and remuda._butler_notify_policy(alias, now) then
+      -- A ready-looking prompt during a Codex update handoff belongs to the
+      -- relaunch check. Seeding here can type over it after a task-poke timeout.
+      -- A delegated task's startup probe owns the pane until the task clears.
+      if previous_instance ~= instance and not bus.pending_tasks[alias] and not update_handoff
+          and remuda._butler_notify_policy(alias, now) then
         local seeded, result = pcall(seed_unread_notices, alias, previous_instance, instance)
         if seeded and result then bus.unread_seeded[alias] = instance end
       end
