@@ -1096,6 +1096,7 @@ local function test_open_mode_denies_room_alias_room_server_and_inviter_server()
     { name = "inviter server", room = NEW, inviter = "@mallory:denied.example",
       alias = "#safe:example.org", deny = "deny_server=denied.example" },
   }
+  local failures = {}
   for index, spec in ipairs(cases) do
     local dir, path = open_invite_fixture(spec.deny .. "\n")
     local client, delivered = invite_client(), {}
@@ -1103,16 +1104,20 @@ local function test_open_mode_denies_room_alias_room_server_and_inviter_server()
     local invitation = invite_with_state(spec.room, spec.inviter, spec.alias)
     client:sync({ json = { next_batch = "s" .. index, rooms = { invite = invitation } } })
     client:pump()
-    assert(client:joins(spec.room) == 0, spec.name .. " denial must refuse the invite before POST join")
-    local item
-    for _, q in ipairs(relay:quarantine_list()) do
-      if q.reason == "invite_denied" then item = q end
-    end
-    assert(item and item.room_id == spec.room,
-      spec.name .. " denial must quarantine as invite_denied")
+    local case_ok, case_err = pcall(function()
+      assert(client:joins(spec.room) == 0, spec.name .. " denial must refuse the invite before POST join")
+      local item
+      for _, q in ipairs(relay:quarantine_list()) do
+        if q.reason == "invite_denied" then item = q end
+      end
+      assert(item and item.room_id == spec.room,
+        spec.name .. " denial must quarantine as invite_denied")
+    end)
+    if not case_ok then failures[#failures + 1] = spec.name .. ": " .. tostring(case_err) end
     relay:stop()
     remove_dir(dir)
   end
+  assert(#failures == 0, table.concat(failures, "\n"))
 end
 
 local function test_open_mode_sender_allowlist_still_quarantines()
