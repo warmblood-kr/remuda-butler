@@ -1405,19 +1405,34 @@ local function test_open_mode_repeated_invite_for_joined_room_rejoins_once()
   remove_dir(dir)
 end
 
-local function test_open_mode_failed_join_rolls_back_config_and_budget()
+local function test_open_mode_failed_join_rolls_back_config_but_counts_against_cap()
   local dir, path = open_invite_fixture()
+  local timestamps = matrix.json_array({})
+  for index = 1, 19 do
+    timestamps[index] = { room_id = "!used" .. index .. ":example.org", at = os.time() }
+  end
+  local state_file = assert(io.open(path .. ".since", "wb"))
+  state_file:write(assert(matrix.encode_json({ auto_join_timestamps = timestamps })))
+  state_file:close()
   local client, delivered = invite_client(), {}
   local relay = started_relay(path, client, delivered)
   local invitation = invite_with_state(NEW, STRANGER, "#open:example.org")
   client:sync({ json = { next_batch = "s1", rooms = { invite = invitation } } })
   client:pump({ error = "M_FORBIDDEN" })
-  assert(room_line(path, NEW) == nil, "a failed open-mode join must remove its config line")
-  client:sync({ json = { next_batch = "s2", rooms = { invite = invitation } } })
+  assert(room_line(path, NEW) == nil, "a failed open-mode join must still roll back its config line")
+  assert(#relay:state().auto_join_timestamps == 20,
+    "a failed open-mode join must retain its timestamp in the daily budget")
+  local next_room = "!after-failure:example.org"
+  client:sync({ json = { next_batch = "s2",
+    rooms = { invite = invite_with_state(next_room, STRANGER, "#after:example.org") } } })
   client:pump()
-  assert(client:joins(NEW) == 2, "a failed join must release the room dedupe and budget reservation")
-  assert(room_line(path, NEW) and client:messages(HOME, "Joined " .. NEW) == 1,
-    "a later successful invite must write config and notify HOME")
+  assert(client:joins(NEW) == 1 and client:joins(next_room) == 0,
+    "the failed 20th join must cause the next room invite to hit the cap")
+  local capped
+  for _, item in ipairs(relay:quarantine_list()) do
+    if item.room_id == next_room and item.reason == "invite_cap" then capped = item end
+  end
+  assert(capped, "the next invite after a failed 20th join must be quarantined at the cap")
   relay:stop()
   remove_dir(dir)
 end
@@ -2329,7 +2344,7 @@ for _, case in ipairs({
   { "test_open_mode_configured_room_invite_rejoins_and_preserves_line", test_open_mode_configured_room_invite_rejoins_and_preserves_line },
   { "test_open_mode_configured_room_rejoin_honors_deny_cap_and_rollback", test_open_mode_configured_room_rejoin_honors_deny_cap_and_rollback },
   { "test_open_mode_repeated_invite_for_joined_room_rejoins_once", test_open_mode_repeated_invite_for_joined_room_rejoins_once },
-  { "test_open_mode_failed_join_rolls_back_config_and_budget", test_open_mode_failed_join_rolls_back_config_and_budget },
+  { "test_open_mode_failed_join_rolls_back_config_but_counts_against_cap", test_open_mode_failed_join_rolls_back_config_but_counts_against_cap },
   { "test_open_mode_hostile_invite_state_is_refused", test_open_mode_hostile_invite_state_is_refused },
   { "test_open_mode_conflicting_inviter_events_remain_refused", test_open_mode_conflicting_inviter_events_remain_refused },
   { "test_config_add_room_pads_short_config", test_config_add_room_pads_short_config },

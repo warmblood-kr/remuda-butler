@@ -1155,7 +1155,6 @@ function relay.new(options)
                                 .. terminal_safe_field(tostring(remove_error), 512))
                           end
                         end
-                        remove_auto_join(room_id, joined_at)
                         local detail = type(result) == "table" and result.error or "Matrix join failed"
                         warn_once("invite-join", room_id, "butler Matrix open invite join failed for "
                           .. terminal_safe_field(room_id, 512) .. ": " .. terminal_safe_field(tostring(detail), 512))
