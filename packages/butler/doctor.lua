@@ -3,18 +3,27 @@ local function platform_name()
   return package.config:sub(1, 1) == "\\" and "windows" or "posix"
 end
 
-local function probe_command(argv)
-  local ok, result = pcall(remuda.process.run, { argv = argv, timeout = 5 })
-  if not ok then
+local function command_candidates(name, platform)
+  platform = platform or platform_name()
+  if platform == "windows" then return { name, name .. ".cmd" } end
+  return { name }
+end
+
+local function probe_command(argv, platform)
+  for _, name in ipairs(command_candidates(argv[1], platform)) do
+    local candidate = { name }
+    for i = 2, #argv do candidate[#candidate + 1] = argv[i] end
+    local ok, result = pcall(remuda.process.run, { argv = candidate, timeout = 5 })
+    if ok then return true, result.code == 0 and not result.timed_out end
+
     local message = tostring(result):lower()
-    if message:find("os error 2", 1, true)
+    if not (message:find("os error 2", 1, true)
         or message:find("no such file or directory", 1, true)
-        or message:find("cannot find the file specified", 1, true) then
-      return false, false
+        or message:find("cannot find the file specified", 1, true)) then
+      error("Could not run " .. argv[1] .. " authentication check.", 0)
     end
-    error("Could not run " .. argv[1] .. " authentication check.", 0)
   end
-  return true, result.code == 0 and not result.timed_out
+  return false, false
 end
 
 local function probe()
@@ -56,6 +65,10 @@ local function render(probe_results, platform)
   return lines
 end
 
-local doctor = { probe = probe, render = render }
+local doctor = {
+  probe = probe,
+  render = render,
+  candidate_names = command_candidates,
+}
 remuda._butler_doctor = doctor
 return doctor

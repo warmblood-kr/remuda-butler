@@ -8121,6 +8121,27 @@ fn doctor_render(probes: &str, platform: &str) -> String {
     eval(&path, &code)
 }
 
+fn doctor_candidate_names(name: &str, platform: &str) -> String {
+    let dir = scratch_dir("butler-doctor-candidates");
+    let (_daemon, path) = butler_cli_test_daemon(&dir);
+    let module = std::env::current_dir()
+        .expect("core checkout")
+        .join("../packages/butler/doctor.lua");
+    let module = lua_raw_string(&module.to_string_lossy());
+    let name = lua_raw_string(name);
+    let platform = lua_raw_string(platform);
+    let code = format!(
+        "local doctor = dofile({module}); return table.concat(doctor.candidate_names({name}, {platform}), ',')"
+    );
+    eval(&path, &code)
+}
+
+#[test]
+fn doctor_candidate_names_include_windows_cmd_fallback() {
+    assert_eq!(doctor_candidate_names("codex", "windows"), "codex,codex.cmd");
+    assert_eq!(doctor_candidate_names("codex", "posix"), "codex");
+}
+
 fn doctor_status(installed: bool, logged_in: bool) -> String {
     format!("{{ installed = {installed}, logged_in = {logged_in} }}")
 }
