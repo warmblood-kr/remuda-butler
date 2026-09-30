@@ -2294,16 +2294,13 @@ fn butler_message_bodies_preserve_stdin_and_file_content_and_enforce_limits() {
     assert!(!relative.status.success());
     assert!(String::from_utf8_lossy(&relative.stderr).contains("message file path must be absolute"));
 
-    let fifo = dir.join("message.fifo");
-    let status = std::process::Command::new("mkfifo").arg(&fifo).status().expect("create FIFO");
-    assert!(status.success(), "mkfifo failed");
     let started = Instant::now();
-    let non_regular = remuda_timed(&dir, &["-s", "s", "butler", "send", "member", "--file", fifo.to_str().unwrap()]);
-    assert!(started.elapsed() < Duration::from_secs(5), "FIFO read blocked too long");
+    let non_regular = remuda_timed(&dir, &["-s", "s", "butler", "send", "member", "--file", "/dev/stdin"]);
+    assert!(started.elapsed() < Duration::from_secs(5), "/dev/stdin read blocked too long");
     assert!(!non_regular.status.success());
-    assert!(String::from_utf8_lossy(&non_regular.stderr).contains("message file must be a regular file"));
+    assert!(String::from_utf8_lossy(&non_regular.stderr).contains("--file must be a regular file; for a pipe, use -"));
     let responsive = remuda_timed(&dir, &["-s", "s", "butler", "sessions"]);
-    assert!(responsive.status.success(), "daemon stopped responding after FIFO rejection");
+    assert!(responsive.status.success(), "daemon stopped responding after /dev/stdin rejection");
 
 }
 

@@ -2402,32 +2402,6 @@ local function words_after(args, first)
 end
 
 local MAX_MESSAGE_BYTES = 64 * 1024
-local MESSAGE_FILE_READER = [==[
-import os, stat, sys
-
-path = sys.argv[1]
-try:
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            print("message file must be a regular file", file=sys.stderr)
-            sys.exit(2)
-        body = bytearray()
-        while len(body) <= 65536:
-            chunk = os.read(fd, 65537 - len(body))
-            if not chunk:
-                break
-            body.extend(chunk)
-        if len(body) > 65536:
-            print("message body exceeds the 64 KiB limit", file=sys.stderr)
-            sys.exit(2)
-        sys.stdout.buffer.write(body)
-    finally:
-        os.close(fd)
-except OSError as exc:
-    print("cannot read message file: " + (exc.strerror or "I/O error"), file=sys.stderr)
-    sys.exit(2)
-]==]
 local function checked_message_body(body)
   if type(body) ~= "string" or #body == 0 then error("message body must not be empty", 0) end
   if #body > MAX_MESSAGE_BYTES then error("message body exceeds the 64 KiB limit", 0) end
@@ -2449,17 +2423,17 @@ local function message_body(args, first, caller)
     local absolute = path:sub(1, 1) == "/" or path:sub(1, 1) == "\\"
       or path:match("^%a:[/\\]") ~= nil
     if not absolute then error('message file path must be absolute; use `--file "$PWD/path"`', 0) end
-    if type(remuda.process) ~= "table" or type(remuda.process.run) ~= "function" then
-      error("`--file` requires Remuda core process support (#250)", 0)
+    -- ponytail: io.open blocks on a named FIFO outside /dev and /proc and would
+    -- hang the daemon; upgrade to a core non-blocking fs read word when it exists.
+    if path:match("^/dev/") or path:match("^/proc/") then
+      error("--file must be a regular file; for a pipe, use - and redirect stdin (Next: remuda butler send NAME - < FILE)", 0)
     end
-    local result = remuda.process.run({
-      argv = { "python3", "-c", MESSAGE_FILE_READER, path }, timeout = 3,
-    })
-    if result.timed_out then error("reading message file timed out", 0) end
-    if result.code ~= 0 then
-      error((result.stderr or "cannot read message file"):gsub("%s+$", ""), 0)
-    end
-    return checked_message_body(result.stdout or "")
+    local file, open_err = io.open(path, "rb")
+    if not file then error("cannot read message file: " .. tostring(open_err), 0) end
+    local body, read_err = file:read(MAX_MESSAGE_BYTES + 1)
+    file:close()
+    if read_err then error("cannot read message file: " .. tostring(read_err), 0) end
+    return checked_message_body(body or "")
   end
   return checked_message_body(words_after(args, first))
 end

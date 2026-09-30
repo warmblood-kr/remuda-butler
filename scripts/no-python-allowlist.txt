@@ -12,4 +12,3 @@ tests/live_reload.sh|1|M2 TODO: remove legacy Matrix relay process fixtures|    
 tests/live_reload.sh|1|M2 TODO: remove legacy Matrix relay process fixtures|if [[ -n "$OLD_RELAY_PID" ]] && kill -0 "$OLD_RELAY_PID" 2>/dev/null; then fail "rollback Python relay survived roll-forward"; fi
 tests/butler_mcp.rs|2|core #213 TODO: remove statusLine test helper|    let mut helper = Command::new("python3")
 tests/butler_daemon.rs|1|M2 TODO: remove legacy Matrix relay test cleanup|        // Python relay. Match both its source marker and this test's cwd so
-packages/butler/main.lua|1|core #213 TODO: replace message file reader with Lua|      argv = { "python3", "-c", MESSAGE_FILE_READER, path }, timeout = 3,
