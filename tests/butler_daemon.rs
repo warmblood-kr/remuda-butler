@@ -5863,9 +5863,11 @@ while IFS= read -r line; do
   case "$line" in
     '')
       if [ "$scenario" = model-confirm ] || [ "$scenario" = model-confirm-with-status ] \
-          || [ "$scenario" = model-confirm-transient ] || [ "$scenario" = model-confirm-changing-status ]; then
+          || [ "$scenario" = model-confirm-transient ] || [ "$scenario" = model-confirm-changing-status ] \
+          || [ "$scenario" = model-confirm-static ]; then
         printf 'KEY:RET\n' >> "$log"
-        model='sonnet'; paint
+        model='sonnet'
+        if [ "$scenario" != model-confirm-static ]; then paint; fi
       fi
       ;;
     '/model sonnet')
@@ -5880,6 +5882,8 @@ while IFS= read -r line; do
         cat "$model_confirm_fixture"
       elif [ "$scenario" = model-confirm-changing-status ]; then
         cat "$changing_status_model_confirm_fixture"
+      elif [ "$scenario" = model-confirm-static ]; then
+        cat "$model_confirm_fixture"
       elif [ "$scenario" = stale-model-confirm ]; then
         cat "$stale_model_confirm_fixture"
       elif [ "$scenario" = wrong-title-model-confirm ]; then
@@ -5944,6 +5948,7 @@ done
           screen = screen:gsub("Status tick: %d+", "Status tick: " .. remuda._fake_model_confirm_status_tick)
         end
         if name == "fake-model-confirm" or name == "fake-model-confirm-transient"
+            or name == "fake-model-confirm-static"
             or name == "fake-model-confirm-with-status" or name == "fake-model-confirm-changing-status" then
           remuda._fake_model_confirm_screen = screen
           if name == "fake-model-confirm-with-status"
@@ -6037,6 +6042,7 @@ done
         ("fake-unknown", "claude", "unknown"),
         ("fake-model-confirm-wrong-title", "claude", "wrong-title-model-confirm"),
         ("fake-model-confirm", "claude", "model-confirm"),
+        ("fake-model-confirm-static", "claude", "model-confirm-static"),
         ("fake-model-confirm-transient", "claude", "model-confirm-transient"),
         ("fake-model-confirm-changing-status", "claude", "model-confirm-changing-status"),
         ("fake-model-confirm-with-status", "claude", "model-confirm-with-status"),
@@ -6077,7 +6083,8 @@ done
         if name == "fake-unsafe-model" {
             eval(&path, "remuda._butler_bus.agents['fake-unsafe-model'].model = 'opus; /compact'");
         }
-        if name == "fake-model-confirm" || name == "fake-model-confirm-transient"
+        if name == "fake-model-confirm" || name == "fake-model-confirm-static"
+            || name == "fake-model-confirm-transient"
             || name == "fake-model-confirm-changing-status" || name == "fake-model-confirm-with-status" {
             eval(&path, "remuda._butler_compaction_config.claude_completion_timeout = 6");
         }
@@ -6205,6 +6212,17 @@ done
                 if name == "fake-settings-mismatch" {
                     assert_eq!(reports.matches("settings.json model is sonnet, expected opus").count(), 1,
                         "a valid differing model should alert the parent exactly once: {reports:?}");
+                    assert_eq!(eval(&path, &format!(
+                        "return tostring(remuda._butler_compaction_members_state[{name:?}].restore_pending)")), "opus",
+                        "settings.json still on sonnet must keep the prior model restore pending");
+                    eval(&path, &format!("return remuda._butler_compaction_execute({name:?})"));
+                    let deadline = Instant::now() + Duration::from_secs(8);
+                    loop {
+                        let got = std::fs::read_to_string(&log).unwrap_or_default();
+                        if got.matches("CMD:/model opus\n").count() >= 2 { break; }
+                        assert!(Instant::now() < deadline, "next tick must retype the prior model: {got:?}");
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
                 } else {
                     assert!(!reports.contains("settings.json model is"),
                         "missing, keyless, or invalid settings.json must not alert for {name}: {reports:?}");
@@ -6326,7 +6344,8 @@ done
             assert_eq!(got, "CMD:/model sonnet\nKEY:RET\n",
                 "same options under a different dialog title must not receive Return: {got:?}");
         }
-        if name == "fake-model-confirm" || name == "fake-model-confirm-transient"
+        if name == "fake-model-confirm" || name == "fake-model-confirm-static"
+            || name == "fake-model-confirm-transient"
             || name == "fake-model-confirm-changing-status" || name == "fake-model-confirm-with-status" {
             let prior_reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
             let prior_report_count = prior_reports.lines().count();

@@ -3680,7 +3680,6 @@ function remuda._butler_compaction_execute(session_name, force)
     pcall(remuda._butler_send, session_name, agent.parent or "butler",
       "Compaction failed: " .. tostring(reason))
   end
-  local settings_model_alert_sent = false
   local function finish_success(event)
     if agent.kind == "claude" then
       local settings = read_claude_settings(settings_path)
@@ -3690,11 +3689,17 @@ function remuda._butler_compaction_execute(session_name, force)
       elseif not matches then
         _butler_trace("settings_model_mismatch", detail .. " model=" .. tostring(actual)
           .. " expected=" .. tostring(prior_model))
-        if not settings_model_alert_sent then
-          settings_model_alert_sent = true
+        if not state.settings_model_alert_sent then
+          state.settings_model_alert_sent = true
           pcall(remuda._butler_send, session_name, agent.parent or "butler",
             "settings.json model is " .. tostring(actual) .. ", expected " .. tostring(prior_model))
         end
+        -- The prior model is not back yet: keep the durable record so the
+        -- next tick types /model again (bounded by restore attempts).
+        state.restore_pending = prior_model
+        state.restore_pending_attempt_active = true
+        fail("settings.json model is " .. tostring(actual))
+        return
       else
         _butler_trace("settings_model_verified", detail .. " model=" .. tostring(actual))
       end
@@ -3708,6 +3713,7 @@ function remuda._butler_compaction_execute(session_name, force)
     state.restore_pending_attempt_active = nil
     state.restore_pending_failure_notified = nil
     state.restore_pending_exhausted = nil
+    state.settings_model_alert_sent = nil
     clear_legacy_restore_state(state)
     local cleared, clear_err = clear_compaction_restore(compaction_agent_key(agent, session_name), session_name)
     if not cleared then
@@ -3737,39 +3743,51 @@ function remuda._butler_compaction_execute(session_name, force)
     return true
   end
   local function wait_for(id, matcher, action, timeout, on_timeout)
-    local branches = { { id = id, match = matcher, action = action } }
-    local model_confirm_state = { signature = nil, captures = 0, started_at = nil, last_capture_at = nil }
-    local unknown_state = { signature = nil, captures = 0, started_at = nil, last_capture_at = nil }
-    -- The daemon captures every second; allow skipped ticks while keeping the
-    -- settle wait bounded. Repeated output events within one second count once.
-    local stable_captures, stable_timeout = 3, 5
-    local function stable_screen(state, signature)
+    local confirmation_sent = false
+    local handle
+    local action_started = false
+    local function run_action(screen)
+      if action_started then return end
+      action_started = true
+      if handle and handle.cancel then handle:cancel() end
+      return action(screen)
+    end
+    local branches = { { id = id, match = matcher, action = run_action } }
+    local model_confirm_state = { signature = nil, captures = 0, polls = 0, started_at = nil }
+    local unknown_state = { signature = nil, captures = 0, polls = 0, started_at = nil }
+    -- Each expect tick (native clock, about 1 s, with or without output)
+    -- captures once and counts it here; never sleep, it blocks the image.
+    -- The poll cap and deadline bound the wait; expiry fails closed.
+    local stable_captures, stable_unknown_captures, stable_poll_cap, stable_timeout = 3, 10, 50, 5
+    local function stable_screen(state, signature, required_captures)
       if not signature then
-        state.signature, state.captures, state.started_at, state.last_capture_at = nil, 0, nil, nil
+        state.signature, state.captures, state.polls, state.started_at = nil, 0, 0, nil
         return false
       end
       local now = os.time()
+      state.started_at = state.started_at or now
       if state.signature ~= signature then
         state.signature, state.captures = signature, 1
-        state.started_at = state.started_at or now
-        state.last_capture_at = now
-      elseif now > state.last_capture_at then
+      else
         state.captures = state.captures + 1
-        state.last_capture_at = now
       end
-      return state.captures >= stable_captures and now - state.started_at <= stable_timeout
+      state.polls = state.polls + 1
+      return state.captures >= (required_captures or stable_captures)
+        and state.polls <= stable_poll_cap
+        and now - state.started_at <= stable_timeout
     end
     local function stable_wait_expired(state)
-      return state.started_at ~= nil and os.time() - state.started_at >= stable_timeout
+      return state.started_at ~= nil
+        and (state.polls >= stable_poll_cap or os.time() - state.started_at >= stable_timeout)
     end
     local function model_confirm_signature(screen)
       if type(screen) ~= "string" then return nil end
-      local lines = bottom_screen_lines(screen, 18)
+      local lines = bottom_screen_lines(screen, 32)
       for index = 1, #lines - 1 do
         if index > #lines - 8
             and lines[index]:find("❯%s*1%.%s+Yes")
             and lines[index + 1]:find("%d%.%s+No, go back") then
-          for title_row = math.max(1, index - 10), index - 1 do
+          for title_row = math.max(1, index - 24), index - 1 do
             if lines[title_row]:find("Switch model?", 1, true) then
               local dialog = {}
               for row = title_row, index + 1 do dialog[#dialog + 1] = lines[row] end
@@ -3780,24 +3798,46 @@ function remuda._butler_compaction_execute(session_name, force)
       end
       return nil
     end
+    local function model_confirm_options_visible(screen)
+      if type(screen) ~= "string" then return false end
+      local lines = bottom_screen_lines(screen, 32)
+      for index = 1, #lines - 1 do
+        if index > #lines - 24
+            and lines[index]:find("❯%s*1%.%s+Yes")
+            and lines[index + 1]:find("%d%.%s+No, go back") then
+          return true
+        end
+      end
+      return false
+    end
+    local function settle_model_confirm(screen)
+      local signature = model_confirm_signature(screen)
+      if signature then return stable_screen(model_confirm_state, signature) end
+      if not model_confirm_options_visible(screen) then
+        stable_screen(model_confirm_state, nil)
+        return false
+      end
+      -- Options without the title yet (half-painted): wait, bounded by expiry.
+      model_confirm_state.started_at = model_confirm_state.started_at or os.time()
+      model_confirm_state.polls = model_confirm_state.polls + 1
+      return false
+    end
     if agent.kind == "claude" and (id == "model-sonnet" or id == "model-restored") then
-      local confirmation_sent = false
       table.insert(branches, {
         id = "claude-model-confirm",
-        match = function(screen)
-          return stable_screen(model_confirm_state, model_confirm_signature(screen))
-        end,
+        match = settle_model_confirm,
         action = function()
           if not confirmation_sent then
-            confirmation_sent = true
             local pressed, press_err = pcall(remuda.key, session_name, "RET")
             if not pressed then error(press_err, 0) end
+            confirmation_sent = true
+            run_action()
           end
         end,
         continue = true,
       })
     end
-    local ok, handle = pcall(remuda.expect, session_name, branches,
+    local ok, started_handle = pcall(remuda.expect, session_name, branches,
       -- This prompt is accepted only during the Claude model-switch watchers.
       -- All other unknown screens continue through the existing fail path.
       { timeout = timeout, interval = 0.1,
@@ -3810,7 +3850,8 @@ function remuda._butler_compaction_execute(session_name, force)
         end
         stable_screen(model_confirm_state, nil)
         local unknown_signature = unknown_dialog_signature(screen)
-        return stable_screen(unknown_state, unknown_signature) or stable_wait_expired(unknown_state)
+        return stable_screen(unknown_state, unknown_signature, stable_unknown_captures)
+          or stable_wait_expired(unknown_state)
       end,
       on_unknown = function()
         if agent.kind == "claude" and (id == "model-sonnet" or id == "compact-complete") then
@@ -3838,7 +3879,8 @@ function remuda._butler_compaction_execute(session_name, force)
         end
       end,
       on_error = function(err) fail("compaction watcher error: " .. tostring(err)) end }, false)
-    if not ok then fail("could not start " .. id .. " watcher: " .. tostring(handle)) end
+    if not ok then fail("could not start " .. id .. " watcher: " .. tostring(started_handle)) end
+    handle = started_handle
     return ok
   end
   local completion_timeout = agent.kind == "claude"
