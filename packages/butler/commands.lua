@@ -236,8 +236,15 @@ command(50, "send-to-leader", "  remuda butler send-to-leader <message...> | - |
   end)
 end)
 command(60, "inbox", "  remuda butler inbox [name]", function(args, caller)
-  if args[2] == "--help" or args[2] == "-h" then return "Usage: remuda butler inbox [name]\n" end
+  if args[2] == "--help" or args[2] == "-h" then
+    return "Usage: remuda butler inbox [name]\n"
+      .. "       remuda butler inbox <message-id>  show one of your messages again; read state is unchanged\n"
+  end
   if #args > 2 then return nil end
+  local me = current_agent(caller)
+  if me and args[2] and mail.find_message(args[2]) then
+    return cli_result(function() return remuda._butler_inbox_message(me, args[2]) end)
+  end
   return cli_result(function()
     return remuda._butler_inbox(args[2] or assert(current_agent(caller), "no Butler identity in your env; use `inbox <name>`"))
   end)

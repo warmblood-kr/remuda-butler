@@ -421,6 +421,7 @@ function remuda._butler_compaction_execute(session_name, force)
         "model was restored, but its recovery record could not be cleared")
     end
     _butler_trace(event or "verified", detail)
+    pcall(remuda._butler_notice_compacted, session_name)
   end
   local function pane_busy()
     local found, session = pcall(remuda.session, session_name)
