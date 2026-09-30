@@ -1519,7 +1519,7 @@ function remuda._butler_notify(alias, notice, message_id)
   bus.notices[alias] = pending
   return false
 end
-local function seed_unread_notices(alias)
+local function seed_unread_notices(alias, previous_instance, instance)
   local agent = bus.agents[alias]
   if not agent or not agent.id then return false end
   local unread = mail.unread(agent.id)
@@ -1528,7 +1528,8 @@ local function seed_unread_notices(alias)
     if mail.is_unread(agent.id, message_id) then
       local seen = bus.notice_seen[agent.id]
       local pending = bus.notices[alias]
-      if seen and seen[message_id]
+      if previous_instance ~= nil and previous_instance ~= instance
+          and seen and seen[message_id]
           and not (pending and pending.message_ids and pending.message_ids[message_id]) then
         -- A prior session may have recorded the deposit notice before its
         -- queue was cleared at exit. Replay that unread mail for this session.
@@ -1578,8 +1579,9 @@ function remuda._butler_deliver_notices()
   for alias, agent in pairs(bus.agents) do
     if agent and remuda._butler_notify_policy(alias, now) then
       local instance = notice_session_instance(alias, agent)
-      if bus.unread_seeded[alias] ~= instance then
-        local seeded, result = pcall(seed_unread_notices, alias)
+      local previous_instance = bus.unread_seeded[alias]
+      if previous_instance ~= instance then
+        local seeded, result = pcall(seed_unread_notices, alias, previous_instance, instance)
         if seeded and result then bus.unread_seeded[alias] = instance end
       end
     end
