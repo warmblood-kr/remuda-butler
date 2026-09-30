@@ -298,6 +298,37 @@ return function(matrix)
   remuda.fs.write_atomic = real_write_atomic
   remuda.http = fake_http
 
+  local registration_token = root .. "/registration-token"
+  write(registration_token, "server-registration-token")
+  local token_guidance = "This is not a valid access token for any account. If it is the server's registration token, use --register (creates the bot account). Nothing was written."
+  local function failed_whoami_does_not_write(label, status, body)
+    local failed_parent = root .. "/failed-output-" .. label
+    local failed_dir = failed_parent .. "/butler"
+    requests, resolved = {}, nil
+    remuda.http = { request = function(spec) requests[#requests + 1] = spec; return {} end }
+    matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
+      "--owner", "@alice:example.org", "--token-file", registration_token, "--dir", failed_dir })
+    assert(#requests == 1 and requests[1].url == "http://matrix.invalid/_matrix/client/v3/account/whoami",
+      "token setup should verify the registration token with whoami")
+    requests[1].callback({ status = status, body = body })
+    assert(resolved and resolved.status == 1 and resolved.stderr:find(token_guidance, 1, true)
+      and not resolved.stderr:find("private response body", 1, true)
+      and not resolved.stderr:find("server-registration-token", 1, true),
+      "registration-token failure should give safe --register guidance")
+    assert(read(failed_dir .. "/token") == nil and read(failed_dir .. "/config") == nil,
+      "failed whoami must not write token or config files")
+    local parent_created, parent_error = remuda.fs.mkdir_new(failed_parent)
+    assert(parent_created, "failed whoami created output directory: " .. tostring(parent_error))
+    local child_created, child_error = remuda.fs.mkdir_new(failed_dir)
+    assert(child_created, "failed whoami created nested output directory: " .. tostring(child_error))
+    assert(os.remove(failed_dir) and os.remove(failed_parent), "failed-output test fixture cleanup failed")
+  end
+  failed_whoami_does_not_write("401", 401,
+    '{"errcode":"M_UNKNOWN_TOKEN","error":"private response body"}')
+  failed_whoami_does_not_write("errcode", 403,
+    '{"errcode":"M_UNKNOWN_TOKEN","error":"private response body"}')
+  remuda.http = fake_http
+
   write(output .. "/token", "previous-token\n")
   write(output .. "/config", "previous-config\n")
   local forced_plan = matrix.setup_prepare({ "--homeserver", "http://matrix.invalid",

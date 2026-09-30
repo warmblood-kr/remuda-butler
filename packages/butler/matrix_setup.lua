@@ -326,6 +326,7 @@ end
 
 function matrix.setup_network(options, on_done)
   local done_called, cancelled, active = false, false, nil
+  local registration_token_error = "This is not a valid access token for any account. If it is the server's registration token, use --register (creates the bot account). Nothing was written."
   local function done(result)
     if done_called or cancelled then return end
     done_called = true
@@ -355,19 +356,29 @@ function matrix.setup_network(options, on_done)
       ca_file = options.ca_file, pin = transport_pin(options.pin),
       callback = function(response)
         if done_called or cancelled then return end
-        if type(response) ~= "table" or response.error then
+        if type(response) ~= "table" then
           return fail("Matrix setup " .. stage .. " request failed")
         end
         local status = tonumber(response.status)
+        local decoded, decode_error
+        if type(response.body) == "string" and response.body ~= "" then
+          local ok
+          ok, decoded, decode_error = pcall(matrix.decode_json, response.body)
+          if not ok then decoded, decode_error = nil, "invalid JSON" end
+        else
+          decoded = {}
+        end
+        local errcode = type(decoded) == "table" and decoded.errcode or nil
+        if (stage == "login" or stage == "whoami")
+          and (status == 401 or errcode == "M_UNKNOWN_TOKEN") then
+          return fail(registration_token_error)
+        end
+        if response.error then
+          return fail("Matrix setup " .. stage .. " request failed")
+        end
         if not status or status < 200 or status >= 300 then
           return fail("Matrix setup " .. stage .. " request failed"
             .. (status and (" (HTTP " .. tostring(status) .. ")") or ""))
-        end
-        local decoded, decode_error
-        if type(response.body) == "string" and response.body ~= "" then
-          decoded, decode_error = matrix.decode_json(response.body)
-        else
-          decoded = {}
         end
         if type(decoded) ~= "table" or decode_error then
           return fail("Matrix setup received an invalid " .. stage .. " response")
