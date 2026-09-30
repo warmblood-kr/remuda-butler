@@ -4711,6 +4711,15 @@ fn butler_topic_delegate_passes_cwd_to_agent_launch() {
         rows.contains(&requested_cwd.to_string_lossy().to_string()),
         "--cwd did not reach remuda.new: {rows}"
     );
+    let root = project_home.join("cwd-topic");
+    let root_grant = eval(
+        &path,
+        &format!(
+            "local d = remuda._butler_bus.trusted_launch_dirs return tostring(d and d[{:?}])",
+            root.to_string_lossy()
+        ),
+    );
+    assert_eq!(root_grant, "nil", "a non-root --cwd must not leave a root trust grant");
     drop(daemon);
 }
 
