@@ -113,12 +113,15 @@ only when exactly one public room matches; multiple matches are listed for the
 operator to choose from. The inviter check relies on the homeserver appending
 the real invite event to `invite_state` (Synapse does). `leave` removes a joined
 room by ID or alias, while HOME and ALL-BUTLERS cannot be left or removed. The
-interactive setup wizard does not ask for the rooms mode yet. The `send -`
-stdin form is unsupported until core #213.
+interactive setup wizard writes `rooms=open` without asking; flag-based setup
+defaults to allowlist unless given `--rooms open`. The `send -` stdin form is
+unsupported until core #213.
 
-`join` and `leave` change room membership and are operator-only. Until core
-#218 enforces caller identity, this is best-effort policy: another local
-process running as the same user may still invoke those verbs.
+`join` and `leave` change room membership and require an outside terminal
+caller; session, unknown, and missing callers are refused. Clearing
+`REMUDA_BUTLER_*` environment variables does not bypass this check. This is
+still advisory within one UID: another local process running as the same user
+may invoke those verbs from an outside terminal caller.
 
 Approvals: when an agent runs `matrix join`, Butler resolves the room and
 posts one request to HOME instead of joining. The owner answers with a ✅ or
@@ -143,7 +146,8 @@ state file containing these records is mode 600 on Unix hosts.
 
 Run `remuda butler matrix setup` to configure Butler; with `--register` and no
 `--registration-token-file`, setup asks for the homeserver registration token
-using a hidden prompt.
+using a hidden prompt. `--rooms open|allowlist` sets the invite mode written to
+the config; flag-based setup defaults to allowlist.
 
 ```text
 remuda butler matrix setup --homeserver https://matrix.example.org --owner @alice:example.org --register --pin <64-hex-sha256> --default
@@ -221,6 +225,11 @@ also applies to delegates without an explicit kind. Each candidate waits up to
 15 seconds by default; set `REMUDA_BUTLER_READINESS_TIMEOUT` to change that
 per-candidate timeout. `remuda butler sessions` shows the selected kind and
 the reason each earlier candidate was skipped.
+
+On each fresh agent-session start—first launch, resume, or a relaunch or
+respawn after a Butler or daemon restart—Butler checks for unread mail. If any
+is unread, it queues one notice with the count, using the normal debounce; it
+does not duplicate a notice that is already pending.
 
 `remuda butler status` prints `butler: up (<kind>)` and exits 0 when the root
 Butler is ready. During launch it exits 75 and writes `launching` plus one

@@ -12,6 +12,7 @@ function remuda.schedule(spec)
 end
 function remuda.cancel(timer) if timer then timer.cancelled = true end end
 local matrix = dofile("packages/butler/matrix_request.lua")
+local ASKER = "team-1-mx"
 dofile("packages/butler/matrix_setup.lua")
 dofile("packages/butler/matrix_read.lua")
 dofile("packages/butler/matrix_cli.lua")
@@ -1643,13 +1644,15 @@ local function with_operator_config(path, status, run)
   dofile("packages/butler/matrix_write.lua")
   local token = path .. ".token"
   local file = assert(io.open(token, "w")); file:write("access-token"); file:close()
-  local saved_http, saved_conf = remuda.http, remuda._butler_matrix_config
+  local saved_http, saved_conf, saved_caller = remuda.http, remuda._butler_matrix_config, remuda.caller
   local calls = {}
   remuda.http = http_fake(status, calls)
+  remuda.caller = function() return { kind = "outside" } end
   remuda._butler_matrix_config = { token_path = token, config_path = path }
   remuda._butler_matrix_paths = remuda._butler_matrix_config
   local ok, err = pcall(run, calls)
-  remuda.http, remuda._butler_matrix_config, remuda._butler_matrix_paths = saved_http, saved_conf, nil
+  remuda.http, remuda._butler_matrix_config, remuda._butler_matrix_paths, remuda.caller =
+    saved_http, saved_conf, nil, saved_caller
   if not ok then error(err, 0) end
 end
 
@@ -1658,7 +1661,7 @@ local function with_alias_http(path, handler, run)
   dofile("packages/butler/matrix_write.lua")
   local token = path .. ".token"
   local file = assert(io.open(token, "w")); file:write("access-token"); file:close()
-  local saved_http, saved_conf = remuda.http, remuda._butler_matrix_config
+  local saved_http, saved_conf, saved_caller = remuda.http, remuda._butler_matrix_config, remuda.caller
   local calls = {}
   remuda.http = { request = function(spec)
     calls[#calls + 1] = spec
@@ -1666,12 +1669,90 @@ local function with_alias_http(path, handler, run)
     spec.callback(response)
     return { cancel = function() end }
   end }
+  remuda.caller = function() return { kind = "outside" } end
   remuda._butler_matrix_config = { token_path = token, config_path = path }
   remuda._butler_matrix_paths = remuda._butler_matrix_config
   local ok, err = pcall(run, calls)
-  remuda.http, remuda._butler_matrix_config, remuda._butler_matrix_paths = saved_http, saved_conf, nil
+  remuda.http, remuda._butler_matrix_config, remuda._butler_matrix_paths, remuda.caller =
+    saved_http, saved_conf, nil, saved_caller
   os.remove(token)
   if not ok then error(err, 0) end
+end
+
+local function with_caller_kind(kind, run)
+  local saved_caller = remuda.caller
+  if kind == "missing" then
+    remuda.caller = nil
+  else
+    remuda.caller = function() return { kind = kind } end
+  end
+  local ok, err = pcall(run)
+  remuda.caller = saved_caller
+  if not ok then error(err, 0) end
+end
+
+local function test_matrix_join_leave_require_outside_caller()
+  for _, verb in ipairs({ "join", "leave" }) do
+    for _, kind in ipairs({ "session", "unknown", "missing" }) do
+      local room_config = verb == "leave" and ("room=" .. NEW .. " how=operator\n") or ""
+      local dir, path = invite_fixture(nil, room_config)
+      local before = read_text(path)
+      with_operator_config(path, 200, function(calls)
+        with_caller_kind(kind, function()
+          local result
+          matrix[verb]({ room = NEW }, function(value) result = value end)
+          assert(result and result.error and result.error:find("operator-only", 1, true),
+            "matrix " .. verb .. " must refuse caller kind " .. kind)
+          assert(#calls == 0 and read_text(path) == before,
+            "matrix " .. verb .. " refusal must not make an HTTP request or change config")
+        end)
+      end)
+      remove_dir(dir)
+    end
+  end
+
+  do
+    local dir, path = invite_fixture(nil, "room=" .. NEW .. " how=operator\n")
+    local before = read_text(path)
+    with_operator_config(path, 200, function(calls)
+      local result
+      matrix.leave({ room = NEW }, function(value) result = value end, ASKER)
+      assert(result and result.error and result.error:find("operator-only", 1, true)
+        and result.error:find("Next: ask the owner to run remuda butler matrix leave ROOM from their terminal", 1, true),
+        "an agent matrix leave must be refused with owner guidance")
+      assert(#calls == 0 and read_text(path) == before,
+        "an agent matrix leave refusal must not make an HTTP request or change config")
+    end)
+    remove_dir(dir)
+  end
+
+  do
+    local dir, path = invite_fixture()
+    with_operator_config(path, 200, function(calls)
+      with_caller_kind("outside", function()
+        local result
+        matrix.join({ room = NEW }, function(value) result = value end)
+        assert(result and not result.error and #calls == 1 and calls[1].url:find("/join", 1, true),
+          "matrix join must allow an outside terminal caller")
+      end)
+    end)
+    assert(room_line(path, NEW), "an outside matrix join must add its room config line")
+    remove_dir(dir)
+  end
+
+  do
+    local dir, path = invite_fixture(nil, "room=" .. NEW .. " how=operator\n")
+    with_operator_config(path, 200, function(calls)
+      with_caller_kind("outside", function()
+        local result
+        matrix.leave({ room = NEW }, function(value) result = value end)
+        assert(result and not result.error and #calls == 1 and calls[1].url:find("/leave", 1, true),
+          "matrix leave must allow an outside terminal caller")
+      end)
+    end)
+    assert(room_line(path, NEW) == nil, "an outside matrix leave must remove its room config line")
+    remove_dir(dir)
+  end
 end
 
 local ALIAS = "#room:example.org"
@@ -2515,6 +2596,7 @@ for _, case in ipairs({
   { "test_public_room_hostile_fields_are_sanitised_in_join_and_listing", test_public_room_hostile_fields_are_sanitised_in_join_and_listing },
   { "test_rooms_public_term_lists_public_rows", test_rooms_public_term_lists_public_rows },
   { "test_rooms_lists_open_mode_room_metadata_and_denies", test_rooms_lists_open_mode_room_metadata_and_denies },
+  { "test_matrix_join_leave_require_outside_caller", test_matrix_join_leave_require_outside_caller },
   { "test_invalid_room_id_hint_mentions_element_x_alias_fallback", test_invalid_room_id_hint_mentions_element_x_alias_fallback },
   { "test_join_failure_rolls_back_room_line", test_join_failure_rolls_back_room_line },
   { "test_joined_room_survives_restart", test_joined_room_survives_restart },
@@ -2537,7 +2619,6 @@ print("ok: Matrix owner invites, room lines, join/leave, and the one room allowl
 -- Contract assumed here beyond the design note: approval.lua publishes itself
 -- as remuda.butler.approval, and approval.cli(args, agent) backs the thin
 -- commands.lua verbs (args = { "approve", ID }), mirroring matrix.cli.
-local ASKER = "team-1-mx"
 local NEW2, NEW3, NEW4 = "!new2:example.org", "!new3:example.org", "!new4:example.org"
 local CHECK, CROSS = "\226\156\133", "\226\157\140"
 
@@ -2634,17 +2715,19 @@ end
 -- Runs `remuda butler matrix join ROOM` as AGENT through matrix.cli and
 -- returns { code, stdout, stderr } once the HOME post is answered.
 local function agent_cli_join(env, room, agent)
-  local old_pending, old_guidance, captured = remuda.pending, matrix.configuration_guidance, nil
+  local old_pending, old_guidance, old_caller, captured =
+    remuda.pending, matrix.configuration_guidance, remuda.caller, nil
   remuda.pending = function()
     return { resolve = function(_, code, stdout, stderr) captured = { code = code, stdout = stdout, stderr = stderr } end }
   end
   matrix.configuration_guidance = function() return nil end
+  remuda.caller = function() return { kind = "session" } end
   local ok, err = pcall(function()
     local returned = matrix.cli({ "matrix", "join", room }, agent or ASKER)
     env.client:pump()
     if not captured and type(returned) == "string" then captured = { code = 0, stdout = returned, stderr = "" } end
   end)
-  remuda.pending, matrix.configuration_guidance = old_pending, old_guidance
+  remuda.pending, matrix.configuration_guidance, remuda.caller = old_pending, old_guidance, old_caller
   if not ok then error(err, 0) end
   return captured or { code = -1, stdout = "", stderr = "no CLI result" }
 end

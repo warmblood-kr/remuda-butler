@@ -269,8 +269,15 @@ function matrix.upload(opts, on_done)
 end
 
 local function operator_room(verb, opts, agent, callback)
-  if agent and verb ~= "join" then
-    callback({ error = "matrix " .. verb .. " is operator-only (advisory at the same UID until core #218)" })
+  if agent then
+    if verb ~= "join" then
+      callback({ error = "matrix " .. verb .. " is operator-only"
+        .. "\nNext: ask the owner to run remuda butler matrix " .. verb .. " ROOM from their terminal" })
+      return nil
+    end
+  elseif not approval.operator_caller() then
+    callback({ error = "matrix " .. verb .. " is operator-only; run it from an outside terminal caller"
+      .. "\nNext: run remuda butler matrix " .. verb .. " ROOM from your own terminal, outside an agent session" })
     return nil
   end
   if not opts.room or opts.room == "" then

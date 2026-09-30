@@ -300,21 +300,13 @@ local function notify_mail_delivery(message, delivered, recipient_alias, what)
   local recipient_ok, _, recipient = pcall(mail_id, recipient_ref, false)
   result.recipient_live = recipient_ok
   if recipient_ok then
-    local notice
-    if what then
-      notice = "Butler message " .. delivered.id .. " " .. what
-    else
-      local sender = message.from.alias or message.from.session or "outside"
-      if message.kind == "forward" then
-        notice = "Butler message " .. delivered.id .. " forwarded by " .. sender
-      elseif message.in_reply_to then
-        notice = "Butler message " .. delivered.id .. " (reply) from " .. sender
-      else
-        sender = message.matrix and message.matrix.sender or message.from.session or sender
-        notice = "Butler message " .. delivered.id .. " from " .. sender
-      end
-    end
-    notice = notice .. " arrived. Read it: remuda butler inbox"
+    local notice = remuda._butler_notice.mail_notice_text({
+      id = delivered.id,
+      from = message.from,
+      kind = message.kind,
+      in_reply_to = message.in_reply_to,
+      matrix = message.matrix,
+    }, what)
     local notify_ok, notified, notify_error =
       pcall(remuda._butler_notify, recipient.alias, notice, delivered.id)
     if notify_ok then
@@ -541,6 +533,7 @@ remuda.exec("butler/doctor")
 -- CLI verbs and the argv parser live in commands.lua.
 remuda._butler_commands_config = { current_agent = current_agent, OPERATOR = OPERATOR,
   contributions = contributions, registry_list = registry_list, statusline = statusline,
+  resolve = resolve, mail = mail,
 }
 remuda.exec("butler/commands")
 
@@ -614,6 +607,18 @@ remuda.tool{
   about = "List Butler-managed Claude Code and Codex agent sessions and their adapter kinds.",
   run = function()
     return remuda._butler_sessions()
+  end,
+}
+remuda.tool{
+  name = "butler_close",
+  about = "Close one of your direct Butler members. Refuses unread mail or a busy member unless force is true; force never bypasses ownership.",
+  args = { name = "Name or ID of one of your direct Butler members.", force = "Set true to skip unread-mail and idle checks." },
+  needs = { "name" },
+  run = function(a, caller)
+    if a.force ~= nil and type(a.force) ~= "boolean" then error("force must be a boolean.\nNext: set force to true or omit it", 0) end
+    local ok, leader = pcall(caller_leader, caller)
+    if not ok then error(tostring(leader) .. "\nNext: run from a Butler member session", 0) end
+    return remuda._butler_close_member(a.name, leader, a.force == true)
   end,
 }
 
@@ -969,6 +974,7 @@ function remuda._butler_session_exited(name, info)
     update_state.waiting = {}
   end
   -- #29: the mail stays in the inbox; only the pending pane notice goes.
+  bus.unread_seeded[name] = "exited"
   bus.notices[name], bus.notice_screens[name], bus.pending_tasks[name] = nil, nil, nil
   bus.notice_recoveries[name], bus.task_retry_screens[name], bus.human_activity_screens[name] = nil, nil, nil
   local exited = bus.agents[name]
