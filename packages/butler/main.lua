@@ -972,6 +972,7 @@ remuda._butler_attempts = butler_attempts
 remuda._butler_sessions_config = { bus = bus, mail = mail, identity_path = identity_path, json_field = json_field }
 remuda.exec("butler/sessions")
 local registry_list = remuda._butler_sessions_impl.registry_list
+remuda.exec("butler/doctor")
 
 local USAGE_NOTES = [[
 Agent sessions receive REMUDA_BUTLER_AGENT_ID and REMUDA_BUTLER_LEADER_ID.
@@ -1050,6 +1051,12 @@ local function command(order, verb, usage, run)
   command_entries[verb] = entry
   if not remuda.contribute then remuda._butler_contribute("butler.command", verb, entry) end
 end
+command(5, "doctor", "  remuda butler doctor", function(args)
+  if #args == 1 then
+    local doctor = remuda._butler_doctor
+    return table.concat(doctor.render(doctor.probe()), "\n")
+  end
+end)
 command(10, "sessions", "  remuda butler sessions", function(args)
   if #args == 1 then return remuda._butler_sessions() end
 end)
