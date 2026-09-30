@@ -1887,6 +1887,30 @@ local function test_join_leave_missing_room_guidance()
   remove_dir(dir)
 end
 
+local function test_quarantine_list_room_reason_columns()
+  local dir, path = invite_fixture()
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  client:sync({ json = { next_batch = "s1", rooms = { invite = invite(NEW, STRANGER) } } })
+  client:pump()
+  local item = assert(relay:quarantine_list()[1], "the stranger invite must be quarantined")
+  local old_instance = matrix.relay.instance
+  matrix.relay.instance = relay
+  local ok, err = pcall(function()
+    local result = capture_matrix_cli({ "matrix", "quarantine" })
+    local expected_header = "Event\tRoom\tReason\tSender\n"
+    local expected_row = (item.event_id ~= "" and item.event_id or item.id) .. "\t" .. NEW
+      .. "\tinvite_not_allowlisted\t" .. STRANGER .. "\n"
+    assert(result and result.code == 0 and result.stdout:find(expected_header .. expected_row, 1, true),
+      "quarantine must show room and reason in their own labeled columns: "
+        .. tostring(result and result.stdout) .. tostring(result and result.stderr))
+  end)
+  matrix.relay.instance = old_instance
+  relay:stop()
+  remove_dir(dir)
+  assert(ok, err)
+end
+
 local function test_join_room_alias_resolves_and_labels_output()
   local dir, path = invite_fixture()
   with_alias_http(path, function(spec, index)
@@ -2687,6 +2711,7 @@ for _, case in ipairs({
   { "test_open_mode_conflicting_inviter_events_remain_refused", test_open_mode_conflicting_inviter_events_remain_refused },
   { "test_config_add_room_pads_short_config", test_config_add_room_pads_short_config },
   { "test_join_leave_missing_room_guidance", test_join_leave_missing_room_guidance },
+  { "test_quarantine_list_room_reason_columns", test_quarantine_list_room_reason_columns },
   { "test_join_room_alias_resolves_and_labels_output", test_join_room_alias_resolves_and_labels_output },
   { "test_unknown_room_alias_is_reported_without_config_change", test_unknown_room_alias_is_reported_without_config_change },
   { "test_alias_directory_room_id_must_be_valid", test_alias_directory_room_id_must_be_valid },
@@ -2884,6 +2909,14 @@ local function test_agent_join_files_request_and_does_not_join()
   approval_env(nil, function(env)
     local before = read_text(env.path)
     local posts_before = #home_posts(env, "Butler wants to join")
+    local missing_room = agent_cli_join(env, nil, ASKER)
+    assert(missing_room.code == 1 and missing_room.stderr
+      == "matrix join requires ROOM.\nNext: remuda butler matrix join #alias:server\n",
+      "an agent join without ROOM must receive the same missing-room error: "
+        .. tostring(missing_room.stdout) .. tostring(missing_room.stderr))
+    assert(#home_posts(env, "Butler wants to join") == posts_before
+      and next(env.relay:state().approvals or {}) == nil,
+      "an agent join without ROOM must not file an approval request")
     local invalid = agent_cli_join(env, "!bad", ASKER)
     local invalid_output = tostring(invalid.stdout) .. tostring(invalid.stderr)
     assert(invalid.code ~= 0 and invalid_output:find(

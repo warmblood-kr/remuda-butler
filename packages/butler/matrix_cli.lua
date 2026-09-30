@@ -232,13 +232,13 @@ local function render_human(verb, options, result)
         "Room: " .. terminal_safe(data.room_id), "Time: " .. terminal_safe(data.created_at),
         "Preview: " .. terminal_safe(data.preview) }, "\n") .. "\n"
     end
-    local lines = {}
+    local lines = { "Event\tRoom\tReason\tSender" }
     for _, item in ipairs(data) do
       lines[#lines + 1] = table.concat({
         terminal_safe(item.event_id ~= "" and item.event_id or item.id),
-        terminal_safe(item.reason), terminal_safe(item.sender) }, "\t")
+        terminal_safe(item.room_id), terminal_safe(item.reason), (terminal_safe(item.sender)) }, "\t")
     end
-    return #lines == 0 and "No quarantined Matrix events\n" or table.concat(lines, "\n") .. "\n"
+    return #lines == 1 and "No quarantined Matrix events\n" or table.concat(lines, "\n") .. "\n"
   elseif verb == "download" then
     return string.format("Downloaded %d bytes to %s\n", result.bytes or 0, result.path or "")
   elseif verb == "send" or verb == "reply" then
