@@ -7457,6 +7457,129 @@ done
     drop(daemon);
 }
 
+/// #158: a fake Codex on gpt-6-luna whose /compact never finishes (the pane
+/// stays working). With a tiny monitor ceiling, Butler must give up waiting:
+/// cancel the monitor, release the fleet lock (another member can compact),
+/// and mail "Compaction not confirmed yet: still busy after N min".
+#[test]
+#[cfg(unix)]
+fn butler_compaction_monitor_gives_up_at_its_ceiling_and_releases_the_fleet_lock() {
+    let dir = scratch_dir("butler-monitor-ceiling");
+    let (token_path, config_path) =
+        butler_config(&dir, "monitor-ceiling", "http://127.0.0.1:1", "!room:example.org", "@butler:example.org", "");
+    let token_str = token_path.to_string_lossy().to_string();
+    let config_str = config_path.to_string_lossy().to_string();
+    let data_home = dir.join("data");
+    let mods = PathBuf::from(std::env::var_os("XDG_DATA_HOME").expect("XDG_DATA_HOME"));
+    std::fs::create_dir_all(data_home.join("remuda/butler")).expect("data home");
+    let _ = std::os::unix::fs::symlink(mods.join("remuda/mods"), data_home.join("remuda/mods"));
+    let data_str = data_home.to_string_lossy().to_string();
+    let daemon = Daemon::spawn_with_env(
+        &dir,
+        &[
+            ("REMUDA_BUTLER_TOKEN", token_str.as_str()),
+            ("REMUDA_BUTLER_CONFIG", config_str.as_str()),
+            ("XDG_DATA_HOME", data_str.as_str()),
+            ("HOME", dir.to_string_lossy().as_ref()),
+        ],
+    );
+    let path = daemon::socket_path_in(&dir, "s");
+    eval(&path, r#"remuda._butler_argv = {"sh", "-c", "while read line; do :; done"}"#);
+    eval(&path, "remuda._butler_skip_relay = true");
+    let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    // "forever": /compact leaves the pane working for good. "quick": /compact
+    // drops the context at once.
+    let script = dir.join("ceiling-codex.sh");
+    std::fs::write(
+        &script,
+        r#"#!/bin/bash
+scenario=$1
+stty -icanon -echo min 1 time 0 2>/dev/null
+ctx=500000; busy=""; line=""
+paint() { printf '\033[H\033[2JMODEL:gpt-6-luna CTX:%s\n%s\n› Ask Codex to do anything\n\n  GPT-6-Luna high · /work\n' "$ctx" "$busy"; }
+paint
+while IFS= read -r -s -n1 -d '' c; do
+  if [ "$c" = $'\r' ] || [ "$c" = $'\n' ]; then
+    [ -z "$line" ] && continue
+    if [ "$line" = /compact ]; then
+      if [ "$scenario" = forever ]; then busy="• Compacting"; else ctx=200000; fi
+    fi
+    line=""; paint
+  else
+    line="$line$c"
+  fi
+done
+"#,
+    )
+    .expect("write ceiling fake Codex");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    eval(
+        &path,
+        &format!(
+            r#"
+      remuda._butler_compaction_config = {{critical=400000, cooldown_ticks=0, capture_gap=0,
+        completion_timeout=1, claude_completion_timeout=0.2, failure_cooldown_seconds=0, input_settle=0.01,
+        monitor_ceiling_seconds=2}}
+      local prior_contributions = remuda.contributions
+      remuda.contributions = function(point)
+        if point == "butler.agent" then
+          return {{{{id="codex", entry={{working=function(screen)
+            return screen:find("Compacting", 1, true) ~= nil
+          end}}}}}}
+        end
+        return prior_contributions(point)
+      end
+      remuda._butler_prompt_is_empty = function(_, screen)
+        if screen:find("Ask Codex to do anything", 1, true) then return "EMPTY" end
+        return "NON-EMPTY"
+      end
+      remuda._butler_telemetry_for = function(agent)
+        local screen = remuda.capture(agent.session_name)
+        return {{context_used=screen:match("CTX:%s*(%d+)"), model=screen:match("MODEL:([^ %c]+)")}}
+      end
+      remuda.session = function() return {{is_busy=false, attached=false}} end
+      remuda._butler_send = function(from, _, message)
+        remuda._fake_reports = remuda._fake_reports or {{}}
+        table.insert(remuda._fake_reports, from .. ": " .. message)
+      end
+      remuda._fake_codex = function(name, scenario)
+        remuda.new(name, {{"bash", {script:?}, scenario}}, nil, {{}})
+        remuda._butler_bus.agents[name] = {{id=name .. "-id", kind="codex", session_name=name}}
+      end
+    "#,
+            script = script.to_string_lossy(),
+        ),
+    );
+
+    let reports = || eval(&path, "return table.concat(remuda._fake_reports or {}, '\\n')");
+    let start = |name: &str, scenario: &str| {
+        eval(&path, &format!("remuda._fake_codex({name:?}, {scenario:?})"));
+        wait_for(&path, name, "Ask Codex to do anything");
+    };
+    start("cx-forever", "forever");
+    start("cx-next", "quick");
+    assert_eq!(eval(&path, "return remuda.butler.compact('cx-forever')"), "started");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !reports().contains("cx-forever: Compaction not confirmed yet: still busy after") {
+        assert!(Instant::now() < deadline, "the monitor never gave up at its ceiling. reports: {}\nscreen:\n{}",
+            reports(), capture(&path, "cx-forever"));
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let state = eval(&path, r#"
+      local s = (remuda._butler_compaction_members_state or {})['cx-forever-id'] or {}
+      return tostring(s.compaction_in_progress == true) .. '|' .. tostring(s.compaction_monitor ~= nil)"#);
+    assert_eq!(state, "false|false", "at the ceiling the lock and the monitor must be released");
+    assert!(!reports().contains("Compaction failed"), "a still-busy pane is not a failure: {}", reports());
+    // The fleet lock is free: another member compacts.
+    assert_eq!(eval(&path, "return remuda.butler.compact('cx-next')"), "started",
+        "the fleet lock must be released at the ceiling");
+    drop(daemon);
+}
+
 /// Same real-process substitution as
 /// `butler_watchdog_relaunches_a_session_that_really_died`, but the witness
 /// here is the trace FILE `_butler_session_trace` in `packages/butler/init.lua`
