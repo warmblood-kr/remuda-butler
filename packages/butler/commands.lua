@@ -122,20 +122,36 @@ local function close_member(name, leader, force)
 end
 remuda._butler_close_member = close_member
 
+local function close_caller_leader()
+  local function refuse()
+    error("cannot identify the Butler caller.\nNext: run from a Butler member session", 0)
+  end
+  if type(remuda.caller) ~= "function" then refuse() end
+  local ok, caller = pcall(remuda.caller)
+  if not ok or type(caller) ~= "table" then refuse() end
+  if caller.kind == "outside" then return "butler" end
+  if caller.kind ~= "session" or type(caller.session) ~= "string" or caller.session == "" then refuse() end
+  local agents = remuda._butler_bus and remuda._butler_bus.agents
+  if type(agents) ~= "table" then refuse() end
+  local leader
+  for alias, agent in pairs(agents) do
+    if type(agent) == "table" and agent.session_name == caller.session then
+      if leader then refuse() end
+      leader = alias
+    end
+  end
+  if not leader then refuse() end
+  return leader
+end
+
 command(8, "close", "  remuda butler close <name> [--force]", function(args, caller)
   if args[2] == "--help" or args[2] == "-h" then return CLOSE_USAGE end
   if #args < 2 or #args > 3 or (args[3] ~= nil and args[3] ~= "--force") then
     error(CLOSE_USAGE .. "\nNext: remuda butler sessions", 0)
   end
-  local leader = current_agent(caller)
-  if leader then
-    local ok, alias = pcall(resolve, leader)
-    if not ok then error("cannot identify your Butler leadership.\nNext: remuda butler sessions", 0) end
-    leader = alias
-  else
-    leader = "butler"
-  end
-  return cli_result(function() return close_member(args[2], leader, args[3] == "--force") end)
+  return cli_result(function()
+    return close_member(args[2], close_caller_leader(), args[3] == "--force")
+  end)
 end)
 command(10, "sessions", "  remuda butler sessions", function(args)
   if #args == 1 then return remuda._butler_sessions() end

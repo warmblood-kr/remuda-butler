@@ -327,7 +327,13 @@ fn butler_close_is_limited_to_own_idle_members_unless_forced() {
     let other_id = eval(&path, "return remuda._butler_bus.agents.other.id");
     let cli = |caller_id: &str, args: &str| {
         eval(&path, &format!(
-            "return remuda._extension_commands.butler({{'close', {args}}}, {{env={{REMUDA_BUTLER_AGENT_ID={caller_id:?}}}}})"
+            "local old=remuda.caller; remuda.caller=function() \
+             for _, agent in pairs(remuda._butler_bus.agents) do \
+               if agent.id == {caller_id:?} then return {{kind='session', session=agent.session_name}} end \
+             end; return {{kind='outside'}} end; \
+             local result=remuda._extension_commands.butler({{'close', {args}}}, \
+               {{env={{REMUDA_BUTLER_AGENT_ID={caller_id:?}}}}}); \
+             remuda.caller=old; return result"
         ))
     };
     let not_owner = cli(&other_id, "'kid'");
@@ -370,9 +376,11 @@ fn butler_close_cli_uses_core_caller_not_forwarded_env() {
       remuda._butler_launch('fake', 'lead')
       remuda._butler_launch('fake', 'kid', nil, 'lead')
       remuda._butler_launch('fake', 'other')
+      remuda._butler_launch('fake', 'other-kid', nil, 'other')
       remuda._butler_mail.unread = function() return 0 end
       remuda.butler.is_idle = function() return true end
       remuda._butler_close_test_calls = {}
+      remuda._butler_close_test_native_close = remuda.close
       remuda.close = function(name)
         table.insert(remuda._butler_close_test_calls, name)
         return 'closed ' .. name
@@ -394,7 +402,7 @@ fn butler_close_cli_uses_core_caller_not_forwarded_env() {
 
     let cleared = cli("session", "lead", "", "lead");
     assert!(cleared.contains("only your direct members"), "cleared env bypassed ownership: {cleared}");
-    let spoofed = cli("session", "lead", &other_id, "other");
+    let spoofed = cli("session", "lead", &other_id, "other-kid");
     assert!(spoofed.contains("only your direct members"), "spoofed env bypassed ownership: {spoofed}");
     let unknown = cli("unknown", "", &lead_id, "kid");
     assert!(unknown.contains("unknown Butler caller") || unknown.contains("run from a Butler member session"),
@@ -408,6 +416,8 @@ fn butler_close_cli_uses_core_caller_not_forwarded_env() {
     ));
     assert_eq!(outside, "Closed lead.\nNext: remuda butler sessions");
     assert_eq!(eval(&path, "return remuda._butler_close_test_calls[1]"), "lead");
+    eval(&path, "local close=remuda._butler_close_test_native_close; \
+      for _, name in ipairs({'kid', 'other-kid', 'lead', 'other'}) do pcall(close, name) end");
 }
 
 #[test]
