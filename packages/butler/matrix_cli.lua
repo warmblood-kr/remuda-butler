@@ -14,7 +14,10 @@ local USAGE = [[  remuda butler matrix [--json] status
   remuda butler matrix [--json] [--room ROOM] redact EVENT_ID [--reason TEXT]
   remuda butler matrix [--json] join ROOM (operator)
   remuda butler matrix [--json] leave ROOM (operator)
-  remuda butler matrix [--json] quarantine [--id EVENT_ID] (operator)]]
+  remuda butler matrix setup [OPTIONS]
+  remuda butler matrix [--json] quarantine [--id EVENT_ID] (operator)
+
+Example: remuda butler matrix setup --homeserver https://<homeserver> --owner @<owner>:<server> --bot @<bot>:<server> --password-file <path> --pin <sha256-hex>]]
 
 local VERBS = {
   status = true, rooms = true, history = true, event = true, get = true, quarantine = true,
@@ -220,6 +223,55 @@ function matrix.cli_usage()
 end
 
 function matrix.cli(args, agent)
+  if type(args) == "table" and args[1] == "matrix" and args[2] == "setup" then
+    local setup_args = {}
+    for index = 3, #args do setup_args[#setup_args + 1] = args[index] end
+    local plan, setup_error = matrix.setup_prepare(setup_args)
+    if not plan then
+      if type(remuda.fail) == "function" then return remuda.fail(setup_error, 2) end
+      error(setup_error, 0)
+    end
+    if plan.help then return plan.usage end
+    if type(remuda.pending) ~= "function" then
+      local message = "Matrix setup requires a remuda core with deferred replies"
+      if type(remuda.fail) == "function" then return remuda.fail(message, 1) end
+      error(message, 0)
+    end
+    local cancelled, completed, active = { value = false }, { value = false }, nil
+    local reply = remuda.pending({ timeout = 90, on_cancel = function()
+      cancelled.value = true
+      if active and active.cancel then active:cancel() end
+    end })
+    local function finish_setup(result)
+      if cancelled.value or completed.value then return end
+      completed.value = true
+      if type(result) ~= "table" then result = { error = "Matrix setup returned no result" } end
+      if result.error then return reply:resolve(1, "", tostring(result.error) .. "\n") end
+      local files, write_error = matrix.setup_write(plan, result)
+      if not files then return reply:resolve(1, "", tostring(write_error) .. "\n") end
+      active = matrix.status({}, function(status_result)
+        if cancelled.value then return end
+        if type(status_result) ~= "table" then status_result = { error = "Matrix status returned no result" } end
+        local lines = { "Matrix login verified as " .. terminal_safe(result.user_id) }
+        if result.home_room then lines[#lines + 1] = "HOME room: " .. terminal_safe(result.home_room) end
+        if result.all_room then lines[#lines + 1] = "ALL-BUTLERS room: " .. terminal_safe(result.all_room) end
+        lines[#lines + 1] = "Token file: " .. terminal_safe(files.token_path)
+        lines[#lines + 1] = "Config file: " .. terminal_safe(files.config_path)
+        if status_result.error then
+          lines[#lines + 1] = "Status check failed: " .. terminal_safe(status_result.error)
+        else
+          lines[#lines + 1] = "Status: " .. terminal_safe(render_human("status", {}, status_result):gsub("\n", "; "):gsub("; $", ""))
+        end
+        lines[#lines + 1] = "Next: accept the invite on your phone and say hi"
+        lines[#lines + 1] = plan.secret_kind == "password"
+          and "Next: delete the password file" or "Next: delete the token input file"
+        reply:resolve(0, table.concat(lines, "\n") .. "\n", "")
+      end, agent)
+    end
+    active = matrix.setup_network(plan, finish_setup)
+    if cancelled.value and active and active.cancel then active:cancel() end
+    return reply
+  end
   local ok, verb, options = pcall(parse, args)
   if not ok then
     if type(remuda.fail) == "function" then return remuda.fail(tostring(verb), 2) end

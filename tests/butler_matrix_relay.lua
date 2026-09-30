@@ -12,6 +12,9 @@ function remuda.schedule(spec)
 end
 function remuda.cancel(timer) if timer then timer.cancelled = true end end
 local matrix = dofile("packages/butler/matrix_request.lua")
+dofile("packages/butler/matrix_setup.lua")
+dofile("packages/butler/matrix_cli.lua")
+local setup_tests = dofile("tests/butler_matrix_setup.lua")
 local relay_module = dofile("packages/butler/matrix_relay.lua")
 
 local function fixture()
@@ -411,5 +414,6 @@ test_ack_reconcile_and_utf8_body_cap()
 test_messages_backfill_baseline_and_retry_backoff()
 test_retry_backoff_grows_and_resets_after_recovery()
 test_allowlist_refusal_is_logged_once()
+setup_tests(matrix)
 test_redefined_public_words_do_not_change_trust()
 print("ok: Matrix relay resume, exactly-once, filters, state, acks, caps, fallback, and backoff")

@@ -70,7 +70,7 @@ function matrix.configuration_guidance()
     "Lines 1-4 are homeserver URL, room ID, own MXID, and comma-separated allowed senders.",
     "Further config lines are optional; see docs/butler.md.",
     "Protect both files: chmod 600 " .. token_display .. " " .. config_display,
-    "Next: create both files, then run: remuda butler matrix status",
+    "Next: remuda butler matrix setup",
   }
   return table.concat(lines, "\n")
 end
@@ -229,6 +229,32 @@ local function report_error(callback, message)
   callback({ error = message })
 end
 
+local ERR_HINTS = {
+  M_FORBIDDEN = "check --password-file",
+  M_LIMIT_EXCEEDED = "wait before retrying",
+  M_USER_IN_USE = "choose a different --bot MXID",
+  M_UNKNOWN_TOKEN = "rerun setup with a valid --password-file",
+  M_MISSING_TOKEN = "rerun setup with a valid --password-file",
+  M_NOT_FOUND = "check the room or event ID",
+  M_INVALID_PARAM = "check the command arguments",
+  M_UNRECOGNIZED = "check that the homeserver supports this Matrix API",
+}
+
+local function matrix_http_error(status, body)
+  local errcode
+  if type(body) == "string" and body ~= "" then
+    local ok, response = pcall(json.decode, body)
+    if ok and type(response) == "table" and type(response.errcode) == "string"
+      and response.errcode:match("^M_[A-Z0-9_]+$") then
+      errcode = response.errcode
+    end
+  end
+  local message = "Matrix HTTP " .. tostring(status)
+  if errcode then message = message .. " (" .. errcode .. ")" end
+  local hint = errcode and ERR_HINTS[errcode] or "check the homeserver settings and retry"
+  return message .. "\nNext: " .. hint
+end
+
 -- Keep the Matrix result convention while delegating the actual codec to core.
 matrix.decode_json = json.decode
 matrix.encode_json = function(value)
@@ -380,8 +406,8 @@ function matrix.request(args, on_done)
       if result.error then return done({ error = result.error }) end
       result.headers = json.object(type(result.headers) == "table" and result.headers or {})
       if result.status and (result.status < 200 or result.status >= 300) then
-        return done({ error = "Matrix HTTP " .. result.status, status = result.status,
-          headers = result.headers, body = result.body })
+        return done({ error = matrix_http_error(result.status, result.body), status = result.status,
+          headers = result.headers })
       end
       done(result)
     end,
