@@ -78,7 +78,7 @@ end
 -- The request client and inbound relay must interpret the same on-disk
 -- settings. Normalize every line here so CRLF and surrounding whitespace do
 -- not change room or sender authorization decisions.
-function matrix.read_config(path)
+local function read_config(path)
   local contents, err = read_file(path, "config")
   if not contents then return nil, err end
   local lines = {}
@@ -149,6 +149,7 @@ function matrix.read_config(path)
     timeout_ms = math.max(1, timeout), ca_file = ca_file, pin = pin,
   }
 end
+matrix.read_config = read_config
 
 local function config()
   local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths
@@ -159,7 +160,7 @@ local function config()
   if not token then return nil, token_error end
   token = trim(token)
   if token == "" then return nil, "Matrix token is empty" end
-  local parsed, config_error = matrix.read_config(paths.config_path)
+  local parsed, config_error = read_config(paths.config_path)
   if not parsed then return nil, config_error end
   if parsed.base:match("^https://") and not parsed.ca_file and not parsed.pin then
     return nil, "HTTPS Matrix homeserver requires ca_file=PATH or pin_sha256=HEX"
@@ -188,7 +189,7 @@ function matrix.room_kind(room)
   return conf.rooms[room]
 end
 
-function matrix.is_agent_mxid(mxid)
+local function is_agent_mxid(mxid)
   local localpart = type(mxid) == "string" and mxid:match("^@([^:]+):")
   if localpart and (localpart:sub(1, 6):lower() == "agent-"
     or localpart:sub(1, 7):lower() == "butler-") then return true end
@@ -196,6 +197,7 @@ function matrix.is_agent_mxid(mxid)
   if not conf then return nil end
   return type(mxid) == "string" and (mxid == conf.self_mxid or conf.butler_senders[mxid] == true)
 end
+matrix.is_agent_mxid = is_agent_mxid
 
 matrix.once = matrix.once or function(callback)
   local called = false

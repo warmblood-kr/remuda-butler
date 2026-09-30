@@ -2,6 +2,9 @@
 -- The relay owns no transport details; request_json is its only HTTP composite.
 local matrix = assert(remuda.butler and remuda.butler.matrix,
   "load butler/matrix_request before butler/matrix_relay")
+-- Trust words are bound at load (main.lua execs matrix_request before
+-- this file), so a later redefinition of the public entry cannot change them.
+local read_config = matrix.read_config
 local json = assert(remuda.json, "Matrix requires core remuda.json")
 local relay = matrix.relay or {}
 matrix.relay = relay
@@ -340,7 +343,7 @@ function relay.new(options)
   local config_path = assert(options.config_path, "Matrix relay requires config_path")
   local api = assert(options.matrix or matrix, "Matrix relay requires the L1 matrix client")
   local deliver = assert(options.deliver, "Matrix relay requires a delivery function")
-  local cfg, config_error = matrix.read_config(config_path)
+  local cfg, config_error = read_config(config_path)
   if not cfg then error(config_error, 0) end
   local state_path, ack_path = config_path .. ".since", config_path .. ".acks"
   local state, state_error, quarantine_pruned = load_state(state_path)

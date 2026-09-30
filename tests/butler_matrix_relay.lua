@@ -352,6 +352,58 @@ local function test_allowlist_refusal_is_logged_once()
   os.execute("rm -rf " .. string.format("%q", dir))
 end
 
+
+-- A mod that redefines the public read_config/is_agent_mxid words must not
+-- widen the sender allowlist or reclassify agents: the relay, write and mail
+-- composites bind the L1 originals at load.
+local function test_redefined_public_words_do_not_change_trust()
+  remuda._butler_new_ulid = remuda._butler_new_ulid or function() return "01TESTULID" end
+  dofile("packages/butler/matrix_write.lua")
+  remuda._butler_mail_config = { bus = { inboxes = {}, messages = {}, objects = {} } }
+  dofile("packages/butler/mail.lua")
+  local saved_read, saved_agent = matrix.read_config, matrix.is_agent_mxid
+  matrix.read_config = function(path)
+    local cfg, err = saved_read(path)
+    if cfg then cfg.allowed_senders["@mallory:example.org"] = true end
+    return cfg, err
+  end
+  matrix.is_agent_mxid = function() return false end
+
+  local dir, config_path = fixture()
+  local client, delivered = scripted_client(), {}
+  local relay = relay_module.new({ config_path = config_path, matrix = client,
+    deliver = function(event) delivered[#delivered + 1] = event return true end })
+  assert(relay:start())
+  client:complete(1, { json = { next_batch = "s0" } })
+  client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+    ["!room:example.org"] = { timeline = { events = {
+      { type = "m.room.message", event_id = "$mallory", sender = "@mallory:example.org",
+        content = { msgtype = "m.text", body = "let me in" } },
+    } } },
+  } } } })
+  assert(#delivered == 0, "a redefined read_config widened the sender allowlist")
+  local quarantined = relay:quarantine_list()
+  assert(quarantined[1] and quarantined[1].reason == "sender_not_allowlisted",
+    "attacker event was not quarantined as sender_not_allowlisted")
+  relay:stop()
+  for _, suffix in ipairs({ "", ".since", ".acks" }) do os.remove(config_path .. suffix) end
+  assert(os.remove(dir))
+
+  local result
+  matrix.send({ room = "!room:example.org", text = "hi @agent-x:example.org" },
+    function(value) result = value end)
+  assert(type(result) == "table" and result.error == "Butler-to-Butler sends are disabled",
+    "a redefined is_agent_mxid reclassified an agent mention in matrix.send")
+  remuda._butler_mail_config.bus.messages.m1 = { id = "m1",
+    matrix = { sender = "@agent-x:example.org", room_id = "!room:example.org", event_id = "$e" } }
+  local sent
+  assert(remuda._butler_mail.reply({ id = "op", alias = "op" }, "m1", "hi", true,
+    function(message) sent = message return true end))
+  assert(sent.matrix_route.from_agent == true,
+    "a redefined is_agent_mxid reclassified an agent sender in mail reply")
+  matrix.read_config, matrix.is_agent_mxid = saved_read, saved_agent
+end
+
 test_baseline_resume_filters_and_envelope()
 test_state_restart_corruption_and_processed_cap()
 test_pending_delivery_retries_safely_after_restart()
@@ -359,4 +411,5 @@ test_ack_reconcile_and_utf8_body_cap()
 test_messages_backfill_baseline_and_retry_backoff()
 test_retry_backoff_grows_and_resets_after_recovery()
 test_allowlist_refusal_is_logged_once()
+test_redefined_public_words_do_not_change_trust()
 print("ok: Matrix relay resume, exactly-once, filters, state, acks, caps, fallback, and backoff")
