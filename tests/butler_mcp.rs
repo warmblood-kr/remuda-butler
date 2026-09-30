@@ -87,10 +87,14 @@ fn butler_status_is_a_live_mcp_tool_not_a_terminal_scrape() {
     let dir = scratch("butler-status");
     let path = daemon::socket_path_in(&dir, "s");
     let _daemon = daemon_at(&path);
+    let requested_status_path = dir.join("status").to_string_lossy().into_owned();
     let status_path = match client::request(
         &path,
         &Request::Eval {
-            code: "remuda._butler_argv = {'sh'}; remuda.exec('butler'); return remuda._butler_status_path".into(),
+            code: format!(
+                "remuda._butler_status_path = {}; remuda._butler_argv = {{'sh'}}; remuda.exec('butler'); return remuda._butler_status_path",
+                serde_json::to_string(&requested_status_path).unwrap()
+            ),
             name: None,
         },
     )
@@ -115,11 +119,27 @@ fn butler_status_is_a_live_mcp_tool_not_a_terminal_scrape() {
     let status_settings = &settings["statusLine"];
     assert_eq!(status_settings["type"], "command");
     let command = status_settings["command"].as_str().expect("status command");
-    assert!(!command.contains("python3"), "status command still uses Python: {command}");
-    assert!(status_settings.get("refreshInterval").is_none(), "status refresh must use Claude events");
-    assert!(command.starts_with("remuda -s "), "status command must select Butler's server: {command}");
-    assert!(command.contains(" --stdin butler statusline "), "status command must forward stdin: {command}");
-    assert!(command.contains(&status_path), "status command must name the telemetry file: {command}");
+    assert_eq!(
+        command.split_whitespace().next(),
+        Some("remuda"),
+        "status command must use the Remuda stdin bridge: {command}"
+    );
+    assert!(
+        status_settings.get("refreshInterval").is_none(),
+        "status refresh must use Claude events"
+    );
+    assert!(
+        command.starts_with("remuda -s "),
+        "status command must select Butler's server: {command}"
+    );
+    assert!(
+        command.contains(" --stdin butler statusline "),
+        "status command must forward stdin: {command}"
+    );
+    assert!(
+        command.contains(&status_path),
+        "status command must name the telemetry file: {command}"
+    );
 
     let snapshot = r#"{"model":{"display_name":"Claude Opus 4.6"},"context_window":{"total_input_tokens":12345,"context_window_size":200000,"used_percentage":6}}"#;
     let status_line = eval(
@@ -130,10 +150,25 @@ fn butler_status_is_a_live_mcp_tool_not_a_terminal_scrape() {
             serde_json::to_string(snapshot).unwrap(),
         ),
     );
-    assert_eq!(status_line, "MODEL:Claude-Opus-4.6 CTX:12345 CTXWIN:200000 CTXPCT:6");
+    assert_eq!(
+        status_line,
+        "MODEL:Claude-Opus-4.6 CTX:12345 CTXWIN:200000 CTXPCT:6"
+    );
     assert_eq!(
         std::fs::read_to_string(&status_path).expect("read status file"),
         format!("{status_line}\n")
+    );
+    let failed_write_line = eval(
+        &path,
+        &format!(
+            "return remuda._dispatch_extension_command('butler', {{'statusline', {}}}, {{stdin = {}}})",
+            serde_json::to_string(&format!("{status_path}/child")).unwrap(),
+            serde_json::to_string(snapshot).unwrap(),
+        ),
+    );
+    assert_eq!(
+        failed_write_line, status_line,
+        "a telemetry write failure must keep status output"
     );
     let reply = call(&path, "butler_status", json!({}));
     assert_eq!(reply["result"]["isError"], false, "status failed: {reply}");
@@ -149,7 +184,21 @@ fn butler_status_is_a_live_mcp_tool_not_a_terminal_scrape() {
         text_of(&call(&path, "butler_status", json!({}))),
         "MODEL:Claude-Opus-4.6 CTX:12345 CTXWIN:200000 CTXPCT:6 AGENT:codex SKIPPED:claude=login"
     );
-    eval(&path, "remuda._butler_bus.agents.butler.kind='claude'; remuda._butler_attempts={}");
+    eval(
+        &path,
+        "remuda._butler_bus.agents.butler.kind='claude'; remuda._butler_attempts={}",
+    );
+
+    let snapshot = r#"{"model":{"id":"sonnet"},"context_window":{"current_usage":{"input_tokens":10,"cache_creation_input_tokens":20,"cache_read_input_tokens":30},"context_window_size":200000,"used_percentage":30}}"#;
+    let status_line = eval(
+        &path,
+        &format!(
+            "return remuda._dispatch_extension_command('butler', {{'statusline', {}}}, {{stdin = {}}})",
+            serde_json::to_string(&status_path).unwrap(),
+            serde_json::to_string(snapshot).unwrap(),
+        ),
+    );
+    assert_eq!(status_line, "MODEL:sonnet CTX:60 CTXWIN:200000 CTXPCT:30");
 
     // Missing context data remains explicit rather than being invented from
     // launch arguments or terminal rendering.
