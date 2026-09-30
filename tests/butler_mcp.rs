@@ -329,6 +329,33 @@ fn relay_deposit_produces_one_mail_notice() {
 }
 
 #[test]
+fn notice_failure_does_not_fail_the_mail_deposit_hook() {
+    let (path, _daemon) = butler_with_member("notice-deposit-error");
+    let trace = path.parent().unwrap().join("session-trace.log");
+    let got = eval(
+        &path,
+        &format!(
+            r#"remuda._butler_session_trace_path = {trace:?}
+            remuda._butler_notify = function() error('notify injected error') end
+            local sender = '@alice:example.org'
+            local delivered = remuda.emit_until_success('butler/deliver', {{
+              from = {{ host = 'matrix', id = '', alias = sender, session = sender,
+                kind = 'matrix', leader = '' }},
+              to = 'butler', text = 'mail survives notice error', subject = 'Matrix message from ' .. sender,
+              matrix = {{ sender = sender, room_id = '!notice:example.org', event_id = '$notice-error' }},
+            }})
+            return tostring(delivered.id) .. '|' .. tostring(remuda._butler_mail.is_unread(
+              remuda._butler_bus.agents.butler.id, delivered.id))"#
+        ),
+    );
+    assert!(got.ends_with("|true"), "notice failure turned deposit into a hook error or lost mail: {got}");
+    let log = std::fs::read_to_string(&trace).expect("notice error trace");
+    assert_eq!(log.lines().filter(|line| {
+        line.contains("notice_delivery_error\tbutler ") && line.contains("notify injected error")
+    }).count(), 1, "{log}");
+}
+
+#[test]
 fn a_single_mail_notice_waits_for_two_quiet_seconds() {
     let (path, _daemon) = butler_with_member("notice-single-debounce");
     setup_mail_notice_clock(&path);

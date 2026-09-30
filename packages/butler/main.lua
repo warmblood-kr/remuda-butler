@@ -1056,7 +1056,14 @@ local function notify_mail_delivery(message, delivered, recipient_alias, what)
       end
     end
     notice = notice .. " arrived. Read it: remuda butler inbox"
-    result.delivered, result.error = remuda._butler_notify(recipient.alias, notice, delivered.id)
+    local notify_ok, notified, notify_error =
+      pcall(remuda._butler_notify, recipient.alias, notice, delivered.id)
+    if notify_ok then
+      result.delivered, result.error = notified, notify_error
+    else
+      result.error = notified
+      _butler_session_trace("notice_delivery_error", recipient.alias .. " " .. tostring(notified))
+    end
   end
   if message.from.host ~= "matrix" then
     delivery_notice_results[delivery_notice_key(delivered.id, recipient_ok and recipient.alias or recipient_ref)] = result
