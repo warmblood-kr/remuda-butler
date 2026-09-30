@@ -632,6 +632,60 @@ return function(matrix)
     "all_room=!all:example.org", "" }, "\n"))
   assert(#atomic_writes == 2 and atomic_writes[1].private and atomic_writes[2].private,
     "token and config must both use private atomic writes")
+
+  -- A successful default setup must update the in-memory config resolved at
+  -- boot and replace only the relay, without printing the old reload hint.
+  local saved_setup_network, saved_setup_status = matrix.setup_network, matrix.status
+  local saved_relay_start, saved_relay_stop = matrix.relay.start, matrix.relay.stop
+  local saved_matrix_config = remuda._butler_matrix_config
+  local relay_events, started_config = {}, nil
+  matrix.setup_network = function(_, callback)
+    callback({ token = "default-access-token", user_id = "@butler-demo:example.org",
+      home_room = "!default-home:example.org" })
+    return { cancel = function() end }
+  end
+  matrix.status = function(_, callback)
+    callback({ status = 200, json = { user_id = "@butler-demo:example.org", joined_rooms = {} } })
+    return { cancel = function() end }
+  end
+  matrix.relay.stop = function()
+    relay_events[#relay_events + 1] = "stop"
+    return true
+  end
+  matrix.relay.start = function(config)
+    relay_events[#relay_events + 1] = "start"
+    started_config = config
+    return true
+  end
+  remuda._butler_matrix_paths = default_paths
+  remuda._butler_matrix_config = { token_path = default_paths.token_path,
+    config_path = default_paths.config_path }
+  requests, resolved = {}, nil
+  local default_reply = matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--bot", "@butler-demo:example.org",
+    "--password-file", password, "--default" })
+  local expected_last_line = "Relay started; write to the Butler in Element."
+  local output_last_line = resolved and resolved.stdout:match("([^\n]+)\n$")
+  assert(default_reply and resolved and resolved.status == 0
+    and table.concat(relay_events, ",") == "stop,start"
+    and started_config and started_config.token_path == default_paths.token_path
+    and started_config.config_path == default_paths.config_path
+    and remuda._butler_matrix_config == started_config
+    and resolved.stdout:match("([^\n]+)\n$") == expected_last_line
+    and not resolved.stdout:find("reload", 1, true)
+    and not resolved.stdout:find("remuda stop", 1, true)
+    and not default_refusal:find("reload", 1, true)
+    and not default_refusal:find("remuda stop", 1, true),
+    "default setup must replace the relay from boot-resolved paths, end with the running message, and contain no reload or stop hints; events="
+      .. table.concat(relay_events, ",") .. "; last=" .. tostring(output_last_line)
+      .. "; refusal_reload=" .. tostring(default_refusal and default_refusal:find("reload", 1, true) ~= nil))
+  matrix.setup_network, matrix.status = saved_setup_network, saved_setup_status
+  matrix.relay.start, matrix.relay.stop = saved_relay_start, saved_relay_stop
+  remuda._butler_matrix_config = saved_matrix_config
+  remuda._butler_matrix_paths = nil
+  os.remove(default_paths.token_path)
+  os.remove(default_paths.config_path)
+
   remuda.fs.write_atomic = real_write_atomic
   remuda.http = fake_http
 
