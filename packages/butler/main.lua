@@ -3673,10 +3673,23 @@ function remuda._butler_compaction_execute(session_name, force)
         match = function(screen)
           if type(screen) ~= "string" then return false end
           local lines = bottom_screen_lines(screen, 8)
+          local screen_lines = {}
+          for line in (screen .. "\n"):gmatch("(.-)\n") do
+            screen_lines[#screen_lines + 1] = line
+          end
+          while #screen_lines > 0 and screen_lines[#screen_lines]:match("^%s*$") do
+            screen_lines[#screen_lines] = nil
+          end
+          local first_visible = #screen_lines - #lines + 1
           for index = 1, #lines - 1 do
             if lines[index]:find("❯%s*1%.%s+Yes")
                 and lines[index + 1]:find("%d%.%s+No, go back") then
-              return true
+              local yes_row = first_visible + index - 1
+              for title_row = math.max(1, yes_row - 10), yes_row - 1 do
+                if screen_lines[title_row]:find("Switch model?", 1, true) then
+                  return true
+                end
+              end
             end
           end
           return false

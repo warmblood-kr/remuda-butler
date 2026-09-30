@@ -5712,6 +5712,7 @@ fn butler_compaction_fake_claude_scenarios_send_only_visible_keys() {
 
     let script = dir.join("fake-claude.sh");
     let model_confirm_fixture = dir.join("claude-model-confirm-dialog.txt");
+    let status_model_confirm_fixture = dir.join("claude-model-confirm-dialog-with-status.txt");
     let wrong_title_model_confirm_fixture = dir.join("claude-model-confirm-wrong-title.txt");
     let stale_model_confirm_fixture = dir.join("claude-stale-model-confirm-with-permission.txt");
     std::fs::write(
@@ -5719,6 +5720,11 @@ fn butler_compaction_fake_claude_scenarios_send_only_visible_keys() {
         include_str!("fixtures/claude-model-confirm-dialog.txt"),
     )
     .expect("write captured Claude model confirmation fixture");
+    std::fs::write(
+        &status_model_confirm_fixture,
+        include_str!("fixtures/claude-model-confirm-dialog-with-status.txt"),
+    )
+    .expect("write model confirmation fixture with trailing status rows");
     std::fs::write(
         &wrong_title_model_confirm_fixture,
         include_str!("fixtures/claude-model-confirm-wrong-title.txt"),
@@ -5737,6 +5743,7 @@ scenario=$2
 model_confirm_fixture=$3
 stale_model_confirm_fixture=$4
 wrong_title_model_confirm_fixture=$5
+status_model_confirm_fixture=$6
 model='current-model'
 ctx=500000
 failed=0
@@ -5753,7 +5760,7 @@ while IFS= read -r line; do
   printf 'CMD:%s\n' "$line" >> "$log"
   case "$line" in
     '')
-      if [ "$scenario" = model-confirm ]; then
+      if [ "$scenario" = model-confirm ] || [ "$scenario" = model-confirm-with-status ]; then
         printf 'KEY:RET\n' >> "$log"
         model='sonnet'; paint
       fi
@@ -5762,6 +5769,8 @@ while IFS= read -r line; do
       printf 'KEY:RET\n' >> "$log"
       if [ "$scenario" = model-confirm ]; then
         cat "$model_confirm_fixture"
+      elif [ "$scenario" = model-confirm-with-status ]; then
+        cat "$status_model_confirm_fixture"
       elif [ "$scenario" = stale-model-confirm ]; then
         cat "$stale_model_confirm_fixture"
       elif [ "$scenario" = wrong-title-model-confirm ]; then
@@ -5821,7 +5830,14 @@ done
       local original_capture = remuda.capture
       remuda.capture = function(name)
         local screen = original_capture(name)
-        if name == "fake-model-confirm" then remuda._fake_model_confirm_screen = screen end
+        if name == "fake-model-confirm" or name == "fake-model-confirm-with-status" then
+          remuda._fake_model_confirm_screen = screen
+          if name == "fake-model-confirm-with-status"
+              and screen:find("Session status: active", 1, true)
+              and screen:find("Model status: current-model", 1, true) then
+            remuda._fake_model_confirm_status_seen = true
+          end
+        end
         if name == "fake-hang" and remuda._fake_busy[name] ~= true then
           screen = screen:gsub(" esc to interrupt", "")
         end
@@ -5873,7 +5889,7 @@ done
         return {{context_used=used, model=screen:match("MODEL:([^ %c]+)") or "current-model"}}
       end
       remuda._fake_setup_compaction = function(name, kind, log, scenario)
-        remuda.new(name, {{"bash", {script:?}, log, scenario, {model_confirm_fixture:?}, {stale_model_confirm_fixture:?}, {wrong_title_model_confirm_fixture:?}}}, nil, {{}})
+        remuda.new(name, {{"bash", {script:?}, log, scenario, {model_confirm_fixture:?}, {stale_model_confirm_fixture:?}, {wrong_title_model_confirm_fixture:?}, {status_model_confirm_fixture:?}}}, nil, {{}})
         local id = name
         if name == "fake-stable-id" then id = "stable-agent-17" end
         if name == "fake-empty-id" then id = "" end
@@ -5907,6 +5923,7 @@ done
         ("fake-unknown", "claude", "unknown"),
         ("fake-model-confirm-wrong-title", "claude", "wrong-title-model-confirm"),
         ("fake-model-confirm", "claude", "model-confirm"),
+        ("fake-model-confirm-with-status", "claude", "model-confirm-with-status"),
         ("fake-stale-model-confirm", "claude", "stale-model-confirm"),
         ("fake-restore-fails", "claude", "unknown-restore-fails"),
         ("fake-unsafe-model", "claude", "happy"),
@@ -6189,7 +6206,7 @@ done
             assert_eq!(got, "CMD:/model sonnet\nKEY:RET\n",
                 "same options under a different dialog title must not receive Return: {got:?}");
         }
-        if name == "fake-model-confirm" {
+        if name == "fake-model-confirm" || name == "fake-model-confirm-with-status" {
             let prior_reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
             let prior_report_count = prior_reports.lines().count();
             let deadline = Instant::now() + Duration::from_secs(8);
@@ -6206,6 +6223,10 @@ done
             let got = std::fs::read_to_string(&log).unwrap();
             let screen = eval(&path, "return remuda._fake_model_confirm_screen or ''");
             let reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
+            if name == "fake-model-confirm-with-status" {
+                assert_eq!(eval(&path, "return tostring(remuda._fake_model_confirm_status_seen == true)"), "true",
+                    "both status rows below the dialog footer must be present in the captured screen");
+            }
             assert!(got.contains("CMD:/compact\n"), "compaction should follow model confirmation: {got:?}; screen={screen:?}; reports={reports:?}");
             assert!(got.ends_with("CMD:/model opus\nKEY:RET\n"), "prior model should be restored: {got:?}");
             assert_eq!(got.matches("KEY:RET\n").count(), 4,
