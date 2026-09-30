@@ -12,13 +12,18 @@ function remuda.schedule(spec)
 end
 function remuda.cancel(timer) if timer then timer.cancelled = true end end
 local matrix = dofile("packages/butler/matrix_request.lua")
+-- Install shared matrix helpers without using the installed package loader;
+-- this suite loads its fake transport modules directly from the worktree.
+local package_exec = remuda.exec
+remuda.exec = function() end
+local matrix_module_ok, matrix_module_error = pcall(dofile, "packages/butler/matrix.lua")
+remuda.exec = package_exec
+assert(matrix_module_ok, matrix_module_error)
 local ASKER = "team-1-mx"
 dofile("packages/butler/matrix_setup.lua")
 dofile("packages/butler/matrix_read.lua")
 dofile("packages/butler/matrix_cli.lua")
 local setup_tests = dofile("tests/butler_matrix_setup.lua")
--- approval.lua loads before the relay (relay.new attaches it) and before
--- matrix_write (which registers the join handler). Absent until step a.
 local approval_file = io.open("packages/butler/approval.lua", "r")
 if approval_file then approval_file:close(); dofile("packages/butler/approval.lua") end
 local relay_module = dofile("packages/butler/matrix_relay.lua")
@@ -2466,6 +2471,9 @@ end
 local function test_plain_reply_fixture()
   local dir, config_path = fixture()
   local client, received = scripted_client(), {}
+  local emoji_quote = "x" .. string.rep("😀", 30)
+  assert(#emoji_quote == 121 and emoji_quote:byte(120) >= 0x80 and emoji_quote:byte(120) <= 0xbf,
+    "emoji quote must put byte 120 inside a four-byte character")
   local relay = relay_module.new({ config_path = config_path, matrix = client,
     deliver = function(event) received[#received + 1] = event return true end,
   })
@@ -2482,6 +2490,9 @@ local function test_plain_reply_fixture()
       { type = "m.room.message", event_id = "$utf8-quote-cut", sender = "@alice:example.org",
         content = { msgtype = "m.text", body = "> <@alice:example.org> " .. string.rep("a", 118)
           .. "한\n\nReply", ["m.relates_to"] = { ["m.in_reply_to"] = { event_id = "$target" } } } },
+      { type = "m.room.message", event_id = "$utf8-emoji-quote", sender = "@alice:example.org",
+        content = { msgtype = "m.text", body = "> <@alice:example.org> " .. emoji_quote
+          .. "\n\nReply", ["m.relates_to"] = { ["m.in_reply_to"] = { event_id = "$target" } } } },
     } } },
   } } } })
   assert(received[1] and received[1].body == "> original\nYes, it is ready.",
@@ -2492,6 +2503,10 @@ local function test_plain_reply_fixture()
   assert(received[3] and received[3].body == "> " .. string.rep("a", 118) .. "\nReply"
       and utf8.len(received[3].body) ~= nil,
     "a 121-byte quote cut at byte 120 inside a character must back off to the preceding complete character")
+  local rendered_emoji_quote = received[4] and received[4].body:match("^> (.-)\n")
+  assert(rendered_emoji_quote == "x" .. string.rep("😀", 29)
+      and #rendered_emoji_quote <= 120 and utf8.len(rendered_emoji_quote) ~= nil,
+    "a four-byte emoji cut at byte 120 must back off to a complete UTF-8 prefix")
   relay:stop()
   cleanup_fixture(dir, config_path)
   render_fixture("matrix-mail-plain-reply.txt", {
