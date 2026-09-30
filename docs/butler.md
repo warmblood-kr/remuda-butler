@@ -83,7 +83,9 @@ rolling day.
 Add `deny_room=!ROOM_ID` or `deny_room=#alias:server` for each denied room, and
 `deny_server=host` for each denied server. Room IDs, canonical aliases, room
 servers, inviter servers, and alias servers are checked against these rules.
-Invalid deny lines are ignored with a warning. An open-mode join records
+An alias deny matches only when the invite carries that canonical alias; use
+`deny_room=!ROOM_ID` or `deny_server=host` for a hard block. Invalid deny lines
+are ignored with a warning. An open-mode join records
 `room=ROOM_ID how=invite inviter=@user:server`; allowlist-mode owner invites
 record `how=owner-invite`, and operator `join` records `how=operator`.
 Operators can join with a room ID, `#alias:server`, or a public room name. An

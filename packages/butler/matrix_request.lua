@@ -351,6 +351,18 @@ function matrix.invite_is_denied(conf, room_id, alias, inviter)
   local deny_servers = type(conf.deny_servers) == "table" and conf.deny_servers or {}
   if type(room_id) == "string" and deny_room_ids[room_id] then return true end
   if type(alias) == "string" and deny_room_aliases[alias] then return true end
+  if type(alias) == "string" then
+    local alias_localpart, alias_server = alias:match("^#([^:]+):(.+)$")
+    if alias_localpart and alias_server then
+      for denied_alias in pairs(deny_room_aliases) do
+        local denied_localpart, denied_server = denied_alias:match("^#([^:]+):(.+)$")
+        if denied_localpart == alias_localpart and denied_server
+          and normalize_server_name(denied_server) == normalize_server_name(alias_server) then
+          return true
+        end
+      end
+    end
+  end
   local room_server, room_host = server_parts(room_id, "!")
   local inviter_server, inviter_host = server_parts(inviter, "@")
   local alias_server, alias_host = server_parts(alias, "#")

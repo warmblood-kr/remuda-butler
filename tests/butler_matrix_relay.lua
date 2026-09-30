@@ -694,6 +694,8 @@ local function test_open_room_config_and_deny_matching()
     "the denied room ID must match")
   assert(matrix.invite_is_denied(conf, NEW, "#blocked:example.org", STRANGER),
     "the denied canonical alias must match")
+  assert(matrix.invite_is_denied(conf, NEW, "#blocked:EXAMPLE.ORG", STRANGER),
+    "the alias deny server comparison must ignore case")
   assert(matrix.invite_is_denied(conf, "!x:room-denied.example", nil, STRANGER),
     "the room server must match")
   assert(matrix.invite_is_denied(conf, NEW, nil, "@mallory:inviter-denied.example"),
