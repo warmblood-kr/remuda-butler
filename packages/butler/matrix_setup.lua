@@ -451,6 +451,137 @@ function matrix.setup_network(options, on_done)
   end }
 end
 
+-- Create a Matrix account using interactive-authentication (UIA). Registration
+-- is separate from setup_network so callers can choose this path explicitly.
+function matrix.setup_register(options, on_done)
+  local done_called, cancelled, active = false, false, nil
+  local rejected_token = "The server rejected that registration token. Nothing was created or written."
+  local missing_flow = "This server does not accept registration tokens. Next: --token-file for an existing bot."
+  local function done(result)
+    if done_called or cancelled then return end
+    done_called = true
+    if on_done then on_done(result) end
+  end
+  local function fail(message) done({ error = message }) end
+  if type(options) ~= "table" or type(options.homeserver) ~= "string"
+    or type(options.username) ~= "string" or options.username == ""
+    or type(options.password) ~= "string" or options.password == ""
+    or type(options.registration_token) ~= "string" or options.registration_token == "" then
+    fail("Matrix registration plan is incomplete")
+    return { cancel = function() cancelled = true end }
+  end
+
+  local base = options.homeserver:gsub("/+$", "")
+  local function decode(response)
+    if type(response) ~= "table" or type(response.body) ~= "string" then return nil end
+    local ok, value = pcall(matrix.decode_json, response.body)
+    if not ok or type(value) ~= "table" then return nil end
+    return value
+  end
+  local function send(payload, callback)
+    local body = matrix.encode_json(payload)
+    if not body then return fail("Matrix registration could not encode a request") end
+    local spec = {
+      method = "POST", url = base .. "/_matrix/client/v3/register",
+      headers = { Accept = "application/json", ["Content-Type"] = "application/json" },
+      body = body, timeout = 15, connect_timeout = 10, max_bytes = 1024 * 1024,
+      ca_file = options.ca_file, pin = transport_pin(options.pin),
+      callback = function(response)
+        if done_called or cancelled then return end
+        callback(response, decode(response))
+      end,
+    }
+    local ok, handle = pcall(remuda.http.request, spec)
+    if not ok or not handle then return fail("Matrix account registration request failed") end
+    active = handle
+  end
+  local function initial_payload(auth)
+    local payload = { username = options.username, password = options.password,
+      inhibit_login = false }
+    if auth then payload.auth = auth end
+    return payload
+  end
+  local function finish(response, decoded)
+    local access_token = type(decoded) == "table" and decoded.access_token
+    local user_id = type(decoded) == "table" and decoded.user_id
+    if type(access_token) ~= "string" or access_token == ""
+      or type(user_id) ~= "string" or not valid_mxid(user_id, "registration user") then
+      return fail("Matrix account registration response was incomplete")
+    end
+    done({ access_token = access_token, user_id = user_id })
+  end
+  local function register_stage(stage, session, callback)
+    local auth = { type = stage, session = session }
+    if stage == "m.login.registration_token" then auth.token = options.registration_token end
+    send(initial_payload(auth), callback)
+  end
+
+  send(initial_payload(), function(response, challenge)
+    if type(response) ~= "table" then return fail("Matrix account registration request failed") end
+    local status = tonumber(response.status)
+    if status ~= 401 or type(challenge) ~= "table"
+      or type(challenge.session) ~= "string" or challenge.session == ""
+      or type(challenge.flows) ~= "table" then
+      if status == 403 or (challenge and challenge.errcode == "M_FORBIDDEN") then
+        return fail(rejected_token)
+      end
+      return fail("Matrix account registration request failed"
+        .. (status and (" (HTTP " .. tostring(status) .. ")") or ""))
+    end
+    local selected
+    for _, flow in ipairs(challenge.flows) do
+      if type(flow) == "table" and type(flow.stages) == "table" then
+        local has_token = false
+        for _, stage in ipairs(flow.stages) do
+          if stage == "m.login.registration_token" then has_token = true; break end
+        end
+        if has_token then selected = flow.stages; break end
+      end
+    end
+    if not selected then return fail(missing_flow) end
+
+    local stages = {}
+    for _, stage in ipairs(selected) do
+      if stage == "m.login.dummy" then stages[#stages + 1] = stage end
+    end
+    stages[#stages + 1] = "m.login.registration_token"
+    local at = 1
+    local function advance()
+      local stage = stages[at]
+      if not stage then return fail("Matrix account registration could not complete its authentication flow") end
+      register_stage(stage, challenge.session, function(stage_response, stage_body)
+        if type(stage_response) ~= "table" then
+          return fail("Matrix account registration request failed")
+        end
+        local stage_status = tonumber(stage_response.status)
+        if stage_status and stage_status >= 200 and stage_status < 300 then
+          return finish(stage_response, stage_body)
+        end
+        if stage == "m.login.registration_token" and (stage_status == 401
+          or stage_status == 403
+          or (stage_body and (stage_body.errcode == "M_FORBIDDEN"
+            or stage_body.errcode == "M_INVALID_PARAM"))) then
+          return fail(rejected_token)
+        end
+        if at < #stages and stage_status == 401 and stage_body
+          and (not stage_body.session or stage_body.session == challenge.session) then
+          at = at + 1
+          return advance()
+        end
+        return fail("Matrix account registration request failed"
+          .. (stage_status and (" (HTTP " .. tostring(stage_status) .. ")") or ""))
+      end)
+    end
+    advance()
+  end)
+
+  return { cancel = function()
+    if done_called or cancelled then return end
+    cancelled = true
+    if active and active.cancel then active:cancel() end
+  end }
+end
+
 function matrix.setup_write(options, result)
   local orphan_ids = {}
   if type(result) == "table" then

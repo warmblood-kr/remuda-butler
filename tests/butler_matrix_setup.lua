@@ -234,6 +234,68 @@ return function(matrix)
     requests[#requests + 1] = spec
     return { cancel = function() end }
   end }
+  local registration_result
+  matrix.setup_register({ homeserver = "http://matrix.invalid", username = "butler-demo",
+    password = "generated-password", registration_token = "server-registration-token" },
+    function(result) registration_result = result end)
+  assert(#requests == 1 and requests[1].method == "POST"
+    and requests[1].url == "http://matrix.invalid/_matrix/client/v3/register",
+    "registration should begin with the Matrix register endpoint")
+  local function request_json(spec)
+    return matrix.decode_json(spec.body)
+  end
+  local initial_register = request_json(requests[1])
+  assert(initial_register.username == "butler-demo"
+    and initial_register.password == "generated-password"
+    and initial_register.inhibit_login == false and initial_register.auth == nil,
+    "registration should submit account details without putting secrets in URL or headers")
+  requests[1].callback({ status = 401, body = '{"session":"uia-session-1","flows":[{"stages":["m.login.dummy","m.login.registration_token"]}]}' })
+  assert(#requests == 2, "registration should send the dummy UIA stage first")
+  local dummy_register = request_json(requests[2])
+  assert(dummy_register.auth and dummy_register.auth.type == "m.login.dummy"
+    and dummy_register.auth.session == "uia-session-1"
+    and dummy_register.auth.token == nil,
+    "dummy UIA stage should use the challenge session and omit the registration token")
+  requests[2].callback({ status = 401, body = '{"session":"uia-session-1","flows":[{"stages":["m.login.dummy","m.login.registration_token"]}]}' })
+  assert(#requests == 3, "registration should submit the token stage after dummy")
+  local token_register = request_json(requests[3])
+  assert(token_register.auth and token_register.auth.type == "m.login.registration_token"
+    and token_register.auth.token == "server-registration-token"
+    and token_register.auth.session == "uia-session-1",
+    "registration token stage should use the same UIA session")
+  assert(not requests[3].url:find("server-registration-token", 1, true)
+    and not requests[3].headers.Authorization,
+    "registration token must never appear in URL or Authorization header")
+  requests[3].callback({ status = 200,
+    body = '{"access_token":"new-access-token","user_id":"@butler-demo:example.org"}' })
+  assert(registration_result and registration_result.access_token == "new-access-token"
+    and registration_result.user_id == "@butler-demo:example.org",
+    "registration should return only the created account credentials")
+  requests = {}
+  local registration_error
+  matrix.setup_register({ homeserver = "http://matrix.invalid", username = "butler-demo",
+    password = "generated-password", registration_token = "server-registration-token" },
+    function(result) registration_error = result end)
+  requests[1].callback({ status = 401,
+    body = '{"session":"uia-session-2","flows":[{"stages":["m.login.registration_token"]}]}' })
+  requests[2].callback({ status = 403,
+    body = '{"errcode":"M_FORBIDDEN","error":"server-registration-token rejected"}' })
+  assert(registration_error and registration_error.error
+    == "The server rejected that registration token. Nothing was created or written."
+    and not registration_error.error:find("server-registration-token", 1, true),
+    "registration token rejection should return fixed safe guidance")
+  requests = {}
+  local no_registration_flow
+  matrix.setup_register({ homeserver = "http://matrix.invalid", username = "butler-demo",
+    password = "generated-password", registration_token = "server-registration-token" },
+    function(result) no_registration_flow = result end)
+  requests[1].callback({ status = 401,
+    body = '{"session":"uia-session-3","flows":[{"stages":["m.login.dummy"]}]}' })
+  assert(no_registration_flow and no_registration_flow.error
+    == "This server does not accept registration tokens. Next: --token-file for an existing bot."
+    and #requests == 1,
+    "registration without a token flow should stop with safe existing-bot guidance")
+  requests = {}
   local resolved
   remuda.pending = function()
     return { resolve = function(_, status, stdout, stderr)
