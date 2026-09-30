@@ -990,7 +990,7 @@ fn notice_verify_mismatch_logs_bounded_capture_and_expected_text() {
             now = 3"#
         ),
     );
-    for _ in 0..12 {
+    for _ in 0..13 {
         eval(&path, "remuda._butler_deliver_notices()");
     }
     let log = std::fs::read_to_string(&trace).expect("notice diagnostic trace");
