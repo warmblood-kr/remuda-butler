@@ -23,9 +23,12 @@ local function json_get(path, room, callback, extras)
   return matrix.request_json(request, callback)
 end
 
-function matrix.rooms(args, callback)
+function matrix.rooms(args, callback, agent)
   args = args or {}
   if args.public then
+    if agent then
+      return done_error(callback, "matrix rooms is operator-only (advisory at the same UID until core #218)")
+    end
     local term = args.public_term
     local body_args = { limit = 20 }
     if term ~= nil then body_args.filter = { generic_search_term = term } end

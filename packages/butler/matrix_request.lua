@@ -39,6 +39,56 @@ end
 local function shell_quote(value)
   return "'" .. value:gsub("'", "'\\''") .. "'"
 end
+matrix.shell_quote = shell_quote
+
+local function format_character(cp)
+  return cp == 0x00ad or cp == 0x061c or (cp >= 0x0600 and cp <= 0x0605)
+    or cp == 0x06dd or cp == 0x070f or (cp >= 0x0890 and cp <= 0x0891)
+    or cp == 0x08e2 or cp == 0x180e or (cp >= 0x200b and cp <= 0x200f)
+    or (cp >= 0x202a and cp <= 0x202e) or cp == 0x2028 or cp == 0x2029
+    or cp == 0x2060 or (cp >= 0x2061 and cp <= 0x206f) or cp == 0xfeff
+    or (cp >= 0xfff9 and cp <= 0xfffb) or cp == 0x110bd or cp == 0x110cd
+    or (cp >= 0x13430 and cp <= 0x1343f) or (cp >= 0x1bca0 and cp <= 0x1bca3)
+    or (cp >= 0x1d173 and cp <= 0x1d17a) or cp == 0xe0001
+    or (cp >= 0xe0020 and cp <= 0xe007f)
+end
+
+local function sanitize_directory_text(value, limit)
+  if type(value) ~= "string" then value = tostring(value or "") end
+  limit = limit or 128
+  local out, count, at = {}, 0, 1
+  while at <= #value and count < limit do
+    local first = value:byte(at)
+    local width, cp
+    if first < 0x80 then width, cp = 1, first
+    elseif first >= 0xc2 and first <= 0xdf then width, cp = 2, first - 0xc0
+    elseif first >= 0xe0 and first <= 0xef then width, cp = 3, first - 0xe0
+    elseif first >= 0xf0 and first <= 0xf4 then width, cp = 4, first - 0xf0
+    else width, cp = 1, 0xfffd end
+    if width > 1 then
+      if at + width - 1 > #value then width, cp = 1, 0xfffd
+      else
+        for offset = 1, width - 1 do
+          local byte = value:byte(at + offset)
+          if byte < 0x80 or byte > 0xbf then width, cp = 1, 0xfffd; break end
+          cp = cp * 64 + byte - 0x80
+        end
+        if (width == 2 and cp < 0x80) or (width == 3 and cp < 0x800)
+          or (width == 4 and (cp < 0x10000 or cp > 0x10ffff))
+          or (cp >= 0xd800 and cp <= 0xdfff) then
+          width, cp = 1, 0xfffd
+        end
+      end
+    end
+    if not (cp < 0x20 or (cp >= 0x7f and cp <= 0x9f) or format_character(cp)) then
+      out[#out + 1] = value:sub(at, at + width - 1)
+      count = count + 1
+    end
+    at = at + width
+  end
+  return table.concat(out)
+end
+matrix.sanitize_directory_text = sanitize_directory_text
 
 local function shown_path(path, override)
   if type(path) == "string" and path ~= "" then return path end

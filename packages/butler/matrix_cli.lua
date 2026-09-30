@@ -154,6 +154,9 @@ end
 local function terminal_safe(value)
   return tostring(value or ""):gsub("[%c]", " "):gsub("\194[\128-\159]", " ")
 end
+local function shell_quote(value)
+  return matrix.shell_quote(tostring(value))
+end
 
 local function render_human(verb, options, result)
   local data = result.json or result
@@ -167,7 +170,7 @@ local function render_human(verb, options, result)
       end
       if #lines == 0 then lines[#lines + 1] = "No public Matrix rooms found" end
       lines[#lines + 1] = options.public_term
-        and ("Next: remuda butler matrix join " .. terminal_safe(options.public_term))
+        and ("Next: remuda butler matrix join " .. shell_quote(terminal_safe(options.public_term)))
         or "Next: remuda butler matrix join ROOM"
       return table.concat(lines, "\n") .. "\n"
     end
@@ -402,9 +405,6 @@ function matrix.cli(args, agent)
             lines[#lines + 1] = "Next: fix the config, then rerun remuda butler matrix setup ... --default --force"
           end
         else
-          local function shell_quote(value)
-            return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
-          end
           lines[#lines + 1] = "Accept the invite in Element before starting this separate Butler."
           lines[#lines + 1] = "Next: REMUDA_BUTLER_TOKEN=" .. shell_quote(files.token_path)
             .. " REMUDA_BUTLER_CONFIG=" .. shell_quote(files.config_path)

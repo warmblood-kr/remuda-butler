@@ -279,54 +279,7 @@ local function operator_room(verb, opts, agent, callback)
   return opts.room
 end
 
-local function format_character(cp)
-  return cp == 0x00ad or cp == 0x061c or (cp >= 0x0600 and cp <= 0x0605)
-    or cp == 0x06dd or cp == 0x070f or (cp >= 0x0890 and cp <= 0x0891)
-    or cp == 0x08e2 or cp == 0x180e or (cp >= 0x200b and cp <= 0x200f)
-    or (cp >= 0x202a and cp <= 0x202e) or cp == 0x2028 or cp == 0x2029
-    or cp == 0x2060 or (cp >= 0x2061 and cp <= 0x206f) or cp == 0xfeff
-    or (cp >= 0xfff9 and cp <= 0xfffb) or cp == 0x110bd or cp == 0x110cd
-    or (cp >= 0x13430 and cp <= 0x1343f) or (cp >= 0x1bca0 and cp <= 0x1bca3)
-    or (cp >= 0x1d173 and cp <= 0x1d17a) or cp == 0xe0001
-    or (cp >= 0xe0020 and cp <= 0xe007f)
-end
-
-local function sanitize_directory_text(value, limit)
-  if type(value) ~= "string" then value = tostring(value or "") end
-  limit = limit or 128
-  local out, count, at = {}, 0, 1
-  while at <= #value and count < limit do
-    local first = value:byte(at)
-    local width, cp
-    if first < 0x80 then width, cp = 1, first
-    elseif first >= 0xc2 and first <= 0xdf then width, cp = 2, first - 0xc0
-    elseif first >= 0xe0 and first <= 0xef then width, cp = 3, first - 0xe0
-    elseif first >= 0xf0 and first <= 0xf4 then width, cp = 4, first - 0xf0
-    else width, cp = 1, 0xfffd end
-    if width > 1 then
-      if at + width - 1 > #value then width, cp = 1, 0xfffd
-      else
-        for offset = 1, width - 1 do
-          local byte = value:byte(at + offset)
-          if byte < 0x80 or byte > 0xbf then width, cp = 1, 0xfffd; break end
-          cp = cp * 64 + byte - 0x80
-        end
-        if (width == 2 and cp < 0x80) or (width == 3 and cp < 0x800)
-          or (width == 4 and (cp < 0x10000 or cp > 0x10ffff))
-          or (cp >= 0xd800 and cp <= 0xdfff) then
-          width, cp = 1, 0xfffd
-        end
-      end
-    end
-    if not (cp < 0x20 or (cp >= 0x7f and cp <= 0x9f) or format_character(cp)) then
-      out[#out + 1] = value:sub(at, at + width - 1)
-      count = count + 1
-    end
-    at = at + width
-  end
-  return table.concat(out)
-end
-matrix.sanitize_directory_text = sanitize_directory_text
+local sanitize_directory_text = matrix.sanitize_directory_text
 
 local function room_id_valid(room)
   return type(matrix.valid_room_id) == "function" and matrix.valid_room_id(room)
@@ -373,7 +326,9 @@ local function resolve_alias(alias, base, callback)
       return callback(result)
     end
     local room = result.json and result.json.room_id
-    if not room_id_valid(room) then return callback({ error = "invalid Matrix room ID in room directory response" }) end
+    if not room_id_valid(room) or sanitize_directory_text(room) ~= room then
+      return callback({ error = "invalid Matrix room ID in room directory response" })
+    end
     callback({ room_id = room, alias = alias })
   end)
 end
@@ -400,10 +355,12 @@ local function find_public_matches(name, base, callback)
     if #rows == 0 then
       return callback({ error = "No public room named " .. sanitize_directory_text(name)
         .. " on " .. homeserver_name(base)
-        .. ".\nNext: remuda butler matrix rooms --public " .. sanitize_directory_text(name)
+        .. ".\nNext: remuda butler matrix rooms --public " .. matrix.shell_quote(sanitize_directory_text(name))
         .. ", or ask for an invite." })
     end
-    if #rows > 1 then return callback({ matches = rows, ambiguous = true }) end
+    local has_next_page = type(result.json) == "table"
+      and type(result.json.next_batch) == "string" and result.json.next_batch ~= ""
+    if #rows > 1 or has_next_page then return callback({ matches = rows, ambiguous = true }) end
     callback({ room_id = rows[1].room_id, alias = rows[1].alias, name = rows[1].name })
   end)
 end
@@ -514,10 +471,22 @@ function matrix.leave(opts, on_done, agent)
     end)
   end
   if requested:sub(1, 1) == "#" then
-    current = resolve_alias(requested, conf.base, function(resolved)
-      if resolved.error then return done(resolved) end
-      leave_room(resolved.room_id)
-    end)
+    local labeled = {}
+    for room, alias in pairs(conf.room_aliases or {}) do
+      if alias == requested and conf.rooms[room] then labeled[#labeled + 1] = room end
+    end
+    table.sort(labeled)
+    if #labeled > 1 then
+      return error_result(done, "more than one configured Matrix room uses " .. sanitize_directory_text(requested)
+        .. ".\nNext: run remuda butler matrix rooms and choose a room ID.")
+    elseif #labeled == 1 then
+      leave_room(labeled[1])
+    else
+      current = resolve_alias(requested, conf.base, function(resolved)
+        if resolved.error then return done(resolved) end
+        leave_room(resolved.room_id)
+      end)
+    end
   else
     leave_room(requested)
   end
