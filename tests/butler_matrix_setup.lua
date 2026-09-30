@@ -66,6 +66,30 @@ return function(matrix)
     for _, value in ipairs(extra or {}) do values[#values + 1] = value end
     return values
   end
+  write(token, "access-token-secret")
+  local function written_room_config(room_mode, destination)
+    local values = { "--homeserver", "http://matrix.invalid", "--owner", "@alice:example.org",
+      "--token-file", token, "--bot", "@butler-demo:example.org", "--dir", destination }
+    if room_mode then
+      values[#values + 1] = "--rooms"
+      values[#values + 1] = room_mode
+    end
+    local plan, prepare_error = matrix.setup_prepare(values)
+    assert(plan, "room policy setup should validate: " .. tostring(prepare_error))
+    assert(plan.rooms_mode == (room_mode or "allowlist"), "room policy should default to allowlist")
+    local files, write_error = matrix.setup_write(plan, {
+      token = "created-access-token", user_id = "@butler-demo:example.org", home_room = "!home:example.org",
+    })
+    assert(files, "room policy setup should write its config: " .. tostring(write_error))
+    return read(files.config_path)
+  end
+  local default_rooms_config = written_room_config(nil, root .. "/default-rooms")
+  assert(not default_rooms_config:find("rooms=", 1, true),
+    "default allowlist policy should preserve the legacy config without a rooms line")
+  local open_rooms_config = written_room_config("open", root .. "/open-rooms")
+  assert(open_rooms_config:find("\nrooms=open\n", 1, true),
+    "open room policy should serialize as rooms=open")
+  mkdir_calls = 0
   local function rejected(values, fragment)
     local plan, err = matrix.setup_prepare(values)
     assert(not plan and tostring(err):find(fragment, 1, true),
@@ -207,6 +231,8 @@ return function(matrix)
     { "--bot", "@butler-demo:example.org", "--token-file", token }), "choose one")
   rejected(args("--password-file", password,
     { "--bot", "@butler-demo:example.org", "--mystery" }), "unknown option")
+  rejected(args("--password-file", password,
+    { "--bot", "@butler-demo:example.org", "--rooms", "anyone" }), "rooms must be open or allowlist")
   rejected(args("--password-file", password,
     { "--bot", "not-an-mxid" }), "--bot 'not-an-mxid' is not a Matrix user ID")
   rejected({ "--homeserver", "https://matrix.invalid", "--owner", "@alice:example.org",
@@ -388,7 +414,9 @@ return function(matrix)
       resolved = { status = status, stdout = stdout, stderr = stderr }
     end }
     function reply:prompt_secret(spec) prompt_specs[#prompt_specs + 1] = spec end
-    function reply:prompt_line(spec) line_specs[#line_specs + 1] = spec end
+    function reply:prompt_line(spec)
+      line_specs[#line_specs + 1] = spec
+    end
     return reply
   end
   requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
@@ -403,8 +431,12 @@ return function(matrix)
   line_specs[2].callback("@alice:example.org", nil)
   assert(#line_specs == 3 and line_specs[3].label:find("Continue? Type Y", 1, true)
     and line_specs[3].label:find("Bot: @butler%-")
+    and line_specs[3].label:find("\n  Rooms: open (anyone can invite this Butler). Restrict: set rooms=allowlist or add deny_room/deny_server in "
+      .. default_paths.config_path .. ". The sender allowlist still decides whose messages are trusted.\n", 1, true)
+    and not line_specs[3].label:find("quarantined", 1, true)
+    and not line_specs[3].label:find("Room access", 1, true)
     and line_specs[3].label:find("replaces its current Matrix relay config", 1, true),
-    "the wizard should summarize validated details and ask for confirmation")
+    "the wizard should set open rooms and summarize the real config path")
   assert(line_specs[3].default == "N", "wizard confirmation should default to no")
   line_specs[3].callback("n", nil)
   assert(resolved and resolved.status == 1 and resolved.stderr:find("Nothing was written.", 1, true)
@@ -421,6 +453,23 @@ return function(matrix)
     == "Registration token for http://matrix.invalid, from its admin (hidden). This is not an access token:"
     and #requests == 0 and not resolved,
     "confirming the summary should enter the existing hidden registration-token flow")
+  local wizard_bot = assert(line_specs[3].label:match("Bot: (@%S+)"), "wizard summary should name the bot")
+  local wizard_relay, wizard_config, wizard_status = matrix.relay, remuda._butler_matrix_config, matrix.status
+  matrix.relay = { stop = function() end, start = function() return true end }
+  matrix.status = function(_, callback) callback({}) end
+  prompt_specs[1].callback("wizard-registration-token", nil)
+  requests[1].callback({ status = 401,
+    body = '{"session":"wizard-session","flows":[{"stages":["m.login.registration_token"]}]}' })
+  requests[2].callback({ status = 200,
+    body = '{"access_token":"wizard-access-token","user_id":"' .. wizard_bot .. '"}' })
+  requests[3].callback({ status = 200, body = '{"user_id":"' .. wizard_bot .. '"}' })
+  requests[4].callback({ status = 200, body = '{"room_id":"!wizard-home:example.org"}' })
+  matrix.relay, matrix.status = wizard_relay, wizard_status
+  assert(resolved and resolved.status == 0 and read(default_paths.config_path):find("\nrooms=open\n", 1, true),
+    "the confirmed wizard should write rooms=open to the config")
+  for _, path in ipairs({ default_paths.token_path, default_paths.config_path,
+    default_paths.config_path:gsub("/config$", "/password") }) do os.remove(path) end
+  remuda._butler_matrix_config = wizard_config
 
   requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
   wizard_reply = matrix.cli({ "matrix", "setup" })

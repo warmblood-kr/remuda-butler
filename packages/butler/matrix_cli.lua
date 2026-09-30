@@ -250,6 +250,11 @@ local function render_human(verb, options, result)
   elseif verb == "upload" then
     return "Uploaded as " .. tostring(result.content_uri or "") .. " (" .. tostring(result.event_id or "") .. ")\n"
   elseif verb == "join" or verb == "leave" then
+    if verb == "join" and result.approval_request_id then
+      return "Asked the owner to approve joining " .. terminal_safe(result.approval_label or "the Matrix room")
+        .. " (request " .. terminal_safe(result.approval_request_id)
+        .. "). You get mail when they answer (expires in 10 min).\nNext: remuda butler inbox\n"
+    end
     if verb == "join" and (result.ambiguous or data.ambiguous)
       and type(result.matches or data.matches) == "table" then
       local matches = result.matches or data.matches
@@ -370,7 +375,7 @@ function matrix.cli(args, agent)
           local valid_owner, owner_error = matrix.setup_validate_mxid(owner, "--owner")
           if not valid_owner then return prompt_failure(tostring(owner_error)) end
           flags[4] = valid_owner
-          flags[5], flags[6] = "--register", "--default"
+          flags[5], flags[6], flags[7], flags[8] = "--register", "--default", "--rooms", "open"
           local function confirm_setup()
             local wizard_plan, validation_error = matrix.setup_prepare(flags)
             if not wizard_plan then
@@ -384,6 +389,8 @@ function matrix.cli(args, agent)
               "Matrix setup will:",
               "  Homeserver: " .. terminal_safe(wizard_plan.homeserver),
               "  Owner: " .. terminal_safe(wizard_plan.owner_mxid),
+              "  Rooms: open (anyone can invite this Butler). Restrict: set rooms=allowlist or add deny_room/deny_server in "
+                .. terminal_safe(wizard_plan.config_path) .. ". The sender allowlist still decides whose messages are trusted.",
               "  Account: create a Butler bot (you will need its server registration token)",
               "  Bot: " .. terminal_safe(wizard_plan.bot_mxid),
               "  Save private token and config files in: " .. terminal_safe(wizard_plan.output_dir),
@@ -403,24 +410,27 @@ function matrix.cli(args, agent)
                 execute_setup(wizard_plan)
               end)
           end
-          if scheme_or_error == "https" then
-            prompt_line("HTTPS trust: enter a 64-character SHA-256 certificate pin or an absolute CA file path:",
-              nil, function(trust)
-                if type(trust) ~= "string" then
-                  return prompt_failure("The HTTPS trust answer must be a certificate pin or CA file path.")
-                end
-                if #trust == 64 and trust:match("^%x+$") then
-                  flags[#flags + 1] = "--pin"
-                  flags[#flags + 1] = trust
-                else
-                  flags[#flags + 1] = "--ca-file"
-                  flags[#flags + 1] = trust
-                end
-                confirm_setup()
-              end)
-          else
-            confirm_setup()
+          local function ask_transport_trust()
+            if scheme_or_error == "https" then
+              prompt_line("HTTPS trust: enter a 64-character SHA-256 certificate pin or an absolute CA file path:",
+                nil, function(trust)
+                  if type(trust) ~= "string" then
+                    return prompt_failure("The HTTPS trust answer must be a certificate pin or CA file path.")
+                  end
+                  if #trust == 64 and trust:match("^%x+$") then
+                    flags[#flags + 1] = "--pin"
+                    flags[#flags + 1] = trust
+                  else
+                    flags[#flags + 1] = "--ca-file"
+                    flags[#flags + 1] = trust
+                  end
+                  confirm_setup()
+                end)
+            else
+              confirm_setup()
+            end
           end
+          ask_transport_trust()
         end)
       end)
     end

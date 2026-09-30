@@ -16,6 +16,10 @@ dofile("packages/butler/matrix_setup.lua")
 dofile("packages/butler/matrix_read.lua")
 dofile("packages/butler/matrix_cli.lua")
 local setup_tests = dofile("tests/butler_matrix_setup.lua")
+-- approval.lua loads before the relay (relay.new attaches it) and before
+-- matrix_write (which registers the join handler). Absent until step a.
+local approval_file = io.open("packages/butler/approval.lua", "r")
+if approval_file then approval_file:close(); dofile("packages/butler/approval.lua") end
 local relay_module = dofile("packages/butler/matrix_relay.lua")
 
 local function remove_dir(dir)
@@ -2407,3 +2411,438 @@ for _, case in ipairs({
 end
 assert(#invite_failures == 0, "invite tests failed:\n" .. table.concat(invite_failures, "\n"))
 print("ok: Matrix owner invites, room lines, join/leave, and the one room allowlist")
+
+-- Agent asks, owner approves (notes/approval-join-ux-threat.md,
+-- notes/approval-design.md). An agent's `matrix join` files a request: one
+-- HOME post; the owner answers with a ✅/❌ reaction or a yes/no reply bound to
+-- that post's event id, or from the terminal with `approve ID`/`deny ID`.
+-- Contract assumed here beyond the design note: approval.lua publishes itself
+-- as remuda.butler.approval, and approval.cli(args, agent) backs the thin
+-- commands.lua verbs (args = { "approve", ID }), mirroring matrix.cli.
+local ASKER = "team-1-mx"
+local NEW2, NEW3, NEW4 = "!new2:example.org", "!new3:example.org", "!new4:example.org"
+local CHECK, CROSS = "\226\156\133", "\226\157\140"
+
+local function approval()
+  return assert(remuda.butler.approval, "packages/butler/approval.lua must publish remuda.butler.approval")
+end
+
+local function approval_env(senders, run)
+  local dir, path = invite_fixture(senders)
+  local mails, saved_send = {}, remuda._butler_send
+  remuda._butler_send = function(from, to, text)
+    mails[#mails + 1] = { from = from, to = to, text = text }
+    return true
+  end
+  remuda._butler_new_ulid = remuda._butler_new_ulid or function() return "01TESTULID" end
+  local env = { dir = dir, path = path, mails = mails, public_rows = {} }
+  local ok, err = pcall(with_alias_http, path, function(spec)
+    if spec.url:find("/publicRooms", 1, true) then return public_rooms_response(env.public_rows) end
+    local room = spec.url:match("/rooms/([^/]+)/join")
+    if room then
+      if env.fail_join then return { status = 403,
+        body = '{"errcode":"M_FORBIDDEN","error":"invite required"}' } end
+      return { status = 200, body = '{"room_id":"' .. room:gsub("%%(%x%x)", function(h)
+        return string.char(tonumber(h, 16)) end) .. '"}' }
+    end
+    return { status = 200, body = "{}" }
+  end, function(calls)
+    env.calls, env.client, env.delivered = calls, invite_client(), {}
+    env.relay = started_relay(path, env.client, env.delivered)
+    local passed, failure = pcall(run, env)
+    env.relay:stop()
+    if not passed then error(failure, 0) end
+  end)
+  remuda._butler_send = saved_send
+  remove_dir(dir)
+  if not ok then error(err, 0) end
+end
+
+-- Simulates a daemon restart: fresh approval and write modules, a new relay on
+-- the same config and state file.
+local function restart_relay(env)
+  env.relay:stop()
+  dofile("packages/butler/approval.lua")
+  dofile("packages/butler/matrix_write.lua")
+  env.relay = relay_module.new({ config_path = env.path, matrix = env.client,
+    deliver = function(event) env.delivered[#env.delivered + 1] = event return true end })
+  assert(env.relay:start())
+  env.client:pump()
+end
+
+local function server_joins(env, room)
+  local n = 0
+  for _, spec in ipairs(env.calls) do
+    if spec.method == "POST" and spec.url:find("/rooms/" .. encoded(room) .. "/join", 1, true) then n = n + 1 end
+  end
+  return n + env.client:joins(room)
+end
+
+-- Every PUT to HOME as { event_id, body, relates_to }; the scripted pump
+-- answers request N with event id "$sentN".
+local function home_posts(env, fragment)
+  local posts = {}
+  for index, args in ipairs(env.client.requests) do
+    if args.method == "PUT" and (args.room == HOME or args.path:find("/rooms/" .. encoded(HOME) .. "/", 1, true)) then
+      local content = args.body and matrix.decode_json(args.body) or {}
+      local body = args.text or (type(content) == "table" and content.body) or ""
+      if not fragment or body:find(fragment, 1, true) then
+        posts[#posts + 1] = { event_id = "$sent" .. index, body = body,
+          relates_to = type(content) == "table" and content["m.relates_to"] or nil }
+      end
+    end
+  end
+  return posts
+end
+
+local function thread_replies(env, request_event, fragment)
+  local n = 0
+  for _, post in ipairs(home_posts(env, fragment)) do
+    local rel = post.relates_to
+    if type(rel) == "table" and (rel.event_id == request_event
+      or type(rel["m.in_reply_to"]) == "table" and rel["m.in_reply_to"].event_id == request_event) then n = n + 1 end
+  end
+  return n
+end
+
+local function mails_to(env, who, fragment)
+  local n = 0
+  for _, mail in ipairs(env.mails) do
+    if mail.to == who and (not fragment or tostring(mail.text):find(fragment, 1, true)) then n = n + 1 end
+  end
+  return n
+end
+
+-- Runs `remuda butler matrix join ROOM` as AGENT through matrix.cli and
+-- returns { code, stdout, stderr } once the HOME post is answered.
+local function agent_cli_join(env, room, agent)
+  local old_pending, old_guidance, captured = remuda.pending, matrix.configuration_guidance, nil
+  remuda.pending = function()
+    return { resolve = function(_, code, stdout, stderr) captured = { code = code, stdout = stdout, stderr = stderr } end }
+  end
+  matrix.configuration_guidance = function() return nil end
+  local ok, err = pcall(function()
+    local returned = matrix.cli({ "matrix", "join", room }, agent or ASKER)
+    env.client:pump()
+    if not captured and type(returned) == "string" then captured = { code = 0, stdout = returned, stderr = "" } end
+  end)
+  remuda.pending, matrix.configuration_guidance = old_pending, old_guidance
+  if not ok then error(err, 0) end
+  return captured or { code = -1, stdout = "", stderr = "no CLI result" }
+end
+
+-- Files a join request as an agent and returns its id and HOME event id.
+local function file_request(env, room, agent)
+  local before = #home_posts(env, "Butler wants to join")
+  local result = agent_cli_join(env, room, agent)
+  local posts = home_posts(env, "Butler wants to join")
+  assert(#posts == before + 1, "an agent join must file a request with one HOME post (got "
+    .. (#posts - before) .. " posts; cli: " .. tostring(result.stdout) .. tostring(result.stderr) .. ")")
+  local post = posts[#posts]
+  local id = assert(post.body:match("Request (%w+)"), "the HOME post must name the request: " .. post.body)
+  return id, post.event_id, result, post
+end
+
+local function ts(offset_ms) return os.time() * 1000 + (offset_ms or 1000) end
+
+local function reaction(id, sender, target, key, when)
+  return { type = "m.reaction", event_id = id, sender = sender, origin_server_ts = when or ts(),
+    content = { ["m.relates_to"] = { rel_type = "m.annotation", event_id = target, key = key or CHECK } } }
+end
+
+local function text_event(id, sender, body, target, when)
+  local content = { msgtype = "m.text", body = body }
+  if target then content["m.relates_to"] = { ["m.in_reply_to"] = { event_id = target } } end
+  return { type = "m.room.message", event_id = id, sender = sender, origin_server_ts = when or ts(), content = content }
+end
+
+local batch_counter = 100
+local function room_events(env, events, room)
+  batch_counter = batch_counter + 1
+  env.client:sync({ json = { next_batch = "s" .. batch_counter,
+    rooms = { join = { [room or HOME] = { timeline = { events = events } } } } } })
+  env.client:pump()
+end
+
+local function is_open(id)
+  for _, record in ipairs(approval().list()) do
+    if tostring(record.id):upper() == id:upper() then return true end
+  end
+  return false
+end
+
+local function test_agent_join_files_request_and_does_not_join()
+  approval_env(nil, function(env)
+    local before = read_text(env.path)
+    local posts_before = #home_posts(env, "Butler wants to join")
+    local invalid = agent_cli_join(env, "!bad", ASKER)
+    local invalid_output = tostring(invalid.stdout) .. tostring(invalid.stderr)
+    assert(invalid.code ~= 0 and invalid_output:find(
+      "invalid Matrix room ID: room IDs start with !", 1, true),
+      "an invalid agent room ID must return the operator validation error: " .. invalid_output)
+    assert(#home_posts(env, "Butler wants to join") == posts_before,
+      "an invalid agent room ID must not post an approval request")
+    local id, _, result, post = file_request(env, NEW)
+    assert(server_joins(env, NEW) == 0 and read_text(env.path) == before,
+      "an agent join must not join or write a room line before approval")
+    local rec = env.relay:state().approvals[id]
+    assert(rec and rec.summary == "join " .. NEW,
+      "a bare room ID must not be repeated in the approval summary: " .. tostring(rec and rec.summary))
+    assert(post.body:find("Butler wants to join", 1, true) and post.body:find(NEW, 1, true)
+      and post.body:find("Asked by: ", 1, true) and post.body:find(ASKER, 1, true)
+      and post.body:find("within 10 minutes", 1, true)
+      and post.body:find("or: remuda butler approve " .. id, 1, true),
+      "the HOME post must show the target id, the asker, the window and the terminal fallback: " .. post.body)
+    assert(result.code == 0 and result.stdout:find("Asked the owner to approve joining", 1, true)
+      and result.stdout:find("(request " .. id .. ")", 1, true)
+      and result.stdout:find("expires in 10 min", 1, true) and result.stdout:find("Next:", 1, true),
+      "the agent must see the asked line with the request id and a Next line: "
+        .. tostring(result.stdout) .. tostring(result.stderr))
+    assert(#env.mails == 0 and is_open(id), "filing must not mail yet and must leave the request open")
+  end)
+end
+
+local function test_owner_check_reaction_approves_and_joins_with_how_approved()
+  approval_env(nil, function(env)
+    local id, event = file_request(env, NEW)
+    room_events(env, { reaction("$ok", OWNER, event, CHECK .. "\239\184\143") })
+    assert(server_joins(env, NEW) == 1, "an owner check-mark reaction on the request must join once")
+    local line = room_line(env.path, NEW)
+    assert(line and line:find("how=approved", 1, true), "an approved join must write how=approved: " .. tostring(line))
+    assert(mails_to(env, ASKER, "Approved; joined") == 1
+      and mails_to(env, ASKER, "(request " .. id .. ", " .. NEW .. ")") == 1,
+      "the asker must get one Approved mail with request identity")
+    assert(thread_replies(env, event, "Approved by " .. OWNER) == 1, "the request thread must say who approved")
+    assert(#env.delivered == 0, "the reaction must not become mail to the Butler")
+  end)
+end
+
+local function test_owner_yes_reply_approves_and_bare_yes_does_not()
+  approval_env(nil, function(env)
+    local id, event = file_request(env, NEW)
+    room_events(env, { text_event("$bare", OWNER, "yes") })
+    assert(server_joins(env, NEW) == 0 and is_open(id), "a bare yes must not answer the request")
+    room_events(env, { text_event("$question", OWNER, "Why this room?", event) })
+    assert(delivered_ids(env.delivered, "$question"),
+      "a non-answer reply to an approval request must still become ordinary mail")
+    room_events(env, { text_event("$reply", OWNER,
+      "> <@bot:example.org> Butler wants to join " .. NEW .. "\n\n Yes ", event) })
+    assert(server_joins(env, NEW) == 1, "an owner yes reply to the request must join")
+    assert(mails_to(env, ASKER, "Approved; joined") == 1
+      and mails_to(env, ASKER, "(request " .. id .. ", " .. NEW .. ")") == 1,
+      "the asker must get one Approved mail with request identity")
+    assert(not delivered_ids(env.delivered, "$reply"), "the yes reply must not become mail to the Butler")
+  end)
+end
+
+local function test_reaction_from_stranger_agent_or_other_room_is_ignored()
+  approval_env(OWNER .. ",@agent-x:example.org", function(env)
+    local id, event = file_request(env, NEW)
+    room_events(env, { reaction("$stranger", STRANGER, event),
+      reaction("$agent", "@agent-x:example.org", event),
+      text_event("$agent-yes", "@agent-x:example.org", "yes", event) })
+    room_events(env, { reaction("$all", OWNER, event) }, ALL)
+    assert(server_joins(env, NEW) == 0 and is_open(id) and #env.mails == 0,
+      "answers from a non-allowlisted sender, an agent MXID or a non-HOME room must do nothing")
+    room_events(env, { reaction("$owner", OWNER, event) })
+    assert(server_joins(env, NEW) == 1, "the owner's answer must still work afterwards")
+  end)
+end
+
+local function test_reaction_on_older_request_or_before_post_is_ignored()
+  approval_env(nil, function(env)
+    local first_id, first = file_request(env, NEW)
+    local second_id = file_request(env, NEW2)
+    room_events(env, { reaction("$other", OWNER, "$older-event"),
+      reaction("$early", OWNER, first, CHECK, ts(-120000)) })
+    assert(server_joins(env, NEW) == 0 and server_joins(env, NEW2) == 0 and is_open(first_id),
+      "a check-mark on another event, or one older than the post, must do nothing")
+    room_events(env, { reaction("$first", OWNER, first) })
+    assert(server_joins(env, NEW) == 1 and server_joins(env, NEW2) == 0 and is_open(second_id),
+      "an answer binds only to the request whose event it targets")
+  end)
+end
+
+local function test_deny_and_expiry_mail_with_next_and_no_join()
+  approval_env(nil, function(env)
+    local denied_id, denied = file_request(env, NEW)
+    room_events(env, { reaction("$no", OWNER, denied, CROSS) })
+    assert(server_joins(env, NEW) == 0 and not is_open(denied_id), "a cross-mark must deny without joining")
+    assert(mails_to(env, ASKER, "Denied by the owner (request " .. denied_id .. ", " .. NEW
+      .. "). Next: ask the owner in HOME why, or pick another room.") == 1,
+      "a denial must mail the asker with Next")
+    assert(thread_replies(env, denied, "Denied by " .. OWNER) == 1, "the request thread must say who denied")
+
+    local expired_id, expired = file_request(env, NEW2)
+    local record = env.relay:state().approvals[expired_id]
+    assert(record, "the open request must be kept in the relay state under its id")
+    record.expires_at = type(record.expires_at) == "string" and "1970-01-01T00:00:00Z" or 0
+    tick_timers(1)
+    env.client:pump()
+    assert(mails_to(env, ASKER, "No answer in 10 minutes; not joined (request " .. expired_id .. ", " .. NEW2
+      .. "). Next: run the join again to re-ask.") == 1,
+      "expiry must mail the asker with Next")
+    room_events(env, { reaction("$late", OWNER, expired) })
+    assert(server_joins(env, NEW2) == 0 and not is_open(expired_id), "an expired request must never join")
+  end)
+end
+
+local function test_approved_join_failure_mail_includes_request_identity()
+  approval_env(nil, function(env)
+    local id, event = file_request(env, NEW)
+    env.fail_join = true
+    room_events(env, { reaction("$failed-join", OWNER, event, CHECK) })
+    assert(mails_to(env, ASKER, "Approved, but the join failed: ") == 1
+      and mails_to(env, ASKER, "(request " .. id .. ", " .. NEW
+        .. "). Next: ask the owner to invite the bot, then run the join again.") == 1,
+      "a failed approved join must mail the requester with its request and room IDs")
+    assert(env.relay:state().approvals[id].status == "failed",
+      "a failed approved join must mark the approval failed")
+  end)
+end
+
+local function test_dedupe_returns_same_id_and_cap_refuses_without_post()
+  approval_env(nil, function(env)
+    local id = file_request(env, NEW)
+    local again = agent_cli_join(env, NEW)
+    assert(#home_posts(env, "Butler wants to join") == 1 and again.stdout:find("(request " .. id .. ")", 1, true),
+      "a repeated ask for the same target must return the same id without posting")
+    file_request(env, NEW2); file_request(env, NEW3)
+    local capped = agent_cli_join(env, NEW4)
+    local text = capped.stdout .. capped.stderr
+    assert(#home_posts(env, "Butler wants to join") == 3
+      and text:find("Too many open approval requests (3 per agent, 5 total). Next: wait for an answer or expiry (10 min), then retry.", 1, true),
+      "a fourth open request for one asker must be refused with Next and post nothing: " .. text)
+    file_request(env, NEW4, "team-2-mx"); file_request(env, "!new5:example.org", "team-2-mx")
+    local total = agent_cli_join(env, "!new6:example.org", "team-3-mx")
+    assert(#home_posts(env, "Butler wants to join") == 5
+      and (total.stdout .. total.stderr):find("Too many open approval requests (3 per agent, 5 total). Next: wait for an answer or expiry (10 min), then retry.", 1, true),
+      "a sixth open request in total must be refused and post nothing")
+  end)
+end
+
+local function test_terminal_approve_operator_only()
+  approval_env(nil, function(env)
+    local id = file_request(env, NEW)
+    local cli = assert(approval().cli, "approval.cli backs the approvals/approve/deny verbs")
+    local old_fail, old_caller, failed = remuda.fail, remuda.caller, nil
+    remuda.fail = function(message, code) failed = { message = message, code = code } return message end
+    local ok, err = pcall(function()
+      local function caller_kind(kind)
+        if kind == nil then
+          remuda.caller = nil
+        else
+          remuda.caller = function() return { kind = kind, session = "agent1" } end
+        end
+      end
+      local function refused(verb, request_id, agent)
+        failed = nil
+        local out = cli({ verb, request_id }, agent)
+        local message = failed and failed.message or tostring(out)
+        assert(message == verb .. " is operator-only. Next: wait for the owner's answer by mail; remuda butler inbox",
+          "an unauthorized " .. verb .. " must be refused with Next: " .. message)
+      end
+      for _, verb in ipairs({ "approve", "deny" }) do
+        caller_kind("outside")
+        refused(verb, id, ASKER) -- current_agent still refuses when caller() says outside
+        caller_kind("session")
+        refused(verb, id, nil) -- agent identity has been cleared; caller kind remains authoritative
+        caller_kind("unknown")
+        refused(verb, id, nil)
+        caller_kind(nil)
+        refused(verb, id, nil)
+      end
+      assert(server_joins(env, NEW) == 0 and is_open(id), "a refused agent approve must leave the request open")
+      caller_kind("outside")
+      local listed = tostring(cli({ "approvals" }, nil))
+      local agent_listed = tostring(cli({ "approvals" }, ASKER))
+      assert(listed:find(id, 1, true) and listed:find(NEW, 1, true)
+        and listed:find("EXPIRES-IN", 1, true) and listed:find("10m", 1, true)
+        and listed:find("Next: remuda butler approve ID, or remuda butler deny ID", 1, true),
+        "approvals must list the open request with a Next line: " .. listed)
+      assert(agent_listed:find("Next: wait for mail; remuda butler inbox", 1, true),
+        "agent approvals must direct the agent to wait for mail: " .. agent_listed)
+      for _, verb in ipairs({ "approvals", "approve", "deny" }) do
+        local help = tostring(cli({ verb, "--help" }, nil))
+        assert(help:find("Usage: remuda butler " .. verb, 1, true), verb .. " --help omitted usage")
+      end
+      failed = nil
+      local out = cli({ "approve", id:lower() }, nil)
+      env.client:pump()
+      assert(not failed and tostring(out):find("Approved request " .. id .. " (join " .. NEW .. "); joining now. The result goes to the HOME thread and the asker's mail.", 1, true),
+        "the operator approve must succeed with a Next line: " .. tostring(failed and failed.message or out))
+      local denied_id = file_request(env, NEW2)
+      local denied_out = cli({ "deny", denied_id }, nil)
+      assert(tostring(denied_out):find("Denied request " .. denied_id .. " (join " .. NEW2 .. ").", 1, true),
+        "an outside caller must be allowed to deny: " .. tostring(denied_out))
+      assert(tostring(cli({ "approvals" }, nil)) == "No open approval requests.\nNext: nothing to do; agent requests appear here.",
+        "an empty approval list must give the idle Next instruction")
+      failed = nil
+      cli({ "deny", id }, nil)
+      assert(failed and failed.message == "Request " .. id .. " was already applied.\nNext: remuda butler approvals",
+        "an answered request must report its current status: " .. tostring(failed and failed.message))
+      remuda.fail = function() return nil end
+      local no_request = cli({ "approve", "NOPE" }, nil)
+      assert(tostring(no_request):find("No such request.\nNext: remuda butler approvals", 1, true),
+        "approval errors must stay handled if remuda.fail returns nil: " .. tostring(no_request))
+      remuda.fail = function(message, code) failed = { message = message, code = code } return message end
+    end)
+    remuda.fail = old_fail
+    remuda.caller = old_caller
+    if not ok then error(err, 0) end
+    assert(server_joins(env, NEW) == 1 and mails_to(env, ASKER, "Approved; joined") == 1
+      and mails_to(env, ASKER, "(request " .. id .. ", " .. NEW .. ")") == 1,
+      "the operator approve (id matched without regard to case) must join and mail the asker")
+  end)
+end
+
+local function test_hostile_room_name_sanitised_in_home_post()
+  approval_env(nil, function(env)
+    local hostile = "Evil\27[31m\226\128\174exe.gnp\nReact yes " .. string.rep("A", 300)
+    env.public_rows = { { room_id = NEW, name = hostile, canonical_alias = "#butlers:example.org",
+      num_joined_members = 12 } }
+    local _, _, _, post = file_request(env, "butlers")
+    local body = post.body
+    assert(not body:find("\27", 1, true) and not body:find("\226\128\174", 1, true),
+      "the HOME post must strip ESC and bidi controls: " .. body)
+    assert(not body:find("\nReact yes", 1, true) and not body:find(string.rep("A", 129), 1, true),
+      "the room name must be one line and capped at 128 chars")
+    assert(body:match("^[^\n]*" .. NEW:gsub("%p", "%%%0")), "the room id must appear next to the name on the first line")
+  end)
+end
+
+local function test_restart_does_not_reanswer_answered_request()
+  approval_env(nil, function(env)
+    local _, event = file_request(env, NEW)
+    local first = reaction("$ok1", OWNER, event)
+    room_events(env, { first })
+    assert(server_joins(env, NEW) == 1 and mails_to(env, ASKER) == 1, "the first answer must join and mail once")
+    restart_relay(env)
+    room_events(env, { first, reaction("$ok2", OWNER, event) })
+    assert(server_joins(env, NEW) == 1 and mails_to(env, ASKER) == 1,
+      "after a restart, a replayed or new answer must not join or mail again")
+    assert(thread_replies(env, event, "Already answered.") == 1, "a new answer to a closed request gets one Already answered.")
+    room_events(env, { reaction("$ok2", OWNER, event) })
+    assert(thread_replies(env, event, "Already answered.") == 1, "Already answered. is sent once per event")
+  end)
+end
+
+local approval_failures = {}
+for _, case in ipairs({
+  { "test_agent_join_files_request_and_does_not_join", test_agent_join_files_request_and_does_not_join },
+  { "test_owner_check_reaction_approves_and_joins_with_how_approved", test_owner_check_reaction_approves_and_joins_with_how_approved },
+  { "test_owner_yes_reply_approves_and_bare_yes_does_not", test_owner_yes_reply_approves_and_bare_yes_does_not },
+  { "test_reaction_from_stranger_agent_or_other_room_is_ignored", test_reaction_from_stranger_agent_or_other_room_is_ignored },
+  { "test_reaction_on_older_request_or_before_post_is_ignored", test_reaction_on_older_request_or_before_post_is_ignored },
+  { "test_deny_and_expiry_mail_with_next_and_no_join", test_deny_and_expiry_mail_with_next_and_no_join },
+  { "test_approved_join_failure_mail_includes_request_identity", test_approved_join_failure_mail_includes_request_identity },
+  { "test_dedupe_returns_same_id_and_cap_refuses_without_post", test_dedupe_returns_same_id_and_cap_refuses_without_post },
+  { "test_terminal_approve_operator_only", test_terminal_approve_operator_only },
+  { "test_hostile_room_name_sanitised_in_home_post", test_hostile_room_name_sanitised_in_home_post },
+  { "test_restart_does_not_reanswer_answered_request", test_restart_does_not_reanswer_answered_request },
+}) do
+  local ok, err = pcall(case[2])
+  if not ok then approval_failures[#approval_failures + 1] = case[1] .. ": " .. tostring(err) end
+end
+assert(#approval_failures == 0, #approval_failures .. " approval tests failed:\n" .. table.concat(approval_failures, "\n"))
+print("ok: agent join approvals")
