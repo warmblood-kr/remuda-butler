@@ -1,0 +1,4 @@
+[MAIL-THREAD-FIRST from matrix/@alice:example.org · 2026-09-30T10:00:00Z] Matrix thread reply from @alice:example.org
+  Matrix event $thread-first-response
+  in reply to M0 (thread M0)
+The Butler's reply started this thread.

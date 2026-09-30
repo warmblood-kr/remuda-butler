@@ -284,10 +284,39 @@ function matrix.join(opts, on_done, agent)
   local done = once(on_done)
   local room = operator_room("join", opts, agent, done)
   if not room then return { cancel = function() end } end
+  local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths or {}
+  local config_path = paths.config_path
+  if type(config_path) ~= "string" or config_path == "" then
+    return error_result(done, "Matrix config path is unavailable")
+  end
+  local conf, config_error = matrix.read_config(config_path)
+  if not conf then return error_result(done, config_error) end
+  local added = false
+  if conf.rooms[room] ~= "home" and conf.rooms[room] ~= "all" then
+    local ok, wrote_or_error = matrix.config_add_room(config_path, room, "operator")
+    local add_error = not ok and wrote_or_error or nil
+    if not ok then return error_result(done, add_error) end
+    added = wrote_or_error == true
+  end
   return matrix.request_json({ method = "POST",
     path = "/_matrix/client/v3/rooms/" .. path_component(room) .. "/join",
     room = room, body = "{}", headers = { ["Content-Type"] = "application/json" },
-  }, done)
+  }, function(result)
+    if result.error and added then
+      local removed, remove_error = matrix.config_remove_room(config_path, room)
+      if not removed then
+        result.error = tostring(result.error) .. "; config rollback failed: " .. tostring(remove_error)
+      end
+    end
+    if result.error and result.error:find("(M_FORBIDDEN)", 1, true) then
+      local next_line = "Next: invite the bot (" .. conf.self_mxid .. ") to " .. room
+        .. " from Element, then retry."
+      local replaced
+      result.error, replaced = result.error:gsub("Next:[^\r\n]*", function() return next_line end)
+      if replaced == 0 then result.error = result.error .. "\n" .. next_line end
+    end
+    done(result)
+  end)
 end
 
 function matrix.leave(opts, on_done, agent)
@@ -295,10 +324,34 @@ function matrix.leave(opts, on_done, agent)
   local done = once(on_done)
   local room = operator_room("leave", opts, agent, done)
   if not room then return { cancel = function() end } end
+  local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths or {}
+  local config_path = paths.config_path
+  if type(config_path) ~= "string" or config_path == "" then
+    return error_result(done, "Matrix config path is unavailable")
+  end
+  local conf, config_error = matrix.read_config(config_path)
+  if not conf then return error_result(done, config_error) end
+  if conf.rooms[room] == "home" or conf.rooms[room] == "all" then
+    return error_result(done,
+      "HOME and ALL rooms can't be left.\nNext: remuda butler matrix setup (to change HOME or ALL).")
+  end
+  if conf.rooms[room] == nil then
+    return error_result(done, room .. " is not a configured Matrix room.")
+  end
   return matrix.request_json({ method = "POST",
     path = "/_matrix/client/v3/rooms/" .. path_component(room) .. "/leave",
     room = room, body = "{}", headers = { ["Content-Type"] = "application/json" },
-  }, done)
+  }, function(result)
+    local removed, remove_error = matrix.config_remove_room(config_path, room)
+    if not removed then
+      local detail = result.error and (tostring(result.error) .. "; ") or ""
+      result.error = detail .. "could not remove Matrix room config line: " .. tostring(remove_error)
+    elseif result.error then
+      local base = tostring(result.error):gsub("\n?Next:[^\r\n]*", "")
+      result.error = base .. "; the room was removed from the local config.\nNext: remuda butler matrix rooms"
+    end
+    done(result)
+  end)
 end
 
 return matrix
