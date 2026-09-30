@@ -2900,10 +2900,14 @@ fn setup_renotice(path: &Path, alias: &str) {
         remuda._rn_tick = function(now) state.now = now; remuda._butler_deliver_notices() end
         -- Notices typed into this member's pane only (the stub records every pane).
         state.to = {{}}
+        -- The pane shows what was typed, as in the #137 tests, so a notice
+        -- verifies instead of hitting the retype fallback.
+        remuda.capture = function() return state.screen or '> ' end
         local prior_type = remuda.type_text
         remuda.type_text = function(name, text)
           local ok = prior_type(name, text)
           state.to[#state.typed] = name
+          state.screen = text .. '\n> '
           return ok
         end
         remuda._rn_mine = function()
