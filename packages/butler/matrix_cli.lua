@@ -386,6 +386,8 @@ function matrix.cli(args, agent)
               "  Owner: " .. terminal_safe(wizard_plan.owner_mxid),
               "  Rooms: open (anyone can invite this Butler). Restrict later: edit deny_room/deny_server in "
                 .. terminal_safe(wizard_plan.config_path),
+              "  Switch back: set rooms=allowlist in " .. terminal_safe(wizard_plan.config_path)
+                .. ". Only allowlisted senders' messages become mail; others are quarantined.",
               "  Account: create a Butler bot (you will need its server registration token)",
               "  Bot: " .. terminal_safe(wizard_plan.bot_mxid),
               "  Save private token and config files in: " .. terminal_safe(wizard_plan.output_dir),

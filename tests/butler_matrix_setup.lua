@@ -433,6 +433,8 @@ return function(matrix)
     and line_specs[3].label:find("Bot: @butler%-")
     and line_specs[3].label:find("\n  Rooms: open (anyone can invite this Butler). Restrict later: edit deny_room/deny_server in "
       .. default_paths.config_path .. "\n", 1, true)
+    and line_specs[3].label:find("\n  Switch back: set rooms=allowlist in " .. default_paths.config_path
+      .. ". Only allowlisted senders' messages become mail; others are quarantined.\n", 1, true)
     and not line_specs[3].label:find("Room access", 1, true)
     and line_specs[3].label:find("replaces its current Matrix relay config", 1, true),
     "the wizard should set open rooms and summarize the real config path")
@@ -452,6 +454,23 @@ return function(matrix)
     == "Registration token for http://matrix.invalid, from its admin (hidden). This is not an access token:"
     and #requests == 0 and not resolved,
     "confirming the summary should enter the existing hidden registration-token flow")
+  local wizard_bot = assert(line_specs[3].label:match("Bot: (@%S+)"), "wizard summary should name the bot")
+  local wizard_relay, wizard_config, wizard_status = matrix.relay, remuda._butler_matrix_config, matrix.status
+  matrix.relay = { stop = function() end, start = function() return true end }
+  matrix.status = function(_, callback) callback({}) end
+  prompt_specs[1].callback("wizard-registration-token", nil)
+  requests[1].callback({ status = 401,
+    body = '{"session":"wizard-session","flows":[{"stages":["m.login.registration_token"]}]}' })
+  requests[2].callback({ status = 200,
+    body = '{"access_token":"wizard-access-token","user_id":"' .. wizard_bot .. '"}' })
+  requests[3].callback({ status = 200, body = '{"user_id":"' .. wizard_bot .. '"}' })
+  requests[4].callback({ status = 200, body = '{"room_id":"!wizard-home:example.org"}' })
+  matrix.relay, matrix.status = wizard_relay, wizard_status
+  assert(resolved and resolved.status == 0 and read(default_paths.config_path):find("\nrooms=open\n", 1, true),
+    "the confirmed wizard should write rooms=open to the config")
+  for _, path in ipairs({ default_paths.token_path, default_paths.config_path,
+    default_paths.config_path:gsub("/config$", "/password") }) do os.remove(path) end
+  remuda._butler_matrix_config = wizard_config
 
   requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
   wizard_reply = matrix.cli({ "matrix", "setup" })

@@ -13,6 +13,7 @@ local USAGE = [[Usage: remuda butler matrix setup [OPTIONS]
   --default              Save to the default live Butler config directory.
   --force                Replace existing token or config files.
   --all                  Also create the optional ALL-BUTLERS room.
+  --rooms open|allowlist Room invites: open (anyone) or allowlist (default; allowlisted senders only).
   --pin SHA256HEX         Trust this HTTPS certificate fingerprint.
   --ca-file PATH         Trust the HTTPS certificate authority in this file.
 
