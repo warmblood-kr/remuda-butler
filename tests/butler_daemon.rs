@@ -2271,6 +2271,7 @@ fn butler_compaction_defers_for_mail_queued_through_the_cli() {
     // This keeps the separate terminal-notice queue out of the assertion: the
     // compaction guard must inspect the real unread mailbox for this agent.
     eval(&path, r#"
+      remuda._butler_state.compaction_enabled = false
       local root = remuda._butler_bus.agents.butler
       remuda._butler_bus.agents["mail-compaction"] = {
         id = root.id, alias = root.alias, kind = "codex",
@@ -2290,6 +2291,18 @@ fn butler_compaction_defers_for_mail_queued_through_the_cli() {
       remuda._butler_prompt_is_empty = function() return "EMPTY", "" end
     "#);
 
+    // Other integration tests share the suite's XDG data home and can leave
+    // old mail for the persistent root identity; assert this send's delta.
+    let unread_before_send = eval(
+        &path,
+        r#"
+      local id = remuda._butler_bus.agents["mail-compaction"].id
+      return tostring(remuda._butler_mail.unread(id))
+    "#,
+    )
+    .parse::<u32>()
+    .expect("unread count before send");
+
     let queued = remuda_timed(
         &dir,
         &[
@@ -2302,13 +2315,36 @@ fn butler_compaction_defers_for_mail_queued_through_the_cli() {
     assert!(String::from_utf8_lossy(&queued.stdout).contains("queued "),
         "butler send did not queue a message: {}", String::from_utf8_lossy(&queued.stdout));
 
-    assert_eq!(
-        eval(&path, r#"
+    let unread_after_send = eval(
+        &path,
+        r#"
           local id = remuda._butler_bus.agents["mail-compaction"].id
           return tostring(remuda._butler_mail.unread(id))
-        "#),
-        "1",
-        "the public send command must leave a real unread mailbox entry"
+        "#,
+    )
+    .parse::<u32>()
+    .expect("unread count after send");
+    assert_eq!(
+        unread_after_send,
+        unread_before_send + 1,
+        "the public send command must leave exactly one new unread mailbox entry"
+    );
+
+    assert_eq!(
+        eval(
+            &path,
+            "return remuda._butler_compaction_preflight('mail-compaction') or 'nil'",
+        ),
+        "queued mail",
+        "ordinary compaction preflight must keep deferring unread mail"
+    );
+    assert_eq!(
+        eval(
+            &path,
+            "return remuda._butler_compaction_preflight('mail-compaction', true) or 'nil'",
+        ),
+        "nil",
+        "the bounded/critical override must pass only the unread-mail preflight"
     );
 
     let compact = remuda_timed(&dir, &["-s", "s", "butler", "compact", "mail-compaction"]);

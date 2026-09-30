@@ -1,6 +1,7 @@
 -- Run from the repo root: luajit tests/butler_compaction.lua
 -- Exercise the scheduled tick's shared compaction gate without a daemon.
-local used, used_pct, busy, composer_empty, session_failure, attached, queued = "?", nil, false, true, false, false, false
+local used, used_pct, busy, composer_empty, session_failure, attached, queued, mail_lookup_error =
+  "?", nil, false, true, false, false, false, false
 local screen = "mock idle screen"
 remuda = {
   _butler_test_mode = true,
@@ -15,7 +16,10 @@ remuda = {
     return { is_busy = busy, attached = attached }
   end,
   ls = function() return { { name = "butler", alive = true, attached = attached } } end,
-  _butler_mail = { unread = function() return queued and 1 or 0 end },
+  _butler_mail = { unread = function()
+    if mail_lookup_error then error("mail read failed") end
+    return queued and 1 or 0
+  end },
   capture = function() return screen end,
 }
 dofile("packages/butler/main.lua")
@@ -192,6 +196,48 @@ queued = true
 send, reason = tick("600000", false)
 assert(not send and reason == "skipped_queued", "queued mail must prevent compaction")
 queued = false
+
+-- Unread mail may defer compaction, but the bound and critical threshold must
+-- keep unread or unreadable mail from preventing compaction forever.
+local saved_compact, saved_butler_send = remuda.butler.compact, remuda._butler_send
+local compacted, parent_alerts = 0, 0
+remuda.butler.compact = function() compacted = compacted + 1; return "sent" end
+remuda._butler_send = function(_, recipient, message)
+  if recipient == "parent" and message:find("unread Butler mail", 1, true) then
+    parent_alerts = parent_alerts + 1
+  end
+end
+remuda._butler_bus.agents.butler.parent = "parent"
+queued, mail_lookup_error, used, used_pct, busy, attached, composer_empty =
+  true, true, "600000", nil, false, false, true
+fake_now = 1000
+local mail_state = {}
+local function run_mail_policy()
+  local should_compact, event = remuda.butler.compaction_policy("butler", mail_state)
+  if should_compact then remuda.butler.compact("butler") end
+  return should_compact, event
+end
+local first_mail_should_compact, first_mail_event = run_mail_policy()
+assert(not first_mail_should_compact and first_mail_event == "skipped_queued" and compacted == 0,
+  "mail lookup errors should initially defer compaction")
+assert(parent_alerts == 0, "mail deferral should not alert before compaction is allowed")
+fake_now = fake_now + 601
+local expired_mail_should_compact, expired_mail_event = run_mail_policy()
+assert(expired_mail_should_compact and expired_mail_event == "sent" and compacted == 1 and parent_alerts == 1,
+  "mail lookup errors must not defer beyond the bound; compact and alert parent once")
+fake_now = fake_now + 3
+run_mail_policy()
+assert(parent_alerts == 1, "an expired mail deferral should alert the parent only once")
+
+compacted, parent_alerts = 0, 0
+mail_state = {}
+mail_lookup_error, used, used_pct = false, "800000", nil
+local critical_mail_should_compact, critical_mail_event = run_mail_policy()
+assert(critical_mail_should_compact and critical_mail_event == "sent" and compacted == 1 and parent_alerts == 1,
+  "critical context must compact despite unread mail and alert the parent once")
+queued, mail_lookup_error = false, false
+remuda._butler_bus.agents.butler.parent = nil
+remuda.butler.compact, remuda._butler_send = saved_compact, saved_butler_send
 
 assert(remuda._butler_compaction_is_unknown_dialog("Mystery chooser\n1. Continue\n❯"),
   "numbered option immediately above the prompt should be an active unknown dialog")
