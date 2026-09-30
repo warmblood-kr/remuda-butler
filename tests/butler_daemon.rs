@@ -6624,6 +6624,312 @@ done
     drop(daemon);
 }
 
+/// Codex compaction on a lower model, observed on codex-cli 0.159: `/model`
+/// opens "Select Model and Effort" (a number key picks a row), then "Select
+/// Reasoning Level for <Model>" with the cursor on that model's default effort;
+/// `s` applies it for this session only and leaves $CODEX_HOME/config.toml
+/// alone, while Enter or a number key there rewrites the global default.
+/// The fake reads raw keys, so a picker key sent through type_text (which
+/// submits with Return) lands as a global-default choice and shows in the log.
+#[test]
+#[cfg(unix)]
+fn butler_codex_compaction_switches_to_luna_for_the_session_and_restores() {
+    let dir = scratch_dir("butler-fake-codex");
+    let (token_path, config_path) = butler_config(
+        &dir,
+        "fake-codex",
+        "http://127.0.0.1:1",
+        "!room:example.org",
+        "@butler:example.org",
+        "",
+    );
+    let token_str = token_path.to_string_lossy().to_string();
+    let config_str = config_path.to_string_lossy().to_string();
+    let data_str = std::env::var("XDG_DATA_HOME").expect("test XDG_DATA_HOME");
+    let daemon = Daemon::spawn_with_env(
+        &dir,
+        &[
+            ("REMUDA_BUTLER_TOKEN", token_str.as_str()),
+            ("REMUDA_BUTLER_CONFIG", config_str.as_str()),
+            ("XDG_DATA_HOME", data_str.as_str()),
+            ("HOME", dir.to_string_lossy().as_ref()),
+        ],
+    );
+    let path = daemon::socket_path_in(&dir, "s");
+    eval(&path, r#"remuda._butler_argv = {"sh", "-c", "while read line; do :; done"}"#);
+    eval(&path, "remuda._butler_skip_relay = true");
+    let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let trace_path = dir.join("compaction-trace.log");
+    eval(&path, &format!(
+        "remuda._butler_compaction_trace_path = {}",
+        lua_raw_string(&trace_path.to_string_lossy())
+    ));
+
+    // An isolated CODEX_HOME: the real ~/.codex is never touched.
+    let codex_home = dir.join("codex-home");
+    std::fs::create_dir_all(&codex_home).unwrap();
+    let codex_config = codex_home.join("config.toml");
+    let config_seed = "model = \"gpt-5.6-sol\"\nmodel_reasoning_effort = \"high\"\n\n[tui]\nscreen_reader_detection_done = true\n";
+    std::fs::write(&codex_config, config_seed).unwrap();
+
+    let script = dir.join("fake-codex.sh");
+    std::fs::write(
+        &script,
+        r#"#!/bin/bash
+log=$1
+scenario=$2
+stty -icanon -echo min 1 time 0 2>/dev/null
+names=("GPT-6.1-Sol" "GPT-6-Astra" "GPT-6-Sol" "GPT-6-Luna" "GPT-5.6-Sol" "GPT-5.6-Terra")
+ids=("gpt-6.1-sol" "gpt-6-astra" "gpt-6-sol" "gpt-6-luna" "gpt-5.6-sol" "gpt-5.6-terra")
+rows=("Low" "Medium" "High" "Extra high")
+levels=("low" "medium" "high" "xhigh")
+model=gpt-5.6-sol; effort=high
+case "$scenario" in
+  crash) model=gpt-6-luna; effort=medium ;;
+  no-row) effort=minimal ;;
+esac
+ctx=500000; mode=composer; line=""; cursor=0; pick=0; ecur=0; note=""
+index_of() { local i; for i in "${!ids[@]}"; do [ "${ids[$i]}" = "$1" ] && echo "$i" && return; done; echo 0; }
+default_row() { if [ "${ids[$1]}" = gpt-5.6-sol ]; then echo 0; else echo 1; fi; }
+paint() {
+  printf '\033[H\033[2JMODEL:%s CTX:%s\n' "$model" "$ctx"
+  [ -n "$note" ] && printf '• %s\n' "$note"
+  local i mark
+  case "$mode" in
+    composer)
+      printf '\n› Ask Codex to do anything\n\n  %s %s · /work\n' "${names[$(index_of "$model")]}" "$effort" ;;
+    model)
+      printf '\n  Select Model and Effort\n\n'
+      for i in "${!names[@]}"; do
+        mark='  '; [ "$i" = "$cursor" ] && mark='› '
+        cur=''; [ "${ids[$i]}" = "$model" ] && cur=' (current)'
+        printf '%s%d. %s%s\n' "$mark" $((i + 1)) "${names[$i]}" "$cur"
+      done
+      printf '\n  enter select · esc back\n' ;;
+    effort)
+      printf '\n  Select Reasoning Level for %s\n\n' "${names[$pick]}"
+      local d; d=$(default_row "$pick")
+      for i in "${!rows[@]}"; do
+        mark='  '; [ "$i" = "$ecur" ] && mark='› '
+        def=''; [ "$i" = "$d" ] && def=' (default)'
+        printf '%s%d. %s%s\n' "$mark" $((i + 1)) "${rows[$i]}" "$def"
+      done
+      printf '\n  enter default · s session · esc back\n' ;;
+  esac
+}
+apply() {
+  model=${ids[$pick]}; effort=${levels[$ecur]}; mode=composer
+  if [ "$1" = session ]; then
+    note="Model changed to $model $effort for this session only"
+  else
+    note="Model changed to $model $effort"
+    printf 'model = "%s"\nmodel_reasoning_effort = "%s"\n' "$model" "$effort" > "$CODEX_HOME/config.toml"
+  fi
+}
+paint
+while IFS= read -r -s -n1 -d '' c; do
+  key=$c
+  if [ "$c" = $'\e' ]; then
+    rest=''; IFS= read -r -s -n2 -t 0.05 -d '' rest
+    case "$rest" in '[A') key='<up>' ;; '[B') key='<down>' ;; *) key='ESC' ;; esac
+  elif [ "$c" = $'\r' ] || [ "$c" = $'\n' ]; then
+    key='RET'
+  fi
+  case "$mode" in
+    composer)
+      if [ "$key" = RET ]; then
+        [ -z "$line" ] && continue
+        printf 'CMD:%s\n' "$line" >> "$log"
+        case "$line" in
+          /model) mode=model; cursor=$(index_of "$model") ;;
+          /compact) [ "$scenario" = compact-fails ] || ctx=200000 ;;
+          *) printf 'PROMPT:%s\n' "$line" >> "$log" ;;
+        esac
+        line=''; paint
+      elif [ "${#key}" = 1 ]; then
+        line="$line$key"
+      fi ;;
+    model)
+      printf 'KEY:%s\n' "$key" >> "$log"
+      case "$key" in
+        [1-6]) pick=$((key - 1)); ecur=$(default_row "$pick"); mode=effort ;;
+        RET) pick=$cursor; ecur=$(default_row "$pick"); mode=effort ;;
+        '<up>') [ "$cursor" -gt 0 ] && cursor=$((cursor - 1)) ;;
+        '<down>') [ "$cursor" -lt 5 ] && cursor=$((cursor + 1)) ;;
+        ESC) mode=composer ;;
+      esac
+      paint ;;
+    effort)
+      printf 'KEY:%s\n' "$key" >> "$log"
+      case "$key" in
+        s) apply session ;;
+        RET) apply default ;;
+        [1-4]) ecur=$((key - 1)); apply default ;;
+        '<up>') [ "$ecur" -gt 0 ] && ecur=$((ecur - 1)) ;;
+        '<down>') [ "$ecur" -lt 3 ] && ecur=$((ecur + 1)) ;;
+        ESC) mode=model ;;
+      esac
+      paint ;;
+  esac
+done
+"#,
+    )
+    .expect("write fake Codex");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let restore_file = format!("{data_str}/remuda/butler/mail/compaction-restore.json");
+    eval(
+        &path,
+        &format!(
+            r#"
+      remuda._butler_compaction_config = {{critical=400000, cooldown_ticks=0, capture_gap=0,
+        completion_timeout=1, claude_completion_timeout=0.2, failure_cooldown_seconds=0, input_settle=0.01}}
+      local prior_contributions = remuda.contributions
+      remuda.contributions = function(point)
+        if point == "butler.agent" then
+          return {{{{id="codex", entry={{working=function() return false end}}}}}}
+        end
+        return prior_contributions(point)
+      end
+      remuda._butler_prompt_is_empty = function(_, screen)
+        if screen:find("Ask Codex to do anything", 1, true) then return "EMPTY" end
+        return "NON-EMPTY"
+      end
+      remuda._butler_telemetry_for = function(agent)
+        local screen = remuda.capture(agent.session_name)
+        return {{context_used=screen:match("CTX:%s*(%d+)"), model=screen:match("MODEL:([^ %c]+)")}}
+      end
+      remuda.session = function() return {{is_busy=false, attached=false}} end
+      remuda._butler_send = function(_, _, message)
+        remuda._fake_reports = remuda._fake_reports or {{}}
+        table.insert(remuda._fake_reports, message)
+      end
+      -- The restore record as it stood when each session-only switch was applied.
+      remuda._fake_record_at_s = {{}}
+      local original_key = remuda.key
+      remuda.key = function(name, key)
+        if key == "s" and not remuda._fake_record_at_s[name] then
+          local f = io.open({restore_file:?}, "r")
+          remuda._fake_record_at_s[name] = f and f:read("*a") or ""
+          if f then f:close() end
+        end
+        return original_key(name, key)
+      end
+      remuda._fake_codex = function(name, log, scenario)
+        remuda.new(name, {{"env", "CODEX_HOME=" .. {home:?}, "bash", {script:?}, log, scenario}}, nil, {{}})
+        remuda._butler_bus.agents[name] = {{id=name .. "-id", kind="codex", session_name=name}}
+      end
+    "#,
+            home = codex_home.to_string_lossy(),
+            script = script.to_string_lossy(),
+        ),
+    );
+
+    let log_of = |name: &str| std::fs::read_to_string(dir.join(format!("{name}.log"))).unwrap_or_default();
+    let reports = || eval(&path, "return table.concat(remuda._fake_reports or {}, '\\n')");
+    let record = || std::fs::read_to_string(&restore_file).unwrap_or_default();
+    let settle = |name: &str, done: &dyn Fn(&str) -> bool, what: &str| {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let in_progress = eval(&path, &format!(
+                "local m = remuda._butler_compaction_members_state or {{}}; local s = m[{:?}] or {{}}; return tostring(s.compaction_in_progress == true)",
+                format!("{name}-id")
+            ));
+            let got = log_of(name);
+            if in_progress == "false" && done(&got) { return got; }
+            assert!(Instant::now() < deadline, "{name}: {what} never happened. log:\n{got}\nscreen:\n{}\nreports: {}",
+                capture(&path, name), reports());
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let start = |name: &str, scenario: &str| {
+        let log = dir.join(format!("{name}.log"));
+        eval(&path, &format!("remuda._fake_codex({name:?}, {:?}, {scenario:?})", log.to_string_lossy()));
+        wait_for(&path, name, "Ask Codex to do anything");
+    };
+    // Switch to luna keeping the high effort (luna's default row is Medium),
+    // compact, then restore sol at high (sol's default row is Low). Picker
+    // rows are chosen with remuda.key, never typed.
+    let full_cycle = "CMD:/model\nKEY:4\nKEY:<down>\nKEY:s\nCMD:/compact\nCMD:/model\nKEY:5\nKEY:<down>\nKEY:<down>\nKEY:s\n";
+
+    // 1. Happy path, twice: effort kept, prior model back, record written
+    //    before the switch and cleared after, config.toml never written.
+    start("cx-happy", "happy");
+    for round in 1..=2 {
+        assert_eq!(eval(&path, "return remuda.butler.compact('cx-happy')"), "started", "round {round}");
+        let expected = full_cycle.repeat(round);
+        let got = settle("cx-happy", &|log| log == expected, "the full session-only cycle");
+        assert!(!got.contains("PROMPT:"), "no /model text may reach the model as a prompt: {got}");
+        assert!(capture(&path, "cx-happy").contains("GPT-5.6-Sol high"),
+            "round {round}: the prior model and effort must be back");
+        eval(&path, "remuda._fake_record_at_s['cx-happy'] = nil");
+    }
+    assert!(!record().contains("cx-happy-id"), "a finished compaction must clear its restore record: {}", record());
+    assert_eq!(std::fs::read_to_string(&codex_config).unwrap(), config_seed,
+        "session-only switches must leave config.toml byte-identical");
+
+    // 2. The restore record holds the prior model and effort while on luna.
+    eval(&path, "remuda._fake_record_at_s['cx-record'] = nil");
+    start("cx-record", "happy");
+    assert_eq!(eval(&path, "return remuda.butler.compact('cx-record')"), "started");
+    settle("cx-record", &|log| log == full_cycle, "the full cycle");
+    let at_switch = eval(&path, "return remuda._fake_record_at_s['cx-record'] or ''");
+    assert!(at_switch.contains("\"cx-record-id\"") && at_switch.contains("codex:gpt-5.6-sol high"),
+        "the durable record must name the prior model and effort before the luna switch: {at_switch:?}");
+
+    // 3. A failed compaction still restores the prior model.
+    start("cx-fails", "compact-fails");
+    assert_eq!(eval(&path, "return remuda.butler.compact('cx-fails')"), "started");
+    let got = settle("cx-fails", &|log| log == full_cycle, "the restore after a failed compaction");
+    assert!(capture(&path, "cx-fails").contains("GPT-5.6-Sol high"), "failure must still restore: {got}");
+    assert!(!record().contains("cx-fails-id"), "restored after failure, the record must be cleared: {}", record());
+
+    // 4. No row for the current effort on the luna picker: ESC out, never
+    //    press s or Enter, never compact, and report why.
+    start("cx-no-row", "no-row");
+    eval(&path, "return remuda.butler.compact('cx-no-row')");
+    let got = settle("cx-no-row", &|log| log.contains("KEY:ESC"), "an ESC out of the picker");
+    assert!(!got.contains("KEY:s") && !got.contains("KEY:RET") && !got.contains("/compact"),
+        "a missing effort row must not switch or compact: {got}");
+    let screen = capture(&path, "cx-no-row");
+    assert!(screen.contains("Ask Codex to do anything") && screen.contains("GPT-5.6-Sol minimal"),
+        "the picker must be closed and the model unchanged:\n{screen}");
+    assert!(reports().contains("minimal"), "the parent must hear which effort row was missing: {}", reports());
+
+    // 5. A crash left the member on luna with a durable record: the next tick
+    //    re-selects the prior model for the session only, then clears it.
+    start("cx-crash", "crash");
+    std::fs::create_dir_all(Path::new(&restore_file).parent().unwrap()).unwrap();
+    let mut prior: serde_json::Value = serde_json::from_str(&record()).unwrap_or_else(|_| serde_json::json!({}));
+    prior["cx-crash-id"] = serde_json::json!("codex:gpt-5.6-sol medium");
+    std::fs::write(&restore_file, prior.to_string()).unwrap();
+    eval(&path, "remuda._butler_compaction_load_restore_record()");
+    eval(&path, "return remuda._butler_compaction_tick('cx-crash', false)");
+    let got = settle("cx-crash", &|log| log.contains("KEY:s"), "the restore after a crash");
+    assert_eq!(got, "CMD:/model\nKEY:5\nKEY:<down>\nKEY:s\n", "resume must only restore, session-only");
+    assert!(capture(&path, "cx-crash").contains("GPT-5.6-Sol medium"));
+    assert!(!record().contains("cx-crash-id"), "the resumed restore must clear the record: {}", record());
+
+    // 6. Two members compacting at once: config.toml stays byte-identical.
+    start("cx-a", "happy");
+    start("cx-b", "happy");
+    eval(&path, "return remuda.butler.compact('cx-a')");
+    eval(&path, "return remuda.butler.compact('cx-b')");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while log_of("cx-a") != full_cycle || log_of("cx-b") != full_cycle {
+        assert_eq!(std::fs::read_to_string(&codex_config).unwrap(), config_seed,
+            "config.toml changed while two members compacted");
+        assert!(Instant::now() < deadline, "both members must finish a full cycle. a:\n{}\nb:\n{}",
+            log_of("cx-a"), log_of("cx-b"));
+        eval(&path, "return remuda.butler.compact('cx-b')");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(std::fs::read_to_string(&codex_config).unwrap(), config_seed);
+    drop(daemon);
+}
+
 /// Same real-process substitution as
 /// `butler_watchdog_relaunches_a_session_that_really_died`, but the witness
 /// here is the trace FILE `_butler_session_trace` in `packages/butler/init.lua`
