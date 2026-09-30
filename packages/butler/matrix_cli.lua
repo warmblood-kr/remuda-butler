@@ -3,6 +3,7 @@ local matrix = assert(remuda.butler and remuda.butler.matrix, "Matrix request wo
 
 local USAGE = [[  remuda butler matrix [--json] status
   remuda butler matrix [--json] rooms
+  remuda butler matrix [--json] rooms --public [TERM]
   remuda butler matrix [--json] [--room ROOM] [-n N] history
   remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
   remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
@@ -12,7 +13,7 @@ local USAGE = [[  remuda butler matrix [--json] status
   remuda butler matrix [--json] [--room ROOM] react EVENT_ID KEY
   remuda butler matrix [--json] [--room ROOM] upload PATH
   remuda butler matrix [--json] [--room ROOM] redact EVENT_ID [--reason TEXT]
-  remuda butler matrix [--json] join ROOM (operator)
+  remuda butler matrix [--json] join ROOM (ID, #alias, or public name; operator)
   remuda butler matrix [--json] leave ROOM (operator)
   remuda butler matrix setup [OPTIONS]
   remuda butler matrix [--json] quarantine [--id EVENT_ID] (operator)
@@ -68,6 +69,9 @@ local function parse(args)
     if not positional and value == "--" then
       positional = true
       at = at + 1
+    elseif not positional and verb == "rooms" and value == "--public" then
+      options.public = true
+      at = at + 1
     elseif not positional and (value == "--json" or value == "--room" or value == "--id") then
       local width = option(value)
       at = at + width
@@ -98,6 +102,7 @@ local function parse(args)
   if options.output and method ~= "download" then return nil end
   if options.reason and method ~= "redact" then return nil end
   if options.id and method ~= "quarantine" then return nil end
+  if options.public and method ~= "rooms" then return nil end
   if method == "send" then
     options.text = join_words(values, 1)
     if #values == 0 then return nil end
@@ -124,7 +129,14 @@ local function parse(args)
   elseif method == "download" then
     if #values ~= 1 then return nil end
     options.mxc = values[1]
-  elseif method == "quarantine" or method == "status" or method == "rooms" then
+  elseif method == "rooms" then
+    if options.public then
+      if #values > 1 then return nil end
+      options.public_term = values[1]
+    elseif #values ~= 0 then
+      return nil
+    end
+  elseif method == "quarantine" or method == "status" then
     if #values ~= 0 then return nil end
   end
   return method, options
@@ -142,13 +154,30 @@ end
 local function terminal_safe(value)
   return tostring(value or ""):gsub("[%c]", " "):gsub("\194[\128-\159]", " ")
 end
+local function shell_quote(value)
+  return matrix.shell_quote(tostring(value))
+end
 
 local function render_human(verb, options, result)
   local data = result.json or result
   if verb == "rooms" then
+    if options.public or result.public or data.public then
+      local rows, lines = data.public_rooms or {}, {}
+      for _, item in ipairs(rows) do
+        lines[#lines + 1] = terminal_safe(item.name) .. "  "
+          .. terminal_safe(item.alias or "(no alias)") .. "  "
+          .. tostring(item.members or 0) .. " members  " .. terminal_safe(item.room_id)
+      end
+      if #lines == 0 then lines[#lines + 1] = "No public Matrix rooms found" end
+      lines[#lines + 1] = options.public_term
+        and ("Next: remuda butler matrix join " .. shell_quote(terminal_safe(options.public_term)))
+        or "Next: remuda butler matrix join ROOM"
+      return table.concat(lines, "\n") .. "\n"
+    end
     local rooms, lines, leave_room, safe_rooms, safe_kinds, room_width, kind_width = data.rooms or {}, {}, false, {}, {}, 0, 0
     for _, item in ipairs(rooms) do
       local room = terminal_safe(item.room)
+      if item.alias then room = room .. " (" .. terminal_safe(item.alias) .. ")" end
       local kind = terminal_safe(item.kind)
       safe_rooms[#safe_rooms + 1] = room
       safe_kinds[#safe_kinds + 1] = kind
@@ -213,8 +242,28 @@ local function render_human(verb, options, result)
   elseif verb == "upload" then
     return "Uploaded as " .. tostring(result.content_uri or "") .. " (" .. tostring(result.event_id or "") .. ")\n"
   elseif verb == "join" or verb == "leave" then
-    return (verb == "join" and "Joined " or "Left ") .. terminal_safe(options.room or "the Matrix room")
-      .. "\nNext: remuda butler matrix rooms\n"
+    if verb == "join" and (result.ambiguous or data.ambiguous)
+      and type(result.matches or data.matches) == "table" then
+      local matches = result.matches or data.matches
+      local lines = {}
+      for _, item in ipairs(matches) do
+        lines[#lines + 1] = terminal_safe(item.name) .. "  "
+          .. terminal_safe(item.alias or "(no alias)") .. "  "
+          .. tostring(item.members or 0) .. " members  " .. terminal_safe(item.display_room_id or item.room_id)
+      end
+      lines[#lines + 1] = "Next: remuda butler matrix join #alias:server"
+      return table.concat(lines, "\n") .. "\n"
+    end
+    local id = result.room_id or data.room_id
+    local room_name, room_alias = result.room_name or data.room_name, result.room_alias or data.room_alias
+    local label = verb == "join" and (room_name or room_alias) or room_alias
+    label = label or options.room or "the Matrix room"
+    label = terminal_safe(label)
+    local suffix = id and id ~= label and (" (" .. terminal_safe(id) .. ")") or ""
+    local next_line = verb == "join"
+      and "Next: write to the Butler in that room, or remuda butler matrix rooms"
+      or "Next: remuda butler matrix rooms"
+    return (verb == "join" and "Joined " or "Left ") .. label .. suffix .. "\n" .. next_line .. "\n"
   end
   return (matrix.encode_json(result) or "{}") .. "\n"
 end
@@ -356,9 +405,6 @@ function matrix.cli(args, agent)
             lines[#lines + 1] = "Next: fix the config, then rerun remuda butler matrix setup ... --default --force"
           end
         else
-          local function shell_quote(value)
-            return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
-          end
           lines[#lines + 1] = "Accept the invite in Element before starting this separate Butler."
           lines[#lines + 1] = "Next: REMUDA_BUTLER_TOKEN=" .. shell_quote(files.token_path)
             .. " REMUDA_BUTLER_CONFIG=" .. shell_quote(files.config_path)
