@@ -7455,19 +7455,17 @@ fn butler_matrix_read_composites_use_async_request_for_history_and_thread_pages(
       if not thread or #thread.json.chunk ~= 2 then return "thread-pages" end
       if thread.json.chunk[1].event_id ~= "$a" or thread.json.chunk[2].event_id ~= "$b" then return "thread-order" end
       if #remuda.http.calls ~= 3 then return "thread-request-count" end
-      remuda.http.respond("GET", "http://matrix.example.org/_matrix/client/v3/joined_rooms",
-        { status = 200, headers = {}, body = '{"joined_rooms":["!read:example.org"]}' })
       local rooms
       matrix.rooms({}, function(value) rooms = value end)
-      for _ = 1, 5 do remuda.http.tick() end
-      if not rooms or rooms.json.joined_rooms[1] ~= room then return "rooms-result" end
+      if not rooms or rooms.status ~= 200 or not rooms.json or not rooms.json.rooms or not rooms.json.rooms[1]
+        or rooms.json.rooms[1].room ~= room or rooms.json.rooms[1].kind ~= "home" then return "rooms-result" end
       remuda.http.respond("GET", "http://matrix.example.org/_matrix/client/v3/rooms/" .. encoded_room .. "/event/%24event",
         { status = 200, headers = {}, body = '{"event_id":"$event","room_id":"!read:example.org"}' })
       local event
       matrix.event({ event_id = "$event" }, function(value) event = value end)
       for _ = 1, 5 do remuda.http.tick() end
       if not event or event.json.event_id ~= "$event" or event.json.room_id ~= room then return "event-result" end
-      if #remuda.http.calls ~= 5 then return "read-request-count" end
+      if #remuda.http.calls ~= 4 then return "read-request-count" end
       return "ok"
     "#);
     assert_eq!(result, "ok", "read composites should page asynchronously through matrix.request: {result}");
@@ -7838,10 +7836,17 @@ fn butler_matrix_reply_react_upload_redact_join_and_leave_compose_request() {
       local oversized
       matrix.upload({{ room = room, file = "{large_path_lua}" }}, function(value) oversized = value end)
       if not oversized or not oversized.error or #remuda.http.calls ~= before_large then return "oversized-upload-not-rejected" end
+      local home_left, calls_before_home_leave = nil, #remuda.http.calls
+      matrix.leave({{ room = room }}, function(value) home_left = value end)
+      if not home_left or not home_left.error or not home_left.error:find("can't", 1, true)
+        or #remuda.http.calls ~= calls_before_home_leave then return "home-leave-not-refused" end
       local joined, left
-      matrix.join({{ room = room }}, function(value) joined = value end)
+      local joined_room = "!joined:example.org"
+      remuda.http.respond("POST", "https://matrix.example.org/_matrix/client/v3/rooms/%21joined%3Aexample.org/join", response("{{}}"))
+      remuda.http.respond("POST", "https://matrix.example.org/_matrix/client/v3/rooms/%21joined%3Aexample.org/leave", response("{{}}"))
+      matrix.join({{ room = joined_room }}, function(value) joined = value end)
       ticks(3)
-      matrix.leave({{ room = room }}, function(value) left = value end)
+      matrix.leave({{ room = joined_room }}, function(value) left = value end)
       ticks(3)
       if not joined or joined.error or not left or left.error then return "join-leave-failed" end
       local bodies = {{}}

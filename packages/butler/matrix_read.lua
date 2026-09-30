@@ -41,7 +41,7 @@ function matrix.rooms(args, callback)
     if a_order ~= b_order then return a_order < b_order end
     return a.room < b.room
   end)
-  return callback({ rooms = matrix.json_array(rooms) })
+  return callback({ status = 200, json = { rooms = matrix.json_array(rooms) } })
 end
 
 function matrix.status(args, callback)
