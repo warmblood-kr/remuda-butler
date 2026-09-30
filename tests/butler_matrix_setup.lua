@@ -431,10 +431,9 @@ return function(matrix)
   line_specs[2].callback("@alice:example.org", nil)
   assert(#line_specs == 3 and line_specs[3].label:find("Continue? Type Y", 1, true)
     and line_specs[3].label:find("Bot: @butler%-")
-    and line_specs[3].label:find("\n  Rooms: open (anyone can invite this Butler). Restrict later: edit deny_room/deny_server in "
+    and line_specs[3].label:find("\n  Rooms: open (anyone can invite this Butler). Restrict: set rooms=allowlist or add deny_room/deny_server in "
       .. default_paths.config_path .. "\n", 1, true)
-    and line_specs[3].label:find("\n  Switch back: set rooms=allowlist in " .. default_paths.config_path
-      .. ". Only allowlisted senders' messages become mail; others are quarantined.\n", 1, true)
+    and not line_specs[3].label:find("quarantined", 1, true)
     and not line_specs[3].label:find("Room access", 1, true)
     and line_specs[3].label:find("replaces its current Matrix relay config", 1, true),
     "the wizard should set open rooms and summarize the real config path")
