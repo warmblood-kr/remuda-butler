@@ -1584,10 +1584,11 @@ function remuda._butler_deliver_notices()
     end
   end
   for alias, agent in pairs(bus.agents) do
-    if agent and remuda._butler_notify_policy(alias, now) then
+    if agent then
       local instance = notice_session_instance(alias, agent, session_instances)
       local previous_instance = bus.unread_seeded[alias]
-      if previous_instance ~= instance then
+      -- Check the policy only when unseeded: it captures the pane.
+      if previous_instance ~= instance and remuda._butler_notify_policy(alias, now) then
         local seeded, result = pcall(seed_unread_notices, alias, previous_instance, instance)
         if seeded and result then bus.unread_seeded[alias] = instance end
       end

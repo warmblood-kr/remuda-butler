@@ -4110,6 +4110,8 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
         &format!(
             r#"
           remuda.butler.project_home({home:?})
+          -- The shared data home can hold unread root mail from earlier tests.
+          remuda._butler_inbox("butler")
           remuda._butler_session_trace_path = {trace:?}
           remuda._butler_task_poke_attempts = 6
           remuda._butler_test_force_launch_probe = {{
@@ -4250,6 +4252,14 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
             log[#log + 1] = n .. " type " .. t
             local glyph = n == "t-codex" and "› " or "❯ "
             screens[n] = {{ glyph .. t, glyph }}
+          end
+          -- Members' fixture Welcome mail is not under test here; keep its
+          -- unread notice out of the per-session logs.
+          local notify = remuda._butler_notify
+          remuda._butler_notify = function(alias, notice, id)
+            local m = id and remuda._butler_mail.find_message(id)
+            if m and m.subject == "Welcome to Butler" then return true end
+            return notify(alias, notice, id)
           end
           local policy = remuda._butler_notify_policy
           remuda._butler_notify_policy = function(n, now)

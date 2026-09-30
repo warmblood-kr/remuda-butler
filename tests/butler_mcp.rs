@@ -326,6 +326,7 @@ fn mail_notices_wait_for_the_policy_and_coalesce() {
          remuda._butler_launch('fake', 'm1'); \
          remuda._butler_notify_policy = function() return false end",
     );
+    eval(&path, "remuda._butler_inbox('m1')"); // fixture Welcome mail never had a notice
     for n in 1..=3 {
         let sent = eval(&path, &format!("return remuda._butler_send('operator', 'm1', 'hi {n}')"));
         assert!(sent.contains("notice deferred"), "{sent}");
@@ -444,7 +445,7 @@ fn root_butler_seeds_three_unread_mails_when_its_pane_is_ready() {
     let dir = scratch("notice-unread-root");
     let path = daemon::socket_path_in(&dir, "s");
     let _daemon = daemon_at(&path);
-    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+    exec_isolated_butler(&path);
     setup_mail_notice_clock(&path);
     let got = eval(
         &path,
@@ -759,13 +760,24 @@ fn butler_with_member(tag: &str) -> (PathBuf, impl Drop) {
     let dir = scratch(tag);
     let path = daemon::socket_path_in(&dir, "s");
     let daemon = daemon_at(&path);
-    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+    exec_isolated_butler(&path);
     eval(
         &path,
         "remuda._butler_agent_builders.fake = function() return {'sleep', '100'} end; \
          remuda._butler_launch('fake', 'm1')",
     );
+    // The Welcome mail is queued without a notice; read it so the unread seed
+    // does not add it to the notices a test counts.
+    eval(&path, "remuda._butler_inbox('m1')");
     (path, daemon)
+}
+
+/// Test daemons share one process, so one XDG data home: skip loading its
+/// agents.jsonl so this root Butler gets its own identity and unread mailbox.
+fn exec_isolated_butler(path: &Path) {
+    eval(path, "remuda._butler_bus = { agents = {}, tokens = {}, inboxes = {}, messages = {}, \
+        objects = {}, next = 0, identities_loaded = true }; \
+        remuda._butler_argv = {'sh'}; remuda.exec('butler')");
 }
 
 fn setup_mail_notice_clock(path: &Path) {
