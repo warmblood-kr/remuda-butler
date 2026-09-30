@@ -113,8 +113,9 @@ only when exactly one public room matches; multiple matches are listed for the
 operator to choose from. The inviter check relies on the homeserver appending
 the real invite event to `invite_state` (Synapse does). `leave` removes a joined
 room by ID or alias, while HOME and ALL-BUTLERS cannot be left or removed. The
-interactive setup wizard does not ask for the rooms mode yet. The `send -`
-stdin form is unsupported until core #213.
+interactive setup wizard writes `rooms=open` without asking; flag-based setup
+defaults to allowlist unless given `--rooms open`. The `send -` stdin form is
+unsupported until core #213.
 
 `join` and `leave` change room membership and are operator-only. Until core
 #218 enforces caller identity, this is best-effort policy: another local
@@ -143,7 +144,8 @@ state file containing these records is mode 600 on Unix hosts.
 
 Run `remuda butler matrix setup` to configure Butler; with `--register` and no
 `--registration-token-file`, setup asks for the homeserver registration token
-using a hidden prompt.
+using a hidden prompt. `--rooms open|allowlist` sets the invite mode written to
+the config; flag-based setup defaults to allowlist.
 
 ```text
 remuda butler matrix setup --homeserver https://matrix.example.org --owner @alice:example.org --register --pin <64-hex-sha256> --default
