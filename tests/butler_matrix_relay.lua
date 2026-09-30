@@ -1071,6 +1071,156 @@ local function with_operator_config(path, status, run)
   if not ok then error(err, 0) end
 end
 
+local function with_alias_http(path, handler, run)
+  dofile("packages/butler/matrix_request.lua") -- fresh rate-limit bucket
+  dofile("packages/butler/matrix_write.lua")
+  local token = path .. ".token"
+  local file = assert(io.open(token, "w")); file:write("access-token"); file:close()
+  local saved_http, saved_conf = remuda.http, remuda._butler_matrix_config
+  local calls = {}
+  remuda.http = { request = function(spec)
+    calls[#calls + 1] = spec
+    local response = handler(spec, #calls) or { status = 200, body = "{}" }
+    spec.callback(response)
+    return { cancel = function() end }
+  end }
+  remuda._butler_matrix_config = { token_path = token, config_path = path }
+  remuda._butler_matrix_paths = remuda._butler_matrix_config
+  local ok, err = pcall(run, calls)
+  remuda.http, remuda._butler_matrix_config, remuda._butler_matrix_paths = saved_http, saved_conf, nil
+  os.remove(token)
+  if not ok then error(err, 0) end
+end
+
+local ALIAS = "#room:example.org"
+local function directory_response(room_id)
+  return { status = 200, body = '{"room_id":"' .. room_id .. '"}' }
+end
+
+local function test_join_room_alias_resolves_and_labels_output()
+  local dir, path = invite_fixture()
+  with_alias_http(path, function(spec, index)
+    if index == 1 then return directory_response(NEW) end
+    return { status = 200, body = '{"room_id":"' .. NEW .. '"}' }
+  end, function(calls)
+    local old_pending, captured = remuda.pending, nil
+    remuda.pending = function()
+      return { resolve = function(_, code, stdout, stderr)
+        captured = { code = code, stdout = stdout, stderr = stderr }
+      end }
+    end
+    matrix.cli({ "matrix", "join", ALIAS })
+    remuda.pending = old_pending
+    assert(#calls == 2 and calls[1].method == "GET"
+      and calls[1].url:find("/_matrix/client/v3/directory/room/", 1, true),
+      "joining an alias must first GET the Matrix room directory")
+    assert(calls[2].method == "POST"
+      and calls[2].url:find("/rooms/" .. encoded(NEW) .. "/join", 1, true),
+      "joining an alias must POST join for its resolved room ID")
+    local line = room_line(path, NEW)
+    assert(line and line:find("how=operator", 1, true) and line:find("alias=" .. ALIAS, 1, true),
+      "the config line must store the resolved ID and display alias")
+    assert(captured and captured.code == 0
+      and captured.stdout:find("Joined " .. ALIAS .. " (" .. NEW .. ")", 1, true),
+      "join output must show both alias and resolved room ID")
+    assert(select(2, captured.stdout:gsub("Next:", "")) == 1,
+      "join output must contain exactly one Next line")
+  end)
+  remove_dir(dir)
+end
+
+local function test_unknown_room_alias_is_reported_without_config_change()
+  local dir, path = invite_fixture()
+  local before = read_text(path)
+  with_alias_http(path, function()
+    return { status = 404, body = '{"errcode":"M_NOT_FOUND","error":"missing"}' }
+  end, function(calls)
+    local result
+    matrix.join({ room = ALIAS }, function(value) result = value end)
+    assert(#calls == 1 and calls[1].method == "GET", "an unknown alias must not attempt join")
+    assert(read_text(path) == before, "an unknown alias must not change the config")
+    assert(result and result.error and result.error:find("No room " .. ALIAS .. " on example.org.", 1, true)
+      and result.error:find("Next: check the spelling, or ask the room admin for an invite.", 1, true),
+      "an unknown alias must explain that it was not found and what to do next")
+  end)
+  remove_dir(dir)
+end
+
+local function test_alias_directory_room_id_must_be_valid()
+  local dir, path = invite_fixture()
+  local before = read_text(path)
+  with_alias_http(path, function() return directory_response("#not-a-room-id") end, function(calls)
+    local result
+    matrix.join({ room = ALIAS }, function(value) result = value end)
+    assert(#calls == 1 and calls[1].method == "GET", "invalid directory room IDs must not be joined")
+    assert(result and result.error and result.error:find("invalid Matrix room ID", 1, true),
+      "an invalid room_id in the directory response must be refused")
+    assert(read_text(path) == before, "an invalid directory room ID must not change the config")
+  end)
+  remove_dir(dir)
+end
+
+local function test_invalid_room_aliases_are_rejected_before_http()
+  local dir, path = invite_fixture()
+  with_alias_http(path, function() error("invalid aliases must not reach HTTP") end, function(calls)
+    for _, alias in ipairs({ "#bad name:example.org", "#bad/example.org", "#bad\1:example.org" }) do
+      local result
+      matrix.join({ room = alias }, function(value) result = value end)
+      assert(result and result.error, "an unsafe alias must be refused: " .. alias)
+      assert(#calls == 0, "an unsafe alias must be refused before HTTP")
+    end
+  end)
+  remove_dir(dir)
+end
+
+local function test_leave_alias_resolves_and_home_all_stay_refused()
+  local dir, path = invite_fixture(nil, "room=" .. NEW .. " how=operator alias=" .. ALIAS .. "\n")
+  with_alias_http(path, function(spec)
+    if spec.url:find("/directory/room/", 1, true) then return directory_response(NEW) end
+    return { status = 200, body = "{}" }
+  end, function(calls)
+    local result
+    matrix.leave({ room = ALIAS }, function(value) result = value end)
+    assert(result and not result.error, "leaving a configured alias must resolve and succeed")
+    assert(#calls == 2 and calls[1].method == "GET"
+      and calls[2].method == "POST" and calls[2].url:find("/rooms/" .. encoded(NEW) .. "/leave", 1, true),
+      "leave by alias must resolve before posting leave for the room ID")
+    assert(room_line(path, NEW) == nil, "leave by alias must remove the resolved room config line")
+  end)
+  for _, protected in ipairs({ HOME, ALL }) do
+    local protected_alias = "#protected" .. (protected == HOME and "home" or "all") .. ":example.org"
+    local before, calls = read_text(path), nil
+    with_alias_http(path, function() return directory_response(protected) end, function(requests)
+      calls = requests
+      local result
+      matrix.leave({ room = protected_alias }, function(value) result = value end)
+      assert(result and result.error and result.error:find("HOME and ALL rooms can't be left", 1, true),
+        "HOME and ALL must remain protected when addressed by alias")
+      assert(#requests == 1 and requests[1].method == "GET",
+        "a protected alias must not make a leave request")
+      assert(read_text(path) == before, "a protected alias must not change the config")
+    end)
+  end
+  remove_dir(dir)
+end
+
+local function test_home_and_all_aliases_cannot_be_left()
+  local dir, path = invite_fixture()
+  for _, protected in ipairs({ HOME, ALL }) do
+    local protected_alias = "#protected" .. (protected == HOME and "home" or "all") .. ":example.org"
+    with_alias_http(path, function() return directory_response(protected) end, function(calls)
+      local before, result = read_text(path), nil
+      matrix.leave({ room = protected_alias }, function(value) result = value end)
+      assert(result and result.error and result.error:find("HOME and ALL rooms can't be left", 1, true),
+        "HOME and ALL must remain protected when addressed by alias")
+      assert(#calls == 1 and calls[1].method == "GET",
+        "a protected alias must resolve but must not make a leave request")
+      assert(read_text(path) == before, "a protected alias must not change the config")
+    end)
+  end
+  remove_dir(dir)
+end
+
 local function test_join_failure_rolls_back_room_line()
   local dir, path = invite_fixture()
   local before = read_text(path)
@@ -1470,6 +1620,12 @@ for _, case in ipairs({
   { "test_invite_home_notice_cap_adds_one_summary", test_invite_home_notice_cap_adds_one_summary },
   { "test_agent_invite_is_not_joined", test_agent_invite_is_not_joined },
   { "test_config_add_room_pads_short_config", test_config_add_room_pads_short_config },
+  { "test_join_room_alias_resolves_and_labels_output", test_join_room_alias_resolves_and_labels_output },
+  { "test_unknown_room_alias_is_reported_without_config_change", test_unknown_room_alias_is_reported_without_config_change },
+  { "test_alias_directory_room_id_must_be_valid", test_alias_directory_room_id_must_be_valid },
+  { "test_invalid_room_aliases_are_rejected_before_http", test_invalid_room_aliases_are_rejected_before_http },
+  { "test_leave_alias_resolves_and_home_all_stay_refused", test_leave_alias_resolves_and_home_all_stay_refused },
+  { "test_home_and_all_aliases_cannot_be_left", test_home_and_all_aliases_cannot_be_left },
   { "test_join_failure_rolls_back_room_line", test_join_failure_rolls_back_room_line },
   { "test_joined_room_survives_restart", test_joined_room_survives_restart },
   { "test_running_relay_picks_up_operator_join_from_config", test_running_relay_picks_up_operator_join_from_config },
