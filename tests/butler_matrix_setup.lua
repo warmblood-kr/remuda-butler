@@ -99,6 +99,11 @@ return function(matrix)
     and registration_plan.bot_mxid == "@butler-demo:example.org"
     and registration_plan.password_path == output .. "/password",
     "--register should validate the homeserver token and reserve a private password output path")
+  local prompted_registration = matrix.setup_prepare({ "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--register", "--bot", "@butler-demo:example.org",
+    "--dir", output })
+  assert(prompted_registration and prompted_registration.prompt_registration_token == true,
+    "--register without a token file should ask the CLI to prompt for the registration token")
   local chosen_password_plan = matrix.setup_prepare({ "--homeserver", "http://matrix.invalid",
     "--owner", "@alice:example.org", "--register", "--registration-token-file",
     registration_token_file, "--password-file", password, "--bot", "@butler-demo:example.org",
