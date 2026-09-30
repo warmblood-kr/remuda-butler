@@ -11,9 +11,13 @@ return function(matrix)
     and setup_help:find("in Element: click your avatar, top left", 1, true)
     and setup_help:find("the account setup logs in as", 1, true)
     and setup_help:find("--register", 1, true)
+    and setup_help:find("prompt for its registration token if no file is given", 1, true)
+    and setup_help:find("--registration-token-file PATH  Optional", 1, true)
     and setup_help:find("homeserver registration token", 1, true)
     and setup_help:find("generated and saved privately", 1, true)
-    and setup_help:find("Example: remuda butler matrix setup", 1, true),
+    and setup_help:find("Example: remuda butler matrix setup", 1, true)
+    and setup_help:find("--register --dir /path/to/private/butler", 1, true)
+    and not setup_help:find("--register --registration-token-file", 1, true),
     "setup usage should explain each option in plain words and show a full example")
   assert(matrix.cli_usage():find("Example:", 1, true)
     and matrix.cli_usage():find("https://<homeserver>", 1, true)
@@ -99,6 +103,11 @@ return function(matrix)
     and registration_plan.bot_mxid == "@butler-demo:example.org"
     and registration_plan.password_path == output .. "/password",
     "--register should validate the homeserver token and reserve a private password output path")
+  local prompted_registration = matrix.setup_prepare({ "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--register", "--bot", "@butler-demo:example.org",
+    "--dir", output })
+  assert(prompted_registration and prompted_registration.prompt_registration_token == true,
+    "--register without a token file should ask the CLI to prompt for the registration token")
   local chosen_password_plan = matrix.setup_prepare({ "--homeserver", "http://matrix.invalid",
     "--owner", "@alice:example.org", "--register", "--registration-token-file",
     registration_token_file, "--password-file", password, "--bot", "@butler-demo:example.org",
@@ -252,11 +261,18 @@ return function(matrix)
     and default_refusal:find("REMUDA_BUTLER_TOKEN=", 1, true)
     and default_refusal:find("REMUDA_BUTLER_CONFIG=", 1, true)
     and default_refusal:find("remuda -s matrix-test daemon", 1, true)
-    and default_refusal:find("packages/butler/init.lua:16-30, 88-91", 1, true)
-    and default_refusal:find("remuda -e \"remuda.reload('butler')\"", 1, true),
-    "default refusal should explain both safe choices and when to start the relay")
+    and not default_refusal:find("reload", 1, true)
+    and not default_refusal:find("remuda stop", 1, true),
+    "default refusal should explain both safe choices without restart hints")
   assert(not default_refusal:find("password-secret", 1, true),
     "default refusal must not reveal the secret contents")
+  local _, registration_default_refusal = matrix.setup_prepare({ "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--register", "--registration-token-file",
+    registration_token_file, "--bot", "@butler-demo:example.org" })
+  assert(registration_default_refusal and registration_default_refusal:find("Nothing was written.", 1, true)
+    and registration_default_refusal:find("--registration-token-file", 1, true)
+    and not registration_default_refusal:find("homeserver-registration-token", 1, true),
+    "setup_command abort hints must never reveal the registration token contents")
   assert(io.open(default_paths.token_path, "rb") == nil
     and io.open(default_paths.config_path, "rb") == nil,
     "refused default setup must not write token or config files")
@@ -361,11 +377,158 @@ return function(matrix)
     "registration should expose only the safe M_USER_IN_USE code for collision retry")
   requests = {}
   local resolved
-  remuda.pending = function()
+  local prompt_specs = {}
+  local pending_timeout
+  remuda.pending = function(options)
+    pending_timeout = options and options.timeout
+    local reply = { resolve = function(_, status, stdout, stderr)
+      resolved = { status = status, stdout = stdout, stderr = stderr }
+    end }
+    function reply:prompt_secret(spec) prompt_specs[#prompt_specs + 1] = spec end
+    return reply
+  end
+  local prompt_output = root .. "/prompted-registration"
+  assert(real_mkdir_new(prompt_output))
+  local prompt_token = "prompted-registration-token"
+  requests, resolved, prompt_specs = {}, nil, {}
+  local prompt_reply = matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--register", "--bot", "@butler-prompt:example.org",
+    "--dir", prompt_output })
+  assert(prompt_reply and pending_timeout == 300 and #prompt_specs == 1 and not resolved,
+    "registration setup should request its token before starting network work")
+  assert(prompt_specs[1].label == "Registration token for http://matrix.invalid, from its admin (hidden). This is not an access token:",
+    "registration prompt should explain which token is needed")
+  for attempt = 1, 3 do
+    local attempt_token = prompt_token .. tostring(attempt)
+    prompt_specs[attempt].callback("  " .. attempt_token .. "  \nignored", nil)
+    local initial_index = (attempt - 1) * 2 + 1
+    assert(#requests == initial_index and requests[initial_index].url == "http://matrix.invalid/_matrix/client/v3/register",
+      "a prompted token should start the existing registration flow")
+    requests[initial_index].callback({ status = 401,
+      body = '{"session":"prompt-session-' .. tostring(attempt)
+        .. '","flows":[{"stages":["m.login.registration_token"]}]}' })
+    local token_index = initial_index + 1
+    local token_request = request_json(requests[token_index])
+    assert(token_request.auth and token_request.auth.type == "m.login.registration_token"
+      and token_request.auth.token == attempt_token
+      and token_request.auth.session == "prompt-session-" .. tostring(attempt)
+      and not requests[token_index].url:find(attempt_token, 1, true)
+      and not requests[token_index].headers.Authorization,
+      "the trimmed prompted token should reach only the registration auth request")
+    requests[token_index].callback({ status = 403,
+      body = '{"errcode":"M_FORBIDDEN","error":"' .. attempt_token .. ' rejected"}' })
+    if attempt < 3 then
+      assert(not resolved and #prompt_specs == attempt + 1,
+        "a rejected registration token should prompt again up to three total attempts")
+      assert(prompt_specs[attempt + 1].label
+        == "The server rejected that registration token. Nothing was created or written. "
+          .. "Registration token for http://matrix.invalid, from its admin (hidden). This is not an access token:",
+        "the retry notice should be separated from the prompt label with a space")
+    end
+  end
+  assert(resolved and resolved.status == 1
+    and resolved.stderr:find("The server rejected that registration token. Nothing was created or written.", 1, true)
+    and resolved.stderr:find("Next: rerun with --registration-token-file PATH", 1, true)
+    and not resolved.stderr:find(prompt_token, 1, true)
+    and #requests == 6 and #prompt_specs == 3,
+    "three token rejections should stop safely without exposing a token")
+
+  prompt_specs, requests, resolved = {}, {}, nil
+  local disabled_reply = matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--register", "--bot", "@butler-disabled:example.org",
+    "--dir", prompt_output })
+  assert(disabled_reply and #prompt_specs == 1)
+  local disabled_token = "never-sent-registration-token"
+  prompt_specs[1].callback(disabled_token, nil)
+  assert(#requests == 1 and not request_json(requests[1]).auth,
+    "the first register request must not send the registration token")
+  requests[1].callback({ status = 403, body = '{"errcode":"M_FORBIDDEN","error":"Registration has been disabled"}' })
+  assert(resolved and resolved.status == 1 and #prompt_specs == 1
+    and resolved.stderr:find("Account registration is disabled on this server. Nothing was created or written. Next: ask the server admin for a bot account, then rerun with --token-file PATH (the bot access token).", 1, true)
+    and not resolved.stderr:find(disabled_token, 1, true),
+    "a 403 before token submission should report disabled registration without prompting again")
+
+  prompt_specs, requests, resolved = {}, {}, nil
+  local drift_reply = matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--register", "--bot", "@butler-drift:example.org",
+    "--dir", prompt_output })
+  assert(drift_reply and #prompt_specs == 1)
+  prompt_specs[1].callback("first-prompt-token", nil)
+  requests[1].callback({ status = 400, body = '{"errcode":"M_USER_IN_USE"}' })
+  assert(request_json(requests[2]).username == "butler-drift-2")
+  requests[2].callback({ status = 401,
+    body = '{"session":"drift-session","flows":[{"stages":["m.login.registration_token"]}]}' })
+  requests[3].callback({ status = 403, body = '{"errcode":"M_FORBIDDEN"}' })
+  assert(#prompt_specs == 2 and not resolved)
+  prompt_specs[2].callback("second-prompt-token", nil)
+  assert(request_json(requests[4]).username == "butler-drift",
+    "a new token attempt should restart account-name selection from the original bot ID")
+
+  prompt_specs, requests, resolved = {}, {}, nil
+  local prompt_pending = remuda.pending
+  remuda.pending = function(options)
+    pending_timeout = options and options.timeout
     return { resolve = function(_, status, stdout, stderr)
       resolved = { status = status, stdout = stdout, stderr = stderr }
     end }
   end
+  local old_core_ok, old_core_reply = pcall(matrix.cli, { "matrix", "setup",
+    "--homeserver", "http://matrix.invalid", "--owner", "@alice:example.org",
+    "--register", "--bot", "@butler-old-core:example.org", "--dir", prompt_output })
+  remuda.pending = prompt_pending
+  assert(old_core_ok and old_core_reply and resolved and resolved.status == 1
+    and resolved.stderr:find("Nothing was written.", 1, true)
+    and resolved.stderr:find("Next: rerun with --registration-token-file PATH (this remuda core has no hidden prompt; upgrade with remuda upgrade)", 1, true),
+    "an older core without prompt_secret should fail with a clear upgrade hint")
+
+  for _, prompt_error in ipairs({ "not_a_terminal", "refused", "too_long", "cancelled" }) do
+    prompt_specs, requests, resolved = {}, {}, nil
+    local error_output = root .. "/prompt-error-" .. prompt_error
+    local error_reply = matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
+      "--owner", "@alice:example.org", "--register", "--bot", "@butler-error:example.org",
+      "--dir", error_output })
+    assert(error_reply and #prompt_specs == 1 and not resolved,
+      "registration setup should be pending while the hidden prompt is active")
+    local leaked = "secret-from-" .. prompt_error
+    prompt_specs[1].callback(leaked, prompt_error)
+    assert(resolved and resolved.status == 1
+      and resolved.stderr:find("Nothing was written.", 1, true)
+      and resolved.stderr:find("Next: rerun with --registration-token-file PATH", 1, true)
+      and not resolved.stderr:find(leaked, 1, true)
+      and #requests == 0,
+      "prompt errors should abort without writing or exposing the attempted token")
+    if prompt_error == "not_a_terminal" then
+      assert(resolved.stderr:find("needs a terminal", 1, true),
+        "a non-terminal prompt failure should explain that a terminal is required")
+    end
+    assert(read(error_output .. "/token") == nil and read(error_output .. "/config") == nil,
+      "prompt errors must leave setup files unwritten")
+  end
+  prompt_specs, requests, resolved = {}, {}, nil
+  local empty_output = root .. "/prompt-empty"
+  local empty_reply = matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--register", "--bot", "@butler-empty:example.org",
+    "--dir", empty_output })
+  assert(empty_reply and #prompt_specs == 1 and not resolved,
+    "registration setup should start with a hidden prompt")
+  for attempt = 1, 3 do
+    prompt_specs[attempt].callback(" \t\r\n ", nil)
+    if attempt < 3 then
+      assert(not resolved and #prompt_specs == attempt + 1,
+        "an empty token answer should ask again and consume one of the three tries")
+      assert(prompt_specs[attempt + 1].label:find("The registration token was empty.", 1, true),
+        "the retry prompt should explain that the registration token is empty")
+    end
+  end
+  assert(resolved and resolved.status == 1
+    and resolved.stderr:find("The registration token was empty.", 1, true)
+    and resolved.stderr:find("Nothing was written.", 1, true)
+    and resolved.stderr:find("Next: rerun with --registration-token-file PATH", 1, true)
+    and #prompt_specs == 3 and #requests == 0,
+    "three empty answers should stop without network work and show safe guidance")
+  assert(read(empty_output .. "/token") == nil and read(empty_output .. "/config") == nil,
+    "empty prompted answers must leave setup files unwritten")
+
   local real_write_atomic, atomic_writes = remuda.fs.write_atomic, {}
   local setup_http = remuda.http
   remuda.fs.write_atomic = function(path, contents, opts)
@@ -406,6 +569,7 @@ return function(matrix)
     registration_token_file, "--bot", "@butler-no-rng:example.org", "--dir", no_rng_output })
   io.open = real_io_open
   assert(no_rng_reply and resolved and resolved.status == 1
+    and pending_timeout == 90
     and resolved.stderr:find("This system has no secure random source for a bot password. Next: rerun with --password-file PATH (a password you choose)", 1, true)
     and #requests == 0
     and read(no_rng_output .. "/token") == nil
@@ -546,8 +710,11 @@ return function(matrix)
     body = '{"access_token":"chosen-access-token","user_id":"@butler-chosen:example.org"}' })
   requests[3].callback({ status = 200, body = '{"user_id":"@butler-chosen:example.org"}' })
   requests[4].callback({ status = 200, body = '{"room_id":"!chosen-home:example.org"}' })
+  local chosen_start_line = "Next: REMUDA_BUTLER_TOKEN='" .. chosen_output .. "/token'"
+    .. " REMUDA_BUTLER_CONFIG='" .. chosen_output .. "/config' remuda -s matrix-test daemon"
   assert(resolved and resolved.status == 0
-    and resolved.stdout:find("Next: Accept the invite in Element, then write in the room.", 1, true)
+    and resolved.stdout:find("Accept the invite in Element before starting this separate Butler.", 1, true)
+    and resolved.stdout:match("([^\n]+)\n$") == chosen_start_line
     and not resolved.stdout:find("password-secret", 1, true)
     and not resolved.stdout:find("homeserver-registration-token", 1, true)
     and not resolved.stdout:find("chosen-access-token", 1, true)
@@ -618,10 +785,13 @@ return function(matrix)
     "ALL-BUTLERS createRoom must invite owner without enabling encryption")
   requests[4].callback({ status = 200, body = '{"room_id":"!all:example.org"}' })
   matrix.status = real_status
+  local separate_output_start = "Next: REMUDA_BUTLER_TOKEN='" .. output .. "/token'"
+    .. " REMUDA_BUTLER_CONFIG='" .. output .. "/config' remuda -s matrix-test daemon"
   assert(resolved and resolved.status == 0 and resolved.stdout:find("!home:example.org", 1, true)
     and resolved.stdout:find("!all:example.org", 1, true)
     and resolved.stdout:find("Status: User: @butler-demo:example.org; Joined rooms: 2", 1, true)
-    and resolved.stdout:find("Next: Accept the invite in Element, then write in the room.", 1, true)
+    and resolved.stdout:find("Accept the invite in Element before starting this separate Butler.", 1, true)
+    and resolved.stdout:match("([^\n]+)\n$") == separate_output_start
     and not resolved.stdout:find("Next: delete", 1, true)
     and not resolved.stdout:find("password-secret", 1, true)
     and not resolved.stdout:find("temporary-access-token", 1, true),
@@ -632,6 +802,174 @@ return function(matrix)
     "all_room=!all:example.org", "" }, "\n"))
   assert(#atomic_writes == 2 and atomic_writes[1].private and atomic_writes[2].private,
     "token and config must both use private atomic writes")
+
+  -- A successful default setup must update the in-memory config resolved at
+  -- boot and replace only the relay, without printing the old reload hint.
+  local saved_setup_network, saved_setup_status = matrix.setup_network, matrix.status
+  local saved_relay_start, saved_relay_stop = matrix.relay.start, matrix.relay.stop
+  local saved_matrix_config = remuda._butler_matrix_config
+  local relay_events, started_config = {}, nil
+  local relay_running = true
+  matrix.setup_network = function(_, callback)
+    callback({ token = "default-access-token", user_id = "@butler-demo:example.org",
+      home_room = "!default-home:example.org" })
+    return { cancel = function() end }
+  end
+  matrix.status = function(_, callback)
+    callback({ status = 200, json = { user_id = "@butler-demo:example.org", joined_rooms = {} } })
+    return { cancel = function() end }
+  end
+  matrix.relay.stop = function()
+    relay_events[#relay_events + 1] = "stop"
+    relay_running = false
+    return true
+  end
+  matrix.relay.start = function(config)
+    assert(not relay_running, "setup must stop the existing relay before starting its replacement")
+    relay_events[#relay_events + 1] = "start"
+    started_config = config
+    relay_running = true
+    return true
+  end
+  remuda._butler_matrix_paths = default_paths
+  remuda._butler_matrix_config = { token_path = default_paths.token_path,
+    config_path = default_paths.config_path }
+  requests, resolved = {}, nil
+  local default_reply = matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--bot", "@butler-demo:example.org",
+    "--password-file", password, "--default" })
+  local invite_line = "Next: Accept the invite in Element, then write in the room."
+  local expected_last_line = "Next: accept the invite in Element; the relay is running, so write to the Butler there."
+  local output_last_line = resolved and resolved.stdout:match("([^\n]+)\n$")
+  assert(default_reply and resolved and resolved.status == 0
+    and table.concat(relay_events, ",") == "stop,start"
+    and started_config and started_config.token_path == default_paths.token_path
+    and started_config.config_path == default_paths.config_path
+    and remuda._butler_matrix_config == started_config
+    and resolved.stdout:match("([^\n]+)\n$") == expected_last_line
+    and not resolved.stdout:find("reload", 1, true)
+    and not resolved.stdout:find("remuda stop", 1, true)
+    and not default_refusal:find("reload", 1, true)
+    and not default_refusal:find("remuda stop", 1, true),
+    "default setup must replace the relay from boot-resolved paths, end with the running message, and contain no reload or stop hints; events="
+      .. table.concat(relay_events, ",") .. "; last=" .. tostring(output_last_line)
+      .. "; refusal_reload=" .. tostring(default_refusal and default_refusal:find("reload", 1, true) ~= nil))
+
+  relay_events, started_config, relay_running = {}, nil, true
+  matrix.relay.start = function(config)
+    assert(not relay_running, "failed-start case must still stop the running relay first")
+    relay_events[#relay_events + 1] = "start"
+    started_config = config
+    return false
+  end
+  requests, resolved = {}, nil
+  local failed_reply = matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--bot", "@butler-demo:example.org",
+    "--password-file", password, "--default", "--force" })
+  local failed_invite_at = resolved and resolved.stdout:find(invite_line, 1, true)
+  local relay_failed_at = resolved and resolved.stdout:find("Relay failed to start: relay.start returned false", 1, true)
+  local status_next_at = resolved and resolved.stdout:find(
+    "Next: fix the config, then rerun remuda butler matrix setup ... --default --force", 1, true)
+  assert(failed_reply and resolved and resolved.status == 0
+    and table.concat(relay_events, ",") == "stop,start"
+    and failed_invite_at and relay_failed_at and status_next_at
+    and failed_invite_at < relay_failed_at and relay_failed_at < status_next_at
+    and resolved.stdout:match("([^\n]+)\n$")
+      == "Next: fix the config, then rerun remuda butler matrix setup ... --default --force",
+    "a false relay start must preserve invite guidance, report the reason, and end with a recovery Next step")
+
+  matrix.relay.start = function()
+    error("bad\nconfig")
+  end
+  requests, resolved = {}, nil
+  local throwing_reply = matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--bot", "@butler-demo:example.org",
+    "--password-file", password, "--default", "--force" })
+  local throwing_error_line = resolved and resolved.stdout:match("([^\n]*Relay failed to start:[^\n]*)")
+  assert(throwing_reply and resolved and resolved.status == 0
+    and resolved.stdout:find(invite_line, 1, true)
+    and throwing_error_line and throwing_error_line:find("bad config", 1, true)
+    and resolved.stdout:match("([^\n]+)\n$")
+      == "Next: fix the config, then rerun remuda butler matrix setup ... --default --force",
+    "a throwing relay start must print its terminal-safe reason and an actionable setup recovery")
+
+  local live_config = remuda._butler_matrix_config
+  relay_events, started_config = {}, nil
+  matrix.relay.stop = function()
+    error("--dir setup must not stop the live relay")
+  end
+  matrix.relay.start = function()
+    error("--dir setup must not start the live relay")
+  end
+  local separate_dir = root .. "/separate-butler"
+  requests, resolved = {}, nil
+  local separate_reply = matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--bot", "@butler-demo:example.org",
+    "--password-file", password, "--dir", separate_dir })
+  local separate_start_line = "Next: REMUDA_BUTLER_TOKEN='" .. separate_dir .. "/token'"
+    .. " REMUDA_BUTLER_CONFIG='" .. separate_dir .. "/config' remuda -s matrix-test daemon"
+  assert(separate_reply and resolved and resolved.status == 0
+    and #relay_events == 0 and remuda._butler_matrix_config == live_config
+    and resolved.stdout:find("Accept the invite in Element before starting this separate Butler.", 1, true)
+    and resolved.stdout:match("([^\n]+)\n$") == separate_start_line
+    and not resolved.stdout:find("reload", 1, true)
+    and not resolved.stdout:find("remuda stop", 1, true),
+    "--dir setup must leave the live relay config untouched and print no restart hints")
+  os.remove(separate_dir .. "/token")
+  os.remove(separate_dir .. "/config")
+  os.remove(separate_dir)
+
+  -- Exercise the real module start path and deliver one scripted sync event
+  -- after setup, with no daemon or module restart between setup and delivery.
+  matrix.relay.start, matrix.relay.stop = saved_relay_start, saved_relay_stop
+  dofile("packages/butler/matrix_request.lua")
+  local saved_emit = remuda.emit_until_success
+  local saved_http = remuda.http
+  local saved_config = remuda._butler_matrix_config
+  local scripted_requests, delivered_mail = {}, {}
+  remuda.http = { request = function(spec)
+    scripted_requests[#scripted_requests + 1] = spec
+    return { cancel = function() end }
+  end }
+  remuda.emit_until_success = function(hook, message)
+    assert(hook == "butler/deliver")
+    delivered_mail[#delivered_mail + 1] = message
+    return true
+  end
+  requests, resolved = {}, nil
+  local delivered_reply = matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--bot", "@butler-demo:example.org",
+    "--password-file", password, "--default", "--force" })
+  assert(delivered_reply and resolved and resolved.status == 0
+    and resolved.stdout:match("([^\n]+)\n$") == expected_last_line
+    and matrix.relay.instance and #scripted_requests == 1,
+    "setup must start the real relay against its newly written default config")
+  scripted_requests[1].callback({ status = 200, headers = {}, body = '{"next_batch":"setup-s0"}' })
+  local rate_timer
+  for _, timer in ipairs(remuda._relay_timers) do
+    if not timer.cancelled and timer.spec.every == 0.25 then rate_timer = timer; break end
+  end
+  assert(rate_timer, "scripted relay sync should have a rate-limit timer")
+  rate_timer.spec.run()
+  assert(#scripted_requests == 2, "relay should continue syncing after the initial baseline")
+  scripted_requests[2].callback({ status = 200, headers = {}, body =
+    '{"next_batch":"setup-s1","rooms":{"join":{"!default-home:example.org":{"timeline":{"events":[{"type":"m.room.message","event_id":"$after-setup","sender":"@alice:example.org","content":{"msgtype":"m.text","body":"hello after setup"}}]}}}}}' })
+  assert(#delivered_mail == 1 and delivered_mail[1].text == "hello after setup"
+    and delivered_mail[1].matrix.event_id == "$after-setup",
+    "the newly started relay must deliver mail immediately after setup without a restart")
+  matrix.relay.stop()
+  remuda.http, remuda.emit_until_success = saved_http, saved_emit
+  remuda._butler_matrix_config = saved_config
+  os.remove(default_paths.config_path .. ".since")
+  os.remove(default_paths.config_path .. ".acks")
+
+  matrix.setup_network, matrix.status = saved_setup_network, saved_setup_status
+  matrix.relay.start, matrix.relay.stop = saved_relay_start, saved_relay_stop
+  remuda._butler_matrix_config = saved_matrix_config
+  remuda._butler_matrix_paths = nil
+  os.remove(default_paths.token_path)
+  os.remove(default_paths.config_path)
+
   remuda.fs.write_atomic = real_write_atomic
   remuda.http = fake_http
 

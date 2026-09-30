@@ -7,8 +7,8 @@ local USAGE = [[Usage: remuda butler matrix setup [OPTIONS]
   --password-file PATH   Use this chosen bot password; with --register it is saved privately. If omitted, one is generated and saved privately.
   --bot ID               The bot's Matrix user ID, like @butler-home:example.org (the account setup logs in as).
   --token-file PATH      Use an existing access token from this file instead of a password.
-  --register             Create the bot account on a server that allows registration tokens.
-  --registration-token-file PATH  Read the homeserver registration token from this file (ask the server admin; this is not a bot access token).
+  --register             Create the bot account; prompt for its registration token if no file is given.
+  --registration-token-file PATH  Optional file with the homeserver registration token (ask the server admin; this is not a bot access token).
   --dir PATH             Save the private token and config files in this directory.
   --default              Save to the default live Butler config directory.
   --force                Replace existing token or config files.
@@ -16,7 +16,9 @@ local USAGE = [[Usage: remuda butler matrix setup [OPTIONS]
   --pin SHA256HEX         Trust this HTTPS certificate fingerprint.
   --ca-file PATH         Trust the HTTPS certificate authority in this file.
 
-Example: remuda butler matrix setup --homeserver https://matrix.example.org --owner @alice:example.org --register --registration-token-file /path/to/server-registration-token --password-file /path/to/chosen-password --dir /path/to/private/butler --pin <64-hex-sha256>]]
+Example: remuda butler matrix setup --homeserver https://matrix.example.org --owner @alice:example.org --register --dir /path/to/private/butler --pin <64-hex-sha256>]]
+
+matrix.REJECTED_REGISTRATION_TOKEN = "The server rejected that registration token. Nothing was created or written."
 
 local function absolute(path)
   return type(path) == "string" and (path:sub(1, 1) == "/" or path:match("^%a:[/\\]") ~= nil)
@@ -131,7 +133,9 @@ local function setup_command(options, destination)
   add("--owner", options.owner_mxid)
   if options.secret_kind == "registration" then
     parts[#parts + 1] = "--register"
-    add("--registration-token-file", options.secret_path)
+    if not options.prompt_registration_token then
+      add("--registration-token-file", options.secret_path)
+    end
     if options.password_input_path then add("--password-file", options.password_input_path) end
     add("--bot", options.bot_mxid)
   elseif options.secret_kind == "password" then
@@ -153,6 +157,17 @@ local function setup_command(options, destination)
   return table.concat(parts, " ")
 end
 
+local function normalize_secret(contents)
+  if type(contents) ~= "string" then return nil, "invalid" end
+  if #contents > 4096 then return nil, "too_long" end
+  local first_line = contents:match("^([^\r\n]*)") or ""
+  first_line = first_line:gsub("^%s+", ""):gsub("%s+$", "")
+  if first_line == "" then return nil, "empty" end
+  return first_line
+end
+
+matrix.normalize_secret = normalize_secret
+
 local function validate_secret(path, kind)
   local option = kind == "registration" and "--registration-token-file"
     or "--" .. kind .. "-file"
@@ -164,11 +179,11 @@ local function validate_secret(path, kind)
   if not file then return nil, "cannot read secret input file: " .. path end
   local contents = file:read(4097) or ""
   file:close()
-  if #contents > 4096 then return nil, "secret input file exceeds 4 KiB: " .. path end
-  local first_line = contents:match("^([^\r\n]*)") or ""
-  first_line = first_line:gsub("^%s+", ""):gsub("%s+$", "")
-  if first_line == "" then return nil, "secret input file is empty: " .. path end
-  return first_line
+  local secret, secret_error = normalize_secret(contents)
+  if secret_error == "too_long" then return nil, "secret input file exceeds 4 KiB: " .. path end
+  if secret_error == "empty" then return nil, "secret input file is empty: " .. path end
+  if not secret then return nil, "secret input file is invalid: " .. path end
+  return secret
 end
 
 local function transport_pin(hex)
@@ -251,9 +266,6 @@ local function resolve_outputs(options)
       "Start its own daemon with the setup files:",
       "  REMUDA_BUTLER_TOKEN=\"" .. test_dir .. "/token\" REMUDA_BUTLER_CONFIG=\""
         .. test_dir .. "/config\" remuda -s matrix-test daemon",
-      "The relay starts when the Butler module starts or reloads (packages/butler/init.lua:16-30, 88-91).",
-      "Trigger it now with: remuda -e \"remuda.reload('butler')\"",
-      "For the test Butler, run: remuda -s matrix-test -e \"remuda.reload('butler')\"",
     }
     return nil, table.concat(lines, "\n")
   end
@@ -327,21 +339,23 @@ function matrix.setup_prepare(args)
     if has_token then
       return nil, "--register creates a bot; use --registration-token-file instead of --token-file"
     end
-    if not has_registration then return nil, "--register requires --registration-token-file" end
+    options.prompt_registration_token = not has_registration
   elseif has_registration then
     return nil, "--registration-token-file requires --register"
   elseif has_password and has_token then
     return nil, "choose one of --password-file or --token-file"
   elseif not has_password and not has_token then
-    return nil, "provide --password-file, --token-file, or --register --registration-token-file"
+    return nil, "provide --password-file, --token-file, or --register"
   end
   options.secret_kind = options.register and "registration"
     or (options.password_file and "password" or "token")
   options.secret_path = options.register and options.registration_token_file
     or options.password_file or options.token_file
-  local secret_ok, secret_error = validate_secret(options.secret_path, options.secret_kind)
-  if not secret_ok then return nil, secret_error end
-  options.secret = secret_ok
+  if not options.prompt_registration_token then
+    local secret_ok, secret_error = validate_secret(options.secret_path, options.secret_kind)
+    if not secret_ok then return nil, secret_error end
+    options.secret = secret_ok
+  end
   if options.register and options.password_file then
     if options.password_file == options.registration_token_file then
       return nil, "use separate files for the bot password and the homeserver registration token"
@@ -576,7 +590,8 @@ end
 -- is separate from setup_network so callers can choose this path explicitly.
 function matrix.setup_register(options, on_done)
   local done_called, cancelled, active = false, false, nil
-  local rejected_token = "The server rejected that registration token. Nothing was created or written."
+  local rejected_token = matrix.REJECTED_REGISTRATION_TOKEN
+  local registration_disabled = "Account registration is disabled on this server. Nothing was created or written. Next: ask the server admin for a bot account, then rerun with --token-file PATH (the bot access token)."
   local missing_flow = "This server does not accept registration tokens. Next: this server needs an admin-created bot; run setup with --token-file PATH (the bot access token)."
   local function done(result)
     if done_called or cancelled then return end
@@ -650,7 +665,7 @@ function matrix.setup_register(options, on_done)
       or type(challenge.session) ~= "string" or challenge.session == ""
       or type(challenge.flows) ~= "table" then
       if status == 403 or (challenge and challenge.errcode == "M_FORBIDDEN") then
-        return fail(rejected_token)
+        return fail(registration_disabled, challenge and challenge.errcode)
       end
       return fail("Matrix account registration request failed"
         .. (status and (" (HTTP " .. tostring(status) .. ")") or ""),

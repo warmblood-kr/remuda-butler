@@ -51,6 +51,15 @@ remuda butler matrix [--json] leave ROOM
 remuda butler matrix [--json] quarantine [--id EVENT_ID]
 ```
 
+`remuda butler matrix setup --default` writes the token and config to the
+running Butler's resolved paths, then starts or replaces only its Matrix
+relay. Accept the invite in Element before sending the Butler a message; setup
+ends with `Next: accept the invite in Element; the relay is running, so write to the Butler there.`
+when the relay is running. `--dir PATH` writes a separate Butler's files and leaves the running
+relay alone. Start that Butler with
+`REMUDA_BUTLER_TOKEN=PATH/token REMUDA_BUTLER_CONFIG=PATH/config remuda -s matrix-test daemon`,
+replacing `PATH` with the chosen directory.
+
 `event` and `get` are aliases for the same read. `rooms` is read-only. The
 configured HOME and ALL-BUTLERS rooms are the security boundary: no verb adds a
 room to them or widens the allowlist. Change the config explicitly to use
@@ -66,6 +75,14 @@ to inspect one. It is operator-only under the same caller policy. The relay
 stores at most 200 records, with a body preview capped at 1 KiB and a 30-day
 expiry. Quarantined events are never delivered through Butler mail. The relay
 state file containing these records is mode 600 on Unix hosts.
+
+Run `remuda butler matrix setup` to configure Butler; with `--register` and no
+`--registration-token-file`, setup asks for the homeserver registration token
+using a hidden prompt.
+
+```text
+remuda butler matrix setup --homeserver https://matrix.example.org --owner @alice:example.org --register --pin <64-hex-sha256> --default
+```
 
 The token is stored in a separate token file. The newline-delimited config
 file contains:
