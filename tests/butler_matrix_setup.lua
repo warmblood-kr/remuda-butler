@@ -4,17 +4,18 @@ return function(matrix)
   assert(matrix.cli({ "matrix", "setup" }) == matrix.setup_usage())
   assert(matrix.cli({ "matrix", "setup", "--help" }) == matrix.setup_usage())
 
+  assert(remuda.fs and remuda.fs.mkdir_new and remuda.fs.write_atomic,
+    "run setup tests with the Remuda filesystem helpers")
   local root = os.tmpname()
   os.remove(root)
-  assert(os.execute("mkdir -p " .. string.format("%q", root)))
-  local password = root .. "/password"
-  local token = root .. "/token"
+  assert(remuda.fs.mkdir_new(root))
+  local password, token = root .. "/password", root .. "/token"
   local output = root .. "/output"
-  assert(os.execute("mkdir -p " .. string.format("%q", output)))
+  assert(remuda.fs.mkdir_new(output))
   local function write(path, content)
-    local file = assert(io.open(path, "wb")); file:write(content or "secret"); file:close()
+    local ok, err = remuda.fs.write_atomic(path, content or "secret", { private = true })
+    assert(ok, err)
   end
-  local function q(path) return string.format("%q", path) end
   local function args(secret_flag, secret_path, extra)
     local values = {
       "--homeserver", "http://matrix.invalid", "--owner", "@alice:example.org",
@@ -29,8 +30,7 @@ return function(matrix)
       "expected setup rejection containing " .. fragment .. ", got " .. tostring(err))
   end
 
-  write(password)
-  assert(os.execute("chmod 600 " .. q(password)))
+  write(password, "  password-secret  \nignored")
   local fake_http = remuda.http
   local calls = 0
   remuda.http = { request = function() calls = calls + 1 end }
@@ -42,19 +42,25 @@ return function(matrix)
   assert(plan.owner_mxid == "@alice:example.org" and plan.create_all == true)
   assert(plan.token_path == output .. "/token" and plan.config_path == output .. "/config")
   assert(plan.secret_kind == "password" and plan.secret_path == password)
+  assert(plan.secret == "password-secret", "only the trimmed first line should be used")
   assert(calls == 0, "setup validation must not make network requests")
   assert(io.open(plan.token_path, "rb") == nil and io.open(plan.config_path, "rb") == nil,
     "setup validation must not create the output files")
-  for _, value in pairs(plan) do
-    assert(value ~= "secret", "setup plan must not contain secret contents")
-  end
   local cli_text = matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
     "--owner", "@alice:example.org", "--bot", "@butler-demo:example.org",
     "--password-file", password, "--dir", output })
-  assert(cli_text:find("inputs validated", 1, true) and calls == 0,
-    "setup CLI validation must not make network requests")
+  assert(cli_text:find("inputs validated", 1, true)
+    and cli_text:find("Next: delete the password or token file", 1, true)
+    and not cli_text:find("password-secret", 1, true) and calls == 0,
+    "setup CLI must guide password cleanup without exposing the secret or making requests")
   remuda.http = fake_http
 
+  local empty = root .. "/empty"
+  write(empty, "  \nignored")
+  rejected(args("--password-file", empty, { "--bot", "@butler-demo:example.org" }), "empty")
+  local oversized = root .. "/oversized"
+  write(oversized, string.rep("x", 4097))
+  rejected(args("--password-file", oversized, { "--bot", "@butler-demo:example.org" }), "4 KiB")
   rejected({ "--homeserver", "http://matrix.invalid", "--owner", "@alice:example.org",
     "--password-file", password }, "bot MXID")
   rejected(args("--password-file", password,
@@ -83,10 +89,6 @@ return function(matrix)
     "--bot", "@butler-demo:example.org", "--password-file", password, "--dir", output,
     "--pin", pin, "--ca-file", ca_file }, "choose one")
 
-  assert(os.execute("chmod 644 " .. q(password)))
-  rejected(args("--password-file", password, { "--bot", "@butler-demo:example.org" }), "mode 600")
-  assert(os.execute("chmod 600 " .. q(password)))
-
   local source = root .. "/existing-source"
   write(source, "keep")
   write(output .. "/token", "existing")
@@ -94,13 +96,7 @@ return function(matrix)
   local forced = matrix.setup_prepare(args("--password-file", password,
     { "--bot", "@butler-demo:example.org", "--force" }))
   assert(forced, "--force should authorize replacing existing output files")
-
   os.remove(output .. "/token")
-  assert(os.execute("ln -s " .. q(source) .. " " .. q(output .. "/token")))
-  rejected(args("--password-file", password, { "--bot", "@butler-demo:example.org" }), "symlink")
-  local symlink_force = matrix.setup_prepare(args("--password-file", password,
-    { "--bot", "@butler-demo:example.org", "--force" }))
-  assert(symlink_force, "--force should authorize replacing a symlink output")
 
   local default_dir = os.getenv("XDG_CONFIG_HOME")
   if not default_dir or default_dir == "" then default_dir = (os.getenv("HOME") or "") .. "/.config" end
@@ -115,12 +111,10 @@ return function(matrix)
   assert(default, "--default should authorize the resolved live paths")
   remuda._butler_matrix_paths = nil
 
-  write(token)
-  assert(os.execute("chmod 600 " .. q(token)))
+  write(token, "  access-token  \nignored")
   local token_plan = matrix.setup_prepare({ "--homeserver", "http://matrix.invalid",
     "--owner", "@alice:example.org", "--token-file", token, "--dir", output, "--force" })
-  assert(token_plan and token_plan.secret_kind == "token" and token_plan.bot_mxid == nil,
-    "token setup discovers the bot MXID with whoami in the network phase")
-
-  os.execute("rm -rf " .. q(root))
+  assert(token_plan and token_plan.secret_kind == "token" and token_plan.bot_mxid == nil
+    and token_plan.secret == "access-token",
+    "token setup should use the first trimmed line and discover the bot with whoami later")
 end

@@ -1,29 +1,10 @@
--- S2 Matrix setup argument parsing and local safety checks. Network and file
--- creation are added in later setup steps.
+-- S2 Matrix setup argument parsing and local safety checks. Network and
+-- credential-file creation are added in later setup steps.
 local matrix = assert(remuda.butler and remuda.butler.matrix, "Matrix request word is unavailable")
 
 local USAGE = [[Usage: remuda butler matrix setup --homeserver URL --owner MXID
   (--password-file PATH --bot MXID | --token-file PATH) [--dir PATH | --default]
   [--force] [--all] [--pin SHA256HEX | --ca-file PATH]]
-
-local function shell_quote(value)
-  return "'" .. value:gsub("'", "'\\''") .. "'"
-end
-
-local function shell_output(command)
-  local ok, pipe = pcall(io.popen, command, "r")
-  if not ok or not pipe then return nil end
-  local value = pipe:read("*a")
-  local closed, why, code = pipe:close()
-  if not (closed == true or closed == 0 or code == 0) then return nil end
-  return value
-end
-
-local function shell_test(flag, path)
-  local result = shell_output("if test " .. flag .. " " .. shell_quote(path)
-    .. "; then printf yes; fi")
-  return result == "yes"
-end
 
 local function absolute(path)
   return type(path) == "string" and (path:sub(1, 1) == "/" or path:match("^%a:[/\\]") ~= nil)
@@ -92,27 +73,46 @@ local function readable_file(path)
   return true
 end
 
-local function mode(path)
-  local quoted = shell_quote(path)
-  local value = shell_output("stat -f '%Lp' " .. quoted .. " 2>/dev/null")
-  local parsed = value and value:match("^%s*(%d+)%s*$")
-  if parsed then return parsed end
-  value = shell_output("stat -c '%a' " .. quoted .. " 2>/dev/null")
-  return value and value:match("^%s*(%d+)%s*$")
+local function file_exists(path)
+  local file = io.open(path, "rb")
+  if not file then return false end
+  file:close()
+  return true
 end
 
 local function validate_secret(path, kind)
   if not absolute(path) then return nil, "--" .. kind .. "-file must be an absolute path" end
-  if shell_test("-L", path) then return nil, "secret input file must not be a symlink: " .. path end
-  if not shell_test("-f", path) or not readable_file(path) then
+  if not readable_file(path) then
     return nil, "cannot read secret input file: " .. path
   end
-  if mode(path) ~= "600" then return nil, "secret input file must have mode 600: " .. path end
-  return true
+  local file = io.open(path, "rb")
+  if not file then return nil, "cannot read secret input file: " .. path end
+  local contents = file:read(4097) or ""
+  file:close()
+  if #contents > 4096 then return nil, "secret input file exceeds 4 KiB: " .. path end
+  local first_line = contents:match("^([^\r\n]*)") or ""
+  first_line = first_line:gsub("^%s+", ""):gsub("%s+$", "")
+  if first_line == "" then return nil, "secret input file is empty: " .. path end
+  return first_line
+end
+
+local function create_output_directory(path, options)
+  if type(remuda.fs) ~= "table" or type(remuda.fs.mkdir_new) ~= "function" then
+    return nil, "core does not provide remuda.fs.mkdir_new"
+  end
+  local parent = path:match("^(.*)/[^/]+$")
+  if parent and type(remuda.mkdir) == "function" then remuda.mkdir(parent) end
+  local created, reason = remuda.fs.mkdir_new(path)
+  if created == true then return true end
+  if reason == "exists" and (options.force or options.dir) then return false end
+  if reason == "exists" then
+    return nil, "default output directory already exists; pass --force or choose an existing --dir"
+  end
+  return nil, "cannot create private output directory: " .. tostring(reason or "unknown error")
 end
 
 local function resolve_outputs(options)
-  local resolved, default_dir = default_paths()
+  local resolved = default_paths()
   local current = remuda._butler_matrix_paths or resolved or {}
   local token_path, config_path, dir
   if options.dir then
@@ -120,15 +120,8 @@ local function resolve_outputs(options)
     if dir == "" or not absolute(dir) then return nil, "--dir must be an absolute path" end
     if not no_dot_segments(dir) then return nil, "--dir must not contain . or .. path segments" end
     token_path, config_path = dir .. "/token", dir .. "/config"
-    if shell_test("-L", dir) and not options.force then
-      return nil, "output directory is a symlink; pass --force to replace through it"
-    end
-    if shell_test("-e", dir) and not shell_test("-d", dir) then
-      return nil, "--dir is not a directory: " .. dir
-    end
   else
     token_path, config_path = current.token_path, current.config_path
-    dir = default_dir
   end
   if not absolute(token_path) or not absolute(config_path) then
     return nil, "cannot resolve Matrix output paths; set HOME/XDG_CONFIG_HOME or pass --dir"
@@ -145,9 +138,23 @@ local function resolve_outputs(options)
 
   if not options.force then
     for _, path in ipairs({ token_path, config_path }) do
-      if shell_test("-L", path) then return nil, "output path is a symlink; pass --force: " .. path end
-      if shell_test("-e", path) then return nil, "output file already exists; pass --force: " .. path end
+      if file_exists(path) then return nil, "output file already exists; pass --force: " .. path end
     end
+  end
+  -- Atomic replacement does not follow an output symlink. A symlinked parent
+  -- cannot be detected without lstat, so the caller owns the selected path.
+  local directories = {}
+  local function add_directory(path)
+    if path and not directories[path] then directories[path] = true end
+  end
+  if dir then add_directory(dir)
+  else
+    add_directory(token_path:match("^(.*)/[^/]+$"))
+    add_directory(config_path:match("^(.*)/[^/]+$"))
+  end
+  for path in pairs(directories) do
+    local made, make_error = create_output_directory(path, options)
+    if made == nil then return nil, make_error end
   end
   return { token_path = token_path, config_path = config_path, dir = dir }
 end
@@ -205,6 +212,7 @@ function matrix.setup_prepare(args)
   options.secret_path = options.password_file or options.token_file
   local secret_ok, secret_error = validate_secret(options.secret_path, options.secret_kind)
   if not secret_ok then return nil, secret_error end
+  options.secret = secret_ok
 
   if options.password_file then
     local bot, bot_error = valid_mxid(options.bot_mxid, "bot")

@@ -231,6 +231,7 @@ function matrix.cli(args, agent)
     end
     if plan.help then return plan.usage end
     return "Matrix setup inputs validated; no network requests were sent.\n"
+      .. "Next: delete the password or token file after setup.\n"
   end
   local ok, verb, options = pcall(parse, args)
   if not ok then
