@@ -5712,13 +5712,18 @@ fn butler_compaction_fake_claude_scenarios_send_only_visible_keys() {
 
     let script = dir.join("fake-claude.sh");
     let model_confirm_fixture = dir.join("claude-model-confirm-dialog.txt");
+    let wrong_title_model_confirm_fixture = dir.join("claude-model-confirm-wrong-title.txt");
     let stale_model_confirm_fixture = dir.join("claude-stale-model-confirm-with-permission.txt");
-    // The confirmation title is SYNTHETIC; only the option labels are verified.
     std::fs::write(
         &model_confirm_fixture,
         include_str!("fixtures/claude-model-confirm-dialog.txt"),
     )
-    .expect("write Claude model confirmation fixture");
+    .expect("write captured Claude model confirmation fixture");
+    std::fs::write(
+        &wrong_title_model_confirm_fixture,
+        include_str!("fixtures/claude-model-confirm-wrong-title.txt"),
+    )
+    .expect("write wrong-title model confirmation fixture");
     std::fs::write(
         &stale_model_confirm_fixture,
         include_str!("fixtures/claude-stale-model-confirm-with-permission.txt"),
@@ -5731,6 +5736,7 @@ log=$1
 scenario=$2
 model_confirm_fixture=$3
 stale_model_confirm_fixture=$4
+wrong_title_model_confirm_fixture=$5
 model='current-model'
 ctx=500000
 failed=0
@@ -5758,6 +5764,8 @@ while IFS= read -r line; do
         cat "$model_confirm_fixture"
       elif [ "$scenario" = stale-model-confirm ]; then
         cat "$stale_model_confirm_fixture"
+      elif [ "$scenario" = wrong-title-model-confirm ]; then
+        cat "$wrong_title_model_confirm_fixture"
       else
         model='sonnet'; paint
       fi
@@ -5865,7 +5873,7 @@ done
         return {{context_used=used, model=screen:match("MODEL:([^ %c]+)") or "current-model"}}
       end
       remuda._fake_setup_compaction = function(name, kind, log, scenario)
-        remuda.new(name, {{"bash", {script:?}, log, scenario, {model_confirm_fixture:?}, {stale_model_confirm_fixture:?}}}, nil, {{}})
+        remuda.new(name, {{"bash", {script:?}, log, scenario, {model_confirm_fixture:?}, {stale_model_confirm_fixture:?}, {wrong_title_model_confirm_fixture:?}}}, nil, {{}})
         local id = name
         if name == "fake-stable-id" then id = "stable-agent-17" end
         if name == "fake-empty-id" then id = "" end
@@ -5897,6 +5905,7 @@ done
         ("fake-settings-invalid", "claude", "happy"),
         ("fake-settings-mismatch", "claude", "settings-mismatch"),
         ("fake-unknown", "claude", "unknown"),
+        ("fake-model-confirm-wrong-title", "claude", "wrong-title-model-confirm"),
         ("fake-model-confirm", "claude", "model-confirm"),
         ("fake-stale-model-confirm", "claude", "stale-model-confirm"),
         ("fake-restore-fails", "claude", "unknown-restore-fails"),
@@ -6167,6 +6176,18 @@ done
                 std::thread::sleep(Duration::from_millis(50));
             }
             assert_eq!(std::fs::read_to_string(&log).unwrap(), format!("{before}CMD:/model opus\nKEY:RET\n"));
+        }
+        if name == "fake-model-confirm-wrong-title" {
+            let deadline = Instant::now() + Duration::from_secs(8);
+            loop {
+                let in_progress = eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].compaction_in_progress == true)"));
+                if in_progress == "false" { break; }
+                assert!(Instant::now() < deadline, "wrong-title confirmation watcher did not finish");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let got = std::fs::read_to_string(&log).unwrap_or_default();
+            assert_eq!(got, "CMD:/model sonnet\nKEY:RET\n",
+                "same options under a different dialog title must not receive Return: {got:?}");
         }
         if name == "fake-model-confirm" {
             let prior_reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
