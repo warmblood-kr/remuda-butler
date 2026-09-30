@@ -7610,6 +7610,57 @@ fn butler_matrix_cli_pending_routes_async_send_and_serializes_json() {
 }
 
 #[test]
+#[cfg(unix)]
+fn butler_matrix_cli_guides_unconfigured_status_and_send_without_exposing_token() {
+    let dir = scratch_dir("butler-matrix-cli-unconfigured");
+    let home = dir.join("home-empty");
+    std::fs::create_dir_all(home.join(".config/remuda/butler")).expect("mkdir empty Butler config");
+    let token_path = home.join(".config/remuda/butler/token");
+    let config_path = home.join(".config/remuda/butler/config");
+    std::fs::write(&token_path, "secret-token-sentinel\n").expect("write token sentinel");
+    let daemon = Daemon::spawn_with_home(&dir, &home);
+    let path = daemon::socket_path_in(&dir, "s");
+    eval(&path, "remuda._butler_test_mode = 'lifecycle'");
+    let loaded = remuda_timed(&dir, &["-s", "s", "butler", "--headless"]);
+    assert!(loaded.status.success(), "load Butler CLI: {}", String::from_utf8_lossy(&loaded.stderr));
+    assert_eq!("true", eval(&path,
+        "return tostring(remuda.butler.matrix.relay.instance == nil)"),
+        "a half-configured Matrix setup must not start the relay");
+
+    let status = remuda_timed(&dir, &["-s", "s", "butler", "matrix", "status"]);
+    assert!(!status.status.success(), "unconfigured Matrix status must fail");
+    let status_text = format!("{}{}", String::from_utf8_lossy(&status.stdout),
+        String::from_utf8_lossy(&status.stderr));
+
+    let send = remuda_timed(&dir, &["-s", "s", "butler", "matrix", "send", "hello"]);
+    assert!(!send.status.success(), "send without a config file must fail");
+    let send_text = format!("{}{}", String::from_utf8_lossy(&send.stdout),
+        String::from_utf8_lossy(&send.stderr));
+
+    for (verb, text) in [("status", status_text.as_str()), ("send", send_text.as_str())] {
+        assert!(text.contains(token_path.to_string_lossy().as_ref()), "{verb} omitted token path: {text}");
+        assert!(text.contains(config_path.to_string_lossy().as_ref()), "{verb} omitted config path: {text}");
+        for line in [
+            "https://<homeserver-url>",
+            "!<room-id>:<server-name>",
+            "@<your-user>:<server-name>",
+            "@<allowed-sender>:<server-name>",
+            "Next: create both files, then run: remuda butler matrix status",
+        ] {
+            assert!(text.contains(line), "{verb} omitted {line:?}: {text}");
+        }
+        assert!(text.contains("chmod 600"), "{verb} omitted file permission guidance: {text}");
+        assert!(text.lines().count() <= 12, "{verb} setup guidance exceeded 12 lines: {text}");
+        assert!(!text.contains("secret-token-sentinel"), "{verb} leaked token contents: {text}");
+    }
+    assert!(status_text.contains("Missing config file"), "status did not identify missing config: {status_text}");
+    assert!(!status_text.contains("Missing token file"), "status marked present token missing: {status_text}");
+    assert!(send_text.contains("Missing config file"), "send did not identify missing config: {send_text}");
+    assert!(!send_text.contains("Missing token file"), "send incorrectly marked present token missing: {send_text}");
+    drop(daemon);
+}
+
+#[test]
 fn butler_matrix_cli_client_disconnect_cancels_active_word() {
     let dir = scratch_dir("butler-matrix-cli-cancel");
     let (_daemon, path) = butler_cli_test_daemon(&dir);

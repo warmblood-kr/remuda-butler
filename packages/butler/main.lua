@@ -431,15 +431,12 @@ end
 -- this resolves). `HOME` (or `XDG_CONFIG_HOME`) is present in essentially
 -- every process's environment regardless of what happened to birth the
 -- daemon (the known exception: a systemd *system* unit with `User=` set but
--- no PAM session, or a process launched via `env -i`) -- `resolve_path`
--- below fails loudly by name when it's genuinely absent, rather than
--- guessing. `REMUDA_BUTLER_TOKEN`/`REMUDA_BUTLER_CONFIG` remain a supported
--- override, checked first, for a caller who wants a different location --
--- this is also what keeps every existing test that sets them via
--- `Daemon::spawn_with_env` unchanged. Mirrors install-butler.sh's own
--- `${XDG_CONFIG_HOME:-$HOME/.config}/remuda/butler/{token,config}` exactly,
--- kept in sync with install-butler.sh's own default by
--- scripts/check-butler-path-convention.lua, which fails if the two diverge.
+-- no PAM session, or a process launched via `env -i`). Keep the resolved
+-- paths even when files are absent so Matrix commands can explain how to
+-- finish configuration. `REMUDA_BUTLER_TOKEN`/`REMUDA_BUTLER_CONFIG` remain
+-- supported overrides, checked before the conventional XDG/HOME locations.
+-- This mirrors install-butler.sh; scripts/check-butler-path-convention.lua
+-- fails if the two defaults diverge.
 local function default_config_home()
   local xdg = os.getenv("XDG_CONFIG_HOME")
   if xdg and xdg ~= "" then
@@ -571,31 +568,15 @@ local function clear_compaction_restore(key, legacy_session)
   return true
 end
 
--- Fails loudly when Matrix has been configured -- naming the exact path it
--- tried and mentioning the override -- rather than silently proceeding with
--- a path that doesn't resolve to a real file.
-local function resolve_path(override_env, filename, what)
+-- Resolve the path whether or not the file exists. Matrix commands report
+-- missing credentials themselves, with both resolved paths and setup help.
+local function resolve_path(override_env, filename, _what)
   local path = os.getenv(override_env)
   if not path or path == "" then
     local config_home = default_config_home()
-    if not config_home then
-      error(
-        "remuda-butler: HOME is not set and " .. override_env .. " was not "
-          .. "given -- cannot locate the " .. what,
-        0
-      )
-    end
+    if not config_home then return nil end
     path = config_home .. "/remuda/butler/" .. filename
   end
-  local f = io.open(path, "r")
-  if not f then
-    error(
-      "remuda-butler: no " .. what .. " at " .. path .. " -- create it, or "
-        .. "set " .. override_env .. " to override",
-      0
-    )
-  end
-  f:close()
   return path
 end
 
@@ -622,25 +603,20 @@ local function load_topic_config()
   for name, setup in pairs(configured.templates or {}) do remuda.butler.template(name, setup) end
 end
 
--- Matrix is an optional Butler integration. An explicit override means its
--- caller intended to enable it, and either conventional credential file
--- means a half-configured relay should still fail loudly. With neither,
--- Butler remains a local Claude-session manager and simply omits the relay.
-local token_override = os.getenv("REMUDA_BUTLER_TOKEN")
-local config_override = os.getenv("REMUDA_BUTLER_CONFIG")
-local config_home = default_config_home()
-local default_token_path = config_home and config_home .. "/remuda/butler/token"
-local default_config_path = config_home and config_home .. "/remuda/butler/config"
-local matrix_requested = (token_override and token_override ~= "")
-  or (config_override and config_override ~= "")
-  or file_exists(default_token_path)
-  or file_exists(default_config_path)
+-- Matrix is an optional Butler integration. Retain both resolved paths even
+-- when absent so the CLI can explain what is missing. Start the relay only
+-- when both credential files are readable; otherwise it stays inactive and
+-- the CLI can guide the owner through setup.
+local resolved_token_path = resolve_path("REMUDA_BUTLER_TOKEN", "token", "token file")
+local resolved_config_path = resolve_path("REMUDA_BUTLER_CONFIG", "config", "config file")
+remuda._butler_matrix_paths = {
+  token_path = resolved_token_path,
+  config_path = resolved_config_path,
+}
 
-local token_path = nil
-local config_path = nil
-if matrix_requested then
-  token_path = resolve_path("REMUDA_BUTLER_TOKEN", "token", "token file")
-  config_path = resolve_path("REMUDA_BUTLER_CONFIG", "config", "config file")
+local token_path, config_path = nil, nil
+if file_exists(resolved_token_path) and file_exists(resolved_config_path) then
+  token_path, config_path = resolved_token_path, resolved_config_path
   remuda._butler_matrix_config = { token_path = token_path, config_path = config_path }
 else
   remuda._butler_matrix_config = nil
