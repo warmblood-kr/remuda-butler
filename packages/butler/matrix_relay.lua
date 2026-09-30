@@ -165,6 +165,32 @@ local function relation_fields(content)
   return root, reply
 end
 
+local function approval_answer_fields(ev)
+  local content = type(ev.content) == "table" and ev.content or {}
+  if ev.type == "m.reaction" then
+    local rel = content["m.relates_to"]
+    if type(rel) ~= "table" or rel.rel_type ~= "m.annotation" then return {}, nil end
+    local verdict
+    if rel.key == "✅" or rel.key == "✅\239\184\143" then verdict = "approve"
+    elseif rel.key == "❌" then verdict = "deny" end
+    return { rel.event_id }, verdict
+  end
+  if ev.type ~= "m.room.message" then return {}, nil end
+  local thread_root, in_reply_to = relation_fields(content)
+  local targets = {}
+  if in_reply_to then targets[#targets + 1] = in_reply_to end
+  if thread_root and thread_root ~= in_reply_to then targets[#targets + 1] = thread_root end
+  local body = type(content.body) == "string" and strip_reply_fallback(content.body) or ""
+  -- strip_reply_fallback retains a compact quote for ordinary mail. Drop that
+  -- generated line for exact approval words while leaving delivery untouched.
+  local prefix_end = body:match("^> [^\n]*()\n")
+  if prefix_end then body = body:sub(prefix_end + 1) end
+  body = body:match("^%s*(.-)%s*$") or ""
+  body = body:lower()
+  local verdict = body == "yes" and "approve" or body == "no" and "deny" or nil
+  return targets, verdict
+end
+
 local function mentions(content, body, mxid)
   local mentions = content and content["m.mentions"]
   if type(mentions) == "table" and type(mentions.user_ids) == "table" then
@@ -889,6 +915,32 @@ function relay.new(options)
         if (event_id == "" or (not state.processed[event_id] and not state.pending[event_id]))
           and ev.sender ~= cfg.self_mxid then
           local content = type(ev.content) == "table" and ev.content or {}
+          local approval_record, approval_verdict
+          if approval then
+            local targets, verdict = approval_answer_fields(ev)
+            for _, target in ipairs(targets) do
+              approval_record = approval.for_event(target)
+              if approval_record then approval_verdict = verdict; break end
+            end
+          end
+          if approval_record then
+            if event_id ~= "" then add_processed(state, event_id) end
+            if cursor then state.since = cursor end
+            local origin_ms = tonumber(ev.origin_server_ts)
+            local counts = approval_verdict ~= nil and room_id == cfg.home_room
+              and type(ev.sender) == "string" and cfg.allowed_senders[ev.sender]
+              and member_kind(ev.sender, cfg) == "HUMAN"
+              and origin_ms ~= nil and tonumber(approval_record.created_ms) ~= nil
+              and origin_ms >= tonumber(approval_record.created_ms) - 30000
+            if counts then
+              if approval_record.status == "open" then
+                pcall(approval.answer, approval_record.event_id, approval_verdict, ev.sender)
+              else
+                pcall(approval.reply, approval_record, "Already answered.")
+              end
+            end
+            persist()
+          else
           local reason
           if event_id == "" then reason = "missing_event_id"
           elseif ev.type ~= "m.room.message" then reason = "unsupported_event_type"
@@ -948,8 +1000,9 @@ function relay.new(options)
           if cursor then state.since = cursor end
           persist()
           end
+          end
+          end
         end
-      end
     end
     end
     return added

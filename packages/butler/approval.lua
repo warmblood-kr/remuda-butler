@@ -97,6 +97,23 @@ function approval.list()
   return open_records(attached.state)
 end
 
+function approval.for_event(event_id)
+  if not attached or type(event_id) ~= "string" then return nil end
+  for _, rec in pairs(attached.state.approvals or {}) do
+    if type(rec) == "table" and rec.event_id == event_id then return rec end
+  end
+end
+
+function approval.reply(rec, text)
+  if not attached or type(attached.post) ~= "function" then
+    return nil, "Matrix relay is not running. Next: remuda butler matrix status"
+  end
+  if type(rec) ~= "table" or type(rec.event_id) ~= "string" or rec.event_id == "" then
+    return nil, "Approval request event is unavailable"
+  end
+  return attached.post(text, { rel_type = "m.thread", event_id = rec.event_id }, function() end)
+end
+
 function approval.request(request, done)
   done = type(done) == "function" and done or function() end
   local completed = false
