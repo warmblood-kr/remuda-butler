@@ -1493,7 +1493,7 @@ fn butler_lifecycle_reload_replaces_hooks_and_schedules_and_rolls_back() {
     "#;
     let initial = eval(&path, counts);
     assert!(
-        initial == "1|4|1|1|1|18" || initial == "1|4|1|1|1|-1",
+        initial == "1|4|1|1|1|19" || initial == "1|4|1|1|1|-1",
         "unexpected Butler lifecycle registrations: {initial}"
     );
 
@@ -4168,6 +4168,9 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
           remuda._butler_bus.codex_update_state = {{claimed=false, done=false}}
           remuda._butler_codex_update_timeout = 2
           remuda._butler_modal_timeout = 3
+          -- Hold the notice clock until every give-up is queued, so the
+          -- leader's notices always batch (#126).
+          remuda._butler_notice_clock = function() return 0 end
           local native_close = remuda.close
           -- remuda.close is reported as reason "closed" by cores with #258; a
           -- simulated natural exit substitutes the exit the real process would report.
@@ -4284,8 +4287,24 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
         // The leader's "task not delivered" notice is typed too; count only
         // the topic sessions' own lines.
         let typed = log.lines().filter(|l| l.starts_with("t-") && l.contains(" type ")).count();
+        if [
+            "t-stuck",
+            "t-codex-unanswerable",
+            "t-codex-human",
+            "t-claude-human-trust",
+        ]
+        .iter()
+        .all(|n| traced.contains(&format!("task_poke_timeout\t{n}")))
+            && traced.contains("launch_failed\tt-claude-launch-unknown")
+        {
+            eval(&path, "remuda._butler_notice_clock = nil");
+        }
+        // Notices batch: one "Butler message ID ..." or "N new Butler messages".
+        let leader_noticed = log
+            .lines()
+            .any(|l| l.starts_with("butler type ") && l.contains("Butler message"));
         if typed == 3 && traced.contains("task_poke_timeout\tt-stuck")
-            && log.contains(" type Butler message ")
+            && leader_noticed
             && eval(&path, "return tostring(remuda._butler_bus.agents['t-claude-launch'] ~= nil)") == "true"
             && eval(&path, "return tostring(remuda._butler_bus.agents['t-claude-launch-transient'] ~= nil)") == "true"
             && eval(&path, "return remuda._butler_sessions()")
@@ -4327,7 +4346,24 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
     assert!(!log.contains("t-stuck "), "typed into an unknown dialog: {log}");
     assert!(std::fs::read_to_string(&trace).unwrap_or_default().contains("Workspace access changed"),
         "launch failure did not preserve the unknown dialog label");
-    assert!(log.contains(" type Butler message "), "the leader is told about t-stuck: {log}");
+    // A batched notice does not name t-stuck; its give-up mail must.
+    let leader_mail = eval(
+        &path,
+        r#"
+          local bus, out = remuda._butler_bus, {}
+          local id = bus.agents[remuda._butler_initial_name].id
+          for _, m in ipairs(remuda._butler_mail.mailbox(id)) do
+            local message = bus.messages[m]
+            local object = message and bus.objects[message.body.object_id]
+            out[#out + 1] = object and object.content or ""
+          end
+          return table.concat(out, "\n")
+        "#,
+    );
+    assert!(
+        leader_mail.contains("Task for t-stuck was not delivered"),
+        "the leader is told about t-stuck: {leader_mail}"
+    );
     assert_eq!(log.lines().filter(|l| l.starts_with("t-codex-unanswerable key ")).count(), 0, "an unknown update menu was answered: {log}");
     assert_eq!(log.lines().filter(|l| l.starts_with("t-codex-human key ")).count(), 0, "a human-attached pane was changed: {log}");
     assert_eq!(log.lines().filter(|l| l.starts_with("t-claude-human-trust key ")).count(), 0, "modal keys were pressed after give_up: {log}");
@@ -8450,4 +8486,182 @@ fn butler_matrix_guidance_covers_each_member_verb_and_omits_operator_verbs() {
     }
     assert!(!guidance.contains("join ROOM"), "operator join leaked into member guidance");
     assert!(!guidance.contains("leave ROOM"), "operator leave leaked into member guidance");
+}
+
+fn doctor_render(probes: &str, platform: &str) -> String {
+    let dir = scratch_dir("butler-doctor-render");
+    let (_daemon, path) = butler_cli_test_daemon(&dir);
+    let module = std::env::current_dir()
+        .expect("core checkout")
+        .join("../packages/butler/doctor.lua");
+    let module = lua_raw_string(&module.to_string_lossy());
+    let platform = lua_raw_string(platform);
+    let code = format!(
+        "local doctor = dofile({module}); return table.concat(doctor.render({probes}, {platform}), '\\n')"
+    );
+    eval(&path, &code)
+}
+
+fn doctor_candidate_names(name: &str, platform: &str) -> String {
+    let dir = scratch_dir("butler-doctor-candidates");
+    let (_daemon, path) = butler_cli_test_daemon(&dir);
+    let module = std::env::current_dir()
+        .expect("core checkout")
+        .join("../packages/butler/doctor.lua");
+    let module = lua_raw_string(&module.to_string_lossy());
+    let name = lua_raw_string(name);
+    let platform = lua_raw_string(platform);
+    let code = format!(
+        "local doctor = dofile({module}); return table.concat(doctor.candidate_names({name}, {platform}), ',')"
+    );
+    eval(&path, &code)
+}
+
+#[test]
+fn doctor_candidate_names_include_windows_cmd_fallback() {
+    assert_eq!(doctor_candidate_names("codex", "windows"), "codex,codex.cmd");
+    assert_eq!(doctor_candidate_names("codex", "posix"), "codex");
+}
+
+fn doctor_status(installed: bool, logged_in: bool) -> String {
+    format!("{{ installed = {installed}, logged_in = {logged_in} }}")
+}
+
+fn doctor_stub_dir(dir: &Path) -> PathBuf {
+    let bin = dir.join("doctor-bin");
+    std::fs::create_dir_all(&bin).expect("create doctor stub directory");
+    bin
+}
+
+fn doctor_write_stub(bin: &Path, name: &str, output: &str, exit_code: i32) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = bin.join(name);
+    std::fs::write(
+        &path,
+        format!("#!/bin/sh\nprintf '%s\\n' '{}'\nexit {exit_code}\n", output),
+    )
+    .expect("write agent stub");
+    let mut permissions = std::fs::metadata(&path).expect("stat agent stub").permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(path, permissions).expect("make agent stub executable");
+}
+
+fn butler_doctor_test_daemon(dir: &Path, path_env: &str) -> (Daemon, PathBuf) {
+    let daemon = Daemon::spawn_with_env(dir, &[("PATH", path_env)]);
+    let path = daemon::socket_path_in(dir, "s");
+    eval(&path, "remuda._butler_test_mode = 'lifecycle'; remuda._butler_skip_relay = true");
+    let out = remuda_timed(dir, &["-s", "s", "butler", "--headless"]);
+    assert!(out.status.success(), "load Butler CLI: {}", String::from_utf8_lossy(&out.stderr));
+    (daemon, path)
+}
+
+#[test]
+fn doctor_reports_all_good() {
+    let probes = format!(
+        "{{ claude = {}, codex = {} }}",
+        doctor_status(true, true),
+        doctor_status(true, true)
+    );
+    assert_eq!(
+        doctor_render(&probes, "macos"),
+        "Claude Code: installed, logged in\nCodex CLI: installed, logged in\nNext: remuda butler matrix setup"
+    );
+}
+
+#[test]
+fn doctor_reports_missing_claude_posix() {
+    let probes = format!(
+        "{{ claude = {}, codex = {} }}",
+        doctor_status(false, false),
+        doctor_status(true, true)
+    );
+    let expected = "Claude Code: missing\nCodex CLI: installed, logged in\nNext: curl -fsSL https://claude.ai/install.sh | bash";
+    assert_eq!(doctor_render(&probes, "macos"), expected);
+    assert_eq!(doctor_render(&probes, "linux"), expected);
+}
+
+#[test]
+fn doctor_reports_missing_claude_windows() {
+    let probes = format!(
+        "{{ claude = {}, codex = {} }}",
+        doctor_status(false, false),
+        doctor_status(true, true)
+    );
+    assert_eq!(
+        doctor_render(&probes, "windows"),
+        "Claude Code: missing\nCodex CLI: installed, logged in\nNext: irm https://claude.ai/install.ps1 | iex"
+    );
+}
+
+#[test]
+fn doctor_reports_codex_logged_out() {
+    let probes = format!(
+        "{{ claude = {}, codex = {} }}",
+        doctor_status(true, true),
+        doctor_status(true, false)
+    );
+    assert_eq!(
+        doctor_render(&probes, "macos"),
+        "Claude Code: installed, logged in\nCodex CLI: installed, not logged in\nNext: codex login"
+    );
+}
+
+#[test]
+fn doctor_reports_both_missing_with_two_next_lines() {
+    let probes = format!(
+        "{{ claude = {}, codex = {} }}",
+        doctor_status(false, false),
+        doctor_status(false, false)
+    );
+    assert_eq!(
+        doctor_render(&probes, "linux"),
+        "Claude Code: missing\nCodex CLI: missing\nNext: curl -fsSL https://claude.ai/install.sh | bash\nNext: npm install -g @openai/codex"
+    );
+}
+
+#[test]
+fn doctor_cli_all_good_never_echoes_agent_output() {
+    let dir = scratch_dir("butler-doctor-cli-good");
+    let bin = doctor_stub_dir(&dir);
+    doctor_write_stub(
+        &bin,
+        "claude",
+        r#"{"status":"logged-in","token":"DOCTOR_SECRET_CLAUDE"}"#,
+        0,
+    );
+    doctor_write_stub(
+        &bin,
+        "codex",
+        "Logged in using ChatGPT; DOCTOR_SECRET_CODEX",
+        0,
+    );
+    let path_env = bin.to_str().expect("PATH is UTF-8");
+    let (_daemon, _path) = butler_doctor_test_daemon(&dir, path_env);
+    let out = remuda_timed(&dir, &["-s", "s", "butler", "doctor"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stdout.contains("Claude Code: installed, logged in"), "{stdout}");
+    assert!(stdout.contains("Codex CLI: installed, logged in"), "{stdout}");
+    assert!(stdout.contains("Next: remuda butler matrix setup"), "{stdout}");
+    for secret in ["DOCTOR_SECRET_CLAUDE", "DOCTOR_SECRET_CODEX", "logged-in"] {
+        assert!(!stdout.contains(secret), "doctor leaked {secret}: {stdout}");
+        assert!(!stderr.contains(secret), "doctor leaked {secret}: {stderr}");
+    }
+}
+
+#[test]
+fn doctor_cli_both_missing_prints_two_next_commands() {
+    let dir = scratch_dir("butler-doctor-cli-missing");
+    let bin = doctor_stub_dir(&dir);
+    let path_env = bin.to_str().expect("PATH is UTF-8");
+    let (_daemon, _path) = butler_doctor_test_daemon(&dir, path_env);
+    let out = remuda_timed(&dir, &["-s", "s", "butler", "doctor"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "Claude Code: missing\nCodex CLI: missing\nNext: curl -fsSL https://claude.ai/install.sh | bash\nNext: npm install -g @openai/codex"
+    );
 }

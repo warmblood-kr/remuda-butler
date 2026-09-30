@@ -84,6 +84,12 @@ local function command(order, verb, usage, run)
   command_entries[verb] = entry
   if not remuda.contribute then remuda._butler_contribute("butler.command", verb, entry) end
 end
+command(5, "doctor", "  remuda butler doctor", function(args)
+  if #args == 1 then
+    local doctor = remuda._butler_doctor
+    return table.concat(doctor.render(doctor.probe()), "\n")
+  end
+end)
 command(10, "sessions", "  remuda butler sessions", function(args)
   if #args == 1 then return remuda._butler_sessions() end
 end)
