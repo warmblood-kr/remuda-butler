@@ -1086,6 +1086,7 @@ function relay.new(options)
             local notice_alias = #aliases == 1 and aliases[1] or nil
             local room_is_safe = valid_room_id(room_id) and #room_id <= 500
               and mail_body(room_id) == room_id and not has_bidi_format(room_id)
+              and matrix.sanitize_directory_text(room_id, 500) == room_id
             local denied = matrix.invite_is_denied(cfg, room_id, nil, raw_inviter)
             for _, alias in ipairs(aliases) do
               if matrix.invite_is_denied(cfg, room_id, alias, raw_inviter) then denied = true end

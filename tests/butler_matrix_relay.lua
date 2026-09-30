@@ -1055,6 +1055,27 @@ local function test_bidi_invite_room_is_quarantined_without_home_notice()
   assert(ok, err)
 end
 
+local function test_open_mode_room_id_unicode_separators_are_refused()
+  for index, char in ipairs({ "\226\128\168", "\226\128\169", "\226\128\139" }) do
+    local room = "!unsafe" .. char .. "room:example.org"
+    local dir, path = open_invite_fixture()
+    local client, delivered = invite_client(), {}
+    local relay = started_relay(path, client, delivered)
+    client:sync({ json = { next_batch = "s" .. index,
+      rooms = { invite = invite(room, STRANGER) } } })
+    client:pump()
+    assert(client:joins(room) == 0,
+      "room IDs containing line separators or zero-width characters must not be joined")
+    local item
+    for _, q in ipairs(relay:quarantine_list()) do
+      if q.room_id == room and q.reason == "invite_not_allowlisted" then item = q end
+    end
+    assert(item, "an unsafe Unicode room ID must be quarantined as not allowlisted")
+    relay:stop()
+    remove_dir(dir)
+  end
+end
+
 local function test_long_invite_identifiers_dedupe_home_notice()
   local dir, path = invite_fixture()
   local long_room = "!" .. string.rep("r", 298) .. ":" .. string.rep("s", 300)
@@ -2293,6 +2314,7 @@ for _, case in ipairs({
   { "test_conflicting_inviter_events_cannot_join", test_conflicting_inviter_events_cannot_join },
   { "test_unsafe_invite_room_is_quarantined_without_home_notice", test_unsafe_invite_room_is_quarantined_without_home_notice },
   { "test_bidi_invite_room_is_quarantined_without_home_notice", test_bidi_invite_room_is_quarantined_without_home_notice },
+  { "test_open_mode_room_id_unicode_separators_are_refused", test_open_mode_room_id_unicode_separators_are_refused },
   { "test_long_invite_identifiers_dedupe_home_notice", test_long_invite_identifiers_dedupe_home_notice },
   { "test_invite_home_notice_cap_adds_one_summary", test_invite_home_notice_cap_adds_one_summary },
   { "test_agent_invite_is_not_joined", test_agent_invite_is_not_joined },
