@@ -1559,20 +1559,13 @@ local function seed_unread_notices(alias, previous_instance, instance)
   end
   return true
 end
-local function notice_session_instance(alias, agent)
+local function notice_session_instance(alias, agent, session_instances)
   if type(agent.session_instance_id) == "string" and agent.session_instance_id ~= "" then
     return agent.session_instance_id
   end
-  local ok, sessions = pcall(remuda.ls)
-  if ok and type(sessions) == "table" then
-    for _, session in ipairs(sessions) do
-      if session.name == alias and session.alive then
-        if type(session.instance_id) == "string" and session.instance_id ~= "" then
-          return session.instance_id
-        end
-        break
-      end
-    end
+  local instance = session_instances[alias]
+  if type(instance) == "string" and instance ~= "" then
+    return instance
   end
   -- Agent records are replaced when Butler relaunches a member, and survive
   -- a mod reload, so the record itself is the fallback instance token.
@@ -1580,9 +1573,19 @@ local function notice_session_instance(alias, agent)
 end
 function remuda._butler_deliver_notices()
   local now = notice_now()
+  local session_instances = {}
+  local listed, sessions = pcall(remuda.ls)
+  if listed and type(sessions) == "table" then
+    for _, session in ipairs(sessions) do
+      if session.alive and type(session.name) == "string"
+          and type(session.instance_id) == "string" and session.instance_id ~= "" then
+        session_instances[session.name] = session.instance_id
+      end
+    end
+  end
   for alias, agent in pairs(bus.agents) do
     if agent and remuda._butler_notify_policy(alias, now) then
-      local instance = notice_session_instance(alias, agent)
+      local instance = notice_session_instance(alias, agent, session_instances)
       local previous_instance = bus.unread_seeded[alias]
       if previous_instance ~= instance then
         local seeded, result = pcall(seed_unread_notices, alias, previous_instance, instance)
