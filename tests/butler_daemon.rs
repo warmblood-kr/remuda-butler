@@ -5808,6 +5808,7 @@ fn butler_compaction_fake_claude_scenarios_send_only_visible_keys() {
     let script = dir.join("fake-claude.sh");
     let model_confirm_fixture = dir.join("claude-model-confirm-dialog.txt");
     let status_model_confirm_fixture = dir.join("claude-model-confirm-dialog-with-status.txt");
+    let changing_status_model_confirm_fixture = dir.join("claude-model-confirm-dialog-changing-status.txt");
     let wrong_title_model_confirm_fixture = dir.join("claude-model-confirm-wrong-title.txt");
     let stale_model_confirm_fixture = dir.join("claude-stale-model-confirm-with-permission.txt");
     std::fs::write(
@@ -5820,6 +5821,11 @@ fn butler_compaction_fake_claude_scenarios_send_only_visible_keys() {
         include_str!("fixtures/claude-model-confirm-dialog-with-status.txt"),
     )
     .expect("write model confirmation fixture with trailing status rows");
+    std::fs::write(
+        &changing_status_model_confirm_fixture,
+        include_str!("fixtures/claude-model-confirm-dialog-changing-status.txt"),
+    )
+    .expect("write model confirmation fixture with a changing status row");
     std::fs::write(
         &wrong_title_model_confirm_fixture,
         include_str!("fixtures/claude-model-confirm-wrong-title.txt"),
@@ -5839,6 +5845,7 @@ model_confirm_fixture=$3
 stale_model_confirm_fixture=$4
 wrong_title_model_confirm_fixture=$5
 status_model_confirm_fixture=$6
+changing_status_model_confirm_fixture=$7
 model='current-model'
 ctx=500000
 failed=0
@@ -5855,7 +5862,8 @@ while IFS= read -r line; do
   printf 'CMD:%s\n' "$line" >> "$log"
   case "$line" in
     '')
-      if [ "$scenario" = model-confirm ] || [ "$scenario" = model-confirm-with-status ] || [ "$scenario" = model-confirm-transient ]; then
+      if [ "$scenario" = model-confirm ] || [ "$scenario" = model-confirm-with-status ] \
+          || [ "$scenario" = model-confirm-transient ] || [ "$scenario" = model-confirm-changing-status ]; then
         printf 'KEY:RET\n' >> "$log"
         model='sonnet'; paint
       fi
@@ -5870,6 +5878,8 @@ while IFS= read -r line; do
         printf 'MODEL:%s CTX:%s\n❯ 1. Yes, switch to Sonnet 5.5\n  2. No, go back\n' "$model" "$ctx"
         sleep 0.3
         cat "$model_confirm_fixture"
+      elif [ "$scenario" = model-confirm-changing-status ]; then
+        cat "$changing_status_model_confirm_fixture"
       elif [ "$scenario" = stale-model-confirm ]; then
         cat "$stale_model_confirm_fixture"
       elif [ "$scenario" = wrong-title-model-confirm ]; then
@@ -5929,7 +5939,12 @@ done
       local original_capture = remuda.capture
       remuda.capture = function(name)
         local screen = original_capture(name)
-        if name == "fake-model-confirm" or name == "fake-model-confirm-with-status" then
+        if name == "fake-model-confirm-changing-status" then
+          remuda._fake_model_confirm_status_tick = (remuda._fake_model_confirm_status_tick or 0) + 1
+          screen = screen:gsub("Status tick: %d+", "Status tick: " .. remuda._fake_model_confirm_status_tick)
+        end
+        if name == "fake-model-confirm" or name == "fake-model-confirm-transient"
+            or name == "fake-model-confirm-with-status" or name == "fake-model-confirm-changing-status" then
           remuda._fake_model_confirm_screen = screen
           if name == "fake-model-confirm-with-status"
               and screen:find("Session status: active", 1, true)
@@ -5988,7 +6003,7 @@ done
         return {{context_used=used, model=screen:match("MODEL:([^ %c]+)") or "current-model"}}
       end
       remuda._fake_setup_compaction = function(name, kind, log, scenario)
-        remuda.new(name, {{"bash", {script:?}, log, scenario, {model_confirm_fixture:?}, {stale_model_confirm_fixture:?}, {wrong_title_model_confirm_fixture:?}, {status_model_confirm_fixture:?}}}, nil, {{}})
+        remuda.new(name, {{"bash", {script:?}, log, scenario, {model_confirm_fixture:?}, {stale_model_confirm_fixture:?}, {wrong_title_model_confirm_fixture:?}, {status_model_confirm_fixture:?}, {changing_status_model_confirm_fixture:?}}}, nil, {{}})
         local id = name
         if name == "fake-stable-id" then id = "stable-agent-17" end
         if name == "fake-empty-id" then id = "" end
@@ -6023,6 +6038,7 @@ done
         ("fake-model-confirm-wrong-title", "claude", "wrong-title-model-confirm"),
         ("fake-model-confirm", "claude", "model-confirm"),
         ("fake-model-confirm-transient", "claude", "model-confirm-transient"),
+        ("fake-model-confirm-changing-status", "claude", "model-confirm-changing-status"),
         ("fake-model-confirm-with-status", "claude", "model-confirm-with-status"),
         ("fake-stale-model-confirm", "claude", "stale-model-confirm"),
         ("fake-restore-fails", "claude", "unknown-restore-fails"),
@@ -6061,7 +6077,8 @@ done
         if name == "fake-unsafe-model" {
             eval(&path, "remuda._butler_bus.agents['fake-unsafe-model'].model = 'opus; /compact'");
         }
-        if name == "fake-model-confirm" || name == "fake-model-confirm-transient" {
+        if name == "fake-model-confirm" || name == "fake-model-confirm-transient"
+            || name == "fake-model-confirm-changing-status" {
             eval(&path, "remuda._butler_compaction_config.claude_completion_timeout = 2");
         }
         wait_for(&path, name, "MODEL:");
@@ -6094,7 +6111,7 @@ done
             "fake-persist-fails" => assert_eq!(result, "failed"),
             "fake-unsafe-model" => assert_eq!(result, "failed"),
             "fake-legacy-record" => assert_eq!(result, "restoring_model"),
-            _ => assert_eq!(result, "started"),
+            _ => assert_eq!(result, "started", "unexpected result for {name}"),
         }
         if name == "fake-persist-fails" {
             assert_eq!(eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].restore_pending)")), "nil",
@@ -6309,7 +6326,8 @@ done
             assert_eq!(got, "CMD:/model sonnet\nKEY:RET\n",
                 "same options under a different dialog title must not receive Return: {got:?}");
         }
-        if name == "fake-model-confirm" || name == "fake-model-confirm-transient" || name == "fake-model-confirm-with-status" {
+        if name == "fake-model-confirm" || name == "fake-model-confirm-transient"
+            || name == "fake-model-confirm-changing-status" || name == "fake-model-confirm-with-status" {
             let prior_reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
             let prior_report_count = prior_reports.lines().count();
             let deadline = Instant::now() + Duration::from_secs(8);
@@ -6318,7 +6336,7 @@ done
                 let reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
                 let new_reports = reports.lines().skip(prior_report_count).collect::<Vec<_>>().join("\\n");
                 assert!(!new_reports.contains("unrecognized dialog"),
-                    "the model confirmation dialog should be accepted: {new_reports:?}");
+                    "the model confirmation dialog should be accepted for {name}: {new_reports:?}");
                 if in_progress == "false" { break; }
                 assert!(Instant::now() < deadline, "compaction did not proceed past model confirmation: {new_reports:?}");
                 std::thread::sleep(Duration::from_millis(50));
