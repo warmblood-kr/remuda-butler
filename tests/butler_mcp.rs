@@ -1656,6 +1656,185 @@ fn trust_dialogs_on_external_or_reused_directories_wait_for_a_human() {
 }
 
 #[test]
+fn dismissed_claude_model_modal_is_rechecked_and_notice_is_delivered() {
+    let (path, _daemon) = butler_with_member("notice-dismissed-model-modal");
+    let trace = scratch("notice-dismissed-model-modal-trace").join("session-trace.log");
+    eval(
+        &path,
+        &format!(
+            r#"
+        local state = {{ now = 0, screen = '❯ 1. Yes, switch to Opus 5.5\n──', events = {{}} }}
+        local row = {{ name = 'm1', alive = true, attached = false }}
+        remuda._notice_test_state = state
+        remuda._butler_session_trace_path = {trace:?}
+        remuda._butler_bus.agents.m1.kind = 'claude'
+        remuda._butler_notice_clock = function() return state.now end
+        remuda._butler_human_active = function() return false end
+        remuda.ls = function() return {{ row }} end
+        remuda.session = function() return {{ is_busy = false }} end
+        remuda.capture_styled = nil
+        remuda.capture = function() table.insert(state.events, 'capture'); return state.screen end
+        remuda.type_text = function(_, text)
+          table.insert(state.events, 'type ' .. text)
+          state.screen = '❯ ' .. text .. '\n──'
+          return true
+        end
+        remuda.key = function(_, key)
+          table.insert(state.events, 'key ' .. key)
+          if key == 'RET' then state.screen = '❯ \n──' end
+        end
+        remuda._notice_test_sent = remuda._butler_send('operator', 'm1', 'modal dismissed notice')
+        state.id = remuda._notice_test_sent:match('queued ([^ ]+)')
+        "#,
+            trace = trace.to_string_lossy(),
+        ),
+    );
+    eval(
+        &path,
+        "local state = remuda._notice_test_state; state.now = 2; remuda._butler_deliver_notices()",
+    );
+    // Replay the captured post-modal composer: the trace line from the model
+    // chooser is gone and Claude now shows its empty prompt.
+    eval(&path, "remuda._notice_test_state.screen = '❯ \\n──'");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while eval(&path, "return tostring(remuda._butler_bus.notices.m1 ~= nil)") != "false" {
+        eval(
+            &path,
+            "remuda._notice_test_state.now = remuda._notice_test_state.now + 1; remuda._butler_deliver_notices()",
+        );
+        assert!(
+            Instant::now() < deadline,
+            "dismissed Claude modal did not release its queued notice: {}",
+            eval(&path, "return table.concat(remuda._notice_test_state.events, '\\n')")
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let sent = eval(&path, "return remuda._notice_test_sent");
+    let id = eval(&path, "return remuda._notice_test_state.id");
+    let events = eval(&path, "return table.concat(remuda._notice_test_state.events, '\\n')");
+    let trace = std::fs::read_to_string(trace).unwrap_or_default();
+    assert!(events.contains("type Butler message"), "notice was not typed: {events}");
+    assert!(events.contains("key RET"), "notice was not submitted: {events}");
+    assert!(
+        sent.contains("notice deferred:")
+            && sent.contains("m1")
+            && trace.contains(&id)
+            && trace.contains("m1")
+            && trace.contains("NON-EMPTY"),
+        "deferred result and retry trace must identify reason, session, and message id {id}; result={sent}; trace={trace}"
+    );
+}
+
+#[test]
+fn codex_router_trace_on_prompt_row_is_not_preserved_as_a_user_draft() {
+    let (path, _daemon) = butler_with_member("notice-codex-router-trace");
+    eval(
+        &path,
+        r#"
+        local state = {
+          now = 0,
+          screen = '› 2026-09-30T14:23:28Z ERROR codex_core::tools::router: error=failed to refresh available mode\n? for shortcuts',
+          events = {}, typed = nil,
+        }
+        local row = { name = 'm1', alive = true, attached = false }
+        remuda._notice_test_state = state
+        remuda._butler_bus.agents.m1.kind = 'codex'
+        remuda._butler_notice_clock = function() return state.now end
+        remuda._butler_human_active = function() return false end
+        remuda.ls = function() return { row } end
+        remuda.session = function() return { is_busy = false } end
+        remuda.capture_styled = nil
+        remuda.capture = function() return state.screen end
+        remuda.key = function(_, key)
+          table.insert(state.events, 'key ' .. key)
+          if key == 'C-l' or key == 'C-u' or key == 'RET' then state.screen = '› ' end
+        end
+        remuda.type_text = function(_, text)
+          state.typed = text
+          table.insert(state.events, 'type ' .. text)
+          state.screen = '› ' .. text
+          return true
+        end
+        remuda._butler_send('operator', 'm1', 'router trace notice')
+        "#,
+    );
+    eval(&path, "remuda._notice_test_state.now = 2; remuda._butler_deliver_notices()");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while eval(&path, "return tostring(remuda._butler_bus.notices.m1 ~= nil)") != "false" {
+        eval(&path, "remuda._notice_test_state.now = remuda._notice_test_state.now + 1; remuda._butler_deliver_notices()");
+        assert!(Instant::now() < deadline, "Codex router trace blocked the queued notice");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let typed = eval(&path, "return remuda._notice_test_state.typed or ''");
+    let decision = eval(
+        &path,
+        r#"local d,t=remuda._butler_prompt_is_empty('codex',
+          '› 2026-09-30T14:23:28Z ERROR codex_core::tools::router: error=failed to refresh available mode\n? for shortcuts'); return d..'|'..t"#,
+    );
+    assert_eq!(decision, "EMPTY|");
+    assert!(typed.contains("Butler message"), "notice was not delivered: {typed}");
+    assert!(!typed.contains("Your unsent draft was:"), "router diagnostics were preserved as user text: {typed}");
+    assert!(!typed.contains("codex_core::tools::router"), "router diagnostics leaked into the notice: {typed}");
+}
+
+#[test]
+fn attached_notice_recovery_progresses_or_times_out_with_a_reason() {
+    let (path, _daemon) = butler_with_member("notice-attached-recovery-bound");
+    let trace = scratch("notice-attached-recovery-trace").join("session-trace.log");
+    eval(
+        &path,
+        &format!(
+            r#"
+        local state = {{ now = 0, screen = '❯ ', events = {{}} }}
+        local row = {{ name = 'm1', alive = true, attached = true, human_idle = 20 }}
+        remuda._notice_test_state = state
+        remuda._butler_session_trace_path = {trace:?}
+        remuda._butler_bus.agents.m1.kind = 'codex'
+        remuda._butler_notice_clock = function() return state.now end
+        remuda._butler_human_active = function() return false end
+        remuda.ls = function() return {{ row }} end
+        remuda.session = function() return {{ is_busy = false }} end
+        remuda.capture_styled = nil
+        remuda.capture = function() table.insert(state.events, 'capture'); return state.screen end
+        remuda.type_text = function(_, text)
+          table.insert(state.events, 'type ' .. text)
+          state.screen = '› ' .. text
+          return true
+        end
+        remuda.key = function(_, key)
+          table.insert(state.events, 'key ' .. key)
+          if key == 'RET' then state.screen = '› ' end
+        end
+        local sent = remuda._butler_send('operator', 'm1', 'attached recovery notice')
+        state.id = sent:match('queued ([^ ]+)')
+        local recovery = {{ phase = 'verify_notice', checks = 0, notice = 'pending', count = 1,
+          message_ids = {{ state.id }} }}
+        remuda._butler_bus.notice_recoveries.m1 = recovery
+        remuda._notice_test_recovery = recovery
+        "#,
+            trace = trace.to_string_lossy(),
+        ),
+    );
+    for _ in 0..12 {
+        eval(
+            &path,
+            "remuda._notice_test_state.now = remuda._notice_test_state.now + 1; remuda._butler_deliver_notices()",
+        );
+    }
+    let pending = eval(&path, "return tostring(remuda._butler_bus.notices.m1 ~= nil)");
+    let recovery = eval(&path, "return tostring(remuda._butler_bus.notice_recoveries.m1 ~= nil)");
+    let id = eval(&path, "return remuda._notice_test_state.id");
+    let trace_contents = std::fs::read_to_string(trace).unwrap_or_default();
+    let failed_with_reason = trace_contents.contains("notice_recovery_failed")
+        && trace_contents.contains("m1")
+        && trace_contents.contains(&id);
+    assert!(
+        pending == "false" || recovery == "false" || failed_with_reason,
+        "attached recovery remained pending without progress or a logged reason; pending={pending}, recovery={recovery}, trace={trace_contents}"
+    );
+}
+
+#[test]
 fn unknown_busy_state_advances_notice_recovery_timeout() {
     let (path, _daemon) = butler_with_member("unknown-busy-recovery");
     eval(
