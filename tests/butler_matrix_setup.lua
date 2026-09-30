@@ -1,6 +1,7 @@
 return function(matrix)
   assert(type(matrix.setup_prepare) == "function", "Matrix setup validator is unavailable")
   assert(type(matrix.setup_network) == "function", "Matrix setup network stage is unavailable")
+  assert(type(matrix.setup_write) == "function", "Matrix setup file writer is unavailable")
   assert(type(matrix.cli) == "function", "Matrix CLI router is unavailable")
   assert(matrix.cli({ "matrix", "setup" }) == matrix.setup_usage())
   assert(matrix.cli({ "matrix", "setup", "--help" }) == matrix.setup_usage())
@@ -22,6 +23,13 @@ return function(matrix)
   local function write(path, content)
     local ok, err = remuda.fs.write_atomic(path, content or "secret", { private = true })
     assert(ok, err)
+  end
+  local function read(path)
+    local file = io.open(path, "rb")
+    if not file then return nil end
+    local contents = file:read("*a")
+    file:close()
+    return contents
   end
   local function args(secret_flag, secret_path, extra)
     local values = {
@@ -138,6 +146,11 @@ return function(matrix)
       resolved = { status = status, stdout = stdout, stderr = stderr }
     end }
   end
+  local real_write_atomic, atomic_writes = remuda.fs.write_atomic, {}
+  remuda.fs.write_atomic = function(path, contents, opts)
+    atomic_writes[#atomic_writes + 1] = { path = path, private = opts and opts.private }
+    return real_write_atomic(path, contents, opts)
+  end
   local reply = matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
     "--owner", "@alice:example.org", "--bot", "@butler-demo:example.org",
     "--password-file", password, "--dir", output, "--all" })
@@ -167,17 +180,88 @@ return function(matrix)
   requests[4].callback({ status = 200, body = '{"room_id":"!all:example.org"}' })
   assert(resolved and resolved.status == 0 and resolved.stdout:find("!home:example.org", 1, true)
     and resolved.stdout:find("!all:example.org", 1, true)
+    and resolved.stdout:find("Next: delete the password or token input file", 1, true)
     and not resolved.stdout:find("password-secret", 1, true)
     and not resolved.stdout:find("temporary-access-token", 1, true),
-    "setup CLI output must report rooms without secrets")
+    "setup CLI output must report saved rooms without secrets")
+  assert(read(output .. "/token") == "temporary-access-token\n")
+  assert(read(output .. "/config") == table.concat({ "http://matrix.invalid",
+    "!home:example.org", "@butler-demo:example.org", "@alice:example.org", "", "30000",
+    "all_room=!all:example.org", "" }, "\n"))
+  assert(#atomic_writes == 2 and atomic_writes[1].private and atomic_writes[2].private,
+    "token and config must both use private atomic writes")
+  remuda.fs.write_atomic = real_write_atomic
   remuda.http = fake_http
+
+  write(output .. "/token", "previous-token\n")
+  write(output .. "/config", "previous-config\n")
+  local forced_plan = matrix.setup_prepare({ "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--bot", "@butler-demo:example.org",
+    "--password-file", password, "--dir", output, "--force" })
+  assert(forced_plan, "--force should permit replacing existing files in an existing directory")
+  remuda.fs.write_atomic = function(path, contents, opts)
+    if path == output .. "/config" then return nil, "simulated disk failure" end
+    return real_write_atomic(path, contents, opts)
+  end
+  local forced_written, forced_error = matrix.setup_write(forced_plan, {
+    token = "replacement-token", user_id = "@butler-demo:example.org",
+    home_room = "!orphan-home:example.org", all_room = "!orphan-all:example.org",
+  })
+  assert(not forced_written and forced_error:find("!orphan-home:example.org", 1, true)
+    and forced_error:find("!orphan-all:example.org", 1, true))
+  assert(read(output .. "/token") == "previous-token\n"
+    and read(output .. "/config") == "previous-config\n",
+    "failed forced write must restore pre-existing output files")
+  remuda.fs.write_atomic = real_write_atomic
+
+  local rollback_dir = root .. "/rollback/child"
+  local rollback_plan = matrix.setup_prepare({ "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--bot", "@butler-demo:example.org",
+    "--password-file", password, "--dir", rollback_dir })
+  assert(rollback_plan, "validation must accept a not-yet-created output directory")
+  remuda.fs.write_atomic = function(path, contents, opts)
+    if path == rollback_dir .. "/config" then return nil, "simulated disk failure" end
+    return real_write_atomic(path, contents, opts)
+  end
+  local rollback_written, rollback_error = matrix.setup_write(rollback_plan, {
+    token = "temporary-access-token", user_id = "@butler-demo:example.org",
+    home_room = "!orphan-room:example.org",
+  })
+  assert(not rollback_written and rollback_error:find("!orphan-room:example.org", 1, true))
+  assert(read(rollback_dir .. "/token") == nil, "failed write must remove files created by this run")
+  local made_parent = remuda.fs.mkdir_new(root .. "/rollback")
+  local made_child = remuda.fs.mkdir_new(rollback_dir)
+  assert(made_parent and made_child, "failed write must remove directories created by this run")
+  os.remove(rollback_dir)
+  os.remove(root .. "/rollback")
+  remuda.fs.write_atomic = real_write_atomic
+
+  local fresh_dir = root .. "/fresh-parent/child"
+  local before_fresh_validation = mkdir_calls
+  local fresh_plan = matrix.setup_prepare({ "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--bot", "@butler-demo:example.org",
+    "--password-file", password, "--dir", fresh_dir })
+  assert(fresh_plan, "setup validation must accept a new output directory without creating it")
+  assert(mkdir_calls == before_fresh_validation, "validation must leave new output directories untouched")
+  local fresh_result, fresh_error = matrix.setup_write(fresh_plan, {
+    token = "fresh-token", user_id = "@butler-demo:example.org", home_room = "!fresh:example.org",
+  })
+  assert(fresh_result, fresh_error)
+  assert(read(fresh_dir .. "/token") == "fresh-token\n" and read(fresh_dir .. "/config"))
+  local existing_dir, existing_dir_error = remuda.fs.mkdir_new(fresh_dir)
+  assert(not existing_dir and existing_dir_error == "exists",
+    "successful setup must keep its newly created output directory")
+  os.remove(fresh_dir .. "/token")
+  os.remove(fresh_dir .. "/config")
+  os.remove(fresh_dir)
+  os.remove(root .. "/fresh-parent")
 
   requests = {}
   remuda.http = { request = function(spec) requests[#requests + 1] = spec; return {} end }
   resolved = nil
   matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
     "--owner", "@alice:example.org", "--bot", "@butler-demo:example.org",
-    "--password-file", password, "--dir", output })
+    "--password-file", password, "--dir", output, "--force" })
   requests[1].callback({ status = 403, body = 'rejected password-secret' })
   assert(resolved and resolved.status == 1 and not resolved.stderr:find("password-secret", 1, true),
     "login errors must not expose secrets or response bodies")
@@ -206,4 +290,8 @@ return function(matrix)
     and token_result.all_room == nil and token_result.token == "access-token")
   remuda.http = fake_http
   remuda.pending = fake_pending
+  for _, path in ipairs({ password, token, empty, oversized, ca_file, source,
+    output .. "/token", output .. "/config" }) do os.remove(path) end
+  os.remove(output)
+  os.remove(root)
 end

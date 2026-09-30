@@ -245,10 +245,14 @@ function matrix.cli(args, agent)
       completed.value = true
       if type(result) ~= "table" then result = { error = "Matrix setup returned no result" } end
       if result.error then return reply:resolve(1, "", tostring(result.error) .. "\n") end
+      local files, write_error = matrix.setup_write(plan, result)
+      if not files then return reply:resolve(1, "", tostring(write_error) .. "\n") end
       local lines = { "Matrix login verified as " .. terminal_safe(result.user_id) }
       if result.home_room then lines[#lines + 1] = "HOME room: " .. terminal_safe(result.home_room) end
       if result.all_room then lines[#lines + 1] = "ALL-BUTLERS room: " .. terminal_safe(result.all_room) end
-      lines[#lines + 1] = "Next: write the Matrix token and config files."
+      lines[#lines + 1] = "Token file: " .. terminal_safe(files.token_path)
+      lines[#lines + 1] = "Config file: " .. terminal_safe(files.config_path)
+      lines[#lines + 1] = "Next: delete the password or token input file, then run: remuda butler matrix status"
       reply:resolve(0, table.concat(lines, "\n") .. "\n", "")
     end
     active = matrix.setup_network(plan, finish_setup)

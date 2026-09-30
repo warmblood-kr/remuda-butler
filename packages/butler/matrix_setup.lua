@@ -127,6 +127,7 @@ local function resolve_outputs(options)
   if not absolute(token_path) or not absolute(config_path) then
     return nil, "cannot resolve Matrix output paths; set HOME/XDG_CONFIG_HOME or pass --dir"
   end
+  if token_path == config_path then return nil, "Matrix token and config output paths must be different" end
   if not no_dot_segments(token_path) or not no_dot_segments(config_path) then
     return nil, "Matrix output paths must not contain . or .. path segments"
   end
@@ -356,6 +357,122 @@ function matrix.setup_network(options, on_done)
     cancelled = true
     if active and active.cancel then active:cancel() end
   end }
+end
+
+function matrix.setup_write(options, result)
+  local orphan_ids = {}
+  if type(result) == "table" then
+    if type(result.home_room) == "string" then orphan_ids[#orphan_ids + 1] = result.home_room end
+    if type(result.all_room) == "string" then orphan_ids[#orphan_ids + 1] = result.all_room end
+  end
+  local function failure(message)
+    if #orphan_ids > 0 then
+      message = message .. "; orphan room ID" .. (#orphan_ids > 1 and "s" or "")
+        .. ": " .. table.concat(orphan_ids, ", ")
+    end
+    return nil, message
+  end
+  if type(options) ~= "table" or type(result) ~= "table"
+    or type(result.token) ~= "string" or result.token == ""
+    or type(result.user_id) ~= "string" or type(result.home_room) ~= "string"
+    or (options.create_all and type(result.all_room) ~= "string")
+    or type(options.token_path) ~= "string" or type(options.config_path) ~= "string" then
+    return failure("Matrix setup cannot write incomplete results")
+  end
+  if type(remuda.fs) ~= "table" or type(remuda.fs.mkdir_new) ~= "function"
+    or type(remuda.fs.write_atomic) ~= "function" then
+    return failure("Matrix setup requires the Remuda private filesystem helpers")
+  end
+
+  local paths = { options.token_path, options.config_path }
+  if not options.force then
+    for _, path in ipairs(paths) do
+      if file_exists(path) then return failure("Matrix output file already exists; pass --force") end
+    end
+  end
+
+  local created_dirs, created_set, backups = {}, {}, {}
+  local function rollback_dirs()
+    for index = #created_dirs, 1, -1 do pcall(os.remove, created_dirs[index]) end
+  end
+  local function rollback_files(written)
+    local clean = true
+    for index = #written, 1, -1 do
+      local path = written[index]
+      if backups[path] == nil then
+        local ok, removed = pcall(os.remove, path)
+        if not ok or removed == nil then clean = false end
+      else
+        local ok, restored = pcall(remuda.fs.write_atomic, path, backups[path], { private = true })
+        if not ok or not restored then clean = false end
+      end
+    end
+    return clean
+  end
+  local function ensure_directory(path)
+    if not path or path == "" or path == "/" or created_set[path] then return true end
+    local parent = path:match("^(.*)/[^/]+$")
+    if parent and parent ~= path then
+      local ok, parent_error = ensure_directory(parent)
+      if not ok then return nil, parent_error end
+    end
+    local ok, made, reason = pcall(remuda.fs.mkdir_new, path)
+    if not ok then return nil, "cannot create private output directory" end
+    if made == true then
+      created_dirs[#created_dirs + 1], created_set[path] = path, true
+      return true
+    end
+    if reason == "exists" then return true end
+    return nil, "cannot create private output directory"
+  end
+  local directories, directory_seen = {}, {}
+  for _, path in ipairs(paths) do
+    local parent = path:match("^(.*)/[^/]+$")
+    if parent and not directory_seen[parent] then
+      directories[#directories + 1], directory_seen[parent] = parent, true
+    end
+  end
+  for _, path in ipairs(directories) do
+    local made, make_error = ensure_directory(path)
+    if not made then rollback_dirs(); return failure(make_error) end
+  end
+
+  for _, path in ipairs(paths) do
+    local file = io.open(path, "rb")
+    if file then
+      if not options.force then
+        file:close(); rollback_dirs()
+        return failure("Matrix output file already exists; pass --force")
+      end
+      local old, read_error = file:read("*a")
+      file:close()
+      if old == nil then
+        rollback_dirs()
+        return failure("Matrix setup cannot preserve an existing output file")
+      end
+      backups[path] = old
+    end
+  end
+
+  local config_lines = {
+    options.homeserver, result.home_room, result.user_id, options.owner_mxid, "", "30000",
+  }
+  if result.all_room then config_lines[#config_lines + 1] = "all_room=" .. result.all_room end
+  if options.pin then config_lines[#config_lines + 1] = "pin_sha256=" .. options.pin end
+  if options.ca_file then config_lines[#config_lines + 1] = "ca_file=" .. options.ca_file end
+  local contents = { result.token .. "\n", table.concat(config_lines, "\n") .. "\n" }
+  local written = {}
+  for index, path in ipairs(paths) do
+    local ok, wrote = pcall(remuda.fs.write_atomic, path, contents[index], { private = true })
+    if not ok or not wrote then
+      local files_clean = rollback_files(written)
+      rollback_dirs()
+      return failure("Matrix setup could not write its " .. (index == 1 and "token" or "config")
+        .. " file" .. (files_clean and "" or "; rollback was incomplete"))
+    end
+    written[#written + 1] = path
+  end
+  return { token_path = options.token_path, config_path = options.config_path }
 end
 
 return matrix
