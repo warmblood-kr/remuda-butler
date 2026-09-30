@@ -839,8 +839,8 @@ function relay.new(options)
                 context_mail_id = event.context_mail_id, from_agent = event.from_agent,
                 room_kind = event.room_kind,
                 created_at = event.created_at }
-              if event.subscribe_thread and event.thread_id then
-                subscribe(state, event.room_id, event.thread_id, event.context_mail_id or result.id)
+              if event.subscribe_thread and event.thread_root then
+                subscribe(state, event.room_id, event.thread_root, event.context_mail_id or result.id)
               end
               trim_map(state.routes, MAX_MAIL_ROUTES, "created_at")
               persist()
@@ -927,17 +927,12 @@ function relay.new(options)
           local actual_room = room_id or cfg.room
           local sender_kind = member_kind(ev.sender, cfg)
           local is_mention = mentions(content, content.body, cfg.self_mxid)
-          local is_home = actual_room == cfg.home_room or cfg.rooms[actual_room] == "joined"
           local thread_id = thread_root or in_reply_to
-          local is_threaded = thread_id ~= nil
           local subscriptions = state.subscriptions[actual_room] or json.object({})
           state.subscriptions[actual_room] = subscriptions
-          local is_subscribed = thread_id and subscriptions[thread_id] ~= nil
+          local is_subscribed = thread_root and subscriptions[thread_root] ~= nil
           local is_agent = sender_kind == "AGENT"
-          local is_all = actual_room == cfg.all_room
-          local accepted = (is_agent and is_mention)
-            or (sender_kind == "HUMAN" and (is_home or (is_all and
-              (not is_threaded or is_mention or is_subscribed))))
+          local accepted = thread_root == nil or is_subscribed or is_mention
           local route_mail_id = thread_id
             and instance:mail_route_for_event(actual_room, thread_root, in_reply_to) or nil
           local thread_root_mail_id = thread_root
@@ -959,7 +954,7 @@ function relay.new(options)
             references = references and { references } or nil,
             from_agent = is_agent,
             trusted = trusted,
-            subscribe_thread = is_all and is_threaded and is_mention,
+            subscribe_thread = thread_root ~= nil and is_mention,
             thread_id = thread_id,
           }
           added[#added + 1] = ev.event_id
@@ -1393,7 +1388,8 @@ function relay.start(config)
   if not config or not config.config_path then return false end
   relay.instance = relay.new({ config_path = config.config_path, matrix = matrix,
     deliver = function(event)
-      local body = event.trusted and event.body or untrusted_matrix_body(event.sender, event.body)
+      local body = event.body
+      if event.trusted == false then body = untrusted_matrix_body(event.sender, body) end
       local delivered = remuda.emit_until_success("butler/deliver", {
         from = { host = "matrix", id = "", alias = event.sender, session = event.sender,
           kind = event.from_agent and "matrix-agent" or "matrix", leader = "" },
@@ -1405,7 +1401,7 @@ function relay.start(config)
           in_reply_to = event.in_reply_to, thread_id = event.thread_id,
           room = event.room, room_kind = event.room_kind,
           context_mail_id = event.context_mail_id, from_agent = event.from_agent,
-          trusted = event.trusted, mxc = event.mxc },
+          trusted = event.trusted ~= false, mxc = event.mxc },
         references = event.references,
       })
       if type(delivered) == "table" and delivered.__butler_delivery_hook_error then
