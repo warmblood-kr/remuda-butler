@@ -300,7 +300,13 @@ local function notify_mail_delivery(message, delivered, recipient_alias, what)
   local recipient_ok, _, recipient = pcall(mail_id, recipient_ref, false)
   result.recipient_live = recipient_ok
   if recipient_ok then
-    local notice = remuda._butler_notice.mail_notice_text(delivered, what)
+    local notice = remuda._butler_notice.mail_notice_text({
+      id = delivered.id,
+      from = message.from,
+      kind = message.kind,
+      in_reply_to = message.in_reply_to,
+      matrix = message.matrix,
+    }, what)
     local notify_ok, notified, notify_error =
       pcall(remuda._butler_notify, recipient.alias, notice, delivered.id)
     if notify_ok then

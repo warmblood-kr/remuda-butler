@@ -392,6 +392,33 @@ fn relay_deposit_produces_one_mail_notice() {
 }
 
 #[test]
+fn forward_mail_notice_names_the_forwarder() {
+    let (path, _daemon) = butler_with_member("notice-forwarder-text");
+    setup_mail_notice_clock_for(&path, "m1");
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        local root = remuda._butler_bus.agents.butler
+        remuda._butler_send('operator', 'butler', 'original message')
+        local ids = remuda._butler_mail.mailbox(root.id)
+        local id = ids[#ids]
+        remuda._butler_inbox('butler')
+        remuda._butler_forward('operator', id, 'm1')
+        state.now = 2
+        remuda._butler_deliver_notices()
+        return tostring(#state.typed) .. '\n' .. tostring(state.typed[1] and state.typed[1].text)
+        "#,
+    );
+    let mut lines = got.lines();
+    assert_eq!(lines.next(), Some("1"), "forward should type exactly one notice: {got}");
+    assert!(
+        lines.next().unwrap_or_default().contains("forwarded by operator"),
+        "forward notice should name the forwarder: {got}"
+    );
+}
+
+#[test]
 fn notice_failure_does_not_fail_the_mail_deposit_hook() {
     let (path, _daemon) = butler_with_member("notice-deposit-error");
     let trace = path.parent().unwrap().join("session-trace.log");
