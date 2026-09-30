@@ -5630,11 +5630,18 @@ fn butler_compaction_fake_claude_scenarios_send_only_visible_keys() {
     );
 
     let script = dir.join("fake-claude.sh");
+    let model_confirm_fixture = dir.join("claude-model-confirm-dialog.txt");
+    std::fs::write(
+        &model_confirm_fixture,
+        include_str!("fixtures/claude-model-confirm-dialog.txt"),
+    )
+    .expect("write Claude model confirmation fixture");
     std::fs::write(
         &script,
         r#"#!/bin/bash
 log=$1
 scenario=$2
+model_confirm_fixture=$3
 model='current-model'
 ctx=500000
 failed=0
@@ -5650,9 +5657,16 @@ paint
 while IFS= read -r line; do
   printf 'CMD:%s\n' "$line" >> "$log"
   case "$line" in
+    '')
+      if [ "$scenario" = model-confirm ]; then model='sonnet'; paint; fi
+      ;;
     '/model sonnet')
       printf 'KEY:RET\n' >> "$log"
-      model='sonnet'; paint
+      if [ "$scenario" = model-confirm ]; then
+        cat "$model_confirm_fixture"
+      else
+        model='sonnet'; paint
+      fi
       if [ "$scenario" = settings-mismatch ]; then printf '{"model":"sonnet","theme":"dark"}\n' > "$HOME/.claude/settings.json"; fi
       ;;
     '/compact')
@@ -5755,7 +5769,7 @@ done
         return {{context_used=used, model=screen:match("MODEL:([^ %c]+)") or "current-model"}}
       end
       remuda._fake_setup_compaction = function(name, kind, log, scenario)
-        remuda.new(name, {{"bash", {script:?}, log, scenario}}, nil, {{}})
+      remuda.new(name, {{"bash", {script:?}, log, scenario, {model_confirm_fixture:?}}}, nil, {{}})
         local id = name
         if name == "fake-stable-id" then id = "stable-agent-17" end
         if name == "fake-empty-id" then id = "" end
@@ -5786,6 +5800,7 @@ done
         ("fake-settings-invalid", "claude", "happy"),
         ("fake-settings-mismatch", "claude", "settings-mismatch"),
         ("fake-unknown", "claude", "unknown"),
+        ("fake-model-confirm", "claude", "model-confirm"),
         ("fake-restore-fails", "claude", "unknown-restore-fails"),
         ("fake-unsafe-model", "claude", "happy"),
         ("fake-force", "claude", "unknown"),
@@ -6019,6 +6034,24 @@ done
                 std::thread::sleep(Duration::from_millis(50));
             }
             assert_eq!(std::fs::read_to_string(&log).unwrap(), format!("{before}CMD:/model opus\nKEY:RET\n"));
+        }
+        if name == "fake-model-confirm" {
+            let prior_reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
+            let prior_report_count = prior_reports.lines().count();
+            let deadline = Instant::now() + Duration::from_secs(8);
+            loop {
+                let in_progress = eval(&path, &format!("return tostring(remuda._butler_compaction_members_state[{name:?}].compaction_in_progress == true)"));
+                let reports = eval(&path, "return table.concat(remuda._fake_compaction_reports or {}, '\\n')");
+                let new_reports = reports.lines().skip(prior_report_count).collect::<Vec<_>>().join("\\n");
+                assert!(!new_reports.contains("unrecognized dialog"),
+                    "the model confirmation dialog should be accepted: {new_reports:?}");
+                if in_progress == "false" { break; }
+                assert!(Instant::now() < deadline, "compaction did not proceed past model confirmation: {new_reports:?}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let got = std::fs::read_to_string(&log).unwrap();
+            assert!(got.contains("CMD:/compact\n"), "compaction should follow model confirmation: {got:?}");
+            assert!(got.ends_with("CMD:/model opus\nKEY:RET\n"), "prior model should be restored: {got:?}");
         }
         if name == "fake-restore-fails" {
             let deadline = Instant::now() + Duration::from_secs(8);
