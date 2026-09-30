@@ -51,6 +51,15 @@ remuda butler matrix [--json] leave ROOM
 remuda butler matrix [--json] quarantine [--id EVENT_ID]
 ```
 
+`remuda butler matrix setup --default` writes the token and config to the
+running Butler's resolved paths, then starts or replaces only its Matrix
+relay. Accept the invite in Element before sending the Butler a message; setup
+ends with `Relay started; write to the Butler in Element.` when the relay is
+running. `--dir PATH` writes a separate Butler's files and leaves the running
+relay alone. Start that Butler with
+`REMUDA_BUTLER_TOKEN=PATH/token REMUDA_BUTLER_CONFIG=PATH/config remuda -s matrix-test daemon`,
+replacing `PATH` with the chosen directory.
+
 `event` and `get` are aliases for the same read. `rooms` is read-only. The
 configured HOME and ALL-BUTLERS rooms are the security boundary: no verb adds a
 room to them or widens the allowlist. Change the config explicitly to use

@@ -283,6 +283,7 @@ function matrix.cli(args, agent)
           lines[#lines + 1] = "Status: " .. terminal_safe(render_human("status", {}, status_result):gsub("\n", "; "):gsub("; $", ""))
         end
         if plan.default then
+          lines[#lines + 1] = "Next: Accept the invite in Element, then write in the room."
           if relay_started then
             lines[#lines + 1] = "Relay started; write to the Butler in Element."
           else
@@ -290,7 +291,13 @@ function matrix.cli(args, agent)
             lines[#lines + 1] = "Next: remuda butler matrix status"
           end
         else
-          lines[#lines + 1] = "Next: Accept the invite in Element, then write in the room."
+          local function shell_quote(value)
+            return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
+          end
+          lines[#lines + 1] = "Accept the invite in Element before starting this separate Butler."
+          lines[#lines + 1] = "Next: REMUDA_BUTLER_TOKEN=" .. shell_quote(files.token_path)
+            .. " REMUDA_BUTLER_CONFIG=" .. shell_quote(files.config_path)
+            .. " remuda -s matrix-test daemon"
         end
         reply:resolve(0, table.concat(lines, "\n") .. "\n", "")
       end, agent)

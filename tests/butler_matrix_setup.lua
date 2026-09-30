@@ -546,8 +546,11 @@ return function(matrix)
     body = '{"access_token":"chosen-access-token","user_id":"@butler-chosen:example.org"}' })
   requests[3].callback({ status = 200, body = '{"user_id":"@butler-chosen:example.org"}' })
   requests[4].callback({ status = 200, body = '{"room_id":"!chosen-home:example.org"}' })
+  local chosen_start_line = "Next: REMUDA_BUTLER_TOKEN='" .. chosen_output .. "/token'"
+    .. " REMUDA_BUTLER_CONFIG='" .. chosen_output .. "/config' remuda -s matrix-test daemon"
   assert(resolved and resolved.status == 0
-    and resolved.stdout:find("Next: Accept the invite in Element, then write in the room.", 1, true)
+    and resolved.stdout:find("Accept the invite in Element before starting this separate Butler.", 1, true)
+    and resolved.stdout:match("([^\n]+)\n$") == chosen_start_line
     and not resolved.stdout:find("password-secret", 1, true)
     and not resolved.stdout:find("homeserver-registration-token", 1, true)
     and not resolved.stdout:find("chosen-access-token", 1, true)
@@ -618,10 +621,13 @@ return function(matrix)
     "ALL-BUTLERS createRoom must invite owner without enabling encryption")
   requests[4].callback({ status = 200, body = '{"room_id":"!all:example.org"}' })
   matrix.status = real_status
+  local separate_output_start = "Next: REMUDA_BUTLER_TOKEN='" .. output .. "/token'"
+    .. " REMUDA_BUTLER_CONFIG='" .. output .. "/config' remuda -s matrix-test daemon"
   assert(resolved and resolved.status == 0 and resolved.stdout:find("!home:example.org", 1, true)
     and resolved.stdout:find("!all:example.org", 1, true)
     and resolved.stdout:find("Status: User: @butler-demo:example.org; Joined rooms: 2", 1, true)
-    and resolved.stdout:find("Next: Accept the invite in Element, then write in the room.", 1, true)
+    and resolved.stdout:find("Accept the invite in Element before starting this separate Butler.", 1, true)
+    and resolved.stdout:match("([^\n]+)\n$") == separate_output_start
     and not resolved.stdout:find("Next: delete", 1, true)
     and not resolved.stdout:find("password-secret", 1, true)
     and not resolved.stdout:find("temporary-access-token", 1, true),
@@ -639,6 +645,7 @@ return function(matrix)
   local saved_relay_start, saved_relay_stop = matrix.relay.start, matrix.relay.stop
   local saved_matrix_config = remuda._butler_matrix_config
   local relay_events, started_config = {}, nil
+  local relay_running = true
   matrix.setup_network = function(_, callback)
     callback({ token = "default-access-token", user_id = "@butler-demo:example.org",
       home_room = "!default-home:example.org" })
@@ -650,11 +657,14 @@ return function(matrix)
   end
   matrix.relay.stop = function()
     relay_events[#relay_events + 1] = "stop"
+    relay_running = false
     return true
   end
   matrix.relay.start = function(config)
+    assert(not relay_running, "setup must stop the existing relay before starting its replacement")
     relay_events[#relay_events + 1] = "start"
     started_config = config
+    relay_running = true
     return true
   end
   remuda._butler_matrix_paths = default_paths
@@ -664,13 +674,17 @@ return function(matrix)
   local default_reply = matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
     "--owner", "@alice:example.org", "--bot", "@butler-demo:example.org",
     "--password-file", password, "--default" })
+  local invite_line = "Next: Accept the invite in Element, then write in the room."
   local expected_last_line = "Relay started; write to the Butler in Element."
   local output_last_line = resolved and resolved.stdout:match("([^\n]+)\n$")
+  local invite_at = resolved and resolved.stdout:find(invite_line, 1, true)
+  local relay_at = resolved and resolved.stdout:find(expected_last_line, 1, true)
   assert(default_reply and resolved and resolved.status == 0
     and table.concat(relay_events, ",") == "stop,start"
     and started_config and started_config.token_path == default_paths.token_path
     and started_config.config_path == default_paths.config_path
     and remuda._butler_matrix_config == started_config
+    and invite_at and relay_at and relay_at > invite_at
     and resolved.stdout:match("([^\n]+)\n$") == expected_last_line
     and not resolved.stdout:find("reload", 1, true)
     and not resolved.stdout:find("remuda stop", 1, true)
@@ -679,6 +693,98 @@ return function(matrix)
     "default setup must replace the relay from boot-resolved paths, end with the running message, and contain no reload or stop hints; events="
       .. table.concat(relay_events, ",") .. "; last=" .. tostring(output_last_line)
       .. "; refusal_reload=" .. tostring(default_refusal and default_refusal:find("reload", 1, true) ~= nil))
+
+  relay_events, started_config, relay_running = {}, nil, true
+  matrix.relay.start = function(config)
+    assert(not relay_running, "failed-start case must still stop the running relay first")
+    relay_events[#relay_events + 1] = "start"
+    started_config = config
+    return false
+  end
+  requests, resolved = {}, nil
+  local failed_reply = matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--bot", "@butler-demo:example.org",
+    "--password-file", password, "--default", "--force" })
+  local failed_invite_at = resolved and resolved.stdout:find(invite_line, 1, true)
+  local relay_failed_at = resolved and resolved.stdout:find("Relay failed to start.", 1, true)
+  local status_next_at = resolved and resolved.stdout:find("Next: remuda butler matrix status", 1, true)
+  assert(failed_reply and resolved and resolved.status == 0
+    and table.concat(relay_events, ",") == "stop,start"
+    and failed_invite_at and relay_failed_at and status_next_at
+    and failed_invite_at < relay_failed_at and relay_failed_at < status_next_at
+    and resolved.stdout:match("([^\n]+)\n$") == "Next: remuda butler matrix status",
+    "a failed relay start must preserve invite guidance, report failure, and end with a status Next step")
+
+  local live_config = remuda._butler_matrix_config
+  relay_events, started_config = {}, nil
+  matrix.relay.stop = function()
+    error("--dir setup must not stop the live relay")
+  end
+  matrix.relay.start = function()
+    error("--dir setup must not start the live relay")
+  end
+  local separate_dir = root .. "/separate-butler"
+  requests, resolved = {}, nil
+  local separate_reply = matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--bot", "@butler-demo:example.org",
+    "--password-file", password, "--dir", separate_dir })
+  local separate_start_line = "Next: REMUDA_BUTLER_TOKEN='" .. separate_dir .. "/token'"
+    .. " REMUDA_BUTLER_CONFIG='" .. separate_dir .. "/config' remuda -s matrix-test daemon"
+  assert(separate_reply and resolved and resolved.status == 0
+    and #relay_events == 0 and remuda._butler_matrix_config == live_config
+    and resolved.stdout:find("Accept the invite in Element before starting this separate Butler.", 1, true)
+    and resolved.stdout:match("([^\n]+)\n$") == separate_start_line
+    and not resolved.stdout:find("reload", 1, true)
+    and not resolved.stdout:find("remuda stop", 1, true),
+    "--dir setup must leave the live relay config untouched and print no restart hints")
+  os.remove(separate_dir .. "/token")
+  os.remove(separate_dir .. "/config")
+  os.remove(separate_dir)
+
+  -- Exercise the real module start path and deliver one scripted sync event
+  -- after setup, with no daemon or module restart between setup and delivery.
+  matrix.relay.start, matrix.relay.stop = saved_relay_start, saved_relay_stop
+  dofile("packages/butler/matrix_request.lua")
+  local saved_emit = remuda.emit_until_success
+  local saved_http = remuda.http
+  local saved_config = remuda._butler_matrix_config
+  local scripted_requests, delivered_mail = {}, {}
+  remuda.http = { request = function(spec)
+    scripted_requests[#scripted_requests + 1] = spec
+    return { cancel = function() end }
+  end }
+  remuda.emit_until_success = function(hook, message)
+    assert(hook == "butler/deliver")
+    delivered_mail[#delivered_mail + 1] = message
+    return true
+  end
+  requests, resolved = {}, nil
+  local delivered_reply = matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--bot", "@butler-demo:example.org",
+    "--password-file", password, "--default", "--force" })
+  assert(delivered_reply and resolved and resolved.status == 0
+    and resolved.stdout:match("([^\n]+)\n$") == expected_last_line
+    and matrix.relay.instance and #scripted_requests == 1,
+    "setup must start the real relay against its newly written default config")
+  scripted_requests[1].callback({ status = 200, headers = {}, body = '{"next_batch":"setup-s0"}' })
+  local rate_timer
+  for _, timer in ipairs(remuda._relay_timers) do
+    if not timer.cancelled and timer.spec.every == 0.25 then rate_timer = timer; break end
+  end
+  assert(rate_timer, "scripted relay sync should have a rate-limit timer")
+  rate_timer.spec.run()
+  assert(#scripted_requests == 2, "relay should continue syncing after the initial baseline")
+  scripted_requests[2].callback({ status = 200, headers = {}, body =
+    '{"next_batch":"setup-s1","rooms":{"join":{"!default-home:example.org":{"timeline":{"events":[{"type":"m.room.message","event_id":"$after-setup","sender":"@alice:example.org","content":{"msgtype":"m.text","body":"hello after setup"}}]}}}}}' })
+  assert(#delivered_mail == 1 and delivered_mail[1].text == "hello after setup"
+    and delivered_mail[1].matrix.event_id == "$after-setup",
+    "the newly started relay must deliver mail immediately after setup without a restart")
+  matrix.relay.stop()
+  remuda.http, remuda.emit_until_success = saved_http, saved_emit
+  remuda._butler_matrix_config = saved_config
+  os.remove(default_paths.config_path .. ".since")
+  os.remove(default_paths.config_path .. ".acks")
+
   matrix.setup_network, matrix.status = saved_setup_network, saved_setup_status
   matrix.relay.start, matrix.relay.stop = saved_relay_start, saved_relay_stop
   remuda._butler_matrix_config = saved_matrix_config
