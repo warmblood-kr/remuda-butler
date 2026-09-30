@@ -682,6 +682,7 @@ local function test_open_room_config_and_deny_matching()
     "deny_server=inviter-denied.example",
     "deny_server=alias-denied.example",
     "deny_server=ported-denied.example",
+    "deny_server=[abcd::1]",
   }, "\n") .. "\n")
   local conf, err = matrix.read_config(path)
   assert(conf, "valid open-room config must parse: " .. tostring(err))
@@ -701,6 +702,14 @@ local function test_open_room_config_and_deny_matching()
     "the alias server must match")
   assert(matrix.invite_is_denied(conf, NEW, "#x:ALIAS-DENIED.EXAMPLE", STRANGER),
     "the alias server comparison must ignore case")
+  assert(matrix.invite_is_denied(conf, "!x:ROOM-DENIED.EXAMPLE.", nil, STRANGER),
+    "a trailing dot on the room server must not bypass deny_server")
+  assert(matrix.invite_is_denied(conf, NEW, nil, "@x:INVITER-DENIED.EXAMPLE."),
+    "a trailing dot on the inviter server must not bypass deny_server")
+  assert(matrix.invite_is_denied(conf, NEW, "#x:ALIAS-DENIED.EXAMPLE.", STRANGER),
+    "a trailing dot on the alias server must not bypass deny_server")
+  assert(matrix.invite_is_denied(conf, "!x:[ABCD::1]", nil, STRANGER),
+    "IPv6 server deny comparison must ignore case")
   assert(matrix.invite_is_denied(conf, "!x:ported-denied.example:8448", nil, STRANGER),
     "deny_server without a port must match a room server with a port")
   assert(matrix.invite_is_denied(conf, NEW, nil, "@x:ported-denied.example:8448"),

@@ -173,6 +173,22 @@ local function config_valid_server(value)
   end
   return true
 end
+
+local function normalize_server_name(value)
+  if type(value) ~= "string" then return value end
+  local host, port
+  if value:sub(1, 1) == "[" then
+    host, port = value:match("^(%b[]):(%d+)$")
+    if not host then host = value end
+  else
+    host, port = value:match("^([^:]+):(%d+)$")
+    if not host then host = value end
+  end
+  host = host:lower()
+  if host:sub(-1) == "." then host = host:sub(1, -2) end
+  -- IPv6 literals are compared textually after lowercasing; equivalent spellings are not canonicalized.
+  return port and (host .. ":" .. port) or host
+end
 local function config_valid_mxid(value)
   if type(value) ~= "string" or #value > 512 then return false end
   local localpart, server = value:match("^@([^:%s]+):([^%s]+)$")
@@ -228,8 +244,9 @@ local function read_config(path)
           warn_invalid_config_line(path, i, key, value)
         end
       elseif key == "deny_server" then
-        if config_valid_server(value) then
-          deny_servers[value:lower()] = true
+        local server = normalize_server_name(value)
+        if config_valid_server(server) then
+          deny_servers[server] = true
         else
           warn_invalid_config_line(path, i, key, value)
         end
@@ -324,7 +341,7 @@ local function server_parts(value, prefix)
   else
     host = server:match("^([^:]+):%d+$") or server
   end
-  return server:lower(), host:lower()
+  return normalize_server_name(server), normalize_server_name(host)
 end
 
 function matrix.invite_is_denied(conf, room_id, alias, inviter)
