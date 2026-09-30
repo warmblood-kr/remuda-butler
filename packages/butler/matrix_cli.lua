@@ -146,9 +146,36 @@ end
 local function render_human(verb, options, result)
   local data = result.json or result
   if verb == "rooms" then
-    local rooms = data.joined_rooms or {}
-    if #rooms == 0 then return "No joined Matrix rooms\n" end
-    return table.concat(rooms, "\n") .. "\n"
+    local rooms, lines, leave_room, safe_rooms, safe_kinds, room_width, kind_width = data.rooms or {}, {}, false, {}, {}, 0, 0
+    for _, item in ipairs(rooms) do
+      local room = terminal_safe(item.room)
+      local kind = terminal_safe(item.kind)
+      safe_rooms[#safe_rooms + 1] = room
+      safe_kinds[#safe_kinds + 1] = kind
+      room_width = math.max(room_width, #room)
+      kind_width = math.max(kind_width, #kind)
+      if item.kind == "joined" then leave_room = true end
+    end
+    for index, item in ipairs(rooms) do
+      lines[#lines + 1] = safe_rooms[index] .. string.rep(" ", room_width - #safe_rooms[index] + 2)
+        .. safe_kinds[index] .. string.rep(" ", kind_width - #safe_kinds[index] + 2) .. terminal_safe(item.how)
+    end
+    if #lines == 0 then lines[#lines + 1] = "No configured Matrix rooms" end
+    if leave_room then
+      lines[#lines + 1] = "Next: remuda butler matrix leave ROOM"
+    else
+      local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths or {}
+      local conf = type(paths.config_path) == "string" and matrix.read_config(paths.config_path) or nil
+      local allowed = {}
+      for mxid in pairs(conf and conf.allowed_senders or {}) do
+        allowed[#allowed + 1] = terminal_safe(mxid)
+      end
+      table.sort(allowed)
+      local allowlist = #allowed > 0 and table.concat(allowed, ", ") or "none"
+      lines[#lines + 1] = "Next: invite " .. terminal_safe(conf and conf.self_mxid or "the Butler")
+        .. " to a room from an allowlisted account (" .. allowlist .. ")."
+    end
+    return table.concat(lines, "\n") .. "\n"
   elseif verb == "status" then
     local rooms = data.joined_rooms or {}
     return table.concat({ "User: " .. tostring(data.user_id or "unknown"),
@@ -186,7 +213,8 @@ local function render_human(verb, options, result)
   elseif verb == "upload" then
     return "Uploaded as " .. tostring(result.content_uri or "") .. " (" .. tostring(result.event_id or "") .. ")\n"
   elseif verb == "join" or verb == "leave" then
-    return (verb == "join" and "Joined " or "Left ") .. tostring(options.room or "the Matrix room") .. "\n"
+    return (verb == "join" and "Joined " or "Left ") .. terminal_safe(options.room or "the Matrix room")
+      .. "\nNext: remuda butler matrix rooms\n"
   end
   return (matrix.encode_json(result) or "{}") .. "\n"
 end
@@ -196,7 +224,12 @@ local function finish(reply, cancelled, completed, verb, options, result)
   completed.value = true
   if type(result) ~= "table" then result = { error = "Matrix command returned no result" } end
   if result.error then
-    return reply:resolve(1, "", tostring(result.error) .. "\n")
+    local message = tostring(result.error)
+    if not message:find("Next:", 1, true) then
+      if verb == "join" or verb == "leave" then message = message .. "\nNext: remuda butler matrix rooms" end
+      if verb == "rooms" then message = message .. "\nNext: remuda butler matrix setup" end
+    end
+    return reply:resolve(1, "", message .. "\n")
   end
   if verb == "reply" and result.event_ids and #result.event_ids > 0 then
     local relay = matrix.relay and matrix.relay.instance

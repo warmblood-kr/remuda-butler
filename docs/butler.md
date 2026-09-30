@@ -4,16 +4,17 @@ Butler is Remuda's local session manager. It starts and coordinates one agent
 session through the same Lua runtime and Remuda protocol used by other
 extensions. It works without Matrix configuration.
 
-When Matrix credentials are configured, Butler listens in its HOME room and,
-when configured, the shared ALL-BUTLERS room. In HOME, every human message is
-delivered to that room's Butler. In ALL-BUTLERS, every top-level human message
-is delivered to every Butler; thread replies are delivered only to Butlers
-subscribed to that thread. A Butler subscribes when it is mentioned in a
-thread or posts in the thread. Subscriptions and the event cursor persist
-across restarts. Agent messages are delivered only when they mention the
-receiving Butler, and Butler never auto-replies to agent-authored messages.
-Mail records the Matrix sender, `room` (`home` or `all`), room ID, event ID,
-and thread ID.
+When Matrix credentials are configured, Butler listens in its HOME room, the
+shared ALL-BUTLERS room when configured, and every configured joined room. In
+HOME, every human message is delivered to that room's Butler. In ALL-BUTLERS,
+every top-level human message is delivered to every Butler; thread replies are
+delivered only to Butlers subscribed to that thread. A Butler subscribes when
+it is mentioned in a thread or posts in the thread. Subscriptions and the event
+cursor persist across restarts. Agent messages are delivered only when they
+mention the receiving Butler, and Butler never auto-replies to agent-authored
+messages. Mail records the Matrix sender, `room` (`home`, `all`, or `joined`),
+room ID, event ID, and thread ID.
+An allowlisted owner can invite the bot from Element, and it joins the room.
 
 Roster classification uses Matrix MXID localparts: case-insensitive `agent-`
 and `butler-` prefixes identify AGENT accounts; configured `butler_senders`
@@ -31,8 +32,8 @@ only in the damaged state file cannot be recovered.
 
 Use `remuda butler matrix` for Matrix reads and writes. Options come before
 the verb or its positional arguments. `--json` selects machine-readable
-output. Verbs that accept `--room ROOM` require the configured HOME room or
-ALL-BUTLERS room.
+output. Verbs that accept `--room ROOM` require the configured HOME,
+ALL-BUTLERS, or a joined room.
 
 ```text
 remuda butler matrix [--json] status
@@ -60,10 +61,16 @@ relay alone. Start that Butler with
 `REMUDA_BUTLER_TOKEN=PATH/token REMUDA_BUTLER_CONFIG=PATH/config remuda -s matrix-test daemon`,
 replacing `PATH` with the chosen directory.
 
-`event` and `get` are aliases for the same read. `rooms` is read-only. The
-configured HOME and ALL-BUTLERS rooms are the security boundary: no verb adds a
-room to them or widens the allowlist. Change the config explicitly to use
-different rooms. The
+`event` and `get` are aliases for the same read.
+The `remuda butler matrix rooms` command lists configured rooms and how each was added; server-side memberships show in `remuda butler matrix status`.
+The config file remains the
+single room boundary: an invite from an allowlisted human
+owner adds `room=ROOM_ID how=owner-invite`, and operator `join` adds
+`room=ROOM_ID how=operator`. Invites from other senders are not joined and are
+reported to HOME; joined rooms use the HOME sender rules. The inviter check
+relies on the homeserver appending the real invite event to `invite_state`
+(Synapse does). `leave` removes a
+joined room, while HOME and ALL-BUTLERS cannot be left or removed. The
 `send -` stdin form is unsupported until core #213.
 
 `join` and `leave` change room membership and are operator-only. Until core
