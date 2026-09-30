@@ -69,21 +69,13 @@ local function cap_body(body)
   body = tostring(body or "")
   if #body <= MAX_BODY_BYTES then return body end
   local keep = MAX_BODY_BYTES
-  while keep > 0 do
-    local next_byte = body:byte(keep + 1)
-    if not next_byte or next_byte < 0x80 or next_byte >= 0xc0 then break end
-    keep = keep - 1
-  end
-  local prefix = body:sub(1, keep)
+  local prefix = matrix.utf8_prefix(body, keep)
+  keep = #prefix
   local suffix = "[truncated " .. tostring(#body - #prefix) .. " bytes]"
   while #prefix + #suffix > MAX_BODY_BYTES do
     keep = keep - 1
-    while keep > 0 do
-      local next_byte = body:byte(keep + 1)
-      if not next_byte or next_byte < 0x80 or next_byte >= 0xc0 then break end
-      keep = keep - 1
-    end
-    prefix = body:sub(1, keep)
+    prefix = matrix.utf8_prefix(body, keep)
+    keep = #prefix
     suffix = "[truncated " .. tostring(#body - #prefix) .. " bytes]"
   end
   return prefix .. suffix
@@ -108,7 +100,7 @@ local function strip_reply_fallback(body)
   if reply[#reply] == "" then table.remove(reply) end
   local text = table.concat(reply, "\n")
   if text:match("^%s*$") then return body end
-  return "> " .. quote:sub(1, 120) .. "\n" .. text
+  return "> " .. matrix.utf8_prefix(quote, 120) .. "\n" .. text
 end
 
 local function timestamp(event)
@@ -123,17 +115,12 @@ local function quarantine_preview(value)
   if type(value) ~= "string" then return "" end
   if #value <= MAX_QUARANTINE_PREVIEW_BYTES then return value end
   local keep = MAX_QUARANTINE_PREVIEW_BYTES - 14
-  while keep > 0 do
-    local next_byte = value:byte(keep + 1)
-    if not next_byte or next_byte < 0x80 or next_byte >= 0xc0 then break end
-    keep = keep - 1
-  end
-  return value:sub(1, keep) .. " [truncated]"
+  return matrix.utf8_prefix(value, keep) .. " [truncated]"
 end
 
 local function cap_field(value, limit)
   if type(value) ~= "string" then return "" end
-  return #value <= limit and value or value:sub(1, limit)
+  return matrix.utf8_prefix(value, limit)
 end
 
 local function valid_room_id(value)
@@ -239,7 +226,7 @@ end
 local function safe_media_field(value)
   value = type(value) == "string" and value or "unknown"
   value = value:gsub("[%z\1-\31\127]", ""):gsub("\194[\128-\159]", "")
-  return value:sub(1, 256)
+  return matrix.utf8_prefix(value, 256)
 end
 
 local function valid_media_uri(value)
@@ -562,8 +549,8 @@ function relay.new(options)
     state.quarantine[#state.quarantine + 1] = {
       id = id, event_id = cap_field(event_id, 512), sender = cap_field(ev.sender, 256),
       room_id = cap_field(room_id or cfg.room, 512), created_at = timestamp(ev), reason = reason,
-      event_type = type(ev.type) == "string" and ev.type:sub(1, 80) or "",
-      msgtype = type(content.msgtype) == "string" and content.msgtype:sub(1, 80) or "",
+      event_type = type(ev.type) == "string" and matrix.utf8_prefix(ev.type, 80) or "",
+      msgtype = type(content.msgtype) == "string" and matrix.utf8_prefix(content.msgtype, 80) or "",
       preview = quarantine_preview(content.body),
       expires_at = os.date("!%Y-%m-%dT%H:%M:%SZ", os.time() + QUARANTINE_TTL_SECONDS),
     }

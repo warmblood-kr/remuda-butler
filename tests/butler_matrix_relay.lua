@@ -12,13 +12,18 @@ function remuda.schedule(spec)
 end
 function remuda.cancel(timer) if timer then timer.cancelled = true end end
 local matrix = dofile("packages/butler/matrix_request.lua")
+-- Install shared matrix helpers without using the installed package loader;
+-- this suite loads its fake transport modules directly from the worktree.
+local package_exec = remuda.exec
+remuda.exec = function() end
+local matrix_module_ok, matrix_module_error = pcall(dofile, "packages/butler/matrix.lua")
+remuda.exec = package_exec
+assert(matrix_module_ok, matrix_module_error)
 local ASKER = "team-1-mx"
 dofile("packages/butler/matrix_setup.lua")
 dofile("packages/butler/matrix_read.lua")
 dofile("packages/butler/matrix_cli.lua")
 local setup_tests = dofile("tests/butler_matrix_setup.lua")
--- approval.lua loads before the relay (relay.new attaches it) and before
--- matrix_write (which registers the join handler). Absent until step a.
 local approval_file = io.open("packages/butler/approval.lua", "r")
 if approval_file then approval_file:close(); dofile("packages/butler/approval.lua") end
 local relay_module = dofile("packages/butler/matrix_relay.lua")
@@ -262,6 +267,53 @@ local function test_allowlisted_media_without_url_is_quarantined()
   assert(quarantined[1] and quarantined[1].event_id == "$no-url-image"
     and quarantined[1].reason == "unsupported_message_type",
     "an allowlisted image without a URL should retain the previous unsupported type quarantine")
+  relay:stop()
+  cleanup_fixture(dir, config_path)
+end
+
+local function test_quarantine_sender_cap_preserves_utf8()
+  local dir, config_path = fixture()
+  local client = scripted_client()
+  local relay = relay_module.new({ config_path = config_path, matrix = client,
+    deliver = function() return true end,
+  })
+  local sender = "@x" .. string.rep("한", 85) .. ":example.org"
+  local expected = "@x" .. string.rep("한", 84)
+  assert(relay:start())
+  client:complete(1, { json = { next_batch = "s0" } })
+  client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+    ["!room:example.org"] = { timeline = { events = {
+      { type = "m.room.message", event_id = "$korean-sender", sender = sender,
+        content = { msgtype = "m.text", body = "blocked" } },
+    } } },
+  } } } })
+  local quarantined = relay:quarantine_list()
+  assert(quarantined[1] and quarantined[1].reason == "sender_not_allowlisted"
+      and quarantined[1].sender == expected and #quarantined[1].sender <= 256
+      and utf8.len(quarantined[1].sender) ~= nil,
+    "a Korean quarantine sender cut at 256 bytes must remain valid UTF-8")
+  relay:stop()
+  cleanup_fixture(dir, config_path)
+end
+
+local function test_media_field_cap_preserves_utf8()
+  local dir, config_path = fixture()
+  local client, delivered = scripted_client(), {}
+  local relay = relay_module.new({ config_path = config_path, matrix = client,
+    deliver = function(event) delivered[#delivered + 1] = event return true end,
+  })
+  assert(relay:start())
+  client:complete(1, { json = { next_batch = "s0" } })
+  client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+    ["!room:example.org"] = { timeline = { events = {
+      { type = "m.room.message", event_id = "$utf8-media", sender = "@alice:example.org",
+        content = { msgtype = "m.file", body = "file", filename = string.rep("a", 255) .. "한",
+          url = "mxc://example.org/utf8", info = { mimetype = "text/plain", size = 12 } } },
+    } } },
+  } } } })
+  assert(#delivered == 1 and delivered[1].body:find("filename: " .. string.rep("a", 255), 1, true)
+      and not delivered[1].body:find("한", 1, true) and utf8.len(delivered[1].body) ~= nil,
+    "media field caps must back off to a complete UTF-8 character")
   relay:stop()
   cleanup_fixture(dir, config_path)
 end
@@ -2341,8 +2393,9 @@ local function render_fixture(name, specs)
 end
 
 local function test_matrix_event_id_is_sanitized_and_capped()
-  local bus = { inboxes = { butler = { "M1", "M2" } }, messages = {}, objects = {} }
-  for index, event_id in ipairs({ "$e\27[31m", "$" .. string.rep("a", 5000) }) do
+  local bus = { inboxes = { butler = { "M1", "M2", "M3" } }, messages = {}, objects = {} }
+  for index, event_id in ipairs({ "$e\27[31m", "$" .. string.rep("a", 5000),
+      "$" .. string.rep("a", 254) .. "한" }) do
     local id, object_id = "M" .. tostring(index), "object-" .. tostring(index)
     bus.messages[id] = { id = id,
       from = { host = "matrix", session = "@alice:example.org" },
@@ -2358,6 +2411,8 @@ local function test_matrix_event_id_is_sanitized_and_capped()
   assert(event_ids[1] == "$e[31m", "ESC in an event id must be stripped before rendering")
   assert(#event_ids[2] == 256 and event_ids[2] == "$" .. string.rep("a", 255),
     "a long event id must be capped at 256 bytes in the header")
+  assert(event_ids[3] == "$" .. string.rep("a", 254) and utf8.len(event_ids[3]) ~= nil,
+    "an event id cap inside a UTF-8 character must back off to a complete character")
 end
 
 local function test_thread_first_fixtures()
@@ -2441,6 +2496,9 @@ end
 local function test_plain_reply_fixture()
   local dir, config_path = fixture()
   local client, received = scripted_client(), {}
+  local emoji_quote = "x" .. string.rep("😀", 30)
+  assert(#emoji_quote == 121 and emoji_quote:byte(120) >= 0x80 and emoji_quote:byte(120) <= 0xbf,
+    "emoji quote must put byte 120 inside a four-byte character")
   local relay = relay_module.new({ config_path = config_path, matrix = client,
     deliver = function(event) received[#received + 1] = event return true end,
   })
@@ -2451,10 +2509,29 @@ local function test_plain_reply_fixture()
       { type = "m.room.message", event_id = "$plain-reply", sender = "@alice:example.org",
         content = { msgtype = "m.text", body = "> <@alice:example.org> original\n\nYes, it is ready.",
           ["m.relates_to"] = { ["m.in_reply_to"] = { event_id = "$plain-target" } } } },
+      { type = "m.room.message", event_id = "$utf8-quote-50", sender = "@alice:example.org",
+        content = { msgtype = "m.text", body = "> <@alice:example.org> " .. string.rep("한", 50)
+          .. "\n\nReply", ["m.relates_to"] = { ["m.in_reply_to"] = { event_id = "$target" } } } },
+      { type = "m.room.message", event_id = "$utf8-quote-cut", sender = "@alice:example.org",
+        content = { msgtype = "m.text", body = "> <@alice:example.org> " .. string.rep("a", 118)
+          .. "한\n\nReply", ["m.relates_to"] = { ["m.in_reply_to"] = { event_id = "$target" } } } },
+      { type = "m.room.message", event_id = "$utf8-emoji-quote", sender = "@alice:example.org",
+        content = { msgtype = "m.text", body = "> <@alice:example.org> " .. emoji_quote
+          .. "\n\nReply", ["m.relates_to"] = { ["m.in_reply_to"] = { event_id = "$target" } } } },
     } } },
   } } } })
   assert(received[1] and received[1].body == "> original\nYes, it is ready.",
     "plain replies should retain only the first quoted fallback line and the reply")
+  assert(received[2] and received[2].body == "> " .. string.rep("한", 40) .. "\nReply"
+      and #string.rep("한", 40) == 120 and utf8.len(received[2].body) ~= nil,
+    "a 120-byte quote cap must retain 40 Korean characters as valid UTF-8")
+  assert(received[3] and received[3].body == "> " .. string.rep("a", 118) .. "\nReply"
+      and utf8.len(received[3].body) ~= nil,
+    "a 121-byte quote cut at byte 120 inside a character must back off to the preceding complete character")
+  local rendered_emoji_quote = received[4] and received[4].body:match("^> (.-)\n")
+  assert(rendered_emoji_quote == "x" .. string.rep("😀", 29)
+      and #rendered_emoji_quote <= 120 and utf8.len(rendered_emoji_quote) ~= nil,
+    "a four-byte emoji cut at byte 120 must back off to a complete UTF-8 prefix")
   relay:stop()
   cleanup_fixture(dir, config_path)
   render_fixture("matrix-mail-plain-reply.txt", {
@@ -2524,7 +2601,9 @@ end
 
 test_baseline_resume_filters_and_envelope()
 test_allowlisted_media_types_and_sender_filter()
+test_media_field_cap_preserves_utf8()
 test_allowlisted_media_without_url_is_quarantined()
+test_quarantine_sender_cap_preserves_utf8()
 test_download_next_command("media: image\nfilename: chart.png\nmimetype: image/png\n"
   .. "size: 12345 bytes\nmxc: mxc://example.org/chart\n"
   .. "Next: remuda butler matrix -o PATH download mxc://example.org/chart")
