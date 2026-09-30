@@ -43,7 +43,7 @@ The body is:
 ## 5. PR 2: limits (config keys in matrix_request.lua `read_config`; defaults in brackets)
 - `b2b_max_turns` [6]: per thread, count the consecutive AGENT turns, both incoming and our own posts. A HUMAN event resets the count. When the count reaches the limit, `reply` and `send` into that thread are refused, and ONE HOME line is posted: `Stopped replying in thread $ROOT (ROOM): 6 Butler-only turns. A human reply resumes it.` State: `b2b_turns[room][root] = {n, notified}`.
 - `posts_per_hour` [30]: our own Matrix posts per rolling hour. Past it, the post is refused with `Next: wait until HH:MMZ`. State: `post_timestamps`.
-- `untrusted_per_room_hour` [20]: this counts only accepted events from non-allowlisted senders. Past the cap, the text is NOT delivered and NOT quarantined: it is marked processed and counted. ONE HOME summary per sync: `N messages from non-allowlisted senders not delivered in ROOM (rate cap). Next: remuda butler matrix history --room ROOM`. State: `untrusted_ts[room]`.
+- `untrusted_per_room_hour` [20]: this counts only accepted events from non-allowlisted senders. Past the cap, the text is NOT delivered and NOT quarantined: it is marked processed and counted. ONE HOME summary per sync: `N messages from non-allowlisted senders not delivered in ROOM (rate cap). Next: remuda butler matrix --room ROOM history`. State: `untrusted_ts[room]`.
 - The B2B reply block is lifted here (relay:709, write.lua:116/:142/:148, cli.lua:607), together with the guard. PR 1 keeps it, with a `TODO(rx PR2)` test marker.
 
 ## 6. Tests (QA, tests/butler_matrix_relay.lua, RED first)
@@ -70,6 +70,6 @@ PR 1:
 PR 2:
 - `test_rx_b2b_turn_guard_home_line_once`
 - `test_rx_posts_per_hour_cap`
-- `test_rx_untrusted_room_cap_summary_no_quarantine`
+- `test_rx_untrusted_room_cap_summary_no_quarantine` (asserts the exact line, including `Next: remuda butler matrix --room ROOM history`)
 
 Dropped by the owner: the mention-follow cap, the idle expiry, the trusted-Butler class.
