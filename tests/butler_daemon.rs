@@ -8320,3 +8320,43 @@ fn doctor_cli_both_missing_prints_two_next_commands() {
         "Claude Code: missing\nCodex CLI: missing\nNext: curl -fsSL https://claude.ai/install.sh | bash\nNext: npm install -g @openai/codex"
     );
 }
+
+#[test]
+fn doctor_cli_timeout_reports_retry_and_the_other_agent() {
+    let dir = scratch_dir("butler-doctor-timeout");
+    let bin = doctor_stub_dir(&dir);
+    let slow = bin.join("claude");
+    std::fs::write(&slow, "#!/bin/sh\n/bin/sleep 30\n").expect("write slow Claude stub");
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = std::fs::metadata(&slow).expect("stat slow Claude stub").permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&slow, permissions).expect("make slow Claude stub executable");
+    doctor_write_stub(&bin, "codex", "Logged in", 0);
+    let path_env = bin.to_str().expect("PATH is UTF-8");
+    let (_daemon, _path) = butler_doctor_test_daemon(&dir, path_env);
+
+    let out = remuda_timed(&dir, &["-s", "s", "butler", "doctor"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(stdout.contains("Claude Code: check timed out"), "{stdout}");
+    assert!(stdout.contains("Codex CLI: installed, logged in"), "{stdout}");
+    assert!(stdout.contains("Next: retry remuda butler doctor"), "{stdout}");
+}
+
+#[test]
+fn doctor_cli_unexpected_probe_error_still_reports_other_agent_and_next() {
+    let dir = scratch_dir("butler-doctor-probe-error");
+    let bin = doctor_stub_dir(&dir);
+    let claude = bin.join("claude");
+    std::fs::write(&claude, "#!/bin/sh\nexit 0\n").expect("write non-executable Claude stub");
+    let path_env = bin.to_str().expect("PATH is UTF-8");
+    let (_daemon, _path) = butler_doctor_test_daemon(&dir, path_env);
+
+    let out = remuda_timed(&dir, &["-s", "s", "butler", "doctor"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(stdout.contains("Claude Code: check failed"), "{stdout}");
+    assert!(stdout.contains("Codex CLI: missing"), "{stdout}");
+    assert!(stdout.contains("Next: retry remuda butler doctor"), "{stdout}");
+    assert!(stdout.contains("Next: npm install -g @openai/codex"), "{stdout}");
+}
