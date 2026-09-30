@@ -911,6 +911,8 @@ fn notice_verify_mismatch_logs_bounded_capture_and_expected_text() {
         &path,
         &format!(
             r#"remuda._butler_session_trace_path = {trace:?}
+            local now = 0
+            remuda._butler_notice_clock = function() return now end
             local state = {{screen = string.rep('x', 9000) .. '\n❯ unrelated composer\n─', keys = 0}}
             remuda._notice_log_test_state = state
             remuda._butler_bus.agents.m1.kind = 'claude'
@@ -920,7 +922,8 @@ fn notice_verify_mismatch_logs_bounded_capture_and_expected_text() {
             remuda._butler_notify_policy = function() return true end
             remuda.type_text = function(_, expected) state.expected = expected end
             remuda.key = function() state.keys = state.keys + 1 end
-            remuda._butler_send('operator', 'm1', 'notice log fixture')"#
+            remuda._butler_send('operator', 'm1', 'notice log fixture')
+            now = 3"#
         ),
     );
     for _ in 0..12 {
