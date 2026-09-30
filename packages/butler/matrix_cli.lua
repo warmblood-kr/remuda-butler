@@ -119,7 +119,7 @@ local function parse(args)
     if #values ~= 1 then return nil end
     options.event_id = values[1]
   elseif method == "join" or method == "leave" then
-    if #values ~= 1 or options.room then return nil end
+    if #values > 1 or options.room then return nil end
     options.room = values[1]
   elseif method == "history" then
     if #values ~= 0 then return nil end

@@ -1865,6 +1865,28 @@ local function test_rooms_public_refuses_agents()
   remove_dir(dir)
 end
 
+local function test_join_leave_missing_room_guidance()
+  local dir, path = invite_fixture()
+  with_operator_config(path, 200, function(calls)
+    for _, verb in ipairs({ "join", "leave" }) do
+      local result = capture_matrix_cli({ "matrix", verb })
+      local example = verb == "join"
+        and "Next: remuda butler matrix join #alias:server"
+        or "Next: remuda butler matrix leave '!room:server'"
+      assert(result and result.code == 1
+        and result.stderr:match("^[^\n]+\nNext: [^\n]+\n$") ~= nil,
+        "matrix " .. verb .. " without ROOM must print one error and one Next line: "
+          .. tostring(result and result.stderr))
+      assert(result.stderr:find("matrix " .. verb .. " requires ROOM", 1, true)
+        and result.stderr:find(example, 1, true)
+        and not result.stderr:find("Usage", 1, true),
+        "matrix " .. verb .. " without ROOM must give a concise example, not usage: " .. result.stderr)
+    end
+    assert(#calls == 0, "missing-room commands must not make HTTP calls")
+  end)
+  remove_dir(dir)
+end
+
 local function test_join_room_alias_resolves_and_labels_output()
   local dir, path = invite_fixture()
   with_alias_http(path, function(spec, index)
@@ -2349,8 +2371,9 @@ local function test_unconfigured_room_request_is_refused()
     for _, r in ipairs(results) do
       assert(r.error and r.error:find("outside the configured Matrix allowlist", 1, true),
         "unconfigured-room refusal changed: " .. tostring(r.error))
-      assert(r.error:match("\nNext: [^\r\n]+$") ~= nil,
-        "unconfigured-room refusal must end with a Next line: " .. tostring(r.error))
+      assert(r.error:find("\nNext: remuda butler matrix rooms lists allowed rooms; the owner adds one with "
+        .. "remuda butler matrix join ROOM", 1, true),
+        "unconfigured-room refusal must tell the user how the owner can add one: " .. tostring(r.error))
     end
     local joined
     matrix.request_json({ method = "GET",
@@ -2663,6 +2686,7 @@ for _, case in ipairs({
   { "test_open_mode_hostile_invite_state_is_refused", test_open_mode_hostile_invite_state_is_refused },
   { "test_open_mode_conflicting_inviter_events_remain_refused", test_open_mode_conflicting_inviter_events_remain_refused },
   { "test_config_add_room_pads_short_config", test_config_add_room_pads_short_config },
+  { "test_join_leave_missing_room_guidance", test_join_leave_missing_room_guidance },
   { "test_join_room_alias_resolves_and_labels_output", test_join_room_alias_resolves_and_labels_output },
   { "test_unknown_room_alias_is_reported_without_config_change", test_unknown_room_alias_is_reported_without_config_change },
   { "test_alias_directory_room_id_must_be_valid", test_alias_directory_room_id_must_be_valid },
