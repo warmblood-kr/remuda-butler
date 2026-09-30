@@ -296,6 +296,7 @@ fn relay_deposit_produces_one_mail_notice() {
         remuda.capture_styled = nil
         remuda.session = function() return { is_busy = false } end
         local policy, t = remuda._butler_notify_policy, 0
+        remuda._butler_notice_clock = function() return t end
         remuda._butler_notify_policy = function(session) return policy(session, t) end
         remuda._relay_notice_calls = 0
         remuda.type_text = function(_, text)
@@ -310,6 +311,8 @@ fn relay_deposit_produces_one_mail_notice() {
           to = 'butler', text = 'hello from Matrix', subject = 'Matrix message from ' .. sender,
           matrix = { sender = sender, room_id = '!notice:example.org', event_id = '$notice-deposit' },
         })
+        t = 2
+        remuda._butler_deliver_notices()
         local expected = 'Butler message ' .. delivered.id .. ' from ' .. sender
           .. ' arrived. Read it: remuda butler inbox'
         remuda.ls, remuda.capture, remuda.capture_styled, remuda.session =
@@ -542,12 +545,15 @@ fn a_notice_that_fails_to_type_stays_queued() {
     let (path, _daemon) = butler_with_member("notice-type-fails");
     let sent = eval(
         &path,
-        "remuda._butler_notify_policy = function() return true end; \
+        "remuda._notice_now = 0; \
+         remuda._butler_notice_clock = function() return remuda._notice_now end; \
+         remuda._butler_notify_policy = function() return true end; \
          remuda._real_type_text = remuda.type_text; \
          remuda.type_text = function() error('pty write failed') end; \
-         return remuda._butler_send('operator', 'm1', 'hi')",
+         local sent = remuda._butler_send('operator', 'm1', 'hi'); \
+         remuda._notice_now = 2; remuda._butler_deliver_notices(); return sent",
     );
-    assert!(sent.contains("terminal delivery deferred"), "{sent}");
+    assert!(sent.contains("notice deferred"), "{sent}");
     assert_eq!(eval(&path, "return remuda._butler_bus.notices.m1.count"), "1");
     eval(
         &path,
@@ -572,6 +578,8 @@ fn a_busy_notice_input_retries_on_the_next_tick() {
         &path,
         r#"
         remuda._butler_notify_policy = function() return true end
+        remuda._notice_now = 0
+        remuda._butler_notice_clock = function() return remuda._notice_now end
         remuda._notice_busy_calls = 0
         remuda.type_text = function(_, text)
           remuda._notice_busy_calls = remuda._notice_busy_calls + 1
@@ -582,8 +590,10 @@ fn a_busy_notice_input_retries_on_the_next_tick() {
         remuda._butler_send('operator', 'm1', 'retry me')
         "#,
     );
-    assert_eq!(eval(&path, "return tostring(remuda._notice_busy_calls)"), "1");
+    assert_eq!(eval(&path, "return tostring(remuda._notice_busy_calls)"), "0");
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1.count)"), "1");
+    eval(&path, "remuda._notice_now = 2; remuda._butler_deliver_notices()");
+    assert_eq!(eval(&path, "return tostring(remuda._notice_busy_calls)"), "1");
     eval(&path, "remuda._butler_deliver_notices()");
     assert_eq!(eval(&path, "return tostring(remuda._notice_busy_calls)"), "2");
     assert_ne!(eval(&path, "return tostring(remuda._notice_typed)"), "nil");
@@ -1043,7 +1053,7 @@ fn notice_recovery_preserves_idle_draft_and_respects_attached_human() {
         remuda._notice_test_state.screen = '› human draft'
         remuda._butler_send('operator', 'm1', 'human-safe notice')"#,
     );
-    std::thread::sleep(Duration::from_millis(1200));
+    std::thread::sleep(Duration::from_millis(2300));
     let events = eval(&path, "return table.concat(remuda._notice_test_state.events, '\\n')");
     assert!(events.contains("capture"), "attached composer was not inspected: {events}");
     assert!(!events.contains("key ") && !events.contains("type "), "recovery sent a key or typed into a human-active pane: {events}");
@@ -1054,6 +1064,8 @@ fn notice_recovery_preserves_idle_draft_and_respects_attached_human() {
         remuda._butler_bus.notices.m1 = nil
         remuda._butler_bus.notice_recoveries.m1 = nil
         remuda._butler_send('operator', 'm1', 'attached empty composer notice')"#);
+    std::thread::sleep(Duration::from_millis(2200));
+    eval(&path, "remuda._butler_deliver_notices()");
     let events = eval(&path, "return table.concat(remuda._notice_test_state.events, '\\n')");
     assert!(events.contains("type Butler message"), "idle attached empty composer did not receive a normal notice: {events}");
 
@@ -1067,6 +1079,10 @@ fn notice_recovery_preserves_idle_draft_and_respects_attached_human() {
         remuda._butler_bus.notices.m1 = nil
         remuda._butler_bus.notice_recoveries.m1 = nil
         remuda._butler_send('operator', 'm1', 'busy pane timeout notice')
+        "#);
+    std::thread::sleep(Duration::from_millis(2200));
+    eval(&path, "remuda._butler_deliver_notices()");
+    eval(&path, r#"
         assert(remuda._butler_bus.notice_recoveries.m1, 'busy timeout recovery was not created')
         remuda._butler_bus.notice_recoveries.m1.checks = 39
         remuda._butler_bus.notice_recoveries.m1.failed = false

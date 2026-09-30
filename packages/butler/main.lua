@@ -2206,6 +2206,13 @@ bus.notices = bus.notices or {}
 bus.notice_screens = bus.notice_screens or {}
 bus.notice_seen = bus.notice_seen or {}
 local NOTICE_STABLE_SECONDS = 3
+local NOTICE_QUIET_S = 2
+local NOTICE_MAX_WAIT_S = 10
+local function notice_now()
+  local clock = remuda._butler_notice_clock
+  if type(clock) == "function" then return clock() end
+  return os.time()
+end
 
 -- The composer's text starts after the last prompt glyph and includes its
 -- continuation rows up to the TUI footer. Returns "EMPTY" (nothing, or
@@ -2794,15 +2801,25 @@ function remuda._butler_notify(alias, notice, message_id)
     pending.message_ids[message_id] = notice
     pending.message_order[#pending.message_order + 1] = message_id
   end
+  local now = notice_now()
+  pending.first_at = pending.first_at or now
+  pending.last_at = now
+  pending.due_at = math.min(now + NOTICE_QUIET_S, pending.first_at + NOTICE_MAX_WAIT_S)
   pending.count, pending.text = pending.count + 1, notice
   bus.notices[alias] = pending
-  return deliver_notice(alias)
+  return false
 end
 function remuda._butler_deliver_notices()
   local sessions = {}
   for session in pairs(bus.notices) do sessions[#sessions + 1] = session end
+  local now = notice_now()
   for _, session in ipairs(sessions) do
-    if bus.agents[session] then deliver_notice(session) else bus.notices[session] = nil end
+    local pending = bus.notices[session]
+    if not bus.agents[session] then
+      bus.notices[session] = nil
+    elseif not pending or pending.due_at == nil or now >= pending.due_at then
+      deliver_notice(session)
+    end
   end
 end
 function remuda._butler_send(from, to, text)
