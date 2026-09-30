@@ -275,13 +275,16 @@ end
 
 local function numbered_option(line)
   local trimmed = line:gsub("^%s+", "")
+  local selected = false
   for _, marker in ipairs({ "❯", "›", ">" }) do
     if trimmed:sub(1, #marker) == marker then
+      selected = true
       trimmed = trimmed:sub(#marker + 1):gsub("^%s+", "")
       break
     end
   end
-  return trimmed:match("^(%d+)[%.)]%s*(.-)%s*$"), trimmed:match("^%d+[%.)]%s*(.-)%s*$")
+  local number, label = trimmed:match("^(%d+)[%.)]%s*(.-)%s*$")
+  return number, label, selected
 end
 local function bottom_screen_lines(screen, limit)
   local lines = {}
@@ -1478,19 +1481,6 @@ end
 local function startup_modal_timeout_seconds()
   return tonumber(remuda._butler_modal_timeout or remuda._butler_modal_attempts or remuda._butler_task_poke_attempts) or 60
 end
-local function startup_option(line)
-  local text = line:gsub("^%s+", "")
-  local selected = false
-  for _, marker in ipairs({ "›", "❯", ">" }) do
-    if text:sub(1, #marker) == marker then
-      selected = true
-      text = text:sub(#marker + 1):gsub("^%s+", "")
-      break
-    end
-  end
-  local number, label = text:match("^(%d+)[%.)]%s*(.-)%s*$")
-  return number, label, selected
-end
 trust_modal_state = function(modal, screen)
   local lines, title, affirmative, selected_no, selected_index = {}, false, false, false, nil
   for line in (tostring(screen or "") .. "\n"):gmatch("(.-)\n") do
@@ -1523,11 +1513,11 @@ trust_modal_state = function(modal, screen)
     if not visible_lower:find("trust this folder?", 1, true) then return "absent" end
     local options, selected_codex = 0, false
     for index, line in ipairs(visible_lines) do
-      local number, label, selected = startup_option(line)
+      local number, label, selected = numbered_option(line)
       if number then options = options + 1 end
-      local next_number, next_label = startup_option(visible_lines[index + 1] or "")
+      local next_number, next_label = numbered_option(visible_lines[index + 1] or "")
       if number == "1" and label == "Trust and continue" and selected and next_number == "2" then
-        for _, back_option in ipairs(modal.back_options or { "Don't trust", "Do not trust" }) do
+        for _, back_option in ipairs(modal.back_options or {}) do
           if next_label:lower() == back_option:lower() then selected_codex = true end
         end
       end
