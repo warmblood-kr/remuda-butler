@@ -2262,6 +2262,63 @@ fn butler_compact_cli_rejects_unknown_sessions_and_previews_safe_keys() {
         "unknown model should be restored from the assigned model value: {preview}");
 }
 
+#[test]
+fn butler_compaction_defers_for_mail_queued_through_the_cli() {
+    let dir = scratch_dir("butler-compaction-queued-mail");
+    let (_daemon, path) = butler_cli_test_daemon(&dir);
+
+    // Model a live session name that differs from its Butler mailbox alias.
+    // This keeps the separate terminal-notice queue out of the assertion: the
+    // compaction guard must inspect the real unread mailbox for this agent.
+    eval(&path, r#"
+      local root = remuda._butler_bus.agents.butler
+      remuda._butler_bus.agents["mail-compaction"] = {
+        id = root.id, alias = root.alias, kind = "codex",
+        session_name = "mail-compaction"
+      }
+      remuda.session = function(name)
+        if name == "mail-compaction" then return { is_busy = false, attached = false } end
+        return nil
+      end
+      remuda.ls = function()
+        return {{ name = "mail-compaction", alive = true, attached = false }}
+      end
+      remuda.capture = function(name)
+        if name == "mail-compaction" then return "❯" end
+        error("no such session: " .. tostring(name))
+      end
+      remuda._butler_prompt_is_empty = function() return "EMPTY", "" end
+    "#);
+
+    let queued = remuda_timed(
+        &dir,
+        &[
+            "-s", "s", "butler", "send", "operator", "butler",
+            "\"mail must be read before compaction\"",
+        ],
+    );
+    assert!(queued.status.success(), "butler send failed: {}",
+        String::from_utf8_lossy(&queued.stderr));
+    assert!(String::from_utf8_lossy(&queued.stdout).contains("queued "),
+        "butler send did not queue a message: {}", String::from_utf8_lossy(&queued.stdout));
+
+    assert_eq!(
+        eval(&path, r#"
+          local id = remuda._butler_bus.agents["mail-compaction"].id
+          return tostring(remuda._butler_mail.unread(id))
+        "#),
+        "1",
+        "the public send command must leave a real unread mailbox entry"
+    );
+
+    let compact = remuda_timed(&dir, &["-s", "s", "butler", "compact", "mail-compaction"]);
+    assert!(compact.status.success(), "compaction command failed: {}",
+        String::from_utf8_lossy(&compact.stderr));
+    assert!(String::from_utf8_lossy(&compact.stdout).contains("skipped_queued"),
+        "compaction must defer while the session mailbox has unread mail: {}",
+        String::from_utf8_lossy(&compact.stdout));
+}
+
 
 #[test]
 fn butler_matrix_request_uses_fake_http_for_auth_trust_allow_and_same_room() {
