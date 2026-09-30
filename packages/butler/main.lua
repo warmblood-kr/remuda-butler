@@ -1478,14 +1478,6 @@ end
 local function startup_modal_timeout_seconds()
   return tonumber(remuda._butler_modal_timeout or remuda._butler_modal_attempts or remuda._butler_task_poke_attempts) or 60
 end
-local function startup_bottom_lines(screen)
-  local lines = {}
-  for line in (tostring(screen or "") .. "\n"):gmatch("(.-)\n") do
-    lines[#lines + 1] = line
-    if #lines > 8 then table.remove(lines, 1) end
-  end
-  return lines
-end
 local function startup_option(line)
   local text = line:gsub("^%s+", "")
   local selected = false
@@ -1526,7 +1518,7 @@ trust_modal_state = function(modal, screen)
     if affirmative and selected_no and options == 2 then return "safe" end
     return "human"
   elseif modal.trust == "codex" then
-    local visible_lines = startup_bottom_lines(screen)
+    local visible_lines = bottom_screen_lines(screen, 8)
     local visible_lower = table.concat(visible_lines, "\n"):lower()
     if not visible_lower:find("trust this folder?", 1, true) then return "absent" end
     local options, selected_codex = 0, false
