@@ -6694,6 +6694,7 @@ model=gpt-5.6-sol; effort=high
 case "$scenario" in
   crash) model=gpt-6-luna; effort=medium ;;
   no-row) effort=minimal ;;
+  no-luna) names[3]="GPT-6-Nova"; ids[3]="gpt-6-nova" ;;
 esac
 ctx=500000; mode=composer; line=""; cursor=0; pick=0; ecur=0; note=""
 index_of() { local i; for i in "${!ids[@]}"; do [ "${ids[$i]}" = "$1" ] && echo "$i" && return; done; echo 0; }
@@ -6769,7 +6770,7 @@ while IFS= read -r -s -n1 -d '' c; do
     effort)
       printf 'KEY:%s\n' "$key" >> "$log"
       case "$key" in
-        s) apply session ;;
+        s) [ "$scenario" = s-ignored ] || apply session ;;
         RET) apply default ;;
         [1-4]) ecur=$((key - 1)); apply default ;;
         '<up>') [ "$ecur" -gt 0 ] && ecur=$((ecur - 1)) ;;
@@ -6837,7 +6838,8 @@ done
     let reports = || eval(&path, "return table.concat(remuda._fake_reports or {}, '\\n')");
     let record = || std::fs::read_to_string(&restore_file).unwrap_or_default();
     let settle = |name: &str, done: &dyn Fn(&str) -> bool, what: &str| {
-        let deadline = Instant::now() + Duration::from_secs(15);
+        // Failure paths wait out the 15 s picker timeout before closing it.
+        let deadline = Instant::now() + Duration::from_secs(45);
         loop {
             let in_progress = eval(&path, &format!(
                 "local m = remuda._butler_compaction_members_state or {{}}; local s = m[{:?}] or {{}}; return tostring(s.compaction_in_progress == true)",
@@ -6877,6 +6879,9 @@ done
         "session-only switches must leave config.toml byte-identical");
 
     // 2. The restore record holds the prior model and effort while on luna.
+    //    An unrelated entry keeps the file on disk after cx-record's is cleared.
+    std::fs::write(&restore_file, r#"{"cx-other-id":"codex:gpt-5.6-sol high"}"#).unwrap();
+    eval(&path, "remuda._butler_compaction_load_restore_record()");
     eval(&path, "remuda._fake_record_at_s['cx-record'] = nil");
     start("cx-record", "happy");
     assert_eq!(eval(&path, "return remuda.butler.compact('cx-record')"), "started");
@@ -6884,6 +6889,10 @@ done
     let at_switch = eval(&path, "return remuda._fake_record_at_s['cx-record'] or ''");
     assert!(at_switch.contains("\"cx-record-id\"") && at_switch.contains("codex:gpt-5.6-sol high"),
         "the durable record must name the prior model and effort before the luna switch: {at_switch:?}");
+    let mode = std::fs::metadata(&restore_file).expect("restore record").permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "the restore record must be written privately");
+    std::fs::remove_file(&restore_file).unwrap();
+    eval(&path, "remuda._butler_compaction_load_restore_record()");
 
     // 3. A failed compaction still restores the prior model.
     start("cx-fails", "compact-fails");
@@ -6933,6 +6942,30 @@ done
         std::thread::sleep(Duration::from_millis(100));
     }
     assert_eq!(std::fs::read_to_string(&codex_config).unwrap(), config_seed);
+
+    // 7. Every picker failure closes the picker (one ESC per screen) before
+    //    it fails, so no later tick stalls behind an open picker.
+    let closed = |name: &str, what: &str| {
+        let screen = capture(&path, name);
+        assert!(screen.contains("Ask Codex to do anything") && screen.contains("GPT-5.6-Sol high")
+            && !screen.contains("Select "), "{what}: the picker must be closed, model unchanged:\n{screen}");
+        assert!(!record().contains(&format!("{name}-id")), "{what}: nothing to restore: {}", record());
+    };
+    // 7a. The account offers no luna row: ESC out of the model list.
+    start("cx-no-luna", "no-luna");
+    assert_eq!(eval(&path, "return remuda.butler.compact('cx-no-luna')"), "started");
+    let got = settle("cx-no-luna", &|log| log.contains("KEY:ESC"), "an ESC out of the model list");
+    assert_eq!(got, "CMD:/model\nKEY:ESC\n", "a missing luna row must only close the picker");
+    closed("cx-no-luna", "missing luna row");
+    assert!(reports().contains("gpt-6-luna"), "the parent must hear luna was missing: {}", reports());
+    // 7b. `s` is ignored: after the timeout, ESC back to the list, then out.
+    start("cx-s-ignored", "s-ignored");
+    assert_eq!(eval(&path, "return remuda.butler.compact('cx-s-ignored')"), "started");
+    let got = settle("cx-s-ignored", &|log| log.ends_with("KEY:ESC\nKEY:ESC\n"), "two ESCs out of the pickers");
+    assert_eq!(got, "CMD:/model\nKEY:4\nKEY:<down>\nKEY:s\nKEY:ESC\nKEY:ESC\n",
+        "an ignored s must close both pickers and never compact");
+    closed("cx-s-ignored", "ignored s");
+    assert!(reports().contains("codex-model-set"), "the parent must hear which step failed: {}", reports());
     drop(daemon);
 }
 
