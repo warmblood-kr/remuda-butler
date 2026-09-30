@@ -1,9 +1,20 @@
 -- Matrix setup argument parsing and staged setup actions.
 local matrix = assert(remuda.butler and remuda.butler.matrix, "Matrix request word is unavailable")
 
-local USAGE = [[Usage: remuda butler matrix setup --homeserver URL --owner MXID
-  (--password-file PATH --bot MXID | --token-file PATH) [--dir PATH | --default]
-  [--force] [--all] [--pin SHA256HEX | --ca-file PATH]]
+local USAGE = [[Usage: remuda butler matrix setup [OPTIONS]
+  --homeserver URL       Your Matrix server address, like https://matrix.example.org.
+  --owner ID             Your Matrix user ID, like @alice:example.org (in Element: click your avatar, top left).
+  --password-file PATH   Read the bot account password from this file.
+  --bot ID               The bot's Matrix user ID, like @butler-home:example.org (the account setup logs in as).
+  --token-file PATH      Use an existing access token from this file instead of a password.
+  --dir PATH             Save the private token and config files in this directory.
+  --default              Save to the default live Butler config directory.
+  --force                Replace existing token or config files.
+  --all                  Also create the optional ALL-BUTLERS room.
+  --pin SHA256HEX         Trust this HTTPS certificate fingerprint.
+  --ca-file PATH         Trust the HTTPS certificate authority in this file.
+
+Example: remuda butler matrix setup --homeserver https://matrix.example.org --owner @alice:example.org --bot @butler-home:example.org --password-file /path/to/password --dir /path/to/private/butler --pin <64-hex-sha256>]]
 
 local function absolute(path)
   return type(path) == "string" and (path:sub(1, 1) == "/" or path:match("^%a:[/\\]") ~= nil)
@@ -54,12 +65,38 @@ local function valid_url(value)
   return value:gsub("/+$", ""), scheme
 end
 
-local function valid_mxid(value, label)
-  if type(value) ~= "string" then return nil, label .. " MXID is required" end
+local function safe_user_id_echo(value)
+  return (value:gsub("[%c]", "?"):sub(1, 64))
+end
+
+local function invalid_user_id(value, option)
+  local echo = safe_user_id_echo(value)
+  if echo:find("%s") then
+    return option .. " '" .. echo .. "' contains spaces. It should look like @alice:example.org: an @, your name, a colon, your server."
+  end
+  if echo:sub(1, 1) ~= "@" then
+    local corrected = "@" .. echo
+    if not corrected:find(":", 2, true) then corrected = corrected .. ":example.org" end
+    return option .. " '" .. echo .. "' is not a Matrix user ID. It looks like " .. corrected
+      .. ": an @, your name, a colon, your server."
+  end
+  local localpart, server = echo:match("^@([^:]+):(.+)$")
+  if not localpart or server == "" then
+    local localpart_hint = echo:match("^@([^:]+)") or "alice"
+    return option .. " '" .. echo .. "' is missing :server. It should look like @"
+      .. localpart_hint .. ":example.org."
+  end
+  return option .. " '" .. echo .. "' is not a Matrix user ID. It should look like @alice:example.org: an @, your name, a colon, your server."
+end
+
+local function valid_mxid(value, option)
+  if type(value) ~= "string" or value == "" then
+    return nil, option .. " is required. Enter a Matrix user ID, like @alice:example.org."
+  end
   local localpart, server = value:match("^@([^:]+):(.+)$")
   if not localpart or localpart:find("[%s%c/@]") or server == ""
     or server:find("[%s%c/#?]") then
-    return nil, label .. " must be a Matrix user ID such as @user:server"
+    return nil, invalid_user_id(value, option)
   end
   return value
 end
@@ -188,7 +225,7 @@ function matrix.setup_prepare(args)
   local homeserver, scheme_or_error = valid_url(options.homeserver)
   if not homeserver then return nil, scheme_or_error end
   options.homeserver = homeserver
-  local owner, owner_error = valid_mxid(options.owner_mxid, "owner")
+  local owner, owner_error = valid_mxid(options.owner_mxid, "--owner")
   if not owner then return nil, owner_error end
   options.owner_mxid = owner
 
@@ -203,16 +240,16 @@ function matrix.setup_prepare(args)
   options.secret = secret_ok
 
   if options.password_file then
-    local bot, bot_error = valid_mxid(options.bot_mxid, "bot")
+    local bot, bot_error = valid_mxid(options.bot_mxid, "--bot")
     if not bot then return nil, bot_error end
     options.bot_mxid = bot
   elseif options.bot_mxid then
-    local bot, bot_error = valid_mxid(options.bot_mxid, "bot")
+    local bot, bot_error = valid_mxid(options.bot_mxid, "--bot")
     if not bot then return nil, bot_error end
     options.bot_mxid = bot
   end
   if options.bot_mxid and options.bot_mxid == options.owner_mxid then
-    return nil, "bot and owner MXIDs must be different"
+    return nil, "the bot and your Matrix user ID must be different"
   end
 
   if options.pin and options.ca_file then return nil, "choose one of --pin or --ca-file" end

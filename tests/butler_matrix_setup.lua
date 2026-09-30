@@ -5,6 +5,13 @@ return function(matrix)
   assert(type(matrix.cli) == "function", "Matrix CLI router is unavailable")
   assert(matrix.cli({ "matrix", "setup" }) == matrix.setup_usage())
   assert(matrix.cli({ "matrix", "setup", "--help" }) == matrix.setup_usage())
+  local setup_help = matrix.setup_usage()
+  assert(not setup_help:find("MXID", 1, true)
+    and setup_help:find("Your Matrix server address", 1, true)
+    and setup_help:find("in Element: click your avatar, top left", 1, true)
+    and setup_help:find("the account setup logs in as", 1, true)
+    and setup_help:find("Example: remuda butler matrix setup", 1, true),
+    "setup usage should explain each option in plain words and show a full example")
   assert(matrix.cli_usage():find("Example:", 1, true)
     and matrix.cli_usage():find("https://<homeserver>", 1, true)
     and matrix.cli_usage():find("--password-file <path>", 1, true),
@@ -41,6 +48,7 @@ return function(matrix)
     file:close()
     return contents
   end
+  write(password, "  password-secret  \nignored")
   local function args(secret_flag, secret_path, extra)
     local values = {
       "--homeserver", "http://matrix.invalid", "--owner", "@alice:example.org",
@@ -54,8 +62,30 @@ return function(matrix)
     assert(not plan and tostring(err):find(fragment, 1, true),
       "expected setup rejection containing " .. fragment .. ", got " .. tostring(err))
   end
+  local function invalid_ids(owner_id, bot_id)
+    return matrix.setup_prepare({ "--homeserver", "http://matrix.invalid",
+      "--owner", owner_id, "--password-file", password, "--bot", bot_id, "--dir", output })
+  end
+  local _, missing_at = invalid_ids("alice", "@butler-demo:example.org")
+  assert(missing_at and missing_at:find("--owner 'alice' is not a Matrix user ID. It looks like @alice:example.org: an @, your name, a colon, your server.", 1, true),
+    "missing @ should show the corrected Matrix user ID shape")
+  local _, missing_server = invalid_ids("@alice", "@butler-demo:example.org")
+  assert(missing_server and missing_server:find("--owner '@alice' is missing :server", 1, true),
+    "missing server should show a specific Matrix user ID hint")
+  local _, spaces = invalid_ids("@alice smith:example.org", "@butler-demo:example.org")
+  assert(spaces and spaces:find("--owner '@alice smith:example.org' contains spaces", 1, true),
+    "spaces should show a specific Matrix user ID hint")
+  local _, invalid_bot = invalid_ids("@alice:example.org", "butler-home:example.org")
+  assert(invalid_bot and invalid_bot:find("--bot 'butler-home:example.org' is not a Matrix user ID. It looks like @butler-home:example.org", 1, true),
+    "bot ID errors should name --bot and show the corrected shape")
+  local _, long_id = invalid_ids(string.rep("a", 80), "@butler-demo:example.org")
+  assert(long_id and not long_id:find(string.rep("a", 65), 1, true),
+    "invalid public ID echoes must be capped at 64 characters")
+  local valid_id_plan = invalid_ids("@alice:example.org", "@butler-demo:example.org")
+  assert(valid_id_plan and valid_id_plan.owner_mxid == "@alice:example.org"
+    and valid_id_plan.bot_mxid == "@butler-demo:example.org",
+    "valid Matrix user IDs should still pass")
 
-  write(password, "  password-secret  \nignored")
   local fake_http = remuda.http
   local fake_pending = remuda.pending
   local calls = 0
@@ -118,13 +148,13 @@ return function(matrix)
   write(oversized, string.rep("x", 4097))
   rejected(args("--password-file", oversized, { "--bot", "@butler-demo:example.org" }), "4 KiB")
   rejected({ "--homeserver", "http://matrix.invalid", "--owner", "@alice:example.org",
-    "--password-file", password }, "bot MXID")
+    "--password-file", password }, "--bot is required")
   rejected(args("--password-file", password,
     { "--bot", "@butler-demo:example.org", "--token-file", token }), "choose one")
   rejected(args("--password-file", password,
     { "--bot", "@butler-demo:example.org", "--mystery" }), "unknown option")
   rejected(args("--password-file", password,
-    { "--bot", "not-an-mxid" }), "bot must be")
+    { "--bot", "not-an-mxid" }), "--bot 'not-an-mxid' is not a Matrix user ID")
   rejected({ "--homeserver", "https://matrix.invalid", "--owner", "@alice:example.org",
     "--bot", "@butler-demo:example.org", "--password-file", password, "--dir", output }, "--pin")
   rejected({ "--homeserver", "https://matrix.invalid", "--owner", "@alice:example.org",
