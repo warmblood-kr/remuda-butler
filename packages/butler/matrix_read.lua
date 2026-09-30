@@ -68,7 +68,7 @@ function matrix.rooms(args, callback, agent)
   local rooms = {}
   for room, kind in pairs(conf.rooms) do
     rooms[#rooms + 1] = { room = room, alias = conf.room_aliases[room], kind = kind,
-      how = conf.room_how[room] or "config" }
+      how = conf.room_how[room] or "config", inviter = conf.room_inviters[room] }
   end
   local order = { home = 1, all = 2, joined = 3 }
   table.sort(rooms, function(a, b)
@@ -76,7 +76,13 @@ function matrix.rooms(args, callback, agent)
     if a_order ~= b_order then return a_order < b_order end
     return a.room < b.room
   end)
-  return callback({ status = 200, json = { rooms = matrix.json_array(rooms) } })
+  local deny_lines = {}
+  for room_id in pairs(conf.deny_room_ids) do deny_lines[#deny_lines + 1] = "deny_room=" .. room_id end
+  for alias in pairs(conf.deny_room_aliases) do deny_lines[#deny_lines + 1] = "deny_room=" .. alias end
+  for server in pairs(conf.deny_servers) do deny_lines[#deny_lines + 1] = "deny_server=" .. server end
+  table.sort(deny_lines)
+  return callback({ status = 200, json = { mode = conf.rooms_mode,
+    rooms = matrix.json_array(rooms), deny_lines = matrix.json_array(deny_lines) } })
 end
 
 function matrix.status(args, callback)

@@ -53,7 +53,7 @@ end
 local function write_compaction_restore_record(record)
   local ok, encoded = pcall(remuda.json.encode, record)
   if not ok then return nil, encoded end
-  local wrote, write_err = remuda.fs.write_atomic(compaction_restore_path, encoded)
+  local wrote, write_err = remuda.fs.write_atomic(compaction_restore_path, encoded, { private = true })
   if not wrote then return nil, write_err end
   compaction_restore_sessions = record
   remuda._butler_compaction_restore_sessions = compaction_restore_sessions
@@ -170,6 +170,14 @@ function remuda._butler_compaction_tick(target_name, dry_run)
           state.restore_pending_exhausted = nil
         end
       end
+      if agent.kind == "codex" and not state.restore_pending and not dry_run then
+        local persisted = compaction_restore_for(agent, session_name)
+        if type(persisted) == "string" and persisted:match("^codex:") then
+          state.restore_pending = persisted
+          state.restore_pending_attempts = 0
+          state.restore_pending_exhausted = nil
+        end
+      end
       local cooling = remuda._butler_compaction_failure_cooldown(
         state, (remuda._butler_compaction_now or os.time)())
       if state.compaction_in_progress then
@@ -215,6 +223,49 @@ function remuda._butler_compaction_tick(target_name, dry_run)
   return nil
 end
 
+-- Codex compacts on this model. `/model` (codex-cli 0.159) opens "Select Model
+-- and Effort" (a number key picks a row), then "Select Reasoning Level for
+-- <Model>" with the cursor on that model's default effort; `s` applies the
+-- choice for this session only. Enter or a number key there would rewrite
+-- the global default in $CODEX_HOME/config.toml, so neither is ever sent.
+local CODEX_LOWER_MODEL = "gpt-6-luna"
+local CODEX_EFFORT_ROWS = { xhigh = "extra high" }
+local function screen_lines(screen)
+  local lines = {}
+  for line in (screen .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
+  return lines
+end
+-- The footer names the session's model and effort: "GPT-5.6-Sol high · /work".
+local function codex_footer(screen)
+  if type(screen) ~= "string" then return nil end
+  local model, effort
+  for _, line in ipairs(screen_lines(screen)) do
+    local m, e = line:match("^%s*(GPT%-[%w%.%-]+)%s+(%a+)%s+·")
+    if m then model, effort = m:lower(), e:lower() end
+  end
+  return model, effort
+end
+-- The numbered rows below the picker titled `title` (lowercase), or nil.
+local function codex_picker_rows(screen, title)
+  if type(screen) ~= "string" then return nil end
+  local rows
+  for _, line in ipairs(screen_lines(screen)) do
+    if line:lower():find(title, 1, true) then
+      rows = {}
+    elseif rows then
+      local mark, number, label = line:match("^%s*([^%s%d]*)%s*(%d+)%.%s+(.-)%s*$")
+      if number then rows[#rows + 1] = { number = number, label = label:lower(), cursor = mark ~= "" } end
+    end
+  end
+  return rows
+end
+local function codex_row(rows, name)
+  for index, row in ipairs(rows or {}) do
+    local rest = row.label:sub(#name + 1)
+    if row.label:sub(1, #name) == name and (rest == "" or rest:match("^[%s(]")) then return index, row end
+  end
+end
+
 function remuda._butler_compaction_execute(session_name, force)
   if not session_name then return "no session" end
   if not remuda._butler_compaction_has_session(session_name) then
@@ -241,7 +292,15 @@ function remuda._butler_compaction_execute(session_name, force)
       state.restore_pending_exhausted = nil
     end
   end
-  local restore_pending = agent.kind == "claude" and type(state.restore_pending) == "string"
+  if agent.kind == "codex" and not state.restore_pending then
+    local persisted = compaction_restore_for(agent, session_name)
+    if type(persisted) == "string" and persisted:match("^codex:") then
+      state.restore_pending = persisted
+      state.restore_pending_attempts = 0
+      state.restore_pending_exhausted = nil
+    end
+  end
+  local restore_pending = (agent.kind == "claude" or agent.kind == "codex") and type(state.restore_pending) == "string"
     and state.restore_pending ~= "" and state.restore_pending or nil
   if state.compaction_in_progress then return "compaction_in_progress" end
   if owner_state.compaction_fleet_active and owner_state.compaction_fleet_active ~= state_key then return "fleet_busy" end
@@ -303,7 +362,8 @@ function remuda._butler_compaction_execute(session_name, force)
         if not state.restore_pending_failure_notified then
           state.restore_pending_failure_notified = true
           pcall(remuda._butler_send, session_name, agent.parent or "butler",
-            "model restore failed; member may still be on sonnet")
+            "model restore failed; member may still be on "
+              .. (agent.kind == "codex" and CODEX_LOWER_MODEL or "sonnet"))
         end
       else
         state.failure_cooldown_until = nil
@@ -381,7 +441,8 @@ function remuda._butler_compaction_execute(session_name, force)
     if not sent then fail("compaction command failed: " .. tostring(send_err)); return false end
     return true
   end
-  local function wait_for(id, matcher, action, timeout, on_timeout)
+  local function wait_for(id, matcher, action, timeout, on_timeout, on_fail)
+    local fail = on_fail or fail
     local confirmation_sent = false
     local handle
     local action_started = false
@@ -548,6 +609,98 @@ function remuda._butler_compaction_execute(session_name, force)
       if after_restore then after_restore() else finish_success(event or "verified") end
     end, completion_timeout)
   end
+  local codex_prior = agent.kind == "codex" and restore_pending or nil
+  local function forget_codex_prior()
+    codex_prior = nil
+    state.restore_pending = nil
+    state.restore_pending_attempts = nil
+    state.restore_pending_attempt_active = nil
+    local cleared, clear_err = clear_compaction_restore(compaction_agent_key(agent, session_name), session_name)
+    if not cleared then _butler_trace("restore_record_clear_failed", detail .. " reason=" .. tostring(clear_err)) end
+  end
+  -- Pick `model` at `effort` for this Codex session only, reading each picker
+  -- row from the screen. Every failure closes the picker, then calls on_abort.
+  local function codex_select(model, effort, on_done, on_abort)
+    local row_label = CODEX_EFFORT_ROWS[effort] or effort
+    local picker_timeout = math.max(completion_timeout, 15)
+    local effort_title = "select reasoning level for " .. model
+    local function picker_open(screen)
+      if codex_picker_rows(screen, "select reasoning level for ") then return "effort" end
+      if codex_picker_rows(screen, "select model and effort") then return "model" end
+      if codex_footer(screen) then return "closed" end
+    end
+    -- One ESC per screen, each confirmed from the screen before the next,
+    -- so two ESCs never merge and none lands in the composer.
+    local function escape(reason, escapes)
+      local function left_open() on_abort(reason .. "; the Codex model picker was left open") end
+      wait_for("codex-picker-escape", function(screen) return picker_open(screen) ~= nil end, function(screen)
+        local open = picker_open(screen)
+        if open == "closed" then on_abort(reason); return end
+        if escapes >= 2 or not pcall(remuda.key, session_name, "ESC") then left_open(); return end
+        wait_for("codex-" .. open .. "-picker-closed", function(next_screen)
+          local now = picker_open(next_screen)
+          return now ~= nil and now ~= open
+        end, function() escape(reason, escapes + 1) end, picker_timeout, nil, left_open)
+      end, picker_timeout, nil, left_open)
+    end
+    local function abort(reason) escape(reason, 0) end
+    local function key(name, what)
+      local pressed, press_err = pcall(remuda.key, session_name, name)
+      if not pressed then abort(what .. " key failed: " .. tostring(press_err)) end
+      return pressed
+    end
+    if not send_command("/model") then return end
+    -- The row, or the same rows on 3 captures (not a half-painted list).
+    local seen, seen_count = nil, 0
+    wait_for("codex-model-picker", function(screen)
+      local rows = codex_picker_rows(screen, "select model and effort")
+      if not rows or #rows == 0 then seen, seen_count = nil, 0; return false end
+      if codex_row(rows, model) then return true end
+      local labels = {}
+      for _, row in ipairs(rows) do labels[#labels + 1] = row.label end
+      labels = table.concat(labels, "\n")
+      seen_count = labels == seen and seen_count + 1 or 1
+      seen = labels
+      return seen_count >= 3
+    end, function(screen)
+      local _, row = codex_row(codex_picker_rows(screen, "select model and effort"), model)
+      if not row then abort("no " .. model .. " row in the Codex model picker"); return end
+      if not key(row.number, "model picker") then return end
+      local function effort_rows(effort_screen)
+        local rows = codex_picker_rows(effort_screen, effort_title)
+        for index, candidate in ipairs(rows or {}) do if candidate.cursor then return rows, index end end
+      end
+      wait_for("codex-effort-picker", function(effort_screen)
+        return effort_rows(effort_screen) ~= nil
+      end, function(effort_screen)
+        local rows, cursor = effort_rows(effort_screen)
+        local target = codex_row(rows, row_label)
+        if not target then abort("no '" .. effort .. "' effort row for " .. model); return end
+        local step = target > cursor and "<down>" or "<up>"
+        for _ = 1, math.abs(target - cursor) do
+          if not key(step, "effort picker") then return end
+        end
+        -- Only apply once the cursor is seen on the target row.
+        wait_for("codex-effort-row", function(row_screen)
+          local _, at = effort_rows(row_screen)
+          return at == target
+        end, function()
+          if not key("s", "session-only model") then return end
+          wait_for("codex-model-set", function(set_screen)
+            local current, current_effort = codex_footer(set_screen)
+            return current == model and current_effort == effort
+          end, on_done, picker_timeout, nil, abort)
+        end, picker_timeout, nil, abort)
+      end, picker_timeout, nil, abort)
+    end, picker_timeout, nil, abort)
+  end
+  local function codex_restore(event, after_restore)
+    local model, effort = tostring(codex_prior):match("^codex:(%S+) (%S+)$")
+    if not model then fail("unreadable Codex restore record: " .. tostring(codex_prior)); return end
+    codex_select(model, effort, function()
+      if after_restore then after_restore() else finish_success(event or "verified") end
+    end, fail)
+  end
   local function monitor_until_idle()
     local warned = pcall(remuda._butler_send, session_name, agent.parent or "butler",
       "Compaction is still running; the fleet lock remains held until this session is idle.")
@@ -577,6 +730,7 @@ function remuda._butler_compaction_execute(session_name, force)
       return used and ctx_before and used < ctx_before
     end, function()
       if agent.kind == "claude" then restore_model("verified")
+      elseif codex_prior then codex_restore("verified")
       else finish_success("verified") end
     end, completion_timeout, function()
       if agent.kind == "claude" then
@@ -585,6 +739,11 @@ function remuda._butler_compaction_execute(session_name, force)
         else
           restore_model(nil, function() fail("compaction context did not drop") end)
         end
+      elseif codex_prior then
+        codex_restore(nil, function()
+          forget_codex_prior()
+          fail("compaction context did not drop")
+        end)
       else
         fail("compaction context did not drop")
       end
@@ -610,7 +769,8 @@ function remuda._butler_compaction_execute(session_name, force)
     owner_state.compaction_fleet_active = state_key
     state.restore_pending_attempts = (tonumber(state.restore_pending_attempts) or 0) + 1
     state.restore_pending_attempt_active = true
-    restore_model("restored_after_dialog")
+    if agent.kind == "codex" then codex_restore("restored_after_dialog")
+    else restore_model("restored_after_dialog") end
     return "restoring_model"
   end
   state.compaction_in_progress = true
@@ -655,7 +815,30 @@ function remuda._butler_compaction_execute(session_name, force)
       return type(current.model) == "string" and current.model:lower():find("sonnet", 1, true) ~= nil
     end, compact, completion_timeout)
   else
-    compact()
+    local _, screen = pcall(remuda.capture, session_name)
+    local current, current_effort = codex_footer(screen)
+    if not current then
+      _butler_trace("model_switch_skipped", detail .. " reason=footer_unreadable")
+      compact()
+    elseif current == CODEX_LOWER_MODEL then
+      _butler_trace("model_switch_skipped", detail .. " reason=already_lower")
+      compact()
+    else
+      codex_prior = "codex:" .. current .. " " .. current_effort
+      state.restore_pending = codex_prior
+      state.restore_pending_attempts = 0
+      state.restore_pending_exhausted = nil
+      local persisted, persist_err = persist_compaction_restore(compaction_agent_key(agent, session_name), codex_prior)
+      if not persisted then
+        codex_prior, state.restore_pending, state.restore_pending_attempts = nil, nil, nil
+        fail("could not persist model restore state: " .. tostring(persist_err))
+        return "failed"
+      end
+      codex_select(CODEX_LOWER_MODEL, current_effort, compact, function(reason)
+        forget_codex_prior()
+        fail(reason)
+      end)
+    end
   end
   return "started"
 end
