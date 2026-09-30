@@ -163,7 +163,9 @@ Start by running `remuda butler inbox` to read your welcome message.
 
 - `remuda butler inbox` reads your own queued messages.
 - `remuda butler send MEMBER "MESSAGE"` sends a message; your sender is inferred.
-  Quote the message: a second unquoted word makes it `send FROM TO ...`.
+- For long bodies, use `cat <<'EOF' | remuda butler send MEMBER -` or `--file "$PWD/path"`.
+- `send-to-leader` and `reply MESSAGE_ID` accept `-` and `--file "$PWD/path"` too.
+- Message bodies are limited to 64 KiB; short quoted messages can stay positional.
 - `remuda butler send-to-leader RESULT...` reports a completed work loop.
 - `remuda butler sessions` shows the household.
 - `remuda butler reply MESSAGE-ID "TEXT"` answers a message in its thread (prefer this over send when answering)
@@ -173,7 +175,8 @@ Start by running `remuda butler inbox` to read your welcome message.
         end,
         prompt = function()
           return "Use `remuda butler inbox`, `remuda butler send MEMBER \"MESSAGE\"`, and "
-            .. "`remuda butler send-to-leader RESULT...` for coordination. "
+            .. "`remuda butler send-to-leader RESULT...` for coordination. Long bodies use "
+            .. 'stdin (`-`) or `--file "$PWD/path"`; message bodies are limited to 64 KiB. '
         end },
       { id = "old-core", order = 30,
         agents_md = function()
@@ -241,13 +244,14 @@ the normal way for a member to communicate.
       { id = "topic", order = 30, verb = "topic", usage = "  remuda butler topic new <name> [--template T] [--agent A] [--model M]\n"
           .. "  remuda butler topic delegate <name> [--agent A] [--leader L] [--model M] <task...>",
         run = function(_, args, caller) return host._butler_command_run("topic", args, caller) end },
-      { id = "send", order = 40, verb = "send", usage = '  remuda butler send <to> "<message>"\n  remuda butler send <from> <to> <message...>',
+      { id = "send", order = 40, verb = "send", usage = '  remuda butler send <to> "<message>" | <to> - | <to> --file PATH\n'
+          .. '  remuda butler send <from> <to> <message...> | <from> <to> - | <from> <to> --file PATH',
         run = function(_, args, caller) return host._butler_command_run("send", args, caller) end },
-      { id = "send-to-leader", order = 50, verb = "send-to-leader", usage = "  remuda butler send-to-leader <message...>",
+      { id = "send-to-leader", order = 50, verb = "send-to-leader", usage = "  remuda butler send-to-leader <message...> | - | --file PATH",
         run = function(_, args, caller) return host._butler_command_run("send-to-leader", args, caller) end },
       { id = "inbox", order = 60, verb = "inbox", usage = "  remuda butler inbox [name]",
         run = function(_, args, caller) return host._butler_command_run("inbox", args, caller) end },
-      { id = "reply", order = 70, verb = "reply", usage = "  remuda butler reply <message-id> <message...>",
+      { id = "reply", order = 70, verb = "reply", usage = "  remuda butler reply <message-id> <message...> | - | --file PATH",
         run = function(_, args, caller) return host._butler_command_run("reply", args, caller) end },
       { id = "forward", order = 80, verb = "forward", usage = "  remuda butler forward <message-id> <member> [note...]",
         run = function(_, args, caller) return host._butler_command_run("forward", args, caller) end },

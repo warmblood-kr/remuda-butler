@@ -336,7 +336,9 @@ remuda._butler_contribute("butler.guidance", "cli", { order = 20,
 
 - `remuda butler inbox` reads your own queued messages.
 - `remuda butler send MEMBER "MESSAGE"` sends a message; your sender is inferred.
-  Quote the message: a second unquoted word makes it `send FROM TO ...`.
+- For long bodies, use `cat <<'EOF' | remuda butler send MEMBER -` or `--file "$PWD/path"`.
+- `send-to-leader` and `reply MESSAGE_ID` accept `-` and `--file "$PWD/path"` too.
+- Message bodies are limited to 64 KiB; short quoted messages can stay positional.
 - `remuda butler send-to-leader RESULT...` reports a completed work loop.
 - `remuda butler sessions` shows the household.
 - `remuda butler reply MESSAGE-ID "TEXT"` answers a message in its thread (prefer this over send when answering)
@@ -346,7 +348,8 @@ remuda._butler_contribute("butler.guidance", "cli", { order = 20,
   end,
   prompt = function()
     return "Use `remuda butler inbox`, `remuda butler send MEMBER \"MESSAGE\"`, and "
-      .. "`remuda butler send-to-leader RESULT...` for coordination. "
+      .. "`remuda butler send-to-leader RESULT...` for coordination. Long bodies use "
+      .. 'stdin (`-`) or `--file "$PWD/path"`; message bodies are limited to 64 KiB. '
   end })
 remuda._butler_contribute("butler.guidance", "old-core", { order = 30,
   agents_md = function()
