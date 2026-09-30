@@ -143,6 +143,8 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   if not relaunch_identity then
     pcall(queue_message, mail_address(parent or "butler"), mail_address(actual),
       team_member_guidance(parent or "butler"), "Welcome to Butler")
+    -- First sight of a new member: nothing to replay or re-show (notice.lua).
+    bus.unread_seeded[actual] = "launched"
   end
   if task and task ~= "" then
     -- Keep an immediate mail notice out of the child's first prompt until the

@@ -3121,6 +3121,31 @@ fn half_drop_heuristic_guards_and_rearms_after_a_rise() {
     assert_eq!(got, "1|2|2|3", "guards: nil start, one per drop, re-arm after rise: {got}");
 }
 
+// First sight of a new member: a brief it read and has not answered while
+// still unseeded (busy with its task) is not re-shown as "after restart".
+#[test]
+fn a_fresh_launch_with_a_read_unanswered_brief_gets_no_reshow() {
+    let (path, _daemon) = butler_with_named_agent("renotice-fresh-launch", "cx1", "codex");
+    setup_renotice(&path, "cx1");
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        local bus = remuda._butler_bus
+        local launched = tostring(bus.unread_seeded.cx1)
+        bus.unread_seeded.cx1 = 'launched' -- as right after launch, before any tick
+        state.busy.cx1 = true
+        local id = remuda._rn_lead('brief for cx1')
+        for t = 0, 3 do remuda._rn_tick(t) end
+        remuda._butler_inbox('cx1')
+        state.busy.cx1 = false
+        for t = 4, 20 do remuda._rn_tick(t) end
+        return launched .. '|' .. tostring(#remuda._rn_mine())
+        "#,
+    );
+    assert!(got.ends_with("|0"), "a fresh launch must not re-show its read brief: {got}");
+}
+
 // inbox ID: own mailbox only; another member's message is refused with a
 // Next: line; the help names the id form.
 #[test]

@@ -790,7 +790,7 @@ local function seed_unread_notices(alias, previous_instance, instance, unread)
       local pending = bus.notices[alias]
       local already_pending = pending and pending.message_ids and pending.message_ids[message_id]
       local already_seen = seen and seen[message_id]
-      if previous_instance ~= nil and previous_instance ~= instance
+      if previous_instance ~= nil and previous_instance ~= "launched" and previous_instance ~= instance
           and already_seen and not already_pending then
         -- A prior session may have recorded the deposit notice before its
         -- queue was cleared at exit. Replay that unread mail for this session.
@@ -938,7 +938,9 @@ function remuda._butler_deliver_notices()
       if previous_instance ~= instance and agent.id then
         local counted, unread = pcall(mail.unread, agent.id)
         local found, leader_message = false, nil
-        if counted and live_sessions[alias] then
+        -- A new member's first sight re-shows nothing: a brief it read while
+        -- unseeded is not lost. nil (a daemon restart) still re-shows.
+        if counted and live_sessions[alias] and previous_instance ~= "launched" then
           found, leader_message = pcall(last_unanswered_leader_message, alias, agent)
         end
         if not found then leader_message = nil end
