@@ -271,7 +271,8 @@ end
 local function operator_room(verb, opts, agent, callback)
   if agent then
     if verb ~= "join" then
-      callback({ error = "matrix " .. verb .. " is operator-only" })
+      callback({ error = "matrix " .. verb .. " is operator-only"
+        .. "\nNext: ask the owner to run remuda butler matrix " .. verb .. " ROOM from their terminal" })
       return nil
     end
   elseif not approval.operator_caller() then

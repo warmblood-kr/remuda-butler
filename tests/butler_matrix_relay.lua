@@ -12,6 +12,7 @@ function remuda.schedule(spec)
 end
 function remuda.cancel(timer) if timer then timer.cancelled = true end end
 local matrix = dofile("packages/butler/matrix_request.lua")
+local ASKER = "team-1-mx"
 dofile("packages/butler/matrix_setup.lua")
 dofile("packages/butler/matrix_read.lua")
 dofile("packages/butler/matrix_cli.lua")
@@ -1594,6 +1595,21 @@ local function test_matrix_join_leave_require_outside_caller()
   end
 
   do
+    local dir, path = invite_fixture(nil, "room=" .. NEW .. " how=operator\n")
+    local before = read_text(path)
+    with_operator_config(path, 200, function(calls)
+      local result
+      matrix.leave({ room = NEW }, function(value) result = value end, ASKER)
+      assert(result and result.error and result.error:find("operator-only", 1, true)
+        and result.error:find("Next: ask the owner to run remuda butler matrix leave ROOM from their terminal", 1, true),
+        "an agent matrix leave must be refused with owner guidance")
+      assert(#calls == 0 and read_text(path) == before,
+        "an agent matrix leave refusal must not make an HTTP request or change config")
+    end)
+    remove_dir(dir)
+  end
+
+  do
     local dir, path = invite_fixture()
     with_operator_config(path, 200, function(calls)
       with_caller_kind("outside", function()
@@ -2485,7 +2501,6 @@ print("ok: Matrix owner invites, room lines, join/leave, and the one room allowl
 -- Contract assumed here beyond the design note: approval.lua publishes itself
 -- as remuda.butler.approval, and approval.cli(args, agent) backs the thin
 -- commands.lua verbs (args = { "approve", ID }), mirroring matrix.cli.
-local ASKER = "team-1-mx"
 local NEW2, NEW3, NEW4 = "!new2:example.org", "!new3:example.org", "!new4:example.org"
 local CHECK, CROSS = "\226\156\133", "\226\157\140"
 
