@@ -839,16 +839,13 @@ return function(matrix)
     "--owner", "@alice:example.org", "--bot", "@butler-demo:example.org",
     "--password-file", password, "--default" })
   local invite_line = "Next: Accept the invite in Element, then write in the room."
-  local expected_last_line = "Relay started; write to the Butler in Element."
+  local expected_last_line = "Next: accept the invite in Element; the relay is running, so write to the Butler there."
   local output_last_line = resolved and resolved.stdout:match("([^\n]+)\n$")
-  local invite_at = resolved and resolved.stdout:find(invite_line, 1, true)
-  local relay_at = resolved and resolved.stdout:find(expected_last_line, 1, true)
   assert(default_reply and resolved and resolved.status == 0
     and table.concat(relay_events, ",") == "stop,start"
     and started_config and started_config.token_path == default_paths.token_path
     and started_config.config_path == default_paths.config_path
     and remuda._butler_matrix_config == started_config
-    and invite_at and relay_at and relay_at > invite_at
     and resolved.stdout:match("([^\n]+)\n$") == expected_last_line
     and not resolved.stdout:find("reload", 1, true)
     and not resolved.stdout:find("remuda stop", 1, true)
@@ -870,14 +867,31 @@ return function(matrix)
     "--owner", "@alice:example.org", "--bot", "@butler-demo:example.org",
     "--password-file", password, "--default", "--force" })
   local failed_invite_at = resolved and resolved.stdout:find(invite_line, 1, true)
-  local relay_failed_at = resolved and resolved.stdout:find("Relay failed to start.", 1, true)
-  local status_next_at = resolved and resolved.stdout:find("Next: remuda butler matrix status", 1, true)
+  local relay_failed_at = resolved and resolved.stdout:find("Relay failed to start: relay.start returned false", 1, true)
+  local status_next_at = resolved and resolved.stdout:find(
+    "Next: fix the config, then rerun remuda butler matrix setup ... --default --force", 1, true)
   assert(failed_reply and resolved and resolved.status == 0
     and table.concat(relay_events, ",") == "stop,start"
     and failed_invite_at and relay_failed_at and status_next_at
     and failed_invite_at < relay_failed_at and relay_failed_at < status_next_at
-    and resolved.stdout:match("([^\n]+)\n$") == "Next: remuda butler matrix status",
-    "a failed relay start must preserve invite guidance, report failure, and end with a status Next step")
+    and resolved.stdout:match("([^\n]+)\n$")
+      == "Next: fix the config, then rerun remuda butler matrix setup ... --default --force",
+    "a false relay start must preserve invite guidance, report the reason, and end with a recovery Next step")
+
+  matrix.relay.start = function()
+    error("bad\nconfig")
+  end
+  requests, resolved = {}, nil
+  local throwing_reply = matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--bot", "@butler-demo:example.org",
+    "--password-file", password, "--default", "--force" })
+  local throwing_error_line = resolved and resolved.stdout:match("([^\n]*Relay failed to start:[^\n]*)")
+  assert(throwing_reply and resolved and resolved.status == 0
+    and resolved.stdout:find(invite_line, 1, true)
+    and throwing_error_line and throwing_error_line:find("bad config", 1, true)
+    and resolved.stdout:match("([^\n]+)\n$")
+      == "Next: fix the config, then rerun remuda butler matrix setup ... --default --force",
+    "a throwing relay start must print its terminal-safe reason and an actionable setup recovery")
 
   local live_config = remuda._butler_matrix_config
   relay_events, started_config = {}, nil
