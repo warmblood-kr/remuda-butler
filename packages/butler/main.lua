@@ -556,7 +556,7 @@ end
 
 -- Resolve the path whether or not the file exists. Matrix commands report
 -- missing credentials themselves, with both resolved paths and setup help.
-local function configured_path(override_env, filename)
+local function resolve_path(override_env, filename, _what)
   local path = os.getenv(override_env)
   if not path or path == "" then
     local config_home = default_config_home()
@@ -589,24 +589,15 @@ local function load_topic_config()
   for name, setup in pairs(configured.templates or {}) do remuda.butler.template(name, setup) end
 end
 
--- Matrix is an optional Butler integration. An explicit override or either
--- conventional credential file requests it; retain both resolved paths so
--- its CLI can explain any missing file. With neither file nor override,
--- Butler remains a local Claude-session manager and simply omits the relay.
-local token_override = os.getenv("REMUDA_BUTLER_TOKEN")
-local config_override = os.getenv("REMUDA_BUTLER_CONFIG")
-local config_home = default_config_home()
-local default_token_path = config_home and config_home .. "/remuda/butler/token"
-local default_config_path = config_home and config_home .. "/remuda/butler/config"
-local token_path = configured_path("REMUDA_BUTLER_TOKEN", "token")
-local config_path = configured_path("REMUDA_BUTLER_CONFIG", "config")
-local matrix_requested = (token_override and token_override ~= "")
-  or (config_override and config_override ~= "")
-  or file_exists(default_token_path)
-  or file_exists(default_config_path)
+-- Matrix is an optional Butler integration. Retain both resolved paths even
+-- when absent so the CLI can explain what is missing. Start the relay only
+-- when both credential files are readable; otherwise it stays inactive and
+-- the CLI can guide the owner through setup.
+local token_path = resolve_path("REMUDA_BUTLER_TOKEN", "token", "token file")
+local config_path = resolve_path("REMUDA_BUTLER_CONFIG", "config", "config file")
 
 remuda._butler_matrix_paths = { token_path = token_path, config_path = config_path }
-if matrix_requested then
+if file_exists(token_path) and file_exists(config_path) then
   remuda._butler_matrix_config = { token_path = token_path, config_path = config_path }
 else
   remuda._butler_matrix_config = nil
