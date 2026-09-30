@@ -540,13 +540,64 @@ local function test_owner_invite_joins_writes_line_and_notices_once()
   assert(client:messages(NEW, notice) == 1, "the joined room must get the notice once")
   client:sync({ json = { next_batch = "s2", rooms = { invite = invite(NEW, OWNER) } } })
   client:pump()
-  assert(client:joins(NEW) == 1 and client:messages(NEW, notice) == 1,
-    "a repeated invite for a joined room must not join or notice again")
+  assert(client:joins(NEW) == 2 and client:messages(NEW, notice) == 1,
+    "a repeated owner invite for a configured room must retry join without repeating the notice")
   client:sync({ json = { next_batch = "s3", rooms = { join = owner_message(NEW, "$in-new") } } })
   assert(delivered_ids(delivered, "$in-new"),
     "a later owner message in the joined room must become mail (HOME rules)")
   relay:stop()
   remove_dir(dir)
+end
+
+local function test_configured_joined_room_owner_invite_retries_without_config_or_notice()
+  local original = "room=" .. NEW .. " how=operator\n"
+  local dir, path = invite_fixture(nil, original)
+  local before = read_text(path)
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  local ok, err = pcall(function()
+    client:sync({ json = { next_batch = "s1", rooms = { invite = invite(NEW, OWNER) } } })
+    client:sync({ json = { next_batch = "s2", rooms = { invite = invite(NEW, OWNER) } } })
+    assert(client:joins(NEW) == 1, "repeated syncs must not stack owner invite joins")
+    client:pump()
+    assert(client:joins(NEW) == 1, "an owner invite for a configured joined room must retry POST join")
+    assert(read_text(path) == before, "retrying a configured room must not rewrite its config line")
+    assert(client:messages(NEW, "Joined;") == 0, "retrying a configured room must not repeat Joined notice")
+    local special_invites = {}
+    for _, room in ipairs({ HOME, ALL }) do
+      for room_id, invitation in pairs(invite(room, OWNER)) do special_invites[room_id] = invitation end
+    end
+    client:sync({ json = { next_batch = "s3", rooms = { invite = special_invites } } })
+    client:pump()
+    assert(client:joins(HOME) == 0 and client:joins(ALL) == 0,
+      "HOME and ALL invites must be ignored")
+    assert(read_text(path) == before and client:messages(HOME, "Invite to") == 0,
+      "HOME and ALL invites must not change config or produce quarantine notices")
+  end)
+  relay:stop()
+  remove_dir(dir)
+  assert(ok, err)
+end
+
+local function test_owner_invite_in_baseline_sync_joins_and_writes_line()
+  local dir, path = invite_fixture()
+  local before = read_text(path)
+  local client, delivered = invite_client(), {}
+  local relay = relay_module.new({ config_path = path, matrix = client,
+    deliver = function(event) delivered[#delivered + 1] = event return true end })
+  assert(relay:start())
+  local ok, err = pcall(function()
+    client:sync({ json = { next_batch = "s0", rooms = { invite = invite(NEW, OWNER) } } })
+    client:pump()
+    assert(client:joins(NEW) == 1, "an owner invite in the baseline sync must POST join")
+    local line = room_line(path, NEW)
+    assert(line and line:find("how=owner-invite", 1, true),
+      "an owner invite in the baseline sync must write the owner-invite room line")
+    assert(read_text(path) ~= before, "an owner invite in the baseline sync must update config")
+  end)
+  relay:stop()
+  remove_dir(dir)
+  assert(ok, err)
 end
 
 local function test_stranger_invite_is_quarantined_with_home_next()
@@ -853,6 +904,8 @@ print("ok: Matrix relay resume, exactly-once, filters, state, acks, caps, fallba
 local invite_failures = {}
 for _, case in ipairs({
   { "test_owner_invite_joins_writes_line_and_notices_once", test_owner_invite_joins_writes_line_and_notices_once },
+  { "test_configured_joined_room_owner_invite_retries_without_config_or_notice", test_configured_joined_room_owner_invite_retries_without_config_or_notice },
+  { "test_owner_invite_in_baseline_sync_joins_and_writes_line", test_owner_invite_in_baseline_sync_joins_and_writes_line },
   { "test_stranger_invite_is_quarantined_with_home_next", test_stranger_invite_is_quarantined_with_home_next },
   { "test_conflicting_inviter_events_cannot_join", test_conflicting_inviter_events_cannot_join },
   { "test_unsafe_invite_room_is_quarantined_without_home_notice", test_unsafe_invite_room_is_quarantined_without_home_notice },

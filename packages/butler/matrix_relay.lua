@@ -375,6 +375,7 @@ function relay.new(options)
   local active, request_handle, request_token, retry_timer, backfill_timer = false, nil, nil, nil, nil
   local delivery_retry_waiting, delivery_retry_timers = {}, {}
   local reply_retry_timers, reply_in_flight = {}, {}
+  local joining = {}
   local generation = 0
   local failures = 0
   local instance = {}
@@ -854,6 +855,101 @@ function relay.new(options)
     end
   end
 
+  local function handle_invites(response)
+    local home_invite_notices, additional_invites = 0, 0
+    local invites = response.rooms and response.rooms.invite or {}
+    for room_id, invitation in pairs(invites) do
+      local room_kind = cfg.rooms[room_id]
+      if room_kind ~= "home" and room_kind ~= "all" and not joining[room_id] then
+        local inviter, matching_invites, same_inviter = nil, 0, true
+        local events = invitation and invitation.invite_state and invitation.invite_state.events
+        for _, event in ipairs(type(events) == "table" and events or {}) do
+          if type(event) == "table" and event.type == "m.room.member"
+            and event.state_key == cfg.self_mxid
+            and type(event.content) == "table" and event.content.membership == "invite" then
+            matching_invites = matching_invites + 1
+            if type(event.sender) ~= "string" or event.sender == "" then
+              same_inviter = false
+            else
+              if inviter and inviter ~= event.sender then same_inviter = false end
+              inviter = event.sender
+            end
+          end
+        end
+        if matching_invites > 0 then
+          local report_inviter = inviter or "unknown inviter"
+          if same_inviter and inviter and cfg.allowed_senders[inviter]
+            and member_kind(inviter, cfg) == "HUMAN" then
+            local added_room, add_error = room_kind == "joined", nil
+            if room_kind == nil then
+              added_room, add_error = matrix.config_add_room(config_path, room_id, "owner-invite")
+              if added_room then
+                cfg.rooms[room_id] = "joined"
+                cfg.room_how[room_id] = "owner-invite"
+              end
+            end
+            if added_room then
+              joining[room_id] = true
+              api.request_json({ method = "POST",
+                path = "/_matrix/client/v3/rooms/" .. percent_encode(room_id) .. "/join",
+                room = room_id, body = "{}", headers = { ["Content-Type"] = "application/json" },
+              }, function(result)
+                joining[room_id] = nil
+                if type(result) ~= "table" or result.error then
+                  if room_kind == nil then
+                    local removed, remove_error = matrix.config_remove_room(config_path, room_id)
+                    cfg.rooms[room_id], cfg.room_how[room_id] = nil, nil
+                    local detail = type(result) == "table" and result.error or "Matrix join failed"
+                    if not removed then detail = tostring(detail) .. "; config rollback failed: " .. tostring(remove_error) end
+                    warn_once("invite-join", room_id, "butler Matrix owner invite join failed for "
+                      .. terminal_safe_field(room_id, 512) .. ": " .. terminal_safe_field(tostring(detail), 512))
+                  else
+                    local detail = type(result) == "table" and result.error or "Matrix join failed"
+                    warn_once("invite-join", room_id, "butler Matrix owner invite join failed for "
+                      .. terminal_safe_field(room_id, 512) .. ": " .. terminal_safe_field(tostring(detail), 512))
+                  end
+                  return
+                end
+                if room_kind == nil then
+                  send_notice(room_id, "Joined; I read messages here from the owner.",
+                    "invite-notice", room_id)
+                end
+              end)
+            elseif room_kind == nil then
+              warn_once("invite-config", room_id, "butler could not add Matrix owner-invited room "
+                .. terminal_safe_field(room_id, 512) .. ": " .. terminal_safe_field(tostring(add_error), 512))
+            end
+          else
+            local ev = { event_id = "invite:" .. cap_field(room_id, 200) .. "|" .. cap_field(report_inviter, 200),
+              sender = report_inviter, type = "m.room.member", content = {} }
+            if quarantine_event(ev, "invite_not_allowlisted", room_id) then
+              local safe_to_notice = valid_room_id(room_id) and not room_id:find("'", 1, true)
+                and valid_mxid(report_inviter)
+              if safe_to_notice then
+                local safe_room = terminal_safe_field(room_id, 512)
+                local safe_inviter = terminal_safe_field(report_inviter, 256)
+                local text = "Invite to " .. safe_room .. " from " .. safe_inviter
+                  .. " was not accepted. Next: remuda butler matrix join " .. shell_quote(safe_room)
+                if home_invite_notices < 3 then
+                  home_invite_notices = home_invite_notices + 1
+                  send_notice(cfg.home_room, text, "invite-home-notice", room_id .. "\0" .. report_inviter)
+                else
+                  additional_invites = additional_invites + 1
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+    if additional_invites > 0 then
+      local text = tostring(additional_invites)
+        .. " more invites quarantined. Next: remuda butler matrix quarantine"
+      send_notice(cfg.home_room, text, "invite-summary-notice",
+        tostring(response.next_batch or state.since or "sync"))
+    end
+  end
+
   function instance._response(response, path)
     if path == SYNC_PATH then
       local refreshed = read_config(config_path)
@@ -863,6 +959,7 @@ function relay.new(options)
     end
     if path == SYNC_PATH and state.since == nil then
       if type(response.next_batch) ~= "string" then failed(); return end
+      handle_invites(response)
       state.since = response.next_batch
       persist()
       deliver_pending()
@@ -878,82 +975,7 @@ function relay.new(options)
           for _, id in ipairs(room_added) do added[#added + 1] = id end
         end
       end
-      local home_invite_notices, additional_invites = 0, 0
-      local invites = response.rooms and response.rooms.invite or {}
-      for room_id, invitation in pairs(invites) do
-        if cfg.rooms[room_id] == nil then
-          local inviter, matching_invites, same_inviter = nil, 0, true
-          local events = invitation and invitation.invite_state and invitation.invite_state.events
-          for _, event in ipairs(type(events) == "table" and events or {}) do
-            if type(event) == "table" and event.type == "m.room.member"
-              and event.state_key == cfg.self_mxid
-              and type(event.content) == "table" and event.content.membership == "invite" then
-              matching_invites = matching_invites + 1
-              if type(event.sender) ~= "string" or event.sender == "" then
-                same_inviter = false
-              else
-                if inviter and inviter ~= event.sender then same_inviter = false end
-                inviter = event.sender
-              end
-            end
-          end
-          if matching_invites > 0 then
-            local report_inviter = inviter or "unknown inviter"
-            if same_inviter and inviter and cfg.allowed_senders[inviter]
-              and member_kind(inviter, cfg) == "HUMAN" then
-              local added_room, add_error = matrix.config_add_room(config_path, room_id, "owner-invite")
-              if added_room then
-                cfg.rooms[room_id] = "joined"
-                cfg.room_how[room_id] = "owner-invite"
-                api.request_json({ method = "POST",
-                  path = "/_matrix/client/v3/rooms/" .. percent_encode(room_id) .. "/join",
-                  room = room_id, body = "{}", headers = { ["Content-Type"] = "application/json" },
-                }, function(result)
-                  if type(result) ~= "table" or result.error then
-                    local removed, remove_error = matrix.config_remove_room(config_path, room_id)
-                    cfg.rooms[room_id], cfg.room_how[room_id] = nil, nil
-                    local detail = type(result) == "table" and result.error or "Matrix join failed"
-                    if not removed then detail = tostring(detail) .. "; config rollback failed: " .. tostring(remove_error) end
-                    warn_once("invite-join", room_id, "butler Matrix owner invite join failed for "
-                      .. terminal_safe_field(room_id, 512) .. ": " .. terminal_safe_field(tostring(detail), 512))
-                    return
-                  end
-                  send_notice(room_id, "Joined; I read messages here from the owner.",
-                    "invite-notice", room_id)
-                end)
-              else
-                warn_once("invite-config", room_id, "butler could not add Matrix owner-invited room "
-                  .. terminal_safe_field(room_id, 512) .. ": " .. terminal_safe_field(tostring(add_error), 512))
-              end
-            else
-              local ev = { event_id = "invite:" .. cap_field(room_id, 200) .. "|" .. cap_field(report_inviter, 200),
-                sender = report_inviter, type = "m.room.member", content = {} }
-              if quarantine_event(ev, "invite_not_allowlisted", room_id) then
-                local safe_to_notice = valid_room_id(room_id) and not room_id:find("'", 1, true)
-                  and valid_mxid(report_inviter)
-                if safe_to_notice then
-                  local safe_room = terminal_safe_field(room_id, 512)
-                  local safe_inviter = terminal_safe_field(report_inviter, 256)
-                  local text = "Invite to " .. safe_room .. " from " .. safe_inviter
-                    .. " was not accepted. Next: remuda butler matrix join " .. shell_quote(safe_room)
-                  if home_invite_notices < 3 then
-                    home_invite_notices = home_invite_notices + 1
-                    send_notice(cfg.home_room, text, "invite-home-notice", room_id .. "\0" .. report_inviter)
-                  else
-                    additional_invites = additional_invites + 1
-                  end
-                end
-              end
-            end
-          end
-        end
-      end
-      if additional_invites > 0 then
-        local text = tostring(additional_invites)
-          .. " more invites quarantined. Next: remuda butler matrix quarantine"
-        send_notice(cfg.home_room, text, "invite-summary-notice",
-          tostring(response.next_batch or state.since or "sync"))
-      end
+      handle_invites(response)
       if type(response.next_batch) == "string" then state.since = response.next_batch end
       persist()
       deliver_pending(added)
