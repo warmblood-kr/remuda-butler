@@ -111,6 +111,7 @@ local DEFAULT_COMPACTION_CONFIG = {
   claude_completion_timeout = 180, failure_cooldown_seconds = 600,
   input_settle = 0.15,
 }
+local COMPACTION_MAIL_DEFER_SECONDS = 600
 local function compaction_config()
   local configured = remuda._butler_compaction_config or {}
   local out = {}
@@ -118,6 +119,47 @@ local function compaction_config()
     out[key] = tonumber(configured[key]) or fallback
   end
   return out
+end
+local function compaction_mail_status(name)
+  local agents = (remuda._butler_bus or {}).agents or {}
+  local agent = agents[name]
+  local mail = remuda._butler_mail
+  -- Missing identity/module fails open; a live lookup error fails closed as queued.
+  if not (agent and agent.id and type(mail) == "table" and type(mail.unread) == "function") then
+    return false, false, agent
+  end
+  local read, unread = pcall(mail.unread, agent.id)
+  if not read then return true, true, agent end
+  return (tonumber(unread) or 0) > 0, false, agent
+end
+local function compaction_has_queued_mail(name)
+  local queued = compaction_mail_status(name)
+  return queued
+end
+local function compaction_mail_defers(name, state, level, now)
+  local queued, lookup_failed, agent = compaction_mail_status(name)
+  if not queued then
+    state.mail_deferred_at = nil
+    state.mail_defer_alert_sent = nil
+    return false, false, false, false, agent
+  end
+  local deferred_at = tonumber(state.mail_deferred_at)
+  if level.level ~= "critical" and not deferred_at then
+    state.mail_deferred_at = now
+    deferred_at = now
+  end
+  local expired = deferred_at and now - deferred_at >= COMPACTION_MAIL_DEFER_SECONDS
+  if level.level ~= "critical" and not expired then return true, false, true, lookup_failed, agent end
+  return false, true, true, lookup_failed, agent
+end
+local function compaction_mail_alert(name, state, level, queued, lookup_failed, agent)
+  if not queued or state.mail_defer_alert_sent then return end
+  state.mail_defer_alert_sent = true
+  local why = lookup_failed and "mail lookup failed" or "mail remains unread"
+  local urgency = level.level == "critical" and "critical context" or "the 10 minute deferral limit"
+  pcall(remuda._butler_send, name, (agent and agent.parent) or "butler",
+    "Compaction is proceeding with unread Butler mail (" .. why .. ") for " .. tostring(name)
+      .. " due to " .. urgency .. "; please read the inbox.")
 end
 
 -- Public compaction units. These stay above the test-mode return so the
@@ -135,7 +177,7 @@ function remuda.butler.ctx_level(name)
   elseif used and used >= config.watch then level = "watch" end
   return { level = level, used = used, pct = pct }
 end
-function remuda.butler.is_idle(name)
+function remuda.butler.is_idle(name, allow_queued_mail)
   local ok, session = pcall(remuda.session, name)
   if not ok or not session then return false, "session unavailable" end
   if session.is_busy ~= false then return false, "busy" end
@@ -148,8 +190,8 @@ function remuda.butler.is_idle(name)
     end
   end
   local bus = remuda._butler_bus or {}
-  if (remuda._butler_compaction_has_queued_mail and remuda._butler_compaction_has_queued_mail(name))
-    or ((bus.pending_tasks or {})[name]) or ((bus.notices or {})[name]) then
+  if (not allow_queued_mail and compaction_has_queued_mail(name))
+      or ((bus.pending_tasks or {})[name]) or ((bus.notices or {})[name]) then
     return false, "queued work"
   end
   local captured, screen = pcall(remuda.capture, name)
@@ -196,7 +238,14 @@ function remuda.butler.compaction_policy(name, state, dry_run)
     current.idle_ticks, current.last_idle_capture_at = 0, nil
     return false, "skipped_cooldown", level.used or "?"
   end
-  local idle, reason = remuda.butler.is_idle(name)
+  local now = (remuda._butler_compaction_now or os.time)()
+  local defer_mail, allow_queued_mail, queued_mail, mail_lookup_failed, mail_agent =
+    compaction_mail_defers(name, current, level, now)
+  if defer_mail then
+    current.idle_ticks, current.last_idle_capture_at = 0, nil
+    return false, "skipped_queued", level.used or "?"
+  end
+  local idle, reason = remuda.butler.is_idle(name, allow_queued_mail)
   if not idle then
     current.idle_ticks, current.last_idle_capture_at = 0, nil
     local reasons = {
@@ -206,7 +255,6 @@ function remuda.butler.compaction_policy(name, state, dry_run)
     }
     return false, reasons[reason] or "skipped_unknown", level.used or "?"
   end
-  local now = (remuda._butler_compaction_now or os.time)()
   local config = compaction_config()
   if current.last_idle_capture_at and now - current.last_idle_capture_at < config.capture_gap then
     return false, "skipped_idle", level.used or "?"
@@ -215,6 +263,9 @@ function remuda.butler.compaction_policy(name, state, dry_run)
   current.idle_ticks = current.idle_ticks + 1
   local required = level.level == "watch" and 2 or 1
   if current.idle_ticks < required then return false, "skipped_idle", level.used or "?" end
+  if allow_queued_mail and not dry_run then
+    compaction_mail_alert(name, current, level, queued_mail, mail_lookup_failed, mail_agent)
+  end
   current.idle_ticks, current.last_idle_capture_at = 0, nil
   current.cooldown_ticks = config.cooldown_ticks
   return true, "sent", level.used or "?"
@@ -234,11 +285,11 @@ function remuda._butler_compaction_failure_cooldown(state, now, force)
   return true, until_at
 end
 
-function remuda._butler_compaction_action_guard(session_name)
-  return remuda._butler_compaction_preflight(session_name)
+function remuda._butler_compaction_action_guard(session_name, allow_queued_mail)
+  return remuda._butler_compaction_preflight(session_name, allow_queued_mail)
 end
 
-function remuda._butler_compaction_preflight(session_name)
+function remuda._butler_compaction_preflight(session_name, allow_queued_mail)
   local found, session = pcall(remuda.session, session_name)
   if not found or not session then return "session unavailable" end
   local attached = session.attached == true
@@ -252,9 +303,7 @@ function remuda._butler_compaction_preflight(session_name)
   end
   if attached then return "human attached" end
   if session.is_busy ~= false then return "busy" end
-  if remuda._butler_compaction_has_queued_mail and remuda._butler_compaction_has_queued_mail(session_name) then
-    return "queued mail"
-  end
+  if not allow_queued_mail and compaction_has_queued_mail(session_name) then return "queued mail" end
   local captured, screen = pcall(remuda.capture, session_name)
   if not captured or type(screen) ~= "string" then return "session unavailable" end
   local agent = remuda._butler_bus.agents[session_name] or {}
@@ -1094,12 +1143,6 @@ local function choose(candidates, opts, done)
   local chooser_record = { id = chooser_id, name = opts.name }
   lifecycle.active_choosers[chooser_id] = chooser_record
   local cancelled = false
-  local function trace(attempt)
-    if remuda._butler_session_trace then
-      remuda._butler_session_trace("candidate", attempt.kind .. ": " .. attempt.reason
-        .. ": " .. (attempt.detail or ""))
-    end
-  end
   local function callback(name, kind)
     if cancelled then return end
     if schedule then remuda.cancel(schedule); schedule = nil end
@@ -1136,7 +1179,7 @@ local function choose(candidates, opts, done)
     attempts[#attempts + 1] = attempt
     if not entry then
       attempt.reason, attempt.detail = "not_found", "agent kind is not registered"
-      trace(attempt); start_next(); return
+      start_next(); return
     end
     local spec = opts.spec(id)
     local argv = (type(opts.argv) == "function" and opts.argv(id, spec)) or opts.argv
@@ -1151,13 +1194,13 @@ local function choose(candidates, opts, done)
       local found = os.execute("command -v " .. quoted .. " >/dev/null 2>&1")
       if found ~= true and found ~= 0 then
         attempt.reason, attempt.detail = "not_found", executable .. " not found in PATH"
-        trace(attempt); start_next(); return
+        start_next(); return
       end
     end
     local ok, name = pcall(remuda.new, opts.name, argv, opts.cwd, opts.env(id, spec))
     if not ok then
       attempt.reason, attempt.detail = "spawn_error", one_line(name)
-      trace(attempt); start_next(); return
+      start_next(); return
     end
     state = { id = id, entry = entry, attempt = attempt, name = name,
       started = os.time(), timeout = opts.timeout or readiness_timeout(),
@@ -1176,12 +1219,12 @@ local function choose(candidates, opts, done)
     if state.closing then
       state.close_ticks = state.close_ticks + 1
       if not alive(state.name) then
-        trace(state.attempt); state = nil; start_next()
+        state = nil; start_next()
       elseif state.close_ticks >= 10 then
         state.attempt.reason = "spawn_error"
         state.attempt.detail = (state.attempt.detail or "") .. "; failed to kill failed session"
           .. (state.close_error and (": " .. tostring(state.close_error)) or "")
-        trace(state.attempt); callback(nil, nil)
+        callback(nil, nil)
       end
       return
     end
@@ -3549,7 +3592,16 @@ function remuda._butler_compaction_execute(session_name, force)
   if not restore_pending and remuda._butler_compaction_failure_cooldown(state, now, force == true) then
     return "skipped_cooldown"
   end
-  local blocked = not restore_pending and remuda._butler_compaction_preflight(session_name)
+  local level = remuda.butler.ctx_level(session_name)
+  local allow_queued_mail = false
+  local queued_mail, mail_lookup_failed, mail_agent
+  if not restore_pending then
+    local defer_mail
+    defer_mail, allow_queued_mail, queued_mail, mail_lookup_failed, mail_agent =
+      compaction_mail_defers(session_name, state, level, now)
+    if defer_mail then return "skipped_queued" end
+  end
+  local blocked = not restore_pending and remuda._butler_compaction_preflight(session_name, allow_queued_mail)
   if blocked then
     local statuses = {
       busy = "skipped_busy", ["busy state unknown"] = "skipped_busy",
@@ -3558,7 +3610,7 @@ function remuda._butler_compaction_execute(session_name, force)
     }
     return statuses[blocked] or "skipped_unknown"
   end
-  local action_blocked = remuda._butler_compaction_action_guard(session_name)
+  local action_blocked = remuda._butler_compaction_action_guard(session_name, allow_queued_mail)
   if action_blocked then
     if restore_pending then return "restore_pending" end
     if action_blocked == "human attached" then return "skipped_attached" end
@@ -3566,9 +3618,11 @@ function remuda._butler_compaction_execute(session_name, force)
     return "skipped_unknown"
   end
   if type(remuda.expect) ~= "function" then return "compaction disabled: core lacks remuda.expect" end
+  if allow_queued_mail then
+    compaction_mail_alert(session_name, state, level, queued_mail, mail_lookup_failed, mail_agent)
+  end
 
   local config = compaction_config()
-  local level = remuda.butler.ctx_level(session_name)
   local detail = "ctx=" .. tostring(level.used or "?")
   local ctx_before = tonumber(level.used)
   local prior_model, settings_path
