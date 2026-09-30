@@ -7,8 +7,8 @@ local USAGE = [[Usage: remuda butler matrix setup [OPTIONS]
   --password-file PATH   Use this chosen bot password; with --register it is saved privately. If omitted, one is generated and saved privately.
   --bot ID               The bot's Matrix user ID, like @butler-home:example.org (the account setup logs in as).
   --token-file PATH      Use an existing access token from this file instead of a password.
-  --register             Create the bot account on a server that allows registration tokens.
-  --registration-token-file PATH  Read the homeserver registration token from this file (ask the server admin; this is not a bot access token).
+  --register             Create the bot account; prompt for its registration token if no file is given.
+  --registration-token-file PATH  Optional file with the homeserver registration token (ask the server admin; this is not a bot access token).
   --dir PATH             Save the private token and config files in this directory.
   --default              Save to the default live Butler config directory.
   --force                Replace existing token or config files.
@@ -16,7 +16,9 @@ local USAGE = [[Usage: remuda butler matrix setup [OPTIONS]
   --pin SHA256HEX         Trust this HTTPS certificate fingerprint.
   --ca-file PATH         Trust the HTTPS certificate authority in this file.
 
-Example: remuda butler matrix setup --homeserver https://matrix.example.org --owner @alice:example.org --register --registration-token-file /path/to/server-registration-token --password-file /path/to/chosen-password --dir /path/to/private/butler --pin <64-hex-sha256>]]
+Example: remuda butler matrix setup --homeserver https://matrix.example.org --owner @alice:example.org --register --dir /path/to/private/butler --pin <64-hex-sha256>]]
+
+matrix.REJECTED_REGISTRATION_TOKEN = "The server rejected that registration token. Nothing was created or written."
 
 local function absolute(path)
   return type(path) == "string" and (path:sub(1, 1) == "/" or path:match("^%a:[/\\]") ~= nil)
@@ -346,7 +348,7 @@ function matrix.setup_prepare(args)
   elseif has_password and has_token then
     return nil, "choose one of --password-file or --token-file"
   elseif not has_password and not has_token then
-    return nil, "provide --password-file, --token-file, or --register --registration-token-file"
+    return nil, "provide --password-file, --token-file, or --register"
   end
   options.secret_kind = options.register and "registration"
     or (options.password_file and "password" or "token")
@@ -591,7 +593,8 @@ end
 -- is separate from setup_network so callers can choose this path explicitly.
 function matrix.setup_register(options, on_done)
   local done_called, cancelled, active = false, false, nil
-  local rejected_token = "The server rejected that registration token. Nothing was created or written."
+  local rejected_token = matrix.REJECTED_REGISTRATION_TOKEN
+  local registration_disabled = "Account registration is disabled on this server. Nothing was created or written."
   local missing_flow = "This server does not accept registration tokens. Next: this server needs an admin-created bot; run setup with --token-file PATH (the bot access token)."
   local function done(result)
     if done_called or cancelled then return end
@@ -665,7 +668,7 @@ function matrix.setup_register(options, on_done)
       or type(challenge.session) ~= "string" or challenge.session == ""
       or type(challenge.flows) ~= "table" then
       if status == 403 or (challenge and challenge.errcode == "M_FORBIDDEN") then
-        return fail(rejected_token)
+        return fail(registration_disabled, challenge and challenge.errcode)
       end
       return fail("Matrix account registration request failed"
         .. (status and (" (HTTP " .. tostring(status) .. ")") or ""),

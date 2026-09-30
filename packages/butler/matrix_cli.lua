@@ -238,23 +238,25 @@ function matrix.cli(args, agent)
       error(message, 0)
     end
     local cancelled, completed, active = { value = false }, { value = false }, nil
-    local reply = remuda.pending({ timeout = 90, on_cancel = function()
+    local reply = remuda.pending({ timeout = plan.prompt_registration_token and 300 or 90, on_cancel = function()
       cancelled.value = true
       if active and active.cancel then active:cancel() end
     end })
     local prompt_attempts, prompt_notice = 0, nil
     local prompt_label = "Registration token for " .. plan.homeserver
       .. ", from its admin (hidden). This is not an access token:"
-    local rejected_registration_token = "The server rejected that registration token. Nothing was created or written."
+    local rejected_registration_token = matrix.REJECTED_REGISTRATION_TOKEN
+    local original_bot_mxid = plan.bot_mxid
     local ask_registration_token
-    local function fail_registration_prompt(message, needs_terminal)
+    local function fail_registration_prompt(message, needs_terminal, next_line)
       if cancelled.value or completed.value then return end
       completed.value = true
       local lines = {}
       if message and message ~= "" then lines[#lines + 1] = message end
       if needs_terminal then lines[#lines + 1] = "The hidden registration token prompt needs a terminal." end
       lines[#lines + 1] = "Nothing was written."
-      lines[#lines + 1] = "Next: rerun with --registration-token-file PATH"
+      lines[#lines + 1] = next_line
+        or "Next: rerun with --registration-token-file PATH"
       reply:resolve(1, "", table.concat(lines, "\n") .. "\n")
     end
     local function finish_setup(result)
@@ -296,6 +298,10 @@ function matrix.cli(args, agent)
     end
     ask_registration_token = function()
       if cancelled.value or completed.value then return end
+      if type(reply.prompt_secret) ~= "function" then
+        return fail_registration_prompt(nil, false,
+          "Next: rerun with --registration-token-file PATH (this remuda core has no hidden prompt; upgrade with remuda upgrade)")
+      end
       prompt_attempts = prompt_attempts + 1
       local label = prompt_notice and (prompt_notice .. " " .. prompt_label) or prompt_label
       reply:prompt_secret({ label = label, callback = function(secret, prompt_error)
@@ -317,15 +323,16 @@ function matrix.cli(args, agent)
         if not token then
           if token_error == "empty" then
             if prompt_attempts < 3 then
-              prompt_notice = "registration token is empty"
+              prompt_notice = "The registration token was empty."
               return ask_registration_token()
             end
-            return fail_registration_prompt("registration token is empty")
+            return fail_registration_prompt("The registration token was empty.")
           end
-          return fail_registration_prompt("The registration token exceeds 4 KiB.")
+          return fail_registration_prompt("The registration token could not be validated.")
         end
         plan.secret = token
         prompt_notice = nil
+        plan.bot_mxid = original_bot_mxid
         active = matrix.setup_network(plan, finish_setup)
         if cancelled.value and active and active.cancel then active:cancel() end
       end })

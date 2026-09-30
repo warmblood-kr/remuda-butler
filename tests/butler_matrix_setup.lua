@@ -11,9 +11,13 @@ return function(matrix)
     and setup_help:find("in Element: click your avatar, top left", 1, true)
     and setup_help:find("the account setup logs in as", 1, true)
     and setup_help:find("--register", 1, true)
+    and setup_help:find("prompt for its registration token if no file is given", 1, true)
+    and setup_help:find("--registration-token-file PATH  Optional", 1, true)
     and setup_help:find("homeserver registration token", 1, true)
     and setup_help:find("generated and saved privately", 1, true)
-    and setup_help:find("Example: remuda butler matrix setup", 1, true),
+    and setup_help:find("Example: remuda butler matrix setup", 1, true)
+    and setup_help:find("--register --dir /path/to/private/butler", 1, true)
+    and not setup_help:find("--register --registration-token-file", 1, true),
     "setup usage should explain each option in plain words and show a full example")
   assert(matrix.cli_usage():find("Example:", 1, true)
     and matrix.cli_usage():find("https://<homeserver>", 1, true)
@@ -374,7 +378,9 @@ return function(matrix)
   requests = {}
   local resolved
   local prompt_specs = {}
-  remuda.pending = function()
+  local pending_timeout
+  remuda.pending = function(options)
+    pending_timeout = options and options.timeout
     local reply = { resolve = function(_, status, stdout, stderr)
       resolved = { status = status, stdout = stdout, stderr = stderr }
     end }
@@ -388,7 +394,7 @@ return function(matrix)
   local prompt_reply = matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
     "--owner", "@alice:example.org", "--register", "--bot", "@butler-prompt:example.org",
     "--dir", prompt_output })
-  assert(prompt_reply and #prompt_specs == 1 and not resolved,
+  assert(prompt_reply and pending_timeout == 300 and #prompt_specs == 1 and not resolved,
     "registration setup should request its token before starting network work")
   assert(prompt_specs[1].label == "Registration token for http://matrix.invalid, from its admin (hidden). This is not an access token:",
     "registration prompt should explain which token is needed")
@@ -427,6 +433,54 @@ return function(matrix)
     and #requests == 6 and #prompt_specs == 3,
     "three token rejections should stop safely without exposing a token")
 
+  prompt_specs, requests, resolved = {}, {}, nil
+  local disabled_reply = matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--register", "--bot", "@butler-disabled:example.org",
+    "--dir", prompt_output })
+  assert(disabled_reply and #prompt_specs == 1)
+  local disabled_token = "never-sent-registration-token"
+  prompt_specs[1].callback(disabled_token, nil)
+  assert(#requests == 1 and not request_json(requests[1]).auth,
+    "the first register request must not send the registration token")
+  requests[1].callback({ status = 403, body = '{"errcode":"M_FORBIDDEN","error":"Registration has been disabled"}' })
+  assert(resolved and resolved.status == 1 and #prompt_specs == 1
+    and resolved.stderr:find("registration is disabled", 1, true)
+    and not resolved.stderr:find(disabled_token, 1, true),
+    "a 403 before token submission should report disabled registration without prompting again")
+
+  prompt_specs, requests, resolved = {}, {}, nil
+  local drift_reply = matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--register", "--bot", "@butler-drift:example.org",
+    "--dir", prompt_output })
+  assert(drift_reply and #prompt_specs == 1)
+  prompt_specs[1].callback("first-prompt-token", nil)
+  requests[1].callback({ status = 400, body = '{"errcode":"M_USER_IN_USE"}' })
+  assert(request_json(requests[2]).username == "butler-drift-2")
+  requests[2].callback({ status = 401,
+    body = '{"session":"drift-session","flows":[{"stages":["m.login.registration_token"]}]}' })
+  requests[3].callback({ status = 403, body = '{"errcode":"M_FORBIDDEN"}' })
+  assert(#prompt_specs == 2 and not resolved)
+  prompt_specs[2].callback("second-prompt-token", nil)
+  assert(request_json(requests[4]).username == "butler-drift",
+    "a new token attempt should restart account-name selection from the original bot ID")
+
+  prompt_specs, requests, resolved = {}, {}, nil
+  local prompt_pending = remuda.pending
+  remuda.pending = function(options)
+    pending_timeout = options and options.timeout
+    return { resolve = function(_, status, stdout, stderr)
+      resolved = { status = status, stdout = stdout, stderr = stderr }
+    end }
+  end
+  local old_core_ok, old_core_reply = pcall(matrix.cli, { "matrix", "setup",
+    "--homeserver", "http://matrix.invalid", "--owner", "@alice:example.org",
+    "--register", "--bot", "@butler-old-core:example.org", "--dir", prompt_output })
+  remuda.pending = prompt_pending
+  assert(old_core_ok and old_core_reply and resolved and resolved.status == 1
+    and resolved.stderr:find("Nothing was written.", 1, true)
+    and resolved.stderr:find("Next: rerun with --registration-token-file PATH (this remuda core has no hidden prompt; upgrade with remuda upgrade)", 1, true),
+    "an older core without prompt_secret should fail with a clear upgrade hint")
+
   for _, prompt_error in ipairs({ "not_a_terminal", "refused", "too_long", "cancelled" }) do
     prompt_specs, requests, resolved = {}, {}, nil
     local error_output = root .. "/prompt-error-" .. prompt_error
@@ -462,12 +516,12 @@ return function(matrix)
     if attempt < 3 then
       assert(not resolved and #prompt_specs == attempt + 1,
         "an empty token answer should ask again and consume one of the three tries")
-      assert(prompt_specs[attempt + 1].label:find("registration token is empty", 1, true),
+      assert(prompt_specs[attempt + 1].label:find("The registration token was empty.", 1, true),
         "the retry prompt should explain that the registration token is empty")
     end
   end
   assert(resolved and resolved.status == 1
-    and resolved.stderr:find("registration token is empty", 1, true)
+    and resolved.stderr:find("The registration token was empty.", 1, true)
     and resolved.stderr:find("Nothing was written.", 1, true)
     and resolved.stderr:find("Next: rerun with --registration-token-file PATH", 1, true)
     and #prompt_specs == 3 and #requests == 0,
@@ -515,6 +569,7 @@ return function(matrix)
     registration_token_file, "--bot", "@butler-no-rng:example.org", "--dir", no_rng_output })
   io.open = real_io_open
   assert(no_rng_reply and resolved and resolved.status == 1
+    and pending_timeout == 90
     and resolved.stderr:find("This system has no secure random source for a bot password. Next: rerun with --password-file PATH (a password you choose)", 1, true)
     and #requests == 0
     and read(no_rng_output .. "/token") == nil
