@@ -171,8 +171,10 @@ local function choose(candidates, opts, done)
       local lower_screen = screen:lower()
       local trust_state = dialog.trust and trust_modal_state(dialog, screen) or nil
       local displayed_workspace = dialog.trust == "claude" and claude_workspace_path(screen) or nil
-      local workspace_matches_launch = not opts.trust_path_gate or not displayed_workspace
-        or displayed_workspace:gsub("/+$", "") == tostring(opts.cwd or ""):gsub("/+$", "")
+      -- An unreadable Claude workspace path fails closed: the human decides.
+      local workspace_matches_launch = not opts.trust_path_gate or dialog.trust ~= "claude"
+        or (displayed_workspace ~= nil
+          and displayed_workspace:gsub("/+$", "") == tostring(opts.cwd or ""):gsub("/+$", ""))
       local matched = dialog.trust and trust_state ~= "absent"
         or (dialog.match and lower_screen:find(dialog.match:lower(), 1, true))
       if matched then

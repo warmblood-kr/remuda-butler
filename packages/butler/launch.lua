@@ -547,7 +547,8 @@ local function make_topic(name, template, kind, parent, task, model, cwd)
   local auto_trust = created_now and not template
     and directory_is_under(root, topic_config.project_home)
     and (kind ~= "claude" or allowed_trust_path)
-  if auto_trust then
+  -- A non-root --cwd launches elsewhere; a root grant would outlive it unused.
+  if auto_trust and (cwd == nil or cwd == root) then
     bus.trusted_launch_dirs = bus.trusted_launch_dirs or {}
     bus.trusted_launch_dirs[root] = true
   end
