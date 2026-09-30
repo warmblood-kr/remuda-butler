@@ -732,8 +732,14 @@ local function statusline(args, caller)
     statusline_tag(model_name), statusline_integer(used),
     statusline_integer(window.context_window_size), statusline_integer(window.used_percentage))
 
-  if type(args[2]) == "string" and args[2] ~= "" then
-    pcall(remuda.fs.write_atomic, args[2], line .. "\n")
+  local path = args[2]
+  local drive_rooted = type(path) == "string" and path:match("^%a:")
+    and (path:sub(3, 3) == "/" or path:sub(3, 3) == "\\")
+  local absolute = type(path) == "string" and (
+    path:sub(1, 1) == "/" or path:sub(1, 2) == "\\\\" or drive_rooted
+  )
+  if absolute and path:match("%.status$") then
+    pcall(remuda.fs.write_atomic, path, line .. "\n")
   end
   return line
 end

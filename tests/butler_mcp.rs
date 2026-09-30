@@ -87,7 +87,7 @@ fn butler_status_is_a_live_mcp_tool_not_a_terminal_scrape() {
     let dir = scratch("butler-status");
     let path = daemon::socket_path_in(&dir, "s");
     let _daemon = daemon_at(&path);
-    let requested_status_path = dir.join("status").to_string_lossy().into_owned();
+    let requested_status_path = dir.join("status.status").to_string_lossy().into_owned();
     let status_path = match client::request(
         &path,
         &Request::Eval {
@@ -158,17 +158,32 @@ fn butler_status_is_a_live_mcp_tool_not_a_terminal_scrape() {
         std::fs::read_to_string(&status_path).expect("read status file"),
         format!("{status_line}\n")
     );
+    let failed_write_path = dir.join("missing").join("write-fail.status");
     let failed_write_line = eval(
         &path,
         &format!(
             "return remuda._dispatch_extension_command('butler', {{'statusline', {}}}, {{stdin = {}}})",
-            serde_json::to_string(&format!("{status_path}/child")).unwrap(),
+            serde_json::to_string(&failed_write_path.display().to_string()).unwrap(),
             serde_json::to_string(snapshot).unwrap(),
         ),
     );
     assert_eq!(
         failed_write_line, status_line,
         "a telemetry write failure must keep status output"
+    );
+    let non_status_path = dir.join("not-a-status-file.txt");
+    let non_status_line = eval(
+        &path,
+        &format!(
+            "return remuda._dispatch_extension_command('butler', {{'statusline', {}}}, {{stdin = {}}})",
+            serde_json::to_string(&non_status_path.display().to_string()).unwrap(),
+            serde_json::to_string(snapshot).unwrap(),
+        ),
+    );
+    assert_eq!(non_status_line, status_line);
+    assert!(
+        !non_status_path.exists(),
+        "non-.status path must not be written"
     );
     let reply = call(&path, "butler_status", json!({}));
     assert_eq!(reply["result"]["isError"], false, "status failed: {reply}");
