@@ -497,9 +497,14 @@ function remuda._butler_inbox(name)
     for alias, agent in pairs(bus.agents) do
       if agent.id == id then
         local recovery = bus.notice_recoveries[alias]
+        local pending, reshow = bus.notices[alias], false
+        for _, message_id in ipairs(pending and pending.message_order or {}) do
+          reshow = reshow or (pending.reshow and pending.reshow[message_id]) == true
+        end
         if recovery and recovery.draft and recovery.draft ~= "" then
           notice_recovery_error(alias, recovery, "mail was read while notice recovery was active; draft preserved")
-        else
+        elseif not reshow then
+          -- A queued re-show is of already-read mail: reading keeps it.
           bus.notices[alias], bus.notice_recoveries[alias] = nil, nil
         end
       end

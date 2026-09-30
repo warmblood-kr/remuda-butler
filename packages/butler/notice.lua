@@ -843,11 +843,13 @@ local function last_unanswered_leader_message(alias, agent)
     end
   end
   if not newest or mail.is_unread(agent.id, newest.id) then return nil end
-  for id, message in pairs(bus.messages) do
-    if id > newest.id and message.from and message.from.id == agent.id then
-      for _, to in ipairs(message.to or {}) do
-        if to.id == leader.id then return nil end
-      end
+  -- Answered: a later message from the member in the leader's inbox log,
+  -- which is durable (bus.messages starts empty after a daemon restart).
+  mail.unread(leader.id) -- loads the leader's delivered set
+  for id in pairs(bus.mail_delivered[leader.id] or {}) do
+    if id > newest.id then
+      local message = mail.find_message(id)
+      if message and message.from and message.from.id == agent.id then return nil end
     end
   end
   return newest
@@ -878,9 +880,9 @@ local function note_context_drop(alias, agent, instance)
   local prior = sample.used
   sample.used = used
   if not used or not prior then return end
-  if used > prior then sample.armed = true; return end
   local members = remuda._butler_compaction_members_state or {}
   if (members[agent.id] or {}).compaction_in_progress then sample.armed = false; return end
+  if used > prior then sample.armed = true; return end
   if sample.armed and used < prior / 2 then
     sample.armed = false
     remuda._butler_notice_compacted(alias)
