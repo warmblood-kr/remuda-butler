@@ -440,6 +440,110 @@ fn a_single_mail_notice_waits_for_two_quiet_seconds() {
 }
 
 #[test]
+fn restart_seeds_three_unread_mails_only_when_the_pane_is_ready() {
+    let (path, _daemon) = butler_with_member("notice-unread-restart");
+    setup_mail_notice_clock(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        for i = 1, 3 do remuda._notice_test_send('m1', 'restart ' .. i) end
+        -- A daemon restart loses the in-memory pending notice and dedupe state,
+        -- but leaves the persisted unread mailbox intact.
+        remuda._butler_bus.notices = {}
+        remuda._butler_bus.notice_seen = {}
+        state.busy.m1 = true
+        remuda._butler_deliver_notices()
+        local before_ready = #state.typed
+        state.busy.m1 = false
+        remuda._butler_deliver_notices()
+        local before_debounce = #state.typed
+        state.now = 1.99
+        remuda._butler_deliver_notices()
+        local early = #state.typed
+        state.now = 2
+        remuda._butler_deliver_notices()
+        return table.concat({ tostring(before_ready), tostring(before_debounce), tostring(early),
+          tostring(#state.typed), tostring(state.typed[1] and state.typed[1].text) }, '|')
+        "#,
+    );
+    assert_eq!(
+        got,
+        "0|0|0|1|3 new Butler messages arrived. Read them: remuda butler inbox"
+    );
+}
+
+#[test]
+fn a_new_member_gets_waiting_mail_after_its_launch_brief() {
+    let (path, _daemon) = butler_with_member("notice-unread-new-member");
+    setup_mail_notice_clock(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        -- Model mail already waiting while the launch brief keeps the pane busy.
+        remuda._notice_test_send('m1', 'waiting for launch')
+        remuda._butler_bus.notices = {}
+        remuda._butler_bus.notice_seen = {}
+        state.busy.m1 = true
+        remuda._butler_deliver_notices()
+        local before_brief = #state.typed
+        state.busy.m1 = false -- the welcome/launch brief has settled
+        remuda._butler_deliver_notices()
+        state.now = 2
+        remuda._butler_deliver_notices()
+        local text = state.typed[1] and state.typed[1].text
+        return tostring(before_brief) .. '|' .. #state.typed .. '|'
+          .. tostring(text and text:match('^Butler message .+ from operator arrived%. Read it: remuda butler inbox$') ~= nil)
+        "#,
+    );
+    assert_eq!(got, "0|1|true");
+}
+
+#[test]
+fn no_unread_mail_does_not_seed_a_notice() {
+    let (path, _daemon) = butler_with_member("notice-unread-empty");
+    setup_mail_notice_clock(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        remuda._butler_deliver_notices()
+        state.now = 10
+        remuda._butler_deliver_notices()
+        return tostring(#state.typed) .. '|' .. tostring(remuda._butler_bus.notices.m1)
+        "#,
+    );
+    assert_eq!(got, "0|nil");
+}
+
+#[test]
+fn a_pending_deposit_notice_is_not_duplicated_by_unread_seeding() {
+    let (path, _daemon) = butler_with_member("notice-unread-pending-deposit");
+    setup_mail_notice_clock(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        remuda._notice_test_send('m1', 'already pending')
+        local count_before = remuda._butler_bus.notices.m1.count
+        local notify, calls = remuda._butler_notify, 0
+        remuda._butler_notify = function(...)
+          calls = calls + 1
+          return notify(...)
+        end
+        remuda._butler_deliver_notices()
+        state.now = 2
+        remuda._butler_deliver_notices()
+        local text = state.typed[1] and state.typed[1].text
+        return table.concat({ tostring(count_before), tostring(calls), tostring(#state.typed),
+          tostring(text and text:match('^Butler message .+ from operator arrived%. Read it: remuda butler inbox$') ~= nil) }, '|')
+        "#,
+    );
+    assert_eq!(got, "1|1|1|true");
+}
+
+#[test]
 fn five_mail_notice_waits_for_two_quiet_seconds_after_the_last_mail() {
     let (path, _daemon) = butler_with_member("notice-burst-debounce");
     setup_mail_notice_clock(&path);
