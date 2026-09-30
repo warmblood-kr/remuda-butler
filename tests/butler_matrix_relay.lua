@@ -1721,6 +1721,44 @@ local function test_rooms_public_term_lists_public_rows()
   assert(listed, list_error)
 end
 
+local function test_rooms_lists_open_mode_room_metadata_and_denies()
+  local dir, path = invite_fixture(OWNER, table.concat({
+    "rooms=open",
+    "room=" .. NEW .. " how=invite inviter=" .. STRANGER,
+    "deny_room=!blocked:example.org",
+    "deny_room=#blocked:example.org",
+    "deny_server=evil.example",
+  }, "\n") .. "\n")
+  with_alias_http(path, function() error("matrix rooms should not make an HTTP request") end, function(calls)
+    local json_result = capture_matrix_cli({ "matrix", "--json", "rooms" })
+    local envelope = assert(matrix.decode_json(json_result.stdout))
+    local data = assert(envelope.json)
+    assert(json_result.code == 0 and data.mode == "open", "rooms JSON must show the current mode")
+    local joined
+    for _, room in ipairs(data.rooms) do
+      if room.room == NEW then joined = room end
+    end
+    assert(joined and joined.kind == "joined" and joined.how == "invite"
+      and joined.inviter == STRANGER,
+      "rooms JSON must list each joined room with kind, how, and inviter")
+    local deny = {}
+    for _, line in ipairs(data.deny_lines) do deny[line] = true end
+    assert(deny["deny_room=!blocked:example.org"] and deny["deny_room=#blocked:example.org"]
+      and deny["deny_server=evil.example"], "rooms JSON must include every deny config line")
+
+    local human = capture_matrix_cli({ "matrix", "rooms" })
+    assert(human.code == 0 and human.stdout:find("Rooms mode: open", 1, true)
+      and human.stdout:find(NEW, 1, true) and human.stdout:find("joined", 1, true)
+      and human.stdout:find("invite; inviter " .. STRANGER, 1, true)
+      and human.stdout:find("Deny: deny_room=!blocked:example.org", 1, true)
+      and human.stdout:find("Deny: deny_room=#blocked:example.org", 1, true)
+      and human.stdout:find("Deny: deny_server=evil.example", 1, true),
+      "rooms human output must show mode, room metadata, and deny lines")
+    assert(#calls == 0, "matrix rooms must remain a local config view")
+  end)
+  remove_dir(dir)
+end
+
 local function test_invalid_room_id_hint_mentions_element_x_alias_fallback()
   local dir, path = invite_fixture()
   with_operator_config(path, 200, function()
@@ -2158,6 +2196,7 @@ for _, case in ipairs({
   { "test_public_name_with_next_batch_is_ambiguous", test_public_name_with_next_batch_is_ambiguous },
   { "test_public_room_hostile_fields_are_sanitised_in_join_and_listing", test_public_room_hostile_fields_are_sanitised_in_join_and_listing },
   { "test_rooms_public_term_lists_public_rows", test_rooms_public_term_lists_public_rows },
+  { "test_rooms_lists_open_mode_room_metadata_and_denies", test_rooms_lists_open_mode_room_metadata_and_denies },
   { "test_invalid_room_id_hint_mentions_element_x_alias_fallback", test_invalid_room_id_hint_mentions_element_x_alias_fallback },
   { "test_join_failure_rolls_back_room_line", test_join_failure_rolls_back_room_line },
   { "test_joined_room_survives_restart", test_joined_room_survives_restart },
