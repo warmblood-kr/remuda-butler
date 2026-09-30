@@ -469,6 +469,61 @@ return function(matrix)
   local prompt_output = root .. "/prompted-registration"
   assert(real_mkdir_new(prompt_output))
   local prompt_token = "prompted-registration-token"
+
+  requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+  wizard_reply = matrix.cli({ "matrix", "setup" })
+  line_specs[1].callback("ftp://matrix.invalid", nil)
+  assert(resolved and resolved.status == 1
+    and resolved.stderr:find("Matrix setup arguments", 1, true) == nil
+    and resolved.stderr:find("must be an absolute http:// or https:// URL", 1, true)
+    and #line_specs == 1 and #requests == 0,
+    "the wizard should reject an invalid homeserver URL before asking for more values: "
+      .. tostring(resolved and resolved.stderr) .. " line prompts=" .. tostring(#line_specs))
+
+  requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+  wizard_reply = matrix.cli({ "matrix", "setup" })
+  line_specs[1].callback("http://matrix.invalid", nil)
+  line_specs[2].callback("alice", nil)
+  assert(resolved and resolved.status == 1
+    and resolved.stderr:find("is not a Matrix user ID", 1, true)
+    and #line_specs == 2 and #requests == 0,
+    "the wizard should reject a malformed owner MXID before continuing")
+
+  local old_pending = remuda.pending
+  remuda.pending = function()
+    return { resolve = function(_, status, stdout, stderr)
+      resolved = { status = status, stdout = stdout, stderr = stderr }
+    end }
+  end
+  resolved = nil
+  matrix.cli({ "matrix", "setup" })
+  remuda.pending = old_pending
+  assert(resolved and resolved.status == 1
+    and resolved.stderr:find("needs a Remuda core with prompt_line", 1, true)
+    and select(2, resolved.stderr:gsub("Next:", "")) == 1,
+    "an older core without prompt_line should refuse the wizard with an upgrade hint")
+
+  for _, prompt_error in ipairs({ "not_a_terminal", "too_long", "cancelled" }) do
+    requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+    wizard_reply = matrix.cli({ "matrix", "setup" })
+    line_specs[1].callback(nil, prompt_error)
+    assert(resolved and resolved.status == 1 and resolved.stderr:find("Nothing was written.", 1, true)
+      and select(2, resolved.stderr:gsub("Next:", "")) == 1 and #requests == 0,
+      "wizard prompt errors should refuse safely: " .. prompt_error)
+  end
+
+  requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+  wizard_reply = matrix.cli({ "matrix", "setup" })
+  line_specs[1].callback("https://matrix.invalid", nil)
+  line_specs[2].callback("@alice:example.org", nil)
+  line_specs[3].callback(ca_file, nil)
+  assert(#line_specs == 4 and line_specs[4].label:find("HTTPS CA file: " .. ca_file, 1, true)
+    and line_specs[4].label:find("Continue? Type Y", 1, true),
+    "the wizard should validate and summarize an HTTPS CA file path")
+  line_specs[4].callback("N", nil)
+  assert(resolved and resolved.status == 1 and #requests == 0,
+    "declining the CA-file wizard should not start registration")
+
   requests, resolved, prompt_specs = {}, nil, {}
   local prompt_reply = matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
     "--owner", "@alice:example.org", "--register", "--bot", "@butler-prompt:example.org",

@@ -355,8 +355,14 @@ function matrix.cli(args, agent)
     local execute_setup
     local function begin_wizard()
       prompt_line("Matrix homeserver URL:", nil, function(homeserver)
+        local normalized, scheme_or_error = matrix.setup_validate_homeserver(homeserver)
+        if not normalized then return prompt_failure(tostring(scheme_or_error)) end
+        local flags = { "--homeserver", normalized, "--owner" }
         prompt_line("Your Matrix user ID (for example @alice:example.org):", nil, function(owner)
-          local flags = { "--homeserver", homeserver, "--owner", owner, "--register", "--default" }
+          local valid_owner, owner_error = matrix.setup_validate_mxid(owner, "--owner")
+          if not valid_owner then return prompt_failure(tostring(owner_error)) end
+          flags[4] = valid_owner
+          flags[5], flags[6] = "--register", "--default"
           local function confirm_setup()
             local wizard_plan, validation_error = matrix.setup_prepare(flags)
             if not wizard_plan then
@@ -389,12 +395,6 @@ function matrix.cli(args, agent)
                 execute_setup(wizard_plan)
               end)
           end
-          local normalized, scheme_or_error = matrix.setup_validate_homeserver(homeserver)
-          if not normalized then return prompt_failure(tostring(scheme_or_error)) end
-          flags[2] = normalized
-          local valid_owner, owner_error = matrix.setup_validate_mxid(owner, "--owner")
-          if not valid_owner then return prompt_failure(tostring(owner_error)) end
-          flags[4] = valid_owner
           if scheme_or_error == "https" then
             prompt_line("HTTPS trust: enter a 64-character SHA-256 certificate pin or an absolute CA file path:",
               nil, function(trust)
