@@ -67,6 +67,14 @@ stores at most 200 records, with a body preview capped at 1 KiB and a 30-day
 expiry. Quarantined events are never delivered through Butler mail. The relay
 state file containing these records is mode 600 on Unix hosts.
 
+Run `remuda butler matrix setup` to configure Butler; with `--register` and no
+`--registration-token-file`, setup asks for the homeserver registration token
+using a hidden prompt.
+
+```text
+remuda butler matrix setup --homeserver https://matrix.example.org --owner @alice:example.org --register --pin <64-hex-sha256> --default
+```
+
 The token is stored in a separate token file. The newline-delimited config
 file contains:
 
