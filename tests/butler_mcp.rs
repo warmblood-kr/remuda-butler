@@ -301,6 +301,74 @@ fn cli_launch_parents_to_the_calling_member_not_butler() {
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.agents.m4)"), "nil");
 }
 
+#[test]
+fn butler_close_is_limited_to_own_idle_members_unless_forced() {
+    let dir = scratch("butler-close");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+    eval(&path, r#"
+      remuda._butler_agent_builders.fake = function() return {'sleep', '100'} end
+      remuda._butler_launch('fake', 'lead')
+      remuda._butler_launch('fake', 'kid', nil, 'lead')
+      remuda._butler_launch('fake', 'other')
+      remuda._butler_close_test_calls = {}
+      remuda.close = function(name)
+        table.insert(remuda._butler_close_test_calls, name)
+        return 'closed ' .. name
+      end
+      remuda.butler.is_idle = function() return remuda._butler_close_test_idle, 'busy' end
+      remuda._butler_close_test_idle = true
+    "#);
+    let leader_id = eval(&path, "return remuda._butler_bus.agents.lead.id");
+    let other_id = eval(&path, "return remuda._butler_bus.agents.other.id");
+    let cli = |caller_id: &str, args: &str| {
+        eval(&path, &format!(
+            "return remuda._extension_commands.butler({{'close', {args}}}, {{env={{REMUDA_BUTLER_AGENT_ID={caller_id:?}}}}})"
+        ))
+    };
+    let not_owner = cli(&other_id, "'kid'");
+    assert!(not_owner.contains("only your direct members") && not_owner.ends_with("Next: remuda butler sessions"), "{not_owner}");
+    assert_eq!(eval(&path, "return #remuda._butler_close_test_calls"), "0");
+
+    eval(&path, "remuda._butler_close_test_idle = false");
+    let busy = cli(&leader_id, "'kid'");
+    assert!(busy.contains("is busy") && busy.ends_with("Next: wait for it to become idle, or use --force"), "{busy}");
+    assert_eq!(eval(&path, "return #remuda._butler_close_test_calls"), "0");
+
+    eval(&path, "remuda._butler_send('butler', 'kid', 'unread close guard')");
+    eval(&path, "remuda._butler_close_test_idle = true");
+    let unread = cli(&leader_id, "'kid'");
+    assert!(unread.contains("unread Butler mail") && unread.ends_with("Next: read the inbox, or use --force"), "{unread}");
+    assert_eq!(eval(&path, "return #remuda._butler_close_test_calls"), "0");
+
+    let forced = cli(&other_id, "'kid', '--force'");
+    assert!(forced.contains("only your direct members"), "--force bypassed ownership: {forced}");
+    assert_eq!(eval(&path, "return #remuda._butler_close_test_calls"), "0");
+    let forced = cli(&leader_id, "'kid', '--force'");
+    assert_eq!(forced, "closed kid");
+    assert_eq!(eval(&path, "return remuda._butler_close_test_calls[1]"), "kid");
+
+    for name in ["lead", "butler", "missing"] {
+        let result = cli(&leader_id, &format!("{name:?}"));
+        assert!(result.contains("cannot close") && result.contains("Next: remuda butler sessions"), "{result}");
+    }
+}
+
+#[test]
+fn butler_close_is_registered_and_unknown_mcp_caller_cannot_close() {
+    let dir = scratch("butler-close-tool");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+    eval(&path, "remuda._butler_agent_builders.fake = function() return {'sleep', '100'} end; remuda._butler_launch('fake', 'm1')");
+    assert!(listed(&path).contains(&"butler_close".to_string()));
+    let reply = call(&path, "butler_close", json!({"name":"m1", "force":true}));
+    assert_eq!(reply["result"]["isError"], true, "{reply}");
+    assert!(text_of(&reply).contains("unknown caller: run from a Butler session"), "{reply}");
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.agents.m1 ~= nil)"), "true");
+}
+
 fn screen_of(path: &Path, session: &str, until: &str) -> String {
     let deadline = Instant::now() + PATIENCE;
     loop {
