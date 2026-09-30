@@ -863,7 +863,8 @@ function matrix.setup_write(options, result)
 
   -- Hand-added deny rules outlive a --force rewrite (#146).
   for line in (backups[options.config_path] or ""):gmatch("[^\r\n]+") do
-    if line:match("^deny_room=") or line:match("^deny_server=") then
+    -- Mirror the config parser: the key before the first "=" is trimmed.
+    if line:match("^%s*deny_room%s*=") or line:match("^%s*deny_server%s*=") then
       contents[options.config_path] = contents[options.config_path] .. line .. "\n"
     end
   end
