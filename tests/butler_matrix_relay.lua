@@ -1047,6 +1047,184 @@ local function test_agent_invite_is_not_joined()
   remove_dir(dir)
 end
 
+local function open_invite_fixture(extra)
+  return invite_fixture(OWNER, "rooms=open\n" .. (extra or ""))
+end
+
+local function invite_with_state(room, inviter, alias)
+  local events = {
+    { type = "m.room.member", sender = inviter, state_key = "@bot:example.org",
+      content = { membership = "invite" } },
+  }
+  if alias then
+    table.insert(events, 1, { type = "m.room.canonical_alias", sender = inviter,
+      state_key = "", content = { alias = alias } })
+  end
+  return { [room] = { invite_state = { events = events } } }
+end
+
+local function test_open_mode_stranger_invite_joins_and_notifies_once()
+  local dir, path = open_invite_fixture()
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  local alias = "#open:example.org"
+  local invitation = invite_with_state(NEW, STRANGER, alias)
+  client:sync({ json = { next_batch = "s1", rooms = { invite = invitation } } })
+  client:pump()
+  assert(client:joins(NEW) == 1, "open mode must join a stranger invite exactly once")
+  local line = room_line(path, NEW)
+  assert(line and line:find("how=invite", 1, true)
+    and line:find("inviter=" .. STRANGER, 1, true),
+    "open mode must record how=invite and the inviter in config")
+  assert(client:messages(HOME, "Joined " .. NEW .. " (" .. alias .. ") from " .. STRANGER .. " invite.") == 1,
+    "open mode must post one HOME line with the room, canonical alias, and inviter")
+  client:sync({ json = { next_batch = "s2", rooms = { invite = invitation } } })
+  client:pump()
+  assert(client:messages(HOME, "Joined " .. NEW) == 1, "a repeated invite must not repeat the HOME line")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function test_open_mode_denies_room_alias_room_server_and_inviter_server()
+  local cases = {
+    { name = "room id", room = NEW, inviter = STRANGER, alias = "#safe:example.org",
+      deny = "deny_room=" .. NEW },
+    { name = "canonical alias", room = NEW, inviter = STRANGER, alias = "#denied:example.org",
+      deny = "deny_room=#denied:example.org" },
+    { name = "room server", room = "!other:denied.example", inviter = STRANGER,
+      alias = "#safe:example.org", deny = "deny_server=denied.example" },
+    { name = "inviter server", room = NEW, inviter = "@mallory:denied.example",
+      alias = "#safe:example.org", deny = "deny_server=denied.example" },
+  }
+  for index, spec in ipairs(cases) do
+    local dir, path = open_invite_fixture(spec.deny .. "\n")
+    local client, delivered = invite_client(), {}
+    local relay = started_relay(path, client, delivered)
+    local invitation = invite_with_state(spec.room, spec.inviter, spec.alias)
+    client:sync({ json = { next_batch = "s" .. index, rooms = { invite = invitation } } })
+    client:pump()
+    assert(client:joins(spec.room) == 0, spec.name .. " denial must refuse the invite before POST join")
+    local item
+    for _, q in ipairs(relay:quarantine_list()) do
+      if q.reason == "invite_denied" then item = q end
+    end
+    assert(item and item.room_id == spec.room,
+      spec.name .. " denial must quarantine as invite_denied")
+    relay:stop()
+    remove_dir(dir)
+  end
+end
+
+local function test_open_mode_sender_allowlist_still_quarantines()
+  local dir, path = open_invite_fixture("room=" .. NEW .. " how=invite inviter=" .. STRANGER .. "\n")
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  client:sync({ json = { next_batch = "s1", rooms = { join = {
+    [NEW] = { timeline = { events = {
+      { type = "m.room.message", event_id = "$open-blocked", sender = STRANGER,
+        content = { msgtype = "m.text", body = "not allowed" } },
+    } } },
+  } } } })
+  assert(not delivered_ids(delivered, "$open-blocked"), "a non-allowlisted sender must never become mail")
+  local item
+  for _, q in ipairs(relay:quarantine_list()) do
+    if q.event_id == "$open-blocked" then item = q end
+  end
+  assert(item and item.reason == "sender_not_allowlisted",
+    "a non-allowlisted sender in an open-mode room must be quarantined")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function test_open_mode_daily_join_cap_quarantines_twenty_first_invite()
+  local dir, path = open_invite_fixture()
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  local invites = {}
+  for index = 1, 21 do
+    local room = "!cap" .. index .. ":example.org"
+    invites[room] = invite(room, STRANGER)[room]
+  end
+  client:sync({ json = { next_batch = "s1", rooms = { invite = invites } } })
+  client:pump()
+  local joined = 0
+  for index = 1, 21 do
+    if client:joins("!cap" .. index .. ":example.org") > 0 then joined = joined + 1 end
+  end
+  assert(joined == 20, "open mode must auto-join at most 20 distinct rooms per rolling day")
+  local capped
+  for _, q in ipairs(relay:quarantine_list()) do
+    if q.reason == "invite_cap" then capped = q end
+  end
+  assert(capped, "the 21st open-mode invite must be quarantined as invite_cap")
+  assert(client:messages(HOME, "Auto-join cap reached (20/day); 1 invites quarantined.") == 1,
+    "a sync that hits the cap must post one cap summary to HOME")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function test_open_mode_repeated_invite_for_joined_room_does_not_join_again()
+  local dir, path = open_invite_fixture("room=" .. NEW .. " how=invite inviter=" .. OWNER .. "\n")
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  local invitation = invite(NEW, OWNER)
+  client:sync({ json = { next_batch = "s1", rooms = { invite = invitation } } })
+  client:pump()
+  client:sync({ json = { next_batch = "s2", rooms = { invite = invitation } } })
+  client:pump()
+  assert(client:joins(NEW) == 0, "an invite for an already joined room must not auto-join again")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function test_open_mode_hostile_invite_state_is_sanitized()
+  local dir, path = open_invite_fixture()
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  local hostile_inviter = "@ali\27ce:example.org"
+  local hostile_alias = "#room\226\128\174:example.org"
+  local invitation = invite_with_state(NEW, hostile_inviter, hostile_alias)
+  client:sync({ json = { next_batch = "s1", rooms = { invite = invitation } } })
+  client:pump()
+  local line = room_line(path, NEW)
+  assert(line and line:find("inviter=@alice:example.org", 1, true)
+    and not line:find("\27", 1, true), "the config inviter field must be sanitized")
+  local joined = client
+  local home_message
+  for _, args in ipairs(client.requests) do
+    local body = args.text or args.body or ""
+    if args.room == HOME and body:find("Joined " .. NEW, 1, true) then home_message = body end
+  end
+  assert(home_message and home_message:find("#room:example.org", 1, true)
+    and not home_message:find("\226\128\174", 1, true)
+    and not home_message:find("\27", 1, true), "HOME invite text must strip ESC and bidi controls")
+  assert(joined:joins(NEW) == 1, "sanitized invite fields must still permit a valid open-mode invite")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function test_open_mode_conflicting_inviter_events_remain_refused()
+  local dir, path = open_invite_fixture()
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  local invitation = { [NEW] = { invite_state = { events = {
+    { type = "m.room.member", sender = OWNER, state_key = "@bot:example.org",
+      content = { membership = "invite" } },
+    { type = "m.room.member", sender = STRANGER, state_key = "@bot:example.org",
+      content = { membership = "invite" } },
+  } } } }
+  client:sync({ json = { next_batch = "s1", rooms = { invite = invitation } } })
+  client:pump()
+  assert(client:joins(NEW) == 0, "conflicting invite events must never be joined in open mode")
+  local item
+  for _, q in ipairs(relay:quarantine_list()) do
+    if q.reason == "invite_not_allowlisted" then item = q end
+  end
+  assert(item and item.room_id == NEW, "conflicting invite events must remain quarantined")
+  relay:stop()
+  remove_dir(dir)
+end
+
 local function http_fake(status, calls)
   return { request = function(spec)
     calls[#calls + 1] = spec
@@ -1861,6 +2039,13 @@ for _, case in ipairs({
   { "test_long_invite_identifiers_dedupe_home_notice", test_long_invite_identifiers_dedupe_home_notice },
   { "test_invite_home_notice_cap_adds_one_summary", test_invite_home_notice_cap_adds_one_summary },
   { "test_agent_invite_is_not_joined", test_agent_invite_is_not_joined },
+  { "test_open_mode_stranger_invite_joins_and_notifies_once", test_open_mode_stranger_invite_joins_and_notifies_once },
+  { "test_open_mode_denies_room_alias_room_server_and_inviter_server", test_open_mode_denies_room_alias_room_server_and_inviter_server },
+  { "test_open_mode_sender_allowlist_still_quarantines", test_open_mode_sender_allowlist_still_quarantines },
+  { "test_open_mode_daily_join_cap_quarantines_twenty_first_invite", test_open_mode_daily_join_cap_quarantines_twenty_first_invite },
+  { "test_open_mode_repeated_invite_for_joined_room_does_not_join_again", test_open_mode_repeated_invite_for_joined_room_does_not_join_again },
+  { "test_open_mode_hostile_invite_state_is_sanitized", test_open_mode_hostile_invite_state_is_sanitized },
+  { "test_open_mode_conflicting_inviter_events_remain_refused", test_open_mode_conflicting_inviter_events_remain_refused },
   { "test_config_add_room_pads_short_config", test_config_add_room_pads_short_config },
   { "test_join_room_alias_resolves_and_labels_output", test_join_room_alias_resolves_and_labels_output },
   { "test_unknown_room_alias_is_reported_without_config_change", test_unknown_room_alias_is_reported_without_config_change },
