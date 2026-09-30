@@ -350,27 +350,45 @@ local function bottom_screen_lines(screen, limit)
   end
   return bottom
 end
-function remuda._butler_compaction_is_unknown_dialog(screen)
-  if type(screen) ~= "string" then return false end
+local function unknown_dialog_signature(screen)
+  if type(screen) ~= "string" then return nil end
   local lines = bottom_screen_lines(screen, 8)
-  local top_border, bottom_border, selected_option, option_line, prompt_line = false, false, false, nil, nil
+  local top_border, bottom_border, selected_option_line, first_option_line, last_option_line, prompt_line
   for i, line in ipairs(lines) do
     local trimmed = line:gsub("^%s+", "")
     local prompt = trimmed:gsub("%s+$", "")
     local first, last = trimmed:sub(1, 3), trimmed:sub(-3)
     if (first == "╭" or first == "┌" or first == "╔")
-      and (last == "╮" or last == "┐" or last == "╗") then top_border = true end
+      and (last == "╮" or last == "┐" or last == "╗") then top_border = i end
     if (first == "╰" or first == "└" or first == "╚")
-      and (last == "╯" or last == "┘" or last == "╝") then bottom_border = true end
+      and (last == "╯" or last == "┘" or last == "╝") then bottom_border = i end
     if numbered_option(line) then
-      option_line = i
-      if trimmed:sub(1, #"❯") == "❯" or trimmed:sub(1, #"›") == "›" then selected_option = true end
+      first_option_line = first_option_line or i
+      last_option_line = i
+      if not selected_option_line
+          and (trimmed:sub(1, #"❯") == "❯" or trimmed:sub(1, #"›") == "›") then
+        selected_option_line = i
+      end
     end
     if prompt == "❯" or prompt == "›" or prompt == ">" then prompt_line = i end
   end
-  return (top_border and bottom_border) or selected_option
-    or (option_line and prompt_line and prompt_line > option_line and prompt_line - option_line <= 2)
-    or false
+  local first, last
+  if top_border and bottom_border and top_border < bottom_border then
+    first, last = top_border, bottom_border
+  elseif selected_option_line then
+    first, last = first_option_line, last_option_line
+    if prompt_line and prompt_line > last and prompt_line - last <= 2 then last = prompt_line end
+  elseif last_option_line and prompt_line and prompt_line > last_option_line
+      and prompt_line - last_option_line <= 2 then
+    first, last = first_option_line, prompt_line
+  end
+  if not first then return nil end
+  local matched = {}
+  for i = first, last do matched[#matched + 1] = lines[i] end
+  return table.concat(matched, "\n")
+end
+function remuda._butler_compaction_is_unknown_dialog(screen)
+  return unknown_dialog_signature(screen) ~= nil
 end
 function remuda._butler_compaction_sequence(prior_model)
   if type(prior_model) == "string" and prior_model ~= "" and prior_model ~= "?" then
@@ -3720,19 +3738,19 @@ function remuda._butler_compaction_execute(session_name, force)
   end
   local function wait_for(id, matcher, action, timeout, on_timeout)
     local branches = { { id = id, match = matcher, action = action } }
-    local model_confirm_state = { screen = nil, captures = 0, started_at = nil, last_capture_at = nil }
-    local unknown_state = { screen = nil, captures = 0, started_at = nil, last_capture_at = nil }
-    -- The daemon's periodic capture source ticks once per second. Allow a
-    -- small scheduling margin while keeping unsettled screens bounded.
-    local stable_captures, stable_timeout = 3, 3
-    local function stable_screen(state, screen, candidate)
-      if not candidate then
-        state.screen, state.captures, state.started_at, state.last_capture_at = nil, 0, nil, nil
+    local model_confirm_state = { signature = nil, captures = 0, started_at = nil, last_capture_at = nil }
+    local unknown_state = { signature = nil, captures = 0, started_at = nil, last_capture_at = nil }
+    -- The daemon captures every second; allow skipped ticks while keeping the
+    -- settle wait bounded. Repeated output events within one second count once.
+    local stable_captures, stable_timeout = 3, 5
+    local function stable_screen(state, signature)
+      if not signature then
+        state.signature, state.captures, state.started_at, state.last_capture_at = nil, 0, nil, nil
         return false
       end
       local now = os.time()
-      if state.screen ~= screen then
-        state.screen, state.captures = screen, 1
+      if state.signature ~= signature then
+        state.signature, state.captures = signature, 1
         state.started_at = state.started_at or now
         state.last_capture_at = now
       elseif now > state.last_capture_at then
@@ -3744,26 +3762,30 @@ function remuda._butler_compaction_execute(session_name, force)
     local function stable_wait_expired(state)
       return state.started_at ~= nil and os.time() - state.started_at >= stable_timeout
     end
-    local function model_confirm_matches(screen)
-      if type(screen) ~= "string" then return false end
+    local function model_confirm_signature(screen)
+      if type(screen) ~= "string" then return nil end
       local lines = bottom_screen_lines(screen, 18)
       for index = 1, #lines - 1 do
         if index > #lines - 8
             and lines[index]:find("❯%s*1%.%s+Yes")
             and lines[index + 1]:find("%d%.%s+No, go back") then
           for title_row = math.max(1, index - 10), index - 1 do
-            if lines[title_row]:find("Switch model?", 1, true) then return true end
+            if lines[title_row]:find("Switch model?", 1, true) then
+              local dialog = {}
+              for row = title_row, index + 1 do dialog[#dialog + 1] = lines[row] end
+              return table.concat(dialog, "\n")
+            end
           end
         end
       end
-      return false
+      return nil
     end
     if agent.kind == "claude" and (id == "model-sonnet" or id == "model-restored") then
       local confirmation_sent = false
       table.insert(branches, {
         id = "claude-model-confirm",
         match = function(screen)
-          return stable_screen(model_confirm_state, screen, model_confirm_matches(screen))
+          return stable_screen(model_confirm_state, model_confirm_signature(screen))
         end,
         action = function()
           if not confirmation_sent then
@@ -3778,16 +3800,17 @@ function remuda._butler_compaction_execute(session_name, force)
     local ok, handle = pcall(remuda.expect, session_name, branches,
       -- This prompt is accepted only during the Claude model-switch watchers.
       -- All other unknown screens continue through the existing fail path.
-      { timeout = math.max(tonumber(timeout) or 0, stable_timeout + 1), interval = 0.1,
+      { timeout = timeout, interval = 0.1,
       unknown = function(screen)
         local model_watcher = agent.kind == "claude" and (id == "model-sonnet" or id == "model-restored")
-        if model_watcher and model_confirm_matches(screen) then
-          stable_screen(unknown_state, screen, false)
+        local model_signature = model_watcher and model_confirm_signature(screen)
+        if model_signature then
+          stable_screen(unknown_state, nil)
           return stable_wait_expired(model_confirm_state)
         end
-        stable_screen(model_confirm_state, screen, false)
-        local unknown = remuda._butler_compaction_is_unknown_dialog(screen)
-        return stable_screen(unknown_state, screen, unknown) or stable_wait_expired(unknown_state)
+        stable_screen(model_confirm_state, nil)
+        local unknown_signature = unknown_dialog_signature(screen)
+        return stable_screen(unknown_state, unknown_signature) or stable_wait_expired(unknown_state)
       end,
       on_unknown = function()
         if agent.kind == "claude" and (id == "model-sonnet" or id == "compact-complete") then
@@ -3798,7 +3821,22 @@ function remuda._butler_compaction_execute(session_name, force)
         end
         fail("unrecognized dialog during " .. id)
       end,
-      on_timeout = on_timeout or function() fail("timed out waiting for " .. id) end,
+      on_timeout = function(screen, handle)
+        local model_watcher = agent.kind == "claude" and (id == "model-sonnet" or id == "model-restored")
+        if unknown_state.started_at or (model_watcher and model_confirm_state.started_at) then
+          if agent.kind == "claude" and (id == "model-sonnet" or id == "compact-complete") then
+            state.restore_pending = prior_model
+            state.restore_pending_attempts = 0
+            state.restore_pending_attempt_active = nil
+            state.restore_pending_failure_notified = nil
+          end
+          fail("unrecognized dialog during " .. id)
+        elseif on_timeout then
+          on_timeout(screen, handle)
+        else
+          fail("timed out waiting for " .. id)
+        end
+      end,
       on_error = function(err) fail("compaction watcher error: " .. tostring(err)) end }, false)
     if not ok then fail("could not start " .. id .. " watcher: " .. tostring(handle)) end
     return ok

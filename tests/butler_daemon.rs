@@ -6078,8 +6078,8 @@ done
             eval(&path, "remuda._butler_bus.agents['fake-unsafe-model'].model = 'opus; /compact'");
         }
         if name == "fake-model-confirm" || name == "fake-model-confirm-transient"
-            || name == "fake-model-confirm-changing-status" {
-            eval(&path, "remuda._butler_compaction_config.claude_completion_timeout = 2");
+            || name == "fake-model-confirm-changing-status" || name == "fake-model-confirm-with-status" {
+            eval(&path, "remuda._butler_compaction_config.claude_completion_timeout = 6");
         }
         wait_for(&path, name, "MODEL:");
         if name == "fake-mid-turn" {
