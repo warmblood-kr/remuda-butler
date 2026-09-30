@@ -6645,7 +6645,13 @@ fn butler_codex_compaction_switches_to_luna_for_the_session_and_restores() {
     );
     let token_str = token_path.to_string_lossy().to_string();
     let config_str = config_path.to_string_lossy().to_string();
-    let data_str = std::env::var("XDG_DATA_HOME").expect("test XDG_DATA_HOME");
+    // A private data home: the restore record file must not be shared with
+    // tests running in parallel in this process.
+    let data_home = dir.join("data");
+    let mods = PathBuf::from(std::env::var_os("XDG_DATA_HOME").expect("XDG_DATA_HOME"));
+    std::fs::create_dir_all(data_home.join("remuda/butler")).expect("data home");
+    let _ = std::os::unix::fs::symlink(mods.join("remuda/mods"), data_home.join("remuda/mods"));
+    let data_str = data_home.to_string_lossy().to_string();
     let daemon = Daemon::spawn_with_env(
         &dir,
         &[
