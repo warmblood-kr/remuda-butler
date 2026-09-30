@@ -233,6 +233,29 @@ local function test_allowlisted_media_types_and_sender_filter()
   cleanup_fixture(dir, config_path)
 end
 
+local function test_allowlisted_media_without_url_is_quarantined()
+  local dir, config_path = fixture()
+  local client, delivered = scripted_client(), {}
+  local relay = relay_module.new({ config_path = config_path, matrix = client,
+    deliver = function(event) delivered[#delivered + 1] = event return true end,
+  })
+  assert(relay:start())
+  relay._response({ next_batch = "s0" }, "/_matrix/client/v3/sync")
+  relay._response({ next_batch = "s1", rooms = { join = {
+    ["!room:example.org"] = { timeline = { events = {
+      { type = "m.room.message", event_id = "$no-url-image", sender = "@alice:example.org",
+        content = { msgtype = "m.image", body = "image without a media URL" } },
+    } } },
+  } } }, "/_matrix/client/v3/sync")
+  local quarantined = relay:quarantine_list()
+  assert(#delivered == 0, "an allowlisted image without a URL must not enter mail")
+  assert(quarantined[1] and quarantined[1].event_id == "$no-url-image"
+    and quarantined[1].reason == "unsupported_message_type",
+    "an allowlisted image without a URL should retain the previous unsupported type quarantine")
+  relay:stop()
+  cleanup_fixture(dir, config_path)
+end
+
 local function test_download_next_command(body)
   local line = assert(body:match("Next: ([^\n]+)"), "media output has no download Next line")
   assert(matrix.cli_usage():find("[-o PATH] download MXC", 1, true),
@@ -825,6 +848,7 @@ end
 
 test_baseline_resume_filters_and_envelope()
 test_allowlisted_media_types_and_sender_filter()
+test_allowlisted_media_without_url_is_quarantined()
 test_download_next_command("media: image\nfilename: chart.png\nmimetype: image/png\n"
   .. "size: 12345 bytes\nmxc: mxc://example.org/chart\n"
   .. "Next: remuda butler matrix -o PATH download mxc://example.org/chart")

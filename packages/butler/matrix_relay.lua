@@ -829,6 +829,8 @@ function relay.new(options)
           elseif ev.type ~= "m.room.message" then reason = "unsupported_event_type"
           elseif type(ev.sender) ~= "string" or ev.sender == "" then reason = "missing_sender"
           elseif not cfg.allowed_senders[ev.sender] then reason = "sender_not_allowlisted"
+          elseif MEDIA_MSGTYPES[content.msgtype] and media_uri(content) == nil then
+            reason = "unsupported_message_type"
           elseif content.msgtype ~= "m.text" and content.msgtype ~= "m.notice" and content.msgtype ~= "m.emote"
               and not MEDIA_MSGTYPES[content.msgtype] then
             reason = "unsupported_message_type"
