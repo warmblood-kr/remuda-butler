@@ -1127,6 +1127,7 @@ function relay.new(options)
         local inviter, invite_event_id, matching_invites, same_inviter = nil, nil, 0, true
         local canonical_aliases = {}
         local changed_invite_metadata = false
+        local room_name
         local invite_state = invitation.invite_state
         local events = type(invite_state) == "table" and invite_state.events or nil
         for _, event in ipairs(type(events) == "table" and events or {}) do
@@ -1150,6 +1151,10 @@ function relay.new(options)
               local alias = matrix.sanitize_directory_text(raw_alias, 128)
               if alias ~= raw_alias then changed_invite_metadata = true end
               if matrix.valid_room_alias(raw_alias) then canonical_aliases[raw_alias] = true end
+            elseif event.type == "m.room.name" and event.state_key == ""
+              and type(event.content) == "table" and type(event.content.name) == "string"
+              and room_name == nil then
+              room_name = event.content.name
             end
           end
         end
@@ -1310,7 +1315,10 @@ function relay.new(options)
               if safe_to_notice then
                 local safe_room = terminal_safe_field(room_id, 512)
                 local safe_inviter = terminal_safe_field(report_inviter, 256)
-                local text = "Invite to " .. safe_room .. " from " .. safe_inviter
+                local safe_room_name = type(room_name) == "string"
+                  and matrix.utf8_prefix(matrix.sanitize_directory_text(room_name, #room_name), 128) or ""
+                if safe_room_name == "" then safe_room_name = "(unnamed room)" end
+                local text = "Invite to " .. safe_room_name .. " (" .. safe_room .. ") from " .. safe_inviter
                   .. " was not accepted. Next: remuda butler matrix join " .. shell_quote(safe_room)
                 if home_invite_notices < 3 then
                   home_invite_notices = home_invite_notices + 1

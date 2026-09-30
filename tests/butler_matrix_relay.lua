@@ -999,9 +999,9 @@ local function invite_client()
   return client
 end
 
-local function invite(room, inviter)
+local function invite(room, inviter, room_name)
   return { [room] = { invite_state = { events = {
-    { type = "m.room.name", sender = inviter, state_key = "", content = { name = "x" } },
+    { type = "m.room.name", sender = inviter, state_key = "", content = { name = room_name or "x" } },
     { type = "m.room.member", sender = inviter, state_key = "@bot:example.org",
       content = { membership = "invite" } },
   } } } }
@@ -1145,13 +1145,36 @@ local function test_stranger_invite_is_quarantined_with_home_next()
   assert(item, "a stranger invite must be quarantined as invite_not_allowlisted")
   assert(item.sender == STRANGER and item.room_id == NEW,
     "the quarantine record must name the inviter and the invited room")
-  local line = "Invite to " .. NEW .. " from " .. STRANGER
+  local line = "Invite to x (" .. NEW .. ") from " .. STRANGER
     .. " was not accepted. Next: remuda butler matrix join '" .. NEW .. "'"
   assert(client:messages(HOME, line) == 1, "HOME must get one line with the Next command")
   client:sync({ json = { next_batch = "s2", rooms = { invite = invite(NEW, STRANGER) } } })
   client:pump()
   assert(client:joins(NEW) == 0 and client:messages(HOME, line) == 1,
     "a repeated stranger invite must not join or repeat the HOME line")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function test_refused_invite_notice_sanitizes_and_caps_room_name()
+  local hostile_name = "\27A\194\133B\226\128\174C" .. string.rep("한", 60)
+  local safe_name = "ABC" .. string.rep("한", 41)
+  local dir, path = invite_fixture()
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  client:sync({ json = { next_batch = "s1", rooms = {
+    invite = invite(NEW, STRANGER, hostile_name),
+  } } })
+  client:pump()
+  local line = "Invite to " .. safe_name .. " (" .. NEW .. ") from " .. STRANGER
+    .. " was not accepted. Next: remuda butler matrix join '" .. NEW .. "'"
+  assert(#safe_name <= 128 and utf8.len(safe_name) ~= nil,
+    "the hostile room name fixture must have a UTF-8-safe prefix no longer than 128 bytes")
+  assert(client:messages(HOME, line) == 1,
+    "a refused invite notice must include the sanitized, capped room name and ID")
+  assert(client:messages(HOME, "\27") == 0 and client:messages(HOME, "\194\133") == 0
+    and client:messages(HOME, "\226\128\174") == 0,
+    "a refused invite notice must strip C0, C1 and bidi characters from the room name")
   relay:stop()
   remove_dir(dir)
 end
@@ -2687,6 +2710,7 @@ for _, case in ipairs({
   { "test_owner_invite_in_baseline_sync_joins_and_writes_line", test_owner_invite_in_baseline_sync_joins_and_writes_line },
   { "test_owner_invite_failure_preserves_concurrent_room_line", test_owner_invite_failure_preserves_concurrent_room_line },
   { "test_stranger_invite_is_quarantined_with_home_next", test_stranger_invite_is_quarantined_with_home_next },
+  { "test_refused_invite_notice_sanitizes_and_caps_room_name", test_refused_invite_notice_sanitizes_and_caps_room_name },
   { "test_conflicting_inviter_events_cannot_join", test_conflicting_inviter_events_cannot_join },
   { "test_unsafe_invite_room_is_quarantined_without_home_notice", test_unsafe_invite_room_is_quarantined_without_home_notice },
   { "test_bidi_invite_room_is_quarantined_without_home_notice", test_bidi_invite_room_is_quarantined_without_home_notice },
