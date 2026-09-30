@@ -28,6 +28,23 @@ starts with a fresh sync baseline. It does not replay room history; messages
 sent while the relay was down can be missed, and pending deliveries recorded
 only in the damaged state file cannot be recovered.
 
+## Installation and sign-in check
+
+Run `remuda butler doctor` to check whether Claude Code and Codex CLI are on
+`PATH` and whether each CLI reports an active login. The check runs
+`claude auth status` and `codex login status`; it discards their output and
+prints only installed and sign-in states. It does not start an agent session.
+
+When a CLI is missing or signed out, the doctor prints the corresponding next
+command. Claude Code uses its shell installer on macOS and Linux and its
+PowerShell installer on Windows. Codex CLI can be installed with
+`npm install -g @openai/codex`. To sign in, run `claude auth login` or
+`codex login`. Once both CLIs are installed and signed in, the doctor points to
+`remuda butler matrix setup` for the optional Matrix bridge.
+
+`remuda butler --help` includes the doctor command with the other installed
+Butler verbs.
+
 ## Matrix commands and configuration
 
 Use `remuda butler matrix` for Matrix reads and writes. Options come before

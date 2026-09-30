@@ -536,6 +536,7 @@ remuda._butler_attempts = butler_attempts
 remuda._butler_sessions_config = { bus = bus, mail = mail, identity_path = identity_path, json_field = json_field }
 remuda.exec("butler/sessions")
 local registry_list = remuda._butler_sessions_impl.registry_list
+remuda.exec("butler/doctor")
 
 -- CLI verbs and the argv parser live in commands.lua.
 remuda._butler_commands_config = { current_agent = current_agent, OPERATOR = OPERATOR,
