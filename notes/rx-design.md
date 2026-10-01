@@ -78,11 +78,10 @@ PR 2:
 Dropped by the owner: the mention-follow cap, the idle expiry, the trusted-Butler class.
 
 ## State and next steps (2026-10-01 03:00Z): restart here
-**PR 1 = butler #178 at `cb9f830` (branch `feat/rx-pr1`): SEC APPROVED, CI green, waiting for the merge. Nobody in the squad merges it.**
+**PR 1 = butler #178 at `cb9f830` is MERGED (main `7ee476c`, 2026-10-01 03:28Z). The squad is parked for the daemon restart; after it, start PR 2 from origin/main.**
 - It holds design sections 1-4 with these owner and SEC changes: HOME delivers every thread reply (section 2); follows stay in the relay state file, 5000 in TOTAL, refuse + one warning, never trim; `untrusted_per_room_hour` (20) in its smallest form (not delivered, not quarantined, one log line per room, no post).
 - SEC fixes: M1 `820ae0e` (a non-allowlisted sender must be a strict MXID: `valid_mxid`, at most 255 bytes, bytes 0x21..0x7E; else quarantine `invalid_sender`). M2 `cb9f830` (only an ALLOWLISTED mention follows a thread; a follow key is a string that starts with `$`, at most 255 bytes). So a non-allowlisted Butler's mention does not follow either.
 - Suites at `cb9f830`, all green: `tests/butler_matrix_relay.sh` (4 blocks, 21 rx tests), `tests/shell_tests.sh` (23 scripts), `scripts/test-no-shell-lua.sh`, `tests/rust_tests.sh` (78 + 88).
-- The squad (rx-qa, rx-dev) is idle until the merge lands. No PR 2 work before the rollout.
 
 Next, in this order, after the rollout:
 1. **PR 2** (design section 5): the Butler-to-Butler loop guard (`b2b_max_turns` 6), `posts_per_hour` (30), the HOME summary line for the rate cap. RED tests: rx-qa commit `2ed025c`. Branch from the merged main. It removes `test_rx_b2b_block_kept_TODO_pr2`.
