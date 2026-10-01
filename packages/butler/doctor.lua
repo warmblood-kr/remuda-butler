@@ -32,6 +32,18 @@ local function probe_command(argv)
   return { installed = true, probe_error = true }
 end
 
+local function typed_line_switches()
+  local matrix = remuda.butler and remuda.butler.matrix
+  local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths or {}
+  if not matrix or type(matrix.read_config) ~= "function"
+      or type(paths.config_path) ~= "string" or paths.config_path == "" then
+    return false, false
+  end
+  local ok, config = pcall(matrix.read_config, paths.config_path)
+  if not ok or type(config) ~= "table" then return false, false end
+  return config.typed_lines == true, config.shell_lines == true
+end
+
 local function probe()
   local results = {}
   for _, agent in ipairs({
@@ -40,6 +52,7 @@ local function probe()
   }) do
     results[agent.key] = probe_command(agent.argv)
   end
+  results.typed_lines, results.shell_lines = typed_line_switches()
   return results
 end
 
@@ -56,6 +69,8 @@ local function render(probe_results, platform)
   local lines = {
     "Claude Code: " .. status(claude),
     "Codex CLI: " .. status(codex),
+    "Typed lines: " .. (probe_results.typed_lines == true and "on" or "off"),
+    "Shell lines: " .. (probe_results.shell_lines == true and "on" or "off"),
   }
   local guard = remuda.butler and remuda.butler.guard
   local unguarded = guard and guard.unguarded_line()

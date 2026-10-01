@@ -10219,7 +10219,7 @@ fn doctor_reports_all_good() {
     );
     assert_eq!(
         doctor_render(&probes, "macos"),
-        "Claude Code: installed, logged in\nCodex CLI: installed, logged in\nNext: remuda butler matrix setup"
+        "Claude Code: installed, logged in\nCodex CLI: installed, logged in\nTyped lines: off\nShell lines: off\nNext: remuda butler matrix setup"
     );
 }
 
@@ -10230,7 +10230,7 @@ fn doctor_reports_missing_claude_posix() {
         doctor_status(false, false),
         doctor_status(true, true)
     );
-    let expected = "Claude Code: missing\nCodex CLI: installed, logged in\nNext: curl -fsSL https://claude.ai/install.sh | bash";
+    let expected = "Claude Code: missing\nCodex CLI: installed, logged in\nTyped lines: off\nShell lines: off\nNext: curl -fsSL https://claude.ai/install.sh | bash";
     assert_eq!(doctor_render(&probes, "macos"), expected);
     assert_eq!(doctor_render(&probes, "linux"), expected);
 }
@@ -10244,7 +10244,7 @@ fn doctor_reports_missing_claude_windows() {
     );
     assert_eq!(
         doctor_render(&probes, "windows"),
-        "Claude Code: missing\nCodex CLI: installed, logged in\nNext: irm https://claude.ai/install.ps1 | iex"
+        "Claude Code: missing\nCodex CLI: installed, logged in\nTyped lines: off\nShell lines: off\nNext: irm https://claude.ai/install.ps1 | iex"
     );
 }
 
@@ -10257,7 +10257,7 @@ fn doctor_reports_codex_logged_out() {
     );
     assert_eq!(
         doctor_render(&probes, "macos"),
-        "Claude Code: installed, logged in\nCodex CLI: installed, not logged in\nNext: codex login"
+        "Claude Code: installed, logged in\nCodex CLI: installed, not logged in\nTyped lines: off\nShell lines: off\nNext: codex login"
     );
 }
 
@@ -10270,7 +10270,7 @@ fn doctor_reports_both_missing_with_two_next_lines() {
     );
     assert_eq!(
         doctor_render(&probes, "linux"),
-        "Claude Code: missing\nCodex CLI: missing\nNext: curl -fsSL https://claude.ai/install.sh | bash\nNext: npm install -g @openai/codex"
+        "Claude Code: missing\nCodex CLI: missing\nTyped lines: off\nShell lines: off\nNext: curl -fsSL https://claude.ai/install.sh | bash\nNext: npm install -g @openai/codex"
     );
 }
 
@@ -10316,7 +10316,7 @@ fn doctor_cli_both_missing_prints_two_next_commands() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
         stdout.trim(),
-        "Claude Code: missing\nCodex CLI: missing\nNext: curl -fsSL https://claude.ai/install.sh | bash\nNext: npm install -g @openai/codex"
+        "Claude Code: missing\nCodex CLI: missing\nTyped lines: off\nShell lines: off\nNext: curl -fsSL https://claude.ai/install.sh | bash\nNext: npm install -g @openai/codex"
     );
 }
 
