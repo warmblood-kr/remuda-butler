@@ -322,9 +322,13 @@ local function trim_invite_dedupe(map, now)
   trim_map(map, MAX_INVITE_DEDUPE, "created_at")
 end
 
+local function valid_event_key(id)
+  return type(id) == "string" and #id <= 255 and id:sub(1, 1) == "$"
+    and not id:find("[^\33-\126]")
+end
+
 local function subscribe(state, room_id, thread_id, mail_id)
-  if type(room_id) ~= "string" or type(thread_id) ~= "string" or thread_id:sub(1, 1) ~= "$"
-      or #thread_id > 255 then return false end
+  if type(room_id) ~= "string" or not valid_event_key(thread_id) then return false end
   local subscriptions = state.subscriptions[room_id]
   if not subscriptions or subscriptions[thread_id] == nil then
     local count = 0
@@ -582,7 +586,7 @@ function relay.new(options)
   end
 
   local function note_turn(room, root, kind)
-    if type(room) ~= "string" or type(root) ~= "string" or root == "" then return 0 end
+    if type(room) ~= "string" or not valid_event_key(root) then return 0 end
     local room_turns = b2b_turns[room]
     if kind == "human" then
       if room_turns then
