@@ -2516,40 +2516,52 @@ local function test_rx_in_thread_reply_unfollowed_not_delivered()
   end)
 end
 
+-- 5000 follows in TOTAL across all rooms, kept in the relay state. The state
+-- file is pre-filled so the test does not depend on how the relay counts.
 local function test_rx_follow_guard_refuses_and_warns_no_trim()
   local dir, path = rx_fixture()
   rx_with_dir(dir, function()
+    local home, new = {}, {}
+    for i = 1, 2500 do home["$h" .. i] = { created_at = string.format("2026-01-01T00:%05dZ", i) } end
+    for i = 1, 2499 do new["$n" .. i] = { created_at = string.format("2026-01-02T00:%05dZ", i) } end
+    local state_file = assert(io.open(path .. ".since", "wb"))
+    state_file:write(assert(matrix.encode_json({ matrix_thread_subscriptions = { [HOME] = home, [NEW] = new } })))
+    state_file:close()
     local relay, client, delivered = rx_relay(path)
-    local rows = relay:state().subscriptions
-    rows[HOME] = rows[HOME] or {}
-    -- Cheap probe first: past the old 5000 cap nothing may be trimmed.
-    for i = 1, 5000 do rows[HOME]["$old" .. i] = { created_at = string.format("2026-01-01T00:%05dZ", i) } end
-    relay:subscribe_thread(HOME, "$probe")
-    assert(rx_followed(relay, HOME, "$old1") and rx_followed(relay, HOME, "$probe"),
-      "a follow past 5000 must not trim the oldest follow")
-    for i = 5001, 49999 do rows[HOME]["$old" .. i] = { created_at = string.format("2026-01-01T00:%05dZ", i) } end
+    assert(rx_followed(relay, HOME, "$h1") and rx_followed(relay, NEW, "$n2499"), "4999 follows load from the state")
+    assert(relay:subscribe_thread(NEW, "$probe") ~= false and rx_followed(relay, NEW, "$probe"),
+      "the 5000th follow in total succeeds")
+    local refused_home, refused_new
     local logs, old_stderr = {}, io.stderr
     io.stderr = { write = function(_, line) logs[#logs + 1] = line end }
     local ok, err = pcall(function()
-      relay:subscribe_thread(HOME, "$new-1")
-      rx_sync(client, HOME, { rx_msg("$cap-m", OWNER, "@bot:example.org at the cap", rx_thread("$new-2")) })
+      refused_home = relay:subscribe_thread(HOME, "$new-1")
+      refused_new = relay:subscribe_thread(NEW, "$new-2")
+      rx_sync(client, HOME, { rx_msg("$cap-m", OWNER, "@bot:example.org at the cap", rx_thread("$new-3")) })
     end)
     io.stderr = old_stderr
     assert(ok, err)
+    assert(refused_home == false and refused_new == false, "at 5000 in total a new follow is refused in every room")
     assert(rx_find(delivered, "$cap-m"), "a mention at the cap is still delivered")
-    assert(not rx_followed(relay, HOME, "$new-1") and not rx_followed(relay, HOME, "$new-2"),
-      "at 50000 follows a new follow is refused")
-    assert(rx_followed(relay, HOME, "$old1") and rx_followed(relay, HOME, "$old49999"), "nothing is trimmed")
+    assert(not rx_followed(relay, HOME, "$new-1") and not rx_followed(relay, NEW, "$new-2")
+      and not rx_followed(relay, HOME, "$new-3"), "refused follows are not stored")
+    assert(rx_followed(relay, HOME, "$h1") and rx_followed(relay, HOME, "$h2500")
+      and rx_followed(relay, NEW, "$n1") and rx_followed(relay, NEW, "$probe"), "nothing is trimmed")
     local warnings = 0
-    for _, line in ipairs(logs) do if line:find("50000", 1, true) then warnings = warnings + 1 end end
+    for _, line in ipairs(logs) do if line:find("5000", 1, true) then warnings = warnings + 1 end end
     assert(warnings == 1, "the refused follows log ONE warning, got " .. warnings)
+    assert(relay:subscribe_thread(HOME, "$h1") ~= false and rx_followed(relay, HOME, "$h1"),
+      "re-following an existing thread is always OK")
     relay_module.instance = relay
     rx_event_http(path, function()
-      local result = capture_matrix_cli({ "matrix", "follow", "$new-3" })
+      local result = capture_matrix_cli({ "matrix", "follow", "$new-4" })
       local out = result and (result.stdout .. result.stderr) or ""
-      assert(out:find("Follow limit reached in " .. HOME .. " (50000). Next: remuda butler matrix unfollow '$new-3'", 1, true),
-        "the follow verb reports the guard, got: " .. out)
+      assert(out:find("Follow limit reached (5000 in total). Next: remuda butler matrix unfollow ", 1, true),
+        "the follow verb reports the total guard, got: " .. out)
     end)
+    relay:unsubscribe_thread(NEW, "$n1")
+    assert(relay:subscribe_thread(HOME, "$new-1") ~= false and rx_followed(relay, HOME, "$new-1"),
+      "unfollow frees a slot")
     relay:stop()
   end)
 end
