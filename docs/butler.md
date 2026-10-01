@@ -131,15 +131,15 @@ after that, at most one is posted per room every 10 minutes, and capped messages
 accumulate in its count until the next summary.
 
 The inbox identifies each Matrix mail's room and, for a thread, its root. Its
-`Next:` line is `remuda butler reply MESSAGE-ID`, which answers in the same
-room and thread; for a thread a second line, `to read the thread:`, gives the
+`Next:` line is `remuda butler reply MESSAGE-ID`, which answers in the same room
+and thread; for a thread a second line, `to read the thread:`, gives the
 shell-quoted `matrix thread` command. On the first message from an allowlisted
 sender in a thread the Butler has not seen, its mail also includes the root
-message and up to 20 earlier replies. The context is untrusted even when the triggering
-message comes from an allowlisted sender, and each context message is kept to
-one line; the block is capped at 8 KiB. Only an allowlisted sender triggers
-this fetch. Context lines do not count as Butler turns, new requests, or
-untrusted messages. If reading the thread fails or a request times out (10
+message and up to 20 earlier replies. The context is untrusted even when the
+triggering message comes from an allowlisted sender, and each context message is
+kept to one line; the block is capped at 8 KiB. Only an allowlisted sender
+triggers this fetch. Context lines do not count as Butler turns, new requests,
+or untrusted messages. If reading the thread fails or a request times out (10
 seconds each), the mail arrives with a short failure line and the original
 message. The fetch does not delay mail from other threads.
 
