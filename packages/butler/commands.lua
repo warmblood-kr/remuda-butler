@@ -236,8 +236,23 @@ command(50, "send-to-leader", "  remuda butler send-to-leader <message...> | - |
   end)
 end)
 command(60, "inbox", "  remuda butler inbox [name]", function(args, caller)
-  if args[2] == "--help" or args[2] == "-h" then return "Usage: remuda butler inbox [name]\n" end
+  if args[2] == "--help" or args[2] == "-h" then
+    return "Usage: remuda butler inbox [name]\n"
+      .. "       remuda butler inbox <message-id>  show one of your messages again; read state is unchanged\n"
+  end
   if #args > 2 then return nil end
+  -- Only a ULID may reach a message lookup (it opens messages/<id>.json).
+  -- An agent id is also a ULID and falls through to the name form.
+  if remuda._butler_identity.is_ulid(args[2]) and mail.find_message(args[2]) then
+    local me = current_agent(caller)
+    return cli_result(function()
+      if not me then
+        error("inbox " .. args[2] .. " shows a message only to the member it was delivered to."
+          .. " Next: run it from that member's session, or remuda butler inbox <name>", 0)
+      end
+      return remuda._butler_inbox_message(me, args[2])
+    end)
+  end
   return cli_result(function()
     return remuda._butler_inbox(args[2] or assert(current_agent(caller), "no Butler identity in your env; use `inbox <name>`"))
   end)
