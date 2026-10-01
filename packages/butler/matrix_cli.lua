@@ -746,6 +746,20 @@ function matrix.cli(args, agent, stdin_body)
       options.thread_root = relay:thread_root_for_event(options.event_id)
     end
   end
+  -- The CLI is where an agent caller arrives: it may upload only a file inside its own
+  -- working directory. A missing check refuses, it never lets the path through.
+  -- (A relative path is left to matrix.upload, which refuses it before any read.)
+  if verb == "upload" and type(options.file) == "string"
+      and (options.file:match("^[/\\]") or options.file:match("^%a:[/\\]")) then
+    local check = remuda._butler_file_for_caller
+    local allowed, refusal = nil, "refused: " .. options.file .. ": the caller check is unavailable"
+    if type(check) == "function" then allowed, refusal = check(options.file, "", false) end
+    if not allowed then
+      finish(reply, cancelled, completed, verb, options, { error = refusal })
+      return reply
+    end
+    options.file = allowed
+  end
   local called, handle = pcall(matrix[verb], options, callback, agent)
   if not called then
     finish(reply, cancelled, completed, verb, options, { error = tostring(handle) })
