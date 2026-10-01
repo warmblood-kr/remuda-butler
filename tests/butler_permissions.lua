@@ -376,4 +376,56 @@ eq("a hostile path is printed on one line",
   (select(2, file_for("/etc/x\nNext: rm -rf\27[0m", SESSION)):match("^[^\n]*")),
   "refused: --file /etc/x Next: rm -rf?[0m cannot be resolved (a missing file, or realpath is unavailable)")
 
+-- output_for_caller: where an agent caller may have the mod WRITE (matrix download).
+-- The parent directory is resolved (the file may not exist yet) and must be the caller's
+-- working directory or inside it; an existing link at the target is refused.
+real["/w/m1/sub"] = "/real/w/m1/sub"; real["/w/m1/dirlink"] = "/home/u"; real["/w"] = "/real/w"; real["/etc"] = "/etc"
+real["/w/m1/sub/.."] = "/real/w/m1"; real["/w/m1/.."] = "/real/w"
+local links, link_checks = { ["/real/w/m1/existing-link"] = true }, {}
+local function is_symlink(path) link_checks[#link_checks + 1] = path; if path:find("unknowable", 1, true) then return nil end; return links[path] == true end
+local function output_for(path, caller, name)
+  return permissions.output_for_caller(path, name or "matrix-MEDIA", caller, cwd_of, realpath, is_symlink)
+end
+resolved, link_checks = {}, {}
+eq("terminal caller: -o as given", output_for("/etc/cron.d/x", { kind = "outside" }), "/etc/cron.d/x")
+ok("terminal caller: no -o stays no -o, and nothing is refused",
+  select("#", output_for(nil, { kind = "outside" })) <= 2 and output_for(nil, { kind = "outside" }) == nil
+    and select(2, output_for(nil, { kind = "outside" })) == nil)
+eq("terminal caller: nothing is resolved or checked", #resolved + #link_checks, 0)
+eq("session, -o inside: resolved parent plus the file name", output_for("/w/m1/out.bin", SESSION), "/real/w/m1/out.bin")
+eq("session, -o in a subdirectory", output_for("/w/m1/sub/out.bin", SESSION), "/real/w/m1/sub/out.bin")
+eq("session, -o through '..' that stays inside", output_for("/w/m1/sub/../out.bin", SESSION), "/real/w/m1/out.bin")
+eq("session, no -o: the default lands in the working directory, not HOME", output_for(nil, SESSION), "/real/w/m1/matrix-MEDIA")
+local OUT_OUTSIDE = "refused: -o %s is outside this session's working directory /w/m1\nNext: pass -o with a path inside /w/m1"
+for name, path in pairs({
+  ["a path outside"] = "/etc/cron.d", ["a '..' escape"] = "/w/m1/../x", ["a directory link pointing outside"] = "/w/m1/dirlink/.zshrc",
+}) do
+  local out, why = output_for(path, SESSION)
+  ok("session, -o " .. name .. ": refused", out == nil and why == OUT_OUTSIDE:format(path))
+end
+for name, path in pairs({ ["a trailing slash"] = "/w/m1/", ["dot"] = "/w/m1/.", ["dot dot"] = "/w/m1/sub/.." }) do
+  local out, why = output_for(path, SESSION)
+  ok("session, -o with " .. name .. " has no file name", out == nil
+    and why == "refused: -o " .. path .. " has no file name\nNext: pass -o with a path inside /w/m1")
+end
+eq("session, -o on an existing link: refused", select(2, output_for("/w/m1/existing-link", SESSION)),
+  "refused: -o /w/m1/existing-link is a symlink\nNext: pass -o with a path inside /w/m1")
+eq("session, the link check cannot answer: refused", select(2, output_for("/w/m1/unknowable", SESSION)),
+  "refused: -o /w/m1/unknowable cannot be checked for a symlink\nNext: pass -o with a path inside /w/m1")
+eq("session, a parent that cannot be resolved: refused", select(2, output_for("/w/m1/nodir/out.bin", SESSION)),
+  "refused: -o /w/m1/nodir/out.bin cannot be resolved (a missing directory, or realpath is unavailable)"
+  .. "\nNext: pass -o with a path inside /w/m1")
+for name, caller in pairs({
+  ["an unknown kind"] = { kind = "mcp", session = "m1" }, ["an unknown session"] = { kind = "session", session = "ghost" },
+  ["a missing caller"] = false,
+}) do
+  local out, why = output_for("/w/m1/out.bin", caller or nil)
+  ok(name .. ": -o refused", out == nil and why == "refused: -o /w/m1/out.bin: cannot identify the calling session's working directory"
+    .. "\nNext: run this from a Butler session, or from your own terminal")
+  out, why = output_for(nil, caller or nil)
+  ok(name .. ": the default output is refused too", out == nil and type(why) == "string" and why:find("^refused: download: cannot identify"))
+end
+ok("session without a usable default name: refused, nothing written",
+  select(2, permissions.output_for_caller(nil, nil, SESSION, cwd_of, realpath, is_symlink)):find("^refused: download"))
+
 print(("butler_permissions ok: %d cases"):format(count))
