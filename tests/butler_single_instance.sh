@@ -39,16 +39,56 @@ under_scratch() {
 
 PIDS=()
 FAKE_AGENT=$T/fake-agent
+# The PID of the daemon that serves a session name: core writes it to
+# NAME.sock.lock in the runtime dir. A daemon that a client call auto-started
+# (it is in no list of ours) is found the same way.
+daemon_pid() {
+  [[ ! -f $REMUDA_RUNTIME_DIR/remuda/$1.sock.lock ]] || tr -cd '0-9' <"$REMUDA_RUNTIME_DIR/remuda/$1.sock.lock"
+}
+# True while PID is still one of this script's daemons; never a reused PID.
+our_daemon() {
+  case $(ps -o command= -p "$1" 2>/dev/null) in
+    *" -s bsi-"?" daemon"* | *" -s  daemon"*) return 0 ;;
+  esac
+  return 1
+}
+wait_gone() { # pid, tenths of a second
+  local i
+  for ((i = 0; i < $2; i++)); do our_daemon "$1" || return 0; sleep 0.1; done
+  ! our_daemon "$1"
+}
 cleanup() {
   STATUS=$?
   assert_scratch
+  local name pid lock log left=""
+  local pids=(${PIDS[@]+"${PIDS[@]}"})
+  for lock in "$REMUDA_RUNTIME_DIR"/remuda/*.sock.lock "$REMUDA_RUNTIME_DIR/remuda/.sock.lock"; do
+    [[ -f $lock ]] || continue
+    pid=$(tr -cd '0-9' <"$lock")
+    [[ -z $pid ]] || pids+=("$pid")
+  done
+  if [[ $STATUS != 0 ]]; then
+    # The scratch dir goes away below: show what each daemon said first.
+    for log in "$T"/*.log "$REMUDA_RUNTIME_DIR"/remuda/*.log; do
+      [[ -s $log ]] || continue
+      echo "--- ${log#"$T"/} (last 20 lines)"
+      tail -20 "$log" | cut -c1-300
+    done
+  fi
+  # Ask each live daemon to stop; a dead one is not asked (the client would start a new one).
   for name in "$A" "$B" "$X" "$D" "$L" "$G"; do
-    [[ -S $REMUDA_RUNTIME_DIR/remuda/$name.sock ]] || continue
+    pid=$(daemon_pid "$name")
+    [[ -n $pid ]] && our_daemon "$pid" || continue
     "$REMUDA_BIN" -s "$name" stop -f >/dev/null 2>&1 || true
   done
-  for pid in ${PIDS[@]+"${PIDS[@]}"}; do
-    for _ in $(seq 30); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
-    if kill -0 "$pid" 2>/dev/null; then kill "$pid" 2>/dev/null || true; fi
+  # Every daemon, by PID: wait, then TERM, then KILL, then check that it is gone.
+  for pid in ${pids[@]+"${pids[@]}"}; do
+    our_daemon "$pid" || continue
+    wait_gone "$pid" 100 && continue
+    kill "$pid" 2>/dev/null || true
+    wait_gone "$pid" 50 && continue
+    kill -9 "$pid" 2>/dev/null || true
+    wait_gone "$pid" 20 || left="$left $pid"
   done
   if [[ -f $T/child-pids ]]; then
     # Only a PID that is still this script's fake agent; never a reused one.
@@ -57,8 +97,10 @@ cleanup() {
       kill "$pid" 2>/dev/null || true
     done <"$T/child-pids"
   fi
-  LEFT=$(ps -ax -o pid,command | grep -F "$T" | grep -v grep || true)
-  [[ -z $LEFT ]] || echo "leftovers: $LEFT"
+  if [[ -n $left ]]; then
+    echo "FAIL: daemons still running after cleanup:$left"
+    STATUS=1
+  fi
   rm -rf "$T"
   exit "$STATUS"
 }
@@ -108,7 +150,7 @@ if [[ $LOCK_WORD != true ]]; then
   FAKE_SECOND="remuda.fs.lock = function() return nil, 'held', 'remuda-lock session=$A pid=1 since=1790000000' end; "
   echo "note - the lock is FAKED: this core has no remuda.fs.lock, so T1-T7 prove Butler's side only, not the OS lock"
 else
-  echo "note - the lock is REAL: this core has remuda.fs.lock ($("$REMUDA_BIN" --version | cut -d+ -f1))"
+  echo "note - the lock is REAL: this core has remuda.fs.lock ($("$REMUDA_BIN" --version | head -1))"
 fi
 load_butler "$A" "$FAKE_OWNER"
 for _ in $(seq 50); do
@@ -357,7 +399,8 @@ if [[ $LOCK_WORD == true ]]; then
     || bad "T9 after the reload the config lock is still held: exit $CODE, output: $(printf '%s' "$OUT" | head -1 | cut -c1-160)"
 
   kill "${PIDS[0]}" # the owner daemon, started by this script
-  for _ in $(seq 50); do kill -0 "${PIDS[0]}" 2>/dev/null || break; sleep 0.1; done
+  # Wait until it is really gone (it stops its sessions first); a fixed wait is too short under load.
+  wait_gone "${PIDS[0]}" 300 || bad "T8 the killed owner daemon (pid ${PIDS[0]}) is still running after 30 s"
   # A refused daemon re-asks on each verb: it says the owner is gone and does not take over.
   assert_scratch
   set +e
@@ -369,24 +412,42 @@ if [[ $LOCK_WORD == true ]]; then
     || bad "T8 after the owner dies a refused daemon says so and does not take over: exit $CODE, root Butler $ROOT_IN_B, output: $(printf '%s' "$OUT" | head -2 | cut -c1-160)"
   # The printed command makes THAT daemon the owner, once: one root Butler, the relay, both locks.
   assert_scratch
-  "$REMUDA_BIN" -s "$B" exec butler >/dev/null 2>&1 || true
-  sleep 5
-  TAKEOVER=$(lua "$B" 'local roots = 0; for _, s in ipairs(remuda.ls()) do if s.name == "butler" then roots = roots + 1 end end
-    local m = remuda.butler and remuda.butler.matrix
-    return "refused=" .. tostring(remuda._butler_standby ~= nil) .. " root_butlers=" .. roots .. " relay=" .. tostring((m and m.relay and m.relay.instance) ~= nil)')
-  set +e
-  OUT=$("$REMUDA_BIN" -s "$B" butler status 2>&1); CODE=$?
-  set -e
-  [[ $TAKEOVER == "refused=false root_butlers=1 relay=true" && $CODE != 1 && $OUT == "butler: "* ]] \
-    && ok "T8 the printed command makes the refused daemon the owner" \
-    || bad "T8 the printed command makes the refused daemon the owner: $TAKEOVER; butler status exit $CODE: $(printf '%s' "$OUT" | head -1 | cut -c1-120)"
+  # It must be the SAME daemon process afterwards. A client call to a name with
+  # no daemon starts a new, empty one, which would hide a daemon that died
+  # (#250): so the PID is checked before every call here.
+  B_PID=$(daemon_pid "$B")
+  EXEC_OUT=$("$REMUDA_BIN" -s "$B" exec butler 2>&1) || EXEC_OUT="$EXEC_OUT (exit $?)"
+  TAKEOVER="" CODE="" OUT=""
+  for _ in $(seq 60); do # until the takeover is complete, at most 30 s
+    our_daemon "$B_PID" && [[ $(daemon_pid "$B") == "$B_PID" ]] || break
+    TAKEOVER=$(lua "$B" 'local roots = 0; for _, s in ipairs(remuda.ls()) do if s.name == "butler" then roots = roots + 1 end end
+      local m = remuda.butler and remuda.butler.matrix
+      return "refused=" .. tostring(remuda._butler_standby ~= nil) .. " root_butlers=" .. roots .. " relay=" .. tostring((m and m.relay and m.relay.instance) ~= nil)' 2>&1) || true
+    [[ $TAKEOVER != "refused=false root_butlers=1 relay=true" ]] || break
+    sleep 0.5
+  done
+  if [[ -n $B_PID ]] && our_daemon "$B_PID" && [[ $(daemon_pid "$B") == "$B_PID" ]]; then
+    set +e
+    OUT=$("$REMUDA_BIN" -s "$B" butler status 2>&1); CODE=$?
+    set -e
+    [[ $TAKEOVER == "refused=false root_butlers=1 relay=true" && $CODE != 1 && $OUT == "butler: "* ]] \
+      && ok "T8 the printed command makes the refused daemon the owner" \
+      || bad "T8 the printed command makes the refused daemon the owner: $TAKEOVER; butler status exit $CODE: $(printf '%s' "$OUT" | head -1 | cut -c1-120); exec butler said: $(printf '%s' "$EXEC_OUT" | head -1 | cut -c1-120)"
+  else
+    bad "T8 the printed command makes the refused daemon the owner: the daemon DIED during the takeover (pid ${B_PID:-unknown} is gone); exec butler said: $(printf '%s' "$EXEC_OUT" | head -1 | cut -c1-120)"
+  fi
   # ...and a daemon started after that is refused: the new owner holds both locks.
   start_daemon "$D"
   load_butler "$D"
-  sleep 4
-  ROOT_IN_D=$(lua "$D" 'for _, s in ipairs(remuda.ls()) do if s.name == "butler" then return true end end return false')
-  [[ $ROOT_IN_D == false ]] && ok "T8 a daemon started after the takeover is refused" \
-    || bad "T8 a daemon started after the takeover is refused: it has a root Butler"
+  ROOT_IN_D=""
+  for _ in $(seq 60); do # until this daemon has decided, at most 30 s
+    ROOT_IN_D=$(lua "$D" 'for _, s in ipairs(remuda.ls()) do if s.name == "butler" then return "root" end end
+      return remuda._butler_standby ~= nil and "refused" or "undecided"')
+    [[ $ROOT_IN_D == undecided ]] || break
+    sleep 0.5
+  done
+  [[ $ROOT_IN_D == refused ]] && ok "T8 a daemon started after the takeover is refused" \
+    || bad "T8 a daemon started after the takeover is refused: it is $ROOT_IN_D"
 else
   echo "skip - T8 after the owner dies: a refused daemon says so, its printed command takes over, a later daemon is refused (needs core remuda.fs.lock)"
   echo "skip - T9 a mod reload in the owner keeps ownership (needs core remuda.fs.lock)"
