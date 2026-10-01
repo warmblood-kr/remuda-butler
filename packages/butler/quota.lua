@@ -6,6 +6,16 @@ local function finite_number(value)
     and value ~= math.huge and value ~= -math.huge
 end
 
+local function plain_word(value)
+  return type(value) == "string" and #value <= 40
+    and value:match("^[%w][%w %-]*$") ~= nil
+end
+
+local function email_address(value)
+  return type(value) == "string" and #value <= 80
+    and value:match("^[%w%._%+%-]+@[%w][%w%.%-]*$") ~= nil
+end
+
 local function rounded(value)
   return math.floor(value + 0.5)
 end
@@ -17,8 +27,8 @@ function quota.claude_account(auth)
   if auth.authMethod == "claude.ai" then
     return {
       mode = "subscription",
-      plan = auth.subscriptionType,
-      email = auth.email,
+      plan = plain_word(auth.subscriptionType) and auth.subscriptionType or nil,
+      email = email_address(auth.email) and auth.email or nil,
     }
   end
   if type(auth.authMethod) == "string"
@@ -175,16 +185,15 @@ end
 
 local function reset_phrase(line)
   if type(line) ~= "string" then return nil end
-  return line:match("%((resets.-)%)")
+  return line:match("%((resets %d%d?:%d%d [AP]M on %d%d? %a%a%a)%)")
 end
 
 local function parse_reset(line, next_line, utc_offset_seconds, now)
   local phrase = reset_phrase(line) or reset_phrase(next_line)
-  if not phrase then return { resets_text = "unknown" } end
-  local text = phrase:match("^resets%s+(.+)$") or phrase
+  if not phrase then return {} end
   local epoch = reset_epoch(phrase, utc_offset_seconds, now)
   if epoch then return { resets_at = epoch } end
-  return { resets_text = text }
+  return {}
 end
 
 function quota.parse_codex_status(screen, utc_offset_seconds, now)
@@ -194,17 +203,38 @@ function quota.parse_codex_status(screen, utc_offset_seconds, now)
     lines[#lines + 1] = line:gsub("\r$", "")
   end
 
-  local plan, occurrences, last_occurrence = nil, {}, {}
+  local status_start = 1
   for i, line in ipairs(lines) do
-    if plan == nil then
-      local account = line:match("^%s*Account:%s*(.-)%s*$")
-      if account and account ~= "" then plan = account end
+    local trimmed = line:match("^%s*(.-)%s*$") or ""
+    if trimmed:sub(1, 3) == "›" or trimmed:sub(1, 1) == ">"
+        or trimmed:sub(1, 3) == "❯" then
+      local glyph_length = (trimmed:sub(1, 3) == "›" or trimmed:sub(1, 3) == "❯") and 3 or 1
+      trimmed = trimmed:sub(glyph_length + 1)
+      trimmed = trimmed:match("^%s*(.-)%s*$") or ""
     end
+    if trimmed == "/status" then status_start = i + 1 end
+  end
+
+  local last_account
+  for i = status_start, #lines do
+    if lines[i]:match("^%s*Account:") then last_account = i end
+  end
+  local plan
+  if last_account then
+    local account = lines[last_account]:match("^%s*Account:%s*(.-)%s*$")
+    if plain_word(account) then plan = account end
+  end
+
+  local occurrences, last_occurrence = {}, {}
+  for i = status_start, #lines do
+    local line = lines[i]
     local name, left = line:match("^%s*(.-):%s+%[.-%]%s+(%d+)%% left%s*.*$")
-    if name then
+    if name and (not last_account or i > last_account) then
       name = name:gsub("^%s+", ""):gsub("%s+$", "")
-      if #name <= 40 and name:match("^[%w][%w %-]*$") then
-        local limit = { name = name, used = 100 - tonumber(left) }
+      if plain_word(name) then
+        local remaining = tonumber(left)
+        local used = remaining >= 0 and remaining <= 100 and 100 - remaining or nil
+        local limit = { name = name, used = used }
         local reset = parse_reset(line, lines[i + 1], utc_offset_seconds, now)
         for key, value in pairs(reset) do limit[key] = value end
         occurrences[#occurrences + 1] = limit
@@ -224,8 +254,8 @@ local function utc_text(epoch)
   return os.date("!%Y-%m-%d %H:%MZ", epoch)
 end
 
-local function clean(text)
-  return (tostring(text):gsub("%c", " ")):sub(1, 80)
+function quota.safe_text(value)
+  return (tostring(value):gsub("[^\032-\126]", "?")):sub(1, 200)
 end
 
 local function format_percent(value)
@@ -238,31 +268,42 @@ local function agent_lines(name, agent, report_at, near_limits)
   local lines = {}
   if agent.mode == "subscription" then
     if name == "claude" then
-      lines[1] = "claude: subscription (" .. clean(agent.plan or "unknown")
-        .. "), " .. clean(agent.email or "unknown")
-    elseif agent.plan ~= nil and agent.plan ~= "" then
-      lines[1] = "codex: subscription (" .. clean(agent.plan)
+      local plan = plain_word(agent.plan) and agent.plan or nil
+      local email = email_address(agent.email) and agent.email or nil
+      lines[1] = "claude: subscription"
+      if plan then lines[1] = lines[1] .. " (" .. plan .. ")" end
+      lines[1] = lines[1] .. ", " .. (email or "account unknown")
+    elseif plain_word(agent.plan) then
+      lines[1] = "codex: subscription (" .. agent.plan
         .. "), account: not exposed by codex"
     else
       lines[1] = "codex: subscription, account: not exposed by codex"
     end
     local limits = type(agent.limits) == "table" and agent.limits or {}
     if #limits == 0 then
-      lines[#lines + 1] = "  quota: unknown (" .. tostring(agent.unknown_reason or "unknown") .. ")"
+      local reasons = {
+        ["no reading yet; it appears after a claude session's first reply"] = true,
+        ["no idle codex session to ask"] = true,
+        ["codex did not show its limits in time"] = true,
+        ["could not type /status into the codex session"] = true,
+      }
+      local reason = reasons[agent.unknown_reason] and agent.unknown_reason or "could not be read"
+      lines[#lines + 1] = "  quota: unknown (" .. reason .. ")"
     else
       for _, limit in ipairs(limits) do
-        local used = format_percent(limit.used)
-        local reset
-        if finite_number(limit.resets_at) then
-          reset = "resets " .. utc_text(limit.resets_at)
+        local limit_name = type(limit) == "table" and limit.name or nil
+        limit_name = plain_word(limit_name) and limit_name or "unknown"
+        local used_value = type(limit) == "table" and limit.used or nil
+        if not finite_number(used_value) then
+          lines[#lines + 1] = "  " .. limit_name .. ": unknown"
         else
-          reset = "resets " .. clean(limit.resets_text or "unknown") .. " (local time)"
-        end
-        lines[#lines + 1] = "  " .. clean(limit.name or "unknown limit") .. ": "
-          .. used .. "% used, " .. reset
-        if finite_number(limit.used) and limit.used >= 80 then
-          near_limits[#near_limits + 1] = name .. " " .. clean(limit.name or "unknown limit")
-            .. " (" .. used .. "%)"
+          local used = format_percent(used_value)
+          local reset = finite_number(limit.resets_at)
+            and ("resets " .. utc_text(limit.resets_at)) or "resets unknown"
+          lines[#lines + 1] = "  " .. limit_name .. ": " .. used .. "% used, " .. reset
+          if used_value >= 80 then
+            near_limits[#near_limits + 1] = name .. " " .. limit_name .. " (" .. used .. "%)"
+          end
         end
       end
       if finite_number(agent.read_at) and finite_number(report_at)
@@ -277,7 +318,8 @@ local function agent_lines(name, agent, report_at, near_limits)
   elseif agent.mode == "not_installed" then
     lines[1] = name .. ": not installed"
   else
-    lines[1] = name .. ": unknown (unrecognised status output)"
+    local command = name == "claude" and "claude auth status" or "codex login status"
+    lines[1] = name .. ": unknown (could not understand what `" .. command .. "` answered)"
   end
   return lines
 end
@@ -286,7 +328,9 @@ function quota.render(report)
   report = type(report) == "table" and report or {}
   local at = finite_number(report.at) and report.at or 0
   local near_limits = {}
-  local lines = { "Agent accounts, " .. utc_text(at) }
+  local header = report.reused == true and "Agent accounts, as of " .. utc_text(at)
+    or "Agent accounts, " .. utc_text(at)
+  local lines = { header }
   for _, name in ipairs({ "claude", "codex" }) do
     local block = agent_lines(name, report[name], at, near_limits)
     for _, line in ipairs(block) do lines[#lines + 1] = line end
@@ -314,28 +358,38 @@ end
 function quota.terminal(report, outcome)
   local lines = { quota.render(report) }
   outcome = type(outcome) == "table" and outcome or nil
-  if outcome and outcome.failed ~= nil then
-    lines[#lines + 1] = "Could not post to Matrix: " .. tostring(outcome.failed)
-    lines[#lines + 1] = "Next: remuda butler doctor"
-    return table.concat(lines, "\n")
-  end
-
   if outcome and outcome.sent == true then
     lines[#lines + 1] = "Sent to the Matrix home room."
   end
   local claude = type(report) == "table" and report.claude or nil
   local codex = type(report) == "table" and report.codex or nil
-  if type(claude) == "table" and claude.mode == "not_logged_in" then
-    lines[#lines + 1] = "Next: log in with `claude auth login`, then run `remuda butler quota` again."
+  local next_line
+  if outcome and outcome.failed ~= nil then
+    lines[#lines + 1] = "Could not post to Matrix: " .. quota.safe_text(outcome.failed)
+    next_line = "Next: remuda butler matrix setup"
+  elseif type(claude) == "table" and claude.mode == "not_logged_in" then
+    next_line = "Next: log in with `claude auth login`, then run `remuda butler quota` again."
   elseif type(codex) == "table" and codex.mode == "not_logged_in" then
-    lines[#lines + 1] = "Next: log in with `codex login`, then run `remuda butler quota` again."
+    next_line = "Next: log in with `codex login`, then run `remuda butler quota` again."
+  elseif type(claude) == "table" and claude.mode == "unknown"
+      or type(codex) == "table" and codex.mode == "unknown" then
+    local command = type(claude) == "table" and claude.mode == "unknown"
+      and "claude auth status" or "codex login status"
+    next_line = "Next: run `" .. command .. "` yourself to see what it answers, then `remuda butler doctor`."
   elseif type(codex) == "table" and codex.unknown_reason == "no idle codex session to ask" then
-    lines[#lines + 1] = "Next: start a codex member with `remuda butler launch codex` (or wait until one is idle), then run `remuda butler quota` again."
+    next_line = "Next: start a codex member with `remuda butler launch codex` (or wait until one is idle), then run `remuda butler quota` again."
+  elseif type(codex) == "table" and (codex.unknown_reason == "codex did not show its limits in time"
+      or codex.unknown_reason == "could not type /status into the codex session") then
+    next_line = "Next: run `remuda butler quota` again in a minute."
+  elseif type(claude) == "table" and claude.mode == "subscription"
+      and (type(claude.limits) ~= "table" or #claude.limits == 0) then
+    next_line = "Next: let a claude session answer once, then run `remuda butler quota` again."
   elseif outcome and outcome.sent == true then
-    lines[#lines + 1] = "Next: run `remuda butler quota` any time for a fresh reading."
+    next_line = "Next: run `remuda butler quota` any time for a fresh reading."
   else
-    lines[#lines + 1] = "Next: run `remuda butler quota --report` to send this to Matrix."
+    next_line = "Next: run `remuda butler quota --report` to send this to Matrix."
   end
+  lines[#lines + 1] = next_line
   return table.concat(lines, "\n")
 end
 
@@ -346,11 +400,25 @@ end
 local USAGE_NEXT = "Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix."
 
 function quota.help()
-  return quota.usage() .. "\n" .. USAGE_NEXT
+  return "remuda butler quota reports, for claude and codex, how each is logged in, the subscription account and how much of each limit is used.\n"
+    .. "With --report it also posts the report to this Butler's Matrix home room.\n"
+    .. quota.usage() .. "\n" .. USAGE_NEXT
 end
 
 function quota.usage_error(argument)
-  return "unknown argument: " .. clean(argument) .. "\n" .. quota.help()
+  local arg = quota.safe_text(argument):sub(1, 40)
+  local message = arg:sub(1, 1) == "-" and "unknown option: " or "unexpected argument: "
+  return message .. arg .. "\n" .. quota.usage() .. "\n" .. USAGE_NEXT
+end
+
+function quota.report_denied()
+  return "only the Butler itself or a person at the terminal can send the report to Matrix.\n"
+    .. "Next: ask the Butler to run `remuda butler quota --report`, or run `remuda butler quota` to read it here."
+end
+
+function quota.unavailable(reason)
+  return "quota is unavailable: " .. quota.safe_text(reason)
+    .. "\nNext: remuda butler doctor"
 end
 
 if type(remuda) == "table" then
