@@ -405,6 +405,8 @@ the normal way for a member to communicate.
   end })
 remuda._butler_contribute("butler.guidance", "leader", { order = 90,
   prompt = function(ctx) return "Your leader is " .. ctx.parent .. "." end })
+remuda._butler_contribute("butler.permission", "cli", { order = 10,
+  rules = function(ctx) return remuda._butler_permissions.builtin(ctx) end })
 end
 local function guidance(part, parent)
   local out = {}

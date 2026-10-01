@@ -217,6 +217,10 @@ the normal way for a member to communicate.
       { id = "leader", order = 90,
         prompt = function(_, ctx) return "Your leader is " .. ctx.parent .. "." end },
     },
+    -- Rules for the mod-owned Claude settings file; an extension adds its own row.
+    ["butler.permission"] = {
+      { id = "cli", order = 10, rules = function(_, ctx) return host._butler_permissions.builtin(ctx) end },
+    },
     ["butler.command"] = {
       { id = "close", order = 8, verb = "close", usage = "  remuda butler close <name> [--force]",
         run = function(_, args, caller) return host._butler_command_run("close", args, caller) end },

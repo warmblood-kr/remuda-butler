@@ -5,7 +5,7 @@ local telemetry = assert(remuda._butler_telemetry_adapters)
 telemetry.claude = {
   setup = function(spec)
     local status_path = spec.status_path or (os.tmpname() .. "." .. spec.name .. ".status")
-    return { status_path = status_path, settings_path = support.status_settings(status_path) }
+    return { status_path = status_path, settings_path = support.status_settings(status_path, spec.role) }
   end,
   read = function(state)
     local status = state.status_path and io.open(state.status_path, "r")

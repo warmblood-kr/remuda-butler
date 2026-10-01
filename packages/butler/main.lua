@@ -135,12 +135,16 @@ local server = os.getenv("REMUDA_BUTLER_SERVER") or "default"
 local runtime_dir = os.getenv("REMUDA_RUNTIME_DIR")
 local status_path = remuda._butler_status_path
   or (config_path and (config_path .. ".status") or (os.tmpname() .. ".status"))
-local function status_settings(path)
+remuda.exec("butler/permissions")
+-- `role` is "root" only at launch_butler's call sites; every other session is a
+-- member. Gathering the rules must never block a launch.
+local function status_settings(path, role)
   local settings_path = path .. ".settings.json"
+  local ok, rules = pcall(function() return remuda._butler_permission_rules(role) end)
   local settings = assert(io.open(settings_path, "w"))
-  settings:write('{"statusLine":{"type":"command","command":'
-    .. json_quote("remuda -s " .. shell_quote(server) .. " --stdin butler statusline " .. shell_quote(path))
-    .. '}}')
+  settings:write(remuda._butler_permissions.settings_json(
+    "remuda -s " .. shell_quote(server) .. " --stdin butler statusline " .. shell_quote(path),
+    ok and rules or {}))
   settings:close()
   return settings_path
 end
@@ -257,6 +261,9 @@ local function contributions(point)
     return a.id < b.id
   end)
   return rows
+end
+function remuda._butler_permission_rules(role)
+  return remuda._butler_permissions.rules({ role = role }, contributions("butler.permission"))
 end
 bus.messages = bus.messages or {}
 bus.objects = bus.objects or {}
@@ -647,7 +654,7 @@ local root_identity = existing_butler and existing_butler.id
   or (bus.identities.butler and { id = bus.identities.butler.id, alias = "butler" })
   or register_identity("butler", butler_kind, "")
 local butler_telemetry = existing_butler and existing_butler.telemetry
-  or setup_telemetry(butler_kind, { name = "butler", status_path = status_path })
+  or setup_telemetry(butler_kind, { name = "butler", status_path = status_path, role = "root" })
 status_path = butler_telemetry.status_path or status_path
 remuda._butler_status_path = status_path
 local settings_path = butler_telemetry.settings_path
@@ -810,7 +817,7 @@ local function launch_butler()
     name = requested_name, cwd = butler_session_cwd, argv = remuda._butler_argv,
     skip_probe = remuda._butler_argv ~= nil,
     spec = function(candidate_kind)
-      local telemetry = setup_telemetry(candidate_kind, { name = requested_name, status_path = status_path })
+      local telemetry = setup_telemetry(candidate_kind, { name = requested_name, status_path = status_path, role = "root" })
       telemetry_by_kind[candidate_kind] = telemetry
       return { name = requested_name, token = butler_token, mcp_config_path = mcp_config_path,
         settings_path = telemetry.settings_path, telemetry = telemetry, system_prompt = SYSTEM_PROMPT }
