@@ -257,6 +257,12 @@ local function read_config(path)
   end
   local mode = (lines[5] or ""):lower()
   local timeout = tonumber(lines[6]) or 30000
+  local untrusted_per_room_hour = tonumber(opts.untrusted_per_room_hour)
+  if not untrusted_per_room_hour or untrusted_per_room_hour ~= untrusted_per_room_hour
+      or untrusted_per_room_hour < 1 or untrusted_per_room_hour == math.huge
+      or untrusted_per_room_hour % 1 ~= 0 then
+    untrusted_per_room_hour = 20
+  end
   local ca_file, pin_hex = opts.ca_file, opts.pin_sha256
   if ca_file == "" then ca_file = nil end
   if pin_hex == "" then pin_hex = nil end
@@ -313,6 +319,7 @@ local function read_config(path)
     deny_room_aliases = deny_room_aliases, deny_servers = deny_servers,
     self_mxid = lines[3], allowed_senders = allowed,
     butler_senders = butler_senders,
+    untrusted_per_room_hour = untrusted_per_room_hour,
     use_messages = mode == "1" or mode == "true" or mode == "messages" or mode == "fallback",
     timeout_ms = math.max(1, timeout), ca_file = ca_file, pin = pin,
   }

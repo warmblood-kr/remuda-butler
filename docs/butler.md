@@ -71,12 +71,15 @@ remuda butler matrix [--json] leave ROOM
 remuda butler matrix [--json] quarantine [--id EVENT_ID]
 ```
 
-Root posts are delivered from anyone. Thread replies are delivered only in
-threads you follow or when a message mentions the Butler; replying, sending,
-and being mentioned follow a thread automatically. Non-allowlisted senders
-arrive marked as information with `trusted=false`. Use `follow EVENT_ID` and
-`unfollow EVENT_ID` to manage subscriptions; the relay allows up to 5000
-followed threads in total.
+Root posts are delivered from anyone. In the HOME room, every thread reply is
+delivered whether or not you follow it. In other rooms, thread replies are
+delivered only in followed threads or when a message mentions the Butler;
+replying, sending, and being mentioned follow a thread automatically.
+Non-allowlisted senders arrive marked as information with `trusted=false`.
+Use `follow EVENT_ID` and `unfollow EVENT_ID` to manage subscriptions; the
+relay allows up to 5000 followed threads in total. Accepted messages from
+non-allowlisted senders are limited per room in a rolling hour by
+`untrusted_per_room_hour` (default 20).
 
 `remuda butler matrix setup --default` writes the token and config to the
 running Butler's resolved paths, then starts or replaces only its Matrix

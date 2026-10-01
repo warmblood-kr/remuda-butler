@@ -602,6 +602,7 @@ local function test_thread_root_mail_references_are_stable()
   assert(delivered[1] and delivered[1].event_id == "$human-root")
   assert(relay:record_outgoing_reply("$human-root", "$butler-sent"),
     "the Butler's Matrix reply event should map back to its answered mail")
+  relay:subscribe_thread("!room:example.org", "$butler-sent", "M0")
 
   sync(3, "s2", { event("$thread-first-response", {
     rel_type = "m.thread", event_id = "$butler-sent",
@@ -2903,15 +2904,22 @@ local function test_rx_thread_reply_needs_follow_home_joined()
   local dir, path = rx_fixture()
   rx_with_dir(dir, function()
     local relay, client, delivered = rx_relay(path)
-    for _, room in ipairs({ HOME, NEW }) do
-      local root = "$root-" .. room:sub(2, 4)
-      rx_sync(client, room, { rx_msg(root, OWNER, "root"), rx_msg(root .. "-t1", OWNER, "reply", rx_thread(root)) })
-      assert(rx_find(delivered, root), room .. ": a root is delivered")
-      assert(not rx_find(delivered, root .. "-t1"), room .. ": an unfollowed thread reply must not be delivered")
-      relay:subscribe_thread(room, root)
-      rx_sync(client, room, { rx_msg(root .. "-t2", OWNER, "reply", rx_thread(root)) })
-      assert(rx_find(delivered, root .. "-t2"), room .. ": a followed thread reply is delivered")
-    end
+    -- HOME delivers every thread reply, followed or not (as on main).
+    rx_sync(client, HOME, { rx_msg("$root-home", OWNER, "root"),
+      rx_msg("$root-home-t1", OWNER, "reply", rx_thread("$root-home")),
+      rx_msg("$home-deep", OWNER, "reply to a reply", { rel_type = "m.thread", event_id = "$unknown-root",
+        ["m.in_reply_to"] = { event_id = "$unknown-reply" } }) })
+    assert(rx_find(delivered, "$root-home") and rx_find(delivered, "$root-home-t1")
+      and rx_find(delivered, "$home-deep"), "HOME delivers an unfollowed thread reply")
+    assert(not rx_followed(relay, HOME, "$root-home"), "delivery in HOME does not follow the thread")
+    -- A joined room delivers a thread reply only in a followed thread.
+    rx_sync(client, NEW, { rx_msg("$root-new", OWNER, "root"),
+      rx_msg("$root-new-t1", OWNER, "reply", rx_thread("$root-new")) })
+    assert(rx_find(delivered, "$root-new"), "a joined room delivers a root")
+    assert(not rx_find(delivered, "$root-new-t1"), "a joined room does not deliver an unfollowed thread reply")
+    relay:subscribe_thread(NEW, "$root-new")
+    rx_sync(client, NEW, { rx_msg("$root-new-t2", OWNER, "reply", rx_thread("$root-new")) })
+    assert(rx_find(delivered, "$root-new-t2"), "a joined room delivers a followed thread reply")
     relay:stop()
   end)
 end
@@ -2929,28 +2937,31 @@ local function test_rx_follow_unfollow_verbs()
     local relay, client, delivered = rx_relay(path)
     relay_module.instance = relay
     rx_event_http(path, function()
-      local result = capture_matrix_cli({ "matrix", "follow", "$f-root" })
+      -- The delivery checks use a joined room: HOME delivers every thread reply.
+      local result = capture_matrix_cli({ "matrix", "--room", NEW, "follow", "$f-root" })
       assert(result and result.code == 0, "follow must succeed: " .. tostring(result and result.stderr))
       assert(result.stdout:find("Following thread $f-root in", 1, true)
-        and result.stdout:find("Next: remuda butler matrix thread '$f-root'", 1, true),
+        and result.stdout:find("Next: remuda butler matrix --room '" .. NEW .. "' thread '$f-root'", 1, true),
         "follow prints what it did and a Next line, got: " .. result.stdout)
-      assert(rx_followed(relay, HOME, "$f-root"), "follow must record the thread")
-      rx_sync(client, HOME, { rx_msg("$f-t1", OWNER, "in thread", rx_thread("$f-root")) })
+      assert(rx_followed(relay, NEW, "$f-root"), "follow must record the thread")
+      rx_sync(client, NEW, { rx_msg("$f-t1", OWNER, "in thread", rx_thread("$f-root")) })
       assert(rx_find(delivered, "$f-t1"), "a reply in a followed thread is delivered")
 
-      result = capture_matrix_cli({ "matrix", "unfollow", "$f-root" })
+      result = capture_matrix_cli({ "matrix", "--room", NEW, "unfollow", "$f-root" })
       assert(result and result.code == 0 and result.stdout:find("Stopped following thread $f-root", 1, true)
-        and result.stdout:find("Next: remuda butler matrix follow '$f-root'", 1, true),
-        "unfollow prints what it did and a Next line")
-      assert(not rx_followed(relay, HOME, "$f-root"), "unfollow must remove the thread")
-      rx_sync(client, HOME, { rx_msg("$f-t2", OWNER, "in thread", rx_thread("$f-root")) })
-      assert(not rx_find(delivered, "$f-t2"), "a reply after unfollow is not delivered")
-      result = capture_matrix_cli({ "matrix", "unfollow", "$f-root" })
+        and result.stdout:find("Next: remuda butler matrix --room '" .. NEW .. "' follow '$f-root'", 1, true),
+        "unfollow prints what it did and a Next line, got: " .. tostring(result and result.stdout))
+      assert(not rx_followed(relay, NEW, "$f-root"), "unfollow must remove the thread")
+      rx_sync(client, NEW, { rx_msg("$f-t2", OWNER, "in thread", rx_thread("$f-root")) })
+      assert(not rx_find(delivered, "$f-t2"), "a reply after unfollow is not delivered in a joined room")
+      result = capture_matrix_cli({ "matrix", "--room", NEW, "unfollow", "$f-root" })
       assert(result and result.code == 0 and result.stdout:find("Not following", 1, true),
         "unfollow of an unknown thread is not an error")
 
-      result = capture_matrix_cli({ "matrix", "--room", NEW, "follow", "$n-root" })
-      assert(result and result.code == 0 and rx_followed(relay, NEW, "$n-root"), "follow honours --room")
+      result = capture_matrix_cli({ "matrix", "follow", "$h-root" })
+      assert(result and result.code == 0 and rx_followed(relay, HOME, "$h-root")
+        and result.stdout:find("Next: remuda butler matrix thread '$h-root'", 1, true),
+        "follow without --room uses HOME")
 
       result = capture_matrix_cli({ "matrix", "follow" })
       assert(result and result.code ~= 0
@@ -2972,12 +2983,14 @@ local function test_rx_reply_follows_thread_all_room_kinds()
       assert(rx_find(delivered, root), room .. ": root delivered")
       assert(relay:record_outgoing_reply(root, sent), room .. ": the reply is recorded")
       assert(rx_followed(relay, room, root), room .. ": a reply must follow its thread")
-      -- A person may also open a thread on the Butler's own reply.
-      assert(rx_followed(relay, room, sent), room .. ": a reply must follow the thread on the sent event")
+      -- A reply follows only its thread root: following the sent event too
+      -- would spend a follow slot on every reply.
+      assert(not rx_followed(relay, room, sent), room .. ": a reply must not follow its own sent event")
       rx_sync(client, room, { rx_msg(root .. "-t", OWNER, "follow-up", rx_thread(root)),
         rx_msg(sent .. "-t", OWNER, "on your reply", rx_thread(sent)) })
-      assert(rx_find(delivered, root .. "-t") and rx_find(delivered, sent .. "-t"),
-        room .. ": replies in the followed threads are delivered")
+      assert(rx_find(delivered, root .. "-t"), room .. ": a reply in the followed thread is delivered")
+      assert((rx_find(delivered, sent .. "-t") ~= nil) == (room == HOME),
+        room .. ": a thread rooted at the sent event is not followed; only HOME delivers it")
     end
     relay:stop()
   end)
@@ -3072,25 +3085,26 @@ end
 
 local function test_rx_follows_survive_restart()
   local dir, path = rx_fixture()
+  -- A joined room: HOME would deliver the unfollowed thread anyway.
   rx_with_dir(dir, function()
     local relay, client = rx_relay(path)
-    rx_sync(client, HOME, { rx_msg("$keep-m", OWNER, "@bot:example.org here", rx_thread("$keep")) })
-    assert(rx_followed(relay, HOME, "$keep"), "a mention follows the thread before restart")
-    relay:subscribe_thread(HOME, "$gone")
-    relay:unsubscribe_thread(HOME, "$gone")
+    rx_sync(client, NEW, { rx_msg("$keep-m", OWNER, "@bot:example.org here", rx_thread("$keep")) })
+    assert(rx_followed(relay, NEW, "$keep"), "a mention follows the thread before restart")
+    relay:subscribe_thread(NEW, "$gone")
+    relay:unsubscribe_thread(NEW, "$gone")
     relay:stop()
     local again, client2, delivered = rx_relay(path)
-    assert(rx_followed(again, HOME, "$keep") and not rx_followed(again, HOME, "$gone"),
+    assert(rx_followed(again, NEW, "$keep") and not rx_followed(again, NEW, "$gone"),
       "the follow set (and an unfollow) survives a restart")
-    rx_sync(client2, HOME, { rx_msg("$keep-t", OWNER, "after restart", rx_thread("$keep")),
+    rx_sync(client2, NEW, { rx_msg("$keep-t", OWNER, "after restart", rx_thread("$keep")),
       rx_msg("$gone-t", OWNER, "after restart", rx_thread("$gone")) })
     assert(rx_find(delivered, "$keep-t") and not rx_find(delivered, "$gone-t"),
       "after restart only the followed thread delivers")
-    again:unsubscribe_thread(HOME, "$keep")
+    again:unsubscribe_thread(NEW, "$keep")
     again:stop()
     local third, client3, delivered3 = rx_relay(path)
-    assert(not rx_followed(third, HOME, "$keep"), "an unfollow after a restart survives the next restart")
-    rx_sync(client3, HOME, { rx_msg("$keep-t2", OWNER, "after unfollow", rx_thread("$keep")) })
+    assert(not rx_followed(third, NEW, "$keep"), "an unfollow after a restart survives the next restart")
+    rx_sync(client3, NEW, { rx_msg("$keep-t2", OWNER, "after unfollow", rx_thread("$keep")) })
     assert(not rx_find(delivered3, "$keep-t2"), "a reply in the unfollowed thread is not delivered")
     third:stop()
   end)
@@ -3106,6 +3120,71 @@ local function test_rx_subscribe_foreign_room_refused()
     assert(relay:state().subscriptions["!foreign:example.org"] == nil, "nothing is stored for a foreign room")
     relay:stop()
   end)
+end
+
+-- Per room and rolling hour, only ACCEPTED events from non-allowlisted
+-- senders count. Past the cap: not delivered, not quarantined, processed, one
+-- warning line per room, nothing posted. The relay counts by receive time.
+local function test_rx_untrusted_room_cap_logs_once_no_post()
+  local real_time, now = os.time, 1790000000
+  os.time = function(value) if value then return real_time(value) end return now end
+  local logs, old_stderr = {}, io.stderr
+  io.stderr = { write = function(_, line) logs[#logs + 1] = line end }
+  local dirs = {}
+  local ok, err = pcall(function()
+    local dir, path = invite_fixture(OWNER, "room=" .. NEW .. "\nuntrusted_per_room_hour=2\n")
+    dirs[#dirs + 1] = dir
+    local relay, client, delivered = rx_relay(path)
+    local events = { rx_msg("$u-img", STRANGER, "x.png", nil, "m.image") }
+    for i = 1, 3 do events[#events + 1] = rx_msg("$u-thread" .. i, STRANGER, "unfollowed", rx_thread("$nope")) end
+    for i = 1, 5 do events[#events + 1] = rx_msg("$u" .. i, STRANGER, "root " .. i) end
+    events[#events + 1] = rx_msg("$u-owner", OWNER, "owner still arrives")
+    rx_sync(client, NEW, events)
+    assert(rx_find(delivered, "$u1") and rx_find(delivered, "$u2"),
+      "the first 2 accepted untrusted roots are delivered (rejected and quarantined events do not count)")
+    for i = 3, 5 do
+      assert(not rx_find(delivered, "$u" .. i), "$u" .. i .. ": past the cap the text is not delivered")
+      assert(not rx_find(relay:quarantine_list(), "$u" .. i), "$u" .. i .. ": the cap never quarantines")
+      assert(relay:state().processed["$u" .. i], "$u" .. i .. ": a capped event is marked processed")
+    end
+    assert(rx_find(delivered, "$u-owner"), "allowlisted senders are never capped")
+    rx_sync(client, HOME, { rx_msg("$h1", STRANGER, "home 1"),
+      rx_msg("$h2", STRANGER, "home thread", rx_thread("$nope")), rx_msg("$h3", STRANGER, "home 3") })
+    assert(rx_find(delivered, "$h2") and not rx_find(delivered, "$h3"),
+      "the cap is per room, and an unfollowed thread reply in HOME is accepted, so it counts")
+    rx_sync(client, NEW, { rx_msg("$u6", STRANGER, "still capped") })
+    assert(not rx_find(delivered, "$u6"), "the room stays capped within the hour")
+    local warnings, new_warnings = 0, 0
+    for _, line in ipairs(logs) do
+      if line:find("rate cap", 1, true) then
+        warnings = warnings + 1
+        if line:find(NEW, 1, true) then new_warnings = new_warnings + 1 end
+      end
+    end
+    assert(warnings == 2 and new_warnings == 1,
+      "exactly ONE rate cap warning line per capped room, got " .. warnings .. " (" .. new_warnings .. " for the joined room)")
+    for _, args in ipairs(client.requests) do
+      assert(args.path:find("/sync", 1, true), "nothing is posted: no request besides /sync, got " .. args.path)
+    end
+    now = now + 3601
+    rx_sync(client, NEW, { rx_msg("$u7", STRANGER, "an hour later") })
+    assert(rx_find(delivered, "$u7"), "delivery works again after the hour")
+    relay:stop()
+
+    -- The default is 20 per room and hour.
+    local default_dir, default_path = rx_fixture()
+    dirs[#dirs + 1] = default_dir
+    local default_relay, default_client, default_delivered = rx_relay(default_path)
+    local roots = {}
+    for i = 1, 21 do roots[i] = rx_msg("$d" .. i, STRANGER, "root " .. i) end
+    rx_sync(default_client, HOME, roots)
+    assert(rx_find(default_delivered, "$d20") and not rx_find(default_delivered, "$d21"),
+      "without the config key the cap is 20 per room and hour")
+    default_relay:stop()
+  end)
+  os.time, io.stderr = real_time, old_stderr
+  for _, dir in ipairs(dirs) do remove_dir(dir) end
+  if not ok then error(err, 0) end
 end
 
 -- TODO(rx PR2): the Butler-to-Butler reply block is lifted together with the
@@ -3128,7 +3207,8 @@ local function test_rx_in_thread_reply_unfollowed_not_delivered()
   local dir, path = rx_fixture()
   rx_with_dir(dir, function()
     local relay, client, delivered = rx_relay(path)
-    for _, room in ipairs({ HOME, NEW, ALL }) do
+    -- Not HOME: HOME delivers every thread reply.
+    for _, room in ipairs({ NEW, ALL }) do
       for _, sender in ipairs({ OWNER, RX_BUTLER, STRANGER }) do
         local id = "$in-" .. room:sub(2, 4) .. "-" .. sender:sub(2, 4)
         rx_sync(client, room, { rx_msg(id, sender, "inside a thread", { rel_type = "m.thread",
@@ -3258,6 +3338,7 @@ rx_tests = {
   { "test_rx_b2b_block_kept_TODO_pr2", test_rx_b2b_block_kept_TODO_pr2 },
   { "test_rx_marker_cannot_be_faked", test_rx_marker_cannot_be_faked },
   { "test_rx_untrusted_approve_text_is_data", test_rx_untrusted_approve_text_is_data },
+  { "test_rx_untrusted_room_cap_logs_once_no_post", test_rx_untrusted_room_cap_logs_once_no_post },
 }
 end
 

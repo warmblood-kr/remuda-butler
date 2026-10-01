@@ -549,6 +549,7 @@ function relay.new(options)
     false, nil, nil, nil, nil, nil
   local delivery_retry_waiting, delivery_retry_timers = {}, {}
   local reply_retry_timers, reply_in_flight = {}, {}
+  local untrusted_receive_times = {}
   local joining = {}
   local generation = 0
   local failures = 0
@@ -699,7 +700,6 @@ function relay.new(options)
         if route.from_agent ~= false then return false end
         route.last_reply_event_id = sent_id
         subscribe(state, route.room_id, route.thread_root or route.event_id, source_mail_id)
-        subscribe(state, route.room_id, sent_id, source_mail_id)
         persist()
         return true
       end
@@ -788,7 +788,6 @@ function relay.new(options)
           route.last_reply_mail_id, route.last_reply_event_id = reply_id, sent_id
           state.routes[item.source_mail_id] = route
           subscribe(state, route.room_id, route.thread_root or route.event_id, item.source_mail_id)
-          subscribe(state, route.room_id, sent_id, item.source_mail_id)
           state.reply_results[reply_id] = { source_mail_id = item.source_mail_id,
             reply_mail_id = reply_id, room_id = item.room_id, thread_root = item.thread_root,
             event_id = sent_id, event_ids = ids, completed_at = os.date("!%Y-%m-%dT%H:%M:%SZ") }
@@ -1063,7 +1062,7 @@ function relay.new(options)
           state.subscriptions[actual_room] = subscriptions
           local is_subscribed = thread_root and subscriptions[thread_root] ~= nil
           local is_agent = sender_kind == "AGENT"
-          local accepted = thread_root == nil or is_subscribed or is_mention
+          local accepted = actual_room == cfg.home_room or thread_root == nil or is_subscribed or is_mention
           local route_mail_id = thread_id
             and instance:mail_route_for_event(actual_room, thread_root, in_reply_to) or nil
           local thread_root_mail_id = thread_root
@@ -1072,7 +1071,27 @@ function relay.new(options)
           local subscribed_mail_id = type(subscription) == "table" and subscription.mail_id or nil
           local context_mail_id = route_mail_id or subscribed_mail_id
           local references = thread_root and (thread_root_mail_id or subscribed_mail_id) or nil
-          if not accepted then
+          local rate_capped = false
+          if accepted and not trusted then
+            local now = os.time()
+            local window_start = now - 3600
+            local receive_times = untrusted_receive_times[actual_room] or {}
+            local retained = {}
+            for _, received_at in ipairs(receive_times) do
+              if received_at > window_start then retained[#retained + 1] = received_at end
+            end
+            untrusted_receive_times[actual_room] = retained
+            if #retained >= cfg.untrusted_per_room_hour then
+              rate_capped = true
+              warn_once("untrusted-rate-cap", actual_room,
+                "butler Matrix rate cap: messages from non-allowlisted senders in "
+                  .. terminal_safe_field(actual_room, 512) .. " are not delivered ("
+                  .. tostring(cfg.untrusted_per_room_hour) .. " per hour)")
+            else
+              retained[#retained + 1] = now
+            end
+          end
+          if not accepted or rate_capped then
             add_processed(state, ev.event_id)
             if cursor then state.since = cursor end
           else
