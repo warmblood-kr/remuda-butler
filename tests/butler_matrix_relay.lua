@@ -4651,6 +4651,28 @@ rx_tests = {
   { "test_ctx_restart_between_fetch_and_delivery", test_ctx_restart_between_fetch_and_delivery },
 }
 
+-- The relations page does not contain the delivered event: 21 newer thread
+-- messages arrived before the fetch. They were sent AFTER the delivered one, so
+-- none of them is an earlier message: the block is the root line and the
+-- "not shown" line only.
+rx_tests[#rx_tests + 1] = { "test_ctx_page_without_the_delivered_event_lists_no_newer_message", function()
+  local thread = { root = ctx_event("$late-root", OWNER, "where do we stand?", 0), replies = {} }
+  ctx_run(nil, thread, function(ctx)
+    local message = ctx_event("$late-m", OWNER, "@bot:example.org your view?", 1, "$late-root")
+    thread.replies[1] = message
+    for index = 1, 21 do
+      thread.replies[#thread.replies + 1] = ctx_event("$late-n" .. index, RX_ALLY, "newer body " .. index, 1 + index, "$late-root")
+    end
+    ctx.sync(NEW, { message })
+    local mail = ctx.mail("$late-m")
+    local expected = CTX_HEAD .. "\n  06:00Z " .. OWNER .. ": where do we stand?\n"
+      .. "  ... earlier messages not shown ...\nMessage to you:\n@bot:example.org your view?"
+    assert(mail, "the mail must be delivered")
+    assert(not mail.text:find("newer body", 1, true), "a message sent after the delivered one is not an earlier message, got:\n" .. mail.text)
+    assert(mail.text == expected, "expected:\n" .. expected .. "\ngot:\n" .. mail.text)
+  end)
+end }
+
 rx_tests[#rx_tests + 1] = { "test_ctx_pending_fetch_does_not_hold_back_other_mail", function()
   local dir, path = rx_fixture()
   rx_with_dir(dir, function()
