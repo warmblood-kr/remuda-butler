@@ -250,6 +250,22 @@ local function test_typed_line_refusals_are_rate_limited()
     end
     assert(refusal_lines == 1, "only one refusal thread line should be sent within a 60-second window")
     assert(#typed == 0, "refused stale lines must not be typed")
+    local real_os_time, clock_now = os.time, os.time()
+    os.time = function() return clock_now + 60 end
+    local third = typed_line_event("$stale-three", "!hello")
+    third.origin_server_ts = (clock_now - 301) * 1000
+    local completed, complete_error = pcall(function()
+      client:complete(3, { json = { next_batch = "s2", rooms = { join = {
+        ["!room:example.org"] = { timeline = { events = { third } } },
+      } } } })
+    end)
+    os.time = real_os_time
+    assert(completed, complete_error)
+    refusal_lines = 0
+    for _, request in ipairs(client.requests) do
+      if tostring(request.path):find("/send/m.room.message/", 1, true) then refusal_lines = refusal_lines + 1 end
+    end
+    assert(refusal_lines == 2, "a new refusal should be allowed after the 60-second window expires")
     relay:stop()
     cleanup_fixture(dir, config_path)
   end)
