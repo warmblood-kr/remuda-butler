@@ -9,6 +9,16 @@ return function(matrix, pinned_hostname)
   assert(no_flag_plan and no_flag_plan.wizard == true,
     "no setup flags should select the interactive wizard")
   assert(matrix.cli({ "matrix", "setup", "--help" }) == matrix.setup_usage())
+  do -- caller kind is not checked; an agent is still refused
+    local saved_caller, saved_fail = remuda.caller, remuda.fail
+    remuda.caller = function() return { kind = "unknown" } end
+    remuda.fail = function(message) return message end
+    assert(matrix.cli({ "matrix", "setup", "--help" }) == matrix.setup_usage(),
+      "an unknown caller kind must be allowed to run matrix setup")
+    local refused = tostring(matrix.cli({ "matrix", "setup", "--help" }, "agent1"))
+    remuda.caller, remuda.fail = saved_caller, saved_fail
+    assert(refused:find("matrix setup is operator-only", 1, true), "an agent must still be refused setup: " .. refused)
+  end
   local setup_help = matrix.setup_usage()
   assert(not setup_help:find("MXID", 1, true)
     and setup_help:find("Your Matrix server address", 1, true)

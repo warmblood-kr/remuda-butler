@@ -248,11 +248,15 @@ interactive setup wizard writes `rooms=open` without asking; flag-based setup
 defaults to allowlist unless given `--rooms open`. `send -` reads the text from
 stdin (up to 64 KiB, one trailing newline dropped); `send -- -` sends a literal `-`.
 
-`join` and `leave` change room membership and require an outside terminal
-caller; session, unknown, and missing callers are refused. Clearing
-`REMUDA_BUTLER_*` environment variables does not bypass this check. This is
-still advisory within one UID: another local process running as the same user
-may invoke those verbs from an outside terminal caller.
+`join` and `leave` change room membership. Butler refuses them for a Butler
+member, identified by the agent identity in the client environment
+(`REMUDA_BUTLER_AGENT_ID` / `REMUDA_BUTLER_SESSION_NAME`). The caller kind
+(session, unknown, outside) is not checked, so a caller with those variables
+cleared is not refused. This is advisory within one UID, not an OS boundary:
+any local process running as the same user can drop the variables.
+The CLI verbs (`approve`, `deny`, `matrix setup`, `join`, `leave`) identify the
+member from those variables only; the MCP tools also accept the session
+capability.
 
 Approvals: when an agent runs `matrix join`, Butler resolves the room and
 posts one request to HOME instead of joining. The owner answers with a ✅ or
@@ -260,9 +264,10 @@ posts one request to HOME instead of joining. The owner answers with a ✅ or
 Only an allowlisted human sender in HOME counts. A bare `yes` does nothing.
 The owner can also answer from the terminal: `remuda butler approvals` lists
 the open requests, and `remuda butler approve ID` or `deny ID` answers one
-(operator-only). Terminal approve/deny require a caller outside any Remuda
-session (core caller identity); clearing the environment no longer passes,
-and this remains a same-UID policy, not an OS boundary. The Matrix answer path
+(operator-only). Terminal approve/deny are refused for a Butler member, by the
+same agent identity in the client environment; the caller kind is not checked,
+so clearing the variables passes. This is a same-UID policy, not an OS
+boundary. The Matrix answer path
 is bound to the owner's MXID. An approved request joins the room ID resolved
 at request time and writes `room=ID how=approved`. The asker gets mail for every outcome:
 approved, denied or expired. A repeat ask for the same room returns the same
