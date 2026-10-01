@@ -28,12 +28,22 @@ end
 function windows.find_command(name, context)
   context = context or {}
   local path = context.path or ""
-  local extensions = context.pathext or ".COM;.EXE;.BAT;.CMD"
-  local names = { name }
-  if not name:match("%.[^\\/]+$") then
-    for _, extension in ipairs(split(extensions, ";")) do
-      names[#names + 1] = name .. extension:lower()
-    end
+  -- Same rule as cmd.exe and core's lookup: an unset or empty PATHEXT means the
+  -- default list, and a name is tried as given only when it already ends in one
+  -- of those extensions. An npm install puts an extensionless sh script next to
+  -- NAME.cmd; Windows cannot start that file.
+  local extensions = {}
+  for _, extension in ipairs(split(context.pathext or "", ";")) do
+    if extension:sub(1, 1) == "." and #extension > 1 then extensions[#extensions + 1] = extension end
+  end
+  if #extensions == 0 then extensions = split(".COM;.EXE;.BAT;.CMD", ";") end
+  local names = {}
+  local lower = name:lower()
+  for _, extension in ipairs(extensions) do
+    if lower:sub(-#extension) == extension:lower() then names = { name }; break end
+  end
+  if #names == 0 then
+    for _, extension in ipairs(extensions) do names[#names + 1] = name .. extension:lower() end
   end
   local explicit = name:find("[/\\\\]") ~= nil
   if explicit then
@@ -42,6 +52,7 @@ function windows.find_command(name, context)
   end
   local directories = {}
   for _, directory in ipairs(split(path, ";")) do
+    directory = directory:match('^"(.*)"$') or directory
     if windows_absolute(directory) then directories[#directories + 1] = directory end
   end
   local exists = context.exists or file_exists

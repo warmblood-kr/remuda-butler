@@ -39,6 +39,47 @@ local windows_missing, windows_missing_reason = windows.find_command("missing-ag
 assert(windows_missing == nil and type(windows_missing_reason) == "string" and windows_missing_reason ~= "",
   "Windows lookup should explain a missing command")
 
+-- An npm install puts three files side by side: `claude` (a sh script for Git
+-- Bash), `claude.cmd` and `claude.ps1`. Windows cannot start the first one.
+local npm = { [ [[C:\npm\claude]] ] = true, [ [[C:\npm\claude.cmd]] ] = true, [ [[C:\npm\claude.ps1]] ] = true }
+local npm_found = windows.find_command("claude", {
+  path = [[C:\npm]], pathext = ".COM;.EXE;.BAT;.CMD",
+  exists = function(path) return npm[path] == true end,
+})
+assert(npm_found == [[C:\npm\claude.cmd]],
+  "Windows lookup must not return the extensionless npm shim: " .. tostring(npm_found))
+local npm_only_shim = windows.find_command("claude", {
+  path = [[C:\npm]], pathext = ".COM;.EXE;.BAT;.CMD",
+  exists = function(path) return path == [[C:\npm\claude]] end,
+})
+assert(npm_only_shim == nil, "a file without a PATHEXT extension is not a command on Windows")
+local named = windows.find_command("claude.cmd", {
+  path = [[C:\npm]], pathext = ".COM;.EXE;.BAT;.CMD",
+  exists = function(path) return npm[path] == true end,
+})
+assert(named == [[C:\npm\claude.cmd]], "a name that already has a PATHEXT extension is tried as given")
+-- A PATHEXT entry is an extension only when it starts with a dot and has more
+-- than the dot (core's rule). "E" must not make "claude" count as named.
+local odd_pathext = windows.find_command("claude", {
+  path = [[C:\npm]], pathext = "E;.;.CMD",
+  exists = function(path) return npm[path] == true end,
+})
+assert(odd_pathext == [[C:\npm\claude.cmd]],
+  "a PATHEXT entry without a leading dot is not an extension: " .. tostring(odd_pathext))
+local no_real_pathext = windows.find_command("claude", {
+  path = [[C:\npm]], pathext = "E;.",
+  exists = function(path) return npm[path] == true end,
+})
+assert(no_real_pathext == [[C:\npm\claude.cmd]],
+  "a PATHEXT with no real extension means the default list: " .. tostring(no_real_pathext))
+-- cmd.exe accepts a quoted PATH entry; it must be unquoted, not skipped.
+local quoted = windows.find_command("node", {
+  path = [["C:\Program Files\nodejs";C:\tools]], pathext = ".EXE",
+  exists = function(path) return path == [[C:\Program Files\nodejs\node.exe]] end,
+})
+assert(quoted == [[C:\Program Files\nodejs\node.exe]],
+  "a quoted PATH entry should be searched: " .. tostring(quoted))
+
 -- Exercise the POSIX table with a fake executable path.
 local posix = assert(system.posix, "POSIX system table must be testable")
 local posix_path = "/opt/agent/bin/claude"
@@ -49,7 +90,8 @@ local posix_found = posix.find_command("claude", {
 assert(posix_found == posix_path, "POSIX lookup should find a file on PATH")
 
 local windows_candidates = {}
-local absolute_windows = [[C:\agent-bin\claude]]
+-- An empty PATHEXT means the default list, as in cmd.exe and in core.
+local absolute_windows = [[C:\agent-bin\claude.com]]
 local relative_windows_found = windows.find_command("claude", {
   path = [[.;bin;C:\agent-bin]], pathext = "",
   exists = function(path) windows_candidates[#windows_candidates + 1] = path; return true end,
