@@ -163,6 +163,12 @@ end
 local function terminal_safe(value)
   return tostring(value or ""):gsub("[%c]", " "):gsub("\194[\128-\159]", " ")
 end
+-- At most `limit` bytes; a cut text ends with "..." inside the limit, so the
+-- reader can see that it is not complete.
+local function shortened(text, limit)
+  if #text <= limit then return text end
+  return matrix.utf8_prefix(text, limit - 3) .. "..."
+end
 local function shell_quote(value)
   return matrix.shell_quote(tostring(value))
 end
@@ -430,7 +436,7 @@ function matrix.cli(args, agent, stdin_body)
             if matrix.prompt_preface_supported() then
               -- A preface line over 256 characters is an error from core, not
               -- a cut: shorten a very long value here so the wizard goes on.
-              for index, line in ipairs(lines) do lines[index] = matrix.utf8_prefix(line, 250) end
+              for index, line in ipairs(lines) do lines[index] = shortened(line, 250) end
               label, preface = question, table.concat(lines, "\n")
             end
             prompt_line(label, "N", function(answer)
@@ -486,7 +492,7 @@ function matrix.cli(args, agent, stdin_body)
       local prompt_attempts, prompt_notice = 0, nil
       -- prompt_secret has no preface and core cuts a label at 256 characters:
       -- a long homeserver is shortened so the notice and the question still fit.
-      local prompt_label = "Registration token for " .. matrix.utf8_prefix(plan.homeserver, 100)
+      local prompt_label = "Registration token for " .. shortened(plan.homeserver, 100)
         .. ", from its admin (hidden). This is not an access token"
       local rejected_registration_token = matrix.REJECTED_REGISTRATION_TOKEN
       local original_bot_mxid = plan.bot_mxid
