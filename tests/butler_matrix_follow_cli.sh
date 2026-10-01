@@ -107,11 +107,19 @@ run_args follow abc
 # posts_per_hour (2 here) counts across SEPARATE CLI processes, not only inside
 # one Lua call chain. HTTP is scripted inside this private daemon: every PUT is
 # answered locally and counted; everything else goes on to 127.0.0.1:9 as before.
+# The refused send makes the relay post ONE notice to HOME (7b); it takes no slot.
 remuda -s "$S" -e 'local m = remuda.butler.matrix
   local real = m.request_json
   m.request_json = function(spec, callback)
     if spec.method ~= "PUT" then return real(spec, callback) end
     bmf_puts = (bmf_puts or 0) + 1
+    local body = tostring(spec.body)
+    if body:find("post %d") then bmf_sent = (bmf_sent or 0) + 1 end
+    if spec.room == "!home:example.org" and body:find("Matrix post limit reached (2 per hour); posts other than "
+        .. "replies to people on the allowlist are refused until ", 1, true)
+      and body:find("Z. Next: remuda butler matrix history", 1, true) then
+      bmf_notices = (bmf_notices or 0) + 1
+    end
     callback({ json = { event_id = "$cli" .. bmf_puts } })
     return { cancel = function() end }
   end' >/dev/null
@@ -122,6 +130,8 @@ done
 run_args send "post 3"
 [[ $CODE != 0 && $OUT =~ Not\ sent:\ Matrix\ post\ limit\ reached\ \(2\ per\ hour\)\.\ Next:\ wait\ until\ [0-9]{2}:[0-9]{2}Z ]] \
   || soft "the 3rd send, a separate process, must be refused with Not sent: ... Next: wait until HH:MMZ: $CODE $OUT"
-remuda -s "$S" -e 'return bmf_puts' | grep -qx 2 || soft "the refused send must not be posted (2 PUTs expected)"
+COUNTS=$(remuda -s "$S" -e 'return (bmf_sent or 0) .. " sent, " .. (bmf_notices or 0) .. " notice, " .. (bmf_puts or 0) .. " PUTs"')
+[[ $COUNTS == "2 sent, 1 notice, 3 PUTs" ]] \
+  || soft "expected the 2 sent texts plus exactly ONE post-cap HOME line and nothing else, got: $COUNTS"
 ((${#SOFT[@]} == 0)) || fail "$(printf '%s\n' "${SOFT[@]}")"
 echo PASS
