@@ -179,7 +179,7 @@ local function test_typed_line_replay_after_restart_and_history_are_not_typed()
     assert(client.requests[1].path:find("/messages?dir=b&limit=1", 1, true),
       "history fixture must use the Matrix /messages back-pagination path")
     client:complete(1, { json = { start = "m0", ["end"] = "m0", chunk = {} } })
-    tick_timers(1)
+    tick_timers(3)
     local history_request
     for index, request in ipairs(client.requests) do
       if client.callbacks[index] and tostring(request.path):find("/messages?from=m0", 1, true) then
@@ -190,7 +190,7 @@ local function test_typed_line_replay_after_restart_and_history_are_not_typed()
     assert(history_request, "history pagination request should follow its baseline")
     client:complete(history_request, { json = { ["end"] = "m1",
       chunk = { typed_line_event("$history-same-shape", "!hello") } } })
-    assert(#typed == 1, "a same-shaped history event with a different ID must not type")
+    assert(#typed == 1, "a history event with a different ID and the same body must not type")
     relay:stop()
     cleanup_fixture(history_dir, history_config)
   end)
