@@ -5,6 +5,7 @@
 -- user-created session. Its stable name is its public control surface:
 -- `remuda send butler ...`, installer liveness checks, and restart recovery
 -- must never depend on the directory that happened to start the daemon.
+local system = assert(remuda._butler_system)
 local function initial_butler_name()
   return "butler"
 end
@@ -103,6 +104,8 @@ local paths = remuda._butler_paths
 -- shared state (the registry, the MCP config, the root Butler, the relay).
 remuda.exec("butler/guard")
 if not remuda.butler.guard.boot(paths) then return end
+remuda.exec("butler/launch_failure")
+local launch_failure_lines = assert(remuda.butler.launch_failure_lines)
 local topic_config = paths.topic_config
 local data_home = paths.data_home
 local butler_session_cwd = paths.butler_session_cwd
@@ -308,7 +311,7 @@ remuda._butler_mail_config = { bus = bus, root = mail_root, json_quote = json_qu
 remuda.exec("butler/mail")
 -- ULIDs, identity records and caller identity live in identity.lua.
 remuda._butler_identity_config = { bus = bus, current_agent = current_agent, data_home = data_home,
-  shell_quote = shell_quote, json_quote = json_quote }
+  json_quote = json_quote }
 remuda.exec("butler/identity")
 local identity = remuda._butler_identity
 local identity_path = identity.identity_path
@@ -762,15 +765,11 @@ behalf of another session. Do not use it for ordinary team communication.
 local function _butler_trace(event, detail)
   pcall(function()
     local path = remuda._butler_compaction_trace_path
-      or (os.getenv("XDG_CONFIG_HOME") or (os.getenv("HOME") .. "/.config"))
+      or (os.getenv("XDG_CONFIG_HOME") or (system.home() .. "/.config"))
         .. "/remuda/compaction-trace.log"
     local f = io.open(path, "a")
     if not f then
-      -- Stock Lua's io has no mkdir; a one-time `mkdir -p` on first-open
-      -- failure is smaller than documenting "the directory must already
-      -- exist" as a precondition every caller (including every test) has
-      -- to remember to satisfy.
-      os.execute('mkdir -p "' .. path:match("^(.*)/[^/]+$") .. '"')
+      system.mkdir_p(path:match("^(.*)/[^/]+$"))
       f = io.open(path, "a")
     end
     if not f then
@@ -821,12 +820,7 @@ function remuda._butler_status()
   end
   if selected and session_exists(name) then return "butler: up (" .. tostring(selected) .. ")", 0 end
   if remuda._butler_start_error then
-    local lines = { "failed" }
-    for _, attempt in ipairs(remuda._butler_attempts or {}) do
-      lines[#lines + 1] = attempt.kind .. ": " .. attempt.reason
-        .. (attempt.detail and attempt.detail ~= "" and (": " .. one_line(attempt.detail)) or "")
-    end
-    return table.concat(lines, "\n"), 1
+    return table.concat(launch_failure_lines(remuda._butler_attempts or {}), "\n"), 1
   end
   return "launching\nreadiness budget: " .. tostring(readiness_chain_budget()), 75
 end
@@ -924,18 +918,9 @@ local function launch_butler()
   remuda._butler_attempts = attempts
   bus.agents.butler.launch_attempts = attempts
   if not selected then
-    local failures = { "butler: no candidate became ready" }
-    for _, a in ipairs(attempts) do
-      failures[#failures + 1] = "butler: " .. one_line(a.kind) .. ": " .. one_line(a.reason)
-        .. (a.detail and a.detail ~= "" and (" (" .. one_line(a.detail) .. ")") or "")
-    end
-    local message = table.concat(failures, "\n")
+    local message = table.concat(launch_failure_lines(attempts), "\n")
     remuda._butler_start_error = message
     remuda._butler_start_pending = false
-    for _, attempt in ipairs(attempts) do
-      io.stderr:write("butler: " .. one_line(attempt.kind) .. ": " .. one_line(attempt.reason)
-        .. (attempt.detail and attempt.detail ~= "" and (" (" .. one_line(attempt.detail) .. ")") or "") .. "\n")
-    end
     _butler_session_trace("reconcile_error", message)
     return nil
   end
@@ -960,7 +945,7 @@ local function launch_butler()
   end)
   butler_attempts, remuda._butler_attempts = attempts, attempts
   bus.agents.butler.launch_attempts = attempts
-  return "launching Butler"
+  return remuda._butler_start_error or "launching Butler"
 end
 
 -- The compaction restore record, tick and execute live in compaction_run.lua.
@@ -980,11 +965,11 @@ remuda.exec("butler/compaction_run")
 function _butler_session_trace(event, detail)
   pcall(function()
     local path = remuda._butler_session_trace_path
-      or (os.getenv("XDG_CONFIG_HOME") or (os.getenv("HOME") .. "/.config"))
+      or (os.getenv("XDG_CONFIG_HOME") or (system.home() .. "/.config"))
         .. "/remuda/session-trace.log"
     local f = io.open(path, "a")
     if not f then
-      os.execute('mkdir -p "' .. path:match("^(.*)/[^/]+$") .. '"')
+      system.mkdir_p(path:match("^(.*)/[^/]+$"))
       f = io.open(path, "a")
     end
     if not f then

@@ -20,6 +20,7 @@ local matrix_module_ok, matrix_module_error = pcall(dofile, "packages/butler/mat
 remuda.exec = package_exec
 assert(matrix_module_ok, matrix_module_error)
 local ASKER = "team-1-mx"
+dofile("packages/butler/system.lua")
 dofile("packages/butler/matrix_setup.lua")
 dofile("packages/butler/matrix_read.lua")
 dofile("packages/butler/matrix_cli.lua")
@@ -359,6 +360,33 @@ local function test_download_next_command(body)
   assert(captured and captured.output == nil and captured.mxc == "mxc://example.org/chart",
     "rendered Next command should parse to download the expected MXC without -o")
   assert(not line:find("-o", 1, true), "the media Next line must not offer an -o PATH form")
+end
+
+local function test_matrix_download_explicit_output_without_home()
+  local system, old_home, old_request = remuda._butler_system, remuda._butler_system.home, matrix.request
+  local dir, config_path = fixture()
+  local output, result = dir .. "/media.bin", nil
+  system.home = function()
+    error("HOME and USERPROFILE are not set.\nNext: set HOME or USERPROFILE, then restart Butler", 0)
+  end
+  matrix.request = function(_, callback)
+    callback({ status = 200, headers = {}, body = "media" })
+    return { cancel = function() end }
+  end
+  local ok, why = pcall(matrix.download, { mxc = "mxc://example.org/media", output = output },
+    function(value) result = value end)
+  assert(ok, "an explicit download output must not raise without HOME: " .. tostring(why))
+  assert(result and not result.error and result.path == output and result.bytes == 5,
+    "an explicit download output should be written without HOME")
+  result = nil
+  local missing_home_ok, missing_home_error = pcall(matrix.download,
+    { mxc = "mxc://example.org/media" }, function(value) result = value end)
+  system.home, matrix.request = old_home, old_request
+  assert(missing_home_ok and result and result.error and result.error:find("Next:", 1, true)
+    and not result.error:find("\n", 1, true) and not result.error:find("stack traceback", 1, true),
+    "missing HOME should produce one actionable error line, not a traceback: " .. tostring(missing_home_error))
+  os.remove(output)
+  cleanup_fixture(dir, config_path)
 end
 
 local function test_state_restart_corruption_and_processed_cap()
@@ -4449,6 +4477,7 @@ test_quarantine_sender_cap_preserves_utf8()
 test_download_next_command("media: image\nfilename: chart.png\nmimetype: image/png\n"
   .. "size: 12345 bytes\nmxc: mxc://example.org/chart\n"
   .. "Next: remuda butler matrix download mxc://example.org/chart")
+test_matrix_download_explicit_output_without_home()
 test_state_restart_corruption_and_processed_cap()
 test_pending_delivery_retries_safely_after_restart()
 test_ack_reconcile_and_utf8_body_cap()

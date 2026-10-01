@@ -7,10 +7,13 @@ if not getmetatable(_G) then
 end
 
 local host = getmetatable(_G).__index.remuda
+local system
 local booted, main_loaded = false, false
 local function load_main()
   if main_loaded then return end
   main_loaded = true
+  host.exec("butler/system")
+  system = assert(host._butler_system)
   host.exec("butler/main")
 end
 local function start_matrix_relay()
@@ -54,7 +57,11 @@ local function stop_legacy_matrix_relay()
   local id = host._butler_matrix_relay
   if id == nil or type(host.processes) ~= "function" or type(host.kill) ~= "function" then return end
   local data_home = os.getenv("XDG_DATA_HOME")
-  if not data_home or data_home == "" then data_home = (os.getenv("HOME") or "") .. "/.local/share" end
+  if not data_home or data_home == "" then
+    local ok, home = pcall(system.home)
+    if not ok then return end
+    data_home = home .. "/.local/share"
+  end
   local mod_dir = data_home .. "/remuda/mods/butler"
   local expected_script = mod_dir .. "/packages/butler/matrix_relay.py"
   local script = host._butler_matrix_relay_script_path or expected_script
