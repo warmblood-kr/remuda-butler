@@ -139,7 +139,11 @@ local butler_fs = {
     return nil
   end,
   json = remuda.json,
-  mkdir = function(path) return remuda.mkdir(path) end,
+  -- A private directory where the core can make one (as paths.lua's create_fresh_directory does).
+  mkdir = function(path)
+    if remuda.fs and remuda.fs.mkdir_new and remuda.fs.mkdir_new(path) == true then return end
+    return remuda.mkdir(path)
+  end,
   write = function(path, text, private)
     if remuda.fs and type(remuda.fs.write_atomic) == "function" then
       return remuda.fs.write_atomic(path, text, private and { private = true } or nil)

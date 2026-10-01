@@ -422,6 +422,9 @@ local function write_agent_guidance(root, text, replace)
   local path = root .. "/AGENTS.md"
   if not replace and file_exists(path) then return end
   -- Only when the text differs: launch_butler calls this on every reconcile tick.
+  -- No symlink check (it would run a process on that tick): the directory is the
+  -- mod's own. An AGENTS.md that is a link is read through, and when the text
+  -- differs the atomic writer replaces the link with a plain file.
   assert(remuda._butler_permissions.write_if_changed(path, text, config.fs))
 end
 local _butler_session_trace -- defined below; the task poke fires later

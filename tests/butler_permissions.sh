@@ -68,6 +68,8 @@ wait_up
 echo "== root_launch_writes_rule, file_is_private"
 wait_for "the root launch did not write $FILE" has_rule
 [[ $(mode "$FILE") == 600 ]] || fail "settings.local.json is not private: $(mode "$FILE")"
+# The mod makes .claude with remuda.fs.mkdir_new; the pinned core (0651664) gives it mode 700.
+[[ $(mode "$ROOT/.claude") == 700 ]] || fail "the created .claude directory is not private: $(mode "$ROOT/.claude")"
 DOCTOR=$("$REMUDA_BIN" -s "$SERVER" butler doctor 2>&1 || true)
 grep -qF "Permissions butler (claude): added 1 rule to $FILE: $RULE (file rewritten: private, mode 600)" <<<"$DOCTOR" \
   || fail "doctor does not show the added rule: $DOCTOR"
