@@ -6368,7 +6368,7 @@ while IFS= read -r line; do
           || [ "$scenario" = model-confirm-static ]; then
         printf 'KEY:RET\n' >> "$log"
         model='sonnet'
-        if [ "$scenario" != model-confirm-static ]; then paint; fi
+        paint
       fi
       ;;
     '/model sonnet')
