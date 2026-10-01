@@ -589,6 +589,19 @@ function matrix.cli(args, agent)
     end
     return USAGE
   end
+  if (verb == "follow" or verb == "unfollow")
+    and (type(options.event_id) ~= "string" or options.event_id:sub(1, 1) ~= "$"
+      or terminal_safe(options.event_id) ~= options.event_id) then
+    local usage = "  remuda butler matrix [--json] [--room ROOM] " .. verb .. " EVENT_ID"
+      .. "\nExample: remuda butler matrix " .. verb .. " '$EVENT_ID'"
+    if type(remuda.pending) == "function" then
+      local reply = remuda.pending({ timeout = 1 })
+      reply:resolve(2, "", usage .. "\n")
+      return reply
+    end
+    if type(remuda.fail) == "function" then return remuda.fail(usage, 2) end
+    return usage
+  end
   if verb ~= "join" and verb ~= "leave" and type(matrix.configuration_guidance) == "function" then
     local guidance = matrix.configuration_guidance()
     if guidance then
@@ -631,14 +644,19 @@ function matrix.cli(args, agent)
       local message = "No Matrix room is configured. Next: remuda butler matrix setup"
       return resolve_local(1, "", message .. "\n")
     end
+    if matrix.room_kind(room) == nil then
+      return resolve_local(1, "", "room is outside the configured Matrix allowlist\n"
+        .. "Next: remuda butler matrix rooms\n")
+    end
     local ok, changed = pcall(function()
       if verb == "follow" then return relay:subscribe_thread(room, thread) end
       return relay:unsubscribe_thread(room, thread)
     end)
     if not ok then return resolve_local(1, "", tostring(changed) .. "\n") end
     if verb == "follow" and not changed then
-      local message = "Follow limit reached in " .. terminal_safe(room) .. " (50000). Next: remuda butler matrix unfollow "
-        .. "EVENT_ID"
+      local next_room = options.room and ("--room " .. shell_quote(options.room) .. " ") or ""
+      local message = "Follow limit reached in " .. terminal_safe(room) .. " (50000). Next: remuda butler matrix "
+        .. next_room .. "unfollow " .. shell_quote(terminal_safe(options.event_id))
       if options.json then
         local encoded, encode_error = matrix.encode_json({ followed = false, room = room, thread = thread })
         if not encoded then return resolve_local(1, "", tostring(encode_error) .. "\n") end
@@ -655,15 +673,16 @@ function matrix.cli(args, agent)
       return resolve_local(0, encoded .. "\n", "")
     end
     local safe_thread, safe_room = terminal_safe(thread), terminal_safe(room)
+    local next_room = options.room and ("--room " .. shell_quote(options.room) .. " ") or ""
     if followed then
       return resolve_local(0, "Following thread " .. safe_thread .. " in " .. safe_room
-        .. ".\nNext: remuda butler matrix thread " .. safe_thread .. "\n", "")
+        .. ".\nNext: remuda butler matrix " .. next_room .. "thread " .. shell_quote(safe_thread) .. "\n", "")
     elseif changed then
       return resolve_local(0, "Stopped following thread " .. safe_thread .. " in " .. safe_room
-        .. ".\nNext: remuda butler matrix follow " .. safe_thread .. "\n", "")
+        .. ".\nNext: remuda butler matrix " .. next_room .. "follow " .. shell_quote(safe_thread) .. "\n", "")
     end
     return resolve_local(0, "Not following thread " .. safe_thread .. " in " .. safe_room
-      .. ".\nNext: remuda butler matrix follow " .. safe_thread .. "\n", "")
+      .. ".\nNext: remuda butler matrix " .. next_room .. "follow " .. shell_quote(safe_thread) .. "\n", "")
   end
   if verb == "reply" then
     local relay = matrix.relay and matrix.relay.instance

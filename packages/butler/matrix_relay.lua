@@ -714,6 +714,7 @@ function relay.new(options)
   end
 
   function instance:subscribe_thread(room_id, thread_id, mail_id)
+    if type(room_id) ~= "string" or cfg.rooms[room_id] == nil then return false end
     if not subscribe(state, room_id, thread_id, mail_id) then return false end
     persist()
     return true
