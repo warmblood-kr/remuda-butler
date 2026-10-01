@@ -296,11 +296,11 @@ local function test_quarantine_sender_cap_preserves_utf8()
   client:complete(2, { json = { next_batch = "s1", rooms = { join = {
     ["!room:example.org"] = { timeline = { events = {
       { type = "m.room.message", event_id = "$korean-sender", sender = sender,
-        content = { msgtype = "m.text", body = "blocked" } },
+        content = { msgtype = "m.image", body = "blocked", url = "mxc://example.org/blocked" } },
     } } },
   } } } })
   local quarantined = relay:quarantine_list()
-  assert(quarantined[1] and quarantined[1].reason == "sender_not_allowlisted"
+  assert(quarantined[1] and quarantined[1].reason == "untrusted_media"
       and quarantined[1].sender == expected and #quarantined[1].sender <= 256
       and utf8.len(quarantined[1].sender) ~= nil,
     "a Korean quarantine sender cut at 256 bytes must remain valid UTF-8")
@@ -698,6 +698,8 @@ local function test_cli_matrix_mail_replies_keep_room_and_relation()
   sync({ next_batch = "s0" })
   local joined_top = event(joined_room, "$joined-top")
   event(joined_room, "$thread-root")
+  -- Receive rules: a thread reply is delivered only in a followed thread.
+  assert(relay:subscribe_thread(joined_room, "$thread-root"), "the thread must be followable")
   local thread_mail = event(joined_room, "$thread-reply", { rel_type = "m.thread",
     event_id = "$thread-root", ["m.in_reply_to"] = { event_id = "$thread-root" } })
   local plain_reply = event(joined_room, "$plain-reply", {
@@ -2758,6 +2760,9 @@ local function render_fixture(name, specs)
   assert_fixture_text(name, actual)
 end
 
+-- One block: the main chunk is at Lua's limit of 200 local variables.
+local rx_tests
+do
 -- Receive rules (notes/rx-design.md, PR 1). One accept rule in every room:
 -- root, followed thread, or mention. Non-allowlisted senders arrive with a marker.
 local RX_BUTLER, RX_ALLY, RX_PREFIX = "@helper:example.org", "@agent-ally:example.org", "@agent-evil:evil.example"
@@ -3234,6 +3239,28 @@ local function test_rx_untrusted_approve_text_is_data()
   end)
 end
 
+rx_tests = {
+  { "test_rx_stranger_root_marked_untrusted", test_rx_stranger_root_marked_untrusted },
+  { "test_rx_agent_root_without_mention", test_rx_agent_root_without_mention },
+  { "test_rx_prefix_stranger_gets_marker", test_rx_prefix_stranger_gets_marker },
+  { "test_rx_thread_reply_needs_follow_home_joined", test_rx_thread_reply_needs_follow_home_joined },
+  { "test_rx_follow_unfollow_verbs", test_rx_follow_unfollow_verbs },
+  { "test_rx_reply_follows_thread_all_room_kinds", test_rx_reply_follows_thread_all_room_kinds },
+  { "test_rx_send_follows_own_root", test_rx_send_follows_own_root },
+  { "test_rx_mention_follows_thread", test_rx_mention_follows_thread },
+  { "test_rx_main_timeline_reply_is_root", test_rx_main_timeline_reply_is_root },
+  { "test_rx_in_thread_reply_unfollowed_not_delivered", test_rx_in_thread_reply_unfollowed_not_delivered },
+  { "test_rx_follow_guard_refuses_and_warns_no_trim", test_rx_follow_guard_refuses_and_warns_no_trim },
+  { "test_rx_untrusted_media_quarantined", test_rx_untrusted_media_quarantined },
+  { "test_rx_allowlisted_human_unchanged", test_rx_allowlisted_human_unchanged },
+  { "test_rx_follows_survive_restart", test_rx_follows_survive_restart },
+  { "test_rx_subscribe_foreign_room_refused", test_rx_subscribe_foreign_room_refused },
+  { "test_rx_b2b_block_kept_TODO_pr2", test_rx_b2b_block_kept_TODO_pr2 },
+  { "test_rx_marker_cannot_be_faked", test_rx_marker_cannot_be_faked },
+  { "test_rx_untrusted_approve_text_is_data", test_rx_untrusted_approve_text_is_data },
+}
+end
+
 local function test_matrix_event_id_is_sanitized_and_capped()
   local bus = { inboxes = { butler = { "M1", "M2", "M3" } }, messages = {}, objects = {} }
   for index, event_id in ipairs({ "$e\27[31m", "$" .. string.rep("a", 5000),
@@ -3557,24 +3584,7 @@ end
 assert(#invite_failures == 0, "invite tests failed:\n" .. table.concat(invite_failures, "\n"))
 print("ok: Matrix owner invites, room lines, join/leave, and the one room allowlist")
 
-rx_check("test_rx_stranger_root_marked_untrusted", test_rx_stranger_root_marked_untrusted)
-rx_check("test_rx_agent_root_without_mention", test_rx_agent_root_without_mention)
-rx_check("test_rx_prefix_stranger_gets_marker", test_rx_prefix_stranger_gets_marker)
-rx_check("test_rx_thread_reply_needs_follow_home_joined", test_rx_thread_reply_needs_follow_home_joined)
-rx_check("test_rx_follow_unfollow_verbs", test_rx_follow_unfollow_verbs)
-rx_check("test_rx_reply_follows_thread_all_room_kinds", test_rx_reply_follows_thread_all_room_kinds)
-rx_check("test_rx_send_follows_own_root", test_rx_send_follows_own_root)
-rx_check("test_rx_mention_follows_thread", test_rx_mention_follows_thread)
-rx_check("test_rx_main_timeline_reply_is_root", test_rx_main_timeline_reply_is_root)
-rx_check("test_rx_in_thread_reply_unfollowed_not_delivered", test_rx_in_thread_reply_unfollowed_not_delivered)
-rx_check("test_rx_follow_guard_refuses_and_warns_no_trim", test_rx_follow_guard_refuses_and_warns_no_trim)
-rx_check("test_rx_untrusted_media_quarantined", test_rx_untrusted_media_quarantined)
-rx_check("test_rx_allowlisted_human_unchanged", test_rx_allowlisted_human_unchanged)
-rx_check("test_rx_follows_survive_restart", test_rx_follows_survive_restart)
-rx_check("test_rx_subscribe_foreign_room_refused", test_rx_subscribe_foreign_room_refused)
-rx_check("test_rx_b2b_block_kept_TODO_pr2", test_rx_b2b_block_kept_TODO_pr2)
-rx_check("test_rx_marker_cannot_be_faked", test_rx_marker_cannot_be_faked)
-rx_check("test_rx_untrusted_approve_text_is_data", test_rx_untrusted_approve_text_is_data)
+for _, case in ipairs(rx_tests) do rx_check(case[1], case[2]) end
 rx_check("test_open_mode_sender_allowlist_still_quarantines", test_open_mode_sender_allowlist_still_quarantines)
 assert(#rx_failures == 0, "receive-rules tests failed:\n" .. table.concat(rx_failures, "\n"))
 print("ok: Matrix receive rules: accept rule, follows, untrusted frame")
