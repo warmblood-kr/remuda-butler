@@ -6368,7 +6368,7 @@ while IFS= read -r line; do
           || [ "$scenario" = model-confirm-static ]; then
         printf 'KEY:RET\n' >> "$log"
         model='sonnet'
-        if [ "$scenario" != model-confirm-static ]; then paint; fi
+        paint
       fi
       ;;
     '/model sonnet')
@@ -7229,6 +7229,230 @@ done
         "an unverified /compact must fail with its own reason: {}", reports());
     assert_eq!(state("cl-unverified", "restore_pending"), "nil");
     assert!(!record().contains("cl-unverified-id"), "the durable record must be cleared: {}", record());
+    });
+    assert!(failures.is_empty(), "{}", failures.join("\n---\n"));
+    drop(daemon);
+}
+
+/// A model wait ends only on a confirmed change (#206 follow-up). The fake
+/// Claude swallows any text typed while a model switch is in flight (logged as
+/// `LOST:<text>`): pressing Return on the "Switch model?" dialog must not
+/// release `/compact`, and the restore is checked only once the switch is done.
+/// Confirmed = the status model or a settings.json value that was not already
+/// there, and a ready pane (no dialog, empty composer).
+#[test]
+#[cfg(unix)]
+fn butler_claude_model_waits_end_only_on_a_confirmed_switch() {
+    let dir = scratch_dir("butler-claude-model-wait");
+    let (token_path, config_path) = butler_config(
+        &dir,
+        "fake-claude-model-wait",
+        "http://127.0.0.1:1",
+        "!room:example.org",
+        "@butler:example.org",
+        "",
+    );
+    let token_str = token_path.to_string_lossy().to_string();
+    let config_str = config_path.to_string_lossy().to_string();
+    let data_home = dir.join("data");
+    let mods = PathBuf::from(std::env::var_os("XDG_DATA_HOME").expect("XDG_DATA_HOME"));
+    std::fs::create_dir_all(data_home.join("remuda/butler")).expect("data home");
+    let _ = std::os::unix::fs::symlink(mods.join("remuda/mods"), data_home.join("remuda/mods"));
+    let data_str = data_home.to_string_lossy().to_string();
+    let daemon = Daemon::spawn_with_env(
+        &dir,
+        &[
+            ("REMUDA_BUTLER_TOKEN", token_str.as_str()),
+            ("REMUDA_BUTLER_CONFIG", config_str.as_str()),
+            ("XDG_DATA_HOME", data_str.as_str()),
+            ("HOME", dir.to_string_lossy().as_ref()),
+        ],
+    );
+    let path = daemon::socket_path_in(&dir, "s");
+    eval(&path, r#"remuda._butler_argv = {"sh", "-c", "while read line; do :; done"}"#);
+    eval(&path, "remuda._butler_skip_relay = true");
+    let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let trace_path = dir.join("compaction-trace.log");
+    eval(&path, &format!(
+        "remuda._butler_compaction_trace_path = {}",
+        lua_raw_string(&trace_path.to_string_lossy())
+    ));
+
+    let script = dir.join("fake-claude.sh");
+    std::fs::write(
+        &script,
+        r#"#!/bin/bash
+# Scenarios: slow (dialog, then a slow switch that swallows input), nodialog (settings change at
+# once, the status line lags), already (settings already hold the target, the
+# status line lags), stuck (the model never changes).
+log=$1
+scenario=$2
+model=opus; ctx=500000; mode=idle; ticks=0; target=
+paint() {
+  printf '\033[H\033[2JMODEL:%s CTX:%s\n' "$model" "$ctx"
+  if [ "$mode" = dialog ]; then
+    printf 'Switch model?\n\nYour next response will be slower and use more tokens\n\nThis conversation is cached for the current model. Switching to %s 5.5 means\nthe full history gets re-read on your next message.\n\n❯ 1. Yes, switch to %s 5.5\n  2. No, go back\n\nEnter to confirm · Esc to cancel\n' "$target" "$target"
+  else
+    printf '❯\xc2\xa0\n'
+  fi
+}
+set_settings() { printf '{"model":"%s"}\n' "$1" > "$HOME/.claude/settings.json"; }
+paint
+while true; do
+  if IFS= read -t 0.3 -r line; then
+    if [ "$mode" = dialog ] && [ -z "$line" ]; then mode=switching; ticks=4; paint; continue; fi
+    if [ "$mode" != idle ]; then [ -n "$line" ] && printf 'LOST:%s\n' "$line" >> "$log"; continue; fi
+    [ -n "$line" ] && printf 'CMD:%s\n' "$line" >> "$log"
+    case "$line" in
+      '/model sonnet'|'/model opus')
+        [ $ticks -gt 0 ] && { model=$target; ticks=0; }
+        target=${line#/model }
+        [ "$scenario" = stuck ] && continue
+        if [ "$scenario" = slow ]; then mode=dialog; else set_settings "$target"; ticks=4; fi
+        paint ;;
+      '/compact') ctx=200000; paint ;;
+    esac
+  else
+    [ $? -gt 128 ] || exit 0
+    if [ $ticks -gt 0 ]; then
+      ticks=$((ticks - 1))
+      if [ $ticks -le 0 ]; then model=$target; set_settings "$target"; mode=idle; paint; fi
+    fi
+  fi
+done
+"#,
+    )
+    .expect("write fake Claude");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let restore_file = format!("{data_str}/remuda/butler/mail/compaction-restore.json");
+    eval(
+        &path,
+        &format!(
+            r#"
+      local fake_now = 1000
+      remuda._butler_compaction_now = function() return fake_now end
+      remuda._butler_compaction_config = {{critical=400000, cooldown_ticks=0, capture_gap=0,
+        completion_timeout=1, claude_completion_timeout=8, failure_cooldown_seconds=600, input_settle=0.01}}
+      local prior_contributions = remuda.contributions
+      remuda.contributions = function(point)
+        if point == "butler.agent" then
+          return {{{{id="claude", entry={{working=function() return false end}}}}}}
+        end
+        return prior_contributions(point)
+      end
+      remuda._butler_telemetry_for = function(agent)
+        local screen = remuda.capture(agent.session_name)
+        return {{context_used=screen:match("CTX:%s*(%d+)"), model=screen:match("MODEL:([^ %c]+)")}}
+      end
+      remuda.session = function() return {{is_busy=false, attached=false}} end
+      remuda._butler_send = function(_, _, message)
+        remuda._fake_reports = remuda._fake_reports or {{}}
+        table.insert(remuda._fake_reports, message)
+      end
+      remuda._fake_claude = function(name, log, scenario)
+        remuda.new(name, {{"bash", {script:?}, log, scenario}}, nil, {{}})
+        remuda._butler_bus.agents[name] = {{id=name .. "-id", kind="claude", session_name=name, model="opus"}}
+      end
+    "#,
+            script = script.to_string_lossy(),
+        ),
+    );
+
+    let log_of = |name: &str| std::fs::read_to_string(dir.join(format!("{name}.log"))).unwrap_or_default();
+    let reports = || eval(&path, "return table.concat(remuda._fake_reports or {}, '\\n')");
+    let trace = || std::fs::read_to_string(&trace_path).unwrap_or_default();
+    let record = || std::fs::read_to_string(&restore_file).unwrap_or_default();
+    let in_progress = |name: &str| eval(&path, &format!(
+        "local s = (remuda._butler_compaction_members_state or {{}})[{:?}] or {{}}; return tostring(s.compaction_in_progress)",
+        format!("{name}-id")
+    ));
+    let settle = |name: &str, done: &dyn Fn() -> bool, what: &str| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            if in_progress(name) == "false" && done() { return; }
+            assert!(Instant::now() < deadline, "{name}: {what} never happened. log:\n{}\nreports: {}\ntrace:\n{}",
+                log_of(name), reports(), trace());
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let settings_path = dir.join(".claude/settings.json");
+    std::fs::create_dir_all(dir.join(".claude")).unwrap();
+    let run = |name: &str, scenario: &str, settings: &str| {
+        std::fs::write(&settings_path, settings).unwrap();
+        let log = dir.join(format!("{name}.log"));
+        eval(&path, &format!("remuda._fake_claude({name:?}, {:?}, {scenario:?})", log.to_string_lossy()));
+        wait_for(&path, name, "MODEL:");
+        assert_eq!(eval(&path, &format!("return remuda.butler.compact({name:?})")), "started");
+    };
+    // The one `model_wait` trace line for `id`, whole line.
+    let wait_line = |id: &str| trace().lines()
+        .find(|line| line.contains("model_wait") && line.contains(&format!("id={id} "))).unwrap_or("").to_string();
+    let mut failures = Vec::new();
+    let mut scenario = |label: &str, body: &dyn Fn()| {
+        if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+            let text = panic.downcast_ref::<String>().cloned()
+                .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default();
+            failures.push(format!("scenario {label}: {text}"));
+        }
+    };
+    let cycle = "CMD:/model sonnet\nCMD:/compact\nCMD:/model opus\n";
+    // The whole cycle: sent -> verified with a context drop, in order, nothing lost.
+    let cycle_ok = |name: &str, sonnet_by: &str, restored_by: Option<&str>| {
+        settle(name, &|| trace().contains("\tverified"), "the verified finish");
+        let got = log_of(name);
+        assert_eq!(got, cycle, "no text may be lost and the order must hold: {got:?}\ntrace:\n{}", trace());
+        let events = trace();
+        let sonnet = wait_line("model-sonnet");
+        let restored = wait_line("model-restored");
+        assert!(sonnet.contains(&format!("outcome=confirmed by={sonnet_by} elapsed=")), "model-sonnet wait: {sonnet:?}\n{events}");
+        match restored_by {
+            Some(by) => assert!(restored.contains(&format!("outcome=confirmed by={by} elapsed=")), "restore wait: {restored:?}\n{events}"),
+            None => assert!(restored.contains("outcome=confirmed by="), "restore wait: {restored:?}\n{events}"),
+        }
+        assert!(events.find(&sonnet).unwrap() < events.find("\tverified").unwrap());
+        assert!(!events.contains("restored_after_dialog"), "no third /model: {events}");
+        assert!(!events.contains("settings_model_mismatch"), "settings must already be restored: {events}");
+        assert!(!events.contains("\terror"), "no failure: {events}");
+        for _ in 0..3 {
+            eval(&path, &format!("return remuda._butler_compaction_tick({name:?}, false)"));
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(log_of(name), cycle, "later ticks must type nothing");
+        assert!(!record().contains(&format!("{name}-id")), "no restore record may be left: {}", record());
+        assert_eq!(std::fs::read_to_string(&settings_path).unwrap().trim(), "{\"model\":\"opus\"}");
+    };
+
+    // a. Opus session, "Switch model?" dialog, a switch that takes a few ticks.
+    scenario("a (slow switch behind the dialog)", &|| {
+        run("mw-slow", "slow", "{\"model\":\"opus\"}\n");
+        cycle_ok("mw-slow", "status", None);
+    });
+    // b. No dialog; settings.json changes at once while the status line lags.
+    scenario("b (no dialog, status lags)", &|| {
+        std::fs::write(&trace_path, "").unwrap();
+        run("mw-nodialog", "nodialog", "{\"model\":\"opus\"}\n");
+        cycle_ok("mw-nodialog", "settings", Some("settings"));
+    });
+    // c. settings.json already says sonnet: it must not confirm the switch.
+    scenario("c (settings already true)", &|| {
+        std::fs::write(&trace_path, "").unwrap();
+        run("mw-already", "already", "{\"model\":\"sonnet\"}\n");
+        cycle_ok("mw-already", "status", None);
+    });
+    // d. The model never changes: the wait times out, nothing is compacted.
+    scenario("d (timeout)", &|| {
+        std::fs::write(&trace_path, "").unwrap();
+        eval(&path, "remuda._butler_compaction_config.claude_completion_timeout = 1");
+        run("mw-stuck", "stuck", "{\"model\":\"opus\"}\n");
+        settle("mw-stuck", &|| trace().contains("outcome=timeout"), "the timeout");
+        let line = wait_line("model-sonnet");
+        assert!(line.contains("outcome=timeout") && line.contains("elapsed="), "{line:?}");
+        assert!(!line.contains(" by="), "a timeout names no signal: {line:?}");
+        assert_eq!(log_of("mw-stuck"), "CMD:/model sonnet\n", "nothing may be compacted");
+        assert!(reports().contains("timed out waiting for model-sonnet"), "{}", reports());
     });
     assert!(failures.is_empty(), "{}", failures.join("\n---\n"));
     drop(daemon);
