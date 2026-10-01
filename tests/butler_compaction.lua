@@ -285,6 +285,11 @@ assert(remuda._butler_model_confirm_signature(live_composer_nbsp) ~= nil,
   "model confirmation signature should recognize the live NBSP composer")
 assert(remuda._butler_model_confirm_options_visible(live_composer_nbsp),
   "model confirmation options should remain visible with the live NBSP composer")
+local live_capture = read_fixture("claude-model-confirm-live-capture-0556Z.txt")
+assert(remuda._butler_model_confirm_signature(live_capture) ~= nil,
+  "model confirmation signature should recognize the live captured composer")
+assert(remuda._butler_model_confirm_options_visible(live_capture),
+  "model confirmation options should remain visible in the live capture")
 assert(remuda._butler_model_confirm_signature(
   read_fixture("claude-model-confirm-multiline-draft.txt")) == nil,
   "model confirmation signature should reject a multiline composer draft")
@@ -304,7 +309,8 @@ assert(not remuda._butler_model_dialog_waiting(stale_permission_screen)
 local dialog_timeout_reason = remuda._butler_model_timeout_reason(
   original_timeout_reason, "s1", model_dialog_fixture)
 assert(dialog_timeout_reason:find("appears to be waiting in s1", 1, true)
-  and dialog_timeout_reason:find("Next:", 1, true),
+  and dialog_timeout_reason:find("Next:", 1, true)
+  and dialog_timeout_reason:find('`remuda attach "s1"`', 1, true),
   "model timeout reason should explain that the dialog is waiting and how to handle it")
 local plain_screen = "ordinary assistant response"
 assert(not remuda._butler_model_dialog_waiting(plain_screen)

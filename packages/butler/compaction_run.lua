@@ -22,6 +22,13 @@ local function model_confirm_rule_row(line)
   return trimmed ~= "" and trimmed:gsub("─", "") == ""
 end
 
+local function blank(text)
+  if type(text) ~= "string" then return false end
+  local stripped = text:gsub("%s", "")
+  stripped = stripped:gsub("\194\160", "")
+  return stripped == ""
+end
+
 local function model_confirm_dialog(screen)
   if type(screen) ~= "string" then return nil end
   local lines = bottom_screen_lines(screen, 32)
@@ -60,7 +67,7 @@ local function model_confirm_dialog(screen)
   end
   if first_rule then
     for row = index + 2, first_rule - 1 do
-      if not lines[row]:match("^%s*$")
+      if not blank(lines[row])
           and not lines[row]:find("Enter to confirm", 1, true) then
         return nil
       end
@@ -75,8 +82,8 @@ local function model_confirm_dialog(screen)
   end
   if previous_rule and last_rule then
     for row = previous_rule + 1, last_rule - 1 do
-      local content = lines[row]:gsub("^%s*❯", "", 1):gsub("^%s+", ""):gsub("%s+$", "")
-      if content ~= "" then
+      local content = lines[row]:gsub("^%s*❯", "", 1)
+      if not blank(content) then
         return nil
       end
     end
@@ -112,8 +119,8 @@ end
 local function model_timeout_reason(reason, session_name, screen)
   if not model_dialog_waiting(screen) then return reason end
   return reason .. "; a Switch model? dialog appears to be waiting in "
-    .. session_name .. ". Next: run `remuda attach " .. session_name
-    .. "` and press Enter to confirm or Esc to cancel"
+    .. session_name .. ". Next: run `remuda attach \"" .. session_name
+    .. "\"` and press Enter to confirm or Esc to cancel"
 end
 
 remuda._butler_model_confirm_signature = model_confirm_signature
