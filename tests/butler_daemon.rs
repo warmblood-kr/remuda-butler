@@ -8788,6 +8788,62 @@ fn butler_matrix_send_chunks_utf8_async_and_rejects_empty_or_dash() {
 }
 
 #[test]
+fn butler_matrix_send_and_reply_add_formatted_body_and_fall_back_to_plain() {
+    let dir = scratch_dir("butler-matrix-formatted");
+    let (_daemon, path) = butler_test_daemon(&dir);
+    let room = "!write:example.org";
+    let (token_path, config_path) = butler_config(&dir, "write", "http://matrix.example.org",
+        room, "@bot:example.org", "");
+    eval(&path, include_str!("support/fake_http.lua"));
+    eval(&path, &format!(
+        "remuda._butler_matrix_config = {{ token_path = {}, config_path = {} }}; remuda.exec('butler/matrix')",
+        lua_raw_string(&token_path.to_string_lossy()), lua_raw_string(&config_path.to_string_lossy())));
+    let result = eval(&path, r#"
+      local matrix, room = remuda.butler.matrix, "!write:example.org"
+      local base = "http://matrix.example.org/_matrix/client/v3/rooms/%21write%3Aexample.org/"
+      remuda.http.respond_prefix("GET", base .. "context/",
+        { status = 200, headers = {}, body = '{"event":{"room_id":"!write:example.org"}}' })
+      remuda.http.respond_prefix("PUT", base .. "send/m.room.message/",
+        { status = 200, headers = {}, body = '{"event_id":"$sent"}' })
+      matrix.relay.instance = { can_reply_to = function() return true end }
+      local function content_of(start)
+        local before, result = #remuda.http.calls, nil
+        start(function(value) result = value end)
+        for _ = 1, 4 do remuda.http.tick() end
+        local call = remuda.http.calls[#remuda.http.calls]
+        if not result or result.error or #remuda.http.calls == before or call.method ~= "PUT" then return {} end
+        return matrix.decode_json(call.body) or {}
+      end
+      local text = "**bold** <b>raw</b>"
+      local html = "<p><strong>bold</strong> &lt;b&gt;raw&lt;/b&gt;</p>"
+      local sent = content_of(function(done) matrix.send({ text = text, room = room }, done) end)
+      if sent.msgtype ~= "m.text" or sent.body ~= text then return "send-body-changed" end
+      if sent.format ~= "org.matrix.custom.html" or sent.formatted_body ~= html then
+        return "send-not-formatted:" .. tostring(sent.formatted_body)
+      end
+      local reply = content_of(function(done)
+        matrix.reply({ room = room, event_id = "$source", text = text }, done)
+      end)
+      local relation = reply["m.relates_to"] or {}
+      if reply.msgtype ~= "m.text" or reply.body ~= text or relation.rel_type ~= "m.thread"
+        or relation.event_id ~= "$source" or (relation["m.in_reply_to"] or {}).event_id ~= "$source" then
+        return "reply-body-or-relation-changed"
+      end
+      if reply.format ~= "org.matrix.custom.html" or reply.formatted_body ~= html then return "reply-not-formatted" end
+      -- 3900 empty table cells render to more than the 30000-byte HTML cap.
+      local wide = "|a|\n|-|\n" .. string.rep("|", 3900)
+      local capped = content_of(function(done) matrix.send({ text = wide, room = room }, done) end)
+      if capped.body ~= wide or capped.format ~= nil or capped.formatted_body ~= nil then return "oversized-html-sent" end
+      remuda.butler.md2html.convert = function() error("converter broke") end
+      local plain = content_of(function(done) matrix.send({ text = text, room = room }, done) end)
+      if plain.msgtype ~= "m.text" or plain.body ~= text then return "fallback-body-changed" end
+      if plain.format ~= nil or plain.formatted_body ~= nil then return "fallback-not-plain" end
+      return "ok"
+    "#);
+    assert_eq!(result, "ok", "Matrix m.text must carry safe HTML next to the unchanged plain body: {result}");
+}
+
+#[test]
 fn butler_matrix_transaction_ids_change_across_daemon_restarts() {
     fn txn_in_fresh_daemon(tag: &str) -> String {
         let dir = scratch_dir(tag);
