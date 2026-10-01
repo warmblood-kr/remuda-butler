@@ -114,6 +114,10 @@ local function test_typed_line_switches_and_non_candidates()
     assert(#typed == 0, "both typed-line switches default off")
     assert(#delivered == 1 and delivered[1].event_id == "$off",
       "with switches off the owner line stays on the ordinary mail path")
+    for _, request in ipairs(client.requests) do
+      assert(not tostring(request.path):find("/send/m.room.message/", 1, true),
+        "with switches off the owner line must not get a refusal thread line")
+    end
     relay:stop()
     cleanup_fixture(dir, config_path)
 

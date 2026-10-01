@@ -1418,7 +1418,7 @@ function relay.new(options)
       or mentions(content, content.body, cfg.self_mxid)
   end
 
-  local function handle_typed_line(event, room_id)
+  local function check_typed_line(event)
     local now = os.time()
     trim_typed_line_timestamps(now)
     local ok, reason, line, form = typed_lines.gate({
@@ -1428,6 +1428,11 @@ function relay.new(options)
       self_mxid = cfg.self_mxid, typed_lines = cfg.typed_lines == true or cfg.typed_lines == "true",
       shell_lines = cfg.shell_lines == true or cfg.shell_lines == "true",
     })
+    return { now = now, ok = ok, reason = reason, line = line, form = form }
+  end
+
+  local function handle_typed_line(event, room_id, check)
+    local ok, reason, line, form, now = check.ok, check.reason, check.line, check.form, check.now
     local target, target_line, target_agent, member_target
     if ok then
       target, target_line, target_agent, member_target = resolve_typed_target(line, form)
@@ -1493,6 +1498,12 @@ function relay.new(options)
               end
             end
           end
+          local typed_line_candidate = not approval_record and cfg.allowed_senders[ev.sender] == true
+            and member_kind(ev.sender, cfg) == "HUMAN"
+            and type(content.body) == "string" and content.body:sub(1, 1) == "!"
+          local typed_line_check = typed_line_candidate and live_sync == true and check_typed_line(ev) or nil
+          local switch_disabled = typed_line_check
+            and (typed_line_check.reason == "typed_lines_off" or typed_line_check.reason == "shell_lines_off")
           if approval_record then
             if event_id ~= "" then add_processed(state, event_id) end
             if cursor then state.since = cursor end
@@ -1512,12 +1523,10 @@ function relay.new(options)
               end
             end
             persist()
-          elseif cfg.allowed_senders[ev.sender] == true
-              and member_kind(ev.sender, cfg) == "HUMAN"
-              and type(content.body) == "string" and content.body:sub(1, 1) == "!"
+          elseif typed_line_candidate and not switch_disabled
               and typed_line_room_allowed(ev, room_id or cfg.room) then
             if live_sync == true then
-              handle_typed_line(ev, room_id or cfg.room)
+              handle_typed_line(ev, room_id or cfg.room, typed_line_check)
             else
               if event_id ~= "" then add_processed(state, event_id) end
               persist()
