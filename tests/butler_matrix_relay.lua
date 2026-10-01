@@ -293,7 +293,7 @@ local function test_typed_line_refusals_are_rate_limited()
     local third = typed_line_event("$stale-three", "!hello")
     third.origin_server_ts = (clock_now - 301) * 1000
     local completed, complete_error = pcall(function()
-      client:complete(3, { json = { next_batch = "s2", rooms = { join = {
+      client:complete(4, { json = { next_batch = "s2", rooms = { join = {
         ["!room:example.org"] = { timeline = { events = { third } } },
       } } } })
     end)
