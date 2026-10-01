@@ -804,11 +804,36 @@ fn a_codex_agent_gets_one_seeded_notice_when_ready() {
         remuda._butler_deliver_notices()
         return tostring(before_ready) .. '|' .. #state.typed .. '|'
           .. tostring(state.typed[1] and state.typed[1].text:match(
-            '^Butler message .+ from operator arrived%. Read it: remuda butler inbox$') ~= nil)
+            '^Butler message .+ from operator arrived%. Read it: MCP butler_inbox %(or remuda butler inbox%)$') ~= nil)
           .. '|' .. remuda._butler_bus.agents.codex1.kind
         "#,
     );
     assert_eq!(got, "0|1|true|codex");
+}
+
+// #201: a Codex member's coalesced notice names the MCP tool first too.
+#[test]
+fn a_codex_agent_gets_a_coalesced_notice_naming_the_mcp_tool() {
+    let (path, _daemon) = butler_with_named_agent("notice-coalesced-codex", "codex1", "codex");
+    setup_mail_notice_clock_for(&path, "codex1");
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        state.busy.codex1 = true
+        for i = 1, 2 do remuda._notice_test_send('codex1', 'codex waiting mail ' .. i) end
+        remuda._butler_bus.notices = {}
+        remuda._butler_bus.notice_seen = {}
+        remuda._butler_bus.unread_seeded = {}
+        remuda._butler_deliver_notices()
+        state.busy.codex1 = false
+        remuda._butler_deliver_notices()
+        state.now = 2
+        remuda._butler_deliver_notices()
+        return #state.typed .. '|' .. tostring(state.typed[1] and state.typed[1].text)
+        "#,
+    );
+    assert_eq!(got, "1|2 new Butler messages arrived. Read them: MCP butler_inbox (or remuda butler inbox)");
 }
 
 #[test]
@@ -3179,7 +3204,7 @@ fn unread_leader_mail_is_renoticed_once_after_a_compaction() {
         local text = tostring(mine[settled + control + 1])
         return table.concat({ tostring(control), tostring(#mine - settled - control),
           tostring(text:find(id, 1, true) ~= nil), tostring(text:find('re-shown', 1, true) == nil),
-          tostring(text:sub(-#'remuda butler inbox') == 'remuda butler inbox') }, '|')
+          tostring(text:sub(-#'MCP butler_inbox (or remuda butler inbox)') == 'MCP butler_inbox (or remuda butler inbox)') }, '|')
         "#,
     );
     assert_eq!(got, "0|1|true|true|true",

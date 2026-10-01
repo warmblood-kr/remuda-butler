@@ -18,6 +18,24 @@ telemetry.codex = {
 builders.codex = function(spec)
   local argv = { "remuda", "_codex_tui", "--status", spec.telemetry.status_path }
   if spec.model and spec.model ~= "" then argv[#argv + 1] = "--model"; argv[#argv + 1] = spec.model end
+  if not spec.token then return argv end
+  -- #201: the remuda MCP server reaches the daemon from outside Codex's command
+  -- sandbox. Only a core whose `_codex_tui` forwards `-c KEY=VALUE` gets the
+  -- flags; an older core would reject them and the member would not start.
+  local supported = remuda._butler_codex_config_supported
+  if supported == nil then
+    local ok, result = false, "process.run unavailable"
+    if remuda.process and type(remuda.process.run) == "function" then
+      ok, result = pcall(remuda.process.run, { argv = { "remuda", "_codex_tui", "--help" }, timeout = 5 })
+    end
+    local output = ok and result and ((result.stdout or "") .. "\n" .. (result.stderr or "")) or ""
+    supported = ok and output:find("-c KEY=VALUE", 1, true) ~= nil
+    remuda._butler_codex_config_supported = supported
+    if not ok and remuda.log then remuda.log("warn", "Codex -c KEY=VALUE help probe failed: " .. tostring(result)) end
+  end
+  if supported then
+    for _, flag in ipairs(remuda._butler_agent_support.mcp_flags(spec.token)) do argv[#argv + 1] = flag end
+  end
   return argv
 end
 

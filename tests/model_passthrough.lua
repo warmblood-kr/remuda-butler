@@ -50,4 +50,36 @@ remuda._butler_claude_autocompact_supported = nil
 remuda.process = { run = function() probes = probes + 1; return { stdout = "help" } end }
 assert(not contains_pair(build.claude({ name = "c", system_prompt = "p" }), "--autocompact", "600k"),
   "unsupported Claude CLI should omit native autocompact")
+-- #201: a Codex member gets the remuda MCP server only when it has a token
+-- and the installed core forwards `-c KEY=VALUE`. The probe is argv-only and
+-- cached; without both, the argv is exactly the old one.
+local codex_probes, codex_help = 0, "usage: remuda _codex_tui --status PATH [--model M] [-c KEY=VALUE]..."
+remuda._butler_agent_support.mcp_flags = function(token)
+  return { "-c", 'mcp_servers.remuda.command="remuda"', "-c", "mcp_servers.remuda.env={T=" .. token .. "}" }
+end
+remuda._butler_codex_config_supported = nil
+remuda.process = { run = function(spec)
+  codex_probes = codex_probes + 1
+  assert(table.concat(spec.argv, " ") == "remuda _codex_tui --help" and spec.timeout == 5)
+  return { stdout = "", stderr = codex_help }
+end }
+assert(table.concat(build.codex({ telemetry = telemetry }), " ") == "remuda _codex_tui --status S"
+  and codex_probes == 0, "Codex launch without a token must be unchanged and must not probe")
+local mcp_tail = ' -c mcp_servers.remuda.command="remuda" -c mcp_servers.remuda.env={T=tok}'
+assert(table.concat(build.codex({ telemetry = telemetry, token = "tok" }), " ")
+  == "remuda _codex_tui --status S" .. mcp_tail, "supported core should receive the MCP flags")
+assert(table.concat(build.codex({ telemetry = telemetry, token = "tok", model = "gpt-5.5" }), " ")
+  == "remuda _codex_tui --status S --model gpt-5.5" .. mcp_tail, "MCP flags follow the model")
+assert(codex_probes == 1, "Codex capability probe should be cached")
+remuda._butler_codex_config_supported = nil
+codex_help = "remuda: Codex TUI needs --status PATH"
+assert(table.concat(build.codex({ telemetry = telemetry, token = "tok" }), " ")
+  == "remuda _codex_tui --status S", "an old core must get the old argv")
+local warned
+remuda._butler_codex_config_supported = nil
+remuda.log = function(level, text) warned = level .. " " .. text end
+remuda.process = { run = function() error("spawn failed") end }
+assert(table.concat(build.codex({ telemetry = telemetry, token = "tok" }), " ")
+  == "remuda _codex_tui --status S", "a failed probe must get the old argv")
+assert(warned and warned:find("^warn ") and not warned:find("tok", 1, true), "a failed probe is logged without the token")
 print("ok")

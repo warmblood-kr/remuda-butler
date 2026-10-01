@@ -36,6 +36,7 @@ release tags yet; entries come from merged pull requests.
 - `matrix setup` takes this computer's name for the default bot from core's `remuda.hostname()` when the core has it, so a stock Mac gets a default bot name and no bot-name prompt. On such a core the daemon's `HOSTNAME`/`COMPUTERNAME` and the hostname files are no longer read; older cores keep that lookup (#207).
 
 ### Fixed
+- Codex members get the `remuda` MCP server and are told to use the `butler_*` tools: the `remuda butler` CLI cannot reach the daemon from inside the Codex sandbox. This needs a core whose `_codex_tui` forwards `-c KEY=VALUE`; on an older core the launch is unchanged (#201).
 - `matrix setup --force` keeps the existing `deny_room`/`deny_server` lines (#154).
 - Matrix length caps never cut a UTF-8 character (#155).
 - Matrix invite follow-ups: refusals carry a next step, the quarantine list shows the room, and commands missing a room say what to pass (#162).
