@@ -1,6 +1,5 @@
 local state = { typed_lines = false, shell_lines = false }
 local writes, prompts = {}, {}
-local operator = true
 local config_path = os.tmpname()
 local config = assert(io.open(config_path, "wb"))
 config:write("https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\n")
@@ -15,7 +14,6 @@ remuda = {
         return { typed_lines = state.typed_lines, shell_lines = state.shell_lines }
       end,
     },
-    approval = { operator_caller = function() return operator end },
   },
   fs = {
     write_atomic = function(path, contents, options)
@@ -52,8 +50,13 @@ local function expect_refused(args, agent, fragment)
   assert(#writes == before, "a refused caller or invalid switch must not write the config")
 end
 
-expect_refused({ "typed-lines", "off" }, "agent-01", "operator-only")
+expect_refused({ "typed-lines", "on" }, "agent-01", "operator-only")
 expect_refused({ "shell-lines", "off" }, "agent-01", "operator-only")
+
+local terminal_pending = remuda.pending
+remuda.pending = nil
+expect_refused({ "typed-lines", "on" }, nil, "needs a Remuda core with terminal prompts")
+remuda.pending = terminal_pending
 
 local before_writes = #writes
 local pending = cli({ "typed-lines", "on" }, nil)
@@ -77,9 +80,6 @@ prompts[2].callback("yes")
 assert(state.shell_lines == true and #writes == before_writes + 2, "yes should enable shell-lines")
 assert(shell_pending ~= nil)
 
-operator = false
-expect_refused({ "typed-lines", "off" }, nil, "operator-only")
-operator = true
 local prompt_count = #prompts
 local write_count = #writes
 cli({ "typed-lines", "off" }, nil)

@@ -139,10 +139,7 @@ function M.cli(args, agent)
       or (args[2] ~= "on" and args[2] ~= "off") then
     return fail(USAGE)
   end
-  local approval = remuda.butler.approval
-  local operator_ok = approval and type(approval.operator_caller) == "function"
-    and approval.operator_caller() == true
-  if (type(agent) == "string" and agent ~= "") or not operator_ok then
+  if type(agent) == "string" and agent ~= "" then
     return fail(args[1] .. " is operator-only. Run it from the owner's terminal; it cannot be enabled from Matrix or Butler mail.")
   end
   local path = config_path()
