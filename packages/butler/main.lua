@@ -633,8 +633,8 @@ remuda.tool{
     return remuda._butler_inbox(caller_name(caller))
   end,
 }
-remuda.tool{
-  name = "butler_report",
+local send_to_leader = {
+  name = "butler_send_to_leader",
   about = "Report a completed work loop to this team member's Butler leader. This also emits the live butler/report hook.",
   args = { text = "Concise result for the leader." },
   needs = { "text" },
@@ -642,6 +642,9 @@ remuda.tool{
     return remuda._butler_report(caller_name(caller), a.text)
   end,
 }
+remuda.tool(send_to_leader)
+-- The old name, kept so a member launched before the rename still reports.
+remuda.tool{ name = "butler_report", about = "Old name of butler_send_to_leader.", args = send_to_leader.args, needs = send_to_leader.needs, run = send_to_leader.run }
 remuda.tool{
   name = "butler_reply",
   about = "Reply to a Butler message by message_id: it goes to the original sender, even if it was forwarded to you. Without message_id, send to `to`.",
@@ -660,6 +663,27 @@ remuda.tool{
   needs = { "message_id", "to" },
   run = function(a, caller)
     return remuda._butler_forward(caller_agent(caller), a.message_id, a.to, a.note)
+  end,
+}
+-- The Matrix file words go through the matrix CLI, which holds an agent caller
+-- to its own working directory (#247); its deferred reply is the tool's answer.
+remuda.tool{
+  name = "matrix_download",
+  about = "Download Matrix media (an mxc:// URI from a Matrix mail) into your working directory. Returns the absolute path.",
+  args = { mxc = "The mxc://server/media URI." },
+  needs = { "mxc" },
+  run = function(a, caller)
+    return remuda.butler.matrix.cli({ "matrix", "download", a.mxc }, caller_name(caller))
+  end,
+}
+remuda.tool{
+  name = "matrix_upload",
+  about = "Upload a file from your working directory to a Matrix room. Returns the event id.",
+  args = { path = "Absolute path of a file inside your working directory.", room = "Optional room; defaults to the configured room." },
+  needs = { "path" },
+  run = function(a, caller)
+    local args = a.room and { "matrix", "--room", a.room, "upload", a.path } or { "matrix", "upload", a.path }
+    return remuda.butler.matrix.cli(args, caller_name(caller))
   end,
 }
 remuda.tool{
