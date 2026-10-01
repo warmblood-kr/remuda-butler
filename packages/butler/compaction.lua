@@ -3,6 +3,7 @@
 -- the dialog/model helpers. main.lua passes its locals in (the mail.lua
 -- pattern) and binds the helpers it still uses back.
 local config = assert(remuda._butler_compaction_module_config)
+local system = assert(remuda._butler_system)
 local registered_agent_kind = assert(config.registered_agent_kind)
 local registered_agent_working = assert(config.registered_agent_working)
 local DEFAULT_COMPACTION_CONFIG = {
@@ -323,7 +324,7 @@ function remuda._butler_claude_model_for(agent)
   local configured = remuda._butler_claude_default_model
     or os.getenv("REMUDA_BUTLER_CLAUDE_DEFAULT_MODEL") or config.claude_default_model
   if type(configured) == "string" and configured ~= "" then return configured end
-  local home_variable = os.getenv("HOME")
+  local home_variable = system.home()
   local settings = home_variable and read_claude_settings(home_variable .. "/.claude/settings.json")
   if settings and type(settings.model) == "string" and settings.model ~= "" then return settings.model end
   return "opus"

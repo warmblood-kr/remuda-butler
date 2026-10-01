@@ -2,7 +2,6 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-sh "$ROOT/scripts/check-no-shell-lua.sh"
 
 fixture=$(mktemp -d)
 trap 'rm -rf "$fixture"' EXIT HUP INT TERM
@@ -53,4 +52,22 @@ if ! grep -F 'stale shell-call allowlist entry: src/frozen.lua' "$fixture/stale.
   exit 1
 fi
 
-echo 'ok - new shell calls fail and removed calls must leave the allowlist'
+mkdir -p "$fixture/packages/butler"
+cat >"$fixture/scripts/no-shell-lua-allowlist.txt" <<'EOF'
+EOF
+cat >"$fixture/packages/butler/foreign.lua" <<'EOF'
+local windows = package.config:sub(1, 1) == "\\"
+EOF
+git -C "$fixture" add .
+if sh "$fixture/scripts/check-no-shell-lua.sh" "$fixture" >"$fixture/os-check.log" 2>&1; then
+  echo 'guard accepted an OS check outside packages/butler/system.lua' >&2
+  exit 1
+fi
+if ! grep -F 'OS check outside packages/butler/system.lua: packages/butler/foreign.lua' "$fixture/os-check.log" >/dev/null; then
+  cat "$fixture/os-check.log" >&2
+  echo 'guard failed without identifying the OS check' >&2
+  exit 1
+fi
+
+echo 'ok - new shell calls and OS checks fail; removed shell calls must leave the allowlist'
+sh "$ROOT/scripts/check-no-shell-lua.sh"

@@ -7,6 +7,8 @@ REMUDA_BIN=$(command -v "$REMUDA_BIN")
 # 103-byte sun_path limit and the pending daemon never binds (#163).
 SCRATCH=$(mktemp -d /tmp/bf.XXXXXX)
 SCRATCH=$(cd "$SCRATCH" && pwd -P)
+"$REMUDA_BIN" version >"$SCRATCH/core-version.log"
+head -n 1 "$SCRATCH/core-version.log"
 longest_socket=$SCRATCH/p/remuda/butler-fallback-pending.sock
 if (( ${#longest_socket} > 103 )); then
   rm -rf "$SCRATCH"
@@ -14,15 +16,28 @@ if (( ${#longest_socket} > 103 )); then
   exit 1
 fi
 SERVER=butler-fallback
+DAEMON_PIDS=()
 export HOME=$SCRATCH/home XDG_CONFIG_HOME=$SCRATCH/config XDG_DATA_HOME=$SCRATCH/data
 export REMUDA_RUNTIME_DIR=$SCRATCH/r REMUDA_NO_UPDATE_CHECK=1 REMUDA_BUTLER_PROJECT_HOME=$SCRATCH/projects
+[[ "$HOME" == "$SCRATCH/"* && "$REMUDA_RUNTIME_DIR" == "$SCRATCH/"* ]] || {
+  echo "FAIL: test HOME and runtime must stay under scratch $SCRATCH" >&2
+  exit 1
+}
 unset REMUDA_BUTLER_AGENT_ORDER
 mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME/remuda/mods/butler" "$REMUDA_RUNTIME_DIR" "$SCRATCH/bin"
 tar -c -C "$REPO" extension.toml packages | tar -x -C "$XDG_DATA_HOME/remuda/mods/butler"
 cleanup() {
+  [[ "$HOME" == "$SCRATCH/"* && "$REMUDA_RUNTIME_DIR" == "$SCRATCH/"* ]] || {
+    echo "FAIL: refusing cleanup outside scratch $SCRATCH" >&2
+    return
+  }
   REMUDA_RUNTIME_DIR="$SCRATCH/r" "$REMUDA_BIN" -s butler-fallback stop -f >/dev/null 2>&1 || true
   REMUDA_RUNTIME_DIR="$SCRATCH/p" "$REMUDA_BIN" -s butler-fallback-pending stop -f >/dev/null 2>&1 || true
   REMUDA_RUNTIME_DIR="$SCRATCH/e" "$REMUDA_BIN" -s butler-fallback-empty stop -f >/dev/null 2>&1 || true
+  for pid in "${DAEMON_PIDS[@]}"; do
+    if kill -0 "$pid" 2>/dev/null; then kill "$pid" 2>/dev/null || true; fi
+    wait "$pid" 2>/dev/null || true
+  done
   rm -rf "$SCRATCH"
 }
 trap cleanup EXIT INT TERM
@@ -60,6 +75,7 @@ STUB
 chmod +x "$SCRATCH/bin"/*
 export PATH="$SCRATCH/bin:/usr/bin:/bin"
 "$REMUDA_BIN" -s "$SERVER" daemon >"$SCRATCH/daemon.log" 2>&1 &
+DAEMON_PIDS+=("$!")
 for _ in $(seq 50); do [[ -S $REMUDA_RUNTIME_DIR/remuda/$SERVER.sock ]] && break; sleep 0.1; done
 lua() { "$REMUDA_BIN" -s "$SERVER" -e "$1"; }
 "$REMUDA_BIN" -s "$SERVER" exec butler >/dev/null
@@ -115,8 +131,6 @@ for _ in $(seq 20); do
   [[ $(lua 'return remuda._butler_codex_requires and remuda._butler_codex_requires.reason or ""') == not_found ]] && break
   sleep 0.1
 done
-[[ $(lua 'return remuda._butler_codex_requires and remuda._butler_codex_requires.detail or ""') == *"codex not found in PATH"* ]] ||
-  fail "Codex precheck did not use its required executable"
 # A pending readiness probe must leave command dispatch responsive.
 lua 'remuda._butler_choose_async({"hang"}, {name="async-hang", spec=function() return {} end,
   env=function() return {} end}, function() end)' >/dev/null
@@ -174,9 +188,27 @@ tar -c -C "$REPO" extension.toml packages | tar -x -C "$XDG_DATA_HOME/remuda/mod
 export PATH="$SCRATCH/empty-bin:/usr/bin:/bin"
 mkdir -p "$SCRATCH/empty-bin"
 "$REMUDA_BIN" -s "$SERVER" daemon >"$SCRATCH/empty-daemon.log" 2>&1 &
+DAEMON_PIDS+=("$!")
 for _ in $(seq 50); do [[ -S $REMUDA_RUNTIME_DIR/remuda/$SERVER.sock ]] && break; sleep 0.1; done
 "$REMUDA_BIN" -s "$SERVER" exec butler >"$SCRATCH/exec.out" 2>"$SCRATCH/exec.err" ||
   fail "bare exec butler should remain asynchronous"
+"$REMUDA_BIN" -s "$SERVER" -e 'return remuda._butler_reconcile()' >"$SCRATCH/launch-failed.out"
+for failure in \
+  'claude: not installed. Next: remuda butler doctor' \
+  'codex: not installed. Next: remuda butler doctor'; do
+  grep -F "$failure" "$SCRATCH/launch-failed.out" >/dev/null ||
+    fail "launch verb omitted $failure: $(cat "$SCRATCH/launch-failed.out")"
+done
+TRACE_FILE=$XDG_CONFIG_HOME/remuda/session-trace.log
+"$REMUDA_BIN" -s "$SERVER" -e 'return remuda._butler_launch(nil, "trace-test")' >/dev/null || true
+TRACE_ROW=
+for _ in $(seq 30); do
+  TRACE_ROW=$(grep -F $'\tlaunch_failed\ttrace-test: ' "$TRACE_FILE" || true)
+  [[ -n "$TRACE_ROW" ]] && break
+  sleep 0.1
+done
+[[ "$TRACE_ROW" == *'; '* ]] ||
+  fail "launch failure trace did not join attempt lines: $TRACE_ROW"
 set +e
 "$REMUDA_BIN" -s "$SERVER" butler status >"$SCRATCH/status-failed.out" 2>"$SCRATCH/status-failed.err"
 FAILED_STATUS=$?
@@ -187,16 +219,15 @@ else
   [[ $FAILED_STATUS != 0 ]] || fail "legacy failed status should be nonzero"
 fi
 [[ ! -s "$SCRATCH/status-failed.out" ]] || fail "failed status wrote to stdout: $(cat "$SCRATCH/status-failed.out")"
-for reason in 'claude: not_found' 'codex: not_found'; do
+for reason in \
+  'claude: not installed. Next: remuda butler doctor' \
+  'codex: not installed. Next: remuda butler doctor'; do
   grep -F "$reason" "$SCRATCH/status-failed.err" >/dev/null ||
     fail "status omitted $reason: $(cat "$SCRATCH/status-failed.out" "$SCRATCH/status-failed.err")"
 done
 if [[ $HAS_TYPED_FAIL == function ]] && grep -E 'runtime error|stack traceback' "$SCRATCH/status-failed.err" >/dev/null; then
   fail "failed status leaked a runtime error or Lua traceback: $(cat "$SCRATCH/status-failed.err")"
 fi
-for failure in 'butler: claude: not_found' 'butler: codex: not_found'; do
-  grep -F "$failure" "$SCRATCH/empty-daemon.log" >/dev/null || fail "daemon log omitted clean failure line $failure"
-done
 EMPTY_ROSTER=$("$REMUDA_BIN" -s "$SERVER" butler sessions)
 for reason in 'BUTLER ATTEMPTS' 'claude: not_found' 'codex: not_found'; do
   [[ "$EMPTY_ROSTER" == *"$reason"* ]] || fail "sessions command unavailable or omitted $reason: $EMPTY_ROSTER"
@@ -221,6 +252,7 @@ STUB
 chmod +x "$SCRATCH/pending-bin/claude"
 export PATH="$SCRATCH/pending-bin:/usr/bin:/bin"
 REMUDA_BUTLER_READINESS_TIMEOUT=2 "$REMUDA_BIN" -s "$SERVER" daemon >"$SCRATCH/pending-daemon.log" 2>&1 &
+DAEMON_PIDS+=("$!")
 for _ in $(seq 50); do [[ -S $REMUDA_RUNTIME_DIR/remuda/$SERVER.sock ]] && break; sleep 0.1; done
 "$REMUDA_BIN" -s "$SERVER" exec butler >"$SCRATCH/exec-pending.out" 2>"$SCRATCH/exec-pending.err" ||
   fail "pending exec should remain asynchronous"

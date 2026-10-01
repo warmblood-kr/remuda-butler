@@ -23,6 +23,8 @@ local function fresh(word)
     process = { run = function() return { status = 0, stdout = "", stderr = "" } end },
   }
   io.stderr = { write = function(_, text) warnings[#warnings + 1] = text end }
+  -- init.lua loads the OS module before main.lua; doctor needs it.
+  dofile("packages/butler/system.lua")
   dofile("packages/butler/guard.lua")
   return remuda.butler.guard
 end
