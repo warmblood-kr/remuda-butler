@@ -45,4 +45,11 @@ expect "an empty AGENT_ID falls through to SESSION_NAME" \
   "remuda._t({'inbox'}, {REMUDA_BUTLER_AGENT_ID = '', REMUDA_BUTLER_SESSION_NAME = 'm1'})" "inbox empty"
 expect "empty identity vars are the operator" \
   "remuda._t({'inbox'}, {REMUDA_BUTLER_AGENT_ID = '', REMUDA_BUTLER_SESSION_NAME = ''})" "no Butler identity"
+# MCP paths (not the CLI verbs) also resolve a registered capability token to a member;
+# a caller with neither identity variables nor a registered capability is "outside".
+lua "remuda._butler_bus.tokens['tok-m1'] = 'm1'" >/dev/null
+expect "a registered capability names the member when the env ids are cleared" \
+  "remuda._butler_identity.caller_name({ env = {}, capability = 'tok-m1' })" "m1"
+expect "neither identity vars nor a registered capability is outside" \
+  "remuda._butler_identity.caller_name({ env = {}, capability = 'nope' })" "outside"
 echo PASS
