@@ -140,6 +140,19 @@ assert(not home_ok and tostring(no_home_message):find("Next: set HOME or USERPRO
   "missing home should explain how to continue")
 
 os.getenv = function(name)
+  if name == "HOME" or name == "USERPROFILE" or name == "XDG_CONFIG_HOME" or name == "XDG_DATA_HOME"
+      or name == "REMUDA_BUTLER_TOKEN" or name == "REMUDA_BUTLER_CONFIG"
+      or name == "REMUDA_BUTLER_TOPICS" or name == "REMUDA_BUTLER_PROJECT_HOME" then return nil end
+  return original_getenv(name)
+end
+local no_home_paths_ok = pcall(dofile, "packages/butler/paths.lua")
+assert(no_home_paths_ok, "missing HOME must not prevent Butler paths or doctor from loading")
+assert(remuda._butler_paths.data_home == nil and remuda._butler_paths.topic_config.project_home == nil,
+  "paths without a home should stay unresolved until a command needs them")
+local no_home_doctor_ok = pcall(dofile, "packages/butler/doctor.lua")
+assert(no_home_doctor_ok, "doctor must remain loadable when HOME and USERPROFILE are unset")
+
+os.getenv = function(name)
   if name == "HOME" then return nil end
   if name == "USERPROFILE" then return "/private/tmp/butler-userprofile-test" end
   if name == "XDG_CONFIG_HOME" or name == "XDG_DATA_HOME"

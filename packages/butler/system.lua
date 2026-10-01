@@ -1,28 +1,11 @@
 -- Operating-system words used by Butler. Keep platform checks and differences here.
-local function missing_command(message)
-  message = tostring(message or ""):lower()
-  return message:find("os error 2", 1, true) ~= nil
-    or message:find("no such file or directory", 1, true) ~= nil
-    or message:find("cannot find the file specified", 1, true) ~= nil
-    or message:find("cannot find the path specified", 1, true) ~= nil
-end
-
-local function process_runs(path, arguments)
-  if not (remuda.process and type(remuda.process.run) == "function") then
-    return false, "process.run is unavailable"
-  end
-  local argv = { path }
-  for _, argument in ipairs(arguments or {}) do argv[#argv + 1] = argument end
-  local ok, result = pcall(remuda.process.run, { argv = argv, timeout = 5 })
-  if ok or not missing_command(result) then return true end
-  return false, tostring(result)
-end
-
 local function file_exists(path)
   local file = io.open(path, "rb")
   if not file then return false end
+  local ok, contents, reason = pcall(file.read, file, 1)
   file:close()
-  return true
+  if not ok then return false end
+  return contents ~= nil or reason == nil
 end
 
 local function split(value, delimiter)
@@ -39,6 +22,9 @@ local function windows_join(directory, name)
 end
 
 local windows = {}
+local function windows_absolute(directory)
+  return directory:match("^%a:[/\\]") ~= nil or directory:match("^[/\\][/\\]") ~= nil
+end
 function windows.find_command(name, context)
   context = context or {}
   local path = context.path or ""
@@ -50,39 +36,45 @@ function windows.find_command(name, context)
     end
   end
   local explicit = name:find("[/\\\\]") ~= nil
-  local directories = explicit and { false } or split(path, ";")
+  if explicit then
+    if windows_absolute(name) and (context.exists or file_exists)(name) then return name end
+    return nil, name .. " not found in PATH"
+  end
+  local directories = {}
+  for _, directory in ipairs(split(path, ";")) do
+    if windows_absolute(directory) then directories[#directories + 1] = directory end
+  end
   local exists = context.exists or file_exists
-  local run = context.run or process_runs
   for _, directory in ipairs(directories) do
     for _, candidate_name in ipairs(names) do
-      local candidate = explicit and candidate_name or windows_join(directory, candidate_name)
-      if exists(candidate) then
-        local runnable, reason = run(candidate)
-        if runnable then return candidate end
-        if reason then path = reason end
-      end
+      local candidate = windows_join(directory, candidate_name)
+      if exists(candidate) then return candidate end
     end
   end
-  return nil, tostring(path ~= "" and path or (name .. " not found in PATH"))
+  return nil, name .. " not found in PATH"
 end
 
 local posix = {}
+local function posix_absolute(directory)
+  return directory:sub(1, 1) == "/"
+end
 function posix.find_command(name, context)
   context = context or {}
   local explicit = name:find("/", 1, true) ~= nil
-  local directories = explicit and { false } or split(context.path or "", ":")
-  local executable = context.is_executable
-  local run = context.run or process_runs
-  local last_reason
-  for _, directory in ipairs(directories) do
-    local candidate = explicit and name or (directory .. "/" .. name)
-    if not executable or executable(candidate) then
-      local runnable, reason = run(candidate)
-      if runnable then return candidate end
-      last_reason = reason or last_reason
-    end
+  local exists = context.exists or file_exists
+  if explicit then
+    if posix_absolute(name) and exists(name) then return name end
+    return nil, name .. " not found in PATH"
   end
-  return nil, last_reason or (name .. " not found in PATH")
+  local directories = {}
+  for _, directory in ipairs(split(context.path or "", ":")) do
+    if posix_absolute(directory) then directories[#directories + 1] = directory end
+  end
+  for _, directory in ipairs(directories) do
+    local candidate = directory .. "/" .. name
+    if exists(candidate) then return candidate end
+  end
+  return nil, name .. " not found in PATH"
 end
 
 local function shell_quote(value)
@@ -122,15 +114,10 @@ function system.find_command(name)
   if type(core_system) == "table" and type(core_system.find_command) == "function" then
     return core_system.find_command(name)
   end
-  local arguments = name == "claude" and { "auth", "status" }
-    or (name == "codex" and { "login", "status" } or { "--version" })
-  local function run(candidate) return process_runs(candidate, arguments) end
   return selected.find_command(name, {
     path = os.getenv("PATH"),
     pathext = os.getenv("PATHEXT"),
     exists = file_exists,
-    is_executable = nil,
-    run = run,
   })
 end
 function system.run_in(directory, argv)

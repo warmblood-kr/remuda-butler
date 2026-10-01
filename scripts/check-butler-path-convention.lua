@@ -69,7 +69,7 @@ if sh_start then
   if value_end then sh_fallback = installer:sub(value_start, value_end - 1) end
 end
 local sh_segments = unique_matches(installer, '%$config_home(/remuda/butler/[%w_]+)')
-local lua_fallback = main:match('local home = system%.home%(%).-return home%s*%.%.%s*"([^"]*)"')
+local lua_fallback = main:match('local home = available_home%(%).-return home%s+and%s+%(%s*home%s*%.%.%s*"([^"]*)"')
 local lua_join = main:match('config_home%s*%.%.%s*"(/remuda/butler/)"%s*%.%.%s*filename')
 local lua_filenames = {}
 for filename in main:gmatch('resolve_path%("REMUDA_BUTLER_[%w_]+",%s*"(%w+)"') do
@@ -84,7 +84,7 @@ if not next(sh_segments) then
   problems[#problems + 1] = 'install-butler.sh: found no $config_home/remuda/butler/<name> segment -- parser or convention changed'
 end
 if not lua_fallback then
-  problems[#problems + 1] = "paths.lua: could not find default_config_home()'s system.home() fallback -- parser or convention changed"
+  problems[#problems + 1] = "paths.lua: could not find default_config_home()'s home fallback -- parser or convention changed"
 end
 if not system_source:find('os.getenv("HOME")', 1, true)
     or not system_source:find('os.getenv("USERPROFILE")', 1, true) then

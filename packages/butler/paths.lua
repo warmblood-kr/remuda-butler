@@ -18,23 +18,30 @@
 -- This mirrors install-butler.sh; scripts/check-butler-path-convention.lua
 -- fails if the two defaults diverge.
 local system = assert(remuda._butler_system)
+local function available_home()
+  local ok, home = pcall(system.home)
+  if ok then return home end
+end
 local function default_config_home()
   local xdg = os.getenv("XDG_CONFIG_HOME")
   if xdg and xdg ~= "" then
     return xdg
   end
-  local home = system.home()
-  return home .. "/.config"
+  local home = available_home()
+  return home and (home .. "/.config") or nil
 end
 
 local function default_data_home()
   local xdg = os.getenv("XDG_DATA_HOME")
   if xdg and xdg ~= "" then return xdg end
-  return system.home() .. "/.local/share"
+  local home = available_home()
+  return home and (home .. "/.local/share") or nil
 end
 
 local function expand_home(path)
-  local home = system.home()
+  if type(path) ~= "string" or path:sub(1, 1) ~= "~" then return path end
+  local home = available_home()
+  if not home then return nil end
   return path:gsub("^~", home)
 end
 
