@@ -601,7 +601,7 @@ function relay.new(options)
       send_notice(cfg.home_room,
         "Stopped replying in thread " .. terminal_safe_field(root, 256) .. " ("
           .. terminal_safe_field(room, 512) .. "): " .. tostring(cfg.b2b_max_turns)
-          .. " Butler-only turns. A human reply resumes it.",
+          .. " Butler-only turns. A reply in that thread from someone on the allowlist resumes it.",
         "b2b-turn-limit", cfg.home_room)
     end
     return turns.n
@@ -897,8 +897,9 @@ function relay.new(options)
       local root = instance:thread_root_for_event(route.event_id)
       if instance:b2b_stopped(room, root) then
         local safe_room, safe_root = terminal_safe_field(room, 512), terminal_safe_field(root, 256)
-        return nil, "Stopped replying in thread " .. safe_root .. " (" .. safe_room .. "): "
-          .. tostring(cfg.b2b_max_turns) .. " Butler-only turns. A human reply resumes it.\nNext: remuda butler matrix --room "
+        return nil, "Reply not sent: stopped replying in thread " .. safe_root .. " (" .. safe_room .. "): "
+          .. tostring(cfg.b2b_max_turns)
+          .. " Butler-only turns. A reply in that thread from someone on the allowlist resumes it.\nNext: remuda butler matrix --room "
           .. shell_quote(safe_room) .. " thread " .. shell_quote(safe_root)
       end
       local slot, slot_error = matrix.take_post_slot(config_path)
@@ -1058,9 +1059,11 @@ function relay.new(options)
         local safe_room = terminal_safe_field(capped_room, 512)
         local count = summary.pending
         local message_word = count == 1 and "message" or "messages"
+        local verb = count == 1 and "was" or "were"
         send_notice(cfg.home_room,
-          tostring(count) .. " " .. message_word .. " from non-allowlisted senders not delivered in " .. safe_room
-            .. " (rate cap). Next: remuda butler matrix --room " .. shell_quote(safe_room) .. " history",
+          tostring(count) .. " " .. message_word .. " from non-allowlisted senders in " .. safe_room .. " " .. verb
+            .. " not passed to the Butler (hourly rate cap). Next: remuda butler matrix --room "
+            .. shell_quote(safe_room) .. " history",
           "untrusted-room-cap-summary", capped_room)
         summary.pending, summary.last = 0, now
       end

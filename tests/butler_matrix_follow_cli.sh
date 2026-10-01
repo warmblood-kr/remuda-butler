@@ -120,8 +120,8 @@ for i in 1 2; do
   [[ $CODE == 0 && $OUT == *"Sent 1 message"* ]] || fail "send $i of 2 is under posts_per_hour=2: $CODE $OUT"
 done
 run_args send "post 3"
-[[ $CODE != 0 && $OUT =~ Next:\ wait\ until\ [0-9]{2}:[0-9]{2}Z ]] \
-  || soft "the 3rd send, a separate process, must be refused with Next: wait until HH:MMZ: $CODE $OUT"
+[[ $CODE != 0 && $OUT =~ Not\ sent:\ Matrix\ post\ limit\ reached\ \(2\ per\ hour\)\.\ Next:\ wait\ until\ [0-9]{2}:[0-9]{2}Z ]] \
+  || soft "the 3rd send, a separate process, must be refused with Not sent: ... Next: wait until HH:MMZ: $CODE $OUT"
 remuda -s "$S" -e 'return bmf_puts' | grep -qx 2 || soft "the refused send must not be posted (2 PUTs expected)"
 ((${#SOFT[@]} == 0)) || fail "$(printf '%s\n' "${SOFT[@]}")"
 echo PASS

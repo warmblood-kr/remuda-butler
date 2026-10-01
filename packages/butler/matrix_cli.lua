@@ -714,8 +714,9 @@ function matrix.cli(args, agent, stdin_body)
     end
     if not relay:can_reply_to(options.event_id) then
       finish(reply, cancelled, completed, verb, options,
-        { error = "No delivered mail for event " .. terminal_safe(options.event_id)
-          .. ", so its sender cannot be verified.\nNext: remuda butler inbox" })
+        { error = "Reply not sent: event " .. terminal_safe(options.event_id)
+          .. " was not delivered to this Butler as mail, so its sender cannot be verified.\n"
+          .. "Next: remuda butler inbox (you can only reply to events listed there)" })
       return reply
     end
     local route = relay.route_for_event and relay:route_for_event(options.event_id)

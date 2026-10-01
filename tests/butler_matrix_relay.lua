@@ -3182,9 +3182,10 @@ local function test_rx_untrusted_room_cap_logs_once_home_summary()
     end
     assert(warnings == 2 and new_warnings == 1,
       "exactly ONE rate cap warning line per capped room, got " .. warnings .. " (" .. new_warnings .. " for the joined room)")
-    local summary = " from non-allowlisted senders not delivered in "
+    local summary = " from non-allowlisted senders in "
     local function summary_line(count, room)
-      return count .. summary .. room .. " (rate cap). Next: remuda butler matrix --room '" .. room .. "' history"
+      return count .. summary .. room .. (count == "1 message" and " was" or " were")
+        .. " not passed to the Butler (hourly rate cap). Next: remuda butler matrix --room '" .. room .. "' history"
     end
     assert(client:messages(HOME, summary_line("3 messages", NEW)) == 1,
       "the first capped sync posts ONE exact HOME summary with its own count")
@@ -3477,7 +3478,7 @@ local function test_rx_b2b_turn_guard_home_line_once()
   rx_with_dir(dir, function()
     local relay, client, delivered = rx_relay(path)
     relay_module.instance = relay
-    local line = "Stopped replying in thread $gt (" .. HOME .. "): 6 Butler-only turns. A human reply resumes it."
+    local line = "Stopped replying in thread $gt (" .. HOME .. "): 6 Butler-only turns. A reply in that thread from someone on the allowlist resumes it."
     rx_post_http(path, function(calls)
       rx_sync(client, HOME, { rx_msg("$gt", OWNER, "@bot:example.org and @agent-ally:example.org, talk") })
       relay:subscribe_thread(HOME, "$gt")
@@ -3487,8 +3488,11 @@ local function test_rx_b2b_turn_guard_home_line_once()
       assert(result.code == 0, "turn 6 (our own reply to a Butler) is allowed once the B2B block is lifted: "
         .. tostring(result.stderr))
       result = rx_cli({ "matrix", "reply", "$gt-a5", "one more" })
-      assert(result.code ~= 0 and (result.stderr .. result.stdout):find("6 Butler-only turns", 1, true),
-        "after 6 Butler-only turns a reply into the thread is refused")
+      assert(result.code ~= 0 and (result.stderr .. result.stdout):find("Reply not sent: stopped replying in thread $gt ("
+        .. HOME .. "): 6 Butler-only turns. A reply in that thread from someone on the allowlist resumes it.\nNext: remuda butler matrix --room '"
+        .. HOME .. "' thread '$gt'", 1, true),
+        "after 6 Butler-only turns a reply into the thread is refused and says it was not sent, got: "
+          .. result.stderr .. result.stdout)
       rx_sync(client, HOME, { rx_msg("$gt-a7", RX_ALLY, "@bot:example.org turn 7", rx_thread("$gt")) })
       result = rx_cli({ "matrix", "reply", "$gt-a7", "again" })
       assert(result.code ~= 0, "the thread stays stopped while only Butlers talk")
@@ -3526,8 +3530,10 @@ local function test_rx_posts_per_hour_cap()
         assert(result.code == 0, "post " .. i .. " is under posts_per_hour=3: " .. tostring(result.stderr))
       end
       local result = rx_cli({ "matrix", "send", "post 4" })
-      assert(result.code ~= 0 and (result.stderr .. result.stdout):find("Next: wait until %d%d:%d%dZ"),
-        "the 4th post in an hour is refused with Next: wait until HH:MMZ, got: " .. result.stderr .. result.stdout)
+      assert(result.code ~= 0 and (result.stderr .. result.stdout):find(
+        "Not sent: Matrix post limit reached %(3 per hour%)%. Next: wait until %d%d:%d%dZ"),
+        "the 4th post in an hour is refused with Not sent: ... Next: wait until HH:MMZ, got: "
+          .. result.stderr .. result.stdout)
       assert(posted() == 3, "the refused post is not sent, sent " .. posted())
     end)
     relay:stop()
@@ -3550,12 +3556,12 @@ local function test_rx_untrusted_room_cap_summary_no_quarantine()
       assert(relay:state().processed["$u" .. i], "$u" .. i .. ": a capped event is marked processed")
     end
     assert(rx_find(delivered, "$u-owner"), "allowlisted senders are not capped")
-    local line = "3 messages from non-allowlisted senders not delivered in " .. NEW
-      .. " (rate cap). Next: remuda butler matrix --room '" .. NEW .. "' history"
+    local line = "3 messages from non-allowlisted senders in " .. NEW
+      .. " were not passed to the Butler (hourly rate cap). Next: remuda butler matrix --room '" .. NEW .. "' history"
     assert(client:messages(HOME, line) == 1,
       "ONE exact HOME summary for the sync, the room shell-quoted in Next (unaccepted events do not count)")
     rx_sync(client, NEW, { rx_msg("$u-owner2", OWNER, "quiet sync") })
-    assert(client:messages(HOME, "non-allowlisted senders not delivered") == 1, "no summary for a sync with nothing capped")
+    assert(client:messages(HOME, "non-allowlisted senders in ") == 1, "no summary for a sync with nothing capped")
     relay:stop()
   end)
 end
@@ -3579,10 +3585,11 @@ local function test_rx_untrusted_room_cap_summary_floor_10min()
       rx_sync(client, room, events)
     end
     local function lines(count, room)
-      return client:messages(HOME, count .. " from non-allowlisted senders not delivered in " .. room
-        .. " (rate cap). Next: remuda butler matrix --room '" .. room .. "' history")
+      return client:messages(HOME, count .. " from non-allowlisted senders in " .. room
+        .. (count == "1 message" and " was" or " were")
+        .. " not passed to the Butler (hourly rate cap). Next: remuda butler matrix --room '" .. room .. "' history")
     end
-    local function total(room) return client:messages(HOME, "senders not delivered in " .. room) end
+    local function total(room) return client:messages(HOME, "non-allowlisted senders in " .. room) end
 
     roots(NEW, STRANGER, 5)                      -- sync A: 2 delivered, 3 capped
     assert(lines("3 messages", NEW) == 1 and total(NEW) == 1, "the first summary for a room is immediate, with 3")
@@ -3614,6 +3621,29 @@ local function test_rx_untrusted_room_cap_summary_floor_10min()
   if not ok then error(err, 0) end
 end
 
+-- A reply to an event that never reached this Butler as mail is refused, by the
+-- CLI and by matrix.reply, and says so (step 5b).
+local function test_rx_reply_to_undelivered_event_says_not_sent()
+  local dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    local relay = rx_relay(path)
+    relay_module.instance = relay
+    local text = "Reply not sent: event $never was not delivered to this Butler as mail, so its sender cannot be verified."
+      .. "\nNext: remuda butler inbox (you can only reply to events listed there)"
+    rx_post_http(path, function(_, posted)
+      local result = rx_cli({ "matrix", "reply", "$never", "hello" })
+      assert(result.code ~= 0 and (result.stderr .. result.stdout):find(text, 1, true),
+        "the CLI reply to an undelivered event is refused with the not-sent text, got: " .. result.stderr .. result.stdout)
+      local low
+      matrix.reply({ room = HOME, event_id = "$never", text = "hello" }, function(value) low = value end)
+      assert(type(low) == "table" and low.error == text,
+        "matrix.reply to an undelivered event is refused with the same text, got: " .. tostring(low and low.error))
+      assert(posted() == 0, "nothing is posted")
+    end)
+    relay:stop()
+  end)
+end
+
 -- Receive rules PR 2, mail path: relay:queue_mail_reply obeys the same limits
 -- as the CLI reply.
 local function rx_mail_id(delivered, event_id)
@@ -3626,15 +3656,16 @@ local function test_rx_mail_reply_turn_guard()
   local dir, path = invite_fixture(OWNER .. "," .. RX_ALLY, "b2b_max_turns=2\n")
   rx_with_dir(dir, function()
     local relay, client, delivered = rx_relay(path)
-    local line = "Stopped replying in thread $mt (" .. HOME .. "): 2 Butler-only turns. A human reply resumes it."
+    local line = "Stopped replying in thread $mt (" .. HOME .. "): 2 Butler-only turns. A reply in that thread from someone on the allowlist resumes it."
     rx_sync(client, HOME, { rx_msg("$mt", RX_ALLY, "@bot:example.org ping") })
     local mail = rx_mail_id(delivered, "$mt")
     assert(mail, "a Butler's root post is delivered")
     local ok, err = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R1", text = "reply-one" })
     assert(ok, "turn 2 of 2 (our mail reply to a Butler) is queued: " .. tostring(err))
     ok, err = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R2", text = "reply-two" })
-    assert(ok == nil and tostring(err):find(line, 1, true),
-      "after b2b_max_turns=2 Butler-only turns a mail reply is refused with the stop text, got: " .. tostring(err))
+    assert(ok == nil and tostring(err):find("Reply not sent: stopped replying in thread $mt (" .. HOME
+      .. "): 2 Butler-only turns. A reply in that thread from someone on the allowlist resumes it.", 1, true),
+      "after b2b_max_turns=2 Butler-only turns a mail reply is refused and says it was not sent, got: " .. tostring(err))
     assert(err:find("Next: remuda butler matrix --room '" .. HOME .. "' thread '$mt'", 1, true),
       "the refusal ends with a Next line that shows the thread, room and event shell-quoted, got: " .. err)
     assert(client:messages(HOME, "reply-two") == 0 and relay:state().reply_outbox["R2"] == nil,
@@ -3703,8 +3734,8 @@ local function test_rx_mail_reply_posts_per_hour()
     local ok, err = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R1", text = "reply-one" })
     assert(ok, "the first mail reply is under posts_per_hour=1: " .. tostring(err))
     ok, err = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R2", text = "reply-two" })
-    assert(ok == nil and tostring(err):find("Next: wait until %d%d:%d%dZ"),
-      "the 2nd mail reply in an hour is refused with Next: wait until HH:MMZ, got: " .. tostring(err))
+    assert(ok == nil and tostring(err):find("Not sent: Matrix post limit reached %(1 per hour%)%. Next: wait until %d%d:%d%dZ"),
+      "the 2nd mail reply in an hour is refused with Not sent: ... Next: wait until HH:MMZ, got: " .. tostring(err))
     assert(client:messages(HOME, "reply-two") == 0 and relay:state().reply_outbox["R2"] == nil,
       "a refused mail reply is neither queued nor posted")
     ok, err = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R1", text = "reply-one" })
@@ -3783,6 +3814,7 @@ rx_tests = {
   { "test_rx_posts_per_hour_cap", test_rx_posts_per_hour_cap },
   { "test_rx_untrusted_room_cap_summary_no_quarantine", test_rx_untrusted_room_cap_summary_no_quarantine },
   { "test_rx_untrusted_room_cap_summary_floor_10min", test_rx_untrusted_room_cap_summary_floor_10min },
+  { "test_rx_reply_to_undelivered_event_says_not_sent", test_rx_reply_to_undelivered_event_says_not_sent },
   { "test_rx_mail_reply_turn_guard", test_rx_mail_reply_turn_guard },
   { "test_rx_mail_reply_limit_turn_is_posted_through_matrix_reply", test_rx_mail_reply_limit_turn_is_posted_through_matrix_reply },
   { "test_rx_mail_reply_posts_per_hour", test_rx_mail_reply_posts_per_hour },
