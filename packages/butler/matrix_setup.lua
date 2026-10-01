@@ -109,9 +109,16 @@ end
 matrix.setup_validate_homeserver = valid_url
 matrix.setup_validate_mxid = valid_mxid
 
--- This computer's name, or nil. The one seam for the name source: when core
--- ships a machine-name primitive (core 399), call it first here.
+-- This computer's name, or nil: the one seam for the name source. On a core
+-- with remuda.hostname() that word is the only source (#207). The env and file
+-- lookup below is for older cores only: its HOSTNAME is the daemon's, not the
+-- caller's.
 function matrix.setup_machine_name()
+  if type(remuda.hostname) == "function" then
+    local ok, name = pcall(remuda.hostname)
+    if ok and type(name) == "string" and name ~= "" then return name end
+    return nil
+  end
   local hostname = os.getenv("HOSTNAME") or os.getenv("COMPUTERNAME") or ""
   if hostname == "" then
     for _, path in ipairs({ "/etc/hostname", "/var/run/hostname" }) do
