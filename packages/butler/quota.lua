@@ -343,6 +343,16 @@ function quota.usage()
   return "Usage: remuda butler quota [--report]\nExample: remuda butler quota --report"
 end
 
+local USAGE_NEXT = "Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix."
+
+function quota.help()
+  return quota.usage() .. "\n" .. USAGE_NEXT
+end
+
+function quota.usage_error(argument)
+  return "unknown argument: " .. clean(argument) .. "\n" .. quota.help()
+end
+
 if type(remuda) == "table" then
   remuda._butler_quota = quota
 
@@ -354,12 +364,14 @@ if type(remuda) == "table" then
         return { mode = "not_installed" }
       end
       local stdout = type(probe) == "table" and probe.stdout or nil
+      local stderr = type(probe) == "table" and probe.stderr or nil
       if name == "claude" then
         local decoded, auth = pcall(remuda.json.decode, stdout)
         if not decoded then return { mode = "unknown" } end
         return parser(auth)
       end
-      return parser(stdout)
+      -- codex-cli 0.159.3 prints `codex login status` on stderr.
+      return parser(tostring(stdout or "") .. "\n" .. tostring(stderr or ""))
     end
     return {
       claude = account_for("claude", quota.claude_account),

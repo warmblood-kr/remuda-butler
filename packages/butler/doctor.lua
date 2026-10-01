@@ -20,6 +20,7 @@ local function probe_command(argv, platform)
         logged_in = result.code == 0 and not result.timed_out,
         timed_out = not not result.timed_out,
         stdout = result.stdout,
+        stderr = result.stderr,
       }
     end
 

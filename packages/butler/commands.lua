@@ -94,8 +94,9 @@ command(5, "doctor", "  remuda butler doctor", function(args)
   end
 end)
 command(6, "quota", "  remuda butler quota [--report]", function(args)
+  if #args == 2 and (args[2] == "--help" or args[2] == "-h") then return quota.help() end
   if #args ~= 1 and not (#args == 2 and args[2] == "--report") then
-    return remuda.fail(quota.usage(), 2)
+    return remuda.fail(quota.usage_error(args[2] == "--report" and args[3] or args[2]), 2)
   end
   if type(remuda.pending) ~= "function" then
     return remuda.fail("remuda butler quota needs a Remuda core with deferred replies.\nNext: remuda upgrade", 1)
