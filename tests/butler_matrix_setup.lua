@@ -25,6 +25,8 @@ return function(matrix)
     and matrix.cli_usage():find("https://<homeserver>", 1, true)
     and matrix.cli_usage():find("--password-file <path>", 1, true),
     "Matrix usage should include one complete placeholder setup example")
+  assert(not matrix.cli_usage():match("Example:[^\n]*"):find("--pin", 1, true),
+    "the usage example should not require --pin")
 
   assert(remuda.fs and remuda.fs.mkdir_new and remuda.fs.write_atomic,
     "run setup tests with the Remuda filesystem helpers")
@@ -576,6 +578,8 @@ return function(matrix)
     and not line_specs[3].label:find("Room access", 1, true)
     and line_specs[3].label:find("replaces its current Matrix relay config", 1, true),
     "the wizard should set open rooms and summarize the real config path")
+  assert(not line_specs[3].label:find("HTTPS", 1, true),
+    "an http wizard summary should show no HTTPS trust line")
   assert(line_specs[3].default == "N", "wizard confirmation should default to no")
   line_specs[3].callback("n", nil)
   assert(resolved and resolved.status == 1 and resolved.stderr:find("Nothing was written.", 1, true)
@@ -615,8 +619,10 @@ return function(matrix)
   line_specs[1].callback("https://matrix.invalid", nil)
   line_specs[2].callback("@alice:example.org", nil)
   assert(#line_specs == 3
-    and line_specs[3].label:find("64-character SHA-256 certificate pin", 1, true),
-    "HTTPS setup should prompt explicitly for a certificate pin or CA file")
+    and line_specs[3].label == "HTTPS trust: press Enter to use this system's trusted certificates, "
+      .. "or enter a 64-character SHA-256 certificate pin or an absolute CA file path:",
+    "HTTPS setup should offer system trust on Enter, or a certificate pin or CA file: "
+      .. tostring(line_specs[3] and line_specs[3].label))
   line_specs[3].callback(string.rep("a", 64), nil)
   assert(#line_specs == 4 and line_specs[4].label:find("HTTPS certificate pin: " .. string.rep("a", 64), 1, true)
     and line_specs[4].label:find("Continue? Type Y", 1, true),
@@ -624,6 +630,24 @@ return function(matrix)
   line_specs[4].callback("N", nil)
   assert(resolved and resolved.status == 1 and #requests == 0 and #prompt_specs == 0,
     "declining an HTTPS wizard should not start registration")
+
+  requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+  wizard_reply = matrix.cli({ "matrix", "setup" })
+  line_specs[1].callback("https://matrix.invalid", nil)
+  line_specs[2].callback("@alice:example.org", nil)
+  line_specs[3].callback("", nil)
+  assert(#line_specs == 4 and not resolved
+    and line_specs[4].label:find("\n  HTTPS trust: this system's trusted certificates\n", 1, true)
+    and not line_specs[4].label:find("HTTPS certificate pin", 1, true)
+    and not line_specs[4].label:find("HTTPS CA file", 1, true)
+    and line_specs[4].label:find("Continue? Type Y", 1, true),
+    "Enter at the HTTPS trust prompt should use system trust: no pin, no CA file: "
+      .. tostring(resolved and resolved.stderr))
+  line_specs[4].callback("Y", nil)
+  prompt_specs[1].callback("wizard-registration-token", nil)
+  assert(#requests == 1 and requests[1].pin == nil and requests[1].ca_file == nil
+    and requests[1].pin_only ~= true,
+    "a system-trust wizard should send its first request with no pin and no CA file")
 
   requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
   wizard_reply = matrix.cli({ "matrix", "setup" })
