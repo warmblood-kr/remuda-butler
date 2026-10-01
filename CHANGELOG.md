@@ -14,6 +14,9 @@ release tags yet; entries come from merged pull requests.
 - `remuda butler doctor` checks agent CLIs and logins and prints the next command (#128).
 - `remuda butler close NAME` lets a leader close its own members (#149).
 - After a compaction or restart, a member is shown the last unanswered leader message again; `remuda butler inbox` shows message IDs (#159).
+- `remuda butler matrix follow EVENT_ID` and `unfollow EVENT_ID` manage thread replies. HOME always delivers replies; other rooms deliver a reply only in a followed thread or on a mention. Replying, sending, and a mention from an allowlisted sender follow the thread automatically (#178).
+- `remuda butler matrix send -` reads the message from stdin, up to 64 KiB (#170).
+- Outgoing Matrix messages carry a formatted HTML body rendered from a Markdown subset; raw HTML is always escaped (#171).
 
 ### Changed
 - `matrix setup --pin` and `pin_sha256` now trust a self-signed homeserver on their own, using core `pin_only`. The hostname, validity dates and SPKI pin are still checked, and `ca_file` keeps full chain validation. Recommended core: `0.1.0-nightly.20261001000710.0a5f090` (#164).
@@ -25,6 +28,9 @@ release tags yet; entries come from merged pull requests.
 - Codex members are compacted on gpt-6-luna for the session, then their model is restored (#134).
 - Launch friction fixes: a verified workspace-trust answer, `delegate --cwd`, and a `--leader` retry (#144). Unreadable Claude trust paths are left for a human, and root trust is offered only at the root (#152).
 - An agent session that starts fresh gets one unread-mail notice (#137). Deferred notices can no longer wait forever (#133).
+- An `https://` homeserver with a publicly trusted certificate needs no `--pin` or `--ca-file`: core verifies it against the system CA roots. An untrusted certificate still fails, with a `Next:` line naming `--ca-file` and `--pin` (#172).
+- Matrix messages from senders not on the allowlist are delivered with a not-on-allowlist marker and are capped per room per hour; their media is quarantined (#178).
+- The unread-mail notice fires on a timer, 2 s after the last arrival and at most 10 s after the first, on cores with `remuda.after` (#177).
 
 ### Fixed
 - `matrix setup --force` keeps the existing `deny_room`/`deny_server` lines (#154).
