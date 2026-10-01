@@ -42,7 +42,7 @@ end
 matrix.shell_quote = shell_quote
 
 function matrix.shown_event_id(id)
-  if type(id) == "string" and id:match("^%$[A-Za-z0-9_-]+$") then return id end
+  if type(id) == "string" and #id <= 255 and id:match("^%$[A-Za-z0-9_-]+$") then return id end
   return "(id not shown)"
 end
 

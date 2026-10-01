@@ -171,12 +171,12 @@ end
 
 local function context_safe_text(value)
   value = tostring(value or "")
-  value = value:gsub("\r\n", "\n"):gsub("\r", "\n")
-    :gsub("\226\128\168", "\n"):gsub("\226\128\169", "\n")
   value = value:gsub("[%z\1-\9\11-\12\14-\31\127]", "")
     :gsub("\194[\128-\159]", ""):gsub("\216\156", "")
     :gsub("\226\128[\142\143\170-\174]", "")
     :gsub("\226\129[\166-\169]", "")
+  value = value:gsub("\r\n", "\n"):gsub("\r", "\n")
+    :gsub("\226\128\168", "\n"):gsub("\226\128\169", "\n")
   return value
 end
 
