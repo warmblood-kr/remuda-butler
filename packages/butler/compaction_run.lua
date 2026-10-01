@@ -51,30 +51,32 @@ local function model_confirm_dialog(screen)
     end
   end
 
-  local composer_top
+  local first_rule
   for row = index + 2, #lines do
     if model_confirm_rule_row(lines[row]) then
-      composer_top = row
+      first_rule = row
       break
     end
   end
-  if composer_top then
-    local composer_bottom
-    for row = composer_top + 1, #lines do
-      if model_confirm_rule_row(lines[row]) then
-        composer_bottom = row
-        break
+  if first_rule then
+    for row = index + 2, first_rule - 1 do
+      if not lines[row]:match("^%s*$")
+          and not lines[row]:find("Enter to confirm", 1, true) then
+        return nil
       end
     end
-    if composer_bottom then
-      local nonblank_rows, only_prompt_row = 0, false
-      for row = composer_top + 1, composer_bottom - 1 do
-        if lines[row]:match("%S") then
-          nonblank_rows = nonblank_rows + 1
-          only_prompt_row = lines[row]:match("^%s*❯%s*$") ~= nil
-        end
-      end
-      if nonblank_rows > 0 and (nonblank_rows > 1 or not only_prompt_row) then
+  end
+
+  local previous_rule, last_rule
+  for row = index + 2, #lines do
+    if model_confirm_rule_row(lines[row]) then
+      previous_rule, last_rule = last_rule, row
+    end
+  end
+  if previous_rule and last_rule then
+    for row = previous_rule + 1, last_rule - 1 do
+      local content = lines[row]:gsub("^%s*❯", "", 1):gsub("^%s+", ""):gsub("%s+$", "")
+      if content ~= "" then
         return nil
       end
     end
