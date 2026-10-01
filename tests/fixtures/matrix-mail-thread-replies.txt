@@ -1,8 +1,10 @@
 [MAIL-THREAD-REPLY-1 from matrix/@alice:example.org · 2026-09-30T10:01:00Z] Matrix thread reply from @alice:example.org
   Matrix event $thread-reply-1
+  Next: remuda butler reply MAIL-THREAD-REPLY-1
   in reply to MAIL-THREAD-ROOT (thread MAIL-THREAD-ROOT)
 I suggest the blue version.
 [MAIL-THREAD-REPLY-2 from matrix/@alice:example.org · 2026-09-30T10:02:00Z] Matrix thread reply from @alice:example.org
   Matrix event $thread-reply-2
+  Next: remuda butler reply MAIL-THREAD-REPLY-2
   in reply to MAIL-THREAD-REPLY-1 (thread MAIL-THREAD-ROOT)
 Agreed, use blue.

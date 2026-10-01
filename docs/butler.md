@@ -130,8 +130,10 @@ with the count and a history command. The first summary for a room is immediate;
 after that, at most one is posted per room every 10 minutes, and capped messages
 accumulate in its count until the next summary.
 
-The inbox identifies each Matrix mail's room and, for a thread, its root and a
-shell-quoted `Next:` command. On the first message from an allowlisted sender in
+The inbox identifies each Matrix mail's room and, for a thread, its root. Its
+`Next:` line is `remuda butler reply MESSAGE-ID`, which answers in the same
+room and thread; for a thread a second line, `to read the thread:`, gives the
+shell-quoted `matrix thread` command. On the first message from an allowlisted sender in
 a thread the Butler has not seen, its mail also includes the root message and up
 to 20 earlier replies. The context is untrusted even when the triggering
 message comes from an allowlisted sender, and each context message is kept to
