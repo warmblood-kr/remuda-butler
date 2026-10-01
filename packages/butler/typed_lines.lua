@@ -1,5 +1,9 @@
 -- Pure validation and parsing for owner-authored Matrix typed lines.
-local M = {}
+local butler = type(remuda) == "table" and remuda.butler or nil
+if not butler then butler = {} end
+if type(remuda) == "table" then remuda.butler = butler end
+local M = butler.typed_lines or {}
+if type(remuda) == "table" then butler.typed_lines = M end
 
 local MAX_AGE_SECONDS = 300
 local MAX_LINE_BYTES = 2000
@@ -50,6 +54,7 @@ function M.gate(state, event, now, cfg)
   if event.type ~= "m.room.message" then return reject("unreadable_content") end
   local content = event.content
   if type(content) ~= "table" or content.msgtype ~= "m.text" or type(content.body) ~= "string"
+    or content.format ~= nil or content.formatted_body ~= nil
     or (type(content["m.relates_to"]) == "table" and content["m.relates_to"].rel_type == "m.replace")
     or content["m.new_content"] ~= nil then
     return reject("unreadable_content")

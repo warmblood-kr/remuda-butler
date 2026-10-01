@@ -44,6 +44,9 @@ local cases = {
   { name = "replayed event refused", event = event("!hello"), state = { processed = { ["$event-1"] = true }, timestamps = {} }, ok = false },
   { name = "encrypted content refused", event = event("!hello", { content = nil, type = "m.room.encrypted" }), ok = false },
   { name = "non-text message refused", event = event("!hello", { content = { msgtype = "m.image", body = "!hello" } }), ok = false },
+  { name = "formatted message refused", event = event("!hello", { content = {
+    msgtype = "m.text", body = "!hello", format = "org.matrix.custom.html", formatted_body = "<b>!hello</b>",
+  } }), ok = false },
   { name = "multiline refused", event = event("!one\ntwo"), ok = false },
   { name = "Unicode line separator refused", event = event("!one\226\128\168two"), ok = false, reason = "invalid_line" },
   { name = "Unicode paragraph separator refused", event = event("!one\226\128\169two"), ok = false, reason = "invalid_line" },

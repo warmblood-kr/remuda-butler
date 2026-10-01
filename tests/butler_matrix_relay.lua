@@ -27,6 +27,7 @@ dofile("packages/butler/matrix_cli.lua")
 local setup_tests = dofile("tests/butler_matrix_setup.lua")
 local approval_file = io.open("packages/butler/approval.lua", "r")
 if approval_file then approval_file:close(); dofile("packages/butler/approval.lua") end
+dofile("packages/butler/typed_lines.lua")
 local relay_module = dofile("packages/butler/matrix_relay.lua")
 
 local function remove_dir(dir)
@@ -68,7 +69,7 @@ local function with_typed_line_stubs(run)
 end
 
 local function test_typed_line_switches_and_non_candidates()
-  with_typed_line_stubs(function(typed)
+  with_typed_line_stubs(function(typed, keys)
     local dir, config_path = fixture()
     local client, delivered = scripted_client(), {}
     local relay = relay_module.new({ config_path = config_path, matrix = client,
@@ -95,6 +96,13 @@ local function test_typed_line_switches_and_non_candidates()
     } } } })
     assert(#typed == 1 and typed[1].session == "butler" and typed[1].text == "hello",
       "enabled owner line should type once into the root Butler session")
+    assert(#keys == 1 and keys[1].session == "butler" and keys[1].key == "RET",
+      "a successfully typed line should submit Return once")
+    local success_reactions = 0
+    for _, request in ipairs(client.requests) do
+      if tostring(request.path):find("/send/m.reaction/", 1, true) then success_reactions = success_reactions + 1 end
+    end
+    assert(success_reactions == 1, "a successfully typed line should get one success reaction")
     assert(#delivered == 1 and delivered[1].event_id == "$ordinary",
       "messages without a leading bang must continue through the mail path")
     relay:stop()
