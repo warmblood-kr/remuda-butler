@@ -196,6 +196,27 @@ local function test_typed_line_replay_after_restart_and_history_are_not_typed()
   end)
 end
 
+local function test_shell_line_uses_selected_kind_for_root()
+  with_typed_line_stubs(function(typed)
+    local old_bus, old_selected = remuda._butler_bus, remuda._butler_selected_agent
+    remuda._butler_bus = { agents = { butler = { session_name = "butler" } } }
+    remuda._butler_selected_agent = "claude"
+    local dir, config_path = fixture("typed_lines=true\nshell_lines=true\n")
+    local client = scripted_client()
+    local relay = relay_module.new({ config_path = config_path, matrix = client, deliver = function() return true end })
+    relay:start()
+    client:complete(1, { json = { next_batch = "s0" } })
+    client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+      ["!room:example.org"] = { timeline = { events = { typed_line_event("$shell-root", "!!echo hi") } } },
+    } } } })
+    assert(#typed == 1 and typed[1].session == "butler" and typed[1].text == "!echo hi",
+      "the selected Claude kind should allow a shell line to the Butler root when its agent record omits kind")
+    relay:stop()
+    cleanup_fixture(dir, config_path)
+    remuda._butler_bus, remuda._butler_selected_agent = old_bus, old_selected
+  end)
+end
+
 local function test_baseline_resume_filters_and_envelope()
   local dir, config_path = fixture()
   local client, delivered = scripted_client(), {}
@@ -4809,6 +4830,7 @@ end
 rx_tests = {
   { "test_typed_line_switches_and_non_candidates", test_typed_line_switches_and_non_candidates },
   { "test_typed_line_replay_after_restart_and_history_are_not_typed", test_typed_line_replay_after_restart_and_history_are_not_typed },
+  { "test_shell_line_uses_selected_kind_for_root", test_shell_line_uses_selected_kind_for_root },
   { "test_rx_stranger_root_marked_untrusted", test_rx_stranger_root_marked_untrusted },
   { "test_rx_agent_root_without_mention", test_rx_agent_root_without_mention },
   { "test_rx_prefix_stranger_gets_marker", test_rx_prefix_stranger_gets_marker },

@@ -1385,6 +1385,10 @@ function relay.new(options)
     local bus = remuda._butler_bus or {}
     local agents = bus.agents or {}
     local root = agents.butler or {}
+    if type(root.kind) ~= "string" or root.kind == "" then
+      root = { kind = remuda._butler_selected_agent,
+        session_name = root.session_name, id = root.id }
+    end
     local root_session = type(root.session_name) == "string" and root.session_name ~= ""
       and root.session_name or "butler"
     local target, target_agent, target_line = root_session, root, line
