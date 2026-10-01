@@ -222,6 +222,8 @@ the normal way for a member to communicate.
         run = function(_, args, caller) return host._butler_command_run("close", args, caller) end },
       { id = "doctor", order = 5, verb = "doctor", usage = "  remuda butler doctor",
         run = function(_, args, caller) return host._butler_command_run("doctor", args, caller) end },
+      { id = "quota", order = 6, verb = "quota", usage = "  remuda butler quota [--report]",
+        run = function(_, args, caller) return host._butler_command_run("quota", args, caller) end },
       { id = "compact", order = 16, verb = "compact", usage = "  remuda butler compact <session> [--dry-run|--force]",
         run = function(_, args)
           if not args[2] or args[2] == "" then return nil end
