@@ -1,9 +1,6 @@
 -- L2 Matrix write composites over remuda.butler.matrix.request.
 local matrix = assert(remuda.butler and remuda.butler.matrix, "Matrix request word is unavailable")
 local approval = assert(remuda.butler.approval, "load butler/approval before butler/matrix_write")
--- Trust words are bound at load (main.lua execs matrix_request before
--- this file), so a later redefinition of the public entry cannot change them.
-local is_agent_mxid = matrix.is_agent_mxid
 
 local MAX_CHUNK_BYTES = 4000
 local MAX_HTML_BYTES = 30000 -- an event is capped at 65536 bytes; markup can expand a chunk ~9x
@@ -32,6 +29,10 @@ local function error_result(callback, message)
   return { cancel = function() end }
 end
 
+local function terminal_safe(value)
+  return tostring(value or ""):gsub("[%c]", " "):gsub("\194[\128-\159]", " ")
+end
+
 local function configured_room(opts, callback)
   local room = opts and opts.room
   if not room or room == "" then room = matrix.configured_room() end
@@ -45,14 +46,6 @@ end
 local function next_txn()
   txn_counter = txn_counter + 1
   return "t" .. tostring(os.time()) .. "_" .. process_tag .. "_" .. tostring(txn_counter)
-end
-
-local function mentions_agent(text)
-  if type(text) ~= "string" or type(is_agent_mxid) ~= "function" then return false end
-  for mentioned in text:gmatch("@[%w._=/%-]+:[%w.%-]+") do
-    if is_agent_mxid(mentioned) then return true end
-  end
-  return false
 end
 
 local function split_utf8(text)
@@ -124,7 +117,6 @@ function matrix.send(opts, on_done)
   if type(opts.text) ~= "string" or opts.text == "" then
     return error_result(done, "message text must not be empty")
   end
-  if mentions_agent(opts.text) then return error_result(done, "Butler-to-Butler sends are disabled") end
   local slot, slot_error = matrix.take_post_slot()
   if not slot then return error_result(done, slot_error) end
   return send_chunks(room, opts.text, nil, done)
@@ -152,20 +144,40 @@ function matrix.reply(opts, on_done)
   if type(opts.text) ~= "string" or opts.text == "" then
     return error_result(done, "message text must not be empty")
   end
-  if mentions_agent(opts.text) then return error_result(done, "Butler-to-Butler sends are disabled") end
   local relay = matrix.relay and matrix.relay.instance
   if not relay or type(relay.can_reply_to) ~= "function" then
     return error_result(done, "Matrix relay is not running; event sender cannot be verified")
   end
   if not relay:can_reply_to(opts.event_id) then
-    return error_result(done, "Butler-to-Butler replies are disabled")
+    return error_result(done, "No delivered mail for event " .. terminal_safe(opts.event_id)
+      .. ", so its sender cannot be verified.\nNext: remuda butler inbox")
+  end
+  local root = relay:thread_root_for_event(opts.event_id)
+  local safe_room = terminal_safe(room)
+  local safe_root = terminal_safe(root or opts.event_id)
+  local function stopped_error()
+    return "Stopped replying in thread " .. safe_root .. " (" .. safe_room .. "): "
+      .. tostring(type(relay.b2b_turn_limit) == "function" and relay:b2b_turn_limit() or 6)
+      .. " Butler-only turns. A human reply resumes it.\nNext: remuda butler matrix --room "
+      .. matrix.shell_quote(safe_room) .. " thread " .. matrix.shell_quote(safe_root)
+  end
+  if type(relay.b2b_stopped) == "function" and relay:b2b_stopped(room, root) then
+    return error_result(done, stopped_error())
   end
   return same_room_then(room, opts.event_id, done, function(reply_done)
-    local slot, slot_error = matrix.take_post_slot()
-    if not slot then return error_result(reply_done, slot_error) end
-    local root = type(opts.thread_root) == "string" and opts.thread_root ~= ""
+    if type(relay.b2b_stopped) == "function" and relay:b2b_stopped(room, root) then
+      return error_result(reply_done, stopped_error())
+    end
+    if not opts._relay_slot_taken then
+      local slot, slot_error = matrix.take_post_slot()
+      if not slot then return error_result(reply_done, slot_error) end
+    end
+    if not opts._relay_turn_noted and type(relay.note_own_turn) == "function" then
+      relay:note_own_turn(room, root)
+    end
+    local relation_root = type(opts.thread_root) == "string" and opts.thread_root ~= ""
       and opts.thread_root or opts.event_id
-    local relation = { rel_type = "m.thread", event_id = root,
+    local relation = { rel_type = "m.thread", event_id = relation_root,
       ["m.in_reply_to"] = { event_id = opts.event_id } }
     return send_chunks(room, opts.text, relation, reply_done, opts.txn_id)
   end)

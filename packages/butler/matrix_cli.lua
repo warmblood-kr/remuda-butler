@@ -714,7 +714,8 @@ function matrix.cli(args, agent, stdin_body)
     end
     if not relay:can_reply_to(options.event_id) then
       finish(reply, cancelled, completed, verb, options,
-        { error = "Butler-to-Butler replies are disabled" })
+        { error = "No delivered mail for event " .. terminal_safe(options.event_id)
+          .. ", so its sender cannot be verified.\nNext: remuda butler inbox" })
       return reply
     end
     local route = relay.route_for_event and relay:route_for_event(options.event_id)
