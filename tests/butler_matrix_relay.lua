@@ -3661,6 +3661,16 @@ do
   -- whatever core runs this suite; they switch it off themselves for the
   -- older-core case.
   local preface_supported = matrix.prompt_preface_supported
+  -- The real seam: core has no capability word, so preface is taken to exist
+  -- exactly when remuda.fs.lock does (merged to core after preface).
+  local core_lock = remuda.fs.lock
+  remuda.fs.lock = nil
+  local without_lock = preface_supported()
+  remuda.fs.lock = function() end
+  local with_lock = preface_supported()
+  remuda.fs.lock = core_lock
+  assert(without_lock == false and with_lock == true,
+    "prompt preface is used exactly on a core that has remuda.fs.lock: " .. tostring(without_lock) .. " " .. tostring(with_lock))
   matrix.prompt_preface_supported = function() return true end
   local ran, why = pcall(setup_tests, matrix)
   matrix.prompt_preface_supported = preface_supported

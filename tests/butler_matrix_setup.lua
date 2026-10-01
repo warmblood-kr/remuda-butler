@@ -556,6 +556,9 @@ return function(matrix)
     end }
     function reply:prompt_secret(spec)
       assert(not spec.label:find(":%s*$"), "a hidden prompt label must not end with its own colon: " .. spec.label)
+      -- prompt_secret has no preface: its label has to fit core's one line.
+      assert(#spec.label <= 256 and not spec.label:find("\n", 1, true),
+        "a hidden prompt label is one line and at most 256 characters: " .. #spec.label)
       prompt_specs[#prompt_specs + 1] = spec
     end
     function reply:prompt_line(spec)
@@ -878,6 +881,21 @@ return function(matrix)
   assert(#line_specs == 3 and line_specs[3].label:find("Continue? Type Y", 1, true),
     "with a name source the wizard shows no bot prompt")
   line_specs[3].callback("N", nil)
+
+  do
+    -- A long homeserver must not push the hidden token prompt over core's
+    -- 256-character line, with or without the "rejected" notice in front.
+    local long_homeserver = "http://" .. string.rep("a", 60) .. "." .. string.rep("b", 60) .. "."
+      .. string.rep("c", 60) .. ".invalid"
+    requests, resolved, prompt_specs = {}, nil, {}
+    matrix.cli({ "matrix", "setup", "--homeserver", long_homeserver, "--owner", "@alice:example.org",
+      "--register", "--bot", "@butler-prompt:example.org", "--dir", prompt_output })
+    assert(#prompt_specs == 1 and not resolved
+      and prompt_specs[1].label:find("^Registration token for http://aaaa")
+      and prompt_specs[1].label:find("from its admin (hidden). This is not an access token", 1, true)
+      and #prompt_specs[1].label + #matrix.REJECTED_REGISTRATION_TOKEN + 1 <= 256,
+      "a long homeserver is shortened in the hidden token prompt: " .. tostring(resolved and resolved.stderr))
+  end
 
   requests, resolved, prompt_specs = {}, nil, {}
   local prompt_reply = matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
