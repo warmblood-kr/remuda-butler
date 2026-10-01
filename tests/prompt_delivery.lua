@@ -143,6 +143,30 @@ exercise("codex")
 exercise("claude", true, false)
 exercise("claude", true, true)
 
+do
+  local state = { cancelled = false }
+  local fake = {}
+  function fake.schedule(spec) state.callback = spec.run; return "type-failure-poll" end
+  function fake.cancel(handle)
+    assert(handle == "type-failure-poll")
+    state.cancelled = true
+  end
+  function fake.capture() return "Ask Codex\n❯ " end
+  function fake.type_text()
+    error("PTY write exceeded 2s; delivery may be partial or late\nstack traceback:\n\t...")
+  end
+  M.schedule(fake, "codex", "type-failure", "member", "leader", "task", {
+    on_done = function(ok, reason)
+      state.done, state.ok, state.reason = true, ok, reason
+    end,
+  })
+  state.callback()
+  assert(state.cancelled and state.done and state.ok == false,
+    "type failure did not call on_done(false)")
+  assert(state.reason == "type failed: PTY write exceeded 2s; delivery may be partial or late",
+    "type failure reason was " .. tostring(state.reason))
+end
+
 local function exercise_composer_after_paste(composer_after_paste, mixed)
   local state = { composer = "", sends = 0, returns = 0, transcript = {}, cancelled = false, now = 0 }
   local task = "START exact delegated task\nsecond line of task"

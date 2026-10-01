@@ -126,8 +126,18 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
         verify_ticks = 0
         -- Keep this nonblocking: a long terminal sleep stalls every daemon
         -- callback, including notice and lifecycle work.
-        local typed = pcall(remuda.type_text, actual, task, 0.1)
-        if not typed then finish(false, "type failed") else verify_started = now() end
+        local typed, type_error = pcall(remuda.type_text, actual, task, 0.1)
+        if not typed then
+          local reason = "type failed"
+          if type(type_error) == "string" then
+            local first_line = type_error:match("^[^\r\n]*") or ""
+            first_line = first_line:gsub("^.-:%d+: ", "", 1):sub(1, 200)
+            reason = "type failed: " .. first_line
+          end
+          finish(false, reason)
+        else
+          verify_started = now()
+        end
       else
         local human_active = false
         if options.human_active then
