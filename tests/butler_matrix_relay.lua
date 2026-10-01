@@ -241,6 +241,41 @@ local function test_typed_line_refusals_are_rate_limited()
   end)
 end
 
+local function test_typed_line_gate_error_is_contained_and_processed()
+  with_typed_line_stubs(function(typed)
+    local old_gate = remuda.butler.typed_lines.gate
+    local gate_calls = 0
+    remuda.butler.typed_lines.gate = function(...)
+      gate_calls = gate_calls + 1
+      if gate_calls == 1 then error("injected typed-line gate error") end
+      return old_gate(...)
+    end
+    local dir, config_path = fixture("typed_lines=true\nshell_lines=true\n")
+    local client, delivered = scripted_client(), {}
+    local relay = relay_module.new({ config_path = config_path, matrix = client,
+      deliver = function(event) delivered[#delivered + 1] = event return true end })
+    relay:start()
+    client:complete(1, { json = { next_batch = "s0" } })
+    local failed = typed_line_event("$gate-error", "!hello")
+    local ordinary = typed_line_event("$after-gate-error", "ordinary mail")
+    client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+      ["!room:example.org"] = { timeline = { events = { failed, ordinary } } },
+    } } } })
+    assert(gate_calls == 1 and #typed == 0,
+      "a gate exception should be contained without typing or aborting the batch")
+    assert(#delivered == 1 and delivered[1].event_id == "$after-gate-error",
+      "the ordinary event after a gate exception should still reach mail")
+    client:complete(3, { json = { next_batch = "s2", rooms = { join = {
+      ["!room:example.org"] = { timeline = { events = { failed } } },
+    } } } })
+    assert(gate_calls == 1 and #typed == 0,
+      "a failed typed-line event must be marked processed and skipped on replay")
+    relay:stop()
+    cleanup_fixture(dir, config_path)
+    remuda.butler.typed_lines.gate = old_gate
+  end)
+end
+
 local function test_baseline_resume_filters_and_envelope()
   local dir, config_path = fixture()
   local client, delivered = scripted_client(), {}
@@ -4856,6 +4891,7 @@ rx_tests = {
   { "test_typed_line_replay_after_restart_and_history_are_not_typed", test_typed_line_replay_after_restart_and_history_are_not_typed },
   { "test_shell_line_uses_selected_kind_for_root", test_shell_line_uses_selected_kind_for_root },
   { "test_typed_line_refusals_are_rate_limited", test_typed_line_refusals_are_rate_limited },
+  { "test_typed_line_gate_error_is_contained_and_processed", test_typed_line_gate_error_is_contained_and_processed },
   { "test_rx_stranger_root_marked_untrusted", test_rx_stranger_root_marked_untrusted },
   { "test_rx_agent_root_without_mention", test_rx_agent_root_without_mention },
   { "test_rx_prefix_stranger_gets_marker", test_rx_prefix_stranger_gets_marker },
