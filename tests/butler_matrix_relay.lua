@@ -4121,6 +4121,10 @@ local function test_inbox_header_names_room_and_thread()
       { event_id = "$ev8", room_id = "!ro'om\27[2J:example.org", room_kind = "joined", thread_root = "$root8" },
       "  Matrix event $ev8 in room !ro'om[2J:example.org (joined), thread $root8\n"
         .. "  Next: remuda butler matrix --room '!ro'\\''om[2J:example.org' thread '$root8'" },
+    { "an event id keeps today's sanitising (control bytes stripped, still printed), also a legacy $local:server id",
+      { event_id = "$e\27[31m:example.org", room_id = HOME, room_kind = "home", thread_root = "$root11" },
+      "  Matrix event $e[31m:example.org in room " .. HOME .. " (home), thread $root11\n"
+        .. "  Next: remuda butler matrix --room '" .. HOME .. "' thread '$root11'" },
     { "a mail stored before this change, with a room but no room kind",
       { event_id = "$ev9", room_id = NEW },
       "  Matrix event $ev9 in room " .. NEW },
@@ -4565,15 +4569,14 @@ local function test_matrix_event_id_is_sanitized_and_capped()
   local output = remuda._butler_mail.inbox("butler")
   local event_ids = {}
   for event_id in output:gmatch("Matrix event ([^\n]+)") do event_ids[#event_ids + 1] = event_id end
-  -- Old rule: an id was printed with its control bytes stripped ("$e[31m"), and
-  -- an id cut inside a UTF-8 character was printed up to the last whole character.
-  -- Replaced by the display rule of PR 223 (#235 step A): an id is printed only
-  -- when it is "$" plus [A-Za-z0-9_-]; anything else reads "(id not shown)".
-  assert(event_ids[1] == "(id not shown)", "an event id with an ESC byte is not printed, got: " .. tostring(event_ids[1]))
+  -- #235 step A keeps this rule: the display rule of PR 223 is for the thread
+  -- root only (sender-chosen, and it goes into a command). The event's own id
+  -- comes from the homeserver and must stay copyable.
+  assert(event_ids[1] == "$e[31m", "ESC in an event id must be stripped before rendering")
   assert(#event_ids[2] == 256 and event_ids[2] == "$" .. string.rep("a", 255),
-    "a long plain event id is still capped at 256 bytes in the header")
-  assert(event_ids[3] == "(id not shown)",
-    "an event id with a non-ASCII character is not printed, got: " .. tostring(event_ids[3]))
+    "a long event id must be capped at 256 bytes in the header")
+  assert(event_ids[3] == "$" .. string.rep("a", 254) and utf8.len(event_ids[3]) ~= nil,
+    "an event id cap inside a UTF-8 character must back off to a complete character")
 end
 
 local function test_thread_first_fixtures()
