@@ -1,0 +1,32 @@
+    matched a permission prompt's "1. Yes" row. I had it fixed with a failing test first.
+  - Gates by me: butler_mcp 78 and butler_daemon 89 passed on core 0651664. The Codex
+    compaction-monitor failure from the earlier run did not recur.
+  - Not run locally: golden and shell suites (CI). Not tested on a real Claude pane.
+  - Closing-keyword check: I scanned the commits and the PR text this time; there are none.
+
+  I asked remuda-dev-lead for the security review and told butler. The mod needs a reload to take
+  effect, so #212 and #219 together are what stop the blocking once rolled out.
+
+  #405: the PR is open at 1229b83 and 20 checks have passed so far; I'll report the final numbers
+  with the head sha when it finishes. On #209, quota-tl is heading to green.
+
+  My pane got /model sonnet from the scheduler once more; a restore is pending.
+
+✻ Cogitated for 57s · done 2:54 PM · 1 shell still running
+
+──────────────────────────────────────────────────────────────────────────────────────────────────
+  Switch model?
+  Your next response will be slower and use more tokens
+
+  This conversation is cached for the current model. Switching to Opus 5.5 means the full
+  history gets re-read on your next message.
+
+  ❯ 1. Yes, switch to Opus 5.5
+    2. No, go back
+
+
+──────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+──────────────────────────────────────────────────────────────────────────────────────────────────
+  MODEL:Sonnet-5.5 CTX:423762 CTXWIN:1000000 CTXPCT:42
+  ⏵⏵ auto mode on · 1 shell · ← 1 agent
