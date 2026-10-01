@@ -1565,7 +1565,7 @@ fn butler_lifecycle_reload_replaces_hooks_and_schedules_and_rolls_back() {
     "#;
     let initial = eval(&path, counts);
     assert!(
-        initial == "1|4|1|1|1|24" || initial == "1|4|1|1|1|-1",
+        initial == "1|4|1|1|1|25" || initial == "1|4|1|1|1|-1",
         "unexpected Butler lifecycle registrations: {initial}"
     );
 
@@ -4128,15 +4128,38 @@ fn butler_codex_builder_uses_automatic_approval() {
         &path,
         r#"remuda._butler_argv = {"sh", "-c", "sleep 1"}; remuda.exec("butler")"#,
     );
-    let argv = eval(
-        &path,
-        r#"local a = remuda._butler_agent_builders.codex({name="codex", token="token", telemetry={status_path="/tmp/status"}}); return table.concat(a, "\n")"#,
-    );
+    // The builder probes whichever `remuda` is on PATH; pin the answer instead.
+    let build = |supported: bool| {
+        eval(
+            &path,
+            &format!(
+                r#"remuda._butler_codex_config_supported = {supported}; local a = remuda._butler_agent_builders.codex({{name="codex", token="token", telemetry={{status_path="/tmp/status"}}}}); return table.concat(a, "\n")"#
+            ),
+        )
+    };
+    let old = ["remuda", "_codex_tui", "--status", "/tmp/status"];
+    let argv = build(false);
+    assert_eq!(argv.lines().collect::<Vec<_>>(), old, "old core: {argv}");
+
+    // #201: the real builder and the real `mcp_flags` give Codex the MCP server.
+    let argv = build(true);
     let argv: Vec<&str> = argv.lines().collect();
-    assert_eq!(&argv[..2], ["remuda", "_codex_tui"]);
-    assert!(argv
-        .windows(2)
-        .any(|pair| pair == ["--status", "/tmp/status"]));
+    assert_eq!(argv.len(), 10, "{argv:?}");
+    assert_eq!(argv[..4], old);
+    assert_eq!(
+        argv[4..6],
+        ["-c", r#"mcp_servers.remuda.command="remuda""#],
+        "{argv:?}"
+    );
+    assert!(
+        argv[6] == "-c" && argv[7].starts_with(r#"mcp_servers.remuda.args=["-s",""#),
+        "{argv:?}"
+    );
+    assert!(
+        argv[8] == "-c"
+            && argv[9].starts_with(r#"mcp_servers.remuda.env={REMUDA_SESSION_CAPABILITY="token""#),
+        "{argv:?}"
+    );
 }
 
 /// Codex folder trust is automatic only for directories Butler created.
