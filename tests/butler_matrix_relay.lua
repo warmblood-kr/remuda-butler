@@ -3181,7 +3181,7 @@ local function test_rx_untrusted_room_cap_logs_once_home_summary()
       "exactly ONE rate cap warning line per capped room, got " .. warnings .. " (" .. new_warnings .. " for the joined room)")
     local summary = " from non-allowlisted senders not delivered in "
     local function summary_line(count, room)
-      return count .. summary .. room .. " (rate cap). Next: remuda butler matrix --room " .. room .. " history"
+      return count .. summary .. room .. " (rate cap). Next: remuda butler matrix --room '" .. room .. "' history"
     end
     assert(client:messages(HOME, summary_line("3 messages", NEW)) == 1,
       "the first capped sync posts ONE exact HOME summary with its own count")
@@ -3545,8 +3545,9 @@ local function test_rx_untrusted_room_cap_summary_no_quarantine()
     end
     assert(rx_find(delivered, "$u-owner"), "allowlisted senders are not capped")
     local line = "3 messages from non-allowlisted senders not delivered in " .. NEW
-      .. " (rate cap). Next: remuda butler matrix --room " .. NEW .. " history"
-    assert(client:messages(HOME, line) == 1, "ONE exact HOME summary for the sync (unaccepted events do not count)")
+      .. " (rate cap). Next: remuda butler matrix --room '" .. NEW .. "' history"
+    assert(client:messages(HOME, line) == 1,
+      "ONE exact HOME summary for the sync, the room shell-quoted in Next (unaccepted events do not count)")
     rx_sync(client, NEW, { rx_msg("$u-owner2", OWNER, "quiet sync") })
     assert(client:messages(HOME, "non-allowlisted senders not delivered") == 1, "no summary for a sync with nothing capped")
     relay:stop()
@@ -3574,8 +3575,8 @@ local function test_rx_mail_reply_turn_guard()
     ok, err = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R2", text = "reply-two" })
     assert(ok == nil and tostring(err):find(line, 1, true),
       "after b2b_max_turns=2 Butler-only turns a mail reply is refused with the stop text, got: " .. tostring(err))
-    assert(err:find("Next: remuda butler matrix ", 1, true) and err:find("thread '$mt'", 1, true),
-      "the refusal ends with a Next line that shows the thread, got: " .. err)
+    assert(err:find("Next: remuda butler matrix --room '" .. HOME .. "' thread '$mt'", 1, true),
+      "the refusal ends with a Next line that shows the thread, room and event shell-quoted, got: " .. err)
     assert(client:messages(HOME, "reply-two") == 0 and relay:state().reply_outbox["R2"] == nil,
       "a refused mail reply is neither queued nor posted")
     assert(client:messages(HOME, line) == 1, "exactly ONE HOME line for the stopped thread")
