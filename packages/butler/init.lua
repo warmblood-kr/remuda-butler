@@ -203,15 +203,16 @@ the normal way for a member to communicate.
 - `[-n N] history`: recent messages in the room.
 - `rooms`: joined rooms (read-only).
 - `thread EVENT_ID`: all replies in a thread.
+- `follow EVENT_ID` / `unfollow EVENT_ID`: manage thread replies; HOME always delivers replies, while other rooms require a follow or mention. Replying, sending and a mention from an allowlisted sender follow automatically.
 - `event EVENT_ID` (alias `get`): one event.
-- `send TEXT`: start a NEW post only (name the room with `--room ROOM`); long text is split, rate-limited; `send -` is refused until core #213. Answers ALWAYS go via `remuda butler reply MESSAGE-ID -`, never send.
+- `send TEXT`: start a NEW post only (name the room with `--room ROOM`); long text is split, rate-limited; `send -` reads the text from stdin (up to 64 KiB). Answers ALWAYS go via `remuda butler reply MESSAGE-ID -`, never send.
 - `reply EVENT_ID TEXT` / `react EVENT_ID KEY`: answer or react (same room only).
 - `upload PATH`: post a file (up to 20 MB). `[-o PATH] download MXC`: fetch media.
 - `redact EVENT_ID [--reason TEXT]`: remove your message.
 ]]
         end,
         prompt = function()
-          return "For Matrix, use `remuda butler matrix VERB`; never call Matrix REST or curl directly. `send TEXT` starts a NEW post only (name the room with `--room ROOM`); long text is split, rate-limited; `send -` is refused until core #213. Answers ALWAYS go via `remuda butler reply MESSAGE-ID -`, never send. "
+          return "For Matrix, use `remuda butler matrix VERB`; never call Matrix REST or curl directly. `send TEXT` starts a NEW post only (name the room with `--room ROOM`); long text is split, rate-limited; `send -` reads the text from stdin (up to 64 KiB). Answers ALWAYS go via `remuda butler reply MESSAGE-ID -`, never send. "
         end },
       { id = "leader", order = 90,
         prompt = function(_, ctx) return "Your leader is " .. ctx.parent .. "." end },
@@ -271,6 +272,8 @@ the normal way for a member to communicate.
   remuda butler matrix [--json] rooms
   remuda butler matrix [--json] [--room ROOM] [-n N] history
   remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] follow EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] unfollow EVENT_ID
   remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
   remuda butler matrix [--json] [-o PATH] download MXC
   remuda butler matrix [--json] [--room ROOM] send TEXT

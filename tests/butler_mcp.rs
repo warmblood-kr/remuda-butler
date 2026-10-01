@@ -1163,6 +1163,110 @@ fn mail_arriving_each_second_fires_by_the_ten_second_maximum() {
 }
 
 #[test]
+fn mail_notice_timer_rearms_quiet_window_and_ignores_stale_handles() {
+    let (path, _daemon) = butler_with_member("notice-timer-quiet-rearm");
+    setup_mail_notice_timer_scheduler(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        remuda._notice_test_send('m1', 'one')
+        local old_quiet = state.timer_at(2)
+        state.now = 1.5
+        remuda._notice_test_send('m1', 'two')
+        local middle_quiet = state.timer_at(3.5)
+        state.now = 2
+        state.force_timer(old_quiet) -- cancellation may race a dequeued callback
+        local after_stale = #state.typed
+        state.now = 3
+        remuda._notice_test_send('m1', 'three')
+        state.fire_until(4.99)
+        local before_due = #state.typed
+        state.fire_until(5)
+        local delivered_at = state.typed[1] and state.typed[1].at
+        state.force_timer(state.timer_at(10)) -- the cancelled cap is stale after delivery
+        return table.concat({ tostring(old_quiet.cancelled), tostring(middle_quiet.cancelled),
+          tostring(after_stale), tostring(before_due), tostring(#state.typed),
+          tostring(delivered_at), tostring(state.typed[1] and state.typed[1].text) }, '|')
+        "#,
+    );
+    assert_eq!(
+        got,
+        "true|true|0|0|1|5|3 new Butler messages arrived. Read them: remuda butler inbox",
+        "quiet timer re-arm, stale callbacks, and delivery deadline: {got}"
+    );
+}
+
+#[test]
+fn mail_notice_timer_cap_fires_during_continuous_arrivals() {
+    let (path, _daemon) = butler_with_member("notice-timer-max-wait");
+    setup_mail_notice_timer_scheduler(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        for i = 1, 10 do
+          state.now = i - 1
+          remuda._notice_test_send('m1', tostring(i))
+        end
+        state.fire_until(9.99)
+        local before_cap = #state.typed
+        state.fire_until(10)
+        return tostring(before_cap) .. '|' .. tostring(#state.typed) .. '|'
+          .. tostring(state.typed[1] and state.typed[1].at) .. '|'
+          .. tostring(state.typed[1] and state.typed[1].text)
+        "#,
+    );
+    assert_eq!(
+        got,
+        "0|1|10|10 new Butler messages arrived. Read them: remuda butler inbox",
+        "continuous arrivals must flush at the cap: {got}"
+    );
+}
+
+#[test]
+fn a_notice_due_at_survives_timer_cancellation_and_delivers_on_poll() {
+    let (path, _daemon) = butler_with_member("notice-timer-reload-fallback");
+    setup_mail_notice_timer_scheduler(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        remuda._notice_test_send('m1', 'reload pending')
+        state.cancel_all() -- a Butler reload cancels its mod-owned timers
+        remuda._butler_bus.notice_timers = {}
+        state.now = 2
+        remuda._butler_deliver_notices() -- the still-declared poll sees due_at
+        local text = state.typed[1] and state.typed[1].text or ''
+        return tostring(#state.typed) .. '|' .. tostring(state.typed[1] and state.typed[1].at)
+          .. '|' .. tostring(text:match('^Butler message .+ arrived%. Read it: remuda butler inbox$') ~= nil)
+        "#,
+    );
+    assert_eq!(got, "1|2|true", "poll must deliver a due notice after timer cancellation: {got}");
+}
+
+#[test]
+fn mail_notice_without_after_keeps_polling_fallback() {
+    let (path, _daemon) = butler_with_member("notice-no-after-fallback");
+    setup_mail_notice_clock(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        local real_after = remuda.after
+        remuda.after = nil
+        remuda._butler_notice_after = nil
+        remuda._notice_test_send('m1', 'old core fallback')
+        state.now = 2
+        remuda._butler_deliver_notices()
+        remuda.after = real_after
+        return tostring(#state.typed) .. '|' .. tostring(state.typed[1] and state.typed[1].at)
+        "#,
+    );
+    assert_eq!(got, "1|2", "a core without remuda.after must use the polling path: {got}");
+}
+
+#[test]
 fn notices_arriving_during_verification_get_a_fresh_debounce_window() {
     let (path, _daemon) = butler_with_member("notice-verification-next-batch");
     setup_mail_notice_clock(&path);
@@ -1376,6 +1480,57 @@ fn setup_mail_notice_clock(path: &Path) {
             to = 'butler', text = 'relay ' .. event_id, subject = 'Matrix message from ' .. sender,
             matrix = { sender = sender, room_id = '!notice:example.org', event_id = event_id },
           })
+        end
+        "#,
+    );
+}
+
+fn setup_mail_notice_timer_scheduler(path: &Path) {
+    setup_mail_notice_clock(path);
+    eval(
+        path,
+        r#"
+        local state = remuda._notice_test_state
+        state.timers = {}
+        remuda._butler_notice_after = function(seconds, callback)
+          local timer = {
+            at = state.now + seconds,
+            callback = callback,
+            cancelled = false,
+            fired = false,
+          }
+          function timer:cancel() self.cancelled = true end
+          state.timers[#state.timers + 1] = timer
+          return timer
+        end
+        state.timer_at = function(at)
+          for _, timer in ipairs(state.timers) do
+            if timer.at == at then return timer end
+          end
+        end
+        state.force_timer = function(timer)
+          state.now = timer.at
+          timer.fired = true
+          timer.callback()
+        end
+        state.fire_until = function(deadline)
+          while true do
+            local next_timer
+            for _, timer in ipairs(state.timers) do
+              if not timer.cancelled and not timer.fired and timer.at <= deadline
+                  and (not next_timer or timer.at < next_timer.at) then
+                next_timer = timer
+              end
+            end
+            if not next_timer then break end
+            next_timer.fired = true
+            state.now = next_timer.at
+            next_timer.callback()
+          end
+          state.now = deadline
+        end
+        state.cancel_all = function()
+          for _, timer in ipairs(state.timers) do timer:cancel() end
         end
         "#,
     );

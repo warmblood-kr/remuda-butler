@@ -50,6 +50,17 @@ local function notice_now()
   if type(clock) == "function" then return clock() end
   return os.time()
 end
+-- Debounce timers (remuda.after, core #375) only run the poll's delivery check
+-- early: due_at stays the truth, and the `butler-notices` poll still delivers
+-- on a core without timers. Handles: bus.notice_timers[session] = { quiet, cap }.
+local function cancel_notice_timers(session)
+  local pair = bus.notice_timers[session]
+  bus.notice_timers[session] = nil
+  for _, handle in pairs(pair or {}) do pcall(function() handle:cancel() end) end
+end
+-- A reload cancels the mod's timers, so no handle survives it.
+bus.notice_timers = bus.notice_timers or {}
+for session in pairs(bus.notice_timers) do cancel_notice_timers(session) end
 
 local function codex_trace_row(text)
   return tostring(text or ""):match(
@@ -748,6 +759,35 @@ local function deliver_notice(session)
   bus.notice_recoveries[session] = state
   return tick_notice_recovery(session, state)
 end
+-- The poll and the debounce timers share this check.
+local function deliver_due_notice(session, now)
+  local pending = bus.notices[session]
+  if not bus.agents[session] then
+    cancel_notice_timers(session)
+    bus.notices[session] = nil
+  elseif bus.notice_recoveries[session]
+      or not pending or pending.due_at == nil or now >= pending.due_at then
+    cancel_notice_timers(session)
+    deliver_notice(session)
+  end
+end
+local function arm_notice_timer(session, slot, seconds)
+  local after = remuda._butler_notice_after or remuda.after
+  if type(after) ~= "function" then return end
+  local pair = bus.notice_timers[session] or {}
+  if pair[slot] then pcall(function() pair[slot]:cancel() end) end
+  local handle
+  local ok, armed = pcall(after, seconds, function()
+    local current = bus.notice_timers[session]
+    -- A cancelled or replaced handle may still fire: it does nothing.
+    if not current or current[slot] ~= handle then return end
+    current[slot] = nil
+    deliver_due_notice(session, notice_now())
+  end)
+  handle = ok and armed or nil
+  pair[slot] = handle
+  bus.notice_timers[session] = pair
+end
 function remuda._butler_notify(alias, notice, message_id, reshow)
   local _, recipient = mail_id(alias, false)
   if message_id and not reshow and not mail.is_unread(recipient.id, message_id) then return true end
@@ -773,11 +813,17 @@ function remuda._butler_notify(alias, notice, message_id, reshow)
     pending.message_times = pending.message_times or {}
     pending.message_times[message_id] = now
   end
+  local first = pending.first_at == nil
   pending.first_at = pending.first_at or now
   pending.last_at = now
   pending.due_at = math.min(now + NOTICE_QUIET_S, pending.first_at + NOTICE_MAX_WAIT_S)
   pending.count, pending.text = pending.count + 1, notice
   bus.notices[alias] = pending
+  if first then
+    cancel_notice_timers(alias)
+    arm_notice_timer(alias, "cap", NOTICE_MAX_WAIT_S)
+  end
+  arm_notice_timer(alias, "quiet", NOTICE_QUIET_S)
   return false
 end
 local function seed_unread_notices(alias, previous_instance, instance, unread)
@@ -968,15 +1014,7 @@ function remuda._butler_deliver_notices()
   end
   local sessions = {}
   for session in pairs(bus.notices) do sessions[#sessions + 1] = session end
-  for _, session in ipairs(sessions) do
-    local pending = bus.notices[session]
-    if not bus.agents[session] then
-      bus.notices[session] = nil
-    elseif bus.notice_recoveries[session]
-        or not pending or pending.due_at == nil or now >= pending.due_at then
-      deliver_notice(session)
-    end
-  end
+  for _, session in ipairs(sessions) do deliver_due_notice(session, now) end
 end
 -- `inbox <message-id>`: print one message delivered to the caller again,
 -- read or not, without changing read state (the owner check of reply).

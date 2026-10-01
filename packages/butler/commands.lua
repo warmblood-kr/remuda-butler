@@ -280,7 +280,14 @@ command(92, "deny", "  remuda butler deny <ID>", function(args, caller)
   return remuda.butler.approval.cli(args, current_agent(caller))
 end)
 command(100, "matrix", remuda.butler.matrix.cli_usage(), function(args, caller)
-  return remuda.butler.matrix.cli(args, current_agent(caller))
+  -- `matrix send -`: the text is stdin minus the one newline a heredoc or echo appends.
+  return remuda.butler.matrix.cli(args, current_agent(caller), function()
+    local body = caller and caller.stdin
+    if type(body) ~= "string" then
+      error("no message body received on stdin; `send -` needs a Remuda core with caller stdin support", 0)
+    end
+    return checked_message_body((body:gsub("\r?\n$", "")))
+  end)
 end)
 remuda._butler_command_run = function(verb, args, caller)
   local entry = command_entries[verb]

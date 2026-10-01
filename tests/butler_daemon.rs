@@ -2603,7 +2603,7 @@ fn butler_matrix_request_uses_fake_http_for_auth_trust_allow_and_same_room() {
 }
 
 #[test]
-fn butler_matrix_request_rejects_https_without_trust_before_network() {
+fn butler_matrix_request_uses_system_tls_trust_by_default() {
     let dir = scratch_dir("butler-matrix-no-trust");
     let (_daemon, path) = butler_test_daemon(&dir);
     let room = "!request:example.org";
@@ -2620,11 +2620,14 @@ fn butler_matrix_request_rejects_https_without_trust_before_network() {
       local failure
       remuda.butler.matrix.request({ method = "GET", path = "/_matrix/client/v3/versions" },
         function(value) failure = value end)
-      if not failure or not failure.error or not failure.error:find("requires ca_file=PATH or pin_sha256=HEX", 1, true)
-        then return "missing-trust-error" end
-      return #remuda.http.calls == 0 and "ok" or "network-reached"
+      local spec = remuda.http.calls[1]
+      if failure then return "request-failed:" .. tostring(failure.error) end
+      if not spec then return "no-request" end
+      if spec.url ~= "https://matrix.example.org/_matrix/client/v3/versions" then return "bad-url" end
+      if spec.pin ~= nil or spec.ca_file ~= nil then return "trust-override-added" end
+      return "ok"
     "#);
-    assert_eq!(result, "ok", "HTTPS must fail closed before HTTP: {result}");
+    assert_eq!(result, "ok", "HTTPS requests should use the core system trust verifier by default: {result}");
 }
 
 #[test]
@@ -2793,7 +2796,8 @@ fn butler_matrix_reply_quarantines_rejected_events_for_operator_inspection() {
         &dir, "quarantine", "http://matrix.example.org", room, "@bot:example.org", "@alice:example.org");
     let room_events = serde_json::json!({"timeline":{"events":[
         {"type":"m.room.message","event_id":"$not-allowed","sender":"@mallory\u{1b}[2J:example.org",
-         "origin_server_ts":0,"content":{"msgtype":"m.text","body":"private rejected \u{1b}[31mtext\u{009b}2J"}},
+         "origin_server_ts":0,"content":{"msgtype":"m.image","url":"mxc://example.org/private",
+            "body":"private rejected \u{1b}[31mtext\u{009b}2J"}},
         {"type":"m.room.message","event_id":"$unsafe","sender":"@alice:example.org",
          "origin_server_ts":1,"content":{"msgtype":"m.image","body":"unsafe image"}},
         {"type":"m.room.message","sender":"@alice:example.org","origin_server_ts":2,
@@ -2834,7 +2838,7 @@ fn butler_matrix_reply_quarantines_rejected_events_for_operator_inspection() {
       local more = {{}}
       for i=1,205 do more[i] = {{type="m.room.message", event_id="$bulk-" .. i,
         sender="@mallory:example.org", origin_server_ts=i,
-        content={{msgtype="m.text", body=i == 205
+        content={{msgtype="m.image", url="mxc://example.org/bulk", body=i == 205
           and (string.char(27) .. "[31mprivate" .. string.char(194,155) .. "2J")
           or string.rep("p", 2048)}}}} end
       local batch = {{rooms={{join={{}}}}}}; batch.rooms.join[room]={{timeline={{events=more}}}}
@@ -3046,7 +3050,8 @@ fn butler_matrix_reply_home_all_roster_subscriptions_survive_restart() {
       local top = has(a, "$top")
       if top.room ~= "all" or top.event_id ~= "$top" then return "mail-room-metadata-missing" end
       if has(a, "$mention-a").thread_id ~= "$mention-thread" then return "thread-id-metadata-missing" end
-      if has(a, "$agent-quiet") or has(b, "$agent-quiet") then return "unmentioned-agent-delivered" end
+      -- Receive rules: a Butler's root post is delivered without a mention.
+      if not has(a, "$agent-quiet") or not has(b, "$agent-quiet") then return "agent-root-not-delivered" end
       if not has(a, "$agent-mention") or has(b, "$agent-mention") then return "agent-mention-routing-failed" end
       if ra:can_reply_to("$agent-mention") or ra:can_reply_to("$unknown-event") then return "reply-guard-failed-open" end
       remuda._butler_matrix_config = {{token_path={a_token}, config_path=config_a}}
@@ -3099,7 +3104,8 @@ fn butler_matrix_reply_home_all_roster_subscriptions_survive_restart() {
       end
       if has(b, "$mention-followup") or has(b, "$post-followup") or has(b, "$send-followup")
         or has(b, "$agent-thread-followup") then return "thread-leaked-to-B" end
-      if has(a, "$agent-quiet-2") or has(b, "$agent-quiet-2") then return "agent-without-mention-delivered" end
+      -- A followed thread delivers every sender; B does not follow it.
+      if not has(a, "$agent-quiet-2") or has(b, "$agent-quiet-2") then return "agent-in-followed-thread-routing-failed" end
       if not has(a, "$agent-mention-2") or has(b, "$agent-mention-2") then return "agent-mention-followup-routing-failed" end
       if ra:can_reply_to("$agent-mention-2") then return "agent-reply-allowed" end
       local before = #a + #b
@@ -3379,12 +3385,15 @@ fn butler_matrix_relay_persists_cursor_filters_and_deduplicates_fake_events() {
       remuda.http.tick()
       if #remuda.relay_deliveries ~= 0 then return "baseline-history-replayed" end
       remuda.http.tick()
-      if #remuda.relay_deliveries ~= 2 then return "filter-or-page-dedup-failed:" .. #remuda.relay_deliveries end
-      local e, fallback
+      -- Receive rules: a non-allowlisted sender's text is delivered, marked untrusted.
+      if #remuda.relay_deliveries ~= 3 then return "filter-or-page-dedup-failed:" .. #remuda.relay_deliveries end
+      local e, fallback, stranger
       for _, value in ipairs(remuda.relay_deliveries) do
         if value.event_id == "$good" then e = value end
         if value.event_id == "$fallback-time" then fallback = value end
+        if value.event_id == "$blocked" then stranger = value end
       end
+      if not stranger or stranger.trusted ~= false then return "stranger-not-marked-untrusted" end
       if not fallback or not fallback.created_at:match("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%dZ$")
         then return "missing-UTC-time-fallback" end
       if e.event_id ~= "$good" or e.body ~= {body} then return "multiline-body-changed" end
@@ -3398,7 +3407,7 @@ fn butler_matrix_relay_persists_cursor_filters_and_deduplicates_fake_events() {
       restarted:start()
       remuda.http.tick()
       remuda.http.tick()
-      if #remuda.relay_deliveries ~= 2 then return "restart-redelivered-processed-event" end
+      if #remuda.relay_deliveries ~= 3 then return "restart-redelivered-processed-event" end
       local resumed = false
       for _, spec in ipairs(remuda.http.calls) do if spec.url == {resumed_sync} then resumed = true end end
       if not resumed then return "restart-did-not-resume-since" end
@@ -3873,7 +3882,7 @@ fn butler_matrix_relay_bounds_processed_ids_and_reconciles_bad_pending_state() {
 }
 
 #[test]
-fn butler_matrix_relay_logs_distinct_transport_misconfigurations_once() {
+fn butler_matrix_relay_uses_system_trust_and_logs_empty_token_once() {
     let dir = scratch_dir("mr-config-log");
     let (_daemon, path) = butler_test_daemon(&dir);
     let (https_token, https_config) = butler_config(
@@ -3898,13 +3907,13 @@ fn butler_matrix_relay_logs_distinct_transport_misconfigurations_once() {
       run({https_token}, {https_config})
       run({empty_token}, {empty_config})
       io.stderr = old_stderr
-      if #remuda.relay_config_logs ~= 2 then return "expected-two-distinct-warnings:" .. #remuda.relay_config_logs end
+      if #remuda.relay_config_logs ~= 1 then return "expected-one-warning:" .. #remuda.relay_config_logs end
       local https, empty = false, false
       for _, line in ipairs(remuda.relay_config_logs) do
         if line:find("HTTPS Matrix homeserver requires", 1, true) then https = true end
         if line:find("Matrix token is empty", 1, true) then empty = true end
       end
-      if not https then return "missing-https-warning" end
+      if https then return "unexpected-https-warning" end
       if not empty then return "missing-empty-token-warning" end
       return "ok"
     "#,
@@ -3912,7 +3921,7 @@ fn butler_matrix_relay_logs_distinct_transport_misconfigurations_once() {
         https_config=lua_raw_string(&https_config.to_string_lossy()),
         empty_token=lua_raw_string(&empty_token.to_string_lossy()),
         empty_config=lua_raw_string(&empty_config.to_string_lossy())));
-    assert_eq!(result, "ok", "relay should log one warning per distinct invalid transport configuration: {result}");
+    assert_eq!(result, "ok", "relay should use system trust for HTTPS and still log invalid tokens: {result}");
 }
 
 #[test]
@@ -8788,6 +8797,62 @@ fn butler_matrix_send_chunks_utf8_async_and_rejects_empty_or_dash() {
 }
 
 #[test]
+fn butler_matrix_send_and_reply_add_formatted_body_and_fall_back_to_plain() {
+    let dir = scratch_dir("butler-matrix-formatted");
+    let (_daemon, path) = butler_test_daemon(&dir);
+    let room = "!write:example.org";
+    let (token_path, config_path) = butler_config(&dir, "write", "http://matrix.example.org",
+        room, "@bot:example.org", "");
+    eval(&path, include_str!("support/fake_http.lua"));
+    eval(&path, &format!(
+        "remuda._butler_matrix_config = {{ token_path = {}, config_path = {} }}; remuda.exec('butler/matrix')",
+        lua_raw_string(&token_path.to_string_lossy()), lua_raw_string(&config_path.to_string_lossy())));
+    let result = eval(&path, r#"
+      local matrix, room = remuda.butler.matrix, "!write:example.org"
+      local base = "http://matrix.example.org/_matrix/client/v3/rooms/%21write%3Aexample.org/"
+      remuda.http.respond_prefix("GET", base .. "context/",
+        { status = 200, headers = {}, body = '{"event":{"room_id":"!write:example.org"}}' })
+      remuda.http.respond_prefix("PUT", base .. "send/m.room.message/",
+        { status = 200, headers = {}, body = '{"event_id":"$sent"}' })
+      matrix.relay.instance = { can_reply_to = function() return true end }
+      local function content_of(start)
+        local before, result = #remuda.http.calls, nil
+        start(function(value) result = value end)
+        for _ = 1, 4 do remuda.http.tick() end
+        local call = remuda.http.calls[#remuda.http.calls]
+        if not result or result.error or #remuda.http.calls == before or call.method ~= "PUT" then return {} end
+        return matrix.decode_json(call.body) or {}
+      end
+      local text = "**bold** <b>raw</b>"
+      local html = "<p><strong>bold</strong> &lt;b&gt;raw&lt;/b&gt;</p>"
+      local sent = content_of(function(done) matrix.send({ text = text, room = room }, done) end)
+      if sent.msgtype ~= "m.text" or sent.body ~= text then return "send-body-changed" end
+      if sent.format ~= "org.matrix.custom.html" or sent.formatted_body ~= html then
+        return "send-not-formatted:" .. tostring(sent.formatted_body)
+      end
+      local reply = content_of(function(done)
+        matrix.reply({ room = room, event_id = "$source", text = text }, done)
+      end)
+      local relation = reply["m.relates_to"] or {}
+      if reply.msgtype ~= "m.text" or reply.body ~= text or relation.rel_type ~= "m.thread"
+        or relation.event_id ~= "$source" or (relation["m.in_reply_to"] or {}).event_id ~= "$source" then
+        return "reply-body-or-relation-changed"
+      end
+      if reply.format ~= "org.matrix.custom.html" or reply.formatted_body ~= html then return "reply-not-formatted" end
+      -- 3900 empty table cells render to more than the 30000-byte HTML cap.
+      local wide = "|a|\n|-|\n" .. string.rep("|", 3900)
+      local capped = content_of(function(done) matrix.send({ text = wide, room = room }, done) end)
+      if capped.body ~= wide or capped.format ~= nil or capped.formatted_body ~= nil then return "oversized-html-sent" end
+      remuda.butler.md2html.convert = function() error("converter broke") end
+      local plain = content_of(function(done) matrix.send({ text = text, room = room }, done) end)
+      if plain.msgtype ~= "m.text" or plain.body ~= text then return "fallback-body-changed" end
+      if plain.format ~= nil or plain.formatted_body ~= nil then return "fallback-not-plain" end
+      return "ok"
+    "#);
+    assert_eq!(result, "ok", "Matrix m.text must carry safe HTML next to the unchanged plain body: {result}");
+}
+
+#[test]
 fn butler_matrix_transaction_ids_change_across_daemon_restarts() {
     fn txn_in_fresh_daemon(tag: &str) -> String {
         let dir = scratch_dir(tag);
@@ -9116,7 +9181,58 @@ fn butler_matrix_cli_client_disconnect_cancels_active_word() {
 }
 
 #[test]
-fn butler_matrix_cli_refuses_send_dash_and_fails_cleanly_without_pending() {
+fn butler_matrix_cli_send_dash_sends_stdin_as_the_text() {
+    let dir = scratch_dir("butler-matrix-cli-stdin");
+    let (_daemon, path) = butler_cli_test_daemon(&dir);
+    let room = "!cli:example.org";
+    let (token_path, config_path) = butler_config(&dir, "cli", "http://matrix.example.org",
+        room, "@bot:example.org", "");
+    eval(&path, include_str!("support/fake_http.lua"));
+    eval(&path, &format!(
+        "remuda._butler_matrix_config = {{ token_path = {}, config_path = {} }}; remuda.exec('butler/matrix')",
+        lua_raw_string(&token_path.to_string_lossy()), lua_raw_string(&config_path.to_string_lossy())));
+    eval(&path, r#"
+      remuda.http.respond_prefix("PUT", "http://matrix.example.org/_matrix/client/v3/rooms/%21cli%3Aexample.org/send/m.room.message/",
+        { status = 200, headers = {}, body = '{"event_id":"$cli"}' })
+    "#);
+    // (argv after `matrix`, stdin, expected m.text body). Stdin is never re-parsed as options.
+    let cases: [(&[&str], &str, &str); 5] = [
+        (&["--room", room, "send", "-"], "--json is text\n-\n--room !x:y last\n", "--json is text\n-\n--room !x:y last"),
+        (&["send", "-"], "-\n", "-"),
+        (&["send", "-"], "two newlines\r\n\r\n", "two newlines\r\n"),
+        (&["send", "--", "-"], "ignored", "-"),
+        (&["send", "plain", "text"], "ignored", "plain text"),
+    ];
+    for (index, (args, stdin, expected)) in cases.iter().enumerate() {
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
+            .args(["-s", "s", "butler", "matrix"]).args(*args)
+            .env("REMUDA_RUNTIME_DIR", &dir)
+            .env("REMUDA_NO_UPDATE_CHECK", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn().expect("spawn Matrix CLI send");
+        child.stdin.take().expect("child stdin").write_all(stdin.as_bytes()).expect("write stdin");
+        let sent = (index + 1).to_string();
+        let deadline = Instant::now() + PATIENCE;
+        // Ticking also runs the send rate-limit timer that queues every send after the first.
+        while eval(&path, "remuda.http.tick(); return #remuda.http.calls") != sent {
+            assert!(Instant::now() < deadline, "{args:?} never dispatched its send");
+            assert!(child.try_wait().expect("poll Matrix CLI").is_none(), "{args:?} exited before sending: {}",
+                String::from_utf8_lossy(&child.wait_with_output().expect("collect").stderr));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        eval(&path, "remuda.http.tick()");
+        let output = child.wait_with_output().expect("collect Matrix CLI output");
+        assert!(output.status.success(), "{args:?} failed: {}", String::from_utf8_lossy(&output.stderr));
+        let content = eval(&path, &format!(
+            "local c = remuda.json.decode(remuda.http.calls[{sent}].body); return c.msgtype .. '|' .. c.body"));
+        assert_eq!(content, format!("m.text|{expected}"), "{args:?} sent the wrong text");
+    }
+}
+
+#[test]
+fn butler_matrix_cli_rejects_invalid_send_dash_and_fails_cleanly_without_pending() {
     let dir = scratch_dir("butler-matrix-cli-compat");
     let (_daemon, path) = butler_cli_test_daemon(&dir);
     for verb in ["approve", "deny"] {
@@ -9164,11 +9280,26 @@ fn butler_matrix_cli_refuses_send_dash_and_fails_cleanly_without_pending() {
     assert!(String::from_utf8_lossy(&agent_approve.stderr).contains(
         "approve is operator-only. Next: wait for the owner's answer by mail; remuda butler inbox"),
         "unexpected agent approve error: {}", String::from_utf8_lossy(&agent_approve.stderr));
-    let dash = remuda_timed(&dir, &["-s", "s", "butler", "matrix", "send", "-"]);
-    assert!(!dash.status.success(), "send - must be refused by CLI glue");
-    assert!(String::from_utf8_lossy(&dash.stderr).contains("stdin"), "unexpected send - error: {}",
-        String::from_utf8_lossy(&dash.stderr));
-    assert_eq!(eval(&path, "return #remuda.http.calls"), "0", "send - unexpectedly touched Matrix");
+    let oversized = format!("{}\n", "x".repeat(65_537));
+    for (args, stdin, expected) in [
+        (&["send", "-"][..], "", "message body must not be empty"),
+        (&["send", "-"][..], "\n", "message body must not be empty"),
+        (&["send", "-"][..], oversized.as_str(), "message body exceeds the 64 KiB limit"),
+        (&["--room", room, "send", "-", "extra"][..], "body\n", "stdin message form takes no extra arguments"),
+    ] {
+        let argv = [&["-s", "s", "butler", "matrix"][..], args].concat();
+        let dash = remuda_timed_stdin(&dir, &argv, stdin.as_bytes());
+        assert!(!dash.status.success(), "{args:?} with invalid stdin must fail");
+        assert!(String::from_utf8_lossy(&dash.stderr).contains(expected), "unexpected {args:?} error: {}",
+            String::from_utf8_lossy(&dash.stderr));
+    }
+    let no_stdin = eval(&path, r#"
+      local ok, err = pcall(remuda._butler_command_run, "matrix", {"matrix", "send", "-"}, {env={}})
+      assert(not ok)
+      return tostring(err)
+    "#);
+    assert!(no_stdin.contains("no message body received on stdin"), "{no_stdin}");
+    assert_eq!(eval(&path, "return #remuda.http.calls"), "0", "invalid send - touched Matrix");
 
     let agent_leave = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
         .args(["-s", "s", "butler", "matrix", "leave", room])
@@ -9217,7 +9348,7 @@ fn butler_matrix_guidance_covers_each_member_verb_and_omits_operator_verbs() {
         "- `rooms`: joined rooms (read-only).",
         "- `thread EVENT_ID`: all replies in a thread.",
         "- `event EVENT_ID` (alias `get`): one event.",
-        "- `send TEXT`: start a NEW post only (name the room with `--room ROOM`); long text is split, rate-limited; `send -` is refused until core #213. Answers ALWAYS go via `remuda butler reply MESSAGE-ID -`, never send.",
+        "- `send TEXT`: start a NEW post only (name the room with `--room ROOM`); long text is split, rate-limited; `send -` reads the text from stdin (up to 64 KiB). Answers ALWAYS go via `remuda butler reply MESSAGE-ID -`, never send.",
         "- `reply EVENT_ID TEXT` / `react EVENT_ID KEY`: answer or react (same room only).",
         "- `upload PATH`: post a file (up to 20 MB). `[-o PATH] download MXC`: fetch media.",
         "- `redact EVENT_ID [--reason TEXT]`: remove your message.",

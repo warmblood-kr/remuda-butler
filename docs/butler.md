@@ -57,6 +57,8 @@ remuda butler matrix [--json] status
 remuda butler matrix [--json] rooms
 remuda butler matrix [--json] [--room ROOM] [-n N] history
 remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
+remuda butler matrix [--json] [--room ROOM] follow EVENT_ID
+remuda butler matrix [--json] [--room ROOM] unfollow EVENT_ID
 remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
 remuda butler matrix [--json] [-o PATH] download MXC
 remuda butler matrix [--json] [--room ROOM] send TEXT
@@ -68,6 +70,16 @@ remuda butler matrix [--json] join ROOM
 remuda butler matrix [--json] leave ROOM
 remuda butler matrix [--json] quarantine [--id EVENT_ID]
 ```
+
+Root posts are delivered from anyone. In the HOME room, every thread reply is
+delivered whether or not you follow it. In other rooms, thread replies are
+delivered only in followed threads or when a message mentions the Butler;
+replying, sending, and a mention from an allowlisted sender follow automatically.
+Non-allowlisted senders arrive marked as information with `trusted=false`.
+Use `follow EVENT_ID` and `unfollow EVENT_ID` to manage subscriptions; the
+relay allows up to 5000 followed threads in total. Accepted messages from
+non-allowlisted senders are limited per room in a rolling hour by
+`untrusted_per_room_hour` (default 20).
 
 `remuda butler matrix setup --default` writes the token and config to the
 running Butler's resolved paths, then starts or replaces only its Matrix
@@ -114,8 +126,8 @@ operator to choose from. The inviter check relies on the homeserver appending
 the real invite event to `invite_state` (Synapse does). `leave` removes a joined
 room by ID or alias, while HOME and ALL-BUTLERS cannot be left or removed. The
 interactive setup wizard writes `rooms=open` without asking; flag-based setup
-defaults to allowlist unless given `--rooms open`. The `send -` stdin form is
-unsupported until core #213.
+defaults to allowlist unless given `--rooms open`. `send -` reads the text from
+stdin (up to 64 KiB, one trailing newline dropped); `send -- -` sends a literal `-`.
 
 `join` and `leave` change room membership and require an outside terminal
 caller; session, unknown, and missing callers are refused. Clearing
@@ -189,15 +201,32 @@ Copy the 64 hexadecimal digits after `=` into `pin_sha256` (or pass them to
 used by `remuda.http` and sends it with `pin_only`, so a self-signed homeserver
 works with the pin alone: the CA chain is skipped, while the hostname, validity
 dates, and the SPKI pin are still checked. `ca_file` keeps full chain
-validation. HTTPS fails closed unless `ca_file` or a valid `pin_sha256` is
-configured, and a pin mismatch fails with a `Next:` line; HTTP is intended for
-local or development use.
+validation. With neither `ca_file` nor `pin_sha256`, an `https://` homeserver
+is verified against the system's trusted CA roots, so a publicly trusted
+certificate needs no extra setting. Verification is never skipped: an untrusted
+certificate fails with `Next: remuda butler matrix setup --ca-file PATH (the
+server's CA certificate), or --pin SHA256HEX`, and a pin mismatch fails with
+its own `Next:` line. HTTP is intended for local or development use.
 
 Matrix sends and replies are split at UTF-8 boundaries into chunks of at most
 4000 bytes. Upload request bodies and download response bodies are capped at
 20 MiB. Ordinary Matrix requests default to a 15-second timeout; downloads use
 30 seconds and uploads use 60 seconds. The default response-body limit is
 1 MiB; media downloads may use the full 20 MiB limit.
+
+Text messages (`send` and `reply`) are sent as `m.text` with the text unchanged
+in `body`, plus a `formatted_body` (`org.matrix.custom.html`) rendered from a
+Markdown subset: headings, `**bold**`, `*italic*`, `` `code` ``, fenced code,
+links, bullet and numbered lists, blockquotes, `---` rules, and tables.
+Everything is HTML-escaped first, so raw HTML never passes through, and link
+targets are limited to `http`, `https`, and `mailto`. Limits: lists are flat
+(nested items join the parent list); a blockquote is a single paragraph; a `|`
+inside a table cell splits the cell, even in a code span or escaped;
+`_italic_` is not supported. Text over 4000 bytes is split first and each chunk
+is converted on its own, so a block that spans a chunk boundary (a code fence
+or a table, for example) renders broken. If the converter fails, or its HTML
+for a chunk exceeds 30000 bytes, that chunk is sent as plain `m.text` without
+`formatted_body`.
 
 The relay resumes from its saved sync cursor and deduplicates by Matrix event
 ID. It records cursor, processed IDs, pending deliveries, quarantine records,

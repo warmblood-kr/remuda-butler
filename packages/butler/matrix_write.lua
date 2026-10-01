@@ -6,6 +6,7 @@ local approval = assert(remuda.butler.approval, "load butler/approval before but
 local is_agent_mxid = matrix.is_agent_mxid
 
 local MAX_CHUNK_BYTES = 4000
+local MAX_HTML_BYTES = 30000 -- an event is capped at 65536 bytes; markup can expand a chunk ~9x
 local MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 local txn_counter = 0
 local function random_tag()
@@ -90,6 +91,12 @@ local function send_chunks(room, text, relation, on_done, txn_prefix)
       return done({ sent = #event_ids, event_ids = event_ids })
     end
     local content = { msgtype = "m.text", body = chunks[index] }
+    -- Converter is looked up at call time so it stays advisable (#166); on any
+    -- failure the chunk goes out plain.
+    local ok, html = pcall(function() return remuda.butler.md2html.convert(chunks[index]) end)
+    if ok and type(html) == "string" and html ~= "" and #html <= MAX_HTML_BYTES then
+      content.format, content.formatted_body = "org.matrix.custom.html", html
+    end
     if relation then content["m.relates_to"] = relation end
     local body, encode_error = matrix.encode_json(content)
     if not body then return done({ error = encode_error }) end

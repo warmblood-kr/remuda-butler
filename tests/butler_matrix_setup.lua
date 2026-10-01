@@ -235,8 +235,54 @@ return function(matrix)
     { "--bot", "@butler-demo:example.org", "--rooms", "anyone" }), "rooms must be open or allowlist")
   rejected(args("--password-file", password,
     { "--bot", "not-an-mxid" }), "--bot 'not-an-mxid' is not a Matrix user ID")
-  rejected({ "--homeserver", "https://matrix.invalid", "--owner", "@alice:example.org",
-    "--bot", "@butler-demo:example.org", "--password-file", password, "--dir", output }, "--pin")
+  do
+  -- Owner decision A: an https homeserver whose certificate the system roots
+  -- trust needs no --pin/--ca-file; an untrusted one is refused with a Next:.
+  local saved_http = remuda.http
+  local function system_trust_setup(trusted)
+    local queue, specs, result = {}, {}, nil
+    remuda.http = { request = function(spec)
+      specs[#specs + 1] = spec
+      queue[#queue + 1] = spec
+      return { cancel = function() end }
+    end }
+    local plan, plan_error = matrix.setup_prepare({ "--homeserver", "https://matrix.invalid",
+      "--owner", "@alice:example.org", "--bot", "@butler-demo:example.org",
+      "--password-file", password, "--dir", output })
+    assert(plan and not plan.pin and not plan.ca_file,
+      "https setup without --pin/--ca-file must use system trust roots: " .. tostring(plan_error))
+    matrix.setup_network(plan, function(value) result = value end)
+    while #queue > 0 do
+      local spec = table.remove(queue, 1)
+      if spec.pin ~= nil or spec.ca_file ~= nil or spec.pin_only == true then
+        spec.callback({ error = "unexpected trust override" })
+      elseif not trusted then
+        spec.callback({ error = "TLS request failed: server certificate issuer not trusted" })
+      elseif spec.url:find("/login", 1, true) then
+        spec.callback({ status = 200, body = '{"access_token":"system-trust-token"}' })
+      elseif spec.url:find("/whoami", 1, true) then
+        spec.callback({ status = 200, body = '{"user_id":"@butler-demo:example.org"}' })
+      elseif spec.url:find("/createRoom", 1, true) then
+        spec.callback({ status = 200, body = '{"room_id":"!system-trust:example.org"}' })
+      else
+        spec.callback({ status = 404, body = '{"errcode":"M_UNRECOGNIZED"}' })
+      end
+    end
+    remuda.http = saved_http
+    return result, specs
+  end
+  local trusted, trusted_specs = system_trust_setup(true)
+  assert(type(trusted) == "table" and not trusted.error and trusted.home_room == "!system-trust:example.org"
+    and #trusted_specs > 0,
+    "a system-trusted https homeserver must set up without --pin/--ca-file: "
+      .. tostring(type(trusted) == "table" and trusted.error))
+  local untrusted = system_trust_setup(false)
+  assert(type(untrusted) == "table" and type(untrusted.error) == "string"
+    and untrusted.error:find("Next: remuda butler matrix setup --ca-file PATH", 1, true)
+    and not untrusted.error:find("system-trust-token", 1, true),
+    "an untrusted https certificate must be refused with a --ca-file Next: line: "
+      .. tostring(type(untrusted) == "table" and untrusted.error))
+  end
   rejected({ "--homeserver", "https://matrix.invalid", "--owner", "@alice:example.org",
     "--bot", "@butler-demo:example.org", "--password-file", password, "--dir", output,
     "--pin", "abcd" }, "64 hexadecimal")
