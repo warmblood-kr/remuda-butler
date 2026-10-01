@@ -8,7 +8,7 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 REMUDA_BIN=${REMUDA_BIN:-remuda}
 T=$(mktemp -d /tmp/bsi.XXXXXX)
 T=$(cd "$T" && pwd -P)
-A=bsi-a B=bsi-b X=bsi-c D=bsi-d L=bsi-l
+A=bsi-a B=bsi-b X=bsi-c D=bsi-d L=bsi-l G=bsi-g
 export HOME=$T/home XDG_CONFIG_HOME=$T/config XDG_DATA_HOME=$T/data REMUDA_RUNTIME_DIR=$T/run
 export REMUDA_BUTLER_PROJECT_HOME=$T/projects REMUDA_NO_UPDATE_CHECK=1
 unset REMUDA_BUTLER_TOKEN REMUDA_BUTLER_CONFIG REMUDA_BUTLER_AGENT_ID REMUDA_BUTLER_LEADER_ID
@@ -19,7 +19,7 @@ assert_scratch() {
   [[ $T == /tmp/bsi.?????? || $T == /private/tmp/bsi.?????? ]] || { echo "ABORT: scratch dir is wrong: $T"; exit 9; }
   [[ $HOME == "$T/home" && $REMUDA_RUNTIME_DIR == "$T/run" && $XDG_DATA_HOME == "$T/data"
     && $XDG_CONFIG_HOME == "$T/config" ]] || { echo "ABORT: env is not scratch"; exit 9; }
-  [[ $A == bsi-a && $B == bsi-b && $X == bsi-c && $D == bsi-d && $L == bsi-l ]] || { echo "ABORT: session names"; exit 9; }
+  [[ $A == bsi-a && $B == bsi-b && $X == bsi-c && $D == bsi-d && $L == bsi-l && $G == bsi-g ]] || { echo "ABORT: session names"; exit 9; }
 }
 assert_scratch
 
@@ -28,7 +28,7 @@ FAKE_AGENT=$T/fake-agent
 cleanup() {
   STATUS=$?
   assert_scratch
-  for name in "$A" "$B" "$X" "$D" "$L"; do
+  for name in "$A" "$B" "$X" "$D" "$L" "$G"; do
     [[ -S $REMUDA_RUNTIME_DIR/remuda/$name.sock ]] || continue
     "$REMUDA_BIN" -s "$name" stop -f >/dev/null 2>&1 || true
   done
@@ -255,6 +255,45 @@ LOCAL_STATE=$(lua "$L" 'local root = false; for _, s in ipairs(remuda.ls()) do i
 [[ $LOCAL_STATE == "refused=false root_butler=true" ]] && ok "T7b a home with no Matrix files is owned by its first daemon" \
   || bad "T7b a home with no Matrix files is owned by its first daemon: $LOCAL_STATE; $("$REMUDA_BIN" -s "$L" butler status 2>&1 | head -1 | cut -c1-160)"
 
+# T7c (faked word only): the owner is gone -> a refused daemon says so, and the
+# command its Next: line prints really makes THIS daemon the owner, once. With
+# the real word T8 does the same against a dead owner.
+if [[ $LOCK_WORD != true ]]; then
+  mkdir -p "$T/gone/home" "$T/gone/config/remuda/butler" "$T/gone/data/remuda/mods/butler"
+  tar -c -C "$REPO" extension.toml packages | tar -x -C "$T/gone/data/remuda/mods/butler"
+  cp "$C/config" "$C/token" "$T/gone/config/remuda/butler/"
+  chmod 600 "$T/gone/config/remuda/butler/config" "$T/gone/config/remuda/butler/token"
+  assert_scratch
+  HOME=$T/gone/home XDG_CONFIG_HOME=$T/gone/config XDG_DATA_HOME=$T/gone/data REMUDA_BUTLER_SERVER=$G \
+    "$REMUDA_BIN" -s "$G" daemon </dev/null >"$T/$G.log" 2>&1 &
+  PIDS+=($!)
+  for _ in $(seq 50); do [[ -S $REMUDA_RUNTIME_DIR/remuda/$G.sock ]] && break; sleep 0.1; done
+  [[ -S $REMUDA_RUNTIME_DIR/remuda/$G.sock ]] || { cat "$T/$G.log"; echo "FAIL: daemon $G did not start"; exit 1; }
+  load_butler "$G" "$FAKE_SECOND"
+  sleep 2
+  lua "$G" "${FAKE_OWNER}return true" >/dev/null # the owner is gone: the locks are free now
+  assert_scratch
+  set +e
+  OUT=$("$REMUDA_BIN" -s "$G" butler status 2>&1); CODE=$?
+  set -e
+  T7C=ok
+  [[ $CODE == 1 && $OUT == *"that owned this home is gone. This daemon has not taken over."* ]] \
+    || T7C="butler status: exit $CODE, output: $(printf '%s' "$OUT" | head -2 | cut -c1-160)"
+  NEXT_COMMAND=$(printf '%s\n' "$OUT" | sed -n 's/^Next: \(remuda exec butler\).*/\1/p')
+  [[ $NEXT_COMMAND == "remuda exec butler" ]] || T7C="$T7C; no reload command in the Next: line"
+  [[ $(lua "$G" 'return remuda._butler_standby ~= nil') == true ]] || T7C="$T7C; the daemon took over without being asked"
+  assert_scratch
+  "$REMUDA_BIN" -s "$G" exec butler >/dev/null 2>&1 || true # the printed command, with this daemon's -s
+  sleep 5
+  GONE_STATE=$(lua "$G" 'local roots = 0; for _, s in ipairs(remuda.ls()) do if s.name == "butler" then roots = roots + 1 end end
+    local m = remuda.butler and remuda.butler.matrix
+    return "refused=" .. tostring(remuda._butler_standby ~= nil) .. " root_butlers=" .. roots .. " relay=" .. tostring((m and m.relay and m.relay.instance) ~= nil)')
+  [[ $GONE_STATE == "refused=false root_butlers=1 relay=true" ]] || T7C="$T7C; after the printed command: $GONE_STATE"
+  [[ -f $T/gone/config/remuda/butler/config.mcp.json ]] || T7C="$T7C; no root MCP config was written"
+  [[ $T7C == ok ]] && ok "T7c when the owner is gone the printed command makes this daemon the owner" \
+    || bad "T7c when the owner is gone the printed command makes this daemon the owner: ${T7C#ok; }"
+fi
+
 # T8 and T9 need the owner lock word from core (remuda.fs.lock). Until a core
 # has it they are skipped; they have never run.
 if [[ $LOCK_WORD == true ]]; then
@@ -278,14 +317,25 @@ if [[ $LOCK_WORD == true ]]; then
   [[ $CODE == 1 && $OUT == *"that owned this home is gone"* && $OUT == *"Next: remuda exec butler"* && $ROOT_IN_B == false ]] \
     && ok "T8 after the owner dies a refused daemon says so and does not take over" \
     || bad "T8 after the owner dies a refused daemon says so and does not take over: exit $CODE, root Butler $ROOT_IN_B, output: $(printf '%s' "$OUT" | head -2 | cut -c1-160)"
+  # The printed command makes THAT daemon the owner, once: one root Butler, the relay, both locks.
+  assert_scratch
+  "$REMUDA_BIN" -s "$B" exec butler >/dev/null 2>&1 || true
+  sleep 5
+  TAKEOVER=$(lua "$B" 'local roots = 0; for _, s in ipairs(remuda.ls()) do if s.name == "butler" then roots = roots + 1 end end
+    local m = remuda.butler and remuda.butler.matrix
+    return "refused=" .. tostring(remuda._butler_standby ~= nil) .. " root_butlers=" .. roots .. " relay=" .. tostring((m and m.relay and m.relay.instance) ~= nil)')
+  [[ $TAKEOVER == "refused=false root_butlers=1 relay=true" ]] \
+    && ok "T8 the printed command makes the refused daemon the owner" \
+    || bad "T8 the printed command makes the refused daemon the owner: $TAKEOVER"
+  # ...and a daemon started after that is refused: the new owner holds both locks.
   start_daemon "$D"
   load_butler "$D"
   sleep 4
   ROOT_IN_D=$(lua "$D" 'for _, s in ipairs(remuda.ls()) do if s.name == "butler" then return true end end return false')
-  [[ $ROOT_IN_D == true ]] && ok "T8 after the owner dies the next daemon takes over" \
-    || bad "T8 after the owner dies the next daemon takes over: no root Butler in the new daemon"
+  [[ $ROOT_IN_D == false ]] && ok "T8 a daemon started after the takeover is refused" \
+    || bad "T8 a daemon started after the takeover is refused: it has a root Butler"
 else
-  echo "skip - T8 after the owner dies: a refused daemon says so, the next daemon takes over (needs core remuda.fs.lock)"
+  echo "skip - T8 after the owner dies: a refused daemon says so, its printed command takes over, a later daemon is refused (needs core remuda.fs.lock)"
   echo "skip - T9 a mod reload in the owner keeps ownership (needs core remuda.fs.lock)"
 fi
 
