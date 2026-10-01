@@ -49,6 +49,7 @@ function windows.find_command(name, context)
   end
   local directories = {}
   for _, directory in ipairs(split(path, ";")) do
+    directory = directory:match('^"(.*)"$') or directory
     if windows_absolute(directory) then directories[#directories + 1] = directory end
   end
   local exists = context.exists or file_exists

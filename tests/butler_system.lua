@@ -58,6 +58,13 @@ local named = windows.find_command("claude.cmd", {
   exists = function(path) return npm[path] == true end,
 })
 assert(named == [[C:\npm\claude.cmd]], "a name that already has a PATHEXT extension is tried as given")
+-- cmd.exe accepts a quoted PATH entry; it must be unquoted, not skipped.
+local quoted = windows.find_command("node", {
+  path = [["C:\Program Files\nodejs";C:\tools]], pathext = ".EXE",
+  exists = function(path) return path == [[C:\Program Files\nodejs\node.exe]] end,
+})
+assert(quoted == [[C:\Program Files\nodejs\node.exe]],
+  "a quoted PATH entry should be searched: " .. tostring(quoted))
 
 -- Exercise the POSIX table with a fake executable path.
 local posix = assert(system.posix, "POSIX system table must be testable")
