@@ -736,7 +736,7 @@ leader, when you have one, is `REMUDA_BUTLER_LEADER_ID`. Use the short forms:
 - `remuda butler inbox` to read your own inbox.
 - `remuda butler send MEMBER "MESSAGE"` to direct a member; your sender is inferred.
 - `remuda butler send-to-leader MESSAGE...` to report a completed work loop.
-- For long bodies, write the text to a file and use `remuda butler send MEMBER --file "$PWD/path"`,
+- For long bodies, write the text to a file inside your working directory and use `remuda butler send MEMBER --file "$PWD/path"`,
   or pipe it: `cat <<'EOF' | remuda butler send MEMBER -`. `send-to-leader` and `reply MESSAGE_ID`
   accept those forms too. The limit is 64 KiB.
 
@@ -823,6 +823,34 @@ function remuda._butler_status()
     return table.concat(launch_failure_lines(remuda._butler_attempts or {}), "\n"), 1
   end
   return "launching\nreadiness budget: " .. tostring(readiness_chain_budget()), 75
+end
+-- The file arguments of send, send-to-leader, reply, matrix upload and matrix
+-- download: an agent caller is held to its own working directory (permissions.lua).
+-- The caller comes from core's caller identity, never from the environment.
+local function core_caller()
+  local known, caller = pcall(function() return remuda.caller() end)
+  return known and caller or nil
+end
+local function session_launch_cwd(session)
+  local cwd, matches = nil, 0
+  for alias, agent in pairs(bus.agents) do
+    if type(agent) == "table" and (agent.session_name == session or (alias == "butler" and session == butler_name)) then
+      cwd, matches = alias == "butler" and butler_session_cwd or agent.cwd, matches + 1
+    end
+  end
+  return matches == 1 and cwd or nil
+end
+local function realpath(target)
+  local result = remuda.process.run({ argv = { "realpath", target }, timeout = 5 })
+  local resolved = result.code == 0 and not result.timed_out and (result.stdout or ""):gsub("\n$", "")
+  return resolved and resolved ~= "" and resolved or nil
+end
+function remuda._butler_file_for_caller(path, flag, pipe)
+  return permissions.file_for_caller(path, core_caller(), session_launch_cwd, realpath, flag, pipe)
+end
+-- The output of matrix download: -o PATH, or the default name when there is none.
+function remuda._butler_output_for_caller(path, name)
+  return permissions.output_for_caller(path, name, core_caller(), session_launch_cwd, realpath, butler_fs.is_symlink)
 end
 -- Merges the root Butler's rule into its own .claude/settings.local.json: at
 -- every real launch, and once per mod load for a session that is already

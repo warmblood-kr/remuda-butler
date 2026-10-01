@@ -272,7 +272,7 @@ local function media_mail_body(content, kind)
   local mxc = media_uri(content)
   if valid_media_uri(mxc) then
     lines[#lines + 1] = "mxc: " .. mxc
-    lines[#lines + 1] = "Next: remuda butler matrix -o PATH download " .. mxc
+    lines[#lines + 1] = "Next: remuda butler matrix download " .. mxc
   else
     lines[#lines + 1] = "mxc: (invalid)"
   end

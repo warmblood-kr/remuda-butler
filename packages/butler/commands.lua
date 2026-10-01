@@ -61,7 +61,9 @@ local function message_body(args, first, caller)
     if path:match("^/dev/") or path:match("^/proc/") then
       error("--file must be a regular file; for a pipe, use - and redirect stdin (Next: remuda butler send NAME - < FILE)", 0)
     end
-    local file, open_err = io.open(path, "rb")
+    local allowed, refusal = remuda._butler_file_for_caller(path, "--file ", true)
+    if not allowed then error(refusal, 0) end
+    local file, open_err = io.open(allowed, "rb")
     if not file then error("cannot read message file: " .. tostring(open_err), 0) end
     local body, read_err = file:read(MAX_MESSAGE_BYTES + 1)
     file:close()
