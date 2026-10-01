@@ -3644,6 +3644,56 @@ local function test_rx_mail_reply_turn_guard()
   end)
 end
 
+-- Live path: the daemon's relay sends a queued mail reply through api.reply, the
+-- REAL matrix.reply (the tests above give the relay a scripted client as api).
+-- The reply that reaches b2b_max_turns was allowed by queue_mail_reply, so it
+-- must be posted; only the next one is refused.
+local function test_rx_mail_reply_limit_turn_is_posted_through_matrix_reply()
+  local dir, path = invite_fixture(OWNER .. "," .. RX_ALLY, "b2b_max_turns=2\n")
+  rx_with_dir(dir, function()
+    with_alias_http(path, function(spec)
+      local url = tostring(spec.url or spec.path or "")
+      if url:find("/sync", 1, true) then return { status = 500, body = "{}" } end
+      if url:find("/context/", 1, true) then
+        return { status = 200, body = '{"event":{"room_id":"' .. HOME .. '"}}' }
+      end
+      return { status = 200, body = '{"event_id":"$live"}' }
+    end, function(calls)
+      local delivered = {}
+      local relay = relay_module.new({ config_path = path, deliver = function(event)
+        delivered[#delivered + 1] = event
+        return { id = "M" .. #delivered }
+      end })
+      relay_module.instance = relay
+      local ok, err = pcall(function()
+        local sync = "/_matrix/client/v3/sync"
+        relay._response({ next_batch = "s0" }, sync)
+        relay._response({ next_batch = "s1", rooms = { join = { [HOME] = { timeline = { events = {
+          rx_msg("$lt", RX_ALLY, "@bot:example.org ping") } } } } } }, sync)
+        local mail = rx_mail_id(delivered, "$lt")
+        assert(mail, "a Butler's root post is delivered")
+        local queued, queue_error = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R1", text = "reply-one" })
+        assert(queued, "turn 2 of 2 (our mail reply to a Butler) is queued: " .. tostring(queue_error))
+        for _ = 1, 4 do
+          if rx_http_texts(calls, "reply-one") > 0 then break end
+          tick_timers(1)
+        end
+        local held = relay:state().reply_outbox["R1"]
+        assert(rx_http_texts(calls, "reply-one") == 1,
+          "the reply that reaches the limit is POSTED through matrix.reply, not refused after it was allowed; outbox error: "
+            .. tostring(held and held.last_error))
+        queued, queue_error = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R2", text = "reply-two" })
+        assert(queued == nil and tostring(queue_error):find("2 Butler-only turns", 1, true),
+          "the next mail reply is refused by the turn guard, got: " .. tostring(queue_error))
+        tick_timers(2)
+        assert(rx_http_texts(calls, "reply-two") == 0, "the refused reply is not posted")
+      end)
+      relay:stop()
+      if not ok then error(err, 0) end
+    end)
+  end)
+end
+
 local function test_rx_mail_reply_posts_per_hour()
   local dir, path = invite_fixture(OWNER, "posts_per_hour=1\n")
   rx_with_dir(dir, function() rx_fresh_hour(function()
@@ -3734,6 +3784,7 @@ rx_tests = {
   { "test_rx_untrusted_room_cap_summary_no_quarantine", test_rx_untrusted_room_cap_summary_no_quarantine },
   { "test_rx_untrusted_room_cap_summary_floor_10min", test_rx_untrusted_room_cap_summary_floor_10min },
   { "test_rx_mail_reply_turn_guard", test_rx_mail_reply_turn_guard },
+  { "test_rx_mail_reply_limit_turn_is_posted_through_matrix_reply", test_rx_mail_reply_limit_turn_is_posted_through_matrix_reply },
   { "test_rx_mail_reply_posts_per_hour", test_rx_mail_reply_posts_per_hour },
   { "test_rx_only_allowlisted_human_resumes_stopped_thread", test_rx_only_allowlisted_human_resumes_stopped_thread },
   { "test_rx_limit_config_defaults_and_fallback", test_rx_limit_config_defaults_and_fallback },
