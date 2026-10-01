@@ -2787,6 +2787,42 @@ fn butler_matrix_relay_persists_matrix_event_time_through_real_mail_delivery() {
         "relay-to-mail delivery must preserve metadata and strip control characters: {result}");
 }
 
+/// TEMPORARY (step 7d, issue 225), not for merge: two daemons started the way
+/// one cargo run starts them (own runtime dir, the inherited XDG_DATA_HOME).
+/// A delivers a Matrix mail to the root Butler; B starts afterwards and runs
+/// the quarantine test's mailbox check.
+#[test]
+fn butler_matrix_reply_quarantine_leak_repro_7d() {
+    let dir_a = scratch_dir("leak-7d-a");
+    let dir_b = scratch_dir("leak-7d-b");
+    let (_daemon_a, path_a) = butler_cli_test_daemon(&dir_a);
+    let a = eval(&path_a, r#"
+      local delivered = remuda._butler_inbox_delivery({from={host="matrix", alias="@alice:example.org",
+        session="@alice:example.org", kind="matrix", id="", leader=""}, to="butler", text="leak probe",
+        subject="Matrix", matrix={event_id="$leak-probe-7d", room_id="!r:example.org", sender="@alice:example.org"}})
+      return remuda._butler_bus.agents.butler.id .. " delivered=" .. tostring(delivered and delivered.id)
+    "#);
+    let (_daemon_b, path_b) = butler_cli_test_daemon(&dir_b);
+    let b = eval(&path_b, r#"
+      local root = remuda._butler_bus.agents.butler
+      local function leaked()
+        for _, id in ipairs(remuda._butler_mail.mailbox(root.id)) do
+          local message = remuda._butler_bus.messages[id]
+          if message and message.matrix and message.matrix.event_id ~= nil then return tostring(message.matrix.event_id) end
+        end
+        return "none"
+      end
+      local before = leaked()
+      remuda._butler_mail.unread(root.id) -- what the session list and the mail notice do on their timers
+      return root.id .. " before=" .. before .. " after=" .. leaked()
+    "#);
+    eprintln!("7d repro: daemon A: {a}; daemon B: {b}");
+    let id_a = a.split(' ').next().unwrap_or("");
+    assert!(b.starts_with(id_a), "the two daemons share one root Butler id: A {a}; B {b}");
+    assert!(b.ends_with("after=$leak-probe-7d"),
+        "daemon B loads the Matrix mail that daemon A delivered: A {a}; B {b}");
+}
+
 #[test]
 fn butler_matrix_reply_quarantines_rejected_events_for_operator_inspection() {
     let dir = scratch_dir("matrix-quarantine-red");
