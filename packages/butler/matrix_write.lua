@@ -281,7 +281,9 @@ local function operator_room(verb, opts, agent, callback)
     return nil
   end
   if not opts.room or opts.room == "" then
-    callback({ error = verb .. " requires room" })
+    local example = verb == "join" and "remuda butler matrix join #alias:server"
+      or "remuda butler matrix leave '!room:server'"
+    callback({ error = "matrix " .. verb .. " requires ROOM.\nNext: " .. example })
     return nil
   end
   return opts.room

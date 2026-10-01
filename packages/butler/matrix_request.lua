@@ -685,12 +685,14 @@ function matrix.request(args, on_done)
   if encoded_room then
     local path_room = percent_decode(encoded_room)
     if not path_room or conf.rooms[path_room] == nil then
-      report_error(done, "room is outside the configured Matrix allowlist")
+      report_error(done, "room is outside the configured Matrix allowlist.\n"
+        .. "Next: remuda butler matrix rooms lists allowed rooms; the owner adds one with remuda butler matrix join ROOM")
       return { cancel = function() end }
     end
   end
   if args.room ~= nil and conf.rooms[args.room] == nil then
-    report_error(done, "room is outside the configured Matrix allowlist")
+    report_error(done, "room is outside the configured Matrix allowlist.\n"
+      .. "Next: remuda butler matrix rooms lists allowed rooms; the owner adds one with remuda butler matrix join ROOM")
     return { cancel = function() end }
   end
   local body = args.body
@@ -759,7 +761,8 @@ function matrix.same_room(room, event_id, on_done)
     return { cancel = function() end }
   end
   if conf.rooms[room] == nil then
-    report_error(done, "room is outside the configured Matrix allowlist")
+    report_error(done, "room is outside the configured Matrix allowlist.\n"
+      .. "Next: remuda butler matrix rooms lists allowed rooms; the owner adds one with remuda butler matrix join ROOM")
     return { cancel = function() end }
   end
   local path = "/_matrix/client/v3/rooms/" .. percent_encode(room)
