@@ -116,6 +116,20 @@ remuda butler matrix [--json] leave ROOM
 remuda butler matrix [--json] quarantine [--id EVENT_ID]
 ```
 
+### Owner typed lines
+
+`remuda butler typed-lines on|off` controls plain owner lines (`!TEXT`), and
+`remuda butler shell-lines on|off` controls shell lines (`!!TEXT`). Shell lines
+require typed lines to be on; turning typed lines off also turns shell lines
+off. `remuda butler doctor` reports the current values as `Typed lines: on|off`
+and `Shell lines: on|off`. Both switches are off by default. When a switch is
+off, matching messages stay on the ordinary mail path.
+
+An enabled line must come from an allowlisted owner in a live Matrix sync, be
+no more than five minutes old, contain one line of at most 2000 bytes, and fit
+the limit of 10 lines per 10 minutes. the switch verbs are for a person at the
+machine; an agent is refused.
+
 Root posts are delivered from anyone. In the HOME room, every thread reply is
 delivered whether or not you follow it. In other rooms, thread replies are
 delivered only in followed threads or when a message mentions the Butler;
