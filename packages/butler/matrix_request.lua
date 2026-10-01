@@ -41,6 +41,11 @@ local function shell_quote(value)
 end
 matrix.shell_quote = shell_quote
 
+function matrix.shown_event_id(id)
+  if type(id) == "string" and id:match("^%$[A-Za-z0-9_-]+$") then return id end
+  return "(id not shown)"
+end
+
 local function format_character(cp)
   return cp == 0x00ad or cp == 0x061c or (cp >= 0x0600 and cp <= 0x0605)
     or cp == 0x06dd or cp == 0x070f or (cp >= 0x0890 and cp <= 0x0891)
@@ -263,6 +268,18 @@ local function read_config(path)
       or untrusted_per_room_hour % 1 ~= 0 then
     untrusted_per_room_hour = 20
   end
+  local posts_per_hour = tonumber(opts.posts_per_hour)
+  if not posts_per_hour or posts_per_hour ~= posts_per_hour
+      or posts_per_hour < 1 or posts_per_hour == math.huge
+      or posts_per_hour % 1 ~= 0 then
+    posts_per_hour = 30
+  end
+  local b2b_max_turns = tonumber(opts.b2b_max_turns)
+  if not b2b_max_turns or b2b_max_turns ~= b2b_max_turns
+      or b2b_max_turns < 1 or b2b_max_turns == math.huge
+      or b2b_max_turns % 1 ~= 0 then
+    b2b_max_turns = 6
+  end
   local ca_file, pin_hex = opts.ca_file, opts.pin_sha256
   if ca_file == "" then ca_file = nil end
   if pin_hex == "" then pin_hex = nil end
@@ -320,11 +337,43 @@ local function read_config(path)
     self_mxid = lines[3], allowed_senders = allowed,
     butler_senders = butler_senders,
     untrusted_per_room_hour = untrusted_per_room_hour,
+    posts_per_hour = posts_per_hour,
+    b2b_max_turns = b2b_max_turns,
     use_messages = mode == "1" or mode == "true" or mode == "messages" or mode == "fallback",
     timeout_ms = math.max(1, timeout), ca_file = ca_file, pin = pin,
   }
 end
 matrix.read_config = read_config
+
+local post_times = {}
+
+-- ponytail: in memory, a restart resets the hour; persist it if a restart loop shows up
+function matrix.take_post_slot(config_path)
+  local now = os.time()
+  local cutoff = now - 3600
+  for index = #post_times, 1, -1 do
+    if post_times[index] <= cutoff then table.remove(post_times, index) end
+  end
+  if not config_path then
+    local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths or {}
+    config_path = paths.config_path
+  end
+  local config = config_path and read_config(config_path)
+  local limit = type(config) == "table" and config.posts_per_hour or 30
+  if #post_times >= limit then
+    local oldest
+    for _, posted_at in ipairs(post_times) do
+      if not oldest or posted_at < oldest then oldest = posted_at end
+    end
+    local until_text = os.date("!%H:%MZ", oldest + 3600 + 59)
+    local relay = matrix.relay and matrix.relay.instance
+    if relay and type(relay.post_cap_hit) == "function" then relay:post_cap_hit(limit, until_text) end
+    return nil, "Not sent: Matrix post limit reached (" .. tostring(limit) .. " per hour). Next: wait until "
+      .. until_text
+  end
+  post_times[#post_times + 1] = now
+  return true
+end
 
 local function valid_room_id(room)
   return type(room) == "string" and room:match("^!%S+:%S+$") ~= nil
