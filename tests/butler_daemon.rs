@@ -1022,12 +1022,17 @@ impl Drop for ProcessPidGuard {
 /// daemon started in the same `dir` (a restart test) gets the same home.
 fn own_data_home(dir: &Path) -> PathBuf {
     let data_home = dir.join("data");
-    let _ = std::fs::create_dir_all(data_home.join("remuda"));
+    std::fs::create_dir_all(data_home.join("remuda"))
+        .unwrap_or_else(|err| panic!("create data home {data_home:?}: {err}"));
     if let Some(install) = std::env::var_os("XDG_DATA_HOME") {
-        let _ = std::os::unix::fs::symlink(
-            PathBuf::from(install).join("remuda/mods"),
-            data_home.join("remuda/mods"),
-        );
+        let link = data_home.join("remuda/mods");
+        // A restart in the same scratch dir finds the link already there.
+        if let Err(err) = std::os::unix::fs::symlink(PathBuf::from(install).join("remuda/mods"), &link) {
+            assert!(
+                err.kind() == std::io::ErrorKind::AlreadyExists,
+                "link the Butler mod into {link:?}: {err}"
+            );
+        }
     }
     data_home
 }
@@ -1037,7 +1042,8 @@ fn own_data_home(dir: &Path) -> PathBuf {
 /// Butler id), one inbox file and one config path.
 fn own_homes(cmd: &mut std::process::Command, dir: &Path) {
     let config_home = dir.join("config");
-    let _ = std::fs::create_dir_all(&config_home);
+    std::fs::create_dir_all(&config_home)
+        .unwrap_or_else(|err| panic!("create config home {config_home:?}: {err}"));
     cmd.env("XDG_DATA_HOME", own_data_home(dir))
         .env("XDG_CONFIG_HOME", config_home);
 }
