@@ -11,6 +11,7 @@ end
 assert(root, "set REMUDA_BUTLER_REPO_ROOT or run this file by absolute path")
 local installer_path = root .. "/install/install-butler.sh"
 local main_path = root .. "/packages/butler/paths.lua"
+local system_path = root .. "/packages/butler/system.lua"
 local core_root = os.getenv("REMUDA_CORE_ROOT")
 local daemon_path = core_root and (core_root:gsub("^~/", (os.getenv("HOME") or "") .. "/") .. "/native/src/daemon.rs")
 
@@ -52,8 +53,8 @@ local function failed()
   return false
 end
 
-local installer, main = read(installer_path), read(main_path)
-for _, item in ipairs({ { installer_path, installer }, { main_path, main } }) do
+local installer, main, system_source = read(installer_path), read(main_path), read(system_path)
+for _, item in ipairs({ { installer_path, installer }, { main_path, main }, { system_path, system_source } }) do
   if not item[2] then
     io.stderr:write("missing ", item[1]:sub(#root + 2), "\n")
     return false
@@ -68,7 +69,7 @@ if sh_start then
   if value_end then sh_fallback = installer:sub(value_start, value_end - 1) end
 end
 local sh_segments = unique_matches(installer, '%$config_home(/remuda/butler/[%w_]+)')
-local lua_fallback = main:match('os%.getenv%("HOME"%).-home%s*%.%.%s*"([^"]*)"')
+local lua_fallback = main:match('local home = system%.home%(%).-return home%s*%.%.%s*"([^"]*)"')
 local lua_join = main:match('config_home%s*%.%.%s*"(/remuda/butler/)"%s*%.%.%s*filename')
 local lua_filenames = {}
 for filename in main:gmatch('resolve_path%("REMUDA_BUTLER_[%w_]+",%s*"(%w+)"') do
@@ -83,13 +84,17 @@ if not next(sh_segments) then
   problems[#problems + 1] = 'install-butler.sh: found no $config_home/remuda/butler/<name> segment -- parser or convention changed'
 end
 if not lua_fallback then
-  problems[#problems + 1] = "main.lua: could not find default_config_home()'s HOME fallback -- parser or convention changed"
+  problems[#problems + 1] = "paths.lua: could not find default_config_home()'s system.home() fallback -- parser or convention changed"
+end
+if not system_source:find('os.getenv("HOME")', 1, true)
+    or not system_source:find('os.getenv("USERPROFILE")', 1, true) then
+  problems[#problems + 1] = "system.lua: system.home() must resolve HOME and USERPROFILE"
 end
 if not lua_join then
-  problems[#problems + 1] = 'main.lua: could not find resolve_path()\'s config_home .. "/remuda/butler/" .. filename join -- parser or convention changed'
+  problems[#problems + 1] = 'paths.lua: could not find resolve_path()\'s config_home .. "/remuda/butler/" .. filename join -- parser or convention changed'
 end
 if not next(lua_filenames) then
-  problems[#problems + 1] = 'main.lua: found no resolve_path(...) call site naming a filename -- parser or convention changed'
+  problems[#problems + 1] = 'paths.lua: found no resolve_path(...) call site naming a filename -- parser or convention changed'
 end
 if #problems > 0 then
   fail(problems, "could not extract the path convention from one or both sides:")
@@ -99,18 +104,18 @@ end
 local lua_segments = {}
 for filename in pairs(lua_filenames) do lua_segments[lua_join .. filename] = true end
 if sh_fallback ~= lua_fallback then
-  problems[#problems + 1] = "HOME fallback diverged: install-butler.sh uses $HOME" .. sh_fallback .. ", main.lua's default_config_home() uses $HOME" .. lua_fallback
+  problems[#problems + 1] = "config-home suffix diverged: install-butler.sh uses $HOME" .. sh_fallback .. ", paths.lua's default_config_home() uses system.home()" .. lua_fallback
 end
 local sh_list, lua_list = sorted(sh_segments), sorted(lua_segments)
 if table.concat(sh_list, "\0") ~= table.concat(lua_list, "\0") then
-  problems[#problems + 1] = "remuda/butler path segments diverged: install-butler.sh has " .. show(sh_list) .. ", main.lua has " .. show(lua_list)
+  problems[#problems + 1] = "remuda/butler path segments diverged: install-butler.sh has " .. show(sh_list) .. ", paths.lua has " .. show(lua_list)
 end
 if #problems > 0 then
-  fail(problems, "install-butler.sh and main.lua no longer agree on the butler path convention:")
-  io.stderr:write("\nmain.lua's default lookup and install-butler.sh's canonical-copy target must resolve to the same path, or the daemon will never find what the installer wrote there -- fix whichever side changed.\n")
+  fail(problems, "install-butler.sh and paths.lua no longer agree on the Butler path convention:")
+  io.stderr:write("\npaths.lua's default lookup and install-butler.sh's canonical-copy target must resolve to the same path below their home directory, or the daemon will never find what the installer wrote there -- fix whichever side changed.\n")
   return failed()
 end
-io.stdout:write("ok — install-butler.sh and main.lua agree: $HOME", sh_fallback, " fallback, segments ", show(sh_list), "\n")
+io.stdout:write("ok — install-butler.sh and paths.lua agree: system.home()", sh_fallback, " fallback, segments ", show(sh_list), "\n")
 
 if not daemon_path or not read(daemon_path) then
   io.stdout:write("ok — core daemon loader check skipped; set REMUDA_CORE_ROOT to a Remuda checkout to enable it\n")
