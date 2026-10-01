@@ -682,6 +682,7 @@ function relay.new(options)
   local context_fetching, context_fetch_handles = {}, {}
   local reply_retry_timers, reply_in_flight = {}, {}
   local untrusted_receive_times = {}
+  local typed_line_refusal_at
   -- ponytail: in memory, a restart may repeat the line once
   local post_cap_notice_at
   -- ponytail: in memory, a restart resets the floor and drops a pending count
@@ -1324,6 +1325,9 @@ function relay.new(options)
     if type(thread_root) ~= "string" or thread_root == "" or type(event.event_id) ~= "string" or event.event_id == "" then
       return false
     end
+    local now = os.time()
+    if typed_line_refusal_at and now - typed_line_refusal_at < 60 then return false end
+    typed_line_refusal_at = now
     local body = encode({ msgtype = "m.notice", body = text,
       ["m.relates_to"] = { rel_type = "m.thread", event_id = thread_root,
         ["m.in_reply_to"] = { event_id = event.event_id } },

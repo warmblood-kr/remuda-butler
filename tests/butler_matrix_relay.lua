@@ -217,6 +217,30 @@ local function test_shell_line_uses_selected_kind_for_root()
   end)
 end
 
+local function test_typed_line_refusals_are_rate_limited()
+  with_typed_line_stubs(function(typed)
+    local dir, config_path = fixture("typed_lines=true\nshell_lines=true\n")
+    local client = scripted_client()
+    local relay = relay_module.new({ config_path = config_path, matrix = client, deliver = function() return true end })
+    relay:start()
+    client:complete(1, { json = { next_batch = "s0" } })
+    local stale_time = (os.time() - 301) * 1000
+    local first, second = typed_line_event("$stale-one", "!hello"), typed_line_event("$stale-two", "!hello")
+    first.origin_server_ts, second.origin_server_ts = stale_time, stale_time
+    client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+      ["!room:example.org"] = { timeline = { events = { first, second } } },
+    } } } })
+    local refusal_lines = 0
+    for _, request in ipairs(client.requests) do
+      if tostring(request.path):find("/send/m.room.message/", 1, true) then refusal_lines = refusal_lines + 1 end
+    end
+    assert(refusal_lines == 1, "only one refusal thread line should be sent within a 60-second window")
+    assert(#typed == 0, "refused stale lines must not be typed")
+    relay:stop()
+    cleanup_fixture(dir, config_path)
+  end)
+end
+
 local function test_baseline_resume_filters_and_envelope()
   local dir, config_path = fixture()
   local client, delivered = scripted_client(), {}
@@ -4831,6 +4855,7 @@ rx_tests = {
   { "test_typed_line_switches_and_non_candidates", test_typed_line_switches_and_non_candidates },
   { "test_typed_line_replay_after_restart_and_history_are_not_typed", test_typed_line_replay_after_restart_and_history_are_not_typed },
   { "test_shell_line_uses_selected_kind_for_root", test_shell_line_uses_selected_kind_for_root },
+  { "test_typed_line_refusals_are_rate_limited", test_typed_line_refusals_are_rate_limited },
   { "test_rx_stranger_root_marked_untrusted", test_rx_stranger_root_marked_untrusted },
   { "test_rx_agent_root_without_mention", test_rx_agent_root_without_mention },
   { "test_rx_prefix_stranger_gets_marker", test_rx_prefix_stranger_gets_marker },
