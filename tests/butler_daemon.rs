@@ -10314,7 +10314,8 @@ fn butler_quota_real_codex_draft_is_not_typed_and_empty_composer_is() {
 log=$1
 composer=$2
 paint() {
-  printf 'Account: Pro\nWeekly limit: [x] 40%% left\n  (resets 2:30 AM on 4 Oct)\n\n%s\n\n  GPT-6-Luna default · ~/quota\n' "$composer"
+  # Like codex: one composer line with the cursor left on it, a footer below.
+  printf '\r\033[JAccount: Pro\nWeekly limit: [x] 40%% left\n  (resets 2:30 AM on 4 Oct)\n\n%s\n\n  GPT-6-Luna default · ~/quota\n\033[3A' "$composer"
 }
 paint
 while IFS= read -r line; do
