@@ -309,6 +309,37 @@ local function test_typed_line_persist_failure_fails_closed()
   end)
 end
 
+local function test_typed_line_return_failure_warns_text_may_remain()
+  with_typed_line_stubs(function(typed, keys)
+    local normal_key = remuda.key
+    remuda.key = function(session, key)
+      keys[#keys + 1] = { session = session, key = key }
+      return false
+    end
+    local dir, config_path = fixture("typed_lines=true\nshell_lines=true\n")
+    local client = scripted_client()
+    local relay = relay_module.new({ config_path = config_path, matrix = client, deliver = function() return true end })
+    relay:start()
+    client:complete(1, { json = { next_batch = "s0" } })
+    client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+      ["!room:example.org"] = { timeline = { events = { typed_line_event("$return-failure", "!hello") } } },
+    } } } })
+    assert(#typed == 1 and typed[1].text == "hello", "text should be entered before the failing Return")
+    assert(#keys == 1 and keys[1].key == "RET", "the relay should attempt Return once")
+    local refusal
+    for _, request in ipairs(client.requests) do
+      if tostring(request.path):find("/send/m.room.message/", 1, true) then refusal = matrix.decode_json(request.body) end
+    end
+    assert(type(refusal) == "table" and type(refusal.body) == "string"
+      and refusal.body:find("may be sitting in the butler pane", 1, true)
+      and not refusal.body:find("Not typed", 1, true),
+      "a Return failure must warn that text may remain in the pane")
+    relay:stop()
+    cleanup_fixture(dir, config_path)
+    remuda.key = normal_key
+  end)
+end
+
 local function test_baseline_resume_filters_and_envelope()
   local dir, config_path = fixture()
   local client, delivered = scripted_client(), {}
@@ -4926,6 +4957,7 @@ rx_tests = {
   { "test_typed_line_refusals_are_rate_limited", test_typed_line_refusals_are_rate_limited },
   { "test_typed_line_gate_error_is_contained_and_processed", test_typed_line_gate_error_is_contained_and_processed },
   { "test_typed_line_persist_failure_fails_closed", test_typed_line_persist_failure_fails_closed },
+  { "test_typed_line_return_failure_warns_text_may_remain", test_typed_line_return_failure_warns_text_may_remain },
   { "test_rx_stranger_root_marked_untrusted", test_rx_stranger_root_marked_untrusted },
   { "test_rx_agent_root_without_mention", test_rx_agent_root_without_mention },
   { "test_rx_prefix_stranger_gets_marker", test_rx_prefix_stranger_gets_marker },
