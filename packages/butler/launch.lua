@@ -105,7 +105,13 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
     local message = table.concat(launch_failure_lines(attempts), "\n")
     bus.launch_failures = bus.launch_failures or {}
     bus.launch_failures[name] = { attempts = attempts, error = message }
-    _butler_session_trace("launch_failed", name .. ": " .. message:gsub("\n", "; "))
+    -- The private trace keeps the internal reason and detail (one entry, one
+    -- line); the user-facing message above never shows them.
+    local traced = {}
+    for _, a in ipairs(attempts or {}) do
+      traced[#traced + 1] = tostring(a.kind) .. ": " .. tostring(a.reason) .. " (" .. tostring(a.detail or "") .. ")"
+    end
+    _butler_session_trace("launch_failed", name .. ": " .. table.concat(traced, "; "):gsub("%c+", " "))
     return message
   end
   kind = selected_kind
