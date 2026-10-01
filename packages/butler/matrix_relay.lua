@@ -322,7 +322,8 @@ local function trim_invite_dedupe(map, now)
 end
 
 local function subscribe(state, room_id, thread_id, mail_id)
-  if type(room_id) ~= "string" or type(thread_id) ~= "string" or thread_id == "" then return false end
+  if type(room_id) ~= "string" or type(thread_id) ~= "string" or thread_id:sub(1, 1) ~= "$"
+      or #thread_id > 255 then return false end
   local subscriptions = state.subscriptions[room_id]
   if not subscriptions or subscriptions[thread_id] == nil then
     local count = 0
@@ -1107,7 +1108,7 @@ function relay.new(options)
             references = references and { references } or nil,
             from_agent = is_agent,
             trusted = trusted,
-            subscribe_thread = thread_root ~= nil and is_mention,
+            subscribe_thread = thread_root ~= nil and is_mention and trusted,
             thread_id = thread_id,
           }
           added[#added + 1] = ev.event_id
