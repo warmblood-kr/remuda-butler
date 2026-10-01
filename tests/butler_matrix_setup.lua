@@ -629,6 +629,10 @@ return function(matrix, pinned_hostname)
     assert(#line_specs == 3 and not resolved and line_specs[3].preface:find("\n  Owner: @aaaa", 1, true)
       and not line_specs[3].preface:find(long_owner, 1, true),
       "a very long value is cut to fit a preface line: " .. tostring(resolved and resolved.stderr))
+    -- The cut is visible: what the user confirms must not look complete.
+    assert(line_specs[3].preface:match("\n(  Owner: @a+%.%.%.)\n") and #line_specs[3].preface:match("\n(  Owner: [^\n]*)") == 250
+      and line_specs[1].label == "Matrix homeserver URL" and not line_specs[3].preface:find("Homeserver: [^\n]*%.%.%.\n"),
+      "a cut summary line ends with ... inside the limit, and an uncut line has no mark")
     line_specs[3].callback("N", nil)
     -- A core without preface (older daemons ignore it silently) keeps the
     -- summary in the label, as before.
@@ -941,6 +945,8 @@ return function(matrix, pinned_hostname)
       and prompt_specs[1].label:find("from its admin (hidden). This is not an access token", 1, true)
       and #prompt_specs[1].label + #matrix.REJECTED_REGISTRATION_TOKEN + 1 <= 256,
       "a long homeserver is shortened in the hidden token prompt: " .. tostring(resolved and resolved.stderr))
+    assert(prompt_specs[1].label:find("^Registration token for http://a+%.b+%.%.%., from its admin"),
+      "the shortened homeserver ends with ... : " .. prompt_specs[1].label)
   end
 
   requests, resolved, prompt_specs = {}, nil, {}
