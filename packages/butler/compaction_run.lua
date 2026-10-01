@@ -689,13 +689,17 @@ function remuda._butler_compaction_execute(session_name, force)
     end
     wait_for(id, function(screen)
       if model_confirm_options_visible(screen) or model_confirm_signature(screen) then return false end
-      if remuda._butler_prompt_is_empty(agent.kind, screen) ~= "EMPTY" then return false end
+      local checked, composer = pcall(remuda._butler_prompt_is_empty, agent.kind, screen)
+      if not checked or composer ~= "EMPTY" then return false end
       if status_matches() then by = "status"
       elseif before ~= typed and claude_settings_model() == typed then by = "settings"
       else return false end
       return true
     end, function(screen) traced("confirmed"); action(screen) end, completion_timeout,
-    function() traced("timeout"); fail("timed out waiting for " .. id) end)
+    function(screen)
+      traced("timeout")
+      fail(model_timeout_reason("timed out waiting for " .. id, session_name, screen))
+    end)
   end
   local function restore_model(event, after_restore)
     if not remuda._butler_compaction_valid_model(prior_model) then
