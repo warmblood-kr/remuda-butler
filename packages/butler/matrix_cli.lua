@@ -655,7 +655,7 @@ function matrix.cli(args, agent)
     if not ok then return resolve_local(1, "", tostring(changed) .. "\n") end
     if verb == "follow" and not changed then
       local next_room = options.room and ("--room " .. shell_quote(options.room) .. " ") or ""
-      local message = "Follow limit reached in " .. terminal_safe(room) .. " (50000). Next: remuda butler matrix "
+      local message = "Follow limit reached (5000 in total). Next: remuda butler matrix "
         .. next_room .. "unfollow " .. shell_quote(terminal_safe(options.event_id))
       if options.json then
         local encoded, encode_error = matrix.encode_json({ followed = false, room = room, thread = thread })

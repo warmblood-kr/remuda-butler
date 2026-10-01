@@ -17,7 +17,7 @@ local MAX_QUARANTINE_ITEMS = 200
 local MAX_QUARANTINE_PREVIEW_BYTES = 1024
 local QUARANTINE_TTL_SECONDS = 30 * 24 * 60 * 60
 local MAX_MAIL_ROUTES = 5000
-local MAX_THREAD_SUBSCRIPTIONS = 50000
+local MAX_THREAD_SUBSCRIPTIONS = 5000
 local MAX_REPLY_OUTBOX = 1000
 local MAX_REPLY_RESULTS = 5000
 local MAX_MAIL_REPLY_BYTES = 64 * 1024
@@ -297,17 +297,24 @@ end
 
 local function subscribe(state, room_id, thread_id, mail_id)
   if type(room_id) ~= "string" or type(thread_id) ~= "string" or thread_id == "" then return false end
-  local subscriptions = state.subscriptions[room_id] or json.object({})
-  state.subscriptions[room_id] = subscriptions
-  if subscriptions[thread_id] == nil then
+  local subscriptions = state.subscriptions[room_id]
+  if not subscriptions or subscriptions[thread_id] == nil then
     local count = 0
-    for _ in pairs(subscriptions) do count = count + 1 end
+    for _, room_subscriptions in pairs(state.subscriptions) do
+      if type(room_subscriptions) == "table" then
+        for _ in pairs(room_subscriptions) do count = count + 1 end
+      end
+    end
     if count >= MAX_THREAD_SUBSCRIPTIONS then
-      warn_once("thread-subscription-limit", room_id,
-        "butler Matrix thread follow limit reached in " .. terminal_safe_field(room_id, 512)
-          .. " (" .. tostring(MAX_THREAD_SUBSCRIPTIONS) .. "); refusing new follow")
+      warn_once("thread-subscription-limit", "total",
+        "butler Matrix thread follow limit reached (" .. tostring(MAX_THREAD_SUBSCRIPTIONS)
+          .. " in total); refusing new follow")
       return false
     end
+  end
+  if not subscriptions then
+    subscriptions = json.object({})
+    state.subscriptions[room_id] = subscriptions
   end
   subscriptions[thread_id] = { mail_id = mail_id,
     created_at = os.date("!%Y-%m-%dT%H:%M:%SZ") }
