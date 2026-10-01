@@ -9738,6 +9738,41 @@ fn butler_quota_reads_codex_status_from_idle_member() {
 }
 
 #[test]
+fn butler_quota_ignores_a_stale_status_card() {
+    let dir = scratch_dir("butler-quota-stale-codex");
+    let bin = doctor_stub_dir(&dir);
+    doctor_write_stub(&bin, "claude", r#"{"loggedIn":true,"authMethod":"api_key"}"#, 0);
+    doctor_write_stub(&bin, "codex", "Logged in using ChatGPT", 0);
+    let path_env = bin.to_str().expect("PATH is UTF-8");
+    let (_daemon, path) = butler_doctor_test_daemon(&dir, path_env);
+    let stale = lua_raw_string(include_str!("fixtures/quota-codex-status-0.159.3.txt"));
+    let fresh = lua_raw_string(&include_str!("fixtures/quota-codex-status-0.159.3.txt")
+        .replace("40% left", "20% left")
+        .replace("100% left", "75% left"));
+    eval(&path, &format!(r#"
+      remuda._butler_bus.agents["quota-stale-codex"] = {{
+        id="quota-stale-codex-id", alias="quota-stale-codex", kind="codex", session_name="quota-stale-codex"
+      }}
+      remuda.butler.is_idle = function(alias) return alias == "quota-stale-codex" end
+      remuda._butler_notify_policy = function() return true end
+      remuda._butler_prompt_is_empty = function() return "EMPTY" end
+      remuda._quota_screen = {stale}
+      remuda._quota_typed = {{}}
+      remuda.capture = function() return remuda._quota_screen end
+      remuda.type_text = function(name, text)
+        table.insert(remuda._quota_typed, name .. "|" .. text)
+        if name == "quota-stale-codex" and text == "/status" then remuda._quota_screen = {fresh} end
+      end
+    "#));
+    let out = remuda_timed(&dir, &["-s", "s", "butler", "quota"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(eval(&path, "return table.concat(remuda._quota_typed, '\\n')"), "quota-stale-codex|/status");
+    assert_quota_utc_limit(&stdout, "Weekly limit", 80);
+    assert_quota_utc_limit(&stdout, "Luna Reserve Weekly limit", 25);
+}
+
+#[test]
 fn butler_quota_does_not_type_into_a_draft() {
     let dir = scratch_dir("butler-quota-draft");
     let bin = doctor_stub_dir(&dir);
