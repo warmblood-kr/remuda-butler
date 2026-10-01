@@ -1,9 +1,6 @@
 -- L2 Matrix write composites over remuda.butler.matrix.request.
 local matrix = assert(remuda.butler and remuda.butler.matrix, "Matrix request word is unavailable")
 local approval = assert(remuda.butler.approval, "load butler/approval before butler/matrix_write")
--- Trust words are bound at load (main.lua execs matrix_request before
--- this file), so a later redefinition of the public entry cannot change them.
-local is_agent_mxid = matrix.is_agent_mxid
 
 local MAX_CHUNK_BYTES = 4000
 local MAX_HTML_BYTES = 30000 -- an event is capped at 65536 bytes; markup can expand a chunk ~9x
@@ -32,6 +29,10 @@ local function error_result(callback, message)
   return { cancel = function() end }
 end
 
+local function terminal_safe(value)
+  return tostring(value or ""):gsub("[%c]", " "):gsub("\194[\128-\159]", " ")
+end
+
 local function configured_room(opts, callback)
   local room = opts and opts.room
   if not room or room == "" then room = matrix.configured_room() end
@@ -45,14 +46,6 @@ end
 local function next_txn()
   txn_counter = txn_counter + 1
   return "t" .. tostring(os.time()) .. "_" .. process_tag .. "_" .. tostring(txn_counter)
-end
-
-local function mentions_agent(text)
-  if type(text) ~= "string" or type(is_agent_mxid) ~= "function" then return false end
-  for mentioned in text:gmatch("@[%w._=/%-]+:[%w.%-]+") do
-    if is_agent_mxid(mentioned) then return true end
-  end
-  return false
 end
 
 local function split_utf8(text)
@@ -123,7 +116,11 @@ function matrix.send(opts, on_done)
   local done = once(on_done)
   local room = configured_room(opts, done)
   if not room then return { cancel = function() end } end
-  if mentions_agent(opts.text) then return error_result(done, "Butler-to-Butler sends are disabled") end
+  if type(opts.text) ~= "string" or opts.text == "" then
+    return error_result(done, "message text must not be empty")
+  end
+  local slot, slot_error = matrix.take_post_slot()
+  if not slot then return error_result(done, slot_error) end
   return send_chunks(room, opts.text, nil, done, nil, opts.plain == true)
 end
 
@@ -141,26 +138,66 @@ local function same_room_then(room, event_id, on_done, action)
   return { cancel = function() if current then current:cancel() end end }
 end
 
+function matrix.reply_relay()
+  local relay = matrix.relay and matrix.relay.instance
+  local required_relay_methods = {
+    "can_reply_to", "route_for_event", "thread_root_for_event", "b2b_stopped",
+    "b2b_turn_limit", "note_own_turn", "post_cap_hit",
+  }
+  if type(relay) == "table" then
+    for _, method in ipairs(required_relay_methods) do
+      if type(relay[method]) ~= "function" then relay = nil; break end
+    end
+  else
+    relay = nil
+  end
+  if relay then return relay end
+  return nil, "Matrix relay is not running or is from an older load; event sender cannot be verified"
+end
+
 function matrix.reply(opts, on_done)
   opts = opts or {}
   local done = once(on_done)
+  local relay, relay_error = matrix.reply_relay()
+  if not relay then return error_result(done, relay_error) end
   local room = configured_room(opts, done)
   if not room then return { cancel = function() end } end
   if type(opts.text) ~= "string" or opts.text == "" then
     return error_result(done, "message text must not be empty")
   end
-  if mentions_agent(opts.text) then return error_result(done, "Butler-to-Butler sends are disabled") end
-  local relay = matrix.relay and matrix.relay.instance
-  if not relay or type(relay.can_reply_to) ~= "function" then
-    return error_result(done, "Matrix relay is not running; event sender cannot be verified")
-  end
   if not relay:can_reply_to(opts.event_id) then
-    return error_result(done, "Butler-to-Butler replies are disabled")
+    return error_result(done, "Reply not sent: event " .. terminal_safe(opts.event_id)
+      .. " was not delivered to this Butler as mail, so its sender cannot be verified.\n"
+      .. "Next: remuda butler inbox (you can only reply to events listed there)")
+  end
+  local route = relay:route_for_event(opts.event_id)
+  local allowlisted_human_reply = route ~= nil and route.allowlisted_human == true
+  local root = relay:thread_root_for_event(opts.event_id)
+  local safe_room = terminal_safe(room)
+  local shown_root = matrix.shown_event_id(root or opts.event_id)
+  local root_is_shown = shown_root ~= "(id not shown)"
+  local function stopped_error()
+    local next_step = "Next: remuda butler matrix --room " .. matrix.shell_quote(safe_room)
+      .. (root_is_shown and (" thread " .. matrix.shell_quote(shown_root)) or " history")
+    return "Reply not sent: stopped replying in thread " .. shown_root .. " (" .. safe_room .. "): "
+      .. tostring(relay:b2b_turn_limit())
+      .. " Butler-only turns. A reply in that thread from a person on the allowlist resumes it.\n"
+      .. next_step
+  end
+  if not opts.from_outbox and relay:b2b_stopped(room, root) then
+    return error_result(done, stopped_error())
   end
   return same_room_then(room, opts.event_id, done, function(reply_done)
-    local root = type(opts.thread_root) == "string" and opts.thread_root ~= ""
+    if not opts.from_outbox then
+      if not allowlisted_human_reply then
+        local slot, slot_error = matrix.take_post_slot()
+        if not slot then return error_result(reply_done, slot_error) end
+      end
+      relay:note_own_turn(room, root)
+    end
+    local relation_root = type(opts.thread_root) == "string" and opts.thread_root ~= ""
       and opts.thread_root or opts.event_id
-    local relation = { rel_type = "m.thread", event_id = root,
+    local relation = { rel_type = "m.thread", event_id = relation_root,
       ["m.in_reply_to"] = { event_id = opts.event_id } }
     return send_chunks(room, opts.text, relation, reply_done, opts.txn_id)
   end)

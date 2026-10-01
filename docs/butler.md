@@ -124,7 +124,66 @@ Non-allowlisted senders arrive marked as information with `trusted=false`.
 Use `follow EVENT_ID` and `unfollow EVENT_ID` to manage subscriptions; the
 relay allows up to 5000 followed threads in total. Accepted messages from
 non-allowlisted senders are limited per room in a rolling hour by
-`untrusted_per_room_hour` (default 20).
+`untrusted_per_room_hour` (default 20). Once the cap is reached, those messages
+are left undelivered, rather than quarantined. The HOME room receives a summary
+with the count and a history command. The first summary for a room is immediate;
+after that, at most one is posted per room every 10 minutes, and capped messages
+accumulate in its count until the next summary.
+
+Configure `b2b_max_turns` (default 6) for consecutive Butler-only turns in one
+thread, `posts_per_hour` (default 30) for posts that are not a reply to a person
+on the allowlist, and
+`untrusted_per_room_hour` (default 20) for non-allowlisted messages delivered
+from each room. The Butler's own replies count as turns. These counters are held
+in memory and reset when the daemon restarts. `b2b_max_turns` and
+`untrusted_per_room_hour` are read when the relay starts, so restart the relay
+after changing either setting; `posts_per_hour` is read for every post. HOME
+notices, `upload`, and `react` do not take a post slot.
+
+When the Butler reaches the turn limit, it posts this line to HOME and stops
+replying in that thread until an allowlisted human replies:
+
+```text
+Stopped replying in thread ROOT (ROOM): N Butler-only turns. A reply in that thread from a person on the allowlist resumes it.
+```
+
+The reply refusal includes a command with shell-quoted room and thread IDs:
+
+A thread root that could be parsed as a link is printed as `(id not shown)`, and
+the refusal points to room history instead of naming that thread.
+
+```text
+Reply not sent: stopped replying in thread ROOT (ROOM): N Butler-only turns. A reply in that thread from a person on the allowlist resumes it.
+Next: remuda butler matrix --room 'ROOM' thread '$ROOT'
+```
+
+When the post limit is reached, the refusal says:
+
+```text
+Not sent: Matrix post limit reached (N per hour). Next: wait until HH:MMZ
+```
+
+The first refusal in an hour also posts one line to HOME; further refusals in
+that hour do not post another:
+
+```text
+Matrix post limit reached (N per hour); posts other than replies to people on the allowlist are refused until HH:MMZ. Next: remuda butler matrix history
+```
+
+A reply without a delivered mail route is refused with:
+
+```text
+Reply not sent: event EVENT_ID was not delivered to this Butler as mail, so its sender cannot be verified.
+Next: remuda butler inbox (you can only reply to events listed there)
+```
+
+The HOME summary distinguishes a single event from multiple events and
+shell-quotes the room ID in its `Next:` command:
+
+```text
+1 message from non-allowlisted senders in ROOM was not passed to the Butler (hourly rate cap). Next: remuda butler matrix --room 'ROOM' history
+N messages from non-allowlisted senders in ROOM were not passed to the Butler (hourly rate cap). Next: remuda butler matrix --room 'ROOM' history
+```
 
 `remuda butler matrix setup --default` writes the token and config to the
 running Butler's resolved paths, then starts or replaces only its Matrix
@@ -227,11 +286,15 @@ file contains:
    `rooms=open` or `rooms=allowlist` selects invite behavior, with allowlist as
    the default; repeat `deny_room=ROOM_ID`, `deny_room=#alias:server`, or
    `deny_server=host` lines to refuse matching invites;
+   `b2b_max_turns=N` sets the consecutive Butler-only thread turn limit
+   (default 6); `posts_per_hour=N` caps posts that are not a reply to a person
+   on the allowlist (default 30);
+   `untrusted_per_room_hour=N` sets the per-room non-allowlisted message limit
+   (default 20);
    `ca_file=PATH` trusts a custom CA, and `pin_sha256=HEX` pins the
    homeserver's leaf key. `butler_senders=@id:server,...` remains accepted for
    older accounts that do not use the prefix convention; `agent-` and
-   `butler-` MXID prefixes identify agent accounts and prevent
-   Butler-to-Butler reply and send loops.
+   `butler-` MXID prefixes identify agent accounts.
 
 `pin_sha256` is the 64-character hexadecimal SHA-256 digest of the leaf
 certificate's SubjectPublicKeyInfo (SPKI), not the certificate file. Compute
@@ -288,8 +351,8 @@ in the damaged state cannot be recovered.
 records the returned event ID against the originating Butler mail. A human
 replying in that thread needs no mention: the event-to-mail correlation routes
 the follow-up to Butler and sets its mail `in_reply_to` to the original mail.
-That correlation survives a relay restart. Butler does not reply to messages
-from another configured Butler account.
+That correlation survives a relay restart. Butler-to-Butler replies are
+permitted until the per-thread turn guard reaches `b2b_max_turns`.
 
 Butler topics use stable session names and are delivered through the Butler
 message queue. The extraction boundary, runtime dependencies, and migration

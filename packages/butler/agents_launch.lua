@@ -371,7 +371,7 @@ remuda._butler_contribute("butler.guidance", "cli", { order = 20,
 
 - `remuda butler inbox` reads your own queued messages.
 - `remuda butler send MEMBER "MESSAGE"` sends a message; your sender is inferred.
-- For long bodies, use `cat <<'EOF' | remuda butler send MEMBER -` or `--file "$PWD/path"`.
+- For long bodies, write the text to a file and use `remuda butler send MEMBER --file "$PWD/path"`, or pipe it: `cat <<'EOF' | remuda butler send MEMBER -`.
 - `send-to-leader` and `reply MESSAGE_ID` accept `-` and `--file "$PWD/path"` too.
 - Message bodies are limited to 64 KiB; short quoted messages can stay positional.
 - `remuda butler send-to-leader RESULT...` reports a completed work loop.
@@ -406,6 +406,8 @@ the normal way for a member to communicate.
   end })
 remuda._butler_contribute("butler.guidance", "leader", { order = 90,
   prompt = function(ctx) return "Your leader is " .. ctx.parent .. "." end })
+remuda._butler_contribute("butler.permission", "cli", { order = 10,
+  rules = function(ctx) return remuda._butler_permissions.builtin(ctx) end })
 end
 local function guidance(part, parent)
   local out = {}
@@ -420,9 +422,11 @@ local function team_member_prompt(parent) return guidance("prompt", parent) end
 local function write_agent_guidance(root, text, replace)
   local path = root .. "/AGENTS.md"
   if not replace and file_exists(path) then return end
-  local f = assert(io.open(path, "w"))
-  f:write(text)
-  f:close()
+  -- Only when the text differs: launch_butler calls this on every reconcile tick.
+  -- No symlink check (it would run a process on that tick): the directory is the
+  -- mod's own. An AGENTS.md that is a link is read through, and when the text
+  -- differs the atomic writer replaces the link with a plain file.
+  assert(remuda._butler_permissions.write_if_changed(path, text, config.fs))
 end
 local _butler_session_trace -- defined below; the task poke fires later
 local function option_number(screen, matches)
