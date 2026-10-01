@@ -367,7 +367,7 @@ function matrix.take_post_slot(config_path)
     end
     local until_text = os.date("!%H:%MZ", oldest + 3600 + 59)
     local relay = matrix.relay and matrix.relay.instance
-    if relay then relay:post_cap_hit(limit, until_text) end
+    if relay and type(relay.post_cap_hit) == "function" then relay:post_cap_hit(limit, until_text) end
     return nil, "Not sent: Matrix post limit reached (" .. tostring(limit) .. " per hour). Next: wait until "
       .. until_text
   end

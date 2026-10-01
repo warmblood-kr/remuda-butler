@@ -726,9 +726,22 @@ function matrix.cli(args, agent, stdin_body)
   end
   if verb == "reply" then
     local relay = matrix.relay and matrix.relay.instance
-    if not relay or type(relay.can_reply_to) ~= "function" then
+    local required_relay_methods = {
+      "can_reply_to", "route_for_event", "thread_root_for_event", "b2b_stopped",
+      "b2b_turn_limit", "note_own_turn", "post_cap_hit",
+    }
+    local relay_ready = type(relay) == "table"
+    if relay_ready then
+      for _, method in ipairs(required_relay_methods) do
+        if type(relay[method]) ~= "function" then
+          relay_ready = false
+          break
+        end
+      end
+    end
+    if not relay_ready then
       finish(reply, cancelled, completed, verb, options,
-        { error = "Matrix relay is not running; event sender cannot be verified" })
+        { error = "Matrix relay is not running or is from an older load; event sender cannot be verified" })
       return reply
     end
     if not relay:can_reply_to(options.event_id) then
@@ -738,7 +751,7 @@ function matrix.cli(args, agent, stdin_body)
           .. "Next: remuda butler inbox (you can only reply to events listed there)" })
       return reply
     end
-    local route = relay.route_for_event and relay:route_for_event(options.event_id)
+    local route = relay:route_for_event(options.event_id)
     if route then
       options.room = options.room or route.room_id
       options.thread_root = route.thread_root
