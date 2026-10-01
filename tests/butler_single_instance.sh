@@ -11,17 +11,31 @@ T=$(cd "$T" && pwd -P)
 A=bsi-a B=bsi-b X=bsi-c D=bsi-d L=bsi-l G=bsi-g
 export HOME=$T/home XDG_CONFIG_HOME=$T/config XDG_DATA_HOME=$T/data REMUDA_RUNTIME_DIR=$T/run
 export REMUDA_BUTLER_PROJECT_HOME=$T/projects REMUDA_NO_UPDATE_CHECK=1
-unset REMUDA_BUTLER_TOKEN REMUDA_BUTLER_CONFIG REMUDA_BUTLER_AGENT_ID REMUDA_BUTLER_LEADER_ID
+unset REMUDA_BUTLER_TOKEN REMUDA_BUTLER_CONFIG REMUDA_BUTLER_TOPICS REMUDA_BUTLER_AGENT_ID REMUDA_BUTLER_LEADER_ID
 unset REMUDA_SERVER REMUDA_BUTLER_SERVER XDG_RUNTIME_DIR
-# Hard rule: every remuda call below runs only with HOME and the runtime dir
-# under the scratch dir and two private, non-empty session names.
+# Hard rule: every remuda call below runs only with the home, the runtime dir,
+# the data side AND the config side under the scratch dir, and private session
+# names. The config side matters as much as the data side: "a scratch data home
+# with the real config" is exactly the damage this test is about. The override
+# variables paths.lua reads (REMUDA_BUTLER_CONFIG, _TOKEN, _TOPICS) must stay
+# unset, so no path can point outside the scratch dir.
 assert_scratch() {
   [[ $T == /tmp/bsi.?????? || $T == /private/tmp/bsi.?????? ]] || { echo "ABORT: scratch dir is wrong: $T"; exit 9; }
   [[ $HOME == "$T/home" && $REMUDA_RUNTIME_DIR == "$T/run" && $XDG_DATA_HOME == "$T/data"
-    && $XDG_CONFIG_HOME == "$T/config" ]] || { echo "ABORT: env is not scratch"; exit 9; }
+    && $XDG_CONFIG_HOME == "$T/config" && $REMUDA_BUTLER_PROJECT_HOME == "$T/projects" ]] \
+    || { echo "ABORT: env is not scratch"; exit 9; }
+  [[ -z ${REMUDA_BUTLER_CONFIG+set} && -z ${REMUDA_BUTLER_TOKEN+set} && -z ${REMUDA_BUTLER_TOPICS+set}
+    && -z ${XDG_RUNTIME_DIR+set} ]] || { echo "ABORT: a Butler path override is set"; exit 9; }
   [[ $A == bsi-a && $B == bsi-b && $X == bsi-c && $D == bsi-d && $L == bsi-l && $G == bsi-g ]] || { echo "ABORT: session names"; exit 9; }
 }
 assert_scratch
+# A daemon that is started with its own homes gets them only from inside the scratch dir.
+under_scratch() {
+  local path
+  for path in "$@"; do
+    [[ $path == "$T"/* && $path != *..* ]] || { echo "ABORT: not under the scratch dir: $path"; exit 9; }
+  done
+}
 
 PIDS=()
 FAKE_AGENT=$T/fake-agent
@@ -213,6 +227,7 @@ tar -c -C "$REPO" extension.toml packages | tar -x -C "$T/data2/remuda/mods/butl
 cp "$C/config.mcp.json" "$T/snap/config.mcp.json.t7"
 [[ ! -f $C/config.since ]] || cp "$C/config.since" "$T/snap/config.since.t7"
 assert_scratch
+under_scratch "$T/data2" # its config side stays the exported, asserted $T/config
 XDG_DATA_HOME=$T/data2 REMUDA_BUTLER_SERVER=$X "$REMUDA_BIN" -s "$X" daemon </dev/null >"$T/$X.log" 2>&1 &
 PIDS+=($!)
 for _ in $(seq 50); do [[ -S $REMUDA_RUNTIME_DIR/remuda/$X.sock ]] && break; sleep 0.1; done
@@ -243,6 +258,7 @@ set -e
 mkdir -p "$T/local/home" "$T/local/config" "$T/local/data/remuda/mods/butler"
 tar -c -C "$REPO" extension.toml packages | tar -x -C "$T/local/data/remuda/mods/butler"
 assert_scratch
+under_scratch "$T/local/home" "$T/local/config" "$T/local/data"
 HOME=$T/local/home XDG_CONFIG_HOME=$T/local/config XDG_DATA_HOME=$T/local/data REMUDA_BUTLER_SERVER=$L \
   "$REMUDA_BIN" -s "$L" daemon </dev/null >"$T/$L.log" 2>&1 &
 PIDS+=($!)
@@ -264,6 +280,7 @@ if [[ $LOCK_WORD != true ]]; then
   cp "$C/config" "$C/token" "$T/gone/config/remuda/butler/"
   chmod 600 "$T/gone/config/remuda/butler/config" "$T/gone/config/remuda/butler/token"
   assert_scratch
+  under_scratch "$T/gone/home" "$T/gone/config" "$T/gone/data"
   HOME=$T/gone/home XDG_CONFIG_HOME=$T/gone/config XDG_DATA_HOME=$T/gone/data REMUDA_BUTLER_SERVER=$G \
     "$REMUDA_BIN" -s "$G" daemon </dev/null >"$T/$G.log" 2>&1 &
   PIDS+=($!)
