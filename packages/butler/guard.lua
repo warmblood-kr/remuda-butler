@@ -123,13 +123,28 @@ end
 
 -- main.lua calls this before it touches any shared state. True = carry on.
 function guard.boot(paths)
+  -- This daemon already owns the home (a mod reload): the locks are held until
+  -- it exits, so do not ask again. Asking could only lose them: core hands the
+  -- same daemon the same handle, and a failed second call would release it.
+  if remuda._butler_owner_lock then
+    remuda._butler_standby = nil
+    return true
+  end
   local unguarded = guard.unguarded_line()
   if unguarded and not remuda._butler_guard_warned then
     remuda._butler_guard_warned = true
     io.stderr:write("butler: " .. unguarded .. "\n")
   end
-  if not unguarded and type(remuda.mkdir) == "function" then
-    for _, path in ipairs({ guard.lock_paths(paths) }) do pcall(remuda.mkdir, path:match("^(.*)/[^/]+$")) end
+  if not unguarded then
+    local data_path, config_path = guard.lock_paths(paths)
+    local function parent(path) return path:match("^(.*)/[^/]+$") end
+    if data_path then pcall(remuda.mkdir, parent(data_path)) end
+    if config_path then
+      -- Matrix setup later puts the token and config in this directory, and it
+      -- accepts one that exists: create it private (0700), as setup would.
+      pcall(remuda.mkdir, parent(parent(config_path)))
+      pcall(remuda.fs.mkdir_new, parent(config_path))
+    end
   end
   local state = guard.claim(paths)
   if state.owner then
@@ -139,6 +154,20 @@ function guard.boot(paths)
   end
   guard.standby(state, paths)
   return false
+end
+
+-- Owner-only (0600) write for a file that carries a capability. Only a core
+-- without remuda.fs.write_atomic gets the plain write; when the word exists and
+-- fails, the error is raised: never a silent non-private fallback.
+function guard.write_private(path, text)
+  if remuda.fs and type(remuda.fs.write_atomic) == "function" then
+    local ok, why = remuda.fs.write_atomic(path, text, { private = true })
+    if not ok then error("cannot write " .. tostring(path) .. ": " .. tostring(why), 0) end
+    return
+  end
+  local file = assert(io.open(path, "w"))
+  file:write(text)
+  file:close()
 end
 
 remuda.butler = remuda.butler or {}
