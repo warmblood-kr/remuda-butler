@@ -725,10 +725,10 @@ function matrix.cli(args, agent, stdin_body)
       .. ".\nNext: remuda butler matrix " .. next_room .. "follow " .. shell_quote(safe_thread) .. "\n", "")
   end
   if verb == "reply" then
-    local relay = matrix.relay and matrix.relay.instance
-    if not relay or type(relay.can_reply_to) ~= "function" then
+    local relay, relay_error = matrix.reply_relay()
+    if not relay then
       finish(reply, cancelled, completed, verb, options,
-        { error = "Matrix relay is not running; event sender cannot be verified" })
+        { error = relay_error })
       return reply
     end
     if not relay:can_reply_to(options.event_id) then
@@ -738,11 +738,11 @@ function matrix.cli(args, agent, stdin_body)
           .. "Next: remuda butler inbox (you can only reply to events listed there)" })
       return reply
     end
-    local route = relay.route_for_event and relay:route_for_event(options.event_id)
+    local route = relay:route_for_event(options.event_id)
     if route then
       options.room = options.room or route.room_id
       options.thread_root = route.thread_root
-    elseif relay.thread_root_for_event then
+    else
       options.thread_root = relay:thread_root_for_event(options.event_id)
     end
   elseif verb == "thread" and not options.room then

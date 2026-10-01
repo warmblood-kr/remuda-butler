@@ -92,6 +92,53 @@ command(5, "doctor", "  remuda butler doctor", function(args)
     return table.concat(doctor.render(doctor.probe()), "\n")
   end
 end)
+command(6, "quota", "  remuda butler quota [--report]", function(args, caller)
+  local quota = remuda._butler_quota
+  if type(quota) ~= "table" then
+    local reason = remuda._butler_quota_error or "not loaded"
+    reason = (tostring(reason):gsub("[^\032-\126]", "?")):sub(1, 200)
+    return remuda.fail("quota is unavailable: " .. reason .. "\nNext: remuda butler doctor", 1)
+  end
+  if #args == 2 and (args[2] == "--help" or args[2] == "-h") then return quota.help() end
+  if #args ~= 1 and not (#args == 2 and args[2] == "--report") then
+    return remuda.fail(quota.usage_error(args[2] == "--report" and args[3] or args[2]), 2)
+  end
+  local report_flag = args[2] == "--report"
+  if report_flag then
+    local identity = current_agent(caller)
+    if identity ~= nil then
+      local resolved, alias = pcall(resolve, identity)
+      if not resolved or alias ~= "butler" then
+        return remuda.fail(quota.report_denied(), 1)
+      end
+    end
+  end
+  if type(remuda.pending) ~= "function" then
+    return remuda.fail("remuda butler quota needs a Remuda core with deferred replies.\nNext: remuda upgrade", 1)
+  end
+  local reply = remuda.pending({ timeout = 30 })
+  local collected, collect_error = pcall(quota.collect, function(report, err)
+    if not report then
+      return reply:resolve(1, "", "quota report failed: " .. quota.safe_text(err)
+        .. "\nNext: remuda butler doctor\n")
+    end
+    if not report_flag then
+      return reply:resolve(0, quota.terminal(report) .. "\n", "")
+    end
+    remuda.butler.matrix.send({ text = quota.render(report), plain = true }, function(result)
+      if result.error then
+        reply:resolve(1, quota.terminal(report, { failed = tostring(result.error) }) .. "\n", "")
+      else
+        reply:resolve(0, quota.terminal(report, { sent = true }) .. "\n", "")
+      end
+    end)
+  end)
+  if not collected then
+    reply:resolve(1, "", "quota report failed: " .. quota.safe_text(collect_error)
+      .. "\nNext: remuda butler doctor\n")
+  end
+  return reply
+end)
 local CLOSE_USAGE = "Usage: remuda butler close <name> [--force]\nExample: remuda butler close worker-1"
 local function close_member(name, leader, force)
   local ok, alias = pcall(resolve, name)

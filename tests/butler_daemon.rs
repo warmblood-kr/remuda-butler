@@ -1016,9 +1016,43 @@ impl Drop for ProcessPidGuard {
     }
 }
 
+/// A data home of this daemon's own, under its scratch dir and removed with it
+/// (see #225). tests/rust_tests.sh installs the Butler mod once, in the
+/// XDG_DATA_HOME it exports; that mod directory is linked in here. A second
+/// daemon started in the same `dir` (a restart test) gets the same home.
+fn own_data_home(dir: &Path) -> PathBuf {
+    let data_home = dir.join("data");
+    std::fs::create_dir_all(data_home.join("remuda"))
+        .unwrap_or_else(|err| panic!("create data home {data_home:?}: {err}"));
+    if let Some(install) = std::env::var_os("XDG_DATA_HOME") {
+        let link = data_home.join("remuda/mods");
+        // A restart in the same scratch dir finds the link already there.
+        if let Err(err) = std::os::unix::fs::symlink(PathBuf::from(install).join("remuda/mods"), &link) {
+            assert!(
+                err.kind() == std::io::ErrorKind::AlreadyExists,
+                "link the Butler mod into {link:?}: {err}"
+            );
+        }
+    }
+    data_home
+}
+
+/// Every test daemon gets its own XDG_DATA_HOME and XDG_CONFIG_HOME. With one
+/// home for the whole cargo run, all daemons share agents.jsonl (one root
+/// Butler id), one inbox file and one config path.
+fn own_homes(cmd: &mut std::process::Command, dir: &Path) {
+    let config_home = dir.join("config");
+    std::fs::create_dir_all(&config_home)
+        .unwrap_or_else(|err| panic!("create config home {config_home:?}: {err}"));
+    cmd.env("XDG_DATA_HOME", own_data_home(dir))
+        .env("XDG_CONFIG_HOME", config_home);
+}
+
 impl Daemon {
     fn spawn(dir: &Path) -> Self {
-        let child = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
+        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"));
+        own_homes(&mut cmd, dir);
+        let child = cmd
             .args(["-s", "s", "daemon"])
             .env("REMUDA_RUNTIME_DIR", dir)
             .current_dir(dir)
@@ -1043,6 +1077,7 @@ impl Daemon {
     /// test`'s own working directory.
     fn spawn_with_pwd(dir: &Path, pwd: Option<&str>) -> Self {
         let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"));
+        own_homes(&mut cmd, dir);
         cmd.args(["-s", "s", "daemon"])
             .env("REMUDA_RUNTIME_DIR", dir)
             .current_dir(dir)
@@ -1074,6 +1109,8 @@ impl Daemon {
     /// `spawn`'s existing behavior.
     fn spawn_with_env(dir: &Path, extra_env: &[(&str, &str)]) -> Self {
         let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"));
+        // Before extra_env, so a home a test passes explicitly wins.
+        own_homes(&mut cmd, dir);
         cmd.args(["-s", "s", "daemon"])
             .env("REMUDA_RUNTIME_DIR", dir)
             .current_dir(dir)
@@ -1105,6 +1142,8 @@ impl Daemon {
     /// they happen to be set).
     fn spawn_with_home(dir: &Path, home: &Path) -> Self {
         let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"));
+        // XDG_CONFIG_HOME is removed again below: the config comes from HOME here.
+        own_homes(&mut cmd, dir);
         cmd.args(["-s", "s", "daemon"])
             .env("REMUDA_RUNTIME_DIR", dir)
             .current_dir(dir)
@@ -1502,7 +1541,7 @@ fn butler_lifecycle_reload_replaces_hooks_and_schedules_and_rolls_back() {
     "#;
     let initial = eval(&path, counts);
     assert!(
-        initial == "1|4|1|1|1|23" || initial == "1|4|1|1|1|-1",
+        initial == "1|4|1|1|1|24" || initial == "1|4|1|1|1|-1",
         "unexpected Butler lifecycle registrations: {initial}"
     );
 
@@ -2251,6 +2290,41 @@ fn butler_cli_test_daemon(dir: &Path) -> (Daemon, PathBuf) {
     let out = remuda_timed(dir, &["-s", "s", "butler", "--headless"]);
     assert!(out.status.success(), "load Butler CLI: {}", String::from_utf8_lossy(&out.stderr));
     (daemon, path)
+}
+
+/// Test daemons must not share a data home (see #225): with one XDG_DATA_HOME
+/// for a whole cargo run, agents.jsonl gives every daemon the same root Butler
+/// id and inbox file, and Matrix mail delivered in one test is loaded by
+/// another test's daemon.
+#[test]
+fn butler_test_daemons_do_not_share_the_root_inbox() {
+    let dir_a = scratch_dir("own-home-a");
+    let dir_b = scratch_dir("own-home-b");
+    let (_daemon_a, path_a) = butler_cli_test_daemon(&dir_a);
+    let a = eval(&path_a, r#"
+      local delivered = remuda._butler_inbox_delivery({from={host="matrix", alias="@alice:example.org",
+        session="@alice:example.org", kind="matrix", id="", leader=""}, to="butler", text="from daemon A",
+        subject="Matrix", matrix={event_id="$own-home-probe", room_id="!r:example.org", sender="@alice:example.org"}})
+      if not delivered then return "not-delivered" end
+      return remuda._butler_bus.agents.butler.id
+    "#);
+    assert_ne!(a, "not-delivered", "daemon A must really deliver the Matrix mail to its root Butler");
+    let (_daemon_b, path_b) = butler_cli_test_daemon(&dir_b);
+    let b = eval(&path_b, r#"
+      local root = remuda._butler_bus.agents.butler
+      remuda._butler_mail.unread(root.id) -- loads the inbox from disk, as the session list does
+      local seen = {}
+      for _, id in ipairs(remuda._butler_mail.mailbox(root.id)) do
+        local message = remuda._butler_bus.messages[id]
+        if message and message.matrix and message.matrix.event_id ~= nil then
+          seen[#seen + 1] = tostring(message.matrix.event_id)
+        end
+      end
+      return root.id .. " matrix=" .. (#seen == 0 and "none" or table.concat(seen, ","))
+    "#);
+    assert!(b.ends_with(" matrix=none"),
+        "daemon B loaded Matrix mail that daemon A delivered (shared data home): A root {a}; B {b}");
+    assert!(!b.starts_with(a.as_str()), "the two daemons share one root Butler id: A {a}; B {b}");
 }
 
 #[test]
@@ -6005,7 +6079,7 @@ fn butler_compaction_schedule_sends_compact_when_idle_but_not_when_busy() {
     );
     let token_str = token_path.to_string_lossy().to_string();
     let config_str = config_path.to_string_lossy().to_string();
-    let data_str = std::env::var("XDG_DATA_HOME").expect("test XDG_DATA_HOME");
+    let data_str = own_data_home(&dir).to_string_lossy().to_string();
     let daemon = Daemon::spawn_with_env(
         &dir,
         &[
@@ -6292,7 +6366,7 @@ fn butler_compaction_fake_claude_scenarios_send_only_visible_keys() {
     );
     let token_str = token_path.to_string_lossy().to_string();
     let config_str = config_path.to_string_lossy().to_string();
-    let data_str = std::env::var("XDG_DATA_HOME").expect("test XDG_DATA_HOME");
+    let data_str = own_data_home(&dir).to_string_lossy().to_string();
     let daemon = Daemon::spawn_with_env(
         &dir,
         &[
@@ -6394,7 +6468,7 @@ while IFS= read -r line; do
           || [ "$scenario" = model-confirm-static ]; then
         printf 'KEY:RET\n' >> "$log"
         model='sonnet'
-        if [ "$scenario" != model-confirm-static ]; then paint; fi
+        paint
       fi
       ;;
     '/model sonnet')
@@ -7255,6 +7329,230 @@ done
         "an unverified /compact must fail with its own reason: {}", reports());
     assert_eq!(state("cl-unverified", "restore_pending"), "nil");
     assert!(!record().contains("cl-unverified-id"), "the durable record must be cleared: {}", record());
+    });
+    assert!(failures.is_empty(), "{}", failures.join("\n---\n"));
+    drop(daemon);
+}
+
+/// A model wait ends only on a confirmed change (#206 follow-up). The fake
+/// Claude swallows any text typed while a model switch is in flight (logged as
+/// `LOST:<text>`): pressing Return on the "Switch model?" dialog must not
+/// release `/compact`, and the restore is checked only once the switch is done.
+/// Confirmed = the status model or a settings.json value that was not already
+/// there, and a ready pane (no dialog, empty composer).
+#[test]
+#[cfg(unix)]
+fn butler_claude_model_waits_end_only_on_a_confirmed_switch() {
+    let dir = scratch_dir("butler-claude-model-wait");
+    let (token_path, config_path) = butler_config(
+        &dir,
+        "fake-claude-model-wait",
+        "http://127.0.0.1:1",
+        "!room:example.org",
+        "@butler:example.org",
+        "",
+    );
+    let token_str = token_path.to_string_lossy().to_string();
+    let config_str = config_path.to_string_lossy().to_string();
+    let data_home = dir.join("data");
+    let mods = PathBuf::from(std::env::var_os("XDG_DATA_HOME").expect("XDG_DATA_HOME"));
+    std::fs::create_dir_all(data_home.join("remuda/butler")).expect("data home");
+    let _ = std::os::unix::fs::symlink(mods.join("remuda/mods"), data_home.join("remuda/mods"));
+    let data_str = data_home.to_string_lossy().to_string();
+    let daemon = Daemon::spawn_with_env(
+        &dir,
+        &[
+            ("REMUDA_BUTLER_TOKEN", token_str.as_str()),
+            ("REMUDA_BUTLER_CONFIG", config_str.as_str()),
+            ("XDG_DATA_HOME", data_str.as_str()),
+            ("HOME", dir.to_string_lossy().as_ref()),
+        ],
+    );
+    let path = daemon::socket_path_in(&dir, "s");
+    eval(&path, r#"remuda._butler_argv = {"sh", "-c", "while read line; do :; done"}"#);
+    eval(&path, "remuda._butler_skip_relay = true");
+    let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let trace_path = dir.join("compaction-trace.log");
+    eval(&path, &format!(
+        "remuda._butler_compaction_trace_path = {}",
+        lua_raw_string(&trace_path.to_string_lossy())
+    ));
+
+    let script = dir.join("fake-claude.sh");
+    std::fs::write(
+        &script,
+        r#"#!/bin/bash
+# Scenarios: slow (dialog, then a slow switch that swallows input), nodialog (settings change at
+# once, the status line lags), already (settings already hold the target, the
+# status line lags), stuck (the model never changes).
+log=$1
+scenario=$2
+model=opus; ctx=500000; mode=idle; ticks=0; target=
+paint() {
+  printf '\033[H\033[2JMODEL:%s CTX:%s\n' "$model" "$ctx"
+  if [ "$mode" = dialog ]; then
+    printf 'Switch model?\n\nYour next response will be slower and use more tokens\n\nThis conversation is cached for the current model. Switching to %s 5.5 means\nthe full history gets re-read on your next message.\n\n❯ 1. Yes, switch to %s 5.5\n  2. No, go back\n\nEnter to confirm · Esc to cancel\n' "$target" "$target"
+  else
+    printf '❯\xc2\xa0\n'
+  fi
+}
+set_settings() { printf '{"model":"%s"}\n' "$1" > "$HOME/.claude/settings.json"; }
+paint
+while true; do
+  if IFS= read -t 0.3 -r line; then
+    if [ "$mode" = dialog ] && [ -z "$line" ]; then mode=switching; ticks=4; paint; continue; fi
+    if [ "$mode" != idle ]; then [ -n "$line" ] && printf 'LOST:%s\n' "$line" >> "$log"; continue; fi
+    [ -n "$line" ] && printf 'CMD:%s\n' "$line" >> "$log"
+    case "$line" in
+      '/model sonnet'|'/model opus')
+        [ $ticks -gt 0 ] && { model=$target; ticks=0; }
+        target=${line#/model }
+        [ "$scenario" = stuck ] && continue
+        if [ "$scenario" = slow ]; then mode=dialog; else set_settings "$target"; ticks=4; fi
+        paint ;;
+      '/compact') ctx=200000; paint ;;
+    esac
+  else
+    [ $? -gt 128 ] || exit 0
+    if [ $ticks -gt 0 ]; then
+      ticks=$((ticks - 1))
+      if [ $ticks -le 0 ]; then model=$target; set_settings "$target"; mode=idle; paint; fi
+    fi
+  fi
+done
+"#,
+    )
+    .expect("write fake Claude");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let restore_file = format!("{data_str}/remuda/butler/mail/compaction-restore.json");
+    eval(
+        &path,
+        &format!(
+            r#"
+      local fake_now = 1000
+      remuda._butler_compaction_now = function() return fake_now end
+      remuda._butler_compaction_config = {{critical=400000, cooldown_ticks=0, capture_gap=0,
+        completion_timeout=1, claude_completion_timeout=8, failure_cooldown_seconds=600, input_settle=0.01}}
+      local prior_contributions = remuda.contributions
+      remuda.contributions = function(point)
+        if point == "butler.agent" then
+          return {{{{id="claude", entry={{working=function() return false end}}}}}}
+        end
+        return prior_contributions(point)
+      end
+      remuda._butler_telemetry_for = function(agent)
+        local screen = remuda.capture(agent.session_name)
+        return {{context_used=screen:match("CTX:%s*(%d+)"), model=screen:match("MODEL:([^ %c]+)")}}
+      end
+      remuda.session = function() return {{is_busy=false, attached=false}} end
+      remuda._butler_send = function(_, _, message)
+        remuda._fake_reports = remuda._fake_reports or {{}}
+        table.insert(remuda._fake_reports, message)
+      end
+      remuda._fake_claude = function(name, log, scenario)
+        remuda.new(name, {{"bash", {script:?}, log, scenario}}, nil, {{}})
+        remuda._butler_bus.agents[name] = {{id=name .. "-id", kind="claude", session_name=name, model="opus"}}
+      end
+    "#,
+            script = script.to_string_lossy(),
+        ),
+    );
+
+    let log_of = |name: &str| std::fs::read_to_string(dir.join(format!("{name}.log"))).unwrap_or_default();
+    let reports = || eval(&path, "return table.concat(remuda._fake_reports or {}, '\\n')");
+    let trace = || std::fs::read_to_string(&trace_path).unwrap_or_default();
+    let record = || std::fs::read_to_string(&restore_file).unwrap_or_default();
+    let in_progress = |name: &str| eval(&path, &format!(
+        "local s = (remuda._butler_compaction_members_state or {{}})[{:?}] or {{}}; return tostring(s.compaction_in_progress)",
+        format!("{name}-id")
+    ));
+    let settle = |name: &str, done: &dyn Fn() -> bool, what: &str| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            if in_progress(name) == "false" && done() { return; }
+            assert!(Instant::now() < deadline, "{name}: {what} never happened. log:\n{}\nreports: {}\ntrace:\n{}",
+                log_of(name), reports(), trace());
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let settings_path = dir.join(".claude/settings.json");
+    std::fs::create_dir_all(dir.join(".claude")).unwrap();
+    let run = |name: &str, scenario: &str, settings: &str| {
+        std::fs::write(&settings_path, settings).unwrap();
+        let log = dir.join(format!("{name}.log"));
+        eval(&path, &format!("remuda._fake_claude({name:?}, {:?}, {scenario:?})", log.to_string_lossy()));
+        wait_for(&path, name, "MODEL:");
+        assert_eq!(eval(&path, &format!("return remuda.butler.compact({name:?})")), "started");
+    };
+    // The one `model_wait` trace line for `id`, whole line.
+    let wait_line = |id: &str| trace().lines()
+        .find(|line| line.contains("model_wait") && line.contains(&format!("id={id} "))).unwrap_or("").to_string();
+    let mut failures = Vec::new();
+    let mut scenario = |label: &str, body: &dyn Fn()| {
+        if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+            let text = panic.downcast_ref::<String>().cloned()
+                .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default();
+            failures.push(format!("scenario {label}: {text}"));
+        }
+    };
+    let cycle = "CMD:/model sonnet\nCMD:/compact\nCMD:/model opus\n";
+    // The whole cycle: sent -> verified with a context drop, in order, nothing lost.
+    let cycle_ok = |name: &str, sonnet_by: &str, restored_by: Option<&str>| {
+        settle(name, &|| trace().contains("\tverified"), "the verified finish");
+        let got = log_of(name);
+        assert_eq!(got, cycle, "no text may be lost and the order must hold: {got:?}\ntrace:\n{}", trace());
+        let events = trace();
+        let sonnet = wait_line("model-sonnet");
+        let restored = wait_line("model-restored");
+        assert!(sonnet.contains(&format!("outcome=confirmed by={sonnet_by} elapsed=")), "model-sonnet wait: {sonnet:?}\n{events}");
+        match restored_by {
+            Some(by) => assert!(restored.contains(&format!("outcome=confirmed by={by} elapsed=")), "restore wait: {restored:?}\n{events}"),
+            None => assert!(restored.contains("outcome=confirmed by="), "restore wait: {restored:?}\n{events}"),
+        }
+        assert!(events.find(&sonnet).unwrap() < events.find("\tverified").unwrap());
+        assert!(!events.contains("restored_after_dialog"), "no third /model: {events}");
+        assert!(!events.contains("settings_model_mismatch"), "settings must already be restored: {events}");
+        assert!(!events.contains("\terror"), "no failure: {events}");
+        for _ in 0..3 {
+            eval(&path, &format!("return remuda._butler_compaction_tick({name:?}, false)"));
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(log_of(name), cycle, "later ticks must type nothing");
+        assert!(!record().contains(&format!("{name}-id")), "no restore record may be left: {}", record());
+        assert_eq!(std::fs::read_to_string(&settings_path).unwrap().trim(), "{\"model\":\"opus\"}");
+    };
+
+    // a. Opus session, "Switch model?" dialog, a switch that takes a few ticks.
+    scenario("a (slow switch behind the dialog)", &|| {
+        run("mw-slow", "slow", "{\"model\":\"opus\"}\n");
+        cycle_ok("mw-slow", "status", None);
+    });
+    // b. No dialog; settings.json changes at once while the status line lags.
+    scenario("b (no dialog, status lags)", &|| {
+        std::fs::write(&trace_path, "").unwrap();
+        run("mw-nodialog", "nodialog", "{\"model\":\"opus\"}\n");
+        cycle_ok("mw-nodialog", "settings", Some("settings"));
+    });
+    // c. settings.json already says sonnet: it must not confirm the switch.
+    scenario("c (settings already true)", &|| {
+        std::fs::write(&trace_path, "").unwrap();
+        run("mw-already", "already", "{\"model\":\"sonnet\"}\n");
+        cycle_ok("mw-already", "status", None);
+    });
+    // d. The model never changes: the wait times out, nothing is compacted.
+    scenario("d (timeout)", &|| {
+        std::fs::write(&trace_path, "").unwrap();
+        eval(&path, "remuda._butler_compaction_config.claude_completion_timeout = 1");
+        run("mw-stuck", "stuck", "{\"model\":\"opus\"}\n");
+        settle("mw-stuck", &|| trace().contains("outcome=timeout"), "the timeout");
+        let line = wait_line("model-sonnet");
+        assert!(line.contains("outcome=timeout") && line.contains("elapsed="), "{line:?}");
+        assert!(!line.contains(" by="), "a timeout names no signal: {line:?}");
+        assert_eq!(log_of("mw-stuck"), "CMD:/model sonnet\n", "nothing may be compacted");
+        assert!(reports().contains("timed out waiting for model-sonnet"), "{}", reports());
     });
     assert!(failures.is_empty(), "{}", failures.join("\n---\n"));
     drop(daemon);
@@ -9096,7 +9394,9 @@ fn butler_matrix_send_and_reply_add_formatted_body_and_fall_back_to_plain() {
       matrix.relay.instance = { can_reply_to = function() return true end,
         thread_root_for_event = function(_, event_id) return event_id end,
         b2b_stopped = function() return false end, b2b_turn_limit = function() return 6 end,
-        note_own_turn = function() end }
+        note_own_turn = function() end,
+        -- No route: the reply takes a post slot, as for an unknown route.
+        route_for_event = function() return nil end, post_cap_hit = function() end }
       local function content_of(start)
         local before, result = #remuda.http.calls, nil
         start(function(value) result = value end)
@@ -9211,7 +9511,9 @@ fn butler_matrix_reply_react_upload_redact_join_and_leave_compose_request() {
       matrix.relay.instance = {{can_reply_to=function() return true end,
         thread_root_for_event=function(_, event_id) return event_id end,
         b2b_stopped=function() return false end, b2b_turn_limit=function() return 6 end,
-        note_own_turn=function() end}}
+        note_own_turn=function() end,
+        -- No route: the reply takes a post slot, as for an unknown route.
+        route_for_event=function() return nil end, post_cap_hit=function() end}}
       remuda.http.respond("GET", "https://matrix.example.org/_matrix/client/v3/rooms/%21write%3Aexample.org/context/%24outside",
         response('{{"event":{{"room_id":"!other:example.org"}}}}'))
       matrix.reply({{ room = room, event_id = "$outside", text = "must not send" }}, function(value) outside = value end)
@@ -9860,4 +10162,961 @@ fn doctor_cli_unexpected_probe_error_still_reports_other_agent_and_next() {
     assert!(stdout.contains("Codex CLI: missing"), "{stdout}");
     assert!(stdout.contains("Next: retry remuda butler doctor"), "{stdout}");
     assert!(stdout.contains("Next: npm install -g @openai/codex"), "{stdout}");
+}
+
+// --- packages/butler: quota report daemon wiring --------------------------
+
+fn assert_quota_marker_absent(root: &Path, marker: &str) {
+    if !root.exists() {
+        return;
+    }
+    for entry in std::fs::read_dir(root).expect("read quota state/log directory") {
+        let path = entry.expect("read quota state/log entry").path();
+        if path.is_dir() {
+            assert_quota_marker_absent(&path, marker);
+        } else if path.is_file() {
+            let bytes = std::fs::read(&path).expect("read quota state/log file");
+            assert!(
+                !String::from_utf8_lossy(&bytes).contains(marker),
+                "quota persisted {marker} in {path:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn butler_quota_statusline_keeps_line_one_and_adds_rate_limits() {
+    let dir = scratch_dir("butler-quota-statusline");
+    let (_daemon, path) = butler_cli_test_daemon(&dir);
+    let status_path = dir.join("claude.status");
+    let snapshot = r#"{"model":{"display_name":"Claude Opus 4.6"},"context_window":{"total_input_tokens":12345,"context_window_size":200000,"used_percentage":6},"rate_limits":{"five_hour":{"used_percentage":92,"resets_at":1790838000},"seven_day":{"used_percentage":71,"resets_at":1791072000}}}"#;
+    let status_path_lua = lua_raw_string(&status_path.to_string_lossy());
+    let snapshot_lua = lua_raw_string(snapshot);
+    let line = eval(&path, &format!(
+        "return remuda._dispatch_extension_command('butler', {{'statusline', {status_path_lua}}}, {{stdin = {snapshot_lua}}})"
+    ));
+    assert_eq!(
+        line,
+        "MODEL:Claude-Opus-4.6 CTX:12345 CTXWIN:200000 CTXPCT:6"
+    );
+    let status = std::fs::read_to_string(&status_path).expect("read quota status file");
+    let lines: Vec<_> = status.lines().collect();
+    assert_eq!(
+        lines[0],
+        "MODEL:Claude-Opus-4.6 CTX:12345 CTXWIN:200000 CTXPCT:6"
+    );
+    assert_eq!(
+        lines.len(),
+        2,
+        "rate limits must add exactly one status-file line: {lines:?}"
+    );
+    let parts: Vec<_> = lines[1].split_whitespace().collect();
+    assert_eq!(parts.len(), 3, "rate-limit cache shape: {:?}", lines[1]);
+    assert!(parts[0]
+        .strip_prefix("RL:")
+        .is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit())));
+    for (part, key) in [(parts[1], "five_hour="), (parts[2], "seven_day=")] {
+        let Some(value) = part.strip_prefix(key) else {
+            panic!("missing {key} in {}", lines[1])
+        };
+        let Some((used, reset)) = value.split_once('@') else {
+            panic!("missing @ in {}", lines[1])
+        };
+        assert!(
+            used.bytes().all(|b| b.is_ascii_digit()) && reset.bytes().all(|b| b.is_ascii_digit()),
+            "rate-limit values must be digits: {}",
+            lines[1]
+        );
+    }
+    assert_eq!(
+        parts[1].split_once('@').expect("five-hour separator").0,
+        "five_hour=92"
+    );
+    assert_eq!(
+        parts[2].split_once('@').expect("weekly separator").0,
+        "seven_day=71"
+    );
+
+    let no_limits = r#"{"model":{"display_name":"Claude Opus 4.6"},"context_window":{"total_input_tokens":12345,"context_window_size":200000,"used_percentage":6}}"#;
+    let no_limits_lua = lua_raw_string(no_limits);
+    eval(&path, &format!(
+        "return remuda._dispatch_extension_command('butler', {{'statusline', {status_path_lua}}}, {{stdin = {no_limits_lua}}})"
+    ));
+    assert_eq!(
+        std::fs::read_to_string(&status_path).expect("read status without limits"),
+        "MODEL:Claude-Opus-4.6 CTX:12345 CTXWIN:200000 CTXPCT:6\n"
+    );
+}
+
+#[test]
+fn butler_quota_reports_modes_without_leaking() {
+    let dir = scratch_dir("butler-quota-modes");
+    let bin = doctor_stub_dir(&dir);
+    let org_id = "QUOTA_ORG_ID_MARKER";
+    let org_name = "QUOTA_ORG_NAME_MARKER";
+    doctor_write_stub(
+        &bin,
+        "claude",
+        &format!(
+            r#"{{"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"max","email":"quota@example.test","orgId":"{org_id}","orgName":"{org_name}"}}"#
+        ),
+        0,
+    );
+    doctor_write_stub(&bin, "codex", "Logged in using ChatGPT", 0);
+    let path_env = bin.to_str().expect("PATH is UTF-8");
+    let (_daemon, _path) = butler_doctor_test_daemon(&dir, path_env);
+    let out = remuda_timed(&dir, &["-s", "s", "butler", "quota"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("claude: subscription (max), quota@example.test"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "  quota: unknown (no reading yet; it appears after a claude session's first reply)"
+        ),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("codex: subscription, account: not exposed by codex"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("  quota: unknown (no idle codex session to ask)"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("Next: start a codex member with `remuda butler launch codex` (or wait until one is idle), then run `remuda butler quota` again."), "{stdout}");
+    for marker in [org_id, org_name] {
+        assert!(
+            !stdout.contains(marker),
+            "quota stdout leaked {marker}: {stdout}"
+        );
+        assert!(
+            !stderr.contains(marker),
+            "quota stderr leaked {marker}: {stderr}"
+        );
+        for child in [dir.join("remuda"), dir.join("logs"), dir.join("state")] {
+            assert_quota_marker_absent(&child, marker);
+        }
+    }
+}
+
+#[test]
+fn butler_quota_never_guesses_mode() {
+    for (tag, claude, expected) in [
+        (
+            "logged-out",
+            Some(r#"{"loggedIn":false}"#),
+            "claude: not logged in",
+        ),
+        (
+            "unrecognised",
+            Some("hello"),
+            "claude: unknown (could not understand what `claude auth status` answered)",
+        ),
+        ("not-installed", None, "claude: not installed"),
+    ] {
+        let dir = scratch_dir(&format!("butler-quota-{tag}"));
+        let bin = doctor_stub_dir(&dir);
+        if let Some(claude) = claude {
+            doctor_write_stub(&bin, "claude", claude, 0);
+        }
+        doctor_write_stub(&bin, "codex", "Not logged in", 0);
+        let path_env = bin.to_str().expect("PATH is UTF-8");
+        let (_daemon, _path) = butler_doctor_test_daemon(&dir, path_env);
+        let out = remuda_timed(&dir, &["-s", "s", "butler", "quota"]);
+        assert!(
+            out.status.success(),
+            "{tag}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains(expected),
+            "{tag}: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+}
+
+#[test]
+fn butler_quota_usage_error() {
+    let dir = scratch_dir("butler-quota-usage");
+    let (_daemon, _path) = butler_cli_test_daemon(&dir);
+    let next = "Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.";
+    let usage = "Usage: remuda butler quota [--report]\nExample: remuda butler quota --report";
+    let out = remuda_timed(&dir, &["-s", "s", "butler", "quota", "--bogus"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr).trim(),
+        format!("unknown option: --bogus\n{usage}\n{next}")
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "",
+        "a usage error prints nothing on stdout"
+    );
+
+    let out = remuda_timed(&dir, &["-s", "s", "butler", "quota", "claude"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr).trim(),
+        format!("unexpected argument: claude\n{usage}\n{next}")
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "");
+
+    for flag in ["--help", "-h"] {
+        let out = remuda_timed(&dir, &["-s", "s", "butler", "quota", flag]);
+        assert_eq!(out.status.code(), Some(0), "{flag}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            format!("remuda butler quota reports, for claude and codex, how each is logged in, the subscription account and how much of each limit is used.\nWith --report it also posts the report to this Butler's Matrix home room.\n{usage}\n{next}"),
+            "{flag}"
+        );
+    }
+}
+
+// codex-cli 0.159.3 prints `codex login status` on stderr (measured 2026-10-01).
+fn quota_write_stderr_stub(bin: &Path, name: &str, output: &str, exit_code: i32) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = bin.join(name);
+    std::fs::write(
+        &path,
+        format!("#!/bin/sh\nprintf '%s\\n' '{output}' >&2\nexit {exit_code}\n"),
+    )
+    .expect("write stderr agent stub");
+    let mut permissions = std::fs::metadata(&path)
+        .expect("stat stderr agent stub")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(path, permissions).expect("make stderr agent stub executable");
+}
+
+#[test]
+fn butler_quota_reads_codex_login_status_from_stderr() {
+    for (tag, codex, code, expected) in [
+        (
+            "logged-out",
+            "Not logged in",
+            1,
+            vec![
+                "codex: not logged in",
+                "Not logged in: codex.",
+                "Next: log in with `codex login`, then run `remuda butler quota` again.",
+            ],
+        ),
+        (
+            "chatgpt",
+            "Logged in using ChatGPT",
+            0,
+            vec!["codex: subscription, account: not exposed by codex"],
+        ),
+    ] {
+        let dir = scratch_dir(&format!("butler-quota-stderr-{tag}"));
+        let bin = doctor_stub_dir(&dir);
+        doctor_write_stub(
+            &bin,
+            "claude",
+            r#"{"loggedIn":true,"authMethod":"api_key"}"#,
+            0,
+        );
+        quota_write_stderr_stub(&bin, "codex", codex, code);
+        let path_env = bin.to_str().expect("PATH is UTF-8");
+        let (_daemon, _path) = butler_doctor_test_daemon(&dir, path_env);
+        let out = remuda_timed(&dir, &["-s", "s", "butler", "quota"]);
+        assert!(
+            out.status.success(),
+            "{tag}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        for line in expected {
+            assert!(stdout.contains(line), "{tag}: missing {line:?} in {stdout}");
+        }
+    }
+}
+
+fn assert_quota_utc_limit(stdout: &str, name: &str, used: u8) {
+    let prefix = format!("  {name}: {used}% used, resets ");
+    let reset = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .unwrap_or_else(|| panic!("missing {prefix:?} in {stdout}"));
+    let bytes = reset.as_bytes();
+    assert_eq!(bytes.len(), 17, "reset is not YYYY-MM-DD HH:MMZ: {reset}");
+    for index in [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15] {
+        assert!(
+            bytes[index].is_ascii_digit(),
+            "reset is not YYYY-MM-DD HH:MMZ: {reset}"
+        );
+    }
+    assert_eq!(&bytes[4..5], b"-");
+    assert_eq!(&bytes[7..8], b"-");
+    assert_eq!(&bytes[10..11], b" ");
+    assert_eq!(&bytes[13..14], b":");
+    assert_eq!(&bytes[16..17], b"Z");
+}
+
+#[test]
+fn butler_quota_reads_codex_status_from_idle_member() {
+    let dir = scratch_dir("butler-quota-idle-codex");
+    let bin = doctor_stub_dir(&dir);
+    doctor_write_stub(
+        &bin,
+        "claude",
+        r#"{"loggedIn":true,"authMethod":"api_key"}"#,
+        0,
+    );
+    doctor_write_stub(&bin, "codex", "Logged in using ChatGPT", 0);
+    let path_env = bin.to_str().expect("PATH is UTF-8");
+    let (_daemon, path) = butler_doctor_test_daemon(&dir, path_env);
+    let fixture = lua_raw_string(include_str!("fixtures/quota-codex-status-0.159.3.txt"));
+    eval(
+        &path,
+        &format!(
+            r#"
+      remuda._butler_bus.agents["quota-idle-codex"] = {{
+        id="quota-idle-codex-id", alias="quota-idle-codex", kind="codex", session_name="quota-idle-codex"
+      }}
+      remuda.butler.is_idle = function(alias) return alias == "quota-idle-codex" end
+      remuda._butler_notify_policy = function() return true end
+      remuda._butler_prompt_is_empty = function() return "EMPTY" end
+      remuda._quota_screen = "› Ask Codex to do anything"
+      remuda._quota_typed = {{}}
+      remuda.capture = function() return remuda._quota_screen end
+      remuda.type_text = function(name, text)
+        if text == "/status" then table.insert(remuda._quota_typed, name .. "|" .. text) end
+        if name == "quota-idle-codex" and text == "/status" then remuda._quota_screen = {fixture} end
+        return "submitted"
+      end
+    "#
+        ),
+    );
+    let out = remuda_timed(&dir, &["-s", "s", "butler", "quota"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        eval(&path, "return table.concat(remuda._quota_typed, '\\n')"),
+        "quota-idle-codex|/status"
+    );
+    assert_quota_utc_limit(&stdout, "Weekly limit", 60);
+    assert_quota_utc_limit(&stdout, "Luna Reserve Weekly limit", 0);
+}
+
+#[test]
+fn butler_quota_ignores_a_stale_status_card() {
+    let dir = scratch_dir("butler-quota-stale-codex");
+    let bin = doctor_stub_dir(&dir);
+    doctor_write_stub(
+        &bin,
+        "claude",
+        r#"{"loggedIn":true,"authMethod":"api_key"}"#,
+        0,
+    );
+    doctor_write_stub(&bin, "codex", "Logged in using ChatGPT", 0);
+    let path_env = bin.to_str().expect("PATH is UTF-8");
+    let (_daemon, path) = butler_doctor_test_daemon(&dir, path_env);
+    let stale = lua_raw_string(include_str!("fixtures/quota-codex-status-0.159.3.txt"));
+    let fresh = lua_raw_string(
+        &include_str!("fixtures/quota-codex-status-0.159.3.txt")
+            .replace("40% left", "20% left")
+            .replace("100% left", "75% left"),
+    );
+    eval(
+        &path,
+        &format!(
+            r#"
+      remuda._butler_bus.agents["quota-stale-codex"] = {{
+        id="quota-stale-codex-id", alias="quota-stale-codex", kind="codex", session_name="quota-stale-codex"
+      }}
+      remuda.butler.is_idle = function(alias) return alias == "quota-stale-codex" end
+      remuda._butler_notify_policy = function() return true end
+      remuda._butler_prompt_is_empty = function() return "EMPTY" end
+      remuda._quota_screen = {stale}
+      remuda._quota_typed = {{}}
+      remuda._quota_captures = 0
+      remuda.capture = function()
+        remuda._quota_captures = remuda._quota_captures + 1
+        if remuda._quota_captures == 2 then return "› Codex is checking limits" end
+        if remuda._quota_captures >= 3 then return {fresh} end
+        return remuda._quota_screen
+      end
+      remuda.type_text = function(name, text)
+        if text == "/status" then table.insert(remuda._quota_typed, name .. "|" .. text) end
+        if name == "quota-stale-codex" and text == "/status" then remuda._quota_screen = {fresh} end
+        return "submitted"
+      end
+    "#
+        ),
+    );
+    let out = remuda_timed(&dir, &["-s", "s", "butler", "quota"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        eval(&path, "return table.concat(remuda._quota_typed, '\\n')"),
+        "quota-stale-codex|/status"
+    );
+    assert!(
+        eval(&path, "return remuda._quota_captures")
+            .parse::<usize>()
+            .expect("capture count")
+            >= 4,
+        "the new status card must be parsed on two polls in a row"
+    );
+    assert_quota_utc_limit(&stdout, "Weekly limit", 80);
+    assert_quota_utc_limit(&stdout, "Luna Reserve Weekly limit", 25);
+}
+
+#[test]
+fn butler_quota_does_not_type_into_a_draft() {
+    let dir = scratch_dir("butler-quota-draft");
+    let bin = doctor_stub_dir(&dir);
+    doctor_write_stub(
+        &bin,
+        "claude",
+        r#"{"loggedIn":true,"authMethod":"api_key"}"#,
+        0,
+    );
+    doctor_write_stub(&bin, "codex", "Logged in using ChatGPT", 0);
+    let path_env = bin.to_str().expect("PATH is UTF-8");
+    let (_daemon, path) = butler_doctor_test_daemon(&dir, path_env);
+    eval(
+        &path,
+        r#"
+      remuda._butler_bus.agents["quota-draft-codex"] = {
+        id="quota-draft-codex-id", alias="quota-draft-codex", kind="codex", session_name="quota-draft-codex"
+      }
+      remuda.butler.is_idle = function(alias) return alias == "quota-draft-codex" end
+      remuda.capture = function() return "› DRAFT: unsent words\n› Ask Codex to do anything" end
+      remuda._butler_prompt_is_empty = function() return "NON-EMPTY" end
+      remuda._butler_notify_policy = function() return false end
+      remuda._quota_typed = {}
+      remuda.type_text = function(_, text) if text == "/status" then table.insert(remuda._quota_typed, text) end end
+    "#,
+    );
+    let out = remuda_timed(&dir, &["-s", "s", "butler", "quota"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        eval(&path, "return #remuda._quota_typed"),
+        "0",
+        "a draft must receive no input"
+    );
+    assert!(String::from_utf8_lossy(&out.stdout)
+        .contains("  quota: unknown (no idle codex session to ask)"));
+}
+
+#[test]
+fn butler_quota_report_posts_body_only() {
+    let dir = scratch_dir("butler-quota-report");
+    let bin = doctor_stub_dir(&dir);
+    doctor_write_stub(
+        &bin,
+        "claude",
+        r#"{"loggedIn":true,"authMethod":"api_key"}"#,
+        0,
+    );
+    doctor_write_stub(&bin, "codex", "Logged in using an API key", 0);
+    let path_env = bin.to_str().expect("PATH is UTF-8");
+    let (_daemon, path) = butler_doctor_test_daemon(&dir, path_env);
+    let room = "!quota:example.org";
+    let (token_path, config_path) = butler_config(
+        &dir,
+        "quota",
+        "http://matrix.example.org",
+        room,
+        "@bot:example.org",
+        "",
+    );
+    eval(&path, include_str!("support/fake_http.lua"));
+    eval(&path, &format!(
+        "remuda._butler_matrix_config={{token_path={},config_path={}}}; remuda.exec('butler/matrix')",
+        lua_raw_string(&token_path.to_string_lossy()), lua_raw_string(&config_path.to_string_lossy())
+    ));
+    eval(
+        &path,
+        r#"
+      remuda.http.respond_prefix("PUT", "http://matrix.example.org/_matrix/client/v3/rooms/%21quota%3Aexample.org/send/m.room.message/",
+        { status = 200, headers = {}, body = '{"event_id":"$quota"}' })
+    "#,
+    );
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
+        .args(["-s", "s", "butler", "quota", "--report"])
+        .env("REMUDA_RUNTIME_DIR", &dir)
+        .env("REMUDA_NO_UPDATE_CHECK", "1")
+        .current_dir(&dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn quota --report");
+    let deadline = Instant::now() + PATIENCE;
+    while eval(&path, "return #remuda.http.calls") == "0" {
+        assert!(
+            child.try_wait().expect("poll quota --report").is_none(),
+            "quota --report exited before posting"
+        );
+        assert!(Instant::now() < deadline, "quota --report never posted");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    eval(&path, "remuda.http.tick()");
+    let out = child.wait_with_output().expect("collect quota --report");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let sent = "\nSent to the Matrix home room.\n";
+    let body = stdout
+        .strip_suffix('\n')
+        .unwrap_or(&stdout)
+        .split_once(sent)
+        .map(|(body, _)| body)
+        .expect("terminal report must name successful Matrix send");
+    let posted = eval(&path, "local call=assert(remuda.http.calls[1]); local body=assert(remuda.butler.matrix.decode_json(call.body)); return body.body");
+    assert_eq!(
+        posted, body,
+        "Matrix must receive the body, not terminal guidance"
+    );
+    assert!(
+        !posted.contains("Next:"),
+        "Matrix body must omit Next guidance: {posted}"
+    );
+    assert_eq!(
+        eval(&path, "local call=assert(remuda.http.calls[1]); local body=assert(remuda.butler.matrix.decode_json(call.body)); return tostring(body.format == nil and body.formatted_body == nil)"),
+        "true",
+        "quota --report must post Matrix plain text only"
+    );
+}
+
+#[test]
+fn butler_quota_report_denies_registered_member_before_collecting() {
+    let dir = scratch_dir("butler-quota-report-member-denied");
+    let bin = doctor_stub_dir(&dir);
+    doctor_write_stub(
+        &bin,
+        "claude",
+        r#"{"loggedIn":true,"authMethod":"api_key"}"#,
+        0,
+    );
+    doctor_write_stub(&bin, "codex", "Logged in using ChatGPT", 0);
+    let path_env = bin.to_str().expect("PATH is UTF-8");
+    let (_daemon, path) = butler_doctor_test_daemon(&dir, path_env);
+    eval(&path, include_str!("support/fake_http.lua"));
+    eval(
+        &path,
+        r#"
+      remuda._butler_bus.agents["quota-member"] = {
+        id="quota-member-id", alias="quota-member", kind="codex", session_name="quota-member"
+      }
+      remuda._quota_typed = {}
+      remuda.type_text = function(_, text) if text == "/status" then table.insert(remuda._quota_typed, text) end end
+    "#,
+    );
+    let member = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
+        .args(["-s", "s", "butler", "quota", "--report"])
+        .env("REMUDA_RUNTIME_DIR", &dir)
+        .env("REMUDA_NO_UPDATE_CHECK", "1")
+        .env("REMUDA_BUTLER_AGENT_ID", "quota-member-id")
+        .current_dir(&dir)
+        .output()
+        .expect("run member quota --report");
+    assert_eq!(member.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&member.stderr).trim(),
+        "only the Butler itself or a person at the terminal can send the report to Matrix.\nNext: ask the Butler to run `remuda butler quota --report`, or run `remuda butler quota` to read it here."
+    );
+    assert_eq!(
+        eval(&path, "return #remuda.http.calls"),
+        "0",
+        "denied report made an HTTP call"
+    );
+    assert_eq!(
+        eval(&path, "return #remuda._quota_typed"),
+        "0",
+        "denied report typed into a pane"
+    );
+
+    let person =
+        remuda_timed_without_butler_identity(&dir, &["-s", "s", "butler", "quota", "--report"]);
+    assert!(
+        !String::from_utf8_lossy(&person.stderr).contains("only the Butler itself"),
+        "a person at a terminal must get past the report authorization gate: {}",
+        String::from_utf8_lossy(&person.stderr)
+    );
+    let root = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
+        .args(["-s", "s", "butler", "quota", "--report"])
+        .env("REMUDA_RUNTIME_DIR", &dir)
+        .env("REMUDA_NO_UPDATE_CHECK", "1")
+        .env("REMUDA_BUTLER_AGENT_ID", "butler")
+        .current_dir(&dir)
+        .output()
+        .expect("run root Butler quota --report");
+    assert!(
+        !String::from_utf8_lossy(&root.stderr).contains("only the Butler itself"),
+        "the root Butler must get past the report authorization gate: {}",
+        String::from_utf8_lossy(&root.stderr)
+    );
+}
+
+#[test]
+fn butler_quota_single_flight_types_status_once_for_overlapping_calls() {
+    let dir = scratch_dir("butler-quota-single-flight");
+    let bin = doctor_stub_dir(&dir);
+    doctor_write_stub(
+        &bin,
+        "claude",
+        r#"{"loggedIn":true,"authMethod":"api_key"}"#,
+        0,
+    );
+    doctor_write_stub(&bin, "codex", "Logged in using ChatGPT", 0);
+    let (_daemon, path) = butler_doctor_test_daemon(&dir, bin.to_str().expect("PATH"));
+    let status = lua_raw_string(include_str!("fixtures/quota-codex-status-0.159.3.txt"));
+    eval(
+        &path,
+        &format!(
+            r#"
+      remuda._butler_bus.agents["quota-single-flight"] = {{
+        id="quota-single-flight-id", alias="quota-single-flight", kind="codex", session_name="quota-single-flight"
+      }}
+      remuda.butler.is_idle = function(alias) return alias == "quota-single-flight" end
+      remuda._butler_notify_policy = function() return true end
+      remuda._butler_prompt_is_empty = function() return "EMPTY" end
+      remuda._quota_typed = {{}}
+      remuda._quota_screen = "› Ask Codex to do anything"
+      remuda.capture = function() return remuda._quota_screen end
+      remuda.type_text = function(_, text)
+        if text == "/status" then table.insert(remuda._quota_typed, text) end
+        return "submitted"
+      end
+      remuda._quota_fresh_screen = {status}
+    "#
+        ),
+    );
+    let mut spawn = || {
+        std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
+            .args(["-s", "s", "butler", "quota"])
+            .env("REMUDA_RUNTIME_DIR", &dir)
+            .env("REMUDA_NO_UPDATE_CHECK", "1")
+            .current_dir(&dir)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn overlapping quota call")
+    };
+    let first = spawn();
+    let deadline = Instant::now() + PATIENCE;
+    while eval(&path, "return #remuda._quota_typed") != "1" {
+        assert!(
+            Instant::now() < deadline,
+            "first quota call did not type /status"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let second = spawn();
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(
+        eval(&path, "return #remuda._quota_typed"),
+        "1",
+        "overlap typed /status twice"
+    );
+    eval(&path, "remuda._quota_screen = remuda._quota_fresh_screen");
+    let first = first.wait_with_output().expect("collect first quota call");
+    let second = second
+        .wait_with_output()
+        .expect("collect second quota call");
+    for out in [&first, &second] {
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(String::from_utf8_lossy(&out.stdout).contains("Weekly limit: 60% used"));
+    }
+    assert_eq!(eval(&path, "return #remuda._quota_typed"), "1");
+}
+
+#[test]
+fn butler_quota_reuses_for_sixty_seconds_then_collects_again() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = scratch_dir("butler-quota-reuse");
+    let bin = doctor_stub_dir(&dir);
+    let runs = dir.join("quota-probe-runs.log");
+    for (name, probe, output) in [
+        (
+            "claude",
+            "auth status",
+            r#"{"loggedIn":true,"authMethod":"api_key"}"#,
+        ),
+        ("codex", "login status", "Logged in using an API key"),
+    ] {
+        let path = bin.join(name);
+        std::fs::write(&path, format!(
+            "#!/bin/sh\nif [ \"$1 $2\" = {probe:?} ]; then printf '%s\\n' {name:?} >> {}; fi\nprintf '%s\\n' {output:?}\n",
+            runs.to_string_lossy()
+        )).expect("write counted quota probe");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("make probe executable");
+    }
+    let (_daemon, path) = butler_doctor_test_daemon(&dir, bin.to_str().expect("PATH"));
+    let baseline = std::fs::read_to_string(&runs)
+        .unwrap_or_default()
+        .lines()
+        .count();
+    let first = remuda_timed(&dir, &["-s", "s", "butler", "quota"]);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&runs)
+            .expect("read first probes")
+            .lines()
+            .count(),
+        baseline + 2
+    );
+    let reused = remuda_timed(&dir, &["-s", "s", "butler", "quota"]);
+    assert!(
+        reused.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reused.stderr)
+    );
+    assert!(String::from_utf8_lossy(&reused.stdout).contains("Agent accounts, as of "));
+    assert_eq!(
+        std::fs::read_to_string(&runs)
+            .expect("read reused probes")
+            .lines()
+            .count(),
+        baseline + 2,
+        "a reused report must not run login probes"
+    );
+    eval(
+        &path,
+        "remuda._butler_quota_state.at = remuda._butler_quota_state.at - 61",
+    );
+    let fresh = remuda_timed(&dir, &["-s", "s", "butler", "quota"]);
+    assert!(
+        fresh.status.success(),
+        "{}",
+        String::from_utf8_lossy(&fresh.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&runs)
+            .expect("read expired probes")
+            .lines()
+            .count(),
+        baseline + 4,
+        "an expired report must run new probes"
+    );
+}
+
+#[test]
+fn butler_quota_type_text_failures_return_without_a_poll() {
+    for (tag, type_text) in [
+        ("late", "return 'late'"),
+        ("error", "error('injected type failure')"),
+    ] {
+        let dir = scratch_dir(&format!("butler-quota-type-{tag}"));
+        let bin = doctor_stub_dir(&dir);
+        doctor_write_stub(
+            &bin,
+            "claude",
+            r#"{"loggedIn":true,"authMethod":"api_key"}"#,
+            0,
+        );
+        doctor_write_stub(&bin, "codex", "Logged in using ChatGPT", 0);
+        let (_daemon, path) = butler_doctor_test_daemon(&dir, bin.to_str().expect("PATH"));
+        eval(
+            &path,
+            &format!(
+                r#"
+          remuda._butler_bus.agents["quota-type-{tag}"] = {{id="quota-type-{tag}-id", alias="quota-type-{tag}", kind="codex", session_name="quota-type-{tag}"}}
+          remuda.butler.is_idle = function() return true end
+          remuda._butler_notify_policy = function() return true end
+          remuda._butler_prompt_is_empty = function() return "EMPTY" end
+          remuda._quota_polls = 0
+          remuda.capture = function() remuda._quota_polls = remuda._quota_polls + 1; return "› Ask Codex to do anything" end
+          remuda.type_text = function() {type_text} end
+        "#
+            ),
+        );
+        let out = remuda_timed(&dir, &["-s", "s", "butler", "quota"]);
+        assert!(
+            out.status.success(),
+            "{tag}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stdout)
+                .contains("quota: unknown (could not type /status into the codex session)"),
+            "{tag}: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        assert_eq!(
+            eval(&path, "return remuda._quota_polls"),
+            "1",
+            "{tag}: type failure scheduled a poll"
+        );
+    }
+}
+
+#[test]
+fn butler_quota_is_unavailable_without_its_module_but_doctor_still_works() {
+    let dir = scratch_dir("butler-quota-unavailable");
+    let (_daemon, path) = butler_cli_test_daemon(&dir);
+    eval(
+        &path,
+        "remuda._butler_quota = nil; remuda._butler_quota_error = 'boom'",
+    );
+    let quota = remuda_timed(&dir, &["-s", "s", "butler", "quota"]);
+    assert_eq!(quota.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&quota.stderr).contains("quota is unavailable: boom"));
+    let doctor = remuda_timed(&dir, &["-s", "s", "butler", "doctor"]);
+    assert!(
+        doctor.status.success(),
+        "{}",
+        String::from_utf8_lossy(&doctor.stderr)
+    );
+}
+
+#[test]
+fn butler_quota_real_codex_draft_is_not_typed_and_empty_composer_is() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = scratch_dir("butler-quota-real-draft");
+    let bin = doctor_stub_dir(&dir);
+    doctor_write_stub(
+        &bin,
+        "claude",
+        r#"{"loggedIn":true,"authMethod":"api_key"}"#,
+        0,
+    );
+    doctor_write_stub(&bin, "codex", "Logged in using ChatGPT", 0);
+    let (_daemon, path) = butler_doctor_test_daemon(&dir, bin.to_str().expect("PATH"));
+    let script = dir.join("quota-codex-pane.sh");
+    std::fs::write(&script, r#"#!/bin/bash
+log=$1
+composer=$2
+paint() {
+  # Like codex: one composer line with the cursor left on it, a footer below.
+  printf '\r\033[JAccount: Pro\nWeekly limit: [x] 40%% left\n  (resets 2:30 AM on 4 Oct)\n\n%s\n\n  GPT-6-Luna default · ~/quota\n\033[3A' "$composer"
+}
+paint
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> "$log"
+  if [ "$line" = /status ]; then composer='› Ask Codex to do anything'; paint; fi
+done
+"#).expect("write real codex pane script");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+        .expect("make pane script executable");
+    let draft_log = dir.join("quota-draft-input.log");
+    let script_lua = lua_raw_string(&script.to_string_lossy());
+    let draft_log_lua = lua_raw_string(&draft_log.to_string_lossy());
+    eval(
+        &path,
+        &format!(
+            r#"
+      remuda.new("quota-real-draft", {{"/bin/bash", {script_lua}, {draft_log_lua}, "› DRAFT: unsent words"}}, nil, {{}})
+      remuda._butler_bus.agents["quota-real-draft"] = {{id="quota-real-draft-id", alias="quota-real-draft", kind="codex", session_name="quota-real-draft"}}
+    "#
+        ),
+    );
+    let wait_until_not_busy = |name: &str| {
+        let deadline = Instant::now() + PATIENCE;
+        let check = format!(
+            "local s = remuda.session({}); return tostring(s and s.is_busy)",
+            lua_raw_string(name)
+        );
+        while eval(&path, &check) != "false" {
+            assert!(Instant::now() < deadline, "real pane {name} stayed busy");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    let deadline = Instant::now() + PATIENCE;
+    while !capture(&path, "quota-real-draft").contains("DRAFT: unsent words") {
+        assert!(Instant::now() < deadline, "real draft pane did not paint");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    wait_until_not_busy("quota-real-draft");
+    assert_eq!(
+        eval(
+            &path,
+            "return (remuda._butler_prompt_is_empty('codex', remuda.capture('quota-real-draft')))"
+        ),
+        "NON-EMPTY",
+        "the real draft pane must be refused for its composer, not because it is busy"
+    );
+    let draft = remuda_timed(&dir, &["-s", "s", "butler", "quota"]);
+    assert!(
+        draft.status.success(),
+        "{}",
+        String::from_utf8_lossy(&draft.stderr)
+    );
+    assert!(String::from_utf8_lossy(&draft.stdout)
+        .contains("quota: unknown (no idle codex session to ask)"));
+    assert!(
+        !std::fs::read_to_string(&draft_log)
+            .unwrap_or_default()
+            .contains("/status"),
+        "a real codex draft pane received /status"
+    );
+
+    let empty_log = dir.join("quota-empty-input.log");
+    eval(
+        &path,
+        &format!(
+            r#"
+      remuda.new("quota-real-empty", {{"/bin/bash", {script_lua}, {}, "› Ask Codex to do anything"}}, nil, {{}})
+      remuda._butler_bus.agents["quota-real-empty"] = {{id="quota-real-empty-id", alias="quota-real-empty", kind="codex", session_name="quota-real-empty"}}
+      remuda._butler_quota_state.at = remuda._butler_quota_state.at - 61
+    "#,
+            lua_raw_string(&empty_log.to_string_lossy())
+        ),
+    );
+    let deadline = Instant::now() + PATIENCE;
+    while !capture(&path, "quota-real-empty").contains("Ask Codex to do anything") {
+        assert!(Instant::now() < deadline, "real empty pane did not paint");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    wait_until_not_busy("quota-real-empty");
+    let empty = remuda_timed(&dir, &["-s", "s", "butler", "quota"]);
+    assert!(
+        empty.status.success(),
+        "{}",
+        String::from_utf8_lossy(&empty.stderr)
+    );
+    let empty_stdout = String::from_utf8_lossy(&empty.stdout);
+    let empty_gates = eval(
+        &path,
+        r#"
+      local alias, session = "quota-real-empty", "quota-real-empty"
+      local idle, idle_detail = remuda.butler.is_idle(alias)
+      local policy = remuda._butler_notify_policy(session)
+      local screen = remuda.capture(session)
+      local prompt, prompt_detail = remuda._butler_prompt_is_empty("codex", screen)
+      return string.format("is_idle=%s,%s notify_policy=%s prompt_is_empty=%s,%s screen=%q",
+        tostring(idle), tostring(idle_detail), tostring(policy), tostring(prompt), tostring(prompt_detail), screen)
+    "#,
+    );
+    assert!(std::fs::read_to_string(&empty_log).unwrap_or_default().contains("/status"),
+        "the empty real codex composer was not typed; the draft assertion would be vacuous\nstdout:\n{empty_stdout}\ngates: {empty_gates}");
 }

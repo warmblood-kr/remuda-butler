@@ -617,7 +617,6 @@ function remuda._butler_compaction_execute(session_name, force)
             local pressed, press_err = pcall(remuda.key, session_name, "RET")
             if not pressed then error(press_err, 0) end
             confirmation_sent = true
-            run_action()
           end
         end,
         continue = true,
@@ -675,6 +674,33 @@ function remuda._butler_compaction_execute(session_name, force)
   end
   local completion_timeout = agent.kind == "claude"
     and config.claude_completion_timeout or config.completion_timeout
+  local function claude_settings_model()
+    return (read_claude_settings(settings_path) or {}).model
+  end
+  -- A Claude model wait ends only on a confirmed switch: the status line shows
+  -- the target, or settings.json names `typed` where it did not before the
+  -- command (`before`); and the pane is ready (no dialog, empty composer).
+  local function wait_for_model(id, typed, before, status_matches, action)
+    local now = remuda._butler_compaction_now or os.time
+    local started, by = now(), nil
+    local function traced(outcome)
+      _butler_trace("model_wait", detail .. " id=" .. id .. " outcome=" .. outcome
+        .. (by and " by=" .. by or "") .. " elapsed=" .. (now() - started) .. "s")
+    end
+    wait_for(id, function(screen)
+      if model_confirm_options_visible(screen) or model_confirm_signature(screen) then return false end
+      local checked, composer = pcall(remuda._butler_prompt_is_empty, agent.kind, screen)
+      if not checked or composer ~= "EMPTY" then return false end
+      if status_matches() then by = "status"
+      elseif before ~= typed and claude_settings_model() == typed then by = "settings"
+      else return false end
+      return true
+    end, function(screen) traced("confirmed"); action(screen) end, completion_timeout,
+    function(screen)
+      traced("timeout")
+      fail(model_timeout_reason("timed out waiting for " .. id, session_name, screen))
+    end)
+  end
   local function restore_model(event, after_restore)
     if not remuda._butler_compaction_valid_model(prior_model) then
       if not state.restore_pending_invalid_notified then
@@ -691,13 +717,14 @@ function remuda._butler_compaction_execute(session_name, force)
       _butler_trace("unsafe_model", detail)
       return false
     end
+    local before = claude_settings_model()
     if not send_command("/model " .. prior_model) then return end
-    wait_for("model-restored", function()
+    wait_for_model("model-restored", prior_model, before, function()
       local current = remuda._butler_telemetry_for(agent) or {}
       return statusline_model_matches(current.model, prior_model)
     end, function()
       if after_restore then after_restore() else finish_success(event or "verified") end
-    end, completion_timeout)
+    end)
   end
   local codex_prior = agent.kind == "codex" and restore_pending or nil
   local function forget_prior()
@@ -944,8 +971,9 @@ function remuda._butler_compaction_execute(session_name, force)
       _butler_trace("restore_record_write_failed", detail .. " reason=" .. tostring(persist_err))
       return "failed"
     end
+    local before = claude_settings_model()
     if not send_command("/model sonnet") then return "failed" end
-    wait_for("model-sonnet", telemetry_on_sonnet, compact, completion_timeout)
+    wait_for_model("model-sonnet", "sonnet", before, telemetry_on_sonnet, compact)
   else
     local _, screen = pcall(remuda.capture, session_name)
     local current, current_effort = codex_footer(screen)
