@@ -4024,6 +4024,54 @@ local function test_rx_post_cap_home_line_once_per_hour()
   if not ok then error(err, 0) end
 end
 
+-- Step 7c (SEC L1): a thread root is counted as before, but it is printed only
+-- when it cannot spell a link: "$" plus [A-Za-z0-9_-]. Any other root reads
+-- "(id not shown)" in the HOME stop line and in both refusals, and the Next
+-- line then points at the room history instead of the thread.
+local function test_rx_link_like_root_counted_but_not_shown()
+  local dir, path = invite_fixture(OWNER .. "," .. RX_ALLY, "b2b_max_turns=2\n")
+  rx_with_dir(dir, function()
+    local relay, client, delivered = rx_relay(path)
+    relay_module.instance = relay
+    local ending = "): 2 Butler-only turns. A reply in that thread from a person on the allowlist resumes it."
+    local function two_turns(root, reply)
+      rx_sync(client, HOME, { rx_msg(root, RX_ALLY, "@bot:example.org ping") })
+      rx_sync(client, HOME, { rx_msg(reply, RX_ALLY, "@bot:example.org again", rx_thread(root)) })
+      return relay:queue_mail_reply({ mail_id = rx_mail_id(delivered, reply), reply_mail_id = "R" .. reply, text = "x" })
+    end
+    rx_post_http(path, function()
+      local normal = "$" .. ("aB3_-xY9"):rep(5) .. "QrS" -- "$" plus 43 URL-safe base64 characters
+      local ok, err = two_turns(normal, "$n2")
+      local shown = "stopped replying in thread " .. normal .. " (" .. HOME .. ending
+      assert(ok == nil and err == "Reply not sent: " .. shown .. "\nNext: remuda butler matrix --room '" .. HOME
+        .. "' thread '" .. normal .. "'", "a normal 43-character id is shown as before, got: " .. tostring(err))
+      assert(client:messages(HOME, "Stopped replying in thread " .. normal .. " (" .. HOME .. ending) == 1,
+        "the HOME stop line shows a normal id as before")
+
+      local link, problems = "$https://evil.example/login", {}
+      ok, err = two_turns(link, "$l2")
+      if not relay:b2b_stopped(HOME, link) then problems[#problems + 1] = "a link-like root must still be counted" end
+      local hidden = "stopped replying in thread (id not shown) (" .. HOME .. ending
+      local refusal = "Reply not sent: " .. hidden .. "\nNext: remuda butler matrix --room '" .. HOME .. "' history"
+      if ok ~= nil or err ~= refusal then
+        problems[#problems + 1] = "the mail refusal must hide the id and end with history, got: " .. tostring(err)
+      end
+      local result = rx_cli({ "matrix", "reply", "$l2", "x" })
+      local text = result.stderr .. result.stdout
+      if result.code == 0 or not text:find(refusal, 1, true) or text:find("evil", 1, true) then
+        problems[#problems + 1] = "the CLI refusal must hide the id and end with history, got: " .. text
+      end
+      if client:messages(HOME, "Stopped replying in thread (id not shown) (" .. HOME .. ending) ~= 1 then
+        problems[#problems + 1] = "ONE HOME stop line with (id not shown) is expected"
+      end
+      if client:messages(HOME, "evil") ~= 0 then problems[#problems + 1] = "a HOME line prints the link-like root" end
+      assert(#problems == 0, table.concat(problems, "\n  "))
+      assert(client:messages(HOME, "Stopped replying") == 2, "one stop line per stopped thread, 2 in total")
+    end)
+    relay:stop()
+  end)
+end
+
 rx_tests = {
   { "test_rx_stranger_root_marked_untrusted", test_rx_stranger_root_marked_untrusted },
   { "test_rx_agent_root_without_mention", test_rx_agent_root_without_mention },
@@ -4063,6 +4111,7 @@ rx_tests = {
   { "test_rx_prefixed_stranger_counts_and_cannot_reset", test_rx_prefixed_stranger_counts_and_cannot_reset },
   { "test_rx_reply_to_allowlisted_human_takes_no_post_slot", test_rx_reply_to_allowlisted_human_takes_no_post_slot },
   { "test_rx_post_cap_home_line_once_per_hour", test_rx_post_cap_home_line_once_per_hour },
+  { "test_rx_link_like_root_counted_but_not_shown", test_rx_link_like_root_counted_but_not_shown },
 }
 end
 
