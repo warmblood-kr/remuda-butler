@@ -423,6 +423,34 @@ end
 
 if type(remuda) == "table" then
   remuda._butler_quota = quota
+  local quota_state = remuda._butler_quota_state
+  if type(quota_state) ~= "table" then
+    quota_state = { report = nil, at = nil, waiting = nil }
+    remuda._butler_quota_state = quota_state
+  else
+    quota_state.report = type(quota_state.report) == "table" and quota_state.report or nil
+    quota_state.at = finite_number(quota_state.at) and quota_state.at or nil
+    quota_state.waiting = type(quota_state.waiting) == "table" and quota_state.waiting or nil
+  end
+
+  local function finish_collect(report)
+    local callbacks = quota_state.waiting or {}
+    local finished_at = os.time()
+    quota_state.report = report
+    quota_state.at = finished_at
+    quota_state.waiting = nil
+
+    for _, callback in ipairs(callbacks) do pcall(callback, report) end
+  end
+
+  local function fail_collect(reason)
+    local callbacks = quota_state.waiting or {}
+    quota_state.waiting = nil
+    quota_state.report = nil
+    quota_state.at = nil
+    local message = tostring(reason)
+    for _, callback in ipairs(callbacks) do pcall(callback, nil, message) end
+  end
 
   function quota.accounts()
     local probes = remuda._butler_doctor.probe()
@@ -487,13 +515,30 @@ if type(remuda) == "table" then
     local utc_offset_seconds = os.time() - os.time(os.date("!*t"))
     local captured_first, first_screen = pcall(remuda.capture, session)
     if not captured_first or type(first_screen) ~= "string" then first_screen = nil end
-    local typed = pcall(remuda.type_text, session, "/status", 0.1)
-    if not typed then
-      done(nil, "codex did not show its limits in time")
+    local typed, result = pcall(remuda.type_text, session, "/status", 0.1)
+    if not typed or (result ~= "submitted" and result ~= "unverified") then
+      done(nil, "could not type /status into the codex session")
       return
     end
 
     local poll, ticks, finished = nil, 0, false
+    local previous_limits
+    local function same_limits(left, right)
+      if #left.limits ~= #right.limits then return false end
+      local by_name = {}
+      for _, limit in ipairs(left.limits) do
+        by_name[limit.name] = { used = limit.used, resets_at = limit.resets_at }
+      end
+      for _, limit in ipairs(right.limits) do
+        local previous = by_name[limit.name]
+        if not previous or previous.used ~= limit.used
+            or previous.resets_at ~= limit.resets_at then
+          return false
+        end
+        by_name[limit.name] = nil
+      end
+      return next(by_name) == nil
+    end
     local function finish(result, reason)
       if finished then return end
       finished = true
@@ -506,9 +551,16 @@ if type(remuda) == "table" then
       if captured and type(screen) == "string" and screen ~= first_screen then
         local parsed = quota.parse_codex_status(screen, utc_offset_seconds, os.time())
         if parsed and #parsed.limits > 0 then
-          finish(parsed, nil)
-          return
+          if previous_limits and same_limits(previous_limits, parsed) then
+            finish(parsed, nil)
+            return
+          end
+          previous_limits = parsed
+        else
+          previous_limits = nil
         end
+      else
+        previous_limits = nil
       end
       if ticks >= 20 then
         finish(nil, "codex did not show its limits in time")
@@ -522,33 +574,59 @@ if type(remuda) == "table" then
   end
 
   function quota.collect(done)
-    local report = { at = os.time() }
-    local accounts = quota.accounts()
-    report.claude = accounts.claude
-    report.codex = accounts.codex
-
-    if report.claude.mode == "subscription" then
-      local reading = quota.claude_reading()
-      if reading then
-        report.claude.limits = reading.limits
-        report.claude.read_at = reading.at
-      else
-        report.claude.unknown_reason = "no reading yet; it appears after a claude session's first reply"
-      end
+    if quota_state.waiting then
+      quota_state.waiting[#quota_state.waiting + 1] = done
+      return
     end
+    local now = os.time()
+    if quota_state.report and quota_state.at and now - quota_state.at >= 0
+        and now - quota_state.at < 60 then
+      local reused = {}
+      for key, value in pairs(quota_state.report) do reused[key] = value end
+      reused.reused = true
+      done(reused)
+      return
+    end
+    if quota_state.report then
+      quota_state.report = nil
+      quota_state.at = nil
+    end
+    quota_state.waiting = { done }
+    local ok, err = pcall(function()
+      local report = { at = os.time() }
+      local accounts = quota.accounts()
+      report.claude = accounts.claude
+      report.codex = accounts.codex
 
-    if report.codex.mode == "subscription" then
-      quota.codex_read(function(reading, reason)
+      if report.claude.mode == "subscription" then
+        local reading = quota.claude_reading()
         if reading then
-          report.codex.plan = reading.plan
-          report.codex.limits = reading.limits
+          report.claude.limits = reading.limits
+          report.claude.read_at = reading.at
         else
-          report.codex.unknown_reason = reason
+          report.claude.unknown_reason = "no reading yet; it appears after a claude session's first reply"
         end
-        done(report)
-      end)
-    else
-      done(report)
+      end
+
+      if report.codex.mode == "subscription" then
+        quota.codex_read(function(reading, reason)
+          local callback_ok, callback_err = pcall(function()
+            if reading then
+              report.codex.plan = reading.plan
+              report.codex.limits = reading.limits
+            else
+              report.codex.unknown_reason = reason
+            end
+            finish_collect(report)
+          end)
+          if not callback_ok then fail_collect(callback_err) end
+        end)
+      else
+        finish_collect(report)
+      end
+    end)
+    if not ok then
+      fail_collect(err)
     end
   end
 end
