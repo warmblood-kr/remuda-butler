@@ -3656,7 +3656,16 @@ test_thread_root_mail_references_are_stable()
 test_cli_matrix_mail_replies_keep_room_and_relation()
 rx_check("test_thread_reply_in_same_sync_batch_gets_root_reference", test_thread_reply_in_same_sync_batch_gets_root_reference)
 rx_check("test_human_root_fixture_through_relay_and_mail", test_human_root_fixture_through_relay_and_mail)
-setup_tests(matrix)
+do
+  -- The setup tests run as on a core whose prompt_line takes a preface (#186),
+  -- whatever core runs this suite; they switch it off themselves for the
+  -- older-core case.
+  local preface_supported = matrix.prompt_preface_supported
+  matrix.prompt_preface_supported = function() return true end
+  local ran, why = pcall(setup_tests, matrix)
+  matrix.prompt_preface_supported = preface_supported
+  assert(ran, why)
+end
 rx_check("test_redefined_public_words_do_not_change_trust", test_redefined_public_words_do_not_change_trust)
 test_matrix_event_id_is_sanitized_and_capped()
 local fixture_failures = {}
