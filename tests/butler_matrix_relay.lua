@@ -3182,9 +3182,10 @@ local function test_rx_untrusted_room_cap_logs_once_home_summary()
     end
     assert(warnings == 2 and new_warnings == 1,
       "exactly ONE rate cap warning line per capped room, got " .. warnings .. " (" .. new_warnings .. " for the joined room)")
-    local summary = " from non-allowlisted senders not delivered in "
+    local summary = " from non-allowlisted senders in "
     local function summary_line(count, room)
-      return count .. summary .. room .. " (rate cap). Next: remuda butler matrix --room '" .. room .. "' history"
+      return count .. summary .. room .. (count == "1 message" and " was" or " were")
+        .. " not passed to the Butler (hourly rate cap). Next: remuda butler matrix --room '" .. room .. "' history"
     end
     assert(client:messages(HOME, summary_line("3 messages", NEW)) == 1,
       "the first capped sync posts ONE exact HOME summary with its own count")
@@ -3477,7 +3478,7 @@ local function test_rx_b2b_turn_guard_home_line_once()
   rx_with_dir(dir, function()
     local relay, client, delivered = rx_relay(path)
     relay_module.instance = relay
-    local line = "Stopped replying in thread $gt (" .. HOME .. "): 6 Butler-only turns. A human reply resumes it."
+    local line = "Stopped replying in thread $gt (" .. HOME .. "): 6 Butler-only turns. A reply in that thread from someone on the allowlist resumes it."
     rx_post_http(path, function(calls)
       rx_sync(client, HOME, { rx_msg("$gt", OWNER, "@bot:example.org and @agent-ally:example.org, talk") })
       relay:subscribe_thread(HOME, "$gt")
@@ -3488,7 +3489,7 @@ local function test_rx_b2b_turn_guard_home_line_once()
         .. tostring(result.stderr))
       result = rx_cli({ "matrix", "reply", "$gt-a5", "one more" })
       assert(result.code ~= 0 and (result.stderr .. result.stdout):find("Reply not sent: stopped replying in thread $gt ("
-        .. HOME .. "): 6 Butler-only turns. A human reply resumes it.\nNext: remuda butler matrix --room '"
+        .. HOME .. "): 6 Butler-only turns. A reply in that thread from someone on the allowlist resumes it.\nNext: remuda butler matrix --room '"
         .. HOME .. "' thread '$gt'", 1, true),
         "after 6 Butler-only turns a reply into the thread is refused and says it was not sent, got: "
           .. result.stderr .. result.stdout)
@@ -3555,12 +3556,12 @@ local function test_rx_untrusted_room_cap_summary_no_quarantine()
       assert(relay:state().processed["$u" .. i], "$u" .. i .. ": a capped event is marked processed")
     end
     assert(rx_find(delivered, "$u-owner"), "allowlisted senders are not capped")
-    local line = "3 messages from non-allowlisted senders not delivered in " .. NEW
-      .. " (rate cap). Next: remuda butler matrix --room '" .. NEW .. "' history"
+    local line = "3 messages from non-allowlisted senders in " .. NEW
+      .. " were not passed to the Butler (hourly rate cap). Next: remuda butler matrix --room '" .. NEW .. "' history"
     assert(client:messages(HOME, line) == 1,
       "ONE exact HOME summary for the sync, the room shell-quoted in Next (unaccepted events do not count)")
     rx_sync(client, NEW, { rx_msg("$u-owner2", OWNER, "quiet sync") })
-    assert(client:messages(HOME, "non-allowlisted senders not delivered") == 1, "no summary for a sync with nothing capped")
+    assert(client:messages(HOME, "non-allowlisted senders in ") == 1, "no summary for a sync with nothing capped")
     relay:stop()
   end)
 end
@@ -3584,10 +3585,11 @@ local function test_rx_untrusted_room_cap_summary_floor_10min()
       rx_sync(client, room, events)
     end
     local function lines(count, room)
-      return client:messages(HOME, count .. " from non-allowlisted senders not delivered in " .. room
-        .. " (rate cap). Next: remuda butler matrix --room '" .. room .. "' history")
+      return client:messages(HOME, count .. " from non-allowlisted senders in " .. room
+        .. (count == "1 message" and " was" or " were")
+        .. " not passed to the Butler (hourly rate cap). Next: remuda butler matrix --room '" .. room .. "' history")
     end
-    local function total(room) return client:messages(HOME, "senders not delivered in " .. room) end
+    local function total(room) return client:messages(HOME, "non-allowlisted senders in " .. room) end
 
     roots(NEW, STRANGER, 5)                      -- sync A: 2 delivered, 3 capped
     assert(lines("3 messages", NEW) == 1 and total(NEW) == 1, "the first summary for a room is immediate, with 3")
@@ -3654,7 +3656,7 @@ local function test_rx_mail_reply_turn_guard()
   local dir, path = invite_fixture(OWNER .. "," .. RX_ALLY, "b2b_max_turns=2\n")
   rx_with_dir(dir, function()
     local relay, client, delivered = rx_relay(path)
-    local line = "Stopped replying in thread $mt (" .. HOME .. "): 2 Butler-only turns. A human reply resumes it."
+    local line = "Stopped replying in thread $mt (" .. HOME .. "): 2 Butler-only turns. A reply in that thread from someone on the allowlist resumes it."
     rx_sync(client, HOME, { rx_msg("$mt", RX_ALLY, "@bot:example.org ping") })
     local mail = rx_mail_id(delivered, "$mt")
     assert(mail, "a Butler's root post is delivered")
@@ -3662,7 +3664,7 @@ local function test_rx_mail_reply_turn_guard()
     assert(ok, "turn 2 of 2 (our mail reply to a Butler) is queued: " .. tostring(err))
     ok, err = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R2", text = "reply-two" })
     assert(ok == nil and tostring(err):find("Reply not sent: stopped replying in thread $mt (" .. HOME
-      .. "): 2 Butler-only turns. A human reply resumes it.", 1, true),
+      .. "): 2 Butler-only turns. A reply in that thread from someone on the allowlist resumes it.", 1, true),
       "after b2b_max_turns=2 Butler-only turns a mail reply is refused and says it was not sent, got: " .. tostring(err))
     assert(err:find("Next: remuda butler matrix --room '" .. HOME .. "' thread '$mt'", 1, true),
       "the refusal ends with a Next line that shows the thread, room and event shell-quoted, got: " .. err)
