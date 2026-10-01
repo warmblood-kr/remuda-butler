@@ -4673,6 +4673,26 @@ rx_tests[#rx_tests + 1] = { "test_ctx_page_without_the_delivered_event_lists_no_
   end)
 end }
 
+-- The delivered event is in the MIDDLE of the page (2 newer, 2 older): the block
+-- lists the root and the 2 older messages only.
+rx_tests[#rx_tests + 1] = { "test_ctx_page_with_the_delivered_event_in_the_middle_lists_only_older", function()
+  local thread = { root = ctx_event("$mid-root", OWNER, "where do we stand?", 0), replies = {
+    ctx_event("$mid-o1", OWNER, "older body 1", 1, "$mid-root"),
+    ctx_event("$mid-o2", OWNER, "older body 2", 2, "$mid-root"),
+  } }
+  ctx_run(nil, thread, function(ctx)
+    local message = ctx_event("$mid-m", OWNER, "@bot:example.org your view?", 3, "$mid-root")
+    thread.replies[3] = message
+    thread.replies[4] = ctx_event("$mid-n1", RX_ALLY, "newer body 1", 4, "$mid-root")
+    thread.replies[5] = ctx_event("$mid-n2", RX_ALLY, "newer body 2", 5, "$mid-root")
+    ctx.sync(NEW, { message })
+    local mail = ctx.mail("$mid-m")
+    local expected = CTX_HEAD .. "\n  06:00Z " .. OWNER .. ": where do we stand?\n  06:01Z " .. OWNER .. ": older body 1\n"
+      .. "  06:02Z " .. OWNER .. ": older body 2\nMessage to you:\n@bot:example.org your view?"
+    assert(mail and mail.text == expected, "expected:\n" .. expected .. "\ngot:\n" .. tostring(mail and mail.text))
+  end)
+end }
+
 rx_tests[#rx_tests + 1] = { "test_ctx_pending_fetch_does_not_hold_back_other_mail", function()
   local dir, path = rx_fixture()
   rx_with_dir(dir, function()
