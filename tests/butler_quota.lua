@@ -52,13 +52,14 @@ local keys_body = table.concat({
 local unavailable = {
   at = at,
   claude = { mode = "not_logged_in" },
-  codex = { mode = "subscription", limits = nil, unknown_reason = "no idle codex session to ask" },
+  codex = { mode = "subscription", limits = nil,
+    unknown_reason = "codex limits need core nightly d47a845 or newer" },
 }
 local unavailable_body = table.concat({
   "⚠️ Agent accounts, 2026-10-01 04:40Z",
   "claude: not logged in",
   "codex: subscription, account: not exposed by codex",
-  "  quota: unknown (no idle codex session to ask)",
+  "  quota: unknown (codex limits need core nightly d47a845 or newer)",
   "Not logged in: claude.",
 }, "\n")
 local old_reading = {
@@ -68,7 +69,8 @@ local old_reading = {
       { name = "5-hour limit", used = 40, resets_at = 1790838000 },
       { name = "Weekly limit", used = 71, resets_at = 1791072000 },
     } },
-  codex = { mode = "subscription", limits = nil, unknown_reason = "no idle codex session to ask" },
+  codex = { mode = "subscription", limits = nil,
+    unknown_reason = "codex limits need core nightly d47a845 or newer" },
 }
 local old_reading_body = table.concat({
   "Agent accounts, 2026-10-01 04:40Z",
@@ -77,10 +79,10 @@ local old_reading_body = table.concat({
   "  Weekly limit: 71% used, resets 2026-10-04 00:00Z",
   "  as of 2026-10-01 04:10Z",
   "codex: subscription, account: not exposed by codex",
-  "  quota: unknown (no idle codex session to ask)",
+  "  quota: unknown (codex limits need core nightly d47a845 or newer)",
 }, "\n")
 local ordinary_next = "Next: run `remuda butler quota --report` to send this to Matrix."
-local codex_idle_next = "Next: start a codex member with `remuda butler launch codex` (or wait until one is idle), then run `remuda butler quota` again."
+local codex_core_next = "Next: update Remuda core to nightly d47a845 or newer, then run `remuda butler quota` again."
 
 -- render: the three UX examples, excluding their terminal ending.
 eq("render subscription near limit", quota.render(normal), normal_body)
@@ -112,9 +114,9 @@ eq("terminal both login hint", quota.terminal(both_out), table.concat({
   "Not logged in: claude, codex.",
   "Next: log in with `claude auth login` and `codex login`, then run `remuda butler quota` again.",
 }, "\n"))
-eq("terminal UX case 4", quota.terminal(old_reading), old_reading_body .. "\n" .. codex_idle_next)
+eq("terminal UX case 4", quota.terminal(old_reading), old_reading_body .. "\n" .. codex_core_next)
 eq("terminal sent with no idle codex", quota.terminal(old_reading, { sent = true }), old_reading_body .. "\n"
-  .. "Sent to the Matrix home room.\n" .. codex_idle_next)
+  .. "Sent to the Matrix home room.\n" .. codex_core_next)
 
 -- Attention is exactly 80% or more, and only then prefixes the header.
 local function one_limit(used)
@@ -275,9 +277,8 @@ eq("not installed line", quota.render({ at = at, claude = { mode = "not_installe
 }, "\n"))
 for _, reason in ipairs({
   "no reading yet; it appears after a claude session's first reply",
-  "no idle codex session to ask",
   "codex did not show its limits in time",
-  "could not type /status into the codex session",
+  "codex limits need core nightly d47a845 or newer",
 }) do
   local body = quota.render({ at = at, claude = { mode = "subscription", plan = "max", email = "a@b.c",
     limits = nil, unknown_reason = reason }, codex = { mode = "api_key" } })
@@ -384,16 +385,18 @@ terminal_case("terminal failure takes priority", unavailable, { failed = "bad\1\
   "Could not post to Matrix: bad??????\nNext: remuda butler matrix setup")
 terminal_case("terminal unknown mode takes priority", {
   at = at, claude = { mode = "unknown" },
-  codex = { mode = "subscription", limits = nil, unknown_reason = "no idle codex session to ask" },
+  codex = { mode = "subscription", limits = nil,
+    unknown_reason = "codex limits need core nightly d47a845 or newer" },
 }, nil, "Next: run `claude auth status` yourself to see what it answers, then `remuda butler doctor`.")
 terminal_case("terminal timeout retry", {
   at = at, claude = { mode = "api_key" },
   codex = { mode = "subscription", limits = nil, unknown_reason = "codex did not show its limits in time" },
 }, nil, "Next: run `remuda butler quota` again in a minute.")
-terminal_case("terminal failed typing retry", {
+terminal_case("terminal core minimum retry", {
   at = at, claude = { mode = "api_key" },
-  codex = { mode = "subscription", limits = nil, unknown_reason = "could not type /status into the codex session" },
-}, nil, "Next: run `remuda butler quota` again in a minute.")
+  codex = { mode = "subscription", limits = nil,
+    unknown_reason = "codex limits need core nightly d47a845 or newer" },
+}, nil, codex_core_next)
 terminal_case("terminal claude first reply hint", {
   at = at, claude = { mode = "subscription", plan = "max", email = "a@b.c", limits = nil },
   codex = { mode = "api_key" },
@@ -401,6 +404,69 @@ terminal_case("terminal claude first reply hint", {
 local long_failure = string.rep("x", 201)
 terminal_case("terminal failure cuts reason at 200", keys, { failed = long_failure },
   "Could not post to Matrix: " .. string.rep("x", 200) .. "\nNext: remuda butler matrix setup")
+
+-- Stub the app-server process and decoder while exercising the production callback path.
+local saved_remuda = remuda
+local wire_init = '{"id":1}'
+local wire_remote = '{"method":"remoteControl/status/changed"}'
+local wire_account = '{"method":"account/updated"}'
+local wire_rate_limits = '{"id":2}'
+local decoded_lines = {
+  [wire_init] = { id = 1 },
+  [wire_remote] = { method = "remoteControl/status/changed" },
+  [wire_account] = { method = "account/updated" },
+  [wire_rate_limits] = { id = 2, result = app_result },
+}
+local stubbed_result, process_options
+remuda = {
+  process = { run = function(options)
+    process_options = options
+    return stubbed_result
+  end },
+  json = { decode = function(line)
+    local decoded = decoded_lines[line]
+    if not decoded then error("invalid JSON") end
+    return decoded
+  end },
+}
+quota = dofile("packages/butler/quota.lua")
+local function codex_read_case(name, stdout, timed_out, expected, failure_reason)
+  if stdout == nil then
+    stubbed_result = nil
+  else
+    stubbed_result = { stdout = stdout, timed_out = timed_out }
+  end
+  local reading, reason
+  quota.codex_read(function(value, failure)
+    reading, reason = value, failure
+  end)
+  eq(name .. " argv executable", process_options.argv[1], "codex")
+  eq(name .. " argv subcommand", process_options.argv[2], "app-server")
+  eq(name .. " hold lines", process_options.stdin_hold_until_lines, 4)
+  eq(name .. " timeout", process_options.timeout, 5)
+  if expected then
+    ok(name .. " reads the fixture response", reading ~= nil)
+    eq(name .. " preserves plan", reading and reading.plan, "prolite")
+    eq(name .. " reads fixture usage", reading and reading.limits[1].used, 62)
+    eq(name .. " has no failure reason", reason, nil)
+  else
+    eq(name .. " uses unknown-reason path", reading, nil)
+    eq(name .. " gives expected unknown reason", reason,
+      failure_reason or "codex did not show its limits in time")
+  end
+end
+codex_read_case("app-server id 2 third", table.concat({ wire_init, wire_remote, wire_rate_limits }, "\n"), false, true)
+codex_read_case("app-server id 2 fourth", table.concat({ wire_init, wire_remote, wire_account, wire_rate_limits }, "\n"), false, true)
+codex_read_case("app-server timed out with id 2", table.concat({
+  wire_init, wire_remote, wire_account, wire_rate_limits,
+}, "\n"), true, true)
+codex_read_case("app-server timed out without id 2", table.concat({ wire_init, wire_remote, wire_account }, "\n"), true, false,
+  "codex limits need core nightly d47a845 or newer")
+codex_read_case("app-server garbage", "not JSON\nstill not JSON", false, false)
+codex_read_case("old core initialize only", wire_init, false, false,
+  "codex limits need core nightly d47a845 or newer")
+codex_read_case("app-server nil result", nil, false, false)
+remuda = saved_remuda
 
 eq("usage error unexpected argument", quota.usage_error("claude"), "unexpected argument: claude\n"
   .. "Usage: remuda butler quota [--report]\nExample: remuda butler quota --report\n"
