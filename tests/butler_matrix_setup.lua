@@ -563,11 +563,11 @@ return function(matrix)
   requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
   local wizard_reply = matrix.cli({ "matrix", "setup" })
   assert(wizard_reply and pending_timeout == 300 and #line_specs == 1 and not resolved
-    and line_specs[1].label == "Matrix homeserver URL:",
+    and line_specs[1].label == "Matrix homeserver URL",
     "no-flag setup should begin an interactive wizard")
   line_specs[1].callback("http://matrix.invalid", nil)
   assert(#line_specs == 2
-    and line_specs[2].label == "Your Matrix user ID (for example @alice:example.org):",
+    and line_specs[2].label == "Your Matrix user ID (for example @alice:example.org)",
     "the wizard should ask for the owner after the homeserver")
   line_specs[2].callback("@alice:example.org", nil)
   assert(#line_specs == 3 and line_specs[3].label:find("Continue? Type Y", 1, true)
@@ -578,6 +578,8 @@ return function(matrix)
     and not line_specs[3].label:find("Room access", 1, true)
     and line_specs[3].label:find("replaces its current Matrix relay config", 1, true),
     "the wizard should set open rooms and summarize the real config path")
+  assert(line_specs[3].label:match("\n([^\n]*)$") == "Continue? Type Y to continue, or N to cancel",
+    "the summary label should end with the bare question: core adds the [N]: suffix")
   assert(not line_specs[3].label:find("HTTPS", 1, true),
     "an http wizard summary should show no HTTPS trust line")
   assert(line_specs[3].default == "N", "wizard confirmation should default to no")
@@ -620,7 +622,7 @@ return function(matrix)
   line_specs[2].callback("@alice:example.org", nil)
   assert(#line_specs == 3
     and line_specs[3].label == "HTTPS trust: press Enter to use this system's trusted certificates, "
-      .. "or enter a 64-character SHA-256 certificate pin or an absolute CA file path:",
+      .. "or enter a 64-character SHA-256 certificate pin or an absolute CA file path",
     "HTTPS setup should offer system trust on Enter, or a certificate pin or CA file: "
       .. tostring(line_specs[3] and line_specs[3].label))
   line_specs[3].callback(string.rep("a", 64), nil)
@@ -764,7 +766,7 @@ return function(matrix)
       line_specs[1].callback("http://matrix.invalid", nil)
       line_specs[2].callback("@alice:example.org", nil)
       assert(#line_specs == 3 and not resolved and line_specs[3].label
-        == "Butler bot name (for example butler-mac; it becomes @butler-mac:example.org):"
+        == "Butler bot name (for example butler-mac; it becomes @butler-mac:example.org)"
         and line_specs[3].default == nil,
         "the wizard asks for a bot name when none can be derived: " .. tostring(resolved and resolved.stderr))
       line_specs[3].callback(bot_answer, nil)
