@@ -89,7 +89,7 @@ if [[ $LOCK_WORD != true ]]; then
   CAN_FAKE=$(lua "$A" 'return (pcall(function() remuda.fs.lock = function() return {} end end)) and type(remuda.fs.lock) == "function"')
   [[ $CAN_FAKE == true ]] || { echo "skip - all: this core has no remuda.fs.lock and it cannot be faked"; exit 0; }
   FAKE_OWNER="remuda.fs.lock = function() return {} end; "
-  FAKE_SECOND="remuda.fs.lock = function() return nil, 'held', '$A 0 faked-by-test' end; "
+  FAKE_SECOND="remuda.fs.lock = function() return nil, 'held', 'remuda-lock session=$A pid=1 since=1790000000' end; "
   echo "note - the lock is FAKED: this core has no remuda.fs.lock, so T1-T6 prove Butler's side only, not the OS lock"
 fi
 load_butler "$A" "$FAKE_OWNER"

@@ -13,9 +13,10 @@ function guard.lock_path(paths)
   return paths.data_home and (paths.data_home .. "/remuda/butler/lock") or nil
 end
 
--- Returns a state table: { owner = boolean, guarded = boolean, holder = text|nil,
--- reason = text|nil }. The handle lives in a host slot so a mod reload in the
--- same daemon keeps ownership without asking again.
+-- Returns a state table: { owner = boolean, guarded = boolean, held = true|nil,
+-- session = name|nil, pid = digits|nil, reason = text|nil }. The handle is kept
+-- in a host slot as a convenience; core gives the same daemon the same handle
+-- anyway, so a mod reload keeps ownership either way.
 function guard.claim(path)
   local held = remuda._butler_owner_lock
   if held and held.path == path then return { owner = true, guarded = true } end
@@ -34,7 +35,12 @@ function guard.claim(path)
     return { owner = true, guarded = true }
   end
   if ok and why == "held" then
-    return { owner = false, guarded = true, holder = type(info) == "string" and info or nil }
+    -- Core's info line: remuda-lock session=NAME pid=N since=UNIX_SECONDS. It is
+    -- display only; keep a field only when it is plainly a name or a number, so
+    -- forged text never reaches the Next: command.
+    info = type(info) == "string" and (" " .. info .. " ") or ""
+    return { owner = false, guarded = true, held = true,
+      session = info:match(" session=([%w._-]+) "), pid = info:match(" pid=(%d+) ") }
   end
   -- Any other failure fails closed: this daemon is not the owner.
   return { owner = false, guarded = true, reason = tostring(ok and why or handle) }
@@ -46,10 +52,11 @@ end
 
 -- One line plus one Next: for a daemon that is not the owner.
 function guard.refusal(state)
-  if state.holder then
-    local session = state.holder:match("^(%S+)")
-    return "Butler for this home is already running in another Remuda daemon (" .. safe(state.holder)
-      .. "). Nothing was changed.\nNext: remuda -s " .. safe(session or "NAME") .. " butler status"
+  if state.held then
+    local running = "Butler for this home is already running in another Remuda daemon"
+    if not state.session then return running .. ". Nothing was changed.\nNext: remuda butler doctor" end
+    return running .. " (session " .. state.session .. (state.pid and (", pid " .. state.pid) or "")
+      .. "). Nothing was changed.\nNext: remuda -s " .. state.session .. " butler status"
   end
   return "Butler could not take the owner lock for this home (" .. safe(state.reason or "unknown reason")
     .. "). Nothing was changed.\nNext: remuda butler doctor"
