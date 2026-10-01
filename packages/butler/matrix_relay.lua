@@ -1297,7 +1297,15 @@ function relay.new(options)
                   return
                 end
                 if room_kind == nil then
-                  send_notice(room_id, "Joined; I read messages here from the owner.",
+                  local humans = {}
+                  for sender in pairs(cfg.allowed_senders) do
+                    if valid_mxid(sender) and member_kind(sender, cfg) == "HUMAN" then
+                      humans[#humans + 1] = matrix.sanitize_directory_text(sender, 128)
+                    end
+                  end
+                  table.sort(humans)
+                  local readers = #humans > 1 and table.concat(humans, ", ") or "the owner"
+                  send_notice(room_id, "Joined; I read messages here from " .. readers .. ".",
                     "invite-notice", room_id)
                 end
               end)
@@ -1318,7 +1326,8 @@ function relay.new(options)
                 local safe_room_name = type(room_name) == "string"
                   and matrix.utf8_prefix(matrix.sanitize_directory_text(room_name, #room_name), 128) or ""
                 if safe_room_name == "" then safe_room_name = "(unnamed room)" end
-                local text = "Invite to " .. safe_room_name .. " (" .. safe_room .. ") from " .. safe_inviter
+                safe_room_name = safe_room_name:gsub('"', "'")
+                local text = 'Invite to "' .. safe_room_name .. '" (' .. safe_room .. ") from " .. safe_inviter
                   .. " was not accepted. Next: remuda butler matrix join " .. shell_quote(safe_room)
                 if home_invite_notices < 3 then
                   home_invite_notices = home_invite_notices + 1
