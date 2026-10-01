@@ -2905,9 +2905,11 @@ fn butler_matrix_reply_quarantines_rejected_events_for_operator_inspection() {
       matrix.quarantine({{id=rows[1].event_id}}, function(result) denied=result.error end, "codex")
       if not denied or not denied:find("operator-only", 1, true) then return "agent-inspection-not-denied" end
       local root = remuda._butler_bus.agents.butler
+      -- Intermittent in full runs (see PR 223): name the leaked mail, so the next
+      -- failure shows which test or event it came from.
       for _, id in ipairs(remuda._butler_mail.mailbox(root.id)) do
         local message = remuda._butler_bus.messages[id]
-        if message and message.matrix and message.matrix.event_id ~= nil then return "quarantine-leaked-to-mail" end
+        if message and message.matrix and message.matrix.event_id ~= nil then return "quarantine-leaked-to-mail: id=" .. tostring(id) .. " ev=" .. tostring(message.matrix.event_id) .. " room=" .. tostring(message.matrix.room_id) .. " sender=" .. tostring(message.matrix.sender) .. " kind=" .. tostring(message.kind) .. " subj=" .. tostring(message.subject) .. " text=" .. tostring(message.text):sub(1,120) end
       end
       local more = {{}}
       for i=1,205 do more[i] = {{type="m.room.message", event_id="$bulk-" .. i,
@@ -3127,22 +3129,32 @@ fn butler_matrix_reply_home_all_roster_subscriptions_survive_restart() {
       -- Receive rules: a Butler's root post is delivered without a mention.
       if not has(a, "$agent-quiet") or not has(b, "$agent-quiet") then return "agent-root-not-delivered" end
       if not has(a, "$agent-mention") or has(b, "$agent-mention") then return "agent-mention-routing-failed" end
-      if ra:can_reply_to("$agent-mention") or ra:can_reply_to("$unknown-event") then return "reply-guard-failed-open" end
+      -- Old rule (PR 1): can_reply_to was false for a Butler's event. Replaced by the
+      -- loop guard b2b_max_turns: a delivered Butler event can be answered; an
+      -- unknown event still cannot.
+      if not ra:can_reply_to("$agent-mention") then return "butler-event-reply-refused" end
+      if ra:can_reply_to("$unknown-event") then return "reply-guard-failed-open" end
       remuda._butler_matrix_config = {{token_path={a_token}, config_path=config_a}}
-      local send_error
+      local send_path = "http://matrix.example.org/_matrix/client/v3/rooms/"
+        .. matrix.path_component(all) .. "/send/m.room.message/"
+      remuda.http.respond_prefix("PUT", send_path,
+        {{status=200,headers={{}},body='{{"event_id":"$a-send"}}'}})
+      -- Old rule (PR 1): a send that mentions a Butler was refused with
+      -- "Butler-to-Butler sends are disabled". Replaced by posts_per_hour and
+      -- b2b_max_turns: it is posted.
+      local mention_send
       matrix.send({{room=all, text="@butler-b:example.org please reply"}},
-        function(result) send_error=result.error end)
-      if not send_error or not send_error:find("Butler-to-Butler", 1, true) then return "send-loop-not-blocked" end
+        function(result) mention_send=result end)
+      for _=1,4 do remuda.http.tick() end
+      if not mention_send or mention_send.error then
+        return "butler-mention-send-not-posted:" .. tostring(mention_send and mention_send.error)
+      end
       local send_completion
       remuda.pending = function()
         return {{resolve=function(_, code, stdout, stderr)
           send_completion={{code=code, stdout=stdout, stderr=stderr}}
         end}}
       end
-      local send_path = "http://matrix.example.org/_matrix/client/v3/rooms/"
-        .. matrix.path_component(all) .. "/send/m.room.message/"
-      remuda.http.respond_prefix("PUT", send_path,
-        {{status=200,headers={{}},body='{{"event_id":"$a-send"}}'}})
       matrix.relay.instance = ra
       matrix.cli({{"matrix", "--room", all, "send", "fleet note"}}, nil)
       for _=1,4 do remuda.http.tick() end
@@ -3181,7 +3193,9 @@ fn butler_matrix_reply_home_all_roster_subscriptions_survive_restart() {
       -- A followed thread delivers every sender; B does not follow it.
       if not has(a, "$agent-quiet-2") or has(b, "$agent-quiet-2") then return "agent-in-followed-thread-routing-failed" end
       if not has(a, "$agent-mention-2") or has(b, "$agent-mention-2") then return "agent-mention-followup-routing-failed" end
-      if ra:can_reply_to("$agent-mention-2") then return "agent-reply-allowed" end
+      -- Old rule (PR 1): can_reply_to was false here ("agent-reply-allowed" was the
+      -- failure). Replaced by b2b_max_turns.
+      if not ra:can_reply_to("$agent-mention-2") then return "butler-followup-reply-refused" end
       local before = #a + #b
       ra._response(response("cursor-3", nil, nil, followups), "/_matrix/client/v3/sync")
       rb._response(response("cursor-3", nil, nil, followups), "/_matrix/client/v3/sync")
@@ -3262,10 +3276,16 @@ fn butler_matrix_reply_thread_returns_to_original_mail_after_relay_restart() {
       if not cli_completion or cli_completion.code == 0
         or not cli_completion.stderr:find("relay is not running", 1, true) then return "cli-failed-open-without-relay" end
       matrix.relay.instance = relay
-      local before = #remuda.http.calls
-      local sent_ok, sent_error = pcall(remuda._butler_reply, "butler", agent_id, "must refuse")
-      if sent_ok or not tostring(sent_error):find("Butler-to-Butler replies are disabled", 1, true)
-        or #remuda.http.calls ~= before then return "agent-mail-reply-not-refused" end
+      -- Old rule (PR 1): a mail reply to a Butler's mail was refused with
+      -- "Butler-to-Butler replies are disabled" and made no HTTP call. Replaced by
+      -- the loop guard b2b_max_turns: it is queued for the Butler's event.
+      local sent_ok, sent_error = pcall(remuda._butler_reply, "butler", agent_id, "to a butler")
+      if not sent_ok then return "agent-mail-reply-refused:" .. tostring(sent_error) end
+      local agent_queued = false
+      for _, item in pairs(relay:state().reply_outbox) do
+        if item.source_mail_id == agent_id and item.event_id == "$agent-root" then agent_queued = true end
+      end
+      if not agent_queued then return "agent-mail-reply-not-queued" end
       local source_message = remuda._butler_bus.messages[source_id]
       local saved_sender = source_message.matrix.sender
       local saved_route = relay:state().routes[source_id]
@@ -3273,8 +3293,14 @@ fn butler_matrix_reply_thread_returns_to_original_mail_after_relay_restart() {
       relay:state().routes[source_id] = nil
       local nil_sender_before = #remuda.http.calls
       local nil_sender_ok, nil_sender_error = pcall(remuda._butler_reply, "butler", source_id, "must refuse unknown sender")
-      if nil_sender_ok or not tostring(nil_sender_error):find("Butler-to-Butler replies are disabled", 1, true)
-        or #remuda.http.calls ~= nil_sender_before then return "unknown-sender-mail-reply-not-refused" end
+      -- Old rule (PR 1): refused with "Butler-to-Butler replies are disabled".
+      -- Still refused, fail closed and with no HTTP call; the text now names the
+      -- missing route.
+      if nil_sender_ok
+        or not tostring(nil_sender_error):find("Matrix route for Butler mail " .. source_id .. " was not found", 1, true)
+        or #remuda.http.calls ~= nil_sender_before then
+        return "unknown-sender-mail-reply-not-refused:" .. tostring(nil_sender_error)
+      end
       source_message.matrix.sender = saved_sender
       relay:state().routes[source_id] = saved_route
       local queued_reply = remuda._butler_reply("butler", source_id, "answer")
@@ -9365,7 +9391,12 @@ fn butler_matrix_send_and_reply_add_formatted_body_and_fall_back_to_plain() {
         { status = 200, headers = {}, body = '{"event":{"room_id":"!write:example.org"}}' })
       remuda.http.respond_prefix("PUT", base .. "send/m.room.message/",
         { status = 200, headers = {}, body = '{"event_id":"$sent"}' })
-      matrix.relay.instance = { can_reply_to = function() return true end }
+      matrix.relay.instance = { can_reply_to = function() return true end,
+        thread_root_for_event = function(_, event_id) return event_id end,
+        b2b_stopped = function() return false end, b2b_turn_limit = function() return 6 end,
+        note_own_turn = function() end,
+        -- No route: the reply takes a post slot, as for an unknown route.
+        route_for_event = function() return nil end, post_cap_hit = function() end }
       local function content_of(start)
         local before, result = #remuda.http.calls, nil
         start(function(value) result = value end)
@@ -9477,7 +9508,12 @@ fn butler_matrix_reply_react_upload_redact_join_and_leave_compose_request() {
       if not no_relay or not no_relay.error or #remuda.http.calls ~= before_outside then
         return "low-level-reply-failed-open-without-relay"
       end
-      matrix.relay.instance = {{can_reply_to=function() return true end}}
+      matrix.relay.instance = {{can_reply_to=function() return true end,
+        thread_root_for_event=function(_, event_id) return event_id end,
+        b2b_stopped=function() return false end, b2b_turn_limit=function() return 6 end,
+        note_own_turn=function() end,
+        -- No route: the reply takes a post slot, as for an unknown route.
+        route_for_event=function() return nil end, post_cap_hit=function() end}}
       remuda.http.respond("GET", "https://matrix.example.org/_matrix/client/v3/rooms/%21write%3Aexample.org/context/%24outside",
         response('{{"event":{{"room_id":"!other:example.org"}}}}'))
       matrix.reply({{ room = room, event_id = "$outside", text = "must not send" }}, function(value) outside = value end)
