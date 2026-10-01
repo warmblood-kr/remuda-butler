@@ -375,11 +375,11 @@ function matrix.cli(args, agent, stdin_body)
     end
     local execute_setup
     local function begin_wizard()
-      prompt_line("Matrix homeserver URL:", nil, function(homeserver)
+      prompt_line("Matrix homeserver URL", nil, function(homeserver)
         local normalized, scheme_or_error = matrix.setup_validate_homeserver(homeserver)
         if not normalized then return prompt_failure(tostring(scheme_or_error)) end
         local flags = { "--homeserver", normalized, "--owner" }
-        prompt_line("Your Matrix user ID (for example @alice:example.org):", nil, function(owner)
+        prompt_line("Your Matrix user ID (for example @alice:example.org)", nil, function(owner)
           local valid_owner, owner_error = matrix.setup_validate_mxid(owner, "--owner")
           if not valid_owner then return prompt_failure(tostring(owner_error)) end
           flags[4] = valid_owner
@@ -411,7 +411,7 @@ function matrix.cli(args, agent, stdin_body)
             elseif scheme_or_error == "https" then
               lines[#lines + 1] = "  HTTPS trust: this system's trusted certificates"
             end
-            prompt_line(table.concat(lines, "\n") .. "\nContinue? Type Y to continue, or N to cancel [N]:",
+            prompt_line(table.concat(lines, "\n") .. "\nContinue? Type Y to continue, or N to cancel",
               "N", function(answer)
                 answer = type(answer) == "string" and answer:lower() or ""
                 if answer ~= "y" and answer ~= "yes" then
@@ -423,7 +423,7 @@ function matrix.cli(args, agent, stdin_body)
           local function ask_transport_trust()
             if scheme_or_error == "https" then
               prompt_line("HTTPS trust: press Enter to use this system's trusted certificates, "
-                .. "or enter a 64-character SHA-256 certificate pin or an absolute CA file path:",
+                .. "or enter a 64-character SHA-256 certificate pin or an absolute CA file path",
                 nil, function(trust)
                   if type(trust) ~= "string" then
                     return prompt_failure("The HTTPS trust answer must be Enter (this system's trusted certificates), "
@@ -446,7 +446,7 @@ function matrix.cli(args, agent, stdin_body)
           end
           if matrix.setup_default_bot(valid_owner) then return ask_transport_trust() end
           local server = valid_owner:match("^@[^:]+:(.+)$")
-          prompt_line("Butler bot name (for example butler-mac; it becomes @butler-mac:" .. server .. "):",
+          prompt_line("Butler bot name (for example butler-mac; it becomes @butler-mac:" .. server .. ")",
             nil, function(bot)
               if type(bot) ~= "string" or bot == "" then
                 return prompt_failure("A Butler bot name is required.")

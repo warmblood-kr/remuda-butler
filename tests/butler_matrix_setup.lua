@@ -556,6 +556,12 @@ return function(matrix)
     end }
     function reply:prompt_secret(spec) prompt_specs[#prompt_specs + 1] = spec end
     function reply:prompt_line(spec)
+      -- Core's prompt_line shows a label on one line, cuts it at 256
+      -- characters and adds ":" / "[default]:" itself. The summary label is
+      -- exempt until core can print output before a prompt (butler #186).
+      assert(not spec.label:find(":%s*$"), "a wizard prompt label must not end with its own colon: " .. spec.label)
+      assert(spec.label:find("^Matrix setup will:") or (#spec.label <= 256 and not spec.label:find("\n", 1, true)),
+        "every wizard prompt label is one line and at most 256 characters: " .. spec.label)
       line_specs[#line_specs + 1] = spec
     end
     return reply

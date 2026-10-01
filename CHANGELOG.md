@@ -40,3 +40,4 @@ release tags yet; entries come from merged pull requests.
 - Future Matrix join timestamps are kept (#141).
 - `remuda butler doctor` reports probe timeouts (#135).
 - The `matrix setup` wizard asks for a Butler bot name when it cannot take one from this computer's name (a stock Mac), instead of stopping. The flag form's refusal now ends with a `Next:` line naming `--bot` (#182).
+- The `matrix setup` wizard prompts no longer show a doubled colon such as `URL::` (#186).
