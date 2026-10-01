@@ -1,0 +1,24 @@
+  Visit https://chatgpt.com/codex/settings/usage for up-to-date
+  information on rate limits and credits
+
+  Server:                     Local background server
+
+  Model:                      GPT-6-Luna (reasoning high, summaries auto)
+  Model provider:             openai
+  Directory:                  ~/projects/quota-tl
+  Permissions:                Workspace (Approve for me)
+  Agents.md:                  AGENTS.md
+  Account:                    Pro
+  Collaboration mode:         Default
+  Session:                    01a0f5bb-bde6-7a63-b507-3838eeaa3afe
+
+  Weekly limit:               [████████░░░░░░░░░░░░] 40% left
+                              (resets 2:30 AM on 4 Oct)
+  Luna Reserve Weekly limit:  [████████████████████] 100% left
+                              (resets 1:32 PM on 8 Oct)
+
+
+› Ask Codex to do anything
+
+  GPT-6-Luna high · ~/projects/quota-tl
+  ← for agents · ? for shortcuts
