@@ -226,8 +226,12 @@ for i in 1 2 3; do
   fi
 done
 lua "pcall(remuda.kill, $FOREIGN_RELAY_ID); remuda._butler_foreign_matrix_relay = nil"
-remuda -s "$S" butler sessions | grep -q m1 || fail "'remuda butler sessions' lost m1"
-remuda -s "$S" butler inbox m1 | grep -q 'kept across reload' || fail "m1 mail lost"
+# Read the whole answer first: `grep -q` leaves at its first match, the client
+# then writes into a closed pipe, and under pipefail the line fails on a match.
+sessions=$(remuda -s "$S" butler sessions) || fail "'remuda butler sessions' failed"
+grep -q m1 <<<"$sessions" || fail "'remuda butler sessions' lost m1"
+inbox=$(remuda -s "$S" butler inbox m1) || fail "'remuda butler inbox m1' failed"
+grep -q 'kept across reload' <<<"$inbox" || fail "m1 mail lost"
 
 echo "== rollback to $OLD_REF"
 old_files
