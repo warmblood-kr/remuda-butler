@@ -405,6 +405,8 @@ the normal way for a member to communicate.
   end })
 remuda._butler_contribute("butler.guidance", "leader", { order = 90,
   prompt = function(ctx) return "Your leader is " .. ctx.parent .. "." end })
+remuda._butler_contribute("butler.permission", "cli", { order = 10,
+  rules = function(ctx) return remuda._butler_permissions.builtin(ctx) end })
 end
 local function guidance(part, parent)
   local out = {}
@@ -419,9 +421,8 @@ local function team_member_prompt(parent) return guidance("prompt", parent) end
 local function write_agent_guidance(root, text, replace)
   local path = root .. "/AGENTS.md"
   if not replace and file_exists(path) then return end
-  local f = assert(io.open(path, "w"))
-  f:write(text)
-  f:close()
+  -- Only when the text differs: launch_butler calls this on every reconcile tick.
+  assert(remuda._butler_permissions.write_if_changed(path, text, config.fs))
 end
 local _butler_session_trace -- defined below; the task poke fires later
 local function option_number(screen, matches)
