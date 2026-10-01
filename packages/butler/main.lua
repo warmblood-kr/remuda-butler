@@ -660,9 +660,15 @@ bus.identities.butler = bus.identities.butler or root_identity
 local root_migrated, root_migration_error = migrate_legacy_mail("butler", root_identity.id)
 if not root_migrated then error("cannot migrate legacy Butler mail: " .. tostring(root_migration_error), 0) end
 mailbox(root_identity.id)
-local mcp_file = io.open(mcp_config_path, "w")
-mcp_file:write(agent_mcp_json(butler_token))
-mcp_file:close()
+-- The root MCP config carries the root capability: owner-only (0600), and a
+-- file left 0644 by an older Butler is replaced. Cores without
+-- remuda.fs.write_atomic keep the plain write.
+if not (remuda.fs and remuda.fs.write_atomic
+    and remuda.fs.write_atomic(mcp_config_path, agent_mcp_json(butler_token), { private = true })) then
+  local mcp_file = io.open(mcp_config_path, "w")
+  mcp_file:write(agent_mcp_json(butler_token))
+  mcp_file:close()
+end
 
 local SYSTEM_PROMPT = "Early in this session, call remuda._butler_register_compaction_schedule() "
   .. "via the run_script MCP tool, once, to enable this butler's own periodic "
