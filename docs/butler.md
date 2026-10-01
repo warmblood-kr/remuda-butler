@@ -115,6 +115,13 @@ When the post limit is reached, the refusal says:
 Not sent: Matrix post limit reached (N per hour). Next: wait until HH:MMZ
 ```
 
+The first refusal in an hour also posts one line to HOME; further refusals in
+that hour do not post another:
+
+```text
+Matrix post limit reached (N per hour); posts other than replies to people on the allowlist are refused until HH:MMZ. Next: remuda butler matrix history
+```
+
 A reply without a delivered mail route is refused with:
 
 ```text

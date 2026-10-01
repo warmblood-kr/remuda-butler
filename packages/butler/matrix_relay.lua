@@ -556,6 +556,8 @@ function relay.new(options)
   local delivery_retry_waiting, delivery_retry_timers = {}, {}
   local reply_retry_timers, reply_in_flight = {}, {}
   local untrusted_receive_times = {}
+  -- ponytail: in memory, a restart may repeat the line once
+  local post_cap_notice_at
   -- ponytail: in memory, a restart resets the floor and drops a pending count
   local cap_summary = {}
   -- ponytail: in memory, a restart resets the turn counts; one entry per Butler thread until a human replies or a restart
@@ -583,6 +585,20 @@ function relay.new(options)
           .. terminal_safe_field(room, 512) .. ": " .. terminal_safe_field(tostring(detail), 512))
       end
     end)
+  end
+
+  function instance:post_cap_hit(limit, until_text)
+    local now = os.time()
+    if post_cap_notice_at == nil or now - post_cap_notice_at >= 3600 then
+      post_cap_notice_at = now
+      send_notice(cfg.home_room,
+        "Matrix post limit reached (" .. tostring(limit)
+          .. " per hour); posts other than replies to people on the allowlist are refused until "
+          .. tostring(until_text) .. ". Next: remuda butler matrix history",
+        "post-cap-notice", cfg.home_room)
+      return true
+    end
+    return false
   end
 
   local function note_turn(room, root, kind)
