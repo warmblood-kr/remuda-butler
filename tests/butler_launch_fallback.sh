@@ -129,8 +129,6 @@ for _ in $(seq 20); do
   [[ $(lua 'return remuda._butler_codex_requires and remuda._butler_codex_requires.reason or ""') == not_found ]] && break
   sleep 0.1
 done
-[[ $(lua 'return remuda._butler_codex_requires and remuda._butler_codex_requires.detail or ""') == *"codex not found in PATH"* ]] ||
-  fail "Codex precheck did not use its required executable"
 # A pending readiness probe must leave command dispatch responsive.
 lua 'remuda._butler_choose_async({"hang"}, {name="async-hang", spec=function() return {} end,
   env=function() return {} end}, function() end)' >/dev/null

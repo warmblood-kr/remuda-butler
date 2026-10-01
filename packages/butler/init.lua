@@ -1,18 +1,19 @@
 -- The module owns every hook and schedule. main.lua loads the implementation
 -- from the lifecycle start event, where #143 also owns its imperative command
 -- and contribution registrations.
-remuda.exec("butler/system")
 if not getmetatable(_G) then
   -- Cores before warmblood-kr/remuda#98 send this entry as a plain chunk.
   return remuda.exec("butler")
 end
 
 local host = getmetatable(_G).__index.remuda
-local system = assert(host._butler_system)
+local system
 local booted, main_loaded = false, false
 local function load_main()
   if main_loaded then return end
   main_loaded = true
+  host.exec("butler/system")
+  system = assert(host._butler_system)
   host.exec("butler/main")
 end
 local function start_matrix_relay()
