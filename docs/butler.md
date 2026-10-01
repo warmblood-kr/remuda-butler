@@ -104,6 +104,9 @@ Stopped replying in thread ROOT (ROOM): N Butler-only turns. A reply in that thr
 
 The reply refusal includes a command with shell-quoted room and thread IDs:
 
+A thread root that could be parsed as a link is printed as `(id not shown)`, and
+the refusal points to room history instead of naming that thread.
+
 ```text
 Reply not sent: stopped replying in thread ROOT (ROOM): N Butler-only turns. A reply in that thread from a person on the allowlist resumes it.
 Next: remuda butler matrix --room 'ROOM' thread '$ROOT'

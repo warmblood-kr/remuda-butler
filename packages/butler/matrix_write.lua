@@ -157,13 +157,15 @@ function matrix.reply(opts, on_done)
   local allowlisted_human_reply = route ~= nil and route.allowlisted_human == true
   local root = relay:thread_root_for_event(opts.event_id)
   local safe_room = terminal_safe(room)
-  local safe_root = terminal_safe(root or opts.event_id)
+  local shown_root = matrix.shown_event_id(root or opts.event_id)
+  local root_is_shown = shown_root ~= "(id not shown)"
   local function stopped_error()
-    return "Reply not sent: stopped replying in thread " .. safe_root .. " (" .. safe_room .. "): "
+    local next_step = "Next: remuda butler matrix --room " .. matrix.shell_quote(safe_room)
+      .. (root_is_shown and (" thread " .. matrix.shell_quote(shown_root)) or " history")
+    return "Reply not sent: stopped replying in thread " .. shown_root .. " (" .. safe_room .. "): "
       .. tostring(relay:b2b_turn_limit())
       .. " Butler-only turns. A reply in that thread from a person on the allowlist resumes it.\n"
-      .. "Next: remuda butler matrix --room " .. matrix.shell_quote(safe_room)
-      .. " thread " .. matrix.shell_quote(safe_root)
+      .. next_step
   end
   if not opts.from_outbox and relay:b2b_stopped(room, root) then
     return error_result(done, stopped_error())

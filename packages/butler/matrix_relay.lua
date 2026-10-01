@@ -619,7 +619,7 @@ function relay.new(options)
     if turns.n >= cfg.b2b_max_turns and not turns.notified then
       turns.notified = true
       send_notice(cfg.home_room,
-        "Stopped replying in thread " .. terminal_safe_field(root, 256) .. " ("
+        "Stopped replying in thread " .. matrix.shown_event_id(root) .. " ("
           .. terminal_safe_field(room, 512) .. "): " .. tostring(cfg.b2b_max_turns)
           .. " Butler-only turns. A reply in that thread from a person on the allowlist resumes it.",
         "b2b-turn-limit", cfg.home_room)
@@ -917,11 +917,15 @@ function relay.new(options)
       local room = route.room_id
       local root = instance:thread_root_for_event(route.event_id)
       if instance:b2b_stopped(room, root) then
-        local safe_room, safe_root = terminal_safe_field(room, 512), terminal_safe_field(root, 256)
-        return nil, "Reply not sent: stopped replying in thread " .. safe_root .. " (" .. safe_room .. "): "
+        local safe_room = terminal_safe_field(room, 512)
+        local shown_root = matrix.shown_event_id(root)
+        local root_is_shown = shown_root ~= "(id not shown)"
+        local next_step = "Next: remuda butler matrix --room " .. shell_quote(safe_room)
+          .. (root_is_shown and (" thread " .. shell_quote(shown_root)) or " history")
+        return nil, "Reply not sent: stopped replying in thread " .. shown_root .. " (" .. safe_room .. "): "
           .. tostring(cfg.b2b_max_turns)
-          .. " Butler-only turns. A reply in that thread from a person on the allowlist resumes it.\nNext: remuda butler matrix --room "
-          .. shell_quote(safe_room) .. " thread " .. shell_quote(safe_root)
+          .. " Butler-only turns. A reply in that thread from a person on the allowlist resumes it.\n"
+          .. next_step
       end
       if route.allowlisted_human ~= true then
         local slot, slot_error = matrix.take_post_slot(config_path)

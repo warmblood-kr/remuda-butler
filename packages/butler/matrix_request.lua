@@ -41,6 +41,11 @@ local function shell_quote(value)
 end
 matrix.shell_quote = shell_quote
 
+function matrix.shown_event_id(id)
+  if type(id) == "string" and id:match("^%$[A-Za-z0-9_-]+$") then return id end
+  return "(id not shown)"
+end
+
 local function format_character(cp)
   return cp == 0x00ad or cp == 0x061c or (cp >= 0x0600 and cp <= 0x0605)
     or cp == 0x06dd or cp == 0x070f or (cp >= 0x0890 and cp <= 0x0891)
