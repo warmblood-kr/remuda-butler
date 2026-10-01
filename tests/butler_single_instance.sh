@@ -112,6 +112,12 @@ ok() { echo "ok - $*"; }
 MCP_MODE=$(ls -l "$C/config.mcp.json" | cut -c1-10)
 [[ $MCP_MODE == "-rw-------" ]] && ok "T0 config.mcp.json is private (0600)" \
   || bad "T0 config.mcp.json is private (0600): mode is $MCP_MODE"
+# A member's MCP config carries that member's capability; it lives in the temp dir.
+MEMBER_MCP=$(lua "$A" "return remuda._butler_agent_support.mcp_config_path('probe', 'test-token')")
+MEMBER_MODE=$(ls -l "$MEMBER_MCP" | cut -c1-10)
+[[ $MEMBER_MCP != *.probe.mcp.json ]] || rm -f "$MEMBER_MCP" "${MEMBER_MCP%.probe.mcp.json}"
+[[ $MEMBER_MODE == "-rw-------" ]] && ok "T0 a member MCP config is private (0600)" \
+  || bad "T0 a member MCP config is private (0600): mode is $MEMBER_MODE"
 sleep 3 # let the owner's reconcile settle before the snapshot
 mkdir "$T/snap"
 cp "$REGISTRY" "$T/snap/agents.jsonl"
