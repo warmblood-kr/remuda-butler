@@ -12,6 +12,7 @@ release tags yet; entries come from merged pull requests.
 - Matrix join and leave accept a room alias or a public room name; public rooms can be browsed (#123).
 - When an agent asks to join a Matrix room, the owner is asked in HOME (#138).
 - `remuda butler doctor` checks agent CLIs and logins and prints the next command (#128).
+- `remuda butler quota` reports, for Claude Code and Codex CLI, the login mode, the subscription account and the used share of each limit with its reset time; `--report` posts the same report to the Matrix home room.
 - `remuda butler close NAME` lets a leader close its own members (#149).
 - After a compaction or restart, a member is shown the last unanswered leader message again; `remuda butler inbox` shows message IDs (#159).
 - `remuda butler matrix follow EVENT_ID` and `unfollow EVENT_ID` manage thread replies. HOME always delivers replies; other rooms deliver a reply only in a followed thread or on a mention. Replying, sending, and a mention from an allowlisted sender follow the thread automatically (#178).
