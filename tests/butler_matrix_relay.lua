@@ -339,6 +339,10 @@ local function test_download_next_command(body)
   for index = 3, #words do args[#args + 1] = words[index] end
   local old_pending, old_download = remuda.pending, matrix.download
   local old_guidance, captured = matrix.configuration_guidance, nil
+  -- This file loads the Matrix modules without main.lua, so the caller check that the
+  -- CLI requires for download is stood in for: an outside caller, path unchanged.
+  local old_check = remuda._butler_output_for_caller
+  remuda._butler_output_for_caller = function(path) return path end
   remuda.pending = function()
     return { resolve = function() end }
   end
@@ -350,6 +354,7 @@ local function test_download_next_command(body)
   matrix.cli(args)
   remuda.pending, matrix.download = old_pending, old_download
   matrix.configuration_guidance = old_guidance
+  remuda._butler_output_for_caller = old_check
   -- No -o in the rendered line: an agent caller's download lands in its working directory.
   assert(captured and captured.output == nil and captured.mxc == "mxc://example.org/chart",
     "rendered Next command should parse to download the expected MXC without -o")

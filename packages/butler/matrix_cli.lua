@@ -327,6 +327,13 @@ end
 
 function matrix.cli(args, agent, stdin_body)
   if type(args) == "table" and args[1] == "matrix" and args[2] == "setup" then
+    -- Setup reads the files its flags name and sends them to the server named on the same
+    -- command line, and rewrites the Butler's Matrix files: operator-only, as join and leave.
+    if agent or not remuda.butler.approval.operator_caller() then
+      local message = "matrix setup is operator-only\nNext: run remuda butler matrix setup from your own terminal"
+      if type(remuda.fail) == "function" then return remuda.fail(message, 1) end
+      error(message, 0)
+    end
     local setup_args = {}
     for index = 3, #args do setup_args[#setup_args + 1] = args[index] end
     local plan, setup_error = matrix.setup_prepare(setup_args)

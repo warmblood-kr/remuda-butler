@@ -231,14 +231,7 @@ local function statusline(args, caller)
   local absolute = type(path) == "string" and (
     path:sub(1, 1) == "/" or path:sub(1, 2) == "\\\\" or drive_rooted
   )
-  -- Only a caller outside any session may name its own path; a session writes
-  -- only a status path this mod issued (its own launch line carries it).
-  local known, who = pcall(function() return remuda.caller() end)
-  local issued = path == remuda._butler_status_path
-  for _, agent in pairs(remuda._butler_bus and remuda._butler_bus.agents or {}) do
-    if type(agent) == "table" and type(agent.telemetry) == "table" and agent.telemetry.status_path == path then issued = true end
-  end
-  if absolute and path:match("%.status$") and (issued or (known and type(who) == "table" and who.kind == "outside")) then
+  if absolute and path:match("%.status$") then
     pcall(remuda.fs.write_atomic, path, line .. "\n" .. (limits and (limits .. "\n") or ""))
   end
   return line
