@@ -21,6 +21,8 @@ trap cleanup EXIT
 EVENT='$abc:example.org'
 HELP_BANNER='coordination for managed agents'
 fail() { echo "FAIL: $*"; exit 1; }
+SOFT=()
+soft() { SOFT+=("$*"); }
 
 start_butler() {
   remuda -s "$S" daemon </dev/null >/dev/null 2>&1 &
@@ -39,6 +41,12 @@ run() { # verb: sets OUT and CODE
   CODE=$?
   set -e
 }
+run_args() { # matrix args...: sets OUT and CODE
+  set +e
+  OUT=$(remuda -s "$S" butler matrix "$@" 2>&1)
+  CODE=$?
+  set -e
+}
 
 # 1. Unconfigured: setup guidance, exit 1, never the general help.
 start_butler
@@ -54,7 +62,7 @@ for _ in $(seq 50); do [[ -S $REMUDA_RUNTIME_DIR/remuda/$S.sock ]] || break; sle
 # 2. Configured (relay running): the verb reaches the Matrix CLI.
 C=$XDG_CONFIG_HOME/remuda/butler
 mkdir -p "$C"
-printf 'http://127.0.0.1:9\n!home:example.org\n@bot:example.org\n@owner:example.org\n' >"$C/config"
+printf 'http://127.0.0.1:9\n!home:example.org\n@bot:example.org\n@owner:example.org\nroom=!side:example.org how=operator\n' >"$C/config"
 printf 'token\n' >"$C/token"
 chmod 600 "$C/config" "$C/token"
 start_butler
@@ -72,6 +80,29 @@ run follow
 # follow is local (no HTTP), so it records the thread even with the
 # homeserver unreachable.
 [[ $CODE == 0 && $OUT == *"Following thread"* ]] || fail "follow EVENT should print Following thread, exit 0: $CODE $OUT"
+# Next lines must survive a paste into sh/zsh: the $ id (and a ! room) quoted.
+[[ $OUT == *"Next: remuda butler matrix thread '$EVENT'"* ]] || soft "follow Next must quote the event id: $OUT"
 run unfollow
 [[ $CODE == 0 && $OUT == *"Stopped following thread"* ]] || fail "unfollow after follow: $CODE $OUT"
+[[ $OUT == *"Next: remuda butler matrix follow '$EVENT'"* ]] || soft "unfollow Next must quote the event id: $OUT"
+
+# --room is carried into Next.
+run_args --room '!side:example.org' follow '$s1:example.org'
+[[ $CODE == 0 && $OUT == *"Next: remuda butler matrix --room '!side:example.org' thread '\$s1:example.org'"* ]] \
+  || soft "follow --room Next must carry the quoted --room: $CODE $OUT"
+
+# A room we are not in is refused, and nothing is stored.
+run_args --room '!nope:example.org' follow '$n1:example.org'
+[[ $CODE == 1 && $OUT == *"room is outside the configured Matrix allowlist"* ]] \
+  || soft "follow --room for an unconfigured room must be refused, exit 1: $CODE $OUT"
+remuda -s "$S" -e 'return remuda.butler.matrix.relay.instance:state().subscriptions["!nope:example.org"] == nil' \
+  | grep -qx true || soft "a refused follow must not store the unconfigured room"
+run_args --room '!nope:example.org' unfollow '$n1:example.org'
+[[ $CODE == 1 ]] || soft "unfollow --room for an unconfigured room must be refused, exit 1: $CODE $OUT"
+
+# An event id must start with $.
+run_args follow abc
+[[ $CODE == 2 && $OUT == *"follow EVENT_ID"* && $OUT == *"Example: remuda butler matrix follow '\$EVENT_ID'"* ]] \
+  || soft "follow of a non-event id must show the follow usage, exit 2: $CODE $OUT"
+((${#SOFT[@]} == 0)) || fail "$(printf '%s\n' "${SOFT[@]}")"
 echo PASS
