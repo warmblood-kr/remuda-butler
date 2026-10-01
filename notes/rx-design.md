@@ -33,12 +33,12 @@ The body is:
 - `reply` follows its thread root in every room kind. `send` follows its own first event in every room kind.
 - Any mention follows the thread, from any sender and in any room (no cap).
 - Follows last until `unfollow`; nothing expires.
-- Store guard: the per-room cap becomes 50000 (`MAX_THREAD_SUBSCRIPTIONS`). At the cap, the new follow is refused with ONE logged warning. Nothing is trimmed, ever (the `trim_map` call is removed).
+- Store guard (PR 1): 5000 follows in TOTAL across rooms (`MAX_THREAD_SUBSCRIPTIONS`). At the cap, the new follow is refused with ONE logged warning. Nothing is trimmed, ever. The 50000 cap is issue text 1 below.
 - Help lines:
   - `remuda butler matrix [--json] [--room ROOM] follow EVENT_ID` then `Next: remuda butler matrix thread EVENT_ID`
   - `remuda butler matrix [--json] [--room ROOM] unfollow EVENT_ID` then `Next: remuda butler matrix follow EVENT_ID (to resume)`
   - Output: `Following thread $ROOT in ROOM.` or `Stopped following thread $ROOT in ROOM.` An unknown thread on unfollow prints `Not following ...` with exit 0.
-  - A follow refused by the guard: `Follow limit reached in ROOM (50000). Next: remuda butler matrix unfollow EVENT_ID`
+  - A follow refused by the guard: `Follow limit reached (5000 in total). Next: remuda butler matrix unfollow 'EVENT_ID'`
 
 ## 5. PR 2: limits (config keys in matrix_request.lua `read_config`; defaults in brackets)
 - `b2b_max_turns` [6]: per thread, count the consecutive AGENT turns, both incoming and our own posts. A HUMAN event resets the count. When the count reaches the limit, `reply` and `send` into that thread are refused, and ONE HOME line is posted: `Stopped replying in thread $ROOT (ROOM): 6 Butler-only turns. A human reply resumes it.` State: `b2b_turns[room][root] = {n, notified}`.
@@ -74,18 +74,28 @@ PR 2:
 
 Dropped by the owner: the mention-follow cap, the idle expiry, the trusted-Butler class.
 
-## State and next steps (2026-10-01 01:36Z, before the restart)
-- feat/rx-dev holds PR 1 code: steps 1-4d plus QA's tests, by cherry-pick.
-  - It is complete except for the follow persistence.
-  - f6a11a9, the chunked JSON-in-string persistence, is ON HOLD and must not ship.
-- Next 1, the PO decision: C prime.
-  - Move follows to a separate file, matrix-follows.json, beside the relay state, written with remuda.fs.write_atomic.
-  - Its shape is room -> {thread_id: created_at}, one value per follow.
-  - The guard is 50000 in TOTAL across rooms (core MAX_VALUES is 100000 per encode).
-  - On load, migrate the old matrix_thread_subscriptions keys, then drop them from the state file. This replaces f6a11a9: revert it.
-  - The docs line "50000 per room" becomes "50000 in total".
-  - Tell the owner: 50000 per room needs a core change.
-- Next 2: rx-qa updates the 2 stale relay asserts for the quoted Next text (step 4d), if it has not already.
-- Next 3: merge feat/rx-dev into feat/matrix-receive-rules. Run tests/butler_matrix_relay.sh, tests/shell_tests.sh, scripts/test-no-shell-lua.sh and, once, tests/rust_tests.sh. Open PR 1 and ask remuda-dev-team-2-lead for the SEC review.
-- Then PR 2: QA's tests are at 2ed025c (feat/rx-qa); design section 5. Remove test_rx_b2b_block_kept_TODO_pr2.
-- Issue to file (out of scope): a misspelled matrix verb gets no did-you-mean and exits 0.
+## State and next steps (2026-10-01 01:55Z)
+PR 1 scope (owner: PR 1 only, smallest cut): design sections 1-4, with ONE change to section 4.
+Follows stay in the relay state file as on main. The guard is 5000 follows in TOTAL across rooms: refuse + one warning, never trim.
+- feat/rx-dev: steps 1-4d, 5a (chunking reverted, 86143c7), 5b (the 5000-total guard, in progress).
+- feat/rx-qa: the PR 1 tests. The follows-file tests are kept as feat/rx-qa-cprime 1c16cc7 for the issue below. The PR 2 tests are in 2ed025c.
+- Then: merge feat/rx-dev + origin/main into feat/matrix-receive-rules; run tests/butler_matrix_relay.sh, tests/shell_tests.sh, scripts/test-no-shell-lua.sh and tests/rust_tests.sh; send the sha to the PO, who pushes, opens PR 1 and asks team-2-lead for the SEC review.
+- PR 2 (design section 5) waits until after the rollout. It removes test_rx_b2b_block_kept_TODO_pr2.
+
+## Issue text 1 (the PO files it): Matrix follows: own file, migration, 50000 cap
+Title: Matrix relay: move thread follows to matrix-follows.json and raise the follow limit to 50000
+
+The owner asked for a follow store guard of 50000. PR 1 ships 5000 follows in total, because follows live in the relay state file (`matrix_thread_subscriptions`) and the core JSON encoder refuses more than 100000 values per encode (`MAX_VALUES`, native/src/json.rs:12). A follow costs 3 values there, and routes and reply results share the same file.
+
+Proposal:
+- Follows move to their own file, `matrix-follows.json`, beside the relay state file, written with `remuda.fs.write_atomic` (private).
+- Shape: `{ ROOM_ID: { THREAD_ID: MAIL_ID or true } }`, one JSON value per follow, with no `created_at` (nothing trims or expires).
+- On load, migrate the old `matrix_thread_subscriptions` entries (keep each `mail_id`; the follows file wins on a conflict), then drop the old key.
+- The guard is 50000 follows in TOTAL across rooms: refuse the new follow, log one warning, never trim; unfollow frees a slot.
+- A corrupt follows file gives an empty set and one warning; the relay keeps running.
+- 50000 per room is not possible without a core change (a higher or streaming encode limit).
+
+RED tests are ready: branch `feat/rx-qa-cprime`, commit 1c16cc7 (5 tests). Do not ship the chunked JSON-in-string workaround (reverted in 86143c7): it evades the core limit.
+
+## Issue text 2: Matrix CLI: a misspelled verb gets no suggestion and exits 0
+`remuda butler matrix folow x` prints the full matrix usage and exits 0. The owner CLI rule wants a did-you-mean suggestion and a non-zero exit. This is true for every matrix verb, and was so before PR 1.
