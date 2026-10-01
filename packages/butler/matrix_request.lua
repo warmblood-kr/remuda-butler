@@ -336,14 +336,17 @@ matrix.read_config = read_config
 local post_times = {}
 
 -- ponytail: in memory, a restart resets the hour; persist it if a restart loop shows up
-function matrix.take_post_slot()
+function matrix.take_post_slot(config_path)
   local now = os.time()
   local cutoff = now - 3600
   for index = #post_times, 1, -1 do
     if post_times[index] < cutoff then table.remove(post_times, index) end
   end
-  local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths or {}
-  local config = paths.config_path and read_config(paths.config_path)
+  if not config_path then
+    local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths or {}
+    config_path = paths.config_path
+  end
+  local config = config_path and read_config(config_path)
   local limit = type(config) == "table" and config.posts_per_hour or 30
   if #post_times >= limit then
     local oldest

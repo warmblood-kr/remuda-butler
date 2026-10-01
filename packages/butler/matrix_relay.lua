@@ -23,6 +23,7 @@ local MAX_THREAD_SUBSCRIPTIONS = 5000
 local MAX_REPLY_OUTBOX = 1000
 local MAX_REPLY_RESULTS = 5000
 local MAX_MAIL_REPLY_BYTES = 64 * 1024
+local CAP_SUMMARY_INTERVAL_SECONDS = 600
 local SYNC_PATH = "/_matrix/client/v3/sync"
 local MESSAGES_PREFIX = "/_matrix/client/v3/rooms/"
 local warning_keys = relay.warning_keys or {}
@@ -551,6 +552,8 @@ function relay.new(options)
   local delivery_retry_waiting, delivery_retry_timers = {}, {}
   local reply_retry_timers, reply_in_flight = {}, {}
   local untrusted_receive_times = {}
+  -- ponytail: in memory, a restart resets the floor and drops a pending count
+  local cap_summary = {}
   local joining = {}
   local generation = 0
   local failures = 0
@@ -848,7 +851,7 @@ function relay.new(options)
       local pending = 0
       for _ in pairs(state.reply_outbox) do pending = pending + 1 end
       if pending >= MAX_REPLY_OUTBOX then return nil, "Matrix mail reply outbox is full" end
-      local slot, slot_error = matrix.take_post_slot()
+      local slot, slot_error = matrix.take_post_slot(config_path)
       if not slot then return nil, slot_error end
       local root = route.thread_root
       state.reply_outbox[reply_id] = { source_mail_id = source_id, room_id = route.room_id,
@@ -998,18 +1001,23 @@ function relay.new(options)
     schedule(delay, "retry", function() if active then poll() end end)
   end
 
-  local function post_rate_cap_summaries(capped)
-    for capped_room, count in pairs(capped) do
-      local safe_room = terminal_safe_field(capped_room, 512)
-      local message_word = count == 1 and "message" or "messages"
-      send_notice(cfg.home_room,
-        tostring(count) .. " " .. message_word .. " from non-allowlisted senders not delivered in " .. safe_room
-          .. " (rate cap). Next: remuda butler matrix --room " .. shell_quote(safe_room) .. " history",
-        "untrusted-room-cap-summary", capped_room)
+  local function post_rate_cap_summaries()
+    local now = os.time()
+    for capped_room, summary in pairs(cap_summary) do
+      if summary.pending > 0 and (summary.last == nil or now - summary.last >= CAP_SUMMARY_INTERVAL_SECONDS) then
+        local safe_room = terminal_safe_field(capped_room, 512)
+        local count = summary.pending
+        local message_word = count == 1 and "message" or "messages"
+        send_notice(cfg.home_room,
+          tostring(count) .. " " .. message_word .. " from non-allowlisted senders not delivered in " .. safe_room
+            .. " (rate cap). Next: remuda butler matrix --room " .. shell_quote(safe_room) .. " history",
+          "untrusted-room-cap-summary", capped_room)
+        summary.pending, summary.last = 0, now
+      end
     end
   end
 
-  local function accept_events(events, cursor, room_id, capped)
+  local function accept_events(events, cursor, room_id)
     local added = {}
     for _, ev in ipairs(type(events) == "table" and events or {}) do
       if type(ev) == "table" then
@@ -1100,7 +1108,9 @@ function relay.new(options)
             untrusted_receive_times[actual_room] = retained
             if #retained >= cfg.untrusted_per_room_hour then
               rate_capped = true
-              capped[actual_room] = (capped[actual_room] or 0) + 1
+              local summary = cap_summary[actual_room] or { pending = 0, last = nil }
+              summary.pending = summary.pending + 1
+              cap_summary[actual_room] = summary
               warn_once("untrusted-rate-cap", actual_room,
                 "butler Matrix rate cap: messages from non-allowlisted senders in "
                   .. terminal_safe_field(actual_room, 512) .. " are not delivered ("
@@ -1498,16 +1508,16 @@ function relay.new(options)
       return
     end
     if path == SYNC_PATH then
-      local added, capped = {}, {}
+      local added = {}
       local rooms = type(response.rooms) == "table" and response.rooms or {}
       local joined = type(rooms.join) == "table" and rooms.join or {}
       for room_id, room in pairs(joined) do
         if cfg.rooms[room_id] then
-          local room_added = accept_events(room and room.timeline and room.timeline.events, nil, room_id, capped)
+          local room_added = accept_events(room and room.timeline and room.timeline.events, nil, room_id)
           for _, id in ipairs(room_added) do added[#added + 1] = id end
         end
       end
-      post_rate_cap_summaries(capped)
+      post_rate_cap_summaries()
       handle_invites(response)
       if type(response.next_batch) == "string" then state.since = response.next_batch end
       persist()
@@ -1525,9 +1535,8 @@ function relay.new(options)
       schedule(3, "backfill", function() if active then poll() end end)
       return
     end
-    local capped = {}
-    local added = accept_events(response.chunk, nil, nil, capped)
-    post_rate_cap_summaries(capped)
+    local added = accept_events(response.chunk)
+    post_rate_cap_summaries()
     state.messages_since = response["end"] or state.messages_since
     persist()
     deliver_pending(added)
