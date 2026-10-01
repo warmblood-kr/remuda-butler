@@ -712,6 +712,62 @@ return function(matrix)
   assert(resolved and resolved.status == 1 and #requests == 0,
     "declining the CA-file wizard should not start registration")
 
+  -- #182: a stock Mac has no HOSTNAME in the daemon and no hostname file.
+  local nameless_getenv, nameless_io_open = os.getenv, io.open
+  os.getenv = function(name)
+    if name == "HOSTNAME" or name == "COMPUTERNAME" then return nil end
+    return nameless_getenv(name)
+  end
+  io.open = function(path, mode)
+    if path == "/etc/hostname" or path == "/var/run/hostname" then return nil, "no such file" end
+    return nameless_io_open(path, mode)
+  end
+  local nameless_ok, nameless_error = pcall(function()
+    assert(type(matrix.setup_default_bot) == "function"
+      and matrix.setup_default_bot("@alice:example.org") == nil,
+      "a machine with no name source has no default bot")
+    local _, no_bot_error = matrix.setup_prepare({ "--homeserver", "http://matrix.invalid",
+      "--owner", "@alice:example.org", "--register", "--dir", output })
+    assert(no_bot_error and no_bot_error:find("cannot derive a bot account name from this computer", 1, true)
+      and no_bot_error:find("\nNext: add --bot @butler-NAME:example.org", 1, true),
+      "the flag form names --bot as the next step when no bot name can be derived: " .. tostring(no_bot_error))
+    for _, bot_answer in ipairs({ "butler-mac", "@butler-mac:example.org" }) do
+      requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+      wizard_reply = matrix.cli({ "matrix", "setup" })
+      line_specs[1].callback("http://matrix.invalid", nil)
+      line_specs[2].callback("@alice:example.org", nil)
+      assert(#line_specs == 3 and not resolved and line_specs[3].label
+        == "Butler bot name (for example butler-mac; it becomes @butler-mac:example.org):"
+        and line_specs[3].default == nil,
+        "the wizard asks for a bot name when none can be derived: " .. tostring(resolved and resolved.stderr))
+      line_specs[3].callback(bot_answer, nil)
+      assert(#line_specs == 4 and line_specs[4].label:find("\n  Bot: @butler-mac:example.org\n", 1, true)
+        and line_specs[4].label:find("Continue? Type Y", 1, true),
+        "the wizard summary shows the entered bot name: " .. bot_answer)
+      line_specs[4].callback("N", nil)
+    end
+    for _, bad_answer in ipairs({ "", "bad name" }) do
+      requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+      wizard_reply = matrix.cli({ "matrix", "setup" })
+      line_specs[1].callback("http://matrix.invalid", nil)
+      line_specs[2].callback("@alice:example.org", nil)
+      line_specs[3].callback(bad_answer, nil)
+      assert(#line_specs == 3 and resolved and resolved.status == 1
+        and resolved.stderr:find("Nothing was written.", 1, true)
+        and select(2, resolved.stderr:gsub("Next:", "")) == 1 and #requests == 0,
+        "the wizard refuses a malformed or empty bot name: '" .. bad_answer .. "'")
+    end
+  end)
+  os.getenv, io.open = nameless_getenv, nameless_io_open
+  assert(nameless_ok, nameless_error)
+  requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+  wizard_reply = matrix.cli({ "matrix", "setup" })
+  line_specs[1].callback("http://matrix.invalid", nil)
+  line_specs[2].callback("@alice:example.org", nil)
+  assert(#line_specs == 3 and line_specs[3].label:find("Continue? Type Y", 1, true),
+    "with a name source the wizard shows no bot prompt")
+  line_specs[3].callback("N", nil)
+
   requests, resolved, prompt_specs = {}, nil, {}
   local prompt_reply = matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
     "--owner", "@alice:example.org", "--register", "--bot", "@butler-prompt:example.org",
