@@ -9618,8 +9618,8 @@ fn butler_quota_statusline_keeps_line_one_and_adds_rate_limits() {
         assert!(used.bytes().all(|b| b.is_ascii_digit()) && reset.bytes().all(|b| b.is_ascii_digit()),
             "rate-limit values must be digits: {}", lines[1]);
     }
-    assert_eq!(parts[1].split_once('@').expect("five-hour separator").0, "92");
-    assert_eq!(parts[2].split_once('@').expect("weekly separator").0, "71");
+    assert_eq!(parts[1].split_once('@').expect("five-hour separator").0, "five_hour=92");
+    assert_eq!(parts[2].split_once('@').expect("weekly separator").0, "seven_day=71");
 
     let no_limits = r#"{"model":{"display_name":"Claude Opus 4.6"},"context_window":{"total_input_tokens":12345,"context_window_size":200000,"used_percentage":6}}"#;
     let no_limits_lua = lua_raw_string(no_limits);
