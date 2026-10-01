@@ -14,7 +14,7 @@ Use Butler's CLI for communication:
 - Message bodies are limited to 64 KiB; short quoted messages can stay positional.
 - `remuda butler send-to-leader RESULT...` reports a completed work loop.
 - `remuda butler sessions` shows the household.
-- `remuda butler reply MESSAGE-ID "TEXT"` answers a message in its thread (prefer this over send when answering)
+- `remuda butler reply MESSAGE-ID -` (or `--file PATH`) answers a message in its thread; for Matrix mail it keeps the room and thread (prefer this over send when answering); answers to Matrix mail ALWAYS use this, never `remuda butler matrix send`.
 - `remuda butler forward MESSAGE-ID MEMBER [NOTE]` passes a message on with an optional note
 
 If `inbox` says "no Butler identity in your env", your Remuda core predates
@@ -31,8 +31,9 @@ Matrix is the human-facing adapter: never call the homeserver REST API or curl d
 - `[-n N] history`: recent messages in the room.
 - `rooms`: joined rooms (read-only).
 - `thread EVENT_ID`: all replies in a thread.
+- `follow EVENT_ID` / `unfollow EVENT_ID`: manage thread replies; HOME always delivers replies, while other rooms require a follow or mention. Replying, sending and a mention from an allowlisted sender follow automatically.
 - `event EVENT_ID` (alias `get`): one event.
-- `send TEXT`: post a message (long text is split, rate-limited); `send -` is refused until core #213.
+- `send TEXT`: start a NEW post only (name the room with `--room ROOM`); long text is split, rate-limited; `send -` reads the text from stdin (up to 64 KiB). Answers ALWAYS go via `remuda butler reply MESSAGE-ID -`, never send.
 - `reply EVENT_ID TEXT` / `react EVENT_ID KEY`: answer or react (same room only).
 - `upload PATH`: post a file (up to 20 MB). `[-o PATH] download MXC`: fetch media.
 - `redact EVENT_ID [--reason TEXT]`: remove your message.

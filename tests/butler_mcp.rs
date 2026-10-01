@@ -233,6 +233,56 @@ fn butler_status_is_a_live_mcp_tool_not_a_terminal_scrape() {
     );
 }
 
+#[test]
+fn matrix_reply_is_not_registered_as_a_text_only_mcp_tool() {
+    let dir = scratch("matrix-reply-tool");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    let token_path = dir.join("matrix-token");
+    let config_path = dir.join("matrix-config");
+    std::fs::write(&token_path, "fake-token").expect("write fake Matrix token");
+    std::fs::write(
+        &config_path,
+        "http://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\n",
+    )
+    .expect("write fake Matrix config");
+    let code = format!(
+        r#"local getenv = os.getenv
+        os.getenv = function(key)
+          if key == 'REMUDA_BUTLER_TOKEN' then return {token_path} end
+          if key == 'REMUDA_BUTLER_CONFIG' then return {config_path} end
+          return getenv(key)
+        end
+        local http, request = remuda.http, remuda.http.request
+        http.request = function(spec)
+          spec.callback({{error='fake homeserver'}})
+          return {{cancel=function() end}}
+        end
+        remuda._butler_argv = {{'sh'}}
+        remuda.exec('butler')
+        http.request = request
+        os.getenv = getenv
+        return 'loaded'"#,
+        token_path = serde_json::to_string(&token_path.to_string_lossy()).unwrap(),
+        config_path = serde_json::to_string(&config_path.to_string_lossy()).unwrap(),
+    );
+    assert_eq!(eval(&path, &code), "loaded");
+    assert_eq!(
+        eval(&path, "return tostring(remuda.butler and remuda.butler.matrix and remuda.butler.matrix.relay ~= nil)"),
+        "true",
+        "Matrix config must load its relay before checking matrix_reply absence"
+    );
+    let names = listed(&path);
+    assert!(
+        !names.contains(&"matrix_reply".to_string()),
+        "the text-only matrix_reply MCP tool must not be registered: {names:?}"
+    );
+    eval(
+        &path,
+        "if remuda.butler and remuda.butler.matrix and remuda.butler.matrix.relay then remuda.butler.matrix.relay.stop() end; return 'stopped'",
+    );
+}
+
 fn eval(path: &Path, code: &str) -> String {
     match client::request(path, &Request::Eval { code: code.into(), name: None }).expect("eval") {
         Response::Value(value) => value,
@@ -301,6 +351,159 @@ fn cli_launch_parents_to_the_calling_member_not_butler() {
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.agents.m4)"), "nil");
 }
 
+#[test]
+fn butler_close_is_limited_to_own_idle_members_unless_forced() {
+    let dir = scratch("butler-close");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+    eval(&path, r#"
+      remuda._butler_agent_builders.fake = function() return {'sleep', '100'} end
+      remuda._butler_launch('fake', 'lead')
+      remuda._butler_launch('fake', 'kid', nil, 'lead')
+      remuda._butler_launch('fake', 'other')
+      remuda._butler_close_test_calls = {}
+      remuda._butler_close_test_unread = 0
+      remuda._butler_mail.unread = function() return remuda._butler_close_test_unread end
+      remuda.fail = function(message) return message end
+      remuda.close = function(name)
+        table.insert(remuda._butler_close_test_calls, name)
+        return 'closed ' .. name
+      end
+      remuda.butler.is_idle = function() return remuda._butler_close_test_idle, 'busy' end
+      remuda._butler_close_test_idle = true
+    "#);
+    let leader_id = eval(&path, "return remuda._butler_bus.agents.lead.id");
+    let other_id = eval(&path, "return remuda._butler_bus.agents.other.id");
+    let cli = |caller_id: &str, args: &str| {
+        eval(&path, &format!(
+            "local old=remuda.caller; remuda.caller=function() \
+             for _, agent in pairs(remuda._butler_bus.agents) do \
+               if agent.id == {caller_id:?} then return {{kind='session', session=agent.session_name}} end \
+             end; return {{kind='outside'}} end; \
+             local result=remuda._extension_commands.butler({{'close', {args}}}, \
+               {{env={{REMUDA_BUTLER_AGENT_ID={caller_id:?}}}}}); \
+             remuda.caller=old; return result"
+        ))
+    };
+    let not_owner = cli(&other_id, "'kid'");
+    assert!(not_owner.contains("only your direct members") && not_owner.ends_with("Next: remuda butler sessions"), "{not_owner}");
+    assert_eq!(eval(&path, "return #remuda._butler_close_test_calls"), "0");
+
+    eval(&path, "remuda._butler_close_test_idle = false");
+    let busy = cli(&leader_id, "'kid'");
+    assert!(busy.contains("is busy") && busy.ends_with("Next: wait for it to become idle, or use --force"), "{busy}");
+    assert_eq!(eval(&path, "return #remuda._butler_close_test_calls"), "0");
+
+    eval(&path, "remuda._butler_send('butler', 'kid', 'unread close guard')");
+    eval(&path, "remuda._butler_close_test_unread = 1");
+    eval(&path, "remuda._butler_close_test_idle = true");
+    let unread = cli(&leader_id, "'kid'");
+    assert!(unread.contains("unread Butler mail") && unread.ends_with("Next: read the inbox, or use --force"), "{unread}");
+    assert_eq!(eval(&path, "return #remuda._butler_close_test_calls"), "0");
+
+    let forced = cli(&other_id, "'kid', '--force'");
+    assert!(forced.contains("only your direct members"), "--force bypassed ownership: {forced}");
+    assert_eq!(eval(&path, "return #remuda._butler_close_test_calls"), "0");
+    let forced = cli(&leader_id, "'kid', '--force'");
+    assert_eq!(forced, "Closed kid.\nNext: remuda butler sessions");
+    assert_eq!(eval(&path, "return remuda._butler_close_test_calls[1]"), "kid");
+
+    for name in ["lead", "butler", "missing"] {
+        let result = cli(&leader_id, &format!("{name:?}"));
+        assert!(result.contains("cannot close") && result.contains("Next: remuda butler sessions"), "{result}");
+    }
+}
+
+#[test]
+fn butler_close_cli_uses_core_caller_not_forwarded_env() {
+    let dir = scratch("butler-close-caller");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+    eval(&path, r#"
+      remuda._butler_agent_builders.fake = function() return {'sleep', '100'} end
+      remuda._butler_launch('fake', 'lead')
+      remuda._butler_launch('fake', 'kid', nil, 'lead')
+      remuda._butler_launch('fake', 'other')
+      remuda._butler_launch('fake', 'other-kid', nil, 'other')
+      remuda._butler_mail.unread = function() return 0 end
+      remuda.butler.is_idle = function() return true end
+      remuda._butler_close_test_calls = {}
+      remuda._butler_close_test_native_close = remuda.close
+      remuda.close = function(name)
+        table.insert(remuda._butler_close_test_calls, name)
+        return 'closed ' .. name
+      end
+      remuda.fail = function(message) return message end
+    "#);
+    let lead_id = eval(&path, "return remuda._butler_bus.agents.lead.id");
+    let other_id = eval(&path, "return remuda._butler_bus.agents.other.id");
+    let cli = |kind: &str, session: &str, env_id: &str, name: &str| {
+        let env = if env_id.is_empty() { "{}".to_string() } else {
+            format!("{{REMUDA_BUTLER_AGENT_ID={env_id:?}}}")
+        };
+        eval(&path, &format!(
+            "local old=remuda.caller; remuda.caller=function() return {{kind={kind:?}, session={session:?}}} end; \
+             local result=remuda._extension_commands.butler({{'close', {name:?}, '--force'}}, {{env={env}}}); \
+             remuda.caller=old; return result"
+        ))
+    };
+
+    let cleared = cli("session", "lead", "", "lead");
+    assert!(cleared.contains("only your direct members"), "cleared env bypassed ownership: {cleared}");
+    let spoofed = cli("session", "lead", &other_id, "other-kid");
+    assert!(spoofed.contains("only your direct members"), "spoofed env bypassed ownership: {spoofed}");
+    let unknown = cli("unknown", "", &lead_id, "kid");
+    assert!(unknown.contains("unknown Butler caller") || unknown.contains("run from a Butler member session"),
+        "unknown caller was not refused: {unknown}");
+    assert_eq!(eval(&path, "return #remuda._butler_close_test_calls"), "0");
+
+    let outside = eval(&path, &format!(
+        "local old=remuda.caller; remuda.caller=function() return {{kind='outside'}} end; \
+         local result=remuda._extension_commands.butler({{'close', 'lead', '--force'}}, {{env={{}}}}); \
+         remuda.caller=old; return result"
+    ));
+    assert_eq!(outside, "Closed lead.\nNext: remuda butler sessions");
+    assert_eq!(eval(&path, "return remuda._butler_close_test_calls[1]"), "lead");
+    eval(&path, "local close=remuda._butler_close_test_native_close; \
+      for _, name in ipairs({'kid', 'other-kid', 'lead', 'other'}) do pcall(close, name) end");
+}
+
+#[test]
+fn butler_close_cli_invokes_real_close_path() {
+    let dir = scratch("butler-close-real");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+    eval(&path, r#"
+      remuda._butler_agent_builders.fake = function() return {'sleep', '100'} end
+      remuda._butler_launch('fake', 'real-kid')
+      remuda._butler_mail.unread = function() return 0 end
+      remuda.butler.is_idle = function() return true end
+      remuda.caller = function() return {kind='outside'} end
+    "#);
+    let result = eval(&path,
+        "return remuda._extension_commands.butler({'close', 'real-kid', '--force'}, {env={}})");
+    assert_eq!(result, "Closed real-kid.\nNext: remuda butler sessions");
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.agents['real-kid'] == nil)"), "true",
+        "the real remuda.close path must remove the closed member from bus.agents");
+}
+
+#[test]
+fn butler_close_is_registered_and_unknown_mcp_caller_cannot_close() {
+    let dir = scratch("butler-close-tool");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+    eval(&path, "remuda._butler_agent_builders.fake = function() return {'sleep', '100'} end; remuda._butler_launch('fake', 'm1')");
+    assert!(listed(&path).contains(&"butler_close".to_string()));
+    let reply = call(&path, "butler_close", json!({"name":"m1", "force":true}));
+    assert_eq!(reply["result"]["isError"], true, "{reply}");
+    assert!(text_of(&reply).contains("unknown caller: run from a Butler session"), "{reply}");
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.agents.m1 ~= nil)"), "true");
+}
+
 fn screen_of(path: &Path, session: &str, until: &str) -> String {
     let deadline = Instant::now() + PATIENCE;
     loop {
@@ -326,6 +529,7 @@ fn mail_notices_wait_for_the_policy_and_coalesce() {
          remuda._butler_launch('fake', 'm1'); \
          remuda._butler_notify_policy = function() return false end",
     );
+    eval(&path, "remuda._butler_inbox('m1')"); // fixture Welcome mail never had a notice
     for n in 1..=3 {
         let sent = eval(&path, &format!("return remuda._butler_send('operator', 'm1', 'hi {n}')"));
         assert!(sent.contains("notice deferred"), "{sent}");
@@ -391,6 +595,33 @@ fn relay_deposit_produces_one_mail_notice() {
 }
 
 #[test]
+fn forward_mail_notice_names_the_forwarder() {
+    let (path, _daemon) = butler_with_member("notice-forwarder-text");
+    setup_mail_notice_clock_for(&path, "m1");
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        local root = remuda._butler_bus.agents.butler
+        remuda._butler_send('operator', 'butler', 'original message')
+        local ids = remuda._butler_mail.mailbox(root.id)
+        local id = ids[#ids]
+        remuda._butler_inbox('butler')
+        remuda._butler_forward('operator', id, 'm1')
+        state.now = 2
+        remuda._butler_deliver_notices()
+        return tostring(#state.typed) .. '\n' .. tostring(state.typed[1] and state.typed[1].text)
+        "#,
+    );
+    let mut lines = got.lines();
+    assert_eq!(lines.next(), Some("1"), "forward should type exactly one notice: {got}");
+    assert!(
+        lines.next().unwrap_or_default().contains("forwarded by operator"),
+        "forward notice should name the forwarder: {got}"
+    );
+}
+
+#[test]
 fn notice_failure_does_not_fail_the_mail_deposit_hook() {
     let (path, _daemon) = butler_with_member("notice-deposit-error");
     let trace = path.parent().unwrap().join("session-trace.log");
@@ -437,6 +668,448 @@ fn a_single_mail_notice_waits_for_two_quiet_seconds() {
         "#,
     );
     assert!(got.starts_with("0|1|2|Butler message "), "single mail debounce timing: {got}");
+}
+
+#[test]
+fn root_butler_seeds_three_unread_mails_when_its_pane_is_ready() {
+    let dir = scratch("notice-unread-root");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    exec_isolated_butler(&path);
+    setup_mail_notice_clock(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        state.busy.butler = true
+        for i = 1, 3 do remuda._notice_test_send('butler', 'root restart ' .. i) end
+        -- Fresh daemon state has lost the deposit notice, but not mailbox mail.
+        remuda._butler_bus.notices = {}
+        remuda._butler_bus.notice_seen = {}
+        remuda._butler_bus.unread_seeded = {}
+        remuda._butler_deliver_notices()
+        local before_ready = #state.typed
+        state.busy.butler = false
+        remuda._butler_deliver_notices()
+        local before_debounce = #state.typed
+        state.now = 1.99
+        remuda._butler_deliver_notices()
+        local early = #state.typed
+        state.now = 2
+        remuda._butler_deliver_notices()
+        return table.concat({ tostring(before_ready), tostring(before_debounce), tostring(early),
+          tostring(#state.typed), tostring(state.typed[1] and state.typed[1].text) }, '|')
+        "#,
+    );
+    assert_eq!(
+        got,
+        "0|0|0|1|3 new Butler messages arrived. Read them: remuda butler inbox"
+    );
+}
+
+#[test]
+fn root_butler_reseeds_after_in_daemon_relaunch_without_instance_ids() {
+    let dir = scratch("notice-unread-root-relaunch");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    exec_isolated_butler(&path);
+    setup_mail_notice_clock(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        remuda.capture = function() return state.screen or '> ' end
+        remuda.type_text = function(_, text)
+          state.typed[#state.typed + 1] = { at = state.now, text = text }
+          state.screen = text .. '\n> '
+          return true
+        end
+        remuda._notice_test_send('butler', 'root unread mail')
+        state.now = 2
+        remuda._butler_deliver_notices()
+        state.now = 3
+        remuda._butler_deliver_notices()
+        local first_count = #state.typed
+        remuda._butler_reconcile = function() end
+        remuda._butler_session_exited('butler')
+        local exit_marker = remuda._butler_bus.unread_seeded.butler
+        state.screen = '> '
+        state.now = 4
+        remuda._butler_deliver_notices()
+        local after_exit_tick = #state.typed
+        state.now = 6
+        remuda._butler_deliver_notices()
+        state.now = 7
+        remuda._butler_deliver_notices()
+        state.now = 20
+        remuda._butler_deliver_notices()
+        return table.concat({ tostring(first_count), tostring(exit_marker),
+          tostring(after_exit_tick), tostring(#state.typed) }, '|')
+        "#,
+    );
+    assert!(got.starts_with("1|exited|1|2"), "root relaunch should re-seed exactly once: {got}");
+}
+
+#[test]
+fn a_lead_session_gets_one_seeded_notice_when_ready() {
+    let (path, _daemon) = butler_with_named_agent("notice-unread-lead", "lead1", "fake");
+    eval(
+        &path,
+        "remuda._butler_topic_delegate('report1', 'task', nil, 'fake', 'lead1'); \
+         remuda._butler_inbox('report1')",
+    );
+    setup_mail_notice_clock_for(&path, "lead1");
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        state.busy.lead1 = true
+        remuda._notice_test_send('lead1', 'lead waiting mail')
+        remuda._butler_bus.notices = {}
+        remuda._butler_bus.notice_seen = {}
+        remuda._butler_bus.unread_seeded = {}
+        remuda._butler_deliver_notices()
+        local before_ready = #state.typed
+        state.busy.lead1 = false
+        remuda._butler_deliver_notices()
+        state.now = 2
+        remuda._butler_deliver_notices()
+        return tostring(before_ready) .. '|' .. #state.typed .. '|'
+          .. tostring(state.typed[1] and state.typed[1].text:match(
+            '^Butler message .+ from operator arrived%. Read it: remuda butler inbox$') ~= nil)
+          .. '|' .. #remuda._butler_bus.agents.lead1.children
+        "#,
+    );
+    assert_eq!(got, "0|1|true|1");
+}
+
+#[test]
+fn a_codex_agent_gets_one_seeded_notice_when_ready() {
+    let (path, _daemon) = butler_with_named_agent("notice-unread-codex", "codex1", "codex");
+    setup_mail_notice_clock_for(&path, "codex1");
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        state.busy.codex1 = true
+        remuda._notice_test_send('codex1', 'codex waiting mail')
+        remuda._butler_bus.notices = {}
+        remuda._butler_bus.notice_seen = {}
+        remuda._butler_bus.unread_seeded = {}
+        remuda._butler_deliver_notices()
+        local before_ready = #state.typed
+        state.busy.codex1 = false
+        remuda._butler_deliver_notices()
+        state.now = 2
+        remuda._butler_deliver_notices()
+        return tostring(before_ready) .. '|' .. #state.typed .. '|'
+          .. tostring(state.typed[1] and state.typed[1].text:match(
+            '^Butler message .+ from operator arrived%. Read it: remuda butler inbox$') ~= nil)
+          .. '|' .. remuda._butler_bus.agents.codex1.kind
+        "#,
+    );
+    assert_eq!(got, "0|1|true|codex");
+}
+
+#[test]
+fn restart_seeds_three_unread_mails_only_when_the_pane_is_ready() {
+    let (path, _daemon) = butler_with_member("notice-unread-restart");
+    eval(&path, "remuda._butler_inbox('m1')");
+    setup_mail_notice_clock(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        state.busy.m1 = true
+        for i = 1, 3 do remuda._notice_test_send('m1', 'restart ' .. i) end
+        -- A daemon restart loses the in-memory pending notice and dedupe state,
+        -- but leaves the persisted unread mailbox intact.
+        remuda._butler_bus.notices = {}
+        remuda._butler_bus.notice_seen = {}
+        remuda._butler_bus.unread_seeded = {}
+        remuda._butler_deliver_notices()
+        local before_ready = #state.typed
+        state.busy.m1 = false
+        remuda._butler_deliver_notices()
+        local before_debounce = #state.typed
+        state.now = 1.99
+        remuda._butler_deliver_notices()
+        local early = #state.typed
+        state.now = 2
+        remuda._butler_deliver_notices()
+        return table.concat({ tostring(before_ready), tostring(before_debounce), tostring(early),
+          tostring(#state.typed), tostring(state.typed[1] and state.typed[1].text) }, '|')
+        "#,
+    );
+    assert_eq!(
+        got,
+        "0|0|0|1|3 new Butler messages arrived. Read them: remuda butler inbox"
+    );
+}
+
+#[test]
+fn a_relaunch_replays_already_noticed_unread_mail_once() {
+    let (path, _daemon) = butler_with_member("notice-unread-relaunch-instance");
+    setup_mail_notice_clock(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        local rows = {
+          { name = 'm1', alive = true, attached = false, instance_id = 'instance-a' },
+          { name = 'butler', alive = true, attached = false, instance_id = 'root-instance' },
+        }
+        remuda.ls = function() return rows end
+        remuda.capture = function() return state.screen or '> ' end
+        remuda.type_text = function(_, text)
+          state.typed[#state.typed + 1] = { at = state.now, text = text }
+          state.screen = text .. '\n> '
+          return true
+        end
+        remuda._notice_test_send('m1', 'already noticed but unread')
+        state.now = 2
+        remuda._butler_deliver_notices()
+        state.now = 3
+        remuda._butler_deliver_notices() -- verify the first notice left the composer
+        local id = state.typed[1].text:match('Butler message ([^ ]+)')
+        local seen_a = remuda._butler_bus.notice_seen[remuda._butler_bus.agents.m1.id][id]
+        local typed_a = #state.typed
+        rows[1].instance_id = 'instance-b'
+        state.screen = '> '
+        state.now = 4
+        remuda._butler_deliver_notices()
+        local typed_before_debounce = #state.typed
+        state.now = 6
+        remuda._butler_deliver_notices()
+        state.now = 7
+        remuda._butler_deliver_notices() -- verify the replayed notice
+        state.now = 8
+        remuda._butler_deliver_notices()
+        state.now = 20
+        remuda._butler_deliver_notices()
+        return table.concat({ tostring(typed_a), tostring(seen_a),
+          tostring(typed_before_debounce), tostring(#state.typed),
+          tostring(state.typed[2] and state.typed[2].text),
+          tostring(remuda._butler_bus.unread_seeded.m1 == 'instance-b') }, '|')
+        "#,
+    );
+    assert!(got.starts_with("1|true|1|2|Butler message "), "relaunch replay: {got}");
+    assert!(got.contains("|true"), "relaunch instance was not marked seeded: {got}");
+}
+
+#[test]
+fn an_exit_tick_keeps_the_unread_seed_for_a_same_id_relaunch() {
+    let (path, _daemon) = butler_with_member("notice-unread-exit-tick-relaunch");
+    setup_mail_notice_clock(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        local bus = remuda._butler_bus
+        local rows = {
+          { name = 'm1', alive = true, attached = false, instance_id = 'instance-a' },
+          { name = 'butler', alive = true, attached = false, instance_id = 'root-instance' },
+        }
+        remuda.ls = function() return rows end
+        remuda.capture = function() return state.screen or '> ' end
+        remuda.type_text = function(_, text)
+          state.typed[#state.typed + 1] = { at = state.now, text = text }
+          state.screen = text .. '\n> '
+          return true
+        end
+        remuda._notice_test_send('m1', 'same-id relaunch unread mail')
+        state.now = 2
+        remuda._butler_deliver_notices()
+        state.now = 3
+        remuda._butler_deliver_notices() -- verify the first notice left the composer
+        local id = state.typed[1].text:match('Butler message ([^ ]+)')
+        local saved_agent = bus.agents.m1
+        local first_notice = #state.typed
+
+        -- A real member exit clears its agent record and preserves this marker.
+        bus.agents.m1 = nil
+        bus.unread_seeded.m1 = 'exited'
+        bus.notices.m1, bus.notice_screens.m1, bus.pending_tasks.m1 = nil, nil, nil
+        bus.notice_recoveries.m1, bus.task_retry_screens.m1, bus.human_activity_screens.m1 = nil, nil, nil
+        rows[1] = nil
+        state.now = 4
+        remuda._butler_deliver_notices() -- one tick during the relaunch gap
+
+        -- Codex update restarts the member under the same Butler identity id.
+        bus.agents.m1 = {
+          id = saved_agent.id, alias = saved_agent.alias, kind = saved_agent.kind,
+          parent = saved_agent.parent, children = {}, session_instance_id = 'instance-b',
+        }
+        rows[1] = { name = 'm1', alive = true, attached = false, instance_id = 'instance-b' }
+        state.screen = '> '
+        state.now = 8
+        remuda._butler_deliver_notices()
+        state.now = 10
+        remuda._butler_deliver_notices()
+        state.now = 11
+        remuda._butler_deliver_notices() -- verify the replayed notice
+        local second_notice = #state.typed
+        local replay_id = state.typed[2] and state.typed[2].text:match('Butler message ([^ ]+)')
+        local unread = remuda._butler_mail.unread(bus.agents.m1.id)
+        return table.concat({ tostring(first_notice), tostring(second_notice),
+          tostring(id == replay_id), tostring(bus.unread_seeded.m1 == 'instance-b'),
+          tostring(unread), tostring(bus.notice_seen[bus.agents.m1.id][id]) }, '|')
+        "#,
+    );
+    assert_eq!(got, "1|2|true|true|1|true", "same-id relaunch replay: {got}");
+}
+
+#[test]
+fn unread_seed_waits_for_pending_task_and_codex_update_handoffs() {
+    let (path, _daemon) = butler_with_member("notice-unread-seed-gates");
+    setup_mail_notice_clock(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        local bus = remuda._butler_bus
+        remuda._notice_test_send('m1', 'waiting for startup gates')
+        bus.notices, bus.notice_seen, bus.unread_seeded = {}, {}, {}
+        local blocked = {}
+        bus.pending_tasks.m1 = 'pending task'
+        remuda._butler_deliver_notices()
+        blocked[#blocked + 1] = #state.typed == 0 and bus.unread_seeded.m1 == nil
+        bus.pending_tasks.m1 = nil
+        bus.codex_update_state.owner = 'm1'
+        remuda._butler_deliver_notices()
+        blocked[#blocked + 1] = #state.typed == 0 and bus.unread_seeded.m1 == nil
+        bus.codex_update_state.owner = nil
+        bus.codex_update_state.waiting.m1 = true
+        remuda._butler_deliver_notices()
+        blocked[#blocked + 1] = #state.typed == 0 and bus.unread_seeded.m1 == nil
+        bus.codex_update_state.waiting.m1 = nil
+        bus.codex_update_state.restart_waiting.m1 = true
+        remuda._butler_deliver_notices()
+        blocked[#blocked + 1] = #state.typed == 0 and bus.unread_seeded.m1 == nil
+        bus.codex_update_state.restart_waiting.m1 = nil
+        bus.codex_update_relaunches.m1 = { version = 'test handoff' }
+        remuda._butler_deliver_notices()
+        blocked[#blocked + 1] = #state.typed == 0 and bus.unread_seeded.m1 == nil
+        bus.codex_update_relaunches.m1 = nil
+        remuda._butler_deliver_notices()
+        state.now = 2
+        remuda._butler_deliver_notices()
+        local all_blocked = true
+        for _, value in ipairs(blocked) do all_blocked = all_blocked and value end
+        return tostring(all_blocked) .. '|' .. tostring(#state.typed) .. '|'
+          .. tostring(state.typed[1] and state.typed[1].text)
+        "#,
+    );
+    assert!(got.starts_with("true|1|Butler message "), "seed handoff gates: {got}");
+}
+
+#[test]
+fn unread_seed_tokens_are_pruned_when_an_agent_disappears() {
+    let (path, _daemon) = butler_with_member("notice-unread-seed-prune");
+    setup_mail_notice_clock(&path);
+    let got = eval(
+        &path,
+        r#"
+        local bus = remuda._butler_bus
+        bus.unread_seeded.gone = 'old agent record'
+        remuda._butler_deliver_notices()
+        local after_exit = bus.unread_seeded.gone
+        local agent_record = bus.agents.gone
+        remuda._notice_test_state.now = 30 * 24 * 60 * 60 + 1
+        remuda._butler_deliver_notices()
+        return table.concat({ tostring(after_exit), tostring(agent_record),
+          tostring(bus.unread_seeded.gone), tostring(bus.agents.gone) }, '|')
+        "#,
+    );
+    assert_eq!(got, "exited|nil|nil|nil", "exit marker cleanup: {got}");
+}
+
+#[test]
+fn a_new_member_gets_waiting_mail_after_its_launch_brief() {
+    let (path, _daemon) = butler_with_member("notice-unread-new-member");
+    eval(&path, "remuda._butler_inbox('m1')");
+    setup_mail_notice_clock(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        -- Model mail already waiting while the launch brief keeps the pane busy.
+        state.busy.m1 = true
+        remuda._notice_test_send('m1', 'waiting for launch')
+        remuda._butler_bus.notices = {}
+        remuda._butler_bus.notice_seen = {}
+        remuda._butler_bus.unread_seeded = {}
+        remuda._butler_deliver_notices()
+        local before_brief = #state.typed
+        state.busy.m1 = false -- the welcome/launch brief has settled
+        remuda._butler_deliver_notices()
+        state.now = 2
+        remuda._butler_deliver_notices()
+        local text = state.typed[1] and state.typed[1].text
+        return tostring(before_brief) .. '|' .. #state.typed .. '|'
+          .. tostring(text and text:match('^Butler message .+ from operator arrived%. Read it: remuda butler inbox$') ~= nil)
+        "#,
+    );
+    assert_eq!(got, "0|1|true");
+}
+
+#[test]
+fn no_unread_mail_does_not_seed_a_notice() {
+    let (path, _daemon) = butler_with_member("notice-unread-empty");
+    eval(&path, "remuda._butler_inbox('m1')");
+    setup_mail_notice_clock(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        local policies, captures = 0, 0
+        remuda.capture = function()
+          captures = captures + 1
+          return '> '
+        end
+        remuda._butler_notify_policy = function()
+          policies = policies + 1
+          remuda.capture()
+          return true
+        end
+        remuda._butler_deliver_notices()
+        state.now = 10
+        remuda._butler_deliver_notices()
+        return table.concat({ tostring(#state.typed), tostring(remuda._butler_bus.notices.m1),
+          tostring(policies), tostring(captures) }, '|')
+        "#,
+    );
+    assert_eq!(got, "0|nil|0|0", "zero-unread startup should skip the pane policy: {got}");
+}
+
+#[test]
+fn a_pending_deposit_notice_is_not_duplicated_by_unread_seeding() {
+    let (path, _daemon) = butler_with_member("notice-unread-pending-deposit");
+    eval(&path, "remuda._butler_inbox('m1')");
+    setup_mail_notice_clock(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        state.busy.m1 = true
+        remuda._notice_test_send('m1', 'already pending')
+        local count_before = remuda._butler_bus.notices.m1.count
+        local notify, calls = remuda._butler_notify, 0
+        remuda._butler_notify = function(...)
+          calls = calls + 1
+          return notify(...)
+        end
+        state.busy.m1 = false
+        remuda._butler_deliver_notices()
+        state.now = 2
+        remuda._butler_deliver_notices()
+        local text = state.typed[1] and state.typed[1].text
+        return table.concat({ tostring(count_before), tostring(calls), tostring(#state.typed),
+          tostring(text and text:match('^Butler message .+ from operator arrived%. Read it: remuda butler inbox$') ~= nil),
+          tostring(remuda._butler_bus.unread_seeded.m1 ~= nil) }, '|')
+        "#,
+    );
+    assert_eq!(got, "1|0|1|true|true");
 }
 
 #[test]
@@ -487,6 +1160,110 @@ fn mail_arriving_each_second_fires_by_the_ten_second_maximum() {
         "#,
     );
     assert_eq!(got, "0|1|10|10 new Butler messages arrived. Read them: remuda butler inbox");
+}
+
+#[test]
+fn mail_notice_timer_rearms_quiet_window_and_ignores_stale_handles() {
+    let (path, _daemon) = butler_with_member("notice-timer-quiet-rearm");
+    setup_mail_notice_timer_scheduler(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        remuda._notice_test_send('m1', 'one')
+        local old_quiet = state.timer_at(2)
+        state.now = 1.5
+        remuda._notice_test_send('m1', 'two')
+        local middle_quiet = state.timer_at(3.5)
+        state.now = 2
+        state.force_timer(old_quiet) -- cancellation may race a dequeued callback
+        local after_stale = #state.typed
+        state.now = 3
+        remuda._notice_test_send('m1', 'three')
+        state.fire_until(4.99)
+        local before_due = #state.typed
+        state.fire_until(5)
+        local delivered_at = state.typed[1] and state.typed[1].at
+        state.force_timer(state.timer_at(10)) -- the cancelled cap is stale after delivery
+        return table.concat({ tostring(old_quiet.cancelled), tostring(middle_quiet.cancelled),
+          tostring(after_stale), tostring(before_due), tostring(#state.typed),
+          tostring(delivered_at), tostring(state.typed[1] and state.typed[1].text) }, '|')
+        "#,
+    );
+    assert_eq!(
+        got,
+        "true|true|0|0|1|5|3 new Butler messages arrived. Read them: remuda butler inbox",
+        "quiet timer re-arm, stale callbacks, and delivery deadline: {got}"
+    );
+}
+
+#[test]
+fn mail_notice_timer_cap_fires_during_continuous_arrivals() {
+    let (path, _daemon) = butler_with_member("notice-timer-max-wait");
+    setup_mail_notice_timer_scheduler(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        for i = 1, 10 do
+          state.now = i - 1
+          remuda._notice_test_send('m1', tostring(i))
+        end
+        state.fire_until(9.99)
+        local before_cap = #state.typed
+        state.fire_until(10)
+        return tostring(before_cap) .. '|' .. tostring(#state.typed) .. '|'
+          .. tostring(state.typed[1] and state.typed[1].at) .. '|'
+          .. tostring(state.typed[1] and state.typed[1].text)
+        "#,
+    );
+    assert_eq!(
+        got,
+        "0|1|10|10 new Butler messages arrived. Read them: remuda butler inbox",
+        "continuous arrivals must flush at the cap: {got}"
+    );
+}
+
+#[test]
+fn a_notice_due_at_survives_timer_cancellation_and_delivers_on_poll() {
+    let (path, _daemon) = butler_with_member("notice-timer-reload-fallback");
+    setup_mail_notice_timer_scheduler(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        remuda._notice_test_send('m1', 'reload pending')
+        state.cancel_all() -- a Butler reload cancels its mod-owned timers
+        remuda._butler_bus.notice_timers = {}
+        state.now = 2
+        remuda._butler_deliver_notices() -- the still-declared poll sees due_at
+        local text = state.typed[1] and state.typed[1].text or ''
+        return tostring(#state.typed) .. '|' .. tostring(state.typed[1] and state.typed[1].at)
+          .. '|' .. tostring(text:match('^Butler message .+ arrived%. Read it: remuda butler inbox$') ~= nil)
+        "#,
+    );
+    assert_eq!(got, "1|2|true", "poll must deliver a due notice after timer cancellation: {got}");
+}
+
+#[test]
+fn mail_notice_without_after_keeps_polling_fallback() {
+    let (path, _daemon) = butler_with_member("notice-no-after-fallback");
+    setup_mail_notice_clock(&path);
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        local real_after = remuda.after
+        remuda.after = nil
+        remuda._butler_notice_after = nil
+        remuda._notice_test_send('m1', 'old core fallback')
+        state.now = 2
+        remuda._butler_deliver_notices()
+        remuda.after = real_after
+        return tostring(#state.typed) .. '|' .. tostring(state.typed[1] and state.typed[1].at)
+        "#,
+    );
+    assert_eq!(got, "1|2", "a core without remuda.after must use the polling path: {got}");
 }
 
 #[test]
@@ -636,13 +1413,41 @@ fn butler_with_member(tag: &str) -> (PathBuf, impl Drop) {
     let dir = scratch(tag);
     let path = daemon::socket_path_in(&dir, "s");
     let daemon = daemon_at(&path);
-    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+    exec_isolated_butler(&path);
     eval(
         &path,
         "remuda._butler_agent_builders.fake = function() return {'sleep', '100'} end; \
          remuda._butler_launch('fake', 'm1')",
     );
+    // The Welcome mail is queued without a notice; read it so the unread seed
+    // does not add it to the notices a test counts.
+    eval(&path, "remuda._butler_inbox('m1')");
     (path, daemon)
+}
+
+fn butler_with_named_agent(tag: &str, alias: &str, kind: &str) -> (PathBuf, impl Drop) {
+    let dir = scratch(tag);
+    let path = daemon::socket_path_in(&dir, "s");
+    let daemon = daemon_at(&path);
+    exec_isolated_butler(&path);
+    let launch = format!(
+        "remuda._butler_agent_builders[{kind}] = function() return {{'sleep', '100'}} end; \
+         remuda._butler_launch({kind}, {alias})",
+        kind = serde_json::to_string(kind).unwrap(),
+        alias = serde_json::to_string(alias).unwrap(),
+    );
+    eval(&path, &launch);
+    let inbox = format!("remuda._butler_inbox({})", serde_json::to_string(alias).unwrap());
+    eval(&path, &inbox);
+    (path, daemon)
+}
+
+/// Test daemons share one process, so one XDG data home: skip loading its
+/// agents.jsonl so this root Butler gets its own identity and unread mailbox.
+fn exec_isolated_butler(path: &Path) {
+    eval(path, "remuda._butler_bus = { agents = {}, tokens = {}, inboxes = {}, messages = {}, \
+        objects = {}, next = 0, identities_loaded = true }; \
+        remuda._butler_argv = {'sh'}; remuda.exec('butler')");
 }
 
 fn setup_mail_notice_clock(path: &Path) {
@@ -678,6 +1483,67 @@ fn setup_mail_notice_clock(path: &Path) {
         end
         "#,
     );
+}
+
+fn setup_mail_notice_timer_scheduler(path: &Path) {
+    setup_mail_notice_clock(path);
+    eval(
+        path,
+        r#"
+        local state = remuda._notice_test_state
+        state.timers = {}
+        remuda._butler_notice_after = function(seconds, callback)
+          local timer = {
+            at = state.now + seconds,
+            callback = callback,
+            cancelled = false,
+            fired = false,
+          }
+          function timer:cancel() self.cancelled = true end
+          state.timers[#state.timers + 1] = timer
+          return timer
+        end
+        state.timer_at = function(at)
+          for _, timer in ipairs(state.timers) do
+            if timer.at == at then return timer end
+          end
+        end
+        state.force_timer = function(timer)
+          state.now = timer.at
+          timer.fired = true
+          timer.callback()
+        end
+        state.fire_until = function(deadline)
+          while true do
+            local next_timer
+            for _, timer in ipairs(state.timers) do
+              if not timer.cancelled and not timer.fired and timer.at <= deadline
+                  and (not next_timer or timer.at < next_timer.at) then
+                next_timer = timer
+              end
+            end
+            if not next_timer then break end
+            next_timer.fired = true
+            state.now = next_timer.at
+            next_timer.callback()
+          end
+          state.now = deadline
+        end
+        state.cancel_all = function()
+          for _, timer in ipairs(state.timers) do timer:cancel() end
+        end
+        "#,
+    );
+}
+
+fn setup_mail_notice_clock_for(path: &Path, alias: &str) {
+    setup_mail_notice_clock(path);
+    let sessions = format!(
+        "remuda.ls = function() return {{ {{ name = {alias}, alive = true, attached = false }}, \
+         {{ name = 'butler', alive = true, attached = false }} }} end",
+        alias = serde_json::to_string(alias).unwrap(),
+    );
+    eval(path, &sessions);
 }
 
 #[test]
@@ -1628,6 +2494,7 @@ fn trust_dialogs_on_external_or_reused_directories_wait_for_a_human() {
     let projects = dir.join("projects");
     let reused = projects.join("reused");
     let external = dir.join("external");
+    let fresh = projects.join("fresh");
     std::fs::create_dir_all(&reused).expect("pre-existing topic directory");
     std::fs::create_dir_all(&external).expect("external cwd");
     eval(
@@ -1652,7 +2519,7 @@ fn trust_dialogs_on_external_or_reused_directories_wait_for_a_human() {
               if name == 'outside' then return selected_yes end
               if name == 'outside_codex' then return codex_modal end
               if name == 'reused' then return safe_modal end
-              if name == 'fresh' then return safe_modal end
+              if name == 'fresh' then return "Accessing workspace:\n" .. {fresh:?} .. "\n❯ No, exit\n  Yes, I trust this folder" end
               return three_options
             end
             remuda._trust_test_keys, remuda._trust_test_reports = {{}}, {{}}
@@ -2168,4 +3035,419 @@ fn missing_delivery_channel_is_reported_to_the_sender() {
         got,
         "false|no Butler channel installed (try remuda-butler-inbox)"
     );
+}
+
+/// Shared prelude for the re-notice tests: a member `alias` whose leader is
+/// the root Butler, a context-size stub per alias (`state.ctx`), a tick helper,
+/// and `_rn_lead(text)` returning the id of a leader message to the member.
+fn setup_renotice(path: &Path, alias: &str) {
+    setup_mail_notice_clock_for(path, alias);
+    eval(
+        path,
+        &format!(
+            r#"
+        local state = remuda._notice_test_state
+        local alias = {alias}
+        state.ctx = {{}}
+        remuda._butler_telemetry_for = function(agent)
+          return {{ context_used = state.ctx[agent and agent.alias or ''] }}
+        end
+        remuda._rn_tick = function(now) state.now = now; remuda._butler_deliver_notices() end
+        -- Notices typed into this member's pane only (the stub records every pane).
+        state.to = {{}}
+        -- The pane shows what was typed, as in the #137 tests, so a notice
+        -- verifies instead of hitting the retype fallback.
+        remuda.capture = function() return state.screen or '> ' end
+        local prior_type = remuda.type_text
+        remuda.type_text = function(name, text)
+          local ok = prior_type(name, text)
+          state.to[#state.typed] = name
+          state.screen = text .. '\n> '
+          return ok
+        end
+        remuda._rn_mine = function()
+          local mine = {{}}
+          for i, entry in ipairs(state.typed) do
+            if state.to[i] == alias then mine[#mine + 1] = entry.text end
+          end
+          return mine
+        end
+        remuda._rn_lead = function(text)
+          return (remuda._butler_send('butler', alias, text):match('^queued (%S+)'))
+        end
+        remuda._rn_inbox_id = function(id)
+          local agent = remuda._butler_bus.agents[alias]
+          local ok, out = pcall(remuda._butler_command_run, 'inbox', {{ 'inbox', id }},
+            {{ env = {{ REMUDA_BUTLER_AGENT_ID = agent.id }} }})
+          return tostring(out)
+        end
+        "#,
+            alias = serde_json::to_string(alias).unwrap()
+        ),
+    );
+}
+
+// The t3-timers / mx-render case: the leader message was read before an
+// auto-compact, so the inbox reads empty, yet the member gets one re-shown
+// notice for it and can open it by id; read state does not change.
+#[test]
+fn codex_auto_compact_reshows_the_last_read_leader_message_once() {
+    let (path, _daemon) = butler_with_named_agent("renotice-codex-auto", "cx1", "codex");
+    setup_renotice(&path, "cx1");
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        state.ctx.cx1 = 170000
+        local id = remuda._rn_lead('task for cx1')
+        remuda._rn_tick(0); remuda._rn_tick(2)
+        local first = #state.typed
+        remuda._butler_inbox('cx1')
+        local empty_before = remuda._butler_inbox('cx1')
+        remuda._rn_tick(3)
+        state.ctx.cx1 = 60000
+        remuda._rn_tick(4); remuda._rn_tick(6)
+        local after_drop = #state.typed
+        local text = tostring(state.typed[2] and state.typed[2].text)
+        for t = 7, 20 do remuda._rn_tick(t) end
+        local opened = remuda._rn_inbox_id(id)
+        local agent_id = remuda._butler_bus.agents.cx1.id
+        return table.concat({ tostring(first), empty_before, tostring(after_drop), tostring(#state.typed),
+          tostring(text:find(id, 1, true) ~= nil), tostring(text:find('re-shown after compaction', 1, true) ~= nil),
+          tostring(text:sub(-#('remuda butler inbox ' .. id)) == 'remuda butler inbox ' .. id),
+          tostring(opened:find('task for cx1', 1, true) ~= nil),
+          tostring(remuda._butler_mail.is_unread(agent_id, id)), remuda._butler_inbox('cx1') }, '|')
+        "#,
+    );
+    assert_eq!(got, "1|inbox empty|2|2|true|true|true|true|false|inbox empty",
+        "auto-compact must re-show the read leader message once, openable by id: {got}");
+}
+
+// Our compaction: the half-drop heuristic stays quiet while compaction is in
+// progress; the compaction path itself calls the re-notice hook once.
+#[test]
+fn claude_our_compaction_reshows_the_leader_message_once_via_the_hook() {
+    let (path, _daemon) = butler_with_named_agent("renotice-claude-ours", "cl1", "claude");
+    setup_renotice(&path, "cl1");
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        state.ctx.cl1 = 170000
+        local id = remuda._rn_lead('task for cl1')
+        remuda._rn_tick(0); remuda._rn_tick(2)
+        remuda._butler_inbox('cl1')
+        remuda._rn_tick(3)
+        local agent_id = remuda._butler_bus.agents.cl1.id
+        remuda._butler_compaction_members_state = remuda._butler_compaction_members_state or {}
+        remuda._butler_compaction_members_state[agent_id] = { compaction_in_progress = true }
+        state.ctx.cl1 = 60000
+        remuda._rn_tick(4); remuda._rn_tick(6)
+        local during = #state.typed
+        remuda._butler_compaction_members_state[agent_id].compaction_in_progress = false
+        remuda._butler_notice_compacted('cl1')
+        for t = 7, 20 do remuda._rn_tick(t) end
+        local text = tostring(state.typed[2] and state.typed[2].text)
+        return table.concat({ tostring(during), tostring(#state.typed),
+          tostring(text:find('remuda butler inbox ' .. id, 1, true) ~= nil) }, '|')
+        "#,
+    );
+    assert_eq!(got, "1|2|true", "our compaction: quiet while in progress, then exactly one re-show: {got}");
+}
+
+// Unread leader mail is re-noticed after a compaction (a plain unread
+// notice, not a re-show), exactly once.
+#[test]
+fn unread_leader_mail_is_renoticed_once_after_a_compaction() {
+    let (path, _daemon) = butler_with_named_agent("renotice-unread", "cx1", "codex");
+    setup_renotice(&path, "cx1");
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        state.ctx.cx1 = 170000
+        local id = remuda._rn_lead('unread task')
+        -- Settle: the arrival notice and any follow-up typing happen here.
+        for t = 0, 20 do remuda._rn_tick(t) end
+        local settled = #remuda._rn_mine()
+        -- Control window, no drop: nothing more for the still-unread mail.
+        for t = 21, 40 do remuda._rn_tick(t) end
+        local control = #remuda._rn_mine() - settled
+        state.ctx.cx1 = 60000
+        for t = 41, 60 do remuda._rn_tick(t) end
+        local mine = remuda._rn_mine()
+        local text = tostring(mine[settled + control + 1])
+        return table.concat({ tostring(control), tostring(#mine - settled - control),
+          tostring(text:find(id, 1, true) ~= nil), tostring(text:find('re-shown', 1, true) == nil),
+          tostring(text:sub(-#'remuda butler inbox') == 'remuda butler inbox') }, '|')
+        "#,
+    );
+    assert_eq!(got, "0|1|true|true|true",
+        "unread mail: no notice without a drop, exactly one plain re-notice after it: {got}");
+}
+
+// A leader message the member already answered is not re-shown.
+#[test]
+fn an_answered_leader_message_is_not_reshown_after_a_compaction() {
+    let (path, _daemon) = butler_with_named_agent("renotice-answered", "cx1", "codex");
+    setup_renotice(&path, "cx1");
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        state.ctx.cx1 = 170000
+        local id = remuda._rn_lead('answer me')
+        remuda._rn_tick(0); remuda._rn_tick(2)
+        remuda._butler_inbox('cx1')
+        remuda._butler_reply('cx1', id, 'done')
+        for t = 3, 20 do remuda._rn_tick(t) end
+        local settled = #remuda._rn_mine()
+        state.ctx.cx1 = 60000
+        for t = 21, 40 do remuda._rn_tick(t) end
+        return tostring(#remuda._rn_mine() - settled) .. '|' .. tostring(remuda._butler_notice_compacted ~= nil)
+        "#,
+    );
+    assert_eq!(got, "0|true", "an answered leader message must not be re-shown after the drop: {got}");
+}
+
+// Restart: the read leader message is re-shown once, coalesced with the
+// unread-count notice into a single notice.
+#[test]
+fn restart_reshows_the_read_leader_message_coalesced_with_unread_mail() {
+    let (path, _daemon) = butler_with_member("renotice-restart");
+    setup_renotice(&path, "m1");
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        local bus = remuda._butler_bus
+        local id = remuda._rn_lead('restart task')
+        remuda._rn_tick(0); remuda._rn_tick(2)
+        remuda._butler_inbox('m1')
+        remuda._notice_test_send('m1', 'other mail')
+        -- A daemon restart loses the in-memory notice state.
+        bus.notices, bus.notice_seen, bus.unread_seeded = {}, {}, {}
+        local before = #state.typed
+        for t = 10, 30 do remuda._rn_tick(t) end
+        local text = tostring(state.typed[before + 1] and state.typed[before + 1].text)
+        return table.concat({ tostring(#state.typed - before),
+          tostring(text:find('remuda butler inbox ' .. id, 1, true) ~= nil),
+          tostring(text:find('re-shown after restart', 1, true) ~= nil),
+          tostring(remuda._rn_inbox_id(id):find('restart task', 1, true) ~= nil) }, '|')
+        "#,
+    );
+    assert_eq!(got, "1|true|true|true", "restart: one coalesced notice naming the leader message: {got}");
+}
+
+// Heuristic guards: nil -> value is not a drop; one notice per drop,
+// re-armed only after the context rises again.
+#[test]
+fn half_drop_heuristic_guards_and_rearms_after_a_rise() {
+    let (path, _daemon) = butler_with_named_agent("renotice-guards", "cx1", "codex");
+    setup_renotice(&path, "cx1");
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        local id = remuda._rn_lead('guard task')
+        remuda._rn_tick(0); remuda._rn_tick(2)
+        remuda._butler_inbox('cx1')
+        state.ctx.cx1 = nil
+        remuda._rn_tick(3)
+        state.ctx.cx1 = 60000
+        for t = 4, 9 do remuda._rn_tick(t) end
+        local after_nil = #state.typed
+        state.ctx.cx1 = 170000
+        remuda._rn_tick(10)
+        state.ctx.cx1 = 60000
+        for t = 11, 20 do remuda._rn_tick(t) end
+        local after_drop = #state.typed
+        state.ctx.cx1 = 25000
+        for t = 21, 30 do remuda._rn_tick(t) end
+        local no_rearm = #state.typed
+        state.ctx.cx1 = 180000
+        remuda._rn_tick(31)
+        state.ctx.cx1 = 50000
+        for t = 32, 40 do remuda._rn_tick(t) end
+        return table.concat({ tostring(after_nil), tostring(after_drop), tostring(no_rearm),
+          tostring(#state.typed) }, '|')
+        "#,
+    );
+    assert_eq!(got, "1|2|2|3", "guards: nil start, one per drop, re-arm after rise: {got}");
+}
+
+// First sight of a new member: a brief it read and has not answered while
+// still unseeded (busy with its task) is not re-shown as "after restart".
+#[test]
+fn a_fresh_launch_with_a_read_unanswered_brief_gets_no_reshow() {
+    let (path, _daemon) = butler_with_named_agent("renotice-fresh-launch", "cx1", "codex");
+    setup_renotice(&path, "cx1");
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        local bus = remuda._butler_bus
+        local launched = tostring(bus.unread_seeded.cx1)
+        bus.unread_seeded.cx1 = 'launched' -- as right after launch, before any tick
+        state.busy.cx1 = true
+        local id = remuda._rn_lead('brief for cx1')
+        for t = 0, 3 do remuda._rn_tick(t) end
+        remuda._butler_inbox('cx1')
+        state.busy.cx1 = false
+        for t = 4, 20 do remuda._rn_tick(t) end
+        return launched .. '|' .. tostring(#remuda._rn_mine())
+        "#,
+    );
+    assert!(got.ends_with("|0"), "a fresh launch must not re-show its read brief: {got}");
+}
+
+// inbox ID: own mailbox only; another member's message is refused with a
+// Next: line; the help names the id form.
+#[test]
+fn inbox_id_opens_only_the_callers_own_messages() {
+    let (path, _daemon) = butler_with_named_agent("renotice-inbox-id", "cx1", "codex");
+    setup_renotice(&path, "cx1");
+    let got = eval(
+        &path,
+        r#"
+        local foreign = remuda._butler_send('operator', 'butler', 'root only'):match('^queued (%S+)')
+        local refused = remuda._rn_inbox_id(foreign)
+        local help = tostring(remuda._butler_command_run('inbox', { 'inbox', '--help' }, { env = {} }))
+        return table.concat({ tostring(refused:find('root only', 1, true) == nil),
+          tostring(refused:find('Next:', 1, true) ~= nil),
+          tostring(help:find('message-id', 1, true) ~= nil) }, '|')
+        "#,
+    );
+    assert_eq!(got, "true|true|true", "inbox ID owner check and help: {got}");
+}
+
+// SEC #159 M1: a daemon restart empties the in-memory messages; the member's
+// earlier answer is still on disk, so its answered leader message is not
+// re-shown.
+#[test]
+fn restart_does_not_reshow_a_leader_message_answered_before_it() {
+    let (path, _daemon) = butler_with_member("renotice-restart-answered");
+    setup_renotice(&path, "m1");
+    let got = eval(
+        &path,
+        r#"
+        local bus = remuda._butler_bus
+        local id = remuda._rn_lead('answered before restart')
+        remuda._rn_tick(0); remuda._rn_tick(2)
+        remuda._butler_inbox('m1')
+        remuda._butler_reply('m1', id, 'done')
+        for t = 3, 9 do remuda._rn_tick(t) end
+        -- A daemon restart: in-memory mail and notice state are gone.
+        bus.messages, bus.mail_delivered, bus.mail_loaded = {}, {}, {}
+        bus.notices, bus.notice_seen, bus.unread_seeded = {}, {}, {}
+        local before = #remuda._rn_mine()
+        for t = 10, 30 do remuda._rn_tick(t) end
+        local found = remuda._butler_mail.find_message(id) ~= nil
+        return tostring(found) .. '|' .. tostring(#remuda._rn_mine() - before)
+        "#,
+    );
+    assert_eq!(got, "true|0", "an answered leader message must not be re-shown after a restart: {got}");
+}
+
+// SEC #159 M2: `inbox <arg>` validates the id before any lookup: a path or a
+// non-ULID never reaches a file open and is never cached.
+#[test]
+fn inbox_with_a_non_ulid_opens_no_message_file() {
+    let (path, _daemon) = butler_with_named_agent("renotice-inbox-path", "cx1", "codex");
+    setup_renotice(&path, "cx1");
+    let got = eval(
+        &path,
+        r#"
+        local opened = {}
+        local real_open = io.open
+        io.open = function(name, ...)
+          if tostring(name):find('../../x', 1, true) or tostring(name):find('not-a-ulid', 1, true) then
+            opened[#opened + 1] = name
+          end
+          return real_open(name, ...)
+        end
+        remuda._rn_inbox_id('../../x')
+        remuda._rn_inbox_id('not-a-ulid')
+        io.open = real_open
+        local bus = remuda._butler_bus
+        return tostring(#opened) .. '|' .. tostring(bus.messages['../../x'] == nil)
+          .. '|' .. tostring(bus.messages['not-a-ulid'] == nil)
+        "#,
+    );
+    assert_eq!(got, "0|true|true", "a non-ULID must not reach a message file or the cache: {got}");
+}
+
+// SEC #159 L1: a rise during Butler's own compaction does not re-arm the
+// half-drop heuristic.
+#[test]
+fn a_rise_during_our_compaction_does_not_rearm_the_heuristic() {
+    let (path, _daemon) = butler_with_named_agent("renotice-l1-rearm", "cx1", "codex");
+    setup_renotice(&path, "cx1");
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        state.ctx.cx1 = 170000
+        local id = remuda._rn_lead('l1 task')
+        remuda._rn_tick(0); remuda._rn_tick(2)
+        remuda._butler_inbox('cx1')
+        for t = 3, 9 do remuda._rn_tick(t) end
+        local before = #remuda._rn_mine()
+        local agent_id = remuda._butler_bus.agents.cx1.id
+        remuda._butler_compaction_members_state = remuda._butler_compaction_members_state or {}
+        remuda._butler_compaction_members_state[agent_id] = { compaction_in_progress = true }
+        state.ctx.cx1 = 60000; remuda._rn_tick(10)
+        state.ctx.cx1 = 170000; remuda._rn_tick(11) -- telemetry lag: a rise mid-compaction
+        remuda._butler_compaction_members_state[agent_id].compaction_in_progress = false
+        state.ctx.cx1 = 60000
+        for t = 12, 30 do remuda._rn_tick(t) end
+        return tostring(#remuda._rn_mine() - before)
+        "#,
+    );
+    assert_eq!(got, "0", "a rise during our compaction must not re-arm the heuristic");
+}
+
+// SEC #159 L2: `inbox <message-id>` outside an agent session says why, with
+// a Next: line.
+#[test]
+fn operator_inbox_with_a_message_id_gets_a_next_line() {
+    let (path, _daemon) = butler_with_named_agent("renotice-l2-operator", "cx1", "codex");
+    setup_renotice(&path, "cx1");
+    let got = eval(
+        &path,
+        r#"
+        local id = remuda._rn_lead('operator view')
+        local ok, out = pcall(remuda._butler_command_run, 'inbox', { 'inbox', id }, { env = {} })
+        return tostring(out):find('Next:', 1, true) ~= nil and 'next' or tostring(out)
+        "#,
+    );
+    assert_eq!(got, "next", "an operator inbox <message-id> needs a Next: line");
+}
+
+// SEC #159 L3: reading other mail (unread reaches 0) does not drop a queued
+// re-show.
+#[test]
+fn reading_other_mail_keeps_a_queued_reshow() {
+    let (path, _daemon) = butler_with_named_agent("renotice-l3-keep", "cx1", "codex");
+    setup_renotice(&path, "cx1");
+    let got = eval(
+        &path,
+        r#"
+        local id = remuda._rn_lead('keep me')
+        remuda._rn_tick(0); remuda._rn_tick(2)
+        remuda._butler_inbox('cx1')
+        for t = 3, 9 do remuda._rn_tick(t) end
+        remuda._butler_notice_compacted('cx1')
+        remuda._rn_tick(10) -- the re-show is queued, due at 12
+        remuda._notice_test_send('cx1', 'other mail')
+        remuda._butler_inbox('cx1') -- unread reaches 0 before the re-show is typed
+        for t = 11, 30 do remuda._rn_tick(t) end
+        local reshown = 0
+        for _, text in ipairs(remuda._rn_mine()) do
+          if text:find('remuda butler inbox ' .. id, 1, true) then reshown = reshown + 1 end
+        end
+        return tostring(reshown)
+        "#,
+    );
+    assert_eq!(got, "1", "the queued re-show must survive reading other mail");
 }

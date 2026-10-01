@@ -66,6 +66,30 @@ return function(matrix)
     for _, value in ipairs(extra or {}) do values[#values + 1] = value end
     return values
   end
+  write(token, "access-token-secret")
+  local function written_room_config(room_mode, destination)
+    local values = { "--homeserver", "http://matrix.invalid", "--owner", "@alice:example.org",
+      "--token-file", token, "--bot", "@butler-demo:example.org", "--dir", destination }
+    if room_mode then
+      values[#values + 1] = "--rooms"
+      values[#values + 1] = room_mode
+    end
+    local plan, prepare_error = matrix.setup_prepare(values)
+    assert(plan, "room policy setup should validate: " .. tostring(prepare_error))
+    assert(plan.rooms_mode == (room_mode or "allowlist"), "room policy should default to allowlist")
+    local files, write_error = matrix.setup_write(plan, {
+      token = "created-access-token", user_id = "@butler-demo:example.org", home_room = "!home:example.org",
+    })
+    assert(files, "room policy setup should write its config: " .. tostring(write_error))
+    return read(files.config_path)
+  end
+  local default_rooms_config = written_room_config(nil, root .. "/default-rooms")
+  assert(not default_rooms_config:find("rooms=", 1, true),
+    "default allowlist policy should preserve the legacy config without a rooms line")
+  local open_rooms_config = written_room_config("open", root .. "/open-rooms")
+  assert(open_rooms_config:find("\nrooms=open\n", 1, true),
+    "open room policy should serialize as rooms=open")
+  mkdir_calls = 0
   local function rejected(values, fragment)
     local plan, err = matrix.setup_prepare(values)
     assert(not plan and tostring(err):find(fragment, 1, true),
@@ -208,9 +232,57 @@ return function(matrix)
   rejected(args("--password-file", password,
     { "--bot", "@butler-demo:example.org", "--mystery" }), "unknown option")
   rejected(args("--password-file", password,
+    { "--bot", "@butler-demo:example.org", "--rooms", "anyone" }), "rooms must be open or allowlist")
+  rejected(args("--password-file", password,
     { "--bot", "not-an-mxid" }), "--bot 'not-an-mxid' is not a Matrix user ID")
-  rejected({ "--homeserver", "https://matrix.invalid", "--owner", "@alice:example.org",
-    "--bot", "@butler-demo:example.org", "--password-file", password, "--dir", output }, "--pin")
+  do
+  -- Owner decision A: an https homeserver whose certificate the system roots
+  -- trust needs no --pin/--ca-file; an untrusted one is refused with a Next:.
+  local saved_http = remuda.http
+  local function system_trust_setup(trusted)
+    local queue, specs, result = {}, {}, nil
+    remuda.http = { request = function(spec)
+      specs[#specs + 1] = spec
+      queue[#queue + 1] = spec
+      return { cancel = function() end }
+    end }
+    local plan, plan_error = matrix.setup_prepare({ "--homeserver", "https://matrix.invalid",
+      "--owner", "@alice:example.org", "--bot", "@butler-demo:example.org",
+      "--password-file", password, "--dir", output })
+    assert(plan and not plan.pin and not plan.ca_file,
+      "https setup without --pin/--ca-file must use system trust roots: " .. tostring(plan_error))
+    matrix.setup_network(plan, function(value) result = value end)
+    while #queue > 0 do
+      local spec = table.remove(queue, 1)
+      if spec.pin ~= nil or spec.ca_file ~= nil or spec.pin_only == true then
+        spec.callback({ error = "unexpected trust override" })
+      elseif not trusted then
+        spec.callback({ error = "TLS request failed: server certificate issuer not trusted" })
+      elseif spec.url:find("/login", 1, true) then
+        spec.callback({ status = 200, body = '{"access_token":"system-trust-token"}' })
+      elseif spec.url:find("/whoami", 1, true) then
+        spec.callback({ status = 200, body = '{"user_id":"@butler-demo:example.org"}' })
+      elseif spec.url:find("/createRoom", 1, true) then
+        spec.callback({ status = 200, body = '{"room_id":"!system-trust:example.org"}' })
+      else
+        spec.callback({ status = 404, body = '{"errcode":"M_UNRECOGNIZED"}' })
+      end
+    end
+    remuda.http = saved_http
+    return result, specs
+  end
+  local trusted, trusted_specs = system_trust_setup(true)
+  assert(type(trusted) == "table" and not trusted.error and trusted.home_room == "!system-trust:example.org"
+    and #trusted_specs > 0,
+    "a system-trusted https homeserver must set up without --pin/--ca-file: "
+      .. tostring(type(trusted) == "table" and trusted.error))
+  local untrusted = system_trust_setup(false)
+  assert(type(untrusted) == "table" and type(untrusted.error) == "string"
+    and untrusted.error:find("Next: remuda butler matrix setup --ca-file PATH", 1, true)
+    and not untrusted.error:find("system-trust-token", 1, true),
+    "an untrusted https certificate must be refused with a --ca-file Next: line: "
+      .. tostring(type(untrusted) == "table" and untrusted.error))
+  end
   rejected({ "--homeserver", "https://matrix.invalid", "--owner", "@alice:example.org",
     "--bot", "@butler-demo:example.org", "--password-file", password, "--dir", output,
     "--pin", "abcd" }, "64 hexadecimal")
@@ -233,6 +305,99 @@ return function(matrix)
   matrix.setup_network(ca_plan, function() end)
   assert(transport_spec and transport_spec.ca_file == ca_file,
     "HTTPS setup must pass the configured CA file to the transport")
+  assert(transport_spec.pin_only ~= true and transport_spec.pin == nil,
+    "--ca-file setup keeps chain validation: no pin_only")
+
+  do
+  -- A self-signed homeserver as core 0a5f090 sees it: a pin alone is additive
+  -- (chain check fails), pin_only = true with the matching SPKI pin replaces it.
+  local good_pin_hex, wrong_pin_hex = string.rep("0", 64), string.rep("1", 64)
+  local good_transport_pin = "sha256/" .. string.rep("A", 43) .. "="
+  local saved_http = remuda.http
+  local function self_signed_setup(pin_hex, register)
+    local queue, specs, result = {}, {}, nil
+    remuda.http = { request = function(spec)
+      specs[#specs + 1] = spec
+      queue[#queue + 1] = spec
+      return { cancel = function() end }
+    end }
+    local setup_args = { "--homeserver", "https://matrix.invalid",
+      "--owner", "@alice:example.org", "--bot", "@butler-demo:example.org",
+      "--password-file", password, "--dir", output, "--pin", pin_hex }
+    if register then
+      setup_args[#setup_args + 1] = "--register"
+      setup_args[#setup_args + 1] = "--registration-token-file"
+      setup_args[#setup_args + 1] = registration_token_file
+    end
+    local plan = assert(matrix.setup_prepare(setup_args))
+    matrix.setup_network(plan, function(value) result = value end)
+    while #queue > 0 do
+      local spec = table.remove(queue, 1)
+      if spec.pin_only ~= true then
+        spec.callback({ error = "TLS request failed: server certificate issuer not trusted" })
+      elseif spec.pin ~= good_transport_pin then
+        spec.callback({ error = "TLS request failed: SPKI pin mismatch" })
+      elseif spec.url:find("/register", 1, true) and not spec.body:find('"auth"', 1, true) then
+        spec.callback({ status = 401,
+          body = '{"session":"self-signed-session","flows":[{"stages":["m.login.registration_token"]}]}' })
+      elseif spec.url:find("/register", 1, true) then
+        spec.callback({ status = 200,
+          body = '{"access_token":"self-signed-token","user_id":"@butler-demo:example.org"}' })
+      elseif spec.url:find("/login", 1, true) then
+        spec.callback({ status = 200, body = '{"access_token":"self-signed-token"}' })
+      elseif spec.url:find("/whoami", 1, true) then
+        spec.callback({ status = 200, body = '{"user_id":"@butler-demo:example.org"}' })
+      elseif spec.url:find("/createRoom", 1, true) then
+        spec.callback({ status = 200, body = '{"room_id":"!self-signed:example.org"}' })
+      else
+        spec.callback({ status = 404, body = '{"errcode":"M_UNRECOGNIZED"}' })
+      end
+    end
+    remuda.http = saved_http
+    return result, specs
+  end
+  local signed, signed_specs = self_signed_setup(good_pin_hex)
+  assert(type(signed) == "table" and not signed.error
+    and signed.home_room == "!self-signed:example.org",
+    "--pin alone must set up a self-signed HTTPS homeserver: "
+      .. tostring(type(signed) == "table" and signed.error))
+  for _, spec in ipairs(signed_specs) do
+    assert(spec.pin_only == true and spec.pin == good_transport_pin and spec.ca_file == nil,
+      "every setup request with --pin must use pin_only = true: " .. tostring(spec.url))
+  end
+  rejected({ "--homeserver", "http://matrix.invalid", "--owner", "@alice:example.org",
+    "--bot", "@butler-demo:example.org", "--password-file", password, "--dir", output,
+    "--pin", good_pin_hex }, "only valid with an https:// homeserver")
+  local saved_setup_http = remuda.http
+  local other_error
+  remuda.http = { request = function(spec)
+    spec.callback({ error = "TLS request failed: server hostname mismatch (pinned)" })
+    return { cancel = function() end }
+  end }
+  matrix.setup_network(assert(matrix.setup_prepare({ "--homeserver", "https://matrix.invalid",
+    "--owner", "@alice:example.org", "--bot", "@butler-demo:example.org",
+    "--password-file", password, "--dir", output, "--pin", good_pin_hex })),
+    function(value) other_error = value end)
+  remuda.http = saved_setup_http
+  assert(other_error and other_error.error and not other_error.error:find("does not match --pin", 1, true),
+    "only core's SPKI pin mismatch text gets the --pin Next: line: " .. tostring(other_error and other_error.error))
+  local registered, registered_specs = self_signed_setup(good_pin_hex, true)
+  assert(type(registered) == "table" and not registered.error
+    and registered.home_room == "!self-signed:example.org"
+    and registered_specs[1].url:find("/register", 1, true),
+    "--register --pin must create the bot on a self-signed HTTPS homeserver: "
+      .. tostring(type(registered) == "table" and registered.error))
+  for _, spec in ipairs(registered_specs) do
+    assert(spec.pin_only == true and spec.pin == good_transport_pin and spec.ca_file == nil,
+      "every --register request with --pin must use pin_only = true: " .. tostring(spec.url))
+  end
+  local mismatched = self_signed_setup(wrong_pin_hex)
+  assert(type(mismatched) == "table" and type(mismatched.error) == "string"
+    and mismatched.error:find("pin", 1, true) and mismatched.error:find("Next:", 1, true)
+    and not mismatched.error:find("self-signed-token", 1, true),
+    "a wrong --pin must fail with a Next: line: "
+      .. tostring(type(mismatched) == "table" and mismatched.error))
+  end
   rejected({ "--homeserver", "https://matrix.invalid", "--owner", "@alice:example.org",
     "--bot", "@butler-demo:example.org", "--password-file", password, "--dir", output,
     "--pin", pin, "--ca-file", ca_file }, "choose one")
@@ -388,7 +553,9 @@ return function(matrix)
       resolved = { status = status, stdout = stdout, stderr = stderr }
     end }
     function reply:prompt_secret(spec) prompt_specs[#prompt_specs + 1] = spec end
-    function reply:prompt_line(spec) line_specs[#line_specs + 1] = spec end
+    function reply:prompt_line(spec)
+      line_specs[#line_specs + 1] = spec
+    end
     return reply
   end
   requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
@@ -403,8 +570,12 @@ return function(matrix)
   line_specs[2].callback("@alice:example.org", nil)
   assert(#line_specs == 3 and line_specs[3].label:find("Continue? Type Y", 1, true)
     and line_specs[3].label:find("Bot: @butler%-")
+    and line_specs[3].label:find("\n  Rooms: open (anyone can invite this Butler). Restrict: set rooms=allowlist or add deny_room/deny_server in "
+      .. default_paths.config_path .. ". The sender allowlist still decides whose messages are trusted.\n", 1, true)
+    and not line_specs[3].label:find("quarantined", 1, true)
+    and not line_specs[3].label:find("Room access", 1, true)
     and line_specs[3].label:find("replaces its current Matrix relay config", 1, true),
-    "the wizard should summarize validated details and ask for confirmation")
+    "the wizard should set open rooms and summarize the real config path")
   assert(line_specs[3].default == "N", "wizard confirmation should default to no")
   line_specs[3].callback("n", nil)
   assert(resolved and resolved.status == 1 and resolved.stderr:find("Nothing was written.", 1, true)
@@ -421,6 +592,23 @@ return function(matrix)
     == "Registration token for http://matrix.invalid, from its admin (hidden). This is not an access token:"
     and #requests == 0 and not resolved,
     "confirming the summary should enter the existing hidden registration-token flow")
+  local wizard_bot = assert(line_specs[3].label:match("Bot: (@%S+)"), "wizard summary should name the bot")
+  local wizard_relay, wizard_config, wizard_status = matrix.relay, remuda._butler_matrix_config, matrix.status
+  matrix.relay = { stop = function() end, start = function() return true end }
+  matrix.status = function(_, callback) callback({}) end
+  prompt_specs[1].callback("wizard-registration-token", nil)
+  requests[1].callback({ status = 401,
+    body = '{"session":"wizard-session","flows":[{"stages":["m.login.registration_token"]}]}' })
+  requests[2].callback({ status = 200,
+    body = '{"access_token":"wizard-access-token","user_id":"' .. wizard_bot .. '"}' })
+  requests[3].callback({ status = 200, body = '{"user_id":"' .. wizard_bot .. '"}' })
+  requests[4].callback({ status = 200, body = '{"room_id":"!wizard-home:example.org"}' })
+  matrix.relay, matrix.status = wizard_relay, wizard_status
+  assert(resolved and resolved.status == 0 and read(default_paths.config_path):find("\nrooms=open\n", 1, true),
+    "the confirmed wizard should write rooms=open to the config")
+  for _, path in ipairs({ default_paths.token_path, default_paths.config_path,
+    default_paths.config_path:gsub("/config$", "/password") }) do os.remove(path) end
+  remuda._butler_matrix_config = wizard_config
 
   requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
   wizard_reply = matrix.cli({ "matrix", "setup" })
@@ -1158,6 +1346,24 @@ return function(matrix)
     and read(output .. "/config") == "previous-config\n",
     "failed forced write must restore pre-existing output files")
   remuda.fs.write_atomic = real_write_atomic
+
+  write(output .. "/config", "previous-config\ndeny_room=!blocked:example.org\n"
+    .. "deny_room=#spam:example.org\ndeny_server=evil.example.org\nrooms=open\n"
+    .. "  deny_room = !indented:example.org\n")
+  local kept, kept_error = matrix.setup_write(forced_plan, {
+    token = "replacement-token", user_id = "@butler-demo:example.org",
+    home_room = "!kept-home:example.org",
+  })
+  assert(kept, kept_error)
+  local kept_config = read(output .. "/config")
+  assert(kept_config:find("\ndeny_room=!blocked:example.org\n", 1, true)
+    and kept_config:find("\ndeny_room=#spam:example.org\n", 1, true)
+    and kept_config:find("\ndeny_server=evil.example.org\n", 1, true)
+    and kept_config:find("\n  deny_room = !indented:example.org\n", 1, true)
+    and not kept_config:find("previous-config", 1, true),
+    "--force must keep hand-added deny_room=/deny_server= lines: " .. kept_config)
+  write(output .. "/token", "previous-token\n")
+  write(output .. "/config", "previous-config\n")
 
   local rollback_dir = root .. "/rollback/child"
   local rollback_plan = matrix.setup_prepare({ "--homeserver", "http://matrix.invalid",

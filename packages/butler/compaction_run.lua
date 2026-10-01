@@ -350,7 +350,8 @@ function remuda._butler_compaction_execute(session_name, force)
     state.compaction_in_progress = false
     if owner_state.compaction_fleet_active == state_key then owner_state.compaction_fleet_active = nil end
   end
-  local function fail(reason)
+  -- `wording` replaces "Compaction failed" when the outcome is unknown.
+  local function fail(reason, wording)
     release_lock()
     if state.restore_pending_attempt_active then
       state.restore_pending_attempt_active = nil
@@ -377,7 +378,7 @@ function remuda._butler_compaction_execute(session_name, force)
     state.cooldown_ticks = 0
     _butler_trace("error", detail .. " reason=" .. tostring(reason))
     pcall(remuda._butler_send, session_name, agent.parent or "butler",
-      "Compaction failed: " .. tostring(reason))
+      (wording or "Compaction failed") .. ": " .. tostring(reason))
   end
   local function finish_success(event)
     if agent.kind == "claude" then
@@ -421,6 +422,7 @@ function remuda._butler_compaction_execute(session_name, force)
         "model was restored, but its recovery record could not be cleared")
     end
     _butler_trace(event or "verified", detail)
+    pcall(remuda._butler_notice_compacted, session_name)
   end
   local function pane_busy()
     local found, session = pcall(remuda.session, session_name)
@@ -705,9 +707,22 @@ function remuda._butler_compaction_execute(session_name, force)
     local warned = pcall(remuda._butler_send, session_name, agent.parent or "butler",
       "Compaction is still running; the fleet lock remains held until this session is idle.")
     state.compaction_still_running_notice_sent = warned and true or false
+    -- #158: the monitor holds the fleet lock, so it gives up at a ceiling.
+    -- The pane is still busy there, so no /model is typed: a pending restore
+    -- (state and durable record) stays for the tick to apply once idle.
+    local ceiling = config.monitor_ceiling_seconds
+    local now = remuda._butler_compaction_now or os.time
+    local give_up_at = now() + ceiling
     local monitor_ok, monitor = pcall(remuda.schedule, { every = 1, run = function()
       local found, session = pcall(remuda.session, session_name)
-      if not found or not session then
+      if now() >= give_up_at then
+        if state.compaction_monitor then remuda.cancel(state.compaction_monitor) end
+        state.compaction_monitor = nil
+        state.compaction_still_running_notice_sent = nil
+        local reason = "still busy after " .. math.ceil(ceiling / 60) .. " min"
+        if state.restore_pending then reason = reason .. "; the model is restored when the session is idle" end
+        fail(reason, "Compaction not confirmed yet")
+      elseif not found or not session then
         if state.compaction_monitor then remuda.cancel(state.compaction_monitor) end
         state.compaction_monitor = nil
         fail("session unavailable after compaction timeout")
@@ -716,6 +731,7 @@ function remuda._butler_compaction_execute(session_name, force)
         state.compaction_monitor = nil
         state.compaction_still_running_notice_sent = nil
         if agent.kind == "claude" then restore_model("completed_after_timeout")
+        elseif codex_prior then codex_restore("completed_after_timeout")
         else finish_success("completed_after_timeout") end
       end
     end })
@@ -739,13 +755,15 @@ function remuda._butler_compaction_execute(session_name, force)
         else
           restore_model(nil, function() fail("compaction context did not drop") end)
         end
+      elseif pane_busy() ~= false then
+        monitor_until_idle()
       elseif codex_prior then
         codex_restore(nil, function()
           forget_codex_prior()
-          fail("compaction context did not drop")
+          fail("compaction context did not drop", "Compaction not confirmed yet")
         end)
       else
-        fail("compaction context did not drop")
+        fail("compaction context did not drop", "Compaction not confirmed yet")
       end
     end)
   end

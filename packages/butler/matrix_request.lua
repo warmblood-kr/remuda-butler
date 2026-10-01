@@ -257,6 +257,12 @@ local function read_config(path)
   end
   local mode = (lines[5] or ""):lower()
   local timeout = tonumber(lines[6]) or 30000
+  local untrusted_per_room_hour = tonumber(opts.untrusted_per_room_hour)
+  if not untrusted_per_room_hour or untrusted_per_room_hour ~= untrusted_per_room_hour
+      or untrusted_per_room_hour < 1 or untrusted_per_room_hour == math.huge
+      or untrusted_per_room_hour % 1 ~= 0 then
+    untrusted_per_room_hour = 20
+  end
   local ca_file, pin_hex = opts.ca_file, opts.pin_sha256
   if ca_file == "" then ca_file = nil end
   if pin_hex == "" then pin_hex = nil end
@@ -313,6 +319,7 @@ local function read_config(path)
     deny_room_aliases = deny_room_aliases, deny_servers = deny_servers,
     self_mxid = lines[3], allowed_senders = allowed,
     butler_senders = butler_senders,
+    untrusted_per_room_hour = untrusted_per_room_hour,
     use_messages = mode == "1" or mode == "true" or mode == "messages" or mode == "fallback",
     timeout_ms = math.max(1, timeout), ca_file = ca_file, pin = pin,
   }
@@ -412,7 +419,7 @@ function matrix.config_add_room(path, room, how, alias, inviter)
   if room == conf.home_room or room == conf.all_room then
     return nil, "HOME and ALL rooms can't be added"
   end
-  if how ~= "owner-invite" and how ~= "operator" and how ~= "invite" then how = nil end
+  if how ~= "owner-invite" and how ~= "operator" and how ~= "invite" and how ~= "approved" then how = nil end
   local new_how = how or "operator"
   if conf.rooms[room] ~= nil then
     if conf.rooms[room] == "joined" and ((alias and conf.room_aliases[room] ~= alias)
@@ -479,6 +486,12 @@ function matrix.config_remove_room(path, room)
   return write_config_text(path, table.concat(kept))
 end
 
+-- Core's stable TLS reason for a wrong pin (remuda net/http_client.rs tls_failure_reason).
+matrix.PIN_MISMATCH = "SPKI pin mismatch"
+-- Core's stable TLS reason for a certificate the trust roots do not cover, and its next step.
+matrix.CERT_UNTRUSTED = "server certificate issuer not trusted"
+matrix.UNTRUSTED_NEXT = "Next: remuda butler matrix setup --ca-file PATH (the server's CA certificate), or --pin SHA256HEX"
+
 local function config()
   local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths
   local guidance = matrix.configuration_guidance()
@@ -490,8 +503,9 @@ local function config()
   if token == "" then return nil, "Matrix token is empty" end
   local parsed, config_error = read_config(paths.config_path)
   if not parsed then return nil, config_error end
-  if parsed.base:match("^https://") and not parsed.ca_file and not parsed.pin then
-    return nil, "HTTPS Matrix homeserver requires ca_file=PATH or pin_sha256=HEX"
+  if parsed.base:match("^http://") and (parsed.ca_file or parsed.pin) then
+    return nil, "Matrix pin_sha256 and ca_file are only valid with an https:// homeserver.\n"
+      .. "Next: remove pin_sha256/ca_file from " .. paths.config_path .. " or switch its homeserver to https://"
   end
   parsed.token = token
   return parsed
@@ -685,12 +699,14 @@ function matrix.request(args, on_done)
   if encoded_room then
     local path_room = percent_decode(encoded_room)
     if not path_room or conf.rooms[path_room] == nil then
-      report_error(done, "room is outside the configured Matrix allowlist")
+      report_error(done, "room is outside the configured Matrix allowlist.\n"
+        .. "Next: remuda butler matrix rooms lists allowed rooms; the owner adds one with remuda butler matrix join ROOM")
       return { cancel = function() end }
     end
   end
   if args.room ~= nil and conf.rooms[args.room] == nil then
-    report_error(done, "room is outside the configured Matrix allowlist")
+    report_error(done, "room is outside the configured Matrix allowlist.\n"
+      .. "Next: remuda butler matrix rooms lists allowed rooms; the owner adds one with remuda butler matrix join ROOM")
     return { cancel = function() end }
   end
   local body = args.body
@@ -729,8 +745,15 @@ function matrix.request(args, on_done)
   local spec = {
     method = method, url = conf.base .. path, headers = headers,
     body = body, timeout = timeout, connect_timeout = math.min(10, timeout),
-    max_bytes = max_bytes, ca_file = conf.ca_file, pin = conf.pin,
+    max_bytes = max_bytes, ca_file = conf.ca_file, pin = conf.pin, pin_only = conf.pin ~= nil,
     callback = function(result)
+      if result.error and conf.pin and result.error:find(matrix.PIN_MISMATCH, 1, true) then
+        return done({ error = result.error .. "\nNext: recompute pin_sha256 as the server key's SPKI SHA-256"
+          .. " (see docs/butler.md) or use ca_file=PATH" })
+      end
+      if result.error and result.error:find(matrix.CERT_UNTRUSTED, 1, true) then
+        return done({ error = result.error .. "\n" .. matrix.UNTRUSTED_NEXT })
+      end
       if result.error then return done({ error = result.error }) end
       result.headers = json.object(type(result.headers) == "table" and result.headers or {})
       if result.status and (result.status < 200 or result.status >= 300) then
@@ -759,7 +782,8 @@ function matrix.same_room(room, event_id, on_done)
     return { cancel = function() end }
   end
   if conf.rooms[room] == nil then
-    report_error(done, "room is outside the configured Matrix allowlist")
+    report_error(done, "room is outside the configured Matrix allowlist.\n"
+      .. "Next: remuda butler matrix rooms lists allowed rooms; the owner adds one with remuda butler matrix join ROOM")
     return { cancel = function() end }
   end
   local path = "/_matrix/client/v3/rooms/" .. percent_encode(room)

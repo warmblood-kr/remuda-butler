@@ -17,7 +17,7 @@ The butler spawns a lead; a worker can spawn its own workers (cascading).
 
 ## Runtime dependency
 
-Install Remuda core/native first. Recommended core: `0.1.0-nightly.20260927085114.3cb8a39`
+Install Remuda core/native first. Recommended core: `0.1.0-nightly.20261001000710.0a5f090`
 or later — the first with the lifecycle `start` hook (warmblood-kr/remuda#104)
 that boots Butler right after activation. An older core ignores `start`; Butler
 then boots by a one-shot fallback on the next tick and writes `booted by

@@ -1,6 +1,7 @@
 remuda butler — coordination for managed agents
 
   remuda butler doctor
+  remuda butler close <name> [--force]
   remuda butler sessions
   remuda butler status  (0=up, 75=launching, 1=failed)
   remuda butler agents [--all]
@@ -14,6 +15,9 @@ remuda butler — coordination for managed agents
   remuda butler inbox [name]
   remuda butler reply <message-id> <message...> | - | --file PATH
   remuda butler forward <message-id> <member> [note...]
+  remuda butler approvals
+  remuda butler approve <ID>
+  remuda butler deny <ID>
   remuda butler matrix [--json] status
   remuda butler matrix [--json] rooms
   remuda butler matrix [--json] [--room ROOM] [-n N] history
