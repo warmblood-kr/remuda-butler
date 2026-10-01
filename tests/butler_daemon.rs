@@ -2796,7 +2796,8 @@ fn butler_matrix_reply_quarantines_rejected_events_for_operator_inspection() {
         &dir, "quarantine", "http://matrix.example.org", room, "@bot:example.org", "@alice:example.org");
     let room_events = serde_json::json!({"timeline":{"events":[
         {"type":"m.room.message","event_id":"$not-allowed","sender":"@mallory\u{1b}[2J:example.org",
-         "origin_server_ts":0,"content":{"msgtype":"m.text","body":"private rejected \u{1b}[31mtext\u{009b}2J"}},
+         "origin_server_ts":0,"content":{"msgtype":"m.image","url":"mxc://example.org/private",
+            "body":"private rejected \u{1b}[31mtext\u{009b}2J"}},
         {"type":"m.room.message","event_id":"$unsafe","sender":"@alice:example.org",
          "origin_server_ts":1,"content":{"msgtype":"m.image","body":"unsafe image"}},
         {"type":"m.room.message","sender":"@alice:example.org","origin_server_ts":2,
@@ -2837,7 +2838,7 @@ fn butler_matrix_reply_quarantines_rejected_events_for_operator_inspection() {
       local more = {{}}
       for i=1,205 do more[i] = {{type="m.room.message", event_id="$bulk-" .. i,
         sender="@mallory:example.org", origin_server_ts=i,
-        content={{msgtype="m.text", body=i == 205
+        content={{msgtype="m.image", url="mxc://example.org/bulk", body=i == 205
           and (string.char(27) .. "[31mprivate" .. string.char(194,155) .. "2J")
           or string.rep("p", 2048)}}}} end
       local batch = {{rooms={{join={{}}}}}}; batch.rooms.join[room]={{timeline={{events=more}}}}
@@ -3049,7 +3050,8 @@ fn butler_matrix_reply_home_all_roster_subscriptions_survive_restart() {
       local top = has(a, "$top")
       if top.room ~= "all" or top.event_id ~= "$top" then return "mail-room-metadata-missing" end
       if has(a, "$mention-a").thread_id ~= "$mention-thread" then return "thread-id-metadata-missing" end
-      if has(a, "$agent-quiet") or has(b, "$agent-quiet") then return "unmentioned-agent-delivered" end
+      -- Receive rules: a Butler's root post is delivered without a mention.
+      if not has(a, "$agent-quiet") or not has(b, "$agent-quiet") then return "agent-root-not-delivered" end
       if not has(a, "$agent-mention") or has(b, "$agent-mention") then return "agent-mention-routing-failed" end
       if ra:can_reply_to("$agent-mention") or ra:can_reply_to("$unknown-event") then return "reply-guard-failed-open" end
       remuda._butler_matrix_config = {{token_path={a_token}, config_path=config_a}}
@@ -3102,7 +3104,8 @@ fn butler_matrix_reply_home_all_roster_subscriptions_survive_restart() {
       end
       if has(b, "$mention-followup") or has(b, "$post-followup") or has(b, "$send-followup")
         or has(b, "$agent-thread-followup") then return "thread-leaked-to-B" end
-      if has(a, "$agent-quiet-2") or has(b, "$agent-quiet-2") then return "agent-without-mention-delivered" end
+      -- A followed thread delivers every sender; B does not follow it.
+      if not has(a, "$agent-quiet-2") or has(b, "$agent-quiet-2") then return "agent-in-followed-thread-routing-failed" end
       if not has(a, "$agent-mention-2") or has(b, "$agent-mention-2") then return "agent-mention-followup-routing-failed" end
       if ra:can_reply_to("$agent-mention-2") then return "agent-reply-allowed" end
       local before = #a + #b
@@ -3382,12 +3385,15 @@ fn butler_matrix_relay_persists_cursor_filters_and_deduplicates_fake_events() {
       remuda.http.tick()
       if #remuda.relay_deliveries ~= 0 then return "baseline-history-replayed" end
       remuda.http.tick()
-      if #remuda.relay_deliveries ~= 2 then return "filter-or-page-dedup-failed:" .. #remuda.relay_deliveries end
-      local e, fallback
+      -- Receive rules: a non-allowlisted sender's text is delivered, marked untrusted.
+      if #remuda.relay_deliveries ~= 3 then return "filter-or-page-dedup-failed:" .. #remuda.relay_deliveries end
+      local e, fallback, stranger
       for _, value in ipairs(remuda.relay_deliveries) do
         if value.event_id == "$good" then e = value end
         if value.event_id == "$fallback-time" then fallback = value end
+        if value.event_id == "$blocked" then stranger = value end
       end
+      if not stranger or stranger.trusted ~= false then return "stranger-not-marked-untrusted" end
       if not fallback or not fallback.created_at:match("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%dZ$")
         then return "missing-UTC-time-fallback" end
       if e.event_id ~= "$good" or e.body ~= {body} then return "multiline-body-changed" end
@@ -3401,7 +3407,7 @@ fn butler_matrix_relay_persists_cursor_filters_and_deduplicates_fake_events() {
       restarted:start()
       remuda.http.tick()
       remuda.http.tick()
-      if #remuda.relay_deliveries ~= 2 then return "restart-redelivered-processed-event" end
+      if #remuda.relay_deliveries ~= 3 then return "restart-redelivered-processed-event" end
       local resumed = false
       for _, spec in ipairs(remuda.http.calls) do if spec.url == {resumed_sync} then resumed = true end end
       if not resumed then return "restart-did-not-resume-since" end
