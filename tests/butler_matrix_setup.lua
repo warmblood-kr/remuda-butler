@@ -25,6 +25,8 @@ return function(matrix)
     and matrix.cli_usage():find("https://<homeserver>", 1, true)
     and matrix.cli_usage():find("--password-file <path>", 1, true),
     "Matrix usage should include one complete placeholder setup example")
+  assert(not matrix.cli_usage():match("Example:[^\n]*"):find("--pin", 1, true),
+    "the usage example should not require --pin")
 
   assert(remuda.fs and remuda.fs.mkdir_new and remuda.fs.write_atomic,
     "run setup tests with the Remuda filesystem helpers")
@@ -552,8 +554,17 @@ return function(matrix)
     local reply = { resolve = function(_, status, stdout, stderr)
       resolved = { status = status, stdout = stdout, stderr = stderr }
     end }
-    function reply:prompt_secret(spec) prompt_specs[#prompt_specs + 1] = spec end
+    function reply:prompt_secret(spec)
+      assert(not spec.label:find(":%s*$"), "a hidden prompt label must not end with its own colon: " .. spec.label)
+      prompt_specs[#prompt_specs + 1] = spec
+    end
     function reply:prompt_line(spec)
+      -- Core's prompt_line shows a label on one line, cuts it at 256
+      -- characters and adds ":" / "[default]:" itself. The summary label is
+      -- exempt until core can print output before a prompt (butler #186).
+      assert(not spec.label:find(":%s*$"), "a wizard prompt label must not end with its own colon: " .. spec.label)
+      assert(spec.label:find("^Matrix setup will:") or (#spec.label <= 256 and not spec.label:find("\n", 1, true)),
+        "every wizard prompt label is one line and at most 256 characters: " .. spec.label)
       line_specs[#line_specs + 1] = spec
     end
     return reply
@@ -561,11 +572,11 @@ return function(matrix)
   requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
   local wizard_reply = matrix.cli({ "matrix", "setup" })
   assert(wizard_reply and pending_timeout == 300 and #line_specs == 1 and not resolved
-    and line_specs[1].label == "Matrix homeserver URL:",
+    and line_specs[1].label == "Matrix homeserver URL",
     "no-flag setup should begin an interactive wizard")
   line_specs[1].callback("http://matrix.invalid", nil)
   assert(#line_specs == 2
-    and line_specs[2].label == "Your Matrix user ID (for example @alice:example.org):",
+    and line_specs[2].label == "Your Matrix user ID (for example @alice:example.org)",
     "the wizard should ask for the owner after the homeserver")
   line_specs[2].callback("@alice:example.org", nil)
   assert(#line_specs == 3 and line_specs[3].label:find("Continue? Type Y", 1, true)
@@ -576,6 +587,10 @@ return function(matrix)
     and not line_specs[3].label:find("Room access", 1, true)
     and line_specs[3].label:find("replaces its current Matrix relay config", 1, true),
     "the wizard should set open rooms and summarize the real config path")
+  assert(line_specs[3].label:match("\n([^\n]*)$") == "Continue? Type Y to continue, or N to cancel",
+    "the summary label should end with the bare question: core adds the [N]: suffix")
+  assert(not line_specs[3].label:find("HTTPS", 1, true),
+    "an http wizard summary should show no HTTPS trust line")
   assert(line_specs[3].default == "N", "wizard confirmation should default to no")
   line_specs[3].callback("n", nil)
   assert(resolved and resolved.status == 1 and resolved.stderr:find("Nothing was written.", 1, true)
@@ -589,7 +604,7 @@ return function(matrix)
   line_specs[2].callback("@alice:example.org", nil)
   line_specs[3].callback("Y", nil)
   assert(#prompt_specs == 1 and prompt_specs[1].label
-    == "Registration token for http://matrix.invalid, from its admin (hidden). This is not an access token:"
+    == "Registration token for http://matrix.invalid, from its admin (hidden). This is not an access token"
     and #requests == 0 and not resolved,
     "confirming the summary should enter the existing hidden registration-token flow")
   local wizard_bot = assert(line_specs[3].label:match("Bot: (@%S+)"), "wizard summary should name the bot")
@@ -615,8 +630,10 @@ return function(matrix)
   line_specs[1].callback("https://matrix.invalid", nil)
   line_specs[2].callback("@alice:example.org", nil)
   assert(#line_specs == 3
-    and line_specs[3].label:find("64-character SHA-256 certificate pin", 1, true),
-    "HTTPS setup should prompt explicitly for a certificate pin or CA file")
+    and line_specs[3].label == "HTTPS trust: press Enter to use this system's trusted certificates, "
+      .. "or enter a 64-character SHA-256 certificate pin or an absolute CA file path",
+    "HTTPS setup should offer system trust on Enter, or a certificate pin or CA file: "
+      .. tostring(line_specs[3] and line_specs[3].label))
   line_specs[3].callback(string.rep("a", 64), nil)
   assert(#line_specs == 4 and line_specs[4].label:find("HTTPS certificate pin: " .. string.rep("a", 64), 1, true)
     and line_specs[4].label:find("Continue? Type Y", 1, true),
@@ -624,6 +641,24 @@ return function(matrix)
   line_specs[4].callback("N", nil)
   assert(resolved and resolved.status == 1 and #requests == 0 and #prompt_specs == 0,
     "declining an HTTPS wizard should not start registration")
+
+  requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+  wizard_reply = matrix.cli({ "matrix", "setup" })
+  line_specs[1].callback("https://matrix.invalid", nil)
+  line_specs[2].callback("@alice:example.org", nil)
+  line_specs[3].callback("", nil)
+  assert(#line_specs == 4 and not resolved
+    and line_specs[4].label:find("\n  HTTPS trust: this system's trusted certificates\n", 1, true)
+    and not line_specs[4].label:find("HTTPS certificate pin", 1, true)
+    and not line_specs[4].label:find("HTTPS CA file", 1, true)
+    and line_specs[4].label:find("Continue? Type Y", 1, true),
+    "Enter at the HTTPS trust prompt should use system trust: no pin, no CA file: "
+      .. tostring(resolved and resolved.stderr))
+  line_specs[4].callback("Y", nil)
+  prompt_specs[1].callback("wizard-registration-token", nil)
+  assert(#requests == 1 and requests[1].pin == nil and requests[1].ca_file == nil
+    and requests[1].pin_only ~= true,
+    "a system-trust wizard should send its first request with no pin and no CA file")
 
   requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
   wizard_reply = matrix.cli({ "matrix", "setup" })
@@ -643,6 +678,9 @@ return function(matrix)
   assert(resolved and resolved.status == 1 and resolved.stderr:find("Nothing was written.", 1, true)
     and select(2, resolved.stderr:gsub("Next:", "")) == 1 and #requests == 0,
     "a non-string HTTPS trust answer should fail safely instead of throwing")
+  assert(resolved.stderr:find("The HTTPS trust answer must be Enter (this system's trusted certificates), "
+    .. "a certificate pin or a CA file path.", 1, true),
+    "the refused HTTPS trust answer should name Enter as a choice: " .. resolved.stderr)
 
   write(default_paths.token_path, "existing default token")
   requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
@@ -712,13 +750,84 @@ return function(matrix)
   assert(resolved and resolved.status == 1 and #requests == 0,
     "declining the CA-file wizard should not start registration")
 
+  -- #182: a stock Mac has no HOSTNAME in the daemon and no hostname file.
+  local nameless_getenv, nameless_io_open = os.getenv, io.open
+  os.getenv = function(name)
+    if name == "HOSTNAME" or name == "COMPUTERNAME" then return nil end
+    return nameless_getenv(name)
+  end
+  io.open = function(path, mode)
+    if path == "/etc/hostname" or path == "/var/run/hostname" then return nil, "no such file" end
+    return nameless_io_open(path, mode)
+  end
+  local nameless_ok, nameless_error = pcall(function()
+    assert(type(matrix.setup_default_bot) == "function"
+      and matrix.setup_default_bot("@alice:example.org") == nil,
+      "a machine with no name source has no default bot")
+    local _, no_bot_error = matrix.setup_prepare({ "--homeserver", "http://matrix.invalid",
+      "--owner", "@alice:example.org", "--register", "--dir", output })
+    assert(no_bot_error and no_bot_error:find("cannot derive a bot account name from this computer", 1, true)
+      and no_bot_error:find("\nNext: add --bot @butler-NAME:example.org", 1, true),
+      "the flag form names --bot as the next step when no bot name can be derived: " .. tostring(no_bot_error))
+    for _, bot_answer in ipairs({ "butler-mac", "@butler-mac:example.org" }) do
+      requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+      wizard_reply = matrix.cli({ "matrix", "setup" })
+      line_specs[1].callback("http://matrix.invalid", nil)
+      line_specs[2].callback("@alice:example.org", nil)
+      assert(#line_specs == 3 and not resolved and line_specs[3].label
+        == "Butler bot name (for example butler-mac; it becomes @butler-mac:example.org)"
+        and line_specs[3].default == nil,
+        "the wizard asks for a bot name when none can be derived: " .. tostring(resolved and resolved.stderr))
+      line_specs[3].callback(bot_answer, nil)
+      assert(#line_specs == 4 and line_specs[4].label:find("\n  Bot: @butler-mac:example.org\n", 1, true)
+        and line_specs[4].label:find("Continue? Type Y", 1, true),
+        "the wizard summary shows the entered bot name: " .. bot_answer)
+      line_specs[4].callback("N", nil)
+    end
+    for _, bad_answer in ipairs({ "", "bad name" }) do
+      requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+      wizard_reply = matrix.cli({ "matrix", "setup" })
+      line_specs[1].callback("http://matrix.invalid", nil)
+      line_specs[2].callback("@alice:example.org", nil)
+      line_specs[3].callback(bad_answer, nil)
+      assert(#line_specs == 3 and resolved and resolved.status == 1
+        and resolved.stderr:find("Nothing was written.", 1, true)
+        and select(2, resolved.stderr:gsub("Next:", "")) == 1 and #requests == 0,
+        "the wizard refuses a malformed or empty bot name: '" .. bad_answer .. "'")
+    end
+    requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+    wizard_reply = matrix.cli({ "matrix", "setup" })
+    line_specs[1].callback("https://matrix.invalid", nil)
+    line_specs[2].callback("@alice:example.org", nil)
+    assert(#line_specs == 3 and line_specs[3].label:find("Butler bot name", 1, true),
+      "with no machine name an https wizard asks for the bot name first")
+    line_specs[3].callback("butler-mac", nil)
+    assert(#line_specs == 4 and line_specs[4].label:find("HTTPS trust: press Enter", 1, true),
+      "the https wizard asks for trust after the bot name")
+    line_specs[4].callback("", nil)
+    assert(#line_specs == 5 and not resolved
+      and line_specs[5].label:find("\n  Bot: @butler-mac:example.org\n", 1, true)
+      and line_specs[5].label:find("\n  HTTPS trust: this system's trusted certificates\n", 1, true),
+      "the summary shows the entered bot and system trust: " .. tostring(resolved and resolved.stderr))
+    line_specs[5].callback("N", nil)
+  end)
+  os.getenv, io.open = nameless_getenv, nameless_io_open
+  assert(nameless_ok, nameless_error)
+  requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+  wizard_reply = matrix.cli({ "matrix", "setup" })
+  line_specs[1].callback("http://matrix.invalid", nil)
+  line_specs[2].callback("@alice:example.org", nil)
+  assert(#line_specs == 3 and line_specs[3].label:find("Continue? Type Y", 1, true),
+    "with a name source the wizard shows no bot prompt")
+  line_specs[3].callback("N", nil)
+
   requests, resolved, prompt_specs = {}, nil, {}
   local prompt_reply = matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
     "--owner", "@alice:example.org", "--register", "--bot", "@butler-prompt:example.org",
     "--dir", prompt_output })
   assert(prompt_reply and pending_timeout == 300 and #prompt_specs == 1 and not resolved,
     "registration setup should request its token before starting network work")
-  assert(prompt_specs[1].label == "Registration token for http://matrix.invalid, from its admin (hidden). This is not an access token:",
+  assert(prompt_specs[1].label == "Registration token for http://matrix.invalid, from its admin (hidden). This is not an access token",
     "registration prompt should explain which token is needed")
   for attempt = 1, 3 do
     local attempt_token = prompt_token .. tostring(attempt)
@@ -744,7 +853,7 @@ return function(matrix)
         "a rejected registration token should prompt again up to three total attempts")
       assert(prompt_specs[attempt + 1].label
         == "The server rejected that registration token. Nothing was created or written. "
-          .. "Registration token for http://matrix.invalid, from its admin (hidden). This is not an access token:",
+          .. "Registration token for http://matrix.invalid, from its admin (hidden). This is not an access token",
         "the retry notice should be separated from the prompt label with a space")
     end
   end

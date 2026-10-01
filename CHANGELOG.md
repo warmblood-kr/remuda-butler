@@ -30,6 +30,7 @@ release tags yet; entries come from merged pull requests.
 - Launch friction fixes: a verified workspace-trust answer, `delegate --cwd`, and a `--leader` retry (#144). Unreadable Claude trust paths are left for a human, and root trust is offered only at the root (#152).
 - An agent session that starts fresh gets one unread-mail notice (#137). Deferred notices can no longer wait forever (#133).
 - An `https://` homeserver with a publicly trusted certificate needs no `--pin` or `--ca-file`: core verifies it against the system CA roots. An untrusted certificate still fails, with a `Next:` line naming `--ca-file` and `--pin` (#172).
+- The `matrix setup` wizard accepts Enter at the HTTPS trust prompt to use this system's trusted certificates; a certificate pin or CA file path can still be entered (#175).
 - Matrix messages from senders not on the allowlist are delivered with a not-on-allowlist marker and are capped per room per hour; their media is quarantined (#178).
 - The unread-mail notice fires on a timer, 2 s after the last arrival and at most 10 s after the first, on cores with `remuda.after` (#177).
 
@@ -39,3 +40,5 @@ release tags yet; entries come from merged pull requests.
 - Matrix invite follow-ups: refusals carry a next step, the quarantine list shows the room, and commands missing a room say what to pass (#162).
 - Future Matrix join timestamps are kept (#141).
 - `remuda butler doctor` reports probe timeouts (#135).
+- The `matrix setup` wizard asks for a Butler bot name when it cannot take one from this computer's name (a stock Mac), instead of stopping. The flag form's refusal now ends with a `Next:` line naming `--bot` (#182).
+- The `matrix setup` wizard prompts no longer show a doubled colon such as `URL::` (#186).
