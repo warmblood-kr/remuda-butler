@@ -294,8 +294,7 @@ local function finish(reply, cancelled, completed, verb, options, result)
       relay:record_outgoing_reply(options.event_id, result.event_ids[#result.event_ids])
     end
   end
-  if verb == "send" and result.event_ids and #result.event_ids > 0
-    and matrix.room_kind and matrix.room_kind(options.room or matrix.configured_room()) == "all" then
+  if verb == "send" and result.event_ids and #result.event_ids > 0 then
     local relay = matrix.relay and matrix.relay.instance
     if relay and relay.subscribe_thread then
       relay:subscribe_thread(options.room or matrix.configured_room(), result.event_ids[1])

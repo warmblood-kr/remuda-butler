@@ -17,7 +17,7 @@ local MAX_QUARANTINE_ITEMS = 200
 local MAX_QUARANTINE_PREVIEW_BYTES = 1024
 local QUARANTINE_TTL_SECONDS = 30 * 24 * 60 * 60
 local MAX_MAIL_ROUTES = 5000
-local MAX_THREAD_SUBSCRIPTIONS = 5000
+local MAX_THREAD_SUBSCRIPTIONS = 50000
 local MAX_REPLY_OUTBOX = 1000
 local MAX_REPLY_RESULTS = 5000
 local MAX_MAIL_REPLY_BYTES = 64 * 1024
@@ -296,12 +296,22 @@ local function trim_map(map, maximum, time_field)
 end
 
 local function subscribe(state, room_id, thread_id, mail_id)
-  if type(room_id) ~= "string" or type(thread_id) ~= "string" or thread_id == "" then return end
+  if type(room_id) ~= "string" or type(thread_id) ~= "string" or thread_id == "" then return false end
   local subscriptions = state.subscriptions[room_id] or json.object({})
   state.subscriptions[room_id] = subscriptions
+  if subscriptions[thread_id] == nil then
+    local count = 0
+    for _ in pairs(subscriptions) do count = count + 1 end
+    if count >= MAX_THREAD_SUBSCRIPTIONS then
+      warn_once("thread-subscription-limit", room_id,
+        "butler Matrix thread follow limit reached in " .. terminal_safe_field(room_id, 512)
+          .. " (" .. tostring(MAX_THREAD_SUBSCRIPTIONS) .. "); refusing new follow")
+      return false
+    end
+  end
   subscriptions[thread_id] = { mail_id = mail_id,
     created_at = os.date("!%Y-%m-%dT%H:%M:%SZ") }
-  trim_map(subscriptions, MAX_THREAD_SUBSCRIPTIONS, "created_at")
+  return true
 end
 
 local function empty_state()
@@ -384,7 +394,6 @@ local function load_state(path)
           end
         end
       end
-      trim_map(valid_roots, MAX_THREAD_SUBSCRIPTIONS, "created_at")
       state.subscriptions[room_id] = valid_roots
     end
   end
@@ -606,9 +615,8 @@ function relay.new(options)
       if route.event_id == event_id or route.last_reply_event_id == event_id then
         if route.from_agent ~= false then return false end
         route.last_reply_event_id = sent_id
-        if route.room_kind == "all" then
-          subscribe(state, route.room_id, route.thread_root or route.event_id, source_mail_id)
-        end
+        subscribe(state, route.room_id, route.thread_root or route.event_id, source_mail_id)
+        subscribe(state, route.room_id, sent_id, source_mail_id)
         persist()
         return true
       end
@@ -644,8 +652,18 @@ function relay.new(options)
   end
 
   function instance:subscribe_thread(room_id, thread_id, mail_id)
-    subscribe(state, room_id, thread_id, mail_id)
-    return persist()
+    if not subscribe(state, room_id, thread_id, mail_id) then return false end
+    persist()
+    return true
+  end
+
+  function instance:unsubscribe_thread(room_id, thread_id)
+    if type(room_id) ~= "string" or type(thread_id) ~= "string" then return false end
+    local subscriptions = state.subscriptions[room_id]
+    if type(subscriptions) ~= "table" or subscriptions[thread_id] == nil then return false end
+    subscriptions[thread_id] = nil
+    persist()
+    return true
   end
 
   local function schedule_reply_retry(reply_id, delay)
@@ -685,9 +703,8 @@ function relay.new(options)
           route.from_agent, route.room_kind = item.from_agent, item.room_kind
           route.last_reply_mail_id, route.last_reply_event_id = reply_id, sent_id
           state.routes[item.source_mail_id] = route
-          if route.room_kind == "all" then
-            subscribe(state, route.room_id, route.thread_root or route.event_id, item.source_mail_id)
-          end
+          subscribe(state, route.room_id, route.thread_root or route.event_id, item.source_mail_id)
+          subscribe(state, route.room_id, sent_id, item.source_mail_id)
           state.reply_results[reply_id] = { source_mail_id = item.source_mail_id,
             reply_mail_id = reply_id, room_id = item.room_id, thread_root = item.thread_root,
             event_id = sent_id, event_ids = ids, completed_at = os.date("!%Y-%m-%dT%H:%M:%SZ") }
