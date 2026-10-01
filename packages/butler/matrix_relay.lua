@@ -18,9 +18,6 @@ local MAX_QUARANTINE_PREVIEW_BYTES = 1024
 local QUARANTINE_TTL_SECONDS = 30 * 24 * 60 * 60
 local MAX_MAIL_ROUTES = 5000
 local MAX_THREAD_SUBSCRIPTIONS = 50000
-local MAX_DIRECT_THREAD_SUBSCRIPTIONS = 5000
-local THREAD_SUBSCRIPTION_CHUNK_SIZE = 500
-local THREAD_SUBSCRIPTION_CHUNK_FORMAT = "matrix-thread-subscriptions-v1"
 local MAX_REPLY_OUTBOX = 1000
 local MAX_REPLY_RESULTS = 5000
 local MAX_MAIL_REPLY_BYTES = 64 * 1024
@@ -325,62 +322,6 @@ local function empty_state()
     reply_outbox = json.object({}), reply_results = json.object({}) }
 end
 
-local function expand_thread_subscriptions(value)
-  if type(value) ~= "table" or value._rx_format ~= THREAD_SUBSCRIPTION_CHUNK_FORMAT then
-    return value
-  end
-  if type(value.chunks) ~= "table" or getmetatable(value.chunks) ~= JSON_ARRAY_MT then
-    return nil, "invalid Matrix relay thread subscription chunks"
-  end
-  local expanded = json.object({})
-  for _, item in ipairs(value.chunks) do
-    if type(item) ~= "table" or type(item.room_id) ~= "string" or type(item.data) ~= "string" then
-      return nil, "invalid Matrix relay thread subscription chunk"
-    end
-    local roots, err = decode(item.data)
-    if type(roots) ~= "table" or roots == json.null or getmetatable(roots) == JSON_ARRAY_MT then
-      return nil, err or "invalid Matrix relay thread subscription chunk data"
-    end
-    local room = expanded[item.room_id] or json.object({})
-    expanded[item.room_id] = room
-    for thread_id, subscription in pairs(roots) do room[thread_id] = subscription end
-  end
-  return expanded
-end
-
-local function compact_thread_subscriptions(subscriptions)
-  local total = 0
-  for _, roots in pairs(subscriptions) do
-    if type(roots) == "table" and getmetatable(roots) ~= JSON_ARRAY_MT then
-      for _ in pairs(roots) do total = total + 1 end
-    end
-  end
-  if total <= MAX_DIRECT_THREAD_SUBSCRIPTIONS then return subscriptions end
-
-  local compact = json.object({
-    _rx_format = THREAD_SUBSCRIPTION_CHUNK_FORMAT,
-    chunks = json.array({}),
-  })
-  for room_id, roots in pairs(subscriptions) do
-    if type(room_id) == "string" and type(roots) == "table" and getmetatable(roots) ~= JSON_ARRAY_MT then
-      local thread_ids = {}
-      for thread_id in pairs(roots) do
-        if type(thread_id) == "string" then thread_ids[#thread_ids + 1] = thread_id end
-      end
-      table.sort(thread_ids)
-      for first = 1, #thread_ids, THREAD_SUBSCRIPTION_CHUNK_SIZE do
-        local chunk = json.object({})
-        for index = first, math.min(#thread_ids, first + THREAD_SUBSCRIPTION_CHUNK_SIZE - 1) do
-          local thread_id = thread_ids[index]
-          chunk[thread_id] = roots[thread_id]
-        end
-        compact.chunks[#compact.chunks + 1] = { room_id = room_id, data = encode(chunk) }
-      end
-    end
-  end
-  return compact
-end
-
 local function load_state(path)
   local file = io.open(path, "rb")
   local recovered_backup = false
@@ -425,9 +366,6 @@ local function load_state(path)
     or getmetatable(auto_join_timestamps) ~= JSON_ARRAY_MT then
     return empty_state(), "invalid Matrix relay auto-join timestamps"
   end
-  local expanded_subscriptions, subscription_error = expand_thread_subscriptions(subscriptions)
-  if not expanded_subscriptions then return empty_state(), subscription_error end
-  subscriptions = expanded_subscriptions
   local state = empty_state()
   local quarantine_pruned = false
   state.since, state.messages_since = since, messages_since
@@ -526,7 +464,7 @@ local function save_state(path, state)
     messages_since = state.messages_since, pending_events = state.pending,
     quarantine = state.quarantine, matrix_mail_routes = state.routes,
     matrix_reply_outbox = state.reply_outbox, matrix_reply_results = state.reply_results,
-    matrix_thread_subscriptions = compact_thread_subscriptions(state.subscriptions),
+    matrix_thread_subscriptions = state.subscriptions,
     auto_join_timestamps = state.auto_join_timestamps })
   return remuda.fs.write_atomic(path, json, { private = true })
 end
