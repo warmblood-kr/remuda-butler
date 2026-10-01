@@ -27,7 +27,7 @@ function matrix.rooms(args, callback, agent)
   args = args or {}
   if args.public then
     if agent then
-      return done_error(callback, "matrix rooms is operator-only (advisory at the same UID until core #218)")
+      return done_error(callback, "matrix rooms is operator-only\nNext: ask the owner to run remuda butler matrix rooms --public from their terminal")
     end
     local term = args.public_term
     local body_args = { limit = 20 }
