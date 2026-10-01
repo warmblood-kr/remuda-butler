@@ -18,6 +18,8 @@ release tags yet; entries come from merged pull requests.
 - `remuda butler matrix follow EVENT_ID` and `unfollow EVENT_ID` manage thread replies. HOME always delivers replies; other rooms deliver a reply only in a followed thread or on a mention. Replying, sending, and a mention from an allowlisted sender follow the thread automatically (#178).
 - `remuda butler matrix send -` reads the message from stdin, up to 64 KiB (#170).
 - Outgoing Matrix messages carry a formatted HTML body rendered from a Markdown subset; raw HTML is always escaped (#171).
+- Matrix `posts_per_hour` (default 30) caps the Butler's Matrix posts per hour that are not a reply to a person on the allowlist; a refused post says `Next: wait until HH:MMZ`, and the first refusal in an hour posts one line to HOME (#223).
+- When the hourly cap for non-allowlisted senders is hit, HOME gets a summary with the count: the first one at once, then at most one per room per 10 minutes (#223).
 
 ### Changed
 - `matrix setup --pin` and `pin_sha256` now trust a self-signed homeserver on their own, using core `pin_only`. The hostname, validity dates and SPKI pin are still checked, and `ca_file` keeps full chain validation. Recommended core: `0.1.0-nightly.20261001000710.0a5f090` (#164).
@@ -35,6 +37,7 @@ release tags yet; entries come from merged pull requests.
 - The unread-mail notice fires on a timer, 2 s after the last arrival and at most 10 s after the first, on cores with `remuda.after` (#177).
 - One Remuda daemon owns a Butler home. A second daemon on the same home changes nothing and answers every Butler verb with one line naming the owner and a `Next:` line; `remuda butler doctor` still runs there. This needs a core with `remuda.fs.lock`; older cores run as before with one warning line. The root and member MCP configs are now written owner-only (0600) (#195).
 - `matrix setup` takes this computer's name for the default bot from core's `remuda.hostname()` when the core has it, so a stock Mac gets a default bot name and no bot-name prompt. On such a core the daemon's `HOSTNAME`/`COMPUTERNAME` and the hostname files are no longer read; older cores keep that lookup (#207).
+- Butler-to-Butler Matrix replies are no longer blocked. A per-thread turn guard (`b2b_max_turns`, default 6) stops the Butler after 6 Butler-only turns and posts one line to HOME; a reply in that thread from a person on the allowlist resumes it (#223).
 
 ### Fixed
 - `matrix setup --force` keeps the existing `deny_room`/`deny_server` lines (#154).
