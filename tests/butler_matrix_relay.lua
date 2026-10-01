@@ -3932,6 +3932,52 @@ local function test_rx_prefixed_stranger_counts_and_cannot_reset()
   end)
 end
 
+-- Step 7a (SEC M1): posts_per_hour bounds posts that can be part of a loop. A
+-- reply to an allowlisted human takes no slot and is never refused by the cap;
+-- send, a reply to a Butler and a reply to a non-allowlisted human still are.
+local function test_rx_reply_to_allowlisted_human_takes_no_post_slot()
+  local dir, path = invite_fixture(OWNER .. "," .. RX_ALLY, "posts_per_hour=1\n")
+  rx_with_dir(dir, function() rx_fresh_hour(function()
+    local relay, client, delivered = rx_relay(path)
+    relay_module.instance = relay
+    rx_post_http(path, function(_, posted)
+      rx_sync(client, HOME, { rx_msg("$h", OWNER, "a question"), rx_msg("$b", RX_ALLY, "@bot:example.org ping"),
+        rx_msg("$s", STRANGER, "hello") })
+      local result = rx_cli({ "matrix", "send", "uses the only slot" })
+      assert(result.code == 0, "the first post is under posts_per_hour=1: " .. tostring(result.stderr))
+      local cap, problems = "Not sent: Matrix post limit reached (1 per hour)", {}
+      local function refused(what, code, text)
+        if code == 0 or not tostring(text):find(cap, 1, true) then
+          problems[#problems + 1] = what .. " must still be refused by the cap, got: " .. tostring(text)
+        end
+      end
+      result = rx_cli({ "matrix", "send", "second send" })
+      refused("a send", result.code, result.stderr .. result.stdout)
+      result = rx_cli({ "matrix", "reply", "$b", "to a butler" })
+      refused("a CLI reply to an allowlisted Butler", result.code, result.stderr .. result.stdout)
+      result = rx_cli({ "matrix", "reply", "$s", "to a stranger" })
+      refused("a CLI reply to a non-allowlisted human", result.code, result.stderr .. result.stdout)
+      local ok, err = relay:queue_mail_reply({ mail_id = rx_mail_id(delivered, "$b"), reply_mail_id = "RB", text = "mail-to-butler" })
+      refused("a mail reply to an allowlisted Butler", ok and 0 or 1, err)
+      ok, err = relay:queue_mail_reply({ mail_id = rx_mail_id(delivered, "$s"), reply_mail_id = "RS", text = "mail-to-stranger" })
+      refused("a mail reply to a non-allowlisted human", ok and 0 or 1, err)
+      result = rx_cli({ "matrix", "reply", "$h", "to the owner" })
+      if result.code ~= 0 then
+        problems[#problems + 1] = "a CLI reply to an allowlisted human must be posted with the budget used up, got: "
+          .. result.stderr .. result.stdout
+      end
+      ok, err = relay:queue_mail_reply({ mail_id = rx_mail_id(delivered, "$h"), reply_mail_id = "RH", text = "mail-to-owner" })
+      if not ok or client:messages(HOME, "mail-to-owner") ~= 1 then
+        problems[#problems + 1] = "a mail reply to an allowlisted human must be posted with the budget used up, got: " .. tostring(err)
+      end
+      assert(#problems == 0, table.concat(problems, "\n  "))
+      assert(posted() == 2 and client:messages(HOME, "mail-to-butler") + client:messages(HOME, "mail-to-stranger") == 0,
+        "only the first send and the replies to the owner are posted, CLI posts: " .. posted())
+    end)
+    relay:stop()
+  end) end)
+end
+
 rx_tests = {
   { "test_rx_stranger_root_marked_untrusted", test_rx_stranger_root_marked_untrusted },
   { "test_rx_agent_root_without_mention", test_rx_agent_root_without_mention },
@@ -3969,6 +4015,7 @@ rx_tests = {
   { "test_rx_cli_reply_takes_post_slot", test_rx_cli_reply_takes_post_slot },
   { "test_rx_outbox_send_takes_no_second_post_slot", test_rx_outbox_send_takes_no_second_post_slot },
   { "test_rx_prefixed_stranger_counts_and_cannot_reset", test_rx_prefixed_stranger_counts_and_cannot_reset },
+  { "test_rx_reply_to_allowlisted_human_takes_no_post_slot", test_rx_reply_to_allowlisted_human_takes_no_post_slot },
 }
 end
 
