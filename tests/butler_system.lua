@@ -1,15 +1,15 @@
 -- Pure Lua contract tests for packages/butler/system.lua.
 local execute_key, popen_key = "exe" .. "cute", "po" .. "pen"
-local original_execute, original_popen, original_getenv = os[execute_key], io[popen_key], os.getenv
+local original_execute, original_popen, original_getenv, original_io_open = os[execute_key], io[popen_key], os.getenv, io.open
 os[execute_key] = function() error("shell execution must not be used for lookup") end
 io[popen_key] = function() error("shell pipes must not be used for lookup") end
 
-local process_calls = {}
+local process_calls = 0
 remuda = {
   process = {
-    run = function(options)
-      process_calls[#process_calls + 1] = options.argv
-      return { code = 0, stdout = "", stderr = "", timed_out = false }
+    run = function()
+      process_calls = process_calls + 1
+      error("command lookup must not run candidate processes")
     end,
   },
 }
@@ -29,14 +29,12 @@ local windows_found, windows_reason = windows.find_command("claude", {
   path = windows_path,
   pathext = ".COM;.EXE;.BAT;.CMD",
   exists = function(path) return path == found_cmd end,
-  run = function(path) return path == found_cmd end,
 })
 assert(windows_found == found_cmd, "Windows lookup should find claude.cmd in a PATH entry with spaces")
 local windows_missing, windows_missing_reason = windows.find_command("missing-agent", {
   path = windows_path,
   pathext = ".COM;.EXE;.BAT;.CMD",
   exists = function() return false end,
-  run = function() return false end,
 })
 assert(windows_missing == nil and type(windows_missing_reason) == "string" and windows_missing_reason ~= "",
   "Windows lookup should explain a missing command")
@@ -46,33 +44,85 @@ local posix = assert(system.posix, "POSIX system table must be testable")
 local posix_path = "/opt/agent/bin/claude"
 local posix_found = posix.find_command("claude", {
   path = "/opt/agent/bin:/usr/bin:",
-  is_executable = function(path) return path == posix_path end,
-  run = function(path) return path == posix_path end,
+  exists = function(path) return path == posix_path end,
 })
-assert(posix_found == posix_path, "POSIX lookup should find an executable on PATH")
+assert(posix_found == posix_path, "POSIX lookup should find a file on PATH")
+
+local windows_candidates = {}
+local absolute_windows = [[C:\agent-bin\claude]]
+local relative_windows_found = windows.find_command("claude", {
+  path = [[.;bin;C:\agent-bin]], pathext = "",
+  exists = function(path) windows_candidates[#windows_candidates + 1] = path; return true end,
+})
+assert(relative_windows_found == absolute_windows,
+  "Windows lookup should skip dot and relative PATH entries")
+assert(#windows_candidates == 1 and windows_candidates[1] == absolute_windows,
+  "Windows lookup should only inspect absolute PATH entries")
+
+local posix_candidates = {}
+local absolute_posix = "/opt/agent-bin/claude"
+local relative_posix_found = posix.find_command("claude", {
+  path = ".:bin:/opt/agent-bin",
+  exists = function(path) posix_candidates[#posix_candidates + 1] = path; return true end,
+})
+assert(relative_posix_found == absolute_posix, "POSIX lookup should skip dot and relative PATH entries")
+assert(#posix_candidates == 1 and posix_candidates[1] == absolute_posix,
+  "POSIX lookup should only inspect absolute PATH entries")
+
+-- file_exists must reject a directory even when io.open succeeds on it.
+local original_test_open = io.open
+io.open = function(path)
+  if path == [[C:\agent-bin\claude.cmd]] then
+    return { read = function() return nil, "Is a directory" end, close = function() end }
+  end
+  return nil, "not found"
+end
+local directory_candidate = windows.find_command("claude", {
+  path = [[C:\agent-bin]], pathext = ".CMD",
+})
+io.open = original_test_open
+assert(directory_candidate == nil, "a directory named like a command must not be found")
+
+-- The selected system lookup must also be existence-only, without invoking a CLI.
+os.getenv = function(name)
+  if name == "PATH" then return "/lookup-only" end
+  if name == "PATHEXT" then return ".CMD" end
+  return original_getenv(name)
+end
+io.open = function(path)
+  if path == "/lookup-only/claude" then
+    return { read = function() return "x" end, close = function() end }
+  end
+  return nil, "not found"
+end
+local selected_found = system.find_command("claude")
+io.open, os.getenv = original_io_open, original_getenv
+assert(selected_found == "/lookup-only/claude", "system.find_command should return the existing candidate")
+assert(process_calls == 0, "finding a command must make zero process.run calls")
 
 -- Doctor must use the same lookup code path; make it return the Windows-style
 -- candidate and assert the process probe sees that exact path.
 local doctor_lookups = {}
 system.find_command = function(name)
   doctor_lookups[#doctor_lookups + 1] = name
+  if name ~= "claude" then return nil, "not found" end
   return windows.find_command(name, {
     path = windows_path,
     pathext = ".COM;.EXE;.BAT;.CMD",
     exists = function(path) return path == found_cmd end,
-    run = function(path) return path == found_cmd end,
   })
 end
 remuda._butler_system = system
 remuda.process.run = function(options)
-  process_calls[#process_calls + 1] = options.argv
+  process_calls = process_calls + 1
   return { code = 0, stdout = "logged in", stderr = "", timed_out = false }
 end
 local doctor = dofile("packages/butler/doctor.lua")
 local doctor_result = doctor.probe()
 assert(doctor_result.claude.installed, "doctor should report the shared candidate as installed")
 assert(doctor_lookups[1] == "claude", "doctor must use system.find_command")
-assert(process_calls[1][1] == found_cmd, "doctor probe should use the found claude.cmd candidate")
+assert(doctor_lookups[2] == "codex", "doctor should check Codex through system.find_command")
+assert(process_calls == 1, "doctor should run one probe for the one found candidate")
 
 -- HOME fallback is testable without changing the test runner's environment.
 os.getenv = function(name)
@@ -123,5 +173,5 @@ assert(created_directories[paths.butler_session_cwd] and created_directories[pat
 assert(identity.identity_path == identity_path and written_identity_path == identity_path,
   "identity records should be written under the profile data home")
 
-os[execute_key], io[popen_key], os.getenv = original_execute, original_popen, original_getenv
+os[execute_key], io[popen_key], os.getenv, io.open = original_execute, original_popen, original_getenv, original_io_open
 print("ok - system module command lookup, failure lines, and home contract")
