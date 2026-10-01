@@ -192,6 +192,13 @@ DAEMON_PIDS+=("$!")
 for _ in $(seq 50); do [[ -S $REMUDA_RUNTIME_DIR/remuda/$SERVER.sock ]] && break; sleep 0.1; done
 "$REMUDA_BIN" -s "$SERVER" exec butler >"$SCRATCH/exec.out" 2>"$SCRATCH/exec.err" ||
   fail "bare exec butler should remain asynchronous"
+"$REMUDA_BIN" -s "$SERVER" -e 'return remuda._butler_reconcile()' >"$SCRATCH/launch-failed.out"
+for failure in \
+  'claude: not installed. Next: remuda butler doctor' \
+  'codex: not installed. Next: remuda butler doctor'; do
+  grep -F "$failure" "$SCRATCH/launch-failed.out" >/dev/null ||
+    fail "launch verb omitted $failure: $(cat "$SCRATCH/launch-failed.out")"
+done
 set +e
 "$REMUDA_BIN" -s "$SERVER" butler status >"$SCRATCH/status-failed.out" 2>"$SCRATCH/status-failed.err"
 FAILED_STATUS=$?
@@ -202,18 +209,15 @@ else
   [[ $FAILED_STATUS != 0 ]] || fail "legacy failed status should be nonzero"
 fi
 [[ ! -s "$SCRATCH/status-failed.out" ]] || fail "failed status wrote to stdout: $(cat "$SCRATCH/status-failed.out")"
-for reason in 'claude: not_found' 'codex: not_found'; do
+for reason in \
+  'claude: not installed. Next: remuda butler doctor' \
+  'codex: not installed. Next: remuda butler doctor'; do
   grep -F "$reason" "$SCRATCH/status-failed.err" >/dev/null ||
     fail "status omitted $reason: $(cat "$SCRATCH/status-failed.out" "$SCRATCH/status-failed.err")"
 done
-grep -F 'Next:' "$SCRATCH/status-failed.err" >/dev/null ||
-  fail "status omitted the launch-failure Next step: $(cat "$SCRATCH/status-failed.out" "$SCRATCH/status-failed.err")"
 if [[ $HAS_TYPED_FAIL == function ]] && grep -E 'runtime error|stack traceback' "$SCRATCH/status-failed.err" >/dev/null; then
   fail "failed status leaked a runtime error or Lua traceback: $(cat "$SCRATCH/status-failed.err")"
 fi
-for failure in 'butler: claude: not_found' 'butler: codex: not_found'; do
-  grep -F "$failure" "$SCRATCH/empty-daemon.log" >/dev/null || fail "daemon log omitted clean failure line $failure"
-done
 EMPTY_ROSTER=$("$REMUDA_BIN" -s "$SERVER" butler sessions)
 for reason in 'BUTLER ATTEMPTS' 'claude: not_found' 'codex: not_found'; do
   [[ "$EMPTY_ROSTER" == *"$reason"* ]] || fail "sessions command unavailable or omitted $reason: $EMPTY_ROSTER"

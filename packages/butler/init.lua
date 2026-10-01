@@ -1,12 +1,14 @@
 -- The module owns every hook and schedule. main.lua loads the implementation
 -- from the lifecycle start event, where #143 also owns its imperative command
 -- and contribution registrations.
+remuda.exec("butler/system")
 if not getmetatable(_G) then
   -- Cores before warmblood-kr/remuda#98 send this entry as a plain chunk.
   return remuda.exec("butler")
 end
 
 local host = getmetatable(_G).__index.remuda
+local system = assert(host._butler_system)
 local booted, main_loaded = false, false
 local function load_main()
   if main_loaded then return end
@@ -53,7 +55,7 @@ local function stop_legacy_matrix_relay()
   local id = host._butler_matrix_relay
   if id == nil or type(host.processes) ~= "function" or type(host.kill) ~= "function" then return end
   local data_home = os.getenv("XDG_DATA_HOME")
-  if not data_home or data_home == "" then data_home = (os.getenv("HOME") or "") .. "/.local/share" end
+  if not data_home or data_home == "" then data_home = system.home() .. "/.local/share" end
   local mod_dir = data_home .. "/remuda/mods/butler"
   local expected_script = mod_dir .. "/packages/butler/matrix_relay.py"
   local script = host._butler_matrix_relay_script_path or expected_script

@@ -1,5 +1,6 @@
 -- Short asynchronous read composites over the single Matrix request word.
 local matrix = assert(remuda.butler and remuda.butler.matrix, "Matrix request word is not loaded")
+local system = assert(remuda._butler_system)
 local function encode(value)
   return (tostring(value):gsub("([^%w%-%._~])", function(c)
     return string.format("%%%02X", c:byte())
@@ -230,8 +231,8 @@ function matrix.download(args, callback)
   local path = "/_matrix/client/v1/media/download/" .. encode(server) .. "/" .. encode(media)
   local function save(result)
     if result.error then return finish(result) end
-    local home = os.getenv("HOME")
-    if not args.output and (not home or home:sub(1, 1) ~= "/") then
+    local home = system.home()
+    if not args.output and not system.is_absolute(home) then
       return finish({ error = "download requires an absolute HOME or -o path" })
     end
     local output = args.output or home .. "/matrix-" .. media

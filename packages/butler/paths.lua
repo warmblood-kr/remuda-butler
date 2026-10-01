@@ -17,27 +17,24 @@
 -- supported overrides, checked before the conventional XDG/HOME locations.
 -- This mirrors install-butler.sh; scripts/check-butler-path-convention.lua
 -- fails if the two defaults diverge.
+local system = assert(remuda._butler_system)
 local function default_config_home()
   local xdg = os.getenv("XDG_CONFIG_HOME")
   if xdg and xdg ~= "" then
     return xdg
   end
-  local home = os.getenv("HOME")
-  if not home or home == "" then
-    return nil
-  end
+  local home = system.home()
   return home .. "/.config"
 end
 
 local function default_data_home()
   local xdg = os.getenv("XDG_DATA_HOME")
   if xdg and xdg ~= "" then return xdg end
-  local home = os.getenv("HOME")
-  return home and home ~= "" and home .. "/.local/share" or nil
+  return system.home() .. "/.local/share"
 end
 
 local function expand_home(path)
-  local home = os.getenv("HOME") or ""
+  local home = system.home()
   return path:gsub("^~", home)
 end
 

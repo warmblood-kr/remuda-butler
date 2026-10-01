@@ -85,7 +85,43 @@ os.getenv = function(name)
   if name == "HOME" or name == "USERPROFILE" then return nil end
   return original_getenv(name)
 end
-assert(system.home() == nil, "home should be nil when HOME and USERPROFILE are unset")
+local home_ok, no_home_message = pcall(system.home)
+assert(not home_ok and tostring(no_home_message):find("Next: set HOME or USERPROFILE", 1, true),
+  "missing home should explain how to continue")
+
+os.getenv = function(name)
+  if name == "HOME" then return nil end
+  if name == "USERPROFILE" then return "/private/tmp/butler-userprofile-test" end
+  if name == "XDG_CONFIG_HOME" or name == "XDG_DATA_HOME"
+      or name == "REMUDA_BUTLER_TOKEN" or name == "REMUDA_BUTLER_CONFIG"
+      or name == "REMUDA_BUTLER_TOPICS" then return nil end
+  return original_getenv(name)
+end
+remuda.butler = {}
+dofile("packages/butler/paths.lua")
+local paths = remuda._butler_paths
+assert(paths.data_home == "/private/tmp/butler-userprofile-test/.local/share")
+assert(paths.butler_session_cwd == paths.data_home .. "/remuda/butler/sessions/butler")
+assert(paths.mail_root == paths.data_home .. "/remuda/butler/mail")
+local identity_path = paths.data_home .. "/remuda/butler/agents.jsonl"
+local created_directories, written_identity_path = {}, nil
+remuda.mkdir = function(path) created_directories[path] = true end
+remuda._butler_mail = { append = function(path) written_identity_path = path end }
+remuda._butler_identity_config = {
+  bus = { identities_loaded = true, identities = {}, identity_ids = {}, next = 0 },
+  current_agent = function() return "butler" end,
+  json_quote = paths.json_quote,
+  data_home = paths.data_home,
+}
+system.mkdir_p(paths.butler_session_cwd)
+system.mkdir_p(paths.mail_root)
+assert(dofile("packages/butler/identity.lua") == nil)
+local identity = remuda._butler_identity
+identity.identity_record({ id = "01ARZ3NDEKTSV4RRFFQ69G5FAV", alias = "butler" })
+assert(created_directories[paths.butler_session_cwd] and created_directories[paths.mail_root],
+  "the profile data home should provide usable session and mail directories")
+assert(identity.identity_path == identity_path and written_identity_path == identity_path,
+  "identity records should be written under the profile data home")
 
 os[execute_key], io[popen_key], os.getenv = original_execute, original_popen, original_getenv
 print("ok - system module command lookup, failure lines, and home contract")

@@ -1,5 +1,6 @@
 -- Matrix setup argument parsing and staged setup actions.
 local matrix = assert(remuda.butler and remuda.butler.matrix, "Matrix request word is unavailable")
+local system = assert(remuda._butler_system)
 
 local USAGE = [[Usage: remuda butler matrix setup [OPTIONS]
   --homeserver URL       Your Matrix server address, like https://matrix.example.org.
@@ -35,8 +36,7 @@ end
 local function default_paths()
   local home = os.getenv("XDG_CONFIG_HOME")
   if not home or home == "" then
-    local user_home = os.getenv("HOME")
-    if not user_home or user_home == "" then return nil end
+    local user_home = system.home()
     home = user_home .. "/.config"
   end
   local dir = home .. "/remuda/butler"

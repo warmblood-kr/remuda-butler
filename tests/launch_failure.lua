@@ -1,4 +1,5 @@
 -- Pure Lua contract tests for packages/butler/launch_failure.lua.
+remuda = { butler = {} }
 local render = dofile("packages/butler/launch_failure.lua")
 assert(type(render) == "function", "launch failure module should return its line renderer")
 
