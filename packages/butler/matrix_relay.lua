@@ -996,13 +996,14 @@ function relay.new(options)
     schedule(delay, "retry", function() if active then poll() end end)
   end
 
-  local function post_rate_cap_summaries(capped, sync_id)
+  local function post_rate_cap_summaries(capped)
     for capped_room, count in pairs(capped) do
       local safe_room = terminal_safe_field(capped_room, 512)
+      local message_word = count == 1 and "message" or "messages"
       send_notice(cfg.home_room,
-        tostring(count) .. " messages from non-allowlisted senders not delivered in " .. safe_room
-          .. " (rate cap). Next: remuda butler matrix --room " .. safe_room .. " history",
-        "untrusted-room-cap-summary", tostring(sync_id or "sync") .. "\0" .. capped_room)
+        tostring(count) .. " " .. message_word .. " from non-allowlisted senders not delivered in " .. safe_room
+          .. " (rate cap). Next: remuda butler matrix --room " .. shell_quote(safe_room) .. " history",
+        "untrusted-room-cap-summary", capped_room)
     end
   end
 
@@ -1504,7 +1505,7 @@ function relay.new(options)
           for _, id in ipairs(room_added) do added[#added + 1] = id end
         end
       end
-      post_rate_cap_summaries(capped, response.next_batch or state.since or "sync")
+      post_rate_cap_summaries(capped)
       handle_invites(response)
       if type(response.next_batch) == "string" then state.since = response.next_batch end
       persist()
@@ -1524,7 +1525,7 @@ function relay.new(options)
     end
     local capped = {}
     local added = accept_events(response.chunk, nil, nil, capped)
-    post_rate_cap_summaries(capped, response["end"] or response.start or state.messages_since or "messages")
+    post_rate_cap_summaries(capped)
     state.messages_since = response["end"] or state.messages_since
     persist()
     deliver_pending(added)
