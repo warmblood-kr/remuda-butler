@@ -1,19 +1,19 @@
 -- Single-instance guard (#195) with a faked remuda.fs.lock.
 -- Run from the repo root: luajit tests/butler_guard.lua
-local failed, warnings, asked, released, exec_calls = nil, {}, {}, {}, {}
+local failed, warnings, asked, released, exec_calls, made = nil, {}, {}, {}, {}, {}
 local real_stderr = io.stderr
 local lock -- the faked core word for the current case: function(path) -> grant | nil, "held", info | nil, error
 local function grant(path)
   return { release = function() released[#released + 1] = path end }
 end
 local function fresh(word)
-  failed, warnings, asked, released, exec_calls, lock = nil, {}, {}, {}, {}, word
+  failed, warnings, asked, released, exec_calls, made, lock = nil, {}, {}, {}, {}, {}, word
   remuda = {
     fs = word and { lock = function(path)
       asked[#asked + 1] = path
       return lock(path)
-    end } or {},
-    mkdir = function() end,
+    end, mkdir_new = function(path) made[#made + 1] = "private " .. path; return true end } or {},
+    mkdir = function(path) made[#made + 1] = "plain " .. path end,
     fail = function(message, code) failed = { message = message, code = code }; return message end,
     extension_command = function(name, run) remuda._command = { name = name, run = run } end,
     exec = function(name)
@@ -47,10 +47,21 @@ local ok, err = pcall(function()
   assert(guard.boot(paths) == true and remuda._butler_standby == nil and remuda._command == nil
     and list(asked) == DATA .. "," .. CONFIG and #released == 0 and #warnings == 0,
     "the daemon that gets both locks is the owner: " .. list(asked))
-  -- Same daemon asks again (a mod reload): still the owner, nothing released.
+  -- The config lock directory holds the Matrix token and config later: the
+  -- guard must create it private (fs.mkdir_new, 0700), never with plain mkdir.
+  assert(list(made):find("private /scratch/config/remuda/butler", 1, true)
+    and not list(made):find("plain /scratch/config/remuda/butler", 1, true)
+    and list(made):find("plain /scratch/config/remuda", 1, true),
+    "the config lock directory is created private, its parent plainly: " .. list(made))
+  -- A mod reload in the daemon that already owns the home: still the owner,
+  -- and core is NOT asked again, so a lock call that would fail now cannot make
+  -- the owner release its own lock.
+  asked, lock = {}, function() return nil, "io error" end
   dofile("packages/butler/guard.lua")
-  assert(remuda.butler.guard.boot(paths) == true and #released == 0,
-    "a reload in the owning daemon keeps ownership")
+  assert(remuda.butler.guard.boot(paths) == true and #asked == 0 and #released == 0
+    and remuda._butler_standby == nil and remuda._command == nil,
+    "a reload in the owning daemon keeps ownership without asking again: asked " .. list(asked)
+      .. " released " .. list(released))
 
   -- Second daemon on the same home: the data lock is held by a live daemon.
   guard = fresh(held(HELD_BY_A))
@@ -191,6 +202,28 @@ local ok, err = pcall(function()
   assert(guard.unguarded_line() == nil
     and not table.concat(remuda._butler_doctor.render({}, "posix"), "\n"):find("not guarded", 1, true),
     "a core with the word shows no not-guarded line")
+
+  -- Files that carry a capability (the root and member MCP configs) are
+  -- written owner-only. A core without write_atomic keeps the plain write; a
+  -- write_atomic that FAILS raises and never falls back to a non-private write.
+  guard = fresh(grant)
+  local real_open, opened, wrote = io.open, {}, nil
+  io.open = function(path) opened[#opened + 1] = path; return { write = function() end, close = function() end } end
+  local private_ok, private_error = pcall(function()
+    remuda.fs.write_atomic = function(path, text, options) wrote = { path, text, options and options.private }; return true end
+    guard.write_private("/scratch/x.mcp.json", "{}")
+    assert(wrote and wrote[1] == "/scratch/x.mcp.json" and wrote[2] == "{}" and wrote[3] == true and #opened == 0,
+      "a capability file is written with write_atomic private")
+    remuda.fs.write_atomic = function() return nil, "disk full" end
+    local raised, why = pcall(guard.write_private, "/scratch/x.mcp.json", "{}")
+    assert(not raised and tostring(why):find("disk full", 1, true) and tostring(why):find("/scratch/x.mcp.json", 1, true)
+      and #opened == 0, "a failed private write raises and never falls back to a plain write: " .. tostring(why))
+    remuda.fs.write_atomic = nil
+    guard.write_private("/scratch/x.mcp.json", "{}")
+    assert(list(opened) == "/scratch/x.mcp.json", "a core without write_atomic keeps the plain write")
+  end)
+  io.open = real_open
+  assert(private_ok, private_error)
 
   -- L2: in a refused daemon main.lua is not loaded, so the functions these
   -- lifecycle hooks call do not exist. The hooks must do nothing, not raise.

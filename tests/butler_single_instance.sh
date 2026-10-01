@@ -268,6 +268,11 @@ load_butler "$L" "$FAKE_OWNER"
 sleep 4
 LOCAL_STATE=$(lua "$L" 'local root = false; for _, s in ipairs(remuda.ls()) do if s.name == "butler" then root = true end end
   return "refused=" .. tostring(remuda._butler_standby ~= nil) .. " root_butler=" .. tostring(root)')
+# The guard creates the config directory for its lock; Matrix setup later puts
+# the token and config there, so it must be private from the start.
+LOCAL_CONFIG_MODE=$(ls -ld "$T/local/config/remuda/butler" 2>/dev/null | cut -c1-10)
+[[ $LOCAL_CONFIG_MODE == "drwx------" ]] && ok "T7b the config directory the guard creates is private (0700)" \
+  || bad "T7b the config directory the guard creates is private (0700): mode is ${LOCAL_CONFIG_MODE:-missing}"
 [[ $LOCAL_STATE == "refused=false root_butler=true" ]] && ok "T7b a home with no Matrix files is owned by its first daemon" \
   || bad "T7b a home with no Matrix files is owned by its first daemon: $LOCAL_STATE; $("$REMUDA_BIN" -s "$L" butler status 2>&1 | head -1 | cut -c1-160)"
 
@@ -307,6 +312,12 @@ if [[ $LOCK_WORD != true ]]; then
     return "refused=" .. tostring(remuda._butler_standby ~= nil) .. " root_butlers=" .. roots .. " relay=" .. tostring((m and m.relay and m.relay.instance) ~= nil)')
   [[ $GONE_STATE == "refused=false root_butlers=1 relay=true" ]] || T7C="$T7C; after the printed command: $GONE_STATE"
   [[ -f $T/gone/config/remuda/butler/config.mcp.json ]] || T7C="$T7C; no root MCP config was written"
+  # The command entry answers as the Butler now, not with the refusal it gave before.
+  assert_scratch
+  set +e
+  OUT=$("$REMUDA_BIN" -s "$G" butler status 2>&1); CODE=$?
+  set -e
+  [[ $CODE != 1 && $OUT == "butler: "* ]] || T7C="$T7C; butler status after the takeover: exit $CODE, output: $(printf '%s' "$OUT" | head -1 | cut -c1-120)"
   [[ $T7C == ok ]] && ok "T7c when the owner is gone the printed command makes this daemon the owner" \
     || bad "T7c when the owner is gone the printed command makes this daemon the owner: ${T7C#ok; }"
 fi
@@ -341,9 +352,12 @@ if [[ $LOCK_WORD == true ]]; then
   TAKEOVER=$(lua "$B" 'local roots = 0; for _, s in ipairs(remuda.ls()) do if s.name == "butler" then roots = roots + 1 end end
     local m = remuda.butler and remuda.butler.matrix
     return "refused=" .. tostring(remuda._butler_standby ~= nil) .. " root_butlers=" .. roots .. " relay=" .. tostring((m and m.relay and m.relay.instance) ~= nil)')
-  [[ $TAKEOVER == "refused=false root_butlers=1 relay=true" ]] \
+  set +e
+  OUT=$("$REMUDA_BIN" -s "$B" butler status 2>&1); CODE=$?
+  set -e
+  [[ $TAKEOVER == "refused=false root_butlers=1 relay=true" && $CODE != 1 && $OUT == "butler: "* ]] \
     && ok "T8 the printed command makes the refused daemon the owner" \
-    || bad "T8 the printed command makes the refused daemon the owner: $TAKEOVER"
+    || bad "T8 the printed command makes the refused daemon the owner: $TAKEOVER; butler status exit $CODE: $(printf '%s' "$OUT" | head -1 | cut -c1-120)"
   # ...and a daemon started after that is refused: the new owner holds both locks.
   start_daemon "$D"
   load_butler "$D"
