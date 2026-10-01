@@ -241,7 +241,7 @@ end
 -- The root line for `remuda butler doctor`; the block ends with Next:.
 function permissions.doctor_lines(report, kind)
   local head = "Permissions butler (" .. one_line(kind or "?") .. "): "
-  if kind ~= "claude" then
+  if kind == "codex" then
     return { head .. "none — the mod writes no Codex permission rules", "Next: nothing to do" }
   end
   if type(report) ~= "table" then return { head .. "not checked yet", "Next: remuda butler status" } end

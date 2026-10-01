@@ -89,7 +89,13 @@ end
 command(5, "doctor", "  remuda butler doctor", function(args)
   if #args == 1 then
     local doctor = remuda._butler_doctor
-    return table.concat(doctor.render(doctor.probe()), "\n")
+    local lines = doctor.render(doctor.probe())
+    -- What the mod did to the root Butler's settings.local.json at its last launch or load.
+    local state = remuda._butler_permission_report or {}
+    for _, line in ipairs(remuda._butler_permissions.doctor_lines(state.report, state.kind)) do
+      lines[#lines + 1] = line
+    end
+    return table.concat(lines, "\n")
   end
 end)
 command(6, "quota", "  remuda butler quota [--report]", function(args, caller)

@@ -721,8 +721,9 @@ leader, when you have one, is `REMUDA_BUTLER_LEADER_ID`. Use the short forms:
 - `remuda butler inbox` to read your own inbox.
 - `remuda butler send MEMBER "MESSAGE"` to direct a member; your sender is inferred.
 - `remuda butler send-to-leader MESSAGE...` to report a completed work loop.
-- For long bodies, use `cat <<'EOF' | remuda butler send MEMBER -` or `--file "$PWD/path"`;
-  `send-to-leader` and `reply MESSAGE_ID` accept those forms too. The limit is 64 KiB.
+- For long bodies, write the text to a file and use `remuda butler send MEMBER --file "$PWD/path"`,
+  or pipe it: `cat <<'EOF' | remuda butler send MEMBER -`. `send-to-leader` and `reply MESSAGE_ID`
+  accept those forms too. The limit is 64 KiB.
 
 If `inbox` says "no Butler identity in your env", your Remuda core predates
 caller-env forwarding: pass your id (`remuda butler inbox

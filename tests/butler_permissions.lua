@@ -240,4 +240,17 @@ eq("doctor: a hostile error text stays on one line",
   "Permissions butler (claude): not written: bad Next: rm -rf?[0m — " .. PATH
   .. "\nNext: fix or delete that file; Butler adds the rule at its next launch")
 
+eq("doctor: no agent chosen yet", doctor(nil, nil),
+  "Permissions butler (?): not checked yet\nNext: remuda butler status")
+
+-- Guidance names the --file form before the pipe: every part of a pipeline must match a rule.
+for _, file in ipairs({ "packages/butler/main.lua", "packages/butler/init.lua", "packages/butler/agents_launch.lua" }) do
+  local f = assert(io.open(file))
+  local source = f:read("*a")
+  f:close()
+  local at = assert(source:find("- For long bodies", 1, true), file .. " has no long-bodies line")
+  local file_form, pipe_form = source:find("--file", at, true), source:find("cat <<", at, true)
+  ok(file .. ": --file comes before the pipe form", file_form and pipe_form and file_form < pipe_form)
+end
+
 print(("butler_permissions ok: %d cases"):format(count))
