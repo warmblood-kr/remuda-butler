@@ -11,10 +11,12 @@ guard.CORE_WITH_LOCK = "a core release with remuda.fs.lock"
 -- Two locks, because Butler's shared files live in two places: the data lock
 -- sits next to agents.jsonl (the data home the registry uses), the config lock
 -- next to the config file that config.mcp.json and the relay's .since/.acks
--- are named after. Always asked in this order: data, then config.
+-- are named after. The config lock uses the RESOLVED config path, which is
+-- known whether or not Matrix is set up (paths.config_path is nil until both
+-- Matrix files exist). Always asked in this order: data, then config.
 function guard.lock_paths(paths)
   local data = paths.data_home and (paths.data_home .. "/remuda/butler/lock") or nil
-  local config = paths.config_path and (paths.config_path .. ".lock") or nil
+  local config = paths.resolved_config_path and (paths.resolved_config_path .. ".lock") or nil
   return data, config
 end
 
