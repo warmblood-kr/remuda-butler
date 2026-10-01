@@ -578,6 +578,7 @@ function matrix.cli(args, agent)
     end
     if candidate then
       local usage = "  remuda butler matrix [--json] [--room ROOM] " .. candidate .. " EVENT_ID"
+      usage = usage .. "\nExample: remuda butler matrix follow '$EVENT_ID'"
       if type(remuda.pending) == "function" then
         local reply = remuda.pending({ timeout = 1 })
         reply:resolve(2, "", usage .. "\n")
@@ -624,7 +625,7 @@ function matrix.cli(args, agent)
     local thread = route and route.thread_root or options.event_id
     local room = options.room or (route and route.room_id) or matrix.configured_room()
     if type(room) ~= "string" or room == "" then
-      local message = 'Matrix relay is not running. Next: remuda butler doctor'
+      local message = "No Matrix room is configured. Next: remuda butler matrix setup"
       return reply:resolve(1, "", message .. "\n")
     end
     local ok, changed = pcall(function()

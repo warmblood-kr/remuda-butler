@@ -57,6 +57,8 @@ remuda butler matrix [--json] status
 remuda butler matrix [--json] rooms
 remuda butler matrix [--json] [--room ROOM] [-n N] history
 remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
+remuda butler matrix [--json] [--room ROOM] follow EVENT_ID
+remuda butler matrix [--json] [--room ROOM] unfollow EVENT_ID
 remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
 remuda butler matrix [--json] [-o PATH] download MXC
 remuda butler matrix [--json] [--room ROOM] send TEXT
@@ -68,6 +70,13 @@ remuda butler matrix [--json] join ROOM
 remuda butler matrix [--json] leave ROOM
 remuda butler matrix [--json] quarantine [--id EVENT_ID]
 ```
+
+Root posts are delivered from anyone. Thread replies are delivered only in
+threads you follow or when a message mentions the Butler; replying, sending,
+and being mentioned follow a thread automatically. Non-allowlisted senders
+arrive marked as information with `trusted=false`. Use `follow EVENT_ID` and
+`unfollow EVENT_ID` to manage subscriptions; the relay allows up to 50000
+followed threads per room.
 
 `remuda butler matrix setup --default` writes the token and config to the
 running Butler's resolved paths, then starts or replaces only its Matrix

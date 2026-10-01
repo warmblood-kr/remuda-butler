@@ -31,6 +31,7 @@ Matrix is the human-facing adapter: never call the homeserver REST API or curl d
 - `[-n N] history`: recent messages in the room.
 - `rooms`: joined rooms (read-only).
 - `thread EVENT_ID`: all replies in a thread.
+- `follow EVENT_ID` / `unfollow EVENT_ID`: get, or stop getting, replies in that thread (replying, sending and being mentioned follow automatically).
 - `event EVENT_ID` (alias `get`): one event.
 - `send TEXT`: post a message (long text is split, rate-limited); `send -` is refused until core #213.
 - `reply EVENT_ID TEXT` / `react EVENT_ID KEY`: answer or react (same room only).
