@@ -250,6 +250,39 @@ function quota.parse_codex_status(screen, utc_offset_seconds, now)
   return { plan = plan, limits = limits }
 end
 
+function quota.parse_codex_rate_limits(result)
+  local by_id = type(result) == "table" and result.rateLimitsByLimitId or nil
+  if type(by_id) ~= "table" then return nil end
+
+  local codex = by_id.codex
+  local plan = type(codex) == "table" and codex.planType or nil
+  if not plain_word(plan) then plan = nil end
+
+  local function weekly_limit(entry, name)
+    if type(entry) ~= "table" or type(entry.primary) ~= "table" then return nil end
+    local primary = entry.primary
+    if primary.windowDurationMins ~= 10080 or not finite_number(primary.resetsAt)
+        or primary.resetsAt <= 0 or primary.resetsAt >= 4000000000 then
+      return nil
+    end
+    local used = finite_number(primary.usedPercent)
+        and primary.usedPercent >= 0 and primary.usedPercent <= 100
+        and primary.usedPercent or nil
+    return { name = name, used = used, resets_at = primary.resetsAt }
+  end
+
+  local limits = {}
+  local weekly = weekly_limit(codex, "Weekly limit")
+  if weekly then limits[#limits + 1] = weekly end
+  local reserve = by_id.base_model_inference
+  if type(reserve) == "table" and reserve.limitName == "gpt-reserve" then
+    local reserve_weekly = weekly_limit(reserve, "Luna Reserve Weekly limit")
+    if reserve_weekly then limits[#limits + 1] = reserve_weekly end
+  end
+  if #limits == 0 then return nil end
+  return { plan = plan, limits = limits }
+end
+
 local function utc_text(epoch)
   return os.date("!%Y-%m-%d %H:%MZ", epoch)
 end
@@ -283,9 +316,8 @@ local function agent_lines(name, agent, report_at, near_limits)
     if #limits == 0 then
       local reasons = {
         ["no reading yet; it appears after a claude session's first reply"] = true,
-        ["no idle codex session to ask"] = true,
         ["codex did not show its limits in time"] = true,
-        ["could not type /status into the codex session"] = true,
+        ["codex limits need core nightly d47a845 or newer"] = true,
       }
       local reason = reasons[agent.unknown_reason] and agent.unknown_reason or "could not be read"
       lines[#lines + 1] = "  quota: unknown (" .. reason .. ")"
@@ -379,10 +411,9 @@ function quota.terminal(report, outcome)
     local command = type(claude) == "table" and claude.mode == "unknown"
       and "claude auth status" or "codex login status"
     next_line = "Next: run `" .. command .. "` yourself to see what it answers, then `remuda butler doctor`."
-  elseif type(codex) == "table" and codex.unknown_reason == "no idle codex session to ask" then
-    next_line = "Next: start a codex member with `remuda butler launch codex` (or wait until one is idle), then run `remuda butler quota` again."
-  elseif type(codex) == "table" and (codex.unknown_reason == "codex did not show its limits in time"
-      or codex.unknown_reason == "could not type /status into the codex session") then
+  elseif type(codex) == "table" and codex.unknown_reason == "codex limits need core nightly d47a845 or newer" then
+    next_line = "Next: update Remuda core to nightly d47a845 or newer, then run `remuda butler quota` again."
+  elseif type(codex) == "table" and codex.unknown_reason == "codex did not show its limits in time" then
     next_line = "Next: run `remuda butler quota` again in a minute."
   elseif type(claude) == "table" and claude.mode == "subscription"
       and (type(claude.limits) ~= "table" or #claude.limits == 0) then
@@ -496,84 +527,60 @@ if type(remuda) == "table" then
   end
 
   function quota.codex_read(done)
-    local bus = remuda._butler_bus or {}
-    local agents = type(bus.agents) == "table" and bus.agents or {}
-    local selected, alias
-    for name, agent in pairs(agents) do
-      if name ~= "butler" and type(agent) == "table" and agent.kind == "codex" then
-        local session = agent.session_name or name
-        if remuda.butler.is_idle(name) == true
-            and remuda._butler_notify_policy(session) == true then
-          selected, alias = agent, name
-          break
-        end
-      end
+    local function unavailable()
+      done(nil, "codex did not show its limits in time")
     end
-    if not selected then
-      done(nil, "no idle codex session to ask")
+    local function needs_newer_core()
+      done(nil, "codex limits need core nightly d47a845 or newer")
+    end
+    local process = remuda.process
+    if type(process) ~= "table" or type(process.run) ~= "function" then
+      unavailable()
       return
     end
 
-    local session = selected.session_name or alias
-    local utc_offset_seconds = os.time() - os.time(os.date("!*t"))
-    local captured_first, first_screen = pcall(remuda.capture, session)
-    if not captured_first or type(first_screen) ~= "string" then first_screen = nil end
-    local typed, result = pcall(remuda.type_text, session, "/status", 0.1)
-    if not typed or (result ~= "submitted" and result ~= "unverified") then
-      done(nil, "could not type /status into the codex session")
+    -- Four output lines were measured on Codex 0.159.3: initialize result, two notifications, rateLimits reply.
+    local input = table.concat({
+      '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"remuda","version":"1.0.0"}}}',
+      '{"jsonrpc":"2.0","method":"initialized"}',
+      '{"jsonrpc":"2.0","id":2,"method":"account/rateLimits/read","params":{}}',
+    }, "\n") .. "\n"
+    local ran, result = pcall(process.run, {
+      argv = { "codex", "app-server" },
+      stdin = input,
+      timeout = 5,
+      stdin_hold_until_lines = 4,
+    })
+    if not ran or type(result) ~= "table" or type(result.stdout) ~= "string" then
+      unavailable()
+      return
+    end
+    local decoder = type(remuda.json) == "table" and remuda.json.decode or nil
+    if type(decoder) ~= "function" then
+      unavailable()
       return
     end
 
-    local poll, ticks, finished = nil, 0, false
-    local previous_limits
-    local function same_limits(left, right)
-      if #left.limits ~= #right.limits then return false end
-      local by_name = {}
-      for _, limit in ipairs(left.limits) do
-        by_name[limit.name] = { used = limit.used, resets_at = limit.resets_at }
-      end
-      for _, limit in ipairs(right.limits) do
-        local previous = by_name[limit.name]
-        if not previous or previous.used ~= limit.used
-            or previous.resets_at ~= limit.resets_at then
-          return false
+    local output_lines = {}
+    for line in (result.stdout .. "\n"):gmatch("([^\n]*)\n") do
+      line = line:gsub("\r$", "")
+      if line ~= "" then output_lines[#output_lines + 1] = line end
+      local decoded, response = pcall(decoder, line)
+      if decoded and type(response) == "table" and response.id == 2 then
+        local parsed = quota.parse_codex_rate_limits(response.result)
+        if parsed then
+          done(parsed)
+          return
         end
-        by_name[limit.name] = nil
+        unavailable()
+        return
       end
-      return next(by_name) == nil
     end
-    local function finish(result, reason)
-      if finished then return end
-      finished = true
-      if poll then remuda.cancel(poll) end
-      done(result, reason)
+    if result.timed_out == true or #output_lines < 2 then
+      needs_newer_core()
+      return
     end
-    local scheduled, handle = pcall(remuda.schedule, { every = 0.5, run = function()
-      ticks = ticks + 1
-      local captured, screen = pcall(remuda.capture, session)
-      if captured and type(screen) == "string" and screen ~= first_screen then
-        local parsed = quota.parse_codex_status(screen, utc_offset_seconds, os.time())
-        if parsed and #parsed.limits > 0 then
-          if previous_limits and same_limits(previous_limits, parsed) then
-            finish(parsed, nil)
-            return
-          end
-          previous_limits = parsed
-        else
-          previous_limits = nil
-        end
-      else
-        previous_limits = nil
-      end
-      if ticks >= 20 then
-        finish(nil, "codex did not show its limits in time")
-      end
-    end })
-    if not scheduled then
-      finish(nil, "codex did not show its limits in time")
-    else
-      poll = handle
-    end
+    unavailable()
   end
 
   function quota.collect(done)

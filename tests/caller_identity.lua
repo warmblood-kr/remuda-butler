@@ -11,6 +11,10 @@ local current_agent = remuda._butler_current_agent
 
 assert(current_agent({ env = { REMUDA_BUTLER_AGENT_ID = "dev-lead" } }) == "dev-lead")
 assert(current_agent({ env = { REMUDA_BUTLER_SESSION_NAME = "sess" } }) == "sess")
+-- Cleared identity variables mean no agent, whatever the core caller kind: the member refusal
+-- (approve/deny, matrix setup/join/leave) keys on this alone and is advisory within one UID.
+assert(current_agent({ kind = "session", env = {} }) == nil)
+assert(current_agent({ kind = "unknown" }) == nil)
 -- No caller means no identity, never the daemon's own env (caller_identity.sh).
 assert(current_agent(nil) == nil)
 -- The stub's exec reaches package modules (paths.lua needs no config).

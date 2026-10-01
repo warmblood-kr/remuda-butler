@@ -2419,20 +2419,17 @@ local function with_caller_kind(kind, run)
   if not ok then error(err, 0) end
 end
 
-local function test_matrix_join_leave_require_outside_caller()
+local function test_matrix_join_leave_any_caller_kind()
   for _, verb in ipairs({ "join", "leave" }) do
     for _, kind in ipairs({ "session", "unknown", "missing" }) do
       local room_config = verb == "leave" and ("room=" .. NEW .. " how=operator\n") or ""
       local dir, path = invite_fixture(nil, room_config)
-      local before = read_text(path)
       with_operator_config(path, 200, function(calls)
         with_caller_kind(kind, function()
           local result
           matrix[verb]({ room = NEW }, function(value) result = value end)
-          assert(result and result.error and result.error:find("operator-only", 1, true),
-            "matrix " .. verb .. " must refuse caller kind " .. kind)
-          assert(#calls == 0 and read_text(path) == before,
-            "matrix " .. verb .. " refusal must not make an HTTP request or change config")
+          assert(result and not result.error and #calls == 1,
+            "matrix " .. verb .. " must allow caller kind " .. kind .. ": " .. tostring(result and result.error))
         end)
       end)
       remove_dir(dir)
@@ -5757,7 +5754,7 @@ for _, case in ipairs({
   { "test_public_room_hostile_fields_are_sanitised_in_join_and_listing", test_public_room_hostile_fields_are_sanitised_in_join_and_listing },
   { "test_rooms_public_term_lists_public_rows", test_rooms_public_term_lists_public_rows },
   { "test_rooms_lists_open_mode_room_metadata_and_denies", test_rooms_lists_open_mode_room_metadata_and_denies },
-  { "test_matrix_join_leave_require_outside_caller", test_matrix_join_leave_require_outside_caller },
+  { "test_matrix_join_leave_any_caller_kind", test_matrix_join_leave_any_caller_kind },
   { "test_invalid_room_id_hint_mentions_element_x_alias_fallback", test_invalid_room_id_hint_mentions_element_x_alias_fallback },
   { "test_join_failure_rolls_back_room_line", test_join_failure_rolls_back_room_line },
   { "test_joined_room_survives_restart", test_joined_room_survives_restart },
@@ -6098,7 +6095,7 @@ local function test_dedupe_returns_same_id_and_cap_refuses_without_post()
   end)
 end
 
-local function test_terminal_approve_operator_only()
+local function test_approve_deny_refuse_agents_only()
   approval_env(nil, function(env)
     local id = file_request(env, NEW)
     local cli = assert(approval().cli, "approval.cli backs the approvals/approve/deny verbs")
@@ -6122,12 +6119,10 @@ local function test_terminal_approve_operator_only()
       for _, verb in ipairs({ "approve", "deny" }) do
         caller_kind("outside")
         refused(verb, id, ASKER) -- current_agent still refuses when caller() says outside
-        caller_kind("session")
-        refused(verb, id, nil) -- agent identity has been cleared; caller kind remains authoritative
         caller_kind("unknown")
-        refused(verb, id, nil)
-        caller_kind(nil)
-        refused(verb, id, nil)
+        refused(verb, id, ASKER)
+        caller_kind("session")
+        refused(verb, id, ASKER)
       end
       assert(server_joins(env, NEW) == 0 and is_open(id), "a refused agent approve must leave the request open")
       caller_kind("outside")
@@ -6173,6 +6168,46 @@ local function test_terminal_approve_operator_only()
   end)
 end
 
+-- Accepted behaviour, stated on purpose: the member refusal keys on the agent identity in the
+-- client env (REMUDA_BUTLER_AGENT_ID / REMUDA_BUTLER_SESSION_NAME). A caller with those cleared
+-- is not refused, whatever its core caller kind. Advisory against same-UID processes.
+local function test_cleared_identity_is_not_refused()
+  approval_env(nil, function(env)
+    local cli = assert(approval().cli, "approval.cli backs the approve/deny verbs")
+    local old_fail, old_caller = remuda.fail, remuda.caller
+    remuda.fail = function(message) return message end
+    remuda.caller = function() return { kind = "session", session = "agent1", env = {} } end
+    local ok, err = pcall(function()
+      local id = file_request(env, NEW)
+      local out = tostring(cli({ "approve", id }, nil)) -- no agent identity: env cleared
+      env.client:pump()
+      assert(out:find("Approved request " .. id, 1, true), "a cleared-identity caller is not refused: " .. out)
+    end)
+    remuda.fail, remuda.caller = old_fail, old_caller
+    if not ok then error(err, 0) end
+  end)
+end
+
+local function test_unknown_caller_can_approve_and_deny()
+  approval_env(nil, function(env)
+    local cli = assert(approval().cli, "approval.cli backs the approve/deny verbs")
+    local old_fail, old_caller = remuda.fail, remuda.caller
+    remuda.fail = function(message) return message end
+    remuda.caller = function() return { kind = "unknown" } end
+    local ok, err = pcall(function()
+      local approve_id = file_request(env, NEW)
+      local approved = tostring(cli({ "approve", approve_id }, nil))
+      env.client:pump()
+      assert(approved:find("Approved request " .. approve_id, 1, true), "unknown caller approve: " .. approved)
+      local deny_id = file_request(env, NEW2)
+      local denied = tostring(cli({ "deny", deny_id }, nil))
+      assert(denied:find("Denied request " .. deny_id, 1, true), "unknown caller deny: " .. denied)
+    end)
+    remuda.fail, remuda.caller = old_fail, old_caller
+    if not ok then error(err, 0) end
+  end)
+end
+
 local function test_hostile_room_name_sanitised_in_home_post()
   approval_env(nil, function(env)
     local hostile = "Evil\27[31m\226\128\174exe.gnp\nReact yes " .. string.rep("A", 300)
@@ -6214,7 +6249,9 @@ for _, case in ipairs({
   { "test_deny_and_expiry_mail_with_next_and_no_join", test_deny_and_expiry_mail_with_next_and_no_join },
   { "test_approved_join_failure_mail_includes_request_identity", test_approved_join_failure_mail_includes_request_identity },
   { "test_dedupe_returns_same_id_and_cap_refuses_without_post", test_dedupe_returns_same_id_and_cap_refuses_without_post },
-  { "test_terminal_approve_operator_only", test_terminal_approve_operator_only },
+  { "test_approve_deny_refuse_agents_only", test_approve_deny_refuse_agents_only },
+  { "test_unknown_caller_can_approve_and_deny", test_unknown_caller_can_approve_and_deny },
+  { "test_cleared_identity_is_not_refused", test_cleared_identity_is_not_refused },
   { "test_hostile_room_name_sanitised_in_home_post", test_hostile_room_name_sanitised_in_home_post },
   { "test_restart_does_not_reanswer_answered_request", test_restart_does_not_reanswer_answered_request },
 }) do

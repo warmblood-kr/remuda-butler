@@ -186,7 +186,7 @@ local function close_caller_leader()
   if type(remuda.caller) ~= "function" then refuse() end
   local ok, caller = pcall(remuda.caller)
   if not ok or type(caller) ~= "table" then refuse() end
-  if caller.kind == "outside" then return "butler" end
+  if caller.kind == "outside" or caller.kind == "unknown" then return "butler" end
   if caller.kind ~= "session" or type(caller.session) ~= "string" or caller.session == "" then refuse() end
   local agents = remuda._butler_bus and remuda._butler_bus.agents
   if type(agents) ~= "table" then refuse() end
