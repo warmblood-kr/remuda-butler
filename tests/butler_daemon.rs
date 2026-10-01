@@ -9731,7 +9731,7 @@ fn butler_quota_never_guesses_mode() {
         (
             "unrecognised",
             Some("hello"),
-            "claude: unknown (unrecognised status output)",
+            "claude: unknown (could not understand what `claude auth status` answered)",
         ),
         ("not-installed", None, "claude: not installed"),
     ] {
