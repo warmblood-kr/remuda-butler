@@ -504,9 +504,10 @@ fn butler_close_cli_uses_core_caller_not_forwarded_env() {
     assert!(spoofed.contains("only your direct members"), "spoofed env bypassed ownership: {spoofed}");
     assert_eq!(eval(&path, "return #remuda._butler_close_test_calls"), "0");
     // An unknown caller (a plain Windows terminal) closes as the Butler, like an outside one.
-    let unknown = cli("unknown", "", &lead_id, "kid");
-    assert_eq!(unknown, "Closed kid.\nNext: remuda butler sessions");
-    assert_eq!(eval(&path, "return remuda._butler_close_test_calls[1]"), "kid");
+    // A Butler-kind close reaches only Butler's direct members: 'other' is one, 'kid' is lead's.
+    let unknown = cli("unknown", "", &lead_id, "other");
+    assert_eq!(unknown, "Closed other.\nNext: remuda butler sessions");
+    assert_eq!(eval(&path, "return remuda._butler_close_test_calls[1]"), "other");
 
     let outside = eval(&path, &format!(
         "local old=remuda.caller; remuda.caller=function() return {{kind='outside'}} end; \
