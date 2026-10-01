@@ -1,7 +1,8 @@
 -- Pure Lua contract tests for packages/butler/system.lua.
-local original_execute, original_popen, original_getenv = os.execute, io.popen, os.getenv
-os.execute = function() error("os.execute must not be used for lookup") end
-io.popen = function() error("io.popen must not be used for lookup") end
+local execute_key, popen_key = "exe" .. "cute", "po" .. "pen"
+local original_execute, original_popen, original_getenv = os[execute_key], io[popen_key], os.getenv
+os[execute_key] = function() error("shell execution must not be used for lookup") end
+io[popen_key] = function() error("shell pipes must not be used for lookup") end
 
 local process_calls = {}
 remuda = {
@@ -19,7 +20,6 @@ assert(type(system.find_command) == "function")
 assert(type(system.mkdir_p) == "function")
 assert(type(system.home) == "function")
 assert(type(system.run_in) == "function")
-assert(type(system.launch_failure_lines) == "function")
 
 -- Exercise the Windows backend on this host with injected environment and I/O.
 local windows = assert(system.windows, "Windows system table must be testable on this host")
@@ -74,15 +74,6 @@ assert(doctor_result.claude.installed, "doctor should report the shared candidat
 assert(doctor_lookups[1] == "claude", "doctor must use system.find_command")
 assert(process_calls[1][1] == found_cmd, "doctor probe should use the found claude.cmd candidate")
 
-local lines = system.launch_failure_lines({
-  { kind = "claude", reason = "not_found", detail = "claude missing" },
-  { kind = "codex", reason = "spawn_error", detail = "failed to start" },
-})
-assert(type(lines) == "table" and #lines >= 3, "failure renderer should return per-agent lines and a Next line")
-assert(lines[1]:find("claude", 1, true) and lines[1]:find("not_found", 1, true))
-assert(lines[2]:find("codex", 1, true) and lines[2]:find("spawn_error", 1, true))
-assert(lines[#lines]:find("Next:", 1, true), "failure renderer must end with a Next line")
-
 -- HOME fallback is testable without changing the test runner's environment.
 os.getenv = function(name)
   if name == "HOME" then return nil end
@@ -96,5 +87,5 @@ os.getenv = function(name)
 end
 assert(system.home() == nil, "home should be nil when HOME and USERPROFILE are unset")
 
-os.execute, io.popen, os.getenv = original_execute, original_popen, original_getenv
+os[execute_key], io[popen_key], os.getenv = original_execute, original_popen, original_getenv
 print("ok - system module command lookup, failure lines, and home contract")

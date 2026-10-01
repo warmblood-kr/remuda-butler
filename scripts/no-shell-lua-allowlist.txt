@@ -1,1 +1,3 @@
+# POSIX run_in keeps one shell call until core process.run accepts cwd; see https://github.com/warmblood-kr/remuda/issues/433.
+packages/butler/system.lua|1
 tests/butler_matrix_relay.lua|2

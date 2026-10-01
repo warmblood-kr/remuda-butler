@@ -42,6 +42,7 @@ while IFS= read -r path; do
 done <"$FILES"
 
 while IFS='|' read -r path expected extra; do
+  case "$path" in ''|\#*) continue ;; esac
   [ -n "$path" ] || { echo 'empty path in Lua shell-call allowlist' >&2; exit 2; }
   case "$expected" in ''|*[!0-9]*) printf 'invalid count in Lua shell-call allowlist: %s\n' "$path" >&2; exit 2 ;; esac
   [ -z "${extra:-}" ] || { printf 'invalid allowlist row: %s|%s|%s\n' "$path" "$expected" "$extra" >&2; exit 2; }
