@@ -156,6 +156,8 @@ remuda._butler_paths = {
   load_topic_config = load_topic_config,
   token_path = token_path,
   config_path = config_path,
+  -- Where the Matrix config is or would be, known even before Matrix is set up.
+  resolved_config_path = resolved_config_path,
   mcp_config_path = mcp_config_path,
   shell_quote = shell_quote,
   valid_child_name = valid_child_name,

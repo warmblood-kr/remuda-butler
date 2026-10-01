@@ -579,16 +579,38 @@ return function(matrix, pinned_hostname)
     end }
     function reply:prompt_secret(spec)
       assert(not spec.label:find(":%s*$"), "a hidden prompt label must not end with its own colon: " .. spec.label)
+      -- prompt_secret has no preface: its label has to fit core's one line.
+      assert(#spec.label <= 256 and not spec.label:find("\n", 1, true),
+        "a hidden prompt label is one line and at most 256 characters: " .. #spec.label)
       prompt_specs[#prompt_specs + 1] = spec
     end
     function reply:prompt_line(spec)
       -- Core's prompt_line shows a label on one line, cuts it at 256
-      -- characters and adds ":" / "[default]:" itself. The summary label is
-      -- exempt until core can print output before a prompt (butler #186).
+      -- characters and adds ":" / "[default]:" itself. Longer text goes in
+      -- `preface` (one string, at most 32 lines of at most 256 characters; more
+      -- is an error from core, #186). Only a core without preface gets the old
+      -- summary-in-the-label form.
+      local legacy = not matrix.prompt_preface_supported() and spec.label:find("^Matrix setup will:")
       assert(not spec.label:find(":%s*$"), "a wizard prompt label must not end with its own colon: " .. spec.label)
-      assert(spec.label:find("^Matrix setup will:") or (#spec.label <= 256 and not spec.label:find("\n", 1, true)),
+      assert(legacy or (#spec.label <= 256 and not spec.label:find("\n", 1, true)),
         "every wizard prompt label is one line and at most 256 characters: " .. spec.label)
-      line_specs[#line_specs + 1] = spec
+      assert(spec.preface == nil or matrix.prompt_preface_supported(), "a core without preface must not be sent one")
+      if spec.preface ~= nil then
+        assert(type(spec.preface) == "string" and spec.preface ~= "" and not spec.preface:find("[%z\1-\9\11-\31\127]")
+          and not spec.preface:find("Continue?", 1, true),
+          "a preface is plain text lines without control characters and without the question")
+        local count = 0
+        for line in (spec.preface .. "\n"):gmatch("([^\n]*)\n") do
+          count = count + 1
+          assert(#line <= 250, "a preface line must leave room under core's 256-character cap: " .. #line)
+        end
+        assert(count <= 32, "a preface must stay under core's 32-line cap: " .. count)
+      end
+      -- What the terminal shows for this prompt: the preface lines, then the
+      -- question. The assertions below read it as `label`; `question` and
+      -- `preface` are the two parts as sent to core.
+      line_specs[#line_specs + 1] = { label = (spec.preface and (spec.preface .. "\n") or "") .. spec.label,
+        question = spec.label, preface = spec.preface, default = spec.default, callback = spec.callback }
     end
     return reply
   end
@@ -612,6 +634,54 @@ return function(matrix, pinned_hostname)
     "the wizard should set open rooms and summarize the real config path")
   assert(line_specs[3].label:match("\n([^\n]*)$") == "Continue? Type Y to continue, or N to cancel",
     "the summary label should end with the bare question: core adds the [N]: suffix")
+  -- #186: the summary is the prompt's preface; the label is only the question.
+  assert(line_specs[3].question == "Continue? Type Y to continue, or N to cancel"
+    and type(line_specs[3].preface) == "string" and line_specs[3].preface:find("^Matrix setup will:\n  Homeserver: ")
+    and line_specs[3].preface:find("\n  Bot: @butler%-"),
+    "the wizard summary is a preface and the label is only the question: " .. tostring(line_specs[3].question))
+  -- Without --dir the files go next to the default config file: the summary names that directory.
+  assert(line_specs[3].preface:find("\n  Save private token and config files in: "
+      .. default_paths.config_path:match("^(.*)/[^/]+$") .. "\n", 1, true),
+    "the summary names the directory the files are saved in: "
+      .. tostring(line_specs[3].preface:match("\n(  Save private[^\n]*)")))
+  do
+    -- A very long value must not hit core's 256-character line cap (an error
+    -- there would end the wizard): the wizard cuts the line itself.
+    local long_owner = "@" .. string.rep("a", 400) .. ":example.org"
+    requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+    matrix.cli({ "matrix", "setup" })
+    line_specs[1].callback("http://matrix.invalid", nil)
+    line_specs[2].callback(long_owner, nil)
+    assert(#line_specs == 3 and not resolved and line_specs[3].preface:find("\n  Owner: @aaaa", 1, true)
+      and not line_specs[3].preface:find(long_owner, 1, true),
+      "a very long value is cut to fit a preface line: " .. tostring(resolved and resolved.stderr))
+    -- The cut is visible: what the user confirms must not look complete.
+    assert(line_specs[3].preface:match("\n(  Owner: @a+%.%.%.)\n") and #line_specs[3].preface:match("\n(  Owner: [^\n]*)") == 250
+      and line_specs[1].label == "Matrix homeserver URL" and not line_specs[3].preface:find("Homeserver: [^\n]*%.%.%.\n"),
+      "a cut summary line ends with ... inside the limit, and an uncut line has no mark")
+    line_specs[3].callback("N", nil)
+    -- A core without preface (older daemons ignore it silently) keeps the
+    -- summary in the label, as before.
+    local supported = matrix.prompt_preface_supported
+    matrix.prompt_preface_supported = function() return false end
+    requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+    local legacy_ok, legacy_error = pcall(function()
+      matrix.cli({ "matrix", "setup" })
+      line_specs[1].callback("http://matrix.invalid", nil)
+      line_specs[2].callback("@alice:example.org", nil)
+      assert(#line_specs == 3 and line_specs[3].preface == nil
+        and line_specs[3].question:find("^Matrix setup will:\n  Homeserver: ")
+        and line_specs[3].question:match("\n([^\n]*)$") == "Continue? Type Y to continue, or N to cancel",
+        "a core without preface keeps the summary in the label")
+      line_specs[3].callback("N", nil)
+    end)
+    matrix.prompt_preface_supported = supported
+    assert(legacy_ok, legacy_error)
+    requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+    matrix.cli({ "matrix", "setup" })
+    line_specs[1].callback("http://matrix.invalid", nil)
+    line_specs[2].callback("@alice:example.org", nil)
+  end
   assert(not line_specs[3].label:find("HTTPS", 1, true),
     "an http wizard summary should show no HTTPS trust line")
   assert(line_specs[3].default == "N", "wizard confirmation should default to no")
@@ -886,6 +956,23 @@ return function(matrix, pinned_hostname)
   end)
   os.getenv, remuda.hostname = word_getenv, word_hostname
   assert(word_ok, word_error)
+  end
+
+  do
+    -- A long homeserver must not push the hidden token prompt over core's
+    -- 256-character line, with or without the "rejected" notice in front.
+    local long_homeserver = "http://" .. string.rep("a", 60) .. "." .. string.rep("b", 60) .. "."
+      .. string.rep("c", 60) .. ".invalid"
+    requests, resolved, prompt_specs = {}, nil, {}
+    matrix.cli({ "matrix", "setup", "--homeserver", long_homeserver, "--owner", "@alice:example.org",
+      "--register", "--bot", "@butler-prompt:example.org", "--dir", prompt_output })
+    assert(#prompt_specs == 1 and not resolved
+      and prompt_specs[1].label:find("^Registration token for http://aaaa")
+      and prompt_specs[1].label:find("from its admin (hidden). This is not an access token", 1, true)
+      and #prompt_specs[1].label + #matrix.REJECTED_REGISTRATION_TOKEN + 1 <= 256,
+      "a long homeserver is shortened in the hidden token prompt: " .. tostring(resolved and resolved.stderr))
+    assert(prompt_specs[1].label:find("^Registration token for http://a+%.b+%.%.%., from its admin"),
+      "the shortened homeserver ends with ... : " .. prompt_specs[1].label)
   end
 
   requests, resolved, prompt_specs = {}, nil, {}
