@@ -110,10 +110,12 @@ return {
       end },
     { event = "session_exited", id = "identity", depth = -50,
       run = function(_, name, info)
-        return host._butler_session_exited(name, info)
+        if host._butler_session_exited then return host._butler_session_exited(name, info) end
       end },
     { event = "butler-compaction-submit", id = "submit",
-      run = function() return host._butler_compaction_submit() end },
+      run = function()
+        if host._butler_compaction_submit then return host._butler_compaction_submit() end
+      end },
   },
   schedules = {
     { name = "butler-notices", every = 1, run = function()

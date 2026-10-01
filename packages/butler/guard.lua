@@ -1,57 +1,84 @@
 -- Single-instance guard (#195): one Remuda daemon owns a Butler home. The
--- owner holds an OS advisory lock (core's remuda.fs.lock) for its whole life,
--- so there is no stale lock: the kernel drops it when the owner dies. A second
--- daemon on the same home loads none of Butler's shared-state code.
+-- owner holds two OS advisory locks (core's remuda.fs.lock) for its whole
+-- life, so there is no stale lock: the kernel drops them when the owner dies.
+-- A daemon without both loads none of Butler's shared-state code.
 local guard = {}
 
 -- ponytail: placeholder until the core release that ships remuda.fs.lock is
 -- known (#195); replace with that version.
 guard.CORE_WITH_LOCK = "a core release with remuda.fs.lock"
 
--- The lock sits next to agents.jsonl: the same data home the registry uses.
-function guard.lock_path(paths)
-  return paths.data_home and (paths.data_home .. "/remuda/butler/lock") or nil
+-- Two locks, because Butler's shared files live in two places: the data lock
+-- sits next to agents.jsonl (the data home the registry uses), the config lock
+-- next to the config file that config.mcp.json and the relay's .since/.acks
+-- are named after. Always asked in this order: data, then config.
+function guard.lock_paths(paths)
+  local data = paths.data_home and (paths.data_home .. "/remuda/butler/lock") or nil
+  local config = paths.config_path and (paths.config_path .. ".lock") or nil
+  return data, config
 end
 
--- Returns a state table: { owner = boolean, guarded = boolean, held = true|nil,
--- session = name|nil, pid = digits|nil, reason = text|nil }. The handle is kept
--- in a host slot as a convenience; core gives the same daemon the same handle
--- anyway, so a mod reload keeps ownership either way.
-function guard.claim(path)
-  local held = remuda._butler_owner_lock
-  if held and held.path == path then return { owner = true, guarded = true } end
-  if not (remuda.fs and type(remuda.fs.lock) == "function") then
-    if not remuda._butler_guard_warned then
-      remuda._butler_guard_warned = true
-      io.stderr:write("butler: this remuda core cannot lock the Butler home, so a second daemon on it is not refused;"
-        .. " upgrade to " .. guard.CORE_WITH_LOCK .. " -- run `remuda upgrade`\n")
-    end
-    return { owner = true, guarded = false }
-  end
-  if not path then return { owner = false, guarded = true, reason = "no data home" } end
+-- The one line shown on a core that cannot lock; nil on a core that can.
+function guard.unguarded_line()
+  if remuda.fs and type(remuda.fs.lock) == "function" then return nil end
+  return "Butler home: not guarded. This remuda core cannot lock it, so a second daemon on this home"
+    .. " is not refused; upgrade to " .. guard.CORE_WITH_LOCK .. " with `remuda upgrade`."
+end
+
+-- One lock: the handle, or nil plus why not.
+local function ask(path)
   local ok, handle, why, info = pcall(remuda.fs.lock, path)
-  if ok and handle then
-    remuda._butler_owner_lock = { path = path, handle = handle }
-    return { owner = true, guarded = true }
-  end
+  if ok and handle then return handle end
   if ok and why == "held" then
     -- Core's info line: remuda-lock session=NAME pid=N since=UNIX_SECONDS. It is
     -- display only; keep a field only when it is plainly a name or a number, so
     -- forged text never reaches the Next: command.
     info = type(info) == "string" and (" " .. info .. " ") or ""
-    return { owner = false, guarded = true, held = true,
-      session = info:match(" session=([%w._-]+) "), pid = info:match(" pid=(%d+) ") }
+    return nil, { held = true, session = info:match(" session=([%w._-]+) "), pid = info:match(" pid=(%d+) ") }
   end
   -- Any other failure fails closed: this daemon is not the owner.
-  return { owner = false, guarded = true, reason = tostring(ok and why or handle) }
+  return nil, { reason = tostring(ok and why or handle) }
 end
 
+local function release(handle)
+  pcall(function() handle:release() end)
+end
+
+-- Returns a state table: { owner = boolean, guarded = boolean, handles = {..}|nil,
+-- held = true|nil, session = name|nil, pid = digits|nil, reason = text|nil }.
+-- The owner has BOTH locks. A daemon that gets only the first gives it back, so
+-- a daemon that is not the owner never holds a lock.
+function guard.claim(paths)
+  if not (remuda.fs and type(remuda.fs.lock) == "function") then
+    return { owner = true, guarded = false }
+  end
+  local data_path, config_path = guard.lock_paths(paths)
+  if not (data_path and config_path) then
+    return { owner = false, guarded = true, reason = "no data home or config path" }
+  end
+  local data, config, why
+  data, why = ask(data_path)
+  if data then
+    config, why = ask(config_path)
+    if config then return { owner = true, guarded = true, handles = { data, config } } end
+    release(data)
+  end
+  why.owner, why.guarded = false, true
+  return why
+end
+
+-- Same rule as matrix_cli's terminal_safe (C0 and C1 controls); that helper is
+-- not loaded in a refused daemon.
 local function safe(text)
-  return (tostring(text):gsub("[%c]", " "))
+  return (tostring(text):gsub("[%c]", " "):gsub("\194[\128-\159]", " "))
 end
 
 -- One line plus one Next: for a daemon that is not the owner.
 function guard.refusal(state)
+  if state.gone then
+    return "The Butler daemon that owned this home is gone. This daemon has not taken over.\n"
+      .. "Next: remuda exec butler  (reloads Butler in this daemon; add your -s NAME)"
+  end
   if state.held then
     local running = "Butler for this home is already running in another Remuda daemon"
     if not state.session then return running .. ". Nothing was changed.\nNext: remuda butler doctor" end
@@ -64,10 +91,19 @@ end
 
 -- Every Butler verb is refused in a daemon that is not the owner. doctor is
 -- the one exception (pure probes, no shared state); its first line says so.
-function guard.standby(state)
+-- Each verb asks the locks again, so the answer names the current owner, or
+-- says that it is gone. A refused daemon never promotes itself: what the
+-- probe took is given back at once.
+function guard.standby(state, paths)
   remuda._butler_standby = state
-  local refusal = guard.refusal(state)
   local function run(args)
+    local now = guard.claim(paths)
+    if now.owner then
+      for _, handle in ipairs(now.handles or {}) do release(handle) end
+      now = { owner = false, guarded = true, gone = true }
+    end
+    remuda._butler_standby = now
+    local refusal = guard.refusal(now)
     if type(args) == "table" and args[1] == "doctor" and #args == 1 then
       remuda.exec("butler/doctor")
       local doctor = remuda._butler_doctor
@@ -85,16 +121,21 @@ end
 
 -- main.lua calls this before it touches any shared state. True = carry on.
 function guard.boot(paths)
-  local path = guard.lock_path(paths)
-  if path and remuda.fs and type(remuda.fs.lock) == "function" and type(remuda.mkdir) == "function" then
-    pcall(remuda.mkdir, path:match("^(.*)/[^/]+$"))
+  local unguarded = guard.unguarded_line()
+  if unguarded and not remuda._butler_guard_warned then
+    remuda._butler_guard_warned = true
+    io.stderr:write("butler: " .. unguarded .. "\n")
   end
-  local state = guard.claim(path)
+  if not unguarded and type(remuda.mkdir) == "function" then
+    for _, path in ipairs({ guard.lock_paths(paths) }) do pcall(remuda.mkdir, path:match("^(.*)/[^/]+$")) end
+  end
+  local state = guard.claim(paths)
   if state.owner then
-    remuda._butler_standby = nil
+    -- Core keeps the handles alive; this slot only keeps them reachable from Lua.
+    remuda._butler_owner_lock, remuda._butler_standby = state.handles, nil
     return true
   end
-  guard.standby(state)
+  guard.standby(state, paths)
   return false
 end
 
