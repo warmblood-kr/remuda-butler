@@ -1343,9 +1343,9 @@ function relay.new(options)
   local function typed_line_refusal(reason, target)
     local safe_target = terminal_safe_field(target or "butler", 128)
     if reason == "typed_lines_off" then
-      return "Not typed: typed lines are off on this machine. Next: turn them on at the machine with remuda butler matrix typed-lines on"
+      return "Not typed: typed lines are off on this machine. Next: remuda butler typed-lines on"
     elseif reason == "shell_lines_off" then
-      return "Not typed: shell lines (!!) are off on this machine. Next: turn them on at the machine with remuda butler matrix shell-lines on"
+      return "Not typed: shell lines (!!) are off on this machine. Next: remuda butler typed-lines on, then remuda butler shell-lines on"
     elseif reason == "event_too_old" then
       return "Not typed: the line is older than 5 minutes. Next: send it again"
     elseif reason == "not_live" then
