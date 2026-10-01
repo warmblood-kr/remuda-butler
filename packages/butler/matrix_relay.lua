@@ -1431,6 +1431,15 @@ function relay.new(options)
     return { now = now, ok = ok, reason = reason, line = line, form = form }
   end
 
+  local function mark_typed_line_error(event_id, err)
+    if event_id ~= "" then add_processed(state, event_id) end
+    local saved, save_error = pcall(persist)
+    warn_once("typed-line-error", event_id,
+      "butler Matrix typed-line handling failed; event marked processed: "
+        .. terminal_safe_field(tostring(err), 512)
+        .. (saved and "" or "; state save failed: " .. terminal_safe_field(tostring(save_error), 512)))
+  end
+
   local function handle_typed_line(event, room_id, check)
     local ok, reason, line, form, now = check.ok, check.reason, check.line, check.form, check.now
     local target, target_line, target_agent, member_target
@@ -1501,7 +1510,17 @@ function relay.new(options)
           local typed_line_candidate = not approval_record and cfg.allowed_senders[ev.sender] == true
             and member_kind(ev.sender, cfg) == "HUMAN"
             and type(content.body) == "string" and content.body:sub(1, 1) == "!"
-          local typed_line_check = typed_line_candidate and live_sync == true and check_typed_line(ev) or nil
+          local typed_line_check
+          local typed_line_check_failed = false
+          if typed_line_candidate and live_sync == true then
+            local checked, result = pcall(check_typed_line, ev)
+            if checked then
+              typed_line_check = result
+            else
+              typed_line_check_failed = true
+              mark_typed_line_error(event_id, result)
+            end
+          end
           local switch_disabled = typed_line_check
             and (typed_line_check.reason == "typed_lines_off" or typed_line_check.reason == "shell_lines_off")
           if approval_record then
@@ -1523,10 +1542,13 @@ function relay.new(options)
               end
             end
             persist()
+          elseif typed_line_candidate and typed_line_check_failed then
+            -- The event was marked processed above; keep this response moving without a retry loop.
           elseif typed_line_candidate and not switch_disabled
               and typed_line_room_allowed(ev, room_id or cfg.room) then
             if live_sync == true then
-              handle_typed_line(ev, room_id or cfg.room, typed_line_check)
+              local handled, err = pcall(handle_typed_line, ev, room_id or cfg.room, typed_line_check)
+              if not handled then mark_typed_line_error(event_id, err) end
             else
               if event_id ~= "" then add_processed(state, event_id) end
               persist()
