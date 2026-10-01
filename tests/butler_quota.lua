@@ -211,5 +211,39 @@ for _, reason in ipairs({
   ok("unknown quota reason: " .. reason, body:find("  quota: unknown (" .. reason .. ")", 1, true) ~= nil)
 end
 
+-- Untrusted status values never add terminal control lines or exceed 80 bytes.
+eq("render replaces controls in account and limit values", quota.render({ at = at,
+  claude = { mode = "subscription", plan = "max\nplan", email = "owner@example.test\n@room:evil",
+    limits = { { name = "Weekly\tlimit", used = 60, resets_text = "tomorrow\r@all" } } },
+  codex = { mode = "api_key" },
+}), table.concat({
+  "Agent accounts, 2026-10-01 04:40Z",
+  "claude: subscription (max plan), owner@example.test @room:evil",
+  "  Weekly limit: 60% used, resets tomorrow @all (local time)",
+  "codex: API key (no subscription, no quota to report)",
+}, "\n"))
+local eighty_p = string.rep("P", 80)
+local eighty_e = string.rep("E", 80)
+local eighty_n = string.rep("N", 80)
+local eighty_r = string.rep("R", 80)
+eq("render cuts every untrusted value to 80 bytes", quota.render({ at = at,
+  claude = { mode = "subscription", plan = eighty_p .. "P", email = eighty_e .. "E",
+    limits = { { name = eighty_n .. "N", used = 1, resets_text = eighty_r .. "R" } } },
+  codex = { mode = "api_key" },
+}), table.concat({
+  "Agent accounts, 2026-10-01 04:40Z",
+  "claude: subscription (" .. eighty_p .. "), " .. eighty_e,
+  "  " .. eighty_n .. ": 1% used, resets " .. eighty_r .. " (local time)",
+  "codex: API key (no subscription, no quota to report)",
+}, "\n"))
+
+local invalid_names = "Account: Pro\n"
+  .. string.rep("L", 41) .. ": [x] 90% left\n  (resets 2:30 AM on 4 Oct)\n"
+  .. "Bad/Name: [x] 90% left\n  (resets 2:30 AM on 4 Oct)\n"
+  .. "Weekly limit: [x] 40% left\n  (resets 2:30 AM on 4 Oct)\n"
+local valid_beside_invalid = quota.parse_codex_status(invalid_names, 32400, at)
+eq("codex skips invalid and overlong limit names", #valid_beside_invalid.limits, 1)
+eq("codex keeps a valid limit beside invalid names", valid_beside_invalid.limits[1].name, "Weekly limit")
+
 eq("usage", quota.usage(), "Usage: remuda butler quota [--report]\nExample: remuda butler quota --report")
 print(("butler_quota ok: %d cases"):format(count))
