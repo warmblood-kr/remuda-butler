@@ -36,7 +36,7 @@ end
 
 local function parse(args)
   if type(args) ~= "table" or args[1] ~= "matrix" then return nil end
-  local options, at = {}, 2
+  local options, at, literal = {}, 2, false
   local function option(value)
     if value == "--json" then options.json = true; return 1 end
     if value == "--room" then
@@ -50,7 +50,7 @@ local function parse(args)
     return nil
   end
   while at <= #args do
-    if args[at] == "--" then at = at + 1; break end
+    if args[at] == "--" then literal = true; at = at + 1; break end
     local width = option(args[at])
     if not width and args[at] == "-n" then
       if not args[at + 1] then error("-n requires a count", 0) end
@@ -70,6 +70,7 @@ local function parse(args)
     local value = args[at]
     if not positional and value == "--" then
       positional = true
+      literal = true
       at = at + 1
     elseif not positional and verb == "rooms" and value == "--public" then
       options.public = true
@@ -108,6 +109,12 @@ local function parse(args)
   if method == "send" then
     options.text = join_words(values, 1)
     if #values == 0 then return nil end
+    -- A bare `-` reads the text from stdin; after `--` it is literal text. Core
+    -- forwards stdin by the same rule (a `-` argument before any `--`).
+    if values[1] == "-" and not literal then
+      if #values ~= 1 then error("stdin message form takes no extra arguments", 0) end
+      options.stdin = true
+    end
   elseif method == "reply" then
     if #values < 2 then return nil end
     options.event_id, options.text = values[1], join_words(values, 2)
@@ -121,7 +128,7 @@ local function parse(args)
     if #values ~= 1 then return nil end
     options.event_id = values[1]
   elseif method == "join" or method == "leave" then
-    if #values ~= 1 or options.room then return nil end
+    if #values > 1 or options.room then return nil end
     options.room = values[1]
   elseif method == "history" then
     if #values ~= 0 then return nil end
@@ -234,13 +241,13 @@ local function render_human(verb, options, result)
         "Room: " .. terminal_safe(data.room_id), "Time: " .. terminal_safe(data.created_at),
         "Preview: " .. terminal_safe(data.preview) }, "\n") .. "\n"
     end
-    local lines = {}
+    local lines = { "Event\tRoom\tReason\tSender" }
     for _, item in ipairs(data) do
       lines[#lines + 1] = table.concat({
         terminal_safe(item.event_id ~= "" and item.event_id or item.id),
-        terminal_safe(item.reason), terminal_safe(item.sender) }, "\t")
+        terminal_safe(item.room_id), terminal_safe(item.reason), (terminal_safe(item.sender)) }, "\t")
     end
-    return #lines == 0 and "No quarantined Matrix events\n" or table.concat(lines, "\n") .. "\n"
+    return #lines == 1 and "No quarantined Matrix events\n" or table.concat(lines, "\n") .. "\n"
   elseif verb == "download" then
     return string.format("Downloaded %d bytes to %s\n", result.bytes or 0, result.path or "")
   elseif verb == "send" or verb == "reply" then
@@ -252,6 +259,11 @@ local function render_human(verb, options, result)
   elseif verb == "upload" then
     return "Uploaded as " .. tostring(result.content_uri or "") .. " (" .. tostring(result.event_id or "") .. ")\n"
   elseif verb == "join" or verb == "leave" then
+    if verb == "join" and result.approval_request_id then
+      return "Asked the owner to approve joining " .. terminal_safe(result.approval_label or "the Matrix room")
+        .. " (request " .. terminal_safe(result.approval_request_id)
+        .. "). You get mail when they answer (expires in 10 min).\nNext: remuda butler inbox\n"
+    end
     if verb == "join" and (result.ambiguous or data.ambiguous)
       and type(result.matches or data.matches) == "table" then
       local matches = result.matches or data.matches
@@ -313,7 +325,7 @@ function matrix.cli_usage()
   return USAGE
 end
 
-function matrix.cli(args, agent)
+function matrix.cli(args, agent, stdin_body)
   if type(args) == "table" and args[1] == "matrix" and args[2] == "setup" then
     local setup_args = {}
     for index = 3, #args do setup_args[#setup_args + 1] = args[index] end
@@ -371,7 +383,7 @@ function matrix.cli(args, agent)
           local valid_owner, owner_error = matrix.setup_validate_mxid(owner, "--owner")
           if not valid_owner then return prompt_failure(tostring(owner_error)) end
           flags[4] = valid_owner
-          flags[5], flags[6] = "--register", "--default"
+          flags[5], flags[6], flags[7], flags[8] = "--register", "--default", "--rooms", "open"
           local function confirm_setup()
             local wizard_plan, validation_error = matrix.setup_prepare(flags)
             if not wizard_plan then
@@ -385,6 +397,8 @@ function matrix.cli(args, agent)
               "Matrix setup will:",
               "  Homeserver: " .. terminal_safe(wizard_plan.homeserver),
               "  Owner: " .. terminal_safe(wizard_plan.owner_mxid),
+              "  Rooms: open (anyone can invite this Butler). Restrict: set rooms=allowlist or add deny_room/deny_server in "
+                .. terminal_safe(wizard_plan.config_path) .. ". The sender allowlist still decides whose messages are trusted.",
               "  Account: create a Butler bot (you will need its server registration token)",
               "  Bot: " .. terminal_safe(wizard_plan.bot_mxid),
               "  Save private token and config files in: " .. terminal_safe(wizard_plan.output_dir),
@@ -404,24 +418,27 @@ function matrix.cli(args, agent)
                 execute_setup(wizard_plan)
               end)
           end
-          if scheme_or_error == "https" then
-            prompt_line("HTTPS trust: enter a 64-character SHA-256 certificate pin or an absolute CA file path:",
-              nil, function(trust)
-                if type(trust) ~= "string" then
-                  return prompt_failure("The HTTPS trust answer must be a certificate pin or CA file path.")
-                end
-                if #trust == 64 and trust:match("^%x+$") then
-                  flags[#flags + 1] = "--pin"
-                  flags[#flags + 1] = trust
-                else
-                  flags[#flags + 1] = "--ca-file"
-                  flags[#flags + 1] = trust
-                end
-                confirm_setup()
-              end)
-          else
-            confirm_setup()
+          local function ask_transport_trust()
+            if scheme_or_error == "https" then
+              prompt_line("HTTPS trust: enter a 64-character SHA-256 certificate pin or an absolute CA file path:",
+                nil, function(trust)
+                  if type(trust) ~= "string" then
+                    return prompt_failure("The HTTPS trust answer must be a certificate pin or CA file path.")
+                  end
+                  if #trust == 64 and trust:match("^%x+$") then
+                    flags[#flags + 1] = "--pin"
+                    flags[#flags + 1] = trust
+                  else
+                    flags[#flags + 1] = "--ca-file"
+                    flags[#flags + 1] = trust
+                  end
+                  confirm_setup()
+                end)
+            else
+              confirm_setup()
+            end
           end
+          ask_transport_trust()
         end)
       end)
     end
@@ -614,10 +631,14 @@ function matrix.cli(args, agent)
     if type(remuda.fail) == "function" then return remuda.fail(message, 1) end
     error(message, 0)
   end
-  if verb == "send" and options.text == "-" then
-    local message = "send - stdin is unavailable until core #213"
-    if type(remuda.fail) == "function" then return remuda.fail(message, 1) end
-    error(message, 0)
+  if options.stdin then
+    local read, text = false, "no message body received on stdin"
+    if type(stdin_body) == "function" then read, text = pcall(stdin_body) end
+    if not read then
+      if type(remuda.fail) == "function" then return remuda.fail(tostring(text), 1) end
+      error(tostring(text), 0)
+    end
+    options.text = text
   end
 
   local active, cancelled, completed = nil, { value = false }, { value = false }

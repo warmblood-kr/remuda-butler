@@ -122,12 +122,30 @@ only when exactly one public room matches; multiple matches are listed for the
 operator to choose from. The inviter check relies on the homeserver appending
 the real invite event to `invite_state` (Synapse does). `leave` removes a joined
 room by ID or alias, while HOME and ALL-BUTLERS cannot be left or removed. The
-interactive setup wizard does not ask for the rooms mode yet. The `send -`
-stdin form is unsupported until core #213.
+interactive setup wizard writes `rooms=open` without asking; flag-based setup
+defaults to allowlist unless given `--rooms open`. `send -` reads the text from
+stdin (up to 64 KiB, one trailing newline dropped); `send -- -` sends a literal `-`.
 
-`join` and `leave` change room membership and are operator-only. Until core
-#218 enforces caller identity, this is best-effort policy: another local
-process running as the same user may still invoke those verbs.
+`join` and `leave` change room membership and require an outside terminal
+caller; session, unknown, and missing callers are refused. Clearing
+`REMUDA_BUTLER_*` environment variables does not bypass this check. This is
+still advisory within one UID: another local process running as the same user
+may invoke those verbs from an outside terminal caller.
+
+Approvals: when an agent runs `matrix join`, Butler resolves the room and
+posts one request to HOME instead of joining. The owner answers with a ✅ or
+❌ reaction, or a `yes`/`no` reply, to that exact message within 10 minutes.
+Only an allowlisted human sender in HOME counts. A bare `yes` does nothing.
+The owner can also answer from the terminal: `remuda butler approvals` lists
+the open requests, and `remuda butler approve ID` or `deny ID` answers one
+(operator-only). Terminal approve/deny require a caller outside any Remuda
+session (core caller identity); clearing the environment no longer passes,
+and this remains a same-UID policy, not an OS boundary. The Matrix answer path
+is bound to the owner's MXID. An approved request joins the room ID resolved
+at request time and writes `room=ID how=approved`. The asker gets mail for every outcome:
+approved, denied or expired. A repeat ask for the same room returns the same
+request. Each agent may have 3 open requests, and there may be 5 in total.
+Requests live in the relay state file.
 
 `quarantine` lists rejected inbound Matrix message events; add `--id EVENT_ID`
 to inspect one. It is operator-only under the same caller policy. The relay
@@ -137,7 +155,8 @@ state file containing these records is mode 600 on Unix hosts.
 
 Run `remuda butler matrix setup` to configure Butler; with `--register` and no
 `--registration-token-file`, setup asks for the homeserver registration token
-using a hidden prompt.
+using a hidden prompt. `--rooms open|allowlist` sets the invite mode written to
+the config; flag-based setup defaults to allowlist.
 
 ```text
 remuda butler matrix setup --homeserver https://matrix.example.org --owner @alice:example.org --register --pin <64-hex-sha256> --default
@@ -174,16 +193,37 @@ it from the server's leaf certificate with:
 openssl x509 -in server-cert.pem -pubkey -noout | openssl pkey -pubin -outform DER | openssl dgst -sha256
 ```
 
-Copy the 64 hexadecimal digits after `=` into `pin_sha256`. Butler converts
-that digest to the `sha256/<base64>` pin form used by `remuda.http`. HTTPS
-fails closed unless `ca_file` or a valid `pin_sha256` is configured; HTTP is
-intended for local or development use.
+Copy the 64 hexadecimal digits after `=` into `pin_sha256` (or pass them to
+`setup --pin`). Butler converts that digest to the `sha256/<base64>` pin form
+used by `remuda.http` and sends it with `pin_only`, so a self-signed homeserver
+works with the pin alone: the CA chain is skipped, while the hostname, validity
+dates, and the SPKI pin are still checked. `ca_file` keeps full chain
+validation. With neither `ca_file` nor `pin_sha256`, an `https://` homeserver
+is verified against the system's trusted CA roots, so a publicly trusted
+certificate needs no extra setting. Verification is never skipped: an untrusted
+certificate fails with `Next: remuda butler matrix setup --ca-file PATH (the
+server's CA certificate), or --pin SHA256HEX`, and a pin mismatch fails with
+its own `Next:` line. HTTP is intended for local or development use.
 
 Matrix sends and replies are split at UTF-8 boundaries into chunks of at most
 4000 bytes. Upload request bodies and download response bodies are capped at
 20 MiB. Ordinary Matrix requests default to a 15-second timeout; downloads use
 30 seconds and uploads use 60 seconds. The default response-body limit is
 1 MiB; media downloads may use the full 20 MiB limit.
+
+Text messages (`send` and `reply`) are sent as `m.text` with the text unchanged
+in `body`, plus a `formatted_body` (`org.matrix.custom.html`) rendered from a
+Markdown subset: headings, `**bold**`, `*italic*`, `` `code` ``, fenced code,
+links, bullet and numbered lists, blockquotes, `---` rules, and tables.
+Everything is HTML-escaped first, so raw HTML never passes through, and link
+targets are limited to `http`, `https`, and `mailto`. Limits: lists are flat
+(nested items join the parent list); a blockquote is a single paragraph; a `|`
+inside a table cell splits the cell, even in a code span or escaped;
+`_italic_` is not supported. Text over 4000 bytes is split first and each chunk
+is converted on its own, so a block that spans a chunk boundary (a code fence
+or a table, for example) renders broken. If the converter fails, or its HTML
+for a chunk exceeds 30000 bytes, that chunk is sent as plain `m.text` without
+`formatted_body`.
 
 The relay resumes from its saved sync cursor and deduplicates by Matrix event
 ID. It records cursor, processed IDs, pending deliveries, quarantine records,
@@ -215,6 +255,11 @@ also applies to delegates without an explicit kind. Each candidate waits up to
 15 seconds by default; set `REMUDA_BUTLER_READINESS_TIMEOUT` to change that
 per-candidate timeout. `remuda butler sessions` shows the selected kind and
 the reason each earlier candidate was skipped.
+
+On each fresh agent-session start—first launch, resume, or a relaunch or
+respawn after a Butler or daemon restart—Butler checks for unread mail. If any
+is unread, it queues one notice with the count, using the normal debounce; it
+does not duplicate a notice that is already pending.
 
 `remuda butler status` prints `butler: up (<kind>)` and exits 0 when the root
 Butler is ready. During launch it exits 75 and writes `launching` plus one

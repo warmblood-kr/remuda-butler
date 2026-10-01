@@ -17,7 +17,7 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 CORE_URL=${CORE_URL:-https://github.com/warmblood-kr/remuda.git}
 # Core with delivery channel hooks and private state writes. Bump deliberately;
 # a core change must not redden Butler PRs.
-CORE_REF=${CORE_REF:-42e29f8}
+CORE_REF=${CORE_REF:-0651664e}
 
 scratch=$(mktemp -d /tmp/butler-rust.XXXXXX)
 scratch=$(cd "$scratch" && pwd -P)
@@ -82,7 +82,10 @@ export HOME=$scratch/home
 export REMUDA_RUNTIME_DIR=$scratch/run
 mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$REMUDA_RUNTIME_DIR" "$TMPDIR" "$XDG_DATA_HOME/remuda/mods/butler"
 cp -R "$REPO/extension.toml" "$REPO/packages" "$XDG_DATA_HOME/remuda/mods/butler/"
-unset REMUDA_SERVER REMUDA_BUTLER_TOKEN REMUDA_BUTLER_CONFIG
+# Run from a member pane, the live Butler identity would leak into the tests.
+unset REMUDA_SERVER REMUDA_BUTLER_TOKEN REMUDA_BUTLER_CONFIG REMUDA_BUTLER_AGENT_ID REMUDA_BUTLER_LEADER_ID \
+  REMUDA_BUTLER_SESSION_NAME REMUDA_BUTLER_AGENT_ALIAS REMUDA_BUTLER_AGENT_KIND REMUDA_SESSION_CAPABILITY \
+  REMUDA_SESSION_NAME REMUDA_SESSION_ID REMUDA_DAEMON_ID
 
 echo "core $(git -C "$CORE_DIR" rev-parse --short HEAD), butler $(git -C "$REPO" rev-parse --short HEAD)"
 cd "$CORE_DIR"

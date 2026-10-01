@@ -13,7 +13,8 @@ local USAGE = [[Usage: remuda butler matrix setup [OPTIONS]
   --default              Save to the default live Butler config directory.
   --force                Replace existing token or config files.
   --all                  Also create the optional ALL-BUTLERS room.
-  --pin SHA256HEX         Trust this HTTPS certificate fingerprint.
+  --rooms open|allowlist Room invites: open (anyone) or allowlist (default; allowlisted senders only).
+  --pin SHA256HEX        Trust this HTTPS certificate SPKI SHA-256 (see docs/butler.md).
   --ca-file PATH         Trust the HTTPS certificate authority in this file.
 
 Example: remuda butler matrix setup --homeserver https://matrix.example.org --owner @alice:example.org --register --dir /path/to/private/butler --pin <64-hex-sha256>]]
@@ -70,7 +71,7 @@ local function valid_url(value)
 end
 
 local function safe_user_id_echo(value)
-  return (value:gsub("[%c]", "?"):sub(1, 64))
+  return matrix.utf8_prefix(value:gsub("[%c]", "?"), 64)
 end
 
 local function invalid_user_id(value, option)
@@ -152,6 +153,7 @@ local function setup_command(options, destination)
   if options.create_all then parts[#parts + 1] = "--all" end
   if options.pin then add("--pin", options.pin) end
   if options.ca_file then add("--ca-file", options.ca_file) end
+  if options.rooms_mode == "open" then add("--rooms", "open") end
   if destination == "default" then
     parts[#parts + 1] = "--default"
   else
@@ -187,6 +189,24 @@ local function validate_secret(path, kind)
   if secret_error == "empty" then return nil, "secret input file is empty: " .. path end
   if not secret then return nil, "secret input file is invalid: " .. path end
   return secret
+end
+
+local PIN_MISMATCH = assert(matrix.PIN_MISMATCH, "load butler/matrix_request before butler/matrix_setup")
+local CERT_UNTRUSTED = matrix.CERT_UNTRUSTED
+
+-- A pin mismatch or an untrusted certificate gets one concrete next step.
+local function tls_error(response)
+  local message = type(response) == "table" and response.error
+  if type(message) ~= "string" then return nil end
+  if message:find(PIN_MISMATCH, 1, true) then
+    return "The HTTPS server key does not match --pin.\n"
+      .. "Next: recompute the SPKI SHA-256 of the server key (see docs/butler.md) or use --ca-file PATH"
+  end
+  if message:find(CERT_UNTRUSTED, 1, true) then
+    return "The HTTPS server certificate is not trusted by this system.\n"
+      .. matrix.UNTRUSTED_NEXT
+  end
+  return nil
 end
 
 local function transport_pin(hex)
@@ -294,6 +314,7 @@ local VALUE_OPTIONS = {
   ["--password-file"] = "password_file", ["--token-file"] = "token_file",
   ["--registration-token-file"] = "registration_token_file",
   ["--dir"] = "dir", ["--pin"] = "pin", ["--ca-file"] = "ca_file",
+  ["--rooms"] = "rooms_mode",
 }
 
 function matrix.setup_usage()
@@ -328,6 +349,11 @@ function matrix.setup_prepare(args)
     else
       return nil, "unexpected setup argument " .. name
     end
+  end
+
+  options.rooms_mode = options.rooms_mode or "allowlist"
+  if options.rooms_mode ~= "open" and options.rooms_mode ~= "allowlist" then
+    return nil, "rooms must be open or allowlist"
   end
 
   local homeserver, scheme_or_error = valid_url(options.homeserver)
@@ -413,10 +439,6 @@ function matrix.setup_prepare(args)
       return nil, "cannot read --ca-file: " .. options.ca_file
     end
   end
-  if homeserver:match("^https://") and not options.pin and not options.ca_file then
-    return nil, "HTTPS setup requires --pin SHA256HEX or --ca-file PATH.\n"
-      .. "Next: rerun with --pin SHA256HEX or --ca-file PATH"
-  end
   if homeserver:match("^http://") and (options.pin or options.ca_file) then
     return nil, "--pin and --ca-file are only valid with an https:// homeserver"
   end
@@ -464,12 +486,13 @@ function matrix.setup_network(options, on_done)
     local spec = {
       method = method, url = base .. path, headers = headers, body = body,
       timeout = 15, connect_timeout = 10, max_bytes = 1024 * 1024,
-      ca_file = options.ca_file, pin = transport_pin(options.pin),
+      ca_file = options.ca_file, pin = transport_pin(options.pin), pin_only = options.pin ~= nil,
       callback = function(response)
         if done_called or cancelled then return end
         if type(response) ~= "table" then
           return fail("Matrix setup " .. stage .. " request failed")
         end
+        if tls_error(response) then return fail(tls_error(response)) end
         local status = tonumber(response.status)
         local decoded, decode_error
         if type(response.body) == "string" and response.body ~= "" then
@@ -631,9 +654,10 @@ function matrix.setup_register(options, on_done)
       method = "POST", url = base .. "/_matrix/client/v3/register",
       headers = { Accept = "application/json", ["Content-Type"] = "application/json" },
       body = body, timeout = 15, connect_timeout = 10, max_bytes = 1024 * 1024,
-      ca_file = options.ca_file, pin = transport_pin(options.pin),
+      ca_file = options.ca_file, pin = transport_pin(options.pin), pin_only = options.pin ~= nil,
       callback = function(response)
         if done_called or cancelled then return end
+        if tls_error(response) then return fail(tls_error(response)) end
         callback(response, decode(response))
       end,
     }
@@ -780,6 +804,7 @@ function matrix.setup_write(options, result)
     options.homeserver, result.home_room, result.user_id, options.owner_mxid, "", "30000",
   }
   if result.all_room then config_lines[#config_lines + 1] = "all_room=" .. result.all_room end
+  if options.rooms_mode == "open" then config_lines[#config_lines + 1] = "rooms=open" end
   if options.pin then config_lines[#config_lines + 1] = "pin_sha256=" .. options.pin end
   if options.ca_file then config_lines[#config_lines + 1] = "ca_file=" .. options.ca_file end
   contents[options.config_path] = table.concat(config_lines, "\n") .. "\n"
@@ -849,6 +874,14 @@ function matrix.setup_write(options, result)
         return failure("Matrix setup cannot preserve an existing output file")
       end
       backups[path] = old
+    end
+  end
+
+  -- Hand-added deny rules outlive a --force rewrite (#146).
+  for line in (backups[options.config_path] or ""):gmatch("[^\r\n]+") do
+    -- Mirror the config parser: the key before the first "=" is trimmed.
+    if line:match("^%s*deny_room%s*=") or line:match("^%s*deny_server%s*=") then
+      contents[options.config_path] = contents[options.config_path] .. line .. "\n"
     end
   end
 
