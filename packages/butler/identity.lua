@@ -206,6 +206,7 @@ local function caller_leader(caller)
 end
 
 remuda._butler_identity = {
+  is_ulid = is_ulid,
   identity_path = identity_path,
   identity_record = identity_record,
   json_field = json_field,

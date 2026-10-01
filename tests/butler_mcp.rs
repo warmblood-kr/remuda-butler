@@ -2881,3 +2881,418 @@ fn missing_delivery_channel_is_reported_to_the_sender() {
         "false|no Butler channel installed (try remuda-butler-inbox)"
     );
 }
+
+/// Shared prelude for the re-notice tests: a member `alias` whose leader is
+/// the root Butler, a context-size stub per alias (`state.ctx`), a tick helper,
+/// and `_rn_lead(text)` returning the id of a leader message to the member.
+fn setup_renotice(path: &Path, alias: &str) {
+    setup_mail_notice_clock_for(path, alias);
+    eval(
+        path,
+        &format!(
+            r#"
+        local state = remuda._notice_test_state
+        local alias = {alias}
+        state.ctx = {{}}
+        remuda._butler_telemetry_for = function(agent)
+          return {{ context_used = state.ctx[agent and agent.alias or ''] }}
+        end
+        remuda._rn_tick = function(now) state.now = now; remuda._butler_deliver_notices() end
+        -- Notices typed into this member's pane only (the stub records every pane).
+        state.to = {{}}
+        -- The pane shows what was typed, as in the #137 tests, so a notice
+        -- verifies instead of hitting the retype fallback.
+        remuda.capture = function() return state.screen or '> ' end
+        local prior_type = remuda.type_text
+        remuda.type_text = function(name, text)
+          local ok = prior_type(name, text)
+          state.to[#state.typed] = name
+          state.screen = text .. '\n> '
+          return ok
+        end
+        remuda._rn_mine = function()
+          local mine = {{}}
+          for i, entry in ipairs(state.typed) do
+            if state.to[i] == alias then mine[#mine + 1] = entry.text end
+          end
+          return mine
+        end
+        remuda._rn_lead = function(text)
+          return (remuda._butler_send('butler', alias, text):match('^queued (%S+)'))
+        end
+        remuda._rn_inbox_id = function(id)
+          local agent = remuda._butler_bus.agents[alias]
+          local ok, out = pcall(remuda._butler_command_run, 'inbox', {{ 'inbox', id }},
+            {{ env = {{ REMUDA_BUTLER_AGENT_ID = agent.id }} }})
+          return tostring(out)
+        end
+        "#,
+            alias = serde_json::to_string(alias).unwrap()
+        ),
+    );
+}
+
+// The t3-timers / mx-render case: the leader message was read before an
+// auto-compact, so the inbox reads empty, yet the member gets one re-shown
+// notice for it and can open it by id; read state does not change.
+#[test]
+fn codex_auto_compact_reshows_the_last_read_leader_message_once() {
+    let (path, _daemon) = butler_with_named_agent("renotice-codex-auto", "cx1", "codex");
+    setup_renotice(&path, "cx1");
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        state.ctx.cx1 = 170000
+        local id = remuda._rn_lead('task for cx1')
+        remuda._rn_tick(0); remuda._rn_tick(2)
+        local first = #state.typed
+        remuda._butler_inbox('cx1')
+        local empty_before = remuda._butler_inbox('cx1')
+        remuda._rn_tick(3)
+        state.ctx.cx1 = 60000
+        remuda._rn_tick(4); remuda._rn_tick(6)
+        local after_drop = #state.typed
+        local text = tostring(state.typed[2] and state.typed[2].text)
+        for t = 7, 20 do remuda._rn_tick(t) end
+        local opened = remuda._rn_inbox_id(id)
+        local agent_id = remuda._butler_bus.agents.cx1.id
+        return table.concat({ tostring(first), empty_before, tostring(after_drop), tostring(#state.typed),
+          tostring(text:find(id, 1, true) ~= nil), tostring(text:find('re-shown after compaction', 1, true) ~= nil),
+          tostring(text:sub(-#('remuda butler inbox ' .. id)) == 'remuda butler inbox ' .. id),
+          tostring(opened:find('task for cx1', 1, true) ~= nil),
+          tostring(remuda._butler_mail.is_unread(agent_id, id)), remuda._butler_inbox('cx1') }, '|')
+        "#,
+    );
+    assert_eq!(got, "1|inbox empty|2|2|true|true|true|true|false|inbox empty",
+        "auto-compact must re-show the read leader message once, openable by id: {got}");
+}
+
+// Our compaction: the half-drop heuristic stays quiet while compaction is in
+// progress; the compaction path itself calls the re-notice hook once.
+#[test]
+fn claude_our_compaction_reshows_the_leader_message_once_via_the_hook() {
+    let (path, _daemon) = butler_with_named_agent("renotice-claude-ours", "cl1", "claude");
+    setup_renotice(&path, "cl1");
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        state.ctx.cl1 = 170000
+        local id = remuda._rn_lead('task for cl1')
+        remuda._rn_tick(0); remuda._rn_tick(2)
+        remuda._butler_inbox('cl1')
+        remuda._rn_tick(3)
+        local agent_id = remuda._butler_bus.agents.cl1.id
+        remuda._butler_compaction_members_state = remuda._butler_compaction_members_state or {}
+        remuda._butler_compaction_members_state[agent_id] = { compaction_in_progress = true }
+        state.ctx.cl1 = 60000
+        remuda._rn_tick(4); remuda._rn_tick(6)
+        local during = #state.typed
+        remuda._butler_compaction_members_state[agent_id].compaction_in_progress = false
+        remuda._butler_notice_compacted('cl1')
+        for t = 7, 20 do remuda._rn_tick(t) end
+        local text = tostring(state.typed[2] and state.typed[2].text)
+        return table.concat({ tostring(during), tostring(#state.typed),
+          tostring(text:find('remuda butler inbox ' .. id, 1, true) ~= nil) }, '|')
+        "#,
+    );
+    assert_eq!(got, "1|2|true", "our compaction: quiet while in progress, then exactly one re-show: {got}");
+}
+
+// Unread leader mail is re-noticed after a compaction (a plain unread
+// notice, not a re-show), exactly once.
+#[test]
+fn unread_leader_mail_is_renoticed_once_after_a_compaction() {
+    let (path, _daemon) = butler_with_named_agent("renotice-unread", "cx1", "codex");
+    setup_renotice(&path, "cx1");
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        state.ctx.cx1 = 170000
+        local id = remuda._rn_lead('unread task')
+        -- Settle: the arrival notice and any follow-up typing happen here.
+        for t = 0, 20 do remuda._rn_tick(t) end
+        local settled = #remuda._rn_mine()
+        -- Control window, no drop: nothing more for the still-unread mail.
+        for t = 21, 40 do remuda._rn_tick(t) end
+        local control = #remuda._rn_mine() - settled
+        state.ctx.cx1 = 60000
+        for t = 41, 60 do remuda._rn_tick(t) end
+        local mine = remuda._rn_mine()
+        local text = tostring(mine[settled + control + 1])
+        return table.concat({ tostring(control), tostring(#mine - settled - control),
+          tostring(text:find(id, 1, true) ~= nil), tostring(text:find('re-shown', 1, true) == nil),
+          tostring(text:sub(-#'remuda butler inbox') == 'remuda butler inbox') }, '|')
+        "#,
+    );
+    assert_eq!(got, "0|1|true|true|true",
+        "unread mail: no notice without a drop, exactly one plain re-notice after it: {got}");
+}
+
+// A leader message the member already answered is not re-shown.
+#[test]
+fn an_answered_leader_message_is_not_reshown_after_a_compaction() {
+    let (path, _daemon) = butler_with_named_agent("renotice-answered", "cx1", "codex");
+    setup_renotice(&path, "cx1");
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        state.ctx.cx1 = 170000
+        local id = remuda._rn_lead('answer me')
+        remuda._rn_tick(0); remuda._rn_tick(2)
+        remuda._butler_inbox('cx1')
+        remuda._butler_reply('cx1', id, 'done')
+        for t = 3, 20 do remuda._rn_tick(t) end
+        local settled = #remuda._rn_mine()
+        state.ctx.cx1 = 60000
+        for t = 21, 40 do remuda._rn_tick(t) end
+        return tostring(#remuda._rn_mine() - settled) .. '|' .. tostring(remuda._butler_notice_compacted ~= nil)
+        "#,
+    );
+    assert_eq!(got, "0|true", "an answered leader message must not be re-shown after the drop: {got}");
+}
+
+// Restart: the read leader message is re-shown once, coalesced with the
+// unread-count notice into a single notice.
+#[test]
+fn restart_reshows_the_read_leader_message_coalesced_with_unread_mail() {
+    let (path, _daemon) = butler_with_member("renotice-restart");
+    setup_renotice(&path, "m1");
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        local bus = remuda._butler_bus
+        local id = remuda._rn_lead('restart task')
+        remuda._rn_tick(0); remuda._rn_tick(2)
+        remuda._butler_inbox('m1')
+        remuda._notice_test_send('m1', 'other mail')
+        -- A daemon restart loses the in-memory notice state.
+        bus.notices, bus.notice_seen, bus.unread_seeded = {}, {}, {}
+        local before = #state.typed
+        for t = 10, 30 do remuda._rn_tick(t) end
+        local text = tostring(state.typed[before + 1] and state.typed[before + 1].text)
+        return table.concat({ tostring(#state.typed - before),
+          tostring(text:find('remuda butler inbox ' .. id, 1, true) ~= nil),
+          tostring(text:find('re-shown after restart', 1, true) ~= nil),
+          tostring(remuda._rn_inbox_id(id):find('restart task', 1, true) ~= nil) }, '|')
+        "#,
+    );
+    assert_eq!(got, "1|true|true|true", "restart: one coalesced notice naming the leader message: {got}");
+}
+
+// Heuristic guards: nil -> value is not a drop; one notice per drop,
+// re-armed only after the context rises again.
+#[test]
+fn half_drop_heuristic_guards_and_rearms_after_a_rise() {
+    let (path, _daemon) = butler_with_named_agent("renotice-guards", "cx1", "codex");
+    setup_renotice(&path, "cx1");
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        local id = remuda._rn_lead('guard task')
+        remuda._rn_tick(0); remuda._rn_tick(2)
+        remuda._butler_inbox('cx1')
+        state.ctx.cx1 = nil
+        remuda._rn_tick(3)
+        state.ctx.cx1 = 60000
+        for t = 4, 9 do remuda._rn_tick(t) end
+        local after_nil = #state.typed
+        state.ctx.cx1 = 170000
+        remuda._rn_tick(10)
+        state.ctx.cx1 = 60000
+        for t = 11, 20 do remuda._rn_tick(t) end
+        local after_drop = #state.typed
+        state.ctx.cx1 = 25000
+        for t = 21, 30 do remuda._rn_tick(t) end
+        local no_rearm = #state.typed
+        state.ctx.cx1 = 180000
+        remuda._rn_tick(31)
+        state.ctx.cx1 = 50000
+        for t = 32, 40 do remuda._rn_tick(t) end
+        return table.concat({ tostring(after_nil), tostring(after_drop), tostring(no_rearm),
+          tostring(#state.typed) }, '|')
+        "#,
+    );
+    assert_eq!(got, "1|2|2|3", "guards: nil start, one per drop, re-arm after rise: {got}");
+}
+
+// First sight of a new member: a brief it read and has not answered while
+// still unseeded (busy with its task) is not re-shown as "after restart".
+#[test]
+fn a_fresh_launch_with_a_read_unanswered_brief_gets_no_reshow() {
+    let (path, _daemon) = butler_with_named_agent("renotice-fresh-launch", "cx1", "codex");
+    setup_renotice(&path, "cx1");
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        local bus = remuda._butler_bus
+        local launched = tostring(bus.unread_seeded.cx1)
+        bus.unread_seeded.cx1 = 'launched' -- as right after launch, before any tick
+        state.busy.cx1 = true
+        local id = remuda._rn_lead('brief for cx1')
+        for t = 0, 3 do remuda._rn_tick(t) end
+        remuda._butler_inbox('cx1')
+        state.busy.cx1 = false
+        for t = 4, 20 do remuda._rn_tick(t) end
+        return launched .. '|' .. tostring(#remuda._rn_mine())
+        "#,
+    );
+    assert!(got.ends_with("|0"), "a fresh launch must not re-show its read brief: {got}");
+}
+
+// inbox ID: own mailbox only; another member's message is refused with a
+// Next: line; the help names the id form.
+#[test]
+fn inbox_id_opens_only_the_callers_own_messages() {
+    let (path, _daemon) = butler_with_named_agent("renotice-inbox-id", "cx1", "codex");
+    setup_renotice(&path, "cx1");
+    let got = eval(
+        &path,
+        r#"
+        local foreign = remuda._butler_send('operator', 'butler', 'root only'):match('^queued (%S+)')
+        local refused = remuda._rn_inbox_id(foreign)
+        local help = tostring(remuda._butler_command_run('inbox', { 'inbox', '--help' }, { env = {} }))
+        return table.concat({ tostring(refused:find('root only', 1, true) == nil),
+          tostring(refused:find('Next:', 1, true) ~= nil),
+          tostring(help:find('message-id', 1, true) ~= nil) }, '|')
+        "#,
+    );
+    assert_eq!(got, "true|true|true", "inbox ID owner check and help: {got}");
+}
+
+// SEC #159 M1: a daemon restart empties the in-memory messages; the member's
+// earlier answer is still on disk, so its answered leader message is not
+// re-shown.
+#[test]
+fn restart_does_not_reshow_a_leader_message_answered_before_it() {
+    let (path, _daemon) = butler_with_member("renotice-restart-answered");
+    setup_renotice(&path, "m1");
+    let got = eval(
+        &path,
+        r#"
+        local bus = remuda._butler_bus
+        local id = remuda._rn_lead('answered before restart')
+        remuda._rn_tick(0); remuda._rn_tick(2)
+        remuda._butler_inbox('m1')
+        remuda._butler_reply('m1', id, 'done')
+        for t = 3, 9 do remuda._rn_tick(t) end
+        -- A daemon restart: in-memory mail and notice state are gone.
+        bus.messages, bus.mail_delivered, bus.mail_loaded = {}, {}, {}
+        bus.notices, bus.notice_seen, bus.unread_seeded = {}, {}, {}
+        local before = #remuda._rn_mine()
+        for t = 10, 30 do remuda._rn_tick(t) end
+        local found = remuda._butler_mail.find_message(id) ~= nil
+        return tostring(found) .. '|' .. tostring(#remuda._rn_mine() - before)
+        "#,
+    );
+    assert_eq!(got, "true|0", "an answered leader message must not be re-shown after a restart: {got}");
+}
+
+// SEC #159 M2: `inbox <arg>` validates the id before any lookup: a path or a
+// non-ULID never reaches a file open and is never cached.
+#[test]
+fn inbox_with_a_non_ulid_opens_no_message_file() {
+    let (path, _daemon) = butler_with_named_agent("renotice-inbox-path", "cx1", "codex");
+    setup_renotice(&path, "cx1");
+    let got = eval(
+        &path,
+        r#"
+        local opened = {}
+        local real_open = io.open
+        io.open = function(name, ...)
+          if tostring(name):find('../../x', 1, true) or tostring(name):find('not-a-ulid', 1, true) then
+            opened[#opened + 1] = name
+          end
+          return real_open(name, ...)
+        end
+        remuda._rn_inbox_id('../../x')
+        remuda._rn_inbox_id('not-a-ulid')
+        io.open = real_open
+        local bus = remuda._butler_bus
+        return tostring(#opened) .. '|' .. tostring(bus.messages['../../x'] == nil)
+          .. '|' .. tostring(bus.messages['not-a-ulid'] == nil)
+        "#,
+    );
+    assert_eq!(got, "0|true|true", "a non-ULID must not reach a message file or the cache: {got}");
+}
+
+// SEC #159 L1: a rise during Butler's own compaction does not re-arm the
+// half-drop heuristic.
+#[test]
+fn a_rise_during_our_compaction_does_not_rearm_the_heuristic() {
+    let (path, _daemon) = butler_with_named_agent("renotice-l1-rearm", "cx1", "codex");
+    setup_renotice(&path, "cx1");
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        state.ctx.cx1 = 170000
+        local id = remuda._rn_lead('l1 task')
+        remuda._rn_tick(0); remuda._rn_tick(2)
+        remuda._butler_inbox('cx1')
+        for t = 3, 9 do remuda._rn_tick(t) end
+        local before = #remuda._rn_mine()
+        local agent_id = remuda._butler_bus.agents.cx1.id
+        remuda._butler_compaction_members_state = remuda._butler_compaction_members_state or {}
+        remuda._butler_compaction_members_state[agent_id] = { compaction_in_progress = true }
+        state.ctx.cx1 = 60000; remuda._rn_tick(10)
+        state.ctx.cx1 = 170000; remuda._rn_tick(11) -- telemetry lag: a rise mid-compaction
+        remuda._butler_compaction_members_state[agent_id].compaction_in_progress = false
+        state.ctx.cx1 = 60000
+        for t = 12, 30 do remuda._rn_tick(t) end
+        return tostring(#remuda._rn_mine() - before)
+        "#,
+    );
+    assert_eq!(got, "0", "a rise during our compaction must not re-arm the heuristic");
+}
+
+// SEC #159 L2: `inbox <message-id>` outside an agent session says why, with
+// a Next: line.
+#[test]
+fn operator_inbox_with_a_message_id_gets_a_next_line() {
+    let (path, _daemon) = butler_with_named_agent("renotice-l2-operator", "cx1", "codex");
+    setup_renotice(&path, "cx1");
+    let got = eval(
+        &path,
+        r#"
+        local id = remuda._rn_lead('operator view')
+        local ok, out = pcall(remuda._butler_command_run, 'inbox', { 'inbox', id }, { env = {} })
+        return tostring(out):find('Next:', 1, true) ~= nil and 'next' or tostring(out)
+        "#,
+    );
+    assert_eq!(got, "next", "an operator inbox <message-id> needs a Next: line");
+}
+
+// SEC #159 L3: reading other mail (unread reaches 0) does not drop a queued
+// re-show.
+#[test]
+fn reading_other_mail_keeps_a_queued_reshow() {
+    let (path, _daemon) = butler_with_named_agent("renotice-l3-keep", "cx1", "codex");
+    setup_renotice(&path, "cx1");
+    let got = eval(
+        &path,
+        r#"
+        local id = remuda._rn_lead('keep me')
+        remuda._rn_tick(0); remuda._rn_tick(2)
+        remuda._butler_inbox('cx1')
+        for t = 3, 9 do remuda._rn_tick(t) end
+        remuda._butler_notice_compacted('cx1')
+        remuda._rn_tick(10) -- the re-show is queued, due at 12
+        remuda._notice_test_send('cx1', 'other mail')
+        remuda._butler_inbox('cx1') -- unread reaches 0 before the re-show is typed
+        for t = 11, 30 do remuda._rn_tick(t) end
+        local reshown = 0
+        for _, text in ipairs(remuda._rn_mine()) do
+          if text:find('remuda butler inbox ' .. id, 1, true) then reshown = reshown + 1 end
+        end
+        return tostring(reshown)
+        "#,
+    );
+    assert_eq!(got, "1", "the queued re-show must survive reading other mail");
+}

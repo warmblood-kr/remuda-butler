@@ -7457,6 +7457,252 @@ done
     drop(daemon);
 }
 
+/// #158: a fake Codex on gpt-6-luna whose /compact never finishes (the pane
+/// stays working). With a tiny monitor ceiling, Butler must give up waiting:
+/// cancel the monitor, release the fleet lock (another member can compact),
+/// and mail "Compaction not confirmed yet: still busy after N min".
+#[test]
+#[cfg(unix)]
+fn butler_compaction_monitor_gives_up_at_its_ceiling_and_releases_the_fleet_lock() {
+    let dir = scratch_dir("butler-monitor-ceiling");
+    let (token_path, config_path) =
+        butler_config(&dir, "monitor-ceiling", "http://127.0.0.1:1", "!room:example.org", "@butler:example.org", "");
+    let token_str = token_path.to_string_lossy().to_string();
+    let config_str = config_path.to_string_lossy().to_string();
+    let data_home = dir.join("data");
+    let mods = PathBuf::from(std::env::var_os("XDG_DATA_HOME").expect("XDG_DATA_HOME"));
+    std::fs::create_dir_all(data_home.join("remuda/butler")).expect("data home");
+    let _ = std::os::unix::fs::symlink(mods.join("remuda/mods"), data_home.join("remuda/mods"));
+    let data_str = data_home.to_string_lossy().to_string();
+    let daemon = Daemon::spawn_with_env(
+        &dir,
+        &[
+            ("REMUDA_BUTLER_TOKEN", token_str.as_str()),
+            ("REMUDA_BUTLER_CONFIG", config_str.as_str()),
+            ("XDG_DATA_HOME", data_str.as_str()),
+            ("HOME", dir.to_string_lossy().as_ref()),
+        ],
+    );
+    let path = daemon::socket_path_in(&dir, "s");
+    eval(&path, r#"remuda._butler_argv = {"sh", "-c", "while read line; do :; done"}"#);
+    eval(&path, "remuda._butler_skip_relay = true");
+    let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    // The picker fake of the luna-switch test. "forever*": /compact leaves the
+    // pane working for good; "quick": it drops the context at once. "forever"
+    // and "quick" start on luna; "forever-sol" starts on gpt-5.6-sol high.
+    let codex_home = dir.join("codex-home");
+    std::fs::create_dir_all(&codex_home).unwrap();
+    let script = dir.join("ceiling-codex.sh");
+    std::fs::write(
+        &script,
+        r#"#!/bin/bash
+log=$1
+scenario=$2
+stty -icanon -echo min 1 time 0 2>/dev/null
+names=("GPT-6.1-Sol" "GPT-6-Astra" "GPT-6-Sol" "GPT-6-Luna" "GPT-5.6-Sol" "GPT-5.6-Terra")
+ids=("gpt-6.1-sol" "gpt-6-astra" "gpt-6-sol" "gpt-6-luna" "gpt-5.6-sol" "gpt-5.6-terra")
+rows=("Low" "Medium" "High" "Extra high")
+levels=("low" "medium" "high" "xhigh")
+model=gpt-5.6-sol; effort=high
+case "$scenario" in
+  forever|quick) model=gpt-6-luna ;;
+  crash) model=gpt-6-luna; effort=medium ;;
+  no-row) effort=minimal ;;
+  no-luna) names[3]="GPT-6-Nova"; ids[3]="gpt-6-nova" ;;
+esac
+ctx=500000; busy=""; mode=composer; line=""; cursor=0; pick=0; ecur=0; note=""
+index_of() { local i; for i in "${!ids[@]}"; do [ "${ids[$i]}" = "$1" ] && echo "$i" && return; done; echo 0; }
+default_row() { if [ "${ids[$1]}" = gpt-5.6-sol ]; then echo 0; else echo 1; fi; }
+paint() {
+  printf '\033[H\033[2JMODEL:%s CTX:%s\n%s\n' "$model" "$ctx" "$busy"
+  [ -n "$note" ] && printf '• %s\n' "$note"
+  local i mark
+  case "$mode" in
+    composer)
+      printf '\n› Ask Codex to do anything\n\n  %s %s · /work\n' "${names[$(index_of "$model")]}" "$effort" ;;
+    model)
+      printf '\n  Select Model and Effort\n\n'
+      for i in "${!names[@]}"; do
+        mark='  '; [ "$i" = "$cursor" ] && mark='› '
+        cur=''; [ "${ids[$i]}" = "$model" ] && cur=' (current)'
+        printf '%s%d. %s%s\n' "$mark" $((i + 1)) "${names[$i]}" "$cur"
+      done
+      printf '\n  enter select · esc back\n' ;;
+    effort)
+      printf '\n  Select Reasoning Level for %s\n\n' "${names[$pick]}"
+      local d; d=$(default_row "$pick")
+      for i in "${!rows[@]}"; do
+        mark='  '; [ "$i" = "$ecur" ] && mark='› '
+        def=''; [ "$i" = "$d" ] && def=' (default)'
+        printf '%s%d. %s%s\n' "$mark" $((i + 1)) "${rows[$i]}" "$def"
+      done
+      printf '\n  enter default · s session · esc back\n' ;;
+  esac
+}
+apply() {
+  model=${ids[$pick]}; effort=${levels[$ecur]}; mode=composer
+  if [ "$1" = session ]; then
+    note="Model changed to $model $effort for this session only"
+  else
+    note="Model changed to $model $effort"
+    printf 'model = "%s"\nmodel_reasoning_effort = "%s"\n' "$model" "$effort" > "$CODEX_HOME/config.toml"
+  fi
+}
+paint
+while IFS= read -r -s -n1 -d '' c; do
+  key=$c
+  if [ "$c" = $'\e' ]; then
+    rest=''; IFS= read -r -s -n2 -t 0.05 -d '' rest
+    case "$rest" in '[A') key='<up>' ;; '[B') key='<down>' ;; *) key='ESC' ;; esac
+  elif [ "$c" = $'\r' ] || [ "$c" = $'\n' ]; then
+    key='RET'
+  fi
+  case "$mode" in
+    composer)
+      if [ "$key" = RET ]; then
+        [ -z "$line" ] && continue
+        printf 'CMD:%s\n' "$line" >> "$log"
+        case "$line" in
+          /model) mode=model; cursor=$(index_of "$model") ;;
+          /compact) case "$scenario" in forever*) busy="• Compacting" ;; *) ctx=200000 ;; esac ;;
+          /idle) busy="" ;;
+          *) printf 'PROMPT:%s\n' "$line" >> "$log" ;;
+        esac
+        line=''; paint
+      elif [ "${#key}" = 1 ]; then
+        line="$line$key"
+      fi ;;
+    model)
+      printf 'KEY:%s\n' "$key" >> "$log"
+      case "$key" in
+        [1-6]) pick=$((key - 1)); ecur=$(default_row "$pick"); mode=effort ;;
+        RET) pick=$cursor; ecur=$(default_row "$pick"); mode=effort ;;
+        '<up>') [ "$cursor" -gt 0 ] && cursor=$((cursor - 1)) ;;
+        '<down>') [ "$cursor" -lt 5 ] && cursor=$((cursor + 1)) ;;
+        ESC) mode=composer ;;
+      esac
+      paint ;;
+    effort)
+      printf 'KEY:%s\n' "$key" >> "$log"
+      case "$key" in
+        s) [ "$scenario" = s-ignored ] || apply session ;;
+        RET) apply default ;;
+        [1-4]) ecur=$((key - 1)); apply default ;;
+        '<up>') [ "$ecur" -gt 0 ] && ecur=$((ecur - 1)) ;;
+        '<down>') [ "$ecur" -lt 3 ] && ecur=$((ecur + 1)) ;;
+        ESC) mode=model ;;
+      esac
+      paint ;;
+  esac
+done
+"#,
+    )
+    .expect("write ceiling fake Codex");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    eval(
+        &path,
+        &format!(
+            r#"
+      remuda._butler_compaction_config = {{critical=400000, cooldown_ticks=0, capture_gap=0,
+        completion_timeout=1, claude_completion_timeout=0.2, failure_cooldown_seconds=0, input_settle=0.01,
+        monitor_ceiling_seconds=2}}
+      local prior_contributions = remuda.contributions
+      remuda.contributions = function(point)
+        if point == "butler.agent" then
+          return {{{{id="codex", entry={{working=function(screen)
+            return screen:find("Compacting", 1, true) ~= nil
+          end}}}}}}
+        end
+        return prior_contributions(point)
+      end
+      remuda._butler_prompt_is_empty = function(_, screen)
+        if screen:find("Ask Codex to do anything", 1, true) then return "EMPTY" end
+        return "NON-EMPTY"
+      end
+      remuda._butler_telemetry_for = function(agent)
+        local screen = remuda.capture(agent.session_name)
+        return {{context_used=screen:match("CTX:%s*(%d+)"), model=screen:match("MODEL:([^ %c]+)")}}
+      end
+      remuda.session = function() return {{is_busy=false, attached=false}} end
+      remuda._butler_send = function(from, _, message)
+        remuda._fake_reports = remuda._fake_reports or {{}}
+        table.insert(remuda._fake_reports, from .. ": " .. message)
+      end
+      remuda._fake_codex = function(name, log, scenario)
+        remuda.new(name, {{"env", "CODEX_HOME=" .. {home:?}, "bash", {script:?}, log, scenario}}, nil, {{}})
+        remuda._butler_bus.agents[name] = {{id=name .. "-id", kind="codex", session_name=name}}
+      end
+    "#,
+            home = codex_home.to_string_lossy(),
+            script = script.to_string_lossy(),
+        ),
+    );
+
+    let reports = || eval(&path, "return table.concat(remuda._fake_reports or {}, '\\n')");
+    let start = |name: &str, scenario: &str| {
+        let log = dir.join(format!("{name}.log"));
+        eval(&path, &format!("remuda._fake_codex({name:?}, {:?}, {scenario:?})", log.to_string_lossy()));
+        wait_for(&path, name, "Ask Codex to do anything");
+    };
+    start("cx-forever", "forever");
+    start("cx-next", "quick");
+    assert_eq!(eval(&path, "return remuda.butler.compact('cx-forever')"), "started");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !reports().contains("cx-forever: Compaction not confirmed yet: still busy after") {
+        assert!(Instant::now() < deadline, "the monitor never gave up at its ceiling. reports: {}\nscreen:\n{}",
+            reports(), capture(&path, "cx-forever"));
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let state = eval(&path, r#"
+      local s = (remuda._butler_compaction_members_state or {})['cx-forever-id'] or {}
+      return tostring(s.compaction_in_progress == true) .. '|' .. tostring(s.compaction_monitor ~= nil)"#);
+    assert_eq!(state, "false|false", "at the ceiling the lock and the monitor must be released");
+    assert!(!reports().contains("Compaction failed"), "a still-busy pane is not a failure: {}", reports());
+    // The fleet lock is free: another member compacts.
+    assert_eq!(eval(&path, "return remuda.butler.compact('cx-next')"), "started",
+        "the fleet lock must be released at the ceiling");
+
+    // 2. Not on luna: at the ceiling the prior model is restored for the
+    //    session before the not-confirmed mail.
+    start("cx-sol", "forever-sol");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while eval(&path, "return remuda.butler.compact('cx-sol')") != "started" {
+        assert!(Instant::now() < deadline, "cx-sol never got the fleet lock. reports: {}", reports());
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let deadline = Instant::now() + Duration::from_secs(40);
+    while !reports().contains("cx-sol: Compaction not confirmed yet: still busy after") {
+        assert!(Instant::now() < deadline, "cx-sol: no not-confirmed mail at the ceiling. reports: {}\nscreen:\n{}",
+            reports(), capture(&path, "cx-sol"));
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(reports().contains("the model is restored when the session is idle"), "{}", reports());
+    // Still busy: ticks keep the restore pending and type nothing.
+    let log_of = || std::fs::read_to_string(dir.join("cx-sol.log")).unwrap_or_default();
+    for _ in 0..3 {
+        eval(&path, "return remuda._butler_compaction_tick('cx-sol', false)");
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    assert!(log_of().ends_with("CMD:/compact\n"), "no /model may be typed into a busy pane: {}", log_of());
+    // Idle: a later tick restores the prior model for the session.
+    eval(&path, "remuda.type_text('cx-sol', '/idle')");
+    let deadline = Instant::now() + Duration::from_secs(40);
+    while !capture(&path, "cx-sol").contains("GPT-5.6-Sol high") {
+        assert!(Instant::now() < deadline, "the pending restore never ran once idle. log:\n{}\nscreen:\n{}",
+            log_of(), capture(&path, "cx-sol"));
+        eval(&path, "return remuda._butler_compaction_tick('cx-sol', false)");
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    let log = log_of();
+    assert!(log.contains("CMD:/compact\nCMD:/idle\nCMD:/model"), "restore only after idle: {log}");
+    assert!(log.ends_with("KEY:s\n"), "the restore is session-only: {log}");
+    drop(daemon);
+}
+
 /// Same real-process substitution as
 /// `butler_watchdog_relaunches_a_session_that_really_died`, but the witness
 /// here is the trace FILE `_butler_session_trace` in `packages/butler/init.lua`
