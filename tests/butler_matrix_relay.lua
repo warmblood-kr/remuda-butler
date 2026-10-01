@@ -392,6 +392,40 @@ local function test_typed_line_return_failure_warns_text_may_remain()
   end)
 end
 
+function test_typed_line_trace_records_owner_actions_and_shell_text()
+  with_typed_line_stubs(function(typed)
+    local old_bus, old_selected, old_trace = remuda._butler_bus, remuda._butler_selected_agent,
+      _G._butler_session_trace
+    remuda._butler_bus = { agents = { butler = { session_name = "butler", kind = "claude" } } }
+    remuda._butler_selected_agent = "claude"
+    local traces = {}
+    _G._butler_session_trace = function(event, detail)
+      traces[#traces + 1] = { event = event, detail = detail }
+    end
+    local dir, config_path = fixture("typed_lines=true\nshell_lines=true\n")
+    local client = scripted_client()
+    local relay = relay_module.new({ config_path = config_path, matrix = client, deliver = function() return true end })
+    relay:start()
+    client:complete(1, { json = { next_batch = "s0" } })
+    local typed_event = typed_line_event("$trace-typed", "!hello")
+    local shell_event = typed_line_event("$trace-shell", "!!git status")
+    shell_event.origin_server_ts = (os.time() - 301) * 1000
+    client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+      ["!room:example.org"] = { timeline = { events = { typed_event, shell_event } } },
+    } } } })
+    assert(#typed == 1 and #traces == 2, "typed and refused owner lines should each create one trace row")
+    assert(traces[1].event == "matrix_owner_line" and traces[1].detail:find(
+      "room=!room:example.org event=$trace-typed sender=@alice:example.org target=butler form=! outcome=typed bytes=5",
+      1, true), "typed trace should include room, event, sender, target, form, outcome, and byte length")
+    assert(traces[2].event == "matrix_owner_line" and traces[2].detail:find(
+      "room=!room:example.org event=$trace-shell sender=@alice:example.org target=butler form=!! outcome=refused:event_too_old bytes=10 command=git status",
+      1, true), "a refused !! trace should include the command text and refusal reason")
+    relay:stop()
+    cleanup_fixture(dir, config_path)
+    remuda._butler_bus, remuda._butler_selected_agent, _G._butler_session_trace = old_bus, old_selected, old_trace
+  end)
+end
+
 local function test_baseline_resume_filters_and_envelope()
   local dir, config_path = fixture()
   local client, delivered = scripted_client(), {}
@@ -5022,6 +5056,7 @@ rx_tests = {
   { "test_typed_line_gate_error_is_contained_and_processed", test_typed_line_gate_error_is_contained_and_processed },
   { "test_typed_line_persist_failure_fails_closed", test_typed_line_persist_failure_fails_closed },
   { "test_typed_line_return_failure_warns_text_may_remain", test_typed_line_return_failure_warns_text_may_remain },
+  { "test_typed_line_trace_records_owner_actions_and_shell_text", test_typed_line_trace_records_owner_actions_and_shell_text },
   { "test_rx_stranger_root_marked_untrusted", test_rx_stranger_root_marked_untrusted },
   { "test_rx_agent_root_without_mention", test_rx_agent_root_without_mention },
   { "test_rx_prefix_stranger_gets_marker", test_rx_prefix_stranger_gets_marker },
