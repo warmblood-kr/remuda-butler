@@ -203,7 +203,7 @@ function quota.parse_codex_status(screen, utc_offset_seconds, now)
     local name, left = line:match("^%s*(.-):%s+%[.-%]%s+(%d+)%% left%s*.*$")
     if name then
       name = name:gsub("^%s+", ""):gsub("%s+$", "")
-      if name ~= "" then
+      if #name <= 40 and name:match("^[%w][%w %-]*$") then
         local limit = { name = name, used = 100 - tonumber(left) }
         local reset = parse_reset(line, lines[i + 1], utc_offset_seconds, now)
         for key, value in pairs(reset) do limit[key] = value end
@@ -219,6 +219,10 @@ local function utc_text(epoch)
   return os.date("!%Y-%m-%d %H:%MZ", epoch)
 end
 
+local function clean(text)
+  return (tostring(text):gsub("%c", " ")):sub(1, 80)
+end
+
 local function format_percent(value)
   if finite_number(value) then return tostring(rounded(value)) end
   return "0"
@@ -229,10 +233,10 @@ local function agent_lines(name, agent, report_at, near_limits)
   local lines = {}
   if agent.mode == "subscription" then
     if name == "claude" then
-      lines[1] = "claude: subscription (" .. tostring(agent.plan or "unknown")
-        .. "), " .. tostring(agent.email or "unknown")
+      lines[1] = "claude: subscription (" .. clean(agent.plan or "unknown")
+        .. "), " .. clean(agent.email or "unknown")
     elseif agent.plan ~= nil and agent.plan ~= "" then
-      lines[1] = "codex: subscription (" .. tostring(agent.plan)
+      lines[1] = "codex: subscription (" .. clean(agent.plan)
         .. "), account: not exposed by codex"
     else
       lines[1] = "codex: subscription, account: not exposed by codex"
@@ -247,12 +251,12 @@ local function agent_lines(name, agent, report_at, near_limits)
         if finite_number(limit.resets_at) then
           reset = "resets " .. utc_text(limit.resets_at)
         else
-          reset = "resets " .. tostring(limit.resets_text or "unknown") .. " (local time)"
+          reset = "resets " .. clean(limit.resets_text or "unknown") .. " (local time)"
         end
-        lines[#lines + 1] = "  " .. tostring(limit.name or "unknown limit") .. ": "
+        lines[#lines + 1] = "  " .. clean(limit.name or "unknown limit") .. ": "
           .. used .. "% used, " .. reset
         if finite_number(limit.used) and limit.used >= 80 then
-          near_limits[#near_limits + 1] = name .. " " .. tostring(limit.name or "unknown limit")
+          near_limits[#near_limits + 1] = name .. " " .. clean(limit.name or "unknown limit")
             .. " (" .. used .. "%)"
         end
       end
