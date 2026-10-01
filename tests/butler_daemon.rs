@@ -154,6 +154,56 @@ fn wait_for(path: &Path, name: &str, needle: &str) -> String {
     }
 }
 
+/// A test clock for one of the mod's watchers: the watcher gets a timeout it
+/// never reaches, and a schedule moves its deadline (core's `handle.state`)
+/// into the past once the gate file exists. Only the length of the timeout
+/// changes; branches, matchers and callbacks pass through, and core's own
+/// timeout path calls the mod's handler.
+/// It depends on core internals, `handle.state.status` and
+/// `handle.state.deadline` (core 499b8b9). If a newer core drops or renames
+/// them, the watcher fails with the MISSING text below (it reaches the test
+/// through the mod's failure mail) instead of waiting for a timeout that
+/// never comes.
+const TIMEOUT_ON_FILE: &str = r#"
+  if remuda._fake_timeout_on_file then return end
+  remuda._fake_timeout_on_file = {}
+  local expect = remuda.expect
+  remuda.expect = function(session, branches, options, ...)
+    local gate = remuda._fake_timeout_on_file[session]
+    if not gate or branches[1].id ~= gate.id then return expect(session, branches, options, ...) end
+    local gated = {}
+    for key, value in pairs(options) do gated[key] = value end
+    gated.timeout = 1e6
+    local handle = expect(session, branches, gated, ...)
+    local MISSING = "timeout_on_file: core no longer exposes handle.state.status and handle.state.deadline; update this helper"
+    assert(type(handle) == "table" and type(handle.state) == "table" and handle.state.status == "pending", MISSING)
+    local poll, released
+    poll = remuda.schedule({ every = 0.1, run = function()
+      local state = handle.state
+      local file = state.status == "pending" and io.open(gate.file)
+      if file then
+        file:close()
+        released = released or remuda.clock()
+        -- Core sets the deadline on the watcher's first step, at most a tick after it starts.
+        if type(state.deadline) == "number" then state.deadline = 0
+        elseif remuda.clock() - released > 5000 then handle:cancel(); options.on_error(MISSING, handle) end
+      end
+      if state.status ~= "pending" then remuda.cancel(poll) end
+    end })
+    return handle
+  end
+"#;
+
+/// The watcher `id` on session `name` times out when the returned file exists
+/// (the test creates it once it has seen the state it wants at the timeout),
+/// not after the configured seconds.
+fn timeout_on_file(path: &Path, dir: &Path, name: &str, id: &str) -> PathBuf {
+    let file = dir.join(format!("{name}.timeout"));
+    eval(path, TIMEOUT_ON_FILE);
+    eval(path, &format!("remuda._fake_timeout_on_file[{name:?}] = {{id={id:?}, file={:?}}}", file.to_string_lossy()));
+    file
+}
+
 #[test]
 fn a_second_listener_cannot_unlink_a_live_daemons_socket() {
     let path = scratch("live-listener");
@@ -7373,8 +7423,15 @@ done
     //     monitor waits for idle and finishes without any /model or settings check.
     scenario("a2 (on Sonnet, busy at the timeout)", &|| {
     start("cl-sonnet-busy", "sonnet-nodrop");
+    let timeout = timeout_on_file(&path, &dir, "cl-sonnet-busy", "compact-complete");
     assert_eq!(eval(&path, "return remuda.butler.compact('cl-sonnet-busy')"), "started");
     eval(&path, "remuda._fake_busy['cl-sonnet-busy'] = true");
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while log_of("cl-sonnet-busy") != "CMD:/compact\n" {
+        assert!(Instant::now() < deadline, "/compact never reached the pane: {}", trace());
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::fs::write(&timeout, "").unwrap();
     let deadline = Instant::now() + Duration::from_secs(8);
     while !reports().contains("still running") {
         assert!(Instant::now() < deadline, "the monitor never started: {}\n{}", reports(), trace());
@@ -7486,8 +7543,8 @@ fn butler_claude_model_waits_end_only_on_a_confirmed_switch() {
         &script,
         r#"#!/bin/bash
 # Scenarios: slow (dialog, then a slow switch that swallows input), nodialog (settings change at
-# once, the status line lags), already (settings already hold the target, the
-# status line lags), stuck (the model never changes).
+# once, the status line changes only once $log.status exists), already (settings already hold
+# the target, the status line lags), stuck (the model never changes).
 log=$1
 scenario=$2
 model=opus; ctx=500000; mode=idle; ticks=0; target=
@@ -7517,7 +7574,7 @@ while true; do
     esac
   else
     [ $? -gt 128 ] || exit 0
-    if [ $ticks -gt 0 ]; then
+    if [ $ticks -gt 0 ] && { [ "$scenario" != nodialog ] || [ -e "$log.status" ]; }; then
       ticks=$((ticks - 1))
       if [ $ticks -le 0 ]; then model=$target; set_settings "$target"; mode=idle; paint; fi
     fi
@@ -7618,6 +7675,9 @@ done
         assert!(!events.contains("restored_after_dialog"), "no third /model: {events}");
         assert!(!events.contains("settings_model_mismatch"), "settings must already be restored: {events}");
         assert!(!events.contains("\terror"), "no failure: {events}");
+        // nodialog: both waits are over, so the status line may follow now.
+        std::fs::write(dir.join(format!("{name}.log.status")), "").unwrap();
+        wait_for(&path, name, "MODEL:opus");
         for _ in 0..3 {
             eval(&path, &format!("return remuda._butler_compaction_tick({name:?}, false)"));
         }
@@ -7977,6 +8037,9 @@ done
         eval(&path, "return remuda.butler.compact('cx-b')");
         std::thread::sleep(Duration::from_millis(100));
     }
+    // The last key is logged before the mod has seen the footer and freed the fleet lock.
+    settle("cx-a", &|log| log == full_cycle, "cx-a's lock release");
+    settle("cx-b", &|log| log == full_cycle, "cx-b's lock release");
     assert_eq!(std::fs::read_to_string(&codex_config).unwrap(), config_seed);
 
     // 7. Every picker failure closes the picker (one ESC per screen) before
@@ -8055,7 +8118,7 @@ while IFS= read -r -s -n1 -d '' c; do
     [ -z "$line" ] && continue
     printf 'CMD:%s\n' "$line" >> "$log"
     if [ "$line" = /compact ] && [ "$scenario" = slow ]; then
-      busy="• Compacting"; paint; sleep 3; busy=""; ctx=200000
+      busy="• Compacting"; paint; until [ -e "$log.finish" ]; do sleep 0.05; done; busy=""; ctx=200000
     fi
     line=""; paint
   else
@@ -8127,7 +8190,16 @@ done
 
     // 1. Slow: still compacting at the timeout, then done. No fail mail.
     start("cx-slow", "slow");
+    let timeout = timeout_on_file(&path, &dir, "cx-slow", "compact-complete");
     assert_eq!(eval(&path, "return remuda.butler.compact('cx-slow')"), "started");
+    wait_for(&path, "cx-slow", "Compacting");
+    std::fs::write(&timeout, "").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !reports().contains("cx-slow: Compaction is still running") {
+        assert!(Instant::now() < deadline, "the monitor never started. reports: {}", reports());
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::fs::write(dir.join("cx-slow.log.finish"), "").unwrap();
     settle("cx-slow", &|screen| screen.contains("CTX:200000"), "the slow compaction finishing");
     let got = reports();
     assert!(!got.contains("Compaction failed"), "a slow compaction that finished is not a failure: {got}");
@@ -8336,9 +8408,16 @@ done
         eval(&path, &format!("remuda._fake_codex({name:?}, {:?}, {scenario:?})", log.to_string_lossy()));
         wait_for(&path, name, "Ask Codex to do anything");
     };
+    let trace_path = dir.join("compaction-trace.log");
+    eval(&path, &format!("remuda._butler_compaction_trace_path = {}", lua_raw_string(&trace_path.to_string_lossy())));
+    let trace = || std::fs::read_to_string(&trace_path).unwrap_or_default();
     start("cx-forever", "forever");
     start("cx-next", "quick");
+    // The completion timeout comes once the pane shows Compacting, not after a second.
+    let timeout = timeout_on_file(&path, &dir, "cx-forever", "compact-complete");
     assert_eq!(eval(&path, "return remuda.butler.compact('cx-forever')"), "started");
+    wait_for(&path, "cx-forever", "Compacting");
+    std::fs::write(&timeout, "").unwrap();
     let deadline = Instant::now() + Duration::from_secs(20);
     while !reports().contains("cx-forever: Compaction not confirmed yet: still busy after") {
         assert!(Instant::now() < deadline, "the monitor never gave up at its ceiling. reports: {}\nscreen:\n{}",
@@ -8357,15 +8436,23 @@ done
     // 2. Not on luna: at the ceiling the prior model is restored for the
     //    session before the not-confirmed mail.
     start("cx-sol", "forever-sol");
+    let timeout = timeout_on_file(&path, &dir, "cx-sol", "compact-complete");
     let deadline = Instant::now() + Duration::from_secs(20);
     while eval(&path, "return remuda.butler.compact('cx-sol')") != "started" {
         assert!(Instant::now() < deadline, "cx-sol never got the fleet lock. reports: {}", reports());
         std::thread::sleep(Duration::from_millis(100));
     }
     let deadline = Instant::now() + Duration::from_secs(40);
+    while !capture(&path, "cx-sol").contains("Compacting") {
+        assert!(Instant::now() < deadline, "cx-sol never started compacting on luna. reports: {}\nscreen:\n{}\ntrace:\n{}",
+            reports(), capture(&path, "cx-sol"), trace());
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    std::fs::write(&timeout, "").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(40);
     while !reports().contains("cx-sol: Compaction not confirmed yet: still busy after") {
-        assert!(Instant::now() < deadline, "cx-sol: no not-confirmed mail at the ceiling. reports: {}\nscreen:\n{}",
-            reports(), capture(&path, "cx-sol"));
+        assert!(Instant::now() < deadline, "cx-sol: no not-confirmed mail at the ceiling. reports: {}\nscreen:\n{}\ntrace:\n{}",
+            reports(), capture(&path, "cx-sol"), trace());
         std::thread::sleep(Duration::from_millis(100));
     }
     assert!(reports().contains("the model is restored when the session is idle"), "{}", reports());
@@ -8378,11 +8465,17 @@ done
     assert!(log_of().ends_with("CMD:/compact\n"), "no /model may be typed into a busy pane: {}", log_of());
     // Idle: a later tick restores the prior model for the session.
     eval(&path, "remuda.type_text('cx-sol', '/idle')");
+    // Tick only while the restore is pending, checked in the same eval: a tick after the
+    // restore has finished would start a new compaction (the context is still high and
+    // this test has no cooldown), and the pane would never show the prior model again.
+    let tick_while_pending = || eval(&path, r#"
+      local state = (remuda._butler_compaction_members_state or {})['cx-sol-id'] or {}
+      if state.restore_pending then return remuda._butler_compaction_tick('cx-sol', false) end"#);
     let deadline = Instant::now() + Duration::from_secs(40);
     while !capture(&path, "cx-sol").contains("GPT-5.6-Sol high") {
         assert!(Instant::now() < deadline, "the pending restore never ran once idle. log:\n{}\nscreen:\n{}",
             log_of(), capture(&path, "cx-sol"));
-        eval(&path, "return remuda._butler_compaction_tick('cx-sol', false)");
+        tick_while_pending();
         std::thread::sleep(Duration::from_millis(300));
     }
     let log = log_of();
