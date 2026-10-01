@@ -11,6 +11,7 @@ matrix.relay = relay
 local JSON_ARRAY_MT = getmetatable(json.array({}))
 
 local MAX_PROCESSED = 5000
+local MAX_INVITE_DEDUPE = 5000
 local MAX_DELIVERY_FAILURES = 5
 local MAX_BODY_BYTES = 64 * 1024
 local MAX_QUARANTINE_ITEMS = 200
@@ -303,6 +304,7 @@ end
 local function empty_state()
   return { since = nil, messages_since = nil, processed = {}, processed_order = {},
     pending = json.object({}), quarantine = json.array({}), routes = json.object({}),
+    invite_dedupe = json.object({}),
     subscriptions = json.object({}),
     auto_join_timestamps = json.array({}),
     reply_outbox = json.object({}), reply_results = json.object({}), approvals = json.object({}) }
@@ -334,6 +336,7 @@ local function load_state(path)
   local reply_results = value.matrix_reply_results or json.object({})
   local subscriptions = value.matrix_thread_subscriptions or json.object({})
   local approvals = value.approvals or json.object({})
+  local invite_dedupe = value.invite_dedupe or json.object({})
   local auto_join_timestamps = value.auto_join_timestamps or json.array({})
   if (since ~= nil and type(since) ~= "string")
     or (messages_since ~= nil and type(messages_since) ~= "string")
@@ -350,6 +353,10 @@ local function load_state(path)
     or type(approvals) ~= "table" or approvals == json.null or getmetatable(approvals) == JSON_ARRAY_MT then
     return empty_state(), "invalid Matrix relay state fields"
   end
+  if type(invite_dedupe) ~= "table" or invite_dedupe == json.null
+    or getmetatable(invite_dedupe) == JSON_ARRAY_MT then
+    return empty_state(), "invalid Matrix relay invite dedupe state"
+  end
   if type(auto_join_timestamps) ~= "table" or auto_join_timestamps == json.null
     or getmetatable(auto_join_timestamps) ~= JSON_ARRAY_MT then
     return empty_state(), "invalid Matrix relay auto-join timestamps"
@@ -359,6 +366,7 @@ local function load_state(path)
   state.since, state.messages_since = since, messages_since
   state.quarantine, state.routes = json.array({}), json.object({})
   state.reply_outbox, state.reply_results = json.object({}), json.object({})
+  state.invite_dedupe = json.object({})
   state.approvals = approvals
   local approval_cutoff = math.floor(os.time() * 1000) - 24 * 60 * 60 * 1000
   for id, rec in pairs(state.approvals) do
@@ -399,6 +407,12 @@ local function load_state(path)
     if type(id) ~= "string" then return empty_state(), "invalid processed event ID" end
     if id ~= "" then add_processed(state, id) end
   end
+  for id, item in pairs(invite_dedupe) do
+    if type(id) == "string" and type(item) == "table" and type(item.created_at) == "string" then
+      state.invite_dedupe[id] = item
+    end
+  end
+  trim_map(state.invite_dedupe, MAX_INVITE_DEDUPE, "created_at")
   for id, event in pairs(pending) do
     if type(id) == "string" and type(event) == "table"
       and type(event.sender) == "string" and type(event.room_id) == "string"
@@ -463,6 +477,7 @@ local function save_state(path, state)
     quarantine = state.quarantine, matrix_mail_routes = state.routes,
     matrix_reply_outbox = state.reply_outbox, matrix_reply_results = state.reply_results,
     matrix_thread_subscriptions = state.subscriptions, approvals = state.approvals,
+    invite_dedupe = state.invite_dedupe,
     auto_join_timestamps = state.auto_join_timestamps })
   return remuda.fs.write_atomic(path, json, { private = true })
 end
@@ -538,7 +553,7 @@ function relay.new(options)
     end)
   end
 
-  local function quarantine_event(ev, reason, room_id)
+  local function quarantine_event(ev, reason, room_id, defer_persist)
     local event_id = type(ev.event_id) == "string" and ev.event_id or ""
     local valid_id = event_id ~= "" and #event_id <= 512
     local id = valid_id and event_id or ("quarantine-" .. tostring(remuda._butler_new_ulid()))
@@ -556,7 +571,7 @@ function relay.new(options)
     }
     while #state.quarantine > MAX_QUARANTINE_ITEMS do table.remove(state.quarantine, 1) end
     if valid_id then add_processed(state, event_id) end
-    persist()
+    if not defer_persist then persist() end
     return true
   end
 
@@ -1087,10 +1102,16 @@ function relay.new(options)
       return "invite:" .. cap_field(room_id, 500)
     end
 
-    local function quarantine_invite(room_id, inviter, reason)
-      local ev = { event_id = invite_state_id(room_id),
+    local function quarantine_invite(room_id, inviter, reason, dedupe_id)
+      local event_id = dedupe_id or invite_state_id(room_id)
+      if state.invite_dedupe[event_id] then return false end
+      local ev = { event_id = event_id,
         sender = terminal_safe_field(inviter, 128), type = "m.room.member", content = {} }
-      return quarantine_event(ev, reason, room_id)
+      local added = quarantine_event(ev, reason, room_id, true)
+      state.invite_dedupe[event_id] = { created_at = timestamp(ev) }
+      trim_map(state.invite_dedupe, MAX_INVITE_DEDUPE, "created_at")
+      persist()
+      return added
     end
 
     local function remove_auto_join(room_id, at)
@@ -1304,7 +1325,12 @@ function relay.new(options)
                     end
                   end
                   table.sort(humans)
-                  local readers = #humans > 1 and table.concat(humans, ", ") or "the owner"
+                  local shown_humans = {}
+                  for index = 1, math.min(#humans, 5) do
+                    shown_humans[#shown_humans + 1] = humans[index]
+                  end
+                  local readers = #humans > 1 and table.concat(shown_humans, ", ") or "the owner"
+                  if #humans > 5 then readers = readers .. ", and " .. tostring(#humans - 5) .. " more" end
                   send_notice(room_id, "Joined; I read messages here from " .. readers .. ".",
                     "invite-notice", room_id)
                 end
@@ -1314,9 +1340,8 @@ function relay.new(options)
                 .. terminal_safe_field(room_id, 512) .. ": " .. terminal_safe_field(tostring(add_error), 512))
             end
           else
-            local ev = { event_id = "invite:" .. cap_field(room_id, 200) .. "|" .. cap_field(report_inviter, 200),
-              sender = report_inviter, type = "m.room.member", content = {} }
-            if quarantine_event(ev, "invite_not_allowlisted", room_id) then
+            local dedupe_id = "invite:" .. cap_field(room_id, 200) .. "|" .. cap_field(report_inviter, 200)
+            if quarantine_invite(room_id, report_inviter, "invite_not_allowlisted", dedupe_id) then
               local safe_to_notice = valid_room_id(room_id) and not room_id:find("'", 1, true)
                 and valid_mxid(report_inviter) and not has_bidi_format(room_id)
                 and not has_bidi_format(report_inviter)

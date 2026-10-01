@@ -1065,6 +1065,23 @@ local function test_owner_invite_notice_names_all_allowlisted_humans()
   remove_dir(dir)
 end
 
+local function test_owner_invite_notice_caps_allowlisted_readers()
+  local readers = {
+    OWNER, "@bob:example.org", "@carol:example.org", "@dan:example.org",
+    "@eve:example.org", "@frank:example.org", "@grace:example.org",
+  }
+  local dir, path = invite_fixture(table.concat(readers, ","))
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  client:sync({ json = { next_batch = "s1", rooms = { invite = invite(NEW, OWNER) } } })
+  client:pump()
+  assert(client:messages(NEW, "Joined; I read messages here from @alice:example.org, @bob:example.org, "
+      .. "@carol:example.org, @dan:example.org, @eve:example.org, and 2 more.") == 1,
+    "a joined notice must list at most five human readers and count the rest")
+  relay:stop()
+  remove_dir(dir)
+end
+
 local function test_configured_joined_room_owner_invite_retries_without_config_or_notice()
   local original = "room=" .. NEW .. " how=operator\n"
   local dir, path = invite_fixture(nil, original)
@@ -1356,6 +1373,45 @@ local function test_invite_home_notice_cap_adds_one_summary()
   relay:stop()
   remove_dir(dir)
   assert(ok, err)
+end
+
+local function test_invite_dedupe_survives_quarantine_limit()
+  local dir, path = invite_fixture()
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  local first_room = "!first:example.org"
+  client:sync({ json = { next_batch = "s1", rooms = { invite = invite(first_room, STRANGER) } } })
+  client:pump()
+  local notices_before = client:messages(HOME, "Invite to")
+  assert(notices_before == 1, "the first stranger invite must send its HOME notice")
+
+  local later_invites = {}
+  for index = 1, 200 do
+    local room = "!later" .. tostring(index) .. ":example.org"
+    later_invites[room] = invite(room, STRANGER)[room]
+  end
+  client:sync({ json = { next_batch = "s2", rooms = { invite = later_invites } } })
+  client:pump()
+  assert(#relay:quarantine_list() == 200, "the quarantine list must remain capped at 200 items")
+
+  client:sync({ json = { next_batch = "s3", rooms = { invite = invite(first_room, STRANGER) } } })
+  client:pump()
+  assert(client:messages(HOME, "Invite to") == notices_before + 3,
+    "an invite dedupe key must survive eviction from the 200-item quarantine list")
+  assert(#relay:quarantine_list() == 200,
+    "a repeated invite evicted from quarantine must not be added as a duplicate")
+  relay:stop()
+
+  local restarted_client, restarted_delivered = invite_client(), {}
+  local restarted_relay = started_relay(path, restarted_client, restarted_delivered)
+  restarted_client:sync({ json = { next_batch = "s4", rooms = { invite = invite(first_room, STRANGER) } } })
+  restarted_client:pump()
+  assert(restarted_client:messages(HOME, "Invite to") == 0,
+    "invite dedupe keys must persist across relay restarts")
+  assert(#restarted_relay:quarantine_list() == 200,
+    "a persisted repeated invite must not enter quarantine again")
+  restarted_relay:stop()
+  remove_dir(dir)
 end
 
 local function test_agent_invite_is_not_joined()
@@ -2738,6 +2794,7 @@ local invite_failures = {}
 for _, case in ipairs({
   { "test_owner_invite_joins_writes_line_and_notices_once", test_owner_invite_joins_writes_line_and_notices_once },
   { "test_owner_invite_notice_names_all_allowlisted_humans", test_owner_invite_notice_names_all_allowlisted_humans },
+  { "test_owner_invite_notice_caps_allowlisted_readers", test_owner_invite_notice_caps_allowlisted_readers },
   { "test_configured_joined_room_owner_invite_retries_without_config_or_notice", test_configured_joined_room_owner_invite_retries_without_config_or_notice },
   { "test_owner_invite_in_baseline_sync_joins_and_writes_line", test_owner_invite_in_baseline_sync_joins_and_writes_line },
   { "test_owner_invite_failure_preserves_concurrent_room_line", test_owner_invite_failure_preserves_concurrent_room_line },
@@ -2750,6 +2807,7 @@ for _, case in ipairs({
   { "test_open_mode_room_id_unicode_separators_are_refused", test_open_mode_room_id_unicode_separators_are_refused },
   { "test_long_invite_identifiers_dedupe_home_notice", test_long_invite_identifiers_dedupe_home_notice },
   { "test_invite_home_notice_cap_adds_one_summary", test_invite_home_notice_cap_adds_one_summary },
+  { "test_invite_dedupe_survives_quarantine_limit", test_invite_dedupe_survives_quarantine_limit },
   { "test_agent_invite_is_not_joined", test_agent_invite_is_not_joined },
   { "test_open_room_config_and_deny_matching", test_open_room_config_and_deny_matching },
   { "test_invalid_open_room_config_lines_are_ignored_with_one_warning", test_invalid_open_room_config_lines_are_ignored_with_one_warning },
