@@ -79,7 +79,50 @@ Non-allowlisted senders arrive marked as information with `trusted=false`.
 Use `follow EVENT_ID` and `unfollow EVENT_ID` to manage subscriptions; the
 relay allows up to 5000 followed threads in total. Accepted messages from
 non-allowlisted senders are limited per room in a rolling hour by
-`untrusted_per_room_hour` (default 20).
+`untrusted_per_room_hour` (default 20). Once the cap is reached, those messages
+are left undelivered, rather than quarantined. The HOME room receives a summary
+with the count and a history command. The first summary for a room is immediate;
+after that, at most one is posted per room every 10 minutes, and capped messages
+accumulate in its count until the next summary.
+
+Configure `b2b_max_turns` (default 6) for consecutive Butler-only turns in one
+thread, `posts_per_hour` (default 30) for Matrix posts by this Butler, and
+`untrusted_per_room_hour` (default 20) for non-allowlisted messages delivered
+from each room.
+
+When the Butler reaches the turn limit, it posts this line to HOME and stops
+replying in that thread until an allowlisted human replies:
+
+```text
+Stopped replying in thread ROOT (ROOM): N Butler-only turns. A human reply resumes it.
+```
+
+The reply refusal includes a command with shell-quoted room and thread IDs:
+
+```text
+Stopped replying in thread ROOT (ROOM): N Butler-only turns. A human reply resumes it.
+Next: remuda butler matrix --room 'ROOM' thread 'ROOT'
+```
+
+When the post limit is reached, the refusal says:
+
+```text
+Matrix post limit reached (N per hour). Next: wait until HH:MMZ
+```
+
+A reply without a delivered mail route is refused with:
+
+```text
+No delivered mail for event EVENT_ID, so its sender cannot be verified.
+Next: remuda butler inbox
+```
+
+The HOME summary uses `1 message` for one event and `N messages` for multiple
+events. Its `Next:` command shell-quotes the room ID:
+
+```text
+N messages from non-allowlisted senders not delivered in ROOM (rate cap). Next: remuda butler matrix --room 'ROOM' history
+```
 
 `remuda butler matrix setup --default` writes the token and config to the
 running Butler's resolved paths, then starts or replaces only its Matrix
@@ -185,8 +228,7 @@ file contains:
    `ca_file=PATH` trusts a custom CA, and `pin_sha256=HEX` pins the
    homeserver's leaf key. `butler_senders=@id:server,...` remains accepted for
    older accounts that do not use the prefix convention; `agent-` and
-   `butler-` MXID prefixes identify agent accounts and prevent
-   Butler-to-Butler reply and send loops.
+   `butler-` MXID prefixes identify agent accounts.
 
 `pin_sha256` is the 64-character hexadecimal SHA-256 digest of the leaf
 certificate's SubjectPublicKeyInfo (SPKI), not the certificate file. Compute
@@ -243,8 +285,8 @@ in the damaged state cannot be recovered.
 records the returned event ID against the originating Butler mail. A human
 replying in that thread needs no mention: the event-to-mail correlation routes
 the follow-up to Butler and sets its mail `in_reply_to` to the original mail.
-That correlation survives a relay restart. Butler does not reply to messages
-from another configured Butler account.
+That correlation survives a relay restart. Butler-to-Butler replies are
+permitted until the per-thread turn guard reaches `b2b_max_turns`.
 
 Butler topics use stable session names and are delivered through the Butler
 message queue. The extraction boundary, runtime dependencies, and migration
