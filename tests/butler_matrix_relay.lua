@@ -1140,6 +1140,26 @@ local function test_config_add_room_pads_short_config()
   assert(passed, err)
 end
 
+local function test_typed_line_config_is_strict_and_off_by_default()
+  local dir, path = fixture()
+  local conf = assert(matrix.read_config(path))
+  assert(conf.typed_lines == false and conf.shell_lines == false,
+    "typed-line switches must default to false")
+  cleanup_fixture(dir, path)
+
+  dir, path = fixture("typed_lines=true\nshell_lines=false\n")
+  conf = assert(matrix.read_config(path))
+  assert(conf.typed_lines == true and conf.shell_lines == false,
+    "typed-line config must accept strict true and false values")
+  cleanup_fixture(dir, path)
+
+  dir, path = fixture("typed_lines=on\nshell_lines=TRUE\n")
+  conf = assert(matrix.read_config(path))
+  assert(conf.typed_lines == false and conf.shell_lines == false,
+    "non-boolean spellings must not enable either typed-line switch")
+  cleanup_fixture(dir, path)
+end
+
 local function encoded(room)
   return (room:gsub("([^%w%-%._~])", function(c) return string.format("%%%02X", c:byte()) end))
 end
@@ -5436,6 +5456,7 @@ for _, case in ipairs({
   { "test_open_mode_hostile_invite_state_is_refused", test_open_mode_hostile_invite_state_is_refused },
   { "test_open_mode_conflicting_inviter_events_remain_refused", test_open_mode_conflicting_inviter_events_remain_refused },
   { "test_config_add_room_pads_short_config", test_config_add_room_pads_short_config },
+  { "test_typed_line_config_is_strict_and_off_by_default", test_typed_line_config_is_strict_and_off_by_default },
   { "test_join_leave_missing_room_guidance", test_join_leave_missing_room_guidance },
   { "test_quarantine_list_room_reason_columns", test_quarantine_list_room_reason_columns },
   { "test_join_room_alias_resolves_and_labels_output", test_join_room_alias_resolves_and_labels_output },
