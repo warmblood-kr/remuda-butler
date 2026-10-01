@@ -276,6 +276,39 @@ local function test_typed_line_gate_error_is_contained_and_processed()
   end)
 end
 
+local function test_typed_line_persist_failure_fails_closed()
+  with_typed_line_stubs(function(typed)
+    local dir, config_path = fixture("typed_lines=true\nshell_lines=true\n")
+    local state_path = config_path .. ".since"
+    local real_write_atomic = remuda.fs.write_atomic
+    local failure_injected = false
+    local client = scripted_client()
+    local relay = relay_module.new({ config_path = config_path, matrix = client, deliver = function() return true end })
+    relay:start()
+    client:complete(1, { json = { next_batch = "s0" } })
+    remuda.fs.write_atomic = function(path, contents, options)
+      if not failure_injected and path == state_path then
+        failure_injected = true
+        return nil, "injected disk full"
+      end
+      return real_write_atomic(path, contents, options)
+    end
+    client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+      ["!room:example.org"] = { timeline = { events = { typed_line_event("$persist-failure", "!hello") } } },
+    } } } })
+    local thread_messages = 0
+    for _, request in ipairs(client.requests) do
+      if tostring(request.path):find("/send/m.room.message/", 1, true) then thread_messages = thread_messages + 1 end
+    end
+    assert(failure_injected, "the test must inject a state persistence failure")
+    assert(#typed == 0, "a failed persist must prevent typing")
+    assert(thread_messages == 0, "a persistence failure should fail closed without posting a thread line")
+    relay:stop()
+    cleanup_fixture(dir, config_path)
+    remuda.fs.write_atomic = real_write_atomic
+  end)
+end
+
 local function test_baseline_resume_filters_and_envelope()
   local dir, config_path = fixture()
   local client, delivered = scripted_client(), {}
@@ -4892,6 +4925,7 @@ rx_tests = {
   { "test_shell_line_uses_selected_kind_for_root", test_shell_line_uses_selected_kind_for_root },
   { "test_typed_line_refusals_are_rate_limited", test_typed_line_refusals_are_rate_limited },
   { "test_typed_line_gate_error_is_contained_and_processed", test_typed_line_gate_error_is_contained_and_processed },
+  { "test_typed_line_persist_failure_fails_closed", test_typed_line_persist_failure_fails_closed },
   { "test_rx_stranger_root_marked_untrusted", test_rx_stranger_root_marked_untrusted },
   { "test_rx_agent_root_without_mention", test_rx_agent_root_without_mention },
   { "test_rx_prefix_stranger_gets_marker", test_rx_prefix_stranger_gets_marker },
