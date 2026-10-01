@@ -1362,6 +1362,8 @@ function relay.new(options)
       return "Not typed: shell lines work in Claude sessions only"
     elseif reason == "type_failed" then
       return "Not typed: could not type into the " .. safe_target .. " pane. Next: check the pane and send the line again"
+    elseif reason == "return_failed" then
+      return "The text may be sitting in the " .. safe_target .. " pane because Return failed. Next: check the pane before retrying"
     end
     return "Not typed: the line could not be accepted. Next: send it again"
   end
@@ -1481,7 +1483,7 @@ function relay.new(options)
     end
     local pressed, key_result = pcall(remuda.key, target, "RET")
     if not pressed or key_result == false then
-      send_typed_line_reply(event, room_id, typed_line_refusal("type_failed", target))
+      send_typed_line_reply(event, room_id, typed_line_refusal("return_failed", target))
       return true
     end
     send_typed_line_reaction(room_id, event.event_id)
