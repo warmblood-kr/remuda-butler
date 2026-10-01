@@ -618,6 +618,11 @@ return function(matrix, pinned_hostname)
     and type(line_specs[3].preface) == "string" and line_specs[3].preface:find("^Matrix setup will:\n  Homeserver: ")
     and line_specs[3].preface:find("\n  Bot: @butler%-"),
     "the wizard summary is a preface and the label is only the question: " .. tostring(line_specs[3].question))
+  -- Without --dir the files go next to the default config file: the summary names that directory.
+  assert(line_specs[3].preface:find("\n  Save private token and config files in: "
+      .. default_paths.config_path:match("^(.*)/[^/]+$") .. "\n", 1, true),
+    "the summary names the directory the files are saved in: "
+      .. tostring(line_specs[3].preface:match("\n(  Save private[^\n]*)")))
   do
     -- A very long value must not hit core's 256-character line cap (an error
     -- there would end the wizard): the wizard cuts the line itself.
