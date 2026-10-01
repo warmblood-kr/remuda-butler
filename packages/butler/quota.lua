@@ -250,6 +250,39 @@ function quota.parse_codex_status(screen, utc_offset_seconds, now)
   return { plan = plan, limits = limits }
 end
 
+function quota.parse_codex_rate_limits(result)
+  local by_id = type(result) == "table" and result.rateLimitsByLimitId or nil
+  if type(by_id) ~= "table" then return nil end
+
+  local codex = by_id.codex
+  local plan = type(codex) == "table" and codex.planType or nil
+  if not plain_word(plan) then plan = nil end
+
+  local function weekly_limit(entry, name)
+    if type(entry) ~= "table" or type(entry.primary) ~= "table" then return nil end
+    local primary = entry.primary
+    if primary.windowDurationMins ~= 10080 or not finite_number(primary.resetsAt)
+        or primary.resetsAt <= 0 then
+      return nil
+    end
+    local used = finite_number(primary.usedPercent)
+        and primary.usedPercent >= 0 and primary.usedPercent <= 100
+        and primary.usedPercent or nil
+    return { name = name, used = used, resets_at = primary.resetsAt }
+  end
+
+  local limits = {}
+  local weekly = weekly_limit(codex, "Weekly limit")
+  if weekly then limits[#limits + 1] = weekly end
+  local reserve = by_id.base_model_inference
+  if type(reserve) == "table" and reserve.limitName == "gpt-reserve" then
+    local reserve_weekly = weekly_limit(reserve, "Luna Reserve Weekly limit")
+    if reserve_weekly then limits[#limits + 1] = reserve_weekly end
+  end
+  if #limits == 0 then return nil end
+  return { plan = plan, limits = limits }
+end
+
 local function utc_text(epoch)
   return os.date("!%Y-%m-%d %H:%MZ", epoch)
 end
