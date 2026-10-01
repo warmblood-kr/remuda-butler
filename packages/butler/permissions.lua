@@ -100,36 +100,73 @@ function permissions.write_if_changed(path, text, fs, private)
   return "written"
 end
 
--- An agent caller may hand the mod only a file inside its own working
--- directory; a caller outside any session (a person at a terminal) is not
--- restricted, and anything unknown is refused. Returns the path to open, or
--- nil and the refusal. `caller` is remuda.caller(), `cwd_of(session)` the
--- recorded launch directory, `realpath(path)` resolves symlinks and `..`.
--- ponytail: a link swapped between this check and the open is not closed;
+-- File arguments. An agent caller may have the mod read or write only inside
+-- its own working directory; a caller outside any session (a person at a
+-- terminal) is not restricted, and anything unknown is refused. `caller` is
+-- remuda.caller(), `cwd_of(session)` the recorded launch directory,
+-- `realpath(path)` resolves symlinks and `..`.
+-- ponytail: a link swapped between these checks and the open is not closed;
 -- upgrade to a core open-beneath helper when it exists.
-function permissions.file_for_caller(path, caller, cwd_of, realpath, flag, pipe)
-  if type(caller) == "table" and caller.kind == "outside" then return path end
-  local function one_line(value) return (tostring(value):gsub("[\r\n]+", " "):gsub("%c", "?")) end
-  local what = "refused: " .. flag .. one_line(path)
+local function one_line(value) return (tostring(value):gsub("[\r\n]+", " "):gsub("%c", "?")) end
+local UNKNOWN = ": cannot identify the calling session's working directory"
+  .. "\nNext: run this from a Butler session, or from your own terminal"
+-- The caller's recorded working directory and its resolved form (nil: cannot resolve).
+local function session_cwd(caller, cwd_of, realpath)
   local cwd = type(caller) == "table" and caller.kind == "session" and type(caller.session) == "string"
     and cwd_of(caller.session)
-  if type(cwd) ~= "string" or cwd:sub(1, 1) ~= "/" then
-    return nil, what .. ": cannot identify the calling session's working directory"
-      .. "\nNext: run this from a Butler session, or from your own terminal"
-  end
-  local ok, root, real = pcall(function()
-    local resolved = realpath(cwd)
-    return resolved, resolved and realpath(path)
-  end)
-  if not ok or not root or not real then
+  if type(cwd) ~= "string" or cwd:sub(1, 1) ~= "/" then return nil end
+  local ok, root = pcall(realpath, cwd)
+  return cwd, ok and root or nil
+end
+-- The trailing slash keeps a sibling like CWDx outside.
+local function inside(real, root) return real:sub(1, #root + 1) == root .. "/" end
+
+-- A file to READ. Returns the path to open, or nil and the refusal.
+function permissions.file_for_caller(path, caller, cwd_of, realpath, flag, pipe)
+  if type(caller) == "table" and caller.kind == "outside" then return path end
+  local what = "refused: " .. flag .. one_line(path)
+  local cwd, root = session_cwd(caller, cwd_of, realpath)
+  if not cwd then return nil, what .. UNKNOWN end
+  local ok, real = pcall(realpath, path)
+  if not root or not ok or not real then
     return nil, what .. " cannot be resolved (a missing file, or realpath is unavailable)"
       .. "\nNext: check that the file exists inside " .. one_line(cwd)
   end
-  -- The trailing slash keeps a sibling like CWDx, and the directory itself, outside.
-  if real:sub(1, #root + 1) == root .. "/" then return real end
+  if inside(real, root) then return real end
   return nil, what .. " is outside this session's working directory " .. one_line(cwd)
     .. "\nNext: copy the file into " .. one_line(cwd) .. " and pass that path"
     .. (pipe and ", or pipe the text: cat FILE | remuda butler send NAME -" or "")
+end
+
+-- A file to WRITE (matrix download). `path` is -o PATH or nil; `name` is the
+-- default file name. The parent directory is resolved (the file need not
+-- exist) and must be the working directory or inside it; an existing link at
+-- the target is refused. Returns the path to write (nil for an outside caller
+-- without -o: the old default), or nil and the refusal.
+function permissions.output_for_caller(path, name, caller, cwd_of, realpath, is_symlink)
+  if type(caller) == "table" and caller.kind == "outside" then return path end
+  local what = "refused: " .. (path and ("-o " .. one_line(path)) or "download")
+  local cwd, root = session_cwd(caller, cwd_of, realpath)
+  if not cwd then return nil, what .. UNKNOWN end
+  local function refuse(why) return nil, what .. why .. "\nNext: pass -o with a path inside " .. one_line(cwd) end
+  local parent, base = root, name
+  if path then
+    local dir
+    dir, base = path:match("^(.*)/([^/]*)$")
+    if not dir or base == "" or base == "." or base == ".." then return refuse(" has no file name") end
+    local ok, real = pcall(realpath, dir == "" and "/" or dir)
+    parent = ok and real or nil
+  end
+  if not root or not parent or type(base) ~= "string" then
+    return refuse(" cannot be resolved (a missing directory, or realpath is unavailable)")
+  end
+  if parent ~= root and not inside(parent, root) then
+    return refuse(" is outside this session's working directory " .. one_line(cwd))
+  end
+  local target = parent .. "/" .. base
+  local linked = is_symlink(target)
+  if linked ~= false then return refuse(linked and " is a symlink" or " cannot be checked for a symlink") end
+  return target
 end
 
 if type(remuda) == "table" then remuda._butler_permissions = permissions end

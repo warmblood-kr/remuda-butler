@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # File arguments from an agent caller: send --file, reply --file and matrix
-# upload take only a path that resolves inside the caller's own working
+# upload read, and matrix download writes, only inside the caller's own working
 # directory; a caller at a terminal is not restricted. Private daemon; the
 # member is a real session that runs the CLI itself, so core's caller identity
 # and the real `realpath` are the ones under test.
@@ -29,6 +29,8 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 echo "core $(remuda --version 2>/dev/null | tail -1) ($REMUDA_BIN)"
 
 printf 'TOP-SECRET-OUTSIDE\n' >"$T/secret.txt"
+printf 'VICTIM\n' >"$T/victim.txt"
+mkdir "$T/outdir"
 # Matrix must look configured for `matrix upload` to reach the path check. The host is
 # under .invalid, which never resolves; a refused upload makes no request at all.
 mkdir -p "$XDG_CONFIG_HOME/remuda/butler"
@@ -52,6 +54,16 @@ run leader   remuda -s $S butler send-to-leader --file "$T/secret.txt"
 run blanked  env REMUDA_BUTLER_AGENT_ID= REMUDA_BUTLER_SESSION_NAME= remuda -s $S butler send butler --file "$T/secret.txt"
 run upload   remuda -s $S butler matrix upload "$T/secret.txt"
 run uplink   remuda -s $S butler matrix upload "\$PWD/link.txt"
+mkdir "\$PWD/sub"
+ln -s "$T/outdir" "\$PWD/dirlink"
+ln -s "$T/victim.txt" "\$PWD/outlink"
+run dl_outside remuda -s $S butler matrix -o "$T/pwned.txt" download mxc://media.example/a1
+run dl_dirlink remuda -s $S butler matrix -o "\$PWD/dirlink/pwned.txt" download mxc://media.example/a1
+run dl_onlink  remuda -s $S butler matrix -o "\$PWD/outlink" download mxc://media.example/a1
+run dl_inside  remuda -s $S butler matrix -o "\$PWD/sub/got.bin" download mxc://media.example/a1
+run dl_default remuda -s $S butler matrix download mxc://media.example/a1
+run status     sh -c 'echo "{}" | remuda -s $S --stdin butler statusline "$T/evil.status"'
+run reply_dots remuda -s $S butler reply ../../../../victim hello
 touch "$T/done"
 sleep 1000
 MEMBER
@@ -65,10 +77,16 @@ for _ in $(seq 100); do lua 'return remuda._butler_agent_builders ~= nil' | grep
 lua "remuda._butler_agent_builders.fake = function() return {'$T/member.sh'} end; remuda._butler_launch('fake', 'm1')" >/dev/null
 for _ in $(seq 300); do lua 'return remuda._butler_bus.agents.m1 ~= nil' | grep -qx true && break; sleep 0.1; done
 lua 'return remuda._butler_bus.agents.m1 ~= nil' | grep -qx true || fail "member m1 was not registered"
+# Media comes from the repo's fake remuda.http (tests/support/fake_http.lua, the one the
+# rust download test uses); its callbacks run on tick, so tick while the member works.
+lua "$(cat "$REPO/tests/support/fake_http.lua")" >/dev/null
+lua 'remuda.http.respond_prefix("GET", "https://matrix.invalid/_matrix/client/v1/media/download/",
+  { status = 200, headers = { ["content-type"] = "application/octet-stream" }, body = "MEDIA-BYTES" })' >/dev/null
 touch "$T/go"
-for _ in $(seq 300); do [[ -e $T/done ]] && break; sleep 0.1; done
+for _ in $(seq 300); do [[ -e $T/done ]] && break; lua 'remuda.http.tick()' >/dev/null || true; sleep 0.1; done
 [[ -e $T/done ]] || fail "the member script did not finish: $(cat "$T"/*.out 2>/dev/null)"
 CWD=$(lua 'return remuda._butler_bus.agents.m1.cwd')
+MEMBER_CWD=$(cat "$T/member.cwd")
 
 echo "== an agent caller: a file inside its working directory is sent"
 [[ $(cat "$T/inside.rc") == 0 ]] || fail "an inside file was refused: $(cat "$T/inside.out")"
@@ -90,6 +108,28 @@ for name in upload uplink; do
   grep -qF "pipe the text" "$T/$name.out" && fail "$name: the upload refusal offers a pipe"
 done
 
+echo "== an agent caller: download -o outside, through a directory link, and onto a link is refused; nothing is written"
+for name in dl_outside dl_dirlink; do
+  [[ $(cat "$T/$name.rc") != 0 ]] || fail "$name was not refused: $(cat "$T/$name.out")"
+  grep -qF "is outside this session's working directory $CWD" "$T/$name.out" || fail "$name: wrong refusal: $(cat "$T/$name.out")"
+  grep -qF "Next: pass -o with a path inside $CWD" "$T/$name.out" || fail "$name: no Next: line: $(cat "$T/$name.out")"
+done
+[[ $(cat "$T/dl_onlink.rc") != 0 ]] || fail "download onto a link was not refused: $(cat "$T/dl_onlink.out")"
+grep -qF "is a symlink" "$T/dl_onlink.out" || fail "dl_onlink: wrong refusal: $(cat "$T/dl_onlink.out")"
+[[ ! -e $T/pwned.txt && ! -e $T/outdir/pwned.txt ]] || fail "a refused download wrote a file outside"
+[[ $(cat "$T/victim.txt") == VICTIM ]] || fail "a refused download changed the link's target"
+
+echo "== an agent caller: download inside is written; without -o it lands in the working directory, not HOME"
+[[ $(cat "$T/dl_inside.rc") == 0 ]] || fail "an inside download failed: $(cat "$T/dl_inside.out")"
+[[ $(cat "$MEMBER_CWD/sub/got.bin") == MEDIA-BYTES ]] || fail "the inside download has the wrong content"
+[[ $(cat "$T/dl_default.rc") == 0 ]] || fail "a download without -o failed: $(cat "$T/dl_default.out")"
+[[ $(cat "$MEMBER_CWD/matrix-a1") == MEDIA-BYTES ]] || fail "the default output is not in the working directory"
+[[ ! -e $HOME/matrix-a1 ]] || fail "the default output of an agent caller landed in HOME"
+
+echo "== an agent caller: statusline writes no path of its own choosing; a message id cannot leave the mail store"
+[[ ! -e $T/evil.status ]] || fail "statusline wrote a path the mod did not issue"
+[[ $(cat "$T/reply_dots.rc") != 0 ]] || fail "a message id with .. was accepted: $(cat "$T/reply_dots.out")"
+
 echo "== nothing was read from a refused path"
 INBOX=$(REMUDA_BUTLER_AGENT_ID=butler remuda -s "$S" butler inbox butler 2>&1)
 grep -qF "INSIDE-BODY" <<<"$INBOX" || fail "the inside file did not arrive: $INBOX"
@@ -98,4 +138,11 @@ grep -qF "TOP-SECRET-OUTSIDE" <<<"$INBOX" && fail "a refused file reached the Bu
 echo "== a caller at a terminal is not restricted"
 remuda -s "$S" butler send m1 --file "$T/secret.txt" >"$T/terminal.out" 2>&1 || fail "a terminal caller was refused: $(cat "$T/terminal.out")"
 remuda -s "$S" butler inbox m1 2>&1 | grep -qF "TOP-SECRET-OUTSIDE" || fail "the terminal caller's file did not arrive"
+remuda -s "$S" butler matrix -o "$T/terminal.bin" download mxc://media.example/a1 >"$T/terminal-dl.out" 2>&1 &
+DL=$!
+for _ in $(seq 100); do kill -0 "$DL" 2>/dev/null || break; lua 'remuda.http.tick()' >/dev/null || true; sleep 0.1; done
+wait "$DL" || fail "a terminal caller's download failed: $(cat "$T/terminal-dl.out")"
+[[ $(cat "$T/terminal.bin") == MEDIA-BYTES ]] || fail "the terminal caller's download was not written where it asked"
+echo '{}' | remuda -s "$S" --stdin butler statusline "$T/terminal.status" >/dev/null
+[[ -s $T/terminal.status ]] || fail "a terminal caller's statusline path was not written"
 echo "butler_file_args.sh ok"

@@ -760,6 +760,19 @@ function matrix.cli(args, agent, stdin_body)
     end
     options.file = allowed
   end
+  -- The same for what download WRITES: -o PATH, or the default name, inside the
+  -- agent caller's working directory only.
+  if verb == "download" then
+    local check = remuda._butler_output_for_caller
+    local media = type(options.mxc) == "string" and options.mxc:match("^mxc://[^/]+/([^/%s]+)$")
+    local allowed, refusal = nil, "refused: download: the caller check is unavailable"
+    if type(check) == "function" then allowed, refusal = check(options.output, media and ("matrix-" .. media)) end
+    if refusal then
+      finish(reply, cancelled, completed, verb, options, { error = refusal })
+      return reply
+    end
+    options.output = allowed
+  end
   local called, handle = pcall(matrix[verb], options, callback, agent)
   if not called then
     finish(reply, cancelled, completed, verb, options, { error = tostring(handle) })

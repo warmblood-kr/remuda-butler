@@ -231,7 +231,14 @@ local function statusline(args, caller)
   local absolute = type(path) == "string" and (
     path:sub(1, 1) == "/" or path:sub(1, 2) == "\\\\" or drive_rooted
   )
-  if absolute and path:match("%.status$") then
+  -- Only a caller outside any session may name its own path; a session writes
+  -- only a status path this mod issued (its own launch line carries it).
+  local known, who = pcall(function() return remuda.caller() end)
+  local issued = path == remuda._butler_status_path
+  for _, agent in pairs(remuda._butler_bus and remuda._butler_bus.agents or {}) do
+    if type(agent) == "table" and type(agent.telemetry) == "table" and agent.telemetry.status_path == path then issued = true end
+  end
+  if absolute and path:match("%.status$") and (issued or (known and type(who) == "table" and who.kind == "outside")) then
     pcall(remuda.fs.write_atomic, path, line .. "\n" .. (limits and (limits .. "\n") or ""))
   end
   return line
@@ -827,24 +834,33 @@ function remuda._butler_status()
   end
   return "launching\nreadiness budget: " .. tostring(readiness_chain_budget()), 75
 end
--- The file arguments of send, send-to-leader, reply and matrix upload: an agent
--- caller is held to its own working directory (permissions.file_for_caller).
+-- The file arguments of send, send-to-leader, reply, matrix upload and matrix
+-- download: an agent caller is held to its own working directory (permissions.lua).
 -- The caller comes from core's caller identity, never from the environment.
-function remuda._butler_file_for_caller(path, flag, pipe)
+local function core_caller()
   local known, caller = pcall(function() return remuda.caller() end)
-  return permissions.file_for_caller(path, known and caller or nil, function(session)
-    local cwd, matches = nil, 0
-    for alias, agent in pairs(bus.agents) do
-      if type(agent) == "table" and (agent.session_name == session or (alias == "butler" and session == butler_name)) then
-        cwd, matches = alias == "butler" and butler_session_cwd or agent.cwd, matches + 1
-      end
+  return known and caller or nil
+end
+local function session_launch_cwd(session)
+  local cwd, matches = nil, 0
+  for alias, agent in pairs(bus.agents) do
+    if type(agent) == "table" and (agent.session_name == session or (alias == "butler" and session == butler_name)) then
+      cwd, matches = alias == "butler" and butler_session_cwd or agent.cwd, matches + 1
     end
-    return matches == 1 and cwd or nil
-  end, function(target)
-    local result = remuda.process.run({ argv = { "realpath", target }, timeout = 5 })
-    local resolved = result.code == 0 and not result.timed_out and (result.stdout or ""):gsub("\n$", "")
-    return resolved and resolved ~= "" and resolved or nil
-  end, flag, pipe)
+  end
+  return matches == 1 and cwd or nil
+end
+local function realpath(target)
+  local result = remuda.process.run({ argv = { "realpath", target }, timeout = 5 })
+  local resolved = result.code == 0 and not result.timed_out and (result.stdout or ""):gsub("\n$", "")
+  return resolved and resolved ~= "" and resolved or nil
+end
+function remuda._butler_file_for_caller(path, flag, pipe)
+  return permissions.file_for_caller(path, core_caller(), session_launch_cwd, realpath, flag, pipe)
+end
+-- The output of matrix download: -o PATH, or the default name when there is none.
+function remuda._butler_output_for_caller(path, name)
+  return permissions.output_for_caller(path, name, core_caller(), session_launch_cwd, realpath, butler_fs.is_symlink)
 end
 -- Merges the root Butler's rule into its own .claude/settings.local.json: at
 -- every real launch, and once per mod load for a session that is already
