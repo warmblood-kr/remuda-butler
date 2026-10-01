@@ -213,6 +213,20 @@ local function test_shell_line_uses_selected_kind_for_root()
       "the selected Claude kind should allow a shell line to the Butler root when its agent record omits kind")
     relay:stop()
     cleanup_fixture(dir, config_path)
+    remuda._butler_bus = { agents = { butler = { session_name = "butler", kind = "claude" } } }
+    remuda._butler_selected_agent = nil
+    dir, config_path = fixture("typed_lines=true\nshell_lines=true\n")
+    client = scripted_client()
+    relay = relay_module.new({ config_path = config_path, matrix = client, deliver = function() return true end })
+    relay:start()
+    client:complete(1, { json = { next_batch = "s0" } })
+    client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+      ["!room:example.org"] = { timeline = { events = { typed_line_event("$shell-explicit-root", "!!echo root") } } },
+    } } } })
+    assert(#typed == 2 and typed[2].session == "butler" and typed[2].text == "!echo root",
+      "an explicitly Claude Butler root should accept a shell line without the selected-agent fallback")
+    relay:stop()
+    cleanup_fixture(dir, config_path)
     remuda._butler_bus, remuda._butler_selected_agent = old_bus, old_selected
   end)
 end
