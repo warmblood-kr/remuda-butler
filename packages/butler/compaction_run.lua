@@ -17,6 +17,18 @@ local statusline_model_matches = assert(config.statusline_model_matches)
 local clear_legacy_restore_state = assert(config.clear_legacy_restore_state)
 local compaction_restore_path = mail_root and mail_root .. "/compaction-restore.json"
 
+local function model_confirm_rule_row(line)
+  local trimmed = line:gsub("^%s+", ""):gsub("%s+$", "")
+  return trimmed ~= "" and trimmed:gsub("─", "") == ""
+end
+
+local function blank(text)
+  if type(text) ~= "string" then return false end
+  local stripped = text:gsub("%s", "")
+  stripped = stripped:gsub("\194\160", "")
+  return stripped == ""
+end
+
 local function model_confirm_dialog(screen)
   if type(screen) ~= "string" then return nil end
   local lines = bottom_screen_lines(screen, 32)
@@ -46,11 +58,34 @@ local function model_confirm_dialog(screen)
     end
   end
 
-  for row = index + 2, #lines - 1 do
-    if lines[row - 1]:match("^%s*─+%s*$")
-        and lines[row + 1]:match("^%s*─+%s*$") then
-      local composer = lines[row]:match("^%s*❯%s*(.-)%s*$")
-      if composer ~= nil and composer ~= "" then return nil end
+  local first_rule
+  for row = index + 2, #lines do
+    if model_confirm_rule_row(lines[row]) then
+      first_rule = row
+      break
+    end
+  end
+  if first_rule then
+    for row = index + 2, first_rule - 1 do
+      if not blank(lines[row])
+          and not lines[row]:find("Enter to confirm", 1, true) then
+        return nil
+      end
+    end
+  end
+
+  local previous_rule, last_rule
+  for row = index + 2, #lines do
+    if model_confirm_rule_row(lines[row]) then
+      previous_rule, last_rule = last_rule, row
+    end
+  end
+  if previous_rule and last_rule then
+    for row = previous_rule + 1, last_rule - 1 do
+      local content = lines[row]:gsub("^%s*❯", "", 1)
+      if not blank(content) then
+        return nil
+      end
     end
   end
 
@@ -70,8 +105,28 @@ local function model_confirm_options_visible(screen)
   return index ~= nil
 end
 
+local function model_dialog_waiting(screen)
+  if type(screen) ~= "string" then return false end
+  local lines = bottom_screen_lines(screen, 32)
+  for _, line in ipairs(lines) do
+    if line:find("Switch model?", 1, true) then
+      return true
+    end
+  end
+  return false
+end
+
+local function model_timeout_reason(reason, session_name, screen)
+  if not model_dialog_waiting(screen) then return reason end
+  return reason .. "; a Switch model? dialog appears to be waiting in "
+    .. session_name .. ". Next: run `remuda attach \"" .. session_name
+    .. "\"` and press Enter to confirm or Esc to cancel"
+end
+
 remuda._butler_model_confirm_signature = model_confirm_signature
 remuda._butler_model_confirm_options_visible = model_confirm_options_visible
+remuda._butler_model_dialog_waiting = model_dialog_waiting
+remuda._butler_model_timeout_reason = model_timeout_reason
 
 local function read_compaction_restore_record()
   if not compaction_restore_path then return {} end
@@ -594,6 +649,10 @@ function remuda._butler_compaction_execute(session_name, force)
       end,
       on_timeout = function(screen, handle)
         local model_watcher = agent.kind == "claude" and (id == "model-sonnet" or id == "model-restored")
+        local function timeout_reason(reason)
+          if model_watcher then return model_timeout_reason(reason, session_name, screen) end
+          return reason
+        end
         if unknown_state.started_at or (model_watcher and model_confirm_state.started_at) then
           if claude_switch and (id == "model-sonnet" or id == "compact-complete") then
             state.restore_pending = prior_model
@@ -601,11 +660,11 @@ function remuda._butler_compaction_execute(session_name, force)
             state.restore_pending_attempt_active = nil
             state.restore_pending_failure_notified = nil
           end
-          fail("unrecognized dialog during " .. id)
+          fail(timeout_reason("unrecognized dialog during " .. id))
         elseif on_timeout then
           on_timeout(screen, handle)
         else
-          fail("timed out waiting for " .. id)
+          fail(timeout_reason("timed out waiting for " .. id))
         end
       end,
       on_error = function(err) fail("compaction watcher error: " .. tostring(err)) end }, false)
