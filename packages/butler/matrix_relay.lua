@@ -497,6 +497,7 @@ function relay.new(options)
   local active, request_handle, request_token, retry_timer, backfill_timer = false, nil, nil, nil, nil
   local delivery_retry_waiting, delivery_retry_timers = {}, {}
   local reply_retry_timers, reply_in_flight = {}, {}
+  local untrusted_receive_times = {}
   local joining = {}
   local generation = 0
   local failures = 0
@@ -964,7 +965,27 @@ function relay.new(options)
           local subscribed_mail_id = type(subscription) == "table" and subscription.mail_id or nil
           local context_mail_id = route_mail_id or subscribed_mail_id
           local references = thread_root and (thread_root_mail_id or subscribed_mail_id) or nil
-          if not accepted then
+          local rate_capped = false
+          if accepted and not trusted then
+            local now = os.time()
+            local window_start = now - 3600
+            local receive_times = untrusted_receive_times[actual_room] or {}
+            local retained = {}
+            for _, received_at in ipairs(receive_times) do
+              if received_at > window_start then retained[#retained + 1] = received_at end
+            end
+            untrusted_receive_times[actual_room] = retained
+            if #retained >= cfg.untrusted_per_room_hour then
+              rate_capped = true
+              warn_once("untrusted-rate-cap", actual_room,
+                "butler Matrix rate cap: messages from non-allowlisted senders in "
+                  .. terminal_safe_field(actual_room, 512) .. " are not delivered ("
+                  .. tostring(cfg.untrusted_per_room_hour) .. " per hour)")
+            else
+              retained[#retained + 1] = now
+            end
+          end
+          if not accepted or rate_capped then
             add_processed(state, ev.event_id)
             if cursor then state.since = cursor end
           else

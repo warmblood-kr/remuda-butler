@@ -76,7 +76,8 @@ threads you follow or when a message mentions the Butler; replying, sending,
 and being mentioned follow a thread automatically. Non-allowlisted senders
 arrive marked as information with `trusted=false`. Use `follow EVENT_ID` and
 `unfollow EVENT_ID` to manage subscriptions; the relay allows up to 5000
-followed threads in total.
+followed threads in total. Accepted messages from non-allowlisted senders are
+limited per room in a rolling hour by `untrusted_per_room_hour` (default 20).
 
 `remuda butler matrix setup --default` writes the token and config to the
 running Butler's resolved paths, then starts or replaces only its Matrix
