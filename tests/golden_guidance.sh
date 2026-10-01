@@ -100,7 +100,7 @@ cp "$REMUDA_BIN" "$T/bin/remuda" ||
 version=$("$T/bin/remuda" --version 2>/dev/null | tail -1)
 # The core built here must be the one under test, never an installed remuda.
 if [[ -n ${built:-} && $version != *"$built"* ]]; then
-  echo "core under test is '$version', not the pinned $built. Next: unset CARGO_TARGET_DIR and rerun" >&2
+  echo "core under test is '$version', not the pinned $built. Next: rerun; if it repeats, another build is using this CARGO_TARGET_DIR" >&2
   exit 2
 fi
 cp -R "$REPO/extension.toml" "$REPO/packages" "$XDG_DATA_HOME/remuda/mods/butler/"

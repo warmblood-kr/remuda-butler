@@ -31,7 +31,7 @@ unset REMUDA_SERVER
 version=$("$REMUDA_BIN" --version 2>/dev/null | tail -1)
 # The core built here must be the one under test, never an installed remuda.
 if [[ -n ${built:-} && $version != *"$built"* ]]; then
-  echo "core under test is '$version', not the pinned $built. Next: unset CARGO_TARGET_DIR and rerun" >&2
+  echo "core under test is '$version', not the pinned $built. Next: rerun; if it repeats, another build is using this CARGO_TARGET_DIR" >&2
   exit 2
 fi
 echo "core $version, butler $(git -C "$REPO" rev-parse --short HEAD)"
