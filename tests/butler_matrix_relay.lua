@@ -4414,9 +4414,12 @@ local function test_ctx_fetch_failure_and_timeout_still_deliver()
     { "a 403 on the relations page only", function(_, url)
         if url:find("/relations/", 1, true) then return { status = 403, body = "{}" } end
       end, "Matrix HTTP 403" },
-    { "a timeout", function() return { error = "request timed out" } end, "timed out after 10 s" },
+    -- The texts core's remuda.http reports (native/src/net/http_client.rs at the
+    -- pinned core): "request timeout" when the deadline passes, and
+    -- "HTTP transport error: ..." for other transport failures.
+    { "a timeout", function() return { error = "request timeout" } end, "timed out after 10 s" },
     { "another error", function()
-        return { error = "connection refused\27[31m by " .. string.rep("x", 200) .. "\nsecond line" }
+        return { error = "HTTP transport error: connection refused\27[31m by " .. string.rep("x", 200) .. "\nsecond line" }
       end, nil },
   }) do
     local thread = { root = ctx_event("$fail-root", OWNER, "first message", 0), replies = {} }
