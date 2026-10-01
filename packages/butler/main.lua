@@ -415,10 +415,10 @@ local function deliver_message(message)
   return notify_mail_delivery(message, delivered)
 end
 local function agent_mcp_json(token)
-  local env = '"REMUDA_SESSION_CAPABILITY":"' .. token .. '"'
-  if runtime_dir then env = env .. ',"REMUDA_RUNTIME_DIR":"' .. runtime_dir .. '"' end
-  return '{"mcpServers":{"remuda":{"command":"remuda","args":["-s","'
-    .. server .. '","mcp"],"env":{' .. env .. '}}}}'
+  local env = '"REMUDA_SESSION_CAPABILITY":' .. json_quote(token)
+  if runtime_dir then env = env .. ',"REMUDA_RUNTIME_DIR":' .. json_quote(runtime_dir) end
+  return '{"mcpServers":{"remuda":{"command":"remuda","args":["-s",'
+    .. json_quote(server) .. ',"mcp"],"env":{' .. env .. '}}}}'
 end
 local function agent_mcp_path(name, token)
   local path = os.tmpname() .. "." .. name .. ".mcp.json"
@@ -426,20 +426,22 @@ local function agent_mcp_path(name, token)
   remuda.butler.guard.write_private(path, agent_mcp_json(token))
   return path
 end
+-- json_quote escapes backslash and quote, which is also right for a TOML
+-- basic string: a Windows runtime dir is otherwise an invalid value.
 local function agent_mcp_flags(token)
-  local env = 'REMUDA_SESSION_CAPABILITY="' .. token .. '"'
-  if runtime_dir then env = env .. ',REMUDA_RUNTIME_DIR="' .. runtime_dir .. '"' end
+  local env = "REMUDA_SESSION_CAPABILITY=" .. json_quote(token)
+  if runtime_dir then env = env .. ",REMUDA_RUNTIME_DIR=" .. json_quote(runtime_dir) end
   return {
     "-c", 'mcp_servers.remuda.command="remuda"',
-    "-c", 'mcp_servers.remuda.args=["-s","' .. server .. '","mcp"]',
+    "-c", 'mcp_servers.remuda.args=["-s",' .. json_quote(server) .. ',"mcp"]',
     "-c", "mcp_servers.remuda.env={" .. env .. "}",
   }
 end
 local function agent_mcp_config(token)
-  local env = '"REMUDA_SESSION_CAPABILITY":"' .. token .. '"'
-  if runtime_dir then env = env .. ',"REMUDA_RUNTIME_DIR":"' .. runtime_dir .. '"' end
-  return '{"mcp_servers":{"remuda":{"command":"remuda","args":["-s","'
-    .. server .. '","mcp"],"env":{' .. env .. '}}}}'
+  local env = '"REMUDA_SESSION_CAPABILITY":' .. json_quote(token)
+  if runtime_dir then env = env .. ',"REMUDA_RUNTIME_DIR":' .. json_quote(runtime_dir) end
+  return '{"mcp_servers":{"remuda":{"command":"remuda","args":["-s",'
+    .. json_quote(server) .. ',"mcp"],"env":{' .. env .. '}}}}'
 end
 remuda._butler_agent_builders = remuda._butler_agent_builders or {}
 remuda._butler_agent_startup = remuda._butler_agent_startup or {}
