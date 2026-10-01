@@ -9,6 +9,7 @@ local registry_list = assert(config.registry_list)
 local statusline = assert(config.statusline)
 local resolve = assert(config.resolve)
 local mail = assert(config.mail)
+local quota = assert(remuda._butler_quota)
 local USAGE_NOTES = [[
 Agent sessions receive REMUDA_BUTLER_AGENT_ID and REMUDA_BUTLER_LEADER_ID.
 In an agent session, use `inbox`, `send <to> "..."`, and `send-to-leader ...`;
@@ -91,6 +92,26 @@ command(5, "doctor", "  remuda butler doctor", function(args)
     local doctor = remuda._butler_doctor
     return table.concat(doctor.render(doctor.probe()), "\n")
   end
+end)
+command(6, "quota", "  remuda butler quota [--report]", function(args)
+  if #args ~= 1 and not (#args == 2 and args[2] == "--report") then
+    return remuda.fail(quota.usage(), 2)
+  end
+  local report_flag = args[2] == "--report"
+  local reply = remuda.pending({ timeout = 30 })
+  quota.collect(function(report)
+    if not report_flag then
+      return reply:resolve(0, quota.terminal(report) .. "\n", "")
+    end
+    remuda.butler.matrix.send({ text = quota.render(report) }, function(result)
+      if result.error then
+        reply:resolve(1, quota.terminal(report, { failed = tostring(result.error) }) .. "\n", "")
+      else
+        reply:resolve(0, quota.terminal(report, { sent = true }) .. "\n", "")
+      end
+    end)
+  end)
+  return reply
 end)
 local CLOSE_USAGE = "Usage: remuda butler close <name> [--force]\nExample: remuda butler close worker-1"
 local function close_member(name, leader, force)

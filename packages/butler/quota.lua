@@ -340,6 +340,130 @@ end
 
 if type(remuda) == "table" then
   remuda._butler_quota = quota
+
+  function quota.accounts()
+    local probes = remuda._butler_doctor.probe()
+    local function account_for(name, parser)
+      local probe = type(probes) == "table" and probes[name] or nil
+      if type(probe) == "table" and probe.installed == false then
+        return { mode = "not_installed" }
+      end
+      local stdout = type(probe) == "table" and probe.stdout or nil
+      if name == "claude" then
+        local decoded, auth = pcall(remuda.json.decode, stdout)
+        if not decoded then return { mode = "unknown" } end
+        return parser(auth)
+      end
+      return parser(stdout)
+    end
+    return {
+      claude = account_for("claude", quota.claude_account),
+      codex = account_for("codex", quota.codex_account),
+    }
+  end
+
+  function quota.claude_reading()
+    local bus = remuda._butler_bus or {}
+    local agents = type(bus.agents) == "table" and bus.agents or {}
+    local newest
+    for _, agent in pairs(agents) do
+      if type(agent) == "table" and agent.kind == "claude" then
+        local telemetry = remuda._butler_telemetry_for(agent)
+        local reading = type(telemetry) == "table" and telemetry.rate_limits or nil
+        if type(reading) == "table" and finite_number(reading.at)
+            and (not newest or reading.at > newest.at) then
+          newest = reading
+        end
+      end
+    end
+    return newest
+  end
+
+  function quota.codex_read(done)
+    local bus = remuda._butler_bus or {}
+    local agents = type(bus.agents) == "table" and bus.agents or {}
+    local selected, alias
+    for name, agent in pairs(agents) do
+      if name ~= "butler" and type(agent) == "table" and agent.kind == "codex" then
+        local session = agent.session_name or name
+        if remuda.butler.is_idle(name) == true
+            and remuda._butler_notify_policy(session) == true then
+          selected, alias = agent, name
+          break
+        end
+      end
+    end
+    if not selected then
+      done(nil, "no idle codex session to ask")
+      return
+    end
+
+    local session = selected.session_name or alias
+    local utc_offset_seconds = os.time() - os.time(os.date("!*t"))
+    local typed = pcall(remuda.type_text, session, "/status", 0.1)
+    if not typed then
+      done(nil, "codex did not show its limits in time")
+      return
+    end
+
+    local poll, ticks, finished = nil, 0, false
+    local function finish(result, reason)
+      if finished then return end
+      finished = true
+      if poll then remuda.cancel(poll) end
+      done(result, reason)
+    end
+    local scheduled, handle = pcall(remuda.schedule, { every = 0.5, run = function()
+      ticks = ticks + 1
+      local captured, screen = pcall(remuda.capture, session)
+      if captured and type(screen) == "string" then
+        local parsed = quota.parse_codex_status(screen, utc_offset_seconds, os.time())
+        if parsed and #parsed.limits > 0 then
+          finish(parsed, nil)
+          return
+        end
+      end
+      if ticks >= 20 then
+        finish(nil, "codex did not show its limits in time")
+      end
+    end })
+    if not scheduled then
+      finish(nil, "codex did not show its limits in time")
+    else
+      poll = handle
+    end
+  end
+
+  function quota.collect(done)
+    local report = { at = os.time() }
+    local accounts = quota.accounts()
+    report.claude = accounts.claude
+    report.codex = accounts.codex
+
+    if report.claude.mode == "subscription" then
+      local reading = quota.claude_reading()
+      if reading then
+        report.claude.limits = reading.limits
+        report.claude.read_at = reading.at
+      else
+        report.claude.unknown_reason = "no reading yet; it appears after a claude session's first reply"
+      end
+    end
+
+    if report.codex.mode == "subscription" then
+      quota.codex_read(function(reading, reason)
+        if reading then
+          report.codex.plan = reading.plan
+          report.codex.limits = reading.limits
+        else
+          report.codex.unknown_reason = reason
+        end
+        done(report)
+      end)
+    else
+      done(report)
+    end
+  end
 end
 
 return quota
