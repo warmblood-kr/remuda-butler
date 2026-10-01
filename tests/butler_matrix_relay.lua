@@ -2468,7 +2468,13 @@ local function test_rx_follows_survive_restart()
       rx_msg("$gone-t", OWNER, "after restart", rx_thread("$gone")) })
     assert(rx_find(delivered, "$keep-t") and not rx_find(delivered, "$gone-t"),
       "after restart only the followed thread delivers")
+    again:unsubscribe_thread(HOME, "$keep")
     again:stop()
+    local third, client3, delivered3 = rx_relay(path)
+    assert(not rx_followed(third, HOME, "$keep"), "an unfollow after a restart survives the next restart")
+    rx_sync(client3, HOME, { rx_msg("$keep-t2", OWNER, "after unfollow", rx_thread("$keep")) })
+    assert(not rx_find(delivered3, "$keep-t2"), "a reply in the unfollowed thread is not delivered")
+    third:stop()
   end)
 end
 
