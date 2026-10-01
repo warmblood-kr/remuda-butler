@@ -280,6 +280,9 @@ assert(remuda._butler_model_confirm_signature(
 assert(remuda._butler_model_confirm_signature(
   read_fixture("claude-model-confirm-composer-two-row-status.txt")) ~= nil,
   "model confirmation signature should recognize the composer dialog with two status rows")
+assert(remuda._butler_model_confirm_signature(
+  read_fixture("claude-model-confirm-multiline-draft.txt")) == nil,
+  "model confirmation signature should reject a multiline composer draft")
 local untitled_model_confirm = "❯ 1. Yes, switch to Opus 5.5\n  2. No, go back"
 assert(remuda._butler_model_confirm_signature(untitled_model_confirm) == nil
   and remuda._butler_model_confirm_options_visible(untitled_model_confirm),
