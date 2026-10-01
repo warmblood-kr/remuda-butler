@@ -1052,20 +1052,36 @@ local function test_owner_invite_joins_writes_line_and_notices_once()
   remove_dir(dir)
 end
 
-local function test_owner_invite_notice_names_all_allowlisted_humans()
+local function test_non_home_join_notice_counts_two_allowlisted_humans()
   local dir, path = invite_fixture(OWNER .. ",@bob:example.org,agent-helper:example.org")
   local client, delivered = invite_client(), {}
   local relay = started_relay(path, client, delivered)
   client:sync({ json = { next_batch = "s1", rooms = { invite = invite(NEW, OWNER) } } })
   client:pump()
-  assert(client:messages(NEW,
-      "Joined; I read messages here from @alice:example.org, @bob:example.org.") == 1,
-    "the joined notice must name every allowlisted human and omit agents")
+  assert(client:messages(NEW, "Joined; I read messages here from 2 allowlisted humans.") == 1,
+    "a non-HOME joined notice must report the count of allowlisted humans")
+  assert(client:messages(NEW, "@") == 0,
+    "a non-HOME joined notice must not disclose allowlisted MXIDs")
   relay:stop()
   remove_dir(dir)
 end
 
-local function test_owner_invite_notice_caps_allowlisted_readers()
+local function test_non_home_join_notice_counts_allowlisted_humans()
+  local senders = table.concat({ OWNER, "@bob:example.org", "@carol:example.org" }, ",")
+  local dir, path = invite_fixture(senders)
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  client:sync({ json = { next_batch = "s1", rooms = { invite = invite(NEW, OWNER) } } })
+  client:pump()
+  assert(client:messages(NEW, "Joined; I read messages here from 3 allowlisted humans.") == 1,
+    "a non-HOME joined notice must give only the count of allowlisted humans")
+  assert(client:messages(NEW, "@") == 0,
+    "a non-HOME joined notice must not disclose allowlisted MXIDs")
+  relay:stop()
+  remove_dir(dir)
+end
+
+local function test_non_home_join_notice_caps_reader_count()
   local readers = {
     OWNER, "@bob:example.org", "@carol:example.org", "@dan:example.org",
     "@eve:example.org", "@frank:example.org", "@grace:example.org",
@@ -1075,9 +1091,10 @@ local function test_owner_invite_notice_caps_allowlisted_readers()
   local relay = started_relay(path, client, delivered)
   client:sync({ json = { next_batch = "s1", rooms = { invite = invite(NEW, OWNER) } } })
   client:pump()
-  assert(client:messages(NEW, "Joined; I read messages here from @alice:example.org, @bob:example.org, "
-      .. "@carol:example.org, @dan:example.org, @eve:example.org, and 2 more.") == 1,
-    "a joined notice must list at most five human readers and count the rest")
+  assert(client:messages(NEW, "Joined; I read messages here from 7 allowlisted humans.") == 1,
+    "a non-HOME joined notice must report the count without listing readers")
+  assert(client:messages(NEW, "@") == 0,
+    "a non-HOME joined notice must not disclose any allowlisted MXID")
   relay:stop()
   remove_dir(dir)
 end
@@ -2920,8 +2937,9 @@ print("ok: Matrix relay resume, exactly-once, filters, state, acks, caps, fallba
 local invite_failures = {}
 for _, case in ipairs({
   { "test_owner_invite_joins_writes_line_and_notices_once", test_owner_invite_joins_writes_line_and_notices_once },
-  { "test_owner_invite_notice_names_all_allowlisted_humans", test_owner_invite_notice_names_all_allowlisted_humans },
-  { "test_owner_invite_notice_caps_allowlisted_readers", test_owner_invite_notice_caps_allowlisted_readers },
+  { "test_non_home_join_notice_counts_two_allowlisted_humans", test_non_home_join_notice_counts_two_allowlisted_humans },
+  { "test_non_home_join_notice_counts_allowlisted_humans", test_non_home_join_notice_counts_allowlisted_humans },
+  { "test_non_home_join_notice_caps_reader_count", test_non_home_join_notice_caps_reader_count },
   { "test_configured_joined_room_owner_invite_retries_without_config_or_notice", test_configured_joined_room_owner_invite_retries_without_config_or_notice },
   { "test_owner_invite_in_baseline_sync_joins_and_writes_line", test_owner_invite_in_baseline_sync_joins_and_writes_line },
   { "test_owner_invite_failure_preserves_concurrent_room_line", test_owner_invite_failure_preserves_concurrent_room_line },

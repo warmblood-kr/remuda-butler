@@ -1342,12 +1342,17 @@ function relay.new(options)
                     end
                   end
                   table.sort(humans)
-                  local shown_humans = {}
-                  for index = 1, math.min(#humans, 5) do
-                    shown_humans[#shown_humans + 1] = humans[index]
+                  local readers
+                  if room_id ~= cfg.home_room then
+                    readers = #humans > 1 and (tostring(#humans) .. " allowlisted humans") or "the owner"
+                  else
+                    local shown_humans = {}
+                    for index = 1, math.min(#humans, 5) do
+                      shown_humans[#shown_humans + 1] = humans[index]
+                    end
+                    readers = #humans > 1 and table.concat(shown_humans, ", ") or "the owner"
+                    if #humans > 5 then readers = readers .. ", and " .. tostring(#humans - 5) .. " more" end
                   end
-                  local readers = #humans > 1 and table.concat(shown_humans, ", ") or "the owner"
-                  if #humans > 5 then readers = readers .. ", and " .. tostring(#humans - 5) .. " more" end
                   send_notice(room_id, "Joined; I read messages here from " .. readers .. ".",
                     "invite-notice", room_id)
                 end
