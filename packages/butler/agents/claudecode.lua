@@ -11,13 +11,21 @@ telemetry.claude = {
     local status = state.status_path and io.open(state.status_path, "r")
     if not status then return {} end
     local line = status:read("*l")
+    local second_line = status:read("*l")
     status:close()
     if not line then return {} end
     local model, used, window, percent = line:match(
       "^MODEL:([A-Za-z0-9_.%-?]+) CTX:([0-9?]+) CTXWIN:([0-9?]+) CTXPCT:([0-9?]+)$"
     )
     if not model then return {} end
-    return { model = model, context_used = used, context_window = window, context_percent = percent }
+    return {
+      model = model,
+      context_used = used,
+      context_window = window,
+      context_percent = percent,
+      rate_limits = remuda._butler_quota
+        and remuda._butler_quota.parse_rate_limits_line(second_line),
+    }
   end,
 }
 
