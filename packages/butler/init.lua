@@ -16,6 +16,7 @@ end
 local function start_matrix_relay()
   local matrix = host.butler and host.butler.matrix
   if host._butler_matrix_config and matrix and matrix.relay and not host._butler_skip_relay
+    and not host._butler_standby
     and type(host.http) == "table" and type(host.http.request) == "function" then
     matrix.relay.start(host._butler_matrix_config)
   end

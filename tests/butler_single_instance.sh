@@ -73,13 +73,26 @@ start_daemon() { # session name
   for _ in $(seq 50); do [[ -S $REMUDA_RUNTIME_DIR/remuda/$1.sock ]] && break; sleep 0.1; done
   [[ -S $REMUDA_RUNTIME_DIR/remuda/$1.sock ]] || { cat "$T/$1.log"; echo "FAIL: daemon $1 did not start"; exit 1; }
 }
-load_butler() { # session name
-  lua "$1" "remuda._butler_argv = {'$FAKE_AGENT'}; remuda.exec('butler')" >/dev/null 2>&1 || true
+load_butler() { # session name, optional Lua run first
+  lua "$1" "${2:-}remuda._butler_argv = {'$FAKE_AGENT'}; remuda.exec('butler')" >/dev/null 2>&1 || true
 }
 
 # The owner: daemon A with the root Butler, one live member and the relay.
 start_daemon "$A"
-load_butler "$A"
+# The guard needs core's remuda.fs.lock. On a core without it the same checks
+# run with a FAKED lock word (the owner is granted it, every other daemon finds
+# it held): that proves Butler's side, not the kernel lock, so the takeover and
+# reload tests stay skipped until a core has the word.
+LOCK_WORD=$(lua "$A" 'return remuda.fs ~= nil and type(remuda.fs.lock) == "function"')
+FAKE_OWNER="" FAKE_SECOND=""
+if [[ $LOCK_WORD != true ]]; then
+  CAN_FAKE=$(lua "$A" 'return (pcall(function() remuda.fs.lock = function() return {} end end)) and type(remuda.fs.lock) == "function"')
+  [[ $CAN_FAKE == true ]] || { echo "skip - all: this core has no remuda.fs.lock and it cannot be faked"; exit 0; }
+  FAKE_OWNER="remuda.fs.lock = function() return {} end; "
+  FAKE_SECOND="remuda.fs.lock = function() return nil, 'held', '$A 0 faked-by-test' end; "
+  echo "note - the lock is FAKED: this core has no remuda.fs.lock, so T1-T6 prove Butler's side only, not the OS lock"
+fi
+load_butler "$A" "$FAKE_OWNER"
 for _ in $(seq 50); do
   lua "$A" 'return remuda._butler_agent_builders ~= nil' | grep -qx true && break
   sleep 0.1
@@ -107,7 +120,7 @@ cp "$C/config.mcp.json" "$T/snap/config.mcp.json"
 
 # The second daemon on the same home loads the mod.
 start_daemon "$B"
-load_butler "$B"
+load_butler "$B" "$FAKE_SECOND"
 sleep 4 # longer than the 2 s reconcile schedule that would launch a root Butler
 
 cmp -s "$REGISTRY" "$T/snap/agents.jsonl" && ok "T1 a second daemon does not touch agents.jsonl" \
@@ -140,6 +153,10 @@ if [[ $CODE == 1 && $OUT == *"already running in another Remuda daemon"* && $NEX
 else
   bad "T5 a second daemon refuses with one line and one Next: exit $CODE, output: $(printf '%s' "$OUT" | head -3 | cut -c1-200)"
 fi
+assert_scratch
+DOCTOR=$("$REMUDA_BIN" -s "$B" butler doctor 2>&1 | head -1 || true)
+[[ $DOCTOR == "Not the owning daemon:"*"$A"* ]] && ok "T5 doctor still runs in a second daemon and its first line names the owner" \
+  || bad "T5 doctor still runs in a second daemon and its first line names the owner: $(printf '%s' "$DOCTOR" | cut -c1-200)"
 
 # T6: the empty session name (-s "") that caused the incident behind #195 is
 # refused like any other second daemon. It runs ONLY on the scratch home: the
@@ -162,7 +179,7 @@ for _ in $(seq 50); do [[ -S $REMUDA_RUNTIME_DIR/remuda/.sock ]] && break; sleep
 T6=ok
 if [[ -S $REMUDA_RUNTIME_DIR/remuda/.sock ]]; then
   empty_guard
-  "$REMUDA_BIN" -s "$EMPTY" -e "remuda._butler_argv = {'$FAKE_AGENT'}; remuda.exec('butler')" >/dev/null 2>&1 || true
+  "$REMUDA_BIN" -s "$EMPTY" -e "${FAKE_SECOND}remuda._butler_argv = {'$FAKE_AGENT'}; remuda.exec('butler')" >/dev/null 2>&1 || true
   sleep 4
   empty_guard
   set +e
@@ -182,7 +199,7 @@ fi # else: core refused the empty session name and the daemon exited, which is a
 
 # T7 and T8 need the owner lock word from core (remuda.fs.lock). Until a core
 # has it they are skipped; they have never run.
-if [[ $(lua "$A" 'return remuda.fs ~= nil and type(remuda.fs.lock) == "function"') == true ]]; then
+if [[ $LOCK_WORD == true ]]; then
   load_butler "$A"
   sleep 1
   set +e

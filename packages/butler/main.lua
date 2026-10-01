@@ -99,6 +99,10 @@ end
 -- Config/data paths, Matrix credential paths and path helpers live in paths.lua.
 remuda.exec("butler/paths")
 local paths = remuda._butler_paths
+-- One daemon owns a Butler home (#195). A second daemon stops here, before any
+-- shared state (the registry, the MCP config, the root Butler, the relay).
+remuda.exec("butler/guard")
+if not remuda.butler.guard.boot(paths) then return end
 local topic_config = paths.topic_config
 local data_home = paths.data_home
 local butler_session_cwd = paths.butler_session_cwd
