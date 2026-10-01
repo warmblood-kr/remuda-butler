@@ -268,16 +268,22 @@ return function(matrix)
   local good_pin_hex, wrong_pin_hex = string.rep("0", 64), string.rep("1", 64)
   local good_transport_pin = "sha256/" .. string.rep("A", 43) .. "="
   local saved_http = remuda.http
-  local function self_signed_setup(pin_hex)
+  local function self_signed_setup(pin_hex, register)
     local queue, specs, result = {}, {}, nil
     remuda.http = { request = function(spec)
       specs[#specs + 1] = spec
       queue[#queue + 1] = spec
       return { cancel = function() end }
     end }
-    local plan = assert(matrix.setup_prepare({ "--homeserver", "https://matrix.invalid",
+    local setup_args = { "--homeserver", "https://matrix.invalid",
       "--owner", "@alice:example.org", "--bot", "@butler-demo:example.org",
-      "--password-file", password, "--dir", output, "--pin", pin_hex }))
+      "--password-file", password, "--dir", output, "--pin", pin_hex }
+    if register then
+      setup_args[#setup_args + 1] = "--register"
+      setup_args[#setup_args + 1] = "--registration-token-file"
+      setup_args[#setup_args + 1] = registration_token_file
+    end
+    local plan = assert(matrix.setup_prepare(setup_args))
     matrix.setup_network(plan, function(value) result = value end)
     while #queue > 0 do
       local spec = table.remove(queue, 1)
@@ -285,6 +291,12 @@ return function(matrix)
         spec.callback({ error = "TLS request failed: server certificate issuer not trusted" })
       elseif spec.pin ~= good_transport_pin then
         spec.callback({ error = "TLS request failed: SPKI pin mismatch" })
+      elseif spec.url:find("/register", 1, true) and not spec.body:find('"auth"', 1, true) then
+        spec.callback({ status = 401,
+          body = '{"session":"self-signed-session","flows":[{"stages":["m.login.registration_token"]}]}' })
+      elseif spec.url:find("/register", 1, true) then
+        spec.callback({ status = 200,
+          body = '{"access_token":"self-signed-token","user_id":"@butler-demo:example.org"}' })
       elseif spec.url:find("/login", 1, true) then
         spec.callback({ status = 200, body = '{"access_token":"self-signed-token"}' })
       elseif spec.url:find("/whoami", 1, true) then
@@ -306,6 +318,16 @@ return function(matrix)
   for _, spec in ipairs(signed_specs) do
     assert(spec.pin_only == true and spec.pin == good_transport_pin and spec.ca_file == nil,
       "every setup request with --pin must use pin_only = true: " .. tostring(spec.url))
+  end
+  local registered, registered_specs = self_signed_setup(good_pin_hex, true)
+  assert(type(registered) == "table" and not registered.error
+    and registered.home_room == "!self-signed:example.org"
+    and registered_specs[1].url:find("/register", 1, true),
+    "--register --pin must create the bot on a self-signed HTTPS homeserver: "
+      .. tostring(type(registered) == "table" and registered.error))
+  for _, spec in ipairs(registered_specs) do
+    assert(spec.pin_only == true and spec.pin == good_transport_pin and spec.ca_file == nil,
+      "every --register request with --pin must use pin_only = true: " .. tostring(spec.url))
   end
   local mismatched = self_signed_setup(wrong_pin_hex)
   assert(type(mismatched) == "table" and type(mismatched.error) == "string"
