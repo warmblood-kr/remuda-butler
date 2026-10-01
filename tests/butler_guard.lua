@@ -191,6 +191,8 @@ local ok, err = pcall(function()
   assert(guard.boot(paths) == true and #warnings == 1 and select(2, warnings[1]:gsub("\n", "")) == 1
     and warnings[1]:find(guard.CORE_WITH_LOCK, 1, true) and warnings[1]:find("remuda upgrade", 1, true),
     "the unguarded core is warned once, on one line, naming the core to upgrade to")
+  assert(warnings[1]:find("upgrade to remuda 0.1.0-nightly.20261001062057.499b8b9 or later with `remuda upgrade`", 1, true),
+    "the warning names the first core release that has remuda.fs.lock: " .. warnings[1])
   -- L3: the same line is in `remuda butler doctor`, where people look.
   local line = guard.unguarded_line()
   assert(line and warnings[1] == "butler: " .. line .. "\n", "the stderr warning and doctor share one line")

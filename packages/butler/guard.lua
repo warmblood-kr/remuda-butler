@@ -4,9 +4,8 @@
 -- A daemon without both loads none of Butler's shared-state code.
 local guard = {}
 
--- ponytail: placeholder until the core release that ships remuda.fs.lock is
--- known (#195); replace with that version.
-guard.CORE_WITH_LOCK = "a core release with remuda.fs.lock"
+-- The first core release that has remuda.fs.lock (#195).
+guard.CORE_WITH_LOCK = "remuda 0.1.0-nightly.20261001062057.499b8b9 or later"
 
 -- Two locks, because Butler's shared files live in two places: the data lock
 -- sits next to agents.jsonl (the data home the registry uses), the config lock

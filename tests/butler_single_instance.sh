@@ -107,6 +107,8 @@ if [[ $LOCK_WORD != true ]]; then
   FAKE_OTHER_DATA="remuda.fs.lock = function(path) if path:find('/data2/', 1, true) then return { release = function() end } end return nil, 'held', 'remuda-lock session=$A pid=1 since=1790000000' end; "
   FAKE_SECOND="remuda.fs.lock = function() return nil, 'held', 'remuda-lock session=$A pid=1 since=1790000000' end; "
   echo "note - the lock is FAKED: this core has no remuda.fs.lock, so T1-T7 prove Butler's side only, not the OS lock"
+else
+  echo "note - the lock is REAL: this core has remuda.fs.lock ($("$REMUDA_BIN" --version | cut -d+ -f1))"
 fi
 load_butler "$A" "$FAKE_OWNER"
 for _ in $(seq 50); do
@@ -325,6 +327,17 @@ fi
 # T8 and T9 need the owner lock word from core (remuda.fs.lock). Until a core
 # has it they are skipped; they have never run.
 if [[ $LOCK_WORD == true ]]; then
+  # Both lock files and core's .info sidecars exist and are owner-only.
+  LOCK_MODES=""
+  for file in "$XDG_DATA_HOME/remuda/butler/lock" "$C/config.lock"; do
+    for path in "$file" "$file.info"; do
+      MODE=$(ls -l "$path" 2>/dev/null | cut -c1-10)
+      [[ $MODE == "-rw-------" ]] || LOCK_MODES="$LOCK_MODES ${path#"$T"/}=${MODE:-missing}"
+    done
+  done
+  [[ -z $LOCK_MODES ]] && ok "T8 both lock files and their .info sidecars are private (0600)" \
+    || bad "T8 both lock files and their .info sidecars are private (0600):$LOCK_MODES"
+
   load_butler "$A"
   sleep 1
   set +e
