@@ -17,6 +17,41 @@ local statusline_model_matches = assert(config.statusline_model_matches)
 local clear_legacy_restore_state = assert(config.clear_legacy_restore_state)
 local compaction_restore_path = mail_root and mail_root .. "/compaction-restore.json"
 
+local function model_confirm_signature(screen)
+  if type(screen) ~= "string" then return nil end
+  local lines = bottom_screen_lines(screen, 32)
+  for index = 1, #lines - 1 do
+    if index > #lines - 8
+        and lines[index]:find("❯%s*1%.%s+Yes")
+        and lines[index + 1]:find("%d%.%s+No, go back") then
+      for title_row = math.max(1, index - 24), index - 1 do
+        if lines[title_row]:find("Switch model?", 1, true) then
+          local dialog = {}
+          for row = title_row, index + 1 do dialog[#dialog + 1] = lines[row] end
+          return table.concat(dialog, "\n")
+        end
+      end
+    end
+  end
+  return nil
+end
+
+local function model_confirm_options_visible(screen)
+  if type(screen) ~= "string" then return false end
+  local lines = bottom_screen_lines(screen, 32)
+  for index = 1, #lines - 1 do
+    if index > #lines - 24
+        and lines[index]:find("❯%s*1%.%s+Yes")
+        and lines[index + 1]:find("%d%.%s+No, go back") then
+      return true
+    end
+  end
+  return false
+end
+
+remuda._butler_model_confirm_signature = model_confirm_signature
+remuda._butler_model_confirm_options_visible = model_confirm_options_visible
+
 local function read_compaction_restore_record()
   if not compaction_restore_path then return {} end
   local file = io.open(compaction_restore_path, "r")
@@ -481,36 +516,6 @@ function remuda._butler_compaction_execute(session_name, force)
     local function stable_wait_expired(state)
       return state.started_at ~= nil
         and (state.polls >= stable_poll_cap or os.time() - state.started_at >= stable_timeout)
-    end
-    local function model_confirm_signature(screen)
-      if type(screen) ~= "string" then return nil end
-      local lines = bottom_screen_lines(screen, 32)
-      for index = 1, #lines - 1 do
-        if index > #lines - 8
-            and lines[index]:find("❯%s*1%.%s+Yes")
-            and lines[index + 1]:find("%d%.%s+No, go back") then
-          for title_row = math.max(1, index - 24), index - 1 do
-            if lines[title_row]:find("Switch model?", 1, true) then
-              local dialog = {}
-              for row = title_row, index + 1 do dialog[#dialog + 1] = lines[row] end
-              return table.concat(dialog, "\n")
-            end
-          end
-        end
-      end
-      return nil
-    end
-    local function model_confirm_options_visible(screen)
-      if type(screen) ~= "string" then return false end
-      local lines = bottom_screen_lines(screen, 32)
-      for index = 1, #lines - 1 do
-        if index > #lines - 24
-            and lines[index]:find("❯%s*1%.%s+Yes")
-            and lines[index + 1]:find("%d%.%s+No, go back") then
-          return true
-        end
-      end
-      return false
     end
     local function settle_model_confirm(screen)
       local signature = model_confirm_signature(screen)
