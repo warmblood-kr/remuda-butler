@@ -12,7 +12,12 @@ export REMUDA_BUTLER_PROJECT_HOME=$T/projects REMUDA_NO_UPDATE_CHECK=1
 unset REMUDA_BUTLER_TOKEN REMUDA_BUTLER_CONFIG
 mkdir -p "$XDG_DATA_HOME/remuda/mods/butler" "$HOME"
 tar -c -C "$REPO" extension.toml packages | tar -x -C "$XDG_DATA_HOME/remuda/mods/butler"
-trap 'remuda -s $S stop -f >/dev/null 2>&1 || true; rm -rf "$T"' EXIT
+cleanup() {
+  remuda -s "$S" stop -f >/dev/null 2>&1 || true
+  for _ in $(seq 50); do pgrep -f "remuda -s $S daemon" >/dev/null || break; sleep 0.1; done
+  rm -rf "$T"
+}
+trap cleanup EXIT
 EVENT='$abc:example.org'
 HELP_BANNER='coordination for managed agents'
 fail() { echo "FAIL: $*"; exit 1; }
