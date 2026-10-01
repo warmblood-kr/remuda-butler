@@ -290,6 +290,25 @@ fn eval(path: &Path, code: &str) -> String {
     }
 }
 
+/// In-process daemons (`daemon_at`) run on threads of the test process, so they
+/// read one process environment. Without homes of their own, every daemon that
+/// loads the whole Butler mod resolves the same agents.jsonl, takes the same
+/// root Butler id and would take the same single-instance lock (see #225, #211).
+#[test]
+fn in_process_daemons_that_load_butler_get_their_own_root_identity() {
+    let root_id = |tag: &str| {
+        let dir = scratch(tag);
+        let path = daemon::socket_path_in(&dir, "s");
+        let daemon = daemon_at(&path);
+        eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+        let id = eval(&path, "return remuda._butler_bus.agents.butler.id");
+        (daemon, id)
+    };
+    let (_first, a) = root_id("own-root-a");
+    let (_second, b) = root_id("own-root-b");
+    assert_ne!(a, b, "two in-process daemons share one data home, so one root Butler id: {a}");
+}
+
 /// #24: an MCP caller Butler cannot identify (no capability token) must get a
 /// tool error, not a child silently parented to `butler`.
 #[test]
