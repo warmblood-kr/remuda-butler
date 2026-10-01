@@ -1372,6 +1372,26 @@ function relay.new(options)
     return "Not typed: the line could not be accepted. Next: send it again"
   end
 
+  local function trace_typed_line(event, room_id, form, line, target, outcome)
+    local trace = remuda._butler_session_trace or _G._butler_session_trace
+    if type(trace) ~= "function" then return end
+    local content = type(event.content) == "table" and event.content or {}
+    local body = type(content.body) == "string" and content.body or ""
+    form = form or (body:sub(1, 2) == "!!" and "!!" or "!")
+    local trace_text = type(line) == "string" and line or body:sub(form == "!!" and 3 or 2)
+    if form == "!!" and trace_text:sub(1, 1) == "!" then trace_text = trace_text:sub(2) end
+    local event_id = type(event.event_id) == "string" and event.event_id or ""
+    local sender = type(event.sender) == "string" and event.sender or ""
+    local detail = "room=" .. terminal_safe_field(room_id, 256)
+      .. " event=" .. terminal_safe_field(event_id, 256)
+      .. " sender=" .. terminal_safe_field(sender, 256)
+      .. " target=" .. terminal_safe_field(target or "butler", 128)
+      .. " form=" .. form .. " outcome=" .. terminal_safe_field(outcome, 128)
+      .. " bytes=" .. tostring(#trace_text)
+    if form == "!!" then detail = detail .. " command=" .. terminal_safe_field(trace_text, 2048) end
+    pcall(trace, "matrix_owner_line", detail)
+  end
+
   local function in_butler_tree(agent_id, agents)
     local root = agents.butler
     local root_id = type(root) == "table" and root.id or "butler"
@@ -1442,9 +1462,11 @@ function relay.new(options)
     return { now = now, ok = ok, reason = reason, line = line, form = form }
   end
 
-  local function mark_typed_line_error(event_id, err)
+  local function mark_typed_line_error(event, room_id, err)
+    local event_id = type(event.event_id) == "string" and event.event_id or ""
     if event_id ~= "" then add_processed(state, event_id) end
     local saved, save_error = pcall(persist)
+    trace_typed_line(event, room_id, nil, nil, "butler", "refused:handler_error")
     warn_once("typed-line-error", event_id,
       "butler Matrix typed-line handling failed; event marked processed: "
         .. terminal_safe_field(tostring(err), 512)
@@ -1481,19 +1503,23 @@ function relay.new(options)
       error("cannot persist Matrix typed-line event before typing", 0)
     end
     if not ok then
+      trace_typed_line(event, room_id, form, target_line or line, target, "refused:" .. tostring(reason))
       send_typed_line_reply(event, room_id, typed_line_refusal(reason, target))
       return true
     end
     local typed, type_result = pcall(remuda.type_text, target, target_line)
     if not typed or type_result == false then
+      trace_typed_line(event, room_id, form, target_line, target, "refused:type_failed")
       send_typed_line_reply(event, room_id, typed_line_refusal("type_failed", target))
       return true
     end
     local pressed, key_result = pcall(remuda.key, target, "RET")
     if not pressed or key_result == false then
+      trace_typed_line(event, room_id, form, target_line, target, "refused:return_failed")
       send_typed_line_reply(event, room_id, typed_line_refusal("return_failed", target))
       return true
     end
+    trace_typed_line(event, room_id, form, target_line, target, "typed")
     send_typed_line_reaction(room_id, event.event_id)
     if member_target then
       local shown_event = matrix.shown_event_id(event.event_id)
@@ -1524,6 +1550,8 @@ function relay.new(options)
           local typed_line_candidate = not approval_record and cfg.allowed_senders[ev.sender] == true
             and member_kind(ev.sender, cfg) == "HUMAN"
             and type(content.body) == "string" and content.body:sub(1, 1) == "!"
+          local typed_line_scope_allowed = typed_line_candidate
+            and typed_line_room_allowed(ev, room_id or cfg.room)
           local typed_line_check
           local typed_line_check_failed = false
           if typed_line_candidate and live_sync == true then
@@ -1532,11 +1560,22 @@ function relay.new(options)
               typed_line_check = result
             else
               typed_line_check_failed = true
-              mark_typed_line_error(event_id, result)
+              mark_typed_line_error(ev, room_id or cfg.room, result)
             end
           end
           local switch_disabled = typed_line_check
             and (typed_line_check.reason == "typed_lines_off" or typed_line_check.reason == "shell_lines_off")
+          if typed_line_candidate and not typed_line_check_failed then
+            if switch_disabled then
+              trace_typed_line(ev, room_id or cfg.room, typed_line_check.form, typed_line_check.line,
+                "butler", "refused:" .. typed_line_check.reason)
+            elseif not typed_line_scope_allowed then
+              trace_typed_line(ev, room_id or cfg.room, typed_line_check and typed_line_check.form,
+                typed_line_check and typed_line_check.line, "butler", "refused:room_not_allowed")
+            elseif live_sync ~= true then
+              trace_typed_line(ev, room_id or cfg.room, nil, nil, "butler", "refused:not_live")
+            end
+          end
           if approval_record then
             if event_id ~= "" then add_processed(state, event_id) end
             if cursor then state.since = cursor end
@@ -1559,10 +1598,10 @@ function relay.new(options)
           elseif typed_line_candidate and typed_line_check_failed then
             -- The event was marked processed above; keep this response moving without a retry loop.
           elseif typed_line_candidate and not switch_disabled
-              and typed_line_room_allowed(ev, room_id or cfg.room) then
+              and typed_line_scope_allowed then
             if live_sync == true then
               local handled, err = pcall(handle_typed_line, ev, room_id or cfg.room, typed_line_check)
-              if not handled then mark_typed_line_error(event_id, err) end
+              if not handled then mark_typed_line_error(ev, room_id or cfg.room, err) end
             else
               if event_id ~= "" then add_processed(state, event_id) end
               persist()
