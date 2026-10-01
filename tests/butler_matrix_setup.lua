@@ -667,6 +667,9 @@ return function(matrix)
   assert(resolved and resolved.status == 1 and resolved.stderr:find("Nothing was written.", 1, true)
     and select(2, resolved.stderr:gsub("Next:", "")) == 1 and #requests == 0,
     "a non-string HTTPS trust answer should fail safely instead of throwing")
+  assert(resolved.stderr:find("The HTTPS trust answer must be Enter (this system's trusted certificates), "
+    .. "a certificate pin or a CA file path.", 1, true),
+    "the refused HTTPS trust answer should name Enter as a choice: " .. resolved.stderr)
 
   write(default_paths.token_path, "existing default token")
   requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
@@ -781,6 +784,21 @@ return function(matrix)
         and select(2, resolved.stderr:gsub("Next:", "")) == 1 and #requests == 0,
         "the wizard refuses a malformed or empty bot name: '" .. bad_answer .. "'")
     end
+    requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+    wizard_reply = matrix.cli({ "matrix", "setup" })
+    line_specs[1].callback("https://matrix.invalid", nil)
+    line_specs[2].callback("@alice:example.org", nil)
+    assert(#line_specs == 3 and line_specs[3].label:find("Butler bot name", 1, true),
+      "with no machine name an https wizard asks for the bot name first")
+    line_specs[3].callback("butler-mac", nil)
+    assert(#line_specs == 4 and line_specs[4].label:find("HTTPS trust: press Enter", 1, true),
+      "the https wizard asks for trust after the bot name")
+    line_specs[4].callback("", nil)
+    assert(#line_specs == 5 and not resolved
+      and line_specs[5].label:find("\n  Bot: @butler-mac:example.org\n", 1, true)
+      and line_specs[5].label:find("\n  HTTPS trust: this system's trusted certificates\n", 1, true),
+      "the summary shows the entered bot and system trust: " .. tostring(resolved and resolved.stderr))
+    line_specs[5].callback("N", nil)
   end)
   os.getenv, io.open = nameless_getenv, nameless_io_open
   assert(nameless_ok, nameless_error)

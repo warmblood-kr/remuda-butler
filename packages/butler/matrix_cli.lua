@@ -426,7 +426,8 @@ function matrix.cli(args, agent, stdin_body)
                 .. "or enter a 64-character SHA-256 certificate pin or an absolute CA file path:",
                 nil, function(trust)
                   if type(trust) ~= "string" then
-                    return prompt_failure("The HTTPS trust answer must be a certificate pin or CA file path.")
+                    return prompt_failure("The HTTPS trust answer must be Enter (this system's trusted certificates), "
+                      .. "a certificate pin or a CA file path.")
                   end
                   if trust == "" then
                     -- Enter: system trust roots, so neither --pin nor --ca-file.
