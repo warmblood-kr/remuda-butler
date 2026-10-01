@@ -92,6 +92,13 @@ done
 lua "$A" 'return remuda.butler.matrix.relay.instance ~= nil' | grep -qx true || { echo "FAIL: setup: owner relay did not start"; exit 1; }
 grep -q '"alias":"member"' "$REGISTRY" || { echo "FAIL: setup: owner has no member row in agents.jsonl"; exit 1; }
 [[ -f $C/config.mcp.json ]] || { echo "FAIL: setup: owner wrote no config.mcp.json"; exit 1; }
+FAILED=()
+bad() { FAILED+=("$*"); echo "not ok - $*"; }
+ok() { echo "ok - $*"; }
+# config.mcp.json holds the root capability: owner-only, like config and token.
+MCP_MODE=$(ls -l "$C/config.mcp.json" | cut -c1-10)
+[[ $MCP_MODE == "-rw-------" ]] && ok "T0 config.mcp.json is private (0600)" \
+  || bad "T0 config.mcp.json is private (0600): mode is $MCP_MODE"
 sleep 3 # let the owner's reconcile settle before the snapshot
 mkdir "$T/snap"
 cp "$REGISTRY" "$T/snap/agents.jsonl"
@@ -102,10 +109,6 @@ cp "$C/config.mcp.json" "$T/snap/config.mcp.json"
 start_daemon "$B"
 load_butler "$B"
 sleep 4 # longer than the 2 s reconcile schedule that would launch a root Butler
-
-FAILED=()
-bad() { FAILED+=("$*"); echo "not ok - $*"; }
-ok() { echo "ok - $*"; }
 
 cmp -s "$REGISTRY" "$T/snap/agents.jsonl" && ok "T1 a second daemon does not touch agents.jsonl" \
   || bad "T1 a second daemon does not touch agents.jsonl: $(diff "$T/snap/agents.jsonl" "$REGISTRY" | grep '^>' | cut -c1-200 | head -3)"
