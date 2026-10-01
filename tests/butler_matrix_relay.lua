@@ -2354,12 +2354,14 @@ local function test_rx_reply_follows_thread_all_room_kinds()
       assert(rx_find(delivered, root), room .. ": root delivered")
       assert(relay:record_outgoing_reply(root, sent), room .. ": the reply is recorded")
       assert(rx_followed(relay, room, root), room .. ": a reply must follow its thread")
-      -- A person may also open a thread on the Butler's own reply.
-      assert(rx_followed(relay, room, sent), room .. ": a reply must follow the thread on the sent event")
+      -- A reply follows only its thread root: following the sent event too
+      -- would spend a follow slot on every reply.
+      assert(not rx_followed(relay, room, sent), room .. ": a reply must not follow its own sent event")
       rx_sync(client, room, { rx_msg(root .. "-t", OWNER, "follow-up", rx_thread(root)),
         rx_msg(sent .. "-t", OWNER, "on your reply", rx_thread(sent)) })
-      assert(rx_find(delivered, root .. "-t") and rx_find(delivered, sent .. "-t"),
-        room .. ": replies in the followed threads are delivered")
+      assert(rx_find(delivered, root .. "-t"), room .. ": a reply in the followed thread is delivered")
+      assert(not rx_find(delivered, sent .. "-t"),
+        room .. ": a thread rooted at the sent event is not followed, so it is not delivered")
     end
     relay:stop()
   end)
