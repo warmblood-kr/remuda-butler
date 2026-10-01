@@ -1030,8 +1030,11 @@ function remuda._butler_inbox_message(caller, id)
   if not object then
     error("message " .. tostring(id) .. " was not delivered to you. Next: remuda butler inbox", 0)
   end
-  return "[" .. message.id .. " from " .. tostring(message.from.host) .. "/" .. tostring(message.from.session)
-    .. " · " .. tostring(message.created_at) .. "] " .. tostring(message.subject) .. "\n" .. object.content
+  local output = "[" .. message.id .. " from " .. tostring(message.from.host) .. "/" .. tostring(message.from.session)
+    .. " · " .. tostring(message.created_at) .. "] " .. tostring(message.subject) .. "\n"
+  local matrix_line = mail.matrix_header(message)
+  if matrix_line ~= "" then output = output .. matrix_line .. "\n" end
+  return output .. object.content
 end
 function remuda._butler_send(from, to, text)
   local _, recipient = mail_id(to, false)

@@ -21,6 +21,7 @@ release tags yet; entries come from merged pull requests.
 - Outgoing Matrix messages carry a formatted HTML body rendered from a Markdown subset; raw HTML is always escaped (#171).
 - Matrix `posts_per_hour` (default 30) caps the Butler's Matrix posts per hour that are not a reply to a person on the allowlist; a refused post says `Next: wait until HH:MMZ`, and the first refusal in an hour posts one line to HOME (#223).
 - When the hourly cap for non-allowlisted senders is hit, HOME gets a summary with the count: the first one at once, then at most one per room per 10 minutes (#223).
+- The first Matrix mail from an allowlisted sender in an unseen thread includes the thread root and up to 20 earlier replies as one-line context; the inbox names each mail's room and thread (#235).
 
 ### Changed
 - `matrix setup --pin` and `pin_sha256` now trust a self-signed homeserver on their own, using core `pin_only`. The hostname, validity dates and SPKI pin are still checked, and `ca_file` keeps full chain validation. Recommended core: `0.1.0-nightly.20261001000710.0a5f090` (#164).

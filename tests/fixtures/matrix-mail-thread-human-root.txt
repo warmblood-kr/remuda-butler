@@ -1,4 +1,5 @@
 [M1 from matrix/@alice:example.org · 2026-09-30T10:01:00Z] Matrix thread reply from @alice:example.org
-  Matrix event $human-thread-reply
+  Matrix event $human-thread-reply in room !room:example.org (home), thread $human-root
+  Next: remuda butler matrix --room '!room:example.org' thread '$human-root'
   in reply to M0 (thread M0)
 Starting the human-rooted thread.

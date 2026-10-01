@@ -2807,6 +2807,11 @@ fn butler_matrix_relay_uses_async_request_and_preserves_envelope_metadata() {
             local matrix = remuda.butler.matrix
             remuda.http.respond("GET", {baseline}, {{ status = 200, headers = {{}}, body = '{{"next_batch":"s0"}}' }})
             remuda.http.respond("GET", {sync}, {{ status = 200, headers = {{}}, body = {response} }})
+            -- #235 step B: the first mail from an unseen thread waits for two context GETs.
+            remuda.http.respond_prefix("GET", "https://matrix.example.org/_matrix/client/v3/rooms/%21relay%3Aexample.org/event/",
+              {{ status = 200, headers = {{}}, body = '{{"type":"m.room.message","event_id":"$thread-root","sender":"@alice:example.org","origin_server_ts":0,"content":{{"msgtype":"m.text","body":"thread start"}}}}' }})
+            remuda.http.respond_prefix("GET", "https://matrix.example.org/_matrix/client/v1/rooms/%21relay%3Aexample.org/relations/",
+              {{ status = 200, headers = {{}}, body = '{{"chunk":[]}}' }})
             remuda.relay_deliveries = {{}}
             remuda.relay_client = matrix.relay.new({{ config_path = {config}, matrix = matrix,
               deliver = function(value) table.insert(remuda.relay_deliveries, value); return true end }})
@@ -2815,6 +2820,12 @@ fn butler_matrix_relay_uses_async_request_and_preserves_envelope_metadata() {
             if remuda.relay_deliveries[1] then return "callback-ran-inline" end
             remuda.http.tick()
             remuda.http.tick()
+            -- Old expectation: delivered after these two ticks. Since #235 step B the
+            -- two context GETs wait their turn in the request queue first.
+            for _ = 1, 12 do
+              if #remuda.relay_deliveries == 1 then break end
+              remuda.http.tick()
+            end
             if #remuda.relay_deliveries ~= 1 then return "event-not-delivered" end
             local event = remuda.relay_deliveries[1]
             if event.event_id ~= "$relay-event" or event.thread_root ~= "$thread-root"
@@ -3021,15 +3032,32 @@ fn butler_matrix_reply_is_correlated_and_sent_id_is_durable() {
       local room = {room}
       local payload = assert(matrix.decode_json({response}))
       if not payload.rooms or not payload.rooms.join or not payload.rooms.join[room] then return "room-key-missing" end
-      local relay = matrix.relay.new({{config_path={config}, matrix=matrix, deliver=function(event)
+      -- #235 step B: the first mail from an unseen thread waits for two context
+      -- GETs, and only a started relay takes their answer. The relay is started
+      -- with a client that never sends the sync poll (the test feeds sync itself).
+      -- Old expectation: the mail is delivered inside relay._response.
+      local api = setmetatable({{ request_json = function(args, done)
+        if tostring(args.path):find("/sync", 1, true) then return {{ cancel = function() end }} end
+        return matrix.request_json(args, done)
+      end }}, {{ __index = matrix }})
+      remuda.http.respond_prefix("GET", "http://matrix.example.org/_matrix/client/v3/rooms/%21reply%3Aexample.org/event/",
+        {{status=200, headers={{}}, body='{{"type":"m.room.message","event_id":"$root","sender":"@alice:example.org","origin_server_ts":0,"content":{{"msgtype":"m.text","body":"thread start"}}}}'}})
+      remuda.http.respond_prefix("GET", "http://matrix.example.org/_matrix/client/v1/rooms/%21reply%3Aexample.org/relations/",
+        {{status=200, headers={{}}, body='{{"chunk":[]}}'}})
+      local relay = matrix.relay.new({{config_path={config}, matrix=api, deliver=function(event)
         local delivered = remuda._butler_inbox_delivery({{from={{host="matrix", alias=event.sender,
           session=event.sender, kind="matrix", id="", leader=""}}, to="butler", text=event.body,
           subject="Matrix", matrix=event}})
         remuda.source_mail_id = delivered and delivered.id
         return delivered
       end}})
+      relay:start()
       relay._response({{next_batch="s0"}}, "/_matrix/client/v3/sync")
       relay._response(payload, "/_matrix/client/v3/sync")
+      for _=1,8 do
+        if remuda.source_mail_id then break end
+        remuda.http.tick()
+      end
       if not remuda.source_mail_id then
         local state=relay:state()
         local count=0; for _ in pairs(state.pending) do count=count+1 end
@@ -3103,7 +3131,24 @@ fn butler_matrix_reply_home_all_roster_subscriptions_survive_restart() {
           return {{id=mail_id}}
         end
       end
-      local ra = matrix.relay.new({{config_path=config_a, matrix=matrix, deliver=deliver(a, "a")}})
+      -- #235 step B: the first mail from an unseen thread waits for two context
+      -- GETs, and only a started relay takes their answer. Relay A is started with
+      -- a client that never sends the sync poll (the test feeds sync itself), and
+      -- its Matrix config is set before the first sync, not only before the sends.
+      -- Old expectation: every mail is delivered inside _response.
+      local api = setmetatable({{ request_json = function(args, done)
+        if tostring(args.path):find("/sync", 1, true) then return {{ cancel = function() end }} end
+        return matrix.request_json(args, done)
+      end }}, {{ __index = matrix }})
+      remuda._butler_matrix_config = {{token_path={a_token}, config_path=config_a}}
+      remuda.http.respond_prefix("GET", "http://matrix.example.org/_matrix/client/v3/rooms/"
+        .. matrix.path_component(all) .. "/event/",
+        {{status=200, headers={{}}, body='{{"type":"m.room.message","event_id":"$start","sender":"@human:example.org","origin_server_ts":0,"content":{{"msgtype":"m.text","body":"thread start"}}}}'}})
+      remuda.http.respond_prefix("GET", "http://matrix.example.org/_matrix/client/v1/rooms/"
+        .. matrix.path_component(all) .. "/relations/",
+        {{status=200, headers={{}}, body='{{"chunk":[]}}'}})
+      local ra = matrix.relay.new({{config_path=config_a, matrix=api, deliver=deliver(a, "a")}})
+      ra:start()
       local rb = matrix.relay.new({{config_path=config_b, matrix=matrix, deliver=deliver(b, "b")}})
       local function ev(id, sender, body, root, reply)
         local content = {{msgtype="m.text", body=body}}
@@ -3142,6 +3187,10 @@ fn butler_matrix_reply_home_all_roster_subscriptions_survive_restart() {
       }}), "/_matrix/client/v3/sync")
       local function has(target, id)
         for _, item in ipairs(target) do if item.event_id == id then return item end end
+      end
+      for _=1,12 do
+        if has(a, "$mention-a") and has(a, "$agent-mention") then break end
+        remuda.http.tick()
       end
       if not has(a, "$home-a") or has(b, "$home-a") then return "home-routing-failed" end
       if not has(b, "$home-b") or has(a, "$home-b") then return "other-home-routing-failed" end
@@ -3193,8 +3242,9 @@ fn butler_matrix_reply_home_all_roster_subscriptions_survive_restart() {
       if not ra:record_outgoing_reply("$top", "$a-post") then return "post-route-missing" end
       if ra:state().routes[mention_mail_id] then return "mention-route-not-removed" end
       ra:stop()
-      ra = matrix.relay.new({{config_path=config_a, matrix=matrix, deliver=deliver(a, "a")}})
+      ra = matrix.relay.new({{config_path=config_a, matrix=api, deliver=deliver(a, "a")}})
       if ra:state().since ~= "cursor-1" then return "cursor-not-restored" end
+      ra:start()
       local followups = {{
         ev("$mention-followup", "@human:example.org", "continued", "$mention-thread"),
         ev("$post-followup", "@human:example.org", "reply to A post", "$top", "$a-post"),
@@ -3205,6 +3255,11 @@ fn butler_matrix_reply_home_all_roster_subscriptions_survive_restart() {
       }}
       ra._response(response("cursor-2", nil, nil, followups), "/_matrix/client/v3/sync")
       rb._response(response("cursor-2", nil, nil, followups), "/_matrix/client/v3/sync")
+      -- The reply to A's own send is the first mail from that thread: it waits for its context.
+      for _=1,8 do
+        if has(a, "$send-followup") then break end
+        remuda.http.tick()
+      end
       if not has(a, "$mention-followup") or not has(a, "$post-followup") or not has(a, "$send-followup")
         or not has(a, "$agent-thread-followup") then return "subscription-not-restored" end
       if has(a, "$mention-followup").context_mail_id ~= has(a, "$mention-a").test_mail_id
