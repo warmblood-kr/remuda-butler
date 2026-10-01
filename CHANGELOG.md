@@ -12,6 +12,7 @@ release tags yet; entries come from merged pull requests.
 - Matrix join and leave accept a room alias or a public room name; public rooms can be browsed (#123).
 - When an agent asks to join a Matrix room, the owner is asked in HOME (#138).
 - `remuda butler doctor` checks agent CLIs and logins and prints the next command (#128).
+- `remuda butler quota` reports, for Claude Code and Codex CLI, the login mode, the subscription account and the used share of each limit with its reset time; `--report` posts the same report to the Matrix home room.
 - `remuda butler close NAME` lets a leader close its own members (#149).
 - After a compaction or restart, a member is shown the last unanswered leader message again; `remuda butler inbox` shows message IDs (#159).
 - `remuda butler matrix follow EVENT_ID` and `unfollow EVENT_ID` manage thread replies. HOME always delivers replies; other rooms deliver a reply only in a followed thread or on a mention. Replying, sending, and a mention from an allowlisted sender follow the thread automatically (#178).
@@ -46,3 +47,4 @@ release tags yet; entries come from merged pull requests.
 - The `matrix setup` wizard asks for a Butler bot name when it cannot take one from this computer's name (a stock Mac), instead of stopping. The flag form's refusal now ends with a `Next:` line naming `--bot` (#182).
 - The `matrix setup` wizard prompts no longer show a doubled colon such as `URL::` (#186).
 - Scheduled compaction of a Claude session already on Sonnet no longer types `/model` before or after `/compact`; a failed compaction keeps its 10-minute cooldown instead of retrying after a few minutes, and a `/compact` that was not submitted fails at once (#206).
+- Scheduled compaction of a Claude session on Opus now waits for `/model sonnet` and the restore to be confirmed (status line or settings.json, dialog gone, empty composer) before typing the next command, so `/compact` is no longer lost behind the switch (#206).

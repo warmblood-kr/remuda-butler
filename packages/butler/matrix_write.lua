@@ -67,7 +67,7 @@ local function split_utf8(text)
   return chunks
 end
 
-local function send_chunks(room, text, relation, on_done, txn_prefix)
+local function send_chunks(room, text, relation, on_done, txn_prefix, plain)
   local done = once(on_done)
   if type(text) ~= "string" or text == "" then
     return error_result(done, "message text must not be empty")
@@ -86,9 +86,11 @@ local function send_chunks(room, text, relation, on_done, txn_prefix)
     local content = { msgtype = "m.text", body = chunks[index] }
     -- Converter is looked up at call time so it stays advisable (#166); on any
     -- failure the chunk goes out plain.
-    local ok, html = pcall(function() return remuda.butler.md2html.convert(chunks[index]) end)
-    if ok and type(html) == "string" and html ~= "" and #html <= MAX_HTML_BYTES then
-      content.format, content.formatted_body = "org.matrix.custom.html", html
+    if not plain then
+      local ok, html = pcall(function() return remuda.butler.md2html.convert(chunks[index]) end)
+      if ok and type(html) == "string" and html ~= "" and #html <= MAX_HTML_BYTES then
+        content.format, content.formatted_body = "org.matrix.custom.html", html
+      end
     end
     if relation then content["m.relates_to"] = relation end
     local body, encode_error = matrix.encode_json(content)
@@ -119,7 +121,7 @@ function matrix.send(opts, on_done)
   end
   local slot, slot_error = matrix.take_post_slot()
   if not slot then return error_result(done, slot_error) end
-  return send_chunks(room, opts.text, nil, done)
+  return send_chunks(room, opts.text, nil, done, nil, opts.plain == true)
 end
 
 local function same_room_then(room, event_id, on_done, action)
