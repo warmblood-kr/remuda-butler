@@ -10348,7 +10348,7 @@ done
     }
     wait_until_not_busy("quota-real-draft");
     assert_eq!(
-        eval(&path, "return remuda._butler_prompt_is_empty('codex', remuda.capture('quota-real-draft'))"),
+        eval(&path, "return (remuda._butler_prompt_is_empty('codex', remuda.capture('quota-real-draft')))"),
         "NON-EMPTY",
         "the real draft pane must be refused for its composer, not because it is busy"
     );
