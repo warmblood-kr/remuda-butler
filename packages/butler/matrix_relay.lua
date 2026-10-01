@@ -623,7 +623,6 @@ function relay.new(options)
         if route.from_agent ~= false then return false end
         route.last_reply_event_id = sent_id
         subscribe(state, route.room_id, route.thread_root or route.event_id, source_mail_id)
-        subscribe(state, route.room_id, sent_id, source_mail_id)
         persist()
         return true
       end
@@ -712,7 +711,6 @@ function relay.new(options)
           route.last_reply_mail_id, route.last_reply_event_id = reply_id, sent_id
           state.routes[item.source_mail_id] = route
           subscribe(state, route.room_id, route.thread_root or route.event_id, item.source_mail_id)
-          subscribe(state, route.room_id, sent_id, item.source_mail_id)
           state.reply_results[reply_id] = { source_mail_id = item.source_mail_id,
             reply_mail_id = reply_id, room_id = item.room_id, thread_root = item.thread_root,
             event_id = sent_id, event_ids = ids, completed_at = os.date("!%Y-%m-%dT%H:%M:%SZ") }

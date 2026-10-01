@@ -545,6 +545,7 @@ local function test_thread_root_mail_references_are_stable()
   assert(delivered[1] and delivered[1].event_id == "$human-root")
   assert(relay:record_outgoing_reply("$human-root", "$butler-sent"),
     "the Butler's Matrix reply event should map back to its answered mail")
+  relay:subscribe_thread("!room:example.org", "$butler-sent", "M0")
 
   sync(3, "s2", { event("$thread-first-response", {
     rel_type = "m.thread", event_id = "$butler-sent",
