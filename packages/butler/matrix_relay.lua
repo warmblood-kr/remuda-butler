@@ -696,6 +696,7 @@ function relay.new(options)
   local function persist()
     local ok, err = save_state(state_path, state)
     if not ok then error("cannot save Matrix relay state: " .. tostring(err), 0) end
+    return true
   end
 
   local function send_notice(room, text, warn_kind, warn_key)
@@ -1465,7 +1466,10 @@ function relay.new(options)
     if ok then
       state.typed_line_timestamps[#state.typed_line_timestamps + 1] = now
     end
-    persist()
+    local persisted, persist_result = pcall(persist)
+    if not persisted or persist_result ~= true then
+      error("cannot persist Matrix typed-line event before typing", 0)
+    end
     if not ok then
       send_typed_line_reply(event, room_id, typed_line_refusal(reason, target))
       return true
