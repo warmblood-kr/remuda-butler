@@ -9761,17 +9761,90 @@ fn butler_quota_never_guesses_mode() {
 fn butler_quota_usage_error() {
     let dir = scratch_dir("butler-quota-usage");
     let (_daemon, _path) = butler_cli_test_daemon(&dir);
-    let out = remuda_timed(&dir, &["-s", "s", "butler", "quota", "bogus"]);
+    let next = "Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.";
+    let usage = "Usage: remuda butler quota [--report]\nExample: remuda butler quota --report";
+    let out = remuda_timed(&dir, &["-s", "s", "butler", "quota", "--bogus"]);
     assert_eq!(out.status.code(), Some(2));
     assert_eq!(
         String::from_utf8_lossy(&out.stderr).trim(),
-        "Usage: remuda butler quota [--report]\nExample: remuda butler quota --report"
+        format!("unknown argument: --bogus\n{usage}\n{next}")
     );
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
         "",
         "a usage error prints nothing on stdout"
     );
+
+    for flag in ["--help", "-h"] {
+        let out = remuda_timed(&dir, &["-s", "s", "butler", "quota", flag]);
+        assert_eq!(out.status.code(), Some(0), "{flag}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            format!("{usage}\n{next}"),
+            "{flag}"
+        );
+    }
+}
+
+// codex-cli 0.159.3 prints `codex login status` on stderr (measured 2026-10-01).
+fn quota_write_stderr_stub(bin: &Path, name: &str, output: &str, exit_code: i32) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = bin.join(name);
+    std::fs::write(
+        &path,
+        format!("#!/bin/sh\nprintf '%s\\n' '{output}' >&2\nexit {exit_code}\n"),
+    )
+    .expect("write stderr agent stub");
+    let mut permissions = std::fs::metadata(&path)
+        .expect("stat stderr agent stub")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(path, permissions).expect("make stderr agent stub executable");
+}
+
+#[test]
+fn butler_quota_reads_codex_login_status_from_stderr() {
+    for (tag, codex, code, expected) in [
+        (
+            "logged-out",
+            "Not logged in",
+            1,
+            vec![
+                "codex: not logged in",
+                "Not logged in: codex.",
+                "Next: log in with `codex login`, then run `remuda butler quota` again.",
+            ],
+        ),
+        (
+            "chatgpt",
+            "Logged in using ChatGPT",
+            0,
+            vec!["codex: subscription, account: not exposed by codex"],
+        ),
+    ] {
+        let dir = scratch_dir(&format!("butler-quota-stderr-{tag}"));
+        let bin = doctor_stub_dir(&dir);
+        doctor_write_stub(
+            &bin,
+            "claude",
+            r#"{"loggedIn":true,"authMethod":"api_key"}"#,
+            0,
+        );
+        quota_write_stderr_stub(&bin, "codex", codex, code);
+        let path_env = bin.to_str().expect("PATH is UTF-8");
+        let (_daemon, _path) = butler_doctor_test_daemon(&dir, path_env);
+        let out = remuda_timed(&dir, &["-s", "s", "butler", "quota"]);
+        assert!(
+            out.status.success(),
+            "{tag}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        for line in expected {
+            assert!(stdout.contains(line), "{tag}: missing {line:?} in {stdout}");
+        }
+    }
 }
 
 fn assert_quota_utc_limit(stdout: &str, name: &str, used: u8) {

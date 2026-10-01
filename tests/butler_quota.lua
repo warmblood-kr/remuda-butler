@@ -142,6 +142,14 @@ local hidden = quota.render({ at = at, claude = ca, codex = { mode = "api_key" }
 ok("Claude organization fields never render", not hidden:find("secret%-org") and not hidden:find("Secret Organization", 1, true))
 eq("claude API key", quota.claude_account({ loggedIn = true, authMethod = "api_key" }).mode, "api_key")
 eq("claude logged out", quota.claude_account({ loggedIn = false }).mode, "not_logged_in")
+-- Measured on claude 2.1.286 in a logged-out home (2026-10-01).
+eq("claude logged out, measured shape", quota.claude_account({ loggedIn = false, authMethod = "none",
+  apiProvider = "firstParty" }).mode, "not_logged_in")
+eq("usage error text", quota.usage_error("--bogus"), "unknown argument: --bogus\n"
+  .. "Usage: remuda butler quota [--report]\nExample: remuda butler quota --report\n"
+  .. "Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.")
+eq("help text", quota.help(), "Usage: remuda butler quota [--report]\nExample: remuda butler quota --report\n"
+  .. "Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.")
 eq("claude unrecognised auth method", quota.claude_account({ loggedIn = true, authMethod = "sso" }).mode, "unknown")
 eq("claude missing auth", quota.claude_account(nil).mode, "unknown")
 
