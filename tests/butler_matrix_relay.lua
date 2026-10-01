@@ -2207,6 +2207,25 @@ local function test_leave_alias_prefers_configured_label_over_current_directory(
   remove_dir(dir)
 end
 
+local function test_leave_duplicate_configured_alias_is_refused()
+  local room_a, room_b = "!roomA:example.org", "!roomB:example.org"
+  local extra = "room=" .. room_a .. " how=operator alias=" .. ALIAS .. "\n"
+    .. "room=" .. room_b .. " how=operator alias=" .. ALIAS .. "\n"
+  local dir, path = invite_fixture(nil, extra)
+  local before = read_text(path)
+  with_alias_http(path, function()
+    error("ambiguous configured aliases must not reach HTTP")
+  end, function(calls)
+    local result
+    matrix.leave({ room = ALIAS }, function(value) result = value end)
+    assert(result and result.error and result.error:find("more than one configured Matrix room uses " .. ALIAS, 1, true),
+      "leave by a duplicate configured alias must explain that the label is ambiguous")
+    assert(#calls == 0, "leave by a duplicate configured alias must not make an HTTP call")
+    assert(read_text(path) == before, "leave by a duplicate configured alias must not change config")
+  end)
+  remove_dir(dir)
+end
+
 local function test_home_and_all_aliases_cannot_be_left()
   local dir, path = invite_fixture()
   for _, protected in ipairs({ HOME, ALL }) do
@@ -2890,6 +2909,7 @@ for _, case in ipairs({
   { "test_invalid_room_aliases_are_rejected_before_http", test_invalid_room_aliases_are_rejected_before_http },
   { "test_leave_alias_resolves_and_home_all_stay_refused", test_leave_alias_resolves_and_home_all_stay_refused },
   { "test_leave_alias_prefers_configured_label_over_current_directory", test_leave_alias_prefers_configured_label_over_current_directory },
+  { "test_leave_duplicate_configured_alias_is_refused", test_leave_duplicate_configured_alias_is_refused },
   { "test_home_and_all_aliases_cannot_be_left", test_home_and_all_aliases_cannot_be_left },
   { "test_join_plain_name_unique_match_joins_room", test_join_plain_name_unique_match_joins_room },
   { "test_join_plain_name_ambiguous_lists_without_joining", test_join_plain_name_ambiguous_lists_without_joining },
