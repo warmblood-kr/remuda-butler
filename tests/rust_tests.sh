@@ -75,6 +75,10 @@ mkdir -p "$CORE_DIR/native/tests/support"
 cp "$REPO/tests/support/fake_http.lua" "$CORE_DIR/native/tests/support/"
 ln -sfn "$REPO/packages" "$CORE_DIR/packages"
 
+# The Butler mod is installed once, here. CLI clients and the daemons that run
+# on a thread of the test process (daemon_at) find it through this variable.
+# Daemons started as their own process get a data home and a config home of
+# their own (own_homes in butler_daemon.rs, see #225) and link the mod in.
 export XDG_DATA_HOME=$scratch/data
 export XDG_CONFIG_HOME=$scratch/config
 export TMPDIR=$scratch/tmp

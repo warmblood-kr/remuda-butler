@@ -1016,9 +1016,37 @@ impl Drop for ProcessPidGuard {
     }
 }
 
+/// A data home of this daemon's own, under its scratch dir and removed with it
+/// (see #225). tests/rust_tests.sh installs the Butler mod once, in the
+/// XDG_DATA_HOME it exports; that mod directory is linked in here. A second
+/// daemon started in the same `dir` (a restart test) gets the same home.
+fn own_data_home(dir: &Path) -> PathBuf {
+    let data_home = dir.join("data");
+    let _ = std::fs::create_dir_all(data_home.join("remuda"));
+    if let Some(install) = std::env::var_os("XDG_DATA_HOME") {
+        let _ = std::os::unix::fs::symlink(
+            PathBuf::from(install).join("remuda/mods"),
+            data_home.join("remuda/mods"),
+        );
+    }
+    data_home
+}
+
+/// Every test daemon gets its own XDG_DATA_HOME and XDG_CONFIG_HOME. With one
+/// home for the whole cargo run, all daemons share agents.jsonl (one root
+/// Butler id), one inbox file and one config path.
+fn own_homes(cmd: &mut std::process::Command, dir: &Path) {
+    let config_home = dir.join("config");
+    let _ = std::fs::create_dir_all(&config_home);
+    cmd.env("XDG_DATA_HOME", own_data_home(dir))
+        .env("XDG_CONFIG_HOME", config_home);
+}
+
 impl Daemon {
     fn spawn(dir: &Path) -> Self {
-        let child = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
+        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"));
+        own_homes(&mut cmd, dir);
+        let child = cmd
             .args(["-s", "s", "daemon"])
             .env("REMUDA_RUNTIME_DIR", dir)
             .current_dir(dir)
@@ -1043,6 +1071,7 @@ impl Daemon {
     /// test`'s own working directory.
     fn spawn_with_pwd(dir: &Path, pwd: Option<&str>) -> Self {
         let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"));
+        own_homes(&mut cmd, dir);
         cmd.args(["-s", "s", "daemon"])
             .env("REMUDA_RUNTIME_DIR", dir)
             .current_dir(dir)
@@ -1074,6 +1103,8 @@ impl Daemon {
     /// `spawn`'s existing behavior.
     fn spawn_with_env(dir: &Path, extra_env: &[(&str, &str)]) -> Self {
         let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"));
+        // Before extra_env, so a home a test passes explicitly wins.
+        own_homes(&mut cmd, dir);
         cmd.args(["-s", "s", "daemon"])
             .env("REMUDA_RUNTIME_DIR", dir)
             .current_dir(dir)
@@ -1105,6 +1136,8 @@ impl Daemon {
     /// they happen to be set).
     fn spawn_with_home(dir: &Path, home: &Path) -> Self {
         let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"));
+        // XDG_CONFIG_HOME is removed again below: the config comes from HOME here.
+        own_homes(&mut cmd, dir);
         cmd.args(["-s", "s", "daemon"])
             .env("REMUDA_RUNTIME_DIR", dir)
             .current_dir(dir)
@@ -6014,7 +6047,7 @@ fn butler_compaction_schedule_sends_compact_when_idle_but_not_when_busy() {
     );
     let token_str = token_path.to_string_lossy().to_string();
     let config_str = config_path.to_string_lossy().to_string();
-    let data_str = std::env::var("XDG_DATA_HOME").expect("test XDG_DATA_HOME");
+    let data_str = own_data_home(&dir).to_string_lossy().to_string();
     let daemon = Daemon::spawn_with_env(
         &dir,
         &[
@@ -6301,7 +6334,7 @@ fn butler_compaction_fake_claude_scenarios_send_only_visible_keys() {
     );
     let token_str = token_path.to_string_lossy().to_string();
     let config_str = config_path.to_string_lossy().to_string();
-    let data_str = std::env::var("XDG_DATA_HOME").expect("test XDG_DATA_HOME");
+    let data_str = own_data_home(&dir).to_string_lossy().to_string();
     let daemon = Daemon::spawn_with_env(
         &dir,
         &[
