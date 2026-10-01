@@ -280,6 +280,11 @@ assert(remuda._butler_model_confirm_signature(
 assert(remuda._butler_model_confirm_signature(
   read_fixture("claude-model-confirm-composer-two-row-status.txt")) ~= nil,
   "model confirmation signature should recognize the composer dialog with two status rows")
+local live_composer_nbsp = read_fixture("claude-model-confirm-live-composer-nbsp.txt")
+assert(remuda._butler_model_confirm_signature(live_composer_nbsp) ~= nil,
+  "model confirmation signature should recognize the live NBSP composer")
+assert(remuda._butler_model_confirm_options_visible(live_composer_nbsp),
+  "model confirmation options should remain visible with the live NBSP composer")
 assert(remuda._butler_model_confirm_signature(
   read_fixture("claude-model-confirm-multiline-draft.txt")) == nil,
   "model confirmation signature should reject a multiline composer draft")
