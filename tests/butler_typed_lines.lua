@@ -29,7 +29,13 @@ local cases = {
   { name = "shell form leaves one bang", event = event("!!ls"), ok = true, line = "!ls", form = "!!" },
   { name = "leading slash is allowed", event = event("!/status"), ok = true, line = "/status", form = "!" },
   { name = "owner allowlist required", event = event("!hello", { sender = "@other:example.org" }), ok = false },
-  { name = "Butler sender refused", event = event("!hello", { sender = "@remuda-bot:example.org" }), ok = false },
+  { name = "allowlisted Butler sender refused", event = event("!hello", { sender = "@remuda-bot:example.org" }), cfg = {
+    allowed_senders = { ["@remuda-bot:example.org"] = true },
+    butler_senders = { ["@remuda-bot:example.org"] = true }, typed_lines = true, shell_lines = true,
+  }, ok = false },
+  { name = "allowlisted agent prefix refused", event = event("!hello", { sender = "@agent-worker:example.org" }), cfg = {
+    allowed_senders = { ["@agent-worker:example.org"] = true }, typed_lines = true, shell_lines = true,
+  }, ok = false },
   { name = "non-message sender kind refused", event = event("!hello", { sender = "@member-agent:example.org" }), ok = false },
   { name = "event older than five minutes refused", event = event("!hello", { origin_server_ts = (now - 301) * 1000 }), ok = false },
   { name = "event exactly five minutes old accepted", event = event("!hello", { origin_server_ts = (now - 300) * 1000 }), ok = true, line = "hello", form = "!" },
@@ -44,6 +50,7 @@ local cases = {
   { name = "triple bang refused", event = event("!!!ls"), ok = false },
   { name = "eleventh line in ten minutes refused", event = event("!hello"), state = { processed = {}, timestamps = { now - 10, now - 9, now - 8, now - 7, now - 6, now - 5, now - 4, now - 3, now - 2, now - 1 } }, ok = false },
   { name = "typed lines switch off", event = event("!hello"), cfg = { typed_lines = false, shell_lines = true }, ok = false },
+  { name = "shell line requires typed lines too", event = event("!!ls"), cfg = { typed_lines = false, shell_lines = true }, ok = false },
   { name = "shell lines switch off", event = event("!!ls"), cfg = { typed_lines = true, shell_lines = false }, ok = false },
 }
 
@@ -59,4 +66,5 @@ for index, case in ipairs(cases) do
   end
 end
 
+assert(next(empty.processed) == nil and #empty.timestamps == 0, "gate must not mutate replay or rate state")
 print(("ok - %d typed-line gate cases"):format(#cases))
