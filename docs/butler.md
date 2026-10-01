@@ -254,6 +254,9 @@ member, identified by the agent identity in the client environment
 (session, unknown, outside) is not checked, so a caller with those variables
 cleared is not refused. This is advisory within one UID, not an OS boundary:
 any local process running as the same user can drop the variables.
+The CLI verbs (`approve`, `deny`, `matrix setup`, `join`, `leave`) identify the
+member from those variables only; the MCP tools also accept the session
+capability.
 
 Approvals: when an agent runs `matrix join`, Butler resolves the room and
 posts one request to HOME instead of joining. The owner answers with a ✅ or
