@@ -290,15 +290,21 @@ assert(remuda._butler_model_confirm_signature(transcript_copy) == nil
 local model_dialog_fixture = read_fixture("claude-model-confirm-composer-two-row-status.txt")
 assert(remuda._butler_model_dialog_waiting(model_dialog_fixture),
   "model dialog waiting helper should detect a Switch model dialog")
+local original_timeout_reason = "timed out waiting for model-restored"
+local stale_permission_screen = read_fixture("claude-stale-model-confirm-with-permission.txt")
+assert(not remuda._butler_model_dialog_waiting(stale_permission_screen)
+  and remuda._butler_model_timeout_reason(original_timeout_reason, "s1", stale_permission_screen)
+    == original_timeout_reason,
+  "model dialog waiting helper should ignore a permission prompt and preserve its timeout reason")
 local dialog_timeout_reason = remuda._butler_model_timeout_reason(
-  "model-restored", "s1", model_dialog_fixture)
+  original_timeout_reason, "s1", model_dialog_fixture)
 assert(dialog_timeout_reason:find("appears to be waiting in s1", 1, true)
   and dialog_timeout_reason:find("Next:", 1, true),
   "model timeout reason should explain that the dialog is waiting and how to handle it")
 local plain_screen = "ordinary assistant response"
 assert(not remuda._butler_model_dialog_waiting(plain_screen)
-  and remuda._butler_model_timeout_reason("model-restored", "s1", plain_screen)
-    == "timed out waiting for model-restored",
+  and remuda._butler_model_timeout_reason(original_timeout_reason, "s1", plain_screen)
+    == original_timeout_reason,
   "model timeout reason should preserve the ordinary timeout without a dialog")
 local untitled_model_confirm = "❯ 1. Yes, switch to Opus 5.5\n  2. No, go back"
 assert(remuda._butler_model_confirm_signature(untitled_model_confirm) == nil
