@@ -10232,13 +10232,13 @@ fn butler_quota_reuses_for_sixty_seconds_then_collects_again() {
     let dir = scratch_dir("butler-quota-reuse");
     let bin = doctor_stub_dir(&dir);
     let runs = dir.join("quota-probe-runs.log");
-    for (name, output) in [
-        ("claude", r#"{"loggedIn":true,"authMethod":"api_key"}"#),
-        ("codex", "Logged in using an API key"),
+    for (name, probe, output) in [
+        ("claude", "auth status", r#"{"loggedIn":true,"authMethod":"api_key"}"#),
+        ("codex", "login status", "Logged in using an API key"),
     ] {
         let path = bin.join(name);
         std::fs::write(&path, format!(
-            "#!/bin/sh\nprintf '%s\\n' {name:?} >> {}\nprintf '%s\\n' {output:?}\n",
+            "#!/bin/sh\nif [ \"$1 $2\" = {probe:?} ]; then printf '%s\\n' {name:?} >> {}; fi\nprintf '%s\\n' {output:?}\n",
             runs.to_string_lossy()
         )).expect("write counted quota probe");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("make probe executable");
@@ -10349,6 +10349,16 @@ done
     "#, lua_raw_string(&empty_log.to_string_lossy())));
     let empty = remuda_timed(&dir, &["-s", "s", "butler", "quota"]);
     assert!(empty.status.success(), "{}", String::from_utf8_lossy(&empty.stderr));
+    let empty_stdout = String::from_utf8_lossy(&empty.stdout);
+    let empty_gates = eval(&path, r#"
+      local alias, session = "quota-real-empty", "quota-real-empty"
+      local idle, idle_detail = remuda.butler.is_idle(alias)
+      local policy = remuda._butler_notify_policy(session)
+      local screen = remuda.capture(session)
+      local prompt, prompt_detail = remuda._butler_prompt_is_empty("codex", screen)
+      return string.format("is_idle=%s,%s notify_policy=%s prompt_is_empty=%s,%s screen=%q",
+        tostring(idle), tostring(idle_detail), tostring(policy), tostring(prompt), tostring(prompt_detail), screen)
+    "#);
     assert!(std::fs::read_to_string(&empty_log).unwrap_or_default().contains("/status"),
-        "the empty real codex composer was not typed; the draft assertion would be vacuous");
+        "the empty real codex composer was not typed; the draft assertion would be vacuous\nstdout:\n{empty_stdout}\ngates: {empty_gates}");
 }
