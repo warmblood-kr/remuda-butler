@@ -17,6 +17,8 @@ release tags yet; entries come from merged pull requests.
 - `remuda butler matrix follow EVENT_ID` and `unfollow EVENT_ID` manage thread replies. HOME always delivers replies; other rooms deliver a reply only in a followed thread or on a mention. Replying, sending, and a mention from an allowlisted sender follow the thread automatically (#178).
 - `remuda butler matrix send -` reads the message from stdin, up to 64 KiB (#170).
 - Outgoing Matrix messages carry a formatted HTML body rendered from a Markdown subset; raw HTML is always escaped (#171).
+- Matrix `posts_per_hour` (default 30) caps the Butler's own Matrix posts per hour; a refused post says `Next: wait until HH:MMZ`.
+- When the hourly cap for non-allowlisted senders is hit, HOME gets a summary with the count: the first one at once, then at most one per room per 10 minutes.
 
 ### Changed
 - `matrix setup --pin` and `pin_sha256` now trust a self-signed homeserver on their own, using core `pin_only`. The hostname, validity dates and SPKI pin are still checked, and `ca_file` keeps full chain validation. Recommended core: `0.1.0-nightly.20261001000710.0a5f090` (#164).
@@ -32,6 +34,7 @@ release tags yet; entries come from merged pull requests.
 - The `matrix setup` wizard accepts Enter at the HTTPS trust prompt to use this system's trusted certificates; a certificate pin or CA file path can still be entered (#175).
 - Matrix messages from senders not on the allowlist are delivered with a not-on-allowlist marker and are capped per room per hour; their media is quarantined (#178).
 - The unread-mail notice fires on a timer, 2 s after the last arrival and at most 10 s after the first, on cores with `remuda.after` (#177).
+- Butler-to-Butler Matrix replies are no longer blocked. A per-thread turn guard (`b2b_max_turns`, default 6) stops the Butler after 6 Butler-only turns and posts one line to HOME; a reply in that thread from someone on the allowlist resumes it.
 
 ### Fixed
 - `matrix setup --force` keeps the existing `deny_room`/`deny_server` lines (#154).
