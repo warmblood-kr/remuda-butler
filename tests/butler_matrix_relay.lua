@@ -183,6 +183,27 @@ local function test_typed_line_switches_and_non_candidates()
     end
     relay:stop()
     cleanup_fixture(dir, config_path)
+
+    dir, config_path = fixture("typed_lines=true\nshell_lines=true\n")
+    client, delivered = scripted_client(), {}
+    local typed_before = #typed
+    relay = relay_module.new({ config_path = config_path, matrix = client,
+      deliver = function(event) delivered[#delivered + 1] = event return true end })
+    relay:start()
+    client:complete(1, { json = { next_batch = "s0" } })
+    assert(os.remove(config_path), "remove the config before its next sync reload")
+    client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+      ["!room:example.org"] = { timeline = { events = { typed_line_event("$config-read-failed", "!hi") } } },
+    } } } })
+    assert(#typed == typed_before, "a failed config reload must turn both typed-line switches off")
+    assert(#delivered == 1 and delivered[1].event_id == "$config-read-failed",
+      "a failed config reload must leave the owner line on the ordinary mail path")
+    for _, request in ipairs(client.requests) do
+      assert(not tostring(request.path):find("/send/m.room.message/", 1, true),
+        "a failed config reload must not send a typed-line refusal")
+    end
+    relay:stop()
+    cleanup_fixture(dir, config_path)
   end)
 end
 

@@ -23,8 +23,12 @@ local function has_forbidden_character(text)
   -- Unicode directional marks, embeddings, overrides, and isolates.
   return text:find("\216\156") ~= nil
     or text:find("\226\128[\142\143\170-\174]") ~= nil
+    or text:find("\226\128[\139-\141]") ~= nil
     or text:find("\226\129[\166-\169]") ~= nil
+    or text:find("\226\129\160") ~= nil
     or text:find("\226\128[\168\169]") ~= nil
+    or text:find("\243\160\128[\128-\191]") ~= nil
+    or text:find("\243\160\129[\128-\191]") ~= nil
 end
 
 local function reject(reason)

@@ -2057,6 +2057,8 @@ function relay.new(options)
       if refreshed then
         cfg.rooms, cfg.room_how = refreshed.rooms, refreshed.room_how
         cfg.typed_lines, cfg.shell_lines = refreshed.typed_lines, refreshed.shell_lines
+      else
+        cfg.typed_lines, cfg.shell_lines = false, false
       end
     end
     if path == SYNC_PATH and state.since == nil then
