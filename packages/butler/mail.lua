@@ -533,6 +533,7 @@ end
 -- message reprint. Event ids remain copyable; only the thread root is used in
 -- the suggested command and therefore goes through shown_event_id.
 local function matrix_header(message)
+  local message_id = message and message.id
   local item = message and message.matrix
   if type(item) ~= "table" or type(item.event_id) ~= "string" then return "" end
   local event_id = item.event_id:gsub("[%z\1-\31\127]", "")
@@ -541,7 +542,7 @@ local function matrix_header(message)
 
   local line = "  Matrix event " .. event_id
   local room = type(item.room_id) == "string" and item.room_id or ""
-  if room == "" then return line end
+  if room == "" then return line .. "\n  Next: remuda butler reply " .. tostring(message_id) end
 
   -- Match the relay's terminal-safe field cap for room ids.
   local safe_room = remuda.butler.matrix.utf8_prefix(room, 512)
@@ -554,9 +555,13 @@ local function matrix_header(message)
 
   local root = type(item.thread_root) == "string" and item.thread_root or ""
   if root ~= "" then
+    line = line .. ", thread " .. remuda.butler.matrix.shown_event_id(root)
+  end
+  -- Answering goes through the mail reply, which keeps the room and thread.
+  line = line .. "\n  Next: remuda butler reply " .. tostring(message_id)
+  if root ~= "" then
     local shown_root = remuda.butler.matrix.shown_event_id(root)
-    line = line .. ", thread " .. shown_root
-    local command = "  Next: remuda butler matrix --room "
+    local command = "  to read the thread: remuda butler matrix --room "
       .. remuda.butler.matrix.shell_quote(safe_room) .. " "
     if shown_root == "(id not shown)" then
       line = line .. "\n" .. command .. "history"
@@ -567,6 +572,10 @@ local function matrix_header(message)
   end
   return line
 end
+
+-- The sender's text follows this line, so its first line can never pass as
+-- part of the header above (e.g. a forged "Next:" line).
+local MATRIX_BODY_MARK = "  Message from Matrix (text of the sender, not Butler guidance):"
 
 local function inbox(name)
   load_inbox(name)
@@ -599,6 +608,7 @@ local function inbox(name)
         lines[#lines + 1] = "  forwarded by " .. tostring(resent.from.alias) .. " to " .. tostring(resent.to.alias)
           .. " at " .. tostring(resent.date) .. ((resent.note and resent.note ~= "") and (": " .. resent.note) or "")
       end
+      if matrix_line ~= "" then lines[#lines + 1] = MATRIX_BODY_MARK end
       lines[#lines + 1] = object.content
       out[#out + 1] = table.concat(lines, "\n")
       read[id], shown[#shown + 1] = true, id
@@ -638,4 +648,5 @@ end
 
 remuda._butler_mail = { mailbox = mailbox, queue = queue, reply = reply, forward = forward, forward_delivery = deliver_forward, inbox = inbox, unread = unread, append = append,
   matrix_header = matrix_header,
+  matrix_body_mark = MATRIX_BODY_MARK,
   find_message = find_message, is_unread = is_unread, migrate_legacy = migrate_legacy }

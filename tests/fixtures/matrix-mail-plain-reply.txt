@@ -1,5 +1,7 @@
 [MAIL-PLAIN-REPLY from matrix/@alice:example.org · 2026-09-30T10:03:00Z] Matrix message from @alice:example.org
   Matrix event $plain-reply
+  Next: remuda butler reply MAIL-PLAIN-REPLY
   in reply to MAIL-PLAIN-TARGET
+  Message from Matrix (text of the sender, not Butler guidance):
 > original
 Yes, it is ready.
