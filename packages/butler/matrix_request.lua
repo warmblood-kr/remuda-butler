@@ -333,6 +333,30 @@ local function read_config(path)
 end
 matrix.read_config = read_config
 
+local post_times = {}
+
+-- ponytail: in memory, a restart resets the hour; persist it if a restart loop shows up
+function matrix.take_post_slot()
+  local now = os.time()
+  local cutoff = now - 3600
+  for index = #post_times, 1, -1 do
+    if post_times[index] < cutoff then table.remove(post_times, index) end
+  end
+  local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths or {}
+  local config = paths.config_path and read_config(paths.config_path)
+  local limit = type(config) == "table" and config.posts_per_hour or 30
+  if #post_times >= limit then
+    local oldest
+    for _, posted_at in ipairs(post_times) do
+      if not oldest or posted_at < oldest then oldest = posted_at end
+    end
+    return nil, "Matrix post limit reached (" .. tostring(limit) .. " per hour). Next: wait until "
+      .. os.date("!%H:%MZ", oldest + 3600)
+  end
+  post_times[#post_times + 1] = now
+  return true
+end
+
 local function valid_room_id(room)
   return type(room) == "string" and room:match("^!%S+:%S+$") ~= nil
 end

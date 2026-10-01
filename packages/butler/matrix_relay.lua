@@ -848,10 +848,8 @@ function relay.new(options)
       local pending = 0
       for _ in pairs(state.reply_outbox) do pending = pending + 1 end
       if pending >= MAX_REPLY_OUTBOX then return nil, "Matrix mail reply outbox is full" end
-      if type(matrix.take_post_slot) == "function" then
-        local slot, slot_error = matrix.take_post_slot()
-        if not slot then return nil, slot_error end
-      end
+      local slot, slot_error = matrix.take_post_slot()
+      if not slot then return nil, slot_error end
       local root = route.thread_root
       state.reply_outbox[reply_id] = { source_mail_id = source_id, room_id = route.room_id,
         event_id = route.event_id, thread_root = root, text = opts.text,
