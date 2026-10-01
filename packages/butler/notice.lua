@@ -1033,7 +1033,7 @@ function remuda._butler_inbox_message(caller, id)
   local output = "[" .. message.id .. " from " .. tostring(message.from.host) .. "/" .. tostring(message.from.session)
     .. " · " .. tostring(message.created_at) .. "] " .. tostring(message.subject) .. "\n"
   local matrix_line = mail.matrix_header(message)
-  if matrix_line ~= "" then output = output .. matrix_line .. "\n" end
+  if matrix_line ~= "" then output = output .. matrix_line .. "\n" .. mail.matrix_body_mark .. "\n" end
   return output .. object.content
 end
 function remuda._butler_send(from, to, text)
