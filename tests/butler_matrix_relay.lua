@@ -3179,11 +3179,15 @@ local function test_rx_untrusted_room_cap_logs_once_home_summary()
     end
     assert(warnings == 2 and new_warnings == 1,
       "exactly ONE rate cap warning line per capped room, got " .. warnings .. " (" .. new_warnings .. " for the joined room)")
-    local summary = "messages from non-allowlisted senders not delivered in "
-    assert(client:messages(HOME, "3 " .. summary .. NEW .. " (rate cap). Next: remuda butler matrix --room "
-      .. NEW .. " history") == 1, "the first capped sync posts ONE exact HOME summary with its own count")
-    assert(client:messages(HOME, summary .. NEW) == 2, "one HOME summary per sync with capped events in the joined room")
-    assert(client:messages(HOME, summary .. HOME) == 1, "one HOME summary for the capped HOME sync")
+    local summary = " from non-allowlisted senders not delivered in "
+    local function summary_line(count, room)
+      return count .. summary .. room .. " (rate cap). Next: remuda butler matrix --room " .. room .. " history"
+    end
+    assert(client:messages(HOME, summary_line("3 messages", NEW)) == 1,
+      "the first capped sync posts ONE exact HOME summary with its own count")
+    assert(client:messages(HOME, summary_line("1 message", NEW)) == 1,
+      "a later capped sync posts its own summary, and a count of 1 reads '1 message'")
+    assert(client:messages(HOME, summary_line("1 message", HOME)) == 1, "one HOME summary for the capped HOME sync")
     now = now + 3601
     rx_sync(client, NEW, { rx_msg("$u7", STRANGER, "an hour later") })
     assert(rx_find(delivered, "$u7"), "delivery works again after the hour")
