@@ -34,16 +34,48 @@ local function remove_dir(dir)
   os.execute("rm -rf " .. string.format("%q", dir))
 end
 
-local function fixture(extra)
+local function fixture(extra, mode)
   local dir = os.tmpname()
   os.remove(dir)
   assert(os.execute("mkdir -p " .. string.format("%q", dir)))
   local path = dir .. "/config"
   local file = assert(io.open(path, "w"))
   file:write("https://matrix.invalid\n!room:example.org\n@bot:example.org\n",
-    "@alice:example.org\nfalse\n30000\n", extra or "")
+    "@alice:example.org\n", mode or "false", "\n30000\n", extra or "")
   file:close()
   return dir, path
+end
+
+local function cleanup_fixture(dir, config_path)
+  for _, suffix in ipairs({ "", ".since", ".since.bak", ".acks", ".acks.drain" }) do
+    os.remove(config_path .. suffix)
+  end
+  assert(os.remove(dir))
+end
+
+local function scripted_client()
+  local client = { requests = {}, callbacks = {}, cancelled = {} }
+  function client.request_json(args, callback)
+    local index = #client.requests + 1
+    client.requests[index] = args
+    client.callbacks[index] = callback
+    return { cancel = function() client.cancelled[index] = true end }
+  end
+  function client:complete(index, value)
+    assert(self.callbacks[index], "missing request callback " .. tostring(index))
+    local callback = self.callbacks[index]
+    self.callbacks[index] = nil
+    callback(value)
+  end
+  return client
+end
+
+local function tick_timers(count)
+  for _ = 1, count or 1 do
+    for _, timer in ipairs(remuda._relay_timers) do
+      if not timer.cancelled then timer.spec.run() end
+    end
+  end
 end
 
 local function typed_line_event(id, body)
@@ -80,6 +112,8 @@ local function test_typed_line_switches_and_non_candidates()
       ["!room:example.org"] = { timeline = { events = { typed_line_event("$off", "!off") } } },
     } } } })
     assert(#typed == 0, "both typed-line switches default off")
+    assert(#delivered == 1 and delivered[1].event_id == "$off",
+      "with switches off the owner line stays on the ordinary mail path")
     relay:stop()
     cleanup_fixture(dir, config_path)
 
@@ -132,45 +166,30 @@ local function test_typed_line_replay_after_restart_and_history_are_not_typed()
     } } } })
     assert(#typed == 1, "durable event record must prevent typing the replay after restart")
     relay:stop()
-
-    local history_path = "/_matrix/client/v3/rooms/!room%3Aexample.org/messages"
-    relay._response({ start = "m0", ["end"] = "m0", chunk = {} }, history_path)
-    relay._response({ ["end"] = "m1", chunk = { typed_line_event("$history", "!history") } }, history_path)
-    assert(#typed == 1, "history/back-pagination events must never be typed")
     cleanup_fixture(dir, config_path)
-  end)
-end
 
-local function cleanup_fixture(dir, config_path)
-  for _, suffix in ipairs({ "", ".since", ".since.bak", ".acks", ".acks.drain" }) do
-    os.remove(config_path .. suffix)
-  end
-  assert(os.remove(dir))
-end
-
-local function scripted_client()
-  local client = { requests = {}, callbacks = {}, cancelled = {} }
-  function client.request_json(args, callback)
-    local index = #client.requests + 1
-    client.requests[index] = args
-    client.callbacks[index] = callback
-    return { cancel = function() client.cancelled[index] = true end }
-  end
-  function client:complete(index, value)
-    assert(self.callbacks[index], "missing request callback " .. tostring(index))
-    local callback = self.callbacks[index]
-    self.callbacks[index] = nil
-    callback(value)
-  end
-  return client
-end
-
-local function tick_timers(count)
-  for _ = 1, count or 1 do
-    for _, timer in ipairs(remuda._relay_timers) do
-      if not timer.cancelled then timer.spec.run() end
+    local history_dir, history_config = fixture("typed_lines=true\nshell_lines=true\n", "messages")
+    client = scripted_client()
+    relay = relay_module.new({ config_path = history_config, matrix = client, deliver = function() return true end })
+    relay:start()
+    assert(client.requests[1].path:find("/messages?dir=b&limit=1", 1, true),
+      "history fixture must use the Matrix /messages back-pagination path")
+    client:complete(1, { json = { start = "m0", ["end"] = "m0", chunk = {} } })
+    tick_timers(1)
+    local history_request
+    for index, request in ipairs(client.requests) do
+      if client.callbacks[index] and tostring(request.path):find("/messages?from=m0", 1, true) then
+        history_request = index
+        break
+      end
     end
-  end
+    assert(history_request, "history pagination request should follow its baseline")
+    client:complete(history_request, { json = { ["end"] = "m1",
+      chunk = { typed_line_event("$history-same-shape", "!hello") } } })
+    assert(#typed == 1, "a same-shaped history event with a different ID must not type")
+    relay:stop()
+    cleanup_fixture(history_dir, history_config)
+  end)
 end
 
 local function test_baseline_resume_filters_and_envelope()
