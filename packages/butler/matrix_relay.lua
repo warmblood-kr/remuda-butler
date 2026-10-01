@@ -777,7 +777,8 @@ function relay.new(options)
     for mail_id, route in pairs(state.routes) do
       if route.event_id == event_id or route.last_reply_event_id == event_id then
         return { source_mail_id = mail_id, room_id = route.room_id,
-          thread_root = route.thread_root or route.event_id, from_agent = route.from_agent }
+          thread_root = route.thread_root or route.event_id, from_agent = route.from_agent,
+          allowlisted_human = route.allowlisted_human == true }
       end
     end
   end
@@ -906,8 +907,10 @@ function relay.new(options)
           .. " Butler-only turns. A reply in that thread from a person on the allowlist resumes it.\nNext: remuda butler matrix --room "
           .. shell_quote(safe_room) .. " thread " .. shell_quote(safe_root)
       end
-      local slot, slot_error = matrix.take_post_slot(config_path)
-      if not slot then return nil, slot_error end
+      if route.allowlisted_human ~= true then
+        local slot, slot_error = matrix.take_post_slot(config_path)
+        if not slot then return nil, slot_error end
+      end
       state.reply_outbox[reply_id] = { source_mail_id = source_id, room_id = route.room_id,
         event_id = route.event_id, thread_root = route.thread_root, text = opts.text,
         from_agent = route.from_agent, room_kind = route.room_kind,
@@ -998,6 +1001,7 @@ function relay.new(options)
               state.routes[result.id] = { room_id = event.room_id, event_id = event.event_id,
                 thread_root = event.thread_root, in_reply_to = event.in_reply_to,
                 context_mail_id = event.context_mail_id, from_agent = event.from_agent,
+                allowlisted_human = event.trusted == true and event.from_agent == false,
                 room_kind = event.room_kind,
                 created_at = event.created_at }
               if event.subscribe_thread and event.thread_root then

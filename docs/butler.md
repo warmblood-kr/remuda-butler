@@ -86,7 +86,8 @@ after that, at most one is posted per room every 10 minutes, and capped messages
 accumulate in its count until the next summary.
 
 Configure `b2b_max_turns` (default 6) for consecutive Butler-only turns in one
-thread, `posts_per_hour` (default 30) for Matrix posts by this Butler, and
+thread, `posts_per_hour` (default 30) for posts that are not a reply to a person
+on the allowlist, and
 `untrusted_per_room_hour` (default 20) for non-allowlisted messages delivered
 from each room. The Butler's own replies count as turns. These counters are held
 in memory and reset when the daemon restarts. `b2b_max_turns` and
@@ -231,7 +232,8 @@ file contains:
    the default; repeat `deny_room=ROOM_ID`, `deny_room=#alias:server`, or
    `deny_server=host` lines to refuse matching invites;
    `b2b_max_turns=N` sets the consecutive Butler-only thread turn limit
-   (default 6); `posts_per_hour=N` sets the Matrix post limit (default 30);
+   (default 6); `posts_per_hour=N` caps posts that are not a reply to a person
+   on the allowlist (default 30);
    `untrusted_per_room_hour=N` sets the per-room non-allowlisted message limit
    (default 20);
    `ca_file=PATH` trusts a custom CA, and `pin_sha256=HEX` pins the

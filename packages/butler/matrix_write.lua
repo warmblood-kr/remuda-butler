@@ -153,6 +153,8 @@ function matrix.reply(opts, on_done)
       .. " was not delivered to this Butler as mail, so its sender cannot be verified.\n"
       .. "Next: remuda butler inbox (you can only reply to events listed there)")
   end
+  local route = relay:route_for_event(opts.event_id)
+  local allowlisted_human_reply = route ~= nil and route.allowlisted_human == true
   local root = relay:thread_root_for_event(opts.event_id)
   local safe_room = terminal_safe(room)
   local safe_root = terminal_safe(root or opts.event_id)
@@ -168,8 +170,10 @@ function matrix.reply(opts, on_done)
   end
   return same_room_then(room, opts.event_id, done, function(reply_done)
     if not opts.from_outbox then
-      local slot, slot_error = matrix.take_post_slot()
-      if not slot then return error_result(reply_done, slot_error) end
+      if not allowlisted_human_reply then
+        local slot, slot_error = matrix.take_post_slot()
+        if not slot then return error_result(reply_done, slot_error) end
+      end
       relay:note_own_turn(room, root)
     end
     local relation_root = type(opts.thread_root) == "string" and opts.thread_root ~= ""
