@@ -7,6 +7,7 @@ local numbered_option = assert(config.numbered_option)
 local bottom_screen_lines = assert(config.bottom_screen_lines)
 local file_exists = assert(config.file_exists)
 local contributions = assert(config.contributions)
+local system = assert(remuda._butler_system)
 
 local AGENT_BUILDERS = remuda._butler_agent_builders
 local TELEMETRY_ADAPTERS = remuda._butler_telemetry_adapters
@@ -107,12 +108,12 @@ local function choose(candidates, opts, done)
     local executable = (builder_override and argv and argv[1])
       or entry.requires or entry.executable or (argv and argv[1]) or id
     if not opts.argv then
-      local quoted = "'" .. tostring(executable):gsub("'", "'\\''") .. "'"
-      local found = os.execute("command -v " .. quoted .. " >/dev/null 2>&1")
-      if found ~= true and found ~= 0 then
-        attempt.reason, attempt.detail = "not_found", executable .. " not found in PATH"
+      local found, lookup_error = system.find_command(executable)
+      if not found then
+        attempt.reason, attempt.detail = "not_found", lookup_error or (executable .. " not found in PATH")
         start_next(); return
       end
+      if type(argv) == "table" and argv[1] == executable then argv[1] = found end
     end
     local ok, name = pcall(remuda.new, opts.name, argv, opts.cwd, opts.env(id, spec))
     if not ok then

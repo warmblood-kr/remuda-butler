@@ -24,6 +24,7 @@ remuda = {
   -- main.lua loads its modules with exec; resolve them the way the daemon does.
   exec = function(name) return dofile("packages/butler/" .. name:gsub("^butler/", "") .. ".lua") end,
 }
+dofile("packages/butler/system.lua")
 dofile("packages/butler/main.lua")
 -- Test mode returns before the daemon loads compaction_run.lua, so load that
 -- module with the same pure helper dependencies for its exported dialog tests.

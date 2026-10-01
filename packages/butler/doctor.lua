@@ -1,37 +1,35 @@
 -- Read-only installation and authentication checks for the Butler CLI.
-local function platform_name()
-  return package.config:sub(1, 1) == "\\" and "windows" or "posix"
-end
+local system = assert(remuda._butler_system)
 
 local function command_candidates(name, platform)
-  platform = platform or platform_name()
+  platform = platform or system.platform()
   if platform == "windows" then return { name, name .. ".cmd" } end
   return { name }
 end
 
-local function probe_command(argv, platform)
-  for _, name in ipairs(command_candidates(argv[1], platform)) do
-    local candidate = { name }
-    for i = 2, #argv do candidate[#candidate + 1] = argv[i] end
-    local ok, result = pcall(remuda.process.run, { argv = candidate, timeout = 5 })
-    if ok then
-      return {
-        installed = true,
-        logged_in = result.code == 0 and not result.timed_out,
-        timed_out = not not result.timed_out,
-        stdout = result.stdout,
-        stderr = result.stderr,
-      }
-    end
-
-    local message = tostring(result):lower()
-    if not (message:find("os error 2", 1, true)
-        or message:find("no such file or directory", 1, true)
-        or message:find("cannot find the file specified", 1, true)) then
-      return { installed = true, probe_error = true }
-    end
+local function probe_command(argv)
+  local path = system.find_command(argv[1])
+  if not path then return { installed = false, logged_in = false } end
+  local candidate = { path }
+  for i = 2, #argv do candidate[#candidate + 1] = argv[i] end
+  local ok, result = pcall(remuda.process.run, { argv = candidate, timeout = 5 })
+  if ok then
+    return {
+      installed = true,
+      logged_in = result.code == 0 and not result.timed_out,
+      timed_out = not not result.timed_out,
+      stdout = result.stdout,
+      stderr = result.stderr,
+    }
   end
-  return { installed = false, logged_in = false }
+
+  local message = tostring(result):lower()
+  if message:find("os error 2", 1, true)
+      or message:find("no such file or directory", 1, true)
+      or message:find("cannot find the file specified", 1, true) then
+    return { installed = false, logged_in = false }
+  end
+  return { installed = true, probe_error = true }
 end
 
 local function probe()
@@ -47,7 +45,7 @@ end
 
 local function render(probe_results, platform)
   probe_results = probe_results or {}
-  platform = platform or platform_name()
+  platform = platform or system.platform()
   local claude = probe_results.claude or {}
   local codex = probe_results.codex or {}
   local function status(cli)
@@ -116,6 +114,7 @@ end
 local doctor = {
   probe = probe,
   render = render,
+  probe_command = probe_command,
   permission_lines = permission_lines,
   candidate_names = command_candidates,
 }

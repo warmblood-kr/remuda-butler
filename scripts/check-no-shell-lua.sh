@@ -42,6 +42,7 @@ while IFS= read -r path; do
 done <"$FILES"
 
 while IFS='|' read -r path expected extra; do
+  case "$path" in ''|\#*) continue ;; esac
   [ -n "$path" ] || { echo 'empty path in Lua shell-call allowlist' >&2; exit 2; }
   case "$expected" in ''|*[!0-9]*) printf 'invalid count in Lua shell-call allowlist: %s\n' "$path" >&2; exit 2 ;; esac
   [ -z "${extra:-}" ] || { printf 'invalid allowlist row: %s|%s|%s\n' "$path" "$expected" "$extra" >&2; exit 2; }
@@ -50,6 +51,14 @@ while IFS='|' read -r path expected extra; do
   actual=$(count_calls "$ROOT/$path")
   [ "$actual" = "$expected" ] || printf 'stale shell-call allowlist entry: %s expected %s, found %s\n' "$path" "$expected" "$actual" >>"$BAD"
 done <"$ALLOWLIST"
+
+while IFS= read -r path; do
+  case "$path" in packages/butler/*.lua) ;; *) continue ;; esac
+  [ "$path" = "packages/butler/system.lua" ] && continue
+  if grep -E 'package[[:space:]]*\.[[:space:]]*config|jit[[:space:]]*\.[[:space:]]*os|os[[:space:]]*\.[[:space:]]*getenv[[:space:]]*\([[:space:]]*["\047]OS["\047]' "$ROOT/$path" >/dev/null; then
+    printf 'OS check outside packages/butler/system.lua: %s\n' "$path" >>"$BAD"
+  fi
+done <"$FILES"
 
 if [ -s "$BAD" ]; then cat "$BAD" >&2; exit 1; fi
 echo 'ok - Lua shell calls match the frozen allowlist'

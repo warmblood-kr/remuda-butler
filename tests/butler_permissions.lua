@@ -2,6 +2,7 @@
 --   luajit tests/butler_permissions.lua
 remuda = {}
 local permissions = dofile("packages/butler/permissions.lua")
+dofile("packages/butler/system.lua")
 local doctor_module = dofile("packages/butler/doctor.lua")
 local count = 0
 

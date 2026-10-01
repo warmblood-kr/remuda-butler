@@ -3,6 +3,7 @@
 -- main.lua passes its locals in (the mail.lua pattern); the lifecycle
 -- schedule itself stays declared in init.lua.
 local config = assert(remuda._butler_compaction_run_config)
+local system = assert(remuda._butler_system)
 local mail_root = config.mail_root
 local _butler_trace = assert(config._butler_trace)
 local registered_agent_kind = assert(config.registered_agent_kind)
@@ -455,7 +456,7 @@ function remuda._butler_compaction_execute(session_name, force)
   local prior_model, settings_path
   if agent.kind == "claude" then
     prior_model = restore_pending or remuda._butler_claude_model_for(agent)
-    settings_path = (os.getenv("HOME") or "") .. "/.claude/settings.json"
+    settings_path = system.home() .. "/.claude/settings.json"
   end
   -- A Claude session already on Sonnet is not switched, so nothing is restored.
   local claude_switch = agent.kind == "claude"
