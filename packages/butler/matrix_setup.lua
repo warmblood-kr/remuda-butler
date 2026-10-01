@@ -191,10 +191,12 @@ local function validate_secret(path, kind)
   return secret
 end
 
--- A TLS error naming the pin gets one concrete next step (core reports SPKI pin mismatches).
+local PIN_MISMATCH = assert(matrix.PIN_MISMATCH, "load butler/matrix_request before butler/matrix_setup")
+
+-- A pin mismatch gets one concrete next step.
 local function pin_error(response)
   local message = type(response) == "table" and response.error
-  if type(message) ~= "string" or not message:lower():find("pin", 1, true) then return nil end
+  if type(message) ~= "string" or not message:find(PIN_MISMATCH, 1, true) then return nil end
   return "The HTTPS server key does not match --pin.\n"
     .. "Next: recompute the SPKI SHA-256 of the server key (see docs/butler.md) or use --ca-file PATH"
 end

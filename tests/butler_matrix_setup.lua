@@ -319,6 +319,22 @@ return function(matrix)
     assert(spec.pin_only == true and spec.pin == good_transport_pin and spec.ca_file == nil,
       "every setup request with --pin must use pin_only = true: " .. tostring(spec.url))
   end
+  rejected({ "--homeserver", "http://matrix.invalid", "--owner", "@alice:example.org",
+    "--bot", "@butler-demo:example.org", "--password-file", password, "--dir", output,
+    "--pin", good_pin_hex }, "only valid with an https:// homeserver")
+  local saved_setup_http = remuda.http
+  local other_error
+  remuda.http = { request = function(spec)
+    spec.callback({ error = "TLS request failed: server hostname mismatch (pinned)" })
+    return { cancel = function() end }
+  end }
+  matrix.setup_network(assert(matrix.setup_prepare({ "--homeserver", "https://matrix.invalid",
+    "--owner", "@alice:example.org", "--bot", "@butler-demo:example.org",
+    "--password-file", password, "--dir", output, "--pin", good_pin_hex })),
+    function(value) other_error = value end)
+  remuda.http = saved_setup_http
+  assert(other_error and other_error.error and not other_error.error:find("does not match --pin", 1, true),
+    "only core's SPKI pin mismatch text gets the --pin Next: line: " .. tostring(other_error and other_error.error))
   local registered, registered_specs = self_signed_setup(good_pin_hex, true)
   assert(type(registered) == "table" and not registered.error
     and registered.home_room == "!self-signed:example.org"
