@@ -114,6 +114,19 @@ merged("one-line allow keeps its layout", '{"permissions":{"allow":["a", "b"]}}'
 merged("non-ASCII and escapes elsewhere survive", '{"note":"caf\\u00e9 \195\169 \\n","permissions":{"allow":["a"]}}',
   '{"note":"caf\\u00e9 \195\169 \\n","permissions":{"allow":["a","Bash(remuda butler:*)"]}}')
 
+-- A string that only looks like the key, or that holds the rule, is not the allow list.
+merged("a value that looks like the allow key", '{"note":"\\"allow\\": [ \\"permissions\\": {","permissions":{"allow":["a"]}}',
+  '{"note":"\\"allow\\": [ \\"permissions\\": {","permissions":{"allow":["a","Bash(remuda butler:*)"]}}')
+eq("the rule as a value elsewhere is not 'present'",
+  list(merged("the rule as a value elsewhere", '{"note":"Bash(remuda butler:*)","env":{"allow":["Bash(remuda butler:*)"]}}',
+    '{"note":"Bash(remuda butler:*)","env":{"allow":["Bash(remuda butler:*)"]},"permissions":{"allow":["Bash(remuda butler:*)"]}}').added),
+  PREFIX)
+merged("CRLF line ends are kept", '{\r\n  "permissions": {\r\n    "allow": [\r\n      "a"\r\n    ]\r\n  }\r\n}\r\n',
+  '{\r\n  "permissions": {\r\n    "allow": [\r\n      "a",\r\n      "Bash(remuda butler:*)"\r\n    ]\r\n  }\r\n}\r\n')
+merged("allow as the last key, no trailing newline", '{"model":"opus","permissions":{"deny":[],"allow":["a"]}}',
+  '{"model":"opus","permissions":{"deny":[],"allow":["a","Bash(remuda butler:*)"]}}')
+eq("a byte-order mark is not ours to edit", merged("BOM", '\239\187\191{"permissions":{"allow":[]}}', nil).error, "not valid JSON")
+
 -- second_run_is_byte_identical / rule_already_present: no new text, so no write.
 local again = merged("second run writes nothing", pretty_want, nil)
 eq("second run: reported as present", list(again.present), PREFIX)
@@ -157,9 +170,20 @@ ok("autoMode is never written", not created:find("autoMode", 1, true) and not pr
 -- ensure(path, rules, fs): the file side. `fs` is the mod's read / symlink / atomic-write helpers.
 local function fake_fs(files, opts)
   opts = opts or {}
-  local fs = { writes = {}, dirs = {} }
+  local fs = { writes = {}, dirs = {}, checked = {}, verified = {} }
   function fs.read(path) return files[path] end
-  function fs.is_symlink(path) return opts.symlink == path end
+  function fs.is_symlink(path)
+    fs.checked[#fs.checked + 1] = path
+    if opts.symlink_unknown then return nil end
+    return opts.symlink == path
+  end
+  if opts.verify ~= "missing" then
+    function fs.verify(old, new, added)
+      fs.verified[#fs.verified + 1] = { old = old, new = new, added = added }
+      if opts.verify == "throw" then error("decoder exploded") end
+      return opts.verify ~= false
+    end
+  end
   function fs.mkdir(path) fs.dirs[#fs.dirs + 1] = path end
   function fs.write(path, text, private)
     if opts.write_error then error(opts.write_error, 0) end
@@ -180,6 +204,10 @@ eq("missing file: the directory is made first", list(fs.dirs), "/s/butler/.claud
 ok("missing file: written to the path, private", fs.writes[1].path == PATH and fs.writes[1].private == true)
 eq("missing file: the created text", fs.writes[1].text, created)
 ok("missing file: report names the path and the rule", report.path == PATH and list(report.added) == PREFIX)
+eq("missing file: the .claude directory and the file are both checked for a symlink",
+  list(fs.checked), "/s/butler/.claude\n" .. PATH)
+ok("missing file: the edit is cross-checked before the write",
+  #fs.verified == 1 and fs.verified[1].old == nil and fs.verified[1].new == created and list(fs.verified[1].added) == PREFIX)
 report = permissions.ensure(PATH, RULES, fs)
 eq("second ensure: no write", #fs.writes, 1)
 eq("second ensure: present", list(report.present), PREFIX)
@@ -188,6 +216,25 @@ eq("second ensure: present", list(report.present), PREFIX)
 fs = fake_fs({ [PATH] = "{}" }, { symlink = PATH })
 report = permissions.ensure(PATH, RULES, fs)
 ok("symlink: no write", #fs.writes == 0 and report.error == "is a symlink")
+
+fs = fake_fs({ [PATH] = "{}" }, { symlink = "/s/butler/.claude" })
+report = permissions.ensure(PATH, RULES, fs)
+ok("symlinked .claude directory: no write", #fs.writes == 0 and report.error == "is a symlink")
+-- Fail closed: no answer about a symlink means no write.
+fs = fake_fs({ [PATH] = "{}" }, { symlink_unknown = true })
+report = permissions.ensure(PATH, RULES, fs)
+ok("unknown symlink state: no write", #fs.writes == 0 and report.error == "cannot check for a symlink")
+
+-- edit_is_cross_checked: the reader is not the only judge of its own splice.
+for _, verify in ipairs({ false, "throw", "missing" }) do
+  fs = fake_fs({ [PATH] = '{"model":"opus"}' }, { verify = verify })
+  report = permissions.ensure(PATH, RULES, fs)
+  ok("failed cross-check (" .. tostring(verify) .. "): no write",
+    #fs.writes == 0 and report.error == "could not verify the edit" and #report.added == 0)
+end
+fs = fake_fs({ [PATH] = '{"permissions":{"allow":["Bash(remuda butler:*)"]}}' }, { verify = false })
+report = permissions.ensure(PATH, RULES, fs)
+ok("nothing to write needs no cross-check", #fs.verified == 0 and not report.error and list(report.present) == PREFIX)
 
 -- write_fails_is_reported: never an error out of ensure, so a launch goes on.
 fs = fake_fs({ [PATH] = "{}" }, { write_refused = "disk full" })
@@ -218,7 +265,7 @@ ok("a refused write is returned, not thrown", state == nil and why == "disk full
 -- doctor_line_has_next: the root line, in the words added / present / withheld / not written.
 local function doctor(r, kind) return table.concat(permissions.doctor_lines(r, kind), "\n") end
 eq("doctor: added", doctor({ path = PATH, added = { PREFIX }, present = {}, withheld = {} }, "claude"),
-  "Permissions butler (claude): added Bash(remuda butler:*) — " .. PATH
+  "Permissions butler (claude): added Bash(remuda butler:*) — " .. PATH .. " (the file is now private, mode 600)"
   .. "\nNext: to block the rule, move it to permissions.deny in that file")
 eq("doctor: present", doctor({ path = PATH, added = {}, present = { PREFIX }, withheld = {} }, "claude"),
   "Permissions butler (claude): present Bash(remuda butler:*) — " .. PATH
