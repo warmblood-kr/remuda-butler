@@ -956,7 +956,7 @@ function relay.new(options)
           state.subscriptions[actual_room] = subscriptions
           local is_subscribed = thread_root and subscriptions[thread_root] ~= nil
           local is_agent = sender_kind == "AGENT"
-          local accepted = thread_root == nil or is_subscribed or is_mention
+          local accepted = actual_room == cfg.home_room or thread_root == nil or is_subscribed or is_mention
           local route_mail_id = thread_id
             and instance:mail_route_for_event(actual_room, thread_root, in_reply_to) or nil
           local thread_root_mail_id = thread_root
