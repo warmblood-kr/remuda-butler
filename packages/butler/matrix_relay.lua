@@ -554,6 +554,8 @@ function relay.new(options)
   local untrusted_receive_times = {}
   -- ponytail: in memory, a restart resets the floor and drops a pending count
   local cap_summary = {}
+  -- ponytail: in memory, a restart resets the hour; persist it if a restart loop shows up
+  local b2b_turns = {}
   local joining = {}
   local generation = 0
   local failures = 0
@@ -577,6 +579,41 @@ function relay.new(options)
           .. terminal_safe_field(room, 512) .. ": " .. terminal_safe_field(tostring(detail), 512))
       end
     end)
+  end
+
+  local function note_turn(room, root, kind)
+    if type(room) ~= "string" or type(root) ~= "string" or root == "" then return 0 end
+    local room_turns = b2b_turns[room]
+    if kind == "human" then
+      if room_turns then
+        room_turns[root] = nil
+        if next(room_turns) == nil then b2b_turns[room] = nil end
+      end
+      return 0
+    end
+    if kind ~= "agent" then return 0 end
+    if not room_turns then room_turns = {}; b2b_turns[room] = room_turns end
+    local turns = room_turns[root]
+    if not turns then turns = { n = 0, notified = false }; room_turns[root] = turns end
+    turns.n = turns.n + 1
+    if turns.n >= cfg.b2b_max_turns and not turns.notified then
+      turns.notified = true
+      send_notice(cfg.home_room,
+        "Stopped replying in thread " .. terminal_safe_field(root, 256) .. " ("
+          .. terminal_safe_field(room, 512) .. "): " .. tostring(cfg.b2b_max_turns)
+          .. " Butler-only turns. A human reply resumes it.",
+        "b2b-turn-limit", cfg.home_room)
+    end
+    return turns.n
+  end
+
+  function instance:b2b_stopped(room, root)
+    local turns = b2b_turns[room] and b2b_turns[room][root]
+    return turns ~= nil and turns.n >= cfg.b2b_max_turns
+  end
+
+  function instance:note_own_turn(room, root)
+    return note_turn(room, root, "agent")
   end
 
   local approval = remuda.butler and remuda.butler.approval
@@ -1123,6 +1160,9 @@ function relay.new(options)
             add_processed(state, ev.event_id)
             if cursor then state.since = cursor end
           else
+          local root = thread_root or ev.event_id
+          if is_agent then note_turn(actual_room, root, "agent")
+          elseif trusted and sender_kind == "HUMAN" then note_turn(actual_room, root, "human") end
           state.pending[ev.event_id] = {
             sender = ev.sender, room_id = actual_room, event_id = ev.event_id,
             created_at = timestamp(ev), body = body,

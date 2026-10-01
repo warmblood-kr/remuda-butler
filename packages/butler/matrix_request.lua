@@ -269,6 +269,12 @@ local function read_config(path)
       or posts_per_hour % 1 ~= 0 then
     posts_per_hour = 30
   end
+  local b2b_max_turns = tonumber(opts.b2b_max_turns)
+  if not b2b_max_turns or b2b_max_turns ~= b2b_max_turns
+      or b2b_max_turns < 1 or b2b_max_turns == math.huge
+      or b2b_max_turns % 1 ~= 0 then
+    b2b_max_turns = 6
+  end
   local ca_file, pin_hex = opts.ca_file, opts.pin_sha256
   if ca_file == "" then ca_file = nil end
   if pin_hex == "" then pin_hex = nil end
@@ -327,6 +333,7 @@ local function read_config(path)
     butler_senders = butler_senders,
     untrusted_per_room_hour = untrusted_per_room_hour,
     posts_per_hour = posts_per_hour,
+    b2b_max_turns = b2b_max_turns,
     use_messages = mode == "1" or mode == "true" or mode == "messages" or mode == "fallback",
     timeout_ms = math.max(1, timeout), ca_file = ca_file, pin = pin,
   }
@@ -340,7 +347,7 @@ function matrix.take_post_slot(config_path)
   local now = os.time()
   local cutoff = now - 3600
   for index = #post_times, 1, -1 do
-    if post_times[index] < cutoff then table.remove(post_times, index) end
+    if post_times[index] <= cutoff then table.remove(post_times, index) end
   end
   if not config_path then
     local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths or {}
