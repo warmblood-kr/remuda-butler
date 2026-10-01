@@ -59,6 +59,9 @@ local function render(probe_results, platform)
     "Claude Code: " .. status(claude),
     "Codex CLI: " .. status(codex),
   }
+  local guard = remuda.butler and remuda.butler.guard
+  local unguarded = guard and guard.unguarded_line()
+  if unguarded then lines[#lines + 1] = unguarded end
   if not claude.timed_out and not claude.probe_error then
     if not claude.installed then
       lines[#lines + 1] = platform == "windows"

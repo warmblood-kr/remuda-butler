@@ -99,6 +99,10 @@ end
 -- Config/data paths, Matrix credential paths and path helpers live in paths.lua.
 remuda.exec("butler/paths")
 local paths = remuda._butler_paths
+-- One daemon owns a Butler home (#195). A second daemon stops here, before any
+-- shared state (the registry, the MCP config, the root Butler, the relay).
+remuda.exec("butler/guard")
+if not remuda.butler.guard.boot(paths) then return end
 local topic_config = paths.topic_config
 local data_home = paths.data_home
 local butler_session_cwd = paths.butler_session_cwd
@@ -415,9 +419,8 @@ local function agent_mcp_json(token)
 end
 local function agent_mcp_path(name, token)
   local path = os.tmpname() .. "." .. name .. ".mcp.json"
-  local f = assert(io.open(path, "w"))
-  f:write(agent_mcp_json(token))
-  f:close()
+  -- The file carries this member's capability: owner-only (0600).
+  remuda.butler.guard.write_private(path, agent_mcp_json(token))
   return path
 end
 local function agent_mcp_flags(token)
@@ -707,9 +710,9 @@ bus.identities.butler = bus.identities.butler or root_identity
 local root_migrated, root_migration_error = migrate_legacy_mail("butler", root_identity.id)
 if not root_migrated then error("cannot migrate legacy Butler mail: " .. tostring(root_migration_error), 0) end
 mailbox(root_identity.id)
-local mcp_file = io.open(mcp_config_path, "w")
-mcp_file:write(agent_mcp_json(butler_token))
-mcp_file:close()
+-- The root MCP config carries the root capability: owner-only (0600), and a
+-- file left 0644 by an older Butler is replaced.
+remuda.butler.guard.write_private(mcp_config_path, agent_mcp_json(butler_token))
 
 local SYSTEM_PROMPT = "Early in this session, call remuda._butler_register_compaction_schedule() "
   .. "via the run_script MCP tool, once, to enable this butler's own periodic "
