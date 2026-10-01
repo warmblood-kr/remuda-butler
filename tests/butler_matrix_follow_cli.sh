@@ -62,7 +62,7 @@ for _ in $(seq 50); do [[ -S $REMUDA_RUNTIME_DIR/remuda/$S.sock ]] || break; sle
 # 2. Configured (relay running): the verb reaches the Matrix CLI.
 C=$XDG_CONFIG_HOME/remuda/butler
 mkdir -p "$C"
-printf 'http://127.0.0.1:9\n!home:example.org\n@bot:example.org\n@owner:example.org\nroom=!side:example.org how=operator\n' >"$C/config"
+printf 'http://127.0.0.1:9\n!home:example.org\n@bot:example.org\n@owner:example.org\nroom=!side:example.org how=operator\nposts_per_hour=2\n' >"$C/config"
 printf 'token\n' >"$C/token"
 chmod 600 "$C/config" "$C/token"
 start_butler
@@ -104,5 +104,24 @@ run_args --room '!nope:example.org' unfollow '$n1:example.org'
 run_args follow abc
 [[ $CODE == 2 && $OUT == *"follow EVENT_ID"* && $OUT == *"Example: remuda butler matrix follow '\$EVENT_ID'"* ]] \
   || soft "follow of a non-event id must show the follow usage, exit 2: $CODE $OUT"
+# posts_per_hour (2 here) counts across SEPARATE CLI processes, not only inside
+# one Lua call chain. HTTP is scripted inside this private daemon: every PUT is
+# answered locally and counted; everything else goes on to 127.0.0.1:9 as before.
+remuda -s "$S" -e 'local m = remuda.butler.matrix
+  local real = m.request_json
+  m.request_json = function(spec, callback)
+    if spec.method ~= "PUT" then return real(spec, callback) end
+    bmf_puts = (bmf_puts or 0) + 1
+    callback({ json = { event_id = "$cli" .. bmf_puts } })
+    return { cancel = function() end }
+  end' >/dev/null
+for i in 1 2; do
+  run_args send "post $i"
+  [[ $CODE == 0 && $OUT == *"Sent 1 message"* ]] || fail "send $i of 2 is under posts_per_hour=2: $CODE $OUT"
+done
+run_args send "post 3"
+[[ $CODE != 0 && $OUT =~ Next:\ wait\ until\ [0-9]{2}:[0-9]{2}Z ]] \
+  || soft "the 3rd send, a separate process, must be refused with Next: wait until HH:MMZ: $CODE $OUT"
+remuda -s "$S" -e 'return bmf_puts' | grep -qx 2 || soft "the refused send must not be posted (2 PUTs expected)"
 ((${#SOFT[@]} == 0)) || fail "$(printf '%s\n' "${SOFT[@]}")"
 echo PASS
