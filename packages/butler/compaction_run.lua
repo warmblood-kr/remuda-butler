@@ -98,8 +98,29 @@ local function model_confirm_options_visible(screen)
   return index ~= nil
 end
 
+local function model_dialog_waiting(screen)
+  if type(screen) ~= "string" then return false end
+  local lines = bottom_screen_lines(screen, 32)
+  for _, line in ipairs(lines) do
+    if line:find("Switch model?", 1, true)
+        or line:find("❯%s*1%.%s+Yes") then
+      return true
+    end
+  end
+  return false
+end
+
+local function model_timeout_reason(id, session_name, screen)
+  if not model_dialog_waiting(screen) then return "timed out waiting for " .. id end
+  return "timed out waiting for " .. id .. "; a Switch model? dialog appears to be waiting in "
+    .. session_name .. ". Next: run `remuda attach " .. session_name
+    .. "` and press Enter to confirm or Esc to cancel"
+end
+
 remuda._butler_model_confirm_signature = model_confirm_signature
 remuda._butler_model_confirm_options_visible = model_confirm_options_visible
+remuda._butler_model_dialog_waiting = model_dialog_waiting
+remuda._butler_model_timeout_reason = model_timeout_reason
 
 local function read_compaction_restore_record()
   if not compaction_restore_path then return {} end
@@ -623,6 +644,8 @@ function remuda._butler_compaction_execute(session_name, force)
       end,
       on_timeout = function(screen, handle)
         local model_watcher = agent.kind == "claude" and (id == "model-sonnet" or id == "model-restored")
+        local waiting_dialog = model_watcher and model_dialog_waiting(screen)
+        local failure_reason = waiting_dialog and model_timeout_reason(id, session_name, screen)
         if unknown_state.started_at or (model_watcher and model_confirm_state.started_at) then
           if claude_switch and (id == "model-sonnet" or id == "compact-complete") then
             state.restore_pending = prior_model
@@ -630,11 +653,11 @@ function remuda._butler_compaction_execute(session_name, force)
             state.restore_pending_attempt_active = nil
             state.restore_pending_failure_notified = nil
           end
-          fail("unrecognized dialog during " .. id)
+          fail(failure_reason or ("unrecognized dialog during " .. id))
         elseif on_timeout then
           on_timeout(screen, handle)
         else
-          fail("timed out waiting for " .. id)
+          fail(failure_reason or ("timed out waiting for " .. id))
         end
       end,
       on_error = function(err) fail("compaction watcher error: " .. tostring(err)) end }, false)
