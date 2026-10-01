@@ -3,8 +3,16 @@ set -euo pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 REMUDA_BIN=${REMUDA_BIN:-remuda}
 REMUDA_BIN=$(command -v "$REMUDA_BIN")
-SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/bf.XXXXXX")
+# /tmp, not $TMPDIR: under macOS /var/folders the daemon socket path passes the
+# 103-byte sun_path limit and the pending daemon never binds (#163).
+SCRATCH=$(mktemp -d /tmp/bf.XXXXXX)
 SCRATCH=$(cd "$SCRATCH" && pwd -P)
+longest_socket=$SCRATCH/p/remuda/butler-fallback-pending.sock
+if (( ${#longest_socket} > 103 )); then
+  rm -rf "$SCRATCH"
+  echo "FAIL: socket path too long (${#longest_socket} > 103 bytes): $longest_socket" >&2
+  exit 1
+fi
 SERVER=butler-fallback
 export HOME=$SCRATCH/home XDG_CONFIG_HOME=$SCRATCH/config XDG_DATA_HOME=$SCRATCH/data
 export REMUDA_RUNTIME_DIR=$SCRATCH/r REMUDA_NO_UPDATE_CHECK=1 REMUDA_BUTLER_PROJECT_HOME=$SCRATCH/projects
