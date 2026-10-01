@@ -20,6 +20,7 @@ local function has_forbidden_character(text)
   return text:find("\216\156") ~= nil
     or text:find("\226\128[\142\143\170-\174]") ~= nil
     or text:find("\226\129[\166-\169]") ~= nil
+    or text:find("\226\128[\168\169]") ~= nil
 end
 
 local function reject(reason)
@@ -40,7 +41,7 @@ function M.gate(state, event, now, cfg)
   now = tonumber(now)
   if not event_time or not now then return reject("invalid_time") end
   local age = now - event_time / 1000
-  if age < 0 or age > MAX_AGE_SECONDS then return reject("event_too_old") end
+  if age < -60 or age > MAX_AGE_SECONDS then return reject("event_too_old") end
 
   local event_id = event.event_id
   if type(event_id) ~= "string" or event_id == "" then return reject("missing_event_id") end
@@ -59,17 +60,18 @@ function M.gate(state, event, now, cfg)
     return reject("invalid_line")
   end
 
-  local form, line
+  local form, line, payload
   if body:sub(1, 3) == "!!!" then return reject("invalid_prefix")
   elseif body:sub(1, 2) == "!!" then
-    form, line = "!!", "!" .. body:sub(3)
+    form, payload = "!!", body:sub(3)
     if cfg.shell_lines ~= true then return reject("shell_lines_off") end
   elseif body:sub(1, 1) == "!" then
-    form, line = "!", body:sub(2)
+    form, payload = "!", body:sub(2)
   else
     return reject("invalid_prefix")
   end
-  if line == "" then return reject("empty_line") end
+  if payload:match("^%s*$") then return reject("empty_line") end
+  line = form == "!!" and ("!" .. payload) or payload
   if cfg.typed_lines ~= true then return reject("typed_lines_off") end
 
   local recent = 0

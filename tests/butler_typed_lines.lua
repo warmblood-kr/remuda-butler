@@ -39,10 +39,16 @@ local cases = {
   { name = "non-message sender kind refused", event = event("!hello", { sender = "@member-agent:example.org" }), ok = false },
   { name = "event older than five minutes refused", event = event("!hello", { origin_server_ts = (now - 301) * 1000 }), ok = false },
   { name = "event exactly five minutes old accepted", event = event("!hello", { origin_server_ts = (now - 300) * 1000 }), ok = true, line = "hello", form = "!" },
+  { name = "event 60 seconds ahead accepted", event = event("!hello", { origin_server_ts = (now + 60) * 1000 }), ok = true, line = "hello", form = "!" },
+  { name = "event over 60 seconds ahead refused", event = event("!hello", { origin_server_ts = (now + 61) * 1000 }), ok = false },
   { name = "replayed event refused", event = event("!hello"), state = { processed = { ["$event-1"] = true }, timestamps = {} }, ok = false },
   { name = "encrypted content refused", event = event("!hello", { content = nil, type = "m.room.encrypted" }), ok = false },
   { name = "non-text message refused", event = event("!hello", { content = { msgtype = "m.image", body = "!hello" } }), ok = false },
   { name = "multiline refused", event = event("!one\ntwo"), ok = false },
+  { name = "Unicode line separator refused", event = event("!one\226\128\168two"), ok = false, reason = "invalid_line" },
+  { name = "Unicode paragraph separator refused", event = event("!one\226\128\169two"), ok = false, reason = "invalid_line" },
+  { name = "space-only plain payload refused", event = event("! "), ok = false, reason = "empty_line" },
+  { name = "space-only shell payload refused", event = event("!!  "), ok = false, reason = "empty_line" },
   { name = "control character refused", event = event("!one\ttwo"), ok = false },
   { name = "direction character refused", event = event("!one\226\128\143two"), ok = false },
   { name = "2000 byte line accepted", event = event("!" .. string.rep("a", 1999)), ok = true, line = string.rep("a", 1999), form = "!" },
@@ -58,6 +64,10 @@ for index, case in ipairs(cases) do
   local ok, reason, line, form = typed_lines.gate(case.state or empty, case.event, now, case.cfg or cfg)
   assert(ok == case.ok, ("case %d (%s): expected ok=%s, got %s (%s)"):format(
     index, case.name, tostring(case.ok), tostring(ok), tostring(reason)))
+  if case.reason then
+    assert(reason == case.reason, ("case %d (%s): expected reason %q, got %q"):format(
+      index, case.name, case.reason, tostring(reason)))
+  end
   if case.line ~= nil then
     assert(line == case.line, ("case %d (%s): expected line %q, got %q"):format(
       index, case.name, case.line, tostring(line)))
