@@ -110,7 +110,7 @@ eq("terminal both login hint", quota.terminal(both_out), table.concat({
   "claude: not logged in",
   "codex: not logged in",
   "Not logged in: claude, codex.",
-  "Next: log in with `claude auth login`, then run `remuda butler quota` again.",
+  "Next: log in with `claude auth login` and `codex login`, then run `remuda butler quota` again.",
 }, "\n"))
 eq("terminal UX case 4", quota.terminal(old_reading), old_reading_body .. "\n" .. codex_idle_next)
 eq("terminal sent with no idle codex", quota.terminal(old_reading, { sent = true }), old_reading_body .. "\n"
