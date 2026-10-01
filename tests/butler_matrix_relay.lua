@@ -2314,7 +2314,7 @@ local function test_rx_follow_unfollow_verbs()
       local result = capture_matrix_cli({ "matrix", "follow", "$f-root" })
       assert(result and result.code == 0, "follow must succeed: " .. tostring(result and result.stderr))
       assert(result.stdout:find("Following thread $f-root in", 1, true)
-        and result.stdout:find("Next: remuda butler matrix thread $f-root", 1, true),
+        and result.stdout:find("Next: remuda butler matrix thread '$f-root'", 1, true),
         "follow prints what it did and a Next line, got: " .. result.stdout)
       assert(rx_followed(relay, HOME, "$f-root"), "follow must record the thread")
       rx_sync(client, HOME, { rx_msg("$f-t1", OWNER, "in thread", rx_thread("$f-root")) })
@@ -2322,7 +2322,7 @@ local function test_rx_follow_unfollow_verbs()
 
       result = capture_matrix_cli({ "matrix", "unfollow", "$f-root" })
       assert(result and result.code == 0 and result.stdout:find("Stopped following thread $f-root", 1, true)
-        and result.stdout:find("Next: remuda butler matrix follow $f-root", 1, true),
+        and result.stdout:find("Next: remuda butler matrix follow '$f-root'", 1, true),
         "unfollow prints what it did and a Next line")
       assert(not rx_followed(relay, HOME, "$f-root"), "unfollow must remove the thread")
       rx_sync(client, HOME, { rx_msg("$f-t2", OWNER, "in thread", rx_thread("$f-root")) })
@@ -2547,7 +2547,7 @@ local function test_rx_follow_guard_refuses_and_warns_no_trim()
     rx_event_http(path, function()
       local result = capture_matrix_cli({ "matrix", "follow", "$new-3" })
       local out = result and (result.stdout .. result.stderr) or ""
-      assert(out:find("Follow limit reached in " .. HOME .. " (50000). Next: remuda butler matrix unfollow EVENT_ID", 1, true),
+      assert(out:find("Follow limit reached in " .. HOME .. " (50000). Next: remuda butler matrix unfollow '$new-3'", 1, true),
         "the follow verb reports the guard, got: " .. out)
     end)
     relay:stop()
