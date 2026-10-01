@@ -73,3 +73,19 @@ PR 2:
 - `test_rx_untrusted_room_cap_summary_no_quarantine` (asserts the exact line, including `Next: remuda butler matrix --room ROOM history`)
 
 Dropped by the owner: the mention-follow cap, the idle expiry, the trusted-Butler class.
+
+## State and next steps (2026-10-01 01:36Z, before the restart)
+- feat/rx-dev holds PR 1 code: steps 1-4d plus QA's tests, by cherry-pick.
+  - It is complete except for the follow persistence.
+  - f6a11a9, the chunked JSON-in-string persistence, is ON HOLD and must not ship.
+- Next 1, the PO decision: C prime.
+  - Move follows to a separate file, matrix-follows.json, beside the relay state, written with remuda.fs.write_atomic.
+  - Its shape is room -> {thread_id: created_at}, one value per follow.
+  - The guard is 50000 in TOTAL across rooms (core MAX_VALUES is 100000 per encode).
+  - On load, migrate the old matrix_thread_subscriptions keys, then drop them from the state file. This replaces f6a11a9: revert it.
+  - The docs line "50000 per room" becomes "50000 in total".
+  - Tell the owner: 50000 per room needs a core change.
+- Next 2: rx-qa updates the 2 stale relay asserts for the quoted Next text (step 4d), if it has not already.
+- Next 3: merge feat/rx-dev into feat/matrix-receive-rules. Run tests/butler_matrix_relay.sh, tests/shell_tests.sh, scripts/test-no-shell-lua.sh and, once, tests/rust_tests.sh. Open PR 1 and ask remuda-dev-team-2-lead for the SEC review.
+- Then PR 2: QA's tests are at 2ed025c (feat/rx-qa); design section 5. Remove test_rx_b2b_block_kept_TODO_pr2.
+- Issue to file (out of scope): a misspelled matrix verb gets no did-you-mean and exits 0.
