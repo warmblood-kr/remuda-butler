@@ -82,7 +82,9 @@ if [[ -z ${REMUDA_BIN:-} ]]; then
   git clone --quiet "$CORE_URL" "$T/core"
   git -C "$T/core" checkout --quiet "$CORE_REF"
   (cd "$T/core" && cargo build --quiet --release --bin remuda)
-  REMUDA_BIN=$T/core/target/release/remuda
+  # cargo resolves a relative CARGO_TARGET_DIR against the clone.
+  REMUDA_BIN=$(cd "$T/core" && cd "${CARGO_TARGET_DIR:-target}/release" && pwd)/remuda
+  built=$(git -C "$T/core" rev-parse --short=7 HEAD)
 fi
 
 export HOME=$T/home REMUDA_RUNTIME_DIR=$T/run XDG_DATA_HOME=$T/data XDG_CONFIG_HOME=$T/config
@@ -93,7 +95,14 @@ unset REMUDA_BUTLER_TOKEN REMUDA_BUTLER_CONFIG REMUDA_BUTLER_AGENT_ID REMUDA_BUT
   REMUDA_BUTLER_SESSION_NAME REMUDA_BUTLER_AGENT_ALIAS REMUDA_BUTLER_AGENT_KIND REMUDA_SESSION_CAPABILITY
 mkdir -p "$HOME" "$XDG_CACHE_HOME" "$XDG_STATE_HOME" "$XDG_RUNTIME_DIR" \
   "$T/bin" "$T/argv" "$T/projects" "$XDG_DATA_HOME/remuda/mods/butler"
-cp "$REMUDA_BIN" "$T/bin/remuda"
+cp "$REMUDA_BIN" "$T/bin/remuda" ||
+  { echo "cannot copy the core binary from $REMUDA_BIN. Next: set REMUDA_BIN to a built remuda" >&2; exit 2; }
+version=$("$T/bin/remuda" --version 2>/dev/null | tail -1)
+# The core built here must be the one under test, never an installed remuda.
+if [[ -n ${built:-} && $version != *"$built"* ]]; then
+  echo "core under test is '$version', not the pinned $built. Next: unset CARGO_TARGET_DIR and rerun" >&2
+  exit 2
+fi
 cp -R "$REPO/extension.toml" "$REPO/packages" "$XDG_DATA_HOME/remuda/mods/butler/"
 # A fake claude: records its argv, one argument per NUL-free line, and stays up.
 cat >"$T/bin/claude" <<EOF
