@@ -121,9 +121,9 @@ local function one_limit(used)
   return { at = at, claude = { mode = "subscription", plan = "max", email = "a@b.c",
     limits = { { name = "5-hour limit", used = used, resets_at = 1790838000 } } }, codex = { mode = "api_key" } }
 end
-ok("79 percent has no warning header", quota.render(one_limit(79)):sub(1, 3) ~= "⚠️")
+ok("79 percent has no warning header", quota.render(one_limit(79)):sub(1, #"⚠️") ~= "⚠️")
 ok("79 percent has no attention line", not quota.render(one_limit(79)):find("Near limit:", 1, true))
-ok("80 percent has warning header", quota.render(one_limit(80)):sub(1, 3) == "⚠️")
+ok("80 percent has warning header", quota.render(one_limit(80)):sub(1, #"⚠️") == "⚠️")
 ok("80 percent has attention line", quota.render(one_limit(80)):find("Near limit: claude 5-hour limit (80%).", 1, true) ~= nil)
 local fresh = one_limit(40)
 fresh.claude.read_at = at - 540
