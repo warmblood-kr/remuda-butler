@@ -3672,7 +3672,14 @@ do
   assert(without_lock == false and with_lock == true,
     "prompt preface is used exactly on a core that has remuda.fs.lock: " .. tostring(without_lock) .. " " .. tostring(with_lock))
   matrix.prompt_preface_supported = function() return true end
-  local ran, why = pcall(setup_tests, matrix)
+  -- The setup tests need one machine name on every core: the shell wrapper
+  -- exports HOSTNAME for cores without remuda.hostname, and the word is pinned
+  -- to the same name on cores that have it (#207).
+  local core_hostname = remuda.hostname
+  local pinned_hostname = type(core_hostname) == "function" and function() return "matrix-test-host" end or nil
+  remuda.hostname = pinned_hostname
+  local ran, why = pcall(setup_tests, matrix, pinned_hostname)
+  remuda.hostname = core_hostname
   matrix.prompt_preface_supported = preface_supported
   assert(ran, why)
 end
