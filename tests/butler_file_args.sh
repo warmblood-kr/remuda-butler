@@ -64,6 +64,12 @@ run dl_inside  remuda -s $S butler matrix -o "\$PWD/sub/got.bin" download mxc://
 run dl_default remuda -s $S butler matrix download mxc://media.example/a1
 run reply_dots remuda -s $S butler reply ../../../../victim hello
 run fwd_dots   remuda -s $S butler forward ../../../../victim butler
+call() { printf '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"%s","arguments":%s}}\n' "\$1" "\$2"; }
+mcp() { name=\$1; shift; call "\$@" | remuda -s $S mcp >"$T/\$name.out" 2>&1; }
+mcp mcp_dl      matrix_download '{"mxc":"mxc://media.example/b2"}'
+mcp mcp_up_out  matrix_upload "{\\"path\\":\\"$T/secret.txt\\"}"
+mcp mcp_up_link matrix_upload "{\\"path\\":\\"\$PWD/link.txt\\"}"
+mcp mcp_up_in   matrix_upload "{\\"path\\":\\"\$PWD/in.txt\\"}"
 run setup      remuda -s $S butler matrix setup --homeserver https://evil.invalid --user @x:evil.invalid --password-file "$T/secret.txt"
 touch "$T/done"
 sleep 1000
@@ -83,6 +89,10 @@ lua 'return remuda._butler_bus.agents.m1 ~= nil' | grep -qx true || fail "member
 lua "$(cat "$REPO/tests/support/fake_http.lua")" >/dev/null
 lua 'remuda.http.respond_prefix("GET", "https://matrix.invalid/_matrix/client/v1/media/download/",
   { status = 200, headers = { ["content-type"] = "application/octet-stream" }, body = "MEDIA-BYTES" })' >/dev/null
+lua 'remuda.http.respond_prefix("POST", "https://matrix.invalid/_matrix/media/v3/upload",
+  { status = 200, body = [[{"content_uri":"mxc://matrix.invalid/up1"}]] })
+remuda.http.respond_prefix("PUT", "https://matrix.invalid/_matrix/client/v3/rooms/",
+  { status = 200, body = [[{"event_id":"$mcpup1"}]] })' >/dev/null
 touch "$T/go"
 for _ in $(seq 300); do [[ -e $T/done ]] && break; lua 'remuda.http.tick()' >/dev/null || true; sleep 0.1; done
 [[ -e $T/done ]] || fail "the member script did not finish: $(cat "$T"/*.out 2>/dev/null)"
@@ -126,6 +136,19 @@ echo "== an agent caller: download inside is written; without -o it lands in the
 [[ $(cat "$T/dl_default.rc") == 0 ]] || fail "a download without -o failed: $(cat "$T/dl_default.out")"
 [[ $(cat "$MEMBER_CWD/matrix-a1") == MEDIA-BYTES ]] || fail "the default output is not in the working directory"
 [[ ! -e $HOME/matrix-a1 ]] || fail "the default output of an agent caller landed in HOME"
+
+echo "== MCP: matrix_download writes into the working directory and returns the absolute path"
+grep -qF "Downloaded 11 bytes to $MEMBER_CWD/matrix-b2" "$T/mcp_dl.out" || fail "matrix_download: $(cat "$T/mcp_dl.out")"
+[[ $(cat "$MEMBER_CWD/matrix-b2") == MEDIA-BYTES ]] || fail "matrix_download wrote the wrong content"
+
+echo "== MCP: matrix_upload outside or through a link is refused; inside returns the event id"
+for name in mcp_up_out mcp_up_link; do
+  grep -qF '"isError":true' "$T/$name.out" || fail "$name was not refused: $(cat "$T/$name.out")"
+  grep -qF "is outside this session's working directory $CWD" "$T/$name.out" || fail "$name: wrong refusal: $(cat "$T/$name.out")"
+done
+grep -qF '$mcpup1' "$T/mcp_up_in.out" || fail "matrix_upload inside: $(cat "$T/mcp_up_in.out")"
+[[ $(lua 'local n = 0; for _, call in ipairs(remuda.http.calls) do if call.method == "POST" and tostring(call.body):find("TOP-SECRET", 1, true) then n = n + 1 end end; return n') == 0 ]] \
+  || fail "a refused matrix_upload sent the outside file"
 
 echo "== an agent caller: a message id with a path in it never becomes a file name"
 for name in reply_dots fwd_dots; do

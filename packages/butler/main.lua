@@ -662,6 +662,27 @@ remuda.tool{
     return remuda._butler_forward(caller_agent(caller), a.message_id, a.to, a.note)
   end,
 }
+-- The Matrix file words go through the matrix CLI, which holds an agent caller
+-- to its own working directory (#247); its deferred reply is the tool's answer.
+remuda.tool{
+  name = "matrix_download",
+  about = "Download Matrix media (an mxc:// URI from a Matrix mail) into your working directory. Returns the absolute path.",
+  args = { mxc = "The mxc://server/media URI." },
+  needs = { "mxc" },
+  run = function(a, caller)
+    return remuda.butler.matrix.cli({ "matrix", "download", a.mxc }, caller_name(caller))
+  end,
+}
+remuda.tool{
+  name = "matrix_upload",
+  about = "Upload a file from your working directory to a Matrix room. Returns the event id.",
+  args = { path = "Absolute path of a file inside your working directory.", room = "Optional room; defaults to the configured room." },
+  needs = { "path" },
+  run = function(a, caller)
+    local args = a.room and { "matrix", "--room", a.room, "upload", a.path } or { "matrix", "upload", a.path }
+    return remuda.butler.matrix.cli(args, caller_name(caller))
+  end,
+}
 remuda.tool{
   name = "butler_sessions",
   about = "List Butler-managed Claude Code and Codex agent sessions and their adapter kinds.",
