@@ -259,6 +259,61 @@ return function(matrix)
   matrix.setup_network(ca_plan, function() end)
   assert(transport_spec and transport_spec.ca_file == ca_file,
     "HTTPS setup must pass the configured CA file to the transport")
+  assert(transport_spec.pin_only ~= true and transport_spec.pin == nil,
+    "--ca-file setup keeps chain validation: no pin_only")
+
+  do
+  -- A self-signed homeserver as core 0a5f090 sees it: a pin alone is additive
+  -- (chain check fails), pin_only = true with the matching SPKI pin replaces it.
+  local good_pin_hex, wrong_pin_hex = string.rep("0", 64), string.rep("1", 64)
+  local good_transport_pin = "sha256/" .. string.rep("A", 43) .. "="
+  local saved_http = remuda.http
+  local function self_signed_setup(pin_hex)
+    local queue, specs, result = {}, {}, nil
+    remuda.http = { request = function(spec)
+      specs[#specs + 1] = spec
+      queue[#queue + 1] = spec
+      return { cancel = function() end }
+    end }
+    local plan = assert(matrix.setup_prepare({ "--homeserver", "https://matrix.invalid",
+      "--owner", "@alice:example.org", "--bot", "@butler-demo:example.org",
+      "--password-file", password, "--dir", output, "--pin", pin_hex }))
+    matrix.setup_network(plan, function(value) result = value end)
+    while #queue > 0 do
+      local spec = table.remove(queue, 1)
+      if spec.pin_only ~= true then
+        spec.callback({ error = "TLS request failed: server certificate issuer not trusted" })
+      elseif spec.pin ~= good_transport_pin then
+        spec.callback({ error = "TLS request failed: SPKI pin mismatch" })
+      elseif spec.url:find("/login", 1, true) then
+        spec.callback({ status = 200, body = '{"access_token":"self-signed-token"}' })
+      elseif spec.url:find("/whoami", 1, true) then
+        spec.callback({ status = 200, body = '{"user_id":"@butler-demo:example.org"}' })
+      elseif spec.url:find("/createRoom", 1, true) then
+        spec.callback({ status = 200, body = '{"room_id":"!self-signed:example.org"}' })
+      else
+        spec.callback({ status = 404, body = '{"errcode":"M_UNRECOGNIZED"}' })
+      end
+    end
+    remuda.http = saved_http
+    return result, specs
+  end
+  local signed, signed_specs = self_signed_setup(good_pin_hex)
+  assert(type(signed) == "table" and not signed.error
+    and signed.home_room == "!self-signed:example.org",
+    "--pin alone must set up a self-signed HTTPS homeserver: "
+      .. tostring(type(signed) == "table" and signed.error))
+  for _, spec in ipairs(signed_specs) do
+    assert(spec.pin_only == true and spec.pin == good_transport_pin and spec.ca_file == nil,
+      "every setup request with --pin must use pin_only = true: " .. tostring(spec.url))
+  end
+  local mismatched = self_signed_setup(wrong_pin_hex)
+  assert(type(mismatched) == "table" and type(mismatched.error) == "string"
+    and mismatched.error:find("pin", 1, true) and mismatched.error:find("Next:", 1, true)
+    and not mismatched.error:find("self-signed-token", 1, true),
+    "a wrong --pin must fail with a Next: line: "
+      .. tostring(type(mismatched) == "table" and mismatched.error))
+  end
   rejected({ "--homeserver", "https://matrix.invalid", "--owner", "@alice:example.org",
     "--bot", "@butler-demo:example.org", "--password-file", password, "--dir", output,
     "--pin", pin, "--ca-file", ca_file }, "choose one")
