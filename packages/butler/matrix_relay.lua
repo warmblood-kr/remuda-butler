@@ -197,23 +197,25 @@ end
 
 local function context_message_line(item, delivered, cfg)
   if type(item) ~= "table" then return nil end
-  local sender = context_sender(item.sender)
-  if sender == "" then sender = "unknown sender" end
-  local mark
-  if item.sender == cfg.self_mxid then
-    mark = " (you)"
-  elseif member_kind(item.sender, cfg) == "AGENT"
-      and (cfg.butler_senders[item.sender] == true or cfg.allowed_senders[item.sender] == true) then
-    mark = " (Butler)"
-  elseif not cfg.allowed_senders[item.sender] then
-    mark = " (not on the owner allowlist)"
-  else
-    mark = ""
+  local sender_valid = valid_mxid(item.sender)
+  local sender = sender_valid and context_sender(item.sender) or "(unknown sender)"
+  local mark = ""
+  if sender_valid then
+    if item.sender == cfg.self_mxid then
+      mark = " (you)"
+    elseif member_kind(item.sender, cfg) == "AGENT"
+        and (cfg.butler_senders[item.sender] == true or cfg.allowed_senders[item.sender] == true) then
+      mark = " (Butler)"
+    elseif not cfg.allowed_senders[item.sender] then
+      mark = " (not on the owner allowlist)"
+    end
   end
 
   local content = type(item.content) == "table" and item.content or {}
   local message = content.body
-  if content.msgtype == "m.image" or content.msgtype == "m.file" then
+  if type(message) ~= "string" then
+    message = "[message]"
+  elseif content.msgtype == "m.image" or content.msgtype == "m.file" then
     local name = context_safe_text(content.filename or content.body or "unknown"):gsub("\n", " / ")
     message = "[" .. (content.msgtype == "m.image" and "image" or "file") .. ": " .. name .. "]"
   else
@@ -228,9 +230,9 @@ local function context_message_line(item, delivered, cfg)
       and os.date("!%Y-%m-%dT%H:%M:%SZ", math.floor(millis / 1000)) or nil
   local day = created and created:sub(1, 10)
   local delivered_day = type(delivered.created_at) == "string" and delivered.created_at:sub(1, 10) or ""
-  local clock = created and created:sub(12, 16) or "00:00"
-  local when = day == delivered_day and (clock .. "Z") or ((day or delivered_day) .. " " .. clock .. "Z")
-  return "  " .. when .. " " .. sender .. mark .. ": " .. message
+  local clock = created and created:sub(12, 16)
+  local when = created and (day == delivered_day and (clock .. "Z") or (day .. " " .. clock .. "Z"))
+  return "  " .. (when and (when .. " ") or "") .. sender .. mark .. ": " .. message
 end
 
 local function context_block(root_event, relations, delivered, cfg)
