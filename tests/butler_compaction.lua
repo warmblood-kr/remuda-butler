@@ -283,6 +283,10 @@ assert(remuda._butler_model_confirm_signature(
 assert(remuda._butler_model_confirm_signature(
   read_fixture("claude-model-confirm-multiline-draft.txt")) == nil,
   "model confirmation signature should reject a multiline composer draft")
+local transcript_copy = read_fixture("claude-model-confirm-transcript-copy.txt")
+assert(remuda._butler_model_confirm_signature(transcript_copy) == nil
+  and not remuda._butler_model_confirm_options_visible(transcript_copy),
+  "model confirmation helpers should reject a transcript copy above the composer")
 local untitled_model_confirm = "❯ 1. Yes, switch to Opus 5.5\n  2. No, go back"
 assert(remuda._butler_model_confirm_signature(untitled_model_confirm) == nil
   and remuda._butler_model_confirm_options_visible(untitled_model_confirm),
