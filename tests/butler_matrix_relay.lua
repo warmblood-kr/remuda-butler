@@ -5750,6 +5750,26 @@ local function test_approve_deny_refuse_agents_only()
   end)
 end
 
+-- Accepted behaviour, stated on purpose: the member refusal keys on the agent identity in the
+-- client env (REMUDA_BUTLER_AGENT_ID / REMUDA_BUTLER_SESSION_NAME). A caller with those cleared
+-- is not refused, whatever its core caller kind. Advisory against same-UID processes.
+local function test_cleared_identity_is_not_refused()
+  approval_env(nil, function(env)
+    local cli = assert(approval().cli, "approval.cli backs the approve/deny verbs")
+    local old_fail, old_caller = remuda.fail, remuda.caller
+    remuda.fail = function(message) return message end
+    remuda.caller = function() return { kind = "session", session = "agent1", env = {} } end
+    local ok, err = pcall(function()
+      local id = file_request(env, NEW)
+      local out = tostring(cli({ "approve", id }, nil)) -- no agent identity: env cleared
+      env.client:pump()
+      assert(out:find("Approved request " .. id, 1, true), "a cleared-identity caller is not refused: " .. out)
+    end)
+    remuda.fail, remuda.caller = old_fail, old_caller
+    if not ok then error(err, 0) end
+  end)
+end
+
 local function test_unknown_caller_can_approve_and_deny()
   approval_env(nil, function(env)
     local cli = assert(approval().cli, "approval.cli backs the approve/deny verbs")
@@ -5813,6 +5833,7 @@ for _, case in ipairs({
   { "test_dedupe_returns_same_id_and_cap_refuses_without_post", test_dedupe_returns_same_id_and_cap_refuses_without_post },
   { "test_approve_deny_refuse_agents_only", test_approve_deny_refuse_agents_only },
   { "test_unknown_caller_can_approve_and_deny", test_unknown_caller_can_approve_and_deny },
+  { "test_cleared_identity_is_not_refused", test_cleared_identity_is_not_refused },
   { "test_hostile_room_name_sanitised_in_home_post", test_hostile_room_name_sanitised_in_home_post },
   { "test_restart_does_not_reanswer_answered_request", test_restart_does_not_reanswer_answered_request },
 }) do
