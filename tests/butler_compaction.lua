@@ -287,6 +287,19 @@ local transcript_copy = read_fixture("claude-model-confirm-transcript-copy.txt")
 assert(remuda._butler_model_confirm_signature(transcript_copy) == nil
   and not remuda._butler_model_confirm_options_visible(transcript_copy),
   "model confirmation helpers should reject a transcript copy above the composer")
+local model_dialog_fixture = read_fixture("claude-model-confirm-composer-two-row-status.txt")
+assert(remuda._butler_model_dialog_waiting(model_dialog_fixture),
+  "model dialog waiting helper should detect a Switch model dialog")
+local dialog_timeout_reason = remuda._butler_model_timeout_reason(
+  "model-restored", "s1", model_dialog_fixture)
+assert(dialog_timeout_reason:find("appears to be waiting in s1", 1, true)
+  and dialog_timeout_reason:find("Next:", 1, true),
+  "model timeout reason should explain that the dialog is waiting and how to handle it")
+local plain_screen = "ordinary assistant response"
+assert(not remuda._butler_model_dialog_waiting(plain_screen)
+  and remuda._butler_model_timeout_reason("model-restored", "s1", plain_screen)
+    == "timed out waiting for model-restored",
+  "model timeout reason should preserve the ordinary timeout without a dialog")
 local untitled_model_confirm = "❯ 1. Yes, switch to Opus 5.5\n  2. No, go back"
 assert(remuda._butler_model_confirm_signature(untitled_model_confirm) == nil
   and remuda._butler_model_confirm_options_visible(untitled_model_confirm),
