@@ -17,36 +17,55 @@ local statusline_model_matches = assert(config.statusline_model_matches)
 local clear_legacy_restore_state = assert(config.clear_legacy_restore_state)
 local compaction_restore_path = mail_root and mail_root .. "/compaction-restore.json"
 
-local function model_confirm_signature(screen)
+local function model_confirm_dialog(screen)
   if type(screen) ~= "string" then return nil end
   local lines = bottom_screen_lines(screen, 32)
-  for index = 1, #lines - 1 do
-    if index > #lines - 8
-        and lines[index]:find("❯%s*1%.%s+Yes")
-        and lines[index + 1]:find("%d%.%s+No, go back") then
-      for title_row = math.max(1, index - 24), index - 1 do
-        if lines[title_row]:find("Switch model?", 1, true) then
-          local dialog = {}
-          for row = title_row, index + 1 do dialog[#dialog + 1] = lines[row] end
-          return table.concat(dialog, "\n")
-        end
-      end
+  local index
+  for row = #lines - 1, 1, -1 do
+    if lines[row]:find("❯%s*1%.%s+Yes")
+        and lines[row + 1]:find("%d%.%s+No, go back") then
+      index = row
+      break
     end
   end
-  return nil
+  if not index then return nil end
+
+  local title_row
+  for row = math.max(1, index - 24), index - 1 do
+    if lines[row]:find("Switch model?", 1, true) then
+      title_row = row
+    end
+  end
+  if not title_row then return nil end
+
+  for row = index + 2, #lines do
+    local line = lines[row]
+    if line:match("^%s*%d+%.%s")
+        or line:match("^%s*>%s*%d+%.%s")
+        or line:match("^%s*❯%s*%d+%.%s") then
+      return nil
+    end
+  end
+
+  for row = index + 2, #lines - 1 do
+    if lines[row - 1]:match("^%s*─+%s*$")
+        and lines[row + 1]:match("^%s*─+%s*$") then
+      local composer = lines[row]:match("^%s*❯%s*(.-)%s*$")
+      if composer ~= nil and composer ~= "" then return nil end
+    end
+  end
+
+  local dialog = {}
+  for row = title_row, index + 1 do dialog[#dialog + 1] = lines[row] end
+  return table.concat(dialog, "\n")
+end
+
+local function model_confirm_signature(screen)
+  return model_confirm_dialog(screen)
 end
 
 local function model_confirm_options_visible(screen)
-  if type(screen) ~= "string" then return false end
-  local lines = bottom_screen_lines(screen, 32)
-  for index = 1, #lines - 1 do
-    if index > #lines - 24
-        and lines[index]:find("❯%s*1%.%s+Yes")
-        and lines[index + 1]:find("%d%.%s+No, go back") then
-      return true
-    end
-  end
-  return false
+  return model_confirm_dialog(screen) ~= nil
 end
 
 remuda._butler_model_confirm_signature = model_confirm_signature
@@ -524,7 +543,7 @@ function remuda._butler_compaction_execute(session_name, force)
         stable_screen(model_confirm_state, nil)
         return false
       end
-      -- Options without the title yet (half-painted): wait, bounded by expiry.
+      -- An incomplete confirmation screen does not advance stable captures.
       model_confirm_state.started_at = model_confirm_state.started_at or os.time()
       model_confirm_state.polls = model_confirm_state.polls + 1
       return false
