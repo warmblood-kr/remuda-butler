@@ -274,6 +274,12 @@ assert(remuda._butler_model_confirm_signature(read_fixture("claude-model-confirm
   "model confirmation signature should reject a wrong title")
 assert(remuda._butler_model_confirm_signature(read_fixture("claude-stale-model-confirm-with-permission.txt")) == nil,
   "model confirmation signature should reject a stale model confirmation")
+assert(remuda._butler_model_confirm_signature(
+  read_fixture("claude-model-confirm-composer-one-row-status.txt")) ~= nil,
+  "model confirmation signature should recognize the composer dialog with one status row")
+assert(remuda._butler_model_confirm_signature(
+  read_fixture("claude-model-confirm-composer-two-row-status.txt")) ~= nil,
+  "model confirmation signature should recognize the composer dialog with two status rows")
 
 assert(remuda._butler_compaction_is_unknown_dialog("Mystery chooser\n1. Continue\n❯"),
   "numbered option immediately above the prompt should be an active unknown dialog")
