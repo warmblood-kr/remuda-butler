@@ -2603,7 +2603,7 @@ fn butler_matrix_request_uses_fake_http_for_auth_trust_allow_and_same_room() {
 }
 
 #[test]
-fn butler_matrix_request_rejects_https_without_trust_before_network() {
+fn butler_matrix_request_uses_system_tls_trust_by_default() {
     let dir = scratch_dir("butler-matrix-no-trust");
     let (_daemon, path) = butler_test_daemon(&dir);
     let room = "!request:example.org";
@@ -2620,11 +2620,14 @@ fn butler_matrix_request_rejects_https_without_trust_before_network() {
       local failure
       remuda.butler.matrix.request({ method = "GET", path = "/_matrix/client/v3/versions" },
         function(value) failure = value end)
-      if not failure or not failure.error or not failure.error:find("requires ca_file=PATH or pin_sha256=HEX", 1, true)
-        then return "missing-trust-error" end
-      return #remuda.http.calls == 0 and "ok" or "network-reached"
+      local spec = remuda.http.calls[1]
+      if failure then return "request-failed:" .. tostring(failure.error) end
+      if not spec then return "no-request" end
+      if spec.url ~= "https://matrix.example.org/_matrix/client/v3/versions" then return "bad-url" end
+      if spec.pin ~= nil or spec.ca_file ~= nil then return "trust-override-added" end
+      return "ok"
     "#);
-    assert_eq!(result, "ok", "HTTPS must fail closed before HTTP: {result}");
+    assert_eq!(result, "ok", "HTTPS requests should use the core system trust verifier by default: {result}");
 }
 
 #[test]
@@ -3873,7 +3876,7 @@ fn butler_matrix_relay_bounds_processed_ids_and_reconciles_bad_pending_state() {
 }
 
 #[test]
-fn butler_matrix_relay_logs_distinct_transport_misconfigurations_once() {
+fn butler_matrix_relay_uses_system_trust_and_logs_empty_token_once() {
     let dir = scratch_dir("mr-config-log");
     let (_daemon, path) = butler_test_daemon(&dir);
     let (https_token, https_config) = butler_config(
@@ -3898,13 +3901,13 @@ fn butler_matrix_relay_logs_distinct_transport_misconfigurations_once() {
       run({https_token}, {https_config})
       run({empty_token}, {empty_config})
       io.stderr = old_stderr
-      if #remuda.relay_config_logs ~= 2 then return "expected-two-distinct-warnings:" .. #remuda.relay_config_logs end
+      if #remuda.relay_config_logs ~= 1 then return "expected-one-warning:" .. #remuda.relay_config_logs end
       local https, empty = false, false
       for _, line in ipairs(remuda.relay_config_logs) do
         if line:find("HTTPS Matrix homeserver requires", 1, true) then https = true end
         if line:find("Matrix token is empty", 1, true) then empty = true end
       end
-      if not https then return "missing-https-warning" end
+      if https then return "unexpected-https-warning" end
       if not empty then return "missing-empty-token-warning" end
       return "ok"
     "#,
@@ -3912,7 +3915,7 @@ fn butler_matrix_relay_logs_distinct_transport_misconfigurations_once() {
         https_config=lua_raw_string(&https_config.to_string_lossy()),
         empty_token=lua_raw_string(&empty_token.to_string_lossy()),
         empty_config=lua_raw_string(&empty_config.to_string_lossy())));
-    assert_eq!(result, "ok", "relay should log one warning per distinct invalid transport configuration: {result}");
+    assert_eq!(result, "ok", "relay should use system trust for HTTPS and still log invalid tokens: {result}");
 }
 
 #[test]

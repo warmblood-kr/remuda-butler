@@ -192,13 +192,21 @@ local function validate_secret(path, kind)
 end
 
 local PIN_MISMATCH = assert(matrix.PIN_MISMATCH, "load butler/matrix_request before butler/matrix_setup")
+local CERT_UNTRUSTED = matrix.CERT_UNTRUSTED
 
--- A pin mismatch gets one concrete next step.
-local function pin_error(response)
+-- A pin mismatch or an untrusted certificate gets one concrete next step.
+local function tls_error(response)
   local message = type(response) == "table" and response.error
-  if type(message) ~= "string" or not message:find(PIN_MISMATCH, 1, true) then return nil end
-  return "The HTTPS server key does not match --pin.\n"
-    .. "Next: recompute the SPKI SHA-256 of the server key (see docs/butler.md) or use --ca-file PATH"
+  if type(message) ~= "string" then return nil end
+  if message:find(PIN_MISMATCH, 1, true) then
+    return "The HTTPS server key does not match --pin.\n"
+      .. "Next: recompute the SPKI SHA-256 of the server key (see docs/butler.md) or use --ca-file PATH"
+  end
+  if message:find(CERT_UNTRUSTED, 1, true) then
+    return "The HTTPS server certificate is not trusted by this system.\n"
+      .. matrix.UNTRUSTED_NEXT
+  end
+  return nil
 end
 
 local function transport_pin(hex)
@@ -431,10 +439,6 @@ function matrix.setup_prepare(args)
       return nil, "cannot read --ca-file: " .. options.ca_file
     end
   end
-  if homeserver:match("^https://") and not options.pin and not options.ca_file then
-    return nil, "HTTPS setup requires --pin SHA256HEX or --ca-file PATH.\n"
-      .. "Next: rerun with --pin SHA256HEX or --ca-file PATH"
-  end
   if homeserver:match("^http://") and (options.pin or options.ca_file) then
     return nil, "--pin and --ca-file are only valid with an https:// homeserver"
   end
@@ -488,7 +492,7 @@ function matrix.setup_network(options, on_done)
         if type(response) ~= "table" then
           return fail("Matrix setup " .. stage .. " request failed")
         end
-        if pin_error(response) then return fail(pin_error(response)) end
+        if tls_error(response) then return fail(tls_error(response)) end
         local status = tonumber(response.status)
         local decoded, decode_error
         if type(response.body) == "string" and response.body ~= "" then
@@ -653,7 +657,7 @@ function matrix.setup_register(options, on_done)
       ca_file = options.ca_file, pin = transport_pin(options.pin), pin_only = options.pin ~= nil,
       callback = function(response)
         if done_called or cancelled then return end
-        if pin_error(response) then return fail(pin_error(response)) end
+        if tls_error(response) then return fail(tls_error(response)) end
         callback(response, decode(response))
       end,
     }

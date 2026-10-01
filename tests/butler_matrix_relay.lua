@@ -2623,16 +2623,35 @@ local function test_pinned_self_signed_homeserver_uses_pin_only()
   assert(ca_spec and ca_spec.ca_file == ca_dir and ca_spec.pin_only ~= true and ca_spec.pin == nil,
     "ca_file requests keep chain validation: no pin_only")
 
-  local dir, path = fixture()
-  with_alias_http(path, self_signed, function(calls)
-    local refused
-    matrix.request({ method = "GET", path = "/_matrix/client/v3/account/whoami" },
-      function(value) refused = value end)
-    assert(#calls == 0 and refused and refused.error
-      == "HTTPS Matrix homeserver requires ca_file=PATH or pin_sha256=HEX",
-      "HTTPS without pin or ca_file stays refused before any request")
-  end)
-  cleanup_fixture(dir, path)
+  -- Owner decision A: no pin/ca_file means the core verifies against system
+  -- roots (never skipped); an untrusted certificate fails closed with a Next:.
+  local function system_trust(trusted)
+    local dir, path = fixture()
+    local result, spec
+    with_alias_http(path, function(request_spec)
+      if request_spec.pin ~= nil or request_spec.ca_file ~= nil or request_spec.pin_only == true then
+        return { error = "unexpected trust override" }
+      elseif not trusted then
+        return { error = "TLS request failed: server certificate issuer not trusted" }
+      end
+      return { status = 200, body = '{"user_id":"@bot:example.org"}' }
+    end, function(calls)
+      matrix.request({ method = "GET", path = "/_matrix/client/v3/account/whoami" },
+        function(value) result = value end)
+      spec = calls[1]
+    end)
+    cleanup_fixture(dir, path)
+    return result, spec
+  end
+  local trusted, trusted_spec = system_trust(true)
+  assert(trusted and not trusted.error and trusted.status == 200 and trusted_spec
+    and trusted_spec.pin == nil and trusted_spec.ca_file == nil and trusted_spec.pin_only ~= true,
+    "https without pin or ca_file must reach a system-trusted homeserver: " .. tostring(trusted and trusted.error))
+  local untrusted = system_trust(false)
+  assert(untrusted and type(untrusted.error) == "string"
+    and untrusted.error:find("not trusted", 1, true)
+    and untrusted.error:find("Next: remuda butler matrix setup --ca-file PATH", 1, true),
+    "an untrusted certificate must fail closed with a --ca-file Next: line: " .. tostring(untrusted and untrusted.error))
 end
 
 -- SEC #164 lows: config-load refusals and a stable core pin-mismatch marker.

@@ -1077,8 +1077,7 @@ function relay.new(options)
           if result.error:find("outside the configured Matrix allowlist", 1, true) then
             warn_once("allowlist", result.error,
               "butler Matrix relay request refused by configured allowlist: " .. result.error)
-          elseif result.error == "Matrix token is empty"
-              or result.error:find("^HTTPS Matrix homeserver requires ca_file=PATH or pin_sha256=HEX") then
+          elseif result.error == "Matrix token is empty" then
             warn_once("config", result.error, "butler Matrix relay misconfigured: " .. result.error)
           end
         end

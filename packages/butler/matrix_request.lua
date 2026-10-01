@@ -481,6 +481,9 @@ end
 
 -- Core's stable TLS reason for a wrong pin (remuda net/http_client.rs tls_failure_reason).
 matrix.PIN_MISMATCH = "SPKI pin mismatch"
+-- Core's stable TLS reason for a certificate the trust roots do not cover, and its next step.
+matrix.CERT_UNTRUSTED = "server certificate issuer not trusted"
+matrix.UNTRUSTED_NEXT = "Next: remuda butler matrix setup --ca-file PATH (the server's CA certificate), or --pin SHA256HEX"
 
 local function config()
   local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths
@@ -496,9 +499,6 @@ local function config()
   if parsed.base:match("^http://") and (parsed.ca_file or parsed.pin) then
     return nil, "Matrix pin_sha256 and ca_file are only valid with an https:// homeserver.\n"
       .. "Next: remove pin_sha256/ca_file from " .. paths.config_path .. " or switch its homeserver to https://"
-  end
-  if parsed.base:match("^https://") and not parsed.ca_file and not parsed.pin then
-    return nil, "HTTPS Matrix homeserver requires ca_file=PATH or pin_sha256=HEX"
   end
   parsed.token = token
   return parsed
@@ -743,6 +743,9 @@ function matrix.request(args, on_done)
       if result.error and conf.pin and result.error:find(matrix.PIN_MISMATCH, 1, true) then
         return done({ error = result.error .. "\nNext: recompute pin_sha256 as the server key's SPKI SHA-256"
           .. " (see docs/butler.md) or use ca_file=PATH" })
+      end
+      if result.error and result.error:find(matrix.CERT_UNTRUSTED, 1, true) then
+        return done({ error = result.error .. "\n" .. matrix.UNTRUSTED_NEXT })
       end
       if result.error then return done({ error = result.error }) end
       result.headers = json.object(type(result.headers) == "table" and result.headers or {})

@@ -189,9 +189,12 @@ Copy the 64 hexadecimal digits after `=` into `pin_sha256` (or pass them to
 used by `remuda.http` and sends it with `pin_only`, so a self-signed homeserver
 works with the pin alone: the CA chain is skipped, while the hostname, validity
 dates, and the SPKI pin are still checked. `ca_file` keeps full chain
-validation. HTTPS fails closed unless `ca_file` or a valid `pin_sha256` is
-configured, and a pin mismatch fails with a `Next:` line; HTTP is intended for
-local or development use.
+validation. With neither `ca_file` nor `pin_sha256`, an `https://` homeserver
+is verified against the system's trusted CA roots, so a publicly trusted
+certificate needs no extra setting. Verification is never skipped: an untrusted
+certificate fails with `Next: remuda butler matrix setup --ca-file PATH (the
+server's CA certificate), or --pin SHA256HEX`, and a pin mismatch fails with
+its own `Next:` line. HTTP is intended for local or development use.
 
 Matrix sends and replies are split at UTF-8 boundaries into chunks of at most
 4000 bytes. Upload request bodies and download response bodies are capped at
