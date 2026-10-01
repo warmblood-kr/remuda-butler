@@ -2516,40 +2516,155 @@ local function test_rx_in_thread_reply_unfollowed_not_delivered()
   end)
 end
 
+-- Follow persistence (C prime): follows live in matrix-follows.json next to
+-- the relay state file, as { ROOM = { THREAD = mail id or true } }.
+local function rx_follows_path(dir) return dir .. "/matrix-follows.json" end
+
+local function rx_read_json(file_path)
+  local file = io.open(file_path, "rb")
+  if not file then return nil end
+  local text = file:read("a")
+  file:close()
+  return matrix.decode_json(text)
+end
+
+local function rx_write_json(file_path, value)
+  local file = assert(io.open(file_path, "wb"))
+  file:write(assert(matrix.encode_json(value)))
+  file:close()
+end
+
+local function rx_capture_stderr(run)
+  local logs, old_stderr = {}, io.stderr
+  io.stderr = { write = function(_, line) logs[#logs + 1] = line end }
+  local ok, err = pcall(run)
+  io.stderr = old_stderr
+  if not ok then error(err, 0) end
+  return logs
+end
+
+local function rx_count(logs, text)
+  local n = 0
+  for _, line in ipairs(logs) do if line:find(text, 1, true) then n = n + 1 end end
+  return n
+end
+
+local function test_rx_follows_saved_to_own_file()
+  local dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    local relay = rx_relay(path)
+    relay:subscribe_thread(HOME, "$with-mail", "M7")
+    relay:subscribe_thread(NEW, "$plain")
+    local follows = rx_read_json(rx_follows_path(dir))
+    assert(type(follows) == "table", "follows are saved to matrix-follows.json next to the state file")
+    assert(follows[HOME] and follows[HOME]["$with-mail"] == "M7", "a follow with mail context stores the mail id string")
+    assert(follows[NEW] and follows[NEW]["$plain"] == true, "a follow without mail context stores true")
+    local state = rx_read_json(relay:metadata().path)
+    assert(type(state) == "table" and state.matrix_thread_subscriptions == nil and state._rx_format == nil,
+      "the relay state file no longer holds matrix_thread_subscriptions or chunks")
+    relay:unsubscribe_thread(NEW, "$plain")
+    follows = rx_read_json(rx_follows_path(dir))
+    assert(not (follows[NEW] and follows[NEW]["$plain"]), "unfollow is saved to the follows file")
+    relay:stop()
+  end)
+end
+
+local function test_rx_follows_restart_from_own_file()
+  local dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    rx_write_json(rx_follows_path(dir), { [HOME] = { ["$hand"] = true, ["$ctx"] = "M42" } })
+    local relay, client, delivered = rx_relay(path)
+    assert(rx_followed(relay, HOME, "$hand") and rx_followed(relay, HOME, "$ctx"),
+      "follows are read from matrix-follows.json at start")
+    rx_sync(client, HOME, { rx_msg("$hand-t", OWNER, "after restart", rx_thread("$hand")),
+      rx_msg("$ctx-t", OWNER, "after restart", rx_thread("$ctx")) })
+    assert(rx_find(delivered, "$hand-t"), "a thread followed in the file delivers after a restart")
+    local with_context = rx_find(delivered, "$ctx-t")
+    assert(with_context and with_context.context_mail_id == "M42", "a mail id string in the file is the mail context")
+    relay:stop()
+  end)
+end
+
+local function test_rx_old_follow_state_migrates_with_mail_id()
+  local dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    rx_write_json(path .. ".since", { since = "s-old", matrix_thread_subscriptions = { [HOME] = {
+      ["$old-root"] = { mail_id = "MOLD", created_at = "2026-09-01T00:00:00Z" },
+      ["$both"] = { mail_id = "MOLDER", created_at = "2026-09-01T00:00:00Z" },
+    } } })
+    rx_write_json(rx_follows_path(dir), { [HOME] = { ["$both"] = "MNEW" } })
+    local relay, client, delivered = rx_relay(path)
+    local follows = rx_read_json(rx_follows_path(dir))
+    assert(follows and follows[HOME] and follows[HOME]["$old-root"] == "MOLD",
+      "old-shape follows move into matrix-follows.json and keep their mail_id")
+    assert(follows[HOME]["$both"] == "MNEW", "a follow already in matrix-follows.json wins on a conflict")
+    local state = rx_read_json(relay:metadata().path)
+    assert(type(state) == "table" and state.matrix_thread_subscriptions == nil,
+      "the old key is gone from the state file after migration")
+    rx_sync(client, HOME, { rx_msg("$old-t", OWNER, "reply in the migrated thread", rx_thread("$old-root")) })
+    local event = rx_find(delivered, "$old-t")
+    assert(event and event.context_mail_id == "MOLD" and event.references and event.references[1] == "MOLD",
+      "a reply in a migrated thread still gets its mail context")
+    relay:stop()
+  end)
+end
+
+local function test_rx_corrupt_follows_file_starts_empty_with_warning()
+  local dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    local file = assert(io.open(rx_follows_path(dir), "wb"))
+    file:write("{ not json")
+    file:close()
+    local relay, client, delivered
+    local logs = rx_capture_stderr(function() relay, client, delivered = rx_relay(path) end)
+    assert(rx_count(logs, "matrix-follows.json") == 1, "a corrupt follows file logs ONE warning naming the file")
+    assert(next(relay:state().subscriptions[HOME] or {}) == nil, "a corrupt follows file starts with no follows")
+    rx_sync(client, HOME, { rx_msg("$after-corrupt", OWNER, "still running") })
+    assert(rx_find(delivered, "$after-corrupt"), "the relay keeps running after a corrupt follows file")
+    relay:subscribe_thread(HOME, "$fresh")
+    local follows = rx_read_json(rx_follows_path(dir))
+    assert(follows and follows[HOME] and follows[HOME]["$fresh"] == true, "the next follow rewrites a valid file")
+    relay:stop()
+  end)
+end
+
+-- 50000 follows in TOTAL across all rooms; the file is pre-filled so the test
+-- does not depend on how the relay counts.
 local function test_rx_follow_guard_refuses_and_warns_no_trim()
   local dir, path = rx_fixture()
   rx_with_dir(dir, function()
+    local home, new = {}, {}
+    for i = 1, 25000 do home["$h" .. i] = true end
+    for i = 1, 24999 do new["$n" .. i] = true end
+    rx_write_json(rx_follows_path(dir), { [HOME] = home, [NEW] = new })
     local relay, client, delivered = rx_relay(path)
-    local rows = relay:state().subscriptions
-    rows[HOME] = rows[HOME] or {}
-    -- Cheap probe first: past the old 5000 cap nothing may be trimmed.
-    for i = 1, 5000 do rows[HOME]["$old" .. i] = { created_at = string.format("2026-01-01T00:%05dZ", i) } end
-    relay:subscribe_thread(HOME, "$probe")
-    assert(rx_followed(relay, HOME, "$old1") and rx_followed(relay, HOME, "$probe"),
-      "a follow past 5000 must not trim the oldest follow")
-    for i = 5001, 49999 do rows[HOME]["$old" .. i] = { created_at = string.format("2026-01-01T00:%05dZ", i) } end
-    local logs, old_stderr = {}, io.stderr
-    io.stderr = { write = function(_, line) logs[#logs + 1] = line end }
-    local ok, err = pcall(function()
-      relay:subscribe_thread(HOME, "$new-1")
-      rx_sync(client, HOME, { rx_msg("$cap-m", OWNER, "@bot:example.org at the cap", rx_thread("$new-2")) })
+    assert(rx_followed(relay, HOME, "$h1") and rx_followed(relay, NEW, "$n24999"), "49999 follows load from the file")
+    assert(relay:subscribe_thread(NEW, "$probe") ~= false and rx_followed(relay, NEW, "$probe"),
+      "the 50000th follow in total succeeds")
+    local refused_home, refused_new
+    local logs = rx_capture_stderr(function()
+      refused_home = relay:subscribe_thread(HOME, "$new-1")
+      refused_new = relay:subscribe_thread(NEW, "$new-2")
+      rx_sync(client, HOME, { rx_msg("$cap-m", OWNER, "@bot:example.org at the cap", rx_thread("$new-3")) })
     end)
-    io.stderr = old_stderr
-    assert(ok, err)
+    assert(refused_home == false and refused_new == false, "at 50000 in total a new follow is refused in every room")
     assert(rx_find(delivered, "$cap-m"), "a mention at the cap is still delivered")
-    assert(not rx_followed(relay, HOME, "$new-1") and not rx_followed(relay, HOME, "$new-2"),
-      "at 50000 follows a new follow is refused")
-    assert(rx_followed(relay, HOME, "$old1") and rx_followed(relay, HOME, "$old49999"), "nothing is trimmed")
-    local warnings = 0
-    for _, line in ipairs(logs) do if line:find("50000", 1, true) then warnings = warnings + 1 end end
-    assert(warnings == 1, "the refused follows log ONE warning, got " .. warnings)
+    assert(not rx_followed(relay, HOME, "$new-1") and not rx_followed(relay, NEW, "$new-2")
+      and not rx_followed(relay, HOME, "$new-3"), "refused follows are not stored")
+    assert(rx_followed(relay, HOME, "$h1") and rx_followed(relay, HOME, "$h25000")
+      and rx_followed(relay, NEW, "$n1") and rx_followed(relay, NEW, "$probe"), "nothing is trimmed")
+    assert(rx_count(logs, "50000") == 1, "the refused follows log ONE warning, got " .. rx_count(logs, "50000"))
+    assert(relay:subscribe_thread(HOME, "$h1") ~= false, "re-following an existing thread is always OK")
     relay_module.instance = relay
     rx_event_http(path, function()
-      local result = capture_matrix_cli({ "matrix", "follow", "$new-3" })
+      local result = capture_matrix_cli({ "matrix", "follow", "$new-4" })
       local out = result and (result.stdout .. result.stderr) or ""
-      assert(out:find("Follow limit reached in " .. HOME .. " (50000). Next: remuda butler matrix unfollow '$new-3'", 1, true),
-        "the follow verb reports the guard, got: " .. out)
+      assert(out:find("Follow limit reached (50000 in total). Next: remuda butler matrix unfollow '", 1, true),
+        "the follow verb reports the total guard, got: " .. out)
     end)
+    relay:unsubscribe_thread(NEW, "$n1")
+    assert(relay:subscribe_thread(HOME, "$new-1") ~= false and rx_followed(relay, HOME, "$new-1"),
+      "unfollow frees a slot")
     relay:stop()
   end)
 end
@@ -3008,6 +3123,10 @@ rx_check("test_rx_mention_follows_thread", test_rx_mention_follows_thread)
 rx_check("test_rx_main_timeline_reply_is_root", test_rx_main_timeline_reply_is_root)
 rx_check("test_rx_in_thread_reply_unfollowed_not_delivered", test_rx_in_thread_reply_unfollowed_not_delivered)
 rx_check("test_rx_follow_guard_refuses_and_warns_no_trim", test_rx_follow_guard_refuses_and_warns_no_trim)
+rx_check("test_rx_follows_saved_to_own_file", test_rx_follows_saved_to_own_file)
+rx_check("test_rx_follows_restart_from_own_file", test_rx_follows_restart_from_own_file)
+rx_check("test_rx_old_follow_state_migrates_with_mail_id", test_rx_old_follow_state_migrates_with_mail_id)
+rx_check("test_rx_corrupt_follows_file_starts_empty_with_warning", test_rx_corrupt_follows_file_starts_empty_with_warning)
 rx_check("test_rx_untrusted_media_quarantined", test_rx_untrusted_media_quarantined)
 rx_check("test_rx_allowlisted_human_unchanged", test_rx_allowlisted_human_unchanged)
 rx_check("test_rx_follows_survive_restart", test_rx_follows_survive_restart)
