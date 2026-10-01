@@ -14,7 +14,11 @@ local deliver_message = assert(config.deliver_message)
 local known_startup_modal = assert(remuda._butler_chooser).known_startup_modal
 local startup_action_safe
 
-local function mail_notice_text(message, detail)
+-- #201: the Codex sandbox blocks the CLI, so a Codex member is pointed at the MCP tool first.
+local function inbox_hint(kind)
+  return kind == "codex" and "MCP butler_inbox (or remuda butler inbox)" or "remuda butler inbox"
+end
+local function mail_notice_text(message, detail, kind)
   if not detail then
     local sender = message.from and (message.from.alias or message.from.session) or "outside"
     if message.kind == "forward" then
@@ -26,7 +30,7 @@ local function mail_notice_text(message, detail)
       detail = "from " .. sender
     end
   end
-  return "Butler message " .. message.id .. " " .. detail .. " arrived. Read it: remuda butler inbox"
+  return "Butler message " .. message.id .. " " .. detail .. " arrived. Read it: " .. inbox_hint(kind)
 end
 
 -- #29: a mail notice must never land on a human's half-typed line. Notices
@@ -297,7 +301,7 @@ local function pending_notice_text(pending)
       .. (pending.message_ids[reshown]:gsub(" Read it: .*$", ""))
       .. " Read them: remuda butler inbox; remuda butler inbox " .. reshown
   end
-  return pending.count .. " new Butler messages arrived. Read them: remuda butler inbox"
+  return pending.count .. " new Butler messages arrived. Read them: " .. inbox_hint(pending.kind)
 end
 local notice_recovery_error
 local function input_was_busy(ok, result, detail)
@@ -817,7 +821,7 @@ function remuda._butler_notify(alias, notice, message_id, reshow)
   pending.first_at = pending.first_at or now
   pending.last_at = now
   pending.due_at = math.min(now + NOTICE_QUIET_S, pending.first_at + NOTICE_MAX_WAIT_S)
-  pending.count, pending.text = pending.count + 1, notice
+  pending.count, pending.text, pending.kind = pending.count + 1, notice, recipient.kind
   bus.notices[alias] = pending
   if first then
     cancel_notice_timers(alias)
@@ -852,7 +856,7 @@ local function seed_unread_notices(alias, previous_instance, instance, unread)
           detail = "forwarded by " .. by
         end
         message.id = message.id or message_id
-        remuda._butler_notify(alias, mail_notice_text(message, detail), message_id)
+        remuda._butler_notify(alias, mail_notice_text(message, detail, agent.kind), message_id)
       end
     end
   end
