@@ -10671,12 +10671,15 @@ fn quota_write_codex_app_server_stub(bin: &Path, runs: &Path, delay: &str) {
         serde_json::to_string(&fixture).expect("compact app-server fixture"),
     ]
     .join("\n");
+    let output_path = bin.join("quota-codex-app-server-output.jsonl");
+    std::fs::write(&output_path, format!("{output}\n")).expect("write app-server output fixture");
     let path = bin.join("codex");
     std::fs::write(
         &path,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1 $2\" = 'login status' ]; then printf '%s\\n' 'Logged in using ChatGPT' >&2; exit 0; fi\nif [ \"$1 $2\" = 'app-server' ]; then cat >/dev/null; sleep {delay}; cat <<'QUOTA_FIXTURE'\n{output}\nQUOTA_FIXTURE\nfi\nexit 2\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1 $2\" = 'login status' ]; then printf '%s\\n' 'Logged in using ChatGPT' >&2; exit 0; fi\nif [ \"$1\" = 'app-server' ]; then count=0; while [ \"$count\" -lt 3 ]; do IFS= read -r request || break; count=$((count + 1)); done; /bin/sleep {delay}; /bin/cat '{}'; fi\nexit 2\n",
             runs.display(),
+            output_path.display(),
         ),
     )
     .expect("write codex app-server stub");
@@ -10890,7 +10893,7 @@ fn butler_quota_single_flight_spawns_app_server_once_for_overlapping_calls() {
     );
     quota_write_codex_app_server_stub(&bin, &runs, "0.3");
     let (_daemon, _path) = butler_doctor_test_daemon(&dir, bin.to_str().expect("PATH"));
-    let mut spawn = || {
+    let spawn = || {
         std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
             .args(["-s", "s", "butler", "quota"])
             .env("REMUDA_RUNTIME_DIR", &dir)
