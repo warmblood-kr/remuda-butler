@@ -4161,9 +4161,13 @@ local function test_rx_link_like_root_counted_but_not_shown()
   end)
 end
 
+-- The #235 tests live in one table: the main chunk of this file is at Lua's
+-- limit of 200 local variables, and a table costs one.
+local ctx_tests = {}
+
 -- #235 step A1: the inbox header of a Matrix mail names the room, its kind and
 -- the thread; a thread mail gets a Next line with the room always written.
-local function test_inbox_header_names_room_and_thread()
+function ctx_tests.test_inbox_header_names_room_and_thread()
   local first = "[H1 from matrix/@alice:example.org · 2026-10-01T06:45:10Z] Matrix message from @alice:example.org\n"
   local function render(fields)
     local bus = { inboxes = { butler = { "H1" } }, messages = {}, objects = { o1 = { content = "the body" } } }
@@ -4222,7 +4226,7 @@ end
 
 -- #235 step A2: `matrix thread EVENT` without --room asks the room of the
 -- delivered mail when the relay has a route for that event, otherwise HOME.
-local function test_matrix_thread_takes_room_from_route()
+function ctx_tests.test_matrix_thread_takes_room_from_route()
   local dir, path = rx_fixture()
   rx_with_dir(dir, function()
     local relay, client = rx_relay(path)
@@ -4347,7 +4351,7 @@ local function ctx_lines(text)
   return lines, block
 end
 
-local function test_ctx_block_text_with_all_four_marks()
+function ctx_tests.test_ctx_block_text_with_all_four_marks()
   local thread = { root = ctx_event("$ctx-root", OWNER, "Can we move the release to Friday?", 31), replies = {
     ctx_event("$ctx-1", RX_ALLY, "Friday works for the core.", 33, "$ctx-root"),
     ctx_event("$ctx-2", "@bot:example.org", "noted.", 35, "$ctx-root"),
@@ -4386,7 +4390,7 @@ local function test_ctx_block_text_with_all_four_marks()
   end)
 end
 
-local function test_ctx_more_than_twenty_and_second_mail_has_no_block()
+function ctx_tests.test_ctx_more_than_twenty_and_second_mail_has_no_block()
   local not_shown = "  ... earlier messages not shown ..."
   for _, earlier in ipairs({ 30, 20 }) do
     local thread = { root = ctx_event("$many-root", OWNER, "first message", 0), replies = {} }
@@ -4424,7 +4428,7 @@ local function test_ctx_more_than_twenty_and_second_mail_has_no_block()
   end
 end
 
-local function test_ctx_line_rules_cut_join_media_time_and_hostile_text()
+function ctx_tests.test_ctx_line_rules_cut_join_media_time_and_hostile_text()
   local long = string.rep("a", 401)
   local thread = { root = ctx_event("$fmt-root", OWNER, "line one\nline two\r\nline three", -7 * 60), replies = {
     ctx_event("$fmt-1", OWNER, long, 1, "$fmt-root"),
@@ -4478,7 +4482,7 @@ local function test_ctx_line_rules_cut_join_media_time_and_hostile_text()
   end)
 end
 
-local function test_ctx_block_is_at_most_8_kib()
+function ctx_tests.test_ctx_block_is_at_most_8_kib()
   local thread = { root = ctx_event("$big-root", OWNER, "first message", 0), replies = {} }
   for i = 1, 19 do
     thread.replies[i] = ctx_event("$big-" .. i, OWNER, string.format("%02d ", i) .. string.rep("x", 440), i, "$big-root")
@@ -4500,7 +4504,7 @@ local function test_ctx_block_is_at_most_8_kib()
   end)
 end
 
-local function test_ctx_fetch_failure_and_timeout_still_deliver()
+function ctx_tests.test_ctx_fetch_failure_and_timeout_still_deliver()
   for _, case in ipairs({
     { "a 403 on the first request", function() return { status = 403, body = "{}" } end, "Matrix HTTP 403" },
     { "a 403 on the relations page only", function(_, url)
@@ -4531,7 +4535,7 @@ local function test_ctx_fetch_failure_and_timeout_still_deliver()
   end
 end
 
-local function test_ctx_non_allowlisted_sender_gets_no_fetch()
+function ctx_tests.test_ctx_non_allowlisted_sender_gets_no_fetch()
   local thread = { root = ctx_event("$nf-root", OWNER, "first message", 0), replies = {} }
   ctx_run(nil, thread, function(ctx)
     ctx.sync(NEW, { ctx_event("$nf-m", STRANGER, "@bot:example.org hello", 5, "$nf-root") })
@@ -4543,7 +4547,7 @@ local function test_ctx_non_allowlisted_sender_gets_no_fetch()
   end)
 end
 
-local function test_ctx_lines_do_not_count_as_turns_or_against_the_rate_cap()
+function ctx_tests.test_ctx_lines_do_not_count_as_turns_or_against_the_rate_cap()
   local thread = { root = ctx_event("$cnt-root", RX_ALLY, "butler line 1", 0), replies = {
     ctx_event("$cnt-1", RX_ALLY, "butler line 2", 1, "$cnt-root"),
     ctx_event("$cnt-2", RX_ALLY, "butler line 3", 2, "$cnt-root"),
@@ -4568,7 +4572,7 @@ end
 
 -- Butler asked for this case: a reply to the Butler inside a thread whose start
 -- it never saw (HOME delivers every thread reply, mention or not).
-local function test_ctx_reply_in_unseen_thread_gets_the_block()
+function ctx_tests.test_ctx_reply_in_unseen_thread_gets_the_block()
   local thread = { root = ctx_event("$un-root", OWNER, "who can take the release?", 0), replies = {
     ctx_event("$un-1", "@bot:example.org", "I can.", 1, "$un-root"),
   } }
@@ -4588,7 +4592,7 @@ local function test_ctx_reply_in_unseen_thread_gets_the_block()
 end
 
 -- The delivered message is the thread's only reply: the block is the root line.
-local function test_ctx_only_the_root_line_when_the_delivered_message_is_the_only_reply()
+function ctx_tests.test_ctx_only_the_root_line_when_the_delivered_message_is_the_only_reply()
   local thread = { root = ctx_event("$solo-root", OWNER, "anyone there?", 0), replies = {} }
   ctx_run(nil, thread, function(ctx)
     local message = ctx_event("$solo-m", OWNER, "@bot:example.org you?", 1, "$solo-root")
@@ -4602,7 +4606,7 @@ end
 
 -- The fetched block is kept with the pending record: a delivery that fails, and a
 -- relay restart before the retry, neither fetch again nor lose the mail.
-local function test_ctx_restart_between_fetch_and_delivery()
+function ctx_tests.test_ctx_restart_between_fetch_and_delivery()
   local thread = { root = ctx_event("$rs-root", OWNER, "first message", 0), replies = {
     ctx_event("$rs-1", OWNER, "second message", 1, "$rs-root"),
   } }
@@ -4679,18 +4683,18 @@ rx_tests = {
   { "test_rx_reply_to_allowlisted_human_takes_no_post_slot", test_rx_reply_to_allowlisted_human_takes_no_post_slot },
   { "test_rx_post_cap_home_line_once_per_hour", test_rx_post_cap_home_line_once_per_hour },
   { "test_rx_link_like_root_counted_but_not_shown", test_rx_link_like_root_counted_but_not_shown },
-  { "test_inbox_header_names_room_and_thread", test_inbox_header_names_room_and_thread },
-  { "test_matrix_thread_takes_room_from_route", test_matrix_thread_takes_room_from_route },
-  { "test_ctx_block_text_with_all_four_marks", test_ctx_block_text_with_all_four_marks },
-  { "test_ctx_more_than_twenty_and_second_mail_has_no_block", test_ctx_more_than_twenty_and_second_mail_has_no_block },
-  { "test_ctx_line_rules_cut_join_media_time_and_hostile_text", test_ctx_line_rules_cut_join_media_time_and_hostile_text },
-  { "test_ctx_block_is_at_most_8_kib", test_ctx_block_is_at_most_8_kib },
-  { "test_ctx_fetch_failure_and_timeout_still_deliver", test_ctx_fetch_failure_and_timeout_still_deliver },
-  { "test_ctx_non_allowlisted_sender_gets_no_fetch", test_ctx_non_allowlisted_sender_gets_no_fetch },
-  { "test_ctx_lines_do_not_count_as_turns_or_against_the_rate_cap", test_ctx_lines_do_not_count_as_turns_or_against_the_rate_cap },
-  { "test_ctx_reply_in_unseen_thread_gets_the_block", test_ctx_reply_in_unseen_thread_gets_the_block },
-  { "test_ctx_only_the_root_line_when_the_delivered_message_is_the_only_reply", test_ctx_only_the_root_line_when_the_delivered_message_is_the_only_reply },
-  { "test_ctx_restart_between_fetch_and_delivery", test_ctx_restart_between_fetch_and_delivery },
+  { "test_inbox_header_names_room_and_thread", ctx_tests.test_inbox_header_names_room_and_thread },
+  { "test_matrix_thread_takes_room_from_route", ctx_tests.test_matrix_thread_takes_room_from_route },
+  { "test_ctx_block_text_with_all_four_marks", ctx_tests.test_ctx_block_text_with_all_four_marks },
+  { "test_ctx_more_than_twenty_and_second_mail_has_no_block", ctx_tests.test_ctx_more_than_twenty_and_second_mail_has_no_block },
+  { "test_ctx_line_rules_cut_join_media_time_and_hostile_text", ctx_tests.test_ctx_line_rules_cut_join_media_time_and_hostile_text },
+  { "test_ctx_block_is_at_most_8_kib", ctx_tests.test_ctx_block_is_at_most_8_kib },
+  { "test_ctx_fetch_failure_and_timeout_still_deliver", ctx_tests.test_ctx_fetch_failure_and_timeout_still_deliver },
+  { "test_ctx_non_allowlisted_sender_gets_no_fetch", ctx_tests.test_ctx_non_allowlisted_sender_gets_no_fetch },
+  { "test_ctx_lines_do_not_count_as_turns_or_against_the_rate_cap", ctx_tests.test_ctx_lines_do_not_count_as_turns_or_against_the_rate_cap },
+  { "test_ctx_reply_in_unseen_thread_gets_the_block", ctx_tests.test_ctx_reply_in_unseen_thread_gets_the_block },
+  { "test_ctx_only_the_root_line_when_the_delivered_message_is_the_only_reply", ctx_tests.test_ctx_only_the_root_line_when_the_delivered_message_is_the_only_reply },
+  { "test_ctx_restart_between_fetch_and_delivery", ctx_tests.test_ctx_restart_between_fetch_and_delivery },
 }
 
 -- A live reload keeps the old relay instance, so the relay object may be from an
