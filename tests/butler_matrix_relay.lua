@@ -2492,6 +2492,70 @@ local function test_rx_subscribe_foreign_room_refused()
   end)
 end
 
+-- Per room and rolling hour, only ACCEPTED events from non-allowlisted
+-- senders count. Past the cap: not delivered, not quarantined, processed, one
+-- warning line per room, nothing posted. The relay counts by receive time.
+local function test_rx_untrusted_room_cap_logs_once_no_post()
+  local real_time, now = os.time, 1790000000
+  os.time = function(value) if value then return real_time(value) end return now end
+  local logs, old_stderr = {}, io.stderr
+  io.stderr = { write = function(_, line) logs[#logs + 1] = line end }
+  local dirs = {}
+  local ok, err = pcall(function()
+    local dir, path = invite_fixture(OWNER, "room=" .. NEW .. "\nuntrusted_per_room_hour=2\n")
+    dirs[#dirs + 1] = dir
+    local relay, client, delivered = rx_relay(path)
+    local events = { rx_msg("$u-img", STRANGER, "x.png", nil, "m.image") }
+    for i = 1, 3 do events[#events + 1] = rx_msg("$u-thread" .. i, STRANGER, "unfollowed", rx_thread("$nope")) end
+    for i = 1, 5 do events[#events + 1] = rx_msg("$u" .. i, STRANGER, "root " .. i) end
+    events[#events + 1] = rx_msg("$u-owner", OWNER, "owner still arrives")
+    rx_sync(client, NEW, events)
+    assert(rx_find(delivered, "$u1") and rx_find(delivered, "$u2"),
+      "the first 2 accepted untrusted roots are delivered (rejected and quarantined events do not count)")
+    for i = 3, 5 do
+      assert(not rx_find(delivered, "$u" .. i), "$u" .. i .. ": past the cap the text is not delivered")
+      assert(not rx_find(relay:quarantine_list(), "$u" .. i), "$u" .. i .. ": the cap never quarantines")
+      assert(relay:state().processed["$u" .. i], "$u" .. i .. ": a capped event is marked processed")
+    end
+    assert(rx_find(delivered, "$u-owner"), "allowlisted senders are never capped")
+    rx_sync(client, HOME, { rx_msg("$h1", STRANGER, "home 1"), rx_msg("$h2", STRANGER, "home 2"),
+      rx_msg("$h3", STRANGER, "home 3") })
+    assert(rx_find(delivered, "$h2") and not rx_find(delivered, "$h3"), "the cap is per room")
+    rx_sync(client, NEW, { rx_msg("$u6", STRANGER, "still capped") })
+    assert(not rx_find(delivered, "$u6"), "the room stays capped within the hour")
+    local warnings, new_warnings = 0, 0
+    for _, line in ipairs(logs) do
+      if line:find("rate cap", 1, true) then
+        warnings = warnings + 1
+        if line:find(NEW, 1, true) then new_warnings = new_warnings + 1 end
+      end
+    end
+    assert(warnings == 2 and new_warnings == 1,
+      "exactly ONE rate cap warning line per capped room, got " .. warnings .. " (" .. new_warnings .. " for the joined room)")
+    for _, args in ipairs(client.requests) do
+      assert(args.path:find("/sync", 1, true), "nothing is posted: no request besides /sync, got " .. args.path)
+    end
+    now = now + 3601
+    rx_sync(client, NEW, { rx_msg("$u7", STRANGER, "an hour later") })
+    assert(rx_find(delivered, "$u7"), "delivery works again after the hour")
+    relay:stop()
+
+    -- The default is 20 per room and hour.
+    local default_dir, default_path = rx_fixture()
+    dirs[#dirs + 1] = default_dir
+    local default_relay, default_client, default_delivered = rx_relay(default_path)
+    local roots = {}
+    for i = 1, 21 do roots[i] = rx_msg("$d" .. i, STRANGER, "root " .. i) end
+    rx_sync(default_client, HOME, roots)
+    assert(rx_find(default_delivered, "$d20") and not rx_find(default_delivered, "$d21"),
+      "without the config key the cap is 20 per room and hour")
+    default_relay:stop()
+  end)
+  os.time, io.stderr = real_time, old_stderr
+  for _, dir in ipairs(dirs) do remove_dir(dir) end
+  if not ok then error(err, 0) end
+end
+
 -- TODO(rx PR2): the Butler-to-Butler reply block is lifted together with the
 -- loop guard; flip this test to test_rx_b2b_turn_guard_home_line_once then.
 local function test_rx_b2b_block_kept_TODO_pr2()
@@ -2922,6 +2986,7 @@ rx_check("test_rx_subscribe_foreign_room_refused", test_rx_subscribe_foreign_roo
 rx_check("test_rx_b2b_block_kept_TODO_pr2", test_rx_b2b_block_kept_TODO_pr2)
 rx_check("test_rx_marker_cannot_be_faked", test_rx_marker_cannot_be_faked)
 rx_check("test_rx_untrusted_approve_text_is_data", test_rx_untrusted_approve_text_is_data)
+rx_check("test_rx_untrusted_room_cap_logs_once_no_post", test_rx_untrusted_room_cap_logs_once_no_post)
 rx_check("test_open_mode_sender_allowlist_still_quarantines", test_open_mode_sender_allowlist_still_quarantines)
 assert(#rx_failures == 0, "receive-rules tests failed:\n" .. table.concat(rx_failures, "\n"))
 print("ok: Matrix receive rules: accept rule, follows, untrusted frame")
