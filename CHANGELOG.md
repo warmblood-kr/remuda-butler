@@ -18,7 +18,7 @@ release tags yet; entries come from merged pull requests.
 - `remuda butler matrix follow EVENT_ID` and `unfollow EVENT_ID` manage thread replies. HOME always delivers replies; other rooms deliver a reply only in a followed thread or on a mention. Replying, sending, and a mention from an allowlisted sender follow the thread automatically (#178).
 - `remuda butler matrix send -` reads the message from stdin, up to 64 KiB (#170).
 - Outgoing Matrix messages carry a formatted HTML body rendered from a Markdown subset; raw HTML is always escaped (#171).
-- Matrix `posts_per_hour` (default 30) caps the Butler's own Matrix posts per hour; a refused post says `Next: wait until HH:MMZ` (#223).
+- Matrix `posts_per_hour` (default 30) caps the Butler's Matrix posts per hour that are not a reply to a person on the allowlist; a refused post says `Next: wait until HH:MMZ`, and the first refusal in an hour posts one line to HOME (#223).
 - When the hourly cap for non-allowlisted senders is hit, HOME gets a summary with the count: the first one at once, then at most one per room per 10 minutes (#223).
 
 ### Changed
