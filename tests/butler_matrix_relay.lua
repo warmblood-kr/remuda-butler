@@ -1303,6 +1303,27 @@ local function test_bidi_invite_room_is_quarantined_without_home_notice()
   assert(ok, err)
 end
 
+local function test_esc_invite_room_id_is_parsed_and_refused()
+  local dir, path = invite_fixture()
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  local response_json = [[{"next_batch":"s1","rooms":{"invite":{"!f1\u001b:example.org":{"invite_state":{"events":[{"type":"m.room.member","sender":"@mallory:example.org","state_key":"@bot:example.org","content":{"membership":"invite"}}]}}}}}]]
+  local response, decode_error = matrix.decode_json(response_json)
+  assert(response, "the escaped ESC Matrix sync fixture must parse: " .. tostring(decode_error))
+  client:sync({ json = response })
+  client:pump()
+  local room = "!f1\27:example.org"
+  local item
+  for _, q in ipairs(relay:quarantine_list()) do
+    if q.room_id == room and q.reason == "invite_not_allowlisted" then item = q end
+  end
+  assert(item, "the parsed ESC room ID must reach invite validation and be quarantined")
+  assert(client:joins(room) == 0 and client:messages(HOME, "Invite to") == 0,
+    "an ESC room ID must not be joined or shown in a HOME invite notice")
+  relay:stop()
+  remove_dir(dir)
+end
+
 local function test_open_mode_room_id_unicode_separators_are_refused()
   for index, char in ipairs({ "\226\128\168", "\226\128\169", "\226\128\139" }) do
     local room = "!unsafe" .. char .. "room:example.org"
@@ -1412,6 +1433,38 @@ local function test_invite_dedupe_survives_quarantine_limit()
     "a persisted repeated invite must not enter quarantine again")
   restarted_relay:stop()
   remove_dir(dir)
+end
+
+local function test_invite_dedupe_expires_after_seven_days()
+  local original_time, fake_now = os.time, os.time()
+  os.time = function(value)
+    if value ~= nil then return original_time(value) end
+    return fake_now
+  end
+  local dir, path = invite_fixture()
+  local client, delivered = invite_client(), {}
+  local relay = started_relay(path, client, delivered)
+  local room = "!week-later:example.org"
+  local ok, err = pcall(function()
+    client:sync({ json = { next_batch = "s1", rooms = { invite = invite(room, STRANGER) } } })
+    client:pump()
+    assert(client:messages(HOME, "Invite to") == 1, "the first invite must notify HOME")
+
+    fake_now = fake_now + 6 * 24 * 60 * 60
+    client:sync({ json = { next_batch = "s2", rooms = { invite = invite(room, STRANGER) } } })
+    client:pump()
+    assert(client:messages(HOME, "Invite to") == 1, "a repeated invite after six days must stay deduped")
+
+    fake_now = fake_now + 2 * 24 * 60 * 60
+    client:sync({ json = { next_batch = "s3", rooms = { invite = invite(room, STRANGER) } } })
+    client:pump()
+    assert(client:messages(HOME, "Invite to") == 2,
+      "a genuine re-invite after eight days must reach HOME after dedupe expiry")
+  end)
+  relay:stop()
+  remove_dir(dir)
+  os.time = original_time
+  assert(ok, err)
 end
 
 local function test_agent_invite_is_not_joined()
@@ -2804,10 +2857,12 @@ for _, case in ipairs({
   { "test_conflicting_inviter_events_cannot_join", test_conflicting_inviter_events_cannot_join },
   { "test_unsafe_invite_room_is_quarantined_without_home_notice", test_unsafe_invite_room_is_quarantined_without_home_notice },
   { "test_bidi_invite_room_is_quarantined_without_home_notice", test_bidi_invite_room_is_quarantined_without_home_notice },
+  { "test_esc_invite_room_id_is_parsed_and_refused", test_esc_invite_room_id_is_parsed_and_refused },
   { "test_open_mode_room_id_unicode_separators_are_refused", test_open_mode_room_id_unicode_separators_are_refused },
   { "test_long_invite_identifiers_dedupe_home_notice", test_long_invite_identifiers_dedupe_home_notice },
   { "test_invite_home_notice_cap_adds_one_summary", test_invite_home_notice_cap_adds_one_summary },
   { "test_invite_dedupe_survives_quarantine_limit", test_invite_dedupe_survives_quarantine_limit },
+  { "test_invite_dedupe_expires_after_seven_days", test_invite_dedupe_expires_after_seven_days },
   { "test_agent_invite_is_not_joined", test_agent_invite_is_not_joined },
   { "test_open_room_config_and_deny_matching", test_open_room_config_and_deny_matching },
   { "test_invalid_open_room_config_lines_are_ignored_with_one_warning", test_invalid_open_room_config_lines_are_ignored_with_one_warning },

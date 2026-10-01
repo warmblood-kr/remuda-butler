@@ -12,6 +12,7 @@ local JSON_ARRAY_MT = getmetatable(json.array({}))
 
 local MAX_PROCESSED = 5000
 local MAX_INVITE_DEDUPE = 5000
+local INVITE_DEDUPE_TTL_SECONDS = 7 * 24 * 60 * 60
 local MAX_DELIVERY_FAILURES = 5
 local MAX_BODY_BYTES = 64 * 1024
 local MAX_QUARANTINE_ITEMS = 200
@@ -292,6 +293,17 @@ local function trim_map(map, maximum, time_field)
   end
 end
 
+local function trim_invite_dedupe(map, now)
+  now = now or os.time()
+  local cutoff = os.date("!%Y-%m-%dT%H:%M:%SZ", now - INVITE_DEDUPE_TTL_SECONDS)
+  for id, item in pairs(map) do
+    if type(item) ~= "table" or type(item.created_at) ~= "string" or item.created_at < cutoff then
+      map[id] = nil
+    end
+  end
+  trim_map(map, MAX_INVITE_DEDUPE, "created_at")
+end
+
 local function subscribe(state, room_id, thread_id, mail_id)
   if type(room_id) ~= "string" or type(thread_id) ~= "string" or thread_id == "" then return end
   local subscriptions = state.subscriptions[room_id] or json.object({})
@@ -412,7 +424,7 @@ local function load_state(path)
       state.invite_dedupe[id] = item
     end
   end
-  trim_map(state.invite_dedupe, MAX_INVITE_DEDUPE, "created_at")
+  trim_invite_dedupe(state.invite_dedupe)
   for id, event in pairs(pending) do
     if type(id) == "string" and type(event) == "table"
       and type(event.sender) == "string" and type(event.room_id) == "string"
@@ -1103,13 +1115,18 @@ function relay.new(options)
     end
 
     local function quarantine_invite(room_id, inviter, reason, dedupe_id)
-      local event_id = dedupe_id or invite_state_id(room_id)
-      if state.invite_dedupe[event_id] then return false end
+      local dedupe_key = dedupe_id or invite_state_id(room_id)
+      local now = os.time()
+      trim_invite_dedupe(state.invite_dedupe, now)
+      if state.invite_dedupe[dedupe_key] then return false end
+      local event_id = cap_field(dedupe_key, 460) .. "|" .. tostring(now)
       local ev = { event_id = event_id,
         sender = terminal_safe_field(inviter, 128), type = "m.room.member", content = {} }
       local added = quarantine_event(ev, reason, room_id, true)
-      state.invite_dedupe[event_id] = { created_at = timestamp(ev) }
-      trim_map(state.invite_dedupe, MAX_INVITE_DEDUPE, "created_at")
+      state.invite_dedupe[dedupe_key] = {
+        created_at = os.date("!%Y-%m-%dT%H:%M:%SZ", now),
+      }
+      trim_invite_dedupe(state.invite_dedupe, now)
       persist()
       return added
     end
@@ -1343,6 +1360,8 @@ function relay.new(options)
             local dedupe_id = "invite:" .. cap_field(room_id, 200) .. "|" .. cap_field(report_inviter, 200)
             if quarantine_invite(room_id, report_inviter, "invite_not_allowlisted", dedupe_id) then
               local safe_to_notice = valid_room_id(room_id) and not room_id:find("'", 1, true)
+                and mail_body(room_id) == room_id
+                and matrix.sanitize_directory_text(room_id, #room_id) == room_id
                 and valid_mxid(report_inviter) and not has_bidi_format(room_id)
                 and not has_bidi_format(report_inviter)
               if safe_to_notice then
