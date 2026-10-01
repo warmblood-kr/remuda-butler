@@ -20,7 +20,7 @@ local USAGE = [[  remuda butler matrix [--json] status
   remuda butler matrix setup [OPTIONS]
   remuda butler matrix [--json] quarantine [--id EVENT_ID] (operator)
 
-Example: remuda butler matrix setup --homeserver https://<homeserver> --owner @<owner>:<server> --bot @<bot>:<server> --password-file <path> --pin <sha256-hex>]]
+Example: remuda butler matrix setup --homeserver https://<homeserver> --owner @<owner>:<server> --bot @<bot>:<server> --password-file <path>]]
 
 local VERBS = {
   status = true, rooms = true, history = true, event = true, get = true, quarantine = true,
@@ -408,6 +408,8 @@ function matrix.cli(args, agent, stdin_body)
               lines[#lines + 1] = "  HTTPS certificate pin: " .. wizard_plan.pin
             elseif wizard_plan.ca_file then
               lines[#lines + 1] = "  HTTPS CA file: " .. terminal_safe(wizard_plan.ca_file)
+            elseif scheme_or_error == "https" then
+              lines[#lines + 1] = "  HTTPS trust: this system's trusted certificates"
             end
             prompt_line(table.concat(lines, "\n") .. "\nContinue? Type Y to continue, or N to cancel [N]:",
               "N", function(answer)
@@ -420,12 +422,15 @@ function matrix.cli(args, agent, stdin_body)
           end
           local function ask_transport_trust()
             if scheme_or_error == "https" then
-              prompt_line("HTTPS trust: enter a 64-character SHA-256 certificate pin or an absolute CA file path:",
+              prompt_line("HTTPS trust: press Enter to use this system's trusted certificates, "
+                .. "or enter a 64-character SHA-256 certificate pin or an absolute CA file path:",
                 nil, function(trust)
                   if type(trust) ~= "string" then
                     return prompt_failure("The HTTPS trust answer must be a certificate pin or CA file path.")
                   end
-                  if #trust == 64 and trust:match("^%x+$") then
+                  if trust == "" then
+                    -- Enter: system trust roots, so neither --pin nor --ca-file.
+                  elseif #trust == 64 and trust:match("^%x+$") then
                     flags[#flags + 1] = "--pin"
                     flags[#flags + 1] = trust
                   else
