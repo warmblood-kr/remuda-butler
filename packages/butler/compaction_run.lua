@@ -36,7 +36,6 @@ local function model_confirm_dialog(screen)
       title_row = row
     end
   end
-  if not title_row then return nil end
 
   for row = index + 2, #lines do
     local line = lines[row]
@@ -55,17 +54,20 @@ local function model_confirm_dialog(screen)
     end
   end
 
+  return lines, index, title_row
+end
+
+local function model_confirm_signature(screen)
+  local lines, index, title_row = model_confirm_dialog(screen)
+  if not title_row then return nil end
   local dialog = {}
   for row = title_row, index + 1 do dialog[#dialog + 1] = lines[row] end
   return table.concat(dialog, "\n")
 end
 
-local function model_confirm_signature(screen)
-  return model_confirm_dialog(screen)
-end
-
 local function model_confirm_options_visible(screen)
-  return model_confirm_dialog(screen) ~= nil
+  local _, index = model_confirm_dialog(screen)
+  return index ~= nil
 end
 
 remuda._butler_model_confirm_signature = model_confirm_signature
@@ -543,7 +545,7 @@ function remuda._butler_compaction_execute(session_name, force)
         stable_screen(model_confirm_state, nil)
         return false
       end
-      -- An incomplete confirmation screen does not advance stable captures.
+      -- Options without the title yet (half-painted): wait, bounded by expiry.
       model_confirm_state.started_at = model_confirm_state.started_at or os.time()
       model_confirm_state.polls = model_confirm_state.polls + 1
       return false

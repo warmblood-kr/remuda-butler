@@ -280,6 +280,10 @@ assert(remuda._butler_model_confirm_signature(
 assert(remuda._butler_model_confirm_signature(
   read_fixture("claude-model-confirm-composer-two-row-status.txt")) ~= nil,
   "model confirmation signature should recognize the composer dialog with two status rows")
+local untitled_model_confirm = "❯ 1. Yes, switch to Opus 5.5\n  2. No, go back"
+assert(remuda._butler_model_confirm_signature(untitled_model_confirm) == nil
+  and remuda._butler_model_confirm_options_visible(untitled_model_confirm),
+  "model confirmation options should remain visible while the title is half-painted")
 
 assert(remuda._butler_compaction_is_unknown_dialog("Mystery chooser\n1. Continue\n❯"),
   "numbered option immediately above the prompt should be an active unknown dialog")
