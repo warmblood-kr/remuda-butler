@@ -344,6 +344,13 @@ end
 
 function matrix.cli(args, agent, stdin_body)
   if type(args) == "table" and args[1] == "matrix" and args[2] == "setup" then
+    -- Setup reads the files its flags name and sends them to the server named on the same
+    -- command line, and rewrites the Butler's Matrix files: operator-only, as join and leave.
+    if agent or not remuda.butler.approval.operator_caller() then
+      local message = "matrix setup is operator-only\nNext: run remuda butler matrix setup from your own terminal"
+      if type(remuda.fail) == "function" then return remuda.fail(message, 1) end
+      error(message, 0)
+    end
     local setup_args = {}
     for index = 3, #args do setup_args[#setup_args + 1] = args[index] end
     local plan, setup_error = matrix.setup_prepare(setup_args)
@@ -782,6 +789,33 @@ function matrix.cli(args, agent, stdin_body)
     if route and type(route.room_id) == "string" and route.room_id ~= "" then
       options.room = route.room_id
     end
+  end
+  -- The CLI is where an agent caller arrives: it may upload only a file inside its own
+  -- working directory. A missing check refuses, it never lets the path through.
+  -- (A relative path is left to matrix.upload, which refuses it before any read.)
+  if verb == "upload" and type(options.file) == "string"
+      and (options.file:match("^[/\\]") or options.file:match("^%a:[/\\]")) then
+    local check = remuda._butler_file_for_caller
+    local allowed, refusal = nil, "refused: " .. options.file .. ": the caller check is unavailable"
+    if type(check) == "function" then allowed, refusal = check(options.file, "", false) end
+    if not allowed then
+      finish(reply, cancelled, completed, verb, options, { error = refusal })
+      return reply
+    end
+    options.file = allowed
+  end
+  -- The same for what download WRITES: -o PATH, or the default name, inside the
+  -- agent caller's working directory only.
+  if verb == "download" then
+    local check = remuda._butler_output_for_caller
+    local media = type(options.mxc) == "string" and options.mxc:match("^mxc://[^/]+/([^/%s]+)$")
+    local allowed, refusal = nil, "refused: download: the caller check is unavailable"
+    if type(check) == "function" then allowed, refusal = check(options.output, media and ("matrix-" .. media)) end
+    if refusal then
+      finish(reply, cancelled, completed, verb, options, { error = refusal })
+      return reply
+    end
+    options.output = allowed
   end
   local called, handle = pcall(matrix[verb], options, callback, agent)
   if not called then
