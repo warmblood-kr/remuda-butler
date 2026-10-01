@@ -3138,9 +3138,12 @@ end
 -- senders count. Past the cap: not delivered, not quarantined, processed, one
 -- warning line per room, nothing posted. The relay counts by receive time.
 -- Old rule (PR 1, test_rx_untrusted_room_cap_logs_once_no_post): past the cap
--- nothing was posted at all (no request besides /sync). Replaced by ONE HOME
--- summary per sync that has capped events (untrusted_per_room_hour, PR 2).
--- The one log line per room stays.
+-- nothing was posted at all (no request besides /sync). Replaced by a HOME
+-- summary (untrusted_per_room_hour, PR 2). The one log line per room stays.
+-- Old rule (PR 2 draft): ONE summary per sync that has capped events, so the
+-- third sync below posted "1 message" at once. Replaced by the summary floor
+-- (step 2b): the first summary for a room is immediate, later ones are at
+-- least 10 minutes apart and carry the count since the last one.
 local function test_rx_untrusted_room_cap_logs_once_home_summary()
   local real_time, now = os.time, 1790000000
   os.time = function(value) if value then return real_time(value) end return now end
@@ -3185,18 +3188,21 @@ local function test_rx_untrusted_room_cap_logs_once_home_summary()
     end
     assert(client:messages(HOME, summary_line("3 messages", NEW)) == 1,
       "the first capped sync posts ONE exact HOME summary with its own count")
-    assert(client:messages(HOME, summary_line("1 message", NEW)) == 1,
-      "a later capped sync posts its own summary, and a count of 1 reads '1 message'")
-    assert(client:messages(HOME, summary_line("1 message", HOME)) == 1, "one HOME summary for the capped HOME sync")
+    assert(client:messages(HOME, summary_line("1 message", HOME)) == 1,
+      "the first summary for another room (HOME) is immediate too, and a count of 1 reads '1 message'")
+    assert(client:messages(HOME, summary .. NEW) == 1,
+      "a second capped sync within 10 minutes posts no second summary for the room")
     now = now + 3601
     rx_sync(client, NEW, { rx_msg("$u7", STRANGER, "an hour later") })
     assert(rx_find(delivered, "$u7"), "delivery works again after the hour")
+    assert(client:messages(HOME, summary_line("1 message", NEW)) == 1,
+      "the held count is posted by the first sync after the 10 minutes, even with nothing capped in it")
     local posts = 0
     for _, args in ipairs(client.requests) do
       if not args.path:find("/sync", 1, true) then posts = posts + 1 end
     end
     assert(posts == 3 and client:messages(HOME, summary) == 3,
-      "only the 3 HOME summaries are posted, nothing else and none for a sync with nothing capped, got " .. posts)
+      "only the 3 HOME summaries are posted and nothing else, got " .. posts)
     relay:stop()
 
     -- The default is 20 per room and hour.
@@ -3554,6 +3560,60 @@ local function test_rx_untrusted_room_cap_summary_no_quarantine()
   end)
 end
 
+-- Summary floor (step 2b): the first HOME summary for a room is immediate; after
+-- it at most ONE per room per 10 minutes, with the count since the last one. A
+-- held count is posted by the first sync pass after the 10 minutes, capped or not.
+local function test_rx_untrusted_room_cap_summary_floor_10min()
+  local real_time, now = os.time, 1790000000
+  os.time = function(value) if value then return real_time(value) end return now end
+  local start, dir, path = now, invite_fixture(OWNER, "room=" .. NEW .. "\nuntrusted_per_room_hour=2\n")
+  local ok, err = pcall(function()
+    local relay, client = rx_relay(path)
+    local seq = 0
+    local function roots(room, sender, count)
+      local events = {}
+      for _ = 1, count do
+        seq = seq + 1
+        events[#events + 1] = rx_msg("$f" .. seq, sender, "root " .. seq)
+      end
+      rx_sync(client, room, events)
+    end
+    local function lines(count, room)
+      return client:messages(HOME, count .. " from non-allowlisted senders not delivered in " .. room
+        .. " (rate cap). Next: remuda butler matrix --room '" .. room .. "' history")
+    end
+    local function total(room) return client:messages(HOME, "senders not delivered in " .. room) end
+
+    roots(NEW, STRANGER, 5)                      -- sync A: 2 delivered, 3 capped
+    assert(lines("3 messages", NEW) == 1 and total(NEW) == 1, "the first summary for a room is immediate, with 3")
+    now = start + 300
+    roots(NEW, STRANGER, 2)                      -- sync B: 2 more capped, inside the floor
+    assert(total(NEW) == 1, "a capped sync within 10 minutes posts no new summary")
+    roots(HOME, STRANGER, 3)                     -- another room: 2 delivered, 1 capped
+    assert(lines("1 message", HOME) == 1 and total(HOME) == 1,
+      "a second room has its own floor: its first summary is immediate")
+    now = start + 599
+    roots(NEW, OWNER, 1)
+    assert(total(NEW) == 1, "599 s after the last summary nothing is posted")
+    now = start + 600
+    roots(NEW, OWNER, 1)                         -- a quiet sync, 10 minutes after the summary
+    assert(lines("2 messages", NEW) == 1 and total(NEW) == 2,
+      "the first sync pass after 10 minutes posts ONE summary with the held count (2), capped or not")
+    roots(HOME, STRANGER, 1)                     -- HOME: capped, 300 s after its own summary
+    assert(total(HOME) == 1, "the other room's floor runs from its own last summary")
+    now = start + 900
+    roots(NEW, OWNER, 1)
+    assert(lines("1 message", HOME) == 2 and total(HOME) == 2, "HOME posts its held count after its own 10 minutes")
+    roots(NEW, OWNER, 1)
+    assert(total(NEW) == 2 and total(HOME) == 2, "nothing held, nothing posted")
+    relay:stop()
+  end)
+  os.time = real_time
+  relay_module.instance = nil
+  remove_dir(dir)
+  if not ok then error(err, 0) end
+end
+
 -- Receive rules PR 2, mail path: relay:queue_mail_reply obeys the same limits
 -- as the CLI reply.
 local function rx_mail_id(delivered, event_id)
@@ -3672,6 +3732,7 @@ rx_tests = {
   { "test_rx_b2b_turn_guard_home_line_once", test_rx_b2b_turn_guard_home_line_once },
   { "test_rx_posts_per_hour_cap", test_rx_posts_per_hour_cap },
   { "test_rx_untrusted_room_cap_summary_no_quarantine", test_rx_untrusted_room_cap_summary_no_quarantine },
+  { "test_rx_untrusted_room_cap_summary_floor_10min", test_rx_untrusted_room_cap_summary_floor_10min },
   { "test_rx_mail_reply_turn_guard", test_rx_mail_reply_turn_guard },
   { "test_rx_mail_reply_posts_per_hour", test_rx_mail_reply_posts_per_hour },
   { "test_rx_only_allowlisted_human_resumes_stopped_thread", test_rx_only_allowlisted_human_resumes_stopped_thread },
