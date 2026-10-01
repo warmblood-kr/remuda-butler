@@ -3478,7 +3478,7 @@ local function test_rx_b2b_turn_guard_home_line_once()
   rx_with_dir(dir, function()
     local relay, client, delivered = rx_relay(path)
     relay_module.instance = relay
-    local line = "Stopped replying in thread $gt (" .. HOME .. "): 6 Butler-only turns. A reply in that thread from someone on the allowlist resumes it."
+    local line = "Stopped replying in thread $gt (" .. HOME .. "): 6 Butler-only turns. A reply in that thread from a person on the allowlist resumes it."
     rx_post_http(path, function(calls)
       rx_sync(client, HOME, { rx_msg("$gt", OWNER, "@bot:example.org and @agent-ally:example.org, talk") })
       relay:subscribe_thread(HOME, "$gt")
@@ -3489,7 +3489,7 @@ local function test_rx_b2b_turn_guard_home_line_once()
         .. tostring(result.stderr))
       result = rx_cli({ "matrix", "reply", "$gt-a5", "one more" })
       assert(result.code ~= 0 and (result.stderr .. result.stdout):find("Reply not sent: stopped replying in thread $gt ("
-        .. HOME .. "): 6 Butler-only turns. A reply in that thread from someone on the allowlist resumes it.\nNext: remuda butler matrix --room '"
+        .. HOME .. "): 6 Butler-only turns. A reply in that thread from a person on the allowlist resumes it.\nNext: remuda butler matrix --room '"
         .. HOME .. "' thread '$gt'", 1, true),
         "after 6 Butler-only turns a reply into the thread is refused and says it was not sent, got: "
           .. result.stderr .. result.stdout)
@@ -3656,7 +3656,7 @@ local function test_rx_mail_reply_turn_guard()
   local dir, path = invite_fixture(OWNER .. "," .. RX_ALLY, "b2b_max_turns=2\n")
   rx_with_dir(dir, function()
     local relay, client, delivered = rx_relay(path)
-    local line = "Stopped replying in thread $mt (" .. HOME .. "): 2 Butler-only turns. A reply in that thread from someone on the allowlist resumes it."
+    local line = "Stopped replying in thread $mt (" .. HOME .. "): 2 Butler-only turns. A reply in that thread from a person on the allowlist resumes it."
     rx_sync(client, HOME, { rx_msg("$mt", RX_ALLY, "@bot:example.org ping") })
     local mail = rx_mail_id(delivered, "$mt")
     assert(mail, "a Butler's root post is delivered")
@@ -3664,7 +3664,7 @@ local function test_rx_mail_reply_turn_guard()
     assert(ok, "turn 2 of 2 (our mail reply to a Butler) is queued: " .. tostring(err))
     ok, err = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R2", text = "reply-two" })
     assert(ok == nil and tostring(err):find("Reply not sent: stopped replying in thread $mt (" .. HOME
-      .. "): 2 Butler-only turns. A reply in that thread from someone on the allowlist resumes it.", 1, true),
+      .. "): 2 Butler-only turns. A reply in that thread from a person on the allowlist resumes it.", 1, true),
       "after b2b_max_turns=2 Butler-only turns a mail reply is refused and says it was not sent, got: " .. tostring(err))
     assert(err:find("Next: remuda butler matrix --room '" .. HOME .. "' thread '$mt'", 1, true),
       "the refusal ends with a Next line that shows the thread, room and event shell-quoted, got: " .. err)
