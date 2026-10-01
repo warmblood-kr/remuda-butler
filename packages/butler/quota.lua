@@ -194,7 +194,7 @@ function quota.parse_codex_status(screen, utc_offset_seconds, now)
     lines[#lines + 1] = line:gsub("\r$", "")
   end
 
-  local plan, limits = nil, {}
+  local plan, occurrences, last_occurrence = nil, {}, {}
   for i, line in ipairs(lines) do
     if plan == nil then
       local account = line:match("^%s*Account:%s*(.-)%s*$")
@@ -207,9 +207,14 @@ function quota.parse_codex_status(screen, utc_offset_seconds, now)
         local limit = { name = name, used = 100 - tonumber(left) }
         local reset = parse_reset(line, lines[i + 1], utc_offset_seconds, now)
         for key, value in pairs(reset) do limit[key] = value end
-        limits[#limits + 1] = limit
+        occurrences[#occurrences + 1] = limit
+        last_occurrence[name] = #occurrences
       end
     end
+  end
+  local limits = {}
+  for i, limit in ipairs(occurrences) do
+    if last_occurrence[limit.name] == i then limits[#limits + 1] = limit end
   end
   if #limits == 0 then return nil end
   return { plan = plan, limits = limits }
@@ -400,6 +405,8 @@ if type(remuda) == "table" then
 
     local session = selected.session_name or alias
     local utc_offset_seconds = os.time() - os.time(os.date("!*t"))
+    local captured_first, first_screen = pcall(remuda.capture, session)
+    if not captured_first or type(first_screen) ~= "string" then first_screen = nil end
     local typed = pcall(remuda.type_text, session, "/status", 0.1)
     if not typed then
       done(nil, "codex did not show its limits in time")
@@ -416,7 +423,7 @@ if type(remuda) == "table" then
     local scheduled, handle = pcall(remuda.schedule, { every = 0.5, run = function()
       ticks = ticks + 1
       local captured, screen = pcall(remuda.capture, session)
-      if captured and type(screen) == "string" then
+      if captured and type(screen) == "string" and screen ~= first_screen then
         local parsed = quota.parse_codex_status(screen, utc_offset_seconds, os.time())
         if parsed and #parsed.limits > 0 then
           finish(parsed, nil)

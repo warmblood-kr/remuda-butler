@@ -97,9 +97,12 @@ command(6, "quota", "  remuda butler quota [--report]", function(args)
   if #args ~= 1 and not (#args == 2 and args[2] == "--report") then
     return remuda.fail(quota.usage(), 2)
   end
+  if type(remuda.pending) ~= "function" then
+    return remuda.fail("remuda butler quota needs a Remuda core with deferred replies.\nNext: remuda upgrade", 1)
+  end
   local report_flag = args[2] == "--report"
   local reply = remuda.pending({ timeout = 30 })
-  quota.collect(function(report)
+  local collected, collect_error = pcall(quota.collect, function(report)
     if not report_flag then
       return reply:resolve(0, quota.terminal(report) .. "\n", "")
     end
@@ -111,6 +114,10 @@ command(6, "quota", "  remuda butler quota [--report]", function(args)
       end
     end)
   end)
+  if not collected then
+    reply:resolve(1, "", "quota report failed: " .. tostring(collect_error)
+      .. "\nNext: remuda butler doctor\n")
+  end
   return reply
 end)
 local CLOSE_USAGE = "Usage: remuda butler close <name> [--force]\nExample: remuda butler close worker-1"
