@@ -2635,6 +2635,40 @@ local function test_pinned_self_signed_homeserver_uses_pin_only()
   cleanup_fixture(dir, path)
 end
 
+-- SEC #164 lows: config-load refusals and a stable core pin-mismatch marker.
+local function test_pin_config_lows()
+  local function request_with(base, trust_line, handler)
+    local dir, path = fixture()
+    local file = assert(io.open(path, "r")); local text = file:read("*a"); file:close()
+    file = assert(io.open(path, "w"))
+    file:write((text:gsub("^https://matrix.invalid", base)), trust_line, "\n"); file:close()
+    local result, count
+    with_alias_http(path, handler or function() return { status = 200, body = "{}" } end, function(calls)
+      matrix.request({ method = "GET", path = "/_matrix/client/v3/account/whoami" },
+        function(value) result = value end)
+      count = #calls
+    end)
+    cleanup_fixture(dir, path)
+    return result, count
+  end
+  for _, line in ipairs({ "pin_sha256=" .. string.rep("0", 64), "ca_file=/etc/ssl/cert.pem" }) do
+    local refused, count = request_with("http://matrix.invalid", line)
+    assert(count == 0 and refused and type(refused.error) == "string"
+      and refused.error:find("only valid with an https:// homeserver", 1, true)
+      and select(2, refused.error:gsub("Next:", "")) == 1,
+      "http:// with " .. line .. " must be refused at config load with one Next: line: "
+        .. tostring(refused and refused.error))
+  end
+  local malformed, malformed_count = request_with("https://matrix.invalid", "pin_sha256=abcd")
+  assert(malformed_count == 0 and malformed and malformed.error
+    and malformed.error:find("pin_sha256 must be 64 hexadecimal characters", 1, true),
+    "a malformed pin_sha256 must be refused before any request: " .. tostring(malformed and malformed.error))
+  local other, _ = request_with("https://matrix.invalid", "pin_sha256=" .. string.rep("0", 64),
+    function() return { error = "TLS request failed: server hostname mismatch (pinned)" } end)
+  assert(other and other.error and not other.error:find("Next: recompute pin_sha256", 1, true),
+    "only core's SPKI pin mismatch text gets the recompute-pin Next: line: " .. tostring(other and other.error))
+end
+
 local function test_unconfigured_room_request_is_refused()
   local dir, path = invite_fixture(nil, "room=" .. NEW .. " how=operator\n")
   with_operator_config(path, 200, function(calls)
@@ -3002,6 +3036,7 @@ for _, case in ipairs({
   { "test_failed_leave_reports_removed_config_and_safe_next", test_failed_leave_reports_removed_config_and_safe_next },
   { "test_unconfigured_room_request_is_refused", test_unconfigured_room_request_is_refused },
   { "test_pinned_self_signed_homeserver_uses_pin_only", test_pinned_self_signed_homeserver_uses_pin_only },
+  { "test_pin_config_lows", test_pin_config_lows },
 }) do
   local ok, err = pcall(case[2])
   if not ok then invite_failures[#invite_failures + 1] = case[1] .. ": " .. tostring(err) end

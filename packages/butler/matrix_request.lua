@@ -479,6 +479,9 @@ function matrix.config_remove_room(path, room)
   return write_config_text(path, table.concat(kept))
 end
 
+-- Core's stable TLS reason for a wrong pin (remuda net/http_client.rs tls_failure_reason).
+matrix.PIN_MISMATCH = "SPKI pin mismatch"
+
 local function config()
   local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths
   local guidance = matrix.configuration_guidance()
@@ -490,6 +493,10 @@ local function config()
   if token == "" then return nil, "Matrix token is empty" end
   local parsed, config_error = read_config(paths.config_path)
   if not parsed then return nil, config_error end
+  if parsed.base:match("^http://") and (parsed.ca_file or parsed.pin) then
+    return nil, "Matrix pin_sha256 and ca_file are only valid with an https:// homeserver.\n"
+      .. "Next: remove pin_sha256/ca_file from " .. paths.config_path .. " or switch its homeserver to https://"
+  end
   if parsed.base:match("^https://") and not parsed.ca_file and not parsed.pin then
     return nil, "HTTPS Matrix homeserver requires ca_file=PATH or pin_sha256=HEX"
   end
@@ -733,7 +740,7 @@ function matrix.request(args, on_done)
     body = body, timeout = timeout, connect_timeout = math.min(10, timeout),
     max_bytes = max_bytes, ca_file = conf.ca_file, pin = conf.pin, pin_only = conf.pin ~= nil,
     callback = function(result)
-      if result.error and result.error:lower():find("pin", 1, true) and conf.pin then
+      if result.error and conf.pin and result.error:find(matrix.PIN_MISMATCH, 1, true) then
         return done({ error = result.error .. "\nNext: recompute pin_sha256 as the server key's SPKI SHA-256"
           .. " (see docs/butler.md) or use ca_file=PATH" })
       end
