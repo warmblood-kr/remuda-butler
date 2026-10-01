@@ -6,14 +6,17 @@ Base: main 204e416. Spec: remuda-dev-lead notes/restart/rx-squad.md. Its REVISIO
 - `allowed = cfg.allowed_senders[sender]`. This is the only input to the marker.
 - `member_kind` AGENT (the existing prefix/`butler_senders` check, ~:195) is used only for `from_agent`: the loop guard count, `matrix-agent` kind, and the PR 1 B2B block. It is never used for trust.
 
-## 2. Accept rule (replaces :893 and :918-920; the same rule in HOME, joined and ALL)
+## 2. Accept rule (replaces :893 and :918-920)
 ```
-root      = thread_root == nil          -- a main-timeline reply (plain m.in_reply_to) is root
+home      = actual_room == cfg.home_room   -- HOME only, not rooms of kind "joined"
+root      = thread_root == nil             -- a main-timeline reply (plain m.in_reply_to) is root
 followed  = thread_root and subscriptions[room][thread_root] ~= nil
-accepted  = root or followed or is_mention
+accepted  = home or root or followed or is_mention
 ```
-- A reply INSIDE a thread (`m.thread`, with or without `m.in_reply_to`) is delivered only if the thread is followed or the reply mentions the Butler.
-- The `sender_not_allowlisted` quarantine goes. Media from a non-allowlisted sender is quarantined as `untrusted_media`. Its text is delivered with the marker.
+- Owner rule (2026-10-01): the HOME room delivers every reply, followed or not, as on main. The follow rule applies to joined rooms and ALL.
+- Outside HOME, a reply INSIDE a thread (`m.thread`, with or without `m.in_reply_to`) is delivered only if the thread is followed or the reply mentions the Butler.
+- The `sender_not_allowlisted` quarantine goes. Media from a non-allowlisted sender is quarantined as `untrusted_media`. Its text is delivered with the marker. Both hold in HOME too.
+- Rate cap (PR 1, owner decision): `untrusted_per_room_hour` (default 20) accepted events from non-allowlisted senders per room in a rolling hour, counted by receive time, in memory. Past the cap, the text is not delivered and not quarantined (it is marked processed), with ONE warning in the Butler log per room. Nothing is posted. The HOME summary line is PR 2.
 - A rejected event is marked processed and is not quarantined (as today). Routing (`context_mail_id`) is unchanged.
 
 ## 3. Marker for non-allowlisted senders (built in the relay `deliver`, :1373; mail.lua is untouched)
@@ -30,7 +33,7 @@ The body is:
 ## 4. Following (reuses `subscribe()` and `matrix_thread_subscriptions`; the value stays `{mail_id, created_at}`)
 - Key: the thread root event id.
 - `remuda butler matrix [--room ROOM] follow EVENT_ID` subscribes to the root of the event if it is a thread reply, otherwise to EVENT_ID itself. `unfollow EVENT_ID` removes it. New relay method: `relay:unsubscribe_thread`.
-- `reply` follows its thread root in every room kind. `send` follows its own first event in every room kind.
+- `reply` follows its thread root in every room kind (never its own sent event). `send` follows its own first event in every room kind.
 - Any mention follows the thread, from any sender and in any room (no cap).
 - Follows last until `unfollow`; nothing expires.
 - Store guard (PR 1): 5000 follows in TOTAL across rooms (`MAX_THREAD_SUBSCRIPTIONS`). At the cap, the new follow is refused with ONE logged warning. Nothing is trimmed, ever. The 50000 cap is issue #173.
