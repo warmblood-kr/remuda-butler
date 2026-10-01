@@ -15,8 +15,9 @@ set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 CORE_URL=${CORE_URL:-https://github.com/warmblood-kr/remuda.git}
-# Core API required by the Codex app-server quota tests. Bump deliberately.
-CORE_REF=${CORE_REF:-d47a84564b8a7b01e5c6a78f14f2c386edbe6c4a}
+# Core with delivery channel hooks and private state writes. Bump deliberately;
+# a core change must not redden Butler PRs.
+CORE_REF=${CORE_REF:-499b8b95}
 
 scratch=$(mktemp -d /tmp/butler-rust.XXXXXX)
 scratch=$(cd "$scratch" && pwd -P)
