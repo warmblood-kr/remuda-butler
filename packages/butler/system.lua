@@ -32,7 +32,10 @@ function windows.find_command(name, context)
   -- default list, and a name is tried as given only when it already ends in one
   -- of those extensions. An npm install puts an extensionless sh script next to
   -- NAME.cmd; Windows cannot start that file.
-  local extensions = split(context.pathext or "", ";")
+  local extensions = {}
+  for _, extension in ipairs(split(context.pathext or "", ";")) do
+    if extension:sub(1, 1) == "." and #extension > 1 then extensions[#extensions + 1] = extension end
+  end
   if #extensions == 0 then extensions = split(".COM;.EXE;.BAT;.CMD", ";") end
   local names = {}
   local lower = name:lower()

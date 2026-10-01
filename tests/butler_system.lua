@@ -58,6 +58,20 @@ local named = windows.find_command("claude.cmd", {
   exists = function(path) return npm[path] == true end,
 })
 assert(named == [[C:\npm\claude.cmd]], "a name that already has a PATHEXT extension is tried as given")
+-- A PATHEXT entry is an extension only when it starts with a dot and has more
+-- than the dot (core's rule). "E" must not make "claude" count as named.
+local odd_pathext = windows.find_command("claude", {
+  path = [[C:\npm]], pathext = "E;.;.CMD",
+  exists = function(path) return npm[path] == true end,
+})
+assert(odd_pathext == [[C:\npm\claude.cmd]],
+  "a PATHEXT entry without a leading dot is not an extension: " .. tostring(odd_pathext))
+local no_real_pathext = windows.find_command("claude", {
+  path = [[C:\npm]], pathext = "E;.",
+  exists = function(path) return npm[path] == true end,
+})
+assert(no_real_pathext == [[C:\npm\claude.cmd]],
+  "a PATHEXT with no real extension means the default list: " .. tostring(no_real_pathext))
 -- cmd.exe accepts a quoted PATH entry; it must be unquoted, not skipped.
 local quoted = windows.find_command("node", {
   path = [["C:\Program Files\nodejs";C:\tools]], pathext = ".EXE",
