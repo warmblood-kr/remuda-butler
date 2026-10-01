@@ -3319,6 +3319,38 @@ local function test_rx_untrusted_approve_text_is_data()
   end)
 end
 
+-- SEC M1: a non-allowlisted sender must be a strict MXID (the relay's
+-- valid_mxid, at most 255 bytes, every byte printable ASCII 0x21..0x7E), else
+-- the event is quarantined as invalid_sender and never delivered.
+local function test_rx_invalid_sender_quarantined()
+  local dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    local relay, client, delivered = rx_relay(path)
+    local bad = { { "space", "@a b:example.org" }, { "newline", "@a:example.org\nx" },
+      { "esc", "@a\27[31m:example.org" }, { "rlo", "@a\226\128\174:example.org" },
+      { "nbsp", "@a\194\160:example.org" }, { "long", "@" .. string.rep("a", 255) .. ":example.org" },
+      { "no-at", "mallory" } }
+    local failures = {}
+    for _, case in ipairs(bad) do
+      local id = "$bad-" .. case[1]
+      rx_sync(client, HOME, { rx_msg(id, case[2], "hello") })
+      if rx_find(delivered, id) then failures[#failures + 1] = case[1] .. ": delivered" end
+      local item = rx_find(relay:quarantine_list(), id)
+      if not (item and item.reason == "invalid_sender") then
+        failures[#failures + 1] = case[1] .. ": quarantine reason " .. tostring(item and item.reason)
+      end
+    end
+    rx_sync(client, HOME, { rx_msg("$good-stranger", STRANGER, "hello"), rx_msg("$good-owner", OWNER, "hello") })
+    local stranger, owner = rx_find(delivered, "$good-stranger"), rx_find(delivered, "$good-owner")
+    assert(stranger and stranger.trusted == false, "a valid stranger is still delivered with trusted=false")
+    assert(owner and owner.trusted ~= false, "an allowlisted sender is unchanged")
+    assert(#relay:quarantine_list() <= #bad, "valid senders are not quarantined")
+    assert(#failures == 0, "an invalid sender must be quarantined as invalid_sender, not delivered:\n  "
+      .. table.concat(failures, "\n  "))
+    relay:stop()
+  end)
+end
+
 rx_tests = {
   { "test_rx_stranger_root_marked_untrusted", test_rx_stranger_root_marked_untrusted },
   { "test_rx_agent_root_without_mention", test_rx_agent_root_without_mention },
@@ -3339,6 +3371,7 @@ rx_tests = {
   { "test_rx_marker_cannot_be_faked", test_rx_marker_cannot_be_faked },
   { "test_rx_untrusted_approve_text_is_data", test_rx_untrusted_approve_text_is_data },
   { "test_rx_untrusted_room_cap_logs_once_no_post", test_rx_untrusted_room_cap_logs_once_no_post },
+  { "test_rx_invalid_sender_quarantined", test_rx_invalid_sender_quarantined },
 }
 end
 
