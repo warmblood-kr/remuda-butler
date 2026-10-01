@@ -17,6 +17,11 @@ local statusline_model_matches = assert(config.statusline_model_matches)
 local clear_legacy_restore_state = assert(config.clear_legacy_restore_state)
 local compaction_restore_path = mail_root and mail_root .. "/compaction-restore.json"
 
+local function model_confirm_rule_row(line)
+  local trimmed = line:gsub("^%s+", ""):gsub("%s+$", "")
+  return trimmed ~= "" and trimmed:gsub("─", "") == ""
+end
+
 local function model_confirm_dialog(screen)
   if type(screen) ~= "string" then return nil end
   local lines = bottom_screen_lines(screen, 32)
@@ -46,11 +51,32 @@ local function model_confirm_dialog(screen)
     end
   end
 
-  for row = index + 2, #lines - 1 do
-    if lines[row - 1]:match("^%s*─+%s*$")
-        and lines[row + 1]:match("^%s*─+%s*$") then
-      local composer = lines[row]:match("^%s*❯%s*(.-)%s*$")
-      if composer ~= nil and composer ~= "" then return nil end
+  local composer_top
+  for row = index + 2, #lines do
+    if model_confirm_rule_row(lines[row]) then
+      composer_top = row
+      break
+    end
+  end
+  if composer_top then
+    local composer_bottom
+    for row = composer_top + 1, #lines do
+      if model_confirm_rule_row(lines[row]) then
+        composer_bottom = row
+        break
+      end
+    end
+    if composer_bottom then
+      local nonblank_rows, only_prompt_row = 0, false
+      for row = composer_top + 1, composer_bottom - 1 do
+        if lines[row]:match("%S") then
+          nonblank_rows = nonblank_rows + 1
+          only_prompt_row = lines[row]:match("^%s*❯%s*$") ~= nil
+        end
+      end
+      if nonblank_rows > 0 and (nonblank_rows > 1 or not only_prompt_row) then
+        return nil
+      end
     end
   end
 
