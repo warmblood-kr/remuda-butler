@@ -109,11 +109,27 @@ local function test_typed_line_switches_and_non_candidates()
     relay:start()
     client:complete(1, { json = { next_batch = "s0" } })
     client:complete(2, { json = { next_batch = "s1", rooms = { join = {
-      ["!room:example.org"] = { timeline = { events = { typed_line_event("$off", "!off") } } },
+      ["!room:example.org"] = { timeline = { events = {
+        typed_line_event("$off-multiline", "!a\nb"),
+        (function()
+          local event = typed_line_event("$off-stale", "!hi")
+          event.origin_server_ts = (os.time() - 6 * 60) * 1000
+          return event
+        end)(),
+        typed_line_event("$off-triple", "!!!x"),
+      } } },
+    } } } })
+    client:complete(3, { json = { next_batch = "s2", rooms = { join = {
+      ["!room:example.org"] = { timeline = { limited = true,
+        events = { typed_line_event("$off-nonlive", "!hi") } } },
     } } } })
     assert(#typed == 0, "both typed-line switches default off")
-    assert(#delivered == 1 and delivered[1].event_id == "$off",
-      "with switches off the owner line stays on the ordinary mail path")
+    local delivered_ids = {}
+    for _, event in ipairs(delivered) do delivered_ids[event.event_id] = true end
+    for _, event_id in ipairs({ "$off-multiline", "$off-stale", "$off-triple", "$off-nonlive" }) do
+      assert(delivered_ids[event_id], "with switches off " .. event_id .. " stays on the ordinary mail path")
+    end
+    assert(#delivered == 4, "each disabled owner line should produce exactly one ordinary mail")
     for _, request in ipairs(client.requests) do
       assert(not tostring(request.path):find("/send/m.room.message/", 1, true),
         "with switches off the owner line must not get a refusal thread line")

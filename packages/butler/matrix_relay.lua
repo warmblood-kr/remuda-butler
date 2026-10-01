@@ -1550,11 +1550,15 @@ function relay.new(options)
           local typed_line_candidate = not approval_record and cfg.allowed_senders[ev.sender] == true
             and member_kind(ev.sender, cfg) == "HUMAN"
             and type(content.body) == "string" and content.body:sub(1, 1) == "!"
-          local typed_line_scope_allowed = typed_line_candidate
+          local typed_line_enabled = typed_line_candidate and cfg.typed_lines == true
+          if typed_line_enabled and content.body:sub(1, 2) == "!!" and content.body:sub(1, 3) ~= "!!!" then
+            typed_line_enabled = cfg.shell_lines == true
+          end
+          local typed_line_scope_allowed = typed_line_enabled
             and typed_line_room_allowed(ev, room_id or cfg.room)
           local typed_line_check
           local typed_line_check_failed = false
-          if typed_line_candidate and live_sync == true then
+          if typed_line_enabled and live_sync == true then
             local checked, result = pcall(check_typed_line, ev)
             if checked then
               typed_line_check = result
@@ -1565,7 +1569,7 @@ function relay.new(options)
           end
           local switch_disabled = typed_line_check
             and (typed_line_check.reason == "typed_lines_off" or typed_line_check.reason == "shell_lines_off")
-          if typed_line_candidate and not typed_line_check_failed then
+          if typed_line_enabled and not typed_line_check_failed then
             if switch_disabled then
               trace_typed_line(ev, room_id or cfg.room, typed_line_check.form, typed_line_check.line,
                 "butler", "refused:" .. typed_line_check.reason)
@@ -1595,9 +1599,9 @@ function relay.new(options)
               end
             end
             persist()
-          elseif typed_line_candidate and typed_line_check_failed then
+          elseif typed_line_enabled and typed_line_check_failed then
             -- The event was marked processed above; keep this response moving without a retry loop.
-          elseif typed_line_candidate and not switch_disabled
+          elseif typed_line_enabled and not switch_disabled
               and typed_line_scope_allowed then
             if live_sync == true then
               local handled, err = pcall(handle_typed_line, ev, room_id or cfg.room, typed_line_check)
