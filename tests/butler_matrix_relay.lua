@@ -145,6 +145,28 @@ local function test_typed_line_switches_and_non_candidates()
       "messages without a leading bang must continue through the mail path")
     relay:stop()
     cleanup_fixture(dir, config_path)
+
+    dir, config_path = fixture("typed_lines=true\nshell_lines=false\n")
+    client, delivered = scripted_client(), {}
+    relay = relay_module.new({ config_path = config_path, matrix = client,
+      deliver = function(event) delivered[#delivered + 1] = event return true end })
+    relay:start()
+    client:complete(1, { json = { next_batch = "s0" } })
+    client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+      ["!room:example.org"] = { timeline = { events = {
+        typed_line_event("$shell-off", "!!ls"), typed_line_event("$plain-on", "!ls"),
+      } } },
+    } } } })
+    assert(#typed == 2 and typed[2].session == "butler" and typed[2].text == "ls",
+      "with shell lines off, !! must not type while a plain ! line still types")
+    assert(#delivered == 1 and delivered[1].event_id == "$shell-off",
+      "a shell line refused by its switch should remain ordinary mail")
+    for _, request in ipairs(client.requests) do
+      assert(not tostring(request.path):find("/send/m.room.message/", 1, true),
+        "a shell line refused by its switch must not get a refusal thread line")
+    end
+    relay:stop()
+    cleanup_fixture(dir, config_path)
   end)
 end
 
