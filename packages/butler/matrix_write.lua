@@ -149,17 +149,19 @@ function matrix.reply(opts, on_done)
     return error_result(done, "Matrix relay is not running; event sender cannot be verified")
   end
   if not relay:can_reply_to(opts.event_id) then
-    return error_result(done, "No delivered mail for event " .. terminal_safe(opts.event_id)
-      .. ", so its sender cannot be verified.\nNext: remuda butler inbox")
+    return error_result(done, "Reply not sent: event " .. terminal_safe(opts.event_id)
+      .. " was not delivered to this Butler as mail, so its sender cannot be verified.\n"
+      .. "Next: remuda butler inbox (you can only reply to events listed there)")
   end
   local root = relay:thread_root_for_event(opts.event_id)
   local safe_room = terminal_safe(room)
   local safe_root = terminal_safe(root or opts.event_id)
   local function stopped_error()
-    return "Stopped replying in thread " .. safe_root .. " (" .. safe_room .. "): "
+    return "Reply not sent: stopped replying in thread " .. safe_root .. " (" .. safe_room .. "): "
       .. tostring(relay:b2b_turn_limit())
-      .. " Butler-only turns. A human reply resumes it.\nNext: remuda butler matrix --room "
-      .. matrix.shell_quote(safe_room) .. " thread " .. matrix.shell_quote(safe_root)
+      .. " Butler-only turns. A reply in that thread from someone on the allowlist resumes it.\n"
+      .. "Next: remuda butler matrix --room " .. matrix.shell_quote(safe_room)
+      .. " thread " .. matrix.shell_quote(safe_root)
   end
   if not opts.from_outbox and relay:b2b_stopped(room, root) then
     return error_result(done, stopped_error())

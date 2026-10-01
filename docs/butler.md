@@ -94,34 +94,35 @@ When the Butler reaches the turn limit, it posts this line to HOME and stops
 replying in that thread until an allowlisted human replies:
 
 ```text
-Stopped replying in thread ROOT (ROOM): N Butler-only turns. A human reply resumes it.
+Stopped replying in thread ROOT (ROOM): N Butler-only turns. A reply in that thread from someone on the allowlist resumes it.
 ```
 
 The reply refusal includes a command with shell-quoted room and thread IDs:
 
 ```text
-Stopped replying in thread ROOT (ROOM): N Butler-only turns. A human reply resumes it.
-Next: remuda butler matrix --room 'ROOM' thread 'ROOT'
+Reply not sent: stopped replying in thread ROOT (ROOM): N Butler-only turns. A reply in that thread from someone on the allowlist resumes it.
+Next: remuda butler matrix --room 'ROOM' thread '$ROOT'
 ```
 
 When the post limit is reached, the refusal says:
 
 ```text
-Matrix post limit reached (N per hour). Next: wait until HH:MMZ
+Not sent: Matrix post limit reached (N per hour). Next: wait until HH:MMZ
 ```
 
 A reply without a delivered mail route is refused with:
 
 ```text
-No delivered mail for event EVENT_ID, so its sender cannot be verified.
-Next: remuda butler inbox
+Reply not sent: event EVENT_ID was not delivered to this Butler as mail, so its sender cannot be verified.
+Next: remuda butler inbox (you can only reply to events listed there)
 ```
 
-The HOME summary uses `1 message` for one event and `N messages` for multiple
-events. Its `Next:` command shell-quotes the room ID:
+The HOME summary distinguishes a single event from multiple events and
+shell-quotes the room ID in its `Next:` command:
 
 ```text
-N messages from non-allowlisted senders not delivered in ROOM (rate cap). Next: remuda butler matrix --room 'ROOM' history
+1 message from non-allowlisted senders in ROOM was not passed to the Butler (hourly rate cap). Next: remuda butler matrix --room 'ROOM' history
+N messages from non-allowlisted senders in ROOM were not passed to the Butler (hourly rate cap). Next: remuda butler matrix --room 'ROOM' history
 ```
 
 `remuda butler matrix setup --default` writes the token and config to the

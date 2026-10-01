@@ -360,7 +360,7 @@ function matrix.take_post_slot(config_path)
     for _, posted_at in ipairs(post_times) do
       if not oldest or posted_at < oldest then oldest = posted_at end
     end
-    return nil, "Matrix post limit reached (" .. tostring(limit) .. " per hour). Next: wait until "
+    return nil, "Not sent: Matrix post limit reached (" .. tostring(limit) .. " per hour). Next: wait until "
       .. os.date("!%H:%MZ", oldest + 3600)
   end
   post_times[#post_times + 1] = now
