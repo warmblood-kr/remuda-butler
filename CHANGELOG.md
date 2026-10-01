@@ -34,6 +34,7 @@ release tags yet; entries come from merged pull requests.
 - The `matrix setup` wizard accepts Enter at the HTTPS trust prompt to use this system's trusted certificates; a certificate pin or CA file path can still be entered (#175).
 - Matrix messages from senders not on the allowlist are delivered with a not-on-allowlist marker and are capped per room per hour; their media is quarantined (#178).
 - The unread-mail notice fires on a timer, 2 s after the last arrival and at most 10 s after the first, on cores with `remuda.after` (#177).
+- `matrix setup` takes this computer's name for the default bot from core's `remuda.hostname()` when the core has it, so a stock Mac gets a default bot name and no bot-name prompt. On such a core the daemon's `HOSTNAME`/`COMPUTERNAME` and the hostname files are no longer read; older cores keep that lookup (#207).
 - Butler-to-Butler Matrix replies are no longer blocked. A per-thread turn guard (`b2b_max_turns`, default 6) stops the Butler after 6 Butler-only turns and posts one line to HOME; a reply in that thread from a person on the allowlist resumes it (#223).
 
 ### Fixed
@@ -44,3 +45,4 @@ release tags yet; entries come from merged pull requests.
 - `remuda butler doctor` reports probe timeouts (#135).
 - The `matrix setup` wizard asks for a Butler bot name when it cannot take one from this computer's name (a stock Mac), instead of stopping. The flag form's refusal now ends with a `Next:` line naming `--bot` (#182).
 - The `matrix setup` wizard prompts no longer show a doubled colon such as `URL::` (#186).
+- Scheduled compaction of a Claude session already on Sonnet no longer types `/model` before or after `/compact`; a failed compaction keeps its 10-minute cooldown instead of retrying after a few minutes, and a `/compact` that was not submitted fails at once (#206).

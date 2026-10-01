@@ -4206,7 +4206,17 @@ test_thread_root_mail_references_are_stable()
 test_cli_matrix_mail_replies_keep_room_and_relation()
 rx_check("test_thread_reply_in_same_sync_batch_gets_root_reference", test_thread_reply_in_same_sync_batch_gets_root_reference)
 rx_check("test_human_root_fixture_through_relay_and_mail", test_human_root_fixture_through_relay_and_mail)
-setup_tests(matrix)
+do
+  -- The setup tests need one machine name on every core: the shell wrapper
+  -- exports HOSTNAME for cores without remuda.hostname, and the word is pinned
+  -- to the same name on cores that have it (#207).
+  local core_hostname = remuda.hostname
+  local pinned_hostname = type(core_hostname) == "function" and function() return "matrix-test-host" end or nil
+  remuda.hostname = pinned_hostname
+  local ran, why = pcall(setup_tests, matrix, pinned_hostname)
+  remuda.hostname = core_hostname
+  assert(ran, why)
+end
 rx_check("test_redefined_public_words_do_not_change_trust", test_redefined_public_words_do_not_change_trust)
 test_matrix_event_id_is_sanitized_and_capped()
 local fixture_failures = {}

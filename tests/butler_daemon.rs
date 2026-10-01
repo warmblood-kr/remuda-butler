@@ -7007,6 +7007,259 @@ done
     drop(daemon);
 }
 
+/// A Claude session already on Sonnet needs no model switch (#206): the keys
+/// are `/compact` alone and no restore record is ever written. A compaction
+/// that fails with the prior model restored must keep its failure cooldown,
+/// and a `/compact` that type_text could not verify on an idle pane fails at
+/// once. The fake Claude logs each submitted line; one data home per test
+/// keeps the restore record away from the other scenarios (#130).
+#[test]
+#[cfg(unix)]
+fn butler_claude_compaction_skips_the_switch_on_sonnet_and_keeps_the_failure_cooldown() {
+    let dir = scratch_dir("butler-claude-sonnet");
+    let (token_path, config_path) = butler_config(
+        &dir,
+        "fake-claude-sonnet",
+        "http://127.0.0.1:1",
+        "!room:example.org",
+        "@butler:example.org",
+        "",
+    );
+    let token_str = token_path.to_string_lossy().to_string();
+    let config_str = config_path.to_string_lossy().to_string();
+    let data_home = dir.join("data");
+    let mods = PathBuf::from(std::env::var_os("XDG_DATA_HOME").expect("XDG_DATA_HOME"));
+    std::fs::create_dir_all(data_home.join("remuda/butler")).expect("data home");
+    let _ = std::os::unix::fs::symlink(mods.join("remuda/mods"), data_home.join("remuda/mods"));
+    let data_str = data_home.to_string_lossy().to_string();
+    let daemon = Daemon::spawn_with_env(
+        &dir,
+        &[
+            ("REMUDA_BUTLER_TOKEN", token_str.as_str()),
+            ("REMUDA_BUTLER_CONFIG", config_str.as_str()),
+            ("XDG_DATA_HOME", data_str.as_str()),
+            ("HOME", dir.to_string_lossy().as_ref()),
+        ],
+    );
+    let path = daemon::socket_path_in(&dir, "s");
+    eval(&path, r#"remuda._butler_argv = {"sh", "-c", "while read line; do :; done"}"#);
+    eval(&path, "remuda._butler_skip_relay = true");
+    let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let trace_path = dir.join("compaction-trace.log");
+    eval(&path, &format!(
+        "remuda._butler_compaction_trace_path = {}",
+        lua_raw_string(&trace_path.to_string_lossy())
+    ));
+
+    let script = dir.join("fake-claude.sh");
+    std::fs::write(
+        &script,
+        r#"#!/bin/bash
+log=$1
+scenario=$2
+case "$scenario" in sonnet-*) model=Sonnet-5.5 ;; *) model=opus ;; esac
+ctx=500000
+paint() { printf '\033[H\033[2JMODEL:%s CTX:%s\n' "$model" "$ctx"; }
+paint
+while IFS= read -r line; do
+  [ -n "$line" ] && printf 'CMD:%s\n' "$line" >> "$log"
+  case "$line" in
+    '/model sonnet') model=sonnet; paint ;;
+    '/model opus') model=opus; paint ;;
+    '/compact') [ "$scenario" != sonnet-drop ] || ctx=200000; paint ;;
+  esac
+done
+"#,
+    )
+    .expect("write fake Claude");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let restore_file = format!("{data_str}/remuda/butler/mail/compaction-restore.json");
+    eval(
+        &path,
+        &format!(
+            r#"
+      local fake_now = 1000
+      remuda._butler_compaction_now = function() return fake_now end
+      remuda._fake_now = function(value) fake_now = value end
+      remuda._butler_compaction_config = {{critical=400000, cooldown_ticks=0, capture_gap=0,
+        completion_timeout=1, claude_completion_timeout=0.2, failure_cooldown_seconds=600, input_settle=0.01}}
+      local prior_contributions = remuda.contributions
+      remuda.contributions = function(point)
+        if point == "butler.agent" then
+          return {{{{id="claude", entry={{working=function() return false end}}}}}}
+        end
+        return prior_contributions(point)
+      end
+      remuda._butler_prompt_is_empty = function() return "EMPTY" end
+      remuda._butler_telemetry_for = function(agent)
+        local screen = remuda.capture(agent.session_name)
+        return {{context_used=screen:match("CTX:%s*(%d+)"), model=screen:match("MODEL:([^ %c]+)")}}
+      end
+      remuda._fake_busy = {{}}
+      remuda.session = function(name) return {{is_busy=remuda._fake_busy[name] == true, attached=false}} end
+      remuda._butler_send = function(_, _, message)
+        remuda._fake_reports = remuda._fake_reports or {{}}
+        table.insert(remuda._fake_reports, message)
+      end
+      -- Whether a restore record existed when /compact was typed; and the
+      -- status type_text answers with for the session named in _fake_unverified.
+      remuda._fake_record_at_compact = {{}}
+      local original_type_text = remuda.type_text
+      remuda.type_text = function(name, value, settle)
+        if value == "/compact" then
+          local f = io.open({restore_file:?}, "r")
+          remuda._fake_record_at_compact[name] = f ~= nil
+          if f then f:close() end
+        end
+        local status = original_type_text(name, value, settle)
+        if value == "/compact" and name == remuda._fake_unverified then return "unverified" end
+        return status
+      end
+      remuda._fake_claude = function(name, log, scenario)
+        remuda.new(name, {{"bash", {script:?}, log, scenario}}, nil, {{}})
+        -- A session on Sonnet is pinned to the full id, as settings.json is; the
+        -- others are configured for opus.
+        local model = scenario:find("^sonnet") and "claude-sonnet-5-5" or "opus"
+        remuda._butler_bus.agents[name] = {{id=name .. "-id", kind="claude", session_name=name, model=model}}
+      end
+    "#,
+            script = script.to_string_lossy(),
+        ),
+    );
+
+    let log_of = |name: &str| std::fs::read_to_string(dir.join(format!("{name}.log"))).unwrap_or_default();
+    let reports = || eval(&path, "return table.concat(remuda._fake_reports or {}, '\\n')");
+    let trace = || std::fs::read_to_string(&trace_path).unwrap_or_default();
+    let record = || std::fs::read_to_string(&restore_file).unwrap_or_default();
+    let state = |name: &str, field: &str| eval(&path, &format!(
+        "local m = remuda._butler_compaction_members_state or {{}}; local s = m[{:?}] or {{}}; return tostring(s.{field})",
+        format!("{name}-id")
+    ));
+    // Wait until the compaction is no longer in progress and `done` holds.
+    let settle = |name: &str, done: &dyn Fn(&str) -> bool, what: &str| {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            let got = log_of(name);
+            if state(name, "compaction_in_progress") == "false" && done(&got) { return got; }
+            assert!(Instant::now() < deadline, "{name}: {what} never happened. log:\n{got}\nreports: {}\ntrace:\n{}",
+                reports(), trace());
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let start = |name: &str, scenario: &str| {
+        let log = dir.join(format!("{name}.log"));
+        eval(&path, &format!("remuda._fake_claude({name:?}, {:?}, {scenario:?})", log.to_string_lossy()));
+        wait_for(&path, name, "MODEL:");
+    };
+
+    // The user pinned the full Sonnet id; the status line shows "Sonnet-5.5".
+    let settings_path = dir.join(".claude/settings.json");
+    let pinned = b"{\"model\":\"claude-sonnet-5-5\"}\n";
+    std::fs::create_dir_all(dir.join(".claude")).unwrap();
+    std::fs::write(&settings_path, pinned).unwrap();
+    // Every scenario runs, so one failing does not hide the others.
+    let mut failures = Vec::new();
+    let mut scenario = |label: &str, body: &dyn Fn()| {
+        if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+            let text = panic.downcast_ref::<String>().cloned()
+                .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default();
+            failures.push(format!("scenario {label}: {text}"));
+        }
+    };
+    let cycle = "CMD:/model sonnet\nCMD:/compact\nCMD:/model opus\n";
+
+    // a. Already on Sonnet: `/compact` alone, no /model before or after, no
+    //    restore record, and the run ends verified.
+    scenario("a (already on Sonnet)", &|| {
+    start("cl-sonnet", "sonnet-drop");
+    assert_eq!(eval(&path, "return remuda.butler.compact('cl-sonnet')"), "started");
+    let got = settle("cl-sonnet", &|log| log.contains("CMD:/compact"), "the compaction");
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(got, "CMD:/compact\n", "a session on Sonnet must get /compact and no /model: {got:?}");
+    assert_eq!(log_of("cl-sonnet"), "CMD:/compact\n", "no /model may follow the compaction");
+    assert_eq!(eval(&path, "return tostring(remuda._fake_record_at_compact['cl-sonnet'])"), "false",
+        "no restore record may be written when nothing is switched");
+    assert!(!record().contains("cl-sonnet-id"), "no restore record: {}", record());
+    assert_eq!(state("cl-sonnet", "restore_pending"), "nil");
+    let events = trace();
+    assert!(events.contains("model_switch_skipped") && events.contains("reason=already_lower"),
+        "the skipped switch must be traced: {events}");
+    assert!(events.contains("\tverified"), "the run must finish verified: {events}");
+    assert!(!events.contains("settings_model_mismatch"), "nothing was switched, nothing to verify: {events}");
+    assert!(!reports().contains("settings.json model is"), "no settings mail: {}", reports());
+    assert_eq!(std::fs::read(&settings_path).unwrap(), pinned, "settings.json must stay as the user pinned it");
+    });
+
+    // a2. Same, but the pane is busy when the completion timeout hits: the
+    //     monitor waits for idle and finishes without any /model or settings check.
+    scenario("a2 (on Sonnet, busy at the timeout)", &|| {
+    start("cl-sonnet-busy", "sonnet-nodrop");
+    assert_eq!(eval(&path, "return remuda.butler.compact('cl-sonnet-busy')"), "started");
+    eval(&path, "remuda._fake_busy['cl-sonnet-busy'] = true");
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while !reports().contains("still running") {
+        assert!(Instant::now() < deadline, "the monitor never started: {}\n{}", reports(), trace());
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    eval(&path, "remuda._fake_busy['cl-sonnet-busy'] = false");
+    let got = settle("cl-sonnet-busy", &|_| trace().contains("completed_after_timeout"), "the idle finish");
+    assert_eq!(got, "CMD:/compact\n", "no /model on a Sonnet session after the timeout: {got:?}");
+    assert!(!trace().contains("settings_model_mismatch"), "no settings check: {}", trace());
+    assert!(!reports().contains("settings.json model is"), "no settings mail: {}", reports());
+    assert_eq!(std::fs::read(&settings_path).unwrap(), pinned);
+    assert!(!record().contains("cl-sonnet-busy-id"), "no restore record: {}", record());
+    });
+
+    // b. Not on Sonnet and the context never drops: switch, compact, one
+    //    restore, one failure. The 600 s failure cooldown then holds: later
+    //    ticks type no third /model and never report a restore.
+    scenario("b (timeout keeps the cooldown)", &|| {
+    std::fs::write(&settings_path, b"{\"model\":\"opus\"}\n").unwrap();
+    start("cl-nodrop", "opus-nodrop");
+    assert_eq!(eval(&path, "return remuda.butler.compact('cl-nodrop')"), "started");
+    let got = settle("cl-nodrop", &|log| log == cycle && reports().contains("context did not drop"),
+        "the failed cycle");
+    assert_eq!(got, cycle);
+    assert_eq!(state("cl-nodrop", "restore_pending"), "nil",
+        "a restored model leaves nothing pending after the timeout failure");
+    assert!(!record().contains("cl-nodrop-id"), "the durable record must be cleared: {}", record());
+    for now in [1050, 1100, 1500] {
+        eval(&path, &format!("remuda._fake_now({now})"));
+        assert_eq!(eval(&path, "return remuda._butler_compaction_tick('cl-nodrop', false)"), "cl-nodrop:skipped_cooldown",
+            "tick at {now}: the failure cooldown must still hold");
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(log_of("cl-nodrop"), cycle, "tick at {now}: no further /model may be typed");
+    }
+    let events = trace();
+    assert!(!events.contains("restored_after_dialog") && !events.contains("settings_model_verified"),
+        "no restore may run after the failure: {events}");
+    assert_ne!(state("cl-nodrop", "failure_cooldown_until"), "nil", "the failure cooldown must remain in force");
+    });
+
+
+    // c. type_text could not verify `/compact` and the pane is idle: fail at
+    //    once (the completion timeout here is 30 s), with the prior model back.
+    scenario("c (unverified /compact)", &|| {
+    eval(&path, "remuda._fake_now(1000)");
+    eval(&path, "remuda._butler_compaction_config.claude_completion_timeout = 30");
+    eval(&path, "remuda._fake_unverified = 'cl-unverified'");
+    std::fs::write(&settings_path, b"{\"model\":\"opus\"}\n").unwrap();
+    start("cl-unverified", "opus-nodrop");
+    assert_eq!(eval(&path, "return remuda.butler.compact('cl-unverified')"), "started");
+    let got = settle("cl-unverified", &|log| log.ends_with("CMD:/model opus\n"), "the immediate failure");
+    assert_eq!(got, cycle);
+    assert!(reports().contains("compact command not submitted"),
+        "an unverified /compact must fail with its own reason: {}", reports());
+    assert_eq!(state("cl-unverified", "restore_pending"), "nil");
+    assert!(!record().contains("cl-unverified-id"), "the durable record must be cleared: {}", record());
+    });
+    assert!(failures.is_empty(), "{}", failures.join("\n---\n"));
+    drop(daemon);
+}
+
 /// Codex compaction on a lower model, observed on codex-cli 0.159: `/model`
 /// opens "Select Model and Effort" (a number key picks a row), then "Select
 /// Reasoning Level for <Model>" with the cursor on that model's default effort;
