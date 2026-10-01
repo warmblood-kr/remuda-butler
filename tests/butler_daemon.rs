@@ -9096,7 +9096,9 @@ fn butler_matrix_send_and_reply_add_formatted_body_and_fall_back_to_plain() {
       matrix.relay.instance = { can_reply_to = function() return true end,
         thread_root_for_event = function(_, event_id) return event_id end,
         b2b_stopped = function() return false end, b2b_turn_limit = function() return 6 end,
-        note_own_turn = function() end }
+        note_own_turn = function() end,
+        -- No route: the reply takes a post slot, as for an unknown route.
+        route_for_event = function() return nil end, post_cap_hit = function() end }
       local function content_of(start)
         local before, result = #remuda.http.calls, nil
         start(function(value) result = value end)
@@ -9211,7 +9213,9 @@ fn butler_matrix_reply_react_upload_redact_join_and_leave_compose_request() {
       matrix.relay.instance = {{can_reply_to=function() return true end,
         thread_root_for_event=function(_, event_id) return event_id end,
         b2b_stopped=function() return false end, b2b_turn_limit=function() return 6 end,
-        note_own_turn=function() end}}
+        note_own_turn=function() end,
+        -- No route: the reply takes a post slot, as for an unknown route.
+        route_for_event=function() return nil end, post_cap_hit=function() end}}
       remuda.http.respond("GET", "https://matrix.example.org/_matrix/client/v3/rooms/%21write%3Aexample.org/context/%24outside",
         response('{{"event":{{"room_id":"!other:example.org"}}}}'))
       matrix.reply({{ room = room, event_id = "$outside", text = "must not send" }}, function(value) outside = value end)
