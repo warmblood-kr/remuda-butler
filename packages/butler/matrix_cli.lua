@@ -464,7 +464,7 @@ function matrix.cli(args, agent, stdin_body)
     execute_setup = function(plan)
       local prompt_attempts, prompt_notice = 0, nil
       local prompt_label = "Registration token for " .. plan.homeserver
-        .. ", from its admin (hidden). This is not an access token:"
+        .. ", from its admin (hidden). This is not an access token"
       local rejected_registration_token = matrix.REJECTED_REGISTRATION_TOKEN
       local original_bot_mxid = plan.bot_mxid
       local ask_registration_token

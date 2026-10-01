@@ -554,7 +554,10 @@ return function(matrix)
     local reply = { resolve = function(_, status, stdout, stderr)
       resolved = { status = status, stdout = stdout, stderr = stderr }
     end }
-    function reply:prompt_secret(spec) prompt_specs[#prompt_specs + 1] = spec end
+    function reply:prompt_secret(spec)
+      assert(not spec.label:find(":%s*$"), "a hidden prompt label must not end with its own colon: " .. spec.label)
+      prompt_specs[#prompt_specs + 1] = spec
+    end
     function reply:prompt_line(spec)
       -- Core's prompt_line shows a label on one line, cuts it at 256
       -- characters and adds ":" / "[default]:" itself. The summary label is
@@ -601,7 +604,7 @@ return function(matrix)
   line_specs[2].callback("@alice:example.org", nil)
   line_specs[3].callback("Y", nil)
   assert(#prompt_specs == 1 and prompt_specs[1].label
-    == "Registration token for http://matrix.invalid, from its admin (hidden). This is not an access token:"
+    == "Registration token for http://matrix.invalid, from its admin (hidden). This is not an access token"
     and #requests == 0 and not resolved,
     "confirming the summary should enter the existing hidden registration-token flow")
   local wizard_bot = assert(line_specs[3].label:match("Bot: (@%S+)"), "wizard summary should name the bot")
@@ -824,7 +827,7 @@ return function(matrix)
     "--dir", prompt_output })
   assert(prompt_reply and pending_timeout == 300 and #prompt_specs == 1 and not resolved,
     "registration setup should request its token before starting network work")
-  assert(prompt_specs[1].label == "Registration token for http://matrix.invalid, from its admin (hidden). This is not an access token:",
+  assert(prompt_specs[1].label == "Registration token for http://matrix.invalid, from its admin (hidden). This is not an access token",
     "registration prompt should explain which token is needed")
   for attempt = 1, 3 do
     local attempt_token = prompt_token .. tostring(attempt)
@@ -850,7 +853,7 @@ return function(matrix)
         "a rejected registration token should prompt again up to three total attempts")
       assert(prompt_specs[attempt + 1].label
         == "The server rejected that registration token. Nothing was created or written. "
-          .. "Registration token for http://matrix.invalid, from its admin (hidden). This is not an access token:",
+          .. "Registration token for http://matrix.invalid, from its admin (hidden). This is not an access token",
         "the retry notice should be separated from the prompt label with a space")
     end
   end
