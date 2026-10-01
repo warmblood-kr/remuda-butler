@@ -554,8 +554,17 @@ return function(matrix)
     local reply = { resolve = function(_, status, stdout, stderr)
       resolved = { status = status, stdout = stdout, stderr = stderr }
     end }
-    function reply:prompt_secret(spec) prompt_specs[#prompt_specs + 1] = spec end
+    function reply:prompt_secret(spec)
+      assert(not spec.label:find(":%s*$"), "a hidden prompt label must not end with its own colon: " .. spec.label)
+      prompt_specs[#prompt_specs + 1] = spec
+    end
     function reply:prompt_line(spec)
+      -- Core's prompt_line shows a label on one line, cuts it at 256
+      -- characters and adds ":" / "[default]:" itself. The summary label is
+      -- exempt until core can print output before a prompt (butler #186).
+      assert(not spec.label:find(":%s*$"), "a wizard prompt label must not end with its own colon: " .. spec.label)
+      assert(spec.label:find("^Matrix setup will:") or (#spec.label <= 256 and not spec.label:find("\n", 1, true)),
+        "every wizard prompt label is one line and at most 256 characters: " .. spec.label)
       line_specs[#line_specs + 1] = spec
     end
     return reply
@@ -563,11 +572,11 @@ return function(matrix)
   requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
   local wizard_reply = matrix.cli({ "matrix", "setup" })
   assert(wizard_reply and pending_timeout == 300 and #line_specs == 1 and not resolved
-    and line_specs[1].label == "Matrix homeserver URL:",
+    and line_specs[1].label == "Matrix homeserver URL",
     "no-flag setup should begin an interactive wizard")
   line_specs[1].callback("http://matrix.invalid", nil)
   assert(#line_specs == 2
-    and line_specs[2].label == "Your Matrix user ID (for example @alice:example.org):",
+    and line_specs[2].label == "Your Matrix user ID (for example @alice:example.org)",
     "the wizard should ask for the owner after the homeserver")
   line_specs[2].callback("@alice:example.org", nil)
   assert(#line_specs == 3 and line_specs[3].label:find("Continue? Type Y", 1, true)
@@ -578,6 +587,8 @@ return function(matrix)
     and not line_specs[3].label:find("Room access", 1, true)
     and line_specs[3].label:find("replaces its current Matrix relay config", 1, true),
     "the wizard should set open rooms and summarize the real config path")
+  assert(line_specs[3].label:match("\n([^\n]*)$") == "Continue? Type Y to continue, or N to cancel",
+    "the summary label should end with the bare question: core adds the [N]: suffix")
   assert(not line_specs[3].label:find("HTTPS", 1, true),
     "an http wizard summary should show no HTTPS trust line")
   assert(line_specs[3].default == "N", "wizard confirmation should default to no")
@@ -593,7 +604,7 @@ return function(matrix)
   line_specs[2].callback("@alice:example.org", nil)
   line_specs[3].callback("Y", nil)
   assert(#prompt_specs == 1 and prompt_specs[1].label
-    == "Registration token for http://matrix.invalid, from its admin (hidden). This is not an access token:"
+    == "Registration token for http://matrix.invalid, from its admin (hidden). This is not an access token"
     and #requests == 0 and not resolved,
     "confirming the summary should enter the existing hidden registration-token flow")
   local wizard_bot = assert(line_specs[3].label:match("Bot: (@%S+)"), "wizard summary should name the bot")
@@ -620,7 +631,7 @@ return function(matrix)
   line_specs[2].callback("@alice:example.org", nil)
   assert(#line_specs == 3
     and line_specs[3].label == "HTTPS trust: press Enter to use this system's trusted certificates, "
-      .. "or enter a 64-character SHA-256 certificate pin or an absolute CA file path:",
+      .. "or enter a 64-character SHA-256 certificate pin or an absolute CA file path",
     "HTTPS setup should offer system trust on Enter, or a certificate pin or CA file: "
       .. tostring(line_specs[3] and line_specs[3].label))
   line_specs[3].callback(string.rep("a", 64), nil)
@@ -764,7 +775,7 @@ return function(matrix)
       line_specs[1].callback("http://matrix.invalid", nil)
       line_specs[2].callback("@alice:example.org", nil)
       assert(#line_specs == 3 and not resolved and line_specs[3].label
-        == "Butler bot name (for example butler-mac; it becomes @butler-mac:example.org):"
+        == "Butler bot name (for example butler-mac; it becomes @butler-mac:example.org)"
         and line_specs[3].default == nil,
         "the wizard asks for a bot name when none can be derived: " .. tostring(resolved and resolved.stderr))
       line_specs[3].callback(bot_answer, nil)
@@ -816,7 +827,7 @@ return function(matrix)
     "--dir", prompt_output })
   assert(prompt_reply and pending_timeout == 300 and #prompt_specs == 1 and not resolved,
     "registration setup should request its token before starting network work")
-  assert(prompt_specs[1].label == "Registration token for http://matrix.invalid, from its admin (hidden). This is not an access token:",
+  assert(prompt_specs[1].label == "Registration token for http://matrix.invalid, from its admin (hidden). This is not an access token",
     "registration prompt should explain which token is needed")
   for attempt = 1, 3 do
     local attempt_token = prompt_token .. tostring(attempt)
@@ -842,7 +853,7 @@ return function(matrix)
         "a rejected registration token should prompt again up to three total attempts")
       assert(prompt_specs[attempt + 1].label
         == "The server rejected that registration token. Nothing was created or written. "
-          .. "Registration token for http://matrix.invalid, from its admin (hidden). This is not an access token:",
+          .. "Registration token for http://matrix.invalid, from its admin (hidden). This is not an access token",
         "the retry notice should be separated from the prompt label with a space")
     end
   end
