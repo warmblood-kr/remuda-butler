@@ -20,6 +20,7 @@ local matrix_module_ok, matrix_module_error = pcall(dofile, "packages/butler/mat
 remuda.exec = package_exec
 assert(matrix_module_ok, matrix_module_error)
 local ASKER = "team-1-mx"
+dofile("packages/butler/system.lua")
 dofile("packages/butler/matrix_setup.lua")
 dofile("packages/butler/matrix_read.lua")
 dofile("packages/butler/matrix_cli.lua")

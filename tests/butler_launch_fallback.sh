@@ -5,7 +5,7 @@ REMUDA_BIN=${REMUDA_BIN:-remuda}
 REMUDA_BIN=$(command -v "$REMUDA_BIN")
 # /tmp, not $TMPDIR: under macOS /var/folders the daemon socket path passes the
 # 103-byte sun_path limit and the pending daemon never binds (#163).
-SCRATCH=$(mktemp -d /private/tmp/bf.XXXXXX)
+SCRATCH=$(mktemp -d /tmp/bf.XXXXXX)
 SCRATCH=$(cd "$SCRATCH" && pwd -P)
 "$REMUDA_BIN" version >"$SCRATCH/core-version.log"
 head -n 1 "$SCRATCH/core-version.log"
