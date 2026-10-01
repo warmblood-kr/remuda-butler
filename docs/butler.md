@@ -114,8 +114,8 @@ operator to choose from. The inviter check relies on the homeserver appending
 the real invite event to `invite_state` (Synapse does). `leave` removes a joined
 room by ID or alias, while HOME and ALL-BUTLERS cannot be left or removed. The
 interactive setup wizard writes `rooms=open` without asking; flag-based setup
-defaults to allowlist unless given `--rooms open`. The `send -` stdin form is
-unsupported until core #213.
+defaults to allowlist unless given `--rooms open`. `send -` reads the text from
+stdin (up to 64 KiB, one trailing newline dropped); `send -- -` sends a literal `-`.
 
 `join` and `leave` change room membership and require an outside terminal
 caller; session, unknown, and missing callers are refused. Clearing
