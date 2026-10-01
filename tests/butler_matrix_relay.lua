@@ -3652,6 +3652,53 @@ test_ack_reconcile_and_utf8_body_cap()
 test_messages_backfill_baseline_and_retry_backoff()
 test_retry_backoff_grows_and_resets_after_recovery()
 test_allowlist_refusal_is_logged_once()
+do -- remuda.butler.matrix.home_notice: one m.notice to the HOME room.
+  local dir, config_path = fixture()
+  local client = scripted_client()
+  local old_request, old_config = matrix.request_json, remuda._butler_matrix_config
+  matrix.request_json = client.request_json
+  local function notices()
+    local found = {}
+    for _, request in ipairs(client.requests) do
+      if request.method == "PUT" and request.path:find("/send/m.room.message/", 1, true) then
+        local body = remuda.json.decode(request.body)
+        found[#found + 1] = { room = request.room, msgtype = body.msgtype, body = body.body }
+      end
+    end
+    return found
+  end
+  assert(type(matrix.home_notice) == "function", "remuda.butler.matrix.home_notice is missing")
+
+  -- Matrix not configured: a no-op, and nothing is kept for later.
+  remuda._butler_matrix_config = nil
+  assert(matrix.home_notice("dropped") == false, "home_notice without Matrix must return false")
+
+  -- Configured but the relay has not started: queued, at most four, oldest dropped.
+  remuda._butler_matrix_config = { config_path = config_path }
+  for i = 1, 6 do assert(matrix.home_notice("queued " .. i) == true, "home_notice must queue") end
+  assert(#client.requests == 0, "home_notice must not send before the relay starts")
+  assert(relay_module.start({ config_path = config_path }) == true, "relay did not start")
+  local sent = notices()
+  assert(#sent == 4, "expected the four newest queued notices, got " .. #sent)
+  for i, item in ipairs(sent) do
+    assert(item.room == "!room:example.org" and item.msgtype == "m.notice"
+      and item.body == "queued " .. (i + 2), "queued notice " .. i .. " was " .. tostring(item.body))
+  end
+
+  -- Running: exactly one notice, with nothing that can drive a terminal, capped.
+  local hostile = "Butler could not start an agent.\nclaude: \27[31mnot\194\133 logged\226\128\174 in "
+    .. ("x"):rep(3000)
+  assert(matrix.home_notice(hostile) == true)
+  sent = notices()
+  assert(#sent == 5, "one home_notice must be one Matrix notice, got " .. (#sent - 4))
+  local want = "Butler could not start an agent.\nclaude: [31mnot logged in xxx"
+  assert(sent[5].room == "!room:example.org" and sent[5].body:sub(1, #want) == want, sent[5].body:sub(1, 80))
+  assert(#sent[5].body <= 1024, "home_notice must cap its text, got " .. #sent[5].body)
+
+  relay_module.stop()
+  matrix.request_json, remuda._butler_matrix_config = old_request, old_config
+  remove_dir(dir)
+end
 test_thread_root_mail_references_are_stable()
 test_cli_matrix_mail_replies_keep_room_and_relation()
 rx_check("test_thread_reply_in_same_sync_batch_gets_root_reference", test_thread_reply_in_same_sync_batch_gets_root_reference)

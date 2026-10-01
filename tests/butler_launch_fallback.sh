@@ -164,6 +164,18 @@ for reason in 'missing: not_found' 'loggedout: login' 'hang: timeout'; do
   shown=${reason%%:*}
   [[ "$ALL_ROSTER" == *"$shown:"* ]] || fail "sessions omitted $shown attempt: $ALL_ROSTER"
 done
+# The owner-facing notice has one line per failed attempt and never the screen
+# text; reconcile retries every 2 s, and the same failure set is noticed once.
+start_notice() { lua 'return tostring(remuda._butler_start_notice) .. "\ncount=" .. tostring(remuda._butler_start_notices)'; }
+NOTICE=$(start_notice)
+for line in 'missing: not installed. Next: remuda butler doctor' \
+    'loggedout: not logged in. Next: remuda butler doctor' \
+    'hang: did not become ready in time. Next: remuda butler doctor'; do
+  [[ "$NOTICE" == *"$line"* ]] || fail "start notice omitted '$line': $NOTICE"
+done
+[[ "$NOTICE" != *"Please log in"* && "$NOTICE" != *"Loading agent"* ]] || fail "start notice leaked screen text: $NOTICE"
+sleep 7
+[[ "$(start_notice)" == "$NOTICE" ]] || fail "start notice was repeated across reconcile rounds: $NOTICE / $(start_notice)"
 # A completely fresh install with neither built-in executable keeps the
 # command surface loaded and reports the failure through status.
 SERVER=butler-fallback-empty
