@@ -697,7 +697,7 @@ local function schedule_queue()
   end })
 end
 
-local function enqueue(dispatch, done, bypass_rate_limit)
+local function enqueue(dispatch, done)
   local item = { dispatch = dispatch, cancelled = false }
   local handle = { cancel = function()
     if item.cancelled or item.completed then return end
@@ -714,8 +714,8 @@ local function enqueue(dispatch, done, bypass_rate_limit)
     if item.transport then item.transport:cancel() end
   end }
   item.handle = handle
-  if bypass_rate_limit or tokens > 0 then
-    if not bypass_rate_limit then tokens = tokens - 1 end
+  if tokens > 0 then
+    tokens = tokens - 1
     dispatch(item)
   else
     item.in_queue = true
@@ -816,7 +816,7 @@ function matrix.request(args, on_done)
     if item and item.cancelled then return end
     item.transport = remuda.http.request(spec)
   end
-  return enqueue(dispatch, done, args.bypass_rate_limit == true)
+  return enqueue(dispatch, done)
 end
 
 function matrix.same_room(room, event_id, on_done)

@@ -156,6 +156,19 @@ local function terminal_safe_field(value, limit)
   return mail_body(cap_field(value, limit))
 end
 
+local function member_kind(mxid, cfg)
+  local localpart, server = type(mxid) == "string" and mxid:match("^@([^:]+):(.+)$")
+  if not localpart or server == "" then return "UNKNOWN" end
+  local agent_prefix = localpart and localpart:sub(1, 6):lower() == "agent-"
+  local butler_prefix = localpart and localpart:sub(1, 7):lower() == "butler-"
+  if mxid == cfg.self_mxid or cfg.butler_senders[mxid]
+    or agent_prefix or butler_prefix then
+    return "AGENT"
+  end
+  if localpart and localpart ~= "" then return "HUMAN" end
+  return "UNKNOWN"
+end
+
 local function context_safe_text(value)
   value = tostring(value or "")
   value = value:gsub("\r\n", "\n"):gsub("\r", "\n")
@@ -189,13 +202,8 @@ local function context_message_line(item, delivered, cfg)
   local mark
   if item.sender == cfg.self_mxid then
     mark = " (you)"
-  elseif type(item.sender) == "string" and (function()
-      local localpart = item.sender:match("^@([^:]+):") or ""
-      local agent_prefix = localpart:sub(1, 6):lower() == "agent-"
-      local butler_prefix = localpart:sub(1, 7):lower() == "butler-"
-      return cfg.butler_senders[item.sender] == true
-        or (cfg.allowed_senders[item.sender] == true and (agent_prefix or butler_prefix))
-    end)() then
+  elseif member_kind(item.sender, cfg) == "AGENT"
+      and (cfg.butler_senders[item.sender] == true or cfg.allowed_senders[item.sender] == true) then
     mark = " (Butler)"
   elseif not cfg.allowed_senders[item.sender] then
     mark = " (not on the owner allowlist)"
@@ -339,19 +347,6 @@ local function mentions(content, body, mxid)
     end
     at = first + 1
   end
-end
-
-local function member_kind(mxid, cfg)
-  local localpart, server = type(mxid) == "string" and mxid:match("^@([^:]+):(.+)$")
-  if not localpart or server == "" then return "UNKNOWN" end
-  local agent_prefix = localpart and localpart:sub(1, 6):lower() == "agent-"
-  local butler_prefix = localpart and localpart:sub(1, 7):lower() == "butler-"
-  if mxid == cfg.self_mxid or cfg.butler_senders[mxid]
-    or agent_prefix or butler_prefix then
-    return "AGENT"
-  end
-  if localpart and localpart ~= "" then return "HUMAN" end
-  return "UNKNOWN"
 end
 
 local function media_uri(content)
@@ -1143,7 +1138,7 @@ function relay.new(options)
     local root_path = "/_matrix/client/v3/rooms/" .. percent_encode(room)
       .. "/event/" .. percent_encode(root)
     local called, handle = pcall(api.request_json, { method = "GET", path = root_path,
-      room = room, timeout = 10, max_bytes = 1024 * 1024, bypass_rate_limit = true }, function(result)
+      room = room, timeout = 10, max_bytes = 1024 * 1024 }, function(result)
       if generation ~= request_generation or not active or state.pending[id] ~= event then return end
       context_fetch_handles[id] = nil
       if type(result) ~= "table" or result.error or type(result.json) ~= "table" then return fail(result) end
@@ -1151,7 +1146,7 @@ function relay.new(options)
       local relation_path = "/_matrix/client/v1/rooms/" .. percent_encode(room)
         .. "/relations/" .. percent_encode(root) .. "/m.thread?dir=b&limit=21"
       local relation_called, relation_handle = pcall(api.request_json, { method = "GET", path = relation_path,
-        room = room, timeout = 10, max_bytes = 1024 * 1024, bypass_rate_limit = true }, function(page)
+        room = room, timeout = 10, max_bytes = 1024 * 1024 }, function(page)
         if generation ~= request_generation or not active or state.pending[id] ~= event then return end
         context_fetch_handles[id] = nil
         if type(page) ~= "table" or page.error or type(page.json) ~= "table" then return fail(page) end
@@ -1196,8 +1191,10 @@ function relay.new(options)
             and not event.context_mail_id and not event.references
           if needs_context and not (event.context_done and type(event.context_block) == "string") then
             if event.context_owner or not has_pending_context_owner(state.pending, id, event) then
-              event.context_owner = true
-              persist()
+              if not event.context_owner then
+                event.context_owner = true
+                persist()
+              end
               fetch_thread_context(id, event)
             end
           else

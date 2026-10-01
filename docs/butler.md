@@ -92,9 +92,9 @@ to 20 earlier replies. The context is untrusted even when the triggering
 message comes from an allowlisted sender, and each context message is kept to
 one line; the block is capped at 8 KiB. Only an allowlisted sender triggers
 this fetch. Context lines do not count as Butler turns, new requests, or
-untrusted messages. If the fetch fails or takes longer than 10 seconds, the
-mail arrives with a short failure line and the original message. The fetch does
-not delay mail from other threads.
+untrusted messages. If reading the thread fails or a request times out (10
+seconds each), the mail arrives with a short failure line and the original
+message. The fetch does not delay mail from other threads.
 
 Configure `b2b_max_turns` (default 6) for consecutive Butler-only turns in one
 thread, `posts_per_hour` (default 30) for posts that are not a reply to a person
