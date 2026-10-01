@@ -117,6 +117,45 @@ local json_quote = paths.json_quote
 -- only the optional relay and remains inert when credentials are absent.
 remuda.exec("butler/matrix_request")
 remuda.exec("butler/matrix")
+-- The root Butler's permission rule and the write-only-when-changed helper
+-- live in permissions.lua; these are the file helpers it is handed.
+remuda.exec("butler/permissions")
+local permissions = remuda._butler_permissions
+local butler_fs = {
+  read = function(path)
+    local f = io.open(path, "rb")
+    if not f then return nil end
+    local text = f:read("*a")
+    f:close()
+    return text
+  end,
+  -- ponytail: asks `test -L` (an argument vector, no shell). nil when it cannot
+  -- tell (no `test`, as on Windows; an old core): then nothing is written.
+  is_symlink = function(path)
+    local ok, result = pcall(function() return remuda.process.run({ argv = { "test", "-L", path }, timeout = 5 }) end)
+    if not ok or type(result) ~= "table" or result.timed_out then return nil end
+    if result.code == 0 then return true end
+    if result.code == 1 then return false end
+    return nil
+  end,
+  json = remuda.json,
+  -- A private directory where the core can make one (as paths.lua's create_fresh_directory does).
+  mkdir = function(path)
+    if remuda.fs and remuda.fs.mkdir_new and remuda.fs.mkdir_new(path) == true then return end
+    return remuda.mkdir(path)
+  end,
+  write = function(path, text, private)
+    if remuda.fs and type(remuda.fs.write_atomic) == "function" then
+      return remuda.fs.write_atomic(path, text, private and { private = true } or nil)
+    end
+    if private then return nil, "atomic writes are unavailable on this core" end
+    local f, why = io.open(path, "w")
+    if not f then return nil, why end
+    f:write(text)
+    f:close()
+    return true
+  end,
+}
 
 -- The session needs an `--mcp-config` pointing back at this same daemon, or
 -- it has no way to reach the Butler MCP tools at all — a bare `remuda.new(nil,
@@ -184,6 +223,7 @@ local function statusline(args, caller)
   local line = string.format("MODEL:%s CTX:%s CTXWIN:%s CTXPCT:%s",
     statusline_tag(model_name), statusline_integer(used),
     statusline_integer(window.context_window_size), statusline_integer(window.used_percentage))
+  local limits = remuda._butler_quota and remuda._butler_quota.rate_limits_line(snapshot, os.time())
 
   local path = args[2]
   local drive_rooted = type(path) == "string" and path:match("^%a:")
@@ -192,7 +232,7 @@ local function statusline(args, caller)
     path:sub(1, 1) == "/" or path:sub(1, 2) == "\\\\" or drive_rooted
   )
   if absolute and path:match("%.status$") then
-    pcall(remuda.fs.write_atomic, path, line .. "\n")
+    pcall(remuda.fs.write_atomic, path, line .. "\n" .. (limits and (limits .. "\n") or ""))
   end
   return line
 end
@@ -411,7 +451,7 @@ remuda.exec("butler/prompt")
 local startup_action_safe
 remuda._butler_chooser_config = { bus = bus, call_callback = call_callback, numbered_option = numbered_option,
   bottom_screen_lines = bottom_screen_lines, file_exists = file_exists, contributions = contributions,
-  startup_action_safe = function(...) return startup_action_safe(...) end }
+  fs = butler_fs, startup_action_safe = function(...) return startup_action_safe(...) end }
 remuda.exec("butler/agents_launch")
 local chooser = remuda._butler_chooser
 local build_agent_argv = chooser.build_agent_argv
@@ -534,6 +574,13 @@ remuda._butler_sessions_config = { bus = bus, mail = mail, identity_path = ident
 remuda.exec("butler/sessions")
 local registry_list = remuda._butler_sessions_impl.registry_list
 remuda.exec("butler/doctor")
+local quota_loaded, quota_error = pcall(remuda.exec, "butler/quota")
+if quota_loaded then
+  remuda._butler_quota_error = nil
+else
+  remuda._butler_quota = nil
+  remuda._butler_quota_error = tostring(quota_error)
+end
 
 -- CLI verbs and the argv parser live in commands.lua.
 remuda._butler_commands_config = { current_agent = current_agent, OPERATOR = OPERATOR,
@@ -683,8 +730,9 @@ leader, when you have one, is `REMUDA_BUTLER_LEADER_ID`. Use the short forms:
 - `remuda butler inbox` to read your own inbox.
 - `remuda butler send MEMBER "MESSAGE"` to direct a member; your sender is inferred.
 - `remuda butler send-to-leader MESSAGE...` to report a completed work loop.
-- For long bodies, use `cat <<'EOF' | remuda butler send MEMBER -` or `--file "$PWD/path"`;
-  `send-to-leader` and `reply MESSAGE_ID` accept those forms too. The limit is 64 KiB.
+- For long bodies, write the text to a file and use `remuda butler send MEMBER --file "$PWD/path"`,
+  or pipe it: `cat <<'EOF' | remuda butler send MEMBER -`. `send-to-leader` and `reply MESSAGE_ID`
+  accept those forms too. The limit is 64 KiB.
 
 If `inbox` says "no Butler identity in your env", your Remuda core predates
 caller-env forwarding: pass your id (`remuda butler inbox
@@ -779,6 +827,31 @@ function remuda._butler_status()
   end
   return "launching\nreadiness budget: " .. tostring(readiness_chain_budget()), 75
 end
+-- Merges the root Butler's rule into its own .claude/settings.local.json: at
+-- every real launch, and once per mod load for a session that is already
+-- alive. Never on the reconcile tick, and never for Codex or a member.
+local root_permissions_ensured = false
+local function ensure_root_permissions(kind)
+  root_permissions_ensured = true
+  if not butler_session_cwd then return end
+  local report
+  if kind == "claude" then
+    local rules, dropped = permissions.rules({ role = "root" }, contributions("butler.permission"))
+    report = permissions.ensure(butler_session_cwd .. "/.claude/settings.local.json", rules, butler_fs)
+    for _, item in ipairs(dropped) do
+      _butler_session_trace("permissions_dropped", one_line(item.id) .. " " .. one_line(item.rule))
+    end
+    if report.error then _butler_session_trace("permissions_not_written", one_line(report.error) .. " " .. report.path) end
+    for _, item in ipairs(report.withheld) do
+      _butler_session_trace("permissions_withheld", item.rule .. " under " .. item.list .. " in " .. report.path)
+    end
+    if #report.added > 0 then
+      _butler_session_trace("permissions_added", "added " .. #report.added .. " rule to " .. report.path
+        .. ": " .. table.concat(report.added, ", ") .. " (file rewritten: private, mode 600)")
+    end
+  end
+  remuda._butler_permission_report = { kind = kind, report = report }
+end
 local function launch_butler()
   local requested_name = butler_name or remuda._butler_initial_name
   if butler_session_cwd then
@@ -789,6 +862,7 @@ local function launch_butler()
   if remuda._butler_selected_agent and stale_session then
     butler_name = requested_name
     remuda._butler_name = butler_name
+    if not root_permissions_ensured then pcall(ensure_root_permissions, remuda._butler_selected_agent) end
     return
   end
   if remuda._butler_launching then return "launching Butler" end
@@ -802,6 +876,7 @@ local function launch_butler()
     name = requested_name, cwd = butler_session_cwd, argv = remuda._butler_argv,
     skip_probe = remuda._butler_argv ~= nil,
     spec = function(candidate_kind)
+      pcall(ensure_root_permissions, candidate_kind)
       local telemetry = setup_telemetry(candidate_kind, { name = requested_name, status_path = status_path })
       telemetry_by_kind[candidate_kind] = telemetry
       return { name = requested_name, token = butler_token, mcp_config_path = mcp_config_path,
