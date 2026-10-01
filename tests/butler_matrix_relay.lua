@@ -3657,6 +3657,7 @@ do -- remuda.butler.matrix.home_notice: one m.notice to the HOME room.
   local client = scripted_client()
   local old_request, old_config = matrix.request_json, remuda._butler_matrix_config
   matrix.request_json = client.request_json
+  remuda._butler_new_ulid = remuda._butler_new_ulid or function() return "01TESTULID" end
   local function notices()
     local found = {}
     for _, request in ipairs(client.requests) do

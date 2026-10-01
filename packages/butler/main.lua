@@ -413,6 +413,7 @@ remuda._butler_chooser_config = { bus = bus, call_callback = call_callback, numb
   bottom_screen_lines = bottom_screen_lines, file_exists = file_exists, contributions = contributions,
   startup_action_safe = function(...) return startup_action_safe(...) end }
 remuda.exec("butler/agents_launch")
+remuda.exec("butler/launch_notice")
 local chooser = remuda._butler_chooser
 local build_agent_argv = chooser.build_agent_argv
 local one_line = chooser.one_line
@@ -813,6 +814,23 @@ local function launch_butler()
         REMUDA_BUTLER_AGENT_KIND = candidate_kind, CLAUDE_CODE_FORCE_SESSION_PERSISTENCE = "1" }
     end,
   }
+  -- One HOME notice per distinct failure set until a start succeeds: reconcile
+  -- retries every 2 s, so without this the room would get one every round.
+  local start_notices_sent = remuda._butler_start_notices_sent or {}
+  remuda._butler_start_notices_sent = start_notices_sent
+  local function notify_start_failure(attempts)
+    local notice = remuda.butler.launch_notice
+    local signature, text = notice.signature(attempts), notice.text(attempts)
+    if not text or start_notices_sent[signature] then return end
+    local sent = 0
+    for _ in pairs(start_notices_sent) do sent = sent + 1 end
+    if sent >= 16 then return end
+    start_notices_sent[signature] = true
+    remuda._butler_start_notice = text
+    remuda._butler_start_notices = (remuda._butler_start_notices or 0) + 1
+    local matrix = remuda.butler.matrix
+    if matrix and type(matrix.home_notice) == "function" then pcall(matrix.home_notice, text) end
+  end
   local function finish(selected, kind, attempts)
   butler_attempts = attempts
   remuda._butler_attempts = attempts
@@ -831,8 +849,11 @@ local function launch_butler()
         .. (attempt.detail and attempt.detail ~= "" and (" (" .. one_line(attempt.detail) .. ")") or "") .. "\n")
     end
     _butler_session_trace("reconcile_error", message)
+    notify_start_failure(attempts)
     return nil
   end
+  for signature in pairs(start_notices_sent) do start_notices_sent[signature] = nil end
+  remuda._butler_start_notice = nil
   butler_name, butler_kind = selected, kind
   remuda._butler_name, remuda._butler_selected_agent = selected, kind
   bus.agents.butler.kind, bus.agents.butler.telemetry = kind, telemetry_by_kind[kind]

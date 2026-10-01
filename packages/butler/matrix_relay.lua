@@ -560,7 +560,7 @@ function relay.new(options)
     if not ok then error("cannot save Matrix relay state: " .. tostring(err), 0) end
   end
 
-  local function send_notice(room, text, warn_kind, warn_key)
+  local function send_notice(room, text, warn_kind, warn_key, label)
     local body = encode({ msgtype = "m.notice", body = text })
     api.request_json({ method = "PUT",
       path = "/_matrix/client/v3/rooms/" .. percent_encode(room)
@@ -570,7 +570,7 @@ function relay.new(options)
     }, function(result)
       if type(result) ~= "table" or result.error then
         local detail = type(result) == "table" and result.error or "Matrix notice failed"
-        warn_once(warn_kind, warn_key, "butler Matrix invite notice failed for "
+        warn_once(warn_kind, warn_key, "butler Matrix " .. (label or "invite") .. " notice failed for "
           .. terminal_safe_field(room, 512) .. ": " .. terminal_safe_field(tostring(detail), 512))
       end
     end)
@@ -1581,7 +1581,40 @@ function relay.new(options)
     return { config = cfg, path = state_path, ack_path = ack_path }
   end
 
+  function instance:home_notice(text)
+    send_notice(cfg.home_room, text, "home-notice", text, "home")
+  end
+
   return instance
+end
+
+-- One m.notice to the HOME room, for things the owner must hear when no agent
+-- can say them. The text is the caller's, so it is made safe and capped here.
+local MAX_HOME_NOTICE_BYTES = 1024
+local MAX_QUEUED_HOME_NOTICES = 4
+local queued_home_notices = relay.queued_home_notices or {}
+relay.queued_home_notices = queued_home_notices
+
+local function home_notice_text(text)
+  text = mail_body(tostring(text or ""))
+  -- U+061C, U+200E/F, U+2028-202E, U+2066-2069: they reorder or split a line.
+  text = text:gsub("\216\156", ""):gsub("\226\128[\142\143\168-\174]", ""):gsub("\226\129[\166-\169]", "")
+  return matrix.utf8_prefix(text, MAX_HOME_NOTICE_BYTES)
+end
+
+-- true: sent, or queued until the relay starts. false: Matrix is not
+-- configured (or the text is empty), and nothing is kept.
+function matrix.home_notice(text)
+  text = home_notice_text(text)
+  if text == "" then return false end
+  if relay.instance then
+    relay.instance:home_notice(text)
+    return true
+  end
+  if not remuda._butler_matrix_config then return false end
+  queued_home_notices[#queued_home_notices + 1] = text
+  while #queued_home_notices > MAX_QUEUED_HOME_NOTICES do table.remove(queued_home_notices, 1) end
+  return true
 end
 
 function relay.start(config)
@@ -1611,7 +1644,11 @@ function relay.start(config)
       return delivered
     end,
   })
-  return relay.instance:start()
+  local started = relay.instance:start()
+  while #queued_home_notices > 0 do
+    relay.instance:home_notice(table.remove(queued_home_notices, 1))
+  end
+  return started
 end
 
 function relay.stop()

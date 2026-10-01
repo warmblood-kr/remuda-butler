@@ -7,6 +7,7 @@ release tags yet; entries come from merged pull requests.
 ## Unreleased
 
 ### Added
+- When the Butler cannot start any agent (not logged in, stopped at a dialog, not ready in time, exited, not installed), the owner gets one notice in the Matrix HOME room with the reason and the next command for each agent. It is sent once per failure, not on every retry, and never includes screen text.
 - `remuda butler matrix setup` with no flags runs guided prompts (#127). The wizard always opens rooms and does not ask about room access (#145).
 - Matrix open-room mode: anyone may invite the Butler, subject to `deny_room`/`deny_server` rules and a daily join cap (#136).
 - Matrix join and leave accept a room alias or a public room name; public rooms can be browsed (#123).

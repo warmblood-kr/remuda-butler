@@ -168,6 +168,8 @@ done
 # text; reconcile retries every 2 s, and the same failure set is noticed once.
 start_notice() { lua 'return tostring(remuda._butler_start_notice) .. "\ncount=" .. tostring(remuda._butler_start_notices)'; }
 NOTICE=$(start_notice)
+# The chain ends only after the last failed session has closed.
+for _ in $(seq 100); do [[ "$NOTICE" == *"hang: "* ]] && break; sleep 0.1; NOTICE=$(start_notice); done
 for line in 'missing: not installed. Next: remuda butler doctor' \
     'loggedout: not logged in. Next: remuda butler doctor' \
     'hang: did not become ready in time. Next: remuda butler doctor'; do
