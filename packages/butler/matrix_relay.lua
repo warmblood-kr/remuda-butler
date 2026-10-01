@@ -1037,6 +1037,9 @@ function relay.new(options)
           if event_id == "" then reason = "missing_event_id"
           elseif ev.type ~= "m.room.message" then reason = "unsupported_event_type"
           elseif type(ev.sender) ~= "string" or ev.sender == "" then reason = "missing_sender"
+          elseif not cfg.allowed_senders[ev.sender]
+              and (not valid_mxid(ev.sender) or #ev.sender > 255 or ev.sender:find("[^\33-\126]")) then
+            reason = "invalid_sender"
           elseif not cfg.allowed_senders[ev.sender] and MEDIA_MSGTYPES[content.msgtype] then
             reason = "untrusted_media"
           elseif MEDIA_MSGTYPES[content.msgtype] and media_uri(content) == nil then
