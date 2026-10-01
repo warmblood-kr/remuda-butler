@@ -26,6 +26,29 @@ end
 local process_tag = random_tag()
 local once = matrix.once
 local path_component = matrix.path_component
+local post_times = {}
+
+-- ponytail: in memory, a restart resets the hour; persist it if a restart loop shows up
+function matrix.take_post_slot()
+  local now = os.time()
+  local cutoff = now - 3600
+  for index = #post_times, 1, -1 do
+    if post_times[index] < cutoff then table.remove(post_times, index) end
+  end
+  local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths or {}
+  local config = paths.config_path and matrix.read_config(paths.config_path)
+  local limit = type(config) == "table" and config.posts_per_hour or 30
+  if #post_times >= limit then
+    local oldest
+    for _, posted_at in ipairs(post_times) do
+      if not oldest or posted_at < oldest then oldest = posted_at end
+    end
+    return nil, "Matrix post limit reached (" .. tostring(limit) .. " per hour). Next: wait until "
+      .. os.date("!%H:%MZ", oldest + 3600)
+  end
+  post_times[#post_times + 1] = now
+  return true
+end
 
 local function error_result(callback, message)
   callback({ error = message })
@@ -121,7 +144,12 @@ function matrix.send(opts, on_done)
   local done = once(on_done)
   local room = configured_room(opts, done)
   if not room then return { cancel = function() end } end
+  if type(opts.text) ~= "string" or opts.text == "" then
+    return error_result(done, "message text must not be empty")
+  end
   if mentions_agent(opts.text) then return error_result(done, "Butler-to-Butler sends are disabled") end
+  local slot, slot_error = matrix.take_post_slot()
+  if not slot then return error_result(done, slot_error) end
   return send_chunks(room, opts.text, nil, done)
 end
 
@@ -156,6 +184,8 @@ function matrix.reply(opts, on_done)
     return error_result(done, "Butler-to-Butler replies are disabled")
   end
   return same_room_then(room, opts.event_id, done, function(reply_done)
+    local slot, slot_error = matrix.take_post_slot()
+    if not slot then return error_result(reply_done, slot_error) end
     local root = type(opts.thread_root) == "string" and opts.thread_root ~= ""
       and opts.thread_root or opts.event_id
     local relation = { rel_type = "m.thread", event_id = root,

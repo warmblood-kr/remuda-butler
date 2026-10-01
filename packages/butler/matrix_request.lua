@@ -263,6 +263,12 @@ local function read_config(path)
       or untrusted_per_room_hour % 1 ~= 0 then
     untrusted_per_room_hour = 20
   end
+  local posts_per_hour = tonumber(opts.posts_per_hour)
+  if not posts_per_hour or posts_per_hour ~= posts_per_hour
+      or posts_per_hour < 1 or posts_per_hour == math.huge
+      or posts_per_hour % 1 ~= 0 then
+    posts_per_hour = 30
+  end
   local ca_file, pin_hex = opts.ca_file, opts.pin_sha256
   if ca_file == "" then ca_file = nil end
   if pin_hex == "" then pin_hex = nil end
@@ -320,6 +326,7 @@ local function read_config(path)
     self_mxid = lines[3], allowed_senders = allowed,
     butler_senders = butler_senders,
     untrusted_per_room_hour = untrusted_per_room_hour,
+    posts_per_hour = posts_per_hour,
     use_messages = mode == "1" or mode == "true" or mode == "messages" or mode == "fallback",
     timeout_ms = math.max(1, timeout), ca_file = ca_file, pin = pin,
   }
