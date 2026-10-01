@@ -1,4 +1,6 @@
-return function(matrix)
+-- pinned_hostname: the caller's stub for remuda.hostname on a core that has the
+-- word (nil on an older core), so these tests see one machine name everywhere.
+return function(matrix, pinned_hostname)
   assert(type(matrix.setup_prepare) == "function", "Matrix setup validator is unavailable")
   assert(type(matrix.setup_network) == "function", "Matrix setup network stage is unavailable")
   assert(type(matrix.setup_write) == "function", "Matrix setup file writer is unavailable")
@@ -750,8 +752,10 @@ return function(matrix)
   assert(resolved and resolved.status == 1 and #requests == 0,
     "declining the CA-file wizard should not start registration")
 
-  -- #182: a stock Mac has no HOSTNAME in the daemon and no hostname file.
+  -- #182: a stock Mac has no HOSTNAME in the daemon and no hostname file (an
+  -- older core: no remuda.hostname word).
   local nameless_getenv, nameless_io_open = os.getenv, io.open
+  remuda.hostname = nil
   os.getenv = function(name)
     if name == "HOSTNAME" or name == "COMPUTERNAME" then return nil end
     return nameless_getenv(name)
@@ -811,7 +815,7 @@ return function(matrix)
       "the summary shows the entered bot and system trust: " .. tostring(resolved and resolved.stderr))
     line_specs[5].callback("N", nil)
   end)
-  os.getenv, io.open = nameless_getenv, nameless_io_open
+  os.getenv, io.open, remuda.hostname = nameless_getenv, nameless_io_open, pinned_hostname
   assert(nameless_ok, nameless_error)
   requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
   wizard_reply = matrix.cli({ "matrix", "setup" })
@@ -820,6 +824,48 @@ return function(matrix)
   assert(#line_specs == 3 and line_specs[3].label:find("Continue? Type Y", 1, true),
     "with a name source the wizard shows no bot prompt")
   line_specs[3].callback("N", nil)
+
+  -- #207: on a core with remuda.hostname() that word is the ONLY name source;
+  -- the daemon's HOSTNAME/COMPUTERNAME and the hostname files are not read.
+  do -- scoped: this test function is at Lua's limit of 200 locals
+  local word_getenv, word_hostname = os.getenv, remuda.hostname
+  os.getenv = function(name)
+    if name == "HOSTNAME" then return "daemon-env-name" end
+    return word_getenv(name)
+  end
+  local word_ok, word_error = pcall(function()
+    remuda.hostname = function() return "Jeongsoos-MacBook.local" end
+    assert(matrix.setup_default_bot("@alice:example.org") == "@butler-jeongsoos-macbook-local:example.org",
+      "the default bot comes from remuda.hostname, not from the daemon env: "
+        .. tostring(matrix.setup_default_bot("@alice:example.org")))
+    for label, word in pairs({
+      refused = function() return nil, "refused" end,
+      empty = function() return "" end,
+      thrown = function() error("boom", 0) end,
+      ["not a string"] = function() return 42 end,
+    }) do
+      remuda.hostname = word
+      assert(matrix.setup_default_bot("@alice:example.org") == nil,
+        "a core word that gives no name (" .. label .. ") gives no default bot, even with HOSTNAME set: "
+          .. tostring(matrix.setup_default_bot("@alice:example.org")))
+    end
+    remuda.hostname = function() return nil, "refused" end
+    requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+    wizard_reply = matrix.cli({ "matrix", "setup" })
+    line_specs[1].callback("http://matrix.invalid", nil)
+    line_specs[2].callback("@alice:example.org", nil)
+    assert(#line_specs == 3 and not resolved and line_specs[3].label:find("Butler bot name", 1, true),
+      "the wizard asks for a bot name when the core word gives none")
+    line_specs[3].callback("butler-mac", nil)
+    line_specs[4].callback("N", nil)
+    -- An older core has no word: the env and file lookup stays.
+    remuda.hostname = nil
+    assert(matrix.setup_default_bot("@alice:example.org") == "@butler-daemon-env-name:example.org",
+      "an older core (no remuda.hostname) keeps the env and file lookup")
+  end)
+  os.getenv, remuda.hostname = word_getenv, word_hostname
+  assert(word_ok, word_error)
+  end
 
   requests, resolved, prompt_specs = {}, nil, {}
   local prompt_reply = matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",

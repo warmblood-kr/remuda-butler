@@ -25,6 +25,23 @@ remuda = {
   exec = function(name) return dofile("packages/butler/" .. name:gsub("^butler/", "") .. ".lua") end,
 }
 dofile("packages/butler/main.lua")
+-- Test mode returns before the daemon loads compaction_run.lua, so load that
+-- module with the same pure helper dependencies for its exported dialog tests.
+local compaction_module = remuda._butler_compaction
+remuda._butler_compaction_run_config = {
+  _butler_trace = function() end,
+  registered_agent_kind = function() end,
+  registered_agent_working = function() end,
+  compaction_config = compaction_module.compaction_config,
+  compaction_mail_defers = compaction_module.compaction_mail_defers,
+  compaction_mail_alert = compaction_module.compaction_mail_alert,
+  bottom_screen_lines = compaction_module.bottom_screen_lines,
+  unknown_dialog_signature = compaction_module.unknown_dialog_signature,
+  read_claude_settings = compaction_module.read_claude_settings,
+  statusline_model_matches = compaction_module.statusline_model_matches,
+  clear_legacy_restore_state = compaction_module.clear_legacy_restore_state,
+}
+dofile("packages/butler/compaction_run.lua")
 used = "500000"
 assert(type(remuda.butler) == "table", "composable compaction API must be exported")
 local level = remuda.butler.ctx_level("butler")
@@ -240,6 +257,33 @@ assert(critical_mail_should_compact and critical_mail_event == "sent" and compac
 queued, mail_lookup_error = false, false
 remuda._butler_bus.agents.butler.parent = nil
 remuda.butler.compact, remuda._butler_send = saved_compact, saved_butler_send
+
+local function read_fixture(name)
+  local file = assert(io.open("tests/fixtures/" .. name, "r"))
+  local contents = file:read("*a")
+  file:close()
+  return contents
+end
+assert(remuda._butler_model_confirm_signature(read_fixture("claude-model-confirm-dialog.txt")) ~= nil,
+  "model confirmation signature should recognize the dialog fixture")
+assert(remuda._butler_model_confirm_signature(read_fixture("claude-model-confirm-dialog-with-status.txt")) ~= nil,
+  "model confirmation signature should recognize the dialog with status fixture")
+assert(remuda._butler_model_confirm_signature(read_fixture("claude-model-confirm-dialog-changing-status.txt")) ~= nil,
+  "model confirmation signature should recognize the dialog with changing status fixture")
+assert(remuda._butler_model_confirm_signature(read_fixture("claude-model-confirm-wrong-title.txt")) == nil,
+  "model confirmation signature should reject a wrong title")
+assert(remuda._butler_model_confirm_signature(read_fixture("claude-stale-model-confirm-with-permission.txt")) == nil,
+  "model confirmation signature should reject a stale model confirmation")
+assert(remuda._butler_model_confirm_signature(
+  read_fixture("claude-model-confirm-composer-one-row-status.txt")) ~= nil,
+  "model confirmation signature should recognize the composer dialog with one status row")
+assert(remuda._butler_model_confirm_signature(
+  read_fixture("claude-model-confirm-composer-two-row-status.txt")) ~= nil,
+  "model confirmation signature should recognize the composer dialog with two status rows")
+local untitled_model_confirm = "❯ 1. Yes, switch to Opus 5.5\n  2. No, go back"
+assert(remuda._butler_model_confirm_signature(untitled_model_confirm) == nil
+  and remuda._butler_model_confirm_options_visible(untitled_model_confirm),
+  "model confirmation options should remain visible while the title is half-painted")
 
 assert(remuda._butler_compaction_is_unknown_dialog("Mystery chooser\n1. Continue\n❯"),
   "numbered option immediately above the prompt should be an active unknown dialog")
