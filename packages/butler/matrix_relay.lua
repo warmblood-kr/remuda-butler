@@ -996,7 +996,17 @@ function relay.new(options)
     schedule(delay, "retry", function() if active then poll() end end)
   end
 
-  local function accept_events(events, cursor, room_id)
+  local function post_rate_cap_summaries(capped, sync_id)
+    for capped_room, count in pairs(capped) do
+      local safe_room = terminal_safe_field(capped_room, 512)
+      send_notice(cfg.home_room,
+        tostring(count) .. " messages from non-allowlisted senders not delivered in " .. safe_room
+          .. " (rate cap). Next: remuda butler matrix --room " .. safe_room .. " history",
+        "untrusted-room-cap-summary", tostring(sync_id or "sync") .. "\0" .. capped_room)
+    end
+  end
+
+  local function accept_events(events, cursor, room_id, capped)
     local added = {}
     for _, ev in ipairs(type(events) == "table" and events or {}) do
       if type(ev) == "table" then
@@ -1087,6 +1097,7 @@ function relay.new(options)
             untrusted_receive_times[actual_room] = retained
             if #retained >= cfg.untrusted_per_room_hour then
               rate_capped = true
+              capped[actual_room] = (capped[actual_room] or 0) + 1
               warn_once("untrusted-rate-cap", actual_room,
                 "butler Matrix rate cap: messages from non-allowlisted senders in "
                   .. terminal_safe_field(actual_room, 512) .. " are not delivered ("
@@ -1484,15 +1495,16 @@ function relay.new(options)
       return
     end
     if path == SYNC_PATH then
-      local added = {}
+      local added, capped = {}, {}
       local rooms = type(response.rooms) == "table" and response.rooms or {}
       local joined = type(rooms.join) == "table" and rooms.join or {}
       for room_id, room in pairs(joined) do
         if cfg.rooms[room_id] then
-          local room_added = accept_events(room and room.timeline and room.timeline.events, nil, room_id)
+          local room_added = accept_events(room and room.timeline and room.timeline.events, nil, room_id, capped)
           for _, id in ipairs(room_added) do added[#added + 1] = id end
         end
       end
+      post_rate_cap_summaries(capped, response.next_batch or state.since or "sync")
       handle_invites(response)
       if type(response.next_batch) == "string" then state.since = response.next_batch end
       persist()
@@ -1510,7 +1522,9 @@ function relay.new(options)
       schedule(3, "backfill", function() if active then poll() end end)
       return
     end
-    local added = accept_events(response.chunk)
+    local capped = {}
+    local added = accept_events(response.chunk, nil, nil, capped)
+    post_rate_cap_summaries(capped, response["end"] or response.start or state.messages_since or "messages")
     state.messages_since = response["end"] or state.messages_since
     persist()
     deliver_pending(added)
