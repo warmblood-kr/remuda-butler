@@ -138,7 +138,46 @@ else
   bad "T5 a second daemon refuses with one line and one Next: exit $CODE, output: $(printf '%s' "$OUT" | head -3 | cut -c1-200)"
 fi
 
-# T6 and T7 need the owner lock word from core (remuda.fs.lock). Until a core
+# T6: the empty session name (-s "") that caused the incident behind #195 is
+# refused like any other second daemon. It runs ONLY on the scratch home: the
+# env is asserted again immediately before each command, and this daemon is
+# stopped by its recorded PID, never through `remuda -s "" stop`. When core
+# refuses an empty session name (warmblood-kr/remuda#402) this becomes a test
+# of that refusal.
+EMPTY=""
+empty_guard() {
+  assert_scratch
+  [[ $HOME == /private/tmp/bsi.*/home || $HOME == /tmp/bsi.*/home ]] || { echo "ABORT: HOME is not scratch"; exit 9; }
+  [[ $REMUDA_RUNTIME_DIR == /private/tmp/bsi.*/run || $REMUDA_RUNTIME_DIR == /tmp/bsi.*/run ]] \
+    || { echo "ABORT: runtime dir is not scratch"; exit 9; }
+}
+cp "$REGISTRY" "$T/snap/agents-before-empty.jsonl"
+empty_guard
+REMUDA_BUTLER_SERVER=$EMPTY "$REMUDA_BIN" -s "$EMPTY" daemon </dev/null >"$T/empty.log" 2>&1 &
+PIDS+=($!)
+for _ in $(seq 50); do [[ -S $REMUDA_RUNTIME_DIR/remuda/.sock ]] && break; sleep 0.1; done
+T6=ok
+if [[ -S $REMUDA_RUNTIME_DIR/remuda/.sock ]]; then
+  empty_guard
+  "$REMUDA_BIN" -s "$EMPTY" -e "remuda._butler_argv = {'$FAKE_AGENT'}; remuda.exec('butler')" >/dev/null 2>&1 || true
+  sleep 4
+  empty_guard
+  set +e
+  OUT=$("$REMUDA_BIN" -s "$EMPTY" butler status 2>&1); CODE=$?
+  set -e
+  [[ $CODE == 1 && $OUT == *"already running in another Remuda daemon"* ]] \
+    || T6="butler status: exit $CODE, output: $(printf '%s' "$OUT" | head -2 | cut -c1-160)"
+  empty_guard
+  ROOT_IN_EMPTY=$("$REMUDA_BIN" -s "$EMPTY" -e 'for _, s in ipairs(remuda.ls()) do if s.name == "butler" then return true end end return false')
+  [[ $ROOT_IN_EMPTY == false ]] || T6="$T6; it has a root Butler session"
+  cmp -s "$REGISTRY" "$T/snap/agents-before-empty.jsonl" || T6="$T6; agents.jsonl changed"
+elif kill -0 "${PIDS[${#PIDS[@]}-1]}" 2>/dev/null; then
+  T6="the empty-name daemon is running but has no socket at remuda/.sock"
+fi # else: core refused the empty session name and the daemon exited, which is a pass
+[[ $T6 == ok ]] && ok "T6 a daemon with an empty session name is refused too" \
+  || bad "T6 a daemon with an empty session name is refused too: ${T6#ok; }"
+
+# T7 and T8 need the owner lock word from core (remuda.fs.lock). Until a core
 # has it they are skipped; they have never run.
 if [[ $(lua "$A" 'return remuda.fs ~= nil and type(remuda.fs.lock) == "function"') == true ]]; then
   load_butler "$A"
@@ -147,8 +186,8 @@ if [[ $(lua "$A" 'return remuda.fs ~= nil and type(remuda.fs.lock) == "function"
   "$REMUDA_BIN" -s "$A" butler status >/dev/null 2>&1; OWNER_CODE=$?
   "$REMUDA_BIN" -s "$B" butler status >/dev/null 2>&1; SECOND_CODE=$?
   set -e
-  [[ $OWNER_CODE != 1 && $SECOND_CODE == 1 ]] && ok "T7 a mod reload in the owner keeps ownership" \
-    || bad "T7 a mod reload in the owner keeps ownership: owner exit $OWNER_CODE, second exit $SECOND_CODE"
+  [[ $OWNER_CODE != 1 && $SECOND_CODE == 1 ]] && ok "T8 a mod reload in the owner keeps ownership" \
+    || bad "T8 a mod reload in the owner keeps ownership: owner exit $OWNER_CODE, second exit $SECOND_CODE"
 
   kill "${PIDS[0]}" # the owner daemon, started by this script
   for _ in $(seq 50); do kill -0 "${PIDS[0]}" 2>/dev/null || break; sleep 0.1; done
@@ -156,11 +195,11 @@ if [[ $(lua "$A" 'return remuda.fs ~= nil and type(remuda.fs.lock) == "function"
   load_butler "$D"
   sleep 4
   ROOT_IN_D=$(lua "$D" 'for _, s in ipairs(remuda.ls()) do if s.name == "butler" then return true end end return false')
-  [[ $ROOT_IN_D == true ]] && ok "T6 after the owner dies the next daemon takes over" \
-    || bad "T6 after the owner dies the next daemon takes over: no root Butler in the new daemon"
+  [[ $ROOT_IN_D == true ]] && ok "T7 after the owner dies the next daemon takes over" \
+    || bad "T7 after the owner dies the next daemon takes over: no root Butler in the new daemon"
 else
-  echo "skip - T6 after the owner dies the next daemon takes over (needs core remuda.fs.lock)"
-  echo "skip - T7 a mod reload in the owner keeps ownership (needs core remuda.fs.lock)"
+  echo "skip - T7 after the owner dies the next daemon takes over (needs core remuda.fs.lock)"
+  echo "skip - T8 a mod reload in the owner keeps ownership (needs core remuda.fs.lock)"
 fi
 
 ((${#FAILED[@]} == 0)) || { echo "FAIL: ${#FAILED[@]} checks"; exit 1; }
