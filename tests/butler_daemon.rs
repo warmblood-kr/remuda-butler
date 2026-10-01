@@ -9684,8 +9684,9 @@ fn butler_quota_usage_error() {
     let (_daemon, _path) = butler_cli_test_daemon(&dir);
     let out = remuda_timed(&dir, &["-s", "s", "butler", "quota", "bogus"]);
     assert_eq!(out.status.code(), Some(2));
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(),
+    assert_eq!(String::from_utf8_lossy(&out.stderr).trim(),
         "Usage: remuda butler quota [--report]\nExample: remuda butler quota --report");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "", "a usage error prints nothing on stdout");
 }
 
 fn assert_quota_utc_limit(stdout: &str, name: &str, used: u8) {
