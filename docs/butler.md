@@ -63,16 +63,18 @@ Next: run `remuda butler quota --report` to send this to Matrix.
 ```
 
 `remuda butler quota --report` also posts the report body to the Butler's Matrix
-home room. Percentages are percent used, reset times are UTC, and a limit at
-80% or more is listed under `Near limit`. A value that could not be read is
-printed as `unknown` with the reason; the login mode is never guessed.
+home room, as plain text. Only the Butler itself or a person at a terminal can
+use `--report`; a member is told to ask the Butler. Percentages are percent
+used, reset times are UTC, and a limit at 80% or more is listed under
+`Near limit`. A value that could not be read is printed as `unknown` with the
+reason, and the last line says what to do next; the login mode is never guessed.
 
 Where the values come from:
 
 - Login mode and the Claude account email: `claude auth status` and
   `codex login status`. Only the mode, the plan and the email are used; the
   rest of the output, including the organisation id, is never printed, logged
-  or stored.
+  or written to disk.
 - Claude limits: the rate-limit fields Claude Code passes to its status line.
   Butler keeps the newest reading among its Claude sessions, so the numbers are
   as fresh as the last Claude reply; a reading older than 10 minutes is marked
@@ -81,6 +83,12 @@ Where the values come from:
   composer, nobody attached and typing, never the Butler's own session) and
   reads the screen. With no idle Codex member the report says so and tells you
   how to get a reading. Codex does not expose the account email, only the plan.
+
+Nothing read from a pane or a CLI is printed as free text: a plan or a limit
+name must be a short plain word and the email must look like an email, or it
+is left out. One report is collected at a time, and a finished report is
+reused for 60 seconds (its header then says `as of`), so repeated calls do not
+type into a Codex pane again.
 
 ## Matrix commands and configuration
 
