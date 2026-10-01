@@ -360,5 +360,5 @@ remuda.extension_command("butler", function(args, caller)
       if result ~= nil then return result end
     end
   end
-  return butler_usage()
+  return remuda.fail(butler_usage(), 2)
 end)
