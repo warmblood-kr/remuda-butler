@@ -4866,6 +4866,35 @@ rx_tests[#rx_tests + 1] = { "test_ctx_missing_or_invalid_time_prints_no_time", f
   end)
 end }
 
+-- Team-2 SEC on e4736dd, S1: the display rule for a thread root has a length
+-- cap (255 bytes, the bound valid_event_key uses). A longer root is sender-chosen
+-- text of any size in the inbox header and in the Next: command.
+rx_tests[#rx_tests + 1] = { "test_inbox_header_does_not_show_a_thread_root_over_255_bytes", function()
+  local function render(root)
+    local bus = { inboxes = { butler = { "H1" } }, messages = {}, objects = { o1 = { content = "the body" } } }
+    bus.messages.H1 = { id = "H1", from = { host = "matrix", session = "@alice:example.org" },
+      created_at = "2026-10-01T06:45:10Z", subject = "Matrix message from @alice:example.org",
+      matrix = { event_id = "$ev", room_id = NEW, room_kind = "joined", thread_root = root }, body = { object_id = "o1" } }
+    remuda._butler_mail_config = { bus = bus }
+    dofile("packages/butler/mail.lua")
+    return remuda._butler_mail.inbox("butler")
+  end
+  local problems = {}
+  local longest = "$" .. ("a"):rep(254)
+  local text = render(longest)
+  if not text:find("  Matrix event $ev in room " .. NEW .. " (joined), thread " .. longest .. "\n"
+    .. "  Next: remuda butler matrix --room '" .. NEW .. "' thread '" .. longest .. "'\n", 1, true) then
+    problems[#problems + 1] = "a 255-byte root is shown as today, got:\n" .. text
+  end
+  text = render(longest .. "a")
+  if not text:find("  Matrix event $ev in room " .. NEW .. " (joined), thread (id not shown)\n"
+    .. "  Next: remuda butler matrix --room '" .. NEW .. "' history\n", 1, true) then
+    problems[#problems + 1] = "a 256-byte root must print (id not shown) and Next: must end in history, got:\n"
+      .. text:gsub(("a"):rep(200), "<200 a>")
+  end
+  assert(#problems == 0, "\n" .. table.concat(problems, "\n"))
+end }
+
 rx_tests[#rx_tests + 1] = { "test_ctx_pending_fetch_does_not_hold_back_other_mail", function()
   local dir, path = rx_fixture()
   rx_with_dir(dir, function()
