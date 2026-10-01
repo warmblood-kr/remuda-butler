@@ -9906,6 +9906,7 @@ fn butler_quota_reads_codex_status_from_idle_member() {
       remuda.type_text = function(name, text)
         table.insert(remuda._quota_typed, name .. "|" .. text)
         if name == "quota-idle-codex" and text == "/status" then remuda._quota_screen = {fixture} end
+        return "submitted"
       end
     "#
         ),
@@ -9966,6 +9967,7 @@ fn butler_quota_ignores_a_stale_status_card() {
       remuda.type_text = function(name, text)
         table.insert(remuda._quota_typed, name .. "|" .. text)
         if name == "quota-stale-codex" and text == "/status" then remuda._quota_screen = {fresh} end
+        return "submitted"
       end
     "#
         ),
@@ -10242,18 +10244,19 @@ fn butler_quota_reuses_for_sixty_seconds_then_collects_again() {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("make probe executable");
     }
     let (_daemon, path) = butler_doctor_test_daemon(&dir, bin.to_str().expect("PATH"));
+    let baseline = std::fs::read_to_string(&runs).unwrap_or_default().lines().count();
     let first = remuda_timed(&dir, &["-s", "s", "butler", "quota"]);
     assert!(first.status.success(), "{}", String::from_utf8_lossy(&first.stderr));
-    assert_eq!(std::fs::read_to_string(&runs).expect("read first probes").lines().count(), 2);
+    assert_eq!(std::fs::read_to_string(&runs).expect("read first probes").lines().count(), baseline + 2);
     let reused = remuda_timed(&dir, &["-s", "s", "butler", "quota"]);
     assert!(reused.status.success(), "{}", String::from_utf8_lossy(&reused.stderr));
     assert!(String::from_utf8_lossy(&reused.stdout).contains("Agent accounts, as of "));
-    assert_eq!(std::fs::read_to_string(&runs).expect("read reused probes").lines().count(), 2,
+    assert_eq!(std::fs::read_to_string(&runs).expect("read reused probes").lines().count(), baseline + 2,
         "a reused report must not run login probes");
     eval(&path, "remuda._butler_quota_state.at = remuda._butler_quota_state.at - 61");
     let fresh = remuda_timed(&dir, &["-s", "s", "butler", "quota"]);
     assert!(fresh.status.success(), "{}", String::from_utf8_lossy(&fresh.stderr));
-    assert_eq!(std::fs::read_to_string(&runs).expect("read expired probes").lines().count(), 4,
+    assert_eq!(std::fs::read_to_string(&runs).expect("read expired probes").lines().count(), baseline + 4,
         "an expired report must run new probes");
 }
 
@@ -10324,7 +10327,7 @@ done
     let script_lua = lua_raw_string(&script.to_string_lossy());
     let draft_log_lua = lua_raw_string(&draft_log.to_string_lossy());
     eval(&path, &format!(r#"
-      remuda.new("quota-real-draft", {{"bash", {script_lua}, {draft_log_lua}, "› DRAFT: unsent words"}}, nil, {{}})
+      remuda.new("quota-real-draft", {{"/bin/bash", {script_lua}, {draft_log_lua}, "› DRAFT: unsent words"}}, nil, {{}})
       remuda._butler_bus.agents["quota-real-draft"] = {{id="quota-real-draft-id", alias="quota-real-draft", kind="codex", session_name="quota-real-draft"}}
     "#));
     let deadline = Instant::now() + PATIENCE;
@@ -10340,7 +10343,7 @@ done
 
     let empty_log = dir.join("quota-empty-input.log");
     eval(&path, &format!(r#"
-      remuda.new("quota-real-empty", {{"bash", {script_lua}, {}, "› Ask Codex to do anything"}}, nil, {{}})
+      remuda.new("quota-real-empty", {{"/bin/bash", {script_lua}, {}, "› Ask Codex to do anything"}}, nil, {{}})
       remuda._butler_bus.agents["quota-real-empty"] = {{id="quota-real-empty-id", alias="quota-real-empty", kind="codex", session_name="quota-real-empty"}}
       remuda._butler_quota_state.at = remuda._butler_quota_state.at - 61
     "#, lua_raw_string(&empty_log.to_string_lossy())));
