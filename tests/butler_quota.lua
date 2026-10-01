@@ -173,6 +173,41 @@ eq("rate limits one window", quota.rate_limits_line({ rate_limits = {
 eq("rate limits absent", quota.rate_limits_line({}, at), nil)
 eq("rate limits garbage", quota.parse_rate_limits_line("RL:bad five_hour=2@3"), nil)
 
+local seven_day_only = "RL:1790829600 seven_day=71@200"
+eq("rate limits omit string used percentage", quota.rate_limits_line({ rate_limits = {
+  five_hour = { used_percentage = "92", resets_at = 100 }, seven_day = snapshot.rate_limits.seven_day,
+} }, at), seven_day_only)
+eq("rate limits omit string reset", quota.rate_limits_line({ rate_limits = {
+  five_hour = { used_percentage = 92, resets_at = "100" }, seven_day = snapshot.rate_limits.seven_day,
+} }, at), seven_day_only)
+eq("rate limits omit missing reset", quota.rate_limits_line({ rate_limits = {
+  five_hour = { used_percentage = 92 }, seven_day = snapshot.rate_limits.seven_day,
+} }, at), seven_day_only)
+for _, unexpected in ipairs({ "limits", 92, true }) do
+  eq("rate limits rejects non-table container " .. tostring(unexpected),
+    quota.rate_limits_line({ rate_limits = unexpected }, at), nil)
+end
+for _, unexpected in ipairs({ "limit", 5 }) do
+  eq("rate limits omits non-table five-hour window " .. tostring(unexpected), quota.rate_limits_line({ rate_limits = {
+    five_hour = unexpected, seven_day = snapshot.rate_limits.seven_day,
+  } }, at), seven_day_only)
+end
+eq("rate limits rejects nested windows", quota.rate_limits_line({ rate_limits = {
+  limits = { five_hour = snapshot.rate_limits.five_hour },
+} }, at), nil)
+eq("rate limits rejects all malformed windows", quota.rate_limits_line({ rate_limits = {
+  five_hour = { used_percentage = "92", resets_at = "100" }, seven_day = true,
+} }, at), nil)
+
+local no_reading = quota.render({ at = at,
+  claude = { mode = "subscription", plan = "max", email = "owner@example.test", limits = nil,
+    unknown_reason = "no reading yet; it appears after a claude session's first reply" },
+  codex = { mode = "api_key" },
+})
+local claude_block = no_reading:match("claude:.-\ncodex:")
+ok("no Claude reading prints unknown quota", claude_block:find("  quota: unknown %(no reading yet; it appears after a claude session's first reply%)") ~= nil)
+ok("no Claude reading block has no percentage", claude_block:find("%%") == nil)
+
 local f = assert(io.open("tests/fixtures/quota-codex-status-0.159.3.txt", "rb"))
 local screen = assert(f:read("*a")); f:close()
 local cs = quota.parse_codex_status(screen, 32400, at)
