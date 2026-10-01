@@ -3016,7 +3016,7 @@ local function test_rx_mention_follows_thread()
   local dir, path = rx_fixture()
   rx_with_dir(dir, function()
     local relay, client, delivered = rx_relay(path)
-    for _, case in ipairs({ { HOME, OWNER, "$mh" }, { NEW, RX_BUTLER, "$mn" }, { HOME, STRANGER, "$ms" } }) do
+    for _, case in ipairs({ { HOME, OWNER, "$mh" }, { NEW, RX_ALLY, "$mn" }, { HOME, RX_ALLY, "$ms" } }) do
       local room, sender, root = case[1], case[2], case[3]
       rx_sync(client, room, { rx_msg(root .. "-m", sender, "@bot:example.org look", rx_thread(root)) })
       assert(rx_find(delivered, root .. "-m"), sender .. ": a mention in a thread is delivered")
@@ -3319,6 +3319,84 @@ local function test_rx_untrusted_approve_text_is_data()
   end)
 end
 
+-- SEC M1: a non-allowlisted sender must be a strict MXID (the relay's
+-- valid_mxid, at most 255 bytes, every byte printable ASCII 0x21..0x7E), else
+-- the event is quarantined as invalid_sender and never delivered.
+local function test_rx_invalid_sender_quarantined()
+  local dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    local relay, client, delivered = rx_relay(path)
+    local bad = { { "space", "@a b:example.org" }, { "newline", "@a:example.org\nx" },
+      { "esc", "@a\27[31m:example.org" }, { "rlo", "@a\226\128\174:example.org" },
+      { "nbsp", "@a\194\160:example.org" }, { "long", "@" .. string.rep("a", 255) .. ":example.org" },
+      { "no-at", "mallory" } }
+    local failures = {}
+    for _, case in ipairs(bad) do
+      local id = "$bad-" .. case[1]
+      rx_sync(client, HOME, { rx_msg(id, case[2], "hello") })
+      if rx_find(delivered, id) then failures[#failures + 1] = case[1] .. ": delivered" end
+      local item = rx_find(relay:quarantine_list(), id)
+      if not (item and item.reason == "invalid_sender") then
+        failures[#failures + 1] = case[1] .. ": quarantine reason " .. tostring(item and item.reason)
+      end
+    end
+    rx_sync(client, HOME, { rx_msg("$good-stranger", STRANGER, "hello"), rx_msg("$good-owner", OWNER, "hello") })
+    local stranger, owner = rx_find(delivered, "$good-stranger"), rx_find(delivered, "$good-owner")
+    assert(stranger and stranger.trusted == false, "a valid stranger is still delivered with trusted=false")
+    assert(owner and owner.trusted ~= false, "an allowlisted sender is unchanged")
+    assert(#relay:quarantine_list() <= #bad, "valid senders are not quarantined")
+    assert(#failures == 0, "an invalid sender must be quarantined as invalid_sender, not delivered:\n  "
+      .. table.concat(failures, "\n  "))
+    relay:stop()
+  end)
+end
+
+-- SEC M2: only an allowlisted mention follows a thread, and a follow key
+-- must be an event id: a string starting with "$", at most 255 bytes.
+local function test_rx_untrusted_mention_does_not_follow()
+  local dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    local relay, client, delivered = rx_relay(path)
+    local failures = {}
+    local function follows()
+      local n = 0
+      for _, threads in pairs(relay:state().subscriptions) do for _ in pairs(threads) do n = n + 1 end end
+      return n
+    end
+    rx_sync(client, NEW, { rx_msg("$fake-m", STRANGER, "@bot:example.org look", rx_thread("$fake-root")) })
+    local mention = rx_find(delivered, "$fake-m")
+    assert(mention and mention.trusted == false, "a stranger's mention is still delivered with trusted=false")
+    if rx_followed(relay, NEW, "$fake-root") then
+      failures[#failures + 1] = "a stranger's mention followed the thread"
+    end
+    rx_sync(client, NEW, { rx_msg("$fake-n", OWNER, "no mention", rx_thread("$fake-root")) })
+    if rx_find(delivered, "$fake-n") then
+      failures[#failures + 1] = "a later non-mention reply in the stranger's thread was delivered"
+    end
+    if follows() ~= 0 then failures[#failures + 1] = "follow count is " .. follows() .. ", want 0" end
+    relay:unsubscribe_thread(NEW, "$fake-root")
+
+    local refused = { { "no $", "abc" }, { "empty", "" }, { "256 bytes", "$" .. string.rep("a", 255) },
+      { "number", 42 } }
+    for _, case in ipairs(refused) do
+      local ok, result = pcall(relay.subscribe_thread, relay, NEW, case[2])
+      if not ok or result ~= false then
+        failures[#failures + 1] = "subscribe_thread key (" .. case[1] .. ") was not refused: " .. tostring(result)
+      end
+      if rx_followed(relay, NEW, case[2]) then
+        failures[#failures + 1] = "subscribe_thread key (" .. case[1] .. ") was stored"
+      end
+    end
+    local longest = "$" .. string.rep("a", 254)
+    assert(relay:subscribe_thread(NEW, longest) ~= false and rx_followed(relay, NEW, longest),
+      "a 255 byte event id is followed")
+    if follows() ~= 1 then failures[#failures + 1] = "after the key checks the follow count is " .. follows() .. ", want 1" end
+    assert(#failures == 0, "an untrusted mention must not follow, and a follow key must be an event id:\n  "
+      .. table.concat(failures, "\n  "))
+    relay:stop()
+  end)
+end
+
 rx_tests = {
   { "test_rx_stranger_root_marked_untrusted", test_rx_stranger_root_marked_untrusted },
   { "test_rx_agent_root_without_mention", test_rx_agent_root_without_mention },
@@ -3339,6 +3417,8 @@ rx_tests = {
   { "test_rx_marker_cannot_be_faked", test_rx_marker_cannot_be_faked },
   { "test_rx_untrusted_approve_text_is_data", test_rx_untrusted_approve_text_is_data },
   { "test_rx_untrusted_room_cap_logs_once_no_post", test_rx_untrusted_room_cap_logs_once_no_post },
+  { "test_rx_invalid_sender_quarantined", test_rx_invalid_sender_quarantined },
+  { "test_rx_untrusted_mention_does_not_follow", test_rx_untrusted_mention_does_not_follow },
 }
 end
 
