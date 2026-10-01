@@ -2253,6 +2253,41 @@ fn butler_cli_test_daemon(dir: &Path) -> (Daemon, PathBuf) {
     (daemon, path)
 }
 
+/// Test daemons must not share a data home (see #225): with one XDG_DATA_HOME
+/// for a whole cargo run, agents.jsonl gives every daemon the same root Butler
+/// id and inbox file, and Matrix mail delivered in one test is loaded by
+/// another test's daemon.
+#[test]
+fn butler_test_daemons_do_not_share_the_root_inbox() {
+    let dir_a = scratch_dir("own-home-a");
+    let dir_b = scratch_dir("own-home-b");
+    let (_daemon_a, path_a) = butler_cli_test_daemon(&dir_a);
+    let a = eval(&path_a, r#"
+      local delivered = remuda._butler_inbox_delivery({from={host="matrix", alias="@alice:example.org",
+        session="@alice:example.org", kind="matrix", id="", leader=""}, to="butler", text="from daemon A",
+        subject="Matrix", matrix={event_id="$own-home-probe", room_id="!r:example.org", sender="@alice:example.org"}})
+      if not delivered then return "not-delivered" end
+      return remuda._butler_bus.agents.butler.id
+    "#);
+    assert_ne!(a, "not-delivered", "daemon A must really deliver the Matrix mail to its root Butler");
+    let (_daemon_b, path_b) = butler_cli_test_daemon(&dir_b);
+    let b = eval(&path_b, r#"
+      local root = remuda._butler_bus.agents.butler
+      remuda._butler_mail.unread(root.id) -- loads the inbox from disk, as the session list does
+      local seen = {}
+      for _, id in ipairs(remuda._butler_mail.mailbox(root.id)) do
+        local message = remuda._butler_bus.messages[id]
+        if message and message.matrix and message.matrix.event_id ~= nil then
+          seen[#seen + 1] = tostring(message.matrix.event_id)
+        end
+      end
+      return root.id .. " matrix=" .. (#seen == 0 and "none" or table.concat(seen, ","))
+    "#);
+    assert!(b.ends_with(" matrix=none"),
+        "daemon B loaded Matrix mail that daemon A delivered (shared data home): A root {a}; B {b}");
+    assert!(!b.starts_with(a.as_str()), "the two daemons share one root Butler id: A {a}; B {b}");
+}
+
 #[test]
 fn butler_message_bodies_preserve_stdin_and_file_content_and_enforce_limits() {
     let dir = scratch_dir("butler-message-body");
