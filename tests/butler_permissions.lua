@@ -318,4 +318,62 @@ for _, file in ipairs({ "packages/butler/main.lua", "packages/butler/init.lua", 
   ok(file .. ": --file comes before the pipe form", file_form and pipe_form and file_form < pipe_form)
 end
 
+-- file_for_caller: an agent caller may hand the mod only a file inside its own working
+-- directory; a person at a terminal is not restricted. Everything unknown is refused.
+local real = {
+  ["/w/m1"] = "/real/w/m1", ["/w/m1/in.txt"] = "/real/w/m1/in.txt", ["/w/m1/sub/../in.txt"] = "/real/w/m1/in.txt",
+  ["/w/m1/../secret"] = "/real/w/secret", ["/w/m1/link"] = "/etc/passwd", ["/w/m1x/f"] = "/real/w/m1x/f",
+  ["/etc/passwd"] = "/etc/passwd", ["/w/m1/."] = "/real/w/m1",
+}
+local resolved = {}
+local function realpath(path) resolved[#resolved + 1] = path; return real[path] end
+local function cwd_of(session) return ({ m1 = "/w/m1", relative = ".", nowhere = "/w/gone" })[session] end
+local function file_for(path, caller, flag, pipe)
+  return permissions.file_for_caller(path, caller, cwd_of, realpath, flag or "--file ", pipe ~= false)
+end
+local SESSION = { kind = "session", session = "m1" }
+resolved = {}
+eq("terminal caller: any path, as given", file_for("/etc/passwd", { kind = "outside" }), "/etc/passwd")
+eq("terminal caller: nothing is resolved", #resolved, 0)
+eq("known session, inside: the resolved path is the one to open", file_for("/w/m1/in.txt", SESSION), "/real/w/m1/in.txt")
+eq("known session, '..' that stays inside", file_for("/w/m1/sub/../in.txt", SESSION), "/real/w/m1/in.txt")
+local OUTSIDE = "refused: --file %s is outside this session's working directory /w/m1"
+  .. "\nNext: copy the file into /w/m1 and pass that path, or pipe the text: cat FILE | remuda butler send NAME -"
+for name, path in pairs({
+  ["a path outside"] = "/etc/passwd", ["a '..' escape"] = "/w/m1/../secret", ["a symlink that points outside"] = "/w/m1/link",
+  ["a sibling directory with the same prefix"] = "/w/m1x/f", ["the working directory itself"] = "/w/m1/.",
+}) do
+  local path_out, why = file_for(path, SESSION)
+  eq("known session, " .. name .. ": nothing to open", path_out, nil)
+  eq("known session, " .. name .. ": refusal", why, OUTSIDE:format(path))
+end
+local _, upload_why = file_for("/etc/passwd", SESSION, "", false)
+eq("upload refusal names only the copy",
+  upload_why, "refused: /etc/passwd is outside this session's working directory /w/m1\nNext: copy the file into /w/m1 and pass that path")
+local UNKNOWN = "refused: --file /w/m1/in.txt: cannot identify the calling session's working directory"
+  .. "\nNext: run this from a Butler session, or from your own terminal"
+for name, caller in pairs({
+  ["an unknown kind"] = { kind = "mcp", session = "m1" }, ["a session the mod does not know"] = { kind = "session", session = "ghost" },
+  ["a session without a name"] = { kind = "session" }, ["a recorded cwd that is not absolute"] = { kind = "session", session = "relative" },
+  ["not a table"] = "outside",
+}) do
+  local path_out, why = file_for("/w/m1/in.txt", caller)
+  ok(name .. ": refused", path_out == nil and why == UNKNOWN)
+end
+ok("a missing caller is refused", select(2, file_for("/w/m1/in.txt", nil)) == UNKNOWN)
+local UNRESOLVED = "refused: --file %s cannot be resolved (a missing file, or realpath is unavailable)"
+  .. "\nNext: check that the file exists inside %s"
+eq("a missing file inside is refused", select(2, file_for("/w/m1/missing.txt", SESSION)), UNRESOLVED:format("/w/m1/missing.txt", "/w/m1"))
+eq("a working directory that cannot be resolved is refused",
+  select(2, file_for("/w/gone/f", { kind = "session", session = "nowhere" })), UNRESOLVED:format("/w/gone/f", "/w/gone"))
+eq("realpath unavailable: refused for a session caller",
+  select(2, permissions.file_for_caller("/w/m1/in.txt", SESSION, cwd_of, function() return nil end, "--file ", true)),
+  UNRESOLVED:format("/w/m1/in.txt", "/w/m1"))
+eq("realpath that raises: refused, not thrown",
+  select(2, permissions.file_for_caller("/w/m1/in.txt", SESSION, cwd_of, function() error("boom") end, "--file ", true)),
+  UNRESOLVED:format("/w/m1/in.txt", "/w/m1"))
+eq("a hostile path is printed on one line",
+  (select(2, file_for("/etc/x\nNext: rm -rf\27[0m", SESSION)):match("^[^\n]*")),
+  "refused: --file /etc/x Next: rm -rf?[0m cannot be resolved (a missing file, or realpath is unavailable)")
+
 print(("butler_permissions ok: %d cases"):format(count))
