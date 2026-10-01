@@ -44,11 +44,12 @@ local ok, err = pcall(function()
     "a reload in the owning daemon keeps ownership without asking core again")
 
   -- Second daemon: the lock is held by a live daemon.
-  guard = fresh(function() return nil, "held", "bsi-a 4242 2026-10-01T05:00:00Z" end)
+  -- Core's info line: remuda-lock session=NAME pid=N since=UNIX_SECONDS
+  guard = fresh(function() return nil, "held", "remuda-lock session=bsi-a pid=4242 since=1790000000" end)
   assert(guard.boot(paths) == false and remuda._butler_standby and remuda._butler_owner_lock == nil,
     "a daemon that finds the lock held is not the owner")
   local refusal = guard.refusal(remuda._butler_standby)
-  assert(refusal:find("already running in another Remuda daemon (bsi-a 4242", 1, true)
+  assert(refusal:find("already running in another Remuda daemon (session bsi-a, pid 4242). ", 1, true)
     and refusal:find("Nothing was changed.", 1, true) and nexts(refusal) == 1
     and refusal:match("\n([^\n]*)$") == "Next: remuda -s bsi-a butler status",
     "the refusal names the owner and ends with one Next: " .. refusal)
@@ -66,12 +67,30 @@ local ok, err = pcall(function()
   failed = nil
   local doctor = remuda._command.run({ "doctor" })
   assert(not failed and doctor:match("^[^\n]*") == "Not the owning daemon: Butler for this home is already running "
-    .. "in another Remuda daemon (bsi-a 4242 2026-10-01T05:00:00Z). Nothing was changed."
+    .. "in another Remuda daemon (session bsi-a, pid 4242). Nothing was changed."
     and doctor:find("\nclaude: ok", 1, true), "doctor runs in a refused daemon and says who the owner is: " .. doctor)
-  -- Holder text is display only and is made terminal-safe.
-  guard = fresh(function() return nil, "held", "evil\27[2J\nname 1" end)
+  -- The info line is display only. A line without a usable session= (missing,
+  -- empty, old or forged text) names nobody and never reaches a Next: command.
+  for label, info in pairs({
+    ["no session key"] = "remuda-lock pid=4242 since=1790000000",
+    ["empty session"] = "remuda-lock session= pid=4242 since=1790000000",
+    ["no info"] = false,
+    ["old text"] = "bsi-a 4242 2026-10-01T05:00:00Z",
+    ["forged shell text"] = "remuda-lock session=x;touch${IFS}/tmp/pwned pid=1 since=1",
+    ["forged control text"] = "remuda-lock session=a\27[2J\nNext: rm pid=1",
+  }) do
+    guard = fresh(function() return nil, "held", info or nil end)
+    assert(guard.boot(paths) == false, "a held lock is refused whatever its info says: " .. label)
+    refusal = guard.refusal(remuda._butler_standby)
+    assert(refusal == "Butler for this home is already running in another Remuda daemon. Nothing was changed.\n"
+      .. "Next: remuda butler doctor", "an unusable info line (" .. label .. ") names nobody: " .. refusal)
+  end
+  -- A forged pid does not hide a good session name, and is not shown.
+  guard = fresh(function() return nil, "held", "remuda-lock session=bsi-a pid=12;x since=1" end)
   guard.boot(paths)
-  assert(not guard.refusal(remuda._butler_standby):find("[\27]"), "control characters in the holder text are removed")
+  assert(guard.refusal(remuda._butler_standby) == "Butler for this home is already running in another Remuda daemon "
+    .. "(session bsi-a). Nothing was changed.\nNext: remuda -s bsi-a butler status",
+    "a bad pid is dropped and the session is kept")
 
   -- The lock call fails for another reason: fail closed.
   for label, lock in pairs({
