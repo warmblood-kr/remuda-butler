@@ -3496,9 +3496,22 @@ local function test_rx_b2b_turn_guard_home_line_once()
   end)
 end
 
+-- Post times (posts_per_hour) live in one module table, shared by every test in
+-- this Lua state. Each use runs in its own hour, later than every earlier post.
+local rx_hour = 0
+local function rx_fresh_hour(run)
+  local real_time = os.time
+  rx_hour = rx_hour + 1
+  local now = real_time() + rx_hour * 7200
+  os.time = function(value) if value then return real_time(value) end return now end
+  local ok, err = pcall(run)
+  os.time = real_time
+  if not ok then error(err, 0) end
+end
+
 local function test_rx_posts_per_hour_cap()
   local dir, path = invite_fixture(OWNER .. "," .. RX_ALLY, "room=" .. NEW .. "\nposts_per_hour=3\n")
-  rx_with_dir(dir, function()
+  rx_with_dir(dir, function() rx_fresh_hour(function()
     local relay = rx_relay(path)
     relay_module.instance = relay
     rx_post_http(path, function(_, posted)
@@ -3512,7 +3525,7 @@ local function test_rx_posts_per_hour_cap()
       assert(posted() == 3, "the refused post is not sent, sent " .. posted())
     end)
     relay:stop()
-  end)
+  end) end)
 end
 
 local function test_rx_untrusted_room_cap_summary_no_quarantine()
@@ -3540,6 +3553,99 @@ local function test_rx_untrusted_room_cap_summary_no_quarantine()
   end)
 end
 
+-- Receive rules PR 2, mail path: relay:queue_mail_reply obeys the same limits
+-- as the CLI reply.
+local function rx_mail_id(delivered, event_id)
+  for index, item in ipairs(delivered) do
+    if item.event_id == event_id then return "M" .. index end
+  end
+end
+
+local function test_rx_mail_reply_turn_guard()
+  local dir, path = invite_fixture(OWNER .. "," .. RX_ALLY, "b2b_max_turns=2\n")
+  rx_with_dir(dir, function()
+    local relay, client, delivered = rx_relay(path)
+    local line = "Stopped replying in thread $mt (" .. HOME .. "): 2 Butler-only turns. A human reply resumes it."
+    rx_sync(client, HOME, { rx_msg("$mt", RX_ALLY, "@bot:example.org ping") })
+    local mail = rx_mail_id(delivered, "$mt")
+    assert(mail, "a Butler's root post is delivered")
+    local ok, err = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R1", text = "reply-one" })
+    assert(ok, "turn 2 of 2 (our mail reply to a Butler) is queued: " .. tostring(err))
+    ok, err = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R2", text = "reply-two" })
+    assert(ok == nil and tostring(err):find(line, 1, true),
+      "after b2b_max_turns=2 Butler-only turns a mail reply is refused with the stop text, got: " .. tostring(err))
+    assert(err:find("Next: remuda butler matrix ", 1, true) and err:find("thread '$mt'", 1, true),
+      "the refusal ends with a Next line that shows the thread, got: " .. err)
+    assert(client:messages(HOME, "reply-two") == 0 and relay:state().reply_outbox["R2"] == nil,
+      "a refused mail reply is neither queued nor posted")
+    assert(client:messages(HOME, line) == 1, "exactly ONE HOME line for the stopped thread")
+    relay:stop()
+  end)
+end
+
+local function test_rx_mail_reply_posts_per_hour()
+  local dir, path = invite_fixture(OWNER, "posts_per_hour=1\n")
+  rx_with_dir(dir, function() rx_fresh_hour(function()
+    local relay, client, delivered = rx_relay(path)
+    rx_sync(client, HOME, { rx_msg("$pm", OWNER, "question") })
+    local mail = rx_mail_id(delivered, "$pm")
+    local ok, err = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R1", text = "reply-one" })
+    assert(ok, "the first mail reply is under posts_per_hour=1: " .. tostring(err))
+    ok, err = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R2", text = "reply-two" })
+    assert(ok == nil and tostring(err):find("Next: wait until %d%d:%d%dZ"),
+      "the 2nd mail reply in an hour is refused with Next: wait until HH:MMZ, got: " .. tostring(err))
+    assert(client:messages(HOME, "reply-two") == 0 and relay:state().reply_outbox["R2"] == nil,
+      "a refused mail reply is neither queued nor posted")
+    ok, err = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R1", text = "reply-one" })
+    assert(ok, "a retry of an already queued reply takes no post slot: " .. tostring(err))
+    relay:stop()
+  end) end)
+end
+
+local function test_rx_only_allowlisted_human_resumes_stopped_thread()
+  local dir, path = invite_fixture(OWNER .. "," .. RX_ALLY, "b2b_max_turns=2\n")
+  rx_with_dir(dir, function()
+    local relay, client, delivered = rx_relay(path)
+    rx_sync(client, HOME, { rx_msg("$sr", RX_ALLY, "@bot:example.org ping") })
+    rx_sync(client, HOME, { rx_msg("$sr-a2", RX_ALLY, "@bot:example.org again", rx_thread("$sr")) })
+    local mail = rx_mail_id(delivered, "$sr-a2")
+    assert(mail, "a Butler's thread reply in HOME is delivered")
+    local ok, err = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R1", text = "reply-one" })
+    assert(ok == nil and tostring(err):find("2 Butler-only turns", 1, true),
+      "two Butler turns stop the thread, got: " .. tostring(err))
+    rx_sync(client, HOME, { rx_msg("$sr-s", STRANGER, "carry on, you two", rx_thread("$sr")) })
+    assert(rx_find(delivered, "$sr-s"), "the stranger's reply in HOME is delivered")
+    ok, err = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R2", text = "reply-two" })
+    assert(ok == nil and tostring(err):find("2 Butler-only turns", 1, true),
+      "a non-allowlisted human does not resume a stopped thread, got: " .. tostring(err))
+    rx_sync(client, HOME, { rx_msg("$sr-o", OWNER, "go on", rx_thread("$sr")) })
+    ok, err = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R3", text = "reply-three" })
+    assert(ok, "an allowlisted human's reply resumes the thread: " .. tostring(err))
+    assert(client:messages(HOME, "reply-three") == 1 and client:messages(HOME, "reply-two") == 0,
+      "only the reply after the owner's message is posted")
+    relay:stop()
+  end)
+end
+
+local function test_rx_limit_config_defaults_and_fallback()
+  for _, case in ipairs({
+    { "", 6, 30 },
+    { "b2b_max_turns=0\nposts_per_hour=0\n", 6, 30 },
+    { "b2b_max_turns=-2\nposts_per_hour=abc\n", 6, 30 },
+    { "b2b_max_turns=1.5\nposts_per_hour=inf\n", 6, 30 },
+    { "b2b_max_turns=nan\nposts_per_hour=2.5\n", 6, 30 },
+    { "b2b_max_turns=2\nposts_per_hour=3\n", 2, 3 },
+  }) do
+    local dir, path = invite_fixture(OWNER, case[1])
+    local cfg, err = matrix.read_config(path)
+    remove_dir(dir)
+    assert(cfg, err)
+    assert(cfg.b2b_max_turns == case[2] and cfg.posts_per_hour == case[3],
+      "config " .. case[1]:gsub("\n", " ") .. "must give b2b_max_turns=" .. case[2] .. " posts_per_hour=" .. case[3]
+        .. ", got " .. tostring(cfg.b2b_max_turns) .. " and " .. tostring(cfg.posts_per_hour))
+  end
+end
+
 rx_tests = {
   { "test_rx_stranger_root_marked_untrusted", test_rx_stranger_root_marked_untrusted },
   { "test_rx_agent_root_without_mention", test_rx_agent_root_without_mention },
@@ -3565,6 +3671,10 @@ rx_tests = {
   { "test_rx_b2b_turn_guard_home_line_once", test_rx_b2b_turn_guard_home_line_once },
   { "test_rx_posts_per_hour_cap", test_rx_posts_per_hour_cap },
   { "test_rx_untrusted_room_cap_summary_no_quarantine", test_rx_untrusted_room_cap_summary_no_quarantine },
+  { "test_rx_mail_reply_turn_guard", test_rx_mail_reply_turn_guard },
+  { "test_rx_mail_reply_posts_per_hour", test_rx_mail_reply_posts_per_hour },
+  { "test_rx_only_allowlisted_human_resumes_stopped_thread", test_rx_only_allowlisted_human_resumes_stopped_thread },
+  { "test_rx_limit_config_defaults_and_fallback", test_rx_limit_config_defaults_and_fallback },
 }
 end
 
