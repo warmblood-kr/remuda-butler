@@ -813,11 +813,23 @@ local function test_redefined_public_words_do_not_change_trust()
   for _, suffix in ipairs({ "", ".since", ".acks" }) do os.remove(config_path .. suffix) end
   assert(os.remove(dir))
 
-  local result
-  matrix.send({ room = "!room:example.org", text = "hi @agent-x:example.org" },
+  -- Old rule (PR 1): matrix.send with a Butler mention was refused with
+  -- "Butler-to-Butler sends are disabled", whatever is_agent_mxid was redefined to.
+  -- Replaced by the loop guard (b2b_max_turns) and posts_per_hour: a send is no
+  -- longer classified by its mentions, so it goes out once.
+  local result, puts, saved_request = nil, 0, matrix.request_json
+  matrix.request_json = function(spec, callback)
+    if spec.method == "PUT" then puts = puts + 1 end
+    callback({ json = { event_id = "$sent" .. puts } })
+    return { cancel = function() end }
+  end
+  local send_ok, send_err = pcall(matrix.send, { room = "!room:example.org", text = "hi @agent-x:example.org" },
     function(value) result = value end)
-  assert(type(result) == "table" and result.error == "Butler-to-Butler sends are disabled",
-    "a redefined is_agent_mxid reclassified an agent mention in matrix.send")
+  matrix.request_json = saved_request
+  assert(send_ok, send_err)
+  assert(type(result) == "table" and not result.error and puts == 1,
+    "a send that mentions a Butler is posted once (the send block is lifted), got: "
+      .. tostring(type(result) == "table" and result.error or result))
   remuda._butler_mail_config.bus.messages.m1 = { id = "m1",
     matrix = { sender = "@agent-x:example.org", room_id = "!room:example.org", event_id = "$e" } }
   local sent
@@ -3125,7 +3137,11 @@ end
 -- Per room and rolling hour, only ACCEPTED events from non-allowlisted
 -- senders count. Past the cap: not delivered, not quarantined, processed, one
 -- warning line per room, nothing posted. The relay counts by receive time.
-local function test_rx_untrusted_room_cap_logs_once_no_post()
+-- Old rule (PR 1, test_rx_untrusted_room_cap_logs_once_no_post): past the cap
+-- nothing was posted at all (no request besides /sync). Replaced by ONE HOME
+-- summary per sync that has capped events (untrusted_per_room_hour, PR 2).
+-- The one log line per room stays.
+local function test_rx_untrusted_room_cap_logs_once_home_summary()
   local real_time, now = os.time, 1790000000
   os.time = function(value) if value then return real_time(value) end return now end
   local logs, old_stderr = {}, io.stderr
@@ -3163,12 +3179,20 @@ local function test_rx_untrusted_room_cap_logs_once_no_post()
     end
     assert(warnings == 2 and new_warnings == 1,
       "exactly ONE rate cap warning line per capped room, got " .. warnings .. " (" .. new_warnings .. " for the joined room)")
-    for _, args in ipairs(client.requests) do
-      assert(args.path:find("/sync", 1, true), "nothing is posted: no request besides /sync, got " .. args.path)
-    end
+    local summary = "messages from non-allowlisted senders not delivered in "
+    assert(client:messages(HOME, "3 " .. summary .. NEW .. " (rate cap). Next: remuda butler matrix --room "
+      .. NEW .. " history") == 1, "the first capped sync posts ONE exact HOME summary with its own count")
+    assert(client:messages(HOME, summary .. NEW) == 2, "one HOME summary per sync with capped events in the joined room")
+    assert(client:messages(HOME, summary .. HOME) == 1, "one HOME summary for the capped HOME sync")
     now = now + 3601
     rx_sync(client, NEW, { rx_msg("$u7", STRANGER, "an hour later") })
     assert(rx_find(delivered, "$u7"), "delivery works again after the hour")
+    local posts = 0
+    for _, args in ipairs(client.requests) do
+      if not args.path:find("/sync", 1, true) then posts = posts + 1 end
+    end
+    assert(posts == 3 and client:messages(HOME, summary) == 3,
+      "only the 3 HOME summaries are posted, nothing else and none for a sync with nothing capped, got " .. posts)
     relay:stop()
 
     -- The default is 20 per room and hour.
@@ -3187,18 +3211,20 @@ local function test_rx_untrusted_room_cap_logs_once_no_post()
   if not ok then error(err, 0) end
 end
 
--- TODO(rx PR2): the Butler-to-Butler reply block is lifted together with the
--- loop guard; flip this test to test_rx_b2b_turn_guard_home_line_once then.
-local function test_rx_b2b_block_kept_TODO_pr2()
+-- Old rule (PR 1, test_rx_b2b_block_kept_TODO_pr2): a mail reply to a Butler was
+-- refused with "Butler-to-Butler replies are disabled" and can_reply_to was false.
+-- Replaced by the loop guard b2b_max_turns (test_rx_b2b_turn_guard_home_line_once).
+local function test_rx_b2b_reply_to_butler_is_queued()
   local dir, path = rx_fixture()
   rx_with_dir(dir, function()
     local relay, client, delivered = rx_relay(path)
     rx_sync(client, HOME, { rx_msg("$b2b", RX_ALLY, "@bot:example.org ping") })
     local event = rx_find(delivered, "$b2b")
     assert(event and event.from_agent == true, "an allowlisted Butler mention is delivered")
-    local ok, err = relay:queue_mail_reply({ mail_id = "M" .. tostring(#delivered), reply_mail_id = "R1" })
-    assert(ok == nil and err == "Butler-to-Butler replies are disabled", "PR 1 keeps the B2B reply block")
-    assert(relay:can_reply_to("$b2b") == false, "PR 1 keeps can_reply_to false for Butler routes")
+    local ok, err = relay:queue_mail_reply({ mail_id = "M" .. tostring(#delivered), reply_mail_id = "R1", text = "pong" })
+    assert(ok, "a mail reply to a Butler is queued (the reply block is lifted): " .. tostring(err))
+    assert(client:messages(HOME, "pong") == 1, "the queued reply is posted once to the Butler's room")
+    assert(relay:can_reply_to("$b2b") == true, "can_reply_to is true for a Butler route")
     relay:stop()
   end)
 end
@@ -3526,10 +3552,10 @@ rx_tests = {
   { "test_rx_allowlisted_human_unchanged", test_rx_allowlisted_human_unchanged },
   { "test_rx_follows_survive_restart", test_rx_follows_survive_restart },
   { "test_rx_subscribe_foreign_room_refused", test_rx_subscribe_foreign_room_refused },
-  { "test_rx_b2b_block_kept_TODO_pr2", test_rx_b2b_block_kept_TODO_pr2 },
+  { "test_rx_b2b_reply_to_butler_is_queued", test_rx_b2b_reply_to_butler_is_queued },
   { "test_rx_marker_cannot_be_faked", test_rx_marker_cannot_be_faked },
   { "test_rx_untrusted_approve_text_is_data", test_rx_untrusted_approve_text_is_data },
-  { "test_rx_untrusted_room_cap_logs_once_no_post", test_rx_untrusted_room_cap_logs_once_no_post },
+  { "test_rx_untrusted_room_cap_logs_once_home_summary", test_rx_untrusted_room_cap_logs_once_home_summary },
   { "test_rx_invalid_sender_quarantined", test_rx_invalid_sender_quarantined },
   { "test_rx_untrusted_mention_does_not_follow", test_rx_untrusted_mention_does_not_follow },
   { "test_rx_b2b_turn_guard_home_line_once", test_rx_b2b_turn_guard_home_line_once },
