@@ -64,7 +64,7 @@
       "availableCount": 2,
       "credits": [
         {
-          "id": "RateLimitResetCredit_7288b9cc65648191bf7c03d89f6031e2",
+          "id": "RateLimitResetCredit_00000000000000000000000000000001",
           "resetType": "codexRateLimits",
           "status": "available",
           "grantedAt": 1790108677,
@@ -73,7 +73,7 @@
           "description": "Thanks for using Codex! You've been granted one free rate limit reset."
         },
         {
-          "id": "RateLimitResetCredit_89e71264b93c81919231883c963b50b2",
+          "id": "RateLimitResetCredit_00000000000000000000000000000002",
           "resetType": "codexRateLimits",
           "status": "available",
           "grantedAt": 1790707722,

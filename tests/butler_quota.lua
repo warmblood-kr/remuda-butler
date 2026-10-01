@@ -250,6 +250,15 @@ eq("codex app-server first limit reset comes from fixture", parsed_app and parse
 eq("codex app-server reserve name matches /status", parsed_app and parsed_app.limits[2].name, "Luna Reserve Weekly limit")
 eq("codex app-server reserve used comes from fixture", parsed_app and parsed_app.limits[2].used, 0)
 eq("codex app-server reserve reset comes from fixture", parsed_app and parsed_app.limits[2].resets_at, 1791460487)
+for _, resets_at in ipairs({ 1e300, 5000000000 }) do
+  app_result.rateLimitsByLimitId.codex.primary.resetsAt = resets_at
+  local rejected_reset = quota.parse_codex_rate_limits(app_result)
+  eq("codex app-server rejects out-of-range reset " .. tostring(resets_at),
+    rejected_reset and #rejected_reset.limits or 0, 1)
+end
+app_result.rateLimitsByLimitId.codex.primary.resetsAt = 1791048656
+local accepted_reset = quota.parse_codex_rate_limits(app_result)
+eq("codex app-server accepts normal reset", accepted_reset and accepted_reset.limits[1].resets_at, 1791048656)
 local newer_screen = screen:gsub("40%% left", "20%% left"):gsub("100%% left", "75%% left")
 local twice = quota.parse_codex_status(screen .. "\n" .. newer_screen, 32400, at)
 eq("codex repeated card deduplicates limits", #twice.limits, 2)

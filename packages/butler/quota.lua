@@ -262,7 +262,7 @@ function quota.parse_codex_rate_limits(result)
     if type(entry) ~= "table" or type(entry.primary) ~= "table" then return nil end
     local primary = entry.primary
     if primary.windowDurationMins ~= 10080 or not finite_number(primary.resetsAt)
-        or primary.resetsAt <= 0 then
+        or primary.resetsAt <= 0 or primary.resetsAt >= 4000000000 then
       return nil
     end
     local used = finite_number(primary.usedPercent)
