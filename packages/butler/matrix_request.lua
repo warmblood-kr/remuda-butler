@@ -460,6 +460,41 @@ local function each_raw_line(contents, visit)
   end
 end
 
+function matrix.config_set_typed_line_switches(path, updates)
+  if type(updates) ~= "table" then return nil, "typed-line switch updates must be a table" end
+  for key, value in pairs(updates) do
+    if (key ~= "typed_lines" and key ~= "shell_lines") or type(value) ~= "boolean" then
+      return nil, "invalid typed-line switch update"
+    end
+  end
+  if not next(updates) then return true end
+  local current, config_error = read_config(path)
+  if not current then return nil, config_error end
+  local contents
+  contents, config_error = read_file(path, "config")
+  if not contents then return nil, config_error end
+  local kept, written = {}, {}
+  each_raw_line(contents, function(raw, line, ending)
+    local key = line:match("^([^=]+)=")
+    key = key and trim(key)
+    if updates[key] ~= nil then
+      if not written[key] then
+        kept[#kept + 1] = key .. "=" .. tostring(updates[key]) .. ending
+        written[key] = true
+      end
+    else
+      kept[#kept + 1] = raw .. ending
+    end
+  end)
+  for _, key in ipairs({ "typed_lines", "shell_lines" }) do
+    if updates[key] ~= nil and not written[key] then
+      if #kept > 0 and kept[#kept]:sub(-1) ~= "\n" then kept[#kept + 1] = "\n" end
+      kept[#kept + 1] = key .. "=" .. tostring(updates[key]) .. "\n"
+    end
+  end
+  return write_config_text(path, table.concat(kept))
+end
+
 local function room_line_id(line)
   return line:match("^%s*room=(%S+)")
 end

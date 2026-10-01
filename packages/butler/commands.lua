@@ -9,6 +9,8 @@ local registry_list = assert(config.registry_list)
 local statusline = assert(config.statusline)
 local resolve = assert(config.resolve)
 local mail = assert(config.mail)
+local typed_lines_cli = assert(remuda.butler and remuda.butler.typed_lines_cli,
+  "load butler/typed_lines_cli before butler/commands")
 local USAGE_NOTES = [[
 Agent sessions receive REMUDA_BUTLER_AGENT_ID and REMUDA_BUTLER_LEADER_ID.
 In an agent session, use `inbox`, `send <to> "..."`, and `send-to-leader ...`;
@@ -220,6 +222,12 @@ command(12, "status", "  remuda butler status  (0=up, 75=launching, 1=failed)", 
     end
     return message
   end
+end)
+command(13, "typed-lines", "  remuda butler typed-lines on|off", function(args, caller)
+  return typed_lines_cli.cli(args, current_agent(caller))
+end)
+command(14, "shell-lines", "  remuda butler shell-lines on|off", function(args, caller)
+  return typed_lines_cli.cli(args, current_agent(caller))
 end)
 command(15, "agents", "  remuda butler agents [--all]", function(args)
   if #args == 1 then return registry_list(false) end

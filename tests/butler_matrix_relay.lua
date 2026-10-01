@@ -1358,6 +1358,18 @@ local function test_typed_line_config_is_strict_and_off_by_default()
   assert(conf.typed_lines == false and conf.shell_lines == false,
     "non-boolean spellings must not enable either typed-line switch")
   cleanup_fixture(dir, path)
+
+  dir, path = fixture("untrusted_per_room_hour=12\ntyped_lines=false\ntyped_lines=true\nshell_lines=false\n")
+  assert(matrix.config_set_typed_line_switches(path, { typed_lines = false, shell_lines = true }),
+    "switch commands should atomically write the requested boolean values")
+  conf = assert(matrix.read_config(path))
+  local contents = assert(read_text(path))
+  local typed_count = 0
+  for _ in contents:gmatch("typed_lines=") do typed_count = typed_count + 1 end
+  assert(conf.typed_lines == false and conf.shell_lines == true and typed_count == 1
+      and contents:find("untrusted_per_room_hour=12", 1, true),
+    "switch writes should deduplicate their keys and preserve unrelated config lines")
+  cleanup_fixture(dir, path)
 end
 
 local function encoded(room)

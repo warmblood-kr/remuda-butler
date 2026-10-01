@@ -48,22 +48,21 @@ expect_refused({ "shell-lines", "off" }, "agent-01", "operator-only")
 local before_writes = #writes
 local pending = cli({ "typed-lines", "on" }, nil)
 assert(#prompts == 1 and #writes == before_writes, "enabling typed lines must prompt before writing")
-assert(prompts[1].preface and prompts[1].preface:find(
-  "whoever controls the owner's Matrix account, or the homeserver that carries it, can type text into every agent session of this machine",
-  1, true), "typed-lines must print the complete warning from the UX note")
+assert(prompts[1].preface == "Whoever controls the owner's Matrix account, or the homeserver that carries it, can type text into every agent session of this machine, and the session cannot tell that text from text typed at its keyboard. Such text counts as the owner's own instruction, including approvals.",
+  "typed-lines must print the complete warning from the UX note")
 assert(prompts[1].label:find("Type yes", 1, true), "typed-lines must ask for the word yes")
 prompts[1].callback("yes")
 assert(state.typed_lines == true and state.shell_lines == false and #writes == before_writes + 1,
   "yes should enable only typed-lines")
 assert(pending ~= nil)
 
+state.typed_lines, state.shell_lines = false, false
 expect_refused({ "shell-lines", "on" }, nil, "typed-lines must be on")
 state.typed_lines = true
 local shell_pending = cli({ "shell-lines", "on" }, nil)
 assert(#prompts == 2, "enabling shell-lines should prompt")
-assert(prompts[2].preface and prompts[2].preface:find(
-  "can run shell commands on this machine as this user, with no review by anyone",
-  1, true), "shell-lines must print the complete warning from the UX note")
+assert(prompts[2].preface == "Whoever controls that account or homeserver can run shell commands on this machine as this user, with no review by anyone. It is remote command execution, bounded only by rules 1 to 8. Recommended only with the Matrix account protected as well as the machine's own login (device verification, a homeserver the owner runs or trusts).",
+  "shell-lines must print the complete warning from the UX note")
 prompts[2].callback("yes")
 assert(state.shell_lines == true and #writes == before_writes + 2, "yes should enable shell-lines")
 assert(shell_pending ~= nil)
