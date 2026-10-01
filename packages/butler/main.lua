@@ -633,8 +633,8 @@ remuda.tool{
     return remuda._butler_inbox(caller_name(caller))
   end,
 }
-remuda.tool{
-  name = "butler_report",
+local send_to_leader = {
+  name = "butler_send_to_leader",
   about = "Report a completed work loop to this team member's Butler leader. This also emits the live butler/report hook.",
   args = { text = "Concise result for the leader." },
   needs = { "text" },
@@ -642,6 +642,9 @@ remuda.tool{
     return remuda._butler_report(caller_name(caller), a.text)
   end,
 }
+remuda.tool(send_to_leader)
+-- The old name, kept so a member launched before the rename still reports.
+remuda.tool{ name = "butler_report", about = "Old name of butler_send_to_leader.", args = send_to_leader.args, needs = send_to_leader.needs, run = send_to_leader.run }
 remuda.tool{
   name = "butler_reply",
   about = "Reply to a Butler message by message_id: it goes to the original sender, even if it was forwarded to you. Without message_id, send to `to`.",

@@ -130,6 +130,10 @@ fn butler_status_is_a_live_mcp_tool_not_a_terminal_scrape() {
     };
 
     assert!(listed(&path).contains(&"butler_status".to_string()));
+    // send-to-leader is the MCP name too; butler_report stays as its old name.
+    for name in ["butler_send_to_leader", "butler_report", "matrix_download", "matrix_upload"] {
+        assert!(listed(&path).contains(&name.to_string()), "{name} is not listed");
+    }
     let settings_path = eval(
         &path,
         &format!(

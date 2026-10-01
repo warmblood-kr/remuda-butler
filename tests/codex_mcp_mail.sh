@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # #201: a real Codex TUI member reads and reports its Butler mail over the
-# remuda MCP server (butler_inbox, butler_report) on a throwaway daemon; the
+# remuda MCP server (butler_inbox, butler_send_to_leader) on a throwaway daemon; the
 # `remuda butler` CLI cannot reach the daemon from inside Codex's sandbox.
 # Opt-in: it needs a Codex login and spends model tokens, and the core must
 # forward `-c KEY=VALUE`. Checked on Linux only (it reads /proc). Run:
@@ -58,5 +58,5 @@ wait_for 30 has_mcp_argv || fail "codex app-server was not launched with mcp_ser
 wait_for 120 shows 'Called remuda.butler_inbox' || fail "member did not call butler_inbox over MCP"
 R send cm1 'Report "codex-mcp-ok" to your leader.'
 wait_for 120 reported || fail "no mail with codex-mcp-ok reached the scratch mail store"
-wait_for 20 shows 'Called remuda.butler_report' || fail "screen does not show the butler_report MCP call"
+wait_for 20 shows 'Called remuda.butler_send_to_leader' || fail "screen does not show the butler_send_to_leader MCP call"
 echo PASS
