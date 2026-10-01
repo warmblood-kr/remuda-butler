@@ -346,6 +346,8 @@ function remuda._butler_compaction_execute(session_name, force)
     prior_model = restore_pending or remuda._butler_claude_model_for(agent)
     settings_path = (os.getenv("HOME") or "") .. "/.claude/settings.json"
   end
+  -- A Claude session already on Sonnet is not switched, so nothing is restored.
+  local claude_switch = agent.kind == "claude"
   local function release_lock()
     state.compaction_in_progress = false
     if owner_state.compaction_fleet_active == state_key then owner_state.compaction_fleet_active = nil end
@@ -381,7 +383,7 @@ function remuda._butler_compaction_execute(session_name, force)
       (wording or "Compaction failed") .. ": " .. tostring(reason))
   end
   local function finish_success(event)
-    if agent.kind == "claude" then
+    if claude_switch then
       local settings = read_claude_settings(settings_path)
       local matches, actual, status = remuda._butler_compaction_verify_settings_model(settings, prior_model)
       if status then
@@ -439,9 +441,10 @@ function remuda._butler_compaction_execute(session_name, force)
     return false
   end
   local function send_command(command)
-    local sent, send_err = pcall(remuda.type_text, session_name, command, config.input_settle)
-    if not sent then fail("compaction command failed: " .. tostring(send_err)); return false end
-    return true
+    local sent, status = pcall(remuda.type_text, session_name, command, config.input_settle)
+    if not sent then fail("compaction command failed: " .. tostring(status)); return false end
+    -- The status ("submitted" or "unverified"; nil on an older core), else true.
+    return status or true
   end
   local function wait_for(id, matcher, action, timeout, on_timeout, on_fail)
     local fail = on_fail or fail
@@ -556,7 +559,7 @@ function remuda._butler_compaction_execute(session_name, force)
           or stable_wait_expired(unknown_state)
       end,
       on_unknown = function()
-        if agent.kind == "claude" and (id == "model-sonnet" or id == "compact-complete") then
+        if claude_switch and (id == "model-sonnet" or id == "compact-complete") then
           state.restore_pending = prior_model
           state.restore_pending_attempts = 0
           state.restore_pending_attempt_active = nil
@@ -567,7 +570,7 @@ function remuda._butler_compaction_execute(session_name, force)
       on_timeout = function(screen, handle)
         local model_watcher = agent.kind == "claude" and (id == "model-sonnet" or id == "model-restored")
         if unknown_state.started_at or (model_watcher and model_confirm_state.started_at) then
-          if agent.kind == "claude" and (id == "model-sonnet" or id == "compact-complete") then
+          if claude_switch and (id == "model-sonnet" or id == "compact-complete") then
             state.restore_pending = prior_model
             state.restore_pending_attempts = 0
             state.restore_pending_attempt_active = nil
@@ -612,13 +615,21 @@ function remuda._butler_compaction_execute(session_name, force)
     end, completion_timeout)
   end
   local codex_prior = agent.kind == "codex" and restore_pending or nil
-  local function forget_codex_prior()
+  local function forget_prior()
     codex_prior = nil
     state.restore_pending = nil
     state.restore_pending_attempts = nil
     state.restore_pending_attempt_active = nil
     local cleared, clear_err = clear_compaction_restore(compaction_agent_key(agent, session_name), session_name)
     if not cleared then _butler_trace("restore_record_clear_failed", detail .. " reason=" .. tostring(clear_err)) end
+  end
+  -- The prior Claude model is back after a failed compaction: forget the
+  -- pending restore, unless settings.json still names another model (then the
+  -- next tick puts it back).
+  local function fail_after_claude_restore(reason)
+    local matches = remuda._butler_compaction_verify_settings_model(read_claude_settings(settings_path), prior_model)
+    if matches ~= false then forget_prior() end
+    fail(reason)
   end
   -- Pick `model` at `effort` for this Codex session only, reading each picker
   -- row from the screen. Every failure closes the picker, then calls on_abort.
@@ -730,7 +741,7 @@ function remuda._butler_compaction_execute(session_name, force)
         if state.compaction_monitor then remuda.cancel(state.compaction_monitor) end
         state.compaction_monitor = nil
         state.compaction_still_running_notice_sent = nil
-        if agent.kind == "claude" then restore_model("completed_after_timeout")
+        if claude_switch then restore_model("completed_after_timeout")
         elseif codex_prior then codex_restore("completed_after_timeout")
         else finish_success("completed_after_timeout") end
       end
@@ -739,27 +750,40 @@ function remuda._butler_compaction_execute(session_name, force)
   end
 
   local function compact()
-    if not send_command("/compact") then return end
+    local sent = send_command("/compact")
+    if not sent then return end
+    -- type_text could not confirm the command and the pane is idle: it was not
+    -- submitted, so do not wait the completion timeout for a compaction.
+    if agent.kind == "claude" and sent == "unverified" and pane_busy() == false then
+      if claude_switch then
+        restore_model(nil, function() fail_after_claude_restore("compact command not submitted") end)
+      else
+        fail("compact command not submitted")
+      end
+      return
+    end
     wait_for("compact-complete", function()
       local current = remuda._butler_telemetry_for(agent) or {}
       local used = tonumber(current.context_used)
       return used and ctx_before and used < ctx_before
     end, function()
-      if agent.kind == "claude" then restore_model("verified")
+      if claude_switch then restore_model("verified")
       elseif codex_prior then codex_restore("verified")
       else finish_success("verified") end
     end, completion_timeout, function()
       if agent.kind == "claude" then
         if pane_busy() ~= false then
           monitor_until_idle()
+        elseif claude_switch then
+          restore_model(nil, function() fail_after_claude_restore("compaction context did not drop") end)
         else
-          restore_model(nil, function() fail("compaction context did not drop") end)
+          fail("compaction context did not drop")
         end
       elseif pane_busy() ~= false then
         monitor_until_idle()
       elseif codex_prior then
         codex_restore(nil, function()
-          forget_codex_prior()
+          forget_prior()
           fail("compaction context did not drop", "Compaction not confirmed yet")
         end)
       else
@@ -795,7 +819,15 @@ function remuda._butler_compaction_execute(session_name, force)
   state.failure_cooldown_until = nil
   owner_state.compaction_fleet_active = state_key
   _butler_trace("sent", detail)
-  if agent.kind == "claude" then
+  local function telemetry_on_sonnet()
+    local current = remuda._butler_telemetry_for(agent) or {}
+    return type(current.model) == "string" and current.model:lower():find("sonnet", 1, true) ~= nil
+  end
+  if agent.kind == "claude" and telemetry_on_sonnet() then
+    claude_switch = false
+    _butler_trace("model_switch_skipped", detail .. " reason=already_lower")
+    compact()
+  elseif agent.kind == "claude" then
     if not remuda._butler_compaction_valid_model(prior_model) then
       state.compaction_in_progress = false
       owner_state.compaction_fleet_active = nil
@@ -828,10 +860,7 @@ function remuda._butler_compaction_execute(session_name, force)
       return "failed"
     end
     if not send_command("/model sonnet") then return "failed" end
-    wait_for("model-sonnet", function()
-      local current = remuda._butler_telemetry_for(agent) or {}
-      return type(current.model) == "string" and current.model:lower():find("sonnet", 1, true) ~= nil
-    end, compact, completion_timeout)
+    wait_for("model-sonnet", telemetry_on_sonnet, compact, completion_timeout)
   else
     local _, screen = pcall(remuda.capture, session_name)
     local current, current_effort = codex_footer(screen)
@@ -853,7 +882,7 @@ function remuda._butler_compaction_execute(session_name, force)
         return "failed"
       end
       codex_select(CODEX_LOWER_MODEL, current_effort, compact, function(reason)
-        forget_codex_prior()
+        forget_prior()
         fail(reason)
       end)
     end
