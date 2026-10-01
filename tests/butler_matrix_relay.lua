@@ -3729,7 +3729,10 @@ local function test_rx_mail_reply_posts_per_hour()
   local dir, path = invite_fixture(OWNER, "posts_per_hour=1\n")
   rx_with_dir(dir, function() rx_fresh_hour(function()
     local relay, client, delivered = rx_relay(path)
-    rx_sync(client, HOME, { rx_msg("$pm", OWNER, "question") })
+    -- Old expectation: the reply went to the allowlisted OWNER and used a post slot.
+    -- Replaced by 7a: a reply to an allowlisted human takes no slot, so the target
+    -- is now a non-allowlisted human, whose replies still take one.
+    rx_sync(client, HOME, { rx_msg("$pm", STRANGER, "question") })
     local mail = rx_mail_id(delivered, "$pm")
     local ok, err = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R1", text = "reply-one" })
     assert(ok, "the first mail reply is under posts_per_hour=1: " .. tostring(err))
@@ -3861,7 +3864,10 @@ local function test_rx_cli_reply_takes_post_slot()
     local relay, client = rx_relay(path)
     relay_module.instance = relay
     rx_post_http(path, function(_, posted)
-      rx_sync(client, HOME, { rx_msg("$cr", OWNER, "question") })
+      -- Old expectation: the reply went to the allowlisted OWNER and used a post slot.
+      -- Replaced by 7a: a reply to an allowlisted human takes no slot, so the target
+      -- is now a non-allowlisted human, whose replies still take one.
+      rx_sync(client, HOME, { rx_msg("$cr", STRANGER, "question") })
       local result = rx_cli({ "matrix", "reply", "$cr", "answer" })
       assert(result.code == 0, "the reply is under posts_per_hour=1: " .. tostring(result.stderr))
       result = rx_cli({ "matrix", "send", "one more" })
@@ -3895,8 +3901,11 @@ local function test_rx_outbox_send_takes_no_second_post_slot()
       local ok, err = pcall(function()
         local sync = "/_matrix/client/v3/sync"
         relay._response({ next_batch = "s0" }, sync)
+        -- Old expectation: the reply went to the allowlisted OWNER and used a post slot.
+        -- Replaced by 7a: a reply to an allowlisted human takes no slot, so the target
+        -- is now a non-allowlisted human, whose replies still take one.
         relay._response({ next_batch = "s1", rooms = { join = { [HOME] = { timeline = { events = {
-          rx_msg("$os", OWNER, "question") } } } } } }, sync)
+          rx_msg("$os", STRANGER, "question") } } } } } }, sync)
         local queued, queue_error = relay:queue_mail_reply({ mail_id = rx_mail_id(delivered, "$os"),
           reply_mail_id = "R1", text = "reply-one" })
         assert(queued, "the first mail reply is under posts_per_hour=1: " .. tostring(queue_error))
