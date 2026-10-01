@@ -41,6 +41,7 @@ release tags yet; entries come from merged pull requests.
 - Butler-to-Butler Matrix replies are no longer blocked. A per-thread turn guard (`b2b_max_turns`, default 6) stops the Butler after 6 Butler-only turns and posts one line to HOME; a reply in that thread from a person on the allowlist resumes it (#223).
 
 ### Fixed
+- Codex members get the `remuda` MCP server and are told to use the `butler_*` tools: the `remuda butler` CLI cannot reach the daemon from inside the Codex sandbox. This needs a core whose `_codex_tui` forwards `-c KEY=VALUE`; on an older core the launch is unchanged (#201).
 - `matrix setup --force` keeps the existing `deny_room`/`deny_server` lines (#154).
 - Matrix length caps never cut a UTF-8 character (#155).
 - Matrix invite follow-ups: refusals carry a next step, the quarantine list shows the room, and commands missing a room say what to pass (#162).

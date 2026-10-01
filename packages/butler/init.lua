@@ -189,6 +189,16 @@ Start by running `remuda butler inbox` to read your welcome message.
             .. "`remuda butler reply MESSAGE-ID -` (or `--file PATH`). Long bodies use "
             .. 'stdin (`-`) or `--file "$PWD/path"`; message bodies are limited to 64 KiB. '
         end },
+      { id = "codex", order = 25,
+        agents_md = function()
+          return [[Codex members: use the MCP `butler_*` tools first (`butler_inbox`,
+`butler_send`, `butler_reply`, `butler_report`, `butler_forward`,
+`butler_sessions`). The `remuda butler` CLI fails inside the Codex sandbox by
+design (`Operation not permitted`). If you must use the CLI and get that error,
+re-run the command requesting escalated permissions.
+
+]]
+        end },
       { id = "old-core", order = 30,
         agents_md = function()
           return [[If `inbox` says "no Butler identity in your env", your Remuda core predates
