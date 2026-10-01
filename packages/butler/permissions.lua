@@ -100,5 +100,37 @@ function permissions.write_if_changed(path, text, fs, private)
   return "written"
 end
 
+-- An agent caller may hand the mod only a file inside its own working
+-- directory; a caller outside any session (a person at a terminal) is not
+-- restricted, and anything unknown is refused. Returns the path to open, or
+-- nil and the refusal. `caller` is remuda.caller(), `cwd_of(session)` the
+-- recorded launch directory, `realpath(path)` resolves symlinks and `..`.
+-- ponytail: a link swapped between this check and the open is not closed;
+-- upgrade to a core open-beneath helper when it exists.
+function permissions.file_for_caller(path, caller, cwd_of, realpath, flag, pipe)
+  if type(caller) == "table" and caller.kind == "outside" then return path end
+  local function one_line(value) return (tostring(value):gsub("[\r\n]+", " "):gsub("%c", "?")) end
+  local what = "refused: " .. flag .. one_line(path)
+  local cwd = type(caller) == "table" and caller.kind == "session" and type(caller.session) == "string"
+    and cwd_of(caller.session)
+  if type(cwd) ~= "string" or cwd:sub(1, 1) ~= "/" then
+    return nil, what .. ": cannot identify the calling session's working directory"
+      .. "\nNext: run this from a Butler session, or from your own terminal"
+  end
+  local ok, root, real = pcall(function()
+    local resolved = realpath(cwd)
+    return resolved, resolved and realpath(path)
+  end)
+  if not ok or not root or not real then
+    return nil, what .. " cannot be resolved (a missing file, or realpath is unavailable)"
+      .. "\nNext: check that the file exists inside " .. one_line(cwd)
+  end
+  -- The trailing slash keeps a sibling like CWDx, and the directory itself, outside.
+  if real:sub(1, #root + 1) == root .. "/" then return real end
+  return nil, what .. " is outside this session's working directory " .. one_line(cwd)
+    .. "\nNext: copy the file into " .. one_line(cwd) .. " and pass that path"
+    .. (pipe and ", or pipe the text: cat FILE | remuda butler send NAME -" or "")
+end
+
 if type(remuda) == "table" then remuda._butler_permissions = permissions end
 return permissions

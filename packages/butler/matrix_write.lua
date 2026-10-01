@@ -264,12 +264,14 @@ end
 function matrix.upload(opts, on_done)
   opts = opts or {}
   local done = once(on_done)
-  local room = configured_room(opts, done)
-  if not room then return { cancel = function() end } end
   if type(opts.file) ~= "string" or opts.file == "" or not absolute(opts.file) then
     return error_result(done, "use an absolute path (the daemon does not know your cwd)")
   end
-  local file, open_error = io.open(opts.file, "rb")
+  local allowed, refusal = remuda._butler_file_for_caller(opts.file, "", false)
+  if not allowed then return error_result(done, refusal) end
+  local room = configured_room(opts, done)
+  if not room then return { cancel = function() end } end
+  local file, open_error = io.open(allowed, "rb")
   if not file then return error_result(done, "cannot read upload file: " .. tostring(open_error)) end
   local ok, data, read_error = pcall(function() return file:read(MAX_UPLOAD_BYTES + 1) end)
   file:close()
