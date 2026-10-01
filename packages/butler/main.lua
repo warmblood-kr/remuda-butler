@@ -535,7 +535,13 @@ remuda._butler_sessions_config = { bus = bus, mail = mail, identity_path = ident
 remuda.exec("butler/sessions")
 local registry_list = remuda._butler_sessions_impl.registry_list
 remuda.exec("butler/doctor")
-remuda.exec("butler/quota")
+local quota_loaded, quota_error = pcall(remuda.exec, "butler/quota")
+if quota_loaded then
+  remuda._butler_quota_error = nil
+else
+  remuda._butler_quota = nil
+  remuda._butler_quota_error = tostring(quota_error)
+end
 
 -- CLI verbs and the argv parser live in commands.lua.
 remuda._butler_commands_config = { current_agent = current_agent, OPERATOR = OPERATOR,
