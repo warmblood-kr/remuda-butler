@@ -725,23 +725,10 @@ function matrix.cli(args, agent, stdin_body)
       .. ".\nNext: remuda butler matrix " .. next_room .. "follow " .. shell_quote(safe_thread) .. "\n", "")
   end
   if verb == "reply" then
-    local relay = matrix.relay and matrix.relay.instance
-    local required_relay_methods = {
-      "can_reply_to", "route_for_event", "thread_root_for_event", "b2b_stopped",
-      "b2b_turn_limit", "note_own_turn", "post_cap_hit",
-    }
-    local relay_ready = type(relay) == "table"
-    if relay_ready then
-      for _, method in ipairs(required_relay_methods) do
-        if type(relay[method]) ~= "function" then
-          relay_ready = false
-          break
-        end
-      end
-    end
-    if not relay_ready then
+    local relay, relay_error = matrix.reply_relay()
+    if not relay then
       finish(reply, cancelled, completed, verb, options,
-        { error = "Matrix relay is not running or is from an older load; event sender cannot be verified" })
+        { error = relay_error })
       return reply
     end
     if not relay:can_reply_to(options.event_id) then
@@ -755,7 +742,7 @@ function matrix.cli(args, agent, stdin_body)
     if route then
       options.room = options.room or route.room_id
       options.thread_root = route.thread_root
-    elseif relay.thread_root_for_event then
+    else
       options.thread_root = relay:thread_root_for_event(options.event_id)
     end
   end
