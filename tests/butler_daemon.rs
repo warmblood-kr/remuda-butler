@@ -10330,11 +10330,28 @@ done
       remuda.new("quota-real-draft", {{"/bin/bash", {script_lua}, {draft_log_lua}, "› DRAFT: unsent words"}}, nil, {{}})
       remuda._butler_bus.agents["quota-real-draft"] = {{id="quota-real-draft-id", alias="quota-real-draft", kind="codex", session_name="quota-real-draft"}}
     "#));
+    let wait_until_not_busy = |name: &str| {
+        let deadline = Instant::now() + PATIENCE;
+        let check = format!(
+            "local s = remuda.session({}); return tostring(s and s.is_busy)",
+            lua_raw_string(name)
+        );
+        while eval(&path, &check) != "false" {
+            assert!(Instant::now() < deadline, "real pane {name} stayed busy");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
     let deadline = Instant::now() + PATIENCE;
     while !capture(&path, "quota-real-draft").contains("DRAFT: unsent words") {
         assert!(Instant::now() < deadline, "real draft pane did not paint");
         std::thread::sleep(Duration::from_millis(10));
     }
+    wait_until_not_busy("quota-real-draft");
+    assert_eq!(
+        eval(&path, "return remuda._butler_prompt_is_empty('codex', remuda.capture('quota-real-draft'))"),
+        "NON-EMPTY",
+        "the real draft pane must be refused for its composer, not because it is busy"
+    );
     let draft = remuda_timed(&dir, &["-s", "s", "butler", "quota"]);
     assert!(draft.status.success(), "{}", String::from_utf8_lossy(&draft.stderr));
     assert!(String::from_utf8_lossy(&draft.stdout).contains("quota: unknown (no idle codex session to ask)"));
@@ -10347,6 +10364,12 @@ done
       remuda._butler_bus.agents["quota-real-empty"] = {{id="quota-real-empty-id", alias="quota-real-empty", kind="codex", session_name="quota-real-empty"}}
       remuda._butler_quota_state.at = remuda._butler_quota_state.at - 61
     "#, lua_raw_string(&empty_log.to_string_lossy())));
+    let deadline = Instant::now() + PATIENCE;
+    while !capture(&path, "quota-real-empty").contains("Ask Codex to do anything") {
+        assert!(Instant::now() < deadline, "real empty pane did not paint");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    wait_until_not_busy("quota-real-empty");
     let empty = remuda_timed(&dir, &["-s", "s", "butler", "quota"]);
     assert!(empty.status.success(), "{}", String::from_utf8_lossy(&empty.stderr));
     let empty_stdout = String::from_utf8_lossy(&empty.stdout);
