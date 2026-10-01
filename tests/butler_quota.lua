@@ -95,7 +95,7 @@ eq("terminal UX case 3", quota.terminal(unavailable), unavailable_body .. "\n"
 eq("terminal sent", quota.terminal(keys, { sent = true }), keys_body .. "\n"
   .. "Sent to the Matrix home room.\nNext: run `remuda butler quota` any time for a fresh reading.")
 eq("terminal failed", quota.terminal(keys, { failed = "network down" }), keys_body .. "\n"
-  .. "Could not post to Matrix: network down\nNext: remuda butler doctor")
+  .. "Could not post to Matrix: network down\nNext: remuda butler matrix setup")
 local codex_out = { at = at, claude = { mode = "api_key" }, codex = { mode = "not_logged_in" } }
 eq("terminal codex login hint", quota.terminal(codex_out), table.concat({
   "⚠️ Agent accounts, 2026-10-01 04:40Z",
@@ -335,7 +335,7 @@ for _, left in ipairs({ 999, 101 }) do
     out_of_range_body:find("  Weekly limit: unknown", 1, true) ~= nil)
   ok("out-of-range percent is never near " .. left,
     not out_of_range_body:find("Near limit:", 1, true))
-  ok("out-of-range percent has no negative number " .. left, not out_of_range_body:find("-", 1, true))
+  ok("out-of-range percent has no negative number " .. left, not out_of_range_body:find("%-%d+%%"))
 end
 
 for _, bad_email in ipairs({ "owner@example.test\n@room", "owner @example.test", "[owner](https://evil.example)" }) do
@@ -361,7 +361,7 @@ local function terminal_case(name, report, outcome, ending)
   eq(name, quota.terminal(report, outcome), quota.render(report) .. "\n" .. ending)
 end
 terminal_case("terminal failure takes priority", unavailable, { failed = "bad\1\226\128\174\195\169" },
-  "Could not post to Matrix: bad??????\nNext: remuda butler doctor")
+  "Could not post to Matrix: bad??????\nNext: remuda butler matrix setup")
 terminal_case("terminal unknown mode takes priority", {
   at = at, claude = { mode = "unknown" },
   codex = { mode = "subscription", limits = nil, unknown_reason = "no idle codex session to ask" },
@@ -380,7 +380,7 @@ terminal_case("terminal claude first reply hint", {
 }, nil, "Next: let a claude session answer once, then run `remuda butler quota` again.")
 local long_failure = string.rep("x", 201)
 terminal_case("terminal failure cuts reason at 200", keys, { failed = long_failure },
-  "Could not post to Matrix: " .. string.rep("x", 200) .. "\nNext: remuda butler doctor")
+  "Could not post to Matrix: " .. string.rep("x", 200) .. "\nNext: remuda butler matrix setup")
 
 eq("usage error unexpected argument", quota.usage_error("claude"), "unexpected argument: claude\n"
   .. "Usage: remuda butler quota [--report]\nExample: remuda butler quota --report\n"
