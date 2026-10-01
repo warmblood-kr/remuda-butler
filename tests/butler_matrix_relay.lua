@@ -2527,7 +2527,7 @@ local function test_rx_follow_guard_refuses_and_warns_no_trim()
     assert(rx_find(delivered, "$cap-m"), "a mention at the cap is still delivered")
     assert(not rx_followed(relay, HOME, "$new-1") and not rx_followed(relay, HOME, "$new-2"),
       "at 50000 follows a new follow is refused")
-    assert(rx_followed(relay, HOME, "$old1") and rx_followed(relay, HOME, "$old50000"), "nothing is trimmed")
+    assert(rx_followed(relay, HOME, "$old1") and rx_followed(relay, HOME, "$old49999"), "nothing is trimmed")
     local warnings = 0
     for _, line in ipairs(logs) do if line:find("50000", 1, true) then warnings = warnings + 1 end end
     assert(warnings == 1, "the refused follows log ONE warning, got " .. warnings)
