@@ -19,6 +19,8 @@ local function probe_command(argv, platform)
         installed = true,
         logged_in = result.code == 0 and not result.timed_out,
         timed_out = not not result.timed_out,
+        stdout = result.stdout,
+        stderr = result.stderr,
       }
     end
 
@@ -85,9 +87,36 @@ local function render(probe_results, platform)
   return lines
 end
 
+-- The root Butler's permission rule (permissions.lua): what the mod did to its
+-- settings.local.json at the last launch or load. The block ends with Next:.
+local function permission_lines(report, kind)
+  local function one_line(value) return (tostring(value):gsub("[\r\n]+", " "):gsub("%c", "?")) end
+  local head = "Permissions butler (" .. one_line(kind or "?") .. "): "
+  if kind == "codex" then
+    return { head .. "none — the mod writes no Codex permission rules", "Next: nothing to do" }
+  end
+  if type(report) ~= "table" then return { head .. "not checked yet", "Next: remuda butler status" } end
+  local path, withheld = one_line(report.path or "?"), report.withheld[1]
+  if report.error then
+    return { head .. "not written: " .. one_line(report.error) .. " — " .. path,
+      "Next: fix or delete that file; Butler adds the rule at its next launch" }
+  elseif withheld then
+    return { head .. "withheld " .. one_line(withheld.rule) .. " — listed under " .. withheld.list .. " in " .. path,
+      "Next: remove the rule from " .. withheld.list .. " in that file; Butler adds it at its next launch" }
+  elseif #report.added > 0 then
+    return { head .. "added " .. #report.added .. " rule to " .. path .. ": " .. one_line(table.concat(report.added, ", "))
+      .. " (file rewritten: private, mode 600)", "Next: to block the rule, move it to permissions.deny in that file" }
+  elseif #report.present > 0 then
+    return { head .. "present " .. one_line(table.concat(report.present, ", ")) .. " — " .. path,
+      "Next: to block the rule, move it to permissions.deny in that file" }
+  end
+  return { head .. "none", "Next: nothing to do" }
+end
+
 local doctor = {
   probe = probe,
   render = render,
+  permission_lines = permission_lines,
   candidate_names = command_candidates,
 }
 remuda._butler_doctor = doctor

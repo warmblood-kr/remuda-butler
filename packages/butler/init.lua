@@ -166,7 +166,7 @@ Start by running `remuda butler inbox` to read your welcome message.
 
 - `remuda butler inbox` reads your own queued messages.
 - `remuda butler send MEMBER "MESSAGE"` sends a message; your sender is inferred.
-- For long bodies, use `cat <<'EOF' | remuda butler send MEMBER -` or `--file "$PWD/path"`.
+- For long bodies, write the text to a file and use `remuda butler send MEMBER --file "$PWD/path"`, or pipe it: `cat <<'EOF' | remuda butler send MEMBER -`.
 - `send-to-leader` and `reply MESSAGE_ID` accept `-` and `--file "$PWD/path"` too.
 - Message bodies are limited to 64 KiB; short quoted messages can stay positional.
 - `remuda butler send-to-leader RESULT...` reports a completed work loop.
@@ -220,11 +220,17 @@ the normal way for a member to communicate.
       { id = "leader", order = 90,
         prompt = function(_, ctx) return "Your leader is " .. ctx.parent .. "." end },
     },
+    -- The rule merged into the root Butler's settings.local.json; an extension adds its own row.
+    ["butler.permission"] = {
+      { id = "cli", order = 10, rules = function(_, ctx) return host._butler_permissions.builtin(ctx) end },
+    },
     ["butler.command"] = {
       { id = "close", order = 8, verb = "close", usage = "  remuda butler close <name> [--force]",
         run = function(_, args, caller) return host._butler_command_run("close", args, caller) end },
       { id = "doctor", order = 5, verb = "doctor", usage = "  remuda butler doctor",
         run = function(_, args, caller) return host._butler_command_run("doctor", args, caller) end },
+      { id = "quota", order = 6, verb = "quota", usage = "  remuda butler quota [--report]",
+        run = function(_, args, caller) return host._butler_command_run("quota", args, caller) end },
       { id = "compact", order = 16, verb = "compact", usage = "  remuda butler compact <session> [--dry-run|--force]",
         run = function(_, args)
           if not args[2] or args[2] == "" then return nil end
