@@ -170,8 +170,9 @@ end
 
 local function load_message(disk, id)
   if bus.messages[id] then return bus.messages[id] end
-  -- The id becomes a file name, so only a ULID: 26 Crockford base32 characters.
-  if type(id) ~= "string" or #id ~= 26 or id:find("[^0-9A-HJKMNP-TV-Z]") then return nil end
+  -- The id becomes a file name: never one that leaves the messages directory.
+  -- (Not ULID-only: legacy mail on disk has other ids.)
+  if type(id) ~= "string" or id:find("[/\\]") or id:find("..", 1, true) then return nil end
   local envelope_file = io.open(disk.messages .. id .. ".json", "r")
   if not envelope_file then return nil end
   local envelope = envelope_file:read("*a")

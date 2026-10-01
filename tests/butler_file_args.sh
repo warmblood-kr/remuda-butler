@@ -63,7 +63,7 @@ run dl_onlink  remuda -s $S butler matrix -o "\$PWD/outlink" download mxc://medi
 run dl_inside  remuda -s $S butler matrix -o "\$PWD/sub/got.bin" download mxc://media.example/a1
 run dl_default remuda -s $S butler matrix download mxc://media.example/a1
 run reply_dots remuda -s $S butler reply ../../../../victim hello
-run reply_low  remuda -s $S butler reply 01m3v0000000000000000000zz hello
+run fwd_dots   remuda -s $S butler forward ../../../../victim butler
 run setup      remuda -s $S butler matrix setup --homeserver https://evil.invalid --user @x:evil.invalid --password-file "$T/secret.txt"
 touch "$T/done"
 sleep 1000
@@ -127,8 +127,8 @@ echo "== an agent caller: download inside is written; without -o it lands in the
 [[ $(cat "$MEMBER_CWD/matrix-a1") == MEDIA-BYTES ]] || fail "the default output is not in the working directory"
 [[ ! -e $HOME/matrix-a1 ]] || fail "the default output of an agent caller landed in HOME"
 
-echo "== an agent caller: a message id that is not a ULID never becomes a file name"
-for name in reply_dots reply_low; do
+echo "== an agent caller: a message id with a path in it never becomes a file name"
+for name in reply_dots fwd_dots; do
   [[ $(cat "$T/$name.rc") != 0 ]] || fail "$name: a bad message id was accepted: $(cat "$T/$name.out")"
 done
 
