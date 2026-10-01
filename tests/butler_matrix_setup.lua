@@ -70,6 +70,27 @@ return function(matrix, pinned_hostname)
     for _, value in ipairs(extra or {}) do values[#values + 1] = value end
     return values
   end
+  do
+    local saved_home, saved_getenv = remuda._butler_system.home, os.getenv
+    remuda._butler_system.home = function()
+      error("HOME and USERPROFILE are not set.\nNext: set HOME or USERPROFILE, then restart Butler", 0)
+    end
+    os.getenv = function(name)
+      if name == "HOME" or name == "USERPROFILE" or name == "XDG_CONFIG_HOME" then return nil end
+      return saved_getenv(name)
+    end
+    local explicit_without_home, explicit_without_home_error = matrix.setup_prepare(
+      args("--password-file", password, { "--bot", "@butler-demo:example.org" }))
+    assert(explicit_without_home, "--dir setup must not require HOME: " .. tostring(explicit_without_home_error))
+    local missing_default, missing_default_error = matrix.setup_prepare({
+      "--homeserver", "http://matrix.invalid", "--owner", "@alice:example.org",
+      "--password-file", password, "--bot", "@butler-demo:example.org" })
+    assert(not missing_default and missing_default_error:find("Next:", 1, true)
+      and not missing_default_error:find("\n", 1, true)
+      and not missing_default_error:find("stack traceback", 1, true),
+      "missing default paths should return one actionable line without a traceback: " .. tostring(missing_default_error))
+    remuda._butler_system.home, os.getenv = saved_home, saved_getenv
+  end
   write(token, "access-token-secret")
   local function written_room_config(room_mode, destination)
     local values = { "--homeserver", "http://matrix.invalid", "--owner", "@alice:example.org",

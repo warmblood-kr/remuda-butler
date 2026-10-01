@@ -7,6 +7,8 @@ REMUDA_BIN=$(command -v "$REMUDA_BIN")
 # 103-byte sun_path limit and the pending daemon never binds (#163).
 SCRATCH=$(mktemp -d /private/tmp/bf.XXXXXX)
 SCRATCH=$(cd "$SCRATCH" && pwd -P)
+"$REMUDA_BIN" version >"$SCRATCH/core-version.log"
+head -n 1 "$SCRATCH/core-version.log"
 longest_socket=$SCRATCH/p/remuda/butler-fallback-pending.sock
 if (( ${#longest_socket} > 103 )); then
   rm -rf "$SCRATCH"
@@ -197,6 +199,16 @@ for failure in \
   grep -F "$failure" "$SCRATCH/launch-failed.out" >/dev/null ||
     fail "launch verb omitted $failure: $(cat "$SCRATCH/launch-failed.out")"
 done
+TRACE_FILE=$XDG_CONFIG_HOME/remuda/session-trace.log
+"$REMUDA_BIN" -s "$SERVER" -e 'return remuda._butler_launch(nil, "trace-test")' >/dev/null || true
+TRACE_ROW=
+for _ in $(seq 30); do
+  TRACE_ROW=$(grep -F $'\tlaunch_failed\ttrace-test: ' "$TRACE_FILE" || true)
+  [[ -n "$TRACE_ROW" ]] && break
+  sleep 0.1
+done
+[[ "$TRACE_ROW" == *'; '* ]] ||
+  fail "launch failure trace did not join attempt lines: $TRACE_ROW"
 set +e
 "$REMUDA_BIN" -s "$SERVER" butler status >"$SCRATCH/status-failed.out" 2>"$SCRATCH/status-failed.err"
 FAILED_STATUS=$?

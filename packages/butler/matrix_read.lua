@@ -231,9 +231,16 @@ function matrix.download(args, callback)
   local path = "/_matrix/client/v1/media/download/" .. encode(server) .. "/" .. encode(media)
   local function save(result)
     if result.error then return finish(result) end
-    local home = system.home()
-    if not args.output and not system.is_absolute(home) then
-      return finish({ error = "download requires an absolute HOME or -o path" })
+    local home
+    if not args.output then
+      local home_ok, value = pcall(system.home)
+      if not home_ok then
+        return finish({ error = tostring(value):gsub("[\r\n]+", " ") })
+      end
+      home = value
+      if not system.is_absolute(home) then
+        return finish({ error = "download requires an absolute HOME or -o path" })
+      end
     end
     local output = args.output or home .. "/matrix-" .. media
     local file, err = io.open(output, "wb")

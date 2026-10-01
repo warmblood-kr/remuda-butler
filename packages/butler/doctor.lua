@@ -7,35 +7,29 @@ local function command_candidates(name, platform)
   return { name }
 end
 
-local function probe_command(argv, platform)
+local function probe_command(argv)
   local path = system.find_command(argv[1])
-  local candidates = {}
-  if path then candidates[#candidates + 1] = path end
-  for _, name in ipairs(command_candidates(argv[1], platform)) do
-    if name ~= path then candidates[#candidates + 1] = name end
+  if not path then return { installed = false, logged_in = false } end
+  local candidate = { path }
+  for i = 2, #argv do candidate[#candidate + 1] = argv[i] end
+  local ok, result = pcall(remuda.process.run, { argv = candidate, timeout = 5 })
+  if ok then
+    return {
+      installed = true,
+      logged_in = result.code == 0 and not result.timed_out,
+      timed_out = not not result.timed_out,
+      stdout = result.stdout,
+      stderr = result.stderr,
+    }
   end
-  for _, name in ipairs(candidates) do
-    local candidate = { name }
-    for i = 2, #argv do candidate[#candidate + 1] = argv[i] end
-    local ok, result = pcall(remuda.process.run, { argv = candidate, timeout = 5 })
-    if ok then
-      return {
-        installed = true,
-        logged_in = result.code == 0 and not result.timed_out,
-        timed_out = not not result.timed_out,
-        stdout = result.stdout,
-        stderr = result.stderr,
-      }
-    end
 
-    local message = tostring(result):lower()
-    if not (message:find("os error 2", 1, true)
-        or message:find("no such file or directory", 1, true)
-        or message:find("cannot find the file specified", 1, true)) then
-      return { installed = true, probe_error = true }
-    end
+  local message = tostring(result):lower()
+  if message:find("os error 2", 1, true)
+      or message:find("no such file or directory", 1, true)
+      or message:find("cannot find the file specified", 1, true) then
+    return { installed = false, logged_in = false }
   end
-  return { installed = false, logged_in = false }
+  return { installed = true, probe_error = true }
 end
 
 local function probe()

@@ -77,6 +77,7 @@ local function file_exists(path)
   if not path then
     return false
   end
+  -- Core lookup uses metadata; opening a FIFO here could block the daemon.
   local f = io.open(path, "r")
   if not f then
     return false

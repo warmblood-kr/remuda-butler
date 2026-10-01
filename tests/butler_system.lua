@@ -135,8 +135,20 @@ assert(not doctor_result.codex.installed, "doctor should keep a missing Codex co
 assert(doctor_lookups[1] == "claude", "doctor must use system.find_command")
 assert(doctor_lookups[2] == "claude" and doctor_lookups[3] == "codex",
   "doctor should check both CLIs through system.find_command")
-assert(process_calls == 2 and probes_by_command[found_cmd] == 1 and probes_by_command.codex == 1,
-  "doctor should probe each found candidate once and use its Windows-name fallback only when lookup misses")
+assert(process_calls == 1 and probes_by_command[found_cmd] == 1 and probes_by_command.codex == nil,
+  "doctor should probe only found absolute paths and must not run missing command names")
+
+-- A command in the daemon cwd can still be resolved by process.run through a
+-- relative PATH. Doctor must trust only the absolute path returned by lookup.
+system.find_command = function() return nil, "not found" end
+process_calls = 0
+remuda.process.run = function()
+  process_calls = process_calls + 1
+  return { code = 0, stdout = "logged in", stderr = "", timed_out = false }
+end
+local rejected_relative = doctor.probe_command({ "claude", "auth", "status" }, "posix")
+assert(not rejected_relative.installed and process_calls == 0,
+  "doctor must report missing without probing the literal name when find_command returns nil")
 
 -- HOME fallback is testable without changing the test runner's environment.
 os.getenv = function(name)

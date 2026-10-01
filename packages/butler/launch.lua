@@ -105,7 +105,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
     local message = table.concat(launch_failure_lines(attempts), "\n")
     bus.launch_failures = bus.launch_failures or {}
     bus.launch_failures[name] = { attempts = attempts, error = message }
-    _butler_session_trace("launch_failed", name .. ": " .. message)
+    _butler_session_trace("launch_failed", name .. ": " .. message:gsub("\n", "; "))
     return message
   end
   kind = selected_kind

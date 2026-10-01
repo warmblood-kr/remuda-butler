@@ -36,7 +36,8 @@ end
 local function default_paths()
   local home = os.getenv("XDG_CONFIG_HOME")
   if not home or home == "" then
-    local user_home = system.home()
+    local home_ok, user_home = pcall(system.home)
+    if not home_ok then return nil end
     home = user_home .. "/.config"
   end
   local dir = home .. "/remuda/butler"
@@ -303,7 +304,7 @@ local function resolve_outputs(options)
     token_path, config_path = current.token_path, current.config_path
   end
   if not absolute(token_path) or not absolute(config_path) then
-    return nil, "cannot resolve Matrix output paths; set HOME/XDG_CONFIG_HOME or pass --dir"
+    return nil, "cannot resolve Matrix output paths. Next: set HOME or XDG_CONFIG_HOME, or pass --dir PATH"
   end
   if token_path == config_path then return nil, "Matrix token and config output paths must be different" end
   if not no_dot_segments(token_path) or not no_dot_segments(config_path) then
