@@ -157,22 +157,17 @@ function matrix.reply(opts, on_done)
   local safe_root = terminal_safe(root or opts.event_id)
   local function stopped_error()
     return "Stopped replying in thread " .. safe_root .. " (" .. safe_room .. "): "
-      .. tostring(type(relay.b2b_turn_limit) == "function" and relay:b2b_turn_limit() or 6)
+      .. tostring(relay:b2b_turn_limit())
       .. " Butler-only turns. A human reply resumes it.\nNext: remuda butler matrix --room "
       .. matrix.shell_quote(safe_room) .. " thread " .. matrix.shell_quote(safe_root)
   end
-  if type(relay.b2b_stopped) == "function" and relay:b2b_stopped(room, root) then
+  if not opts.from_outbox and relay:b2b_stopped(room, root) then
     return error_result(done, stopped_error())
   end
   return same_room_then(room, opts.event_id, done, function(reply_done)
-    if type(relay.b2b_stopped) == "function" and relay:b2b_stopped(room, root) then
-      return error_result(reply_done, stopped_error())
-    end
-    if not opts._relay_slot_taken then
+    if not opts.from_outbox then
       local slot, slot_error = matrix.take_post_slot()
       if not slot then return error_result(reply_done, slot_error) end
-    end
-    if not opts._relay_turn_noted and type(relay.note_own_turn) == "function" then
       relay:note_own_turn(room, root)
     end
     local relation_root = type(opts.thread_root) == "string" and opts.thread_root ~= ""

@@ -817,8 +817,7 @@ function relay.new(options)
     local token = { generation = send_generation }
     reply_in_flight[reply_id] = token
     token.handle = api.reply({ room = item.room_id, event_id = item.event_id, text = item.text,
-      thread_root = item.thread_root, txn_id = item.txn_id,
-      _relay_slot_taken = true, _relay_turn_noted = item.turn_noted == true }, function(result)
+      thread_root = item.thread_root, txn_id = item.txn_id, from_outbox = true }, function(result)
       if reply_in_flight[reply_id] ~= token or generation ~= send_generation then return end
       reply_in_flight[reply_id] = nil
       if type(result) == "table" and not result.error then
@@ -907,7 +906,6 @@ function relay.new(options)
       state.reply_outbox[reply_id] = { source_mail_id = source_id, room_id = route.room_id,
         event_id = route.event_id, thread_root = route.thread_root, text = opts.text,
         from_agent = route.from_agent, room_kind = route.room_kind,
-        turn_noted = true,
         txn_id = opts.txn_id or ("butler_" .. reply_id), attempts = 0, status = "pending",
         created_at = os.date("!%Y-%m-%dT%H:%M:%SZ") }
       persist()
