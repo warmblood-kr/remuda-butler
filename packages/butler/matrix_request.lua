@@ -731,8 +731,12 @@ function matrix.request(args, on_done)
   local spec = {
     method = method, url = conf.base .. path, headers = headers,
     body = body, timeout = timeout, connect_timeout = math.min(10, timeout),
-    max_bytes = max_bytes, ca_file = conf.ca_file, pin = conf.pin,
+    max_bytes = max_bytes, ca_file = conf.ca_file, pin = conf.pin, pin_only = conf.pin ~= nil,
     callback = function(result)
+      if result.error and result.error:lower():find("pin", 1, true) and conf.pin then
+        return done({ error = result.error .. "\nNext: recompute pin_sha256 as the server key's SPKI SHA-256"
+          .. " (see docs/butler.md) or use ca_file=PATH" })
+      end
       if result.error then return done({ error = result.error }) end
       result.headers = json.object(type(result.headers) == "table" and result.headers or {})
       if result.status and (result.status < 200 or result.status >= 300) then

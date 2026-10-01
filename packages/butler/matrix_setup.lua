@@ -14,7 +14,7 @@ local USAGE = [[Usage: remuda butler matrix setup [OPTIONS]
   --force                Replace existing token or config files.
   --all                  Also create the optional ALL-BUTLERS room.
   --rooms open|allowlist Room invites: open (anyone) or allowlist (default; allowlisted senders only).
-  --pin SHA256HEX         Trust this HTTPS certificate fingerprint.
+  --pin SHA256HEX        Trust this HTTPS certificate SPKI SHA-256 (see docs/butler.md).
   --ca-file PATH         Trust the HTTPS certificate authority in this file.
 
 Example: remuda butler matrix setup --homeserver https://matrix.example.org --owner @alice:example.org --register --dir /path/to/private/butler --pin <64-hex-sha256>]]
@@ -189,6 +189,14 @@ local function validate_secret(path, kind)
   if secret_error == "empty" then return nil, "secret input file is empty: " .. path end
   if not secret then return nil, "secret input file is invalid: " .. path end
   return secret
+end
+
+-- A TLS error naming the pin gets one concrete next step (core reports SPKI pin mismatches).
+local function pin_error(response)
+  local message = type(response) == "table" and response.error
+  if type(message) ~= "string" or not message:lower():find("pin", 1, true) then return nil end
+  return "The HTTPS server key does not match --pin.\n"
+    .. "Next: recompute the SPKI SHA-256 of the server key (see docs/butler.md) or use --ca-file PATH"
 end
 
 local function transport_pin(hex)
@@ -472,12 +480,13 @@ function matrix.setup_network(options, on_done)
     local spec = {
       method = method, url = base .. path, headers = headers, body = body,
       timeout = 15, connect_timeout = 10, max_bytes = 1024 * 1024,
-      ca_file = options.ca_file, pin = transport_pin(options.pin),
+      ca_file = options.ca_file, pin = transport_pin(options.pin), pin_only = options.pin ~= nil,
       callback = function(response)
         if done_called or cancelled then return end
         if type(response) ~= "table" then
           return fail("Matrix setup " .. stage .. " request failed")
         end
+        if pin_error(response) then return fail(pin_error(response)) end
         local status = tonumber(response.status)
         local decoded, decode_error
         if type(response.body) == "string" and response.body ~= "" then
@@ -639,9 +648,10 @@ function matrix.setup_register(options, on_done)
       method = "POST", url = base .. "/_matrix/client/v3/register",
       headers = { Accept = "application/json", ["Content-Type"] = "application/json" },
       body = body, timeout = 15, connect_timeout = 10, max_bytes = 1024 * 1024,
-      ca_file = options.ca_file, pin = transport_pin(options.pin),
+      ca_file = options.ca_file, pin = transport_pin(options.pin), pin_only = options.pin ~= nil,
       callback = function(response)
         if done_called or cancelled then return end
+        if pin_error(response) then return fail(pin_error(response)) end
         callback(response, decode(response))
       end,
     }

@@ -184,10 +184,14 @@ it from the server's leaf certificate with:
 openssl x509 -in server-cert.pem -pubkey -noout | openssl pkey -pubin -outform DER | openssl dgst -sha256
 ```
 
-Copy the 64 hexadecimal digits after `=` into `pin_sha256`. Butler converts
-that digest to the `sha256/<base64>` pin form used by `remuda.http`. HTTPS
-fails closed unless `ca_file` or a valid `pin_sha256` is configured; HTTP is
-intended for local or development use.
+Copy the 64 hexadecimal digits after `=` into `pin_sha256` (or pass them to
+`setup --pin`). Butler converts that digest to the `sha256/<base64>` pin form
+used by `remuda.http` and sends it with `pin_only`, so a self-signed homeserver
+works with the pin alone: the CA chain is skipped, while the hostname, validity
+dates, and the SPKI pin are still checked. `ca_file` keeps full chain
+validation. HTTPS fails closed unless `ca_file` or a valid `pin_sha256` is
+configured, and a pin mismatch fails with a `Next:` line; HTTP is intended for
+local or development use.
 
 Matrix sends and replies are split at UTF-8 boundaries into chunks of at most
 4000 bytes. Upload request bodies and download response bodies are capped at

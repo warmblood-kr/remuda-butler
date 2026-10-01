@@ -2563,6 +2563,61 @@ local function test_failed_leave_reports_removed_config_and_safe_next()
   remove_dir(dir)
 end
 
+-- A self-signed homeserver as core 0a5f090 sees it: pin_sha256 must reach
+-- remuda.http with pin_only = true; ca_file keeps chain validation.
+local function test_pinned_self_signed_homeserver_uses_pin_only()
+  local good_hex, wrong_hex = string.rep("0", 64), string.rep("1", 64)
+  local good_pin = "sha256/" .. string.rep("A", 43) .. "="
+  local function self_signed(spec)
+    if spec.pin_only ~= true then
+      return { error = "TLS request failed: server certificate issuer not trusted" }
+    elseif spec.pin ~= good_pin then
+      return { error = "TLS request failed: SPKI pin mismatch" }
+    end
+    return { status = 200, body = '{"user_id":"@bot:example.org"}' }
+  end
+  local function run(trust_line)
+    local dir, path = fixture()
+    local file = assert(io.open(path, "a")); file:write(trust_line, "\n"); file:close()
+    local result, spec
+    with_alias_http(path, self_signed, function(calls)
+      matrix.request({ method = "GET", path = "/_matrix/client/v3/account/whoami" },
+        function(value) result = value end)
+      spec = calls[1]
+    end)
+    cleanup_fixture(dir, path)
+    return result, spec
+  end
+
+  local ok, ok_spec = run("pin_sha256=" .. good_hex)
+  assert(ok and not ok.error and ok.status == 200,
+    "pin_sha256 alone must reach a self-signed homeserver: " .. tostring(ok and ok.error))
+  assert(ok_spec.pin_only == true and ok_spec.pin == good_pin and ok_spec.ca_file == nil,
+    "pin_sha256 requests must use pin_only = true")
+
+  local bad = run("pin_sha256=" .. wrong_hex)
+  assert(bad and type(bad.error) == "string" and bad.error:find("pin", 1, true)
+    and bad.error:find("Next:", 1, true) and not bad.error:find("access-token", 1, true),
+    "a wrong pin_sha256 must fail with a Next: line: " .. tostring(bad and bad.error))
+
+  local ca_dir = os.tmpname()
+  local _, ca_spec = run("ca_file=" .. ca_dir)
+  os.remove(ca_dir)
+  assert(ca_spec and ca_spec.ca_file == ca_dir and ca_spec.pin_only ~= true and ca_spec.pin == nil,
+    "ca_file requests keep chain validation: no pin_only")
+
+  local dir, path = fixture()
+  with_alias_http(path, self_signed, function(calls)
+    local refused
+    matrix.request({ method = "GET", path = "/_matrix/client/v3/account/whoami" },
+      function(value) refused = value end)
+    assert(#calls == 0 and refused and refused.error
+      == "HTTPS Matrix homeserver requires ca_file=PATH or pin_sha256=HEX",
+      "HTTPS without pin or ca_file stays refused before any request")
+  end)
+  cleanup_fixture(dir, path)
+end
+
 local function test_unconfigured_room_request_is_refused()
   local dir, path = invite_fixture(nil, "room=" .. NEW .. " how=operator\n")
   with_operator_config(path, 200, function(calls)
@@ -2928,6 +2983,7 @@ for _, case in ipairs({
   { "test_leave_unconfigured_room_is_refused", test_leave_unconfigured_room_is_refused },
   { "test_failed_leave_reports_removed_config_and_safe_next", test_failed_leave_reports_removed_config_and_safe_next },
   { "test_unconfigured_room_request_is_refused", test_unconfigured_room_request_is_refused },
+  { "test_pinned_self_signed_homeserver_uses_pin_only", test_pinned_self_signed_homeserver_uses_pin_only },
 }) do
   local ok, err = pcall(case[2])
   if not ok then invite_failures[#invite_failures + 1] = case[1] .. ": " .. tostring(err) end
