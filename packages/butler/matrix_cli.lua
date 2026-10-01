@@ -34,7 +34,7 @@ end
 
 local function parse(args)
   if type(args) ~= "table" or args[1] ~= "matrix" then return nil end
-  local options, at = {}, 2
+  local options, at, literal = {}, 2, false
   local function option(value)
     if value == "--json" then options.json = true; return 1 end
     if value == "--room" then
@@ -48,7 +48,7 @@ local function parse(args)
     return nil
   end
   while at <= #args do
-    if args[at] == "--" then at = at + 1; break end
+    if args[at] == "--" then literal = true; at = at + 1; break end
     local width = option(args[at])
     if not width and args[at] == "-n" then
       if not args[at + 1] then error("-n requires a count", 0) end
@@ -68,6 +68,7 @@ local function parse(args)
     local value = args[at]
     if not positional and value == "--" then
       positional = true
+      literal = true
       at = at + 1
     elseif not positional and verb == "rooms" and value == "--public" then
       options.public = true
@@ -106,6 +107,12 @@ local function parse(args)
   if method == "send" then
     options.text = join_words(values, 1)
     if #values == 0 then return nil end
+    -- A bare `-` reads the text from stdin; after `--` it is literal text. Core
+    -- forwards stdin by the same rule (a `-` argument before any `--`).
+    if values[1] == "-" and not literal then
+      if #values ~= 1 then error("stdin message form takes no extra arguments", 0) end
+      options.stdin = true
+    end
   elseif method == "reply" then
     if #values < 2 then return nil end
     options.event_id, options.text = values[1], join_words(values, 2)
@@ -317,7 +324,7 @@ function matrix.cli_usage()
   return USAGE
 end
 
-function matrix.cli(args, agent)
+function matrix.cli(args, agent, stdin_body)
   if type(args) == "table" and args[1] == "matrix" and args[2] == "setup" then
     local setup_args = {}
     for index = 3, #args do setup_args[#setup_args + 1] = args[index] end
@@ -593,10 +600,14 @@ function matrix.cli(args, agent)
     if type(remuda.fail) == "function" then return remuda.fail(message, 1) end
     error(message, 0)
   end
-  if verb == "send" and options.text == "-" then
-    local message = "send - stdin is unavailable until core #213"
-    if type(remuda.fail) == "function" then return remuda.fail(message, 1) end
-    error(message, 0)
+  if options.stdin then
+    local read, text = false, "no message body received on stdin"
+    if type(stdin_body) == "function" then read, text = pcall(stdin_body) end
+    if not read then
+      if type(remuda.fail) == "function" then return remuda.fail(tostring(text), 1) end
+      error(tostring(text), 0)
+    end
+    options.text = text
   end
 
   local active, cancelled, completed = nil, { value = false }, { value = false }

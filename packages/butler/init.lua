@@ -204,14 +204,14 @@ the normal way for a member to communicate.
 - `rooms`: joined rooms (read-only).
 - `thread EVENT_ID`: all replies in a thread.
 - `event EVENT_ID` (alias `get`): one event.
-- `send TEXT`: start a NEW post only (name the room with `--room ROOM`); long text is split, rate-limited; `send -` is refused until core #213. Answers ALWAYS go via `remuda butler reply MESSAGE-ID -`, never send.
+- `send TEXT`: start a NEW post only (name the room with `--room ROOM`); long text is split, rate-limited; `send -` reads the text from stdin (up to 64 KiB). Answers ALWAYS go via `remuda butler reply MESSAGE-ID -`, never send.
 - `reply EVENT_ID TEXT` / `react EVENT_ID KEY`: answer or react (same room only).
 - `upload PATH`: post a file (up to 20 MB). `[-o PATH] download MXC`: fetch media.
 - `redact EVENT_ID [--reason TEXT]`: remove your message.
 ]]
         end,
         prompt = function()
-          return "For Matrix, use `remuda butler matrix VERB`; never call Matrix REST or curl directly. `send TEXT` starts a NEW post only (name the room with `--room ROOM`); long text is split, rate-limited; `send -` is refused until core #213. Answers ALWAYS go via `remuda butler reply MESSAGE-ID -`, never send. "
+          return "For Matrix, use `remuda butler matrix VERB`; never call Matrix REST or curl directly. `send TEXT` starts a NEW post only (name the room with `--room ROOM`); long text is split, rate-limited; `send -` reads the text from stdin (up to 64 KiB). Answers ALWAYS go via `remuda butler reply MESSAGE-ID -`, never send. "
         end },
       { id = "leader", order = 90,
         prompt = function(_, ctx) return "Your leader is " .. ctx.parent .. "." end },

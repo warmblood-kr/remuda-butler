@@ -8791,6 +8791,62 @@ fn butler_matrix_send_chunks_utf8_async_and_rejects_empty_or_dash() {
 }
 
 #[test]
+fn butler_matrix_send_and_reply_add_formatted_body_and_fall_back_to_plain() {
+    let dir = scratch_dir("butler-matrix-formatted");
+    let (_daemon, path) = butler_test_daemon(&dir);
+    let room = "!write:example.org";
+    let (token_path, config_path) = butler_config(&dir, "write", "http://matrix.example.org",
+        room, "@bot:example.org", "");
+    eval(&path, include_str!("support/fake_http.lua"));
+    eval(&path, &format!(
+        "remuda._butler_matrix_config = {{ token_path = {}, config_path = {} }}; remuda.exec('butler/matrix')",
+        lua_raw_string(&token_path.to_string_lossy()), lua_raw_string(&config_path.to_string_lossy())));
+    let result = eval(&path, r#"
+      local matrix, room = remuda.butler.matrix, "!write:example.org"
+      local base = "http://matrix.example.org/_matrix/client/v3/rooms/%21write%3Aexample.org/"
+      remuda.http.respond_prefix("GET", base .. "context/",
+        { status = 200, headers = {}, body = '{"event":{"room_id":"!write:example.org"}}' })
+      remuda.http.respond_prefix("PUT", base .. "send/m.room.message/",
+        { status = 200, headers = {}, body = '{"event_id":"$sent"}' })
+      matrix.relay.instance = { can_reply_to = function() return true end }
+      local function content_of(start)
+        local before, result = #remuda.http.calls, nil
+        start(function(value) result = value end)
+        for _ = 1, 4 do remuda.http.tick() end
+        local call = remuda.http.calls[#remuda.http.calls]
+        if not result or result.error or #remuda.http.calls == before or call.method ~= "PUT" then return {} end
+        return matrix.decode_json(call.body) or {}
+      end
+      local text = "**bold** <b>raw</b>"
+      local html = "<p><strong>bold</strong> &lt;b&gt;raw&lt;/b&gt;</p>"
+      local sent = content_of(function(done) matrix.send({ text = text, room = room }, done) end)
+      if sent.msgtype ~= "m.text" or sent.body ~= text then return "send-body-changed" end
+      if sent.format ~= "org.matrix.custom.html" or sent.formatted_body ~= html then
+        return "send-not-formatted:" .. tostring(sent.formatted_body)
+      end
+      local reply = content_of(function(done)
+        matrix.reply({ room = room, event_id = "$source", text = text }, done)
+      end)
+      local relation = reply["m.relates_to"] or {}
+      if reply.msgtype ~= "m.text" or reply.body ~= text or relation.rel_type ~= "m.thread"
+        or relation.event_id ~= "$source" or (relation["m.in_reply_to"] or {}).event_id ~= "$source" then
+        return "reply-body-or-relation-changed"
+      end
+      if reply.format ~= "org.matrix.custom.html" or reply.formatted_body ~= html then return "reply-not-formatted" end
+      -- 3900 empty table cells render to more than the 30000-byte HTML cap.
+      local wide = "|a|\n|-|\n" .. string.rep("|", 3900)
+      local capped = content_of(function(done) matrix.send({ text = wide, room = room }, done) end)
+      if capped.body ~= wide or capped.format ~= nil or capped.formatted_body ~= nil then return "oversized-html-sent" end
+      remuda.butler.md2html.convert = function() error("converter broke") end
+      local plain = content_of(function(done) matrix.send({ text = text, room = room }, done) end)
+      if plain.msgtype ~= "m.text" or plain.body ~= text then return "fallback-body-changed" end
+      if plain.format ~= nil or plain.formatted_body ~= nil then return "fallback-not-plain" end
+      return "ok"
+    "#);
+    assert_eq!(result, "ok", "Matrix m.text must carry safe HTML next to the unchanged plain body: {result}");
+}
+
+#[test]
 fn butler_matrix_transaction_ids_change_across_daemon_restarts() {
     fn txn_in_fresh_daemon(tag: &str) -> String {
         let dir = scratch_dir(tag);
@@ -9119,7 +9175,58 @@ fn butler_matrix_cli_client_disconnect_cancels_active_word() {
 }
 
 #[test]
-fn butler_matrix_cli_refuses_send_dash_and_fails_cleanly_without_pending() {
+fn butler_matrix_cli_send_dash_sends_stdin_as_the_text() {
+    let dir = scratch_dir("butler-matrix-cli-stdin");
+    let (_daemon, path) = butler_cli_test_daemon(&dir);
+    let room = "!cli:example.org";
+    let (token_path, config_path) = butler_config(&dir, "cli", "http://matrix.example.org",
+        room, "@bot:example.org", "");
+    eval(&path, include_str!("support/fake_http.lua"));
+    eval(&path, &format!(
+        "remuda._butler_matrix_config = {{ token_path = {}, config_path = {} }}; remuda.exec('butler/matrix')",
+        lua_raw_string(&token_path.to_string_lossy()), lua_raw_string(&config_path.to_string_lossy())));
+    eval(&path, r#"
+      remuda.http.respond_prefix("PUT", "http://matrix.example.org/_matrix/client/v3/rooms/%21cli%3Aexample.org/send/m.room.message/",
+        { status = 200, headers = {}, body = '{"event_id":"$cli"}' })
+    "#);
+    // (argv after `matrix`, stdin, expected m.text body). Stdin is never re-parsed as options.
+    let cases: [(&[&str], &str, &str); 5] = [
+        (&["--room", room, "send", "-"], "--json is text\n-\n--room !x:y last\n", "--json is text\n-\n--room !x:y last"),
+        (&["send", "-"], "-\n", "-"),
+        (&["send", "-"], "two newlines\r\n\r\n", "two newlines\r\n"),
+        (&["send", "--", "-"], "ignored", "-"),
+        (&["send", "plain", "text"], "ignored", "plain text"),
+    ];
+    for (index, (args, stdin, expected)) in cases.iter().enumerate() {
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
+            .args(["-s", "s", "butler", "matrix"]).args(*args)
+            .env("REMUDA_RUNTIME_DIR", &dir)
+            .env("REMUDA_NO_UPDATE_CHECK", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn().expect("spawn Matrix CLI send");
+        child.stdin.take().expect("child stdin").write_all(stdin.as_bytes()).expect("write stdin");
+        let sent = (index + 1).to_string();
+        let deadline = Instant::now() + PATIENCE;
+        // Ticking also runs the send rate-limit timer that queues every send after the first.
+        while eval(&path, "remuda.http.tick(); return #remuda.http.calls") != sent {
+            assert!(Instant::now() < deadline, "{args:?} never dispatched its send");
+            assert!(child.try_wait().expect("poll Matrix CLI").is_none(), "{args:?} exited before sending: {}",
+                String::from_utf8_lossy(&child.wait_with_output().expect("collect").stderr));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        eval(&path, "remuda.http.tick()");
+        let output = child.wait_with_output().expect("collect Matrix CLI output");
+        assert!(output.status.success(), "{args:?} failed: {}", String::from_utf8_lossy(&output.stderr));
+        let content = eval(&path, &format!(
+            "local c = remuda.json.decode(remuda.http.calls[{sent}].body); return c.msgtype .. '|' .. c.body"));
+        assert_eq!(content, format!("m.text|{expected}"), "{args:?} sent the wrong text");
+    }
+}
+
+#[test]
+fn butler_matrix_cli_rejects_invalid_send_dash_and_fails_cleanly_without_pending() {
     let dir = scratch_dir("butler-matrix-cli-compat");
     let (_daemon, path) = butler_cli_test_daemon(&dir);
     for verb in ["approve", "deny"] {
@@ -9167,11 +9274,26 @@ fn butler_matrix_cli_refuses_send_dash_and_fails_cleanly_without_pending() {
     assert!(String::from_utf8_lossy(&agent_approve.stderr).contains(
         "approve is operator-only. Next: wait for the owner's answer by mail; remuda butler inbox"),
         "unexpected agent approve error: {}", String::from_utf8_lossy(&agent_approve.stderr));
-    let dash = remuda_timed(&dir, &["-s", "s", "butler", "matrix", "send", "-"]);
-    assert!(!dash.status.success(), "send - must be refused by CLI glue");
-    assert!(String::from_utf8_lossy(&dash.stderr).contains("stdin"), "unexpected send - error: {}",
-        String::from_utf8_lossy(&dash.stderr));
-    assert_eq!(eval(&path, "return #remuda.http.calls"), "0", "send - unexpectedly touched Matrix");
+    let oversized = format!("{}\n", "x".repeat(65_537));
+    for (args, stdin, expected) in [
+        (&["send", "-"][..], "", "message body must not be empty"),
+        (&["send", "-"][..], "\n", "message body must not be empty"),
+        (&["send", "-"][..], oversized.as_str(), "message body exceeds the 64 KiB limit"),
+        (&["--room", room, "send", "-", "extra"][..], "body\n", "stdin message form takes no extra arguments"),
+    ] {
+        let argv = [&["-s", "s", "butler", "matrix"][..], args].concat();
+        let dash = remuda_timed_stdin(&dir, &argv, stdin.as_bytes());
+        assert!(!dash.status.success(), "{args:?} with invalid stdin must fail");
+        assert!(String::from_utf8_lossy(&dash.stderr).contains(expected), "unexpected {args:?} error: {}",
+            String::from_utf8_lossy(&dash.stderr));
+    }
+    let no_stdin = eval(&path, r#"
+      local ok, err = pcall(remuda._butler_command_run, "matrix", {"matrix", "send", "-"}, {env={}})
+      assert(not ok)
+      return tostring(err)
+    "#);
+    assert!(no_stdin.contains("no message body received on stdin"), "{no_stdin}");
+    assert_eq!(eval(&path, "return #remuda.http.calls"), "0", "invalid send - touched Matrix");
 
     let agent_leave = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
         .args(["-s", "s", "butler", "matrix", "leave", room])
@@ -9220,7 +9342,7 @@ fn butler_matrix_guidance_covers_each_member_verb_and_omits_operator_verbs() {
         "- `rooms`: joined rooms (read-only).",
         "- `thread EVENT_ID`: all replies in a thread.",
         "- `event EVENT_ID` (alias `get`): one event.",
-        "- `send TEXT`: start a NEW post only (name the room with `--room ROOM`); long text is split, rate-limited; `send -` is refused until core #213. Answers ALWAYS go via `remuda butler reply MESSAGE-ID -`, never send.",
+        "- `send TEXT`: start a NEW post only (name the room with `--room ROOM`); long text is split, rate-limited; `send -` reads the text from stdin (up to 64 KiB). Answers ALWAYS go via `remuda butler reply MESSAGE-ID -`, never send.",
         "- `reply EVENT_ID TEXT` / `react EVENT_ID KEY`: answer or react (same room only).",
         "- `upload PATH`: post a file (up to 20 MB). `[-o PATH] download MXC`: fetch media.",
         "- `redact EVENT_ID [--reason TEXT]`: remove your message.",

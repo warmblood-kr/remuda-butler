@@ -114,8 +114,8 @@ operator to choose from. The inviter check relies on the homeserver appending
 the real invite event to `invite_state` (Synapse does). `leave` removes a joined
 room by ID or alias, while HOME and ALL-BUTLERS cannot be left or removed. The
 interactive setup wizard writes `rooms=open` without asking; flag-based setup
-defaults to allowlist unless given `--rooms open`. The `send -` stdin form is
-unsupported until core #213.
+defaults to allowlist unless given `--rooms open`. `send -` reads the text from
+stdin (up to 64 KiB, one trailing newline dropped); `send -- -` sends a literal `-`.
 
 `join` and `leave` change room membership and require an outside terminal
 caller; session, unknown, and missing callers are refused. Clearing
@@ -198,6 +198,20 @@ Matrix sends and replies are split at UTF-8 boundaries into chunks of at most
 20 MiB. Ordinary Matrix requests default to a 15-second timeout; downloads use
 30 seconds and uploads use 60 seconds. The default response-body limit is
 1 MiB; media downloads may use the full 20 MiB limit.
+
+Text messages (`send` and `reply`) are sent as `m.text` with the text unchanged
+in `body`, plus a `formatted_body` (`org.matrix.custom.html`) rendered from a
+Markdown subset: headings, `**bold**`, `*italic*`, `` `code` ``, fenced code,
+links, bullet and numbered lists, blockquotes, `---` rules, and tables.
+Everything is HTML-escaped first, so raw HTML never passes through, and link
+targets are limited to `http`, `https`, and `mailto`. Limits: lists are flat
+(nested items join the parent list); a blockquote is a single paragraph; a `|`
+inside a table cell splits the cell, even in a code span or escaped;
+`_italic_` is not supported. Text over 4000 bytes is split first and each chunk
+is converted on its own, so a block that spans a chunk boundary (a code fence
+or a table, for example) renders broken. If the converter fails, or its HTML
+for a chunk exceeds 30000 bytes, that chunk is sent as plain `m.text` without
+`formatted_body`.
 
 The relay resumes from its saved sync cursor and deduplicates by Matrix event
 ID. It records cursor, processed IDs, pending deliveries, quarantine records,
