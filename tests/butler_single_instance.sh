@@ -346,6 +346,15 @@ if [[ $LOCK_WORD == true ]]; then
   set -e
   [[ $OWNER_CODE != 1 && $SECOND_CODE == 1 ]] && ok "T9 a mod reload in the owner keeps ownership" \
     || bad "T9 a mod reload in the owner keeps ownership: owner exit $OWNER_CODE, second exit $SECOND_CODE"
+  # The daemon with ANOTHER data home gets its own data lock, so only the
+  # config lock can refuse it: that lock is still held after the reload too.
+  assert_scratch
+  set +e
+  OUT=$("$REMUDA_BIN" -s "$X" butler status 2>&1); CODE=$?
+  set -e
+  [[ $CODE == 1 && $OUT == *"already running in another Remuda daemon (session $A,"* ]] \
+    && ok "T9 after the reload the config lock is still held: a daemon with another data home is refused" \
+    || bad "T9 after the reload the config lock is still held: exit $CODE, output: $(printf '%s' "$OUT" | head -1 | cut -c1-160)"
 
   kill "${PIDS[0]}" # the owner daemon, started by this script
   for _ in $(seq 50); do kill -0 "${PIDS[0]}" 2>/dev/null || break; sleep 0.1; done
