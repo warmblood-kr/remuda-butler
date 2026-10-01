@@ -601,7 +601,7 @@ function relay.new(options)
       send_notice(cfg.home_room,
         "Stopped replying in thread " .. terminal_safe_field(root, 256) .. " ("
           .. terminal_safe_field(room, 512) .. "): " .. tostring(cfg.b2b_max_turns)
-          .. " Butler-only turns. A reply in that thread from someone on the allowlist resumes it.",
+          .. " Butler-only turns. A reply in that thread from a person on the allowlist resumes it.",
         "b2b-turn-limit", cfg.home_room)
     end
     return turns.n
@@ -899,7 +899,7 @@ function relay.new(options)
         local safe_room, safe_root = terminal_safe_field(room, 512), terminal_safe_field(root, 256)
         return nil, "Reply not sent: stopped replying in thread " .. safe_root .. " (" .. safe_room .. "): "
           .. tostring(cfg.b2b_max_turns)
-          .. " Butler-only turns. A reply in that thread from someone on the allowlist resumes it.\nNext: remuda butler matrix --room "
+          .. " Butler-only turns. A reply in that thread from a person on the allowlist resumes it.\nNext: remuda butler matrix --room "
           .. shell_quote(safe_room) .. " thread " .. shell_quote(safe_root)
       end
       local slot, slot_error = matrix.take_post_slot(config_path)

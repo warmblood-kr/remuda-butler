@@ -159,7 +159,7 @@ function matrix.reply(opts, on_done)
   local function stopped_error()
     return "Reply not sent: stopped replying in thread " .. safe_root .. " (" .. safe_room .. "): "
       .. tostring(relay:b2b_turn_limit())
-      .. " Butler-only turns. A reply in that thread from someone on the allowlist resumes it.\n"
+      .. " Butler-only turns. A reply in that thread from a person on the allowlist resumes it.\n"
       .. "Next: remuda butler matrix --room " .. matrix.shell_quote(safe_room)
       .. " thread " .. matrix.shell_quote(safe_root)
   end

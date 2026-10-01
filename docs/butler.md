@@ -94,13 +94,13 @@ When the Butler reaches the turn limit, it posts this line to HOME and stops
 replying in that thread until an allowlisted human replies:
 
 ```text
-Stopped replying in thread ROOT (ROOM): N Butler-only turns. A reply in that thread from someone on the allowlist resumes it.
+Stopped replying in thread ROOT (ROOM): N Butler-only turns. A reply in that thread from a person on the allowlist resumes it.
 ```
 
 The reply refusal includes a command with shell-quoted room and thread IDs:
 
 ```text
-Reply not sent: stopped replying in thread ROOT (ROOM): N Butler-only turns. A reply in that thread from someone on the allowlist resumes it.
+Reply not sent: stopped replying in thread ROOT (ROOM): N Butler-only turns. A reply in that thread from a person on the allowlist resumes it.
 Next: remuda butler matrix --room 'ROOM' thread '$ROOT'
 ```
 
