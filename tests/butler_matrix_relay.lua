@@ -4922,13 +4922,15 @@ rx_tests[#rx_tests + 1] = { "test_inbox_header_does_not_show_a_thread_root_over_
   local longest = "$" .. ("a"):rep(254)
   local text = render(longest)
   if not text:find("  Matrix event $ev in room " .. NEW .. " (joined), thread " .. longest .. "\n"
-    .. "  Next: remuda butler matrix --room '" .. NEW .. "' thread '" .. longest .. "'\n", 1, true) then
+    .. "  Next: remuda butler reply H1\n  to read the thread: remuda butler matrix --room '" .. NEW
+    .. "' thread '" .. longest .. "'\n", 1, true) then
     problems[#problems + 1] = "a 255-byte root is shown as today, got:\n" .. text
   end
   text = render(longest .. "a")
   if not text:find("  Matrix event $ev in room " .. NEW .. " (joined), thread (id not shown)\n"
-    .. "  Next: remuda butler matrix --room '" .. NEW .. "' history\n", 1, true) then
-    problems[#problems + 1] = "a 256-byte root must print (id not shown) and Next: must end in history, got:\n"
+    .. "  Next: remuda butler reply H1\n  to read the thread: remuda butler matrix --room '" .. NEW
+    .. "' history\n", 1, true) then
+    problems[#problems + 1] = "a 256-byte root must print (id not shown) and the thread line must end in history, got:\n"
       .. text:gsub(("a"):rep(200), "<200 a>")
   end
   assert(#problems == 0, "\n" .. table.concat(problems, "\n"))
