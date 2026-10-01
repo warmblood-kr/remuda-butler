@@ -353,7 +353,7 @@ local function notify_mail_delivery(message, delivered, recipient_alias, what)
       kind = message.kind,
       in_reply_to = message.in_reply_to,
       matrix = message.matrix,
-    }, what)
+    }, what, recipient.kind)
     local notify_ok, notified, notify_error =
       pcall(remuda._butler_notify, recipient.alias, notice, delivered.id)
     if notify_ok then

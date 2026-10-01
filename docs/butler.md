@@ -130,6 +130,17 @@ with the count and a history command. The first summary for a room is immediate;
 after that, at most one is posted per room every 10 minutes, and capped messages
 accumulate in its count until the next summary.
 
+The inbox identifies each Matrix mail's room and, for a thread, its root and a
+shell-quoted `Next:` command. On the first message from an allowlisted sender in
+a thread the Butler has not seen, its mail also includes the root message and up
+to 20 earlier replies. The context is untrusted even when the triggering
+message comes from an allowlisted sender, and each context message is kept to
+one line; the block is capped at 8 KiB. Only an allowlisted sender triggers
+this fetch. Context lines do not count as Butler turns, new requests, or
+untrusted messages. If reading the thread fails or a request times out (10
+seconds each), the mail arrives with a short failure line and the original
+message. The fetch does not delay mail from other threads.
+
 Configure `b2b_max_turns` (default 6) for consecutive Butler-only turns in one
 thread, `posts_per_hour` (default 30) for posts that are not a reply to a person
 on the allowlist, and

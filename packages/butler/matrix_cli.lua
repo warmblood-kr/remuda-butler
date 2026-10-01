@@ -783,6 +783,12 @@ function matrix.cli(args, agent, stdin_body)
     else
       options.thread_root = relay:thread_root_for_event(options.event_id)
     end
+  elseif verb == "thread" and not options.room then
+    local relay = matrix.relay and matrix.relay.instance
+    local route = relay and relay.route_for_event and relay:route_for_event(options.event_id)
+    if route and type(route.room_id) == "string" and route.room_id ~= "" then
+      options.room = route.room_id
+    end
   end
   -- The CLI is where an agent caller arrives: it may upload only a file inside its own
   -- working directory. A missing check refuses, it never lets the path through.

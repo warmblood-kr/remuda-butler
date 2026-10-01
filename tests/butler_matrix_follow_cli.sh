@@ -133,5 +133,19 @@ run_args send "post 3"
 COUNTS=$(remuda -s "$S" -e 'return (bmf_sent or 0) .. " sent, " .. (bmf_notices or 0) .. " notice, " .. (bmf_puts or 0) .. " PUTs"')
 [[ $COUNTS == "2 sent, 1 notice, 3 PUTs" ]] \
   || soft "expected the 2 sent texts plus exactly ONE post-cap HOME line and nothing else, got: $COUNTS"
+# #235 step A: `remuda butler inbox MESSAGE-ID` reprints one mail. It must show
+# the same Matrix line and Next line as the inbox itself (one shared helper).
+REPRINT=$(remuda -s "$S" -e '
+  local delivered = remuda._butler_inbox_delivery({ from = { host = "matrix", alias = "@owner:example.org",
+    session = "@owner:example.org", kind = "matrix", id = "", leader = "" }, to = "butler",
+    text = "reprint body", subject = "Matrix message from @owner:example.org",
+    matrix = { event_id = "$rp1", room_id = "!side:example.org", room_kind = "joined",
+      thread_root = "$rp-root", sender = "@owner:example.org" } })
+  return remuda._butler_inbox_message("butler", delivered.id)' 2>&1) || true
+WANT="  Matrix event \$rp1 in room !side:example.org (joined), thread \$rp-root
+  Next: remuda butler matrix --room '!side:example.org' thread '\$rp-root'
+reprint body"
+[[ $REPRINT == *"] Matrix message from @owner:example.org
+$WANT" ]] || soft "inbox MESSAGE-ID must show the Matrix line and the Next line of the mail, got: $REPRINT"
 ((${#SOFT[@]} == 0)) || fail "$(printf '%s\n' "${SOFT[@]}")"
 echo PASS
