@@ -1016,9 +1016,43 @@ impl Drop for ProcessPidGuard {
     }
 }
 
+/// A data home of this daemon's own, under its scratch dir and removed with it
+/// (see #225). tests/rust_tests.sh installs the Butler mod once, in the
+/// XDG_DATA_HOME it exports; that mod directory is linked in here. A second
+/// daemon started in the same `dir` (a restart test) gets the same home.
+fn own_data_home(dir: &Path) -> PathBuf {
+    let data_home = dir.join("data");
+    std::fs::create_dir_all(data_home.join("remuda"))
+        .unwrap_or_else(|err| panic!("create data home {data_home:?}: {err}"));
+    if let Some(install) = std::env::var_os("XDG_DATA_HOME") {
+        let link = data_home.join("remuda/mods");
+        // A restart in the same scratch dir finds the link already there.
+        if let Err(err) = std::os::unix::fs::symlink(PathBuf::from(install).join("remuda/mods"), &link) {
+            assert!(
+                err.kind() == std::io::ErrorKind::AlreadyExists,
+                "link the Butler mod into {link:?}: {err}"
+            );
+        }
+    }
+    data_home
+}
+
+/// Every test daemon gets its own XDG_DATA_HOME and XDG_CONFIG_HOME. With one
+/// home for the whole cargo run, all daemons share agents.jsonl (one root
+/// Butler id), one inbox file and one config path.
+fn own_homes(cmd: &mut std::process::Command, dir: &Path) {
+    let config_home = dir.join("config");
+    std::fs::create_dir_all(&config_home)
+        .unwrap_or_else(|err| panic!("create config home {config_home:?}: {err}"));
+    cmd.env("XDG_DATA_HOME", own_data_home(dir))
+        .env("XDG_CONFIG_HOME", config_home);
+}
+
 impl Daemon {
     fn spawn(dir: &Path) -> Self {
-        let child = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
+        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"));
+        own_homes(&mut cmd, dir);
+        let child = cmd
             .args(["-s", "s", "daemon"])
             .env("REMUDA_RUNTIME_DIR", dir)
             .current_dir(dir)
@@ -1043,6 +1077,7 @@ impl Daemon {
     /// test`'s own working directory.
     fn spawn_with_pwd(dir: &Path, pwd: Option<&str>) -> Self {
         let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"));
+        own_homes(&mut cmd, dir);
         cmd.args(["-s", "s", "daemon"])
             .env("REMUDA_RUNTIME_DIR", dir)
             .current_dir(dir)
@@ -1074,6 +1109,8 @@ impl Daemon {
     /// `spawn`'s existing behavior.
     fn spawn_with_env(dir: &Path, extra_env: &[(&str, &str)]) -> Self {
         let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"));
+        // Before extra_env, so a home a test passes explicitly wins.
+        own_homes(&mut cmd, dir);
         cmd.args(["-s", "s", "daemon"])
             .env("REMUDA_RUNTIME_DIR", dir)
             .current_dir(dir)
@@ -1105,6 +1142,8 @@ impl Daemon {
     /// they happen to be set).
     fn spawn_with_home(dir: &Path, home: &Path) -> Self {
         let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"));
+        // XDG_CONFIG_HOME is removed again below: the config comes from HOME here.
+        own_homes(&mut cmd, dir);
         cmd.args(["-s", "s", "daemon"])
             .env("REMUDA_RUNTIME_DIR", dir)
             .current_dir(dir)
@@ -2251,6 +2290,41 @@ fn butler_cli_test_daemon(dir: &Path) -> (Daemon, PathBuf) {
     let out = remuda_timed(dir, &["-s", "s", "butler", "--headless"]);
     assert!(out.status.success(), "load Butler CLI: {}", String::from_utf8_lossy(&out.stderr));
     (daemon, path)
+}
+
+/// Test daemons must not share a data home (see #225): with one XDG_DATA_HOME
+/// for a whole cargo run, agents.jsonl gives every daemon the same root Butler
+/// id and inbox file, and Matrix mail delivered in one test is loaded by
+/// another test's daemon.
+#[test]
+fn butler_test_daemons_do_not_share_the_root_inbox() {
+    let dir_a = scratch_dir("own-home-a");
+    let dir_b = scratch_dir("own-home-b");
+    let (_daemon_a, path_a) = butler_cli_test_daemon(&dir_a);
+    let a = eval(&path_a, r#"
+      local delivered = remuda._butler_inbox_delivery({from={host="matrix", alias="@alice:example.org",
+        session="@alice:example.org", kind="matrix", id="", leader=""}, to="butler", text="from daemon A",
+        subject="Matrix", matrix={event_id="$own-home-probe", room_id="!r:example.org", sender="@alice:example.org"}})
+      if not delivered then return "not-delivered" end
+      return remuda._butler_bus.agents.butler.id
+    "#);
+    assert_ne!(a, "not-delivered", "daemon A must really deliver the Matrix mail to its root Butler");
+    let (_daemon_b, path_b) = butler_cli_test_daemon(&dir_b);
+    let b = eval(&path_b, r#"
+      local root = remuda._butler_bus.agents.butler
+      remuda._butler_mail.unread(root.id) -- loads the inbox from disk, as the session list does
+      local seen = {}
+      for _, id in ipairs(remuda._butler_mail.mailbox(root.id)) do
+        local message = remuda._butler_bus.messages[id]
+        if message and message.matrix and message.matrix.event_id ~= nil then
+          seen[#seen + 1] = tostring(message.matrix.event_id)
+        end
+      end
+      return root.id .. " matrix=" .. (#seen == 0 and "none" or table.concat(seen, ","))
+    "#);
+    assert!(b.ends_with(" matrix=none"),
+        "daemon B loaded Matrix mail that daemon A delivered (shared data home): A root {a}; B {b}");
+    assert!(!b.starts_with(a.as_str()), "the two daemons share one root Butler id: A {a}; B {b}");
 }
 
 #[test]
@@ -5979,7 +6053,7 @@ fn butler_compaction_schedule_sends_compact_when_idle_but_not_when_busy() {
     );
     let token_str = token_path.to_string_lossy().to_string();
     let config_str = config_path.to_string_lossy().to_string();
-    let data_str = std::env::var("XDG_DATA_HOME").expect("test XDG_DATA_HOME");
+    let data_str = own_data_home(&dir).to_string_lossy().to_string();
     let daemon = Daemon::spawn_with_env(
         &dir,
         &[
@@ -6266,7 +6340,7 @@ fn butler_compaction_fake_claude_scenarios_send_only_visible_keys() {
     );
     let token_str = token_path.to_string_lossy().to_string();
     let config_str = config_path.to_string_lossy().to_string();
-    let data_str = std::env::var("XDG_DATA_HOME").expect("test XDG_DATA_HOME");
+    let data_str = own_data_home(&dir).to_string_lossy().to_string();
     let daemon = Daemon::spawn_with_env(
         &dir,
         &[
