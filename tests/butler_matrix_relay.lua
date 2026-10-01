@@ -4279,6 +4279,19 @@ local function ctx_run(extra, thread, run, fail)
       cursor = cursor + 1
       relay_module.instance._response({ next_batch = "c" .. cursor,
         rooms = { join = { [room] = { timeline = { events = events } } } } }, "/_matrix/client/v3/sync")
+      ctx.settle(events)
+    end
+    -- The context GETs are ordinary requests: they wait in the request queue for
+    -- a token, which a timer refills. Tick until each synced event has its mail.
+    function ctx.settle(events)
+      for _ = 1, 8 do
+        local waiting = false
+        for _, event in ipairs(events) do
+          if not ctx.mail(event.event_id) then waiting = true end
+        end
+        if not waiting then return end
+        tick_timers(1)
+      end
     end
     function ctx.mail(event_id)
       for _, message in ipairs(emitted) do
