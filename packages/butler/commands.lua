@@ -92,7 +92,7 @@ command(5, "doctor", "  remuda butler doctor", function(args)
     local lines = doctor.render(doctor.probe())
     -- What the mod did to the root Butler's settings.local.json at its last launch or load.
     local state = remuda._butler_permission_report or {}
-    for _, line in ipairs(remuda._butler_permissions.doctor_lines(state.report, state.kind)) do
+    for _, line in ipairs(doctor.permission_lines(state.report, state.kind)) do
       lines[#lines + 1] = line
     end
     return table.concat(lines, "\n")

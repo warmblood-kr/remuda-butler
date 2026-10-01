@@ -129,11 +129,16 @@ local butler_fs = {
     f:close()
     return text
   end,
-  -- ponytail: asks `test -L`, so no symlink check where that is missing (Windows).
+  -- ponytail: asks `test -L` (an argument vector, no shell). nil when it cannot
+  -- tell (no `test`, as on Windows; an old core): then nothing is written.
   is_symlink = function(path)
-    local ok, result = pcall(remuda.process.run, { argv = { "test", "-L", path }, timeout = 5 })
-    return ok and type(result) == "table" and result.code == 0 and not result.timed_out
+    local ok, result = pcall(function() return remuda.process.run({ argv = { "test", "-L", path }, timeout = 5 }) end)
+    if not ok or type(result) ~= "table" or result.timed_out then return nil end
+    if result.code == 0 then return true end
+    if result.code == 1 then return false end
+    return nil
   end,
+  json = remuda.json,
   mkdir = function(path) return remuda.mkdir(path) end,
   write = function(path, text, private)
     if remuda.fs and type(remuda.fs.write_atomic) == "function" then
@@ -837,7 +842,8 @@ local function ensure_root_permissions(kind)
       _butler_session_trace("permissions_withheld", item.rule .. " under " .. item.list .. " in " .. report.path)
     end
     if #report.added > 0 then
-      _butler_session_trace("permissions_added", table.concat(report.added, ", ") .. " " .. report.path)
+      _butler_session_trace("permissions_added", "added " .. #report.added .. " rule to " .. report.path
+        .. ": " .. table.concat(report.added, ", ") .. " (file rewritten: private, mode 600)")
     end
   end
   remuda._butler_permission_report = { kind = kind, report = report }

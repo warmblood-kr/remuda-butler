@@ -59,6 +59,7 @@ respawn() {
   wait_up
 }
 
+echo "core $("$REMUDA_BIN" --version 2>/dev/null | tail -1) ($REMUDA_BIN)"
 "$REMUDA_BIN" -s "$SERVER" daemon >"$SCRATCH/daemon.log" 2>&1 &
 for _ in $(seq 50); do [[ -S $REMUDA_RUNTIME_DIR/remuda/$SERVER.sock ]] && break; sleep 0.1; done
 "$REMUDA_BIN" -s "$SERVER" exec butler >/dev/null
@@ -68,7 +69,8 @@ echo "== root_launch_writes_rule, file_is_private"
 wait_for "the root launch did not write $FILE" has_rule
 [[ $(mode "$FILE") == 600 ]] || fail "settings.local.json is not private: $(mode "$FILE")"
 DOCTOR=$("$REMUDA_BIN" -s "$SERVER" butler doctor 2>&1 || true)
-grep -qF "Permissions butler (claude): added $RULE — $FILE" <<<"$DOCTOR" || fail "doctor does not show the added rule: $DOCTOR"
+grep -qF "Permissions butler (claude): added 1 rule to $FILE: $RULE (file rewritten: private, mode 600)" <<<"$DOCTOR" \
+  || fail "doctor does not show the added rule: $DOCTOR"
 [[ $(tail -1 <<<"$DOCTOR") == Next:* ]] || fail "doctor does not end with Next: $DOCTOR"
 
 echo "== tick_does_not_rewrite (3 reconcile ticks)"
@@ -79,12 +81,54 @@ sleep 7
 rm "$ROOT/AGENTS.md"
 wait_for "a deleted AGENTS.md was not written again" test -s "$ROOT/AGENTS.md"
 
-echo "== respawn_readds_removed_rule, keeping the user's entries"
-printf '{"permissions":{"allow":["Bash(ls:*)"],"deny":["Bash(curl:*)"]}}' >"$FILE"
+echo "== respawn_readds_removed_rule; the real remuda.json keeps the meaning of everything else"
+# The one write goes through remuda.json: keys come back sorted and pretty-printed;
+# {} and [] stay distinct, null stays null, allow keeps its order and gains the rule last.
+printf '%s' '{"z":{"empty":{},"none":[],"v":null,"n":[1,2.5,9007199254740993],"s":"caf\u00e9"},"permissions":{"deny":["Bash(curl:*)"],"allow":["Bash(ls:*)","Bash(git status:*)"],"ask":[]},"model":"opus"}' >"$FILE"
 respawn
 wait_for "the respawn did not add the rule again" has_rule
-[[ $(cat "$FILE") == '{"permissions":{"allow":["Bash(ls:*)","'"$RULE"'"],"deny":["Bash(curl:*)"]}}' ]] \
-  || fail "the user's entries were not kept as written: $(cat "$FILE")"
+cat >"$SCRATCH/want.json" <<WANT
+{
+  "model": "opus",
+  "permissions": {
+    "allow": [
+      "Bash(ls:*)",
+      "Bash(git status:*)",
+      "$RULE"
+    ],
+    "ask": [],
+    "deny": [
+      "Bash(curl:*)"
+    ]
+  },
+  "z": {
+    "empty": {},
+    "n": [
+      1,
+      2.5,
+      9007199254740993
+    ],
+    "none": [],
+    "s": "café",
+    "v": null
+  }
+}
+WANT
+diff "$SCRATCH/want.json" "$FILE" >"$SCRATCH/diff.out" || fail "the user's settings did not come back with the same meaning: $(cat "$SCRATCH/diff.out")"
+BEFORE_FILE=$(mtime "$FILE")
+respawn
+sleep 1
+[[ $(mtime "$FILE") == "$BEFORE_FILE" ]] || fail "a file that already holds the rule was written again"
+
+echo "== malformed and wrong-typed files are left alone"
+for content in '{"permissions":' '{"permissions":{"allow":[]},"permissions":{}}' '[]' '{"permissions":{"allow":{}}}' '{"permissions":null}'; do
+  printf '%s' "$content" >"$FILE"
+  respawn
+  sleep 1
+  [[ $(cat "$FILE") == "$content" ]] || fail "a file the mod must not edit was changed: $content -> $(cat "$FILE")"
+  "$REMUDA_BIN" -s "$SERVER" butler doctor 2>&1 | grep -qE "Permissions butler \(claude\): not written: (not valid JSON|wrong type) — " \
+    || fail "doctor does not say why $content was not written"
+done
 
 echo "== live_session_gets_rule_once_per_load"
 printf '{}' >"$FILE"
