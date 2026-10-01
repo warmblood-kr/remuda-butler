@@ -141,9 +141,12 @@ REPRINT=$(remuda -s "$S" -e '
     text = "reprint body", subject = "Matrix message from @owner:example.org",
     matrix = { event_id = "$rp1", room_id = "!side:example.org", room_kind = "joined",
       thread_root = "$rp-root", sender = "@owner:example.org" } })
-  return remuda._butler_inbox_message("butler", delivered.id)' 2>&1) || true
+  return delivered.id .. "\n" .. remuda._butler_inbox_message("butler", delivered.id)' 2>&1) || true
+RP_ID=${REPRINT%%$'\n'*}
+REPRINT=${REPRINT#*$'\n'}
 WANT="  Matrix event \$rp1 in room !side:example.org (joined), thread \$rp-root
-  Next: remuda butler matrix --room '!side:example.org' thread '\$rp-root'
+  Next: remuda butler reply $RP_ID
+  to read the thread: remuda butler matrix --room '!side:example.org' thread '\$rp-root'
 reprint body"
 [[ $REPRINT == *"] Matrix message from @owner:example.org
 $WANT" ]] || soft "inbox MESSAGE-ID must show the Matrix line and the Next line of the mail, got: $REPRINT"
