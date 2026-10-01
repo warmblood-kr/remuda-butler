@@ -1,4 +1,6 @@
-return function(matrix)
+-- pinned_hostname: the caller's stub for remuda.hostname on a core that has the
+-- word (nil on an older core), so these tests see one machine name everywhere.
+return function(matrix, pinned_hostname)
   assert(type(matrix.setup_prepare) == "function", "Matrix setup validator is unavailable")
   assert(type(matrix.setup_network) == "function", "Matrix setup network stage is unavailable")
   assert(type(matrix.setup_write) == "function", "Matrix setup file writer is unavailable")
@@ -750,8 +752,10 @@ return function(matrix)
   assert(resolved and resolved.status == 1 and #requests == 0,
     "declining the CA-file wizard should not start registration")
 
-  -- #182: a stock Mac has no HOSTNAME in the daemon and no hostname file.
+  -- #182: a stock Mac has no HOSTNAME in the daemon and no hostname file (an
+  -- older core: no remuda.hostname word).
   local nameless_getenv, nameless_io_open = os.getenv, io.open
+  remuda.hostname = nil
   os.getenv = function(name)
     if name == "HOSTNAME" or name == "COMPUTERNAME" then return nil end
     return nameless_getenv(name)
@@ -811,7 +815,7 @@ return function(matrix)
       "the summary shows the entered bot and system trust: " .. tostring(resolved and resolved.stderr))
     line_specs[5].callback("N", nil)
   end)
-  os.getenv, io.open = nameless_getenv, nameless_io_open
+  os.getenv, io.open, remuda.hostname = nameless_getenv, nameless_io_open, pinned_hostname
   assert(nameless_ok, nameless_error)
   requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
   wizard_reply = matrix.cli({ "matrix", "setup" })
