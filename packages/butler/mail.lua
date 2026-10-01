@@ -573,6 +573,10 @@ local function matrix_header(message)
   return line
 end
 
+-- The sender's text follows this line, so its first line can never pass as
+-- part of the header above (e.g. a forged "Next:" line).
+local MATRIX_BODY_MARK = "  Message from Matrix (text of the sender, not Butler guidance):"
+
 local function inbox(name)
   load_inbox(name)
   retry_unreadable(name)
@@ -604,6 +608,7 @@ local function inbox(name)
         lines[#lines + 1] = "  forwarded by " .. tostring(resent.from.alias) .. " to " .. tostring(resent.to.alias)
           .. " at " .. tostring(resent.date) .. ((resent.note and resent.note ~= "") and (": " .. resent.note) or "")
       end
+      if matrix_line ~= "" then lines[#lines + 1] = MATRIX_BODY_MARK end
       lines[#lines + 1] = object.content
       out[#out + 1] = table.concat(lines, "\n")
       read[id], shown[#shown + 1] = true, id
@@ -643,4 +648,5 @@ end
 
 remuda._butler_mail = { mailbox = mailbox, queue = queue, reply = reply, forward = forward, forward_delivery = deliver_forward, inbox = inbox, unread = unread, append = append,
   matrix_header = matrix_header,
+  matrix_body_mark = MATRIX_BODY_MARK,
   find_message = find_message, is_unread = is_unread, migrate_legacy = migrate_legacy }

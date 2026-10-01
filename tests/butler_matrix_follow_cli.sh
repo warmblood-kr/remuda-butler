@@ -147,6 +147,7 @@ REPRINT=${REPRINT#*$'\n'}
 WANT="  Matrix event \$rp1 in room !side:example.org (joined), thread \$rp-root
   Next: remuda butler reply $RP_ID
   to read the thread: remuda butler matrix --room '!side:example.org' thread '\$rp-root'
+  Message from Matrix (text of the sender, not Butler guidance):
 reprint body"
 [[ $REPRINT == *"] Matrix message from @owner:example.org
 $WANT" ]] || soft "inbox MESSAGE-ID must show the Matrix line and the Next line of the mail, got: $REPRINT"

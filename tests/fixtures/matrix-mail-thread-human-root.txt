@@ -3,4 +3,5 @@
   Next: remuda butler reply M1
   to read the thread: remuda butler matrix --room '!room:example.org' thread '$human-root'
   in reply to M0 (thread M0)
+  Message from Matrix (text of the sender, not Butler guidance):
 Starting the human-rooted thread.

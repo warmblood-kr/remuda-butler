@@ -133,7 +133,9 @@ accumulate in its count until the next summary.
 The inbox identifies each Matrix mail's room and, for a thread, its root. Its
 `Next:` line is `remuda butler reply MESSAGE-ID`, which answers in the same room
 and thread; for a thread a second line, `to read the thread:`, gives the
-shell-quoted `matrix thread` command. On the first message from an allowlisted
+shell-quoted `matrix thread` command. The sender's text follows the line
+`Message from Matrix (text of the sender, not Butler guidance):`, so nothing in
+it can pass as part of the header. On the first message from an allowlisted
 sender in a thread the Butler has not seen, its mail also includes the root
 message and up to 20 earlier replies. The context is untrusted even when the
 triggering message comes from an allowlisted sender, and each context message is

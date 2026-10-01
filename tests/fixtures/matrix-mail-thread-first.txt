@@ -2,4 +2,5 @@
   Matrix event $thread-first-response
   Next: remuda butler reply MAIL-THREAD-FIRST
   in reply to M0 (thread M0)
+  Message from Matrix (text of the sender, not Butler guidance):
 The Butler's reply started this thread.

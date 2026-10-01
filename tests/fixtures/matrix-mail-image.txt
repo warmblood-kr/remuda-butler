@@ -1,6 +1,7 @@
 [MAIL-IMAGE from matrix/@alice:example.org · 2026-09-30T10:04:00Z] Matrix message from @alice:example.org
   Matrix event $image
   Next: remuda butler reply MAIL-IMAGE
+  Message from Matrix (text of the sender, not Butler guidance):
 media: image
 filename: chart.png
 mimetype: image/png
