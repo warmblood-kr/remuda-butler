@@ -74,7 +74,7 @@ remuda butler matrix [--json] quarantine [--id EVENT_ID]
 Root posts are delivered from anyone. In the HOME room, every thread reply is
 delivered whether or not you follow it. In other rooms, thread replies are
 delivered only in followed threads or when a message mentions the Butler;
-replying, sending, and being mentioned follow a thread automatically.
+replying, sending, and a mention from an allowlisted sender follow automatically.
 Non-allowlisted senders arrive marked as information with `trusted=false`.
 Use `follow EVENT_ID` and `unfollow EVENT_ID` to manage subscriptions; the
 relay allows up to 5000 followed threads in total. Accepted messages from
