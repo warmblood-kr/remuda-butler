@@ -7,6 +7,7 @@ local numbered_option = assert(config.numbered_option)
 local bottom_screen_lines = assert(config.bottom_screen_lines)
 local file_exists = assert(config.file_exists)
 local contributions = assert(config.contributions)
+local system = assert(remuda._butler_system)
 
 local AGENT_BUILDERS = remuda._butler_agent_builders
 local TELEMETRY_ADAPTERS = remuda._butler_telemetry_adapters
@@ -107,12 +108,12 @@ local function choose(candidates, opts, done)
     local executable = (builder_override and argv and argv[1])
       or entry.requires or entry.executable or (argv and argv[1]) or id
     if not opts.argv then
-      local quoted = "'" .. tostring(executable):gsub("'", "'\\''") .. "'"
-      local found = os.execute("command -v " .. quoted .. " >/dev/null 2>&1")
-      if found ~= true and found ~= 0 then
-        attempt.reason, attempt.detail = "not_found", executable .. " not found in PATH"
+      local found, lookup_error = system.find_command(executable)
+      if not found then
+        attempt.reason, attempt.detail = "not_found", lookup_error or (executable .. " not found in PATH")
         start_next(); return
       end
+      if type(argv) == "table" and argv[1] == executable then argv[1] = found end
     end
     local ok, name = pcall(remuda.new, opts.name, argv, opts.cwd, opts.env(id, spec))
     if not ok then
@@ -370,7 +371,7 @@ remuda._butler_contribute("butler.guidance", "cli", { order = 20,
 
 - `remuda butler inbox` reads your own queued messages.
 - `remuda butler send MEMBER "MESSAGE"` sends a message; your sender is inferred.
-- For long bodies, use `cat <<'EOF' | remuda butler send MEMBER -` or `--file "$PWD/path"`.
+- For long bodies, write the text to a file inside your working directory and use `remuda butler send MEMBER --file "$PWD/path"`, or pipe it: `cat <<'EOF' | remuda butler send MEMBER -`.
 - `send-to-leader` and `reply MESSAGE_ID` accept `-` and `--file "$PWD/path"` too.
 - Message bodies are limited to 64 KiB; short quoted messages can stay positional.
 - `remuda butler send-to-leader RESULT...` reports a completed work loop.
@@ -416,6 +417,8 @@ the normal way for a member to communicate.
   end })
 remuda._butler_contribute("butler.guidance", "leader", { order = 90,
   prompt = function(ctx) return "Your leader is " .. ctx.parent .. "." end })
+remuda._butler_contribute("butler.permission", "cli", { order = 10,
+  rules = function(ctx) return remuda._butler_permissions.builtin(ctx) end })
 end
 local function guidance(part, parent)
   local out = {}
@@ -430,9 +433,11 @@ local function team_member_prompt(parent) return guidance("prompt", parent) end
 local function write_agent_guidance(root, text, replace)
   local path = root .. "/AGENTS.md"
   if not replace and file_exists(path) then return end
-  local f = assert(io.open(path, "w"))
-  f:write(text)
-  f:close()
+  -- Only when the text differs: launch_butler calls this on every reconcile tick.
+  -- No symlink check (it would run a process on that tick): the directory is the
+  -- mod's own. An AGENTS.md that is a link is read through, and when the text
+  -- differs the atomic writer replaces the link with a plain file.
+  assert(remuda._butler_permissions.write_if_changed(path, text, config.fs))
 end
 local _butler_session_trace -- defined below; the task poke fires later
 local function option_number(screen, matches)

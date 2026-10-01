@@ -23,6 +23,7 @@ local MAX_THREAD_SUBSCRIPTIONS = 5000
 local MAX_REPLY_OUTBOX = 1000
 local MAX_REPLY_RESULTS = 5000
 local MAX_MAIL_REPLY_BYTES = 64 * 1024
+local CAP_SUMMARY_INTERVAL_SECONDS = 600
 local SYNC_PATH = "/_matrix/client/v3/sync"
 local MESSAGES_PREFIX = "/_matrix/client/v3/rooms/"
 local warning_keys = relay.warning_keys or {}
@@ -271,7 +272,7 @@ local function media_mail_body(content, kind)
   local mxc = media_uri(content)
   if valid_media_uri(mxc) then
     lines[#lines + 1] = "mxc: " .. mxc
-    lines[#lines + 1] = "Next: remuda butler matrix -o PATH download " .. mxc
+    lines[#lines + 1] = "Next: remuda butler matrix download " .. mxc
   else
     lines[#lines + 1] = "mxc: (invalid)"
   end
@@ -321,9 +322,13 @@ local function trim_invite_dedupe(map, now)
   trim_map(map, MAX_INVITE_DEDUPE, "created_at")
 end
 
+local function valid_event_key(id)
+  return type(id) == "string" and #id <= 255 and id:sub(1, 1) == "$"
+    and not id:find("[^\33-\126]")
+end
+
 local function subscribe(state, room_id, thread_id, mail_id)
-  if type(room_id) ~= "string" or type(thread_id) ~= "string" or thread_id:sub(1, 1) ~= "$"
-      or #thread_id > 255 then return false end
+  if type(room_id) ~= "string" or not valid_event_key(thread_id) then return false end
   local subscriptions = state.subscriptions[room_id]
   if not subscriptions or subscriptions[thread_id] == nil then
     local count = 0
@@ -551,6 +556,12 @@ function relay.new(options)
   local delivery_retry_waiting, delivery_retry_timers = {}, {}
   local reply_retry_timers, reply_in_flight = {}, {}
   local untrusted_receive_times = {}
+  -- ponytail: in memory, a restart may repeat the line once
+  local post_cap_notice_at
+  -- ponytail: in memory, a restart resets the floor and drops a pending count
+  local cap_summary = {}
+  -- ponytail: in memory, a restart resets the turn counts; one entry per Butler thread until a human replies or a restart
+  local b2b_turns = {}
   local joining = {}
   local generation = 0
   local failures = 0
@@ -574,6 +585,59 @@ function relay.new(options)
           .. terminal_safe_field(room, 512) .. ": " .. terminal_safe_field(tostring(detail), 512))
       end
     end)
+  end
+
+  function instance:post_cap_hit(limit, until_text)
+    local now = os.time()
+    if post_cap_notice_at == nil or now - post_cap_notice_at >= 3600 then
+      post_cap_notice_at = now
+      send_notice(cfg.home_room,
+        "Matrix post limit reached (" .. tostring(limit)
+          .. " per hour); posts other than replies to people on the allowlist are refused until "
+          .. tostring(until_text) .. ". Next: remuda butler matrix history",
+        "post-cap-notice", cfg.home_room)
+      return true
+    end
+    return false
+  end
+
+  local function note_turn(room, root, kind)
+    if type(room) ~= "string" or not valid_event_key(root) then return 0 end
+    local room_turns = b2b_turns[room]
+    if kind == "human" then
+      if room_turns then
+        room_turns[root] = nil
+        if next(room_turns) == nil then b2b_turns[room] = nil end
+      end
+      return 0
+    end
+    if kind ~= "agent" then return 0 end
+    if not room_turns then room_turns = {}; b2b_turns[room] = room_turns end
+    local turns = room_turns[root]
+    if not turns then turns = { n = 0, notified = false }; room_turns[root] = turns end
+    turns.n = turns.n + 1
+    if turns.n >= cfg.b2b_max_turns and not turns.notified then
+      turns.notified = true
+      send_notice(cfg.home_room,
+        "Stopped replying in thread " .. matrix.shown_event_id(root) .. " ("
+          .. terminal_safe_field(room, 512) .. "): " .. tostring(cfg.b2b_max_turns)
+          .. " Butler-only turns. A reply in that thread from a person on the allowlist resumes it.",
+        "b2b-turn-limit", cfg.home_room)
+    end
+    return turns.n
+  end
+
+  function instance:b2b_stopped(room, root)
+    local turns = b2b_turns[room] and b2b_turns[room][root]
+    return turns ~= nil and turns.n >= cfg.b2b_max_turns
+  end
+
+  function instance:b2b_turn_limit()
+    return cfg.b2b_max_turns
+  end
+
+  function instance:note_own_turn(room, root)
+    return note_turn(room, root, "agent")
   end
 
   local approval = remuda.butler and remuda.butler.approval
@@ -698,7 +762,6 @@ function relay.new(options)
     if type(event_id) ~= "string" or type(sent_id) ~= "string" or sent_id == "" then return false end
     for source_mail_id, route in pairs(state.routes) do
       if route.event_id == event_id or route.last_reply_event_id == event_id then
-        if route.from_agent ~= false then return false end
         route.last_reply_event_id = sent_id
         subscribe(state, route.room_id, route.thread_root or route.event_id, source_mail_id)
         persist()
@@ -711,7 +774,7 @@ function relay.new(options)
   function instance:can_reply_to(event_id)
     for _, route in pairs(state.routes) do
       if route.event_id == event_id or route.last_reply_event_id == event_id then
-        return route.from_agent == false
+        return true
       end
     end
     return false
@@ -730,7 +793,8 @@ function relay.new(options)
     for mail_id, route in pairs(state.routes) do
       if route.event_id == event_id or route.last_reply_event_id == event_id then
         return { source_mail_id = mail_id, room_id = route.room_id,
-          thread_root = route.thread_root or route.event_id, from_agent = route.from_agent }
+          thread_root = route.thread_root or route.event_id, from_agent = route.from_agent,
+          allowlisted_human = route.allowlisted_human == true }
       end
     end
   end
@@ -774,7 +838,7 @@ function relay.new(options)
     local token = { generation = send_generation }
     reply_in_flight[reply_id] = token
     token.handle = api.reply({ room = item.room_id, event_id = item.event_id, text = item.text,
-      thread_root = item.thread_root, txn_id = item.txn_id }, function(result)
+      thread_root = item.thread_root, txn_id = item.txn_id, from_outbox = true }, function(result)
       if reply_in_flight[reply_id] ~= token or generation ~= send_generation then return end
       reply_in_flight[reply_id] = nil
       if type(result) == "table" and not result.error then
@@ -824,7 +888,9 @@ function relay.new(options)
     end
     local route = state.routes[source_id] or opts.route
     if not route then return nil, "Matrix route for Butler mail " .. source_id .. " was not found" end
-    if route.from_agent ~= false then return nil, "Butler-to-Butler replies are disabled" end
+    if not state.routes[source_id] and route.from_agent ~= false then
+      return nil, "Matrix route for Butler mail " .. source_id .. " was not found"
+    end
     if state.reply_results[reply_id] then
       if callback then callback(state.reply_results[reply_id]) end
       return { cancel = function() end }
@@ -848,13 +914,30 @@ function relay.new(options)
       local pending = 0
       for _ in pairs(state.reply_outbox) do pending = pending + 1 end
       if pending >= MAX_REPLY_OUTBOX then return nil, "Matrix mail reply outbox is full" end
-      local root = route.thread_root
+      local room = route.room_id
+      local root = instance:thread_root_for_event(route.event_id)
+      if instance:b2b_stopped(room, root) then
+        local safe_room = terminal_safe_field(room, 512)
+        local shown_root = matrix.shown_event_id(root)
+        local root_is_shown = shown_root ~= "(id not shown)"
+        local next_step = "Next: remuda butler matrix --room " .. shell_quote(safe_room)
+          .. (root_is_shown and (" thread " .. shell_quote(shown_root)) or " history")
+        return nil, "Reply not sent: stopped replying in thread " .. shown_root .. " (" .. safe_room .. "): "
+          .. tostring(cfg.b2b_max_turns)
+          .. " Butler-only turns. A reply in that thread from a person on the allowlist resumes it.\n"
+          .. next_step
+      end
+      if route.allowlisted_human ~= true then
+        local slot, slot_error = matrix.take_post_slot(config_path)
+        if not slot then return nil, slot_error end
+      end
       state.reply_outbox[reply_id] = { source_mail_id = source_id, room_id = route.room_id,
-        event_id = route.event_id, thread_root = root, text = opts.text,
+        event_id = route.event_id, thread_root = route.thread_root, text = opts.text,
         from_agent = route.from_agent, room_kind = route.room_kind,
         txn_id = opts.txn_id or ("butler_" .. reply_id), attempts = 0, status = "pending",
         created_at = os.date("!%Y-%m-%dT%H:%M:%SZ") }
       persist()
+      instance:note_own_turn(room, root)
     end
     instance._send_reply(reply_id, callback)
     return { cancel = function() end }
@@ -938,6 +1021,7 @@ function relay.new(options)
               state.routes[result.id] = { room_id = event.room_id, event_id = event.event_id,
                 thread_root = event.thread_root, in_reply_to = event.in_reply_to,
                 context_mail_id = event.context_mail_id, from_agent = event.from_agent,
+                allowlisted_human = event.trusted == true and event.from_agent == false,
                 room_kind = event.room_kind,
                 created_at = event.created_at }
               if event.subscribe_thread and event.thread_root then
@@ -994,6 +1078,24 @@ function relay.new(options)
     failures = failures + 1
     local delay = math.min(60, 2 ^ math.min(6, failures - 1))
     schedule(delay, "retry", function() if active then poll() end end)
+  end
+
+  local function post_rate_cap_summaries()
+    local now = os.time()
+    for capped_room, summary in pairs(cap_summary) do
+      if summary.pending > 0 and (summary.last == nil or now - summary.last >= CAP_SUMMARY_INTERVAL_SECONDS) then
+        local safe_room = terminal_safe_field(capped_room, 512)
+        local count = summary.pending
+        local message_word = count == 1 and "message" or "messages"
+        local verb = count == 1 and "was" or "were"
+        send_notice(cfg.home_room,
+          tostring(count) .. " " .. message_word .. " from non-allowlisted senders in " .. safe_room .. " " .. verb
+            .. " not passed to the Butler (hourly rate cap). Next: remuda butler matrix --room "
+            .. shell_quote(safe_room) .. " history",
+          "untrusted-room-cap-summary", capped_room)
+        summary.pending, summary.last = 0, now
+      end
+    end
   end
 
   local function accept_events(events, cursor, room_id)
@@ -1087,6 +1189,9 @@ function relay.new(options)
             untrusted_receive_times[actual_room] = retained
             if #retained >= cfg.untrusted_per_room_hour then
               rate_capped = true
+              local summary = cap_summary[actual_room] or { pending = 0, last = nil }
+              summary.pending = summary.pending + 1
+              cap_summary[actual_room] = summary
               warn_once("untrusted-rate-cap", actual_room,
                 "butler Matrix rate cap: messages from non-allowlisted senders in "
                   .. terminal_safe_field(actual_room, 512) .. " are not delivered ("
@@ -1099,6 +1204,9 @@ function relay.new(options)
             add_processed(state, ev.event_id)
             if cursor then state.since = cursor end
           else
+          local root = thread_root or ev.event_id
+          if is_agent then note_turn(actual_room, root, "agent")
+          elseif trusted and sender_kind == "HUMAN" then note_turn(actual_room, root, "human") end
           state.pending[ev.event_id] = {
             sender = ev.sender, room_id = actual_room, event_id = ev.event_id,
             created_at = timestamp(ev), body = body,
@@ -1493,6 +1601,7 @@ function relay.new(options)
           for _, id in ipairs(room_added) do added[#added + 1] = id end
         end
       end
+      post_rate_cap_summaries()
       handle_invites(response)
       if type(response.next_batch) == "string" then state.since = response.next_batch end
       persist()
@@ -1511,6 +1620,7 @@ function relay.new(options)
       return
     end
     local added = accept_events(response.chunk)
+    post_rate_cap_summaries()
     state.messages_since = response["end"] or state.messages_since
     persist()
     deliver_pending(added)

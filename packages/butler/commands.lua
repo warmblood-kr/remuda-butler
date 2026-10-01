@@ -61,7 +61,9 @@ local function message_body(args, first, caller)
     if path:match("^/dev/") or path:match("^/proc/") then
       error("--file must be a regular file; for a pipe, use - and redirect stdin (Next: remuda butler send NAME - < FILE)", 0)
     end
-    local file, open_err = io.open(path, "rb")
+    local allowed, refusal = remuda._butler_file_for_caller(path, "--file ", true)
+    if not allowed then error(refusal, 0) end
+    local file, open_err = io.open(allowed, "rb")
     if not file then error("cannot read message file: " .. tostring(open_err), 0) end
     local body, read_err = file:read(MAX_MESSAGE_BYTES + 1)
     file:close()
@@ -89,7 +91,13 @@ end
 command(5, "doctor", "  remuda butler doctor", function(args)
   if #args == 1 then
     local doctor = remuda._butler_doctor
-    return table.concat(doctor.render(doctor.probe()), "\n")
+    local lines = doctor.render(doctor.probe())
+    -- What the mod did to the root Butler's settings.local.json at its last launch or load.
+    local state = remuda._butler_permission_report or {}
+    for _, line in ipairs(doctor.permission_lines(state.report, state.kind)) do
+      lines[#lines + 1] = line
+    end
+    return table.concat(lines, "\n")
   end
 end)
 command(6, "quota", "  remuda butler quota [--report]", function(args, caller)

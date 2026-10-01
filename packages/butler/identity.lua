@@ -4,9 +4,9 @@
 local config = assert(remuda._butler_identity_config)
 local bus = assert(config.bus)
 local current_agent = assert(config.current_agent)
-local shell_quote = assert(config.shell_quote)
 local json_quote = assert(config.json_quote)
 local data_home = config.data_home
+local system = assert(remuda._butler_system)
 
 -- ULIDs are durable public identities; session names remain the mutable,
 -- human-friendly keys used by the mailbox and the in-memory team tree.
@@ -65,7 +65,7 @@ remuda._butler_new_ulid = crockford_ulid
 local function identity_record(record)
   if not identity_path then return end
   local dir = identity_path:match("^(.*)/[^/]+$")
-  if dir then os.execute("mkdir -p " .. shell_quote(dir)) end
+  if dir then system.mkdir_p(dir) end
   local row = '{"id":' .. json_quote(record.id) .. ',"alias":' .. json_quote(record.alias)
     .. ',"kind":' .. json_quote(record.kind or "") .. ',"leader_id":' .. json_quote(record.leader_id or "")
   if record.created_at and not record.created_at_unknown then

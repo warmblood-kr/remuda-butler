@@ -1,0 +1,132 @@
+-- Operating-system words used by Butler. Keep platform checks and differences here.
+local function file_exists(path)
+  local file = io.open(path, "rb")
+  if not file then return false end
+  local ok, contents, reason = pcall(file.read, file, 1)
+  file:close()
+  if not ok then return false end
+  return contents ~= nil or reason == nil
+end
+
+local function split(value, delimiter)
+  local parts = {}
+  for part in (tostring(value or "") .. delimiter):gmatch("(.-)" .. delimiter) do
+    if part ~= "" then parts[#parts + 1] = part end
+  end
+  return parts
+end
+
+local function windows_join(directory, name)
+  if directory:sub(-1) == "\\" or directory:sub(-1) == "/" then return directory .. name end
+  return directory .. "\\" .. name
+end
+
+local windows = {}
+local function windows_absolute(directory)
+  return directory:match("^%a:[/\\]") ~= nil or directory:match("^[/\\][/\\]") ~= nil
+end
+function windows.find_command(name, context)
+  context = context or {}
+  local path = context.path or ""
+  local extensions = context.pathext or ".COM;.EXE;.BAT;.CMD"
+  local names = { name }
+  if not name:match("%.[^\\/]+$") then
+    for _, extension in ipairs(split(extensions, ";")) do
+      names[#names + 1] = name .. extension:lower()
+    end
+  end
+  local explicit = name:find("[/\\\\]") ~= nil
+  if explicit then
+    if windows_absolute(name) and (context.exists or file_exists)(name) then return name end
+    return nil, name .. " not found in PATH"
+  end
+  local directories = {}
+  for _, directory in ipairs(split(path, ";")) do
+    if windows_absolute(directory) then directories[#directories + 1] = directory end
+  end
+  local exists = context.exists or file_exists
+  for _, directory in ipairs(directories) do
+    for _, candidate_name in ipairs(names) do
+      local candidate = windows_join(directory, candidate_name)
+      if exists(candidate) then return candidate end
+    end
+  end
+  return nil, name .. " not found in PATH"
+end
+
+local posix = {}
+local function posix_absolute(directory)
+  return directory:sub(1, 1) == "/"
+end
+function posix.find_command(name, context)
+  context = context or {}
+  local explicit = name:find("/", 1, true) ~= nil
+  local exists = context.exists or file_exists
+  if explicit then
+    if posix_absolute(name) and exists(name) then return name end
+    return nil, name .. " not found in PATH"
+  end
+  local directories = {}
+  for _, directory in ipairs(split(context.path or "", ":")) do
+    if posix_absolute(directory) then directories[#directories + 1] = directory end
+  end
+  for _, directory in ipairs(directories) do
+    local candidate = directory .. "/" .. name
+    if exists(candidate) then return candidate end
+  end
+  return nil, name .. " not found in PATH"
+end
+
+local function shell_quote(value)
+  return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
+end
+
+function posix.run_in(directory, argv)
+  local words = { "cd", shell_quote(directory), "&&" }
+  for _, word in ipairs(argv or {}) do words[#words + 1] = shell_quote(word) end
+  local ok, why, code = os.execute(table.concat(words, " "))
+  if ok == true or ok == 0 then return true end
+  return nil, "Butler topic command failed (" .. tostring(why) .. " " .. tostring(code) .. ")"
+end
+
+local windows_selected = package.config:sub(1, 1) == "\\"
+local selected = windows_selected and windows or posix
+local system = { windows = windows, posix = posix }
+function system.platform() return windows_selected and "windows" or "posix" end
+function system.is_absolute(path)
+  if type(path) ~= "string" then return false end
+  if windows_selected then return path:match("^%a:[/\\]") ~= nil or path:match("^[/\\][/\\]") ~= nil end
+  return path:sub(1, 1) == "/"
+end
+function system.home()
+  local home = os.getenv("HOME")
+  if home and home ~= "" then return home end
+  home = os.getenv("USERPROFILE")
+  if home and home ~= "" then return home end
+  error("HOME and USERPROFILE are not set.\nNext: set HOME or USERPROFILE, then restart Butler", 0)
+end
+function system.mkdir_p(path)
+  assert(type(remuda.mkdir) == "function", "remuda.mkdir is unavailable")
+  return remuda.mkdir(path)
+end
+function system.find_command(name)
+  local core_system = remuda.system
+  if type(core_system) == "table" and type(core_system.find_command) == "function" then
+    return core_system.find_command(name)
+  end
+  return selected.find_command(name, {
+    path = os.getenv("PATH"),
+    pathext = os.getenv("PATHEXT"),
+    exists = file_exists,
+  })
+end
+function system.run_in(directory, argv)
+  if windows_selected then
+    return nil, "Butler topic templates cannot run commands with this core on Windows.\n"
+      .. "Next: update Remuda after core process.run gains cwd support"
+  end
+  return posix.run_in(directory, argv)
+end
+
+remuda._butler_system = system
+return system

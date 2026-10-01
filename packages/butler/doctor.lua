@@ -1,37 +1,35 @@
 -- Read-only installation and authentication checks for the Butler CLI.
-local function platform_name()
-  return package.config:sub(1, 1) == "\\" and "windows" or "posix"
-end
+local system = assert(remuda._butler_system)
 
 local function command_candidates(name, platform)
-  platform = platform or platform_name()
+  platform = platform or system.platform()
   if platform == "windows" then return { name, name .. ".cmd" } end
   return { name }
 end
 
-local function probe_command(argv, platform)
-  for _, name in ipairs(command_candidates(argv[1], platform)) do
-    local candidate = { name }
-    for i = 2, #argv do candidate[#candidate + 1] = argv[i] end
-    local ok, result = pcall(remuda.process.run, { argv = candidate, timeout = 5 })
-    if ok then
-      return {
-        installed = true,
-        logged_in = result.code == 0 and not result.timed_out,
-        timed_out = not not result.timed_out,
-        stdout = result.stdout,
-        stderr = result.stderr,
-      }
-    end
-
-    local message = tostring(result):lower()
-    if not (message:find("os error 2", 1, true)
-        or message:find("no such file or directory", 1, true)
-        or message:find("cannot find the file specified", 1, true)) then
-      return { installed = true, probe_error = true }
-    end
+local function probe_command(argv)
+  local path = system.find_command(argv[1])
+  if not path then return { installed = false, logged_in = false } end
+  local candidate = { path }
+  for i = 2, #argv do candidate[#candidate + 1] = argv[i] end
+  local ok, result = pcall(remuda.process.run, { argv = candidate, timeout = 5 })
+  if ok then
+    return {
+      installed = true,
+      logged_in = result.code == 0 and not result.timed_out,
+      timed_out = not not result.timed_out,
+      stdout = result.stdout,
+      stderr = result.stderr,
+    }
   end
-  return { installed = false, logged_in = false }
+
+  local message = tostring(result):lower()
+  if message:find("os error 2", 1, true)
+      or message:find("no such file or directory", 1, true)
+      or message:find("cannot find the file specified", 1, true) then
+    return { installed = false, logged_in = false }
+  end
+  return { installed = true, probe_error = true }
 end
 
 local function probe()
@@ -47,7 +45,7 @@ end
 
 local function render(probe_results, platform)
   probe_results = probe_results or {}
-  platform = platform or platform_name()
+  platform = platform or system.platform()
   local claude = probe_results.claude or {}
   local codex = probe_results.codex or {}
   local function status(cli)
@@ -59,6 +57,9 @@ local function render(probe_results, platform)
     "Claude Code: " .. status(claude),
     "Codex CLI: " .. status(codex),
   }
+  local guard = remuda.butler and remuda.butler.guard
+  local unguarded = guard and guard.unguarded_line()
+  if unguarded then lines[#lines + 1] = unguarded end
   if not claude.timed_out and not claude.probe_error then
     if not claude.installed then
       lines[#lines + 1] = platform == "windows"
@@ -84,9 +85,37 @@ local function render(probe_results, platform)
   return lines
 end
 
+-- The root Butler's permission rule (permissions.lua): what the mod did to its
+-- settings.local.json at the last launch or load. The block ends with Next:.
+local function permission_lines(report, kind)
+  local function one_line(value) return (tostring(value):gsub("[\r\n]+", " "):gsub("%c", "?")) end
+  local head = "Permissions butler (" .. one_line(kind or "?") .. "): "
+  if kind == "codex" then
+    return { head .. "none — the mod writes no Codex permission rules", "Next: nothing to do" }
+  end
+  if type(report) ~= "table" then return { head .. "not checked yet", "Next: remuda butler status" } end
+  local path, withheld = one_line(report.path or "?"), report.withheld[1]
+  if report.error then
+    return { head .. "not written: " .. one_line(report.error) .. " — " .. path,
+      "Next: fix or delete that file; Butler adds the rule at its next launch" }
+  elseif withheld then
+    return { head .. "withheld " .. one_line(withheld.rule) .. " — listed under " .. withheld.list .. " in " .. path,
+      "Next: remove the rule from " .. withheld.list .. " in that file; Butler adds it at its next launch" }
+  elseif #report.added > 0 then
+    return { head .. "added " .. #report.added .. " rule to " .. path .. ": " .. one_line(table.concat(report.added, ", "))
+      .. " (file rewritten: private, mode 600)", "Next: to block the rule, move it to permissions.deny in that file" }
+  elseif #report.present > 0 then
+    return { head .. "present " .. one_line(table.concat(report.present, ", ")) .. " — " .. path,
+      "Next: to block the rule, move it to permissions.deny in that file" }
+  end
+  return { head .. "none", "Next: nothing to do" }
+end
+
 local doctor = {
   probe = probe,
   render = render,
+  probe_command = probe_command,
+  permission_lines = permission_lines,
   candidate_names = command_candidates,
 }
 remuda._butler_doctor = doctor

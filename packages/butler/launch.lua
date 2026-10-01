@@ -2,10 +2,11 @@
 -- mail.lua pattern); the chooser helpers come from agents_launch.lua.
 local config = assert(remuda._butler_launch_config)
 local bus = assert(config.bus)
+local system = assert(remuda._butler_system)
+local launch_failure_lines = assert(remuda.butler.launch_failure_lines)
 local topic_config = config.topic_config
 local data_home = config.data_home
 local load_topic_config = config.load_topic_config
-local shell_quote = config.shell_quote
 local valid_child_name = config.valid_child_name
 local create_fresh_directory = config.create_fresh_directory
 local directory_is_under = config.directory_is_under
@@ -101,13 +102,17 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   local function finish(actual, selected_kind, attempts)
   if not actual then
     if bus.trusted_launch_dirs then bus.trusted_launch_dirs[launch_cwd] = nil end
-    local errors = {}
-    for _, a in ipairs(attempts) do errors[#errors + 1] = a.kind .. ": " .. a.reason .. " (" .. (a.detail or "") .. ")" end
-    local message = "no agent candidate became ready: " .. table.concat(errors, "; ")
+    local message = table.concat(launch_failure_lines(attempts), "\n")
     bus.launch_failures = bus.launch_failures or {}
     bus.launch_failures[name] = { attempts = attempts, error = message }
-    _butler_session_trace("launch_failed", name .. ": " .. message)
-    return nil
+    -- The private trace keeps the internal reason and detail (one entry, one
+    -- line); the user-facing message above never shows them.
+    local traced = {}
+    for _, a in ipairs(attempts or {}) do
+      traced[#traced + 1] = tostring(a.kind) .. ": " .. tostring(a.reason) .. " (" .. tostring(a.detail or "") .. ")"
+    end
+    _butler_session_trace("launch_failed", name .. ": " .. table.concat(traced, "; "):gsub("%c+", " "))
+    return message
   end
   kind = selected_kind
   agent_telemetry = telemetry_by_kind[kind]
@@ -561,12 +566,8 @@ local function make_topic(name, template, kind, parent, task, model, cwd)
     f:close()
   end
   function topic.run(argv)
-    local words = { "cd", shell_quote(root), "&&" }
-    for _, word in ipairs(argv) do words[#words + 1] = shell_quote(word) end
-    local ok, why, code = os.execute(table.concat(words, " "))
-    if not ok then
-      error("Butler topic command failed (" .. tostring(why) .. " " .. tostring(code) .. "): " .. argv[1], 0)
-    end
+    local ok, why = system.run_in(root, argv)
+    if not ok then error(why, 0) end
   end
   if template then
     local setup = topic_config.templates[template]

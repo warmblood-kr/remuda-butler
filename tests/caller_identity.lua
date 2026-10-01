@@ -5,6 +5,7 @@ remuda = { _butler_test_mode = true,
   exec = function(name) return dofile("packages/butler/" .. name:gsub("^butler/", "") .. ".lua") end,
 }
 -- init.lua is only the lifecycle entry since #17; the logic lives in main.lua.
+dofile("packages/butler/system.lua")
 dofile("packages/butler/main.lua")
 local current_agent = remuda._butler_current_agent
 

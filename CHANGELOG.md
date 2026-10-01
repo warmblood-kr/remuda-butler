@@ -7,6 +7,7 @@ release tags yet; entries come from merged pull requests.
 ## Unreleased
 
 ### Added
+- Butler resolves installed agent CLIs on Windows, uses `USERPROFILE` when `HOME` is missing, and gives a clear next step when launch fails.
 - `remuda butler matrix setup` with no flags runs guided prompts (#127). The wizard always opens rooms and does not ask about room access (#145).
 - Matrix open-room mode: anyone may invite the Butler, subject to `deny_room`/`deny_server` rules and a daily join cap (#136).
 - Matrix join and leave accept a room alias or a public room name; public rooms can be browsed (#123).
@@ -18,6 +19,8 @@ release tags yet; entries come from merged pull requests.
 - `remuda butler matrix follow EVENT_ID` and `unfollow EVENT_ID` manage thread replies. HOME always delivers replies; other rooms deliver a reply only in a followed thread or on a mention. Replying, sending, and a mention from an allowlisted sender follow the thread automatically (#178).
 - `remuda butler matrix send -` reads the message from stdin, up to 64 KiB (#170).
 - Outgoing Matrix messages carry a formatted HTML body rendered from a Markdown subset; raw HTML is always escaped (#171).
+- Matrix `posts_per_hour` (default 30) caps the Butler's Matrix posts per hour that are not a reply to a person on the allowlist; a refused post says `Next: wait until HH:MMZ`, and the first refusal in an hour posts one line to HOME (#223).
+- When the hourly cap for non-allowlisted senders is hit, HOME gets a summary with the count: the first one at once, then at most one per room per 10 minutes (#223).
 
 ### Changed
 - `matrix setup --pin` and `pin_sha256` now trust a self-signed homeserver on their own, using core `pin_only`. The hostname, validity dates and SPKI pin are still checked, and `ca_file` keeps full chain validation. Recommended core: `0.1.0-nightly.20261001000710.0a5f090` (#164).
@@ -33,7 +36,9 @@ release tags yet; entries come from merged pull requests.
 - The `matrix setup` wizard accepts Enter at the HTTPS trust prompt to use this system's trusted certificates; a certificate pin or CA file path can still be entered (#175).
 - Matrix messages from senders not on the allowlist are delivered with a not-on-allowlist marker and are capped per room per hour; their media is quarantined (#178).
 - The unread-mail notice fires on a timer, 2 s after the last arrival and at most 10 s after the first, on cores with `remuda.after` (#177).
+- One Remuda daemon owns a Butler home. A second daemon on the same home changes nothing and answers every Butler verb with one line naming the owner and a `Next:` line; `remuda butler doctor` still runs there. This needs a core with `remuda.fs.lock`; older cores run as before with one warning line. The root and member MCP configs are now written owner-only (0600) (#195).
 - `matrix setup` takes this computer's name for the default bot from core's `remuda.hostname()` when the core has it, so a stock Mac gets a default bot name and no bot-name prompt. On such a core the daemon's `HOSTNAME`/`COMPUTERNAME` and the hostname files are no longer read; older cores keep that lookup (#207).
+- Butler-to-Butler Matrix replies are no longer blocked. A per-thread turn guard (`b2b_max_turns`, default 6) stops the Butler after 6 Butler-only turns and posts one line to HOME; a reply in that thread from a person on the allowlist resumes it (#223).
 
 ### Fixed
 - Codex members get the `remuda` MCP server and are told to use the `butler_*` tools: the `remuda butler` CLI cannot reach the daemon from inside the Codex sandbox. This needs a core whose `_codex_tui` forwards `-c KEY=VALUE`; on an older core the launch is unchanged (#201).
@@ -44,5 +49,6 @@ release tags yet; entries come from merged pull requests.
 - `remuda butler doctor` reports probe timeouts (#135).
 - The `matrix setup` wizard asks for a Butler bot name when it cannot take one from this computer's name (a stock Mac), instead of stopping. The flag form's refusal now ends with a `Next:` line naming `--bot` (#182).
 - The `matrix setup` wizard prompts no longer show a doubled colon such as `URL::` (#186).
+- The `matrix setup` wizard shows its whole summary and the `Continue?` question before asking: the summary is printed above the prompt instead of being cut at 256 characters. This needs a core whose `prompt_line` takes a preface; older cores show the cut summary as before. A very long homeserver no longer pushes the registration-token prompt past one line (#186).
 - Scheduled compaction of a Claude session already on Sonnet no longer types `/model` before or after `/compact`; a failed compaction keeps its 10-minute cooldown instead of retrying after a few minutes, and a `/compact` that was not submitted fails at once (#206).
 - Scheduled compaction of a Claude session on Opus now waits for `/model sonnet` and the restore to be confirmed (status line or settings.json, dialog gone, empty composer) before typing the next command, so `/compact` is no longer lost behind the switch (#206).

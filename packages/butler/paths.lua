@@ -17,27 +17,31 @@
 -- supported overrides, checked before the conventional XDG/HOME locations.
 -- This mirrors install-butler.sh; scripts/check-butler-path-convention.lua
 -- fails if the two defaults diverge.
+local system = assert(remuda._butler_system)
+local function available_home()
+  local ok, home = pcall(system.home)
+  if ok then return home end
+end
 local function default_config_home()
   local xdg = os.getenv("XDG_CONFIG_HOME")
   if xdg and xdg ~= "" then
     return xdg
   end
-  local home = os.getenv("HOME")
-  if not home or home == "" then
-    return nil
-  end
-  return home .. "/.config"
+  local home = available_home()
+  return home and (home .. "/.config") or nil
 end
 
 local function default_data_home()
   local xdg = os.getenv("XDG_DATA_HOME")
   if xdg and xdg ~= "" then return xdg end
-  local home = os.getenv("HOME")
-  return home and home ~= "" and home .. "/.local/share" or nil
+  local home = available_home()
+  return home and (home .. "/.local/share") or nil
 end
 
 local function expand_home(path)
-  local home = os.getenv("HOME") or ""
+  if type(path) ~= "string" or path:sub(1, 1) ~= "~" then return path end
+  local home = available_home()
+  if not home then return nil end
   return path:gsub("^~", home)
 end
 
@@ -73,6 +77,7 @@ local function file_exists(path)
   if not path then
     return false
   end
+  -- Core lookup uses metadata; opening a FIFO here could block the daemon.
   local f = io.open(path, "r")
   if not f then
     return false
@@ -151,6 +156,8 @@ remuda._butler_paths = {
   load_topic_config = load_topic_config,
   token_path = token_path,
   config_path = config_path,
+  -- Where the Matrix config is or would be, known even before Matrix is set up.
+  resolved_config_path = resolved_config_path,
   mcp_config_path = mcp_config_path,
   shell_quote = shell_quote,
   valid_child_name = valid_child_name,

@@ -9,7 +9,7 @@ Use Butler's CLI for communication:
 
 - `remuda butler inbox` reads your own queued messages.
 - `remuda butler send MEMBER "MESSAGE"` sends a message; your sender is inferred.
-- For long bodies, use `cat <<'EOF' | remuda butler send MEMBER -` or `--file "$PWD/path"`.
+- For long bodies, write the text to a file inside your working directory and use `remuda butler send MEMBER --file "$PWD/path"`, or pipe it: `cat <<'EOF' | remuda butler send MEMBER -`.
 - `send-to-leader` and `reply MESSAGE_ID` accept `-` and `--file "$PWD/path"` too.
 - Message bodies are limited to 64 KiB; short quoted messages can stay positional.
 - `remuda butler send-to-leader RESULT...` reports a completed work loop.

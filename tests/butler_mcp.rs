@@ -19,6 +19,27 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
+/// The daemon thread shares the test process's environment, and an environment
+/// variable is per process, so its Butler homes cannot be separated by env.
+/// They are resolved by `os.getenv` in the daemon's own Lua image (paths.lua),
+/// so this replaces it there, before any mod loads, for the two variables that
+/// name the data and config homes. Both live under this daemon's scratch dir
+/// (see #225, #211). Core still finds the mod through the process
+/// XDG_DATA_HOME (Rust side), and every other name passes through, so a test
+/// that sets REMUDA_BUTLER_CONFIG on purpose keeps working.
+fn own_butler_homes(path: &Path) -> String {
+    let base = path.parent().unwrap_or(path).join("butler-homes");
+    let (data, config) = (base.join("data"), base.join("config"));
+    std::fs::create_dir_all(&data).expect("create own data home");
+    std::fs::create_dir_all(&config).expect("create own config home");
+    format!(
+        "local getenv = os.getenv; local homes = {{ XDG_DATA_HOME = [==[{}]==], XDG_CONFIG_HOME = [==[{}]==] }}; \
+         os.getenv = function(key) return homes[key] or getenv(key) end",
+        data.display(),
+        config.display()
+    )
+}
+
 /// Start a daemon and return once it actually answers, not once it was spawned.
 fn daemon_at(path: &Path) -> impl Drop {
     if let Some(parent) = path.parent() {
@@ -33,6 +54,10 @@ fn daemon_at(path: &Path) -> impl Drop {
         assert!(Instant::now() < deadline, "daemon never bound {path:?}");
         std::thread::sleep(Duration::from_millis(10));
     }
+    // After the daemon answers, before any test loads a mod: the same prelude
+    // again for a daemon the test restarts at the same path.
+    let _ = client::request(path, &Request::Eval { code: own_butler_homes(path), name: None })
+        .expect("install own Butler homes");
     Cleanup(path.to_path_buf())
 }
 
@@ -288,6 +313,25 @@ fn eval(path: &Path, code: &str) -> String {
         Response::Value(value) => value,
         other => panic!("eval {code:?} failed: {other:?}"),
     }
+}
+
+/// In-process daemons (`daemon_at`) run on threads of the test process, so they
+/// read one process environment. Without homes of their own, every daemon that
+/// loads the whole Butler mod resolves the same agents.jsonl, takes the same
+/// root Butler id and would take the same single-instance lock (see #225, #211).
+#[test]
+fn in_process_daemons_that_load_butler_get_their_own_root_identity() {
+    let root_id = |tag: &str| {
+        let dir = scratch(tag);
+        let path = daemon::socket_path_in(&dir, "s");
+        let daemon = daemon_at(&path);
+        eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+        let id = eval(&path, "return remuda._butler_bus.agents.butler.id");
+        (daemon, id)
+    };
+    let (_first, a) = root_id("own-root-a");
+    let (_second, b) = root_id("own-root-b");
+    assert_ne!(a, b, "two in-process daemons share one data home, so one root Butler id: {a}");
 }
 
 /// #24: an MCP caller Butler cannot identify (no capability token) must get a

@@ -7,15 +7,19 @@ if not getmetatable(_G) then
 end
 
 local host = getmetatable(_G).__index.remuda
+local system
 local booted, main_loaded = false, false
 local function load_main()
   if main_loaded then return end
   main_loaded = true
+  host.exec("butler/system")
+  system = assert(host._butler_system)
   host.exec("butler/main")
 end
 local function start_matrix_relay()
   local matrix = host.butler and host.butler.matrix
   if host._butler_matrix_config and matrix and matrix.relay and not host._butler_skip_relay
+    and not host._butler_standby
     and type(host.http) == "table" and type(host.http.request) == "function" then
     matrix.relay.start(host._butler_matrix_config)
   end
@@ -53,7 +57,11 @@ local function stop_legacy_matrix_relay()
   local id = host._butler_matrix_relay
   if id == nil or type(host.processes) ~= "function" or type(host.kill) ~= "function" then return end
   local data_home = os.getenv("XDG_DATA_HOME")
-  if not data_home or data_home == "" then data_home = (os.getenv("HOME") or "") .. "/.local/share" end
+  if not data_home or data_home == "" then
+    local ok, home = pcall(system.home)
+    if not ok then return end
+    data_home = home .. "/.local/share"
+  end
   local mod_dir = data_home .. "/remuda/mods/butler"
   local expected_script = mod_dir .. "/packages/butler/matrix_relay.py"
   local script = host._butler_matrix_relay_script_path or expected_script
@@ -109,10 +117,12 @@ return {
       end },
     { event = "session_exited", id = "identity", depth = -50,
       run = function(_, name, info)
-        return host._butler_session_exited(name, info)
+        if host._butler_session_exited then return host._butler_session_exited(name, info) end
       end },
     { event = "butler-compaction-submit", id = "submit",
-      run = function() return host._butler_compaction_submit() end },
+      run = function()
+        if host._butler_compaction_submit then return host._butler_compaction_submit() end
+      end },
   },
   schedules = {
     { name = "butler-notices", every = 1, run = function()
@@ -163,7 +173,7 @@ Start by running `remuda butler inbox` to read your welcome message.
 
 - `remuda butler inbox` reads your own queued messages.
 - `remuda butler send MEMBER "MESSAGE"` sends a message; your sender is inferred.
-- For long bodies, use `cat <<'EOF' | remuda butler send MEMBER -` or `--file "$PWD/path"`.
+- For long bodies, write the text to a file inside your working directory and use `remuda butler send MEMBER --file "$PWD/path"`, or pipe it: `cat <<'EOF' | remuda butler send MEMBER -`.
 - `send-to-leader` and `reply MESSAGE_ID` accept `-` and `--file "$PWD/path"` too.
 - Message bodies are limited to 64 KiB; short quoted messages can stay positional.
 - `remuda butler send-to-leader RESULT...` reports a completed work loop.
@@ -226,6 +236,10 @@ the normal way for a member to communicate.
         end },
       { id = "leader", order = 90,
         prompt = function(_, ctx) return "Your leader is " .. ctx.parent .. "." end },
+    },
+    -- The rule merged into the root Butler's settings.local.json; an extension adds its own row.
+    ["butler.permission"] = {
+      { id = "cli", order = 10, rules = function(_, ctx) return host._butler_permissions.builtin(ctx) end },
     },
     ["butler.command"] = {
       { id = "close", order = 8, verb = "close", usage = "  remuda butler close <name> [--force]",
