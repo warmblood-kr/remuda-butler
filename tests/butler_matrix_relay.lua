@@ -3138,9 +3138,12 @@ end
 -- senders count. Past the cap: not delivered, not quarantined, processed, one
 -- warning line per room, nothing posted. The relay counts by receive time.
 -- Old rule (PR 1, test_rx_untrusted_room_cap_logs_once_no_post): past the cap
--- nothing was posted at all (no request besides /sync). Replaced by ONE HOME
--- summary per sync that has capped events (untrusted_per_room_hour, PR 2).
--- The one log line per room stays.
+-- nothing was posted at all (no request besides /sync). Replaced by a HOME
+-- summary (untrusted_per_room_hour, PR 2). The one log line per room stays.
+-- Old rule (PR 2 draft): ONE summary per sync that has capped events, so the
+-- third sync below posted "1 message" at once. Replaced by the summary floor
+-- (step 2b): the first summary for a room is immediate, later ones are at
+-- least 10 minutes apart and carry the count since the last one.
 local function test_rx_untrusted_room_cap_logs_once_home_summary()
   local real_time, now = os.time, 1790000000
   os.time = function(value) if value then return real_time(value) end return now end
@@ -3179,20 +3182,27 @@ local function test_rx_untrusted_room_cap_logs_once_home_summary()
     end
     assert(warnings == 2 and new_warnings == 1,
       "exactly ONE rate cap warning line per capped room, got " .. warnings .. " (" .. new_warnings .. " for the joined room)")
-    local summary = "messages from non-allowlisted senders not delivered in "
-    assert(client:messages(HOME, "3 " .. summary .. NEW .. " (rate cap). Next: remuda butler matrix --room "
-      .. NEW .. " history") == 1, "the first capped sync posts ONE exact HOME summary with its own count")
-    assert(client:messages(HOME, summary .. NEW) == 2, "one HOME summary per sync with capped events in the joined room")
-    assert(client:messages(HOME, summary .. HOME) == 1, "one HOME summary for the capped HOME sync")
+    local summary = " from non-allowlisted senders not delivered in "
+    local function summary_line(count, room)
+      return count .. summary .. room .. " (rate cap). Next: remuda butler matrix --room '" .. room .. "' history"
+    end
+    assert(client:messages(HOME, summary_line("3 messages", NEW)) == 1,
+      "the first capped sync posts ONE exact HOME summary with its own count")
+    assert(client:messages(HOME, summary_line("1 message", HOME)) == 1,
+      "the first summary for another room (HOME) is immediate too, and a count of 1 reads '1 message'")
+    assert(client:messages(HOME, summary .. NEW) == 1,
+      "a second capped sync within 10 minutes posts no second summary for the room")
     now = now + 3601
     rx_sync(client, NEW, { rx_msg("$u7", STRANGER, "an hour later") })
     assert(rx_find(delivered, "$u7"), "delivery works again after the hour")
+    assert(client:messages(HOME, summary_line("1 message", NEW)) == 1,
+      "the held count is posted by the first sync after the 10 minutes, even with nothing capped in it")
     local posts = 0
     for _, args in ipairs(client.requests) do
       if not args.path:find("/sync", 1, true) then posts = posts + 1 end
     end
     assert(posts == 3 and client:messages(HOME, summary) == 3,
-      "only the 3 HOME summaries are posted, nothing else and none for a sync with nothing capped, got " .. posts)
+      "only the 3 HOME summaries are posted and nothing else, got " .. posts)
     relay:stop()
 
     -- The default is 20 per room and hour.
@@ -3492,9 +3502,22 @@ local function test_rx_b2b_turn_guard_home_line_once()
   end)
 end
 
+-- Post times (posts_per_hour) live in one module table, shared by every test in
+-- this Lua state. Each use runs in its own hour, later than every earlier post.
+local rx_hour = 0
+local function rx_fresh_hour(run)
+  local real_time = os.time
+  rx_hour = rx_hour + 1
+  local now = real_time() + rx_hour * 7200
+  os.time = function(value) if value then return real_time(value) end return now end
+  local ok, err = pcall(run)
+  os.time = real_time
+  if not ok then error(err, 0) end
+end
+
 local function test_rx_posts_per_hour_cap()
   local dir, path = invite_fixture(OWNER .. "," .. RX_ALLY, "room=" .. NEW .. "\nposts_per_hour=3\n")
-  rx_with_dir(dir, function()
+  rx_with_dir(dir, function() rx_fresh_hour(function()
     local relay = rx_relay(path)
     relay_module.instance = relay
     rx_post_http(path, function(_, posted)
@@ -3508,7 +3531,7 @@ local function test_rx_posts_per_hour_cap()
       assert(posted() == 3, "the refused post is not sent, sent " .. posted())
     end)
     relay:stop()
-  end)
+  end) end)
 end
 
 local function test_rx_untrusted_room_cap_summary_no_quarantine()
@@ -3528,12 +3551,160 @@ local function test_rx_untrusted_room_cap_summary_no_quarantine()
     end
     assert(rx_find(delivered, "$u-owner"), "allowlisted senders are not capped")
     local line = "3 messages from non-allowlisted senders not delivered in " .. NEW
-      .. " (rate cap). Next: remuda butler matrix --room " .. NEW .. " history"
-    assert(client:messages(HOME, line) == 1, "ONE exact HOME summary for the sync (unaccepted events do not count)")
+      .. " (rate cap). Next: remuda butler matrix --room '" .. NEW .. "' history"
+    assert(client:messages(HOME, line) == 1,
+      "ONE exact HOME summary for the sync, the room shell-quoted in Next (unaccepted events do not count)")
     rx_sync(client, NEW, { rx_msg("$u-owner2", OWNER, "quiet sync") })
     assert(client:messages(HOME, "non-allowlisted senders not delivered") == 1, "no summary for a sync with nothing capped")
     relay:stop()
   end)
+end
+
+-- Summary floor (step 2b): the first HOME summary for a room is immediate; after
+-- it at most ONE per room per 10 minutes, with the count since the last one. A
+-- held count is posted by the first sync pass after the 10 minutes, capped or not.
+local function test_rx_untrusted_room_cap_summary_floor_10min()
+  local real_time, now = os.time, 1790000000
+  os.time = function(value) if value then return real_time(value) end return now end
+  local start, dir, path = now, invite_fixture(OWNER, "room=" .. NEW .. "\nuntrusted_per_room_hour=2\n")
+  local ok, err = pcall(function()
+    local relay, client = rx_relay(path)
+    local seq = 0
+    local function roots(room, sender, count)
+      local events = {}
+      for _ = 1, count do
+        seq = seq + 1
+        events[#events + 1] = rx_msg("$f" .. seq, sender, "root " .. seq)
+      end
+      rx_sync(client, room, events)
+    end
+    local function lines(count, room)
+      return client:messages(HOME, count .. " from non-allowlisted senders not delivered in " .. room
+        .. " (rate cap). Next: remuda butler matrix --room '" .. room .. "' history")
+    end
+    local function total(room) return client:messages(HOME, "senders not delivered in " .. room) end
+
+    roots(NEW, STRANGER, 5)                      -- sync A: 2 delivered, 3 capped
+    assert(lines("3 messages", NEW) == 1 and total(NEW) == 1, "the first summary for a room is immediate, with 3")
+    now = start + 300
+    roots(NEW, STRANGER, 2)                      -- sync B: 2 more capped, inside the floor
+    assert(total(NEW) == 1, "a capped sync within 10 minutes posts no new summary")
+    roots(HOME, STRANGER, 3)                     -- another room: 2 delivered, 1 capped
+    assert(lines("1 message", HOME) == 1 and total(HOME) == 1,
+      "a second room has its own floor: its first summary is immediate")
+    now = start + 599
+    roots(NEW, OWNER, 1)
+    assert(total(NEW) == 1, "599 s after the last summary nothing is posted")
+    now = start + 600
+    roots(NEW, OWNER, 1)                         -- a quiet sync, 10 minutes after the summary
+    assert(lines("2 messages", NEW) == 1 and total(NEW) == 2,
+      "the first sync pass after 10 minutes posts ONE summary with the held count (2), capped or not")
+    roots(HOME, STRANGER, 1)                     -- HOME: capped, 300 s after its own summary
+    assert(total(HOME) == 1, "the other room's floor runs from its own last summary")
+    now = start + 900
+    roots(NEW, OWNER, 1)
+    assert(lines("1 message", HOME) == 2 and total(HOME) == 2, "HOME posts its held count after its own 10 minutes")
+    roots(NEW, OWNER, 1)
+    assert(total(NEW) == 2 and total(HOME) == 2, "nothing held, nothing posted")
+    relay:stop()
+  end)
+  os.time = real_time
+  relay_module.instance = nil
+  remove_dir(dir)
+  if not ok then error(err, 0) end
+end
+
+-- Receive rules PR 2, mail path: relay:queue_mail_reply obeys the same limits
+-- as the CLI reply.
+local function rx_mail_id(delivered, event_id)
+  for index, item in ipairs(delivered) do
+    if item.event_id == event_id then return "M" .. index end
+  end
+end
+
+local function test_rx_mail_reply_turn_guard()
+  local dir, path = invite_fixture(OWNER .. "," .. RX_ALLY, "b2b_max_turns=2\n")
+  rx_with_dir(dir, function()
+    local relay, client, delivered = rx_relay(path)
+    local line = "Stopped replying in thread $mt (" .. HOME .. "): 2 Butler-only turns. A human reply resumes it."
+    rx_sync(client, HOME, { rx_msg("$mt", RX_ALLY, "@bot:example.org ping") })
+    local mail = rx_mail_id(delivered, "$mt")
+    assert(mail, "a Butler's root post is delivered")
+    local ok, err = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R1", text = "reply-one" })
+    assert(ok, "turn 2 of 2 (our mail reply to a Butler) is queued: " .. tostring(err))
+    ok, err = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R2", text = "reply-two" })
+    assert(ok == nil and tostring(err):find(line, 1, true),
+      "after b2b_max_turns=2 Butler-only turns a mail reply is refused with the stop text, got: " .. tostring(err))
+    assert(err:find("Next: remuda butler matrix --room '" .. HOME .. "' thread '$mt'", 1, true),
+      "the refusal ends with a Next line that shows the thread, room and event shell-quoted, got: " .. err)
+    assert(client:messages(HOME, "reply-two") == 0 and relay:state().reply_outbox["R2"] == nil,
+      "a refused mail reply is neither queued nor posted")
+    assert(client:messages(HOME, line) == 1, "exactly ONE HOME line for the stopped thread")
+    relay:stop()
+  end)
+end
+
+local function test_rx_mail_reply_posts_per_hour()
+  local dir, path = invite_fixture(OWNER, "posts_per_hour=1\n")
+  rx_with_dir(dir, function() rx_fresh_hour(function()
+    local relay, client, delivered = rx_relay(path)
+    rx_sync(client, HOME, { rx_msg("$pm", OWNER, "question") })
+    local mail = rx_mail_id(delivered, "$pm")
+    local ok, err = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R1", text = "reply-one" })
+    assert(ok, "the first mail reply is under posts_per_hour=1: " .. tostring(err))
+    ok, err = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R2", text = "reply-two" })
+    assert(ok == nil and tostring(err):find("Next: wait until %d%d:%d%dZ"),
+      "the 2nd mail reply in an hour is refused with Next: wait until HH:MMZ, got: " .. tostring(err))
+    assert(client:messages(HOME, "reply-two") == 0 and relay:state().reply_outbox["R2"] == nil,
+      "a refused mail reply is neither queued nor posted")
+    ok, err = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R1", text = "reply-one" })
+    assert(ok, "a retry of an already queued reply takes no post slot: " .. tostring(err))
+    relay:stop()
+  end) end)
+end
+
+local function test_rx_only_allowlisted_human_resumes_stopped_thread()
+  local dir, path = invite_fixture(OWNER .. "," .. RX_ALLY, "b2b_max_turns=2\n")
+  rx_with_dir(dir, function()
+    local relay, client, delivered = rx_relay(path)
+    rx_sync(client, HOME, { rx_msg("$sr", RX_ALLY, "@bot:example.org ping") })
+    rx_sync(client, HOME, { rx_msg("$sr-a2", RX_ALLY, "@bot:example.org again", rx_thread("$sr")) })
+    local mail = rx_mail_id(delivered, "$sr-a2")
+    assert(mail, "a Butler's thread reply in HOME is delivered")
+    local ok, err = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R1", text = "reply-one" })
+    assert(ok == nil and tostring(err):find("2 Butler-only turns", 1, true),
+      "two Butler turns stop the thread, got: " .. tostring(err))
+    rx_sync(client, HOME, { rx_msg("$sr-s", STRANGER, "carry on, you two", rx_thread("$sr")) })
+    assert(rx_find(delivered, "$sr-s"), "the stranger's reply in HOME is delivered")
+    ok, err = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R2", text = "reply-two" })
+    assert(ok == nil and tostring(err):find("2 Butler-only turns", 1, true),
+      "a non-allowlisted human does not resume a stopped thread, got: " .. tostring(err))
+    rx_sync(client, HOME, { rx_msg("$sr-o", OWNER, "go on", rx_thread("$sr")) })
+    ok, err = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R3", text = "reply-three" })
+    assert(ok, "an allowlisted human's reply resumes the thread: " .. tostring(err))
+    assert(client:messages(HOME, "reply-three") == 1 and client:messages(HOME, "reply-two") == 0,
+      "only the reply after the owner's message is posted")
+    relay:stop()
+  end)
+end
+
+local function test_rx_limit_config_defaults_and_fallback()
+  for _, case in ipairs({
+    { "", 6, 30 },
+    { "b2b_max_turns=0\nposts_per_hour=0\n", 6, 30 },
+    { "b2b_max_turns=-2\nposts_per_hour=abc\n", 6, 30 },
+    { "b2b_max_turns=1.5\nposts_per_hour=inf\n", 6, 30 },
+    { "b2b_max_turns=nan\nposts_per_hour=2.5\n", 6, 30 },
+    { "b2b_max_turns=2\nposts_per_hour=3\n", 2, 3 },
+  }) do
+    local dir, path = invite_fixture(OWNER, case[1])
+    local cfg, err = matrix.read_config(path)
+    remove_dir(dir)
+    assert(cfg, err)
+    assert(cfg.b2b_max_turns == case[2] and cfg.posts_per_hour == case[3],
+      "config " .. case[1]:gsub("\n", " ") .. "must give b2b_max_turns=" .. case[2] .. " posts_per_hour=" .. case[3]
+        .. ", got " .. tostring(cfg.b2b_max_turns) .. " and " .. tostring(cfg.posts_per_hour))
+  end
 end
 
 rx_tests = {
@@ -3561,6 +3732,11 @@ rx_tests = {
   { "test_rx_b2b_turn_guard_home_line_once", test_rx_b2b_turn_guard_home_line_once },
   { "test_rx_posts_per_hour_cap", test_rx_posts_per_hour_cap },
   { "test_rx_untrusted_room_cap_summary_no_quarantine", test_rx_untrusted_room_cap_summary_no_quarantine },
+  { "test_rx_untrusted_room_cap_summary_floor_10min", test_rx_untrusted_room_cap_summary_floor_10min },
+  { "test_rx_mail_reply_turn_guard", test_rx_mail_reply_turn_guard },
+  { "test_rx_mail_reply_posts_per_hour", test_rx_mail_reply_posts_per_hour },
+  { "test_rx_only_allowlisted_human_resumes_stopped_thread", test_rx_only_allowlisted_human_resumes_stopped_thread },
+  { "test_rx_limit_config_defaults_and_fallback", test_rx_limit_config_defaults_and_fallback },
 }
 end
 
