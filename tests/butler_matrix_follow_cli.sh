@@ -69,11 +69,9 @@ run unfollow
 [[ $CODE == 0 && $OUT == *"Not following"* ]] || fail "unfollow of an unknown thread should print Not following, exit 0: $CODE $OUT"
 run follow
 [[ $OUT != *"$HELP_BANNER"* ]] || fail "follow EVENT printed the general butler help"
-# The homeserver is unreachable, so follow either records the thread or
-# reports the transport error; both prove it reached the Matrix CLI.
-[[ $OUT == *"Following thread"* || $OUT == *"HTTP transport error"* ]] || fail "follow EVENT did not reach the Matrix CLI: $CODE $OUT"
-if [[ $OUT == *"Following thread"* ]]; then
-  run unfollow
-  [[ $CODE == 0 && $OUT == *"Stopped following thread"* ]] || fail "unfollow after follow: $CODE $OUT"
-fi
+# follow is local (no HTTP), so it records the thread even with the
+# homeserver unreachable.
+[[ $CODE == 0 && $OUT == *"Following thread"* ]] || fail "follow EVENT should print Following thread, exit 0: $CODE $OUT"
+run unfollow
+[[ $CODE == 0 && $OUT == *"Stopped following thread"* ]] || fail "unfollow after follow: $CODE $OUT"
 echo PASS
