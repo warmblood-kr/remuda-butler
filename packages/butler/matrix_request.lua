@@ -361,7 +361,7 @@ function matrix.take_post_slot(config_path)
       if not oldest or posted_at < oldest then oldest = posted_at end
     end
     return nil, "Not sent: Matrix post limit reached (" .. tostring(limit) .. " per hour). Next: wait until "
-      .. os.date("!%H:%MZ", oldest + 3600)
+      .. os.date("!%H:%MZ", oldest + 3600 + 59)
   end
   post_times[#post_times + 1] = now
   return true
