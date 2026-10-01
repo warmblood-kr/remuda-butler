@@ -109,6 +109,32 @@ end
 matrix.setup_validate_homeserver = valid_url
 matrix.setup_validate_mxid = valid_mxid
 
+-- This computer's name, or nil. The one seam for the name source: when core
+-- ships a machine-name primitive (core 399), call it first here.
+function matrix.setup_machine_name()
+  local hostname = os.getenv("HOSTNAME") or os.getenv("COMPUTERNAME") or ""
+  if hostname == "" then
+    for _, path in ipairs({ "/etc/hostname", "/var/run/hostname" }) do
+      local file = io.open(path, "rb")
+      if file then
+        hostname = file:read("*l") or ""
+        file:close()
+        if hostname ~= "" then break end
+      end
+    end
+  end
+  if hostname ~= "" then return hostname end
+end
+
+-- "@butler-SLUG:SERVER" from this computer's name and the owner's server, or nil.
+function matrix.setup_default_bot(owner_mxid)
+  local slug = (matrix.setup_machine_name() or ""):lower():gsub("[^a-z0-9]+", "-"):gsub("^-+", ""):gsub("-+$", "")
+  slug = slug:sub(1, 48):gsub("-+$", "")
+  local server = type(owner_mxid) == "string" and owner_mxid:match("^@[^:]+:(.+)$")
+  if slug == "" or not server or server == "" then return nil end
+  return "@butler-" .. slug .. ":" .. server
+end
+
 local function readable_file(path)
   if not absolute(path) then return false end
   local file = io.open(path, "rb")
@@ -397,24 +423,11 @@ function matrix.setup_prepare(args)
   end
 
   if options.register and not options.bot_mxid then
-    local hostname = os.getenv("HOSTNAME") or os.getenv("COMPUTERNAME") or ""
-    if hostname == "" then
-      for _, path in ipairs({ "/etc/hostname", "/var/run/hostname" }) do
-        local file = io.open(path, "rb")
-        if file then
-          hostname = file:read("*l") or ""
-          file:close()
-          if hostname ~= "" then break end
-        end
-      end
+    options.bot_mxid = matrix.setup_default_bot(options.owner_mxid)
+    if not options.bot_mxid then
+      return nil, "cannot derive a bot account name from this computer\nNext: add --bot @butler-NAME:"
+        .. (options.owner_mxid:match("^@[^:]+:(.+)$") or "SERVER")
     end
-    local slug = hostname:lower():gsub("[^a-z0-9]+", "-"):gsub("^-+", ""):gsub("-+$", "")
-    slug = slug:sub(1, 48):gsub("-+$", "")
-    local server = options.owner_mxid:match("^@[^:]+:(.+)$")
-    if slug == "" or not server or server == "" then
-      return nil, "cannot derive a bot account name from this computer; pass --bot"
-    end
-    options.bot_mxid = "@butler-" .. slug .. ":" .. server
   elseif options.password_file and not options.bot_mxid then
     return nil, "--bot is required when using --password-file"
   end

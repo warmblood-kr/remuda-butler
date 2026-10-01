@@ -426,7 +426,8 @@ function matrix.cli(args, agent, stdin_body)
                 .. "or enter a 64-character SHA-256 certificate pin or an absolute CA file path:",
                 nil, function(trust)
                   if type(trust) ~= "string" then
-                    return prompt_failure("The HTTPS trust answer must be a certificate pin or CA file path.")
+                    return prompt_failure("The HTTPS trust answer must be Enter (this system's trusted certificates), "
+                      .. "a certificate pin or a CA file path.")
                   end
                   if trust == "" then
                     -- Enter: system trust roots, so neither --pin nor --ca-file.
@@ -443,7 +444,20 @@ function matrix.cli(args, agent, stdin_body)
               confirm_setup()
             end
           end
-          ask_transport_trust()
+          if matrix.setup_default_bot(valid_owner) then return ask_transport_trust() end
+          local server = valid_owner:match("^@[^:]+:(.+)$")
+          prompt_line("Butler bot name (for example butler-mac; it becomes @butler-mac:" .. server .. "):",
+            nil, function(bot)
+              if type(bot) ~= "string" or bot == "" then
+                return prompt_failure("A Butler bot name is required.")
+              end
+              if bot:sub(1, 1) ~= "@" then bot = "@" .. bot .. ":" .. server end
+              local valid_bot, bot_error = matrix.setup_validate_mxid(bot, "--bot")
+              if not valid_bot then return prompt_failure((terminal_safe(bot_error))) end
+              flags[#flags + 1] = "--bot"
+              flags[#flags + 1] = valid_bot
+              ask_transport_trust()
+            end)
         end)
       end)
     end

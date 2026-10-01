@@ -39,3 +39,4 @@ release tags yet; entries come from merged pull requests.
 - Matrix invite follow-ups: refusals carry a next step, the quarantine list shows the room, and commands missing a room say what to pass (#162).
 - Future Matrix join timestamps are kept (#141).
 - `remuda butler doctor` reports probe timeouts (#135).
+- The `matrix setup` wizard asks for a Butler bot name when it cannot take one from this computer's name (a stock Mac), instead of stopping. The flag form's refusal now ends with a `Next:` line naming `--bot` (#182).
