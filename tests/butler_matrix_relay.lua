@@ -2472,6 +2472,18 @@ local function test_rx_follows_survive_restart()
   end)
 end
 
+local function test_rx_subscribe_foreign_room_refused()
+  local dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    local relay = rx_relay(path)
+    assert(relay:subscribe_thread(NEW, "$ok") ~= false, "a configured room can be followed")
+    assert(relay:subscribe_thread("!foreign:example.org", "$x") == false,
+      "subscribe_thread for a room we are not in must return false")
+    assert(relay:state().subscriptions["!foreign:example.org"] == nil, "nothing is stored for a foreign room")
+    relay:stop()
+  end)
+end
+
 -- TODO(rx PR2): the Butler-to-Butler reply block is lifted together with the
 -- loop guard; flip this test to test_rx_b2b_turn_guard_home_line_once then.
 local function test_rx_b2b_block_kept_TODO_pr2()
@@ -2999,6 +3011,7 @@ rx_check("test_rx_follow_guard_refuses_and_warns_no_trim", test_rx_follow_guard_
 rx_check("test_rx_untrusted_media_quarantined", test_rx_untrusted_media_quarantined)
 rx_check("test_rx_allowlisted_human_unchanged", test_rx_allowlisted_human_unchanged)
 rx_check("test_rx_follows_survive_restart", test_rx_follows_survive_restart)
+rx_check("test_rx_subscribe_foreign_room_refused", test_rx_subscribe_foreign_room_refused)
 rx_check("test_rx_b2b_block_kept_TODO_pr2", test_rx_b2b_block_kept_TODO_pr2)
 rx_check("test_rx_marker_cannot_be_faked", test_rx_marker_cannot_be_faked)
 rx_check("test_rx_untrusted_approve_text_is_data", test_rx_untrusted_approve_text_is_data)
