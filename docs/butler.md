@@ -45,6 +45,43 @@ PowerShell installer on Windows. Codex CLI can be installed with
 `remuda butler --help` includes the doctor command with the other installed
 Butler verbs.
 
+## Agent accounts and quota
+
+Run `remuda butler quota` to see, for Claude Code and for Codex CLI, how the
+agent is logged in (subscription, API key, not logged in), which subscription
+it uses, and how much of each limit is used:
+
+```
+⚠️ Agent accounts, 2026-10-01 04:40Z
+claude: subscription (max), you@example.org
+  5-hour limit: 92% used, resets 2026-10-01 07:00Z
+  Weekly limit: 71% used, resets 2026-10-04 00:00Z
+codex: subscription (Pro), account: not exposed by codex
+  Weekly limit: 60% used, resets 2026-10-03 17:30Z
+Near limit: claude 5-hour limit (92%).
+Next: run `remuda butler quota --report` to send this to Matrix.
+```
+
+`remuda butler quota --report` also posts the report body to the Butler's Matrix
+home room. Percentages are percent used, reset times are UTC, and a limit at
+80% or more is listed under `Near limit`. A value that could not be read is
+printed as `unknown` with the reason; the login mode is never guessed.
+
+Where the values come from:
+
+- Login mode and the Claude account email: `claude auth status` and
+  `codex login status`. Only the mode, the plan and the email are used; the
+  rest of the output, including the organisation id, is never printed, logged
+  or stored.
+- Claude limits: the rate-limit fields Claude Code passes to its status line.
+  Butler keeps the newest reading among its Claude sessions, so the numbers are
+  as fresh as the last Claude reply; a reading older than 10 minutes is marked
+  `as of`. API-key logins have no such reading.
+- Codex limits: Butler types `/status` into one idle Codex member (empty
+  composer, nobody attached and typing, never the Butler's own session) and
+  reads the screen. With no idle Codex member the report says so and tells you
+  how to get a reading. Codex does not expose the account email, only the plan.
+
 ## Matrix commands and configuration
 
 Use `remuda butler matrix` for Matrix reads and writes. Options come before
