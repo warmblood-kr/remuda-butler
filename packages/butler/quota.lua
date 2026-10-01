@@ -367,6 +367,9 @@ function quota.terminal(report, outcome)
   if outcome and outcome.failed ~= nil then
     lines[#lines + 1] = "Could not post to Matrix: " .. quota.safe_text(outcome.failed)
     next_line = "Next: remuda butler matrix setup"
+  elseif type(claude) == "table" and claude.mode == "not_logged_in"
+      and type(codex) == "table" and codex.mode == "not_logged_in" then
+    next_line = "Next: log in with `claude auth login` and `codex login`, then run `remuda butler quota` again."
   elseif type(claude) == "table" and claude.mode == "not_logged_in" then
     next_line = "Next: log in with `claude auth login`, then run `remuda butler quota` again."
   elseif type(codex) == "table" and codex.mode == "not_logged_in" then
