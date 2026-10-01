@@ -27,13 +27,50 @@ local function read_switches(path)
   return config
 end
 
+local function each_raw_line(contents, visit)
+  local start = 1
+  while start <= #contents do
+    local newline = contents:find("\n", start, true)
+    local finish = newline or (#contents + 1)
+    local raw = contents:sub(start, finish - 1)
+    local line = raw:gsub("\r$", "")
+    visit(raw, line, newline and "\n" or "")
+    start = finish + 1
+  end
+end
+
 local function write_switches(path, updates)
-  if type(matrix.config_set_typed_line_switches) ~= "function" then
+  local latest, config_error = read_switches(path)
+  if not latest then return nil, config_error end
+  local file, read_error = io.open(path, "rb")
+  if not file then return nil, "cannot read Matrix config: " .. tostring(read_error) end
+  local contents = file:read("*a")
+  file:close()
+  local kept, written = {}, {}
+  each_raw_line(contents, function(raw, line, ending)
+    local key = line:match("^([^=]+)=")
+    key = key and key:gsub("^%s+", ""):gsub("%s+$", "")
+    if updates[key] ~= nil then
+      if not written[key] then
+        kept[#kept + 1] = key .. "=" .. tostring(updates[key]) .. ending
+        written[key] = true
+      end
+    else
+      kept[#kept + 1] = raw .. ending
+    end
+  end)
+  for _, key in ipairs({ "typed_lines", "shell_lines" }) do
+    if updates[key] ~= nil and not written[key] then
+      if #kept > 0 and kept[#kept]:sub(-1) ~= "\n" then kept[#kept + 1] = "\n" end
+      kept[#kept + 1] = key .. "=" .. tostring(updates[key]) .. "\n"
+    end
+  end
+  if not remuda.fs or type(remuda.fs.write_atomic) ~= "function" then
     return nil, "atomic typed-line config writes are unavailable"
   end
-  local ok, written, err = pcall(matrix.config_set_typed_line_switches, path, updates)
-  if not ok then return nil, tostring(written) end
-  if not written then return nil, tostring(err or "could not update Matrix typed-line switches") end
+  local ok, wrote, err = pcall(remuda.fs.write_atomic, path, table.concat(kept), { private = true })
+  if not ok then return nil, tostring(wrote) end
+  if not wrote then return nil, tostring(err or "could not update Matrix typed-line switches") end
   return true
 end
 

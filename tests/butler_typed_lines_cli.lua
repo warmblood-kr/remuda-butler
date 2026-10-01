@@ -1,25 +1,35 @@
 local state = { typed_lines = false, shell_lines = false }
 local writes, prompts = {}, {}
 local operator = true
+local config_path = os.tmpname()
+local config = assert(io.open(config_path, "wb"))
+config:write("https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\n")
+config:close()
 
 remuda = {
   butler = {
     matrix = {
       prompt_preface_supported = function() return true end,
       read_config = function(path)
-        assert(path == "/test/matrix-config")
+        assert(path == config_path)
         return { typed_lines = state.typed_lines, shell_lines = state.shell_lines }
-      end,
-      config_set_typed_line_switches = function(path, updates)
-        assert(path == "/test/matrix-config")
-        writes[#writes + 1] = updates
-        for key, value in pairs(updates) do state[key] = value end
-        return true
       end,
     },
     approval = { operator_caller = function() return operator end },
   },
-  _butler_matrix_config = { config_path = "/test/matrix-config" },
+  fs = {
+    write_atomic = function(path, contents, options)
+      assert(path == config_path and options.private == true, "switch updates use a private atomic write")
+      writes[#writes + 1] = contents
+      local file = assert(io.open(path, "wb"))
+      file:write(contents)
+      file:close()
+      state.typed_lines = contents:find("typed_lines=true", 1, true) ~= nil
+      state.shell_lines = contents:find("shell_lines=true", 1, true) ~= nil
+      return true
+    end,
+  },
+  _butler_matrix_config = { config_path = config_path },
   fail = function(message, code) return { error = message, code = code } end,
   pending = function()
     return {
@@ -77,4 +87,12 @@ assert(state.typed_lines == false and state.shell_lines == false,
   "turning typed-lines off must also turn shell-lines off")
 assert(#prompts == prompt_count and #writes == write_count + 1,
   "turning switches off must write immediately without prompting")
+local written_file = assert(io.open(config_path, "rb"))
+local written_config = written_file:read("*a")
+written_file:close()
+local typed_count = 0
+for _ in written_config:gmatch("typed_lines=") do typed_count = typed_count + 1 end
+assert(typed_count == 1 and written_config:find("untrusted_per_room_hour=12", 1, true),
+  "the private switch writer must deduplicate switch keys and preserve other config lines")
+os.remove(config_path)
 print("ok - typed-line switch CLI cases")
