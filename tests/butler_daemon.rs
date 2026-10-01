@@ -2831,9 +2831,11 @@ fn butler_matrix_reply_quarantines_rejected_events_for_operator_inspection() {
       matrix.quarantine({{id=rows[1].event_id}}, function(result) denied=result.error end, "codex")
       if not denied or not denied:find("operator-only", 1, true) then return "agent-inspection-not-denied" end
       local root = remuda._butler_bus.agents.butler
+      -- Intermittent in full runs (see PR 223): name the leaked mail, so the next
+      -- failure shows which test or event it came from.
       for _, id in ipairs(remuda._butler_mail.mailbox(root.id)) do
         local message = remuda._butler_bus.messages[id]
-        if message and message.matrix and message.matrix.event_id ~= nil then return "quarantine-leaked-to-mail" end
+        if message and message.matrix and message.matrix.event_id ~= nil then return "quarantine-leaked-to-mail: id=" .. tostring(id) .. " ev=" .. tostring(message.matrix.event_id) .. " room=" .. tostring(message.matrix.room_id) .. " sender=" .. tostring(message.matrix.sender) .. " kind=" .. tostring(message.kind) .. " subj=" .. tostring(message.subject) .. " text=" .. tostring(message.text):sub(1,120) end
       end
       local more = {{}}
       for i=1,205 do more[i] = {{type="m.room.message", event_id="$bulk-" .. i,
