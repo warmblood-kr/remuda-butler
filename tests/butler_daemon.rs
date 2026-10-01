@@ -9605,7 +9605,8 @@ fn butler_quota_statusline_keeps_line_one_and_adds_rate_limits() {
         "return remuda._dispatch_extension_command('butler', {{'statusline', {status_path_lua}}}, {{stdin = {snapshot_lua}}})"
     ));
     assert_eq!(line, "MODEL:Claude-Opus-4.6 CTX:12345 CTXWIN:200000 CTXPCT:6");
-    let lines: Vec<_> = std::fs::read_to_string(&status_path).expect("read quota status file").lines().collect();
+    let status = std::fs::read_to_string(&status_path).expect("read quota status file");
+    let lines: Vec<_> = status.lines().collect();
     assert_eq!(lines[0], "MODEL:Claude-Opus-4.6 CTX:12345 CTXWIN:200000 CTXPCT:6");
     assert_eq!(lines.len(), 2, "rate limits must add exactly one status-file line: {lines:?}");
     let parts: Vec<_> = lines[1].split_whitespace().collect();
