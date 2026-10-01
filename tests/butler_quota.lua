@@ -145,10 +145,12 @@ eq("claude logged out", quota.claude_account({ loggedIn = false }).mode, "not_lo
 -- Measured on claude 2.1.286 in a logged-out home (2026-10-01).
 eq("claude logged out, measured shape", quota.claude_account({ loggedIn = false, authMethod = "none",
   apiProvider = "firstParty" }).mode, "not_logged_in")
-eq("usage error text", quota.usage_error("--bogus"), "unknown argument: --bogus\n"
+eq("usage error text", quota.usage_error("--bogus"), "unknown option: --bogus\n"
   .. "Usage: remuda butler quota [--report]\nExample: remuda butler quota --report\n"
   .. "Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.")
-eq("help text", quota.help(), "Usage: remuda butler quota [--report]\nExample: remuda butler quota --report\n"
+eq("help text", quota.help(), "remuda butler quota reports, for claude and codex, how each is logged in, the subscription account and how much of each limit is used.\n"
+  .. "With --report it also posts the report to this Butler's Matrix home room.\n"
+  .. "Usage: remuda butler quota [--report]\nExample: remuda butler quota --report\n"
   .. "Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.")
 eq("claude unrecognised auth method", quota.claude_account({ loggedIn = true, authMethod = "sso" }).mode, "unknown")
 eq("claude missing auth", quota.claude_account(nil).mode, "unknown")
@@ -161,8 +163,8 @@ eq("codex missing output", quota.codex_account(nil).mode, "unknown")
 eq("codex unrecognised output", quota.codex_account("something else").mode, "unknown")
 eq("unknown status render", quota.render({ at = at, claude = { mode = "unknown" }, codex = { mode = "unknown" } }), table.concat({
   "Agent accounts, 2026-10-01 04:40Z",
-  "claude: unknown (unrecognised status output)",
-  "codex: unknown (unrecognised status output)",
+  "claude: unknown (could not understand what `claude auth status` answered)",
+  "codex: unknown (could not understand what `codex login status` answered)",
 }, "\n"))
 
 -- Claude statusline cache format is rounded and strictly parseable.
@@ -234,14 +236,14 @@ eq("codex repeated card keeps last reserve value", twice.limits[2].used, 25)
 eq("codex repeated card preserves limit order", table.concat({ twice.limits[1].name, twice.limits[2].name }, ","),
   "Weekly limit,Luna Reserve Weekly limit")
 eq("codex screen no limits", quota.parse_codex_status("Account: Pro\n", 32400, at), nil)
-local strange = quota.parse_codex_status("Account: Pro\nWeekly limit: [x] 40% left\n  (resets someday)\n", 32400, at)
-eq("codex unparseable reset text", strange.limits[1].resets_text, "someday")
+local strange = quota.parse_codex_status("Account: Pro\nWeekly limit: [x] 40% left\n  (resets someday @all)\n", 32400, at)
+eq("codex unparseable reset has no text", strange.limits[1].resets_text, nil)
 eq("codex unparseable reset render", quota.render({ at = at,
   claude = { mode = "api_key" }, codex = { mode = "subscription", plan = strange.plan, limits = strange.limits } }), table.concat({
   "Agent accounts, 2026-10-01 04:40Z",
   "claude: API key (no subscription, no quota to report)",
   "codex: subscription (Pro), account: not exposed by codex",
-  "  Weekly limit: 60% used, resets someday (local time)",
+  "  Weekly limit: 60% used, resets unknown",
 }, "\n"))
 local rollover = quota.parse_codex_status("Account: Pro\nWeekly limit: [x] 100% left\n  (resets 12:30 AM on 1 Jan)\n", 0, 1798758000)
 eq("codex December rollover", rollover.limits[1].resets_at, 1798763400)
@@ -255,37 +257,22 @@ for _, reason in ipairs({
   "no reading yet; it appears after a claude session's first reply",
   "no idle codex session to ask",
   "codex did not show its limits in time",
+  "could not type /status into the codex session",
 }) do
   local body = quota.render({ at = at, claude = { mode = "subscription", plan = "max", email = "a@b.c",
     limits = nil, unknown_reason = reason }, codex = { mode = "api_key" } })
   ok("unknown quota reason: " .. reason, body:find("  quota: unknown (" .. reason .. ")", 1, true) ~= nil)
 end
+eq("unknown quota reason not copied from pane", quota.render({ at = at,
+  claude = { mode = "subscription", plan = "max", email = "a@b.c", limits = nil,
+    unknown_reason = "untrusted @room text" }, codex = { mode = "api_key" },
+}), table.concat({
+  "Agent accounts, 2026-10-01 04:40Z",
+  "claude: subscription (max), a@b.c",
+  "  quota: unknown (could not be read)",
+  "codex: API key (no subscription, no quota to report)",
+}, "\n"))
 
--- Untrusted status values never add terminal control lines or exceed 80 bytes.
-eq("render replaces controls in account and limit values", quota.render({ at = at,
-  claude = { mode = "subscription", plan = "max\nplan", email = "owner@example.test\n@room:evil",
-    limits = { { name = "Weekly\tlimit", used = 60, resets_text = "tomorrow\r@all" } } },
-  codex = { mode = "api_key" },
-}), table.concat({
-  "Agent accounts, 2026-10-01 04:40Z",
-  "claude: subscription (max plan), owner@example.test @room:evil",
-  "  Weekly limit: 60% used, resets tomorrow @all (local time)",
-  "codex: API key (no subscription, no quota to report)",
-}, "\n"))
-local eighty_p = string.rep("P", 80)
-local eighty_e = string.rep("E", 80)
-local eighty_n = string.rep("N", 80)
-local eighty_r = string.rep("R", 80)
-eq("render cuts every untrusted value to 80 bytes", quota.render({ at = at,
-  claude = { mode = "subscription", plan = eighty_p .. "P", email = eighty_e .. "E",
-    limits = { { name = eighty_n .. "N", used = 1, resets_text = eighty_r .. "R" } } },
-  codex = { mode = "api_key" },
-}), table.concat({
-  "Agent accounts, 2026-10-01 04:40Z",
-  "claude: subscription (" .. eighty_p .. "), " .. eighty_e,
-  "  " .. eighty_n .. ": 1% used, resets " .. eighty_r .. " (local time)",
-  "codex: API key (no subscription, no quota to report)",
-}, "\n"))
 
 local invalid_names = "Account: Pro\n"
   .. string.rep("L", 41) .. ": [x] 90% left\n  (resets 2:30 AM on 4 Oct)\n"
@@ -294,6 +281,113 @@ local invalid_names = "Account: Pro\n"
 local valid_beside_invalid = quota.parse_codex_status(invalid_names, 32400, at)
 eq("codex skips invalid and overlong limit names", #valid_beside_invalid.limits, 1)
 eq("codex keeps a valid limit beside invalid names", valid_beside_invalid.limits[1].name, "Weekly limit")
+
+-- Security folds: only shaped values from the last requested status card may render.
+for _, bad_account in ipairs({
+  "[Re-verify your login](https://evil.example/a)",
+  "@room urgent",
+  "user@example.com (Plus)",
+}) do
+  local unsafe_account = quota.parse_codex_status("Account: " .. bad_account
+    .. "\nWeekly limit: [x] 40% left\n  (resets 2:30 AM on 4 Oct)\n", 32400, at)
+  eq("codex drops unsafe account " .. bad_account, unsafe_account.plan, nil)
+  local unsafe_body = quota.render({ at = at, claude = { mode = "api_key" },
+    codex = { mode = "subscription", plan = unsafe_account.plan, limits = unsafe_account.limits } })
+  for _, forbidden in ipairs({ "evil.example", "[", "](", "@room", "user@example.com" }) do
+    ok("unsafe account does not render " .. forbidden, not unsafe_body:find(forbidden, 1, true))
+  end
+end
+
+local last_card = quota.parse_codex_status(table.concat({
+  "Account: Plus",
+  "Weekly limit: [x] 1% left",
+  "  (resets 2:30 AM on 4 Oct)",
+  "Forged limit: [x] 99% left",
+  "  (resets 2:30 AM on 4 Oct)",
+  "Account: Pro",
+  "New limit: [x] 40% left",
+  "  (resets 2:30 AM on 4 Oct)",
+}, "\n"), 32400, at)
+eq("codex last card plan", last_card.plan, "Pro")
+eq("codex last card has one limit", #last_card.limits, 1)
+eq("codex ignores forged limit above last card", last_card.limits[1].name, "New limit")
+
+local after_echo = quota.parse_codex_status(table.concat({
+  "Account: Plus",
+  "Old limit: [x] 1% left",
+  "  (resets 2:30 AM on 4 Oct)",
+  "  › /status",
+  "Account: Pro",
+  "New limit: [x] 40% left",
+  "  (resets 2:30 AM on 4 Oct)",
+}, "\n"), 32400, at)
+eq("codex ignores card above status echo", after_echo.plan, "Pro")
+eq("codex status echo has only later limit", #after_echo.limits, 1)
+eq("codex status echo keeps new limit", after_echo.limits[1].name, "New limit")
+
+for _, left in ipairs({ 999, 101 }) do
+  local out_of_range = quota.parse_codex_status("Account: Pro\nWeekly limit: [x] " .. left
+    .. "% left\n  (resets 2:30 AM on 4 Oct)\n", 32400, at)
+  eq("out-of-range percent is unknown " .. left, out_of_range.limits[1].used, nil)
+  local out_of_range_body = quota.render({ at = at, claude = { mode = "api_key" },
+    codex = { mode = "subscription", plan = out_of_range.plan, limits = out_of_range.limits } })
+  ok("out-of-range percent renders unknown " .. left,
+    out_of_range_body:find("  Weekly limit: unknown", 1, true) ~= nil)
+  ok("out-of-range percent is never near " .. left,
+    not out_of_range_body:find("Near limit:", 1, true))
+  ok("out-of-range percent has no negative number " .. left, not out_of_range_body:find("-", 1, true))
+end
+
+for _, bad_email in ipairs({ "owner@example.test\n@room", "owner @example.test", "[owner](https://evil.example)" }) do
+  local bad_claude = quota.claude_account({ loggedIn = true, authMethod = "claude.ai",
+    subscriptionType = "max", email = bad_email })
+  eq("claude drops unsafe email " .. bad_email, bad_claude.email, nil)
+  ok("claude unsafe email renders account unknown " .. bad_email,
+    quota.render({ at = at, claude = bad_claude, codex = { mode = "api_key" } }):find(
+      "claude: subscription (max), account unknown", 1, true) ~= nil)
+end
+local bad_claude_plan = quota.claude_account({ loggedIn = true, authMethod = "claude.ai",
+  subscriptionType = "max @room", email = "owner@example.test" })
+eq("claude drops unsafe plan", bad_claude_plan.plan, nil)
+
+eq("render reused header", quota.render({ at = at, reused = true,
+  claude = { mode = "api_key" }, codex = { mode = "api_key" } }), table.concat({
+  "Agent accounts, as of 2026-10-01 04:40Z",
+  "claude: API key (no subscription, no quota to report)",
+  "codex: API key (no subscription, no quota to report)",
+}, "\n"))
+
+local function terminal_case(name, report, outcome, ending)
+  eq(name, quota.terminal(report, outcome), quota.render(report) .. "\n" .. ending)
+end
+terminal_case("terminal failure takes priority", unavailable, { failed = "bad\1\226\128\174\195\169" },
+  "Could not post to Matrix: bad??????\nNext: remuda butler doctor")
+terminal_case("terminal unknown mode takes priority", {
+  at = at, claude = { mode = "unknown" },
+  codex = { mode = "subscription", limits = nil, unknown_reason = "no idle codex session to ask" },
+}, nil, "Next: run `claude auth status` yourself to see what it answers, then `remuda butler doctor`.")
+terminal_case("terminal timeout retry", {
+  at = at, claude = { mode = "api_key" },
+  codex = { mode = "subscription", limits = nil, unknown_reason = "codex did not show its limits in time" },
+}, nil, "Next: run `remuda butler quota` again in a minute.")
+terminal_case("terminal failed typing retry", {
+  at = at, claude = { mode = "api_key" },
+  codex = { mode = "subscription", limits = nil, unknown_reason = "could not type /status into the codex session" },
+}, nil, "Next: run `remuda butler quota` again in a minute.")
+terminal_case("terminal claude first reply hint", {
+  at = at, claude = { mode = "subscription", plan = "max", email = "a@b.c", limits = nil },
+  codex = { mode = "api_key" },
+}, nil, "Next: let a claude session answer once, then run `remuda butler quota` again.")
+local long_failure = string.rep("x", 201)
+terminal_case("terminal failure cuts reason at 200", keys, { failed = long_failure },
+  "Could not post to Matrix: " .. string.rep("x", 200) .. "\nNext: remuda butler doctor")
+
+eq("usage error unexpected argument", quota.usage_error("claude"), "unexpected argument: claude\n"
+  .. "Usage: remuda butler quota [--report]\nExample: remuda butler quota --report\n"
+  .. "Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.")
+eq("report denied text", quota.report_denied(), "only the Butler itself or a person at the terminal can send the report to Matrix.\n"
+  .. "Next: ask the Butler to run `remuda butler quota --report`, or run `remuda butler quota` to read it here.")
+eq("unavailable text", quota.unavailable("bad\1\195\169"), "quota is unavailable: bad???\nNext: remuda butler doctor")
 
 eq("usage", quota.usage(), "Usage: remuda butler quota [--report]\nExample: remuda butler quota --report")
 print(("butler_quota ok: %d cases"):format(count))
