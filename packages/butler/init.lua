@@ -188,10 +188,6 @@ design (`Operation not permitted`). If you must use the CLI and get that error,
 re-run the command requesting escalated permissions.
 
 ]]
-        end,
-        prompt = function()
-          return "Codex members: prefer the MCP `butler_*` tools; the CLI fails in the Codex sandbox "
-            .. "(if it says Operation not permitted, re-run it requesting escalated permissions). "
         end },
       { id = "old-core", order = 30,
         agents_md = function()

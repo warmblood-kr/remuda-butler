@@ -71,15 +71,35 @@ assert(table.concat(build.codex({ telemetry = telemetry, token = "tok" }), " ")
 assert(table.concat(build.codex({ telemetry = telemetry, token = "tok", model = "gpt-5.5" }), " ")
   == "remuda _codex_tui --status S --model gpt-5.5" .. mcp_tail, "MCP flags follow the model")
 assert(codex_probes == 1, "Codex capability probe should be cached")
+local supported_help = codex_help
 remuda._butler_codex_config_supported = nil
 codex_help = "remuda: Codex TUI needs --status PATH"
-assert(table.concat(build.codex({ telemetry = telemetry, token = "tok" }), " ")
-  == "remuda _codex_tui --status S", "an old core must get the old argv")
+for _ = 1, 2 do
+  assert(table.concat(build.codex({ telemetry = telemetry, token = "tok" }), " ")
+    == "remuda _codex_tui --status S", "an old core must get the old argv")
+end
+assert(codex_probes == 2 and remuda._butler_codex_config_supported == false,
+  "an old core's answer is definitive and cached")
+-- A probe that gives no answer (timed out, threw, returned nothing) is not an
+-- answer: this launch gets the old argv, and the next launch probes again.
 local warned
-remuda._butler_codex_config_supported = nil
 remuda.log = function(level, text) warned = level .. " " .. text end
-remuda.process = { run = function() error("spawn failed") end }
-assert(table.concat(build.codex({ telemetry = telemetry, token = "tok" }), " ")
-  == "remuda _codex_tui --status S", "a failed probe must get the old argv")
-assert(warned and warned:find("^warn ") and not warned:find("tok", 1, true), "a failed probe is logged without the token")
+for why, run in pairs({
+  ["timed-out"] = function() return { stdout = "", stderr = "", timed_out = true } end,
+  ["throwing"] = function() error("spawn failed") end,
+  ["empty"] = function() return nil end,
+}) do
+  warned, codex_probes, codex_help = nil, 0, supported_help
+  remuda._butler_codex_config_supported = nil
+  remuda.process = { run = function() codex_probes = codex_probes + 1; return run() end }
+  assert(table.concat(build.codex({ telemetry = telemetry, token = "tok" }), " ")
+    == "remuda _codex_tui --status S", "a " .. why .. " probe must get the old argv")
+  assert(warned and warned:find("^warn ") and not warned:find("tok", 1, true),
+    "a " .. why .. " probe is logged without the token")
+  assert(remuda._butler_codex_config_supported == nil, "a " .. why .. " probe must not be cached")
+  remuda.process = { run = function() codex_probes = codex_probes + 1; return { stdout = "", stderr = codex_help } end }
+  assert(table.concat(build.codex({ telemetry = telemetry, token = "tok" }), " ")
+    == "remuda _codex_tui --status S" .. mcp_tail and codex_probes == 2,
+    "the launch after a " .. why .. " probe must probe again and get the MCP flags")
+end
 print("ok")
