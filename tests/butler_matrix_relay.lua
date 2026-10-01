@@ -3978,6 +3978,52 @@ local function test_rx_reply_to_allowlisted_human_takes_no_post_slot()
   end) end)
 end
 
+-- Step 7b (SEC M2 step 1): when a post is first refused by the cap, the owner
+-- gets ONE line in HOME; further refusals in the next 60 minutes post nothing.
+local function test_rx_post_cap_home_line_once_per_hour()
+  local real_time = os.time
+  local first = 1790000000 - 1790000000 % 3600 + 5 * 60 + 30 -- hh:05:30
+  local now = first
+  os.time = function(value) if value then return real_time(value) end return now end
+  local dir, path = invite_fixture(OWNER, "posts_per_hour=1\n")
+  local ok, err = pcall(function()
+    local relay, client = rx_relay(path)
+    relay_module.instance = relay
+    local function line(until_time)
+      return "Matrix post limit reached (1 per hour); posts other than replies to people on the allowlist are refused until "
+        .. os.date("!%H:%MZ", until_time) .. ". Next: remuda butler matrix history"
+    end
+    local function lines() return client:messages(HOME, "Matrix post limit reached (1 per hour); posts other than") end
+    rx_post_http(path, function()
+      local result = rx_cli({ "matrix", "send", "one" })
+      assert(result.code == 0, "the first post is under posts_per_hour=1: " .. tostring(result.stderr))
+      assert(lines() == 0, "no HOME line before a refusal")
+      now = first + 60
+      result = rx_cli({ "matrix", "send", "two" })
+      assert(result.code ~= 0, "the second post is refused")
+      assert(client:messages(HOME, line(first + 3600 + 30)) == 1 and lines() == 1,
+        "the first refusal posts ONE exact HOME line with the rounded-up time, got " .. lines() .. " line(s)")
+      for i = 1, 5 do
+        result = rx_cli({ "matrix", "send", "again " .. i })
+        assert(result.code ~= 0, "refusal " .. i .. " of 5 more")
+      end
+      assert(lines() == 1, "5 more refusals in the same hour post nothing, got " .. lines())
+      now = first + 60 + 61 * 60 -- 61 minutes after the HOME line; the first slot is free again
+      result = rx_cli({ "matrix", "send", "three" })
+      assert(result.code == 0, "the slot is free again after the hour: " .. tostring(result.stderr))
+      result = rx_cli({ "matrix", "send", "four" })
+      assert(result.code ~= 0, "the next post is refused again")
+      assert(client:messages(HOME, line(now + 3600 + 30)) == 1 and lines() == 2,
+        "a refusal 61 minutes after the last HOME line posts it again, got " .. lines() .. " line(s)")
+    end)
+    relay:stop()
+  end)
+  os.time = real_time
+  relay_module.instance = nil
+  remove_dir(dir)
+  if not ok then error(err, 0) end
+end
+
 rx_tests = {
   { "test_rx_stranger_root_marked_untrusted", test_rx_stranger_root_marked_untrusted },
   { "test_rx_agent_root_without_mention", test_rx_agent_root_without_mention },
@@ -4016,6 +4062,7 @@ rx_tests = {
   { "test_rx_outbox_send_takes_no_second_post_slot", test_rx_outbox_send_takes_no_second_post_slot },
   { "test_rx_prefixed_stranger_counts_and_cannot_reset", test_rx_prefixed_stranger_counts_and_cannot_reset },
   { "test_rx_reply_to_allowlisted_human_takes_no_post_slot", test_rx_reply_to_allowlisted_human_takes_no_post_slot },
+  { "test_rx_post_cap_home_line_once_per_hour", test_rx_post_cap_home_line_once_per_hour },
 }
 end
 
