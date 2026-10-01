@@ -138,17 +138,32 @@ local function same_room_then(room, event_id, on_done, action)
   return { cancel = function() if current then current:cancel() end end }
 end
 
+function matrix.reply_relay()
+  local relay = matrix.relay and matrix.relay.instance
+  local required_relay_methods = {
+    "can_reply_to", "route_for_event", "thread_root_for_event", "b2b_stopped",
+    "b2b_turn_limit", "note_own_turn", "post_cap_hit",
+  }
+  if type(relay) == "table" then
+    for _, method in ipairs(required_relay_methods) do
+      if type(relay[method]) ~= "function" then relay = nil; break end
+    end
+  else
+    relay = nil
+  end
+  if relay then return relay end
+  return nil, "Matrix relay is not running or is from an older load; event sender cannot be verified"
+end
+
 function matrix.reply(opts, on_done)
   opts = opts or {}
   local done = once(on_done)
+  local relay, relay_error = matrix.reply_relay()
+  if not relay then return error_result(done, relay_error) end
   local room = configured_room(opts, done)
   if not room then return { cancel = function() end } end
   if type(opts.text) ~= "string" or opts.text == "" then
     return error_result(done, "message text must not be empty")
-  end
-  local relay = matrix.relay and matrix.relay.instance
-  if not relay or type(relay.can_reply_to) ~= "function" then
-    return error_result(done, "Matrix relay is not running; event sender cannot be verified")
   end
   if not relay:can_reply_to(opts.event_id) then
     return error_result(done, "Reply not sent: event " .. terminal_safe(opts.event_id)

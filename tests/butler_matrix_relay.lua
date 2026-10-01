@@ -4081,6 +4081,99 @@ local function test_rx_link_like_root_counted_but_not_shown()
   end)
 end
 
+-- A live reload keeps the old relay instance, so the relay object may be from an
+-- older load and lack newer methods. ONE check at the top of the reply path: the
+-- relay must have every method that path needs; if one is missing the reply is
+-- refused (fail closed), nothing is posted and no relay method is called. The
+-- send path has no relay check: a missing post_cap_hit only means no HOME line.
+local function test_rx_reply_and_post_slot_never_raise_on_an_older_relay()
+  local dir, path = invite_fixture(OWNER, "posts_per_hour=2\n")
+  rx_with_dir(dir, function() rx_fresh_hour(function()
+    rx_post_http(path, function(_, posted)
+      local problems, calls = {}, 0
+      local needed = { "can_reply_to", "route_for_event", "thread_root_for_event", "b2b_stopped",
+        "b2b_turn_limit", "note_own_turn", "post_cap_hit" }
+      local answers = { can_reply_to = true, thread_root_for_event = "$old", b2b_stopped = false, b2b_turn_limit = 6 }
+      local function relay_without(missing)
+        local fake = {}
+        for _, name in ipairs(needed) do
+          if not missing[name] then
+            fake[name] = function() calls = calls + 1 return answers[name] end
+          end
+        end
+        return fake
+      end
+      local function reply(fake, text)
+        relay_module.instance = fake
+        local result
+        local ok, err = pcall(function()
+          matrix.reply({ room = HOME, event_id = "$old", text = text }, function(value) result = value end)
+          -- Requests go through the rate limit bucket, so the answer may come on a timer.
+          for _ = 1, 8 do if result then break end tick_timers(1) end
+        end)
+        return ok, err, type(result) == "table" and result or {}
+      end
+      local refusal = "Matrix relay is not running or is from an older load; event sender cannot be verified"
+      local function refused(what, missing)
+        local before = posted()
+        calls = 0
+        local ok, err, result = reply(relay_without(missing), "to an older relay")
+        if not ok then
+          problems[#problems + 1] = what .. ": matrix.reply raised: " .. tostring(err)
+        elseif result.error ~= refusal then
+          problems[#problems + 1] = what .. ": must be refused with '" .. refusal .. "', got: " .. tostring(result.error)
+        end
+        if posted() ~= before then problems[#problems + 1] = what .. ": nothing may be posted" end
+        if calls ~= 0 then problems[#problems + 1] = what .. ": no relay method may be called, called " .. calls end
+      end
+
+      -- Control first: a relay with all of them posts the reply.
+      do
+        local posted_before = posted()
+        local ok, err, result = reply(relay_without({}), "to a current relay")
+        if not ok or result.error or posted() ~= posted_before + 1 then
+          problems[#problems + 1] = "a relay with every method must post the reply, got: "
+            .. tostring((not ok and err) or result.error or "nothing posted")
+        end
+      end
+
+      -- Each needed method missing on its own, among them route_for_event (an
+      -- older load, NOT "route unknown") and post_cap_hit alone.
+      for _, name in ipairs(needed) do refused("a relay without " .. name, { [name] = true }) end
+      -- A relay with can_reply_to only.
+      local only = {}
+      for _, name in ipairs(needed) do only[name] = name ~= "can_reply_to" end
+      refused("a relay with can_reply_to only", only)
+
+      local before, ok, err
+      -- Send path: sends until the cap (2 per hour) refuses one, with a relay
+      -- that has no post_cap_hit: the normal refusal, no raise, nothing posted.
+      relay_module.instance = relay_without({ post_cap_hit = true })
+      local refused_error, raised
+      for _ = 1, 3 do
+        before = posted()
+        local sent
+        ok, err = pcall(function()
+          matrix.send({ room = HOME, text = "a send" }, function(value) sent = value end)
+          for _ = 1, 8 do if sent then break end tick_timers(1) end
+        end)
+        if not ok then raised = err break end
+        if type(sent) == "table" and sent.error then
+          refused_error = sent.error
+          if posted() ~= before then problems[#problems + 1] = "send: a refused post must post nothing" end
+          break
+        end
+      end
+      if raised then
+        problems[#problems + 1] = "send: the post refused by the cap raised on a relay without post_cap_hit: " .. tostring(raised)
+      elseif not tostring(refused_error):find("^Not sent: Matrix post limit reached %(2 per hour%)%. Next: wait until %d%d:%d%dZ$") then
+        problems[#problems + 1] = "send: the post over the cap must get the normal refusal, got: " .. tostring(refused_error)
+      end
+      assert(#problems == 0, "\n" .. table.concat(problems, "\n"))
+    end)
+  end) end)
+end
+
 rx_tests = {
   { "test_rx_stranger_root_marked_untrusted", test_rx_stranger_root_marked_untrusted },
   { "test_rx_agent_root_without_mention", test_rx_agent_root_without_mention },
@@ -4121,6 +4214,7 @@ rx_tests = {
   { "test_rx_reply_to_allowlisted_human_takes_no_post_slot", test_rx_reply_to_allowlisted_human_takes_no_post_slot },
   { "test_rx_post_cap_home_line_once_per_hour", test_rx_post_cap_home_line_once_per_hour },
   { "test_rx_link_like_root_counted_but_not_shown", test_rx_link_like_root_counted_but_not_shown },
+  { "test_rx_reply_and_post_slot_never_raise_on_an_older_relay", test_rx_reply_and_post_slot_never_raise_on_an_older_relay },
 }
 end
 
