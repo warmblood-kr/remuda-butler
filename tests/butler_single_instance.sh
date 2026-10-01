@@ -8,7 +8,7 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 REMUDA_BIN=${REMUDA_BIN:-remuda}
 T=$(mktemp -d /tmp/bsi.XXXXXX)
 T=$(cd "$T" && pwd -P)
-A=bsi-a B=bsi-b X=bsi-c D=bsi-d
+A=bsi-a B=bsi-b X=bsi-c D=bsi-d L=bsi-l
 export HOME=$T/home XDG_CONFIG_HOME=$T/config XDG_DATA_HOME=$T/data REMUDA_RUNTIME_DIR=$T/run
 export REMUDA_BUTLER_PROJECT_HOME=$T/projects REMUDA_NO_UPDATE_CHECK=1
 unset REMUDA_BUTLER_TOKEN REMUDA_BUTLER_CONFIG REMUDA_BUTLER_AGENT_ID REMUDA_BUTLER_LEADER_ID
@@ -19,7 +19,7 @@ assert_scratch() {
   [[ $T == /tmp/bsi.?????? || $T == /private/tmp/bsi.?????? ]] || { echo "ABORT: scratch dir is wrong: $T"; exit 9; }
   [[ $HOME == "$T/home" && $REMUDA_RUNTIME_DIR == "$T/run" && $XDG_DATA_HOME == "$T/data"
     && $XDG_CONFIG_HOME == "$T/config" ]] || { echo "ABORT: env is not scratch"; exit 9; }
-  [[ $A == bsi-a && $B == bsi-b && $X == bsi-c && $D == bsi-d ]] || { echo "ABORT: session names"; exit 9; }
+  [[ $A == bsi-a && $B == bsi-b && $X == bsi-c && $D == bsi-d && $L == bsi-l ]] || { echo "ABORT: session names"; exit 9; }
 }
 assert_scratch
 
@@ -28,7 +28,7 @@ FAKE_AGENT=$T/fake-agent
 cleanup() {
   STATUS=$?
   assert_scratch
-  for name in "$A" "$B" "$X" "$D"; do
+  for name in "$A" "$B" "$X" "$D" "$L"; do
     [[ -S $REMUDA_RUNTIME_DIR/remuda/$name.sock ]] || continue
     "$REMUDA_BIN" -s "$name" stop -f >/dev/null 2>&1 || true
   done
@@ -236,6 +236,24 @@ set -e
   || T7="$T7; butler status: exit $CODE, output: $(printf '%s' "$OUT" | head -2 | cut -c1-160)"
 [[ $T7 == ok ]] && ok "T7 a daemon with the same config path and another data home is refused" \
   || bad "T7 a daemon with the same config path and another data home is refused: ${T7#ok; }"
+
+# T7b: a home with NO Matrix files (every new install) is owned by its first
+# daemon: the config lock sits beside the resolved config path, which is known
+# even when the config file does not exist.
+mkdir -p "$T/local/home" "$T/local/config" "$T/local/data/remuda/mods/butler"
+tar -c -C "$REPO" extension.toml packages | tar -x -C "$T/local/data/remuda/mods/butler"
+assert_scratch
+HOME=$T/local/home XDG_CONFIG_HOME=$T/local/config XDG_DATA_HOME=$T/local/data REMUDA_BUTLER_SERVER=$L \
+  "$REMUDA_BIN" -s "$L" daemon </dev/null >"$T/$L.log" 2>&1 &
+PIDS+=($!)
+for _ in $(seq 50); do [[ -S $REMUDA_RUNTIME_DIR/remuda/$L.sock ]] && break; sleep 0.1; done
+[[ -S $REMUDA_RUNTIME_DIR/remuda/$L.sock ]] || { cat "$T/$L.log"; echo "FAIL: daemon $L did not start"; exit 1; }
+load_butler "$L" "$FAKE_OWNER"
+sleep 4
+LOCAL_STATE=$(lua "$L" 'local root = false; for _, s in ipairs(remuda.ls()) do if s.name == "butler" then root = true end end
+  return "refused=" .. tostring(remuda._butler_standby ~= nil) .. " root_butler=" .. tostring(root)')
+[[ $LOCAL_STATE == "refused=false root_butler=true" ]] && ok "T7b a home with no Matrix files is owned by its first daemon" \
+  || bad "T7b a home with no Matrix files is owned by its first daemon: $LOCAL_STATE; $("$REMUDA_BIN" -s "$L" butler status 2>&1 | head -1 | cut -c1-160)"
 
 # T8 and T9 need the owner lock word from core (remuda.fs.lock). Until a core
 # has it they are skipped; they have never run.

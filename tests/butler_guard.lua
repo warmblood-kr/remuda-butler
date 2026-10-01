@@ -26,7 +26,9 @@ local function fresh(word)
   dofile("packages/butler/guard.lua")
   return remuda.butler.guard
 end
-local paths = { data_home = "/scratch/data", config_path = "/scratch/config/remuda/butler/config" }
+-- config_path stays nil, as on a home with no Matrix files; the lock uses the
+-- resolved path, which paths.lua knows whether or not the files exist.
+local paths = { data_home = "/scratch/data", resolved_config_path = "/scratch/config/remuda/butler/config" }
 local DATA, CONFIG = "/scratch/data/remuda/butler/lock", "/scratch/config/remuda/butler/config.lock"
 local HELD_BY_A = "remuda-lock session=bsi-a pid=4242 since=1790000000"
 local function held(info) return function() return nil, "held", info end end
@@ -38,7 +40,7 @@ local ok, err = pcall(function()
   -- beside the config file (config.mcp.json, the relay's .since/.acks).
   local guard = fresh(grant)
   local data_path, config_path = guard.lock_paths(paths)
-  assert(data_path == DATA and config_path == CONFIG, "the lock paths come from paths.data_home and paths.config_path")
+  assert(data_path == DATA and config_path == CONFIG, "the lock paths come from paths.data_home and paths.resolved_config_path")
   assert(select("#", guard.lock_paths({})) == 2 and guard.lock_paths({}) == nil, "no homes give no lock paths")
 
   -- Owner: both locks, asked in a fixed order, nothing released.
@@ -94,11 +96,19 @@ local ok, err = pcall(function()
     assert(guard.boot(paths) == false and list(released) == DATA and remuda._butler_standby.reason,
       "a failing config lock (" .. label .. ") is not ownership and the data lock is released")
   end
-  for label, partial in pairs({ ["no config path"] = { data_home = "/scratch/data" },
-    ["no data home"] = { config_path = "/scratch/config/remuda/butler/config" }, ["no homes"] = {} }) do
+  -- H1: a home with no Matrix files (every new install) has no paths.config_path,
+  -- but its RESOLVED config path is known: the daemon is the owner with both locks.
+  guard = fresh(grant)
+  assert(paths.config_path == nil and guard.boot(paths) == true and remuda._butler_standby == nil
+    and list(asked) == DATA .. "," .. CONFIG and #released == 0,
+    "a home with no Matrix files is owned with both locks: " .. list(asked))
+  -- Only an unknown path (no HOME) is refused.
+  for label, partial in pairs({ ["no resolved config path"] = { data_home = "/scratch/data" },
+    ["a Matrix config path but no resolved one"] = { data_home = "/scratch/data", config_path = "/x/config" },
+    ["no data home"] = { resolved_config_path = "/scratch/config/remuda/butler/config" }, ["no homes"] = {} }) do
     guard = fresh(grant)
     assert(guard.boot(partial) == false and #asked == 0 and #released == 0,
-      "a missing lock path (" .. label .. ") must not make this daemon the owner on a core that can lock")
+      "an unknown lock path (" .. label .. ") must not make this daemon the owner on a core that can lock")
   end
 
   -- L1: a refused daemon re-asks on each verb. Still held: the CURRENT holder.
