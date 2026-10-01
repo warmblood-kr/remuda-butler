@@ -32,6 +32,7 @@ release tags yet; entries come from merged pull requests.
 - The `matrix setup` wizard accepts Enter at the HTTPS trust prompt to use this system's trusted certificates; a certificate pin or CA file path can still be entered (#175).
 - Matrix messages from senders not on the allowlist are delivered with a not-on-allowlist marker and are capped per room per hour; their media is quarantined (#178).
 - The unread-mail notice fires on a timer, 2 s after the last arrival and at most 10 s after the first, on cores with `remuda.after` (#177).
+- One Remuda daemon owns a Butler home. A second daemon on the same home changes nothing and answers every Butler verb with one line naming the owner and a `Next:` line; `remuda butler doctor` still runs there. This needs a core with `remuda.fs.lock`; older cores run as before with one warning line. The root and member MCP configs are now written owner-only (0600) (#195).
 
 ### Fixed
 - `matrix setup --force` keeps the existing `deny_room`/`deny_server` lines (#154).
