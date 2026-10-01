@@ -187,6 +187,7 @@ local function statusline(args, caller)
   local line = string.format("MODEL:%s CTX:%s CTXWIN:%s CTXPCT:%s",
     statusline_tag(model_name), statusline_integer(used),
     statusline_integer(window.context_window_size), statusline_integer(window.used_percentage))
+  local limits = remuda._butler_quota and remuda._butler_quota.rate_limits_line(snapshot, os.time())
 
   local path = args[2]
   local drive_rooted = type(path) == "string" and path:match("^%a:")
@@ -195,7 +196,7 @@ local function statusline(args, caller)
     path:sub(1, 1) == "/" or path:sub(1, 2) == "\\\\" or drive_rooted
   )
   if absolute and path:match("%.status$") then
-    pcall(remuda.fs.write_atomic, path, line .. "\n")
+    pcall(remuda.fs.write_atomic, path, line .. "\n" .. (limits and (limits .. "\n") or ""))
   end
   return line
 end
@@ -537,6 +538,13 @@ remuda._butler_sessions_config = { bus = bus, mail = mail, identity_path = ident
 remuda.exec("butler/sessions")
 local registry_list = remuda._butler_sessions_impl.registry_list
 remuda.exec("butler/doctor")
+local quota_loaded, quota_error = pcall(remuda.exec, "butler/quota")
+if quota_loaded then
+  remuda._butler_quota_error = nil
+else
+  remuda._butler_quota = nil
+  remuda._butler_quota_error = tostring(quota_error)
+end
 
 -- CLI verbs and the argv parser live in commands.lua.
 remuda._butler_commands_config = { current_agent = current_agent, OPERATOR = OPERATOR,

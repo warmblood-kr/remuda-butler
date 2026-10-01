@@ -113,16 +113,30 @@ system.find_command = function(name)
   })
 end
 remuda._butler_system = system
+local probes_by_command = {}
 remuda.process.run = function(options)
   process_calls = process_calls + 1
+  local executable = options.argv[1]
+  probes_by_command[executable] = (probes_by_command[executable] or 0) + 1
+  if executable == "codex" then error("No such file or directory") end
   return { code = 0, stdout = "logged in", stderr = "", timed_out = false }
 end
 local doctor = dofile("packages/butler/doctor.lua")
+local windows_doctor_names = doctor.candidate_names("claude", "windows")
+assert(windows_doctor_names[1] == "claude" and windows_doctor_names[2] == "claude.cmd",
+  "doctor should keep the Windows .cmd probe candidate")
+local one_probe = doctor.probe_command({ "claude", "auth", "status" }, "posix")
+assert(one_probe.installed and process_calls == 1,
+  "doctor should make exactly one process probe for a found candidate")
+process_calls, probes_by_command = 0, {}
 local doctor_result = doctor.probe()
 assert(doctor_result.claude.installed, "doctor should report the shared candidate as installed")
+assert(not doctor_result.codex.installed, "doctor should keep a missing Codex command missing")
 assert(doctor_lookups[1] == "claude", "doctor must use system.find_command")
-assert(doctor_lookups[2] == "codex", "doctor should check Codex through system.find_command")
-assert(process_calls == 1, "doctor should run one probe for the one found candidate")
+assert(doctor_lookups[2] == "claude" and doctor_lookups[3] == "codex",
+  "doctor should check both CLIs through system.find_command")
+assert(process_calls == 2 and probes_by_command[found_cmd] == 1 and probes_by_command.codex == 1,
+  "doctor should probe each found candidate once and use its Windows-name fallback only when lookup misses")
 
 -- HOME fallback is testable without changing the test runner's environment.
 os.getenv = function(name)
