@@ -6,6 +6,8 @@ local USAGE = [[  remuda butler matrix [--json] status
   remuda butler matrix [--json] rooms --public [TERM]
   remuda butler matrix [--json] [--room ROOM] [-n N] history
   remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] follow EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] unfollow EVENT_ID
   remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
   remuda butler matrix [--json] [-o PATH] download MXC
   remuda butler matrix [--json] [--room ROOM] send TEXT
@@ -22,7 +24,7 @@ Example: remuda butler matrix setup --homeserver https://<homeserver> --owner @<
 
 local VERBS = {
   status = true, rooms = true, history = true, event = true, get = true, quarantine = true,
-  thread = true, download = true, send = true, reply = true, react = true,
+  thread = true, follow = true, unfollow = true, download = true, send = true, reply = true, react = true,
   upload = true, redact = true, join = true, leave = true,
 }
 
@@ -96,7 +98,7 @@ local function parse(args)
 
   local method = verb == "get" and "event" or verb
   local room_verbs = { history = true, thread = true, event = true, send = true,
-    reply = true, react = true, upload = true, redact = true }
+    follow = true, unfollow = true, reply = true, react = true, upload = true, redact = true }
   if options.room and not room_verbs[method] then return nil end
   if options.n and method ~= "history" then return nil end
   if options.output and method ~= "download" then return nil end
@@ -123,7 +125,7 @@ local function parse(args)
     options.room = values[1]
   elseif method == "history" then
     if #values ~= 0 then return nil end
-  elseif method == "thread" or method == "event" then
+  elseif method == "thread" or method == "event" or method == "follow" or method == "unfollow" then
     if #values ~= 1 then return nil end
     options.event_id = values[1]
   elseif method == "download" then
@@ -569,8 +571,25 @@ function matrix.cli(args, agent)
     if type(remuda.fail) == "function" then return remuda.fail(tostring(verb), 2) end
     error(tostring(verb), 0)
   end
-  if not verb then return USAGE end
-  if verb ~= "join" and verb ~= "leave" and type(matrix.configuration_guidance) == "function" then
+  if not verb then
+    local candidate
+    for _, value in ipairs(args or {}) do
+      if value == "follow" or value == "unfollow" then candidate = value end
+    end
+    if candidate then
+      local usage = "  remuda butler matrix [--json] [--room ROOM] " .. candidate .. " EVENT_ID"
+      if type(remuda.pending) == "function" then
+        local reply = remuda.pending({ timeout = 1 })
+        reply:resolve(2, "", usage .. "\n")
+        return reply
+      end
+      if type(remuda.fail) == "function" then return remuda.fail(usage, 2) end
+      return usage
+    end
+    return USAGE
+  end
+  if verb ~= "join" and verb ~= "leave" and verb ~= "follow" and verb ~= "unfollow"
+    and type(matrix.configuration_guidance) == "function" then
     local guidance = matrix.configuration_guidance()
     if guidance then
       if type(remuda.fail) == "function" then return remuda.fail(guidance, 1) end
@@ -594,6 +613,54 @@ function matrix.cli(args, agent)
     if active and active.cancel then active:cancel() end
   end })
   local callback = function(result) finish(reply, cancelled, completed, verb, options, result) end
+  if verb == "follow" or verb == "unfollow" then
+    local relay = matrix.relay and matrix.relay.instance
+    if not relay or type(relay.subscribe_thread) ~= "function"
+      or type(relay.unsubscribe_thread) ~= "function" or type(relay.route_for_event) ~= "function" then
+      local message = 'Matrix relay is not running. Next: remuda butler doctor'
+      return reply:resolve(1, "", message .. "\n")
+    end
+    local route = relay:route_for_event(options.event_id)
+    local thread = route and route.thread_root or options.event_id
+    local room = options.room or (route and route.room_id) or matrix.configured_room()
+    if type(room) ~= "string" or room == "" then
+      local message = 'Matrix relay is not running. Next: remuda butler doctor'
+      return reply:resolve(1, "", message .. "\n")
+    end
+    local ok, changed = pcall(function()
+      if verb == "follow" then return relay:subscribe_thread(room, thread) end
+      return relay:unsubscribe_thread(room, thread)
+    end)
+    if not ok then return reply:resolve(1, "", tostring(changed) .. "\n") end
+    if verb == "follow" and not changed then
+      local message = "Follow limit reached in " .. terminal_safe(room) .. " (50000). Next: remuda butler matrix unfollow "
+        .. "EVENT_ID"
+      if options.json then
+        local encoded, encode_error = matrix.encode_json({ followed = false, room = room, thread = thread })
+        if not encoded then return reply:resolve(1, "", tostring(encode_error) .. "\n") end
+        return reply:resolve(1, encoded .. "\n", "")
+      end
+      return reply:resolve(1, "", message .. "\n")
+    end
+    local followed = verb == "follow"
+    local result = followed and { followed = true, room = room, thread = thread }
+      or { unfollowed = changed == true, room = room, thread = thread }
+    if options.json then
+      local encoded, encode_error = matrix.encode_json(result)
+      if not encoded then return reply:resolve(1, "", tostring(encode_error) .. "\n") end
+      return reply:resolve(0, encoded .. "\n", "")
+    end
+    local safe_thread, safe_room = terminal_safe(thread), terminal_safe(room)
+    if followed then
+      return reply:resolve(0, "Following thread " .. safe_thread .. " in " .. safe_room
+        .. ".\nNext: remuda butler matrix thread " .. safe_thread .. "\n", "")
+    elseif changed then
+      return reply:resolve(0, "Stopped following thread " .. safe_thread .. " in " .. safe_room
+        .. ".\nNext: remuda butler matrix follow " .. safe_thread .. "\n", "")
+    end
+    return reply:resolve(0, "Not following thread " .. safe_thread .. " in " .. safe_room
+      .. ".\nNext: remuda butler matrix follow " .. safe_thread .. "\n", "")
+  end
   if verb == "reply" then
     local relay = matrix.relay and matrix.relay.instance
     if not relay or type(relay.can_reply_to) ~= "function" then
