@@ -229,7 +229,7 @@ local function test_allowlisted_media_types_and_sender_filter()
     local event = assert(by_id[spec[1]], "allowlisted " .. spec[1] .. " did not deliver")
     for _, expected in ipairs({ "media: " .. spec[2], "filename: " .. spec[3],
         "mimetype: " .. spec[4], "size: " .. spec[5] .. " bytes", "mxc: " .. spec[6],
-        "Next: remuda butler matrix -o PATH download " .. spec[6] }) do
+        "Next: remuda butler matrix download " .. spec[6] }) do
       assert(event.body:find(expected, 1, true), spec[1] .. " omitted " .. expected)
     end
   end
@@ -350,8 +350,10 @@ local function test_download_next_command(body)
   matrix.cli(args)
   remuda.pending, matrix.download = old_pending, old_download
   matrix.configuration_guidance = old_guidance
-  assert(captured and captured.output == "PATH" and captured.mxc == "mxc://example.org/chart",
-    "rendered Next command should parse to download the expected MXC to PATH")
+  -- No -o in the rendered line: an agent caller's download lands in its working directory.
+  assert(captured and captured.output == nil and captured.mxc == "mxc://example.org/chart",
+    "rendered Next command should parse to download the expected MXC without -o")
+  assert(not line:find("-o", 1, true), "the media Next line must not offer an -o PATH form")
 end
 
 local function test_state_restart_corruption_and_processed_cap()
@@ -4441,7 +4443,7 @@ test_allowlisted_media_without_url_is_quarantined()
 test_quarantine_sender_cap_preserves_utf8()
 test_download_next_command("media: image\nfilename: chart.png\nmimetype: image/png\n"
   .. "size: 12345 bytes\nmxc: mxc://example.org/chart\n"
-  .. "Next: remuda butler matrix -o PATH download mxc://example.org/chart")
+  .. "Next: remuda butler matrix download mxc://example.org/chart")
 test_state_restart_corruption_and_processed_cap()
 test_pending_delivery_retries_safely_after_restart()
 test_ack_reconcile_and_utf8_body_cap()
