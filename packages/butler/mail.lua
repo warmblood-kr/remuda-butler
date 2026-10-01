@@ -526,6 +526,45 @@ local function retry_unreadable(name)
   bus.mail_unreadable[name] = still
 end
 
+-- Keep the Matrix context line identical in the inbox list and in a single
+-- message reprint. Event ids remain copyable; only the thread root is used in
+-- the suggested command and therefore goes through shown_event_id.
+local function matrix_header(message)
+  local item = message and message.matrix
+  if type(item) ~= "table" or type(item.event_id) ~= "string" then return "" end
+  local event_id = item.event_id:gsub("[%z\1-\31\127]", "")
+    :gsub("\194[\128-\159]", "")
+  event_id = remuda.butler.matrix.utf8_prefix(event_id, 256)
+
+  local line = "  Matrix event " .. event_id
+  local room = type(item.room_id) == "string" and item.room_id or ""
+  if room == "" then return line end
+
+  -- Match the relay's terminal-safe field cap for room ids.
+  local safe_room = remuda.butler.matrix.utf8_prefix(room, 512)
+    :gsub("[%z\1-\31\127]", ""):gsub("\194[\128-\159]", "")
+  local room_kind = item.room_kind or item.room
+  line = line .. " in room " .. safe_room
+  if room_kind == "home" or room_kind == "all" or room_kind == "joined" then
+    line = line .. " (" .. room_kind .. ")"
+  end
+
+  local root = type(item.thread_root) == "string" and item.thread_root or ""
+  if root ~= "" then
+    local shown_root = remuda.butler.matrix.shown_event_id(root)
+    line = line .. ", thread " .. shown_root
+    local command = "  Next: remuda butler matrix --room "
+      .. remuda.butler.matrix.shell_quote(safe_room) .. " "
+    if shown_root == "(id not shown)" then
+      line = line .. "\n" .. command .. "history"
+    else
+      line = line .. "\n" .. command .. "thread "
+        .. remuda.butler.matrix.shell_quote(shown_root)
+    end
+  end
+  return line
+end
+
 local function inbox(name)
   load_inbox(name)
   retry_unreadable(name)
@@ -538,11 +577,9 @@ local function inbox(name)
     if message and object then
       local lines = { "[" .. message.id .. " from " .. message.from.host .. "/"
         .. message.from.session .. " · " .. message.created_at .. "] " .. message.subject }
-      if message.matrix and message.matrix.event_id then
-        local event_id = message.matrix.event_id:gsub("[%z\1-\31\127]", "")
-          :gsub("\194[\128-\159]", "")
-        event_id = remuda.butler.matrix.utf8_prefix(event_id, 256)
-        lines[#lines + 1] = "  Matrix event " .. event_id
+      local matrix_line = matrix_header(message)
+      if matrix_line ~= "" then
+        for line in (matrix_line .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
       end
       if message.in_reply_to then
         local root = message.references and message.references[1]
@@ -597,4 +634,5 @@ local function is_unread(name, id)
 end
 
 remuda._butler_mail = { mailbox = mailbox, queue = queue, reply = reply, forward = forward, forward_delivery = deliver_forward, inbox = inbox, unread = unread, append = append,
+  matrix_header = matrix_header,
   find_message = find_message, is_unread = is_unread, migrate_legacy = migrate_legacy }

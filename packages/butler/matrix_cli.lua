@@ -745,6 +745,12 @@ function matrix.cli(args, agent, stdin_body)
     elseif relay.thread_root_for_event then
       options.thread_root = relay:thread_root_for_event(options.event_id)
     end
+  elseif verb == "thread" and not options.room then
+    local relay = matrix.relay and matrix.relay.instance
+    local route = relay and relay.route_for_event and relay:route_for_event(options.event_id)
+    if route and type(route.room_id) == "string" and route.room_id ~= "" then
+      options.room = route.room_id
+    end
   end
   local called, handle = pcall(matrix[verb], options, callback, agent)
   if not called then
