@@ -4460,6 +4460,21 @@ test_cli_matrix_mail_replies_keep_room_and_relation()
 rx_check("test_thread_reply_in_same_sync_batch_gets_root_reference", test_thread_reply_in_same_sync_batch_gets_root_reference)
 rx_check("test_human_root_fixture_through_relay_and_mail", test_human_root_fixture_through_relay_and_mail)
 do
+  -- The setup tests run as on a core whose prompt_line takes a preface (#186),
+  -- whatever core runs this suite; they switch it off themselves for the
+  -- older-core case.
+  local preface_supported = matrix.prompt_preface_supported
+  -- The real seam: core has no capability word, so preface is taken to exist
+  -- exactly when remuda.fs.lock does (merged to core after preface).
+  local core_lock = remuda.fs.lock
+  remuda.fs.lock = nil
+  local without_lock = preface_supported()
+  remuda.fs.lock = function() end
+  local with_lock = preface_supported()
+  remuda.fs.lock = core_lock
+  assert(without_lock == false and with_lock == true,
+    "prompt preface is used exactly on a core that has remuda.fs.lock: " .. tostring(without_lock) .. " " .. tostring(with_lock))
+  matrix.prompt_preface_supported = function() return true end
   -- The setup tests need one machine name on every core: the shell wrapper
   -- exports HOSTNAME for cores without remuda.hostname, and the word is pinned
   -- to the same name on cores that have it (#207).
@@ -4468,6 +4483,7 @@ do
   remuda.hostname = pinned_hostname
   local ran, why = pcall(setup_tests, matrix, pinned_hostname)
   remuda.hostname = core_hostname
+  matrix.prompt_preface_supported = preface_supported
   assert(ran, why)
 end
 rx_check("test_redefined_public_words_do_not_change_trust", test_redefined_public_words_do_not_change_trust)

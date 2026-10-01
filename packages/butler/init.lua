@@ -16,6 +16,7 @@ end
 local function start_matrix_relay()
   local matrix = host.butler and host.butler.matrix
   if host._butler_matrix_config and matrix and matrix.relay and not host._butler_skip_relay
+    and not host._butler_standby
     and type(host.http) == "table" and type(host.http.request) == "function" then
     matrix.relay.start(host._butler_matrix_config)
   end
@@ -109,10 +110,12 @@ return {
       end },
     { event = "session_exited", id = "identity", depth = -50,
       run = function(_, name, info)
-        return host._butler_session_exited(name, info)
+        if host._butler_session_exited then return host._butler_session_exited(name, info) end
       end },
     { event = "butler-compaction-submit", id = "submit",
-      run = function() return host._butler_compaction_submit() end },
+      run = function()
+        if host._butler_compaction_submit then return host._butler_compaction_submit() end
+      end },
   },
   schedules = {
     { name = "butler-notices", every = 1, run = function()

@@ -163,6 +163,12 @@ end
 local function terminal_safe(value)
   return tostring(value or ""):gsub("[%c]", " "):gsub("\194[\128-\159]", " ")
 end
+-- At most `limit` bytes; a cut text ends with "..." inside the limit, so the
+-- reader can see that it is not complete.
+local function shortened(text, limit)
+  if #text <= limit then return text end
+  return matrix.utf8_prefix(text, limit - 3) .. "..."
+end
 local function shell_quote(value)
   return matrix.shell_quote(tostring(value))
 end
@@ -325,6 +331,17 @@ function matrix.cli_usage()
   return USAGE
 end
 
+-- True when this core's prompt_line takes `preface` (core 416). An older
+-- daemon ignores the key silently and core has no capability or version word,
+-- so there is nothing to detect directly.
+-- ponytail: a proxy. remuda.fs.lock was merged to core main (da874da9) after
+-- prompt_line preface (74fc5321), so every core with fs.lock has preface; a
+-- core in the narrow window between the two shows the old behaviour, which is
+-- safe. Replace it when core has a capability or version word.
+function matrix.prompt_preface_supported()
+  return type(remuda.fs) == "table" and type(remuda.fs.lock) == "function"
+end
+
 function matrix.cli(args, agent, stdin_body)
   if type(args) == "table" and args[1] == "matrix" and args[2] == "setup" then
     -- Setup reads the files its flags name and sends them to the server named on the same
@@ -358,11 +375,11 @@ function matrix.cli(args, agent, stdin_body)
       reply:resolve(1, "", message .. "\nNothing was written.\n"
         .. (next_line or "Next: rerun remuda butler matrix setup.") .. "\n")
     end
-    local function prompt_line(label, default, callback)
+    local function prompt_line(label, default, callback, preface)
       if type(reply.prompt_line) ~= "function" then
         return prompt_failure("The Matrix setup wizard needs a Remuda core with prompt_line; upgrade Remuda first.")
       end
-      reply:prompt_line({ label = label, default = default, callback = function(line, prompt_error)
+      reply:prompt_line({ label = label, default = default, preface = preface, callback = function(line, prompt_error)
         if cancelled.value or completed.value then return end
         if prompt_error then
           local message
@@ -408,7 +425,9 @@ function matrix.cli(args, agent, stdin_body)
                 .. terminal_safe(wizard_plan.config_path) .. ". The sender allowlist still decides whose messages are trusted.",
               "  Account: create a Butler bot (you will need its server registration token)",
               "  Bot: " .. terminal_safe(wizard_plan.bot_mxid),
-              "  Save private token and config files in: " .. terminal_safe(wizard_plan.output_dir),
+              -- Without --dir the files go next to the config file.
+              "  Save private token and config files in: "
+                .. terminal_safe(wizard_plan.output_dir or wizard_plan.config_path:match("^(.*)/[^/]+$")),
               "  Start the relay for this Butler with this config (replaces its current Matrix relay config)",
             }
             if wizard_plan.pin then
@@ -418,14 +437,24 @@ function matrix.cli(args, agent, stdin_body)
             elseif scheme_or_error == "https" then
               lines[#lines + 1] = "  HTTPS trust: this system's trusted certificates"
             end
-            prompt_line(table.concat(lines, "\n") .. "\nContinue? Type Y to continue, or N to cancel",
-              "N", function(answer)
+            -- Core shows a label on one line and cuts it at 256 characters, so
+            -- the summary goes in the prompt's preface and the label is only
+            -- the question (#186). An older core keeps the summary in the label.
+            local question = "Continue? Type Y to continue, or N to cancel"
+            local label, preface = table.concat(lines, "\n") .. "\n" .. question, nil
+            if matrix.prompt_preface_supported() then
+              -- A preface line over 256 characters is an error from core, not
+              -- a cut: shorten a very long value here so the wizard goes on.
+              for index, line in ipairs(lines) do lines[index] = shortened(line, 250) end
+              label, preface = question, table.concat(lines, "\n")
+            end
+            prompt_line(label, "N", function(answer)
                 answer = type(answer) == "string" and answer:lower() or ""
                 if answer ~= "y" and answer ~= "yes" then
                   return prompt_failure("Matrix setup was not confirmed.")
                 end
                 execute_setup(wizard_plan)
-              end)
+              end, preface)
           end
           local function ask_transport_trust()
             if scheme_or_error == "https" then
@@ -470,7 +499,9 @@ function matrix.cli(args, agent, stdin_body)
     end
     execute_setup = function(plan)
       local prompt_attempts, prompt_notice = 0, nil
-      local prompt_label = "Registration token for " .. plan.homeserver
+      -- prompt_secret has no preface and core cuts a label at 256 characters:
+      -- a long homeserver is shortened so the notice and the question still fit.
+      local prompt_label = "Registration token for " .. shortened(plan.homeserver, 100)
         .. ", from its admin (hidden). This is not an access token"
       local rejected_registration_token = matrix.REJECTED_REGISTRATION_TOKEN
       local original_bot_mxid = plan.bot_mxid
