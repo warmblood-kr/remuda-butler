@@ -10157,7 +10157,7 @@ fn butler_quota_reads_codex_status_from_idle_member() {
       remuda._quota_typed = {{}}
       remuda.capture = function() return remuda._quota_screen end
       remuda.type_text = function(name, text)
-        table.insert(remuda._quota_typed, name .. "|" .. text)
+        if text == "/status" then table.insert(remuda._quota_typed, name .. "|" .. text) end
         if name == "quota-idle-codex" and text == "/status" then remuda._quota_screen = {fixture} end
         return "submitted"
       end
@@ -10218,7 +10218,7 @@ fn butler_quota_ignores_a_stale_status_card() {
         return remuda._quota_screen
       end
       remuda.type_text = function(name, text)
-        table.insert(remuda._quota_typed, name .. "|" .. text)
+        if text == "/status" then table.insert(remuda._quota_typed, name .. "|" .. text) end
         if name == "quota-stale-codex" and text == "/status" then remuda._quota_screen = {fresh} end
         return "submitted"
       end
@@ -10271,7 +10271,7 @@ fn butler_quota_does_not_type_into_a_draft() {
       remuda._butler_prompt_is_empty = function() return "NON-EMPTY" end
       remuda._butler_notify_policy = function() return false end
       remuda._quota_typed = {}
-      remuda.type_text = function(_, text) table.insert(remuda._quota_typed, text) end
+      remuda.type_text = function(_, text) if text == "/status" then table.insert(remuda._quota_typed, text) end end
     "#,
     );
     let out = remuda_timed(&dir, &["-s", "s", "butler", "quota"]);
@@ -10393,7 +10393,7 @@ fn butler_quota_report_denies_registered_member_before_collecting() {
         id="quota-member-id", alias="quota-member", kind="codex", session_name="quota-member"
       }
       remuda._quota_typed = {}
-      remuda.type_text = function(_, text) table.insert(remuda._quota_typed, text) end
+      remuda.type_text = function(_, text) if text == "/status" then table.insert(remuda._quota_typed, text) end end
     "#,
     );
     let member = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
@@ -10469,7 +10469,7 @@ fn butler_quota_single_flight_types_status_once_for_overlapping_calls() {
       remuda._quota_screen = "› Ask Codex to do anything"
       remuda.capture = function() return remuda._quota_screen end
       remuda.type_text = function(_, text)
-        table.insert(remuda._quota_typed, text)
+        if text == "/status" then table.insert(remuda._quota_typed, text) end
         return "submitted"
       end
       remuda._quota_fresh_screen = {status}
