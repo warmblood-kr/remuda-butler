@@ -313,9 +313,12 @@ It takes every argument after it, so it must be the last option. It works with
 and without `--register` (without it, `--bot` is required) and cannot be
 combined with `--password-file` or `--token-file`. Setup saves no copy of this
 password: it stays where it was made. The program inherits the daemon's
-environment (stdin is closed), so treat it as running with your own authority. A password that setup generates, or one
-given with `--register --password-file`, is still saved privately beside the
-token.
+environment (stdin is closed), so treat it as running with your own authority.
+
+Whoever made the password keeps it. Setup saves no copy of a password you
+supply, with `--password-cmd` or with `--password-file`, and says so: "The
+password you supplied was not copied." Only a password that setup generates
+(`--register` with neither option) is saved privately beside the token.
 
 ```text
 remuda butler matrix setup ... --password-cmd op read op://Vault/Item/password
