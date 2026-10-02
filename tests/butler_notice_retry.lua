@@ -112,6 +112,14 @@ remuda._butler_notice.notice_recovery_error("lead", {
 }, "recovery timed out")
 assert(sent[#sent][1] == "root",
   "id-less CLI/Matrix sender failure falls back to recipient leader")
+bus.agents.lead.parent = "gone-leader"
+bus.notice_failure_alerts.lead = nil
+bus.notices.lead = { count = 1, message_order = { "m3" }, delivery_attempts = 4 }
+remuda._butler_notice.notice_recovery_error("lead", {
+  message_ids = { "m3" }, draft = "",
+}, "recovery timed out")
+assert(sent[#sent][1] == "butler",
+  "id-less sender falls back to root Butler when recipient leader record is gone")
 bus.agents.orphan = { id = "orphan-id", kind = "codex" }
 stored_messages.m4 = { from = { alias = "operator", id = "" } }
 bus.notice_failure_alerts.orphan = nil
@@ -133,14 +141,19 @@ remuda.capture = function() return screen end
 remuda.key = function(_, key) unsafe_writes[#unsafe_writes + 1] = "key " .. key end
 remuda.type_text = function(_, value)
   type_attempts = type_attempts + 1
-  if type_attempts == 1 then error("a session input write is already in flight") end
+  if type_attempts == 1 then
+    error("runtime error: a session input write is already in flight\nstack traceback:\n\t[C]: in ?", 0)
+  end
   unsafe_writes[#unsafe_writes + 1] = "type " .. value
 end
 assert(not remuda._butler_notify("lead", "queued notice"))
 now = now + 2
+local retry_at = now
 remuda._butler_deliver_notices()
-assert(type_attempts == 1 and bus.notice_recoveries.lead == nil,
-  "busy input does not retain an unconditional retry_type phase")
+assert(type_attempts == 1 and bus.notice_recoveries.lead == nil
+  and bus.notices.lead.delivery_attempts == nil
+  and bus.notices.lead.due_at == retry_at + 1,
+  "traceback-wrapped busy input schedules a one-second probe, not a delivery retry")
 screen = "› another sender's task text / human draft"
 now = now + 1.1
 remuda._butler_deliver_notices()

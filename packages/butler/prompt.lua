@@ -45,6 +45,12 @@ local function task_running_visible(screen, task, composer)
   return prompt_start_visible(screen, task) and not compact(composer):find(marker, 1, true)
 end
 
+local function paste_placeholder(text)
+  text = tostring(text or "")
+  return text:match("^%[Pasted text #%d+ %+%d+ lines?%]$") ~= nil
+    or text:match("^%[Pasted Content %d+ chars%]$") ~= nil
+end
+
 local function notify(remuda, parent, name, reason)
   if parent then
     pcall(remuda._butler_send, "butler", parent,
@@ -98,6 +104,28 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
     options.return_retried = nil
     if options.on_retry then pcall(options.on_retry, retry_failures, delay, reason) end
   end
+  local function submit_timeout(screen, decision, composer_text)
+    if write_succeeded then
+      -- Before giving up, allow one safe Return retry when the composer still
+      -- exactly matches our write. Never submit an arbitrary paste or draft.
+      if decision == "NON-EMPTY" and compact(composer_text) == compact(task)
+          and not options.return_retried then
+        local allowed = true
+        if options.allowed then
+          local checked, result = pcall(options.allowed, true, screen)
+          allowed = checked and result == true
+        end
+        if allowed then
+          options.return_retried = true
+          pcall(remuda.key, actual, "RET")
+          verify_ticks = 0
+          verify_started = now()
+          return
+        end
+      end
+      finish(false, "submit")
+    else retry("submit") end
+  end
   poll = remuda.schedule({ every = 0.5, run = function()
     if finished then return end
     if options.recipient_alive then
@@ -112,6 +140,9 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
     if not captured then
       retry("could not capture the agent screen")
       return
+    end
+    if write_succeeded and prompt_start_visible(screen, task) then
+      task_seen_in_composer = true
     end
 
     if options.trust_dialog then
@@ -232,12 +263,12 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
       if write_result == "submitted" or task_seen_in_composer or prompt_start_visible(screen, task) then
         finish(true)
       elseif verify_started and now() - verify_started >= (options.submit_timeout or 300) then
-        retry("submit")
+        submit_timeout(screen, decision, composer_text)
       end
       return
     end
     local composer_is_task = compact(composer_text) == compact(task)
-    if composer_is_task then task_seen_in_composer = true end
+    if composer_is_task or paste_placeholder(composer_text) then task_seen_in_composer = true end
     if not composer_is_task and (decision ~= "NON-EMPTY" or write_result == "submitted")
         and task_running_visible(screen, task, composer_text) then
       finish(true)
@@ -262,7 +293,7 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
       return
     end
     if verify_started and now() - verify_started >= (options.submit_timeout or 300) then
-      retry("submit")
+      submit_timeout(screen, decision, composer_text)
     end
   end })
   return poll

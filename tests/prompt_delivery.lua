@@ -193,6 +193,7 @@ local function exercise_composer_after_paste(composer_after_paste, mixed)
     assert(text == task)
     state.sends = state.sends + 1
     state.composer = composer_after_paste
+    return "unverified"
   end
   function fake.key(_, key)
     assert(key == "RET")

@@ -619,8 +619,8 @@ minutes using one shared budget, then sends the original mail sender or task
 leader one failure message with a resend command. A failure notice is recorded
 in mail so a daemon restart cannot send it again. Mail without a Butler sender
 identity, such as CLI or Matrix mail, is reported to the recipient's leader.
-If the recipient has no leader, the root Butler receives the failure mail. The
-root records its own notice failure without mailing itself. Notice retries
+If that leader is absent or has exited, the root Butler receives the failure
+mail. The root records its own notice failure without mailing itself. Notice retries
 stop when the mail is read or the recipient exits. The `NOTICE` column in
 `remuda butler sessions` marks `task queued`, `task failed`, `queued`, and
 `notice failed` deliveries;

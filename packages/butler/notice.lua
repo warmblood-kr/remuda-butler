@@ -307,7 +307,8 @@ end
 local notice_recovery_error
 local function input_was_busy(ok, result, detail)
   local message = tostring(ok and (detail or result) or result or "")
-  return message:match("a session input write is already in flight$") ~= nil
+  local first_line = message:match("^[^\r\n]*") or ""
+  return first_line:match("a session input write is already in flight$") ~= nil
 end
 local function refresh_pending_notice(session, pending)
   if not pending.message_order then return pending end
@@ -491,6 +492,10 @@ notice_recovery_error = function(session, state, reason)
             target = recipient and recipient.parent or "butler"
             local leader = bus.agents[target]
             target_id = leader and leader.id
+            if not target_id or target_id == "" then
+              target, leader = "butler", bus.agents.butler
+              target_id = leader and leader.id
+            end
           end
           if target_id and target_id ~= "" then
             local group = by_sender[target] or { id = target_id, message_ids = {} }

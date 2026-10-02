@@ -4873,7 +4873,7 @@ fn butler_topic_delegate_checks_claude_trust_path_and_selection() {
             r#"
           remuda.butler.project_home({projects:?})
           remuda._butler_task_poke_attempts = 6
-          remuda._butler_task_retry_delays = {0, 0, 0, 0}
+          remuda._butler_task_retry_delays = {{0, 0, 0, 0}}
           remuda._butler_agent_builders.claude = function() return {{"sh"}} end
           remuda._butler_test_force_launch_probe = {{["allowed-topic"] = true, ["outside-topic"] = true}}
           local rule = string.rep("─", 20)
@@ -4888,12 +4888,12 @@ fn butler_topic_delegate_checks_claude_trust_path_and_selection() {
           remuda.key = function(name, key)
             log[#log + 1] = name .. " key " .. key
             if name == "allowed-topic" and key == "<down>" then
-              screens[name] = {allowed_yes_selected:?}
+              screens[name] = {{{allowed_yes_selected:?}}}
             elseif name == "allowed-topic" and key == "RET" then
               screens[name] = rule .. "\n❯ \n" .. rule
             elseif name == "outside-topic" and key == "<down>" then
               -- Deliberately leave No selected after Down in this unexpected UI.
-              screens[name] = {outside_dialog:?}
+              screens[name] = {{{outside_dialog:?}}}
             end
           end
           remuda.type_text = function(name, text) log[#log + 1] = name .. " type " .. text end

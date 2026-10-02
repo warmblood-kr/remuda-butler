@@ -176,7 +176,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
         return
       end
       local detail = reason or "delivery could not be verified"
-      if detail == "submit" then detail = "it was typed but not submitted" end
+      if detail == "submit" then detail = "submission could not be verified" end
       bus.pending_tasks[actual] = nil
       bus.task_poke_failures[actual] = { reason = detail, task = task }
       _butler_session_trace("task_poke_timeout", actual .. " " .. detail)

@@ -195,13 +195,50 @@ prompt.schedule(remuda, "codex", "member", "member", "lead", "ambiguous task", {
   empty = function() return "EMPTY", "" end,
   recipient_alive = function() return alive end,
   now = function() return now end,
-  submit_timeout = 100,
-  on_done = function(ok) done[#done + 1] = ok end,
+  submit_timeout = 1,
+  retry_delays = { 0, 0, 0, 0 },
+  on_done = function(ok, reason) done[#done + 1] = { ok, reason } end,
 })
 poll.run()
 poll.run()
 assert(input_calls == 1 and #done == 0,
   "blank capture after an unverified write must not count as delivered")
+now = now + 1
+poll.run()
+assert(input_calls == 1 and #done == 1 and done[1][1] == false and done[1][2] == "submit",
+  "an unverified write ends once at the first submit timeout without a false success")
+poll.run()
+assert(input_calls == 1 and #done == 1, "submit timeout does not start a 46-minute retry loop")
+
+-- If the unverified write is still represented by a paste placeholder, seeing
+-- it in the composer counts as our task being observed. A later blank capture
+-- then verifies that it was submitted without typing it again.
+now, alive, screen, input_calls, done = 8550, true, "ready", 0, {}
+remuda.capture = function() return screen end
+remuda.type_text = function()
+  input_calls = input_calls + 1
+  screen = "Ask Codex\n❯ [Pasted text #1 +2 lines]"
+  return "unverified"
+end
+prompt.schedule(remuda, "codex", "member", "member", "lead", "paste task\nsecond line", {
+  ready = function() return true end,
+  allowed = function() return true end,
+  empty = function(value)
+    local composer = value:match("❯ (.*)$") or ""
+    if composer:find("[Pasted text #1 +2 lines]", 1, true) then return "NON-EMPTY", composer end
+    return "EMPTY", ""
+  end,
+  recipient_alive = function() return alive end,
+  now = function() return now end,
+  submit_timeout = 10,
+  on_done = function(ok, reason) done[#done + 1] = { ok, reason } end,
+})
+poll.run()
+poll.run()
+screen = "Ask Codex\n❯ "
+poll.run()
+assert(input_calls == 1 and #done == 1 and done[1][1] == true,
+  "observed paste placeholder followed by blank composer confirms one delivery")
 
 -- The core's submitted status is sufficient confirmation of an empty prompt.
 now, alive, screen, input_calls, done = 8600, true, "ready", 0, {}
@@ -261,6 +298,6 @@ assert(loadfile("packages/butler/launch.lua"), "Codex task launcher parses")
 local launch_file = assert(io.open("packages/butler/launch.lua", "r"))
 local launch_source = launch_file:read("*a")
 launch_file:close()
-assert(launch_source:find('if detail == "submit" then detail = "it was typed but not submitted" end', 1, true),
-  "task submission failures explain that the typed task was not submitted")
+assert(launch_source:find('if detail == "submit" then detail = "submission could not be verified" end', 1, true),
+  "task submission failures explain that submission could not be verified")
 print("ok - first task retries until verified, exhaustion reports once, and exit cancels retries")
