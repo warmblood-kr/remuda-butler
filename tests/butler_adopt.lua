@@ -2,7 +2,7 @@
 --   luajit tests/butler_adopt.lua
 local bus = { agents = {} }
 local unread, idle, closed = {}, {}, {}
-remuda = { extension_command = function() end, butler = { typed_lines_cli = {}, schedule_cli = {}, matrix = { cli_usage = function() return "" end },
+remuda = { extension_command = function() end, butler = { typed_lines_cli = {}, schedule_cli = {}, approve_text = { cli = function() end }, matrix = { cli_usage = function() return "" end },
     is_idle = function(name) if idle[name] == false then return false, "busy" end return true end },
   _butler_bus = bus,
   _butler_mail = nil,

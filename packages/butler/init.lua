@@ -286,6 +286,8 @@ the normal way for a member to communicate.
         run = function(_, args, caller) return host._butler_command_run("agents", args, caller) end },
       { id = "status-commands", order = 17, verb = "status-commands", usage = "  remuda butler status-commands on|off",
         run = function(_, args, caller) return host._butler_command_run("status-commands", args, caller) end },
+      { id = "approve-text", order = 19, verb = "approve-text", usage = "  remuda butler approve-text request SESSION - | on|off",
+        run = function(_, args, caller) return host._butler_command_run("approve-text", args, caller) end },
       { id = "schedule", order = 18, verb = "schedule", usage = "  remuda butler schedule list\n"
           .. '  remuda butler schedule add <name> "<M H * * *>" <text> | - [--to SESSION]\n'
           .. "  remuda butler schedule rm <name>",
