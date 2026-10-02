@@ -1730,6 +1730,7 @@ fn a_notice_that_fails_to_type_stays_queued() {
         "remuda._notice_now = 0; \
          remuda._butler_notice_clock = function() return remuda._notice_now end; \
          remuda._butler_notify_policy = function() return true end; \
+         remuda.capture_styled = nil; \
          remuda._real_type_text = remuda.type_text; \
          remuda.type_text = function() error('pty write failed') end; \
          local sent = remuda._butler_send('operator', 'm1', 'hi'); \
@@ -1737,9 +1738,12 @@ fn a_notice_that_fails_to_type_stays_queued() {
     );
     assert!(sent.contains("notice deferred"), "{sent}");
     assert_eq!(eval(&path, "return remuda._butler_bus.notices.m1.count"), "1");
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1.delivery_attempts)"), "1");
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1.retry_at)"), "22");
     eval(
         &path,
         "remuda.type_text = remuda._real_type_text; \
+         remuda._notice_now = 22; \
          remuda.capture = function() \
            return remuda._butler_bus.notices.m1.text .. '\\n❯ ' \
          end; \
@@ -1754,7 +1758,7 @@ fn a_notice_that_fails_to_type_stays_queued() {
 }
 
 #[test]
-fn a_busy_notice_input_retries_on_the_next_tick() {
+fn a_busy_notice_input_defers_until_its_one_second_retry() {
     let (path, _daemon) = butler_with_member("notice-input-busy-retry");
     eval(
         &path,
@@ -1765,7 +1769,7 @@ fn a_busy_notice_input_retries_on_the_next_tick() {
         remuda._notice_busy_calls = 0
         remuda.type_text = function(_, text)
           remuda._notice_busy_calls = remuda._notice_busy_calls + 1
-          if remuda._notice_busy_calls == 1 then error('a session input write is already in flight') end
+          if remuda._notice_busy_calls == 1 then error('a session input write is already in flight', 0) end
           remuda._notice_typed = text
           return true
         end
@@ -1776,7 +1780,10 @@ fn a_busy_notice_input_retries_on_the_next_tick() {
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1.count)"), "1");
     eval(&path, "remuda._notice_now = 2; remuda._butler_deliver_notices()");
     assert_eq!(eval(&path, "return tostring(remuda._notice_busy_calls)"), "1");
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1.due_at)"), "3");
     eval(&path, "remuda._butler_deliver_notices()");
+    assert_eq!(eval(&path, "return tostring(remuda._notice_busy_calls)"), "1");
+    eval(&path, "remuda._notice_now = 3; remuda._butler_deliver_notices()");
     assert_eq!(eval(&path, "return tostring(remuda._notice_busy_calls)"), "2");
     assert_ne!(eval(&path, "return tostring(remuda._notice_typed)"), "nil");
 }
@@ -1792,6 +1799,7 @@ fn a_non_busy_error_containing_busy_is_not_retried_as_input_lock() {
         remuda.session = function() return { is_busy = false } end
         remuda._butler_human_active = function() return false end
         remuda.capture = function() return '❯ ' end
+        remuda.capture_styled = nil
         remuda._notice_busy_error_calls = 0
         remuda.type_text = function()
           remuda._notice_busy_error_calls = remuda._notice_busy_error_calls + 1
@@ -1812,8 +1820,8 @@ fn a_non_busy_error_containing_busy_is_not_retried_as_input_lock() {
         "#,
     );
     assert_eq!(eval(&path, "return tostring(remuda._notice_busy_error_calls)"), "1");
-    assert_eq!(eval(&path, "return tostring(remuda._notice_recovery_failed)"), "false",
-        "a type failure schedules the queued notice retry instead of alerting immediately");
+    assert_eq!(eval(&path, "return tostring(remuda._notice_recovery_failed)"), "true",
+        "the current attempt records failure before scheduling its retry");
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1.delivery_attempts)"), "1");
     assert_eq!(eval(&path, "return tostring(remuda._notice_busy_error_report)"), "nil",
         "a transient write failure does not send the exhausted-retry alert");
@@ -2029,10 +2037,10 @@ fn notice_ids_are_deduplicated_and_read_messages_are_not_notified() {
         "reading the message left its notice recovery active");
 }
 
-/// A notice that remains the exact Claude composer text gets one Return retry,
-/// then the bounded verification failure is reported and its count cleared.
+/// A notice that remains in Claude's composer gets one Return retry; failed
+/// verification schedules a delivery retry and keeps the notice queued.
 #[test]
-fn claude_notice_still_in_composer_is_retried_once_then_reported() {
+fn claude_notice_still_in_composer_is_retried_once_then_queued_for_retry() {
     let (path, _daemon) = butler_with_member("notice-still-in-composer");
     eval(
         &path,
@@ -2076,11 +2084,12 @@ fn claude_notice_still_in_composer_is_retried_once_then_reported() {
     let events = eval(&path, "return table.concat(remuda._notice_stuck_test_state.events, ',')");
     assert_eq!(events.matches("type").count(), 1, "{events}");
     assert_eq!(events.matches("key RET").count(), 1, "{events}");
-    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1 ~= nil)"), "false",
-        "a terminal notice failure left its pending count behind");
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1 ~= nil)"), "true",
+        "failed verification must preserve the pending notice");
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1.delivery_attempts)"), "1");
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notice_recoveries.m1 == nil)"), "true",
-        "a terminal notice failure left recovery state behind");
-    assert!(eval(&path, "return remuda._notice_stuck_test_state.report").contains("could not be verified"));
+        "the failed verification state is cleared before the scheduled retry");
+    assert_eq!(eval(&path, "return remuda._notice_stuck_test_state.report"), "");
 }
 
 /// #82: failed comparisons log sizes and a fixed reason, never pane or notice text.
@@ -2219,7 +2228,7 @@ fn a_task_deferred_too_long_times_out_and_tells_the_leader() {
         &path,
         &format!(
             "remuda._butler_session_trace_path = {trace:?}; \
-             remuda._butler_task_retry_delays = {{0,0,0,0}}; \
+             remuda._butler_task_retry_delays = {{}}; \
              remuda.butler.project_home({projects:?}); \
              remuda._butler_agent_builders.fake = function() return {{'sleep', '100'}} end; \
              remuda._butler_agent_startup.fake = {{ ready = function() return true end }}; \
@@ -2284,6 +2293,7 @@ fn a_topic_task_is_submitted_before_an_immediate_notice_is_typed() {
         &format!(
             r#"
             remuda.butler.project_home({projects:?})
+            remuda._butler_task_retry_delays = {{}}
             remuda._butler_agent_builders.claude = function() return {{"sh", {script:?}, {submitted:?}}} end
             remuda.session = function() return {{is_busy = false}} end
             remuda._butler_topic_delegate("topic", "do the delegated task", nil, "claude", "butler")
@@ -2351,6 +2361,7 @@ fn a_topic_task_retries_a_dropped_return_before_delivering_a_notice() {
             table.insert(events, "task typed; first Return dropped")
             screen = "──────\n❯ " .. text
             first_poll_empty = true
+            return "unverified"
           else
             table.insert(events, "notice delivered")
             remuda._topic_test_pending_at_notice = remuda._butler_bus.pending_tasks[n] ~= nil
@@ -2761,7 +2772,7 @@ fn attached_notice_recovery_progresses_or_times_out_with_a_reason() {
 }
 
 #[test]
-fn empty_prompt_fallback_types_once_per_notice_then_alerts() {
+fn empty_prompt_fallback_types_once_per_notice_then_retries_without_alerting() {
     let (path, _daemon) = butler_with_member("notice-fallback-once");
     eval(
         &path,
@@ -2800,95 +2811,41 @@ fn empty_prompt_fallback_types_once_per_notice_then_alerts() {
     );
     assert_eq!(
         eval(&path, "return tostring(#remuda._notice_fallback_test.alerts)"),
-        "1",
-        "fallback exhaustion must send one leader alert",
+        "0",
+        "a scheduled retry must not send an exhaustion alert",
     );
-    assert_eq!(
-        eval(&path, "return tostring(remuda._butler_bus.notices.m1 == nil)"),
-        "true",
-    );
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1 ~= nil)"), "true");
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1.delivery_attempts > 0)"), "true");
 }
 
 #[test]
-fn recovery_alert_dedupes_until_a_notice_is_delivered() {
+fn exhausted_recovery_sends_one_failure_alert() {
     let (path, _daemon) = butler_with_member("notice-alert-dedupe");
     eval(
         &path,
         r#"
-        local state = { now = 0, alerts = {}, screen = '' }
-        local row = { name = 'm1', alive = true, attached = false }
-        remuda._notice_alert_test = state
-        remuda._butler_bus.pending_tasks.m1 = nil
-        remuda._butler_notice_clock = function() return state.now end
-        remuda.ls = function() return { row } end
-        remuda.capture = function()
-          if state.screen == 'error' then error('private capture detail') end
-          return state.screen
-        end
-        remuda.capture_styled = nil
-        remuda.session = function() return { is_busy = false } end
-        remuda._butler_human_active = function() return false end
-        remuda._butler_notify_policy = function() return state.screen ~= 'error' end
-        remuda.type_text = function(_, text)
-          state.screen = text .. '\n❯ '
-          return true
-        end
         local send = remuda._butler_send
         remuda._butler_send = function(from, to, text)
-          if from == 'butler' then table.insert(state.alerts, text); return 'alerted' end
+          if from == 'butler' then
+            remuda._notice_failure_alert = text
+            return 'alerted'
+          end
           return send(from, to, text)
         end
-        state.screen = 'error'
-        local first = remuda._butler_send('operator', 'm1', 'first recovery failure')
-        local first_id = first:match('queued ([^ ]+)')
-        remuda._butler_bus.notice_recoveries.m1 = { phase = 'verify_notice', checks = 0,
-          message_ids = { first_id }, started_at = 0 }
-        state.now = 2
-        remuda._butler_deliver_notices()
-        state.now = 3
-        local second = remuda._butler_send('operator', 'm1', 'same recovery failure')
-        local second_id = second:match('queued ([^ ]+)')
-        remuda._butler_bus.notice_recoveries.m1 = { phase = 'verify_notice', checks = 0,
-          message_ids = { second_id }, started_at = 3 }
-        state.now = 5
-        remuda._butler_deliver_notices()
+        local sent = remuda._butler_send('operator', 'm1', 'failure contract fixture')
+        local id = assert(sent:match('queued ([^ ]+)'))
+        local pending = remuda._butler_bus.notices.m1
+        pending.delivery_attempts = 4
+        remuda._butler_notice.notice_recovery_error('m1', {
+          message_ids = { id }, draft = 'private draft'
+        }, 'verification failed')
         "#,
     );
-    let first_alerts = eval(&path, "return tostring(#remuda._notice_alert_test.alerts)");
-    assert_eq!(first_alerts, "1", "the same session and reason should alert only once");
-    eval(
-        &path,
-        r#"
-        remuda._notice_alert_test.screen = ''
-        remuda._butler_notify_policy = function() return true end
-        remuda._notice_alert_test.now = 6
-        remuda._butler_send('operator', 'm1', 'successful recovery')
-        remuda._notice_alert_test.now = 8
-        remuda._butler_deliver_notices()
-        remuda._butler_deliver_notices()
-        "#,
-    );
-    eval(
-        &path,
-        r#"
-        remuda._notice_alert_test.screen = 'error'
-        remuda._notice_alert_test.now = 10
-        local sent = remuda._butler_send('operator', 'm1', 'new recovery after delivery')
-        local id = sent:match('queued ([^ ]+)')
-        remuda._butler_bus.notice_recoveries.m1 = { phase = 'verify_notice', checks = 0,
-          message_ids = { id }, started_at = 10 }
-        remuda._notice_alert_test.now = 12
-        remuda._butler_deliver_notices()
-        "#,
-    );
-    assert_eq!(
-        eval(&path, "return tostring(#remuda._notice_alert_test.alerts)"),
-        "2",
-        "a delivered notice should reset the alert dedupe window",
-    );
-    let alert = eval(&path, r#"return table.concat(remuda._notice_alert_test.alerts, '\n')"#);
-    assert!(!alert.contains("private capture detail"), "alert leaked capture error text: {alert}");
-    assert!(!alert.contains("first recovery failure"), "alert leaked message text: {alert}");
+    let alert = eval(&path, "return tostring(remuda._notice_failure_alert)");
+    assert!(alert.contains("after 5 attempts"), "exhaustion summary omitted its attempts: {alert}");
+    assert!(alert.contains("remuda butler send"), "failure alert omitted the next action: {alert}");
+    assert!(!alert.contains("private draft"), "failure alert leaked the composer draft: {alert}");
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1)"), "nil");
 }
 
 #[test]

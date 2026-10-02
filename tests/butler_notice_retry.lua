@@ -112,6 +112,14 @@ remuda._butler_notice.notice_recovery_error("lead", {
 }, "recovery timed out")
 assert(sent[#sent][1] == "root",
   "id-less CLI/Matrix sender failure falls back to recipient leader")
+bus.agents.orphan = { id = "orphan-id", kind = "codex" }
+stored_messages.m4 = { from = { alias = "operator", id = "" } }
+bus.notice_failure_alerts.orphan = nil
+bus.notices.orphan = { count = 1, message_order = { "m4" }, delivery_attempts = 4 }
+remuda._butler_notice.notice_recovery_error("orphan", {
+  message_ids = { "m4" }, draft = "",
+}, "recovery timed out")
+assert(sent[#sent][1] == "butler", "leaderless recipient failure falls back to root Butler")
 
 -- If type_text reports another write in flight, a later non-empty composer is
 -- re-probed before any retry; another sender's task or human draft is untouched.
@@ -125,7 +133,7 @@ remuda.capture = function() return screen end
 remuda.key = function(_, key) unsafe_writes[#unsafe_writes + 1] = "key " .. key end
 remuda.type_text = function(_, value)
   type_attempts = type_attempts + 1
-  if type_attempts == 1 then error("a session input write is already in flight", 0) end
+  if type_attempts == 1 then error("a session input write is already in flight") end
   unsafe_writes[#unsafe_writes + 1] = "type " .. value
 end
 assert(not remuda._butler_notify("lead", "queued notice"))

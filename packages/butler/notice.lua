@@ -307,8 +307,7 @@ end
 local notice_recovery_error
 local function input_was_busy(ok, result, detail)
   local message = tostring(ok and (detail or result) or result or "")
-  return message == "a session input write is already in flight"
-    or message == "runtime error: a session input write is already in flight"
+  return message:match("a session input write is already in flight$") ~= nil
 end
 local function refresh_pending_notice(session, pending)
   if not pending.message_order then return pending end

@@ -61,6 +61,7 @@ now, alive, screen, input_calls, done = 4000, true, "ready", 0, {}
 remuda.type_text = function()
   input_calls = input_calls + 1
   if input_calls == 1 then return false end
+  return "submitted"
 end
 prompt.schedule(remuda, "codex", "member", "member", "lead", "first task", {
   ready = function() return true end,
@@ -81,7 +82,7 @@ assert(input_calls == 2 and #done == 1 and done[1][1] == true,
 -- accepted it, even if the first capture missed the text while background
 -- activity made the pane report busy.
 now, alive, screen, input_calls, done, retries = 5000, true, "ready", 0, {}, {}
-remuda.type_text = function() input_calls = input_calls + 1 end
+remuda.type_text = function() input_calls = input_calls + 1; return "submitted" end
 remuda.session = function() return { is_busy = true } end
 prompt.schedule(remuda, "codex", "member", "member", "lead", "first task", {
   ready = function() return true end,
@@ -108,7 +109,7 @@ assert(#done == 1, "completed delivery does not emit another callback after reci
 now, alive, screen, input_calls, done, retries = 6000, true, "ready", 0, {}, {}
 local busy = true
 remuda.session = function() return { is_busy = busy } end
-remuda.type_text = function() input_calls = input_calls + 1; busy = true end
+remuda.type_text = function() input_calls = input_calls + 1; busy = true; return "submitted" end
 prompt.schedule(remuda, "codex", "member", "member", "lead", string.rep("long first task\n", 80), {
   ready = function() return true end,
   allowed = function() return true end,
@@ -130,7 +131,7 @@ now, alive, screen, input_calls, done, retries = 7000, true, "ready", 0, {}, {}
 local return_calls = 0
 remuda.session = function() return { is_busy = false } end
 remuda.capture = function() return screen end
-remuda.type_text = function(_, text) input_calls = input_calls + 1; screen = text end
+remuda.type_text = function(_, text) input_calls = input_calls + 1; screen = text; return "submitted" end
 remuda.key = function(_, key)
   if key == "RET" then return_calls = return_calls + 1; screen = "first task accepted" end
 end
@@ -183,6 +184,40 @@ assert(input_calls == 1 and return_calls == 1,
   "successful write retry must submit once without typing the task twice")
 poll.run()
 assert(#done == 1 and done[1] == true, "retry Return completes delivery")
+
+-- An unverified write plus a blank capture is ambiguous: the task may still
+-- be sitting in the composer, so Butler must not report it delivered.
+now, alive, screen, input_calls, done = 8500, true, "ready", 0, {}
+remuda.type_text = function() input_calls = input_calls + 1; return "unverified" end
+prompt.schedule(remuda, "codex", "member", "member", "lead", "ambiguous task", {
+  ready = function() return true end,
+  allowed = function() return true end,
+  empty = function() return "EMPTY", "" end,
+  recipient_alive = function() return alive end,
+  now = function() return now end,
+  submit_timeout = 100,
+  on_done = function(ok) done[#done + 1] = ok end,
+})
+poll.run()
+poll.run()
+assert(input_calls == 1 and #done == 0,
+  "blank capture after an unverified write must not count as delivered")
+
+-- The core's submitted status is sufficient confirmation of an empty prompt.
+now, alive, screen, input_calls, done = 8600, true, "ready", 0, {}
+remuda.type_text = function() input_calls = input_calls + 1; return "submitted" end
+prompt.schedule(remuda, "codex", "member", "member", "lead", "confirmed task", {
+  ready = function() return true end,
+  allowed = function() return true end,
+  empty = function() return "EMPTY", "" end,
+  recipient_alive = function() return alive end,
+  now = function() return now end,
+  on_done = function(ok) done[#done + 1] = ok end,
+})
+poll.run()
+poll.run()
+assert(input_calls == 1 and #done == 1 and done[1] == true,
+  "submitted write status confirms an empty composer")
 
 -- A quote-prefixed task can look like transcript text to the composer parser.
 -- That ambiguous NON-EMPTY screen is not proof that a dropped Return worked.

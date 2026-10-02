@@ -4388,7 +4388,7 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
           remuda._butler_inbox("butler")
           remuda._butler_session_trace_path = {trace:?}
           remuda._butler_task_poke_attempts = 6
-          remuda._butler_task_retry_delays = {0, 0, 0, 0}
+          remuda._butler_task_retry_delays = {{}}
           remuda._butler_test_force_launch_probe = {{
             ["t-claude"] = true,
             ["t-claude-launch"] = true,

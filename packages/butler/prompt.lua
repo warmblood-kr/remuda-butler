@@ -59,6 +59,7 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
   local handled_modals, settle_until = {}, 0
   local write_succeeded = false
   local write_result
+  local task_seen_in_composer = false
   local verify_started, retry_at, retry_failures, finished
   local retry_delays = options.retry_delays or { 20, 60, 300, 900 }
   local function now()
@@ -182,18 +183,18 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
         verify_ticks = 0
         -- Keep this nonblocking: a long terminal sleep stalls every daemon
         -- callback, including notice and lifecycle work.
-        local typed, type_error, result = pcall(remuda.type_text, actual, task, 0.1)
-        if not typed or type_error == false then
+        local typed, type_result = pcall(remuda.type_text, actual, task, 0.1)
+        if not typed or type_result == false then
           local reason = "type failed"
-          if not typed and type(type_error) == "string" then
-            reason = "type failed: " .. safe_type_error_line(type_error)
-          elseif type_error == false then
+          if not typed and type(type_result) == "string" then
+            reason = "type failed: " .. safe_type_error_line(type_result)
+          elseif type_result == false then
             reason = "type failed: write refused"
           end
           retry(reason)
         else
           write_succeeded = true
-          write_result = result
+          write_result = type_result
           verify_started = now()
         end
       else
@@ -224,13 +225,19 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
       empty = checked and composer_decision == "EMPTY"
       if checked then composer_text = tostring(text or "") end
     end
-    -- After a successful write, an empty composer means the TUI accepted it,
-    -- even when the task was submitted before its text appeared in a capture.
+    -- A blank capture can miss text that is still in the composer. Trust it
+    -- only when the core confirmed submission or a prior screen proved the
+    -- task reached the prompt.
     if empty then
-      finish(true)
+      if write_result == "submitted" or task_seen_in_composer or prompt_start_visible(screen, task) then
+        finish(true)
+      elseif verify_started and now() - verify_started >= (options.submit_timeout or 300) then
+        retry("submit")
+      end
       return
     end
     local composer_is_task = compact(composer_text) == compact(task)
+    if composer_is_task then task_seen_in_composer = true end
     if not composer_is_task and (decision ~= "NON-EMPTY" or write_result == "submitted")
         and task_running_visible(screen, task, composer_text) then
       finish(true)
