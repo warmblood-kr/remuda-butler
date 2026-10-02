@@ -157,10 +157,34 @@ end
 -- true, backend | nil, reason ("no store", or core's not_found / unavailable: / denied:).
 function system.credential_put(name, secret) return credential_call("put", name, secret) end
 function system.credential_delete(name) return credential_call("delete", name) end
--- Core's per-user directory for `kind`, "<base>/remuda" (remuda.storage.dir).
--- Not written yet: answers nil, so the data home below is always the old one.
-function system.storage_dir(kind) return nil end
-function system.data_home(legacy_home, exists) return legacy_home end
+-- Core's per-user directory for `kind`, "<base>/remuda" (remuda.storage.dir),
+-- or nil on a core without the word or when it cannot say.
+function system.storage_dir(kind)
+  local storage = remuda.storage
+  if type(storage) ~= "table" or type(storage.dir) ~= "function" then return nil end
+  local ok, dir = pcall(storage.dir, kind)
+  return ok and type(dir) == "string" and dir ~= "" and dir or nil
+end
+-- A directory test that works on Windows too; every core with storage.dir has fs.realpath.
+local function path_exists(path)
+  local fs = remuda.fs
+  if type(fs) ~= "table" or type(fs.realpath) ~= "function" then return false end
+  local ok, real = pcall(fs.realpath, path)
+  return ok and real ~= nil
+end
+-- The directory that holds remuda/: core's where it has one, else `legacy_home`
+-- (Butler's own XDG/HOME rule). Data made under the old rule is kept until it is
+-- moved: then the second value is a note naming both places.
+function system.data_home(legacy_home, exists)
+  local core = system.storage_dir("data")
+  local base = core and core:match("^(.+)[/\\]remuda[/\\]?$")
+  if not base or base == legacy_home then return legacy_home end
+  exists = exists or path_exists
+  if legacy_home and exists(legacy_home .. "/remuda/butler") and not exists(base .. "/remuda/butler") then
+    return legacy_home, "kept " .. legacy_home .. "/remuda/butler; core's data directory is " .. core
+  end
+  return base
+end
 function system.run_in(directory, argv)
   if windows_selected then
     return nil, "Butler topic templates cannot run commands with this core on Windows.\n"

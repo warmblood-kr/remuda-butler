@@ -282,6 +282,7 @@ end
   assert(moved == [[C:\Users\u\AppData\Local]] and moved_note == nil, "when both exist, core's place is used and nothing is said")
 
   -- paths.lua builds Butler's directories on that answer.
+  local outer_getenv = os.getenv
   os.getenv = function(name)
     if name == "HOME" or name == "USERPROFILE" or name == "XDG_CONFIG_HOME" or name == "XDG_DATA_HOME"
         or name == "REMUDA_BUTLER_TOKEN" or name == "REMUDA_BUTLER_CONFIG"
@@ -294,7 +295,7 @@ end
     and remuda._butler_paths.butler_session_cwd == [[C:\Users\u\AppData\Local]] .. "/remuda/butler/sessions/butler"
     and remuda._butler_paths.mail_root == [[C:\Users\u\AppData\Local]] .. "/remuda/butler/mail",
     "Butler's directories should sit under core's data directory: " .. tostring(remuda._butler_paths.data_home))
-  remuda.storage = nil
+  remuda.storage, os.getenv = nil, outer_getenv
 end)()
 
 remuda.butler = {}

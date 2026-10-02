@@ -822,6 +822,8 @@ local function _butler_trace(event, detail)
     f:close()
   end)
 end
+-- Data made before core chose the data directory is still in use (#205).
+if paths.data_home_note then _butler_trace("data_home", paths.data_home_note) end
 
 local BUTLER_ARGV = remuda._butler_argv
 if not BUTLER_ARGV then
