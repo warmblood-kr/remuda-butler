@@ -17,7 +17,7 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 CORE_URL=${CORE_URL:-https://github.com/warmblood-kr/remuda.git}
 # Core with delivery channel hooks and private state writes. Bump deliberately;
 # a core change must not redden Butler PRs.
-CORE_REF=${CORE_REF:-499b8b95}
+CORE_REF=${CORE_REF:-c7b0cbd0}
 
 scratch=$(mktemp -d /tmp/butler-rust.XXXXXX)
 scratch=$(cd "$scratch" && pwd -P)
