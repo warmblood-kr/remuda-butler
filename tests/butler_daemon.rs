@@ -1593,6 +1593,7 @@ fn butler_lifecycle_reload_replaces_hooks_and_schedules_and_rolls_back() {
 
     let counts = r#"
         local inbox, owned, notices, reconcile, compaction, owned_contributions = 0, 0, 0, 0, 0, -1
+        local switch_verbs = {}
         for _, hook in ipairs(remuda.hook_list()) do
           if hook.group == "remuda-module:butler" then owned = owned + 1 end
           if hook.event == "butler/deliver" and hook.id == "inbox"
@@ -1607,15 +1608,24 @@ fn butler_lifecycle_reload_replaces_hooks_and_schedules_and_rolls_back() {
           owned_contributions = 0
           for _, point in ipairs({ "butler.command", "butler.guidance" }) do
             for _, item in ipairs(remuda.contributions(point)) do
-              if item.owner == "butler" then owned_contributions = owned_contributions + 1 end
+              if item.owner == "butler" then
+                owned_contributions = owned_contributions + 1
+                if point == "butler.command" and item.id
+                    and (item.id == "typed-lines" or item.id == "shell-lines") then
+                  switch_verbs[#switch_verbs + 1] = item.id
+                end
+              end
             end
           end
         end
-        return table.concat({ inbox, owned, notices, reconcile, compaction, owned_contributions }, "|")
+        table.sort(switch_verbs)
+        return table.concat({ inbox, owned, notices, reconcile, compaction, owned_contributions,
+          table.concat(switch_verbs, ",") }, "|")
     "#;
     let initial = eval(&path, counts);
     assert!(
-        initial == "1|4|1|1|1|25" || initial == "1|4|1|1|1|-1",
+        initial == "1|4|1|1|1|27|shell-lines,typed-lines"
+            || initial == "1|4|1|1|1|-1|",
         "unexpected Butler lifecycle registrations: {initial}"
     );
 
