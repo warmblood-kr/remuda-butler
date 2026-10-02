@@ -5,13 +5,13 @@ local system = assert(remuda._butler_system)
 local USAGE = [[Usage: remuda butler matrix setup [OPTIONS]
   --homeserver URL       Your Matrix server address, like https://matrix.example.org.
   --owner ID             Your Matrix user ID, like @alice:example.org (in Element: click your avatar, top left).
-  --password-file PATH   Use this chosen bot password; setup saves no copy of it. If omitted with --register, one is generated and saved privately.
+  --password-file PATH   Use this chosen bot password; setup saves no copy of it. If omitted with --register, one is generated and saved in the OS secure store, or in a private file when there is no store.
   --password-cmd PROG [ARG...]  Run this program and use the first line it prints as the bot password; no copy is saved. Must be the last option.
   --bot ID               The bot's Matrix user ID, like @butler-home:example.org (the account setup logs in as).
   --token-file PATH      Use an existing access token from this file instead of a password.
   --register             Create the bot account; prompt for its registration token if no file is given.
   --registration-token-file PATH  Optional file with the homeserver registration token (ask the server admin; this is not a bot access token).
-  --dir PATH             Save the private token and config files in this directory.
+  --dir PATH             Save the private token and config files in this directory; a generated password is saved there as a file too.
   --default              Save to the default live Butler config directory.
   --force                Replace existing token or config files.
   --all                  Also create the optional ALL-BUTLERS room.
@@ -372,13 +372,17 @@ local function resolve_outputs(options)
   if options.default and options.dir then return nil, "--default and --dir cannot be combined" end
 
   local password_path = token_path:match("^(.*)/[^/]+$") .. "/password"
-  local saves_password = saves_password(options)
-  if saves_password and (password_path == token_path or password_path == config_path) then
+  local keeps_password = saves_password(options)
+  if keeps_password and (password_path == token_path or password_path == config_path) then
     return nil, "Matrix password, token, and config output paths must be different"
   end
   if not options.force then
     local paths = { token_path, config_path }
-    if saves_password then paths[#paths + 1] = password_path end
+    -- Only the file route can collide with an old password file: --dir always
+    -- means the file, and so does a system with no OS secure store.
+    if keeps_password and (dir or not system.credential_backend()) then
+      paths[#paths + 1] = password_path
+    end
     for _, path in ipairs(paths) do
       if file_exists(path) then return nil, "output file already exists; pass --force: " .. path end
     end
@@ -850,18 +854,28 @@ function matrix.setup_write(options, result)
     if type(result.home_room) == "string" then orphan_ids[#orphan_ids + 1] = result.home_room end
     if type(result.all_room) == "string" then orphan_ids[#orphan_ids + 1] = result.all_room end
   end
+  local stored -- { backend, name } once the generated password is in the OS secure store
   local function failure(message)
+    if stored then
+      local ok, deleted = pcall(system.credential_delete, stored.name)
+      if not ok or not deleted then
+        -- The name holds no secret; the operator needs it to find the entry.
+        message = message .. "; the password is still in the OS secure store (" .. stored.backend
+          .. ") as " .. stored.name .. "; delete that entry by hand"
+      end
+      stored = nil
+    end
     if #orphan_ids > 0 then
       message = message .. "; orphan room ID" .. (#orphan_ids > 1 and "s" or "")
         .. ": " .. table.concat(orphan_ids, ", ")
     end
     return nil, message
   end
-  local saves_password = type(options) == "table" and saves_password(options)
+  local keeps_password = type(options) == "table" and saves_password(options)
   if type(options) ~= "table" or type(result) ~= "table"
     or type(result.token) ~= "string" or result.token == ""
     or type(result.user_id) ~= "string" or type(result.home_room) ~= "string"
-    or (saves_password
+    or (keeps_password
       and (type(result.password) ~= "string" or result.password == ""
         or type(options.password_path) ~= "string"))
     or (options.create_all and type(result.all_room) ~= "string")
@@ -873,34 +887,39 @@ function matrix.setup_write(options, result)
     return failure("Matrix setup requires the Remuda private filesystem helpers")
   end
 
-  local paths = { options.token_path }
-  if saves_password then paths[#paths + 1] = options.password_path end
-  paths[#paths + 1] = options.config_path
-  local path_labels = { [options.token_path] = "token", [options.config_path] = "config" }
-  local contents = { [options.token_path] = result.token .. "\n" }
-  if saves_password then
-    path_labels[options.password_path] = "password"
-    contents[options.password_path] = result.password .. "\n"
-  end
-  local config_lines = {
-    options.homeserver, result.home_room, result.user_id, options.owner_mxid, "", "30000",
-  }
-  if result.all_room then config_lines[#config_lines + 1] = "all_room=" .. result.all_room end
-  if options.rooms_mode == "open" then config_lines[#config_lines + 1] = "rooms=open" end
-  if options.pin then config_lines[#config_lines + 1] = "pin_sha256=" .. options.pin end
-  if options.ca_file then config_lines[#config_lines + 1] = "ca_file=" .. options.ca_file end
-  contents[options.config_path] = table.concat(config_lines, "\n") .. "\n"
+  -- A generated password goes to the OS secure store. --dir always means the
+  -- file in that directory, and so does a store that is missing or says no.
+  local uses_store = keeps_password and not options.output_dir and system.credential_backend() ~= nil
+  local writes_password = keeps_password
+  -- Why a store that is there was not used, as one fixed word ("unavailable" or
+  -- "denied"), never the store's own text. No store at all needs no line.
+  local store_refused
   if not options.force then
-    for _, path in ipairs(paths) do
+    local checked = { options.token_path, options.config_path }
+    if keeps_password and not uses_store then checked[#checked + 1] = options.password_path end
+    for _, path in ipairs(checked) do
       if file_exists(path) then return failure("Matrix output file already exists; pass --force") end
     end
   end
+  if uses_store then
+    local name = "butler/matrix/" .. result.user_id .. "/password"
+    local put, backend = system.credential_put(name, result.password)
+    if put then
+      stored, writes_password = { backend = backend, name = name }, false
+    else
+      local reason = tostring(backend)
+      if reason ~= "no store" then store_refused = reason:match("^denied") or "unavailable" end
+    end
+  end
+  -- The account exists by now. A store that refused must not cost its password,
+  -- so the fallback may replace an old password file even without --force.
+  local replaces_password = uses_store and writes_password
 
-  local created_dirs, created_set, backups = {}, {}, {}
+  local created_dirs, created_set, backups, written = {}, {}, {}, {}
   local function rollback_dirs()
     for index = #created_dirs, 1, -1 do pcall(os.remove, created_dirs[index]) end
   end
-  local function rollback_files(written)
+  local function rollback_files()
     local clean = true
     for index = #written, 1, -1 do
       local path = written[index]
@@ -914,72 +933,107 @@ function matrix.setup_write(options, result)
     end
     return clean
   end
-  local function ensure_directory(path)
-    if not path or path == "" or path == "/" or created_set[path] then return true end
-    local parent = path:match("^(.*)/[^/]+$")
-    if parent and parent ~= path then
-      local ok, parent_error = ensure_directory(parent)
-      if not ok then return nil, parent_error end
+  local function write_outputs()
+    local paths = { options.token_path }
+    if writes_password then paths[#paths + 1] = options.password_path end
+    paths[#paths + 1] = options.config_path
+    local path_labels = { [options.token_path] = "token", [options.config_path] = "config" }
+    local contents = { [options.token_path] = result.token .. "\n" }
+    if writes_password then
+      path_labels[options.password_path] = "password"
+      contents[options.password_path] = result.password .. "\n"
     end
-    local ok, made, reason = pcall(remuda.fs.mkdir_new, path)
-    if not ok then return nil, "cannot create private output directory" end
-    if made == true then
-      created_dirs[#created_dirs + 1], created_set[path] = path, true
-      return true
-    end
-    if reason == "exists" then return true end
-    return nil, "cannot create private output directory"
-  end
-  local directories, directory_seen = {}, {}
-  for _, path in ipairs(paths) do
-    local parent = path:match("^(.*)/[^/]+$")
-    if parent and not directory_seen[parent] then
-      directories[#directories + 1], directory_seen[parent] = parent, true
-    end
-  end
-  for _, path in ipairs(directories) do
-    local made, make_error = ensure_directory(path)
-    if not made then rollback_dirs(); return failure(make_error) end
-  end
+    local config_lines = {
+      options.homeserver, result.home_room, result.user_id, options.owner_mxid, "", "30000",
+    }
+    if result.all_room then config_lines[#config_lines + 1] = "all_room=" .. result.all_room end
+    if options.rooms_mode == "open" then config_lines[#config_lines + 1] = "rooms=open" end
+    if options.pin then config_lines[#config_lines + 1] = "pin_sha256=" .. options.pin end
+    if options.ca_file then config_lines[#config_lines + 1] = "ca_file=" .. options.ca_file end
+    contents[options.config_path] = table.concat(config_lines, "\n") .. "\n"
 
-  for _, path in ipairs(paths) do
-    local file = io.open(path, "rb")
-    if file then
-      if not options.force then
-        file:close(); rollback_dirs()
-        return failure("Matrix output file already exists; pass --force")
+    local function ensure_directory(path)
+      if not path or path == "" or path == "/" or created_set[path] then return true end
+      local parent = path:match("^(.*)/[^/]+$")
+      if parent and parent ~= path then
+        local ok, parent_error = ensure_directory(parent)
+        if not ok then return nil, parent_error end
       end
-      local old, read_error = file:read("*a")
-      file:close()
-      if old == nil then
+      local ok, made, reason = pcall(remuda.fs.mkdir_new, path)
+      if not ok then return nil, "cannot create private output directory" end
+      if made == true then
+        created_dirs[#created_dirs + 1], created_set[path] = path, true
+        return true
+      end
+      if reason == "exists" then return true end
+      return nil, "cannot create private output directory"
+    end
+    local directories, directory_seen = {}, {}
+    for _, path in ipairs(paths) do
+      local parent = path:match("^(.*)/[^/]+$")
+      if parent and not directory_seen[parent] then
+        directories[#directories + 1], directory_seen[parent] = parent, true
+      end
+    end
+    for _, path in ipairs(directories) do
+      local made, make_error = ensure_directory(path)
+      if not made then rollback_dirs(); return failure(make_error) end
+    end
+
+    for _, path in ipairs(paths) do
+      local file = io.open(path, "rb")
+      if file then
+        if not options.force and not (replaces_password and path == options.password_path) then
+          file:close(); rollback_dirs()
+          return failure("Matrix output file already exists; pass --force")
+        end
+        local old, read_error = file:read("*a")
+        file:close()
+        if old == nil then
+          rollback_dirs()
+          return failure("Matrix setup cannot preserve an existing output file")
+        end
+        backups[path] = old
+      end
+    end
+
+    -- Hand-added deny rules outlive a --force rewrite (#146).
+    for line in (backups[options.config_path] or ""):gmatch("[^\r\n]+") do
+      -- Mirror the config parser: the key before the first "=" is trimmed.
+      if line:match("^%s*deny_room%s*=") or line:match("^%s*deny_server%s*=") then
+        contents[options.config_path] = contents[options.config_path] .. line .. "\n"
+      end
+    end
+
+    for _, path in ipairs(paths) do
+      local ok, wrote = pcall(remuda.fs.write_atomic, path, contents[path], { private = true })
+      if not ok or not wrote then
+        local files_clean = rollback_files()
         rollback_dirs()
-        return failure("Matrix setup cannot preserve an existing output file")
+        return failure("Matrix setup could not write its " .. path_labels[path]
+          .. " file" .. (files_clean and "" or "; rollback was incomplete"))
       end
-      backups[path] = old
+      written[#written + 1] = path
     end
-  end
-
-  -- Hand-added deny rules outlive a --force rewrite (#146).
-  for line in (backups[options.config_path] or ""):gmatch("[^\r\n]+") do
-    -- Mirror the config parser: the key before the first "=" is trimmed.
-    if line:match("^%s*deny_room%s*=") or line:match("^%s*deny_server%s*=") then
-      contents[options.config_path] = contents[options.config_path] .. line .. "\n"
+    local files = { token_path = options.token_path, config_path = options.config_path,
+      password_path = writes_password and options.password_path or nil, password_store = stored,
+      store_refused = writes_password and store_refused or nil }
+    if writes_password then
+      files.password_replaced = replaces_password and not options.force
+        and backups[options.password_path] ~= nil or nil
+    elseif options.secret_kind == "registration" and type(options.password_path) == "string"
+      and file_exists(options.password_path) then
+      files.old_password_path = options.password_path
     end
+    return files
   end
-
-  local written = {}
-  for _, path in ipairs(paths) do
-    local ok, wrote = pcall(remuda.fs.write_atomic, path, contents[path], { private = true })
-    if not ok or not wrote then
-      local files_clean = rollback_files(written)
-      rollback_dirs()
-      return failure("Matrix setup could not write its " .. path_labels[path]
-        .. " file" .. (files_clean and "" or "; rollback was incomplete"))
-    end
-    written[#written + 1] = path
-  end
-  return { token_path = options.token_path, config_path = options.config_path,
-    password_path = saves_password and options.password_path or nil }
+  -- A Lua error after the put must not leave the stored password behind.
+  local ok, files, write_error = pcall(write_outputs)
+  if ok then return files, write_error end
+  local files_clean = rollback_files()
+  rollback_dirs()
+  return failure("Matrix setup failed while writing its files"
+    .. (files_clean and "" or "; rollback was incomplete"))
 end
 
 return matrix

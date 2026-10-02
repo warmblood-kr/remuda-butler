@@ -131,6 +131,32 @@ function system.find_command(name)
     exists = file_exists,
   })
 end
+-- The OS secure store (core's remuda.system.credential): put, delete and a probe.
+-- There is no word here that reads a secret back, and there must not be one.
+local function credential_store()
+  local core_system = remuda.system
+  local store = type(core_system) == "table" and core_system.credential
+  if type(store) ~= "table" or type(store.backend) ~= "function" then return nil end
+  local ok, backend = pcall(store.backend)
+  if not ok or type(backend) ~= "string" or backend == "" then return nil end
+  return store, backend
+end
+local function credential_call(word, ...)
+  local store, backend = credential_store()
+  if not store or type(store[word]) ~= "function" then return nil, "no store" end
+  local ok, done, reason = pcall(store[word], ...)
+  if not ok then return nil, "unavailable: the OS secure store raised an error" end
+  if done ~= true then return nil, type(reason) == "string" and reason or "unavailable" end
+  return true, backend
+end
+-- The store's name ("keychain", "wincred"), or nil when the caller must use a file.
+function system.credential_backend()
+  local _, backend = credential_store()
+  return backend
+end
+-- true, backend | nil, reason ("no store", or core's not_found / unavailable: / denied:).
+function system.credential_put(name, secret) return credential_call("put", name, secret) end
+function system.credential_delete(name) return credential_call("delete", name) end
 function system.run_in(directory, argv)
   if windows_selected then
     return nil, "Butler topic templates cannot run commands with this core on Windows.\n"
