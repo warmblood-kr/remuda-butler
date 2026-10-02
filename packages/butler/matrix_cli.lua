@@ -29,6 +29,116 @@ local VERBS = {
   upload = true, redact = true, join = true, leave = true,
 }
 
+local THREAD_CLI_SPEC = {
+  name = "remuda butler matrix",
+  options = {
+    { long = "room", value = "ROOM", help = "Room ID, alias or name (default: the configured room)", global = true },
+    { long = "json", help = "Print machine-readable JSON", global = true },
+  },
+  verbs = {
+    thread = {
+      about = "Show every reply in a Matrix thread",
+      args = { { name = "EVENT_ID", help = "Event that starts the thread, e.g. $abc123" } },
+      next = "remuda butler matrix reply EVENT_ID TEXT",
+    },
+  },
+}
+
+local THREAD_HELP_TEXT = [[Show every reply in a Matrix thread
+
+Usage: remuda butler matrix thread [OPTIONS] EVENT_ID
+
+Arguments:
+  EVENT_ID  Event that starts the thread, e.g. $abc123
+
+Options:
+      --room ROOM  Room ID, alias or name (default: the configured room)
+      --json       Print machine-readable JSON
+  -h, --help       Print help
+
+Next: remuda butler matrix reply EVENT_ID TEXT]]
+
+local function terminal_safe(value)
+  return tostring(value or ""):gsub("[%c]", " "):gsub("\194[\128-\159]", " ")
+end
+
+local function matrix_verb(args)
+  if type(args) ~= "table" then return nil end
+  local at = 2
+  while at <= #args do
+    if args[at] == "--json" then
+      at = at + 1
+    elseif args[at] == "--room" or args[at] == "-n" or args[at] == "-o" or args[at] == "--id" then
+      at = at + 2
+    elseif args[at] == "--" then
+      return nil
+    elseif type(args[at]) == "string" and args[at]:sub(1, 1) == "-" then
+      at = at + 1
+    else
+      return args[at]
+    end
+  end
+end
+
+local function matrix_cli_failure(text, code)
+  text = tostring(text or "")
+  local trailing_newline = text:sub(-1) == "\n"
+  if trailing_newline then text = text:sub(1, -2) end
+  local safe_lines = {}
+  for line in (text .. "\n"):gmatch("(.-)\n") do
+    safe_lines[#safe_lines + 1] = terminal_safe(line)
+  end
+  text = table.concat(safe_lines, "\n")
+  if trailing_newline then text = text .. "\n" end
+  if text:sub(-1) ~= "\n" then text = text .. "\n" end
+  if type(remuda.pending) == "function" then
+    local reply = remuda.pending({ timeout = 1 })
+    reply:resolve(code or 2, "", text)
+    return reply
+  end
+  if type(remuda.fail) == "function" then return remuda.fail(text, code or 2) end
+  error(text, 0)
+end
+
+local function verb_distance(left, right)
+  local previous = {}
+  for at = 0, #right do previous[at] = at end
+  for row = 1, #left do
+    local current = { [0] = row }
+    for column = 1, #right do
+      current[column] = math.min(current[column - 1] + 1, previous[column] + 1,
+        previous[column - 1] + (left:sub(row, row) == right:sub(column, column) and 0 or 1))
+    end
+    previous = current
+  end
+  return previous[#right]
+end
+
+local function unknown_matrix_verb(args)
+  local word = matrix_verb(args)
+  if not word or word == "help" or VERBS[word] then return nil end
+  local verbs = {}
+  for verb in pairs(VERBS) do verbs[#verbs + 1] = verb end
+  table.sort(verbs)
+  local suggestion, distance
+  for _, verb in ipairs(verbs) do
+    local candidate = verb_distance(word, verb)
+    if not distance or candidate < distance then suggestion, distance = verb, candidate end
+  end
+  local safe_word = terminal_safe(word)
+  local lines = { "remuda: butler matrix: unknown verb '" .. safe_word .. "'." }
+  if suggestion and distance <= math.max(1, math.floor(#word / 3)) then
+    lines[1] = lines[1]:sub(1, -2) .. " Did you mean '" .. suggestion .. "'?"
+    lines[#lines + 1] = "Usage: remuda butler matrix [--json] [--room ROOM] " .. suggestion .. " EVENT_ID"
+    lines[#lines + 1] = "Example: remuda butler matrix " .. suggestion .. " '$EVENT_ID'"
+    lines[#lines + 1] = "Next: remuda butler matrix " .. suggestion .. " '$EVENT_ID'"
+  else
+    lines[#lines + 1] = "Usage: remuda butler matrix <" .. table.concat(verbs, " | ") .. ">"
+    lines[#lines + 1] = "Next: remuda butler matrix --help"
+  end
+  return matrix_cli_failure(table.concat(lines, "\n"), 2)
+end
+
 local function join_words(values, first)
   local words = {}
   for index = first, #values do words[#words + 1] = values[index] end
@@ -175,9 +285,6 @@ local function event_line(event)
   return sender .. ": " .. (matrix.encode_json(event) or "<event>")
 end
 
-local function terminal_safe(value)
-  return tostring(value or ""):gsub("[%c]", " "):gsub("\194[\128-\159]", " ")
-end
 -- At most `limit` bytes; a cut text ends with "..." inside the limit, so the
 -- reader can see that it is not complete.
 local function shortened(text, limit)
@@ -726,12 +833,36 @@ function matrix.cli(args, agent, stdin_body, file_body)
     if plan.wizard then begin_wizard() else execute_setup(plan) end
     return reply
   end
-  local ok, verb, options = pcall(parse, args)
-  if not ok then
-    if type(remuda.fail) == "function" then return remuda.fail(tostring(verb), 2) end
-    error(tostring(verb), 0)
+  local verb, options
+  local cli = remuda.cli
+  if type(cli) == "table" and type(cli.parse) == "function" and matrix_verb(args) == "thread" then
+    local argv = {}
+    for at = 2, #args do argv[#argv + 1] = args[at] end
+    local report = cli.parse(THREAD_CLI_SPEC, argv)
+    if not report.ok then
+      if report.kind == "help" then return THREAD_HELP_TEXT end
+      local text = report.text:gsub("\nNext: [^\n]*$", "\nNext: remuda butler matrix thread --help")
+      return matrix_cli_failure(text, report.code)
+    end
+    verb = report.verb
+    options = {
+      event_id = report.values.EVENT_ID,
+      room = report.values.room,
+      json = report.values.json,
+    }
+  else
+    local ok
+    ok, verb, options = pcall(parse, args)
+    if not ok then
+      if type(remuda.fail) == "function" then return remuda.fail(tostring(verb), 2) end
+      error(tostring(verb), 0)
+    end
   end
   if not verb then
+    if type(cli) == "table" and type(cli.parse) == "function" then
+      local unknown = unknown_matrix_verb(args)
+      if unknown then return unknown end
+    end
     local candidate
     for _, value in ipairs(args or {}) do
       if value == "follow" or value == "unfollow" then candidate = value end

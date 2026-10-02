@@ -2568,6 +2568,92 @@ local function capture_matrix_cli(args, agent, stdin_body, file_body)
   return captured
 end
 
+-- The #235 tests live in one table: the main chunk is at Lua's 200-local limit.
+local ctx_tests = {}
+function ctx_tests.test_matrix_thread_cli_parser_contract()
+  local dir, path = invite_fixture()
+  with_operator_config(path, 200, function(calls)
+    local failures = {}
+    local function check(name, args, validate)
+      local before = #calls
+      local result = capture_matrix_cli(args)
+      local ok, err = pcall(validate, result)
+      if not ok then failures[#failures + 1] = name .. ": " .. tostring(err) end
+      if #calls ~= before then failures[#failures + 1] = name .. " made a Matrix request" end
+    end
+
+    check("thread --help", { "matrix", "thread", "--help" }, function(help)
+      local expected_help = [[Show every reply in a Matrix thread
+
+Usage: remuda butler matrix thread [OPTIONS] EVENT_ID
+
+Arguments:
+  EVENT_ID  Event that starts the thread, e.g. $abc123
+
+Options:
+      --room ROOM  Room ID, alias or name (default: the configured room)
+      --json       Print machine-readable JSON
+  -h, --help       Print help
+
+Next: remuda butler matrix reply EVENT_ID TEXT]]
+      assert(help and help.code == 0 and help.stdout == expected_help and help.stderr == "",
+        "must show the exact per-verb help and exit 0; got: " .. tostring(help and help.stdout or help))
+    end)
+
+    check("thread --jsno", { "matrix", "thread", "--jsno", "$abc" }, function(bad_option)
+      local expected_error = "remuda: butler matrix thread: unknown option '--jsno'. Did you mean '--json'?\n"
+        .. "Usage: remuda butler matrix thread [OPTIONS] EVENT_ID\n"
+        .. "Next: remuda butler matrix thread --help\n"
+      assert(bad_option and bad_option.code == 2 and bad_option.stderr == expected_error
+        and bad_option.stdout == "", "must suggest --json, show Usage and Next, and exit 2; got: "
+          .. tostring(bad_option and bad_option.stderr or bad_option))
+    end)
+
+    local hostile_option = "--jsno\27]8;;https://example.invalid\7"
+    check("thread hostile option", { "matrix", "thread", hostile_option, "$abc" }, function(result)
+      local text = tostring(result and result.stderr or result)
+      assert(result and result.code == 2 and text:find("unknown option", 1, true)
+        and not text:find("\27", 1, true) and not text:find("\7", 1, true),
+        "parser errors must strip ESC/OSC controls from arguments: " .. text)
+    end)
+
+    check("matrix folow", { "matrix", "folow", "$abc" }, function(unknown)
+      local text = tostring(unknown and (unknown.stderr .. unknown.stdout) or unknown)
+      assert(unknown and unknown.code == 2 and text:find("folow", 1, true)
+        and text:find("follow", 1, true) and text:find("Did you mean", 1, true)
+        and text:find("Usage:", 1, true) and text:find("Next:", 1, true),
+        "must suggest follow, show Usage and Next, and exit 2; got: " .. text)
+    end)
+
+    check("matrix C1 verb", { "matrix", "unknown\194\133verb" }, function(unknown)
+      local text = tostring(unknown and (unknown.stderr .. unknown.stdout) or unknown)
+      assert(unknown and unknown.code == 2 and not text:find("\194[\128-\159]"),
+        "unknown-verb errors must strip UTF-8 C1 controls: " .. text)
+    end)
+
+    check("matrix -n history extra", { "matrix", "-n", "5", "history", "extra" }, function(result)
+      assert(result and result.code == 0 and result.stdout == matrix.cli_usage() and result.stderr == "",
+        "an invalid history invocation must keep the legacy full-usage response")
+    end)
+    check("matrix help", { "matrix", "help" }, function(result)
+      assert(result and result.code == 0 and result.stdout == matrix.cli_usage() and result.stderr == "",
+        "matrix help must keep the legacy full-usage response")
+    end)
+
+    local before = #calls
+    local old_cli = remuda.cli
+    remuda.cli = nil
+    local old_core = capture_matrix_cli({ "matrix", "thread", "$abc" })
+    remuda.cli = old_cli
+    local ok, err = pcall(function()
+      assert(old_core and old_core.code == 0 and old_core.stdout == "No Matrix events\n"
+        and #calls == before + 1, "without remuda.cli, thread must keep the old parser and request path")
+    end)
+    if not ok then failures[#failures + 1] = "old core fallback: " .. tostring(err) end
+    assert(#failures == 0, table.concat(failures, "\n"))
+  end)
+  remove_dir(dir)
+end
 local function test_alias_directory_room_id_terminal_controls_are_refused()
   local dir, path = invite_fixture()
   local before = read_text(path)
@@ -4636,10 +4722,6 @@ local function test_rx_link_like_root_counted_but_not_shown()
   end)
 end
 
--- The #235 tests live in one table: the main chunk of this file is at Lua's
--- limit of 200 local variables, and a table costs one.
-local ctx_tests = {}
-
 -- #235 step A1: the inbox header of a Matrix mail names the room, its kind and
 -- the thread; a thread mail gets a Next line with the room always written.
 function ctx_tests.test_inbox_header_names_room_and_thread()
@@ -6025,6 +6107,7 @@ for _, case in ipairs({
   { "test_typed_line_config_is_strict_and_off_by_default", test_typed_line_config_is_strict_and_off_by_default },
   { "test_join_leave_missing_room_guidance", test_join_leave_missing_room_guidance },
   { "test_quarantine_list_room_reason_columns", test_quarantine_list_room_reason_columns },
+  { "test_matrix_thread_cli_parser_contract", ctx_tests.test_matrix_thread_cli_parser_contract },
   { "test_join_room_alias_resolves_and_labels_output", test_join_room_alias_resolves_and_labels_output },
   { "test_unknown_room_alias_is_reported_without_config_change", test_unknown_room_alias_is_reported_without_config_change },
   { "test_alias_directory_room_id_must_be_valid", test_alias_directory_room_id_must_be_valid },
