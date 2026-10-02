@@ -19,7 +19,7 @@ CORE_URL=${CORE_URL:-https://github.com/warmblood-kr/remuda.git}
 # OS credential store, which answers "unavailable" where macOS has no default
 # keychain instead of waiting on a dialog. Bump deliberately; a core change
 # must not redden Butler PRs.
-CORE_REF=${CORE_REF:-c7b0cbd0}
+source "$REPO/tests/core_ref.sh"
 
 scratch=$(mktemp -d /tmp/butler-rust.XXXXXX)
 scratch=$(cd "$scratch" && pwd -P)
