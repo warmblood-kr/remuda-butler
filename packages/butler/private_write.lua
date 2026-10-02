@@ -1,5 +1,5 @@
 -- Report once when Butler asks a core to make a file private.
-local state = remuda._butler_private_write_state or { warned = false }
+local state = remuda._butler_private_write_state or { warned = false, traced = false }
 remuda._butler_private_write_state = state
 
 local M = {}
@@ -9,16 +9,21 @@ function M.install()
   if fs.write_atomic == state.wrapper then return true end
   local write_atomic = fs.write_atomic
   state.wrapper = function(path, text, options)
-    if options and options.private == true and not state.warned then
-      state.warned = true
-      local message = "Butler requested private file writes, but this Remuda core does not report whether it enforces mode 0600; verify the core before treating Butler files as private."
-      if type(remuda.log) == "function" then
-        pcall(remuda.log, "warn", message)
-      else
-        pcall(function() io.stderr:write(message .. "\n") end)
+    if options and options.private == true then
+      if not state.warned then
+        state.warned = true
+        local message = "Butler requested private file writes, but this Remuda core does not report whether it enforces mode 0600; verify the core before treating Butler files as private."
+        if type(remuda.log) == "function" then
+          pcall(remuda.log, "warn", message)
+        else
+          pcall(function() io.stderr:write(message .. "\n") end)
+        end
       end
-      local trace = remuda._butler_session_trace or _G._butler_session_trace
-      if type(trace) == "function" then pcall(trace, "private_write_unverified") end
+      -- The first private write happens at load, before the session trace exists: keep trying until it does.
+      if not state.traced then
+        local trace = remuda._butler_session_trace or _G._butler_session_trace
+        if type(trace) == "function" and pcall(trace, "private_write_unverified") then state.traced = true end
+      end
     end
     return write_atomic(path, text, options)
   end

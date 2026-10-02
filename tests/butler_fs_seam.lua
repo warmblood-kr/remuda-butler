@@ -140,5 +140,17 @@ eq("private write warning names the uncertainty",
 eq("private writes trace once", #private_traces, 1)
 eq("private mode reaches the core", private_writes[1][3].private, true)
 
+-- The first private write happens at load, before the session trace exists: the trace follows once it does.
+remuda._butler_private_write_state, remuda._butler_session_trace, _G._butler_session_trace = nil, nil, nil
+local late_traces = {}
+remuda.fs = { write_atomic = function() return true end }
+dofile("packages/butler/private_write.lua").install()
+remuda.fs.write_atomic("a", "x", { private = true })
+eq("nothing is traced while the session trace is missing", #late_traces, 0)
+remuda._butler_session_trace = function(event) late_traces[#late_traces + 1] = event end
+remuda.fs.write_atomic("b", "x", { private = true })
+remuda.fs.write_atomic("c", "x", { private = true })
+eq("the trace lands on the first private write after the session trace exists, once", #late_traces, 1)
+
 if #failed > 0 then error(#failed .. " of " .. count .. " cases failed:\n" .. table.concat(failed, "\n"), 0) end
 print(("butler_fs_seam ok: %d cases"):format(count))
