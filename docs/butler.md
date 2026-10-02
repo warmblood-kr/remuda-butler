@@ -90,6 +90,19 @@ is left out. One report is collected at a time, and a finished report is
 reused for 60 seconds (its header then says `as of`), so repeated calls do not
 type into a Codex pane again.
 
+## Closing sessions
+
+`remuda butler close NAME [--force]` closes a session when the caller is its
+leader. A person at a terminal counts as the root `butler`. The root may also
+close a leader-less row (no leader, or a leader that is gone); nobody can close
+the root row. Without `--force` a row with unread mail or one that is not idle
+is refused.
+
+When a lead exits, its live members move to the lead's leader (to `butler`
+when that leader is gone too), so they stay closable and keep reporting to a
+live session. Adoption changes only who the leader is: no one else gains close
+rights, and the unread and idle checks apply as before.
+
 ## Schedules
 
 A schedule sends a fixed text to a session at wall-clock times and survives
