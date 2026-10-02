@@ -44,8 +44,6 @@ PowerShell installer on Windows. Codex CLI can be installed with
 
 `remuda butler --help` includes the doctor command with the other installed
 Butler verbs.
-Monocle launches as `monocle agent --workdir DIR --session NAME --auto-approve`
-with `--model M` when a model is specified.
 
 ## Agent accounts and quota
 
@@ -405,6 +403,8 @@ also applies to delegates without an explicit kind. Each candidate waits up to
 15 seconds by default; set `REMUDA_BUTLER_READINESS_TIMEOUT` to change that
 per-candidate timeout. `remuda butler sessions` shows the selected kind and
 the reason each earlier candidate was skipped.
+Explicit Monocle launches use this argv: `monocle agent --workdir DIR --session NAME --auto-approve`;
+Butler adds `--model M` when specified.
 
 On each fresh agent-session start—first launch, resume, or a relaunch or
 respawn after a Butler or daemon restart—Butler checks for unread mail. If any
