@@ -104,6 +104,16 @@ when that leader is gone too), so they stay closable and keep reporting to a
 live session. Adoption changes only who the leader is: no one else gains close
 rights, and the unread and idle checks apply as before.
 
+## The root AGENTS.md
+
+Butler's own guidance in the root session's `AGENTS.md` sits between
+`<!-- BEGIN remuda-butler:managed id=butler -->` and
+`<!-- END remuda-butler:managed id=butler -->`. Text outside the markers is
+kept; text inside is rewritten to Butler's current text. A file whose markers
+are damaged or doubled, a symlinked `AGENTS.md`, and a file mixing LF and CRLF
+line endings are left unchanged, and the trace names them. A file holding only an earlier Butler text is replaced by the
+marked form; any other unmarked file keeps its text and gets the block appended.
+
 ## Schedules
 
 A schedule sends a fixed text to a session at wall-clock times and survives

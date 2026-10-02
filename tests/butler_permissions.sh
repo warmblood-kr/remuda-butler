@@ -83,6 +83,22 @@ sleep 7
 rm "$ROOT/AGENTS.md"
 wait_for "a deleted AGENTS.md was not written again" test -s "$ROOT/AGENTS.md"
 
+echo "== guidance_block_keeps_outside_text, symlink_refused"
+grep -qF "<!-- BEGIN remuda-butler:managed id=butler -->" "$ROOT/AGENTS.md" || fail "AGENTS.md has no managed block"
+printf '\n| my | table |\n' >>"$ROOT/AGENTS.md"
+respawn
+grep -qF "| my | table |" "$ROOT/AGENTS.md" || fail "text outside the block was lost on relaunch"
+mv "$ROOT/AGENTS.md" "$ROOT/AGENTS.real"
+printf 'drift\n' >"$ROOT/AGENTS.real"
+ln -s "$ROOT/AGENTS.real" "$ROOT/AGENTS.md"
+BEFORE_REAL=$(mtime "$ROOT/AGENTS.real")
+sleep 7
+[[ -L $ROOT/AGENTS.md ]] || fail "the symlinked AGENTS.md was replaced"
+[[ $(mtime "$ROOT/AGENTS.real") == "$BEFORE_REAL" ]] || fail "the symlinked AGENTS.md was written through"
+[[ $(cat "$ROOT/AGENTS.real") == drift ]] || fail "the symlinked AGENTS.md target was changed"
+rm "$ROOT/AGENTS.md" "$ROOT/AGENTS.real"
+wait_for "AGENTS.md was not written again after the symlink case" test -s "$ROOT/AGENTS.md"
+
 echo "== respawn_readds_removed_rule; the real remuda.json keeps the meaning of everything else"
 # The one write goes through remuda.json: keys come back sorted and pretty-printed;
 # {} and [] stay distinct, null stays null, allow keeps its order and gains the rule last.
