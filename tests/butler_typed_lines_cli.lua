@@ -69,6 +69,19 @@ for line in (indented .. "\n"):gmatch("([^\n]*)\n") do
   assert(line:match("^  word") and #line <= 200, "a wrapped line keeps its indent on every line: " .. line)
 end
 assert(select(2, indented:gsub("\n", "")) >= 1, "the indented sample must wrap")
+-- Malformed or multibyte words always make progress and lose nothing.
+for name, word in pairs({ ["a run of continuation bytes"] = string.rep("\128", 500),
+  ["3-byte characters across the boundary"] = string.rep("\226\130\172", 150),
+  ["a valid multibyte character at the split"] = string.rep("x", 199) .. "\195\169" .. string.rep("y", 300) }) do
+  local wrapped = remuda.butler.matrix.wrap_prompt_preface(word)
+  assert(#wrapped > 0, name .. ": the wrapper must return text")
+  for line in (wrapped .. "\n"):gmatch("([^\n]*)\n") do
+    assert(#line <= 200, name .. ": a line is over the limit: " .. #line)
+  end
+  if not wrapped:find("...", 1, true) then
+    assert(wrapped:gsub("\n", "") == word, name .. ": characters were lost")
+  end
+end
 local long_word = string.rep("x", 450)
 local wrapped_long_word = remuda.butler.matrix.wrap_prompt_preface(long_word)
 assert(wrapped_long_word:gsub("\n", "") == long_word, "a long word must be hard-split without losing characters")

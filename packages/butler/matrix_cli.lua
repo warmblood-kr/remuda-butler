@@ -381,6 +381,8 @@ function matrix.wrap_prompt_preface(text)
           if byte < 0x80 or byte > 0xbf then break end
           cut = cut - 1
         end
+        -- No boundary within reach (malformed bytes): split on the byte.
+        if cut == 0 then cut = room end
         lines[#lines + 1] = indent .. word:sub(1, cut)
         word = word:sub(cut + 1)
       end
