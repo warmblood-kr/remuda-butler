@@ -221,6 +221,7 @@ assert(#writes == before_prompt_error_writes and state.typed_lines == false,
 
 local command_rows, bridge_handler = {}, nil
 remuda.butler.schedule_cli = { cli = function() end }
+remuda.butler.approve_text = { cli = function() end }
 remuda._butler_commands_config = {
   current_agent = function() return nil end,
   OPERATOR = "operator",
