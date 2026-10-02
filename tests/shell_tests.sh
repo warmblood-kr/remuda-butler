@@ -12,7 +12,7 @@ set -uo pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 CORE_URL=${CORE_URL:-https://github.com/warmblood-kr/remuda.git}
 # Same pin as tests/rust_tests.sh and tests/golden_guidance.sh; keep them in step.
-CORE_REF=${CORE_REF:-c7b0cbd0}
+CORE_REF=${CORE_REF:-c59e04c5}
 T=$(mktemp -d /tmp/bst.XXXXXX)
 T=$(cd "$T" && pwd -P)
 trap 'rm -rf "$T"' EXIT
