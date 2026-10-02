@@ -82,6 +82,11 @@ end
 function remuda._butler_sessions()
   -- main.lua reassigns its butler_attempts with this global; read it late.
   local butler_attempts = remuda._butler_attempts or {}
+  local now = os.time()
+  if type(remuda._butler_notice_clock) == "function" then
+    local ok, value = pcall(remuda._butler_notice_clock)
+    if ok and tonumber(value) then now = tonumber(value) end
+  end
   local rows = {}
   for _, item in ipairs(team_order()) do
     local agent = bus.agents[item.id]
@@ -90,7 +95,10 @@ function remuda._butler_sessions()
       marker = "task queued"
     elseif bus.task_poke_failures and bus.task_poke_failures[item.id] then
       marker = "task failed"
-    elseif bus.notices and bus.notices[item.id] then
+    elseif bus.notices and bus.notices[item.id]
+        and (bus.notice_recoveries and bus.notice_recoveries[item.id]
+          or bus.notices[item.id].retry_at ~= nil
+          or bus.notices[item.id].due_at == nil or bus.notices[item.id].due_at <= now) then
       marker = bus.notice_delivery_failures and bus.notice_delivery_failures[item.id]
         and "queued; notice failed" or "queued"
     elseif bus.notice_delivery_failures and bus.notice_delivery_failures[item.id] then

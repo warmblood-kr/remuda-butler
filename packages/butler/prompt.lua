@@ -72,7 +72,8 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
     finished = true
     remuda.cancel(poll)
     if options.on_done then
-      pcall(options.on_done, ok, reason)
+      pcall(options.on_done, ok, reason,
+        (tonumber(options.prior_failures) or 0) + (retry_failures or 0) + (ok and 1 or 0))
     elseif not ok then
       notify(remuda, parent, name, reason)
     end
@@ -216,10 +217,12 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
         -- Keep this nonblocking: a long terminal sleep stalls every daemon
         -- callback, including notice and lifecycle work.
         local typed, type_error = pcall(remuda.type_text, actual, task, 0.1)
-        if not typed then
+        if not typed or type_error == false then
           local reason = "type failed"
-          if type(type_error) == "string" then
+          if not typed and type(type_error) == "string" then
             reason = "type failed: " .. safe_type_error_line(type_error)
+          elseif type_error == false then
+            reason = "type failed: write refused"
           end
           retry(reason)
         else

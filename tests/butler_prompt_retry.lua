@@ -16,7 +16,7 @@ local options = {
   recipient_alive = function() return alive end,
   now = function() return now end,
   on_retry = function(attempt, delay) retries[#retries + 1] = { attempt, delay } end,
-  on_done = function(ok, reason) done[#done + 1] = { ok, reason } end,
+  on_done = function(ok, reason, attempts) done[#done + 1] = { ok, reason, attempts } end,
 }
 prompt.schedule(remuda, "codex", "member", "member", "lead", "first task", options)
 local delays = { 20, 60, 300, 900 }
@@ -34,8 +34,48 @@ poll.run()
 assert(input_calls == 5, "last attempt runs after the final backoff")
 assert(#done == 1 and done[1][1] == false, "exhaustion completes once with failure")
 assert(done[1][2]:find("type failed", 1, true), "failure identifies the last delivery error")
+assert(done[1][3] == 5, "five actual prompt attempts are reported accurately")
 poll.run()
 assert(#done == 1, "no duplicate failure callback after exhaustion")
+
+-- Codex startup and shared prompt delivery consume one retry budget, so the
+-- prompt callback adds its remaining attempts to failures already used.
+now, alive, screen, input_calls, done = 3000, true, "ready", 0, {}
+remuda.type_text = function() input_calls = input_calls + 1; error("write refused") end
+prompt.schedule(remuda, "codex", "member", "member", "lead", "first task", {
+  ready = function() return true end,
+  allowed = function() return true end,
+  empty = function() return "EMPTY", "" end,
+  recipient_alive = function() return alive end,
+  now = function() return now end,
+  prior_failures = 2,
+  retry_delays = { 0 },
+  on_done = function(ok, reason, attempts) done[#done + 1] = { ok, reason, attempts } end,
+})
+poll.run()
+poll.run()
+assert(input_calls == 2 and #done == 1 and done[1][3] == 4,
+  "the prompt shares prior Codex failures and reports the combined attempt count")
+
+now, alive, screen, input_calls, done = 4000, true, "ready", 0, {}
+remuda.type_text = function()
+  input_calls = input_calls + 1
+  if input_calls == 1 then return false end
+end
+prompt.schedule(remuda, "codex", "member", "member", "lead", "first task", {
+  ready = function() return true end,
+  allowed = function() return true end,
+  empty = function() return "EMPTY", "" end,
+  recipient_alive = function() return alive end,
+  now = function() return now end,
+  retry_delays = { 0 },
+  on_done = function(ok, reason) done[#done + 1] = { ok, reason } end,
+})
+poll.run()
+poll.run()
+poll.run()
+assert(input_calls == 2 and #done == 1 and done[1][1] == true,
+  "a false write result retries before being counted as delivered")
 
 -- A successful task write followed by an empty composer proves that the TUI
 -- accepted it, even if the first capture missed the text while background

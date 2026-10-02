@@ -160,6 +160,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
     bus.task_poke_failure_alerts = bus.task_poke_failure_alerts or {}
     bus.task_poke_failures[actual], bus.task_poke_failure_alerts[actual] = nil, nil
     bus.pending_tasks[actual] = true
+    local task_retry_failures = 0
     local function task_recipient_alive()
       local listed, rows = pcall(remuda.ls)
       if not listed or type(rows) ~= "table" then return true end
@@ -176,7 +177,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       end
       local detail = reason or "delivery could not be verified"
       bus.pending_tasks[actual] = nil
-      bus.task_poke_failures[actual] = { reason = detail }
+      bus.task_poke_failures[actual] = { reason = detail, task = task }
       _butler_session_trace("task_poke_timeout", actual .. " " .. detail)
       if not bus.task_poke_failure_alerts[actual] then
         bus.task_poke_failure_alerts[actual] = true
@@ -188,6 +189,12 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
     end
     local startup = remuda._butler_agent_startup[kind] or {}
     local function task_delivery_options()
+      local configured_delays = type(remuda._butler_task_retry_delays) == "table"
+        and remuda._butler_task_retry_delays or TASK_POKE_RETRY_DELAYS
+      local retry_delays = {}
+      for index = task_retry_failures + 1, #configured_delays do
+        retry_delays[#retry_delays + 1] = configured_delays[index]
+      end
       return {
         ready = startup.ready,
         modals = startup.modals,
@@ -202,7 +209,8 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
         human_active = function() return remuda._butler_human_active(actual) end,
         empty = function(screen) return remuda._butler_prompt_is_empty(kind, screen) end,
         recipient_alive = task_recipient_alive,
-        retry_delays = remuda._butler_task_retry_delays,
+        retry_delays = retry_delays,
+        prior_failures = task_retry_failures,
         timeout = remuda._butler_task_poke_deferrals or 600,
         ready_timeout = remuda._butler_task_poke_attempts or 60,
         submit_timeout = remuda._butler_submit_timeout or 300,
@@ -210,12 +218,14 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
           _butler_session_trace("task_poke_retry_scheduled", actual .. " attempt="
             .. tostring(attempt) .. " delay=" .. tostring(delay) .. " reason=" .. tostring(reason))
         end,
-        on_done = function(delivered, reason) task_delivery_done(delivered, reason) end,
+        on_done = function(delivered, reason, attempts)
+          task_delivery_done(delivered, reason, attempts)
+        end,
       }
     end
     if kind == "codex" then
     local poke, attempts, settle, deferred = nil, 0, 0, 0
-    local retry_failures, retry_at = 0, nil
+    local retry_at = nil
     local update_waiting, waiting_for_update, update_deadline = false, false, 0
     local modal_wait_started, update_timeout_reported, update_version = nil, false, nil
     local function modal_wait_expired()
@@ -260,10 +270,10 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       state.waiting = {}
     end
     local function fail_task_delivery(detail)
-      retry_failures = retry_failures + 1
+      task_retry_failures = task_retry_failures + 1
       local delays = type(remuda._butler_task_retry_delays) == "table"
         and remuda._butler_task_retry_delays or TASK_POKE_RETRY_DELAYS
-      local delay = delays[retry_failures]
+      local delay = delays[task_retry_failures]
       if delay then
         retry_at = os.time() + delay
         attempts, settle, deferred = 0, 0, 0
@@ -272,7 +282,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
         modal_wait_started = nil
         bus.pending_tasks[actual] = task
         _butler_session_trace("task_poke_retry_scheduled", actual .. " attempt="
-          .. tostring(retry_failures) .. " delay=" .. tostring(delay) .. " reason=" .. detail)
+          .. tostring(task_retry_failures) .. " delay=" .. tostring(delay) .. " reason=" .. detail)
         return
       end
       remuda.cancel(poke)
@@ -281,7 +291,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       if detail:find("Codex update wait limit reached", 1, true) then
         _butler_session_trace("codex_update_timeout", actual .. detail)
       end
-      task_delivery_done(false, detail, retry_failures + 1)
+      task_delivery_done(false, detail, task_retry_failures)
     end
     local function report_update_timeout(detail)
       if update_timeout_reported then return end
