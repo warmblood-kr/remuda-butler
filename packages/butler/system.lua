@@ -168,8 +168,12 @@ end
 -- A directory test that works on Windows too; every core with storage.dir has fs.realpath.
 local function path_exists(path)
   local fs = remuda.fs
-  if type(fs) ~= "table" or type(fs.realpath) ~= "function" then return false end
-  return fs.realpath(path) ~= nil
+  -- Without a way to check, preserve the old location rather than risk hiding
+  -- data. realpath's nil reason distinguishes a missing path from other errors.
+  if type(fs) ~= "table" or type(fs.realpath) ~= "function" then return true end
+  local resolved, reason = fs.realpath(path)
+  if resolved ~= nil then return true end
+  return type(reason) ~= "string" or reason:sub(1, 9) ~= "not_found"
 end
 -- The directory that holds remuda/: core's where it has one, else `legacy_home`
 -- (Butler's own XDG/HOME rule). Data made under the old rule is kept until it is

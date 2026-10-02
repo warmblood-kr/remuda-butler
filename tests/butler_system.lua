@@ -281,6 +281,20 @@ end
   local moved, moved_note = system.data_home("C:/Users/u/.local/share", function() return true end)
   assert(moved == [[C:\Users\u\AppData\Local]] and moved_note == nil, "when both exist, core's place is used and nothing is said")
 
+  -- An inaccessible legacy data directory is not known to be absent. Preserve it
+  -- and explain the selected location so Butler cannot silently hide old data.
+  with_storage("/new/remuda")
+  remuda.fs = { realpath = function(path)
+    if path == "/old/remuda/butler" then return nil, "denied: permission denied" end
+    return nil, "not_found: path does not exist"
+  end }
+  local denied_home, denied_note = system.data_home("/old")
+  remuda.fs = nil
+  assert(denied_home == "/old", "an inaccessible old data home must be kept: " .. tostring(denied_home))
+  assert(type(denied_note) == "string" and denied_note:find("/old/remuda/butler", 1, true),
+    "an inaccessible old data home must produce a note: " .. tostring(denied_note))
+  with_storage([[C:\Users\u\AppData\Local\remuda]])
+
   -- A check that raises must never stop Butler from loading: the old home is used.
   local raised_ok, raised_home = pcall(system.data_home, "C:/Users/u/.local/share", function() error("disk check exploded") end)
   assert(raised_ok and raised_home == "C:/Users/u/.local/share",
