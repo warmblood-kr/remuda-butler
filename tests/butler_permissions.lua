@@ -429,4 +429,110 @@ end
 ok("session without a usable default name: refused, nothing written",
   select(2, permissions.output_for_caller(nil, nil, SESSION, cwd_of, realpath, is_symlink)):find("^refused: download"))
 
+-- Windows paths. The platform is the trailing argument, so these run on any
+-- OS: drive roots with either slash, UNC, and the \\?\ forms a resolver
+-- returns; compared without regard to case. Every case is run and the
+-- failures are reported together.
+local wfailed = {}
+local function weq(name, got, want)
+  count = count + 1
+  if got ~= want then
+    wfailed[#wfailed + 1] = ("case %d: %s\n   want: %s\n    got: %s"):format(count, name, tostring(want), tostring(got))
+  end
+end
+local wreal = {
+  [ [[C:\proj]] ] = [[C:\proj]], [ [[C:\proj\in.txt]] ] = [[C:\proj\in.txt]],
+  [ [[C:/proj\sub/f.txt]] ] = [[C:\proj\sub\f.txt]], [ [[c:\PROJ\F.txt]] ] = [[c:\PROJ\F.txt]],
+  [ [[C:\proj\verbatim.txt]] ] = [[\\?\C:\proj\verbatim.txt]],
+  [ [[C:\proj\..\other\f]] ] = [[C:\other\f]], [ [[D:\proj\f]] ] = [[D:\proj\f]], [ [[C:\projx\f]] ] = [[C:\projx\f]],
+  [ [[C:\proj\.]] ] = [[C:\proj]], [ [[C:\proj\unresolved\..\f]] ] = [[C:\proj\unresolved\..\f]],
+  [ [[\\srv\share\proj]] ] = [[\\srv\share\proj]], [ [[\\srv\share\proj\f]] ] = [[\\srv\share\proj\f]],
+  [ [[\\srv\share\proj\v]] ] = [[\\?\UNC\srv\share\proj\v]],
+  [ [[\\srv\other\proj\f]] ] = [[\\srv\other\proj\f]], [ [[\\srv2\share\proj\f]] ] = [[\\srv2\share\proj\f]],
+  [ [[\\.\pipe\x]] ] = [[\\.\pipe\x]], [ [[C:\proj\NUL]] ] = [[\\.\NUL]], [ [[C:\proj\con.txt]] ] = [[C:\proj\con.txt]],
+  [ [[C:\proj\f.txt:stream]] ] = [[C:\proj\f.txt:stream]],
+  [ [[C:\proj\sub]] ] = [[C:\proj\sub]], [ [[C:/proj/sub]] ] = [[C:\proj\sub]], [ [[C:\]] ] = [[C:\]],
+  [ [[C:\vproj]] ] = [[\\?\C:\vproj]],
+}
+local function wrealpath(path) return wreal[path] end
+local wcwd = { w1 = [[C:\proj]], unc = [[\\srv\share\proj]], rel = [[C:proj]], rooted = [[\proj]], posix = "/w/m1", v = [[C:\vproj]] }
+local function wcwd_of(session) return wcwd[session] end
+local wlinks = { [ [[C:\proj\existing-link]] ] = true }
+local function wis_symlink(path) return wlinks[path] == true end
+local function wfile(path, session, platform)
+  return permissions.file_for_caller(path, { kind = "session", session = session or "w1" }, wcwd_of, wrealpath,
+    "--file ", true, platform or "windows")
+end
+local function wout(path, session, platform)
+  return permissions.output_for_caller(path, "matrix-MEDIA", { kind = "session", session = session or "w1" }, wcwd_of,
+    wrealpath, wis_symlink, platform or "windows")
+end
+
+weq("windows, inside the working directory", wfile([[C:\proj\in.txt]]), [[C:\proj\in.txt]])
+weq("windows, mixed slashes", wfile([[C:/proj\sub/f.txt]]), [[C:\proj\sub\f.txt]])
+weq("windows, a case difference is the same place", wfile([[c:\PROJ\F.txt]]), [[c:\PROJ\F.txt]])
+weq("windows, a \\\\?\\ path from the resolver is inside", wfile([[C:\proj\verbatim.txt]]), [[\\?\C:\proj\verbatim.txt]])
+weq("windows, UNC inside a UNC working directory", wfile([[\\srv\share\proj\f]], "unc"), [[\\srv\share\proj\f]])
+weq("windows, \\\\?\\UNC from the resolver is inside", wfile([[\\srv\share\proj\v]], "unc"), [[\\?\UNC\srv\share\proj\v]])
+local WOUTSIDE = "refused: --file %s is outside this session's working directory %s"
+  .. "\nNext: copy the file into %s and pass that path, or pipe the text: cat FILE | remuda butler send NAME -"
+for name, case in pairs({
+  ["a forged '..' escape"] = { [[C:\proj\..\other\f]] }, ["a different drive"] = { [[D:\proj\f]] },
+  ["a sibling directory with the same prefix"] = { [[C:\projx\f]] }, ["the working directory itself"] = { [[C:\proj\.]] },
+  ["another share on the same server"] = { [[\\srv\other\proj\f]], "unc" },
+  ["the same share on another server"] = { [[\\srv2\share\proj\f]], "unc" },
+  ["a pipe"] = { [[\\.\pipe\x]] },
+}) do
+  local path, session = case[1], case[2] or "w1"
+  local out, why = wfile(path, session)
+  weq("windows, " .. name .. ": nothing to open", out, nil)
+  weq("windows, " .. name .. ": refusal", why, WOUTSIDE:format(path, wcwd[session], wcwd[session]))
+end
+weq("windows, a '..' the resolver left in place is refused",
+  select(2, wfile([[C:\proj\unresolved\..\f]])),
+  [[refused: --file C:\proj\unresolved\..\f cannot be resolved (a missing file, or realpath is unavailable)]]
+    .. "\n" .. [[Next: check that the file exists inside C:\proj]])
+local WDEVICE = "refused: --file %s names a device or a stream, not a file\n" .. [[Next: pass a regular file inside C:\proj]]
+for name, path in pairs({
+  ["a device the resolver names"] = [[C:\proj\NUL]], ["a device name with an extension"] = [[C:\proj\con.txt]],
+  ["an alternate stream"] = [[C:\proj\f.txt:stream]],
+}) do
+  local out, why = wfile(path)
+  weq("windows, " .. name .. ": nothing to open", out, nil)
+  weq("windows, " .. name .. ": refusal", why, WDEVICE:format(path))
+end
+local WUNKNOWN = [[refused: --file C:\proj\in.txt: cannot identify the calling session's working directory]]
+  .. "\nNext: run this from a Butler session, or from your own terminal"
+for name, session in pairs({
+  ["a drive-relative working directory"] = "rel", ["a working directory with no drive"] = "rooted",
+  ["a posix working directory"] = "posix",
+}) do
+  weq("windows, " .. name .. " is not a known place", select(2, wfile([[C:\proj\in.txt]], session)), WUNKNOWN)
+end
+weq("posix, a drive working directory is still not a known place", select(2, wfile([[C:\proj\in.txt]], "w1", "posix")), WUNKNOWN)
+weq("no platform means posix", select(2, permissions.file_for_caller([[C:\proj\in.txt]], { kind = "session", session = "w1" },
+  wcwd_of, wrealpath, "--file ", true)), WUNKNOWN)
+
+weq("windows, -o inside: the resolved parent, a backslash, the name", wout([[C:\proj\out.bin]]), [[C:\proj\out.bin]])
+weq("windows, -o with forward slashes", wout("C:/proj/sub/out.bin"), [[C:\proj\sub\out.bin]])
+weq("windows, no -o: the default lands in the working directory", wout(nil), [[C:\proj\matrix-MEDIA]])
+weq("windows, -o in a UNC working directory", wout([[\\srv\share\proj\o.bin]], "unc"), [[\\srv\share\proj\o.bin]])
+weq("windows, -o under a \\\\?\\ parent from the resolver", wout([[C:\vproj\o.bin]], "v"), [[\\?\C:\vproj\o.bin]])
+local WNEXT = "\n" .. [[Next: pass -o with a path inside C:\proj]]
+weq("windows, -o at the drive root resolves C:\\ and is outside", select(2, wout([[C:\out.bin]])),
+  [[refused: -o C:\out.bin is outside this session's working directory C:\proj]] .. WNEXT)
+weq("windows, -o on another drive", select(2, wout([[D:\proj\out.bin]])),
+  [[refused: -o D:\proj\out.bin cannot be resolved (a missing directory, or realpath is unavailable)]] .. WNEXT)
+weq("windows, -o with a trailing backslash has no file name", select(2, wout([[C:\proj\]])),
+  [[refused: -o C:\proj\ has no file name]] .. WNEXT)
+weq("windows, -o on an existing link", select(2, wout([[C:\proj\existing-link]])),
+  [[refused: -o C:\proj\existing-link is a symlink]] .. WNEXT)
+for name, path in pairs({
+  ["a device"] = [[C:\proj\NUL]], ["a device name with an extension"] = [[C:\proj\con.txt]],
+  ["an alternate stream"] = [[C:\proj\out.bin:s]],
+}) do
+  weq("windows, -o on " .. name, select(2, wout(path)), "refused: -o " .. path .. " names a device or a stream, not a file" .. WNEXT)
+end
+if #wfailed > 0 then error(#wfailed .. " Windows path cases failed:\n" .. table.concat(wfailed, "\n"), 0) end
+
 print(("butler_permissions ok: %d cases"):format(count))
