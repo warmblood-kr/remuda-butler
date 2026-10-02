@@ -17,9 +17,8 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 CORE_URL=${CORE_URL:-https://github.com/warmblood-kr/remuda.git}
 # Core with remuda.fs.realpath and is_symlink (file checks on Windows) and the
 # OS credential store, which answers "unavailable" where macOS has no default
-# keychain instead of waiting on a dialog. Bump deliberately; a core change
-# must not redden Butler PRs.
-CORE_REF=${CORE_REF:-c59e04c5}
+# keychain instead of waiting on a dialog.
+source "$REPO/tests/core_ref.sh"
 
 scratch=$(mktemp -d /tmp/butler-rust.XXXXXX)
 scratch=$(cd "$scratch" && pwd -P)
