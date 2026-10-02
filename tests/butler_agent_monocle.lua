@@ -120,6 +120,24 @@ eq("resolved launch argv", capture.argv, {
   "monocle", "agent", "--workdir", "/work", "--session", "monocle-test", "--auto-approve",
 })
 
+-- A core without remuda.contribute registers through the legacy path; its rows
+-- must keep Monocle out of the automatic order, and failed Claude and Codex
+-- candidates must not fall through to it.
+assert(fallback_rows.monocle.automatic == false, "legacy Monocle row must be explicit-only")
+do
+  local legacy = {}
+  for id, entry in pairs(fallback_rows) do legacy[#legacy + 1] = { id = id, entry = entry } end
+  contributions = legacy
+  local order = remuda._butler_configured_agent_order()
+  assert(table.concat(order, ",") == "claude,codex", "legacy order must be claude,codex: " .. table.concat(order, ","))
+  local started, failed = {}, nil
+  remuda.new = function(name, argv) started[#started + 1] = argv[1]; return name end
+  remuda._butler_chooser_config.system.find_command = function() return nil end
+  remuda._butler_choose(order, { name = "legacy-fail", cwd = "/work", spec = function(kind) return { cwd = "/work", name = "legacy-fail", kind = kind } end, env = function() return {} end, skip_probe = true }, function(name, kind, attempts) failed = { name = name, kind = kind } end)
+  assert(#started == 0 and failed and failed.kind == nil, "failed claude and codex must not start monocle")
+  remuda._butler_chooser_config.system.find_command = function(name) return name end
+end
+
 -- With no contributed entries, the legacy automatic launch fallback should
 -- retain Claude and Codex without selecting explicit-only Monocle.
 contributions = {}

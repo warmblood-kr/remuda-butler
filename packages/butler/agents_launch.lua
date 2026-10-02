@@ -19,7 +19,7 @@ if not remuda.contribute then
     local kind_id = kind
     local startup = remuda._butler_agent_startup[kind_id] or {}
     remuda._butler_contribute("butler.agent", kind_id, {
-      order = order * 10, executable = kind_id,
+      order = order * 10, executable = kind_id, automatic = kind_id ~= "monocle",
       argv = function(_, spec) return AGENT_BUILDERS[kind_id](spec) end,
       ready = startup.ready and function(_, screen) return startup.ready(screen) end or nil,
       working = startup.working and function(_, screen) return startup.working(screen) end
