@@ -195,6 +195,12 @@ with `--` and is not `--file` is refused with a `Next:` line; put `--` before
 the text to send it literally (`send -- --text`). The output names the room
 posted to.
 
+`download` writes the media to `-o PATH`. PATH must be an absolute path, from a
+terminal too: a relative one is refused ("is not an absolute path"), because
+the daemon writes the file and its directory is not yours. From an agent
+session PATH must also lie inside the session's working directory; with no
+`-o` the file is written there as `matrix-<media id>`.
+
 ### Owner typed lines
 
 `remuda butler typed-lines on|off` controls plain owner lines (`!TEXT`), and
