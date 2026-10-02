@@ -55,10 +55,28 @@ remuda = {
 dofile("packages/butler/matrix_cli.lua")
 local sample = string.rep("preface-word ", 40):gsub(" $", "")
 local wrapped_sample = remuda.butler.matrix.wrap_prompt_preface(sample)
+assert(remuda.butler.matrix.wrap_prompt_preface(nil) == "", "a missing preface must not raise")
 assert(wrapped_sample:gsub("\n", " ") == sample, "the shared preface wrapper must preserve every word")
 for line in (wrapped_sample .. "\n"):gmatch("([^\n]*)\n") do
   assert(#line <= 200, "the shared preface wrapper must keep every line within 200 characters")
 end
+local multi_line = "Heading\n\n" .. string.rep("wrapped-word ", 30) .. "\nLast line"
+local wrapped_multi_line = remuda.butler.matrix.wrap_prompt_preface(multi_line)
+assert(wrapped_multi_line:match("^Heading\n\n"), "the shared preface wrapper must keep existing blank lines")
+assert(wrapped_multi_line:match("\nLast line$"), "the shared preface wrapper must keep existing line breaks")
+local long_word = string.rep("x", 450)
+local wrapped_long_word = remuda.butler.matrix.wrap_prompt_preface(long_word)
+assert(wrapped_long_word:gsub("\n", "") == long_word, "a long word must be hard-split without losing characters")
+for line in (wrapped_long_word .. "\n"):gmatch("([^\n]*)\n") do
+  assert(#line <= 200, "hard-split words must fit the line limit")
+end
+local too_many_lines = {}
+for i = 1, 40 do too_many_lines[i] = "line " .. i end
+local truncated_preface = remuda.butler.matrix.wrap_prompt_preface(table.concat(too_many_lines, "\n"))
+local truncated_lines = {}
+for line in (truncated_preface .. "\n"):gmatch("([^\n]*)\n") do truncated_lines[#truncated_lines + 1] = line end
+assert(#truncated_lines == 32 and truncated_lines[32] == "..." and truncated_lines[31] == "line 31",
+  "an oversized preface must end with an ellipsis within the core line limit")
 local cli = assert(dofile("packages/butler/typed_lines_cli.lua")).cli
 local function text(result)
   return type(result) == "table" and (result.error or result.stdout or "") or tostring(result)
@@ -171,5 +189,43 @@ assert(failed_resolution and failed_resolution.code == 1
     .. tostring(failed_resolution and failed_resolution.stderr))
 assert(#writes == before_prompt_error_writes and state.typed_lines == false,
   "a rejected prompt must not change the config")
+
+local command_rows, bridge_handler = {}, nil
+remuda.butler.schedule_cli = { cli = function() end }
+remuda._butler_commands_config = {
+  current_agent = function() return nil end,
+  OPERATOR = "operator",
+  contributions = function() return command_rows end,
+  registry_list = function() return {} end,
+  statusline = function() return "" end,
+  resolve = function(name) return name end,
+  mail = {},
+}
+remuda._butler_contribute = function(point, id, entry)
+  if point == "butler.command" then command_rows[#command_rows + 1] = { id = id, entry = entry } end
+end
+remuda.extension_command = function(name, callback)
+  assert(name == "butler")
+  bridge_handler = callback
+end
+dofile("packages/butler/commands.lua")
+local bridge_resolution, bridge_reply_object
+remuda.pending = function()
+  bridge_reply_object = {
+    prompt_line = function() error("core prompt failure", 0) end,
+    resolve = function(_, code, stdout, stderr)
+      bridge_resolution = { code = code, stdout = stdout, stderr = stderr }
+    end,
+  }
+  return bridge_reply_object
+end
+local bridge_result = bridge_handler({ "typed-lines", "on" })
+assert(bridge_result == bridge_reply_object,
+  "the real remuda butler command bridge must return the failed prompt reply, not fall through to usage")
+assert(bridge_resolution and bridge_resolution.code == 1
+  and bridge_resolution.stderr == "The typed-line switch prompt failed: core prompt failure. Nothing was changed.\n",
+  "the real command bridge must resolve prompt_line exceptions with exit 1 and a clear message")
+assert(#writes == before_prompt_error_writes and state.typed_lines == false,
+  "a failed prompt through the command bridge must not change the config")
 os.remove(config_path)
 print("ok - typed-line switch CLI cases")

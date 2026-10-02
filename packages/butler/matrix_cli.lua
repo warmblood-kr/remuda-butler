@@ -360,21 +360,49 @@ function matrix.prompt_preface_supported()
 end
 
 function matrix.wrap_prompt_preface(text)
-  assert(type(text) == "string", "prompt preface must be text")
-  local lines, line = {}, ""
-  for word in text:gmatch("%S+") do
-    assert(#word <= 200, "prompt preface word exceeds 200 characters")
-    if line == "" then
-      line = word
-    elseif #line + 1 + #word <= 200 then
-      line = line .. " " .. word
-    else
-      lines[#lines + 1] = line
-      line = word
+  if type(text) ~= "string" then return "" end
+  local lines = {}
+  local function wrap_line(source)
+    if #source <= 200 then lines[#lines + 1] = source; return end
+    if source:match("^%s*$") then lines[#lines + 1] = ""; return end
+    local line = ""
+    local function flush()
+      if line ~= "" then lines[#lines + 1] = line; line = "" end
     end
+    for word in source:gmatch("%S+") do
+      while #word > 200 do
+        flush()
+        local cut = 200
+        while cut > 0 do
+          local byte = word:byte(cut + 1) or 0
+          if byte < 0x80 or byte > 0xbf then break end
+          cut = cut - 1
+        end
+        lines[#lines + 1] = word:sub(1, cut)
+        word = word:sub(cut + 1)
+      end
+      if line == "" then
+        line = word
+      elseif #line + 1 + #word <= 200 then
+        line = line .. " " .. word
+      else
+        flush()
+        line = word
+      end
+    end
+    flush()
   end
-  if line ~= "" then lines[#lines + 1] = line end
-  assert(#lines <= 32, "prompt preface exceeds 32 lines")
+  local start = 1
+  while true do
+    local newline = text:find("\n", start, true)
+    wrap_line(text:sub(start, newline and newline - 1 or #text))
+    if not newline then break end
+    start = newline + 1
+  end
+  if #lines > 32 then
+    for index = #lines, 32, -1 do lines[index] = nil end
+    lines[32] = "..."
+  end
   return table.concat(lines, "\n")
 end
 

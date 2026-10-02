@@ -132,7 +132,7 @@ local function enable(args, key, path)
   local prompted, prompt_error = pcall(reply.prompt_line, reply, prompt)
   if not prompted then
     resolve(1, "", "The typed-line switch prompt failed: " .. tostring(prompt_error) .. ". Nothing was changed.\n")
-    return nil
+    return reply
   end
   return reply
 end
