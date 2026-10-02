@@ -1428,6 +1428,16 @@ return function(matrix, pinned_hostname)
     end
     assert(#runs == 0, "a setup that cannot proceed must not run the password command")
 
+    runs = {}
+    local taken_dir = root .. "/cmd-taken"
+    remuda.fs.mkdir_new(taken_dir)
+    local taken = assert(io.open(taken_dir .. "/token", "wb")); taken:write("old"); taken:close()
+    local _, cmd_taken = matrix.setup_prepare({ "--homeserver", "http://matrix.invalid",
+      "--owner", "@alice:example.org", "--bot", "@butler-cmd:example.org", "--dir", taken_dir,
+      "--password-cmd", "op", "read", "x" })
+    assert(tostring(cmd_taken):find("output file already exists", 1, true) and #runs == 0,
+      "an existing-file refusal must not run the password command: " .. tostring(cmd_taken))
+
     -- Without --register the command's output is the login password.
     runs, requests, resolved, atomic_writes = {}, {}, nil, {}
     run_result = { code = 0, stdout = "cmd-secret-pw\n", stderr = "", timed_out = false }

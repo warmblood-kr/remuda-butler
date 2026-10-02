@@ -312,7 +312,8 @@ directly (no shell), waits up to 10 seconds, and uses the first line it prints.
 It takes every argument after it, so it must be the last option. It works with
 and without `--register` (without it, `--bot` is required) and cannot be
 combined with `--password-file` or `--token-file`. Setup saves no copy of this
-password: it stays where it was made. A password that setup generates, or one
+password: it stays where it was made. The program inherits the daemon's
+environment (stdin is closed), so treat it as running with your own authority. A password that setup generates, or one
 given with `--register --password-file`, is still saved privately beside the
 token.
 
