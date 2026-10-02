@@ -544,6 +544,13 @@ also applies to delegates without an explicit kind. Each candidate waits up to
 15 seconds by default; set `REMUDA_BUTLER_READINESS_TIMEOUT` to change that
 per-candidate timeout. `remuda butler sessions` shows the selected kind and
 the reason each earlier candidate was skipped.
+
+The client session list leads each Butler session line with its status, read
+from the agent's own screen probes: `working`, `idle`, `needs you` (a trust,
+update or startup dialog) or `other` (no screen, an unreadable one, or a kind
+without reliable probes such as Monocle). The screen is captured at most once
+per session every 2 seconds and only the status word is shown, for example
+`idle · claude · opus · 123K · ✉2`.
 Explicit Monocle launches use this argv: `monocle agent --workdir DIR --session NAME --auto-approve`;
 Butler adds `--model M` when specified.
 `--auto-approve` means the member runs with Monocle's own auto-approval. Butler
