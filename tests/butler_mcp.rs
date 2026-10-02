@@ -554,6 +554,43 @@ fn butler_close_is_registered_and_unknown_mcp_caller_cannot_close() {
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.agents.m1 ~= nil)"), "true");
 }
 
+#[test]
+fn butler_close_accepts_published_string_force_argument() {
+    let dir = scratch("butler-close-string-force");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    eval(&path, r#"
+      remuda._butler_argv = {'sh'}; remuda.exec('butler')
+      remuda._butler_agent_builders.fake = function() return {'sleep', '100'} end
+      remuda._butler_launch('fake', 'm1')
+      remuda._butler_mail.unread = function() return 1 end
+      remuda.butler.is_idle = function() return false, 'busy' end
+    "#);
+    let refused = eval(
+        &path,
+        "local token = remuda._butler_bus.agents.butler.token; \
+         local ok = pcall(remuda._call, 'butler_close', {name='m1', force='false'}, {capability=token}); \
+         return tostring(ok) .. ':' .. tostring(remuda._butler_bus.agents.m1 ~= nil)",
+    );
+    assert_eq!(refused, "false:true", "string force=false must not force the close");
+    let result = eval(
+        &path,
+        "local token = remuda._butler_bus.agents.butler.token; \
+         return remuda._call('butler_close', {name='m1', force='true'}, {capability=token})",
+    );
+    assert_eq!(result, "Closed m1.\nNext: remuda butler sessions");
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.agents.m1 == nil)"), "true");
+
+    let invalid = eval(
+        &path,
+        "local token = remuda._butler_bus.agents.butler.token; \
+         local ok, message = pcall(remuda._call, 'butler_close', \
+           {name='m1', force='yes'}, {capability=token}); \
+         return tostring(ok) .. ':' .. tostring(message)",
+    );
+    assert!(invalid.starts_with("false:force must be a boolean."), "{invalid}");
+}
+
 fn screen_of(path: &Path, session: &str, until: &str) -> String {
     let deadline = Instant::now() + PATIENCE;
     loop {

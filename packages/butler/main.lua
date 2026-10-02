@@ -706,10 +706,17 @@ remuda.tool{
   args = { name = "Name or ID of one of your direct Butler members.", force = "Set true to skip unread-mail and idle checks." },
   needs = { "name" },
   run = function(a, caller)
-    if a.force ~= nil and type(a.force) ~= "boolean" then error("force must be a boolean.\nNext: set force to true or omit it", 0) end
+    local force = a.force
+    if force == "true" then
+      force = true
+    elseif force == "false" then
+      force = false
+    elseif force ~= nil and type(force) ~= "boolean" then
+      error("force must be a boolean.\nNext: set force to true or omit it", 0)
+    end
     local ok, leader = pcall(caller_leader, caller)
     if not ok then error(tostring(leader) .. "\nNext: run from a Butler member session", 0) end
-    return remuda._butler_close_member(a.name, leader, a.force == true)
+    return remuda._butler_close_member(a.name, leader, force == true)
   end,
 }
 

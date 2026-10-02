@@ -154,6 +154,12 @@ return function(matrix, pinned_hostname)
   local _, spaces = invalid_ids("@alice smith:example.org", "@butler-demo:example.org")
   assert(spaces and spaces:find("--owner '@alice smith:example.org' contains spaces", 1, true),
     "spaces should show a specific Matrix user ID hint")
+  do
+    local _, c1_error = invalid_ids("@alice:example.org\194\133", "@butler-demo:example.org")
+    assert(c1_error and not c1_error:find("\194\133", 1, true)
+      and c1_error:find("@alice:example.org?", 1, true),
+      "C1 controls in an MXID server must be rejected and sanitized in the hint")
+  end
   local _, invalid_bot = invalid_ids("@alice:example.org", "butler-home:example.org")
   assert(invalid_bot and invalid_bot:find("--bot 'butler-home:example.org' is not a Matrix user ID. It looks like @butler-home:example.org", 1, true),
     "bot ID errors should name --bot and show the corrected shape")
@@ -164,6 +170,11 @@ return function(matrix, pinned_hostname)
   assert(valid_id_plan and valid_id_plan.owner_mxid == "@alice:example.org"
     and valid_id_plan.bot_mxid == "@butler-demo:example.org",
     "valid Matrix user IDs should still pass")
+  for _, name in ipairs({ "é", "ü", "한", "😀", "€" }) do
+    local plan = invalid_ids("@" .. name .. ":example.org", "@" .. name .. "bot:example.org")
+    assert(plan and plan.owner_mxid == "@" .. name .. ":example.org",
+      "legit multibyte UTF-8 must not be rejected as C1: " .. name)
+  end
 
   local registration_token_file = root .. "/registration-token"
   write(registration_token_file, "  homeserver-registration-token  \nignored")
