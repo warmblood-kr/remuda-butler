@@ -246,13 +246,28 @@ remuda._butler_identity_config = {
 }
 system.mkdir_p(paths.butler_session_cwd)
 system.mkdir_p(paths.mail_root)
+remuda._test_identity_saved_random_bytes = remuda.random_bytes
+remuda._test_identity_random_requests = {}
+remuda.random_bytes = function(n)
+  remuda._test_identity_random_requests[#remuda._test_identity_random_requests + 1] = n
+  return string.rep("r", n)
+end
+io.open = function(path, mode)
+  if path == "/dev/urandom" then return nil, "simulated unavailable random source" end
+  return original_io_open(path, mode)
+end
 assert(dofile("packages/butler/identity.lua") == nil)
 local identity = remuda._butler_identity
+assert(#remuda._butler_new_ulid() == 26
+  and remuda._test_identity_random_requests[1] == 10,
+  "ULID entropy should use remuda.random_bytes when /dev/urandom is unavailable")
 identity.identity_record({ id = "01ARZ3NDEKTSV4RRFFQ69G5FAV", alias = "butler" })
 assert(created_directories[paths.butler_session_cwd] and created_directories[paths.mail_root],
   "the profile data home should provide usable session and mail directories")
 assert(identity.identity_path == identity_path and written_identity_path == identity_path,
   "identity records should be written under the profile data home")
 
+remuda.random_bytes = remuda._test_identity_saved_random_bytes
+remuda._test_identity_saved_random_bytes, remuda._test_identity_random_requests = nil, nil
 os[execute_key], io[popen_key], os.getenv, io.open = original_execute, original_popen, original_getenv, original_io_open
 print("ok - system module command lookup, failure lines, and home contract")

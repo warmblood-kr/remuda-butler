@@ -7,9 +7,18 @@ local MAX_HTML_BYTES = 30000 -- an event is capped at 65536 bytes; markup can ex
 local MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 local txn_counter = 0
 local function random_tag()
-  local file = io.open("/dev/urandom", "rb")
-  local bytes = file and file:read(16)
-  if file then file:close() end
+  local bytes
+  if type(remuda.random_bytes) == "function" then
+    local ok, random_bytes = pcall(remuda.random_bytes, 16)
+    if ok and type(random_bytes) == "string" and #random_bytes >= 16 then
+      bytes = random_bytes:sub(1, 16)
+    end
+  end
+  if not bytes then
+    local file = io.open("/dev/urandom", "rb")
+    bytes = file and file:read(16)
+    if file then file:close() end
+  end
   if not bytes or #bytes < 16 then
     math.randomseed(os.time() + math.floor(os.clock() * 1000000))
     local out = {}
