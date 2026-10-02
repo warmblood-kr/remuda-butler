@@ -49,9 +49,9 @@ done
 if grep -F 'after a daemon restart' "$SCRATCH/out" >/dev/null; then
   fail "installer claims a restart check it did not run"
 fi
-echo "PASS installer finished without stopping or restarting the daemon"
 last_line=$(tail -n 1 "$SCRATCH/out")
 case "$last_line" in
-  Next:*) ;;
+  *Next:*) ;;
   *) fail "installer output does not end with a Next: line" ;;
 esac
+echo "PASS installer finished without stopping or restarting the daemon"
