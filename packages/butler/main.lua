@@ -518,7 +518,6 @@ remuda._butler_notice_config = { bus = bus,
 remuda.exec("butler/notice")
 -- The launch configs above call main.lua's startup_action_safe late; set it here.
 startup_action_safe = remuda._butler_notice.startup_action_safe
-local notice_recovery_error = remuda._butler_notice.notice_recovery_error
 -- Reply and forward live in mail.lua; this adds the caller's identity and the
 -- terminal notice. A recipient that has ended still gets the mail, unnotified.
 local function sender_address(from)
@@ -559,14 +558,11 @@ function remuda._butler_inbox(name)
   if mail.unread(id) == 0 then
     for alias, agent in pairs(bus.agents) do
       if agent.id == id then
-        local recovery = bus.notice_recoveries[alias]
         local pending, reshow = bus.notices[alias], false
         for _, message_id in ipairs(pending and pending.message_order or {}) do
           reshow = reshow or (pending.reshow and pending.reshow[message_id]) == true
         end
-        if recovery and recovery.draft and recovery.draft ~= "" then
-          notice_recovery_error(alias, recovery, "mail was read while notice recovery was active; draft preserved")
-        elseif not reshow then
+        if not reshow then
           -- A queued re-show is of already-read mail: reading keeps it.
           bus.notices[alias], bus.notice_recoveries[alias] = nil, nil
         end
