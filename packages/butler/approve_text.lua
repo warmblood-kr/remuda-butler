@@ -34,15 +34,8 @@ function M.prepare(session, text, request_id)
   if #text > MAX_BYTES then return nil, "text_too_long" end
   if type(request_id) ~= "string" then request_id = "" end
   return { session = session, bytes = #text, registered_text = text,
-    stored_text = text, posted_text = text, request_id = request_id,
+    request_id = request_id,
     display_fingerprint = request_id .. "/" .. tostring(#text) }
-end
-
-function M.matches(record)
-  if type(record) ~= "table" or type(record.registered_text) ~= "string"
-    or type(record.posted_text) ~= "string" or type(record.stored_text) ~= "string" then return false end
-  return record.registered_text == record.stored_text and record.posted_text == record.stored_text
-    and tonumber(record.bytes) == #record.registered_text
 end
 
 local BIDI_ESCAPES = {
@@ -151,8 +144,8 @@ end
 function M.session_instance(session)
   if not M.target_session_allowed(session) then return nil end
   local id, agent = live_agent(session)
-  if not id or type(agent.id) ~= "string" or type(agent.token) ~= "string" then return nil end
-  return agent.id, agent.token
+  if not id or type(agent.id) ~= "string" or type(agent.session_start_marker) ~= "string" then return nil end
+  return agent.id, agent.session_start_marker
 end
 
 local function pane_has_human(session)
@@ -220,7 +213,12 @@ local function request(session, text, asker, ttl_s, done)
     done(nil, failure)
     return nil, failure
   end
-  local session_id, session_start = M.session_instance(session)
+  if live_config.use_messages == true then
+    local failure = "Prepared text approvals require live Matrix sync; messages fallback cannot approve them."
+    done(nil, failure)
+    return nil, failure
+  end
+  local session_id, session_marker = M.session_instance(session)
   if not session_id then
     local failure = "Target is not a live Butler session. Next: choose a live session and retry."
     done(nil, failure)
@@ -229,9 +227,9 @@ local function request(session, text, asker, ttl_s, done)
   request_counter = request_counter + 1
   local key = tostring(os.time()) .. ":" .. tostring(request_counter)
   local requested_id, failure
-  local request_data = { registered_text = prepared.registered_text, stored_text = prepared.stored_text,
-    posted_text = prepared.posted_text, session = session, session_id = session_id,
-    session_start = session_start, bytes = prepared.bytes }
+  local request_data = { registered_text = prepared.registered_text, session = session,
+    session_id = session_id, session_marker = session_marker, session_binding_version = 2,
+    bytes = prepared.bytes }
   local bounded_ttl = math.max(1, math.min(MAX_TTL, tonumber(ttl_s) or DEFAULT_TTL))
   local result = approval.request({ kind = "approve_text", key = key,
     asker = asker, summary = "type " .. tostring(prepared.bytes) .. " prepared bytes in " .. session,
@@ -244,14 +242,15 @@ local function request(session, text, asker, ttl_s, done)
       local id = tostring(rec.id)
       data.request_id = id
       data.display_fingerprint = id .. "/" .. tostring(data.bytes)
-      local shown = M.display(data.posted_text)
+      local shown = M.display(data.registered_text)
       local expires = tonumber(rec.expires_at) or (os.time() * 1000)
       return table.concat({ "Approve prepared text for " .. session,
         "Request " .. id .. " · " .. tostring(data.bytes) .. " bytes",
         "Fingerprint " .. data.display_fingerprint,
         "Expires " .. os.date("!%Y-%m-%dT%H:%M:%SZ", math.floor(expires / 1000)),
         "Asked by " .. tostring(asker),
-        "React ✅ or reply yes " .. id .. " to approve; ❌ or no " .. id .. " to deny.",
+        "React ✅ or reply yes/승인 " .. id .. " (id optional) to approve; ❌ or no/거부 "
+          .. id .. " (id optional) to deny.",
         shown }, "\n")
     end,
   }, function(id, why)
@@ -313,13 +312,14 @@ function M.configure()
   approval.handler("approve_text", {
     approve = function(rec, complete)
       local data = type(rec.data) == "table" and rec.data or {}
-      if not M.matches(data) or data.request_id ~= rec.id then
+      if type(data.registered_text) ~= "string" or #data.registered_text > MAX_BYTES
+          or tonumber(data.bytes) ~= #data.registered_text or data.request_id ~= rec.id then
         complete(false, "text_changed")
         return
       end
       local current_id, current_start = M.session_instance(data.session)
       if not M.target_session_allowed(data.session) or current_id ~= data.session_id
-          or current_start ~= data.session_start then
+          or current_start ~= data.session_marker then
         pcall(approval.reply, rec, "refused: session_changed")
         complete("retry", "session_changed")
         return

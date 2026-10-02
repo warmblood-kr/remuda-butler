@@ -129,6 +129,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   bus.agents[actual] = {
     kind = kind, token = token, model = model, telemetry = agent_telemetry,
     parent = parent, children = {}, id = identity.id, alias = actual, session_name = actual,
+    session_start_marker = remuda._butler_new_ulid(),
     cwd = launch_cwd, task = task, launch_attempts = attempts, trust_allowed = auto_trust,
     trust_reported = waiting_for_trust, trust_answered = trust_answered,
   }

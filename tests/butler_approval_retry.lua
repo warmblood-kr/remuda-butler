@@ -58,22 +58,46 @@ approval.request({ kind = "approve_text", key = "text-approved-deny", asker = "a
   summary = "approved but waiting", data = {}, on_id = function(id) approved_id = id end }, function() end)
 post_callback({ event_id = "$approval-deny" })
 assert(approval.answer("$approval-deny", "approve", "@alice:example.org", "$yes"))
-local denied_ok = approval.answer("$approval-deny", "deny", "@alice:example.org", "$cancel")
-assert(denied_ok and state.approvals[approved_id].status == "denied",
-  "an owner may cancel approved-but-undelivered prepared text")
+local prepared_rows = approval.cli({ "approvals" })
+assert(prepared_rows:find("deny ID cancels prepared text", 1, true),
+  "approval listing tells the operator how to cancel prepared text")
+local terminal_approve_ok, terminal_approve_error = approval.answer("$approval-deny", "approve", "operator (terminal)")
+assert(not terminal_approve_ok and terminal_approve_error:find("live Matrix thread", 1, true),
+  "the local operator cannot approve prepared text")
+local terminal_deny = approval.cli({ "deny", approved_id })
+assert(terminal_deny:find("Denied request " .. approved_id, 1, true)
+  and state.approvals[approved_id].status == "denied",
+  "the local operator can cancel approved-but-undelivered prepared text")
 
 local crash_id
 approval.request({ kind = "approve_text", key = "text-crash", asker = "agent-1",
-  summary = "crash recovery", data = {}, on_id = function(id) crash_id = id end }, function() end)
+  summary = "crash recovery", data = { session_binding_version = 2 },
+  on_id = function(id) crash_id = id end }, function() end)
 post_callback({ event_id = "$approval-crash" })
 assert(approval.answer("$approval-crash", "approve", "@alice:example.org", "$crash"))
 assert(state.approvals[crash_id].status == "failed", "the partial write record is already failed")
 state.approvals[crash_id].status = "approved"
 state.approvals[crash_id].delivery_started = true
+local recovery_posts, recovery_mails = {}, {}
+remuda._butler_send = function(from, to, text)
+  recovery_mails[#recovery_mails + 1] = { from = from, to = to, text = text }
+  return true
+end
 approval.attach(state, function() saved = saved + 1; return true end,
-  function(text, _, callback) posted, post_callback = text, callback; return true end)
+  function(text, relation, callback)
+    recovery_posts[#recovery_posts + 1] = { text = text, relation = relation }
+    callback({ event_id = "$recovery-notice" })
+    return true
+  end)
 assert(state.approvals[crash_id].status == "failed",
   "a restart fails closed when a persisted delivery marker has unknown outcome")
+assert(#recovery_posts == 1 and recovery_posts[1].text:find("may not have been typed", 1, true)
+  and recovery_posts[1].text:find("register it again", 1, true)
+  and recovery_posts[1].relation.event_id == "$approval-crash",
+  "restart recovery explains the uncertain outcome in the owner's request thread")
+assert(#recovery_mails == 1 and recovery_mails[1].to == "agent-1"
+  and recovery_mails[1].text:find("Register the text again", 1, true),
+  "restart recovery sends one re-registration notice to the requesting agent")
 
 local second_id
 approval.request({ kind = "approve_text", key = "text-2", asker = "agent-1",

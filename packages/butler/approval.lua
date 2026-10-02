@@ -104,12 +104,55 @@ function approval.attach(state, persist_fn, post_fn)
   attached = { state = state, persist = persist_fn, post = post_fn }
   local recovered = false
   for _, rec in pairs(state.approvals) do
-    if type(rec) == "table" and rec.kind == "approve_text" and rec.status == "approved"
-        and rec.delivery_started == true then
-      rec.status, rec.error, recovered = "failed", "delivery outcome unknown after restart", true
+    if type(rec) == "table" and rec.kind == "approve_text" then
+      local data = type(rec.data) == "table" and rec.data or {}
+      if data.session_binding_version ~= 2 then
+        data.session_start, data.session_marker = nil, nil
+        rec.data = data
+        if rec.status == "open" or rec.status == "approved" then
+          rec.status, rec.error = "failed", "session binding changed; re-register prepared text"
+        end
+        recovered = true
+      end
+      if rec.status == "approved" and rec.delivery_started == true then
+        rec.status, rec.error = "failed", "delivery outcome unknown after restart"
+        rec.recovery_notice = { owner_sent = false, agent_sent = false }
+        recovered = true
+      end
     end
   end
   if recovered then persist() end
+  for _, rec in pairs(state.approvals) do
+    local notice = type(rec) == "table" and rec.recovery_notice
+    if type(notice) == "table" and rec.kind == "approve_text" and rec.status == "failed" then
+      if notice.owner_sent ~= true and type(rec.event_id) == "string" and rec.event_id ~= ""
+          and type(attached.post) == "function" then
+        local called = pcall(attached.post,
+          "Delivery outcome unknown after restart. The prepared text may not have been typed; register it again before asking for approval.",
+          { rel_type = "m.thread", event_id = rec.event_id }, function(result)
+            if type(result) == "table" and not result.error then
+              notice.owner_sent = true
+              pcall(persist)
+            end
+          end)
+        if not called then notice.owner_sent = false end
+      end
+      if notice.agent_sent ~= true and type(remuda._butler_send) == "function"
+          and type(rec.asker) == "string" then
+        local called, sent = pcall(remuda._butler_send, "butler", rec.asker,
+          "Prepared text request " .. tostring(rec.id)
+            .. " had an unknown delivery outcome after restart; it may not have been typed. Register the text again before requesting approval.")
+        if called and sent ~= nil and sent ~= false then
+          notice.agent_sent = true
+          pcall(persist)
+        end
+      end
+      if notice.owner_sent == true and notice.agent_sent == true then
+        rec.recovery_notice = nil
+        pcall(persist)
+      end
+    end
+  end
   return true
 end
 
@@ -329,7 +372,7 @@ function approval.answer(id_or_event, verdict, who, event_id)
       or candidate.event_id == id_or_event) then rec = candidate; break end
   end
   if not rec then return nil, "No such request." end
-  if rec.kind == "approve_text" and who == "operator (terminal)" then
+  if rec.kind == "approve_text" and who == "operator (terminal)" and verdict == "approve" then
     return nil, "Prepared text can only be approved by the owner in its live Matrix thread."
   end
   if rec.kind == "approve_text" and rec.status == "approved" and verdict == "approve" then
@@ -403,12 +446,15 @@ function approval.cli(args, agent)
     if #rows == 0 then return "No open approval requests.\nNext: nothing to do; agent requests appear here." end
     local now = math.floor(os.time() * 1000)
     local lines = { "ID  KIND  SUMMARY  ASKER  EXPIRES-IN" }
+    local has_prepared_text = false
     for _, rec in ipairs(rows) do
       local minutes = math.max(0, math.ceil(((tonumber(rec.expires_at) or now) - now) / 60000))
       lines[#lines + 1] = string.format("%s  %s  %s  %s  %s", tostring(rec.id), tostring(rec.kind),
         tostring(rec.summary), tostring(rec.asker), tostring(minutes) .. "m")
+      if rec.kind == "approve_text" then has_prepared_text = true end
     end
     lines[#lines + 1] = agent and "Next: wait for mail; remuda butler inbox"
+      or has_prepared_text and "Next: remuda butler deny ID cancels prepared text; owner Matrix approval is required to type"
       or "Next: remuda butler approve ID, or remuda butler deny ID"
     return table.concat(lines, "\n")
   end

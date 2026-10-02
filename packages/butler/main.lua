@@ -774,6 +774,7 @@ bus.agents.butler = existing_butler or {
 bus.agents.butler.id = root_identity.id
 bus.agents.butler.alias = "butler"
 bus.agents.butler.session_name = bus.agents.butler.session_name or "butler"
+bus.agents.butler.session_start_marker = remuda._butler_new_ulid()
 bus.identity_ids[root_identity.id] = bus.identities.butler or root_identity
 bus.identities.butler = bus.identities.butler or root_identity
 local root_migrated, root_migration_error = migrate_legacy_mail("butler", root_identity.id)

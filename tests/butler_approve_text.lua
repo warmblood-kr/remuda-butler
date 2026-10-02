@@ -15,10 +15,6 @@ assert(record.bytes == #multiline and record.registered_text == multiline,
   "registration must retain exact multiline bytes and byte count")
 assert(record.display_fingerprint == "ABCD/" .. #multiline,
   "fingerprint must use the request id and byte count when SHA-256 is unavailable")
-assert(approve_text.matches(record), "an unchanged registered copy must match")
-record.registered_text = string.rep("x", #multiline)
-assert(not approve_text.matches(record), "delivery must refuse text changed after posting")
-
 local at_limit = string.rep("a", 8190) .. "\n\n"
 local boundary = assert(approve_text.prepare("agent-1", at_limit, "WXYZ"))
 assert(boundary.bytes == 8192, "8 KiB text is accepted by byte length")
@@ -29,7 +25,7 @@ assert(empty == nil and empty_error == "empty_text", "empty text is refused")
 local esc, esc_error = approve_text.prepare("agent-1", "safe\27[31m", "WXYZ")
 assert(esc == nil and esc_error == "control_character", "ESC and other controls are refused before posting")
 local crlf = assert(approve_text.prepare("agent-1", "one\r\ntwo\rthree", "WXYZ"))
-assert(crlf.registered_text == "one\ntwo\nthree" and crlf.posted_text == crlf.registered_text,
+assert(crlf.registered_text == "one\ntwo\nthree",
   "CR and CRLF normalize before storage and owner display")
 
 local displayed, escaped = approve_text.display("one\ntwo\t\1")
@@ -54,8 +50,8 @@ remuda.ls = function() return { { name = "agent-1", alive = true, attached = fal
 remuda.session = function() return { attached = false } end
 remuda._butler_matrix_live_config = { approve_text = true }
 remuda._butler_bus = { pending_tasks = {}, agents = {
-  butler = { id = "butler", token = "root-token" },
-  agent1 = { id = "agent1", token = "agent-token", session_name = "agent-1", parent = "butler" },
+  butler = { id = "butler", session_start_marker = "root-start" },
+  agent1 = { id = "agent1", session_start_marker = "agent-start", session_name = "agent-1", parent = "butler" },
 } }
 local provenance = { owner = "@alice:example.org", event_id = "$approved", request_id = "ABCD" }
 local ok, reason = approve_text.type_text("agent-1", multiline, provenance)
@@ -86,10 +82,11 @@ remuda.ls = function() return { { name = "agent-1", alive = true, attached = fal
 local returned_id = approve_text.request("agent-1", multiline, "agent-1")
 assert(returned_id == "ABCD", "registration returns the short request id")
 assert(request_spec.kind == "approve_text" and request_spec.data.session == "agent-1"
-  and request_spec.data.registered_text == multiline and request_spec.data.stored_text == multiline
-  and request_spec.data.posted_text == multiline and request_spec.data.session_id == "agent1"
-  and request_spec.data.session_start == "agent-token",
-  "request stores the exact bytes, session, and display copy")
+  and request_spec.data.registered_text == multiline and request_spec.data.bytes == #multiline
+  and request_spec.data.session_id == "agent1" and request_spec.data.session_marker == "agent-start"
+  and request_spec.data.session_binding_version == 2
+  and request_spec.data.session_start == nil and request_spec.data.session_start_marker == nil,
+  "request stores text once and binds to a non-secret session launch marker")
 assert(request_spec.rate_limit_per_window == 10 and request_spec.rate_window_s == 600,
   "registration rate is bounded per agent")
 local posted = request_spec.render({ id = "ABCD", data = request_spec.data,
@@ -104,17 +101,17 @@ request_handler.approve({ id = "ABCD", data = request_spec.data,
   function(ok, why) applied = { ok, why } end)
 assert(applied[1] == true, "approved request delivers the stored text")
 
-local saved_token = remuda._butler_bus.agents.agent1.token
-remuda._butler_bus.agents.agent1.token = "new-token"
+local saved_marker = remuda._butler_bus.agents.agent1.session_start_marker
+remuda._butler_bus.agents.agent1.session_start_marker = "new-start"
 local relaunch_result
 request_handler.approve({ id = "ABCD", data = request_spec.data },
   function(ok, why) relaunch_result = { ok, why } end)
 assert(relaunch_result[1] == "retry" and relaunch_result[2] == "session_changed" and #typed == 2,
   "a relaunch under the same name cannot receive a registered request")
-remuda._butler_bus.agents.agent1.token = saved_token
+remuda._butler_bus.agents.agent1.session_start_marker = saved_marker
 
-local changed = { id = "ABCD", data = { session = "agent-1", bytes = #multiline,
-  registered_text = string.rep("x", #multiline), posted_text = multiline, request_id = "ABCD" } }
+local changed = { id = "ABCD", data = { session = "agent-1", bytes = #multiline - 1,
+  registered_text = string.rep("x", #multiline), request_id = "ABCD" } }
 request_handler.approve(changed, function(ok, why) applied = { ok, why } end)
 assert(applied[1] == false and applied[2] == "text_changed",
   "text mismatch fails closed without delivery")
@@ -137,7 +134,8 @@ remuda._butler_matrix_live_config.approve_text = true
 assert(approve_text.reply_verdict("yes") == "approve")
 local verdict, reply_id = approve_text.reply_verdict("승인 abcd")
 assert(verdict == "approve" and reply_id == "ABCD", "Korean reply supports the optional request id")
-assert(approve_text.reply_verdict("거부") == "deny" and approve_text.reply_verdict("maybe") == nil,
+assert(approve_text.reply_verdict("승인") == "approve" and approve_text.reply_verdict("거부") == "deny"
+  and approve_text.reply_verdict("거부 ABCD") == "deny" and approve_text.reply_verdict("maybe") == nil,
   "deny words are exact and other replies are not approvals")
 local owner_cfg = { home_room = "!home:example.org", self_mxid = "@bot:example.org",
   allowed_senders = { ["@alice:example.org"] = true, ["@agent-runner:example.org"] = true },
@@ -161,4 +159,11 @@ local edited = { type = "m.room.message", event_id = "$edited", sender = owner_e
   origin_server_ts = owner_event.origin_server_ts, content = { ["m.new_content"] = { body = "yes" } } }
 assert(not approve_text.owner_event_allowed(edited, owner_record, owner_cfg, true, owner_cfg.home_room),
   "edited Matrix events cannot approve")
+remuda._butler_matrix_live_config.use_messages = true
+local prior_spec = request_spec
+local message_mode_id, message_mode_error = approve_text.request("agent-1", multiline, "agent-1")
+assert(message_mode_id == nil and message_mode_error:find("require live Matrix sync", 1, true)
+  and request_spec == prior_spec,
+  "registration is refused when messages fallback cannot deliver live approvals")
+remuda._butler_matrix_live_config.use_messages = false
 print("ok - prepared approved text cases")

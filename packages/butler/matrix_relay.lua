@@ -318,7 +318,6 @@ local function approval_answer_fields(ev)
     return { rel.event_id }, verdict
   end
   if ev.type ~= "m.room.message" then return {}, nil end
-  if content.msgtype ~= "m.text" then return {}, nil end
   local thread_root, in_reply_to = relation_fields(content)
   local targets = {}
   if in_reply_to then targets[#targets + 1] = in_reply_to end
@@ -332,7 +331,7 @@ local function approval_answer_fields(ev)
   legacy_body = legacy_body:lower()
   local verdict = legacy_body == "yes" and "approve" or legacy_body == "no" and "deny" or nil
   local text_verdict, explicit_id = approve_text.reply_verdict(body)
-  return targets, verdict, explicit_id, text_verdict
+  return targets, verdict, explicit_id, text_verdict, content.msgtype
 end
 
 local function mentions(content, body, mxid)
@@ -1559,24 +1558,28 @@ function relay.new(options)
           local content = type(ev.content) == "table" and ev.content or {}
           local approval_record, approval_verdict
           if approval then
-            local targets, verdict, explicit_id, text_verdict = approval_answer_fields(ev)
-            if verdict or (explicit_id and text_verdict) then
+            local targets, verdict, explicit_id, text_verdict, msgtype = approval_answer_fields(ev)
+            if verdict or text_verdict then
               if explicit_id and type(approval.for_id) == "function" then
                 local candidate = approval.for_id(explicit_id)
-                if candidate and candidate.kind == "approve_text" and cfg.approve_text == true then
+                if candidate and candidate.kind == "approve_text" and cfg.approve_text == true
+                    and msgtype == "m.text" then
                   approval_record = candidate
                   approval_verdict = text_verdict
                 end
               end
               if not approval_record and not explicit_id then
                 for _, target in ipairs(targets) do
-                  approval_record = approval.for_event(target)
-                  if approval_record then approval_verdict = verdict; break end
+                  local candidate = approval.for_event(target)
+                  if candidate and candidate.kind == "approve_text" then
+                    if cfg.approve_text == true and msgtype == "m.text" then
+                      approval_record, approval_verdict = candidate, text_verdict
+                    end
+                  elseif candidate and verdict then
+                    approval_record, approval_verdict = candidate, verdict
+                  end
+                  if approval_record then break end
                 end
-              end
-              if explicit_id and not approval_record then verdict = nil end
-              if approval_record and approval_record.kind == "approve_text" and cfg.approve_text ~= true then
-                approval_record = nil
               end
             end
           end

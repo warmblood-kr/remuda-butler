@@ -6351,6 +6351,24 @@ local function test_legacy_reply_parser_preserves_exact_words_and_rich_fallback(
   end)
 end
 
+local function test_legacy_notice_and_emote_answers_stay_compatible()
+  approval_env(nil, function(env)
+    local yes_id, yes_event = file_request(env, NEW)
+    local notice_yes = text_event("$notice-yes", OWNER, "yes", yes_event)
+    notice_yes.content.msgtype = "m.notice"
+    room_events(env, { notice_yes })
+    assert(server_joins(env, NEW) == 1 and not is_open(yes_id),
+      "m.notice yes replies must continue to answer ordinary approvals")
+
+    local no_id, no_event = file_request(env, NEW2)
+    local emote_no = text_event("$emote-no", OWNER, "no", no_event)
+    emote_no.content.msgtype = "m.emote"
+    room_events(env, { emote_no })
+    assert(env.relay:state().approvals[no_id].status == "denied" and server_joins(env, NEW2) == 0,
+      "m.emote no replies must continue to deny ordinary approvals")
+  end)
+end
+
 local function test_legacy_approval_survives_first_non_live_sync()
   approval_env(nil, function(env)
     local id, event = file_request(env, NEW)
@@ -6630,8 +6648,7 @@ local function test_approved_text_live_owner_reply_types_exact_bytes_once()
       env.client:pump()
       local rec = env.relay:state().approvals[id]
       local event = rec and rec.event_id
-      assert(rec and event and rec.data.registered_text == bytes
-        and rec.data.posted_text == bytes and rec.data.bytes == #bytes,
+      assert(rec and event and rec.data.registered_text == bytes and rec.data.bytes == #bytes,
         "registration must persist exact bytes with its posted event")
       local post = home_posts(env, "Approve prepared text for")[1]
       assert(post and post.body:find(id .. "/" .. #bytes, 1, true)
@@ -6647,6 +6664,18 @@ local function test_approved_text_live_owner_reply_types_exact_bytes_once()
       room_events(env, { reaction("$duplicate-approve", OWNER, event, CHECK) })
       assert(#typed == 1 and thread_replies(env, event, "Already answered.") == 1,
         "one-shot request cannot type again")
+      local bare_approve_id = assert(remuda.butler.approve_text.request("butler", "bare korean approve", ASKER))
+      env.client:pump()
+      local bare_approve = env.relay:state().approvals[bare_approve_id]
+      room_events(env, { text_event("$bare-korean-approve", OWNER, "승인", bare_approve.event_id) })
+      assert(bare_approve.status == "applied" and #typed == 2,
+        "a bare 승인 reply to prepared text approves it")
+      local bare_deny_id = assert(remuda.butler.approve_text.request("butler", "bare korean deny", ASKER))
+      env.client:pump()
+      local bare_deny = env.relay:state().approvals[bare_deny_id]
+      room_events(env, { text_event("$bare-korean-deny", OWNER, "거부", bare_deny.event_id) })
+      assert(bare_deny.status == "denied" and #typed == 2,
+        "a bare 거부 reply to prepared text denies it")
       local reaction_id = assert(remuda.butler.approve_text.request("butler", "reaction bytes", ASKER))
       env.client:pump()
       local reaction_rec = env.relay:state().approvals[reaction_id]
@@ -6792,6 +6821,7 @@ for _, case in ipairs({
   { "test_owner_check_reaction_approves_and_joins_with_how_approved", test_owner_check_reaction_approves_and_joins_with_how_approved },
   { "test_owner_yes_reply_approves_and_bare_yes_does_not", test_owner_yes_reply_approves_and_bare_yes_does_not },
   { "test_legacy_reply_parser_preserves_exact_words_and_rich_fallback", test_legacy_reply_parser_preserves_exact_words_and_rich_fallback },
+  { "test_legacy_notice_and_emote_answers_stay_compatible", test_legacy_notice_and_emote_answers_stay_compatible },
   { "test_legacy_approval_reaction_works_in_messages_fallback", test_legacy_approval_reaction_works_in_messages_fallback },
   { "test_legacy_approval_survives_first_non_live_sync", test_legacy_approval_survives_first_non_live_sync },
   { "test_reaction_from_stranger_agent_or_other_room_is_ignored", test_reaction_from_stranger_agent_or_other_room_is_ignored },
