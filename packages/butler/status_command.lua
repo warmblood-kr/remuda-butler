@@ -68,9 +68,11 @@ function M.status_format(data)
   local rows = {}
   for index, session in ipairs(sessions) do rows[index] = session_line(type(session) == "table" and session or {}) end
   local text
+  local head = {}
+  for i, row in ipairs(rows) do head[i] = row end
   for shown = #rows, 0, -1 do
-    local head, count = {}, nil
-    for i = 1, shown do head[i] = rows[i] end
+    head[shown + 1] = nil
+    local count
     text, count = compose(head, #rows - shown, data.quota, now, #rows)
     if count <= MAX_LINES and #text <= MAX_BYTES then break end
   end
