@@ -5130,6 +5130,29 @@ rx_tests = {
   { "test_typed_line_target_routing", test_typed_line_target_routing },
   { "test_shell_line_uses_selected_kind_for_root", test_shell_line_uses_selected_kind_for_root },
   { "test_typed_line_refusals_are_rate_limited", test_typed_line_refusals_are_rate_limited },
+  { "test_typed_line_refusal_with_unusable_event_id_keeps_window_closed",
+  function()
+    with_typed_line_stubs(function()
+      local dir, config_path = fixture("typed_lines=true\nshell_lines=true\n")
+      local client = scripted_client()
+      local relay = relay_module.new({ config_path = config_path, matrix = client, deliver = function() return true end })
+      relay:start()
+      client:complete(1, { json = { next_batch = "s0" } })
+      local stale_time = (os.time() - 301) * 1000
+      local anonymous, usable = typed_line_event(nil, "!hello"), typed_line_event("$stale-usable", "!hello")
+      anonymous.origin_server_ts, usable.origin_server_ts = stale_time, stale_time
+      client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+        ["!room:example.org"] = { timeline = { events = { anonymous, usable } } },
+      } } } })
+      local sent = 0
+      for _, request in ipairs(client.requests) do
+        if tostring(request.path):find("/send/m.room.message/", 1, true) then sent = sent + 1 end
+      end
+      assert(sent == 1, "a refusal that cannot be sent must not open the 60-second window, sent " .. sent)
+      relay:stop()
+      cleanup_fixture(dir, config_path)
+    end)
+  end },
   { "test_status_commands_answer_without_typing_or_mail", function()
     with_typed_line_stubs(function(typed, keys)
       local old_bus = remuda._butler_bus

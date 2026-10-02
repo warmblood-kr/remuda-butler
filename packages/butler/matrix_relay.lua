@@ -1322,12 +1322,18 @@ function relay.new(options)
     }, function() end)
   end
 
-  local function send_threaded_notice(event, room_id, text, txn_prefix)
+  local function notice_thread_root(event)
     local thread_root = relation_fields(type(event.content) == "table" and event.content or {})
     thread_root = thread_root or event.event_id
     if type(thread_root) ~= "string" or thread_root == "" or type(event.event_id) ~= "string" or event.event_id == "" then
-      return false
+      return nil
     end
+    return thread_root
+  end
+
+  local function send_threaded_notice(event, room_id, text, txn_prefix)
+    local thread_root = notice_thread_root(event)
+    if not thread_root then return false end
     local body = encode({ msgtype = "m.notice", body = text,
       ["m.relates_to"] = { rel_type = "m.thread", event_id = thread_root,
         ["m.in_reply_to"] = { event_id = event.event_id } },
@@ -1341,6 +1347,7 @@ function relay.new(options)
   end
 
   local function send_typed_line_reply(event, room_id, text)
+    if not notice_thread_root(event) then return false end
     local now = os.time()
     if typed_line_refusal_at and now - typed_line_refusal_at < 60 then return false end
     typed_line_refusal_at = now
