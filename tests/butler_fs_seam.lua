@@ -123,5 +123,34 @@ local unc = { [ [[\\srv\share\proj]] ] = { [[\\?\UNC\srv\share\proj]] } }
 eq("windows: a verbatim UNC answer is inside a UNC working directory",
   download([[\\srv\share\proj\new.bin]], unc, {}, "windows", [[\\srv\share\proj]]), [[\\?\UNC\srv\share\proj\new.bin]])
 
+local private_warnings, private_traces, private_writes = {}, {}, {}
+remuda.fs = { write_atomic = function(path, text, options)
+  private_writes[#private_writes + 1] = { path, text, options }
+  return true
+end }
+remuda.log = function(level, message) private_warnings[#private_warnings + 1] = { level, message } end
+remuda._butler_session_trace = function(event) private_traces[#private_traces + 1] = event end
+dofile("packages/butler/private_write.lua").install()
+local private_result = remuda.fs.write_atomic("secret", "data", { private = true })
+remuda.fs.write_atomic("state", "data", { private = true })
+eq("private writes still return the core result", private_result, true)
+eq("private writes warn once", #private_warnings, 1)
+eq("private write warning names the uncertainty",
+  type(private_warnings[1]) == "table" and private_warnings[1][2]:find("does not report whether", 1, true) ~= nil, true)
+eq("private writes trace once", #private_traces, 1)
+eq("private mode reaches the core", private_writes[1][3].private, true)
+
+-- The first private write happens at load, before the session trace exists: the trace follows once it does.
+remuda._butler_private_write_state, remuda._butler_session_trace, _G._butler_session_trace = nil, nil, nil
+local late_traces = {}
+remuda.fs = { write_atomic = function() return true end }
+dofile("packages/butler/private_write.lua").install()
+remuda.fs.write_atomic("a", "x", { private = true })
+eq("nothing is traced while the session trace is missing", #late_traces, 0)
+remuda._butler_session_trace = function(event) late_traces[#late_traces + 1] = event end
+remuda.fs.write_atomic("b", "x", { private = true })
+remuda.fs.write_atomic("c", "x", { private = true })
+eq("the trace lands on the first private write after the session trace exists, once", #late_traces, 1)
+
 if #failed > 0 then error(#failed .. " of " .. count .. " cases failed:\n" .. table.concat(failed, "\n"), 0) end
 print(("butler_fs_seam ok: %d cases"):format(count))
