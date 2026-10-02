@@ -157,6 +157,10 @@ end
 -- true, backend | nil, reason ("no store", or core's not_found / unavailable: / denied:).
 function system.credential_put(name, secret) return credential_call("put", name, secret) end
 function system.credential_delete(name) return credential_call("delete", name) end
+-- Core's per-user directory for `kind`, "<base>/remuda" (remuda.storage.dir).
+-- Not written yet: answers nil, so the data home below is always the old one.
+function system.storage_dir(kind) return nil end
+function system.data_home(legacy_home, exists) return legacy_home end
 function system.run_in(directory, argv)
   if windows_selected then
     return nil, "Butler topic templates cannot run commands with this core on Windows.\n"

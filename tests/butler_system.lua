@@ -228,6 +228,75 @@ os.getenv = function(name)
       or name == "REMUDA_BUTLER_TOPICS" then return nil end
   return original_getenv(name)
 end
+-- #205: the data home follows core's remuda.storage.dir("data") where the core has it.
+;(function()
+  local function with_storage(answer)
+    remuda.storage = answer ~= nil and { dir = function(kind)
+      if type(answer) == "function" then return answer(kind) end
+      return answer
+    end } or nil
+  end
+  assert(type(system.storage_dir) == "function" and type(system.data_home) == "function",
+    "system must offer storage_dir and data_home")
+  local asked
+  with_storage(function(kind) asked = kind; return [[C:\Users\u\AppData\Local\remuda]] end)
+  assert(system.storage_dir("data") == [[C:\Users\u\AppData\Local\remuda]] and asked == "data",
+    "storage_dir should pass core's answer through: " .. tostring(system.storage_dir("data")))
+  for name, answer in pairs({ ["nil with a reason"] = function() return nil, "unavailable: no home" end,
+      ["a raise"] = function() error("boom") end, ["an empty string"] = "", ["a number"] = 7 }) do
+    with_storage(answer)
+    assert(system.storage_dir("data") == nil, "storage_dir should answer nil for " .. name)
+  end
+  remuda.storage = { lock = function() end }
+  assert(system.storage_dir("data") == nil, "a core without storage.dir has no answer")
+  remuda.storage = nil
+  assert(system.storage_dir("data") == nil, "a core without remuda.storage has no answer")
+
+  local function never() error("an old core must not look at the disk") end
+  assert(system.data_home("/home/u/.local/share", never) == "/home/u/.local/share",
+    "an old core keeps today's data home")
+  local nothing = function() return false end
+  with_storage("/home/u/.local/share/remuda")
+  assert(system.data_home("/home/u/.local/share", never) == "/home/u/.local/share",
+    "where both rules agree nothing is checked and nothing moves")
+  with_storage([[C:\Users\u\AppData\Local\remuda]])
+  assert(system.data_home(nil, nothing) == [[C:\Users\u\AppData\Local]],
+    "core's answer gives a data home where Butler had none: " .. tostring(system.data_home(nil, nothing)))
+  assert(system.data_home("C:/Users/u/.local/share", nothing) == [[C:\Users\u\AppData\Local]],
+    "core's answer wins over the old rule on a fresh install")
+  with_storage("/data/remuda/")
+  assert(system.data_home("/old", nothing) == "/data", "a trailing separator is accepted")
+  for _, odd in ipairs({ "/data/other", "remuda", "/remuda", "/data/remudax" }) do
+    with_storage(odd)
+    assert(system.data_home("/old", nothing) == "/old", "an answer that is not <base>/remuda is ignored: " .. odd)
+  end
+  -- An install made under the old rule keeps its data until someone moves it.
+  with_storage([[C:\Users\u\AppData\Local\remuda]])
+  local seen = {}
+  local function old_only(path) seen[#seen + 1] = path; return path == "C:/Users/u/.local/share/remuda/butler" end
+  local kept, note = system.data_home("C:/Users/u/.local/share", old_only)
+  assert(kept == "C:/Users/u/.local/share", "old data that exists is kept: " .. tostring(kept))
+  assert(type(note) == "string" and note:find("C:/Users/u/.local/share/remuda/butler", 1, true)
+    and note:find([[C:\Users\u\AppData\Local\remuda]], 1, true), "the note names both places: " .. tostring(note))
+  local moved, moved_note = system.data_home("C:/Users/u/.local/share", function() return true end)
+  assert(moved == [[C:\Users\u\AppData\Local]] and moved_note == nil, "when both exist, core's place is used and nothing is said")
+
+  -- paths.lua builds Butler's directories on that answer.
+  os.getenv = function(name)
+    if name == "HOME" or name == "USERPROFILE" or name == "XDG_CONFIG_HOME" or name == "XDG_DATA_HOME"
+        or name == "REMUDA_BUTLER_TOKEN" or name == "REMUDA_BUTLER_CONFIG"
+        or name == "REMUDA_BUTLER_TOPICS" or name == "REMUDA_BUTLER_PROJECT_HOME" then return nil end
+    return original_getenv(name)
+  end
+  remuda.butler = {}
+  dofile("packages/butler/paths.lua")
+  assert(remuda._butler_paths.data_home == [[C:\Users\u\AppData\Local]]
+    and remuda._butler_paths.butler_session_cwd == [[C:\Users\u\AppData\Local]] .. "/remuda/butler/sessions/butler"
+    and remuda._butler_paths.mail_root == [[C:\Users\u\AppData\Local]] .. "/remuda/butler/mail",
+    "Butler's directories should sit under core's data directory: " .. tostring(remuda._butler_paths.data_home))
+  remuda.storage = nil
+end)()
+
 remuda.butler = {}
 dofile("packages/butler/paths.lua")
 local paths = remuda._butler_paths
