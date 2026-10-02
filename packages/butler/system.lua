@@ -169,8 +169,7 @@ end
 local function path_exists(path)
   local fs = remuda.fs
   if type(fs) ~= "table" or type(fs.realpath) ~= "function" then return false end
-  local ok, real = pcall(fs.realpath, path)
-  return ok and real ~= nil
+  return fs.realpath(path) ~= nil
 end
 -- The directory that holds remuda/: core's where it has one, else `legacy_home`
 -- (Butler's own XDG/HOME rule). Data made under the old rule is kept until it is
@@ -180,9 +179,13 @@ function system.data_home(legacy_home, exists)
   local base = core and core:match("^(.+)[/\\]remuda[/\\]?$")
   if not base or base == legacy_home then return legacy_home end
   exists = exists or path_exists
-  if legacy_home and exists(legacy_home .. "/remuda/butler") and not exists(base .. "/remuda/butler") then
-    return legacy_home, "kept " .. legacy_home .. "/remuda/butler; core's data directory is " .. core
-  end
+  if not legacy_home then return base end
+  -- A check that raises must not stop Butler loading: the old home is used.
+  local ok, keep = pcall(function()
+    return exists(legacy_home .. "/remuda/butler") and not exists(base .. "/remuda/butler")
+  end)
+  if not ok then return legacy_home end
+  if keep then return legacy_home, "kept " .. legacy_home .. "/remuda/butler; core's data directory is " .. core end
   return base
 end
 function system.run_in(directory, argv)
