@@ -66,6 +66,19 @@ local function team_order()
   return order
 end
 
+-- A lead that exits hands its live members to its own leader (the root when
+-- that leader is gone too), so someone can still close them (#230).
+function remuda._butler_adopt_members(name, exited)
+  local heir = exited.parent and bus.agents[exited.parent] and exited.parent
+    or (bus.agents.butler and "butler") or nil
+  for alias, agent in pairs(bus.agents) do
+    if agent.parent == name then
+      agent.parent = heir
+      if heir then table.insert(bus.agents[heir].children, alias) end
+    end
+  end
+end
+
 function remuda._butler_sessions()
   -- main.lua reassigns its butler_attempts with this global; read it late.
   local butler_attempts = remuda._butler_attempts or {}
