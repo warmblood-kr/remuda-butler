@@ -315,7 +315,7 @@ local function approval_answer_fields(ev)
     local verdict
     if rel.key == "✅" or rel.key == "✅\239\184\143" then verdict = "approve"
     elseif rel.key == "❌" then verdict = "deny" end
-    return { rel.event_id }, verdict
+    return { rel.event_id }, verdict, nil, nil, "m.reaction"
   end
   if ev.type ~= "m.room.message" then return {}, nil end
   local thread_root, in_reply_to = relation_fields(content)
@@ -1574,6 +1574,8 @@ function relay.new(options)
                   if candidate and candidate.kind == "approve_text" then
                     if cfg.approve_text == true and msgtype == "m.text" then
                       approval_record, approval_verdict = candidate, text_verdict
+                    elseif cfg.approve_text == true and msgtype == "m.reaction" then
+                      approval_record, approval_verdict = candidate, verdict
                     end
                   elseif candidate and verdict then
                     approval_record, approval_verdict = candidate, verdict

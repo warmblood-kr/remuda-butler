@@ -6777,7 +6777,7 @@ local function test_approved_text_switch_off_keeps_reply_on_mail_path()
       room_events(env, { text_event("$switch-off-reply", OWNER, "yes " .. id, rec.event_id) })
       assert(#typed == 0 and rec.status == "open" and delivered_ids(env.delivered, "$switch-off-reply"),
         "with approve-text off, the reply stays ordinary mail and cannot deliver")
-    end)
+    end, "approve_text=true\n")
   end)
 end
 
