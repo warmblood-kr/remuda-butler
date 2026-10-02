@@ -454,6 +454,7 @@ remuda._butler_agent_support = {
 remuda.exec("butler/telemetry")
 remuda.exec("butler/agents/claudecode")
 remuda.exec("butler/agents/codex")
+remuda.exec("butler/agents/monocle")
 remuda.exec("butler/prompt")
 -- The launch chooser, member guidance and startup modals live in agents_launch.lua.
 local startup_action_safe

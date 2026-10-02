@@ -87,7 +87,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       local telemetry = telemetry_by_kind[candidate_kind]
         or setup_telemetry(candidate_kind, { name = name, model = model })
       telemetry_by_kind[candidate_kind] = telemetry
-      return { name = name, token = token, model = model,
+      return { name = name, token = token, model = model, cwd = choose_opts.cwd,
         settings_path = telemetry.settings_path, telemetry = telemetry,
         system_prompt = parent and team_member_prompt(parent) or nil }
     end,

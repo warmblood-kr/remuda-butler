@@ -15,6 +15,8 @@ local remuda = {
 _G.remuda = remuda
 
 dofile("packages/butler/agents/monocle.lua")
+dofile("packages/butler/agents/claudecode.lua")
+dofile("packages/butler/agents/codex.lua")
 
 local build = remuda._butler_agent_builders.monocle
 local expected = { "monocle", "agent", "--workdir", "/work", "--session", "m1", "--auto-approve" }
@@ -22,11 +24,24 @@ local function eq(name, got, want)
   assert(#got == #want, name .. " has " .. #got .. " args; expected " .. #want)
   for i = 1, #want do assert(got[i] == want[i], name .. " arg " .. i .. ": " .. tostring(got[i])) end
 end
-eq("default argv", build({ dir = "/work", name = "m1" }), expected)
+eq("argv with cwd", build({ cwd = "/work", name = "m1" }), expected)
 local modeled = { unpack(expected) }
 modeled[#modeled + 1] = "--model"
 modeled[#modeled + 1] = "gpt-5-mini"
-eq("model argv", build({ dir = "/work", name = "m1", model = "gpt-5-mini" }), modeled)
+eq("model argv", build({ cwd = "/work", name = "m1", model = "gpt-5-mini" }), modeled)
+eq("argv without cwd", build({ name = "m1" }), {
+  "monocle", "agent", "--session", "m1", "--auto-approve",
+})
+
+remuda._butler_agent_support.mcp_config_path = function() return "mcp.json" end
+remuda._butler_claude_autocompact_supported = false
+local claude_without_cwd = remuda._butler_agent_builders.claude({ name = "c", system_prompt = "p" })
+local claude_with_cwd = remuda._butler_agent_builders.claude({ name = "c", cwd = "/work", system_prompt = "p" })
+eq("Claude ignores cwd", claude_with_cwd, claude_without_cwd)
+local codex_spec = { telemetry = { status_path = "S" } }
+local codex_without_cwd = remuda._butler_agent_builders.codex(codex_spec)
+local codex_with_cwd = remuda._butler_agent_builders.codex({ telemetry = codex_spec.telemetry, cwd = "/work" })
+eq("Codex ignores cwd", codex_with_cwd, codex_without_cwd)
 
 local startup = remuda._butler_agent_startup.monocle
 local idle_screen = "banner\nanswer\n  \n❯ "
@@ -51,6 +66,12 @@ assert(by_id.claude.order == 10 and by_id.codex.order == 20 and by_id.monocle.or
   "Monocle should follow Claude and Codex in the built-in order")
 assert(by_id.monocle.executable == "monocle" and by_id.monocle.requires == "monocle",
   "Monocle registry row should resolve the monocle executable")
+assert(by_id.monocle.ready(remuda, idle_screen) and not by_id.monocle.ready(remuda, working_screen),
+  "Monocle registry ready callback should use its startup predicate")
+assert(by_id.monocle.working(remuda, working_screen) and not by_id.monocle.working(remuda, idle_screen),
+  "Monocle registry working callback should use its startup predicate")
+assert(by_id.monocle.login[1] == "monocle login" and by_id.monocle.dialogs == nil,
+  "Monocle registry should keep its login marker without dialog handling")
 
 local contributions = rows
 local capture = {}
@@ -68,14 +89,23 @@ remuda._butler_chooser_config = {
 }
 remuda._butler_prompt_delivery = {}
 remuda._butler_system = remuda._butler_chooser_config.system
-remuda._butler_contribute = function() end
+local fallback_rows = {}
+remuda._butler_contribute = function(point, id, entry)
+  if point == "butler.agent" then fallback_rows[id] = entry end
+end
 remuda.contribute = nil
 dofile("packages/butler/agents_launch.lua")
+assert(fallback_rows.monocle and fallback_rows.monocle.order == 30,
+  "legacy launch fallback should register Monocle after Claude and Codex")
+assert(fallback_rows.monocle.login[1] == "monocle login"
+  and fallback_rows.monocle.working(nil, working_screen),
+  "legacy Monocle registration should retain its login and working predicates")
 remuda.new = function(name, argv) capture.name, capture.argv = name or "monocle-test", argv; return capture.name end
 remuda.ls = function() return {} end
 remuda._butler_choose({ "monocle" }, {
   name = "monocle-test",
-  spec = function(kind) return { dir = "/work", name = "monocle-test", kind = kind } end,
+  cwd = "/work",
+  spec = function(kind) return { cwd = "/work", name = "monocle-test", kind = kind } end,
   env = function() return {} end,
   skip_probe = true,
 }, function(name, kind) capture.resolved_name, capture.resolved_kind = name, kind end)

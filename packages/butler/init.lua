@@ -150,6 +150,11 @@ return {
         working = function(_, screen) return screen:find("esc to interrupt", 1, true) ~= nil end,
         login = { "Please log in", "not logged in", "Authentication required", "Sign in to continue", "Not authenticated" },
         dialogs = function() return host._butler_agent_startup.codex.modals end },
+      { id = "monocle", order = 30, executable = "monocle", requires = "monocle",
+        argv = function(_, spec) return host._butler_agent_builders.monocle(spec) end,
+        ready = function(_, screen) return host._butler_agent_startup.monocle.ready(screen) end,
+        working = function(_, screen) return host._butler_agent_startup.monocle.working(screen) end,
+        login = { "monocle login" } },
     },
     ["butler.guidance"] = {
       { id = "header", order = 10,
@@ -276,7 +281,7 @@ the normal way for a member to communicate.
         run = function(_, args, caller) return host._butler_command_run("shell-lines", args, caller) end },
       { id = "agents", order = 15, verb = "agents", usage = "  remuda butler agents [--all]",
         run = function(_, args, caller) return host._butler_command_run("agents", args, caller) end },
-      { id = "launch", order = 20, verb = "launch", usage = "  remuda butler launch <claude|codex> [name] [--model M]",
+      { id = "launch", order = 20, verb = "launch", usage = "  remuda butler launch <claude|codex|monocle> [name] [--model M]",
         run = function(_, args, caller) return host._butler_command_run("launch", args, caller) end },
       { id = "topic", order = 30, verb = "topic", usage = "  remuda butler topic new <name> [--template T] [--agent A] [--model M]\n"
           .. "  remuda butler topic delegate <name> [--agent A] [--leader L] [--model M] <task...>",

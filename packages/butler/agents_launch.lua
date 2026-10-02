@@ -15,17 +15,18 @@ local PROMPT_DELIVERY = assert(remuda._butler_prompt_delivery)
 local BUILTIN_AGENT_BUILDERS = {}
 for kind, builder in pairs(AGENT_BUILDERS) do BUILTIN_AGENT_BUILDERS[kind] = builder end
 if not remuda.contribute then
-  for order, kind in ipairs({ "claude", "codex" }) do
+  for order, kind in ipairs({ "claude", "codex", "monocle" }) do
     local kind_id = kind
     local startup = remuda._butler_agent_startup[kind_id] or {}
     remuda._butler_contribute("butler.agent", kind_id, {
       order = order * 10, executable = kind_id,
       argv = function(_, spec) return AGENT_BUILDERS[kind_id](spec) end,
       ready = startup.ready and function(_, screen) return startup.ready(screen) end or nil,
-      working = function(_, screen) return screen:find("esc to interrupt", 1, true) ~= nil end,
-      login = kind_id == "claude"
+      working = startup.working and function(_, screen) return startup.working(screen) end
+        or function(_, screen) return screen:find("esc to interrupt", 1, true) ~= nil end,
+      login = startup.login or (kind_id == "claude"
         and { "Please log in", "not logged in", "Authentication required", "Invalid API key", "Please run /login", "Select login method" }
-        or { "Please log in", "not logged in", "Authentication required", "Sign in to continue", "Not authenticated" },
+        or { "Please log in", "not logged in", "Authentication required", "Sign in to continue", "Not authenticated" }),
       dialogs = startup.modals,
     })
   end
@@ -334,7 +335,7 @@ local function configured_agent_order()
   end)
   local order = {}
   for _, row in ipairs(rows) do order[#order + 1] = row.id end
-  if #order == 0 then return { "claude", "codex" } end
+  if #order == 0 then return { "claude", "codex", "monocle" } end
   return order
 end
 remuda._butler_configured_agent_order = configured_agent_order
