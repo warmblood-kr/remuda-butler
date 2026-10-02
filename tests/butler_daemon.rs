@@ -11096,3 +11096,74 @@ fn schedule_store_saves_and_loads_through_the_real_encoder_in_a_fresh_mail_root(
         "add=true save=true loaded=true remove=true save_empty=true loaded_empty=true"
     );
 }
+
+#[test]
+fn butler_schedule_load_drops_hostile_stored_values_in_real_lua() {
+    let dir = scratch_dir("schedule-hostile");
+    let _daemon = Daemon::spawn(&dir);
+    let root = dir.join("hostile/butler/mail");
+    std::fs::create_dir_all(&root).expect("create mail root");
+    let entry = |name: &str, fired: &str| {
+        format!(
+            r#"{{"name":"{name}","spec":"7 * * * *","target":"butler","text":"hi","created_by":"operator","created_at":"x","last_fired":{fired},"enabled":true}}"#
+        )
+    };
+    let entries = [
+        entry("good", "29000000"),
+        entry("huge", "1e300"),
+        entry("negative", "-1"),
+        entry("fractional", "1.5"),
+        entry("bad\\u001b[31m\\nname", "0"),
+    ];
+    std::fs::write(
+        root.join("schedules.json"),
+        format!(r#"{{"version":1,"schedules":[{}]}}"#, entries.join(",")),
+    )
+    .expect("write schedules.json");
+    std::fs::write(
+        root.join("version.json"),
+        r#"{"version":"\u001b[31m\nx","schedules":[]}"#,
+    )
+    .expect("write version.json");
+    let lua = r#"
+        remuda.butler = remuda.butler or {}
+        remuda.exec('butler/schedule')
+        remuda.exec('butler/schedule_cli')
+        local s, cli = remuda.butler.schedule, remuda.butler.schedule_cli
+        local root = ROOT
+        local function ctl(text) return text:find('[\0-\31]') ~= nil end
+        local traces, clean = {}, true
+        local function trace(event, detail)
+          traces[#traces + 1] = event .. ' ' .. detail
+          if ctl(event) or ctl(detail) then clean = false end
+        end
+        local out = {}
+        local list, problem = s.load(root .. '/schedules.json', trace)
+        out[#out + 1] = 'kept=' .. #list .. ':' .. tostring(list[1] and list[1].name)
+        out[#out + 1] = 'problem=' .. tostring(problem)
+        out[#out + 1] = 'dropped=' .. #traces
+        local none, why = s.load(root .. '/version.json', trace)
+        out[#out + 1] = 'version=' .. #none .. ':' .. tostring(why and why:find('unknown version', 1, true) ~= nil)
+        out[#out + 1] = 'clean=' .. tostring(clean and not ctl(why))
+        remuda._butler_schedule_env = { path = root .. '/schedules.json', trace = trace }
+        local listing = cli.cli({ 'schedule', 'list' })
+        out[#out + 1] = 'listing=' .. tostring(type(listing) == 'string' and not ctl(listing:gsub('\n', '')) and listing:find('good', 1, true) ~= nil and listing:find('last %d%d%d%d%-%d%d%-%d%d') ~= nil)
+        local huge = { name = 'h', spec = '7 * * * *', target = 'butler', text = 'x', enabled = true, last_fired = 1e300 }
+        local described, line = pcall(cli.describe, huge)
+        out[#out + 1] = 'huge=' .. tostring(described and type(line) == 'string')
+        local edge = { name = 'e', spec = '7 * * * *', target = 'butler', text = 'x', created_by = 'o', enabled = true }
+        edge.last_fired = 4223371679
+        local accepts = s.check(edge)
+        edge.last_fired = 4223371680
+        local rejects = not s.check(edge)
+        out[#out + 1] = 'bound=' .. tostring(accepts and rejects)
+        return table.concat(out, ' ')
+    "#
+    .replace("ROOT", &format!("{:?}", root));
+    let out = remuda_timed(&dir, &["-s", "s", "-e", &lua]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "kept=1:good problem=nil dropped=4 version=0:true clean=true listing=true huge=true bound=true"
+    );
+}
