@@ -113,7 +113,8 @@ local UNKNOWN = ": cannot identify the calling session's working directory"
 -- Windows opens a device for these base names in any directory, with or
 -- without an extension: what /dev is on a posix system.
 local function windows_device(name)
-  local stem = name:lower():match("^[^%.]*"):gsub(" +$", "")
+  -- COM and LPT are reserved with a superscript 1, 2 or 3 too (UTF-8 here).
+  local stem = name:lower():match("^[^%.]*"):gsub(" +$", ""):gsub("\194[\185\178\179]$", "1")
   return stem == "con" or stem == "prn" or stem == "aux" or stem == "nul" or stem == "conin$" or stem == "conout$"
     or stem:match("^com%d$") ~= nil or stem:match("^lpt%d$") ~= nil
 end
