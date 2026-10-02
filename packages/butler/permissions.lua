@@ -131,22 +131,25 @@ local function windows_key(path)
   local head, rest = text:match("^(%a:)\\(.*)$")
   if not head then
     local server, share, tail = text:match("^\\\\([^\\]+)\\([^\\]+)(.*)$")
-    if not server then return nil end
-    head, rest = "//" .. server .. "/" .. share, tail
+    if server then head, rest = "//" .. server .. "/" .. share, tail
+    -- Not absolute (C:name, sub\name, name): no key, but its names are still checked.
+    else rest = text:gsub("^%a:", "") end
   end
-  local parts, why = { head:lower() }, nil
+  local parts, why = { head and head:lower() }, nil
   for part in rest:gmatch("[^\\]+") do
     if part:find(":", 1, true) or windows_device(part) then return nil, "device" end
     if part == "." or part == ".." then why = "unresolved" end
     parts[#parts + 1] = part:lower()
   end
+  if not head then return nil end
   if why then return nil, why end
   return table.concat(parts, "/")
 end
 -- The form two paths are compared in, or nil when `path` is not an absolute
 -- file path on `platform` ("windows"; anything else is posix). Windows: a
 -- drive root or UNC with either slash, compared without regard to case. The
--- second value says why not: "device" (a device name or an alternate stream),
+-- second value says why not: "device" (a device name or an alternate stream,
+-- named for a path that is not absolute too),
 -- "unresolved" (a `.` or `..` left in place).
 -- ponytail: lower() folds ASCII only, so a non-ASCII case difference is
 -- refused; upgrade to a core case-folding word if that is ever met.
