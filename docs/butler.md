@@ -90,6 +90,51 @@ is left out. One report is collected at a time, and a finished report is
 reused for 60 seconds (its header then says `as of`), so repeated calls do not
 type into a Codex pane again.
 
+## Schedules
+
+A schedule sends a fixed text to a session at wall-clock times and survives
+restarts. It is stored in `schedules.json` beside the mail store and delivered
+as ordinary Butler mail.
+
+```
+remuda butler schedule list
+remuda butler schedule add NAME "M H * * *" TEXT [--to SESSION]
+remuda butler schedule rm NAME
+```
+
+`NAME` is 1-32 characters of `a-z`, `0-9` and `-`, unique among at most 16
+schedules. `SESSION` is a live session alias and defaults to `butler`. `TEXT`
+is at most 2048 bytes and holds no control characters except newlines; `-`
+reads it from stdin. The schedule has five fields in the machine's local time:
+the minute is `N` or `*/N` (N from 5 to 59), the hour is `N` or `*`, and day,
+month and weekday are `*`. `7 * * * *` is minute 7 of every hour,
+`0 9 * * *` is 09:00 daily, `*/30 * * * *` is every half hour.
+
+`list` is open to every session and prints each schedule's name, spec, target,
+state, last firing and the first 80 bytes of its text. `add` and `rm` are for a
+person at the terminal; a Butler agent is refused, because a schedule keeps
+injecting its text after the agent has forgotten it. `add` asks for `yes` at
+the terminal, as turning typed lines on does; `rm` does not ask.
+
+A timer checks every 30 seconds. Each due schedule is delivered as mail from
+the reserved sender `schedule`, with the subject `[schedule NAME]` and a first
+line saying it is a timed message and not a human instruction. It is never
+typed into a session or run as a shell command. The slot is recorded before the
+mail is sent, so a failed send or a restart in the same minute never repeats
+it, and a failed send is not retried. After downtime a schedule fires once, for
+its latest missed slot. A slot is skipped, with a line in the trace log, when
+the target session is not live (`schedule_target_absent`) or when the previous
+mail of the same schedule is still unread (`schedule_unread_skip`), so a
+schedule leaves at most one unread mail. When a clock change skips a scheduled
+time, the schedule fires once at the first minute after the gap; a time that a
+clock change repeats can fire twice. The session name `schedule` is reserved
+and cannot be launched.
+
+`add`, `rm`, firings and skips are written to the trace log
+(`compaction-trace.log` under the Remuda config directory). A `schedules.json`
+that is corrupt, oversized or of an unknown version is treated as empty and
+traced; `add` and `rm` leave it untouched until it is fixed or removed.
+
 ## Matrix commands and configuration
 
 Use `remuda butler matrix` for Matrix reads and writes. Options come before

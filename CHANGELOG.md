@@ -7,6 +7,7 @@ release tags yet; entries come from merged pull requests.
 ## Unreleased
 
 ### Added
+- `remuda butler schedule list|add|rm` keeps fixed texts that arrive as Butler mail from the reserved sender `schedule` at set times (`M H * * *`), across restarts; `add` and `rm` are for a person at the terminal.
 - Matrix `?status` and `?help` answer from code without an LLM, so the fleet stays visible when a model is out of quota; `remuda butler status-commands on|off` switches them (on by default).
 - `remuda butler matrix setup --password-cmd PROG [ARG...]` reads the bot password from a program such as a password manager (`op read ...`, `security find-generic-password ...`, `powershell -NoProfile -Command ...`). It must be the last option, and setup saves no copy of that password.
 - Butler resolves installed agent CLIs on Windows, uses `USERPROFILE` when `HOME` is missing, and gives a clear next step when launch fails.
