@@ -82,26 +82,29 @@ assert_equal((function() local n=0 for _ in pairs(seen) do n=n+1 end return n en
 -- The pane's detail line: current context usage only, in K.
 fixture({{"root", "claude"}})
 local real_telemetry = remuda._butler_telemetry_for
+local real_capture = remuda.capture
+remuda.capture = function() error("no pane") end -- no screen: status is "other"
 remuda._butler_telemetry_for = function()
   return { model = "opus", context_used = "123456", context_window = "1000000", context_percent = "12" }
 end
-assert_equal(remuda.session_detail({ name = "root" }), "claude · opus · 123K", "detail shows usage in K")
+assert_equal(remuda.session_detail({ name = "root" }), "other · claude · opus · 123K", "detail shows usage in K")
 remuda._butler_telemetry_for = function()
   return { model = "opus", context_used = "?", context_window = "?", context_percent = "?" }
 end
-assert_equal(remuda.session_detail({ name = "root" }), "claude · opus", "unknown usage is left out")
+assert_equal(remuda.session_detail({ name = "root" }), "other · claude · opus", "unknown usage is left out")
 
 -- Unread mail: the recipient's unread count, and nothing once it is read.
 local root_id = "01TESTUNREADC0UNT000000000"
 remuda._butler_bus.agents.root.id = root_id
 local to_root = { host = "local", id = root_id, alias = "root", session = "root" }
-assert_equal(remuda.session_detail({ name = "root" }), "claude · opus", "no mail, no count")
+assert_equal(remuda.session_detail({ name = "root" }), "other · claude · opus", "no mail, no count")
 remuda._butler_mail.queue("operator", to_root, "one")
 remuda._butler_mail.queue("operator", to_root, "two")
-assert_equal(remuda.session_detail({ name = "root" }), "claude · opus · ✉2", "unread count")
+assert_equal(remuda.session_detail({ name = "root" }), "other · claude · opus · ✉2", "unread count")
 remuda._butler_mail.inbox(root_id)
-assert_equal(remuda.session_detail({ name = "root" }), "claude · opus", "read mail is not counted")
+assert_equal(remuda.session_detail({ name = "root" }), "other · claude · opus", "read mail is not counted")
 remuda._butler_telemetry_for = real_telemetry
+remuda.capture = real_capture
 
 local deep = {{"depth-0", "claude"}}
 for depth = 1, 26 do deep[#deep + 1] = {"depth-" .. depth, "codex", "depth-" .. (depth - 1)} end

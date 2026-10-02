@@ -7,6 +7,7 @@ release tags yet; entries come from merged pull requests.
 ## Unreleased
 
 ### Added
+- The client session list leads each Butler session line with `working`, `idle`, `needs you` or `other`, read from the agent's screen probes.
 - `remuda butler matrix send` and `reply` accept `-` and `--file PATH` like the mail verbs, a text starting with an unknown `--option` is refused instead of posted (use `--` for literal text), and the output names the room posted to (#251).
 - A mail whose first line is `HANDOFF` is the handoff letter: the root Butler reads it first after a relaunch.
 - `remuda butler schedule list|add|rm` keeps fixed texts that arrive as Butler mail from the reserved sender `schedule` at set times (`M H * * *`), across restarts; `add` and `rm` are for a person at the terminal.

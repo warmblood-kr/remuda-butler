@@ -584,7 +584,8 @@ end
 local butler_attempts = remuda._butler_attempts or {}
 remuda._butler_attempts = butler_attempts
 -- The household walk, roster and session hooks live in sessions.lua.
-remuda._butler_sessions_config = { bus = bus, mail = mail, identity_path = identity_path, json_field = json_field }
+remuda._butler_sessions_config = { bus = bus, mail = mail, identity_path = identity_path, json_field = json_field,
+  registered_agent_kind = registered_agent_kind, call_callback = call_callback }
 remuda.exec("butler/sessions")
 local registry_list = remuda._butler_sessions_impl.registry_list
 remuda.exec("butler/doctor")

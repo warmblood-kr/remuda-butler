@@ -173,11 +173,46 @@ function remuda.session_order()
   return order
 end
 
+-- Per-session status from the agent's own screen probes: "needs you" (a
+-- startup/trust/update dialog), "working", "idle" or "other". Only kinds whose
+-- ready/working probes are meaningful are probed (monocle's "working" means
+-- "not ready"). Any failure is "other"; the screen itself is never shown.
+local STATUS_KINDS = { claude = true, codex = true }
+local STATUS_TTL_SECONDS = 2
+local status_cache = {}
+local function probe_status(name, agent)
+  if not STATUS_KINDS[agent.kind] then return "other" end
+  local entry = config.registered_agent_kind(agent.kind)
+  if not (entry and type(entry.ready) == "function" and type(entry.working) == "function") then return "other" end
+  local captured, screen = pcall(remuda.capture, name)
+  if not captured or type(screen) ~= "string" then return "other" end
+  local startup = remuda._butler_agent_startup[agent.kind] or {}
+  local modal_ok, modal = pcall(remuda._butler_chooser.known_startup_modal, startup, screen)
+  if modal_ok and modal then return "needs you" end
+  local working_ok, working = config.call_callback(entry.working, screen)
+  if not working_ok then return "other" end
+  if working then return "working" end
+  local ready_ok, ready = config.call_callback(entry.ready, screen)
+  return ready_ok and ready and "idle" or "other"
+end
+local function session_status(name, agent)
+  local now = (remuda._butler_status_now or os.time)()
+  local cached = status_cache[name]
+  if cached and now - cached.at < STATUS_TTL_SECONDS then return cached.status end
+  local ok, status = pcall(probe_status, name, agent)
+  if not ok then status = "other" end
+  for key, value in pairs(status_cache) do -- entries of closed sessions expire with the window
+    if key ~= name and now - value.at >= STATUS_TTL_SECONDS then status_cache[key] = nil end
+  end
+  status_cache[name] = { at = now, status = status }
+  return status
+end
+
 function remuda.session_detail(session)
   local agent = bus.agents[session.name]
   if not agent then return nil end
   local telemetry = remuda._butler_telemetry_for(agent)
-  local detail = (agent.kind or "agent") .. " · " .. telemetry.model
+  local detail = session_status(session.name, agent) .. " · " .. (agent.kind or "agent") .. " · " .. telemetry.model
   -- Current usage only: the window and percent cost width and rarely change.
   local used = tonumber(telemetry.context_used)
   if used then detail = detail .. " · " .. string.format("%.0fK", used / 1000) end
