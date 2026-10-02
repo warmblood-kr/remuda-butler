@@ -240,6 +240,34 @@ poll.run()
 assert(input_calls == 1 and #done == 1 and done[1][1] == true,
   "observed paste placeholder followed by blank composer confirms one delivery")
 
+-- A successful but unverified write may be absent from the first blank
+-- capture, then appear in transcript output. That later blank prompt confirms
+-- the write without requiring the task to remain in the composer.
+now, alive, screen, input_calls, done = 8575, true, "Ask Codex\n❯ ", 0, {}
+remuda.type_text = function(_, text)
+  input_calls = input_calls + 1
+  assert(text == "transcript task")
+  screen = "Ask Codex\n❯ "
+  return "unverified"
+end
+prompt.schedule(remuda, "codex", "member", "member", "lead", "transcript task", {
+  ready = function(value) return value:find("Ask Codex", 1, true) ~= nil end,
+  allowed = function() return true end,
+  empty = function() return "EMPTY", "" end,
+  recipient_alive = function() return alive end,
+  now = function() return now end,
+  submit_timeout = 10,
+  on_done = function(ok, reason) done[#done + 1] = { ok, reason } end,
+})
+poll.run()
+poll.run()
+assert(input_calls == 1 and #done == 0,
+  "a blank capture without transcript evidence does not verify an unverified write")
+screen = "Ask Codex\ntranscript: transcript task\n❯ "
+poll.run()
+assert(input_calls == 1 and #done == 1 and done[1][1] == true,
+  "task start visible in transcript followed by a blank composer confirms delivery")
+
 -- The core's submitted status is sufficient confirmation of an empty prompt.
 now, alive, screen, input_calls, done = 8600, true, "ready", 0, {}
 remuda.type_text = function() input_calls = input_calls + 1; return "submitted" end
