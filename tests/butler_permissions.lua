@@ -679,6 +679,27 @@ real["/w/x/../m1"] = "/real/w/m1"
 weq("posix, a working directory recorded with '..' is still a known place",
   permissions.file_for_caller("/w/m1/in.txt", { kind = "session", session = "dotted" },
     function() return "/w/x/../m1" end, realpath, "--file ", true), "/real/w/m1/in.txt")
+-- A terminal caller is not confined, but a relative -o would be written into the
+-- daemon's directory, not the caller's: it is refused, as --file and upload already are.
+for _, case in ipairs({ { "out.bin", "posix" }, { "sub/out.bin", "posix" }, { "./out.bin", "posix" },
+    { "out.bin", "windows" }, { [[sub\out.bin]], "windows" }, { "C:out.bin", "windows" }, { [[\out.bin]], "windows" } }) do
+  local path, platform = case[1], case[2]
+  local asked = 0
+  local out, why = permissions.output_for_caller(path, "matrix-MEDIA", { kind = "outside" }, cwd_of,
+    function() asked = asked + 1 end, function() asked = asked + 1 end, platform)
+  local label = platform .. ", terminal caller, relative -o " .. path
+  weq(label .. ": nothing to write", out, nil)
+  weq(label .. ": refusal", why, "refused: -o " .. path .. " is not an absolute path\nNext: pass -o with the full path")
+  weq(label .. ": nothing is resolved or checked", asked, 0)
+end
+weq("posix, terminal caller: an absolute -o with '..' is still given back",
+  output_for("/tmp/a/../out.bin", { kind = "outside" }), "/tmp/a/../out.bin")
+weq("windows, terminal caller: an absolute -o with '..' is still given back",
+  permissions.output_for_caller([[D:\a\..\out.bin]], "matrix-MEDIA", { kind = "outside" }, wcwd_of, wrealpath, wis_symlink,
+    "windows"), [[D:\a\..\out.bin]])
+weq("terminal caller: no -o is still no -o",
+  select("#", output_for(nil, { kind = "outside" })) <= 2 and output_for(nil, { kind = "outside" }) == nil
+    and select(2, output_for(nil, { kind = "outside" })) == nil, true)
 if #wfailed > 0 then error(#wfailed .. " path cases failed:\n" .. table.concat(wfailed, "\n"), 0) end
 
 print(("butler_permissions ok: %d cases"):format(count))
