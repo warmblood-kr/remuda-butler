@@ -18,18 +18,7 @@ local function fail(message)
   return nil, message
 end
 
-local function terminal_safe(value)
-  return (tostring(value or ""):gsub("%c", " "):gsub("\194[\128-\159]", " "))
-end
-
--- shortened(text, limit): at most `limit` bytes, cut on a character boundary,
--- ending in "..." when it is not complete.
-local function shortened(text, limit)
-  if #text <= limit then return text end
-  local cut = limit - 3
-  while cut > 0 and text:byte(cut + 1) >= 128 and text:byte(cut + 1) < 192 do cut = cut - 1 end
-  return text:sub(1, cut) .. "..."
-end
+local terminal_safe, shortened = schedule.safe, schedule.shortened
 
 -- describe(entry) -> one list line.
 function M.describe(entry)
@@ -143,7 +132,7 @@ local function remove(args, env)
   if not schedule.remove(list, args[3]) then return fail("no schedule named " .. terminal_safe(args[3])) end
   local saved, save_error = schedule.save(env.path, list)
   if not saved then return fail("could not save the schedules: " .. tostring(save_error)) end
-  env.trace("schedule_removed", args[3])
+  env.trace("schedule_removed", terminal_safe(args[3]))
   return "removed schedule " .. args[3]
 end
 

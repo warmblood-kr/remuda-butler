@@ -210,4 +210,26 @@ matrix.prompt_preface_supported = function() return false end
 ok("no preface support, no add", cli.cli(words("add", "n1", "7 * * * *", "t")).error:find("terminal prompts"))
 eq("still nothing stored", file_text(), nil)
 
+-- Planted file contents reach neither the terminal nor the trace unescaped.
+do
+  local function clean(text)
+    return not text:find("%c") and not text:find("\194[\128-\159]") and not text:find("\226\128[\139-\143\168-\174]")
+      and not text:find("\226\129[\160-\164\166-\169]") and not text:find("\243\160[\128-\129]")
+  end
+  local nasty = "\27[31mRED\27]0;pwn\7\n\226\128\174\194\133z\226\128\139\243\160\128\129"
+  local function message(reply) return type(reply) == "table" and reply.error or reply end
+  traces = {}
+  local f = assert(io.open(path, "wb"))
+  f:write(remuda.json.encode({ version = nasty, schedules = remuda.json.array({}) }))
+  f:close()
+  ok("list shows a planted version clean", clean(message(cli.cli(words("list")))))
+  ok("add shows it clean", clean(message(add(words("add", "n1", "7 * * * *", "t"), "yes"))))
+  ok("rm shows it clean", clean(message(cli.cli(words("rm", "n1")))))
+  ok("the trace holds it clean", #traces == 3 and clean(table.concat(traces, "")))
+  local hostile_entry = { name = "ok-name", spec = "7 * * * *", target = "butler", text = nasty, created_by = nasty,
+    created_at = nasty, last_fired = 0, enabled = true }
+  eq("describe shows every field clean", clean(cli.describe(hostile_entry)), true)
+  os.remove(path)
+end
+
 print(("butler_schedule_cli: %d cases passed"):format(count))

@@ -192,6 +192,38 @@ loaded = schedule.load(path, trace)
 eq("only the good unique record loads", #loaded, 1)
 eq("it is the first of the duplicates", loaded[1].name, "keep")
 eq("each dropped record is traced", #traces, 4)
+
+-- File-derived text never reaches a problem, a trace or a listing unescaped.
+do
+  local nasty = { "\27[31mRED", "\27]0;pwn\7", "a\nb", "\226\128\174evil", "\194\133c1", "z\226\128\139w",
+    "\243\160\128\129tag", "\r\n2026 schedule_added forged", ("x"):rep(5000) }
+  local function clean(text)
+    return not text:find("%c") and not text:find("\194[\128-\159]") and not text:find("\226\128[\139-\143\168-\174]")
+      and not text:find("\226\129[\160-\164\166-\169]") and not text:find("\239\187\191")
+      and not text:find("\243\160[\128-\129]")
+  end
+  for _, bad in ipairs(nasty) do
+    put(remuda.json.encode({ version = bad, schedules = remuda.json.array({}) }))
+    traces = {}
+    local _, why = schedule.load(path, trace)
+    ok("a planted version is clean in the problem", clean(why) and #why < 300)
+    ok("and in the trace", clean(traces[1]:gsub("^schedule_file_unusable ", "")) and #traces[1] < 300)
+    local named = entry(bad)
+    put(remuda.json.encode({ version = 1, schedules = { named } }))
+    traces = {}
+    schedule.load(path, trace)
+    ok("a rejected name is clean in the trace", #traces == 1 and clean(traces[1]) and #traces[1] < 300)
+    local fires = {}
+    schedule.tick({ path = path, trace = function(e, d) fires[#fires + 1] = e .. d end }, 1e9)
+    local shared = { path = path, trace = function() end }
+    schedule.tick(shared, 1e9)
+    for key in pairs(shared.seen) do ok("and in the once cache", #key < 300) end
+    ok("and in a tick", #fires == 1 and clean(fires[1]))
+  end
+  eq("safe keeps plain text", schedule.safe("north-star 7 * * * *"), "north-star 7 * * * *")
+  eq("safe cuts long text", #schedule.safe(("é"):rep(500), 100) <= 100, true)
+  put(remuda.json.encode({ version = 1, schedules = remuda.json.array({}) }))
+end
 os.remove(path)
 
 -- Limits.

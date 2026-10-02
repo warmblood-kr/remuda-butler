@@ -89,6 +89,23 @@ M.MAX_SCHEDULES = 16
 M.MAX_TEXT_BYTES = 2048
 local MAX_FILE_BYTES = 256 * 1024
 
+-- Text taken from a file or a caller is shown and traced only through safe:
+-- control, C1, bidi, zero-width and tag characters become spaces and the
+-- result is cut to `limit` bytes (default 200) on a character boundary.
+local INVISIBLE = { "%c", "\194[\128-\159]", "\226\128[\139-\143\168-\174]", "\226\129[\160-\164\166-\169]",
+  "\239\187\191", "\243\160[\128-\191][\128-\191]" }
+function M.shortened(text, limit)
+  if #text <= limit then return text end
+  local cut = limit - 3
+  while cut > 0 and text:byte(cut + 1) >= 128 and text:byte(cut + 1) < 192 do cut = cut - 1 end
+  return text:sub(1, cut) .. "..."
+end
+function M.safe(value, limit)
+  local text = tostring(value == nil and "" or value)
+  for _, pattern in ipairs(INVISIBLE) do text = text:gsub(pattern, " ") end
+  return M.shortened(text, limit or 200)
+end
+
 function M.valid_name(name)
   if type(name) == "string" and name:match("^[a-z0-9-]+$") and #name <= 32 then return true end
   return nil, "name must be 1-32 characters of a-z, 0-9 and -"
@@ -159,7 +176,8 @@ end
 -- `problem` naming why and a trace line; a bad record inside a good file is
 -- dropped with a trace line.
 function M.load(path, trace)
-  trace = trace or function() end
+  local raw = trace or function() end
+  local function trace(event, detail) raw(event, M.safe(detail)) end
   local file = path and io.open(path, "rb")
   if not file then return {} end
   local bytes = file:read(MAX_FILE_BYTES + 1)
@@ -171,7 +189,7 @@ function M.load(path, trace)
     local decoded, value = pcall(remuda.json.decode, bytes)
     doc = decoded and value
     if type(doc) ~= "table" or type(doc.schedules) ~= "table" then problem = "file is not a schedule record"
-    elseif doc.version ~= M.VERSION then problem = "unknown version " .. tostring(doc.version) end
+    elseif doc.version ~= M.VERSION then problem = "unknown version " .. M.safe(doc.version, 40) end
   end
   if problem then
     trace("schedule_file_unusable", problem)
@@ -222,31 +240,32 @@ end
 -- fire(env, list, entry, slot) -> message id | nil. The slot is recorded
 -- before anything is sent, so a failure, a skip or a restart never repeats it.
 function M.fire(env, list, entry, slot)
+  local function trace(event, detail) env.trace(event, M.safe(detail)) end
   entry.last_fired = slot
   local saved, err = M.save(env.path, list)
   if not saved then
-    env.trace("schedule_save_failed", entry.name .. ": " .. tostring(err))
+    trace("schedule_save_failed", entry.name .. ": " .. tostring(err))
     return nil
   end
   local resolved, alias = pcall(env.resolve, entry.target)
   if not resolved then
-    env.trace("schedule_target_absent", entry.name .. " -> " .. entry.target)
+    trace("schedule_target_absent", entry.name .. " -> " .. entry.target)
     return nil
   end
   if entry.last_message and env.unread(alias, entry.last_message) then
-    env.trace("schedule_unread_skip", entry.name .. " slot=" .. slot)
+    trace("schedule_unread_skip", entry.name .. " slot=" .. slot)
     return nil
   end
   local subject, text = M.compose(entry)
   local sent, summary, id = pcall(env.send, alias, text, subject)
   if not sent then
-    env.trace("schedule_send_failed", entry.name .. ": " .. tostring(summary))
+    trace("schedule_send_failed", entry.name .. ": " .. tostring(summary))
     return nil
   end
-  env.trace("schedule_fired", entry.name .. " slot=" .. slot .. " message=" .. tostring(id))
+  trace("schedule_fired", entry.name .. " slot=" .. slot .. " message=" .. tostring(id))
   entry.last_message = id
   saved, err = M.save(env.path, list)
-  if not saved then env.trace("schedule_save_failed", entry.name .. ": " .. tostring(err)) end
+  if not saved then trace("schedule_save_failed", entry.name .. ": " .. tostring(err)) end
   return id
 end
 
@@ -255,7 +274,8 @@ end
 function M.tick(env, now)
   env.seen = env.seen or {}
   local function once(event, detail)
-    local key = event .. " " .. tostring(detail)
+    detail = M.safe(detail)
+    local key = event .. " " .. detail
     if env.seen[key] then return end
     env.seen[key] = true
     env.trace(event, detail)
