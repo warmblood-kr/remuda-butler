@@ -1,6 +1,6 @@
 -- Persistent schedules: fixed texts that arrive as ordinary mail at wall-clock
--- times. This file holds the pure rule grammar (parse, last_due); it does no
--- I/O and reads the clock only through the `fields` function it is given.
+-- times. parse and last_due are pure and read the clock only through the
+-- `fields` function they are given; load and save keep <mail_root>/schedules.json.
 local M = {}
 local floor = math.floor
 
@@ -78,6 +78,113 @@ function M.last_due(rule, now, fields)
     end
     current = before
   end
+end
+
+M.VERSION = 1
+M.MAX_SCHEDULES = 16
+M.MAX_TEXT_BYTES = 2048
+local MAX_FILE_BYTES = 256 * 1024
+
+function M.valid_name(name)
+  if type(name) == "string" and name:match("^[a-z0-9-]+$") and #name <= 32 then return true end
+  return nil, "name must be 1-32 characters of a-z, 0-9 and -"
+end
+
+-- Newlines are the only control characters a text may carry.
+function M.valid_text(text)
+  if type(text) ~= "string" or text == "" then return nil, "text must not be empty" end
+  if #text > M.MAX_TEXT_BYTES then return nil, "text exceeds " .. M.MAX_TEXT_BYTES .. " bytes" end
+  if text:gsub("\n", ""):find("%c") or text:find("\194[\128-\159]") then
+    return nil, "text must not contain control characters"
+  end
+  return true
+end
+
+function M.valid_target(target)
+  if type(target) == "string" and #target <= 64 and target:match("^[%w._-]+$") then return true end
+  return nil, "target must be a session alias"
+end
+
+-- check(entry) -> true | nil, reason. The fields a stored schedule must carry.
+function M.check(entry)
+  if type(entry) ~= "table" then return nil, "not a record" end
+  local ok, err = M.valid_name(entry.name)
+  if not ok then return nil, err end
+  ok, err = M.parse(entry.spec)
+  if not ok then return nil, err end
+  ok, err = M.valid_target(entry.target)
+  if not ok then return nil, err end
+  ok, err = M.valid_text(entry.text)
+  if not ok then return nil, err end
+  if type(entry.enabled) ~= "boolean" or type(entry.last_fired) ~= "number" then
+    return nil, "enabled and last_fired are required"
+  end
+  return true
+end
+
+-- find(list, name) -> index, entry
+function M.find(list, name)
+  for index, entry in ipairs(list) do
+    if entry.name == name then return index, entry end
+  end
+end
+
+-- add(list, entry) -> true | nil, reason: appends a checked, unique entry.
+function M.add(list, entry)
+  local ok, err = M.check(entry)
+  if not ok then return nil, err end
+  if M.find(list, entry.name) then return nil, "a schedule named " .. entry.name .. " exists" end
+  if #list >= M.MAX_SCHEDULES then return nil, "at most " .. M.MAX_SCHEDULES .. " schedules" end
+  list[#list + 1] = entry
+  return true
+end
+
+-- remove(list, name) -> true | nil
+function M.remove(list, name)
+  local index = M.find(list, name)
+  if index then table.remove(list, index) return true end
+end
+
+-- load(path, trace) -> list, problem. An absent file is an empty list. A file
+-- that is oversized, corrupt or of another version is also an empty list, with
+-- `problem` naming why and a trace line; a bad record inside a good file is
+-- dropped with a trace line.
+function M.load(path, trace)
+  trace = trace or function() end
+  local file = path and io.open(path, "rb")
+  if not file then return {} end
+  local bytes = file:read(MAX_FILE_BYTES + 1)
+  file:close()
+  local problem, doc
+  if not bytes or #bytes > MAX_FILE_BYTES then
+    problem = "file is empty or larger than " .. MAX_FILE_BYTES .. " bytes"
+  else
+    local decoded, value = pcall(remuda.json.decode, bytes)
+    doc = decoded and value
+    if type(doc) ~= "table" or type(doc.schedules) ~= "table" then problem = "file is not a schedule record"
+    elseif doc.version ~= M.VERSION then problem = "unknown version " .. tostring(doc.version) end
+  end
+  if problem then
+    trace("schedule_file_unusable", problem)
+    return {}, problem
+  end
+  local list = {}
+  for _, entry in ipairs(doc.schedules) do
+    local valid, err = M.check(entry)
+    if valid and M.find(list, entry.name) then valid, err = nil, "duplicate name" end
+    if valid and #list >= M.MAX_SCHEDULES then valid, err = nil, "over the schedule limit" end
+    if valid then list[#list + 1] = entry
+    else trace("schedule_entry_dropped", tostring(type(entry) == "table" and entry.name) .. ": " .. err) end
+  end
+  return list
+end
+
+-- save(path, list) -> true | nil, err
+function M.save(path, list)
+  if not path then return nil, "no mail root" end
+  local encoded, text = pcall(remuda.json.encode, { version = M.VERSION, schedules = list })
+  if not encoded then return nil, text end
+  return remuda.fs.write_atomic(path, text, { private = true })
 end
 
 if remuda and remuda.butler then remuda.butler.schedule = M end
