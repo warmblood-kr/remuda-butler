@@ -52,6 +52,33 @@ function M.display(text)
   return table.concat(lines, "\n") .. note, escaped
 end
 
+function M.reply_verdict(body)
+  if type(body) ~= "string" then return nil end
+  body = body:match("^%s*(.-)%s*$") or ""
+  local word, id = body:match("^(%S+)%s+(%w%w%w%w)$")
+  if word then body = word end
+  body = body:lower()
+  local verdict = (body == "yes" or body == "승인") and "approve"
+    or (body == "no" or body == "거부") and "deny" or nil
+  return verdict, id and id:upper() or nil
+end
+
+function M.owner_event_allowed(event, record, cfg, live_sync, room_id)
+  cfg = type(cfg) == "table" and cfg or {}
+  if live_sync ~= true or type(event) ~= "table" or type(record) ~= "table"
+      or (event.type ~= "m.room.message" and event.type ~= "m.reaction")
+      or type(event.event_id) ~= "string" or event.event_id == ""
+      or type(event.sender) ~= "string" or (cfg.allowed_senders or {})[event.sender] ~= true
+      or room_id ~= cfg.home_room then return false end
+  if event.sender == cfg.self_mxid or (cfg.butler_senders or {})[event.sender] == true then return false end
+  local localpart = event.sender:match("^@([^:]+):.+$")
+  if not localpart then return false end
+  local normalized = localpart:lower()
+  if normalized:sub(1, 6) == "agent-" or normalized:sub(1, 7) == "butler-" then return false end
+  local event_ms, created_ms = tonumber(event.origin_server_ts), tonumber(record.created_ms)
+  return event_ms ~= nil and created_ms ~= nil and event_ms >= created_ms - 30000
+end
+
 local function provenance_text(provenance)
   provenance = type(provenance) == "table" and provenance or {}
   local function field(value)
@@ -88,18 +115,25 @@ end
 
 local function request(session, text, asker, ttl_s, done)
   done = type(done) == "function" and done or function() end
-  if type(asker) ~= "string" or asker == "" then return done(nil, "invalid_asker") end
+  if type(asker) ~= "string" or asker == "" then
+    done(nil, "invalid_asker")
+    return nil, "invalid_asker"
+  end
   local prepared, why = M.prepare(session, text)
-  if not prepared then return done(nil, why) end
+  if not prepared then
+    done(nil, why)
+    return nil, why
+  end
   request_counter = request_counter + 1
   local key = tostring(os.time()) .. ":" .. tostring(request_counter)
-  local requested_id
-  local request_data = { text = prepared.registered_text, registered_text = prepared.registered_text, posted_text = prepared.posted_text,
-    session = session, bytes = prepared.bytes, owner = nil }
+  local requested_id, failure
+  local request_data = { registered_text = prepared.registered_text,
+    posted_text = prepared.posted_text, session = session, bytes = prepared.bytes }
   local bounded_ttl = math.max(1, math.min(MAX_TTL, tonumber(ttl_s) or DEFAULT_TTL))
   local result = approval.request({ kind = "approve_text", key = key,
     asker = asker, summary = "type " .. tostring(prepared.bytes) .. " prepared bytes in " .. session,
     ttl_s = bounded_ttl, data = request_data, rate_limit_per_window = 10,
+    max_open_for_asker = 5,
     rate_window_s = 600,
     on_id = function(id) requested_id = id end,
     render = function(rec)
@@ -108,18 +142,68 @@ local function request(session, text, asker, ttl_s, done)
       data.request_id = id
       data.display_fingerprint = id .. "/" .. tostring(data.bytes)
       local shown = M.display(data.posted_text)
+      local expires = tonumber(rec.expires_at) or (os.time() * 1000)
       return table.concat({ "Approve prepared text for " .. session,
         "Request " .. id .. " · " .. tostring(data.bytes) .. " bytes",
         "Fingerprint " .. data.display_fingerprint,
-        "Asked by " .. tostring(asker), "Reply yes " .. id .. " to approve, or no " .. id .. " to deny.",
+        "Expires " .. os.date("!%Y-%m-%dT%H:%M:%SZ", math.floor(expires / 1000)),
+        "Asked by " .. tostring(asker),
+        "React ✅ or reply yes " .. id .. " to approve; ❌ or no " .. id .. " to deny.",
         shown }, "\n")
     end,
-  }, done)
-  return requested_id or result
+  }, function(id, why)
+    if not id then failure = why end
+    done(id, why)
+  end)
+  if failure then return nil, failure end
+  return requested_id or result, nil
 end
 
 function M.request(session, text, asker, done)
   return request(session, text, asker, nil, done)
+end
+
+local function fail(message)
+  if type(remuda.fail) == "function" then return remuda.fail(message, 1) end
+  return nil, message
+end
+
+function M.target_session_allowed(session)
+  if session == "butler" then return true end
+  local bus = remuda._butler_bus or {}
+  local agents = bus.agents or {}
+  local root = agents.butler or {}
+  local root_id = type(root) == "table" and root.id or "butler"
+  local function in_tree(id)
+    local current, visited = id, {}
+    while type(current) == "string" and current ~= "" and not visited[current] do
+      if current == root_id or current == "butler" then return true end
+      visited[current] = true
+      local agent = agents[current]
+      current = type(agent) == "table" and agent.parent or nil
+    end
+    return false
+  end
+  for id, agent in pairs(agents) do
+    if type(agent) == "table" and agent.session_name == session and in_tree(id) then return true end
+  end
+  return false
+end
+
+function M.cli(args, agent, stdin)
+  if type(args) ~= "table" or type(args[1]) ~= "string" then return fail("Usage: remuda butler approve-text request SESSION - | on|off") end
+  if args[1] == "on" or args[1] == "off" then
+    local cli = butler.typed_lines_cli
+    if not cli then return fail("Approve text switch is unavailable") end
+    return cli.cli({ "approve-text", args[1] }, agent)
+  end
+  if args[1] ~= "request" or #args ~= 3 or args[3] ~= "-" then
+    return fail("Usage: remuda butler approve-text request SESSION - | on|off")
+  end
+  if not M.target_session_allowed(args[2]) then return fail("Unknown Butler session: " .. tostring(args[2])) end
+  local id, why = M.request(args[2], stdin, agent or "operator")
+  if not id then return fail(tostring(why or "Could not register prepared text")) end
+  return "Registered prepared text request " .. tostring(id)
 end
 
 function M.configure()
@@ -134,15 +218,15 @@ function M.configure()
         owner = rec.answered_by, event_id = rec.answer_event_id, request_id = rec.id,
       })
       if ok then
-        approval.reply(rec, "typed")
+        pcall(approval.reply, rec, "typed")
         complete(true)
       else
-        approval.reply(rec, "refused: " .. tostring(why))
+        pcall(approval.reply, rec, "refused: " .. tostring(why))
         complete("retry", why)
       end
     end,
-    deny = function(rec) approval.reply(rec, "denied") end,
-    expire = function(rec) approval.reply(rec, "expired") end,
+    deny = function(rec) pcall(approval.reply, rec, "denied") end,
+    expire = function(rec) pcall(approval.reply, rec, "expired") end,
   })
 end
 

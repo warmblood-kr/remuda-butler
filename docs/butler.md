@@ -219,6 +219,27 @@ no more than five minutes old, contain one line of at most 2000 bytes, and fit
 the limit of 10 lines per 10 minutes. the switch verbs are for a person at the
 machine; an agent is refused.
 
+### Prepared text approvals
+
+An agent can register exact text with `remuda butler approve-text request
+SESSION -` and stdin, or the `butler_approve_text` MCP tool. Text can contain
+multiple lines and is limited to 8 KiB. Butler posts a quoted, escaped display
+to HOME with a four-character request id, target session, byte count and
+`ID/bytes` fingerprint. The current core has no SHA-256 word, so delivery
+checks the stored byte count and an unchanged copy of the posted text.
+
+An allowlisted owner can approve with ✅ or a `yes`/`승인` reply, optionally
+including the id. A ❌ or `no`/`거부` denies it. Replies must arrive in live
+Matrix sync; messages from agents and the terminal approve/deny verbs cannot
+deliver prepared text. Butler types only the stored bytes when the target
+composer is free and no dialog or human is attached. A refusal leaves the
+approved request available for another owner reply until expiry. Successful
+delivery is one-shot. Requests expire after 60 minutes; no more than five may
+be open at once, and an agent may register at most ten in ten minutes.
+`remuda butler approve-text on|off` is a terminal-only switch that asks for
+`yes` before enabling. It is off by default; with it off, replies stay on the
+ordinary mail path. Doctor reports `Approve text: on|off`.
+
 ### Status commands
 
 An allowlisted owner can send `?status` or `?help` as a whole line in the HOME

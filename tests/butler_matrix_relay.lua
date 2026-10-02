@@ -28,6 +28,7 @@ local setup_tests = dofile("tests/butler_matrix_setup.lua")
 local approval_file = io.open("packages/butler/approval.lua", "r")
 if approval_file then approval_file:close(); dofile("packages/butler/approval.lua") end
 dofile("packages/butler/typed_lines.lua")
+dofile("packages/butler/approve_text.lua")
 dofile("packages/butler/status_command.lua")
 local relay_module = dofile("packages/butler/matrix_relay.lua")
 
@@ -6071,8 +6072,8 @@ local function approval()
   return assert(remuda.butler.approval, "packages/butler/approval.lua must publish remuda.butler.approval")
 end
 
-local function approval_env(senders, run)
-  local dir, path = invite_fixture(senders)
+local function approval_env(senders, run, extra)
+  local dir, path = invite_fixture(senders, extra)
   local mails, saved_send = {}, remuda._butler_send
   remuda._butler_send = function(from, to, text)
     mails[#mails + 1] = { from = from, to = to, text = text }
@@ -6107,6 +6108,7 @@ end
 local function restart_relay(env)
   env.relay:stop()
   dofile("packages/butler/approval.lua")
+  dofile("packages/butler/approve_text.lua")
   dofile("packages/butler/matrix_write.lua")
   env.relay = relay_module.new({ config_path = env.path, matrix = env.client,
     deliver = function(event) env.delivered[#env.delivered + 1] = event return true end })
@@ -6519,6 +6521,120 @@ local function test_restart_does_not_reanswer_answered_request()
   end)
 end
 
+local function with_approved_text_stubs(run)
+  local old_type, old_key, old_policy, old_trace = remuda.type_text, remuda.key,
+    remuda._butler_notify_policy, remuda._butler_session_trace
+  local typed, keys, traces = {}, {}, {}
+  local safe = true
+  remuda.type_text = function(session, bytes)
+    typed[#typed + 1] = { session = session, bytes = bytes }
+    return true
+  end
+  remuda.key = function(session, key)
+    keys[#keys + 1] = { session = session, key = key }
+    return true
+  end
+  remuda._butler_notify_policy = function() return safe end
+  remuda._butler_session_trace = function(kind, detail) traces[#traces + 1] = { kind, detail } end
+  local ok, err = pcall(run, typed, keys, traces, function(value) safe = value end)
+  remuda.type_text, remuda.key = old_type, old_key
+  remuda._butler_notify_policy, remuda._butler_session_trace = old_policy, old_trace
+  if not ok then error(err, 0) end
+end
+
+local function test_approved_text_live_owner_reply_types_exact_bytes_once()
+  with_approved_text_stubs(function(typed, keys, traces)
+    approval_env(nil, function(env)
+      local bytes = "line one\nline two\n"
+      local id = assert(remuda.butler.approve_text.request("butler", bytes, ASKER))
+      env.client:pump()
+      local rec = env.relay:state().approvals[id]
+      local event = rec and rec.event_id
+      assert(rec and event and rec.data.registered_text == bytes
+        and rec.data.posted_text == bytes and rec.data.bytes == #bytes,
+        "registration must persist exact bytes with its posted event")
+      local post = home_posts(env, "Approve prepared text for")[1]
+      assert(post and post.body:find(id .. "/" .. #bytes, 1, true)
+        and post.body:find("> line one\n> line two\n> ", 1, true),
+        "the HOME post shows the request fingerprint and quoted multiline text")
+      room_events(env, { text_event("$owner-approve", OWNER, "승인 " .. id, event) })
+      assert(#typed == 1 and typed[1].session == "butler" and typed[1].bytes == bytes,
+        "an owner live reply types the stored bytes exactly")
+      assert(#keys == 1 and keys[1].key == "RET" and rec.status == "applied",
+        "successful delivery is submitted once and marked spent")
+      assert(traces[1][2]:find(OWNER, 1, true) and traces[1][2]:find("$owner-approve", 1, true)
+        and traces[1][2]:find(id, 1, true), "trace records owner, source event, and request id")
+      room_events(env, { reaction("$duplicate-approve", OWNER, event, CHECK) })
+      assert(#typed == 1 and thread_replies(env, event, "Already answered.") == 1,
+        "one-shot request cannot type again")
+      local reaction_id = assert(remuda.butler.approve_text.request("butler", "reaction bytes", ASKER))
+      env.client:pump()
+      local reaction_rec = env.relay:state().approvals[reaction_id]
+      room_events(env, { reaction("$owner-reaction", OWNER, reaction_rec.event_id, CHECK) })
+      assert(#typed == 2 and typed[2].bytes == "reaction bytes" and reaction_rec.status == "applied",
+        "an owner reaction on the request also approves prepared text")
+    end, "approve_text=true\n")
+  end)
+end
+
+local function test_approved_text_refusal_stays_approved_for_owner_retry()
+  with_approved_text_stubs(function(typed, keys, traces, set_safe)
+    approval_env(nil, function(env)
+      local bytes = "prepared\ntext"
+      local id = assert(remuda.butler.approve_text.request("butler", bytes, ASKER))
+      env.client:pump()
+      local rec = env.relay:state().approvals[id]
+      set_safe(false)
+      room_events(env, { text_event("$busy-answer", OWNER, "yes " .. id, rec.event_id) })
+      assert(rec.status == "approved" and #typed == 0 and #keys == 0,
+        "busy target remains approved but undelivered")
+      assert(thread_replies(env, rec.event_id, "refused: pane_busy") == 1,
+        "owner gets the refusal reason")
+      set_safe(true)
+      room_events(env, { text_event("$retry-answer", OWNER, "yes", rec.event_id) })
+      assert(rec.status == "applied" and #typed == 1 and typed[1].bytes == bytes,
+        "a new live owner reply retries delivery from stored bytes")
+    end, "approve_text=true\n")
+  end)
+end
+
+local function test_approved_text_switch_off_keeps_reply_on_mail_path()
+  with_approved_text_stubs(function(typed)
+    approval_env(nil, function(env)
+      local id = assert(remuda.butler.approve_text.request("butler", "prepared", ASKER))
+      env.client:pump()
+      local rec = env.relay:state().approvals[id]
+      room_events(env, { text_event("$switch-off-reply", OWNER, "yes " .. id, rec.event_id) })
+      assert(#typed == 0 and rec.status == "open" and delivered_ids(env.delivered, "$switch-off-reply"),
+        "with approve-text off, the reply stays ordinary mail and cannot deliver")
+    end)
+  end)
+end
+
+local function test_approved_text_denial_and_expiry_type_nothing()
+  with_approved_text_stubs(function(typed, keys)
+    approval_env(nil, function(env)
+      local denied_id = assert(remuda.butler.approve_text.request("butler", "never type", ASKER))
+      env.client:pump()
+      local denied = env.relay:state().approvals[denied_id]
+      room_events(env, { text_event("$owner-deny", OWNER, "거부 " .. denied_id, denied.event_id) })
+      assert(denied.status == "denied" and #typed == 0 and #keys == 0,
+        "owner denial never types prepared text")
+
+      local expired_id = assert(remuda.butler.approve_text.request("butler", "also never type", ASKER))
+      env.client:pump()
+      local expired = env.relay:state().approvals[expired_id]
+      expired.expires_at = 0
+      tick_timers(1)
+      env.client:pump()
+      assert(expired.status == "expired" and #typed == 0 and #keys == 0,
+        "an unanswered request expires without typing")
+      assert(thread_replies(env, expired.event_id, "expired") == 1,
+        "the owner gets one expiry notice in the request thread")
+    end, "approve_text=true\n")
+  end)
+end
+
 local approval_failures = {}
 for _, case in ipairs({
   { "test_agent_join_files_request_and_does_not_join", test_agent_join_files_request_and_does_not_join },
@@ -6534,6 +6650,10 @@ for _, case in ipairs({
   { "test_cleared_identity_is_not_refused", test_cleared_identity_is_not_refused },
   { "test_hostile_room_name_sanitised_in_home_post", test_hostile_room_name_sanitised_in_home_post },
   { "test_restart_does_not_reanswer_answered_request", test_restart_does_not_reanswer_answered_request },
+  { "test_approved_text_live_owner_reply_types_exact_bytes_once", test_approved_text_live_owner_reply_types_exact_bytes_once },
+  { "test_approved_text_refusal_stays_approved_for_owner_retry", test_approved_text_refusal_stays_approved_for_owner_retry },
+  { "test_approved_text_switch_off_keeps_reply_on_mail_path", test_approved_text_switch_off_keeps_reply_on_mail_path },
+  { "test_approved_text_denial_and_expiry_type_nothing", test_approved_text_denial_and_expiry_type_nothing },
 }) do
   local ok, err = pcall(case[2])
   if not ok then approval_failures[#approval_failures + 1] = case[1] .. ": " .. tostring(err) end

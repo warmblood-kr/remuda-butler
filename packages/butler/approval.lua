@@ -69,7 +69,8 @@ end
 local function open_records(state)
   local rows = {}
   for _, record in pairs(state and state.approvals or {}) do
-    if type(record) == "table" and record.status == "open" then rows[#rows + 1] = record end
+    if type(record) == "table" and (record.status == "open"
+      or (record.kind == "approve_text" and record.status == "approved")) then rows[#rows + 1] = record end
   end
   table.sort(rows, function(a, b)
     if tonumber(a.created_ms) and tonumber(b.created_ms) then return a.created_ms < b.created_ms end
@@ -117,6 +118,14 @@ function approval.for_event(event_id)
   end
 end
 
+function approval.for_id(id)
+  if not attached or type(id) ~= "string" then return nil end
+  for key, rec in pairs(attached.state.approvals or {}) do
+    if type(rec) == "table" and (tostring(key):upper() == id:upper()
+      or (type(rec.id) == "string" and rec.id:upper() == id:upper())) then return rec end
+  end
+end
+
 function approval.reply(rec, text)
   if not attached or type(attached.post) ~= "function" then
     return nil, "Matrix relay is not running. Next: remuda butler matrix status"
@@ -142,7 +151,8 @@ local function apply_approved(rec)
     completed = true
     applying[rec.id] = nil
     rec.status = ok == "retry" and "approved" or ok and "applied" or "failed"
-    if err then rec.error = tostring(err) end
+    if err then rec.error = tostring(err)
+    elseif ok then rec.error = nil end
     persist()
   end
   local ok, err = pcall(callback, rec, done)
@@ -205,7 +215,8 @@ function approval.request(request, done)
   local rate_limit = tonumber(request.rate_limit_per_window)
   local rate_window_ms = math.max(1, tonumber(request.rate_window_s) or 600) * 1000
   for _, rec in pairs(attached.state.approvals or {}) do
-    if type(rec) == "table" and rec.status == "open" then
+    if type(rec) == "table" and (rec.status == "open"
+      or (rec.kind == "approve_text" and rec.status == "approved")) then
       open_total = open_total + 1
       if rec.asker == asker then open_for_asker = open_for_asker + 1 end
     end

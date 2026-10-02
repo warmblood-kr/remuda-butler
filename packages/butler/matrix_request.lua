@@ -255,14 +255,15 @@ local function read_config(path)
         else
           warn_invalid_config_line(path, i, key, value)
         end
-      elseif key == "typed_lines" or key == "shell_lines" or key == "status_commands" then
+      elseif key == "typed_lines" or key == "shell_lines" or key == "status_commands"
+          or key == "approve_text" then
         if value == "true" then
           opts[key] = true
         elseif value == "false" then
           opts[key] = false
         else
           -- An unreadable status switch turns the commands off, never on.
-          if key == "status_commands" then opts[key] = false end
+          if key == "status_commands" or key == "approve_text" then opts[key] = false end
           warn_invalid_config_line(path, i, key, value)
         end
       else
@@ -349,6 +350,7 @@ local function read_config(path)
     typed_lines = opts.typed_lines == true,
     shell_lines = opts.shell_lines == true,
     status_commands = opts.status_commands == nil or opts.status_commands == true,
+    approve_text = opts.approve_text == true,
     untrusted_per_room_hour = untrusted_per_room_hour,
     posts_per_hour = posts_per_hour,
     b2b_max_turns = b2b_max_turns,
