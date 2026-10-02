@@ -700,6 +700,10 @@ weq("windows, terminal caller: an absolute -o with '..' is still given back",
 weq("terminal caller: no -o is still no -o",
   select("#", output_for(nil, { kind = "outside" })) <= 2 and output_for(nil, { kind = "outside" }) == nil
     and select(2, output_for(nil, { kind = "outside" })) == nil, true)
+wreal[ [[C:\x\..\proj]] ] = [[\\?\C:\proj]]
+weq("windows, a working directory recorded with '..' is a known place: the root is the resolver's answer",
+  permissions.file_for_caller([[C:\proj\in.txt]], { kind = "session", session = "dotted" },
+    function() return [[C:\x\..\proj]] end, wrealpath, "--file ", true, "windows"), [[C:\proj\in.txt]])
 if #wfailed > 0 then error(#wfailed .. " path cases failed:\n" .. table.concat(wfailed, "\n"), 0) end
 
 print(("butler_permissions ok: %d cases"):format(count))

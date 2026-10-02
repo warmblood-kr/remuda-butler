@@ -152,13 +152,16 @@ end
 -- drive root or UNC with either slash, compared without regard to case. The
 -- second value says why not: "device" (a device name or an alternate stream,
 -- named for a path that is not absolute too),
--- "unresolved" (a `.` or `..` left in place).
+-- "unresolved" (a `.` or `..` left in place, on posix too: the prefix test
+-- would lie about such a path).
 -- ponytail: lower() folds ASCII only, so a non-ASCII case difference is
 -- refused; upgrade to a core case-folding word if that is ever met.
 function permissions.path_key(path, platform)
   if type(path) ~= "string" then return nil end
   if platform == "windows" then return windows_key(path) end
-  return path:sub(1, 1) == "/" and path or nil
+  if path:sub(1, 1) ~= "/" then return nil end
+  if ("/" .. path .. "/"):find("/%.%.?/") then return nil, "unresolved" end
+  return path
 end
 local path_key = permissions.path_key
 
@@ -166,7 +169,9 @@ local path_key = permissions.path_key
 local function session_cwd(caller, cwd_of, realpath, platform)
   local cwd = type(caller) == "table" and caller.kind == "session" and type(caller.session) == "string"
     and cwd_of(caller.session)
-  if not path_key(cwd, platform) then return nil end
+  -- A recorded `..` is the resolver's to settle: the root is its answer.
+  local key, why = path_key(cwd, platform)
+  if not key and why ~= "unresolved" then return nil end
   local ok, root = pcall(realpath, cwd)
   return cwd, ok and root or nil
 end
