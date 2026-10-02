@@ -2,6 +2,7 @@ local builders = assert(remuda._butler_agent_builders)
 local startup = assert(remuda._butler_agent_startup)
 
 builders.monocle = function(spec)
+  assert(type(spec.name) == "string", "Monocle agent spec requires a string name")
   local argv = { "monocle", "agent" }
   if type(spec.cwd) == "string" and spec.cwd ~= "" then
     argv[#argv + 1] = "--workdir"

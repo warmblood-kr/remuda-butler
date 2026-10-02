@@ -32,6 +32,9 @@ eq("model argv", build({ cwd = "/work", name = "m1", model = "gpt-5-mini" }), mo
 eq("argv without cwd", build({ name = "m1" }), {
   "monocle", "agent", "--session", "m1", "--auto-approve",
 })
+local valid_spec, invalid_spec_error = pcall(build, { cwd = "/work" })
+assert(not valid_spec and tostring(invalid_spec_error):find("string name", 1, true),
+  "Monocle builder must reject a non-spec table without a session name")
 
 remuda._butler_agent_support.mcp_config_path = function() return "mcp.json" end
 remuda._butler_agent_support.status_settings = function(path) return path .. ".settings" end
