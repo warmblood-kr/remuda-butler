@@ -121,6 +121,26 @@ eq("an absent file is an empty list", #schedule.load(os.tmpname() .. ".none", tr
 eq("an absent file is no problem", select(2, schedule.load(os.tmpname() .. ".none", trace)), nil)
 eq("a missing mail root is an empty list", #schedule.load(nil, trace), 0)
 
+-- A file that exists but cannot be opened is a problem, not an absent file.
+do
+  local real_open = io.open
+  local function stub(err, code) io.open = function() return nil, err, code end end
+  stub(path .. ": Permission denied", 13)
+  traces = {}
+  local got, why = schedule.load(path, trace)
+  io.open = real_open
+  ok("an unreadable file is an empty list", #got == 0)
+  ok("with a problem naming the reason", type(why) == "string" and why:find("Permission denied", 1, true))
+  ok("and a trace", traces[1] and traces[1]:find("^schedule_file_unusable"))
+  stub(path .. ": No such file or directory", nil)
+  eq("ENOENT by text is absent", select(2, schedule.load(path, trace)), nil)
+  stub("gone", 2)
+  eq("ENOENT by code is absent", select(2, schedule.load(path, trace)), nil)
+  io.open = real_open
+  traces = {}
+  io.open = real_open
+end
+
 local list = {}
 ok("add stores a checked entry", schedule.add(list, entry()))
 ok("save writes", schedule.save(path, list))

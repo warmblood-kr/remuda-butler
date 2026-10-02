@@ -178,14 +178,19 @@ function M.remove(list, name)
 end
 
 -- load(path, trace) -> list, problem. An absent file is an empty list. A file
--- that is oversized, corrupt or of another version is also an empty list, with
+-- that cannot be opened, is oversized, corrupt or of another version is also an empty list, with
 -- `problem` naming why and a trace line; a bad record inside a good file is
 -- dropped with a trace line.
-function M.load(path, trace)
-  local raw = trace or function() end
-  local function trace(event, detail) raw(event, M.safe(detail)) end
-  local file = path and io.open(path, "rb")
-  if not file then return {} end
+function M.load(path, raw)
+  local function trace(event, detail) (raw or function() end)(event, M.safe(detail)) end
+  if not path then return {} end
+  local file, open_error, code = io.open(path, "rb")
+  if not file then
+    if code == 2 or tostring(open_error):find("No such file", 1, true) then return {} end
+    local problem = "cannot be opened: " .. M.safe(open_error, 100)
+    trace("schedule_file_unusable", problem)
+    return {}, problem
+  end
   local bytes = file:read(MAX_FILE_BYTES + 1)
   file:close()
   local problem, doc

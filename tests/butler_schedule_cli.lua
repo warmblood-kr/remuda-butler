@@ -246,4 +246,20 @@ do
   eq("a never-fired entry still says never", cli.describe(entries[2]):find("last never", 1, true) ~= nil, true)
 end
 
+-- A file that cannot be opened is refused like a corrupt one, never replaced.
+do
+  local real_open = io.open
+  io.open = function(target, mode)
+    if target == path then return nil, path .. ": Permission denied", 13 end
+    return real_open(target, mode)
+  end
+  local before = writes
+  local added = add(words("add", "n1", "7 * * * *", "t"), "yes")
+  local removed = cli.cli(words("rm", "n1"))
+  io.open = real_open
+  ok("add refuses an unreadable file", added.error:find("unusable") and added.error:find("Delete the file", 1, true))
+  ok("rm refuses an unreadable file", removed.error:find("unusable"))
+  eq("nothing was written", writes, before)
+end
+
 print(("butler_schedule_cli: %d cases passed"):format(count))
