@@ -730,7 +730,11 @@ return function(matrix, pinned_hostname)
     and #requests == 0 and not resolved,
     "confirming the summary should enter the existing hidden registration-token flow")
   local wizard_bot = assert(line_specs[3].label:match("Bot: (@%S+)"), "wizard summary should name the bot")
-  local wizard_relay, wizard_config, wizard_status = matrix.relay, remuda._butler_matrix_config, matrix.status
+  -- This case is about the files a wizard writes: it runs with no OS secure store.
+  -- wizard_saved holds matrix.status and remuda.system: this function is at Lua's limit of 200 locals.
+  local wizard_relay, wizard_config, wizard_saved = matrix.relay, remuda._butler_matrix_config,
+    { status = matrix.status, system = remuda.system }
+  remuda.system = nil
   matrix.relay = { stop = function() end, start = function() return true end }
   matrix.status = function(_, callback) callback({}) end
   prompt_specs[1].callback("wizard-registration-token", nil)
@@ -740,7 +744,7 @@ return function(matrix, pinned_hostname)
     body = '{"access_token":"wizard-access-token","user_id":"' .. wizard_bot .. '"}' })
   requests[3].callback({ status = 200, body = '{"user_id":"' .. wizard_bot .. '"}' })
   requests[4].callback({ status = 200, body = '{"room_id":"!wizard-home:example.org"}' })
-  matrix.relay, matrix.status = wizard_relay, wizard_status
+  matrix.relay, matrix.status, remuda.system = wizard_relay, wizard_saved.status, wizard_saved.system
   assert(resolved and resolved.status == 0 and read(default_paths.config_path):find("\nrooms=open\n", 1, true),
     "the confirmed wizard should write rooms=open to the config")
   for _, path in ipairs({ default_paths.token_path, default_paths.config_path,
