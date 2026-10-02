@@ -502,6 +502,9 @@ function remuda._butler_compaction_execute(session_name, force)
     _butler_trace("error", detail .. " reason=" .. tostring(reason))
     local exhausted = remuda._butler_compaction_record_failure(state)
     if exhausted then
+      -- One alert per run of failures: forced retries clear the count, not this flag.
+      if state.compaction_exhausted_alerted then return end
+      state.compaction_exhausted_alerted = true
       pcall(remuda._butler_send, session_name, agent.parent or "butler",
         "Compaction stopped after 3 consecutive failures: " .. tostring(reason)
           .. "; it will resume when context drops below the compaction threshold or a human clears this session.")

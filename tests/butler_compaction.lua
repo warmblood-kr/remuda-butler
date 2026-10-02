@@ -141,6 +141,15 @@ repeated_failure_state.compaction_failures = 3
 repeated_failure_state.compaction_failure_exhausted = true
 assert(not remuda._butler_compaction_failure_exhausted(repeated_failure_state, { level = "critical" }, true),
   "a forced human retry should clear the failure limit")
+-- The exhaustion alert goes out once per run of failures: a forced retry keeps the flag, success or a low level clears it.
+local alert_state = { compaction_exhausted_alerted = true, compaction_failures = 3, compaction_failure_exhausted = true }
+remuda._butler_compaction_failure_exhausted(alert_state, { level = "critical" }, true)
+assert(alert_state.compaction_exhausted_alerted, "a forced retry must not re-arm the exhaustion alert")
+remuda._butler_compaction_failure_exhausted(alert_state, { level = "ok" })
+assert(alert_state.compaction_exhausted_alerted == nil, "a low context level re-arms the exhaustion alert")
+alert_state.compaction_exhausted_alerted = true
+remuda._butler_compaction_clear_failures(alert_state, true)
+assert(alert_state.compaction_exhausted_alerted == nil, "a successful compaction re-arms the exhaustion alert")
 local restore_state = { restore_pending = "opus", failure_cooldown_until = 900 }
 assert(remuda._butler_compaction_prepare_restore(restore_state).failure_cooldown_until == 900
   and restore_state.restore_pending == "opus" and restore_state.compaction_in_progress,

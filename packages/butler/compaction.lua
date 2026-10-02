@@ -200,6 +200,7 @@ function remuda._butler_compaction_failure_exhausted(state, level, force)
   if force or (level and level.level == "ok") then
     state.compaction_failures = nil
     state.compaction_failure_exhausted = nil
+    if not force then state.compaction_exhausted_alerted = nil end
     return false
   end
   return state.compaction_failure_exhausted == true
@@ -215,6 +216,7 @@ function remuda._butler_compaction_clear_failures(state, compacted)
   state.failure_cooldown_until = nil
   state.compaction_failures = nil
   state.compaction_failure_exhausted = nil
+  state.compaction_exhausted_alerted = nil
 end
 
 function remuda._butler_compaction_action_guard(session_name, allow_queued_mail)

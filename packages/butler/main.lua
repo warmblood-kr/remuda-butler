@@ -905,7 +905,8 @@ end
 local root_permissions_ensured = false
 local function ensure_root_permissions(kind)
   root_permissions_ensured = true
-  if not butler_session_cwd then return end
+  remuda._butler_permission_report = nil
+  if not butler_session_cwd then remuda._butler_permission_report = { kind = kind }; return end
   local report
   if kind == "claude" then
     local rules, dropped = permissions.rules({ role = "root" }, contributions("butler.permission"))
@@ -924,6 +925,14 @@ local function ensure_root_permissions(kind)
   end
   remuda._butler_permission_report = { kind = kind, report = report }
 end
+-- True when the last permission step for this kind finished with nothing
+-- refused: the compaction schedule is armed only then.
+local function root_permissions_settled(kind)
+  local state = remuda._butler_permission_report
+  if not state or state.kind ~= kind then return false end
+  local report = state.report
+  return report == nil or (not report.error and #report.withheld == 0)
+end
 local function launch_butler()
   local requested_name = butler_name or remuda._butler_initial_name
   if butler_session_cwd then
@@ -935,8 +944,8 @@ local function launch_butler()
     butler_name = requested_name
     remuda._butler_name = butler_name
     if not root_permissions_ensured then
-      remuda._butler_register_compaction_schedule()
       pcall(ensure_root_permissions, remuda._butler_selected_agent)
+      if root_permissions_settled(remuda._butler_selected_agent) then remuda._butler_register_compaction_schedule() end
     end
     return
   end
@@ -981,7 +990,7 @@ local function launch_butler()
   root_record.kind = kind
   bus.identities.butler, bus.identity_ids[root_record.id] = root_record, root_record
   identity_record(root_record)
-  remuda._butler_register_compaction_schedule()
+  if root_permissions_settled(kind) then remuda._butler_register_compaction_schedule() end
   remuda._butler_start_error = nil
   remuda._butler_start_pending = false
   return selected
