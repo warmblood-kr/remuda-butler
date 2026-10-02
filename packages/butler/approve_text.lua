@@ -244,11 +244,13 @@ local function request(session, text, asker, ttl_s, done)
       data.display_fingerprint = id .. "/" .. tostring(data.bytes)
       local shown = M.display(data.registered_text)
       local expires = tonumber(rec.expires_at) or (os.time() * 1000)
-      return table.concat({ "Approve prepared text for " .. session,
+      -- Session and asker names may hold line or direction characters: show them escaped like the text.
+      local shown_session, shown_asker = (display_line(tostring(session))), (display_line(tostring(asker)))
+      return table.concat({ "Approve prepared text for " .. shown_session,
         "Request " .. id .. " · " .. tostring(data.bytes) .. " bytes",
         "Fingerprint " .. data.display_fingerprint,
         "Expires " .. os.date("!%Y-%m-%dT%H:%M:%SZ", math.floor(expires / 1000)),
-        "Asked by " .. tostring(asker),
+        "Asked by " .. shown_asker,
         "React ✅ or reply yes/승인 " .. id .. " (id optional) to approve; ❌ or no/거부 "
           .. id .. " (id optional) to deny.",
         shown }, "\n")

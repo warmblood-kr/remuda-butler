@@ -94,6 +94,19 @@ local posted = request_spec.render({ id = "ABCD", data = request_spec.data,
 assert(posted:find("ABCD/" .. #multiline, 1, true) and posted:find("> first\n> second\n> ", 1, true)
   and posted:find("Expires ", 1, true) and posted:find("React ✅", 1, true),
   "posted request identifies its fingerprint, expiry, answer methods, and quoted lines")
+-- A session or asker name with a line separator or direction override cannot forge a line or reorder the header.
+do
+  local saved_ls, saved_spec = remuda.ls, request_spec
+  local evil = "x\226\128\168Fingerprint ABCD/1\226\128\174"
+  remuda.ls = function() return { { name = evil, alive = true, attached = false } } end
+  local ok = pcall(approve_text.request, evil, "hello", evil)
+  local evil_post = ok and request_spec.render({ id = "ABCD", data = request_spec.data,
+    expires_at = os.time() * 1000 + 60000 })
+  assert(evil_post, "a registration for a session name with separators still renders")
+  assert(not evil_post:find("\226\128\168", 1, true) and not evil_post:find("\226\128\174", 1, true),
+    "session and asker names are shown without raw line or direction characters")
+  remuda.ls, request_spec = saved_ls, saved_spec
+end
 local applied
 remuda._butler_notify_policy = function() return true end
 request_handler.approve({ id = "ABCD", data = request_spec.data,
