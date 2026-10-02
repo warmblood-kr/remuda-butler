@@ -139,7 +139,8 @@ local function windows_key(path)
   local parts, why = { head and head:lower() }, nil
   for part in rest:gmatch("[^\\]+") do
     if part:find(":", 1, true) or windows_device(part) then return nil, "device" end
-    if part == "." or part == ".." then why = "unresolved" end
+    -- `.`, `..`, and any name Windows would shorten (a trailing dot or space).
+    if part:find("[%. ]$") then why = "unresolved" end
     parts[#parts + 1] = part:lower()
   end
   if not head then return nil end
@@ -235,6 +236,7 @@ function permissions.output_for_caller(path, name, caller, cwd_of, realpath, is_
   -- A default name comes from the sender: on Windows it must be one plain name.
   if windows and base:find("[/\\]") then return refuse(" has no file name") end
   if windows and (base:find(":", 1, true) or windows_device(base)) then return refuse(DEVICE) end
+  if windows and base:find("[%. ]$") then return refuse(" ends in a dot or a space, which Windows drops") end
   local parent_key, root_key = path_key(parent, platform), path_key(root, platform)
   if not parent_key or not root_key or (parent_key ~= root_key and not inside(parent_key, root_key)) then
     return refuse(" is outside this session's working directory " .. one_line(cwd))
