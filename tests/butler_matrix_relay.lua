@@ -5938,9 +5938,25 @@ do
   local core_hostname = remuda.hostname
   local pinned_hostname = type(core_hostname) == "function" and function() return "matrix-test-host" end or nil
   remuda.hostname = pinned_hostname
+  -- No test may reach the OS secure store: with this suite's scratch HOME macOS
+  -- asks for a keychain dialog and the daemon waits on it. This stands in for
+  -- core's remuda.system.credential, says a store exists, and counts every call
+  -- a test makes without a fake of its own.
+  local core_system, store_calls = remuda.system, {}
+  local function tripwire(verb)
+    return function(name)
+      store_calls[#store_calls + 1] = verb .. " " .. tostring(name)
+      return nil, "unavailable: a test reached the OS secure store"
+    end
+  end
+  remuda.system = setmetatable({ credential = { backend = function() return "keychain" end,
+    put = tripwire("put"), get = tripwire("get"), delete = tripwire("delete") } }, { __index = core_system })
   local ran, why = pcall(setup_tests, matrix, pinned_hostname)
+  remuda.system = core_system
   remuda.hostname = core_hostname
   matrix.prompt_preface_supported = preface_supported
+  assert(#store_calls == 0, "the setup tests reached the OS secure store outside their own fake: "
+    .. table.concat(store_calls, ", "))
   assert(ran, why)
 end
 rx_check("test_redefined_public_words_do_not_change_trust", test_redefined_public_words_do_not_change_trust)
