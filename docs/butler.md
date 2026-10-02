@@ -405,6 +405,9 @@ per-candidate timeout. `remuda butler sessions` shows the selected kind and
 the reason each earlier candidate was skipped.
 Explicit Monocle launches use this argv: `monocle agent --workdir DIR --session NAME --auto-approve`;
 Butler adds `--model M` when specified.
+`--auto-approve` means the member runs with Monocle's own auto-approval. Butler
+adds no extra gate for this kind: no permission rules, no MCP token, no trust
+dialog. Launch it only in directories you trust.
 
 On each fresh agent-session start—first launch, resume, or a relaunch or
 respawn after a Butler or daemon restart—Butler checks for unread mail. If any
