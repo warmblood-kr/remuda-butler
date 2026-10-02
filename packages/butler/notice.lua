@@ -1058,14 +1058,23 @@ function remuda._butler_send(from, to, text)
     or mail_address(resolve(from))
   return (send_envelope({ from = sender, to = mail_address(recipient.alias), text = text }, recipient))
 end
--- Mail from the reserved sender `schedule`. The sender is fixed here, not a
--- parameter. `_butler_send` resolves a sender to a live session, and
--- valid_child_name keeps any session from taking the name `schedule`.
+-- Mail from the reserved sender `schedule`. The sender is fixed here and the
+-- send function is an upvalue of the tick's env, never a `remuda` field.
+-- `_butler_send` resolves a sender to a live session, and valid_child_name keeps
+-- any session from taking the name `schedule`.
 local SCHEDULE_SENDER = { host = "local", id = "", alias = "schedule", session = "schedule", kind = "", leader = "" }
-function remuda._butler_schedule_send(to, text, subject)
+local function schedule_send(to, text, subject)
   local _, recipient = mail_id(to, false)
   return send_envelope({ from = SCHEDULE_SENDER, to = mail_address(recipient.alias), text = text,
     subject = subject }, recipient)
+end
+-- The tick's env borrows the seams of remuda._butler_schedule_env (main.lua) and
+-- adds `send`, which that table does not carry.
+local tick_env = setmetatable({ send = schedule_send },
+  { __index = function(_, key) return remuda._butler_schedule_env[key] end })
+function remuda._butler_schedule_tick()
+  local ok, err = pcall(remuda.butler.schedule.tick, tick_env)
+  if not ok then remuda._butler_schedule_env.trace("schedule_tick_error", tostring(err)) end
 end
 
 remuda._butler_notice = {

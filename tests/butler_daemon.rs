@@ -1542,6 +1542,11 @@ fn exec_butler_runs_the_builtin_package_in_the_daemons_image() {
         String::from_utf8_lossy(&out.stderr)
     );
     let path = daemon::socket_path_in(&dir, "s");
+    let sender_reachable = eval(
+        &path,
+        "return tostring(remuda._butler_schedule_send ~= nil or remuda._butler_schedule_env.send ~= nil)",
+    );
+    assert_eq!(sender_reachable, "false", "a schedule's mail sender must not be reachable from Lua globals");
     let matrix_entry = eval(&path, "local ok, err = pcall(remuda.exec, 'butler/matrix'); return tostring(ok) .. '|' .. tostring(err)");
     assert!(matrix_entry.starts_with("true|"), "Butler's internal Matrix package failed to load: {matrix_entry}");
 
