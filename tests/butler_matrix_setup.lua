@@ -1955,6 +1955,26 @@ return function(matrix, pinned_hostname)
       clean_store_dir()
     end
 
+    -- Core's own "no default keychain" reason is shown (it holds the fix), with the file path.
+    local no_keychain = "unavailable: no default keychain. Fix: if macOS asks, Cancel is safe (the password goes to the private file) and Reset to Defaults creates a new login keychain; or pass --dir"
+    fake_store(no_keychain)
+    local kept_password = register(bot, { "--default" })
+    assert(kept_password and resolved and resolved.status == 0 and read(store_password_path) == kept_password .. "\n",
+      "no default keychain must still save the password to the private file")
+    assert(resolved.stdout:find("\nThe OS secure store was not used: " .. no_keychain .. "\n", 1, true)
+      and resolved.stdout:find("\nSaved to the private file instead: " .. store_password_path .. "\n", 1, true)
+      and not resolved.stdout:find(kept_password, 1, true),
+      "setup should print core's fix line and the file path: " .. resolved.stdout)
+    clean_store_dir()
+    -- Any other reason keeps the generic class word and never echoes store text.
+    fake_store("unavailable: no default keychain (but different), secret-detail")
+    register(bot, { "--default" })
+    assert(not resolved.stdout:find("secret-detail", 1, true)
+      and not resolved.stdout:find("Saved to the private file instead", 1, true)
+      and resolved.stdout:find("\nThe OS secure store was not used: unavailable\n", 1, true),
+      "a look-alike reason must stay generic: " .. resolved.stdout)
+    clean_store_dir()
+
     -- The store was there at validation but then refused: the account exists, so
     -- the new password replaces the old file even without --force, and setup says so.
     write(store_password_path, old_password_bytes)

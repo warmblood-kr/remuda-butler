@@ -893,7 +893,9 @@ function matrix.setup_write(options, result)
   local writes_password = keeps_password
   -- Why a store that is there was not used, as one fixed word ("unavailable" or
   -- "denied"), never the store's own text. No store at all needs no line.
-  local store_refused
+  -- The one exception is core's own fixed "no default keychain" line, which holds
+  -- the fix; it is kept whole and shown (matrix_cli caps and cleans it).
+  local store_refused, store_fix
   if not options.force then
     local checked = { options.token_path, options.config_path }
     if keeps_password and not uses_store then checked[#checked + 1] = options.password_path end
@@ -909,6 +911,7 @@ function matrix.setup_write(options, result)
     else
       local reason = tostring(backend)
       if reason ~= "no store" then store_refused = reason:match("^denied") or "unavailable" end
+      if reason:sub(1, 33) == "unavailable: no default keychain." then store_fix = reason end
     end
   end
   -- The account exists by now. A store that refused must not cost its password,
@@ -1017,7 +1020,8 @@ function matrix.setup_write(options, result)
     end
     local files = { token_path = options.token_path, config_path = options.config_path,
       password_path = writes_password and options.password_path or nil, password_store = stored,
-      store_refused = writes_password and store_refused or nil }
+      store_refused = writes_password and store_refused or nil,
+      store_fix = writes_password and store_fix or nil }
     if writes_password then
       files.password_replaced = replaces_password and not options.force
         and backups[options.password_path] ~= nil or nil
