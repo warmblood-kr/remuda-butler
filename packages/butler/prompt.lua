@@ -58,6 +58,7 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
   local attempts = 0
   local handled_modals, settle_until = {}, 0
   local write_succeeded = false
+  local write_result
   local verify_started, retry_at, retry_failures, finished
   local retry_delays = options.retry_delays or { 20, 60, 300, 900 }
   local function now()
@@ -87,7 +88,10 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
     local delay = retry_delays[retry_failures]
     if not delay then finish(false, reason); return end
     retry_at = now() + delay
-    startup_ticks, deferred_ticks, verify_ticks, attempts = 0, 0, 0, 0
+    startup_ticks, deferred_ticks, verify_ticks = 0, 0, 0
+    -- A successful write is at-most-once. Keep it in verification mode across
+    -- retries so a populated composer can receive a safe Return retry.
+    attempts = write_succeeded and 1 or 0
     settle_until = 0
     verify_started = write_succeeded and now() or nil
     options.return_retried = nil
@@ -162,44 +166,6 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
         is_ready = checked and result == true
       end
       if is_ready then
-        -- A successful terminal write is at-most-once. An empty composer is
-        -- delivery confirmation even if the TUI submitted before our first
-        -- poll could paint the task. After that write, only retry Return when
-        -- the visible composer still exactly matches our task.
-        if write_succeeded then
-          local decision, text = "EMPTY", ""
-          if options.empty then
-            local checked, value, composer = pcall(options.empty, screen)
-            decision, text = checked and value or "UNPARSEABLE", tostring(composer or "")
-          end
-          if decision == "EMPTY" then
-            finish(true)
-            return
-          end
-          local composer_is_task = decision == "NON-EMPTY" and compact(text) == compact(task)
-          if not composer_is_task and task_running_visible(screen, task, text) then
-            finish(true)
-            return
-          end
-          if composer_is_task then
-            if verify_ticks >= 4 and not options.return_retried then
-              local allowed = true
-              if options.allowed then
-                local checked, value = pcall(options.allowed, true, screen)
-                allowed = checked and value == true
-              end
-              if allowed then
-                options.return_retried = true
-                pcall(remuda.key, actual, "RET")
-                verify_ticks = 0
-              end
-            end
-          end
-          if verify_started and now() - verify_started >= (options.submit_timeout or 300) then
-            retry("submit")
-          end
-          return
-        end
         local allowed = true
         if options.allowed then
           local checked, result = pcall(options.allowed, false, screen)
@@ -216,7 +182,7 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
         verify_ticks = 0
         -- Keep this nonblocking: a long terminal sleep stalls every daemon
         -- callback, including notice and lifecycle work.
-        local typed, type_error = pcall(remuda.type_text, actual, task, 0.1)
+        local typed, type_error, result = pcall(remuda.type_text, actual, task, 0.1)
         if not typed or type_error == false then
           local reason = "type failed"
           if not typed and type(type_error) == "string" then
@@ -227,6 +193,7 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
           retry(reason)
         else
           write_succeeded = true
+          write_result = result
           verify_started = now()
         end
       else
@@ -249,11 +216,12 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
     end
 
     verify_ticks = verify_ticks + 1
-    local empty = true
+    local empty, decision = true, "EMPTY"
     local composer_text = ""
     if options.empty then
-      local checked, decision, text = pcall(options.empty, screen)
-      empty = checked and decision == "EMPTY"
+      local checked, composer_decision, text = pcall(options.empty, screen)
+      decision = checked and composer_decision or "UNPARSEABLE"
+      empty = checked and composer_decision == "EMPTY"
       if checked then composer_text = tostring(text or "") end
     end
     -- After a successful write, an empty composer means the TUI accepted it,
@@ -263,7 +231,8 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
       return
     end
     local composer_is_task = compact(composer_text) == compact(task)
-    if not composer_is_task and task_running_visible(screen, task, composer_text) then
+    if not composer_is_task and (decision ~= "NON-EMPTY" or write_result == "submitted")
+        and task_running_visible(screen, task, composer_text) then
       finish(true)
       return
     end

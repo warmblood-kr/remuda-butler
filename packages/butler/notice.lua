@@ -483,10 +483,21 @@ notice_recovery_error = function(session, state, reason)
         local message = mail.find_message and mail.find_message(id)
         local sender = message and message.from
         local alias = sender and (sender.alias or sender.session)
-        if sender and sender.id and sender.id ~= "" and alias and alias ~= "butler" and alias ~= session then
-          local group = by_sender[alias] or { id = sender.id, message_ids = {} }
-          by_sender[alias] = group
-          group.message_ids[#group.message_ids + 1] = id
+        if sender and alias and alias ~= "butler" and alias ~= session then
+          local target, target_id = alias, sender.id
+          if not target_id or target_id == "" then
+            -- CLI/Matrix senders may not have a Butler mailbox identity. Tell
+            -- the recipient's leader so the undelivered notice is actionable.
+            local recipient = bus.agents[session]
+            target = recipient and recipient.parent or "butler"
+            local leader = bus.agents[target]
+            target_id = leader and leader.id
+          end
+          if target_id and target_id ~= "" then
+            local group = by_sender[target] or { id = target_id, message_ids = {} }
+            by_sender[target] = group
+            group.message_ids[#group.message_ids + 1] = id
+          end
         end
       end
       for alias, group in pairs(by_sender) do

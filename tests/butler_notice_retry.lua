@@ -101,6 +101,18 @@ remuda._butler_notice.notice_recovery_error("butler", { message_ids = { "m1" }, 
 assert(#sent == 1 and bus.notice_delivery_failures.butler,
   "root Butler records failure state without sending itself failure mail")
 
+-- A sender without a Butler mailbox identity receives the failure through
+-- the recipient's leader instead of silently losing the alert.
+bus.agents.root = { id = "root-id", kind = "codex" }
+stored_messages.m3 = { from = { alias = "matrix", id = "" } }
+bus.notice_failure_alerts.lead = nil
+bus.notices.lead = { count = 1, message_order = { "m3" }, delivery_attempts = 4 }
+remuda._butler_notice.notice_recovery_error("lead", {
+  message_ids = { "m3" }, draft = "",
+}, "recovery timed out")
+assert(sent[#sent][1] == "root",
+  "id-less CLI/Matrix sender failure falls back to recipient leader")
+
 -- If type_text reports another write in flight, a later non-empty composer is
 -- re-probed before any retry; another sender's task or human draft is untouched.
 now, screen = now + 10, "› Ask Codex to do anything"

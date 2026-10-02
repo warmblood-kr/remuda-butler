@@ -152,8 +152,62 @@ poll.run()
 assert(input_calls == 1 and #done == 1 and done[1][1] == true,
   "verified task delivery is successful without duplicate text")
 
+-- A submit timeout keeps successful writes in the verification path. The
+-- retry may press Return once when our exact task is still in the composer.
+now, alive, screen, input_calls, done = 8000, true, "ready", 0, {}
+return_calls = 0
+remuda.type_text = function(_, text) input_calls = input_calls + 1; screen = text end
+remuda.key = function(_, key)
+  assert(key == "RET")
+  return_calls = return_calls + 1
+  screen = "accepted task"
+end
+prompt.schedule(remuda, "codex", "member", "member", "lead", "retry task", {
+  ready = function(value) return value == "ready" end,
+  allowed = function() return true end,
+  empty = function(value)
+    if value == "retry task" then return "NON-EMPTY", value end
+    return "EMPTY", ""
+  end,
+  recipient_alive = function() return alive end,
+  now = function() return now end,
+  submit_timeout = 1,
+  retry_delays = { 0 },
+  on_done = function(ok) done[#done + 1] = ok end,
+})
+poll.run()
+now = now + 1
+poll.run() -- verification times out and schedules retry
+for _ = 1, 4 do poll.run() end
+assert(input_calls == 1 and return_calls == 1,
+  "successful write retry must submit once without typing the task twice")
+poll.run()
+assert(#done == 1 and done[1] == true, "retry Return completes delivery")
+
+-- A quote-prefixed task can look like transcript text to the composer parser.
+-- That ambiguous NON-EMPTY screen is not proof that a dropped Return worked.
+now, alive, screen, input_calls, done = 9000, true, "ready", 0, {}
+remuda.type_text = function(_, text) input_calls = input_calls + 1; screen = "› " .. text end
+remuda.key = function() end
+prompt.schedule(remuda, "codex", "member", "member", "lead", "> quoted task", {
+  ready = function(value) return value == "ready" or value:find("› ", 1, true) ~= nil end,
+  allowed = function() return true end,
+  empty = function(value)
+    if value == "› > quoted task" then return "NON-EMPTY", "quoted task" end
+    return "EMPTY", ""
+  end,
+  recipient_alive = function() return alive end,
+  now = function() return now end,
+  submit_timeout = 100,
+  on_done = function(ok) done[#done + 1] = ok end,
+})
+poll.run()
+for _ = 1, 5 do poll.run() end
+assert(input_calls == 1 and #done == 0,
+  "quoted task visible as a composer tail is not verified delivery")
+
 -- A draft fails the empty-composer gate; retries never type into it.
-now, alive, screen, input_calls, done = 9000, true, "draft", 0, {}
+now, alive, screen, input_calls, done = 10000, true, "draft", 0, {}
 remuda.type_text = function() input_calls = input_calls + 1 end
 prompt.schedule(remuda, "codex", "member", "member", "lead", "first task", {
   ready = function() return true end,
@@ -169,4 +223,9 @@ for _ = 1, 20 do poll.run(); now = now + 0.5 end
 assert(input_calls == 0, "first task retries preserve a non-empty draft")
 assert(#done == 1 and done[1][1] == false, "draft protection still ends in one failure notice")
 assert(loadfile("packages/butler/launch.lua"), "Codex task launcher parses")
+local launch_file = assert(io.open("packages/butler/launch.lua", "r"))
+local launch_source = launch_file:read("*a")
+launch_file:close()
+assert(launch_source:find('if detail == "submit" then detail = "it was typed but not submitted" end', 1, true),
+  "task submission failures explain that the typed task was not submitted")
 print("ok - first task retries until verified, exhaustion reports once, and exit cancels retries")

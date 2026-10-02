@@ -617,9 +617,10 @@ to pause. A successful first-task write is never repeated. If delivery cannot
 be verified, Butler retries after 20 seconds, one minute, five minutes and 15
 minutes using one shared budget, then sends the original mail sender or task
 leader one failure message with a resend command. A failure notice is recorded
-in mail so a daemon restart cannot send it again; the root Butler records its
-own notice failure without mailing itself. Notice retries stop when the mail is
-read or the recipient exits. The `NOTICE` column in `remuda butler sessions`
+in mail so a daemon restart cannot send it again. Mail without a Butler sender
+identity, such as CLI or Matrix mail, is reported to the recipient's leader.
+The root Butler records its own notice failure without mailing itself. Notice
+retries stop when the mail is read or the recipient exits. The `NOTICE` column in `remuda butler sessions`
 marks `task queued`, `task failed`, `queued`, and `notice failed` deliveries;
 the initial two-second mail debounce is not shown as queued.
 
