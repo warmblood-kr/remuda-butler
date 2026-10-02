@@ -1262,7 +1262,24 @@ end
 -- composites bind the L1 originals at load.
 local function test_redefined_public_words_do_not_change_trust()
   remuda._butler_new_ulid = remuda._butler_new_ulid or function() return "01TESTULID" end
+  remuda._test_matrix_write_saved_random = remuda.random_bytes
+  remuda._test_matrix_write_saved_open = io.open
+  remuda._test_matrix_write_random_request = nil
+  remuda.random_bytes = function(n)
+    remuda._test_matrix_write_random_request = n
+    return string.rep("w", n)
+  end
+  io.open = function(path, mode)
+    if path == "/dev/urandom" then return nil, "simulated unavailable random source" end
+    return remuda._test_matrix_write_saved_open(path, mode)
+  end
   dofile("packages/butler/matrix_write.lua")
+  assert(remuda._test_matrix_write_random_request == 16,
+    "Matrix write transaction tag should use remuda.random_bytes when /dev/urandom is unavailable")
+  remuda.random_bytes = remuda._test_matrix_write_saved_random
+  io.open = remuda._test_matrix_write_saved_open
+  remuda._test_matrix_write_saved_random, remuda._test_matrix_write_saved_open = nil, nil
+  remuda._test_matrix_write_random_request = nil
   remuda._butler_mail_config = { bus = { inboxes = {}, messages = {}, objects = {} } }
   dofile("packages/butler/mail.lua")
   local saved_read, saved_agent = matrix.read_config, matrix.is_agent_mxid

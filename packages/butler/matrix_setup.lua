@@ -283,6 +283,12 @@ local function base64url(bytes)
 end
 
 local function new_password()
+  if type(remuda.random_bytes) == "function" then
+    local ok, bytes = pcall(remuda.random_bytes, 32)
+    if ok and type(bytes) == "string" and #bytes >= 32 then
+      return base64url(bytes:sub(1, 32))
+    end
+  end
   local ok, file = pcall(io.open, "/dev/urandom", "rb")
   if not ok or not file then return nil end
   local read_ok, bytes = pcall(file.read, file, 32)
@@ -600,7 +606,7 @@ function matrix.setup_network(options, on_done)
   elseif options.secret_kind == "registration" then
     registration_password = options.password_secret or new_password()
     if not registration_password then
-      return fail("This system has no secure random source for a bot password. Next: rerun with --password-file PATH (a password you choose)")
+      return fail("This system has no secure random source for a bot password. Next: create a private password file, then rerun with --password-file PATH. PowerShell: [Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(24)) | Set-Content -NoNewline FILE. POSIX: umask 077; head -c 24 /dev/urandom | base64 > FILE. Keep the file private.")
     end
     local base_bot = options.bot_mxid
     local localpart, server = base_bot:match("^@([^:]+):(.+)$")

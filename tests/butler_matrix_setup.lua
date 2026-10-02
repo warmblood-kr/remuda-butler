@@ -1154,10 +1154,27 @@ return function(matrix, pinned_hostname)
   end
   local no_rng_output = root .. "/no-secure-random"
   local real_io_open = io.open
+  remuda._test_saved_random_bytes = remuda.random_bytes
+  remuda.random_bytes = function(n)
+    requested_random_length = n
+    return string.rep(string.char(251), n)
+  end
   io.open = function(path, mode)
     if path == "/dev/urandom" then return nil, "simulated unavailable random source" end
     return real_io_open(path, mode)
   end
+  requests, resolved = {}, nil
+  matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
+    "--owner", "@alice:example.org", "--register", "--registration-token-file",
+    registration_token_file, "--bot", "@butler-random-api:example.org", "--dir", root .. "/random-api-output" })
+  assert(#requests == 1 and requests[1].url:match("/register$"),
+    "registration should reach the network when remuda.random_bytes is available")
+  assert(type(request_json(requests[1]).password) == "string"
+    and #request_json(requests[1]).password == 43
+    and request_json(requests[1]).password:match("^[%w_-]+$")
+    and requested_random_length == 32,
+    "registration should make a base64url password from 32 remuda.random_bytes bytes")
+  remuda.random_bytes = nil
   requests, resolved = {}, nil
   local no_rng_reply = matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
     "--owner", "@alice:example.org", "--register", "--registration-token-file",
@@ -1165,17 +1182,38 @@ return function(matrix, pinned_hostname)
   io.open = real_io_open
   assert(no_rng_reply and resolved and resolved.status == 1
     and pending_timeout == 90
-    and resolved.stderr:find("This system has no secure random source for a bot password. Next: rerun with --password-file PATH (a password you choose)", 1, true)
+    and resolved.stderr:find("This system has no secure random source for a bot password. Next: create a private password file, then rerun with --password-file PATH. PowerShell:", 1, true)
+    and resolved.stderr:find("PowerShell: [Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(24)) | Set-Content -NoNewline FILE. POSIX:", 1, true)
+    and resolved.stderr:find("POSIX: umask 077; head -c 24 /dev/urandom | base64 > FILE. Keep the file private.", 1, true)
     and #requests == 0
     and read(no_rng_output .. "/token") == nil
     and read(no_rng_output .. "/password") == nil
     and read(no_rng_output .. "/config") == nil,
-    "registration must fail closed without secure randomness before network or file writes")
+    "registration must fail closed without secure randomness before network or file writes: "
+      .. tostring(resolved and resolved.stderr))
   local no_rng_dir_created = remuda.fs.mkdir_new(no_rng_output)
   assert(no_rng_dir_created, "secure-random failure must not create the output directory")
   os.remove(no_rng_output)
 
+  for _, bad in ipairs({ function() return string.rep("x", 31) end, function() return 42 end, function() error("boom") end }) do
+    remuda.random_bytes = bad
+    io.open = function(path, mode)
+      if path == "/dev/urandom" then return nil, "simulated unavailable random source" end
+      return real_io_open(path, mode)
+    end
+    requests, resolved = {}, nil
+    matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
+      "--owner", "@alice:example.org", "--register", "--registration-token-file",
+      registration_token_file, "--bot", "@butler-bad-rng:example.org", "--dir", root .. "/bad-rng-output" })
+    io.open = real_io_open
+    assert(#requests == 0 and resolved and resolved.status == 1
+      and resolved.stderr:find("no secure random source", 1, true),
+      "a short, wrong-type or erroring remuda.random_bytes must fail closed when urandom is absent")
+  end
+  remuda.random_bytes = nil
+
   local short_rng_output = root .. "/short-secure-random"
+  remuda.random_bytes = nil
   io.open = function(path, mode)
     if path == "/dev/urandom" then
       return { read = function() return string.rep("x", 31) end, close = function() end }
@@ -1261,6 +1299,8 @@ return function(matrix, pinned_hostname)
     "registration token, generated password, and config must use private atomic writes")
   matrix.status = password_status
   io.open = real_io_open
+  remuda.random_bytes = remuda._test_saved_random_bytes
+  remuda._test_saved_random_bytes = nil
   requests, resolved, atomic_writes = {}, nil, {}
   os.remove(registration_output .. "/token")
   os.remove(registration_output .. "/password")

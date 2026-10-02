@@ -431,11 +431,16 @@ end
 local function agent_mcp_flags(token)
   local env = "REMUDA_SESSION_CAPABILITY=" .. json_quote(token)
   if runtime_dir then env = env .. ",REMUDA_RUNTIME_DIR=" .. json_quote(runtime_dir) end
-  return {
+  local flags = {
     "-c", 'mcp_servers.remuda.command="remuda"',
     "-c", 'mcp_servers.remuda.args=["-s",' .. json_quote(server) .. ',"mcp"]',
     "-c", "mcp_servers.remuda.env={" .. env .. "}",
   }
+  if runtime_dir then
+    flags[#flags + 1] = "-c"
+    flags[#flags + 1] = "shell_environment_policy.set={REMUDA_RUNTIME_DIR=" .. json_quote(runtime_dir) .. "}"
+  end
+  return flags
 end
 local function agent_mcp_config(token)
   local env = '"REMUDA_SESSION_CAPABILITY":' .. json_quote(token)
