@@ -101,9 +101,18 @@ local function choose(candidates, opts, done)
       start_next(); return
     end
     local spec = opts.spec(id)
+    local build_error
     local argv = (type(opts.argv) == "function" and opts.argv(id, spec)) or opts.argv
-      or (type(entry.argv) == "function" and select(2, call_callback(entry.argv, spec))) or entry.argv
+      or (type(entry.argv) == "function" and (function()
+        local built, value = call_callback(entry.argv, spec)
+        if not built then build_error = value end
+        return value
+      end)()) or entry.argv
       or (entry.build and entry.build(spec))
+    if build_error or type(argv) == "function" then
+      attempt.reason, attempt.detail = "spawn_error", one_line(build_error or "agent argv builder failed")
+      start_next(); return
+    end
     local builder_override = remuda._butler_agent_builders[id]
       and remuda._butler_agent_builders[id] ~= BUILTIN_AGENT_BUILDERS[id]
     local executable = (builder_override and argv and argv[1])

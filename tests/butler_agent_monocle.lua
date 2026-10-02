@@ -131,6 +131,23 @@ eq("resolved launch argv", capture.argv, {
   "monocle", "agent", "--workdir", "/work", "--session", "monocle-test", "--auto-approve",
 })
 
+-- A refused spec is a launch failure: nothing reaches remuda.new.
+for field, bad in pairs({ name = "-x", model = "-m" }) do
+  local spawned, result = 0, nil
+  remuda.new = function() spawned = spawned + 1; return "x" end
+  remuda._butler_choose({ "monocle" }, {
+    name = "refused", cwd = "/work", skip_probe = true, env = function() return {} end,
+    spec = function(kind)
+      local spec = { cwd = "/work", name = "refused", kind = kind, model = "ok" }
+      spec[field] = bad
+      return spec
+    end,
+  }, function(name, kind, attempts) result = { name = name, kind = kind, attempts = attempts } end)
+  assert(spawned == 0, "a refused " .. field .. " must not reach remuda.new")
+  assert(result and result.name == nil and result.attempts[1].reason == "spawn_error",
+    "a refused " .. field .. " must fail the launch as spawn_error")
+end
+
 -- A core without remuda.contribute registers through the legacy path; its rows
 -- must keep Monocle out of the automatic order, and failed Claude and Codex
 -- candidates must not fall through to it.
