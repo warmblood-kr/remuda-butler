@@ -76,8 +76,8 @@ rows = displayed_rows(fixture({
   {"cycle-a", "claude", "cycle-b"},
   {"cycle-b", "codex", "cycle-a"},
 }))
-assert_equal(rows[2], "root-a\tclaude\t-", "roots are sorted")
-assert_equal(rows[3], "root-b\tcodex\t-", "all roots are rendered")
+assert_equal(rows[2], "root-a\tclaude\t-\t-", "roots are sorted")
+assert_equal(rows[3], "root-b\tcodex\t-\t-", "all roots are rendered")
 local found_orphan, found_cycle_a, found_cycle_b = false, false, false
 local seen = {}
 for _, line in ipairs(rows) do

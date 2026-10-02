@@ -54,7 +54,7 @@ for _ in $(seq 50); do
 done
 [[ $(parent_of m1) == butler && $(parent_of m2) == butler ]] ||
   fail "members not adopted by butler: m1=$(parent_of m1) m2=$(parent_of m2)"
-"$REMUDA_BIN" -s "$SERVER" butler sessions | grep -Fx $'m1\tfake\tbutler' >/dev/null ||
+"$REMUDA_BIN" -s "$SERVER" butler sessions | grep -Fx $'m1\tfake\tbutler\t-' >/dev/null ||
   fail "butler sessions does not show m1 under butler"
 
 # root closes an adopted member; --force only when the unread guard blocks.
