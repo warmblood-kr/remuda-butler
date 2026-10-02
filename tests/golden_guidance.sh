@@ -21,8 +21,8 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 source "$REPO/tests/awk-timeout.sh"
 GOLDEN=$REPO/tests/golden
 CORE_URL=${CORE_URL:-https://github.com/warmblood-kr/remuda.git}
-# Keep in step with tests/rust_tests.sh.
-CORE_REF=${CORE_REF:-c59e04c5}
+# The core pin is shared: tests/core_ref.sh.
+source "$REPO/tests/core_ref.sh"
 T=$(mktemp -d /tmp/bgg.XXXXXX)
 T=$(cd "$T" && pwd -P)
 S=bgg
