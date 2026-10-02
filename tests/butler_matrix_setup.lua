@@ -1778,6 +1778,217 @@ return function(matrix, pinned_hostname)
   os.remove(default_paths.token_path)
   os.remove(default_paths.config_path)
 
+  -- A GENERATED bot password goes to the OS secure store; the private file is the fallback.
+  -- A function, not a do block: this chunk is at Lua's limit of 200 locals.
+  ;(function()
+    local seam = remuda._butler_system
+    local saved_core_system = remuda.system
+    local store_calls, store_gets = {}, 0
+    -- Fake of core's remuda.system.credential; put_reason nil means put succeeds.
+    local function fake_store(put_reason)
+      store_calls = {}
+      remuda.system = { credential = {
+        backend = function() return "keychain" end,
+        put = function(name, secret)
+          store_calls[#store_calls + 1] = { verb = "put", name = name, secret = secret }
+          if put_reason then return nil, put_reason end
+          return true
+        end,
+        get = function() store_gets = store_gets + 1; return nil, "not_found" end,
+        delete = function(name)
+          store_calls[#store_calls + 1] = { verb = "delete", name = name }
+          return true
+        end,
+      } }
+    end
+
+    -- The seam: put and delete only. Nothing in Butler reads the store back.
+    assert(type(seam.credential_put) == "function" and type(seam.credential_delete) == "function",
+      "system seam must offer credential_put and credential_delete")
+    for key in pairs(seam) do
+      local word = tostring(key):lower()
+      assert(not (word:find("cred", 1, true) and (word:find("get", 1, true) or word:find("read", 1, true))),
+        "the system seam must not expose a credential read: " .. word)
+    end
+    for _, source_path in ipairs({ "packages/butler/system.lua", "packages/butler/matrix_setup.lua",
+      "packages/butler/matrix_cli.lua" }) do
+      local source = read(source_path)
+      assert(source and not source:find("credential[%._]get") and not source:find("credential%s*%["),
+        source_path .. " must not read the OS secure store")
+    end
+    local seam_name = "butler/matrix/@seam:example.org/password"
+    fake_store()
+    local put_ok, put_backend = seam.credential_put(seam_name, "seam-secret")
+    assert(put_ok == true and put_backend == "keychain" and #store_calls == 1
+      and store_calls[1].name == seam_name and store_calls[1].secret == "seam-secret",
+      "credential_put should store the secret and name the backend")
+    assert(seam.credential_delete(seam_name) == true and store_calls[2].verb == "delete"
+      and store_calls[2].name == seam_name, "credential_delete should delete by name")
+    fake_store("unavailable: the keychain is locked")
+    local locked, locked_reason = seam.credential_put(seam_name, "seam-secret")
+    assert(locked == nil and tostring(locked_reason):find("^unavailable:"),
+      "credential_put should pass the store's reason through: " .. tostring(locked_reason))
+    remuda.system.credential.put = function() error("store exploded") end
+    local raised_ok, raised = pcall(seam.credential_put, seam_name, "seam-secret")
+    assert(raised_ok and raised == nil, "a store that raises must read as a failed put, not an error")
+    remuda.system.credential.backend = function() return nil end
+    remuda.system.credential.put = function() error("no backend: put must not be called") end
+    local no_backend, no_backend_reason = seam.credential_put(seam_name, "seam-secret")
+    assert(no_backend == nil and no_backend_reason == "no store", "a nil backend means no store")
+    remuda.system = nil
+    local old_core, old_core_reason = seam.credential_put(seam_name, "seam-secret")
+    local old_core_delete, old_core_delete_reason = seam.credential_delete(seam_name)
+    assert(old_core == nil and old_core_reason == "no store"
+      and old_core_delete == nil and old_core_delete_reason == "no store",
+      "a core without remuda.system has no store")
+
+    local store_dir = root .. "/store-default/butler"
+    assert(real_mkdir_new(root .. "/store-default") and real_mkdir_new(store_dir))
+    local store_password_path = store_dir .. "/password"
+    local function clean_store_dir()
+      for _, name in ipairs({ "token", "config", "password" }) do os.remove(store_dir .. "/" .. name) end
+    end
+    local saved_status, saved_relay_start, saved_relay_stop = matrix.status, matrix.relay.start, matrix.relay.stop
+    local saved_matrix_config, outer_write_atomic = remuda._butler_matrix_config, remuda.fs.write_atomic
+    matrix.status = function(_, callback)
+      callback({ status = 200, json = { user_id = "@butler-store:example.org", joined_rooms = {} } })
+      return { cancel = function() end }
+    end
+    matrix.relay.stop = function() return true end
+    matrix.relay.start = function() return true end
+    remuda.http = { request = function(spec) requests[#requests + 1] = spec; return {} end }
+    remuda._butler_matrix_paths = { token_path = store_dir .. "/token", config_path = store_dir .. "/config" }
+    -- Runs a whole --register setup through the CLI; returns the password the
+    -- register request carried, or nil when setup stopped before the network.
+    local function register(bot, destination)
+      requests, resolved = {}, nil
+      local argv = { "matrix", "setup", "--homeserver", "http://matrix.invalid",
+        "--owner", "@alice:example.org", "--register", "--registration-token-file",
+        registration_token_file, "--bot", bot }
+      for _, word in ipairs(destination) do argv[#argv + 1] = word end
+      matrix.cli(argv)
+      if #requests == 0 then return nil end
+      local sent_password = request_json(requests[1]).password
+      requests[1].callback({ status = 401,
+        body = '{"session":"store-session","flows":[{"stages":["m.login.registration_token"]}]}' })
+      requests[2].callback({ status = 200,
+        body = '{"access_token":"store-access-token","user_id":"' .. bot .. '"}' })
+      requests[3].callback({ status = 200, body = '{"user_id":"' .. bot .. '"}' })
+      requests[4].callback({ status = 200, body = '{"room_id":"!store-home:example.org"}' })
+      return sent_password
+    end
+    local bot = "@butler-store:example.org"
+    local store_name = "butler/matrix/" .. bot .. "/password"
+    local store_line = "\nBot account password saved in the OS secure store (keychain) as " .. store_name .. "\n"
+
+    fake_store()
+    local stored_password = register(bot, { "--default" })
+    assert(resolved and resolved.status == 0, "store setup should succeed: " .. tostring(resolved and resolved.stderr))
+    assert(#store_calls == 1 and store_calls[1].verb == "put" and store_calls[1].name == store_name
+      and store_calls[1].secret == stored_password and #stored_password == 43,
+      "the generated password the register request used must be put in the store under the bot's name")
+    assert(read(store_password_path) == nil and read(store_dir .. "/token") == "store-access-token\n",
+      "a stored password must not also be written to the password file")
+    assert(resolved.stdout:find(store_line, 1, true)
+      and not resolved.stdout:find("saved privately", 1, true)
+      and not resolved.stdout:find("left in place", 1, true)
+      and not resolved.stdout:find(stored_password, 1, true),
+      "store setup should say where the password went, without the secret: " .. resolved.stdout)
+    clean_store_dir()
+
+    -- An old password file does not block the store route; it is left alone and named.
+    local old_password_bytes = "old-generated-password\r\n\0tail"
+    write(store_password_path, old_password_bytes)
+    fake_store()
+    assert(register(bot, { "--default" }) and resolved and resolved.status == 0,
+      "an existing password file must not block a setup that uses the store: "
+        .. tostring(resolved and resolved.stderr))
+    assert(read(store_password_path) == old_password_bytes and #store_calls == 1,
+      "the store route must leave an existing password file byte-identical")
+    assert(resolved.stdout:find(store_line, 1, true)
+      and resolved.stdout:find("left in place", 1, true)
+      and resolved.stdout:find(store_password_path, 1, true)
+      and resolved.stdout:find("delete it if you no longer use it", 1, true),
+      "setup should say the old password file was left in place: " .. resolved.stdout)
+    clean_store_dir()
+
+    -- Store says no, or there is no store: today's private file, and the output says so.
+    for _, reason in ipairs({ "unavailable: no desktop session", "denied: the user refused", "old core" }) do
+      if reason == "old core" then remuda.system, store_calls = nil, {} else fake_store(reason) end
+      local file_password = register(bot, { "--default" })
+      assert(resolved and resolved.status == 0, reason .. ": setup should fall back to the file: "
+        .. tostring(resolved and resolved.stderr))
+      assert(read(store_password_path) == file_password .. "\n"
+        and #store_calls == (reason == "old core" and 0 or 1),
+        reason .. ": the generated password should be saved in the private file")
+      assert(resolved.stdout:find("\nBot account password saved privately: " .. store_password_path .. "\n", 1, true)
+        and not resolved.stdout:find("OS secure store (", 1, true)
+        and not resolved.stdout:find(file_password, 1, true),
+        reason .. ": setup should say the password went to the file: " .. resolved.stdout)
+      clean_store_dir()
+    end
+
+    -- The file route still refuses to replace an existing password file without --force.
+    write(store_password_path, old_password_bytes)
+    remuda.system = nil
+    assert(register(bot, { "--default" }) == nil and resolved and resolved.status == 1
+      and resolved.stderr:find("output file already exists; pass --force: " .. store_password_path, 1, true)
+      and read(store_password_path) == old_password_bytes,
+      "without a store an existing password file must stop setup before the network")
+    clean_store_dir()
+
+    -- --dir always means the file in that directory; the real store is never touched.
+    local dir_output = root .. "/store-dir-output"
+    fake_store()
+    local dir_password = register(bot, { "--dir", dir_output })
+    assert(resolved and resolved.status == 0 and #store_calls == 0
+      and read(dir_output .. "/password") == dir_password .. "\n"
+      and resolved.stdout:find("\nBot account password saved privately: " .. dir_output .. "/password\n", 1, true)
+      and not resolved.stdout:find("OS secure store (", 1, true),
+      "--dir must save the generated password in that directory and never call the store")
+    for _, name in ipairs({ "token", "config", "password" }) do os.remove(dir_output .. "/" .. name) end
+    os.remove(dir_output)
+
+    -- Setup fails after the put: the stored password is deleted again.
+    fake_store()
+    remuda.fs.write_atomic = function(path, contents, opts)
+      if path == store_dir .. "/config" then return nil, "simulated disk failure" end
+      return outer_write_atomic(path, contents, opts)
+    end
+    register(bot, { "--default" })
+    remuda.fs.write_atomic = outer_write_atomic
+    assert(resolved and resolved.status == 1 and #store_calls == 2
+      and store_calls[1].verb == "put" and store_calls[2].verb == "delete"
+      and store_calls[2].name == store_name and read(store_dir .. "/token") == nil,
+      "a failed setup must delete the password it put in the store")
+    clean_store_dir()
+
+    -- A chosen password is never saved, and an old password file stays byte-identical under --force.
+    write(store_password_path, old_password_bytes)
+    fake_store()
+    local chosen_force_plan, chosen_force_error = matrix.setup_prepare({ "--homeserver", "http://matrix.invalid",
+      "--owner", "@alice:example.org", "--register", "--registration-token-file", registration_token_file,
+      "--password-file", password, "--bot", bot, "--dir", store_dir, "--force" })
+    assert(chosen_force_plan, chosen_force_error)
+    local chosen_force_files, chosen_force_write_error = matrix.setup_write(chosen_force_plan, {
+      token = "chosen-force-token", password = "password-secret", user_id = bot,
+      home_room = "!chosen-force:example.org" })
+    assert(chosen_force_files, chosen_force_write_error)
+    assert(read(store_password_path) == old_password_bytes and #store_calls == 0
+      and chosen_force_files.password_path == nil
+      and chosen_force_files.old_password_path == store_password_path,
+      "a chosen-password --force setup must leave an existing password file byte-identical and report it")
+    clean_store_dir()
+
+    assert(store_gets == 0, "setup must never read the OS secure store")
+    matrix.status, matrix.relay.start, matrix.relay.stop = saved_status, saved_relay_start, saved_relay_stop
+    remuda._butler_matrix_config, remuda._butler_matrix_paths = saved_matrix_config, nil
+    remuda.system = saved_core_system
+    requests, resolved = {}, nil
+    os.remove(store_dir)
+    os.remove(root .. "/store-default")
+  end)()
+
   remuda.fs.write_atomic = real_write_atomic
   remuda.http = fake_http
 
