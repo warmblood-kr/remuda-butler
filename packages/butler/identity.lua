@@ -30,9 +30,17 @@ local function crockford_ulid()
     for i = 1, 10 do out[i] = string.char(bytes[i]) end
     entropy = table.concat(out)
   else
-    local random = io.open("/dev/urandom", "rb")
-    entropy = random and random:read(10)
-    if random then random:close() end
+    if type(remuda.random_bytes) == "function" then
+      local ok, random_bytes = pcall(remuda.random_bytes, 10)
+      if ok and type(random_bytes) == "string" and #random_bytes >= 10 then
+        entropy = random_bytes:sub(1, 10)
+      end
+    end
+    if not entropy then
+      local random = io.open("/dev/urandom", "rb")
+      entropy = random and random:read(10)
+      if random then random:close() end
+    end
     if not entropy or #entropy ~= 10 then
       math.randomseed(second + math.floor(os.clock() * 1000000))
       local out = {}
