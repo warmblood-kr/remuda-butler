@@ -1182,12 +1182,15 @@ return function(matrix, pinned_hostname)
   io.open = real_io_open
   assert(no_rng_reply and resolved and resolved.status == 1
     and pending_timeout == 90
-    and resolved.stderr:find("This system has no secure random source for a bot password. Next: rerun with --password-file PATH (a password you choose)", 1, true)
+    and resolved.stderr:find("This system has no secure random source for a bot password. Next: create a private password file, then rerun with --password-file PATH. PowerShell:", 1, true)
+    and resolved.stderr:find("PowerShell: [Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(24)) | Set-Content -NoNewline FILE. POSIX:", 1, true)
+    and resolved.stderr:find("POSIX: umask 077; head -c 24 /dev/urandom | base64 > FILE. Keep the file private.", 1, true)
     and #requests == 0
     and read(no_rng_output .. "/token") == nil
     and read(no_rng_output .. "/password") == nil
     and read(no_rng_output .. "/config") == nil,
-    "registration must fail closed without secure randomness before network or file writes")
+    "registration must fail closed without secure randomness before network or file writes: "
+      .. tostring(resolved and resolved.stderr))
   local no_rng_dir_created = remuda.fs.mkdir_new(no_rng_output)
   assert(no_rng_dir_created, "secure-random failure must not create the output directory")
   os.remove(no_rng_output)

@@ -606,7 +606,7 @@ function matrix.setup_network(options, on_done)
   elseif options.secret_kind == "registration" then
     registration_password = options.password_secret or new_password()
     if not registration_password then
-      return fail("This system has no secure random source for a bot password. Next: rerun with --password-file PATH (a password you choose)")
+      return fail("This system has no secure random source for a bot password. Next: create a private password file, then rerun with --password-file PATH. PowerShell: [Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(24)) | Set-Content -NoNewline FILE. POSIX: umask 077; head -c 24 /dev/urandom | base64 > FILE. Keep the file private.")
     end
     local base_bot = options.bot_mxid
     local localpart, server = base_bot:match("^@([^:]+):(.+)$")
