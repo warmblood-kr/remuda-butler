@@ -99,7 +99,7 @@ local function enable(args, key, path)
   end
   local prompt = {
     label = "Type yes to enable " .. args[1] .. ".",
-    preface = WARNINGS[key],
+    preface = matrix.wrap_prompt_preface(WARNINGS[key]),
     callback = function(answer, prompt_error)
       if completed then return end
       if prompt_error then
@@ -134,7 +134,7 @@ local function enable(args, key, path)
   local prompted, prompt_error = pcall(reply.prompt_line, reply, prompt)
   if not prompted then
     resolve(1, "", "The typed-line switch prompt failed: " .. tostring(prompt_error) .. ". Nothing was changed.\n")
-    return nil
+    return reply
   end
   return reply
 end

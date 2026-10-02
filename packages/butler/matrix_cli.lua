@@ -359,6 +359,58 @@ function matrix.prompt_preface_supported()
   return type(remuda.fs) == "table" and type(remuda.fs.lock) == "function"
 end
 
+function matrix.wrap_prompt_preface(text)
+  if type(text) ~= "string" then return "" end
+  local lines = {}
+  local function wrap_line(source)
+    if #source <= 200 then lines[#lines + 1] = source; return end
+    if source:match("^%s*$") then lines[#lines + 1] = ""; return end
+    -- A wrapped line keeps its indent, on the continuation lines too.
+    local indent = source:match("^%s*"):sub(1, 8)
+    local room = 200 - #indent
+    local line = ""
+    local function flush()
+      if line ~= "" then lines[#lines + 1] = indent .. line; line = "" end
+    end
+    for word in source:gmatch("%S+") do
+      while #word > room do
+        flush()
+        local cut = room
+        while cut > 0 do
+          local byte = word:byte(cut + 1) or 0
+          if byte < 0x80 or byte > 0xbf then break end
+          cut = cut - 1
+        end
+        -- No boundary within reach (malformed bytes): split on the byte.
+        if cut == 0 then cut = room end
+        lines[#lines + 1] = indent .. word:sub(1, cut)
+        word = word:sub(cut + 1)
+      end
+      if line == "" then
+        line = word
+      elseif #line + 1 + #word <= room then
+        line = line .. " " .. word
+      else
+        flush()
+        line = word
+      end
+    end
+    flush()
+  end
+  local start = 1
+  while true do
+    local newline = text:find("\n", start, true)
+    wrap_line(text:sub(start, newline and newline - 1 or #text))
+    if not newline then break end
+    start = newline + 1
+  end
+  if #lines > 32 then
+    for index = #lines, 32, -1 do lines[index] = nil end
+    lines[32] = "..."
+  end
+  return table.concat(lines, "\n")
+end
+
 function matrix.cli(args, agent, stdin_body, file_body)
   if type(args) == "table" and args[1] == "matrix" and args[2] == "setup" then
     -- Setup reads the files its flags name and sends them to the server named on the same
@@ -434,23 +486,26 @@ function matrix.cli(args, agent, stdin_body, file_body)
                 or nil
               return prompt_failure(safe_error, next_line)
             end
+            -- A dynamic value is cut at 150 characters so one long value cannot
+            -- crowd the summary; the fixed wording is never cut.
+            local function value(text) return shortened(terminal_safe(text), 150) end
             local lines = {
               "Matrix setup will:",
-              "  Homeserver: " .. terminal_safe(wizard_plan.homeserver),
-              "  Owner: " .. terminal_safe(wizard_plan.owner_mxid),
+              "  Homeserver: " .. value(wizard_plan.homeserver),
+              "  Owner: " .. value(wizard_plan.owner_mxid),
               "  Rooms: open (anyone can invite this Butler). Restrict: set rooms=allowlist or add deny_room/deny_server in "
-                .. terminal_safe(wizard_plan.config_path) .. ". The sender allowlist still decides whose messages are trusted.",
+                .. value(wizard_plan.config_path) .. ". The sender allowlist still decides whose messages are trusted.",
               "  Account: create a Butler bot (you will need its server registration token)",
-              "  Bot: " .. terminal_safe(wizard_plan.bot_mxid),
+              "  Bot: " .. value(wizard_plan.bot_mxid),
               -- Without --dir the files go next to the config file.
               "  Save private token and config files in: "
-                .. terminal_safe(wizard_plan.output_dir or wizard_plan.config_path:match("^(.*)/[^/]+$")),
+                .. value(wizard_plan.output_dir or wizard_plan.config_path:match("^(.*)/[^/]+$")),
               "  Start the relay for this Butler with this config (replaces its current Matrix relay config)",
             }
             if wizard_plan.pin then
               lines[#lines + 1] = "  HTTPS certificate pin: " .. wizard_plan.pin
             elseif wizard_plan.ca_file then
-              lines[#lines + 1] = "  HTTPS CA file: " .. terminal_safe(wizard_plan.ca_file)
+              lines[#lines + 1] = "  HTTPS CA file: " .. value(wizard_plan.ca_file)
             elseif scheme_or_error == "https" then
               lines[#lines + 1] = "  HTTPS trust: this system's trusted certificates"
             end
@@ -460,10 +515,7 @@ function matrix.cli(args, agent, stdin_body, file_body)
             local question = "Continue? Type Y to continue, or N to cancel"
             local label, preface = table.concat(lines, "\n") .. "\n" .. question, nil
             if matrix.prompt_preface_supported() then
-              -- A preface line over 256 characters is an error from core, not
-              -- a cut: shorten a very long value here so the wizard goes on.
-              for index, line in ipairs(lines) do lines[index] = shortened(line, 250) end
-              label, preface = question, table.concat(lines, "\n")
+              label, preface = question, matrix.wrap_prompt_preface(table.concat(lines, "\n"))
             end
             prompt_line(label, "N", function(answer)
                 answer = type(answer) == "string" and answer:lower() or ""
