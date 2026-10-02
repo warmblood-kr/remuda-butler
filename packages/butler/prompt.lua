@@ -32,26 +32,26 @@ local function safe_type_error_line(value)
   return utf8_prefix(line, 200)
 end
 
-local function prompt_start_visible(screen, task)
-  local visible, expected = compact(screen), compact(task)
-  if expected == "" then return false end
-  local marker_size = math.min(48, #expected)
-  return visible:find(expected:sub(1, marker_size), 1, true) ~= nil
-end
-
-local function notify(remuda, parent, name, reason)
-  if parent then
-    pcall(remuda._butler_send, "butler", parent,
-      "Could not verify delivery of the initial task to " .. name .. ": " .. reason .. ".")
+local function trace_write(remuda, session, marker, ok, result, detail)
+  local first = safe_type_error_line(ok and (detail or result) or result or "")
+  local outcome = "success"
+  if not ok or result == false then
+    local refused = first:find("LateSubmitAbandoned", 1, true) ~= nil
+      or first:find("input write is already in flight", 1, true) ~= nil
+    if result == false or refused then outcome = "refused" else outcome = "error" end
   end
+  local trace = rawget(_G, "_butler_session_trace")
+  if type(trace) == "function" then
+    pcall(trace, "task_write_outcome", session .. " marker=" .. tostring(marker)
+      .. " outcome=" .. outcome .. (first ~= "" and " first_line=" .. first or ""))
+  end
+  return outcome, first
 end
 
 local function schedule(remuda, kind, actual, name, parent, task, options)
   options = options or {}
-  local poll, startup_ticks, deferred_ticks, verify_ticks = nil, 0, 0, 0
-  local attempts = 0
-  local handled_modals, settle_until, task_seen_in_composer = {}, 0, false
-  local verify_started
+  local poll, startup_ticks, deferred_ticks = nil, 0, 0
+  local handled_modals, settle_until, write_at, finished = {}, 0, nil, false
   local function now()
     if options.now then
       local ok, value = pcall(options.now)
@@ -60,14 +60,52 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
     return os.time()
   end
   local function finish(ok, reason)
+    if finished then return end
+    finished = true
     remuda.cancel(poll)
-    if options.on_done then
-      pcall(options.on_done, ok, reason)
-    elseif not ok then
-      notify(remuda, parent, name, reason)
+    if options.on_done then pcall(options.on_done, ok, reason) end
+  end
+  local function target_alive()
+    if not options.same_launch then return true end
+    local checked, alive, reason = pcall(options.same_launch)
+    if not checked then return false, "session liveness check failed" end
+    return alive == true, reason
+  end
+  local function observe_write()
+    local alive, reason = target_alive()
+    if not alive then finish(false, reason or "session was replaced"); return end
+    local captured, screen = pcall(remuda.capture, actual)
+    if not captured then
+      local trace = rawget(_G, "_butler_session_trace")
+      if type(trace) == "function" then pcall(trace, "task_write_observation", actual .. " outcome=capture_error") end
+      finish(true)
+      return
+    end
+    local checked, decision = pcall(options.empty or remuda._butler_prompt_is_empty, kind, screen)
+    local activity_known, active = true, false
+    if options.working then
+      local ok, value = pcall(options.working, screen)
+      if ok then active = value == true else activity_known = false end
+    end
+    if remuda.session then
+      local ok, session = pcall(remuda.session, actual)
+      if ok and session then active = active or session.is_busy == true
+      else activity_known = false end
+    end
+    if checked and decision == "EMPTY" and activity_known and not active then
+      finish(false, "write returned success but the task never appeared")
+    else
+      finish(true)
     end
   end
   poll = remuda.schedule({ every = 0.5, run = function()
+    if finished then return end
+    if write_at then
+      if now() - write_at >= 15 then observe_write() end
+      return
+    end
+    local alive, unavailable = target_alive()
+    if not alive then finish(false, unavailable or "session was replaced"); return end
     local captured, screen = pcall(remuda.capture, actual)
     if not captured then
       finish(false, "could not capture the agent screen")
@@ -85,7 +123,7 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
       end
     end
 
-    if attempts == 0 then
+    if not write_at then
       for index, modal in ipairs(options.modals or {}) do
         if modal.match and screen:find(modal.match, 1, true) then
           local human_active = false
@@ -127,6 +165,11 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
         is_ready = checked and result == true
       end
       if is_ready then
+        local checked, decision = pcall(options.empty or remuda._butler_prompt_is_empty, kind, screen)
+        if not checked or decision ~= "EMPTY" then
+          finish(false, decision == "NON-EMPTY" and "composer is non-empty" or "composer state is unknown")
+          return
+        end
         local allowed = true
         if options.allowed then
           local checked, result = pcall(options.allowed, false, screen)
@@ -139,20 +182,10 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
           end
           return
         end
-        attempts = 1
-        verify_ticks = 0
-        -- Keep this nonblocking: a long terminal sleep stalls every daemon
-        -- callback, including notice and lifecycle work.
-        local typed, type_error = pcall(remuda.type_text, actual, task, 0.1)
-        if not typed then
-          local reason = "type failed"
-          if type(type_error) == "string" then
-            reason = "type failed: " .. safe_type_error_line(type_error)
-          end
-          finish(false, reason)
-        else
-          verify_started = now()
-        end
+        local typed, result, detail = pcall(remuda.type_text, actual, task, 0.1)
+        local outcome, first = trace_write(remuda, actual, options.marker, typed, result, detail)
+        if outcome ~= "success" then finish(false, first ~= "" and first or "write refused"); return end
+        write_at = now()
       else
         local human_active = false
         if options.human_active then
@@ -172,63 +205,10 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
       return
     end
 
-    verify_ticks = verify_ticks + 1
-    local started = prompt_start_visible(screen, task)
-    local empty = true
-    local composer_text = ""
-    if options.empty then
-      local checked, decision, text = pcall(options.empty, screen)
-      empty = checked and decision == "EMPTY"
-      if checked then composer_text = tostring(text or "") end
-    end
-    local session_busy = false
-    if remuda.session then
-      local checked, session = pcall(remuda.session, actual)
-      session_busy = checked and session and session.is_busy == true
-    end
-    -- Busy is useful only after the composer releases our text; typing the
-    -- task itself also makes a terminal look busy.
-    if session_busy and empty then
-      finish(true)
-      return
-    end
-    local placeholder = composer_text:match("^%[?Pasted text #%d+%s*%+%s*%d+%s+lines?%]?%s*$") ~= nil
-      or composer_text:match("^%[Pasted Content %d+ chars%]$") ~= nil
-    local composer_is_task = not empty and (compact(composer_text) == compact(task) or placeholder)
-    if composer_is_task then task_seen_in_composer = true end
-    if started and empty then
-      finish(true)
-      return
-    end
-    if task_seen_in_composer and empty then
-      finish(true)
-      return
-    end
-    -- A task can be fully painted while its first Return is dropped. Retry
-    -- submit once, before allowing queued notices to reach this composer.
-    if composer_is_task and verify_ticks >= 4 and not options.return_retried then
-      local allowed = true
-      if options.allowed then
-        local checked, result = pcall(options.allowed, true, screen)
-        allowed = checked and result == true
-      end
-      if not allowed then
-        deferred_ticks = deferred_ticks + 1
-        if deferred_ticks >= (options.timeout or 600) then finish(false, "deferred") end
-        return
-      end
-      options.return_retried = true
-      pcall(remuda.key, actual, "RET")
-      verify_ticks = 0
-      return
-    end
-    if verify_started and now() - verify_started >= (options.submit_timeout or 300) then
-      finish(false, "submit")
-    end
   end })
   return poll
 end
 
-local delivery = { schedule = schedule, ready = ready, prompt_start_visible = prompt_start_visible }
+local delivery = { schedule = schedule, ready = ready, trace_write = trace_write }
 remuda._butler_prompt_delivery = delivery
 return delivery
