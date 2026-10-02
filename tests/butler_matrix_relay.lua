@@ -2542,7 +2542,7 @@ local function public_rooms_response(chunk)
   })) }
 end
 
-local function capture_matrix_cli(args, agent)
+local function capture_matrix_cli(args, agent, stdin_body, file_body)
   local old_pending, old_guidance, captured = remuda.pending, matrix.configuration_guidance, nil
   remuda.pending = function()
     return { resolve = function(_, code, stdout, stderr)
@@ -2550,10 +2550,17 @@ local function capture_matrix_cli(args, agent)
     end }
   end
   matrix.configuration_guidance = function() return nil end
-  local returned = matrix.cli(args, agent)
-  tick_timers(1)
+  local old_fail = remuda.fail
+  remuda.fail = function(message, code) return { code = code or 1, stdout = "", stderr = tostring(message) } end
+  local ok, returned = pcall(matrix.cli, args, agent, stdin_body, file_body)
+  remuda.fail = old_fail
+  for _ = 1, 8 do if captured then break end tick_timers(1) end
   remuda.pending, matrix.configuration_guidance = old_pending, old_guidance
+  if not ok then error(returned, 0) end
   if not captured and type(returned) == "string" then captured = { code = 0, stdout = returned, stderr = "" } end
+  if not captured and type(returned) == "table" and returned.code then
+    captured = { code = returned.code, stdout = returned.stdout or "", stderr = returned.stderr or "" }
+  end
   return captured
 end
 
@@ -5293,6 +5300,55 @@ rx_tests = {
   { "test_rx_follow_unfollow_verbs", test_rx_follow_unfollow_verbs },
   { "test_rx_reply_follows_thread_all_room_kinds", test_rx_reply_follows_thread_all_room_kinds },
   { "test_rx_send_follows_own_root", test_rx_send_follows_own_root },
+  { "test_rx_send_text_forms", function()
+    local dir, path = rx_fixture()
+    rx_with_dir(dir, function()
+      local relay, client = rx_relay(path)
+      relay_module.instance = relay
+      rx_sync(client, HOME, { rx_msg("$q", OWNER, "question") })
+      local function stdin_body() return "from stdin" end
+      local function file_body(p)
+        if p == "/outside" then error("refused: /outside is outside the working directory", 0) end
+        return "from file " .. p
+      end
+      rx_post_http(path, function(calls)
+        local function posted(args) -- result, number of PUTs, body of the last PUT
+          local before, last = #calls, ""
+          local result = capture_matrix_cli(args, nil, stdin_body, file_body)
+          local puts = 0
+          for i = before + 1, #calls do
+            if calls[i].method == "PUT" then puts, last = puts + 1, tostring(calls[i].body) end
+          end
+          return result, puts, last
+        end
+        local result, n, body = posted({ "matrix", "send", "--file", "/in.md" })
+        assert(result.code == 0 and n == 1 and body:find("from file /in.md", 1, true)
+          and not body:find('"--file', 1, true), "--file posts the file text, got " .. body)
+        assert(result.stdout:find("to " .. HOME, 1, true), "output names the room, got " .. result.stdout)
+        result, n, body = posted({ "matrix", "--room", NEW, "send", "-" })
+        assert(result.code == 0 and n == 1 and body:find("from stdin", 1, true)
+          and result.stdout:find("to " .. NEW, 1, true), "- posts stdin to the named room")
+        result, n = posted({ "matrix", "send", "--file", "/outside" })
+        assert(result.code ~= 0 and n == 0 and result.stderr:find("outside", 1, true), "an outside file is refused, nothing posts")
+        result, n = posted({ "matrix", "send", "--fiel", "x" })
+        assert(result.code ~= 0 and n == 0 and result.stderr:find("Next:", 1, true)
+          and result.stderr:find("--fiel", 1, true), "a mistyped option never posts, got " .. tostring(result.stderr))
+        result, n, body = posted({ "matrix", "send", "--", "--fiel", "x" })
+        assert(result.code == 0 and n == 1 and body:find("--fiel x", 1, true), "text after -- stays literal")
+        result, n, body = posted({ "matrix", "send", "plain text" })
+        assert(result.code == 0 and n == 1 and body:find("plain text", 1, true), "plain text is unchanged")
+        result, n, body = posted({ "matrix", "reply", "$q", "-" })
+        assert(result.code == 0 and n == 1 and body:find("from stdin", 1, true), "reply - posts stdin, got " .. tostring(result.stderr))
+        result, n, body = posted({ "matrix", "reply", "$q", "--file", "/in.md" })
+        assert(result.code == 0 and n == 1 and body:find("from file /in.md", 1, true)
+          and not body:find('"--file', 1, true), "reply --file posts the file text, got " .. tostring(result.stderr))
+        result, n = posted({ "matrix", "reply", "$q", "--fiel", "x" })
+        assert(result.code ~= 0 and n == 0 and result.stderr:find("matrix reply EVENT_ID --file PATH", 1, true),
+          "a mistyped reply option never posts, got " .. tostring(result.stderr))
+      end)
+      relay:stop()
+    end)
+  end },
   { "test_rx_mention_follows_thread", test_rx_mention_follows_thread },
   { "test_rx_main_timeline_reply_is_root", test_rx_main_timeline_reply_is_root },
   { "test_rx_in_thread_reply_unfollowed_not_delivered", test_rx_in_thread_reply_unfollowed_not_delivered },

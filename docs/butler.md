@@ -165,8 +165,8 @@ remuda butler matrix [--json] [--room ROOM] follow EVENT_ID
 remuda butler matrix [--json] [--room ROOM] unfollow EVENT_ID
 remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
 remuda butler matrix [--json] [-o PATH] download MXC
-remuda butler matrix [--json] [--room ROOM] send TEXT
-remuda butler matrix [--json] [--room ROOM] reply EVENT_ID TEXT
+remuda butler matrix [--json] [--room ROOM] send TEXT | - | --file PATH
+remuda butler matrix [--json] [--room ROOM] reply EVENT_ID TEXT | - | --file PATH
 remuda butler matrix [--json] [--room ROOM] react EVENT_ID KEY
 remuda butler matrix [--json] [--room ROOM] upload PATH
 remuda butler matrix [--json] [--room ROOM] redact EVENT_ID [--reason TEXT]
@@ -174,6 +174,13 @@ remuda butler matrix [--json] join ROOM
 remuda butler matrix [--json] leave ROOM
 remuda butler matrix [--json] quarantine [--id EVENT_ID]
 ```
+
+`send` and `reply` take the text as arguments, `-` for stdin, or `--file PATH`
+for a file. Bodies are limited to 64 KiB, and a file must lie inside the
+caller's working directory, as for `remuda butler send`. A text that starts
+with `--` and is not `--file` is refused with a `Next:` line; put `--` before
+the text to send it literally (`send -- --text`). The output names the room
+posted to.
 
 ### Owner typed lines
 

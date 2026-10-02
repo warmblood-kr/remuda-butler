@@ -10,8 +10,8 @@ local USAGE = [[  remuda butler matrix [--json] status
   remuda butler matrix [--json] [--room ROOM] unfollow EVENT_ID
   remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
   remuda butler matrix [--json] [-o PATH] download MXC
-  remuda butler matrix [--json] [--room ROOM] send TEXT
-  remuda butler matrix [--json] [--room ROOM] reply EVENT_ID TEXT
+  remuda butler matrix [--json] [--room ROOM] send TEXT | - | --file PATH
+  remuda butler matrix [--json] [--room ROOM] reply EVENT_ID TEXT | - | --file PATH
   remuda butler matrix [--json] [--room ROOM] react EVENT_ID KEY
   remuda butler matrix [--json] [--room ROOM] upload PATH
   remuda butler matrix [--json] [--room ROOM] redact EVENT_ID [--reason TEXT]
@@ -107,18 +107,32 @@ local function parse(args)
   if options.reason and method ~= "redact" then return nil end
   if options.id and method ~= "quarantine" then return nil end
   if options.public and method ~= "rooms" then return nil end
-  if method == "send" then
-    options.text = join_words(values, 1)
-    if #values == 0 then return nil end
-    -- A bare `-` reads the text from stdin; after `--` it is literal text. Core
-    -- forwards stdin by the same rule (a `-` argument before any `--`).
-    if values[1] == "-" and not literal then
-      if #values ~= 1 then error("stdin message form takes no extra arguments", 0) end
+  -- TEXT starts at `first`. A bare `-` reads stdin (core forwards stdin by the same rule: a
+  -- `-` argument before any `--`) and `--file PATH` reads a file; after `--` both are literal
+  -- text, and any other leading `--word` is refused so a typo never posts.
+  local function text_form(first)
+    local head = values[first]
+    options.text = join_words(values, first)
+    if literal then return end
+    if head == "-" then
+      if #values ~= first then error("stdin message form takes no extra arguments", 0) end
       options.stdin = true
+    elseif head == "--file" then
+      if #values ~= first + 1 then error("expected one path after --file", 0) end
+      options.file_body = values[first + 1]
+    elseif head:sub(1, 2) == "--" then
+      error("unknown option " .. head:gsub("%c", "?") .. " in the message text\n"
+        .. "Next: remuda butler matrix " .. method .. (first == 2 and " EVENT_ID" or "")
+        .. " --file PATH, or put -- before text that starts with dashes", 0)
     end
+  end
+  if method == "send" then
+    if #values == 0 then return nil end
+    text_form(1)
   elseif method == "reply" then
     if #values < 2 then return nil end
-    options.event_id, options.text = values[1], join_words(values, 2)
+    options.event_id = values[1]
+    text_form(2)
   elseif method == "react" then
     if #values ~= 2 then return nil end
     options.event_id, options.key = values[1], values[2]
@@ -259,7 +273,9 @@ local function render_human(verb, options, result)
     return string.format("Downloaded %d bytes to %s\n", result.bytes or 0, result.path or "")
   elseif verb == "send" or verb == "reply" then
     local ids = result.event_ids or {}
-    return string.format("Sent %d message(s)%s\n", result.sent or #ids,
+    local room = options.room or matrix.configured_room()
+    return string.format("Sent %d message(s)%s%s\n", result.sent or #ids,
+      type(room) == "string" and room ~= "" and (" to " .. terminal_safe(room)) or "",
       #ids > 0 and (": " .. table.concat(ids, ", ")) or "")
   elseif verb == "react" or verb == "redact" then
     return "Completed Matrix " .. verb .. (result.event_id and (": " .. result.event_id) or "") .. "\n"
@@ -343,7 +359,7 @@ function matrix.prompt_preface_supported()
   return type(remuda.fs) == "table" and type(remuda.fs.lock) == "function"
 end
 
-function matrix.cli(args, agent, stdin_body)
+function matrix.cli(args, agent, stdin_body, file_body)
   if type(args) == "table" and args[1] == "matrix" and args[2] == "setup" then
     -- Setup reads the files its flags name and sends them to the server named on the same
     -- command line, and rewrites the Butler's Matrix files: refused to agents, as join and leave.
@@ -702,9 +718,12 @@ function matrix.cli(args, agent, stdin_body)
     if type(remuda.fail) == "function" then return remuda.fail(message, 1) end
     error(message, 0)
   end
-  if options.stdin then
+  if options.stdin or options.file_body then
     local read, text = false, "no message body received on stdin"
-    if type(stdin_body) == "function" then read, text = pcall(stdin_body) end
+    if options.file_body then
+      read, text = false, "no file reader is available"
+      if type(file_body) == "function" then read, text = pcall(file_body, options.file_body) end
+    elseif type(stdin_body) == "function" then read, text = pcall(stdin_body) end
     if not read then
       if type(remuda.fail) == "function" then return remuda.fail(tostring(text), 1) end
       error(tostring(text), 0)
