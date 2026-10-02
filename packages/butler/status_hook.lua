@@ -23,7 +23,9 @@ function M.run(args, caller)
   local path, input = args[2], caller and caller.stdin
   local absolute = type(path) == "string" and (path:sub(1, 1) == "/" or path:sub(1, 2) == "\\\\"
     or (path:match("^%a:") ~= nil and (path:sub(3, 3) == "/" or path:sub(3, 3) == "\\")))
-  if absolute and path:match("%.status$") and type(input) == "string" then
+  -- A "." or ".." component would let the written file land beside another status file.
+  local plain = absolute and not ("/" .. path:gsub("\\", "/") .. "/"):find("/%.%.?/")
+  if plain and path:match("%.status$") and type(input) == "string" then
     local decoded_ok, decoded = pcall(remuda.json.decode, input)
     local word = decoded_ok and M.word(decoded)
     if word then
