@@ -25,7 +25,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            ${{ runner.temp }}/remuda-target
+            ${{ github.workspace }}/remuda-core/target
           key: ${{ runner.os }}-cargo-${{ github.workflow }}-${{ github.ref }}-${{ steps.core-ref.outputs.ref }}-${{ github.sha }}
           restore-keys: |
             ${{ runner.os }}-cargo-${{ github.workflow }}-${{ github.ref }}-${{ steps.core-ref.outputs.ref }}-
@@ -36,7 +36,7 @@ jobs:
       - run: tests/rust_tests.sh
         env:
           CORE_REF: ${{ steps.core-ref.outputs.ref }}
-          CARGO_TARGET_DIR: ${{ runner.temp }}/remuda-target
+          CARGO_TARGET_DIR: ${{ github.workspace }}/remuda-core/target
 
   golden:
     # Guidance text (help, member AGENTS.md, welcome mail, member prompt) must stay
@@ -103,26 +103,26 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            ${{ runner.temp }}/remuda-target
+            ${{ github.workspace }}/remuda-core/target
           key: ${{ runner.os }}-cargo-${{ github.workflow }}-${{ github.ref }}-${{ steps.core-ref.outputs.ref }}-${{ github.sha }}
           restore-keys: |
             ${{ runner.os }}-cargo-${{ github.workflow }}-${{ github.ref }}-${{ steps.core-ref.outputs.ref }}-
       - name: Build pinned core
         if: steps.paths.outputs.run == 'true'
         working-directory: remuda-core
-        run: cargo build --release --bin remuda
+        run: cargo build --manifest-path Cargo.toml -p remuda-native --bin remuda
         env:
-          CARGO_TARGET_DIR: ${{ runner.temp }}/remuda-target
+          CARGO_TARGET_DIR: ${{ github.workspace }}/remuda-core/target
       - name: Run Butler contract gate
         if: steps.paths.outputs.run == 'true'
         env:
           BUTLER_REPO: ${{ github.workspace }}
-          CARGO_TARGET_DIR: ${{ runner.temp }}/remuda-target
+          CARGO_TARGET_DIR: ${{ github.workspace }}/remuda-core/target
         run: |
           run_gate() {
             local log=$1 status
             set +e
-            PATH="$CARGO_TARGET_DIR/release:$PATH" remuda-core/scripts/check-butler-contract.sh 2>&1 | tee "$log"
+            remuda-core/scripts/check-butler-contract.sh 2>&1 | tee "$log"
             status=${PIPESTATUS[0]}
             set -e
             return "$status"
