@@ -160,9 +160,10 @@ do
   assert(table.concat(order, ",") == "claude,codex", "legacy order must be claude,codex: " .. table.concat(order, ","))
   local started, failed = {}, nil
   remuda.new = function(name, argv) started[#started + 1] = argv[1]; return name end
-  remuda._butler_chooser_config.system.find_command = function() return nil end
+  remuda._butler_chooser_config.system.find_command = function(name) if name ~= "monocle" then return nil end return name end
   remuda._butler_choose(order, { name = "legacy-fail", cwd = "/work", spec = function(kind) return { cwd = "/work", name = "legacy-fail", kind = kind } end, env = function() return {} end, skip_probe = true }, function(name, kind, attempts) failed = { name = name, kind = kind } end)
-  assert(#started == 0 and failed and failed.kind == nil, "failed claude and codex must not start monocle")
+  assert(#started == 0 and failed and failed.kind ~= "monocle" and failed.kind == nil,
+    "failed claude and codex must not start monocle")
   remuda._butler_chooser_config.system.find_command = function(name) return name end
 end
 
