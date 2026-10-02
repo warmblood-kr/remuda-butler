@@ -173,19 +173,25 @@ end
 -- Both are keys. The trailing slash keeps a sibling like CWDx outside.
 local function inside(real, root) return real ~= nil and root ~= nil and real:sub(1, #root + 1) == root .. "/" end
 local DEVICE = " names a device or a stream, not a file"
+local RELATIVE = " is not an absolute path"
 
 -- A file to READ. Returns the path to open, or nil and the refusal.
 function permissions.file_for_caller(path, caller, cwd_of, realpath, flag, pipe, platform)
   local what = "refused: " .. flag .. one_line(path)
   -- A device is refused by its name, before anything opens or resolves it, and
   -- for a terminal caller too: opening a pipe blocks the daemon.
-  local key, why = nil, select(2, path_key(path, platform))
+  local key, why = path_key(path, platform)
   if type(caller) == "table" and caller.kind == "outside" then
     if why == "device" then return nil, what .. DEVICE .. "\nNext: pass a regular file" end
     return path
   end
   local cwd, root = session_cwd(caller, cwd_of, realpath, platform)
   if not cwd then return nil, what .. UNKNOWN end
+  -- A relative path would resolve against the daemon's directory, not the caller's.
+  if not key and not why then
+    return nil, what .. RELATIVE .. "\nNext: pass the full path of a file inside " .. one_line(cwd)
+  end
+  key = nil
   local ok, real = true, nil
   if why ~= "device" then ok, real = pcall(realpath, path) end
   if ok and real then key, why = path_key(real, platform) end
@@ -221,7 +227,9 @@ function permissions.output_for_caller(path, name, caller, cwd_of, realpath, is_
   local separator = windows and "\\" or "/"
   local parent, base = root, name
   if path then
-    if select(2, path_key(path, platform)) == "device" then return refuse(DEVICE) end
+    local given, why = path_key(path, platform)
+    if why == "device" then return refuse(DEVICE) end
+    if not given and not why then return refuse(RELATIVE) end
     local dir
     dir, base = path:match(windows and "^(.*)[/\\]([^/\\]*)$" or "^(.*)/([^/]*)$")
     if not dir or base == "" or base == "." or base == ".." then return refuse(" has no file name") end
