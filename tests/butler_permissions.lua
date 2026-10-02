@@ -594,6 +594,12 @@ weq("path_key: UNC and its \\\\?\\ form are one place", permissions.path_key([[\
   permissions.path_key([[\\srv\share\D]], "windows"))
 weq("path_key: a drive-relative path is not absolute", permissions.path_key([[C:proj]], "windows"), nil)
 weq("path_key: a device says why", select(2, permissions.path_key([[C:\proj\COM1.log]], "windows")), "device")
+-- Windows reserves COM and LPT with a superscript 1, 2 or 3 as well.
+for _, name in ipairs({ "COM\194\185", "com\194\178.txt", "LPT\194\179", "lpt\194\185 .log" }) do
+  weq("path_key: " .. name .. " is a device", select(2, permissions.path_key([[C:\proj\]] .. name, "windows")), "device")
+end
+weq("path_key: a superscript 4 is an ordinary name", permissions.path_key([[C:\proj\COM]] .. "\226\129\180", "windows"),
+  "c:/proj/com\226\129\180")
 weq("path_key: posix is the path itself", permissions.path_key("/w/M1", "posix"), "/w/M1")
 weq("path_key: posix keeps a backslash as a character", permissions.path_key([[C:\proj]], "posix"), nil)
 if #wfailed > 0 then error(#wfailed .. " Windows path cases failed:\n" .. table.concat(wfailed, "\n"), 0) end
