@@ -327,6 +327,13 @@ local function new_password()
   return base64url(bytes)
 end
 
+-- Whoever made the password keeps it: only one setup generated is saved, never a
+-- --password-file or --password-cmd one.
+local function saves_password(options)
+  return options.secret_kind == "registration" and not options.password_cmd
+    and not options.password_input_path
+end
+
 local function resolve_outputs(options)
   local resolved = default_paths()
   local current = remuda._butler_matrix_paths or resolved or {}
@@ -365,7 +372,7 @@ local function resolve_outputs(options)
   if options.default and options.dir then return nil, "--default and --dir cannot be combined" end
 
   local password_path = token_path:match("^(.*)/[^/]+$") .. "/password"
-  local saves_password = options.register and not options.password_cmd
+  local saves_password = saves_password(options)
   if saves_password and (password_path == token_path or password_path == config_path) then
     return nil, "Matrix password, token, and config output paths must be different"
   end
@@ -850,9 +857,7 @@ function matrix.setup_write(options, result)
     end
     return nil, message
   end
-  -- A --password-cmd password stays with whoever made it; no copy is saved.
-  local saves_password = type(options) == "table" and options.secret_kind == "registration"
-    and not options.password_cmd
+  local saves_password = type(options) == "table" and saves_password(options)
   if type(options) ~= "table" or type(result) ~= "table"
     or type(result.token) ~= "string" or result.token == ""
     or type(result.user_id) ~= "string" or type(result.home_room) ~= "string"
