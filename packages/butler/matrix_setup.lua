@@ -78,7 +78,7 @@ local function valid_url(value)
 end
 
 local function safe_user_id_echo(value)
-  return matrix.utf8_prefix(value:gsub("[%c]", "?"), 64)
+  return matrix.utf8_prefix(value:gsub("[%c]", "?"):gsub("\194[\128-\159]", "?"), 64)
 end
 
 local function invalid_user_id(value, option)
@@ -106,8 +106,8 @@ local function valid_mxid(value, option)
     return nil, option .. " is required. Enter a Matrix user ID, like @alice:example.org."
   end
   local localpart, server = value:match("^@([^:]+):(.+)$")
-  if not localpart or localpart:find("[%s%c/@]") or server == ""
-    or server:find("[%s%c/#?]") then
+  if not localpart or localpart:find("[%s%c/@]") or localpart:find("\194[\128-\159]") or server == ""
+    or server:find("[%s%c/#?]") or server:find("\194[\128-\159]") then
     return nil, invalid_user_id(value, option)
   end
   return value

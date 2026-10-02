@@ -66,6 +66,9 @@ if remuda._butler_test_mode == true then
   return
 end
 
+remuda.exec("butler/private_write")
+remuda._butler_private_write.install()
+
 -- Cancel the existing Matrix relay before resolving new config;
 -- matrix.lua will start exactly one relay after the new config is installed.
 local old_matrix = remuda.butler and remuda.butler.matrix
@@ -182,9 +185,16 @@ local status_path = remuda._butler_status_path
 local function status_settings(path)
   local settings_path = path .. ".settings.json"
   local settings = assert(io.open(settings_path, "w"))
+  -- Hooks feed the per-session status word (see status_hook.lua); their
+  -- output is discarded and they always exit 0 so Claude never sees them.
+  -- Claude runs hook commands through sh, or PowerShell on Windows.
+  local quiet = system.platform() == "windows" and " *> $null; exit 0" or " >/dev/null 2>&1; exit 0"
+  local hook = '{"hooks":[{"type":"command","command":' .. json_quote(
+    "remuda -s " .. shell_quote(server) .. " --stdin butler status-hook " .. shell_quote(path) .. quiet
+  ) .. '}]}'
   settings:write('{"statusLine":{"type":"command","command":'
     .. json_quote("remuda -s " .. shell_quote(server) .. " --stdin butler statusline " .. shell_quote(path))
-    .. '}}')
+    .. '},"hooks":{"UserPromptSubmit":[' .. hook .. '],"Stop":[' .. hook .. '],"Notification":[' .. hook .. ']}}')
   settings:close()
   return settings_path
 end
@@ -602,6 +612,7 @@ remuda._butler_commands_config = { current_agent = current_agent, OPERATOR = OPE
 }
 remuda.exec("butler/schedule")
 remuda.exec("butler/schedule_cli")
+remuda.exec("butler/status_hook")
 remuda.exec("butler/commands")
 
 remuda.tool{
@@ -706,10 +717,17 @@ remuda.tool{
   args = { name = "Name or ID of one of your direct Butler members.", force = "Set true to skip unread-mail and idle checks." },
   needs = { "name" },
   run = function(a, caller)
-    if a.force ~= nil and type(a.force) ~= "boolean" then error("force must be a boolean.\nNext: set force to true or omit it", 0) end
+    local force = a.force
+    if force == "true" then
+      force = true
+    elseif force == "false" then
+      force = false
+    elseif force ~= nil and type(force) ~= "boolean" then
+      error("force must be a boolean.\nNext: set force to true or omit it", 0)
+    end
     local ok, leader = pcall(caller_leader, caller)
     if not ok then error(tostring(leader) .. "\nNext: run from a Butler member session", 0) end
-    return remuda._butler_close_member(a.name, leader, a.force == true)
+    return remuda._butler_close_member(a.name, leader, force == true)
   end,
 }
 
@@ -1136,18 +1154,23 @@ function remuda._butler_session_exited(name, info)
       local children = bus.agents[exited.parent].children
       for i = #children, 1, -1 do if children[i] == name then table.remove(children, i) end end
     end
+    -- A lead that is about to relaunch under the same name keeps its members.
+    if not update_restart then remuda._butler_adopt_members(name, exited) end
   end
   if name == butler_name then
     _butler_session_trace("relaunching", name)
     remuda._butler_reconcile()
   end
   if update_restart then
+    remuda._butler_relaunching = remuda._butler_relaunching or {}
+    remuda._butler_relaunching[name] = os.time()
     _butler_session_trace("codex_updated_relaunch", name)
     local ok, err = pcall(launch_agent, update_restart.kind, update_restart.name,
       update_restart.cwd, update_restart.model, update_restart.parent, update_restart.task,
       update_restart.identity)
     if not ok then
       _butler_session_trace("codex_updated_relaunch_failed", name .. ": " .. tostring(err))
+      remuda._butler_relaunching[name] = nil
       pcall(remuda._butler_send, "butler", update_restart.parent or "butler",
         "Codex update completed but " .. name .. " could not be relaunched: " .. tostring(err))
     end

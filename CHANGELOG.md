@@ -7,6 +7,7 @@ release tags yet; entries come from merged pull requests.
 ## Unreleased
 
 ### Added
+- Claude members report `working`, `idle` and `needs you` through Claude Code hooks (`remuda butler status-hook`), which beat the screen probe while fresh; Codex keeps the screen probe.
 - The client session list leads each Butler session line with `working`, `idle`, `needs you` or `other`, read from the agent's screen probes.
 - `remuda butler matrix send` and `reply` accept `-` and `--file PATH` like the mail verbs, a text starting with an unknown `--option` is refused instead of posted (use `--` for literal text), and the output names the room posted to (#251).
 - A mail whose first line is `HANDOFF` is the handoff letter: the root Butler reads it first after a relaunch.
@@ -52,6 +53,8 @@ release tags yet; entries come from merged pull requests.
 - Butler-to-Butler Matrix replies are no longer blocked. A per-thread turn guard (`b2b_max_turns`, default 6) stops the Butler after 6 Butler-only turns and posts one line to HOME; a reply in that thread from a person on the allowlist resumes it (#223).
 
 ### Fixed
+- When a lead exits, its members move to the lead's leader instead of keeping a dead leader, and the root Butler (or a person) can close leader-less rows, so finished sessions no longer pile up unclosable (#230).
+- `remuda butler matrix download -o PATH` from a terminal now refuses a relative PATH ("not an absolute path"): it used to write into the daemon's directory, not yours. Known limits of file confinement for agent sessions: on Windows two directories that differ only by letter case count as one place, even in a directory made case-sensitive; and a named pipe (FIFO) inside the working directory still blocks the read.
 - File arguments from an agent session work on Windows: Butler resolves a path with core's `remuda.fs.realpath` and `remuda.fs.is_symlink` when the core has them. On an older core nothing changes: posix asks `realpath` and `test -L`, and Windows refuses the argument as "cannot be resolved" (piping the text with `-` works). A relative path from an agent session is now refused as "not an absolute path" instead of being resolved against the daemon's directory.
 - File arguments from an agent session (`--file`, Matrix upload and download) understand Windows paths: `C:\dir` and `C:/dir`, `\\server\share`, either slash, any letter case. A device name such as `NUL` or `con.txt` and an alternate stream (`file:stream`) are refused, for a person at a terminal too.
 - On Windows, Butler no longer picks the extensionless `claude` / `codex` script that an npm install puts next to `claude.cmd`; it starts the `.cmd` (or `.exe`) file.

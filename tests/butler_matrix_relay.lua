@@ -1277,6 +1277,10 @@ local function test_redefined_public_words_do_not_change_trust()
   dofile("packages/butler/matrix_write.lua")
   assert(remuda._test_matrix_write_random_request == 16,
     "Matrix write transaction tag should use remuda.random_bytes when /dev/urandom is unavailable")
+  remuda.random_bytes = nil
+  local txn_ok, txn_error = pcall(dofile, "packages/butler/matrix_write.lua")
+  assert(not txn_ok and tostring(txn_error):find("secure random source unavailable", 1, true),
+    "Matrix writes must fail to load when both secure random sources are unavailable")
   remuda.random_bytes = remuda._test_matrix_write_saved_random
   io.open = remuda._test_matrix_write_saved_open
   remuda._test_matrix_write_saved_random, remuda._test_matrix_write_saved_open = nil, nil

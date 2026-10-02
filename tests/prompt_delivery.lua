@@ -153,7 +153,8 @@ do
   end
   function fake.capture() return "Ask Codex\n❯ " end
   function fake.type_text()
-    error("PTY write exceeded 2s; delivery may be partial or late\nstack traceback:\n\t...")
+    error("packages/butler/native.lua:12: " .. string.rep("x", 192)
+      .. "\t\27[31m\194\133é\nstack traceback:\n\t...", 0)
   end
   M.schedule(fake, "codex", "type-failure", "member", "leader", "task", {
     on_done = function(ok, reason)
@@ -163,8 +164,20 @@ do
   state.callback()
   assert(state.cancelled and state.done and state.ok == false,
     "type failure did not call on_done(false)")
-  assert(state.reason == "type failed: PTY write exceeded 2s; delivery may be partial or late",
-    "type failure reason was " .. tostring(state.reason))
+  assert(state.reason:sub(1, 13) == "type failed: ", "type failure reason was " .. tostring(state.reason))
+  assert(not state.reason:find("[\t\r\n\27]") and not state.reason:find("\194\133", 1, true),
+    "type failure reason contains terminal controls")
+  assert(#state.reason <= 212 and state.reason:sub(-1) ~= "\195",
+    "type failure reason was not safely bounded at a UTF-8 boundary: " .. state.reason)
+  assert(not state.reason:find("native.lua:12", 1, true), "Lua source location was not removed")
+
+  fake.type_text = function() error("12:34: warning about the clock", 0) end
+  M.schedule(fake, "codex", "type-failure", "member", "leader", "task", {
+    on_done = function(ok, reason) state.reason = reason end,
+  })
+  state.callback()
+  assert(state.reason == "type failed: 12:34: warning about the clock",
+    "a clock-like prefix without a source location was stripped: " .. tostring(state.reason))
 end
 
 local function exercise_composer_after_paste(composer_after_paste, mixed)

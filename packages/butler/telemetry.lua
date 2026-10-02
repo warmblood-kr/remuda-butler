@@ -9,5 +9,7 @@ function remuda._butler_telemetry_for(agent)
     context_window = telemetry.context_window or "?",
     context_percent = telemetry.context_percent or "?",
     rate_limits = telemetry.rate_limits,
+    hook_state = telemetry.hook_state,
+    hook_at = telemetry.hook_at,
   }
 end

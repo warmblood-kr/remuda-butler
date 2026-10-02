@@ -340,6 +340,11 @@ local identity = remuda._butler_identity
 assert(#remuda._butler_new_ulid() == 26
   and remuda._test_identity_random_requests[1] == 10,
   "ULID entropy should use remuda.random_bytes when /dev/urandom is unavailable")
+remuda.random_bytes = nil
+remuda._butler_identity_config.bus.previous_ulid_second = nil
+local ulid_ok, ulid_error = pcall(remuda._butler_new_ulid)
+assert(not ulid_ok and tostring(ulid_error):find("secure random source unavailable", 1, true),
+  "ULID creation must fail when both secure random sources are unavailable")
 identity.identity_record({ id = "01ARZ3NDEKTSV4RRFFQ69G5FAV", alias = "butler" })
 assert(created_directories[paths.butler_session_cwd] and created_directories[paths.mail_root],
   "the profile data home should provide usable session and mail directories")
