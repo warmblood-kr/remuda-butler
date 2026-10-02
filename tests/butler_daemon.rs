@@ -7130,8 +7130,6 @@ done
             assert!(std::path::Path::new(&eval(&path, "return remuda._fake_restore_file")).exists(),
                 "an interrupted compaction must leave a durable prior-model record");
             let trace = std::fs::read_to_string(&trace_path).unwrap_or_default();
-            assert!(trace.contains("\tmodel_wait\t") && trace.contains("outcome=unrecognized_dialog"),
-                "unrecognized dialogs during a model wait must be traced: {trace}");
             assert!(trace.contains("\tlock_released\t"), "lock release must be traced: {trace}");
             eval(&path, &format!(r#"
               remuda._butler_compaction_members_state[{name:?}].restore_pending = nil
@@ -7217,6 +7215,9 @@ done
             assert!(reports.contains("unrecognized dialog during model-sonnet")
                     && got == "CMD:/model sonnet\nKEY:RET\n",
                 "the bottom permission dialog must follow the unknown path without Return; reports={reports:?}; log={got:?}");
+            let trace = std::fs::read_to_string(&trace_path).unwrap_or_default();
+            assert!(trace.contains("\tmodel_wait\t") && trace.contains("outcome=unrecognized_dialog"),
+                "unrecognized dialogs during a model wait must be traced: {trace}");
         }
         if name == "fake-restore-fails" {
             let deadline = Instant::now() + Duration::from_secs(8);
