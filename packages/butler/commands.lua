@@ -11,6 +11,8 @@ local resolve = assert(config.resolve)
 local mail = assert(config.mail)
 local typed_lines_cli = assert(remuda.butler and remuda.butler.typed_lines_cli,
   "load butler/typed_lines_cli before butler/commands")
+local schedule_cli = assert(remuda.butler and remuda.butler.schedule_cli,
+  "load butler/schedule_cli before butler/commands")
 local USAGE_NOTES = [[
 Agent sessions receive REMUDA_BUTLER_AGENT_ID and REMUDA_BUTLER_LEADER_ID.
 In an agent session, use `inbox`, `send <to> "..."`, and `send-to-leader ...`;
@@ -235,6 +237,11 @@ command(15, "agents", "  remuda butler agents [--all]", function(args)
 end)
 command(17, "status-commands", "  remuda butler status-commands on|off", function(args, caller)
   return typed_lines_cli.cli(args, current_agent(caller))
+end)
+command(18, "schedule", "  remuda butler schedule list\n"
+  .. '  remuda butler schedule add <name> "<M H * * *>" <text> | - [--to SESSION]\n'
+  .. "  remuda butler schedule rm <name>", function(args, caller)
+  return schedule_cli.cli(args, current_agent(caller), caller and caller.stdin)
 end)
 command(20, "launch", "  remuda butler launch <claude|codex|monocle> [name] [--model M]", function(args, caller)
   if not args[2] then return nil end

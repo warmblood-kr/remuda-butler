@@ -92,27 +92,10 @@ eq("a rule outside the gap is unaffected", due(rule_of("0 9 * * *"), jump + 2520
 eq("an hourly rule fires at its real minute after the jump", due(hourly, jump + 600, new_york), jump + 420)
 
 
--- Persistence. remuda.json is a stand-in that round-trips Lua literals; the
--- daemon is the only place the real one runs.
+-- Persistence. remuda.json is a stand-in; the daemon is the only place the real one runs.
 local writes = {}
 remuda = {
-  json = {
-    encode = function(value)
-      local function lit(v)
-        if type(v) == "string" then return ("%q"):format(v) end
-        if type(v) ~= "table" then return tostring(v) end
-        local out = {}
-        for k, item in pairs(v) do out[#out + 1] = "[" .. lit(k) .. "]=" .. lit(item) end
-        return "{" .. table.concat(out, ",") .. "}"
-      end
-      return lit(value)
-    end,
-    decode = function(text)
-      local chunk = assert(loadstring(text and "return " .. text or "return nil"))
-      setfenv(chunk, {})
-      return chunk()
-    end,
-  },
+  json = dofile("tests/support/literal_json.lua"),
   fs = {
     write_atomic = function(path, contents, options)
       writes[#writes + 1] = options

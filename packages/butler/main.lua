@@ -601,6 +601,8 @@ remuda._butler_commands_config = { current_agent = current_agent, OPERATOR = OPE
   contributions = contributions, registry_list = registry_list, statusline = statusline,
   resolve = resolve, mail = mail,
 }
+remuda.exec("butler/schedule")
+remuda.exec("butler/schedule_cli")
 remuda.exec("butler/commands")
 
 remuda.tool{
@@ -990,10 +992,9 @@ remuda._butler_compaction_run_config = { mail_root = mail_root, _butler_trace = 
 }
 remuda.exec("butler/compaction_run")
 
--- Persistent schedules live in schedule.lua; the tick is declared in init.lua
--- and the verbs in schedule_cli.lua use the same seams. The sender of a
--- schedule's mail is fixed inside _butler_schedule_send.
-remuda.exec("butler/schedule")
+-- The tick is declared in init.lua; schedule_cli.lua (loaded before commands.lua)
+-- uses the same seams. The sender of a schedule's mail is fixed inside
+-- _butler_schedule_send.
 remuda._butler_schedule_env = {
   path = mail_root and mail_root .. "/schedules.json",
   trace = _butler_trace,
