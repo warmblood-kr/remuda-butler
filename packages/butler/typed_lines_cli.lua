@@ -5,13 +5,15 @@ local M = {}
 
 local USAGE = "Usage: remuda butler typed-lines on|off\n"
   .. "       remuda butler shell-lines on|off\n"
-  .. "       remuda butler status-commands on|off"
+  .. "       remuda butler status-commands on|off\n"
+  .. "       remuda butler approve-text on|off"
 local SWITCH_KEYS = { ["typed-lines"] = "typed_lines", ["shell-lines"] = "shell_lines",
-  ["status-commands"] = "status_commands" }
+  ["status-commands"] = "status_commands", ["approve-text"] = "approve_text" }
 local WARNINGS = {
   typed_lines = "Whoever controls the owner's Matrix account, or the homeserver that carries it, can type text into every agent session of this machine, and the session cannot tell that text from text typed at its keyboard. Such text counts as the owner's own instruction, including approvals.",
   shell_lines = "Whoever controls that account or homeserver can run shell commands on this machine as this user, with no review by anyone. It is remote command execution, bounded only by rules 1 to 8. Recommended only with the Matrix account protected as well as the machine's own login (device verification, a homeserver the owner runs or trusts).",
   status_commands = "Whoever controls that account or homeserver can read this machine's session names, kinds, context use, unread mail counts and Claude quota by sending ?status, without involving an agent. The answer never contains mail, prompts or screen text.",
+  approve_text = "Whoever controls the owner's Matrix account, or the homeserver that carries it, can approve registered text to be typed into agent sessions on this machine.",
 }
 
 local function fail(message)
@@ -63,7 +65,7 @@ local function write_switches(path, updates)
       kept[#kept + 1] = raw .. ending
     end
   end)
-  for _, key in ipairs({ "typed_lines", "shell_lines", "status_commands" }) do
+  for _, key in ipairs({ "typed_lines", "shell_lines", "status_commands", "approve_text" }) do
     if updates[key] ~= nil and not written[key] then
       if #kept > 0 and kept[#kept]:sub(-1) ~= "\n" then kept[#kept + 1] = "\n" end
       kept[#kept + 1] = key .. "=" .. tostring(updates[key]) .. "\n"

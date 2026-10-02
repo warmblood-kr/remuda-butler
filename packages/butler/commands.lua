@@ -11,6 +11,8 @@ local resolve = assert(config.resolve)
 local mail = assert(config.mail)
 local typed_lines_cli = assert(remuda.butler and remuda.butler.typed_lines_cli,
   "load butler/typed_lines_cli before butler/commands")
+local approve_text = assert(remuda.butler and remuda.butler.approve_text,
+  "load butler/approve_text before butler/commands")
 local schedule_cli = assert(remuda.butler and remuda.butler.schedule_cli,
   "load butler/schedule_cli before butler/commands")
 local USAGE_NOTES = [[
@@ -248,6 +250,9 @@ command(15, "agents", "  remuda butler agents [--all]", function(args)
 end)
 command(17, "status-commands", "  remuda butler status-commands on|off", function(args, caller)
   return typed_lines_cli.cli(args, current_agent(caller))
+end)
+command(19, "approve-text", "  remuda butler approve-text request SESSION - | on|off", function(args, caller)
+  return approve_text.cli(args, current_agent(caller), caller and caller.stdin)
 end)
 command(18, "schedule", "  remuda butler schedule list\n"
   .. '  remuda butler schedule add <name> "<M H * * *>" <text> | - [--to SESSION]\n'

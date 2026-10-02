@@ -1,9 +1,9 @@
-local state = { typed_lines = false, shell_lines = false, status_commands = true }
+local state = { typed_lines = false, shell_lines = false, status_commands = true, approve_text = false }
 local writes, prompts = {}, {}
 local prompt_error_to_throw
 local config_path = os.tmpname()
 local config = assert(io.open(config_path, "wb"))
-config:write("https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\n")
+config:write("https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n")
 config:close()
 
 remuda = {
@@ -12,7 +12,7 @@ remuda = {
       read_config = function(path)
         assert(path == config_path)
         return { typed_lines = state.typed_lines, shell_lines = state.shell_lines,
-          status_commands = state.status_commands }
+          status_commands = state.status_commands, approve_text = state.approve_text }
       end,
     },
   },
@@ -27,6 +27,7 @@ remuda = {
       state.typed_lines = contents:find("typed_lines=true", 1, true) ~= nil
       state.shell_lines = contents:find("shell_lines=true", 1, true) ~= nil
       state.status_commands = contents:find("status_commands=false", 1, true) == nil
+      state.approve_text = contents:find("approve_text=true", 1, true) ~= nil
       return true
     end,
   },
@@ -163,6 +164,7 @@ assert(typed_count == 1 and written_config:find("untrusted_per_room_hour=12", 1,
   "the private switch writer must deduplicate switch keys and preserve other config lines")
 -- status-commands: default on, off is immediate, on asks for yes
 expect_refused({ "status-commands", "off" }, "agent-01", "operator-only")
+expect_refused({ "approve-text", "on" }, "agent-01", "operator-only")
 expect_refused({ "status-commands", "maybe" }, nil, "Usage:")
 prompt_count, write_count = #prompts, #writes
 assert(text(cli({ "status-commands", "on" }, nil)):find("already on", 1, true), "default is on")
@@ -180,6 +182,15 @@ assert(state.status_commands == false, "anything but yes changes nothing")
 cli({ "status-commands", "on" }, nil)
 prompts[#prompts].callback("yes")
 assert(state.status_commands == true, "yes turns it on")
+local approve_pending = cli({ "approve-text", "on" }, nil)
+assert(#prompts == prompt_count + 3 and state.approve_text == false,
+  "approve-text on asks for owner confirmation before writing")
+assert(prompts[#prompts].preface:find("approve registered text", 1, true),
+  "approve-text warns that Matrix approval can type into sessions")
+prompts[#prompts].callback("yes")
+assert(state.approve_text == true and approve_pending ~= nil, "yes enables approve-text")
+cli({ "approve-text", "off" }, nil)
+assert(state.approve_text == false, "approve-text can be turned off immediately")
 written_file = assert(io.open(config_path, "rb"))
 written_config = written_file:read("*a")
 written_file:close()
@@ -210,6 +221,7 @@ assert(#writes == before_prompt_error_writes and state.typed_lines == false,
 
 local command_rows, bridge_handler = {}, nil
 remuda.butler.schedule_cli = { cli = function() end }
+remuda.butler.approve_text = { cli = function() end }
 remuda._butler_commands_config = {
   current_agent = function() return nil end,
   OPERATOR = "operator",

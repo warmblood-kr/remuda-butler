@@ -219,6 +219,41 @@ no more than five minutes old, contain one line of at most 2000 bytes, and fit
 the limit of 10 lines per 10 minutes. the switch verbs are for a person at the
 machine; an agent is refused.
 
+### Prepared text approvals
+
+An agent can register exact text with `remuda butler approve-text request
+SESSION -` and stdin, or the `butler_approve_text` MCP tool. Text can contain
+multiple lines and is limited to 8 KiB. Core input normalization strips ESC
+and other C0/C1 controls and turns CR and CRLF into LF. Registration applies
+the CR normalization and refuses those controls except tab and newline. Butler
+posts that normalized stored text to HOME with a
+quoted, escaped display, a four-character request id, target session, byte
+count and `ID/bytes` fingerprint. The fingerprint is the request id and stored
+byte count; the normalized text and byte count are stored with the request.
+
+An allowlisted owner can approve with ✅ or a `yes`/`승인` reply, optionally
+including the id. A ❌ or `no`/`거부` denies it. Replies must arrive in live
+Matrix sync; messages from agents and the terminal approve/deny verbs cannot
+deliver prepared text. Butler types only after confirming the same live session
+instance is available and no human is attached to its pane. The owner sees the
+same normalized text that Butler stores. The display escapes control, line
+separator and bidirectional formatting characters. A refusal before typing
+leaves the approved request available for another owner reply until expiry.
+Before typing, Butler persists a one-shot delivery marker; if typing can have
+started, the request cannot be retried. If Butler restarts after saving that
+marker, delivery is uncertain: the text may not have been typed, and it must
+be registered again. Requests expire after 60 minutes; no
+more than five may be pending at once, and an agent may register at most ten
+in ten minutes.
+Session binding uses the Butler session identity and a non-secret launch marker;
+the root Butler identity can survive a pane relaunch, so its fresh launch marker
+is what distinguishes that instance.
+`remuda butler approve-text on|off` is a terminal-only switch that asks for
+`yes` before enabling. It is off by default; with it off, replies stay on the
+ordinary mail path. Registration is also refused in Matrix messages fallback
+mode because that mode cannot receive live owner approvals. Doctor reports
+`Approve text: on|off`.
+
 ### Status commands
 
 An allowlisted owner can send `?status` or `?help` as a whole line in the HOME
