@@ -1544,7 +1544,7 @@ fn exec_butler_runs_the_builtin_package_in_the_daemons_image() {
     let path = daemon::socket_path_in(&dir, "s");
     let sender_reachable = eval(
         &path,
-        "return tostring(remuda._butler_schedule_send ~= nil or remuda._butler_schedule_env.send ~= nil)",
+        "return tostring(remuda._butler_schedule_send ~= nil or (remuda._butler_schedule_env or {}).send ~= nil)",
     );
     assert_eq!(sender_reachable, "false", "a schedule's mail sender must not be reachable from Lua globals");
     let matrix_entry = eval(&path, "local ok, err = pcall(remuda.exec, 'butler/matrix'); return tostring(ok) .. '|' .. tostring(err)");
@@ -1588,6 +1588,15 @@ fn butler_lifecycle_reload_replaces_hooks_and_schedules_and_rolls_back() {
     eval(
         &path,
         "remuda._butler_test_mode = 'lifecycle'; remuda.exec('butler')",
+    );
+    // main.lua runs fully in this mode, so the env table exists; the sender is an upvalue of notice.lua.
+    assert_eq!(
+        eval(
+            &path,
+            "local env = remuda._butler_schedule_env; return tostring(type(env) == 'table' and env.send == nil and remuda._butler_schedule_send == nil)",
+        ),
+        "true",
+        "a schedule's mail sender must not be reachable from remuda globals"
     );
 
     let main = include_str!("../../packages/butler/main.lua");
