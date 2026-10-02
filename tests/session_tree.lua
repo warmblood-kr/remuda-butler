@@ -11,6 +11,7 @@ local function fixture(rows)
     agents[row[1]] = { kind = row[2], parent = row[3] }
   end
   remuda._butler_bus.agents = agents
+  remuda._butler_bus.notices = {}
   local output = remuda._butler_sessions()
   assert_no_blank_rows(output, "fixture roster")
   return output
@@ -27,13 +28,16 @@ local rows = displayed_rows(fixture({
   {"alpha", "codex", "root"},
   {"worker", "codex", "alpha"},
 }))
-assert_equal(rows[1], "SESSION\tAGENT\tLEADER", "roster header")
-assert_equal(rows[2], "root\tclaude\t-", "root row")
+assert_equal(rows[1], "SESSION\tAGENT\tLEADER\tNOTICE", "roster header")
+assert_equal(rows[2], "root\tclaude\t-\t-", "root row")
 -- View policy: a root (butler) and its direct children sit at the margin;
 -- indentation starts at grandchildren (indent = max(0, depth - 1)).
-assert_equal(rows[3], "alpha\tcodex\troot", "direct child stays at the margin")
-assert_equal(rows[4], "  worker\tcodex\talpha", "grandchild is the first indented row")
-assert_equal(rows[5], "zeta\tclaude\troot", "sorted second child")
+assert_equal(rows[3], "alpha\tcodex\troot\t-", "direct child stays at the margin")
+assert_equal(rows[4], "  worker\tcodex\talpha\t-", "grandchild is the first indented row")
+assert_equal(rows[5], "zeta\tclaude\troot\t-", "sorted second child")
+remuda._butler_bus.notices.root = { count = 1, retry_at = 200 }
+rows = displayed_rows(remuda._butler_sessions())
+assert_equal(rows[2], "root\tclaude\t-\tqueued", "undelivered notice is marked in the roster")
 
 -- The client's session pane asks the same tree for its order (core's
 -- remuda.session_order hook): same walk, depth per row, names as sessions.
@@ -63,7 +67,7 @@ local found_orphan, found_cycle_a, found_cycle_b = false, false, false
 local seen = {}
 for _, line in ipairs(rows) do
   assert(line ~= "", "roster contains a blank row")
-  if line == "[orphan] orphan\tcodex\tMISSING_PARENT" then found_orphan = true end
+  if line == "[orphan] orphan\tcodex\tMISSING_PARENT\t-" then found_orphan = true end
   if line:find("cycle-a", 1, true) then found_cycle_a = true end
   if line:find("cycle-b", 1, true) then found_cycle_b = true end
   local display = line:match("^[^\t]+")
@@ -111,8 +115,8 @@ for depth = 1, 26 do deep[#deep + 1] = {"depth-" .. depth, "codex", "depth-" .. 
 rows = displayed_rows(fixture(deep))
 assert_equal(#rows, 28, "header plus all 27 agents")
 for index = 2, #rows do
-  local alias, kind, leader = rows[index]:match("^([^\t]*)\t([^\t]*)\t([^\t]*)$")
-  assert(alias and kind and leader, "compact three-column row: " .. rows[index])
+  local alias, kind, leader, notice = rows[index]:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)$")
+  assert(alias and kind and leader and notice, "compact four-column row: " .. rows[index])
   local indent = #(alias:match("^ *"))
   assert(indent <= 40 and indent % 2 == 0, "bounded two-space indentation")
   assert(not kind:match("^ ") and not leader:match("^ "), "only session display column is indented")

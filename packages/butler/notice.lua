@@ -52,6 +52,7 @@ local NOTICE_STABLE_SECONDS = 3
 local NOTICE_QUIET_S = 2
 local NOTICE_MAX_WAIT_S = 10
 local NOTICE_RECOVERY_TIMEOUT_S = 20
+local NOTICE_RETRY_DELAYS = { 20, 60, 300, 900 }
 -- os.time is whole seconds: quiet is 1-2 s, plus up to 1 s for the notice tick.
 local function notice_now()
   local clock = remuda._butler_notice_clock
@@ -147,19 +148,8 @@ function remuda._butler_notify_policy(session, now)
   end
   if not row or not row.alive then return false end
   local attached = row.attached
-  -- Attached panes use the human idle clock or screen stability below. Only
-  -- detached panes need the core busy bit, whose Session metatable may throw
-  -- when older cores lack output_idle data.
-  if not attached and remuda.session then
-    local checked, busy = pcall(function()
-      local current = remuda.session(session)
-      return current and current.is_busy
-    end)
-    -- Older cores and synthetic rows can lack a Session object, and some
-    -- Session metatables can fail while computing is_busy. Unknown busy state
-    -- falls through to the prompt parser; only an explicit busy state defers.
-    if checked and busy == true then return false end
-  end
+  -- Composer contents are the safety signal. A session may report busy while
+  -- background agents run even though its own prompt is idle and empty.
   local seen = bus.notice_screens[session] or {}
   bus.notice_screens[session] = seen
   local screen
@@ -341,12 +331,7 @@ local function refresh_pending_notice(session, pending)
   pending.count = #order
   pending.text = order[#order] and notices[order[#order]] or nil
   if pending.count == 0 then
-    local recovery = bus.notice_recoveries[session]
-    if recovery and recovery.draft and recovery.draft ~= "" then
-      notice_recovery_error(session, recovery, "mail read during notice recovery")
-    else
-      bus.notices[session], bus.notice_recoveries[session] = nil, nil
-    end
+    bus.notices[session], bus.notice_recoveries[session] = nil, nil
     return nil
   end
   return pending
@@ -473,13 +458,32 @@ notice_recovery_error = function(session, state, reason)
     .. table.concat(state.message_ids or {}, ",") .. " session=" .. session .. " reason=" .. reason
     .. " draft_bytes=" .. tostring(notice_byte_length(state.draft)))
   bus.notice_retry_reasons[session] = nil
+  local pending = bus.notices[session]
+  if pending and pending.message_order then
+    state.message_ids = {}
+    for _, id in ipairs(pending.message_order) do state.message_ids[#state.message_ids + 1] = id end
+  end
+  local attempts = pending and (pending.delivery_attempts or 0) or 0
+  local delay = NOTICE_RETRY_DELAYS[attempts + 1]
+  if pending and delay then
+    pending.delivery_attempts = attempts + 1
+    pending.last_delivery_error = reason
+    pending.retry_at = notice_now() + delay
+    pending.due_at = pending.retry_at
+    bus.notice_recoveries[session] = nil
+    _butler_session_trace("notice_retry_scheduled", "message_ids="
+      .. table.concat(state.message_ids or {}, ",") .. " session=" .. session
+      .. " attempt=" .. tostring(pending.delivery_attempts) .. " delay=" .. tostring(delay))
+    return false
+  end
   local alerts = bus.notice_failure_alerts[session] or {}
   bus.notice_failure_alerts[session] = alerts
-  if not alerts[reason] then
-    alerts[reason] = true
+  if pending and not alerts.exhausted then
+    alerts.exhausted = true
     pcall(remuda._butler_send, "butler", parent,
-      "Could not safely deliver queued Butler mail to " .. session .. ": " .. reason
-      .. ". Inspect the composer and resend the notice. Message IDs: "
+      "Could not safely deliver queued Butler mail to " .. session .. " after "
+      .. tostring(attempts + 1) .. " attempts (last error: " .. reason
+      .. "). Inspect the composer, then resend the notice. Message IDs: "
       .. table.concat(state.message_ids or {}, ",") .. "; draft bytes: "
       .. tostring(notice_byte_length(state.draft)) .. ".")
   end
@@ -510,6 +514,7 @@ local function complete_notice_recovery(session, state)
     if pending.count <= 0 then
       bus.notices[session] = nil
     else
+      pending.delivery_attempts, pending.retry_at = 0, nil
       local first_at, last_at
       for _, id in ipairs(pending.message_order or {}) do
         local arrived_at = pending.message_times and pending.message_times[id]
@@ -781,6 +786,7 @@ local function deliver_due_notice(session, now)
   elseif bus.notice_recoveries[session]
       or not pending or pending.due_at == nil or now >= pending.due_at then
     cancel_notice_timers(session)
+    if pending and pending.retry_at and now >= pending.retry_at then pending.retry_at = nil end
     deliver_notice(session)
   end
 end
@@ -811,7 +817,9 @@ function remuda._butler_notify(alias, notice, message_id, reshow)
     if seen[message_id] then return false end
     seen[message_id] = true
   end
-  local pending = bus.notices[alias] or { count = 0 }
+  local pending = bus.notices[alias]
+  if not pending then bus.notice_failure_alerts[alias] = nil end
+  pending = pending or { count = 0 }
   bus.notice_retry_reasons[alias] = nil
   if message_id then
     pending.message_ids = pending.message_ids or {}
@@ -830,6 +838,7 @@ function remuda._butler_notify(alias, notice, message_id, reshow)
   pending.first_at = pending.first_at or now
   pending.last_at = now
   pending.due_at = math.min(now + NOTICE_QUIET_S, pending.first_at + NOTICE_MAX_WAIT_S)
+  if pending.retry_at then pending.due_at = math.max(pending.due_at, pending.retry_at) end
   pending.count, pending.text, pending.kind = pending.count + 1, notice, recipient.kind
   bus.notices[alias] = pending
   if first then

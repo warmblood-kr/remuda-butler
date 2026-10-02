@@ -87,10 +87,11 @@ function remuda._butler_sessions()
     local agent = bus.agents[item.id]
     rows[#rows + 1] = string.rep(" ", item.indent * 2) .. (item.orphan and "[orphan] " or "")
       .. display_name(item.id) .. "\t" .. tostring(agent.kind or "") .. "\t"
-      .. tostring(agent.parent or "-")
+      .. tostring(agent.parent or "-") .. "\t"
+      .. (bus.notices and bus.notices[item.id] and "queued" or "-")
   end
   local out = #rows == 0 and "no Butler agents"
-    or "SESSION\tAGENT\tLEADER\n" .. table.concat(rows, "\n")
+    or "SESSION\tAGENT\tLEADER\tNOTICE\n" .. table.concat(rows, "\n")
   if bus.agents.butler and #butler_attempts > 0 then
     local details = {}
     for _, attempt in ipairs(butler_attempts) do
