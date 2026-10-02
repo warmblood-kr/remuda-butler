@@ -30,7 +30,11 @@ local function mail_notice_text(message, detail, kind)
       detail = "from " .. sender
     end
   end
-  return "Butler message " .. message.id .. " " .. detail .. " arrived. Read it: " .. inbox_hint(kind)
+  local notice = "Butler message " .. message.id .. " " .. detail .. " arrived. Read it: " .. inbox_hint(kind)
+  if type(message.matrix) == "table" then
+    notice = notice .. ". Next: remuda butler reply " .. message.id
+  end
+  return notice
 end
 
 -- #29: a mail notice must never land on a human's half-typed line. Notices

@@ -633,17 +633,18 @@ function matrix.cli(args, agent, stdin_body, file_body)
         reply:prompt_secret({ label = label, callback = function(secret, prompt_error)
           if cancelled.value or completed.value then return end
           if prompt_error then
-            local message
+            local message, next_line
             if prompt_error == "not_a_terminal" then
               message = "The registration token prompt cannot read a hidden answer."
             elseif prompt_error == "too_long" then
               message = "The registration token exceeds 4 KiB."
-            elseif prompt_error == "cancelled" then
+            elseif prompt_error == "cancelled" or prompt_error == "refused" then
               message = "The registration token prompt was cancelled."
+              next_line = "Next: remuda butler matrix setup"
             else
               message = "The registration token prompt was refused."
             end
-            return fail_registration_prompt(message, prompt_error == "not_a_terminal")
+            return fail_registration_prompt(message, prompt_error == "not_a_terminal", next_line)
           end
           local token, token_error = matrix.normalize_secret(secret)
           if not token then
