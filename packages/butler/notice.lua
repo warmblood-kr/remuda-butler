@@ -99,6 +99,12 @@ function remuda._butler_prompt_is_empty(kind, screen)
   end
   if not text then return "UNPARSEABLE", "" end
   text = text:gsub("│%s*$", ""):match("^%s*(.-)%s*$")
+  local startup = remuda._butler_agent_startup[kind] or {}
+  if kind == "codex" then
+    for _, placeholder in ipairs(startup.placeholders or {}) do
+      if text == placeholder then return "EMPTY", text end
+    end
+  end
   local parts = { text }
   for index = prompt_at + 1, #lines do
     local rest = lines[index]:gsub("^%s+", "")
@@ -122,7 +128,6 @@ function remuda._butler_prompt_is_empty(kind, screen)
     text = table.concat(remaining, "\n"):match("^%s*(.-)%s*$")
   end
   if text == "" then return "EMPTY", text end
-  local startup = remuda._butler_agent_startup[kind] or {}
   for _, placeholder in ipairs(startup.placeholders or {}) do
     if text == placeholder then return "EMPTY", text end
   end
