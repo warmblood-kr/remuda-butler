@@ -1811,12 +1811,29 @@ return function(matrix, pinned_hostname)
       assert(not (word:find("cred", 1, true) and (word:find("get", 1, true) or word:find("read", 1, true))),
         "the system seam must not expose a credential read: " .. word)
     end
-    for _, source_path in ipairs({ "packages/butler/system.lua", "packages/butler/matrix_setup.lua",
-      "packages/butler/matrix_cli.lua" }) do
-      local source = read(source_path)
-      assert(source and not source:find("credential[%._]get") and not source:find("credential%s*%["),
-        source_path .. " must not read the OS secure store")
+    -- Every Butler Lua file: no line that touches the store may name a get or a read.
+    local function reads_store(line)
+      if not (line:find("credential[%._%[]") or line:find("%f[%w_]store[%.%[]")) then return false end
+      return line:find("[%._]get%f[^%w_]") ~= nil or line:find("[%._]read%f[^%w_]") ~= nil
+        or line:find("[\"']get[\"']") ~= nil or line:find("[\"']read[\"']") ~= nil
     end
+    for _, line in ipairs({ "remuda.system.credential.get(name)", "system.credential_get(name)",
+      'credential["get"](name)', 'credential_call("read", name)', "store.get(name)" }) do
+      assert(reads_store(line), "the scan should catch: " .. line)
+    end
+    assert(not reads_store("system.credential_put(name, secret)") and not reads_store("file:read('*a')"))
+    local listing = assert(io.popen("ls packages/butler/*.lua packages/butler/*/*.lua 2>/dev/null"))
+    local scanned = 0
+    for source_path in listing:lines() do
+      scanned = scanned + 1
+      local number = 0
+      for line in assert(read(source_path), source_path):gmatch("[^\n]*") do
+        number = number + 1
+        assert(not reads_store(line), source_path .. ":" .. number .. " must not read the OS secure store")
+      end
+    end
+    listing:close()
+    assert(scanned >= 30, "the scan should cover every packages/butler Lua file, saw " .. scanned)
     local seam_name = "butler/matrix/@seam:example.org/password"
     fake_store()
     local put_ok, put_backend = seam.credential_put(seam_name, "seam-secret")
@@ -1914,7 +1931,8 @@ return function(matrix, pinned_hostname)
     clean_store_dir()
 
     -- Store says no, or there is no store: today's private file, and the output says so.
-    for _, reason in ipairs({ "unavailable: no desktop session", "denied: the user refused", "old core" }) do
+    for _, reason in ipairs({ "unavailable: no desktop session for alice", "denied: alice refused", "old core" }) do
+      local class = reason == "old core" and "no store" or reason:match("^%a+")
       if reason == "old core" then remuda.system, store_calls = nil, {} else fake_store(reason) end
       local file_password = register(bot, { "--default" })
       assert(resolved and resolved.status == 0, reason .. ": setup should fall back to the file: "
@@ -1926,6 +1944,10 @@ return function(matrix, pinned_hostname)
         and not resolved.stdout:find("OS secure store (", 1, true)
         and not resolved.stdout:find(file_password, 1, true),
         reason .. ": setup should say the password went to the file: " .. resolved.stdout)
+      assert(resolved.stdout:find("\nThe OS secure store was not used: " .. class .. "\n", 1, true)
+        and not resolved.stdout:find("alice refused", 1, true)
+        and not resolved.stdout:find("desktop session", 1, true),
+        reason .. ": setup should name only the reason class: " .. resolved.stdout)
       clean_store_dir()
     end
 
@@ -1938,7 +1960,8 @@ return function(matrix, pinned_hostname)
       and read(store_password_path) == replacing_password .. "\n",
       "a refused store must not cost the new account its password: " .. tostring(resolved and resolved.stderr))
     assert(resolved.stdout:find("\nBot account password saved privately: " .. store_password_path .. "\n", 1, true)
-      and resolved.stdout:find("the old password file there was replaced", 1, true)
+      and resolved.stdout:find("\nThe OS secure store was not used: unavailable\n", 1, true)
+      and resolved.stdout:find("\nThe old password file there was replaced.\n", 1, true)
       and not resolved.stdout:find("left in place", 1, true),
       "setup should say the old password file was replaced: " .. resolved.stdout)
     clean_store_dir()
@@ -1962,7 +1985,7 @@ return function(matrix, pinned_hostname)
     assert(resolved and resolved.status == 0 and #store_calls == 0
       and read(dir_output .. "/password") == dir_password .. "\n"
       and resolved.stdout:find("\nBot account password saved privately: " .. dir_output .. "/password\n", 1, true)
-      and not resolved.stdout:find("OS secure store (", 1, true),
+      and not resolved.stdout:find("OS secure store", 1, true),
       "--dir must save the generated password in that directory and never call the store")
     for _, name in ipairs({ "token", "config", "password" }) do os.remove(dir_output .. "/" .. name) end
     os.remove(dir_output)
@@ -1979,6 +2002,65 @@ return function(matrix, pinned_hostname)
       and store_calls[1].verb == "put" and store_calls[2].verb == "delete"
       and store_calls[2].name == store_name and read(store_dir .. "/token") == nil,
       "a failed setup must delete the password it put in the store")
+    clean_store_dir()
+
+    -- The same for a failed token write.
+    fake_store()
+    remuda.fs.write_atomic = function(path, contents, opts)
+      if path == store_dir .. "/token" then return nil, "simulated disk failure" end
+      return outer_write_atomic(path, contents, opts)
+    end
+    register(bot, { "--default" })
+    remuda.fs.write_atomic = outer_write_atomic
+    assert(resolved and resolved.status == 1 and #store_calls == 2
+      and store_calls[1].verb == "put" and store_calls[2].verb == "delete"
+      and store_calls[2].name == store_name and read(store_dir .. "/config") == nil,
+      "a failed token write must delete the password it put in the store")
+    clean_store_dir()
+
+    -- The rollback delete fails: the operator is told which entry to delete by hand.
+    fake_store()
+    remuda.system.credential.delete = function(name)
+      store_calls[#store_calls + 1] = { verb = "delete", name = name }
+      return nil, "denied: alice refused"
+    end
+    remuda.fs.write_atomic = function(path, contents, opts)
+      if path == store_dir .. "/config" then return nil, "simulated disk failure" end
+      return outer_write_atomic(path, contents, opts)
+    end
+    register(bot, { "--default" })
+    remuda.fs.write_atomic = outer_write_atomic
+    assert(resolved and resolved.status == 1 and #store_calls == 2
+      and resolved.stderr:find("the password is still in the OS secure store (keychain) as " .. store_name, 1, true)
+      and resolved.stderr:find("delete that entry by hand", 1, true)
+      and not resolved.stderr:find("alice refused", 1, true),
+      "a failed rollback delete must name the entry and the backend: " .. tostring(resolved and resolved.stderr))
+    clean_store_dir()
+
+    -- A Lua error after the put goes through the same rollback instead of escaping.
+    fake_store()
+    local store_real_open = io.open
+    io.open = function(path, mode)
+      if #store_calls > 0 and path == store_dir .. "/config" then error("simulated Lua error") end
+      return store_real_open(path, mode)
+    end
+    local contained = pcall(register, bot, { "--default" })
+    io.open = store_real_open
+    assert(contained and resolved and resolved.status == 1 and #store_calls == 2
+      and store_calls[2].verb == "delete" and store_calls[2].name == store_name
+      and read(store_dir .. "/token") == nil
+      and not resolved.stderr:find("simulated Lua error", 1, true),
+      "a Lua error after the put must roll back and delete the stored password")
+    clean_store_dir()
+
+    -- A chosen password never reaches the store, with no --dir either.
+    fake_store()
+    local chosen_default = register(bot, { "--password-file", password, "--default" })
+    assert(chosen_default == "password-secret" and resolved and resolved.status == 0
+      and #store_calls == 0 and read(store_password_path) == nil
+      and resolved.stdout:find("\nThe password you supplied was not copied.\n", 1, true)
+      and not resolved.stdout:find("OS secure store", 1, true),
+      "a chosen password must never be put in the store: " .. tostring(resolved and resolved.stdout))
     clean_store_dir()
 
     -- A chosen password is never saved, and an old password file stays byte-identical under --force.

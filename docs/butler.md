@@ -334,11 +334,15 @@ Where a generated password is saved:
 - If the store is missing or refuses (no desktop session, a locked keychain,
   an older core), setup saves the password in the private file `password`
   beside the token instead, mode 600 on Unix hosts, and prints "Bot account
-  password saved privately: PATH".
+  password saved privately: PATH" and "The OS secure store was not used:
+  REASON" (`unavailable`, `denied` or `no store`).
 - `--dir PATH` always uses that file in `PATH` and never touches the store.
 - A password from `--password-file` or `--password-cmd` is never put in the
   store.
-- If setup fails after it stored the password, it deletes the entry again.
+- If setup fails after it stored the password, it deletes the entry again. If
+  that delete fails, or the daemon dies in between, the entry
+  `butler/matrix/<bot user ID>/password` stays: delete it by hand (see below
+  for where to find it). A failed delete names the entry in the error.
 - An old `password` file is left in place when the password goes to the store
   or was supplied by you. Setup names the file; delete it if you no longer use
   it. Only when the store refuses after the account was created does setup
