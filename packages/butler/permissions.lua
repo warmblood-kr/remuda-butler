@@ -247,5 +247,11 @@ function permissions.output_for_caller(path, name, caller, cwd_of, realpath, is_
   return target
 end
 
+-- The realpath and is_symlink helpers the checks above are handed.
+-- Not written yet: these answer "cannot tell", so everything is refused.
+function permissions.fs_helpers(core_fs, run, platform)
+  return function() return nil end, function() return nil end
+end
+
 if type(remuda) == "table" then remuda._butler_permissions = permissions end
 return permissions
