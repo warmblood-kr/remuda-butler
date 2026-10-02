@@ -283,6 +283,12 @@ local function base64url(bytes)
 end
 
 local function new_password()
+  if type(remuda.random_bytes) == "function" then
+    local ok, bytes = pcall(remuda.random_bytes, 32)
+    if ok and type(bytes) == "string" and #bytes >= 32 then
+      return base64url(bytes:sub(1, 32))
+    end
+  end
   local ok, file = pcall(io.open, "/dev/urandom", "rb")
   if not ok or not file then return nil end
   local read_ok, bytes = pcall(file.read, file, 32)
