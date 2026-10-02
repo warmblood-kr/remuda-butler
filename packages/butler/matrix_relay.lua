@@ -1418,7 +1418,9 @@ function relay.new(options)
     local target, target_agent, target_line = root_session, root, line
     local parse_line = form == "!!" and line:sub(2) or line
     local first, rest = parse_line:match("^(%S+)%s+(.+)$")
-    if first and rest then
+    if first and rest and first == root_session then
+      target_line = (form == "!!" and "!" or "") .. rest
+    elseif first and rest then
       for id, agent in pairs(agents) do
         if id ~= "butler" and type(agent) == "table" and agent.session_name == first
           and in_butler_tree(id, agents) then

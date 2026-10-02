@@ -290,6 +290,39 @@ local function test_shell_line_uses_selected_kind_for_root()
   end)
 end
 
+function test_typed_line_target_routing()
+  with_typed_line_stubs(function(typed)
+    local old_bus, old_selected = remuda._butler_bus, remuda._butler_selected_agent
+    remuda._butler_bus = { agents = {
+      butler = { id = "butler", session_name = "butler", kind = "claude" },
+      ["rx-qa"] = { id = "rx-qa", session_name = "rx-qa", kind = "claude", parent = "butler" },
+    } }
+    remuda._butler_selected_agent = "claude"
+    local dir, config_path = fixture("typed_lines=true\nshell_lines=true\n")
+    local client = scripted_client()
+    local relay = relay_module.new({ config_path = config_path, matrix = client, deliver = function() return true end })
+    relay:start()
+    client:complete(1, { json = { next_batch = "s0" } })
+    client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+      ["!room:example.org"] = { timeline = { events = {
+        typed_line_event("$root-name", "!butler rx-qa is waiting"),
+        typed_line_event("$live-member", "!rx-qa hello"),
+        typed_line_event("$not-a-member", "!offline hello"),
+      } } },
+    } } } })
+    assert(#typed == 3, "each valid routing example should type once")
+    assert(typed[1].session == "butler" and typed[1].text == "rx-qa is waiting",
+      "the root name prefix should be consumed while routing to the root")
+    assert(typed[2].session == "rx-qa" and typed[2].text == "hello",
+      "a live member name prefix should route to that member and be consumed")
+    assert(typed[3].session == "butler" and typed[3].text == "offline hello",
+      "a name that is not a live member should remain in the root's text")
+    relay:stop()
+    cleanup_fixture(dir, config_path)
+    remuda._butler_bus, remuda._butler_selected_agent = old_bus, old_selected
+  end)
+end
+
 local function test_typed_line_refusals_are_rate_limited()
   with_typed_line_stubs(function(typed)
     local dir, config_path = fixture("typed_lines=true\nshell_lines=true\n")
@@ -5076,6 +5109,7 @@ end
 rx_tests = {
   { "test_typed_line_switches_and_non_candidates", test_typed_line_switches_and_non_candidates },
   { "test_typed_line_replay_after_restart_and_history_are_not_typed", test_typed_line_replay_after_restart_and_history_are_not_typed },
+  { "test_typed_line_target_routing", test_typed_line_target_routing },
   { "test_shell_line_uses_selected_kind_for_root", test_shell_line_uses_selected_kind_for_root },
   { "test_typed_line_refusals_are_rate_limited", test_typed_line_refusals_are_rate_limited },
   { "test_typed_line_gate_error_is_contained_and_processed", test_typed_line_gate_error_is_contained_and_processed },
