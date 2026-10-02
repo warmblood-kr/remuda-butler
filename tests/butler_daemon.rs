@@ -4183,11 +4183,14 @@ fn butler_claude_builder_keeps_its_noninteractive_cli_hint() {
 
 #[test]
 fn butler_codex_builder_uses_automatic_approval() {
-    let path = scratch("butler-codex-builder");
+    // The daemon reads REMUDA_RUNTIME_DIR while loading its module. Override
+    // os.getenv in its Lua state before that load so the test covers the real
+    // module-level value without changing the Rust test process environment.
+    let path = scratch("butler-codex-builder-unset");
     let _daemon = daemon_at(&path);
     eval(
         &path,
-        r#"remuda._butler_argv = {"sh", "-c", "sleep 1"}; remuda.exec("butler")"#,
+        r#"local old_getenv = os.getenv; os.getenv = function(key) if key == "REMUDA_RUNTIME_DIR" then return nil end return old_getenv(key) end; remuda._butler_argv = {"sh", "-c", "sleep 1"}; remuda.exec("butler")"#,
     );
     // The builder probes whichever `remuda` is on PATH; pin the answer instead.
     let build = |supported: bool| {
@@ -4205,6 +4208,11 @@ fn butler_codex_builder_uses_automatic_approval() {
     // #201: the real builder and the real `mcp_flags` give Codex the MCP server.
     let argv = build(true);
     let argv: Vec<&str> = argv.lines().collect();
+    assert!(
+        argv.iter()
+            .all(|arg| !arg.contains("shell_environment_policy")),
+        "unset runtime dir: {argv:?}"
+    );
     assert_eq!(argv.len(), 10, "{argv:?}");
     assert_eq!(argv[..4], old);
     assert_eq!(
@@ -4219,6 +4227,28 @@ fn butler_codex_builder_uses_automatic_approval() {
     assert!(
         argv[8] == "-c"
             && argv[9].starts_with(r#"mcp_servers.remuda.env={REMUDA_SESSION_CAPABILITY="token""#),
+        "{argv:?}"
+    );
+
+    let runtime_dir = r#"/tmp/remuda "runtime"\dir"#;
+    let path = scratch("butler-codex-builder-set");
+    let _runtime_daemon = daemon_at(&path);
+    eval(
+        &path,
+        &format!(
+            r#"local old_getenv = os.getenv; os.getenv = function(key) if key == "REMUDA_RUNTIME_DIR" then return {runtime_dir:?} end return old_getenv(key) end; remuda._butler_argv = {{"sh", "-c", "sleep 1"}}; remuda.exec("butler")"#
+        ),
+    );
+    let argv = eval(
+        &path,
+        r#"remuda._butler_codex_config_supported = true; local a = remuda._butler_agent_builders.codex({name="codex", token="token", telemetry={status_path="/tmp/status"}}); return table.concat(a, "\n")"#,
+    );
+    let argv: Vec<&str> = argv.lines().collect();
+    assert_eq!(argv.len(), 12, "{argv:?}");
+    assert_eq!(argv[10], "-c", "{argv:?}");
+    assert_eq!(
+        argv[11],
+        r#"shell_environment_policy.set={REMUDA_RUNTIME_DIR="/tmp/remuda \"runtime\"\\dir"}"#,
         "{argv:?}"
     );
 }
