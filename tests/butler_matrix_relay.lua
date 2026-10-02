@@ -6682,7 +6682,7 @@ local function test_approved_text_live_owner_reply_types_exact_bytes_once()
       env.client:pump()
       local reaction_rec = env.relay:state().approvals[reaction_id]
       room_events(env, { reaction("$owner-reaction", OWNER, reaction_rec.event_id, CHECK) })
-      assert(#typed == 2 and typed[2].bytes == "reaction bytes" and reaction_rec.status == "applied",
+      assert(#typed == 3 and typed[3].bytes == "reaction bytes" and reaction_rec.status == "applied",
         "an owner reaction on the request also approves prepared text")
     end, "approve_text=true\n")
   end)
