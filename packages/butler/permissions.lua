@@ -107,6 +107,9 @@ end
 -- `realpath(path)` resolves symlinks and `..`.
 -- ponytail: a link swapped between these checks and the open is not closed;
 -- upgrade to a core open-beneath helper when it exists.
+-- ponytail: a named pipe (FIFO) inside the working directory passes these
+-- checks and io.open then blocks the daemon (see commands.lua, message_body);
+-- upgrade to a core non-blocking read word when it exists.
 local function one_line(value) return (tostring(value):gsub("[\r\n]+", " "):gsub("%c", "?")) end
 local UNKNOWN = ": cannot identify the calling session's working directory"
   .. "\nNext: run this from a Butler session, or from your own terminal"
@@ -152,13 +155,19 @@ end
 -- drive root or UNC with either slash, compared without regard to case. The
 -- second value says why not: "device" (a device name or an alternate stream,
 -- named for a path that is not absolute too),
--- "unresolved" (a `.` or `..` left in place).
+-- "unresolved" (a `.` or `..` left in place, on posix too: the prefix test
+-- would lie about such a path).
 -- ponytail: lower() folds ASCII only, so a non-ASCII case difference is
 -- refused; upgrade to a core case-folding word if that is ever met.
+-- ponytail: Windows keys always fold case, so in a directory made
+-- case-sensitive (the WSL flag) "proj" and "Proj" are one place here; telling
+-- them apart needs a core word that asks the directory.
 function permissions.path_key(path, platform)
   if type(path) ~= "string" then return nil end
   if platform == "windows" then return windows_key(path) end
-  return path:sub(1, 1) == "/" and path or nil
+  if path:sub(1, 1) ~= "/" then return nil end
+  if ("/" .. path .. "/"):find("/%.%.?/") then return nil, "unresolved" end
+  return path
 end
 local path_key = permissions.path_key
 
@@ -166,7 +175,9 @@ local path_key = permissions.path_key
 local function session_cwd(caller, cwd_of, realpath, platform)
   local cwd = type(caller) == "table" and caller.kind == "session" and type(caller.session) == "string"
     and cwd_of(caller.session)
-  if not path_key(cwd, platform) then return nil end
+  -- A recorded `..` is the resolver's to settle: the root is its answer.
+  local key, why = path_key(cwd, platform)
+  if not key and why ~= "unresolved" then return nil end
   local ok, root = pcall(realpath, cwd)
   return cwd, ok and root or nil
 end
@@ -215,9 +226,10 @@ function permissions.output_for_caller(path, name, caller, cwd_of, realpath, is_
   local what = "refused: " .. (path and ("-o " .. one_line(path)) or "download")
   if type(caller) == "table" and caller.kind == "outside" then
     -- Not confined, but a pipe opened for writing blocks the daemon as well.
-    if select(2, path_key(path, platform)) == "device" then
-      return nil, what .. DEVICE .. "\nNext: pass -o with a regular file path"
-    end
+    local given, why = path_key(path, platform)
+    if why == "device" then return nil, what .. DEVICE .. "\nNext: pass -o with a regular file path" end
+    -- A relative path would land in the daemon's directory, not the caller's.
+    if path ~= nil and not given and not why then return nil, what .. RELATIVE .. "\nNext: pass -o with the full path" end
     return path
   end
   local cwd, root = session_cwd(caller, cwd_of, realpath, platform)
