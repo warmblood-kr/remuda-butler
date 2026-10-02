@@ -33,9 +33,17 @@ return function(matrix, pinned_hostname)
     and setup_help:find("--register --dir /path/to/private/butler", 1, true)
     and not setup_help:find("--register --registration-token-file", 1, true),
     "setup usage should explain each option in plain words and show a full example")
+  assert(setup_help:find("--password-cmd PROG [ARG...]", 1, true)
+    and setup_help:find("Must be the last option", 1, true)
+    and setup_help:find("saves no copy of that password", 1, true)
+    and setup_help:find("--password-cmd op read op://Vault/Item/password", 1, true)
+    and setup_help:find("--password-cmd security find-generic-password -s butler-bot -w", 1, true)
+    and setup_help:find("--password-cmd powershell -NoProfile -Command ", 1, true),
+    "setup usage should explain --password-cmd with password manager examples")
   assert(matrix.cli_usage():find("Example:", 1, true)
     and matrix.cli_usage():find("https://<homeserver>", 1, true)
-    and matrix.cli_usage():find("--password-file <path>", 1, true),
+    and matrix.cli_usage():find("--password-file <path>", 1, true)
+    and matrix.cli_usage():find("--password-cmd PROG [ARG...]", 1, true),
     "Matrix usage should include one complete placeholder setup example")
   assert(not matrix.cli_usage():match("Example:[^\n]*"):find("--pin", 1, true),
     "the usage example should not require --pin")
@@ -1331,6 +1339,10 @@ return function(matrix, pinned_hostname)
     local cmd_output = root .. "/password-cmd-output"
     assert(remuda.fs.mkdir_new(cmd_output))
     local saved_run, saved_fail, saved_status = remuda.process.run, remuda.fail, matrix.status
+    local saved_find = remuda._butler_system.find_command
+    remuda._butler_system.find_command = function(name)
+      return name == "op" and "/resolved/op.cmd" or nil
+    end
     local runs, run_result = {}, nil
     remuda.process.run = function(spec)
       runs[#runs + 1] = spec
@@ -1371,7 +1383,8 @@ return function(matrix, pinned_hostname)
       end
       assert(message:find("op", 1, true) and message:find("Next:", 1, true),
         label .. " should name the program and give a next step: " .. message)
-      assert(not message:find("leaky", 1, true) and not message:find("op://", 1, true),
+      assert(not message:find("leaky", 1, true) and not message:find("op://", 1, true)
+        and message:find(" op ", 1, true) and not message:find("/resolved", 1, true),
         label .. " must not echo the command's output or its arguments: " .. message)
       return message
     end
@@ -1421,7 +1434,8 @@ return function(matrix, pinned_hostname)
     local login_plan, login_error = matrix.setup_prepare(cmd_args("--password-cmd", "security",
       "find-generic-password", "-s", "butler-bot", "-w"))
     assert(login_plan, "--password-cmd should work without --register: " .. tostring(login_error))
-    assert(#runs == 1 and runs[1].argv[1] == "security" and runs[1].argv[5] == "-w")
+    assert(#runs == 1 and runs[1].argv[1] == "security" and runs[1].argv[5] == "-w",
+      "a program that is not found by name should be run unchanged")
     matrix.setup_network(login_plan, function() end)
     assert(#requests == 1 and requests[1].url:match("/login$")
       and request_json(requests[1]).password == "cmd-secret-pw",
@@ -1434,8 +1448,9 @@ return function(matrix, pinned_hostname)
       "--password-cmd", table.unpack(op)))
     assert(#runs == 1 and type(runs[1].argv) == "table" and #runs[1].argv == #op
       and runs[1].timeout == 10, "--password-cmd should run once, as an argv list, with a 10s limit")
-    for index, word in ipairs(op) do
-      assert(runs[1].argv[index] == word, "--password-cmd should pass every remaining argument unchanged")
+    assert(runs[1].argv[1] == "/resolved/op.cmd", "--password-cmd should run the program found by name")
+    for index = 2, #op do
+      assert(runs[1].argv[index] == op[index], "--password-cmd should pass every remaining argument unchanged")
     end
     assert(#requests == 1 and requests[1].url:match("/register$")
       and request_json(requests[1]).password == "cmd-secret-pw",
@@ -1456,6 +1471,7 @@ return function(matrix, pinned_hostname)
       "--password-cmd must not save a copy of the password")
 
     remuda.process.run, remuda.fail, matrix.status = saved_run, saved_fail, saved_status
+    remuda._butler_system.find_command = saved_find
     requests, resolved, atomic_writes = {}, nil, {}
     os.remove(cmd_output .. "/token")
     os.remove(cmd_output .. "/config")

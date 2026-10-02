@@ -6,6 +6,7 @@ local USAGE = [[Usage: remuda butler matrix setup [OPTIONS]
   --homeserver URL       Your Matrix server address, like https://matrix.example.org.
   --owner ID             Your Matrix user ID, like @alice:example.org (in Element: click your avatar, top left).
   --password-file PATH   Use this chosen bot password; with --register it is saved privately. If omitted, one is generated and saved privately.
+  --password-cmd PROG [ARG...]  Run this program and use the first line it prints as the bot password; no copy is saved. Must be the last option.
   --bot ID               The bot's Matrix user ID, like @butler-home:example.org (the account setup logs in as).
   --token-file PATH      Use an existing access token from this file instead of a password.
   --register             Create the bot account; prompt for its registration token if no file is given.
@@ -18,7 +19,12 @@ local USAGE = [[Usage: remuda butler matrix setup [OPTIONS]
   --pin SHA256HEX        Trust this HTTPS certificate SPKI SHA-256 (see docs/butler.md).
   --ca-file PATH         Trust the HTTPS certificate authority in this file.
 
-Example: remuda butler matrix setup --homeserver https://matrix.example.org --owner @alice:example.org --register --dir /path/to/private/butler --pin <64-hex-sha256>]]
+Example: remuda butler matrix setup --homeserver https://matrix.example.org --owner @alice:example.org --register --dir /path/to/private/butler --pin <64-hex-sha256>
+
+Password from a password manager: end the command with --password-cmd. Setup runs the program directly (no shell) and saves no copy of that password.
+  1Password:  ... --password-cmd op read op://Vault/Item/password
+  macOS:      ... --password-cmd security find-generic-password -s butler-bot -w
+  PowerShell: ... --password-cmd powershell -NoProfile -Command "Get-Secret -Name butler-bot -AsPlainText"]]
 
 matrix.REJECTED_REGISTRATION_TOKEN = "The server rejected that registration token. Nothing was created or written."
 
@@ -236,7 +242,10 @@ local function password_from_command(argv)
     return nil, "--password-cmd: " .. safe_user_id_echo(argv[1]) .. " " .. what
       .. "\nNext: check the command runs by itself and prints only the password"
   end
-  local ok, result = pcall(remuda.process.run, { argv = argv, timeout = 10 })
+  -- Resolve the program as doctor does, so a Windows .cmd shim starts by its bare name.
+  local resolved = { system.find_command(argv[1]) or argv[1] }
+  for index = 2, #argv do resolved[#resolved + 1] = argv[index] end
+  local ok, result = pcall(remuda.process.run, { argv = resolved, timeout = 10 })
   if not ok or type(result) ~= "table" then return failed("could not be started") end
   if result.timed_out then return failed("timed out after 10 seconds") end
   if result.code ~= 0 then return failed("failed with exit status " .. tostring(result.code)) end
