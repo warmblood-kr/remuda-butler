@@ -116,6 +116,10 @@ state, last firing and the first 80 bytes of its text. `add` and `rm` are for a
 person at the terminal; a Butler agent is refused, because a schedule keeps
 injecting its text after the agent has forgotten it. `add` asks for `yes` at
 the terminal, as turning typed lines on does; `rm` does not ask.
+The operator-only gate on `add` and `rm` is advisory within one user account, like
+the typed-line switches: a process running as the same user with Lua access can
+write the schedule store directly. A schedule's text is delivered as mail marked
+as a timed message, never as typed input.
 
 A timer checks every 30 seconds. Each due schedule is delivered as mail from
 the reserved sender `schedule`, with the subject `[schedule NAME]` and a first
