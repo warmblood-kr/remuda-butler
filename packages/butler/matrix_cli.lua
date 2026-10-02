@@ -564,10 +564,20 @@ function matrix.cli(args, agent, stdin_body)
           if result.home_room then lines[#lines + 1] = "HOME room: " .. terminal_safe(result.home_room) end
           if result.all_room then lines[#lines + 1] = "ALL-BUTLERS room: " .. terminal_safe(result.all_room) end
           lines[#lines + 1] = "Token file: " .. terminal_safe(files.token_path)
-          if files.password_path then
+          if files.password_store then
+            lines[#lines + 1] = "Bot account password saved in the OS secure store ("
+              .. terminal_safe(files.password_store.backend) .. ") as " .. terminal_safe(files.password_store.name)
+          elseif files.password_path then
             lines[#lines + 1] = "Bot account password saved privately: " .. terminal_safe(files.password_path)
+            if files.password_replaced then
+              lines[#lines + 1] = "The OS secure store did not take it, so the old password file there was replaced."
+            end
           elseif plan.secret_kind == "registration" then
             lines[#lines + 1] = "The password you supplied was not copied."
+          end
+          if files.old_password_path then
+            lines[#lines + 1] = "An old password file was left in place: " .. terminal_safe(files.old_password_path)
+              .. " (delete it if you no longer use it)"
           end
           lines[#lines + 1] = "Config file: " .. terminal_safe(files.config_path)
           if status_result.error then

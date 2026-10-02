@@ -378,7 +378,11 @@ local function resolve_outputs(options)
   end
   if not options.force then
     local paths = { token_path, config_path }
-    if saves_password then paths[#paths + 1] = password_path end
+    -- Only the file route can collide with an old password file: --dir always
+    -- means the file, and so does a system with no OS secure store.
+    if saves_password and (dir or not system.credential_backend()) then
+      paths[#paths + 1] = password_path
+    end
     for _, path in ipairs(paths) do
       if file_exists(path) then return nil, "output file already exists; pass --force: " .. path end
     end
@@ -850,7 +854,13 @@ function matrix.setup_write(options, result)
     if type(result.home_room) == "string" then orphan_ids[#orphan_ids + 1] = result.home_room end
     if type(result.all_room) == "string" then orphan_ids[#orphan_ids + 1] = result.all_room end
   end
+  local stored -- { backend, name } once the generated password is in the OS secure store
   local function failure(message)
+    if stored then
+      local ok, deleted = pcall(system.credential_delete, stored.name)
+      if not ok or not deleted then message = message .. "; the password is still in the OS secure store" end
+      stored = nil
+    end
     if #orphan_ids > 0 then
       message = message .. "; orphan room ID" .. (#orphan_ids > 1 and "s" or "")
         .. ": " .. table.concat(orphan_ids, ", ")
@@ -873,12 +883,32 @@ function matrix.setup_write(options, result)
     return failure("Matrix setup requires the Remuda private filesystem helpers")
   end
 
+  -- A generated password goes to the OS secure store. --dir always means the
+  -- file in that directory, and so does a store that is missing or says no.
+  local uses_store = saves_password and not options.output_dir and system.credential_backend() ~= nil
+  local writes_password = saves_password
+  if not options.force then
+    local checked = { options.token_path, options.config_path }
+    if saves_password and not uses_store then checked[#checked + 1] = options.password_path end
+    for _, path in ipairs(checked) do
+      if file_exists(path) then return failure("Matrix output file already exists; pass --force") end
+    end
+  end
+  if uses_store then
+    local name = "butler/matrix/" .. result.user_id .. "/password"
+    local put, backend = system.credential_put(name, result.password)
+    if put then stored, writes_password = { backend = backend, name = name }, false end
+  end
+  -- The account exists by now. A store that refused must not cost its password,
+  -- so the fallback may replace an old password file even without --force.
+  local replaces_password = uses_store and writes_password
+
   local paths = { options.token_path }
-  if saves_password then paths[#paths + 1] = options.password_path end
+  if writes_password then paths[#paths + 1] = options.password_path end
   paths[#paths + 1] = options.config_path
   local path_labels = { [options.token_path] = "token", [options.config_path] = "config" }
   local contents = { [options.token_path] = result.token .. "\n" }
-  if saves_password then
+  if writes_password then
     path_labels[options.password_path] = "password"
     contents[options.password_path] = result.password .. "\n"
   end
@@ -890,11 +920,6 @@ function matrix.setup_write(options, result)
   if options.pin then config_lines[#config_lines + 1] = "pin_sha256=" .. options.pin end
   if options.ca_file then config_lines[#config_lines + 1] = "ca_file=" .. options.ca_file end
   contents[options.config_path] = table.concat(config_lines, "\n") .. "\n"
-  if not options.force then
-    for _, path in ipairs(paths) do
-      if file_exists(path) then return failure("Matrix output file already exists; pass --force") end
-    end
-  end
 
   local created_dirs, created_set, backups = {}, {}, {}
   local function rollback_dirs()
@@ -945,7 +970,7 @@ function matrix.setup_write(options, result)
   for _, path in ipairs(paths) do
     local file = io.open(path, "rb")
     if file then
-      if not options.force then
+      if not options.force and not (replaces_password and path == options.password_path) then
         file:close(); rollback_dirs()
         return failure("Matrix output file already exists; pass --force")
       end
@@ -978,8 +1003,16 @@ function matrix.setup_write(options, result)
     end
     written[#written + 1] = path
   end
-  return { token_path = options.token_path, config_path = options.config_path,
-    password_path = saves_password and options.password_path or nil }
+  local files = { token_path = options.token_path, config_path = options.config_path,
+    password_path = writes_password and options.password_path or nil, password_store = stored }
+  if writes_password then
+    files.password_replaced = replaces_password and not options.force
+      and backups[options.password_path] ~= nil or nil
+  elseif options.secret_kind == "registration" and type(options.password_path) == "string"
+    and file_exists(options.password_path) then
+    files.old_password_path = options.password_path
+  end
+  return files
 end
 
 return matrix

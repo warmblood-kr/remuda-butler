@@ -1928,11 +1928,28 @@ return function(matrix, pinned_hostname)
       clean_store_dir()
     end
 
+    -- The store was there at validation but then refused: the account exists, so
+    -- the new password replaces the old file even without --force, and setup says so.
+    write(store_password_path, old_password_bytes)
+    fake_store("unavailable: the keychain is locked")
+    local replacing_password = register(bot, { "--default" })
+    assert(replacing_password and resolved and resolved.status == 0 and #store_calls == 1
+      and read(store_password_path) == replacing_password .. "\n",
+      "a refused store must not cost the new account its password: " .. tostring(resolved and resolved.stderr))
+    assert(resolved.stdout:find("\nBot account password saved privately: " .. store_password_path .. "\n", 1, true)
+      and resolved.stdout:find("the old password file there was replaced", 1, true)
+      and not resolved.stdout:find("left in place", 1, true),
+      "setup should say the old password file was replaced: " .. resolved.stdout)
+    clean_store_dir()
+
     -- The file route still refuses to replace an existing password file without --force.
     write(store_password_path, old_password_bytes)
     remuda.system = nil
-    assert(register(bot, { "--default" }) == nil and resolved and resolved.status == 1
-      and resolved.stderr:find("output file already exists; pass --force: " .. store_password_path, 1, true)
+    local refused_plan, refused_error = matrix.setup_prepare({ "--homeserver", "http://matrix.invalid",
+      "--owner", "@alice:example.org", "--register", "--registration-token-file", registration_token_file,
+      "--bot", bot, "--default" })
+    assert(not refused_plan
+      and tostring(refused_error):find("output file already exists; pass --force: " .. store_password_path, 1, true)
       and read(store_password_path) == old_password_bytes,
       "without a store an existing password file must stop setup before the network")
     clean_store_dir()
