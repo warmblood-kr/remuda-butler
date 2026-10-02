@@ -601,6 +601,8 @@ remuda._butler_commands_config = { current_agent = current_agent, OPERATOR = OPE
   contributions = contributions, registry_list = registry_list, statusline = statusline,
   resolve = resolve, mail = mail,
 }
+remuda.exec("butler/schedule")
+remuda.exec("butler/schedule_cli")
 remuda.exec("butler/commands")
 
 remuda.tool{
@@ -989,6 +991,16 @@ remuda._butler_compaction_run_config = { mail_root = mail_root, _butler_trace = 
   statusline_model_matches = statusline_model_matches, clear_legacy_restore_state = clear_legacy_restore_state,
 }
 remuda.exec("butler/compaction_run")
+
+-- The tick is declared in init.lua; schedule_cli.lua (loaded before commands.lua)
+-- uses the same seams. notice.lua owns the tick and the send seam, so the
+-- sender of a schedule's mail is not reachable from this table.
+remuda._butler_schedule_env = {
+  path = mail_root and mail_root .. "/schedules.json",
+  trace = _butler_trace,
+  resolve = resolve,
+  unread = function(alias, message_id) return mail.is_unread(mail_id(alias, false), message_id) end,
+}
 
 -- remuda._butler_session_trace_path lets a test redirect this to a throwaway
 -- tempfile, same idiom as remuda._butler_compaction_trace_path above; nil in

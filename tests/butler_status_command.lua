@@ -189,3 +189,46 @@ local m, bare = handle(event("?status", { event_id = "$m2" }))
 status.status_format = real_format
 assert(m == true and bare == "status unavailable", tostring(m) .. tostring(bare))
 print("ok - malformed data is contained")
+
+-- outcome: a raise on a command line consumes the event; on other text it does not
+local o_m, o_t, o_c = status.outcome(false, nil, nil, nil, "?status")
+assert(o_m == true and o_t == nil and o_c == nil, "raise on ?status consumes silently")
+assert(select(4, status.outcome(false, "boom", nil, nil, "?status")) == "handler_error", "a consumed raise names its trace reason")
+assert(select(4, status.outcome(false, "boom", nil, nil, "?status please")) == nil, "no trace reason when not consumed")
+assert(select(4, status.outcome(true, true, "txt", nil, "?status")) == nil, "no trace reason on success")
+assert(status.outcome(false, nil, nil, nil, "?help") == true, "raise on ?help consumes")
+assert(status.outcome(false, nil, nil, nil, "?status please") == false, "raise on other text is ordinary mail")
+assert(status.outcome(false, nil, nil, nil, "hello") == false)
+local commit = function() end
+local k_m, k_t, k_c = status.outcome(true, true, "txt", commit, "?status")
+assert(k_m == true and k_t == "txt" and k_c == commit, "a normal result passes through")
+assert(status.outcome(true, false, nil, nil, "?status") == false, "an unmatched result stays unmatched")
+print("ok - outcome")
+
+-- a long quota list cannot push the reply past the 14-line / 1500-byte bound
+local limits = {}
+for i = 1, 200 do limits[i] = { name = i % 2 == 0 and "5-hour limit" or "Weekly limit", used = 50 } end
+local long = status.status_format({ now = now, sessions = { { name = "a", kind = "claude" } },
+  quota = { at = now, limits = limits } })
+assert(#long <= 1500 and lines_of(long) <= 14, #long .. " bytes " .. lines_of(long) .. " lines")
+assert(long:match("[^\n]+$") == "(truncated)", "a marker line ends a clamped reply")
+-- the cut never splits a UTF-8 character
+local function valid_utf8(s)
+  local i = 1
+  while i <= #s do
+    local b = s:byte(i)
+    local n = b < 0x80 and 0 or b >= 0xF0 and 3 or b >= 0xE0 and 2 or b >= 0xC2 and 1 or -1
+    if n < 0 or i + n > #s then return false end
+    for j = 1, n do local c = s:byte(i + j); if c < 0x80 or c > 0xBF then return false end end
+    i = i + n + 1
+  end
+  return true
+end
+for n = 1, 12 do
+  local many = {}
+  for i = 1, 300 do many[i] = { name = "5-hour limit", used = i <= n and 5 or 50 } end
+  local utf = status.status_format({ now = now, sessions = { { name = ("s"):rep(n), kind = "claude" } },
+    quota = { at = now, limits = many } })
+  assert(#utf <= 1500 and valid_utf8(utf), "the cut keeps UTF-8 whole at " .. n)
+end
+print("ok - final clamp")

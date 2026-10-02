@@ -131,6 +131,9 @@ return {
     { name = "butler-reconcile", every = host._butler_reconcile_interval or 2, run = function()
       if host._butler_reconcile then host._butler_reconcile() end
     end },
+    { name = "butler-schedule", every = 30, run = function()
+      if host._butler_schedule_tick then host._butler_schedule_tick() end
+    end },
     { name = "butler-compaction", every = host._butler_compaction_interval or 45, run = function()
       local state = host._butler_state or host._butler_compaction_state
       if state and state.compaction_enabled and host._butler_compaction_tick then host._butler_compaction_tick() end
@@ -283,6 +286,10 @@ the normal way for a member to communicate.
         run = function(_, args, caller) return host._butler_command_run("agents", args, caller) end },
       { id = "status-commands", order = 17, verb = "status-commands", usage = "  remuda butler status-commands on|off",
         run = function(_, args, caller) return host._butler_command_run("status-commands", args, caller) end },
+      { id = "schedule", order = 18, verb = "schedule", usage = "  remuda butler schedule list\n"
+          .. '  remuda butler schedule add <name> "<M H * * *>" <text> | - [--to SESSION]\n'
+          .. "  remuda butler schedule rm <name>",
+        run = function(_, args, caller) return host._butler_command_run("schedule", args, caller) end },
       { id = "launch", order = 20, verb = "launch", usage = "  remuda butler launch <claude|codex|monocle> [name] [--model M]",
         run = function(_, args, caller) return host._butler_command_run("launch", args, caller) end },
       { id = "topic", order = 30, verb = "topic", usage = "  remuda butler topic new <name> [--template T] [--agent A] [--model M]\n"

@@ -60,6 +60,27 @@ local function compose(rows, hidden, quota, now, total)
   return table.concat(out, "\n"), #out
 end
 
+local TRUNCATED = "(truncated)"
+
+-- Final bound on the whole reply; cuts on a line and UTF-8 boundary and ends with a marker line.
+local function clamp(text)
+  local count = select(2, text:gsub("\n", "")) + 1
+  if count <= MAX_LINES and #text <= MAX_BYTES then return text end
+  local kept, used = {}, 0
+  for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+    if #kept >= MAX_LINES - 1 then break end
+    kept[#kept + 1] = line
+  end
+  local head = table.concat(kept, "\n")
+  local room = MAX_BYTES - #TRUNCATED - 1
+  if #head > room then
+    local cut = room
+    while cut > 0 and head:byte(cut + 1) and head:byte(cut + 1) >= 0x80 and head:byte(cut + 1) < 0xC0 do cut = cut - 1 end
+    head = head:sub(1, cut)
+  end
+  return head .. "\n" .. TRUNCATED
+end
+
 -- data = { sessions = { {name, kind, context_percent, busy, unread} }, quota = {at, limits}|nil, now }
 function M.status_format(data)
   data = type(data) == "table" and data or {}
@@ -76,7 +97,7 @@ function M.status_format(data)
     text, count = compose(head, #rows - shown, data.quota, now, #rows)
     if count <= MAX_LINES and #text <= MAX_BYTES then break end
   end
-  return text
+  return clamp(text)
 end
 
 function M.help_text()
@@ -105,6 +126,16 @@ function M.rate_allow(last, sender, now)
   if not M.rate_check(last, sender, now) then return false end
   last[sender] = now
   return true
+end
+
+-- Folds the pcall of M.handle into the relay's decision. A handle that raised on
+-- a line that parses as a command still consumes the event, with no reply; a
+-- line that is not a command is left to the ordinary path. A consumed raise
+-- returns the trace reason as the fourth result.
+function M.outcome(ok, matched, text, commit, body)
+  if ok then return matched == true, text, commit end
+  if M.parse(body) == nil then return false end
+  return true, nil, nil, "handler_error"
 end
 
 local function try(fn, ...)
