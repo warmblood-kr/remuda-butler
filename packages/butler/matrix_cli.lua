@@ -58,23 +58,38 @@ Options:
 
 Next: remuda butler matrix reply EVENT_ID TEXT]]
 
+local function terminal_safe(value)
+  return tostring(value or ""):gsub("[%c]", " "):gsub("\194[\128-\159]", " ")
+end
+
 local function matrix_verb(args)
   if type(args) ~= "table" then return nil end
   local at = 2
   while at <= #args do
     if args[at] == "--json" then
       at = at + 1
-    elseif args[at] == "--room" and args[at + 1] then
+    elseif args[at] == "--room" or args[at] == "-n" or args[at] == "-o" or args[at] == "--id" then
       at = at + 2
+    elseif args[at] == "--" then
+      return nil
+    elseif type(args[at]) == "string" and args[at]:sub(1, 1) == "-" then
+      at = at + 1
     else
-      local word = args[at]
-      return type(word) == "string" and word:sub(1, 2) ~= "--" and word or nil
+      return args[at]
     end
   end
 end
 
 local function matrix_cli_failure(text, code)
   text = tostring(text or "")
+  local trailing_newline = text:sub(-1) == "\n"
+  if trailing_newline then text = text:sub(1, -2) end
+  local safe_lines = {}
+  for line in (text .. "\n"):gmatch("(.-)\n") do
+    safe_lines[#safe_lines + 1] = terminal_safe(line)
+  end
+  text = table.concat(safe_lines, "\n")
+  if trailing_newline then text = text .. "\n" end
   if text:sub(-1) ~= "\n" then text = text .. "\n" end
   if type(remuda.pending) == "function" then
     local reply = remuda.pending({ timeout = 1 })
@@ -101,7 +116,7 @@ end
 
 local function unknown_matrix_verb(args)
   local word = matrix_verb(args)
-  if not word or VERBS[word] then return nil end
+  if not word or word == "help" or VERBS[word] then return nil end
   local verbs = {}
   for verb in pairs(VERBS) do verbs[#verbs + 1] = verb end
   table.sort(verbs)
@@ -110,7 +125,7 @@ local function unknown_matrix_verb(args)
     local candidate = verb_distance(word, verb)
     if not distance or candidate < distance then suggestion, distance = verb, candidate end
   end
-  local safe_word = word:gsub("[%c]", "?")
+  local safe_word = terminal_safe(word)
   local lines = { "remuda: butler matrix: unknown verb '" .. safe_word .. "'." }
   if suggestion and distance <= math.max(1, math.floor(#word / 3)) then
     lines[1] = lines[1]:sub(1, -2) .. " Did you mean '" .. suggestion .. "'?"
@@ -270,9 +285,6 @@ local function event_line(event)
   return sender .. ": " .. (matrix.encode_json(event) or "<event>")
 end
 
-local function terminal_safe(value)
-  return tostring(value or ""):gsub("[%c]", " "):gsub("\194[\128-\159]", " ")
-end
 -- At most `limit` bytes; a cut text ends with "..." inside the limit, so the
 -- reader can see that it is not complete.
 local function shortened(text, limit)

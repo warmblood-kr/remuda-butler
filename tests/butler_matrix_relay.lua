@@ -2568,6 +2568,7 @@ local function capture_matrix_cli(args, agent, stdin_body, file_body)
   return captured
 end
 
+-- The #235 tests live in one table: the main chunk is at Lua's 200-local limit.
 local ctx_tests = {}
 function ctx_tests.test_matrix_thread_cli_parser_contract()
   local dir, path = invite_fixture()
@@ -2608,12 +2609,35 @@ Next: remuda butler matrix reply EVENT_ID TEXT]]
           .. tostring(bad_option and bad_option.stderr or bad_option))
     end)
 
+    local hostile_option = "--jsno\27]8;;https://example.invalid\7"
+    check("thread hostile option", { "matrix", "thread", hostile_option, "$abc" }, function(result)
+      local text = tostring(result and result.stderr or result)
+      assert(result and result.code == 2 and text:find("unknown option", 1, true)
+        and not text:find("\27", 1, true) and not text:find("\7", 1, true),
+        "parser errors must strip ESC/OSC controls from arguments: " .. text)
+    end)
+
     check("matrix folow", { "matrix", "folow", "$abc" }, function(unknown)
       local text = tostring(unknown and (unknown.stderr .. unknown.stdout) or unknown)
       assert(unknown and unknown.code == 2 and text:find("folow", 1, true)
         and text:find("follow", 1, true) and text:find("Did you mean", 1, true)
         and text:find("Usage:", 1, true) and text:find("Next:", 1, true),
         "must suggest follow, show Usage and Next, and exit 2; got: " .. text)
+    end)
+
+    check("matrix C1 verb", { "matrix", "unknown\194\133verb" }, function(unknown)
+      local text = tostring(unknown and (unknown.stderr .. unknown.stdout) or unknown)
+      assert(unknown and unknown.code == 2 and not text:find("\194[\128-\159]"),
+        "unknown-verb errors must strip UTF-8 C1 controls: " .. text)
+    end)
+
+    check("matrix -n history extra", { "matrix", "-n", "5", "history", "extra" }, function(result)
+      assert(result and result.code == 0 and result.stdout == matrix.cli_usage() and result.stderr == "",
+        "an invalid history invocation must keep the legacy full-usage response")
+    end)
+    check("matrix help", { "matrix", "help" }, function(result)
+      assert(result and result.code == 0 and result.stdout == matrix.cli_usage() and result.stderr == "",
+        "matrix help must keep the legacy full-usage response")
     end)
 
     local before = #calls
@@ -4697,9 +4721,6 @@ local function test_rx_link_like_root_counted_but_not_shown()
     relay:stop()
   end)
 end
-
--- The #235 tests live in one table: the main chunk of this file is at Lua's
--- limit of 200 local variables, and a table costs one.
 
 -- #235 step A1: the inbox header of a Matrix mail names the room, its kind and
 -- the thread; a thread mail gets a Next line with the room always written.
