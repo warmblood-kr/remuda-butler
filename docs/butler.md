@@ -133,6 +133,21 @@ no more than five minutes old, contain one line of at most 2000 bytes, and fit
 the limit of 10 lines per 10 minutes. the switch verbs are for a person at the
 machine; an agent is refused.
 
+### Status commands
+
+An allowlisted owner can send `?status` or `?help` as a whole line in the HOME
+room, a followed thread, or a message that mentions the Butler. Butler answers
+with one threaded notice built by code, with no LLM and no agent running:
+`?status` lists each session's name, kind, context percent, idle or task, and
+unread mail count, then the Claude quota from the cached statusline reading
+(Codex quota and machine load show `n/a`); `?help` lists the commands. The
+answer holds at most 14 lines and 1500 bytes and never includes mail bodies,
+prompts, screen text, paths, or accounts. A sender gets one answer per 10
+seconds, separate from the typed-line limit. A command is never typed into a
+session, and a message that is not exactly one known command stays on the
+ordinary mail path. `remuda butler status-commands on|off` turns it off or on
+(on asks for `yes` at the terminal; an agent is refused); it is on by default.
+
 Root posts are delivered from anyone. In the HOME room, every thread reply is
 delivered whether or not you follow it. In other rooms, thread replies are
 delivered only in followed threads or when a message mentions the Butler;
