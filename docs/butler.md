@@ -192,7 +192,8 @@ prompts, screen text, paths, or accounts. A sender gets one answer per 10
 seconds, separate from the typed-line limit. A command is never typed into a
 session, and a message that is not exactly one known command stays on the
 ordinary mail path. `remuda butler status-commands on|off` turns it off or on
-(on asks for `yes` at the terminal; an agent is refused); it is on by default.
+(on asks for `yes` at the terminal; an agent is refused); it is on by default. In `matrix.conf`, `status_commands` is on when absent or `true`;
+any value other than `true` or `false` turns it off.
 
 Root posts are delivered from anyone. In the HOME room, every thread reply is
 delivered whether or not you follow it. In other rooms, thread replies are

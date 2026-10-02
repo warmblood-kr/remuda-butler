@@ -261,6 +261,8 @@ local function read_config(path)
         elseif value == "false" then
           opts[key] = false
         else
+          -- An unreadable status switch turns the commands off, never on.
+          if key == "status_commands" then opts[key] = false end
           warn_invalid_config_line(path, i, key, value)
         end
       else
@@ -346,7 +348,7 @@ local function read_config(path)
     butler_senders = butler_senders,
     typed_lines = opts.typed_lines == true,
     shell_lines = opts.shell_lines == true,
-    status_commands = opts.status_commands ~= false,
+    status_commands = opts.status_commands == nil or opts.status_commands == true,
     untrusted_per_room_hour = untrusted_per_room_hour,
     posts_per_hour = posts_per_hour,
     b2b_max_turns = b2b_max_turns,
