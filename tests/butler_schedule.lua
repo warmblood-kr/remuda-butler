@@ -394,6 +394,26 @@ for _, case in ipairs({
   ok("check refuses " .. case[1], not schedule.check(bad))
 end
 ok("a missing last_message is fine", schedule.check(hourly_entry("fresh")))
+for _, value in ipairs({ 1e300, 0 / 0, 1 / 0, -1 / 0, -1, 1.5, 2 ^ 53 + 2, 4223371680, "5" }) do
+  local bad = entry("planted")
+  bad.last_fired = value
+  ok("check refuses last_fired " .. tostring(value), not schedule.check(bad))
+end
+for _, value in ipairs({ 0, 1, 29000000, 4223371679 }) do
+  local good = entry("planted")
+  good.last_fired = value
+  ok("check accepts last_fired " .. value, schedule.check(good))
+end
+do
+  local planted = entry("planted")
+  planted.last_fired = 1e300
+  put(remuda.json.encode({ version = 1, schedules = { planted, entry("keep") } }))
+  traces = {}
+  local got = schedule.load(path, trace)
+  eq("a planted last_fired drops only that entry", #got, 1)
+  ok("and is traced", traces[1] and traces[1]:find("^schedule_entry_dropped planted"))
+  os.remove(path)
+end
 
 -- Disabled schedules and several schedules.
 local off = hourly_entry("off")

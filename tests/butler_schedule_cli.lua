@@ -232,4 +232,18 @@ do
   os.remove(path)
 end
 
+-- One unprintable date never aborts the listing.
+do
+  local entries = { { name = "bad", spec = "7 * * * *", target = "butler", text = "t", created_by = "operator",
+    last_fired = 1e300, enabled = true }, { name = "good", spec = "7 * * * *", target = "butler", text = "t",
+    created_by = "operator", last_fired = 0, enabled = true } }
+  ok("describe prints ? for a date os.date cannot format", cli.describe(entries[1]):find("last %?  t$"))
+  local real_date = os.date
+  os.date = function() error("number has no integer representation") end
+  local line = cli.describe({ name = "x", spec = "7 * * * *", target = "b", text = "t", last_fired = 5, enabled = true })
+  os.date = real_date
+  ok("a throwing os.date prints ?", line:find("last %?  t$"))
+  eq("a never-fired entry still says never", cli.describe(entries[2]):find("last never", 1, true) ~= nil, true)
+end
+
 print(("butler_schedule_cli: %d cases passed"):format(count))

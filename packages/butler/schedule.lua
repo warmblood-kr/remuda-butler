@@ -88,6 +88,7 @@ M.VERSION = 1
 M.MAX_SCHEDULES = 16
 M.MAX_TEXT_BYTES = 2048
 local MAX_FILE_BYTES = 256 * 1024
+local MAX_MINUTE = 4223371679 -- 9999-12-31T23:59 as epoch minutes
 
 -- Text taken from a file or a caller is shown and traced only through safe:
 -- control, C1, bidi, zero-width and tag characters become spaces and the
@@ -142,8 +143,13 @@ function M.check(entry)
   if last ~= nil and (type(last) ~= "string" or #last > 64 or last:find("%c")) then
     return nil, "last_message must be a message id"
   end
-  if type(entry.enabled) ~= "boolean" or type(entry.last_fired) ~= "number" then
+  local fired = entry.last_fired
+  if type(entry.enabled) ~= "boolean" or type(fired) ~= "number" then
     return nil, "enabled and last_fired are required"
+  end
+  -- Whole minutes up to the year 9999; written so doubles and Lua 5.4 agree.
+  if not (fired == floor(fired) and fired >= 0 and fired <= MAX_MINUTE) then
+    return nil, "last_fired must be a whole minute count from 0 to " .. MAX_MINUTE
   end
   return true
 end

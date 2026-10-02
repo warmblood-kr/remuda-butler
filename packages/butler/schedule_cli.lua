@@ -22,7 +22,11 @@ local terminal_safe, shortened = schedule.safe, schedule.shortened
 
 -- describe(entry) -> one list line.
 function M.describe(entry)
-  local fired = entry.last_fired > 0 and os.date("%Y-%m-%d %H:%M", entry.last_fired * 60) or "never"
+  local fired = "never"
+  if entry.last_fired > 0 then
+    local formatted, text = pcall(os.date, "%Y-%m-%d %H:%M", entry.last_fired * 60)
+    fired = formatted and type(text) == "string" and text or "?"
+  end
   return table.concat({
     terminal_safe(entry.name), terminal_safe(entry.spec), "-> " .. terminal_safe(entry.target),
     entry.enabled and "on" or "off", "last " .. fired,
