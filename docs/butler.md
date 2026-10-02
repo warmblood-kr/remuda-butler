@@ -106,7 +106,8 @@ remuda butler schedule rm NAME
 schedules. `SESSION` is a live session alias and defaults to `butler`. `TEXT`
 is at most 2048 bytes and holds no control characters except newlines; `-`
 reads it from stdin. The schedule has five fields in the machine's local time:
-the minute is `N` or `*/N` (N from 5 to 59), the hour is `N` or `*`, and day,
+the minute is `N` or `*/N` (N is 5, 6, 10, 12, 15, 20 or 30, so the gap
+stays the same across the hour), the hour is `N` or `*`, and day,
 month and weekday are `*`. `7 * * * *` is minute 7 of every hour,
 `0 9 * * *` is 09:00 daily, `*/30 * * * *` is every half hour.
 

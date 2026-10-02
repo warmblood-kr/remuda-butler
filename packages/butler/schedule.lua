@@ -13,7 +13,9 @@ function M.days_from_civil(y, m, d)
   return era * 146097 + yoe * 365 + floor(yoe / 4) - floor(yoe / 100) + doy - 719468
 end
 
--- Grammar: `M H * * *` with M = N (0-59) or */N (5-59) and H = N (0-23) or *.
+-- Grammar: `M H * * *` with M = N (0-59) or */N and H = N (0-23) or *. A step
+-- restarts each hour, so only divisors of 60 that are at least 5 keep the gap.
+local STEPS = { [5] = true, [6] = true, [10] = true, [12] = true, [15] = true, [20] = true, [30] = true }
 local function number(text, max)
   if not text:match("^%d%d?$") then return nil end
   local value = tonumber(text)
@@ -34,7 +36,9 @@ function M.parse(spec)
   local step = fields[1]:match("^%*/(.*)$")
   if step then
     rule.step = number(step, 59)
-    if not rule.step or rule.step < 5 then return nil, "minute step must be */N with N from 5 to 59" end
+    if not (rule.step and STEPS[rule.step]) then
+      return nil, "minute step must be */N with N one of 5, 6, 10, 12, 15, 20, 30 (a step that divides 60 keeps every gap at least 5 minutes)"
+    end
   else
     rule.minute = number(fields[1], 59)
     if not rule.minute then return nil, "minute must be 0-59 or */N" end

@@ -39,9 +39,11 @@ eq("step", half.step, 30)
 eq("step has no fixed minute", half.minute, nil)
 eq("*/5 is the smallest step", rule_of("*/5 * * * *").step, 5)
 rule_of("59 23 * * *")
+for _, n in ipairs({ 5, 6, 10, 12, 15, 20, 30 }) do eq("*/" .. n .. " parses", rule_of("*/" .. n .. " * * * *").step, n) end
+ok("a rejected step says which steps are allowed", select(2, schedule.parse("*/59 * * * *")):find("5, 6, 10, 12, 15, 20, 30", 1, true))
 
 for _, spec in ipairs({
-  "", "* * * * *", "*/4 * * * *", "*/0 * * * *", "*/60 * * * *", "*/ * * * *", "*/5x * * * *",
+  "", "* * * * *", "*/4 * * * *", "*/7 * * * *", "*/25 * * * *", "*/59 * * * *", "*/0 * * * *", "*/60 * * * *", "*/ * * * *", "*/5x * * * *",
   "60 * * * *", "7 24 * * *", "-1 * * * *", "a * * * *", "1-5 * * * *", "1,2 * * * *", "*/5,10 * * * *",
   "007 * * * *", "7 * 1 * *", "7 * * 1 *", "7 * * * 1", "7 * * *", "7 * * * * *",
   " 7 * * * *", "7 * * * * ", "7  * * * *", "7\t*\t*\t*\t*", "7 * * * *\n", "7 * * * *\0",
@@ -122,6 +124,15 @@ eq("a missing mail root is an empty list", #schedule.load(nil, trace), 0)
 local list = {}
 ok("add stores a checked entry", schedule.add(list, entry()))
 ok("save writes", schedule.save(path, list))
+do
+  local planted = { entry("planted") }
+  planted[1].spec = "*/59 * * * *"
+  local sink = {}
+  assert(schedule.save(path, planted))
+  eq("a hand-planted */59 is dropped on load", #schedule.load(path, function(e) sink[#sink + 1] = e end), 0)
+  eq("and traced", sink[1], "schedule_entry_dropped")
+  assert(schedule.save(path, list))
+end
 ok("the file is written private", writes[1].private == true)
 local loaded, problem = schedule.load(path, trace)
 eq("round trip keeps the entry", #loaded, 1)

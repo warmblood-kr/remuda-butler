@@ -9,7 +9,7 @@ local M = {}
 local USAGE = "Usage: remuda butler schedule list\n"
   .. '       remuda butler schedule add NAME "M H * * *" TEXT [--to SESSION]\n'
   .. "       remuda butler schedule rm NAME\n"
-  .. "TEXT may be - to read it from stdin. A schedule is minute N or */N (N >= 5) at hour N or *."
+  .. "TEXT may be - to read it from stdin. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *."
 local WARNING = "From now on this text arrives as mail from the reserved sender `schedule` at every due time, until the schedule is removed, also after restarts. The receiving agent reads it like any mail and may act on it."
 local LIST_TEXT_BYTES = 80
 
