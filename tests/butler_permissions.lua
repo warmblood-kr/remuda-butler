@@ -560,6 +560,29 @@ weq("windows, terminal caller: -o as given",
 weq("posix, terminal caller: -o with a colon or a device-like name is an ordinary file",
   permissions.output_for_caller("/tmp/nul:x", "matrix-MEDIA", { kind = "outside" }, wcwd_of, wrealpath, wis_symlink,
     "linux"), "/tmp/nul:x")
+-- A name that is not absolute is refused by name too, before anything resolves or opens it.
+for _, path in ipairs({ "nul", [[sub\con .txt]], "COM1:", "f.txt::$DATA", [[sub\nul]], "sub/nul", "c:nul" }) do
+  for kind, caller in pairs({ session = { kind = "session", session = "w1" }, terminal = { kind = "outside" } }) do
+    local asked = 0
+    local function spy(target)
+      if target ~= [[C:\proj]] then asked = asked + 1 end
+      return wrealpath(target)
+    end
+    local label = "windows, " .. kind .. " caller, relative " .. path
+    local out, why = permissions.file_for_caller(path, caller, wcwd_of, spy, "--file ", true, "windows")
+    weq(label .. ": nothing to open", out, nil)
+    weq(label .. ": refusal", tostring(why):find("refused: --file " .. path .. " names a device or a stream, not a file", 1, true), 1)
+    out, why = permissions.output_for_caller(path, "matrix-MEDIA", caller, wcwd_of, spy, wis_symlink, "windows")
+    weq(label .. ": nothing to write", out, nil)
+    weq(label .. ": -o refusal", tostring(why):find("refused: -o " .. path .. " names a device or a stream, not a file", 1, true), 1)
+    weq(label .. ": never resolved", asked, 0)
+  end
+end
+weq("path_key: a relative device says why", select(2, permissions.path_key([[sub\nul]], "windows")), "device")
+weq("path_key: a relative file is not absolute, with no reason", select("#", permissions.path_key([[sub\f.txt]], "windows")) <= 1
+  or select(2, permissions.path_key([[sub\f.txt]], "windows")) == nil, true)
+weq("windows, terminal caller: a relative file, as given",
+  permissions.file_for_caller([[sub\f.txt]], { kind = "outside" }, wcwd_of, wrealpath, "--file ", true, "windows"), [[sub\f.txt]])
 -- The default name comes from the sender's media id.
 for name, default in pairs({ ["a backslash"] = [[matrix-a\..\..\b]], ["a stream"] = "matrix-a:b", ["a device"] = "nul" }) do
   local out = permissions.output_for_caller(nil, default, { kind = "session", session = "w1" }, wcwd_of, wrealpath,
