@@ -696,7 +696,7 @@ return function(matrix, pinned_hostname)
       and not line_specs[3].preface:find(long_owner, 1, true),
       "a very long value is cut to fit a preface line: " .. tostring(resolved and resolved.stderr))
     -- The cut is visible: what the user confirms must not look complete.
-    assert(line_specs[3].preface:match("\n(  Owner: @a+%.%.%.)\n") and #line_specs[3].preface:match("\n(  Owner: [^\n]*)") == 180
+    assert(line_specs[3].preface:match("\n(  Owner: @a+%.%.%.)\n") and #line_specs[3].preface:match("\n(  Owner: [^\n]*)") == 159
       and line_specs[1].label == "Matrix homeserver URL" and not line_specs[3].preface:find("Homeserver: [^\n]*%.%.%.\n"),
       "a cut summary line ends with ... inside the limit, and an uncut line has no mark")
     line_specs[3].callback("N", nil)

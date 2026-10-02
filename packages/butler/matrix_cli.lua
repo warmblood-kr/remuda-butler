@@ -486,23 +486,26 @@ function matrix.cli(args, agent, stdin_body, file_body)
                 or nil
               return prompt_failure(safe_error, next_line)
             end
+            -- A dynamic value is cut at 150 characters so one long value cannot
+            -- crowd the summary; the fixed wording is never cut.
+            local function value(text) return shortened(terminal_safe(text), 150) end
             local lines = {
               "Matrix setup will:",
-              "  Homeserver: " .. terminal_safe(wizard_plan.homeserver),
-              "  Owner: " .. terminal_safe(wizard_plan.owner_mxid),
+              "  Homeserver: " .. value(wizard_plan.homeserver),
+              "  Owner: " .. value(wizard_plan.owner_mxid),
               "  Rooms: open (anyone can invite this Butler). Restrict: set rooms=allowlist or add deny_room/deny_server in "
-                .. terminal_safe(wizard_plan.config_path) .. ". The sender allowlist still decides whose messages are trusted.",
+                .. value(wizard_plan.config_path) .. ". The sender allowlist still decides whose messages are trusted.",
               "  Account: create a Butler bot (you will need its server registration token)",
-              "  Bot: " .. terminal_safe(wizard_plan.bot_mxid),
+              "  Bot: " .. value(wizard_plan.bot_mxid),
               -- Without --dir the files go next to the config file.
               "  Save private token and config files in: "
-                .. terminal_safe(wizard_plan.output_dir or wizard_plan.config_path:match("^(.*)/[^/]+$")),
+                .. value(wizard_plan.output_dir or wizard_plan.config_path:match("^(.*)/[^/]+$")),
               "  Start the relay for this Butler with this config (replaces its current Matrix relay config)",
             }
             if wizard_plan.pin then
               lines[#lines + 1] = "  HTTPS certificate pin: " .. wizard_plan.pin
             elseif wizard_plan.ca_file then
-              lines[#lines + 1] = "  HTTPS CA file: " .. terminal_safe(wizard_plan.ca_file)
+              lines[#lines + 1] = "  HTTPS CA file: " .. value(wizard_plan.ca_file)
             elseif scheme_or_error == "https" then
               lines[#lines + 1] = "  HTTPS trust: this system's trusted certificates"
             end
@@ -512,9 +515,6 @@ function matrix.cli(args, agent, stdin_body, file_body)
             local question = "Continue? Type Y to continue, or N to cancel"
             local label, preface = table.concat(lines, "\n") .. "\n" .. question, nil
             if matrix.prompt_preface_supported() then
-              -- Bound dynamic values before wrapping so even a long URL or path
-              -- cannot form a word larger than the shared preface limit.
-              for index, line in ipairs(lines) do lines[index] = shortened(line, 180) end
               label, preface = question, matrix.wrap_prompt_preface(table.concat(lines, "\n"))
             end
             prompt_line(label, "N", function(answer)
