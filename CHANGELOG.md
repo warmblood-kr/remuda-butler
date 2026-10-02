@@ -7,6 +7,7 @@ release tags yet; entries come from merged pull requests.
 ## Unreleased
 
 ### Added
+- `remuda butler matrix setup --password-cmd PROG [ARG...]` reads the bot password from a program such as a password manager (`op read ...`, `security find-generic-password ...`, `powershell -NoProfile -Command ...`). It must be the last option, and setup saves no copy of that password.
 - Butler resolves installed agent CLIs on Windows, uses `USERPROFILE` when `HOME` is missing, and gives a clear next step when launch fails.
 - `remuda butler matrix setup` with no flags runs guided prompts (#127). The wizard always opens rooms and does not ask about room access (#145).
 - Matrix open-room mode: anyone may invite the Butler, subject to `deny_room`/`deny_server` rules and a daily join cap (#136).

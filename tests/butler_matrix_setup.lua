@@ -33,9 +33,17 @@ return function(matrix, pinned_hostname)
     and setup_help:find("--register --dir /path/to/private/butler", 1, true)
     and not setup_help:find("--register --registration-token-file", 1, true),
     "setup usage should explain each option in plain words and show a full example")
+  assert(setup_help:find("--password-cmd PROG [ARG...]", 1, true)
+    and setup_help:find("Must be the last option", 1, true)
+    and setup_help:find("saves no copy of that password", 1, true)
+    and setup_help:find("--password-cmd op read op://Vault/Item/password", 1, true)
+    and setup_help:find("--password-cmd security find-generic-password -s butler-bot -w", 1, true)
+    and setup_help:find("--password-cmd powershell -NoProfile -Command ", 1, true),
+    "setup usage should explain --password-cmd with password manager examples")
   assert(matrix.cli_usage():find("Example:", 1, true)
     and matrix.cli_usage():find("https://<homeserver>", 1, true)
-    and matrix.cli_usage():find("--password-file <path>", 1, true),
+    and matrix.cli_usage():find("--password-file <path>", 1, true)
+    and matrix.cli_usage():find("--password-cmd PROG [ARG...]", 1, true),
     "Matrix usage should include one complete placeholder setup example")
   assert(not matrix.cli_usage():match("Example:[^\n]*"):find("--pin", 1, true),
     "the usage example should not require --pin")
@@ -1366,6 +1374,159 @@ return function(matrix, pinned_hostname)
   os.remove(chosen_output .. "/password")
   os.remove(chosen_output .. "/config")
   os.remove(chosen_output)
+
+  do -- --password-cmd: the bot password is a program's stdout and is never saved
+    local cmd_output = root .. "/password-cmd-output"
+    assert(remuda.fs.mkdir_new(cmd_output))
+    local saved_run, saved_fail, saved_status = remuda.process.run, remuda.fail, matrix.status
+    local saved_find = remuda._butler_system.find_command
+    remuda._butler_system.find_command = function(name)
+      return name == "op" and "/resolved/op.cmd" or nil
+    end
+    local runs, run_result = {}, nil
+    remuda.process.run = function(spec)
+      runs[#runs + 1] = spec
+      if type(run_result) == "string" then error(run_result) end
+      return run_result
+    end
+    remuda.fail = function(message) return message end
+    matrix.status = function(_, callback)
+      callback({ status = 200, json = { user_id = "@butler-cmd:example.org",
+        joined_rooms = { "!cmd-home:example.org" } } })
+      return { cancel = function() end }
+    end
+    local function cmd_args(...)
+      local values = { "--homeserver", "http://matrix.invalid", "--owner", "@alice:example.org",
+        "--bot", "@butler-cmd:example.org", "--dir", cmd_output }
+      for _, value in ipairs({ ... }) do values[#values + 1] = value end
+      return values
+    end
+    local function cmd_cli(...)
+      local values = cmd_args(...)
+      table.insert(values, 1, "setup")
+      table.insert(values, 1, "matrix")
+      return matrix.cli(values)
+    end
+    local op = { "op", "read", "--no-newline", "op://Vault/Item/password" }
+    local function nothing_written()
+      return read(cmd_output .. "/password") == nil and read(cmd_output .. "/token") == nil
+        and read(cmd_output .. "/config") == nil and #atomic_writes == 0
+    end
+    local function cmd_refused(result, label, ...)
+      runs, run_result, requests, resolved, atomic_writes = {}, result, {}, nil, {}
+      local message = tostring(cmd_cli("--password-cmd", table.unpack(op)))
+      assert(#requests == 0 and nothing_written(),
+        label .. " must stop before any network request or file write")
+      for _, fragment in ipairs({ ... }) do
+        assert(message:find(fragment, 1, true),
+          label .. " should say '" .. fragment .. "': " .. message)
+      end
+      assert(message:find("op", 1, true) and message:find("Next:", 1, true),
+        label .. " should name the program and give a next step: " .. message)
+      assert(not message:find("leaky", 1, true) and not message:find("op://", 1, true)
+        and message:find(" op ", 1, true) and not message:find("/resolved", 1, true),
+        label .. " must not echo the command's output or its arguments: " .. message)
+      return message
+    end
+
+    local failed = cmd_refused({ code = 3, stdout = "leaky-stdout\n", stderr = "leaky-stderr",
+      timed_out = false }, "a failing --password-cmd")
+    assert(failed:match("exit[^\n]*3"), "a failing --password-cmd should report its exit status: " .. failed)
+    cmd_refused({ code = nil, stdout = "leaky-stdout", stderr = "", timed_out = true },
+      "a slow --password-cmd", "timed out")
+    cmd_refused({ code = 0, stdout = "\n", stderr = "leaky-stderr", timed_out = false },
+      "a silent --password-cmd", "empty")
+    cmd_refused("leaky os error 2", "an unrunnable --password-cmd")
+
+    for _, other in ipairs({ { "--password-file", password }, { "--token-file", token } }) do
+      runs, requests, atomic_writes = {}, {}, {}
+      run_result = { code = 0, stdout = "cmd-secret-pw\n", stderr = "", timed_out = false }
+      local message = tostring(cmd_cli(other[1], other[2], "--password-cmd", table.unpack(op)))
+      assert(message:find(other[1], 1, true) and message:find("--password-cmd", 1, true),
+        "--password-cmd and " .. other[1] .. " should be refused together by name: " .. message)
+      assert(#runs == 0 and #requests == 0 and nothing_written(),
+        "a refused option pair must not run the command, reach the network, or write files")
+      assert(not message:find("cmd-secret-pw", 1, true))
+    end
+    runs = {}
+    local _, no_program = matrix.setup_prepare(cmd_args("--password-cmd"))
+    assert(tostring(no_program):find("--password-cmd requires a", 1, true) and #runs == 0,
+      "--password-cmd needs a program: " .. tostring(no_program))
+    local _, cmd_no_bot = matrix.setup_prepare({ "--homeserver", "http://matrix.invalid",
+      "--owner", "@alice:example.org", "--dir", cmd_output, "--password-cmd", "op" })
+    assert(tostring(cmd_no_bot):find("--bot is required when using --password-cmd", 1, true),
+      "--password-cmd without --register needs --bot: " .. tostring(cmd_no_bot))
+
+    runs = {}
+    local _, cmd_retry = matrix.setup_prepare({ "--homeserver", "http://matrix.invalid",
+      "--owner", "@alice:example.org", "--bot", "@butler-cmd:example.org", "--password-cmd", "op", "read",
+      "op://Vault/It'em/password" })
+    for _, destination in ipairs({ "--default", '--dir "$HOME/.config/remuda/matrix-test"' }) do
+      assert(tostring(cmd_retry):find(" --bot '@butler-cmd:example.org' " .. destination
+        .. " --password-cmd 'op' 'read' 'op://Vault/It'\\''em/password'\n", 1, true),
+        "the retry line should keep --password-cmd and its quoted arguments last: " .. tostring(cmd_retry))
+    end
+    assert(#runs == 0, "a setup that cannot proceed must not run the password command")
+
+    runs = {}
+    local taken_dir = root .. "/cmd-taken"
+    remuda.fs.mkdir_new(taken_dir)
+    local taken = assert(io.open(taken_dir .. "/token", "wb")); taken:write("old"); taken:close()
+    local _, cmd_taken = matrix.setup_prepare({ "--homeserver", "http://matrix.invalid",
+      "--owner", "@alice:example.org", "--bot", "@butler-cmd:example.org", "--dir", taken_dir,
+      "--password-cmd", "op", "read", "x" })
+    assert(tostring(cmd_taken):find("output file already exists", 1, true) and #runs == 0,
+      "an existing-file refusal must not run the password command: " .. tostring(cmd_taken))
+
+    -- Without --register the command's output is the login password.
+    runs, requests, resolved, atomic_writes = {}, {}, nil, {}
+    run_result = { code = 0, stdout = "cmd-secret-pw\n", stderr = "", timed_out = false }
+    local login_plan, login_error = matrix.setup_prepare(cmd_args("--password-cmd", "security",
+      "find-generic-password", "-s", "butler-bot", "-w"))
+    assert(login_plan, "--password-cmd should work without --register: " .. tostring(login_error))
+    assert(#runs == 1 and runs[1].argv[1] == "security" and runs[1].argv[5] == "-w",
+      "a program that is not found by name should be run unchanged")
+    matrix.setup_network(login_plan, function() end)
+    assert(#requests == 1 and requests[1].url:match("/login$")
+      and request_json(requests[1]).password == "cmd-secret-pw",
+      "--password-cmd should log in with the command's output")
+
+    -- With --register it is the new account's password, and no copy is saved.
+    runs, requests, resolved, atomic_writes = {}, {}, nil, {}
+    run_result = { code = 0, stdout = "  cmd-secret-pw \r\nignored\n", stderr = "", timed_out = false }
+    assert(cmd_cli("--register", "--registration-token-file", registration_token_file,
+      "--password-cmd", table.unpack(op)))
+    assert(#runs == 1 and type(runs[1].argv) == "table" and #runs[1].argv == #op
+      and runs[1].timeout == 10, "--password-cmd should run once, as an argv list, with a 10s limit")
+    assert(runs[1].argv[1] == "/resolved/op.cmd", "--password-cmd should run the program found by name")
+    for index = 2, #op do
+      assert(runs[1].argv[index] == op[index], "--password-cmd should pass every remaining argument unchanged")
+    end
+    assert(#requests == 1 and requests[1].url:match("/register$")
+      and request_json(requests[1]).password == "cmd-secret-pw",
+      "--register --password-cmd should submit the trimmed first line of the command's output, like a password file")
+    requests[1].callback({ status = 401,
+      body = '{"session":"cmd-session","flows":[{"stages":["m.login.registration_token"]}]}' })
+    assert(request_json(requests[2]).password == "cmd-secret-pw")
+    requests[2].callback({ status = 200,
+      body = '{"access_token":"cmd-access-token","user_id":"@butler-cmd:example.org"}' })
+    requests[3].callback({ status = 200, body = '{"user_id":"@butler-cmd:example.org"}' })
+    requests[4].callback({ status = 200, body = '{"room_id":"!cmd-home:example.org"}' })
+    assert(resolved and resolved.status == 0
+      and not (resolved.stdout .. (resolved.stderr or "")):find("cmd-secret-pw", 1, true)
+      and not resolved.stdout:find(cmd_output .. "/password", 1, true),
+      "--password-cmd setup must not print the password or a saved password path")
+    assert(read(cmd_output .. "/token") == "cmd-access-token\n"
+      and read(cmd_output .. "/password") == nil and #atomic_writes == 2,
+      "--password-cmd must not save a copy of the password")
+
+    remuda.process.run, remuda.fail, matrix.status = saved_run, saved_fail, saved_status
+    remuda._butler_system.find_command = saved_find
+    requests, resolved, atomic_writes = {}, nil, {}
+    os.remove(cmd_output .. "/token")
+    os.remove(cmd_output .. "/config")
+    os.remove(cmd_output)
+  end
 
   local collision_plan = matrix.setup_prepare({ "--homeserver", "http://matrix.invalid",
     "--owner", "@alice:example.org", "--register", "--registration-token-file",
