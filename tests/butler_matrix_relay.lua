@@ -4022,7 +4022,7 @@ local function test_rx_b2b_turn_guard_home_line_once()
   rx_with_dir(dir, function()
     local relay, client, delivered = rx_relay(path)
     relay_module.instance = relay
-    local line = "Stopped replying in thread $gt (" .. HOME .. "): 6 Butler-only turns. A reply in that thread from a person on the allowlist resumes it."
+    local line = "Two Butlers talked 6 turns without a human, so I paused thread $gt (" .. HOME .. ") to avoid ping-pong. No action needed; reply in that thread only if you want it to continue."
     rx_post_http(path, function(calls)
       rx_sync(client, HOME, { rx_msg("$gt", OWNER, "@bot:example.org and @agent-ally:example.org, talk") })
       relay:subscribe_thread(HOME, "$gt")
@@ -4200,7 +4200,7 @@ local function test_rx_mail_reply_turn_guard()
   local dir, path = invite_fixture(OWNER .. "," .. RX_ALLY, "b2b_max_turns=2\n")
   rx_with_dir(dir, function()
     local relay, client, delivered = rx_relay(path)
-    local line = "Stopped replying in thread $mt (" .. HOME .. "): 2 Butler-only turns. A reply in that thread from a person on the allowlist resumes it."
+    local line = "Two Butlers talked 2 turns without a human, so I paused thread $mt (" .. HOME .. ") to avoid ping-pong. No action needed; reply in that thread only if you want it to continue."
     rx_sync(client, HOME, { rx_msg("$mt", RX_ALLY, "@bot:example.org ping") })
     local mail = rx_mail_id(delivered, "$mt")
     assert(mail, "a Butler's root post is delivered")
@@ -4361,12 +4361,12 @@ local function test_rx_hostile_thread_root_not_counted_no_forged_home_line()
     if client:messages(HOME, "remuda butler matrix join") ~= 0 then
       problems[#problems + 1] = "a HOME line carries the forged Next text"
     end
-    if client:messages(HOME, "Stopped replying") ~= 0 then
-      problems[#problems + 1] = client:messages(HOME, "Stopped replying") .. " HOME stop line(s) for invalid roots"
+    if client:messages(HOME, "to avoid ping-pong") ~= 0 then
+      problems[#problems + 1] = client:messages(HOME, "to avoid ping-pong") .. " HOME stop line(s) for invalid roots"
     end
     assert(#problems == 0, table.concat(problems, "; "))
     turns("$valid-root")
-    assert(relay:b2b_stopped(HOME, "$valid-root") and client:messages(HOME, "Stopped replying in thread $valid-root") == 1,
+    assert(relay:b2b_stopped(HOME, "$valid-root") and client:messages(HOME, "paused thread $valid-root (") == 1,
       "a valid root still counts and posts its ONE HOME stop line")
     relay:stop()
   end)
@@ -4598,7 +4598,7 @@ local function test_rx_link_like_root_counted_but_not_shown()
       local shown = "stopped replying in thread " .. normal .. " (" .. HOME .. ending
       assert(ok == nil and err == "Reply not sent: " .. shown .. "\nNext: remuda butler matrix --room '" .. HOME
         .. "' thread '" .. normal .. "'", "a normal 43-character id is shown as before, got: " .. tostring(err))
-      assert(client:messages(HOME, "Stopped replying in thread " .. normal .. " (" .. HOME .. ending) == 1,
+      assert(client:messages(HOME, "paused thread " .. normal .. " (" .. HOME .. ") to avoid ping-pong.") == 1,
         "the HOME stop line shows a normal id as before")
 
       local link, problems = "$https://evil.example/login", {}
@@ -4614,12 +4614,12 @@ local function test_rx_link_like_root_counted_but_not_shown()
       if result.code == 0 or not text:find(refusal, 1, true) or text:find("evil", 1, true) then
         problems[#problems + 1] = "the CLI refusal must hide the id and end with history, got: " .. text
       end
-      if client:messages(HOME, "Stopped replying in thread (id not shown) (" .. HOME .. ending) ~= 1 then
+      if client:messages(HOME, "paused thread (id not shown) (" .. HOME .. ") to avoid ping-pong.") ~= 1 then
         problems[#problems + 1] = "ONE HOME stop line with (id not shown) is expected"
       end
       if client:messages(HOME, "evil") ~= 0 then problems[#problems + 1] = "a HOME line prints the link-like root" end
       assert(#problems == 0, table.concat(problems, "\n  "))
-      assert(client:messages(HOME, "Stopped replying") == 2, "one stop line per stopped thread, 2 in total")
+      assert(client:messages(HOME, "to avoid ping-pong") == 2, "one stop line per stopped thread, 2 in total")
     end)
     relay:stop()
   end)
