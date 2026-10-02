@@ -169,6 +169,20 @@ fn butler_status_is_a_live_mcp_tool_not_a_terminal_scrape() {
         command.contains(&status_path),
         "status command must name the telemetry file: {command}"
     );
+    for event in ["UserPromptSubmit", "Stop", "Notification"] {
+        let groups = settings["hooks"][event].as_array().expect("hook groups");
+        assert_eq!(groups.len(), 1, "{event} has one hook group");
+        let hook = &groups[0]["hooks"][0];
+        assert_eq!(hook["type"], "command");
+        let hook_command = hook["command"].as_str().expect("hook command");
+        assert!(
+            hook_command.starts_with("remuda -s ")
+                && hook_command.contains(" --stdin butler status-hook ")
+                && hook_command.contains(&status_path)
+                && (hook_command.ends_with(">/dev/null 2>&1; exit 0") || hook_command.ends_with("*> $null; exit 0")),
+            "{event} hook must be quiet and always exit 0: {hook_command}"
+        );
+    }
 
     let snapshot = r#"{"model":{"display_name":"Claude Opus 4.6"},"context_window":{"total_input_tokens":12345,"context_window_size":200000,"used_percentage":6}}"#;
     let status_line = eval(

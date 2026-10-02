@@ -195,16 +195,33 @@ local function probe_status(name, agent)
   local ready_ok, ready = config.call_callback(entry.ready, screen)
   return ready_ok and ready and "idle" or "other"
 end
-local function session_status(name, agent)
+-- A hook word (Claude Code hooks, see status_hook.lua) beats the screen while
+-- fresh: "working" for 10 minutes (a Stop that never came means a crash or an
+-- interrupt, so later the screen decides), "idle"/"needs you" for an hour. For
+-- those two the screen is still probed and a "working" screen wins, because
+-- resuming after a permission prompt fires no hook.
+local HOOK_MAX_AGE = { working = 600, idle = 3600, ["needs you"] = 3600 }
+local function session_status(name, agent, telemetry)
   local now = (remuda._butler_status_now or os.time)()
   local cached = status_cache[name]
-  if cached and now - cached.at < STATUS_TTL_SECONDS then return cached.status end
-  local ok, status = pcall(probe_status, name, agent)
-  if not ok then status = "other" end
+  -- A closed session whose name is reused is a new agent: never show its status.
+  if cached and cached.agent == agent and cached.id == agent.id and now - cached.at < STATUS_TTL_SECONDS then
+    return cached.status
+  end
+  local hook, hook_at = telemetry.hook_state, tonumber(telemetry.hook_at)
+  local fresh = hook and hook_at and now >= hook_at and now - hook_at < (HOOK_MAX_AGE[hook] or 0)
+  local status
+  if fresh and hook == "working" then
+    status = hook
+  else
+    local ok, probed = pcall(probe_status, name, agent)
+    status = ok and probed or "other"
+    if fresh and status ~= "working" then status = hook end
+  end
   for key, value in pairs(status_cache) do -- entries of closed sessions expire with the window
     if key ~= name and now - value.at >= STATUS_TTL_SECONDS then status_cache[key] = nil end
   end
-  status_cache[name] = { at = now, status = status }
+  status_cache[name] = { at = now, status = status, agent = agent, id = agent.id }
   return status
 end
 
@@ -212,7 +229,7 @@ function remuda.session_detail(session)
   local agent = bus.agents[session.name]
   if not agent then return nil end
   local telemetry = remuda._butler_telemetry_for(agent)
-  local detail = session_status(session.name, agent) .. " · " .. (agent.kind or "agent") .. " · " .. telemetry.model
+  local detail = session_status(session.name, agent, telemetry) .. " · " .. (agent.kind or "agent") .. " · " .. telemetry.model
   -- Current usage only: the window and percent cost width and rarely change.
   local used = tonumber(telemetry.context_used)
   if used then detail = detail .. " · " .. string.format("%.0fK", used / 1000) end

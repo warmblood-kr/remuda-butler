@@ -7,6 +7,7 @@ release tags yet; entries come from merged pull requests.
 ## Unreleased
 
 ### Added
+- Claude members report `working`, `idle` and `needs you` through Claude Code hooks (`remuda butler status-hook`), which beat the screen probe while fresh; Codex keeps the screen probe.
 - The client session list leads each Butler session line with `working`, `idle`, `needs you` or `other`, read from the agent's screen probes.
 - `remuda butler matrix send` and `reply` accept `-` and `--file PATH` like the mail verbs, a text starting with an unknown `--option` is refused instead of posted (use `--` for literal text), and the output names the room posted to (#251).
 - A mail whose first line is `HANDOFF` is the handoff letter: the root Butler reads it first after a relaunch.

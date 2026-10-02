@@ -375,6 +375,7 @@ end
 remuda.extension_command("butler", function(args, caller)
   if #args == 0 or args[1] == "help" or args[1] == "-h" or args[1] == "--help" then return butler_usage() end
   if args[1] == "statusline" then return statusline(args, caller) end
+  if args[1] == "status-hook" then return remuda.butler.status_hook.run(args, caller) end
   for _, item in ipairs(contributions("butler.command")) do
     if item.entry.verb == args[1] then
       local result = item.entry.run(args, caller)

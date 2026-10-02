@@ -551,6 +551,14 @@ update or startup dialog) or `other` (no screen, an unreadable one, or a kind
 without reliable probes such as Monocle). The screen is captured at most once
 per session every 2 seconds and only the status word is shown, for example
 `idle · claude · opus · 123K · ✉2`.
+For Claude members, Claude Code hooks written into the member's settings file
+(UserPromptSubmit = `working`, Stop = `idle`, a permission or elicitation
+Notification = `needs you`, an idle-prompt Notification = `idle`) call the
+internal `remuda butler status-hook`, which stores only that word and a time in
+`<status file>.state`. A hook word beats the screen while fresh: 10 minutes for
+`working` (a missing Stop means a crash or interrupt), an hour for `idle` and
+`needs you`; those two still yield to a screen that shows `working`. Otherwise
+the screen probe decides. Codex has no hooks yet and stays on the screen probe.
 Explicit Monocle launches use this argv: `monocle agent --workdir DIR --session NAME --auto-approve`;
 Butler adds `--model M` when specified.
 `--auto-approve` means the member runs with Monocle's own auto-approval. Butler
