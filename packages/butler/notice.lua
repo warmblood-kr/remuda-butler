@@ -791,6 +791,16 @@ local function deliver_notice(session)
     end
   end
   if remuda._butler_notify_policy(session) then
+    if (tonumber(pending.delivery_attempts) or 0) > 0 then
+      local screen, decision = recovery_screen(session)
+      if not screen or decision ~= "EMPTY" then
+        local state = { phase = "probe", count = pending.count, started_at = notice_now() }
+        state.message_ids = {}
+        for _, id in ipairs(pending.message_order or {}) do state.message_ids[#state.message_ids + 1] = id end
+        return notice_recovery_error(session, state,
+          "composer was not empty after a failed notice write")
+      end
+    end
     local state = { phase = "verify_notice", count = pending.count, notice = pending_notice_text(pending), checks = 0,
       started_at = notice_now() }
     state.message_ids = {}

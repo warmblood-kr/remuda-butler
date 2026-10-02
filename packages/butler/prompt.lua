@@ -66,7 +66,7 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
   local write_succeeded = false
   local write_result
   local task_seen_in_composer = false
-  local verify_started, retry_at, retry_failures, finished
+  local verify_started, retry_at, retry_failures, last_retry_reason, finished
   local retry_delays = options.retry_delays or { 20, 60, 300, 900 }
   local function now()
     if options.now then
@@ -92,6 +92,7 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
       if not checked or alive ~= true then finish(false, "recipient gone"); return end
     end
     retry_failures = (retry_failures or 0) + 1
+    last_retry_reason = reason
     local delay = retry_delays[retry_failures]
     if not delay then finish(false, reason); return end
     retry_at = now() + delay
@@ -209,6 +210,14 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
             retry("deferred")
           end
           return
+        end
+        if (retry_failures or 0) > 0 and not write_succeeded then
+          local checked, decision = false, nil
+          if options.empty then checked, decision = pcall(options.empty, screen) end
+          if not checked or decision ~= "EMPTY" then
+            finish(false, last_retry_reason or "composer was not empty after a failed write")
+            return
+          end
         end
         attempts = 1
         verify_ticks = 0

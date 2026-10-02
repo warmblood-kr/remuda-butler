@@ -160,6 +160,34 @@ remuda._butler_deliver_notices()
 assert(type_attempts == 1 and #unsafe_writes == 0,
   "a retry never types or submits into the non-empty composer")
 
+-- A failed notice write may leave part of its text behind. Even if the
+-- delivery policy's capture is stale and looks empty, the retry's fresh
+-- composer check must prevent another write into that partial text.
+now, screen = now + 10, "› Ask Codex to do anything"
+bus.notices.lead, bus.notice_recoveries.lead = nil, nil
+bus.unread_seeded = bus.unread_seeded or {}
+bus.unread_seeded.lead = bus.agents.lead
+local retry_captures, notice_type_attempts = 0, 0
+remuda.capture = function()
+  retry_captures = retry_captures + 1
+  if retry_captures <= 2 then return "› Ask Codex to do anything" end
+  return "› partially typed notice"
+end
+remuda.type_text = function(_, value)
+  notice_type_attempts = notice_type_attempts + 1
+  screen = "› partially typed notice"
+  error("simulated write failure after partial input", 0)
+end
+assert(not remuda._butler_notify("lead", "notice that may be partial"))
+now = now + 2
+remuda._butler_deliver_notices()
+assert(notice_type_attempts == 1 and bus.notices.lead.delivery_attempts == 1,
+  "first notice write fails after leaving partial text")
+now = bus.notices.lead.due_at
+remuda._butler_deliver_notices()
+assert(retry_captures >= 3 and notice_type_attempts == 1,
+  "notice retry requires a fresh empty-composer check before retyping")
+
 -- A successful manual mail resend clears the matching failed first-task marker.
 bus.notices.lead, bus.notice_recoveries.lead = nil, nil
 bus.task_poke_failures = { lead = { task = "manual resend body", reason = "submit" } }

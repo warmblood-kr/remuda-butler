@@ -6,35 +6,38 @@ remuda = {
   schedule = function(spec) poll = { run = spec.run }; return poll end,
   cancel = function(handle) if handle then handle.cancelled = true end end,
   capture = function() return screen end,
-  type_text = function() input_calls = input_calls + 1; error("write refused") end,
+  type_text = function(_, text)
+    input_calls = input_calls + 1
+    screen = "› partial " .. text
+    error("write refused")
+  end,
 }
 local prompt = dofile("packages/butler/prompt.lua")
 local options = {
   ready = function() return true end,
   allowed = function() return true end,
-  empty = function() return "EMPTY", "" end,
+  empty = function(value)
+    if value == "ready" then return "EMPTY", "" end
+    return "NON-EMPTY", value
+  end,
   recipient_alive = function() return alive end,
   now = function() return now end,
   on_retry = function(attempt, delay) retries[#retries + 1] = { attempt, delay } end,
   on_done = function(ok, reason, attempts) done[#done + 1] = { ok, reason, attempts } end,
 }
 prompt.schedule(remuda, "codex", "member", "member", "lead", "first task", options)
-local delays = { 20, 60, 300, 900 }
-for index, delay in ipairs(delays) do
-  poll.run()
-  assert(input_calls == index, "initial task text is retried after each failure")
-  assert(#retries == index, "each failed attempt schedules a retry")
-  assert(retries[index][1] == index and retries[index][2] == delay, "task retry uses backoff")
-  now = now + delay - 1
-  poll.run()
-  assert(input_calls == index, "task is not typed before the backoff expires")
-  now = now + 1
-end
 poll.run()
-assert(input_calls == 5, "last attempt runs after the final backoff")
-assert(#done == 1 and done[1][1] == false, "exhaustion completes once with failure")
-assert(done[1][2]:find("type failed", 1, true), "failure identifies the last delivery error")
-assert(done[1][3] == 5, "five actual prompt attempts are reported accurately")
+assert(input_calls == 1 and #retries == 1 and retries[1][1] == 1 and retries[1][2] == 20,
+  "a failed first write schedules one backoff")
+now = now + 19
+poll.run()
+assert(input_calls == 1 and #done == 0, "retry waits for its backoff without retyping")
+now = now + 1
+poll.run()
+assert(input_calls == 1, "a non-empty composer after a failed write is never typed over")
+assert(#done == 1 and done[1][1] == false, "a partial failed write completes as undelivered")
+assert(done[1][2]:find("type failed", 1, true), "failure identifies the original write error")
+assert(done[1][3] == 1, "the failure count reflects one actual write attempt")
 poll.run()
 assert(#done == 1, "no duplicate failure callback after exhaustion")
 
@@ -77,6 +80,29 @@ poll.run()
 poll.run()
 assert(input_calls == 2 and #done == 1 and done[1][1] == true,
   "a false write result retries before being counted as delivered")
+
+now, alive, screen, input_calls, done = 4500, true, "ready", 0, {}
+remuda.type_text = function(_, text)
+  input_calls = input_calls + 1
+  screen = "› partial " .. text
+  return false
+end
+prompt.schedule(remuda, "codex", "member", "member", "lead", "first task", {
+  ready = function() return true end,
+  allowed = function() return true end,
+  empty = function(value)
+    if value == "ready" then return "EMPTY", "" end
+    return "NON-EMPTY", value
+  end,
+  recipient_alive = function() return alive end,
+  now = function() return now end,
+  retry_delays = { 0 },
+  on_done = function(ok, reason) done[#done + 1] = { ok, reason } end,
+})
+poll.run()
+poll.run()
+assert(input_calls == 1 and #done == 1 and done[1][1] == false,
+  "a refused write that left text is not retyped into its non-empty composer")
 
 -- A successful task write followed by an empty composer proves that the TUI
 -- accepted it, even if the first capture missed the text while background
