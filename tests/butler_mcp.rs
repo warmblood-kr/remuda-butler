@@ -1498,6 +1498,22 @@ fn codex_trace_row_followed_by_user_draft_is_not_empty_or_typed_over() {
     assert_eq!(got, "NON-EMPTY|0", "a trace-looking draft must be preserved: {got}");
 }
 
+#[test]
+fn codex_error_below_empty_placeholder_does_not_block_notice() {
+    let (path, _daemon) = butler_with_member("codex-error-below-placeholder");
+    let got = eval(
+        &path,
+        r#"
+        local file = assert(io.open('tests/fixtures/codex-composer-with-error-line-quota-qa-2026-10-01.raw', 'rb'))
+        local screen = file:read('*a')
+        file:close()
+        local decision = remuda._butler_prompt_is_empty('codex', screen)
+        return decision
+        "#,
+    );
+    assert_eq!(got, "EMPTY", "Codex error below an empty placeholder blocked notice delivery: {got}");
+}
+
 fn butler_with_member(tag: &str) -> (PathBuf, impl Drop) {
     let dir = scratch(tag);
     let path = daemon::socket_path_in(&dir, "s");
