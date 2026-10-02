@@ -836,9 +836,15 @@ local function _butler_trace(event, detail)
     end
     f = io.open(path, "a")
     if not f then return end
-    f:write(os.date("!%Y-%m-%dT%H:%M:%SZ") .. "\t" .. event .. "\t" .. (detail or "") .. "\n")
+    f:write(os.date("!%Y-%m-%dT%H:%M:%SZ") .. "\t" .. event .. "\t" .. system.trace_detail(detail) .. "\n")
     f:close()
   end)
+end
+-- Data made before core chose the data directory is still in use (#205).
+-- This module reloads in the daemon, so keep the migration note to one trace line.
+if paths.data_home_note and not remuda._butler_data_home_traced then
+  remuda._butler_data_home_traced = true
+  _butler_trace("data_home", paths.data_home_note)
 end
 
 local BUTLER_ARGV = remuda._butler_argv

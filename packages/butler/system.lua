@@ -103,6 +103,23 @@ end
 local windows_selected = package.config:sub(1, 1) == "\\"
 local selected = windows_selected and windows or posix
 local system = { windows = windows, posix = posix }
+-- Trace details can contain paths copied from the environment. Keep one record
+-- to one line and bound the bytes written even when a path is unusually long.
+function system.trace_detail(value)
+  value = tostring(value or "")
+  local parts, size = {}, 0
+  for index = 1, #value do
+    local byte = value:byte(index)
+    local part = (byte < 32 or byte == 127) and string.format("\\x%02X", byte) or value:sub(index, index)
+    if size + #part > 509 then
+      parts[#parts + 1] = "..."
+      break
+    end
+    parts[#parts + 1] = part
+    size = size + #part
+  end
+  return table.concat(parts)
+end
 function system.platform() return windows_selected and "windows" or "posix" end
 function system.is_absolute(path)
   if type(path) ~= "string" then return false end
@@ -157,6 +174,41 @@ end
 -- true, backend | nil, reason ("no store", or core's not_found / unavailable: / denied:).
 function system.credential_put(name, secret) return credential_call("put", name, secret) end
 function system.credential_delete(name) return credential_call("delete", name) end
+-- Core's per-user directory for `kind`, "<base>/remuda" (remuda.storage.dir),
+-- or nil on a core without the word or when it cannot say.
+function system.storage_dir(kind)
+  local storage = remuda.storage
+  if type(storage) ~= "table" or type(storage.dir) ~= "function" then return nil end
+  local ok, dir = pcall(storage.dir, kind)
+  return ok and type(dir) == "string" and dir ~= "" and dir or nil
+end
+-- A directory test that works on Windows too; every core with storage.dir has fs.realpath.
+local function path_exists(path)
+  local fs = remuda.fs
+  -- Without a way to check, preserve the old location rather than risk hiding
+  -- data. realpath's nil reason distinguishes a missing path from other errors.
+  if type(fs) ~= "table" or type(fs.realpath) ~= "function" then return true end
+  local resolved, reason = fs.realpath(path)
+  if resolved ~= nil then return true end
+  return type(reason) ~= "string" or reason:sub(1, 9) ~= "not_found"
+end
+-- The directory that holds remuda/: core's where it has one, else `legacy_home`
+-- (Butler's own XDG/HOME rule). Data made under the old rule is kept until it is
+-- moved: then the second value is a note naming both places.
+function system.data_home(legacy_home, exists)
+  local core = system.storage_dir("data")
+  local base = core and core:match("^(.+)[/\\]remuda[/\\]?$")
+  if not base or base == legacy_home then return legacy_home end
+  exists = exists or path_exists
+  if not legacy_home then return base end
+  -- A check that raises must not stop Butler loading: the old home is used.
+  local ok, keep = pcall(function()
+    return exists(legacy_home .. "/remuda/butler") and not exists(base .. "/remuda/butler")
+  end)
+  if not ok then return legacy_home end
+  if keep then return legacy_home, "kept " .. legacy_home .. "/remuda/butler; core's data directory is " .. core end
+  return base
+end
 function system.run_in(directory, argv)
   if windows_selected then
     return nil, "Butler topic templates cannot run commands with this core on Windows.\n"

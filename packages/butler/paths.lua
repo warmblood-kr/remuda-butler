@@ -58,7 +58,8 @@ function remuda.butler.template(name, setup)
   topic_config.templates[name] = setup
 end
 
-local data_home = default_data_home()
+-- Core's data directory where it has remuda.storage.dir (#205), else the rule above.
+local data_home, data_home_note = system.data_home(default_data_home())
 local butler_session_cwd = data_home and data_home .. "/remuda/butler/sessions/butler"
 local mail_root = data_home and data_home .. "/remuda/butler/mail"
 -- Resolve the path whether or not the file exists. Matrix commands report
@@ -153,6 +154,8 @@ end
 remuda._butler_paths = {
   topic_config = topic_config,
   data_home = data_home,
+  -- Set when data made under the old rule is still in use; main.lua traces it once.
+  data_home_note = data_home_note,
   butler_session_cwd = butler_session_cwd,
   mail_root = mail_root,
   file_exists = file_exists,

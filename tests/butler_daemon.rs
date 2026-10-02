@@ -46,12 +46,10 @@ fn scratch(tag: &str) -> PathBuf {
 
 /// The daemon thread shares the test process's environment, and an environment
 /// variable is per process, so its Butler homes cannot be separated by env.
-/// They are resolved by `os.getenv` in the daemon's own Lua image (paths.lua),
-/// so this replaces it there, before any mod loads, for the two variables that
-/// name the data and config homes. Both live under this daemon's scratch dir
-/// (see #225, #211). Core still finds the mod through the process
-/// XDG_DATA_HOME (Rust side), and every other name passes through, so a test
-/// that sets REMUDA_BUTLER_CONFIG on purpose keeps working.
+/// They are resolved from `os.getenv` and `remuda.storage.dir` in the daemon's
+/// own Lua image (paths.lua), so this replaces both there, before any mod loads,
+/// for this daemon's data and config homes. Both live under its scratch dir
+/// (see #225, #211). Other environment names and storage kinds pass through.
 fn own_butler_homes(path: &Path) -> String {
     let base = path.parent().unwrap_or(path).join("butler-homes");
     let (data, config) = (base.join("data"), base.join("config"));
@@ -59,7 +57,13 @@ fn own_butler_homes(path: &Path) -> String {
     std::fs::create_dir_all(&config).expect("create own config home");
     format!(
         "local getenv = os.getenv; local homes = {{ XDG_DATA_HOME = [==[{}]==], XDG_CONFIG_HOME = [==[{}]==] }}; \
-         os.getenv = function(key) return homes[key] or getenv(key) end",
+         os.getenv = function(key) return homes[key] or getenv(key) end; \
+         local storage = remuda.storage; if storage and type(storage.dir) == 'function' then \
+           local storage_dir = storage.dir; storage.dir = function(kind) \
+             if kind == 'data' then return homes.XDG_DATA_HOME .. '/remuda' end \
+             return storage_dir(kind) \
+           end \
+         end",
         data.display(),
         config.display()
     )
