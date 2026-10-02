@@ -88,7 +88,7 @@ assert(#sent == 1, "the exhausted notice alerts only once")
 
 -- Re-seeded unread mail after a daemon restart still finds the durable marker
 -- in the sender's delivered mail, so it cannot create another failure notice.
-bus.notice_failure_alerts, bus.notice_delivery_failures = {}, {}
+bus.notice_failure_alerts = {}
 bus.notices.lead = { count = 1, message_order = { "m1" }, delivery_attempts = 4 }
 remuda._butler_notice.notice_recovery_error("lead", { message_ids = { "m1" }, draft = "" }, "again after restart")
 assert(#sent == 1, "a restart does not send a second failure notice for the same original mail")
@@ -98,8 +98,7 @@ assert(#sent == 1, "a restart does not send a second failure notice for the same
 bus.agents.butler = { id = "butler-id", kind = "claude" }
 bus.notices.butler = { count = 1, message_order = { "m1" }, delivery_attempts = 4 }
 remuda._butler_notice.notice_recovery_error("butler", { message_ids = { "m1" }, draft = "" }, "root failure")
-assert(#sent == 1 and bus.notice_delivery_failures.butler,
-  "root Butler records failure state without sending itself failure mail")
+assert(#sent == 1, "root Butler records failure without sending itself failure mail")
 
 -- A sender without a Butler mailbox identity receives the failure through
 -- the recipient's leader instead of silently losing the alert.
@@ -187,16 +186,6 @@ now = bus.notices.lead.due_at
 remuda._butler_deliver_notices()
 assert(retry_captures >= 3 and notice_type_attempts == 1,
   "notice retry requires a fresh empty-composer check before retyping")
-
--- A successful manual mail resend clears the matching failed first-task marker.
-bus.notices.lead, bus.notice_recoveries.lead = nil, nil
-bus.task_poke_failures = { lead = { task = "manual resend body", reason = "submit" } }
-bus.task_poke_failure_alerts = { lead = true }
-stored_messages.m5 = { body = { object_id = "manual-resend-object" } }
-bus.objects["manual-resend-object"] = { content = "manual resend body" }
-remuda._butler_notice.complete_notice_recovery("lead", { message_ids = { "m5" } })
-assert(bus.task_poke_failures.lead == nil and bus.task_poke_failure_alerts.lead == nil,
-  "verified manual resend clears the task-failed marker and alert guard")
 
 -- A human draft is left exactly where it is; recovery neither clears it nor types over it.
 now, screen = now + 10, "› private draft"

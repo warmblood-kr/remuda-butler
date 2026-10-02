@@ -558,7 +558,6 @@ function remuda._butler_inbox(name)
   if mail.unread(id) == 0 then
     for alias, agent in pairs(bus.agents) do
       if agent.id == id then
-        if bus.notice_delivery_failures then bus.notice_delivery_failures[alias] = nil end
         local pending, reshow = bus.notices[alias], false
         for _, message_id in ipairs(pending and pending.message_order or {}) do
           reshow = reshow or (pending.reshow and pending.reshow[message_id]) == true
@@ -1191,9 +1190,6 @@ function remuda._butler_session_exited(name, info)
   -- #29: the mail stays in the inbox; only the pending pane notice goes.
   bus.unread_seeded[name] = "exited"
   bus.notices[name], bus.notice_screens[name], bus.pending_tasks[name] = nil, nil, nil
-  if bus.notice_delivery_failures then bus.notice_delivery_failures[name] = nil end
-  if bus.task_poke_failures then bus.task_poke_failures[name] = nil end
-  if bus.task_poke_failure_alerts then bus.task_poke_failure_alerts[name] = nil end
   bus.notice_recoveries[name], bus.task_retry_screens[name], bus.human_activity_screens[name] = nil, nil, nil
   local exited = bus.agents[name]
   if exited and exited.cwd and bus.trusted_launch_dirs then

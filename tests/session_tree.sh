@@ -87,6 +87,6 @@ if printf '%s\n' "$ROSTER" | grep -n '^$' >/dev/null; then
   echo "actual CLI roster contains a blank spacer row"
   exit 1
 fi
-printf '%s\n' "$ROSTER" | grep -Fx 'depth-1	codex	depth-0	-' >/dev/null
+printf '%s\n' "$ROSTER" | grep -Fx 'depth-1	codex	depth-0' >/dev/null
 printf '%s\n' "$ROSTER" | grep -F '  depth-2' >/dev/null
 echo PASS

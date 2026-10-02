@@ -48,7 +48,6 @@ bus.unread_seeded_exited_at = bus.unread_seeded_exited_at or {}
 bus.notice_retry_reasons = bus.notice_retry_reasons or {}
 bus.notice_fallbacks = bus.notice_fallbacks or {}
 bus.notice_failure_alerts = bus.notice_failure_alerts or {}
-bus.notice_delivery_failures = bus.notice_delivery_failures or {}
 local NOTICE_STABLE_SECONDS = 3
 local NOTICE_QUIET_S = 2
 local NOTICE_MAX_WAIT_S = 10
@@ -474,9 +473,6 @@ notice_recovery_error = function(session, state, reason)
   bus.notice_failure_alerts[session] = alerts
   if pending and not alerts.exhausted then
     alerts.exhausted = true
-    bus.notice_delivery_failures[session] = {
-      message_ids = state.message_ids or {}, reason = reason,
-    }
     if session ~= "butler" then
       local by_sender = {}
       for _, id in ipairs(state.message_ids or {}) do
@@ -583,28 +579,6 @@ local function complete_notice_recovery(session, state)
   bus.notice_recoveries[session] = nil
   bus.notice_retry_reasons[session] = nil
   bus.notice_failure_alerts[session] = nil
-  local failed = bus.notice_delivery_failures[session]
-  if failed then
-    local delivered, remaining = {}, {}
-    for _, id in ipairs(state.message_ids or {}) do delivered[id] = true end
-    for _, id in ipairs(failed.message_ids or {}) do
-      if not delivered[id] then remaining[#remaining + 1] = id end
-    end
-    if #remaining == 0 then bus.notice_delivery_failures[session] = nil
-    else failed.message_ids = remaining end
-  end
-  local failed_task = bus.task_poke_failures and bus.task_poke_failures[session]
-  if failed_task and type(failed_task.task) == "string" then
-    for _, id in ipairs(state.message_ids or {}) do
-      local message = mail.find_message and mail.find_message(id)
-      local object = message and message.body and bus.objects and bus.objects[message.body.object_id]
-      if object and object.content == failed_task.task then
-        bus.task_poke_failures[session] = nil
-        if bus.task_poke_failure_alerts then bus.task_poke_failure_alerts[session] = nil end
-        break
-      end
-    end
-  end
   clear_notice_fallbacks(session, state.message_ids)
   return true
 end
@@ -830,7 +804,6 @@ local function deliver_due_notice(session, now)
   if not bus.agents[session] then
     cancel_notice_timers(session)
     bus.notices[session] = nil
-    bus.notice_delivery_failures[session] = nil
   elseif bus.notice_recoveries[session]
       or not pending or pending.due_at == nil or now >= pending.due_at then
     cancel_notice_timers(session)
@@ -1147,5 +1120,4 @@ remuda._butler_notice = {
   mail_notice_text = mail_notice_text,
   startup_action_safe = startup_action_safe,
   notice_recovery_error = notice_recovery_error,
-  complete_notice_recovery = complete_notice_recovery,
 }
