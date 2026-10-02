@@ -48,7 +48,7 @@ release tags yet; entries come from merged pull requests.
 - Butler-to-Butler Matrix replies are no longer blocked. A per-thread turn guard (`b2b_max_turns`, default 6) stops the Butler after 6 Butler-only turns and posts one line to HOME; a reply in that thread from a person on the allowlist resumes it (#223).
 
 ### Fixed
-- File arguments from an agent session (`--file`, Matrix upload and download) understand Windows paths: `C:\dir` and `C:/dir`, `\\server\share`, either slash, any letter case. A device name such as `NUL` or `con.txt` and an alternate stream (`file:stream`) are refused. On Windows these arguments are still refused as "cannot be resolved" until Remuda core can resolve a path there; piping the text (`-`) works.
+- File arguments from an agent session (`--file`, Matrix upload and download) understand Windows paths: `C:\dir` and `C:/dir`, `\\server\share`, either slash, any letter case. A device name such as `NUL` or `con.txt` and an alternate stream (`file:stream`) are refused, for a person at a terminal too. On Windows the arguments from an agent session are still refused as "cannot be resolved" until Remuda core can resolve a path there; piping the text (`-`) works.
 - On Windows, Butler no longer picks the extensionless `claude` / `codex` script that an npm install puts next to `claude.cmd`; it starts the `.cmd` (or `.exe`) file.
 - Codex members get the `remuda` MCP server and are told to use the `butler_*` tools: the `remuda butler` CLI cannot reach the daemon from inside the Codex sandbox. This needs a core whose `_codex_tui` forwards `-c KEY=VALUE`; on an older core the launch is unchanged (#201).
 - `matrix setup --force` keeps the existing `deny_room`/`deny_server` lines (#154).

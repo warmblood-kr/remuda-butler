@@ -171,12 +171,16 @@ local DEVICE = " names a device or a stream, not a file"
 
 -- A file to READ. Returns the path to open, or nil and the refusal.
 function permissions.file_for_caller(path, caller, cwd_of, realpath, flag, pipe, platform)
-  if type(caller) == "table" and caller.kind == "outside" then return path end
   local what = "refused: " .. flag .. one_line(path)
+  -- A device is refused by its name, before anything opens or resolves it, and
+  -- for a terminal caller too: opening a pipe blocks the daemon.
+  local key, why = nil, select(2, path_key(path, platform))
+  if type(caller) == "table" and caller.kind == "outside" then
+    if why == "device" then return nil, what .. DEVICE .. "\nNext: pass a regular file" end
+    return path
+  end
   local cwd, root = session_cwd(caller, cwd_of, realpath, platform)
   if not cwd then return nil, what .. UNKNOWN end
-  -- A device is refused by its name, before anything opens or resolves it.
-  local key, why = nil, select(2, path_key(path, platform))
   local ok, real = true, nil
   if why ~= "device" then ok, real = pcall(realpath, path) end
   if ok and real then key, why = path_key(real, platform) end
