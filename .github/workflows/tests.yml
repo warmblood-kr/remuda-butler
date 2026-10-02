@@ -14,11 +14,30 @@ jobs:
     # (tests/rust_tests.sh). warmblood-kr/remuda-butler#20.
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      CARGO_TARGET_DIR: ${{ runner.temp }}/remuda-target
     steps:
       - uses: actions/checkout@v4
+      - id: core-ref
+        run: |
+          source tests/core_ref.sh
+          echo "ref=$CORE_REF" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ runner.temp }}/remuda-target
+          key: ${{ runner.os }}-cargo-${{ github.workflow }}-${{ github.ref }}-${{ steps.core-ref.outputs.ref }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ github.workflow }}-${{ github.ref }}-${{ steps.core-ref.outputs.ref }}-
       - run: scripts/check-no-python.sh
       - run: sh scripts/test-no-shell-lua.sh
+        env:
+          CORE_REF: ${{ steps.core-ref.outputs.ref }}
       - run: tests/rust_tests.sh
+        env:
+          CORE_REF: ${{ steps.core-ref.outputs.ref }}
 
   golden:
     # Guidance text (help, member AGENTS.md, welcome mail, member prompt) must stay
@@ -41,3 +60,79 @@ jobs:
           fetch-depth: 0
       - run: sudo apt-get update && sudo apt-get install --yes luajit
       - run: tests/shell_tests.sh
+
+  contract:
+    name: butler-contract
+    if: github.event_name == 'pull_request'
+    needs: rust
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_TARGET_DIR: ${{ runner.temp }}/remuda-target
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: paths
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          run_gate=false
+          changed_files=$(git diff --name-only "$BASE_SHA...$HEAD_SHA")
+          while IFS= read -r path; do
+            case "$path" in
+              packages/butler/main.lua|packages/butler/init.lua|tests/live_reload.sh)
+                run_gate=true
+                break
+                ;;
+            esac
+          done <<< "$changed_files"
+          echo "run=$run_gate" >> "$GITHUB_OUTPUT"
+      - id: core-ref
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          source tests/core_ref.sh
+          echo "ref=$CORE_REF" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        if: steps.paths.outputs.run == 'true'
+        with:
+          repository: warmblood-kr/remuda
+          ref: ${{ steps.core-ref.outputs.ref }}
+          path: remuda-core
+      - uses: actions/cache@v4
+        if: steps.paths.outputs.run == 'true'
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ runner.temp }}/remuda-target
+          key: ${{ runner.os }}-cargo-${{ github.workflow }}-${{ github.ref }}-${{ steps.core-ref.outputs.ref }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ github.workflow }}-${{ github.ref }}-${{ steps.core-ref.outputs.ref }}-
+      - name: Build pinned core
+        if: steps.paths.outputs.run == 'true'
+        working-directory: remuda-core
+        run: cargo build --release --bin remuda
+      - name: Run Butler contract gate
+        if: steps.paths.outputs.run == 'true'
+        env:
+          BUTLER_REPO: ${{ github.workspace }}
+        run: |
+          run_gate() {
+            local log=$1 status
+            set +e
+            PATH="$CARGO_TARGET_DIR/release:$PATH" remuda-core/scripts/check-butler-contract.sh 2>&1 | tee "$log"
+            status=${PIPESTATUS[0]}
+            set -e
+            return "$status"
+          }
+          log="$RUNNER_TEMP/butler-contract.log"
+          if run_gate "$log"; then
+            exit 0
+          fi
+          if ! awk '/Broken pipe/ { broken = 1; next } broken && /FAIL/ { found = 1 } END { exit !found }' "$log"; then
+            exit 1
+          fi
+          echo "Retrying the contract gate once after the Broken pipe harness race."
+          run_gate "$RUNNER_TEMP/butler-contract-retry.log"
