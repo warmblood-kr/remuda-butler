@@ -22,6 +22,8 @@ remuda.exec("butler/md2html")
 if not matrix.send then remuda.exec("butler/matrix_write") end
 remuda.exec("butler/matrix_setup")
 remuda.exec("butler/matrix_cli")
+remuda.exec("butler/typed_lines")
+remuda.exec("butler/typed_lines_cli")
 remuda.exec("butler/matrix_relay")
 
 return matrix

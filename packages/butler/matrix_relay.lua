@@ -2,6 +2,8 @@
 -- The relay owns no transport details; request_json is its only HTTP composite.
 local matrix = assert(remuda.butler and remuda.butler.matrix,
   "load butler/matrix_request before butler/matrix_relay")
+local typed_lines = assert(remuda.butler.typed_lines,
+  "load butler/typed_lines before butler/matrix_relay")
 -- Trust words are bound at load (main.lua execs matrix_request before
 -- this file), so a later redefinition of the public entry cannot change them.
 local read_config = matrix.read_config
@@ -469,6 +471,7 @@ local function empty_state()
     invite_dedupe = json.object({}),
     subscriptions = json.object({}),
     auto_join_timestamps = json.array({}),
+    typed_line_timestamps = json.array({}),
     reply_outbox = json.object({}), reply_results = json.object({}), approvals = json.object({}) }
 end
 
@@ -500,6 +503,7 @@ local function load_state(path)
   local approvals = value.approvals or json.object({})
   local invite_dedupe = value.invite_dedupe or json.object({})
   local auto_join_timestamps = value.auto_join_timestamps or json.array({})
+  local typed_line_timestamps = value.typed_line_timestamps or json.array({})
   if (since ~= nil and type(since) ~= "string")
     or (messages_since ~= nil and type(messages_since) ~= "string")
     or type(processed_ids) ~= "table" or processed_ids == json.null
@@ -523,12 +527,17 @@ local function load_state(path)
     or getmetatable(auto_join_timestamps) ~= JSON_ARRAY_MT then
     return empty_state(), "invalid Matrix relay auto-join timestamps"
   end
+  if type(typed_line_timestamps) ~= "table" or typed_line_timestamps == json.null
+    or getmetatable(typed_line_timestamps) ~= JSON_ARRAY_MT then
+    return empty_state(), "invalid Matrix relay typed-line timestamps"
+  end
   local state = empty_state()
   local quarantine_pruned = false
   state.since, state.messages_since = since, messages_since
   state.quarantine, state.routes = json.array({}), json.object({})
   state.reply_outbox, state.reply_results = json.object({}), json.object({})
   state.invite_dedupe = json.object({})
+  state.typed_line_timestamps = json.array({})
   state.approvals = approvals
   local approval_cutoff = math.floor(os.time() * 1000) - 24 * 60 * 60 * 1000
   for id, rec in pairs(state.approvals) do
@@ -547,6 +556,11 @@ local function load_state(path)
       state.auto_join_timestamps[#state.auto_join_timestamps + 1] = {
         room_id = item.room_id, at = item.at, invite_event_id = invite_event_id,
       }
+    end
+  end
+  for _, timestamp in ipairs(typed_line_timestamps) do
+    if type(timestamp) == "number" and timestamp >= 0 and timestamp % 1 == 0 then
+      state.typed_line_timestamps[#state.typed_line_timestamps + 1] = timestamp
     end
   end
   for room_id, roots in pairs(subscriptions) do
@@ -639,7 +653,8 @@ local function save_state(path, state)
     matrix_reply_outbox = state.reply_outbox, matrix_reply_results = state.reply_results,
     matrix_thread_subscriptions = state.subscriptions, approvals = state.approvals,
     invite_dedupe = state.invite_dedupe,
-    auto_join_timestamps = state.auto_join_timestamps })
+    auto_join_timestamps = state.auto_join_timestamps,
+    typed_line_timestamps = state.typed_line_timestamps })
   return remuda.fs.write_atomic(path, json, { private = true })
 end
 
@@ -667,6 +682,7 @@ function relay.new(options)
   local context_fetching, context_fetch_handles = {}, {}
   local reply_retry_timers, reply_in_flight = {}, {}
   local untrusted_receive_times = {}
+  local typed_line_refusal_at
   -- ponytail: in memory, a restart may repeat the line once
   local post_cap_notice_at
   -- ponytail: in memory, a restart resets the floor and drops a pending count
@@ -676,10 +692,12 @@ function relay.new(options)
   local joining = {}
   local generation = 0
   local failures = 0
+  local live_sync_ready = false
   local instance = {}
   local function persist()
     local ok, err = save_state(state_path, state)
     if not ok then error("cannot save Matrix relay state: " .. tostring(err), 0) end
+    return true
   end
 
   local function send_notice(room, text, warn_kind, warn_key)
@@ -1280,7 +1298,240 @@ function relay.new(options)
     end
   end
 
-  local function accept_events(events, cursor, room_id)
+  local function matrix_txn_id(prefix)
+    local id
+    if type(remuda._butler_new_ulid) == "function" then
+      local ok, value = pcall(remuda._butler_new_ulid)
+      if ok then id = value end
+    end
+    if type(id) ~= "string" or id == "" then id = tostring(os.time()) .. "-" .. tostring(math.random(1, 2147483647)) end
+    return prefix .. id
+  end
+
+  local function send_typed_line_reaction(room_id, event_id)
+    local body = encode({ ["m.relates_to"] = {
+      rel_type = "m.annotation", event_id = event_id, key = "✅",
+    } })
+    pcall(api.request_json, { method = "PUT", room = room_id, body = body,
+      path = "/_matrix/client/v3/rooms/" .. percent_encode(room_id)
+        .. "/send/m.reaction/" .. percent_encode(matrix_txn_id("typed-line-")),
+      headers = { ["Content-Type"] = "application/json" },
+    }, function() end)
+  end
+
+  local function send_typed_line_reply(event, room_id, text)
+    local thread_root = relation_fields(type(event.content) == "table" and event.content or {})
+    thread_root = thread_root or event.event_id
+    if type(thread_root) ~= "string" or thread_root == "" or type(event.event_id) ~= "string" or event.event_id == "" then
+      return false
+    end
+    local now = os.time()
+    if typed_line_refusal_at and now - typed_line_refusal_at < 60 then return false end
+    typed_line_refusal_at = now
+    local body = encode({ msgtype = "m.notice", body = text,
+      ["m.relates_to"] = { rel_type = "m.thread", event_id = thread_root,
+        ["m.in_reply_to"] = { event_id = event.event_id } },
+    })
+    local ok = pcall(api.request_json, { method = "PUT", room = room_id, body = body,
+      path = "/_matrix/client/v3/rooms/" .. percent_encode(room_id)
+        .. "/send/m.room.message/" .. percent_encode(matrix_txn_id("typed-line-refusal-")),
+      headers = { ["Content-Type"] = "application/json" },
+    }, function() end)
+    return ok
+  end
+
+  local function typed_line_refusal(reason, target)
+    local safe_target = terminal_safe_field(target or "butler", 128)
+    if reason == "typed_lines_off" then
+      return "Not typed: typed lines are off on this machine. Next: remuda butler typed-lines on"
+    elseif reason == "shell_lines_off" then
+      return "Not typed: shell lines (!!) are off on this machine. Next: remuda butler typed-lines on, then remuda butler shell-lines on"
+    elseif reason == "event_too_old" then
+      return "Not typed: the line is older than 5 minutes. Next: send it again"
+    elseif reason == "not_live" then
+      return "Not typed: the line was not received live. Next: send it again"
+    elseif reason == "rate_limited" then
+      return "Not typed: typed lines are limited to 10 per 10 minutes. Next: wait, then send the line again"
+    elseif reason == "invalid_line" or reason == "empty_line" then
+      return "Not typed: one plain line of at most 2000 bytes. Next: send it as one line"
+    elseif reason == "unreadable_content" then
+      return "Not typed: the message is not plain text. Next: send it as one plain text line"
+    elseif reason == "invalid_prefix" then
+      return "Not typed: use !TEXT for a plain line or !!TEXT for a shell line. Next: send one line"
+    elseif reason == "pane_busy" then
+      return "Not typed: the " .. safe_target .. " pane is busy or its input box is not empty. Next: send the line again when it is free"
+    elseif reason == "shell_codex" then
+      return "Not typed: " .. safe_target .. " is a Codex session; shell lines work in Claude sessions only"
+    elseif reason == "shell_unsupported" then
+      return "Not typed: shell lines work in Claude sessions only"
+    elseif reason == "type_failed" then
+      return "Not typed: could not type into the " .. safe_target .. " pane. Next: check the pane and send the line again"
+    elseif reason == "return_failed" then
+      return "The text may be sitting in the " .. safe_target .. " pane because Return failed. Next: check the pane before retrying"
+    end
+    return "Not typed: the line could not be accepted. Next: send it again"
+  end
+
+  local function trace_typed_line(event, room_id, form, line, target, outcome)
+    local trace = remuda._butler_session_trace or _G._butler_session_trace
+    if type(trace) ~= "function" then return end
+    local content = type(event.content) == "table" and event.content or {}
+    local body = type(content.body) == "string" and content.body or ""
+    form = form or (body:sub(1, 2) == "!!" and "!!" or "!")
+    local trace_text = type(line) == "string" and line or body:sub(form == "!!" and 3 or 2)
+    if form == "!!" and trace_text:sub(1, 1) == "!" then trace_text = trace_text:sub(2) end
+    local event_id = type(event.event_id) == "string" and event.event_id or ""
+    local sender = type(event.sender) == "string" and event.sender or ""
+    local detail = "room=" .. terminal_safe_field(room_id, 256)
+      .. " event=" .. terminal_safe_field(event_id, 256)
+      .. " sender=" .. terminal_safe_field(sender, 256)
+      .. " target=" .. terminal_safe_field(target or "butler", 128)
+      .. " form=" .. form .. " outcome=" .. terminal_safe_field(outcome, 128)
+      .. " bytes=" .. tostring(#trace_text)
+    if form == "!!" then detail = detail .. " command=" .. terminal_safe_field(trace_text, 2048) end
+    pcall(trace, "matrix_owner_line", detail)
+  end
+
+  local function in_butler_tree(agent_id, agents)
+    local root = agents.butler
+    local root_id = type(root) == "table" and root.id or "butler"
+    local current, visited = agent_id, {}
+    while type(current) == "string" and current ~= "" and not visited[current] do
+      if current == root_id or current == "butler" then return true end
+      visited[current] = true
+      local agent = agents[current]
+      current = type(agent) == "table" and agent.parent or nil
+    end
+    return false
+  end
+
+  local function resolve_typed_target(line, form)
+    local bus = remuda._butler_bus or {}
+    local agents = bus.agents or {}
+    local root = agents.butler or {}
+    if type(root.kind) ~= "string" or root.kind == "" then
+      root = { kind = remuda._butler_selected_agent,
+        session_name = root.session_name, id = root.id }
+    end
+    local root_session = type(root.session_name) == "string" and root.session_name ~= ""
+      and root.session_name or "butler"
+    local target, target_agent, target_line = root_session, root, line
+    local parse_line = form == "!!" and line:sub(2) or line
+    local first, rest = parse_line:match("^(%S+)%s+(.+)$")
+    if first and rest and first == root_session then
+      target_line = (form == "!!" and "!" or "") .. rest
+    elseif first and rest then
+      for id, agent in pairs(agents) do
+        if id ~= "butler" and type(agent) == "table" and agent.session_name == first
+          and in_butler_tree(id, agents) then
+          target, target_agent = agent.session_name, agent
+          target_line = (form == "!!" and "!" or "") .. rest
+          break
+        end
+      end
+    end
+    return target, target_line, target_agent, target ~= root_session
+  end
+
+  local function trim_typed_line_timestamps(now)
+    local retained = json.array({})
+    for _, value in ipairs(state.typed_line_timestamps or {}) do
+      local timestamp = tonumber(value)
+      if timestamp and timestamp >= now - 600 then retained[#retained + 1] = timestamp end
+    end
+    state.typed_line_timestamps = retained
+  end
+
+  local function typed_line_room_allowed(event, room_id)
+    if room_id == cfg.home_room then return true end
+    local content = type(event.content) == "table" and event.content or {}
+    local thread_root = relation_fields(content)
+    local subscriptions = state.subscriptions[room_id] or {}
+    return (thread_root ~= nil and subscriptions[thread_root] ~= nil)
+      or mentions(content, content.body, cfg.self_mxid)
+  end
+
+  local function check_typed_line(event)
+    local now = os.time()
+    trim_typed_line_timestamps(now)
+    local ok, reason, line, form = typed_lines.gate({
+      processed = state.processed, timestamps = state.typed_line_timestamps,
+    }, event, now, {
+      allowed_senders = cfg.allowed_senders, butler_senders = cfg.butler_senders,
+      self_mxid = cfg.self_mxid, typed_lines = cfg.typed_lines == true or cfg.typed_lines == "true",
+      shell_lines = cfg.shell_lines == true or cfg.shell_lines == "true",
+    })
+    return { now = now, ok = ok, reason = reason, line = line, form = form }
+  end
+
+  local function mark_typed_line_error(event, room_id, err)
+    local event_id = type(event.event_id) == "string" and event.event_id or ""
+    if event_id ~= "" then add_processed(state, event_id) end
+    local saved, save_error = pcall(persist)
+    trace_typed_line(event, room_id, nil, nil, "butler", "refused:handler_error")
+    warn_once("typed-line-error", event_id,
+      "butler Matrix typed-line handling failed; event marked processed: "
+        .. terminal_safe_field(tostring(err), 512)
+        .. (saved and "" or "; state save failed: " .. terminal_safe_field(tostring(save_error), 512)))
+  end
+
+  local function handle_typed_line(event, room_id, check)
+    local ok, reason, line, form, now = check.ok, check.reason, check.line, check.form, check.now
+    local target, target_line, target_agent, member_target
+    if ok then
+      target, target_line, target_agent, member_target = resolve_typed_target(line, form)
+      if form == "!!" and type(target_agent) == "table" and tostring(target_agent.kind):lower() ~= "claude" then
+        ok, reason = false, tostring(target_agent.kind):lower() == "codex" and "shell_codex" or "shell_unsupported"
+      else
+        local policy_ok, may_type = false, false
+        local bus = remuda._butler_bus or {}
+        local pending = bus.pending_tasks or {}
+        if pending[target] then
+          ok, reason = false, "pane_busy"
+        elseif type(remuda._butler_notify_policy) == "function" then
+          policy_ok, may_type = pcall(remuda._butler_notify_policy, target)
+          if not policy_ok or not may_type then ok, reason = false, "pane_busy" end
+        else
+          ok, reason = false, "pane_busy"
+        end
+      end
+    end
+    if event.event_id ~= "" then add_processed(state, event.event_id) end
+    if ok then
+      state.typed_line_timestamps[#state.typed_line_timestamps + 1] = now
+    end
+    local persisted, persist_result = pcall(persist)
+    if not persisted or persist_result ~= true then
+      error("cannot persist Matrix typed-line event before typing", 0)
+    end
+    if not ok then
+      trace_typed_line(event, room_id, form, target_line or line, target, "refused:" .. tostring(reason))
+      send_typed_line_reply(event, room_id, typed_line_refusal(reason, target))
+      return true
+    end
+    local typed, type_result = pcall(remuda.type_text, target, target_line)
+    if not typed or type_result == false then
+      trace_typed_line(event, room_id, form, target_line, target, "refused:type_failed")
+      send_typed_line_reply(event, room_id, typed_line_refusal("type_failed", target))
+      return true
+    end
+    local pressed, key_result = pcall(remuda.key, target, "RET")
+    if not pressed or key_result == false then
+      trace_typed_line(event, room_id, form, target_line, target, "refused:return_failed")
+      send_typed_line_reply(event, room_id, typed_line_refusal("return_failed", target))
+      return true
+    end
+    trace_typed_line(event, room_id, form, target_line, target, "typed")
+    send_typed_line_reaction(room_id, event.event_id)
+    if member_target then
+      local shown_event = matrix.shown_event_id(event.event_id)
+      pcall(remuda._butler_send, "butler", "butler",
+        "Owner line typed into " .. target .. " (Matrix " .. shown_event .. "): " .. target_line)
+    end
+    return true
+  end
+
+  local function accept_events(events, cursor, room_id, live_sync)
     local added = {}
     for _, ev in ipairs(type(events) == "table" and events or {}) do
       if type(ev) == "table" then
@@ -1296,6 +1547,39 @@ function relay.new(options)
                 approval_record = approval.for_event(target)
                 if approval_record then approval_verdict = verdict; break end
               end
+            end
+          end
+          local typed_line_candidate = not approval_record and cfg.allowed_senders[ev.sender] == true
+            and member_kind(ev.sender, cfg) == "HUMAN"
+            and type(content.body) == "string" and content.body:sub(1, 1) == "!"
+          local typed_line_enabled = typed_line_candidate and cfg.typed_lines == true
+          if typed_line_enabled and content.body:sub(1, 2) == "!!" and content.body:sub(1, 3) ~= "!!!" then
+            typed_line_enabled = cfg.shell_lines == true
+          end
+          local typed_line_scope_allowed = typed_line_enabled
+            and typed_line_room_allowed(ev, room_id or cfg.room)
+          local typed_line_check
+          local typed_line_check_failed = false
+          if typed_line_enabled and live_sync == true then
+            local checked, result = pcall(check_typed_line, ev)
+            if checked then
+              typed_line_check = result
+            else
+              typed_line_check_failed = true
+              mark_typed_line_error(ev, room_id or cfg.room, result)
+            end
+          end
+          local switch_disabled = typed_line_check
+            and (typed_line_check.reason == "typed_lines_off" or typed_line_check.reason == "shell_lines_off")
+          if typed_line_enabled and not typed_line_check_failed then
+            if switch_disabled then
+              trace_typed_line(ev, room_id or cfg.room, typed_line_check.form, typed_line_check.line,
+                "butler", "refused:" .. typed_line_check.reason)
+            elseif not typed_line_scope_allowed then
+              trace_typed_line(ev, room_id or cfg.room, typed_line_check and typed_line_check.form,
+                typed_line_check and typed_line_check.line, "butler", "refused:room_not_allowed")
+            elseif live_sync ~= true then
+              trace_typed_line(ev, room_id or cfg.room, nil, nil, "butler", "refused:not_live")
             end
           end
           if approval_record then
@@ -1317,6 +1601,18 @@ function relay.new(options)
               end
             end
             persist()
+          elseif typed_line_enabled and typed_line_check_failed then
+            -- The event was marked processed above; keep this response moving without a retry loop.
+          elseif typed_line_enabled and not switch_disabled
+              and typed_line_scope_allowed then
+            if live_sync == true then
+              local handled, err = pcall(handle_typed_line, ev, room_id or cfg.room, typed_line_check)
+              if not handled then mark_typed_line_error(ev, room_id or cfg.room, err) end
+            else
+              if event_id ~= "" then add_processed(state, event_id) end
+              persist()
+              send_typed_line_reply(ev, room_id or cfg.room, typed_line_refusal("not_live"))
+            end
           else
           local reason
           if event_id == "" then reason = "missing_event_id"
@@ -1762,6 +2058,9 @@ function relay.new(options)
       local refreshed = read_config(config_path)
       if refreshed then
         cfg.rooms, cfg.room_how = refreshed.rooms, refreshed.room_how
+        cfg.typed_lines, cfg.shell_lines = refreshed.typed_lines, refreshed.shell_lines
+      else
+        cfg.typed_lines, cfg.shell_lines = false, false
       end
     end
     if path == SYNC_PATH and state.since == nil then
@@ -1769,6 +2068,7 @@ function relay.new(options)
       handle_invites(response)
       state.since = response.next_batch
       persist()
+      live_sync_ready = true
       deliver_pending()
       poll()
       return
@@ -1779,7 +2079,9 @@ function relay.new(options)
       local joined = type(rooms.join) == "table" and rooms.join or {}
       for room_id, room in pairs(joined) do
         if cfg.rooms[room_id] then
-          local room_added = accept_events(room and room.timeline and room.timeline.events, nil, room_id)
+          local timeline = room and room.timeline
+          local live_timeline = live_sync_ready and not (timeline and timeline.limited == true)
+          local room_added = accept_events(timeline and timeline.events, nil, room_id, live_timeline)
           for _, id in ipairs(room_added) do added[#added + 1] = id end
         end
       end
@@ -1787,6 +2089,7 @@ function relay.new(options)
       handle_invites(response)
       if type(response.next_batch) == "string" then state.since = response.next_batch end
       persist()
+      live_sync_ready = true
       deliver_pending(added)
       poll()
       return
@@ -1830,6 +2133,7 @@ function relay.new(options)
   function instance:start()
     if active then return false end
     generation = generation + 1
+    live_sync_ready = false
     active = true
     if approval and type(approval.reapply_approved) == "function" then approval.reapply_approved() end
     if approval and type(approval.sweep) == "function" and type(remuda.schedule) == "function" then

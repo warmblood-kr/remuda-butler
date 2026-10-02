@@ -255,6 +255,14 @@ local function read_config(path)
         else
           warn_invalid_config_line(path, i, key, value)
         end
+      elseif key == "typed_lines" or key == "shell_lines" then
+        if value == "true" then
+          opts[key] = true
+        elseif value == "false" then
+          opts[key] = false
+        else
+          warn_invalid_config_line(path, i, key, value)
+        end
       else
         opts[key] = value
       end
@@ -336,6 +344,8 @@ local function read_config(path)
     deny_room_aliases = deny_room_aliases, deny_servers = deny_servers,
     self_mxid = lines[3], allowed_senders = allowed,
     butler_senders = butler_senders,
+    typed_lines = opts.typed_lines == true,
+    shell_lines = opts.shell_lines == true,
     untrusted_per_room_hour = untrusted_per_room_hour,
     posts_per_hour = posts_per_hour,
     b2b_max_turns = b2b_max_turns,

@@ -1593,6 +1593,7 @@ fn butler_lifecycle_reload_replaces_hooks_and_schedules_and_rolls_back() {
 
     let counts = r#"
         local inbox, owned, notices, reconcile, compaction, owned_contributions = 0, 0, 0, 0, 0, -1
+        local switch_verbs = {}
         for _, hook in ipairs(remuda.hook_list()) do
           if hook.group == "remuda-module:butler" then owned = owned + 1 end
           if hook.event == "butler/deliver" and hook.id == "inbox"
@@ -1607,15 +1608,24 @@ fn butler_lifecycle_reload_replaces_hooks_and_schedules_and_rolls_back() {
           owned_contributions = 0
           for _, point in ipairs({ "butler.command", "butler.guidance" }) do
             for _, item in ipairs(remuda.contributions(point)) do
-              if item.owner == "butler" then owned_contributions = owned_contributions + 1 end
+              if item.owner == "butler" then
+                owned_contributions = owned_contributions + 1
+                if point == "butler.command" and item.id
+                    and (item.id == "typed-lines" or item.id == "shell-lines") then
+                  switch_verbs[#switch_verbs + 1] = item.id
+                end
+              end
             end
           end
         end
-        return table.concat({ inbox, owned, notices, reconcile, compaction, owned_contributions }, "|")
+        table.sort(switch_verbs)
+        return table.concat({ inbox, owned, notices, reconcile, compaction, owned_contributions,
+          table.concat(switch_verbs, ",") }, "|")
     "#;
     let initial = eval(&path, counts);
     assert!(
-        initial == "1|4|1|1|1|25" || initial == "1|4|1|1|1|-1",
+        initial == "1|4|1|1|1|27|shell-lines,typed-lines"
+            || initial == "1|4|1|1|1|-1|",
         "unexpected Butler lifecycle registrations: {initial}"
     );
 
@@ -4009,7 +4019,8 @@ fn butler_matrix_lua_relay_has_no_process_child_after_daemon_sigkill() {
     let path = daemon::socket_path_in(&dir, "s");
     eval(&path, &format!(
         "remuda._butler_matrix_config = {{ token_path={}, config_path={} }}; \
-         remuda.exec('butler/matrix_request'); remuda.exec('butler/matrix_relay'); \
+         remuda.exec('butler/matrix_request'); remuda.exec('butler/typed_lines'); \
+         remuda.exec('butler/matrix_relay'); \
          assert(remuda.butler.matrix.relay.start(remuda._butler_matrix_config))",
         lua_raw_string(&token), lua_raw_string(&config)));
     assert_eq!(read_count(&path, "return remuda.butler.matrix.relay.instance ~= nil and 1 or 0"), 1,
@@ -10219,7 +10230,7 @@ fn doctor_reports_all_good() {
     );
     assert_eq!(
         doctor_render(&probes, "macos"),
-        "Claude Code: installed, logged in\nCodex CLI: installed, logged in\nNext: remuda butler matrix setup"
+        "Claude Code: installed, logged in\nCodex CLI: installed, logged in\nTyped lines: off\nShell lines: off\nNext: remuda butler matrix setup"
     );
 }
 
@@ -10230,7 +10241,7 @@ fn doctor_reports_missing_claude_posix() {
         doctor_status(false, false),
         doctor_status(true, true)
     );
-    let expected = "Claude Code: missing\nCodex CLI: installed, logged in\nNext: curl -fsSL https://claude.ai/install.sh | bash";
+    let expected = "Claude Code: missing\nCodex CLI: installed, logged in\nTyped lines: off\nShell lines: off\nNext: curl -fsSL https://claude.ai/install.sh | bash";
     assert_eq!(doctor_render(&probes, "macos"), expected);
     assert_eq!(doctor_render(&probes, "linux"), expected);
 }
@@ -10244,7 +10255,7 @@ fn doctor_reports_missing_claude_windows() {
     );
     assert_eq!(
         doctor_render(&probes, "windows"),
-        "Claude Code: missing\nCodex CLI: installed, logged in\nNext: irm https://claude.ai/install.ps1 | iex"
+        "Claude Code: missing\nCodex CLI: installed, logged in\nTyped lines: off\nShell lines: off\nNext: irm https://claude.ai/install.ps1 | iex"
     );
 }
 
@@ -10257,7 +10268,7 @@ fn doctor_reports_codex_logged_out() {
     );
     assert_eq!(
         doctor_render(&probes, "macos"),
-        "Claude Code: installed, logged in\nCodex CLI: installed, not logged in\nNext: codex login"
+        "Claude Code: installed, logged in\nCodex CLI: installed, not logged in\nTyped lines: off\nShell lines: off\nNext: codex login"
     );
 }
 
@@ -10270,7 +10281,7 @@ fn doctor_reports_both_missing_with_two_next_lines() {
     );
     assert_eq!(
         doctor_render(&probes, "linux"),
-        "Claude Code: missing\nCodex CLI: missing\nNext: curl -fsSL https://claude.ai/install.sh | bash\nNext: npm install -g @openai/codex"
+        "Claude Code: missing\nCodex CLI: missing\nTyped lines: off\nShell lines: off\nNext: curl -fsSL https://claude.ai/install.sh | bash\nNext: npm install -g @openai/codex"
     );
 }
 
@@ -10316,7 +10327,7 @@ fn doctor_cli_both_missing_prints_two_next_commands() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
         stdout.trim(),
-        "Claude Code: missing\nCodex CLI: missing\nNext: curl -fsSL https://claude.ai/install.sh | bash\nNext: npm install -g @openai/codex"
+        "Claude Code: missing\nCodex CLI: missing\nTyped lines: off\nShell lines: off\nNext: curl -fsSL https://claude.ai/install.sh | bash\nNext: npm install -g @openai/codex"
     );
 }
 

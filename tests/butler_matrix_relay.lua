@@ -27,20 +27,21 @@ dofile("packages/butler/matrix_cli.lua")
 local setup_tests = dofile("tests/butler_matrix_setup.lua")
 local approval_file = io.open("packages/butler/approval.lua", "r")
 if approval_file then approval_file:close(); dofile("packages/butler/approval.lua") end
+dofile("packages/butler/typed_lines.lua")
 local relay_module = dofile("packages/butler/matrix_relay.lua")
 
 local function remove_dir(dir)
   os.execute("rm -rf " .. string.format("%q", dir))
 end
 
-local function fixture()
+local function fixture(extra, mode)
   local dir = os.tmpname()
   os.remove(dir)
   assert(os.execute("mkdir -p " .. string.format("%q", dir)))
   local path = dir .. "/config"
   local file = assert(io.open(path, "w"))
   file:write("https://matrix.invalid\n!room:example.org\n@bot:example.org\n",
-    "@alice:example.org\nfalse\n30000\n")
+    "@alice:example.org\n", mode or "false", "\n30000\n", extra or "")
   file:close()
   return dir, path
 end
@@ -75,6 +76,424 @@ local function tick_timers(count)
       if not timer.cancelled then timer.spec.run() end
     end
   end
+end
+
+local function typed_line_event(id, body)
+  return { type = "m.room.message", event_id = id, sender = "@alice:example.org",
+    origin_server_ts = os.time() * 1000,
+    content = { msgtype = "m.text", body = body } }
+end
+
+local function with_typed_line_stubs(run)
+  local old_type_text, old_key = remuda.type_text, remuda.key
+  local old_notify_policy = remuda._butler_notify_policy
+  local typed, keys = {}, {}
+  remuda.type_text = function(session, text)
+    typed[#typed + 1] = { session = session, text = text }
+    return true
+  end
+  remuda.key = function(session, key) keys[#keys + 1] = { session = session, key = key } end
+  remuda._butler_notify_policy = function() return true end
+  local ok, err = pcall(run, typed, keys)
+  remuda.type_text, remuda.key = old_type_text, old_key
+  remuda._butler_notify_policy = old_notify_policy
+  if not ok then error(err, 0) end
+end
+
+local function test_typed_line_switches_and_non_candidates()
+  with_typed_line_stubs(function(typed, keys)
+    local dir, config_path = fixture()
+    local client, delivered = scripted_client(), {}
+    local relay = relay_module.new({ config_path = config_path, matrix = client,
+      deliver = function(event) delivered[#delivered + 1] = event return true end })
+    relay:start()
+    client:complete(1, { json = { next_batch = "s0" } })
+    client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+      ["!room:example.org"] = { timeline = { events = {
+        typed_line_event("$off-multiline", "!a\nb"),
+        (function()
+          local event = typed_line_event("$off-stale", "!hi")
+          event.origin_server_ts = (os.time() - 6 * 60) * 1000
+          return event
+        end)(),
+        typed_line_event("$off-triple", "!!!x"),
+      } } },
+    } } } })
+    client:complete(3, { json = { next_batch = "s2", rooms = { join = {
+      ["!room:example.org"] = { timeline = { limited = true,
+        events = { typed_line_event("$off-nonlive", "!hi") } } },
+    } } } })
+    assert(#typed == 0, "both typed-line switches default off")
+    local delivered_ids = {}
+    for _, event in ipairs(delivered) do delivered_ids[event.event_id] = true end
+    for _, event_id in ipairs({ "$off-multiline", "$off-stale", "$off-triple", "$off-nonlive" }) do
+      assert(delivered_ids[event_id], "with switches off " .. event_id .. " stays on the ordinary mail path")
+    end
+    assert(#delivered == 4, "each disabled owner line should produce exactly one ordinary mail")
+    for _, request in ipairs(client.requests) do
+      assert(not tostring(request.path):find("/send/m.room.message/", 1, true),
+        "with switches off the owner line must not get a refusal thread line")
+    end
+    relay:stop()
+    cleanup_fixture(dir, config_path)
+
+    dir, config_path = fixture("typed_lines=true\nshell_lines=true\n")
+    client, delivered = scripted_client(), {}
+    relay = relay_module.new({ config_path = config_path, matrix = client,
+      deliver = function(event) delivered[#delivered + 1] = event return true end })
+    relay:start()
+    client:complete(1, { json = { next_batch = "s0" } })
+    client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+      ["!room:example.org"] = { timeline = { events = {
+        typed_line_event("$ordinary", "ordinary mail"), typed_line_event("$on", "!hello"),
+      } } },
+    } } } })
+    assert(#typed == 1 and typed[1].session == "butler" and typed[1].text == "hello",
+      "enabled owner line should type once into the root Butler session")
+    assert(#keys == 1 and keys[1].session == "butler" and keys[1].key == "RET",
+      "a successfully typed line should submit Return once")
+    local success_reactions = 0
+    for _, request in ipairs(client.requests) do
+      if tostring(request.path):find("/send/m.reaction/", 1, true) then success_reactions = success_reactions + 1 end
+    end
+    assert(success_reactions == 1, "a successfully typed line should get one success reaction")
+    assert(#delivered == 1 and delivered[1].event_id == "$ordinary",
+      "messages without a leading bang must continue through the mail path")
+    relay:stop()
+    cleanup_fixture(dir, config_path)
+
+    dir, config_path = fixture("typed_lines=true\nshell_lines=false\n")
+    client, delivered = scripted_client(), {}
+    relay = relay_module.new({ config_path = config_path, matrix = client,
+      deliver = function(event) delivered[#delivered + 1] = event return true end })
+    relay:start()
+    client:complete(1, { json = { next_batch = "s0" } })
+    client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+      ["!room:example.org"] = { timeline = { events = {
+        typed_line_event("$shell-off", "!!ls"), typed_line_event("$plain-on", "!ls"),
+      } } },
+    } } } })
+    assert(#typed == 2 and typed[2].session == "butler" and typed[2].text == "ls",
+      "with shell lines off, !! must not type while a plain ! line still types")
+    assert(#delivered == 1 and delivered[1].event_id == "$shell-off",
+      "a shell line refused by its switch should remain ordinary mail")
+    for _, request in ipairs(client.requests) do
+      assert(not tostring(request.path):find("/send/m.room.message/", 1, true),
+        "a shell line refused by its switch must not get a refusal thread line")
+    end
+    relay:stop()
+    cleanup_fixture(dir, config_path)
+
+    dir, config_path = fixture("typed_lines=true\nshell_lines=true\n")
+    client, delivered = scripted_client(), {}
+    local typed_before = #typed
+    relay = relay_module.new({ config_path = config_path, matrix = client,
+      deliver = function(event) delivered[#delivered + 1] = event return true end })
+    relay:start()
+    client:complete(1, { json = { next_batch = "s0" } })
+    assert(os.remove(config_path), "remove the config before its next sync reload")
+    client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+      ["!room:example.org"] = { timeline = { events = { typed_line_event("$config-read-failed", "!hi") } } },
+    } } } })
+    assert(#typed == typed_before, "a failed config reload must turn both typed-line switches off")
+    assert(#delivered == 1 and delivered[1].event_id == "$config-read-failed",
+      "a failed config reload must leave the owner line on the ordinary mail path")
+    for _, request in ipairs(client.requests) do
+      assert(not tostring(request.path):find("/send/m.room.message/", 1, true),
+        "a failed config reload must not send a typed-line refusal")
+    end
+    relay:stop()
+    cleanup_fixture(dir, config_path)
+  end)
+end
+
+local function test_typed_line_replay_after_restart_and_history_are_not_typed()
+  with_typed_line_stubs(function(typed)
+    local dir, config_path = fixture("typed_lines=true\nshell_lines=true\n")
+    local client = scripted_client()
+    local event = typed_line_event("$restart-replay", "!hello")
+    local relay = relay_module.new({ config_path = config_path, matrix = client, deliver = function() return true end })
+    relay:start()
+    client:complete(1, { json = { next_batch = "s0" } })
+    client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+      ["!room:example.org"] = { timeline = { events = { event } } },
+    } } } })
+    assert(#typed == 1, "first live event should type once")
+    relay:stop()
+
+    client = scripted_client()
+    relay = relay_module.new({ config_path = config_path, matrix = client, deliver = function() return true end })
+    relay:start()
+    client:complete(1, { json = { next_batch = "s2", rooms = { join = {
+      ["!room:example.org"] = { timeline = { events = { event } } },
+    } } } })
+    assert(#typed == 1, "durable event record must prevent typing the replay after restart")
+    relay:stop()
+    cleanup_fixture(dir, config_path)
+
+    local history_dir, history_config = fixture("typed_lines=true\nshell_lines=true\n", "messages")
+    client = scripted_client()
+    relay = relay_module.new({ config_path = history_config, matrix = client, deliver = function() return true end })
+    relay:start()
+    assert(client.requests[1].path:find("/messages?dir=b&limit=1", 1, true),
+      "history fixture must use the Matrix /messages back-pagination path")
+    client:complete(1, { json = { start = "m0", ["end"] = "m0", chunk = {} } })
+    tick_timers(3)
+    local history_request
+    for index, request in ipairs(client.requests) do
+      if client.callbacks[index] and tostring(request.path):find("/messages?from=m0", 1, true) then
+        history_request = index
+        break
+      end
+    end
+    assert(history_request, "history pagination request should follow its baseline")
+    client:complete(history_request, { json = { ["end"] = "m1",
+      chunk = { typed_line_event("$history-same-shape", "!hello") } } })
+    assert(#typed == 1, "a history event with a different ID and the same body must not type")
+    relay:stop()
+    cleanup_fixture(history_dir, history_config)
+  end)
+end
+
+local function test_shell_line_uses_selected_kind_for_root()
+  with_typed_line_stubs(function(typed)
+    local old_bus, old_selected = remuda._butler_bus, remuda._butler_selected_agent
+    remuda._butler_bus = { agents = { butler = { session_name = "butler" } } }
+    remuda._butler_selected_agent = "claude"
+    local dir, config_path = fixture("typed_lines=true\nshell_lines=true\n")
+    local client = scripted_client()
+    local relay = relay_module.new({ config_path = config_path, matrix = client, deliver = function() return true end })
+    relay:start()
+    client:complete(1, { json = { next_batch = "s0" } })
+    client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+      ["!room:example.org"] = { timeline = { events = { typed_line_event("$shell-root", "!!echo hi") } } },
+    } } } })
+    assert(#typed == 1 and typed[1].session == "butler" and typed[1].text == "!echo hi",
+      "the selected Claude kind should allow a shell line to the Butler root when its agent record omits kind")
+    relay:stop()
+    cleanup_fixture(dir, config_path)
+    remuda._butler_bus = { agents = { butler = { session_name = "butler", kind = "claude" } } }
+    remuda._butler_selected_agent = nil
+    dir, config_path = fixture("typed_lines=true\nshell_lines=true\n")
+    client = scripted_client()
+    relay = relay_module.new({ config_path = config_path, matrix = client, deliver = function() return true end })
+    relay:start()
+    client:complete(1, { json = { next_batch = "s0" } })
+    client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+      ["!room:example.org"] = { timeline = { events = { typed_line_event("$shell-explicit-root", "!!echo root") } } },
+    } } } })
+    assert(#typed == 2 and typed[2].session == "butler" and typed[2].text == "!echo root",
+      "an explicitly Claude Butler root should accept a shell line without the selected-agent fallback")
+    relay:stop()
+    cleanup_fixture(dir, config_path)
+    remuda._butler_bus, remuda._butler_selected_agent = old_bus, old_selected
+  end)
+end
+
+function test_typed_line_target_routing()
+  with_typed_line_stubs(function(typed)
+    local old_bus, old_selected = remuda._butler_bus, remuda._butler_selected_agent
+    remuda._butler_bus = { agents = {
+      butler = { id = "butler", session_name = "butler", kind = "claude" },
+      ["rx-qa"] = { id = "rx-qa", session_name = "rx-qa", kind = "claude", parent = "butler" },
+    } }
+    remuda._butler_selected_agent = "claude"
+    local dir, config_path = fixture("typed_lines=true\nshell_lines=true\n")
+    local client = scripted_client()
+    local relay = relay_module.new({ config_path = config_path, matrix = client, deliver = function() return true end })
+    relay:start()
+    client:complete(1, { json = { next_batch = "s0" } })
+    client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+      ["!room:example.org"] = { timeline = { events = {
+        typed_line_event("$root-name", "!butler rx-qa is waiting"),
+        typed_line_event("$live-member", "!rx-qa hello"),
+        typed_line_event("$not-a-member", "!offline hello"),
+      } } },
+    } } } })
+    assert(#typed == 3, "each valid routing example should type once")
+    assert(typed[1].session == "butler" and typed[1].text == "rx-qa is waiting",
+      "the root name prefix should be consumed while routing to the root")
+    assert(typed[2].session == "rx-qa" and typed[2].text == "hello",
+      "a live member name prefix should route to that member and be consumed")
+    assert(typed[3].session == "butler" and typed[3].text == "offline hello",
+      "a name that is not a live member should remain in the root's text")
+    relay:stop()
+    cleanup_fixture(dir, config_path)
+    remuda._butler_bus, remuda._butler_selected_agent = old_bus, old_selected
+  end)
+end
+
+local function test_typed_line_refusals_are_rate_limited()
+  with_typed_line_stubs(function(typed)
+    local dir, config_path = fixture("typed_lines=true\nshell_lines=true\n")
+    local client = scripted_client()
+    local relay = relay_module.new({ config_path = config_path, matrix = client, deliver = function() return true end })
+    relay:start()
+    client:complete(1, { json = { next_batch = "s0" } })
+    local stale_time = (os.time() - 301) * 1000
+    local first, second = typed_line_event("$stale-one", "!hello"), typed_line_event("$stale-two", "!hello")
+    first.origin_server_ts, second.origin_server_ts = stale_time, stale_time
+    client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+      ["!room:example.org"] = { timeline = { events = { first, second } } },
+    } } } })
+    local refusal_lines = 0
+    for _, request in ipairs(client.requests) do
+      if tostring(request.path):find("/send/m.room.message/", 1, true) then refusal_lines = refusal_lines + 1 end
+    end
+    assert(refusal_lines == 1, "only one refusal thread line should be sent within a 60-second window")
+    assert(#typed == 0, "refused stale lines must not be typed")
+    local real_os_time, clock_now = os.time, os.time()
+    os.time = function() return clock_now + 60 end
+    local third = typed_line_event("$stale-three", "!hello")
+    third.origin_server_ts = (clock_now - 301) * 1000
+    local completed, complete_error = pcall(function()
+      client:complete(4, { json = { next_batch = "s2", rooms = { join = {
+        ["!room:example.org"] = { timeline = { events = { third } } },
+      } } } })
+    end)
+    os.time = real_os_time
+    assert(completed, complete_error)
+    refusal_lines = 0
+    for _, request in ipairs(client.requests) do
+      if tostring(request.path):find("/send/m.room.message/", 1, true) then refusal_lines = refusal_lines + 1 end
+    end
+    assert(refusal_lines == 2, "a new refusal should be allowed after the 60-second window expires")
+    relay:stop()
+    cleanup_fixture(dir, config_path)
+  end)
+end
+
+local function test_typed_line_gate_error_is_contained_and_processed()
+  with_typed_line_stubs(function(typed)
+    local old_gate = remuda.butler.typed_lines.gate
+    local gate_calls = 0
+    remuda.butler.typed_lines.gate = function(...)
+      gate_calls = gate_calls + 1
+      if gate_calls == 1 then error("injected typed-line gate error") end
+      return old_gate(...)
+    end
+    local dir, config_path = fixture("typed_lines=true\nshell_lines=true\n")
+    local client, delivered = scripted_client(), {}
+    local relay = relay_module.new({ config_path = config_path, matrix = client,
+      deliver = function(event) delivered[#delivered + 1] = event return true end })
+    relay:start()
+    client:complete(1, { json = { next_batch = "s0" } })
+    local failed = typed_line_event("$gate-error", "!hello")
+    local ordinary = typed_line_event("$after-gate-error", "ordinary mail")
+    client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+      ["!room:example.org"] = { timeline = { events = { failed, ordinary } } },
+    } } } })
+    assert(gate_calls == 1 and #typed == 0,
+      "a gate exception should be contained without typing or aborting the batch")
+    assert(#delivered == 1 and delivered[1].event_id == "$after-gate-error",
+      "the ordinary event after a gate exception should still reach mail")
+    client:complete(3, { json = { next_batch = "s2", rooms = { join = {
+      ["!room:example.org"] = { timeline = { events = { failed } } },
+    } } } })
+    assert(gate_calls == 1 and #typed == 0,
+      "a failed typed-line event must be marked processed and skipped on replay")
+    relay:stop()
+    cleanup_fixture(dir, config_path)
+    remuda.butler.typed_lines.gate = old_gate
+  end)
+end
+
+local function test_typed_line_persist_failure_fails_closed()
+  with_typed_line_stubs(function(typed)
+    local dir, config_path = fixture("typed_lines=true\nshell_lines=true\n")
+    local state_path = config_path .. ".since"
+    local real_write_atomic = remuda.fs.write_atomic
+    local failure_injected = false
+    local client = scripted_client()
+    local relay = relay_module.new({ config_path = config_path, matrix = client, deliver = function() return true end })
+    relay:start()
+    client:complete(1, { json = { next_batch = "s0" } })
+    remuda.fs.write_atomic = function(path, contents, options)
+      if not failure_injected and path == state_path then
+        failure_injected = true
+        return nil, "injected disk full"
+      end
+      return real_write_atomic(path, contents, options)
+    end
+    client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+      ["!room:example.org"] = { timeline = { events = { typed_line_event("$persist-failure", "!hello") } } },
+    } } } })
+    local thread_messages = 0
+    for _, request in ipairs(client.requests) do
+      if tostring(request.path):find("/send/m.room.message/", 1, true) then thread_messages = thread_messages + 1 end
+    end
+    assert(failure_injected, "the test must inject a state persistence failure")
+    assert(#typed == 0, "a failed persist must prevent typing")
+    assert(thread_messages == 0, "a persistence failure should fail closed without posting a thread line")
+    relay:stop()
+    cleanup_fixture(dir, config_path)
+    remuda.fs.write_atomic = real_write_atomic
+  end)
+end
+
+local function test_typed_line_return_failure_warns_text_may_remain()
+  with_typed_line_stubs(function(typed, keys)
+    local normal_key = remuda.key
+    remuda.key = function(session, key)
+      keys[#keys + 1] = { session = session, key = key }
+      return false
+    end
+    local dir, config_path = fixture("typed_lines=true\nshell_lines=true\n")
+    local client = scripted_client()
+    local relay = relay_module.new({ config_path = config_path, matrix = client, deliver = function() return true end })
+    relay:start()
+    client:complete(1, { json = { next_batch = "s0" } })
+    client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+      ["!room:example.org"] = { timeline = { events = { typed_line_event("$return-failure", "!hello") } } },
+    } } } })
+    assert(#typed == 1 and typed[1].text == "hello", "text should be entered before the failing Return")
+    assert(#keys == 1 and keys[1].key == "RET", "the relay should attempt Return once")
+    local refusal
+    for _, request in ipairs(client.requests) do
+      if tostring(request.path):find("/send/m.room.message/", 1, true) then refusal = matrix.decode_json(request.body) end
+    end
+    assert(type(refusal) == "table" and type(refusal.body) == "string"
+      and refusal.body:find("may be sitting in the butler pane", 1, true)
+      and not refusal.body:find("Not typed", 1, true),
+      "a Return failure must warn that text may remain in the pane")
+    relay:stop()
+    cleanup_fixture(dir, config_path)
+    remuda.key = normal_key
+  end)
+end
+
+function test_typed_line_trace_records_owner_actions_and_shell_text()
+  with_typed_line_stubs(function(typed)
+    local old_bus, old_selected, old_trace = remuda._butler_bus, remuda._butler_selected_agent,
+      _G._butler_session_trace
+    remuda._butler_bus = { agents = { butler = { session_name = "butler", kind = "claude" } } }
+    remuda._butler_selected_agent = "claude"
+    local traces = {}
+    _G._butler_session_trace = function(event, detail)
+      traces[#traces + 1] = { event = event, detail = detail }
+    end
+    local dir, config_path = fixture("typed_lines=true\nshell_lines=true\n")
+    local client = scripted_client()
+    local relay = relay_module.new({ config_path = config_path, matrix = client, deliver = function() return true end })
+    relay:start()
+    client:complete(1, { json = { next_batch = "s0" } })
+    local typed_event = typed_line_event("$trace-typed", "!hello")
+    local shell_event = typed_line_event("$trace-shell", "!!git status")
+    shell_event.origin_server_ts = (os.time() - 301) * 1000
+    client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+      ["!room:example.org"] = { timeline = { events = { typed_event, shell_event } } },
+    } } } })
+    assert(#typed == 1 and #traces == 2, "typed and refused owner lines should each create one trace row")
+    assert(traces[1].event == "matrix_owner_line" and traces[1].detail:find(
+      "room=!room:example.org event=$trace-typed sender=@alice:example.org target=butler form=! outcome=typed bytes=5",
+      1, true), "typed trace should include room, event, sender, target, form, outcome, and byte length")
+    assert(traces[2].event == "matrix_owner_line" and traces[2].detail:find(
+      "room=!room:example.org event=$trace-shell sender=@alice:example.org target=butler form=!! outcome=refused:event_too_old bytes=10 command=git status",
+      1, true), "a refused !! trace should include the command text and refusal reason")
+    relay:stop()
+    cleanup_fixture(dir, config_path)
+    remuda._butler_bus, remuda._butler_selected_agent, _G._butler_session_trace = old_bus, old_selected, old_trace
+  end)
 end
 
 local function test_baseline_resume_filters_and_envelope()
@@ -1023,6 +1442,29 @@ local function test_config_add_room_pads_short_config()
   end)
   remove_dir(dir)
   assert(passed, err)
+end
+
+local function test_typed_line_config_is_strict_and_off_by_default()
+  local dir, path = fixture()
+  local conf = assert(matrix.read_config(path))
+  assert(conf.typed_lines == false and conf.shell_lines == false,
+    "typed-line switches must default to false")
+  cleanup_fixture(dir, path)
+
+  dir, path = fixture("typed_lines=true\nshell_lines=false\n")
+  conf = assert(matrix.read_config(path))
+  assert(conf.typed_lines == true and conf.shell_lines == false,
+    "typed-line config must accept strict true and false values")
+  cleanup_fixture(dir, path)
+
+  dir, path = fixture("typed_lines=on\nshell_lines=TRUE\n")
+  conf = assert(matrix.read_config(path))
+  assert(conf.typed_lines == false and conf.shell_lines == false,
+    "non-boolean spellings must not enable either typed-line switch")
+  cleanup_fixture(dir, path)
+
+  assert(matrix.config_set_typed_line_switches == nil,
+    "Matrix request modules must not expose a public typed-line switch writer")
 end
 
 local function encoded(room)
@@ -4665,6 +5107,15 @@ end
 -- once; each waiting mail goes out when ITS fetch answers or fails.
 
 rx_tests = {
+  { "test_typed_line_switches_and_non_candidates", test_typed_line_switches_and_non_candidates },
+  { "test_typed_line_replay_after_restart_and_history_are_not_typed", test_typed_line_replay_after_restart_and_history_are_not_typed },
+  { "test_typed_line_target_routing", test_typed_line_target_routing },
+  { "test_shell_line_uses_selected_kind_for_root", test_shell_line_uses_selected_kind_for_root },
+  { "test_typed_line_refusals_are_rate_limited", test_typed_line_refusals_are_rate_limited },
+  { "test_typed_line_gate_error_is_contained_and_processed", test_typed_line_gate_error_is_contained_and_processed },
+  { "test_typed_line_persist_failure_fails_closed", test_typed_line_persist_failure_fails_closed },
+  { "test_typed_line_return_failure_warns_text_may_remain", test_typed_line_return_failure_warns_text_may_remain },
+  { "test_typed_line_trace_records_owner_actions_and_shell_text", test_typed_line_trace_records_owner_actions_and_shell_text },
   { "test_rx_stranger_root_marked_untrusted", test_rx_stranger_root_marked_untrusted },
   { "test_rx_agent_root_without_mention", test_rx_agent_root_without_mention },
   { "test_rx_prefix_stranger_gets_marker", test_rx_prefix_stranger_gets_marker },
@@ -5316,6 +5767,7 @@ for _, case in ipairs({
   { "test_open_mode_hostile_invite_state_is_refused", test_open_mode_hostile_invite_state_is_refused },
   { "test_open_mode_conflicting_inviter_events_remain_refused", test_open_mode_conflicting_inviter_events_remain_refused },
   { "test_config_add_room_pads_short_config", test_config_add_room_pads_short_config },
+  { "test_typed_line_config_is_strict_and_off_by_default", test_typed_line_config_is_strict_and_off_by_default },
   { "test_join_leave_missing_room_guidance", test_join_leave_missing_room_guidance },
   { "test_quarantine_list_room_reason_columns", test_quarantine_list_room_reason_columns },
   { "test_join_room_alias_resolves_and_labels_output", test_join_room_alias_resolves_and_labels_output },
