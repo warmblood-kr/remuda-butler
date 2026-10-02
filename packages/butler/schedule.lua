@@ -184,6 +184,8 @@ function M.save(path, list)
   if not path then return nil, "no mail root" end
   local encoded, text = pcall(remuda.json.encode, { version = M.VERSION, schedules = list })
   if not encoded then return nil, text end
+  local root = path:match("^(.*)/[^/]+$")
+  if root then pcall(remuda.mkdir, root) end
   return remuda.fs.write_atomic(path, text, { private = true })
 end
 

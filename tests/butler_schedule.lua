@@ -128,6 +128,14 @@ eq("round trip keeps the entry", #loaded, 1)
 eq("round trip name", loaded[1].name, "north-star")
 eq("round trip text", loaded[1].text, "North Star check")
 eq("round trip last_message", loaded[1].last_message, "m1")
+
+-- A mail root that does not exist yet is created by save.
+local fresh_root = os.tmpname() .. ".d/butler/mail"
+local made_dirs = {}
+remuda.mkdir = function(dir) made_dirs[#made_dirs + 1] = dir; os.execute("mkdir -p '" .. dir .. "'") end
+ok("save into a missing mail root", schedule.save(fresh_root .. "/schedules.json", list))
+eq("the mail root was made", made_dirs[1], fresh_root)
+eq("the saved file loads", #schedule.load(fresh_root .. "/schedules.json", trace), 1)
 eq("round trip is not a problem", problem, nil)
 eq("a good file leaves no trace", #traces, 0)
 
