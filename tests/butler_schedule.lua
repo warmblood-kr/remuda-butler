@@ -143,10 +143,13 @@ eq("round trip last_message", loaded[1].last_message, "m1")
 -- A mail root that does not exist yet is created by save.
 local fresh_root = os.tmpname() .. ".d/butler/mail"
 local made_dirs = {}
-remuda.mkdir = function(dir) made_dirs[#made_dirs + 1] = dir; os.execute("mkdir -p '" .. dir .. "'") end
+remuda.mkdir = function(dir) made_dirs[#made_dirs + 1] = dir end
+local real_write_atomic, landed = remuda.fs.write_atomic, os.tmpname()
+remuda.fs.write_atomic = function(_, contents, options) return real_write_atomic(landed, contents, options) end
 ok("save into a missing mail root", schedule.save(fresh_root .. "/schedules.json", list))
+remuda.fs.write_atomic = real_write_atomic
 eq("the mail root was made", made_dirs[1], fresh_root)
-eq("the saved file loads", #schedule.load(fresh_root .. "/schedules.json", trace), 1)
+eq("the saved file loads", #schedule.load(landed, trace), 1)
 
 -- Removing the last entry saves an empty list.
 local emptied = {}
