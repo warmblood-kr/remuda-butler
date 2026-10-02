@@ -585,7 +585,10 @@ function matrix.cli(args, agent, stdin_body, file_body)
               .. terminal_safe(files.password_store.backend) .. ") as " .. terminal_safe(files.password_store.name)
           elseif files.password_path then
             lines[#lines + 1] = "Bot account password saved privately: " .. terminal_safe(files.password_path)
-            if files.store_refused then
+            if files.store_fix then
+              lines[#lines + 1] = "The OS secure store was not used: " .. shortened((terminal_safe(files.store_fix)), 240)
+              lines[#lines + 1] = "Saved to the private file instead: " .. terminal_safe(files.password_path)
+            elseif files.store_refused then
               lines[#lines + 1] = "The OS secure store was not used: " .. terminal_safe(files.store_refused)
             end
             if files.password_replaced then lines[#lines + 1] = "The old password file there was replaced." end
