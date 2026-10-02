@@ -12,6 +12,7 @@ local DEFAULT_COMPACTION_CONFIG = {
   claude_completion_timeout = 180, failure_cooldown_seconds = 600, monitor_ceiling_seconds = 1800,
   input_settle = 0.15,
 }
+local COMPACTION_FAILURE_LIMIT = 3
 local COMPACTION_MAIL_DEFER_SECONDS = 600
 local function compaction_config()
   local configured = remuda._butler_compaction_config or {}
@@ -184,6 +185,38 @@ function remuda._butler_compaction_failure_cooldown(state, now, force)
     return false
   end
   return true, until_at
+end
+
+function remuda._butler_compaction_record_failure(state)
+  state.compaction_failures = (tonumber(state.compaction_failures) or 0) + 1
+  if state.compaction_failures >= COMPACTION_FAILURE_LIMIT then
+    state.compaction_failure_exhausted = true
+    return true
+  end
+  return false
+end
+
+function remuda._butler_compaction_failure_exhausted(state, level, force)
+  if force or (level and level.level == "ok") then
+    state.compaction_failures = nil
+    state.compaction_failure_exhausted = nil
+    if not force then state.compaction_exhausted_alerted = nil end
+    return false
+  end
+  return state.compaction_failure_exhausted == true
+end
+
+function remuda._butler_compaction_prepare_restore(state)
+  state.compaction_in_progress = true
+  return state
+end
+
+function remuda._butler_compaction_clear_failures(state, compacted)
+  if not compacted then return end
+  state.failure_cooldown_until = nil
+  state.compaction_failures = nil
+  state.compaction_failure_exhausted = nil
+  state.compaction_exhausted_alerted = nil
 end
 
 function remuda._butler_compaction_action_guard(session_name, allow_queued_mail)

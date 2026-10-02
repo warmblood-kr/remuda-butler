@@ -218,9 +218,8 @@ local function clear_compaction_restore(key, legacy_session)
   return true
 end
 
--- The lifecycle declaration owns the one compaction schedule. The session's
--- one-time run_script call only enables its callback; reloading the mod
--- replaces the schedule without leaving an old handle behind.
+-- The lifecycle declaration owns the one compaction schedule. Root launch
+-- enables its callback; reloading replaces the schedule without stale handles.
 function remuda._butler_register_compaction_schedule()
   _butler_trace("registered")
   local state = remuda._butler_state or remuda._butler_compaction_state or {}
@@ -295,9 +294,16 @@ function remuda._butler_compaction_tick(target_name, dry_run)
       if state.compaction_in_progress then
         results[#results + 1] = session_name .. ":compaction_in_progress"
       elseif owner_state.compaction_fleet_active and owner_state.compaction_fleet_active ~= state_key then
+        if state.last_trace_event ~= "fleet_busy" then
+          _butler_trace("fleet_busy", "active=" .. tostring(owner_state.compaction_fleet_active))
+          state.last_trace_event = "fleet_busy"
+        end
         results[#results + 1] = session_name .. ":fleet_busy"
       elseif state.restore_pending and not dry_run then
         results[#results + 1] = remuda._butler_compaction_execute(session_name)
+      elseif remuda._butler_compaction_failure_exhausted(
+          state, remuda.butler.ctx_level(session_name), false) then
+        results[#results + 1] = session_name .. ":skipped_failure_limit"
       elseif cooling then
         results[#results + 1] = session_name .. ":skipped_cooldown"
       else
@@ -415,7 +421,10 @@ function remuda._butler_compaction_execute(session_name, force)
   local restore_pending = (agent.kind == "claude" or agent.kind == "codex") and type(state.restore_pending) == "string"
     and state.restore_pending ~= "" and state.restore_pending or nil
   if state.compaction_in_progress then return "compaction_in_progress" end
-  if owner_state.compaction_fleet_active and owner_state.compaction_fleet_active ~= state_key then return "fleet_busy" end
+  if owner_state.compaction_fleet_active and owner_state.compaction_fleet_active ~= state_key then
+    _butler_trace("fleet_busy", "active=" .. tostring(owner_state.compaction_fleet_active))
+    return "fleet_busy"
+  end
   local now = (remuda._butler_compaction_now or os.time)()
   if not restore_pending and remuda._butler_compaction_failure_cooldown(state, now, force == true) then
     return "skipped_cooldown"
@@ -463,12 +472,14 @@ function remuda._butler_compaction_execute(session_name, force)
   local function release_lock()
     state.compaction_in_progress = false
     if owner_state.compaction_fleet_active == state_key then owner_state.compaction_fleet_active = nil end
+    _butler_trace("lock_released", detail)
   end
   -- `wording` replaces "Compaction failed" when the outcome is unknown.
   local function fail(reason, wording)
     release_lock()
     if state.restore_pending_attempt_active then
       state.restore_pending_attempt_active = nil
+      -- Preserve a compaction failure cooldown while recovery retries continue.
       if (tonumber(state.restore_pending_attempts) or 0) >= 3 then
         state.restore_pending_exhausted = true
         state.failure_cooldown_until = (remuda._butler_compaction_now or os.time)()
@@ -480,8 +491,6 @@ function remuda._butler_compaction_execute(session_name, force)
             "model restore failed; member may still be on "
               .. (agent.kind == "codex" and CODEX_LOWER_MODEL or "sonnet"))
         end
-      else
-        state.failure_cooldown_until = nil
       end
       _butler_trace("restore_failed", detail .. " attempt=" .. tostring(state.restore_pending_attempts)
         .. " reason=" .. tostring(reason))
@@ -491,6 +500,16 @@ function remuda._butler_compaction_execute(session_name, force)
       + config.failure_cooldown_seconds
     state.cooldown_ticks = 0
     _butler_trace("error", detail .. " reason=" .. tostring(reason))
+    local exhausted = remuda._butler_compaction_record_failure(state)
+    if exhausted then
+      -- One alert per run of failures: forced retries clear the count, not this flag.
+      if state.compaction_exhausted_alerted then return end
+      state.compaction_exhausted_alerted = true
+      pcall(remuda._butler_send, session_name, agent.parent or "butler",
+        "Compaction stopped after 3 consecutive failures: " .. tostring(reason)
+          .. "; it will resume when context drops below the compaction threshold or a human clears this session.")
+      return
+    end
     pcall(remuda._butler_send, session_name, agent.parent or "butler",
       (wording or "Compaction failed") .. ": " .. tostring(reason))
   end
@@ -519,7 +538,7 @@ function remuda._butler_compaction_execute(session_name, force)
       end
     end
     release_lock()
-    state.failure_cooldown_until = nil
+    remuda._butler_compaction_clear_failures(state, event ~= "restored_after_dialog")
     state.cooldown_ticks = config.cooldown_ticks
     state.compaction_still_running_notice_sent = nil
     state.restore_pending = nil
@@ -700,6 +719,9 @@ function remuda._butler_compaction_execute(session_name, force)
     function(screen)
       traced("timeout")
       fail(model_timeout_reason("timed out waiting for " .. id, session_name, screen))
+    end, function(reason)
+      traced("unrecognized_dialog")
+      fail(reason)
     end)
   end
   local function restore_model(event, after_restore)
@@ -919,14 +941,17 @@ function remuda._butler_compaction_execute(session_name, force)
         or remuda._butler_compaction_is_unknown_dialog(screen) then
       return "restore_pending"
     end
-    state.compaction_in_progress = true
-    state.failure_cooldown_until = nil
+    remuda._butler_compaction_prepare_restore(state)
     owner_state.compaction_fleet_active = state_key
     state.restore_pending_attempts = (tonumber(state.restore_pending_attempts) or 0) + 1
     state.restore_pending_attempt_active = true
     if agent.kind == "codex" then codex_restore("restored_after_dialog")
     else restore_model("restored_after_dialog") end
     return "restoring_model"
+  end
+  local level = remuda.butler.ctx_level(session_name)
+  if remuda._butler_compaction_failure_exhausted(state, level, force == true) then
+    return "skipped_failure_limit"
   end
   state.compaction_in_progress = true
   state.failure_cooldown_until = nil

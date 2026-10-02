@@ -29,8 +29,11 @@ dofile("packages/butler/main.lua")
 -- Test mode returns before the daemon loads compaction_run.lua, so load that
 -- module with the same pure helper dependencies for its exported dialog tests.
 local compaction_module = remuda._butler_compaction
+local compaction_trace_events = {}
 remuda._butler_compaction_run_config = {
-  _butler_trace = function() end,
+  _butler_trace = function(event, detail)
+    compaction_trace_events[#compaction_trace_events + 1] = event .. " " .. (detail or "")
+  end,
   registered_agent_kind = function() end,
   registered_agent_working = function() end,
   compaction_config = compaction_module.compaction_config,
@@ -118,6 +121,46 @@ cooldown_state.failure_cooldown_until = 200
 active = remuda._butler_compaction_failure_cooldown(cooldown_state, 200)
 assert(not active and cooldown_state.failure_cooldown_until == nil,
   "failure cooldown should expire without a scheduled tick")
+local repeated_failure_state = {}
+assert(not remuda._butler_compaction_record_failure(repeated_failure_state),
+  "the first failure should leave another attempt available")
+repeated_failure_state.failure_cooldown_until = 200
+active = remuda._butler_compaction_failure_cooldown(repeated_failure_state, 200)
+assert(not active and repeated_failure_state.failure_cooldown_until == nil,
+  "the cooldown should expire before a retry")
+assert(not remuda._butler_compaction_record_failure(repeated_failure_state)
+  and repeated_failure_state.compaction_failures == 2,
+  "a second failure after cooldown expiry should count as consecutive")
+assert(remuda._butler_compaction_record_failure(repeated_failure_state)
+  and remuda._butler_compaction_failure_exhausted(repeated_failure_state, { level = "critical" }),
+  "three consecutive failures should exhaust compaction retries")
+assert(not remuda._butler_compaction_failure_exhausted(repeated_failure_state, { level = "ok" })
+  and repeated_failure_state.compaction_failures == nil,
+  "context dropping below threshold should clear the failure limit")
+repeated_failure_state.compaction_failures = 3
+repeated_failure_state.compaction_failure_exhausted = true
+assert(not remuda._butler_compaction_failure_exhausted(repeated_failure_state, { level = "critical" }, true),
+  "a forced human retry should clear the failure limit")
+-- The exhaustion alert goes out once per run of failures: a forced retry keeps the flag, success or a low level clears it.
+local alert_state = { compaction_exhausted_alerted = true, compaction_failures = 3, compaction_failure_exhausted = true }
+remuda._butler_compaction_failure_exhausted(alert_state, { level = "critical" }, true)
+assert(alert_state.compaction_exhausted_alerted, "a forced retry must not re-arm the exhaustion alert")
+remuda._butler_compaction_failure_exhausted(alert_state, { level = "ok" })
+assert(alert_state.compaction_exhausted_alerted == nil, "a low context level re-arms the exhaustion alert")
+alert_state.compaction_exhausted_alerted = true
+remuda._butler_compaction_clear_failures(alert_state, true)
+assert(alert_state.compaction_exhausted_alerted == nil, "a successful compaction re-arms the exhaustion alert")
+local restore_state = { restore_pending = "opus", failure_cooldown_until = 900 }
+assert(remuda._butler_compaction_prepare_restore(restore_state).failure_cooldown_until == 900
+  and restore_state.restore_pending == "opus" and restore_state.compaction_in_progress,
+  "starting a pending restore should preserve the running failure cooldown")
+restore_state.compaction_failures = 1
+remuda._butler_compaction_clear_failures(restore_state, false)
+assert(restore_state.failure_cooldown_until == 900 and restore_state.compaction_failures == 1,
+  "finishing a recovery-only restore should preserve the compaction failure cooldown")
+remuda._butler_compaction_clear_failures(restore_state, true)
+assert(restore_state.failure_cooldown_until == nil and restore_state.compaction_failures == nil,
+  "a verified compaction should clear the failure cooldown and counter")
 local state, sends, fake_now = {}, 0, 100
 remuda._butler_compaction_now = function() return fake_now end
 local function tick(ctx, is_busy)
@@ -374,6 +417,14 @@ assert(not submit("EMPTY", "") and submit_count == 0,
   "submit must skip if the composer changed before the delayed Enter")
 assert(submit("NON-EMPTY", "/compact") and submit_count == 1,
   "submit may confirm only the exact /compact composer text")
+
+local prior_owner_state = remuda._butler_state
+remuda._butler_state = { compaction_fleet_active = "another-session" }
+assert(remuda._butler_compaction_tick("butler") == "butler:fleet_busy",
+  "the scheduler should skip a session while another compaction owns the fleet lock")
+assert(compaction_trace_events[#compaction_trace_events]:match("^fleet_busy active=another%-session$"),
+  "fleet-busy skips must emit a trace event")
+remuda._butler_state = prior_owner_state
 
 -- Drive the lifecycle-owned schedule callback without arguments, as the core
 -- scheduler does. The tick stub uses the real policy and records the Codex
