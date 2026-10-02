@@ -85,10 +85,20 @@ function remuda._butler_sessions()
   local rows = {}
   for _, item in ipairs(team_order()) do
     local agent = bus.agents[item.id]
+    local marker = "-"
+    if bus.pending_tasks and bus.pending_tasks[item.id] then
+      marker = "task queued"
+    elseif bus.task_poke_failures and bus.task_poke_failures[item.id] then
+      marker = "task failed"
+    elseif bus.notices and bus.notices[item.id] then
+      marker = bus.notice_delivery_failures and bus.notice_delivery_failures[item.id]
+        and "queued; notice failed" or "queued"
+    elseif bus.notice_delivery_failures and bus.notice_delivery_failures[item.id] then
+      marker = "notice failed"
+    end
     rows[#rows + 1] = string.rep(" ", item.indent * 2) .. (item.orphan and "[orphan] " or "")
       .. display_name(item.id) .. "\t" .. tostring(agent.kind or "") .. "\t"
-      .. tostring(agent.parent or "-") .. "\t"
-      .. (bus.notices and bus.notices[item.id] and "queued" or "-")
+      .. tostring(agent.parent or "-") .. "\t" .. marker
   end
   local out = #rows == 0 and "no Butler agents"
     or "SESSION\tAGENT\tLEADER\tNOTICE\n" .. table.concat(rows, "\n")

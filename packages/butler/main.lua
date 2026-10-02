@@ -518,7 +518,6 @@ remuda._butler_notice_config = { bus = bus,
 remuda.exec("butler/notice")
 -- The launch configs above call main.lua's startup_action_safe late; set it here.
 startup_action_safe = remuda._butler_notice.startup_action_safe
-local notice_recovery_error = remuda._butler_notice.notice_recovery_error
 -- Reply and forward live in mail.lua; this adds the caller's identity and the
 -- terminal notice. A recipient that has ended still gets the mail, unnotified.
 local function sender_address(from)
@@ -559,14 +558,12 @@ function remuda._butler_inbox(name)
   if mail.unread(id) == 0 then
     for alias, agent in pairs(bus.agents) do
       if agent.id == id then
-        local recovery = bus.notice_recoveries[alias]
+        if bus.notice_delivery_failures then bus.notice_delivery_failures[alias] = nil end
         local pending, reshow = bus.notices[alias], false
         for _, message_id in ipairs(pending and pending.message_order or {}) do
           reshow = reshow or (pending.reshow and pending.reshow[message_id]) == true
         end
-        if recovery and recovery.draft and recovery.draft ~= "" then
-          notice_recovery_error(alias, recovery, "mail was read while notice recovery was active; draft preserved")
-        elseif not reshow then
+        if not reshow then
           -- A queued re-show is of already-read mail: reading keeps it.
           bus.notices[alias], bus.notice_recoveries[alias] = nil, nil
         end
@@ -1194,6 +1191,9 @@ function remuda._butler_session_exited(name, info)
   -- #29: the mail stays in the inbox; only the pending pane notice goes.
   bus.unread_seeded[name] = "exited"
   bus.notices[name], bus.notice_screens[name], bus.pending_tasks[name] = nil, nil, nil
+  if bus.notice_delivery_failures then bus.notice_delivery_failures[name] = nil end
+  if bus.task_poke_failures then bus.task_poke_failures[name] = nil end
+  if bus.task_poke_failure_alerts then bus.task_poke_failure_alerts[name] = nil end
   bus.notice_recoveries[name], bus.task_retry_screens[name], bus.human_activity_screens[name] = nil, nil, nil
   local exited = bus.agents[name]
   if exited and exited.cwd and bus.trusted_launch_dirs then

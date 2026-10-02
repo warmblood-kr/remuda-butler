@@ -4388,6 +4388,7 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
           remuda._butler_inbox("butler")
           remuda._butler_session_trace_path = {trace:?}
           remuda._butler_task_poke_attempts = 6
+          remuda._butler_task_retry_delays = {0, 0, 0, 0}
           remuda._butler_test_force_launch_probe = {{
             ["t-claude"] = true,
             ["t-claude-launch"] = true,
@@ -4872,6 +4873,7 @@ fn butler_topic_delegate_checks_claude_trust_path_and_selection() {
             r#"
           remuda.butler.project_home({projects:?})
           remuda._butler_task_poke_attempts = 6
+          remuda._butler_task_retry_delays = {0, 0, 0, 0}
           remuda._butler_agent_builders.claude = function() return {{"sh"}} end
           remuda._butler_test_force_launch_probe = {{["allowed-topic"] = true, ["outside-topic"] = true}}
           local rule = string.rep("─", 20)

@@ -610,6 +610,15 @@ also applies to delegates without an explicit kind. Each candidate waits up to
 per-candidate timeout. `remuda butler sessions` shows the selected kind and
 the reason each earlier candidate was skipped.
 
+Butler waits for an empty composer before typing a delegate's first task or a
+mail notice. Background work in other sessions does not block an empty prompt;
+a non-empty composer is left untouched. If a task or notice cannot be verified,
+Butler retries after 20 seconds, one minute, five minutes and 15 minutes. After
+the final failed attempt it sends the leader one message with the resend step.
+Notice retries stop when the mail is read or the recipient exits. The `NOTICE`
+column in `remuda butler sessions` marks `task queued`, `task failed`, `queued`,
+and `notice failed` deliveries.
+
 The client session list leads each Butler session line with its status, read
 from the agent's own screen probes: `working`, `idle`, `needs you` (a trust,
 update or startup dialog) or `other` (no screen, an unreadable one, or a kind

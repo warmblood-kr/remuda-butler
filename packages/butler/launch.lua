@@ -36,6 +36,7 @@ local startup_modal_timeout_seconds = chooser.startup_modal_timeout_seconds
 local startup_modal = chooser.startup_modal
 local codex_update_complete = chooser.codex_update_complete
 local capture_update_evidence = chooser.capture_update_evidence
+local TASK_POKE_RETRY_DELAYS = { 20, 60, 300, 900 }
 
 local function launch_agent(kind, requested_name, cwd, model, parent, task, relaunch_identity, fresh_trusted_cwd)
   local candidates = kind and { kind } or configured_agent_order()
@@ -155,10 +156,66 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   if task and task ~= "" then
     -- Keep an immediate mail notice out of the child's first prompt until the
     -- delegated task has been submitted.
+    bus.task_poke_failures = bus.task_poke_failures or {}
+    bus.task_poke_failure_alerts = bus.task_poke_failure_alerts or {}
+    bus.task_poke_failures[actual], bus.task_poke_failure_alerts[actual] = nil, nil
     bus.pending_tasks[actual] = true
+    local function task_recipient_alive()
+      local listed, rows = pcall(remuda.ls)
+      if not listed or type(rows) ~= "table" then return true end
+      for _, row in ipairs(rows) do
+        if row.name == actual then return row.alive == true end
+      end
+      return false
+    end
+    local function task_delivery_done(delivered, reason, attempts)
+      if delivered or reason == "recipient gone" then
+        bus.pending_tasks[actual], bus.task_poke_failures[actual] = nil, nil
+        bus.task_poke_failure_alerts[actual] = nil
+        return
+      end
+      local detail = reason or "delivery could not be verified"
+      bus.pending_tasks[actual] = nil
+      bus.task_poke_failures[actual] = { reason = detail }
+      _butler_session_trace("task_poke_timeout", actual .. " " .. detail)
+      if not bus.task_poke_failure_alerts[actual] then
+        bus.task_poke_failure_alerts[actual] = true
+        local attempts_text = tonumber(attempts) and (tostring(attempts) .. " attempts") or "exhausting its retries"
+        pcall(remuda._butler_send, "butler", parent or "butler", "Task for " .. actual
+          .. " was not delivered after " .. attempts_text .. ": " .. detail
+          .. ". Resend it with `remuda butler send " .. actual .. " TASK` once its pane is ready.")
+      end
+    end
     local startup = remuda._butler_agent_startup[kind] or {}
+    local function task_delivery_options()
+      return {
+        ready = startup.ready,
+        modals = startup.modals,
+        trust_dialog = function(screen)
+          local modal = startup_modal(startup, screen)
+          return modal ~= nil and modal.trust ~= nil
+        end,
+        allowed = function(retrying)
+          if retrying then return remuda._butler_task_retry_policy(actual) end
+          return remuda._butler_notify_policy(actual)
+        end,
+        human_active = function() return remuda._butler_human_active(actual) end,
+        empty = function(screen) return remuda._butler_prompt_is_empty(kind, screen) end,
+        recipient_alive = task_recipient_alive,
+        retry_delays = remuda._butler_task_retry_delays,
+        timeout = remuda._butler_task_poke_deferrals or 600,
+        ready_timeout = remuda._butler_task_poke_attempts or 60,
+        submit_timeout = remuda._butler_submit_timeout or 300,
+        on_retry = function(attempt, delay, reason)
+          _butler_session_trace("task_poke_retry_scheduled", actual .. " attempt="
+            .. tostring(attempt) .. " delay=" .. tostring(delay) .. " reason=" .. tostring(reason))
+        end,
+        on_done = function(delivered, reason) task_delivery_done(delivered, reason) end,
+      }
+    end
     if kind == "codex" then
-    local poke, confirm, attempts, settle, deferred = nil, nil, 0, 0, 0
+    local poke, attempts, settle, deferred = nil, 0, 0, 0
+    local retry_failures, retry_at = 0, nil
     local update_waiting, waiting_for_update, update_deadline = false, false, 0
     local modal_wait_started, update_timeout_reported, update_version = nil, false, nil
     local function modal_wait_expired()
@@ -202,28 +259,45 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       for member in pairs(state.waiting or {}) do state.restart_waiting[member] = true end
       state.waiting = {}
     end
-    -- Either timeout means the task never reached the agent: say so to its
-    -- leader rather than only in the trace (#29).
-    local function give_up(detail)
+    local function fail_task_delivery(detail)
+      retry_failures = retry_failures + 1
+      local delays = type(remuda._butler_task_retry_delays) == "table"
+        and remuda._butler_task_retry_delays or TASK_POKE_RETRY_DELAYS
+      local delay = delays[retry_failures]
+      if delay then
+        retry_at = os.time() + delay
+        attempts, settle, deferred = 0, 0, 0
+        update_timeout_reported = false
+        update_deadline = os.time() + (tonumber(remuda._butler_codex_update_timeout) or 300)
+        modal_wait_started = nil
+        bus.pending_tasks[actual] = task
+        _butler_session_trace("task_poke_retry_scheduled", actual .. " attempt="
+          .. tostring(retry_failures) .. " delay=" .. tostring(delay) .. " reason=" .. detail)
+        return
+      end
       remuda.cancel(poke)
-      if confirm then remuda.cancel(confirm) end
-      bus.pending_tasks[actual] = nil
       if bus.codex_update_state.waiting then bus.codex_update_state.waiting[actual] = nil end
       if bus.codex_update_state.restart_waiting then bus.codex_update_state.restart_waiting[actual] = nil end
-      _butler_session_trace("task_poke_timeout", actual .. detail)
-      pcall(remuda._butler_send, "butler", parent or "butler", "Task for " .. actual
-        .. " was not delivered: its pane never became ready or free to type into."
-        .. " Resend it with `remuda butler send " .. actual .. " TASK` once it is.")
+      if detail:find("Codex update wait limit reached", 1, true) then
+        _butler_session_trace("codex_update_timeout", actual .. detail)
+      end
+      task_delivery_done(false, detail, retry_failures + 1)
     end
     local function report_update_timeout(detail)
       if update_timeout_reported then return end
       update_timeout_reported = true
-      bus.pending_tasks[actual] = nil
-      _butler_session_trace("codex_update_timeout", actual .. detail)
-      pcall(remuda._butler_send, "butler", parent or "butler", "Codex update wait limit reached for " .. actual
-        .. ". Its pane was left open; task delivery will resume when the pane is safe to relaunch.")
+      fail_task_delivery("Codex update wait limit reached" .. detail)
     end
     poke = remuda.schedule({ every = 0.5, run = function()
+      if not task_recipient_alive() then
+        remuda.cancel(poke)
+        task_delivery_done(false, "recipient gone")
+        return
+      end
+      if retry_at then
+        if os.time() < retry_at then return end
+        retry_at = nil
+      end
       if update_relaunch_record_ref and (update_relaunch_record_ref.relaunched or update_relaunch_record_ref.cancelled) then
         remuda.cancel(poke)
         bus.pending_tasks[actual] = nil
@@ -235,8 +309,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       -- must not leave a throwing callback in the daemon's shared Lua image.
       local captured, screen = pcall(remuda.capture, actual)
       if not captured then
-        remuda.cancel(poke)
-        bus.pending_tasks[actual] = nil
+        fail_task_delivery("could not capture the agent screen")
         return
       end
       local agent = bus.agents[actual]
@@ -316,13 +389,13 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       if update_state.done and update_state.waiting and update_state.waiting[actual] then
         update_version, waiting_for_update = update_state.done_version, true
         if relaunch_after_update() then return end
-        if modal_wait_expired(screen) then give_up(" update completed while human attached") end
+        if modal_wait_expired(screen) then fail_task_delivery("update completed while human attached") end
         return
       end
       if update_state.done and update_state.restart_waiting and update_state.restart_waiting[actual] then
         update_version, waiting_for_update = update_state.done_version, true
         if relaunch_after_update() then update_state.restart_waiting[actual] = nil; return end
-        if modal_wait_expired(screen) then give_up(" update completed while human attached") end
+        if modal_wait_expired(screen) then fail_task_delivery("update completed while human attached") end
         return
       end
       if update_state.claimed and update_state.owner ~= actual
@@ -338,7 +411,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
             waiting_for_update, settle = false, attempts + 3
             update_state.waiting[actual] = nil
           else
-            give_up(" waiting for Codex update")
+            fail_task_delivery("waiting for Codex update")
           end
         end
         return
@@ -367,7 +440,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
             end
             if update_state.done and update_state.done_version == version then
               if relaunch_after_update() then return end
-              if modal_wait_expired(screen) then give_up(" modal human attached") end
+              if modal_wait_expired(screen) then fail_task_delivery("modal human attached") end
               return
             end
             if os.time() >= update_deadline then
@@ -379,7 +452,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
                 return
               end
             end
-            if modal_wait_expired(screen) then give_up(" waiting for Codex update") end
+            if modal_wait_expired(screen) then fail_task_delivery("waiting for Codex update") end
             return
           end
           if waiting_for_update and update_state.done and update_state.done_version == version then
@@ -427,104 +500,35 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
             pcall(remuda.key, actual, skip)
             settle = attempts + 3
           else
-            if modal_wait_expired(screen) then give_up(" update dialog") end
+            if modal_wait_expired(screen) then fail_task_delivery("update dialog") end
           end
           return
         end
-        if modal_wait_expired(screen) then give_up(" modal"); return end
+        if modal_wait_expired(screen) then fail_task_delivery("startup modal"); return end
         if startup_action_safe and not startup_action_safe(actual) then return end
         for _, key in ipairs(modal.keys or {}) do pcall(remuda.key, actual, key) end
         settle = attempts + 3
         return
       end
       if not startup.ready or startup.ready(screen) then
-        -- #29: never type the task over a human's line. Waiting is bounded
-        -- separately (default 600 ticks = 300s); then the leader is told.
+        -- Never type over a draft; shared first-task delivery verifies the
+        -- composer and retries a missing submission before reporting failure.
         if not remuda._butler_notify_policy(actual) then
           attempts, deferred = attempts - 1, deferred + 1
-          if deferred >= (remuda._butler_task_poke_deferrals or 600) then give_up(" deferred") end
+          if deferred >= (remuda._butler_task_poke_deferrals or 600) then fail_task_delivery("deferred") end
           return
         end
         remuda.cancel(poke)
-        local typed = pcall(remuda.type_text, actual, task)
-        if not typed then
-          give_up(" type failed")
-          return
-        end
-
-        -- A terminal write succeeding does not mean the agent accepted its
-        -- Return. Keep notices out until the composer releases the task, and
-        -- retry Return if the same task remains in the composer.
         bus.pending_tasks[actual] = task
-        local task_line = task:gsub("^%s+", ""):match("^[^\n]*") or ""
-        local checks, empty_checks = 0, 0
-        confirm = remuda.schedule({ every = 0.5, run = function()
-          checks = checks + 1
-          local seen, latest = pcall(remuda.capture, actual)
-          if not seen then
-            remuda.cancel(confirm)
-            bus.pending_tasks[actual] = nil
-            return
-          end
-          local decision, text = remuda._butler_prompt_is_empty(kind, latest)
-          local busy = remuda.session(actual).is_busy == true
-          local task_in_composer = #task_line > 0 and (text == task_line
-            or (#text > 0 and task_line:sub(1, #text) == text))
-          if not task_in_composer and decision == "EMPTY" then
-            empty_checks = empty_checks + 1
-          else
-            empty_checks = 0
-          end
-          -- The task can be accepted between type_text and this first poll.
-          -- A fast TUI may also still be painting the text on its first empty
-          -- poll, so require two consecutive empty captures. Busy is definitive.
-          if busy or empty_checks >= 2 then
-            remuda.cancel(confirm)
-            bus.pending_tasks[actual] = nil
-            return
-          end
-          -- Give the UI time to consume the first Return before retrying.
-          if decision == "NON-EMPTY" and task_in_composer and checks >= 4 and checks % 4 == 0 then
-            pcall(remuda.key, actual, "RET")
-          end
-          if checks >= (remuda._butler_task_poke_deferrals or 600) then
-            give_up(" submit")
-          end
-        end })
+        PROMPT_DELIVERY.schedule(remuda, kind, actual, name, parent, task,
+          task_delivery_options())
         return
       end
-      if attempts >= (remuda._butler_task_poke_attempts or 60) then give_up("") end
+      if attempts >= (remuda._butler_task_poke_attempts or 60) then fail_task_delivery("composer never became ready") end
     end })
     else
-    PROMPT_DELIVERY.schedule(remuda, kind, actual, name, parent, task, {
-      ready = startup.ready,
-      modals = startup.modals,
-      trust_dialog = function(screen)
-        local modal = startup_modal(startup, screen)
-        return modal ~= nil and modal.trust ~= nil
-      end,
-      allowed = function(retrying)
-        if retrying then return remuda._butler_task_retry_policy(actual) end
-        return remuda._butler_notify_policy(actual)
-      end,
-      human_active = function() return remuda._butler_human_active(actual) end,
-      empty = function(screen)
-        return remuda._butler_prompt_is_empty(kind, screen)
-      end,
-      timeout = remuda._butler_task_poke_deferrals or 600,
-      ready_timeout = remuda._butler_task_poke_attempts or 60,
-      submit_timeout = remuda._butler_submit_timeout or 300,
-      on_done = function(delivered, reason)
-        bus.pending_tasks[actual] = nil
-        if delivered then return end
-        local detail = reason or "delivery could not be verified"
-        if detail == "submit" then detail = "it was typed but not submitted" end
-        _butler_session_trace("task_poke_timeout", actual .. " " .. detail)
-        pcall(remuda._butler_send, "butler", parent or "butler", "Task for " .. actual
-          .. " was not delivered: " .. detail
-          .. ". Resend it with `remuda butler send " .. actual .. " TASK` once it is.")
-      end,
-    })
+    bus.pending_tasks[actual] = task
+    PROMPT_DELIVERY.schedule(remuda, kind, actual, name, parent, task, task_delivery_options())
     end
   end
   return actual

@@ -51,7 +51,8 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
   local poll, startup_ticks, deferred_ticks, verify_ticks = nil, 0, 0, 0
   local attempts = 0
   local handled_modals, settle_until, task_seen_in_composer = {}, 0, false
-  local verify_started
+  local verify_started, retry_at, retry_failures, finished
+  local retry_delays = options.retry_delays or { 20, 60, 300, 900 }
   local function now()
     if options.now then
       local ok, value = pcall(options.now)
@@ -60,6 +61,8 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
     return os.time()
   end
   local function finish(ok, reason)
+    if finished then return end
+    finished = true
     remuda.cancel(poll)
     if options.on_done then
       pcall(options.on_done, ok, reason)
@@ -67,10 +70,33 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
       notify(remuda, parent, name, reason)
     end
   end
+  local function retry(reason)
+    if options.recipient_alive then
+      local checked, alive = pcall(options.recipient_alive)
+      if not checked or alive ~= true then finish(false, "recipient gone"); return end
+    end
+    retry_failures = (retry_failures or 0) + 1
+    local delay = retry_delays[retry_failures]
+    if not delay then finish(false, reason); return end
+    retry_at = now() + delay
+    startup_ticks, deferred_ticks, verify_ticks, attempts = 0, 0, 0, 0
+    handled_modals, settle_until = {}, 0
+    verify_started, options.return_retried = nil, nil
+    if options.on_retry then pcall(options.on_retry, retry_failures, delay, reason) end
+  end
   poll = remuda.schedule({ every = 0.5, run = function()
+    if finished then return end
+    if options.recipient_alive then
+      local checked, alive = pcall(options.recipient_alive)
+      if not checked or alive ~= true then finish(false, "recipient gone"); return end
+    end
+    if retry_at then
+      if now() < retry_at then return end
+      retry_at = nil
+    end
     local captured, screen = pcall(remuda.capture, actual)
     if not captured then
-      finish(false, "could not capture the agent screen")
+      retry("could not capture the agent screen")
       return
     end
 
@@ -79,7 +105,7 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
       if not checked or waiting then
         startup_ticks = startup_ticks + 1
         if startup_ticks >= (options.ready_timeout or 60) then
-          finish(false, "waiting for a human to answer the trust dialog")
+          retry("waiting for a human to answer the trust dialog")
         end
         return
       end
@@ -96,7 +122,7 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
           if human_active then
             startup_ticks = startup_ticks + 1
             if startup_ticks >= (options.ready_timeout or 60) then
-              finish(false, "human active during startup modal")
+              retry("human active during startup modal")
             end
             return
           end
@@ -109,7 +135,7 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
             startup_ticks = startup_ticks + 1
           end
           if startup_ticks >= (options.ready_timeout or 60) then
-            finish(false, "startup modal did not clear")
+            retry("startup modal did not clear")
           end
           return
         end
@@ -117,7 +143,7 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
       if startup_ticks < settle_until then
         startup_ticks = startup_ticks + 1
         if startup_ticks >= (options.ready_timeout or 60) then
-          finish(false, "startup modal did not clear")
+          retry("startup modal did not clear")
         end
         return
       end
@@ -127,6 +153,46 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
         is_ready = checked and result == true
       end
       if is_ready then
+        if task_seen_in_composer then
+          local decision, text = "EMPTY", ""
+          if options.empty then
+            local checked, value, composer = pcall(options.empty, screen)
+            decision, text = checked and value or "UNPARSEABLE", tostring(composer or "")
+          end
+          local placeholder = text:match("^%[?Pasted text #%d+%s*%+%s*%d+%s+lines?%]?%s*$") ~= nil
+            or text:match("^%[Pasted Content %d+ chars%]$") ~= nil
+          local same_task = decision == "NON-EMPTY"
+            and (compact(text) == compact(task) or placeholder)
+          if same_task then
+            local allowed = true
+            if options.allowed then
+              local checked, value = pcall(options.allowed, true, screen)
+              allowed = checked and value == true
+            end
+            if allowed then
+              attempts, verify_ticks, verify_started = 1, 0, now()
+              options.return_retried = true
+              pcall(remuda.key, actual, "RET")
+            else
+              deferred_ticks = deferred_ticks + 1
+              if deferred_ticks >= (options.timeout or 600) then retry("deferred") end
+            end
+            return
+          end
+          if decision == "EMPTY" then
+            verify_ticks = verify_ticks + 1
+            local busy = false
+            if remuda.session then
+              local checked, session = pcall(remuda.session, actual)
+              busy = checked and session and session.is_busy == true
+            end
+            if prompt_start_visible(screen, task) or busy or verify_ticks >= 2 then finish(true) end
+            return
+          end
+          deferred_ticks = deferred_ticks + 1
+          if deferred_ticks >= (options.timeout or 600) then retry("deferred") end
+          return
+        end
         local allowed = true
         if options.allowed then
           local checked, result = pcall(options.allowed, false, screen)
@@ -135,7 +201,7 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
         if not allowed then
           deferred_ticks = deferred_ticks + 1
           if deferred_ticks >= (options.timeout or 600) then
-            finish(false, "deferred")
+            retry("deferred")
           end
           return
         end
@@ -149,7 +215,7 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
           if type(type_error) == "string" then
             reason = "type failed: " .. safe_type_error_line(type_error)
           end
-          finish(false, reason)
+          retry(reason)
         else
           verify_started = now()
         end
@@ -161,11 +227,11 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
         end
         if human_active then
           deferred_ticks = deferred_ticks + 1
-          if deferred_ticks >= (options.timeout or 600) then finish(false, "deferred") end
+          if deferred_ticks >= (options.timeout or 600) then retry("deferred") end
         else
           startup_ticks = startup_ticks + 1
           if startup_ticks >= (options.ready_timeout or 60) then
-            finish(false, "the composer never became ready")
+            retry("the composer never became ready")
           end
         end
       end
@@ -188,7 +254,7 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
     end
     -- Busy is useful only after the composer releases our text; typing the
     -- task itself also makes a terminal look busy.
-    if session_busy and empty then
+    if session_busy and empty and task_seen_in_composer then
       finish(true)
       return
     end
@@ -214,7 +280,7 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
       end
       if not allowed then
         deferred_ticks = deferred_ticks + 1
-        if deferred_ticks >= (options.timeout or 600) then finish(false, "deferred") end
+        if deferred_ticks >= (options.timeout or 600) then retry("deferred") end
         return
       end
       options.return_retried = true
@@ -223,7 +289,7 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
       return
     end
     if verify_started and now() - verify_started >= (options.submit_timeout or 300) then
-      finish(false, "submit")
+      retry("submit")
     end
   end })
   return poll

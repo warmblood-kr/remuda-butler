@@ -54,6 +54,7 @@ release tags yet; entries come from merged pull requests.
 - Butler-to-Butler Matrix replies are no longer blocked. A per-thread turn guard (`b2b_max_turns`, default 6) stops the Butler after 6 Butler-only turns and posts one line to HOME; a reply in that thread from a person on the allowlist resumes it (#223).
 
 ### Fixed
+- Deferred mail notices and delegate first-task text retry after 20 seconds, 1 minute, 5 minutes and 15 minutes. Butler leaves non-empty composers untouched, sends one resend instruction after retries are exhausted, and marks queued or failed delivery in `remuda butler sessions` (#292).
 - When a lead exits, its members move to the lead's leader instead of keeping a dead leader, and the root Butler (or a person) can close leader-less rows, so finished sessions no longer pile up unclosable (#230).
 - `remuda butler matrix download -o PATH` from a terminal now refuses a relative PATH ("not an absolute path"): it used to write into the daemon's directory, not yours. Known limits of file confinement for agent sessions: on Windows two directories that differ only by letter case count as one place, even in a directory made case-sensitive; and a named pipe (FIFO) inside the working directory still blocks the read.
 - The root Butler's `AGENTS.md` keeps text you add outside its managed block; only the block between the `remuda-butler:managed` markers is rewritten.

@@ -6,7 +6,11 @@ local bus = {
   notices = { lead = { count = 1, message_order = { "m1" } } },
   pending_tasks = {}, notice_timers = {},
 }
-local mail = { mailbox = {}, is_unread = function() return true end }
+local mail_unread = true
+local mail = {
+  mailbox = {}, is_unread = function() return mail_unread end,
+  unread = function() return mail_unread and 1 or 0 end,
+}
 remuda = {
   _butler_notice_config = {
     bus = bus, resolve = function(name) return name end,
@@ -54,4 +58,36 @@ assert(sent[1][2]:find("m2", 1, true), "failure mail covers notices coalesced du
 assert(bus.notices.lead == nil, "exhausted notice is removed")
 remuda._butler_notice.notice_recovery_error("lead", { message_ids = { "m1" }, draft = "" }, "again")
 assert(#sent == 1, "the exhausted notice alerts only once")
+
+-- A human draft is left exactly where it is; recovery neither clears it nor types over it.
+now, screen = now + 10, "› private draft"
+local input_events = {}
+remuda.capture = function() return screen end
+remuda.key = function(_, key) input_events[#input_events + 1] = "key " .. key end
+remuda.type_text = function(_, value) input_events[#input_events + 1] = "type " .. value end
+remuda.after = nil
+bus.agents.lead.id = nil
+bus.notices.lead = nil
+bus.notice_recoveries.lead = nil
+bus.pending_tasks.lead = nil
+bus.codex_update_state, bus.codex_update_relaunches = {}, {}
+assert(not remuda._butler_notify("lead", "queued notice"))
+now = now + 2
+remuda._butler_deliver_notices()
+remuda._butler_deliver_notices()
+assert(#input_events == 0, "a non-empty composer receives no keys or typed text")
+assert(bus.notices.lead and bus.notice_recoveries.lead.phase == "probe", "draft blocks the queued notice safely")
+bus.notices.lead, bus.notice_recoveries.lead = nil, nil
+bus.agents.lead.id, mail_unread = "lead-id", true
+assert(not remuda._butler_notify("lead", "readable mail", "m3"))
+mail_unread = false
+now = now + 2
+remuda._butler_deliver_notices()
+assert(bus.notices.lead == nil and bus.notice_recoveries.lead == nil, "reading mail cancels queued retries")
+bus.agents.lead.id = nil
+mail_unread = true
+assert(not remuda._butler_notify("lead", "mail for gone recipient", "m4"))
+bus.agents.lead = nil
+remuda._butler_deliver_notices()
+assert(bus.notices.lead == nil, "recipient exit cancels queued retries")
 print("ok - retries back off, respect empty busy prompt, and alert once on exhaustion")

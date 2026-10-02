@@ -12,6 +12,9 @@ local function fixture(rows)
   end
   remuda._butler_bus.agents = agents
   remuda._butler_bus.notices = {}
+  remuda._butler_bus.pending_tasks = {}
+  remuda._butler_bus.task_poke_failures = {}
+  remuda._butler_bus.notice_delivery_failures = {}
   local output = remuda._butler_sessions()
   assert_no_blank_rows(output, "fixture roster")
   return output
@@ -38,6 +41,18 @@ assert_equal(rows[5], "zeta\tclaude\troot\t-", "sorted second child")
 remuda._butler_bus.notices.root = { count = 1, retry_at = 200 }
 rows = displayed_rows(remuda._butler_sessions())
 assert_equal(rows[2], "root\tclaude\t-\tqueued", "undelivered notice is marked in the roster")
+remuda._butler_bus.notices.root = nil
+remuda._butler_bus.notice_delivery_failures.root = { message_ids = { "m1" } }
+rows = displayed_rows(remuda._butler_sessions())
+assert_equal(rows[2], "root\tclaude\t-\tnotice failed", "exhausted notice remains visible")
+remuda._butler_bus.notice_delivery_failures.root = nil
+remuda._butler_bus.pending_tasks.root = "first task"
+rows = displayed_rows(remuda._butler_sessions())
+assert_equal(rows[2], "root\tclaude\t-\ttask queued", "undelivered first text is marked in the roster")
+remuda._butler_bus.pending_tasks.root = nil
+remuda._butler_bus.task_poke_failures.root = { reason = "submit" }
+rows = displayed_rows(remuda._butler_sessions())
+assert_equal(rows[2], "root\tclaude\t-\ttask failed", "exhausted first text remains visible")
 
 -- The client's session pane asks the same tree for its order (core's
 -- remuda.session_order hook): same walk, depth per row, names as sessions.

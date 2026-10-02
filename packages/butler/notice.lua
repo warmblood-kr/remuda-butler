@@ -1,6 +1,6 @@
 -- Mail notices: the typing policy, notice recovery, deposit debounce and
 -- delivery, and _butler_send. main.lua passes its locals in (the mail.lua
--- pattern) and binds startup_action_safe and notice_recovery_error back.
+-- pattern) and binds startup_action_safe back.
 local config = assert(remuda._butler_notice_config)
 local bus = assert(config.bus)
 local resolve = assert(config.resolve)
@@ -48,6 +48,7 @@ bus.unread_seeded_exited_at = bus.unread_seeded_exited_at or {}
 bus.notice_retry_reasons = bus.notice_retry_reasons or {}
 bus.notice_fallbacks = bus.notice_fallbacks or {}
 bus.notice_failure_alerts = bus.notice_failure_alerts or {}
+bus.notice_delivery_failures = bus.notice_delivery_failures or {}
 local NOTICE_STABLE_SECONDS = 3
 local NOTICE_QUIET_S = 2
 local NOTICE_MAX_WAIT_S = 10
@@ -444,12 +445,6 @@ local function notice_fallback_or_fail(session, state, pending, reason)
   bus.notice_recoveries[session] = nil
   return true
 end
-local function recovery_composer_empty(session, screen, decision, text)
-  if decision ~= "EMPTY" then return false end
-  local agent = bus.agents[session]
-  local composer, safe = recovery_draft(agent and agent.kind or "", screen, "")
-  return safe and normalized_composer(composer) == ""
-end
 notice_recovery_error = function(session, state, reason)
   state.failed = true
   local agent = bus.agents[session]
@@ -480,6 +475,9 @@ notice_recovery_error = function(session, state, reason)
   bus.notice_failure_alerts[session] = alerts
   if pending and not alerts.exhausted then
     alerts.exhausted = true
+    bus.notice_delivery_failures[session] = {
+      message_ids = state.message_ids or {}, reason = reason,
+    }
     pcall(remuda._butler_send, "butler", parent,
       "Could not safely deliver queued Butler mail to " .. session .. " after "
       .. tostring(attempts + 1) .. " attempts (last error: " .. reason
@@ -532,6 +530,16 @@ local function complete_notice_recovery(session, state)
   bus.notice_recoveries[session] = nil
   bus.notice_retry_reasons[session] = nil
   bus.notice_failure_alerts[session] = nil
+  local failed = bus.notice_delivery_failures[session]
+  if failed then
+    local delivered, remaining = {}, {}
+    for _, id in ipairs(state.message_ids or {}) do delivered[id] = true end
+    for _, id in ipairs(failed.message_ids or {}) do
+      if not delivered[id] then remaining[#remaining + 1] = id end
+    end
+    if #remaining == 0 then bus.notice_delivery_failures[session] = nil
+    else failed.message_ids = remaining end
+  end
   clear_notice_fallbacks(session, state.message_ids)
   return true
 end
@@ -558,17 +566,14 @@ local function recovery_human_safe(session, allow_busy)
   end
   return true
 end
-local function begin_notice_submit(session, state, draft)
+local function begin_notice_submit(session, state)
   local pending = bus.notices[session]
   if not pending then bus.notice_recoveries[session] = nil; return true end
-  state.draft = draft
+  state.draft = nil
   state.count = pending.count
   state.message_ids = {}
   for _, id in ipairs(pending.message_order or {}) do state.message_ids[#state.message_ids + 1] = id end
   state.notice = pending_notice_text(pending)
-  if draft and draft ~= "" then
-    state.notice = state.notice .. "\n\nYour unsent draft was: " .. draft
-  end
   bus.notice_recoveries[session] = state
   local typed, result, why = pcall(remuda.type_text, session, state.notice, 0.1)
   if input_was_busy(typed, result, why) then
@@ -609,7 +614,7 @@ local function tick_notice_recovery(session, state)
   local pending = bus.notices[session]
   trace_notice_retry(session, pending, "prompt-" .. decision)
   if state.phase == "retry_type" then
-    return begin_notice_submit(session, state, state.draft)
+    return begin_notice_submit(session, state)
   end
   if state.phase == "probe" then
     if state.last_screen == normalized then state.stable = (state.stable or 0) + 1
@@ -619,64 +624,17 @@ local function tick_notice_recovery(session, state)
       bus.notice_recoveries[session] = nil
       return begin_notice_submit(session, state)
     end
-    state.pre_redraw_decision, state.pre_redraw_screen, state.pre_redraw_text = decision, screen, text
-    local redrawn, why = pcall(remuda.key, session, "C-l")
-    if not redrawn then return notice_recovery_error(session, state, "Ctrl-L redraw failed") end
-    state.phase = "redrawn"
+    -- An unrecognized or non-empty composer may be a human draft. Leave it
+    -- untouched and let this attempt time out into the scheduled retry.
+    state.draft = decision == "NON-EMPTY" and text or ""
     return false
   elseif state.phase == "redrawn" then
     if decision == "EMPTY" then
-      if state.pre_redraw_decision == "NON-EMPTY" then
-        local pending = pending_notice_text(bus.notices[session] or { count = 0, text = "" })
-        if notice_matches_composer(session, state.pre_redraw_screen, state.pre_redraw_text, pending) then
-          return begin_notice_submit(session, state)
-        end
-        local agent = bus.agents[session]
-        local draft, safe = recovery_draft(agent and agent.kind or "", state.pre_redraw_screen,
-          state.pre_redraw_text)
-        if not safe then
-          return notice_recovery_error(session, state, "the pre-redraw draft could not be preserved")
-        end
-        return begin_notice_submit(session, state, draft)
-      end
       return begin_notice_submit(session, state)
     end
-    if decision == "UNPARSEABLE" or not text or text == "" then
-      return notice_recovery_error(session, state, "the composer remained unparseable after Ctrl-L")
-    end
-    local current_notice = pending_notice_text(bus.notices[session] or { count = 0, text = "" })
-    if notice_matches_composer(session, screen, text, current_notice) then
-      local pressed, result, why = pcall(remuda.key, session, "RET")
-      if input_was_busy(pressed, result, why) then return false end
-      if not pressed then return notice_recovery_error(session, state,
-        "the existing Butler notice could not be submitted") end
-      state.phase, state.checks, state.notice = "verify_existing", 0, current_notice
-      state.message_ids = {}
-      for _, id in ipairs((bus.notices[session] or {}).message_order or {}) do
-        state.message_ids[#state.message_ids + 1] = id
-      end
-      return false
-    end
-    local agent = bus.agents[session]
-    local startup = remuda._butler_agent_startup[agent and agent.kind or ""] or {}
-    local draft, safe = recovery_draft(agent and agent.kind or "", screen, text)
-    if not safe then
-      return notice_recovery_error(session, state, "the draft spans unrecognized composer rows")
-    end
-    if not startup.clear_input then
-      state.draft = draft
-      return notice_recovery_error(session, state, "this agent has no verified composer clear key")
-    end
-    state.draft = draft
-    local cleared, why = pcall(remuda.key, session, startup.clear_input)
-    if not cleared then return notice_recovery_error(session, state, "the draft clear key failed") end
-    state.phase, state.checks = "verify_clear", 0
-    return false
+    return notice_recovery_error(session, state, "legacy recovery state left the composer untouched")
   elseif state.phase == "verify_clear" then
-    if not recovery_composer_empty(session, screen, decision, text) then
-      return notice_recovery_error(session, state, "the composer did not become empty after the clear key")
-    end
-    return begin_notice_submit(session, state, state.draft)
+    return notice_recovery_error(session, state, "legacy clear state left the composer untouched")
   elseif state.phase == "verify_existing" then
     local notice_visible = state.notice and tostring(screen):gsub("%s+", "")
       :find(tostring(state.notice):gsub("%s+", ""):sub(1, 32), 1, true) ~= nil
@@ -764,8 +722,15 @@ local function deliver_notice(session)
     state.message_ids = {}
     for _, id in ipairs(pending.message_order or {}) do state.message_ids[#state.message_ids + 1] = id end
     local typed, result, why = pcall(remuda.type_text, session, state.notice, 0.1)
-    if input_was_busy(typed, result, why) then return false, "busy" end
-    if not typed then return false, why or result end
+    if input_was_busy(typed, result, why) then
+      state.phase = "retry_type"
+      bus.notice_recoveries[session] = state
+      return false, "busy"
+    end
+    if not typed or result == false then
+      bus.notice_recoveries[session] = state
+      return notice_recovery_error(session, state, tostring(why or result or "the notice could not be typed"))
+    end
     bus.notice_recoveries[session] = state
     return false
   end
@@ -783,6 +748,7 @@ local function deliver_due_notice(session, now)
   if not bus.agents[session] then
     cancel_notice_timers(session)
     bus.notices[session] = nil
+    bus.notice_delivery_failures[session] = nil
   elseif bus.notice_recoveries[session]
       or not pending or pending.due_at == nil or now >= pending.due_at then
     cancel_notice_timers(session)
