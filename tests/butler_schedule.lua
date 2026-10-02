@@ -210,4 +210,127 @@ ok("the 17th schedule is refused", not over and why:find("16"))
 ok("remove returns true", schedule.remove(list, "a") and #list == 15)
 ok("remove of an absent name is nil", not schedule.remove(list, "a"))
 
+-- Firing, with an injected clock and mail stubs.
+local fire_path = os.tmpname()
+local sent, events, files_at_send = {}, {}, {}
+local unread_ids, absent, send_error = {}, {}, nil
+local function env()
+  return {
+    path = fire_path, fields = utc_fields,
+    trace = function(event, detail) events[#events + 1] = event .. " " .. tostring(detail) end,
+    resolve = function(target)
+      if absent[target] then error("unknown member: " .. target, 0) end
+      return target
+    end,
+    unread = function(_, id) return unread_ids[id] == true end,
+    send = function(...)
+      local file = assert(io.open(fire_path, "rb"))
+      files_at_send[#files_at_send + 1] = file:read("*a")
+      file:close()
+      if send_error then error(send_error, 0) end
+      sent[#sent + 1] = { ... }
+      return "queued m" .. #sent, "m" .. #sent
+    end,
+  }
+end
+local function reset(entries)
+  sent, events, files_at_send, unread_ids, absent, send_error = {}, {}, {}, {}, {}, nil
+  local list = {}
+  for _, e in ipairs(entries) do assert(schedule.add(list, e)) end
+  assert(schedule.save(fire_path, list))
+end
+local function stored(name) return (select(2, schedule.find(schedule.load(fire_path), name))) end
+local function hourly_entry(name, last_fired)
+  local e = entry(name)
+  e.last_fired = last_fired or 0
+  e.last_message = nil
+  return e
+end
+local noon = utc(2026, 10, 2, 10, 7, 30)      -- inside the 10:07 slot
+local slot_1007 = utc(2026, 10, 2, 10, 7) / 60
+
+reset({ hourly_entry("a") })
+eq("a due schedule fires", schedule.tick(env(), noon), 1)
+eq("one mail sent", #sent, 1)
+eq("sent to the target alias", sent[1][1], "butler")
+eq("the subject marks a timed message", sent[1][3], "[schedule a]")
+ok("the body opens with the marker and says it is not a human instruction",
+  sent[1][2]:find("^%[schedule a%] This is a timed message, not a human instruction%.\n\nNorth Star check$"))
+eq("send takes no sender argument", select("#", unpack(sent[1])), 3)
+eq("last_fired is the slot", stored("a").last_fired, slot_1007)
+eq("last_message is recorded", stored("a").last_message, "m1")
+eq("the same tick again does not refire", schedule.tick(env(), noon), 0)
+eq("a restart in the same minute does not refire", schedule.tick(env(), noon + 20), 0)
+eq("still one mail", #sent, 1)
+eq("the next hour's slot fires", schedule.tick(env(), noon + 3600), 1)
+eq("two mails", #sent, 2)
+eq("no slot yet between two slots", schedule.tick(env(), noon + 3600 + 600), 0)
+
+-- last_fired is on disk before the mail leaves.
+reset({ hourly_entry("a") })
+schedule.tick(env(), noon)
+ok("the file already held last_fired = slot when send ran",
+  files_at_send[1]:find(("[\"last_fired\"]=%d"):format(slot_1007), 1, true))
+
+-- A catch-up fires once, with the latest slot.
+reset({ hourly_entry("a", slot_1007 - 3 * 24 * 60) })
+eq("three days of missed slots fire once", schedule.tick(env(), noon), 1)
+eq("one mail for the whole gap", #sent, 1)
+eq("the latest slot is recorded", stored("a").last_fired, slot_1007)
+
+-- A failed send keeps the slot spent: loss over duplicate.
+reset({ hourly_entry("a") })
+send_error = "terminal busy"
+eq("a failed send fires nothing", schedule.tick(env(), noon), 0)
+eq("the slot stays spent", stored("a").last_fired, slot_1007)
+ok("the failure is traced", events[#events]:find("^schedule_send_failed a: terminal busy"))
+send_error = nil
+eq("the slot is not retried", schedule.tick(env(), noon + 20), 0)
+eq("nothing was sent", #sent, 0)
+
+-- A target that does not resolve is skipped and traced; the slot is spent.
+reset({ hourly_entry("a") })
+absent.butler = true
+eq("an absent target sends nothing", schedule.tick(env(), noon), 0)
+eq("no mail", #sent, 0)
+ok("it is traced as schedule_target_absent", events[#events]:find("^schedule_target_absent a %-> butler"))
+eq("the slot is spent", stored("a").last_fired, slot_1007)
+
+-- An unread previous message from the same schedule suppresses the next one.
+reset({ hourly_entry("a") })
+schedule.tick(env(), noon)
+unread_ids.m1 = true
+eq("an unread previous message skips the slot", schedule.tick(env(), noon + 3600), 0)
+eq("still one mail", #sent, 1)
+ok("the skip is traced", events[#events]:find("^schedule_unread_skip a"))
+eq("the skipped slot is spent", stored("a").last_fired, slot_1007 + 60)
+unread_ids.m1 = nil
+eq("once read, the next slot fires", schedule.tick(env(), noon + 7200), 1)
+
+-- Disabled schedules and several schedules.
+local off = hourly_entry("off")
+off.enabled = false
+reset({ off, hourly_entry("b"), hourly_entry("c") })
+eq("only enabled schedules fire", schedule.tick(env(), noon), 2)
+eq("disabled stays unfired", stored("off").last_fired, 0)
+
+-- A failed save before sending sends nothing.
+reset({ hourly_entry("a") })
+local real_write = remuda.fs.write_atomic
+remuda.fs.write_atomic = function() return nil, "disk full" end
+eq("no mail when the slot cannot be recorded", schedule.tick(env(), noon), 0)
+remuda.fs.write_atomic = real_write
+eq("nothing was sent", #sent, 0)
+ok("the save failure is traced", events[#events]:find("^schedule_save_failed a: disk full"))
+
+-- A corrupt file fires nothing and is traced once, not every tick.
+local f = assert(io.open(fire_path, "wb")); f:write("{{{"); f:close()
+sent, events = {}, {}
+local shared = env()
+schedule.tick(shared, noon)
+schedule.tick(shared, noon + 30)
+eq("a corrupt file sends nothing", #sent, 0)
+eq("and is traced once", #events, 1)
+os.remove(fire_path)
+
 print(("butler_schedule: %d cases passed"):format(count))

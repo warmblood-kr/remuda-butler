@@ -187,5 +187,76 @@ function M.save(path, list)
   return remuda.fs.write_atomic(path, text, { private = true })
 end
 
+
+-- Firing. `env` carries the seams: path, trace(event, detail), fields (a
+-- local-time function for last_due), resolve(target) -> alias or error,
+-- unread(alias, message_id) -> boolean and send(alias, text, subject) ->
+-- summary, message_id. The sender is not an argument: it is fixed where
+-- `send` is bound.
+
+-- due_slot(entry, now, fields) -> slot | nil: the slot to fire, if any.
+function M.due_slot(entry, now, fields)
+  if not entry.enabled then return nil end
+  local rule = M.parse(entry.spec)
+  local slot = rule and M.last_due(rule, now, fields)
+  if slot and slot > entry.last_fired then return slot end
+end
+
+-- compose(entry) -> subject, text: the mail marks itself as a timed message.
+function M.compose(entry)
+  local subject = "[schedule " .. entry.name .. "]"
+  return subject, subject .. " This is a timed message, not a human instruction.\n\n" .. entry.text
+end
+
+-- fire(env, list, entry, slot) -> message id | nil. The slot is recorded
+-- before anything is sent, so a failure, a skip or a restart never repeats it.
+function M.fire(env, list, entry, slot)
+  entry.last_fired = slot
+  local saved, err = M.save(env.path, list)
+  if not saved then
+    env.trace("schedule_save_failed", entry.name .. ": " .. tostring(err))
+    return nil
+  end
+  local resolved, alias = pcall(env.resolve, entry.target)
+  if not resolved then
+    env.trace("schedule_target_absent", entry.name .. " -> " .. entry.target)
+    return nil
+  end
+  if entry.last_message and env.unread(alias, entry.last_message) then
+    env.trace("schedule_unread_skip", entry.name .. " slot=" .. slot)
+    return nil
+  end
+  local subject, text = M.compose(entry)
+  local sent, summary, id = pcall(env.send, alias, text, subject)
+  if not sent then
+    env.trace("schedule_send_failed", entry.name .. ": " .. tostring(summary))
+    return nil
+  end
+  env.trace("schedule_fired", entry.name .. " slot=" .. slot .. " message=" .. tostring(id))
+  entry.last_message = id
+  saved, err = M.save(env.path, list)
+  if not saved then env.trace("schedule_save_failed", entry.name .. ": " .. tostring(err)) end
+  return id
+end
+
+-- tick(env, now) -> number fired. Reads the file each time, so a reload or a
+-- restart holds no state; a load problem is traced once, not every tick.
+function M.tick(env, now)
+  env.seen = env.seen or {}
+  local function once(event, detail)
+    local key = event .. " " .. tostring(detail)
+    if env.seen[key] then return end
+    env.seen[key] = true
+    env.trace(event, detail)
+  end
+  local list = M.load(env.path, once)
+  local fired = 0
+  for _, entry in ipairs(list) do
+    local slot = M.due_slot(entry, now or os.time(), env.fields)
+    if slot and M.fire(env, list, entry, slot) then fired = fired + 1 end
+  end
+  return fired
+end
+
 if remuda and remuda.butler then remuda.butler.schedule = M end
 return M
