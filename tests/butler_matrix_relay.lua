@@ -6124,6 +6124,7 @@ local function approval_env(senders, run, extra)
   if not ok then error(err, 0) end
 end
 
+local reaction
 local function test_legacy_approval_reaction_works_in_messages_fallback()
   approval_env(nil, function(env)
     local applied = 0
@@ -6236,7 +6237,7 @@ end
 
 local function ts(offset_ms) return os.time() * 1000 + (offset_ms or 1000) end
 
-local function reaction(id, sender, target, key, when)
+function reaction(id, sender, target, key, when)
   return { type = "m.reaction", event_id = id, sender = sender, origin_server_ts = when or ts(),
     content = { ["m.relates_to"] = { rel_type = "m.annotation", event_id = target, key = key or CHECK } } }
 end
@@ -6618,7 +6619,7 @@ end
 local function with_approved_text_stubs(run)
   local old_type, old_key, old_policy, old_trace = remuda.type_text, remuda.key,
     remuda._butler_notify_policy, remuda._butler_session_trace
-  local old_ls, old_session = remuda.ls, remuda.session
+  local old_ls, old_session, old_bus = remuda.ls, remuda.session, remuda._butler_bus
   local typed, keys, traces = {}, {}, {}
   local safe = true
   remuda.type_text = function(session, bytes)
@@ -6630,13 +6631,14 @@ local function with_approved_text_stubs(run)
     return true
   end
   remuda._butler_notify_policy = function() return safe end
+  remuda._butler_bus = { agents = { butler = { id = "butler", session_name = "butler", session_start_marker = "butler-start" } } }
   remuda.ls = function() return { { name = "butler", alive = true, attached = false } } end
   remuda.session = function() return { attached = false } end
   remuda._butler_session_trace = function(kind, detail) traces[#traces + 1] = { kind, detail } end
   local ok, err = pcall(run, typed, keys, traces, function(value) safe = value end)
   remuda.type_text, remuda.key = old_type, old_key
   remuda._butler_notify_policy, remuda._butler_session_trace = old_policy, old_trace
-  remuda.ls, remuda.session = old_ls, old_session
+  remuda.ls, remuda.session, remuda._butler_bus = old_ls, old_session, old_bus
   if not ok then error(err, 0) end
 end
 
