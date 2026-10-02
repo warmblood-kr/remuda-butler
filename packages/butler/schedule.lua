@@ -182,7 +182,7 @@ end
 -- save(path, list) -> true | nil, err
 function M.save(path, list)
   if not path then return nil, "no mail root" end
-  local encoded, text = pcall(remuda.json.encode, { version = M.VERSION, schedules = list })
+  local encoded, text = pcall(remuda.json.encode, { version = M.VERSION, schedules = remuda.json.array(list) })
   if not encoded then return nil, text end
   local root = path:match("^(.*)/[^/]+$")
   if root then pcall(remuda.mkdir, root) end

@@ -11045,3 +11045,40 @@ fn butler_quota_is_unavailable_without_its_module_but_doctor_still_works() {
         String::from_utf8_lossy(&doctor.stderr)
     );
 }
+
+/// schedules.json goes through the real `remuda.json` encoder, which refuses an
+/// empty table that is not marked as an array or object. A fresh data home has
+/// no mail root yet.
+#[test]
+fn schedule_store_saves_and_loads_through_the_real_encoder_in_a_fresh_mail_root() {
+    let dir = scratch_dir("schedule-store");
+    let _daemon = Daemon::spawn(&dir);
+    let root = dir.join("fresh/butler/mail");
+    let lua = format!(
+        r#"
+        remuda.butler = remuda.butler or {{}}
+        remuda.exec('butler/schedule')
+        local s = remuda.butler.schedule
+        local path = {root:?} .. '/schedules.json'
+        local list = s.load(path)
+        local entry = {{ name = 'a', spec = '7 * * * *', target = 'butler', text = 'hi',
+          created_by = 'operator', created_at = 'x', last_fired = 0, enabled = true }}
+        local out = {{}}
+        local function step(name, ok, err) out[#out + 1] = name .. '=' .. tostring(ok) .. (ok and '' or ':' .. tostring(err)) end
+        step('add', s.add(list, entry))
+        step('save', s.save(path, list))
+        step('loaded', #s.load(path) == 1, 'wrong count')
+        step('remove', s.remove(list, 'a'))
+        step('save_empty', s.save(path, list))
+        local back, problem = s.load(path)
+        step('loaded_empty', #back == 0 and problem == nil, problem)
+        return table.concat(out, ' ')
+        "#
+    );
+    let out = remuda_timed(&dir, &["-s", "s", "-e", &lua]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "add=true save=true loaded=true remove=true save_empty=true loaded_empty=true"
+    );
+}

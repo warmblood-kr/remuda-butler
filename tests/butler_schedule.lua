@@ -136,6 +136,13 @@ remuda.mkdir = function(dir) made_dirs[#made_dirs + 1] = dir; os.execute("mkdir 
 ok("save into a missing mail root", schedule.save(fresh_root .. "/schedules.json", list))
 eq("the mail root was made", made_dirs[1], fresh_root)
 eq("the saved file loads", #schedule.load(fresh_root .. "/schedules.json", trace), 1)
+
+-- Removing the last entry saves an empty list.
+local emptied = {}
+assert(schedule.add(emptied, entry()))
+assert(schedule.remove(emptied, "north-star"))
+ok("an empty list saves", schedule.save(path, emptied))
+eq("an empty list loads empty", #schedule.load(path, trace), 0)
 eq("round trip is not a problem", problem, nil)
 eq("a good file leaves no trace", #traces, 0)
 
