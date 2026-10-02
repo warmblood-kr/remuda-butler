@@ -1149,7 +1149,8 @@ function remuda._butler_session_exited(name, info)
       local children = bus.agents[exited.parent].children
       for i = #children, 1, -1 do if children[i] == name then table.remove(children, i) end end
     end
-    remuda._butler_adopt_members(name, exited)
+    -- A lead that is about to relaunch under the same name keeps its members.
+    if not update_restart then remuda._butler_adopt_members(name, exited) end
   end
   if name == butler_name then
     _butler_session_trace("relaunching", name)
