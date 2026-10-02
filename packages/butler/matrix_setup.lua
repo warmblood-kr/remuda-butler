@@ -5,13 +5,13 @@ local system = assert(remuda._butler_system)
 local USAGE = [[Usage: remuda butler matrix setup [OPTIONS]
   --homeserver URL       Your Matrix server address, like https://matrix.example.org.
   --owner ID             Your Matrix user ID, like @alice:example.org (in Element: click your avatar, top left).
-  --password-file PATH   Use this chosen bot password; setup saves no copy of it. If omitted with --register, one is generated and saved privately.
+  --password-file PATH   Use this chosen bot password; setup saves no copy of it. If omitted with --register, one is generated and saved in the OS secure store, or in a private file when there is no store.
   --password-cmd PROG [ARG...]  Run this program and use the first line it prints as the bot password; no copy is saved. Must be the last option.
   --bot ID               The bot's Matrix user ID, like @butler-home:example.org (the account setup logs in as).
   --token-file PATH      Use an existing access token from this file instead of a password.
   --register             Create the bot account; prompt for its registration token if no file is given.
   --registration-token-file PATH  Optional file with the homeserver registration token (ask the server admin; this is not a bot access token).
-  --dir PATH             Save the private token and config files in this directory.
+  --dir PATH             Save the private token and config files in this directory; a generated password is saved there as a file too.
   --default              Save to the default live Butler config directory.
   --force                Replace existing token or config files.
   --all                  Also create the optional ALL-BUTLERS room.
@@ -372,15 +372,15 @@ local function resolve_outputs(options)
   if options.default and options.dir then return nil, "--default and --dir cannot be combined" end
 
   local password_path = token_path:match("^(.*)/[^/]+$") .. "/password"
-  local saves_password = saves_password(options)
-  if saves_password and (password_path == token_path or password_path == config_path) then
+  local keeps_password = saves_password(options)
+  if keeps_password and (password_path == token_path or password_path == config_path) then
     return nil, "Matrix password, token, and config output paths must be different"
   end
   if not options.force then
     local paths = { token_path, config_path }
     -- Only the file route can collide with an old password file: --dir always
     -- means the file, and so does a system with no OS secure store.
-    if saves_password and (dir or not system.credential_backend()) then
+    if keeps_password and (dir or not system.credential_backend()) then
       paths[#paths + 1] = password_path
     end
     for _, path in ipairs(paths) do
@@ -867,11 +867,11 @@ function matrix.setup_write(options, result)
     end
     return nil, message
   end
-  local saves_password = type(options) == "table" and saves_password(options)
+  local keeps_password = type(options) == "table" and saves_password(options)
   if type(options) ~= "table" or type(result) ~= "table"
     or type(result.token) ~= "string" or result.token == ""
     or type(result.user_id) ~= "string" or type(result.home_room) ~= "string"
-    or (saves_password
+    or (keeps_password
       and (type(result.password) ~= "string" or result.password == ""
         or type(options.password_path) ~= "string"))
     or (options.create_all and type(result.all_room) ~= "string")
@@ -885,11 +885,11 @@ function matrix.setup_write(options, result)
 
   -- A generated password goes to the OS secure store. --dir always means the
   -- file in that directory, and so does a store that is missing or says no.
-  local uses_store = saves_password and not options.output_dir and system.credential_backend() ~= nil
-  local writes_password = saves_password
+  local uses_store = keeps_password and not options.output_dir and system.credential_backend() ~= nil
+  local writes_password = keeps_password
   if not options.force then
     local checked = { options.token_path, options.config_path }
-    if saves_password and not uses_store then checked[#checked + 1] = options.password_path end
+    if keeps_password and not uses_store then checked[#checked + 1] = options.password_path end
     for _, path in ipairs(checked) do
       if file_exists(path) then return failure("Matrix output file already exists; pass --force") end
     end

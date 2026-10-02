@@ -318,7 +318,41 @@ environment (stdin is closed), so treat it as running with your own authority.
 Whoever made the password keeps it. Setup saves no copy of a password you
 supply, with `--password-cmd` or with `--password-file`, and says so: "The
 password you supplied was not copied." Only a password that setup generates
-(`--register` with neither option) is saved privately beside the token.
+(`--register` with neither option) is saved, and setup prints where.
+
+Where a generated password is saved:
+
+| System | Place |
+|---|---|
+| Windows 10/11 | Credential Manager |
+| macOS | login Keychain |
+| Linux | the private file `password` beside the token (for now) |
+
+- The entry is named `butler/matrix/<bot user ID>/password`, under the service
+  `remuda`. Setup prints: "Bot account password saved in the OS secure store
+  (BACKEND) as NAME".
+- If the store is missing or refuses (no desktop session, a locked keychain,
+  an older core), setup saves the password in the private file `password`
+  beside the token instead, mode 600 on Unix hosts, and prints "Bot account
+  password saved privately: PATH".
+- `--dir PATH` always uses that file in `PATH` and never touches the store.
+- A password from `--password-file` or `--password-cmd` is never put in the
+  store.
+- If setup fails after it stored the password, it deletes the entry again.
+- An old `password` file is left in place when the password goes to the store
+  or was supplied by you. Setup names the file; delete it if you no longer use
+  it. Only when the store refuses after the account was created does setup
+  replace that file, and it says so.
+
+Butler never reads the password back; it is kept for you. To read it by hand:
+
+- macOS: open Keychain Access, search for `remuda` (service `remuda`, account
+  `butler/matrix/<bot user ID>/password`), and choose Show Password.
+- Windows: open Control Panel > Credential Manager > Windows Credentials and
+  look for the entry `remuda:butler/matrix/<bot user ID>/password`.
+
+The store is not a sandbox. Any Lua that runs in the daemon image, including
+the MCP `run_script` tool, runs as the same program and can read the store.
 
 ```text
 remuda butler matrix setup ... --password-cmd op read op://Vault/Item/password
