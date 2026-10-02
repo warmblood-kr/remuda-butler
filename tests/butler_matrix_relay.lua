@@ -5159,6 +5159,15 @@ rx_tests = {
       remuda._butler_bus = { agents = {}, pending_tasks = {} }
       local dir, config_path = fixture("typed_lines=true\nshell_lines=true\n")
       local client, delivered = scripted_client(), {}
+      local since_at_send, request_json = {}, client.request_json
+      client.request_json = function(args, callback)
+        if tostring(args.path):find("/send/m.room.message/", 1, true) then
+          local file = io.open(config_path .. ".since", "r")
+          since_at_send[#since_at_send + 1] = file and file:read("a") or ""
+          if file then file:close() end
+        end
+        return request_json(args, callback)
+      end
       local relay = relay_module.new({ config_path = config_path, matrix = client,
         deliver = function(event) delivered[#delivered + 1] = event return true end })
       relay:start()
@@ -5188,6 +5197,41 @@ rx_tests = {
       assert(not delivered_ids["$status"] and not delivered_ids["$again"] and not delivered_ids["$help"],
         "status commands do not become Butler mail")
       assert(delivered_ids["$unknown"], "an unknown ?word stays on the ordinary mail path")
+      assert(#since_at_send == 1 and since_at_send[1]:find("$status", 1, true),
+        "the event id is persisted before the reply is sent")
+
+      local real_time, clock = os.time, os.time()
+      local function sync_at(offset, events)
+        os.time = function(value) if value then return real_time(value) end return clock + offset end
+        local pending
+        for index = #client.requests, 1, -1 do
+          if client.callbacks[index] and tostring(client.requests[index].path):find("/sync", 1, true) then
+            pending = index
+            break
+          end
+        end
+        assert(pending, "no pending sync")
+        for _, event in ipairs(events) do event.origin_server_ts = event.origin_server_ts + offset * 1000 end
+        local ok, err = pcall(client.complete, client, pending, { json = { next_batch = "s" .. offset, rooms = { join = {
+          ["!room:example.org"] = { timeline = { events = events } },
+        } } } })
+        os.time = real_time
+        assert(ok, err)
+      end
+      sync_at(11, { typed_line_event("$help-later", "?help") })
+      replies = room_messages()
+      assert(#replies == 2 and tostring(replies[2].body):find("this list", 1, true),
+        "a ?help past the window is answered, got " .. #replies .. " replies")
+      local threaded = typed_line_event("$in-thread", "?status")
+      threaded.content["m.relates_to"] = { rel_type = "m.thread", event_id = "$thread-root" }
+      sync_at(22, { threaded })
+      replies = room_messages()
+      assert(#replies == 3 and tostring(replies[3].body):find("$thread-root", 1, true)
+        and tostring(replies[3].body):find("$in-thread", 1, true), "a thread reply is answered inside its thread")
+      local old = typed_line_event("$old-status", "?status")
+      old.origin_server_ts = (clock - 400) * 1000
+      sync_at(33, { old, typed_line_event("$in-thread", "?status") })
+      assert(#room_messages() == 3, "an old or replayed ?status gets no reply")
       relay:stop()
       cleanup_fixture(dir, config_path)
 
