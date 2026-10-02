@@ -600,6 +600,24 @@ for _, name in ipairs({ "COM\194\185", "com\194\178.txt", "LPT\194\179", "lpt\19
 end
 weq("path_key: a superscript 4 is an ordinary name", permissions.path_key([[C:\proj\COM]] .. "\226\129\180", "windows"),
   "c:/proj/com\226\129\180")
+-- Windows drops a trailing dot or space from a name, so such a name is not what it says.
+for _, tail in ipairs({ [[a\.. ]], [[...\x]], [[name.]], [[name ]], [[sub.\f.txt]], [[.. .\x]] }) do
+  local path = [[C:\proj\]] .. tail
+  weq("path_key: " .. tail .. " is not resolved", select(2, permissions.path_key(path, "windows")), "unresolved")
+  weq("windows, a resolver answer ending a name in a dot or a space is refused: " .. tail,
+    select(2, permissions.file_for_caller([[C:\proj\in.txt]], { kind = "session", session = "w1" }, wcwd_of,
+      function(asked) return asked == [[C:\proj\in.txt]] and path or wrealpath(asked) end, "--file ", true, "windows")),
+    [[refused: --file C:\proj\in.txt cannot be resolved (a missing file, or realpath is unavailable)]]
+      .. "\n" .. [[Next: check that the file exists inside C:\proj]])
+end
+for _, base in ipairs({ "out.bin.", "out ", "out. ." }) do
+  weq("windows, -o with a name ending in a dot or a space: " .. base, select(2, wout([[C:\proj\]] .. base)),
+    [[refused: -o C:\proj\]] .. base .. " ends in a dot or a space, which Windows drops" .. WNEXT)
+  weq("windows, a default name ending in a dot or a space writes nothing: " .. base,
+    (permissions.output_for_caller(nil, base, { kind = "session", session = "w1" }, wcwd_of, wrealpath, wis_symlink, "windows")),
+    nil)
+end
+weq("posix, a name ending in a dot is an ordinary file", output_for("/w/m1/out.", SESSION), "/real/w/m1/out.")
 weq("path_key: posix is the path itself", permissions.path_key("/w/M1", "posix"), "/w/M1")
 weq("path_key: posix keeps a backslash as a character", permissions.path_key([[C:\proj]], "posix"), nil)
 if #wfailed > 0 then error(#wfailed .. " Windows path cases failed:\n" .. table.concat(wfailed, "\n"), 0) end
