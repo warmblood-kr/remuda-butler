@@ -85,13 +85,16 @@ for name, old in pairs({ ["no remuda.fs"] = false, ["remuda.fs without the words
   eq(on .. "is_symlink cannot tell", is_symlink([[C:\proj\in.txt]]), nil)
   eq(on .. "no shell command is run", #shell_calls, 0)
 end
-for name, result in pairs({ ["a failing realpath"] = { code = 1, stdout = "" }, ["a timed-out helper"] = { code = 0, timed_out = true, stdout = "/x\n" },
-  ["an empty answer"] = { code = 0, stdout = "\n" }, ["a helper that raises"] = raises, ["no result"] = function() return nil end,
+for name, result in pairs({ ["a failing helper"] = { code = 3, stdout = "/x\n" }, ["a timed-out helper"] = { code = 0, timed_out = true, stdout = "/x\n" },
+  ["a helper that raises"] = raises, ["no result"] = function() return nil end,
   ["test -L exit 2"] = { code = 2 } }) do
   local realpath, is_symlink = permissions.fs_helpers(nil, shell(result), "posix")
   eq("posix, old core, " .. name .. ": realpath is nil", realpath("/w/in.txt"), nil)
   eq("posix, old core, " .. name .. ": is_symlink cannot tell", is_symlink("/w/in.txt"), nil)
 end
+
+eq("posix, old core, an empty realpath answer is nil",
+  (permissions.fs_helpers(nil, shell({ code = 0, stdout = "\n" }), "posix"))("/w/in.txt"), nil)
 
 -- End to end with the confinement rule: a download into the working directory.
 local function download(path, real, links, platform, cwd)

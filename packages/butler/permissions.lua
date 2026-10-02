@@ -247,10 +247,37 @@ function permissions.output_for_caller(path, name, caller, cwd_of, realpath, is_
   return target
 end
 
--- The realpath and is_symlink helpers the checks above are handed.
--- Not written yet: these answer "cannot tell", so everything is refused.
+-- The realpath and is_symlink helpers the checks above are handed. Both answer
+-- nil when they cannot tell, and every nil is a refusal. `core_fs` is remuda.fs;
+-- `run(argv)` is remuda.process.run for a core without fs.realpath, where
+-- posix asks `realpath` and `test -L` and Windows has no answer.
 function permissions.fs_helpers(core_fs, run, platform)
-  return function() return nil end, function() return nil end
+  if type(core_fs) == "table" and type(core_fs.realpath) == "function" and type(core_fs.is_symlink) == "function" then
+    return function(path)
+      local ok, real = pcall(core_fs.realpath, path)
+      return ok and type(real) == "string" and real ~= "" and real or nil
+    end, function(path)
+      local ok, linked, why = pcall(core_fs.is_symlink, path)
+      if ok and type(linked) == "boolean" then return linked end
+      -- Nothing there, so no link there: a new file may be written. Any other nil cannot tell.
+      if ok and linked == nil and why == "not_found" then return false end
+      return nil
+    end
+  end
+  local function shell(argv)
+    if platform == "windows" then return nil end
+    local ok, result = pcall(run, argv)
+    return ok and type(result) == "table" and not result.timed_out and result or nil
+  end
+  return function(path)
+    local result = shell({ "realpath", path })
+    local real = result and result.code == 0 and type(result.stdout) == "string" and result.stdout:gsub("\n$", "")
+    return real and real ~= "" and real or nil
+  end, function(path)
+    local result = shell({ "test", "-L", path })
+    if result and (result.code == 0 or result.code == 1) then return result.code == 0 end
+    return nil
+  end
 end
 
 if type(remuda) == "table" then remuda._butler_permissions = permissions end
