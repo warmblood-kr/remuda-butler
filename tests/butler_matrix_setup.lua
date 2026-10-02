@@ -1111,13 +1111,19 @@ return function(matrix, pinned_hostname)
     prompt_specs[1].callback(leaked, prompt_error)
     assert(resolved and resolved.status == 1
       and resolved.stderr:find("Nothing was written.", 1, true)
-      and resolved.stderr:find("Next: rerun with --registration-token-file PATH", 1, true)
+      and (prompt_error == "cancelled" or prompt_error == "refused"
+        or resolved.stderr:find("Next: rerun with --registration-token-file PATH", 1, true))
       and not resolved.stderr:find(leaked, 1, true)
       and #requests == 0,
       "prompt errors should abort without writing or exposing the attempted token")
     if prompt_error == "not_a_terminal" then
       assert(resolved.stderr:find("needs a terminal", 1, true),
         "a non-terminal prompt failure should explain that a terminal is required")
+    elseif prompt_error == "cancelled" or prompt_error == "refused" then
+      assert(resolved.stderr:find("The registration token prompt was cancelled.", 1, true)
+        and resolved.stderr:find("Next: remuda butler matrix setup", 1, true)
+        and not resolved.stderr:find("--registration-token-file", 1, true),
+        "cancelling the registration prompt should point back to Matrix setup")
     end
     assert(read(error_output .. "/token") == nil and read(error_output .. "/config") == nil,
       "prompt errors must leave setup files unwritten")

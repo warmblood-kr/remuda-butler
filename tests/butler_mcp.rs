@@ -644,7 +644,7 @@ fn relay_deposit_produces_one_mail_notice() {
         t = 2
         remuda._butler_deliver_notices()
         local expected = 'Butler message ' .. delivered.id .. ' from ' .. sender
-          .. ' arrived. Read it: remuda butler inbox'
+          .. ' arrived. Read it: remuda butler inbox. Next: remuda butler reply ' .. delivered.id
         remuda.ls, remuda.capture, remuda.capture_styled, remuda.session =
           real_ls, real_capture, real_capture_styled, real_session
         return tostring(remuda._relay_notice_calls) .. '\n'
