@@ -334,8 +334,9 @@ Where a generated password is saved:
 - If the store is missing or refuses (no desktop session, a locked keychain,
   an older core), setup saves the password in the private file `password`
   beside the token instead, mode 600 on Unix hosts, and prints "Bot account
-  password saved privately: PATH" and "The OS secure store was not used:
-  REASON" (`unavailable`, `denied` or `no store`).
+  password saved privately: PATH". When a store is there but refused, it also
+  prints "The OS secure store was not used: REASON" (`unavailable` or
+  `denied`).
 - `--dir PATH` always uses that file in `PATH` and never touches the store.
 - A password from `--password-file` or `--password-cmd` is never put in the
   store.

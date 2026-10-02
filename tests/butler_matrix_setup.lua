@@ -1932,7 +1932,7 @@ return function(matrix, pinned_hostname)
 
     -- Store says no, or there is no store: today's private file, and the output says so.
     for _, reason in ipairs({ "unavailable: no desktop session for alice", "denied: alice refused", "old core" }) do
-      local class = reason == "old core" and "no store" or reason:match("^%a+")
+      local class = reason ~= "old core" and reason:match("^%a+") or nil
       if reason == "old core" then remuda.system, store_calls = nil, {} else fake_store(reason) end
       local file_password = register(bot, { "--default" })
       assert(resolved and resolved.status == 0, reason .. ": setup should fall back to the file: "
@@ -1944,7 +1944,9 @@ return function(matrix, pinned_hostname)
         and not resolved.stdout:find("OS secure store (", 1, true)
         and not resolved.stdout:find(file_password, 1, true),
         reason .. ": setup should say the password went to the file: " .. resolved.stdout)
-      assert(resolved.stdout:find("\nThe OS secure store was not used: " .. class .. "\n", 1, true)
+      -- No store at all (Linux today, an old core) is not worth a line.
+      assert((class and resolved.stdout:find("\nThe OS secure store was not used: " .. class .. "\n", 1, true)
+          or not class and not resolved.stdout:find("was not used", 1, true))
         and not resolved.stdout:find("alice refused", 1, true)
         and not resolved.stdout:find("desktop session", 1, true),
         reason .. ": setup should name only the reason class: " .. resolved.stdout)

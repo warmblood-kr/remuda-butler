@@ -891,8 +891,9 @@ function matrix.setup_write(options, result)
   -- file in that directory, and so does a store that is missing or says no.
   local uses_store = keeps_password and not options.output_dir and system.credential_backend() ~= nil
   local writes_password = keeps_password
-  -- Why the store was not used, as one fixed word: never the store's own text.
-  local store_refused = keeps_password and not options.output_dir and not uses_store and "no store" or nil
+  -- Why a store that is there was not used, as one fixed word ("unavailable" or
+  -- "denied"), never the store's own text. No store at all needs no line.
+  local store_refused
   if not options.force then
     local checked = { options.token_path, options.config_path }
     if keeps_password and not uses_store then checked[#checked + 1] = options.password_path end
@@ -907,7 +908,7 @@ function matrix.setup_write(options, result)
       stored, writes_password = { backend = backend, name = name }, false
     else
       local reason = tostring(backend)
-      store_refused = reason == "no store" and reason or reason:match("^denied") or "unavailable"
+      if reason ~= "no store" then store_refused = reason:match("^denied") or "unavailable" end
     end
   end
   -- The account exists by now. A store that refused must not cost its password,
