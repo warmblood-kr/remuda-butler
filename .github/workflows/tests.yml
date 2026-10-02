@@ -14,8 +14,6 @@ jobs:
     # (tests/rust_tests.sh). warmblood-kr/remuda-butler#20.
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      CARGO_TARGET_DIR: ${{ runner.temp }}/remuda-target
     steps:
       - uses: actions/checkout@v4
       - id: core-ref
@@ -38,6 +36,7 @@ jobs:
       - run: tests/rust_tests.sh
         env:
           CORE_REF: ${{ steps.core-ref.outputs.ref }}
+          CARGO_TARGET_DIR: ${{ runner.temp }}/remuda-target
 
   golden:
     # Guidance text (help, member AGENTS.md, welcome mail, member prompt) must stay
@@ -67,8 +66,6 @@ jobs:
     needs: rust
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      CARGO_TARGET_DIR: ${{ runner.temp }}/remuda-target
     steps:
       - uses: actions/checkout@v4
         with:
@@ -114,10 +111,13 @@ jobs:
         if: steps.paths.outputs.run == 'true'
         working-directory: remuda-core
         run: cargo build --release --bin remuda
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/remuda-target
       - name: Run Butler contract gate
         if: steps.paths.outputs.run == 'true'
         env:
           BUTLER_REPO: ${{ github.workspace }}
+          CARGO_TARGET_DIR: ${{ runner.temp }}/remuda-target
         run: |
           run_gate() {
             local log=$1 status
