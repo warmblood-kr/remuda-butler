@@ -20,6 +20,11 @@ assert(type(system.find_command) == "function")
 assert(type(system.mkdir_p) == "function")
 assert(type(system.home) == "function")
 assert(type(system.run_in) == "function")
+local trace_detail = system.trace_detail("path\nwith\tcontrols\0")
+assert(trace_detail == "path\\x0Awith\\x09controls\\x00", "trace details must escape control bytes: " .. trace_detail)
+local long_trace_detail = system.trace_detail(string.rep("x", 600))
+assert(#long_trace_detail == 512 and long_trace_detail:sub(-3) == "...",
+  "trace details must be capped at 512 bytes")
 
 -- Exercise the Windows backend on this host with injected environment and I/O.
 local windows = assert(system.windows, "Windows system table must be testable on this host")

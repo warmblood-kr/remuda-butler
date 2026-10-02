@@ -103,6 +103,23 @@ end
 local windows_selected = package.config:sub(1, 1) == "\\"
 local selected = windows_selected and windows or posix
 local system = { windows = windows, posix = posix }
+-- Trace details can contain paths copied from the environment. Keep one record
+-- to one line and bound the bytes written even when a path is unusually long.
+function system.trace_detail(value)
+  value = tostring(value or "")
+  local parts, size = {}, 0
+  for index = 1, #value do
+    local byte = value:byte(index)
+    local part = (byte < 32 or byte == 127) and string.format("\\x%02X", byte) or value:sub(index, index)
+    if size + #part > 509 then
+      parts[#parts + 1] = "..."
+      break
+    end
+    parts[#parts + 1] = part
+    size = size + #part
+  end
+  return table.concat(parts)
+end
 function system.platform() return windows_selected and "windows" or "posix" end
 function system.is_absolute(path)
   if type(path) ~= "string" then return false end
