@@ -64,6 +64,11 @@ local multi_line = "Heading\n\n" .. string.rep("wrapped-word ", 30) .. "\nLast l
 local wrapped_multi_line = remuda.butler.matrix.wrap_prompt_preface(multi_line)
 assert(wrapped_multi_line:match("^Heading\n\n"), "the shared preface wrapper must keep existing blank lines")
 assert(wrapped_multi_line:match("\nLast line$"), "the shared preface wrapper must keep existing line breaks")
+local indented = remuda.butler.matrix.wrap_prompt_preface("  " .. string.rep("word ", 80):gsub(" $", ""))
+for line in (indented .. "\n"):gmatch("([^\n]*)\n") do
+  assert(line:match("^  word") and #line <= 200, "a wrapped line keeps its indent on every line: " .. line)
+end
+assert(select(2, indented:gsub("\n", "")) >= 1, "the indented sample must wrap")
 local long_word = string.rep("x", 450)
 local wrapped_long_word = remuda.butler.matrix.wrap_prompt_preface(long_word)
 assert(wrapped_long_word:gsub("\n", "") == long_word, "a long word must be hard-split without losing characters")

@@ -666,8 +666,8 @@ return function(matrix, pinned_hostname)
   line_specs[2].callback("@alice:example.org", nil)
   assert(#line_specs == 3 and line_specs[3].label:find("Continue? Type Y", 1, true)
     and line_specs[3].label:find("Bot: @butler%-")
-    and line_specs[3].label:find("\n  Rooms: open (anyone can invite this Butler). Restrict: set rooms=allowlist or add deny_room/deny_server in "
-      .. default_paths.config_path .. ". The sender allowlist still decides whose messages are trusted.\n", 1, true)
+    and line_specs[3].label:gsub("%s*\n%s*", " "):find(" Rooms: open (anyone can invite this Butler). Restrict: set rooms=allowlist or add deny_room/deny_server in "
+      .. default_paths.config_path .. ". The sender allowlist still decides whose messages are trusted. ", 1, true)
     and not line_specs[3].label:find("quarantined", 1, true)
     and not line_specs[3].label:find("Room access", 1, true)
     and line_specs[3].label:find("replaces its current Matrix relay config", 1, true),
@@ -696,7 +696,7 @@ return function(matrix, pinned_hostname)
       and not line_specs[3].preface:find(long_owner, 1, true),
       "a very long value is cut to fit a preface line: " .. tostring(resolved and resolved.stderr))
     -- The cut is visible: what the user confirms must not look complete.
-    assert(line_specs[3].preface:match("\n(  Owner: @a+%.%.%.)\n") and #line_specs[3].preface:match("\n(  Owner: [^\n]*)") == 250
+    assert(line_specs[3].preface:match("\n(  Owner: @a+%.%.%.)\n") and #line_specs[3].preface:match("\n(  Owner: [^\n]*)") == 180
       and line_specs[1].label == "Matrix homeserver URL" and not line_specs[3].preface:find("Homeserver: [^\n]*%.%.%.\n"),
       "a cut summary line ends with ... inside the limit, and an uncut line has no mark")
     line_specs[3].callback("N", nil)

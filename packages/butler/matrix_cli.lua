@@ -365,25 +365,28 @@ function matrix.wrap_prompt_preface(text)
   local function wrap_line(source)
     if #source <= 200 then lines[#lines + 1] = source; return end
     if source:match("^%s*$") then lines[#lines + 1] = ""; return end
+    -- A wrapped line keeps its indent, on the continuation lines too.
+    local indent = source:match("^%s*"):sub(1, 8)
+    local room = 200 - #indent
     local line = ""
     local function flush()
-      if line ~= "" then lines[#lines + 1] = line; line = "" end
+      if line ~= "" then lines[#lines + 1] = indent .. line; line = "" end
     end
     for word in source:gmatch("%S+") do
-      while #word > 200 do
+      while #word > room do
         flush()
-        local cut = 200
+        local cut = room
         while cut > 0 do
           local byte = word:byte(cut + 1) or 0
           if byte < 0x80 or byte > 0xbf then break end
           cut = cut - 1
         end
-        lines[#lines + 1] = word:sub(1, cut)
+        lines[#lines + 1] = indent .. word:sub(1, cut)
         word = word:sub(cut + 1)
       end
       if line == "" then
         line = word
-      elseif #line + 1 + #word <= 200 then
+      elseif #line + 1 + #word <= room then
         line = line .. " " .. word
       else
         flush()
