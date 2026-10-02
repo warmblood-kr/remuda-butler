@@ -505,7 +505,18 @@ for name, path in pairs({
   weq("windows, " .. name .. ": refused by name, never resolved", resolved_devices, 0)
   weq("windows, " .. name .. ": nothing to open", out, nil)
   weq("windows, " .. name .. ": refusal", why, WDEVICE:format(path))
+  -- A person at a terminal is not confined, but opening a device can block the daemon.
+  local terminal_out, terminal_why = permissions.file_for_caller(path, { kind = "outside" }, wcwd_of, wrealpath,
+    "--file ", true, "windows")
+  weq("windows, terminal caller, " .. name .. ": nothing to open", terminal_out, nil)
+  weq("windows, terminal caller, " .. name .. ": refusal", terminal_why,
+    "refused: --file " .. path .. " names a device or a stream, not a file\nNext: pass a regular file")
 end
+weq("windows, terminal caller: any file path, as given",
+  permissions.file_for_caller([[D:\any\f.txt]], { kind = "outside" }, wcwd_of, wrealpath, "--file ", true, "windows"),
+  [[D:\any\f.txt]])
+weq("posix, terminal caller: a colon or a device-like name is an ordinary file",
+  permissions.file_for_caller("/tmp/nul:x", { kind = "outside" }, wcwd_of, wrealpath, "--file ", true, "linux"), "/tmp/nul:x")
 local WUNKNOWN = [[refused: --file C:\proj\in.txt: cannot identify the calling session's working directory]]
   .. "\nNext: run this from a Butler session, or from your own terminal"
 for name, session in pairs({
