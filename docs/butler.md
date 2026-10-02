@@ -140,6 +140,15 @@ and cannot be launched.
 that is corrupt, oversized or of an unknown version is treated as empty and
 traced; `add` and `rm` leave it untouched until it is fixed or removed.
 
+## Handoff letters
+
+A Butler that is about to stop or be replaced leaves its open items as a mail to
+`butler` whose first line is `HANDOFF`, written with `remuda butler send butler -`.
+The root Butler keeps its ULID across a relaunch, so the letter is still unread
+in its inbox, and its launch prompt tells it to read a `HANDOFF` mail before
+anything else. The convention has no verb of its own. Put decisions, open
+items and pointers in the letter (up to 8 KB), never secrets or tokens.
+
 ## Matrix commands and configuration
 
 Use `remuda butler matrix` for Matrix reads and writes. Options come before

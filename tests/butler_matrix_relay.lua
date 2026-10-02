@@ -5265,6 +5265,17 @@ rx_tests = {
         "a ?-prefixed non-command is still ordinary mail when the handler raises")
       sync_at(77, { typed_line_event("$raise-again", "?status") })
       assert(#delivered == 2 and #room_messages() == 0, "a real ?status under the same raise is consumed")
+      -- The raised error text reaches the session trace as one row: control
+      -- characters collapse and the length is capped.
+      local old_trace, rows = _G._butler_session_trace, {}
+      _G._butler_session_trace = function(event, detail) rows[#rows + 1] = { event = event, detail = detail } end
+      remuda.butler.status_command.handle = function() error("boom\n2026-10-02T00:00:00Z\tforged " .. string.rep("x", 200), 0) end
+      sync_at(88, { typed_line_event("$forge", "?status") })
+      _G._butler_session_trace = old_trace
+      assert(#rows == 1 and rows[1].event == "matrix_owner_line", "the status failure is traced once")
+      assert(not rows[1].detail:find("[\n\t]"), "a control character in the error text cannot forge a trace row")
+      assert(rows[1].detail:find("consumed:handler_error:boom 2026", 1, true), "the error text is kept with control characters collapsed")
+      assert(#rows[1].detail < 400, "the error text in the trace is capped")
       remuda.butler.status_command.handle = real_handle
       relay:stop()
       cleanup_fixture(dir, config_path)

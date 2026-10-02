@@ -757,6 +757,8 @@ local SYSTEM_PROMPT = "Early in this session, call remuda._butler_register_compa
   .. "Remuda-managed member with `remuda butler topic delegate NAME TASK`. "
   .. "Internal agent subagents are separate from Butler team members. Use `remuda butler sessions` to "
   .. "inspect members, `inbox` to read reports, and `send` for follow-up direction."
+  .. " If the inbox has a mail whose first line is `HANDOFF`, read it before anything else and take over its open items."
+remuda._butler_system_prompt = SYSTEM_PROMPT
 local BUTLER_GUIDANCE = [[# Butler
 
 You are Butler, manager of this household. You may create Remuda-managed team

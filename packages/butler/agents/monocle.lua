@@ -6,7 +6,7 @@ builders.monocle = function(spec)
   assert(spec.name:sub(1, 1) ~= "-", "Monocle agent name must not start with a dash")
   assert(not (type(spec.cwd) == "string" and spec.cwd:sub(1, 1) == "-"), "Monocle agent cwd must not start with a dash")
   assert(spec.model == nil or spec.model == "" or (type(spec.model) == "string" and spec.model:find("^[%w_:/][%w._:/-]*$")
-    and not spec.model:find("..", 1, true)),
+    and not spec.model:find("..", 1, true) and not ("/" .. spec.model .. "/"):find("/%.%/")),
     "Monocle agent model must be a plain token")
   local argv = { "monocle", "agent" }
   if type(spec.cwd) == "string" and spec.cwd ~= "" then

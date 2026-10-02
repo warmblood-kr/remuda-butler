@@ -11064,7 +11064,7 @@ fn butler_quota_is_unavailable_without_its_module_but_doctor_still_works() {
 /// empty table that is not marked as an array or object. A fresh data home has
 /// no mail root yet.
 #[test]
-fn schedule_store_saves_and_loads_through_the_real_encoder_in_a_fresh_mail_root() {
+fn butler_schedule_store_saves_and_loads_through_the_real_encoder_in_a_fresh_mail_root() {
     let dir = scratch_dir("schedule-store");
     let _daemon = Daemon::spawn(&dir);
     let root = dir.join("fresh/butler/mail");

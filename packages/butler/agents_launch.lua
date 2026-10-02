@@ -110,7 +110,9 @@ local function choose(candidates, opts, done)
       end)()) or entry.argv
       or (entry.build and entry.build(spec))
     if build_error or type(argv) == "function" then
-      attempt.reason, attempt.detail = "spawn_error", one_line(build_error or "agent argv builder failed")
+      attempt.reason = "spawn_error"
+      -- A refused spec names its reason, without the builder's file:line prefix.
+      attempt.detail = one_line((tostring(build_error or "agent argv builder failed"):gsub("^[^\n]-:%d+: ", "")))
       start_next(); return
     end
     local builder_override = remuda._butler_agent_builders[id]

@@ -37,7 +37,7 @@ for field, bad in pairs({ name = "-x", cwd = "-w", model = "-m" }) do
   spec[field] = bad
   assert(not pcall(build, spec), "Monocle builder must refuse a dash-leading " .. field)
 end
-for _, bad in ipairs({ "a b", "a\nb", "m;x", "..", ".x", "a/../b" }) do
+for _, bad in ipairs({ "a b", "a\nb", "m;x", "..", ".x", "a/../b", "a/./b", "a/.", "a//./b" }) do
   assert(not pcall(build, { name = "m1", model = bad }), "Monocle builder must refuse model " .. bad)
 end
 for _, good in ipairs({ "claude-opus-4-5", "gpt-6-luna", "anthropic/claude-3.5" }) do
@@ -135,7 +135,9 @@ eq("resolved launch argv", capture.argv, {
 })
 
 -- A refused spec is a launch failure: nothing reaches remuda.new.
-for field, bad in pairs({ name = "-x", model = "-m" }) do
+local reasons = { name = "name must not start with a dash", cwd = "cwd must not start with a dash",
+  model = "model must be a plain token" }
+for field, bad in pairs({ name = "-x", cwd = "-w", model = "-m" }) do
   local spawned, result = 0, nil
   remuda.new = function() spawned = spawned + 1; return "x" end
   remuda._butler_choose({ "monocle" }, {
@@ -149,6 +151,9 @@ for field, bad in pairs({ name = "-x", model = "-m" }) do
   assert(spawned == 0, "a refused " .. field .. " must not reach remuda.new")
   assert(result and result.name == nil and result.attempts[1].reason == "spawn_error",
     "a refused " .. field .. " must fail the launch as spawn_error")
+  local detail = result.attempts[1].detail
+  assert(detail:find(reasons[field], 1, true) and not detail:find("%.lua:%d+:"),
+    "a refused " .. field .. " must name its reason in the detail: " .. tostring(detail))
 end
 
 -- A core without remuda.contribute registers through the legacy path; its rows
