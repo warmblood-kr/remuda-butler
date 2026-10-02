@@ -130,6 +130,7 @@ remuda.exec("butler/matrix")
 -- The root Butler's permission rule and the write-only-when-changed helper
 -- live in permissions.lua; these are the file helpers it is handed.
 remuda.exec("butler/permissions")
+remuda.exec("butler/guidance_blocks")
 local permissions = remuda._butler_permissions
 -- Core's remuda.fs.realpath and is_symlink where it has them; on an older core
 -- the posix shell helpers, and no answer (so a refusal) on Windows.
@@ -159,8 +160,9 @@ local butler_fs = {
     if private then return nil, "atomic writes are unavailable on this core" end
     local f, why = io.open(path, "w")
     if not f then return nil, why end
-    f:write(text)
-    f:close()
+    local wrote, werr = f:write(text)
+    local closed, cerr = f:close()
+    if not wrote or not closed then return nil, werr or cerr or "write failed" end
     return true
   end,
 }
@@ -482,7 +484,6 @@ local choose = chooser.choose
 local configured_agent_order = chooser.configured_agent_order
 local readiness_chain_budget = chooser.readiness_chain_budget
 local setup_telemetry = chooser.setup_telemetry
-local write_agent_guidance = chooser.write_agent_guidance
 local codex_update_complete = chooser.codex_update_complete
 -- Member launch and topic creation live in launch.lua.
 remuda._butler_launch_config = { bus = bus,
@@ -959,11 +960,36 @@ local function arm_compaction_schedule(kind)
   if root_permissions_settled(kind) then remuda._butler_register_compaction_schedule(); return end
   _butler_session_trace("compaction_schedule_unarmed", "root permission step did not settle for " .. tostring(kind))
 end
+-- The root AGENTS.md carries Butler's text in a marked block; text outside the
+-- markers is the user's and stays. A trace line names a problem once per file.
+local guidance_traced = {}
+-- AGENTS.md may hold the user's text: it is written atomically or not at all
+-- (an old core without remuda.fs.write_atomic leaves it as it is).
+local guidance_fs = setmetatable({
+  write = function(path, text)
+    if not (remuda.fs and type(remuda.fs.write_atomic) == "function") then
+      return nil, "atomic writes are unavailable on this core"
+    end
+    return butler_fs.write(path, text)
+  end,
+}, { __index = butler_fs })
+local function write_root_guidance(root, body)
+  local path = root .. "/AGENTS.md"
+  local _, report, err = remuda._butler_guidance_blocks.sync(path, { { id = "butler", body = body } }, guidance_fs)
+  local outcome = err and "guidance_not_written" or report[1].outcome
+  local event = ({ damaged = "guidance_markers_damaged", duplicated = "guidance_markers_damaged",
+    symlink = "guidance_symlink_refused", ["mixed-eol"] = "guidance_mixed_eol", dropped = "guidance_block_dropped" })[outcome]
+  if err then event = outcome end
+  if event and not guidance_traced[event .. path] then
+    guidance_traced[event .. path] = true
+    _butler_session_trace(event, one_line(err or path))
+  end
+end
 local function launch_butler()
   local requested_name = butler_name or remuda._butler_initial_name
   if butler_session_cwd then
     remuda.mkdir(butler_session_cwd)
-    write_agent_guidance(butler_session_cwd, BUTLER_GUIDANCE, true)
+    write_root_guidance(butler_session_cwd, BUTLER_GUIDANCE)
   end
   local stale_session = session_exists(requested_name)
   if remuda._butler_selected_agent and stale_session then

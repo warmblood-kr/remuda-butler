@@ -83,6 +83,36 @@ sleep 7
 rm "$ROOT/AGENTS.md"
 wait_for "a deleted AGENTS.md was not written again" test -s "$ROOT/AGENTS.md"
 
+echo "== guidance_block_keeps_outside_text, symlink_refused"
+grep -qF "<!-- BEGIN remuda-butler:managed id=butler -->" "$ROOT/AGENTS.md" || fail "AGENTS.md has no managed block"
+printf '\n| my | table |\n' >>"$ROOT/AGENTS.md"
+respawn
+grep -qF "| my | table |" "$ROOT/AGENTS.md" || fail "text outside the block was lost on relaunch"
+mv "$ROOT/AGENTS.md" "$ROOT/AGENTS.real"
+printf 'drift\n' >"$ROOT/AGENTS.real"
+ln -s "$ROOT/AGENTS.real" "$ROOT/AGENTS.md"
+BEFORE_REAL=$(mtime "$ROOT/AGENTS.real")
+sleep 7
+[[ -L $ROOT/AGENTS.md ]] || fail "the symlinked AGENTS.md was replaced"
+[[ $(mtime "$ROOT/AGENTS.real") == "$BEFORE_REAL" ]] || fail "the symlinked AGENTS.md was written through"
+[[ $(cat "$ROOT/AGENTS.real") == drift ]] || fail "the symlinked AGENTS.md target was changed"
+rm "$ROOT/AGENTS.md" "$ROOT/AGENTS.real"
+wait_for "AGENTS.md was not written again after the symlink case" test -s "$ROOT/AGENTS.md"
+
+echo "== no_atomic_write_leaves_the_root_agents_md"
+# A core without remuda.fs.write_atomic leaves AGENTS.md as it is (one trace line)
+# and never falls back to a truncating write; with it back, the block is refreshed.
+TRACE=$XDG_CONFIG_HOME/remuda/session-trace.log
+printf '<!-- BEGIN remuda-butler:managed id=butler -->\nstale body\n<!-- END remuda-butler:managed id=butler -->\nhand text\n' >"$ROOT/AGENTS.md"
+cp "$ROOT/AGENTS.md" "$SCRATCH/agents.stale"
+lua 'remuda._saved_write_atomic = remuda.fs.write_atomic; remuda.fs.write_atomic = nil' >/dev/null
+respawn
+cmp -s "$ROOT/AGENTS.md" "$SCRATCH/agents.stale" || fail "AGENTS.md was rewritten without write_atomic: $(cat "$ROOT/AGENTS.md")"
+[[ $(grep -c 'guidance_not_written' "$TRACE") == 1 ]] || fail "guidance_not_written is not traced once: $(cat "$TRACE")"
+lua 'remuda.fs.write_atomic = remuda._saved_write_atomic' >/dev/null
+respawn
+{ grep -qF 'hand text' "$ROOT/AGENTS.md" && ! grep -qF 'stale body' "$ROOT/AGENTS.md"; } || fail "AGENTS.md was not refreshed once write_atomic is back"
+
 echo "== respawn_readds_removed_rule; the real remuda.json keeps the meaning of everything else"
 # The one write goes through remuda.json: keys come back sorted and pretty-printed;
 # {} and [] stay distinct, null stays null, allow keeps its order and gains the rule last.
