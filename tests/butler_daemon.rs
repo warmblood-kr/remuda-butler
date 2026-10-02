@@ -1644,7 +1644,7 @@ fn butler_lifecycle_reload_replaces_hooks_and_schedules_and_rolls_back() {
     "#;
     let initial = eval(&path, counts);
     assert!(
-        initial == "1|4|1|1|1|1|29|shell-lines,status-commands,typed-lines"
+        initial == "1|4|1|1|1|1|30|shell-lines,status-commands,typed-lines"
             || initial == "1|4|1|1|1|1|-1|",
         "unexpected Butler lifecycle registrations: {initial}"
     );
@@ -4039,7 +4039,7 @@ fn butler_matrix_lua_relay_has_no_process_child_after_daemon_sigkill() {
     let path = daemon::socket_path_in(&dir, "s");
     eval(&path, &format!(
         "remuda._butler_matrix_config = {{ token_path={}, config_path={} }}; \
-         remuda.exec('butler/matrix_request'); remuda.exec('butler/typed_lines'); remuda.exec('butler/status_command'); \
+         remuda.exec('butler/matrix_request'); remuda.exec('butler/typed_lines'); remuda.exec('butler/approve_text'); remuda.exec('butler/status_command'); \
          remuda.exec('butler/matrix_relay'); \
          assert(remuda.butler.matrix.relay.start(remuda._butler_matrix_config))",
         lua_raw_string(&token), lua_raw_string(&config)));

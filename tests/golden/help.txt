@@ -13,6 +13,7 @@ remuda butler — coordination for managed agents
   remuda butler schedule list
   remuda butler schedule add <name> "<M H * * *>" <text> | - [--to SESSION]
   remuda butler schedule rm <name>
+  remuda butler approve-text request SESSION - | on|off
   remuda butler launch <claude|codex|monocle> [name] [--model M]
   remuda butler topic new <name> [--template T] [--agent A] [--model M]
   remuda butler topic delegate <name> [--agent A] [--leader L] [--model M] <task...>
