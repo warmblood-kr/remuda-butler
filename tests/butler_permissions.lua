@@ -654,6 +654,31 @@ for _, path in ipairs({ [[sub\in.txt]], "C:in.txt", [[\proj\in.txt]] }) do
   weq("windows, relative " .. path .. ": only the working directory was resolved", table.concat(asked, " "), [[C:\proj C:\proj]])
 end
 weq("a terminal caller's relative path is still given back", file_for("in.txt", { kind = "outside" }), "in.txt")
-if #wfailed > 0 then error(#wfailed .. " Windows path cases failed:\n" .. table.concat(wfailed, "\n"), 0) end
+-- A resolver's answer is used only when it is fully resolved: a `.` or `..` left
+-- in it would make the prefix test lie. Core never answers so; a shell helper might.
+real["/w/m1/escape.txt"] = "/real/w/m1/../../etc/passwd"; real["/w/m1/dot.txt"] = "/real/w/m1/./in.txt"
+real["/w/m1/odd"] = "/real/w/m1/../x"; real["/w/m1/dotdir"] = "/real/w/m1/sub/."
+for _, path in ipairs({ "/w/m1/escape.txt", "/w/m1/dot.txt" }) do
+  local out, why = file_for(path, SESSION)
+  weq("posix, a resolver answer with a dot component, " .. path .. ": nothing to open", out, nil)
+  weq("posix, a resolver answer with a dot component, " .. path .. ": refusal", why,
+    "refused: --file " .. path .. " cannot be resolved (a missing file, or realpath is unavailable)"
+      .. "\nNext: check that the file exists inside /w/m1")
+end
+for _, path in ipairs({ "/w/m1/odd/out.bin", "/w/m1/dotdir/out.bin" }) do
+  local out, why = output_for(path, SESSION)
+  weq("posix, a resolved parent with a dot component, " .. path .. ": nothing to write", out, nil)
+  weq("posix, a resolved parent with a dot component, " .. path .. ": refusal", why,
+    "refused: -o " .. path .. " is outside this session's working directory /w/m1\nNext: pass -o with a path inside /w/m1")
+end
+weq("path_key: a posix path with '..' says why", select(2, permissions.path_key("/w/m1/../x", "posix")), "unresolved")
+weq("path_key: a posix name that only starts with dots is ordinary", permissions.path_key("/w/..m1/...", "posix"), "/w/..m1/...")
+-- Controls: what the CALLER writes may still hold `..`; the resolver settles it. The same for a recorded working directory.
+weq("posix, '..' in the caller's path is still resolved", file_for("/w/m1/sub/../in.txt", SESSION), "/real/w/m1/in.txt")
+real["/w/x/../m1"] = "/real/w/m1"
+weq("posix, a working directory recorded with '..' is still a known place",
+  permissions.file_for_caller("/w/m1/in.txt", { kind = "session", session = "dotted" },
+    function() return "/w/x/../m1" end, realpath, "--file ", true), "/real/w/m1/in.txt")
+if #wfailed > 0 then error(#wfailed .. " path cases failed:\n" .. table.concat(wfailed, "\n"), 0) end
 
 print(("butler_permissions ok: %d cases"):format(count))
