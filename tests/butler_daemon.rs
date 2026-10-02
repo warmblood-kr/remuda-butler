@@ -4888,12 +4888,12 @@ fn butler_topic_delegate_checks_claude_trust_path_and_selection() {
           remuda.key = function(name, key)
             log[#log + 1] = name .. " key " .. key
             if name == "allowed-topic" and key == "<down>" then
-              screens[name] = {{{allowed_yes_selected:?}}}
+              screens[name] = {allowed_yes_selected:?}
             elseif name == "allowed-topic" and key == "RET" then
               screens[name] = rule .. "\n❯ \n" .. rule
             elseif name == "outside-topic" and key == "<down>" then
               -- Deliberately leave No selected after Down in this unexpected UI.
-              screens[name] = {{{outside_dialog:?}}}
+              screens[name] = {outside_dialog:?}
             end
           end
           remuda.type_text = function(name, text) log[#log + 1] = name .. " type " .. text end
