@@ -47,7 +47,9 @@ local sessions_config = {
   registered_agent_kind = function(kind) return entries[kind] end, call_callback = call_callback,
 }
 remuda._butler_sessions_config = sessions_config
-remuda._butler_telemetry_for = function() return { model = "m" } end
+local hooks = {}
+remuda._butler_telemetry_for = function(agent) return { model = "m", hook_state = hooks[agent].state, hook_at = hooks[agent].at } end
+setmetatable(hooks, { __index = function() return {} end })
 
 local screens, captures, now = {}, 0, 100
 remuda._butler_status_now = function() return now end
@@ -106,4 +108,38 @@ now = now + 2
 screens.c = "x\nesc to interrupt"
 check(remuda.session_detail({ name = "c" }):match("^(.-) · "), "working", "status refreshes after the window")
 check(captures, 2, "a listing after 2s captures again")
+
+-- A session name reused by a new agent within the window never shows the old status.
+bus.agents.r = { kind = "claude", id = "A" }
+screens.r = claude_idle
+captures = 0
+check(remuda.session_detail({ name = "r" }):match("^(.-) · "), "idle", "first agent")
+bus.agents.r = { kind = "claude", id = "B" }
+screens.r = "x\nesc to interrupt"
+check(remuda.session_detail({ name = "r" }):match("^(.-) · "), "working", "reused name shows the new agent")
+check(captures, 2, "reused name is probed again within the window")
+
+-- Hook state: fresh wins, stale or absent falls back to the screen.
+local function hooked(state, age, screen)
+  seq = seq + 1
+  local name = "h" .. seq
+  local agent = { kind = "claude" }
+  bus.agents[name], screens[name] = agent, screen
+  hooks[agent] = { state = state, at = age and (now - age) or nil }
+  captures = 0
+  return remuda.session_detail({ name = name }):match("^(.-) · ")
+end
+check(hooked("working", 5, claude_idle), "working", "fresh working hook beats an idle screen")
+check(captures, 0, "a fresh working hook needs no capture")
+check(hooked("working", 601, claude_idle), "idle", "stale working hook falls back to the screen")
+check(hooked("needs you", 5, claude_idle), "needs you", "fresh needs-you hook beats an idle screen")
+check(hooked("needs you", 5, "some other screen"), "needs you", "fresh needs-you hook beats an unknown screen")
+check(hooked("idle", 5, "x\nesc to interrupt"), "working", "a working screen beats an idle hook")
+check(hooked("needs you", 5, "x\nesc to interrupt"), "working", "a working screen beats a needs-you hook")
+check(hooked("idle", 3601, "x\nesc to interrupt"), "working", "stale idle hook falls back to the screen")
+check(hooked("idle", 3601, "some other screen"), "other", "stale idle hook falls back to an unknown screen")
+check(hooked("idle", 3599, "some other screen"), "idle", "idle hook is trusted for an hour")
+check(hooked(nil, nil, claude_idle), "idle", "no hook file falls back to the screen")
+check(hooked("working", -50, claude_idle), "idle", "a hook from the future is ignored")
+check(hooked("bogus", 5, claude_idle), "idle", "unknown hook word is ignored")
 print("ok")

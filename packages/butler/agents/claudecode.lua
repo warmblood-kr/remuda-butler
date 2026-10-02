@@ -8,17 +8,27 @@ telemetry.claude = {
     return { status_path = status_path, settings_path = support.status_settings(status_path) }
   end,
   read = function(state)
+    -- The hook-written `.state` file: "<word> <unix time>", one fixed word.
+    local hook_state, hook_at
+    local hook = state.status_path and io.open(state.status_path .. ".state", "r")
+    if hook then
+      local word, at = (hook:read("*l") or ""):match("^(%a+ ?%a*) (%d+)$")
+      hook:close()
+      if word == "working" or word == "idle" or word == "needs you" then hook_state, hook_at = word, tonumber(at) end
+    end
     local status = state.status_path and io.open(state.status_path, "r")
-    if not status then return {} end
+    if not status then return { hook_state = hook_state, hook_at = hook_at } end
     local line = status:read("*l")
     local second_line = status:read("*l")
     status:close()
-    if not line then return {} end
+    if not line then return { hook_state = hook_state, hook_at = hook_at } end
     local model, used, window, percent = line:match(
       "^MODEL:([A-Za-z0-9_.%-?]+) CTX:([0-9?]+) CTXWIN:([0-9?]+) CTXPCT:([0-9?]+)$"
     )
-    if not model then return {} end
+    if not model then return { hook_state = hook_state, hook_at = hook_at } end
     return {
+      hook_state = hook_state,
+      hook_at = hook_at,
       model = model,
       context_used = used,
       context_window = window,

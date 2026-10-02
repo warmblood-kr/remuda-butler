@@ -182,9 +182,16 @@ local status_path = remuda._butler_status_path
 local function status_settings(path)
   local settings_path = path .. ".settings.json"
   local settings = assert(io.open(settings_path, "w"))
+  -- Hooks feed the per-session status word (see status_hook.lua); their
+  -- output is discarded and they always exit 0 so Claude never sees them.
+  -- Claude runs hook commands through sh, or PowerShell on Windows.
+  local quiet = system.platform() == "windows" and " *> $null; exit 0" or " >/dev/null 2>&1; exit 0"
+  local hook = '{"hooks":[{"type":"command","command":' .. json_quote(
+    "remuda -s " .. shell_quote(server) .. " --stdin butler status-hook " .. shell_quote(path) .. quiet
+  ) .. '}]}'
   settings:write('{"statusLine":{"type":"command","command":'
     .. json_quote("remuda -s " .. shell_quote(server) .. " --stdin butler statusline " .. shell_quote(path))
-    .. '}}')
+    .. '},"hooks":{"UserPromptSubmit":[' .. hook .. '],"Stop":[' .. hook .. '],"Notification":[' .. hook .. ']}}')
   settings:close()
   return settings_path
 end
@@ -602,6 +609,7 @@ remuda._butler_commands_config = { current_agent = current_agent, OPERATOR = OPE
 }
 remuda.exec("butler/schedule")
 remuda.exec("butler/schedule_cli")
+remuda.exec("butler/status_hook")
 remuda.exec("butler/commands")
 
 remuda.tool{
