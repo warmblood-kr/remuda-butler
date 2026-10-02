@@ -173,19 +173,25 @@ end
 -- Both are keys. The trailing slash keeps a sibling like CWDx outside.
 local function inside(real, root) return real ~= nil and root ~= nil and real:sub(1, #root + 1) == root .. "/" end
 local DEVICE = " names a device or a stream, not a file"
+local RELATIVE = " is not an absolute path"
 
 -- A file to READ. Returns the path to open, or nil and the refusal.
 function permissions.file_for_caller(path, caller, cwd_of, realpath, flag, pipe, platform)
   local what = "refused: " .. flag .. one_line(path)
   -- A device is refused by its name, before anything opens or resolves it, and
   -- for a terminal caller too: opening a pipe blocks the daemon.
-  local key, why = nil, select(2, path_key(path, platform))
+  local key, why = path_key(path, platform)
   if type(caller) == "table" and caller.kind == "outside" then
     if why == "device" then return nil, what .. DEVICE .. "\nNext: pass a regular file" end
     return path
   end
   local cwd, root = session_cwd(caller, cwd_of, realpath, platform)
   if not cwd then return nil, what .. UNKNOWN end
+  -- A relative path would resolve against the daemon's directory, not the caller's.
+  if not key and not why then
+    return nil, what .. RELATIVE .. "\nNext: pass the full path of a file inside " .. one_line(cwd)
+  end
+  key = nil
   local ok, real = true, nil
   if why ~= "device" then ok, real = pcall(realpath, path) end
   if ok and real then key, why = path_key(real, platform) end
@@ -221,7 +227,9 @@ function permissions.output_for_caller(path, name, caller, cwd_of, realpath, is_
   local separator = windows and "\\" or "/"
   local parent, base = root, name
   if path then
-    if select(2, path_key(path, platform)) == "device" then return refuse(DEVICE) end
+    local given, why = path_key(path, platform)
+    if why == "device" then return refuse(DEVICE) end
+    if not given and not why then return refuse(RELATIVE) end
     local dir
     dir, base = path:match(windows and "^(.*)[/\\]([^/\\]*)$" or "^(.*)/([^/]*)$")
     if not dir or base == "" or base == "." or base == ".." then return refuse(" has no file name") end
@@ -245,6 +253,39 @@ function permissions.output_for_caller(path, name, caller, cwd_of, realpath, is_
   local linked = is_symlink(target)
   if linked ~= false then return refuse(linked and " is a symlink" or " cannot be checked for a symlink") end
   return target
+end
+
+-- The realpath and is_symlink helpers the checks above are handed. Both answer
+-- nil when they cannot tell, and every nil is a refusal. `core_fs` is remuda.fs;
+-- `run(argv)` is remuda.process.run for a core without fs.realpath, where
+-- posix asks `realpath` and `test -L` and Windows has no answer.
+function permissions.fs_helpers(core_fs, run, platform)
+  if type(core_fs) == "table" and type(core_fs.realpath) == "function" and type(core_fs.is_symlink) == "function" then
+    return function(path)
+      local ok, real = pcall(core_fs.realpath, path)
+      return ok and type(real) == "string" and real ~= "" and real or nil
+    end, function(path)
+      local ok, linked, why = pcall(core_fs.is_symlink, path)
+      if ok and type(linked) == "boolean" then return linked end
+      -- Nothing there, so no link there: a new file may be written. Any other nil cannot tell.
+      if ok and linked == nil and why == "not_found" then return false end
+      return nil
+    end
+  end
+  local function shell(argv)
+    if platform == "windows" then return nil end
+    local ok, result = pcall(run, argv)
+    return ok and type(result) == "table" and not result.timed_out and result or nil
+  end
+  return function(path)
+    local result = shell({ "realpath", path })
+    local real = result and result.code == 0 and type(result.stdout) == "string" and result.stdout:gsub("\n$", "")
+    return real and real ~= "" and real or nil
+  end, function(path)
+    local result = shell({ "test", "-L", path })
+    if result and (result.code == 0 or result.code == 1) then return result.code == 0 end
+    return nil
+  end
 end
 
 if type(remuda) == "table" then remuda._butler_permissions = permissions end

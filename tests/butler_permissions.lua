@@ -620,6 +620,40 @@ end
 weq("posix, a name ending in a dot is an ordinary file", output_for("/w/m1/out.", SESSION), "/real/w/m1/out.")
 weq("path_key: posix is the path itself", permissions.path_key("/w/M1", "posix"), "/w/M1")
 weq("path_key: posix keeps a backslash as a character", permissions.path_key([[C:\proj]], "posix"), nil)
+-- A relative path would be resolved against the daemon's directory, not the caller's:
+-- it is refused before anything resolves it, even where the answer would land inside.
+real["in.txt"] = "/real/w/m1/in.txt"; real["sub/in.txt"] = "/real/w/m1/in.txt"; real["sub"] = "/real/w/m1/sub"
+real["./in.txt"] = "/real/w/m1/in.txt"; real["."] = "/real/w/m1"
+for _, path in ipairs({ "in.txt", "sub/in.txt", "./in.txt" }) do
+  resolved = {}
+  local out, why = file_for(path, SESSION)
+  weq("posix, relative --file " .. path .. ": nothing to open", out, nil)
+  weq("posix, relative --file " .. path .. ": refusal", why,
+    "refused: --file " .. path .. " is not an absolute path\nNext: pass the full path of a file inside /w/m1")
+  weq("posix, relative --file " .. path .. ": only the working directory was resolved", table.concat(resolved, " "), "/w/m1")
+  resolved = {}
+  out, why = output_for(path, SESSION)
+  weq("posix, relative -o " .. path .. ": nothing to write", out, nil)
+  weq("posix, relative -o " .. path .. ": refusal", why,
+    "refused: -o " .. path .. " is not an absolute path\nNext: pass -o with a path inside /w/m1")
+  weq("posix, relative -o " .. path .. ": only the working directory was resolved", table.concat(resolved, " "), "/w/m1")
+end
+wreal[ [[sub\in.txt]] ] = [[C:\proj\sub\in.txt]]; wreal["sub"] = [[C:\proj\sub]]; wreal[ [[C:in.txt]] ] = [[C:\proj\in.txt]]
+wreal[ [[\proj\in.txt]] ] = [[C:\proj\in.txt]]; wreal[ [[\proj]] ] = [[C:\proj]]; wreal["C:"] = [[C:\proj]]
+for _, path in ipairs({ [[sub\in.txt]], "C:in.txt", [[\proj\in.txt]] }) do
+  local asked = {}
+  local function spy(target) asked[#asked + 1] = target; return wrealpath(target) end
+  local out, why = permissions.file_for_caller(path, { kind = "session", session = "w1" }, wcwd_of, spy, "--file ", true, "windows")
+  weq("windows, relative --file " .. path .. ": nothing to open", out, nil)
+  weq("windows, relative --file " .. path .. ": refusal", why,
+    "refused: --file " .. path .. " is not an absolute path\n" .. [[Next: pass the full path of a file inside C:\proj]])
+  out, why = permissions.output_for_caller(path, "matrix-MEDIA", { kind = "session", session = "w1" }, wcwd_of, spy,
+    wis_symlink, "windows")
+  weq("windows, relative -o " .. path .. ": nothing to write", out, nil)
+  weq("windows, relative -o " .. path .. ": refusal", why, "refused: -o " .. path .. " is not an absolute path" .. WNEXT)
+  weq("windows, relative " .. path .. ": only the working directory was resolved", table.concat(asked, " "), [[C:\proj C:\proj]])
+end
+weq("a terminal caller's relative path is still given back", file_for("in.txt", { kind = "outside" }), "in.txt")
 if #wfailed > 0 then error(#wfailed .. " Windows path cases failed:\n" .. table.concat(wfailed, "\n"), 0) end
 
 print(("butler_permissions ok: %d cases"):format(count))

@@ -128,6 +128,11 @@ remuda.exec("butler/matrix")
 -- live in permissions.lua; these are the file helpers it is handed.
 remuda.exec("butler/permissions")
 local permissions = remuda._butler_permissions
+-- Core's remuda.fs.realpath and is_symlink where it has them; on an older core
+-- the posix shell helpers, and no answer (so a refusal) on Windows.
+local realpath, is_symlink = permissions.fs_helpers(remuda.fs, function(argv)
+  return remuda.process.run({ argv = argv, timeout = 5 })
+end, system.platform())
 local butler_fs = {
   read = function(path)
     local f = io.open(path, "rb")
@@ -136,15 +141,8 @@ local butler_fs = {
     f:close()
     return text
   end,
-  -- ponytail: asks `test -L` (an argument vector, no shell). nil when it cannot
-  -- tell (no `test`, as on Windows; an old core): then nothing is written.
-  is_symlink = function(path)
-    local ok, result = pcall(function() return remuda.process.run({ argv = { "test", "-L", path }, timeout = 5 }) end)
-    if not ok or type(result) ~= "table" or result.timed_out then return nil end
-    if result.code == 0 then return true end
-    if result.code == 1 then return false end
-    return nil
-  end,
+  -- nil when it cannot tell: then nothing is written.
+  is_symlink = is_symlink,
   json = remuda.json,
   -- A private directory where the core can make one (as paths.lua's create_fresh_directory does).
   mkdir = function(path)
@@ -876,11 +874,6 @@ local function session_launch_cwd(session)
     end
   end
   return matches == 1 and cwd or nil
-end
-local function realpath(target)
-  local result = remuda.process.run({ argv = { "realpath", target }, timeout = 5 })
-  local resolved = result.code == 0 and not result.timed_out and (result.stdout or ""):gsub("\n$", "")
-  return resolved and resolved ~= "" and resolved or nil
 end
 function remuda._butler_file_for_caller(path, flag, pipe)
   return permissions.file_for_caller(path, core_caller(), session_launch_cwd, realpath, flag, pipe, system.platform())
