@@ -34,6 +34,7 @@ eq("argv without cwd", build({ name = "m1" }), {
 })
 
 remuda._butler_agent_support.mcp_config_path = function() return "mcp.json" end
+remuda._butler_agent_support.status_settings = function(path) return path .. ".settings" end
 remuda._butler_claude_autocompact_supported = false
 local claude_without_cwd = remuda._butler_agent_builders.claude({ name = "c", system_prompt = "p" })
 local claude_with_cwd = remuda._butler_agent_builders.claude({ name = "c", cwd = "/work", system_prompt = "p" })
@@ -149,3 +150,29 @@ assert(remuda._butler_telemetry_adapters.monocle == nil, "Monocle should not hav
 local quota = dofile("packages/butler/quota.lua")
 local quota_text = quota.render({ at = 1790829600, monocle = { mode = "subscription" } })
 assert(not quota_text:find("monocle:", 1, true), "quota should not add a Monocle row")
+
+-- Exercise the real launch spec closure for Claude and Monocle. The fake
+-- chooser captures its spec and completes as a failed attempt, so no process
+-- is started and launch setup remains isolated from external CLIs.
+local launch_specs = {}
+local real_choose = remuda._butler_chooser.choose
+remuda._butler_chooser.choose = function(candidates, opts, done)
+  local kind = candidates[1]
+  launch_specs[kind] = opts.spec(kind)
+  done(nil, nil, { { kind = kind, reason = "not_found" } })
+end
+remuda.butler.launch_failure_lines = function() return { "not launched" } end
+remuda._butler_launch_config = {
+  bus = { agents = {}, identities = {}, identity_ids = {}, tokens = {}, unread_seeded = {} },
+  valid_child_name = function(name) return name end,
+  register_identity = function(name, kind) return { id = "id-" .. name, kind = kind } end,
+  identity_record = function() end,
+  next_token = function() return "token" end,
+}
+_G._butler_session_trace = function() end
+dofile("packages/butler/launch.lua")
+for _, kind in ipairs({ "claude", "monocle" }) do
+  remuda._butler_launch_impl.launch_agent(kind, kind .. "-spec", "/work", nil, nil)
+  assert(launch_specs[kind].cwd == "/work", kind .. " launch spec should carry the launch cwd")
+end
+remuda._butler_chooser.choose = real_choose
