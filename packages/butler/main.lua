@@ -459,6 +459,7 @@ remuda._butler_agent_support = {
 remuda.exec("butler/telemetry")
 remuda.exec("butler/agents/claudecode")
 remuda.exec("butler/agents/codex")
+remuda.exec("butler/agents/monocle")
 remuda.exec("butler/prompt")
 -- The launch chooser, member guidance and startup modals live in agents_launch.lua.
 local startup_action_safe
@@ -604,8 +605,8 @@ remuda.exec("butler/commands")
 
 remuda.tool{
   name = "butler_launch",
-  about = "Launch a Claude Code or Codex child agent with this Butler's shared MCP mailbox.",
-  args = { kind = "Agent kind: claude or codex.", name = "Optional session name.", cwd = "Optional working directory.", model = "Optional model override." },
+  about = "Launch a Claude Code, Codex, or Monocle child agent with this Butler's shared MCP mailbox.",
+  args = { kind = "Agent kind: claude, codex, or monocle.", name = "Optional session name.", cwd = "Optional working directory.", model = "Optional model override." },
   needs = { "kind" },
   run = function(a, caller)
     local parent = caller_leader(caller)

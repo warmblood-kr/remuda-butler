@@ -233,7 +233,7 @@ command(15, "agents", "  remuda butler agents [--all]", function(args)
   if #args == 1 then return registry_list(false) end
   if #args == 2 and args[2] == "--all" then return registry_list(true) end
 end)
-command(20, "launch", "  remuda butler launch <claude|codex> [name] [--model M]", function(args, caller)
+command(20, "launch", "  remuda butler launch <claude|codex|monocle> [name] [--model M]", function(args, caller)
   if not args[2] then return nil end
   local registered = false
   for _, row in ipairs(contributions("butler.agent")) do if row.id == args[2] then registered = true end end
