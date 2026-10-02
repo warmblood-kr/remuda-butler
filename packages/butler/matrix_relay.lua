@@ -4,6 +4,8 @@ local matrix = assert(remuda.butler and remuda.butler.matrix,
   "load butler/matrix_request before butler/matrix_relay")
 local typed_lines = assert(remuda.butler.typed_lines,
   "load butler/typed_lines before butler/matrix_relay")
+local approve_text = assert(remuda.butler.approve_text,
+  "load butler/approve_text before butler/matrix_relay")
 local status_command = assert(remuda.butler.status_command,
   "load butler/status_command before butler/matrix_relay")
 -- Trust words are bound at load (main.lua execs matrix_request before
@@ -316,6 +318,8 @@ local function approval_answer_fields(ev)
     return { rel.event_id }, verdict
   end
   if ev.type ~= "m.room.message" then return {}, nil end
+  if content.msgtype ~= "m.text" or content.format ~= nil or content.formatted_body ~= nil
+      or content["m.new_content"] ~= nil then return {}, nil end
   local thread_root, in_reply_to = relation_fields(content)
   local targets = {}
   if in_reply_to then targets[#targets + 1] = in_reply_to end
@@ -325,10 +329,8 @@ local function approval_answer_fields(ev)
   -- generated line for exact approval words while leaving delivery untouched.
   local prefix_end = body:match("^> [^\n]*()\n")
   if prefix_end then body = body:sub(prefix_end + 1) end
-  body = body:match("^%s*(.-)%s*$") or ""
-  body = body:lower()
-  local verdict = body == "yes" and "approve" or body == "no" and "deny" or nil
-  return targets, verdict
+  local verdict, explicit_id = approve_text.reply_verdict(body)
+  return targets, verdict, explicit_id
 end
 
 local function mentions(content, body, mxid)
@@ -1555,10 +1557,19 @@ function relay.new(options)
           local content = type(ev.content) == "table" and ev.content or {}
           local approval_record, approval_verdict
           if approval then
-            local targets, verdict = approval_answer_fields(ev)
+            local targets, verdict, explicit_id = approval_answer_fields(ev)
             if verdict then
+              if explicit_id and type(approval.for_id) == "function" then
+                local candidate = approval.for_id(explicit_id)
+                if candidate and (candidate.kind ~= "approve_text" or cfg.approve_text == true) then
+                  approval_record, approval_verdict = candidate, verdict
+                end
+              end
               for _, target in ipairs(targets) do
-                approval_record = approval.for_event(target)
+                approval_record = approval_record or approval.for_event(target)
+                if approval_record and approval_record.kind == "approve_text" and cfg.approve_text ~= true then
+                  approval_record = nil
+                end
                 if approval_record then approval_verdict = verdict; break end
               end
             end
@@ -1622,14 +1633,24 @@ function relay.new(options)
             if event_id ~= "" then add_processed(state, event_id) end
             if cursor then state.since = cursor end
             local origin_ms = tonumber(ev.origin_server_ts)
-            local counts = approval_verdict ~= nil and (room_id or cfg.room) == cfg.home_room
-              and type(ev.sender) == "string" and cfg.allowed_senders[ev.sender]
-              and member_kind(ev.sender, cfg) == "HUMAN"
-              and origin_ms ~= nil and tonumber(approval_record.created_ms) ~= nil
-              and origin_ms >= tonumber(approval_record.created_ms) - 30000
+            local counts
+            if approval_record.kind == "approve_text" then
+              counts = approval_verdict ~= nil
+                and approve_text.owner_event_allowed(ev, approval_record, cfg, live_sync, room_id or cfg.room)
+                and member_kind(ev.sender, cfg) == "HUMAN"
+            else
+              counts = live_sync == true and event_id ~= "" and approval_verdict ~= nil
+                and (room_id or cfg.room) == cfg.home_room
+                and type(ev.sender) == "string" and cfg.allowed_senders[ev.sender]
+                and member_kind(ev.sender, cfg) == "HUMAN"
+                and origin_ms ~= nil and tonumber(approval_record.created_ms) ~= nil
+                and origin_ms >= tonumber(approval_record.created_ms) - 30000
+            end
             if counts then
-              if approval_record.status == "open" then
-                pcall(approval.answer, approval_record.event_id, approval_verdict, ev.sender)
+              if approval_record.status == "open"
+                  or (approval_record.kind == "approve_text" and approval_record.status == "approved"
+                    and approval_verdict == "approve") then
+                pcall(approval.answer, approval_record.event_id, approval_verdict, ev.sender, ev.event_id)
               elseif approval_record.status == "expired" then
                 pcall(approval.reply, approval_record, "Expired.")
               else
@@ -2094,10 +2115,11 @@ function relay.new(options)
       local refreshed = read_config(config_path)
       if refreshed then
         cfg.rooms, cfg.room_how = refreshed.rooms, refreshed.room_how
-        cfg.typed_lines, cfg.shell_lines = refreshed.typed_lines, refreshed.shell_lines
+        cfg.typed_lines, cfg.shell_lines, cfg.approve_text = refreshed.typed_lines,
+          refreshed.shell_lines, refreshed.approve_text
         cfg.status_commands = refreshed.status_commands
       else
-        cfg.typed_lines, cfg.shell_lines = false, false
+        cfg.typed_lines, cfg.shell_lines, cfg.approve_text = false, false, false
       end
     end
     if path == SYNC_PATH and state.since == nil then

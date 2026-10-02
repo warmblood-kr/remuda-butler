@@ -645,6 +645,21 @@ remuda.tool{
   end,
 }
 remuda.tool{
+  name = "butler_approve_text",
+  about = "Register exact prepared text for owner approval before it is typed into a Butler session.",
+  args = { session = "Target Butler session name.", text = "Exact text to register, up to 8 KiB." },
+  needs = { "session", "text" },
+  run = function(a, caller)
+    local feature = remuda.butler and remuda.butler.approve_text
+    if not feature or not feature.target_session_allowed(a.session) then
+      error("Unknown Butler session: " .. tostring(a.session), 0)
+    end
+    local id, why = feature.request(a.session, a.text, caller_name(caller))
+    if not id then error(tostring(why or "Could not register prepared text"), 0) end
+    return id
+  end,
+}
+remuda.tool{
   name = "butler_inbox",
   about = "Drain this agent's Butler inbox and return its queued messages in arrival order.",
   run = function(_, caller)

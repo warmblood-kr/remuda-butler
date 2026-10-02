@@ -26,6 +26,9 @@ assert(posted == "posted " .. requested_id, "request renderer receives its gener
 post_callback({ event_id = "$approval" })
 assert(state.approvals[requested_id].event_id == "$approval" and saved > 0,
   "posted approval is persisted with its event")
+local terminal_ok, terminal_why = approval.answer(requested_id, "approve", "operator (terminal)")
+assert(not terminal_ok and terminal_why:find("live Matrix thread", 1, true),
+  "terminal verbs cannot approve prepared text")
 local answered = approval.answer("$approval", "approve", "@alice:example.org", "$answer-1")
 assert(answered and state.approvals[requested_id].status == "approved"
   and state.approvals[requested_id].answer_event_id == "$answer-1",
@@ -35,6 +38,9 @@ assert(approval.reapply_approved() == 0 and attempts == 1,
 assert(approval.answer("$approval", "approve", "@alice:example.org", "$answer-2")
   and state.approvals[requested_id].status == "applied" and attempts == 2,
   "a later owner approval event retries approved-but-undelivered text")
+local duplicate_ok = approval.answer("$approval", "approve", "@alice:example.org", "$answer-3")
+assert(not duplicate_ok and attempts == 2 and state.approvals[requested_id].status == "applied",
+  "a delivered request is one-shot")
 
 local second_id
 approval.request({ kind = "approve_text", key = "text-2", asker = "agent-1",
@@ -42,4 +48,11 @@ approval.request({ kind = "approve_text", key = "text-2", asker = "agent-1",
   on_id = function(id) second_id = id end }, function() end)
 post_callback({ event_id = "$approval-2" })
 assert(second_id and state.approvals[second_id], "request registration remains persistent")
+local rate_error
+approval.request({ kind = "approve_text", key = "text-3", asker = "agent-1",
+  summary = "third", data = {}, rate_limit_per_window = 2, rate_window_s = 600,
+  on_id = function() error("rate-limited request must not get an id") end },
+  function(id, why) assert(id == nil); rate_error = why end)
+assert(rate_error and rate_error:find("Too many prepared text registrations", 1, true),
+  "registration limit counts recent requests per agent")
 print("ok - retryable approval storage cases")
