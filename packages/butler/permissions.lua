@@ -220,9 +220,10 @@ function permissions.output_for_caller(path, name, caller, cwd_of, realpath, is_
   local what = "refused: " .. (path and ("-o " .. one_line(path)) or "download")
   if type(caller) == "table" and caller.kind == "outside" then
     -- Not confined, but a pipe opened for writing blocks the daemon as well.
-    if select(2, path_key(path, platform)) == "device" then
-      return nil, what .. DEVICE .. "\nNext: pass -o with a regular file path"
-    end
+    local given, why = path_key(path, platform)
+    if why == "device" then return nil, what .. DEVICE .. "\nNext: pass -o with a regular file path" end
+    -- A relative path would land in the daemon's directory, not the caller's.
+    if path ~= nil and not given and not why then return nil, what .. RELATIVE .. "\nNext: pass -o with the full path" end
     return path
   end
   local cwd, root = session_cwd(caller, cwd_of, realpath, platform)
