@@ -201,8 +201,14 @@ end
 -- the target is refused. Returns the path to write (nil for an outside caller
 -- without -o: the old default), or nil and the refusal.
 function permissions.output_for_caller(path, name, caller, cwd_of, realpath, is_symlink, platform)
-  if type(caller) == "table" and caller.kind == "outside" then return path end
   local what = "refused: " .. (path and ("-o " .. one_line(path)) or "download")
+  if type(caller) == "table" and caller.kind == "outside" then
+    -- Not confined, but a pipe opened for writing blocks the daemon as well.
+    if select(2, path_key(path, platform)) == "device" then
+      return nil, what .. DEVICE .. "\nNext: pass -o with a regular file path"
+    end
+    return path
+  end
   local cwd, root = session_cwd(caller, cwd_of, realpath, platform)
   if not cwd then return nil, what .. UNKNOWN end
   local function refuse(why) return nil, what .. why .. "\nNext: pass -o with a path inside " .. one_line(cwd) end
