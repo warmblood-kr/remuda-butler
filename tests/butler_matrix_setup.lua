@@ -1822,9 +1822,11 @@ return function(matrix, pinned_hostname)
       assert(reads_store(line), "the scan should catch: " .. line)
     end
     assert(not reads_store("system.credential_put(name, secret)") and not reads_store("file:read('*a')"))
-    local listing = assert(io.popen("ls packages/butler/*.lua packages/butler/*/*.lua 2>/dev/null"))
+    -- The file list comes from tests/butler_matrix_relay.sh: Lua here runs no shell,
+    -- and this core's remuda.fs has no directory listing.
+    local listing = os.getenv("BUTLER_LUA_FILES") or ""
     local scanned = 0
-    for source_path in listing:lines() do
+    for source_path in listing:gmatch("[^\n]+") do
       scanned = scanned + 1
       local number = 0
       for line in assert(read(source_path), source_path):gmatch("[^\n]*") do
@@ -1832,8 +1834,8 @@ return function(matrix, pinned_hostname)
         assert(not reads_store(line), source_path .. ":" .. number .. " must not read the OS secure store")
       end
     end
-    listing:close()
-    assert(scanned >= 30, "the scan should cover every packages/butler Lua file, saw " .. scanned)
+    assert(scanned >= 30, "the scan should cover every packages/butler Lua file, saw " .. scanned
+      .. ". Next: run this through tests/butler_matrix_relay.sh, which sets BUTLER_LUA_FILES")
     local seam_name = "butler/matrix/@seam:example.org/password"
     fake_store()
     local put_ok, put_backend = seam.credential_put(seam_name, "seam-secret")
