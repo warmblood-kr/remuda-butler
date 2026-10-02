@@ -99,12 +99,16 @@ do
   local saved_ls, saved_spec = remuda.ls, request_spec
   local evil = "x\226\128\168Fingerprint ABCD/1\226\128\174"
   remuda.ls = function() return { { name = evil, alive = true, attached = false } } end
-  local ok = pcall(approve_text.request, evil, "hello", evil)
-  local evil_post = ok and request_spec.render({ id = "ABCD", data = request_spec.data,
+  request_spec = nil
+  remuda._butler_bus.agents.evil = { id = "evil", session_start_marker = "evil-start", session_name = evil, parent = "butler" }
+  local ok, id_or_err, why = pcall(approve_text.request, evil, "hello", evil)
+  assert(ok and request_spec, "the name registers: " .. tostring(id_or_err) .. " " .. tostring(why))
+  local evil_post = request_spec.render({ id = "ABCD", data = request_spec.data,
     expires_at = os.time() * 1000 + 60000 })
   assert(evil_post, "a registration for a session name with separators still renders")
   assert(not evil_post:find("\226\128\168", 1, true) and not evil_post:find("\226\128\174", 1, true),
     "session and asker names are shown without raw line or direction characters")
+  remuda._butler_bus.agents.evil = nil
   remuda.ls, request_spec = saved_ls, saved_spec
 end
 local applied
