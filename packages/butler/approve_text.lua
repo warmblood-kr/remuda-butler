@@ -94,7 +94,7 @@ local function request(session, text, asker, ttl_s, done)
   request_counter = request_counter + 1
   local key = tostring(os.time()) .. ":" .. tostring(request_counter)
   local requested_id
-  local request_data = { text = prepared.registered_text, posted_text = prepared.posted_text,
+  local request_data = { text = prepared.registered_text, registered_text = prepared.registered_text, posted_text = prepared.posted_text,
     session = session, bytes = prepared.bytes, owner = nil }
   local bounded_ttl = math.max(1, math.min(MAX_TTL, tonumber(ttl_s) or DEFAULT_TTL))
   local result = approval.request({ kind = "approve_text", key = key,

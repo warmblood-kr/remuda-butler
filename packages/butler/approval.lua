@@ -141,7 +141,7 @@ local function apply_approved(rec)
     if completed then return end
     completed = true
     applying[rec.id] = nil
-    rec.status = ok and "applied" or "failed"
+    rec.status = ok == "retry" and "approved" or ok and "applied" or "failed"
     if err then rec.error = tostring(err) end
     persist()
   end
@@ -154,7 +154,7 @@ function approval.reapply_approved()
   if not attached then return 0 end
   local count = 0
   for _, rec in pairs(attached.state.approvals or {}) do
-    if type(rec) == "table" and rec.status == "approved" then
+    if type(rec) == "table" and rec.status == "approved" and rec.kind ~= "approve_text" then
       apply_approved(rec)
       count = count + 1
     end
@@ -200,17 +200,33 @@ function approval.request(request, done)
     return nil
   end
   local open_total, open_for_asker = 0, 0
+  local registered_in_window = 0
+  local now = math.floor(os.time() * 1000)
+  local rate_limit = tonumber(request.rate_limit_per_window)
+  local rate_window_ms = math.max(1, tonumber(request.rate_window_s) or 600) * 1000
   for _, rec in pairs(attached.state.approvals or {}) do
     if type(rec) == "table" and rec.status == "open" then
       open_total = open_total + 1
       if rec.asker == asker then open_for_asker = open_for_asker + 1 end
     end
+    if rate_limit and type(rec) == "table" and rec.kind == request.kind and rec.asker == asker
+        and tonumber(rec.created_ms) and tonumber(rec.created_ms) >= now - rate_window_ms then
+      registered_in_window = registered_in_window + 1
+    end
   end
   for _, item in pairs(pending_requests) do
     open_total = open_total + 1
     if item.asker == asker then open_for_asker = open_for_asker + 1 end
+    if rate_limit and item.kind == request.kind and item.asker == asker
+        and tonumber(item.created_ms) and item.created_ms >= now - rate_window_ms then
+      registered_in_window = registered_in_window + 1
+    end
   end
-  if open_for_asker >= 3 or open_total >= 5 then
+  if rate_limit and registered_in_window >= rate_limit then
+    finish(nil, "Too many prepared text registrations. Next: wait 10 minutes, then retry.")
+    return nil
+  end
+  if open_for_asker >= (tonumber(request.max_open_for_asker) or 3) or open_total >= 5 then
     finish(nil, "Too many open approval requests (3 per agent, 5 total). Next: wait for an answer or expiry (10 min), then retry.")
     return nil
   end
@@ -232,7 +248,17 @@ function approval.request(request, done)
       .. " minutes. ❌ or no denies.",
     "Request " .. id,
     "or: remuda butler approve " .. id }, "\n")
-  pending = { id = id, asker = asker, callbacks = { finish } }
+  if type(request.on_id) == "function" then pcall(request.on_id, id) end
+  if type(request.render) == "function" then
+    local rendered, value = pcall(request.render, rec)
+    if not rendered or type(value) ~= "string" then
+      finish(nil, "Could not prepare approval message: " .. tostring(value))
+      return nil
+    end
+    text = value
+  end
+  pending = { id = id, asker = asker, kind = request.kind, created_ms = created_ms,
+    callbacks = { finish } }
   pending_requests[token] = pending
   local function complete(request_id, why)
     if pending_requests[token] ~= pending then return end
@@ -261,7 +287,7 @@ function approval.request(request, done)
   return handle
 end
 
-function approval.answer(id_or_event, verdict, who)
+function approval.answer(id_or_event, verdict, who, event_id)
   if not attached then return nil, "Matrix relay is not running. Next: remuda butler matrix status" end
   if verdict ~= "approve" and verdict ~= "deny" then return nil, "Invalid approval answer." end
   approval.sweep()
@@ -271,12 +297,20 @@ function approval.answer(id_or_event, verdict, who)
       or candidate.event_id == id_or_event) then rec = candidate; break end
   end
   if not rec then return nil, "No such request." end
+  if rec.kind == "approve_text" and who == "operator (terminal)" then
+    return nil, "Prepared text can only be approved by the owner in its live Matrix thread."
+  end
+  if rec.kind == "approve_text" and rec.status == "approved" and verdict == "approve" then
+    rec.answered_by, rec.answer_event_id = who, event_id
+    apply_approved(rec)
+    return true, nil, rec
+  end
   if rec.status ~= "open" then
     return nil, rec.status == "expired" and "Expired." or "Already answered.", rec
   end
   local now = math.floor(os.time() * 1000)
-  rec.status, rec.answered_by, rec.answered_at = verdict == "approve" and "approved" or "denied", who,
-    now
+  rec.status, rec.answered_by, rec.answered_at, rec.answer_event_id =
+    verdict == "approve" and "approved" or "denied", who, now, event_id
   persist()
   if verdict == "approve" then
     apply_approved(rec)
@@ -291,8 +325,10 @@ function approval.sweep(now)
   if not attached then return 0 end
   now = tonumber(now) or math.floor(os.time() * 1000)
   local count = 0
-  for _, rec in ipairs(open_records(attached.state)) do
-    if tonumber(rec.expires_at) and now >= rec.expires_at then
+  for _, rec in pairs(attached.state.approvals or {}) do
+    local expirable = type(rec) == "table" and (rec.status == "open"
+      or (rec.status == "approved" and rec.kind == "approve_text"))
+    if expirable and tonumber(rec.expires_at) and now >= rec.expires_at then
       rec.status, rec.answered_at = "expired", now
       local callback = handlers[rec.kind] and handlers[rec.kind].expire
       if callback then callback(rec) end
