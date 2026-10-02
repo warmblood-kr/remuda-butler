@@ -35,7 +35,9 @@ local function reject(reason)
   return false, reason
 end
 
-function M.gate(state, event, now, cfg)
+-- The checks every owner-authored Matrix line passes whatever its prefix:
+-- sender, age, event id and replay, plain one-line text. Returns true, nil, body.
+function M.accept(state, event, now, cfg)
   state = type(state) == "table" and state or {}
   cfg = type(cfg) == "table" and cfg or {}
   if type(event) ~= "table" then return reject("invalid_event") end
@@ -68,6 +70,16 @@ function M.gate(state, event, now, cfg)
   if #body > MAX_LINE_BYTES or body:find("[\r\n]") or has_forbidden_character(body) then
     return reject("invalid_line")
   end
+
+  return true, nil, body
+end
+
+function M.gate(state, event, now, cfg)
+  state = type(state) == "table" and state or {}
+  cfg = type(cfg) == "table" and cfg or {}
+  local accepted, reason, body = M.accept(state, event, now, cfg)
+  if not accepted then return reject(reason) end
+  now = tonumber(now)
 
   local form, line, payload
   if body:sub(1, 3) == "!!!" then return reject("invalid_prefix")
