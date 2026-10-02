@@ -62,7 +62,7 @@ jobs:
 
   contract:
     name: butler-contract
-    if: github.event_name == 'pull_request'
+    if: ${{ always() && github.event_name == 'pull_request' }}
     needs: rust
     runs-on: ubuntu-latest
     timeout-minutes: 30
