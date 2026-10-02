@@ -155,15 +155,18 @@ end
 
 -- Decides one Matrix event. Returns matched, text: matched is true when the
 -- event is a status command that must not reach mail or a session; text is
--- nil when the sender is inside the reply window. The third result is a commit
+-- nil when the sender is inside the reply window. An unmatched event returns
+-- false, nil, reason. The third result is a commit
 -- function the caller runs once the reply is durable: it opens the sender's
 -- reply window. scope = { live, room_allowed, rate }.
 function M.handle(state, event, now, cfg, scope)
-  if cfg.status_commands ~= true or scope.live ~= true or scope.room_allowed ~= true then return false end
-  local accepted, _, body = accept(state, event, now, cfg)
-  if not accepted then return false end
+  if cfg.status_commands ~= true then return false, nil, "switch_off" end
+  if scope.live ~= true then return false, nil, "not_live" end
+  if scope.room_allowed ~= true then return false, nil, "room_not_allowed" end
+  local accepted, reason, body = accept(state, event, now, cfg)
+  if not accepted then return false, nil, reason end
   local command = M.parse(body)
-  if not command then return false end
+  if not command then return false, nil, "unknown_command" end
   if not M.rate_check(scope.rate, event.sender, now) then return true end
   local function commit() scope.rate[event.sender] = now end
   if command == "help" then return true, M.help_text(), commit end
