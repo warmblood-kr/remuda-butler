@@ -54,6 +54,9 @@ assert(startup.ready(idle_screen), "Monocle is ready when the last non-empty scr
 assert(not startup.ready(working_screen), "a tool line is not a ready prompt")
 assert(startup.working(working_screen), "a non-ready final line means Monocle is working")
 assert(not startup.working(idle_screen), "the ready prompt is not working")
+assert(startup.ready("banner\n❯ done\n\n  \n"), "trailing blank lines after the prompt stay ready")
+assert(not startup.ready("❯ task\n⏵ bash {}"), "an earlier glyph line is not the ready prompt")
+assert(not startup.ready("banner\n⏵ run ❯ now"), "a mid-line glyph is not the ready prompt")
 
 -- Load the declarative built-in registry as the daemon does, but keep launch
 -- resolution in-process so this test never needs the monocle executable.
