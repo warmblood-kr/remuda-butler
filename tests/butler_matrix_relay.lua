@@ -5936,6 +5936,15 @@ do
   assert(without_lock == false and with_lock == true,
     "prompt preface is used exactly on a core that has remuda.fs.lock: " .. tostring(without_lock) .. " " .. tostring(with_lock))
   matrix.prompt_preface_supported = function() return true end
+  local wrapped_sample = matrix.wrap_prompt_preface(string.rep("preface-word ", 40):gsub(" $", ""))
+  local wrapped_lines = 0
+  for line in (wrapped_sample .. "\n"):gmatch("([^\n]*)\n") do
+    wrapped_lines = wrapped_lines + 1
+    assert(#line <= 200, "shared preface wrapper must use lines no longer than 200 characters")
+  end
+  assert(wrapped_lines <= 32, "shared preface wrapper must stay under the core line limit")
+  assert(wrapped_sample:gsub("\n", " ") == string.rep("preface-word ", 39) .. "preface-word",
+    "shared preface wrapper must preserve every word")
   -- The setup tests need one machine name on every core: the shell wrapper
   -- exports HOSTNAME for cores without remuda.hostname, and the word is pinned
   -- to the same name on cores that have it (#207).
