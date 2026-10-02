@@ -642,7 +642,7 @@ return function(matrix, pinned_hostname)
         local count = 0
         for line in (spec.preface .. "\n"):gmatch("([^\n]*)\n") do
           count = count + 1
-          assert(#line <= 250, "a preface line must leave room under core's 256-character cap: " .. #line)
+          assert(#line <= 200, "a preface line must fit the shared wrapping limit: " .. #line)
         end
         assert(count <= 32, "a preface must stay under core's 32-line cap: " .. count)
       end

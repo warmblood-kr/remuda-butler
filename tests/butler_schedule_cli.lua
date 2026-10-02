@@ -16,11 +16,12 @@ local path = os.tmpname()
 os.remove(path)
 local traces, prompts, writes = {}, {}, 0
 local live = { butler = true, ["dev-1"] = true }
-local matrix = { prompt_preface_supported = function() return true end }
+local matrix = {}
 remuda = {
   json = dofile("tests/support/literal_json.lua"),
   butler = { matrix = matrix },
   fs = {
+    lock = function() return true end,
     write_atomic = function(target, contents, options)
       assert(options.private == true, "schedules are written private")
       writes = writes + 1
@@ -33,7 +34,15 @@ remuda = {
   fail = function(message, code) return { error = message, code = code } end,
   pending = function()
     return {
-      prompt_line = function(_, spec) prompts[#prompts + 1] = spec end,
+      prompt_line = function(_, spec)
+        local lines = {}
+        for line in ((spec.preface or "") .. "\n"):gmatch("([^\n]*)\n") do
+          if #line > 256 then error("prompt_line preface line " .. (#lines + 1) .. " is too long") end
+          lines[#lines + 1] = line
+        end
+        if #lines > 32 then error("prompt_line preface has too many lines") end
+        prompts[#prompts + 1] = spec
+      end,
       resolve = function(self, code, stdout, stderr)
         self.result = { code = code, stdout = stdout, stderr = stderr }
       end,
@@ -49,6 +58,7 @@ remuda = {
   },
 }
 dofile("packages/butler/schedule.lua")
+dofile("packages/butler/matrix_cli.lua")
 local cli = dofile("packages/butler/schedule_cli.lua")
 local schedule = remuda.butler.schedule
 
@@ -86,6 +96,8 @@ eq("yes completes the add", result.code, 0)
 ok("it reports the name", result.stdout:find("added schedule north%-star"))
 ok("the prompt names the schedule", prompt.label:find("north%-star"))
 ok("the prompt warns about standing delivery", prompt.preface:find("reserved sender `schedule`", 1, true))
+eq("the warning wording is preserved", prompt.preface:gsub("\n", " "),
+  "From now on this text arrives as mail from the reserved sender `schedule` at every due time, until the schedule is removed, also after restarts. The receiving agent reads it like any mail and may act on it.")
 local entry = stored()[1]
 eq("stored name", entry.name, "north-star")
 eq("stored spec", entry.spec, "7 * * * *")

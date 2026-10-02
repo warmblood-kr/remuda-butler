@@ -359,6 +359,25 @@ function matrix.prompt_preface_supported()
   return type(remuda.fs) == "table" and type(remuda.fs.lock) == "function"
 end
 
+function matrix.wrap_prompt_preface(text)
+  assert(type(text) == "string", "prompt preface must be text")
+  local lines, line = {}, ""
+  for word in text:gmatch("%S+") do
+    assert(#word <= 200, "prompt preface word exceeds 200 characters")
+    if line == "" then
+      line = word
+    elseif #line + 1 + #word <= 200 then
+      line = line .. " " .. word
+    else
+      lines[#lines + 1] = line
+      line = word
+    end
+  end
+  if line ~= "" then lines[#lines + 1] = line end
+  assert(#lines <= 32, "prompt preface exceeds 32 lines")
+  return table.concat(lines, "\n")
+end
+
 function matrix.cli(args, agent, stdin_body, file_body)
   if type(args) == "table" and args[1] == "matrix" and args[2] == "setup" then
     -- Setup reads the files its flags name and sends them to the server named on the same
@@ -460,10 +479,10 @@ function matrix.cli(args, agent, stdin_body, file_body)
             local question = "Continue? Type Y to continue, or N to cancel"
             local label, preface = table.concat(lines, "\n") .. "\n" .. question, nil
             if matrix.prompt_preface_supported() then
-              -- A preface line over 256 characters is an error from core, not
-              -- a cut: shorten a very long value here so the wizard goes on.
-              for index, line in ipairs(lines) do lines[index] = shortened(line, 250) end
-              label, preface = question, table.concat(lines, "\n")
+              -- Bound dynamic values before wrapping so even a long URL or path
+              -- cannot form a word larger than the shared preface limit.
+              for index, line in ipairs(lines) do lines[index] = shortened(line, 180) end
+              label, preface = question, matrix.wrap_prompt_preface(table.concat(lines, "\n"))
             end
             prompt_line(label, "N", function(answer)
                 answer = type(answer) == "string" and answer:lower() or ""
