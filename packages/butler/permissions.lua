@@ -110,29 +110,91 @@ end
 local function one_line(value) return (tostring(value):gsub("[\r\n]+", " "):gsub("%c", "?")) end
 local UNKNOWN = ": cannot identify the calling session's working directory"
   .. "\nNext: run this from a Butler session, or from your own terminal"
+-- Windows opens a device for these base names in any directory, with or
+-- without an extension: what /dev is on a posix system.
+local function windows_device(name)
+  -- COM and LPT are reserved with a superscript 1, 2 or 3 too (UTF-8 here).
+  local stem = name:lower():match("^[^%.]*"):gsub(" +$", ""):gsub("\194[\185\178\179]$", "1")
+  return stem == "con" or stem == "prn" or stem == "aux" or stem == "nul" or stem == "conin$" or stem == "conout$"
+    or stem:match("^com%d$") ~= nil or stem:match("^lpt%d$") ~= nil
+end
+local function windows_key(path)
+  local text = path:gsub("/", "\\")
+  -- The forms a resolver returns: \\?\C:\dir and \\?\UNC\server\share\dir.
+  local verbatim = text:match("^\\\\%?\\(.*)$")
+  if verbatim then
+    local unc = verbatim:match("^[Uu][Nn][Cc]\\(.*)$")
+    text = unc and ("\\\\" .. unc) or verbatim
+    if not unc and not text:match("^%a:\\") then return nil, "device" end
+  end
+  -- \\.\pipe\name, \\.\NUL: the device namespace, never a file.
+  if text:match("^\\\\[%.%?]\\") then return nil, "device" end
+  local head, rest = text:match("^(%a:)\\(.*)$")
+  if not head then
+    local server, share, tail = text:match("^\\\\([^\\]+)\\([^\\]+)(.*)$")
+    if server then head, rest = "//" .. server .. "/" .. share, tail
+    -- Not absolute (C:name, sub\name, name): no key, but its names are still checked.
+    else rest = text:gsub("^%a:", "") end
+  end
+  local parts, why = { head and head:lower() }, nil
+  for part in rest:gmatch("[^\\]+") do
+    if part:find(":", 1, true) or windows_device(part) then return nil, "device" end
+    -- `.`, `..`, and any name Windows would shorten (a trailing dot or space).
+    if part:find("[%. ]$") then why = "unresolved" end
+    parts[#parts + 1] = part:lower()
+  end
+  if not head then return nil end
+  if why then return nil, why end
+  return table.concat(parts, "/")
+end
+-- The form two paths are compared in, or nil when `path` is not an absolute
+-- file path on `platform` ("windows"; anything else is posix). Windows: a
+-- drive root or UNC with either slash, compared without regard to case. The
+-- second value says why not: "device" (a device name or an alternate stream,
+-- named for a path that is not absolute too),
+-- "unresolved" (a `.` or `..` left in place).
+-- ponytail: lower() folds ASCII only, so a non-ASCII case difference is
+-- refused; upgrade to a core case-folding word if that is ever met.
+function permissions.path_key(path, platform)
+  if type(path) ~= "string" then return nil end
+  if platform == "windows" then return windows_key(path) end
+  return path:sub(1, 1) == "/" and path or nil
+end
+local path_key = permissions.path_key
+
 -- The caller's recorded working directory and its resolved form (nil: cannot resolve).
-local function session_cwd(caller, cwd_of, realpath)
+local function session_cwd(caller, cwd_of, realpath, platform)
   local cwd = type(caller) == "table" and caller.kind == "session" and type(caller.session) == "string"
     and cwd_of(caller.session)
-  if type(cwd) ~= "string" or cwd:sub(1, 1) ~= "/" then return nil end
+  if not path_key(cwd, platform) then return nil end
   local ok, root = pcall(realpath, cwd)
   return cwd, ok and root or nil
 end
--- The trailing slash keeps a sibling like CWDx outside.
-local function inside(real, root) return real:sub(1, #root + 1) == root .. "/" end
+-- Both are keys. The trailing slash keeps a sibling like CWDx outside.
+local function inside(real, root) return real ~= nil and root ~= nil and real:sub(1, #root + 1) == root .. "/" end
+local DEVICE = " names a device or a stream, not a file"
 
 -- A file to READ. Returns the path to open, or nil and the refusal.
-function permissions.file_for_caller(path, caller, cwd_of, realpath, flag, pipe)
-  if type(caller) == "table" and caller.kind == "outside" then return path end
+function permissions.file_for_caller(path, caller, cwd_of, realpath, flag, pipe, platform)
   local what = "refused: " .. flag .. one_line(path)
-  local cwd, root = session_cwd(caller, cwd_of, realpath)
+  -- A device is refused by its name, before anything opens or resolves it, and
+  -- for a terminal caller too: opening a pipe blocks the daemon.
+  local key, why = nil, select(2, path_key(path, platform))
+  if type(caller) == "table" and caller.kind == "outside" then
+    if why == "device" then return nil, what .. DEVICE .. "\nNext: pass a regular file" end
+    return path
+  end
+  local cwd, root = session_cwd(caller, cwd_of, realpath, platform)
   if not cwd then return nil, what .. UNKNOWN end
-  local ok, real = pcall(realpath, path)
-  if not root or not ok or not real then
+  local ok, real = true, nil
+  if why ~= "device" then ok, real = pcall(realpath, path) end
+  if ok and real then key, why = path_key(real, platform) end
+  if why == "device" then return nil, what .. DEVICE .. "\nNext: pass a regular file inside " .. one_line(cwd) end
+  if not root or not ok or not real or why == "unresolved" then
     return nil, what .. " cannot be resolved (a missing file, or realpath is unavailable)"
       .. "\nNext: check that the file exists inside " .. one_line(cwd)
   end
-  if inside(real, root) then return real end
+  if inside(key, path_key(root, platform)) then return real end
   return nil, what .. " is outside this session's working directory " .. one_line(cwd)
     .. "\nNext: copy the file into " .. one_line(cwd) .. " and pass that path"
     .. (pipe and ", or pipe the text: cat FILE | remuda butler send NAME -" or "")
@@ -143,27 +205,43 @@ end
 -- exist) and must be the working directory or inside it; an existing link at
 -- the target is refused. Returns the path to write (nil for an outside caller
 -- without -o: the old default), or nil and the refusal.
-function permissions.output_for_caller(path, name, caller, cwd_of, realpath, is_symlink)
-  if type(caller) == "table" and caller.kind == "outside" then return path end
+function permissions.output_for_caller(path, name, caller, cwd_of, realpath, is_symlink, platform)
   local what = "refused: " .. (path and ("-o " .. one_line(path)) or "download")
-  local cwd, root = session_cwd(caller, cwd_of, realpath)
+  if type(caller) == "table" and caller.kind == "outside" then
+    -- Not confined, but a pipe opened for writing blocks the daemon as well.
+    if select(2, path_key(path, platform)) == "device" then
+      return nil, what .. DEVICE .. "\nNext: pass -o with a regular file path"
+    end
+    return path
+  end
+  local cwd, root = session_cwd(caller, cwd_of, realpath, platform)
   if not cwd then return nil, what .. UNKNOWN end
   local function refuse(why) return nil, what .. why .. "\nNext: pass -o with a path inside " .. one_line(cwd) end
+  local windows = platform == "windows"
+  local separator = windows and "\\" or "/"
   local parent, base = root, name
   if path then
+    if select(2, path_key(path, platform)) == "device" then return refuse(DEVICE) end
     local dir
-    dir, base = path:match("^(.*)/([^/]*)$")
+    dir, base = path:match(windows and "^(.*)[/\\]([^/\\]*)$" or "^(.*)/([^/]*)$")
     if not dir or base == "" or base == "." or base == ".." then return refuse(" has no file name") end
-    local ok, real = pcall(realpath, dir == "" and "/" or dir)
+    -- `C:` alone is the current directory of that drive, not its root.
+    if dir == "" or (windows and dir:match("^%a:$")) then dir = dir .. separator end
+    local ok, real = pcall(realpath, dir)
     parent = ok and real or nil
   end
   if not root or not parent or type(base) ~= "string" then
     return refuse(" cannot be resolved (a missing directory, or realpath is unavailable)")
   end
-  if parent ~= root and not inside(parent, root) then
+  -- A default name comes from the sender: on Windows it must be one plain name.
+  if windows and base:find("[/\\]") then return refuse(" has no file name") end
+  if windows and (base:find(":", 1, true) or windows_device(base)) then return refuse(DEVICE) end
+  if windows and base:find("[%. ]$") then return refuse(" ends in a dot or a space, which Windows drops") end
+  local parent_key, root_key = path_key(parent, platform), path_key(root, platform)
+  if not parent_key or not root_key or (parent_key ~= root_key and not inside(parent_key, root_key)) then
     return refuse(" is outside this session's working directory " .. one_line(cwd))
   end
-  local target = parent .. "/" .. base
+  local target = (parent:sub(-1) == separator and parent or parent .. separator) .. base
   local linked = is_symlink(target)
   if linked ~= false then return refuse(linked and " is a symlink" or " cannot be checked for a symlink") end
   return target
