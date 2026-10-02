@@ -70,6 +70,7 @@ assert(by_id.claude.order == 10 and by_id.codex.order == 20 and by_id.monocle.or
   "Monocle should follow Claude and Codex in the built-in order")
 assert(by_id.monocle.executable == "monocle" and by_id.monocle.requires == "monocle",
   "Monocle registry row should resolve the monocle executable")
+assert(by_id.monocle.automatic == false, "Monocle should be explicit-only in automatic launch order")
 assert(by_id.monocle.ready(remuda, idle_screen) and not by_id.monocle.ready(remuda, working_screen),
   "Monocle registry ready callback should use its startup predicate")
 assert(by_id.monocle.working(remuda, working_screen) and not by_id.monocle.working(remuda, idle_screen),
@@ -119,12 +120,16 @@ eq("resolved launch argv", capture.argv, {
   "monocle", "agent", "--workdir", "/work", "--session", "monocle-test", "--auto-approve",
 })
 
--- With no contributed entries, the legacy launch fallback should still expose
--- the three built-in kinds in their normal order.
+-- With no contributed entries, the legacy automatic launch fallback should
+-- retain Claude and Codex without selecting explicit-only Monocle.
 contributions = {}
 local fallback = remuda._butler_configured_agent_order()
-assert(table.concat(fallback, ",") == "claude,codex,monocle",
-  "empty contribution fallback should include monocle after Claude and Codex")
+assert(table.concat(fallback, ",") == "claude,codex",
+  "empty contribution fallback should keep monocle out of automatic launches")
+contributions = rows
+local configured = remuda._butler_configured_agent_order()
+assert(table.concat(configured, ",") == "claude,codex",
+  "the registered Monocle kind should not be auto-selected")
 
 -- Compaction intentionally remains unsupported for this kind, and neither
 -- telemetry nor the provider-specific quota report gains a Monocle row.

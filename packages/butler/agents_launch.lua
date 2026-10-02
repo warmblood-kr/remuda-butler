@@ -334,8 +334,11 @@ local function configured_agent_order()
     return a.id < b.id
   end)
   local order = {}
-  for _, row in ipairs(rows) do order[#order + 1] = row.id end
-  if #order == 0 then return { "claude", "codex", "monocle" } end
+  for _, row in ipairs(rows) do
+    local entry = row.entry or row
+    if entry.automatic ~= false then order[#order + 1] = row.id end
+  end
+  if #order == 0 then return { "claude", "codex" } end
   return order
 end
 remuda._butler_configured_agent_order = configured_agent_order

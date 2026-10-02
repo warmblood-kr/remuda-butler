@@ -150,7 +150,7 @@ return {
         working = function(_, screen) return screen:find("esc to interrupt", 1, true) ~= nil end,
         login = { "Please log in", "not logged in", "Authentication required", "Sign in to continue", "Not authenticated" },
         dialogs = function() return host._butler_agent_startup.codex.modals end },
-      { id = "monocle", order = 30, executable = "monocle", requires = "monocle",
+      { id = "monocle", order = 30, executable = "monocle", requires = "monocle", automatic = false,
         argv = function(_, spec) return host._butler_agent_builders.monocle(spec) end,
         ready = function(_, screen) return host._butler_agent_startup.monocle.ready(screen) end,
         working = function(_, screen) return host._butler_agent_startup.monocle.working(screen) end,
