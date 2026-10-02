@@ -220,6 +220,16 @@ do
     for key in pairs(shared.seen) do ok("and in the once cache", #key < 300) end
     ok("and in a tick", #fires == 1 and clean(fires[1]))
   end
+  do
+    local shared = { path = path, trace = function() end, fields = function() error("\27[2J\n" .. ("y"):rep(5000), 0) end }
+    local due_entry = entry("due-one")
+    due_entry.last_message = nil
+    put(remuda.json.encode({ version = 1, schedules = { due_entry } }))
+    schedule.tick(shared, 1e9)
+    local keys = 0
+    for key in pairs(shared.seen) do keys = keys + 1; ok("a fire error is clean in the once cache", #key < 300 and not key:find("%c")) end
+    eq("the fire error was recorded", keys, 1)
+  end
   eq("safe keeps plain text", schedule.safe("north-star 7 * * * *"), "north-star 7 * * * *")
   eq("safe cuts long text", #schedule.safe(("é"):rep(500), 100) <= 100, true)
   put(remuda.json.encode({ version = 1, schedules = remuda.json.array({}) }))
