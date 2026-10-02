@@ -1036,24 +1036,36 @@ function remuda._butler_inbox_message(caller, id)
   if matrix_line ~= "" then output = output .. matrix_line .. "\n" .. mail.matrix_body_mark .. "\n" end
   return output .. object.content
 end
-function remuda._butler_send(from, to, text)
-  local _, recipient = mail_id(to, false)
-  local sender = (from == "operator" or from == "outside") and mail_address(from)
-    or mail_address(resolve(from))
-  local envelope = { from = sender, to = mail_address(recipient.alias), text = text }
+local function send_envelope(envelope, recipient)
   local message = deliver_message(envelope)
   local notice = take_delivery_notice_result(message, recipient.alias)
   if not notice then
     notify_mail_delivery(envelope, message)
     notice = take_delivery_notice_result(message, recipient.alias)
   end
-  if notice and notice.delivered then return "queued " .. message.id .. " and notified " .. recipient.alias end
+  if notice and notice.delivered then return "queued " .. message.id .. " and notified " .. recipient.alias, message.id end
   if notice and notice.error then
-    return "queued " .. message.id .. " for " .. recipient.alias .. "; terminal delivery deferred: " .. tostring(notice.error)
+    return "queued " .. message.id .. " for " .. recipient.alias .. "; terminal delivery deferred: " .. tostring(notice.error),
+      message.id
   end
   return "queued " .. message.id .. " for " .. recipient.alias
     .. "; notice deferred: session " .. recipient.alias
-    .. "; reason: waiting for the recipient's quiet delivery window"
+    .. "; reason: waiting for the recipient's quiet delivery window", message.id
+end
+function remuda._butler_send(from, to, text)
+  local _, recipient = mail_id(to, false)
+  local sender = (from == "operator" or from == "outside") and mail_address(from)
+    or mail_address(resolve(from))
+  return (send_envelope({ from = sender, to = mail_address(recipient.alias), text = text }, recipient))
+end
+-- Mail from the reserved sender `schedule`. The sender is fixed here, not a
+-- parameter. `_butler_send` resolves a sender to a live session, and
+-- valid_child_name keeps any session from taking the name `schedule`.
+local SCHEDULE_SENDER = { host = "local", id = "", alias = "schedule", session = "schedule", kind = "", leader = "" }
+function remuda._butler_schedule_send(to, text, subject)
+  local _, recipient = mail_id(to, false)
+  return send_envelope({ from = SCHEDULE_SENDER, to = mail_address(recipient.alias), text = text,
+    subject = subject }, recipient)
 end
 
 remuda._butler_notice = {

@@ -333,4 +333,11 @@ eq("a corrupt file sends nothing", #sent, 0)
 eq("and is traced once", #events, 1)
 os.remove(fire_path)
 
+-- The reserved sender: no session or topic can take the name `schedule`.
+remuda._butler_system = setmetatable({}, { __index = function() return function() return "/tmp" end end })
+dofile("packages/butler/paths.lua")
+local valid_child_name = remuda._butler_paths.valid_child_name
+ok("schedule is not a launchable name", not pcall(valid_child_name, "schedule", "agent name"))
+ok("other names still are", pcall(valid_child_name, "scheduler", "agent name"))
+
 print(("butler_schedule: %d cases passed"):format(count))

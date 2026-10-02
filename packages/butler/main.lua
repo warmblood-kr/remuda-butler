@@ -990,6 +990,22 @@ remuda._butler_compaction_run_config = { mail_root = mail_root, _butler_trace = 
 }
 remuda.exec("butler/compaction_run")
 
+-- Persistent schedules live in schedule.lua; the tick is declared in init.lua
+-- and the verbs in schedule_cli.lua use the same seams. The sender of a
+-- schedule's mail is fixed inside _butler_schedule_send.
+remuda.exec("butler/schedule")
+remuda._butler_schedule_env = {
+  path = mail_root and mail_root .. "/schedules.json",
+  trace = _butler_trace,
+  resolve = resolve,
+  unread = function(alias, message_id) return mail.is_unread(mail_id(alias, false), message_id) end,
+  send = function(...) return remuda._butler_schedule_send(...) end,
+}
+function remuda._butler_schedule_tick()
+  local ok, err = pcall(remuda.butler.schedule.tick, remuda._butler_schedule_env)
+  if not ok then _butler_trace("schedule_tick_error", tostring(err)) end
+end
+
 -- remuda._butler_session_trace_path lets a test redirect this to a throwaway
 -- tempfile, same idiom as remuda._butler_compaction_trace_path above; nil in
 -- production falls back to the real default, matching the token/config path

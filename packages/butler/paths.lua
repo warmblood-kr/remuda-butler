@@ -122,7 +122,10 @@ local mcp_config_path = config_path and (config_path .. ".mcp.json") or (os.tmpn
 local function shell_quote(s)
   return "'" .. s:gsub("'", "'\\\"'\\\"'") .. "'"
 end
+-- Names that are mail senders and never sessions.
+local RESERVED_NAMES = { schedule = true }
 local function valid_child_name(name, what)
+  if RESERVED_NAMES[name] then error((what or "name") .. " " .. name .. " is reserved", 0) end
   if type(name) ~= "string" or name == "" or name:sub(1, 1) == "."
       or name:find("/", 1, true) or name:find("\\", 1, true)
       or name:find("..", 1, true) or name:find("%c") then
