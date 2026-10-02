@@ -5260,8 +5260,11 @@ rx_tests = {
       assert(#delivered == 0 and #room_messages() == 0, "a command line whose handler raised is consumed, not mailed")
       sync_at(55, { typed_line_event("$raise", "?status") })
       assert(#delivered == 0, "the consumed event id is processed and not retried into mail")
-      sync_at(66, { typed_line_event("$plain", "hello there") })
-      assert(#delivered == 1, "a non-command line still takes the ordinary path when the handler raises")
+      sync_at(66, { typed_line_event("$plain-status", "?status please"), typed_line_event("$plain-load", "?load") })
+      assert(#delivered == 2 and #room_messages() == 0,
+        "a ?-prefixed non-command is still ordinary mail when the handler raises")
+      sync_at(77, { typed_line_event("$raise-again", "?status") })
+      assert(#delivered == 2 and #room_messages() == 0, "a real ?status under the same raise is consumed")
       remuda.butler.status_command.handle = real_handle
       relay:stop()
       cleanup_fixture(dir, config_path)
