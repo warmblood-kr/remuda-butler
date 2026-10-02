@@ -152,12 +152,23 @@ command(6, "quota", "  remuda butler quota [--report]", function(args, caller)
   return reply
 end)
 local CLOSE_USAGE = "Usage: remuda butler close <name> [--force]\nExample: remuda butler close worker-1"
-local function close_member(name, leader, force)
+local RELAUNCH_WINDOW = 120
+local function close_member(name, leader, force, leaderless_ok)
   local ok, alias = pcall(resolve, name)
   if not ok then error("cannot close " .. tostring(name) .. ": unknown Butler member.\nNext: remuda butler sessions", 0) end
   local agents = remuda._butler_bus and remuda._butler_bus.agents or {}
   local agent = agents[alias]
-  if not agent or agent.parent ~= leader then
+  -- Direct members only; the root (or a person) may also close leader-less rows
+  -- (no parent, or a parent that is gone and not relaunching), from the CLI only:
+  -- an MCP caller's identity comes from its environment. The root row itself is
+  -- never closable.
+  local relaunching = remuda._butler_relaunching or {}
+  local function gone(parent)
+    return not agents[parent] and not (relaunching[parent] and os.time() - relaunching[parent] < RELAUNCH_WINDOW)
+  end
+  local root_row = alias == "butler" or alias == remuda._butler_name
+  local leaderless = leaderless_ok and agent and (not agent.parent or gone(agent.parent))
+  if not agent or root_row or not (agent.parent == leader or (leader == "butler" and leaderless)) then
     error("cannot close " .. tostring(alias) .. ": only your direct members can be closed (you and your leader are excluded).\nNext: remuda butler sessions", 0)
   end
   if not force then
@@ -209,7 +220,7 @@ command(8, "close", "  remuda butler close <name> [--force]", function(args, cal
     error(CLOSE_USAGE .. "\nNext: remuda butler sessions", 0)
   end
   return cli_result(function()
-    return close_member(args[2], close_caller_leader(), args[3] == "--force")
+    return close_member(args[2], close_caller_leader(), args[3] == "--force", true)
   end)
 end)
 command(10, "sessions", "  remuda butler sessions", function(args)

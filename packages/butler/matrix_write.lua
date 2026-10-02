@@ -15,16 +15,14 @@ local function random_tag()
     end
   end
   if not bytes then
-    local file = io.open("/dev/urandom", "rb")
-    bytes = file and file:read(16)
-    if file then file:close() end
+    local opened, file = pcall(io.open, "/dev/urandom", "rb")
+    if opened and file then
+      local read_ok, value = pcall(file.read, file, 16)
+      if read_ok and type(value) == "string" and #value >= 16 then bytes = value:sub(1, 16) end
+      pcall(file.close, file)
+    end
   end
-  if not bytes or #bytes < 16 then
-    math.randomseed(os.time() + math.floor(os.clock() * 1000000))
-    local out = {}
-    for i = 1, 16 do out[i] = string.char(math.random(0, 255)) end
-    bytes = table.concat(out)
-  end
+  if not bytes then error("secure random source unavailable for Matrix transaction IDs", 0) end
   local hex = {}
   for i = 1, #bytes do hex[i] = string.format("%02x", bytes:byte(i)) end
   return table.concat(hex)

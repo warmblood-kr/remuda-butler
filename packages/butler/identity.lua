@@ -37,16 +37,14 @@ local function crockford_ulid()
       end
     end
     if not entropy then
-      local random = io.open("/dev/urandom", "rb")
-      entropy = random and random:read(10)
-      if random then random:close() end
+      local opened, random = pcall(io.open, "/dev/urandom", "rb")
+      if opened and random then
+        local read_ok, value = pcall(random.read, random, 10)
+        if read_ok and type(value) == "string" and #value == 10 then entropy = value end
+        pcall(random.close, random)
+      end
     end
-    if not entropy or #entropy ~= 10 then
-      math.randomseed(second + math.floor(os.clock() * 1000000))
-      local out = {}
-      for i = 1, 10 do out[i] = string.char(math.random(0, 255)) end
-      entropy = table.concat(out)
-    end
+    if not entropy then error("secure random source unavailable for ULID entropy", 0) end
   end
   bus.previous_ulid_second, bus.previous_ulid_random = second, entropy
   for i = 1, 10 do bytes[i + 6] = entropy:byte(i) end

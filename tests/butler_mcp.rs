@@ -568,6 +568,43 @@ fn butler_close_is_registered_and_unknown_mcp_caller_cannot_close() {
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.agents.m1 ~= nil)"), "true");
 }
 
+#[test]
+fn butler_close_accepts_published_string_force_argument() {
+    let dir = scratch("butler-close-string-force");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    eval(&path, r#"
+      remuda._butler_argv = {'sh'}; remuda.exec('butler')
+      remuda._butler_agent_builders.fake = function() return {'sleep', '100'} end
+      remuda._butler_launch('fake', 'm1')
+      remuda._butler_mail.unread = function() return 1 end
+      remuda.butler.is_idle = function() return false, 'busy' end
+    "#);
+    let refused = eval(
+        &path,
+        "local token = remuda._butler_bus.agents.butler.token; \
+         local ok = pcall(remuda._call, 'butler_close', {name='m1', force='false'}, {capability=token}); \
+         return tostring(ok) .. ':' .. tostring(remuda._butler_bus.agents.m1 ~= nil)",
+    );
+    assert_eq!(refused, "false:true", "string force=false must not force the close");
+    let result = eval(
+        &path,
+        "local token = remuda._butler_bus.agents.butler.token; \
+         return remuda._call('butler_close', {name='m1', force='true'}, {capability=token})",
+    );
+    assert_eq!(result, "Closed m1.\nNext: remuda butler sessions");
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.agents.m1 == nil)"), "true");
+
+    let invalid = eval(
+        &path,
+        "local token = remuda._butler_bus.agents.butler.token; \
+         local ok, message = pcall(remuda._call, 'butler_close', \
+           {name='m1', force='yes'}, {capability=token}); \
+         return tostring(ok) .. ':' .. tostring(message)",
+    );
+    assert!(invalid.starts_with("false:force must be a boolean."), "{invalid}");
+}
+
 fn screen_of(path: &Path, session: &str, until: &str) -> String {
     let deadline = Instant::now() + PATIENCE;
     loop {
@@ -1496,6 +1533,39 @@ fn codex_trace_row_followed_by_user_draft_is_not_empty_or_typed_over() {
         "#,
     );
     assert_eq!(got, "NON-EMPTY|0", "a trace-looking draft must be preserved: {got}");
+}
+
+#[test]
+fn codex_error_below_empty_placeholder_does_not_block_notice() {
+    let (path, _daemon) = butler_with_member("codex-error-below-placeholder");
+    let got = eval(
+        &path,
+        r#"
+        local file = assert(io.open('tests/fixtures/codex-composer-with-error-line-quota-qa-2026-10-01.raw', 'rb'))
+        local screen = file:read('*a')
+        file:close()
+        local decision = remuda._butler_prompt_is_empty('codex', screen)
+        return decision
+        "#,
+    );
+    assert_eq!(got, "EMPTY", "Codex error below an empty placeholder blocked notice delivery: {got}");
+}
+
+#[test]
+fn codex_error_below_typed_text_or_altered_placeholder_stays_a_draft() {
+    let (path, _daemon) = butler_with_member("codex-error-below-draft");
+    let got = eval(
+        &path,
+        r#"
+        local err = "\n verification failed: invalid hunk\n  ? for shortcuts"
+        local r = {}
+        for _, first in ipairs({ 'fix the test', 'Ask Codex to do anything else', 'ask codex to do anything' }) do
+          r[#r + 1] = (remuda._butler_prompt_is_empty('codex', '› ' .. first .. err))
+        end
+        return table.concat(r, '|')
+        "#,
+    );
+    assert_eq!(got, "NON-EMPTY|NON-EMPTY|NON-EMPTY", "a draft with a Codex error row below it must be preserved: {got}");
 }
 
 fn butler_with_member(tag: &str) -> (PathBuf, impl Drop) {

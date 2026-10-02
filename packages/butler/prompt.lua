@@ -15,6 +15,23 @@ local function compact(text)
   return tostring(text):gsub("%s+", "")
 end
 
+local function utf8_prefix(value, limit)
+  local cut = limit
+  while cut > 0 do
+    local byte = value:byte(cut + 1) or 0
+    if byte < 0x80 or byte > 0xbf then break end
+    cut = cut - 1
+  end
+  return value:sub(1, cut)
+end
+
+local function safe_type_error_line(value)
+  local line = tostring(value):match("^[^\r\n]*") or ""
+  line = line:gsub("[%c]", " "):gsub("\194[\128-\159]", " ")
+  line = line:gsub("^.-%.lua:%d+: ", "", 1)
+  return utf8_prefix(line, 200)
+end
+
 local function prompt_start_visible(screen, task)
   local visible, expected = compact(screen), compact(task)
   if expected == "" then return false end
@@ -130,9 +147,7 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
         if not typed then
           local reason = "type failed"
           if type(type_error) == "string" then
-            local first_line = type_error:match("^[^\r\n]*") or ""
-            first_line = first_line:gsub("^.-:%d+: ", "", 1):sub(1, 200)
-            reason = "type failed: " .. first_line
+            reason = "type failed: " .. safe_type_error_line(type_error)
           end
           finish(false, reason)
         else
