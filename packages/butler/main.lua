@@ -933,6 +933,10 @@ local function root_permissions_settled(kind)
   local report = state.report
   return report == nil or (not report.error and #report.withheld == 0)
 end
+local function arm_compaction_schedule(kind)
+  if root_permissions_settled(kind) then remuda._butler_register_compaction_schedule(); return end
+  _butler_session_trace("compaction_schedule_unarmed", "root permission step did not settle for " .. tostring(kind))
+end
 local function launch_butler()
   local requested_name = butler_name or remuda._butler_initial_name
   if butler_session_cwd then
@@ -945,7 +949,7 @@ local function launch_butler()
     remuda._butler_name = butler_name
     if not root_permissions_ensured then
       pcall(ensure_root_permissions, remuda._butler_selected_agent)
-      if root_permissions_settled(remuda._butler_selected_agent) then remuda._butler_register_compaction_schedule() end
+      arm_compaction_schedule(remuda._butler_selected_agent)
     end
     return
   end
@@ -990,7 +994,7 @@ local function launch_butler()
   root_record.kind = kind
   bus.identities.butler, bus.identity_ids[root_record.id] = root_record, root_record
   identity_record(root_record)
-  if root_permissions_settled(kind) then remuda._butler_register_compaction_schedule() end
+  arm_compaction_schedule(kind)
   remuda._butler_start_error = nil
   remuda._butler_start_pending = false
   return selected
