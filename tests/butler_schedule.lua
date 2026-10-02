@@ -316,6 +316,40 @@ eq("the skipped slot is spent", stored("a").last_fired, slot_1007 + 60)
 unread_ids.m1 = nil
 eq("once read, the next slot fires", schedule.tick(env(), noon + 7200), 1)
 
+-- A throw while firing one entry does not stop the later ones, and is traced once.
+reset({ hourly_entry("a"), hourly_entry("b") })
+do
+  local shared = env()
+  shared.unread = function(_, id) if id == "boom" then error("bad store", 0) end return false end
+  local listing = schedule.load(fire_path)
+  listing[1].last_message = "boom"
+  assert(schedule.save(fire_path, listing))
+  eq("the second entry fires after the first throws", schedule.tick(shared, noon), 1)
+  eq("the later entry was sent", sent[1][3], "[schedule b]")
+  ok("the throw is traced", table.concat(events, "\n"):find("schedule_fire_error a: bad store", 1, true))
+end
+
+-- An entry whose slot is already spent does not scan the clock.
+reset({ hourly_entry("a", slot_1007) })
+do
+  local calls = 0
+  local counting = env()
+  counting.fields = function(t) calls = calls + 1 return utc_fields(t) end
+  eq("a spent slot fires nothing", schedule.tick(counting, noon), 0)
+  eq("and reads no calendar fields", calls, 0)
+end
+
+-- Hand-planted fields are validated on load.
+for _, case in ipairs({
+  { "created_by", 42 }, { "created_by", "x\n y" }, { "created_by", ("x"):rep(65) },
+  { "last_message", 7 }, { "last_message", "m\0" }, { "last_message", ("m"):rep(65) },
+}) do
+  local bad = entry("planted")
+  bad[case[1]] = case[2]
+  ok("check refuses " .. case[1], not schedule.check(bad))
+end
+ok("a missing last_message is fine", schedule.check(hourly_entry("fresh")))
+
 -- Disabled schedules and several schedules.
 local off = hourly_entry("off")
 off.enabled = false

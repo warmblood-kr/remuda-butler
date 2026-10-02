@@ -120,6 +120,11 @@ function M.check(entry)
   if not ok then return nil, err end
   ok, err = M.valid_text(entry.text)
   if not ok then return nil, err end
+  local by, last = entry.created_by, entry.last_message
+  if type(by) ~= "string" or #by > 64 or by:find("%c") then return nil, "created_by must be short text" end
+  if last ~= nil and (type(last) ~= "string" or #last > 64 or last:find("%c")) then
+    return nil, "last_message must be a message id"
+  end
   if type(entry.enabled) ~= "boolean" or type(entry.last_fired) ~= "number" then
     return nil, "enabled and last_fired are required"
   end
@@ -202,7 +207,7 @@ end
 
 -- due_slot(entry, now, fields) -> slot | nil: the slot to fire, if any.
 function M.due_slot(entry, now, fields)
-  if not entry.enabled then return nil end
+  if not entry.enabled or entry.last_fired >= floor(now / 60) then return nil end
   local rule = M.parse(entry.spec)
   local slot = rule and M.last_due(rule, now, fields)
   if slot and slot > entry.last_fired then return slot end
@@ -258,8 +263,12 @@ function M.tick(env, now)
   local list = M.load(env.path, once)
   local fired = 0
   for _, entry in ipairs(list) do
-    local slot = M.due_slot(entry, now or os.time(), env.fields)
-    if slot and M.fire(env, list, entry, slot) then fired = fired + 1 end
+    local ran, result = pcall(function()
+      local slot = M.due_slot(entry, now or os.time(), env.fields)
+      return slot and M.fire(env, list, entry, slot)
+    end)
+    if not ran then once("schedule_fire_error", entry.name .. ": " .. tostring(result))
+    elseif result then fired = fired + 1 end
   end
   return fired
 end
