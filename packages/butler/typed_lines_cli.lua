@@ -1,13 +1,17 @@
--- Terminal-only, owner-confirmed switches for Matrix typed lines.
+-- Terminal-only, owner-confirmed switches for Matrix typed lines and status commands.
 local matrix = assert(remuda.butler and remuda.butler.matrix,
   "load butler/matrix_request before butler/typed_lines_cli")
 local M = {}
 
 local USAGE = "Usage: remuda butler typed-lines on|off\n"
-  .. "       remuda butler shell-lines on|off"
+  .. "       remuda butler shell-lines on|off\n"
+  .. "       remuda butler status-commands on|off"
+local SWITCH_KEYS = { ["typed-lines"] = "typed_lines", ["shell-lines"] = "shell_lines",
+  ["status-commands"] = "status_commands" }
 local WARNINGS = {
   typed_lines = "Whoever controls the owner's Matrix account, or the homeserver that carries it, can type text into every agent session of this machine, and the session cannot tell that text from text typed at its keyboard. Such text counts as the owner's own instruction, including approvals.",
   shell_lines = "Whoever controls that account or homeserver can run shell commands on this machine as this user, with no review by anyone. It is remote command execution, bounded only by rules 1 to 8. Recommended only with the Matrix account protected as well as the machine's own login (device verification, a homeserver the owner runs or trusts).",
+  status_commands = "Whoever controls that account or homeserver can read this machine's session names, kinds, context use, unread mail counts and Claude quota by sending ?status, without involving an agent. The answer never contains mail, prompts or screen text.",
 }
 
 local function fail(message)
@@ -59,7 +63,7 @@ local function write_switches(path, updates)
       kept[#kept + 1] = raw .. ending
     end
   end)
-  for _, key in ipairs({ "typed_lines", "shell_lines" }) do
+  for _, key in ipairs({ "typed_lines", "shell_lines", "status_commands" }) do
     if updates[key] ~= nil and not written[key] then
       if #kept > 0 and kept[#kept]:sub(-1) ~= "\n" then kept[#kept + 1] = "\n" end
       kept[#kept + 1] = key .. "=" .. tostring(updates[key]) .. "\n"
@@ -135,7 +139,7 @@ end
 
 function M.cli(args, agent)
   if type(args) ~= "table" or #args ~= 2
-      or (args[1] ~= "typed-lines" and args[1] ~= "shell-lines")
+      or SWITCH_KEYS[args[1]] == nil
       or (args[2] ~= "on" and args[2] ~= "off") then
     return fail(USAGE)
   end
@@ -148,7 +152,7 @@ function M.cli(args, agent)
   end
   local config, config_error = read_switches(path)
   if not config then return fail(tostring(config_error)) end
-  local key = args[1] == "typed-lines" and "typed_lines" or "shell_lines"
+  local key = SWITCH_KEYS[args[1]]
   if args[2] == "on" then
     if key == "shell_lines" and config.typed_lines ~= true then
       return fail("typed-lines must be on before shell-lines can be enabled. Nothing was changed.")

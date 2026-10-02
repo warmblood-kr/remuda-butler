@@ -233,6 +233,9 @@ command(15, "agents", "  remuda butler agents [--all]", function(args)
   if #args == 1 then return registry_list(false) end
   if #args == 2 and args[2] == "--all" then return registry_list(true) end
 end)
+command(17, "status-commands", "  remuda butler status-commands on|off", function(args, caller)
+  return typed_lines_cli.cli(args, current_agent(caller))
+end)
 command(20, "launch", "  remuda butler launch <claude|codex|monocle> [name] [--model M]", function(args, caller)
   if not args[2] then return nil end
   local registered = false
