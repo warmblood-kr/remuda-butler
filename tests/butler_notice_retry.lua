@@ -187,6 +187,27 @@ remuda._butler_deliver_notices()
 assert(retry_captures >= 3 and notice_type_attempts == 1,
   "notice retry requires a fresh empty-composer check before retyping")
 
+-- A busy pane does not consume the verification check budget. Keep the notice
+-- in the composer so this tick cannot complete the recovery for another reason.
+now = now + 10
+local busy_notice = "Busy recovery notice"
+bus.notice_recoveries.lead = {
+  phase = "verify_notice", checks = 39, notice = busy_notice,
+  message_ids = { "m1" }, started_at = now,
+}
+bus.notices.lead = {
+  count = 1, text = busy_notice, message_ids = { m1 = busy_notice },
+  message_order = { "m1" },
+}
+remuda.session = function() return { is_busy = true } end
+remuda.capture = function() return "› " .. busy_notice end
+remuda.key = function() end
+remuda._butler_deliver_notices()
+assert(bus.notice_recoveries.lead and not bus.notice_recoveries.lead.failed,
+  "busy verification at the check cap remains active")
+assert(bus.notice_recoveries.lead.checks == 39,
+  "busy verification does not consume a recovery check")
+
 -- A human draft is left exactly where it is; recovery neither clears it nor types over it.
 now, screen = now + 10, "› private draft"
 local input_events = {}
