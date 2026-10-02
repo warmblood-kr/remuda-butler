@@ -360,6 +360,9 @@ command(100, "matrix", remuda.butler.matrix.cli_usage(), function(args, caller)
       error("no message body received on stdin; `send -` needs a Remuda core with caller stdin support", 0)
     end
     return checked_message_body((body:gsub("\r?\n$", "")))
+  end, function(path)
+    -- `matrix send --file PATH`: the same bounded, caller-confined read as the mail verbs.
+    return (message_body({ "--file", path }, 1, caller):gsub("\r?\n$", ""))
   end)
 end)
 remuda._butler_command_run = function(verb, args, caller)

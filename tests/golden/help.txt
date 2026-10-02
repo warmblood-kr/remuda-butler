@@ -33,8 +33,8 @@ remuda butler — coordination for managed agents
   remuda butler matrix [--json] [--room ROOM] unfollow EVENT_ID
   remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
   remuda butler matrix [--json] [-o PATH] download MXC
-  remuda butler matrix [--json] [--room ROOM] send TEXT
-  remuda butler matrix [--json] [--room ROOM] reply EVENT_ID TEXT
+  remuda butler matrix [--json] [--room ROOM] send TEXT | - | --file PATH
+  remuda butler matrix [--json] [--room ROOM] reply EVENT_ID TEXT | - | --file PATH
   remuda butler matrix [--json] [--room ROOM] react EVENT_ID KEY
   remuda butler matrix [--json] [--room ROOM] upload PATH
   remuda butler matrix [--json] [--room ROOM] redact EVENT_ID [--reason TEXT]
