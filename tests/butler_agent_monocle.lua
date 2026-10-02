@@ -37,10 +37,13 @@ for field, bad in pairs({ name = "-x", cwd = "-w", model = "-m" }) do
   spec[field] = bad
   assert(not pcall(build, spec), "Monocle builder must refuse a dash-leading " .. field)
 end
-for _, bad in ipairs({ "a b", "a\nb", "m;x" }) do
+for _, bad in ipairs({ "a b", "a\nb", "m;x", "..", ".x", "a/../b" }) do
   assert(not pcall(build, { name = "m1", model = bad }), "Monocle builder must refuse model " .. bad)
 end
-local valid_spec, invalid_spec_error = pcall(build, { cwd = "/work" })
+for _, good in ipairs({ "claude-opus-4-5", "gpt-6-luna", "anthropic/claude-3.5" }) do
+  assert(pcall(build, { name = "m1", model = good }), "Monocle builder must accept model " .. good)
+end
+local valid_spec,invalid_spec_error = pcall(build, { cwd = "/work" })
 assert(not valid_spec and tostring(invalid_spec_error):find("string name", 1, true),
   "Monocle builder must reject a non-spec table without a session name")
 
