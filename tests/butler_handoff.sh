@@ -66,6 +66,8 @@ expect_ulid "root id" "$ROOT_ID"
 PROMPT=$(lua 'return remuda._butler_system_prompt')
 [[ $PROMPT == *'If the inbox has a mail whose first line is `HANDOFF`, read it before anything else and take over its open items.'* ]] || \
   fail "root prompt lacks the HANDOFF line"
+[[ $PROMPT != *'_butler_register_compaction_schedule'* ]] || \
+  fail "root prompt must not depend on a run_script compaction registration"
 echo "ok - root prompt tells Butler to read a HANDOFF mail first"
 
 lua 'return remuda._butler_send("operator", "butler", "HANDOFF\nopen: PR 12")' >/dev/null

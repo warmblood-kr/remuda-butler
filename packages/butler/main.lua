@@ -768,9 +768,7 @@ mailbox(root_identity.id)
 -- file left 0644 by an older Butler is replaced.
 remuda.butler.guard.write_private(mcp_config_path, agent_mcp_json(butler_token))
 
-local SYSTEM_PROMPT = "Early in this session, call remuda._butler_register_compaction_schedule() "
-  .. "via the run_script MCP tool, once, to enable this butler's own periodic "
-  .. "context-compaction upkeep. You lead a Butler team. For every delegation, create a "
+local SYSTEM_PROMPT = "You lead a Butler team. For every delegation, create a "
   .. "Remuda-managed member with `remuda butler topic delegate NAME TASK`. "
   .. "Internal agent subagents are separate from Butler team members. Use `remuda butler sessions` to "
   .. "inspect members, `inbox` to read reports, and `send` for follow-up direction."
@@ -936,7 +934,10 @@ local function launch_butler()
   if remuda._butler_selected_agent and stale_session then
     butler_name = requested_name
     remuda._butler_name = butler_name
-    if not root_permissions_ensured then pcall(ensure_root_permissions, remuda._butler_selected_agent) end
+    if not root_permissions_ensured then
+      remuda._butler_register_compaction_schedule()
+      pcall(ensure_root_permissions, remuda._butler_selected_agent)
+    end
     return
   end
   if remuda._butler_launching then return "launching Butler" end
@@ -980,6 +981,7 @@ local function launch_butler()
   root_record.kind = kind
   bus.identities.butler, bus.identity_ids[root_record.id] = root_record, root_record
   identity_record(root_record)
+  remuda._butler_register_compaction_schedule()
   remuda._butler_start_error = nil
   remuda._butler_start_pending = false
   return selected

@@ -6185,9 +6185,8 @@ fn butler_watchdog_relaunches_a_session_that_really_died() {
     );
 }
 
-/// The lifecycle declaration owns one compaction schedule; the session's
-/// run_script call only enables it. Repeating that request must not register
-/// another schedule.
+/// A successful root launch enables its lifecycle compaction schedule, and
+/// reconciliation of the live root keeps the single schedule.
 #[test]
 #[cfg(unix)]
 fn butler_compaction_schedule_registration_is_idempotent() {
@@ -6226,12 +6225,12 @@ fn butler_compaction_schedule_registration_is_idempotent() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // Two separate Eval requests, exactly like two separate `run_script`
-    // calls would arrive -- a plain Lua local inside init.lua would not even
-    // be reachable a second time this way, which is the whole reason the
-    // handle lives on `remuda` itself.
-    eval(&path, "remuda._butler_register_compaction_schedule()");
-    eval(&path, "remuda._butler_register_compaction_schedule()");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while eval(&path, "return tostring(remuda._butler_state.compaction_enabled)") != "true" {
+        assert!(Instant::now() < deadline, "the root launch did not enable compaction");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    eval(&path, "remuda._butler_reconcile()");
 
     let live = read_count(
         &path,
@@ -6245,7 +6244,7 @@ fn butler_compaction_schedule_registration_is_idempotent() {
     );
     assert_eq!(
         live, 1,
-        "two calls to remuda._butler_register_compaction_schedule() left {live} live \
+        "root launch and reconciliation left {live} live \
          \"butler-compaction\" schedules -- expected the one lifecycle schedule"
     );
 
@@ -6339,9 +6338,11 @@ fn butler_compaction_schedule_sends_compact_when_idle_but_not_when_busy() {
         "the Codex fixture must cross the warn-level compaction threshold"
     );
 
-    // Simulates the launched session's own one-time `run_script` call the
-    // system prompt asks for.
-    eval(&path, "remuda._butler_register_compaction_schedule()");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while eval(&path, "return tostring(remuda._butler_state.compaction_enabled)") != "true" {
+        assert!(Instant::now() < deadline, "the root launch did not enable compaction");
+        std::thread::sleep(Duration::from_millis(50));
+    }
     assert_eq!(
         read_count(
             &path,
@@ -6350,7 +6351,7 @@ fn butler_compaction_schedule_sends_compact_when_idle_but_not_when_busy() {
             end return n"#,
         ),
         1,
-        "run_script must enable the lifecycle-declared compaction schedule"
+        "the root launch must enable the lifecycle-declared compaction schedule"
     );
     let fires_before_idle = read_count(
         &path,
@@ -6482,11 +6483,15 @@ fn butler_compaction_trace_records_registered_skipped_and_sent() {
     eval(&path, &format!("remuda._butler_inbox({butler_name:?})"));
     eval(&path, FAKE_COMPACTION_EXPECT);
 
-    // Simulates the launched session's own one-time `run_script` call the
-    // system prompt asks for -- this alone must already leave a "registered"
-    // line, before any tick has had a chance to run.
-    eval(&path, "remuda._butler_register_compaction_schedule()");
-    let registered = std::fs::read_to_string(&trace_path).unwrap_or_default();
+    // Root launch enables the lifecycle schedule before any tick has had a
+    // chance to run.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let registered = loop {
+        let trace = std::fs::read_to_string(&trace_path).unwrap_or_default();
+        if trace.contains("\tregistered\t") { break trace; }
+        assert!(Instant::now() < deadline, "root launch did not enable compaction:\n{trace}");
+        std::thread::sleep(Duration::from_millis(50));
+    };
     assert!(
         registered.contains("\tregistered\t"),
         "no \"registered\" trace line after registration:\n{registered}"
@@ -6912,6 +6917,17 @@ done
                 pending_restore_model="opus", restore_retry_in_progress=true}}
             "#));
         }
+        if name == "fake-unknown" {
+            assert_eq!(eval(&path, &format!(r#"
+              remuda._butler_state = remuda._butler_state or {{}}
+              remuda._butler_state.compaction_fleet_active = "another-session"
+              local result = remuda._butler_compaction_tick({name:?}, false)
+              remuda._butler_state.compaction_fleet_active = nil
+              return result
+            "#)), "fake-unknown:fleet_busy");
+            assert!(std::fs::read_to_string(&trace_path).unwrap_or_default().contains("\tfleet_busy\t"),
+                "fleet-busy skips must be traced");
+        }
         let result = if name == "fake-stale-flags" {
             eval(&path, &format!("return remuda._butler_compaction_tick({name:?}, false)"))
         } else if name == "fake-legacy-record" {
@@ -7113,6 +7129,8 @@ done
                 "remember prior model for idle recovery");
             assert!(std::path::Path::new(&eval(&path, "return remuda._fake_restore_file")).exists(),
                 "an interrupted compaction must leave a durable prior-model record");
+            let trace = std::fs::read_to_string(&trace_path).unwrap_or_default();
+            assert!(trace.contains("\tlock_released\t"), "lock release must be traced: {trace}");
             eval(&path, &format!(r#"
               remuda._butler_compaction_members_state[{name:?}].restore_pending = nil
               remuda._butler_compaction_load_restore_record()
@@ -7130,6 +7148,11 @@ done
             eval(&path, &format!("return remuda._butler_compaction_tick({name:?}, false)"));
             assert_eq!(std::fs::read_to_string(&log).unwrap(), before,
                 "recovery must not type while a human is attached");
+            let failure_state = format!("local s = remuda._butler_compaction_members_state[{name:?}]; \
+                return tostring(s.failure_cooldown_until) .. '/' .. tostring(s.compaction_failures)");
+            let failed_state = eval(&path, &failure_state);
+            assert!(!failed_state.starts_with("nil/") && failed_state.ends_with("/1"),
+                "the failed compaction must leave a cooldown and one counted failure: {failed_state}");
             eval(&path, &format!("remuda._fake_attached[{name:?}] = false"));
             eval(&path, &format!("return remuda._butler_compaction_tick({name:?}, false)"));
             let deadline = Instant::now() + Duration::from_secs(8);
@@ -7141,6 +7164,8 @@ done
                 std::thread::sleep(Duration::from_millis(50));
             }
             assert_eq!(std::fs::read_to_string(&log).unwrap(), format!("{before}CMD:/model opus\nKEY:RET\n"));
+            assert_eq!(eval(&path, &failure_state), failed_state,
+                "a recovery-only restore must keep the failure cooldown and count");
         }
         if name == "fake-model-confirm-wrong-title" {
             let deadline = Instant::now() + Duration::from_secs(8);
@@ -7197,6 +7222,9 @@ done
             assert!(reports.contains("unrecognized dialog during model-sonnet")
                     && got == "CMD:/model sonnet\nKEY:RET\n",
                 "the bottom permission dialog must follow the unknown path without Return; reports={reports:?}; log={got:?}");
+            let trace = std::fs::read_to_string(&trace_path).unwrap_or_default();
+            assert!(trace.contains("\tmodel_wait\t") && trace.contains("outcome=unrecognized_dialog"),
+                "unrecognized dialogs during a model wait must be traced: {trace}");
         }
         if name == "fake-restore-fails" {
             let deadline = Instant::now() + Duration::from_secs(8);
@@ -7545,6 +7573,28 @@ done
         "an unverified /compact must fail with its own reason: {}", reports());
     assert_eq!(state("cl-unverified", "restore_pending"), "nil");
     assert!(!record().contains("cl-unverified-id"), "the durable record must be cleared: {}", record());
+    });
+
+    // d. Three consecutive failures stop compaction: one terminal mail, then
+    //    every non-forced attempt and tick is skipped.
+    scenario("d (failure limit)", &|| {
+    eval(&path, "remuda._fake_reports = {}");
+    eval(&path, "remuda._butler_compaction_config.claude_completion_timeout = 0.2");
+    std::fs::write(&settings_path, b"{\"model\":\"opus\"}\n").unwrap();
+    start("cl-limit", "opus-nodrop");
+    for (round, now) in [(1, 1000), (2, 2000), (3, 3000)] {
+        eval(&path, &format!("remuda._fake_now({now})"));
+        assert_eq!(eval(&path, "return remuda.butler.compact('cl-limit')"), "started", "round {round}");
+        settle("cl-limit", &|log| log.matches("CMD:/model opus").count() == round, "the failed cycle");
+        assert_eq!(state("cl-limit", "compaction_failures"), round.to_string());
+    }
+    assert!(reports().contains("Compaction stopped after 3 consecutive failures"),
+        "the third failure must send the terminal message: {}", reports());
+    assert_eq!(reports().matches("Compaction failed").count(), 2, "only the first two failures send the plain notice");
+    eval(&path, "remuda._fake_now(5000)");
+    assert_eq!(eval(&path, "return remuda.butler.compact('cl-limit')"), "skipped_failure_limit");
+    assert_eq!(eval(&path, "return remuda._butler_compaction_tick('cl-limit', false)"), "cl-limit:skipped_failure_limit");
+    assert_eq!(log_of("cl-limit").matches("CMD:/model sonnet").count(), 3, "no fourth cycle may start");
     });
     assert!(failures.is_empty(), "{}", failures.join("\n---\n"));
     drop(daemon);
