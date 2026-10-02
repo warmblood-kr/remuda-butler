@@ -700,6 +700,29 @@ return function(matrix, pinned_hostname)
       and line_specs[1].label == "Matrix homeserver URL" and not line_specs[3].preface:find("Homeserver: [^\n]*%.%.%.\n"),
       "a cut summary line ends with ... inside the limit, and an uncut line has no mark")
     line_specs[3].callback("N", nil)
+
+    -- Long paths need a middle cut so the owner can still identify the file.
+    local saved_paths = remuda._butler_matrix_paths
+    local long_prefix = "/tmp/" .. string.rep("long-directory/", 12)
+    remuda._butler_matrix_paths = { token_path = long_prefix .. "remuda/butler/token",
+      config_path = long_prefix .. "remuda/butler/config" }
+    requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+    matrix.cli({ "matrix", "setup" })
+    line_specs[1].callback("http://matrix.invalid", nil)
+    line_specs[2].callback("@alice:example.org", nil)
+    local summary = line_specs[3].preface
+    local config_cut = summary:find("...", 1, true)
+    local config_tail = summary:find("remuda/butler/config", 1, true)
+    assert(summary:find(long_prefix:sub(1, 12), 1, true)
+      and config_cut and config_tail and config_cut < config_tail and #summary <= 32 * 200,
+      "a long path summary keeps a leading directory and the trailing config filename: " .. tostring(summary))
+    local output_line = summary:match("\n(  Save private token and config files in: [^\n]*)")
+    assert(output_line and output_line:find("...", 1, true)
+      and output_line:match("remuda/butler$"),
+      "the output directory summary keeps its trailing directory names: " .. tostring(summary))
+    line_specs[3].callback("N", nil)
+    remuda._butler_matrix_paths = saved_paths
+
     -- A core without preface (older daemons ignore it silently) keeps the
     -- summary in the label, as before.
     local supported = matrix.prompt_preface_supported

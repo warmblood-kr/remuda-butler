@@ -291,6 +291,18 @@ local function shortened(text, limit)
   if #text <= limit then return text end
   return matrix.utf8_prefix(text, limit - 3) .. "..."
 end
+local function shortened_path(text, limit)
+  if #text <= limit then return text end
+  local room = limit - 3
+  local prefix = matrix.utf8_prefix(text, math.floor(room / 3))
+  local suffix_start = #text - (room - #prefix) + 1
+  while suffix_start <= #text do
+    local byte = text:byte(suffix_start)
+    if not byte or byte < 0x80 or byte >= 0xC0 then break end
+    suffix_start = suffix_start + 1
+  end
+  return prefix .. "..." .. text:sub(suffix_start)
+end
 local function shell_quote(value)
   return matrix.shell_quote(tostring(value))
 end
@@ -596,23 +608,24 @@ function matrix.cli(args, agent, stdin_body, file_body)
             -- A dynamic value is cut at 150 characters so one long value cannot
             -- crowd the summary; the fixed wording is never cut.
             local function value(text) return shortened(terminal_safe(text), 150) end
+            local function path(text) return shortened_path(terminal_safe(text), 150) end
             local lines = {
               "Matrix setup will:",
               "  Homeserver: " .. value(wizard_plan.homeserver),
               "  Owner: " .. value(wizard_plan.owner_mxid),
               "  Rooms: open (anyone can invite this Butler). Restrict: set rooms=allowlist or add deny_room/deny_server in "
-                .. value(wizard_plan.config_path) .. ". The sender allowlist still decides whose messages are trusted.",
+                .. path(wizard_plan.config_path) .. ". The sender allowlist still decides whose messages are trusted.",
               "  Account: create a Butler bot (you will need its server registration token)",
               "  Bot: " .. value(wizard_plan.bot_mxid),
               -- Without --dir the files go next to the config file.
               "  Save private token and config files in: "
-                .. value(wizard_plan.output_dir or wizard_plan.config_path:match("^(.*)/[^/]+$")),
+                .. path(wizard_plan.output_dir or wizard_plan.config_path:match("^(.*)/[^/]+$")),
               "  Start the relay for this Butler with this config (replaces its current Matrix relay config)",
             }
             if wizard_plan.pin then
               lines[#lines + 1] = "  HTTPS certificate pin: " .. wizard_plan.pin
             elseif wizard_plan.ca_file then
-              lines[#lines + 1] = "  HTTPS CA file: " .. value(wizard_plan.ca_file)
+              lines[#lines + 1] = "  HTTPS CA file: " .. path(wizard_plan.ca_file)
             elseif scheme_or_error == "https" then
               lines[#lines + 1] = "  HTTPS trust: this system's trusted certificates"
             end
