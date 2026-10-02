@@ -545,10 +545,21 @@ weq("windows, -o on an existing link", select(2, wout([[C:\proj\existing-link]])
   [[refused: -o C:\proj\existing-link is a symlink]] .. WNEXT)
 for name, path in pairs({
   ["a device"] = [[C:\proj\NUL]], ["a device name with an extension"] = [[C:\proj\con.txt]],
-  ["an alternate stream"] = [[C:\proj\out.bin:s]],
+  ["an alternate stream"] = [[C:\proj\out.bin:s]], ["a pipe"] = [[\\.\pipe\x]],
 }) do
   weq("windows, -o on " .. name, select(2, wout(path)), "refused: -o " .. path .. " names a device or a stream, not a file" .. WNEXT)
+  local terminal_out, terminal_why = permissions.output_for_caller(path, "matrix-MEDIA", { kind = "outside" }, wcwd_of,
+    wrealpath, wis_symlink, "windows")
+  weq("windows, terminal caller, -o on " .. name .. ": nothing to write", terminal_out, nil)
+  weq("windows, terminal caller, -o on " .. name .. ": refusal", terminal_why,
+    "refused: -o " .. path .. " names a device or a stream, not a file\nNext: pass -o with a regular file path")
 end
+weq("windows, terminal caller: -o as given",
+  permissions.output_for_caller([[D:\any\out.bin]], "matrix-MEDIA", { kind = "outside" }, wcwd_of, wrealpath, wis_symlink,
+    "windows"), [[D:\any\out.bin]])
+weq("posix, terminal caller: -o with a colon or a device-like name is an ordinary file",
+  permissions.output_for_caller("/tmp/nul:x", "matrix-MEDIA", { kind = "outside" }, wcwd_of, wrealpath, wis_symlink,
+    "linux"), "/tmp/nul:x")
 -- The default name comes from the sender's media id.
 for name, default in pairs({ ["a backslash"] = [[matrix-a\..\..\b]], ["a stream"] = "matrix-a:b", ["a device"] = "nul" }) do
   local out = permissions.output_for_caller(nil, default, { kind = "session", session = "w1" }, wcwd_of, wrealpath,
