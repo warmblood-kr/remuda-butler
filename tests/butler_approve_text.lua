@@ -1,6 +1,11 @@
 -- Unit tests for prepared owner-approved text. Run from the repository root:
 --   luajit tests/butler_approve_text.lua
-remuda = { butler = { approval = { handler = function() end, request = function() end, reply = function() end } } }
+local request_spec, request_handler
+remuda = { butler = { approval = {
+  handler = function(kind, callbacks) assert(kind == "approve_text"); request_handler = callbacks end,
+  request = function(spec) request_spec = spec; spec.on_id("ABCD"); return "request-handle" end,
+  reply = function() return true end,
+} } }
 local approve_text = dofile("packages/butler/approve_text.lua")
 
 local multiline = "first\nsecond\n"
@@ -58,3 +63,26 @@ assert(ok == false and reason == "pane_busy" and #typed == 1,
   "unsafe composer, dialog, or attached human refuses without typing")
 
 print("ok - prepared approved text cases")
+
+local returned_id = approve_text.request("agent-1", multiline, "agent-1")
+assert(returned_id == "ABCD", "registration returns the short request id")
+assert(request_spec.kind == "approve_text" and request_spec.data.session == "agent-1"
+  and request_spec.data.text == multiline and request_spec.data.posted_text == multiline,
+  "request stores the exact bytes, session, and display copy")
+assert(request_spec.rate_limit_per_window == 10 and request_spec.rate_window_s == 600,
+  "registration rate is bounded per agent")
+local posted = request_spec.render({ id = "ABCD", data = request_spec.data })
+assert(posted:find("ABCD/" .. #multiline, 1, true) and posted:find("> first\n> second\n> ", 1, true),
+  "posted request identifies its fingerprint and quotes every line")
+local applied
+remuda._butler_notify_policy = function() return true end
+request_handler.approve({ id = "ABCD", data = request_spec.data,
+  answered_by = "@alice:example.org", answer_event_id = "$owner-answer" },
+  function(ok, why) applied = { ok, why } end)
+assert(applied[1] == true, "approved request delivers the stored text")
+
+local changed = { id = "ABCD", data = { session = "agent-1", bytes = #multiline,
+  registered_text = "changed", posted_text = multiline, request_id = "ABCD" } }
+request_handler.approve(changed, function(ok, why) applied = { ok, why } end)
+assert(applied[1] == "retry" and applied[2] == "text_changed",
+  "hash mismatch remains approved for retry without delivery")
