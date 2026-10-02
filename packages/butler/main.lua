@@ -66,6 +66,9 @@ if remuda._butler_test_mode == true then
   return
 end
 
+remuda.exec("butler/private_write")
+remuda._butler_private_write.install()
+
 -- Cancel the existing Matrix relay before resolving new config;
 -- matrix.lua will start exactly one relay after the new config is installed.
 local old_matrix = remuda.butler and remuda.butler.matrix
