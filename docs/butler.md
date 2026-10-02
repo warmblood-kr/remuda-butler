@@ -44,6 +44,8 @@ PowerShell installer on Windows. Codex CLI can be installed with
 
 `remuda butler --help` includes the doctor command with the other installed
 Butler verbs.
+Monocle launches as `monocle agent --workdir DIR --session NAME --auto-approve`
+with `--model M` when a model is specified.
 
 ## Agent accounts and quota
 
