@@ -281,6 +281,15 @@ end
   local moved, moved_note = system.data_home("C:/Users/u/.local/share", function() return true end)
   assert(moved == [[C:\Users\u\AppData\Local]] and moved_note == nil, "when both exist, core's place is used and nothing is said")
 
+  -- A check that raises must never stop Butler from loading: the old home is used.
+  local raised_ok, raised_home = pcall(system.data_home, "C:/Users/u/.local/share", function() error("disk check exploded") end)
+  assert(raised_ok and raised_home == "C:/Users/u/.local/share",
+    "a raising existence check falls back to the old home: " .. tostring(raised_home))
+  remuda.fs = { realpath = function() error("core realpath exploded") end }
+  raised_ok, raised_home = pcall(system.data_home, "C:/Users/u/.local/share")
+  remuda.fs = nil
+  assert(raised_ok and raised_home == "C:/Users/u/.local/share",
+    "a raising core realpath falls back to the old home: " .. tostring(raised_home))
   -- paths.lua builds Butler's directories on that answer.
   local outer_getenv = os.getenv
   os.getenv = function(name)
