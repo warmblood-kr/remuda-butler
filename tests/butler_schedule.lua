@@ -413,6 +413,16 @@ for _, case in ipairs({
   bad[case[1]] = case[2]
   ok("check refuses " .. case[1], not schedule.check(bad))
 end
+for _, value in ipairs({ 42, "x\ny", "\27[31m", ("x"):rep(41) }) do
+  local bad = entry("planted")
+  bad.created_at = value
+  ok("check refuses created_at " .. tostring(#tostring(value)), not schedule.check(bad))
+end
+local stamped = entry("planted")
+stamped.created_at = ("x"):rep(40)
+ok("check accepts a 40-byte created_at", schedule.check(stamped))
+stamped.created_at = nil
+ok("check accepts a missing created_at", schedule.check(stamped))
 ok("a missing last_message is fine", schedule.check(hourly_entry("fresh")))
 for _, value in ipairs({ 1e300, 0 / 0, 1 / 0, -1 / 0, -1, 1.5, 2 ^ 53 + 2, 4223371680, "5" }) do
   local bad = entry("planted")

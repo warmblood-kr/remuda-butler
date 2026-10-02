@@ -143,6 +143,10 @@ function M.check(entry)
   if last ~= nil and (type(last) ~= "string" or #last > 64 or last:find("%c")) then
     return nil, "last_message must be a message id"
   end
+  local created = entry.created_at
+  if created ~= nil and (type(created) ~= "string" or #created > 40 or created:find("%c")) then
+    return nil, "created_at must be short text"
+  end
   local fired = entry.last_fired
   if type(entry.enabled) ~= "boolean" or type(fired) ~= "number" then
     return nil, "enabled and last_fired are required"
