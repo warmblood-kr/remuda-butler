@@ -191,7 +191,9 @@ function M.load(path, raw)
   local file, open_error, code = io.open(path, "rb")
   if not file then
     if code == 2 or tostring(open_error):find("No such file", 1, true) then return {} end
-    local problem = "cannot be opened: " .. M.safe(open_error, 100)
+    local reason = tostring(open_error)
+    if reason:sub(1, #path + 2) == path .. ": " then reason = reason:sub(#path + 3) end
+    local problem = "cannot be opened: " .. M.safe(reason, 100)
     trace("schedule_file_unusable", problem)
     return {}, problem
   end

@@ -1607,7 +1607,7 @@ function relay.new(options)
             status_matched, status_text, status_commit, trace_reason = status_command.outcome(handled, matched, text, commit, content.body)
             if trace_reason then
               trace_typed_line(ev, room_id or cfg.room, "?", nil, "butler",
-                "consumed:" .. trace_reason .. ":" .. terminal_safe_field(tostring(matched), 64))
+                "consumed:" .. trace_reason .. ":" .. (terminal_safe_field(tostring(matched), 64):gsub("%c", " ")))
             end
           end
           if status_matched then

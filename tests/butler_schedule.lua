@@ -139,7 +139,14 @@ do
   io.open = real_open
   traces = {}
   io.open = real_open
+  -- The open error keeps the reason class, not the path prefix that cuts it off.
+  stub(string.rep("d/", 80) .. "s.json: Permission denied", 13)
+  local _, long_why = schedule.load(string.rep("d/", 80) .. "s.json", trace)
+  io.open = real_open
+  ok("a long path keeps the reason class", long_why == "cannot be opened: Permission denied")
+  traces = {}
 end
+
 
 local list = {}
 ok("add stores a checked entry", schedule.add(list, entry()))
