@@ -1266,3 +1266,5 @@ function remuda._butler_compaction_submit()
   end
   return true
 end
+
+-- contract gate trigger validation
