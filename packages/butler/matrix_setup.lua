@@ -177,7 +177,7 @@ local function setup_command(options, destination)
     if options.password_input_path then add("--password-file", options.password_input_path) end
     add("--bot", options.bot_mxid)
   elseif options.secret_kind == "password" then
-    add("--password-file", options.secret_path)
+    if not options.password_cmd then add("--password-file", options.secret_path) end
     add("--bot", options.bot_mxid)
   else
     add("--token-file", options.secret_path)
@@ -192,6 +192,11 @@ local function setup_command(options, destination)
     parts[#parts + 1] = "--default"
   else
     parts[#parts + 1] = '--dir "$HOME/.config/remuda/matrix-test"'
+  end
+  if options.password_cmd then
+    -- Stays last: --password-cmd takes every remaining argument. The quoting is POSIX-style.
+    parts[#parts + 1] = "--password-cmd"
+    for _, word in ipairs(options.password_cmd) do parts[#parts + 1] = shell_quote(word) end
   end
   return table.concat(parts, " ")
 end
@@ -222,6 +227,22 @@ local function validate_secret(path, kind)
   if secret_error == "too_long" then return nil, "secret input file exceeds 4 KiB: " .. path end
   if secret_error == "empty" then return nil, "secret input file is empty: " .. path end
   if not secret then return nil, "secret input file is invalid: " .. path end
+  return secret
+end
+
+-- The bot password is the first line a program prints; nothing it prints is ever echoed.
+local function password_from_command(argv)
+  local function failed(what)
+    return nil, "--password-cmd: " .. safe_user_id_echo(argv[1]) .. " " .. what
+      .. "\nNext: check the command runs by itself and prints only the password"
+  end
+  local ok, result = pcall(remuda.process.run, { argv = argv, timeout = 10 })
+  if not ok or type(result) ~= "table" then return failed("could not be started") end
+  if result.timed_out then return failed("timed out after 10 seconds") end
+  if result.code ~= 0 then return failed("failed with exit status " .. tostring(result.code)) end
+  local secret, secret_error = normalize_secret(result.stdout)
+  if secret_error == "too_long" then return failed("printed more than 4 KiB") end
+  if not secret then return failed("printed an empty password") end
   return secret
 end
 
@@ -329,12 +350,13 @@ local function resolve_outputs(options)
   if options.default and options.dir then return nil, "--default and --dir cannot be combined" end
 
   local password_path = token_path:match("^(.*)/[^/]+$") .. "/password"
-  if options.register and (password_path == token_path or password_path == config_path) then
+  local saves_password = options.register and not options.password_cmd
+  if saves_password and (password_path == token_path or password_path == config_path) then
     return nil, "Matrix password, token, and config output paths must be different"
   end
   if not options.force then
     local paths = { token_path, config_path }
-    if options.register then paths[#paths + 1] = password_path end
+    if saves_password then paths[#paths + 1] = password_path end
     for _, path in ipairs(paths) do
       if file_exists(path) then return nil, "output file already exists; pass --force: " .. path end
     end
@@ -367,7 +389,13 @@ function matrix.setup_prepare(args)
   local at = 1
   while at <= #args do
     local name, value = args[at], args[at + 1]
-    if flags[name] then
+    if name == "--password-cmd" then
+      -- Takes every remaining argument, so it must be the last option.
+      if not value or value == "" then return nil, "--password-cmd requires a program to run" end
+      options.password_cmd = {}
+      for index = at + 1, #args do options.password_cmd[#options.password_cmd + 1] = args[index] end
+      break
+    elseif flags[name] then
       if seen[name] then return nil, "duplicate option " .. name end
       options[flags[name]], seen[name] = true, true
       at = at + 1
@@ -397,8 +425,11 @@ function matrix.setup_prepare(args)
   if not owner then return nil, owner_error end
   options.owner_mxid = owner
 
-  local has_password, has_token, has_registration = options.password_file ~= nil,
-    options.token_file ~= nil, options.registration_token_file ~= nil
+  if options.password_cmd and (options.password_file or options.token_file) then
+    return nil, "choose one of --password-cmd, --password-file, or --token-file"
+  end
+  local has_password, has_token, has_registration = options.password_file ~= nil
+    or options.password_cmd ~= nil, options.token_file ~= nil, options.registration_token_file ~= nil
   if options.register then
     if has_token then
       return nil, "--register creates a bot; use --registration-token-file instead of --token-file"
@@ -409,13 +440,13 @@ function matrix.setup_prepare(args)
   elseif has_password and has_token then
     return nil, "choose one of --password-file or --token-file"
   elseif not has_password and not has_token then
-    return nil, "provide --password-file, --token-file, or --register"
+    return nil, "provide --password-file, --password-cmd, --token-file, or --register"
   end
   options.secret_kind = options.register and "registration"
-    or (options.password_file and "password" or "token")
+    or (has_password and "password" or "token")
   options.secret_path = options.register and options.registration_token_file
     or options.password_file or options.token_file
-  if not options.prompt_registration_token then
+  if not options.prompt_registration_token and (options.register or not options.password_cmd) then
     local secret_ok, secret_error = validate_secret(options.secret_path, options.secret_kind)
     if not secret_ok then return nil, secret_error end
     options.secret = secret_ok
@@ -436,10 +467,11 @@ function matrix.setup_prepare(args)
       return nil, "cannot derive a bot account name from this computer\nNext: add --bot @butler-NAME:"
         .. (options.owner_mxid:match("^@[^:]+:(.+)$") or "SERVER")
     end
-  elseif options.password_file and not options.bot_mxid then
-    return nil, "--bot is required when using --password-file"
+  elseif has_password and not options.bot_mxid then
+    return nil, "--bot is required when using "
+      .. (options.password_cmd and "--password-cmd" or "--password-file")
   end
-  if options.register or options.password_file or options.bot_mxid then
+  if options.register or has_password or options.bot_mxid then
     local bot, bot_error = valid_mxid(options.bot_mxid, "--bot")
     if not bot then return nil, bot_error end
     options.bot_mxid = bot
@@ -472,6 +504,12 @@ function matrix.setup_prepare(args)
     or outputs.token_path:match("^(.*)/[^/]+$") .. "/password"
   if options.register and options.password_path == options.token_path then
     return nil, "Matrix password and token output paths must be different"
+  end
+  -- Run last, so a command that may prompt its owner only runs for a setup that can proceed.
+  if options.password_cmd then
+    local password, command_error = password_from_command(options.password_cmd)
+    if not password then return nil, command_error end
+    if options.register then options.password_secret = password else options.secret = password end
   end
   options.password_file, options.token_file = nil, nil
   options.registration_token_file = nil
@@ -797,10 +835,13 @@ function matrix.setup_write(options, result)
     end
     return nil, message
   end
+  -- A --password-cmd password stays with whoever made it; no copy is saved.
+  local saves_password = type(options) == "table" and options.secret_kind == "registration"
+    and not options.password_cmd
   if type(options) ~= "table" or type(result) ~= "table"
     or type(result.token) ~= "string" or result.token == ""
     or type(result.user_id) ~= "string" or type(result.home_room) ~= "string"
-    or (options.secret_kind == "registration"
+    or (saves_password
       and (type(result.password) ~= "string" or result.password == ""
         or type(options.password_path) ~= "string"))
     or (options.create_all and type(result.all_room) ~= "string")
@@ -813,11 +854,11 @@ function matrix.setup_write(options, result)
   end
 
   local paths = { options.token_path }
-  if options.secret_kind == "registration" then paths[#paths + 1] = options.password_path end
+  if saves_password then paths[#paths + 1] = options.password_path end
   paths[#paths + 1] = options.config_path
   local path_labels = { [options.token_path] = "token", [options.config_path] = "config" }
   local contents = { [options.token_path] = result.token .. "\n" }
-  if options.secret_kind == "registration" then
+  if saves_password then
     path_labels[options.password_path] = "password"
     contents[options.password_path] = result.password .. "\n"
   end
@@ -918,7 +959,7 @@ function matrix.setup_write(options, result)
     written[#written + 1] = path
   end
   return { token_path = options.token_path, config_path = options.config_path,
-    password_path = options.secret_kind == "registration" and options.password_path or nil }
+    password_path = saves_password and options.password_path or nil }
 end
 
 return matrix

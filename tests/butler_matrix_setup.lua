@@ -1404,6 +1404,17 @@ return function(matrix, pinned_hostname)
     assert(tostring(cmd_no_bot):find("--bot is required when using --password-cmd", 1, true),
       "--password-cmd without --register needs --bot: " .. tostring(cmd_no_bot))
 
+    runs = {}
+    local _, cmd_retry = matrix.setup_prepare({ "--homeserver", "http://matrix.invalid",
+      "--owner", "@alice:example.org", "--bot", "@butler-cmd:example.org", "--password-cmd", "op", "read",
+      "op://Vault/It'em/password" })
+    for _, destination in ipairs({ "--default", '--dir "$HOME/.config/remuda/matrix-test"' }) do
+      assert(tostring(cmd_retry):find(" --bot '@butler-cmd:example.org' " .. destination
+        .. " --password-cmd 'op' 'read' 'op://Vault/It'\\''em/password'\n", 1, true),
+        "the retry line should keep --password-cmd and its quoted arguments last: " .. tostring(cmd_retry))
+    end
+    assert(#runs == 0, "a setup that cannot proceed must not run the password command")
+
     -- Without --register the command's output is the login password.
     runs, requests, resolved, atomic_writes = {}, {}, nil, {}
     run_result = { code = 0, stdout = "cmd-secret-pw\n", stderr = "", timed_out = false }
@@ -1418,7 +1429,7 @@ return function(matrix, pinned_hostname)
 
     -- With --register it is the new account's password, and no copy is saved.
     runs, requests, resolved, atomic_writes = {}, {}, nil, {}
-    run_result = { code = 0, stdout = "cmd-secret-pw\r\n", stderr = "", timed_out = false }
+    run_result = { code = 0, stdout = "  cmd-secret-pw \r\nignored\n", stderr = "", timed_out = false }
     assert(cmd_cli("--register", "--registration-token-file", registration_token_file,
       "--password-cmd", table.unpack(op)))
     assert(#runs == 1 and type(runs[1].argv) == "table" and #runs[1].argv == #op
@@ -1428,7 +1439,7 @@ return function(matrix, pinned_hostname)
     end
     assert(#requests == 1 and requests[1].url:match("/register$")
       and request_json(requests[1]).password == "cmd-secret-pw",
-      "--register --password-cmd should submit the command's output minus one trailing newline")
+      "--register --password-cmd should submit the trimmed first line of the command's output, like a password file")
     requests[1].callback({ status = 401,
       body = '{"session":"cmd-session","flows":[{"stages":["m.login.registration_token"]}]}' })
     assert(request_json(requests[2]).password == "cmd-secret-pw")
