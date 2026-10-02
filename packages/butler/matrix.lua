@@ -23,6 +23,7 @@ if not matrix.send then remuda.exec("butler/matrix_write") end
 remuda.exec("butler/matrix_setup")
 remuda.exec("butler/matrix_cli")
 remuda.exec("butler/typed_lines")
+remuda.exec("butler/status_command")
 remuda.exec("butler/typed_lines_cli")
 remuda.exec("butler/matrix_relay")
 

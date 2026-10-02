@@ -1,5 +1,7 @@
 -- Unit tests for packages/butler/status_command.lua. Run from the repository root:
 --   luajit tests/butler_status_command.lua
+remuda = { butler = {} }
+dofile("packages/butler/typed_lines.lua")
 local status = dofile("packages/butler/status_command.lua")
 
 local function lines_of(text)
@@ -73,5 +75,87 @@ assert(#fat_text <= 1500 and lines_of(fat_text) <= 14, "byte bound holds for lon
 local help = status.help_text()
 assert(help:find("?status", 1, true) and help:find("?help", 1, true))
 assert(lines_of(help) <= 14 and #help <= 1500)
-
 print("ok - status_format and help_text")
+
+-- parse: whole line, case-sensitive, known words only
+assert(status.parse("?status") == "status" and status.parse("?help") == "help")
+for _, body in ipairs({ "?Status", "?status ", " ?status", "? status", "?statu", "?status now", "!status",
+  "status", "?", "?load", "??status", "?status\n" }) do
+  assert(status.parse(body) == nil, "must not match " .. string.format("%q", body))
+end
+
+-- rate: one per 10 s per sender
+local last = {}
+assert(status.rate_allow(last, "@a:x", now) == true)
+assert(status.rate_allow(last, "@a:x", now + 9) == false)
+assert(status.rate_allow(last, "@b:x", now + 9) == true, "other senders have their own window")
+assert(status.rate_allow(last, "@a:x", now + 10) == true)
+
+-- handle: gate, scope, parse, rate, in that order
+local owner = "@owner:example.org"
+local cfg = { allowed_senders = { [owner] = true, ["@agent-1:example.org"] = true },
+  butler_senders = {}, self_mxid = "@bot:example.org", status_commands = true }
+local function event(body, overrides)
+  local value = { event_id = "$e1", sender = owner, type = "m.room.message",
+    origin_server_ts = now * 1000, content = { msgtype = "m.text", body = body } }
+  for key, item in pairs(overrides or {}) do value[key] = item end
+  return value
+end
+local function scope(overrides)
+  local value = { live = true, room_allowed = true, rate = {} }
+  for key, item in pairs(overrides or {}) do value[key] = item end
+  return value
+end
+local function handle(ev, c, s, st) return status.handle(st or { processed = {} }, ev, now, c or cfg, s or scope()) end
+
+remuda._butler_bus = { agents = {
+  butler = { id = "01A", kind = "claude", cwd = "/secret/cwd", model = "SECRET-MODEL" },
+  ["dev-1"] = { id = "01B", kind = "codex" },
+}, pending_tasks = { ["dev-1"] = "SECRET-PROMPT" }, inboxes = { butler = { { body = "SECRET-MAIL-BODY" } } } }
+remuda._butler_telemetry_for = function(agent)
+  return { context_percent = agent.kind == "claude" and 41 or "?", model = "SECRET-MODEL", screen = "SECRET-SCREEN" }
+end
+remuda._butler_mail = { unread = function(id) return id == "01B" and 2 or 0 end }
+remuda._butler_quota = { claude_reading = function()
+  return { at = now, limits = { { name = "5-hour limit", used = 62, resets_at = now + 1 } } }
+end }
+
+local matched, reply = handle(event("?status"))
+assert(matched == true and reply, "an allowlisted human gets a status reply")
+assert(reply:find("butler status · 2 sessions", 1, true), reply)
+assert(reply:find("butler   claude ctx 41%  idle", 1, true), reply)
+assert(reply:find("dev-1    codex  ctx n/a  task  ✉2", 1, true), reply)
+assert(reply:find("claude 5h 62%", 1, true), reply)
+for _, secret in ipairs({ "SECRET-MAIL-BODY", "SECRET-PROMPT", "SECRET-MODEL", "SECRET-SCREEN", "/secret/cwd", "01A" }) do
+  assert(not reply:find(secret, 1, true), "reply leaks " .. secret)
+end
+local _, help_reply = handle(event("?help"))
+assert(help_reply == status.help_text())
+
+local function silent(name, ev, c, s, st)
+  local got, text = handle(ev, c, s, st)
+  assert(not got and text == nil, name .. " must not be handled")
+end
+local off = { allowed_senders = cfg.allowed_senders, butler_senders = {}, self_mxid = cfg.self_mxid, status_commands = false }
+silent("switch off", event("?status"), off)
+silent("not live", event("?status"), nil, scope({ live = false }))
+silent("room not allowed", event("?status"), nil, scope({ room_allowed = false }))
+silent("agent sender", event("?status", { sender = "@agent-1:example.org" }))
+silent("unlisted sender", event("?status", { sender = "@eve:example.org" }))
+silent("replayed event", event("?status"), nil, nil, { processed = { ["$e1"] = true } })
+silent("old event", event("?status", { origin_server_ts = (now - 400) * 1000 }))
+silent("unknown command", event("?load"))
+silent("typed-line form", event("!status"))
+
+local s = scope()
+assert(handle(event("?status", { event_id = "$a" }), nil, s) == true)
+local again, text = handle(event("?status", { event_id = "$b" }), nil, s)
+assert(again == true and text == nil, "a request inside the window is consumed without a reply")
+
+-- a failing source blanks only its own part
+remuda._butler_telemetry_for = function() error("boom") end
+remuda._butler_quota = nil
+local degraded = select(2, handle(event("?status")))
+assert(degraded:find("butler   claude ctx n/a  idle", 1, true) and degraded:find("claude n/a", 1, true), degraded)
+
+print("ok - parse, rate, handle")

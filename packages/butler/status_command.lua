@@ -83,4 +83,80 @@ function M.help_text()
   }, "\n")
 end
 
+local COMMANDS = { ["?status"] = "status", ["?help"] = "help" }
+local REPLY_INTERVAL_SECONDS = 10
+
+-- A whole line that is exactly one known command; anything else is ordinary mail.
+function M.parse(body)
+  return COMMANDS[body]
+end
+
+-- One reply per interval per sender; `last` maps sender to the last reply time.
+function M.rate_allow(last, sender, now)
+  local previous = last[sender]
+  if previous and now - previous >= 0 and now - previous < REPLY_INTERVAL_SECONDS then return false end
+  last[sender] = now
+  return true
+end
+
+local function try(fn, ...)
+  if type(fn) ~= "function" then return nil end
+  local ok, value = pcall(fn, ...)
+  if ok then return value end
+  return nil
+end
+
+local function session_names(agents)
+  local names = {}
+  for name in pairs(agents) do names[#names + 1] = tostring(name) end
+  table.sort(names, function(a, b)
+    if (a == "butler") ~= (b == "butler") then return a == "butler" end
+    return a < b
+  end)
+  return names
+end
+
+-- Reads live Butler state only: no process, no shell, no screen text. A source
+-- that fails leaves its own field empty.
+function M.gather(now)
+  local host = type(remuda) == "table" and remuda or {}
+  local bus = type(host._butler_bus) == "table" and host._butler_bus or {}
+  local agents = type(bus.agents) == "table" and bus.agents or {}
+  local pending = type(bus.pending_tasks) == "table" and bus.pending_tasks or {}
+  local mail = type(host._butler_mail) == "table" and host._butler_mail or {}
+  local sessions = {}
+  for _, name in ipairs(session_names(agents)) do
+    local agent = agents[name]
+    if type(agent) == "table" then
+      local telemetry = try(host._butler_telemetry_for, agent)
+      sessions[#sessions + 1] = {
+        name = name, kind = agent.kind,
+        context_percent = type(telemetry) == "table" and tonumber(telemetry.context_percent) or nil,
+        busy = pending[name] ~= nil,
+        unread = type(agent.id) == "string" and agent.id ~= "" and try(mail.unread, agent.id) or nil,
+      }
+    end
+  end
+  local quota = type(host._butler_quota) == "table" and try(host._butler_quota.claude_reading) or nil
+  return { sessions = sessions, quota = quota, now = now }
+end
+
+local function accept(state, event, now, cfg)
+  return butler.typed_lines.accept(state, event, now, cfg)
+end
+
+-- Decides one Matrix event. Returns matched, text: matched is true when the
+-- event is a status command that must not reach mail or a session; text is
+-- nil when the sender is inside the reply window. scope = { live, room_allowed, rate }.
+function M.handle(state, event, now, cfg, scope)
+  if cfg.status_commands ~= true or scope.live ~= true or scope.room_allowed ~= true then return false end
+  local accepted, _, body = accept(state, event, now, cfg)
+  if not accepted then return false end
+  local command = M.parse(body)
+  if not command then return false end
+  if not M.rate_allow(scope.rate, event.sender, now) then return true end
+  if command == "help" then return true, M.help_text() end
+  return true, M.status_format(M.gather(now))
+end
+
 return M

@@ -4,6 +4,8 @@ local matrix = assert(remuda.butler and remuda.butler.matrix,
   "load butler/matrix_request before butler/matrix_relay")
 local typed_lines = assert(remuda.butler.typed_lines,
   "load butler/typed_lines before butler/matrix_relay")
+local status_command = assert(remuda.butler.status_command,
+  "load butler/status_command before butler/matrix_relay")
 -- Trust words are bound at load (main.lua execs matrix_request before
 -- this file), so a later redefinition of the public entry cannot change them.
 local read_config = matrix.read_config
@@ -683,6 +685,7 @@ function relay.new(options)
   local reply_retry_timers, reply_in_flight = {}, {}
   local untrusted_receive_times = {}
   local typed_line_refusal_at
+  local status_reply_at = {}
   -- ponytail: in memory, a restart may repeat the line once
   local post_cap_notice_at
   -- ponytail: in memory, a restart resets the floor and drops a pending count
@@ -1319,25 +1322,29 @@ function relay.new(options)
     }, function() end)
   end
 
-  local function send_typed_line_reply(event, room_id, text)
+  local function send_threaded_notice(event, room_id, text, txn_prefix)
     local thread_root = relation_fields(type(event.content) == "table" and event.content or {})
     thread_root = thread_root or event.event_id
     if type(thread_root) ~= "string" or thread_root == "" or type(event.event_id) ~= "string" or event.event_id == "" then
       return false
     end
-    local now = os.time()
-    if typed_line_refusal_at and now - typed_line_refusal_at < 60 then return false end
-    typed_line_refusal_at = now
     local body = encode({ msgtype = "m.notice", body = text,
       ["m.relates_to"] = { rel_type = "m.thread", event_id = thread_root,
         ["m.in_reply_to"] = { event_id = event.event_id } },
     })
     local ok = pcall(api.request_json, { method = "PUT", room = room_id, body = body,
       path = "/_matrix/client/v3/rooms/" .. percent_encode(room_id)
-        .. "/send/m.room.message/" .. percent_encode(matrix_txn_id("typed-line-refusal-")),
+        .. "/send/m.room.message/" .. percent_encode(matrix_txn_id(txn_prefix)),
       headers = { ["Content-Type"] = "application/json" },
     }, function() end)
     return ok
+  end
+
+  local function send_typed_line_reply(event, room_id, text)
+    local now = os.time()
+    if typed_line_refusal_at and now - typed_line_refusal_at < 60 then return false end
+    typed_line_refusal_at = now
+    return send_threaded_notice(event, room_id, text, "typed-line-refusal-")
   end
 
   local function typed_line_refusal(reason, target)
@@ -1582,7 +1589,23 @@ function relay.new(options)
               trace_typed_line(ev, room_id or cfg.room, nil, nil, "butler", "refused:not_live")
             end
           end
-          if approval_record then
+          local status_matched, status_text = false, nil
+          if not approval_record and type(content.body) == "string" and content.body:sub(1, 1) == "?"
+              and member_kind(ev.sender, cfg) == "HUMAN" then
+            local handled, matched, text = pcall(status_command.handle, state, ev, os.time(), cfg, {
+              live = live_sync == true, room_allowed = typed_line_room_allowed(ev, room_id or cfg.room),
+              rate = status_reply_at,
+            })
+            if handled then status_matched, status_text = matched == true, text end
+          end
+          if status_matched then
+            if event_id ~= "" then add_processed(state, event_id) end
+            if cursor then state.since = cursor end
+            local persisted, persist_result = pcall(persist)
+            if status_text and persisted and persist_result == true then
+              send_threaded_notice(ev, room_id or cfg.room, status_text, "status-command-")
+            end
+          elseif approval_record then
             if event_id ~= "" then add_processed(state, event_id) end
             if cursor then state.since = cursor end
             local origin_ms = tonumber(ev.origin_server_ts)
@@ -2059,6 +2082,7 @@ function relay.new(options)
       if refreshed then
         cfg.rooms, cfg.room_how = refreshed.rooms, refreshed.room_how
         cfg.typed_lines, cfg.shell_lines = refreshed.typed_lines, refreshed.shell_lines
+        cfg.status_commands = refreshed.status_commands
       else
         cfg.typed_lines, cfg.shell_lines = false, false
       end
