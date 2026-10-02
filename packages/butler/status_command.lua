@@ -96,9 +96,13 @@ function M.parse(body)
 end
 
 -- One reply per interval per sender; `last` maps sender to the last reply time.
-function M.rate_allow(last, sender, now)
+function M.rate_check(last, sender, now)
   local previous = last[sender]
-  if previous and now - previous >= 0 and now - previous < REPLY_INTERVAL_SECONDS then return false end
+  return not (previous and now - previous >= 0 and now - previous < REPLY_INTERVAL_SECONDS)
+end
+
+function M.rate_allow(last, sender, now)
+  if not M.rate_check(last, sender, now) then return false end
   last[sender] = now
   return true
 end
@@ -151,18 +155,21 @@ end
 
 -- Decides one Matrix event. Returns matched, text: matched is true when the
 -- event is a status command that must not reach mail or a session; text is
--- nil when the sender is inside the reply window. scope = { live, room_allowed, rate }.
+-- nil when the sender is inside the reply window. The third result is a commit
+-- function the caller runs once the reply is durable: it opens the sender's
+-- reply window. scope = { live, room_allowed, rate }.
 function M.handle(state, event, now, cfg, scope)
   if cfg.status_commands ~= true or scope.live ~= true or scope.room_allowed ~= true then return false end
   local accepted, _, body = accept(state, event, now, cfg)
   if not accepted then return false end
   local command = M.parse(body)
   if not command then return false end
-  if not M.rate_allow(scope.rate, event.sender, now) then return true end
-  if command == "help" then return true, M.help_text() end
+  if not M.rate_check(scope.rate, event.sender, now) then return true end
+  local function commit() scope.rate[event.sender] = now end
+  if command == "help" then return true, M.help_text(), commit end
   -- An internal error still consumes the event; the reply stays a bare line.
   local ok, text = pcall(function() return M.status_format(M.gather(now)) end)
-  return true, ok and text or "status unavailable"
+  return true, ok and text or "status unavailable", commit
 end
 
 return M

@@ -1589,20 +1589,21 @@ function relay.new(options)
               trace_typed_line(ev, room_id or cfg.room, nil, nil, "butler", "refused:not_live")
             end
           end
-          local status_matched, status_text = false, nil
+          local status_matched, status_text, status_commit = false, nil, nil
           if not approval_record and type(content.body) == "string" and content.body:sub(1, 1) == "?"
               and member_kind(ev.sender, cfg) == "HUMAN" then
-            local handled, matched, text = pcall(status_command.handle, state, ev, os.time(), cfg, {
+            local handled, matched, text, commit = pcall(status_command.handle, state, ev, os.time(), cfg, {
               live = live_sync == true, room_allowed = typed_line_room_allowed(ev, room_id or cfg.room),
               rate = status_reply_at,
             })
-            if handled then status_matched, status_text = matched == true, text end
+            if handled then status_matched, status_text, status_commit = matched == true, text, commit end
           end
           if status_matched then
             if event_id ~= "" then add_processed(state, event_id) end
             if cursor then state.since = cursor end
             local persisted, persist_result = pcall(persist)
             if status_text and persisted and persist_result == true then
+              if status_commit then status_commit() end
               send_threaded_notice(ev, room_id or cfg.room, status_text, "status-command-")
             end
           elseif approval_record then

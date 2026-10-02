@@ -148,7 +148,9 @@ silent("unknown command", event("?load"))
 silent("typed-line form", event("!status"))
 
 local s = scope()
-assert(handle(event("?status", { event_id = "$a" }), nil, s) == true)
+local first, _, commit = handle(event("?status", { event_id = "$a" }), nil, s)
+assert(first == true and next(s.rate) == nil, "handle alone does not open the reply window")
+commit()
 local again, text = handle(event("?status", { event_id = "$b" }), nil, s)
 assert(again == true and text == nil, "a request inside the window is consumed without a reply")
 
