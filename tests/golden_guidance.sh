@@ -153,6 +153,7 @@ wait_live lead1; wait_live w1; wait_file "$T/argv/lead1"
 
 OUT=$T/out; mkdir -p "$OUT"
 R butler help >"$OUT/help.txt"
+R butler matrix thread --help >"$OUT/matrix-thread-help.txt"
 cp "$T/projects/lead1/AGENTS.md" "$OUT/agents-topic.md"
 cp "$XDG_DATA_HOME/remuda/butler/sessions/w1/AGENTS.md" "$OUT/agents-launch.md"
 wait_welcome
