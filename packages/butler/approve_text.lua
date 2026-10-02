@@ -10,32 +10,80 @@ local DEFAULT_TTL = 60 * 60
 local MAX_TTL = 24 * 60 * 60
 local request_counter = 0
 
+local function normalized_text(text)
+  text = text:gsub("\r\n", "\n"):gsub("\r", "\n")
+  for i = 1, #text do
+    local byte = text:byte(i)
+    if byte < 32 and byte ~= 9 and byte ~= 10 then return nil, "control_character" end
+    if byte == 127 then return nil, "control_character" end
+    if byte == 0xC2 and i < #text then
+      local next_byte = text:byte(i + 1)
+      if next_byte >= 0x80 and next_byte <= 0x9F then return nil, "control_character" end
+    end
+  end
+  return text
+end
+
 function M.prepare(session, text, request_id)
   if type(session) ~= "string" or session == "" then return nil, "invalid_session" end
   if type(text) ~= "string" or text == "" then return nil, "empty_text" end
+  local normalized, normalize_error = normalized_text(text)
+  if not normalized then return nil, normalize_error end
+  text = normalized
+  if #text == 0 then return nil, "empty_text" end
   if #text > MAX_BYTES then return nil, "text_too_long" end
   if type(request_id) ~= "string" then request_id = "" end
   return { session = session, bytes = #text, registered_text = text,
-    posted_text = text, request_id = request_id,
+    stored_text = text, posted_text = text, request_id = request_id,
     display_fingerprint = request_id .. "/" .. tostring(#text) }
 end
 
 function M.matches(record)
   if type(record) ~= "table" or type(record.registered_text) ~= "string"
-    or type(record.posted_text) ~= "string" then return false end
-  return record.registered_text == record.posted_text
+    or type(record.posted_text) ~= "string" or type(record.stored_text) ~= "string" then return false end
+  return record.registered_text == record.stored_text and record.posted_text == record.stored_text
     and tonumber(record.bytes) == #record.registered_text
 end
 
+local BIDI_ESCAPES = {
+  ["\226\128\142"] = "\\u200E", ["\226\128\143"] = "\\u200F",
+  ["\226\128\168"] = "\\u2028", ["\226\128\169"] = "\\u2029",
+  ["\226\128\170"] = "\\u202A", ["\226\128\171"] = "\\u202B",
+  ["\226\128\172"] = "\\u202C", ["\226\128\173"] = "\\u202D",
+  ["\226\128\174"] = "\\u202E", ["\226\129\166"] = "\\u2066",
+  ["\226\129\167"] = "\\u2067", ["\226\129\168"] = "\\u2068",
+  ["\226\129\169"] = "\\u2069", ["\216\156"] = "\\u061C",
+  ["\226\129\170"] = "\\u206A", ["\226\129\171"] = "\\u206B",
+  ["\226\129\172"] = "\\u206C", ["\226\129\173"] = "\\u206D",
+  ["\226\129\174"] = "\\u206E", ["\226\129\175"] = "\\u206F",
+}
+
 local function display_line(line)
   local out, escaped = {}, false
-  for i = 1, #line do
+  local i = 1
+  while i <= #line do
     local byte = line:byte(i)
     if byte < 32 or byte == 127 then
       out[#out + 1] = byte == 9 and "\\t" or string.format("\\x%02X", byte)
       escaped = true
+      i = i + 1
     else
-      out[#out + 1] = line:sub(i, i)
+      local special
+      for size = 2, 3 do
+        local candidate = line:sub(i, i + size - 1)
+        if BIDI_ESCAPES[candidate] then special = candidate; break end
+      end
+      if special then
+        out[#out + 1] = BIDI_ESCAPES[special]
+        escaped, i = true, i + #special
+      elseif byte == 0xC2 and line:byte(i + 1) and line:byte(i + 1) >= 0x80
+          and line:byte(i + 1) <= 0x9F then
+        out[#out + 1] = string.format("\\u%04X", line:byte(i + 1))
+        escaped, i = true, i + 2
+      else
+        out[#out + 1] = line:sub(i, i)
+        i = i + 1
+      end
     end
   end
   return table.concat(out), escaped
@@ -48,7 +96,7 @@ function M.display(text)
     lines[#lines + 1] = "> " .. shown
     escaped = escaped or line_escaped
   end
-  local note = escaped and "\nControl characters are shown escaped." or ""
+  local note = escaped and "\nControl and direction characters are shown escaped." or ""
   return table.concat(lines, "\n") .. note, escaped
 end
 
@@ -70,6 +118,11 @@ function M.owner_event_allowed(event, record, cfg, live_sync, room_id)
       or type(event.event_id) ~= "string" or event.event_id == ""
       or type(event.sender) ~= "string" or (cfg.allowed_senders or {})[event.sender] ~= true
       or room_id ~= cfg.home_room then return false end
+  local content = type(event.content) == "table" and event.content or {}
+  local relation = type(content["m.relates_to"]) == "table" and content["m.relates_to"] or {}
+  if content["m.new_content"] ~= nil or relation.rel_type == "m.replace" then
+    return false
+  end
   if event.sender == cfg.self_mxid or (cfg.butler_senders or {})[event.sender] == true then return false end
   local localpart = event.sender:match("^@([^:]+):.+$")
   if not localpart then return false end
@@ -88,6 +141,41 @@ local function provenance_text(provenance)
     .. " request=" .. field(provenance.request_id)
 end
 
+local function live_agent(session)
+  local bus = remuda._butler_bus or {}
+  for id, agent in pairs(bus.agents or {}) do
+    if type(agent) == "table" and (agent.session_name or id) == session then return id, agent end
+  end
+end
+
+function M.session_instance(session)
+  if not M.target_session_allowed(session) then return nil end
+  local id, agent = live_agent(session)
+  if not id or type(agent.id) ~= "string" then return nil end
+  return agent.id
+end
+
+local function pane_has_human(session)
+  if type(remuda.ls) ~= "function" then return true end
+  local ok, rows = pcall(remuda.ls)
+  if not ok or type(rows) ~= "table" then return true end
+  local live = false
+  for _, row in ipairs(rows) do
+    if type(row) == "table" and row.name == session then
+      live = row.alive == true
+      if row.attached == true then return true end
+    end
+  end
+  if not live then return true end
+  if type(remuda.session) == "function" then
+    local checked, current = pcall(remuda.session, session)
+    if not checked or not current then return true end
+    local read_ok, attached = pcall(function() return current.attached end)
+    if not read_ok or attached == true then return true end
+  end
+  return false
+end
+
 function M.type_text(session, exact_bytes, provenance)
   if type(session) ~= "string" or session == "" or type(exact_bytes) ~= "string" then
     return false, "invalid_request"
@@ -96,15 +184,17 @@ function M.type_text(session, exact_bytes, provenance)
   if type(bus.pending_tasks) == "table" and bus.pending_tasks[session] then
     return false, "pane_busy"
   end
+  if pane_has_human(session) then return false, "human_attached" end
   if type(remuda._butler_notify_policy) ~= "function" then return false, "pane_busy" end
   local checked, safe = pcall(remuda._butler_notify_policy, session)
   if not checked or not safe then return false, "pane_busy" end
   if type(remuda.type_text) ~= "function" then return false, "type_failed" end
+  if type(provenance) == "table" and type(provenance.before_write) == "function" then
+    local marked, allowed = pcall(provenance.before_write)
+    if not marked or allowed ~= true then return false, "delivery_marker_failed" end
+  end
   local typed, result = pcall(remuda.type_text, session, exact_bytes)
-  if not typed or result == false then return false, "type_failed" end
-  if type(remuda.key) ~= "function" then return false, "return_failed" end
-  local pressed, key_result = pcall(remuda.key, session, "RET")
-  if not pressed or key_result == false then return false, "return_failed" end
+  if not typed or result == false then return false, "type_failed", true end
   local trace = remuda._butler_session_trace or _G._butler_session_trace
   if type(trace) == "function" then
     pcall(trace, "matrix_approved_text", "target=" .. session .. " " .. provenance_text(provenance)
@@ -124,11 +214,23 @@ local function request(session, text, asker, ttl_s, done)
     done(nil, why)
     return nil, why
   end
+  local session_id = M.session_instance(session)
+  if not session_id then
+    local failure = "Target is not a live Butler session. Next: choose a live session and retry."
+    done(nil, failure)
+    return nil, failure
+  end
+  local live_config = remuda._butler_matrix_live_config or {}
+  if live_config.approve_text ~= true then
+    local failure = "Prepared text approvals are off. Next: remuda butler approve-text on"
+    done(nil, failure)
+    return nil, failure
+  end
   request_counter = request_counter + 1
   local key = tostring(os.time()) .. ":" .. tostring(request_counter)
   local requested_id, failure
-  local request_data = { registered_text = prepared.registered_text,
-    posted_text = prepared.posted_text, session = session, bytes = prepared.bytes }
+  local request_data = { registered_text = prepared.registered_text, stored_text = prepared.stored_text,
+    posted_text = prepared.posted_text, session = session, session_id = session_id, bytes = prepared.bytes }
   local bounded_ttl = math.max(1, math.min(MAX_TTL, tonumber(ttl_s) or DEFAULT_TTL))
   local result = approval.request({ kind = "approve_text", key = key,
     asker = asker, summary = "type " .. tostring(prepared.bytes) .. " prepared bytes in " .. session,
@@ -211,18 +313,25 @@ function M.configure()
     approve = function(rec, complete)
       local data = type(rec.data) == "table" and rec.data or {}
       if not M.matches(data) or data.request_id ~= rec.id then
-        complete("retry", "text_changed")
+        complete(false, "text_changed")
+        return
+      end
+      if not M.target_session_allowed(data.session) or M.session_instance(data.session) ~= data.session_id then
+        pcall(approval.reply, rec, "refused: session_changed")
+        complete("retry", "session_changed")
         return
       end
       local ok, why = M.type_text(data.session, data.registered_text, {
         owner = rec.answered_by, event_id = rec.answer_event_id, request_id = rec.id,
+        before_write = function() return approval.begin_delivery(rec) end,
       })
       if ok then
         pcall(approval.reply, rec, "typed")
         complete(true)
       else
         pcall(approval.reply, rec, "refused: " .. tostring(why))
-        complete("retry", why)
+        if rec.delivery_started == true then complete(false, why)
+        else complete("retry", why) end
       end
     end,
     deny = function(rec) pcall(approval.reply, rec, "denied") end,

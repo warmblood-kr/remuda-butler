@@ -6093,7 +6093,19 @@ local function approval_env(senders, run, extra)
     return { status = 200, body = "{}" }
   end, function(calls)
     env.calls, env.client, env.delivered = calls, invite_client(), {}
-    env.relay = started_relay(path, env.client, env.delivered)
+    if extra and extra:find("mode=messages", 1, true) then
+      env.relay = relay_module.new({ config_path = path, matrix = env.client,
+        deliver = function(event) env.delivered[#env.delivered + 1] = event return true end })
+      assert(env.relay:start())
+      env.relay._response({ start = "m0", ["end"] = "m0", chunk = {} },
+        "/_matrix/client/v3/rooms/" .. encoded(HOME) .. "/messages")
+      env.relay:stop()
+      for index, request in ipairs(env.client.requests) do
+        if request.path:find("/messages", 1, true) then env.client.callbacks[index] = nil end
+      end
+    else
+      env.relay = started_relay(path, env.client, env.delivered)
+    end
     local passed, failure = pcall(run, env)
     env.relay:stop()
     if not passed then error(failure, 0) end
@@ -6101,6 +6113,28 @@ local function approval_env(senders, run, extra)
   remuda._butler_send = saved_send
   remove_dir(dir)
   if not ok then error(err, 0) end
+end
+
+local function test_legacy_approval_reaction_works_in_messages_fallback()
+  approval_env(nil, function(env)
+    local applied = 0
+    approval().handler("legacy_fallback_test", { approve = function(_, done)
+      applied = applied + 1
+      done(true)
+    end })
+    local request_id
+    approval().request({ kind = "legacy_fallback_test", key = "fallback-approval", asker = ASKER,
+      summary = "fallback test", on_id = function(id) request_id = id end }, function() end)
+    env.client:pump()
+    local rec = env.relay:state().approvals[request_id]
+    assert(rec and rec.event_id, "fallback approval posts normally")
+    env.relay._response({ start = "m0", ["end"] = "m1",
+      chunk = { reaction("$fallback-yes", OWNER, rec.event_id) } },
+      "/_matrix/client/v3/rooms/" .. encoded(HOME) .. "/messages")
+    env.client:pump()
+    assert(rec.status == "applied" and applied == 1,
+      "messages fallback owner reaction must answer an ordinary approval without a live flag")
+  end, "mode=messages\n")
 end
 
 -- Simulates a daemon restart: fresh approval and write modules, a new relay on
@@ -6291,6 +6325,39 @@ local function test_owner_yes_reply_approves_and_bare_yes_does_not()
   end)
 end
 
+local function test_legacy_reply_parser_preserves_exact_words_and_rich_fallback()
+  approval_env(nil, function(env)
+    local id, event = file_request(env, NEW)
+    room_events(env, { text_event("$yes-sure", OWNER, "yes sure", event),
+      text_event("$no-wait", OWNER, "no wait", event) })
+    assert(server_joins(env, NEW) == 0 and is_open(id)
+      and delivered_ids(env.delivered, "$yes-sure") and delivered_ids(env.delivered, "$no-wait"),
+      "non-exact legacy replies must remain ordinary mail as on main")
+    local rich = text_event("$rich-yes", OWNER, "yes", event)
+    rich.content.format = "org.matrix.custom.html"
+    rich.content.formatted_body = "<p>yes</p>"
+    room_events(env, { rich })
+    assert(server_joins(env, NEW) == 1 and not delivered_ids(env.delivered, "$rich-yes"),
+      "formatted-body clients must still answer legacy approvals")
+  end)
+end
+
+local function test_legacy_approval_survives_first_non_live_sync()
+  approval_env(nil, function(env)
+    local id, event = file_request(env, NEW)
+    env.relay:stop()
+    env.relay = relay_module.new({ config_path = env.path, matrix = env.client,
+      deliver = function(message) env.delivered[#env.delivered + 1] = message return true end })
+    assert(env.relay:start())
+    -- The first /sync after a relay restart is a baseline and is not marked live.
+    env.client:sync({ json = { next_batch = "first-after-restart", rooms = { join = {
+      [HOME] = { timeline = { events = { reaction("$first-sync-yes", OWNER, event) } } },
+    } } } })
+    assert(server_joins(env, NEW) == 1 and not is_open(id),
+      "a legacy owner reaction in the first non-live sync must still answer the request")
+  end)
+end
+
 local function test_reaction_from_stranger_agent_or_other_room_is_ignored()
   approval_env(OWNER .. ",@agent-x:example.org", function(env)
     local id, event = file_request(env, NEW)
@@ -6367,12 +6434,12 @@ local function test_dedupe_returns_same_id_and_cap_refuses_without_post()
     local capped = agent_cli_join(env, NEW4)
     local text = capped.stdout .. capped.stderr
     assert(#home_posts(env, "Butler wants to join") == 3
-      and text:find("Too many open approval requests (3 per agent, 5 total). Next: wait for an answer or expiry (10 min), then retry.", 1, true),
+      and text:find("Too many open approval requests (3 per agent, 5 total). Next: wait for an answer or expiry, then retry.", 1, true),
       "a fourth open request for one asker must be refused with Next and post nothing: " .. text)
     file_request(env, NEW4, "team-2-mx"); file_request(env, "!new5:example.org", "team-2-mx")
     local total = agent_cli_join(env, "!new6:example.org", "team-3-mx")
     assert(#home_posts(env, "Butler wants to join") == 5
-      and (total.stdout .. total.stderr):find("Too many open approval requests (3 per agent, 5 total). Next: wait for an answer or expiry (10 min), then retry.", 1, true),
+      and (total.stdout .. total.stderr):find("Too many open approval requests (3 per agent, 5 total). Next: wait for an answer or expiry, then retry.", 1, true),
       "a sixth open request in total must be refused and post nothing")
   end)
 end
@@ -6524,6 +6591,7 @@ end
 local function with_approved_text_stubs(run)
   local old_type, old_key, old_policy, old_trace = remuda.type_text, remuda.key,
     remuda._butler_notify_policy, remuda._butler_session_trace
+  local old_ls, old_session = remuda.ls, remuda.session
   local typed, keys, traces = {}, {}, {}
   local safe = true
   remuda.type_text = function(session, bytes)
@@ -6535,10 +6603,13 @@ local function with_approved_text_stubs(run)
     return true
   end
   remuda._butler_notify_policy = function() return safe end
+  remuda.ls = function() return { { name = "butler", alive = true, attached = false } } end
+  remuda.session = function() return { attached = false } end
   remuda._butler_session_trace = function(kind, detail) traces[#traces + 1] = { kind, detail } end
   local ok, err = pcall(run, typed, keys, traces, function(value) safe = value end)
   remuda.type_text, remuda.key = old_type, old_key
   remuda._butler_notify_policy, remuda._butler_session_trace = old_policy, old_trace
+  remuda.ls, remuda.session = old_ls, old_session
   if not ok then error(err, 0) end
 end
 
@@ -6560,8 +6631,8 @@ local function test_approved_text_live_owner_reply_types_exact_bytes_once()
       room_events(env, { text_event("$owner-approve", OWNER, "승인 " .. id, event) })
       assert(#typed == 1 and typed[1].session == "butler" and typed[1].bytes == bytes,
         "an owner live reply types the stored bytes exactly")
-      assert(#keys == 1 and keys[1].key == "RET" and rec.status == "applied",
-        "successful delivery is submitted once and marked spent")
+      assert(#keys == 0 and rec.status == "applied",
+        "type_text submits exactly once and the request is marked spent")
       assert(traces[1][2]:find(OWNER, 1, true) and traces[1][2]:find("$owner-approve", 1, true)
         and traces[1][2]:find(id, 1, true), "trace records owner, source event, and request id")
       room_events(env, { reaction("$duplicate-approve", OWNER, event, CHECK) })
@@ -6573,6 +6644,59 @@ local function test_approved_text_live_owner_reply_types_exact_bytes_once()
       room_events(env, { reaction("$owner-reaction", OWNER, reaction_rec.event_id, CHECK) })
       assert(#typed == 2 and typed[2].bytes == "reaction bytes" and reaction_rec.status == "applied",
         "an owner reaction on the request also approves prepared text")
+    end, "approve_text=true\n")
+  end)
+end
+
+local function test_approved_text_unknown_explicit_id_never_uses_reply_target()
+  with_approved_text_stubs(function(typed)
+    approval_env(nil, function(env)
+      local id = assert(remuda.butler.approve_text.request("butler", "prepared", ASKER))
+      env.client:pump()
+      local rec = env.relay:state().approvals[id]
+      room_events(env, { text_event("$unknown-explicit", OWNER, "yes WXYZ", rec.event_id) })
+      assert(#typed == 0 and rec.status == "open"
+        and delivered_ids(env.delivered, "$unknown-explicit"),
+        "an unknown explicit approve-text id cannot fall back to the replied-to request")
+    end, "approve_text=true\n")
+  end)
+end
+
+local function test_approved_text_cancel_and_failed_delivery_are_one_shot()
+  with_approved_text_stubs(function(typed)
+    approval_env(nil, function(env)
+      local cancel_id = assert(remuda.butler.approve_text.request("butler", "cancel me", ASKER))
+      env.client:pump()
+      local cancelled = env.relay:state().approvals[cancel_id]
+      remuda._butler_notify_policy = function() return false end
+      room_events(env, { text_event("$approve-busy", OWNER, "yes", cancelled.event_id) })
+      assert(cancelled.status == "approved" and #typed == 0,
+        "a pre-write busy refusal stays retryable")
+      remuda._butler_notify_policy = function() return true end
+      room_events(env, { reaction("$cancel-approved", OWNER, cancelled.event_id, CROSS) })
+      assert(cancelled.status == "denied" and #typed == 0,
+        "an owner cross cancels an approved-but-undelivered request")
+
+      for index, failure in ipairs({ "failed key", "partial write" }) do
+        local id = assert(remuda.butler.approve_text.request("butler", "one shot " .. index, ASKER))
+        env.client:pump()
+        local rec = env.relay:state().approvals[id]
+        local attempts = 0
+        remuda.type_text = function()
+          attempts = attempts + 1
+          if failure == "failed key" then return false, "key failed" end
+          error("type_text failed after partial write")
+        end
+        room_events(env, { text_event("$failed-write-" .. index, OWNER, "yes", rec.event_id) })
+        assert(rec.status == "failed" and rec.delivery_started == true and attempts == 1,
+          "a " .. failure .. " result after type_text starts is terminal")
+        room_events(env, { reaction("$retry-failed-" .. index, OWNER, rec.event_id, CHECK) })
+        assert(attempts == 1, "an owner check mark cannot repeat a possibly partial write")
+        remuda.type_text = function(session, bytes)
+          typed[#typed + 1] = { session = session, bytes = bytes }
+          return true
+        end
+      end
     end, "approve_text=true\n")
   end)
 end
@@ -6604,9 +6728,27 @@ local function test_approved_text_switch_off_keeps_reply_on_mail_path()
       local id = assert(remuda.butler.approve_text.request("butler", "prepared", ASKER))
       env.client:pump()
       local rec = env.relay:state().approvals[id]
+      local file = assert(io.open(env.path, "rb"))
+      local config = file:read("a")
+      file:close()
+      file = assert(io.open(env.path, "wb"))
+      file:write((config:gsub("approve_text=true\n", "")))
+      file:close()
       room_events(env, { text_event("$switch-off-reply", OWNER, "yes " .. id, rec.event_id) })
       assert(#typed == 0 and rec.status == "open" and delivered_ids(env.delivered, "$switch-off-reply"),
         "with approve-text off, the reply stays ordinary mail and cannot deliver")
+    end)
+  end)
+end
+
+local function test_approved_text_registration_refuses_when_switch_is_off()
+  with_approved_text_stubs(function()
+    approval_env(nil, function(env)
+      local before = #home_posts(env, "Approve prepared text for")
+      local id, why = remuda.butler.approve_text.request("butler", "prepared", ASKER)
+      assert(id == nil and tostring(why):find("Prepared text approvals are off", 1, true)
+        and #home_posts(env, "Approve prepared text for") == before,
+        "switch-off registration must report a clear refusal without a HOME post")
     end)
   end)
 end
@@ -6640,6 +6782,9 @@ for _, case in ipairs({
   { "test_agent_join_files_request_and_does_not_join", test_agent_join_files_request_and_does_not_join },
   { "test_owner_check_reaction_approves_and_joins_with_how_approved", test_owner_check_reaction_approves_and_joins_with_how_approved },
   { "test_owner_yes_reply_approves_and_bare_yes_does_not", test_owner_yes_reply_approves_and_bare_yes_does_not },
+  { "test_legacy_reply_parser_preserves_exact_words_and_rich_fallback", test_legacy_reply_parser_preserves_exact_words_and_rich_fallback },
+  { "test_legacy_approval_reaction_works_in_messages_fallback", test_legacy_approval_reaction_works_in_messages_fallback },
+  { "test_legacy_approval_survives_first_non_live_sync", test_legacy_approval_survives_first_non_live_sync },
   { "test_reaction_from_stranger_agent_or_other_room_is_ignored", test_reaction_from_stranger_agent_or_other_room_is_ignored },
   { "test_reaction_on_older_request_or_before_post_is_ignored", test_reaction_on_older_request_or_before_post_is_ignored },
   { "test_deny_and_expiry_mail_with_next_and_no_join", test_deny_and_expiry_mail_with_next_and_no_join },
@@ -6651,8 +6796,11 @@ for _, case in ipairs({
   { "test_hostile_room_name_sanitised_in_home_post", test_hostile_room_name_sanitised_in_home_post },
   { "test_restart_does_not_reanswer_answered_request", test_restart_does_not_reanswer_answered_request },
   { "test_approved_text_live_owner_reply_types_exact_bytes_once", test_approved_text_live_owner_reply_types_exact_bytes_once },
+  { "test_approved_text_unknown_explicit_id_never_uses_reply_target", test_approved_text_unknown_explicit_id_never_uses_reply_target },
+  { "test_approved_text_cancel_and_failed_delivery_are_one_shot", test_approved_text_cancel_and_failed_delivery_are_one_shot },
   { "test_approved_text_refusal_stays_approved_for_owner_retry", test_approved_text_refusal_stays_approved_for_owner_retry },
   { "test_approved_text_switch_off_keeps_reply_on_mail_path", test_approved_text_switch_off_keeps_reply_on_mail_path },
+  { "test_approved_text_registration_refuses_when_switch_is_off", test_approved_text_registration_refuses_when_switch_is_off },
   { "test_approved_text_denial_and_expiry_type_nothing", test_approved_text_denial_and_expiry_type_nothing },
 }) do
   local ok, err = pcall(case[2])

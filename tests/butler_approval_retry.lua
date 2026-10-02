@@ -11,8 +11,19 @@ approval.attach(state, function() saved = saved + 1; return true end,
   function(text, _, callback) posted, post_callback = text, callback; return true end)
 local attempts = 0
 approval.handler("approve_text", { approve = function(rec, done)
+  if rec.key == "text-approved-deny" then done("retry", "pane_busy"); return end
+  if rec.key == "text-crash" then
+    assert(approval.begin_delivery(rec), "crash case must persist delivery marker")
+    done(false, "type_text failed after partial write")
+    return
+  end
   attempts = attempts + 1
-  if attempts == 1 then done("retry", "pane_busy") else done(true) end
+  if attempts == 1 then
+    done("retry", "pane_busy")
+  else
+    assert(approval.begin_delivery(rec), "delivery marker must persist before text can be typed")
+    done(false, "type_text failed after partial write")
+  end
 end })
 local requested_id
 local handle = approval.request({ kind = "approve_text", key = "text-1", asker = "agent-1",
@@ -36,11 +47,33 @@ assert(answered and state.approvals[requested_id].status == "approved"
 assert(approval.reapply_approved() == 0 and attempts == 1,
   "restart recovery never triggers prepared text delivery")
 assert(approval.answer("$approval", "approve", "@alice:example.org", "$answer-2")
-  and state.approvals[requested_id].status == "applied" and attempts == 2,
-  "a later owner approval event retries approved-but-undelivered text")
+  and state.approvals[requested_id].status == "failed" and attempts == 2,
+  "a partial write is terminally failed after the persisted one-shot marker")
 local duplicate_ok = approval.answer("$approval", "approve", "@alice:example.org", "$answer-3")
-assert(not duplicate_ok and attempts == 2 and state.approvals[requested_id].status == "applied",
-  "a delivered request is one-shot")
+assert(not duplicate_ok and attempts == 2 and state.approvals[requested_id].status == "failed",
+  "a request that may have written is never retried")
+
+local approved_id
+approval.request({ kind = "approve_text", key = "text-approved-deny", asker = "agent-1",
+  summary = "approved but waiting", data = {}, on_id = function(id) approved_id = id end }, function() end)
+post_callback({ event_id = "$approval-deny" })
+assert(approval.answer("$approval-deny", "approve", "@alice:example.org", "$yes"))
+local denied_ok = approval.answer("$approval-deny", "deny", "@alice:example.org", "$cancel")
+assert(denied_ok and state.approvals[approved_id].status == "denied",
+  "an owner may cancel approved-but-undelivered prepared text")
+
+local crash_id
+approval.request({ kind = "approve_text", key = "text-crash", asker = "agent-1",
+  summary = "crash recovery", data = {}, on_id = function(id) crash_id = id end }, function() end)
+post_callback({ event_id = "$approval-crash" })
+assert(approval.answer("$approval-crash", "approve", "@alice:example.org", "$crash"))
+assert(state.approvals[crash_id].status == "failed", "the partial write record is already failed")
+state.approvals[crash_id].status = "approved"
+state.approvals[crash_id].delivery_started = true
+approval.attach(state, function() saved = saved + 1; return true end,
+  function(text, _, callback) posted, post_callback = text, callback; return true end)
+assert(state.approvals[crash_id].status == "failed",
+  "a restart fails closed when a persisted delivery marker has unknown outcome")
 
 local second_id
 approval.request({ kind = "approve_text", key = "text-2", asker = "agent-1",
@@ -55,4 +88,20 @@ approval.request({ kind = "approve_text", key = "text-3", asker = "agent-1",
   function(id, why) assert(id == nil); rate_error = why end)
 assert(rate_error and rate_error:find("Too many prepared text registrations", 1, true),
   "registration limit counts recent requests per agent")
+
+local cap_state = { approvals = { approved_text = { id = "APPV", kind = "approve_text",
+  status = "approved", asker = "agent-text" } } }
+approval.attach(cap_state, function() return true end,
+  function(text, _, callback) posted, post_callback = text, callback; return true end)
+approval.handler("ordinary", { approve = function(_, done) done(true) end })
+local function file_ordinary(key)
+  local id
+  approval.request({ kind = "ordinary", key = key, asker = "agent-ordinary-" .. key, summary = key,
+    on_id = function(value) id = value end }, function() end)
+  if id then post_callback({ event_id = "$" .. key }) end
+  return id
+end
+for i = 1, 4 do assert(file_ordinary("cap-" .. i), "four pending requests fit beside approved text") end
+assert(file_ordinary("cap-5"),
+  "approved-but-undelivered prepared text does not count toward the five pending global cap")
 print("ok - retryable approval storage cases")

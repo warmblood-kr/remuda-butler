@@ -318,8 +318,7 @@ local function approval_answer_fields(ev)
     return { rel.event_id }, verdict
   end
   if ev.type ~= "m.room.message" then return {}, nil end
-  if content.msgtype ~= "m.text" or content.format ~= nil or content.formatted_body ~= nil
-      or content["m.new_content"] ~= nil then return {}, nil end
+  if content.msgtype ~= "m.text" then return {}, nil end
   local thread_root, in_reply_to = relation_fields(content)
   local targets = {}
   if in_reply_to then targets[#targets + 1] = in_reply_to end
@@ -329,8 +328,11 @@ local function approval_answer_fields(ev)
   -- generated line for exact approval words while leaving delivery untouched.
   local prefix_end = body:match("^> [^\n]*()\n")
   if prefix_end then body = body:sub(prefix_end + 1) end
-  local verdict, explicit_id = approve_text.reply_verdict(body)
-  return targets, verdict, explicit_id
+  local legacy_body = body:match("^%s*(.-)%s*$") or ""
+  legacy_body = legacy_body:lower()
+  local verdict = legacy_body == "yes" and "approve" or legacy_body == "no" and "deny" or nil
+  local text_verdict, explicit_id = approve_text.reply_verdict(body)
+  return targets, verdict, explicit_id, text_verdict
 end
 
 local function mentions(content, body, mxid)
@@ -1557,20 +1559,24 @@ function relay.new(options)
           local content = type(ev.content) == "table" and ev.content or {}
           local approval_record, approval_verdict
           if approval then
-            local targets, verdict, explicit_id = approval_answer_fields(ev)
-            if verdict then
+            local targets, verdict, explicit_id, text_verdict = approval_answer_fields(ev)
+            if verdict or (explicit_id and text_verdict) then
               if explicit_id and type(approval.for_id) == "function" then
                 local candidate = approval.for_id(explicit_id)
-                if candidate and (candidate.kind ~= "approve_text" or cfg.approve_text == true) then
-                  approval_record, approval_verdict = candidate, verdict
+                if candidate and candidate.kind == "approve_text" and cfg.approve_text == true then
+                  approval_record = candidate
+                  approval_verdict = text_verdict
                 end
               end
-              for _, target in ipairs(targets) do
-                approval_record = approval_record or approval.for_event(target)
-                if approval_record and approval_record.kind == "approve_text" and cfg.approve_text ~= true then
-                  approval_record = nil
+              if not approval_record and not explicit_id then
+                for _, target in ipairs(targets) do
+                  approval_record = approval.for_event(target)
+                  if approval_record then approval_verdict = verdict; break end
                 end
-                if approval_record then approval_verdict = verdict; break end
+              end
+              if explicit_id and not approval_record then verdict = nil end
+              if approval_record and approval_record.kind == "approve_text" and cfg.approve_text ~= true then
+                approval_record = nil
               end
             end
           end
@@ -1639,7 +1645,7 @@ function relay.new(options)
                 and approve_text.owner_event_allowed(ev, approval_record, cfg, live_sync, room_id or cfg.room)
                 and member_kind(ev.sender, cfg) == "HUMAN"
             else
-              counts = live_sync == true and event_id ~= "" and approval_verdict ~= nil
+              counts = event_id ~= "" and approval_verdict ~= nil
                 and (room_id or cfg.room) == cfg.home_room
                 and type(ev.sender) == "string" and cfg.allowed_senders[ev.sender]
                 and member_kind(ev.sender, cfg) == "HUMAN"
@@ -1649,7 +1655,7 @@ function relay.new(options)
             if counts then
               if approval_record.status == "open"
                   or (approval_record.kind == "approve_text" and approval_record.status == "approved"
-                    and approval_verdict == "approve") then
+                    and (approval_verdict == "approve" or approval_verdict == "deny")) then
                 pcall(approval.answer, approval_record.event_id, approval_verdict, ev.sender, ev.event_id)
               elseif approval_record.status == "expired" then
                 pcall(approval.reply, approval_record, "Expired.")
@@ -2118,8 +2124,10 @@ function relay.new(options)
         cfg.typed_lines, cfg.shell_lines, cfg.approve_text = refreshed.typed_lines,
           refreshed.shell_lines, refreshed.approve_text
         cfg.status_commands = refreshed.status_commands
+        remuda._butler_matrix_live_config = cfg
       else
         cfg.typed_lines, cfg.shell_lines, cfg.approve_text = false, false, false
+        remuda._butler_matrix_live_config = cfg
       end
     end
     if path == SYNC_PATH and state.since == nil then
@@ -2194,6 +2202,7 @@ function relay.new(options)
     generation = generation + 1
     live_sync_ready = false
     active = true
+    remuda._butler_matrix_live_config = cfg
     if approval and type(approval.reapply_approved) == "function" then approval.reapply_approved() end
     if approval and type(approval.sweep) == "function" and type(remuda.schedule) == "function" then
       -- ponytail: move to remuda.after when team-3 lands it.
@@ -2211,6 +2220,7 @@ function relay.new(options)
   function instance:stop()
     generation = generation + 1
     active = false
+    if remuda._butler_matrix_live_config == cfg then remuda._butler_matrix_live_config = nil end
     if request_handle and request_handle.cancel then pcall(function() request_handle:cancel() end) end
     request_handle = nil
     request_token = nil

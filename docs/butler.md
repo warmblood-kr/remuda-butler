@@ -223,19 +223,26 @@ machine; an agent is refused.
 
 An agent can register exact text with `remuda butler approve-text request
 SESSION -` and stdin, or the `butler_approve_text` MCP tool. Text can contain
-multiple lines and is limited to 8 KiB. Butler posts a quoted, escaped display
-to HOME with a four-character request id, target session, byte count and
-`ID/bytes` fingerprint. The current core has no SHA-256 word, so delivery
-checks the stored byte count and an unchanged copy of the posted text.
+multiple lines and is limited to 8 KiB. Core input normalization strips ESC
+and other C0/C1 controls and turns CR and CRLF into LF. Registration applies
+the CR normalization and refuses those controls except tab and newline. Butler
+posts that normalized stored text to HOME with a
+quoted, escaped display, a four-character request id, target session, byte
+count and `ID/bytes` fingerprint. The fingerprint is the request id and stored
+byte count; delivery also checks an independently stored copy of the text.
 
 An allowlisted owner can approve with ✅ or a `yes`/`승인` reply, optionally
 including the id. A ❌ or `no`/`거부` denies it. Replies must arrive in live
 Matrix sync; messages from agents and the terminal approve/deny verbs cannot
-deliver prepared text. Butler types only the stored bytes when the target
-composer is free and no dialog or human is attached. A refusal leaves the
-approved request available for another owner reply until expiry. Successful
-delivery is one-shot. Requests expire after 60 minutes; no more than five may
-be open at once, and an agent may register at most ten in ten minutes.
+deliver prepared text. Butler types only after confirming the same live session
+instance is available and no human is attached to its pane. The owner sees the
+same normalized text that Butler stores. The display escapes control, line
+separator and bidirectional formatting characters. A refusal before typing
+leaves the approved request available for another owner reply until expiry.
+Before typing, Butler persists a one-shot delivery marker; if typing can have
+started, the request cannot be retried. Requests expire after 60 minutes; no
+more than five may be pending at once, and an agent may register at most ten
+in ten minutes.
 `remuda butler approve-text on|off` is a terminal-only switch that asks for
 `yes` before enabling. It is off by default; with it off, replies stay on the
 ordinary mail path. Doctor reports `Approve text: on|off`.

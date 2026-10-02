@@ -102,6 +102,26 @@ function approval.attach(state, persist_fn, post_fn)
     state.approvals = remuda.json and remuda.json.object({}) or {}
   end
   attached = { state = state, persist = persist_fn, post = post_fn }
+  local recovered = false
+  for _, rec in pairs(state.approvals) do
+    if type(rec) == "table" and rec.kind == "approve_text" and rec.status == "approved"
+        and rec.delivery_started == true then
+      rec.status, rec.error, recovered = "failed", "delivery outcome unknown after restart", true
+    end
+  end
+  if recovered then persist() end
+  return true
+end
+
+function approval.begin_delivery(rec)
+  if not attached or type(rec) ~= "table" or rec.kind ~= "approve_text"
+      or rec.status ~= "approved" or rec.delivery_started == true then return false end
+  rec.delivery_started = true
+  local ok, result = pcall(persist)
+  if not ok or result == false then
+    rec.status, rec.error = "failed", "could not persist one-shot delivery marker"
+    return false
+  end
   return true
 end
 
@@ -215,8 +235,7 @@ function approval.request(request, done)
   local rate_limit = tonumber(request.rate_limit_per_window)
   local rate_window_ms = math.max(1, tonumber(request.rate_window_s) or 600) * 1000
   for _, rec in pairs(attached.state.approvals or {}) do
-    if type(rec) == "table" and (rec.status == "open"
-      or (rec.kind == "approve_text" and rec.status == "approved")) then
+    if type(rec) == "table" and rec.status == "open" then
       open_total = open_total + 1
       if rec.asker == asker then open_for_asker = open_for_asker + 1 end
     end
@@ -237,8 +256,10 @@ function approval.request(request, done)
     finish(nil, "Too many prepared text registrations. Next: wait 10 minutes, then retry.")
     return nil
   end
-  if open_for_asker >= (tonumber(request.max_open_for_asker) or 3) or open_total >= 5 then
-    finish(nil, "Too many open approval requests (3 per agent, 5 total). Next: wait for an answer or expiry (10 min), then retry.")
+  local max_for_asker = tonumber(request.max_open_for_asker) or 3
+  if open_for_asker >= max_for_asker or open_total >= 5 then
+    finish(nil, "Too many open approval requests (" .. tostring(max_for_asker)
+      .. " per agent, 5 total). Next: wait for an answer or expiry, then retry.")
     return nil
   end
   local id = random_id(attached.state)
@@ -312,8 +333,18 @@ function approval.answer(id_or_event, verdict, who, event_id)
     return nil, "Prepared text can only be approved by the owner in its live Matrix thread."
   end
   if rec.kind == "approve_text" and rec.status == "approved" and verdict == "approve" then
+    if rec.delivery_started == true then return nil, "Already answered.", rec end
     rec.answered_by, rec.answer_event_id = who, event_id
     apply_approved(rec)
+    return true, nil, rec
+  end
+  if rec.kind == "approve_text" and rec.status == "approved" and verdict == "deny"
+      and rec.delivery_started ~= true then
+    rec.status, rec.answered_by, rec.answered_at, rec.answer_event_id = "denied", who,
+      math.floor(os.time() * 1000), event_id
+    persist()
+    local callback = handlers[rec.kind] and handlers[rec.kind].deny
+    if callback then callback(rec) end
     return true, nil, rec
   end
   if rec.status ~= "open" then
