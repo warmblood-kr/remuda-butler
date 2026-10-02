@@ -3,6 +3,10 @@ local startup = assert(remuda._butler_agent_startup)
 
 builders.monocle = function(spec)
   assert(type(spec.name) == "string", "Monocle agent spec requires a string name")
+  assert(spec.name:sub(1, 1) ~= "-", "Monocle agent name must not start with a dash")
+  assert(not (type(spec.cwd) == "string" and spec.cwd:sub(1, 1) == "-"), "Monocle agent cwd must not start with a dash")
+  assert(spec.model == nil or spec.model == "" or (type(spec.model) == "string" and spec.model:find("^[%w._:/][%w._:/-]*$")),
+    "Monocle agent model must be a plain token")
   local argv = { "monocle", "agent" }
   if type(spec.cwd) == "string" and spec.cwd ~= "" then
     argv[#argv + 1] = "--workdir"

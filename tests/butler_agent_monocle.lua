@@ -32,6 +32,14 @@ eq("model argv", build({ cwd = "/work", name = "m1", model = "gpt-5-mini" }), mo
 eq("argv without cwd", build({ name = "m1" }), {
   "monocle", "agent", "--session", "m1", "--auto-approve",
 })
+for field, bad in pairs({ name = "-x", cwd = "-w", model = "-m" }) do
+  local spec = { cwd = "/work", name = "m1", model = "ok" }
+  spec[field] = bad
+  assert(not pcall(build, spec), "Monocle builder must refuse a dash-leading " .. field)
+end
+for _, bad in ipairs({ "a b", "a\nb", "m;x" }) do
+  assert(not pcall(build, { name = "m1", model = bad }), "Monocle builder must refuse model " .. bad)
+end
 local valid_spec, invalid_spec_error = pcall(build, { cwd = "/work" })
 assert(not valid_spec and tostring(invalid_spec_error):find("string name", 1, true),
   "Monocle builder must reject a non-spec table without a session name")
