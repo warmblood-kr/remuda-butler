@@ -28,6 +28,7 @@ local setup_tests = dofile("tests/butler_matrix_setup.lua")
 local approval_file = io.open("packages/butler/approval.lua", "r")
 if approval_file then approval_file:close(); dofile("packages/butler/approval.lua") end
 dofile("packages/butler/typed_lines.lua")
+dofile("packages/butler/status_command.lua")
 local relay_module = dofile("packages/butler/matrix_relay.lua")
 
 local function remove_dir(dir)
@@ -5129,6 +5130,126 @@ rx_tests = {
   { "test_typed_line_target_routing", test_typed_line_target_routing },
   { "test_shell_line_uses_selected_kind_for_root", test_shell_line_uses_selected_kind_for_root },
   { "test_typed_line_refusals_are_rate_limited", test_typed_line_refusals_are_rate_limited },
+  { "test_typed_line_refusal_with_unusable_event_id_keeps_window_closed",
+  function()
+    with_typed_line_stubs(function()
+      local dir, config_path = fixture("typed_lines=true\nshell_lines=true\n")
+      local client = scripted_client()
+      local relay = relay_module.new({ config_path = config_path, matrix = client, deliver = function() return true end })
+      relay:start()
+      client:complete(1, { json = { next_batch = "s0" } })
+      local stale_time = (os.time() - 301) * 1000
+      local anonymous, usable = typed_line_event(nil, "!hello"), typed_line_event("$stale-usable", "!hello")
+      anonymous.origin_server_ts, usable.origin_server_ts = stale_time, stale_time
+      client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+        ["!room:example.org"] = { timeline = { events = { anonymous, usable } } },
+      } } } })
+      local sent = 0
+      for _, request in ipairs(client.requests) do
+        if tostring(request.path):find("/send/m.room.message/", 1, true) then sent = sent + 1 end
+      end
+      assert(sent == 1, "a refusal that cannot be sent must not open the 60-second window, sent " .. sent)
+      relay:stop()
+      cleanup_fixture(dir, config_path)
+    end)
+  end },
+  { "test_status_commands_answer_without_typing_or_mail", function()
+    with_typed_line_stubs(function(typed, keys)
+      local old_bus = remuda._butler_bus
+      remuda._butler_bus = { agents = {}, pending_tasks = {} }
+      local dir, config_path = fixture("typed_lines=true\nshell_lines=true\n")
+      local client, delivered = scripted_client(), {}
+      local since_at_send, request_json = {}, client.request_json
+      client.request_json = function(args, callback)
+        if tostring(args.path):find("/send/m.room.message/", 1, true) then
+          local file = io.open(config_path .. ".since", "r")
+          since_at_send[#since_at_send + 1] = file and file:read("a") or ""
+          if file then file:close() end
+        end
+        return request_json(args, callback)
+      end
+      local relay = relay_module.new({ config_path = config_path, matrix = client,
+        deliver = function(event) delivered[#delivered + 1] = event return true end })
+      relay:start()
+      client:complete(1, { json = { next_batch = "s0" } })
+      local agent_event = typed_line_event("$agent", "?status")
+      agent_event.sender = "@agent-9:example.org"
+      local function room_messages()
+        local found = {}
+        for _, request in ipairs(client.requests) do
+          if tostring(request.path):find("/send/m.room.message/", 1, true) then found[#found + 1] = request end
+        end
+        return found
+      end
+      client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+        ["!room:example.org"] = { timeline = { events = {
+          typed_line_event("$status", "?status"), typed_line_event("$again", "?status"),
+          typed_line_event("$help", "?help"), agent_event, typed_line_event("$unknown", "?nope"),
+        } } },
+      } } } })
+      local replies = room_messages()
+      assert(#replies == 1, "one reply inside the 10 second window, got " .. #replies)
+      assert(tostring(replies[1].body):find("butler status", 1, true) and tostring(replies[1].body):find("m.notice", 1, true)
+        and tostring(replies[1].body):find("m.thread", 1, true), "the reply is one threaded notice")
+      assert(#typed == 0 and #keys == 0, "a status command is never typed into a session")
+      local delivered_ids = {}
+      for _, event in ipairs(delivered) do delivered_ids[event.event_id] = true end
+      assert(not delivered_ids["$status"] and not delivered_ids["$again"] and not delivered_ids["$help"],
+        "status commands do not become Butler mail")
+      assert(delivered_ids["$unknown"], "an unknown ?word stays on the ordinary mail path")
+      assert(#since_at_send == 1 and since_at_send[1]:find("$status", 1, true),
+        "the event id is persisted before the reply is sent")
+
+      local real_time, clock = os.time, os.time()
+      local function sync_at(offset, events)
+        os.time = function(value) if value then return real_time(value) end return clock + offset end
+        local pending
+        for index = #client.requests, 1, -1 do
+          if client.callbacks[index] and tostring(client.requests[index].path):find("/sync", 1, true) then
+            pending = index
+            break
+          end
+        end
+        assert(pending, "no pending sync")
+        for _, event in ipairs(events) do event.origin_server_ts = event.origin_server_ts + offset * 1000 end
+        local ok, err = pcall(client.complete, client, pending, { json = { next_batch = "s" .. offset, rooms = { join = {
+          ["!room:example.org"] = { timeline = { events = events } },
+        } } } })
+        os.time = real_time
+        assert(ok, err)
+      end
+      sync_at(11, { typed_line_event("$help-later", "?help") })
+      replies = room_messages()
+      assert(#replies == 2 and tostring(replies[2].body):find("this list", 1, true),
+        "a ?help past the window is answered, got " .. #replies .. " replies")
+      local threaded = typed_line_event("$in-thread", "?status")
+      threaded.content["m.relates_to"] = { rel_type = "m.thread", event_id = "$thread-root" }
+      sync_at(22, { threaded })
+      replies = room_messages()
+      assert(#replies == 3 and tostring(replies[3].body):find("$thread-root", 1, true)
+        and tostring(replies[3].body):find("$in-thread", 1, true), "a thread reply is answered inside its thread")
+      local old = typed_line_event("$old-status", "?status")
+      old.origin_server_ts = (clock - 400) * 1000
+      sync_at(33, { old, typed_line_event("$in-thread", "?status") })
+      assert(#room_messages() == 3, "an old or replayed ?status gets no reply")
+      relay:stop()
+      cleanup_fixture(dir, config_path)
+
+      dir, config_path = fixture("status_commands=false\n")
+      client, delivered = scripted_client(), {}
+      relay = relay_module.new({ config_path = config_path, matrix = client,
+        deliver = function(event) delivered[#delivered + 1] = event return true end })
+      relay:start()
+      client:complete(1, { json = { next_batch = "s0" } })
+      client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+        ["!room:example.org"] = { timeline = { events = { typed_line_event("$off", "?status") } } },
+      } } } })
+      assert(#room_messages() == 0 and #delivered == 1, "with the switch off ?status is ordinary mail")
+      relay:stop()
+      cleanup_fixture(dir, config_path)
+      remuda._butler_bus = old_bus
+    end)
+  end },
   { "test_typed_line_gate_error_is_contained_and_processed", test_typed_line_gate_error_is_contained_and_processed },
   { "test_typed_line_persist_failure_fails_closed", test_typed_line_persist_failure_fails_closed },
   { "test_typed_line_return_failure_warns_text_may_remain", test_typed_line_return_failure_warns_text_may_remain },

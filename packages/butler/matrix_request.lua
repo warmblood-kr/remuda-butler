@@ -255,7 +255,7 @@ local function read_config(path)
         else
           warn_invalid_config_line(path, i, key, value)
         end
-      elseif key == "typed_lines" or key == "shell_lines" then
+      elseif key == "typed_lines" or key == "shell_lines" or key == "status_commands" then
         if value == "true" then
           opts[key] = true
         elseif value == "false" then
@@ -346,6 +346,7 @@ local function read_config(path)
     butler_senders = butler_senders,
     typed_lines = opts.typed_lines == true,
     shell_lines = opts.shell_lines == true,
+    status_commands = opts.status_commands ~= false,
     untrusted_per_room_hour = untrusted_per_room_hour,
     posts_per_hour = posts_per_hour,
     b2b_max_turns = b2b_max_turns,

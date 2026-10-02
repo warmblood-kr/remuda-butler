@@ -1,4 +1,4 @@
-local state = { typed_lines = false, shell_lines = false }
+local state = { typed_lines = false, shell_lines = false, status_commands = true }
 local writes, prompts = {}, {}
 local config_path = os.tmpname()
 local config = assert(io.open(config_path, "wb"))
@@ -11,7 +11,8 @@ remuda = {
       prompt_preface_supported = function() return true end,
       read_config = function(path)
         assert(path == config_path)
-        return { typed_lines = state.typed_lines, shell_lines = state.shell_lines }
+        return { typed_lines = state.typed_lines, shell_lines = state.shell_lines,
+          status_commands = state.status_commands }
       end,
     },
   },
@@ -24,6 +25,7 @@ remuda = {
       file:close()
       state.typed_lines = contents:find("typed_lines=true", 1, true) ~= nil
       state.shell_lines = contents:find("shell_lines=true", 1, true) ~= nil
+      state.status_commands = contents:find("status_commands=false", 1, true) == nil
       return true
     end,
   },
@@ -94,5 +96,29 @@ local typed_count = 0
 for _ in written_config:gmatch("typed_lines=") do typed_count = typed_count + 1 end
 assert(typed_count == 1 and written_config:find("untrusted_per_room_hour=12", 1, true),
   "the private switch writer must deduplicate switch keys and preserve other config lines")
+-- status-commands: default on, off is immediate, on asks for yes
+expect_refused({ "status-commands", "off" }, "agent-01", "operator-only")
+expect_refused({ "status-commands", "maybe" }, nil, "Usage:")
+prompt_count, write_count = #prompts, #writes
+assert(text(cli({ "status-commands", "on" }, nil)):find("already on", 1, true), "default is on")
+assert(#prompts == prompt_count and #writes == write_count, "already on changes nothing")
+cli({ "status-commands", "off" }, nil)
+assert(state.status_commands == false and #writes == write_count + 1 and #prompts == prompt_count,
+  "off writes at once without a prompt")
+assert(state.typed_lines == false, "status-commands off leaves typed-lines alone")
+cli({ "status-commands", "on" }, nil)
+assert(#prompts == prompt_count + 1 and state.status_commands == false, "on prompts before writing")
+assert(prompts[#prompts].label:find("Type yes", 1, true) and prompts[#prompts].preface:find("status", 1, true))
+prompts[#prompts].callback("no")
+assert(state.status_commands == false, "anything but yes changes nothing")
+cli({ "status-commands", "on" }, nil)
+prompts[#prompts].callback("yes")
+assert(state.status_commands == true, "yes turns it on")
+written_file = assert(io.open(config_path, "rb"))
+written_config = written_file:read("*a")
+written_file:close()
+local status_count = 0
+for _ in written_config:gmatch("status_commands=") do status_count = status_count + 1 end
+assert(status_count == 1, "the switch key is written once")
 os.remove(config_path)
 print("ok - typed-line switch CLI cases")
