@@ -157,7 +157,11 @@ local function close_member(name, leader, force)
   if not ok then error("cannot close " .. tostring(name) .. ": unknown Butler member.\nNext: remuda butler sessions", 0) end
   local agents = remuda._butler_bus and remuda._butler_bus.agents or {}
   local agent = agents[alias]
-  if not agent or agent.parent ~= leader then
+  -- Direct members only; the root (or a person) may also close leader-less rows
+  -- (no parent, or a parent that is gone). The root row itself is never closable.
+  local root_row = alias == "butler" or alias == remuda._butler_name
+  local leaderless = agent and (not agent.parent or not agents[agent.parent])
+  if not agent or root_row or not (agent.parent == leader or (leader == "butler" and leaderless)) then
     error("cannot close " .. tostring(alias) .. ": only your direct members can be closed (you and your leader are excluded).\nNext: remuda butler sessions", 0)
   end
   if not force then
