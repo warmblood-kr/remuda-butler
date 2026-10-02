@@ -1157,12 +1157,15 @@ function remuda._butler_session_exited(name, info)
     remuda._butler_reconcile()
   end
   if update_restart then
+    remuda._butler_relaunching = remuda._butler_relaunching or {}
+    remuda._butler_relaunching[name] = os.time()
     _butler_session_trace("codex_updated_relaunch", name)
     local ok, err = pcall(launch_agent, update_restart.kind, update_restart.name,
       update_restart.cwd, update_restart.model, update_restart.parent, update_restart.task,
       update_restart.identity)
     if not ok then
       _butler_session_trace("codex_updated_relaunch_failed", name .. ": " .. tostring(err))
+      remuda._butler_relaunching[name] = nil
       pcall(remuda._butler_send, "butler", update_restart.parent or "butler",
         "Codex update completed but " .. name .. " could not be relaunched: " .. tostring(err))
     end

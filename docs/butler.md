@@ -94,8 +94,9 @@ type into a Codex pane again.
 
 `remuda butler close NAME [--force]` closes a session when the caller is its
 leader. A person at a terminal counts as the root `butler`. The root may also
-close a leader-less row (no leader, or a leader that is gone); nobody can close
-the root row. Without `--force` a row with unread mail or one that is not idle
+close a leader-less row (no leader, or a leader that is gone and not
+relaunching) with the command line; the `butler_close` tool never closes
+leader-less rows. Nobody can close the root row. Without `--force` a row with unread mail or one that is not idle
 is refused.
 
 When a lead exits, its live members move to the lead's leader (to `butler`

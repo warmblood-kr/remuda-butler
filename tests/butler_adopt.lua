@@ -36,9 +36,9 @@ local function exit(name)
   bus.agents[name] = nil
   remuda._butler_adopt_members(name, exited)
 end
-local function can_close(leader, name, force)
+local function can_close(leader, name, force, cli)
   closed = {}
-  local ok = pcall(remuda._butler_close_member, name, leader, force)
+  local ok = pcall(remuda._butler_close_member, name, leader, force, cli)
   return ok and closed[1] == name
 end
 local function has(list, x) for _, v in ipairs(list) do if v == x then return true end end end
@@ -85,9 +85,15 @@ assert(bus.agents.m1.parent == "butler", "no live leader -> root")
 
 -- root closes leader-less rows (old orphans, or no parent at all)
 tree({ {"butler"}, {"orphan", "DEAD"}, {"free"}, {"lead", "butler"}, {"m", "lead"} })
-assert(can_close("butler", "orphan"), "root closes an orphan")
-assert(can_close("butler", "free"), "root closes a parentless row")
+assert(can_close("butler", "orphan", nil, true), "root closes an orphan")
+assert(can_close("butler", "free", nil, true), "root closes a parentless row")
 assert(not can_close("butler", "butler"), "root never closes itself")
 assert(not can_close("lead", "orphan") and not can_close("m", "free"), "non-root cannot close leader-less rows")
 assert(not can_close("butler", "m"), "root cannot close a row whose parent is alive")
+assert(not can_close("butler", "orphan") and not can_close("butler", "free"), "an MCP caller (no CLI flag) never closes leader-less rows")
+remuda._butler_relaunching = { DEAD = os.time() }
+assert(not can_close("butler", "orphan", nil, true), "a lead that is relaunching still has its members")
+remuda._butler_relaunching = { DEAD = os.time() - 1000 }
+assert(can_close("butler", "orphan", nil, true), "a stale relaunch marker expires")
+remuda._butler_relaunching = nil
 print("ok - adoption and close authority")
