@@ -54,7 +54,8 @@ remuda.ls = function() return { { name = "agent-1", alive = true, attached = fal
 remuda.session = function() return { attached = false } end
 remuda._butler_matrix_live_config = { approve_text = true }
 remuda._butler_bus = { pending_tasks = {}, agents = {
-  butler = { id = "butler" }, agent1 = { id = "agent1", session_name = "agent-1", parent = "butler" },
+  butler = { id = "butler", token = "root-token" },
+  agent1 = { id = "agent1", token = "agent-token", session_name = "agent-1", parent = "butler" },
 } }
 local provenance = { owner = "@alice:example.org", event_id = "$approved", request_id = "ABCD" }
 local ok, reason = approve_text.type_text("agent-1", multiline, provenance)
@@ -86,7 +87,8 @@ local returned_id = approve_text.request("agent-1", multiline, "agent-1")
 assert(returned_id == "ABCD", "registration returns the short request id")
 assert(request_spec.kind == "approve_text" and request_spec.data.session == "agent-1"
   and request_spec.data.registered_text == multiline and request_spec.data.stored_text == multiline
-  and request_spec.data.posted_text == multiline and request_spec.data.session_id == "agent1",
+  and request_spec.data.posted_text == multiline and request_spec.data.session_id == "agent1"
+  and request_spec.data.session_start == "agent-token",
   "request stores the exact bytes, session, and display copy")
 assert(request_spec.rate_limit_per_window == 10 and request_spec.rate_window_s == 600,
   "registration rate is bounded per agent")
@@ -102,14 +104,14 @@ request_handler.approve({ id = "ABCD", data = request_spec.data,
   function(ok, why) applied = { ok, why } end)
 assert(applied[1] == true, "approved request delivers the stored text")
 
-local saved_id = remuda._butler_bus.agents.agent1.id
-remuda._butler_bus.agents.agent1.id = "relaunch-id"
+local saved_token = remuda._butler_bus.agents.agent1.token
+remuda._butler_bus.agents.agent1.token = "new-token"
 local relaunch_result
 request_handler.approve({ id = "ABCD", data = request_spec.data },
   function(ok, why) relaunch_result = { ok, why } end)
 assert(relaunch_result[1] == "retry" and relaunch_result[2] == "session_changed" and #typed == 2,
   "a relaunch under the same name cannot receive a registered request")
-remuda._butler_bus.agents.agent1.id = saved_id
+remuda._butler_bus.agents.agent1.token = saved_token
 
 local changed = { id = "ABCD", data = { session = "agent-1", bytes = #multiline,
   registered_text = string.rep("x", #multiline), posted_text = multiline, request_id = "ABCD" } }

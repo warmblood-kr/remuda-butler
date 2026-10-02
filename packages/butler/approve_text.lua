@@ -151,8 +151,8 @@ end
 function M.session_instance(session)
   if not M.target_session_allowed(session) then return nil end
   local id, agent = live_agent(session)
-  if not id or type(agent.id) ~= "string" then return nil end
-  return agent.id
+  if not id or type(agent.id) ~= "string" or type(agent.token) ~= "string" then return nil end
+  return agent.id, agent.token
 end
 
 local function pane_has_human(session)
@@ -214,15 +214,15 @@ local function request(session, text, asker, ttl_s, done)
     done(nil, why)
     return nil, why
   end
-  local session_id = M.session_instance(session)
-  if not session_id then
-    local failure = "Target is not a live Butler session. Next: choose a live session and retry."
-    done(nil, failure)
-    return nil, failure
-  end
   local live_config = remuda._butler_matrix_live_config or {}
   if live_config.approve_text ~= true then
     local failure = "Prepared text approvals are off. Next: remuda butler approve-text on"
+    done(nil, failure)
+    return nil, failure
+  end
+  local session_id, session_start = M.session_instance(session)
+  if not session_id then
+    local failure = "Target is not a live Butler session. Next: choose a live session and retry."
     done(nil, failure)
     return nil, failure
   end
@@ -230,7 +230,8 @@ local function request(session, text, asker, ttl_s, done)
   local key = tostring(os.time()) .. ":" .. tostring(request_counter)
   local requested_id, failure
   local request_data = { registered_text = prepared.registered_text, stored_text = prepared.stored_text,
-    posted_text = prepared.posted_text, session = session, session_id = session_id, bytes = prepared.bytes }
+    posted_text = prepared.posted_text, session = session, session_id = session_id,
+    session_start = session_start, bytes = prepared.bytes }
   local bounded_ttl = math.max(1, math.min(MAX_TTL, tonumber(ttl_s) or DEFAULT_TTL))
   local result = approval.request({ kind = "approve_text", key = key,
     asker = asker, summary = "type " .. tostring(prepared.bytes) .. " prepared bytes in " .. session,
@@ -316,7 +317,9 @@ function M.configure()
         complete(false, "text_changed")
         return
       end
-      if not M.target_session_allowed(data.session) or M.session_instance(data.session) ~= data.session_id then
+      local current_id, current_start = M.session_instance(data.session)
+      if not M.target_session_allowed(data.session) or current_id ~= data.session_id
+          or current_start ~= data.session_start then
         pcall(approval.reply, rec, "refused: session_changed")
         complete("retry", "session_changed")
         return
