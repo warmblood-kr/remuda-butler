@@ -20,7 +20,8 @@ local USAGE = [[  remuda butler matrix [--json] status
   remuda butler matrix setup [OPTIONS]
   remuda butler matrix [--json] quarantine [--id EVENT_ID] (operator)
 
-Example: remuda butler matrix setup --homeserver https://<homeserver> --owner @<owner>:<server> --bot @<bot>:<server> --password-file <path>]]
+Example: remuda butler matrix setup --homeserver https://<homeserver> --owner @<owner>:<server> --bot @<bot>:<server> --password-file <path>
+Or end with --password-cmd PROG [ARG...] in place of --password-file to read the bot password from a program.]]
 
 local VERBS = {
   status = true, rooms = true, history = true, event = true, get = true, quarantine = true,
@@ -565,6 +566,8 @@ function matrix.cli(args, agent, stdin_body)
           lines[#lines + 1] = "Token file: " .. terminal_safe(files.token_path)
           if files.password_path then
             lines[#lines + 1] = "Bot account password saved privately: " .. terminal_safe(files.password_path)
+          elseif plan.secret_kind == "registration" then
+            lines[#lines + 1] = "The password you supplied was not copied."
           end
           lines[#lines + 1] = "Config file: " .. terminal_safe(files.config_path)
           if status_result.error then

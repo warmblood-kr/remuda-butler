@@ -306,6 +306,26 @@ the config; flag-based setup defaults to allowlist.
 remuda butler matrix setup --homeserver https://matrix.example.org --owner @alice:example.org --register --pin <64-hex-sha256> --default
 ```
 
+`--password-cmd PROG [ARG...]` reads the bot password from a program, such as
+a password manager, instead of `--password-file`. Setup runs the program
+directly (no shell), waits up to 10 seconds, and uses the first line it prints.
+It takes every argument after it, so it must be the last option. It works with
+and without `--register` (without it, `--bot` is required) and cannot be
+combined with `--password-file` or `--token-file`. Setup saves no copy of this
+password: it stays where it was made. The program inherits the daemon's
+environment (stdin is closed), so treat it as running with your own authority.
+
+Whoever made the password keeps it. Setup saves no copy of a password you
+supply, with `--password-cmd` or with `--password-file`, and says so: "The
+password you supplied was not copied." Only a password that setup generates
+(`--register` with neither option) is saved privately beside the token.
+
+```text
+remuda butler matrix setup ... --password-cmd op read op://Vault/Item/password
+remuda butler matrix setup ... --password-cmd security find-generic-password -s butler-bot -w
+remuda butler matrix setup ... --password-cmd powershell -NoProfile -Command "Get-Secret -Name butler-bot -AsPlainText"
+```
+
 The token is stored in a separate token file. The newline-delimited config
 file contains:
 
