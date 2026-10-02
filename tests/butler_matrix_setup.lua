@@ -1195,6 +1195,23 @@ return function(matrix, pinned_hostname)
   assert(no_rng_dir_created, "secure-random failure must not create the output directory")
   os.remove(no_rng_output)
 
+  for _, bad in ipairs({ function() return string.rep("x", 31) end, function() return 42 end, function() error("boom") end }) do
+    remuda.random_bytes = bad
+    io.open = function(path, mode)
+      if path == "/dev/urandom" then return nil, "simulated unavailable random source" end
+      return real_io_open(path, mode)
+    end
+    requests, resolved = {}, nil
+    matrix.cli({ "matrix", "setup", "--homeserver", "http://matrix.invalid",
+      "--owner", "@alice:example.org", "--register", "--registration-token-file",
+      registration_token_file, "--bot", "@butler-bad-rng:example.org", "--dir", root .. "/bad-rng-output" })
+    io.open = real_io_open
+    assert(#requests == 0 and resolved and resolved.status == 1
+      and resolved.stderr:find("no secure random source", 1, true),
+      "a short, wrong-type or erroring remuda.random_bytes must fail closed when urandom is absent")
+  end
+  remuda.random_bytes = nil
+
   local short_rng_output = root .. "/short-secure-random"
   remuda.random_bytes = nil
   io.open = function(path, mode)
