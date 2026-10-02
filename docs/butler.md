@@ -251,7 +251,7 @@ When the Butler reaches the turn limit, it posts this line to HOME and stops
 replying in that thread until an allowlisted human replies:
 
 ```text
-Stopped replying in thread ROOT (ROOM): N Butler-only turns. A reply in that thread from a person on the allowlist resumes it.
+Two Butlers talked N turns without a human, so I paused thread ROOT (ROOM) to avoid ping-pong. No action needed; reply in that thread only if you want it to continue.
 ```
 
 The reply refusal includes a command with shell-quoted room and thread IDs:

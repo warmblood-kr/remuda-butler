@@ -751,9 +751,9 @@ function relay.new(options)
     if turns.n >= cfg.b2b_max_turns and not turns.notified then
       turns.notified = true
       send_notice(cfg.home_room,
-        "Stopped replying in thread " .. matrix.shown_event_id(root) .. " ("
-          .. terminal_safe_field(room, 512) .. "): " .. tostring(cfg.b2b_max_turns)
-          .. " Butler-only turns. A reply in that thread from a person on the allowlist resumes it.",
+        "Two Butlers talked " .. tostring(cfg.b2b_max_turns) .. " turns without a human, so I paused thread "
+          .. matrix.shown_event_id(root) .. " (" .. terminal_safe_field(room, 512)
+          .. ") to avoid ping-pong. No action needed; reply in that thread only if you want it to continue.",
         "b2b-turn-limit", cfg.home_room)
     end
     return turns.n
