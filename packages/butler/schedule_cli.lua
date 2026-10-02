@@ -46,7 +46,8 @@ end
 local function load_list(env)
   local list, problem = schedule.load(env.path, env.trace)
   if problem then
-    return nil, "schedules.json is unusable (" .. problem .. "). Fix or remove it; nothing was changed."
+    return nil, (env.path or "schedules.json") .. " is unusable (" .. problem
+      .. "). Delete the file, or fix its contents, to use schedules again; nothing was changed."
   end
   return list
 end

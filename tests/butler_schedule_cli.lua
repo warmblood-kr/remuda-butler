@@ -192,6 +192,9 @@ local garbage = "{{{ corrupt"
 local f = assert(io.open(path, "wb")); f:write(garbage); f:close()
 local wrote = writes
 ok("add refuses an unusable file", add(words("add", "n1", "7 * * * *", "t"), "yes").error:find("unusable"))
+ok("the refusal names the file and how to recover",
+  add(words("add", "n1", "7 * * * *", "t"), "yes").error:find(path .. " is unusable", 1, true)
+  and add(words("add", "n1", "7 * * * *", "t"), "yes").error:find("Delete the file", 1, true))
 ok("rm refuses an unusable file", cli.cli(words("rm", "n1")).error:find("unusable"))
 ok("list says the file is unusable", cli.cli(words("list")).error:find("unusable"))
 eq("the unusable file is untouched", file_text(), garbage)
