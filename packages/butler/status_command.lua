@@ -130,10 +130,12 @@ end
 
 -- Folds the pcall of M.handle into the relay's decision. A handle that raised on
 -- a line that parses as a command still consumes the event, with no reply; a
--- line that is not a command is left to the ordinary path.
+-- line that is not a command is left to the ordinary path. A consumed raise
+-- returns the trace reason as the fourth result.
 function M.outcome(ok, matched, text, commit, body)
   if ok then return matched == true, text, commit end
-  return M.parse(body) ~= nil, nil, nil
+  if M.parse(body) == nil then return false end
+  return true, nil, nil, "handler_error"
 end
 
 local function try(fn, ...)
