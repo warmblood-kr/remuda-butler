@@ -882,11 +882,12 @@ local function realpath(target)
   return resolved and resolved ~= "" and resolved or nil
 end
 function remuda._butler_file_for_caller(path, flag, pipe)
-  return permissions.file_for_caller(path, core_caller(), session_launch_cwd, realpath, flag, pipe)
+  return permissions.file_for_caller(path, core_caller(), session_launch_cwd, realpath, flag, pipe, system.platform())
 end
 -- The output of matrix download: -o PATH, or the default name when there is none.
 function remuda._butler_output_for_caller(path, name)
-  return permissions.output_for_caller(path, name, core_caller(), session_launch_cwd, realpath, butler_fs.is_symlink)
+  return permissions.output_for_caller(path, name, core_caller(), session_launch_cwd, realpath, butler_fs.is_symlink,
+    system.platform())
 end
 -- Merges the root Butler's rule into its own .claude/settings.local.json: at
 -- every real launch, and once per mod load for a session that is already

@@ -481,7 +481,6 @@ for name, case in pairs({
   ["a sibling directory with the same prefix"] = { [[C:\projx\f]] }, ["the working directory itself"] = { [[C:\proj\.]] },
   ["another share on the same server"] = { [[\\srv\other\proj\f]], "unc" },
   ["the same share on another server"] = { [[\\srv2\share\proj\f]], "unc" },
-  ["a pipe"] = { [[\\.\pipe\x]] },
 }) do
   local path, session = case[1], case[2] or "w1"
   local out, why = wfile(path, session)
@@ -495,9 +494,15 @@ weq("windows, a '..' the resolver left in place is refused",
 local WDEVICE = "refused: --file %s names a device or a stream, not a file\n" .. [[Next: pass a regular file inside C:\proj]]
 for name, path in pairs({
   ["a device the resolver names"] = [[C:\proj\NUL]], ["a device name with an extension"] = [[C:\proj\con.txt]],
-  ["an alternate stream"] = [[C:\proj\f.txt:stream]],
+  ["an alternate stream"] = [[C:\proj\f.txt:stream]], ["a pipe"] = [[\\.\pipe\x]],
+  ["another \\\\?\\ namespace"] = [[\\?\GLOBALROOT\Device\x]],
 }) do
-  local out, why = wfile(path)
+  local resolved_devices = 0
+  local out, why = permissions.file_for_caller(path, { kind = "session", session = "w1" }, wcwd_of, function(asked)
+    if asked == path then resolved_devices = resolved_devices + 1 end
+    return wrealpath(asked)
+  end, "--file ", true, "windows")
+  weq("windows, " .. name .. ": refused by name, never resolved", resolved_devices, 0)
   weq("windows, " .. name .. ": nothing to open", out, nil)
   weq("windows, " .. name .. ": refusal", why, WDEVICE:format(path))
 end
@@ -533,6 +538,19 @@ for name, path in pairs({
 }) do
   weq("windows, -o on " .. name, select(2, wout(path)), "refused: -o " .. path .. " names a device or a stream, not a file" .. WNEXT)
 end
+-- The default name comes from the sender's media id.
+for name, default in pairs({ ["a backslash"] = [[matrix-a\..\..\b]], ["a stream"] = "matrix-a:b", ["a device"] = "nul" }) do
+  local out = permissions.output_for_caller(nil, default, { kind = "session", session = "w1" }, wcwd_of, wrealpath,
+    wis_symlink, "windows")
+  weq("windows, a default name with " .. name .. " writes nothing", out, nil)
+end
+weq("path_key: a drive path, either slash, any case", permissions.path_key([[C:/Proj\Sub]], "windows"), "c:/proj/sub")
+weq("path_key: UNC and its \\\\?\\ form are one place", permissions.path_key([[\\?\UNC\Srv\Share\d]], "windows"),
+  permissions.path_key([[\\srv\share\D]], "windows"))
+weq("path_key: a drive-relative path is not absolute", permissions.path_key([[C:proj]], "windows"), nil)
+weq("path_key: a device says why", select(2, permissions.path_key([[C:\proj\COM1.log]], "windows")), "device")
+weq("path_key: posix is the path itself", permissions.path_key("/w/M1", "posix"), "/w/M1")
+weq("path_key: posix keeps a backslash as a character", permissions.path_key([[C:\proj]], "posix"), nil)
 if #wfailed > 0 then error(#wfailed .. " Windows path cases failed:\n" .. table.concat(wfailed, "\n"), 0) end
 
 print(("butler_permissions ok: %d cases"):format(count))
