@@ -37,7 +37,9 @@ assert(done[1][2]:find("type failed", 1, true), "failure identifies the last del
 poll.run()
 assert(#done == 1, "no duplicate failure callback after exhaustion")
 
--- A busy pane with an empty composer does not prove that the first task arrived.
+-- A successful task write followed by an empty composer proves that the TUI
+-- accepted it, even if the first capture missed the text while background
+-- activity made the pane report busy.
 now, alive, screen, input_calls, done, retries = 5000, true, "ready", 0, {}, {}
 remuda.type_text = function() input_calls = input_calls + 1 end
 remuda.session = function() return { is_busy = true } end
@@ -53,12 +55,35 @@ prompt.schedule(remuda, "codex", "member", "member", "lead", "first task", {
 poll.run()
 now = now + 1
 poll.run()
-assert(#done == 0, "background activity cannot falsely acknowledge unseen task text")
-assert(input_calls == 1, "the retry waits instead of overwriting a nonempty composer")
+assert(#done == 1 and done[1][1] == true, "successful write plus empty composer is accepted")
+assert(input_calls == 1, "an empty composer after an accepted write is never retyped")
 
 alive = false
 poll.run()
-assert(#done == 1 and done[1][2] == "recipient gone", "recipient exit stops pending retries")
+assert(#done == 1, "completed delivery does not emit another callback after recipient exit")
+
+-- A fast Codex submit can empty the composer before the first verification
+-- capture. Once type_text returned successfully, that empty composer proves
+-- acceptance and must never trigger a second write after submit_timeout.
+now, alive, screen, input_calls, done, retries = 6000, true, "ready", 0, {}, {}
+local busy = true
+remuda.session = function() return { is_busy = busy } end
+remuda.type_text = function() input_calls = input_calls + 1; busy = true end
+prompt.schedule(remuda, "codex", "member", "member", "lead", string.rep("long first task\n", 80), {
+  ready = function() return true end,
+  allowed = function() return true end,
+  empty = function() return "EMPTY", "" end,
+  recipient_alive = function() return alive end,
+  now = function() return now end,
+  submit_timeout = 1,
+  retry_delays = { 0, 0, 0, 0 },
+  on_done = function(ok, reason) done[#done + 1] = { ok, reason } end,
+})
+poll.run()
+now = now + 1
+poll.run()
+assert(input_calls == 1, "successful write was duplicated when the first poll saw an empty composer")
+assert(#done == 1 and done[1][1] == true, "empty composer after a successful write is delivered")
 
 -- If text reached the composer but Return was dropped, retry Return without retyping.
 now, alive, screen, input_calls, done, retries = 7000, true, "ready", 0, {}, {}

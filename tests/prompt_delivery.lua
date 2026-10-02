@@ -157,11 +157,12 @@ do
       .. "\t\27[31m\194\133é\nstack traceback:\n\t...", 0)
   end
   M.schedule(fake, "codex", "type-failure", "member", "leader", "task", {
+    retry_delays = { 0, 0, 0, 0 },
     on_done = function(ok, reason)
       state.done, state.ok, state.reason = true, ok, reason
     end,
   })
-  state.callback()
+  for _ = 1, 5 do state.callback() end
   assert(state.cancelled and state.done and state.ok == false,
     "type failure did not call on_done(false)")
   assert(state.reason:sub(1, 13) == "type failed: ", "type failure reason was " .. tostring(state.reason))
@@ -173,9 +174,10 @@ do
 
   fake.type_text = function() error("12:34: warning about the clock", 0) end
   M.schedule(fake, "codex", "type-failure", "member", "leader", "task", {
+    retry_delays = { 0, 0, 0, 0 },
     on_done = function(ok, reason) state.reason = reason end,
   })
-  state.callback()
+  for _ = 1, 5 do state.callback() end
   assert(state.reason == "type failed: 12:34: warning about the clock",
     "a clock-like prefix without a source location was stripped: " .. tostring(state.reason))
 end
@@ -208,22 +210,19 @@ local function exercise_composer_after_paste(composer_after_paste, mixed)
       return state.composer == "" and "EMPTY" or "NON-EMPTY", state.composer
     end,
     submit_timeout = 6,
+    retry_delays = { 0 },
     now = function() return state.now end,
     on_done = function(ok, reason) state.ok, state.reason = ok, reason end,
   })
-  for _ = 1, 20 do
+  for _ = 1, 40 do
     state.now = state.now + 0.5
     if not state.cancelled then state.callback() end
   end
   assert(state.sends == 1, "task was pasted more than once")
   assert(state.cancelled, "paste verification poll did not stop")
-  if mixed then
-    assert(state.returns == 0, "Return submitted task together with human text")
-    assert(state.ok == false and state.reason == "submit", "mixed composer was not reported to the leader")
-  else
-    assert(state.returns == 1, "collapsed paste placeholder did not get one Return retry")
-    assert(state.ok and state.transcript[1] == task, "accepted placeholder submit was not recorded")
-  end
+  assert(state.returns == 0, "a paste placeholder cannot prove the composer still holds our task")
+  assert(state.ok == false and state.reason == "submit",
+    mixed and "mixed composer was not reported to the leader" or "unverified paste placeholder was not reported")
 end
 
 exercise_composer_after_paste("[Pasted text #1 +2 lines]", false)
@@ -279,6 +278,7 @@ do
   M.schedule(fake, "codex", "stuck-modal", "stuck", "leader", "task", {
     modals = { { match = "2. Skip", keys = { "2" } } },
     ready_timeout = 4,
+    retry_delays = { 0 },
     on_done = function(ok, reason) state.ok, state.reason = ok, reason end,
   })
   for _ = 1, 10 do if not state.cancelled then state.callback() end end
@@ -303,6 +303,7 @@ do
     ready = function(screen) return screen:find("Ask Codex", 1, true) ~= nil end,
     empty = function() return "NON-EMPTY" end,
     submit_timeout = 3,
+    retry_delays = { 0 },
     now = function() return state.now end,
     on_done = function(ok, reason) state.ok, state.reason = ok, reason end,
   })

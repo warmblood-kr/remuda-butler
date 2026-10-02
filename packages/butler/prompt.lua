@@ -39,6 +39,12 @@ local function prompt_start_visible(screen, task)
   return visible:find(expected:sub(1, marker_size), 1, true) ~= nil
 end
 
+local function task_running_visible(screen, task, composer)
+  local expected = compact(task)
+  local marker = expected:sub(1, math.min(48, #expected))
+  return prompt_start_visible(screen, task) and not compact(composer):find(marker, 1, true)
+end
+
 local function notify(remuda, parent, name, reason)
   if parent then
     pcall(remuda._butler_send, "butler", parent,
@@ -50,7 +56,8 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
   options = options or {}
   local poll, startup_ticks, deferred_ticks, verify_ticks = nil, 0, 0, 0
   local attempts = 0
-  local handled_modals, settle_until, task_seen_in_composer = {}, 0, false
+  local handled_modals, settle_until = {}, 0
+  local write_succeeded = false
   local verify_started, retry_at, retry_failures, finished
   local retry_delays = options.retry_delays or { 20, 60, 300, 900 }
   local function now()
@@ -80,8 +87,9 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
     if not delay then finish(false, reason); return end
     retry_at = now() + delay
     startup_ticks, deferred_ticks, verify_ticks, attempts = 0, 0, 0, 0
-    handled_modals, settle_until = {}, 0
-    verify_started, options.return_retried = nil, nil
+    settle_until = 0
+    verify_started = write_succeeded and now() or nil
+    options.return_retried = nil
     if options.on_retry then pcall(options.on_retry, retry_failures, delay, reason) end
   end
   poll = remuda.schedule({ every = 0.5, run = function()
@@ -153,44 +161,42 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
         is_ready = checked and result == true
       end
       if is_ready then
-        if task_seen_in_composer then
+        -- A successful terminal write is at-most-once. An empty composer is
+        -- delivery confirmation even if the TUI submitted before our first
+        -- poll could paint the task. After that write, only retry Return when
+        -- the visible composer still exactly matches our task.
+        if write_succeeded then
           local decision, text = "EMPTY", ""
           if options.empty then
             local checked, value, composer = pcall(options.empty, screen)
             decision, text = checked and value or "UNPARSEABLE", tostring(composer or "")
           end
-          local placeholder = text:match("^%[?Pasted text #%d+%s*%+%s*%d+%s+lines?%]?%s*$") ~= nil
-            or text:match("^%[Pasted Content %d+ chars%]$") ~= nil
-          local same_task = decision == "NON-EMPTY"
-            and (compact(text) == compact(task) or placeholder)
-          if same_task then
-            local allowed = true
-            if options.allowed then
-              local checked, value = pcall(options.allowed, true, screen)
-              allowed = checked and value == true
-            end
-            if allowed then
-              attempts, verify_ticks, verify_started = 1, 0, now()
-              options.return_retried = true
-              pcall(remuda.key, actual, "RET")
-            else
-              deferred_ticks = deferred_ticks + 1
-              if deferred_ticks >= (options.timeout or 600) then retry("deferred") end
-            end
-            return
-          end
           if decision == "EMPTY" then
-            verify_ticks = verify_ticks + 1
-            local busy = false
-            if remuda.session then
-              local checked, session = pcall(remuda.session, actual)
-              busy = checked and session and session.is_busy == true
-            end
-            if prompt_start_visible(screen, task) or busy or verify_ticks >= 2 then finish(true) end
+            finish(true)
             return
           end
-          deferred_ticks = deferred_ticks + 1
-          if deferred_ticks >= (options.timeout or 600) then retry("deferred") end
+          local composer_is_task = decision == "NON-EMPTY" and compact(text) == compact(task)
+          if not composer_is_task and task_running_visible(screen, task, text) then
+            finish(true)
+            return
+          end
+          if composer_is_task then
+            if verify_ticks >= 4 and not options.return_retried then
+              local allowed = true
+              if options.allowed then
+                local checked, value = pcall(options.allowed, true, screen)
+                allowed = checked and value == true
+              end
+              if allowed then
+                options.return_retried = true
+                pcall(remuda.key, actual, "RET")
+                verify_ticks = 0
+              end
+            end
+          end
+          if verify_started and now() - verify_started >= (options.submit_timeout or 300) then
+            retry("submit")
+          end
           return
         end
         local allowed = true
@@ -217,6 +223,7 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
           end
           retry(reason)
         else
+          write_succeeded = true
           verify_started = now()
         end
       else
@@ -239,7 +246,6 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
     end
 
     verify_ticks = verify_ticks + 1
-    local started = prompt_start_visible(screen, task)
     local empty = true
     local composer_text = ""
     if options.empty then
@@ -247,26 +253,14 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
       empty = checked and decision == "EMPTY"
       if checked then composer_text = tostring(text or "") end
     end
-    local session_busy = false
-    if remuda.session then
-      local checked, session = pcall(remuda.session, actual)
-      session_busy = checked and session and session.is_busy == true
-    end
-    -- Busy is useful only after the composer releases our text; typing the
-    -- task itself also makes a terminal look busy.
-    if session_busy and empty and task_seen_in_composer then
+    -- After a successful write, an empty composer means the TUI accepted it,
+    -- even when the task was submitted before its text appeared in a capture.
+    if empty then
       finish(true)
       return
     end
-    local placeholder = composer_text:match("^%[?Pasted text #%d+%s*%+%s*%d+%s+lines?%]?%s*$") ~= nil
-      or composer_text:match("^%[Pasted Content %d+ chars%]$") ~= nil
-    local composer_is_task = not empty and (compact(composer_text) == compact(task) or placeholder)
-    if composer_is_task then task_seen_in_composer = true end
-    if started and empty then
-      finish(true)
-      return
-    end
-    if task_seen_in_composer and empty then
+    local composer_is_task = compact(composer_text) == compact(task)
+    if not composer_is_task and task_running_visible(screen, task, composer_text) then
       finish(true)
       return
     end
