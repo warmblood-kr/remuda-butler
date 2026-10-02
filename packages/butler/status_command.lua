@@ -17,7 +17,7 @@ end
 
 local function percent_text(value)
   value = tonumber(value)
-  if not value or value ~= value or value == math.huge or value == -math.huge then return "n/a" end
+  if not value or value ~= value or value < 0 or value > 1000 then return "n/a" end
   return string.format("%.0f%%", value)
 end
 
@@ -36,13 +36,15 @@ end
 
 local function quota_line(quota, now)
   local parts = {}
-  for _, limit in ipairs(type(quota) == "table" and quota.limits or {}) do
-    local label = limit.name == "5-hour limit" and "5h" or limit.name == "Weekly limit" and "7d" or nil
+  local limits = type(quota) == "table" and type(quota.limits) == "table" and quota.limits or {}
+  for _, limit in ipairs(limits) do
+    local label = type(limit) == "table"
+      and (limit.name == "5-hour limit" and "5h" or limit.name == "Weekly limit" and "7d" or nil)
     if label and tonumber(limit.used) then parts[#parts + 1] = label .. " " .. percent_text(limit.used) end
   end
   local claude = #parts > 0 and table.concat(parts, " · ") or "n/a"
   local at = type(quota) == "table" and tonumber(quota.at)
-  if #parts > 0 and at and now - at > STALE_SECONDS then
+  if #parts > 0 and at and now - at > STALE_SECONDS and now - at < 1e9 then
     claude = claude .. " (as of " .. age_text(now - at) .. " ago)"
   end
   return "quota    claude " .. claude .. "  codex n/a"
@@ -64,7 +66,7 @@ function M.status_format(data)
   local sessions = type(data.sessions) == "table" and data.sessions or {}
   local now = tonumber(data.now) or 0
   local rows = {}
-  for index, session in ipairs(sessions) do rows[index] = session_line(session) end
+  for index, session in ipairs(sessions) do rows[index] = session_line(type(session) == "table" and session or {}) end
   local text
   for shown = #rows, 0, -1 do
     local head, count = {}, nil
@@ -156,7 +158,9 @@ function M.handle(state, event, now, cfg, scope)
   if not command then return false end
   if not M.rate_allow(scope.rate, event.sender, now) then return true end
   if command == "help" then return true, M.help_text() end
-  return true, M.status_format(M.gather(now))
+  -- An internal error still consumes the event; the reply stays a bare line.
+  local ok, text = pcall(function() return M.status_format(M.gather(now)) end)
+  return true, ok and text or "status unavailable"
 end
 
 return M

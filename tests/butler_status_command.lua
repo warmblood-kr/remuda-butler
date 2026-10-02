@@ -159,3 +159,30 @@ local degraded = select(2, handle(event("?status")))
 assert(degraded:find("butler   claude ctx n/a  idle", 1, true) and degraded:find("claude n/a", 1, true), degraded)
 
 print("ok - parse, rate, handle")
+
+-- malformed quota, telemetry and mail shapes never raise
+local function fmt(quota) return status.status_format({ now = now, sessions = {}, quota = quota }) end
+for _, quota in ipairs({
+  { at = 1, limits = { 5 } }, { at = now, limits = { {} } }, { at = "x", limits = { { name = "Weekly limit", used = 1 } } },
+  { limits = { { name = "5-hour limit", used = 1e308 } } }, { at = 1e308, limits = { { name = "5-hour limit", used = 5 } } },
+  { at = -1e308, limits = { { name = "5-hour limit", used = 5 } } },
+  { limits = "x" }, { limits = { false, "s", { name = 7, used = {} } } }, 5, "q",
+}) do
+  local out = fmt(quota)
+  assert(out:find("quota    claude", 1, true), "malformed quota still formats")
+end
+assert(not fmt({ at = 1, limits = { 5 } }):find("5h", 1, true))
+remuda._butler_bus = { agents = { a = { id = "01A", kind = "claude" } }, pending_tasks = {} }
+remuda._butler_telemetry_for = function() error("boom") end
+remuda._butler_mail = { unread = function() error("boom") end }
+remuda._butler_quota = { claude_reading = function() return { at = 1, limits = { 5 } } end }
+local survived = select(2, handle(event("?status", { event_id = "$m1" })))
+assert(survived and survived:find("butler status · 1 sessions", 1, true), tostring(survived))
+
+-- an internal error still consumes the event with a bare reply
+local real_format = status.status_format
+status.status_format = function() error("boom") end
+local m, bare = handle(event("?status", { event_id = "$m2" }))
+status.status_format = real_format
+assert(m == true and bare == "status unavailable", tostring(m) .. tostring(bare))
+print("ok - malformed data is contained")
