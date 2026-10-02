@@ -131,4 +131,20 @@ failing.write = function() return nil, "disk full" end
 local fw, _, why = gb.sync("/r/AGENTS.md", blocks, failing)
 eq("a failed write is reported", why, "disk full")
 
+-- a malformed managed marker makes the whole file damaged: nothing is written
+for _, bad in ipairs({
+  "<!-- BEGIN remuda-butler:managed id=butler_1 -->", "<!-- END remuda-butler:managed id=butler_1 -->",
+  "<!-- BEGIN remuda-butler:managed id= -->", "<!-- BEGIN remuda-butler:managed id=Butler -->",
+  "<!-- BEGIN remuda-butler:managed id=butler --> junk", "<!-- BEGIN remuda-butler:managed",
+}) do
+  damaged("malformed marker " .. bad, "my notes\n" .. bad .. "\nedited\n")
+  damaged("malformed marker beside a good block " .. bad, block("a\n") .. bad .. "\n")
+end
+eq("a lowercase begin is plain text", outcome(select(2, gb.merge("<!-- begin remuda-butler:managed id=x -->\n", blocks))), "appended")
+
+-- legacy match is exact except for one trailing newline
+eq("legacy with one extra trailing newline not migrated", outcome(select(2, gb.merge(old .. "\n\n", blocks))), "appended")
+eq("legacy with trailing spaces not migrated", outcome(select(2, gb.merge(old .. "  ", blocks))), "appended")
+eq("legacy without its final newline migrated", outcome(select(2, gb.merge((old:gsub("\n$", "")), blocks))), "migrated")
+
 print(("butler_guidance_blocks: %d cases passed"):format(count))

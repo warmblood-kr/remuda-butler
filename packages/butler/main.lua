@@ -160,8 +160,9 @@ local butler_fs = {
     if private then return nil, "atomic writes are unavailable on this core" end
     local f, why = io.open(path, "w")
     if not f then return nil, why end
-    f:write(text)
-    f:close()
+    local wrote, werr = f:write(text)
+    local closed, cerr = f:close()
+    if not wrote or not closed then return nil, werr or cerr or "write failed" end
     return true
   end,
 }
@@ -962,9 +963,19 @@ end
 -- The root AGENTS.md carries Butler's text in a marked block; text outside the
 -- markers is the user's and stays. A trace line names a problem once per file.
 local guidance_traced = {}
+-- AGENTS.md may hold the user's text: it is written atomically or not at all
+-- (an old core without remuda.fs.write_atomic leaves it as it is).
+local guidance_fs = setmetatable({
+  write = function(path, text)
+    if not (remuda.fs and type(remuda.fs.write_atomic) == "function") then
+      return nil, "atomic writes are unavailable on this core"
+    end
+    return butler_fs.write(path, text)
+  end,
+}, { __index = butler_fs })
 local function write_root_guidance(root, body)
   local path = root .. "/AGENTS.md"
-  local _, report, err = remuda._butler_guidance_blocks.sync(path, { { id = "butler", body = body } }, butler_fs)
+  local _, report, err = remuda._butler_guidance_blocks.sync(path, { { id = "butler", body = body } }, guidance_fs)
   local outcome = err and "guidance_not_written" or report[1].outcome
   local event = ({ damaged = "guidance_markers_damaged", duplicated = "guidance_markers_damaged",
     symlink = "guidance_symlink_refused", ["mixed-eol"] = "guidance_mixed_eol", dropped = "guidance_block_dropped" })[outcome]

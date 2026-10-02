@@ -8,7 +8,8 @@ local MAX_BODY = 8192
 local function begin_line(id) return "<!-- BEGIN remuda-butler:managed id=" .. id .. " -->" end
 local function end_line(id) return "<!-- END remuda-butler:managed id=" .. id .. " -->" end
 
-local function strip(text) return (text:gsub("\r\n", "\n"):gsub("%s+$", "")) end
+-- Legacy comparison is exact (CRLF read as LF) except for one trailing newline.
+local function exact(text) return (text:gsub("\r\n", "\n"):gsub("\n$", "")) end
 
 -- Whole-file texts the root guidance had before it was marked, one per
 -- historical version of Butler's own text (oldest first). A file equal to one
@@ -120,8 +121,9 @@ behalf of another session. Do not use it for ordinary team communication.
 
 local function valid_id(id) return type(id) == "string" and id:match("^[a-z0-9%-]+$") ~= nil end
 
--- Marker lines of `text` for `id`: { kind, from, to } where from..to spans the
--- line without its line ending; `all` counts every marker line of any id.
+-- Marker lines of `text`: { kind, id, from, to } where from..to spans the line
+-- without its line ending. A line that starts like a marker but is not a
+-- well-formed one for a valid id is kind "BAD".
 local function scan(text)
   local marks, pos = {}, 1
   while pos <= #text do
@@ -129,7 +131,11 @@ local function scan(text)
     local to = (nl or #text + 1) - 1
     local line = text:sub(pos, to):gsub("\r$", "")
     local kind, id = line:match("^<!%-%- (%u+) remuda%-butler:managed id=([a-z0-9%-]+) %-%->$")
-    if kind == "BEGIN" or kind == "END" then marks[#marks + 1] = { kind = kind, id = id, from = pos, to = to - (text:sub(to, to) == "\r" and 1 or 0) } end
+    local from, upto = pos, to - (text:sub(to, to) == "\r" and 1 or 0)
+    if kind == "BEGIN" or kind == "END" then marks[#marks + 1] = { kind = kind, id = id, from = from, to = upto }
+    elseif line:find("^<!%-%- BEGIN remuda%-butler:managed") or line:find("^<!%-%- END remuda%-butler:managed") then
+      marks[#marks + 1] = { kind = "BAD", from = from, to = upto }
+    end
     pos = (nl or #text) + 1
   end
   return marks
@@ -184,10 +190,16 @@ function guidance_blocks.merge(text, blocks)
   if #valid == 0 then return nil, report end
 
   local function note(id, outcome) report[#report + 1] = { id = id, outcome = outcome } end
+  for _, m in ipairs(scan(current)) do
+    if m.kind == "BAD" then -- a malformed marker line: the file is damaged for every block
+      for _, block in ipairs(valid) do note(block.id, "damaged") end
+      return nil, report
+    end
+  end
   if #scan(current) == 0 then
-    local whole, legacy = strip(current), current:find("%S") == nil
-    for _, old in ipairs(guidance_blocks.known_old) do if strip(old) == whole then legacy = true end end
-    for _, block in ipairs(valid) do if strip(block.body) == whole then legacy = true end end
+    local whole, legacy = exact(current), current:find("%S") == nil
+    for _, old in ipairs(guidance_blocks.known_old) do if exact(old) == whole then legacy = true end end
+    for _, block in ipairs(valid) do if exact(block.body) == whole then legacy = true end end
     if legacy then
       local parts = {}
       for _, block in ipairs(valid) do parts[#parts + 1] = render(block.id, block.body, eol); note(block.id, current:find("%S") and "migrated" or "written") end
