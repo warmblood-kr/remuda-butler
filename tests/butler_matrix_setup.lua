@@ -204,6 +204,14 @@ return function(matrix, pinned_hostname)
     registration_token_file, "--bot", "@butler-demo:example.org", "--dir", existing_password_dir,
     "--force" })
   assert(forced_registration, "--force should explicitly permit replacing an existing password file")
+  do
+    local chosen_beside_old, chosen_beside_old_error = matrix.setup_prepare({ "--homeserver",
+      "http://matrix.invalid", "--owner", "@alice:example.org", "--register", "--registration-token-file",
+      registration_token_file, "--password-file", password, "--bot", "@butler-demo:example.org",
+      "--dir", existing_password_dir })
+    assert(chosen_beside_old, "a chosen password is not copied, so an old password file must not block setup: "
+      .. tostring(chosen_beside_old_error))
+  end
   os.remove(existing_password_dir .. "/password")
   os.remove(existing_password_dir)
 
@@ -1319,9 +1327,9 @@ return function(matrix, pinned_hostname)
   assert(remuda.fs.mkdir_new(chosen_output))
   local chosen_status = matrix.status
   matrix.status = function(_, callback)
-    assert(read(chosen_output .. "/password") == "password-secret\n"
+    assert(read(chosen_output .. "/password") == nil
       and read(chosen_output .. "/token") == "chosen-access-token\n",
-      "chosen password and access token should be saved before status")
+      "the access token, and no copy of the chosen password, should be saved before status")
     callback({ status = 200, json = { user_id = "@butler-chosen:example.org",
       joined_rooms = { "!chosen-home:example.org" } } })
     return { cancel = function() end }
@@ -1361,17 +1369,16 @@ return function(matrix, pinned_hostname)
     and not resolved.stdout:find("password-secret", 1, true)
     and not resolved.stdout:find("homeserver-registration-token", 1, true)
     and not resolved.stdout:find("chosen-access-token", 1, true)
-    and read(chosen_output .. "/password") == "password-secret\n"
+    and not resolved.stdout:find(chosen_output .. "/password", 1, true)
+    and read(chosen_output .. "/password") == nil
     and secure_random_attempts == 0,
-    "chosen-password registration should save privately, avoid secrets in output, and print a real next step")
-  assert(#atomic_writes == 3 and atomic_writes[1].private
-    and atomic_writes[2].private and atomic_writes[3].private,
-    "chosen password, token, and config must all use private atomic writes")
+    "chosen-password registration must not save or print a copy of the password, and should print a real next step")
+  assert(#atomic_writes == 2 and atomic_writes[1].private and atomic_writes[2].private,
+    "only the token and config are written, both privately; the chosen password stays with its owner")
   io.open = real_io_open
   matrix.status = chosen_status
   requests, resolved, atomic_writes = {}, nil, {}
   os.remove(chosen_output .. "/token")
-  os.remove(chosen_output .. "/password")
   os.remove(chosen_output .. "/config")
   os.remove(chosen_output)
 
