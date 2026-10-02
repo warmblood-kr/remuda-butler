@@ -5247,6 +5247,24 @@ rx_tests = {
       assert(#room_messages() == 0 and #delivered == 1, "with the switch off ?status is ordinary mail")
       relay:stop()
       cleanup_fixture(dir, config_path)
+
+      dir, config_path = fixture("")
+      client, delivered = scripted_client(), {}
+      local real_handle = remuda.butler.status_command.handle
+      remuda.butler.status_command.handle = function() error("boom") end
+      relay = relay_module.new({ config_path = config_path, matrix = client,
+        deliver = function(event) delivered[#delivered + 1] = event return true end })
+      relay:start()
+      client:complete(1, { json = { next_batch = "s0" } })
+      sync_at(44, { typed_line_event("$raise", "?status") })
+      assert(#delivered == 0 and #room_messages() == 0, "a command line whose handler raised is consumed, not mailed")
+      sync_at(55, { typed_line_event("$raise", "?status") })
+      assert(#delivered == 0, "the consumed event id is processed and not retried into mail")
+      sync_at(66, { typed_line_event("$plain", "hello there") })
+      assert(#delivered == 1, "a non-command line still takes the ordinary path when the handler raises")
+      remuda.butler.status_command.handle = real_handle
+      relay:stop()
+      cleanup_fixture(dir, config_path)
       remuda._butler_bus = old_bus
     end)
   end },

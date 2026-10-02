@@ -107,6 +107,14 @@ function M.rate_allow(last, sender, now)
   return true
 end
 
+-- Folds the pcall of M.handle into the relay's decision. A handle that raised on
+-- a line that parses as a command still consumes the event, with no reply; a
+-- line that is not a command is left to the ordinary path.
+function M.outcome(ok, matched, text, commit, body)
+  if ok then return matched == true, text, commit end
+  return M.parse(body) ~= nil, nil, nil
+end
+
 local function try(fn, ...)
   if type(fn) ~= "function" then return nil end
   local ok, value = pcall(fn, ...)

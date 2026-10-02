@@ -1603,7 +1603,7 @@ function relay.new(options)
               live = live_sync == true, room_allowed = typed_line_room_allowed(ev, room_id or cfg.room),
               rate = status_reply_at,
             })
-            if handled then status_matched, status_text, status_commit = matched == true, text, commit end
+            status_matched, status_text, status_commit = status_command.outcome(handled, matched, text, commit, content.body)
           end
           if status_matched then
             if event_id ~= "" then add_processed(state, event_id) end

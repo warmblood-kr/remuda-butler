@@ -189,3 +189,15 @@ local m, bare = handle(event("?status", { event_id = "$m2" }))
 status.status_format = real_format
 assert(m == true and bare == "status unavailable", tostring(m) .. tostring(bare))
 print("ok - malformed data is contained")
+
+-- outcome: a raise on a command line consumes the event; on other text it does not
+local o_m, o_t, o_c = status.outcome(false, nil, nil, nil, "?status")
+assert(o_m == true and o_t == nil and o_c == nil, "raise on ?status consumes silently")
+assert(status.outcome(false, nil, nil, nil, "?help") == true, "raise on ?help consumes")
+assert(status.outcome(false, nil, nil, nil, "?status please") == false, "raise on other text is ordinary mail")
+assert(status.outcome(false, nil, nil, nil, "hello") == false)
+local commit = function() end
+local k_m, k_t, k_c = status.outcome(true, true, "txt", commit, "?status")
+assert(k_m == true and k_t == "txt" and k_c == commit, "a normal result passes through")
+assert(status.outcome(true, false, nil, nil, "?status") == false, "an unmatched result stays unmatched")
+print("ok - outcome")
