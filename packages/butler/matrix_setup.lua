@@ -5,7 +5,7 @@ local system = assert(remuda._butler_system)
 local USAGE = [[Usage: remuda butler matrix setup [OPTIONS]
   --homeserver URL       Your Matrix server address, like https://matrix.example.org.
   --owner ID             Your Matrix user ID, like @alice:example.org (in Element: click your avatar, top left).
-  --password-file PATH   Use this chosen bot password; with --register it is saved privately. If omitted, one is generated and saved privately.
+  --password-file PATH   Use this chosen bot password; setup saves no copy of it. If omitted with --register, one is generated and saved privately.
   --password-cmd PROG [ARG...]  Run this program and use the first line it prints as the bot password; no copy is saved. Must be the last option.
   --bot ID               The bot's Matrix user ID, like @butler-home:example.org (the account setup logs in as).
   --token-file PATH      Use an existing access token from this file instead of a password.

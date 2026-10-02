@@ -28,7 +28,9 @@ return function(matrix, pinned_hostname)
     and setup_help:find("prompt for its registration token if no file is given", 1, true)
     and setup_help:find("--registration-token-file PATH  Optional", 1, true)
     and setup_help:find("homeserver registration token", 1, true)
+    and setup_help:find("Use this chosen bot password; setup saves no copy of it.", 1, true)
     and setup_help:find("generated and saved privately", 1, true)
+    and not setup_help:find("with --register it is saved privately", 1, true)
     and setup_help:find("Example: remuda butler matrix setup", 1, true)
     and setup_help:find("--register --dir /path/to/private/butler", 1, true)
     and not setup_help:find("--register --registration-token-file", 1, true),
@@ -1304,7 +1306,8 @@ return function(matrix, pinned_hostname)
     and not resolved.stdout:find("homeserver-registration-token", 1, true)
     and not resolved.stdout:find(generated_password, 1, true)
     and not resolved.stdout:find("registered-access-token", 1, true)
-    and resolved.stdout:find(registration_output .. "/password", 1, true),
+    and resolved.stdout:find(registration_output .. "/password", 1, true)
+    and not resolved.stdout:find("was not copied", 1, true),
     "registration success should report the private password file path without any secret")
   assert(read(registration_output .. "/password") == generated_password .. "\n"
     and read(registration_output .. "/token") == "registered-access-token\n"
@@ -1370,6 +1373,7 @@ return function(matrix, pinned_hostname)
     and not resolved.stdout:find("homeserver-registration-token", 1, true)
     and not resolved.stdout:find("chosen-access-token", 1, true)
     and not resolved.stdout:find(chosen_output .. "/password", 1, true)
+    and resolved.stdout:find("\nThe password you supplied was not copied.\n", 1, true)
     and read(chosen_output .. "/password") == nil
     and secure_random_attempts == 0,
     "chosen-password registration must not save or print a copy of the password, and should print a real next step")
@@ -1521,7 +1525,8 @@ return function(matrix, pinned_hostname)
     requests[4].callback({ status = 200, body = '{"room_id":"!cmd-home:example.org"}' })
     assert(resolved and resolved.status == 0
       and not (resolved.stdout .. (resolved.stderr or "")):find("cmd-secret-pw", 1, true)
-      and not resolved.stdout:find(cmd_output .. "/password", 1, true),
+      and not resolved.stdout:find(cmd_output .. "/password", 1, true)
+      and resolved.stdout:find("\nThe password you supplied was not copied.\n", 1, true),
       "--password-cmd setup must not print the password or a saved password path")
     assert(read(cmd_output .. "/token") == "cmd-access-token\n"
       and read(cmd_output .. "/password") == nil and #atomic_writes == 2,

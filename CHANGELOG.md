@@ -25,6 +25,7 @@ release tags yet; entries come from merged pull requests.
 - The first Matrix mail from an allowlisted sender in an unseen thread includes the thread root and up to 20 earlier replies as one-line context; the inbox names each mail's room and thread (#235).
 
 ### Changed
+- `remuda butler matrix setup --register --password-file PATH` no longer saves a copy of the chosen password to `<dir>/password`; whoever made the password keeps it, as with `--password-cmd`. Setup prints "The password you supplied was not copied." and an old `<dir>/password` file no longer blocks it. A password that setup generates is still saved privately.
 - `matrix setup --pin` and `pin_sha256` now trust a self-signed homeserver on their own, using core `pin_only`. The hostname, validity dates and SPKI pin are still checked, and `ca_file` keeps full chain validation. Recommended core: `0.1.0-nightly.20261001000710.0a5f090` (#164).
 - A Matrix config with an `http://` homeserver plus `ca_file` or `pin_sha256` is now refused at load, with a `Next:` line naming the config file. Only core's exact `SPKI pin mismatch` error gets the recompute-pin hint (#167).
 - The notice for a joined room outside HOME names "the owner" or a count of allowlisted humans instead of listing their MXIDs (#165).
