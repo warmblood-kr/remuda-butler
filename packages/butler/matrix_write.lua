@@ -109,7 +109,13 @@ local function send_chunks(room, text, relation, on_done, txn_prefix, plain)
       room = room, body = body, headers = { ["Content-Type"] = "application/json" },
     }, function(result)
       if result.error then return done(result) end
-      event_ids[#event_ids + 1] = result.json and result.json.event_id or ""
+      local event_id = result.json and result.json.event_id or ""
+      event_ids[#event_ids + 1] = event_id
+      local relay = matrix.relay and matrix.relay.instance
+      if relay and type(relay.record_own_event) == "function" then
+        local thread_root = relation and relation.rel_type == "m.thread" and relation.event_id or event_id
+        pcall(relay.record_own_event, relay, room, event_id, thread_root)
+      end
       index = index + 1
       step()
     end)
