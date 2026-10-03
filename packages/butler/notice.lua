@@ -115,7 +115,7 @@ function remuda._butler_prompt_is_empty(kind, screen)
     if rest:sub(1, 3) == "╰" or rest:sub(1, 3) == "└" or rest:sub(1, 3) == "─" then break end
     if rest:match("^%? for shortcuts")
         or (kind == "codex" and (rest:lower():find("context left", 1, true)
-        or rest:sub(1, 3) == "⚠" or rest:match("^[^%s]+%s+[^%s]+%s+·"))) then
+        or rest:match("^⚠%s+%d+%s+warning") or rest:match("^[^%s]+%s+[^%s]+%s+·"))) then
       break
     end
     if kind == "claude" and rest:sub(1, 3) == "│" then

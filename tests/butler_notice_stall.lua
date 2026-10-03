@@ -40,6 +40,8 @@ local decision = remuda._butler_prompt_is_empty("codex", "› \n⚠ 3 warnings �
 assert(decision == "EMPTY", "a warning row below the composer is not composer text, got " .. decision)
 local text_decision = remuda._butler_prompt_is_empty("codex", "› draft text\n⚠ 3 warnings · f2 to view\n")
 assert(text_decision == "NON-EMPTY", "real composer text stays non-empty, got " .. text_decision)
+local blank_draft = remuda._butler_prompt_is_empty("codex", "› \n⚠ my own note\n")
+assert(blank_draft == "NON-EMPTY", "only the warning-count footer ends the composer, got " .. blank_draft)
 
 -- A pane the policy never accepts (a human keeps typing) while its composer reads empty:
 -- the stall becomes a failed attempt, then the retry schedule, then the sender's failure notice.
