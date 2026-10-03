@@ -2247,12 +2247,12 @@ fn a_task_deferred_too_long_times_out_and_tells_the_leader() {
     );
     std::thread::sleep(Duration::from_secs(3));
     let log = std::fs::read_to_string(&trace).unwrap_or_default();
-    assert!(log.contains("task_poke_timeout\tt1 deferred"), "{log}");
-    assert!(log.contains("task_poke_timeout\tt2"), "{log}");
+    assert!(log.contains("first_task_delivery\tt1 "), "{log}");
+    assert!(log.contains("first_task_delivery\tt2 "), "{log}");
     let inbox = eval(&path, "return remuda._butler_inbox('butler')");
     for topic in ["t1", "t2"] {
         assert!(
-            inbox.contains(&format!("Task for {topic} was not delivered")),
+            inbox.contains(&format!("initial task for {topic} was not delivered")),
             "{inbox}"
         );
     }
