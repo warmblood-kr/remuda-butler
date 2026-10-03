@@ -194,15 +194,16 @@ local function status_settings(path)
   local hook = '{"hooks":[{"type":"command","command":' .. json_quote(
     "remuda -s " .. shell_quote(server) .. " --stdin butler status-hook " .. shell_quote(path) .. quiet
   ) .. '}]}'
-  -- Guard slice 0: while the switch is on, PreToolUse/PermissionRequest hooks record each call
-  -- (guard_policy.lua); the hook prints no decision, so Claude behaves as without it.
+  -- Guard hooks are installed per session while audit is on. PreToolUse keeps stdout
+  -- only when deny is on; PermissionRequest keeps it only when approvals are on.
   local guard_policy = remuda.butler and remuda.butler.guard_policy
   local guard_hooks = ""
   if guard_policy and guard_policy.enabled() then
     local keep_stdout = system.platform() == "windows" and " 2>$null; exit 0" or " 2>/dev/null; exit 0"
     local guard_command = "remuda -s " .. shell_quote(server) .. " --stdin butler guard"
     guard_hooks = guard_policy.hooks_json(guard_command .. quiet, json_quote,
-      guard_policy.approvals_enabled() and (guard_command .. keep_stdout) or nil) .. ","
+      guard_policy.approvals_enabled() and (guard_command .. keep_stdout) or nil,
+      guard_policy.deny_enabled() and (guard_command .. keep_stdout) or nil) .. ","
   end
   settings:write('{"statusLine":{"type":"command","command":'
     .. json_quote("remuda -s " .. shell_quote(server) .. " --stdin butler statusline " .. shell_quote(path))
