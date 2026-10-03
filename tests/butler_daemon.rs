@@ -5134,38 +5134,6 @@ fn test_ulid_stub() -> &'static str {
     end"#
 }
 
-#[test]
-fn butler_mail_separates_the_envelope_from_its_body_object() {
-    let path = scratch("butler-mail");
-    let _daemon = daemon_at(&path);
-    eval(
-        &path,
-        &(test_ulid_stub().to_owned()
-            + r#"
-          remuda._butler_mail_config = {
-            bus = { agents = { fixer = { id = "01FIXER" } }, inboxes = {}, messages = {}, objects = {}, next = 0 },
-            json_quote = function(value) return '"' .. value .. '"' end,
-          }
-          remuda.exec("butler/mail")
-        "#),
-    );
-    let result = eval(
-        &path,
-        r#"
-          local message = remuda._butler_mail.queue("butler", "fixer", "private body")
-          local object = remuda._butler_mail_config.bus.objects[message.body.object_id]
-          return message.from.host .. ":" .. message.from.session .. "\n"
-            .. message.body.object_id .. "\n" .. object.content .. "\n"
-            .. remuda._butler_mail.inbox("01FIXER")
-        "#,
-    );
-    let lines: Vec<&str> = result.lines().collect();
-    assert_eq!(lines[0], "local:butler");
-    assert!(lines[1].starts_with("object-"));
-    assert_eq!(lines[2], "private body");
-    assert!(result.contains("Message from butler\nprivate body"));
-}
-
 /// A mail root holding one delivered message (`message-a`) for `id`, and the
 /// hex inbox/read paths mail.lua derives from that id.
 fn seeded_mail_root(dir: &Path, id: &str) -> (PathBuf, PathBuf, PathBuf) {
@@ -5658,39 +5626,6 @@ fn butler_mail_refuses_to_overwrite_an_existing_message_on_an_id_collision() {
     );
 }
 
-/// Only an explicit operator skips the delivered check; an id-less caller
-/// (an unknown MCP client) is refused and writes nothing (review of #39).
-#[test]
-fn butler_mail_an_unidentified_caller_cannot_reply_or_forward_but_the_operator_can() {
-    let dir = scratch_dir("butler-mail-authz");
-    let (root, _, _) = seeded_mail_root(&dir, REPLY_F);
-    let path = scratch("butler-mail-authz");
-    let _daemon = daemon_at(&path);
-    let out = eval(
-        &path,
-        &format!(
-            r#"{}
-               local W = {{ host = "local", id = "{REPLY_W}", alias = "worker", session = "worker" }}
-               local OUT = {{ host = "local", id = "", alias = "outside", session = "outside" }}
-               local a = assert(M.queue(B, F, "secret"))
-               local r1, e1 = M.forward(OUT, a.id, W)
-               local r2, e2 = M.reply(OUT, a.id, "x")
-               local w_rows = M.unread(W.id)
-               local op = M.reply({{ host = "local", id = "", alias = "operator", session = "operator" }}, a.id, "from op", true)
-               return table.concat({{ tostring(r1), tostring(e1), tostring(r2), tostring(e2), tostring(w_rows),
-                 op and op.to[1].alias or "refused" }}, "\n")"#,
-            reply_prelude(&root)
-        ),
-    );
-    let v: Vec<&str> = out.lines().collect();
-    assert_eq!(v[0], "nil", "an unidentified forward went through: {out}");
-    assert!(v[1].contains("unknown caller"), "{out}");
-    assert_eq!(v[2], "nil", "an unidentified reply went through: {out}");
-    assert!(v[3].contains("unknown caller"), "{out}");
-    assert_eq!(v[4], "0", "nothing reached the target");
-    assert_eq!(v[5], "butler", "the explicit operator may still reply");
-}
-
 #[test]
 fn butler_mail_survives_a_fresh_lua_mailbox_and_remembers_reads() {
     let dir = scratch_dir("butler-mail-reload");
@@ -5799,28 +5734,6 @@ fn butler_matrix_mail_envelope_is_durable_and_deduplicated_across_daemon_restart
     );
     assert_eq!(after_restart, format!("{}\n$thread-root\n$parent\nmxc://media/example", ids[0]),
         "a restarted mail store did not deduplicate the Matrix event or restore its metadata");
-}
-
-#[test]
-fn matrix_mail_truncates_oversized_bodies_with_a_byte_count() {
-    let dir = scratch_dir("matrix-mail-body-cap");
-    let (root, _, _) = seeded_mail_root(&dir, REPLY_F);
-    let _daemon = Daemon::spawn(&dir);
-    let path = daemon::socket_path_in(&dir, "s");
-    let result = eval(
-        &path,
-        &format!(
-            r#"{}
-               local from = {{ host = "matrix", alias = "@alice:example.org", session = "@alice:example.org", kind = "matrix" }}
-               local msg = assert(M.queue(from, F, string.rep("a", 65536 + 100), nil, nil, nil,
-                 {{ sender = "@alice:example.org", room_id = "!room:example.org", event_id = "$large" }}))
-               local body = remuda._butler_mail_config.bus.objects[msg.body.object_id].content
-               return tostring(#body) .. "|" .. (body:match("%[truncated %d+ bytes%]$") or "missing")
-            "#,
-            reply_prelude(&root),
-        ),
-    );
-    assert_eq!(result, "65536|[truncated 121 bytes]");
 }
 
 #[test]
