@@ -221,7 +221,8 @@ assert(#writes == before_prompt_error_writes and state.typed_lines == false,
 
 local command_rows, bridge_handler = {}, nil
 remuda.butler.schedule_cli = { cli = function() end }
-remuda.butler.approve_text = { cli = function() end }
+local approve_text_args
+remuda.butler.approve_text = { cli = function(args) approve_text_args = args end }
 remuda._butler_commands_config = {
   current_agent = function() return nil end,
   OPERATOR = "operator",
@@ -257,5 +258,13 @@ assert(bridge_resolution and bridge_resolution.code == 1
   "the real command bridge must resolve prompt_line exceptions with exit 1 and a clear message")
 assert(#writes == before_prompt_error_writes and state.typed_lines == false,
   "a failed prompt through the command bridge must not change the config")
+for _, argv in ipairs({ { "on" }, { "off" }, { "request", "agent-1", "-" } }) do
+  approve_text_args = nil
+  local full = { "approve-text" }
+  for _, word in ipairs(argv) do full[#full + 1] = word end
+  bridge_handler(full)
+  assert(approve_text_args and table.concat(approve_text_args, " ") == table.concat(argv, " "),
+    "the command bridge hands approve_text.cli the words after the verb, got: " .. table.concat(approve_text_args or {}, " "))
+end
 os.remove(config_path)
 print("ok - typed-line switch CLI cases")

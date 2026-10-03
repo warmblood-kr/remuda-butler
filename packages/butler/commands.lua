@@ -256,7 +256,10 @@ command(17, "status-commands", "  remuda butler status-commands on|off", functio
   return typed_lines_cli.cli(args, current_agent(caller))
 end)
 command(19, "approve-text", "  remuda butler approve-text request SESSION - | on|off", function(args, caller)
-  return approve_text.cli(args, current_agent(caller), caller and caller.stdin)
+  -- The verb receives the whole argv; approve_text.cli takes what follows the verb.
+  local rest = {}
+  for i = 2, #args do rest[#rest + 1] = args[i] end
+  return approve_text.cli(rest, current_agent(caller), caller and caller.stdin)
 end)
 command(18, "schedule", "  remuda butler schedule list\n"
   .. '  remuda butler schedule add <name> "<M H * * *>" <text> | - [--to SESSION]\n'
