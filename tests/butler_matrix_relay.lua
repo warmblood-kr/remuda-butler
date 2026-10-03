@@ -5852,14 +5852,14 @@ end }
       local handle = assert(io.open(file, "wb")); handle:write("PNGDATA"); handle:close()
       local saved_check = remuda._butler_file_for_caller
       remuda._butler_file_for_caller = function(p) return p end
-      local requests, context_room = {}, HOME
+      local requests, context_room, on_context = {}, HOME, nil
       local ok, err = pcall(with_alias_http, path, function(spec)
         requests[#requests + 1] = spec
-        if spec.method == "GET" then return { status = 200, body = '{"event":{"room_id":"' .. context_room .. '"}}' } end
+        if spec.method == "GET" then if on_context then on_context() end; return { status = 200, body = '{"event":{"room_id":"' .. context_room .. '"}}' } end
         if spec.method == "POST" then return { status = 200, body = '{"content_uri":"mxc://example.org/up1"}' } end
         return { status = 200, body = '{"event_id":"$upload1"}' }
       end, function()
-        run(relay, file, requests, function(room) context_room = room end)
+        run(relay, file, requests, function(room) context_room = room end, function(fn) on_context = fn end)
       end)
       remuda._butler_file_for_caller = saved_check
       relay:stop()
@@ -5890,6 +5890,20 @@ end }
         "the upload is an own event on its thread root")
       local again = rx_cli({ "matrix", "--room", HOME, "reply", "$upload1", "thanks" })
       assert(again.code == 0, "a reply to the upload works: " .. again.stderr .. again.stdout)
+    end)
+  end }
+
+  rx_tests[#rx_tests + 1] = { "test_rx_upload_thread_reads_the_file_before_waiting_on_the_homeserver", function()
+    upload_fixture(function(relay, file, requests, _, swap_on_context)
+      assert(relay:record_own_event(HOME, "$mine", "$mine"))
+      swap_on_context(function()
+        local handle = assert(io.open(file, "wb")); handle:write("SWAPPED"); handle:close()
+      end)
+      local result = rx_cli({ "matrix", "--room", HOME, "upload", "--thread", "$mine", file })
+      assert(result.code == 0, "threaded upload: " .. result.stderr .. result.stdout)
+      local media
+      for _, spec in ipairs(requests) do if spec.method == "POST" then media = spec end end
+      assert(media and media.body == "PNGDATA", "the bytes are those read before the homeserver wait: " .. tostring(media and media.body))
     end)
   end }
 

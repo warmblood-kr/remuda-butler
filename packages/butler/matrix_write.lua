@@ -285,18 +285,29 @@ end
 
 -- A file is read, uploaded, then sent as an m.image or m.file event, in a thread when
 -- `relation` is set.
-local function upload_file(opts, done, room, relation)
+local function read_upload(opts)
   if type(opts.file) ~= "string" or opts.file == "" or not absolute(opts.file) then
-    return error_result(done, "use an absolute path (the daemon does not know your cwd)")
+    return nil, "use an absolute path (the daemon does not know your cwd)"
   end
   local file, open_error = io.open(opts.file, "rb")
-  if not file then return error_result(done, "cannot read upload file: " .. tostring(open_error)) end
+  if not file then return nil, "cannot read upload file: " .. tostring(open_error) end
   local ok, data, read_error = pcall(function() return file:read(MAX_UPLOAD_BYTES + 1) end)
   file:close()
-  if not ok then return error_result(done, "upload path is not a readable regular file") end
-  if read_error then return error_result(done, "upload path is not a readable regular file: " .. tostring(read_error)) end
-  if not data or #data == 0 then return error_result(done, "upload file must not be empty") end
-  if #data > MAX_UPLOAD_BYTES then return error_result(done, "upload exceeds 20 MiB limit") end
+  if not ok then return nil, "upload path is not a readable regular file" end
+  if read_error then return nil, "upload path is not a readable regular file: " .. tostring(read_error) end
+  if not data or #data == 0 then return nil, "upload file must not be empty" end
+  if #data > MAX_UPLOAD_BYTES then return nil, "upload exceeds 20 MiB limit" end
+  return data
+end
+
+-- `data` is the file already read: a threaded upload reads before it waits on the homeserver,
+-- so the bytes are those of the path the caller was checked against.
+local function upload_file(opts, done, room, relation, data)
+  if not data then
+    local read_error
+    data, read_error = read_upload(opts)
+    if not data then return error_result(done, read_error) end
+  end
   local filename = opts.file:match("([^/\\]+)$") or opts.file
   local mime = media_type(filename)
   local content_uri
@@ -356,8 +367,10 @@ function matrix.upload(opts, on_done)
   if not relay then return error_result(done, relay_error) end
   local unverified = unverified_event_error(relay, opts.event_id)
   if unverified then return error_result(done, unverified) end
+  local data, read_error = read_upload(opts)
+  if not data then return error_result(done, read_error) end
   return same_room_then(room, opts.event_id, done, function(thread_done)
-    return upload_file(opts, thread_done, room, thread_relation(opts))
+    return upload_file(opts, thread_done, room, thread_relation(opts), data)
   end)
 end
 
