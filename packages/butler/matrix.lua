@@ -19,7 +19,7 @@ if not matrix.request_json then remuda.exec("butler/matrix_request") end
 remuda.exec("butler/matrix_read")
 remuda.exec("butler/approval")
 remuda.exec("butler/md2html")
-if not matrix.send then remuda.exec("butler/matrix_write") end
+remuda.exec("butler/matrix_write")
 remuda.exec("butler/matrix_setup")
 remuda.exec("butler/matrix_cli")
 remuda.exec("butler/typed_lines")

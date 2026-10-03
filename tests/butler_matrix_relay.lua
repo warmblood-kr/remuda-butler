@@ -5625,6 +5625,43 @@ rx_tests[#rx_tests + 1] = { "test_rx_reply_and_post_slot_never_raise_on_an_older
   end) end)
 end }
 
+-- The live shape: a live reload re-runs butler/matrix on the retained matrix
+-- table (its send is an older load), then `matrix --json --room ROOM send` and
+-- `reply` to the id it printed, an event id with '-' and '_'.
+rx_tests[#rx_tests + 1] = { "test_rx_cli_json_room_send_then_reply_threads_on_root", function()
+  local dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    local relay = rx_relay(path)
+    relay_module.instance = relay
+    local ids, puts = { "$tbLa1m8VTJauQDU1Yn1DkSHdvVa160O8--EAT8nOvMY", "$reply_Id-2" }, {}
+    with_alias_http(path, function(spec)
+      if spec.method == "PUT" then
+        puts[#puts + 1] = spec
+        return { status = 200, body = '{"event_id":"' .. ids[#puts] .. '"}' }
+      end
+      return { status = 200, body = '{"event":{"room_id":"' .. HOME .. '"}}' }
+    end, function()
+      -- The retained matrix table holds an older send; only matrix_write is re-run.
+      matrix.send = function(_, done) done({ error = "older load" }) end
+      local package_exec = remuda.exec
+      remuda.exec = function(name)
+        if name == "butler/matrix_write" then dofile("packages/butler/matrix_write.lua") end
+      end
+      local reloaded, reload_error = pcall(dofile, "packages/butler/matrix.lua")
+      remuda.exec = package_exec
+      assert(reloaded, reload_error)
+      local sent = rx_cli({ "matrix", "--json", "--room", HOME, "send", "root text" })
+      assert(sent.code == 0 and sent.stdout:find(ids[1], 1, true), "send: " .. sent.stderr .. sent.stdout)
+      local result = rx_cli({ "matrix", "--json", "--room", HOME, "reply", ids[1], "answer" })
+      assert(result.code == 0, "reply to our own send is accepted: " .. result.stderr .. result.stdout)
+      local content = assert(matrix.decode_json(puts[2].body))
+      local rel = content["m.relates_to"]
+      assert(rel and rel.rel_type == "m.thread" and rel.event_id == ids[1], "reply is a thread on the root")
+    end)
+    relay:stop()
+  end)
+end }
+
 -- The relations page does not contain the delivered event: 21 newer thread
 -- messages arrived before the fetch. They were sent AFTER the delivered one, so
 -- none of them is an earlier message: the block is the root line and the

@@ -25,3 +25,13 @@ rendered = output()
 assert(rendered:find("Typed lines: off", 1, true), "doctor should show typed-lines off")
 assert(rendered:find("Shell lines: on", 1, true), "doctor should show shell-lines on")
 print("ok - doctor typed-line switch status")
+
+-- The setup hint appears only while Matrix is not configured.
+local ready = { installed = true, logged_in = true }
+local function lines_with(matrix_configured)
+  return table.concat(doctor.render({ claude = ready, codex = ready, matrix_configured = matrix_configured }, "macos"), "\n")
+end
+assert(lines_with(false):find("Next: remuda butler matrix setup", 1, true), "unconfigured Matrix points to setup")
+assert(not lines_with(true):find("Next:", 1, true), "configured Matrix gets no setup hint")
+assert(doctor.probe().matrix_configured == true, "a readable Matrix config counts as configured")
+print("ok - doctor setup hint only when Matrix is unconfigured")
