@@ -37,5 +37,4 @@ status-hook
 status-commands
 statusline
 topic delegate
-topic new
 typed-lines

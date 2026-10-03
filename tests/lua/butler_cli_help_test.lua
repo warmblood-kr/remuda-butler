@@ -17,6 +17,8 @@ local function start_butler()
     remuda._butler_report = function(...) return record("report", ...) end
     remuda._butler_reply = function(...) return record("reply", ...) end
     remuda._butler_forward = function(...) return record("forward", ...) end
+    remuda._butler_topic_new = function(...) return record("topic-new", ...) end
+    remuda._butler_topic_delegate = function(...) return record("topic-delegate", ...) end
     return "actions stubbed"
   ]])
 end
@@ -28,6 +30,7 @@ T.test("message verbs treat --help as help without actions", function()
     local cases = {
       { "send", { "send" } },
       { "send-to-leader", { "send-to-leader" } },
+      { "topic", { "topic", "new", "work" } },
     }
     local lines = {}
     for _, case in ipairs(cases) do
@@ -61,7 +64,7 @@ T.test("message verbs treat --help as help without actions", function()
       .. ",actions=" .. #remuda._butler_cli_action_calls
     return table.concat(lines, "\n")
   ]])
-  for _, verb in ipairs({ "send", "send-to-leader" }) do
+  for _, verb in ipairs({ "send", "send-to-leader", "topic" }) do
     for _, flag in ipairs({ "--help", "-h" }) do
       T.expect(out:find(verb .. ":" .. flag .. ":help=true,actions=0", 1, true),
         verb .. " " .. flag .. " was not help-only: " .. out)

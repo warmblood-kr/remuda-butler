@@ -54,7 +54,6 @@ status-hook
 status-commands
 statusline
 topic delegate
-topic new
 typed-lines
 SEED
     then
@@ -101,13 +100,22 @@ SEED
   # A new command declaration is accepted only when it opts into the core parser itself.
   awk '
     /^command\(/ {
-      if (verb != "" && parsed) print verb
-      verb=""; parsed=0; uses_cli=0
+      if (verb != "" && parsed) {
+        print verb
+        if (verb == "topic" && topic_new) print "topic new"
+      }
+      verb=""; parsed=0; uses_cli=0; topic_new=0
       if (match($0, /"[^"]+"/)) { verb=substr($0, RSTART+1, RLENGTH-2) }
     }
     verb != "" && /remuda\.cli/ { uses_cli=1 }
     verb != "" && /cli\.parse/ && uses_cli { parsed=1 }
-    END { if (verb != "" && parsed) print verb }
+    verb == "topic" && /cli\.parse\(TOPIC_NEW_CLI_SPEC/ { topic_new=1 }
+    END {
+      if (verb != "" && parsed) {
+        print verb
+        if (verb == "topic" && topic_new) print "topic new"
+      }
+    }
   ' "$commands" > "$tmp/migrated"
   while IFS=$'\t' read -r verb parsed; do
     [[ -z $verb || $verb == matrix ]] && continue
