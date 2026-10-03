@@ -490,6 +490,13 @@ local codex_update_complete = chooser.codex_update_complete
 -- Member launch and topic creation live in launch.lua.
 remuda._butler_launch_config = { bus = bus,
   realpath = realpath,
+  protected_dirs = function()
+    local dirs = { data_home and (data_home .. "/remuda"), runtime_dir, config_path and config_path:match("^(.*)/[^/]+$"),
+      token_path and token_path:match("^(.*)/[^/]+$") }
+    local out = {}
+    for _, d in ipairs(dirs) do if d then out[#out + 1] = d end end
+    return out
+  end,
   topic_config = topic_config,
   data_home = data_home,
   load_topic_config = load_topic_config,

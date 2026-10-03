@@ -108,3 +108,34 @@ T.test("profile is recorded, shown, and re-applied on relaunch", function()
   T.wait_until(function() return T.eval("return tostring(#remuda._test_specs)") == "2" end, 20, "relaunch spec")
   T.eq(T.eval("return remuda._test_specs[2].writable[1]"), dir, "relaunch dropped the profile")
 end)
+
+T.test("credential and Butler state directories are refused as writable roots", function()
+  start_butler()
+  ev("local h = os.getenv('HOME'); remuda.mkdir(h .. '/.ssh'); remuda.mkdir(os.getenv('XDG_DATA_HOME') .. '/remuda'); return 'done'")
+  local home = T.eval("return os.getenv('HOME')")
+  local data = T.eval("return os.getenv('XDG_DATA_HOME')")
+  for _, dir in ipairs({ home .. "/.ssh", data .. "/remuda" }) do
+    local r = ev("return remuda._butler_profile('codex', nil, {'" .. dir .. "'})")
+    T.expect(r:find("^err:") and r:find("credentials or Butler state", 1, true), "protected root " .. dir .. " accepted: " .. r,
+      "ok - writable root " .. dir .. " refused")
+  end
+  local r = ev("local g = os.getenv; os.getenv = function(k) if k == 'HOME' then return nil end return g(k) end; "
+    .. "local ok, v = pcall(remuda._butler_profile, 'codex', nil, {os.getenv('XDG_DATA_HOME')}); os.getenv = g; "
+    .. "if ok then return 'accepted' end return v")
+  T.expect(r:find("subdirectory", 1, true), "unset HOME did not fail closed: " .. r, "ok - an unset HOME refuses a broad root")
+end)
+
+T.test("launch_agent itself gates full access and re-checks a relaunch profile", function()
+  start_butler()
+  T.eval("remuda.caller = function() return { kind = 'session', session = 'x' } end")
+  local r = ev("return remuda._butler_launch_impl.launch_agent('codex', 'raw1', nil, nil, 'butler', nil, nil, nil, { sandbox = 'full' })")
+  T.expect(r:find("^err:") and r:find("only by a person at a terminal", 1, true), "raw launcher not gated: " .. r,
+    "ok - the raw launcher refuses full for a session caller")
+  T.eval("remuda.caller = nil")
+  r = ev("return remuda._butler_launch_impl.launch_agent('codex', 'raw2', nil, nil, 'butler', nil, 'ID-X', nil, { sandbox = 'full' })")
+  T.expect(r:find("^err:") and r:find("only by a person at a terminal", 1, true), "tampered relaunch profile accepted: " .. r,
+    "ok - a relaunch record cannot grant full access")
+  r = ev("return remuda._butler_launch_impl.launch_agent('codex', 'raw3', nil, nil, 'butler', nil, nil, nil, { writable = { '/' } })")
+  T.expect(r:find("^err:") and r:find("subdirectory", 1, true), "raw launcher took a broad root: " .. r,
+    "ok - the raw launcher normalizes the profile")
+end)

@@ -30,14 +30,40 @@ end
 local function too_broad(real, realpath)
   if real == "/" then return true end
   local home = os.getenv("HOME")
-  if not home or home == "" then return false end
+  if not home or home == "" then return true end
   home = type(realpath) == "function" and realpath(home) or home
-  if not home then return false end
+  if not home then return true end
   return home == real or home:sub(1, #real + 1) == real .. "/"
 end
 
+-- Credential and Butler state directories a member must not be able to write:
+-- a root that is, contains or lies inside one of them is refused.
+local function touches(real, protected, realpath)
+  for _, dir in ipairs(protected) do
+    local p = type(realpath) == "function" and realpath(dir) or dir
+    p = p or dir
+    if real == p or real:sub(1, #p + 1) == p .. "/" or p:sub(1, #real + 1) == real .. "/" then return p end
+  end
+end
+
+-- Directories under the home directory that hold credentials, plus those the caller names
+-- (Butler's config, data and runtime directories).
+function sandbox.protected(extra)
+  local list = {}
+  local home = os.getenv("HOME")
+  if home and home ~= "" then
+    for _, rel in ipairs({ ".ssh", ".aws", ".gnupg", ".codex", ".claude", ".config/remuda", ".local/share/remuda" }) do
+      list[#list + 1] = home .. "/" .. rel
+    end
+  end
+  for _, dir in ipairs(extra or {}) do
+    if type(dir) == "string" and dir ~= "" then list[#list + 1] = dir end
+  end
+  return list
+end
+
 -- Returns nil for no profile, else a normalized profile; refuses with a Next: line.
-function sandbox.normalize(kind, sandbox_mode, writable, realpath)
+function sandbox.normalize(kind, sandbox_mode, writable, realpath, protected)
   local dirs = dir_list(writable)
   if sandbox_mode ~= nil and sandbox_mode ~= "full" then
     error("--sandbox accepts only `full`.\nNext: remuda butler launch codex NAME --sandbox full", 0)
@@ -57,6 +83,10 @@ function sandbox.normalize(kind, sandbox_mode, writable, realpath)
     end
     if sandbox_mode ~= "full" and too_broad(real, realpath) then
       error("--writable " .. dir .. " covers your whole home or more.\nNext: name a subdirectory (for example --writable DIR/flutter-sdk); full access is granted only by a person at a terminal with --sandbox full", 0)
+    end
+    local hit = sandbox_mode ~= "full" and touches(real, sandbox.protected(protected), realpath)
+    if hit then
+      error("--writable " .. dir .. " reaches " .. hit .. ", which holds credentials or Butler state.\nNext: name a different directory; full access is granted only by a person at a terminal with --sandbox full", 0)
     end
     if not seen[real] then seen[real] = true; roots[#roots + 1] = real end
   end

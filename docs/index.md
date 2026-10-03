@@ -82,8 +82,14 @@ The Butler scheduler remains the primary compaction path. The MCP
 Codex members get extra writable directories with `--writable DIR` (repeatable,
 absolute and existing; on `launch` and `topic delegate`; the MCP tools take
 `writable`). `--sandbox full` removes the sandbox and is accepted only from a
-person at a terminal, never from a Butler agent. The profile is kept for
-relaunches and shown by `remuda butler sessions`.
+person at a terminal, never from a Butler agent. `--writable` refuses `/`, the
+home directory and its ancestors, and any directory that is, contains or lies
+inside `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.codex`, `~/.claude` or Butler's
+config, data and runtime directories; only `--sandbox full` grants those. The
+profile is kept for relaunches and shown by `remuda butler sessions`. The
+`--sandbox full` check covers every Butler entry point (CLI, MCP tools, the
+launcher and relaunch). It is not a boundary against an agent that can run
+Lua through `run_script`, which runs as the daemon.
 
 Every Butler-managed agent receives `REMUDA_BUTLER_AGENT_ID` and, when it has
 one, `REMUDA_BUTLER_LEADER_ID`. Therefore agents normally use the short forms:

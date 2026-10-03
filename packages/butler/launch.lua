@@ -44,6 +44,20 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   if profile and (kind ~= "codex" or not remuda._butler_codex_config_ok()) then
     error("this core cannot pass a sandbox profile to Codex (`_codex_tui` lacks -c KEY=VALUE); refusing to launch without it.\nNext: remuda upgrade, then retry", 0)
   end
+  -- Every launch and relaunch passes here: the profile is checked again, and `full`
+  -- needs a person at a terminal on a first launch, or that earlier grant on a relaunch.
+  if profile then
+    profile = sandbox_lib.normalize(kind, profile.sandbox, profile.writable, config.realpath,
+      config.protected_dirs and config.protected_dirs())
+    bus.sandbox_granted = bus.sandbox_granted or {}
+    if profile and profile.sandbox == "full" then
+      local granted = relaunch_identity and bus.sandbox_granted[requested_name or kind]
+      if not granted and (relaunch_identity or sandbox_lib.caller_is_agent()) then
+        sandbox_lib.refuse_full(sandbox_lib.owner_command("remuda butler launch " .. tostring(kind) .. " " .. tostring(requested_name or "NAME"), profile))
+      end
+      bus.sandbox_granted[requested_name or kind] = true
+    end
+  end
   if kind == "claude" and (not model or model == "") then
     local config = remuda._butler_compaction_config or {}
     model = remuda._butler_claude_default_model
@@ -692,7 +706,7 @@ end
 
 -- Entry points turn requested flags into a checked profile (nil when none).
 function remuda._butler_profile(kind, sandbox_mode, writable)
-  return sandbox_lib.normalize(kind, sandbox_mode, writable, config.realpath)
+  return sandbox_lib.normalize(kind, sandbox_mode, writable, config.realpath, config.protected_dirs and config.protected_dirs())
 end
 
 remuda._butler_launch_impl = { launch_agent = launch_agent }
