@@ -25,6 +25,17 @@ local function is_directory(path)
   return f ~= nil
 end
 
+-- A root that is /, $HOME or an ancestor of $HOME (after symlinks) is full access in
+-- all but name; only `--sandbox full` may grant that.
+local function too_broad(real, realpath)
+  if real == "/" then return true end
+  local home = os.getenv("HOME")
+  if not home or home == "" then return false end
+  home = type(realpath) == "function" and realpath(home) or home
+  if not home then return false end
+  return home == real or home:sub(1, #real + 1) == real .. "/"
+end
+
 -- Returns nil for no profile, else a normalized profile; refuses with a Next: line.
 function sandbox.normalize(kind, sandbox_mode, writable, realpath)
   local dirs = dir_list(writable)
@@ -43,6 +54,9 @@ function sandbox.normalize(kind, sandbox_mode, writable, realpath)
     local real = type(realpath) == "function" and realpath(dir) or dir
     if not real or not is_directory(real) then
       error("--writable directory does not exist: " .. dir .. ".\nNext: create it first, or pass an existing absolute directory", 0)
+    end
+    if sandbox_mode ~= "full" and too_broad(real, realpath) then
+      error("--writable " .. dir .. " covers your whole home or more.\nNext: name a subdirectory (for example --writable DIR/flutter-sdk); full access is granted only by a person at a terminal with --sandbox full", 0)
     end
     if not seen[real] then seen[real] = true; roots[#roots + 1] = real end
   end

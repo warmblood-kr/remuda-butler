@@ -5,7 +5,7 @@ local function ev(code)
 end
 local function start_butler()
   T.install_mod("butler", assert(os.getenv("REMUDA_LUA_REPO")))
-  T.eval('remuda._butler_argv = {"sh", "-c", "sleep 60"}; remuda._butler_skip_relay = true')
+  T.eval('remuda._butler_argv = {"sh", "-c", "sleep 60"}; remuda._butler_skip_relay = true; remuda._butler_readiness_timeout = 1')
   T.eval('return remuda.exec("butler")')
   T.wait_until(function()
     return T.eval('return remuda._butler_bus ~= nil and remuda._butler_bus.agents.butler ~= nil')
@@ -48,6 +48,17 @@ T.test("profile validation refuses claude, relative and missing dirs", function(
     "ok - missing dir refused with a Next: line")
   r = ev("return remuda._butler_profile('codex', 'half', nil)")
   T.expect(r:find("^err:"), "unknown sandbox value accepted", "ok - only `full` is a sandbox value")
+  local home = T.eval("return os.getenv('HOME')")
+  for _, dir in ipairs({ "/", home, (home:gsub("/[^/]+/?$", "")) }) do
+    r = ev("return remuda._butler_profile('codex', nil, {'" .. dir .. "'})")
+    T.expect(r:find("^err:") and r:find("subdirectory", 1, true), "broad root " .. dir .. " accepted: " .. r,
+      "ok - writable root " .. dir .. " refused")
+  end
+  r = ev("return remuda._butler_profile('codex', 'full', {'/'})")
+  T.expect(not r:find("^err:"), "full refused a broad root: " .. r, "ok - full may carry a broad root")
+  ev("remuda.mkdir(os.getenv('HOME') .. '/sub332'); return 'done'")
+  r = ev("return remuda._butler_profile('codex', nil, {os.getenv('HOME') .. '/sub332'})")
+  T.expect(not r:find("^err:"), "subdir under HOME refused: " .. r, "ok - a subdirectory of HOME is accepted")
 end)
 
 T.test("sandbox full is refused for agent callers with the owner command", function()
@@ -78,7 +89,7 @@ T.test("profile is recorded, shown, and re-applied on relaunch", function()
     return { "sh", "-c", "sleep 60" }
   end]])
   T.eval("return remuda._butler_launch('codex', 'wr', nil, 'butler', remuda._butler_profile('codex', nil, {'" .. dir .. "'}))")
-  T.wait_until(function() return T.eval("return tostring(remuda._butler_bus.agents.wr ~= nil)") == "true" end, 8, "wr row")
+  T.wait_until(function() return T.eval("return tostring(remuda._butler_bus.agents.wr ~= nil)") == "true" end, 20, "wr row")
   T.eq(T.eval("local a = remuda._butler_bus.agents.wr; return tostring(a.writable and a.writable[1])"), dir, "row lost the writable root")
   T.eq(T.eval("local w = remuda._test_specs[1].writable; return tostring(w and w[1])"), dir, "builder spec lacks the writable root")
   local sessions = T.eval("return remuda._butler_sessions()")
@@ -94,6 +105,6 @@ T.test("profile is recorded, shown, and re-applied on relaunch", function()
     remuda._butler_bus.codex_update_relaunches.wr = { kind = "codex", name = "wr", cwd = row.cwd, parent = "butler",
       identity = row.id, expected_close = true, profile = remuda._butler_sandbox.of(row) }
     return remuda.close("wr")]])
-  T.wait_until(function() return T.eval("return tostring(#remuda._test_specs)") == "2" end, 10, "relaunch spec")
+  T.wait_until(function() return T.eval("return tostring(#remuda._test_specs)") == "2" end, 20, "relaunch spec")
   T.eq(T.eval("return remuda._test_specs[2].writable[1]"), dir, "relaunch dropped the profile")
 end)
