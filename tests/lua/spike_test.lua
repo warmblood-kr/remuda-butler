@@ -15,4 +15,3 @@ T.test("intentional timeout reports its screen", function()
     "timeout failure should include the current screen")
   T.report_expected_failure(message)
 end)
-

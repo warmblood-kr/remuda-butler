@@ -143,10 +143,10 @@ function T.report_expected_failure(message)
   reports[#reports + 1] = "FAIL (expected diagnostic): " .. tostring(message)
 end
 
-local function save_result(status, message)
+local function save_result(status, message, left)
   local lines = { status, message or "" }
   for _, report in ipairs(reports) do lines[#lines + 1] = report end
-  lines[#lines + 1] = "harness: killed pids: 0; stopped child: " .. child_server .. "; left: 0"
+  lines[#lines + 1] = "harness: killed pids: 0; stopped child: " .. child_server .. "; left: " .. tostring(left or 0)
   fs.write_atomic(result_path, table.concat(lines, "\n") .. "\n")
 end
 
@@ -177,7 +177,7 @@ local function finish(status, message)
   if not ok then
     status, message = "FAIL", tostring(message or "") .. "\n" .. tostring(err)
   end
-  save_result(status, message)
+  save_result(status, message, ok and 0 or 1)
   remuda_api.after(0.01, function()
     process.run { argv = { exe, "-s", controller_server, "stop", "-f" }, timeout = 5 }
   end)
@@ -252,8 +252,8 @@ end
 
 local ok, err = xpcall(run, function(e) return tostring(e) end)
 if not ok then
-  local success, stop_error = pcall(stop_child)
-  save_result("FAIL", tostring(err) .. (success and "" or "\n" .. tostring(stop_error)))
+  local success, stopped, stop_error = pcall(stop_child)
+  save_result("FAIL", tostring(err) .. ((success and stopped) and "" or "\n" .. tostring(stop_error or stopped)), (success and stopped) and 0 or 1)
   remuda_api.after(0.01, function()
     process.run { argv = { exe, "-s", controller_server, "stop", "-f" }, timeout = 5 }
   end)
