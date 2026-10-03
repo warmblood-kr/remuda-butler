@@ -14,6 +14,16 @@ local read_config = matrix.read_config
 local json = assert(remuda.json, "Matrix requires core remuda.json")
 local relay = matrix.relay or {}
 matrix.relay = relay
+function relay.approval_room_for_config(cfg)
+  if type(cfg) ~= "table" then return nil end
+  if cfg.approval_room == "home" then return cfg.home_room end
+  local room_id = cfg.all_room
+  if type(room_id) == "string" and room_id ~= "" and type(cfg.rooms) == "table"
+      and cfg.rooms[room_id] == "all" then
+    return room_id
+  end
+  return cfg.home_room
+end
 local JSON_ARRAY_MT = getmetatable(json.array({}))
 
 local MAX_PROCESSED = 5000
@@ -816,7 +826,8 @@ function relay.new(options)
       extras = extras or {}
       local room_id = type(extras.room) == "string" and cfg.rooms[extras.room] ~= nil
         and extras.room or cfg.home_room
-      local content = { msgtype = "m.text", body = text, ["m.relates_to"] = relation }
+      local content = { msgtype = "m.text", body = text, ["m.relates_to"] = relation,
+        ["app.remuda.approval"] = true }
       if extras.mention and #owners > 0 then
         content.body = table.concat(owners, " ") .. "\n" .. text
         content["m.mentions"] = { user_ids = owners }
@@ -842,13 +853,7 @@ function relay.new(options)
           callback({ event_id = result.json and result.json.event_id, room_id = room_id })
         end
       end)
-    end, function()
-      local room_id = cfg.all_room
-      if type(room_id) == "string" and room_id ~= "" and cfg.rooms[room_id] == "all" then
-        return room_id
-      end
-      return cfg.home_room
-    end)
+    end, function() return relay.approval_room_for_config(cfg) end, cfg.home_room)
   end
 
   local function quarantine_event(ev, reason, room_id, defer_persist)
@@ -1642,6 +1647,11 @@ function relay.new(options)
         if (event_id == "" or (not state.processed[event_id] and not state.pending[event_id]))
           and ev.sender ~= cfg.self_mxid then
           local content = type(ev.content) == "table" and ev.content or {}
+          if content["app.remuda.approval"] ~= nil then
+            if event_id ~= "" then add_processed(state, event_id) end
+            if cursor then state.since = cursor end
+            persist()
+          else
           local approval_record, approval_verdict
           if approval then
             local targets, verdict, explicit_id, text_verdict, msgtype = approval_answer_fields(ev)
@@ -1853,6 +1863,7 @@ function relay.new(options)
           added[#added + 1] = ev.event_id
           if cursor then state.since = cursor end
           persist()
+          end
           end
           end
           end

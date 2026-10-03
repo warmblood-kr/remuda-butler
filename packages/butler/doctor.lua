@@ -41,11 +41,15 @@ local function typed_line_switches()
   end
   local ok, config = pcall(matrix.read_config, paths.config_path)
   if not ok or type(config) ~= "table" then return false, false end
-  local approval_room = "HOME (lounge not joined)"
-  if type(config.all_room) == "string" and type(config.rooms) == "table"
+  local approval_mode = config.approval_room == "home" and "home" or "all"
+  local approval_result = "HOME (lounge not joined)"
+  if approval_mode == "home" then
+    approval_result = "HOME"
+  elseif type(config.all_room) == "string" and type(config.rooms) == "table"
       and config.rooms[config.all_room] == "all" then
-    approval_room = config.all_room
+    approval_result = config.all_room
   end
+  local approval_room = approval_mode .. " -> " .. approval_result
   return config.typed_lines == true, config.shell_lines == true, config.approve_text == true, true, approval_room
 end
 
@@ -81,7 +85,7 @@ local function render(probe_results, platform)
     "Typed lines: " .. (probe_results.typed_lines == true and "on" or "off"),
     "Shell lines: " .. (probe_results.shell_lines == true and "on" or "off"),
     "Approve text: " .. (probe_results.approve_text == true and "on" or "off"),
-    "Approval room: " .. tostring(probe_results.approval_room or "HOME (lounge not joined)"),
+    "Approval room: " .. tostring(probe_results.approval_room or "all -> HOME (lounge not joined)"),
   }
   if probe_results.guard_approvals ~= nil then
     lines[#lines + 1] = "Guard approvals: " .. (probe_results.guard_approvals

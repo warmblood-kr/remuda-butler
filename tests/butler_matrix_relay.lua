@@ -1476,6 +1476,17 @@ local function test_typed_line_config_is_strict_and_off_by_default()
   local conf = assert(matrix.read_config(path))
   assert(conf.typed_lines == false and conf.shell_lines == false,
     "typed-line switches must default to false")
+  assert(conf.approval_room == "all", "approval_room must default to all")
+  cleanup_fixture(dir, path)
+
+  dir, path = fixture("approval_room=home\n")
+  conf = assert(matrix.read_config(path))
+  assert(conf.approval_room == "home", "approval_room=home must be accepted")
+  cleanup_fixture(dir, path)
+
+  dir, path = fixture("approval_room=other\n")
+  conf = assert(matrix.read_config(path))
+  assert(conf.approval_room == "all", "invalid approval_room values must fall back to all")
   cleanup_fixture(dir, path)
 
   dir, path = fixture("typed_lines=true\nshell_lines=false\n")
@@ -7443,6 +7454,8 @@ function remuda._t359.test_approval_mentions_exclude_butlers_and_relay_mxid()
     local mentions = posts[1].content["m.mentions"]
     assert(mentions and #mentions.user_ids == 1 and mentions.user_ids[1] == OWNER,
       "m.mentions includes the allowed owner, excluding butler_senders and the relay's own mxid")
+    assert(posts[1].content["app.remuda.approval"] == true,
+      "approval messages carry the relay-loop marker")
   end, "butler_senders=@helper:example.org\n", ALL)
 end
 
@@ -7511,6 +7524,116 @@ function remuda._t359.test_approval_room_falls_back_to_home_without_joined_loung
     assert(rec and rec.room_id == HOME and #remuda._t359.room_posts(env, HOME, "Butler wants to use fallback room") == 1,
       "without a joined all room the request is posted in HOME and stores HOME")
   end, nil, false)
+end
+
+function remuda._t359.test_approval_room_home_mode_and_kind_fallback()
+  approval_env(nil, function(env)
+    local id
+    approval().request({ kind = "room_home_test", key = "home", asker = ASKER,
+      summary = "use home room", on_id = function(value) id = value end })
+    env.client:pump()
+    local rec = env.relay:state().approvals[id]
+    assert(rec and rec.room_id == HOME
+      and #remuda._t359.room_posts(env, HOME, "Butler wants to use home room") == 1
+      and #remuda._t359.room_posts(env, ALL, "Butler wants to use home room") == 0,
+      "approval_room=home posts only in HOME")
+  end, "approval_room=home\n", ALL)
+  assert(relay_module.approval_room_for_config({ approval_room = "all", home_room = HOME,
+    all_room = ALL, rooms = { [ALL] = "joined" } }) == HOME,
+    "an all_room configured as a joined room is not an ALL-BUTLERS lounge")
+end
+
+function remuda._t359.test_failed_lounge_post_does_not_fall_back_to_home()
+  approval_env(nil, function(env)
+    local request_error, id
+    approval().request({ kind = "lounge_failure_test", key = "lounge-failure", asker = ASKER,
+      summary = "must fail in lounge", on_id = function(value) id = value end },
+      function(value, err) if not value then request_error = err end end)
+    local index
+    for i, args in ipairs(env.client.requests) do
+      if args.method == "PUT" and args.room == ALL then index = i break end
+    end
+    assert(index, "the request is first sent to the configured lounge")
+    env.client:complete(index, { error = "Matrix room not joined" })
+    assert(request_error and request_error:find("Could not post approval request", 1, true),
+      "a failed lounge post reports Could not post approval request")
+    assert(#remuda._t359.room_posts(env, HOME, "must fail in lounge") == 0
+      and #remuda._t359.room_posts(env, ALL, "must fail in lounge") == 1,
+      "the failed lounge attempt is not retried or copied into HOME")
+    assert(not env.relay:state().approvals[id], "a failed lounge post leaves no saved request")
+  end, nil, ALL)
+end
+
+function remuda._t359.test_approval_lounge_summary_cap_and_home_copy()
+  approval_env(nil, function(env)
+    local summary = string.rep("한", 80)
+    local id
+    approval().request({ kind = "summary_cap_test", key = "summary", asker = ASKER,
+      summary = summary, on_id = function(value) id = value end })
+    env.client:pump()
+    local lounge = remuda._t359.room_posts(env, ALL, "Butler wants to ")[1]
+    local copy = remuda._t359.room_posts(env, HOME, "Copy of request " .. id)[1]
+    local shown = lounge.body:match("Butler wants to ([^\n]+)")
+    assert(shown and #shown <= 200 and lounge.body:find("full text in HOME", 1, true),
+      "the lounge summary is capped at 200 bytes and points to HOME")
+    assert(copy and copy.body:find(summary, 1, true) and not copy.content["m.mentions"]
+      and copy.content["app.remuda.approval"] == true,
+      "HOME receives one full, unmentioned, marked copy")
+  end, nil, ALL)
+end
+
+function remuda._t359.test_approval_marker_skips_live_sync_and_backfill()
+  approval_env(nil, function(env)
+    local marked = text_event("$marked-live", "@helper:example.org", "approval chatter")
+    marked.content["app.remuda.approval"] = true
+    local plain = text_event("$plain-live", "@helper:example.org", "ordinary chatter")
+    room_events(env, { marked, plain }, HOME)
+    local state = env.relay:state()
+    assert(state.pending["$marked-live"] == nil and state.processed["$marked-live"]
+      and delivered_ids(env.delivered, "$plain-live") and not delivered_ids(env.delivered, "$marked-live"),
+      "live sync skips marked approval messages while unmarked control is delivered")
+  end, "butler_senders=@helper:example.org\n")
+
+  approval_env(nil, function(env)
+    local marked = text_event("$marked-backfill", "@helper:example.org", "approval chatter")
+    marked.content["app.remuda.approval"] = true
+    local plain = text_event("$plain-backfill", "@helper:example.org", "ordinary chatter")
+    env.relay._response({ start = "m0", ["end"] = "m1", chunk = { marked, plain } },
+      "/_matrix/client/v3/rooms/" .. encoded(HOME) .. "/messages")
+    local state = env.relay:state()
+    assert(state.pending["$marked-backfill"] == nil and state.processed["$marked-backfill"]
+      and delivered_ids(env.delivered, "$plain-backfill")
+      and not delivered_ids(env.delivered, "$marked-backfill"),
+      "messages backfill skips marked approval messages while unmarked control is delivered")
+  end, "mode=messages\nbutler_senders=@helper:example.org\n")
+end
+
+function remuda._t359.test_long_lounge_prepared_text_is_cut_but_full_text_is_typed()
+  with_approved_text_stubs(function(typed)
+    approval_env(nil, function(env)
+      local bytes = string.rep("x", 1600)
+      local id = assert(remuda.butler.approve_text.request("butler", bytes, ASKER))
+      env.client:pump()
+      local rec = env.relay:state().approvals[id]
+      local lounge = remuda._t359.room_posts(env, ALL, "Approve prepared text for")[1]
+      local copy = remuda._t359.room_posts(env, HOME, "Copy of request " .. id)[1]
+      local block = lounge.body:match("(```\n.-\n```)")
+      assert(rec and rec.data.registered_text == bytes and rec.data.bytes == #bytes
+        and rec.data.display_fingerprint == id .. "/" .. #bytes,
+        "the stored prepared text and fingerprint retain the full registered bytes")
+      assert(block and #block <= 1024 and lounge.body:find("full text in HOME", 1, true),
+        "the lounge code block stays within 1 KiB and points to HOME")
+      assert(copy and copy.body:find(bytes, 1, true) and not copy.content["m.mentions"],
+        "HOME receives the full prepared-text request without an owner mention")
+      assert(copy.content["app.remuda.approval"] == true,
+        "the HOME copy also carries the relay-loop marker")
+      room_events(env, { text_event("$prepared-copy-cannot-answer", OWNER, "yes " .. id) }, HOME)
+      assert(rec.status == "open" and #typed == 0, "the HOME copy cannot answer a lounge request")
+      room_events(env, { text_event("$prepared-lounge-answer", OWNER, "yes " .. id) }, ALL)
+      assert(#typed == 1 and typed[1].bytes == bytes,
+        "answering in the lounge types the entire stored prepared text")
+    end, "approve_text=true\n", ALL)
+  end)
 end
 
 function remuda._t359.test_approval_expiry_is_configurable_and_a_fence_in_the_text_falls_back_to_quotes()
@@ -7923,6 +8046,11 @@ for _, case in ipairs({
   { "test_approval_mentions_exclude_butlers_and_relay_mxid", remuda._t359.test_approval_mentions_exclude_butlers_and_relay_mxid },
   { "test_approval_room_routing_and_answer_binding", remuda._t359.test_approval_room_routing_and_answer_binding },
   { "test_approval_room_falls_back_to_home_without_joined_lounge", remuda._t359.test_approval_room_falls_back_to_home_without_joined_lounge },
+  { "test_approval_room_home_mode_and_kind_fallback", remuda._t359.test_approval_room_home_mode_and_kind_fallback },
+  { "test_failed_lounge_post_does_not_fall_back_to_home", remuda._t359.test_failed_lounge_post_does_not_fall_back_to_home },
+  { "test_approval_lounge_summary_cap_and_home_copy", remuda._t359.test_approval_lounge_summary_cap_and_home_copy },
+  { "test_approval_marker_skips_live_sync_and_backfill", remuda._t359.test_approval_marker_skips_live_sync_and_backfill },
+  { "test_long_lounge_prepared_text_is_cut_but_full_text_is_typed", remuda._t359.test_long_lounge_prepared_text_is_cut_but_full_text_is_typed },
   { "test_approval_expiry_is_configurable_and_a_fence_in_the_text_falls_back_to_quotes", remuda._t359.test_approval_expiry_is_configurable_and_a_fence_in_the_text_falls_back_to_quotes },
   { "test_approved_text_live_owner_reply_types_exact_bytes_once", test_approved_text_live_owner_reply_types_exact_bytes_once },
   { "test_approved_text_unknown_explicit_id_never_uses_reply_target", test_approved_text_unknown_explicit_id_never_uses_reply_target },
