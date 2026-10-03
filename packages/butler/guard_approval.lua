@@ -1,6 +1,6 @@
 -- Guard slice 1: owner approval for the permission prompts of Claude members.
 -- With `guard on` and `guard approvals on`, the PermissionRequest hook registers
--- one request, posts it to the owner's Matrix HOME room, and waits for the
+-- one request, posts it to the configured approval room, and waits for the
 -- verified owner's answer (approval.lua and the relay's owner gate). Allow and
 -- deny are printed as Claude's PermissionRequest decision; every other outcome
 -- (no Matrix, a cap, expiry, an error) prints nothing, so Claude shows its own
@@ -107,11 +107,25 @@ end
 
 local function thread_note(rec, text) pcall(approval.reply, rec, text) end
 
-local function render(rec)
+local function cap_summary(text, limit)
+  if #text <= limit then return text, false end
+  local at, finish = 1, 0
+  while at <= #text do
+    local first = text:byte(at)
+    local width = first < 0x80 and 1 or first < 0xe0 and 2 or first < 0xf0 and 3 or 4
+    if at + width - 1 > limit - 3 then break end
+    finish, at = at + width - 1, at + width
+  end
+  return text:sub(1, finish) .. "...", true
+end
+
+local function render(rec, display)
   local data = rec.data
   data.id, data.nonce = rec.id, rec.nonce
   data.hash = sha256(canonical(data))
   local shown = approve_text.display_inline
+  local summary, summary_cut = data.text, false
+  if display and display.lounge then summary, summary_cut = cap_summary(data.text, 200) end
   local expires = math.floor((tonumber(rec.expires_at) or 0) / 1000)
   return table.concat({
     "[Butler approval " .. rec.id .. "] " .. shown(data.agent) .. " session " .. shown(data.session)
@@ -119,13 +133,13 @@ local function render(rec)
     "  tool:     " .. shown(data.tool),
     "  class:    " .. shown(data.class),
     "  cwd:      " .. shown(data.cwd),
-    "  command:  " .. shown(data.text),
+    "  command:  " .. shown(summary),
     "  hash:     sha256 " .. data.hash:sub(1, 12) .. " (tool, class, cwd, session, text)",
     "  expires:  " .. os.date("!%Y-%m-%dT%H:%M:%SZ", expires) .. " (about " .. math.ceil(TTL_S / 60) .. " min)",
     "React ✅ to allow this one call, ❌ to deny. Reply \"yes " .. rec.id .. "\" / \"no " .. rec.id
       .. "\" (승인 / 거부) also works.",
     "No answer: the agent shows its own prompt.",
-  }, "\n")
+  }, "\n"), nil, summary_cut and { display_cut = true } or nil
 end
 
 -- Returns the deferred reply for the hook, or nil when the hook should print nothing.

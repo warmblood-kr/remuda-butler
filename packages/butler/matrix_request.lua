@@ -255,6 +255,8 @@ local function read_config(path)
         else
           warn_invalid_config_line(path, i, key, value)
         end
+      elseif key == "approval_room" then
+        opts[key] = value
       elseif key == "typed_lines" or key == "shell_lines" or key == "status_commands"
           or key == "approve_text" then
         if value == "true" then
@@ -290,6 +292,8 @@ local function read_config(path)
       or approval_ttl_minutes < 1 or approval_ttl_minutes > 1440 or approval_ttl_minutes % 1 ~= 0 then
     approval_ttl_minutes = 30
   end
+  local approval_room = opts.approval_room
+  if approval_room ~= "home" and approval_room ~= "all" then approval_room = "all" end
   local b2b_max_turns = tonumber(opts.b2b_max_turns)
   if not b2b_max_turns or b2b_max_turns ~= b2b_max_turns
       or b2b_max_turns < 1 or b2b_max_turns == math.huge
@@ -360,6 +364,7 @@ local function read_config(path)
     posts_per_hour = posts_per_hour,
     b2b_max_turns = b2b_max_turns,
     approval_ttl_minutes = approval_ttl_minutes,
+    approval_room = approval_room,
     use_messages = mode == "1" or mode == "true" or mode == "messages" or mode == "fallback",
     timeout_ms = math.max(1, timeout), ca_file = ca_file, pin = pin,
   }

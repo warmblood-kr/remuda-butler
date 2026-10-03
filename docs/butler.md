@@ -248,7 +248,7 @@ SESSION -` and stdin, or the `butler_approve_text` MCP tool. Text can contain
 multiple lines and is limited to 8 KiB. Core input normalization strips ESC
 and other C0/C1 controls and turns CR and CRLF into LF. Registration applies
 the CR normalization and refuses those controls except tab and newline. Butler
-posts that normalized stored text to HOME with a
+posts that normalized stored text to the configured approval room with a
 quoted, escaped display, a four-character request id, target session, byte
 count and `ID/bytes` fingerprint. The fingerprint is the request id and stored
 byte count; the normalized text and byte count are stored with the request.
@@ -435,9 +435,27 @@ member from those variables only; the MCP tools also accept the session
 capability.
 
 Approvals: when an agent runs `matrix join`, Butler resolves the room and
-posts one request to HOME instead of joining. The owner answers with a ✅ or
-❌ reaction, or a `yes`/`no` reply, to that exact message within 30 minutes (`approval_ttl_minutes`, 1 to 1440).
-Only an allowlisted human sender in HOME counts. A bare `yes` does nothing.
+posts one request as an ordinary message with an owner mention. Prepared-text
+and Claude guard approvals use the same room. `approval_room=all` (the default)
+uses the joined ALL-BUTLERS room and falls back to HOME; `approval_room=home`
+always uses HOME. Doctor shows the configured mode and resulting room. Every
+allowlisted owner is mentioned, while Butler senders and the relay's own MXID
+are excluded. A second human who is not on the allowlist can read the request
+in a shared room but cannot answer it. The lounge must stay the owner plus the
+owner's own butlers, otherwise set `approval_room=home`.
+
+The lounge accepts prepared text up to 1 KiB. Longer prepared-text requests are
+posted whole in HOME with the full text and hash, and HOME is the only room
+where they can be answered. There is no second HOME copy. Butler types the full
+stored text after approval. Approval posts carry `app.remuda.approval=true`; relays skip marked
+events from Butler senders before quarantine or delivery to prevent
+Butler-to-Butler loops. If the lounge post fails, Butler reports `Could not post
+approval request` and does not retry the request in HOME.
+
+The owner answers with a ✅ or ❌ reaction, or a `yes`/`no` reply, to that exact
+message within 30 minutes (`approval_ttl_minutes`, 1 to 1440; Claude guard
+approvals keep their fixed 290 second window). Only an allowlisted human sender
+in the request's room counts. A bare `yes` does nothing.
 The owner can also answer from the terminal: `remuda butler approvals` lists
 the open requests, and `remuda butler approve ID` or `deny ID` answers one
 (operator-only). Terminal approve/deny are refused for a Butler member, by the
@@ -449,6 +467,8 @@ at request time and writes `room=ID how=approved`. The asker gets mail for every
 approved, denied or expired. A repeat ask for the same room returns the same
 request. Each agent may have 3 open requests, and there may be 5 in total.
 Requests live in the relay state file.
+The config accepts `approval_room=all|home`; an absent or invalid value uses
+`all`.
 
 `quarantine` lists rejected inbound Matrix message events; add `--id EVENT_ID`
 to inspect one. It is operator-only under the same caller policy. The relay
@@ -543,6 +563,8 @@ file contains:
    `deny_server=host` lines to refuse matching invites;
    `approval_ttl_minutes=N` sets how long an owner approval request stays open
    (default 30; a Claude guard approval keeps its fixed 5 minute window);
+   `approval_room=all|home` selects the joined ALL-BUTLERS room or HOME
+   (default `all`);
    `b2b_max_turns=N` sets the consecutive Butler-only thread turn limit
    (default 6); `posts_per_hour=N` caps posts that are not a reply to a person
    on the allowlist (default 30);

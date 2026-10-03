@@ -1349,11 +1349,13 @@ end
 local HOME, ALL, NEW = "!room:example.org", "!all:example.org", "!new:example.org"
 local OWNER, STRANGER = "@alice:example.org", "@mallory:example.org"
 
-local function invite_fixture(senders, extra)
+local function invite_fixture(senders, extra, all_room)
   local dir, path = fixture()
   local file = assert(io.open(path, "w"))
   file:write("http://matrix.invalid\n", HOME, "\n@bot:example.org\n", senders or OWNER,
-    "\nfalse\n30000\nall_room=", ALL, "\n", extra or "")
+    "\nfalse\n30000\n")
+  if all_room ~= false then file:write("all_room=", all_room or ALL, "\n") end
+  file:write(extra or "")
   file:close()
   return dir, path
 end
@@ -1474,6 +1476,17 @@ local function test_typed_line_config_is_strict_and_off_by_default()
   local conf = assert(matrix.read_config(path))
   assert(conf.typed_lines == false and conf.shell_lines == false,
     "typed-line switches must default to false")
+  assert(conf.approval_room == "all", "approval_room must default to all")
+  cleanup_fixture(dir, path)
+
+  dir, path = fixture("approval_room=home\n")
+  conf = assert(matrix.read_config(path))
+  assert(conf.approval_room == "home", "approval_room=home must be accepted")
+  cleanup_fixture(dir, path)
+
+  dir, path = fixture("approval_room=other\n")
+  conf = assert(matrix.read_config(path))
+  assert(conf.approval_room == "all", "invalid approval_room values must fall back to all")
   cleanup_fixture(dir, path)
 
   dir, path = fixture("typed_lines=true\nshell_lines=false\n")
@@ -6816,8 +6829,9 @@ local function approval()
   return assert(remuda.butler.approval, "packages/butler/approval.lua must publish remuda.butler.approval")
 end
 
-local function approval_env(senders, run, extra)
-  local dir, path = invite_fixture(senders, extra)
+local function approval_env(senders, run, extra, all_room)
+  if all_room == nil then all_room = false end
+  local dir, path = invite_fixture(senders, extra, all_room)
   local mails, saved_send = {}, remuda._butler_send
   remuda._butler_send = function(from, to, text)
     mails[#mails + 1] = { from = from, to = to, text = text }
@@ -6905,10 +6919,28 @@ end
 
 -- Every PUT to HOME as { event_id, body, relates_to }; the scripted pump
 -- answers request N with event id "$sentN".
+remuda._t359 = remuda._t359 or {}
+
 local function home_posts(env, fragment)
   local posts = {}
   for index, args in ipairs(env.client.requests) do
     if args.method == "PUT" and (args.room == HOME or args.path:find("/rooms/" .. encoded(HOME) .. "/", 1, true)) then
+      local content = args.body and matrix.decode_json(args.body) or {}
+      local body = args.text or (type(content) == "table" and content.body) or ""
+      if not fragment or body:find(fragment, 1, true) then
+        posts[#posts + 1] = { event_id = "$sent" .. index, body = body,
+          content = type(content) == "table" and content or {},
+          relates_to = type(content) == "table" and content["m.relates_to"] or nil }
+      end
+    end
+  end
+  return posts
+end
+
+function remuda._t359.room_posts(env, room, fragment)
+  local posts = {}
+  for index, args in ipairs(env.client.requests) do
+    if args.method == "PUT" and (args.room == room or args.path:find("/rooms/" .. encoded(room) .. "/", 1, true)) then
       local content = args.body and matrix.decode_json(args.body) or {}
       local body = args.text or (type(content) == "table" and content.body) or ""
       if not fragment or body:find(fragment, 1, true) then
@@ -6960,11 +6992,12 @@ local function agent_cli_join(env, room, agent)
 end
 
 -- Files a join request as an agent and returns its id and HOME event id.
-local function file_request(env, room, agent)
-  local before = #home_posts(env, "Butler wants to join")
+local function file_request(env, room, agent, request_room)
+  request_room = request_room or HOME
+  local before = #remuda._t359.room_posts(env, request_room, "Butler wants to join")
   local result = agent_cli_join(env, room, agent)
-  local posts = home_posts(env, "Butler wants to join")
-  assert(#posts == before + 1, "an agent join must file a request with one HOME post (got "
+  local posts = remuda._t359.room_posts(env, request_room, "Butler wants to join")
+  assert(#posts == before + 1, "an agent join must file a request with one approval-room post (got "
     .. (#posts - before) .. " posts; cli: " .. tostring(result.stdout) .. tostring(result.stderr) .. ")")
   local post = posts[#posts]
   local id = assert(post.body:match("Request (%w+)"), "the HOME post must name the request: " .. post.body)
@@ -7156,7 +7189,7 @@ local function test_deny_and_expiry_mail_with_next_and_no_join()
     room_events(env, { reaction("$no", OWNER, denied, CROSS) })
     assert(server_joins(env, NEW) == 0 and not is_open(denied_id), "a cross-mark must deny without joining")
     assert(mails_to(env, ASKER, "Denied by the owner (request " .. denied_id .. ", " .. NEW
-      .. "). Next: ask the owner in HOME why, or pick another room.") == 1,
+      .. "). Next: ask the owner in the request room why, or pick another room.") == 1,
       "a denial must mail the asker with Next")
     assert(thread_replies(env, denied, "Denied by " .. OWNER) == 1, "the request thread must say who denied")
 
@@ -7254,7 +7287,7 @@ local function test_approve_deny_refuse_agents_only()
       failed = nil
       local out = cli({ "approve", id:lower() }, nil)
       env.client:pump()
-      assert(not failed and tostring(out):find("Approved request " .. id .. " (join " .. NEW .. "); joining now. The result goes to the HOME thread and the asker's mail.", 1, true),
+      assert(not failed and tostring(out):find("Approved request " .. id .. " (join " .. NEW .. "); joining now. The result goes to the request thread and the asker's mail.", 1, true),
         "the operator approve must succeed with a Next line: " .. tostring(failed and failed.message or out))
       local denied_id = file_request(env, NEW2)
       local denied_out = cli({ "deny", denied_id }, nil)
@@ -7406,6 +7439,204 @@ function remuda._t359.test_approval_post_mentions_owner_with_code_block_and_30_m
       local reply = home_posts(env, "Already answered.")[1]
       assert(reply and not reply.content["m.mentions"], "thread replies do not mention the owner again")
     end, "approve_text=true\n")
+  end)
+end
+
+function remuda._t359.test_approval_mentions_exclude_butlers_and_relay_mxid()
+  approval_env(OWNER .. ",@helper:example.org,@bot:example.org", function(env)
+    local id
+    approval().request({ kind = "mention_filter_test", key = "mentions", asker = ASKER,
+      summary = "check mention filtering", on_id = function(value) id = value end })
+    env.client:pump()
+    local posts = remuda._t359.room_posts(env, ALL, "Butler wants to check mention filtering")
+    local rec = env.relay:state().approvals[id]
+    assert(rec and rec.event_id and #posts == 1, "the mention-filter request is posted once")
+    local mentions = posts[1].content["m.mentions"]
+    assert(mentions and #mentions.user_ids == 1 and mentions.user_ids[1] == OWNER,
+      "m.mentions includes the allowed owner, excluding butler_senders and the relay's own mxid")
+    assert(posts[1].content["app.remuda.approval"] == true,
+      "approval messages carry the relay-loop marker")
+  end, "butler_senders=@helper:example.org\n", ALL)
+end
+
+function remuda._t359.test_approval_room_routing_and_answer_binding()
+  with_approved_text_stubs(function(typed)
+    approval_env(nil, function(env)
+      local id = assert(remuda.butler.approve_text.request("butler", "lounge text", ASKER))
+      env.client:pump()
+      local rec = env.relay:state().approvals[id]
+      local post = remuda._t359.room_posts(env, ALL, "Approve prepared text for")[1]
+      assert(rec and rec.room_id == ALL and post, "prepared-text approval uses the configured all room")
+      assert(post.content.msgtype == "m.text" and post.content["m.mentions"].user_ids[1] == OWNER,
+        "the lounge request is an ordinary message with the owner mention")
+      room_events(env, { text_event("$prepared-home-answer", OWNER, "yes " .. id) }, HOME)
+      room_events(env, { text_event("$prepared-stranger-answer", STRANGER, "yes " .. id) }, ALL)
+      assert(rec.status == "open" and #typed == 0,
+        "the owner in HOME and a stranger in the lounge cannot approve prepared text")
+      room_events(env, { text_event("$prepared-lounge-answer", OWNER, "yes " .. id) }, ALL)
+      assert(#typed == 1 and typed[1].bytes == "lounge text",
+        "the owner can approve prepared text in its lounge request room")
+
+      local join_id, join_event, _, join_post = file_request(env, NEW, nil, ALL)
+      assert(join_post.content.msgtype == "m.text" and env.relay:state().approvals[join_id].room_id == ALL,
+        "join approval is an ordinary message stored against the lounge room")
+      room_events(env, { text_event("$join-home-answer", OWNER, "yes", join_event) }, HOME)
+      assert(env.relay:state().approvals[join_id].status == "open" and server_joins(env, NEW) == 0,
+        "an owner answer in HOME cannot approve a lounge request")
+      room_events(env, { text_event("$join-lounge-answer", OWNER, "yes", join_event) }, ALL)
+      assert(env.relay:state().approvals[join_id].status == "applied" and server_joins(env, NEW) == 1,
+        "the owner can approve the join in the room where it was posted")
+
+      remuda._t359.with_guard(env, function(replies)
+        local guard_event, guard_reply, guard_id, guard_post = remuda._t359.guard_request(env, replies, nil, nil, ALL)
+        local guard_rec = env.relay:state().approvals[guard_id]
+        assert(guard_rec.room_id == ALL and guard_post.content.msgtype == "m.text",
+          "guard approval uses the configured lounge as an ordinary message")
+        room_events(env, { reaction("$guard-stranger", STRANGER, guard_event) }, ALL)
+        room_events(env, { reaction("$guard-home", OWNER, guard_event) }, HOME)
+        assert(guard_rec.status == "open" and remuda._t359.guard_state(guard_reply) == "waiting",
+          "a stranger in the lounge and the owner in HOME cannot answer the lounge request")
+        room_events(env, { reaction("$guard-owner", OWNER, guard_event) }, ALL)
+        assert(remuda._t359.guard_state(guard_reply) == "done:" .. remuda._t359.guard_allow,
+          "the allowlisted owner can answer the guard request in the lounge")
+        env.client:pump()
+        local lounge_reply = remuda._t359.room_posts(env, ALL, "Allowed this one call.")[1]
+        assert(lounge_reply and lounge_reply.relates_to.event_id == guard_event,
+          "guard thread notes are sent to the stored approval room")
+      end)
+
+      approval().reply({ event_id = "$legacy-home-root" }, "legacy reply")
+      env.client:pump()
+      local legacy = remuda._t359.room_posts(env, HOME, "legacy reply")[1]
+      assert(legacy and legacy.relates_to.event_id == "$legacy-home-root",
+        "an old approval record without room_id keeps its thread in HOME")
+    end, "approve_text=true\n", ALL)
+  end)
+end
+
+function remuda._t359.test_approval_room_falls_back_to_home_without_joined_lounge()
+  approval_env(nil, function(env)
+    local id
+    approval().request({ kind = "room_fallback_test", key = "fallback", asker = ASKER,
+      summary = "use fallback room", on_id = function(value) id = value end })
+    env.client:pump()
+    local rec = env.relay:state().approvals[id]
+    assert(rec and rec.room_id == HOME and #remuda._t359.room_posts(env, HOME, "Butler wants to use fallback room") == 1,
+      "without a joined all room the request is posted in HOME and stores HOME")
+  end, nil, false)
+end
+
+function remuda._t359.test_approval_room_home_mode_and_kind_fallback()
+  approval_env(nil, function(env)
+    local id
+    approval().request({ kind = "room_home_test", key = "home", asker = ASKER,
+      summary = "use home room", on_id = function(value) id = value end })
+    env.client:pump()
+    local rec = env.relay:state().approvals[id]
+    assert(rec and rec.room_id == HOME
+      and #remuda._t359.room_posts(env, HOME, "Butler wants to use home room") == 1
+      and #remuda._t359.room_posts(env, ALL, "Butler wants to use home room") == 0,
+      "approval_room=home posts only in HOME")
+  end, "approval_room=home\n", ALL)
+  assert(relay_module.approval_room_for_config({ approval_room = "all", home_room = HOME,
+    all_room = ALL, rooms = { [ALL] = "joined" } }) == HOME,
+    "an all_room configured as a joined room is not an ALL-BUTLERS lounge")
+end
+
+function remuda._t359.test_failed_lounge_post_does_not_fall_back_to_home()
+  approval_env(nil, function(env)
+    local request_error, id
+    approval().request({ kind = "lounge_failure_test", key = "lounge-failure", asker = ASKER,
+      summary = "must fail in lounge", on_id = function(value) id = value end },
+      function(value, err) if not value then request_error = err end end)
+    local index
+    for i, args in ipairs(env.client.requests) do
+      if args.method == "PUT" and args.room == ALL then index = i break end
+    end
+    assert(index, "the request is first sent to the configured lounge")
+    env.client:complete(index, { error = "Matrix room not joined" })
+    assert(request_error and request_error:find("Could not post approval request", 1, true),
+      "a failed lounge post reports Could not post approval request")
+    assert(#remuda._t359.room_posts(env, HOME, "must fail in lounge") == 0
+      and #remuda._t359.room_posts(env, ALL, "must fail in lounge") == 1,
+      "the failed lounge attempt is not retried or copied into HOME")
+    assert(not env.relay:state().approvals[id], "a failed lounge post leaves no saved request")
+  end, nil, ALL)
+end
+
+function remuda._t359.test_approval_marker_skips_live_sync_and_backfill()
+  approval_env(nil, function(env)
+    local marked = text_event("$marked-live", "@helper:example.org", "approval chatter")
+    marked.content["app.remuda.approval"] = true
+    local plain = text_event("$plain-live", "@helper:example.org", "ordinary chatter")
+    local non_butler = text_event("$non-butler-marked-live", STRANGER, "marked human chatter")
+    non_butler.content["app.remuda.approval"] = true
+    room_events(env, { marked, plain, non_butler }, HOME)
+    local state = env.relay:state()
+    assert(state.pending["$marked-live"] == nil and state.processed["$marked-live"]
+      and delivered_ids(env.delivered, "$plain-live") and not delivered_ids(env.delivered, "$marked-live")
+      and delivered_ids(env.delivered, "$non-butler-marked-live"),
+      "live sync skips marked Butler posts; unmarked control and marked non-Butler messages are delivered")
+  end, "butler_senders=@helper:example.org\n")
+
+  approval_env(nil, function(env)
+    local marked = text_event("$marked-backfill", "@helper:example.org", "approval chatter")
+    marked.content["app.remuda.approval"] = true
+    local plain = text_event("$plain-backfill", "@helper:example.org", "ordinary chatter")
+    env.relay._response({ start = "m0", ["end"] = "m1", chunk = { marked, plain } },
+      "/_matrix/client/v3/rooms/" .. encoded(HOME) .. "/messages")
+    local state = env.relay:state()
+    assert(state.pending["$marked-backfill"] == nil and state.processed["$marked-backfill"]
+      and delivered_ids(env.delivered, "$plain-backfill")
+      and not delivered_ids(env.delivered, "$marked-backfill"),
+      "messages backfill skips marked approval messages while unmarked control is delivered")
+  end, "mode=messages\nbutler_senders=@helper:example.org\n")
+end
+
+function remuda._t359.test_long_prepared_text_routes_home_only_and_types_full_text()
+  with_approved_text_stubs(function(typed)
+    approval_env(nil, function(env)
+      local bytes = string.rep("x", 1025)
+      local id = assert(remuda.butler.approve_text.request("butler", bytes, ASKER))
+      env.client:pump()
+      local rec = env.relay:state().approvals[id]
+      local home_post = remuda._t359.room_posts(env, HOME, "Approve prepared text for")[1]
+      assert(rec and rec.data.registered_text == bytes and rec.data.bytes == #bytes
+        and rec.data.display_fingerprint == id .. "/" .. #bytes and rec.room_id == HOME,
+        "the stored prepared text, fingerprint, and answer room retain the full request")
+      assert(home_post and home_post.body:find(bytes, 1, true)
+        and home_post.body:find(id .. "/" .. #bytes, 1, true),
+        "HOME contains the complete 1 KiB plus one byte request and its full fingerprint")
+      assert(#remuda._t359.room_posts(env, ALL) == 0,
+        "a long prepared-text request never reaches the lounge")
+      room_events(env, { text_event("$prepared-lounge-answer", OWNER, "yes " .. id) }, ALL)
+      assert(rec.status == "open" and #typed == 0,
+        "a lounge answer cannot approve a request that was posted in HOME")
+      room_events(env, { text_event("$prepared-home-answer", OWNER, "yes " .. id) }, HOME)
+      assert(rec.status == "applied" and #typed == 1 and typed[1].bytes == rec.data.registered_text
+        and typed[1].bytes == bytes,
+        "answering the HOME-only request types exactly the full stored text")
+    end, "approve_text=true\n", ALL)
+  end)
+end
+
+function remuda._t359.test_multibyte_prepared_text_boundary_routes_without_truncation()
+  with_approved_text_stubs(function(typed)
+    approval_env(nil, function(env)
+      local bytes = string.rep("a", 1021) .. "界"
+      assert(#bytes == 1024, "fixture must end at the 1 KiB UTF-8 byte boundary")
+      local id = assert(remuda.butler.approve_text.request("butler", bytes, ASKER))
+      env.client:pump()
+      local rec = env.relay:state().approvals[id]
+      local home_post = remuda._t359.room_posts(env, HOME, "Approve prepared text for")[1]
+      assert(rec and rec.room_id == HOME and rec.data.registered_text == bytes
+        and home_post and home_post.body:find(bytes, 1, true)
+        and #remuda._t359.room_posts(env, ALL) == 0,
+        "the full multibyte boundary text is routed to HOME without a lounge post")
+      room_events(env, { text_event("$prepared-multibyte-home", OWNER, "yes " .. id) }, HOME)
+      assert(#typed == 1 and typed[1].bytes == bytes and rec.data.registered_text == bytes,
+        "the multibyte boundary request types the exact stored bytes")
+    end, "approve_text=true\n", ALL)
   end)
 end
 
@@ -7622,21 +7853,26 @@ local function with_guard(env, run)
   remuda._butler_guard_dir, remuda.pending = old_dir, old_pending
   if not ok then error(err, 0) end
 end
+remuda._t359.with_guard = with_guard
 
 -- One PermissionRequest through the verb: the request's event id, its deferred reply, its id, its post.
-local function guard_request(env, replies, command, alias)
-  local before = #home_posts(env, "Butler approval")
+local function guard_request(env, replies, command, alias, request_room)
+  request_room = request_room or HOME
+  local before = #remuda._t359.room_posts(env, request_room, "Butler approval")
   remuda.butler.guard_policy.run({ "guard" }, { stdin = remuda.json.encode({ hook_event_name = "PermissionRequest",
     tool_name = "Bash", tool_input = { command = command or "git push origin main" }, cwd = "/p/w" }),
     env = { REMUDA_BUTLER_AGENT_ALIAS = alias or "ss-a", REMUDA_BUTLER_AGENT_KIND = "claude" } })
   env.client:pump()
-  local posts = home_posts(env, "Butler approval")
-  assert(#posts == before + 1, "one request must make exactly one HOME post")
+  local posts = remuda._t359.room_posts(env, request_room, "Butler approval")
+  assert(#posts == before + 1, "one request must make exactly one approval-room post")
   local post = posts[#posts]
   return post.event_id, replies[#replies], assert(post.body:match("%[Butler approval (%w+)%]")), post
 end
+remuda._t359.guard_request = guard_request
 
 local function guard_state(reply) return reply.done and ("done:" .. reply.out) or "waiting" end
+remuda._t359.guard_state = guard_state
+remuda._t359.guard_allow = GUARD_ALLOW
 
 local function test_guard_owner_answers_by_reply_and_reaction()
   approval_env(nil, function(env)
@@ -7692,6 +7928,24 @@ local function test_guard_needs_live_sync()
       assert(guard_state(reply) == "waiting", "an answer outside live sync must not approve a guarded call")
     end)
   end, "mode=messages\n")
+end
+
+function remuda._t359.test_guard_request_expires_at_290_seconds_not_default_ttl()
+  approval_env(nil, function(env)
+    with_guard(env, function(replies)
+      local event, reply, id = guard_request(env, replies)
+      local rec = env.relay:state().approvals[id]
+      assert(rec.expires_at - rec.created_ms == 290 * 1000,
+        "guard approvals keep their 290 second window instead of the 30 minute default")
+      assert(remuda.butler.approval.sweep(rec.expires_at - 1) == 0 and rec.status == "open",
+        "the guard request remains open immediately before its 290 second expiry")
+      assert(remuda.butler.approval.sweep(rec.expires_at) == 1 and rec.status == "expired",
+        "the guard request expires at 290 seconds")
+      env.client:pump()
+      assert(guard_state(reply) == "done:" and thread_replies(env, event, "Expired.") == 1,
+        "guard expiry releases the hook without a decision and replies in its request thread")
+    end)
+  end)
 end
 
 local function test_guard_forged_nonce_gives_no_decision()
@@ -7764,6 +8018,7 @@ end
     { "test_guard_owner_answers_by_reply_and_reaction", test_guard_owner_answers_by_reply_and_reaction },
     { "test_guard_only_the_verified_owner_counts", test_guard_only_the_verified_owner_counts },
     { "test_guard_needs_live_sync", test_guard_needs_live_sync },
+    { "test_guard_request_expires_at_290_seconds_not_default_ttl", remuda._t359.test_guard_request_expires_at_290_seconds_not_default_ttl },
     { "test_guard_forged_nonce_gives_no_decision", test_guard_forged_nonce_gives_no_decision },
     { "test_guard_answer_binds_to_its_own_request", test_guard_answer_binds_to_its_own_request },
     { "test_guard_one_shot_expiry_and_restart", test_guard_one_shot_expiry_and_restart },
@@ -7783,7 +8038,7 @@ for _, case in ipairs({
   { "test_legacy_approval_survives_first_non_live_sync", test_legacy_approval_survives_first_non_live_sync },
   { "test_reaction_from_stranger_agent_or_other_room_is_ignored", test_reaction_from_stranger_agent_or_other_room_is_ignored },
   { "test_reaction_on_older_request_or_before_post_is_ignored", test_reaction_on_older_request_or_before_post_is_ignored },
-  { "test_deny_and_expiry_mail_with_next_and_no_join", test_deny_and_expiry_mail_with_next_and_no_join },
+    { "test_deny_and_expiry_mail_with_next_and_no_join", test_deny_and_expiry_mail_with_next_and_no_join },
   { "test_approved_join_failure_mail_includes_request_identity", test_approved_join_failure_mail_includes_request_identity },
   { "test_dedupe_returns_same_id_and_cap_refuses_without_post", test_dedupe_returns_same_id_and_cap_refuses_without_post },
   { "test_approve_deny_refuse_agents_only", test_approve_deny_refuse_agents_only },
@@ -7792,6 +8047,14 @@ for _, case in ipairs({
   { "test_hostile_room_name_sanitised_in_home_post", test_hostile_room_name_sanitised_in_home_post },
   { "test_restart_does_not_reanswer_answered_request", test_restart_does_not_reanswer_answered_request },
   { "test_approval_post_mentions_owner_with_code_block_and_30_minute_expiry", remuda._t359.test_approval_post_mentions_owner_with_code_block_and_30_minute_expiry },
+  { "test_approval_mentions_exclude_butlers_and_relay_mxid", remuda._t359.test_approval_mentions_exclude_butlers_and_relay_mxid },
+  { "test_approval_room_routing_and_answer_binding", remuda._t359.test_approval_room_routing_and_answer_binding },
+  { "test_approval_room_falls_back_to_home_without_joined_lounge", remuda._t359.test_approval_room_falls_back_to_home_without_joined_lounge },
+  { "test_approval_room_home_mode_and_kind_fallback", remuda._t359.test_approval_room_home_mode_and_kind_fallback },
+  { "test_failed_lounge_post_does_not_fall_back_to_home", remuda._t359.test_failed_lounge_post_does_not_fall_back_to_home },
+  { "test_approval_marker_skips_live_sync_and_backfill", remuda._t359.test_approval_marker_skips_live_sync_and_backfill },
+  { "test_long_prepared_text_routes_home_only_and_types_full_text", remuda._t359.test_long_prepared_text_routes_home_only_and_types_full_text },
+  { "test_multibyte_prepared_text_boundary_routes_without_truncation", remuda._t359.test_multibyte_prepared_text_boundary_routes_without_truncation },
   { "test_approval_expiry_is_configurable_and_a_fence_in_the_text_falls_back_to_quotes", remuda._t359.test_approval_expiry_is_configurable_and_a_fence_in_the_text_falls_back_to_quotes },
   { "test_approved_text_live_owner_reply_types_exact_bytes_once", test_approved_text_live_owner_reply_types_exact_bytes_once },
   { "test_approved_text_unknown_explicit_id_never_uses_reply_target", test_approved_text_unknown_explicit_id_never_uses_reply_target },

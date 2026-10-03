@@ -112,6 +112,41 @@ function M.display_block(text)
   return "```\n" .. body .. "\n```", "<pre><code>" .. html_escape(body) .. "</code></pre>"
 end
 
+local function utf8_prefix(text, limit)
+  local at, finish = 1, 0
+  while at <= #text do
+    local first = text:byte(at)
+    local width = first < 0x80 and 1 or first < 0xe0 and 2 or first < 0xf0 and 3 or 4
+    if at + width - 1 > limit then break end
+    finish, at = at + width - 1, at + width
+  end
+  return text:sub(1, finish), finish < #text
+end
+
+local function limited_block(text, limit)
+  local full, full_html = M.display_block(text)
+  if full and #full <= limit then return full, full_html, false end
+  local low, high, best, best_html = 0, #text, "```\n\n```", "<pre><code></code></pre>"
+  while low <= high do
+    local middle = math.floor((low + high) / 2)
+    local prefix = utf8_prefix(text, middle)
+    local block, html = M.display_block(prefix)
+    if block and #block <= limit then
+      best, best_html = block, html
+      low = middle + 1
+    else
+      high = middle - 1
+    end
+  end
+  return best, best_html, true
+end
+
+local function cap_bytes(text, limit)
+  if #text <= limit then return text, false end
+  local prefix = utf8_prefix(text, limit - 3)
+  return prefix .. "...", true
+end
+
 function M.reply_verdict(body)
   if type(body) ~= "string" then return nil end
   body = body:match("^%s*(.-)%s*$") or ""
@@ -129,7 +164,7 @@ function M.owner_event_allowed(event, record, cfg, live_sync, room_id)
       or (event.type ~= "m.room.message" and event.type ~= "m.reaction")
       or type(event.event_id) ~= "string" or event.event_id == ""
       or type(event.sender) ~= "string" or (cfg.allowed_senders or {})[event.sender] ~= true
-      or room_id ~= cfg.home_room then return false end
+      or room_id ~= (record.room_id or cfg.home_room) then return false end
   local content = type(event.content) == "table" and event.content or {}
   local relation = type(content["m.relates_to"]) == "table" and content["m.relates_to"] or {}
   if content["m.new_content"] ~= nil or relation.rel_type == "m.replace" then
@@ -256,13 +291,21 @@ local function request(session, text, asker, ttl_s, done)
     max_open_for_asker = 5,
     rate_window_s = 600,
     on_id = function(id) requested_id = id end,
-    render = function(rec)
+    render = function(rec, display)
       local data = rec.data
       local id = tostring(rec.id)
       data.request_id = id
       data.display_fingerprint = id .. "/" .. tostring(data.bytes)
       local shown, escaped = M.display(data.registered_text)
       local block, block_html = M.display_block(data.registered_text)
+      local display_cut = false
+      if display and display.lounge then
+        if block then
+          block, block_html, display_cut = limited_block(data.registered_text, 1024)
+        elseif #shown > 1024 then
+          shown, display_cut = cap_bytes(shown, 1024)
+        end
+      end
       local expires = tonumber(rec.expires_at) or (os.time() * 1000)
       -- Session and asker names may hold line or direction characters: show them escaped like the text.
       local shown_session, shown_asker = (display_line(tostring(session))), (display_line(tostring(asker)))
@@ -275,12 +318,14 @@ local function request(session, text, asker, ttl_s, done)
         "Asked by " .. shown_asker,
         "React ✅ or reply yes/승인 " .. id .. " (id optional) to approve; ❌ or no/거부 "
           .. id .. " (id optional) to deny." }
-      if not block then return table.concat(head, "\n") .. "\n" .. shown end
+      if not block then return table.concat(head, "\n") .. "\n" .. shown, nil,
+        display_cut and { display_cut = true } or nil end
       local note = escaped and "\nControl and direction characters are shown escaped." or ""
       local html = {}
       for _, line in ipairs(head) do html[#html + 1] = html_escape(line) .. "<br>" end
       return table.concat(head, "\n") .. "\n" .. block .. note,
-        table.concat(html) .. block_html .. (escaped and "<br>" .. html_escape(note:gsub("^\n", "")) or "")
+        table.concat(html) .. block_html .. (escaped and "<br>" .. html_escape(note:gsub("^\n", "")) or ""),
+        display_cut and { display_cut = true } or nil
     end,
   }, function(id, why)
     if not id then failure = why end

@@ -605,7 +605,7 @@ approval.handler("join", {
     local data = type(rec.data) == "table" and rec.data or {}
     local room = sanitize_directory_text(data.room_id or "unknown room")
     approval_mail(rec, "Denied by the owner (request " .. tostring(rec.id) .. ", " .. room
-      .. "). Next: ask the owner in HOME why, or pick another room.")
+      .. "). Next: ask the owner in the request room why, or pick another room.")
     approval_thread(rec, "Denied by " .. tostring(rec.answered_by or "the owner") .. ".")
   end,
   expire = function(rec)
