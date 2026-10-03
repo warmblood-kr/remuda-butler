@@ -53,6 +53,9 @@ local NOTICE_QUIET_S = 2
 local NOTICE_MAX_WAIT_S = 10
 local NOTICE_RECOVERY_TIMEOUT_S = 20
 local NOTICE_RETRY_DELAYS = { 20, 60, 300, 900 }
+-- A pane that never passes the delivery policy while its composer reads empty is reported as a
+-- failed attempt after this long, so the retry schedule and the sender's failure notice apply.
+local NOTICE_STALL_S = 120
 -- os.time is whole seconds: quiet is 1-2 s, plus up to 1 s for the notice tick.
 local function notice_now()
   local clock = remuda._butler_notice_clock
@@ -112,7 +115,7 @@ function remuda._butler_prompt_is_empty(kind, screen)
     if rest:sub(1, 3) == "╰" or rest:sub(1, 3) == "└" or rest:sub(1, 3) == "─" then break end
     if rest:match("^%? for shortcuts")
         or (kind == "codex" and (rest:lower():find("context left", 1, true)
-        or rest:match("^[^%s]+%s+[^%s]+%s+·"))) then
+        or rest:match("^⚠%s+%d+%s+warning") or rest:match("^[^%s]+%s+[^%s]+%s+·"))) then
       break
     end
     if kind == "claude" and rest:sub(1, 3) == "│" then
@@ -765,6 +768,7 @@ local function deliver_notice(session)
     end
   end
   if remuda._butler_notify_policy(session) then
+    pending.stalled_at = nil
     if (tonumber(pending.delivery_attempts) or 0) > 0 then
       local screen, decision = recovery_screen(session)
       if not screen or decision ~= "EMPTY" then
@@ -791,7 +795,15 @@ local function deliver_notice(session)
     return false
   end
   local screen, decision = recovery_screen(session)
-  if not screen or decision == "EMPTY" then return false end
+  if not screen or decision == "EMPTY" then
+    pending.stalled_at = pending.stalled_at or notice_now()
+    if notice_now() - pending.stalled_at < NOTICE_STALL_S then return false end
+    pending.stalled_at = nil
+    local stalled = { phase = "probe", count = pending.count, started_at = notice_now(), message_ids = {} }
+    return notice_recovery_error(session, stalled, "the pane did not become ready for a notice within "
+      .. tostring(NOTICE_STALL_S) .. " seconds")
+  end
+  pending.stalled_at = nil
   local state = { phase = "probe", count = pending.count, checks = 0, started_at = notice_now() }
   state.message_ids = {}
   for _, id in ipairs(pending.message_order or {}) do state.message_ids[#state.message_ids + 1] = id end
@@ -1120,4 +1132,5 @@ remuda._butler_notice = {
   mail_notice_text = mail_notice_text,
   startup_action_safe = startup_action_safe,
   notice_recovery_error = notice_recovery_error,
+  deliver_notice = deliver_notice,
 }
