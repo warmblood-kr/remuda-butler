@@ -194,17 +194,31 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
     local function shell_quote(value)
       return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
     end
-    local function finish_task(delivered, reason)
-      if not same_delivery_record() or delivery.state ~= "waiting" then return end
+    -- Direction-override characters would make the copied command read
+    -- differently from what runs; the resend drops them.
+    local function without_bidi(value)
+      return (value:gsub("\226\128[\142\143\170-\174]", ""):gsub("\226\129[\166-\169]", "")
+        :gsub("\216\156", ""))
+    end
+    local function finish_task(delivered, reason, unverified)
+      if delivery.state ~= "waiting" then return end
+      local replaced = not same_delivery_record()
+      if replaced and (delivered or delivery.relaunching) then return end
       delivery.state = delivered and "delivered" or "failed"
-      bus.pending_tasks[actual] = nil
+      -- A newer launch under this alias owns the pending flag.
+      if bus.first_task_delivery[actual] == delivery then bus.pending_tasks[actual] = nil end
       if delivered then return end
       reason = tostring(reason or "task was not delivered")
+      if replaced then reason = "its launch was replaced (" .. reason .. ")" end
       _butler_session_trace("first_task_delivery", actual .. " marker=" .. tostring(delivery.marker)
         .. " state=failed reason=" .. reason)
-      local command = "remuda butler send " .. shell_quote(actual) .. " " .. shell_quote(task)
-      pcall(remuda._butler_send, "butler", parent or "butler", "The initial task for " .. actual
-        .. " was not delivered: " .. reason .. ". Resend it with `" .. command .. "`.")
+      local command = "remuda butler send " .. shell_quote(actual) .. " " .. shell_quote(without_bidi(task))
+      local head = unverified
+        and "Could not verify delivery of the initial task for " .. actual .. ": " .. reason
+          .. ". It may have been delivered; to send it again"
+        or "The initial task for " .. actual .. " was not delivered: " .. reason .. ". To resend it"
+      pcall(remuda._butler_send, "butler", parent or "butler",
+        head .. ", run this in a POSIX shell: " .. command)
     end
     local function recipient_alive()
       for _, row in ipairs(remuda.ls()) do
@@ -252,6 +266,8 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
         update_relaunch_record_ref = nil
         return false
       end
+      -- The relaunch re-queues this task; its new record owns the delivery.
+      delivery.relaunching = true
       remuda.cancel(poke)
       return true
     end
@@ -522,7 +538,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
         -- never appeared is reported only after 15 seconds.
         delivery.write_at = os.time()
         local task_line = task:gsub("^%s+", ""):match("^[^\n]*") or ""
-        local checks, seen_in_composer = 0, false
+        local checks, seen_in_composer, returns = 0, false, 0
         confirm = remuda.schedule({ every = 0.5, run = function()
           if not same_live_launch() then
             remuda.cancel(confirm)
@@ -558,7 +574,9 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
             return
           end
           -- Give the UI time to consume the first Return before retrying.
-          if decision == "NON-EMPTY" and task_in_composer and checks >= 4 and checks % 4 == 0 then
+          if decision == "NON-EMPTY" and task_in_composer and checks >= 4 and checks % 4 == 0
+              and returns < 3 then
+            returns = returns + 1
             pcall(remuda.key, actual, "RET")
           end
           if checks >= (remuda._butler_task_poke_deferrals or 600) then
@@ -594,8 +612,8 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       timeout = remuda._butler_task_poke_deferrals or 600,
       ready_timeout = remuda._butler_task_poke_attempts or 60,
       submit_timeout = remuda._butler_submit_timeout or 300,
-      on_done = function(delivered, reason)
-        finish_task(delivered, reason)
+      on_done = function(delivered, reason, unverified)
+        finish_task(delivered, reason, unverified)
       end,
     })
     end

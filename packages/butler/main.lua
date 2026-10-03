@@ -1141,11 +1141,12 @@ local function report_update_task_not_relaunched(record, reason)
   if delivery then
     if delivery.state ~= "waiting" then return end
     delivery.state = "failed"
+    bus.pending_tasks[record.name] = nil
   end
   pcall(remuda._butler_send, "butler", record.parent or "butler",
     "Task for " .. record.name .. " was not delivered because its Codex update ended without a safe relaunch ("
-      .. tostring(reason or "update aborted") .. "). Resend it with `remuda butler send "
-      .. record.name .. " TASK` when the pane is ready.")
+      .. tostring(reason or "update aborted") .. "). To resend it when the pane is ready, run this in a POSIX shell: remuda butler send "
+      .. record.name .. " TASK")
 end
 local function stale_session_exit(name, instance_id)
   if type(instance_id) ~= "string" or instance_id == "" then return false end
