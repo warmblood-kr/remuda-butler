@@ -636,6 +636,7 @@ local function load_state(path, rooms)
   -- Own events load for configured rooms only (all rooms when no config is
   -- given), in sorted room order, newest MAX_OWN_EVENTS_PER_ROOM raw entries per
   -- room. An event id is kept once: the first sorted room that lists it wins.
+  -- Only the newest 500 raw entries are read; invalid and duplicate ones among them are dropped without pulling in older entries.
   local own_rooms, seen_own = {}, {}
   for room_id in pairs(rooms or own_events) do own_rooms[#own_rooms + 1] = room_id end
   table.sort(own_rooms)
