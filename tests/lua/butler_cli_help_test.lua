@@ -18,7 +18,7 @@ local function start_butler()
     remuda._butler_reply = function(...) return record("reply", ...) end
     remuda._butler_forward = function(...) return record("forward", ...) end
     remuda._butler_topic_new = function(...) return record("topic-new", ...) end
-    remuda._butler_topic_delegate = function(...) return record("topic-delegate", ...) end
+    remuda.close = function(...) return record("close", ...) end
     return "actions stubbed"
   ]])
 end
@@ -29,7 +29,8 @@ T.test("message verbs treat --help as help without actions", function()
     local caller = { env = { REMUDA_BUTLER_AGENT_ID = "agent-test" } }
     local cases = {
       { "send", { "send" } },
-      { "topic", { "topic", "new", "work" } },
+      { "topic", { "topic", "new", "work" }, "topic new" },
+      { "close", { "close", "worker" } },
     }
     local lines = {}
     for _, case in ipairs(cases) do
@@ -38,10 +39,10 @@ T.test("message verbs treat --help as help without actions", function()
         for _, word in ipairs(case[2]) do argv[#argv + 1] = word end
         argv[#argv + 1] = flag
         remuda._butler_cli_action_calls = {}
-        local result = remuda._butler_command_run(case[1], argv, caller)
-        local text = type(result) == "string" and result or ""
+        local ok, result = pcall(remuda._butler_command_run, case[1], argv, caller)
+        local text = ok and type(result) == "string" and result or ""
         local help = text:find("Usage:", 1, true) and text:find("remuda butler " .. case[1], 1, true)
-        lines[#lines + 1] = case[1] .. ":" .. flag .. ":help=" .. tostring(not not help)
+        lines[#lines + 1] = (case[3] or case[1]) .. ":" .. flag .. ":help=" .. tostring(not not help)
           .. ",actions=" .. #remuda._butler_cli_action_calls
       end
     end
@@ -63,7 +64,7 @@ T.test("message verbs treat --help as help without actions", function()
       .. ",actions=" .. #remuda._butler_cli_action_calls
     return table.concat(lines, "\n")
   ]])
-  for _, verb in ipairs({ "send", "topic" }) do
+  for _, verb in ipairs({ "send", "topic new", "close" }) do
     for _, flag in ipairs({ "--help", "-h" }) do
       T.expect(out:find(verb .. ":" .. flag .. ":help=true,actions=0", 1, true),
         verb .. " " .. flag .. " was not help-only: " .. out)

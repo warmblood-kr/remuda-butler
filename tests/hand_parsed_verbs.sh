@@ -19,7 +19,6 @@ agents
 approve
 approve-text
 approvals
-close
 deny
 doctor
 forward
