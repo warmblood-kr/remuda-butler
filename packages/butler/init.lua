@@ -78,20 +78,20 @@ end
 
 local fallback
 if host._butler_start_fallback then host.cancel(host._butler_start_fallback) end
--- A core with `_exec_commands` honors `start` and may load this mod for its
--- commands alone: it owns the start, so only older cores get the fallback boot.
-if host._exec_commands == nil then
-  fallback = host.schedule({ name = "butler-start-fallback", every = 0.05, run = function()
-    host.cancel(fallback)
-    if host._butler_start_fallback == fallback then host._butler_start_fallback = nil end
-    if not booted then
-      io.stderr:write("butler: this remuda core ignores the lifecycle start hook"
-        .. " (warmblood-kr/remuda#104); booted by fallback -- run `remuda upgrade`\n")
-      boot()
-    end
-  end })
-  host._butler_start_fallback = fallback
-end
+-- A core that loads this mod for its commands alone calls `commands` during the
+-- load; that load boots nothing, the later `start` does. Every other load of
+-- this file (an exec, a core without the hook) boots by fallback when no `start` came.
+local commands_only = false
+fallback = host.schedule({ name = "butler-start-fallback", every = 0.05, run = function()
+  host.cancel(fallback)
+  if host._butler_start_fallback == fallback then host._butler_start_fallback = nil end
+  if not booted and not commands_only then
+    io.stderr:write("butler: this remuda core ignores the lifecycle start hook"
+      .. " (warmblood-kr/remuda#104); booted by fallback -- run `remuda upgrade`\n")
+    boot()
+  end
+end })
+host._butler_start_fallback = fallback
 
 return {
   api = "remuda-module-v1",
@@ -99,6 +99,7 @@ return {
   initialize = function() return { compaction_enabled = false, active_choosers = {}, next_chooser_id = 0 } end,
   -- Registers the CLI verbs only; `start` boots. Cores without the hook ignore this field.
   commands = function(state)
+    commands_only = true
     host._butler_state = state
     load_main()
   end,

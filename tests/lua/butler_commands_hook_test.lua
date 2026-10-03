@@ -7,10 +7,12 @@ local with_hook = ...
 local f = assert(io.open(repo .. "/packages/butler/init.lua"))
 local src = f:read("a"); f:close()
 local log = { emits = {}, schedules = {}, bootstrap = 0, reconcile = 0 }
-local host = setmetatable({}, { __index = remuda, __newindex = function(_, k, v) if k ~= "_exec_commands" then remuda[k] = v end end })
+local host = setmetatable({}, { __index = function(_, k) if k ~= "_exec_commands" then return remuda[k] end end,
+  __newindex = function(_, k, v) if k ~= "_exec_commands" then remuda[k] = v end end })
 local real_emit = remuda.emit
 rawset(host, "emit", function(name, ...) log.emits[#log.emits + 1] = name; return real_emit(name, ...) end)
-rawset(host, "schedule", function(spec) log.schedules[#log.schedules + 1] = spec.name; return 0 end)
+log.specs = {}
+rawset(host, "schedule", function(spec) log.schedules[#log.schedules + 1] = spec.name; log.specs[spec.name] = spec; return 0 end)
 rawset(host, "cancel", function() end)
 local exec_commands = with_hook and function() end or nil
 rawset(host, "_exec_commands", exec_commands)
@@ -42,7 +44,9 @@ T.test("commands registers the verbs and boots nothing", function()
     out[#out + 1] = "run=" .. type(remuda._butler_command_run)
     out[#out + 1] = "doctor=" .. tostring(usage.doctor)
     out[#out + 1] = "emits=" .. #log.emits
+    log.specs["butler-start-fallback"].run()
     out[#out + 1] = "fallback=" .. count(log.schedules, "butler-start-fallback")
+    out[#out + 1] = "emits_after_fallback=" .. #log.emits
     out[#out + 1] = "bootstrap=" .. log.bootstrap
     out[#out + 1] = "reconcile=" .. log.reconcile
     out[#out + 1] = "sessions=" .. #remuda.ls()
@@ -51,8 +55,8 @@ T.test("commands registers the verbs and boots nothing", function()
   T.expect(out:find("doctor=  remuda butler doctor", 1, true), "usage missing: " .. out, "ok - verbs carry usage")
   T.expect(out:find("emits=0;", 1, true) and out:find("bootstrap=0", 1, true), "commands booted: " .. out,
     "ok - no butler-start, no bootstrap")
-  T.expect(out:find("fallback=0", 1, true), "fallback boot scheduled on a hook core: " .. out,
-    "ok - no 0.05 s fallback on a core with the hook")
+  T.expect(out:find("emits_after_fallback=0", 1, true), "fallback booted a commands-only load: " .. out,
+    "ok - the fallback does not boot a commands-only load")
   T.expect(out:find("reconcile=0", 1, true), "reconcile ran before boot: " .. out, "ok - schedules inert before boot")
   T.expect(out:find("sessions=0", 1, true), "a session was created: " .. out, "ok - no Butler session")
 end)
@@ -87,4 +91,14 @@ T.test("a core without the hook keeps the fallback boot", function()
   ]==], false)
   T.expect(out:find("name=butler-start-fallback", 1, true), "fallback missing: " .. out, "ok - old core schedules the fallback")
   T.expect(out:find("emits=1", 1, true), "start did not boot: " .. out, "ok - start boots as before")
+end)
+
+T.test("a load that is not commands-only boots by fallback on a core with the hook", function()
+  setup()
+  local out = run([==[
+    remuda._butler_bootstrap = function() end
+    log.specs["butler-start-fallback"].run()
+    out[#out + 1] = "emits=" .. #log.emits
+  ]==], true)
+  T.expect(out:find("emits=1", 1, true), "an exec load did not boot: " .. out, "ok - an exec load boots by fallback on a hook core")
 end)
