@@ -205,7 +205,7 @@ local function run()
   ticker = remuda_api.every(0.05, T.tick)
 end
 
-local ok, err = xpcall(run, debug.traceback)
+local ok, err = xpcall(run, function(e) return tostring(e) end)
 if not ok then
   local success, stop_error = pcall(stop_child)
   save_result("FAIL", tostring(err) .. (success and "" or "\n" .. tostring(stop_error)))
