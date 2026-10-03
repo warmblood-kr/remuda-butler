@@ -405,7 +405,39 @@ command(40, "send", '  remuda butler send <to> "<message>" | <to> - | <to> --fil
     return remuda._butler_send(from, to, message_body(args, first, caller))
   end)
 end)
+local SEND_TO_LEADER_CLI_SPEC = {
+  name = "remuda butler",
+  verbs = {
+    ["send-to-leader"] = {
+      about = "Send a message to the Butler leader",
+      options = { { long = "file", value = "PATH", help = "Read message text from a file" } },
+      args = { { name = "MESSAGE", help = "Message words", multiple = true } },
+      next = "remuda butler send-to-leader --help",
+    },
+  },
+}
 command(50, "send-to-leader", "  remuda butler send-to-leader <message...> | - | --file PATH", function(args, caller)
+  local cli = remuda.cli
+  if type(cli) == "table" and type(cli.parse) == "function" then
+    local report = cli.parse(SEND_TO_LEADER_CLI_SPEC, args)
+    if report.kind == "help" then return report.text end
+    if not report.ok then
+      if type(remuda.fail) == "function" then return remuda.fail(report.text, report.code) end
+      error(report.text, 0)
+    end
+    local message = report.values.MESSAGE
+    if type(message) == "string" then message = { message } end
+    if report.values.file then message = { "--file", report.values.file } end
+    local from = current_agent(caller)
+    if not from then
+      local text = OPERATOR .. " has no leader; send-to-leader is for Butler agents"
+      if type(remuda.fail) == "function" then return remuda.fail(text, 1) end
+      error(text, 0)
+    end
+    return cli_result(function()
+      return remuda._butler_report(from, message_body(message, 1, caller))
+    end)
+  end
   if #args < 2 then return nil end
   local from = current_agent(caller)
   if not from then

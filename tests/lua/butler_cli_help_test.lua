@@ -27,6 +27,7 @@ T.test("message verbs treat --help as help without actions", function()
     local caller = { env = { REMUDA_BUTLER_AGENT_ID = "agent-test" } }
     local cases = {
       { "send", { "send" } },
+      { "send-to-leader", { "send-to-leader" } },
     }
     local lines = {}
     for _, case in ipairs(cases) do
@@ -60,7 +61,7 @@ T.test("message verbs treat --help as help without actions", function()
       .. ",actions=" .. #remuda._butler_cli_action_calls
     return table.concat(lines, "\n")
   ]])
-  for _, verb in ipairs({ "send" }) do
+  for _, verb in ipairs({ "send", "send-to-leader" }) do
     for _, flag in ipairs({ "--help", "-h" }) do
       T.expect(out:find(verb .. ":" .. flag .. ":help=true,actions=0", 1, true),
         verb .. " " .. flag .. " was not help-only: " .. out)

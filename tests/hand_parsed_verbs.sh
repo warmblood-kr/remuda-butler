@@ -47,7 +47,6 @@ matrix upload
 quota
 reply
 schedule
-send-to-leader
 sessions
 shell-lines
 status
