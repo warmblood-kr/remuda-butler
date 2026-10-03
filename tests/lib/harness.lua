@@ -184,8 +184,16 @@ local function finish(status, message)
 end
 
 local function begin_child()
+  local child_env = T.child_env
+  assert(child_env == nil or type(child_env) == "table", "T.child_env must be a table")
+  if child_env then
+    for key, value in pairs(child_env) do
+      assert(type(key) == "string" and type(value) == "string", "T.child_env must map strings to strings")
+    end
+  end
   local started = process.run {
     argv = { exe, "-s", child_server, "-e", "1" },
+    env = child_env,
     timeout = 30,
   }
   if started.timed_out or started.code ~= 0 then
