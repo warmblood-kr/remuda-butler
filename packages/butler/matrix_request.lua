@@ -285,6 +285,11 @@ local function read_config(path)
       or posts_per_hour % 1 ~= 0 then
     posts_per_hour = 30
   end
+  local approval_ttl_minutes = tonumber(opts.approval_ttl_minutes)
+  if not approval_ttl_minutes or approval_ttl_minutes ~= approval_ttl_minutes
+      or approval_ttl_minutes < 1 or approval_ttl_minutes > 1440 or approval_ttl_minutes % 1 ~= 0 then
+    approval_ttl_minutes = 30
+  end
   local b2b_max_turns = tonumber(opts.b2b_max_turns)
   if not b2b_max_turns or b2b_max_turns ~= b2b_max_turns
       or b2b_max_turns < 1 or b2b_max_turns == math.huge
@@ -354,6 +359,7 @@ local function read_config(path)
     untrusted_per_room_hour = untrusted_per_room_hour,
     posts_per_hour = posts_per_hour,
     b2b_max_turns = b2b_max_turns,
+    approval_ttl_minutes = approval_ttl_minutes,
     use_messages = mode == "1" or mode == "true" or mode == "messages" or mode == "fallback",
     timeout_ms = math.max(1, timeout), ca_file = ca_file, pin = pin,
   }

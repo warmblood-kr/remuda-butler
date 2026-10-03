@@ -436,7 +436,7 @@ capability.
 
 Approvals: when an agent runs `matrix join`, Butler resolves the room and
 posts one request to HOME instead of joining. The owner answers with a ✅ or
-❌ reaction, or a `yes`/`no` reply, to that exact message within 10 minutes.
+❌ reaction, or a `yes`/`no` reply, to that exact message within 30 minutes (`approval_ttl_minutes`, 1 to 1440).
 Only an allowlisted human sender in HOME counts. A bare `yes` does nothing.
 The owner can also answer from the terminal: `remuda butler approvals` lists
 the open requests, and `remuda butler approve ID` or `deny ID` answers one
@@ -541,6 +541,8 @@ file contains:
    `rooms=open` or `rooms=allowlist` selects invite behavior, with allowlist as
    the default; repeat `deny_room=ROOM_ID`, `deny_room=#alias:server`, or
    `deny_server=host` lines to refuse matching invites;
+   `approval_ttl_minutes=N` sets how long an owner approval request stays open
+   (default 30; a Claude guard approval keeps its fixed 5 minute window);
    `b2b_max_turns=N` sets the consecutive Butler-only thread turn limit
    (default 6); `posts_per_hour=N` caps posts that are not a reply to a person
    on the allowlist (default 30);

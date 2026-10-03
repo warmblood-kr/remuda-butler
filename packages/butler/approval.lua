@@ -96,6 +96,10 @@ function approval.handler(kind, callbacks)
   return true
 end
 
+-- Minutes an owner approval request stays open (configured by `approval_ttl_minutes`).
+approval.ttl_minutes = 30
+function approval.default_ttl_s() return approval.ttl_minutes * 60 end
+
 function approval.attach(state, persist_fn, post_fn)
   assert(type(state) == "table", "approval state is required")
   if type(state.approvals) ~= "table" or state.approvals == remuda.json.null then
@@ -331,6 +335,7 @@ function approval.request(request, done)
     expires_at = created_ms + math.max(1, tonumber(request.ttl_s) or 600) * 1000,
     event_id = nil, status = "open" }
   local ttl_minutes = math.max(1, math.ceil((tonumber(request.ttl_s) or 600) / 60))
+  local html
   local text = table.concat({ "Butler wants to " .. summary,
     "Asked by: " .. asker,
     "React ✅ or reply yes to THIS message within " .. tostring(ttl_minutes)
@@ -339,12 +344,12 @@ function approval.request(request, done)
     "or: remuda butler approve " .. id }, "\n")
   if type(request.on_id) == "function" then pcall(request.on_id, id) end
   if type(request.render) == "function" then
-    local rendered, value = pcall(request.render, rec)
+    local rendered, value, value_html = pcall(request.render, rec)
     if not rendered or type(value) ~= "string" then
       finish(nil, "Could not prepare approval message: " .. tostring(value))
       return nil
     end
-    text = value
+    text, html = value, type(value_html) == "string" and value_html or nil
   end
   pending = { id = id, asker = asker, kind = request.kind, created_ms = created_ms,
     callbacks = { finish } }
@@ -371,7 +376,7 @@ function approval.request(request, done)
       return complete(nil, "Could not save approval request: " .. tostring(save_error))
     end
     complete(id)
-  end)
+  end, { mention = true, html = html })
   if not ok then complete(nil, "Could not post to HOME: " .. tostring(handle)) end
   return handle
 end

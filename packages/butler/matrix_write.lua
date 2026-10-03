@@ -510,7 +510,7 @@ local function file_request(room, alias, display_name, is_public, members, asker
   local summary = approval_summary(room, alias, display_name, is_public, members)
   local label = sanitize_directory_text(alias or display_name or room)
   return approval.request({ kind = "join", key = room, summary = summary, asker = tostring(asker),
-    ttl_s = 600, data = { room_id = room, alias = alias, name = display_name } }, function(id, why)
+    ttl_s = approval.default_ttl_s(), data = { room_id = room, alias = alias, name = display_name } }, function(id, why)
       if not id then return callback({ error = why or "Could not file approval request" }) end
       callback({ approval_request_id = id, room_id = room, room_alias = alias,
         room_name = display_name, approval_label = label })
