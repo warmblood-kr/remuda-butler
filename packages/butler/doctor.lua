@@ -41,7 +41,7 @@ local function typed_line_switches()
   end
   local ok, config = pcall(matrix.read_config, paths.config_path)
   if not ok or type(config) ~= "table" then return false, false end
-  return config.typed_lines == true, config.shell_lines == true, config.approve_text == true
+  return config.typed_lines == true, config.shell_lines == true, config.approve_text == true, true
 end
 
 local function probe()
@@ -52,7 +52,7 @@ local function probe()
   }) do
     results[agent.key] = probe_command(agent.argv)
   end
-  results.typed_lines, results.shell_lines, results.approve_text = typed_line_switches()
+  results.typed_lines, results.shell_lines, results.approve_text, results.matrix_configured = typed_line_switches()
   return results
 end
 
@@ -95,7 +95,8 @@ local function render(probe_results, platform)
   if claude.timed_out or claude.probe_error or codex.timed_out or codex.probe_error then
     lines[#lines + 1] = "Next: retry remuda butler doctor"
   end
-  if claude.installed and claude.logged_in and codex.installed and codex.logged_in then
+  if claude.installed and claude.logged_in and codex.installed and codex.logged_in
+      and probe_results.matrix_configured ~= true then
     lines[#lines + 1] = "Next: remuda butler matrix setup"
   end
   return lines
