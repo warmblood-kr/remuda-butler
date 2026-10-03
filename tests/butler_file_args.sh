@@ -120,7 +120,8 @@ echo "== an agent caller: matrix upload outside is refused before anything else"
 for name in upload uplink; do
   [[ $(cat "$T/$name.rc") != 0 ]] || fail "$name was not refused: $(cat "$T/$name.out")"
   grep -qF "is outside this session's working directory $CWD" "$T/$name.out" || fail "$name: wrong refusal: $(cat "$T/$name.out")"
-  grep -qF "Next: copy the file into $CWD and pass that path" "$T/$name.out" || fail "$name: no Next: line"
+  grep -qF "Next: copy it into your working directory first: cp '" "$T/$name.out" || fail "$name: no Next: line"
+  grep -qF "' \"\$PWD/\" and pass that path" "$T/$name.out" || fail "$name: the Next: line does not say where to copy"
   grep -qF "pipe the text" "$T/$name.out" && fail "$name: the upload refusal offers a pipe"
 done
 

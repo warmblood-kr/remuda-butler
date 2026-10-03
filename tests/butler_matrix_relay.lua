@@ -5841,6 +5841,252 @@ rx_tests[#rx_tests + 1] = { "test_rx_reply_to_own_event_takes_post_slot", functi
   end) end)
 end }
 
+-- matrix upload --thread EVENT: the file lands in the thread, built as reply builds it.
+;(function()
+  local function upload_fixture(run)
+    local dir, path = rx_fixture()
+    rx_with_dir(dir, function()
+      local relay = rx_relay(path)
+      relay_module.instance = relay
+      local file = dir .. "/shot.png"
+      local handle = assert(io.open(file, "wb")); handle:write("PNGDATA"); handle:close()
+      local saved_check = remuda._butler_file_for_caller
+      remuda._butler_file_for_caller = function(p) return p end
+      local requests, context_room = {}, HOME
+      local ok, err = pcall(with_alias_http, path, function(spec)
+        requests[#requests + 1] = spec
+        if spec.method == "GET" then return { status = 200, body = '{"event":{"room_id":"' .. context_room .. '"}}' } end
+        if spec.method == "POST" then return { status = 200, body = '{"content_uri":"mxc://example.org/up1"}' } end
+        return { status = 200, body = '{"event_id":"$upload1"}' }
+      end, function()
+        run(relay, file, requests, function(room) context_room = room end)
+      end)
+      remuda._butler_file_for_caller = saved_check
+      relay:stop()
+      if not ok then error(err, 0) end
+    end)
+  end
+  local function puts(requests)
+    local found = {}
+    for _, spec in ipairs(requests) do if spec.method == "PUT" then found[#found + 1] = spec end end
+    return found
+  end
+
+  rx_tests[#rx_tests + 1] = { "test_rx_upload_thread_carries_the_reply_relation_and_records_the_own_event", function()
+    upload_fixture(function(relay, file, requests)
+      assert(relay:record_own_event(HOME, "$mine", "$root"))
+      local result = rx_cli({ "matrix", "--json", "--room", HOME, "upload", "--thread", "$mine", file })
+      assert(result.code == 0, "threaded upload: " .. result.stderr .. result.stdout)
+      local sent = puts(requests)
+      assert(#sent == 1, "one event is sent")
+      local content = assert(matrix.decode_json(sent[1].body))
+      assert(content.msgtype == "m.image" and content.body == "shot.png" and content.filename == nil,
+        "without a caption the body is the file name")
+      local rel = content["m.relates_to"]
+      assert(rel and rel.rel_type == "m.thread" and rel.event_id == "$root"
+        and rel["m.in_reply_to"].event_id == "$mine" and rel.is_falling_back == nil,
+        "the relation is the one reply builds: " .. sent[1].body)
+      assert(relay:route_for_event("$upload1") and relay:thread_root_for_event("$upload1") == "$root",
+        "the upload is an own event on its thread root")
+      local again = rx_cli({ "matrix", "--room", HOME, "reply", "$upload1", "thanks" })
+      assert(again.code == 0, "a reply to the upload works: " .. again.stderr .. again.stdout)
+    end)
+  end }
+
+  rx_tests[#rx_tests + 1] = { "test_rx_upload_caption_is_the_body_and_the_name_is_the_filename", function()
+    upload_fixture(function(relay, file, requests)
+      assert(relay:record_own_event(HOME, "$mine", "$mine"))
+      local result = rx_cli({ "matrix", "--room", HOME, "upload", "--thread", "$mine", "--caption", "the mockup", file })
+      assert(result.code == 0, "captioned upload: " .. result.stderr .. result.stdout)
+      local content = assert(matrix.decode_json(puts(requests)[1].body))
+      assert(content.body == "the mockup" and content.filename == "shot.png" and content.msgtype == "m.image",
+        "caption body, file name apart: " .. puts(requests)[1].body)
+    end)
+  end }
+
+  rx_tests[#rx_tests + 1] = { "test_rx_upload_without_thread_is_unchanged_and_records_a_root", function()
+    upload_fixture(function(relay, file, requests)
+      local result = rx_cli({ "matrix", "--room", HOME, "upload", file })
+      assert(result.code == 0, "plain upload: " .. result.stderr .. result.stdout)
+      local content = assert(matrix.decode_json(puts(requests)[1].body))
+      assert(content["m.relates_to"] == nil and content.body == "shot.png" and content.filename == nil,
+        "no relation and no caption fields")
+      assert(relay:thread_root_for_event("$upload1") == "$upload1" and relay:can_reply_to("$upload1"),
+        "a plain upload is its own thread root")
+    end)
+  end }
+
+  rx_tests[#rx_tests + 1] = { "test_rx_upload_thread_refuses_an_unverifiable_event_and_another_room", function()
+    upload_fixture(function(relay, file, requests, set_context_room)
+      local result = rx_cli({ "matrix", "--room", HOME, "upload", "--thread", "$stranger", file })
+      assert(result.code ~= 0 and result.stderr:find("Reply not sent: event $stranger was not delivered to this Butler as mail", 1, true)
+        and result.stderr:find("Next: remuda butler inbox (you can only reply to events listed there)", 1, true),
+        "the reply refusal, got: " .. result.stderr .. result.stdout)
+      assert(#puts(requests) == 0 and #requests == 0, "nothing is read or sent")
+      assert(relay:record_own_event(HOME, "$mine", "$mine"))
+      set_context_room(NEW)
+      result = rx_cli({ "matrix", "--room", HOME, "upload", "--thread", "$mine", file })
+      assert(result.code ~= 0 and (result.stderr .. result.stdout):find("outside the configured Matrix room", 1, true)
+        and #puts(requests) == 0, "another room is refused: " .. result.stderr .. result.stdout)
+    end)
+  end }
+
+  rx_tests[#rx_tests + 1] = { "test_rx_upload_cli_parse_errors", function()
+    local function failed(args, text)
+      local result = capture_matrix_cli(args)
+      assert(result and result.code ~= 0 and result.stderr:find(text, 1, true),
+        table.concat(args, " ") .. " should fail with " .. text .. ", got: " .. tostring(result and result.stderr))
+    end
+    failed({ "matrix", "upload", "--thread" }, "--thread requires a value")
+    failed({ "matrix", "upload", "--thread", "$e", "--caption" }, "--caption requires a value")
+    local function usage_shown(args)
+      local result = capture_matrix_cli(args)
+      assert(result and result.code == 0 and result.stdout:find("upload [--thread EVENT_ID] [--caption TEXT] PATH", 1, true),
+        table.concat(args, " ") .. " should print the usage, got: " .. tostring(result and result.stdout))
+    end
+    usage_shown({ "matrix", "upload", "--thread", "$e" })
+    usage_shown({ "matrix", "upload", "--bogus", "/x" })
+    usage_shown({ "matrix", "upload", "--caption", "c" })
+    failed({ "matrix", "send", "--thread", "$e", "hi" }, "unknown option --thread")
+  end }
+end)()
+
+-- Scripted failures of the upload and the send, and `reply MAIL --attach` through the real
+-- mail, relay and commands.lua with the fake homeserver.
+;(function()
+  local function with_commands(run)
+    local saved = { remuda._butler_commands_config, remuda._butler_contribute, remuda.extension_command,
+      remuda._butler_reply_target, remuda._butler_file_for_caller, remuda.butler.typed_lines_cli,
+      remuda.butler.approve_text, remuda.butler.schedule_cli, remuda._butler_command_run }
+    remuda._butler_commands_config = { current_agent = function() return nil end, OPERATOR = "operator",
+      contributions = function() return {} end, registry_list = function() return {} end,
+      statusline = function() return "" end, resolve = function(name) return name end,
+      mail = remuda._butler_mail }
+    remuda._butler_contribute, remuda.extension_command = function() end, function() end
+    remuda._butler_reply_target = function(_, id)
+      local room, event = remuda._butler_mail.matrix_target({ id = "operator", alias = "operator" }, id, true)
+      if not room then error(event, 0) end
+      return room, event
+    end
+    remuda._butler_file_for_caller = function(p) return p end
+    for _, name in ipairs({ "typed_lines_cli", "approve_text", "schedule_cli" }) do
+      remuda.butler[name] = { cli = function() end }
+    end
+    dofile("packages/butler/commands.lua")
+    local ok, err = pcall(run)
+    remuda._butler_commands_config, remuda._butler_contribute, remuda.extension_command,
+      remuda._butler_reply_target, remuda._butler_file_for_caller, remuda.butler.typed_lines_cli,
+      remuda.butler.approve_text, remuda.butler.schedule_cli, remuda._butler_command_run = table.unpack(saved, 1, 9)
+    if not ok then error(err, 0) end
+  end
+  local function run_reply(args)
+    local old_pending, old_fail, captured = remuda.pending, remuda.fail, nil
+    remuda.pending = function()
+      return { resolve = function(_, code, stdout, stderr) captured = { code = code, stdout = stdout, stderr = stderr } end }
+    end
+    remuda.fail = function(message, code) return { code = code or 1, stdout = "", stderr = tostring(message) } end
+    local ok, returned = pcall(remuda._butler_command_run, "reply", args, nil)
+    for _ = 1, 8 do if captured then break end tick_timers(1) end
+    remuda.pending, remuda.fail = old_pending, old_fail
+    if not ok then error(returned, 0) end
+    return captured or returned
+  end
+  local function attach_fixture(handler, run)
+    local dir, path = rx_fixture()
+    rx_with_dir(dir, function()
+      local file = dir .. "/shot.png"
+      local handle = assert(io.open(file, "wb")); handle:write("PNGDATA"); handle:close()
+      rx_production(path, function(client)
+        rx_sync(client, HOME, { rx_msg("$q", OWNER, "question") })
+        rx_sync(client, HOME, { rx_msg("$t1", OWNER, "in thread", rx_thread("$q")) })
+        local relay = relay_module.instance
+        local mail_id = assert(relay:route_for_event("$q"), "the question is a mail").source_mail_id
+        local requests = {}
+        with_alias_http(path, function(spec)
+          requests[#requests + 1] = spec
+          return handler(spec)
+        end, function()
+          with_commands(function() run(relay, file, mail_id, requests) end)
+        end)
+      end)
+    end)
+  end
+  local function ok_handler(spec)
+    if spec.method == "GET" then return { status = 200, body = '{"event":{"room_id":"' .. HOME .. '"}}' } end
+    if spec.method == "POST" then return { status = 200, body = '{"content_uri":"mxc://example.org/up1"}' } end
+    return { status = 200, body = '{"event_id":"$upload1"}' }
+  end
+  local function puts(requests)
+    local found = {}
+    for _, spec in ipairs(requests) do if spec.method == "PUT" then found[#found + 1] = spec end end
+    return found
+  end
+
+  rx_tests[#rx_tests + 1] = { "test_rx_reply_attach_posts_the_file_into_the_mail_thread_with_a_caption", function()
+    attach_fixture(ok_handler, function(relay, file, mail_id, requests)
+      local result = run_reply({ "reply", mail_id, "--attach", file, "the", "mockup" })
+      assert(result.code == 0, "reply --attach: " .. tostring(result.stderr) .. tostring(result.stdout))
+      assert(result.stdout:find("Uploaded as mxc://example.org/up1 ($upload1)", 1, true), "output: " .. result.stdout)
+      local sent = puts(requests)
+      assert(#sent == 1, "one event is sent")
+      local content = assert(matrix.decode_json(sent[1].body))
+      local rel = content["m.relates_to"]
+      assert(content.body == "the mockup" and content.filename == "shot.png"
+        and rel.rel_type == "m.thread" and rel.event_id == "$q" and rel["m.in_reply_to"].event_id == "$q",
+        "the mail's thread, caption as body: " .. sent[1].body)
+      assert(relay:thread_root_for_event("$upload1") == "$q", "recorded as an own event on the thread")
+    end)
+  end }
+
+  rx_tests[#rx_tests + 1] = { "test_rx_reply_attach_answers_inside_the_thread_of_a_thread_mail", function()
+    attach_fixture(ok_handler, function(relay, file, _, requests)
+      local thread_mail = assert(relay:route_for_event("$t1"), "the thread reply is a mail").source_mail_id
+      local result = run_reply({ "reply", thread_mail, "--attach", file })
+      assert(result.code == 0, "reply --attach: " .. tostring(result.stderr))
+      local content = assert(matrix.decode_json(puts(requests)[1].body))
+      local rel = content["m.relates_to"]
+      assert(content.body == "shot.png" and rel.event_id == "$q" and rel["m.in_reply_to"].event_id == "$t1",
+        "root is the thread root, target is the mail's event")
+    end)
+  end }
+
+  rx_tests[#rx_tests + 1] = { "test_rx_reply_attach_refuses_a_mail_that_is_not_matrix_and_bad_forms", function()
+    attach_fixture(ok_handler, function(_, file, _, requests)
+      local plain = assert(remuda._butler_mail.queue({ id = "a", alias = "a" }, { id = "butler", alias = "butler" },
+        "hi", "subject")).id
+      local result = run_reply({ "reply", plain, "--attach", file })
+      assert(result.code == 1 and result.stderr:find("is not a Matrix message, so a file cannot be attached", 1, true)
+        and result.stderr:find("Next: remuda butler reply " .. plain .. " TEXT", 1, true),
+        "non-Matrix mail: " .. tostring(result.stderr))
+      assert(run_reply({ "reply", plain, "--attach" }) == nil, "--attach without a path gets the usage")
+      assert(#requests == 0, "nothing is sent")
+    end)
+  end }
+
+  rx_tests[#rx_tests + 1] = { "test_rx_upload_scripted_failures_register_nothing", function()
+    local function failing(handler, expected)
+      attach_fixture(handler, function(relay, file, mail_id)
+        local result = run_reply({ "reply", mail_id, "--attach", file })
+        assert(result.code ~= 0 and (result.stderr .. result.stdout):find(expected, 1, true),
+          "expected " .. expected .. ", got: " .. tostring(result.stderr) .. tostring(result.stdout))
+        assert(not relay:can_reply_to("$upload1"), "a failed upload records no own event")
+      end)
+    end
+    failing(function(spec)
+      if spec.method == "POST" then return { status = 500, body = "{}" } end
+      return ok_handler(spec)
+    end, "500")
+    failing(function(spec)
+      if spec.method == "PUT" then return { status = 500, body = "{}" } end
+      return ok_handler(spec)
+    end, "500")
+    failing(function(spec)
+      if spec.method == "POST" then return { status = 200, body = "{}" } end
+      return ok_handler(spec)
+    end, "omitted content_uri")
+  end }
+end)()
+
 -- The relations page does not contain the delivered event: 21 newer thread
 -- messages arrived before the fetch. They were sent AFTER the delivered one, so
 -- none of them is an earlier message: the block is the root line and the

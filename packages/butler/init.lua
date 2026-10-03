@@ -316,7 +316,8 @@ the normal way for a member to communicate.
         run = function(_, args, caller) return host._butler_command_run("send-to-leader", args, caller) end },
       { id = "inbox", order = 60, verb = "inbox", usage = "  remuda butler inbox [name]",
         run = function(_, args, caller) return host._butler_command_run("inbox", args, caller) end },
-      { id = "reply", order = 70, verb = "reply", usage = "  remuda butler reply <message-id> <message...> | - | --file PATH",
+      { id = "reply", order = 70, verb = "reply", usage = "  remuda butler reply <message-id> <message...> | - | --file PATH\n"
+          .. "  remuda butler reply <message-id> --attach PATH [caption...]",
         run = function(_, args, caller) return host._butler_command_run("reply", args, caller) end },
       { id = "forward", order = 80, verb = "forward", usage = "  remuda butler forward <message-id> <member> [note...]",
         run = function(_, args, caller) return host._butler_command_run("forward", args, caller) end },
@@ -338,7 +339,7 @@ the normal way for a member to communicate.
   remuda butler matrix [--json] [--room ROOM] send TEXT | - | --file PATH
   remuda butler matrix [--json] [--room ROOM] reply EVENT_ID TEXT | - | --file PATH
   remuda butler matrix [--json] [--room ROOM] react EVENT_ID KEY
-  remuda butler matrix [--json] [--room ROOM] upload PATH
+  remuda butler matrix [--json] [--room ROOM] upload [--thread EVENT_ID] [--caption TEXT] PATH
   remuda butler matrix [--json] [--room ROOM] redact EVENT_ID [--reason TEXT]
   remuda butler matrix [--json] join ROOM (operator)
   remuda butler matrix [--json] leave ROOM (operator)]],

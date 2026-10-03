@@ -192,7 +192,7 @@ remuda butler matrix [--json] [-o PATH] download MXC
 remuda butler matrix [--json] [--room ROOM] send TEXT | - | --file PATH
 remuda butler matrix [--json] [--room ROOM] reply EVENT_ID TEXT | - | --file PATH
 remuda butler matrix [--json] [--room ROOM] react EVENT_ID KEY
-remuda butler matrix [--json] [--room ROOM] upload PATH
+remuda butler matrix [--json] [--room ROOM] upload [--thread EVENT_ID] [--caption TEXT] PATH
 remuda butler matrix [--json] [--room ROOM] redact EVENT_ID [--reason TEXT]
 remuda butler matrix [--json] join ROOM
 remuda butler matrix [--json] leave ROOM
@@ -205,6 +205,18 @@ caller's working directory, as for `remuda butler send`. A text that starts
 with `--` and is not `--file` is refused with a `Next:` line; put `--` before
 the text to send it literally (`send -- --text`). The output names the room
 posted to.
+
+`upload` posts a file (up to 20 MB) to the room, as an `m.image` or `m.file` event.
+With `--thread EVENT_ID` the file goes into that event's thread, built like a
+`reply`: the event must be one the Butler received as mail or sent itself, and in
+the room addressed, or it is refused with the same `Next:` line as `reply`. With
+`--caption TEXT` the event `body` is the caption and `filename` the file name;
+without it `body` is the file name. The upload is recorded as a Butler event, so
+a reply to it works. `remuda butler reply MESSAGE-ID --attach PATH [CAPTION...]`
+posts the file into the Matrix thread of that mail (one file per command; a mail
+that did not come from Matrix is refused; `--file` still means "read the text
+from a file"). An agent session may upload only a file inside its working
+directory; the refusal says to copy the file there first and pass the copy.
 
 `download` writes the media to `-o PATH`. PATH must be an absolute path, from a
 terminal too: a relative one is refused ("is not an absolute path"), because

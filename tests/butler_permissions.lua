@@ -350,7 +350,11 @@ for name, path in pairs({
 end
 local _, upload_why = file_for("/etc/passwd", SESSION, "", false)
 eq("upload refusal names only the copy",
-  upload_why, "refused: /etc/passwd is outside this session's working directory /w/m1\nNext: copy the file into /w/m1 and pass that path")
+  upload_why, "refused: /etc/passwd is outside this session's working directory /w/m1\nNext: copy it into your working directory first: cp '/etc/passwd' \"$PWD/\" and pass that path")
+real["/etc/it's"] = "/etc/it's"
+local _, quoted_why = file_for("/etc/it's", SESSION, "", false)
+assert(quoted_why:find("cp '/etc/it'\\''s' \"$PWD/\" and pass that path", 1, true) and not quoted_why:find("`", 1, true),
+  "the copy line shell-quotes the source: " .. tostring(quoted_why))
 local UNKNOWN = "refused: --file /w/m1/in.txt: cannot identify the calling session's working directory"
   .. "\nNext: run this from a Butler session, or from your own terminal"
 for name, caller in pairs({
