@@ -1,3 +1,13 @@
+  # The controller stops itself and its child; this covers a controller that died
+  # first. Only the two generated names (h<pid>, h<pid>c) are ever stopped.
+  local name
+  for name in "$H_CHILD_SERVER" "$H_SERVER"; do
+    if [[ "$name" =~ ^h[0-9]+c?$ ]] && [[ "$name" == "h$$" || "$name" == "h$$c" ]]; then
+      if "$REMUDA_BIN" -s "$name" stop -f >/dev/null 2>&1; then echo "harness: stopped daemon $name"; fi
+    else
+      echo "harness: refusing to stop daemon named '$name'" >&2
+    fi
+  done
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -76,9 +86,18 @@ harness_cleanup() {
     echo "refusing cleanup outside the harness runtime" >&2
     return 1
   }
-  # The controller stops itself and its child; this covers a controller that died first.
-  "$REMUDA_BIN" -s "$H_CHILD_SERVER" stop -f >/dev/null 2>&1 || true
-  "$REMUDA_BIN" -s "$H_SERVER" stop -f >/dev/null 2>&1 || true
+  # The controller stops itself and its child; this covers a controller that died
+  # first. Only the two names generated from this shell's pid are ever stopped.
+  local name
+  for name in "$H_CHILD_SERVER" "$H_SERVER"; do
+    if [[ "$name" == "h$$" || "$name" == "h$$c" ]]; then
+      if "$REMUDA_BIN" -s "$name" stop -f >/dev/null 2>&1; then
+        echo "harness: stopped daemon $name"
+      fi
+    else
+      echo "harness: refusing to stop daemon named '$name'" >&2
+    fi
+  done
   rm -rf "$H_SCRATCH"
   if [[ -e "$H_SCRATCH" ]]; then
     echo "harness: killed pids: 0; removed dirs: 0; left: 1" >&2
