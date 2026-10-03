@@ -6913,6 +6913,7 @@ local function home_posts(env, fragment)
       local body = args.text or (type(content) == "table" and content.body) or ""
       if not fragment or body:find(fragment, 1, true) then
         posts[#posts + 1] = { event_id = "$sent" .. index, body = body,
+          content = type(content) == "table" and content or {},
           relates_to = type(content) == "table" and content["m.relates_to"] or nil }
       end
     end
@@ -7025,7 +7026,7 @@ local function test_agent_join_files_request_and_does_not_join()
       "a bare room ID must not be repeated in the approval summary: " .. tostring(rec and rec.summary))
     assert(post.body:find("Butler wants to join", 1, true) and post.body:find(NEW, 1, true)
       and post.body:find("Asked by: ", 1, true) and post.body:find(ASKER, 1, true)
-      and post.body:find("within 10 minutes", 1, true)
+      and post.body:find("within 30 minutes", 1, true)
       and post.body:find("or: remuda butler approve " .. id, 1, true),
       "the HOME post must show the target id, the asker, the window and the terminal fallback: " .. post.body)
     assert(result.code == 0 and result.stdout:find("Asked the owner to approve joining", 1, true)
@@ -7241,7 +7242,7 @@ local function test_approve_deny_refuse_agents_only()
       local listed = tostring(cli({ "approvals" }, nil))
       local agent_listed = tostring(cli({ "approvals" }, ASKER))
       assert(listed:find(id, 1, true) and listed:find(NEW, 1, true)
-        and listed:find("EXPIRES-IN", 1, true) and listed:find("10m", 1, true)
+        and listed:find("EXPIRES-IN", 1, true) and listed:find("30m", 1, true)
         and listed:find("Next: remuda butler approve ID, or remuda butler deny ID", 1, true),
         "approvals must list the open request with a Next line: " .. listed)
       assert(agent_listed:find("Next: wait for mail; remuda butler inbox", 1, true),
@@ -7331,7 +7332,7 @@ local function test_hostile_room_name_sanitised_in_home_post()
       "the HOME post must strip ESC and bidi controls: " .. body)
     assert(not body:find("\nReact yes", 1, true) and not body:find(string.rep("A", 129), 1, true),
       "the room name must be one line and capped at 128 chars")
-    assert(body:match("^[^\n]*" .. NEW:gsub("%p", "%%%0")), "the room id must appear next to the name on the first line")
+    assert(body:match("^[^\n]*\n[^\n]*" .. NEW:gsub("%p", "%%%0")), "the room id must appear next to the name on the line after the mention")
   end)
 end
 
@@ -7377,6 +7378,51 @@ local function with_approved_text_stubs(run)
   if not ok then error(err, 0) end
 end
 
+remuda._t359 = remuda._t359 or {}
+function remuda._t359.test_approval_post_mentions_owner_with_code_block_and_30_minute_expiry()
+  with_approved_text_stubs(function()
+    approval_env(nil, function(env)
+      local bytes = "echo <hi> & `date`\nsecond line"
+      local id = assert(remuda.butler.approve_text.request("butler", bytes, ASKER))
+      env.client:pump()
+      local rec = env.relay:state().approvals[id]
+      assert(rec.expires_at - rec.created_ms == 30 * 60 * 1000, "the default expiry is 30 minutes")
+      local post = home_posts(env, "Approve prepared text for")[1]
+      local mentions = post.content["m.mentions"]
+      assert(mentions and mentions.user_ids and mentions.user_ids[1] == OWNER and #mentions.user_ids == 1,
+        "the request mentions the owner in m.mentions")
+      assert(post.body:sub(1, #OWNER) == OWNER, "the body starts with the owner's MXID")
+      assert(post.body:find("Butler will type the text below into butler once, only if you approve.", 1, true),
+        "one plain line says what approval does")
+      assert(post.body:find("```\necho <hi> & `date`\nsecond line\n```", 1, true), "the text is a code block")
+      local html = post.content.formatted_body or ""
+      assert(post.content.format == "org.matrix.custom.html"
+        and html:find("<pre><code>echo &lt;hi&gt; &amp; `date`\nsecond line</code></pre>", 1, true),
+        "the HTML code block escapes the text: " .. html)
+      assert(html:find("(about 30 min)", 1, true) and post.body:find("(about 30 min)", 1, true),
+        "the post states the deadline")
+      room_events(env, { text_event("$owner-approve", OWNER, "승인 " .. id, rec.event_id) })
+      room_events(env, { reaction("$late", OWNER, rec.event_id, CHECK) })
+      local reply = home_posts(env, "Already answered.")[1]
+      assert(reply and not reply.content["m.mentions"], "thread replies do not mention the owner again")
+    end, "approve_text=true\n")
+  end)
+end
+
+function remuda._t359.test_approval_expiry_is_configurable_and_a_fence_in_the_text_falls_back_to_quotes()
+  with_approved_text_stubs(function()
+    approval_env(nil, function(env)
+      local id = assert(remuda.butler.approve_text.request("butler", "a\n```\nb", ASKER))
+      env.client:pump()
+      local rec = env.relay:state().approvals[id]
+      assert(rec.expires_at - rec.created_ms == 5 * 60 * 1000, "approval_ttl_minutes=5 sets a 5 minute expiry")
+      local post = home_posts(env, "Approve prepared text for")[1]
+      assert(post.body:find("> a\n> ```\n> b", 1, true), "text holding a fence keeps the exact quoted form")
+      assert(not post.content.formatted_body, "no HTML is built for the quoted form")
+    end, "approve_text=true\napproval_ttl_minutes=5\n")
+  end)
+end
+
 local function test_approved_text_live_owner_reply_types_exact_bytes_once()
   with_approved_text_stubs(function(typed, keys, traces)
     approval_env(nil, function(env)
@@ -7389,8 +7435,8 @@ local function test_approved_text_live_owner_reply_types_exact_bytes_once()
         "registration must persist exact bytes with its posted event")
       local post = home_posts(env, "Approve prepared text for")[1]
       assert(post and post.body:find(id .. "/" .. #bytes, 1, true)
-        and post.body:find("> line one\n> line two\n> ", 1, true),
-        "the HOME post shows the request fingerprint and quoted multiline text")
+        and post.body:find("```\nline one\nline two\n\n```", 1, true),
+        "the HOME post shows the request fingerprint and the multiline text in a code block")
       room_events(env, { text_event("$owner-approve", OWNER, "승인 " .. id, event) })
       assert(#typed == 1 and typed[1].session == "butler" and typed[1].bytes == bytes,
         "an owner live reply types the stored bytes exactly")
@@ -7745,6 +7791,8 @@ for _, case in ipairs({
   { "test_cleared_identity_is_not_refused", test_cleared_identity_is_not_refused },
   { "test_hostile_room_name_sanitised_in_home_post", test_hostile_room_name_sanitised_in_home_post },
   { "test_restart_does_not_reanswer_answered_request", test_restart_does_not_reanswer_answered_request },
+  { "test_approval_post_mentions_owner_with_code_block_and_30_minute_expiry", remuda._t359.test_approval_post_mentions_owner_with_code_block_and_30_minute_expiry },
+  { "test_approval_expiry_is_configurable_and_a_fence_in_the_text_falls_back_to_quotes", remuda._t359.test_approval_expiry_is_configurable_and_a_fence_in_the_text_falls_back_to_quotes },
   { "test_approved_text_live_owner_reply_types_exact_bytes_once", test_approved_text_live_owner_reply_types_exact_bytes_once },
   { "test_approved_text_unknown_explicit_id_never_uses_reply_target", test_approved_text_unknown_explicit_id_never_uses_reply_target },
   { "test_approved_text_cancel_and_failed_delivery_are_one_shot", test_approved_text_cancel_and_failed_delivery_are_one_shot },

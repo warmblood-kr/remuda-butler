@@ -805,9 +805,25 @@ function relay.new(options)
 
   local approval = remuda.butler and remuda.butler.approval
   if approval and type(approval.attach) == "function" then
-    approval.attach(state, persist, function(text, relation, callback)
-      local body, encode_error = encode({ msgtype = "m.notice", body = text,
-        ["m.relates_to"] = relation })
+    approval.ttl_minutes = cfg.approval_ttl_minutes or 30
+    -- Owners are the allowlisted humans; a mention makes the client notify them.
+    local owners = {}
+    for mxid in pairs(cfg.allowed_senders or {}) do
+      if not (cfg.butler_senders or {})[mxid] and mxid ~= cfg.self_mxid then owners[#owners + 1] = mxid end
+    end
+    table.sort(owners)
+    approval.attach(state, persist, function(text, relation, callback, extras)
+      extras = extras or {}
+      local content = { msgtype = "m.notice", body = text, ["m.relates_to"] = relation }
+      if extras.mention and #owners > 0 then
+        content.body = table.concat(owners, " ") .. "\n" .. text
+        content["m.mentions"] = { user_ids = owners }
+      end
+      if extras.html then
+        local lead = content["m.mentions"] and (table.concat(owners, " "):gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;") .. "<br>") or ""
+        content.format, content.formatted_body = "org.matrix.custom.html", lead .. extras.html
+      end
+      local body, encode_error = encode(content)
       if not body then
         callback({ error = encode_error })
         return { cancel = function() end }

@@ -1,7 +1,7 @@
 -- Unit tests for prepared owner-approved text. Run from the repository root:
 --   luajit tests/butler_approve_text.lua
 local request_spec, request_handler
-remuda = { butler = { approval = {
+remuda = { butler = { approval = { default_ttl_s = function() return 1800 end,
   handler = function(kind, callbacks) assert(kind == "approve_text"); request_handler = callbacks end,
   request = function(spec) request_spec = spec; spec.on_id("ABCD"); return "request-handle" end,
   reply = function() return true end,
@@ -91,9 +91,9 @@ assert(request_spec.rate_limit_per_window == 10 and request_spec.rate_window_s =
   "registration rate is bounded per agent")
 local posted = request_spec.render({ id = "ABCD", data = request_spec.data,
   expires_at = os.time() * 1000 + 60000 })
-assert(posted:find("ABCD/" .. #multiline, 1, true) and posted:find("> first\n> second\n> ", 1, true)
+assert(posted:find("ABCD/" .. #multiline, 1, true) and posted:find("```\nfirst\nsecond\n\n```", 1, true)
   and posted:find("Expires ", 1, true) and posted:find("React ✅", 1, true),
-  "posted request identifies its fingerprint, expiry, answer methods, and quoted lines")
+  "posted request identifies its fingerprint, expiry, answer methods, and code block")
 -- A session or asker name with a line separator or direction override cannot forge a line or reorder the header.
 do
   local saved_ls, saved_spec = remuda.ls, request_spec

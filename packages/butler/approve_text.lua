@@ -6,7 +6,6 @@ local M = butler.approve_text or {}
 butler.approve_text = M
 
 local MAX_BYTES = 8 * 1024
-local DEFAULT_TTL = 60 * 60
 local MAX_TTL = 24 * 60 * 60
 local request_counter = 0
 
@@ -94,6 +93,23 @@ function M.display(text)
   end
   local note = escaped and "\nControl and direction characters are shown escaped." or ""
   return table.concat(lines, "\n") .. note, escaped
+end
+
+local function html_escape(text)
+  return (text:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"))
+end
+
+-- The text as a code block with control and direction characters escaped, plain and HTML.
+-- nil when a line would end the fence early; the caller then shows the quoted form.
+function M.display_block(text)
+  local lines = {}
+  for line in (text .. "\n"):gmatch("(.-)\n") do
+    local shown = display_line(line)
+    if shown:find("```", 1, true) then return nil end
+    lines[#lines + 1] = shown
+  end
+  local body = table.concat(lines, "\n")
+  return "```\n" .. body .. "\n```", "<pre><code>" .. html_escape(body) .. "</code></pre>"
 end
 
 function M.reply_verdict(body)
@@ -233,7 +249,7 @@ local function request(session, text, asker, ttl_s, done)
   local request_data = { registered_text = prepared.registered_text, session = session,
     session_id = session_id, session_marker = session_marker, session_binding_version = 2,
     bytes = prepared.bytes }
-  local bounded_ttl = math.max(1, math.min(MAX_TTL, tonumber(ttl_s) or DEFAULT_TTL))
+  local bounded_ttl = math.max(1, math.min(MAX_TTL, tonumber(ttl_s) or approval.default_ttl_s()))
   local result = approval.request({ kind = "approve_text", key = key,
     asker = asker, summary = "type " .. tostring(prepared.bytes) .. " prepared bytes in " .. session,
     ttl_s = bounded_ttl, data = request_data, rate_limit_per_window = 10,
@@ -245,18 +261,26 @@ local function request(session, text, asker, ttl_s, done)
       local id = tostring(rec.id)
       data.request_id = id
       data.display_fingerprint = id .. "/" .. tostring(data.bytes)
-      local shown = M.display(data.registered_text)
+      local shown, escaped = M.display(data.registered_text)
+      local block, block_html = M.display_block(data.registered_text)
       local expires = tonumber(rec.expires_at) or (os.time() * 1000)
       -- Session and asker names may hold line or direction characters: show them escaped like the text.
       local shown_session, shown_asker = (display_line(tostring(session))), (display_line(tostring(asker)))
-      return table.concat({ "Approve prepared text for " .. shown_session,
+      local head = { "Approve prepared text for " .. shown_session,
+        "Butler will type the text below into " .. shown_session .. " once, only if you approve.",
         "Request " .. id .. " · " .. tostring(data.bytes) .. " bytes",
         "Fingerprint " .. data.display_fingerprint,
-        "Expires " .. os.date("!%Y-%m-%dT%H:%M:%SZ", math.floor(expires / 1000)),
+        "Expires " .. os.date("!%Y-%m-%dT%H:%M:%SZ", math.floor(expires / 1000))
+          .. " (about " .. tostring(math.max(1, math.ceil((expires / 1000 - os.time()) / 60))) .. " min)",
         "Asked by " .. shown_asker,
         "React ✅ or reply yes/승인 " .. id .. " (id optional) to approve; ❌ or no/거부 "
-          .. id .. " (id optional) to deny.",
-        shown }, "\n")
+          .. id .. " (id optional) to deny." }
+      if not block then return table.concat(head, "\n") .. "\n" .. shown end
+      local note = escaped and "\nControl and direction characters are shown escaped." or ""
+      local html = {}
+      for _, line in ipairs(head) do html[#html + 1] = html_escape(line) .. "<br>" end
+      return table.concat(head, "\n") .. "\n" .. block .. note,
+        table.concat(html) .. block_html .. (escaped and "<br>" .. html_escape(note:gsub("^\n", "")) or "")
     end,
   }, function(id, why)
     if not id then failure = why end
