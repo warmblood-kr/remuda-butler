@@ -147,7 +147,7 @@ Only `Bash`, `Read`, `Glob`, `Grep`, `WebFetch` and `WebSearch` calls are routed
 because the post shows their whole action; `Write`, `Edit` and other tools keep
 Claude's own prompt. A command longer than 1000 bytes, a `run_script` call, a cap
 (5 open requests per session, 20 in all) or a missing or failing Matrix
-setup is not routed either. A call whose text redaction would change (a command with a token, password or URL credential) keeps Claude's own prompt, so the owner approves exactly what would run. Open-request caps count one kind of approval at a time. Pending requests are stored, and a restart expires them.
+setup is not routed either. A call whose text redaction would change (a command with a token, password or URL credential) keeps Claude's own prompt, so the owner approves exactly what would run. A command with a control character (newline, carriage return, NUL, tab) is not routed either. Open-request caps count one kind of approval at a time. Pending requests are stored, and a restart expires them.
 
 Every other outcome prints no decision, so Claude shows its own prompt: this
 slice only adds a way for the owner to answer prompts the agent already raises,
