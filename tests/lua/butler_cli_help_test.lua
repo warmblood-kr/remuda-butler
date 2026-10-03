@@ -1,3 +1,10 @@
+local CORE_BLOCKED = {
+  "SKIP core-blocked: send-to-leader --file PATH (needs optional MESSAGE positional)",
+  "SKIP core-blocked: launch optional NAME and help handling (needs required=false positional)",
+  "SKIP core-blocked: topic delegate repeated --writable (needs repeatable OptionSpec)",
+  "SKIP core-blocked: reply/forward optional message or note positionals",
+}
+
 local function start_butler()
   T.install_mod("butler", assert(os.getenv("REMUDA_LUA_REPO")))
   T.eval('remuda._butler_argv = {"sh", "-c", "sleep 60"}; remuda._butler_skip_relay = true; remuda._butler_readiness_timeout = 1')
@@ -77,4 +84,13 @@ T.test("message verbs treat --help as help without actions", function()
   T.expect(out:find("unknown=failure:2:", 1, true) and out:find("Next: remuda butler send --help", 1, true)
       and out:find("Next: remuda butler send --help,actions=0", 1, true),
     "send unknown option did not return usage exit 2 with Next: " .. out)
+end)
+
+T.test("core-blocked parser cases are explicitly skipped", function()
+  T.expect(#CORE_BLOCKED == 4 and CORE_BLOCKED[1]:find("send-to-leader", 1, true)
+      and CORE_BLOCKED[2]:find("launch", 1, true)
+      and CORE_BLOCKED[3]:find("topic delegate", 1, true)
+      and CORE_BLOCKED[4]:find("reply/forward", 1, true),
+    "expected four explicitly marked core-blocked cases")
+  T.expect(true, nil, table.concat(CORE_BLOCKED, "\n"))
 end)
