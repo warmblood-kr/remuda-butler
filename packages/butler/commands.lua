@@ -259,20 +259,53 @@ command(18, "schedule", "  remuda butler schedule list\n"
   .. "  remuda butler schedule rm <name>", function(args, caller)
   return schedule_cli.cli(args, current_agent(caller), caller and caller.stdin)
 end)
-command(20, "launch", "  remuda butler launch <claude|codex|monocle> [name] [--model M]", function(args, caller)
+local function refuse(message)
+  if type(remuda.fail) == "function" then return remuda.fail(tostring(message), 1) end
+  error(tostring(message), 0)
+end
+-- Parses --writable DIR (repeatable) and --sandbox full out of a flag list; refuses
+-- `full` from any Butler agent session (only a person at a terminal grants it).
+local function sandbox_flag(args, i, state)
+  if args[i] ~= "--writable" and args[i] ~= "--sandbox" then return false end
+  local value = args[i + 1]
+  if not value or value == "" then error(args[i] .. " needs a value.\nNext: remuda butler help", 0) end
+  if args[i] == "--writable" then
+    state.writable = state.writable or {}
+    state.writable[#state.writable + 1] = value
+  else
+    state.sandbox = value
+  end
+  return true
+end
+-- verb_words is the owner's command up to the flags, for the refusal message.
+local function checked_profile(kind, state, caller, verb_words, cwd, suffix)
+  if state.sandbox == "full" and current_agent(caller) ~= nil then
+    local profile = { writable = state.writable }
+    remuda._butler_sandbox.refuse_full(remuda._butler_sandbox.owner_command(verb_words, profile, cwd) .. (suffix or ""))
+  end
+  return remuda._butler_profile(kind, state.sandbox, state.writable)
+end
+command(20, "launch", "  remuda butler launch <claude|codex|monocle> [name] [--model M] [--writable DIR]... [--sandbox full]", function(args, caller)
   if not args[2] then return nil end
   local registered = false
   for _, row in ipairs(contributions("butler.agent")) do if row.id == args[2] then registered = true end end
   if not registered then return nil end
-  local model
-  if args[#args - 1] == "--model" then model = args[#args]; args[#args] = nil; args[#args] = nil end
+  local model, name, state, i = nil, nil, {}, 3
+  while i <= #args do
+    if args[i] == "--model" and args[i + 1] then model = args[i + 1]; i = i + 2
+    elseif sandbox_flag(args, i, state) then i = i + 2
+    elseif not name and args[i]:sub(1, 2) ~= "--" then name = args[i]; i = i + 1
+    else return nil end
+  end
   -- The calling member leads the child; only the operator's falls to butler (#24).
   local parent = current_agent(caller)
-  if #args == 2 then return remuda._butler_launch(args[2], nil, model, parent) end
-  if #args == 3 then return remuda._butler_launch(args[2], args[3], model, parent) end
+  local words = "remuda butler launch " .. args[2] .. " " .. (name or "NAME")
+  local ok, profile = pcall(checked_profile, args[2], state, caller, words)
+  if not ok then return refuse(profile) end
+  return remuda._butler_launch(args[2], name, model, parent, profile)
 end)
 command(30, "topic", "  remuda butler topic new <name> [--template T] [--agent A] [--model M]\n"
-  .. "  remuda butler topic delegate <name> [--agent A] [--leader L] [--model M] [--cwd DIR] <task...>", function(args, caller)
+  .. "  remuda butler topic delegate <name> [--agent A] [--leader L] [--model M] [--cwd DIR] [--writable DIR]... [--sandbox full] <task...>", function(args, caller)
   if args[2] == "new" and args[3] then
     local template, kind, model, i = nil, nil, nil, 4
     while i <= #args do
@@ -286,15 +319,23 @@ command(30, "topic", "  remuda butler topic new <name> [--template T] [--agent A
   end
   if args[2] == "delegate" and args[3] then
     local kind, parent, model, cwd, i = nil, current_agent(caller) or "butler", nil, nil, 4
-    while i <= #args and (args[i] == "--agent" or args[i] == "--leader" or args[i] == "--model" or args[i] == "--cwd") do
-      if args[i] == "--agent" then kind = args[i + 1]
+    local state = {}
+    while i <= #args and (args[i] == "--agent" or args[i] == "--leader" or args[i] == "--model" or args[i] == "--cwd"
+        or args[i] == "--writable" or args[i] == "--sandbox") do
+      if sandbox_flag(args, i, state) then -- recorded in state
+      elseif args[i] == "--agent" then kind = args[i + 1]
       elseif args[i] == "--model" then model = args[i + 1]
       elseif args[i] == "--cwd" then cwd = args[i + 1]
       else parent = args[i + 1] end
       if not args[i + 1] or args[i + 1] == "" then return nil end
       i = i + 2
     end
-    if i <= #args then return remuda._butler_topic_delegate(args[3], words_after(args, i), nil, kind, parent, model, cwd) end
+    if i <= #args then
+      local words = "remuda butler topic delegate " .. args[3] .. " --agent " .. tostring(kind or "codex")
+      local ok, profile = pcall(checked_profile, kind, state, caller, words, cwd, " <task...>")
+      if not ok then return refuse(profile) end
+      return remuda._butler_topic_delegate(args[3], words_after(args, i), nil, kind, parent, model, cwd, profile)
+    end
   end
 end)
 command(40, "send", '  remuda butler send <to> "<message>" | <to> - | <to> --file PATH\n'

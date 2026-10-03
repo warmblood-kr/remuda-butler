@@ -292,10 +292,10 @@ the normal way for a member to communicate.
           .. '  remuda butler schedule add <name> "<M H * * *>" <text> | - [--to SESSION]\n'
           .. "  remuda butler schedule rm <name>",
         run = function(_, args, caller) return host._butler_command_run("schedule", args, caller) end },
-      { id = "launch", order = 20, verb = "launch", usage = "  remuda butler launch <claude|codex|monocle> [name] [--model M]",
+      { id = "launch", order = 20, verb = "launch", usage = "  remuda butler launch <claude|codex|monocle> [name] [--model M] [--writable DIR]... [--sandbox full]",
         run = function(_, args, caller) return host._butler_command_run("launch", args, caller) end },
       { id = "topic", order = 30, verb = "topic", usage = "  remuda butler topic new <name> [--template T] [--agent A] [--model M]\n"
-          .. "  remuda butler topic delegate <name> [--agent A] [--leader L] [--model M] <task...>",
+          .. "  remuda butler topic delegate <name> [--agent A] [--leader L] [--model M] [--cwd DIR] [--writable DIR]... [--sandbox full] <task...>",
         run = function(_, args, caller) return host._butler_command_run("topic", args, caller) end },
       { id = "send", order = 40, verb = "send", usage = '  remuda butler send <to> "<message>" | <to> - | <to> --file PATH\n'
           .. '  remuda butler send <from> <to> <message...> | <from> <to> - | <from> <to> --file PATH',

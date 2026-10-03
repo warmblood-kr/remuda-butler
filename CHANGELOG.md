@@ -7,6 +7,7 @@ release tags yet; entries come from merged pull requests.
 ## Unreleased
 
 ### Added
+- Codex members take `--writable DIR` (repeatable) and, from a person at a terminal only, `--sandbox full` on `launch` and `topic delegate`; the profile is kept across relaunch and shown by `butler sessions` (#332).
 - `remuda butler matrix reply` accepts the Butler's own sent events and keeps replies on their thread roots (#323).
 - A delegated first task is typed once, only into an empty composer, and the write outcome is traced. If it is refused, the pane never becomes ready, the session is replaced, or the composer is still empty with no agent activity 15 seconds after a successful write, the leader receives one failure mail with the exact `remuda butler send` command to resend it (#319).
 - CI runs the core Butler contract gate when a pull request changes the Butler entry points, the live reload script, the core pin or the workflow.

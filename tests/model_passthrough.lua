@@ -6,6 +6,7 @@ remuda = {
   _butler_telemetry_adapters = {},
   _butler_agent_support = { mcp_config_path = function() return "mcp.json" end },
 }
+dofile("packages/butler/sandbox.lua")
 dofile("packages/butler/agents/codex.lua")
 dofile("packages/butler/agents/claudecode.lua")
 local build = remuda._butler_agent_builders

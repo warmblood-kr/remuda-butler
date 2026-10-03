@@ -463,9 +463,11 @@ remuda._butler_agent_startup = remuda._butler_agent_startup or {}
 remuda._butler_agent_support = {
   mcp_config_path = agent_mcp_path,
   mcp_flags = agent_mcp_flags,
+  json_quote = json_quote,
   mcp_config = agent_mcp_config,
   status_settings = status_settings,
 }
+remuda.exec("butler/sandbox")
 remuda.exec("butler/telemetry")
 remuda.exec("butler/agents/claudecode")
 remuda.exec("butler/agents/codex")
@@ -487,6 +489,7 @@ local setup_telemetry = chooser.setup_telemetry
 local codex_update_complete = chooser.codex_update_complete
 -- Member launch and topic creation live in launch.lua.
 remuda._butler_launch_config = { bus = bus,
+  realpath = realpath,
   topic_config = topic_config,
   data_home = data_home,
   load_topic_config = load_topic_config,
@@ -615,21 +618,22 @@ remuda.exec("butler/commands")
 remuda.tool{
   name = "butler_launch",
   about = "Launch a Claude Code, Codex, or Monocle child agent with this Butler's shared MCP mailbox.",
-  args = { kind = "Agent kind: claude, codex, or monocle.", name = "Optional session name.", cwd = "Optional working directory.", model = "Optional model override." },
+  args = { kind = "Agent kind: claude, codex, or monocle.", name = "Optional session name.", cwd = "Optional working directory.", model = "Optional model override.", writable = "Optional absolute directories a Codex member may also write, one per line." },
   needs = { "kind" },
   run = function(a, caller)
     local parent = caller_leader(caller)
-    return "launched " .. launch_agent(a.kind, a.name, a.cwd, a.model, parent)
+    local profile = remuda._butler_profile(a.kind, nil, a.writable)
+    return "launched " .. launch_agent(a.kind, a.name, a.cwd, a.model, parent, nil, nil, nil, profile)
   end,
 }
 remuda.tool{
   name = "butler_delegate",
   about = "Create a topic, start a child agent in it, and give it an initial task. The child reports each completed work loop to this leader.",
-  args = { name = "Topic and child-session name.", task = "Initial task for the child.", template = "Optional Butler topic template.", kind = "Optional agent kind; defaults to the leader's kind.", model = "Optional model override." },
+  args = { name = "Topic and child-session name.", task = "Initial task for the child.", template = "Optional Butler topic template.", kind = "Optional agent kind; defaults to the leader's kind.", model = "Optional model override.", writable = "Optional absolute directories a Codex member may also write, one per line (needs kind codex)." },
   needs = { "name", "task" },
   run = function(a, caller)
     local parent = caller_leader(caller)
-    return "delegated " .. remuda._butler_topic_delegate(a.name, a.task, a.template, a.kind, parent, a.model)
+    return "delegated " .. remuda._butler_topic_delegate(a.name, a.task, a.template, a.kind, parent, a.model, nil, remuda._butler_profile(a.kind, nil, a.writable))
   end,
 }
 remuda.tool{
@@ -1230,7 +1234,7 @@ function remuda._butler_session_exited(name, info)
     _butler_session_trace("codex_updated_relaunch", name)
     local ok, err = pcall(launch_agent, update_restart.kind, update_restart.name,
       update_restart.cwd, update_restart.model, update_restart.parent, update_restart.task,
-      update_restart.identity)
+      update_restart.identity, nil, update_restart.profile)
     if not ok then
       _butler_session_trace("codex_updated_relaunch_failed", name .. ": " .. tostring(err))
       remuda._butler_relaunching[name] = nil

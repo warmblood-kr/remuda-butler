@@ -79,6 +79,12 @@ autocompact safety net defaults to `600k`; set
 The Butler scheduler remains the primary compaction path. The MCP
 `butler_launch` and `butler_delegate` tools take `model`.
 
+Codex members get extra writable directories with `--writable DIR` (repeatable,
+absolute and existing; on `launch` and `topic delegate`; the MCP tools take
+`writable`). `--sandbox full` removes the sandbox and is accepted only from a
+person at a terminal, never from a Butler agent. The profile is kept for
+relaunches and shown by `remuda butler sessions`.
+
 Every Butler-managed agent receives `REMUDA_BUTLER_AGENT_ID` and, when it has
 one, `REMUDA_BUTLER_LEADER_ID`. Therefore agents normally use the short forms:
 
