@@ -13,7 +13,7 @@ local USAGE = [[  remuda butler matrix [--json] status
   remuda butler matrix [--json] [--room ROOM] send TEXT | - | --file PATH
   remuda butler matrix [--json] [--room ROOM] reply EVENT_ID TEXT | - | --file PATH
   remuda butler matrix [--json] [--room ROOM] react EVENT_ID KEY
-  remuda butler matrix [--json] [--room ROOM] upload PATH
+  remuda butler matrix [--json] [--room ROOM] upload [--thread EVENT_ID] [--caption TEXT] PATH
   remuda butler matrix [--json] [--room ROOM] redact EVENT_ID [--reason TEXT]
   remuda butler matrix [--json] join ROOM (ID, #alias, or public name; operator)
   remuda butler matrix [--json] leave ROOM (operator)
@@ -196,6 +196,10 @@ local function parse(args)
     elseif not positional and verb == "download" and value == "-o" then
       if not args[at + 1] then error("-o requires an absolute path", 0) end
       options.output = args[at + 1]
+      at = at + 2
+    elseif verb == "upload" and not positional and (value == "--thread" or value == "--caption") then
+      if not args[at + 1] then error(value .. " requires a value", 0) end
+      options[value:sub(3)] = args[at + 1]
       at = at + 2
     elseif verb == "redact" and value == "--reason" then
       if not args[at + 1] then error("--reason requires text", 0) end
@@ -995,7 +999,10 @@ function matrix.cli(args, agent, stdin_body, file_body)
     return resolve_local(0, "Not following thread " .. safe_thread .. " in " .. safe_room
       .. ".\nNext: remuda butler matrix " .. next_room .. "follow " .. shell_quote(safe_thread) .. "\n", "")
   end
-  if verb == "reply" then
+  -- A reply, or an upload into a thread, answers one verified event.
+  local answers = verb == "reply" and options.event_id or (verb == "upload" and options.thread)
+  if answers then
+    options.event_id = answers
     local relay, relay_error = matrix.reply_relay()
     if not relay then
       finish(reply, cancelled, completed, verb, options,

@@ -168,6 +168,22 @@ function matrix.reply_relay()
   return nil, "Matrix relay is not running or is from an older load; event sender cannot be verified"
 end
 
+-- The reply-to refusal shared by reply and upload --thread: an event that never arrived as
+-- mail has no verified sender.
+local function unverified_event_error(relay, event_id)
+  if relay:can_reply_to(event_id) then return nil end
+  return "Reply not sent: event " .. terminal_safe(event_id)
+    .. " was not delivered to this Butler as mail, so its sender cannot be verified.\n"
+    .. "Next: remuda butler inbox (you can only reply to events listed there)"
+end
+
+-- The m.thread relation of a post that answers opts.event_id inside opts.thread_root.
+local function thread_relation(opts)
+  local root = type(opts.thread_root) == "string" and opts.thread_root ~= ""
+    and opts.thread_root or opts.event_id
+  return { rel_type = "m.thread", event_id = root, ["m.in_reply_to"] = { event_id = opts.event_id } }
+end
+
 function matrix.reply(opts, on_done)
   opts = opts or {}
   local done = once(on_done)
@@ -178,11 +194,8 @@ function matrix.reply(opts, on_done)
   if type(opts.text) ~= "string" or opts.text == "" then
     return error_result(done, "message text must not be empty")
   end
-  if not relay:can_reply_to(opts.event_id) then
-    return error_result(done, "Reply not sent: event " .. terminal_safe(opts.event_id)
-      .. " was not delivered to this Butler as mail, so its sender cannot be verified.\n"
-      .. "Next: remuda butler inbox (you can only reply to events listed there)")
-  end
+  local unverified = unverified_event_error(relay, opts.event_id)
+  if unverified then return error_result(done, unverified) end
   local route = relay:route_for_event(opts.event_id)
   local allowlisted_human_reply = route ~= nil and route.allowlisted_human == true
   local root = relay:thread_root_for_event(opts.event_id)
@@ -208,11 +221,7 @@ function matrix.reply(opts, on_done)
       end
       relay:note_own_turn(room, root)
     end
-    local relation_root = type(opts.thread_root) == "string" and opts.thread_root ~= ""
-      and opts.thread_root or opts.event_id
-    local relation = { rel_type = "m.thread", event_id = relation_root,
-      ["m.in_reply_to"] = { event_id = opts.event_id } }
-    return send_chunks(room, opts.text, relation, reply_done, opts.txn_id)
+    return send_chunks(room, opts.text, thread_relation(opts), reply_done, opts.txn_id)
   end)
 end
 
@@ -274,22 +283,31 @@ local function media_type(name)
   return types[extension] or "application/octet-stream"
 end
 
-function matrix.upload(opts, on_done)
-  opts = opts or {}
-  local done = once(on_done)
-  local room = configured_room(opts, done)
-  if not room then return { cancel = function() end } end
+-- A file is read, uploaded, then sent as an m.image or m.file event, in a thread when
+-- `relation` is set.
+local function read_upload(opts)
   if type(opts.file) ~= "string" or opts.file == "" or not absolute(opts.file) then
-    return error_result(done, "use an absolute path (the daemon does not know your cwd)")
+    return nil, "use an absolute path (the daemon does not know your cwd)"
   end
   local file, open_error = io.open(opts.file, "rb")
-  if not file then return error_result(done, "cannot read upload file: " .. tostring(open_error)) end
+  if not file then return nil, "cannot read upload file: " .. tostring(open_error) end
   local ok, data, read_error = pcall(function() return file:read(MAX_UPLOAD_BYTES + 1) end)
   file:close()
-  if not ok then return error_result(done, "upload path is not a readable regular file") end
-  if read_error then return error_result(done, "upload path is not a readable regular file: " .. tostring(read_error)) end
-  if not data or #data == 0 then return error_result(done, "upload file must not be empty") end
-  if #data > MAX_UPLOAD_BYTES then return error_result(done, "upload exceeds 20 MiB limit") end
+  if not ok then return nil, "upload path is not a readable regular file" end
+  if read_error then return nil, "upload path is not a readable regular file: " .. tostring(read_error) end
+  if not data or #data == 0 then return nil, "upload file must not be empty" end
+  if #data > MAX_UPLOAD_BYTES then return nil, "upload exceeds 20 MiB limit" end
+  return data
+end
+
+-- `data` is the file already read: a threaded upload reads before it waits on the homeserver,
+-- so the bytes are those of the path the caller was checked against.
+local function upload_file(opts, done, room, relation, data)
+  if not data then
+    local read_error
+    data, read_error = read_upload(opts)
+    if not data then return error_result(done, read_error) end
+  end
   local filename = opts.file:match("([^/\\]+)$") or opts.file
   local mime = media_type(filename)
   local content_uri
@@ -312,8 +330,13 @@ function matrix.upload(opts, on_done)
     end
     content_uri = uploaded.content_uri
     local msgtype = mime:sub(1, 6) == "image/" and "m.image" or "m.file"
-    local body, encode_error = matrix.encode_json({ msgtype = msgtype, body = filename,
-      url = content_uri, info = { mimetype = mime, size = #data } })
+    -- With a caption, `body` is the caption and `filename` the file name (Matrix 1.10).
+    local caption = type(opts.caption) == "string" and opts.caption ~= "" and opts.caption or nil
+    local content = { msgtype = msgtype, body = caption or filename, url = content_uri,
+      info = { mimetype = mime, size = #data } }
+    if caption then content.filename = filename end
+    if relation then content["m.relates_to"] = relation end
+    local body, encode_error = matrix.encode_json(content)
     if not body then return done({ error = encode_error }) end
     current = matrix.request_json({ method = "PUT",
       path = "/_matrix/client/v3/rooms/" .. path_component(room)
@@ -321,10 +344,34 @@ function matrix.upload(opts, on_done)
       room = room, body = body, headers = { ["Content-Type"] = "application/json" },
     }, function(result)
       if result.error then return done(result) end
-      done({ event_id = result.json and result.json.event_id or "", content_uri = content_uri })
+      local event_id = result.json and result.json.event_id or ""
+      local relay = matrix.relay and matrix.relay.instance
+      if event_id ~= "" and relay and type(relay.record_own_event) == "function" then
+        pcall(relay.record_own_event, relay, room, event_id, relation and relation.event_id or event_id)
+      end
+      done({ event_id = event_id, content_uri = content_uri })
     end)
   end)
   return handle
+end
+
+-- With opts.event_id the file is posted into that event's thread, after the checks reply
+-- makes: the event reached this Butler as mail (or is its own), in the configured room.
+function matrix.upload(opts, on_done)
+  opts = opts or {}
+  local done = once(on_done)
+  local room = configured_room(opts, done)
+  if not room then return { cancel = function() end } end
+  if opts.event_id == nil then return upload_file(opts, done, room, nil) end
+  local relay, relay_error = matrix.reply_relay()
+  if not relay then return error_result(done, relay_error) end
+  local unverified = unverified_event_error(relay, opts.event_id)
+  if unverified then return error_result(done, unverified) end
+  local data, read_error = read_upload(opts)
+  if not data then return error_result(done, read_error) end
+  return same_room_then(room, opts.event_id, done, function(thread_done)
+    return upload_file(opts, thread_done, room, thread_relation(opts), data)
+  end)
 end
 
 local function operator_room(verb, opts, agent, callback)

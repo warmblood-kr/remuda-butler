@@ -561,6 +561,13 @@ function remuda._butler_reply(from, message_id, text)
   if message.matrix_reply then return "queued Matrix reply " .. message.id .. " for " .. message.source_mail_id end
   return notify_queued(message, recipient.alias, "(reply) from " .. sender.alias)
 end
+-- The Matrix room and event of a mail the caller holds, for `reply --attach`: the file goes
+-- into that mail's thread through `matrix upload --thread`, never through the text outbox.
+function remuda._butler_reply_target(from, message_id)
+  local room, event = mail.matrix_target(sender_address(from), message_id, from == OPERATOR)
+  if not room then error(event, 0) end
+  return room, event
+end
 function remuda._butler_forward(from, message_id, member, note)
   local sender = sender_address(from)
   local _, target = mail_id(member, false)

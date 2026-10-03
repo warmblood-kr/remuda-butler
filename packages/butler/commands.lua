@@ -25,6 +25,7 @@ identity (a plain shell, or a core that does not forward the caller's env),
 `send` is from "operator" and `inbox` needs a name (`inbox <name>`).
 `reply` answers a message's original sender, even when it was forwarded to you;
 `forward` re-delivers a message you received, keeping its sender, with a note.
+`reply <message-id> --attach PATH` posts a file into that Matrix message's thread.
 ]]
 -- Help lists every `butler.command` entry's usage in order, so it names only
 -- the verbs that are installed.
@@ -390,8 +391,21 @@ command(60, "inbox", "  remuda butler inbox [name]", function(args, caller)
     return remuda._butler_inbox(args[2] or assert(current_agent(caller), "no Butler identity in your env; use `inbox <name>`"))
   end)
 end)
-command(70, "reply", "  remuda butler reply <message-id> <message...> | - | --file PATH", function(args, caller)
+command(70, "reply", "  remuda butler reply <message-id> <message...> | - | --file PATH\n"
+  .. "  remuda butler reply <message-id> --attach PATH [caption...]", function(args, caller)
   if #args < 3 then return nil end
+  if args[3] == "--attach" then
+    -- The file goes into the Matrix thread of that mail; --file keeps meaning "read the text".
+    if #args < 4 then return nil end
+    return cli_result(function()
+      local agent = current_agent(caller)
+      local room, event = remuda._butler_reply_target(agent or OPERATOR, args[2])
+      local upload = { "matrix", "--room", room, "upload", "--thread", event }
+      if #args > 4 then upload[#upload + 1] = "--caption"; upload[#upload + 1] = words_after(args, 5) end
+      upload[#upload + 1] = args[4]
+      return remuda.butler.matrix.cli(upload, agent)
+    end)
+  end
   return cli_result(function()
     return remuda._butler_reply(current_agent(caller) or OPERATOR, args[2], message_body(args, 3, caller))
   end)
