@@ -193,7 +193,7 @@ refspec, the hook cannot infer the current branch, so a force push with an
 implied target is not denied. Writer detection covers redirects and the
 lexical writers `rm`, `mv`, `cp` destinations, `tee`, `dd` output, `chmod`,
 `chown`, `ln`, `touch`, `truncate`, `install` destinations, and `sed -i`.
-`perl -pi`, `python -c`, `rsync`, `curl -o`, and `patch` are not covered. If the
+`perl -pi`, interpreter one-liners, `rsync`, `curl -o`, and `patch` are not covered. If the
 hook fails before it builds a decision, it fails open and prints no decision;
 an audit append failure does not change a built denial.
 
