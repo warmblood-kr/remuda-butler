@@ -115,4 +115,35 @@ do
   assert(state.ok == false, "non-empty composer did not produce a bounded failure")
 end
 
+-- A short task equal to a banner word is not evidence that it was submitted.
+assert(not delivery.prompt_start_visible("Ask Codex\n❯ ", "Ask"), "a short task matched the banner")
+assert(delivery.prompt_start_visible("Ask Codex\n› fix the login bug", "fix the login bug"),
+  "a long task prefix on screen was not seen")
+
+-- A capture failure after a successful write is unverified, never delivered.
+do
+  local state = { now = 100, captures = 0 }
+  local fake = {}
+  function fake.schedule(spec) state.poll = spec.run; return "capture-poll" end
+  function fake.cancel() state.cancelled = true end
+  function fake.capture()
+    state.captures = state.captures + 1
+    if state.captures > 1 then error("pane closed") end
+    return "Ask Codex\n❯ "
+  end
+  function fake.type_text() end
+  delivery.schedule(fake, "codex", "member", "member", "leader", "first task", {
+    detect_only = true,
+    now = function() return state.now end,
+    ready = function() return true end,
+    empty = function() return "EMPTY", "" end,
+    allowed = function() return true end,
+    on_done = function(ok, reason, unverified) state.ok, state.reason, state.unverified = ok, reason, unverified end,
+  })
+  state.poll()
+  state.poll()
+  assert(state.ok == false and state.unverified == true and state.reason == "could not capture the agent screen",
+    "a capture failure after the write counted as delivered")
+end
+
 print("butler_prompt_retry: ok")

@@ -47,7 +47,8 @@ end
 
 local function prompt_start_visible(screen, task)
   local visible, expected = compact(screen), compact(task)
-  if expected == "" then return false end
+  -- A short task can equal a banner word; only a long-enough prefix is evidence.
+  if #expected < 8 then return false end
   local marker_size = math.min(48, #expected)
   return visible:find(expected:sub(1, marker_size), 1, true) ~= nil
 end
@@ -72,10 +73,10 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
     end
     return os.time()
   end
-  local function finish(ok, reason)
+  local function finish(ok, reason, unverified)
     remuda.cancel(poll)
     if options.on_done then
-      pcall(options.on_done, ok, reason)
+      pcall(options.on_done, ok, reason, unverified)
     elseif not ok then
       notify(remuda, parent, name, reason)
     end
@@ -90,7 +91,7 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
     end
     local captured, screen = pcall(remuda.capture, actual)
     if not captured then
-      finish(verify_started ~= nil and options.detect_only == true, "could not capture the agent screen")
+      finish(false, "could not capture the agent screen", verify_started ~= nil)
       return
     end
 
