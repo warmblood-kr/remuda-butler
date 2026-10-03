@@ -282,13 +282,14 @@ function approval.request(request, done)
     pending.callbacks[#pending.callbacks + 1] = finish
     return nil
   end
+  -- Caps count requests of the same kind, so one kind cannot starve another.
   local open_total, open_for_asker = 0, 0
   local registered_in_window = 0
   local now = math.floor(os.time() * 1000)
   local rate_limit = tonumber(request.rate_limit_per_window)
   local rate_window_ms = math.max(1, tonumber(request.rate_window_s) or 600) * 1000
   for _, rec in pairs(attached.state.approvals or {}) do
-    if type(rec) == "table" and rec.status == "open" then
+    if type(rec) == "table" and rec.status == "open" and rec.kind == request.kind then
       open_total = open_total + 1
       if rec.asker == asker then open_for_asker = open_for_asker + 1 end
     end
@@ -298,8 +299,10 @@ function approval.request(request, done)
     end
   end
   for _, item in pairs(pending_requests) do
-    open_total = open_total + 1
-    if item.asker == asker then open_for_asker = open_for_asker + 1 end
+    if item.kind == request.kind then
+      open_total = open_total + 1
+      if item.asker == asker then open_for_asker = open_for_asker + 1 end
+    end
     if rate_limit and item.kind == request.kind and item.asker == asker
         and tonumber(item.created_ms) and item.created_ms >= now - rate_window_ms then
       registered_in_window = registered_in_window + 1
