@@ -75,11 +75,11 @@ function M.redact(text, cap)
   text = tostring(text or ""):sub(1, REDACT_PREFIX):gsub("%c", " ")
   for _, rule in ipairs(SECRET_PATTERNS) do text = text:gsub(rule[1], rule[2]) end
   -- NAME=value and --flag value where the name says secret.
-  text = text:gsub("([%w_]*[Tt][Oo][Kk][Ee][Nn][%w_]*)=%S+", "%1=***")
-    :gsub("([%w_]*[Ss][Ee][Cc][Rr][Ee][Tt][%w_]*)=%S+", "%1=***")
-    :gsub("([%w_]*[Pp][Aa][Ss][Ss][Ww]?[Oo]?[Rr]?[Dd]?[%w_]*)=%S+", "%1=***")
-    :gsub("([%w_]*[Aa][Pp][Ii][_-]?[Kk][Ee][Yy][%w_]*)=%S+", "%1=***")
-    :gsub("(%-%-[%w-]*[Tt][Oo][Kk][Ee][Nn][%w-]*)%s+%S+", "%1 ***")
+  text = text:gsub("([%w_]*[Tt][Oo][Kk][Ee][Nn][%w_]*)=[^%s;|&]+", "%1=***")
+    :gsub("([%w_]*[Ss][Ee][Cc][Rr][Ee][Tt][%w_]*)=[^%s;|&]+", "%1=***")
+    :gsub("([%w_]*[Pp][Aa][Ss][Ss][Ww]?[Oo]?[Rr]?[Dd]?[%w_]*)=[^%s;|&]+", "%1=***")
+    :gsub("([%w_]*[Aa][Pp][Ii][_-]?[Kk][Ee][Yy][%w_]*)=[^%s;|&]+", "%1=***")
+    :gsub("(%-%-[%w-]*[Tt][Oo][Kk][Ee][Nn][%w-]*)%s+[^%s;|&]+", "%1 ***")
     :gsub("([Xx]%-[%w-]*[Kk][Ee][Yy][%w-]*:%s*)[^\r\n'\"]+", "%1***")
     :gsub("(\"[%w_]*[Pp][Aa][Ss][Ss][%w_]*\"%s*:%s*\")[^\"]*", "%1***")
     :gsub("(\"[%w_]*[Tt][Oo][Kk][Ee][Nn][%w_]*\"%s*:%s*\")[^\"]*", "%1***")
@@ -87,7 +87,7 @@ function M.redact(text, cap)
     :gsub("(%[['\"][%w_-]*[Kk][Ee][Yy][%w_-]*['\"]%]%s*=%s*['\"])[^'\"]*", "%1***")
     :gsub("(%[['\"][%w_-]*[Pp][Aa][Ss][Ss][%w_-]*['\"]%]%s*=%s*['\"])[^'\"]*", "%1***")
     :gsub("(%[['\"][%w_-]*[Tt][Oo][Kk][Ee][Nn][%w_-]*['\"]%]%s*=%s*['\"])[^'\"]*", "%1***")
-    :gsub("(%-%-[%w-]*[Pp][Aa][Ss][Ss][%w-]*)%s+%S+", "%1 ***")
+    :gsub("(%-%-[%w-]*[Pp][Aa][Ss][Ss][%w-]*)%s+[^%s;|&]+", "%1 ***")
     :gsub("([?&])([%w_.%-]+)=([^&%s]*)", function(prefix, name, value)
       local lower = name:lower()
       if lower:find("sig", 1, true) or lower:find("auth", 1, true) or lower:find("cred", 1, true)
@@ -248,7 +248,10 @@ function M.summary(tool, input, cap)
   end
   local value = input.command or input.file_path or input.notebook_path or input.url or input.query or input.pattern
   if type(value) ~= "string" then
-    for _, v in pairs(input) do if type(v) == "string" then value = v; break end end
+    local keys = {}
+    for k, v in pairs(input) do if type(v) == "string" then keys[#keys + 1] = k end end
+    table.sort(keys)
+    value = keys[1] and input[keys[1]]
   end
   return M.redact(value or "", cap)
 end
