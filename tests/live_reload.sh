@@ -135,11 +135,20 @@ record_session_pids() {
   [[ $SESSION_PID_COUNT -gt 0 ]] || fail "no process PID recorded for the two tracked sessions"
 }
 settle() { sleep 1; }
+# The process count is one ps snapshot; a session starting or exiting at that
+# moment skews it. Poll for 5 s, so only a state that persists fails.
 check() {
-  local got
-  got="$(lua "$SNAPSHOT") pids=$(pid_count)"
+  local got attempt
+  for attempt in $(seq 1 25); do
+    got="$(lua "$SNAPSHOT") pids=$(pid_count)"
+    [[ "$got" == "$2" ]] && break
+    sleep 0.2
+  done
   echo "$1: $got"
-  [[ "$got" == "$2" ]] || fail "$1: expected '$2'"
+  if [[ "$got" != "$2" ]]; then
+    ps -axo pid,ppid,stat,command | awk -v id="sleep ${ID}" 'index($0, id)' >&2
+    fail "$1: expected '$2'"
+  fi
 }
 
 echo "== legacy install ($OLD_REF)"
