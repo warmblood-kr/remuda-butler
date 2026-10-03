@@ -1,13 +1,3 @@
-  # The controller stops itself and its child; this covers a controller that died
-  # first. Only the two generated names (h<pid>, h<pid>c) are ever stopped.
-  local name
-  for name in "$H_CHILD_SERVER" "$H_SERVER"; do
-    if [[ "$name" =~ ^h[0-9]+c?$ ]] && [[ "$name" == "h$$" || "$name" == "h$$c" ]]; then
-      if "$REMUDA_BIN" -s "$name" stop -f >/dev/null 2>&1; then echo "harness: stopped daemon $name"; fi
-    else
-      echo "harness: refusing to stop daemon named '$name'" >&2
-    fi
-  done
 #!/usr/bin/env bash
 set -euo pipefail
 
