@@ -96,3 +96,14 @@ daemon is restarted.
 
 `remuda butler --agent claude|codex` selects the root Butler agent without an
 environment variable. Add `--headless` when only the service should start.
+
+## Testing
+
+New Butler behavior tests belong in `tests/lua/`. Keep Rust tests for core
+primitives and the wire protocol. Run all Lua tests or one file with
+`REMUDA_BIN=<pinned remuda> tests/lua_tests.sh [tests/lua/file_test.lua]`.
+
+The harness uses private daemon names `h<pid>` and `h<pid>c`, private HOME,
+XDG, and runtime directories, and never targets the default daemon. Teardown
+reports `left: 0`. Keep `tests/lib/harness.lua` free of `os.execute` and
+`io.popen`.
