@@ -5786,6 +5786,42 @@ rx_tests[#rx_tests + 1] = { "test_rx_failed_send_registers_no_own_event", functi
   end)
 end }
 
+-- An upload is an `m.room.message` event whose content carries the msgtype; a
+-- msgtype in the event-type position stores a custom event that clients do not show.
+rx_tests[#rx_tests + 1] = { "test_rx_upload_puts_an_m_room_message_event", function()
+  local dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    local relay = rx_relay(path)
+    relay_module.instance = relay
+    local names = { { "chart.png", "m.image" }, { "notes.txt", "m.file" } }
+    local saved_check = remuda._butler_file_for_caller
+    remuda._butler_file_for_caller = function(file) return file end
+    for _, item in ipairs(names) do
+      local file = dir .. "/" .. item[1]
+      local handle = assert(io.open(file, "wb")); handle:write("payload"); handle:close()
+      local result
+      with_alias_http(path, function(spec)
+        if (spec.url or ""):find("/_matrix/media/", 1, true) then return { status = 200, body = '{"content_uri":"mxc://example.org/abc"}' } end
+        return { status = 200, body = '{"event_id":"$up1"}' }
+      end, function(calls)
+        result = rx_cli({ "matrix", "upload", file })
+        assert(result.code == 0, "the upload completes: " .. tostring(result.stderr) .. tostring(result.stdout))
+        local put
+        for _, spec in ipairs(calls) do if spec.method == "PUT" then put = spec end end
+        assert(put, "the event is PUT")
+        assert(put.url:find("/send/m.room.message/", 1, true), "the event type is m.room.message, got " .. put.url)
+        assert(not put.url:find("/send/m.image/", 1, true) and not put.url:find("/send/m.file/", 1, true), "no msgtype in the event type")
+        local content = assert(matrix.decode_json(put.body))
+        assert(content.msgtype == item[2] and content.body == item[1] and content.url == "mxc://example.org/abc",
+          "the msgtype stays in the content: " .. put.body)
+      end)
+      os.remove(file)
+    end
+    remuda._butler_file_for_caller = saved_check
+    relay:stop()
+  end)
+end }
+
 -- A reply to an own event is not a reply to an allowlisted person: it takes a post slot.
 rx_tests[#rx_tests + 1] = { "test_rx_reply_to_own_event_takes_post_slot", function()
   local dir, path = invite_fixture(OWNER, "posts_per_hour=1\n")

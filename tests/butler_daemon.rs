@@ -9766,8 +9766,6 @@ fn butler_matrix_reply_react_upload_redact_join_and_leave_compose_request() {
         response('{{"event_id":"$react"}}'))
       remuda.http.respond_prefix("POST", "https://matrix.example.org/_matrix/media/v3/upload?filename=image.png",
         response('{{"content_uri":"mxc://example.org/media"}}'))
-      remuda.http.respond_prefix("PUT", "https://matrix.example.org/_matrix/client/v3/rooms/%21write%3Aexample.org/send/m.image/",
-        response('{{"event_id":"$image"}}'))
       remuda.http.respond_prefix("PUT", "https://matrix.example.org/_matrix/client/v3/rooms/%21write%3Aexample.org/redact/%24redact/",
         response('{{"event_id":"$redact"}}'))
       remuda.http.respond("POST", "https://matrix.example.org/_matrix/client/v3/rooms/%21write%3Aexample.org/join", response("{{}}"))
@@ -9817,7 +9815,7 @@ fn butler_matrix_reply_react_upload_redact_join_and_leave_compose_request() {
       local upload
       matrix.upload({{ room = room, file = {media_path_lua} }}, function(value) upload = value end)
       ticks(5)
-      if not upload or upload.event_id ~= "$image" or upload.content_uri ~= "mxc://example.org/media" then return "upload-failed" end
+      if not upload or upload.event_id ~= "$reply" or upload.content_uri ~= "mxc://example.org/media" then return "upload-failed" end
       local upload_timeout
       for _, spec in ipairs(remuda.http.calls) do
         if spec.method == "POST" and spec.url:find("/media/v3/upload?", 1, true) then upload_timeout = spec.timeout end
