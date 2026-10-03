@@ -3390,6 +3390,45 @@ end
 -- One block: the main chunk is at Lua's limit of 200 local variables.
 local rx_tests
 do
+-- Exercise the same permission helper and registered session lookup used by
+-- main.lua. The caller env represents the agent launch; the checker itself
+-- receives core caller identity, never an environment-variable override.
+remuda._test_with_agent_file_caller = function(cwd, run)
+  local saved_caller, saved_check, saved_bus = remuda.caller, remuda._butler_file_for_caller, remuda._butler_bus
+  local permissions = dofile("packages/butler/permissions.lua")
+  local realpath = permissions.fs_helpers(remuda.fs, function(argv)
+    return remuda.process.run({ argv = argv, timeout = 5 })
+  end, "posix")
+  local member = { id = "registered-member", alias = "member", session_name = "session-member", cwd = cwd }
+  local bus = { agents = { member = member } }
+  local function cwd_of(session)
+    local matches, result = 0, nil
+    for alias, agent in pairs(bus.agents) do
+      if type(agent) == "table" and (agent.session_name == session or (alias == "butler" and session == "butler")) then
+        matches, result = matches + 1, agent.cwd
+      end
+    end
+    return matches == 1 and result or nil
+  end
+  remuda._butler_bus = bus
+  remuda.caller = function()
+    return { kind = "session", session = "session-member", env = {
+      REMUDA_BUTLER_AGENT_ID = member.id, REMUDA_BUTLER_SESSION_NAME = member.session_name,
+    } }
+  end
+  remuda._butler_file_for_caller = function(path, flag, pipe)
+    return permissions.file_for_caller(path, remuda.caller(), cwd_of, realpath, flag, pipe, "posix")
+  end
+  local ok, err = pcall(run)
+  remuda.caller, remuda._butler_file_for_caller, remuda._butler_bus = saved_caller, saved_check, saved_bus
+  if not ok then error(err, 0) end
+end
+
+remuda._test_create_symlink = function(target, link)
+  local result = remuda.process.run({ argv = { "ln", "-s", target, link }, timeout = 5 })
+  assert(result and result.code == 0, "could not create symlink: " .. tostring(result and result.stderr))
+end
+
 -- Receive rules (notes/rx-design.md, PR 1). One accept rule in every room:
 -- root, followed thread, or mention. Non-allowlisted senders arrive with a marker.
 local RX_BUTLER, RX_ALLY, RX_PREFIX = "@helper:example.org", "@agent-ally:example.org", "@agent-evil:evil.example"
@@ -5843,7 +5882,7 @@ end }
 
 -- matrix upload --thread EVENT: the file lands in the thread, built as reply builds it.
 ;(function()
-  local function upload_fixture(run)
+  local function upload_fixture(run, agent_caller, symlink_target)
     local dir, path = rx_fixture()
     rx_with_dir(dir, function()
       local relay = rx_relay(path)
@@ -5851,7 +5890,7 @@ end }
       local file = dir .. "/shot.png"
       local handle = assert(io.open(file, "wb")); handle:write("PNGDATA"); handle:close()
       local saved_check = remuda._butler_file_for_caller
-      remuda._butler_file_for_caller = function(p) return p end
+      if not agent_caller then remuda._butler_file_for_caller = function(p) return p end end
       local requests, context_room, on_context = {}, HOME, nil
       local ok, err = pcall(with_alias_http, path, function(spec)
         requests[#requests + 1] = spec
@@ -5859,7 +5898,11 @@ end }
         if spec.method == "POST" then return { status = 200, body = '{"content_uri":"mxc://example.org/up1"}' } end
         return { status = 200, body = '{"event_id":"$upload1"}' }
       end, function()
-        run(relay, file, requests, function(room) context_room = room end, function(fn) on_context = fn end)
+        local function exercise()
+          run(relay, file, requests, function(room) context_room = room end, function(fn) on_context = fn end,
+            symlink_target)
+        end
+        if agent_caller then remuda._test_with_agent_file_caller(dir, exercise) else exercise() end
       end)
       remuda._butler_file_for_caller = saved_check
       relay:stop()
@@ -5894,17 +5937,77 @@ end }
   end }
 
   rx_tests[#rx_tests + 1] = { "test_rx_upload_thread_reads_the_file_before_waiting_on_the_homeserver", function()
-    upload_fixture(function(relay, file, requests, _, swap_on_context)
+    local outside_dir, outside_path = rx_fixture()
+    local outside_file = outside_dir .. "/outside.png"
+    local outside = assert(io.open(outside_file, "wb")); outside:write("LATE-LINK"); outside:close()
+    upload_fixture(function(relay, file, requests, _, swap_on_context, target)
       assert(relay:record_own_event(HOME, "$mine", "$mine"))
       swap_on_context(function()
-        local handle = assert(io.open(file, "wb")); handle:write("SWAPPED"); handle:close()
+        assert(os.remove(file))
+        remuda._test_create_symlink(target, file)
       end)
       local result = rx_cli({ "matrix", "--room", HOME, "upload", "--thread", "$mine", file })
       assert(result.code == 0, "threaded upload: " .. result.stderr .. result.stdout)
       local media
       for _, spec in ipairs(requests) do if spec.method == "POST" then media = spec end end
       assert(media and media.body == "PNGDATA", "the bytes are those read before the homeserver wait: " .. tostring(media and media.body))
+    end, true, outside_file)
+    remove_dir(outside_dir)
+  end }
+
+  rx_tests[#rx_tests + 1] = { "test_rx_agent_matrix_upload_confines_plain_threaded_symlink_and_inside_paths", function()
+    local dir, path = rx_fixture()
+    local outside_dir, outside_path = rx_fixture()
+    rx_with_dir(dir, function()
+      local relay = rx_relay(path)
+      relay_module.instance = relay
+      local inside = dir .. "/inside.png"
+      local outside = outside_dir .. "/outside.png"
+      for _, item in ipairs({ { inside, "INSIDE" }, { outside, "OUTSIDE" } }) do
+        local handle = assert(io.open(item[1], "wb")); handle:write(item[2]); handle:close()
+      end
+      assert(relay:record_own_event(HOME, "$mine", "$mine"))
+      local link = dir .. "/outside-link.png"
+      remuda._test_create_symlink(outside, link)
+      local function run_upload(args)
+        local requests, result = {}, nil
+        with_alias_http(path, function(spec)
+          requests[#requests + 1] = spec
+          if spec.method == "POST" then return { status = 200, body = '{"content_uri":"mxc://example.org/up1"}' } end
+          return { status = 200, body = '{"event_id":"$upload1"}' }
+        end, function(calls)
+          remuda._test_with_agent_file_caller(dir, function() result = rx_cli(args) end)
+          requests = calls
+        end)
+        return result, requests
+      end
+      local function refused(args, label)
+        local result, requests = run_upload(args)
+        local output = result.stderr .. result.stdout
+        if result.code == 0 or not output:find("outside this session's working directory", 1, true)
+            or not output:find("Next: copy it into your working directory first", 1, true) then
+          return label .. " did not show the confinement refusal and copy guidance: " .. output
+        end
+        if #requests ~= 0 then return label .. " sent " .. tostring(#requests) .. " request(s)" end
+      end
+      local failures = {}
+      local function check_refusal(args, label)
+        local failure = refused(args, label)
+        if failure then failures[#failures + 1] = failure end
+      end
+      check_refusal({ "matrix", "--room", HOME, "upload", outside }, "plain upload outside the working directory")
+      check_refusal({ "matrix", "--room", HOME, "upload", "--thread", "$mine", outside },
+        "threaded upload outside the working directory")
+      check_refusal({ "matrix", "--room", HOME, "upload", link }, "a symlink inside the working directory")
+      local result, requests = run_upload({ "matrix", "--room", HOME, "upload", inside })
+      if result.code ~= 0 then failures[#failures + 1] = "an inside path was refused: " .. result.stderr .. result.stdout end
+      local posted = false
+      for _, spec in ipairs(requests) do if spec.method == "POST" then posted = true end end
+      if not posted then failures[#failures + 1] = "the inside-path control did not upload the file" end
+      relay:stop()
+      assert(#failures == 0, table.concat(failures, "\n"))
     end)
+    remove_dir(outside_dir)
   end }
 
   rx_tests[#rx_tests + 1] = { "test_rx_upload_caption_is_the_body_and_the_name_is_the_filename", function()
@@ -5968,7 +6071,7 @@ end)()
 -- Scripted failures of the upload and the send, and `reply MAIL --attach` through the real
 -- mail, relay and commands.lua with the fake homeserver.
 ;(function()
-  local function with_commands(run)
+  local function with_commands(run, preserve_file_checker)
     local saved = { remuda._butler_commands_config, remuda._butler_contribute, remuda.extension_command,
       remuda._butler_reply_target, remuda._butler_file_for_caller, remuda.butler.typed_lines_cli,
       remuda.butler.approve_text, remuda.butler.schedule_cli, remuda._butler_command_run }
@@ -5982,7 +6085,7 @@ end)()
       if not room then error(event, 0) end
       return room, event
     end
-    remuda._butler_file_for_caller = function(p) return p end
+    if not preserve_file_checker then remuda._butler_file_for_caller = function(p) return p end end
     for _, name in ipairs({ "typed_lines_cli", "approve_text", "schedule_cli" }) do
       remuda.butler[name] = { cli = function() end }
     end
@@ -6005,7 +6108,7 @@ end)()
     if not ok then error(returned, 0) end
     return captured or returned
   end
-  local function attach_fixture(handler, run)
+  local function attach_fixture(handler, run, preserve_file_checker)
     local dir, path = rx_fixture()
     rx_with_dir(dir, function()
       local file = dir .. "/shot.png"
@@ -6020,7 +6123,7 @@ end)()
           requests[#requests + 1] = spec
           return handler(spec)
         end, function()
-          with_commands(function() run(relay, file, mail_id, requests) end)
+          with_commands(function() run(relay, file, mail_id, requests) end, preserve_file_checker)
         end)
       end)
     end)
@@ -6075,6 +6178,27 @@ end)()
       assert(run_reply({ "reply", plain, "--attach" }) == nil, "--attach without a path gets the usage")
       assert(#requests == 0, "nothing is sent")
     end)
+  end }
+
+  rx_tests[#rx_tests + 1] = { "test_rx_agent_reply_attach_refuses_path_outside_working_directory", function()
+    local outside_dir, outside_path = rx_fixture()
+    local outside_file = outside_dir .. "/outside.png"
+    local outside = assert(io.open(outside_file, "wb")); outside:write("OUTSIDE"); outside:close()
+    attach_fixture(ok_handler, function(_, file, mail_id, requests)
+      local cwd = file:match("^(.*)/[^/]+$")
+      local result
+      remuda._test_with_agent_file_caller(cwd, function()
+        with_commands(function()
+          result = run_reply({ "reply", mail_id, "--attach", outside_file })
+        end, true)
+      end)
+      local output = result.stderr .. result.stdout
+      assert(result.code ~= 0 and output:find("outside this session's working directory", 1, true)
+        and output:find("Next: copy it into your working directory first", 1, true),
+        "reply --attach outside must show the confinement refusal and copy guidance: " .. output)
+      assert(#requests == 0, "a refused reply attachment sends nothing")
+    end, true)
+    remove_dir(outside_dir)
   end }
 
   rx_tests[#rx_tests + 1] = { "test_rx_upload_scripted_failures_register_nothing", function()
