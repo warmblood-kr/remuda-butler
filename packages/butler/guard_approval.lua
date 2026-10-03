@@ -141,7 +141,7 @@ function M.maybe_request(record, hook_json)
   if #text > MAX_TEXT or (type(raw) == "string" and #raw > MAX_TEXT) then return nil end
   -- Redaction rewrites text it masks; the owner must approve exactly what would run, so a call
   -- the redaction changed keeps Claude's own prompt.
-  if type(raw) == "string" and text ~= (raw:gsub("%c", " ")) then return nil end
+  if type(raw) == "string" and (raw:find("%c") or text ~= raw) then return nil end
   local session = record.session ~= "" and record.session or "unknown"
   local data = { tool = policy.redact(record.tool, 120), class = record.class, agent = record.kind,
     cwd = policy.redact(hook_json.cwd, 300), session = policy.redact(session, 120), text = text }
