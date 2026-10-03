@@ -317,7 +317,7 @@ function matrix.upload(opts, on_done)
     if not body then return done({ error = encode_error }) end
     current = matrix.request_json({ method = "PUT",
       path = "/_matrix/client/v3/rooms/" .. path_component(room)
-        .. "/send/" .. msgtype .. "/" .. next_txn(),
+        .. "/send/m.room.message/" .. next_txn(),
       room = room, body = body, headers = { ["Content-Type"] = "application/json" },
     }, function(result)
       if result.error then return done(result) end
