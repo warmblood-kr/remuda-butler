@@ -25,6 +25,7 @@ local MAX_QUARANTINE_ITEMS = 200
 local MAX_QUARANTINE_PREVIEW_BYTES = 1024
 local QUARANTINE_TTL_SECONDS = 30 * 24 * 60 * 60
 local MAX_MAIL_ROUTES = 5000
+local MAX_OWN_EVENTS_PER_ROOM = 500
 local MAX_THREAD_SUBSCRIPTIONS = 5000
 local MAX_REPLY_OUTBOX = 1000
 local MAX_REPLY_RESULTS = 5000
@@ -473,6 +474,7 @@ end
 local function empty_state()
   return { since = nil, messages_since = nil, processed = {}, processed_order = {},
     pending = json.object({}), quarantine = json.array({}), routes = json.object({}),
+    own_events = json.object({}),
     invite_dedupe = json.object({}),
     subscriptions = json.object({}),
     auto_join_timestamps = json.array({}),
@@ -502,6 +504,7 @@ local function load_state(path)
   local pending = value.pending_events or json.object({})
   local quarantine = value.quarantine or json.array({})
   local routes = value.matrix_mail_routes or json.object({})
+  local own_events = value.matrix_own_events or json.object({})
   local reply_outbox = value.matrix_reply_outbox or json.object({})
   local reply_results = value.matrix_reply_results or json.object({})
   local subscriptions = value.matrix_thread_subscriptions or json.object({})
@@ -518,6 +521,7 @@ local function load_state(path)
     or type(quarantine) ~= "table" or quarantine == json.null
     or getmetatable(quarantine) ~= JSON_ARRAY_MT
     or type(routes) ~= "table" or routes == json.null or getmetatable(routes) == JSON_ARRAY_MT
+    or type(own_events) ~= "table" or own_events == json.null or getmetatable(own_events) == JSON_ARRAY_MT
     or type(reply_outbox) ~= "table" or reply_outbox == json.null or getmetatable(reply_outbox) == JSON_ARRAY_MT
     or type(reply_results) ~= "table" or reply_results == json.null or getmetatable(reply_results) == JSON_ARRAY_MT
     or type(subscriptions) ~= "table" or subscriptions == json.null or getmetatable(subscriptions) == JSON_ARRAY_MT
@@ -540,6 +544,7 @@ local function load_state(path)
   local quarantine_pruned = false
   state.since, state.messages_since = since, messages_since
   state.quarantine, state.routes = json.array({}), json.object({})
+  state.own_events = json.object({})
   state.reply_outbox, state.reply_results = json.object({}), json.object({})
   state.invite_dedupe = json.object({})
   state.typed_line_timestamps = json.array({})
@@ -628,6 +633,19 @@ local function load_state(path)
       state.routes[id] = route
     end
   end
+  for room_id, events in pairs(own_events) do
+    if valid_room_id(room_id) and type(events) == "table" and getmetatable(events) == JSON_ARRAY_MT then
+      local valid = json.array({})
+      for _, item in ipairs(events) do
+        if type(item) == "table" and valid_event_key(item.event_id)
+          and valid_event_key(item.thread_root) then
+          valid[#valid + 1] = { event_id = item.event_id, thread_root = item.thread_root }
+        end
+      end
+      while #valid > MAX_OWN_EVENTS_PER_ROOM do table.remove(valid, 1) end
+      state.own_events[room_id] = valid
+    end
+  end
   for id, item in pairs(reply_outbox) do
     if type(id) == "string" and type(item) == "table"
       and type(item.source_mail_id) == "string" and type(item.room_id) == "string"
@@ -655,6 +673,7 @@ local function save_state(path, state)
   local json = encode({ since = state.since, processed_event_ids = processed,
     messages_since = state.messages_since, pending_events = state.pending,
     quarantine = state.quarantine, matrix_mail_routes = state.routes,
+    matrix_own_events = state.own_events,
     matrix_reply_outbox = state.reply_outbox, matrix_reply_results = state.reply_results,
     matrix_thread_subscriptions = state.subscriptions, approvals = state.approvals,
     invite_dedupe = state.invite_dedupe,
@@ -906,13 +925,39 @@ function relay.new(options)
     return false
   end
 
+  function instance:record_own_event(room_id, event_id, thread_root)
+    if not valid_room_id(room_id) or cfg.rooms[room_id] == nil or not valid_event_key(event_id) then return false end
+    thread_root = valid_event_key(thread_root) and thread_root or event_id
+    local events = state.own_events[room_id] or json.array({})
+    for index, item in ipairs(events) do
+      if item.event_id == event_id then table.remove(events, index); break end
+    end
+    events[#events + 1] = { event_id = event_id, thread_root = thread_root }
+    while #events > MAX_OWN_EVENTS_PER_ROOM do table.remove(events, 1) end
+    state.own_events[room_id] = events
+    persist()
+    return true
+  end
+
+  local function own_event_for(event_id)
+    for room_id, events in pairs(state.own_events) do
+      if cfg.rooms[room_id] ~= nil then
+        for _, item in ipairs(events) do
+          if item.event_id == event_id then
+            return { room_id = room_id, thread_root = item.thread_root }
+          end
+        end
+      end
+    end
+  end
+
   function instance:can_reply_to(event_id)
     for _, route in pairs(state.routes) do
       if route.event_id == event_id or route.last_reply_event_id == event_id then
         return true
       end
     end
-    return false
+    return own_event_for(event_id) ~= nil
   end
 
   function instance:thread_root_for_event(event_id)
@@ -921,7 +966,8 @@ function relay.new(options)
         return route.thread_root or route.event_id
       end
     end
-    return event_id
+    local own = own_event_for(event_id)
+    return own and own.thread_root or event_id
   end
 
   function instance:route_for_event(event_id)
@@ -932,6 +978,8 @@ function relay.new(options)
           allowlisted_human = route.allowlisted_human == true }
       end
     end
+    local own = own_event_for(event_id)
+    if own then return own end
   end
 
   function instance:subscribe_thread(room_id, thread_id, mail_id)

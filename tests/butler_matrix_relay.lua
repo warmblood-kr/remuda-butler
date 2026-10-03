@@ -4286,6 +4286,55 @@ local function test_rx_reply_to_undelivered_event_says_not_sent()
   end)
 end
 
+function test_rx_reply_to_own_event_keeps_thread_root()
+  local dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    local relay = rx_relay(path)
+    relay_module.instance = relay
+    rx_post_http(path, function(calls, posted)
+      local result = rx_cli({ "matrix", "send", "own root" })
+      assert(result.code == 0 and relay:can_reply_to("$own1"),
+        "a message sent by this Butler can be replied to: " .. tostring(result.stderr))
+      local route = relay:route_for_event("$own1")
+      assert(route and route.room_id == HOME and route.thread_root == "$own1",
+        "an own root event keeps its room and is its own thread root")
+
+      result = rx_cli({ "matrix", "reply", "$own1", "reply to root" })
+      assert(result.code == 0 and posted() == 2, "replying to our own root posts: " .. tostring(result.stderr))
+      route = relay:route_for_event("$own2")
+      assert(route and route.room_id == HOME and route.thread_root == "$own1",
+        "the outgoing thread reply is recorded under its root")
+
+      result = rx_cli({ "matrix", "reply", "$own2", "reply to reply" })
+      assert(result.code == 0 and posted() == 3, "replying to our own thread reply posts: " .. tostring(result.stderr))
+      local relations = {}
+      for _, call in ipairs(calls) do
+        if call.method == "PUT" then
+          local content = assert(matrix.decode_json(call.body))
+          if content.body == "reply to root" or content.body == "reply to reply" then
+            relations[content.body] = content["m.relates_to"]
+          end
+        end
+      end
+      assert(relations["reply to root"] and relations["reply to root"].rel_type == "m.thread"
+        and relations["reply to root"].event_id == "$own1"
+        and relations["reply to root"]["m.in_reply_to"].event_id == "$own1",
+        "a reply to our root is posted as a thread relation on that root")
+      assert(relations["reply to reply"] and relations["reply to reply"].rel_type == "m.thread"
+        and relations["reply to reply"].event_id == "$own1"
+        and relations["reply to reply"]["m.in_reply_to"].event_id == "$own2",
+        "a reply to our thread reply keeps the root and names that event as its target")
+
+      local refused = rx_cli({ "matrix", "reply", "$foreign-unknown", "no" })
+      local refusal_text = "Reply not sent: event $foreign-unknown was not delivered to this Butler as mail, so its sender cannot be verified.\n"
+        .. "Next: remuda butler inbox (you can only reply to events listed there)"
+      assert(refused.code ~= 0 and refused.stderr:find(refusal_text, 1, true)
+        and posted() == 3, "an unknown foreign event keeps the original refusal without posting")
+    end)
+    relay:stop()
+  end)
+end
+
 -- Receive rules PR 2, mail path: relay:queue_mail_reply obeys the same limits
 -- as the CLI reply.
 local function rx_mail_id(delivered, event_id)
@@ -5455,6 +5504,7 @@ rx_tests = {
   { "test_rx_untrusted_room_cap_summary_no_quarantine", test_rx_untrusted_room_cap_summary_no_quarantine },
   { "test_rx_untrusted_room_cap_summary_floor_10min", test_rx_untrusted_room_cap_summary_floor_10min },
   { "test_rx_reply_to_undelivered_event_says_not_sent", test_rx_reply_to_undelivered_event_says_not_sent },
+  { "test_rx_reply_to_own_event_keeps_thread_root", test_rx_reply_to_own_event_keeps_thread_root },
   { "test_rx_mail_reply_turn_guard", test_rx_mail_reply_turn_guard },
   { "test_rx_mail_reply_limit_turn_is_posted_through_matrix_reply", test_rx_mail_reply_limit_turn_is_posted_through_matrix_reply },
   { "test_rx_mail_reply_posts_per_hour", test_rx_mail_reply_posts_per_hour },
