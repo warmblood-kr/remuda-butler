@@ -78,21 +78,30 @@ end
 
 local fallback
 if host._butler_start_fallback then host.cancel(host._butler_start_fallback) end
-fallback = host.schedule({ name = "butler-start-fallback", every = 0.05, run = function()
-  host.cancel(fallback)
-  if host._butler_start_fallback == fallback then host._butler_start_fallback = nil end
-  if not booted then
-    io.stderr:write("butler: this remuda core ignores the lifecycle start hook"
-      .. " (warmblood-kr/remuda#104); booted by fallback -- run `remuda upgrade`\n")
-    boot()
-  end
-end })
-host._butler_start_fallback = fallback
+-- A core with `_exec_commands` honors `start` and may load this mod for its
+-- commands alone: it owns the start, so only older cores get the fallback boot.
+if host._exec_commands == nil then
+  fallback = host.schedule({ name = "butler-start-fallback", every = 0.05, run = function()
+    host.cancel(fallback)
+    if host._butler_start_fallback == fallback then host._butler_start_fallback = nil end
+    if not booted then
+      io.stderr:write("butler: this remuda core ignores the lifecycle start hook"
+        .. " (warmblood-kr/remuda#104); booted by fallback -- run `remuda upgrade`\n")
+      boot()
+    end
+  end })
+  host._butler_start_fallback = fallback
+end
 
 return {
   api = "remuda-module-v1",
   state_version = 1,
   initialize = function() return { compaction_enabled = false, active_choosers = {}, next_chooser_id = 0 } end,
+  -- Registers the CLI verbs only; `start` boots. Cores without the hook ignore this field.
+  commands = function(state)
+    host._butler_state = state
+    load_main()
+  end,
   start = function(state)
     host._butler_state = state
     boot()
@@ -126,17 +135,17 @@ return {
   },
   schedules = {
     { name = "butler-notices", every = 1, run = function()
-      if host._butler_deliver_notices then host._butler_deliver_notices() end
+      if booted and host._butler_deliver_notices then host._butler_deliver_notices() end
     end },
     { name = "butler-reconcile", every = host._butler_reconcile_interval or 2, run = function()
-      if host._butler_reconcile then host._butler_reconcile() end
+      if booted and host._butler_reconcile then host._butler_reconcile() end
     end },
     { name = "butler-schedule", every = 30, run = function()
-      if host._butler_schedule_tick then host._butler_schedule_tick() end
+      if booted and host._butler_schedule_tick then host._butler_schedule_tick() end
     end },
     { name = "butler-compaction", every = host._butler_compaction_interval or 45, run = function()
       local state = host._butler_state or host._butler_compaction_state
-      if state and state.compaction_enabled and host._butler_compaction_tick then host._butler_compaction_tick() end
+      if booted and state and state.compaction_enabled and host._butler_compaction_tick then host._butler_compaction_tick() end
     end },
   },
   contributes = {
