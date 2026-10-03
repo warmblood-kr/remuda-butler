@@ -5662,6 +5662,123 @@ rx_tests[#rx_tests + 1] = { "test_rx_cli_json_room_send_then_reply_threads_on_ro
   end)
 end }
 
+-- Own-event reply table (#326): restart persistence, trim, load hardening,
+-- failed sends, and the post slot a reply to an own event takes.
+
+rx_tests[#rx_tests + 1] = { "test_rx_own_event_survives_a_relay_restart", function()
+  local dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    local relay = rx_relay(path)
+    relay_module.instance = relay
+    rx_post_http(path, function(_, posted)
+      local sent = rx_cli({ "matrix", "send", "root" })
+      assert(sent.code == 0 and relay:can_reply_to("$own1"), "send is recorded: " .. sent.stderr)
+      relay:stop()
+      local restarted = rx_relay(path)
+      relay_module.instance = restarted
+      local route = restarted:route_for_event("$own1")
+      assert(route and route.room_id == HOME and route.thread_root == "$own1", "the record is reloaded")
+      local reply = rx_cli({ "matrix", "reply", "$own1", "after restart" })
+      assert(reply.code == 0 and posted() == 2, "reply after restart posts: " .. reply.stderr)
+      restarted:stop()
+    end)
+  end)
+end }
+
+rx_tests[#rx_tests + 1] = { "test_rx_own_events_keep_the_newest_500_per_room", function()
+  local dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    local relay = rx_relay(path)
+    for index = 1, 501 do assert(relay:record_own_event(HOME, "$e" .. index, "$e" .. index)) end
+    assert(not relay:can_reply_to("$e1"), "the 501st record evicts the oldest")
+    assert(relay:can_reply_to("$e2") and relay:can_reply_to("$e501"), "the rest and the newest stay")
+    local saved = assert(matrix.decode_json(read_text(path .. ".since")))
+    assert(#saved.matrix_own_events[HOME] == 500, "500 are persisted, got " .. #saved.matrix_own_events[HOME])
+    assert(not relay:record_own_event(HOME, "bad-id", "$x"), "an id without $ is refused")
+    assert(not relay:record_own_event("!gone:example.org", "$g", "$g"), "an unconfigured room is refused")
+    relay:stop()
+  end)
+end }
+
+rx_tests[#rx_tests + 1] = { "test_rx_own_events_load_ignores_malformed_duplicate_and_unconfigured", function()
+  local dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    local home_events = { "text", 5, { event_id = "bad", thread_root = "$r" },
+      { event_id = "$ok", thread_root = "$ok" }, { event_id = "$dup", thread_root = "$from-home" },
+      { event_id = "$nothread" } }
+    local state = { matrix_own_events = {
+      [HOME] = home_events,
+      [NEW] = { { event_id = "$dup", thread_root = "$from-new" }, { event_id = "$new1", thread_root = "$new1" } },
+      ["!gone:example.org"] = { { event_id = "$gone", thread_root = "$gone" } },
+      ["not-a-room"] = { { event_id = "$odd", thread_root = "$odd" } },
+    } }
+    local file = assert(io.open(path .. ".since", "wb"))
+    file:write(assert(matrix.encode_json(state)))
+    file:close()
+    local relay = rx_relay(path)
+    assert(relay:can_reply_to("$ok") and relay:can_reply_to("$new1"), "valid records load")
+    for _, id in ipairs({ "bad", "$nothread", "$gone", "$odd" }) do
+      assert(not relay:can_reply_to(id), id .. " is ignored")
+    end
+    local dup = relay:route_for_event("$dup")
+    assert(dup and dup.room_id == NEW and dup.thread_root == "$from-new",
+      "a duplicate id belongs to the first room in sorted order")
+    relay:stop()
+  end)
+end }
+
+rx_tests[#rx_tests + 1] = { "test_rx_own_events_load_reads_only_the_newest_500_raw_entries", function()
+  local dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    local events = {}
+    for index = 1, 600 do events[index] = { event_id = "$h" .. index, thread_root = "$h" .. index } end
+    local file = assert(io.open(path .. ".since", "wb"))
+    file:write(assert(matrix.encode_json({ matrix_own_events = { [HOME] = events } })))
+    file:close()
+    local relay = rx_relay(path)
+    assert(not relay:can_reply_to("$h100") and relay:can_reply_to("$h101") and relay:can_reply_to("$h600"),
+      "the newest 500 load")
+    relay:stop()
+  end)
+end }
+
+rx_tests[#rx_tests + 1] = { "test_rx_failed_send_registers_no_own_event", function()
+  local dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    local relay = rx_relay(path)
+    relay_module.instance = relay
+    with_alias_http(path, function() return { status = 500, body = "{}" } end, function()
+      local sent = rx_cli({ "matrix", "send", "doomed" })
+      assert(sent.code ~= 0, "the send fails")
+      assert(relay:route_for_event("$own0") == nil and not relay:can_reply_to("$own0"), "nothing is recorded")
+      local saved = io.open(path .. ".since", "rb")
+      local text = saved and saved:read("a") or ""
+      if saved then saved:close() end
+      assert(not text:find("$", 1, true) or not text:find('"event_id"', 1, true), "no own event is persisted")
+    end)
+    relay:stop()
+  end)
+end }
+
+-- A reply to an own event is not a reply to an allowlisted person: it takes a post slot.
+rx_tests[#rx_tests + 1] = { "test_rx_reply_to_own_event_takes_post_slot", function()
+  local dir, path = invite_fixture(OWNER, "posts_per_hour=1\n")
+  rx_with_dir(dir, function() rx_fresh_hour(function()
+    local relay = rx_relay(path)
+    relay_module.instance = relay
+    assert(relay:record_own_event(HOME, "$mine", "$mine"))
+    rx_post_http(path, function(_, posted)
+      local reply = rx_cli({ "matrix", "reply", "$mine", "answer" })
+      assert(reply.code == 0 and posted() == 1, "the reply is under posts_per_hour=1: " .. reply.stderr)
+      local second = rx_cli({ "matrix", "reply", "$mine", "again" })
+      assert(second.code ~= 0 and (second.stderr .. second.stdout):find("Matrix post limit reached (1 per hour)", 1, true),
+        "the reply took the only slot, got: " .. second.stderr .. second.stdout)
+      assert(posted() == 1, "only one is posted, got " .. posted())
+    end)
+    relay:stop()
+  end) end)
+end }
+
 -- The relations page does not contain the delivered event: 21 newer thread
 -- messages arrived before the fetch. They were sent AFTER the delivered one, so
 -- none of them is an earlier message: the block is the root line and the

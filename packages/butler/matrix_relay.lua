@@ -482,7 +482,7 @@ local function empty_state()
     reply_outbox = json.object({}), reply_results = json.object({}), approvals = json.object({}) }
 end
 
-local function load_state(path)
+local function load_state(path, rooms)
   local file = io.open(path, "rb")
   local recovered_backup = false
   if not file then
@@ -633,16 +633,24 @@ local function load_state(path)
       state.routes[id] = route
     end
   end
-  for room_id, events in pairs(own_events) do
+  -- Own events load for configured rooms only (all rooms when no config is
+  -- given), in sorted room order, newest MAX_OWN_EVENTS_PER_ROOM raw entries per
+  -- room. An event id is kept once: the first sorted room that lists it wins.
+  local own_rooms, seen_own = {}, {}
+  for room_id in pairs(rooms or own_events) do own_rooms[#own_rooms + 1] = room_id end
+  table.sort(own_rooms)
+  for _, room_id in ipairs(own_rooms) do
+    local events = own_events[room_id]
     if valid_room_id(room_id) and type(events) == "table" and getmetatable(events) == JSON_ARRAY_MT then
       local valid = json.array({})
-      for _, item in ipairs(events) do
+      for index = math.max(1, #events - MAX_OWN_EVENTS_PER_ROOM + 1), #events do
+        local item = events[index]
         if type(item) == "table" and valid_event_key(item.event_id)
-          and valid_event_key(item.thread_root) then
+          and valid_event_key(item.thread_root) and not seen_own[item.event_id] then
+          seen_own[item.event_id] = true
           valid[#valid + 1] = { event_id = item.event_id, thread_root = item.thread_root }
         end
       end
-      while #valid > MAX_OWN_EVENTS_PER_ROOM do table.remove(valid, 1) end
       state.own_events[room_id] = valid
     end
   end
@@ -690,7 +698,7 @@ function relay.new(options)
   local cfg, config_error = read_config(config_path)
   if not cfg then error(config_error, 0) end
   local state_path, ack_path = config_path .. ".since", config_path .. ".acks"
-  local state, state_error, quarantine_pruned = load_state(state_path)
+  local state, state_error, quarantine_pruned = load_state(state_path, cfg.rooms)
   if state_error then
     warn_once("state", state_path .. "\0" .. state_error,
       "butler invalid Matrix relay state; starting from a fresh baseline: " .. tostring(state_error))
