@@ -311,8 +311,35 @@ command(20, "launch", "  remuda butler launch <claude|codex|monocle> [name] [--m
   if not ok then return refuse(profile) end
   return remuda._butler_launch(args[2], name, model, parent, profile)
 end)
+local TOPIC_NEW_CLI_SPEC = {
+  name = "remuda butler topic",
+  verbs = {
+    new = {
+      about = "Create a Butler topic",
+      options = {
+        { long = "template", value = "TEMPLATE", help = "Topic template" },
+        { long = "agent", value = "AGENT", help = "Agent kind to launch" },
+        { long = "model", value = "MODEL", help = "Model for the launched agent" },
+      },
+      args = { { name = "NAME", help = "Topic name" } },
+      next = "remuda butler topic new --help",
+    },
+  },
+}
 command(30, "topic", "  remuda butler topic new <name> [--template T] [--agent A] [--model M]\n"
   .. "  remuda butler topic delegate <name> [--agent A] [--leader L] [--model M] [--cwd DIR] [--writable DIR]... [--sandbox full] <task...>", function(args, caller)
+  local cli = remuda.cli
+  if type(cli) == "table" and type(cli.parse) == "function" and args[2] == "new" then
+    local argv = {}
+    for index = 2, #args do argv[#argv + 1] = args[index] end
+    local report = cli.parse(TOPIC_NEW_CLI_SPEC, argv)
+    if report.kind == "help" then return report.text end
+    if not report.ok then
+      if type(remuda.fail) == "function" then return remuda.fail(report.text, report.code) end
+      error(report.text, 0)
+    end
+    return remuda._butler_topic_new(report.values.NAME, report.values.template, report.values.agent, report.values.model)
+  end
   if args[2] == "new" and args[3] then
     local template, kind, model, i = nil, nil, nil, 4
     while i <= #args do
