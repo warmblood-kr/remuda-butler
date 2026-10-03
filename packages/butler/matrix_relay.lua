@@ -1647,7 +1647,9 @@ function relay.new(options)
         if (event_id == "" or (not state.processed[event_id] and not state.pending[event_id]))
           and ev.sender ~= cfg.self_mxid then
           local content = type(ev.content) == "table" and ev.content or {}
-          if content["app.remuda.approval"] ~= nil then
+          local is_butler_sender = cfg.butler_senders[ev.sender] == true
+            or member_kind(ev.sender, cfg) == "AGENT"
+          if content["app.remuda.approval"] ~= nil and is_butler_sender then
             if event_id ~= "" then add_processed(state, event_id) end
             if cursor then state.since = cursor end
             persist()

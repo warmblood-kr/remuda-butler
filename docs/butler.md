@@ -444,15 +444,13 @@ are excluded. A second human who is not on the allowlist can read the request
 in a shared room but cannot answer it. The lounge must stay the owner plus the
 owner's own butlers, otherwise set `approval_room=home`.
 
-In the lounge, summaries are limited to 200 bytes and prepared-text code blocks
-to 1 KiB. When either display is cut, the lounge post says the full text is in
-HOME and Butler posts one full copy there without an owner mention. Answer the
-request in the room where it was posted; the HOME copy is informational. The
-stored request and hash retain the full text, and Butler types the full stored
-text after approval. Approval posts carry `app.remuda.approval=true`; relays
-skip those events before quarantine or delivery to prevent Butler-to-Butler
-loops. If the lounge post fails, Butler reports `Could not post approval request`
-and does not retry the request in HOME.
+The lounge accepts prepared text up to 1 KiB. Longer prepared-text requests are
+posted whole in HOME with the full text and hash, and HOME is the only room
+where they can be answered. There is no second HOME copy. Butler types the full
+stored text after approval. Approval posts carry `app.remuda.approval=true`; relays skip marked
+events from Butler senders before quarantine or delivery to prevent
+Butler-to-Butler loops. If the lounge post fails, Butler reports `Could not post
+approval request` and does not retry the request in HOME.
 
 The owner answers with a ✅ or ❌ reaction, or a `yes`/`no` reply, to that exact
 message within 30 minutes (`approval_ttl_minutes`, 1 to 1440; Claude guard

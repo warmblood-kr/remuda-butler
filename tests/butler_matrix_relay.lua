@@ -7564,34 +7564,19 @@ function remuda._t359.test_failed_lounge_post_does_not_fall_back_to_home()
   end, nil, ALL)
 end
 
-function remuda._t359.test_approval_lounge_summary_cap_and_home_copy()
-  approval_env(nil, function(env)
-    local summary = string.rep("한", 80)
-    local id
-    approval().request({ kind = "summary_cap_test", key = "summary", asker = ASKER,
-      summary = summary, on_id = function(value) id = value end })
-    env.client:pump()
-    local lounge = remuda._t359.room_posts(env, ALL, "Butler wants to ")[1]
-    local copy = remuda._t359.room_posts(env, HOME, "Copy of request " .. id)[1]
-    local shown = lounge.body:match("Butler wants to ([^\n]+)")
-    assert(shown and #shown <= 200 and lounge.body:find("full text in HOME", 1, true),
-      "the lounge summary is capped at 200 bytes and points to HOME")
-    assert(copy and copy.body:find(summary, 1, true) and not copy.content["m.mentions"]
-      and copy.content["app.remuda.approval"] == true,
-      "HOME receives one full, unmentioned, marked copy")
-  end, nil, ALL)
-end
-
 function remuda._t359.test_approval_marker_skips_live_sync_and_backfill()
   approval_env(nil, function(env)
     local marked = text_event("$marked-live", "@helper:example.org", "approval chatter")
     marked.content["app.remuda.approval"] = true
     local plain = text_event("$plain-live", "@helper:example.org", "ordinary chatter")
-    room_events(env, { marked, plain }, HOME)
+    local non_butler = text_event("$non-butler-marked-live", STRANGER, "marked human chatter")
+    non_butler.content["app.remuda.approval"] = true
+    room_events(env, { marked, plain, non_butler }, HOME)
     local state = env.relay:state()
     assert(state.pending["$marked-live"] == nil and state.processed["$marked-live"]
-      and delivered_ids(env.delivered, "$plain-live") and not delivered_ids(env.delivered, "$marked-live"),
-      "live sync skips marked approval messages while unmarked control is delivered")
+      and delivered_ids(env.delivered, "$plain-live") and not delivered_ids(env.delivered, "$marked-live")
+      and delivered_ids(env.delivered, "$non-butler-marked-live"),
+      "live sync skips marked Butler posts; unmarked control and marked non-Butler messages are delivered")
   end, "butler_senders=@helper:example.org\n")
 
   approval_env(nil, function(env)
@@ -7608,30 +7593,49 @@ function remuda._t359.test_approval_marker_skips_live_sync_and_backfill()
   end, "mode=messages\nbutler_senders=@helper:example.org\n")
 end
 
-function remuda._t359.test_long_lounge_prepared_text_is_cut_but_full_text_is_typed()
+function remuda._t359.test_long_prepared_text_routes_home_only_and_types_full_text()
   with_approved_text_stubs(function(typed)
     approval_env(nil, function(env)
-      local bytes = string.rep("x", 1600)
+      local bytes = string.rep("x", 1025)
       local id = assert(remuda.butler.approve_text.request("butler", bytes, ASKER))
       env.client:pump()
       local rec = env.relay:state().approvals[id]
-      local lounge = remuda._t359.room_posts(env, ALL, "Approve prepared text for")[1]
-      local copy = remuda._t359.room_posts(env, HOME, "Copy of request " .. id)[1]
-      local block = lounge.body:match("(```\n.-\n```)")
+      local home_post = remuda._t359.room_posts(env, HOME, "Approve prepared text for")[1]
       assert(rec and rec.data.registered_text == bytes and rec.data.bytes == #bytes
-        and rec.data.display_fingerprint == id .. "/" .. #bytes,
-        "the stored prepared text and fingerprint retain the full registered bytes")
-      assert(block and #block <= 1024 and lounge.body:find("full text in HOME", 1, true),
-        "the lounge code block stays within 1 KiB and points to HOME")
-      assert(copy and copy.body:find(bytes, 1, true) and not copy.content["m.mentions"],
-        "HOME receives the full prepared-text request without an owner mention")
-      assert(copy.content["app.remuda.approval"] == true,
-        "the HOME copy also carries the relay-loop marker")
-      room_events(env, { text_event("$prepared-copy-cannot-answer", OWNER, "yes " .. id) }, HOME)
-      assert(rec.status == "open" and #typed == 0, "the HOME copy cannot answer a lounge request")
+        and rec.data.display_fingerprint == id .. "/" .. #bytes and rec.room_id == HOME,
+        "the stored prepared text, fingerprint, and answer room retain the full request")
+      assert(home_post and home_post.body:find(bytes, 1, true)
+        and home_post.body:find(id .. "/" .. #bytes, 1, true),
+        "HOME contains the complete 1 KiB plus one byte request and its full fingerprint")
+      assert(#remuda._t359.room_posts(env, ALL) == 0,
+        "a long prepared-text request never reaches the lounge")
       room_events(env, { text_event("$prepared-lounge-answer", OWNER, "yes " .. id) }, ALL)
-      assert(#typed == 1 and typed[1].bytes == bytes,
-        "answering in the lounge types the entire stored prepared text")
+      assert(rec.status == "open" and #typed == 0,
+        "a lounge answer cannot approve a request that was posted in HOME")
+      room_events(env, { text_event("$prepared-home-answer", OWNER, "yes " .. id) }, HOME)
+      assert(rec.status == "applied" and #typed == 1 and typed[1].bytes == rec.data.registered_text
+        and typed[1].bytes == bytes,
+        "answering the HOME-only request types exactly the full stored text")
+    end, "approve_text=true\n", ALL)
+  end)
+end
+
+function remuda._t359.test_multibyte_prepared_text_boundary_routes_without_truncation()
+  with_approved_text_stubs(function(typed)
+    approval_env(nil, function(env)
+      local bytes = string.rep("a", 1021) .. "界"
+      assert(#bytes == 1024, "fixture must end at the 1 KiB UTF-8 byte boundary")
+      local id = assert(remuda.butler.approve_text.request("butler", bytes, ASKER))
+      env.client:pump()
+      local rec = env.relay:state().approvals[id]
+      local home_post = remuda._t359.room_posts(env, HOME, "Approve prepared text for")[1]
+      assert(rec and rec.room_id == HOME and rec.data.registered_text == bytes
+        and home_post and home_post.body:find(bytes, 1, true)
+        and #remuda._t359.room_posts(env, ALL) == 0,
+        "the full multibyte boundary text is routed to HOME without a lounge post")
+      room_events(env, { text_event("$prepared-multibyte-home", OWNER, "yes " .. id) }, HOME)
+      assert(#typed == 1 and typed[1].bytes == bytes and rec.data.registered_text == bytes,
+        "the multibyte boundary request types the exact stored bytes")
     end, "approve_text=true\n", ALL)
   end)
 end
@@ -8048,9 +8052,9 @@ for _, case in ipairs({
   { "test_approval_room_falls_back_to_home_without_joined_lounge", remuda._t359.test_approval_room_falls_back_to_home_without_joined_lounge },
   { "test_approval_room_home_mode_and_kind_fallback", remuda._t359.test_approval_room_home_mode_and_kind_fallback },
   { "test_failed_lounge_post_does_not_fall_back_to_home", remuda._t359.test_failed_lounge_post_does_not_fall_back_to_home },
-  { "test_approval_lounge_summary_cap_and_home_copy", remuda._t359.test_approval_lounge_summary_cap_and_home_copy },
   { "test_approval_marker_skips_live_sync_and_backfill", remuda._t359.test_approval_marker_skips_live_sync_and_backfill },
-  { "test_long_lounge_prepared_text_is_cut_but_full_text_is_typed", remuda._t359.test_long_lounge_prepared_text_is_cut_but_full_text_is_typed },
+  { "test_long_prepared_text_routes_home_only_and_types_full_text", remuda._t359.test_long_prepared_text_routes_home_only_and_types_full_text },
+  { "test_multibyte_prepared_text_boundary_routes_without_truncation", remuda._t359.test_multibyte_prepared_text_boundary_routes_without_truncation },
   { "test_approval_expiry_is_configurable_and_a_fence_in_the_text_falls_back_to_quotes", remuda._t359.test_approval_expiry_is_configurable_and_a_fence_in_the_text_falls_back_to_quotes },
   { "test_approved_text_live_owner_reply_types_exact_bytes_once", test_approved_text_live_owner_reply_types_exact_bytes_once },
   { "test_approved_text_unknown_explicit_id_never_uses_reply_target", test_approved_text_unknown_explicit_id_never_uses_reply_target },

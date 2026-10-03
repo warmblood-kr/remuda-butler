@@ -20,23 +20,6 @@ local function safe_line(value, limit)
   return (value:gsub("[\r\n]+", " "))
 end
 
-local function byte_prefix(text, limit)
-  local at, finish = 1, 0
-  while at <= #text do
-    local first = text:byte(at)
-    local width = first < 0x80 and 1 or first < 0xe0 and 2 or first < 0xf0 and 3 or 4
-    if at + width - 1 > limit then break end
-    finish, at = at + width - 1, at + width
-  end
-  return text:sub(1, finish), finish < #text
-end
-
-local function cap_bytes(text, limit)
-  if #text <= limit then return text, false end
-  local prefix = byte_prefix(text, limit - 3)
-  return prefix .. "...", true
-end
-
 local CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 local function random_bytes(n)
   if type(remuda.random_bytes) == "function" then
@@ -361,10 +344,8 @@ function approval.request(request, done)
   local ttl_minutes = math.max(1, math.ceil((tonumber(request.ttl_s) or 600) / 60))
   local lounge = type(room_id) == "string" and type(attached.home_room) == "string"
     and room_id ~= attached.home_room
-  local display_summary, summary_cut = summary, false
-  if lounge then display_summary, summary_cut = cap_bytes(summary, 200) end
   local html, render_metadata
-  local text = table.concat({ "Butler wants to " .. (lounge and display_summary or summary),
+  local text = table.concat({ "Butler wants to " .. summary,
     "Asked by: " .. asker,
     "React ✅ or reply yes to THIS message within " .. tostring(ttl_minutes)
       .. " minutes. ❌ or no denies.",
@@ -373,7 +354,7 @@ function approval.request(request, done)
   if type(request.on_id) == "function" then pcall(request.on_id, id) end
   if type(request.render) == "function" then
     local rendered, value, value_html, metadata = pcall(request.render, rec,
-      { lounge = lounge, summary = display_summary, summary_cut = summary_cut })
+      { lounge = lounge, summary = summary })
     if not rendered or type(value) ~= "string" then
       finish(nil, "Could not prepare approval message: " .. tostring(value))
       return nil
@@ -381,31 +362,17 @@ function approval.request(request, done)
     text, html = value, type(value_html) == "string" and value_html or nil
     render_metadata = type(metadata) == "table" and metadata or nil
   end
-  local needs_home_copy = lounge and (summary_cut or render_metadata and render_metadata.display_cut == true)
-  if lounge and summary_cut then text = text .. "\nSummary shortened; full text in HOME." end
   if lounge and render_metadata and render_metadata.display_cut == true then
-    text = text .. "\nDisplayed text is shortened; full text in HOME. Approval uses the full stored request."
-  end
-  local home_copy_text, home_copy_html
-  if needs_home_copy then
+    room_id, rec.room_id, lounge = attached.home_room, attached.home_room, false
     if type(request.render) == "function" then
       local rendered, full_text, full_html = pcall(request.render, rec,
-        { lounge = false, summary = summary, summary_cut = false })
+        { lounge = false, summary = summary })
       if not rendered or type(full_text) ~= "string" then
-        finish(nil, "Could not prepare full approval request copy: " .. tostring(full_text))
+        finish(nil, "Could not prepare full approval request: " .. tostring(full_text))
         return nil
       end
-      home_copy_text, home_copy_html = full_text, type(full_html) == "string" and full_html or nil
-    else
-      home_copy_text = table.concat({ "Butler wants to " .. summary,
-        "Asked by: " .. asker,
-        "React ✅ or reply yes to THIS message within " .. tostring(ttl_minutes)
-          .. " minutes. ❌ or no denies.",
-        "Request " .. id,
-        "or: remuda butler approve " .. id }, "\n")
+      text, html = full_text, type(full_html) == "string" and full_html or nil
     end
-    home_copy_text = "Copy of request " .. id .. ". Answer in the lounge; this HOME copy is not an approval request.\n\n"
-      .. home_copy_text
   end
   pending = { id = id, asker = asker, kind = request.kind, created_ms = created_ms,
     callbacks = { finish } }
@@ -432,29 +399,7 @@ function approval.request(request, done)
       attached.state.approvals[id] = nil
       return complete(nil, "Could not save approval request: " .. tostring(save_error))
     end
-    local function finish_posted()
-      complete(id)
-    end
-    if needs_home_copy then
-      local posted, copy_handle = pcall(attached.post, home_copy_text, nil, function(copy_result)
-        if type(copy_result) ~= "table" or copy_result.error
-            or type(copy_result.event_id) ~= "string" or copy_result.event_id == "" then
-          rec.status, rec.error = "failed", "Could not post full request copy in HOME"
-          pcall(persist)
-          return complete(nil, rec.error)
-        end
-        rec.home_copy_event_id = copy_result.event_id
-        pcall(persist)
-        finish_posted()
-      end, { room = attached.home_room, html = home_copy_html, copy = true })
-      if not posted then
-        rec.status, rec.error = "failed", "Could not post full request copy in HOME: " .. tostring(copy_handle)
-        pcall(persist)
-        complete(nil, rec.error)
-      end
-    else
-      finish_posted()
-    end
+    complete(id)
   end, { mention = true, html = html, room = room_id })
   if not ok then complete(nil, "Could not post approval request: " .. tostring(handle)) end
   return handle
