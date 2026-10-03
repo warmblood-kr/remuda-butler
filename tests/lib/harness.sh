@@ -56,12 +56,12 @@ harness_run() {
     echo "FAIL: controller launch failed (exit $command_status)" >&2
     return "$command_status"
   fi
-  for attempt in $(seq 1 600); do
+  for attempt in $(seq 1 400); do
     [[ -s "$H_RESULT" ]] && break
     sleep 0.05
   done
   if [[ ! -s "$H_RESULT" ]]; then
-    echo "FAIL: controller did not write a result within 30 seconds" >&2
+    echo "FAIL: controller did not write a result within 20 seconds" >&2
     return 1
   fi
   cat "$H_RESULT"
@@ -76,13 +76,11 @@ harness_cleanup() {
     echo "refusing cleanup outside the harness runtime" >&2
     return 1
   }
-  # The controller stops itself and its child; this covers a controller that died
-  # first. Only the two names generated from this shell's pid are ever stopped.
   local name
   for name in "$H_CHILD_SERVER" "$H_SERVER"; do
-    if [[ "$name" == "h$$" || "$name" == "h$$c" ]]; then
+    if [[ "$name" =~ ^h[0-9]+c?$ ]] && [[ "$name" == "h$$" || "$name" == "h$$c" ]]; then
       if "$REMUDA_BIN" -s "$name" stop -f >/dev/null 2>&1; then
-        echo "harness: stopped daemon $name"
+        echo "harness: stop requested for daemon $name"
       fi
     else
       echo "harness: refusing to stop daemon named '$name'" >&2

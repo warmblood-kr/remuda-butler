@@ -1,5 +1,6 @@
 local T = { patience = 10 }
 _G.T = T
+
 local tests, sessions, reports = {}, {}, {}
 local current, test_index, completed, ticker
 local remuda_api = remuda
@@ -57,9 +58,45 @@ function T.ok(value, message)
   if not value then error(message or "expected a truthy value", 2) end
 end
 
+function T.expect(value, message, success_message)
+  if not value then error(message or "expectation failed", 2) end
+  if success_message then reports[#reports + 1] = success_message end
+  return value
+end
+
+function T.eval(code)
+  return remote(code)
+end
+
+local function copy_tree(source, destination)
+  local ok, entries = pcall(remuda_api.list_dir, source)
+  if ok and type(entries) == "table" then
+    remuda_api.mkdir(destination)
+    for _, entry in ipairs(entries) do
+      copy_tree(source .. "/" .. entry, destination .. "/" .. entry)
+    end
+    return
+  end
+  local input = assert(io.open(source, "rb"), "cannot read mod file: " .. source)
+  local contents = input:read("*a")
+  input:close()
+  local wrote, err = fs.write_atomic(destination, contents)
+  assert(wrote, "cannot install mod file: " .. tostring(err))
+end
+
+function T.install_mod(name, source)
+  assert(type(name) == "string" and name:match("^[%w_-]+$"), "invalid mod name")
+  assert(type(source) == "string" and source ~= "", "mod source directory required")
+  local destination = assert(os.getenv("XDG_DATA_HOME"), "XDG_DATA_HOME is required")
+    .. "/remuda/mods/" .. name
+  remuda_api.mkdir(destination)
+  copy_tree(source .. "/extension.toml", destination .. "/extension.toml")
+  copy_tree(source .. "/packages", destination .. "/packages")
+end
+
 function T.new_session(name, argv)
   local values = {}
-  for index, value in ipairs(argv or { "sh" }) do
+  for _, value in ipairs(argv or { "sh" }) do
     values[#values + 1] = quote(value)
   end
   remote("return remuda.new(" .. quote(name) .. ", {" .. table.concat(values, ",") .. "})")
@@ -140,7 +177,6 @@ local function finish(status, message)
     status, message = "FAIL", tostring(message or "") .. "\n" .. tostring(err)
   end
   save_result(status, message)
-  -- The controller is private to this launcher and exits after publishing results.
   remuda_api.after(0.01, function()
     process.run { argv = { exe, "-s", controller_server, "stop", "-f" }, timeout = 5 }
   end)
