@@ -6,7 +6,7 @@
 -- This is a record, not a boundary: a same-user agent can bypass or edit it.
 local M = {}
 
-local MAX_INPUT = 64 * 1024 -- larger hook payloads are logged by tool name only
+local MAX_INPUT = 64 * 1024 -- larger payloads use only bounded structured deny fields
 local REDACT_PREFIX = 2048 -- redaction reads only this many bytes: its patterns are quadratic on long word runs
 local SUMMARY_CAP = 200
 local LOG_CAP = 1024 * 1024 -- the log rotates to LOG.1 past this size
@@ -52,6 +52,23 @@ end
 
 function M.set_approvals(on)
   local path = approvals_path()
+  if not path then return nil, "Butler data directory is unknown" end
+  pcall(remuda.mkdir, dir())
+  return remuda.fs.write_atomic(path, on and "on\n" or "off\n", { private = true })
+end
+
+-- Denials are a separate, opt-in switch from both audit and approvals.
+local function deny_path() local d = dir(); return d and (d .. "/guard-deny") or nil end
+function M.deny_enabled()
+  local path = deny_path()
+  local f = path and io.open(path, "r")
+  if not f then return false end
+  local text = f:read("*l")
+  f:close()
+  return text == "on"
+end
+function M.set_deny(on)
+  local path = deny_path()
   if not path then return nil, "Butler data directory is unknown" end
   pcall(remuda.mkdir, dir())
   return remuda.fs.write_atomic(path, on and "on\n" or "off\n", { private = true })
@@ -109,8 +126,9 @@ local function home()
 end
 
 -- Classification: first match wins, most serious class first.
-local PROTECTED = { "/.ssh", "/.claude", "/.codex", "/.config/remuda", "/.local/share/remuda", "/remuda/butler" }
+local PROTECTED = { "/.ssh", "/.config/remuda", "/.local/share/remuda/butler" }
 local HOOK_FILES = { "settings.json", "settings.local.json", "hooks.json", "config.toml", "managed-settings.json" }
+M.PROTECTED, M.HOOK_FILES = PROTECTED, HOOK_FILES
 
 local function expand(path, h)
   if type(path) ~= "string" then return "" end
@@ -118,10 +136,18 @@ local function expand(path, h)
   return path
 end
 
-local function protected(path)
-  for _, p in ipairs(PROTECTED) do
-    if (path .. "/"):find(p .. "/", 1, true) then return true end
+local function protected(path, h)
+  h = h or home()
+  path = path:gsub("/+$", "")
+  if h then
+    for _, p in ipairs(PROTECTED) do
+      local root = h .. p
+      if path == root or path:sub(1, #root + 1) == root .. "/" then return true end
+    end
   end
+  local actual = dir()
+  if actual and (path == actual or path:sub(1, #actual + 1) == actual .. "/") then return true end
+  if h and path == h .. "/.local/share/remuda/butler" then return true end
 end
 
 local function file_class(path, ctx)
@@ -131,7 +157,7 @@ local function file_class(path, ctx)
     local base = path:match("([^/]+)$") or ""
     for _, f in ipairs(HOOK_FILES) do if base == f then return "weaken" end end
   end
-  if protected(path) then return "escape" end
+  if protected(path, ctx.home) then return "escape" end
   local cwd = ctx.cwd
   if path:sub(1, 1) == "/" and type(cwd) == "string" and cwd ~= "" then
     if path ~= cwd and path:sub(1, #cwd + 1) ~= cwd .. "/" then return "escape" end
@@ -142,8 +168,80 @@ end
 local WORD_STRIP = { sudo = true, env = true, command = true, nohup = true, time = true, exec = true, builtin = true }
 local function words(segment)
   local out = {}
-  for w in segment:gmatch("%S+") do out[#out + 1] = w:gsub("^[\"']+", ""):gsub("[\"']+$", "") end
-  while out[1] and (WORD_STRIP[out[1]] or out[1]:find("^[%w_]+=")) do table.remove(out, 1) end
+  local token, quote, escaped = {}, nil, false
+  local function flush()
+    if #token > 0 then out[#out + 1] = table.concat(token); token = {} end
+  end
+  for i = 1, #segment do
+    local c = segment:sub(i, i)
+    if escaped then token[#token + 1] = c; escaped = false
+    elseif quote then
+      if c == quote then quote = nil else token[#token + 1] = c end
+    elseif c == "\\" then escaped = true
+    elseif c == "'" or c == '"' then quote = c
+    elseif c:match("%s") then flush()
+    else token[#token + 1] = c end
+  end
+  if escaped then token[#token + 1] = "\\" end
+  flush()
+  local cleaned = {}
+  for _, w in ipairs(out) do
+    w = w:gsub("^[({!]+", ""):gsub("[)}]+$", "")
+    if w ~= "" then cleaned[#cleaned + 1] = w end
+  end
+  out = cleaned
+  local i = 1
+  while out[i] do
+    local word = out[i]
+    if word == "env" then
+      table.remove(out, i)
+      if out[i] == "-i" or out[i] == "--ignore-environment" then table.remove(out, i) end
+      if out[i] == "--" then table.remove(out, i) end
+      while out[i] and (out[i]:find("^[%w_]+=") or out[i] == "-i" or out[i] == "--ignore-environment"
+        or out[i] == "-u" or out[i] == "--unset") do
+        local takes_value = out[i] == "-u" or out[i] == "--unset"
+        table.remove(out, i)
+        if takes_value and out[i] then table.remove(out, i) end
+      end
+    elseif word == "sudo" then
+      table.remove(out, i)
+      while out[i] and out[i]:sub(1, 1) == "-" do
+        local takes_value = out[i] == "-u" or out[i] == "--user" or out[i] == "-g" or out[i] == "--group"
+          or out[i] == "-h" or out[i] == "--host" or out[i] == "-p" or out[i] == "--prompt"
+          or out[i] == "-C" or out[i] == "-D"
+        table.remove(out, i)
+        if takes_value and out[i] then table.remove(out, i) end
+      end
+    elseif word == "timeout" then
+      table.remove(out, i)
+      while out[i] and out[i]:sub(1, 1) == "-" do
+        local takes_value = out[i] == "-s" or out[i] == "--signal" or out[i] == "-k" or out[i] == "--kill-after"
+        table.remove(out, i)
+        if takes_value and out[i] then table.remove(out, i) end
+      end
+      if out[i] and out[i]:match("^%d") then table.remove(out, i) end
+    elseif word == "nice" or word == "xargs" then
+      local wrapper = word
+      table.remove(out, i)
+      while out[i] and (out[i]:sub(1, 1) == "-" or (wrapper == "nice" and out[i]:match("^%-%d"))) do
+        local option = out[i]
+        local takes_value = wrapper == "nice" and (option == "-n" or option == "--adjustment")
+          or wrapper == "xargs" and (option == "-a" or option == "-d" or option == "-E" or option == "-I"
+            or option == "-L" or option == "-n" or option == "-P" or option == "-s"
+            or option == "--arg-file" or option == "--delimiter" or option == "--eof"
+            or option == "--replace" or option == "--max-lines" or option == "--max-args"
+            or option == "--max-procs" or option == "--max-chars")
+        table.remove(out, i)
+        if takes_value and out[i] then table.remove(out, i) end
+      end
+    elseif WORD_STRIP[word] or word == "then" or word == "do" or word == "else" then
+      table.remove(out, i)
+    elseif word:find("^[%w_]+=") then
+      table.remove(out, i)
+    else
+      break
+    end
+  end
   return out
 end
 local function has(w, set) for _, x in ipairs(w) do if set[x] then return true end end end
@@ -171,7 +269,7 @@ local function segment_class(w, text, ctx)
   local touches_protected = false
   for _, a in ipairs(w) do
     local p = expand((a:gsub("^[<>]+", "")), ctx.home)
-    if p:find("/", 1, true) and protected(p) then touches_protected = true end
+    if p:find("/", 1, true) and protected(p, ctx.home) then touches_protected = true end
     local lp = p:lower()
     if lp:find("/%.claude/") or lp:find("/%.codex/") then
       local base = p:match("([^/]+)$") or ""
@@ -208,11 +306,310 @@ local function segment_class(w, text, ctx)
 end
 
 local function split_commands(command)
-  local segments = {}
-  for seg in (command:gsub("&&", "\n"):gsub("||", "\n"):gsub("[;|&]", "\n")):gmatch("[^\n]+") do
-    segments[#segments + 1] = seg
+  local segments, buf, quote, escaped = {}, {}, nil, false
+  local function push(text)
+    for _, seg in ipairs(split_commands(text)) do segments[#segments + 1] = seg end
   end
+  local function flush()
+    local seg = table.concat(buf)
+    if seg:match("%S") then segments[#segments + 1] = seg end
+    buf = {}
+  end
+  local function substitution_end(start)
+    local depth, q, esc = 1, nil, false
+    local j = start + 2
+    while j <= #command do
+      local c = command:sub(j, j)
+      if esc then esc = false
+      elseif c == "\\" then esc = true
+      elseif q then if c == q then q = nil end
+      elseif c == "'" or c == '"' then q = c
+      elseif command:sub(j, j + 1) == "$(" then depth = depth + 1; j = j + 1
+      elseif c == ")" then depth = depth - 1; if depth == 0 then return j end end
+      j = j + 1
+    end
+  end
+  local i = 1
+  while i <= #command do
+    local c = command:sub(i, i)
+    if escaped then buf[#buf + 1] = c; escaped = false; i = i + 1
+    elseif quote ~= "'" and command:sub(i, i + 1) == "$(" then
+      local finish = substitution_end(i)
+      if finish then
+        push(command:sub(i + 2, finish - 1))
+        buf[#buf + 1] = command:sub(i, finish)
+        i = finish + 1
+      else buf[#buf + 1] = c; i = i + 1 end
+    elseif quote ~= "'" and c == "`" then
+      local finish = command:find("`", i + 1, true)
+      if finish then
+        push(command:sub(i + 1, finish - 1))
+        buf[#buf + 1] = command:sub(i, finish)
+        i = finish + 1
+      else buf[#buf + 1] = c; i = i + 1 end
+    elseif quote then
+      buf[#buf + 1] = c
+      if c == quote then quote = nil elseif quote == '"' and c == "\\" then escaped = true end
+      i = i + 1
+    elseif c == "'" or c == '"' then quote = c; buf[#buf + 1] = c; i = i + 1
+    elseif c == "\\" then escaped = true; buf[#buf + 1] = c; i = i + 1
+    elseif c == "|" and command:sub(i - 1, i - 1) == ">" then
+      buf[#buf + 1] = c
+      i = i + 1
+    elseif c == ";" or c == "|" or c == "&" or c == "\r" or c == "\n" then
+      flush()
+      if (c == "|" or c == "&") and command:sub(i + 1, i + 1) == c then i = i + 1 end
+      i = i + 1
+    else buf[#buf + 1] = c; i = i + 1 end
+  end
+  flush()
   return segments
+end
+
+local function bypass_flag(text)
+  local tokens = words(tostring(text or ""))
+  for i, raw in ipairs(tokens) do
+    local token = raw:lower()
+    local option = token:match("^%-%-") ~= nil
+    local setting_value = (tokens[i - 1] or ""):lower()
+    local next_value = (tokens[i + 1] or ""):lower()
+    if option and token:match("^%-%-dangerously[%w%-]*$") or token == "--yolo"
+      or option and token:match("^%-%-bypasspermissions$")
+      or token:match("^%-%-permission%-mode=bypasspermissions$")
+      or token == "bypasspermissions" and (setting_value == "--permission-mode" or setting_value == "--permission_mode")
+      or token == "--danger-full-access"
+      or token == "danger-full-access" and (option or setting_value == "--permission-mode" or setting_value == "--sandbox"
+        or setting_value:match("^sandbox_mode="))
+      or token == "--sandbox=full" or token == "--sandbox-full"
+      or token:match("^sandbox_mode=danger%-full%-access$")
+      or (token == "full" and (setting_value == "--sandbox" or setting_value == "--sandbox="))
+      or (token == "-a" or token == "--ask-for-approval") and next_value == "never"
+      or token == "--ask-for-approval=never" or token == "-a=never"
+      or token == "-c" and next_value:match("^approval_policy=never$")
+      or token:match("^approval_policy=never$") and setting_value == "-c" then return true end
+  end
+  return false
+end
+
+local function protected_write_path(path, ctx)
+  path = expand(path:gsub("^[<>]+", ""):gsub("[<>]+$", ""), ctx.home)
+  if path == "" then return false end
+  if path:sub(1, 1) ~= "/" then path = (ctx.cwd or "") .. "/" .. path end
+  local lower = path:lower()
+  if lower:find("/%.claude/") or lower:find("/%.codex/") then
+    local base = path:match("([^/]+)$") or ""
+    for _, f in ipairs(HOOK_FILES) do if base == f then return true end end
+  end
+  return protected(path, ctx.home) == true
+end
+
+local function owner_or_daemon_command(w, text)
+  local first = (w[1] or ""):match("([^/]+)$") or ""
+  if first ~= "remuda" then return nil end
+  local remuda_at
+  for i, word in ipairs(w) do if (word:match("([^/]+)$") or word) == "remuda" then remuda_at = i; break end end
+  if not remuda_at then return nil end
+  local butler_at
+  for i = remuda_at + 1, #w do if w[i] == "butler" then butler_at = i; break end end
+  if butler_at then
+    local verb, sub = w[butler_at + 1], w[butler_at + 2]
+    if verb == "guard" and (sub == "on" or sub == "off" or sub == "approvals" or sub == "deny") then
+      return "Butler owner control"
+    end
+    if verb == "approve" or verb == "deny" or verb == "approve-text" or verb == "typed-lines"
+      or verb == "shell-lines" or verb == "status-commands" then return "Butler owner control" end
+  end
+  local subcommand
+  local i = remuda_at + 1
+  while i <= #w do
+    local word = w[i]
+    if word == "-s" or word == "--server" or word == "-c" or word == "--config"
+      or word == "--runtime-dir" or word == "--socket" or word == "--data-home" then
+      i = i + 2
+    elseif word:sub(1, 1) ~= "-" then
+      subcommand = word
+      break
+    else
+      i = i + 1
+    end
+  end
+  if subcommand == "stop" or subcommand == "restart" or subcommand == "kill" then
+    local servers, test_servers_only = 0, true
+    for i = remuda_at + 1, #w do
+      if w[i] == "-s" or w[i] == "--server" then
+        servers = servers + 1
+        local name = w[i + 1]
+        if not name or not name:match("^h%d+c?$") then test_servers_only = false end
+      elseif w[i]:match("^%-s") or w[i]:match("^%-%-server=") then
+        test_servers_only = false
+      end
+      if w[i] == "-c" or w[i] == "--config" or w[i]:match("^%-%-socket=")
+          or w[i]:match("^%-%-runtime%-dir=") or w[i]:match("^%-%-data%-home=") or w[i]:match("^%-%-config=")
+          or w[i] == "--socket" or w[i] == "--runtime-dir" or w[i] == "--data-home" then
+        test_servers_only = false
+      end
+    end
+    if servers > 0 and test_servers_only then return nil end
+    return "Remuda daemon control"
+  end
+end
+
+local function protected_push(w)
+  if ((w[1] or ""):match("([^/]+)$") or "") ~= "git" then return false end
+  local push_at
+  for i, word in ipairs(w) do if word == "push" then push_at = i; break end end
+  if not push_at then return false end
+  local guarded, branch_named = false, false
+  for i = push_at + 1, #w do
+    local word = w[i]
+    if word == "--force" or word:match("^%-%-force%-with%-lease") or word == "--delete"
+      or (word:match("^%-%w+$") and word:find("f", 2, true))
+      or (word:match("^%-%w+$") and word:find("d", 2, true)) then guarded = true end
+    if word:match("^[+:]") then guarded = true end
+    local ref = word:gsub("^%+", ""):gsub("^[^=]+=", "")
+    for name in ref:gmatch("[^:]+") do
+      name = name:gsub("^refs/heads/", "")
+      if name == "main" or name == "master" or name == "trunk" then branch_named = true end
+    end
+  end
+  return guarded and branch_named
+end
+
+local function protected_redirect(command, ctx)
+  local quote, escaped, i = nil, false, 1
+  while i <= #command do
+    local c = command:sub(i, i)
+    if escaped then escaped = false
+    elseif c == "\\" and quote ~= "'" then escaped = true
+    elseif quote then if c == quote then quote = nil end
+    elseif c == "'" or c == '"' then quote = c
+    elseif c == ">" and command:sub(i - 1, i - 1) ~= "-" then
+      local j = i + 1
+      if command:sub(j, j) == ">" then j = j + 1 end
+      if command:sub(j, j) == "|" then j = j + 1 end
+      while command:sub(j, j):match("%s") do j = j + 1 end
+      if command:sub(j, j) == "&" then
+        j = j + 1
+        if command:sub(j, j):match("%d") then i = j
+        end
+      else
+        local target
+        local delimiter = command:sub(j, j)
+        if delimiter == "'" or delimiter == '"' then
+          local finish = command:find(delimiter, j + 1, true)
+          if finish then target = command:sub(j + 1, finish - 1); i = finish end
+        else
+          local finish = j
+          while finish <= #command and not command:sub(finish, finish):match("[%s;|&]") do finish = finish + 1 end
+          target = command:sub(j, finish - 1)
+          i = finish - 1
+        end
+        if target and target ~= "" and protected_write_path(target, ctx) then return true end
+      end
+    end
+    i = i + 1
+  end
+  return false
+end
+
+local function sed_in_place(w)
+  for i = 2, #w do if w[i] == "-i" or w[i] == "--in-place" or w[i]:match("^%-i[^-].*") then return true end end
+  return false
+end
+
+local function writer_touches_protected(first, w, ctx)
+  local candidates = {}
+  local destination_only = first == "cp" or first == "ln" or first == "install"
+  if first == "dd" then
+    for i = 2, #w do
+      local output = w[i]:match("^of=(.+)$")
+      if output then candidates[#candidates + 1] = output end
+    end
+  elseif destination_only then
+    if #w > 1 then candidates[1] = w[#w] end
+  else
+    for i = 2, #w do
+      local path = w[i]
+      if path:find("/", 1, true) or path:match("^~") or path:match("^%.%.?") then candidates[#candidates + 1] = path end
+    end
+  end
+  for _, path in ipairs(candidates) do if protected_write_path(path, ctx) then return true end end
+  return false
+end
+
+local function segment_deny_reason(seg, ctx)
+  local w = words(seg)
+  local executable = (w[1] or ""):match("([^/]+)$") or ""
+  if executable == "sh" or executable == "bash" or executable == "zsh" or executable == "dash"
+      or executable == "ksh" or executable == "ash" then
+    for i = 2, #w do
+      if w[i] == "-c" or w[i]:match("^%-%w*c%w*$") then
+        local body = {}
+        for j = i + 1, #w do body[#body + 1] = w[j] end
+        if #body > 0 then
+          for _, nested in ipairs(split_commands(table.concat(body, " "))) do
+            local reason = segment_deny_reason(nested, ctx)
+            if reason then return reason end
+          end
+        end
+        return nil
+      end
+    end
+  end
+  if executable == "eval" then
+    local body = {}
+    for i = 2, #w do body[#body + 1] = w[i] end
+    for _, nested in ipairs(split_commands(table.concat(body, " "))) do
+      local reason = segment_deny_reason(nested, ctx)
+      if reason then return reason end
+    end
+  elseif executable == "find" then
+    for i = 2, #w do
+      if w[i] == "-exec" or w[i] == "-execdir" then
+        local body = {}
+        for j = i + 1, #w do
+          if w[j] == ";" or w[j] == "+" then break end
+          body[#body + 1] = w[j]
+        end
+        if #body > 0 then
+          for _, nested in ipairs(split_commands(table.concat(body, " "))) do
+            local reason = segment_deny_reason(nested, ctx)
+            if reason then return reason end
+          end
+        end
+      end
+    end
+  end
+  if bypass_flag(seg) then return "Agent permission bypass flag" end
+  local owner = owner_or_daemon_command(w, seg)
+  if owner then return owner end
+  if protected_push(w) then return "Protected branch push" end
+  local first = (w[1] or ""):match("([^/]+)$") or ""
+  local redirect = protected_redirect(seg, ctx)
+  local writer = WRITERS[first] or (first == "sed" and sed_in_place(w))
+  if redirect or (writer and writer_touches_protected(first, w, ctx)) then return "Protected settings or directory write" end
+end
+
+-- Return a short constant reason for a narrowly recognised high-impact action.
+-- Unknown tools and actions return nil; this is an opt-in cooperative guardrail.
+function M.deny_reason(tool, input, ctx)
+  ctx = ctx or {}
+  if ctx.home == nil then ctx.home = home() end
+  input = type(input) == "table" and input or {}
+  tool = tostring(tool or "")
+  if tool == "Bash" or tool == "PowerShell" then
+    local command = type(input.command) == "string" and input.command or ""
+    for _, seg in ipairs(split_commands(command)) do
+      local reason = segment_deny_reason(seg, ctx)
+      if reason then return reason end
+    end
+    return nil
+  end
+  if tool == "Write" or tool == "Edit" or tool == "MultiEdit" or tool == "NotebookEdit" then
+    local path = input.file_path or input.notebook_path
+    if type(path) == "string" and protected_write_path(path, ctx) then return "Protected settings or directory write" end
+  end
+  return nil
 end
 
 -- tool_name + tool_input (decoded hook fields) -> one class name.
@@ -304,6 +701,27 @@ local function hook(caller)
     record.tool = text:match('"tool_name"%s*:%s*"([^"]*)"') or ""
     record.class = "other"
     record.summary = "payload " .. #text .. " bytes"
+    if M.deny_enabled() then
+      local decoded_ok, oversized = pcall(remuda.json.decode, text)
+      if decoded_ok and type(oversized) == "table" and oversized.hook_event_name == "PreToolUse" then
+        local tool = tostring(oversized.tool_name or "")
+        local original = type(oversized.tool_input) == "table" and oversized.tool_input or {}
+        local safe_input = {}
+        if tool == "Bash" or tool == "PowerShell" then
+          safe_input.command = type(original.command) == "string" and original.command:sub(1, 4096) or ""
+        elseif tool == "Write" or tool == "Edit" or tool == "MultiEdit" or tool == "NotebookEdit" then
+          safe_input.file_path, safe_input.notebook_path = original.file_path, original.notebook_path
+        end
+        local partial = { hook_event_name = "PreToolUse", tool_name = tool, tool_input = safe_input, cwd = oversized.cwd }
+        local reason = M.deny_reason(tool, safe_input, { cwd = oversized.cwd })
+        if reason then
+          record.event, record.tool = "PreToolUse", tool
+          record.class = M.classify(tool, safe_input, { cwd = oversized.cwd })
+          record.summary = M.summary(tool, safe_input)
+          return record, partial
+        end
+      end
+    end
     return record
   end
   local decoded_ok, hook_json = pcall(remuda.json.decode, text)
@@ -326,11 +744,32 @@ function M.run(args, caller)
   local verb = args[2]
   if verb == nil then
     local reply
+    local function audit(record)
+      local ok, appended, why = pcall(M.append, record)
+      if not ok then note("guard audit not written: " .. tostring(appended))
+      elseif not appended then note("guard audit not written: " .. tostring(why)) end
+    end
     local ok, err = pcall(function()
       if not M.enabled() then return end
       local record, hook_json = hook(caller)
-      local appended, why = M.append(record)
-      if not appended then note("guard audit not written: " .. tostring(why)) end
+      if hook_json and record.event == "PreToolUse" and M.deny_enabled() then
+        local policy_ok, reason = pcall(M.deny_reason, record.tool, hook_json.tool_input, { cwd = hook_json.cwd })
+        if not policy_ok then
+          record.event = "policy_error"
+          audit(record)
+          note("guard policy failed open: " .. tostring(reason))
+          return
+        end
+        if reason then
+          record.event = "deny"
+          reply = '{"hookSpecificOutput":{"hookEventName":'
+            .. remuda.json.encode("PreToolUse") .. ',"permissionDecision":"deny","permissionDecisionReason":'
+            .. remuda.json.encode("Butler guard: " .. reason) .. "}}"
+          audit(record)
+          return
+        end
+      end
+      audit(record)
       local routing = remuda.butler.guard_approval
       if routing then reply = routing.maybe_request(record, hook_json) end
     end)
@@ -348,24 +787,38 @@ function M.run(args, caller)
     return "guard approvals: " .. (M.approvals_enabled() and "on" or "off") .. " (guard: "
       .. (M.enabled() and "on" or "off") .. "; routing runs only when both are on)\n" .. SWITCH_NOTE
   end
+  if #args == 3 and verb == "deny" and (args[3] == "on" or args[3] == "off") then
+    local written, why = M.set_deny(args[3] == "on")
+    if not written then return remuda.fail("guard deny switch not changed: " .. tostring(why), 1) end
+    return "guard deny is now " .. args[3] .. ". " .. SWITCH_NOTE
+      .. (args[3] == "on" and " Needs `guard on`; recognised high-impact calls are denied." or "")
+  end
+  if #args == 3 and verb == "deny" and args[3] == "status" then
+    return "guard deny: " .. (M.deny_enabled() and "on" or "off") .. " (guard: "
+      .. (M.enabled() and "on" or "off") .. "; denial runs only when both are on)\n" .. SWITCH_NOTE
+  end
   if #args == 2 and (verb == "on" or verb == "off") then
     local written, why = M.set(verb == "on")
     if not written then return remuda.fail("guard switch not changed: " .. tostring(why), 1) end
     return "guard is now " .. verb .. ". " .. SWITCH_NOTE
-      .. (verb == "on" and " It records only; it never blocks or asks." or "")
+      .. (verb == "on" and " It records calls; `guard deny on` also enables recognised denials." or "")
   end
   if #args == 2 and verb == "status" then
-    return "guard: " .. (M.enabled() and "on" or "off") .. " (audit only, never blocks)\nlog: " .. tostring(M.log_path())
+    return "guard: " .. (M.enabled() and "on" or "off") .. " (audit; deny: "
+      .. (M.deny_enabled() and "on" or "off") .. ")\nlog: " .. tostring(M.log_path())
       .. "\n" .. SWITCH_NOTE
   end
-  return remuda.fail("Usage: remuda butler guard on|off|status | approvals on|off|status", 2)
+  return remuda.fail("Usage: remuda butler guard on|off|status | approvals on|off|status | deny on|off|status", 2)
 end
 
 -- Hook entries merged into the per-session settings file while the switch is on.
--- prompt_command (optional): the PermissionRequest command when approvals are on. It keeps
--- stdout, which carries the decision, and its timeout outlasts the approval wait.
-function M.hooks_json(command, json_quote, prompt_command)
+-- prompt_command keeps stdout for PermissionRequest decisions; pre_command keeps it
+-- for PreToolUse denials. Both are optional so the settings bytes stay unchanged.
+function M.hooks_json(command, json_quote, prompt_command, pre_command)
   local entry = '{"matcher":"*","hooks":[{"type":"command","command":' .. json_quote(command) .. "}]}"
+  if pre_command then
+    entry = '{"matcher":"*","hooks":[{"type":"command","command":' .. json_quote(pre_command) .. "}]}"
+  end
   local prompt = entry
   if prompt_command then
     prompt = '{"matcher":"*","hooks":[{"type":"command","command":' .. json_quote(prompt_command)

@@ -125,10 +125,11 @@ class, a redacted and size-capped summary) to `guard-audit.jsonl` in Butler's
 data directory (mode 0600, rotated at 1 MiB). The class is one of `push`,
 `destroy`, `escape`, `net`, `control`, `weaken`, `identity`, `script` or `other`,
 chosen by a fixed classifier over the tool name and arguments (`other` means "not recognised", not "harmless": wrapped commands such as `bash -c` are not unpacked); `run_script` calls
-are logged with their size and first 120 characters. The hook never blocks or
-asks and fails open: if the daemon or the log is unavailable the agent proceeds
-as before. `remuda butler doctor` shows the switch. The audit is a record, not a
-security boundary: agents run as the same user and can bypass or edit it.
+are logged with their size and first 120 characters. With only audit on, the
+hook never blocks or asks and fails open: if the daemon or the log is unavailable
+the agent proceeds as before. `remuda butler doctor` shows the switch. The audit
+is a record, not a security boundary: agents run as the same user and can bypass
+or edit it.
 
 ### Guard approvals
 
@@ -160,6 +161,41 @@ contents. Requests, answers and expiries are appended to the guard audit
 Codex and Monocle members are not routed. This is a cooperative guardrail, not a
 boundary: a member that goes through `run_script`, edits its own settings or
 runs outside the hook is not covered.
+
+### Guard deny
+
+`remuda butler guard deny on|off|status` is a separate switch, off by default.
+Denials run only while both `guard on` and `guard deny on` are set. For Claude
+members launched after both switches are on, the `PreToolUse` hook denies
+recognised permission bypass flags, owner-only Butler controls, daemon
+stop/restart/kill commands, writes to hook/settings files or protected
+directories, and force or delete pushes that name `main`, `master` or `trunk`.
+Agents are also denied `remuda butler guard deny status`. Plain pushes and force
+pushes to other branches remain allowed. `doctor` shows the deny switch.
+
+The test harness can stop or restart its private daemon with `-s hNNN` (an `h`
+followed by digits, optionally followed by `c`). This exception applies only
+when every server selector names such a harness daemon and no other daemon
+selector is present; other daemon stop/restart/kill commands are denied.
+
+This is a cooperative guardrail. `run_script` calls and edits to a member's own
+settings outside the hook can bypass it. The hook scans command text
+lexically, including `sh`, `bash`, `zsh`, `dash`, `ksh` and `ash` `-c` bodies,
+`eval` bodies, and `find -exec`/`-execdir` bodies. It does not unwrap `ssh`,
+`su -c`, `script -c`, `setsid`, `stdbuf`, `ionice` or `busybox`; it also cannot
+resolve `$var` command indirection or commands piped into `sh`. For payloads
+over 64 KiB, it checks the tool name, file path, and at most the first 4 KiB of
+a command. Protected roots are anchored to the user's home and active Butler
+data directory. The user's `.claude` and `.codex` directories are not protected
+wholesale; only hook/settings files there are protected, so auto-memory and
+plans remain writable. Without an explicit
+refspec, the hook cannot infer the current branch, so a force push with an
+implied target is not denied. Writer detection covers redirects and the
+lexical writers `rm`, `mv`, `cp` destinations, `tee`, `dd` output, `chmod`,
+`chown`, `ln`, `touch`, `truncate`, `install` destinations, and `sed -i`.
+`perl -pi`, `python -c`, `rsync`, `curl -o`, and `patch` are not covered. If the
+hook fails before it builds a decision, it fails open and prints no decision;
+an audit append failure does not change a built denial.
 
 ## Compatibility
 
