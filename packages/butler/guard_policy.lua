@@ -6,7 +6,8 @@
 -- This is a record, not a boundary: a same-user agent can bypass or edit it.
 local M = {}
 
-local MAX_INPUT = 1024 * 1024 -- larger hook payloads are logged by tool name only
+local MAX_INPUT = 64 * 1024 -- larger hook payloads are logged by tool name only
+local REDACT_PREFIX = 2048 -- redaction reads only this many bytes: its patterns are quadratic on long word runs
 local SUMMARY_CAP = 200
 local LOG_CAP = 1024 * 1024 -- the log rotates to LOG.1 past this size
 local SCRIPT_HEAD = 120
@@ -51,7 +52,7 @@ local SECRET_PATTERNS = {
   { "eyJ[%w_-]+%.[%w_-]+%.[%w_-]*", "***" },
 }
 function M.redact(text, cap)
-  text = tostring(text or ""):gsub("%c", " ")
+  text = tostring(text or ""):sub(1, REDACT_PREFIX):gsub("%c", " ")
   for _, rule in ipairs(SECRET_PATTERNS) do text = text:gsub(rule[1], rule[2]) end
   -- NAME=value and --flag value where the name says secret.
   text = text:gsub("([%w_]*[Tt][Oo][Kk][Ee][Nn][%w_]*)=%S+", "%1=***")
@@ -63,6 +64,9 @@ function M.redact(text, cap)
     :gsub("(\"[%w_]*[Pp][Aa][Ss][Ss][%w_]*\"%s*:%s*\")[^\"]*", "%1***")
     :gsub("(\"[%w_]*[Tt][Oo][Kk][Ee][Nn][%w_]*\"%s*:%s*\")[^\"]*", "%1***")
     :gsub("(\"[%w_]*[Ss][Ee][Cc][Rr][Ee][Tt][%w_]*\"%s*:%s*\")[^\"]*", "%1***")
+    :gsub("(%[['\"][%w_-]*[Kk][Ee][Yy][%w_-]*['\"]%]%s*=%s*['\"])[^'\"]*", "%1***")
+    :gsub("(%[['\"][%w_-]*[Pp][Aa][Ss][Ss][%w_-]*['\"]%]%s*=%s*['\"])[^'\"]*", "%1***")
+    :gsub("(%[['\"][%w_-]*[Tt][Oo][Kk][Ee][Nn][%w_-]*['\"]%]%s*=%s*['\"])[^'\"]*", "%1***")
     :gsub("(%-%-[%w-]*[Pp][Aa][Ss][Ss][%w-]*)%s+%S+", "%1 ***")
   if utf8 and not utf8.len(text) then text = text:gsub("[\128-\255]", "?") end
   cap = cap or SUMMARY_CAP

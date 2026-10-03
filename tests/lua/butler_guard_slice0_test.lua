@@ -116,6 +116,14 @@ T.test("hook always allows: malformed, oversized, control chars, secrets, cap", 
   for _, leaked in ipairs({ "p4ssw0rd9", "t0k3n77", "zzkey888" }) do
     T.expect(not has(json_secret, leaked), "json/header secret leaked: " .. leaked .. " in " .. json_secret)
   end
+  local lua_secret = T.eval([=[return remuda.butler.guard_policy.redact("run(){ ['X-Api-Key']='zzkey777', ['password'] = \"p4ss777\" }")]=])
+  T.expect(not has(lua_secret, "zzkey777") and not has(lua_secret, "p4ss777"), "Lua-style secret leaked: " .. lua_secret)
+  local slow = T.eval([=[local t = os.clock()
+    local long = string.rep("a", 50000)
+    remuda._t_hook('{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"' .. long .. '"}}')
+    remuda._t_hook('{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"' .. string.rep("a", 400000) .. '"}}')
+    return tostring(os.clock() - t)]=])
+  T.expect(tonumber(slow) < 2, "a long single-word command blocked the daemon for " .. slow .. " s", "ok - long inputs are redacted in bounded time")
   local capped = T.eval([[remuda._t_hook('{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo ' .. string.rep('가', 400) .. '"}}')
     local last; for l in remuda._t_lines():gmatch('[^\n]+') do last = l end
     local d = remuda.json.decode(last); return #d.summary .. ' ' .. tostring(utf8.len(d.summary) ~= nil)]])
