@@ -345,8 +345,53 @@ command(30, "topic", "  remuda butler topic new <name> [--template T] [--agent A
     end
   end
 end)
+local SEND_CLI_SPEC = {
+  name = "remuda butler",
+  verbs = {
+    send = {
+      about = "Send a message to a Butler member",
+      options = { { long = "file", value = "PATH", help = "Read message text from a file" } },
+      args = {
+        { name = "WORDS", help = "Recipient, sender, and message words", multiple = true },
+      },
+      next = "remuda butler send --help",
+    },
+  },
+}
 command(40, "send", '  remuda butler send <to> "<message>" | <to> - | <to> --file PATH\n'
   .. '  remuda butler send <from> <to> <message...> | <from> <to> - | <from> <to> --file PATH', function(args, caller)
+  local cli = remuda.cli
+  if type(cli) == "table" and type(cli.parse) == "function" then
+    local report = cli.parse(SEND_CLI_SPEC, args)
+    if report.kind == "help" then return report.text end
+    if not report.ok then
+      if type(remuda.fail) == "function" then return remuda.fail(report.text, report.code) end
+      error(report.text, 0)
+    end
+    local words = report.values.WORDS
+    if type(words) == "string" then words = { words } end
+    local count = #(words or {})
+    local from, to, first = current_agent(caller) or OPERATOR, nil, 1
+    if report.values.file then
+      if count == 1 then to = words[1]
+      elseif count >= 2 then from, to, first = words[1], words[2], 3 end
+    elseif count == 2 then
+      to, first = words[1], 2
+    elseif count >= 3 then
+      from, to, first = words[1], words[2], 3
+    else
+      return nil
+    end
+    local body = { "send" }
+    if report.values.file then
+      body[2], body[3] = "--file", report.values.file
+    else
+      for index = first, count do body[#body + 1] = words[index] end
+    end
+    return cli_result(function()
+      return remuda._butler_send(from, to, message_body(body, 2, caller))
+    end)
+  end
   if #args < 3 then return nil end
   local from, to, first = current_agent(caller) or OPERATOR, args[2], 3
   if args[3] ~= "-" and args[3] ~= "--file" and #args >= 4 then
