@@ -52,6 +52,8 @@ local function probe()
   }) do
     results[agent.key] = probe_command(agent.argv)
   end
+  local policy = remuda.butler and remuda.butler.guard_policy
+  if policy then results.guard = policy.enabled() end
   results.typed_lines, results.shell_lines, results.approve_text, results.matrix_configured = typed_line_switches()
   return results
 end
@@ -73,6 +75,10 @@ local function render(probe_results, platform)
     "Shell lines: " .. (probe_results.shell_lines == true and "on" or "off"),
     "Approve text: " .. (probe_results.approve_text == true and "on" or "off"),
   }
+  if probe_results.guard ~= nil then
+    lines[#lines + 1] = "Guard audit: "
+      .. (probe_results.guard and "on (records tool calls of new Claude sessions; never blocks)" or "off")
+  end
   local guard = remuda.butler and remuda.butler.guard
   local unguarded = guard and guard.unguarded_line()
   if unguarded then lines[#lines + 1] = unguarded end

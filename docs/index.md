@@ -114,6 +114,22 @@ With Matrix credentials configured, Butler can bridge one room. The bridge is
 optional and composes Remuda processes, hooks, sessions, and MCP rather than
 introducing a separate runtime.
 
+### Guard audit
+
+`remuda butler guard on|off|status` switches an audit of what Claude members do;
+it is off by default and may be switched by Butler and leaders. While it is on,
+the per-session settings file of each Claude member launched from then on gets
+`PreToolUse` and `PermissionRequest` hooks that call `remuda butler guard`.
+Each call appends one JSON line (time, session, agent kind, event, tool,
+class, a redacted and size-capped summary) to `guard-audit.jsonl` in Butler's
+data directory (mode 0600, rotated at 1 MiB). The class is one of `push`,
+`destroy`, `escape`, `net`, `control`, `weaken`, `identity`, `script` or `other`,
+chosen by a fixed classifier over the tool name and arguments; `run_script` calls
+are logged with their size and first 120 characters. The hook never blocks or
+asks and fails open: if the daemon or the log is unavailable the agent proceeds
+as before. `remuda butler doctor` shows the switch. The audit is a record, not a
+security boundary: agents run as the same user and can bypass or edit it.
+
 ## Compatibility
 
 The extension declares the API it uses in
