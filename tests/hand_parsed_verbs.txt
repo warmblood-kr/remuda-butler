@@ -1,0 +1,43 @@
+agents
+approve
+approve-text
+approvals
+close
+doctor
+deny
+forward
+guard
+help
+inbox
+launch
+matrix download
+matrix event
+matrix follow
+matrix get
+matrix history
+matrix join
+matrix leave
+matrix quarantine
+matrix react
+matrix redact
+matrix reply
+matrix rooms
+matrix send
+matrix setup
+matrix status
+matrix unfollow
+matrix upload
+quota
+reply
+schedule
+send
+send-to-leader
+sessions
+shell-lines
+status
+status-hook
+status-commands
+statusline
+topic delegate
+topic new
+typed-lines
