@@ -1605,6 +1605,11 @@ function relay.new(options)
     return true
   end
 
+  -- Prepared-text and guard requests take the strict owner gate; the first also needs its switch.
+  local function owner_gated(record)
+    return (record.kind == "approve_text" and cfg.approve_text == true) or record.kind == "guard_action"
+  end
+
   local function accept_events(events, cursor, room_id, live_sync)
     local added = {}
     for _, ev in ipairs(type(events) == "table" and events or {}) do
@@ -1619,8 +1624,7 @@ function relay.new(options)
             if verdict or text_verdict then
               if explicit_id and type(approval.for_id) == "function" then
                 local candidate = approval.for_id(explicit_id)
-                if candidate and candidate.kind == "approve_text" and cfg.approve_text == true
-                    and msgtype == "m.text" then
+                if candidate and owner_gated(candidate) and msgtype == "m.text" then
                   approval_record = candidate
                   approval_verdict = text_verdict
                 end
@@ -1628,10 +1632,10 @@ function relay.new(options)
               if not approval_record and not explicit_id then
                 for _, target in ipairs(targets) do
                   local candidate = approval.for_event(target)
-                  if candidate and candidate.kind == "approve_text" then
-                    if cfg.approve_text == true and msgtype == "m.text" then
+                  if candidate and (candidate.kind == "approve_text" or candidate.kind == "guard_action") then
+                    if owner_gated(candidate) and msgtype == "m.text" then
                       approval_record, approval_verdict = candidate, text_verdict
-                    elseif cfg.approve_text == true and msgtype == "m.reaction" then
+                    elseif owner_gated(candidate) and msgtype == "m.reaction" then
                       approval_record, approval_verdict = candidate, verdict
                     end
                   elseif candidate and verdict then
@@ -1702,7 +1706,7 @@ function relay.new(options)
             if cursor then state.since = cursor end
             local origin_ms = tonumber(ev.origin_server_ts)
             local counts
-            if approval_record.kind == "approve_text" then
+            if approval_record.kind == "approve_text" or approval_record.kind == "guard_action" then
               counts = approval_verdict ~= nil
                 and approve_text.owner_event_allowed(ev, approval_record, cfg, live_sync, room_id or cfg.room)
                 and member_kind(ev.sender, cfg) == "HUMAN"

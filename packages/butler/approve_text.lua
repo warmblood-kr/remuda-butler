@@ -82,6 +82,9 @@ local function display_line(line)
   return table.concat(out), escaped
 end
 
+-- One line of text with control and direction characters escaped.
+function M.display_inline(text) return (display_line(tostring(text))) end
+
 function M.display(text)
   local lines, escaped = {}, false
   for line in (text .. "\n"):gmatch("(.-)\n") do

@@ -130,6 +130,35 @@ asks and fails open: if the daemon or the log is unavailable the agent proceeds
 as before. `remuda butler doctor` shows the switch. The audit is a record, not a
 security boundary: agents run as the same user and can bypass or edit it.
 
+### Guard approvals
+
+`remuda butler guard approvals on|off|status` is a second switch, off by
+default and independent of `guard on|off`; routing runs only while both are on,
+for Claude members launched after the switch. The `PermissionRequest` hook of
+such a member registers each permission prompt as an approval request (id,
+stored redacted summary, class, a sha256 of the request text) and posts one
+message to the owner's Matrix HOME room. The verified owner answers it as for
+`approve-text`: reply `yes` or `no` (also `승인`/`거부`) to that post, or react ✅ or
+❌ to it. Only an allowlisted human in HOME on a live sync counts; an edit, a
+reaction on another post or an unknown id does nothing, and a terminal cannot
+approve (it may deny). An answer applies once, to that request, while the
+member's hook waits; the hook then prints Claude's allow or deny decision.
+A call whose command is longer than 1000 bytes, a `run_script` call, a cap
+(5 open requests per session, 20 in all) or a missing or failing Matrix
+setup is not routed. Pending requests are stored, and a restart expires them.
+
+Every other outcome prints no decision, so Claude shows its own prompt: this
+slice only adds a way for the owner to answer prompts the agent already raises,
+and never allows something the member could not do before. A request expires
+after about 5 minutes (the longest wait core allows a hook), which is
+"no decision", not "deny"; a late answer is told "Expired." in the thread. The
+owner sees the redacted command or path, not other tool input such as file
+contents. Requests, answers and expiries are appended to the guard audit
+(`approval_requested`, `approval_approved`, `approval_denied`, `approval_expired`).
+Codex and Monocle members are not routed. This is a cooperative guardrail, not a
+boundary: a member that goes through `run_script`, edits its own settings or
+runs outside the hook is not covered.
+
 ## Compatibility
 
 The extension declares the API it uses in

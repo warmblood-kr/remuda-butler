@@ -37,6 +37,26 @@ function M.set(on)
   return remuda.fs.write_atomic(path, on and "on\n" or "off\n", { private = true })
 end
 
+-- The approvals switch (`guard approvals on|off|status`) is a second marker file;
+-- approval routing runs only while both switches are on.
+local function approvals_path() local d = dir(); return d and (d .. "/guard-approvals") or nil end
+
+function M.approvals_enabled()
+  local path = approvals_path()
+  local f = path and io.open(path, "r")
+  if not f then return false end
+  local text = f:read("*l")
+  f:close()
+  return text == "on"
+end
+
+function M.set_approvals(on)
+  local path = approvals_path()
+  if not path then return nil, "Butler data directory is unknown" end
+  pcall(remuda.mkdir, dir())
+  return remuda.fs.write_atomic(path, on and "on\n" or "off\n", { private = true })
+end
+
 -- Text safe for one log line: control characters become spaces, secret-looking
 -- tokens are masked, invalid UTF-8 is replaced, and the result is capped.
 local SECRET_PATTERNS = {
@@ -162,6 +182,7 @@ local function segment_class(w, text, ctx)
       if a == "butler" then
         local verb = w[i + 1]
         if verb == "close" then return "control" end
+        if verb == "guard" and w[i + 2] == "approvals" and (w[i + 3] == "on" or w[i + 3] == "off") then return "weaken" end
         if verb == "guard" and (w[i + 2] == "on" or w[i + 2] == "off") then return "weaken" end
         if IDENTITY[verb or ""] then return "identity" end
         if verb == "matrix" and (w[i + 2] == "join" or w[i + 2] == "leave" or w[i + 2] == "invite") then
@@ -213,7 +234,7 @@ function M.classify(tool, input, ctx)
 end
 
 -- One short, redacted description of what the tool call does.
-function M.summary(tool, input)
+function M.summary(tool, input, cap)
   input = type(input) == "table" and input or {}
   tool = tostring(tool or "")
   if tool:find("run_script$") then
@@ -224,7 +245,7 @@ function M.summary(tool, input)
   if type(value) ~= "string" then
     for _, v in pairs(input) do if type(v) == "string" then value = v; break end end
   end
-  return M.redact(value or "")
+  return M.redact(value or "", cap)
 end
 
 -- Append one JSON line to the audit log (0600, rotated). Returns true, or nil and why.
@@ -242,6 +263,9 @@ function M.append(record)
     local line = '{"time":' .. remuda.json.encode(os.date("!%Y-%m-%dT%H:%M:%SZ"))
     for _, key in ipairs({ "session", "kind", "event", "tool", "class", "summary" }) do
       line = line .. ',"' .. key .. '":' .. remuda.json.encode(tostring(record[key] or ""))
+    end
+    for _, key in ipairs({ "id", "hash" }) do
+      if record[key] then line = line .. ',"' .. key .. '":' .. remuda.json.encode(tostring(record[key])) end
     end
     assert(out:write(line .. "}\n"))
     out:close()
@@ -283,7 +307,7 @@ local function hook(caller)
   record.tool = tostring(hook_json.tool_name or "")
   record.class = M.classify(record.tool, hook_json.tool_input, { cwd = hook_json.cwd })
   record.summary = M.summary(record.tool, hook_json.tool_input)
-  return record
+  return record, hook_json
 end
 
 local SWITCH_NOTE = "Applies to sessions launched from now on; running sessions keep their settings."
@@ -293,13 +317,28 @@ local SWITCH_NOTE = "Applies to sessions launched from now on; running sessions 
 function M.run(args, caller)
   local verb = args[2]
   if verb == nil then
+    local reply
     local ok, err = pcall(function()
       if not M.enabled() then return end
-      local appended, why = M.append(hook(caller))
+      local record, hook_json = hook(caller)
+      local appended, why = M.append(record)
       if not appended then note("guard audit not written: " .. tostring(why)) end
+      local routing = remuda.butler.guard_approval
+      if routing then reply = routing.maybe_request(record, hook_json) end
     end)
     if not ok then note("guard failed open: " .. tostring(err)) end
-    return ""
+    return reply or ""
+  end
+  if #args == 3 and verb == "approvals" and (args[3] == "on" or args[3] == "off") then
+    local written, why = M.set_approvals(args[3] == "on")
+    if not written then return remuda.fail("guard approvals switch not changed: " .. tostring(why), 1) end
+    return "guard approvals are now " .. args[3] .. ". " .. SWITCH_NOTE
+      .. (args[3] == "on" and " Needs `guard on`; the owner answers Claude permission prompts in Matrix,"
+        .. " and with no answer Claude shows its own prompt." or "")
+  end
+  if #args == 3 and verb == "approvals" and args[3] == "status" then
+    return "guard approvals: " .. (M.approvals_enabled() and "on" or "off") .. " (guard: "
+      .. (M.enabled() and "on" or "off") .. "; routing runs only when both are on)\n" .. SWITCH_NOTE
   end
   if #args == 2 and (verb == "on" or verb == "off") then
     local written, why = M.set(verb == "on")
@@ -311,13 +350,20 @@ function M.run(args, caller)
     return "guard: " .. (M.enabled() and "on" or "off") .. " (audit only, never blocks)\nlog: " .. tostring(M.log_path())
       .. "\n" .. SWITCH_NOTE
   end
-  return remuda.fail("Usage: remuda butler guard on|off|status", 2)
+  return remuda.fail("Usage: remuda butler guard on|off|status | approvals on|off|status", 2)
 end
 
 -- Hook entries merged into the per-session settings file while the switch is on.
-function M.hooks_json(command, json_quote)
+-- prompt_command (optional): the PermissionRequest command when approvals are on. It keeps
+-- stdout, which carries the decision, and its timeout outlasts the approval wait.
+function M.hooks_json(command, json_quote, prompt_command)
   local entry = '{"matcher":"*","hooks":[{"type":"command","command":' .. json_quote(command) .. "}]}"
-  return '"PreToolUse":[' .. entry .. '],"PermissionRequest":[' .. entry .. "]"
+  local prompt = entry
+  if prompt_command then
+    prompt = '{"matcher":"*","hooks":[{"type":"command","command":' .. json_quote(prompt_command)
+      .. ',"timeout":330}]}'
+  end
+  return '"PreToolUse":[' .. entry .. '],"PermissionRequest":[' .. prompt .. "]"
 end
 
 remuda.butler = remuda.butler or {}

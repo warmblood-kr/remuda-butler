@@ -103,6 +103,16 @@ function approval.attach(state, persist_fn, post_fn)
   end
   attached = { state = state, persist = persist_fn, post = post_fn }
   local recovered = false
+  local restarted_ms = math.floor(os.time() * 1000)
+  for _, rec in pairs(state.approvals) do
+    -- A guard request is answered only while its hook waits; a restart ends the wait.
+    if type(rec) == "table" and rec.kind == "guard_action" and (rec.status == "open" or rec.status == "approved") then
+      rec.status, rec.answered_at, rec.error = "expired", restarted_ms, "daemon restarted"
+      local callback = handlers.guard_action and handlers.guard_action.expire
+      if callback then pcall(callback, rec) end
+      recovered = true
+    end
+  end
   for _, rec in pairs(state.approvals) do
     if type(rec) == "table" and rec.kind == "approve_text" then
       local data = type(rec.data) == "table" and rec.data or {}
@@ -300,9 +310,10 @@ function approval.request(request, done)
     return nil
   end
   local max_for_asker = tonumber(request.max_open_for_asker) or 3
-  if open_for_asker >= max_for_asker or open_total >= 5 then
+  local max_total = tonumber(request.max_open_total) or 5
+  if open_for_asker >= max_for_asker or open_total >= max_total then
     finish(nil, "Too many open approval requests (" .. tostring(max_for_asker)
-      .. " per agent, 5 total). Next: wait for an answer or expiry, then retry.")
+      .. " per agent, " .. tostring(max_total) .. " total). Next: wait for an answer or expiry, then retry.")
     return nil
   end
   local id = random_id(attached.state)
@@ -374,6 +385,9 @@ function approval.answer(id_or_event, verdict, who, event_id)
   if not rec then return nil, "No such request." end
   if rec.kind == "approve_text" and who == "operator (terminal)" and verdict == "approve" then
     return nil, "Prepared text can only be approved by the owner in its live Matrix thread."
+  end
+  if rec.kind == "guard_action" and who == "operator (terminal)" and verdict == "approve" then
+    return nil, "A guarded tool call can only be approved by the owner in its live Matrix thread."
   end
   if rec.kind == "approve_text" and rec.status == "approved" and verdict == "approve" then
     if rec.delivery_started == true then return nil, "Already answered.", rec end
@@ -451,10 +465,10 @@ function approval.cli(args, agent)
       local minutes = math.max(0, math.ceil(((tonumber(rec.expires_at) or now) - now) / 60000))
       lines[#lines + 1] = string.format("%s  %s  %s  %s  %s", tostring(rec.id), tostring(rec.kind),
         tostring(rec.summary), tostring(rec.asker), tostring(minutes) .. "m")
-      if rec.kind == "approve_text" then has_prepared_text = true end
+      if rec.kind == "approve_text" or rec.kind == "guard_action" then has_prepared_text = true end
     end
     lines[#lines + 1] = agent and "Next: wait for mail; remuda butler inbox"
-      or has_prepared_text and "Next: remuda butler deny ID cancels prepared text; owner Matrix approval is required to type"
+      or has_prepared_text and "Next: remuda butler deny ID cancels prepared text or a guarded call; owner Matrix approval is required"
       or "Next: remuda butler approve ID, or remuda butler deny ID"
     return table.concat(lines, "\n")
   end

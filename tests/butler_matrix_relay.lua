@@ -30,6 +30,8 @@ if approval_file then approval_file:close(); dofile("packages/butler/approval.lu
 dofile("packages/butler/typed_lines.lua")
 dofile("packages/butler/approve_text.lua")
 dofile("packages/butler/status_command.lua")
+dofile("packages/butler/guard_policy.lua")
+dofile("packages/butler/guard_approval.lua")
 local relay_module = dofile("packages/butler/matrix_relay.lua")
 
 local function remove_dir(dir)
@@ -7427,6 +7429,180 @@ local function test_approved_text_denial_and_expiry_type_nothing()
 end
 
 local approval_failures = {}
+for _, case in ipairs((function()
+-- Guard slice 1: the owner gate for PermissionRequest approvals. The hook verb runs through
+-- guard_policy.run with a recording deferred reply.
+local GUARD_ALLOW = remuda.butler.guard_approval.ALLOW
+local GUARD_DENY = remuda.butler.guard_approval.DENY
+
+local function with_guard(env, run)
+  local gp = remuda.butler.guard_policy
+  local old_dir, old_pending = remuda._butler_guard_dir, remuda.pending
+  remuda._butler_guard_dir = env.dir .. "/guard"
+  remuda.mkdir(remuda._butler_guard_dir)
+  assert(gp.set(true) and gp.set_approvals(true), "guard switches")
+  local replies = {}
+  remuda.pending = function(opts)
+    local reply = { opts = opts }
+    function reply:resolve(_, out) self.done, self.out = true, out end
+    replies[#replies + 1] = reply
+    return reply
+  end
+  local ok, err = pcall(run, replies)
+  remuda._butler_guard_dir, remuda.pending = old_dir, old_pending
+  if not ok then error(err, 0) end
+end
+
+-- One PermissionRequest through the verb: the request's event id, its deferred reply, its id, its post.
+local function guard_request(env, replies, command, alias)
+  local before = #home_posts(env, "Butler approval")
+  remuda.butler.guard_policy.run({ "guard" }, { stdin = remuda.json.encode({ hook_event_name = "PermissionRequest",
+    tool_name = "Bash", tool_input = { command = command or "git push origin main" }, cwd = "/p/w" }),
+    env = { REMUDA_BUTLER_AGENT_ALIAS = alias or "ss-a", REMUDA_BUTLER_AGENT_KIND = "claude" } })
+  env.client:pump()
+  local posts = home_posts(env, "Butler approval")
+  assert(#posts == before + 1, "one request must make exactly one HOME post")
+  local post = posts[#posts]
+  return post.event_id, replies[#replies], assert(post.body:match("%[Butler approval (%w+)%]")), post
+end
+
+local function guard_state(reply) return reply.done and ("done:" .. reply.out) or "waiting" end
+
+local function test_guard_owner_answers_by_reply_and_reaction()
+  approval_env(nil, function(env)
+    with_guard(env, function(replies)
+      local cases = {
+        { "yes id", function(id, ev) return text_event("$g1", OWNER, "yes " .. id, ev) end, GUARD_ALLOW },
+        { "bare 승인 reply", function(_, ev) return text_event("$g2", OWNER, "승인", ev) end, GUARD_ALLOW },
+        { "check reaction", function(_, ev) return reaction("$g3", OWNER, ev, CHECK) end, GUARD_ALLOW },
+        { "no id", function(id, ev) return text_event("$g4", OWNER, "no " .. id, ev) end, GUARD_DENY },
+        { "bare 거부 reply", function(_, ev) return text_event("$g5", OWNER, "거부", ev) end, GUARD_DENY },
+        { "cross reaction", function(_, ev) return reaction("$g6", OWNER, ev, CROSS) end, GUARD_DENY },
+      }
+      for _, case in ipairs(cases) do
+        local event, reply, id = guard_request(env, replies)
+        assert(guard_state(reply) == "waiting", "the hook waits for the owner")
+        room_events(env, { case[2](id, event) })
+        assert(guard_state(reply) == "done:" .. case[3], case[1] .. " must print the decision, got " .. guard_state(reply))
+      end
+    end)
+  end)
+end
+
+local function test_guard_only_the_verified_owner_counts()
+  approval_env(OWNER .. ",@agent-x:example.org", function(env)
+    with_guard(env, function(replies)
+      local event, reply, id = guard_request(env, replies)
+      local edit = text_event("$edit", OWNER, "* yes " .. id, event)
+      edit.content["m.new_content"] = { msgtype = "m.text", body = "yes " .. id }
+      edit.content["m.relates_to"] = { rel_type = "m.replace", event_id = event }
+      room_events(env, {
+        reaction("$stranger", STRANGER, event), text_event("$stranger-yes", STRANGER, "yes " .. id, event),
+        reaction("$agent", "@agent-x:example.org", event), text_event("$agent-yes", "@agent-x:example.org", "yes", event),
+        reaction("$other-event", OWNER, "$another-post"), text_event("$wrong-id", OWNER, "yes WXYZ", event),
+        text_event("$bare-elsewhere", OWNER, "yes"), edit,
+        reaction("$early", OWNER, event, CHECK, ts(-120000)),
+      })
+      room_events(env, { reaction("$all", OWNER, event) }, ALL)
+      assert(guard_state(reply) == "waiting", "non-owner, wrong room, edit, wrong target and wrong id must do nothing: "
+        .. guard_state(reply))
+      room_events(env, { reaction("$owner", OWNER, event) })
+      assert(guard_state(reply) == "done:" .. GUARD_ALLOW, "the owner's answer still works afterwards")
+    end)
+  end)
+end
+
+local function test_guard_needs_live_sync()
+  approval_env(nil, function(env)
+    with_guard(env, function(replies)
+      local event, reply = guard_request(env, replies)
+      env.relay._response({ start = "m0", ["end"] = "m1", chunk = { reaction("$not-live", OWNER, event) } },
+        "/_matrix/client/v3/rooms/" .. encoded(HOME) .. "/messages")
+      env.client:pump()
+      assert(guard_state(reply) == "waiting", "an answer outside live sync must not approve a guarded call")
+    end)
+  end, "mode=messages\n")
+end
+
+local function test_guard_forged_nonce_gives_no_decision()
+  approval_env(nil, function(env)
+    with_guard(env, function(replies)
+      for _, field in ipairs({ "nonce", "hash", "text" }) do
+        local event, reply, id = guard_request(env, replies)
+        env.relay:state().approvals[id].data[field] = "forged"
+        room_events(env, { reaction("$owner-" .. field, OWNER, event) })
+        assert(guard_state(reply) == "done:", "a request whose " .. field .. " no longer matches must print no decision")
+      end
+    end)
+  end)
+end
+
+-- An answer is bound to the request it targets: another request's answer, hash or id gives nothing.
+local function test_guard_answer_binds_to_its_own_request()
+  approval_env(nil, function(env)
+    with_guard(env, function(replies)
+      local first, first_reply, first_id = guard_request(env, replies, "git push origin main")
+      local second, second_reply, second_id = guard_request(env, replies, "rm -rf /x")
+      local first_hash = env.relay:state().approvals[first_id].data.hash
+      assert(first_hash ~= env.relay:state().approvals[second_id].data.hash, "each request has its own hash")
+      room_events(env, { text_event("$wrong-hash", OWNER, "yes " .. first_hash:sub(1, 4):upper(), second) })
+      assert(guard_state(first_reply) == "waiting" and guard_state(second_reply) == "waiting",
+        "an answer naming a hash instead of the request id changes nothing")
+      room_events(env, { text_event("$cross", OWNER, "yes " .. second_id, first) })
+      assert(guard_state(first_reply) == "done:" .. GUARD_ALLOW or guard_state(second_reply) == "done:" .. GUARD_ALLOW,
+        "an explicit id decides that request")
+      assert(guard_state(first_reply) == "waiting" and guard_state(second_reply) == "done:" .. GUARD_ALLOW,
+        "the id in the answer, not the replied-to post, picks the request; the other stays open")
+    end)
+  end)
+end
+
+local function test_guard_one_shot_expiry_and_restart()
+  approval_env(nil, function(env)
+    with_guard(env, function(replies)
+      local event, reply = guard_request(env, replies)
+      room_events(env, { reaction("$once", OWNER, event) })
+      room_events(env, { reaction("$twice", OWNER, event), text_event("$thrice", OWNER, "yes", event) })
+      assert(guard_state(reply) == "done:" .. GUARD_ALLOW and thread_replies(env, event, "Already answered.") >= 1,
+        "a duplicate answer must change nothing and be told so")
+
+      local expiring, expiring_reply, expiring_id = guard_request(env, replies, "git push -f")
+      env.relay:state().approvals[expiring_id].expires_at = 0
+      tick_timers(1)
+      env.client:pump()
+      assert(guard_state(expiring_reply) == "done:", "expiry prints no decision")
+      local told = thread_replies(env, expiring, "Expired")
+      assert(told >= 1, "the owner is told in the thread")
+      room_events(env, { reaction("$late", OWNER, expiring) })
+      assert(guard_state(expiring_reply) == "done:" and thread_replies(env, expiring, "Expired.") == told + 1
+        and #home_posts(env, "Allowed") == 1, "a late answer allows nothing and is told: expired")
+
+      local restarted, restarted_reply, restarted_id = guard_request(env, replies, "git push --force")
+      restart_relay(env)
+      assert(env.relay:state().approvals[restarted_id].status == "expired" and guard_state(restarted_reply) == "done:",
+        "a restart expires the open request without an allow")
+      room_events(env, {}) -- the first sync after a restart is not live
+      local before = thread_replies(env, restarted, "Expired.")
+      room_events(env, { reaction("$after-restart", OWNER, restarted) })
+      assert(thread_replies(env, restarted, "Expired.") == before + 1 and #home_posts(env, "Allowed") == 1,
+        "an answer after a restart is told: expired")
+    end)
+  end)
+end
+
+  return {
+    { "test_guard_owner_answers_by_reply_and_reaction", test_guard_owner_answers_by_reply_and_reaction },
+    { "test_guard_only_the_verified_owner_counts", test_guard_only_the_verified_owner_counts },
+    { "test_guard_needs_live_sync", test_guard_needs_live_sync },
+    { "test_guard_forged_nonce_gives_no_decision", test_guard_forged_nonce_gives_no_decision },
+    { "test_guard_answer_binds_to_its_own_request", test_guard_answer_binds_to_its_own_request },
+    { "test_guard_one_shot_expiry_and_restart", test_guard_one_shot_expiry_and_restart },
+  }
+end)()) do
+  local ok, err = pcall(case[2])
+  if not ok then approval_failures[#approval_failures + 1] = case[1] .. ": " .. tostring(err) end
+end
+
 for _, case in ipairs({
   { "test_agent_join_files_request_and_does_not_join", test_agent_join_files_request_and_does_not_join },
   { "test_owner_check_reaction_approves_and_joins_with_how_approved", test_owner_check_reaction_approves_and_joins_with_how_approved },

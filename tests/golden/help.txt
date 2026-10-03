@@ -15,7 +15,7 @@ remuda butler — coordination for managed agents
   remuda butler schedule rm <name>
   remuda butler approve-text request SESSION - | on|off
   remuda butler launch <claude|codex|monocle> [name] [--model M] [--writable DIR]... [--sandbox full]
-  remuda butler guard on|off|status  (audit-only; off by default)
+  remuda butler guard on|off|status | approvals on|off|status  (off by default)
   remuda butler topic new <name> [--template T] [--agent A] [--model M]
   remuda butler topic delegate <name> [--agent A] [--leader L] [--model M] [--cwd DIR] [--writable DIR]... [--sandbox full] <task...>
   remuda butler send <to> "<message>" | <to> - | <to> --file PATH
