@@ -5742,6 +5742,32 @@ rx_tests[#rx_tests + 1] = { "test_rx_own_events_load_reads_only_the_newest_500_r
   end)
 end }
 
+rx_tests[#rx_tests + 1] = { "test_rx_own_events_load_slices_newest_500_before_filtering", function()
+  local dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    local events = {}
+    for index = 1, 520 do events[index] = { event_id = "$h" .. index, thread_root = "$h" .. index } end
+    events[21] = { event_id = "bad", thread_root = "$r" }
+    events[22] = "text"
+    events[23] = { event_id = "$h24", thread_root = "$h24" } -- the first of two entries with this id
+    events[25] = { event_id = "$h1", thread_root = "$h1" }   -- same id as an entry outside the newest 500
+    local file = assert(io.open(path .. ".since", "wb"))
+    file:write(assert(matrix.encode_json({ matrix_own_events = { [HOME] = events } })))
+    file:close()
+    local relay = rx_relay(path)
+    local expected = { ["$h24"] = true, ["$h1"] = true }
+    for index = 26, 520 do expected["$h" .. index] = true end
+    local loaded = 0
+    for index = 1, 520 do
+      local id = "$h" .. index
+      assert(relay:can_reply_to(id) == (expected[id] == true), id .. " loads only if valid within the newest 500")
+      if expected[id] then loaded = loaded + 1 end
+    end
+    assert(loaded == 497, "invalid entries shrink the set below 500, got " .. loaded)
+    relay:stop()
+  end)
+end }
+
 rx_tests[#rx_tests + 1] = { "test_rx_failed_send_registers_no_own_event", function()
   local dir, path = rx_fixture()
   rx_with_dir(dir, function()
