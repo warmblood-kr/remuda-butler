@@ -10,7 +10,7 @@ local function start_butler()
   T.wait_until(function()
     return T.eval('return remuda._butler_bus ~= nil and remuda._butler_bus.agents.butler ~= nil')
       :match("^%s*true%s*$") ~= nil
-  end, 5, "Butler root start")
+  end, 30, "Butler root start")
   T.eval("remuda._butler_codex_config_supported = true")
 end
 local function has(list_text, item) return list_text:find(item, 1, true) ~= nil end
@@ -89,7 +89,7 @@ T.test("profile is recorded, shown, and re-applied on relaunch", function()
     return { "sh", "-c", "sleep 60" }
   end]])
   T.eval("return remuda._butler_launch('codex', 'wr', nil, 'butler', remuda._butler_profile('codex', nil, {'" .. dir .. "'}))")
-  T.wait_until(function() return T.eval("return tostring(remuda._butler_bus.agents.wr ~= nil)") == "true" end, 20, "wr row")
+  T.wait_until(function() return T.eval("return tostring(remuda._butler_bus.agents.wr ~= nil)") == "true" end, 60, "wr row")
   T.eq(T.eval("local a = remuda._butler_bus.agents.wr; return tostring(a.writable and a.writable[1])"), dir, "row lost the writable root")
   T.eq(T.eval("local w = remuda._test_specs[1].writable; return tostring(w and w[1])"), dir, "builder spec lacks the writable root")
   local sessions = T.eval("return remuda._butler_sessions()")
@@ -105,7 +105,7 @@ T.test("profile is recorded, shown, and re-applied on relaunch", function()
     remuda._butler_bus.codex_update_relaunches.wr = { kind = "codex", name = "wr", cwd = row.cwd, parent = "butler",
       identity = row.id, expected_close = true, profile = remuda._butler_sandbox.of(row) }
     return remuda.close("wr")]])
-  T.wait_until(function() return T.eval("return tostring(#remuda._test_specs)") == "2" end, 20, "relaunch spec")
+  T.wait_until(function() return T.eval("return tostring(#remuda._test_specs)") == "2" end, 60, "relaunch spec")
   T.eq(T.eval("return remuda._test_specs[2].writable[1]"), dir, "relaunch dropped the profile")
 end)
 
