@@ -54,6 +54,7 @@ local function probe()
   end
   local policy = remuda.butler and remuda.butler.guard_policy
   if policy then results.guard = policy.enabled() end
+  if policy then results.guard_approvals = policy.approvals_enabled() end
   results.typed_lines, results.shell_lines, results.approve_text, results.matrix_configured = typed_line_switches()
   return results
 end
@@ -75,6 +76,11 @@ local function render(probe_results, platform)
     "Shell lines: " .. (probe_results.shell_lines == true and "on" or "off"),
     "Approve text: " .. (probe_results.approve_text == true and "on" or "off"),
   }
+  if probe_results.guard_approvals ~= nil then
+    lines[#lines + 1] = "Guard approvals: " .. (probe_results.guard_approvals
+      and "on (the owner answers Claude permission prompts of new sessions in Matrix; no answer means Claude's own prompt)"
+      or "off")
+  end
   if probe_results.guard ~= nil then
     lines[#lines + 1] = "Guard audit: "
       .. (probe_results.guard and "on (records tool calls of new Claude sessions; never blocks)" or "off")

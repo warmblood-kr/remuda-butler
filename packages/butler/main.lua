@@ -199,8 +199,10 @@ local function status_settings(path)
   local guard_policy = remuda.butler and remuda.butler.guard_policy
   local guard_hooks = ""
   if guard_policy and guard_policy.enabled() then
-    guard_hooks = guard_policy.hooks_json(
-      "remuda -s " .. shell_quote(server) .. " --stdin butler guard" .. quiet, json_quote) .. ","
+    local keep_stdout = system.platform() == "windows" and " 2>$null; exit 0" or " 2>/dev/null; exit 0"
+    local guard_command = "remuda -s " .. shell_quote(server) .. " --stdin butler guard"
+    guard_hooks = guard_policy.hooks_json(guard_command .. quiet, json_quote,
+      guard_policy.approvals_enabled() and (guard_command .. keep_stdout) or nil) .. ","
   end
   settings:write('{"statusLine":{"type":"command","command":'
     .. json_quote("remuda -s " .. shell_quote(server) .. " --stdin butler statusline " .. shell_quote(path))
@@ -636,6 +638,7 @@ remuda.exec("butler/schedule")
 remuda.exec("butler/schedule_cli")
 remuda.exec("butler/status_hook")
 remuda.exec("butler/guard_policy")
+remuda.exec("butler/guard_approval")
 remuda.exec("butler/commands")
 
 remuda.tool{
