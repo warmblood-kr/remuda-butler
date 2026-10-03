@@ -65,7 +65,8 @@ function T.expect(value, message, success_message)
 end
 
 function T.eval(code)
-  return remote(code)
+  -- The CLI appends one newline to the value it prints; the value itself has none.
+  return (remote(code):gsub("\n$", ""))
 end
 
 local function copy_tree(source, destination)
