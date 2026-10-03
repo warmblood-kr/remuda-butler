@@ -88,7 +88,6 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
         return
       end
     end
-    if verify_started and options.detect_only and now() - verify_started < 15 then return end
     local captured, screen = pcall(remuda.capture, actual)
     if not captured then
       finish(verify_started ~= nil and options.detect_only == true, "could not capture the agent screen")
@@ -208,15 +207,12 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
     local session_busy = false
     if remuda.session then
       local checked, session = pcall(remuda.session, actual)
-      session_busy = not checked or not session or session.is_busy == true
+      session_busy = checked and session and session.is_busy == true
+      if options.detect_only then session_busy = not checked or not session or session.is_busy == true end
     end
-    if options.detect_only then
-      if options.working then
-        local checked, working = pcall(options.working, screen)
-        session_busy = session_busy or not checked or working == true
-      end
-      finish(not (empty and not session_busy), "write returned success but the task never appeared")
-      return
+    if options.detect_only and options.working then
+      local checked, working = pcall(options.working, screen)
+      session_busy = session_busy or not checked or working == true
     end
     -- Busy is useful only after the composer releases our text; typing the
     -- task itself also makes a terminal look busy.
@@ -234,6 +230,13 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
     end
     if task_seen_in_composer and empty then
       finish(true)
+      return
+    end
+    -- Empty, idle and never seen in the composer: the write was lost. Wait
+    -- out a slow first paint before saying so.
+    if options.detect_only and empty and not session_busy and not task_seen_in_composer
+      and now() - verify_started >= 15 then
+      finish(false, "write returned success but the task never appeared")
       return
     end
     -- A task can be fully painted while its first Return is dropped. Retry

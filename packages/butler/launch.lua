@@ -496,32 +496,53 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
           return
         end
 
+        -- A write succeeding does not mean the agent accepted its Return.
+        -- Retry Return while the task sits in the composer; a write that
+        -- never appeared is reported only after 15 seconds.
         delivery.write_at = os.time()
+        local task_line = task:gsub("^%s+", ""):match("^[^\n]*") or ""
+        local checks, seen_in_composer = 0, false
         confirm = remuda.schedule({ every = 0.5, run = function()
           if not same_live_launch() then
             remuda.cancel(confirm)
             finish_task(false, "the recipient is gone")
             return
           end
-          if os.time() - delivery.write_at < 15 then return end
-          remuda.cancel(confirm)
+          checks = checks + 1
           local seen, latest = pcall(remuda.capture, actual)
           if not seen then
-            finish_task(true)
+            remuda.cancel(confirm)
+            finish_task(false, "the recipient is gone")
             return
           end
-          local decision = remuda._butler_prompt_is_empty(kind, latest)
+          local decision, text = remuda._butler_prompt_is_empty(kind, latest)
           local working = false
           if startup.working then
             local checked, result = pcall(startup.working, latest)
             working = not checked or result == true
           end
           local checked, session = pcall(remuda.session, actual)
-          local active = not checked or not session or session.is_busy == true
-          if decision == "EMPTY" and not working and not active then
-            finish_task(false, "write returned success but the task never appeared")
-          else
+          local active = working or not checked or not session or session.is_busy == true
+          local task_in_composer = #task_line > 0 and (text == task_line
+            or (#text > 0 and task_line:sub(1, #text) == text))
+          if task_in_composer then seen_in_composer = true end
+          if decision == "EMPTY" and (active or seen_in_composer) then
+            remuda.cancel(confirm)
             finish_task(true)
+            return
+          end
+          if decision == "EMPTY" and os.time() - delivery.write_at >= 15 then
+            remuda.cancel(confirm)
+            finish_task(false, "write returned success but the task never appeared")
+            return
+          end
+          -- Give the UI time to consume the first Return before retrying.
+          if decision == "NON-EMPTY" and task_in_composer and checks >= 4 and checks % 4 == 0 then
+            pcall(remuda.key, actual, "RET")
+          end
+          if checks >= (remuda._butler_task_poke_deferrals or 600) then
+            remuda.cancel(confirm)
+            finish_task(false, "it was typed but not submitted")
           end
         end })
         return

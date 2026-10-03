@@ -1,12 +1,12 @@
 -- Run with: luajit tests/butler_prompt_retry.lua
--- First-task delivery is detect-and-tell: one empty-composer write and one
--- capture 15 seconds later, with no retype or Return retry.
+-- First-task delivery types once into an empty composer, retries a dropped
+-- Return, and reports a write that never appeared only after 15 seconds.
 
 _G.remuda = {}
 local delivery = dofile("packages/butler/prompt.lua")
 
 local function scenario(after_write, busy, working, expected_ok)
-  local state = { now = 100, composer = "", captures = 0, writes = 0, done = false }
+  local state = { now = 100, composer = "", captures = 0, writes = 0, keys = 0, done = false }
   local fake = {}
   function fake.schedule(spec) state.poll = spec.run; return "task-poll" end
   function fake.cancel(handle) assert(handle == "task-poll"); state.cancelled = true end
@@ -18,6 +18,11 @@ local function scenario(after_write, busy, working, expected_ok)
     state.writes = state.writes + 1
     state.composer = after_write == "task" and text or ""
     return true
+  end
+  function fake.key(_, key)
+    assert(key == "RET")
+    state.keys = state.keys + 1
+    state.composer = ""
   end
   function fake.session() return { is_busy = busy == true } end
   delivery.schedule(fake, "codex", "member", "member", "leader", "first task", {
@@ -37,20 +42,28 @@ local function scenario(after_write, busy, working, expected_ok)
   state.poll()
   assert(state.writes == 1, "ready empty composer did not receive exactly one write")
   assert(not state.done, "delivery finished before its one post-write look")
+  if expected_ok == "retry" then
+    for _ = 1, 8 do state.now = state.now + 0.5; state.poll() end
+    assert(state.done and state.ok and state.keys == 1 and state.writes == 1,
+      "a dropped Return was not retried once before acceptance")
+    return
+  end
+  if expected_ok then
+    state.poll()
+    assert(state.done and state.ok and state.writes == 1, "an accepted task was not reported delivered")
+    return
+  end
   state.now = 114
   state.poll()
-  assert(not state.done and state.captures == 1, "post-write capture ran before 15 seconds")
+  assert(not state.done, "a lost write was reported before 15 seconds")
   state.now = 115
   state.poll()
-  assert(state.done and state.cancelled, "delivery did not finish after the 15-second look")
-  assert(state.captures == 2 and state.writes == 1, "delivery used more than one look or write")
-  assert(state.ok == expected_ok, "unexpected delivery result: " .. tostring(state.reason))
-  if not expected_ok then
-    assert(state.reason == "write returned success but the task never appeared", state.reason)
-  end
+  assert(state.done and state.cancelled and state.writes == 1 and state.keys == 0 and not state.ok,
+    "a lost write was not reported after 15 seconds")
+  assert(state.reason == "write returned success but the task never appeared", state.reason)
 end
 
-scenario("task", false, false, true)
+scenario("task", false, false, "retry")
 scenario("blank", false, false, false)
 scenario("blank", true, false, true)
 scenario("blank", false, true, true)
