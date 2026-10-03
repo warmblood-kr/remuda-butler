@@ -143,9 +143,11 @@ message to the owner's Matrix HOME room. The verified owner answers it as for
 reaction on another post or an unknown id does nothing, and a terminal cannot
 approve (it may deny). An answer applies once, to that request, while the
 member's hook waits; the hook then prints Claude's allow or deny decision.
-A call whose command is longer than 1000 bytes, a `run_script` call, a cap
+Only `Bash`, `Read`, `Glob`, `Grep`, `WebFetch` and `WebSearch` calls are routed,
+because the post shows their whole action; `Write`, `Edit` and other tools keep
+Claude's own prompt. A command longer than 1000 bytes, a `run_script` call, a cap
 (5 open requests per session, 20 in all) or a missing or failing Matrix
-setup is not routed. Pending requests are stored, and a restart expires them.
+setup is not routed either. Pending requests are stored, and a restart expires them.
 
 Every other outcome prints no decision, so Claude shows its own prompt: this
 slice only adds a way for the owner to answer prompts the agent already raises,

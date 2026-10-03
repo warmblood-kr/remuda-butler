@@ -88,6 +88,11 @@ function M.redact(text, cap)
     :gsub("(%[['\"][%w_-]*[Pp][Aa][Ss][Ss][%w_-]*['\"]%]%s*=%s*['\"])[^'\"]*", "%1***")
     :gsub("(%[['\"][%w_-]*[Tt][Oo][Kk][Ee][Nn][%w_-]*['\"]%]%s*=%s*['\"])[^'\"]*", "%1***")
     :gsub("(%-%-[%w-]*[Pp][Aa][Ss][Ss][%w-]*)%s+%S+", "%1 ***")
+    :gsub("([?&])([%w_.%-]+)=([^&%s]*)", function(prefix, name, value)
+      local lower = name:lower()
+      if lower:find("sig", 1, true) or lower:find("auth", 1, true) or lower:find("cred", 1, true)
+        or lower:find("key", 1, true) then return prefix .. name .. "=***" end
+    end)
   if utf8 and not utf8.len(text) then text = text:gsub("[\128-\255]", "?") end
   cap = cap or SUMMARY_CAP
   if #text > cap then

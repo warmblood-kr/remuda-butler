@@ -18,6 +18,9 @@ butler.guard_approval = M
 local TTL_S = 290
 local REPLY_TIMEOUT_S = 300
 local MAX_TEXT = 1000
+-- Only tools whose whole action the post shows: their one field is the action. Write, Edit and
+-- the like carry content the post would not show, so they stay with Claude's own prompt.
+local ROUTED_TOOLS = { Bash = true, Read = true, Glob = true, Grep = true, WebFetch = true, WebSearch = true }
 local MAX_OPEN = 20
 local MAX_OPEN_PER_SESSION = 5
 local RATE_PER_10_MIN = 30
@@ -129,7 +132,7 @@ end
 function M.maybe_request(record, hook_json)
   if not (M.enabled() and policy.enabled()) then return nil end
   if record.event ~= "PermissionRequest" or record.kind ~= "claude" or type(hook_json) ~= "table" then return nil end
-  if type(remuda.pending) ~= "function" or record.class == "script" or record.tool == "" then return nil end
+  if type(remuda.pending) ~= "function" or record.class == "script" or not ROUTED_TOOLS[record.tool] then return nil end
   -- A command the owner cannot see in full is not routed; Claude's own prompt shows it whole.
   -- Redaction reads a bounded prefix, so the raw field is measured as well.
   local input = type(hook_json.tool_input) == "table" and hook_json.tool_input or {}

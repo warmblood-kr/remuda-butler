@@ -216,6 +216,8 @@ T.test("post failure, caps and unrouted calls print nothing", function()
   T.eq(perm("x", "ss-a", "{ event = 'PreToolUse' }"), 0, "PreToolUse is not routed")
   T.eq(perm("x", "ss-a", "{ kind = 'codex' }"), 0, "codex is not routed")
   T.eq(perm("x", "ss-a", "{ tool = 'mcp__remuda__run_script', input = { code = 'return 1' } }"), 0, "run_script is not routed")
+  T.eq(perm("x", "ss-a", "{ tool = 'Write', input = { file_path = '/p/w/a.txt', content = 'rm -rf x' } }"), 0, "Write is not routed")
+  T.eq(perm("x", "ss-a", "{ tool = 'Edit', input = { file_path = '/p/w/a.txt', new_string = 'x' } }"), 0, "Edit is not routed")
   T.eq(perm(string.rep("x", 1100)), 0, "a command too long to show whole is not routed")
   T.eq(T.eval("return remuda._t_count()"), "0", "unrouted calls post nothing")
   T.expect(true, "", "ok - caps and unrouted calls")
@@ -224,7 +226,7 @@ end)
 T.test("post escapes line and direction characters; audit and post hide secrets", function()
   on("a-esc")
   T.eval("remuda._t_attach()")
-  local cmd = "echo a\u{2028}b\u{202E}c; curl -H 'Authorization: Bearer abc123def456' https://x"
+  local cmd = "echo a\u{2028}b\u{202E}c; curl -H 'Authorization: Bearer abc123def456' 'https://x/y?X-Amz-Signature=sigsecret99&a=b'"
   perm(cmd, "ss\u{2028}x\u{202E}")
   local post = T.eval("return remuda._t_posts[1].text")
   for _, raw in ipairs({ "\226\128\168", "\226\128\174" }) do
@@ -232,9 +234,11 @@ T.test("post escapes line and direction characters; audit and post hide secrets"
   end
   T.expect(has(post, "\\u2028") and has(post, "\\u202E"), "escapes missing: " .. post)
   T.expect(not has(post, "abc123def456"), "secret in the post: " .. post)
+  T.expect(not has(post, "sigsecret99") and has(post, "a=b"), "query credential in the post: " .. post)
   T.eval("remuda._t_answer(1, 'approve')")
   local lines = T.eval("return remuda._t_lines()")
   T.expect(not has(lines, "abc123def456"), "secret in the audit: " .. lines)
+  T.expect(not has(lines, "sigsecret99"), "query credential in the audit: " .. lines)
   for _, event in ipairs({ "approval_requested", "approval_approved" }) do
     T.expect(has(lines, '"event":"' .. event .. '"'), "audit lacks " .. event .. ": " .. lines)
   end
