@@ -1721,40 +1721,6 @@ fn butler_lifecycle_reload_replaces_hooks_and_schedules_and_rolls_back() {
     );
 }
 
-/// `remuda._butler_initial_name` is set before the test-mode return (see
-/// `init.lua`), so this reaches real code without needing the live `claude`
-/// launch that `remuda._butler_test_mode` exists to avoid.
-#[test]
-fn butler_initial_name_is_butler_even_with_a_launch_directory() {
-    let dir = scratch_dir("butler-name-basename");
-    let _daemon = Daemon::spawn_with_pwd(&dir, Some("/home/x/my-project/"));
-
-    let mode = remuda_timed(&dir, &["-s", "s", "-e", "remuda._butler_test_mode = true"]);
-    assert!(
-        mode.status.success(),
-        "{}",
-        String::from_utf8_lossy(&mode.stderr)
-    );
-
-    let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    let name = remuda_timed(
-        &dir,
-        &["-s", "s", "-e", "return remuda._butler_initial_name"],
-    );
-    assert!(
-        name.status.success(),
-        "{}",
-        String::from_utf8_lossy(&name.stderr)
-    );
-    assert_eq!(String::from_utf8_lossy(&name.stdout).trim(), "butler");
-}
-
 /// A daemon without `PWD` has the same stable service name.
 #[test]
 fn butler_initial_name_falls_back_to_butler_without_a_pwd() {

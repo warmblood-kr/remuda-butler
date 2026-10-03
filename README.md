@@ -107,3 +107,4 @@ The harness uses private daemon names `h<pid>` and `h<pid>c`, private HOME,
 XDG, and runtime directories, and never targets the default daemon. Teardown
 reports `left: 0`. Keep `tests/lib/harness.lua` free of `os.execute` and
 `io.popen`.
+Test files can set `T.child_env = { PWD = "/path/" }` before startup to customize the child daemon environment.
