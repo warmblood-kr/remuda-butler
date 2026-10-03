@@ -59,6 +59,10 @@ function M.redact(text, cap)
     :gsub("([%w_]*[Pp][Aa][Ss][Ss][Ww]?[Oo]?[Rr]?[Dd]?[%w_]*)=%S+", "%1=***")
     :gsub("([%w_]*[Aa][Pp][Ii][_-]?[Kk][Ee][Yy][%w_]*)=%S+", "%1=***")
     :gsub("(%-%-[%w-]*[Tt][Oo][Kk][Ee][Nn][%w-]*)%s+%S+", "%1 ***")
+    :gsub("([Xx]%-[%w-]*[Kk][Ee][Yy][%w-]*:%s*)[^\r\n'\"]+", "%1***")
+    :gsub("(\"[%w_]*[Pp][Aa][Ss][Ss][%w_]*\"%s*:%s*\")[^\"]*", "%1***")
+    :gsub("(\"[%w_]*[Tt][Oo][Kk][Ee][Nn][%w_]*\"%s*:%s*\")[^\"]*", "%1***")
+    :gsub("(\"[%w_]*[Ss][Ee][Cc][Rr][Ee][Tt][%w_]*\"%s*:%s*\")[^\"]*", "%1***")
     :gsub("(%-%-[%w-]*[Pp][Aa][Ss][Ss][%w-]*)%s+%S+", "%1 ***")
   if utf8 and not utf8.len(text) then text = text:gsub("[\128-\255]", "?") end
   cap = cap or SUMMARY_CAP

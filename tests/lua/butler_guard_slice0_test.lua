@@ -107,10 +107,14 @@ T.test("hook always allows: malformed, oversized, control chars, secrets, cap", 
   local lines = T.eval("return remuda._t_lines()")
   T.expect(has(lines, '"event":"unparsed"') and has(lines, '"event":"oversized"'), "unparsed/oversized not logged: " .. lines)
   T.expect(not lines:find("[\1-\9\11-\31]"), "control characters reached the log")
-  local sec = T.eval([[remuda._t_hook('{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"curl -H \"Authorization: Bearer abc123def456\" https://x -d token=hunter2 sk-abcdefghij1234 ghp_AAAABBBBCCCC https://u:pw@host"}}')
+  local sec = T.eval([[remuda._t_hook('{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"curl -H \"Authorization: Bearer abc123def456\" https://x -d token=hunter2 sk-abcdefghij1234 ghp_AAAABBBBCCCC https://u:pw@host -H X-Api-Key:zzkey999"}}')
     return remuda._t_lines()]])
-  for _, leaked in ipairs({ "abc123def456", "hunter2", "sk-abcdefghij1234", "ghp_AAAABBBBCCCC", "u:pw@" }) do
+  for _, leaked in ipairs({ "abc123def456", "hunter2", "sk-abcdefghij1234", "ghp_AAAABBBBCCCC", "u:pw@", "zzkey999" }) do
     T.expect(not has(sec, leaked), "secret leaked: " .. leaked)
+  end
+  local json_secret = T.eval([=[return remuda.butler.guard_policy.redact('{"password":"p4ssw0rd9","api_token":"t0k3n77"} -H "X-Api-Key: zzkey888"')]=])
+  for _, leaked in ipairs({ "p4ssw0rd9", "t0k3n77", "zzkey888" }) do
+    T.expect(not has(json_secret, leaked), "json/header secret leaked: " .. leaked .. " in " .. json_secret)
   end
   local capped = T.eval([[remuda._t_hook('{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo ' .. string.rep('가', 400) .. '"}}')
     local last; for l in remuda._t_lines():gmatch('[^\n]+') do last = l end
