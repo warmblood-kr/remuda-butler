@@ -4586,7 +4586,7 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
             "t-claude-human-trust",
         ]
         .iter()
-        .all(|n| traced.contains(&format!("task_poke_timeout\t{n}")))
+        .all(|n| traced.contains(&format!("first_task_delivery\t{n}")))
             && traced.contains("launch_failed\tt-claude-launch-unknown")
         {
             eval(&path, "remuda._butler_notice_clock = nil");
@@ -4598,7 +4598,7 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
                 l.starts_with("butler type ")
                     && (l.contains("Butler message") || l.contains("new Butler messages arrived"))
             });
-        if typed == 3 && traced.contains("task_poke_timeout\tt-stuck")
+        if typed == 3 && traced.contains("first_task_delivery\tt-stuck")
             && leader_noticed
             && eval(&path, "return tostring(remuda._butler_bus.agents['t-claude-launch'] ~= nil)") == "true"
             && eval(&path, "return tostring(remuda._butler_bus.agents['t-claude-launch-transient'] ~= nil)") == "true"
@@ -4643,8 +4643,8 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
         "launch failure did not preserve the unknown dialog label");
     assert!(log.contains(" type Butler message ") || log.contains(" new Butler messages arrived"),
         "the leader is told about t-stuck: {log}");
-    assert_eq!(eval(&path, "local found=false; for _,o in pairs(remuda._butler_bus.objects) do if (o.content or ''):find('Task for t-stuck was not delivered', 1, true) then found=true end end; return tostring(found)"),
-        "true", "the task-poke failure was not mailed to the leader");
+    assert_eq!(eval(&path, "local found=false; for _,o in pairs(remuda._butler_bus.objects) do if (o.content or ''):find('initial task for t-stuck was not delivered', 1, true) then found=true end end; return tostring(found)"),
+        "true", "the first-task failure was not mailed to the leader");
     // A batched notice does not name t-stuck; its give-up mail must.
     let leader_mail = eval(
         &path,
@@ -4660,9 +4660,13 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
         "#,
     );
     assert!(
-        leader_mail.contains("Task for t-stuck was not delivered"),
+        leader_mail.contains("initial task for t-stuck was not delivered"),
         "the leader is told about t-stuck: {leader_mail}"
     );
+    assert_eq!(leader_mail.matches("initial task for t-stuck was not delivered").count(), 1,
+        "the leader received duplicate first-task failure mail: {leader_mail}");
+    assert!(leader_mail.contains("remuda butler send 't-stuck' 'task three'"),
+        "the failure mail omitted the shell-quoted resend command: {leader_mail}");
     assert_eq!(log.lines().filter(|l| l.starts_with("t-codex-unanswerable key ")).count(), 0, "an unknown update menu was answered: {log}");
     assert_eq!(log.lines().filter(|l| l.starts_with("t-codex-human key ")).count(), 0, "a human-attached pane was changed: {log}");
     assert_eq!(log.lines().filter(|l| l.starts_with("t-claude-human-trust key ")).count(), 0, "modal keys were pressed after give_up: {log}");
@@ -4758,7 +4762,7 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
         std::thread::sleep(Duration::from_millis(100));
     }
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.codex_update_state.done_version ~= '0.157.1->0.158.0' and remuda._butler_bus.codex_update_state.claimed == false and remuda._butler_bus.codex_update_relaunches['t-codex-gui-close'] == nil)"), "true", "screen close was mistaken for update completion");
-    assert_eq!(eval(&path, "local found=false; for _,o in pairs(remuda._butler_bus.objects) do if (o.content or ''):find('Task for t-codex-gui-close was not delivered', 1, true) then found=true end end; return tostring(found)"), "true", "aborted update silently lost its task");
+    assert_eq!(eval(&path, "local found=false; for _,o in pairs(remuda._butler_bus.objects) do if (o.content or ''):find('initial task for t-codex-gui-close was not delivered', 1, true) then found=true end end; return tostring(found)"), "true", "aborted update silently lost its task");
     eval(&path, r#"remuda.capture_styled=function() return {rows={[2]={{text="",dim=false}},[3]={{text="",dim=false}}},cursor={row=3}} end"#);
     eval(&path, r#"remuda._butler_notify("t-codex-timeout", "Butler message 01M3MX8NCGV5GVSGN104YP4TFT arrived. Read them: remuda butler inbox")"#);
     let modal_notice_log = eval(&path, "return table.concat(remuda._t, '\\n')");

@@ -156,6 +156,45 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
     -- Keep an immediate mail notice out of the child's first prompt until the
     -- delegated task has been submitted.
     bus.pending_tasks[actual] = true
+    bus.first_task_delivery = bus.first_task_delivery or {}
+    local delivery = {
+      marker = bus.agents[actual] and bus.agents[actual].session_start_marker,
+      state = "waiting",
+    }
+    bus.first_task_delivery[actual] = delivery
+    local function same_delivery_record()
+      local agent = bus.agents[actual]
+      return bus.first_task_delivery[actual] == delivery
+        and (agent == nil or agent.session_start_marker == delivery.marker)
+    end
+    local function same_launch()
+      local agent = bus.agents[actual]
+      return same_delivery_record() and agent ~= nil
+    end
+    local function shell_quote(value)
+      return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
+    end
+    local function finish_task(delivered, reason)
+      if not same_delivery_record() or delivery.state ~= "waiting" then return end
+      delivery.state = delivered and "delivered" or "failed"
+      bus.pending_tasks[actual] = nil
+      if delivered then return end
+      reason = tostring(reason or "task was not delivered")
+      _butler_session_trace("first_task_delivery", actual .. " marker=" .. tostring(delivery.marker)
+        .. " state=failed reason=" .. reason)
+      local command = "remuda butler send " .. shell_quote(actual) .. " " .. shell_quote(task)
+      pcall(remuda._butler_send, "butler", parent or "butler", "The initial task for " .. actual
+        .. " was not delivered: " .. reason .. ". Resend it with `" .. command .. "`.")
+    end
+    local function recipient_alive()
+      for _, row in ipairs(remuda.ls()) do
+        if row.name == actual and row.alive then return true end
+      end
+      return false
+    end
+    local function same_live_launch()
+      return same_launch() and recipient_alive(), "recipient is gone or launch was replaced"
+    end
     local startup = remuda._butler_agent_startup[kind] or {}
     if kind == "codex" then
     local poke, confirm, attempts, settle, deferred = nil, nil, 0, 0, 0
@@ -207,26 +246,27 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
     local function give_up(detail)
       remuda.cancel(poke)
       if confirm then remuda.cancel(confirm) end
-      bus.pending_tasks[actual] = nil
       if bus.codex_update_state.waiting then bus.codex_update_state.waiting[actual] = nil end
       if bus.codex_update_state.restart_waiting then bus.codex_update_state.restart_waiting[actual] = nil end
-      _butler_session_trace("task_poke_timeout", actual .. detail)
-      pcall(remuda._butler_send, "butler", parent or "butler", "Task for " .. actual
-        .. " was not delivered: its pane never became ready or free to type into."
-        .. " Resend it with `remuda butler send " .. actual .. " TASK` once it is.")
+      finish_task(false, "its pane never became ready or free to type into" .. tostring(detail or ""))
     end
     local function report_update_timeout(detail)
       if update_timeout_reported then return end
       update_timeout_reported = true
-      bus.pending_tasks[actual] = nil
       _butler_session_trace("codex_update_timeout", actual .. detail)
-      pcall(remuda._butler_send, "butler", parent or "butler", "Codex update wait limit reached for " .. actual
-        .. ". Its pane was left open; task delivery will resume when the pane is safe to relaunch.")
+      remuda.cancel(poke)
+      finish_task(false, "the Codex update dialog did not clear" .. tostring(detail or ""))
     end
     poke = remuda.schedule({ every = 0.5, run = function()
+      local checked, alive = pcall(same_live_launch)
+      if not checked or not alive then
+        remuda.cancel(poke)
+        finish_task(false, "the recipient is gone or launch was replaced")
+        return
+      end
       if update_relaunch_record_ref and (update_relaunch_record_ref.relaunched or update_relaunch_record_ref.cancelled) then
         remuda.cancel(poke)
-        bus.pending_tasks[actual] = nil
+        finish_task(false, "the recipient launch was replaced")
         return
       end
       attempts = attempts + 1
@@ -236,7 +276,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       local captured, screen = pcall(remuda.capture, actual)
       if not captured then
         remuda.cancel(poke)
-        bus.pending_tasks[actual] = nil
+        finish_task(false, "the recipient is gone")
         return
       end
       local agent = bus.agents[actual]
@@ -440,55 +480,48 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       if not startup.ready or startup.ready(screen) then
         -- #29: never type the task over a human's line. Waiting is bounded
         -- separately (default 600 ticks = 300s); then the leader is told.
-        if not remuda._butler_notify_policy(actual) then
+        local empty = remuda._butler_prompt_is_empty(kind, screen)
+        if empty ~= "EMPTY" or not remuda._butler_notify_policy(actual) then
           attempts, deferred = attempts - 1, deferred + 1
           if deferred >= (remuda._butler_task_poke_deferrals or 600) then give_up(" deferred") end
           return
         end
         remuda.cancel(poke)
-        local typed = pcall(remuda.type_text, actual, task)
-        if not typed then
-          give_up(" type failed")
+        local typed, result, detail = pcall(remuda.type_text, actual, task)
+        local outcome, first = PROMPT_DELIVERY.trace_write(remuda, actual, delivery.marker,
+          typed, result, detail)
+        delivery.write_outcome = outcome
+        if outcome ~= "success" then
+          finish_task(false, first ~= "" and first or "the write was refused")
           return
         end
 
-        -- A terminal write succeeding does not mean the agent accepted its
-        -- Return. Keep notices out until the composer releases the task, and
-        -- retry Return if the same task remains in the composer.
-        bus.pending_tasks[actual] = task
-        local task_line = task:gsub("^%s+", ""):match("^[^\n]*") or ""
-        local checks, empty_checks = 0, 0
+        delivery.write_at = os.time()
         confirm = remuda.schedule({ every = 0.5, run = function()
-          checks = checks + 1
+          if not same_live_launch() then
+            remuda.cancel(confirm)
+            finish_task(false, "the recipient is gone")
+            return
+          end
+          if os.time() - delivery.write_at < 15 then return end
+          remuda.cancel(confirm)
           local seen, latest = pcall(remuda.capture, actual)
           if not seen then
-            remuda.cancel(confirm)
-            bus.pending_tasks[actual] = nil
+            finish_task(true)
             return
           end
-          local decision, text = remuda._butler_prompt_is_empty(kind, latest)
-          local busy = remuda.session(actual).is_busy == true
-          local task_in_composer = #task_line > 0 and (text == task_line
-            or (#text > 0 and task_line:sub(1, #text) == text))
-          if not task_in_composer and decision == "EMPTY" then
-            empty_checks = empty_checks + 1
+          local decision = remuda._butler_prompt_is_empty(kind, latest)
+          local working = false
+          if startup.working then
+            local checked, result = pcall(startup.working, latest)
+            working = not checked or result == true
+          end
+          local checked, session = pcall(remuda.session, actual)
+          local active = not checked or not session or session.is_busy == true
+          if decision == "EMPTY" and not working and not active then
+            finish_task(false, "write returned success but the task never appeared")
           else
-            empty_checks = 0
-          end
-          -- The task can be accepted between type_text and this first poll.
-          -- A fast TUI may also still be painting the text on its first empty
-          -- poll, so require two consecutive empty captures. Busy is definitive.
-          if busy or empty_checks >= 2 then
-            remuda.cancel(confirm)
-            bus.pending_tasks[actual] = nil
-            return
-          end
-          -- Give the UI time to consume the first Return before retrying.
-          if decision == "NON-EMPTY" and task_in_composer and checks >= 4 and checks % 4 == 0 then
-            pcall(remuda.key, actual, "RET")
-          end
-          if checks >= (remuda._butler_task_poke_deferrals or 600) then
-            give_up(" submit")
+            finish_task(true)
           end
         end })
         return
@@ -497,8 +530,13 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
     end })
     else
     PROMPT_DELIVERY.schedule(remuda, kind, actual, name, parent, task, {
+      detect_only = true,
+      marker = delivery.marker,
+      same_launch = same_live_launch,
+      on_write = function(outcome) delivery.write_outcome = outcome end,
       ready = startup.ready,
       modals = startup.modals,
+      working = startup.working,
       trust_dialog = function(screen)
         local modal = startup_modal(startup, screen)
         return modal ~= nil and modal.trust ~= nil
@@ -515,14 +553,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       ready_timeout = remuda._butler_task_poke_attempts or 60,
       submit_timeout = remuda._butler_submit_timeout or 300,
       on_done = function(delivered, reason)
-        bus.pending_tasks[actual] = nil
-        if delivered then return end
-        local detail = reason or "delivery could not be verified"
-        if detail == "submit" then detail = "it was typed but not submitted" end
-        _butler_session_trace("task_poke_timeout", actual .. " " .. detail)
-        pcall(remuda._butler_send, "butler", parent or "butler", "Task for " .. actual
-          .. " was not delivered: " .. detail
-          .. ". Resend it with `remuda butler send " .. actual .. " TASK` once it is.")
+        finish_task(delivered, reason)
       end,
     })
     end
