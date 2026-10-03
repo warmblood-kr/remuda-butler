@@ -1125,6 +1125,12 @@ if not bus.close_wrapper_installed and type(remuda.close) == "function" then
 end
 local function report_update_task_not_relaunched(record, reason)
   if not record or not record.task or record.task == "" then return end
+  -- The launch reports a lost first task itself; one mail per lost task.
+  local delivery = bus.first_task_delivery and bus.first_task_delivery[record.name]
+  if delivery then
+    if delivery.state ~= "waiting" then return end
+    delivery.state = "failed"
+  end
   pcall(remuda._butler_send, "butler", record.parent or "butler",
     "Task for " .. record.name .. " was not delivered because its Codex update ended without a safe relaunch ("
       .. tostring(reason or "update aborted") .. "). Resend it with `remuda butler send "
