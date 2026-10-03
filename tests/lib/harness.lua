@@ -221,7 +221,7 @@ local function run()
   local scratch_real = fs.realpath(scratch)
   local default_runtime = os.getenv("REMUDA_LUA_DEFAULT_RUNTIME")
   local resolved, value = pcall(fs.realpath, default_runtime)
-  if resolved then default_runtime = value end
+  if resolved and type(value) == "string" then default_runtime = value end
   local controller_socket = runtime .. "/remuda/" .. controller_server .. ".sock"
   local child_socket = runtime .. "/remuda/" .. child_server .. ".sock"
   assert(runtime == scratch_real .. "/run",
