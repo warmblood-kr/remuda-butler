@@ -3,6 +3,7 @@
 local config = assert(remuda._butler_launch_config)
 local bus = assert(config.bus)
 local system = assert(remuda._butler_system)
+local sandbox_lib = assert(remuda._butler_sandbox)
 local launch_failure_lines = assert(remuda.butler.launch_failure_lines)
 local topic_config = config.topic_config
 local data_home = config.data_home
@@ -37,9 +38,26 @@ local startup_modal = chooser.startup_modal
 local codex_update_complete = chooser.codex_update_complete
 local capture_update_evidence = chooser.capture_update_evidence
 
-local function launch_agent(kind, requested_name, cwd, model, parent, task, relaunch_identity, fresh_trusted_cwd)
+local function launch_agent(kind, requested_name, cwd, model, parent, task, relaunch_identity, fresh_trusted_cwd, profile)
   local candidates = kind and { kind } or configured_agent_order()
   kind = kind or candidates[1]
+  if profile and (kind ~= "codex" or not remuda._butler_codex_config_ok()) then
+    error("this core cannot pass a sandbox profile to Codex (`_codex_tui` lacks -c KEY=VALUE); refusing to launch without it.\nNext: remuda upgrade, then retry", 0)
+  end
+  -- Every launch and relaunch passes here: the profile is checked again, and `full`
+  -- needs a person at a terminal on a first launch, or that earlier grant on a relaunch.
+  if profile then
+    profile = sandbox_lib.normalize(kind, profile.sandbox, profile.writable, config.realpath,
+      config.protected_dirs and config.protected_dirs())
+    bus.sandbox_granted = bus.sandbox_granted or {}
+    if profile and profile.sandbox == "full" then
+      local granted = relaunch_identity and bus.sandbox_granted[requested_name or kind]
+      if not granted and (relaunch_identity or sandbox_lib.caller_is_agent()) then
+        sandbox_lib.refuse_full(sandbox_lib.owner_command("remuda butler launch " .. tostring(kind) .. " " .. tostring(requested_name or "NAME"), profile))
+      end
+      bus.sandbox_granted[requested_name or kind] = true
+    end
+  end
   if kind == "claude" and (not model or model == "") then
     local config = remuda._butler_compaction_config or {}
     model = remuda._butler_claude_default_model
@@ -88,6 +106,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
         or setup_telemetry(candidate_kind, { name = name, model = model })
       telemetry_by_kind[candidate_kind] = telemetry
       return { name = name, token = token, model = model, cwd = launch_cwd,
+        sandbox = profile and profile.sandbox, writable = profile and profile.writable,
         settings_path = telemetry.settings_path, telemetry = telemetry,
         system_prompt = parent and team_member_prompt(parent) or nil }
     end,
@@ -131,6 +150,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
     parent = parent, children = {}, id = identity.id, alias = actual, session_name = actual,
     session_start_marker = remuda._butler_new_ulid(),
     cwd = launch_cwd, task = task, launch_attempts = attempts, trust_allowed = auto_trust,
+    sandbox = profile and profile.sandbox, writable = profile and profile.writable,
     trust_reported = waiting_for_trust, trust_answered = trust_answered,
   }
   if parent and bus.agents[parent] then
@@ -148,7 +168,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   -- A failed welcome write must not prevent the agent from starting.
   if not relaunch_identity then
     pcall(queue_message, mail_address(parent or "butler"), mail_address(actual),
-      team_member_guidance(parent or "butler"), "Welcome to Butler")
+      team_member_guidance(parent or "butler") .. sandbox_lib.guidance_line(profile), "Welcome to Butler")
     -- First sight of a new member: nothing to replay or re-show (notice.lua).
     bus.unread_seeded[actual] = "launched"
   end
@@ -210,6 +230,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       return {
         kind = kind, name = actual, cwd = agent.cwd, model = agent.model,
         parent = agent.parent, task = task, identity = agent.id,
+        profile = sandbox_lib.of(agent),
         update_pressed = false, last_screen = agent.last_screen,
       }
     end
@@ -594,7 +615,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   return result or ("launching " .. name)
 end
 
-local function make_topic(name, template, kind, parent, task, model, cwd)
+local function make_topic(name, template, kind, parent, task, model, cwd, profile)
   valid_child_name(name, "topic name")
   load_topic_config()
   local root = topic_config.project_home .. "/" .. name
@@ -628,9 +649,11 @@ local function make_topic(name, template, kind, parent, task, model, cwd)
     assert(type(setup) == "function", "Butler topic template must be a function: " .. template)
     setup(topic)
   end
-  if created_now and not template then write_agent_guidance(root, team_member_guidance(parent or "butler")) end
+  if created_now and not template then
+    write_agent_guidance(root, team_member_guidance(parent or "butler") .. sandbox_lib.guidance_line(profile))
+  end
   return launch_agent(kind, name, cwd or root, model, parent, task, nil,
-    auto_trust and (cwd == nil or cwd == root))
+    auto_trust and (cwd == nil or cwd == root), profile)
 end
 
 -- Shell-facing doors into the same deliberately mutable bus.  These are not
@@ -638,13 +661,19 @@ end
 -- attribution a human (or an agent using the CLI) chose to leave on a note.
 -- Keeping them on `remuda` also makes the post office pleasant to explore from
 -- a REPL without having to know this chunk's private locals.
-function remuda._butler_launch(kind, name, model, parent)
-  return launch_agent(kind, name, nil, model, resolve(parent or "butler"))
+function remuda._butler_launch(kind, name, model, parent, profile)
+  if profile and profile.sandbox == "full" and sandbox_lib.caller_is_agent() then
+    sandbox_lib.refuse_full(sandbox_lib.owner_command("remuda butler launch " .. tostring(kind) .. " " .. tostring(name or "NAME"), profile))
+  end
+  return launch_agent(kind, name, nil, model, resolve(parent or "butler"), nil, nil, nil, profile)
 end
 function remuda._butler_topic_new(name, template, kind, model)
   return make_topic(name, template, kind, "butler", nil, model)
 end
-function remuda._butler_topic_delegate(name, task, template, kind, parent, model, cwd)
+function remuda._butler_topic_delegate(name, task, template, kind, parent, model, cwd, profile)
+  if profile and profile.sandbox == "full" and sandbox_lib.caller_is_agent() then
+    sandbox_lib.refuse_full(sandbox_lib.owner_command("remuda butler topic delegate " .. name .. " --agent codex", profile, cwd) .. " <task...>")
+  end
   local requested_parent = parent or "butler"
   local resolved, leader = pcall(resolve, requested_parent)
   if resolved then
@@ -672,7 +701,12 @@ function remuda._butler_topic_delegate(name, task, template, kind, parent, model
   end
   local leader = bus.agents[parent]
   if not leader then error("no Butler leader named " .. tostring(parent), 0) end
-  return make_topic(name, template, kind, parent, task, model, cwd)
+  return make_topic(name, template, kind, parent, task, model, cwd, profile)
+end
+
+-- Entry points turn requested flags into a checked profile (nil when none).
+function remuda._butler_profile(kind, sandbox_mode, writable)
+  return sandbox_lib.normalize(kind, sandbox_mode, writable, config.realpath, config.protected_dirs and config.protected_dirs())
 end
 
 remuda._butler_launch_impl = { launch_agent = launch_agent }

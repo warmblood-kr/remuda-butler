@@ -10,6 +10,7 @@ local remuda = {
 }
 _G.remuda = remuda
 dofile("packages/butler/agents/claudecode.lua")
+dofile("packages/butler/sandbox.lua")
 dofile("packages/butler/agents/codex.lua")
 dofile("packages/butler/agents/monocle.lua")
 

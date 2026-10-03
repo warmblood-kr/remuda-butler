@@ -111,6 +111,13 @@ function remuda._butler_sessions()
     end
   end
   if #member_attempts > 0 then out = out .. "\nMEMBER ATTEMPTS\n" .. table.concat(member_attempts, "\n") end
+  local profiles = {}
+  for _, item in ipairs(team_order()) do
+    local agent = bus.agents[item.id]
+    local summary = remuda._butler_sandbox.summary(remuda._butler_sandbox.of(agent))
+    if summary then profiles[#profiles + 1] = display_name(item.id) .. ": " .. summary end
+  end
+  if #profiles > 0 then out = out .. "\nSANDBOX\n" .. table.concat(profiles, "\n") end
   local failed_names = {}
   for name in pairs(bus.launch_failures or {}) do failed_names[#failed_names + 1] = name end
   table.sort(failed_names)
@@ -243,6 +250,8 @@ function remuda.session_detail(session)
   if not agent then return nil end
   local telemetry = remuda._butler_telemetry_for(agent)
   local detail = session_status(session.name, agent, telemetry) .. " · " .. (agent.kind or "agent") .. " · " .. telemetry.model
+  local profile = remuda._butler_sandbox.summary(remuda._butler_sandbox.of(agent))
+  if profile then detail = detail .. " · " .. profile end
   -- Current usage only: the window and percent cost width and rarely change.
   local used = tonumber(telemetry.context_used)
   if used then detail = detail .. " · " .. string.format("%.0fK", used / 1000) end

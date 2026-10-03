@@ -16,6 +16,7 @@ _G.remuda = remuda
 
 dofile("packages/butler/agents/monocle.lua")
 dofile("packages/butler/agents/claudecode.lua")
+dofile("packages/butler/sandbox.lua")
 dofile("packages/butler/agents/codex.lua")
 
 local build = remuda._butler_agent_builders.monocle

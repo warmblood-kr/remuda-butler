@@ -15,14 +15,11 @@ telemetry.codex = {
   end,
 }
 
-builders.codex = function(spec)
-  local argv = { "remuda", "_codex_tui", "--status", spec.telemetry.status_path }
-  if spec.model and spec.model ~= "" then argv[#argv + 1] = "--model"; argv[#argv + 1] = spec.model end
-  if not spec.token then return argv end
-  -- #201: the remuda MCP server reaches the daemon from outside Codex's command
-  -- sandbox. Only a core whose `_codex_tui` forwards `-c KEY=VALUE` gets the
-  -- flags; an older core would reject them and the member would not start.
-  -- Only a completed probe is cached.
+-- #201: the remuda MCP server reaches the daemon from outside Codex's command
+-- sandbox. Only a core whose `_codex_tui` forwards `-c KEY=VALUE` gets the
+-- flags; an older core would reject them and the member would not start.
+-- Only a completed probe is cached. The sandbox profile needs the same support.
+function remuda._butler_codex_config_ok()
   local supported = remuda._butler_codex_config_supported
   if supported == nil then
     local ok, result = false, "process.run unavailable"
@@ -39,12 +36,29 @@ builders.codex = function(spec)
         .. "); this member starts without the remuda MCP server")
     end
   end
-  if supported then
+  return supported == true
+end
+
+builders.codex = function(spec)
+  local argv = { "remuda", "_codex_tui", "--status", spec.telemetry.status_path }
+  if spec.model and spec.model ~= "" then argv[#argv + 1] = "--model"; argv[#argv + 1] = spec.model end
+  local profile = { sandbox = spec.sandbox, writable = spec.writable }
+  local wants_profile = profile.sandbox ~= nil or (profile.writable and #profile.writable > 0)
+  if not spec.token and not wants_profile then return argv end
+  if not remuda._butler_codex_config_ok() then
+    if wants_profile then
+      error("this core cannot pass a sandbox profile to Codex (`_codex_tui` lacks -c KEY=VALUE).\nNext: remuda upgrade, then retry", 0)
+    end
+    return argv
+  end
+  if spec.token then
     for _, flag in ipairs(remuda._butler_agent_support.mcp_flags(spec.token)) do argv[#argv + 1] = flag end
+  end
+  for _, flag in ipairs(remuda._butler_sandbox.flags(profile, remuda._butler_agent_support.json_quote)) do
+    argv[#argv + 1] = flag
   end
   return argv
 end
-
 local codex_modal_markers = {
   "Update available",
   "A new version of Codex is available",
