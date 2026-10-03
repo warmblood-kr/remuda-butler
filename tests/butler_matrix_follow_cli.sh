@@ -9,7 +9,8 @@ T=$(mktemp -d /tmp/bmf.XXXXXX)
 T=$(cd "$T" && pwd -P); S=bmf
 export REMUDA_RUNTIME_DIR=$T/run XDG_DATA_HOME=$T/data XDG_CONFIG_HOME=$T/config HOME=$T/home
 export REMUDA_BUTLER_PROJECT_HOME=$T/projects REMUDA_NO_UPDATE_CHECK=1
-unset REMUDA_BUTLER_TOKEN REMUDA_BUTLER_CONFIG
+unset REMUDA_BUTLER_TOKEN REMUDA_BUTLER_CONFIG REMUDA_SESSION_ID REMUDA_SESSION_NAME REMUDA_DAEMON_ID
+for name in ${!REMUDA_BUTLER_AGENT_@} REMUDA_BUTLER_LEADER_ID REMUDA_BUTLER_SESSION_NAME; do unset "$name"; done
 mkdir -p "$XDG_DATA_HOME/remuda/mods/butler" "$HOME"
 tar -c -C "$REPO" extension.toml packages | tar -x -C "$XDG_DATA_HOME/remuda/mods/butler"
 cleanup() {
