@@ -194,9 +194,17 @@ local function status_settings(path)
   local hook = '{"hooks":[{"type":"command","command":' .. json_quote(
     "remuda -s " .. shell_quote(server) .. " --stdin butler status-hook " .. shell_quote(path) .. quiet
   ) .. '}]}'
+  -- Guard slice 0: while the switch is on, PreToolUse/PermissionRequest hooks record each call
+  -- (guard_policy.lua); the hook prints no decision, so Claude behaves as without it.
+  local guard_policy = remuda.butler and remuda.butler.guard_policy
+  local guard_hooks = ""
+  if guard_policy and guard_policy.enabled() then
+    guard_hooks = guard_policy.hooks_json(
+      "remuda -s " .. shell_quote(server) .. " --stdin butler guard" .. quiet, json_quote) .. ","
+  end
   settings:write('{"statusLine":{"type":"command","command":'
     .. json_quote("remuda -s " .. shell_quote(server) .. " --stdin butler statusline " .. shell_quote(path))
-    .. '},"hooks":{"UserPromptSubmit":[' .. hook .. '],"Stop":[' .. hook .. '],"Notification":[' .. hook .. ']}}')
+    .. '},"hooks":{' .. guard_hooks .. '"UserPromptSubmit":[' .. hook .. '],"Stop":[' .. hook .. '],"Notification":[' .. hook .. ']}}')
   settings:close()
   return settings_path
 end
@@ -620,6 +628,7 @@ remuda._butler_commands_config = { current_agent = current_agent, OPERATOR = OPE
 remuda.exec("butler/schedule")
 remuda.exec("butler/schedule_cli")
 remuda.exec("butler/status_hook")
+remuda.exec("butler/guard_policy")
 remuda.exec("butler/commands")
 
 remuda.tool{

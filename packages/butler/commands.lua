@@ -244,6 +244,9 @@ end)
 command(14, "shell-lines", "  remuda butler shell-lines on|off", function(args, caller)
   return typed_lines_cli.cli(args, current_agent(caller))
 end)
+command(21, "guard", "  remuda butler guard on|off|status  (audit-only; off by default)", function(args, caller)
+  return remuda.butler.guard_policy.run(args, caller)
+end)
 command(15, "agents", "  remuda butler agents [--all]", function(args)
   if #args == 1 then return registry_list(false) end
   if #args == 2 and args[2] == "--all" then return registry_list(true) end
