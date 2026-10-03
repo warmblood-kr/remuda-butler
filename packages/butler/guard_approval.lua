@@ -1,6 +1,6 @@
 -- Guard slice 1: owner approval for the permission prompts of Claude members.
 -- With `guard on` and `guard approvals on`, the PermissionRequest hook registers
--- one request, posts it to the owner's Matrix HOME room, and waits for the
+-- one request, posts it to the configured approval room, and waits for the
 -- verified owner's answer (approval.lua and the relay's owner gate). Allow and
 -- deny are printed as Claude's PermissionRequest decision; every other outcome
 -- (no Matrix, a cap, expiry, an error) prints nothing, so Claude shows its own

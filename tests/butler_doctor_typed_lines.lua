@@ -1,4 +1,5 @@
-local config = { typed_lines = true, shell_lines = false, approve_text = false }
+local config = { typed_lines = true, shell_lines = false, approve_text = false,
+  all_room = "!all:example.org", rooms = { ["!all:example.org"] = "all" } }
 remuda = {
   _butler_system = {
     platform = function() return "macos" end,
@@ -20,10 +21,14 @@ local rendered = output()
 assert(rendered:find("Typed lines: on", 1, true), "doctor should show typed-lines on")
 assert(rendered:find("Shell lines: off", 1, true), "doctor should show shell-lines off")
 assert(rendered:find("Approve text: off", 1, true), "doctor should show approve-text off")
+assert(rendered:find("Approval room: !all:example.org", 1, true), "doctor should show the configured approval room")
 config.typed_lines, config.shell_lines = false, true
 rendered = output()
 assert(rendered:find("Typed lines: off", 1, true), "doctor should show typed-lines off")
 assert(rendered:find("Shell lines: on", 1, true), "doctor should show shell-lines on")
+config.all_room, config.rooms = nil, {}
+rendered = output()
+assert(rendered:find("Approval room: HOME (lounge not joined)", 1, true), "doctor should show the HOME fallback")
 print("ok - doctor typed-line switch status")
 
 -- The setup hint appears only while Matrix is not configured.

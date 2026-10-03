@@ -129,7 +129,7 @@ function M.owner_event_allowed(event, record, cfg, live_sync, room_id)
       or (event.type ~= "m.room.message" and event.type ~= "m.reaction")
       or type(event.event_id) ~= "string" or event.event_id == ""
       or type(event.sender) ~= "string" or (cfg.allowed_senders or {})[event.sender] ~= true
-      or room_id ~= cfg.home_room then return false end
+      or room_id ~= (record.room_id or cfg.home_room) then return false end
   local content = type(event.content) == "table" and event.content or {}
   local relation = type(content["m.relates_to"]) == "table" and content["m.relates_to"] or {}
   if content["m.new_content"] ~= nil or relation.rel_type == "m.replace" then

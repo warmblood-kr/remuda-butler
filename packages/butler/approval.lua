@@ -100,12 +100,12 @@ end
 approval.ttl_minutes = 30
 function approval.default_ttl_s() return approval.ttl_minutes * 60 end
 
-function approval.attach(state, persist_fn, post_fn)
+function approval.attach(state, persist_fn, post_fn, room_fn)
   assert(type(state) == "table", "approval state is required")
   if type(state.approvals) ~= "table" or state.approvals == remuda.json.null then
     state.approvals = remuda.json and remuda.json.object({}) or {}
   end
-  attached = { state = state, persist = persist_fn, post = post_fn }
+  attached = { state = state, persist = persist_fn, post = post_fn, approval_room = room_fn }
   local recovered = false
   local restarted_ms = math.floor(os.time() * 1000)
   for _, rec in pairs(state.approvals) do
@@ -148,7 +148,7 @@ function approval.attach(state, persist_fn, post_fn)
               notice.owner_sent = true
               pcall(persist)
             end
-          end)
+          end, { room = rec.room_id })
         if not called then notice.owner_sent = false end
       end
       if notice.agent_sent ~= true and type(remuda._butler_send) == "function"
@@ -210,7 +210,8 @@ function approval.reply(rec, text)
   if type(rec) ~= "table" or type(rec.event_id) ~= "string" or rec.event_id == "" then
     return nil, "Approval request event is unavailable"
   end
-  return attached.post(text, { rel_type = "m.thread", event_id = rec.event_id }, function() end)
+  return attached.post(text, { rel_type = "m.thread", event_id = rec.event_id }, function() end,
+    { room = rec.room_id })
 end
 
 local function apply_approved(rec)
@@ -330,10 +331,15 @@ function approval.request(request, done)
     return nil
   end
   local created_ms = math.floor(os.time() * 1000)
+  local room_id
+  if type(attached.approval_room) == "function" then
+    local ok, value = pcall(attached.approval_room)
+    if ok and type(value) == "string" and value ~= "" then room_id = value end
+  end
   local rec = { id = id, kind = request.kind, key = request.key, asker = asker,
     summary = summary, data = request.data, nonce = hex(nonce), created_ms = created_ms,
     expires_at = created_ms + math.max(1, tonumber(request.ttl_s) or 600) * 1000,
-    event_id = nil, status = "open" }
+    event_id = nil, room_id = room_id, status = "open" }
   local ttl_minutes = math.max(1, math.ceil((tonumber(request.ttl_s) or 600) / 60))
   local html
   local text = table.concat({ "Butler wants to " .. summary,
@@ -361,14 +367,15 @@ function approval.request(request, done)
   end
   local ok, handle = pcall(attached.post, text, nil, function(result)
     if type(result) ~= "table" or result.error then
-      return complete(nil, "Could not post to HOME: "
+      return complete(nil, "Could not post approval request: "
         .. tostring(type(result) == "table" and result.error or "Matrix post returned no result"))
     end
     local event_id = result.event_id
     if type(event_id) ~= "string" or event_id == "" then
-      return complete(nil, "Could not post to HOME: response omitted event_id")
+      return complete(nil, "Could not post approval request: response omitted event_id")
     end
     rec.event_id = event_id
+    if type(result.room_id) == "string" and result.room_id ~= "" then rec.room_id = result.room_id end
     attached.state.approvals[id] = rec
     local saved, save_error = pcall(persist)
     if not saved then
@@ -376,8 +383,8 @@ function approval.request(request, done)
       return complete(nil, "Could not save approval request: " .. tostring(save_error))
     end
     complete(id)
-  end, { mention = true, html = html })
-  if not ok then complete(nil, "Could not post to HOME: " .. tostring(handle)) end
+  end, { mention = true, html = html, room = room_id })
+  if not ok then complete(nil, "Could not post approval request: " .. tostring(handle)) end
   return handle
 end
 
@@ -496,7 +503,7 @@ function approval.cli(args, agent)
       return fail(tostring(err) .. "\nNext: remuda butler approvals")
     end
     if verb == "approve" then
-      return "Approved request " .. tostring(rec.id) .. " (" .. tostring(rec.summary) .. "); joining now. The result goes to the HOME thread and the asker's mail."
+      return "Approved request " .. tostring(rec.id) .. " (" .. tostring(rec.summary) .. "); joining now. The result goes to the request thread and the asker's mail."
         .. "\nNext: remuda butler approvals"
     end
     return "Denied request " .. tostring(rec.id) .. " (" .. tostring(rec.summary) .. ")."

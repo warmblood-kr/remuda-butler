@@ -435,9 +435,13 @@ member from those variables only; the MCP tools also accept the session
 capability.
 
 Approvals: when an agent runs `matrix join`, Butler resolves the room and
-posts one request to HOME instead of joining. The owner answers with a ✅ or
-❌ reaction, or a `yes`/`no` reply, to that exact message within 30 minutes (`approval_ttl_minutes`, 1 to 1440).
-Only an allowlisted human sender in HOME counts. A bare `yes` does nothing.
+posts one request as an ordinary message with an owner mention in the shared
+ALL-BUTLERS room when it is configured and joined, or in HOME otherwise.
+Prepared-text and Claude guard approvals use the same room. The owner answers
+with a ✅ or ❌ reaction, or a `yes`/`no` reply, to that exact message within
+30 minutes (`approval_ttl_minutes`, 1 to 1440; Claude guard approvals keep a
+fixed 290 second window). Only an allowlisted human sender in the request's
+room counts. A bare `yes` does nothing.
 The owner can also answer from the terminal: `remuda butler approvals` lists
 the open requests, and `remuda butler approve ID` or `deny ID` answers one
 (operator-only). Terminal approve/deny are refused for a Butler member, by the
@@ -449,6 +453,7 @@ at request time and writes `room=ID how=approved`. The asker gets mail for every
 approved, denied or expired. A repeat ask for the same room returns the same
 request. Each agent may have 3 open requests, and there may be 5 in total.
 Requests live in the relay state file.
+Doctor shows the configured approval room.
 
 `quarantine` lists rejected inbound Matrix message events; add `--id EVENT_ID`
 to inspect one. It is operator-only under the same caller policy. The relay

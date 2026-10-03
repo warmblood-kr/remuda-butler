@@ -814,7 +814,9 @@ function relay.new(options)
     table.sort(owners)
     approval.attach(state, persist, function(text, relation, callback, extras)
       extras = extras or {}
-      local content = { msgtype = "m.notice", body = text, ["m.relates_to"] = relation }
+      local room_id = type(extras.room) == "string" and cfg.rooms[extras.room] ~= nil
+        and extras.room or cfg.home_room
+      local content = { msgtype = "m.text", body = text, ["m.relates_to"] = relation }
       if extras.mention and #owners > 0 then
         content.body = table.concat(owners, " ") .. "\n" .. text
         content["m.mentions"] = { user_ids = owners }
@@ -829,17 +831,23 @@ function relay.new(options)
         return { cancel = function() end }
       end
       return api.request_json({ method = "PUT",
-        path = "/_matrix/client/v3/rooms/" .. percent_encode(cfg.home_room)
+        path = "/_matrix/client/v3/rooms/" .. percent_encode(room_id)
           .. "/send/m.room.message/" .. percent_encode("approval-" .. tostring(remuda._butler_new_ulid())),
-        room = cfg.home_room, body = body,
+        room = room_id, body = body,
         headers = { ["Content-Type"] = "application/json" },
       }, function(result)
         if type(result) ~= "table" or result.error then
           callback({ error = type(result) == "table" and result.error or "Matrix approval post failed" })
         else
-          callback({ event_id = result.json and result.json.event_id })
+          callback({ event_id = result.json and result.json.event_id, room_id = room_id })
         end
       end)
+    end, function()
+      local room_id = cfg.all_room
+      if type(room_id) == "string" and room_id ~= "" and cfg.rooms[room_id] == "all" then
+        return room_id
+      end
+      return cfg.home_room
     end)
   end
 
@@ -1728,7 +1736,7 @@ function relay.new(options)
                 and member_kind(ev.sender, cfg) == "HUMAN"
             else
               counts = event_id ~= "" and approval_verdict ~= nil
-                and (room_id or cfg.room) == cfg.home_room
+                and (room_id or cfg.room) == (approval_record.room_id or cfg.home_room)
                 and type(ev.sender) == "string" and cfg.allowed_senders[ev.sender]
                 and member_kind(ev.sender, cfg) == "HUMAN"
                 and origin_ms ~= nil and tonumber(approval_record.created_ms) ~= nil
