@@ -7,6 +7,7 @@ release tags yet; entries come from merged pull requests.
 ## Unreleased
 
 ### Added
+- `remuda butler matrix mark-all ROOM` (operator only) marks an already-joined room as the ALL-BUTLERS room, and doctor now says "joined room is not marked ALL-BUTLERS" with a `Next:` line naming that fix and the reload (`remuda exec butler`) instead of claiming the lounge is not joined (#367).
 - Owner approval requests use `approval_room=all|home` (default `all`); prepared-text requests over 1 KiB are posted in full in HOME only. Requests carry a relay-loop marker, mention every allowlisted owner, and keep answers bound to the request room; doctor shows the selected mode and room. Requests stay open 30 minutes by default (`approval_ttl_minutes`, 1 to 1440), while guard approvals keep their 290 second window (#359, #361, #362).
 - `remuda butler guard on|off|status`: an off-by-default audit that records each tool call of new Claude members (class, redacted summary) to `guard-audit.jsonl` through `PreToolUse` and `PermissionRequest` hooks; it never blocks, fails open, and `doctor` shows the switch (#339).
 - `remuda butler matrix upload --thread EVENT_ID [--caption TEXT] PATH` posts a file into a thread, and `remuda butler reply MESSAGE-ID --attach PATH [CAPTION...]` posts it into the Matrix thread of a mail (#347). The refusal for a file outside an agent session's working directory now names the `cp` that copies it in.
