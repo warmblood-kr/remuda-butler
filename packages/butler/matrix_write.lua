@@ -384,7 +384,7 @@ local function operator_room(verb, opts, agent, callback)
   end
   if not opts.room or opts.room == "" then
     local example = verb == "join" and "remuda butler matrix join #alias:server"
-      or "remuda butler matrix leave '!room:server'"
+      or ("remuda butler matrix " .. verb .. " '!room:server'")
     callback({ error = "matrix " .. verb .. " requires ROOM.\nNext: " .. example })
     return nil
   end
@@ -658,6 +658,22 @@ function matrix.join(opts, on_done, agent)
     end)
   end
   return { cancel = function() if current and current.cancel then current:cancel() end end }
+end
+
+-- Operator-only: mark a joined room as ALL-BUTLERS in the config. Takes effect on a reload.
+function matrix.mark_all(opts, on_done, agent)
+  opts = opts or {}
+  local done = once(on_done)
+  local room = operator_room("mark-all", opts, agent, done)
+  if not room then return { cancel = function() end } end
+  local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths or {}
+  if type(paths.config_path) ~= "string" or paths.config_path == "" then
+    error_result(done, "Matrix config path is unavailable")
+    return { cancel = function() end }
+  end
+  local ok, mark_error = matrix.config_mark_all(paths.config_path, room)
+  if not ok then error_result(done, mark_error) else done({ room_id = room }) end
+  return { cancel = function() end }
 end
 
 function matrix.leave(opts, on_done, agent)

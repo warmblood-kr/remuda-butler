@@ -32,6 +32,11 @@ local function probe_command(argv)
   return { installed = true, probe_error = true }
 end
 
+-- Same rule as matrix_cli's terminal_safe; that module is not loaded here.
+local function safe(text)
+  return (tostring(text):gsub("[%c]", " "):gsub("\194[\128-\159]", " "))
+end
+
 local function typed_line_switches()
   local matrix = remuda.butler and remuda.butler.matrix
   local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths or {}
@@ -42,15 +47,29 @@ local function typed_line_switches()
   local ok, config = pcall(matrix.read_config, paths.config_path)
   if not ok or type(config) ~= "table" then return false, false end
   local approval_mode = config.approval_room == "home" and "home" or "all"
-  local approval_result = "HOME (lounge not joined)"
+  local approval_result, approval_next = "HOME (lounge not joined)", "Next: remuda butler matrix join ROOM"
   if approval_mode == "home" then
     approval_result = "HOME"
   elseif type(config.all_room) == "string" and type(config.rooms) == "table"
       and config.rooms[config.all_room] == "all" then
-    approval_result = config.all_room
+    approval_result, approval_next = config.all_room, nil
+  else
+    local joined = {}
+    for room, kind in pairs(type(config.rooms) == "table" and config.rooms or {}) do
+      if kind == "joined" then joined[#joined + 1] = room end
+    end
+    if #joined == 1 then
+      approval_result = "HOME (joined room is not marked ALL-BUTLERS)"
+      approval_next = "Next: check that the room's members are only you and Butlers (ALL-BUTLERS receives approval requests in full), then run: remuda butler matrix mark-all '"
+        .. safe(joined[1]):gsub("'", "'\\''") .. "'; then remuda exec butler"
+    elseif #joined > 1 then
+      approval_result = "HOME (no joined room is marked ALL-BUTLERS)"
+      approval_next = "Next: remuda butler matrix rooms; then remuda butler matrix mark-all ROOM"
+    end
   end
+  if approval_mode == "home" then approval_next = nil end
   local approval_room = approval_mode .. " -> " .. approval_result
-  return config.typed_lines == true, config.shell_lines == true, config.approve_text == true, true, approval_room
+  return config.typed_lines == true, config.shell_lines == true, config.approve_text == true, true, approval_room, approval_next
 end
 
 local function probe()
@@ -66,7 +85,7 @@ local function probe()
   if policy then results.guard_approvals = policy.approvals_enabled() end
   if policy then results.guard_deny = policy.deny_enabled() end
   results.typed_lines, results.shell_lines, results.approve_text, results.matrix_configured,
-    results.approval_room = typed_line_switches()
+    results.approval_room, results.approval_next = typed_line_switches()
   return results
 end
 
@@ -100,6 +119,7 @@ local function render(probe_results, platform)
     lines[#lines + 1] = "Guard audit: "
       .. (probe_results.guard and "on (records tool calls of new Claude sessions; never blocks)" or "off")
   end
+  if probe_results.approval_next then lines[#lines + 1] = probe_results.approval_next end
   local guard = remuda.butler and remuda.butler.guard
   local unguarded = guard and guard.unguarded_line()
   if unguarded then lines[#lines + 1] = unguarded end

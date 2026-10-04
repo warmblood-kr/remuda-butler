@@ -17,6 +17,7 @@ local USAGE = [[  remuda butler matrix [--json] status
   remuda butler matrix [--json] [--room ROOM] redact EVENT_ID [--reason TEXT]
   remuda butler matrix [--json] join ROOM (ID, #alias, or public name; operator)
   remuda butler matrix [--json] leave ROOM (operator)
+  remuda butler matrix [--json] mark-all ROOM (operator; ROOM is a joined room ID; reload with remuda exec butler)
   remuda butler matrix setup [OPTIONS]
   remuda butler matrix [--json] quarantine [--id EVENT_ID] (operator)
 
@@ -26,7 +27,7 @@ Or end with --password-cmd PROG [ARG...] in place of --password-file to read the
 local VERBS = {
   status = true, rooms = true, history = true, event = true, get = true, quarantine = true,
   thread = true, follow = true, unfollow = true, download = true, send = true, reply = true, react = true,
-  upload = true, redact = true, join = true, leave = true,
+  upload = true, redact = true, join = true, leave = true, ["mark-all"] = true,
 }
 
 local THREAD_CLI_SPEC = {
@@ -256,7 +257,7 @@ local function parse(args)
   elseif method == "redact" then
     if #values ~= 1 then return nil end
     options.event_id = values[1]
-  elseif method == "join" or method == "leave" then
+  elseif method == "join" or method == "leave" or method == "mark-all" then
     if #values > 1 or options.room then return nil end
     options.room = values[1]
   elseif method == "history" then
@@ -404,6 +405,8 @@ local function render_human(verb, options, result)
     return "Completed Matrix " .. verb .. (result.event_id and (": " .. result.event_id) or "") .. "\n"
   elseif verb == "upload" then
     return "Uploaded as " .. tostring(result.content_uri or "") .. " (" .. tostring(result.event_id or "") .. ")\n"
+  elseif verb == "mark-all" then
+    return "Marked " .. terminal_safe(result.room_id or options.room) .. " as the ALL-BUTLERS room\nNext: remuda exec butler\n"
   elseif verb == "join" or verb == "leave" then
     if verb == "join" and result.approval_request_id then
       return "Asked the owner to approve joining " .. terminal_safe(result.approval_label or "the Matrix room")
@@ -443,7 +446,7 @@ local function finish(reply, cancelled, completed, verb, options, result)
   if result.error then
     local message = tostring(result.error)
     if not message:find("Next:", 1, true) then
-      if verb == "join" or verb == "leave" then message = message .. "\nNext: remuda butler matrix rooms" end
+      if verb == "join" or verb == "leave" or verb == "mark-all" then message = message .. "\nNext: remuda butler matrix rooms" end
       if verb == "rooms" then message = message .. "\nNext: remuda butler matrix setup" end
     end
     return reply:resolve(1, "", message .. "\n")
@@ -1072,7 +1075,7 @@ function matrix.cli(args, agent, stdin_body, file_body)
     end
     options.output = allowed
   end
-  local called, handle = pcall(matrix[verb], options, callback, agent)
+  local called, handle = pcall(matrix[(verb:gsub("-", "_"))], options, callback, agent)
   if not called then
     finish(reply, cancelled, completed, verb, options, { error = tostring(handle) })
   else

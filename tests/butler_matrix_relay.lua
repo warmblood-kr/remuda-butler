@@ -2699,6 +2699,47 @@ local function test_rooms_public_refuses_agents()
   remove_dir(dir)
 end
 
+remuda._t359 = remuda._t359 or {}
+function remuda._t359.test_mark_all_marks_a_joined_room_operator_only()
+  local dir, path = invite_fixture(nil, "room=" .. NEW .. " how=owner-invite\n", false)
+  with_operator_config(path, 200, function(calls)
+    local before = read_text(path)
+    local refused
+    matrix.mark_all({ room = NEW }, function(value) refused = value end, ASKER)
+    assert(refused and refused.error and refused.error:find("matrix mark-all is operator-only", 1, true)
+      and refused.error:find("Next: ask the owner to run remuda butler matrix mark-all ROOM from their terminal", 1, true),
+      "an agent mark-all must be refused with owner guidance")
+    assert(read_text(path) == before, "a refused mark-all must not touch the config")
+    local cli = capture_matrix_cli({ "matrix", "mark-all", NEW }, ASKER)
+    assert(cli and cli.code == 1 and cli.stderr:find("operator-only", 1, true), "the CLI must refuse an agent caller: " .. tostring(cli and (cli.code .. cli.stderr .. cli.stdout)))
+    local missing
+    matrix.mark_all({ room = "!nope:example.org" }, function(value) missing = value end)
+    assert(missing and missing.error and missing.error:find("not a joined room", 1, true), "an unknown room is refused")
+    local home
+    matrix.mark_all({ room = HOME }, function(value) home = value end)
+    assert(home and home.error and home.error:find("not a joined room", 1, true), "HOME cannot be marked")
+    assert(read_text(path) == before, "failed marks must not touch the config")
+    local result = capture_matrix_cli({ "matrix", "mark-all", NEW })
+    assert(result and result.code == 0 and result.stdout:find("Marked " .. NEW .. " as the ALL-BUTLERS room", 1, true)
+      and result.stdout:find("Next: remuda exec butler", 1, true), "the operator verb must say to reload: " .. tostring(result and result.stdout))
+    local conf = assert(matrix.read_config(path))
+    assert(conf.all_room == NEW and conf.rooms[NEW] == "all", "the room must become ALL-BUTLERS")
+    assert(not read_text(path):find("\nroom=" .. NEW, 1, true), "the room= line must be replaced, not duplicated")
+    assert(#calls == 0, "marking is a local config write")
+    local again
+    matrix.mark_all({ room = NEW }, function(value) again = value end)
+    assert(again and not again.error, "marking the current ALL-BUTLERS room again is a no-op")
+  end)
+  local dir2, path2 = invite_fixture(nil, "room=" .. NEW .. " how=owner-invite\n")
+  with_operator_config(path2, 200, function()
+    local blocked
+    matrix.mark_all({ room = NEW }, function(value) blocked = value end)
+    assert(blocked and blocked.error and blocked.error:find("already set", 1, true), "an existing ALL-BUTLERS room is not replaced")
+  end)
+  remove_dir(dir)
+  remove_dir(dir2)
+end
+
 local function test_join_leave_missing_room_guidance()
   local dir, path = invite_fixture()
   with_operator_config(path, 200, function(calls)
@@ -6854,6 +6895,7 @@ for _, case in ipairs({
   { "test_alias_directory_room_id_must_be_valid", test_alias_directory_room_id_must_be_valid },
   { "test_alias_directory_room_id_terminal_controls_are_refused", test_alias_directory_room_id_terminal_controls_are_refused },
   { "test_rooms_public_refuses_agents", test_rooms_public_refuses_agents },
+  { "test_mark_all_marks_a_joined_room_operator_only", remuda._t359.test_mark_all_marks_a_joined_room_operator_only },
   { "test_invalid_room_aliases_are_rejected_before_http", test_invalid_room_aliases_are_rejected_before_http },
   { "test_leave_alias_resolves_and_home_all_stay_refused", test_leave_alias_resolves_and_home_all_stay_refused },
   { "test_leave_alias_prefers_configured_label_over_current_directory", test_leave_alias_prefers_configured_label_over_current_directory },

@@ -561,6 +561,29 @@ function matrix.config_remove_room(path, room)
   return write_config_text(path, table.concat(kept))
 end
 
+-- Mark an already-joined room as the ALL-BUTLERS room: its room= line becomes all_room=.
+function matrix.config_mark_all(path, room)
+  local conf, err = read_config(path)
+  if not conf then return nil, err end
+  if conf.all_room == room then return true, false end
+  if conf.rooms[room] ~= "joined" then
+    return nil, tostring(room) .. " is not a joined room.\nNext: remuda butler matrix rooms"
+  end
+  if conf.all_room then
+    return nil, "an ALL-BUTLERS room is already set (" .. conf.all_room .. ").\nNext: remuda butler matrix rooms"
+  end
+  local contents
+  contents, err = read_file(path, "config")
+  if not contents then return nil, err end
+  local kept = {}
+  each_raw_line(contents, function(raw, line, ending)
+    kept[#kept + 1] = (room_line_id(line) == room and ("all_room=" .. room) or raw) .. ending
+  end)
+  local wrote, write_error = write_config_text(path, table.concat(kept))
+  if not wrote then return nil, write_error end
+  return true, true
+end
+
 -- Core's stable TLS reason for a wrong pin (remuda net/http_client.rs tls_failure_reason).
 matrix.PIN_MISMATCH = "SPKI pin mismatch"
 -- Core's stable TLS reason for a certificate the trust roots do not cover, and its next step.
