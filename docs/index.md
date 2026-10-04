@@ -131,6 +131,20 @@ the agent proceeds as before. `remuda butler doctor` shows the switch. The audit
 is a record, not a security boundary: agents run as the same user and can bypass
 or edit it.
 
+Every audit line carries a `grant_id` field, `-` until standing grants exist.
+When grants land, `grant_id` comes from the grant store, never from agent input.
+Each change of the `guard`, `guard deny` or `guard approvals` switch appends a
+`switch` line naming who changed it (the caller's alias, or `operator`) and when.
+`Who` is evidence from the forwarded environment, not a control; the `weaken`-class deny is the control.
+Turning a switch off is audited first. If that line cannot be written the switch still turns off (it only narrows enforcement, so the owner is never locked out), the answer and stderr say "switched off, NOT audited", and a `guard-unaudited` marker shows in `guard status` and `guard stats` until the next audit line is written.
+When the log passes 1 MiB, the previous `guard-audit.jsonl.1` moves to a
+`guard-audit.jsonl.<UTC stamp>` archive, and archives older than 90 days are
+deleted at that moment and never otherwise.
+Two rotations in one second keep both archives (a `-N` suffix).
+`remuda butler guard stats` prints the line count, the first and last time, and
+the counts per class and per event over the log and its archives, bucketing names it does not know as `other` and counting oversized or unreadable lines as unreadable, as a baseline
+to compare before enabling `guard deny`.
+
 ### Guard approvals
 
 `remuda butler guard approvals on|off|status` is a second switch, off by
