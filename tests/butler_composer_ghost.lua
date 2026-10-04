@@ -40,3 +40,14 @@ end
 local draft = remuda._butler_composer_decision("claude", "lead", "❯ \n  second line\n────")
 assert(draft == "NON-EMPTY", "a draft below an empty first line must stay NON-EMPTY, got " .. tostring(draft))
 print("ok - multi-line draft is not upgraded")
+
+-- A real, non-dim 23-byte draft with capture_styled present must stay NON-EMPTY: the styled
+-- read only upgrades a dim ghost (fails under an always-EMPTY decision).
+local typed = "this is a real draft ok"
+assert(#typed == 23)
+remuda.capture_styled = function()
+  return { cursor = { row = 2 }, rows = { {}, { { text = "❯ " }, { text = typed } } } }
+end
+local real = remuda._butler_composer_decision("claude", "lead", "────\n❯ " .. typed .. "\n────")
+assert(real == "NON-EMPTY", "a real draft with capture_styled present must stay NON-EMPTY, got " .. tostring(real))
+print("ok - real draft stays NON-EMPTY with capture_styled")
