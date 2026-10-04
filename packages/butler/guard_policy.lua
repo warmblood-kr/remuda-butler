@@ -849,14 +849,16 @@ local function each_line(f, fn)
       break
     end
     pending = pending .. chunk
+    local pos = 1 -- a cursor, so the rest of the chunk is not copied once per line
     while true do
-      local nl = pending:find("\n", 1, true)
+      local nl = pending:find("\n", pos, true)
       if not nl then break end
-      local line = pending:sub(1, nl - 1)
-      pending = pending:sub(nl + 1)
-      if skipping or #line > STATS_LINE_CAP then fn(nil) else fn(line) end
+      local len = nl - pos
+      if skipping or len > STATS_LINE_CAP then fn(nil) else fn(pending:sub(pos, nl - 1)) end
       skipping = false
+      pos = nl + 1
     end
+    pending = pending:sub(pos)
     if #pending > STATS_LINE_CAP then pending, skipping = "", true end
   end
   if skipping or #pending > STATS_LINE_CAP then fn(nil) elseif #pending > 0 then fn(pending) end
@@ -873,7 +875,7 @@ local function stats()
     if f then
       local ok = pcall(each_line, f, function(line)
         local decoded, r = false, nil
-        if line then decoded, r = pcall(remuda.json.decode, line) end
+        if line and line ~= "" then decoded, r = pcall(remuda.json.decode, line) end -- a blank line is unreadable, not worth a decode
         if not (decoded and type(r) == "table") then unreadable = unreadable + 1; return end
         total = total + 1
         if type(r.time) == "string" and r.time:match(TIME) then

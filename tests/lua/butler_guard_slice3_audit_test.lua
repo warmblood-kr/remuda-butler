@@ -193,3 +193,16 @@ T.test("an off line followed by a failed switch write is followed by 'off failed
   local last; for l in lines:gmatch("[^\n]+") do last = l end
   T.expect(has(last, '"summary":"guard off failed: '), "last line must say the off failed: " .. tostring(last), "ok - off failed line")
 end)
+
+T.test("guard stats reads a 1 MiB file of newlines in linear time", function()
+  start_butler()
+  T.eval("remuda._t_dir('g3-newlines')")
+  local out = T.eval([[
+    local gp = remuda.butler.guard_policy
+    local f = io.open(gp.log_path(), 'w'); f:write(string.rep('\n', 1024 * 1024)); f:close()
+    local t0 = os.clock()
+    local answer = remuda._t_guard({'guard','stats'})
+    return string.format('%.2f', os.clock() - t0) .. ' ' .. answer
+  ]])
+  T.expect(tonumber(out:match("^(%S+)")) < 2, "stats over 1 MiB of newlines was too slow: " .. out, "ok - stats linear")
+end)
