@@ -2604,7 +2604,7 @@ function ctx_tests.test_matrix_thread_cli_parser_contract()
 Usage: remuda butler matrix thread [OPTIONS] EVENT_ID
 
 Arguments:
-  EVENT_ID  Event that starts the thread, e.g. $abc123
+  EVENT_ID  Event that starts the thread, e.g. $abc123, or a Butler mail id (01M...)
 
 Options:
       --room ROOM  Room ID, alias or name (default: the configured room)
@@ -4133,14 +4133,14 @@ end
 -- Receive rules PR 2: loop guard, own post cap, untrusted per-room cap.
 -- Posts by the CLI go through remuda.http; notices may go through the relay
 -- client, so the HOME-line counts look at both.
-local function rx_cli(args)
+local function rx_cli(args, agent)
   local old_pending, old_guidance, captured = remuda.pending, matrix.configuration_guidance, nil
   remuda.pending = function()
     return { resolve = function(_, code, stdout, stderr) captured = { code = code, stdout = stdout, stderr = stderr } end }
   end
   matrix.configuration_guidance = function() return nil end
   local ok, err = pcall(function()
-    local returned = matrix.cli(args)
+    local returned = matrix.cli(args, agent)
     for _ = 1, 8 do if captured then break end tick_timers(1) end
     if not captured and type(returned) == "string" then captured = { code = 0, stdout = returned, stderr = "" } end
   end)
@@ -4932,6 +4932,79 @@ function ctx_tests.test_matrix_thread_takes_room_from_route()
   end)
 end
 
+function ctx_tests.test_matrix_thread_takes_a_mail_id()
+  local dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    local relay = rx_relay(path)
+    relay_module.instance = relay
+    local MAIL, old_mail = "01M43ECFKRY1782NGW0XNYWD6G", remuda._butler_mail
+    -- Stands in for mail.matrix_thread_target: only member1 (or the operator) holds MAIL.
+    local seen_operator
+    remuda._butler_mail = { matrix_thread_target = function(caller, id, as_operator)
+      seen_operator = as_operator
+      if id == MAIL and (caller == "member1" or as_operator) then return NEW, "$root1" end
+      return nil, "message " .. id .. " was not delivered to you\nNext: remuda butler inbox"
+    end }
+    local urls = {}
+    with_alias_http(path, function(spec)
+      urls[#urls + 1] = tostring(spec.url or spec.path)
+      return { status = 200, body = '{"chunk":[]}' }
+    end, function()
+      rx_cli({ "matrix", "thread", MAIL }, "member1")
+      local asked = table.concat(urls, "\n")
+      assert(asked:find("/rooms/" .. encoded(NEW) .. "/relations/" .. encoded("$root1") .. "/", 1, true),
+        "thread MAIL_ID must read the mail's room and thread root, asked:\n" .. asked)
+      rx_cli({ "matrix", "thread", MAIL })
+      assert(seen_operator == true and #urls == 2, "the operator reads a mail's thread")
+      local before = #urls
+      local refused = rx_cli({ "matrix", "thread", MAIL }, "member2")
+      assert(#urls == before and refused.code == 1 and seen_operator == false
+        and refused.stderr:find("not delivered to you", 1, true)
+        and refused.stderr:find("\nNext: remuda butler inbox", 1, true),
+        "a member the mail was not delivered to must be refused with no request, got: " .. tostring(refused.stderr))
+      local other = rx_cli({ "matrix", "--room", HOME, "thread", MAIL }, "member1")
+      assert(#urls == before and other.code == 1 and other.stderr:find("belongs to room " .. NEW, 1, true)
+        and other.stderr:find("\nNext: remuda butler matrix thread", 1, true),
+        "a --room that differs from the mail's room must be refused, got: " .. tostring(other.stderr))
+    end)
+    remuda._butler_mail = old_mail
+    relay:stop()
+  end)
+end
+
+-- The REAL mail.matrix_thread_target, in memory (no mail root): the delivery check is the
+-- security boundary of `matrix thread MAIL_ID`, so a stub must not be the only test of it.
+function ctx_tests.test_mail_matrix_thread_target_checks_delivery()
+  local old_mail, old_config = remuda._butler_mail, remuda._butler_mail_config
+  local THREADED, SOLO, PLAIN, UNKNOWN = "01MTHREADED", "01MSOLO", "01MPLAIN", "01MUNKNOWN"
+  local bus = { agents = { alice = { id = "A1", alias = "alice" }, bob = { id = "B1", alias = "bob" } },
+    inboxes = {}, messages = {
+      [THREADED] = { matrix = { room_id = NEW, event_id = "$reply1", thread_root = "$root1" } },
+      [SOLO] = { matrix = { room_id = NEW, event_id = "$solo" } },
+      [PLAIN] = {} },
+    mail_delivered = { A1 = { [THREADED] = true, [SOLO] = true, [PLAIN] = true } } }
+  remuda._butler_mail_config = { bus = bus, json_quote = function(value) return '"' .. value .. '"' end }
+  local loaded, why = pcall(dofile, "packages/butler/mail.lua")
+  local target = remuda._butler_mail and remuda._butler_mail.matrix_thread_target
+  remuda._butler_mail, remuda._butler_mail_config = old_mail, old_config
+  assert(loaded and target, "mail.lua must load in memory: " .. tostring(why))
+  local function refused(id, caller, as_operator, expected)
+    local room, message = target(caller, id, as_operator)
+    assert(room == nil and message:find(expected, 1, true) and message:find("\nNext: remuda butler inbox", 1, true),
+      id .. " must be refused with '" .. expected .. "' and a Next line, got: " .. tostring(room) .. " " .. tostring(message))
+  end
+  refused(THREADED, "bob", false, "not delivered to you")
+  refused(UNKNOWN, "alice", false, "not delivered to you")
+  refused(PLAIN, "alice", false, "is not a Matrix message")
+  refused(UNKNOWN, nil, true, "is not a Matrix message")
+  local room, root = target("alice", THREADED, false)
+  assert(room == NEW and root == "$root1", "the recipient gets the room and thread root")
+  room, root = target(nil, THREADED, true)
+  assert(room == NEW and root == "$root1", "the operator gets the room and thread root")
+  room, root = target("alice", SOLO, false)
+  assert(room == NEW and root == "$solo", "a mail with no thread root falls back to its event")
+end
+
 -- #235 step B: the first mail from a thread this Butler has not seen carries the
 -- earlier messages of that thread. Production path: relay.start with the real
 -- matrix module, HTTP scripted at remuda.http, mail captured at butler/deliver.
@@ -5574,6 +5647,8 @@ rx_tests = {
   { "test_rx_link_like_root_counted_but_not_shown", test_rx_link_like_root_counted_but_not_shown },
   { "test_inbox_header_names_room_and_thread", ctx_tests.test_inbox_header_names_room_and_thread },
   { "test_matrix_thread_takes_room_from_route", ctx_tests.test_matrix_thread_takes_room_from_route },
+  { "test_matrix_thread_takes_a_mail_id", ctx_tests.test_matrix_thread_takes_a_mail_id },
+  { "test_mail_matrix_thread_target_checks_delivery", ctx_tests.test_mail_matrix_thread_target_checks_delivery },
   { "test_ctx_block_text_with_all_four_marks", ctx_tests.test_ctx_block_text_with_all_four_marks },
   { "test_ctx_more_than_twenty_and_second_mail_has_no_block", ctx_tests.test_ctx_more_than_twenty_and_second_mail_has_no_block },
   { "test_ctx_line_rules_cut_join_media_time_and_hostile_text", ctx_tests.test_ctx_line_rules_cut_join_media_time_and_hostile_text },

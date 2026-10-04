@@ -439,6 +439,18 @@ local function matrix_target(caller, id, as_operator)
   return route.room_id, route.event_id
 end
 
+-- The Matrix room and thread root of a mail the caller holds, for `matrix thread MAIL_ID`.
+local function matrix_thread_target(caller, id, as_operator)
+  local allowed, why = may_resend(address(caller), id, as_operator)
+  if not allowed then return nil, why .. "\nNext: remuda butler inbox" end
+  local message = find_message(id)
+  local route = message and message.matrix
+  if not (route and route.room_id and (route.thread_root or route.event_id)) then
+    return nil, "message " .. id .. " is not a Matrix message\nNext: remuda butler inbox"
+  end
+  return route.room_id, route.thread_root or route.event_id
+end
+
 -- RFC 5322 §3.6.4: in_reply_to is the parent; references are the parent's (or
 -- its in_reply_to), then the parent. JWZ: repeats and self-references drop.
 local function reply(caller, parent_id, text, as_operator, deliver)
@@ -660,5 +672,6 @@ end
 
 remuda._butler_mail = { mailbox = mailbox, queue = queue, reply = reply, forward = forward, forward_delivery = deliver_forward, inbox = inbox, unread = unread, append = append,
   matrix_header = matrix_header, matrix_target = matrix_target,
+  matrix_thread_target = matrix_thread_target,
   matrix_body_mark = MATRIX_BODY_MARK,
   find_message = find_message, is_unread = is_unread, migrate_legacy = migrate_legacy }
