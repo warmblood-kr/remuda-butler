@@ -136,6 +136,20 @@ local function expand(path, h)
   return path
 end
 
+-- Hook/settings files under any .claude/.codex dir, plus the user-level instruction files anchored to the real home.
+local INSTRUCTION_FILES = { "/.codex/AGENTS.md", "/.claude/CLAUDE.md" }
+local function weakens(path, h)
+  local lower = path:lower()
+  if lower:find("/%.claude/") or lower:find("/%.codex/") then
+    local base = path:match("([^/]+)$") or ""
+    for _, f in ipairs(HOOK_FILES) do if base == f then return true end end
+  end
+  if h then
+    for _, f in ipairs(INSTRUCTION_FILES) do if lower == (h .. f):lower() then return true end end
+  end
+  return false
+end
+
 local function protected(path, h)
   h = h or home()
   path = path:gsub("/+$", "")
@@ -152,11 +166,7 @@ end
 
 local function file_class(path, ctx)
   path = expand(path, ctx.home)
-  local lower = path:lower()
-  if lower:find("/%.claude/") or lower:find("/%.codex/") then
-    local base = path:match("([^/]+)$") or ""
-    for _, f in ipairs(HOOK_FILES) do if base == f then return "weaken" end end
-  end
+  if weakens(path, ctx.home) then return "weaken" end
   if protected(path, ctx.home) then return "escape" end
   local cwd = ctx.cwd
   if path:sub(1, 1) == "/" and type(cwd) == "string" and cwd ~= "" then
@@ -270,13 +280,7 @@ local function segment_class(w, text, ctx)
   for _, a in ipairs(w) do
     local p = expand((a:gsub("^[<>]+", "")), ctx.home)
     if p:find("/", 1, true) and protected(p, ctx.home) then touches_protected = true end
-    local lp = p:lower()
-    if lp:find("/%.claude/") or lp:find("/%.codex/") then
-      local base = p:match("([^/]+)$") or ""
-      for _, f in ipairs(HOOK_FILES) do
-        if base == f and (WRITERS[first] or first == "sed" or text:find(">", 1, true)) then return "weaken" end
-      end
-    end
+    if weakens(p, ctx.home) and (WRITERS[first] or first == "sed" or text:find(">", 1, true)) then return "weaken" end
   end
   if first == "kill" or first == "pkill" or first == "killall" then return "control" end
   if first == "remuda" then
@@ -395,12 +399,7 @@ local function protected_write_path(path, ctx)
   path = expand(path:gsub("^[<>]+", ""):gsub("[<>]+$", ""), ctx.home)
   if path == "" then return false end
   if path:sub(1, 1) ~= "/" then path = (ctx.cwd or "") .. "/" .. path end
-  local lower = path:lower()
-  if lower:find("/%.claude/") or lower:find("/%.codex/") then
-    local base = path:match("([^/]+)$") or ""
-    for _, f in ipairs(HOOK_FILES) do if base == f then return true end end
-  end
-  return protected(path, ctx.home) == true
+  return weakens(path, ctx.home) or protected(path, ctx.home) == true
 end
 
 local function owner_or_daemon_command(w, text)
