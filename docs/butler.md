@@ -719,27 +719,59 @@ no guard behavior changes.
 - The owner can freeze and revoke from Matrix. Freeze and revoke only narrow
   power; lifting a freeze stays owner-approved.
 - Any push that touches CI or workflow files is T3 and always asks. A standing
-  grant never covers it.
+  grant never covers it (see Pushes under a grant).
 - Every audit line carries `grant_id`. The audit log has a daily hash digest
-  posted to the HOME room, a stated retention period, and a `guard stats`
+  posted to the HOME room, a retention period of 90 days, and a `guard stats`
   baseline snapshot saved before any grant code ships.
 - The approval post offers three separate reactions: approve once, approve as
   a standing grant, and deny. They are never one button.
 - The switch is off by default. The owner flips it, after one week of saved
   baseline stats.
 
-### Who may grant
+### Who decides
 
-Only the owner grants a grant that widens power: `writable:DIR`, `git:common`
-and `net:DOMAIN`. Butler root, leaders and members request; none of them
-decides. A first use of a new scope is T2: the owner is asked once, and the
-answer becomes a standing grant. A leader's grant never exceeds the leader's own
-profile. `device`, open `net` and `full` stay T3.
+A grant is created only from an authenticated owner Matrix reaction: an
+allowlisted mxid, on the event id of the approval post for that request. No CLI
+verb creates a grant. A process without a Butler identity is treated as the
+operator by the CLI, so a CLI path would let it grant itself.
 
-### Grant lifetime
+The grants switch is classed in `guard_policy` like `guard on/off`: an action
+that weakens the guard, owner-only.
+
+Only the owner grants `writable:DIR`, `git:common` and `net:DOMAIN`. Butler
+root, leaders and members request; none of them decides. A first use of a new
+scope is T2: the owner is asked once. A leader does not pass grants to a
+child in slice 3; a child gets the default profile for its role and asks for
+anything more. `device`, open `net` and `full` stay T3.
+
+### Approval post and reactions
+
+Butler composes and posts the three options itself. Only the owner's reaction
+on that event id counts. Each request carries a nonce; a reaction naming another
+request's event, or arriving after expiry, is ignored. Approve-once is
+single-use. Only the standing-grant reaction creates a grant; approve-once and
+deny create none.
+
+The post shows the resolved (realpath) scope and the absolute expiry time, both
+derived from the request by Butler, never from agent text.
+
+A deny is remembered for that scope until the request's TTL window ends, and
+the same request is not asked again in that window. Requests are deduplicated
+per agent and scope, and rate-limited per agent and per scope; a request over
+the limit is refused without a post.
+
+### Grant lifetime and store
 
 A grant's TTL is at most 24 hours; the default is 1 hour. The cap applies to
-every grant however it was created, so no rule or example may exceed it.
+every grant however it was created.
+
+The grant store lives under the protected Butler data dir, which a deny rule
+covers. Each entry holds the absolute expiry time (never a duration), the scope,
+the holder and the approval event id for cross-check. The store is reloaded on
+Butler start. An entry that is expired, unparseable, lacks a matching approval
+event, or was written with a clock that has gone backwards is no grant (fail
+closed). Limit: processes running as the same user, outside the hook, can still
+write the file; the deny rule governs agent tools, not the OS.
 
 ### Scope patterns
 
@@ -748,23 +780,66 @@ every grant however it was created, so no rule or example may exceed it.
 - A glob may only be a whole path segment `*` below a fixed absolute prefix
   (`~/projects/rx/*`). Partial-segment globs (`rx-*`, `t1*`) are refused, and
   so is `*` as the first segment. A directory scope covers its subtree.
-- A directory scope is checked on the `realpath` of the target: a symlink that
-  leaves the scope is outside it.
+  `*` never matches `.` or `..`.
 - The pattern is resolved when the grant is made and stored as the resolved
   value. Later changes to the filesystem do not widen it.
+
+### Path canonicalisation
+
+One shared function canonicalises every path for grants and for deny rules. It
+takes the `realpath` of the target. If the target does not exist, it takes the
+`realpath` of the nearest existing ancestor and appends the remaining segments,
+refusing any `.` or `..` among them. It case-folds on macOS and Windows. A path
+it cannot parse yields no grant: the action falls back to its tier. A symlink
+that leaves the scope puts the target outside it.
+
+Residual limit: the path can change between the hook's check and the tool's
+run (time of check to time of use). Grants are not a defense against an agent
+that races its own filesystem.
+
+### Network scopes
+
+`net:DOMAIN` matches the exact host only; a subdomain needs its own grant. The
+host is compared lowercased, without a trailing dot, in punycode form. A URL
+with userinfo (`good.com@evil.com`) is judged by the host after the `@`. A port
+other than the scheme default is a different scope. An IP literal never matches
+a domain scope; it needs its own `net:IP` scope, T3. A redirect is a new
+request and is judged on its own host. Codex cannot enforce a domain, because
+its sandbox network is all-or-nothing, so `net:DOMAIN` for codex is refused as
+T3 and never widened to open `net`.
+
+### Pushes under a grant
+
+A command string cannot show which files a push changes. Every push covered by
+a grant is checked at hook time: `git diff --name-only` against the remote ref,
+best effort. A push touching `.github/workflows`, other CI configs, or scripts
+those call is T3 and asks. The path set is a list in code, reviewed like any
+guard rule. Server-side branch protection and required review remain the real
+backstop; this check is a convenience, not a boundary.
+
+`git:common` covers the main repo's `.git` except `.git/hooks` and git config.
 
 ### Agent text in approval posts
 
 Text an agent supplied (a `why:` line, an intent name, a task description) may
-appear in an approval post only as a quoted line labelled `agent-supplied`,
-after Butler's own lines, with control and bidirectional characters escaped.
-It is never styled or placed as Butler text, and it never selects the scope,
-the TTL or the reactions. Butler derives those from the request itself.
+appear in an approval post only as one quoted line of at most 200 characters,
+labelled `agent-supplied`, after Butler's own lines. Control and bidirectional
+characters are escaped, and Matrix HTML and markdown, mentions (`@room`, the
+owner's mxid) and links are stripped. It is never styled or placed as Butler
+text, and it never selects the scope, the TTL or the reactions.
+
+### Audit chain
+
+Each audit line carries the hash of the previous line, so removing a line
+breaks the chain. The daily digest posted to HOME includes the previous digest
+and the line count.
 
 ### Codex grants
 
 Codex grants are baked into the launch flags. When a codex grant expires or is
-revoked, Butler parks the session or relaunches it with the reduced profile,
-and records the profile it applied on the session row. A running codex
-sandbox is never edited in place. Claude grants are checked on every hook
-call, so expiry and revocation apply on the next tool call.
+revoked, Butler parks the session or relaunches it with the reduced profile
+within 60 seconds, and records the profile it applied on the session row. The
+expiry is timer-driven and reconciled on Butler start, because a Butler crash
+leaves a codex session running with its wide flags. A running codex sandbox is
+never edited in place. Claude grants are checked on every hook call, so expiry
+and revocation apply on the next tool call.
