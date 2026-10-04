@@ -112,3 +112,63 @@ T.test("guard stats counts decision classes over the log and its archives", func
   end
   T.expect(true, "", "ok - guard stats")
 end)
+
+T.test("rotation never overwrites an archive made in the same second", function()
+  start_butler()
+  T.eval("remuda._t_dir('g3-collide')")
+  local out = T.eval([[
+    local gp = remuda.butler.guard_policy
+    local base, now = gp.log_path(), os.time()
+    local name = base .. '.' .. os.date('!%Y%m%dT%H%M%SZ', now)
+    local function put(p, s) local f = io.open(p, 'w'); f:write(s); f:close() end
+    local function get(p) local f = io.open(p, 'r'); local s = f and f:read('a'); if f then f:close() end; return s end
+    put(name, 'OLD'); put(base .. '.1', 'NEW'); put(base, 'CUR')
+    gp.rotate(base, now)
+    return table.concat({ tostring(get(name)), tostring(get(name .. '-1')), tostring(get(base .. '.1')) }, ' ')
+  ]])
+  T.expect(out == "OLD NEW CUR", "same-second rotation lost or misplaced an archive: " .. out, "ok - rotate collision")
+end)
+
+T.test("guard stats survives a tampered log: bucketed names, capped lines, unreadable files", function()
+  start_butler()
+  T.eval("remuda._t_dir('g3-hostile')")
+  local out = T.eval([[
+    local gp = remuda.butler.guard_policy
+    local base = gp.log_path()
+    assert(remuda.mkdir(base .. '.1') ~= false)
+    local f = io.open(base, 'w')
+    f:write('{"time":"2026-01-01T00:00:00Z","class":"evil\\u001b[31mred","event":"x\\nfoo","summary":""}\n')
+    f:write('{"time":"\\u001b[2Jbad","class":"push","event":"switch"}\n')
+    f:write(string.rep('a', 300000) .. '\n')
+    f:write('{"time":"2026-01-02T00:00:00Z","class":"push","event":"deny"}\n')
+    f:write(string.rep('b', 300000)) -- no trailing newline
+    f:close()
+    return remuda._t_guard({'guard','stats'})
+  ]])
+  T.expect(not out:find("[\1-\9\11-\31]"), "control bytes reached the terminal: " .. out)
+  for _, want in ipairs({ "class other: 1", "class push: 2", "event other: 1", "event deny: 1", "event switch: 1",
+    "unreadable" }) do
+    T.expect(has(out, want), "stats missing '" .. want .. "':\n" .. out)
+  end
+  T.expect(not has(out, "evil") and not has(out, "bad"), "raw tampered text echoed: " .. out)
+  T.expect(has(out, "since 2026-01-01T00:00:00Z until 2026-01-02T00:00:00Z"), "time range wrong: " .. out, "ok - hostile stats")
+end)
+
+T.test("turning a switch off is audited before it changes, and refused when the audit cannot be written", function()
+  start_butler()
+  T.eval("remuda._t_dir('g3-offfirst'); remuda._t_guard({'guard','on'}); remuda._t_guard({'guard','deny','on'})")
+  T.eval([[local gp = remuda.butler.guard_policy
+    os.rename(gp.log_path(), gp.log_path() .. '.keep'); remuda.mkdir(gp.log_path())]])
+  local off = T.eval("return select(2, pcall(remuda._t_guard, {'guard','off'}))")
+  local deny_off = T.eval("return select(2, pcall(remuda._t_guard, {'guard','deny','off'}))")
+  local status = T.eval("return remuda._t_guard({'guard','status'})")
+  T.expect(has(status, "guard: on") and has(status, "deny: on"), "a switch turned off with no audit line: " .. status)
+  T.expect(not has(off, "guard is now") and not has(deny_off, "guard deny is now"), "the switch must be refused: " .. off .. deny_off)
+  T.eval([[local gp = remuda.butler.guard_policy
+    os.remove(gp.log_path()); os.rename(gp.log_path() .. '.keep', gp.log_path())]])
+  T.eval("remuda._t_guard({'guard','off'}, {env={REMUDA_BUTLER_AGENT_ALIAS='lead-1'}})")
+  local lines = T.eval("return remuda._t_lines()")
+  local last; for l in lines:gmatch("[^\n]+") do last = l end
+  T.expect(has(last, '"summary":"guard off"') and has(last, '"session":"lead-1"')
+    and has(T.eval("return remuda._t_guard({'guard','status'})"), "guard: off"), "off line missing: " .. last, "ok - off audited first")
+end)

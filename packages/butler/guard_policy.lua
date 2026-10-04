@@ -656,27 +656,34 @@ function M.summary(tool, input, cap)
   return M.redact(value or "", cap)
 end
 
-local STAMP = "^%d%d%d%d%d%d%d%dT%d%d%d%d%d%dZ$"
+local STAMP = "%d%d%d%d%d%d%d%dT%d%d%d%d%d%dZ"
 
--- Rotated files beside the log: LOG.1 and the dated archives (stamp is nil for LOG.1).
+-- Rotated files beside the log: LOG.1 and the dated archives LOG.<stamp>[-N] (stamp is nil for LOG.1).
 local function archives()
   local out = {}
   local ok, names = pcall(remuda.list_dir, dir())
   for _, name in ipairs(ok and type(names) == "table" and names or {}) do
-    local suffix = name:match("^guard%-audit%.jsonl%.(.+)$")
-    if suffix == "1" or (suffix and suffix:match(STAMP)) then
-      out[#out + 1] = { path = dir() .. "/" .. name, stamp = suffix ~= "1" and suffix or nil }
-    end
+    local suffix = name:match("^guard%-audit%.jsonl%.(.+)$") or ""
+    local stamp = suffix:match("^(" .. STAMP .. ")$") or suffix:match("^(" .. STAMP .. ")%-%d+$")
+    if suffix == "1" or stamp then out[#out + 1] = { path = dir() .. "/" .. name, stamp = stamp } end
   end
   return out
 end
 
-local function rotate(path)
-  local now = os.time()
-  local previous = io.open(path .. ".1", "r")
-  if previous then
-    previous:close()
-    os.rename(path .. ".1", path .. "." .. os.date("!%Y%m%dT%H%M%SZ", now))
+local function exists(path)
+  local f = io.open(path, "r")
+  if f then f:close() end
+  return f ~= nil
+end
+
+function M.rotate(path, now)
+  now = now or os.time()
+  if exists(path .. ".1") then
+    -- Two rotations in one second must not overwrite an archive: add a counter.
+    local dated, n = path .. "." .. os.date("!%Y%m%dT%H%M%SZ", now), 0
+    local target = dated
+    while exists(target) do n = n + 1; target = dated .. "-" .. n end
+    os.rename(path .. ".1", target)
   end
   os.rename(path, path .. ".1")
   local cutoff = os.date("!%Y%m%dT%H%M%SZ", now - M.RETENTION_DAYS * 86400)
@@ -694,7 +701,7 @@ function M.append(record)
     local f = io.open(path, "r")
     local size = 0
     if f then size = f:seek("end") or 0; f:close() end
-    if size >= LOG_CAP then rotate(path); f = nil end
+    if size >= LOG_CAP then M.rotate(path); f = nil end
     if not f then assert(remuda.fs.write_atomic(path, "", { private = true })) end
     local out = assert(io.open(path, "a"))
     local line = '{"time":' .. remuda.json.encode(os.date("!%Y-%m-%dT%H:%M:%SZ"))
@@ -772,39 +779,92 @@ end
 
 local SWITCH_NOTE = "Applies to sessions launched from now on; running sessions keep their settings."
 
--- Record who changed a switch (the caller's alias, or "operator" from a terminal), even when it turns the audit off.
+-- Record who changed a switch, as evidence from the forwarded env (the caller's alias, else "operator"),
+-- not as a control: the weaken-class deny is the control. Returns true, or nil and why.
 local function switched(caller, text)
   local env = caller and caller.env or {}
   local ok, appended, why = pcall(M.append, { session = env.REMUDA_BUTLER_AGENT_ALIAS or "operator",
     kind = env.REMUDA_BUTLER_AGENT_KIND, event = "switch", tool = "", class = "other", summary = text })
-  if not ok or not appended then note("guard switch not audited: " .. tostring(ok and why or appended)) end
+  if ok and appended then return true end
+  return nil, "audit not written: " .. tostring(ok and why or appended)
 end
 
--- `guard stats`: counts per class and per event over the log and its archives.
+-- Change a switch with its audit line. Turning one off is audited first and refused when the
+-- line cannot be written, so it cannot go unaudited; turning one on is audited once it took effect.
+local function change(caller, label, on, set)
+  if not on then
+    local ok, why = switched(caller, label .. " off")
+    if not ok then return nil, why end
+  end
+  local written, why = set(on)
+  if not written then return nil, why end
+  if on then
+    local ok, audit_why = switched(caller, label .. " on")
+    if not ok then note("guard switch not audited: " .. tostring(audit_why)) end
+  end
+  return true
+end
+
+local STATS_LINE_CAP = 16 * 1024 -- a longer line is tampered or foreign: counted as unreadable, never decoded
+local KNOWN_CLASS = { push = 1, destroy = 1, escape = 1, net = 1, control = 1, weaken = 1, identity = 1,
+  script = 1, other = 1 }
+local KNOWN_EVENT = { PreToolUse = 1, PermissionRequest = 1, deny = 1, policy_error = 1, ["no-input"] = 1,
+  oversized = 1, unparsed = 1, switch = 1, approval_requested = 1, approval_approved = 1,
+  approval_denied = 1, approval_expired = 1, approval_failed = 1 }
+local TIME = "^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%dZ$"
+
+-- Call fn(line) for each line of f, or fn(nil) for one that is over the cap; memory stays bounded.
+local function each_line(f, fn)
+  local pending, skipping = "", false
+  while true do
+    local chunk, err = f:read(65536)
+    if not chunk then
+      if err then fn(nil) end -- not a readable file (for example a directory)
+      break
+    end
+    pending = pending .. chunk
+    while true do
+      local nl = pending:find("\n", 1, true)
+      if not nl then break end
+      local line = pending:sub(1, nl - 1)
+      pending = pending:sub(nl + 1)
+      if skipping or #line > STATS_LINE_CAP then fn(nil) else fn(line) end
+      skipping = false
+    end
+    if #pending > STATS_LINE_CAP then pending, skipping = "", true end
+  end
+  if skipping or #pending > STATS_LINE_CAP then fn(nil) elseif #pending > 0 then fn(pending) end
+end
+
+-- `guard stats`: counts per class and per event over the log and its archives. It prints only known
+-- class and event names (the rest count as "other"), so a tampered file cannot reach the terminal.
 local function stats()
   local files = { M.log_path() }
   for _, a in ipairs(archives()) do files[#files + 1] = a.path end
   local total, unreadable, first, last, class, event = 0, 0, nil, nil, {}, {}
   for _, path in ipairs(files) do
     local f = io.open(path, "r")
-    for line in (f and f:lines() or function() end) do
-      local ok, r = pcall(remuda.json.decode, line)
-      if ok and type(r) == "table" then
+    if f then
+      local ok = pcall(each_line, f, function(line)
+        local decoded, r = false, nil
+        if line then decoded, r = pcall(remuda.json.decode, line) end
+        if not (decoded and type(r) == "table") then unreadable = unreadable + 1; return end
         total = total + 1
-        local t = tostring(r.time or "")
-        if not first or t < first then first = t end
-        if not last or t > last then last = t end
-        class[tostring(r.class or "")] = (class[tostring(r.class or "")] or 0) + 1
-        event[tostring(r.event or "")] = (event[tostring(r.event or "")] or 0) + 1
-      else
-        unreadable = unreadable + 1
-      end
+        if type(r.time) == "string" and r.time:match(TIME) then
+          if not first or r.time < first then first = r.time end
+          if not last or r.time > last then last = r.time end
+        end
+        local c = KNOWN_CLASS[r.class] and r.class or "other"
+        local e = KNOWN_EVENT[r.event] and r.event or "other"
+        class[c], event[e] = (class[c] or 0) + 1, (event[e] or 0) + 1
+      end)
+      if not ok then unreadable = unreadable + 1 end
+      f:close()
     end
-    if f then f:close() end
   end
-  if total == 0 then return "guard stats: no audit lines yet. Next: remuda butler guard on" end
-  local out = { "guard stats: lines: " .. total .. " since " .. first .. " until " .. last
-    .. (unreadable > 0 and (" (unreadable lines: " .. unreadable .. ")") or "") }
+  if total == 0 and unreadable == 0 then return "guard stats: no audit lines yet. Next: remuda butler guard on" end
+  local out = { "guard stats: lines: " .. total .. (first and (" since " .. first .. " until " .. last) or "")
+    .. (unreadable > 0 and (" (unreadable: " .. unreadable .. ")") or "") }
   for _, kv in ipairs({ { "class", class }, { "event", event } }) do
     local names = {}
     for name in pairs(kv[2]) do names[#names + 1] = name end
@@ -853,9 +913,8 @@ function M.run(args, caller)
     return reply or ""
   end
   if #args == 3 and verb == "approvals" and (args[3] == "on" or args[3] == "off") then
-    local written, why = M.set_approvals(args[3] == "on")
+    local written, why = change(caller, "guard approvals", args[3] == "on", M.set_approvals)
     if not written then return remuda.fail("guard approvals switch not changed: " .. tostring(why), 1) end
-    switched(caller, "guard approvals " .. args[3])
     return "guard approvals are now " .. args[3] .. ". " .. SWITCH_NOTE
       .. (args[3] == "on" and " Needs `guard on`; the owner answers Claude permission prompts in Matrix,"
         .. " and with no answer Claude shows its own prompt." or "")
@@ -865,9 +924,8 @@ function M.run(args, caller)
       .. (M.enabled() and "on" or "off") .. "; routing runs only when both are on)\n" .. SWITCH_NOTE
   end
   if #args == 3 and verb == "deny" and (args[3] == "on" or args[3] == "off") then
-    local written, why = M.set_deny(args[3] == "on")
+    local written, why = change(caller, "guard deny", args[3] == "on", M.set_deny)
     if not written then return remuda.fail("guard deny switch not changed: " .. tostring(why), 1) end
-    switched(caller, "guard deny " .. args[3])
     return "guard deny is now " .. args[3] .. ". " .. SWITCH_NOTE
       .. (args[3] == "on" and " Needs `guard on`; recognised high-impact calls are denied." or "")
   end
@@ -876,9 +934,8 @@ function M.run(args, caller)
       .. (M.enabled() and "on" or "off") .. "; denial runs only when both are on)\n" .. SWITCH_NOTE
   end
   if #args == 2 and (verb == "on" or verb == "off") then
-    local written, why = M.set(verb == "on")
+    local written, why = change(caller, "guard", verb == "on", M.set)
     if not written then return remuda.fail("guard switch not changed: " .. tostring(why), 1) end
-    switched(caller, "guard " .. verb)
     return "guard is now " .. verb .. ". " .. SWITCH_NOTE
       .. (verb == "on" and " It records calls; `guard deny on` also enables recognised denials." or "")
   end
