@@ -154,19 +154,27 @@ T.test("guard stats survives a tampered log: bucketed names, capped lines, unrea
   T.expect(has(out, "since 2026-01-01T00:00:00Z until 2026-01-02T00:00:00Z"), "time range wrong: " .. out, "ok - hostile stats")
 end)
 
-T.test("turning a switch off is audited before it changes, and refused when the audit cannot be written", function()
+T.test("turning a switch off is audited first; an unwritable audit still switches off, loudly, with a sticky marker", function()
   start_butler()
   T.eval("remuda._t_dir('g3-offfirst'); remuda._t_guard({'guard','on'}); remuda._t_guard({'guard','deny','on'})")
   -- a read-only log: opening it for append fails on every platform (a directory would not on Linux)
   T.eval([[local gp = remuda.butler.guard_policy
     remuda.process.run({ argv = { 'chmod', '400', gp.log_path() } })]])
-  local off = T.eval("return select(2, pcall(remuda._t_guard, {'guard','off'}))")
-  local deny_off = T.eval("return select(2, pcall(remuda._t_guard, {'guard','deny','off'}))")
+  local off = T.eval([[local err, real = {}, io.stderr
+    io.stderr = { write = function(_, t) err[#err + 1] = t end }
+    local ok, r = pcall(remuda._t_guard, {'guard','off'})
+    io.stderr = real
+    return tostring(r) .. '\nSTDERR:' .. table.concat(err)]])
+  local answer, stderr = off:match("^(.-)\nSTDERR:(.*)$")
+  T.expect(has(answer, "switched off, NOT audited:") and has(stderr, "NOT audited"), "loud answer and stderr: " .. off)
   local status = T.eval("return remuda._t_guard({'guard','status'})")
-  T.expect(has(status, "guard: on") and has(status, "deny: on"), "a switch turned off with no audit line: " .. status)
-  T.expect(not has(off, "guard is now") and not has(deny_off, "guard deny is now"), "the switch must be refused: " .. off .. deny_off)
+  T.expect(has(status, "guard: off") and has(status, "NOT audited"), "status must show off and the marker: " .. status)
+  T.expect(has(T.eval("return remuda._t_guard({'guard','stats'})"), "NOT audited"), "stats must show the marker")
   T.eval([[local gp = remuda.butler.guard_policy
     remuda.process.run({ argv = { 'chmod', '600', gp.log_path() } })]])
+  T.eval("remuda._t_guard({'guard','on'}, {env={REMUDA_BUTLER_AGENT_ALIAS='lead-1'}})")
+  status = T.eval("return remuda._t_guard({'guard','status'})")
+  T.expect(has(status, "guard: on") and not has(status, "NOT audited"), "a good audit line clears the marker: " .. status)
   T.eval("remuda._t_guard({'guard','off'}, {env={REMUDA_BUTLER_AGENT_ALIAS='lead-1'}})")
   local lines = T.eval("return remuda._t_lines()")
   local last; for l in lines:gmatch("[^\n]+") do last = l end

@@ -676,6 +676,18 @@ local function exists(path)
   return f ~= nil
 end
 
+-- Sticky marker: a switch was turned off while its audit line could not be written. The next
+-- successful audit line clears it. Its text is shown by `guard status|stats`, so it is sanitised.
+local function unaudited_path() local d = dir(); return d and (d .. "/guard-unaudited") or nil end
+local function unaudited_note()
+  local f = unaudited_path() and io.open(unaudited_path(), "r")
+  if not f then return "" end
+  local why = (f:read("*l") or ""):gsub("[%c]", "?"):sub(1, SUMMARY_CAP)
+  f:close()
+  return "\nWARNING: a guard switch was turned off and NOT audited: " .. why
+    .. " (cleared by the next audit line)"
+end
+
 function M.rotate(path, now)
   now = now or os.time()
   if exists(path .. ".1") then
@@ -717,6 +729,7 @@ function M.append(record)
     out:close()
   end)
   if not ok then return nil, tostring(why) end
+  if unaudited_path() then os.remove(unaudited_path()) end
   return true
 end
 
@@ -789,12 +802,21 @@ local function switched(caller, text)
   return nil, "audit not written: " .. tostring(ok and why or appended)
 end
 
--- Change a switch with its audit line. Turning one off is audited first and refused when the
--- line cannot be written, so it cannot go unaudited; turning one on is audited once it took effect.
+-- Change a switch with its audit line. Turning one off is audited first; when the line cannot be
+-- written it still turns off (fail open: the switch only narrows enforcement, and the owner must
+-- never be locked out) but says so loudly and leaves the sticky guard-unaudited marker. Turning one
+-- on is audited once it took effect. Returns true and a warning text for an unaudited off.
 local function change(caller, label, on, set)
+  local warning
   if not on then
     local ok, why = switched(caller, label .. " off")
-    if not ok then return nil, why end
+    if not ok then
+      warning = "switched off, NOT audited: " .. tostring(why)
+      io.stderr:write("guard: " .. label .. " " .. warning .. "\n")
+      if unaudited_path() then
+        pcall(remuda.fs.write_atomic, unaudited_path(), tostring(why):gsub("%c", " ") .. "\n", { private = true })
+      end
+    end
   end
   local written, why = set(on)
   if not written then return nil, why end
@@ -802,7 +824,7 @@ local function change(caller, label, on, set)
     local ok, audit_why = switched(caller, label .. " on")
     if not ok then note("guard switch not audited: " .. tostring(audit_why)) end
   end
-  return true
+  return true, warning
 end
 
 local STATS_LINE_CAP = 16 * 1024 -- a longer line is tampered or foreign: counted as unreadable, never decoded
@@ -862,7 +884,9 @@ local function stats()
       f:close()
     end
   end
-  if total == 0 and unreadable == 0 then return "guard stats: no audit lines yet. Next: remuda butler guard on" end
+  if total == 0 and unreadable == 0 then
+    return "guard stats: no audit lines yet. Next: remuda butler guard on" .. unaudited_note()
+  end
   local out = { "guard stats: lines: " .. total .. (first and (" since " .. first .. " until " .. last) or "")
     .. (unreadable > 0 and (" (unreadable: " .. unreadable .. ")") or "") }
   for _, kv in ipairs({ { "class", class }, { "event", event } }) do
@@ -871,7 +895,7 @@ local function stats()
     table.sort(names)
     for _, name in ipairs(names) do out[#out + 1] = kv[1] .. " " .. name .. ": " .. kv[2][name] end
   end
-  return table.concat(out, "\n")
+  return table.concat(out, "\n") .. unaudited_note()
 end
 
 -- `remuda butler guard [on|off|status]`. Without an argument it is the hook: it
@@ -914,8 +938,10 @@ function M.run(args, caller)
   end
   if #args == 3 and verb == "approvals" and (args[3] == "on" or args[3] == "off") then
     local written, why = change(caller, "guard approvals", args[3] == "on", M.set_approvals)
+    local warn = why
     if not written then return remuda.fail("guard approvals switch not changed: " .. tostring(why), 1) end
     return "guard approvals are now " .. args[3] .. ". " .. SWITCH_NOTE
+      .. (warn and ("\n" .. warn) or "")
       .. (args[3] == "on" and " Needs `guard on`; the owner answers Claude permission prompts in Matrix,"
         .. " and with no answer Claude shows its own prompt." or "")
   end
@@ -925,8 +951,10 @@ function M.run(args, caller)
   end
   if #args == 3 and verb == "deny" and (args[3] == "on" or args[3] == "off") then
     local written, why = change(caller, "guard deny", args[3] == "on", M.set_deny)
+    local warn = why
     if not written then return remuda.fail("guard deny switch not changed: " .. tostring(why), 1) end
     return "guard deny is now " .. args[3] .. ". " .. SWITCH_NOTE
+      .. (warn and ("\n" .. warn) or "")
       .. (args[3] == "on" and " Needs `guard on`; recognised high-impact calls are denied." or "")
   end
   if #args == 3 and verb == "deny" and args[3] == "status" then
@@ -935,14 +963,16 @@ function M.run(args, caller)
   end
   if #args == 2 and (verb == "on" or verb == "off") then
     local written, why = change(caller, "guard", verb == "on", M.set)
+    local warn = why
     if not written then return remuda.fail("guard switch not changed: " .. tostring(why), 1) end
     return "guard is now " .. verb .. ". " .. SWITCH_NOTE
+      .. (warn and ("\n" .. warn) or "")
       .. (verb == "on" and " It records calls; `guard deny on` also enables recognised denials." or "")
   end
   if #args == 2 and verb == "status" then
     return "guard: " .. (M.enabled() and "on" or "off") .. " (audit; deny: "
       .. (M.deny_enabled() and "on" or "off") .. ")\nlog: " .. tostring(M.log_path())
-      .. "\n" .. SWITCH_NOTE
+      .. "\n" .. SWITCH_NOTE .. unaudited_note()
   end
   if #args == 2 and verb == "stats" then return stats() end
   return remuda.fail("Usage: remuda butler guard on|off|status | approvals on|off|status | deny on|off|status | stats", 2)
