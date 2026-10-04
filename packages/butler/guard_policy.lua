@@ -307,6 +307,7 @@ local function segment_class(w, text, ctx)
   if first == "kill" or first == "pkill" or first == "killall" then return "control" end
   if first == "remuda" then
     if has(w, { stop = true, restart = true, kill = true }) then return "control" end
+    if has(w, { eval = true }) then return "script" end -- runs Lua inside the daemon
     for i, a in ipairs(w) do
       if a == "butler" then
         local verb = w[i + 1]
@@ -565,6 +566,8 @@ local function writer_touches_protected(first, w, ctx)
 end
 
 local function segment_deny_reason(seg, ctx)
+  -- The grant store is written only by Butler itself; no command text may name its module (cooperative: text, not a boundary).
+  if seg:find("guard_grants", 1, true) then return "Butler grant store" end
   local w = words(seg)
   local executable = (w[1] or ""):match("([^/]+)$") or ""
   if executable == "sh" or executable == "bash" or executable == "zsh" or executable == "dash"
@@ -631,6 +634,9 @@ function M.deny_reason(tool, input, ctx)
       if reason then return reason end
     end
     return nil
+  end
+  if tool:find("run_script$") and type(input.code) == "string" and input.code:find("guard_grants", 1, true) then
+    return "Butler grant store"
   end
   if tool == "Write" or tool == "Edit" or tool == "MultiEdit" or tool == "NotebookEdit" then
     local path = input.file_path or input.notebook_path

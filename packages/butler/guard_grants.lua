@@ -72,6 +72,45 @@ local function parse(class, pattern)
   return segs
 end
 
+local function covers(g, target)
+  if g.class == "net" then return g.scope == target end
+  local want = {}
+  for s in g.scope:gmatch("[^/]+") do want[#want + 1] = s end
+  local have = {}
+  for s in target:gmatch("[^/]+") do have[#have + 1] = s end
+  if #have < #want then return false end
+  for i, s in ipairs(want) do if s ~= "*" and s ~= have[i] then return false end end
+  return true
+end
+
+-- A grant never overrides a deny or a weaken/identity/escape decision: the guard consults the store only for
+-- calls it would otherwise ask about. These scopes are refused anyway so a grant cannot even be requested
+-- over the places the guard protects: a shallow root, the home itself, credentials, Butler's own data and
+-- config, and git's code-running files.
+local PROTECTED_SEGMENTS = { { ".ssh" }, { ".claude" }, { ".git", "hooks" }, { ".git", "config" } }
+local function protected_scope(scope, fixed, asked)
+  local pattern = { class = "path", scope = scope }
+  local depth = asked -- depth as written: a firmlink like /home resolves deeper on macOS
+  local home = M.canonical(os.getenv("HOME") or "")
+  if depth < 2 or (home and covers(pattern, home)) then return "scope is too shallow" end
+  local places = { policy.dir(), home and (home .. "/.ssh"), home and (home .. "/.claude"), home and (home .. "/.config/remuda") }
+  for _, place in ipairs(places) do
+    local p = place and M.canonical(place)
+    if p and (covers(pattern, p) or fixed == p or p:sub(1, #fixed + 1) == fixed .. "/" or fixed:sub(1, #p + 1) == p .. "/") then
+      return "scope covers a protected directory"
+    end
+  end
+  local segs = {}
+  for s in scope:gmatch("[^/]+") do segs[#segs + 1] = s end
+  for _, seq in ipairs(PROTECTED_SEGMENTS) do
+    for i = 1, #segs - #seq + 1 do
+      local hit = true
+      for k, name in ipairs(seq) do if segs[i + k - 1]:lower() ~= name then hit = false; break end end
+      if hit then return "scope covers a protected directory" end
+    end
+  end
+end
+
 -- The resolved scope to store: the fixed prefix through canonical(), any whole-segment * kept after it.
 function M.scope(class, pattern)
   local parsed = parse(class, pattern)
@@ -81,22 +120,34 @@ function M.scope(class, pattern)
   for i, s in ipairs(parsed) do if s == "*" then star = i; break end end
   local fixed = M.canonical("/" .. table.concat(parsed, "/", 1, (star or #parsed + 1) - 1))
   if not fixed then return nil, "scope cannot be resolved" end
-  if not star then return fixed end
-  local tail = table.concat(parsed, "/", star)
-  return fixed .. "/" .. (insensitive(fixed) and tail:lower() or tail)
+  local out = fixed
+  if star then
+    local tail = table.concat(parsed, "/", star)
+    out = fixed .. "/" .. (insensitive(fixed) and tail:lower() or tail)
+  end
+  local why = protected_scope(out, fixed, (star or #parsed + 1) - 1)
+  if why then return nil, why end
+  return out
 end
 
-local function entries()
+-- Every line, decoded, with its raw text. No read window: add() prunes, so the file stays small and a new
+-- grant is never beyond what a read sees.
+local function lines()
   local path = file()
   local f = path and io.open(path, "r")
   if not f then return {} end
-  local text = f:read(MAX_FILE) or ""
+  local text = f:read("a") or ""
   f:close()
   local out = {}
   for line in text:gmatch("[^\n]+") do
     local ok, e = pcall(remuda.json.decode, line)
-    if ok and type(e) == "table" then out[#out + 1] = e end
+    if ok and type(e) == "table" then out[#out + 1] = { raw = line, e = e } end
   end
+  return out
+end
+local function entries()
+  local out = {}
+  for _, l in ipairs(lines()) do out[#out + 1] = l.e end
   return out
 end
 
@@ -118,6 +169,23 @@ function M.active()
   return out
 end
 
+-- Run fn holding the store's advisory lock (core's remuda.fs.lock); refuse if it stays held.
+-- ponytail: on a core without fs.lock this runs unlocked, as Butler's single-instance guard does.
+local function locked(path, fn)
+  if not (remuda.fs and type(remuda.fs.lock) == "function") then return fn() end
+  for _ = 1, 20 do
+    local ok, handle = pcall(remuda.fs.lock, path)
+    if ok and handle then
+      local ran, a, b = pcall(fn)
+      pcall(function() handle:release() end)
+      if not ran then return nil, tostring(a) end
+      return a, b
+    end
+    pcall(remuda.process.run, { argv = { "sleep", "0.05" }, timeout = 2 })
+  end
+  return nil, "grant store is busy"
+end
+
 -- Record a grant. Returns its id (gNNN), or nil and why. TTL <= 24h whoever asks.
 function M.add(e)
   local path = file()
@@ -129,18 +197,36 @@ function M.add(e)
   if not (text(e.holder) and text(e.event)) then return nil, "holder and approval event are required" end
   local scope, why = M.scope(e.class, e.scope)
   if not scope then return nil, why end
-  local t, top = now(), 0
-  for _, old in ipairs(entries()) do top = math.max(top, tonumber(tostring(old.id):match("^g(%d+)$")) or 0) end
-  local id = string.format("g%03d", top + 1)
-  local line = remuda.json.encode({ id = id, class = e.class, scope = scope, ceiling = e.ceiling, holder = e.holder,
-    event = e.event, written = t, expires = t + ttl })
-  local f = io.open(path, "r")
-  local old = f and f:read("a") or ""
-  if f then f:close() end
   pcall(remuda.mkdir, policy.dir())
-  local ok, err = remuda.fs.write_atomic(path, old .. line .. "\n", { private = true })
-  if not ok then return nil, tostring(err) end
-  return id
+  return locked(path .. ".lock", function()
+    -- Under the lock: prune what is gone, allocate the id and write, so two adds never share an id or lose a line.
+    -- The line holding the highest id stays even when expired, so an id is never reused.
+    local t, top, topraw, keep = now(), 0, nil, {}
+    for _, l in ipairs(lines()) do
+      local n = tonumber(tostring(l.e.id):match("^g(%d+)$")) or 0
+      if n > top then top, topraw = n, l.raw end
+      if math.type(l.e.expires) == "integer" and l.e.expires > t then keep[#keep + 1] = l.raw end
+    end
+    local id = string.format("g%03d", top + 1)
+    local line = remuda.json.encode({ id = id, class = e.class, scope = scope, ceiling = e.ceiling, holder = e.holder,
+      event = e.event, written = t, expires = t + ttl })
+    local out = {}
+    if topraw then out[1] = topraw end
+    for _, raw in ipairs(keep) do if raw ~= topraw then out[#out + 1] = raw end end
+    out[#out + 1] = line
+    local body = table.concat(out, "\n") .. "\n"
+    if #body > MAX_FILE then return nil, "grant store is full" end
+    local ok, err = remuda.fs.write_atomic(path, body, { private = true })
+    if not ok then return nil, tostring(err) end
+    return id
+  end)
+end
+
+-- Direction-control characters (U+202A-202E, U+2066-2069, U+200E/F and friends) are shown escaped, as in the approval post.
+local function show(v, cap)
+  return (policy.redact(v, cap):gsub("\226\128[\142\143\168-\174]", function(c) return string.format("\\u%04X", utf8.codepoint(c)) end)
+    :gsub("\226\129[\166-\175]", function(c) return string.format("\\u%04X", utf8.codepoint(c)) end)
+    :gsub("\216\156", "\\u061C"))
 end
 
 -- `guard grants`: the operator's view. Names and times only, control characters removed.
@@ -153,27 +239,18 @@ function M.list()
   local out = { "guard grants: " .. #gs .. " active" }
   for _, g in ipairs(gs) do
     out[#out + 1] = string.format("%s  %s  %s  ceiling %s  holder %s  expires %s (in %dm)  event %s", g.id, g.class,
-      policy.redact(g.scope, 300), g.ceiling, policy.redact(g.holder, 60),
-      os.date("!%Y-%m-%dT%H:%M:%SZ", g.expires), math.ceil((g.expires - t) / 60), policy.redact(g.event, 80))
+      show(g.scope, 300), g.ceiling, show(g.holder, 60),
+      os.date("!%Y-%m-%dT%H:%M:%SZ", g.expires), math.ceil((g.expires - t) / 60), show(g.event, 80))
   end
   return table.concat(out, "\n")
 end
 
-local function covers(g, target)
-  if g.class == "net" then return g.scope == target end
-  local want = {}
-  for s in g.scope:gmatch("[^/]+") do want[#want + 1] = s end
-  local have = {}
-  for s in target:gmatch("[^/]+") do have[#have + 1] = s end
-  if #have < #want then return false end
-  for i, s in ipairs(want) do if s ~= "*" and s ~= have[i] then return false end end
-  return true
-end
-
 -- Pushes under a grant: any CI or workflow path is T3 (always asks). The list is reviewed like a guard rule.
-local CI_PREFIX = { ".github/", ".circleci/", ".buildkite/", ".gitlab/" }
+-- scripts/, Makefile and justfile are what CI calls, so they count as CI.
+local CI_PREFIX = { ".github/", ".circleci/", ".buildkite/", ".gitlab/", "scripts/" }
 local CI_FILE = { [".gitlab-ci.yml"] = 1, ["jenkinsfile"] = 1, [".travis.yml"] = 1, ["azure-pipelines.yml"] = 1,
-  ["bitbucket-pipelines.yml"] = 1, [".drone.yml"] = 1, ["cloudbuild.yaml"] = 1, ["appveyor.yml"] = 1, [".appveyor.yml"] = 1 }
+  ["bitbucket-pipelines.yml"] = 1, [".drone.yml"] = 1, ["cloudbuild.yaml"] = 1, ["appveyor.yml"] = 1, [".appveyor.yml"] = 1,
+  ["makefile"] = 1, ["gnumakefile"] = 1, ["justfile"] = 1 }
 function M.touches_ci(names)
   for _, name in ipairs(names) do
     local lower = name:lower()
@@ -185,7 +262,11 @@ end
 
 -- Files the push would add over the upstream ref, best effort; nil when it cannot be computed.
 function M.diff_names(cwd)
-  local ok, r = pcall(remuda.process.run, { argv = { "git", "-C", cwd, "diff", "--name-only", "-z", "@{upstream}...HEAD" }, timeout = 5 })
+  -- Repo config must not run anything at hook time (fsmonitor, hooks, external diff, textconv); renames are
+  -- split so a move out of a CI path still lists the source.
+  local argv = { "env", "GIT_OPTIONAL_LOCKS=0", "git", "-C", cwd, "-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null",
+    "--no-pager", "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", "@{upstream}...HEAD" }
+  local ok, r = pcall(remuda.process.run, { argv = argv, timeout = 5 })
   if not ok or type(r) ~= "table" or r.code ~= 0 or r.timed_out then return nil end
   local names = {}
   for name in (r.stdout or ""):gmatch("[^\0]+") do names[#names + 1] = name end
@@ -198,11 +279,29 @@ local function host_of(url)
   if type(url) ~= "string" then return nil end
   local scheme, authority = url:match("^(%a[%w+.-]*)://([^/?#]*)")
   if not scheme then return nil end
-  authority = authority:match("([^@]*)$") -- userinfo: judge the host after the last @
+  -- Anything a parser could read differently from us is no grant: backslash, whitespace, control, userinfo.
+  if url:find("[\\%s%c]") or authority:find("@", 1, true) then return nil end
   local host, port = authority:match("^([^:]+):(%d+)$")
   host = host or authority
   if port and port == DEFAULT_PORT[scheme:lower()] then port = nil end
   return parse("net", host .. (port and (":" .. port) or ""))
+end
+
+-- A push is covered only when the command is exactly `git push [remote [current-branch]]`: no shell syntax, no
+-- cd/-C/env/GIT_DIR prefix, no refspec, no flag. The diff runs in the hook's cwd, so anything that moves the
+-- push elsewhere or changes what it sends is outside this whitelist and falls to the tier (ask).
+local function plain_push(command, cwd)
+  -- the character set also refuses tabs, newlines, = : + ; & | ` $ ( ) < > and quotes
+  if type(command) ~= "string" or command:find("[^%w %./_@%-]") then return false end
+  local w = {}
+  for s in command:gmatch("%S+") do w[#w + 1] = s end
+  if #w < 2 or #w > 4 or w[1] ~= "git" or w[2] ~= "push" then return false end
+  for i = 3, #w do if w[i]:find("^%-") then return false end end
+  if #w == 4 then
+    local ok, r = pcall(remuda.process.run, { argv = { "git", "-C", cwd, "symbolic-ref", "--short", "-q", "HEAD" }, timeout = 5 })
+    return ok and type(r) == "table" and r.code == 0 and (r.stdout or ""):gsub("%s+$", "") == w[4]
+  end
+  return true
 end
 
 -- The id of the active grant that covers this call, or nil. Never takes an id from the call itself.
@@ -215,10 +314,7 @@ function M.match(tool, input, cwd)
   elseif tool == "WebFetch" then
     class, target = "net", host_of(input.url)
   elseif (tool == "Bash" or tool == "PowerShell") and policy.classify(tool, input, { cwd = cwd }) == "push" then
-    -- ponytail: the diff runs in the hook's cwd, so a command that moves elsewhere (cd, -C, --git-dir) gets no grant.
-    local command = input.command
-    if type(command) ~= "string" or command:find("%f[%w]cd%f[%W]") or command:find("%-C") or command:find("%-%-git%-dir")
-        or command:find("%-%-work%-tree") then return nil end
+    if not plain_push(input.command, cwd) then return nil end
     class, target = "git", M.canonical(cwd)
   end
   if not target then return nil end
