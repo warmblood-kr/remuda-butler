@@ -21,6 +21,7 @@ local function dir()
   local paths = remuda._butler_paths
   return paths and paths.data_home and (paths.data_home .. "/remuda/butler") or nil
 end
+M.dir = dir
 function M.log_path() local d = dir(); return d and (d .. "/guard-audit.jsonl") end
 local function switch_path() local d = dir(); return d and (d .. "/guard-observe") end
 
@@ -72,6 +73,24 @@ function M.deny_enabled()
 end
 function M.set_deny(on)
   local path = deny_path()
+  if not path then return nil, "Butler data directory is unknown" end
+  pcall(remuda.mkdir, dir())
+  return remuda.fs.write_atomic(path, on and "on\n" or "off\n", { private = true })
+end
+
+-- The grants switch (`guard grants on|off|status`): off by default. With it off nothing reads the
+-- grant store and every audit line carries grant_id "-".
+local function grants_path() local d = dir(); return d and (d .. "/guard-grants") or nil end
+function M.grants_enabled()
+  local path = grants_path()
+  local f = path and io.open(path, "r")
+  if not f then return false end
+  local text = f:read("*l")
+  f:close()
+  return text == "on"
+end
+function M.set_grants(on)
+  local path = grants_path()
   if not path then return nil, "Butler data directory is unknown" end
   pcall(remuda.mkdir, dir())
   return remuda.fs.write_atomic(path, on and "on\n" or "off\n", { private = true })
@@ -293,6 +312,7 @@ local function segment_class(w, text, ctx)
         local verb = w[i + 1]
         if verb == "close" then return "control" end
         if verb == "guard" and w[i + 2] == "approvals" and (w[i + 3] == "on" or w[i + 3] == "off") then return "weaken" end
+        if verb == "guard" and w[i + 2] == "grants" and (w[i + 3] == "on" or w[i + 3] == "off") then return "weaken" end
         if verb == "guard" and (w[i + 2] == "on" or w[i + 2] == "off") then return "weaken" end
         if IDENTITY[verb or ""] then return "identity" end
         if verb == "matrix" and (w[i + 2] == "join" or w[i + 2] == "leave" or w[i + 2] == "invite"
@@ -417,6 +437,10 @@ local function owner_or_daemon_command(w, text)
   if butler_at then
     local verb, sub = w[butler_at + 1], w[butler_at + 2]
     if verb == "guard" and (sub == "on" or sub == "off" or sub == "approvals" or sub == "deny") then
+      return "Butler owner control"
+    end
+    -- Only the switch is owner control; `guard grants` and `guard grants status` are read-only views.
+    if verb == "guard" and sub == "grants" and (w[butler_at + 3] == "on" or w[butler_at + 3] == "off") then
       return "Butler owner control"
     end
     if verb == "approve" or verb == "deny" or verb == "approve-text" or verb == "typed-lines"
@@ -940,6 +964,12 @@ function M.run(args, caller)
     local ok, err = pcall(function()
       if not M.enabled() then return end
       local record, hook_json = hook(caller)
+      -- grant_id comes only from the store (never from the call); with the switch off nothing reads it.
+      local grants = remuda.butler.guard_grants
+      if grants and hook_json and M.grants_enabled() then
+        local matched, id = pcall(grants.match, record.tool, hook_json.tool_input, hook_json.cwd)
+        if matched and id then record.grant_id = id end
+      end
       if hook_json and record.event == "PreToolUse" and M.deny_enabled() then
         local policy_ok, reason = pcall(M.deny_reason, record.tool, hook_json.tool_input, { cwd = hook_json.cwd })
         if not policy_ok then
@@ -977,6 +1007,18 @@ function M.run(args, caller)
     return "guard approvals: " .. (M.approvals_enabled() and "on" or "off") .. " (guard: "
       .. (M.enabled() and "on" or "off") .. "; routing runs only when both are on)\n" .. SWITCH_NOTE
   end
+  if #args == 3 and verb == "grants" and (args[3] == "on" or args[3] == "off") then
+    local written, why = change(caller, "guard grants", args[3] == "on", M.set_grants)
+    local warn = why
+    if not written then return remuda.fail("guard grants switch not changed: " .. tostring(why), 1) end
+    return "guard grants are now " .. args[3] .. ". There is no way to create a grant from the CLI."
+      .. (warn and ("\n" .. warn) or "")
+  end
+  if #args == 3 and verb == "grants" and args[3] == "status" then
+    return "guard grants: " .. (M.grants_enabled() and "on" or "off") .. " (guard: " .. (M.enabled() and "on" or "off")
+      .. "; with the switch off the grant store is not read)"
+  end
+  if #args == 2 and verb == "grants" then return remuda.butler.guard_grants.list() end
   if #args == 3 and verb == "deny" and (args[3] == "on" or args[3] == "off") then
     local written, why = change(caller, "guard deny", args[3] == "on", M.set_deny)
     local warn = why
@@ -1003,7 +1045,7 @@ function M.run(args, caller)
       .. "\n" .. SWITCH_NOTE .. unaudited_note()
   end
   if #args == 2 and verb == "stats" then return stats() end
-  return remuda.fail("Usage: remuda butler guard on|off|status | approvals on|off|status | deny on|off|status | stats", 2)
+  return remuda.fail("Usage: remuda butler guard on|off|status | approvals on|off|status | deny on|off|status | grants [on|off|status] | stats", 2)
 end
 
 -- Hook entries merged into the per-session settings file while the switch is on.
