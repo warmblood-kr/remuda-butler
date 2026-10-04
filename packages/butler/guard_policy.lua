@@ -10,6 +10,9 @@ local MAX_INPUT = 64 * 1024 -- larger payloads use only bounded structured deny 
 local REDACT_PREFIX = 2048 -- redaction reads only this many bytes: its patterns are quadratic on long word runs
 local SUMMARY_CAP = 200
 local LOG_CAP = 1024 * 1024 -- the log rotates to LOG.1 past this size
+-- A rotated LOG.1 moves to LOG.<UTC stamp> on the next rotation; only those dated
+-- archives older than this many days are deleted, and only at rotation time.
+M.RETENTION_DAYS = 90
 local SCRIPT_HEAD = 120
 
 -- Where the switch and the log live; remuda._butler_guard_dir lets a test redirect both.
@@ -653,6 +656,35 @@ function M.summary(tool, input, cap)
   return M.redact(value or "", cap)
 end
 
+local STAMP = "^%d%d%d%d%d%d%d%dT%d%d%d%d%d%dZ$"
+
+-- Rotated files beside the log: LOG.1 and the dated archives (stamp is nil for LOG.1).
+local function archives()
+  local out = {}
+  local ok, names = pcall(remuda.list_dir, dir())
+  for _, name in ipairs(ok and type(names) == "table" and names or {}) do
+    local suffix = name:match("^guard%-audit%.jsonl%.(.+)$")
+    if suffix == "1" or (suffix and suffix:match(STAMP)) then
+      out[#out + 1] = { path = dir() .. "/" .. name, stamp = suffix ~= "1" and suffix or nil }
+    end
+  end
+  return out
+end
+
+local function rotate(path)
+  local now = os.time()
+  local previous = io.open(path .. ".1", "r")
+  if previous then
+    previous:close()
+    os.rename(path .. ".1", path .. "." .. os.date("!%Y%m%dT%H%M%SZ", now))
+  end
+  os.rename(path, path .. ".1")
+  local cutoff = os.date("!%Y%m%dT%H%M%SZ", now - M.RETENTION_DAYS * 86400)
+  for _, a in ipairs(archives()) do
+    if a.stamp and a.stamp < cutoff then os.remove(a.path) end
+  end
+end
+
 -- Append one JSON line to the audit log (0600, rotated). Returns true, or nil and why.
 function M.append(record)
   local path = M.log_path()
@@ -662,13 +694,15 @@ function M.append(record)
     local f = io.open(path, "r")
     local size = 0
     if f then size = f:seek("end") or 0; f:close() end
-    if size >= LOG_CAP then os.remove(path .. ".1"); os.rename(path, path .. ".1"); f = nil end
+    if size >= LOG_CAP then rotate(path); f = nil end
     if not f then assert(remuda.fs.write_atomic(path, "", { private = true })) end
     local out = assert(io.open(path, "a"))
     local line = '{"time":' .. remuda.json.encode(os.date("!%Y-%m-%dT%H:%M:%SZ"))
     for _, key in ipairs({ "session", "kind", "event", "tool", "class", "summary" }) do
       line = line .. ',"' .. key .. '":' .. remuda.json.encode(tostring(record[key] or ""))
     end
+    -- grant_id is "-" until a standing grant covers the call (a later PR); the field is fixed now.
+    line = line .. ',"grant_id":' .. remuda.json.encode(tostring(record.grant_id or "-"))
     for _, key in ipairs({ "id", "hash" }) do
       if record[key] then line = line .. ',"' .. key .. '":' .. remuda.json.encode(tostring(record[key])) end
     end
@@ -738,6 +772,48 @@ end
 
 local SWITCH_NOTE = "Applies to sessions launched from now on; running sessions keep their settings."
 
+-- Record who changed a switch (the caller's alias, or "operator" from a terminal), even when it turns the audit off.
+local function switched(caller, text)
+  local env = caller and caller.env or {}
+  local ok, appended, why = pcall(M.append, { session = env.REMUDA_BUTLER_AGENT_ALIAS or "operator",
+    kind = env.REMUDA_BUTLER_AGENT_KIND, event = "switch", tool = "", class = "other", summary = text })
+  if not ok or not appended then note("guard switch not audited: " .. tostring(ok and why or appended)) end
+end
+
+-- `guard stats`: counts per class and per event over the log and its archives.
+local function stats()
+  local files = { M.log_path() }
+  for _, a in ipairs(archives()) do files[#files + 1] = a.path end
+  local total, unreadable, first, last, class, event = 0, 0, nil, nil, {}, {}
+  for _, path in ipairs(files) do
+    local f = io.open(path, "r")
+    for line in (f and f:lines() or function() end) do
+      local ok, r = pcall(remuda.json.decode, line)
+      if ok and type(r) == "table" then
+        total = total + 1
+        local t = tostring(r.time or "")
+        if not first or t < first then first = t end
+        if not last or t > last then last = t end
+        class[tostring(r.class or "")] = (class[tostring(r.class or "")] or 0) + 1
+        event[tostring(r.event or "")] = (event[tostring(r.event or "")] or 0) + 1
+      else
+        unreadable = unreadable + 1
+      end
+    end
+    if f then f:close() end
+  end
+  if total == 0 then return "guard stats: no audit lines yet. Next: remuda butler guard on" end
+  local out = { "guard stats: lines: " .. total .. " since " .. first .. " until " .. last
+    .. (unreadable > 0 and (" (unreadable lines: " .. unreadable .. ")") or "") }
+  for _, kv in ipairs({ { "class", class }, { "event", event } }) do
+    local names = {}
+    for name in pairs(kv[2]) do names[#names + 1] = name end
+    table.sort(names)
+    for _, name in ipairs(names) do out[#out + 1] = kv[1] .. " " .. name .. ": " .. kv[2][name] end
+  end
+  return table.concat(out, "\n")
+end
+
 -- `remuda butler guard [on|off|status]`. Without an argument it is the hook: it
 -- always returns an empty answer (no decision) and exit 0.
 function M.run(args, caller)
@@ -779,6 +855,7 @@ function M.run(args, caller)
   if #args == 3 and verb == "approvals" and (args[3] == "on" or args[3] == "off") then
     local written, why = M.set_approvals(args[3] == "on")
     if not written then return remuda.fail("guard approvals switch not changed: " .. tostring(why), 1) end
+    switched(caller, "guard approvals " .. args[3])
     return "guard approvals are now " .. args[3] .. ". " .. SWITCH_NOTE
       .. (args[3] == "on" and " Needs `guard on`; the owner answers Claude permission prompts in Matrix,"
         .. " and with no answer Claude shows its own prompt." or "")
@@ -790,6 +867,7 @@ function M.run(args, caller)
   if #args == 3 and verb == "deny" and (args[3] == "on" or args[3] == "off") then
     local written, why = M.set_deny(args[3] == "on")
     if not written then return remuda.fail("guard deny switch not changed: " .. tostring(why), 1) end
+    switched(caller, "guard deny " .. args[3])
     return "guard deny is now " .. args[3] .. ". " .. SWITCH_NOTE
       .. (args[3] == "on" and " Needs `guard on`; recognised high-impact calls are denied." or "")
   end
@@ -800,6 +878,7 @@ function M.run(args, caller)
   if #args == 2 and (verb == "on" or verb == "off") then
     local written, why = M.set(verb == "on")
     if not written then return remuda.fail("guard switch not changed: " .. tostring(why), 1) end
+    switched(caller, "guard " .. verb)
     return "guard is now " .. verb .. ". " .. SWITCH_NOTE
       .. (verb == "on" and " It records calls; `guard deny on` also enables recognised denials." or "")
   end
@@ -808,7 +887,8 @@ function M.run(args, caller)
       .. (M.deny_enabled() and "on" or "off") .. ")\nlog: " .. tostring(M.log_path())
       .. "\n" .. SWITCH_NOTE
   end
-  return remuda.fail("Usage: remuda butler guard on|off|status | approvals on|off|status | deny on|off|status", 2)
+  if #args == 2 and verb == "stats" then return stats() end
+  return remuda.fail("Usage: remuda butler guard on|off|status | approvals on|off|status | deny on|off|status | stats", 2)
 end
 
 -- Hook entries merged into the per-session settings file while the switch is on.

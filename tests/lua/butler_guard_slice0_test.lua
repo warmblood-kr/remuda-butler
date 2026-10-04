@@ -88,8 +88,10 @@ T.test("switch defaults off, records nothing off, one line on", function()
     "on output lacks the scope note: " .. on, "ok - on says it applies to new sessions")
   local out = ev([[return '[' .. remuda._t_hook('{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git push origin main"},"cwd":"/p"}') .. ']']])
   T.eq(out, "ok:[]", "hook returns no decision")
-  local lines = T.eval("return remuda._t_lines()")
-  T.expect(not has(lines, "\n"), "more than one line: " .. lines, "ok - one audit line")
+  -- `guard on` is itself audited (a switch line); the hook call adds exactly one more.
+  local all = T.eval("return remuda._t_lines()")
+  local switch_line, lines = all:match("^([^\n]*)\n([^\n]*)$")
+  T.expect(lines and has(switch_line, '"event":"switch"'), "expected a switch line then one audit line: " .. all, "ok - one audit line")
   for _, f in ipairs({ '"time":"', '"session":"ss-a"', '"kind":"claude"', '"event":"PreToolUse"', '"tool":"Bash"',
     '"class":"push"', '"summary":"git push origin main"' }) do
     T.expect(has(lines, f), "audit field missing " .. f .. ": " .. lines)
@@ -97,7 +99,7 @@ T.test("switch defaults off, records nothing off, one line on", function()
   T.eval("return remuda.json.decode(remuda._t_lines())") -- valid JSON
   ev("return remuda._butler_command_run('guard', {'guard','off'}, {})")
   T.eval([[remuda._t_hook('{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}')]])
-  T.eq(T.eval("return select(2, remuda._t_lines():gsub('\\n', '')) + 1"), "1", "off again records nothing more")
+  T.eq(T.eval("return select(2, remuda._t_lines():gsub('\\n', '')) + 1"), "3", "off again records nothing more (the off switch itself is audited)")
 end)
 
 T.test("hook always allows: malformed, oversized, control chars, secrets, cap", function()

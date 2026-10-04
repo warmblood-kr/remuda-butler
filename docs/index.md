@@ -131,6 +131,16 @@ the agent proceeds as before. `remuda butler doctor` shows the switch. The audit
 is a record, not a security boundary: agents run as the same user and can bypass
 or edit it.
 
+Every audit line carries a `grant_id` field, `-` until standing grants exist.
+Each change of the `guard`, `guard deny` or `guard approvals` switch appends a
+`switch` line naming who changed it (the caller's alias, or `operator`) and when.
+When the log passes 1 MiB, the previous `guard-audit.jsonl.1` moves to a
+`guard-audit.jsonl.<UTC stamp>` archive, and archives older than 90 days are
+deleted at that moment and never otherwise.
+`remuda butler guard stats` prints the line count, the first and last time, and
+the counts per class and per event over the log and its archives, as a baseline
+to compare before enabling `guard deny`.
+
 ### Guard approvals
 
 `remuda butler guard approvals on|off|status` is a second switch, off by
