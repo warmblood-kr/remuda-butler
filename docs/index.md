@@ -168,8 +168,8 @@ runs outside the hook is not covered.
 Denials run only while both `guard on` and `guard deny on` are set. For Claude
 members launched after both switches are on, the `PreToolUse` hook denies
 recognised permission bypass flags, owner-only Butler controls, daemon
-stop/restart/kill commands, writes to hook/settings files or protected
-directories, and force or delete pushes that name `main`, `master` or `trunk`.
+stop/restart/kill commands, writes to hook/settings files, the home-level
+`~/.codex/AGENTS.md` and `~/.claude/CLAUDE.md`, or protected directories, and force or delete pushes that name `main`, `master` or `trunk`.
 Agents are also denied `remuda butler guard deny status`. Plain pushes and force
 pushes to other branches remain allowed. `doctor` shows the deny switch.
 
