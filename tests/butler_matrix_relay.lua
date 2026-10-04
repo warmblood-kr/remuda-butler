@@ -4972,6 +4972,39 @@ function ctx_tests.test_matrix_thread_takes_a_mail_id()
   end)
 end
 
+-- The REAL mail.matrix_thread_target, in memory (no mail root): the delivery check is the
+-- security boundary of `matrix thread MAIL_ID`, so a stub must not be the only test of it.
+function ctx_tests.test_mail_matrix_thread_target_checks_delivery()
+  local old_mail, old_config = remuda._butler_mail, remuda._butler_mail_config
+  local THREADED, SOLO, PLAIN, UNKNOWN = "01MTHREADED", "01MSOLO", "01MPLAIN", "01MUNKNOWN"
+  local bus = { agents = { alice = { id = "A1", alias = "alice" }, bob = { id = "B1", alias = "bob" } },
+    inboxes = {}, messages = {
+      [THREADED] = { matrix = { room_id = NEW, event_id = "$reply1", thread_root = "$root1" } },
+      [SOLO] = { matrix = { room_id = NEW, event_id = "$solo" } },
+      [PLAIN] = {} },
+    mail_delivered = { A1 = { [THREADED] = true, [SOLO] = true, [PLAIN] = true } } }
+  remuda._butler_mail_config = { bus = bus, json_quote = function(value) return '"' .. value .. '"' end }
+  local loaded, why = pcall(dofile, "packages/butler/mail.lua")
+  local target = remuda._butler_mail and remuda._butler_mail.matrix_thread_target
+  remuda._butler_mail, remuda._butler_mail_config = old_mail, old_config
+  assert(loaded and target, "mail.lua must load in memory: " .. tostring(why))
+  local function refused(id, caller, as_operator, expected)
+    local room, message = target(caller, id, as_operator)
+    assert(room == nil and message:find(expected, 1, true) and message:find("\nNext: remuda butler inbox", 1, true),
+      id .. " must be refused with '" .. expected .. "' and a Next line, got: " .. tostring(room) .. " " .. tostring(message))
+  end
+  refused(THREADED, "bob", false, "not delivered to you")
+  refused(UNKNOWN, "alice", false, "not delivered to you")
+  refused(PLAIN, "alice", false, "is not a Matrix message")
+  refused(UNKNOWN, nil, true, "is not a Matrix message")
+  local room, root = target("alice", THREADED, false)
+  assert(room == NEW and root == "$root1", "the recipient gets the room and thread root")
+  room, root = target(nil, THREADED, true)
+  assert(room == NEW and root == "$root1", "the operator gets the room and thread root")
+  room, root = target("alice", SOLO, false)
+  assert(room == NEW and root == "$solo", "a mail with no thread root falls back to its event")
+end
+
 -- #235 step B: the first mail from a thread this Butler has not seen carries the
 -- earlier messages of that thread. Production path: relay.start with the real
 -- matrix module, HTTP scripted at remuda.http, mail captured at butler/deliver.
@@ -5615,6 +5648,7 @@ rx_tests = {
   { "test_inbox_header_names_room_and_thread", ctx_tests.test_inbox_header_names_room_and_thread },
   { "test_matrix_thread_takes_room_from_route", ctx_tests.test_matrix_thread_takes_room_from_route },
   { "test_matrix_thread_takes_a_mail_id", ctx_tests.test_matrix_thread_takes_a_mail_id },
+  { "test_mail_matrix_thread_target_checks_delivery", ctx_tests.test_mail_matrix_thread_target_checks_delivery },
   { "test_ctx_block_text_with_all_four_marks", ctx_tests.test_ctx_block_text_with_all_four_marks },
   { "test_ctx_more_than_twenty_and_second_mail_has_no_block", ctx_tests.test_ctx_more_than_twenty_and_second_mail_has_no_block },
   { "test_ctx_line_rules_cut_join_media_time_and_hostile_text", ctx_tests.test_ctx_line_rules_cut_join_media_time_and_hostile_text },
