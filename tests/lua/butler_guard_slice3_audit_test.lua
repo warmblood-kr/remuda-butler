@@ -206,3 +206,21 @@ T.test("guard stats reads a 1 MiB file of newlines in linear time", function()
   ]])
   T.expect(tonumber(out:match("^(%S+)")) < 2, "stats over 1 MiB of newlines was too slow: " .. out, "ok - stats linear")
 end)
+
+T.test("a failed rotate rename never truncates the live log", function()
+  start_butler()
+  T.eval("remuda._t_dir('g3-rotfail')")
+  local out = T.eval([[
+    local gp = remuda.butler.guard_policy
+    local base = gp.log_path()
+    local f = io.open(base, 'w'); f:write(string.rep('x', 1024 * 1024 + 1)); f:close()
+    local real = os.rename
+    os.rename = function() return nil, 'boom' end
+    local ok, why = gp.append({ session = 's', event = 'switch', summary = 'after failed rotate' })
+    os.rename = real
+    local h = io.open(base, 'r'); local size = h:seek('end'); h:close()
+    return tostring(ok) .. ' ' .. size
+  ]])
+  local ok, size = out:match("^(%a+) (%d+)$")
+  T.expect(ok == "true" and tonumber(size) > 1024 * 1024, "the live log must keep its content when rotate fails: " .. out, "ok - rotate failure keeps log")
+end)

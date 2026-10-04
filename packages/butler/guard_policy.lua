@@ -697,11 +697,13 @@ function M.rotate(path, now)
     while exists(target) do n = n + 1; target = dated .. "-" .. n end
     os.rename(path .. ".1", target)
   end
-  os.rename(path, path .. ".1")
+  -- A failed rename returns false: the caller must not truncate the live log.
+  if not os.rename(path, path .. ".1") then return false end
   local cutoff = os.date("!%Y%m%dT%H%M%SZ", now - M.RETENTION_DAYS * 86400)
   for _, a in ipairs(archives()) do
     if a.stamp and a.stamp < cutoff then os.remove(a.path) end
   end
+  return true
 end
 
 -- Append one JSON line to the audit log (0600, rotated). Returns true, or nil and why.
@@ -713,7 +715,7 @@ function M.append(record)
     local f = io.open(path, "r")
     local size = 0
     if f then size = f:seek("end") or 0; f:close() end
-    if size >= LOG_CAP then M.rotate(path); f = nil end
+    if size >= LOG_CAP and M.rotate(path) then f = nil end -- a failed rotate keeps appending to the live log
     if not f then assert(remuda.fs.write_atomic(path, "", { private = true })) end
     local out = assert(io.open(path, "a"))
     local line = '{"time":' .. remuda.json.encode(os.date("!%Y-%m-%dT%H:%M:%SZ"))
