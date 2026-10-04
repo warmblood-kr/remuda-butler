@@ -31,6 +31,7 @@ T.test("message verbs treat --help as help without actions", function()
       { "send", { "send" } },
       { "topic", { "topic", "new", "work" }, "topic new" },
       { "close", { "close", "worker" } },
+      { "reply", { "reply", "message-id", "hello" } },
     }
     local lines = {}
     for _, case in ipairs(cases) do
@@ -59,12 +60,17 @@ T.test("message verbs treat --help as help without actions", function()
     local real_fail = remuda.fail
     remuda.fail = function(text, code) return "failure:" .. tostring(code) .. ":" .. tostring(text) end
     local invalid = remuda._butler_command_run("send", { "send", "--bogus", "recipient" }, caller)
+    local invalid_reply = remuda._butler_command_run("reply", { "reply", "--bogus", "message-id" }, caller)
+    local missing_reply = remuda._butler_command_run("reply", { "reply", "message-id" }, caller)
     remuda.fail = real_fail
     lines[#lines + 1] = "unknown=" .. tostring(invalid)
       .. ",actions=" .. #remuda._butler_cli_action_calls
+    lines[#lines + 1] = "reply-unknown=" .. tostring(invalid_reply)
+      .. ",reply-missing=" .. tostring(missing_reply)
+      .. ",actions=" .. #remuda._butler_cli_action_calls
     return table.concat(lines, "\n")
   ]])
-  for _, verb in ipairs({ "send", "topic new", "close" }) do
+  for _, verb in ipairs({ "send", "topic new", "close", "reply" }) do
     for _, flag in ipairs({ "--help", "-h" }) do
       T.expect(out:find(verb .. ":" .. flag .. ":help=true,actions=0", 1, true),
         verb .. " " .. flag .. " was not help-only: " .. out)
@@ -76,4 +82,9 @@ T.test("message verbs treat --help as help without actions", function()
   T.expect(out:find("unknown=failure:2:", 1, true) and out:find("Next: remuda butler send --help", 1, true)
       and out:find("Next: remuda butler send --help,actions=0", 1, true),
     "send unknown option did not return usage exit 2 with Next: " .. out)
+  T.expect(out:find("reply-unknown=failure:2:", 1, true)
+      and out:find("Next: remuda butler reply --help", 1, true)
+      and out:find("reply-missing=failure:2:", 1, true)
+      and out:find("message ID and reply text are required", 1, true),
+    "reply errors did not return usage exit 2 with Next: " .. out)
 end)

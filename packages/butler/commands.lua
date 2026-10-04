@@ -489,8 +489,63 @@ command(60, "inbox", "  remuda butler inbox [name]", function(args, caller)
     return remuda._butler_inbox(args[2] or assert(current_agent(caller), "no Butler identity in your env; use `inbox <name>`"))
   end)
 end)
+local REPLY_CLI_SPEC = {
+  name = "remuda butler",
+  verbs = {
+    reply = {
+      about = "Reply to a Butler message",
+      options = {
+        { long = "file", value = "PATH", help = "Read reply text from a file" },
+        { long = "attach", value = "PATH", help = "Attach a file to the Matrix thread" },
+      },
+      args = { { name = "WORDS", help = "Message ID and reply text", multiple = true } },
+      next = "remuda butler reply --help",
+    },
+  },
+}
 command(70, "reply", "  remuda butler reply <message-id> <message...> | - | --file PATH\n"
   .. "  remuda butler reply <message-id> --attach PATH [caption...]", function(args, caller)
+  local cli = remuda.cli
+  if type(cli) == "table" and type(cli.parse) == "function" then
+    for index = 2, #args do
+      if args[index] == "--" then break end
+      if args[index] == "--help" or args[index] == "-h" then
+        local help = cli.parse(REPLY_CLI_SPEC, { "reply", args[index] })
+        return help.text
+      end
+    end
+    local report = cli.parse(REPLY_CLI_SPEC, args)
+    if report.kind == "help" then return report.text end
+    if not report.ok then
+      if type(remuda.fail) == "function" then return remuda.fail(report.text, report.code) end
+      error(report.text, 0)
+    end
+    local words = report.values.WORDS
+    if type(words) == "string" then words = { words } end
+    if #words < 1 or (#words < 2 and not report.values.file and not report.values.attach) then
+      return remuda.fail("message ID and reply text are required.\nUsage: remuda butler reply <message-id> <message...> | - | --file PATH\nNext: remuda butler reply --help", 2)
+    end
+    local message_id = words[1]
+    if report.values.attach then
+      local agent = current_agent(caller)
+      local room, event = remuda._butler_reply_target(agent or OPERATOR, message_id)
+      local upload = { "matrix", "--room", room, "upload", "--thread", event }
+      if #words > 1 then upload[#upload + 1] = "--caption"; upload[#upload + 1] = words_after(words, 2) end
+      upload[#upload + 1] = report.values.attach
+      return remuda.butler.matrix.cli(upload, agent)
+    end
+    local body
+    if report.values.file then
+      body = message_body({ "--file", report.values.file }, 1, caller)
+    else
+      local body_args = { "reply" }
+      for index = 2, #words do body_args[#body_args + 1] = words[index] end
+      body = message_body(body_args, 2, caller)
+    end
+    return cli_result(function()
+      return remuda._butler_reply(current_agent(caller) or OPERATOR, message_id, body)
+    end)
+  end
   if #args < 3 then return nil end
   if args[3] == "--attach" then
     -- The file goes into the Matrix thread of that mail; --file keeps meaning "read the text".

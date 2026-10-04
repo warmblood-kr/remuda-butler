@@ -27,7 +27,6 @@ matrix status
 matrix unfollow
 matrix upload
 quota
-reply
 schedule
 send-to-leader
 sessions
