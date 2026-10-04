@@ -88,7 +88,7 @@ T.test("retention: size rotation keeps dated archives, prunes only past the docu
       tostring(exists(base .. '.1')), tostring(dated) }, ' ')
   ]])
   local days, old, young, one, dated = out:match("(%d+) (%a+) (%a+) (%a+) (%d+)")
-  T.expect(tonumber(days) >= 30, "retention default must be conservative: " .. out)
+  T.expect(days == "90", "RETENTION_DAYS is the documented 90: " .. out)
   T.expect(old == "false", "an archive past retention must be pruned: " .. out)
   T.expect(young == "true" and one == "true", "archives inside retention must stay: " .. out)
   T.expect(dated == "2", "the previous .1 moves to a dated name instead of being deleted: " .. out, "ok - retention")

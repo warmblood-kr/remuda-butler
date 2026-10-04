@@ -136,7 +136,7 @@ When grants land, `grant_id` comes from the grant store, never from agent input.
 Each change of the `guard`, `guard deny` or `guard approvals` switch appends a
 `switch` line naming who changed it (the caller's alias, or `operator`) and when.
 `Who` is evidence from the forwarded environment, not a control; the `weaken`-class deny is the control.
-Turning a switch off is audited first and refused if that line cannot be written.
+Turning a switch off is audited first. If that line cannot be written the switch still turns off (it only narrows enforcement, so the owner is never locked out), the answer and stderr say "switched off, NOT audited", and a `guard-unaudited` marker shows in `guard status` and `guard stats` until the next audit line is written.
 When the log passes 1 MiB, the previous `guard-audit.jsonl.1` moves to a
 `guard-audit.jsonl.<UTC stamp>` archive, and archives older than 90 days are
 deleted at that moment and never otherwise.

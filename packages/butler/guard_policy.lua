@@ -836,6 +836,7 @@ end
 local STATS_LINE_CAP = 16 * 1024 -- a longer line is tampered or foreign: counted as unreadable, never decoded
 local KNOWN_CLASS = { push = 1, destroy = 1, escape = 1, net = 1, control = 1, weaken = 1, identity = 1,
   script = 1, other = 1 }
+-- Every audit event name a producer appends (hooks, switch, approvals) must be listed here, or stats counts it as "other".
 local KNOWN_EVENT = { PreToolUse = 1, PermissionRequest = 1, deny = 1, policy_error = 1, ["no-input"] = 1,
   oversized = 1, unparsed = 1, switch = 1, approval_requested = 1, approval_approved = 1,
   approval_denied = 1, approval_expired = 1, approval_failed = 1 }
