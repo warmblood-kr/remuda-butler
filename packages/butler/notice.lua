@@ -214,6 +214,30 @@ function remuda._butler_notify_policy(session, now)
   return decision == "EMPTY"
 end
 
+-- The composer decision the policy makes, for callers that hold a raw screen (first-task
+-- delivery): the cursor row without dim ghost text when the core can say so (#137, #372).
+function remuda._butler_composer_decision(kind, session, screen)
+  local raw, raw_text = remuda._butler_prompt_is_empty(kind, screen)
+  -- Only a NON-EMPTY raw read can be a ghost, and the styled row can only upgrade it to EMPTY.
+  if raw == "NON-EMPTY" and remuda.capture_styled then
+    local ok, styled = pcall(remuda.capture_styled, session)
+    local row = ok and styled and styled.cursor and styled.rows and styled.rows[styled.cursor.row]
+    if row then
+      local parts, dim = {}, {}
+      for _, span in ipairs(row) do
+        local list = span.dim and dim or parts
+        list[#list + 1] = span.text
+      end
+      local decision, text = remuda._butler_prompt_is_empty(kind, table.concat(parts))
+      -- The raw text must be exactly the dim ghost: continuation rows below an empty first
+      -- line are a human's draft.
+      local ghost = table.concat(dim):gsub("\194\160", " "):match("^%s*(.-)%s*$")
+      if decision == "EMPTY" and ghost == raw_text then return decision, text end
+    end
+  end
+  return raw, raw_text
+end
+
 -- Startup dialogs are not empty prompts, so task/notice policy cannot be used
 -- to decide whether a key or close is safe. Protect attached human panes using
 -- the same idle/stable-screen rule, while allowing detached panes to proceed.

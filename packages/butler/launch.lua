@@ -517,7 +517,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       if not startup.ready or startup.ready(screen) then
         -- #29: never type the task over a human's line. Waiting is bounded
         -- separately (default 600 ticks = 300s); then the leader is told.
-        local empty = remuda._butler_prompt_is_empty(kind, screen)
+        local empty = remuda._butler_composer_decision(kind, actual, screen)
         if empty ~= "EMPTY" or not remuda._butler_notify_policy(actual) then
           attempts, deferred = attempts - 1, deferred + 1
           if deferred >= (remuda._butler_task_poke_deferrals or 600) then give_up(" deferred") end
@@ -552,7 +552,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
             finish_task(false, "the recipient is gone")
             return
           end
-          local decision, text = remuda._butler_prompt_is_empty(kind, latest)
+          local decision, text = remuda._butler_composer_decision(kind, actual, latest)
           local working = false
           if startup.working then
             local checked, result = pcall(startup.working, latest)
@@ -607,7 +607,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       end,
       human_active = function() return remuda._butler_human_active(actual) end,
       empty = function(screen)
-        return remuda._butler_prompt_is_empty(kind, screen)
+        return remuda._butler_composer_decision(kind, actual, screen)
       end,
       timeout = remuda._butler_task_poke_deferrals or 600,
       ready_timeout = remuda._butler_task_poke_attempts or 60,
