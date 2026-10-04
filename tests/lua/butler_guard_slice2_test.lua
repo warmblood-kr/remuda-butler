@@ -118,6 +118,7 @@ T.test("protected file writes are denied while worktree writes are allowed", fun
   for _, pair in ipairs({
     { "Write", "/home/a/.claude/settings.json" }, { "Edit", "/home/a/.codex/hooks.json" },
     { "MultiEdit", "/home/a/.ssh/config" }, { "NotebookEdit", "/home/a/.config/remuda/prefs.lua" },
+    { "Edit", "/home/a/.codex/AGENTS.md" }, { "Write", "/home/a/.claude/CLAUDE.md" },
   }) do T.expect(reason(pair[1], pair[2], "{home='/home/a',cwd='/home/a/work'}") ~= "nil", pair[1] .. " not denied: " .. pair[2]) end
   for _, command in ipairs({
     "tee ~/.claude/settings.json", "sed -i s/a/b/ ~/.codex/config.toml", "echo x > ~/.ssh/authorized_keys",
@@ -127,6 +128,8 @@ T.test("protected file writes are denied while worktree writes are allowed", fun
     "rm -rf ~/.ssh", "rm -rf ~/.local/share/remuda/butler",
     "mv ~/.ssh/config ./backup", "mv /tmp/new ~/.ssh/config",
     "dd if=/dev/zero of=~/.ssh/known_hosts",
+    "echo x > ~/.codex/AGENTS.md", "echo x >> ~/.claude/CLAUDE.md", "rm ~/.claude/CLAUDE.md",
+    "tee /home/a/.codex/AGENTS.md", "sed -i s/a/b/ ~/.claude/CLAUDE.md", "mv ~/.codex/AGENTS.md ./backup",
   }) do T.expect(reason("Bash", command, "{home='/home/a',cwd='/home/a/work'}") ~= "nil", "not denied: " .. command) end
   for _, command in ipairs({
     "cat ~/.claude/settings.json 2>/dev/null", "ls ~/.ssh 2>&1", "git commit -m 'a -> ~/.claude/x'",
@@ -139,6 +142,14 @@ T.test("protected file writes are denied while worktree writes are allowed", fun
   T.eq(reason("Write", "/home/a/work/.claude/commands/help.md", "{home='/home/a',cwd='/home/a/work'}"), "nil", "worktree Claude docs")
   T.eq(reason("Write", "/home/a/.claude/projects/sample/memory/MEMORY.md", "{home='/home/a',cwd='/home/a/work'}"), "nil", "Claude auto-memory remains writable")
   T.eq(reason("Write", "/home/a/.claude/plans/implementation.md", "{home='/home/a',cwd='/home/a/work'}"), "nil", "Claude plans remain writable")
+  for _, pair in ipairs({
+    { "Write", "/home/a/work/AGENTS.md" }, { "Write", "/home/a/work/CLAUDE.md" },
+    { "Edit", "/home/a/work/.claude/CLAUDE.md" }, { "Edit", "/home/a/work/.codex/AGENTS.md" },
+    { "Write", "/home/b/.claude/CLAUDE.md" }, { "Write", "/home/a/.claude/projects/p/memory/CLAUDE.md" },
+  }) do T.eq(reason(pair[1], pair[2], "{home='/home/a',cwd='/home/a/work'}"), "nil", "instruction-file near miss: " .. pair[2]) end
+  for _, command in ipairs({ "echo x > AGENTS.md", "echo x > CLAUDE.md", "cat ~/.claude/CLAUDE.md", "cp ~/.codex/AGENTS.md ./backup" }) do
+    T.eq(reason("Bash", command, "{home='/home/a',cwd='/home/a/work'}"), "nil", "instruction-file near miss: " .. command)
+  end
   T.eq(reason("Write", "/home/a/projects/remuda/butler/docs/index.md", "{home='/home/a',cwd='/home/a/projects'}"), "nil", "sibling Butler source tree")
   T.expect(true, "", "ok - protected writes and worktree near misses")
 end)
