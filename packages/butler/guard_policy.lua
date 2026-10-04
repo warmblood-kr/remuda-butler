@@ -707,7 +707,7 @@ function M.rotate(path, now)
 end
 
 -- Append one JSON line to the audit log (0600, rotated). Returns true, or nil and why.
-function M.append(record)
+local function write_line(record)
   local path = M.log_path()
   if not path then return nil, "no audit path" end
   local ok, why = pcall(function()
@@ -731,7 +731,22 @@ function M.append(record)
     out:close()
   end)
   if not ok then return nil, tostring(why) end
-  if unaudited_path() then os.remove(unaudited_path()) end
+  return true
+end
+
+-- Append one line; then, if a guard-unaudited marker exists, record its text in a 'switch' line
+-- and only then delete it (the marker stays when that line cannot be written).
+function M.append(record)
+  local ok, why = write_line(record)
+  if not ok then return nil, why end
+  local path = unaudited_path()
+  local f = path and io.open(path, "r")
+  if f then
+    local text = (f:read("*l") or ""):gsub("%c", " "):sub(1, SUMMARY_CAP)
+    f:close()
+    if write_line({ session = "operator", event = "switch", tool = "", class = "other",
+        summary = "earlier off NOT audited: " .. text }) then os.remove(path) end
+  end
   return true
 end
 
@@ -823,7 +838,11 @@ local function change(caller, label, on, set)
   local written, why = set(on)
   if not written then
     -- The off line is already in the log: say it did not take effect.
-    if not on then switched(caller, label .. " off failed: " .. tostring(why)) end
+    if not on then
+      switched(caller, label .. " off failed: " .. tostring(why))
+      -- Nothing turned off, so an unaudited-off marker would only mislead.
+      if warning and unaudited_path() then os.remove(unaudited_path()) end
+    end
     return nil, why
   end
   if on then
