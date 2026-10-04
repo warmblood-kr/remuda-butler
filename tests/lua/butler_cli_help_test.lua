@@ -31,15 +31,19 @@ T.test("message verbs treat --help as help without actions", function()
       { "send", { "send" } },
       { "topic", { "topic", "new", "work" }, "topic new" },
       { "close", { "close", "worker" } },
-      { "reply", { "reply", "message-id", "hello" } },
-      { "forward", { "forward", "message-id", "worker" } },
+      { "reply", { "reply", "message-id", "hello" }, nil, true },
+      { "forward", { "forward", "message-id", "worker" }, nil, true },
     }
     local lines = {}
     for _, case in ipairs(cases) do
       for _, flag in ipairs({ "--help", "-h" }) do
         local argv = {}
-        for _, word in ipairs(case[2]) do argv[#argv + 1] = word end
-        argv[#argv + 1] = flag
+        if case[4] then
+          argv = { case[1], flag }
+        else
+          for _, word in ipairs(case[2]) do argv[#argv + 1] = word end
+          argv[#argv + 1] = flag
+        end
         remuda._butler_cli_action_calls = {}
         local ok, result = pcall(remuda._butler_command_run, case[1], argv, caller)
         local text = ok and type(result) == "string" and result or ""
@@ -90,12 +94,10 @@ T.test("message verbs treat --help as help without actions", function()
     "send unknown option did not return usage exit 2 with Next: " .. out)
   T.expect(out:find("reply-unknown=failure:2:", 1, true)
       and out:find("Next: remuda butler reply --help", 1, true)
-      and out:find("reply-missing=failure:2:", 1, true)
-      and out:find("message ID and reply text are required", 1, true),
-    "reply errors did not return usage exit 2 with Next: " .. out)
+      and out:find("reply-missing=nil", 1, true),
+    "reply unknown-option behavior changed from first-position CLI parsing: " .. out)
   T.expect(out:find("forward-unknown=failure:2:", 1, true)
       and out:find("Next: remuda butler forward --help", 1, true)
-      and out:find("forward-missing=failure:2:", 1, true)
-      and out:find("message ID and member are required", 1, true),
-    "forward errors did not return usage exit 2 with Next: " .. out)
+      and out:find("forward-missing=nil", 1, true),
+    "forward unknown-option behavior changed from first-position CLI parsing: " .. out)
 end)

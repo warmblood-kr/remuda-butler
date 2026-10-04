@@ -411,48 +411,43 @@ local SEND_CLI_SPEC = {
 command(40, "send", '  remuda butler send <to> "<message>" | <to> - | <to> --file PATH\n'
   .. '  remuda butler send <from> <to> <message...> | <from> <to> - | <from> <to> --file PATH', function(args, caller)
   local cli = remuda.cli
-  if type(cli) == "table" and type(cli.parse) == "function" then
+  if type(cli) == "table" and type(cli.parse) == "function" and type(args[2]) == "string"
+      and args[2]:sub(1, 1) == "-" and args[2] ~= "-" then
     local report = cli.parse(SEND_CLI_SPEC, args)
     if report.kind == "help" then return report.text end
     if not report.ok then
       if type(remuda.fail) == "function" then return remuda.fail(report.text, report.code) end
       error(report.text, 0)
     end
-    local words = report.values.WORDS
-    if type(words) == "string" then words = { words } end
-    local count = #(words or {})
-    local from, to, first = current_agent(caller) or OPERATOR, nil, 1
-    if report.values.file then
-      if count == 1 then to = words[1]
-      elseif count >= 2 then from, to, first = words[1], words[2], 3 end
-    elseif count == 2 then
-      to, first = words[1], 2
-    elseif count >= 3 then
-      from, to, first = words[1], words[2], 3
-    else
-      return nil
+    if args[2] == "--file" and report.values.file then
+      local words = report.values.WORDS
+      if type(words) == "string" then words = { words } end
+      local from, to = current_agent(caller) or OPERATOR, nil
+      if #words == 1 then to = words[1]
+      elseif #words >= 2 then from, to = words[1], words[2] end
+      if not to then return nil end
+      return cli_result(function()
+        return remuda._butler_send(from, to, message_body({ "send", "--file", report.values.file }, 2, caller))
+      end)
     end
-    local body = { "send" }
-    if report.values.file then
-      body[2], body[3] = "--file", report.values.file
-    else
-      for index = first, count do body[#body + 1] = words[index] end
-    end
-    return cli_result(function()
-      return remuda._butler_send(from, to, message_body(body, 2, caller))
-    end)
   end
   if #args < 3 then return nil end
   local from, to, first = current_agent(caller) or OPERATOR, args[2], 3
-  if args[3] ~= "-" and args[3] ~= "--file" and #args >= 4 then
+  if args[3] ~= "-" and args[3] ~= "--file" and args[3] ~= "--" and #args >= 4 then
     from, to, first = args[2], args[3], 4
-  elseif args[3] ~= "-" and args[3] ~= "--file" and #args < 4 then
+  elseif args[3] ~= "-" and args[3] ~= "--file" and args[3] ~= "--" and #args < 4 then
     -- Positional short messages retain the caller-inferred sender form.
-  elseif args[4] == "-" or args[4] == "--file" then
+  elseif args[3] ~= "--" and (args[4] == "-" or args[4] == "--file") then
     from, to, first = args[2], args[3], 4
   end
   return cli_result(function()
-    return remuda._butler_send(from, to, message_body(args, first, caller))
+    local body
+    if args[first] == "--" then
+      body = checked_message_body(words_after(args, first + 1))
+    else
+      body = message_body(args, first, caller)
+    end
+    return remuda._butler_send(from, to, body)
   end)
 end)
 command(50, "send-to-leader", "  remuda butler send-to-leader <message...> | - | --file PATH", function(args, caller)
@@ -506,45 +501,14 @@ local REPLY_CLI_SPEC = {
 command(70, "reply", "  remuda butler reply <message-id> <message...> | - | --file PATH\n"
   .. "  remuda butler reply <message-id> --attach PATH [caption...]", function(args, caller)
   local cli = remuda.cli
-  if type(cli) == "table" and type(cli.parse) == "function" then
-    for index = 2, #args do
-      if args[index] == "--" then break end
-      if args[index] == "--help" or args[index] == "-h" then
-        local help = cli.parse(REPLY_CLI_SPEC, { "reply", args[index] })
-        return help.text
-      end
-    end
+  if type(cli) == "table" and type(cli.parse) == "function" and type(args[2]) == "string"
+      and args[2]:sub(1, 1) == "-" and args[2] ~= "-" then
     local report = cli.parse(REPLY_CLI_SPEC, args)
     if report.kind == "help" then return report.text end
     if not report.ok then
       if type(remuda.fail) == "function" then return remuda.fail(report.text, report.code) end
       error(report.text, 0)
     end
-    local words = report.values.WORDS
-    if type(words) == "string" then words = { words } end
-    if #words < 1 or (#words < 2 and not report.values.file and not report.values.attach) then
-      return remuda.fail("message ID and reply text are required.\nUsage: remuda butler reply <message-id> <message...> | - | --file PATH\nNext: remuda butler reply --help", 2)
-    end
-    local message_id = words[1]
-    if report.values.attach then
-      local agent = current_agent(caller)
-      local room, event = remuda._butler_reply_target(agent or OPERATOR, message_id)
-      local upload = { "matrix", "--room", room, "upload", "--thread", event }
-      if #words > 1 then upload[#upload + 1] = "--caption"; upload[#upload + 1] = words_after(words, 2) end
-      upload[#upload + 1] = report.values.attach
-      return remuda.butler.matrix.cli(upload, agent)
-    end
-    local body
-    if report.values.file then
-      body = message_body({ "--file", report.values.file }, 1, caller)
-    else
-      local body_args = { "reply" }
-      for index = 2, #words do body_args[#body_args + 1] = words[index] end
-      body = message_body(body_args, 2, caller)
-    end
-    return cli_result(function()
-      return remuda._butler_reply(current_agent(caller) or OPERATOR, message_id, body)
-    end)
   end
   if #args < 3 then return nil end
   if args[3] == "--attach" then
@@ -560,7 +524,13 @@ command(70, "reply", "  remuda butler reply <message-id> <message...> | - | --fi
     end)
   end
   return cli_result(function()
-    return remuda._butler_reply(current_agent(caller) or OPERATOR, args[2], message_body(args, 3, caller))
+    local body
+    if args[3] == "--" then
+      body = checked_message_body(words_after(args, 4))
+    else
+      body = message_body(args, 3, caller)
+    end
+    return remuda._butler_reply(current_agent(caller) or OPERATOR, args[2], body)
   end)
 end)
 local FORWARD_CLI_SPEC = {
@@ -575,34 +545,25 @@ local FORWARD_CLI_SPEC = {
 }
 command(80, "forward", "  remuda butler forward <message-id> <member> [note...]", function(args, caller)
   local cli = remuda.cli
-  if type(cli) == "table" and type(cli.parse) == "function" then
-    for index = 2, #args do
-      if args[index] == "--" then break end
-      if args[index] == "--help" or args[index] == "-h" then
-        local help = cli.parse(FORWARD_CLI_SPEC, { "forward", args[index] })
-        return help.text
-      end
-    end
+  if type(cli) == "table" and type(cli.parse) == "function" and type(args[2]) == "string"
+      and args[2]:sub(1, 1) == "-" and args[2] ~= "-" then
     local report = cli.parse(FORWARD_CLI_SPEC, args)
     if report.kind == "help" then return report.text end
     if not report.ok then
       if type(remuda.fail) == "function" then return remuda.fail(report.text, report.code) end
       error(report.text, 0)
     end
-    local words = report.values.WORDS
-    if type(words) == "string" then words = { words } end
-    if #words < 2 then
-      return remuda.fail("message ID and member are required.\nUsage: remuda butler forward <message-id> <member> [note...]\nNext: remuda butler forward --help", 2)
-    end
-    return cli_result(function()
-      return remuda._butler_forward(current_agent(caller) or OPERATOR, words[1], words[2],
-        #words >= 3 and words_after(words, 3) or nil)
-    end)
   end
   if #args < 3 then return nil end
   return cli_result(function()
+    local note
+    if args[4] == "--" then
+      note = #args >= 5 and words_after(args, 5) or nil
+    else
+      note = #args >= 4 and words_after(args, 4) or nil
+    end
     return remuda._butler_forward(current_agent(caller) or OPERATOR, args[2], args[3],
-      #args >= 4 and words_after(args, 4) or nil)
+      note)
   end)
 end)
 command(90, "approvals", "  remuda butler approvals", function(args, caller)
