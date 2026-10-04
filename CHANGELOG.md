@@ -7,6 +7,7 @@ release tags yet; entries come from merged pull requests.
 ## Unreleased
 
 ### Added
+- `remuda butler guard grants [on|off|status]`: an off-by-default switch (classed as weakening, owner-only) and the grant store behind it; `grant_id` in audit lines now comes from the store, pushes touching CI or workflow files get no grant, and clearing an unaudited-off marker first records it in a `switch` line (see #339).
 - `remuda butler guard stats` counts audit lines per class and event; every audit line has a `grant_id` (`-` for now), switch changes are audited, and rotated logs are kept as dated archives for 90 days (see #339).
 - `remuda butler matrix mark-all ROOM` (operator only) marks an already-joined room as the ALL-BUTLERS room, and doctor now says "joined room is not marked ALL-BUTLERS" with a `Next:` line naming that fix and the reload (`remuda exec butler`) instead of claiming the lounge is not joined (#367).
 - `remuda butler matrix thread` accepts a Butler mail id and reads the room and thread root recorded in that mail; `--room` is optional then (#368).
