@@ -3,7 +3,7 @@ Show every reply in a Matrix thread
 Usage: remuda butler matrix thread [OPTIONS] EVENT_ID
 
 Arguments:
-  EVENT_ID  Event that starts the thread, e.g. $abc123
+  EVENT_ID  Event that starts the thread, e.g. $abc123, or a Butler mail id (01M...)
 
 Options:
       --room ROOM  Room ID, alias or name (default: the configured room)

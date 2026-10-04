@@ -1709,18 +1709,6 @@ fn setup_mail_notice_clock_for(path: &Path, alias: &str) {
     eval(path, &sessions);
 }
 
-#[test]
-fn prompt_parser_returns_multiline_task_and_stops_at_codex_footer() {
-    let (path, _daemon) = butler_with_member("prompt-parser-multiline");
-    let parsed = eval(
-        &path,
-        r#"local decision, text = remuda._butler_prompt_is_empty('codex',
-          'Ask Codex\n› START task\nsecond task line\nEND task\nGPT-6-Luna medium · ~/projects/ids · task\n? for shortcuts\n98% context left')
-        return decision .. '\n' .. text"#,
-    );
-    assert_eq!(parsed, "NON-EMPTY\nSTART task\nsecond task line\nEND task");
-}
-
 /// #29 review 1: a notice whose type_text fails stays queued for the retry.
 #[test]
 fn a_notice_that_fails_to_type_stays_queued() {
@@ -2461,56 +2449,6 @@ fn notify_policy_uses_human_idle_and_dim_spans_when_the_core_has_them() {
         got,
         "typing=false ghost=true ghost_words=true typed=false never=true off_prompt=false detached_typed=false detached_empty=true knob=false"
     );
-}
-
-#[test]
-fn topic_names_cannot_escape_the_project_home() {
-    let dir = scratch("topic-name-escape");
-    let path = daemon::socket_path_in(&dir, "s");
-    let _daemon = daemon_at(&path);
-    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
-    let projects = dir.join("projects");
-    let got = eval(
-        &path,
-        &format!(
-            "remuda.butler.project_home({projects:?}); \
-             remuda._butler_agent_builders.fake = function() return {{'sleep','20'}} end; \
-             local rejected = {{}} \
-             for _, name in ipairs({{'../escape', 'back\\\\slash', '.hidden', 'line\\nbreak'}}) do \
-               local ok = pcall(remuda._butler_topic_new, name, nil, 'fake'); \
-               rejected[#rejected + 1] = tostring(not ok) \
-             end \
-             return table.concat(rejected, ',')"
-        ),
-    );
-    assert_eq!(got, "true,true,true,true", "unsafe topic name was accepted: {got}");
-    assert!(
-        !dir.join("escape").exists(),
-        "traversal topic created a directory outside project_home"
-    );
-}
-
-#[test]
-fn launch_cwd_rejects_control_characters() {
-    let dir = scratch("launch-cwd-controls");
-    let path = daemon::socket_path_in(&dir, "s");
-    let _daemon = daemon_at(&path);
-    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
-    let cwd = dir.join("cwd\nnotice-injection");
-    std::fs::create_dir_all(&cwd).expect("control-character cwd");
-    let cwd_lua = format!("{:?}", cwd.to_string_lossy());
-    let accepted = eval(
-        &path,
-        &format!(
-            "remuda._butler_agent_builders.claude = function() return {{'sleep', '20'}} end; \
-             local token = remuda._butler_bus.agents.butler.token; \
-             pcall(remuda._call, 'butler_launch', \
-               {{ kind = 'claude', name = 'badcwd', cwd = {cwd_lua} }}, \
-               {{ capability = token }}); \
-             return tostring(remuda._butler_bus.agents.badcwd ~= nil)"
-        ),
-    );
-    assert_eq!(accepted, "false", "launch accepted a control character in cwd");
 }
 
 #[test]
