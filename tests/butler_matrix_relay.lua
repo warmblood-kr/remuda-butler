@@ -2604,7 +2604,7 @@ function ctx_tests.test_matrix_thread_cli_parser_contract()
 Usage: remuda butler matrix thread [OPTIONS] EVENT_ID
 
 Arguments:
-  EVENT_ID  Event that starts the thread, e.g. $abc123
+  EVENT_ID  Event that starts the thread, e.g. $abc123, or a Butler mail id (01M...)
 
 Options:
       --room ROOM  Room ID, alias or name (default: the configured room)
@@ -4932,6 +4932,38 @@ function ctx_tests.test_matrix_thread_takes_room_from_route()
   end)
 end
 
+function ctx_tests.test_matrix_thread_takes_a_mail_id()
+  local dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    local relay = rx_relay(path)
+    relay_module.instance = relay
+    local MAIL, old_mail = "01M43ECFKRY1782NGW0XNYWD6G", remuda._butler_mail
+    remuda._butler_mail = { find_message = function(id)
+      if id == MAIL then
+        return { matrix = { room_id = NEW, event_id = "$reply1", thread_root = "$root1" } }
+      end
+    end }
+    local urls = {}
+    with_alias_http(path, function(spec)
+      urls[#urls + 1] = tostring(spec.url or spec.path)
+      return { status = 200, body = '{"chunk":[]}' }
+    end, function()
+      rx_cli({ "matrix", "thread", MAIL })
+      local asked = table.concat(urls, "\n")
+      assert(asked:find("/rooms/" .. encoded(NEW) .. "/relations/" .. encoded("$root1") .. "/", 1, true),
+        "thread MAIL_ID must read the mail's room and thread root, asked:\n" .. asked)
+      local before = #urls
+      local missing = rx_cli({ "matrix", "thread", "01M0000000000000000000000Z" })
+      assert(#urls == before and missing.code == 1
+        and missing.stderr:find("no Matrix mail 01M0000000000000000000000Z", 1, true)
+        and missing.stderr:find("\nNext: remuda butler inbox", 1, true),
+        "an unknown mail id must fail with a Next line and no request, got: " .. tostring(missing.stderr))
+    end)
+    remuda._butler_mail = old_mail
+    relay:stop()
+  end)
+end
+
 -- #235 step B: the first mail from a thread this Butler has not seen carries the
 -- earlier messages of that thread. Production path: relay.start with the real
 -- matrix module, HTTP scripted at remuda.http, mail captured at butler/deliver.
@@ -5574,6 +5606,7 @@ rx_tests = {
   { "test_rx_link_like_root_counted_but_not_shown", test_rx_link_like_root_counted_but_not_shown },
   { "test_inbox_header_names_room_and_thread", ctx_tests.test_inbox_header_names_room_and_thread },
   { "test_matrix_thread_takes_room_from_route", ctx_tests.test_matrix_thread_takes_room_from_route },
+  { "test_matrix_thread_takes_a_mail_id", ctx_tests.test_matrix_thread_takes_a_mail_id },
   { "test_ctx_block_text_with_all_four_marks", ctx_tests.test_ctx_block_text_with_all_four_marks },
   { "test_ctx_more_than_twenty_and_second_mail_has_no_block", ctx_tests.test_ctx_more_than_twenty_and_second_mail_has_no_block },
   { "test_ctx_line_rules_cut_join_media_time_and_hostile_text", ctx_tests.test_ctx_line_rules_cut_join_media_time_and_hostile_text },

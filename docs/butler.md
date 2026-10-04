@@ -199,6 +199,11 @@ remuda butler matrix [--json] leave ROOM
 remuda butler matrix [--json] quarantine [--id EVENT_ID]
 ```
 
+`thread` takes an event ID or the ID of a Matrix mail (`01M...`). A mail ID
+reads the room and thread root recorded in that mail, so `--room` is not
+needed; an event delivered as mail also resolves its room. An unknown mail ID
+is refused with `Next: remuda butler inbox`.
+
 `send` and `reply` take the text as arguments, `-` for stdin, or `--file PATH`
 for a file. Bodies are limited to 64 KiB, and a file must lie inside the
 caller's working directory, as for `remuda butler send`. A text that starts

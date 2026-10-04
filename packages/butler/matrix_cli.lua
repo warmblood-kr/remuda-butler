@@ -38,7 +38,7 @@ local THREAD_CLI_SPEC = {
   verbs = {
     thread = {
       about = "Show every reply in a Matrix thread",
-      args = { { name = "EVENT_ID", help = "Event that starts the thread, e.g. $abc123" } },
+      args = { { name = "EVENT_ID", help = "Event that starts the thread, e.g. $abc123, or a Butler mail id (01M...)" } },
       next = "remuda butler matrix reply EVENT_ID TEXT",
     },
   },
@@ -49,7 +49,7 @@ local THREAD_HELP_TEXT = [[Show every reply in a Matrix thread
 Usage: remuda butler matrix thread [OPTIONS] EVENT_ID
 
 Arguments:
-  EVENT_ID  Event that starts the thread, e.g. $abc123
+  EVENT_ID  Event that starts the thread, e.g. $abc123, or a Butler mail id (01M...)
 
 Options:
       --room ROOM  Room ID, alias or name (default: the configured room)
@@ -1023,6 +1023,18 @@ function matrix.cli(args, agent, stdin_body, file_body)
     else
       options.thread_root = relay:thread_root_for_event(options.event_id)
     end
+  elseif verb == "thread" and #options.event_id == 26 and options.event_id:match("^[0-9A-HJKMNP-TV-Z]+$") then
+    -- A Butler mail id names its Matrix room and thread root.
+    local mail = remuda._butler_mail
+    local message = mail and mail.find_message and mail.find_message(options.event_id)
+    local route = message and message.matrix
+    if not (route and route.room_id and (route.thread_root or route.event_id)) then
+      finish(reply, cancelled, completed, verb, options, { error = "no Matrix mail "
+        .. terminal_safe(options.event_id) .. " in this Butler's mail\nNext: remuda butler inbox" })
+      return reply
+    end
+    options.room = options.room or route.room_id
+    options.event_id = route.thread_root or route.event_id
   elseif verb == "thread" and not options.room then
     local relay = matrix.relay and matrix.relay.instance
     local route = relay and relay.route_for_event and relay:route_for_event(options.event_id)
