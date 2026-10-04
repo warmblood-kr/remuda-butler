@@ -1,3 +1,3 @@
 # Core version shared by the shell, Rust, golden guidance, and contract checks.
 # Bump deliberately; a core change must not redden Butler PRs.
-CORE_REF=${CORE_REF:-d7478e51e902a8e3b7117314ca77b601cd467c97}
+CORE_REF=${CORE_REF:-3125ea4657e052628d45196c6350edcf33e507cf}
