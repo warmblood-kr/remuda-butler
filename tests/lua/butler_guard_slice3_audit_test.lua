@@ -181,3 +181,15 @@ T.test("turning a switch off is audited first; an unwritable audit still switche
   T.expect(has(last, '"summary":"guard off"') and has(last, '"session":"lead-1"')
     and has(T.eval("return remuda._t_guard({'guard','status'})"), "guard: off"), "off line missing: " .. last, "ok - off audited first")
 end)
+
+T.test("an off line followed by a failed switch write is followed by 'off failed', so the log does not claim off", function()
+  start_butler()
+  T.eval("remuda._t_dir('g3-offfail')")
+  -- a directory where the switch file belongs makes the atomic write fail
+  T.eval("remuda.mkdir(remuda._butler_guard_dir .. '/guard-observe')")
+  local answer = T.eval("local ok, r = pcall(remuda._t_guard, {'guard','off'}); return tostring(ok) .. tostring(r)")
+  T.expect(has(answer, "guard switch not changed"), "the failed write is reported: " .. answer)
+  local lines = T.eval("return remuda._t_lines()")
+  local last; for l in lines:gmatch("[^\n]+") do last = l end
+  T.expect(has(last, '"summary":"guard off failed: '), "last line must say the off failed: " .. tostring(last), "ok - off failed line")
+end)

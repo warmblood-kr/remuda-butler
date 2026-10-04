@@ -819,7 +819,11 @@ local function change(caller, label, on, set)
     end
   end
   local written, why = set(on)
-  if not written then return nil, why end
+  if not written then
+    -- The off line is already in the log: say it did not take effect.
+    if not on then switched(caller, label .. " off failed: " .. tostring(why)) end
+    return nil, why
+  end
   if on then
     local ok, audit_why = switched(caller, label .. " on")
     if not ok then note("guard switch not audited: " .. tostring(audit_why)) end
