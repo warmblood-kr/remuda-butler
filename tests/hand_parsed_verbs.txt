@@ -4,7 +4,6 @@ approve-text
 approvals
 doctor
 deny
-forward
 guard
 help
 inbox

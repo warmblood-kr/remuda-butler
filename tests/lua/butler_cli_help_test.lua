@@ -32,6 +32,7 @@ T.test("message verbs treat --help as help without actions", function()
       { "topic", { "topic", "new", "work" }, "topic new" },
       { "close", { "close", "worker" } },
       { "reply", { "reply", "message-id", "hello" } },
+      { "forward", { "forward", "message-id", "worker" } },
     }
     local lines = {}
     for _, case in ipairs(cases) do
@@ -62,15 +63,20 @@ T.test("message verbs treat --help as help without actions", function()
     local invalid = remuda._butler_command_run("send", { "send", "--bogus", "recipient" }, caller)
     local invalid_reply = remuda._butler_command_run("reply", { "reply", "--bogus", "message-id" }, caller)
     local missing_reply = remuda._butler_command_run("reply", { "reply", "message-id" }, caller)
+    local invalid_forward = remuda._butler_command_run("forward", { "forward", "--bogus", "message-id", "worker" }, caller)
+    local missing_forward = remuda._butler_command_run("forward", { "forward", "message-id" }, caller)
     remuda.fail = real_fail
     lines[#lines + 1] = "unknown=" .. tostring(invalid)
       .. ",actions=" .. #remuda._butler_cli_action_calls
     lines[#lines + 1] = "reply-unknown=" .. tostring(invalid_reply)
       .. ",reply-missing=" .. tostring(missing_reply)
       .. ",actions=" .. #remuda._butler_cli_action_calls
+    lines[#lines + 1] = "forward-unknown=" .. tostring(invalid_forward)
+      .. ",forward-missing=" .. tostring(missing_forward)
+      .. ",actions=" .. #remuda._butler_cli_action_calls
     return table.concat(lines, "\n")
   ]])
-  for _, verb in ipairs({ "send", "topic new", "close", "reply" }) do
+  for _, verb in ipairs({ "send", "topic new", "close", "reply", "forward" }) do
     for _, flag in ipairs({ "--help", "-h" }) do
       T.expect(out:find(verb .. ":" .. flag .. ":help=true,actions=0", 1, true),
         verb .. " " .. flag .. " was not help-only: " .. out)
@@ -87,4 +93,9 @@ T.test("message verbs treat --help as help without actions", function()
       and out:find("reply-missing=failure:2:", 1, true)
       and out:find("message ID and reply text are required", 1, true),
     "reply errors did not return usage exit 2 with Next: " .. out)
+  T.expect(out:find("forward-unknown=failure:2:", 1, true)
+      and out:find("Next: remuda butler forward --help", 1, true)
+      and out:find("forward-missing=failure:2:", 1, true)
+      and out:find("message ID and member are required", 1, true),
+    "forward errors did not return usage exit 2 with Next: " .. out)
 end)

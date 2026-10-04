@@ -563,7 +563,42 @@ command(70, "reply", "  remuda butler reply <message-id> <message...> | - | --fi
     return remuda._butler_reply(current_agent(caller) or OPERATOR, args[2], message_body(args, 3, caller))
   end)
 end)
+local FORWARD_CLI_SPEC = {
+  name = "remuda butler",
+  verbs = {
+    forward = {
+      about = "Forward a Butler message to a member",
+      args = { { name = "WORDS", help = "Message ID, member, and optional note", multiple = true } },
+      next = "remuda butler forward --help",
+    },
+  },
+}
 command(80, "forward", "  remuda butler forward <message-id> <member> [note...]", function(args, caller)
+  local cli = remuda.cli
+  if type(cli) == "table" and type(cli.parse) == "function" then
+    for index = 2, #args do
+      if args[index] == "--" then break end
+      if args[index] == "--help" or args[index] == "-h" then
+        local help = cli.parse(FORWARD_CLI_SPEC, { "forward", args[index] })
+        return help.text
+      end
+    end
+    local report = cli.parse(FORWARD_CLI_SPEC, args)
+    if report.kind == "help" then return report.text end
+    if not report.ok then
+      if type(remuda.fail) == "function" then return remuda.fail(report.text, report.code) end
+      error(report.text, 0)
+    end
+    local words = report.values.WORDS
+    if type(words) == "string" then words = { words } end
+    if #words < 2 then
+      return remuda.fail("message ID and member are required.\nUsage: remuda butler forward <message-id> <member> [note...]\nNext: remuda butler forward --help", 2)
+    end
+    return cli_result(function()
+      return remuda._butler_forward(current_agent(caller) or OPERATOR, words[1], words[2],
+        #words >= 3 and words_after(words, 3) or nil)
+    end)
+  end
   if #args < 3 then return nil end
   return cli_result(function()
     return remuda._butler_forward(current_agent(caller) or OPERATOR, args[2], args[3],
