@@ -1026,15 +1026,18 @@ function matrix.cli(args, agent, stdin_body, file_body)
   elseif verb == "thread" and #options.event_id == 26 and options.event_id:match("^[0-9A-HJKMNP-TV-Z]+$") then
     -- A Butler mail id names its Matrix room and thread root.
     local mail = remuda._butler_mail
-    local message = mail and mail.find_message and mail.find_message(options.event_id)
-    local route = message and message.matrix
-    if not (route and route.room_id and (route.thread_root or route.event_id)) then
-      finish(reply, cancelled, completed, verb, options, { error = "no Matrix mail "
-        .. terminal_safe(options.event_id) .. " in this Butler's mail\nNext: remuda butler inbox" })
+    local room, root = nil, "the mail lookup is unavailable"
+    if mail and mail.matrix_thread_target then room, root = mail.matrix_thread_target(agent, options.event_id, agent == nil) end
+    if room and options.room and options.room ~= room then
+      root = "mail " .. terminal_safe(options.event_id) .. " belongs to room " .. terminal_safe(room) .. ", not "
+        .. terminal_safe(options.room) .. "\nNext: remuda butler matrix thread " .. terminal_safe(options.event_id)
+      room = nil
+    end
+    if not room then
+      finish(reply, cancelled, completed, verb, options, { error = root })
       return reply
     end
-    options.room = options.room or route.room_id
-    options.event_id = route.thread_root or route.event_id
+    options.room, options.event_id = room, root
   elseif verb == "thread" and not options.room then
     local relay = matrix.relay and matrix.relay.instance
     local route = relay and relay.route_for_event and relay:route_for_event(options.event_id)

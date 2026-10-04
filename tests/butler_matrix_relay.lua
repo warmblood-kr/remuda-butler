@@ -4133,14 +4133,14 @@ end
 -- Receive rules PR 2: loop guard, own post cap, untrusted per-room cap.
 -- Posts by the CLI go through remuda.http; notices may go through the relay
 -- client, so the HOME-line counts look at both.
-local function rx_cli(args)
+local function rx_cli(args, agent)
   local old_pending, old_guidance, captured = remuda.pending, matrix.configuration_guidance, nil
   remuda.pending = function()
     return { resolve = function(_, code, stdout, stderr) captured = { code = code, stdout = stdout, stderr = stderr } end }
   end
   matrix.configuration_guidance = function() return nil end
   local ok, err = pcall(function()
-    local returned = matrix.cli(args)
+    local returned = matrix.cli(args, agent)
     for _ = 1, 8 do if captured then break end tick_timers(1) end
     if not captured and type(returned) == "string" then captured = { code = 0, stdout = returned, stderr = "" } end
   end)
@@ -4938,26 +4938,34 @@ function ctx_tests.test_matrix_thread_takes_a_mail_id()
     local relay = rx_relay(path)
     relay_module.instance = relay
     local MAIL, old_mail = "01M43ECFKRY1782NGW0XNYWD6G", remuda._butler_mail
-    remuda._butler_mail = { find_message = function(id)
-      if id == MAIL then
-        return { matrix = { room_id = NEW, event_id = "$reply1", thread_root = "$root1" } }
-      end
+    -- Stands in for mail.matrix_thread_target: only member1 (or the operator) holds MAIL.
+    local seen_operator
+    remuda._butler_mail = { matrix_thread_target = function(caller, id, as_operator)
+      seen_operator = as_operator
+      if id == MAIL and (caller == "member1" or as_operator) then return NEW, "$root1" end
+      return nil, "message " .. id .. " was not delivered to you\nNext: remuda butler inbox"
     end }
     local urls = {}
     with_alias_http(path, function(spec)
       urls[#urls + 1] = tostring(spec.url or spec.path)
       return { status = 200, body = '{"chunk":[]}' }
     end, function()
-      rx_cli({ "matrix", "thread", MAIL })
+      rx_cli({ "matrix", "thread", MAIL }, "member1")
       local asked = table.concat(urls, "\n")
       assert(asked:find("/rooms/" .. encoded(NEW) .. "/relations/" .. encoded("$root1") .. "/", 1, true),
         "thread MAIL_ID must read the mail's room and thread root, asked:\n" .. asked)
+      rx_cli({ "matrix", "thread", MAIL })
+      assert(seen_operator == true and #urls == 2, "the operator reads a mail's thread")
       local before = #urls
-      local missing = rx_cli({ "matrix", "thread", "01M0000000000000000000000Z" })
-      assert(#urls == before and missing.code == 1
-        and missing.stderr:find("no Matrix mail 01M0000000000000000000000Z", 1, true)
-        and missing.stderr:find("\nNext: remuda butler inbox", 1, true),
-        "an unknown mail id must fail with a Next line and no request, got: " .. tostring(missing.stderr))
+      local refused = rx_cli({ "matrix", "thread", MAIL }, "member2")
+      assert(#urls == before and refused.code == 1 and seen_operator == false
+        and refused.stderr:find("not delivered to you", 1, true)
+        and refused.stderr:find("\nNext: remuda butler inbox", 1, true),
+        "a member the mail was not delivered to must be refused with no request, got: " .. tostring(refused.stderr))
+      local other = rx_cli({ "matrix", "--room", HOME, "thread", MAIL }, "member1")
+      assert(#urls == before and other.code == 1 and other.stderr:find("belongs to room " .. NEW, 1, true)
+        and other.stderr:find("\nNext: remuda butler matrix thread", 1, true),
+        "a --room that differs from the mail's room must be refused, got: " .. tostring(other.stderr))
     end)
     remuda._butler_mail = old_mail
     relay:stop()
