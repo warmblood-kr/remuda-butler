@@ -704,3 +704,67 @@ The install script polls status every half second until the reported budget
 expires, continues while status is 75, and stops on ready or failure. Bare
 `remuda exec butler` remains asynchronous; use `remuda butler status` to
 inspect readiness.
+
+## Guardrail grants (slice 3 design rules)
+
+These rules are final for slice 3 of the guardrails (#339). They describe what
+the code must do; nothing here is shipped until its PR lands. All of it sits
+behind one switch that is off by default, and with it off no grant exists and
+no guard behavior changes.
+
+### Binding owner conditions
+
+- Scope is slice 3 only. There is no learning loop (3b), no slice 4 and no
+  slice 5.
+- The owner can freeze and revoke from Matrix. Freeze and revoke only narrow
+  power; lifting a freeze stays owner-approved.
+- Any push that touches CI or workflow files is T3 and always asks. A standing
+  grant never covers it.
+- Every audit line carries `grant_id`. The audit log has a daily hash digest
+  posted to the HOME room, a stated retention period, and a `guard stats`
+  baseline snapshot saved before any grant code ships.
+- The approval post offers three separate reactions: approve once, approve as
+  a standing grant, and deny. They are never one button.
+- The switch is off by default. The owner flips it, after one week of saved
+  baseline stats.
+
+### Who may grant
+
+Only the owner grants a grant that widens power: `writable:DIR`, `git:common`
+and `net:DOMAIN`. Butler root, leaders and members request; none of them
+decides. A first use of a new scope is T2: the owner is asked once, and the
+answer becomes a standing grant. A leader's grant never exceeds the leader's own
+profile. `device`, open `net` and `full` stay T3.
+
+### Grant lifetime
+
+A grant's TTL is at most 24 hours; the default is 1 hour. The cap applies to
+every grant however it was created, so no rule or example may exceed it.
+
+### Scope patterns
+
+- A scope is a class plus a narrow pattern: a repo, a domain or a directory.
+- A bare `*` is never a scope.
+- A glob may only be a whole path segment `*` below a fixed absolute prefix
+  (`~/projects/rx/*`). Partial-segment globs (`rx-*`, `t1*`) are refused, and
+  so is `*` as the first segment. A directory scope covers its subtree.
+- A directory scope is checked on the `realpath` of the target: a symlink that
+  leaves the scope is outside it.
+- The pattern is resolved when the grant is made and stored as the resolved
+  value. Later changes to the filesystem do not widen it.
+
+### Agent text in approval posts
+
+Text an agent supplied (a `why:` line, an intent name, a task description) may
+appear in an approval post only as a quoted line labelled `agent-supplied`,
+after Butler's own lines, with control and bidirectional characters escaped.
+It is never styled or placed as Butler text, and it never selects the scope,
+the TTL or the reactions. Butler derives those from the request itself.
+
+### Codex grants
+
+Codex grants are baked into the launch flags. When a codex grant expires or is
+revoked, Butler parks the session or relaunches it with the reduced profile,
+and records the profile it applied on the session row. A running codex
+sandbox is never edited in place. Claude grants are checked on every hook
+call, so expiry and revocation apply on the next tool call.
