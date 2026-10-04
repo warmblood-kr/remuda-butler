@@ -31,3 +31,12 @@ assert(decision == "EMPTY", "first-task delivery must agree with the policy, got
 remuda.capture_styled = nil
 assert(remuda._butler_composer_decision("claude", "lead", "❯ real draft\n────") == "NON-EMPTY")
 print("ok - composer decision ignores ghost text")
+
+-- A multi-line draft with an empty first line: the cursor row alone reads EMPTY, but the text
+-- below is the human's. Only upgrade when the raw text IS the dim ghost.
+remuda.capture_styled = function()
+  return { cursor = { row = 1 }, rows = { { { text = "❯ " } }, { { text = "  second line" } } } }
+end
+local draft = remuda._butler_composer_decision("claude", "lead", "❯ \n  second line\n────")
+assert(draft == "NON-EMPTY", "a draft below an empty first line must stay NON-EMPTY, got " .. tostring(draft))
+print("ok - multi-line draft is not upgraded")

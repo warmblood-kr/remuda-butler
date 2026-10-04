@@ -223,12 +223,16 @@ function remuda._butler_composer_decision(kind, session, screen)
     local ok, styled = pcall(remuda.capture_styled, session)
     local row = ok and styled and styled.cursor and styled.rows and styled.rows[styled.cursor.row]
     if row then
-      local parts = {}
+      local parts, dim = {}, {}
       for _, span in ipairs(row) do
-        if not span.dim then parts[#parts + 1] = span.text end
+        local list = span.dim and dim or parts
+        list[#list + 1] = span.text
       end
       local decision, text = remuda._butler_prompt_is_empty(kind, table.concat(parts))
-      if decision == "EMPTY" then return decision, text end
+      -- The raw text must be exactly the dim ghost: continuation rows below an empty first
+      -- line are a human's draft.
+      local ghost = table.concat(dim):gsub("\194\160", " "):match("^%s*(.-)%s*$")
+      if decision == "EMPTY" and ghost == raw_text then return decision, text end
     end
   end
   return raw, raw_text
