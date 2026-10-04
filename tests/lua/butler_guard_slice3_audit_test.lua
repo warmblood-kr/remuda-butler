@@ -157,15 +157,16 @@ end)
 T.test("turning a switch off is audited before it changes, and refused when the audit cannot be written", function()
   start_butler()
   T.eval("remuda._t_dir('g3-offfirst'); remuda._t_guard({'guard','on'}); remuda._t_guard({'guard','deny','on'})")
+  -- a read-only log: opening it for append fails on every platform (a directory would not on Linux)
   T.eval([[local gp = remuda.butler.guard_policy
-    os.rename(gp.log_path(), gp.log_path() .. '.keep'); remuda.mkdir(gp.log_path())]])
+    remuda.process.run({ argv = { 'chmod', '400', gp.log_path() } })]])
   local off = T.eval("return select(2, pcall(remuda._t_guard, {'guard','off'}))")
   local deny_off = T.eval("return select(2, pcall(remuda._t_guard, {'guard','deny','off'}))")
   local status = T.eval("return remuda._t_guard({'guard','status'})")
   T.expect(has(status, "guard: on") and has(status, "deny: on"), "a switch turned off with no audit line: " .. status)
   T.expect(not has(off, "guard is now") and not has(deny_off, "guard deny is now"), "the switch must be refused: " .. off .. deny_off)
   T.eval([[local gp = remuda.butler.guard_policy
-    os.remove(gp.log_path()); os.rename(gp.log_path() .. '.keep', gp.log_path())]])
+    remuda.process.run({ argv = { 'chmod', '600', gp.log_path() } })]])
   T.eval("remuda._t_guard({'guard','off'}, {env={REMUDA_BUTLER_AGENT_ALIAS='lead-1'}})")
   local lines = T.eval("return remuda._t_lines()")
   local last; for l in lines:gmatch("[^\n]+") do last = l end
