@@ -39,8 +39,15 @@ config.rooms = { ["!lounge:example.org"] = "joined" }
 rendered = output()
 assert(rendered:find("Approval room: all -> HOME (joined room is not marked ALL-BUTLERS)", 1, true),
   "doctor should not claim the lounge is unjoined")
-assert(rendered:find("Next: remuda butler matrix mark-all '!lounge:example.org'; then remuda exec butler", 1, true),
+assert(rendered:find("remuda butler matrix mark-all '!lounge:example.org'; then remuda exec butler", 1, true),
   "doctor should name the mark-all fix and the reload")
+assert(rendered:find("check that the room's members are only you and Butlers", 1, true),
+  "the Next line warns that ALL-BUTLERS receives approvals in full")
+config.rooms = { ["!x'y\n:example.org"] = "joined" }
+rendered = output()
+assert(rendered:find("mark-all '!x'\\''y :example.org'", 1, true) and not rendered:find("\n:example", 1, true),
+  "the printed room id is terminal-safe and shell-quoted")
+config.rooms = { ["!lounge:example.org"] = "joined" }
 config.rooms["!other:example.org"] = "joined"
 assert(output():find("Next: remuda butler matrix rooms; then remuda butler matrix mark-all ROOM", 1, true),
   "several joined rooms point to rooms first")

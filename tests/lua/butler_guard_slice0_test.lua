@@ -54,6 +54,7 @@ T.test("classifier covers every class", function()
     { "Edit", [[{file_path='/Users/x/proj/.codex/hooks.json'}]], "weaken" },
     { "Bash", [[{command='remuda butler approve-text on'}]], "identity" },
     { "Bash", [[{command='remuda butler matrix join !r:x'}]], "identity" },
+    { "Bash", [[{command='remuda butler matrix mark-all !r:s'}]], "identity" },
     { "mcp__remuda__run_script", [[{code='return 1'}]], "script" },
     { "Bash", [[{command='ls -la && echo done'}]], "other" },
     { "Read", [[{file_path='/etc/hosts'}]], "other" },

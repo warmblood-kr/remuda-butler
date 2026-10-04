@@ -422,7 +422,8 @@ the real invite event to `invite_state` (Synapse does). `leave` removes a joined
 room by ID or alias, while HOME and ALL-BUTLERS cannot be left or removed.
 `mark-all ROOM` (operator only) marks an already-joined room, for example one entered by
 owner invite, as ALL-BUTLERS by turning its `room=` line into `all_room=`; it refuses when an
-ALL-BUTLERS room is already set. Config changes, including this one, take effect after a
+ALL-BUTLERS room is already set. Before running it, check that the room's members are only you and Butlers: ALL-BUTLERS
+receives approval requests posted in full (`doctor` prints this in its `Next:` line). Config changes, including this one, take effect after a
 Butler reload (`remuda exec butler`). The interactive setup wizard writes `rooms=open` without asking; flag-based setup
 defaults to allowlist unless given `--rooms open`. `send -` reads the text from
 stdin (up to 64 KiB, one trailing newline dropped); `send -- -` sends a literal `-`.

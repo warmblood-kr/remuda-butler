@@ -190,7 +190,8 @@ local function segment_class(w, text, ctx)
         if verb == "guard" and w[i + 2] == "approvals" and (w[i + 3] == "on" or w[i + 3] == "off") then return "weaken" end
         if verb == "guard" and (w[i + 2] == "on" or w[i + 2] == "off") then return "weaken" end
         if IDENTITY[verb or ""] then return "identity" end
-        if verb == "matrix" and (w[i + 2] == "join" or w[i + 2] == "leave" or w[i + 2] == "invite") then
+        if verb == "matrix" and (w[i + 2] == "join" or w[i + 2] == "leave" or w[i + 2] == "invite"
+            or w[i + 2] == "mark-all") then
           return "identity"
         end
       end

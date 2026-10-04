@@ -32,6 +32,11 @@ local function probe_command(argv)
   return { installed = true, probe_error = true }
 end
 
+-- Same rule as matrix_cli's terminal_safe; that module is not loaded here.
+local function safe(text)
+  return (tostring(text):gsub("[%c]", " "):gsub("\194[\128-\159]", " "))
+end
+
 local function typed_line_switches()
   local matrix = remuda.butler and remuda.butler.matrix
   local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths or {}
@@ -55,7 +60,8 @@ local function typed_line_switches()
     end
     if #joined == 1 then
       approval_result = "HOME (joined room is not marked ALL-BUTLERS)"
-      approval_next = "Next: remuda butler matrix mark-all '" .. joined[1] .. "'; then remuda exec butler"
+      approval_next = "Next: check that the room's members are only you and Butlers (ALL-BUTLERS receives approval requests in full), then run: remuda butler matrix mark-all '"
+        .. safe(joined[1]):gsub("'", "'\\''") .. "'; then remuda exec butler"
     elseif #joined > 1 then
       approval_result = "HOME (no joined room is marked ALL-BUTLERS)"
       approval_next = "Next: remuda butler matrix rooms; then remuda butler matrix mark-all ROOM"
