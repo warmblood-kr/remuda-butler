@@ -95,11 +95,12 @@ end
 local function protected_segment(path)
   local segs = {}
   for s in path:gmatch("[^/]+") do segs[#segs + 1] = s end
-  -- .git then hooks|config|config.worktree at any later depth (.git/modules/<s>/hooks, linked worktrees)
+  -- .git (or a bare repo dir ending in .git, x.git) then hooks|config|config.worktree at any later depth
+  -- (.git/modules/<s>/hooks, linked worktrees)
   local git_at
   for i, s in ipairs(segs) do
     local l = s:lower()
-    if l == ".git" then git_at = git_at or i end
+    if l:sub(-4) == ".git" then git_at = git_at or i end
     if git_at and i > git_at and (l == "hooks" or l == "config" or l == "config.worktree") then return true end
   end
   for _, seq in ipairs(PROTECTED_SEGMENTS) do

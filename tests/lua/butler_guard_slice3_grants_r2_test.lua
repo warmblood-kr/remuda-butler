@@ -132,9 +132,11 @@ T.test("R2 MUST 2: a target under a protected place gets no grant even under a b
     .. ", ceiling = 'T2', holder = 'ss-a', event = '$ev1', ttl = 3600 }))"), "g001", "a broad scope under the home is allowed")
   local function w(p) return T.eval(("return tostring(remuda.butler.guard_grants.match('Write', { file_path = %q }, '/'))"):format(p)) end
   T.eq(w(home .. "/projects/x/src/a.lua"), "g001", "control: an ordinary file is covered")
+  T.eq(w(home .. "/projects/srv/x.gitignore/hooks/a"), "g001", "control: only a segment ending in .git is a git dir")
   local data = T.eval("return remuda.butler.guard_grants.canonical(remuda.butler.guard_policy.dir())")
   for _, bad in ipairs({ home .. "/projects/x/.git/hooks/pre-commit", home .. "/projects/x/.git/config", home .. "/projects/x/.claude/settings.json",
-    home .. "/projects/x/y/.claude/z", home .. "/projects/.ssh/id_rsa", home .. "/projects/x/.CLAUDE/z" }) do
+    home .. "/projects/x/y/.claude/z", home .. "/projects/.ssh/id_rsa", home .. "/projects/x/.CLAUDE/z",
+    home .. "/projects/srv/x.git/hooks/post-receive", home .. "/projects/srv/X.GIT/config" }) do
     T.eq(w(bad), "nil", "no grant: " .. bad)
   end
   -- places that are protected by location: the data dir and ~/.config/remuda, under a scope that reaches them
