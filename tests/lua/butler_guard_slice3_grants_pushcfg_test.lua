@@ -97,3 +97,23 @@ T.test("SHOULD a: scripts, Makefile and justfile called by CI are CI paths", fun
   T.eq(got, "true,true,true,true,true,true,true,false", "scripts/, Makefile and justfile are T3 (a scripts/ segment at any depth)", "ok - ci scripts")
 end)
 
+
+T.test("LOW 2: only exit 1 means a config key is unset; a git config probe that fails or times out is no grant", function()
+  local work = git_fixture("g3p3-probefail")
+  T.eq(grant_for("git push", work), "g001", "baseline covered")
+  for _, key in ipairs({ "remote.pushDefault", "pushRemote", "--get-regexp", "push.default", ".remote", ".merge", "remote.origin.push" }) do
+    for _, fail in ipairs({ "code = 128", "code = 0, timed_out = true" }) do
+      local got = T.eval(([[local real, g = remuda.process.run, remuda.butler.guard_grants
+        remuda.process.run = function(o)
+          local argv = table.concat(o.argv, ' ')
+          if argv:find('config', 1, true) and argv:find(%q, 1, true) then return { %s, stdout = '' } end
+          return real(o)
+        end
+        local ok, id = pcall(g.match, 'Bash', { command = 'git push' }, %q)
+        remuda.process.run = real
+        return tostring(id)]]):format(key, fail, work))
+      T.eq(got, "nil", "no grant when the probe for " .. key .. " fails (" .. fail .. ")")
+    end
+  end
+  T.expect(true, "", "ok - probe failures")
+end)

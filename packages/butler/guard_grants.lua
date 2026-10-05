@@ -323,10 +323,10 @@ local function host_of(url)
   return parse("net", host .. (port and (":" .. port) or ""))
 end
 
--- Trimmed stdout of `git -C cwd ...`, nil when git fails (an unset config key included).
+-- Trimmed stdout and exit code of `git -C cwd ...`; nil when git could not run or timed out.
 local function git(cwd, ...)
   local ok, r = pcall(remuda.process.run, { argv = { "git", "-C", cwd, ... }, timeout = 5 })
-  if ok and type(r) == "table" and r.code == 0 and not r.timed_out then return ((r.stdout or ""):gsub("%s+$", "")) end
+  if ok and type(r) == "table" and type(r.code) == "number" and not r.timed_out then return ((r.stdout or ""):gsub("%s+$", "")), r.code end
 end
 
 -- A push is covered only when the command is exactly `git push [remote [current-branch]]`: no shell syntax, no
@@ -341,21 +341,32 @@ local function plain_push(command, cwd)
   for s in command:gmatch("%S+") do w[#w + 1] = s end
   if #w < 2 or #w > 4 or w[1] ~= "git" or w[2] ~= "push" then return nil end
   for i = 3, #w do if w[i]:find("^%-") then return nil end end
-  local branch = git(cwd, "symbolic-ref", "--short", "-q", "HEAD")
-  if not branch or branch == "" then return nil end
+  local branch, bcode = git(cwd, "symbolic-ref", "--short", "-q", "HEAD")
+  if bcode ~= 0 or branch == "" then return nil end
+  -- A config probe: exit 0 = set (value), exit 1 = unset (nil); any other result (failure, timeout) is no grant.
+  local failed = false
+  local function cfg(...)
+    local out, code = git(cwd, "config", ...)
+    if code ~= 0 and code ~= 1 then failed = true end
+    if code == 0 then return out end
+  end
   -- git pushes to remote.pushDefault / branch.<b>.pushRemote when set, not to the upstream the diff is taken against
-  if git(cwd, "config", "--get", "remote.pushDefault") or git(cwd, "config", "--get", "branch." .. branch .. ".pushRemote") then return nil end
+  if cfg("--get", "remote.pushDefault") or cfg("--get", "branch." .. branch .. ".pushRemote") then return nil end
   -- config that redirects or rewrites a push (mirror, pushurl, insteadOf, submodule recursion) is no grant
-  if git(cwd, "config", "--get-regexp", "^(remote\\..*\\.(mirror|pushurl)|url\\..*\\.(insteadof|pushinsteadof)|push\\.recursesubmodules)$") then return nil end
-  local mode = git(cwd, "config", "--get", "push.default")
+  if cfg("--get-regexp", "^(remote\\..*\\.(mirror|pushurl)|url\\..*\\.(insteadof|pushinsteadof)|push\\.recursesubmodules)$") then return nil end
+  local mode = cfg("--get", "push.default")
   if mode == "matching" or mode == "nothing" then return nil end
-  local up_remote, up_merge = git(cwd, "config", "--get", "branch." .. branch .. ".remote"), git(cwd, "config", "--get", "branch." .. branch .. ".merge")
+  local up_remote, up_merge = cfg("--get", "branch." .. branch .. ".remote"), cfg("--get", "branch." .. branch .. ".merge")
+  if failed then return nil end
   local remote = w[3] or up_remote
   if #w < 4 and not (up_remote == remote and up_merge == "refs/heads/" .. branch) then return nil end
   if #w == 4 and w[4] ~= branch then return nil end
-  for name in (git(cwd, "remote") or ""):gmatch("[^\n]+") do
+  local remotes, rcode = git(cwd, "remote")
+  if rcode ~= 0 then return nil end
+  for name in remotes:gmatch("[^\n]+") do
     if name == remote then
-      if git(cwd, "config", "--get-all", "remote." .. name .. ".push") then return nil end
+      local pushes = cfg("--get-all", "remote." .. name .. ".push")
+      if pushes or failed then return nil end
       return "refs/remotes/" .. remote .. "/" .. branch
     end
   end
