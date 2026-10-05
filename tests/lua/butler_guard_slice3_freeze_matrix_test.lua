@@ -94,9 +94,13 @@ local function answer(n, verdict, who)
     :format(n, verdict, who and string.format("%q", who) or "nil"))
 end
 local function grants() return tonumber(T.eval("return remuda._t_grants()")) end
-local function oc(line, who)
-  return T.eval(("return tostring(remuda.butler.guard_approval.owner_command(%q, %s))"):format(line, string.format("%q", who or "@owner:x")))
+local function oc(line, who, event)
+  return T.eval(("return tostring(remuda.butler.guard_approval.owner_command(%q, %q, %q))"):format(line, who or "@owner:x", event or "$line"))
 end
+local function at(offset) T.eval(("remuda.butler.guard_grants.now = function() return %d end"):format(1790000000 + offset)) end
+-- Make the audit log unwritable (opening it for append fails) or writable again.
+local function audit_mode(mode) T.eval(("remuda.process.run({ argv = { 'chmod', '%s', remuda.butler.guard_policy.log_path() } })"):format(mode)) end
+local function logged_errors() return T.eval("return table.concat(remuda._t_logged or {}, '|')") end
 local function frozen() return T.eval("return tostring(remuda.butler.guard_grants.frozen())") end
 local function lines() return T.eval("return remuda._t_lines()") end
 local function reset_holds() T.eval("local g = remuda.butler.guard_grants; g._revoked, g._frozen = {}, false") end
@@ -152,7 +156,7 @@ T.test("unfreeze needs the owner's answer on a Butler post; the terminal and a p
   local before = tonumber(T.eval("return remuda._t_count()"))
   T.eq(oc("guard unfreeze"), "To lift the freeze, react ✅ on the post I just made (or reply yes).", "asks")
   T.eq(tonumber(T.eval("return remuda._t_count()")), before + 1, "one approval post")
-  T.eq(oc("guard unfreeze"), "To lift the freeze, react ✅ on the post I just made (or reply yes).", "asking again")
+  T.expect(has(oc("guard unfreeze"), "already open"), "asking again says the request is already open")
   T.eq(tonumber(T.eval("return remuda._t_count()")), before + 1, "reuses the open post")
   T.eq(frozen(), "true", "still frozen: asking lifts nothing")
   local n = before + 1
@@ -175,4 +179,113 @@ T.test("unfreeze post expiry leaves the freeze", function()
   T.eval("for _, rec in pairs(remuda._t_state.approvals) do rec.expires_at = 0 end; remuda.butler.approval.sweep()")
   T.eq(frozen(), "true", "expired: still frozen")
   T.expect(has(note(), "stay frozen"), "owner told: " .. tostring(note()), "ok - expiry")
+end)
+
+T.test("SHOULD a: every owner line that starts with a guard verb is answered, extra tokens get usage", function()
+  on("v-usage"); reset_holds()
+  fetch("https://a.test/"); answer(1, "grant")
+  T.eq(oc("guard revoke g001 now"), "Usage: guard revoke gNNN (the id from `remuda butler guard grants`).", "revoke + token")
+  T.eq(oc("guard revoke"), "Usage: guard revoke gNNN (the id from `remuda butler guard grants`).", "revoke alone")
+  T.eq(oc("guard freeze please"), "Usage: guard freeze (no arguments).", "freeze + token")
+  T.eq(oc("guard unfreeze now"), "Usage: guard unfreeze (no arguments).", "unfreeze + token")
+  T.eq(oc("guard freeze-now"), "Usage: guard freeze (no arguments).", "glued text")
+  T.eq(frozen(), "false", "none of them acted")
+  T.eq(grants(), 1, "g001 stands", "ok - usage")
+end)
+
+T.test("SHOULD b: the audit summary of every owner line names the sender and the event", function()
+  on("v-by"); reset_holds()
+  fetch("https://a.test/"); answer(1, "grant")
+  oc("guard revoke g001 now", "@owner:x", "$ev-usage")
+  oc("guard revoke g001", "@owner:x", "$ev-revoke")
+  oc("guard freeze", "@owner:x", "$ev-freeze")
+  for _, ev in ipairs({ "$ev-usage", "$ev-revoke", "$ev-freeze" }) do
+    T.expect(has(lines(), "@owner:x, event " .. ev), ev .. " in the audit: " .. lines())
+  end
+  T.expect(has(lines(), '"event":"owner_line_refused"'), "usage lines are audited too", "ok - by")
+end)
+
+T.test("MUST 1: unfreeze writes its audit line first and stays frozen when it cannot; freeze and revoke log the failure", function()
+  on("v-audit"); reset_holds()
+  T.eval("remuda._t_logged = {}; remuda.log = function(level, msg) remuda._t_logged[#remuda._t_logged + 1] = level .. ':' .. msg end")
+  fetch("https://a.test/"); answer(1, "grant")
+  oc("guard freeze"); oc("guard unfreeze")
+  local n = tonumber(T.eval("return remuda._t_count()"))
+  audit_mode("400")
+  answer(n, "approve")
+  T.eq(frozen(), "true", "no audit line, no lift")
+  T.expect(has(note(), "audit line could not be written") and has(note(), "stay frozen"), "owner told: " .. tostring(note()))
+  audit_mode("600")
+  -- narrowing still acts with an unwritable audit, and says so in the log
+  T.eval("remuda.butler.guard_grants._frozen = false; os.remove(remuda.butler.guard_policy.dir() .. '/guard-grants-frozen')")
+  audit_mode("400")
+  T.expect(has(oc("guard freeze"), "Grants are frozen"), "freeze acts")
+  T.eq(frozen(), "true", "frozen")
+  T.expect(has(logged_errors(), "grants_frozen could not be written"), "logged: " .. logged_errors())
+  T.eq(oc("guard revoke g001"), "Revoked g001. It stops matching on the next call.", "revoke acts too")
+  T.expect(has(logged_errors(), "grant_revoked could not be written"), "logged: " .. logged_errors())
+  audit_mode("600")
+  T.expect(true, "", "ok - audit first")
+end)
+
+T.test("MUST 2: a stale unfreeze post cannot beat a newer freeze", function()
+  on("v-stale"); reset_holds()
+  fetch("https://a.test/"); answer(1, "grant")
+  oc("guard freeze"); oc("guard unfreeze")
+  local n = tonumber(T.eval("return remuda._t_count()"))
+  T.eq(oc("guard freeze"), "Grants are already frozen.", "a newer freeze while the ask is open")
+  answer(n, "approve")
+  T.eq(frozen(), "true", "the late check-mark lifts nothing")
+  T.eq(grants(), 0, "no grant matches")
+  -- a request still posting (not yet in the store) is caught by the freeze generation
+  oc("guard unfreeze")
+  local m = tonumber(T.eval("return remuda._t_count()"))
+  T.eval("local g = remuda.butler.guard_approval; g._freeze_gen = g._freeze_gen + 1")
+  answer(m, "approve")
+  T.eq(frozen(), "true", "an older generation lifts nothing")
+  T.expect(has(note(), "newer freeze"), "owner told: " .. tostring(note()), "ok - stale unfreeze")
+end)
+
+T.test("SHOULD e: the unfreeze reply says what the request did", function()
+  on("v-reply"); reset_holds()
+  oc("guard freeze")
+  T.expect(has(oc("guard unfreeze"), "post I just made"), "a new post")
+  T.expect(has(oc("guard unfreeze"), "already open"), "the open one")
+  T.eval("remuda.butler.approval.expire_open('guard_unfreeze')")
+  -- the post fails: the reply says so
+  T.eval([[remuda._t_state = { approvals = remuda.json.object({}) }
+    remuda.butler.approval.attach(remuda._t_state, function() return true end, function(text, relation, cb)
+      if cb then cb({ error = 'boom' }) end
+      return {}
+    end)]])
+  local out = oc("guard unfreeze")
+  T.expect(has(out, "Could not ask to lift the freeze") and has(out, "boom") and has(out, "stay frozen"), "failure told: " .. out, "ok - reply")
+end)
+
+T.test("SHOULD d: a grant that expires during a freeze is still announced", function()
+  on("v-expfreeze"); reset_holds()
+  at(0)
+  fetch("https://a.test/"); answer(1, "grant")
+  local function sweep(offset) at(offset); T.eval("remuda.butler.approval.sweep()") end
+  sweep(10)
+  oc("guard freeze")
+  sweep(20)
+  sweep(3601)
+  sweep(3670)
+  T.expect(has(tostring(post(2)), "Standing grants expired: g001 net a.test"), "notice: " .. tostring(post(2)), "ok - expiry while frozen")
+  T.eval("remuda.butler.guard_grants.now = nil")
+end)
+
+-- Last: this reloads guard_approval alone, which leaves it without the private handoff (grant_controls nil).
+T.test("MUST 3: freeze and revoke work without the private handoff; unfreeze says it is unavailable", function()
+  on("v-nohandoff"); reset_holds()
+  fetch("https://a.test/"); fetch("https://b.test/")
+  answer(1, "grant"); answer(2, "grant")
+  T.eval("remuda.exec('butler/guard_approval')")
+  T.eq(oc("guard revoke g001"), "Revoked g001. It stops matching on the next call.", "revoke")
+  T.eq(grants(), 1, "g002 left")
+  T.expect(has(oc("guard freeze"), "Grants are frozen"), "freeze")
+  T.eq(frozen(), "true", "marker written")
+  T.eq(grants(), 0, "nothing matches")
+  T.expect(has(oc("guard unfreeze"), "not available"), "unfreeze stays private", "ok - no handoff")
 end)

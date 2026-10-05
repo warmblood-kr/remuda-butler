@@ -8264,6 +8264,24 @@ local function test_guard_unfreeze_needs_the_owner_answer_on_butler_post()
   end)
 end
 
+local function test_guard_verb_lines_with_extra_text_are_answered_and_audited_with_the_event()
+  approval_env(OWNER, function(env)
+    with_guard(env, function(replies)
+      assert(remuda.butler.guard_policy.set_grants(true), "grants switch")
+      local g = remuda.butler.guard_grants
+      room_events(env, {
+        guard_line("$extra1", OWNER, "guard revoke g001 now"), guard_line("$extra2", OWNER, "guard freeze please"),
+      })
+      assert(#home_posts(env, "Usage: guard revoke gNNN") == 1 and #home_posts(env, "Usage: guard freeze") == 1,
+        "each line is answered, not handed on as mail")
+      assert(not g.frozen(), "usage lines change nothing")
+      room_events(env, { guard_line("$freeze-ev", OWNER, "guard freeze") })
+      local lines = io.open(remuda.butler.guard_policy.log_path()):read("a")
+      assert(g.frozen() and lines:find(OWNER .. ", event $freeze-ev", 1, true), "the audit names sender and event: " .. lines)
+    end)
+  end)
+end
+
 local function test_guard_cycle_reaction_needs_a_guard_request_and_the_switch()
   approval_env(nil, function(env)
     with_guard(env, function(replies)
@@ -8292,6 +8310,8 @@ end
     { "test_guard_verbs_only_from_the_verified_owner", test_guard_verbs_only_from_the_verified_owner },
     { "test_guard_revoke_from_the_owner", test_guard_revoke_from_the_owner },
     { "test_guard_unfreeze_needs_the_owner_answer_on_butler_post", test_guard_unfreeze_needs_the_owner_answer_on_butler_post },
+    { "test_guard_verb_lines_with_extra_text_are_answered_and_audited_with_the_event",
+      test_guard_verb_lines_with_extra_text_are_answered_and_audited_with_the_event },
   }
 end)()) do
   local ok, err = pcall(case[2])

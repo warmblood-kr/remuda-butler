@@ -278,6 +278,15 @@ function approval.reapply_approved()
   return count
 end
 
+-- End every open request of a kind now (their expire handler runs): a newer decision replaces the old asks.
+function approval.expire_open(kind)
+  if not attached then return end
+  for _, rec in pairs(attached.state.approvals or {}) do
+    if type(rec) == "table" and rec.kind == kind and rec.status == "open" then rec.expires_at = 0 end
+  end
+  approval.sweep()
+end
+
 function approval.request(request, done)
   done = type(done) == "function" and done or function() end
   local completed = false

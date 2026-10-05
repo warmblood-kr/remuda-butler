@@ -1654,8 +1654,13 @@ function relay.new(options)
         or not content.body:lower():match("^%s*guard%s") then return nil end
     if not (approve_text.owner_event_allowed(ev, { room_id = cfg.home_room, created_ms = relay_started_ms }, cfg,
         live_sync, room_id) and member_kind(ev.sender, cfg) == "HUMAN") then return nil end
-    local ok, reply = pcall(guards.owner_command, content.body, ev.sender)
+    local ok, reply = pcall(guards.owner_command, content.body, ev.sender, ev.event_id)
     if ok and type(reply) == "string" then return reply end
+    -- a guard verb is never handed on as mail, even when its handler failed
+    local verb = content.body:lower():match("^%s*guard%s+(%a+)")
+    if not ok and (verb == "freeze" or verb == "unfreeze" or verb == "revoke") then
+      return "That guard command failed and was not run. Check `remuda butler guard grants`."
+    end
   end
 
   local function accept_events(events, cursor, room_id, live_sync)

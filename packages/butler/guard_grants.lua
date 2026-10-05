@@ -226,6 +226,10 @@ function M.active()
   return live()
 end
 
+-- The grants the store holds (valid, not expired or revoked), frozen or not: what the expiry notice tracks, so a
+-- grant that runs out during a freeze is still announced. It never decides a call; active() does.
+function M.held() return live() end
+
 -- Run fn holding the store's advisory lock (core's remuda.fs.lock); refuse if it stays held.
 -- ponytail: on a core without fs.lock this runs unlocked, as Butler's single-instance guard does.
 local function locked(path, fn)
@@ -329,11 +333,16 @@ function controls.unfreeze()
   local path = frozen_file()
   if path then
     local ok, err = os.remove(path)
-    if not ok and io.open(path, "r") then return nil, tostring(err) end -- still there: stays frozen
+    local f = not ok and io.open(path, "r")
+    if f then f:close(); return nil, tostring(err) end -- still there: stays frozen
   end
   M._frozen = false
   return "lifted"
 end
+
+-- Narrowing is public, so an emergency freeze or revoke never depends on the one-time hand-over below (a refused
+-- register, or guard_approval reloaded alone). Add and unfreeze, which widen, stay private.
+M.freeze, M.revoke = controls.freeze, controls.revoke
 
 -- The one-time hand-over of add and the owner controls to the owner-gated handler: handler(add, controls) runs
 -- once per load of this module, later calls (and non-functions) get nil. Cooperative like the text deny in
