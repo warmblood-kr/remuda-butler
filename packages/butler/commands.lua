@@ -517,6 +517,12 @@ command(70, "reply", "  remuda butler reply <message-id> <message...> | - | --fi
       if type(remuda.fail) == "function" then return remuda.fail(report.text, report.code) end
       error(report.text, 0)
     end
+    local message = 'reply needs the message ID before any options.\n'
+      .. 'Usage: remuda butler reply <message-id> <message...> | <message-id> --file PATH\n'
+      .. 'Example: remuda butler reply ID --file "$PWD/note.txt"\n'
+      .. 'Next: remuda butler reply --help'
+    if type(remuda.fail) == "function" then return remuda.fail(message, 2) end
+    error(message, 0)
   end
   if #args < 3 then return nil end
   if args[3] == "--attach" then
@@ -561,6 +567,12 @@ command(80, "forward", "  remuda butler forward <message-id> <member> [note...]"
       if type(remuda.fail) == "function" then return remuda.fail(report.text, report.code) end
       error(report.text, 0)
     end
+    local message = 'forward needs the message ID first.\n'
+      .. 'Usage: remuda butler forward <message-id> <member> [note...]\n'
+      .. 'Example: remuda butler forward ID worker\n'
+      .. 'Next: remuda butler forward --help'
+    if type(remuda.fail) == "function" then return remuda.fail(message, 2) end
+    error(message, 0)
   end
   if #args < 3 then return nil end
   return cli_result(function()

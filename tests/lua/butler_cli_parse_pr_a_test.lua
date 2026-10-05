@@ -96,6 +96,16 @@ T.test("reply ID --file note.txt uses file text as body", function()
   T.eq(out, "stub:reply|reply|agent-test|ID|file-body", "reply ID --file note.txt")
 end)
 
+T.test("reply and forward reject valid first-position CLI parses", function()
+  local out = invoke_error("reply", { "reply", "--file", path(), "ID" })
+  local forward = invoke_error("forward", { "forward", "--", "ID", "worker" })
+  local reply_ok = out:find("Usage: remuda butler reply", 1, true) ~= nil and out:find("Next:", 1, true) ~= nil
+    and out:find("false|", 1, true) == 1 and out:find("|0$") ~= nil
+  local forward_ok = forward:find("Usage: remuda butler forward", 1, true) ~= nil and forward:find("Next:", 1, true) ~= nil
+    and forward:find("false|", 1, true) == 1 and forward:find("|0$") ~= nil
+  T.expect(reply_ok and forward_ok, "reply result: " .. out .. "\nforward result: " .. forward)
+end)
+
 T.test("reply help in first position returns usage", function()
   local out = invoke("reply", { "reply", "--help" })
   T.expect(out:find("Usage: remuda butler reply", 1, true) ~= nil, "reply --help first position")
