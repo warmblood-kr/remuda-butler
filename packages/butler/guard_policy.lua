@@ -326,10 +326,11 @@ local function segment_class(w, text, ctx)
         break
       end
     end
-    -- -e / --eval may carry the value attached (-e'code', --eval=code); a .lua file or `run` also runs Lua in the daemon
-    local lua_file = butler_at > #w
+    -- The CLI's Lua entry points are `lua`, `exec`, `repl` (as the verb) and -e / --eval (the value may be attached:
+    -- -e'code', --eval=code). `run` starts a command in a session, so it is script-class too; `eval` is kept as one.
+    if w[2] == "lua" or w[2] == "exec" or w[2] == "repl" then return "script" end
     for i = 2, butler_at - 1 do
-      if w[i] == "eval" or w[i]:find("^%-e") or w[i]:find("^%-%-eval") or w[i] == "run" or (lua_file and w[i]:find("%.lua$")) then return "script" end
+      if w[i] == "eval" or w[i]:find("^%-e") or w[i]:find("^%-%-eval") or w[i] == "run" then return "script" end
     end
   end
   if first == "git" and has(w, { push = true }) then return "push" end

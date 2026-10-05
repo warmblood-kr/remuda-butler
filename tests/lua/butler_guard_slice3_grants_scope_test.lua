@@ -131,13 +131,13 @@ T.test("SHOULD f: an agent cannot reach guard_grants.add through run_script or r
 end)
 
 
-T.test("round 3 item 11: remuda -e/--eval with an attached value, `remuda <file.lua>` and `remuda run` are scripts", function()
+T.test("round 3 item 11: remuda -e/--eval with an attached value, `remuda lua|exec|repl` and `remuda run` are scripts", function()
   start_butler()
   local out = T.eval([[local gp = remuda.butler.guard_policy
     local r = {}
-    for _, c in ipairs({ "remuda -e'return 1'", 'remuda -ereturn1', "remuda --eval=return1", "remuda --evalx 1", "remuda x.lua", "remuda /tmp/x.lua a b",
-      "remuda run x", "remuda --server s run x", "remuda ls", "remuda butler status" }) do
+    for _, c in ipairs({ "remuda -e'return 1'", 'remuda -ereturn1', "remuda --eval=return1", "remuda --evalx 1", "remuda lua x.lua", "remuda exec x", "remuda repl",
+      "remuda run x", "remuda --server s run x", "remuda x.lua", "remuda /tmp/x.lua a b", "remuda ls", "remuda butler status" }) do
       r[#r + 1] = gp.classify('Bash', { command = c }, { home = '/h' }) end
     return table.concat(r, ',')]])
-  T.eq(out, "script,script,script,script,script,script,script,script,other,other", "attached -e/--eval, .lua and run are scripts; plain verbs are not", "ok - eval forms")
+  T.eq(out, "script,script,script,script,script,script,script,script,script,other,other,other,other", "attached -e/--eval, lua/exec/repl and run (starts a command) are scripts; a bare .lua word is not", "ok - eval forms")
 end)
