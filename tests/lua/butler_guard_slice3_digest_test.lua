@@ -128,3 +128,66 @@ T.test("a failed post is retried on a later tick and never blocks the audit", fu
   sweep(86400 + 400)
   T.eq(posts(), 1, "retried", "ok - retry")
 end)
+
+-- Count the daemon's scans of the audit files (a wrapper around day_facts, installed once).
+local function scans()
+  T.eval([[local gp = remuda.butler.guard_policy
+    if not remuda._t_real_facts then
+      remuda._t_real_facts = gp.day_facts
+      gp.day_facts = function(d) remuda._t_scans = (remuda._t_scans or 0) + 1; return remuda._t_real_facts(d) end
+    end]])
+  return tonumber(T.eval("return remuda._t_scans or 0"))
+end
+local function reset_scans() scans(); T.eval("remuda._t_scans = 0") end
+
+T.test("a quiet day (no audit lines) is scanned once, not on every tick", function()
+  fresh("d-quiet")
+  reset_scans()
+  sweep(86400 + 300)
+  sweep(86400 + 400)
+  sweep(86400 + 500)
+  T.eq(posts(), 0, "no digest for a day without lines")
+  T.eq(scans(), 1, "one scan", "ok - quiet")
+end)
+
+T.test("a failed post is retried from the cached facts, without scanning again", function()
+  fresh("d-noscan")
+  at(36000)
+  T.eval("remuda._butler_command_run('guard', {'guard','on'}, {})")
+  reset_scans()
+  T.eval("local a = remuda.butler.approval; remuda._t_notify = a.notify; a.notify = function() return nil, 'down' end")
+  sweep(86400 + 300)
+  sweep(86400 + 400)
+  sweep(86400 + 500)
+  T.eq(scans(), 1, "scanned once while the post keeps failing")
+  T.eval("remuda.butler.approval.notify = remuda._t_notify")
+  sweep(86400 + 600)
+  T.eq(posts(), 1, "posted")
+  T.eq(scans(), 1, "and still one scan", "ok - noscan")
+end)
+
+T.test("an archive stamped before the day cannot hold it and is not read", function()
+  fresh("d-skip")
+  T.eval([[local gp = remuda.butler.guard_policy
+    local f = io.open(gp.log_path() .. '.20260101T000000Z', 'w')
+    f:write('{"time":"2026-10-04T10:00:00Z","summary":"forged"}\n'); f:close()]])
+  T.eq(T.eval("return (remuda.butler.guard_policy.day_facts('2026-10-04'))"), "0", "stamp Jan 1 < Oct 4", "ok - skip")
+end)
+
+T.test("after downtime each day with lines is attested, oldest first, and the chain stays linked", function()
+  fresh("d-gap")
+  at(36000) -- 10-04
+  T.eval("remuda._butler_command_run('guard', {'guard','on'}, {})")
+  sweep(86400 + 300)
+  T.eq(posts(), 1, "10-04")
+  at(86400 + 36000) -- 10-05
+  T.eval("remuda.butler.guard_policy.observe('x', 's', 'claude', 'y')")
+  at(3 * 86400 + 36000) -- 10-07, none on 10-06: the daemon was down
+  T.eval("remuda.butler.guard_policy.observe('x', 's', 'claude', 'y')")
+  sweep(4 * 86400 + 300) -- 10-08
+  T.eq(posts(), 3, "10-05 and 10-07 both attested")
+  local h1 = T.eval(("return remuda.butler.guard_approval.sha256(%q)"):format(text(1)))
+  local h2 = T.eval(("return remuda.butler.guard_approval.sha256(%q)"):format(text(2)))
+  T.expect(text(2):find("for 2026-10-05 (UTC)", 1, true) and text(2):find("previous digest " .. h1 .. ".", 1, true), "2: " .. text(2))
+  T.expect(text(3):find("for 2026-10-07 (UTC)", 1, true) and text(3):find("previous digest " .. h2 .. ".", 1, true), "3: " .. text(3), "ok - gap")
+end)

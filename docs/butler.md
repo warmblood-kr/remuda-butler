@@ -971,9 +971,21 @@ blocks and never locks the owner out.
 archives, `guard-audit.jsonl.1` and the live log in order and prints `ok` with
 the chained line count and last hash, or `BROKEN at FILE line N` with the
 reason. It detects a removed, edited or unchained line and a removed rotated
-file. It cannot detect the whole log replaced by a consistent forgery by the
+file. A final line of the live log with no newline yet is a write in
+progress: it is reported as a note, not as BROKEN. It cannot detect the whole log replaced by a consistent forgery by the
 same user, nor the truncation of the newest lines, and it cannot check the
 oldest kept archive's first link (older archives are pruned after 90 days).
+
+A fork of the chain (the audit lock fell back after 1 s and two writers raced, a line
+written without `prev` because the hash failed, a line cut short by a crash and
+appended to) makes verify report BROKEN at that line, and it keeps doing so until the
+file holding it is pruned (up to 90 days). There is no way to acknowledge or
+re-anchor the chain, and verify stops at that first break.
+
+The audit lock is core's `remuda.fs.lock`, which never blocks (it is a try-lock, a
+busy lock answers at once). The audit write retries it for about a second, then
+writes without it, so a holder that never lets go cannot hang the hooks; the cost
+is a possible fork, as above.
 
 Once per UTC day, Butler posts a digest of the last completed day to HOME (the
 owner room): its audit line count, the hash of its last line, and the hash of
@@ -982,6 +994,14 @@ repeat one (the last day and hash are kept in the protected data dir), and a
 failed post is retried. The digest holds only counts and hashes, never agent
 text. The digest in the owner's room is the real control: it is off the box, so
 a replaced log no longer matches it. The local chain only detects.
+
+After downtime (or a run of failed posts across midnight) the days since the last digest
+are attested oldest first, each linking the digest before it, so the chain has no
+skipped day within the last 7 days. A gap older than that cap is never covered: the digest
+resumes with the newest 7 days and its previous-digest link still names the last one
+posted. A quiet day is scanned once, and a failed post is retried without scanning
+again. If the digest state cannot be saved (`guard-digest.json`), a restart may post
+the same day again: a double post, the safe direction.
 
 ### Codex grants
 

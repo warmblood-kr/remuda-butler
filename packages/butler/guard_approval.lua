@@ -524,6 +524,7 @@ approval.tick("guard_grants_expiry", expiry_tick)
 -- text. Posted once per day: the last day and hash persist in the protected data dir, so a restart does not repeat
 -- it, and only a day with audit lines gets one. A failed post is retried (at most once a minute) and never touches the audit writes.
 local DIGEST_SCAN_S = 60
+local DIGEST_MAX_DAYS = 7 -- after downtime, at most this many days back are attested; older ones are never covered
 M._dg = { checked = 0 }
 local function digest_state_path() return policy.dir() .. "/guard-digest.json" end
 local function digest_load()
@@ -543,18 +544,31 @@ local function digest_tick()
   local now = policy.time()
   if now - (D.checked or 0) < DIGEST_SCAN_S then return end
   D.checked = now
-  local target = os.date("!%Y-%m-%d", now - 86400)
   digest_load()
-  if D.day and D.day >= target then return end
-  local count, last = policy.day_facts(target)
-  if count == 0 then return end -- a day with no audit lines has nothing to attest
-  local text = "Butler audit digest for " .. target .. " (UTC): " .. count .. " lines, last line hash "
-    .. (last or "none") .. ", previous digest " .. (D.hash or "none") .. "."
-  if not approval.notify(text) then return end
-  D.day, D.hash = target, M.sha256(text)
-  local saved, why = remuda.fs.write_atomic(digest_state_path(), remuda.json.encode({ day = D.day, hash = D.hash }),
-    { private = true })
-  if not saved and type(remuda.log) == "function" then pcall(remuda.log, "warn", "guard digest state not saved: " .. tostring(why)) end
+  -- Oldest day first, so the previous-digest link stays continuous. With no digest on record only yesterday counts.
+  -- ponytail: a day is scanned once (facts cached while its post fails, empty days remembered); no digest older than the cap.
+  local floor = D.day or ""
+  if D.empty_day and D.empty_day > floor then floor = D.empty_day end
+  for back = (D.day and DIGEST_MAX_DAYS or 1), 1, -1 do
+    local day = os.date("!%Y-%m-%d", now - back * 86400)
+    if day > floor then
+      if not (D.facts and D.facts.day == day) then
+        local count, last = policy.day_facts(day)
+        D.facts = { day = day, count = count, last = last }
+      end
+      if D.facts.count == 0 then
+        D.empty_day = day -- a day with no audit lines has nothing to attest
+      else
+        local text = "Butler audit digest for " .. day .. " (UTC): " .. D.facts.count .. " lines, last line hash "
+          .. (D.facts.last or "none") .. ", previous digest " .. (D.hash or "none") .. "."
+        if not approval.notify(text) then return end
+        D.day, D.hash, D.facts = day, M.sha256(text), nil
+        local saved, why = remuda.fs.write_atomic(digest_state_path(), remuda.json.encode({ day = D.day, hash = D.hash }),
+          { private = true })
+        if not saved and type(remuda.log) == "function" then pcall(remuda.log, "warn", "guard digest state not saved: " .. tostring(why)) end
+      end
+    end
+  end
 end
 approval.tick("guard_audit_digest", function() pcall(digest_tick) end)
 

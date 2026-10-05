@@ -1020,7 +1020,7 @@ local function each_line(f, fn)
     pending = pending:sub(pos)
     if #pending > STATS_LINE_CAP then pending, skipping = "", true end
   end
-  if skipping or #pending > STATS_LINE_CAP then fn(nil) elseif #pending > 0 then fn(pending) end
+  if skipping or #pending > STATS_LINE_CAP then fn(nil) elseif #pending > 0 then fn(pending, true) end
 end
 
 -- `guard stats`: counts per class and per event over the log and its archives. It prints only known
@@ -1075,18 +1075,19 @@ local function ordered_files()
   return dated
 end
 
--- Walk every file in order calling fn(line, r, file, n); stops and returns what fn returns when it returns non-nil.
-local function walk(fn)
+-- Walk every file in order calling fn(line, r, file, n, partial); stops and returns what fn returns when it returns
+-- non-nil. `partial` marks a final line with no newline. skip(path) true leaves a file unread.
+local function walk(fn, skip)
   for _, path in ipairs(ordered_files()) do
-    local f = io.open(path, "r")
+    local f = not (skip and skip(path)) and io.open(path, "r")
     if f then
       local n, result = 0, nil
-      local ok = pcall(each_line, f, function(line)
+      local ok = pcall(each_line, f, function(line, partial)
         n = n + 1
         if result ~= nil then return end
         local decoded, r = false, nil
         if line then decoded, r = pcall(remuda.json.decode, line) end
-        result = fn(line, decoded and type(r) == "table" and r or nil, path:match("([^/]+)$"), n)
+        result = fn(line, decoded and type(r) == "table" and r or nil, path:match("([^/]+)$"), n, partial)
       end)
       f:close()
       if result ~= nil then return result end
@@ -1103,8 +1104,11 @@ local function verify()
   if not sha then return "guard verify: cannot check, no sha256 available" end
   local live = M.log_path():match("([^/]+)$")
   local prev_text, chained, count = nil, false, 0
-  local broke = walk(function(line, r, file, n)
+  local skipped
+  local broke = walk(function(line, r, file, n, partial)
     local function bad(why) return { broken = file, n = n, why = why } end
+    -- A last line with no newline in the live log is a write in progress: noted, not judged.
+    if partial and file == live then skipped = true; return nil end
     if not r then return bad("unreadable line") end
     if r.prev == nil then
       if chained then return bad("line without a hash of the one before") end
@@ -1121,17 +1125,25 @@ local function verify()
     chained, count, prev_text = true, count + 1, line
   end)
   if broke then return "guard verify: BROKEN at " .. broke.broken .. " line " .. broke.n .. ": " .. broke.why end
-  if count == 0 then return "guard verify: ok, no chained lines yet" end
-  return "guard verify: ok, " .. count .. " chained lines, last hash " .. sha(prev_text)
+  local note = skipped and " (note: the last line of " .. live .. " has no newline yet, a write in progress; not checked)" or ""
+  if count == 0 then return "guard verify: ok, no chained lines yet" .. note end
+  return "guard verify: ok, " .. count .. " chained lines, last hash " .. sha(prev_text) .. note
 end
 M.verify = verify
 
--- Facts for the digest of one UTC day (YYYY-MM-DD): line count and the sha256 of its last line.
+-- Facts for the digest of one UTC day (YYYY-MM-DD): line count and the sha256 of its last line. A dated archive
+-- stamped before the day began cannot hold it (the stamp is when the file was closed), and the log is in time order,
+-- so the walk stops at the first line past the day.
 function M.day_facts(day)
   local sha = sha256()
   local count, last = 0, nil
+  local from = day:gsub("-", "") .. "T000000Z"
   walk(function(line, r)
-    if r and type(r.time) == "string" and r.time:sub(1, 10) == day then count, last = count + 1, line end
+    local t = r and type(r.time) == "string" and r.time:sub(1, 10)
+    if t == day then count, last = count + 1, line elseif t and t > day then return true end
+  end, function(path)
+    local stamp = path:match("guard%-audit%.jsonl%.(" .. STAMP .. ")")
+    return stamp ~= nil and stamp < from
   end)
   return count, last and sha and sha(last) or nil
 end
