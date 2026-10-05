@@ -308,6 +308,11 @@ local function segment_class(w, text, ctx)
   if first == "remuda" then
     if has(w, { stop = true, restart = true, kill = true }) then return "control" end
     if has(w, { eval = true, ["-e"] = true, ["--eval"] = true }) then return "script" end -- runs Lua inside the daemon
+    -- -e / --eval may carry the value attached (-e'code', --eval=code); a .lua file or `run` also runs Lua in the daemon
+    local lua_file = not has(w, { butler = true })
+    for i = 2, #w do
+      if w[i]:find("^%-e") or w[i]:find("^%-%-eval") or w[i] == "run" or (lua_file and w[i]:find("%.lua$")) then return "script" end
+    end
     for i, a in ipairs(w) do
       if a == "butler" then
         local verb = w[i + 1]

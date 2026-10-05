@@ -468,3 +468,15 @@ T.test("SHOULD f: an agent cannot reach guard_grants.add through run_script or r
       gp.classify('Bash', { command = 'remuda eval "return 1"' }, { home = '/h' }) }, '|')]]):format(code, code))
   T.eq(out, "Butler grant store|Butler grant store|Butler grant store|script", "denied by text, and eval is a script", "ok - no agent path to add")
 end)
+
+
+T.test("round 3 item 11: remuda -e/--eval with an attached value, `remuda <file.lua>` and `remuda run` are scripts", function()
+  start_butler()
+  local out = T.eval([[local gp = remuda.butler.guard_policy
+    local r = {}
+    for _, c in ipairs({ "remuda -e'return 1'", 'remuda -ereturn1', "remuda --eval=return1", "remuda --evalx 1", "remuda x.lua", "remuda /tmp/x.lua a b",
+      "remuda run x", "remuda --server s run x", "remuda ls", "remuda butler status" }) do
+      r[#r + 1] = gp.classify('Bash', { command = c }, { home = '/h' }) end
+    return table.concat(r, ',')]])
+  T.eq(out, "script,script,script,script,script,script,script,script,other,other", "attached -e/--eval, .lua and run are scripts; plain verbs are not", "ok - eval forms")
+end)
