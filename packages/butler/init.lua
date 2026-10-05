@@ -313,7 +313,8 @@ the normal way for a member to communicate.
       { id = "send", order = 40, verb = "send", usage = '  remuda butler send <to> "<message>" | <to> - | <to> --file PATH\n'
           .. '  remuda butler send <from> <to> <message...> | <from> <to> - | <from> <to> --file PATH',
         run = function(_, args, caller) return host._butler_command_run("send", args, caller) end },
-      { id = "send-to-leader", order = 50, verb = "send-to-leader", usage = "  remuda butler send-to-leader <message...> | - | --file PATH",
+      { id = "send-to-leader", order = 50, verb = "send-to-leader", usage = "  remuda butler send-to-leader <message...> | - | --file PATH\n"
+          .. "  To send text that starts with -, put -- first: remuda butler send-to-leader -- -text",
         run = function(_, args, caller) return host._butler_command_run("send-to-leader", args, caller) end },
       { id = "inbox", order = 60, verb = "inbox", usage = "  remuda butler inbox [name]",
         run = function(_, args, caller) return host._butler_command_run("inbox", args, caller) end },

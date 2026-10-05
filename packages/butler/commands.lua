@@ -155,13 +155,16 @@ command(6, "quota", "  remuda butler quota [--report]", function(args, caller)
   return reply
 end)
 local CLOSE_USAGE = "Usage: remuda butler close <name> [--force]\n"
+  .. "Example: remuda butler close worker-1"
+local CLOSE_CLI_USAGE = "Usage: remuda butler close <name> [--force]\n"
   .. "       remuda butler close --force <name>\nExample: remuda butler close worker-1"
 local function close_usage_text(text)
+  text = text:gsub("Usage: remuda butler close [^\n]*", "")
   local next_start = text:find("\nNext:", 1, true)
   if next_start then
-    return text:sub(1, next_start - 1) .. "\n\n" .. CLOSE_USAGE .. text:sub(next_start)
+    return text:sub(1, next_start - 1) .. "\n\n" .. CLOSE_CLI_USAGE .. text:sub(next_start)
   end
-  return text .. "\n\n" .. CLOSE_USAGE .. "\nNext: remuda butler sessions"
+  return text .. "\n\n" .. CLOSE_CLI_USAGE .. "\nNext: remuda butler sessions"
 end
 local RELAUNCH_WINDOW = 120
 local function close_member(name, leader, force, leaderless_ok)
@@ -469,7 +472,19 @@ command(40, "send", '  remuda butler send <to> "<message>" | <to> - | <to> --fil
     return remuda._butler_send(from, to, body)
   end)
 end)
-command(50, "send-to-leader", "  remuda butler send-to-leader <message...> | - | --file PATH", function(args, caller)
+local SEND_TO_LEADER_CLI_SPEC = {
+  name = "remuda butler",
+  verbs = {
+    ["send-to-leader"] = {
+      about = "Send a message to your Butler leader",
+      options = { { long = "file", value = "PATH", help = "Read message text from a file" } },
+      args = { { name = "WORDS", help = "Message words", multiple = true, required = false } },
+      next = "remuda butler send-to-leader --help",
+    },
+  },
+}
+command(50, "send-to-leader", "  remuda butler send-to-leader <message...> | - | --file PATH\n"
+  .. "  To send text that starts with -, put -- first: remuda butler send-to-leader -- -text", function(args, caller)
   if #args < 2 then return nil end
   local from = current_agent(caller)
   if not from then
@@ -477,8 +492,48 @@ command(50, "send-to-leader", "  remuda butler send-to-leader <message...> | - |
     if type(remuda.fail) == "function" then return remuda.fail(message, 1) end
     error(message, 0)
   end
+  local cli = remuda.cli
+  if type(cli) == "table" and type(cli.parse) == "function" and type(args[2]) == "string"
+      and args[2]:sub(1, 1) == "-" and args[2] ~= "-" then
+    local report = cli.parse(SEND_TO_LEADER_CLI_SPEC, args)
+    if report.kind == "help" then
+      return (report.text:gsub("\nNext:",
+        "\nTo send text that starts with -, put -- first: remuda butler send-to-leader -- -text\n\nNext:", 1))
+    end
+    if not report.ok then
+      if type(remuda.fail) == "function" then return remuda.fail(report.text, report.code) end
+      error(report.text, 0)
+    end
+    if args[2] == "--file" and report.values.file then
+      if #args > 3 then
+        local message = 'send-to-leader --file accepts no message words after PATH.\n'
+          .. 'Usage: remuda butler send-to-leader --file PATH\n'
+          .. 'Example: remuda butler send-to-leader --file "$PWD/message.txt"\n'
+          .. 'Next: remuda butler send-to-leader --help'
+        if type(remuda.fail) == "function" then return remuda.fail(message, 2) end
+        error(message, 0)
+      end
+      return cli_result(function()
+        return remuda._butler_report(from, message_body({ "send-to-leader", "--file", report.values.file }, 2, caller))
+      end)
+    end
+    if args[2] ~= "--" then
+      local message = 'send-to-leader accepts --file PATH as an option; put -- before message text that starts with -.\n'
+        .. 'Usage: remuda butler send-to-leader <message...> | - | --file PATH\n'
+        .. 'Example: remuda butler send-to-leader -- -text\n'
+        .. 'Next: remuda butler send-to-leader --help'
+      if type(remuda.fail) == "function" then return remuda.fail(message, 2) end
+      error(message, 0)
+    end
+  end
   return cli_result(function()
-    return remuda._butler_report(from, message_body(args, 2, caller))
+    local body
+    if args[2] == "--" then
+      body = checked_message_body(words_after(args, 3))
+    else
+      body = message_body(args, 2, caller)
+    end
+    return remuda._butler_report(from, body)
   end)
 end)
 command(60, "inbox", "  remuda butler inbox [name]", function(args, caller)
