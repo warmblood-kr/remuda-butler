@@ -155,13 +155,15 @@ command(6, "quota", "  remuda butler quota [--report]", function(args, caller)
   return reply
 end)
 local CLOSE_USAGE = "Usage: remuda butler close <name> [--force]\n"
-  .. "       remuda butler close --force <name>\nExample: remuda butler close worker-1"
+  .. "Example: remuda butler close worker-1"
+local CLOSE_CLI_USAGE = CLOSE_USAGE .. "\n       remuda butler close --force <name>"
 local function close_usage_text(text)
+  text = text:gsub("Usage: remuda butler close [^\n]*", "")
   local next_start = text:find("\nNext:", 1, true)
   if next_start then
-    return text:sub(1, next_start - 1) .. "\n\n" .. CLOSE_USAGE .. text:sub(next_start)
+    return text:sub(1, next_start - 1) .. "\n\n" .. CLOSE_CLI_USAGE .. text:sub(next_start)
   end
-  return text .. "\n\n" .. CLOSE_USAGE .. "\nNext: remuda butler sessions"
+  return text .. "\n\n" .. CLOSE_CLI_USAGE .. "\nNext: remuda butler sessions"
 end
 local RELAUNCH_WINDOW = 120
 local function close_member(name, leader, force, leaderless_ok)

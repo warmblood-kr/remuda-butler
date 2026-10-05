@@ -93,6 +93,18 @@ T.test("close help documents --force before the name", function()
     "close --help should document close --force NAME with Next: " .. out)
   T.expect(invalid:find("remuda butler close --force", 1, true) ~= nil and invalid:find("Next:", 1, true) ~= nil,
     "close usage error should document close --force NAME with Next: " .. invalid)
+  local _, usage_count = invalid:gsub("Usage:", "")
+  T.eq(tostring(usage_count), "1", "close parse error prints usage once")
+end)
+
+T.test("close fallback usage only advertises trailing --force", function()
+  start_butler()
+  T.eval("remuda._pr_a_saved_cli = remuda.cli; remuda.cli = nil")
+  local out = invoke_error("close", { "close", "--force", "worker" })
+  T.eval("remuda.cli = remuda._pr_a_saved_cli; remuda._pr_a_saved_cli = nil")
+  T.expect(out:find("Usage: remuda butler close <name> [--force]", 1, true) ~= nil
+      and out:find("remuda butler close --force <name>", 1, true) == nil,
+    "close fallback usage should match its accepted argument order: " .. out)
 end)
 
 T.test("reply ID --attach PATH caption words uploads with caption", function()
