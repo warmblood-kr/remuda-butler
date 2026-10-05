@@ -1,4 +1,4 @@
--- Guard slice 3, PR3 review round 2 (SEC delta on #384), push config and git cwd. Its own file: the harness gives a file 20s in all.
+-- Guard slice 3, PR-A (#339): grant matching hardened, still no allow path: protected branches and tags, push.followTags. The class gate, grant_id and the git budget are in grants_gate_test (own file: the harness gives a file 20s in all).
 local function start_butler(no_register)
   T.install_mod("butler", assert(os.getenv("REMUDA_LUA_REPO")))
   T.eval('remuda._butler_argv = {"sh", "-c", "sleep 60"}; remuda._butler_skip_relay = true; remuda._butler_readiness_timeout = 1')
@@ -31,7 +31,6 @@ local function start_butler(no_register)
   if not no_register then T.eval("remuda.exec(\"butler/guard_grants\"); remuda.butler.guard_grants.verified = function() return true end; remuda.butler.guard_grants.register(function(add) remuda._t_add = add end)") end
 end
 local function has(text, needle) return text:find(needle, 1, true) ~= nil end
-
 -- A scratch tree: ROOT/real/sub, ROOT/link -> real, ROOT/other. Sets G (the grants module) and ROOT.
 local function tree(name)
   T.eval("remuda._t_dir(" .. string.format("%q", name) .. ")")
@@ -43,7 +42,8 @@ local function tree(name)
     return remuda._t_root
   ]])
 end
--- Review fixes (SEC on #384). A bare repo + clone with one pushed commit; returns work dir, a shell runner and the hook helpers.
+
+
 local function git_fixture(name)
   start_butler()
   local root = tree(name)
@@ -51,7 +51,7 @@ local function git_fixture(name)
     local script = table.concat({ 'set -e', 'cd ' .. remuda._t_root,
       'git init -q --bare remote.git', 'git clone -q remote.git work 2>/dev/null', 'cd work',
       'git config user.email t@t; git config user.name t', 'echo a > a; git add a; git commit -q -m a',
-      'git branch -q -M feat; git push -q -u origin HEAD 2>/dev/null' }, '\n')
+      'git branch -q -M feat; git push -q -u origin feat 2>/dev/null' }, '\n')
     local r = remuda.process.run({ argv = { 'sh', '-c', script } })
     return tostring(r.code) .. ' ' .. tostring(r.stderr)]])
   T.expect(g:match("^0"), "git fixture: " .. g)
@@ -62,33 +62,41 @@ local function git_fixture(name)
     .. ", ceiling = 'T2', holder = 'ss-a', event = '$ev1', ttl = 3600 })")
   return work, sh
 end
-local function grant_for(command, cwd)
-  return T.eval(("return tostring(remuda.butler.guard_grants.match('Bash', { command = %q }, %q))"):format(command, cwd))
+local function grant_for(command, cwd, class)
+  return T.eval(("return tostring(remuda.butler.guard_grants.match('Bash', { command = %q }, %q, %s))"):format(command, cwd, class and string.format("%q", class) or "nil"))
 end
 
--- Review fixes, round 2 (SEC delta on #384).
-local function branch_of(work)
-  return T.eval(("local r = remuda.process.run({ argv = { 'git', '-C', %q, 'rev-parse', '--abbrev-ref', 'HEAD' } }); return (r.stdout:gsub('%%s', ''))"):format(work))
-end
-
-T.test("R2 MUST 1: remote.<r>.push or push.default matching/nothing means no grant", function()
-  local work, sh = git_fixture("g3p3-pushcfg")
-  T.eq(sh("echo b > b; git add b; git commit -q -m b"), "0", "commit")
-  T.eq(sh("git config remote.origin.push 'refs/heads/*:refs/heads/elsewhere'"), "0", "remote.origin.push set")
-  for _, cmd in ipairs({ "git push", "git push origin", "git push origin " .. branch_of(work) }) do T.eq(grant_for(cmd, work), "nil", "remote.push set: " .. cmd) end
-  T.eq(sh("git config --unset remote.origin.push"), "0", "unset")
-  for _, mode in ipairs({ "matching", "nothing" }) do
-    T.eq(sh("git config push.default " .. mode), "0", "push.default " .. mode)
-    T.eq(grant_for("git push", work), "nil", "push.default " .. mode)
+T.test("a push of main/master/trunk gets no grant (bare and named), a feature branch still does", function()
+  local work, sh = git_fixture("g3a-protected")
+  T.eq(sh("echo b >> a; git commit -q -am b"), "0", "commit")
+  T.eq(grant_for("git push", work), "g001", "control: feature branch, bare push")
+  T.eq(grant_for("git push origin feat", work), "g001", "control: feature branch, named")
+  for _, b in ipairs({ "main", "master", "trunk" }) do
+    T.eq(sh("git branch -q -M " .. b .. "; git push -q -u origin " .. b .. " 2>/dev/null; echo x >> a; git commit -q -am x"), "0", "on " .. b)
+    T.eq(grant_for("git push", work), "nil", "bare push on checked-out " .. b)
+    T.eq(grant_for("git push origin " .. b, work), "nil", "git push origin " .. b)
   end
-  T.eq(sh("git config push.default simple"), "0", "simple")
-  T.eq(grant_for("git push", work), "g001", "control: simple is covered", "ok - push config")
+  T.eq(sh("git branch -q -M feat; git tag v1"), "0", "back on feat, a tag")
+  T.eq(grant_for("git push origin v1", work), "nil", "a tag is not the checked-out branch", "ok - protected branches")
 end)
 
-T.test("R2 MUST 2: a git grant does not cover a protected cwd", function()
-  local work, sh = git_fixture("g3p3-gitcwd")
-  T.eq(sh("mkdir -p sub/.claude; echo b > sub/.claude/b; git add -f .; git commit -q -m b"), "0", "commit")
+T.test("push.followTags (set to anything) and a failed probe give no grant", function()
+  local work, sh = git_fixture("g3a-follow")
   T.eq(grant_for("git push", work), "g001", "control")
-  T.eq(grant_for("git push", work .. "/sub/.claude"), "nil", "cwd under .claude", "ok - git cwd protected")
+  for _, v in ipairs({ "true", "false" }) do
+    T.eq(sh("git config push.followTags " .. v), "0", "set " .. v)
+    T.eq(grant_for("git push", work), "nil", "followTags=" .. v)
+  end
+  T.eq(sh("git config --unset push.followTags"), "0", "unset")
+  T.eq(grant_for("git push", work), "g001", "covered again once unset")
+  local failed = T.eval(([[local real, g = remuda.process.run, remuda.butler.guard_grants
+    remuda.process.run = function(o)
+      for _, a in ipairs(o.argv) do if a == 'push.followTags' then return { code = 128, stdout = '' } end end
+      return real(o)
+    end
+    local id = g.match('Bash', { command = 'git push' }, %q)
+    remuda.process.run = real
+    return tostring(id)]]):format(work))
+  T.eq(failed, "nil", "a probe that exits neither 0 nor 1 is no grant", "ok - followTags")
 end)
 

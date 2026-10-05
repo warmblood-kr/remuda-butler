@@ -51,7 +51,7 @@ local function git_fixture(name)
     local script = table.concat({ 'set -e', 'cd ' .. remuda._t_root,
       'git init -q --bare remote.git', 'git clone -q remote.git work 2>/dev/null', 'cd work',
       'git config user.email t@t; git config user.name t', 'echo a > a; git add a; git commit -q -m a',
-      'git push -q -u origin HEAD 2>/dev/null' }, '\n')
+      'git branch -q -M feat; git push -q -u origin HEAD 2>/dev/null' }, '\n')
     local r = remuda.process.run({ argv = { 'sh', '-c', script } })
     return tostring(r.code) .. ' ' .. tostring(r.stderr)]])
   T.expect(g:match("^0"), "git fixture: " .. g)

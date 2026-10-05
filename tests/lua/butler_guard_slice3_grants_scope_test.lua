@@ -43,31 +43,6 @@ local function tree(name)
   ]])
 end
 
-local function write_hook(path) return ([[{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":%q,"grant_id":"g999"},"cwd":"/"}]]):format(path) end
-
-T.test("grant_id in audit lines comes from the store: the covering grant, '-' when off, outside, or agent-supplied", function()
-  start_butler()
-  local root = tree("g3p3-audit")
-  T.eval("remuda._t_guard({'guard','on'}); remuda._t_guard({'guard','grants','on'})")
-  T.eval("remuda._t_add({ class = 'writable', scope = " .. string.format("%q", root .. "/real/*")
-    .. ", ceiling = 'T2', holder = 'ss-a', event = '$ev1', ttl = 3600 })")
-  local function last_line() local l; for x in T.eval("return remuda._t_lines()"):gmatch("[^\n]+") do l = x end; return l end
-  T.eval(("remuda._t_hook(%q)"):format(write_hook(root .. "/real/sub/f.txt")))
-  T.expect(has(last_line(), '"grant_id":"g001"'), "covered write: " .. last_line())
-  T.eval(("remuda._t_hook(%q)"):format(write_hook(root .. "/link/sub/f.txt")))
-  T.expect(has(last_line(), '"grant_id":"g001"'), "a symlink into the scope resolves into it: " .. last_line())
-  T.eval(("remuda._t_hook(%q)"):format(write_hook(root .. "/other/f.txt")))
-  T.expect(has(last_line(), '"grant_id":"-"'), "outside the scope, and an agent-supplied grant_id is ignored: " .. last_line())
-  T.eval("remuda.process.run({ argv = { 'sh', '-c', 'ln -s ../other " .. root .. "/real/leak' } })")
-  T.eval(("remuda._t_hook(%q)"):format(write_hook(root .. "/real/leak/f.txt")))
-  T.expect(has(last_line(), '"grant_id":"-"'), "a symlink that leaves the scope is outside it: " .. last_line())
-  T.eval(("remuda._t_hook(%q)"):format(write_hook(root .. "/real/x/../../other/f")))
-  T.expect(has(last_line(), '"grant_id":"-"'), "a .. in the path yields no grant: " .. last_line())
-  T.eval("remuda._t_guard({'guard','grants','off'})")
-  T.eval(("remuda._t_hook(%q)"):format(write_hook(root .. "/real/sub/f.txt")))
-  T.expect(has(last_line(), '"grant_id":"-"'), "switch off: no grant applies: " .. last_line(), "ok - grant_id from store")
-end)
-
 T.test("MUST 3: a URL with a backslash, whitespace, control char or userinfo gets no net grant", function()
   start_butler()
   tree("g3p3-host")

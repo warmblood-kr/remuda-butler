@@ -941,8 +941,14 @@ taken without renames, so a move out of a CI path still lists the source, and
 with repo config, hooks, external diff and textconv neutralised. A push is
 covered only when the command is exactly `git push [remote [current-branch]]`:
 no shell syntax, refspec, flag, `cd`, `-C`, `env` or `GIT_DIR` prefix.
-Anything else falls to the tier. The path set is a list in code, reviewed like
-any guard rule. Server-side branch protection and required review remain the real
+Anything else falls to the tier. A push of `main`, `master` or `trunk` (the
+checked-out branch for a bare `git push`, the named branch otherwise) and a
+push that publishes tags (`push.followTags` set) always ask: a grant never
+covers them. Only a push or a WebFetch can match a grant at all; a call the
+guard classes as weaken, identity, escape, control, destroy, script or other
+never does. All the git probes of one call share a budget of about two seconds;
+when it runs out, or no git grant exists, there is no grant. The path set is a
+list in code, reviewed like any guard rule. Server-side branch protection and required review remain the real
 backstop; this check is a convenience, not a boundary.
 
 `git:common` covers the main repo's `.git` except `.git/hooks` and git config.

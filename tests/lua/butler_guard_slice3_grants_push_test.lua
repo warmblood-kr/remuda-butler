@@ -52,7 +52,7 @@ T.test("a push under a grant is checked against the remote ref: CI/workflow path
       'set -e', 'cd ' .. root,
       'git init -q --bare remote.git', 'git clone -q remote.git work 2>/dev/null', 'cd work',
       'git config user.email t@t; git config user.name t', 'echo a > a; git add a; git commit -q -m a',
-      'git push -q -u origin HEAD 2>/dev/null',
+      'git branch -q -M feat; git push -q -u origin HEAD 2>/dev/null',
     }, '\n')
     local r = remuda.process.run({ argv = { 'sh', '-c', script } })
     return tostring(r.code) .. ' ' .. tostring(r.stderr)]])
@@ -62,19 +62,14 @@ T.test("a push under a grant is checked against the remote ref: CI/workflow path
   T.eval("remuda._t_guard({'guard','on'}); remuda._t_guard({'guard','grants','on'})")
   T.eval("remuda._t_add({ class = 'git', scope = " .. string.format("%q", work)
     .. ", ceiling = 'T2', holder = 'ss-a', event = '$ev1', ttl = 3600 })")
-  local PUSH = ([[{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git push"},"cwd":%q}]]):format(work)
-  local function last_line() local l; for x in T.eval("return remuda._t_lines()"):gmatch("[^\n]+") do l = x end; return l end
+  local function covered() return T.eval(("return tostring(remuda.butler.guard_grants.match('Bash', { command = 'git push' }, %q))"):format(work)) end
   T.eq(sh("echo b > b; git add b; git commit -q -m b"), "0", "commit b")
-  T.eval(("remuda._t_hook(%q)"):format(PUSH))
-  T.expect(has(last_line(), '"class":"push"') and has(last_line(), '"grant_id":"g001"'), "a plain push is covered: " .. last_line())
+  T.eq(covered(), "g001", "a plain push is covered")
   T.eq(sh("mkdir -p .github/workflows; echo x > .github/workflows/ci.yml; git add .; git commit -q -m ci"), "0", "commit ci")
-  T.eval(("remuda._t_hook(%q)"):format(PUSH))
-  T.expect(has(last_line(), '"grant_id":"-"'), "a push touching .github/workflows is T3, no grant: " .. last_line())
+  T.eq(covered(), "nil", "a push touching .github/workflows is T3, no grant")
   T.eq(sh("git push -q 2>/dev/null; git checkout -q -b fresh; echo c > c; git add c; git commit -q -m c"), "0", "new branch")
-  T.eval(("remuda._t_hook(%q)"):format(PUSH))
-  T.expect(has(last_line(), '"grant_id":"-"'), "no upstream: the diff cannot be computed, fall back to the tier: " .. last_line())
-  T.eval(("remuda._t_hook(%q)"):format(PUSH:gsub(work, root .. "/nonexistent")))
-  T.expect(has(last_line(), '"grant_id":"-"'), "an unreadable repo falls back too", "ok - push diff")
+  T.eq(covered(), "nil", "no upstream: the diff cannot be computed, fall back to the tier")
+  T.eq(T.eval(("return tostring(remuda.butler.guard_grants.match('Bash', { command = 'git push' }, %q))"):format(root .. "/nonexistent")), "nil", "an unreadable repo falls back too", "ok - push diff")
   local names = T.eval("return tostring(remuda.butler.guard_grants.touches_ci({ 'src/a.lua', 'docs/.github/workflows/x.yml' }))"
     .. " .. tostring(remuda.butler.guard_grants.touches_ci({ '.gitlab-ci.yml' })) .. tostring(remuda.butler.guard_grants.touches_ci({ 'src/a.lua' }))")
   T.eq(names, "falsetruefalse", "the CI path list is anchored at the repo root")
@@ -88,7 +83,7 @@ local function git_fixture(name)
     local script = table.concat({ 'set -e', 'cd ' .. remuda._t_root,
       'git init -q --bare remote.git', 'git clone -q remote.git work 2>/dev/null', 'cd work',
       'git config user.email t@t; git config user.name t', 'echo a > a; git add a; git commit -q -m a',
-      'git push -q -u origin HEAD 2>/dev/null' }, '\n')
+      'git branch -q -M feat; git push -q -u origin HEAD 2>/dev/null' }, '\n')
     local r = remuda.process.run({ argv = { 'sh', '-c', script } })
     return tostring(r.code) .. ' ' .. tostring(r.stderr)]])
   T.expect(g:match("^0"), "git fixture: " .. g)

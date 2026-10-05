@@ -212,7 +212,7 @@ T.test("guard grants lists active grants for the operator, sanitised; with the s
   T.eval("remuda._t_guard({'guard','grants','off'})")
   local opened = T.eval([[local gp, real, n = remuda.butler.guard_grants, io.open, 0
     io.open = function(p, ...) if tostring(p):find('guard%-grants%.jsonl') then n = n + 1 end; return real(p, ...) end
-    gp.match('Write', { file_path = ']] .. root .. [[/real/x' }, '/')
+    gp.match('WebFetch', { url = 'https://example.com/x' }, '/')
     local listed = remuda._t_guard({'guard','grants'})
     io.open = real
     return n .. ' ' .. tostring(listed:find('off', 1, true) ~= nil)]])

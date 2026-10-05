@@ -789,7 +789,7 @@ local function write_line(record)
     for _, key in ipairs({ "session", "kind", "event", "tool", "class", "summary" }) do
       line = line .. ',"' .. key .. '":' .. remuda.json.encode(tostring(record[key] or ""))
     end
-    -- grant_id is "-" until a standing grant covers the call (a later PR); the field is fixed now.
+    -- grant_id names the grant that allowed the call; no hook line carries one while nothing allows (enforcement is a later PR).
     line = line .. ',"grant_id":' .. remuda.json.encode(tostring(record.grant_id or "-"))
     for _, key in ipairs({ "id", "hash" }) do
       if record[key] then line = line .. ',"' .. key .. '":' .. remuda.json.encode(tostring(record[key])) end
@@ -927,7 +927,7 @@ local KNOWN_EVENT = { PreToolUse = 1, PermissionRequest = 1, deny = 1, policy_er
   oversized = 1, unparsed = 1, switch = 1, approval_requested = 1, approval_approved = 1,
   approval_denied = 1, approval_expired = 1, approval_failed = 1, approval_limited = 1, grant_created = 1,
   grant_refused = 1, grant_register_refused = 1, grant_revoked = 1, grant_revoke_unsaved = 1, grants_frozen = 1,
-  grants_unfrozen = 1, owner_line_refused = 1, grants_unfreeze_failed = 1 }
+  grants_unfrozen = 1, owner_line_refused = 1, grants_unfreeze_failed = 1, grant_used = 1, grant_limited = 1 }
 local TIME = "^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%dZ$"
 
 -- Call fn(line) for each line of f, or fn(nil) for one that is over the cap; memory stays bounded.
@@ -1009,12 +1009,6 @@ function M.run(args, caller)
     local ok, err = pcall(function()
       if not M.enabled() then return end
       local record, hook_json = hook(caller)
-      -- grant_id comes only from the store (never from the call); with the switch off nothing reads it.
-      local grants = remuda.butler.guard_grants
-      if grants and hook_json and M.grants_enabled() then
-        local matched, id = pcall(grants.match, record.tool, hook_json.tool_input, hook_json.cwd)
-        if matched and id then record.grant_id = id end
-      end
       if hook_json and record.event == "PreToolUse" and M.deny_enabled() then
         local policy_ok, reason = pcall(M.deny_reason, record.tool, hook_json.tool_input, { cwd = hook_json.cwd })
         if not policy_ok then
