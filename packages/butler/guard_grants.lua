@@ -336,6 +336,8 @@ local function plain_push(command, cwd)
   for i = 3, #w do if w[i]:find("^%-") then return nil end end
   local branch = git(cwd, "symbolic-ref", "--short", "-q", "HEAD")
   if not branch or branch == "" then return nil end
+  -- git pushes to remote.pushDefault / branch.<b>.pushRemote when set, not to the upstream the diff is taken against
+  if git(cwd, "config", "--get", "remote.pushDefault") or git(cwd, "config", "--get", "branch." .. branch .. ".pushRemote") then return nil end
   local mode = git(cwd, "config", "--get", "push.default")
   if mode == "matching" or mode == "nothing" then return nil end
   local up_remote, up_merge = git(cwd, "config", "--get", "branch." .. branch .. ".remote"), git(cwd, "config", "--get", "branch." .. branch .. ".merge")

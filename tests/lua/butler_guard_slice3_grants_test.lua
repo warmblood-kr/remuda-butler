@@ -355,6 +355,17 @@ T.test("MUST 4: a push is covered only as exactly `git push [remote [current-bra
   T.expect(true, "", "ok - push whitelist")
 end)
 
+T.test("round 3: a push to remote.pushDefault or branch.<b>.pushRemote is no grant (git pushes there, not to the upstream)", function()
+  local work, sh = git_fixture("g3p3-pushremote")
+  T.eq(sh("git init -q --bare ../second.git; git remote add second ../second.git; git push -q second HEAD 2>/dev/null"), "0", "second remote")
+  T.eq(sh("mkdir -p .github/workflows; echo x > .github/workflows/ci.yml; git add .; git commit -q -m ci; git push -q 2>/dev/null"), "0", "CI change reaches origin only")
+  T.eq(grant_for("git push", work), "g001", "baseline: the upstream already has it, so a plain push is covered")
+  T.eq(sh("git config remote.pushDefault second"), "0", "pushDefault")
+  T.eq(grant_for("git push", work), "nil", "pushDefault redirects the push: no grant")
+  T.eq(sh("git config --unset remote.pushDefault; git config branch.$(git symbolic-ref --short HEAD).pushRemote second"), "0", "pushRemote")
+  T.eq(grant_for("git push", work), "nil", "branch pushRemote redirects the push: no grant", "ok - push remote")
+end)
+
 T.test("SHOULD a: scripts, Makefile and justfile called by CI are CI paths", function()
   start_butler()
   local got = T.eval([[local g = remuda.butler.guard_grants
