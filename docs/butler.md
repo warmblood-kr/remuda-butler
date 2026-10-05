@@ -959,9 +959,29 @@ text, and it never selects the scope, the TTL or the reactions. On a guard post 
 
 ### Audit chain
 
-Each audit line carries the hash of the previous line, so removing a line
-breaks the chain. The daily digest posted to HOME includes the previous digest
-and the line count.
+Each new audit line carries `prev`, the SHA-256 of the line before it (its text
+without the newline). A log that is new, or whose last line predates the chain,
+starts with a `chain` genesis line (`"prev":"genesis"`); older lines are not
+rewritten. When the log rotates, the first line of the new live log carries the
+hash of the rotated file's last line, so the chain runs across files. If the
+hash cannot be computed the line is still written, without `prev`: audit never
+blocks and never locks the owner out.
+
+`remuda butler guard verify` (read-only, not a weakening verb) walks the dated
+archives, `guard-audit.jsonl.1` and the live log in order and prints `ok` with
+the chained line count and last hash, or `BROKEN at FILE line N` with the
+reason. It detects a removed, edited or unchained line and a removed rotated
+file. It cannot detect the whole log replaced by a consistent forgery by the
+same user, nor the truncation of the newest lines, and it cannot check the
+oldest kept archive's first link (older archives are pruned after 90 days).
+
+Once per UTC day, Butler posts a digest of the last completed day to HOME (the
+owner room): its audit line count, the hash of its last line, and the hash of
+the previous digest. A day with no audit lines gets none, a restart does not
+repeat one (the last day and hash are kept in the protected data dir), and a
+failed post is retried. The digest holds only counts and hashes, never agent
+text. The digest in the owner's room is the real control: it is off the box, so
+a replaced log no longer matches it. The local chain only detects.
 
 ### Codex grants
 

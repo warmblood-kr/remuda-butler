@@ -518,5 +518,45 @@ local function expiry_tick()
 end
 approval.tick("guard_grants_expiry", expiry_tick)
 
+-- Daily digest to the owner room: for the last completed UTC day, its audit line count, the hash of its last line,
+-- and the previous digest's hash. The room then holds an off-box chain; the local chain only detects (a same-user
+-- agent can replace the whole log, the digest is what shows it). Text is Butler's own numbers and hashes, no agent
+-- text. Posted once per day: the last day and hash persist in the protected data dir, so a restart does not repeat
+-- it, and only a day with audit lines gets one. A failed post is retried (at most once a minute) and never touches the audit writes.
+local DIGEST_SCAN_S = 60
+M._dg = { checked = 0 }
+local function digest_state_path() return policy.dir() .. "/guard-digest.json" end
+local function digest_load()
+  if M._dg.loaded then return end
+  M._dg.loaded = true
+  local f = io.open(digest_state_path(), "r")
+  if not f then return end
+  local ok, r = pcall(remuda.json.decode, f:read("a") or "")
+  f:close()
+  if ok and type(r) == "table" and type(r.day) == "string" and r.day:match("^%d%d%d%d%-%d%d%-%d%d$") then
+    M._dg.day = r.day
+    M._dg.hash = type(r.hash) == "string" and r.hash:match("^%x+$") and #r.hash == 64 and r.hash or nil
+  end
+end
+local function digest_tick()
+  local D = M._dg
+  local now = policy.time()
+  if now - (D.checked or 0) < DIGEST_SCAN_S then return end
+  D.checked = now
+  local target = os.date("!%Y-%m-%d", now - 86400)
+  digest_load()
+  if D.day and D.day >= target then return end
+  local count, last = policy.day_facts(target)
+  if count == 0 then return end -- a day with no audit lines has nothing to attest
+  local text = "Butler audit digest for " .. target .. " (UTC): " .. count .. " lines, last line hash "
+    .. (last or "none") .. ", previous digest " .. (D.hash or "none") .. "."
+  if not approval.notify(text) then return end
+  D.day, D.hash = target, M.sha256(text)
+  local saved, why = remuda.fs.write_atomic(digest_state_path(), remuda.json.encode({ day = D.day, hash = D.hash }),
+    { private = true })
+  if not saved and type(remuda.log) == "function" then pcall(remuda.log, "warn", "guard digest state not saved: " .. tostring(why)) end
+end
+approval.tick("guard_audit_digest", function() pcall(digest_tick) end)
+
 M.configure()
 return M
