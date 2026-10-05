@@ -16,9 +16,11 @@ local CLASS = { writable = "path", git = "path", net = "net" }
 local CEILING = { T1 = true, T2 = true } -- T3 is never grantable
 local MAX_FILE = 256 * 1024
 
--- Test seams: M.now(), M.insensitive(real) and M.verified(e) replace these, but only when the test harness set
--- remuda._butler_test = true; in production they are ignored, whatever Lua sets them.
-local function seam(name) return remuda._butler_test == true and M[name] or nil end
+-- Test seams: M.now(), M.insensitive(real) and M.verified(e) replace these, but only when the process env carried
+-- REMUDA_BUTLER_TEST=1 when this module loaded (the harness sets it for its child daemon). The flag is read once, here:
+-- later Lua cannot switch it on, and the text deny in guard_policy refuses the field and the env name.
+local TEST_MODE = os.getenv("REMUDA_BUTLER_TEST") == "1"
+local function seam(name) return TEST_MODE and M[name] or nil end
 local function now() return (seam("now") or os.time)() end
 
 local function file() local d = policy.dir(); return d and (d .. "/guard-grants.jsonl") end

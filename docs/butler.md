@@ -800,7 +800,10 @@ derived from the request by Butler, never from agent text.
 With the grants switch on (off: no new behavior at all):
 
 - **Per scope: 10 approval posts per hour** (the host or repository, or the
-  tool, class, directory and text when no scope applies).
+  tool, class and directory when no scope applies; never the command text).
+  The number protects the owner from a flood of posts for one kind of call: an
+  agent that varies the text of a command (a trailing space, `; :`) still hits
+  the same limit.
 - **Overall: 30 approval posts per hour.**
 - **Per agent session: 5 approval posts per minute**, as an extra bucket only.
 - **A deny is remembered for 10 minutes** for the same scope, whichever agent
@@ -810,7 +813,8 @@ With the grants switch on (off: no new behavior at all):
 
 The agent chooses its own session name and alias, so no control rests on that
 name alone: the remembered deny and the per-scope limit are keyed by scope
-only, and the per-session bucket does not replace them.
+only (the remembered deny also keeps the exact command text when no scope
+applies), and the per-session bucket does not replace them.
 
 A request over a post limit is refused without a post: the hook prints no
 decision, so Claude shows its own prompt, and the refusal is an audit line
@@ -839,6 +843,12 @@ Butler start. An entry that is expired, unparseable, lacks a matching approval
 event, or was written with a clock that has gone backwards is no grant (fail
 closed). Limit: processes running as the same user, outside the hook, can still
 write the file; the deny rule governs agent tools, not the OS.
+
+The store's test seams (clock, case probe, approval cross-check) answer only
+to `REMUDA_BUTLER_TEST=1` in the daemon's process environment, read once when
+the module loads; setting a Lua field later changes nothing. The text deny
+refuses command and script text naming the grant store module, the
+`_butler_test` field or the env name, like any other guard rule.
 
 ### Scope patterns
 

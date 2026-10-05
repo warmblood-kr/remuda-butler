@@ -576,7 +576,9 @@ end
 
 local function segment_deny_reason(seg, ctx)
   -- The grant store is written only by Butler itself; no command text may name its module (cooperative: text, not a boundary).
-  if seg:find("guard_grants", 1, true) then return "Butler grant store" end
+  if seg:find("guard_grants", 1, true) or seg:find("_butler_test", 1, true) or seg:find("REMUDA_BUTLER_TEST", 1, true) then
+    return "Butler grant store"
+  end
   local w = words(seg)
   local executable = (w[1] or ""):match("([^/]+)$") or ""
   if executable == "sh" or executable == "bash" or executable == "zsh" or executable == "dash"
@@ -644,7 +646,8 @@ function M.deny_reason(tool, input, ctx)
     end
     return nil
   end
-  if tool:find("run_script$") and type(input.code) == "string" and input.code:find("guard_grants", 1, true) then
+  if tool:find("run_script$") and type(input.code) == "string" and (input.code:find("guard_grants", 1, true)
+      or input.code:find("_butler_test", 1, true) or input.code:find("REMUDA_BUTLER_TEST", 1, true)) then
     return "Butler grant store"
   end
   if tool == "Write" or tool == "Edit" or tool == "MultiEdit" or tool == "NotebookEdit" then

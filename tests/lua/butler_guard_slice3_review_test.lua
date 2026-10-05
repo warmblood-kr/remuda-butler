@@ -40,8 +40,9 @@ T.test("approval records are kept at least as long as the longest grant", functi
     "the relay prunes by the shared constant, not its own literal", "ok - retention")
 end)
 
--- M.now / M.verified / M.insensitive are test seams: honoured only when the harness set remuda._butler_test.
-T.test("the grant-store seams do nothing in production mode", function()
+-- M.now / M.verified / M.insensitive are test seams: honoured only when the env carried REMUDA_BUTLER_TEST=1 at load
+-- (production mode is covered in butler_guard_slice3_testflag_test.lua).
+T.test("the grant-store seams work in test mode", function()
   start_butler()
   T.eval("remuda.exec('butler/guard_grants')")
   T.eval([[local gg, d = remuda.butler.guard_grants, os.getenv('XDG_DATA_HOME') .. '/r-seam'
@@ -54,11 +55,7 @@ T.test("the grant-store seams do nothing in production mode", function()
     gg.verified = function() return true end
     gg.now = function() return t + 1000 end
     gg.insensitive = function() return true end]])
-  T.eq(T.eval("return tostring(remuda._butler_test)"), "true", "the harness sets the flag")
-  T.eq(T.eval("return #remuda.butler.guard_grants.active()"), "1", "with the flag the seams work")
-  T.eval("remuda._butler_test = nil")
-  T.eq(T.eval("return #remuda.butler.guard_grants.active()"), "0", "in production a hand-written line is no grant, verified seam or not")
-  T.eq(T.eval("return tostring(math.abs(remuda.butler.guard_grants.time() - os.time()) < 5)"), "true", "the clock seam is ignored")
-  T.eval("remuda._butler_test = true; remuda.butler.guard_grants.verified, remuda.butler.guard_grants.now, remuda.butler.guard_grants.insensitive = nil, nil, nil")
+  T.eq(T.eval("return #remuda.butler.guard_grants.active()"), "1", "with the env flag the seams work")
+  T.eval("remuda.butler.guard_grants.verified, remuda.butler.guard_grants.now, remuda.butler.guard_grants.insensitive = nil, nil, nil")
   T.expect(true, "", "ok - seams")
 end)

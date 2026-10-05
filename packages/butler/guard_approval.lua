@@ -185,7 +185,7 @@ end
 
 -- Limits and remembered crosses (grants on only). nil = go ahead; "denied" = the owner already said no to this
 -- scope (key, not session); "limited" = too many posts. Denied requests do not count against the limits.
-local function admit(session, key)
+local function admit(session, key, scope_key)
   local L, t = M._limits, clock()
   L.scope = L.scope or {}
   for k, until_ in pairs(L.denies) do if until_ <= t then L.denies[k] = nil end end
@@ -196,8 +196,8 @@ local function admit(session, key)
   end
   for s, list in pairs(L.agent) do if recent(list, 60) == 0 then L.agent[s] = nil end end
   for k, list in pairs(L.scope) do if recent(list, 3600) == 0 then L.scope[k] = nil end end
-  local mine, theirs = L.agent[session] or {}, L.scope[key] or {}
-  L.agent[session], L.scope[key] = mine, theirs
+  local mine, theirs = L.agent[session] or {}, L.scope[scope_key] or {}
+  L.agent[session], L.scope[scope_key] = mine, theirs
   if recent(mine, 60) >= PER_AGENT_PER_MIN or recent(theirs, 3600) >= PER_SCOPE_PER_HOUR
       or recent(L.hour, 3600) >= GLOBAL_PER_HOUR then return "limited" end
   mine[#mine + 1], theirs[#theirs + 1], L.hour[#L.hour + 1] = t, t, t
@@ -229,9 +229,12 @@ function M.maybe_request(record, hook_json)
     data.offer = grants.offer(record.tool, input, hook_json.cwd)
     if data.offer then data.offer.expires = grants.time() + grants.DEFAULT_TTL end
     data.note = note_line(input.description)
-    data.deny_key = data.offer and (data.offer.class .. " " .. data.offer.scope)
-      or (data.tool .. " " .. data.class .. " " .. data.cwd .. " " .. data.text)
-    local verdict = admit(data.session, data.deny_key)
+    -- The post limit never keys on command text (a trailing space or `; :` would dodge it); only the remembered
+    -- deny keeps the exact text.
+    local scope_key = data.offer and (data.offer.class .. " " .. data.offer.scope)
+      or (data.tool .. " " .. data.class .. " " .. data.cwd)
+    data.deny_key = data.offer and scope_key or (scope_key .. " " .. data.text)
+    local verdict = admit(data.session, data.deny_key, scope_key)
     if verdict then
       audit_refusal(record, data, verdict)
       if verdict == "denied" then
@@ -316,7 +319,8 @@ function M.configure()
           rec.grant = { id = id, class = offer.class, scope = offer.scope }
           settle(rec.id, M.ALLOW)
           audit("grant_created", rec, offer.class .. " " .. offer.scope, id)
-          thread_note(rec, "Standing grant " .. id .. ": " .. grants.show(offer.class .. " " .. offer.scope, 200)
+          -- a path may hold @ (a mention) or a backtick (markup): the note is plain text
+          thread_note(rec, "Standing grant " .. id .. ": " .. grants.show(offer.class .. " " .. offer.scope, 200):gsub("[@`]", "")
             .. " until " .. os.date("!%Y-%m-%dT%H:%M:%SZ", offer.expires) .. ". Allowed this call.")
           complete(true)
         end
