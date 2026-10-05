@@ -102,6 +102,8 @@ environment variable. Add `--headless` when only the service should start.
 New Butler behavior tests belong in `tests/lua/`. Keep Rust tests for core
 primitives and the wire protocol. Run all Lua tests or one file with
 `REMUDA_BIN=<pinned remuda> tests/lua_tests.sh [tests/lua/file_test.lua]`.
+New Butler CLI verbs must use `remuda.cli.parse`; hand-parsed exceptions are
+listed in `tests/hand_parsed_verbs.txt`, and that list may only shrink.
 
 The harness uses private daemon names `h<pid>` and `h<pid>c`, private HOME,
 XDG, and runtime directories, and never targets the default daemon. Teardown
