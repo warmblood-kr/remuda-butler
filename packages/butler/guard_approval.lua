@@ -373,7 +373,8 @@ local function expiry_tick()
     local names = {}
     for i, g in ipairs(E.due) do
       if i > 10 then names[#names + 1] = "and " .. (#E.due - 10) .. " more"; break end
-      names[#names + 1] = g.id .. " " .. g.class .. " " .. grants.show(g.scope, 80)
+      -- a path may hold @ (a mention) or a backtick (markup): the notice is plain text
+      names[#names + 1] = g.id .. " " .. g.class .. " " .. grants.show(g.scope, 80):gsub("[@`]", "")
     end
     if approval.notify("Standing grants expired: " .. table.concat(names, ", ")
         .. ". The agent asks again if it still needs them. Next: remuda butler guard grants") then

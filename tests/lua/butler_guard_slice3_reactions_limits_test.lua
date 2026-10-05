@@ -204,6 +204,18 @@ T.test("grants that expire together get one notice, after 60 s, in the owner roo
   T.eq(T.eval("local n = 0; for _ in pairs(remuda.butler.guard_approval._exp.tracked) do n = n + 1 end; return n"), "0", "the tracker is dropped", "ok - expiry notice")
 end)
 
+T.test("the expiry notice strips @ and backticks from scope text", function()
+  on("l-strip")
+  at(1000)
+  T.eval([[local g = remuda.butler.guard_approval
+    g._exp.due = { { id = 'g009', class = 'git', scope = '/p/@room/`x`/@alice:x.org', expires = 0 } }
+    g._exp.first = 0
+    remuda.butler.approval.sweep()]])
+  local text = post(1)
+  T.expect(text and has(text, "Standing grants expired: g009 git /p/room/x/alice:x.org."), "the notice is posted, scope stripped: " .. tostring(text))
+  T.expect(not has(text, "@") and not has(text, "`"), "no mention or markup survives", "ok - strip")
+end)
+
 T.test("agent text is one labelled, escaped, stripped line of at most 200 characters, after Butler's own lines", function()
   on("l-note")
   local note = "do it @room\nsee https://evil.test/x <b>**now**</b> `x` \u{202E}" .. string.rep("y", 300)
