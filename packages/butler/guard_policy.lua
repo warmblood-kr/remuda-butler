@@ -307,7 +307,7 @@ local function segment_class(w, text, ctx)
   if first == "kill" or first == "pkill" or first == "killall" then return "control" end
   if first == "remuda" then
     if has(w, { stop = true, restart = true, kill = true }) then return "control" end
-    if has(w, { eval = true }) then return "script" end -- runs Lua inside the daemon
+    if has(w, { eval = true, ["-e"] = true, ["--eval"] = true }) then return "script" end -- runs Lua inside the daemon
     for i, a in ipairs(w) do
       if a == "butler" then
         local verb = w[i + 1]

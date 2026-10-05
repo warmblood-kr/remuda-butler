@@ -1,7 +1,7 @@
 -- Guard slice 3, PR3: the standing-grant store. A grant is one JSON line in guard-grants.jsonl under
 -- the protected Butler data dir: scope (class + narrow pattern), ceiling, absolute expiry, holder,
--- and the approval event id. Nothing here creates a grant from the CLI or from agent text: `add` is
--- the in-process API a later PR calls from the owner's verified reaction. With the grants switch
+-- and the approval event id. Nothing here creates a grant from the CLI or from agent text: `add` is private
+-- and handed once, by register(), to the owner's verified-reaction handler (PR4). With the grants switch
 -- off nothing reads the store. Every read is fresh (no cache), so a start always reloads it, and an
 -- entry that is expired, unparseable, lacks its approval event or was written "in the future" is no
 -- grant (fail closed). Cooperative, like the rest of the guard: not a boundary.
@@ -10,6 +10,7 @@ local policy = assert(butler.guard_policy, "load butler/guard_policy before butl
 local M = butler.guard_grants or {}
 butler.guard_grants = M
 
+M.add = nil -- a live reload must not keep an add from an older load
 M.MAX_TTL, M.DEFAULT_TTL = 86400, 3600
 local CLASS = { writable = "path", git = "path", net = "net" }
 local CEILING = { T1 = true, T2 = true } -- T3 is never grantable
@@ -87,27 +88,41 @@ end
 -- calls it would otherwise ask about. These scopes are refused anyway so a grant cannot even be requested
 -- over the places the guard protects: a shallow root, the home itself, credentials, Butler's own data and
 -- config, and git's code-running files.
-local PROTECTED_SEGMENTS = { { ".ssh" }, { ".claude" }, { ".git", "hooks" }, { ".git", "config" } }
+local PROTECTED_SEGMENTS = { { ".ssh" }, { ".claude" }, { ".git", "hooks" }, { ".git", "config" }, { ".config", "remuda" } }
+local function protected_places(home)
+  return { policy.dir(), home and (home .. "/.ssh"), home and (home .. "/.claude"), home and (home .. "/.config/remuda") }
+end
+local function protected_segment(path)
+  local segs = {}
+  for s in path:gmatch("[^/]+") do segs[#segs + 1] = s end
+  for _, seq in ipairs(PROTECTED_SEGMENTS) do
+    for i = 1, #segs - #seq + 1 do
+      local hit = true
+      for k, name in ipairs(seq) do if segs[i + k - 1]:lower() ~= name then hit = false; break end end
+      if hit then return true end
+    end
+  end
+end
 local function protected_scope(scope, fixed, asked)
   local pattern = { class = "path", scope = scope }
   local depth = asked -- depth as written: a firmlink like /home resolves deeper on macOS
   local home = M.canonical(os.getenv("HOME") or "")
   if depth < 2 or (home and covers(pattern, home)) then return "scope is too shallow" end
-  local places = { policy.dir(), home and (home .. "/.ssh"), home and (home .. "/.claude"), home and (home .. "/.config/remuda") }
-  for _, place in ipairs(places) do
+  for _, place in ipairs(protected_places(home)) do
     local p = place and M.canonical(place)
     if p and (covers(pattern, p) or fixed == p or p:sub(1, #fixed + 1) == fixed .. "/" or fixed:sub(1, #p + 1) == p .. "/") then
       return "scope covers a protected directory"
     end
   end
-  local segs = {}
-  for s in scope:gmatch("[^/]+") do segs[#segs + 1] = s end
-  for _, seq in ipairs(PROTECTED_SEGMENTS) do
-    for i = 1, #segs - #seq + 1 do
-      local hit = true
-      for k, name in ipairs(seq) do if segs[i + k - 1]:lower() ~= name then hit = false; break end end
-      if hit then return "scope covers a protected directory" end
-    end
+  if protected_segment(scope) then return "scope covers a protected directory" end
+end
+
+-- The same places, asked of a call's canonical target: a broad scope never reaches them.
+local function protected_target(target)
+  if protected_segment(target) then return true end
+  for _, place in ipairs(protected_places(M.canonical(os.getenv("HOME") or ""))) do
+    local p = place and M.canonical(place)
+    if p and (target == p or target:sub(1, #p + 1) == p .. "/") then return true end
   end
 end
 
@@ -130,14 +145,15 @@ function M.scope(class, pattern)
   return out
 end
 
--- Every line, decoded, with its raw text. No read window: add() prunes, so the file stays small and a new
--- grant is never beyond what a read sees.
+-- Every line, decoded, with its raw text. At most MAX_FILE+1 bytes are read: add() keeps the file under MAX_FILE,
+-- so a larger one was not written by us and is nil (no grants, fail closed).
 local function lines()
   local path = file()
   local f = path and io.open(path, "r")
   if not f then return {} end
-  local text = f:read("a") or ""
+  local text = f:read(MAX_FILE + 1) or ""
   f:close()
+  if #text > MAX_FILE then return nil end
   local out = {}
   for line in text:gmatch("[^\n]+") do
     local ok, e = pcall(remuda.json.decode, line)
@@ -147,7 +163,7 @@ local function lines()
 end
 local function entries()
   local out = {}
-  for _, l in ipairs(lines()) do out[#out + 1] = l.e end
+  for _, l in ipairs(lines() or {}) do out[#out + 1] = l.e end
   return out
 end
 
@@ -187,7 +203,7 @@ local function locked(path, fn)
 end
 
 -- Record a grant. Returns its id (gNNN), or nil and why. TTL <= 24h whoever asks.
-function M.add(e)
+local function add(e)
   local path = file()
   if not path then return nil, "Butler data directory is unknown" end
   local ttl = e.ttl == nil and M.DEFAULT_TTL or e.ttl
@@ -202,7 +218,9 @@ function M.add(e)
     -- Under the lock: prune what is gone, allocate the id and write, so two adds never share an id or lose a line.
     -- The line holding the highest id stays even when expired, so an id is never reused.
     local t, top, topraw, keep = now(), 0, nil, {}
-    for _, l in ipairs(lines()) do
+    local old = lines()
+    if not old then return nil, "grant store is too large" end
+    for _, l in ipairs(old) do
       local n = tonumber(tostring(l.e.id):match("^g(%d+)$")) or 0
       if n > top then top, topraw = n, l.raw end
       if math.type(l.e.expires) == "integer" and l.e.expires > t then keep[#keep + 1] = l.raw end
@@ -220,6 +238,17 @@ function M.add(e)
     if not ok then return nil, tostring(err) end
     return id
   end)
+end
+
+-- The one-time hand-over of add to the owner-reaction handler: handler(add) runs once per load of this module,
+-- later calls (and non-functions) get nil. Cooperative like the text deny in guard_policy: it keeps add off the
+-- module table, it does not stop Lua running inside the daemon.
+local registered
+function M.register(handler)
+  if registered or type(handler) ~= "function" then return nil, "grant store add is already registered" end
+  registered = true
+  handler(add)
+  return true
 end
 
 -- Direction-control characters (U+202A-202E, U+2066-2069, U+200E/F and friends) are shown escaped, as in the approval post.
@@ -246,26 +275,26 @@ function M.list()
 end
 
 -- Pushes under a grant: any CI or workflow path is T3 (always asks). The list is reviewed like a guard rule.
--- scripts/, Makefile and justfile are what CI calls, so they count as CI.
-local CI_PREFIX = { ".github/", ".circleci/", ".buildkite/", ".gitlab/", "scripts/" }
+-- scripts/ (a segment at any depth), Makefile and justfile (by basename) are what CI calls, so they count as CI.
+local CI_PREFIX = { ".github/", ".circleci/", ".buildkite/", ".gitlab/" }
 local CI_FILE = { [".gitlab-ci.yml"] = 1, ["jenkinsfile"] = 1, [".travis.yml"] = 1, ["azure-pipelines.yml"] = 1,
-  ["bitbucket-pipelines.yml"] = 1, [".drone.yml"] = 1, ["cloudbuild.yaml"] = 1, ["appveyor.yml"] = 1, [".appveyor.yml"] = 1,
-  ["makefile"] = 1, ["gnumakefile"] = 1, ["justfile"] = 1 }
+  ["bitbucket-pipelines.yml"] = 1, [".drone.yml"] = 1, ["cloudbuild.yaml"] = 1, ["appveyor.yml"] = 1, [".appveyor.yml"] = 1 }
+local CI_BASENAME = { ["makefile"] = 1, ["gnumakefile"] = 1, ["justfile"] = 1 }
 function M.touches_ci(names)
   for _, name in ipairs(names) do
     local lower = name:lower()
-    if CI_FILE[lower] then return true end
+    if CI_FILE[lower] or CI_BASENAME[lower:match("[^/]*$")] or ("/" .. lower):find("/scripts/", 1, true) then return true end
     for _, p in ipairs(CI_PREFIX) do if lower:sub(1, #p) == p then return true end end
   end
   return false
 end
 
 -- Files the push would add over the upstream ref, best effort; nil when it cannot be computed.
-function M.diff_names(cwd)
+function M.diff_names(cwd, base)
   -- Repo config must not run anything at hook time (fsmonitor, hooks, external diff, textconv); renames are
-  -- split so a move out of a CI path still lists the source.
-  local argv = { "env", "GIT_OPTIONAL_LOCKS=0", "git", "-C", cwd, "-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null",
-    "--no-pager", "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", "@{upstream}...HEAD" }
+  -- split so a move out of a CI path still lists the source. base is the ref the push updates.
+  local argv = { "env", "GIT_OPTIONAL_LOCKS=0", "git", "-C", cwd, "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+    "--no-pager", "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", (base or "@{upstream}") .. "...HEAD" }
   local ok, r = pcall(remuda.process.run, { argv = argv, timeout = 5 })
   if not ok or type(r) ~= "table" or r.code ~= 0 or r.timed_out then return nil end
   local names = {}
@@ -287,41 +316,59 @@ local function host_of(url)
   return parse("net", host .. (port and (":" .. port) or ""))
 end
 
+-- Trimmed stdout of `git -C cwd ...`, nil when git fails (an unset config key included).
+local function git(cwd, ...)
+  local ok, r = pcall(remuda.process.run, { argv = { "git", "-C", cwd, ... }, timeout = 5 })
+  if ok and type(r) == "table" and r.code == 0 and not r.timed_out then return ((r.stdout or ""):gsub("%s+$", "")) end
+end
+
 -- A push is covered only when the command is exactly `git push [remote [current-branch]]`: no shell syntax, no
--- cd/-C/env/GIT_DIR prefix, no refspec, no flag. The diff runs in the hook's cwd, so anything that moves the
--- push elsewhere or changes what it sends is outside this whitelist and falls to the tier (ask).
+-- cd/-C/env/GIT_DIR prefix, no refspec, no flag. The remote word must be a configured remote (never a path) with
+-- no remote.<r>.push, push.default must not be matching/nothing, and the 2-3 word forms must push to the upstream
+-- (git's `simple` rule). Returns the ref the push updates, which is what the diff runs against; anything else
+-- falls to the tier (ask).
 local function plain_push(command, cwd)
   -- the character set also refuses tabs, newlines, = : + ; & | ` $ ( ) < > and quotes
-  if type(command) ~= "string" or command:find("[^%w %./_@%-]") then return false end
+  if type(command) ~= "string" or type(cwd) ~= "string" or command:find("[^%w %./_@%-]") then return nil end
   local w = {}
   for s in command:gmatch("%S+") do w[#w + 1] = s end
-  if #w < 2 or #w > 4 or w[1] ~= "git" or w[2] ~= "push" then return false end
-  for i = 3, #w do if w[i]:find("^%-") then return false end end
-  if #w == 4 then
-    local ok, r = pcall(remuda.process.run, { argv = { "git", "-C", cwd, "symbolic-ref", "--short", "-q", "HEAD" }, timeout = 5 })
-    return ok and type(r) == "table" and r.code == 0 and (r.stdout or ""):gsub("%s+$", "") == w[4]
+  if #w < 2 or #w > 4 or w[1] ~= "git" or w[2] ~= "push" then return nil end
+  for i = 3, #w do if w[i]:find("^%-") then return nil end end
+  local branch = git(cwd, "symbolic-ref", "--short", "-q", "HEAD")
+  if not branch or branch == "" then return nil end
+  local mode = git(cwd, "config", "--get", "push.default")
+  if mode == "matching" or mode == "nothing" then return nil end
+  local up_remote, up_merge = git(cwd, "config", "--get", "branch." .. branch .. ".remote"), git(cwd, "config", "--get", "branch." .. branch .. ".merge")
+  local remote = w[3] or up_remote
+  if #w < 4 and not (up_remote == remote and up_merge == "refs/heads/" .. branch) then return nil end
+  if #w == 4 and w[4] ~= branch then return nil end
+  for name in (git(cwd, "remote") or ""):gmatch("[^\n]+") do
+    if name == remote then
+      if git(cwd, "config", "--get-all", "remote." .. name .. ".push") then return nil end
+      return "refs/remotes/" .. remote .. "/" .. branch
+    end
   end
-  return true
 end
 
 -- The id of the active grant that covers this call, or nil. Never takes an id from the call itself.
 function M.match(tool, input, cwd)
   if not policy.grants_enabled() then return nil end
   input = type(input) == "table" and input or {}
-  local class, target
+  local class, target, base
   if FILE_TOOLS[tool] then
     class, target = "writable", M.canonical(input.file_path or input.notebook_path)
   elseif tool == "WebFetch" then
     class, target = "net", host_of(input.url)
   elseif (tool == "Bash" or tool == "PowerShell") and policy.classify(tool, input, { cwd = cwd }) == "push" then
-    if not plain_push(input.command, cwd) then return nil end
+    base = plain_push(input.command, cwd)
+    if not base then return nil end
     class, target = "git", M.canonical(cwd)
   end
-  if not target then return nil end
+  if not target or (class ~= "net" and protected_target(target)) then return nil end
   for _, g in ipairs(M.active()) do
     if g.class == class and covers(g, target) then
       if class == "git" then
-        local names = M.diff_names(cwd)
+        local names = M.diff_names(cwd, base)
         if names == nil or M.touches_ci(names) then return nil end -- no diff: the tier asks
       end
       return g.id

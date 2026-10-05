@@ -1,5 +1,5 @@
 -- Guard slice 3, PR3: the grant store, `guard grants`, the grants switch, grant_id from the store, push diff check.
-local function start_butler()
+local function start_butler(no_register)
   T.install_mod("butler", assert(os.getenv("REMUDA_LUA_REPO")))
   T.eval('remuda._butler_argv = {"sh", "-c", "sleep 60"}; remuda._butler_skip_relay = true; remuda._butler_readiness_timeout = 1')
   T.eval('return remuda.exec("butler")')
@@ -26,6 +26,7 @@ local function start_butler()
     remuda._t_guard = function(args, caller) return remuda._butler_command_run('guard', args, caller or {}) end
     return 'ok'
   ]])
+  if not no_register then T.eval("remuda.butler.guard_grants.register(function(add) remuda._t_add = add end)") end
 end
 local function has(text, needle) return text:find(needle, 1, true) ~= nil end
 
@@ -144,7 +145,7 @@ T.test("scope patterns: whole-segment * below a fixed prefix only; resolved when
   T.eq(scope("frob", root), "nil", "unknown class refused", "ok - scope")
 end)
 
-local ADD = [[remuda.butler.guard_grants.add({ class = 'writable', scope = %q, ceiling = 'T2', holder = 'ss-a',
+local ADD = [[remuda._t_add({ class = 'writable', scope = %q, ceiling = 'T2', holder = 'ss-a',
   event = '$ev1', ttl = %s })]]
 
 T.test("grant store: ids, TTL cap, ceiling, absolute expiry, fail closed on bad entries, nothing cached", function()
@@ -157,9 +158,9 @@ T.test("grant store: ids, TTL cap, ceiling, absolute expiry, fail closed on bad 
   T.eq(refused(ADD:format(root .. "/other", "86401")), "nil", "TTL over 24h refused")
   T.eq(refused(ADD:format(root .. "/other", "0")), "nil", "zero TTL refused")
   T.eq(refused(ADD:format("*", "60")), "nil", "bad scope refused")
-  T.eq(refused("remuda.butler.guard_grants.add({ class = 'writable', scope = '" .. root .. "/other', ceiling = 'T3', holder = 'x', event = '$e', ttl = 60 })"),
+  T.eq(refused("remuda._t_add({ class = 'writable', scope = '" .. root .. "/other', ceiling = 'T3', holder = 'x', event = '$e', ttl = 60 })"),
     "nil", "T3 ceiling refused")
-  T.eq(refused("remuda.butler.guard_grants.add({ class = 'writable', scope = '" .. root .. "/other', ceiling = 'T2', holder = 'x', ttl = 60 })"),
+  T.eq(refused("remuda._t_add({ class = 'writable', scope = '" .. root .. "/other', ceiling = 'T2', holder = 'x', ttl = 60 })"),
     "nil", "no approval event refused")
   local file = T.eval("return (remuda.butler.guard_policy.log_path():gsub('guard%-audit%.jsonl$', 'guard-grants.jsonl'))")
   T.expect(has(T.eval("local f = io.open(" .. string.format("%q", file) .. "); local s = f:read('a'); f:close(); return s"),
@@ -195,9 +196,9 @@ T.test("guard grants lists active grants for the operator, sanitised; with the s
   T.eval("remuda._t_guard({'guard','grants','on'})")
   T.expect(has(T.eval("return remuda._t_guard({'guard','grants'})"), "no active grants"), "empty store")
   -- control characters in holder or event are refused at add and make a stored entry no grant
-  T.eq(T.eval("return tostring(remuda.butler.guard_grants.add({ class = 'writable', scope = " .. string.format("%q", root .. "/real/*")
+  T.eq(T.eval("return tostring(remuda._t_add({ class = 'writable', scope = " .. string.format("%q", root .. "/real/*")
     .. ", ceiling = 'T2', holder = 'ss-a\\27[2J\\nNext: rm', event = '$ev1', ttl = 3600 }))"), "nil", "control characters refused")
-  T.eval("remuda.butler.guard_grants.add({ class = 'writable', scope = " .. string.format("%q", root .. "/real/*")
+  T.eval("remuda._t_add({ class = 'writable', scope = " .. string.format("%q", root .. "/real/*")
     .. ", ceiling = 'T2', holder = 'ss-a', event = '$ev1', ttl = 3600 })")
   local out = T.eval("return remuda._t_guard({'guard','grants'})")
   for _, want in ipairs({ "g001", "writable", root .. "/real/*", "T2", "ss-a", "expires" }) do
@@ -222,7 +223,7 @@ T.test("grant_id in audit lines comes from the store: the covering grant, '-' wh
   start_butler()
   local root = tree("g3p3-audit")
   T.eval("remuda._t_guard({'guard','on'}); remuda._t_guard({'guard','grants','on'})")
-  T.eval("remuda.butler.guard_grants.add({ class = 'writable', scope = " .. string.format("%q", root .. "/real/*")
+  T.eval("remuda._t_add({ class = 'writable', scope = " .. string.format("%q", root .. "/real/*")
     .. ", ceiling = 'T2', holder = 'ss-a', event = '$ev1', ttl = 3600 })")
   local function last_line() local l; for x in T.eval("return remuda._t_lines()"):gmatch("[^\n]+") do l = x end; return l end
   T.eval(("remuda._t_hook(%q)"):format(write_hook(root .. "/real/sub/f.txt")))
@@ -258,7 +259,7 @@ T.test("a push under a grant is checked against the remote ref: CI/workflow path
   local work = root .. "/work"
   local function sh(script) return T.eval(("local r = remuda.process.run({ argv = { 'sh', '-c', %q } }); return tostring(r.code)"):format("set -e; cd " .. work .. "; " .. script)) end
   T.eval("remuda._t_guard({'guard','on'}); remuda._t_guard({'guard','grants','on'})")
-  T.eval("remuda.butler.guard_grants.add({ class = 'git', scope = " .. string.format("%q", work)
+  T.eval("remuda._t_add({ class = 'git', scope = " .. string.format("%q", work)
     .. ", ceiling = 'T2', holder = 'ss-a', event = '$ev1', ttl = 3600 })")
   local PUSH = ([[{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git push"},"cwd":%q}]]):format(work)
   local function last_line() local l; for x in T.eval("return remuda._t_lines()"):gmatch("[^\n]+") do l = x end; return l end
@@ -293,7 +294,7 @@ local function git_fixture(name)
   local work = root .. "/work"
   local function sh(script) return T.eval(("local r = remuda.process.run({ argv = { 'sh', '-c', %q } }); return tostring(r.code)"):format("set -e; cd " .. work .. "; " .. script)) end
   T.eval("remuda._t_guard({'guard','on'}); remuda._t_guard({'guard','grants','on'})")
-  T.eval("remuda.butler.guard_grants.add({ class = 'git', scope = " .. string.format("%q", work)
+  T.eval("remuda._t_add({ class = 'git', scope = " .. string.format("%q", work)
     .. ", ceiling = 'T2', holder = 'ss-a', event = '$ev1', ttl = 3600 })")
   return work, sh
 end
@@ -309,7 +310,7 @@ T.test("MUST 1: diff_names runs git with repo config neutralised and no optional
     remuda.butler.guard_grants.diff_names('/w')
     remuda.process.run = real
     return table.concat(got.argv, ' ')]])
-  for _, want in ipairs({ "GIT_OPTIONAL_LOCKS=0", "-c core.fsmonitor=", "-c core.hooksPath=/dev/null", "--no-pager", "--no-ext-diff",
+  for _, want in ipairs({ "GIT_OPTIONAL_LOCKS=0", "-c core.fsmonitor=false", "-c core.hooksPath=/dev/null", "--no-pager", "--no-ext-diff",
     "--no-textconv", "--no-renames", "--name-only", "-z" }) do
     T.expect(has(seen, want), "diff argv missing '" .. want .. "': " .. seen)
   end
@@ -328,7 +329,7 @@ end)
 T.test("MUST 3: a URL with a backslash, whitespace, control char or userinfo gets no net grant", function()
   start_butler()
   tree("g3p3-host")
-  T.eval("remuda._t_guard({'guard','grants','on'}); remuda.butler.guard_grants.add({ class = 'net', scope = 'example.com', ceiling = 'T2', holder = 'ss-a', event = '$ev1', ttl = 3600 })")
+  T.eval("remuda._t_guard({'guard','grants','on'}); remuda._t_add({ class = 'net', scope = 'example.com', ceiling = 'T2', holder = 'ss-a', event = '$ev1', ttl = 3600 })")
   local function fetch(url) return T.eval(("return tostring(remuda.butler.guard_grants.match('WebFetch', { url = %q }, '/'))"):format(url)) end
   T.eq(fetch("https://example.com/x"), "g001", "a plain URL is covered")
   for _, bad in ipairs({ "https://example.com\\@evil.com/", "https://evil.com\\.example.com/", "https://example.com@evil.com/",
@@ -361,7 +362,7 @@ T.test("SHOULD a: scripts, Makefile and justfile called by CI are CI paths", fun
     for _, n in ipairs({ 'scripts/release.sh', 'Makefile', 'makefile', 'justfile', 'Justfile', 'GNUmakefile', 'docs/scripts/x', 'src/a.lua' }) do
       out[#out + 1] = tostring(g.touches_ci({ n })) end
     return table.concat(out, ',')]])
-  T.eq(got, "true,true,true,true,true,true,false,false", "scripts/, Makefile and justfile are T3 at the repo root", "ok - ci scripts")
+  T.eq(got, "true,true,true,true,true,true,true,false", "scripts/, Makefile and justfile are T3 (a scripts/ segment at any depth)", "ok - ci scripts")
 end)
 
 T.test("SHOULD b: add prunes expired lines and allocates ids under one lock; a big store does not hide a new grant", function()
@@ -370,7 +371,7 @@ T.test("SHOULD b: add prunes expired lines and allocates ids under one lock; a b
   T.eval("remuda._t_guard({'guard','grants','on'}); remuda.butler.guard_grants.now = function() return 1790000000 end")
   local file = T.eval("return (remuda.butler.guard_policy.log_path():gsub('guard%-audit%.jsonl$', 'guard-grants.jsonl'))")
   -- core's lock is per process, so a second holder is simulated: a held lock refuses the add and writes nothing
-  local add = "remuda.butler.guard_grants.add({ class = 'writable', scope = " .. string.format("%q", root .. "/other") .. ", ceiling = 'T2', holder = 'a', event = '$e', ttl = 60 })"
+  local add = "remuda._t_add({ class = 'writable', scope = " .. string.format("%q", root .. "/other") .. ", ceiling = 'T2', holder = 'a', event = '$e', ttl = 60 })"
   local busy = T.eval("local real = remuda.fs.lock; remuda.fs.lock = function() return nil, 'held' end; local id = " .. add .. "; remuda.fs.lock = real; return tostring(id)")
   T.eq(busy, "nil", "add waits for the lock and refuses when it stays held")
   T.eq(T.eval("local f = io.open(" .. string.format("%q", file) .. "); return tostring(f and f:read('a'))"), "nil", "nothing written under a held lock")
@@ -378,18 +379,18 @@ T.test("SHOULD b: add prunes expired lines and allocates ids under one lock; a b
   local order = T.eval(("local real, seen = remuda.fs.lock, {}; remuda.fs.lock = function(p) seen.path = p; return { release = function() seen.file = io.open(%q) ~= nil end } end; local id = %s; remuda.fs.lock = real; return seen.path .. ' ' .. tostring(seen.file) .. ' ' .. tostring(id)"):format(file, add))
   T.eq(order, file .. ".lock true g001", "locked on the store's lock file, released after the write")
 
-  T.eq(T.eval("return tostring(remuda.butler.guard_grants.add({ class = 'writable', scope = " .. string.format("%q", root .. "/other") .. ", ceiling = 'T2', holder = 'a', event = '$e', ttl = 60 }))"), "g002", "next add: g002")
-  T.eq(T.eval("return tostring(remuda.butler.guard_grants.add({ class = 'writable', scope = " .. string.format("%q", root .. "/real") .. ", ceiling = 'T2', holder = 'a', event = '$e', ttl = 60 }))"), "g003", "next add: g003")
-  -- 300 KiB of expired lines in front: the next add prunes them, keeps ids rising and stays visible
+  T.eq(T.eval("return tostring(remuda._t_add({ class = 'writable', scope = " .. string.format("%q", root .. "/other") .. ", ceiling = 'T2', holder = 'a', event = '$e', ttl = 60 }))"), "g002", "next add: g002")
+  T.eq(T.eval("return tostring(remuda._t_add({ class = 'writable', scope = " .. string.format("%q", root .. "/real") .. ", ceiling = 'T2', holder = 'a', event = '$e', ttl = 60 }))"), "g003", "next add: g003")
+  -- 190 KiB (under the read bound) of expired lines in front: the next add prunes them, keeps ids rising and stays visible
   T.eval(([[local f = io.open(%q, 'w')
-    for i = 1, 3000 do
+    for i = 1, 1200 do
       f:write(remuda.json.encode({ id = string.format('g%%03d', i), class = 'writable', scope = %q, ceiling = 'T2', holder = 'h', event = '$e',
         written = 1789000000, expires = 1789003600 }), '\n')
     end
     f:close()]]):format(file, root .. "/other"))
-  T.eq(T.eval("return tostring(remuda.butler.guard_grants.add({ class = 'writable', scope = " .. string.format("%q", root .. "/real") .. ", ceiling = 'T2', holder = 'a', event = '$e', ttl = 60 }))"),
-    "g3001", "ids keep rising past the pruned lines")
-  T.eq(T.eval("local out = {}; for _, g in ipairs(remuda.butler.guard_grants.active()) do out[#out+1] = g.id end; return table.concat(out, ',')"), "g3001",
+  T.eq(T.eval("return tostring(remuda._t_add({ class = 'writable', scope = " .. string.format("%q", root .. "/real") .. ", ceiling = 'T2', holder = 'a', event = '$e', ttl = 60 }))"),
+    "g1201", "ids keep rising past the pruned lines")
+  T.eq(T.eval("local out = {}; for _, g in ipairs(remuda.butler.guard_grants.active()) do out[#out+1] = g.id end; return table.concat(out, ',')"), "g1201",
     "the new grant is active, not lost beyond a read window")
   T.expect(tonumber(T.eval("local f = io.open(" .. string.format("%q", file) .. "); local n = #f:read('a'); f:close(); return n")) < 2000, "expired lines were pruned", "ok - add under lock")
 end)
@@ -413,7 +414,7 @@ T.test("SHOULD e: guard grants escapes bidi overrides in holder, event and scope
   start_butler()
   local root = tree("g3p3-bidi")
   T.eval("remuda._t_guard({'guard','grants','on'})")
-  T.eval("remuda.butler.guard_grants.add({ class = 'writable', scope = " .. string.format("%q", root .. "/real/*")
+  T.eval("remuda._t_add({ class = 'writable', scope = " .. string.format("%q", root .. "/real/*")
     .. ", ceiling = 'T2', holder = 'ss\226\128\174a', event = '$ev\226\129\166x', ttl = 3600 })")
   local out = T.eval("return remuda._t_guard({'guard','grants'})")
   T.expect(has(out, "g001"), "grant listed: " .. out)
