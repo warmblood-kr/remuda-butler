@@ -57,15 +57,17 @@ T.test("switch changes are audited with who and when, even when turned off", fun
     { "guard approvals on", "operator" }, { "guard off", "operator" } }
   local i = 0
   for line in lines:gmatch("[^\n]+") do
-    i = i + 1
-    local w = want[i]
-    T.expect(w and has(line, '"event":"switch"') and has(line, '"summary":"' .. w[1] .. '"')
-      and has(line, '"session":"' .. w[2] .. '"') and has(line, '"time":"'), "switch line " .. i .. ": " .. line)
+    if not has(line, '"event":"chain"') then -- the genesis line is not a switch
+      i = i + 1
+      local w = want[i]
+      T.expect(w and has(line, '"event":"switch"') and has(line, '"summary":"' .. w[1] .. '"')
+        and has(line, '"session":"' .. w[2] .. '"') and has(line, '"time":"'), "switch line " .. i .. ": " .. line)
+    end
   end
   T.expect(i == #want, "expected " .. #want .. " switch lines, got " .. i, "ok - switch events")
   -- A status read changes nothing and records nothing.
   T.eval("remuda._t_guard({'guard','status'}, {})")
-  T.eq(T.eval("return select(2, remuda._t_lines():gsub('\\n', '')) + 1"), tostring(#want), "status records nothing")
+  T.eq(T.eval("return select(2, remuda._t_lines():gsub('\\n', '')) + 1"), tostring(#want + 1), "status records nothing")
 end)
 
 T.test("retention: size rotation keeps dated archives, prunes only past the documented period", function()
@@ -106,7 +108,7 @@ T.test("guard stats counts decision classes over the log and its archives", func
     f:write('{"time":"2020-01-01T00:00:00Z","session":"s","kind":"claude","event":"PreToolUse","tool":"Bash","class":"push","summary":"x"}\n')
     f:close()]])
   local out = T.eval("return remuda._t_guard({'guard','stats'})")
-  for _, f in ipairs({ "lines: 6", "class push: 3", "class other: 3", "event deny: 2", "event PreToolUse: 2",
+  for _, f in ipairs({ "lines: 7", "class push: 3", "class other: 4", "event chain: 1", "event deny: 2", "event PreToolUse: 2",
     "event switch: 2", "since 2020-01-01T00:00:00Z" }) do
     T.expect(has(out, f), "stats missing '" .. f .. "':\n" .. out)
   end

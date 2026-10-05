@@ -927,9 +927,8 @@ with userinfo (any `@` in the authority), a backslash, whitespace or a control
 character gets no grant, because parsers disagree about its host. A port
 other than the scheme default is a different scope. An IP literal never matches
 a domain scope; it needs its own `net:IP` scope, T3. A redirect is a new
-request and is judged on its own host. Codex cannot enforce a domain, because
-its sandbox network is all-or-nothing, so `net:DOMAIN` for codex is refused as
-T3 and never widened to open `net`.
+request and is judged on its own host. Grants never apply to codex (see Codex
+grants), whose sandbox network is all-or-nothing.
 
 ### Pushes under a grant
 
@@ -966,16 +965,54 @@ text, and it never selects the scope, the TTL or the reactions. On a guard post 
 
 ### Audit chain
 
-Each audit line carries the hash of the previous line, so removing a line
-breaks the chain. The daily digest posted to HOME includes the previous digest
-and the line count.
+Each new audit line carries `prev`, the SHA-256 of the line before it (its text
+without the newline). A log that is new, or whose last line predates the chain,
+starts with a `chain` genesis line (`"prev":"genesis"`); older lines are not
+rewritten. When the log rotates, the first line of the new live log carries the
+hash of the rotated file's last line, so the chain runs across files. If the
+hash cannot be computed the line is still written, without `prev`: audit never
+blocks and never locks the owner out.
+
+`remuda butler guard verify` (read-only, not a weakening verb) walks the dated
+archives, `guard-audit.jsonl.1` and the live log in order and prints `ok` with
+the chained line count and last hash, or `BROKEN at FILE line N` with the
+reason. It detects a removed, edited or unchained line and a removed rotated
+file. A final line of the live log with no newline yet is a write in
+progress: it is reported as a note, not as BROKEN. It cannot detect the whole log replaced by a consistent forgery by the
+same user, nor the truncation of the newest lines, and it cannot check the
+oldest kept archive's first link (older archives are pruned after 90 days).
+
+A fork of the chain (the audit lock fell back after 1 s and two writers raced, a line
+written without `prev` because the hash failed, a line cut short by a crash and
+appended to) makes verify report BROKEN at that line, and it keeps doing so until the
+file holding it is pruned (up to 90 days). There is no way to acknowledge or
+re-anchor the chain, and verify stops at that first break.
+
+The audit lock is core's `remuda.fs.lock`, which never blocks (it is a try-lock, a
+busy lock answers at once). The audit write retries it for about a second, then
+writes without it, so a holder that never lets go cannot hang the hooks; the cost
+is a possible fork, as above.
+
+Once per UTC day, Butler posts a digest of the last completed day to HOME (the
+owner room): its audit line count, the hash of its last line, and the hash of
+the previous digest. A day with no audit lines gets none, a restart does not
+repeat one (the last day and hash are kept in the protected data dir), and a
+failed post is retried. The digest holds only counts and hashes, never agent
+text. The digest in the owner's room is the real control: it is off the box, so
+a replaced log no longer matches it. The local chain only detects.
+
+After downtime (or a run of failed posts across midnight) the days since the last digest
+are attested oldest first, each linking the digest before it, so the chain has no
+skipped day within the last 7 days. A gap older than that cap is never covered: the digest
+resumes with the newest 7 days and its previous-digest link still names the last one
+posted. A quiet day is scanned once, and a failed post is retried without scanning
+again. If the digest state cannot be saved (`guard-digest.json`), a restart may post
+the same day again: a double post, the safe direction.
 
 ### Codex grants
 
-Codex grants are baked into the launch flags. When a codex grant expires or is
-revoked, Butler parks the session or relaunches it with the reduced profile
-within 60 seconds, and records the profile it applied on the session row. The
-expiry is timer-driven and reconciled on Butler start, because a Butler crash
-leaves a codex session running with its wide flags. A running codex sandbox is
-never edited in place. Claude grants are checked on every hook call, so expiry
+Grants apply to Claude sessions only. A codex session keeps its fixed launch
+profile (sandbox and writable roots, set when it starts); no path widens it, and
+Butler never edits a running codex sandbox. A codex grant would need its own
+owner-approved design. Claude grants are checked on every hook call, so expiry
 and revocation apply on the next tool call.

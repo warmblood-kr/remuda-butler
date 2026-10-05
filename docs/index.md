@@ -143,6 +143,7 @@ Two rotations in one second keep both archives (a `-N` suffix).
 `remuda butler guard stats` prints the line count, the first and last time, and
 the counts per class and per event over the log and its archives, bucketing names it does not know as `other` and counting oversized or unreadable lines as unreadable, as a baseline
 to compare before enabling `guard deny`.
+Each new audit line carries `prev`, the SHA-256 of the line before it, starting at a `chain` genesis line and carried across rotation; lines from before the chain stay as they are. `remuda butler guard verify` (read-only) walks the archives and the live log and prints `ok` or the first broken line. Once per UTC day Butler posts a digest of the last day to the owner room (line count, last line hash, previous digest hash); that off-box digest is what shows a replaced log, the local chain only detects. See `docs/butler.md` (Audit chain).
 
 ### Guard grants
 
