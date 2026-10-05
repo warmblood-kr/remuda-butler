@@ -96,6 +96,10 @@ function approval.handler(kind, callbacks)
   return true
 end
 
+-- Seconds a finished approval record is kept. It must outlive the longest standing grant (guard_grants.MAX_TTL,
+-- 24 h): the grant store trusts a grant only while Butler's record of the owner's reaction exists.
+approval.RETENTION_S = 24 * 60 * 60
+
 -- Minutes an owner approval request stays open (configured by `approval_ttl_minutes`).
 approval.ttl_minutes = 30
 function approval.default_ttl_s() return approval.ttl_minutes * 60 end
@@ -214,6 +218,29 @@ function approval.reply(rec, text)
   return attached.post(text, { rel_type = "m.thread", event_id = rec.event_id }, function() end,
     { room = rec.room_id })
 end
+
+-- Butler's own record that the owner's reaction (the Matrix event id) turned this request into this standing grant.
+-- The relay writes answer_event_id only for the verified owner; the grant store trusts nothing on its own.
+function approval.granted_by(event_id, grant_id, class, scope)
+  if not attached or type(event_id) ~= "string" or event_id == "" then return false end
+  for _, rec in pairs(attached.state.approvals or {}) do
+    local g = type(rec) == "table" and rec.kind == "guard_action" and rec.answer_verdict == "grant" and rec.grant
+    if type(g) == "table" and rec.answer_event_id == event_id and g.id == grant_id and g.class == class
+        and g.scope == scope and type(rec.answered_by) == "string" and rec.answered_by ~= "" then return true end
+  end
+  return false
+end
+
+-- A plain notice in the owner's room (no request, no mention); nil and why when the relay is not running.
+function approval.notify(text)
+  if not attached or type(attached.post) ~= "function" then return nil, "Matrix relay is not running" end
+  return attached.post(text, nil, function() end, {})
+end
+
+-- Named per-second hooks run by sweep(); a name is replaced, never added, so a live reload leaves one.
+local ticks = approval._ticks or {}
+approval._ticks = ticks
+function approval.tick(name, fn) ticks[name] = fn end
 
 local function apply_approved(rec)
   if type(rec) ~= "table" or rec.status ~= "approved" or applying[rec.id] then return false end
@@ -407,7 +434,7 @@ end
 
 function approval.answer(id_or_event, verdict, who, event_id)
   if not attached then return nil, "Matrix relay is not running. Next: remuda butler matrix status" end
-  if verdict ~= "approve" and verdict ~= "deny" then return nil, "Invalid approval answer." end
+  if verdict ~= "approve" and verdict ~= "deny" and verdict ~= "grant" then return nil, "Invalid approval answer." end
   approval.sweep()
   local rec
   for id, candidate in pairs(attached.state.approvals or {}) do
@@ -415,6 +442,17 @@ function approval.answer(id_or_event, verdict, who, event_id)
       or candidate.event_id == id_or_event) then rec = candidate; break end
   end
   if not rec then return nil, "No such request." end
+  if verdict == "grant" then
+    -- Only a guard request can end in a standing grant, and only the owner in Matrix: the terminal never grants.
+    local check = rec.kind == "guard_action" and handlers.guard_action and handlers.guard_action.grant_check
+    local why = not check and "No standing grant is offered for this request."
+      or who == "operator (terminal)" and "A guarded tool call can only be approved by the owner in its live Matrix thread."
+      or rec.status == "open" and check(rec)
+    if why then
+      if rec.status == "open" then approval.reply(rec, why) end
+      return nil, why
+    end
+  end
   if rec.kind == "approve_text" and who == "operator (terminal)" and verdict == "approve" then
     return nil, "Prepared text can only be approved by the owner in its live Matrix thread."
   end
@@ -441,9 +479,10 @@ function approval.answer(id_or_event, verdict, who, event_id)
   end
   local now = math.floor(os.time() * 1000)
   rec.status, rec.answered_by, rec.answered_at, rec.answer_event_id =
-    verdict == "approve" and "approved" or "denied", who, now, event_id
+    verdict == "deny" and "denied" or "approved", who, now, event_id
+  rec.answer_verdict = verdict
   persist()
-  if verdict == "approve" then
+  if verdict ~= "deny" then
     apply_approved(rec)
   else
     local callback = handlers[rec.kind] and handlers[rec.kind].deny
@@ -467,6 +506,7 @@ function approval.sweep(now)
     end
   end
   if count > 0 then persist() end
+  for _, fn in pairs(ticks) do pcall(fn, now) end
   return count
 end
 

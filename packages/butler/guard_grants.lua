@@ -16,8 +16,10 @@ local CLASS = { writable = "path", git = "path", net = "net" }
 local CEILING = { T1 = true, T2 = true } -- T3 is never grantable
 local MAX_FILE = 256 * 1024
 
--- Test seams: M.now() and M.insensitive(real) replace these when set.
-local function now() return (M.now or os.time)() end
+-- Test seams: M.now(), M.insensitive(real) and M.verified(e) replace these, but only when the test harness set
+-- remuda._butler_test = true; in production they are ignored, whatever Lua sets them.
+local function seam(name) return remuda._butler_test == true and M[name] or nil end
+local function now() return (seam("now") or os.time)() end
 
 local function file() local d = policy.dir(); return d and (d .. "/guard-grants.jsonl") end
 
@@ -31,7 +33,7 @@ local function probe(real)
   local swapped = real:gsub("%a", function(c) local u = c:upper(); return u == c and c:lower() or u end)
   return swapped ~= real and realpath(swapped) ~= nil
 end
-local function insensitive(real) return (M.insensitive or probe)(real) end
+local function insensitive(real) return (seam("insensitive") or probe)(real) end
 
 -- The ONE path canonicaliser (posix paths; ponytail: Windows drive paths yield no grant, add when codex-on-windows grants land).
 -- realpath of the nearest existing ancestor plus the remaining segments, which may not be . or ..;
@@ -177,12 +179,23 @@ end
 
 local function text(v) return type(v) == "string" and v ~= "" and #v <= 200 and not v:find("%c") end
 
--- No grant unless every field is sound and the clock agrees (fail closed).
+-- Butler's own record of the owner's reaction (the approval store written when the relay saw it): a line the store
+-- holds but that record does not vouch for (same reaction event, id, class and scope) is no grant. M.verified is a
+-- test seam, like M.now.
+local function verified(e)
+  local fake = seam("verified")
+  if fake then return fake(e) end
+  local a = butler.approval
+  return a and type(a.granted_by) == "function" and a.granted_by(e.event, e.id, e.class, e.scope) == true
+end
+
+-- No grant unless every field is sound, the clock agrees and the owner's reaction is on record (fail closed).
 local function valid(e, t)
   return type(e.id) == "string" and e.id:match("^g%d%d%d+$") and CLASS[e.class] and CEILING[e.ceiling]
     and text(e.holder) and text(e.event) and parse(e.class, e.scope) and e.scope == e.scope:gsub("/+$", "")
     and math.type(e.written) == "integer" and math.type(e.expires) == "integer"
     and e.written <= t and e.expires > t and e.expires - e.written <= M.MAX_TTL and e.expires > e.written
+    and verified(e)
 end
 
 function M.active()
@@ -372,6 +385,26 @@ local function plain_push(command, cwd)
     end
   end
 end
+
+-- What a standing grant for this call would be: { class, scope, ceiling } with the scope resolved, or nil. The
+-- approval post shows it and the owner's reaction decides; nothing here creates a grant. Only calls the approval
+-- post routes can be offered: a fetch (net, exact host) or a plain push (git, the working directory).
+function M.offer(tool, input, cwd)
+  input = type(input) == "table" and input or {}
+  local class, pattern
+  if tool == "WebFetch" then
+    class, pattern = "net", host_of(input.url)
+  elseif (tool == "Bash" or tool == "PowerShell") and policy.classify(tool, input, { cwd = cwd }) == "push"
+      and plain_push(input.command, cwd) then
+    class, pattern = "git", M.canonical(cwd)
+  end
+  local scope = pattern and M.scope(class, pattern)
+  if scope then return { class = class, scope = scope, ceiling = "T2" } end
+end
+
+-- The store's clock (the test seam included), and the display escape, for the code that announces grants.
+function M.time() return now() end
+M.show = show
 
 -- The id of the active grant that covers this call, or nil. Never takes an id from the call itself.
 function M.match(tool, input, cwd)

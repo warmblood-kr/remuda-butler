@@ -200,6 +200,12 @@ local function begin_child()
     finish("FAIL", "child daemon start failed: " .. tostring(started.stderr or started.stdout))
     return false
   end
+  -- Test seams in Butler (guard_grants.now/verified/insensitive) are honoured only when this is set.
+  local flagged = process.run { argv = { exe, "-s", child_server, "-e", "remuda._butler_test = true" }, timeout = 10 }
+  if flagged.timed_out or flagged.code ~= 0 then
+    finish("FAIL", "child daemon test flag failed: " .. tostring(flagged.stderr or flagged.stdout))
+    return false
+  end
   return true
 end
 

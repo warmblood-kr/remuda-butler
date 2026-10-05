@@ -7,6 +7,7 @@ release tags yet; entries come from merged pull requests.
 ## Unreleased
 
 ### Added
+- Guard grants are created from the owner's reactions on Butler's approval post (only with `guard grants on`): ✅ approves one call, 🔄 approves it and records a one-hour standing grant for the fetched host or the pushing repository (calls still ask in this version; the grant shows in `guard grants` and the audit log), ❌ denies and is remembered for 10 minutes. Each grant is cross-checked on every read against Butler's own record of that owner reaction, so a hand-written line is no grant. Posts are limited to 10 per scope and 30 overall per hour (and 5 per agent session per minute as an extra); a cross is remembered per scope, whatever the agent's name, and grants expiring together are announced in one notice in the owner room (see #339).
 - `remuda butler guard grants [on|off|status]`: an off-by-default switch (classed as weakening, owner-only) and the grant store behind it; `grant_id` in audit lines now comes from the store, pushes touching CI or workflow files get no grant, and clearing an unaudited-off marker first records it in a `switch` line (see #339).
 - `remuda butler guard stats` counts audit lines per class and event; every audit line has a `grant_id` (`-` for now), switch changes are audited, and rotated logs are kept as dated archives for 90 days (see #339).
 - `remuda butler matrix mark-all ROOM` (operator only) marks an already-joined room as the ALL-BUTLERS room, and doctor now says "joined room is not marked ALL-BUTLERS" with a `Next:` line naming that fix and the reload (`remuda exec butler`) instead of claiming the lounge is not joined (#367).
@@ -69,6 +70,7 @@ release tags yet; entries come from merged pull requests.
 - Butler-to-Butler Matrix replies are no longer blocked. A per-thread turn guard (`b2b_max_turns`, default 6) stops the Butler after 6 Butler-only turns and posts one line to HOME; a reply in that thread from a person on the allowlist resumes it (#223).
 
 ### Fixed
+- The guard classifier now treats `lua`, `exec` and `repl` as script anywhere before the `butler` word, so `remuda -s srv lua x` is no longer classed `other` (see #339).
 - A reply to an event the Butler sent works after a live reload: `matrix_write` is loaded again on every load, so the send path always records its events (#325).
 - `remuda butler doctor` suggests `matrix setup` only when no readable Matrix config exists.
 - Deferred mail notices retry after 20 seconds, 1 minute, 5 minutes and 15 minutes; the original sender receives one failure notice after exhaustion (#292).

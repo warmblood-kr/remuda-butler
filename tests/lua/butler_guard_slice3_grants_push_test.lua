@@ -26,7 +26,9 @@ local function start_butler(no_register)
     remuda._t_guard = function(args, caller) return remuda._butler_command_run('guard', args, caller or {}) end
     return 'ok'
   ]])
-  if not no_register then T.eval("remuda.butler.guard_grants.register(function(add) remuda._t_add = add end)") end
+  -- Butler's own load handed `add` to the owner-reaction handler; a fresh load of the store module hands it to the test.
+  -- The store trusts Butler's approval record (tested in guard_slice3_reactions); these tests are about the store.
+  if not no_register then T.eval("remuda.exec(\"butler/guard_grants\"); remuda.butler.guard_grants.verified = function() return true end; remuda.butler.guard_grants.register(function(add) remuda._t_add = add end)") end
 end
 local function has(text, needle) return text:find(needle, 1, true) ~= nil end
 -- A scratch tree: ROOT/real/sub, ROOT/link -> real, ROOT/other. Sets G (the grants module) and ROOT.
