@@ -469,6 +469,17 @@ command(40, "send", '  remuda butler send <to> "<message>" | <to> - | <to> --fil
     return remuda._butler_send(from, to, body)
   end)
 end)
+local SEND_TO_LEADER_CLI_SPEC = {
+  name = "remuda butler",
+  verbs = {
+    ["send-to-leader"] = {
+      about = "Send a message to your Butler leader",
+      options = { { long = "file", value = "PATH", help = "Read message text from a file" } },
+      args = { { name = "WORDS", help = "Message words", multiple = true, required = false } },
+      next = "remuda butler send-to-leader --help",
+    },
+  },
+}
 command(50, "send-to-leader", "  remuda butler send-to-leader <message...> | - | --file PATH", function(args, caller)
   if #args < 2 then return nil end
   local from = current_agent(caller)
@@ -477,8 +488,29 @@ command(50, "send-to-leader", "  remuda butler send-to-leader <message...> | - |
     if type(remuda.fail) == "function" then return remuda.fail(message, 1) end
     error(message, 0)
   end
+  local cli = remuda.cli
+  if type(cli) == "table" and type(cli.parse) == "function" and type(args[2]) == "string"
+      and args[2]:sub(1, 1) == "-" and args[2] ~= "-" then
+    local report = cli.parse(SEND_TO_LEADER_CLI_SPEC, args)
+    if report.kind == "help" then return report.text end
+    if not report.ok then
+      if type(remuda.fail) == "function" then return remuda.fail(report.text, report.code) end
+      error(report.text, 0)
+    end
+    if args[2] == "--file" and report.values.file then
+      return cli_result(function()
+        return remuda._butler_report(from, message_body({ "send-to-leader", "--file", report.values.file }, 2, caller))
+      end)
+    end
+  end
   return cli_result(function()
-    return remuda._butler_report(from, message_body(args, 2, caller))
+    local body
+    if args[2] == "--" then
+      body = checked_message_body(words_after(args, 3))
+    else
+      body = message_body(args, 2, caller)
+    end
+    return remuda._butler_report(from, body)
   end)
 end)
 command(60, "inbox", "  remuda butler inbox [name]", function(args, caller)

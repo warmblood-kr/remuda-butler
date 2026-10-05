@@ -20,6 +20,7 @@ local function start_butler()
       return "stub:" .. kind
     end
     remuda._butler_send = function(...) return remuda._pr_a_record("send", ...) end
+    remuda._butler_report = function(...) return remuda._pr_a_record("report", ...) end
     remuda._butler_reply = function(...) return remuda._pr_a_record("reply", ...) end
     remuda._butler_forward = function(...) return remuda._pr_a_record("forward", ...) end
     remuda._butler_reply_target = function() return "!room:test", "$event" end
@@ -158,4 +159,51 @@ end)
 T.test("send lead hello -h preserves the original body word", function()
   local out = invoke("send", { "send", "lead", "hello", "-h" })
   T.eq(out, "stub:send|send|lead|hello|-h", "send lead hello -h behaves like main")
+end)
+
+T.test("send-to-leader hello world sends the original positional body", function()
+  local out = invoke("send-to-leader", { "send-to-leader", "hello", "world" })
+  T.eq(out, "stub:report|report|agent-test|hello world", "send-to-leader hello world")
+end)
+
+T.test("send-to-leader - reads caller stdin", function()
+  start_butler()
+  T.eval('remuda._pr_a_caller.stdin = "stdin-body"')
+  local out = invoke("send-to-leader", { "send-to-leader", "-" })
+  T.eval('remuda._pr_a_caller.stdin = nil')
+  T.eq(out, "stub:report|report|agent-test|stdin-body", "send-to-leader -")
+end)
+
+T.test("send-to-leader --file PATH reads the original file body", function()
+  local out = invoke("send-to-leader", { "send-to-leader", "--file", path() })
+  T.eq(out, "stub:report|report|agent-test|file-body", "send-to-leader --file PATH")
+end)
+
+T.test("send-to-leader -h returns help", function()
+  local out = invoke("send-to-leader", { "send-to-leader", "-h" })
+  T.expect(out:find("Usage: remuda butler send-to-leader", 1, true) ~= nil,
+    "send-to-leader -h should print help: " .. out)
+end)
+
+T.test("send-to-leader --bogus returns a usage error with Next", function()
+  local out = invoke_error("send-to-leader", { "send-to-leader", "--bogus" })
+  T.expect(out:find("Usage: remuda butler send-to-leader", 1, true) ~= nil
+      and out:find("Next:", 1, true) ~= nil and out:find("false|", 1, true) == 1
+      and out:find("|0$") ~= nil,
+    "send-to-leader --bogus should fail with usage and no report: " .. out)
+end)
+
+T.test("send-to-leader fix the -h flag sends free text", function()
+  local out = invoke("send-to-leader", { "send-to-leader", "fix", "the", "-h", "flag" })
+  T.eq(out, "stub:report|report|agent-test|fix the -h flag", "send-to-leader fix the -h flag")
+end)
+
+T.test("send-to-leader -- --file x sends the text after the separator", function()
+  local out = invoke("send-to-leader", { "send-to-leader", "--", "--file", "x" })
+  T.eq(out, "stub:report|report|agent-test|--file x", "send-to-leader -- --file x")
+end)
+
+T.test("send-to-leader with no words keeps the existing usage result", function()
+  local out = invoke("send-to-leader", { "send-to-leader" })
+  T.eq(out, "nil|none", "send-to-leader with no words")
 end)
