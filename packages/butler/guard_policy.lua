@@ -9,7 +9,7 @@ local M = {}
 local MAX_INPUT = 64 * 1024 -- larger payloads use only bounded structured deny fields
 local REDACT_PREFIX = 2048 -- redaction reads only this many bytes: its patterns are quadratic on long word runs
 local SUMMARY_CAP = 200
-local LOG_CAP = 1024 * 1024 -- the log rotates to LOG.1 past this size
+M.LOG_CAP = 1024 * 1024 -- the log rotates to LOG.1 past this size (a field so a test can shrink it)
 -- A rotated LOG.1 moves to LOG.<UTC stamp> on the next rotation; only those dated
 -- archives older than this many days are deleted, and only at rotation time.
 M.RETENTION_DAYS = 90
@@ -752,29 +752,97 @@ function M.rotate(path, now)
   return true
 end
 
--- Append one JSON line to the audit log (0600, rotated). Returns true, or nil and why.
+-- Hash chain: each new line carries "prev", the sha256 of the line before it (its text without the newline). A log
+-- with no chained tail (new, or from before the chain) gets a genesis line first, carrying "genesis". After a
+-- rotation the first live line carries the hash of the rotated file's last line. The hash is Butler's own pure-Lua
+-- sha256 (guard_approval); if it is unavailable or fails the line is still written, without "prev", and `guard
+-- verify` reports it. The local chain only detects; the daily digest posted to HOME is the off-box control.
+local function sha256()
+  local ga = remuda.butler and remuda.butler.guard_approval
+  return ga and ga.sha256
+end
+
+-- The last line of a file, or nil (empty, unreadable, or a line over 64 KiB).
+local function last_line(path)
+  local f = io.open(path, "r")
+  if not f then return nil end
+  local size = f:seek("end") or 0
+  f:seek("set", math.max(0, size - 65536))
+  local tail = (f:read("a") or ""):gsub("\n+$", "")
+  f:close()
+  if tail == "" then return nil end
+  local back = tail:reverse():find("\n", 1, true) -- not a ".*\n" pattern: quadratic on a long line
+  if not back and size > 65536 then return nil end
+  return tail:sub(back and (#tail - back + 2) or 1)
+end
+
+-- ponytail: advisory lock via core's fs.lock, 1 s then unlocked so audit never blocks; an unlocked race forks the
+-- chain, which verify reports. Per-process locks if that is ever seen.
+local function locked(path, fn)
+  if not (remuda.fs and type(remuda.fs.lock) == "function") then return fn() end
+  for _ = 1, 20 do
+    local ok, handle = pcall(remuda.fs.lock, path .. ".lock")
+    if ok and handle then
+      local ran, err = pcall(fn)
+      pcall(function() handle:release() end)
+      if not ran then error(err, 0) end
+      return
+    end
+    pcall(remuda.process.run, { argv = { "sleep", "0.05" }, timeout = 2 })
+  end
+  return fn()
+end
+
+-- Test clock: the line timestamps and the digest day read this, and only under the test flag.
+local TEST_MODE = os.getenv("REMUDA_BUTLER_TEST") == "1"
+function M.time() return (TEST_MODE and M.now and M.now()) or os.time() end
+
+local function build_line(record, prev)
+  local line = '{"time":' .. remuda.json.encode(os.date("!%Y-%m-%dT%H:%M:%SZ", M.time()))
+  for _, key in ipairs({ "session", "kind", "event", "tool", "class", "summary" }) do
+    line = line .. ',"' .. key .. '":' .. remuda.json.encode(tostring(record[key] or ""))
+  end
+  -- grant_id is "-" until a standing grant covers the call (a later PR); the field is fixed now.
+  line = line .. ',"grant_id":' .. remuda.json.encode(tostring(record.grant_id or "-"))
+  for _, key in ipairs({ "id", "hash" }) do
+    if record[key] then line = line .. ',"' .. key .. '":' .. remuda.json.encode(tostring(record[key])) end
+  end
+  if prev then line = line .. ',"prev":' .. remuda.json.encode(prev) end
+  return line .. "}"
+end
+
+-- Append one JSON line to the audit log (0600, rotated, chained). Returns true, or nil and why.
 local function write_line(record)
   local path = M.log_path()
   if not path then return nil, "no audit path" end
   local ok, why = pcall(function()
     pcall(remuda.mkdir, dir())
-    local f = io.open(path, "r")
-    local size = 0
-    if f then size = f:seek("end") or 0; f:close() end
-    if size >= LOG_CAP and M.rotate(path) then f = nil end -- a failed rotate keeps appending to the live log
-    if not f then assert(remuda.fs.write_atomic(path, "", { private = true })) end
-    local out = assert(io.open(path, "a"))
-    local line = '{"time":' .. remuda.json.encode(os.date("!%Y-%m-%dT%H:%M:%SZ"))
-    for _, key in ipairs({ "session", "kind", "event", "tool", "class", "summary" }) do
-      line = line .. ',"' .. key .. '":' .. remuda.json.encode(tostring(record[key] or ""))
-    end
-    -- grant_id is "-" until a standing grant covers the call (a later PR); the field is fixed now.
-    line = line .. ',"grant_id":' .. remuda.json.encode(tostring(record.grant_id or "-"))
-    for _, key in ipairs({ "id", "hash" }) do
-      if record[key] then line = line .. ',"' .. key .. '":' .. remuda.json.encode(tostring(record[key])) end
-    end
-    assert(out:write(line .. "}\n"))
-    out:close()
+    locked(path, function()
+      local tail = last_line(path) -- read before a rotation moves it
+      local f = io.open(path, "r")
+      local size = 0
+      if f then size = f:seek("end") or 0; f:close() end
+      if size >= M.LOG_CAP and M.rotate(path) then f = nil end -- a failed rotate keeps appending to the live log
+      if not f then assert(remuda.fs.write_atomic(path, "", { private = true })) end
+      local out = assert(io.open(path, "a"))
+      local prev, genesis
+      local hashed = pcall(function()
+        local sha = assert(sha256())
+        local decoded, r = false, nil
+        if tail then decoded, r = pcall(remuda.json.decode, tail) end
+        if decoded and type(r) == "table" and r.prev ~= nil then
+          prev = sha(tail)
+        else
+          genesis = build_line({ session = "operator", event = "chain", class = "other",
+            summary = "audit chain starts here; earlier lines are not chained" }, "genesis")
+          prev = sha(genesis)
+        end
+      end)
+      if not hashed then prev, genesis = nil, nil end
+      if genesis then assert(out:write(genesis .. "\n")) end
+      assert(out:write(build_line(record, prev) .. "\n"))
+      out:close()
+    end)
   end)
   if not ok then return nil, tostring(why) end
   return true
@@ -904,7 +972,7 @@ local KNOWN_CLASS = { push = 1, destroy = 1, escape = 1, net = 1, control = 1, w
 -- Every audit event name a producer appends (hooks, switch, approvals) must be listed here, or stats counts it as "other".
 local KNOWN_EVENT = { PreToolUse = 1, PermissionRequest = 1, deny = 1, policy_error = 1, ["no-input"] = 1,
   oversized = 1, unparsed = 1, switch = 1, approval_requested = 1, approval_approved = 1,
-  approval_denied = 1, approval_expired = 1, approval_failed = 1, approval_limited = 1, grant_created = 1,
+  approval_denied = 1, approval_expired = 1, approval_failed = 1, approval_limited = 1, chain = 1, grant_created = 1,
   grant_refused = 1, grant_register_refused = 1, grant_revoked = 1, grant_revoke_unsaved = 1, grants_frozen = 1,
   grants_unfrozen = 1 }
 local TIME = "^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%dZ$"
@@ -972,6 +1040,79 @@ local function stats()
     for _, name in ipairs(names) do out[#out + 1] = kv[1] .. " " .. name .. ": " .. kv[2][name] end
   end
   return table.concat(out, "\n") .. unaudited_note()
+end
+
+-- The audit files oldest first: dated archives, then LOG.1, then the live log.
+local function ordered_files()
+  local dated, one = {}, nil
+  for _, a in ipairs(archives()) do
+    if a.stamp then dated[#dated + 1] = a.path else one = a.path end
+  end
+  table.sort(dated)
+  if one then dated[#dated + 1] = one end
+  dated[#dated + 1] = M.log_path()
+  return dated
+end
+
+-- Walk every file in order calling fn(line, r, file, n); stops and returns what fn returns when it returns non-nil.
+local function walk(fn)
+  for _, path in ipairs(ordered_files()) do
+    local f = io.open(path, "r")
+    if f then
+      local n, result = 0, nil
+      local ok = pcall(each_line, f, function(line)
+        n = n + 1
+        if result ~= nil then return end
+        local decoded, r = false, nil
+        if line then decoded, r = pcall(remuda.json.decode, line) end
+        result = fn(line, decoded and type(r) == "table" and r or nil, path:match("([^/]+)$"), n)
+      end)
+      f:close()
+      if result ~= nil then return result end
+      if not ok then return { broken = path:match("([^/]+)$"), n = n + 1, why = "unreadable" } end
+    end
+  end
+end
+
+-- `guard verify`: ok, or the first line where the chain breaks. Lines before the first chained line are old
+-- (unchained) and are not judged; the oldest kept archive's first chained line is the anchor (retention removes
+-- older ones).
+local function verify()
+  local sha = sha256()
+  if not sha then return "guard verify: cannot check, no sha256 available" end
+  local live = M.log_path():match("([^/]+)$")
+  local prev_text, chained, count = nil, false, 0
+  local broke = walk(function(line, r, file, n)
+    local function bad(why) return { broken = file, n = n, why = why } end
+    if not r then return bad("unreadable line") end
+    if r.prev == nil then
+      if chained then return bad("line without a hash of the one before") end
+      prev_text = line
+      return nil
+    end
+    if r.prev == "genesis" then
+      if chained then return bad("unexpected chain restart") end
+    elseif prev_text ~= nil then
+      if r.prev ~= sha(prev_text) then return bad("hash of the previous line does not match") end
+    elseif file == live then
+      return bad("the rotated file before this one is missing") -- only archives are pruned, never LOG.1
+    end
+    chained, count, prev_text = true, count + 1, line
+  end)
+  if broke then return "guard verify: BROKEN at " .. broke.broken .. " line " .. broke.n .. ": " .. broke.why end
+  if count == 0 then return "guard verify: ok, no chained lines yet" end
+  return "guard verify: ok, " .. count .. " chained lines, last hash " .. sha(prev_text)
+end
+M.verify = verify
+
+-- Facts for the digest of one UTC day (YYYY-MM-DD): line count and the sha256 of its last line.
+function M.day_facts(day)
+  local sha = sha256()
+  local count, last = 0, nil
+  walk(function(line, r)
+    if r and type(r.time) == "string" and r.time:sub(1, 10) == day then count, last = count + 1, line end
+  end)
+  return count, last and sha and sha(last) or nil
 end
 
 -- `remuda butler guard [on|off|status]`. Without an argument it is the hook: it
@@ -1069,7 +1210,8 @@ function M.run(args, caller)
       .. "\n" .. SWITCH_NOTE .. unaudited_note()
   end
   if #args == 2 and verb == "stats" then return stats() end
-  return remuda.fail("Usage: remuda butler guard on|off|status | approvals on|off|status | deny on|off|status | grants [on|off|status] | stats", 2)
+  if #args == 2 and verb == "verify" then return verify() end
+  return remuda.fail("Usage: remuda butler guard on|off|status | approvals on|off|status | deny on|off|status | grants [on|off|status] | stats | verify", 2)
 end
 
 -- Hook entries merged into the per-session settings file while the switch is on.
