@@ -927,9 +927,8 @@ with userinfo (any `@` in the authority), a backslash, whitespace or a control
 character gets no grant, because parsers disagree about its host. A port
 other than the scheme default is a different scope. An IP literal never matches
 a domain scope; it needs its own `net:IP` scope, T3. A redirect is a new
-request and is judged on its own host. Codex cannot enforce a domain, because
-its sandbox network is all-or-nothing, so `net:DOMAIN` for codex is refused as
-T3 and never widened to open `net`.
+request and is judged on its own host. Grants never apply to codex (see Codex
+grants), whose sandbox network is all-or-nothing.
 
 ### Pushes under a grant
 
@@ -966,10 +965,8 @@ and the line count.
 
 ### Codex grants
 
-Codex grants are baked into the launch flags. When a codex grant expires or is
-revoked, Butler parks the session or relaunches it with the reduced profile
-within 60 seconds, and records the profile it applied on the session row. The
-expiry is timer-driven and reconciled on Butler start, because a Butler crash
-leaves a codex session running with its wide flags. A running codex sandbox is
-never edited in place. Claude grants are checked on every hook call, so expiry
+Grants apply to Claude sessions only. A codex session keeps its fixed launch
+profile (sandbox and writable roots, set when it starts); no path widens it, and
+Butler never edits a running codex sandbox. A codex grant would need its own
+owner-approved design. Claude grants are checked on every hook call, so expiry
 and revocation apply on the next tool call.
