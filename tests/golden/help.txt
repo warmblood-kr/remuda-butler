@@ -3,6 +3,7 @@ remuda butler — coordination for managed agents
   remuda butler doctor
   remuda butler quota [--report]
   remuda butler close <name> [--force]
+  remuda butler close --force <name>
   remuda butler sessions
   remuda butler status  (0=up, 75=launching, 1=failed)
   remuda butler typed-lines on|off

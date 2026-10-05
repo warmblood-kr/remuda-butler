@@ -85,6 +85,15 @@ T.test("send --file p.txt a b c rejects extra words", function()
     "send --file p.txt a b c must fail without sending: " .. out)
 end)
 
+T.test("close help documents --force before the name", function()
+  local out = invoke("close", { "close", "--help" })
+  local invalid = invoke_error("close", { "close", "--force" })
+  T.expect(out:find("remuda butler close --force", 1, true) ~= nil and out:find("Next:", 1, true) ~= nil,
+    "close --help should document close --force NAME with Next: " .. out)
+  T.expect(invalid:find("remuda butler close --force", 1, true) ~= nil and invalid:find("Next:", 1, true) ~= nil,
+    "close usage error should document close --force NAME with Next: " .. invalid)
+end)
+
 T.test("reply ID --attach PATH caption words uploads with caption", function()
   local out = invoke("reply", { "reply", "ID", "--attach", path(), "caption", "words" })
   local expected = "stub:upload|upload|matrix --room !room:test upload --thread $event --caption caption words " .. path()

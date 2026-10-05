@@ -154,7 +154,15 @@ command(6, "quota", "  remuda butler quota [--report]", function(args, caller)
   end
   return reply
 end)
-local CLOSE_USAGE = "Usage: remuda butler close <name> [--force]\nExample: remuda butler close worker-1"
+local CLOSE_USAGE = "Usage: remuda butler close <name> [--force]\n"
+  .. "       remuda butler close --force <name>\nExample: remuda butler close worker-1"
+local function close_usage_text(text)
+  local next_start = text:find("\nNext:", 1, true)
+  if next_start then
+    return text:sub(1, next_start - 1) .. "\n\n" .. CLOSE_USAGE .. text:sub(next_start)
+  end
+  return text .. "\n\n" .. CLOSE_USAGE .. "\nNext: remuda butler sessions"
+end
 local RELAUNCH_WINDOW = 120
 local function close_member(name, leader, force, leaderless_ok)
   local ok, alias = pcall(resolve, name)
@@ -228,20 +236,23 @@ local CLOSE_CLI_SPEC = {
     },
   },
 }
-command(8, "close", "  remuda butler close <name> [--force]", function(args, caller)
+command(8, "close", "  remuda butler close <name> [--force]\n  remuda butler close --force <name>", function(args, caller)
   local cli = remuda.cli
   if type(cli) == "table" and type(cli.parse) == "function" then
     local report = cli.parse(CLOSE_CLI_SPEC, args)
-    if report.kind == "help" then return report.text end
+    if report.kind == "help" then return close_usage_text(report.text) end
     if not report.ok then
-      if type(remuda.fail) == "function" then return remuda.fail(report.text, report.code) end
-      error(report.text, 0)
+      local message = close_usage_text(report.text)
+      if type(remuda.fail) == "function" then return remuda.fail(message, report.code) end
+      error(message, 0)
     end
     return cli_result(function()
       return close_member(report.values.NAME, close_caller_leader(), report.values.force, true)
     end)
   end
-  if args[2] == "--help" or args[2] == "-h" then return CLOSE_USAGE end
+  if args[2] == "--help" or args[2] == "-h" then
+    return CLOSE_USAGE .. "\nNext: remuda butler sessions"
+  end
   if #args < 2 or #args > 3 or (args[3] ~= nil and args[3] ~= "--force") then
     error(CLOSE_USAGE .. "\nNext: remuda butler sessions", 0)
   end

@@ -261,7 +261,8 @@ the normal way for a member to communicate.
       { id = "cli", order = 10, rules = function(_, ctx) return host._butler_permissions.builtin(ctx) end },
     },
     ["butler.command"] = {
-      { id = "close", order = 8, verb = "close", usage = "  remuda butler close <name> [--force]",
+      { id = "close", order = 8, verb = "close",
+        usage = "  remuda butler close <name> [--force]\n  remuda butler close --force <name>",
         run = function(_, args, caller) return host._butler_command_run("close", args, caller) end },
       { id = "doctor", order = 5, verb = "doctor", usage = "  remuda butler doctor",
         run = function(_, args, caller) return host._butler_command_run("doctor", args, caller) end },
