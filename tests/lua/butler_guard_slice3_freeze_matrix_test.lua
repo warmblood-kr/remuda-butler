@@ -181,6 +181,15 @@ T.test("unfreeze post expiry leaves the freeze", function()
   T.expect(has(note(), "stay frozen"), "owner told: " .. tostring(note()), "ok - expiry")
 end)
 
+T.test("a second freeze marks the older open unfreeze request expired", function()
+  on("v-expire-open"); reset_holds()
+  oc("guard freeze"); oc("guard unfreeze")
+  local function statuses() return T.eval("local t = {}; for _, r in pairs(remuda._t_state.approvals) do if r.kind == 'guard_unfreeze' then t[#t + 1] = r.status end end; table.sort(t); return table.concat(t, ',')") end
+  T.eq(statuses(), "open", "one open ask")
+  oc("guard freeze")
+  T.eq(statuses(), "expired", "the older ask expired", "ok - expire_open")
+end)
+
 T.test("SHOULD a: every owner line that starts with a guard verb is answered, extra tokens get usage", function()
   on("v-usage"); reset_holds()
   fetch("https://a.test/"); answer(1, "grant")

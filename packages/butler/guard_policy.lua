@@ -292,6 +292,9 @@ local WRITERS = { rm = true, mv = true, cp = true, tee = true, dd = true, chmod 
 local IDENTITY = { approve = true, deny = true, ["approve-text"] = true, ["typed-lines"] = true,
   ["shell-lines"] = true, ["status-commands"] = true }
 
+-- Global `remuda` options that take the next word as their value (`--opt=value` is one word and needs no entry).
+local VALUE_OPT = { ["-s"] = true, ["--server"] = true, ["-c"] = true, ["--config"] = true,
+  ["--runtime-dir"] = true, ["--socket"] = true, ["--data-home"] = true }
 local function segment_class(w, text, ctx)
   local first = (w[1] or ""):match("([^/]+)$") or ""
   if text:find("--dangerously", 1, true) or text:find("--yolo", 1, true) or text:find("bypassPermissions", 1, true)
@@ -328,8 +331,18 @@ local function segment_class(w, text, ctx)
     end
     -- The CLI's Lua entry points are `lua`, `exec`, `repl` (as the verb) and -e / --eval (the value may be attached:
     -- -e'code', --eval=code). `run` starts a command in a session, so it is script-class too; `eval` is kept as one.
-    for i = 2, butler_at - 1 do
-      if w[i] == "lua" or w[i] == "exec" or w[i] == "repl" or w[i] == "eval" or w[i]:find("^%-e") or w[i]:find("^%-%-eval") or w[i] == "run" then return "script" end
+    -- Only the verb (the first word that is not an option or the value of a VALUE_OPT) counts, so `remuda send NAME run it`
+    -- is a message, not a script.
+    local i = 2
+    while i < butler_at do
+      local a = w[i]
+      if a:find("^%-e") or a:find("^%-%-eval") then return "script" end
+      if VALUE_OPT[a] then i = i + 1
+      elseif a:sub(1, 1) ~= "-" then
+        if a == "lua" or a == "exec" or a == "repl" or a == "eval" or a == "run" then return "script" end
+        break
+      end
+      i = i + 1
     end
   end
   if first == "git" and has(w, { push = true }) then return "push" end
@@ -460,8 +473,7 @@ local function owner_or_daemon_command(w, text)
   local i = remuda_at + 1
   while i <= #w do
     local word = w[i]
-    if word == "-s" or word == "--server" or word == "-c" or word == "--config"
-      or word == "--runtime-dir" or word == "--socket" or word == "--data-home" then
+    if VALUE_OPT[word] then
       i = i + 2
     elseif word:sub(1, 1) ~= "-" then
       subcommand = word
@@ -644,7 +656,16 @@ function M.deny_reason(tool, input, ctx)
   tool = tostring(tool or "")
   if tool == "Bash" or tool == "PowerShell" then
     local command = type(input.command) == "string" and input.command or ""
-    for _, seg in ipairs(split_commands(command)) do
+    -- A here-doc or a pipe puts the code in one segment and the script runner in another, so the module-name test
+    -- reads the whole string and the script test any segment. Still cooperative: text, not a boundary.
+    local segments = split_commands(command)
+    if command:find("guard_grants", 1, true) or command:find("_butler_test", 1, true)
+        or command:find("REMUDA_BUTLER_TEST", 1, true) then
+      for _, seg in ipairs(segments) do
+        if segment_class(words(seg), seg, ctx) == "script" then return "Butler grant store" end
+      end
+    end
+    for _, seg in ipairs(segments) do
       local reason = segment_deny_reason(seg, ctx)
       if reason then return reason end
     end
@@ -906,7 +927,7 @@ local KNOWN_EVENT = { PreToolUse = 1, PermissionRequest = 1, deny = 1, policy_er
   oversized = 1, unparsed = 1, switch = 1, approval_requested = 1, approval_approved = 1,
   approval_denied = 1, approval_expired = 1, approval_failed = 1, approval_limited = 1, grant_created = 1,
   grant_refused = 1, grant_register_refused = 1, grant_revoked = 1, grant_revoke_unsaved = 1, grants_frozen = 1,
-  grants_unfrozen = 1 }
+  grants_unfrozen = 1, owner_line_refused = 1, grants_unfreeze_failed = 1 }
 local TIME = "^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%dZ$"
 
 -- Call fn(line) for each line of f, or fn(nil) for one that is over the cap; memory stays bounded.

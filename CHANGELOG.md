@@ -71,6 +71,7 @@ release tags yet; entries come from merged pull requests.
 - Butler-to-Butler Matrix replies are no longer blocked. A per-thread turn guard (`b2b_max_turns`, default 6) stops the Butler after 6 Butler-only turns and posts one line to HOME; a reply in that thread from a person on the allowlist resumes it (#223).
 
 ### Fixed
+- The guard's text deny now reads a whole command (a here-doc or pipe feeding `remuda lua /dev/stdin` that names the grant store is denied), script markers (`run`, `-e`, `lua`, ...) count only at the `remuda` verb so `remuda send NAME ... run ...` is a message, and `guard stats` counts `owner_line_refused` and `grants_unfreeze_failed` by name. Still cooperative: text, not a boundary.
 - The grant store's test seams follow `REMUDA_BUTLER_TEST=1` read once at load instead of a field Lua can set, the per-scope approval post limit ignores command text, and the "Standing grant" thread note drops `@` and backticks (see #339).
 - The guard classifier now treats `lua`, `exec` and `repl` as script anywhere before the `butler` word, so `remuda -s srv lua x` is no longer classed `other` (see #339).
 - A reply to an event the Butler sent works after a live reload: `matrix_write` is loaded again on every load, so the send path always records its events (#325).
