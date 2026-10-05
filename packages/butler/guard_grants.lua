@@ -16,8 +16,10 @@ local CLASS = { writable = "path", git = "path", net = "net" }
 local CEILING = { T1 = true, T2 = true } -- T3 is never grantable
 local MAX_FILE = 256 * 1024
 
--- Test seams: M.now() and M.insensitive(real) replace these when set.
-local function now() return (M.now or os.time)() end
+-- Test seams: M.now(), M.insensitive(real) and M.verified(e) replace these, but only when the test harness set
+-- remuda._butler_test = true; in production they are ignored, whatever Lua sets them.
+local function seam(name) return remuda._butler_test == true and M[name] or nil end
+local function now() return (seam("now") or os.time)() end
 
 local function file() local d = policy.dir(); return d and (d .. "/guard-grants.jsonl") end
 
@@ -31,7 +33,7 @@ local function probe(real)
   local swapped = real:gsub("%a", function(c) local u = c:upper(); return u == c and c:lower() or u end)
   return swapped ~= real and realpath(swapped) ~= nil
 end
-local function insensitive(real) return (M.insensitive or probe)(real) end
+local function insensitive(real) return (seam("insensitive") or probe)(real) end
 
 -- The ONE path canonicaliser (posix paths; ponytail: Windows drive paths yield no grant, add when codex-on-windows grants land).
 -- realpath of the nearest existing ancestor plus the remaining segments, which may not be . or ..;
@@ -181,7 +183,8 @@ local function text(v) return type(v) == "string" and v ~= "" and #v <= 200 and 
 -- holds but that record does not vouch for (same reaction event, id, class and scope) is no grant. M.verified is a
 -- test seam, like M.now.
 local function verified(e)
-  if M.verified then return M.verified(e) end
+  local fake = seam("verified")
+  if fake then return fake(e) end
   local a = butler.approval
   return a and type(a.granted_by) == "function" and a.granted_by(e.event, e.id, e.class, e.scope) == true
 end
