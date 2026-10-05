@@ -131,12 +131,11 @@ the agent proceeds as before. `remuda butler doctor` shows the switch. The audit
 is a record, not a security boundary: agents run as the same user and can bypass
 or edit it.
 
-Every audit line carries a `grant_id` field, `-` until standing grants exist.
-When grants land, `grant_id` comes from the grant store, never from agent input.
+Every audit line carries a `grant_id` field: the id (`gNNN`) of the active standing grant that covers the call, read from the grant store by Butler (never from agent input), or `-`.
 Each change of the `guard`, `guard deny` or `guard approvals` switch appends a
 `switch` line naming who changed it (the caller's alias, or `operator`) and when.
 `Who` is evidence from the forwarded environment, not a control; the `weaken`-class deny is the control.
-Turning a switch off is audited first. If that line cannot be written the switch still turns off (it only narrows enforcement, so the owner is never locked out), the answer and stderr say "switched off, NOT audited", and a `guard-unaudited` marker shows in `guard status` and `guard stats` until the next audit line is written.
+Turning a switch off is audited first. If that line cannot be written the switch still turns off (it only narrows enforcement, so the owner is never locked out), the answer and stderr say "switched off, NOT audited", and a `guard-unaudited` marker shows in `guard status` and `guard stats` until the next audit line is written. That line is followed by a `switch` line "earlier off NOT audited: ..." recording the marker; if it cannot be written the marker stays. A switch write that fails after an unaudited off removes the marker, because nothing turned off.
 When the log passes 1 MiB, the previous `guard-audit.jsonl.1` moves to a
 `guard-audit.jsonl.<UTC stamp>` archive, and archives older than 90 days are
 deleted at that moment and never otherwise.
@@ -144,6 +143,14 @@ Two rotations in one second keep both archives (a `-N` suffix).
 `remuda butler guard stats` prints the line count, the first and last time, and
 the counts per class and per event over the log and its archives, bucketing names it does not know as `other` and counting oversized or unreadable lines as unreadable, as a baseline
 to compare before enabling `guard deny`.
+
+### Guard grants
+
+`remuda butler guard grants on|off|status` is a switch, off by default, classed like `guard on|off` (it weakens the guard: owner-only, denied to agents). `remuda butler guard grants` prints the operator view of the active grants: id, class, resolved scope, ceiling, holder, absolute expiry and approval event. With the switch off the grant store is not read and every `grant_id` is `-`. No CLI verb creates a grant; this slice only holds and reads them.
+
+The store is `guard-grants.jsonl` in Butler's protected data dir. An entry holds the class (`writable`, `git`, `net`), the resolved scope, a ceiling (`T1` or `T2`, never `T3`), the holder, the approval event id, the time it was written and an absolute expiry at most 24 hours later. It is read afresh on every use, so a start reloads it; an entry that is expired, unparseable, lacks its approval event, was written with a clock ahead of now or fails any check is no grant. A scope is a path or host: a `*` is allowed only as a whole path segment below a fixed absolute prefix, and paths are canonicalised by one function (realpath of the nearest existing ancestor, no `.` or `..`, case-folded only on a case-insensitive volume). A push covered by a `git` grant is checked at hook time with `git diff --name-only` against the upstream ref: a change under `.github/`, `.circleci/`, `.buildkite/`, `.gitlab/` or to a root CI file is T3 and gets no grant, and so does a push whose diff cannot be computed (no upstream, new branch, git failure). A scope at the root, `/Users`, the home itself, or covering `.ssh`, `.claude`, `.config/remuda`, Butler's data dir, `.git/hooks` or `.git/config` is refused. A grant never overrides a deny or a weaken, identity or escape decision. `add` takes the store's lock, prunes expired lines and allocates the id in one step, and refuses when the lock stays held. No command or `run_script` text may name the grant module (denied), and `remuda eval` classes as `script`. `guard grants` shows direction-control characters escaped. A push is covered only as exactly `git push [remote [current-branch]]`; `scripts/`, `Makefile` and `justfile` count as CI paths, and the diff is taken without renames and with repo config neutralised. A URL with userinfo, a backslash, whitespace or a control character gets no net grant. The deny rules keep their own lexical path checks and do not use the grant canonicaliser yet.
+
+**PR4 MUST:** `load()` must cross-check each grant's approval event id against Butler's own record of the owner's reaction before the grant can allow anything. This store trusts its own lines; the check belongs where grants are created from reactions.
 
 ### Guard approvals
 

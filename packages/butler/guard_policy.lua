@@ -21,6 +21,7 @@ local function dir()
   local paths = remuda._butler_paths
   return paths and paths.data_home and (paths.data_home .. "/remuda/butler") or nil
 end
+M.dir = dir
 function M.log_path() local d = dir(); return d and (d .. "/guard-audit.jsonl") end
 local function switch_path() local d = dir(); return d and (d .. "/guard-observe") end
 
@@ -72,6 +73,24 @@ function M.deny_enabled()
 end
 function M.set_deny(on)
   local path = deny_path()
+  if not path then return nil, "Butler data directory is unknown" end
+  pcall(remuda.mkdir, dir())
+  return remuda.fs.write_atomic(path, on and "on\n" or "off\n", { private = true })
+end
+
+-- The grants switch (`guard grants on|off|status`): off by default. With it off nothing reads the
+-- grant store and every audit line carries grant_id "-".
+local function grants_path() local d = dir(); return d and (d .. "/guard-grants") or nil end
+function M.grants_enabled()
+  local path = grants_path()
+  local f = path and io.open(path, "r")
+  if not f then return false end
+  local text = f:read("*l")
+  f:close()
+  return text == "on"
+end
+function M.set_grants(on)
+  local path = grants_path()
   if not path then return nil, "Butler data directory is unknown" end
   pcall(remuda.mkdir, dir())
   return remuda.fs.write_atomic(path, on and "on\n" or "off\n", { private = true })
@@ -288,18 +307,30 @@ local function segment_class(w, text, ctx)
   if first == "kill" or first == "pkill" or first == "killall" then return "control" end
   if first == "remuda" then
     if has(w, { stop = true, restart = true, kill = true }) then return "control" end
+    -- Classify the butler verb first: RANK puts weaken/control/identity above script, so a later `run` or `-ex`
+    -- argument of a butler verb must not downgrade it. Script markers count only before the `butler` word.
+    local butler_at = #w + 1
     for i, a in ipairs(w) do
       if a == "butler" then
+        butler_at = i
         local verb = w[i + 1]
         if verb == "close" then return "control" end
         if verb == "guard" and w[i + 2] == "approvals" and (w[i + 3] == "on" or w[i + 3] == "off") then return "weaken" end
+        if verb == "guard" and w[i + 2] == "grants" and (w[i + 3] == "on" or w[i + 3] == "off") then return "weaken" end
         if verb == "guard" and (w[i + 2] == "on" or w[i + 2] == "off") then return "weaken" end
         if IDENTITY[verb or ""] then return "identity" end
         if verb == "matrix" and (w[i + 2] == "join" or w[i + 2] == "leave" or w[i + 2] == "invite"
             or w[i + 2] == "mark-all") then
           return "identity"
         end
+        break
       end
+    end
+    -- The CLI's Lua entry points are `lua`, `exec`, `repl` (as the verb) and -e / --eval (the value may be attached:
+    -- -e'code', --eval=code). `run` starts a command in a session, so it is script-class too; `eval` is kept as one.
+    if w[2] == "lua" or w[2] == "exec" or w[2] == "repl" then return "script" end
+    for i = 2, butler_at - 1 do
+      if w[i] == "eval" or w[i]:find("^%-e") or w[i]:find("^%-%-eval") or w[i] == "run" then return "script" end
     end
   end
   if first == "git" and has(w, { push = true }) then return "push" end
@@ -417,6 +448,10 @@ local function owner_or_daemon_command(w, text)
   if butler_at then
     local verb, sub = w[butler_at + 1], w[butler_at + 2]
     if verb == "guard" and (sub == "on" or sub == "off" or sub == "approvals" or sub == "deny") then
+      return "Butler owner control"
+    end
+    -- Only the switch is owner control; `guard grants` and `guard grants status` are read-only views.
+    if verb == "guard" and sub == "grants" and (w[butler_at + 3] == "on" or w[butler_at + 3] == "off") then
       return "Butler owner control"
     end
     if verb == "approve" or verb == "deny" or verb == "approve-text" or verb == "typed-lines"
@@ -541,6 +576,8 @@ local function writer_touches_protected(first, w, ctx)
 end
 
 local function segment_deny_reason(seg, ctx)
+  -- The grant store is written only by Butler itself; no command text may name its module (cooperative: text, not a boundary).
+  if seg:find("guard_grants", 1, true) then return "Butler grant store" end
   local w = words(seg)
   local executable = (w[1] or ""):match("([^/]+)$") or ""
   if executable == "sh" or executable == "bash" or executable == "zsh" or executable == "dash"
@@ -607,6 +644,9 @@ function M.deny_reason(tool, input, ctx)
       if reason then return reason end
     end
     return nil
+  end
+  if tool:find("run_script$") and type(input.code) == "string" and input.code:find("guard_grants", 1, true) then
+    return "Butler grant store"
   end
   if tool == "Write" or tool == "Edit" or tool == "MultiEdit" or tool == "NotebookEdit" then
     local path = input.file_path or input.notebook_path
@@ -707,7 +747,7 @@ function M.rotate(path, now)
 end
 
 -- Append one JSON line to the audit log (0600, rotated). Returns true, or nil and why.
-function M.append(record)
+local function write_line(record)
   local path = M.log_path()
   if not path then return nil, "no audit path" end
   local ok, why = pcall(function()
@@ -731,7 +771,22 @@ function M.append(record)
     out:close()
   end)
   if not ok then return nil, tostring(why) end
-  if unaudited_path() then os.remove(unaudited_path()) end
+  return true
+end
+
+-- Append one line; then, if a guard-unaudited marker exists, record its text in a 'switch' line
+-- and only then delete it (the marker stays when that line cannot be written).
+function M.append(record)
+  local ok, why = write_line(record)
+  if not ok then return nil, why end
+  local path = unaudited_path()
+  local f = path and io.open(path, "r")
+  if f then
+    local text = (f:read("*l") or ""):gsub("%c", " "):sub(1, SUMMARY_CAP)
+    f:close()
+    if write_line({ session = "operator", event = "switch", tool = "", class = "other",
+        summary = "earlier off NOT audited: " .. text }) then os.remove(path) end
+  end
   return true
 end
 
@@ -823,7 +878,11 @@ local function change(caller, label, on, set)
   local written, why = set(on)
   if not written then
     -- The off line is already in the log: say it did not take effect.
-    if not on then switched(caller, label .. " off failed: " .. tostring(why)) end
+    if not on then
+      switched(caller, label .. " off failed: " .. tostring(why))
+      -- Nothing turned off, so an unaudited-off marker would only mislead.
+      if warning and unaudited_path() then os.remove(unaudited_path()) end
+    end
     return nil, why
   end
   if on then
@@ -921,6 +980,12 @@ function M.run(args, caller)
     local ok, err = pcall(function()
       if not M.enabled() then return end
       local record, hook_json = hook(caller)
+      -- grant_id comes only from the store (never from the call); with the switch off nothing reads it.
+      local grants = remuda.butler.guard_grants
+      if grants and hook_json and M.grants_enabled() then
+        local matched, id = pcall(grants.match, record.tool, hook_json.tool_input, hook_json.cwd)
+        if matched and id then record.grant_id = id end
+      end
       if hook_json and record.event == "PreToolUse" and M.deny_enabled() then
         local policy_ok, reason = pcall(M.deny_reason, record.tool, hook_json.tool_input, { cwd = hook_json.cwd })
         if not policy_ok then
@@ -958,6 +1023,18 @@ function M.run(args, caller)
     return "guard approvals: " .. (M.approvals_enabled() and "on" or "off") .. " (guard: "
       .. (M.enabled() and "on" or "off") .. "; routing runs only when both are on)\n" .. SWITCH_NOTE
   end
+  if #args == 3 and verb == "grants" and (args[3] == "on" or args[3] == "off") then
+    local written, why = change(caller, "guard grants", args[3] == "on", M.set_grants)
+    local warn = why
+    if not written then return remuda.fail("guard grants switch not changed: " .. tostring(why), 1) end
+    return "guard grants are now " .. args[3] .. ". There is no way to create a grant from the CLI."
+      .. (warn and ("\n" .. warn) or "")
+  end
+  if #args == 3 and verb == "grants" and args[3] == "status" then
+    return "guard grants: " .. (M.grants_enabled() and "on" or "off") .. " (guard: " .. (M.enabled() and "on" or "off")
+      .. "; with the switch off the grant store is not read)"
+  end
+  if #args == 2 and verb == "grants" then return remuda.butler.guard_grants.list() end
   if #args == 3 and verb == "deny" and (args[3] == "on" or args[3] == "off") then
     local written, why = change(caller, "guard deny", args[3] == "on", M.set_deny)
     local warn = why
@@ -984,7 +1061,7 @@ function M.run(args, caller)
       .. "\n" .. SWITCH_NOTE .. unaudited_note()
   end
   if #args == 2 and verb == "stats" then return stats() end
-  return remuda.fail("Usage: remuda butler guard on|off|status | approvals on|off|status | deny on|off|status | stats", 2)
+  return remuda.fail("Usage: remuda butler guard on|off|status | approvals on|off|status | deny on|off|status | grants [on|off|status] | stats", 2)
 end
 
 -- Hook entries merged into the per-session settings file while the switch is on.

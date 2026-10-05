@@ -727,6 +727,9 @@ no guard behavior changes.
   a standing grant, and deny. They are never one button.
 - The switch is off by default. The owner flips it, after one week of saved
   baseline stats.
+- PR4 MUST: `load()` cross-checks each grant's approval event id against
+  Butler's own record of the owner's reaction before a grant can allow.
+  The store trusts its own lines; a grant is never allowed on the store alone.
 
 ### Who decides
 
@@ -801,7 +804,8 @@ that races its own filesystem.
 
 `net:DOMAIN` matches the exact host only; a subdomain needs its own grant. The
 host is compared lowercased, without a trailing dot, in punycode form. A URL
-with userinfo (`good.com@evil.com`) is judged by the host after the `@`. A port
+with userinfo (any `@` in the authority), a backslash, whitespace or a control
+character gets no grant, because parsers disagree about its host. A port
 other than the scheme default is a different scope. An IP literal never matches
 a domain scope; it needs its own `net:IP` scope, T3. A redirect is a new
 request and is judged on its own host. Codex cannot enforce a domain, because
@@ -813,8 +817,13 @@ T3 and never widened to open `net`.
 A command string cannot show which files a push changes. Every push covered by
 a grant is checked at hook time: `git diff --name-only` against the remote ref,
 best effort. A push touching `.github/workflows`, other CI configs, or scripts
-those call is T3 and asks. The path set is a list in code, reviewed like any
-guard rule. Server-side branch protection and required review remain the real
+those call (`scripts/`, `Makefile`, `justfile`) is T3 and asks. The diff is
+taken without renames, so a move out of a CI path still lists the source, and
+with repo config, hooks, external diff and textconv neutralised. A push is
+covered only when the command is exactly `git push [remote [current-branch]]`:
+no shell syntax, refspec, flag, `cd`, `-C`, `env` or `GIT_DIR` prefix.
+Anything else falls to the tier. The path set is a list in code, reviewed like
+any guard rule. Server-side branch protection and required review remain the real
 backstop; this check is a convenience, not a boundary.
 
 `git:common` covers the main repo's `.git` except `.git/hooks` and git config.

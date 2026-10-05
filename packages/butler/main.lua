@@ -639,6 +639,7 @@ remuda.exec("butler/schedule")
 remuda.exec("butler/schedule_cli")
 remuda.exec("butler/status_hook")
 remuda.exec("butler/guard_policy")
+remuda.exec("butler/guard_grants")
 remuda.exec("butler/guard_approval")
 remuda.exec("butler/commands")
 
