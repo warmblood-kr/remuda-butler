@@ -24,10 +24,11 @@ local ROUTED_TOOLS = { Bash = true, Read = true, Glob = true, Grep = true, WebFe
 local MAX_OPEN = 20
 local MAX_OPEN_PER_SESSION = 5
 local RATE_PER_10_MIN = 30
--- With grants on (documented in docs/butler.md "Request limits"): a post per agent session per minute, a post
--- overall per hour, and how long an owner's cross is remembered for the same request. A request over a limit
--- gets no post, so Claude shows its own prompt; a remembered cross answers deny without asking again.
-local PER_AGENT_PER_MIN, GLOBAL_PER_HOUR, DENY_MEMORY_S = 5, 30, 600
+-- With grants on (documented in docs/butler.md "Request limits"): posts per scope per hour and overall per hour,
+-- how long an owner's cross is remembered for the same scope, and a per-session-name bucket as an extra. The agent
+-- names its own session (data.session), so only the scope limits and the remembered cross are keyed without it.
+-- A request over a limit gets no post, so Claude shows its own prompt; a remembered cross answers deny at once.
+local PER_AGENT_PER_MIN, PER_SCOPE_PER_HOUR, GLOBAL_PER_HOUR, DENY_MEMORY_S = 5, 10, 30, 600
 local EXPIRY_NOTICE_WAIT_S, EXPIRY_SCAN_S, NOTE_MAX = 60, 5, 200
 local grants = butler.guard_grants
 
@@ -183,9 +184,10 @@ local function note_line(text)
 end
 
 -- Limits and remembered crosses (grants on only). nil = go ahead; "denied" = the owner already said no to this
--- request; "limited" = too many posts. Denied requests do not count against the limits.
+-- scope (key, not session); "limited" = too many posts. Denied requests do not count against the limits.
 local function admit(session, key)
   local L, t = M._limits, clock()
+  L.scope = L.scope or {}
   for k, until_ in pairs(L.denies) do if until_ <= t then L.denies[k] = nil end end
   if L.denies[key] then return "denied" end
   local function recent(list, span)
@@ -193,10 +195,12 @@ local function admit(session, key)
     return #list
   end
   for s, list in pairs(L.agent) do if recent(list, 60) == 0 then L.agent[s] = nil end end
-  local mine = L.agent[session] or {}
-  L.agent[session] = mine
-  if recent(mine, 60) >= PER_AGENT_PER_MIN or recent(L.hour, 3600) >= GLOBAL_PER_HOUR then return "limited" end
-  mine[#mine + 1], L.hour[#L.hour + 1] = t, t
+  for k, list in pairs(L.scope) do if recent(list, 3600) == 0 then L.scope[k] = nil end end
+  local mine, theirs = L.agent[session] or {}, L.scope[key] or {}
+  L.agent[session], L.scope[key] = mine, theirs
+  if recent(mine, 60) >= PER_AGENT_PER_MIN or recent(theirs, 3600) >= PER_SCOPE_PER_HOUR
+      or recent(L.hour, 3600) >= GLOBAL_PER_HOUR then return "limited" end
+  mine[#mine + 1], theirs[#theirs + 1], L.hour[#L.hour + 1] = t, t, t
 end
 
 local function audit_refusal(record, data, verdict)
@@ -225,8 +229,8 @@ function M.maybe_request(record, hook_json)
     data.offer = grants.offer(record.tool, input, hook_json.cwd)
     if data.offer then data.offer.expires = grants.time() + grants.DEFAULT_TTL end
     data.note = note_line(input.description)
-    data.deny_key = data.session .. "\n" .. (data.offer and (data.offer.class .. " " .. data.offer.scope)
-      or (data.tool .. " " .. data.class .. " " .. data.cwd .. " " .. data.text))
+    data.deny_key = data.offer and (data.offer.class .. " " .. data.offer.scope)
+      or (data.tool .. " " .. data.class .. " " .. data.cwd .. " " .. data.text)
     local verdict = admit(data.session, data.deny_key)
     if verdict then
       audit_refusal(record, data, verdict)

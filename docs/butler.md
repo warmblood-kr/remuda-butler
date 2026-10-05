@@ -793,13 +793,18 @@ derived from the request by Butler, never from agent text.
 
 With the grants switch on (off: no new behavior at all):
 
-- **Per agent session: 5 approval posts per minute.**
+- **Per scope: 10 approval posts per hour** (the host or repository, or the
+  tool, class, directory and text when no scope applies).
 - **Overall: 30 approval posts per hour.**
-- **A deny is remembered for 10 minutes** for the same request: the same agent
-  session and the same scope (host or repository), or the same tool, class,
-  directory and text when no scope applies. During that time the same
-  request is answered deny at once, without a post. Another agent, another
-  scope, or the same request after 10 minutes is asked as usual.
+- **Per agent session: 5 approval posts per minute**, as an extra bucket only.
+- **A deny is remembered for 10 minutes** for the same scope, whichever agent
+  or session name asks. During that time the same request is answered deny at
+  once, without a post. Another scope, or the same request after 10 minutes,
+  is asked as usual.
+
+The agent chooses its own session name and alias, so no control rests on that
+name alone: the remembered deny and the per-scope limit are keyed by scope
+only, and the per-session bucket does not replace them.
 
 A request over a post limit is refused without a post: the hook prints no
 decision, so Claude shows its own prompt, and the refusal is an audit line
