@@ -46,6 +46,17 @@ local function invoke(verb, args)
   ]])
 end
 
+local function invoke_error(verb, args)
+  start_butler()
+  local quoted = {}
+  for _, word in ipairs(args) do quoted[#quoted + 1] = luaq(word) end
+  return T.eval([[
+    remuda._pr_a_actions = {}
+    local ok, result = pcall(remuda._butler_command_run, ]] .. luaq(verb) .. [[, {]] .. table.concat(quoted, ",") .. [[}, remuda._pr_a_caller)
+    return table.concat({ tostring(ok), tostring(result), tostring(#remuda._pr_a_actions) }, "|")
+  ]])
+end
+
 local function path()
   start_butler()
   return os.getenv("REMUDA_LUA_SCRATCH") .. "/pr-a-message.txt"
@@ -64,6 +75,14 @@ end)
 T.test("send --file p.txt lead accepts the option first", function()
   local out = invoke("send", { "send", "--file", path(), "lead" })
   T.eq(out, "stub:send|send|agent-test|lead|file-body", "send --file p.txt lead")
+end)
+
+T.test("send --file p.txt a b c rejects extra words", function()
+  local out = invoke_error("send", { "send", "--file", path(), "a", "b", "c" })
+  T.expect(out:find("Usage: remuda butler send", 1, true) ~= nil and out:find("Next:", 1, true) ~= nil,
+    "send --file p.txt a b c should return usage with Next: " .. out)
+  T.expect(out:find("false|", 1, true) == 1 and out:find("|0$"),
+    "send --file p.txt a b c must fail without sending: " .. out)
 end)
 
 T.test("reply ID --attach PATH caption words uploads with caption", function()

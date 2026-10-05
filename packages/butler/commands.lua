@@ -422,6 +422,14 @@ command(40, "send", '  remuda butler send <to> "<message>" | <to> - | <to> --fil
     if args[2] == "--file" and report.values.file then
       local words = report.values.WORDS
       if type(words) == "string" then words = { words } end
+      if #words > 2 then
+        local message = 'send --file accepts at most two words after PATH.\n'
+          .. 'Usage: remuda butler send --file PATH <to> [<from> <to>]\n'
+          .. 'Example: remuda butler send --file "$PWD/message.txt" lead\n'
+          .. 'Next: remuda butler send --help'
+        if type(remuda.fail) == "function" then return remuda.fail(message, 2) end
+        error(message, 0)
+      end
       local from, to = current_agent(caller) or OPERATOR, nil
       if #words == 1 then to = words[1]
       elseif #words >= 2 then from, to = words[1], words[2] end
