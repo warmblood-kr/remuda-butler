@@ -501,6 +501,14 @@ command(50, "send-to-leader", "  remuda butler send-to-leader <message...> | - |
       error(report.text, 0)
     end
     if args[2] == "--file" and report.values.file then
+      if #args > 3 then
+        local message = 'send-to-leader --file accepts no message words after PATH.\n'
+          .. 'Usage: remuda butler send-to-leader --file PATH\n'
+          .. 'Example: remuda butler send-to-leader --file "$PWD/message.txt"\n'
+          .. 'Next: remuda butler send-to-leader --help'
+        if type(remuda.fail) == "function" then return remuda.fail(message, 2) end
+        error(message, 0)
+      end
       return cli_result(function()
         return remuda._butler_report(from, message_body({ "send-to-leader", "--file", report.values.file }, 2, caller))
       end)

@@ -195,6 +195,14 @@ T.test("send-to-leader --file PATH reads the original file body", function()
   T.eq(out, "stub:report|report|agent-test|file-body", "send-to-leader --file PATH")
 end)
 
+T.test("send-to-leader --file PATH rejects extra words", function()
+  local out = invoke_error("send-to-leader", { "send-to-leader", "--file", path(), "extra", "words" })
+  T.expect(out:find("Usage: remuda butler send-to-leader", 1, true) ~= nil
+      and out:find("Next:", 1, true) ~= nil and out:find("false|", 1, true) == 1
+      and out:find("|0$") ~= nil,
+    "send-to-leader --file PATH extra words should fail with usage and no report: " .. out)
+end)
+
 T.test("send-to-leader -h returns help", function()
   local out = invoke("send-to-leader", { "send-to-leader", "-h" })
   T.expect(out:find("Usage: remuda butler send-to-leader", 1, true) ~= nil,
