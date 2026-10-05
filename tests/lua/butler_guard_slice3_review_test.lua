@@ -27,3 +27,15 @@ T.test("guard stats counts the grant events by name, not as other", function()
   end
   T.expect(not has(out, "event other"), "none counted as other:\n" .. out, "ok - stats events")
 end)
+
+T.test("approval records are kept at least as long as the longest grant", function()
+  start_butler()
+  T.eval("remuda.exec('butler/guard_grants')")
+  T.eq(T.eval("return tostring(remuda.butler.approval.RETENTION_S >= remuda.butler.guard_grants.MAX_TTL)"), "true",
+    "retention covers the 24 h grant TTL")
+  local f = assert(io.open(os.getenv("REMUDA_LUA_REPO") .. "/packages/butler/matrix_relay.lua", "r"))
+  local source = f:read("a")
+  f:close()
+  T.expect(has(source, "approval.RETENTION_S") and not has(source, "24 * 60 * 60 * 1000"),
+    "the relay prunes by the shared constant, not its own literal", "ok - retention")
+end)

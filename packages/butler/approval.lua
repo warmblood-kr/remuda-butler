@@ -96,6 +96,10 @@ function approval.handler(kind, callbacks)
   return true
 end
 
+-- Seconds a finished approval record is kept. It must outlive the longest standing grant (guard_grants.MAX_TTL,
+-- 24 h): the grant store trusts a grant only while Butler's record of the owner's reaction exists.
+approval.RETENTION_S = 24 * 60 * 60
+
 -- Minutes an owner approval request stays open (configured by `approval_ttl_minutes`).
 approval.ttl_minutes = 30
 function approval.default_ttl_s() return approval.ttl_minutes * 60 end

@@ -561,7 +561,9 @@ local function load_state(path, rooms)
   state.invite_dedupe = json.object({})
   state.typed_line_timestamps = json.array({})
   state.approvals = approvals
-  local approval_cutoff = math.floor(os.time() * 1000) - 24 * 60 * 60 * 1000
+  -- Records are pruned by approval.RETENTION_S; without the approval module nothing is pruned.
+  local retention = remuda.butler and remuda.butler.approval and remuda.butler.approval.RETENTION_S
+  local approval_cutoff = math.floor(os.time() * 1000) - (retention or math.huge) * 1000
   for id, rec in pairs(state.approvals) do
     if type(rec) == "table" and (rec.status == "applied" or rec.status == "failed"
       or rec.status == "denied" or rec.status == "expired")
