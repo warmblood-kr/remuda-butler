@@ -575,11 +575,15 @@ local function writer_touches_protected(first, w, ctx)
 end
 
 local function segment_deny_reason(seg, ctx)
-  -- The grant store is written only by Butler itself; no command text may name its module (cooperative: text, not a boundary).
-  if seg:find("guard_grants", 1, true) or seg:find("_butler_test", 1, true) or seg:find("REMUDA_BUTLER_TEST", 1, true) then
+  local w = words(seg)
+  -- The grant store is written only by Butler itself. Code that names its module or the test flag is denied (a
+  -- remuda -e/lua/exec/run command; shell wrappers are unwrapped below), as is setting the flag's env var. Plain
+  -- reads of repo files that mention them (git diff, rg) are not. Cooperative: text, not a boundary. Writes to the
+  -- data dir itself are the protected-write checks further down.
+  if (seg:find("guard_grants", 1, true) or seg:find("_butler_test", 1, true) or seg:find("REMUDA_BUTLER_TEST", 1, true))
+      and (segment_class(w, seg, ctx) == "script" or seg:find("REMUDA_BUTLER_TEST=", 1, true)) then
     return "Butler grant store"
   end
-  local w = words(seg)
   local executable = (w[1] or ""):match("([^/]+)$") or ""
   if executable == "sh" or executable == "bash" or executable == "zsh" or executable == "dash"
       or executable == "ksh" or executable == "ash" then

@@ -43,3 +43,21 @@ T.test("command text naming the test flag or its env var is denied like the gran
       d('Bash', { command = "remuda eval 'remuda._butler_test = true'" }) }, '|')]])
   T.eq(out, "Butler grant store|Butler grant store|Butler grant store|Butler grant store", "all four denied", "ok - text deny")
 end)
+
+T.test("SHOULD c: plain reads that mention the grant store or the test flag are not denied; code and data-dir writes are", function()
+  start_butler()
+  local out = T.eval([[local gp = remuda.butler.guard_policy
+    local function d(tool, input) return tostring(gp.deny_reason(tool, input, { home = '/h' })) end
+    local data = gp.dir() or '/x/butler'
+    return table.concat({
+      d('Bash', { command = 'git diff packages/butler/guard_grants.lua' }),
+      d('Bash', { command = 'rg guard_grants packages' }),
+      d('Bash', { command = 'rg _butler_test tests' }),
+      d('Bash', { command = 'grep -n REMUDA_BUTLER_TEST docs/butler.md' }),
+      d('Bash', { command = 'remuda -e "remuda.butler.guard_grants.add{}"' }),
+      d('Bash', { command = "remuda lua -e 'remuda._butler_test = true'" }),
+      d('mcp__remuda__run_script', { code = 'return remuda.butler.guard_grants' }),
+      d('Bash', { command = 'echo x >> ' .. data .. '/guard-grants.jsonl' }) }, '|')]])
+  T.eq(out, "nil|nil|nil|nil|Butler grant store|Butler grant store|Butler grant store|Protected settings or directory write",
+    "reads pass, code and data writes are denied", "ok - text deny scope")
+end)
