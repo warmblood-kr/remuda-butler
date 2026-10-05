@@ -88,13 +88,20 @@ end
 -- calls it would otherwise ask about. These scopes are refused anyway so a grant cannot even be requested
 -- over the places the guard protects: a shallow root, the home itself, credentials, Butler's own data and
 -- config, and git's code-running files.
-local PROTECTED_SEGMENTS = { { ".ssh" }, { ".claude" }, { ".git", "hooks" }, { ".git", "config" }, { ".config", "remuda" } }
+local PROTECTED_SEGMENTS = { { ".ssh" }, { ".claude" }, { ".config", "remuda" } }
 local function protected_places(home)
   return { policy.dir(), home and (home .. "/.ssh"), home and (home .. "/.claude"), home and (home .. "/.config/remuda") }
 end
 local function protected_segment(path)
   local segs = {}
   for s in path:gmatch("[^/]+") do segs[#segs + 1] = s end
+  -- .git then hooks|config|config.worktree at any later depth (.git/modules/<s>/hooks, linked worktrees)
+  local git_at
+  for i, s in ipairs(segs) do
+    local l = s:lower()
+    if l == ".git" then git_at = git_at or i end
+    if git_at and i > git_at and (l == "hooks" or l == "config" or l == "config.worktree") then return true end
+  end
   for _, seq in ipairs(PROTECTED_SEGMENTS) do
     for i = 1, #segs - #seq + 1 do
       local hit = true

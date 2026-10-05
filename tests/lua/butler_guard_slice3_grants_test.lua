@@ -433,6 +433,17 @@ T.test("SHOULD c: shallow roots and protected directories are refused as scopes"
   T.expect(true, "", "ok - protected scopes")
 end)
 
+T.test("round 3 item 10: .git followed by hooks, config or config.worktree at any later depth is protected", function()
+  start_butler()
+  local root = tree("g3p3-gitdeep")
+  local function scope(p) return T.eval("return tostring((remuda.butler.guard_grants.scope('writable', " .. string.format("%q", p) .. ")))") end
+  for _, bad in ipairs({ root .. "/real/.git/modules/s/hooks", root .. "/real/.git/modules/s/hooks/x", root .. "/real/.git/modules/s/config",
+    root .. "/real/.git/config.worktree", root .. "/real/.git/worktrees/w/config.worktree" }) do
+    T.eq(scope(bad), "nil", "refused: " .. bad)
+  end
+  T.eq(scope(root .. "/real/.git/modules/s/objects"), root .. "/real/.git/modules/s/objects", "other .git paths still resolve", "ok - deep git")
+end)
+
 T.test("SHOULD e: guard grants escapes bidi overrides in holder, event and scope", function()
   start_butler()
   local root = tree("g3p3-bidi")
