@@ -8177,6 +8177,93 @@ local function test_guard_cycle_reaction_makes_a_grant_only_for_the_owner()
   end)
 end
 
+-- Guard slice 3, PR5: `guard freeze`, `guard revoke gNNN` and `guard unfreeze` are owner lines on the Matrix path only.
+local function guard_line(id, sender, body, when) return text_event(id, sender, body, nil, when) end
+local function first_post(env, fragment)
+  local posts = home_posts(env, fragment)
+  return posts[#posts]
+end
+
+local function test_guard_verbs_only_from_the_verified_owner()
+  approval_env(OWNER .. ",@agent-x:example.org", function(env)
+    with_guard(env, function(replies)
+      assert(remuda.butler.guard_policy.set_grants(true), "grants switch")
+      local event = guard_fetch(env, replies, "a.test")
+      room_events(env, { reaction("$owner", OWNER, event, CYCLE) })
+      assert(grant_events() == "$owner", "a grant to freeze and revoke")
+      local g = remuda.butler.guard_grants
+      local edited = guard_line("$edited", OWNER, "* guard freeze")
+      edited.content["m.new_content"] = { msgtype = "m.text", body = "guard freeze" }
+      edited.content["m.relates_to"] = { rel_type = "m.replace", event_id = "$orig" }
+      room_events(env, {
+        guard_line("$s", STRANGER, "guard freeze"), guard_line("$s2", STRANGER, "guard revoke g001"),
+        guard_line("$a", "@agent-x:example.org", "guard freeze"), guard_line("$early", OWNER, "guard freeze", ts(-120000)),
+        edited,
+      })
+      room_events(env, { guard_line("$all", OWNER, "guard freeze") }, ALL)
+      assert(not g.frozen() and grant_events() == "$owner", "stranger, agent, early, edited and wrong room change nothing")
+      restart_relay(env)
+      room_events(env, { guard_line("$not-live", OWNER, "guard freeze") }) -- the first sync after a restart is not live
+      assert(not g.frozen(), "a line outside live sync changes nothing")
+      room_events(env, { guard_line("$freeze", OWNER, "guard freeze") })
+      assert(g.frozen() and grant_events() == "", "the owner's line freezes: no grant matches")
+      assert(#home_posts(env, "Grants are frozen:") == 1, "one plain confirmation")
+      room_events(env, { guard_line("$freeze", OWNER, "guard freeze") })
+      assert(#home_posts(env, "Grants are frozen:") == 1 and #home_posts(env, "already frozen") == 0, "a replayed event answers nothing")
+      room_events(env, { guard_line("$freeze2", OWNER, "guard freeze") })
+      assert(#home_posts(env, "Grants are already frozen.") == 1, "a second line is told")
+    end)
+  end)
+end
+
+local function test_guard_revoke_from_the_owner()
+  approval_env(OWNER, function(env)
+    with_guard(env, function(replies)
+      assert(remuda.butler.guard_policy.set_grants(true), "grants switch")
+      local event = guard_fetch(env, replies, "a.test")
+      room_events(env, { reaction("$owner", OWNER, event, CYCLE) })
+      room_events(env, { guard_line("$no", STRANGER, "guard revoke g001") })
+      assert(grant_events() == "$owner", "a stranger revokes nothing")
+      room_events(env, { guard_line("$rev", OWNER, "guard revoke g001"), guard_line("$rev9", OWNER, "guard revoke g009") })
+      assert(grant_events() == "", "the owner's revoke ends the grant")
+      assert(#home_posts(env, "Revoked g001.") == 1 and #home_posts(env, "No grant g009.") == 1, "plain answers")
+      local lines = io.open(remuda.butler.guard_policy.log_path()):read("a")
+      assert(lines:find('"event":"grant_revoked"', 1, true) and lines:find('"grant_id":"g001"', 1, true), "audited with grant_id")
+    end)
+  end)
+end
+
+local function test_guard_unfreeze_needs_the_owner_answer_on_butler_post()
+  approval_env(OWNER, function(env)
+    with_guard(env, function(replies)
+      assert(remuda.butler.guard_policy.set_grants(true), "grants switch")
+      local g = remuda.butler.guard_grants
+      room_events(env, { guard_line("$f", OWNER, "guard freeze") })
+      room_events(env, { guard_line("$u", OWNER, "guard unfreeze") })
+      assert(g.frozen(), "the owner's line only asks")
+      local post = assert(first_post(env, "Lift the guard grant freeze"), "a Butler post asks")
+      local id = assert(post.body:match("%[Butler approval (%w+)%]"))
+      room_events(env, { reaction("$stranger", STRANGER, post.event_id), reaction("$early", OWNER, post.event_id, nil, ts(-120000)) })
+      room_events(env, { guard_line("$stranger-yes", STRANGER, "yes " .. id) })
+      assert(g.frozen(), "a stranger or an early reaction lifts nothing")
+      room_events(env, { reaction("$no", OWNER, post.event_id, "\226\157\140") })
+      assert(g.frozen(), "a cross keeps the freeze")
+      room_events(env, { guard_line("$u2", OWNER, "guard unfreeze") })
+      post = first_post(env, "Lift the guard grant freeze")
+      id = post.body:match("%[Butler approval (%w+)%]")
+      room_events(env, { reaction("$yes", OWNER, post.event_id) })
+      assert(not g.frozen() and thread_replies(env, post.event_id, "Freeze lifted") == 1, "the owner's reaction lifts it")
+      -- the reply path
+      room_events(env, { guard_line("$f2", OWNER, "guard freeze"), guard_line("$u3", OWNER, "guard unfreeze") })
+      post = first_post(env, "Lift the guard grant freeze")
+      id = post.body:match("%[Butler approval (%w+)%]")
+      assert(g.frozen(), "frozen again")
+      room_events(env, { guard_line("$reply", OWNER, "yes " .. id) })
+      assert(not g.frozen(), "the owner's yes ID lifts it")
+    end)
+  end)
+end
+
 local function test_guard_cycle_reaction_needs_a_guard_request_and_the_switch()
   approval_env(nil, function(env)
     with_guard(env, function(replies)
@@ -8202,6 +8289,9 @@ end
     { "test_guard_one_shot_expiry_and_restart", test_guard_one_shot_expiry_and_restart },
     { "test_guard_cycle_reaction_makes_a_grant_only_for_the_owner", test_guard_cycle_reaction_makes_a_grant_only_for_the_owner },
     { "test_guard_cycle_reaction_needs_a_guard_request_and_the_switch", test_guard_cycle_reaction_needs_a_guard_request_and_the_switch },
+    { "test_guard_verbs_only_from_the_verified_owner", test_guard_verbs_only_from_the_verified_owner },
+    { "test_guard_revoke_from_the_owner", test_guard_revoke_from_the_owner },
+    { "test_guard_unfreeze_needs_the_owner_answer_on_butler_post", test_guard_unfreeze_needs_the_owner_answer_on_butler_post },
   }
 end)()) do
   local ok, err = pcall(case[2])

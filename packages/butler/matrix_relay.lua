@@ -1641,6 +1641,21 @@ function relay.new(options)
   -- Prepared-text and guard requests take the strict owner gate; the first also needs its switch.
   local function owner_gated(record)
     return (record.kind == "approve_text" and cfg.approve_text == true) or record.kind == "guard_action"
+      or record.kind == "guard_unfreeze"
+  end
+
+  -- The owner's `guard freeze|unfreeze|revoke gNNN` lines (guard_approval.owner_command). The strict owner gate is the
+  -- one the reactions use, against the HOME room and this relay's start in place of a post: an allowlisted human, live
+  -- sync, not edited, not older than the relay. Returns the reply text when the line was a guard verb.
+  local relay_started_ms = os.time() * 1000
+  local function owner_guard_line(ev, content, live_sync, room_id)
+    local guards = remuda.butler and remuda.butler.guard_approval
+    if not (guards and guards.owner_command) or content.msgtype ~= "m.text" or type(content.body) ~= "string"
+        or not content.body:lower():match("^%s*guard%s") then return nil end
+    if not (approve_text.owner_event_allowed(ev, { room_id = cfg.home_room, created_ms = relay_started_ms }, cfg,
+        live_sync, room_id) and member_kind(ev.sender, cfg) == "HUMAN") then return nil end
+    local ok, reply = pcall(guards.owner_command, content.body, ev.sender)
+    if ok and type(reply) == "string" then return reply end
   end
 
   local function accept_events(events, cursor, room_id, live_sync)
@@ -1672,7 +1687,8 @@ function relay.new(options)
               if not approval_record and not explicit_id then
                 for _, target in ipairs(targets) do
                   local candidate = approval.for_event(target)
-                  if candidate and (candidate.kind == "approve_text" or candidate.kind == "guard_action") then
+                  if candidate and (candidate.kind == "approve_text" or candidate.kind == "guard_action"
+                      or candidate.kind == "guard_unfreeze") then
                     if owner_gated(candidate) and msgtype == "m.text" then
                       approval_record, approval_verdict = candidate, text_verdict
                     elseif owner_gated(candidate) and msgtype == "m.reaction" then
@@ -1723,6 +1739,7 @@ function relay.new(options)
               trace_typed_line(ev, room_id or cfg.room, nil, nil, "butler", "refused:not_live")
             end
           end
+          local guard_reply = not approval_record and owner_guard_line(ev, content, live_sync == true, room_id or cfg.room)
           local status_matched, status_text, status_commit = false, nil, nil
           if not approval_record and type(content.body) == "string" and content.body:sub(1, 1) == "?"
               and member_kind(ev.sender, cfg) == "HUMAN" then
@@ -1737,7 +1754,13 @@ function relay.new(options)
                 "consumed:" .. trace_reason .. ":" .. (terminal_safe_field(tostring(matched), 64):gsub("%c", " ")))
             end
           end
-          if status_matched then
+          if guard_reply then
+            -- The event is spent before it acts, so a replay after a restart changes nothing.
+            if event_id ~= "" then add_processed(state, event_id) end
+            if cursor then state.since = cursor end
+            pcall(persist)
+            send_threaded_notice(ev, room_id or cfg.room, guard_reply, "guard-command-")
+          elseif status_matched then
             if event_id ~= "" then add_processed(state, event_id) end
             if cursor then state.since = cursor end
             local persisted, persist_result = pcall(persist)
@@ -1750,7 +1773,8 @@ function relay.new(options)
             if cursor then state.since = cursor end
             local origin_ms = tonumber(ev.origin_server_ts)
             local counts
-            if approval_record.kind == "approve_text" or approval_record.kind == "guard_action" then
+            if approval_record.kind == "approve_text" or approval_record.kind == "guard_action"
+                or approval_record.kind == "guard_unfreeze" then
               counts = approval_verdict ~= nil
                 and approve_text.owner_event_allowed(ev, approval_record, cfg, live_sync, room_id or cfg.room)
                 and member_kind(ev.sender, cfg) == "HUMAN"

@@ -716,8 +716,8 @@ no guard behavior changes.
 
 - Scope is slice 3 only. There is no learning loop (3b), no slice 4 and no
   slice 5.
-- The owner can freeze and revoke from Matrix. Freeze and revoke only narrow
-  power; lifting a freeze stays owner-approved.
+- The owner can freeze and revoke from Matrix (see Freeze and revoke). Freeze
+  and revoke only narrow power; lifting a freeze stays owner-approved.
 - Any push that touches CI or workflow files is T3 and always asks. A standing
   grant never covers it (see Pushes under a grant).
 - Every audit line carries `grant_id`. The audit log has a daily hash digest
@@ -822,6 +822,35 @@ decision, so Claude shows its own prompt, and the refusal is an audit line
 "remembered deny"). Limits and remembered denies live in the daemon's memory
 and end when it restarts. The existing caps (open requests per session and in
 all, 30 requests per 10 minutes per asker) stay.
+
+### Freeze and revoke (owner, Matrix only)
+
+Three lines the owner types in the HOME room, each the whole message:
+
+| Line | What it does |
+| --- | --- |
+| `guard revoke gNNN` | ends that one grant at the next hook call; answers plainly when the id is unknown, already revoked or already expired |
+| `guard freeze` | no grant matches and none is offered or made until the freeze is lifted |
+| `guard unfreeze` | asks to lift the freeze: Butler posts a request, and only the owner's ✅ reaction on that post (or `yes ID` as a reply) lifts it; ❌, `no ID` or expiry keeps the freeze |
+
+They take the same owner gate as the reactions: an allowlisted human mxid, live
+sync (not backfill or the first sync after a start), a message that is not an
+edit, in the HOME room, and not older than the relay. Any other sender (a
+stranger, an agent, Butler itself) or any other room does nothing. There is no
+CLI verb for them and an agent cannot reach them: `remuda butler guard freeze`
+is a usage error, and the terminal cannot approve the unfreeze request.
+Freeze and revoke only narrow power; widening it again (lifting a freeze) is
+always the owner's answer on a Butler post, never a plain command.
+
+Butler answers each line with one short plain confirmation in the room (no
+agent text, no mention) and writes an audit line (`grant_revoked` with the
+`grant_id`, `grants_frozen`, `grants_unfrozen`). A revoke rewrites that grant's
+line in the store as revoked. A freeze is a marker file in the protected data
+dir, so it survives a restart; while it stands the approval post offers no 🔄
+and a 🔄 on an older post is refused. Both fail closed: if the revoke or the
+marker cannot be saved, the grant (or every grant) is off in memory and Butler
+says so, until it restarts. `remuda butler guard grants` shows `frozen` and the
+revoked grants.
 
 ### Expiry notice
 
