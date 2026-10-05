@@ -781,6 +781,12 @@ handed out earlier in this load), Butler logs it to stderr, the daemon log and
 the audit log (`grant_register_refused`), and no reaction can create a grant
 until Butler reloads.
 
+Limit: `approval.answer(id, "grant", who, event)` trusts its `who` and
+`event` arguments. The relay passes only the verified owner's mxid and the
+reaction's event id, and every call site must keep doing so; Lua running inside
+the daemon can call it directly, so, like `register`, this is a cooperative
+limit and not a boundary.
+
 The cross-check: the store trusts only grants whose approval event id is the
 owner's reaction event that Butler itself recorded on the request (reaction
 event, grant id, class and scope all equal). A line written into the file by
