@@ -459,6 +459,9 @@ function approval.answer(id_or_event, verdict, who, event_id)
   if rec.kind == "guard_action" and who == "operator (terminal)" and verdict == "approve" then
     return nil, "A guarded tool call can only be approved by the owner in its live Matrix thread."
   end
+  if rec.kind == "guard_unfreeze" and who == "operator (terminal)" and verdict == "approve" then
+    return nil, "Lifting the freeze can only be approved by the owner in its live Matrix thread."
+  end
   if rec.kind == "approve_text" and rec.status == "approved" and verdict == "approve" then
     if rec.delivery_started == true then return nil, "Already answered.", rec end
     rec.answered_by, rec.answer_event_id = who, event_id
