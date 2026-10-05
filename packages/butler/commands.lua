@@ -483,7 +483,8 @@ local SEND_TO_LEADER_CLI_SPEC = {
     },
   },
 }
-command(50, "send-to-leader", "  remuda butler send-to-leader <message...> | - | --file PATH", function(args, caller)
+command(50, "send-to-leader", "  remuda butler send-to-leader <message...> | - | --file PATH\n"
+  .. "  To send text that starts with -, put -- first: remuda butler send-to-leader -- -text", function(args, caller)
   if #args < 2 then return nil end
   local from = current_agent(caller)
   if not from then
@@ -495,7 +496,10 @@ command(50, "send-to-leader", "  remuda butler send-to-leader <message...> | - |
   if type(cli) == "table" and type(cli.parse) == "function" and type(args[2]) == "string"
       and args[2]:sub(1, 1) == "-" and args[2] ~= "-" then
     local report = cli.parse(SEND_TO_LEADER_CLI_SPEC, args)
-    if report.kind == "help" then return report.text end
+    if report.kind == "help" then
+      return (report.text:gsub("\nNext:",
+        "\nTo send text that starts with -, put -- first: remuda butler send-to-leader -- -text\n\nNext:", 1))
+    end
     if not report.ok then
       if type(remuda.fail) == "function" then return remuda.fail(report.text, report.code) end
       error(report.text, 0)
@@ -512,6 +516,14 @@ command(50, "send-to-leader", "  remuda butler send-to-leader <message...> | - |
       return cli_result(function()
         return remuda._butler_report(from, message_body({ "send-to-leader", "--file", report.values.file }, 2, caller))
       end)
+    end
+    if args[2] ~= "--" then
+      local message = 'send-to-leader accepts --file PATH as an option; put -- before message text that starts with -.\n'
+        .. 'Usage: remuda butler send-to-leader <message...> | - | --file PATH\n'
+        .. 'Example: remuda butler send-to-leader -- -text\n'
+        .. 'Next: remuda butler send-to-leader --help'
+      if type(remuda.fail) == "function" then return remuda.fail(message, 2) end
+      error(message, 0)
     end
   end
   return cli_result(function()

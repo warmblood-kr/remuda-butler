@@ -217,6 +217,15 @@ T.test("send-to-leader --bogus returns a usage error with Next", function()
     "send-to-leader --bogus should fail with usage and no report: " .. out)
 end)
 
+T.test("send-to-leader --file=PATH returns usage with Next", function()
+  local out = invoke_error("send-to-leader", { "send-to-leader", "--file=" .. path() })
+  T.expect(out:find("Usage: remuda butler send-to-leader", 1, true) ~= nil
+      and out:find("Next: remuda butler send-to-leader --help\nstack traceback", 1, true) ~= nil
+      and out:find("false|", 1, true) == 1
+      and out:find("|0$") ~= nil,
+    "send-to-leader --file=PATH should fail with usage and no report: " .. out)
+end)
+
 T.test("send-to-leader fix the -h flag sends free text", function()
   local out = invoke("send-to-leader", { "send-to-leader", "fix", "the", "-h", "flag" })
   T.eq(out, "stub:report|report|agent-test|fix the -h flag", "send-to-leader fix the -h flag")

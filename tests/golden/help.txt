@@ -22,6 +22,7 @@ remuda butler — coordination for managed agents
   remuda butler send <to> "<message>" | <to> - | <to> --file PATH
   remuda butler send <from> <to> <message...> | <from> <to> - | <from> <to> --file PATH
   remuda butler send-to-leader <message...> | - | --file PATH
+  To send text that starts with -, put -- first: remuda butler send-to-leader -- -text
   remuda butler inbox [name]
   remuda butler reply <message-id> <message...> | - | --file PATH
   remuda butler reply <message-id> --attach PATH [caption...]

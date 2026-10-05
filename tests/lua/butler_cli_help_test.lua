@@ -101,3 +101,14 @@ T.test("message verbs treat --help as help without actions", function()
       and out:find("forward-missing=nil", 1, true),
     "forward unknown-option behavior changed from first-position CLI parsing: " .. out)
 end)
+
+T.test("send-to-leader help explains how to send dash-first text", function()
+  start_butler()
+  local out = T.eval([[
+    local caller = { env = { REMUDA_BUTLER_AGENT_ID = "agent-test" } }
+    return remuda._butler_command_run("send-to-leader", { "send-to-leader", "--help" }, caller)
+  ]])
+  T.expect(out:find("To send text that starts with -, put -- first:", 1, true) ~= nil
+      and out:find("remuda butler send-to-leader -- -text", 1, true) ~= nil,
+    "send-to-leader help should explain the -- separator: " .. out)
+end)
