@@ -89,8 +89,12 @@ end)
 T.test("close help documents --force before the name", function()
   local out = invoke("close", { "close", "--help" })
   local invalid = invoke_error("close", { "close", "--force" })
-  T.expect(out:find("remuda butler close --force", 1, true) ~= nil and out:find("Next:", 1, true) ~= nil,
-    "close --help should document close --force NAME with Next: " .. out)
+  local usage_at = out:find("Usage: remuda butler close <name> [--force]", 1, true)
+  local alternate_at = out:find("       remuda butler close --force <name>", 1, true)
+  local example_at = out:find("Example: remuda butler close worker-1", 1, true)
+  T.expect(usage_at ~= nil and alternate_at ~= nil and example_at ~= nil
+      and usage_at < alternate_at and alternate_at < example_at and out:find("Next:", 1, true) ~= nil,
+    "close --help should order the usage, alternate form, and example: " .. out)
   T.expect(invalid:find("remuda butler close --force", 1, true) ~= nil and invalid:find("Next:", 1, true) ~= nil,
     "close usage error should document close --force NAME with Next: " .. invalid)
   local _, usage_count = invalid:gsub("Usage:", "")
