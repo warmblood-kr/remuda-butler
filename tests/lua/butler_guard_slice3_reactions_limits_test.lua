@@ -141,6 +141,15 @@ T.test("changing the alias does not escape a remembered cross or the per-scope p
   T.expect(perm("ss-n11", "t.test") > 0, "another scope is asked", "ok - alias")
 end)
 
+T.test("the post tells the owner what the standing-grant reaction does in this version", function()
+  on("l-truth")
+  perm("ss-a", "a.test")
+  T.expect(has(post(1), "🔄 to allow it and record a grant for the scope; calls still ask in this version"), "says so: " .. post(1))
+  guard("grants", "off")
+  perm("ss-a", "b.test")
+  T.expect(not has(post(2), "grant"), "no grant words with the switch off", "ok - truth")
+end)
+
 T.test("at most 5 posts per agent per minute and 30 per hour overall; refused without a post", function()
   on("l-rate")
   at(0)

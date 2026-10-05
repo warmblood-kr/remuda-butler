@@ -756,7 +756,7 @@ backfill), after the post was made. Three separate reactions, never one button:
 | Reaction | Meaning |
 | --- | --- |
 | ✅ | approve this one call (single-use) |
-| 🔄 | approve this call and create a standing grant for the scope shown |
+| 🔄 | approve this call and record a standing grant for the scope shown; calls still ask in this version (the grant is recorded and audited, not yet used to skip the question) |
 | ❌ | deny, and remember the deny (see Request limits) |
 
 Each post is one request with its own id and nonce, and the post's text hash
