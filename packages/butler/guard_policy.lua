@@ -307,14 +307,12 @@ local function segment_class(w, text, ctx)
   if first == "kill" or first == "pkill" or first == "killall" then return "control" end
   if first == "remuda" then
     if has(w, { stop = true, restart = true, kill = true }) then return "control" end
-    if has(w, { eval = true, ["-e"] = true, ["--eval"] = true }) then return "script" end -- runs Lua inside the daemon
-    -- -e / --eval may carry the value attached (-e'code', --eval=code); a .lua file or `run` also runs Lua in the daemon
-    local lua_file = not has(w, { butler = true })
-    for i = 2, #w do
-      if w[i]:find("^%-e") or w[i]:find("^%-%-eval") or w[i] == "run" or (lua_file and w[i]:find("%.lua$")) then return "script" end
-    end
+    -- Classify the butler verb first: RANK puts weaken/control/identity above script, so a later `run` or `-ex`
+    -- argument of a butler verb must not downgrade it. Script markers count only before the `butler` word.
+    local butler_at = #w + 1
     for i, a in ipairs(w) do
       if a == "butler" then
+        butler_at = i
         local verb = w[i + 1]
         if verb == "close" then return "control" end
         if verb == "guard" and w[i + 2] == "approvals" and (w[i + 3] == "on" or w[i + 3] == "off") then return "weaken" end
@@ -325,7 +323,13 @@ local function segment_class(w, text, ctx)
             or w[i + 2] == "mark-all") then
           return "identity"
         end
+        break
       end
+    end
+    -- -e / --eval may carry the value attached (-e'code', --eval=code); a .lua file or `run` also runs Lua in the daemon
+    local lua_file = butler_at > #w
+    for i = 2, butler_at - 1 do
+      if w[i] == "eval" or w[i]:find("^%-e") or w[i]:find("^%-%-eval") or w[i] == "run" or (lua_file and w[i]:find("%.lua$")) then return "script" end
     end
   end
   if first == "git" and has(w, { push = true }) then return "push" end
