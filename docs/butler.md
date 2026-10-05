@@ -825,7 +825,7 @@ all, 30 requests per 10 minutes per asker) stay.
 
 ### Freeze and revoke (owner, Matrix only)
 
-Three lines the owner types in the HOME room, each the whole message:
+Three lines the owner types in the HOME room. Each takes no other text (`guard revoke` takes exactly one id); a line that starts with one of these verbs and has more, or a malformed id, is answered with its usage and never handed on as mail or a typed line:
 
 | Line | What it does |
 | --- | --- |
@@ -844,8 +844,20 @@ always the owner's answer on a Butler post, never a plain command.
 
 Butler answers each line with one short plain confirmation in the room (no
 agent text, no mention) and writes an audit line (`grant_revoked` with the
-`grant_id`, `grants_frozen`, `grants_unfrozen`). A revoke rewrites that grant's
-line in the store as revoked. A freeze is a marker file in the protected data
+`grant_id`, `grants_frozen`, `grants_unfrozen`, `owner_line_refused` for a usage
+answer); every summary names the sender and the Matrix event of the line (of
+the answering reaction for an unfreeze). Freeze and revoke act even when their
+audit line cannot be written and log the failure. Lifting widens, so the
+`grants_unfrozen` line is written first: if it cannot be, the freeze stays and
+Butler says so. A revoke rewrites that grant's
+line in the store as revoked. A new `guard freeze` (also when already frozen)
+expires any open unfreeze request, and an unfreeze post made before the latest
+freeze lifts nothing, so a late ✅ on an old post cannot beat a newer freeze. If
+the unfreeze post cannot be made, is already open or is refused by a cap, the
+reply says which. Freeze and revoke use the grant store's public functions, so
+they still work when the private hand-over to the reaction handler did not
+happen (a refused register, or the approval module reloaded alone); the add and
+the unfreeze never leave the handler. A freeze is a marker file in the protected data
 dir, so it survives a restart; while it stands the approval post offers no 🔄
 and a 🔄 on an older post is refused. Both fail closed: if the revoke or the
 marker cannot be saved, the grant (or every grant) is off in memory and Butler
@@ -856,7 +868,8 @@ revoked grants.
 
 Grants that expire within 60 seconds of the first one are announced in one
 notice in the owner (HOME) room, naming each (`g001 net example.com`); there
-is no notice per grant and no mention. Only grants this daemon saw active are
+is no notice per grant and no mention. A grant is tracked from the store, frozen or not, so one that
+expires during a freeze is still announced. Only grants this daemon saw held are
 announced: one that expired while Butler was not running is not. With the
 switch off nothing is tracked or posted.
 
@@ -876,8 +889,11 @@ write the file; the deny rule governs agent tools, not the OS.
 The store's test seams (clock, case probe, approval cross-check) answer only
 to `REMUDA_BUTLER_TEST=1` in the daemon's process environment, read once when
 the module loads; setting a Lua field later changes nothing. The text deny
-refuses command and script text naming the grant store module, the
-`_butler_test` field or the env name, like any other guard rule.
+refuses code that names the grant store module, the `_butler_test` field or the
+env name (`run_script` code, and `remuda -e`, `lua`, `exec` or `run` commands),
+and commands that set `REMUDA_BUTLER_TEST=`; writes into the data dir are
+refused as protected writes. Plain reads of repo files that mention them
+(`git diff packages/butler/guard_grants.lua`, `rg guard_grants`) are allowed.
 
 ### Scope patterns
 
