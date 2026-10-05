@@ -191,19 +191,17 @@ local function begin_child()
       assert(type(key) == "string" and type(value) == "string", "T.child_env must map strings to strings")
     end
   end
+  -- Test seams in Butler (guard_grants.now/verified/insensitive) are honoured only when the child daemon's process env
+  -- carries REMUDA_BUTLER_TEST=1, read once at module load; a test may override it (T.child_env) to run in production mode.
+  local env = { REMUDA_BUTLER_TEST = "1" }
+  for key, value in pairs(child_env or {}) do env[key] = value end
   local started = process.run {
     argv = { exe, "-s", child_server, "-e", "1" },
-    env = child_env,
+    env = env,
     timeout = 30,
   }
   if started.timed_out or started.code ~= 0 then
     finish("FAIL", "child daemon start failed: " .. tostring(started.stderr or started.stdout))
-    return false
-  end
-  -- Test seams in Butler (guard_grants.now/verified/insensitive) are honoured only when this is set.
-  local flagged = process.run { argv = { exe, "-s", child_server, "-e", "remuda._butler_test = true" }, timeout = 10 }
-  if flagged.timed_out or flagged.code ~= 0 then
-    finish("FAIL", "child daemon test flag failed: " .. tostring(flagged.stderr or flagged.stdout))
     return false
   end
   return true

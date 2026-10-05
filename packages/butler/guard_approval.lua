@@ -185,7 +185,7 @@ end
 
 -- Limits and remembered crosses (grants on only). nil = go ahead; "denied" = the owner already said no to this
 -- scope (key, not session); "limited" = too many posts. Denied requests do not count against the limits.
-local function admit(session, key)
+local function admit(session, key, scope_key)
   local L, t = M._limits, clock()
   L.scope = L.scope or {}
   for k, until_ in pairs(L.denies) do if until_ <= t then L.denies[k] = nil end end
@@ -196,8 +196,8 @@ local function admit(session, key)
   end
   for s, list in pairs(L.agent) do if recent(list, 60) == 0 then L.agent[s] = nil end end
   for k, list in pairs(L.scope) do if recent(list, 3600) == 0 then L.scope[k] = nil end end
-  local mine, theirs = L.agent[session] or {}, L.scope[key] or {}
-  L.agent[session], L.scope[key] = mine, theirs
+  local mine, theirs = L.agent[session] or {}, L.scope[scope_key] or {}
+  L.agent[session], L.scope[scope_key] = mine, theirs
   if recent(mine, 60) >= PER_AGENT_PER_MIN or recent(theirs, 3600) >= PER_SCOPE_PER_HOUR
       or recent(L.hour, 3600) >= GLOBAL_PER_HOUR then return "limited" end
   mine[#mine + 1], theirs[#theirs + 1], L.hour[#L.hour + 1] = t, t, t
@@ -226,12 +226,16 @@ function M.maybe_request(record, hook_json)
   local data = { tool = policy.redact(record.tool, 120), class = record.class, agent = record.kind,
     cwd = policy.redact(hook_json.cwd, 300), session = policy.redact(session, 120), text = text }
   if grants_on() then
-    data.offer = grants.offer(record.tool, input, hook_json.cwd)
+    -- Frozen: no standing grant is offered (the owner's reaction would make none).
+    data.offer = not grants.frozen() and grants.offer(record.tool, input, hook_json.cwd) or nil
     if data.offer then data.offer.expires = grants.time() + grants.DEFAULT_TTL end
     data.note = note_line(input.description)
-    data.deny_key = data.offer and (data.offer.class .. " " .. data.offer.scope)
-      or (data.tool .. " " .. data.class .. " " .. data.cwd .. " " .. data.text)
-    local verdict = admit(data.session, data.deny_key)
+    -- The post limit never keys on command text (a trailing space or `; :` would dodge it); only the remembered
+    -- deny keeps the exact text.
+    local scope_key = data.offer and (data.offer.class .. " " .. data.offer.scope)
+      or (data.tool .. " " .. data.class .. " " .. data.cwd)
+    data.deny_key = data.offer and scope_key or (scope_key .. " " .. data.text)
+    local verdict = admit(data.session, data.deny_key, scope_key)
     if verdict then
       audit_refusal(record, data, verdict)
       if verdict == "denied" then
@@ -270,9 +274,9 @@ end
 
 -- The private grant-store add is handed here, once, by the module's own load: nothing else holds it. A refusal
 -- means a grant module that already handed it out (or none), so no reaction can create a grant: say so loudly.
-local add_grant
+local add_grant, grant_controls
 if grants then
-  local ok, why = grants.register(function(add) add_grant = add end)
+  local ok, why = grants.register(function(add, controls) add_grant, grant_controls = add, controls end)
   if not ok then
     local msg = "guard grants: the owner-reaction handler could not register (" .. tostring(why)
       .. "); no reaction creates a grant until Butler reloads"
@@ -280,6 +284,107 @@ if grants then
     if type(remuda.log) == "function" then pcall(remuda.log, "error", msg) end
     policy.observe("grant_register_refused", "butler", "butler", msg)
   end
+end
+
+-- Owner audit lines (freeze, revoke, lift) carry the grant id where there is one, and who asked: the sender and the
+-- Matrix event of the line (or of the answer) are in every summary. Returns true, or nil and why.
+local function by_text(who, event_id)
+  return " (by " .. policy.redact(tostring(who or "-"), 120) .. ", event " .. policy.redact(tostring(event_id or "-"), 120) .. ")"
+end
+local function owner_audit(event, summary, grant_id, by)
+  local ok, done, why = pcall(policy.append, { session = "owner", kind = "owner", event = event, tool = "", class = "other",
+    summary = summary .. (by or ""), grant_id = grant_id })
+  if ok and done then return true end
+  return nil, tostring(ok and why or done)
+end
+-- A line that narrows (freeze, revoke) still acts when its audit line cannot be written, but never silently.
+local function audit_narrowing(event, summary, grant_id, by)
+  local ok, why = owner_audit(event, summary, grant_id, by)
+  if not ok then
+    local msg = "guard grants: the audit line for " .. event .. " could not be written (" .. tostring(why) .. ")"
+    io.stderr:write("butler: " .. msg .. "\n")
+    if type(remuda.log) == "function" then pcall(remuda.log, "error", msg) end
+  end
+end
+-- Error text for a room reply: escaped, no mention or markup.
+local function plain(text) return (grants.show(tostring(text), 120):gsub("[@`]", "")) end
+
+-- Bumped by every owner `guard freeze`: an unfreeze request remembers the one it was made under, so a post that
+-- is older than the latest freeze cannot lift it (the open ones are also expired, this covers one still posting).
+M._freeze_gen = M._freeze_gen or 0
+
+-- The owner's Matrix lines `guard freeze`, `guard unfreeze` and `guard revoke gNNN`. The relay calls this only for
+-- a line that passed its owner gate (allowlisted human, live sync, not edited, in the room); there is no CLI or
+-- agent path to it. Cooperative like approval.answer: Lua inside the daemon can call it. Returns the reply text, or
+-- nil when the line is not one of these verbs. Every line that starts with one of them is answered, so the
+-- relay never hands it on as mail. Freeze and revoke only narrow, so they use the grant store's public functions when
+-- the private handoff is missing; unfreeze needs the private one.
+function M.owner_command(line, who, event_id)
+  if type(line) ~= "string" or not grants then return nil end
+  local text = line:match("^%s*(.-)%s*$"):lower()
+  local verb, rest = text:match("^guard%s+(%a+)(.*)$")
+  if verb ~= "freeze" and verb ~= "unfreeze" and verb ~= "revoke" then return nil end
+  local by = by_text(who, event_id)
+  local args = {}
+  for word in rest:gmatch("%S+") do args[#args + 1] = word end
+  if rest ~= "" and not rest:match("^%s") then args[1] = rest end -- `guard freeze-now`: extra text, not the bare verb
+  local id = args[1]
+  if (verb == "revoke" and (#args ~= 1 or not id:match("^g%d%d%d+$"))) or (verb ~= "revoke" and #args > 0) then
+    owner_audit("owner_line_refused", "usage: " .. policy.redact(text, 80), nil, by)
+    return verb == "revoke" and "Usage: guard revoke gNNN (the id from `remuda butler guard grants`)."
+      or "Usage: guard " .. verb .. " (no arguments)."
+  end
+  local narrow = grant_controls or grants
+  if verb == "revoke" then
+    local done, why = narrow.revoke(id)
+    if done == "revoked" then
+      audit_narrowing("grant_revoked", "revoked", id, by)
+      return "Revoked " .. id .. ". It stops matching on the next call."
+    elseif done == "already" then return id .. " is already revoked."
+    elseif done == "expired" then return id .. " has already expired."
+    elseif done == "unknown" then return "No grant " .. id .. "."
+    end
+    audit_narrowing("grant_revoke_unsaved", plain(why), id, by)
+    return "Revoke of " .. id .. " could not be saved (" .. plain(why) .. "). It is off until Butler restarts; try again."
+  elseif verb == "freeze" then
+    M._freeze_gen = M._freeze_gen + 1
+    approval.expire_open("guard_unfreeze") -- an older ask to lift must not outlive this freeze
+    local done, why = narrow.freeze()
+    if done == "already" then return "Grants are already frozen." end
+    audit_narrowing("grants_frozen", done and "frozen" or plain(why), nil, by)
+    if not done then
+      return "Grants are frozen in memory only: the marker could not be saved (" .. plain(why)
+        .. "). The freeze ends if Butler restarts; try again."
+    end
+    return "Grants are frozen: none matches and none is made until you lift it (guard unfreeze, then react on the post)."
+  end
+  if not grants.frozen() then return "Grants are not frozen." end
+  if not grant_controls then return "Grant controls are not available: Butler has not registered them. Reload Butler." end
+  local fresh, sent, asked_id, asked_why = false, false, nil, nil
+  local started, err = pcall(approval.request, { kind = "guard_unfreeze", key = "unfreeze", asker = "owner",
+    summary = "lift the guard grant freeze", ttl_s = 600, max_open_for_asker = 1, max_open_total = 1,
+    data = { gen = M._freeze_gen }, on_id = function() fresh = true end,
+    render = function(rec)
+      return "[Butler approval " .. rec.id .. "] Lift the guard grant freeze\n"
+        .. "React ✅ to lift it: grants match again until they expire. Reply \"yes " .. rec.id .. "\" also works.\n"
+        .. "❌ or no keeps grants frozen. Only the owner in Matrix can lift it."
+    end }, function(rid, why)
+      if sent then
+        -- the post finished after this reply went out: only a failure still needs telling
+        if not rid then pcall(approval.notify, "The unfreeze request could not be posted: " .. plain(why) .. ". Grants stay frozen.") end
+      else
+        asked_id, asked_why = rid, why
+      end
+    end)
+  sent = true
+  if not started then asked_why = err end
+  if asked_id then
+    if fresh then return "To lift the freeze, react ✅ on the post I just made (or reply yes)." end
+    return "An unfreeze request is already open (" .. plain(asked_id) .. "): react ✅ on its post (or reply yes)."
+  elseif asked_why then
+    return "Could not ask to lift the freeze: " .. plain(asked_why) .. " Grants stay frozen."
+  end
+  return "To lift the freeze, react ✅ on the post I am making (or reply yes)."
 end
 
 function M.configure()
@@ -316,7 +421,8 @@ function M.configure()
           rec.grant = { id = id, class = offer.class, scope = offer.scope }
           settle(rec.id, M.ALLOW)
           audit("grant_created", rec, offer.class .. " " .. offer.scope, id)
-          thread_note(rec, "Standing grant " .. id .. ": " .. grants.show(offer.class .. " " .. offer.scope, 200)
+          -- a path may hold @ (a mention) or a backtick (markup): the note is plain text
+          thread_note(rec, "Standing grant " .. id .. ": " .. grants.show(offer.class .. " " .. offer.scope, 200):gsub("[@`]", "")
             .. " until " .. os.date("!%Y-%m-%dT%H:%M:%SZ", offer.expires) .. ". Allowed this call.")
           complete(true)
         end
@@ -330,6 +436,7 @@ function M.configure()
     -- Asked before a cycle reaction counts: nil to go ahead, or why not (the request stays open).
     grant_check = function(rec)
       if not grants_on() then return "Standing grants are off." end
+      if grants.frozen() then return "Standing grants are frozen." end
       if type(rec.data) ~= "table" or type(rec.data.offer) ~= "table" then
         return "No standing grant is offered for this request."
       end
@@ -348,6 +455,33 @@ function M.configure()
       thread_note(rec, "Expired. The agent shows its own prompt.")
     end,
   })
+  -- Lifting a freeze: the owner's answer (reaction or "yes ID", through the relay's owner gate) on Butler's post.
+  approval.handler("guard_unfreeze", {
+    approve = function(rec, complete)
+      local function stay(why, code)
+        thread_note(rec, "Freeze not lifted: " .. plain(why) .. ". Grants stay frozen.")
+        complete(false, code)
+      end
+      local by = by_text(rec.answered_by, rec.answer_event_id)
+      if type(rec.data) ~= "table" or rec.data.gen ~= M._freeze_gen then
+        return stay("a newer freeze replaced this request", "stale_unfreeze")
+      end
+      if not grant_controls then return stay("grant controls are not available", "unfreeze_failed") end
+      -- Lifting widens: the audit line comes first, and without it the freeze stays (the safe side).
+      local logged, why = owner_audit("grants_unfrozen", "freeze lifted", nil, by)
+      if not logged then return stay("the audit line could not be written (" .. tostring(why) .. ")", "audit_failed") end
+      local done, lift_why = grant_controls.unfreeze()
+      if done == "lifted" or done == "not frozen" then
+        thread_note(rec, "Freeze lifted. Grants match again until they expire.")
+        complete(true)
+      else
+        owner_audit("grants_unfreeze_failed", plain(lift_why), nil, by)
+        stay(lift_why, "unfreeze_failed")
+      end
+    end,
+    deny = function(rec) thread_note(rec, "Grants stay frozen.") end,
+    expire = function(rec) thread_note(rec, "Expired. Grants stay frozen.") end,
+  })
 end
 
 -- One notice for the grants that expired within EXPIRY_NOTICE_WAIT_S of the first one, posted to the owner's room.
@@ -359,7 +493,7 @@ local function expiry_tick()
   if t - E.checked >= EXPIRY_SCAN_S then
     E.checked = t
     local active = {}
-    for _, g in ipairs(grants.active()) do active[g.id] = g end
+    for _, g in ipairs(grants.held()) do active[g.id] = g end
     for id, g in pairs(E.tracked) do
       if not active[id] then
         if t >= g.expires and #E.due < 200 then E.due[#E.due + 1] = g; E.first = E.first or t end

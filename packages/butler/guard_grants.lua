@@ -11,14 +11,18 @@ local M = butler.guard_grants or {}
 butler.guard_grants = M
 
 M.add = nil -- a live reload must not keep an add from an older load
+M._revoked = M._revoked or {} -- ids revoked in memory whose line could not be saved; the file is the truth otherwise
+M._frozen = M._frozen or false -- a freeze whose marker could not be saved
 M.MAX_TTL, M.DEFAULT_TTL = 86400, 3600
 local CLASS = { writable = "path", git = "path", net = "net" }
 local CEILING = { T1 = true, T2 = true } -- T3 is never grantable
 local MAX_FILE = 256 * 1024
 
--- Test seams: M.now(), M.insensitive(real) and M.verified(e) replace these, but only when the test harness set
--- remuda._butler_test = true; in production they are ignored, whatever Lua sets them.
-local function seam(name) return remuda._butler_test == true and M[name] or nil end
+-- Test seams: M.now(), M.insensitive(real) and M.verified(e) replace these, but only when the process env carried
+-- REMUDA_BUTLER_TEST=1 when this module loaded (the harness sets it for its child daemon). The flag is read once, here:
+-- later Lua cannot switch it on, and the text deny in guard_policy refuses the field and the env name.
+local TEST_MODE = os.getenv("REMUDA_BUTLER_TEST") == "1"
+local function seam(name) return TEST_MODE and M[name] or nil end
 local function now() return (seam("now") or os.time)() end
 
 local function file() local d = policy.dir(); return d and (d .. "/guard-grants.jsonl") end
@@ -195,16 +199,36 @@ local function valid(e, t)
     and text(e.holder) and text(e.event) and parse(e.class, e.scope) and e.scope == e.scope:gsub("/+$", "")
     and math.type(e.written) == "integer" and math.type(e.expires) == "integer"
     and e.written <= t and e.expires > t and e.expires - e.written <= M.MAX_TTL and e.expires > e.written
-    and verified(e)
+    and not e.revoked and not M._revoked[e.id] and verified(e)
 end
 
-function M.active()
+-- Frozen: every grant stops matching and no new one is made until the owner lifts it (marker file under the
+-- protected data dir, so it survives a restart). Read fresh each time, like the store itself.
+local function frozen_file() local d = policy.dir(); return d and (d .. "/guard-grants-frozen") end
+function M.frozen()
+  if M._frozen then return true end
+  local path = frozen_file()
+  local f = path and io.open(path, "r")
+  if f then f:close() end
+  return f ~= nil
+end
+
+local function live()
   local t, seen, out = now(), {}, {}
   for _, e in ipairs(entries()) do
     if not seen[tostring(e.id)] and valid(e, t) then seen[e.id] = true; out[#out + 1] = e end
   end
   return out
 end
+
+function M.active()
+  if M.frozen() then return {} end
+  return live()
+end
+
+-- The grants the store holds (valid, not expired or revoked), frozen or not: what the expiry notice tracks, so a
+-- grant that runs out during a freeze is still announced. It never decides a call; active() does.
+function M.held() return live() end
 
 -- Run fn holding the store's advisory lock (core's remuda.fs.lock); refuse if it stays held.
 -- ponytail: on a core without fs.lock this runs unlocked, as Butler's single-instance guard does.
@@ -227,6 +251,7 @@ end
 local function add(e)
   local path = file()
   if not path then return nil, "Butler data directory is unknown" end
+  if M.frozen() then return nil, "grants are frozen" end
   local ttl = e.ttl == nil and M.DEFAULT_TTL or e.ttl
   if not CLASS[e.class] then return nil, "unknown class" end
   if not CEILING[e.ceiling] then return nil, "ceiling must be T1 or T2" end
@@ -261,14 +286,72 @@ local function add(e)
   end)
 end
 
--- The one-time hand-over of add to the owner-reaction handler: handler(add) runs once per load of this module,
--- later calls (and non-functions) get nil. Cooperative like the text deny in guard_policy: it keeps add off the
--- module table, it does not stop Lua running inside the daemon.
+-- Owner controls, handed out with add and never reachable from the CLI. They only narrow power, except unfreeze,
+-- which the owner-approved handler alone calls. Each answers a short word, or nil and why.
+local controls = {}
+
+-- Revoke one grant: its line is rewritten with the revoke time, so the next hook call no longer matches it. The
+-- revoke holds in memory even when the line cannot be saved (fail closed); the failure is returned.
+function controls.revoke(id)
+  if type(id) ~= "string" or not id:match("^g%d%d%d+$") then return "unknown" end
+  local path = file()
+  if not path then return nil, "Butler data directory is unknown" end
+  return locked(path .. ".lock", function()
+    local t, all = now(), lines()
+    if not all then return nil, "grant store is too large" end
+    local at
+    for i, l in ipairs(all) do if l.e.id == id then at = i; break end end
+    if not at then return "unknown" end
+    local e = all[at].e
+    if e.revoked or M._revoked[id] then return "already" end
+    if math.type(e.expires) ~= "integer" or e.expires <= t then return "expired" end
+    M._revoked[id] = true
+    e.revoked = t
+    local out = {}
+    for i, l in ipairs(all) do out[i] = i == at and remuda.json.encode(e) or l.raw end
+    local ok, err = remuda.fs.write_atomic(path, table.concat(out, "\n") .. "\n", { private = true })
+    if not ok then return nil, tostring(err) end
+    M._revoked[id] = nil
+    return "revoked"
+  end)
+end
+
+function controls.freeze()
+  if M.frozen() then return "already" end
+  M._frozen = true -- grants stop now, even if the marker cannot be saved
+  local path = frozen_file()
+  if not path then return nil, "Butler data directory is unknown" end
+  pcall(remuda.mkdir, policy.dir())
+  local ok, err = remuda.fs.write_atomic(path, "frozen " .. now() .. "\n", { private = true })
+  if not ok then return nil, tostring(err) end
+  M._frozen = false
+  return "frozen"
+end
+
+function controls.unfreeze()
+  if not M.frozen() then return "not frozen" end
+  local path = frozen_file()
+  if path then
+    local ok, err = os.remove(path)
+    local f = not ok and io.open(path, "r")
+    if f then f:close(); return nil, tostring(err) end -- still there: stays frozen
+  end
+  M._frozen = false
+  return "lifted"
+end
+
+-- Narrowing is public, so an emergency freeze or revoke never depends on the one-time hand-over below (a refused
+-- register, or guard_approval reloaded alone). Add and unfreeze, which widen, stay private.
+M.freeze, M.revoke = controls.freeze, controls.revoke
+
+-- The one-time hand-over of add and the owner controls to the owner-gated handler: handler(add, controls) runs
+-- once per load of this module, later calls (and non-functions) get nil. Cooperative like the text deny in
+-- guard_policy: it keeps them off the module table, it does not stop Lua running inside the daemon.
 local registered
 function M.register(handler)
   if registered or type(handler) ~= "function" then return nil, "grant store add is already registered" end
   registered = true
-  handler(add)
+  handler(add, controls)
   return true
 end
 
@@ -284,14 +367,22 @@ function M.list()
   if not policy.grants_enabled() then
     return "guard grants: off (the store is not consulted). Next: remuda butler guard grants on"
   end
-  local gs, t = M.active(), now()
-  if #gs == 0 then return "guard grants: no active grants" end
-  local out = { "guard grants: " .. #gs .. " active" }
+  local gs, t, frozen = live(), now(), M.frozen()
+  local revoked = {}
+  for _, e in ipairs(entries()) do
+    if (e.revoked or M._revoked[e.id]) and math.type(e.expires) == "integer" and e.expires > t and parse(e.class, e.scope) then
+      revoked[#revoked + 1] = string.format("%s  revoked  %s %s", tostring(e.id):gsub("[^%w]", ""), tostring(e.class):gsub("[^%w]", ""), show(e.scope, 300))
+    end
+  end
+  if #gs == 0 and #revoked == 0 and not frozen then return "guard grants: no active grants" end
+  local out = { "guard grants: " .. (frozen and ("frozen, none matches and none is made until the owner lifts it in Matrix; " .. #gs .. " held")
+    or (#gs .. " active")) }
   for _, g in ipairs(gs) do
     out[#out + 1] = string.format("%s  %s  %s  ceiling %s  holder %s  expires %s (in %dm)  event %s", g.id, g.class,
       show(g.scope, 300), g.ceiling, show(g.holder, 60),
       os.date("!%Y-%m-%dT%H:%M:%SZ", g.expires), math.ceil((g.expires - t) / 60), show(g.event, 80))
   end
+  for _, line in ipairs(revoked) do out[#out + 1] = line end
   return table.concat(out, "\n")
 end
 

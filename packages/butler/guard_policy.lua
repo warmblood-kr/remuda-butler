@@ -575,9 +575,15 @@ local function writer_touches_protected(first, w, ctx)
 end
 
 local function segment_deny_reason(seg, ctx)
-  -- The grant store is written only by Butler itself; no command text may name its module (cooperative: text, not a boundary).
-  if seg:find("guard_grants", 1, true) then return "Butler grant store" end
   local w = words(seg)
+  -- The grant store is written only by Butler itself. Code that names its module or the test flag is denied (a
+  -- remuda -e/lua/exec/run command; shell wrappers are unwrapped below), as is setting the flag's env var. Plain
+  -- reads of repo files that mention them (git diff, rg) are not. Cooperative: text, not a boundary. Writes to the
+  -- data dir itself are the protected-write checks further down.
+  if (seg:find("guard_grants", 1, true) or seg:find("_butler_test", 1, true) or seg:find("REMUDA_BUTLER_TEST", 1, true))
+      and (segment_class(w, seg, ctx) == "script" or seg:find("REMUDA_BUTLER_TEST=", 1, true)) then
+    return "Butler grant store"
+  end
   local executable = (w[1] or ""):match("([^/]+)$") or ""
   if executable == "sh" or executable == "bash" or executable == "zsh" or executable == "dash"
       or executable == "ksh" or executable == "ash" then
@@ -644,7 +650,8 @@ function M.deny_reason(tool, input, ctx)
     end
     return nil
   end
-  if tool:find("run_script$") and type(input.code) == "string" and input.code:find("guard_grants", 1, true) then
+  if tool:find("run_script$") and type(input.code) == "string" and (input.code:find("guard_grants", 1, true)
+      or input.code:find("_butler_test", 1, true) or input.code:find("REMUDA_BUTLER_TEST", 1, true)) then
     return "Butler grant store"
   end
   if tool == "Write" or tool == "Edit" or tool == "MultiEdit" or tool == "NotebookEdit" then
@@ -898,7 +905,8 @@ local KNOWN_CLASS = { push = 1, destroy = 1, escape = 1, net = 1, control = 1, w
 local KNOWN_EVENT = { PreToolUse = 1, PermissionRequest = 1, deny = 1, policy_error = 1, ["no-input"] = 1,
   oversized = 1, unparsed = 1, switch = 1, approval_requested = 1, approval_approved = 1,
   approval_denied = 1, approval_expired = 1, approval_failed = 1, approval_limited = 1, grant_created = 1,
-  grant_refused = 1, grant_register_refused = 1 }
+  grant_refused = 1, grant_register_refused = 1, grant_revoked = 1, grant_revoke_unsaved = 1, grants_frozen = 1,
+  grants_unfrozen = 1 }
 local TIME = "^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%dZ$"
 
 -- Call fn(line) for each line of f, or fn(nil) for one that is over the cap; memory stays bounded.

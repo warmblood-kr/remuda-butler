@@ -278,6 +278,15 @@ function approval.reapply_approved()
   return count
 end
 
+-- End every open request of a kind now (their expire handler runs): a newer decision replaces the old asks.
+function approval.expire_open(kind)
+  if not attached then return end
+  for _, rec in pairs(attached.state.approvals or {}) do
+    if type(rec) == "table" and rec.kind == kind and rec.status == "open" then rec.expires_at = 0 end
+  end
+  approval.sweep()
+end
+
 function approval.request(request, done)
   done = type(done) == "function" and done or function() end
   local completed = false
@@ -458,6 +467,9 @@ function approval.answer(id_or_event, verdict, who, event_id)
   end
   if rec.kind == "guard_action" and who == "operator (terminal)" and verdict == "approve" then
     return nil, "A guarded tool call can only be approved by the owner in its live Matrix thread."
+  end
+  if rec.kind == "guard_unfreeze" and who == "operator (terminal)" and verdict == "approve" then
+    return nil, "Lifting the freeze can only be approved by the owner in its live Matrix thread."
   end
   if rec.kind == "approve_text" and rec.status == "approved" and verdict == "approve" then
     if rec.delivery_started == true then return nil, "Already answered.", rec end

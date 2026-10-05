@@ -716,8 +716,8 @@ no guard behavior changes.
 
 - Scope is slice 3 only. There is no learning loop (3b), no slice 4 and no
   slice 5.
-- The owner can freeze and revoke from Matrix. Freeze and revoke only narrow
-  power; lifting a freeze stays owner-approved.
+- The owner can freeze and revoke from Matrix (see Freeze and revoke). Freeze
+  and revoke only narrow power; lifting a freeze stays owner-approved.
 - Any push that touches CI or workflow files is T3 and always asks. A standing
   grant never covers it (see Pushes under a grant).
 - Every audit line carries `grant_id`. The audit log has a daily hash digest
@@ -800,7 +800,10 @@ derived from the request by Butler, never from agent text.
 With the grants switch on (off: no new behavior at all):
 
 - **Per scope: 10 approval posts per hour** (the host or repository, or the
-  tool, class, directory and text when no scope applies).
+  tool, class and directory when no scope applies; never the command text).
+  The number protects the owner from a flood of posts for one kind of call: an
+  agent that varies the text of a command (a trailing space, `; :`) still hits
+  the same limit.
 - **Overall: 30 approval posts per hour.**
 - **Per agent session: 5 approval posts per minute**, as an extra bucket only.
 - **A deny is remembered for 10 minutes** for the same scope, whichever agent
@@ -810,7 +813,8 @@ With the grants switch on (off: no new behavior at all):
 
 The agent chooses its own session name and alias, so no control rests on that
 name alone: the remembered deny and the per-scope limit are keyed by scope
-only, and the per-session bucket does not replace them.
+only (the remembered deny also keeps the exact command text when no scope
+applies), and the per-session bucket does not replace them.
 
 A request over a post limit is refused without a post: the hook prints no
 decision, so Claude shows its own prompt, and the refusal is an audit line
@@ -819,11 +823,53 @@ decision, so Claude shows its own prompt, and the refusal is an audit line
 and end when it restarts. The existing caps (open requests per session and in
 all, 30 requests per 10 minutes per asker) stay.
 
+### Freeze and revoke (owner, Matrix only)
+
+Three lines the owner types in the HOME room. Each takes no other text (`guard revoke` takes exactly one id); a line that starts with one of these verbs and has more, or a malformed id, is answered with its usage and never handed on as mail or a typed line:
+
+| Line | What it does |
+| --- | --- |
+| `guard revoke gNNN` | ends that one grant at the next hook call; answers plainly when the id is unknown, already revoked or already expired |
+| `guard freeze` | no grant matches and none is offered or made until the freeze is lifted |
+| `guard unfreeze` | asks to lift the freeze: Butler posts a request, and only the owner's ✅ reaction on that post (or `yes ID` as a reply) lifts it; ❌, `no ID` or expiry keeps the freeze |
+
+They take the same owner gate as the reactions: an allowlisted human mxid, live
+sync (not backfill or the first sync after a start), a message that is not an
+edit, in the HOME room, and not older than the relay. Any other sender (a
+stranger, an agent, Butler itself) or any other room does nothing. There is no
+CLI verb for them and an agent cannot reach them: `remuda butler guard freeze`
+is a usage error, and the terminal cannot approve the unfreeze request.
+Freeze and revoke only narrow power; widening it again (lifting a freeze) is
+always the owner's answer on a Butler post, never a plain command.
+
+Butler answers each line with one short plain confirmation in the room (no
+agent text, no mention) and writes an audit line (`grant_revoked` with the
+`grant_id`, `grants_frozen`, `grants_unfrozen`, `owner_line_refused` for a usage
+answer); every summary names the sender and the Matrix event of the line (of
+the answering reaction for an unfreeze). Freeze and revoke act even when their
+audit line cannot be written and log the failure. Lifting widens, so the
+`grants_unfrozen` line is written first: if it cannot be, the freeze stays and
+Butler says so. A revoke rewrites that grant's
+line in the store as revoked. A new `guard freeze` (also when already frozen)
+expires any open unfreeze request, and an unfreeze post made before the latest
+freeze lifts nothing, so a late ✅ on an old post cannot beat a newer freeze. If
+the unfreeze post cannot be made, is already open or is refused by a cap, the
+reply says which. Freeze and revoke use the grant store's public functions, so
+they still work when the private hand-over to the reaction handler did not
+happen (a refused register, or the approval module reloaded alone); the add and
+the unfreeze never leave the handler. A freeze is a marker file in the protected data
+dir, so it survives a restart; while it stands the approval post offers no 🔄
+and a 🔄 on an older post is refused. Both fail closed: if the revoke or the
+marker cannot be saved, the grant (or every grant) is off in memory and Butler
+says so, until it restarts. `remuda butler guard grants` shows `frozen` and the
+revoked grants.
+
 ### Expiry notice
 
 Grants that expire within 60 seconds of the first one are announced in one
 notice in the owner (HOME) room, naming each (`g001 net example.com`); there
-is no notice per grant and no mention. Only grants this daemon saw active are
+is no notice per grant and no mention. A grant is tracked from the store, frozen or not, so one that
+expires during a freeze is still announced. Only grants this daemon saw held are
 announced: one that expired while Butler was not running is not. With the
 switch off nothing is tracked or posted.
 
@@ -839,6 +885,15 @@ Butler start. An entry that is expired, unparseable, lacks a matching approval
 event, or was written with a clock that has gone backwards is no grant (fail
 closed). Limit: processes running as the same user, outside the hook, can still
 write the file; the deny rule governs agent tools, not the OS.
+
+The store's test seams (clock, case probe, approval cross-check) answer only
+to `REMUDA_BUTLER_TEST=1` in the daemon's process environment, read once when
+the module loads; setting a Lua field later changes nothing. The text deny
+refuses code that names the grant store module, the `_butler_test` field or the
+env name (`run_script` code, and `remuda -e`, `lua`, `exec` or `run` commands),
+and commands that set `REMUDA_BUTLER_TEST=`; writes into the data dir are
+refused as protected writes. Plain reads of repo files that mention them
+(`git diff packages/butler/guard_grants.lua`, `rg guard_grants`) are allowed.
 
 ### Scope patterns
 
