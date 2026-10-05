@@ -897,7 +897,8 @@ local KNOWN_CLASS = { push = 1, destroy = 1, escape = 1, net = 1, control = 1, w
 -- Every audit event name a producer appends (hooks, switch, approvals) must be listed here, or stats counts it as "other".
 local KNOWN_EVENT = { PreToolUse = 1, PermissionRequest = 1, deny = 1, policy_error = 1, ["no-input"] = 1,
   oversized = 1, unparsed = 1, switch = 1, approval_requested = 1, approval_approved = 1,
-  approval_denied = 1, approval_expired = 1, approval_failed = 1 }
+  approval_denied = 1, approval_expired = 1, approval_failed = 1, approval_limited = 1, grant_created = 1,
+  grant_refused = 1, grant_register_refused = 1 }
 local TIME = "^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%dZ$"
 
 -- Call fn(line) for each line of f, or fn(nil) for one that is over the cap; memory stays bounded.
