@@ -328,9 +328,8 @@ local function segment_class(w, text, ctx)
     end
     -- The CLI's Lua entry points are `lua`, `exec`, `repl` (as the verb) and -e / --eval (the value may be attached:
     -- -e'code', --eval=code). `run` starts a command in a session, so it is script-class too; `eval` is kept as one.
-    if w[2] == "lua" or w[2] == "exec" or w[2] == "repl" then return "script" end
     for i = 2, butler_at - 1 do
-      if w[i] == "eval" or w[i]:find("^%-e") or w[i]:find("^%-%-eval") or w[i] == "run" then return "script" end
+      if w[i] == "lua" or w[i] == "exec" or w[i] == "repl" or w[i] == "eval" or w[i]:find("^%-e") or w[i]:find("^%-%-eval") or w[i] == "run" then return "script" end
     end
   end
   if first == "git" and has(w, { push = true }) then return "push" end

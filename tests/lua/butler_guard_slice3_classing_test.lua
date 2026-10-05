@@ -21,3 +21,9 @@ T.test("MUST: a butler verb outranks a trailing script marker; -e/eval before it
     "remuda butler close run", "remuda butler send worker run the tests", "remuda -e 'return 1'", "remuda eval 'return 1'" })
   T.eq(out, "weaken,identity,identity,control,other,script,script", "higher-risk class wins; an ordinary send stays other", "ok - precedence")
 end)
+
+T.test("MUST: lua/exec/repl count anywhere before the butler word (remuda -s srv lua x)", function()
+  local out = classes({ "remuda -s srv lua x", "remuda -s srv exec x", "remuda --server srv repl", "remuda -s srv ls",
+    "remuda butler send worker lua exec repl" })
+  T.eq(out, "script,script,script,other,other", "a server flag before the entry point stays script; butler args do not count", "ok - lua after flags")
+end)
