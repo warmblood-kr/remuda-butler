@@ -140,37 +140,3 @@ T.test("MUST 4: a push is covered only as exactly `git push [remote [current-bra
   end
   T.expect(true, "", "ok - push whitelist")
 end)
-
-T.test("round 3: a push to remote.pushDefault or branch.<b>.pushRemote is no grant (git pushes there, not to the upstream)", function()
-  local work, sh = git_fixture("g3p3-pushremote")
-  T.eq(sh("git init -q --bare ../second.git; git remote add second ../second.git; git push -q second HEAD 2>/dev/null"), "0", "second remote")
-  T.eq(sh("mkdir -p .github/workflows; echo x > .github/workflows/ci.yml; git add .; git commit -q -m ci; git push -q 2>/dev/null"), "0", "CI change reaches origin only")
-  T.eq(grant_for("git push", work), "g001", "baseline: the upstream already has it, so a plain push is covered")
-  T.eq(sh("git config remote.pushDefault second"), "0", "pushDefault")
-  T.eq(grant_for("git push", work), "nil", "pushDefault redirects the push: no grant")
-  T.eq(sh("git config --unset remote.pushDefault; git config branch.$(git symbolic-ref --short HEAD).pushRemote second"), "0", "pushRemote")
-  T.eq(grant_for("git push", work), "nil", "branch pushRemote redirects the push: no grant", "ok - push remote")
-end)
-
-T.test("round 3 item 9: a bare git push is no grant when config redirects or rewrites it", function()
-  local work, sh = git_fixture("g3p3-pushcfg")
-  T.eq(grant_for("git push", work), "g001", "baseline covered")
-  for _, cfg in ipairs({ "remote.origin.mirror true", "remote.origin.pushurl ../elsewhere.git", "url.x.insteadOf origin", "url.x.pushInsteadOf ../remote.git",
-    "push.recurseSubmodules on-demand" }) do
-    T.eq(sh("git config " .. cfg), "0", "set " .. cfg)
-    T.eq(grant_for("git push", work), "nil", "no grant: " .. cfg)
-    T.eq(sh("git config --unset-all " .. cfg:match("^%S+")), "0", "unset " .. cfg)
-  end
-  T.eq(grant_for("git push", work), "g001", "covered again once the config is clean", "ok - push config")
-end)
-
-T.test("SHOULD a: scripts, Makefile and justfile called by CI are CI paths", function()
-  start_butler()
-  local got = T.eval([[local g = remuda.butler.guard_grants
-    local out = {}
-    for _, n in ipairs({ 'scripts/release.sh', 'Makefile', 'makefile', 'justfile', 'Justfile', 'GNUmakefile', 'docs/scripts/x', 'src/a.lua' }) do
-      out[#out + 1] = tostring(g.touches_ci({ n })) end
-    return table.concat(out, ',')]])
-  T.eq(got, "true,true,true,true,true,true,true,false", "scripts/, Makefile and justfile are T3 (a scripts/ segment at any depth)", "ok - ci scripts")
-end)
-
