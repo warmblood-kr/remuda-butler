@@ -292,6 +292,9 @@ local WRITERS = { rm = true, mv = true, cp = true, tee = true, dd = true, chmod 
 local IDENTITY = { approve = true, deny = true, ["approve-text"] = true, ["typed-lines"] = true,
   ["shell-lines"] = true, ["status-commands"] = true }
 
+-- Global `remuda` options that take the next word as their value (`--opt=value` is one word and needs no entry).
+local VALUE_OPT = { ["-s"] = true, ["--server"] = true, ["-c"] = true, ["--config"] = true,
+  ["--runtime-dir"] = true, ["--socket"] = true, ["--data-home"] = true }
 local function segment_class(w, text, ctx)
   local first = (w[1] or ""):match("([^/]+)$") or ""
   if text:find("--dangerously", 1, true) or text:find("--yolo", 1, true) or text:find("bypassPermissions", 1, true)
@@ -328,13 +331,13 @@ local function segment_class(w, text, ctx)
     end
     -- The CLI's Lua entry points are `lua`, `exec`, `repl` (as the verb) and -e / --eval (the value may be attached:
     -- -e'code', --eval=code). `run` starts a command in a session, so it is script-class too; `eval` is kept as one.
-    -- Only the verb (the first word that is not an option or the value of -s) counts, so `remuda send NAME run it`
+    -- Only the verb (the first word that is not an option or the value of a VALUE_OPT) counts, so `remuda send NAME run it`
     -- is a message, not a script.
     local i = 2
     while i < butler_at do
       local a = w[i]
       if a:find("^%-e") or a:find("^%-%-eval") then return "script" end
-      if a == "-s" or a == "--server" then i = i + 1
+      if VALUE_OPT[a] then i = i + 1
       elseif a:sub(1, 1) ~= "-" then
         if a == "lua" or a == "exec" or a == "repl" or a == "eval" or a == "run" then return "script" end
         break
@@ -470,8 +473,7 @@ local function owner_or_daemon_command(w, text)
   local i = remuda_at + 1
   while i <= #w do
     local word = w[i]
-    if word == "-s" or word == "--server" or word == "-c" or word == "--config"
-      or word == "--runtime-dir" or word == "--socket" or word == "--data-home" then
+    if VALUE_OPT[word] then
       i = i + 2
     elseif word:sub(1, 1) ~= "-" then
       subcommand = word

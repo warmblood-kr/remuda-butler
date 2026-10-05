@@ -42,3 +42,14 @@ T.test("script markers are read only at the verb: a message that says run is not
   T.eq(deny("Bash", "{ command = \"remuda run 'guard_grants'\" }"), "Butler grant store", "run is the verb")
   T.eq(deny("Bash", "{ command = \"remuda -s srv lua -e guard_grants\" }"), "Butler grant store", "option before verb", "ok - verb only")
 end)
+
+T.test("every remuda option that takes a value is skipped to find the verb", function()
+  start_butler()
+  for _, o in ipairs({ "-s", "-c", "--server", "--config", "--runtime-dir", "--socket", "--data-home" }) do
+    T.eq(deny("Bash", ("{ command = 'remuda %s /x lua guard_grants' }"):format(o)), "Butler grant store", o .. " VALUE")
+  end
+  for _, o in ipairs({ "--server", "--config", "--runtime-dir", "--socket", "--data-home" }) do
+    T.eq(deny("Bash", ("{ command = 'remuda %s=/x lua guard_grants' }"):format(o)), "Butler grant store", o .. "=VALUE")
+  end
+  T.eq(deny("Bash", "{ command = 'remuda --socket /x send NAME run guard_grants' }"), "nil", "still a message", "ok - option values")
+end)
