@@ -46,6 +46,17 @@ local function invoke(verb, args)
   ]])
 end
 
+local function invoke_error(verb, args)
+  start_butler()
+  local quoted = {}
+  for _, word in ipairs(args) do quoted[#quoted + 1] = luaq(word) end
+  return T.eval([[
+    remuda._pr_a_actions = {}
+    local ok, result = pcall(remuda._butler_command_run, ]] .. luaq(verb) .. [[, {]] .. table.concat(quoted, ",") .. [[}, remuda._pr_a_caller)
+    return table.concat({ tostring(ok), tostring(result), tostring(#remuda._pr_a_actions) }, "|")
+  ]])
+end
+
 local function path()
   start_butler()
   return os.getenv("REMUDA_LUA_SCRATCH") .. "/pr-a-message.txt"
@@ -66,6 +77,23 @@ T.test("send --file p.txt lead accepts the option first", function()
   T.eq(out, "stub:send|send|agent-test|lead|file-body", "send --file p.txt lead")
 end)
 
+T.test("send --file p.txt a b c rejects extra words", function()
+  local out = invoke_error("send", { "send", "--file", path(), "a", "b", "c" })
+  T.expect(out:find("Usage: remuda butler send", 1, true) ~= nil and out:find("Next:", 1, true) ~= nil,
+    "send --file p.txt a b c should return usage with Next: " .. out)
+  T.expect(out:find("false|", 1, true) == 1 and out:find("|0$"),
+    "send --file p.txt a b c must fail without sending: " .. out)
+end)
+
+T.test("close help documents --force before the name", function()
+  local out = invoke("close", { "close", "--help" })
+  local invalid = invoke_error("close", { "close", "--force" })
+  T.expect(out:find("remuda butler close --force", 1, true) ~= nil and out:find("Next:", 1, true) ~= nil,
+    "close --help should document close --force NAME with Next: " .. out)
+  T.expect(invalid:find("remuda butler close --force", 1, true) ~= nil and invalid:find("Next:", 1, true) ~= nil,
+    "close usage error should document close --force NAME with Next: " .. invalid)
+end)
+
 T.test("reply ID --attach PATH caption words uploads with caption", function()
   local out = invoke("reply", { "reply", "ID", "--attach", path(), "caption", "words" })
   local expected = "stub:upload|upload|matrix --room !room:test upload --thread $event --caption caption words " .. path()
@@ -75,6 +103,16 @@ end)
 T.test("reply ID --file note.txt uses file text as body", function()
   local out = invoke("reply", { "reply", "ID", "--file", path() })
   T.eq(out, "stub:reply|reply|agent-test|ID|file-body", "reply ID --file note.txt")
+end)
+
+T.test("reply and forward reject valid first-position CLI parses", function()
+  local out = invoke_error("reply", { "reply", "--file", path(), "ID" })
+  local forward = invoke_error("forward", { "forward", "--", "ID", "worker" })
+  local reply_ok = out:find("Usage: remuda butler reply", 1, true) ~= nil and out:find("Next:", 1, true) ~= nil
+    and out:find("false|", 1, true) == 1 and out:find("|0$") ~= nil
+  local forward_ok = forward:find("Usage: remuda butler forward", 1, true) ~= nil and forward:find("Next:", 1, true) ~= nil
+    and forward:find("false|", 1, true) == 1 and forward:find("|0$") ~= nil
+  T.expect(reply_ok and forward_ok, "reply result: " .. out .. "\nforward result: " .. forward)
 end)
 
 T.test("reply help in first position returns usage", function()
