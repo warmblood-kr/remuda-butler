@@ -338,6 +338,8 @@ local function plain_push(command, cwd)
   if not branch or branch == "" then return nil end
   -- git pushes to remote.pushDefault / branch.<b>.pushRemote when set, not to the upstream the diff is taken against
   if git(cwd, "config", "--get", "remote.pushDefault") or git(cwd, "config", "--get", "branch." .. branch .. ".pushRemote") then return nil end
+  -- config that redirects or rewrites a push (mirror, pushurl, insteadOf, submodule recursion) is no grant
+  if git(cwd, "config", "--get-regexp", "^(remote\\..*\\.(mirror|pushurl)|url\\..*\\.(insteadof|pushinsteadof)|push\\.recursesubmodules)$") then return nil end
   local mode = git(cwd, "config", "--get", "push.default")
   if mode == "matching" or mode == "nothing" then return nil end
   local up_remote, up_merge = git(cwd, "config", "--get", "branch." .. branch .. ".remote"), git(cwd, "config", "--get", "branch." .. branch .. ".merge")

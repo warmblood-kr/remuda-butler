@@ -366,6 +366,18 @@ T.test("round 3: a push to remote.pushDefault or branch.<b>.pushRemote is no gra
   T.eq(grant_for("git push", work), "nil", "branch pushRemote redirects the push: no grant", "ok - push remote")
 end)
 
+T.test("round 3 item 9: a bare git push is no grant when config redirects or rewrites it", function()
+  local work, sh = git_fixture("g3p3-pushcfg")
+  T.eq(grant_for("git push", work), "g001", "baseline covered")
+  for _, cfg in ipairs({ "remote.origin.mirror true", "remote.origin.pushurl ../elsewhere.git", "url.x.insteadOf origin", "url.x.pushInsteadOf ../remote.git",
+    "push.recurseSubmodules on-demand" }) do
+    T.eq(sh("git config " .. cfg), "0", "set " .. cfg)
+    T.eq(grant_for("git push", work), "nil", "no grant: " .. cfg)
+    T.eq(sh("git config --unset-all " .. cfg:match("^%S+")), "0", "unset " .. cfg)
+  end
+  T.eq(grant_for("git push", work), "g001", "covered again once the config is clean", "ok - push config")
+end)
+
 T.test("SHOULD a: scripts, Makefile and justfile called by CI are CI paths", function()
   start_butler()
   local got = T.eval([[local g = remuda.butler.guard_grants
