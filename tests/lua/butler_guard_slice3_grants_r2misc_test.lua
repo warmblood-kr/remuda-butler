@@ -26,7 +26,9 @@ local function start_butler(no_register)
     remuda._t_guard = function(args, caller) return remuda._butler_command_run('guard', args, caller or {}) end
     return 'ok'
   ]])
-  if not no_register then T.eval("remuda.butler.guard_grants.register(function(add) remuda._t_add = add end)") end
+  -- Butler's own load handed `add` to the owner-reaction handler; a fresh load of the store module hands it to the test.
+  -- The store trusts Butler's approval record (tested in guard_slice3_reactions); these tests are about the store.
+  if not no_register then T.eval("remuda.exec(\"butler/guard_grants\"); remuda.butler.guard_grants.verified = function() return true end; remuda.butler.guard_grants.register(function(add) remuda._t_add = add end)") end
 end
 local function has(text, needle) return text:find(needle, 1, true) ~= nil end
 
@@ -108,17 +110,21 @@ end)
 
 T.test("R2 SHOULD b: add is not on the module table; one registration hands it to the owner-reaction handler", function()
   start_butler(true)
-  T.eval("remuda.exec(\"butler/guard_grants\")") -- a fresh load of the module: the registration is once per load
   local root = tree("g3p3-register")
-  local g = "remuda.butler.guard_grants"
-  T.eq(T.eval("return tostring(" .. g .. ".add)"), "nil", "no add on the module table")
-  T.eq(T.eval("local ok = pcall(function() return " .. g .. ".add({ class = 'writable', scope = '/x/y', ceiling = 'T2', holder = 'a', event = '$e' }) end); return tostring(ok)"),
-    "false", "calling it fails")
-  T.eq(T.eval("return tostring(" .. g .. ".register('not a function'))"), "nil", "a non-function handler is refused and does not use the registration")
-  T.eq(T.eval("return tostring(" .. g .. ".register(function(add) remuda._t_add = add end))"), "true", "the first handler is registered")
-  T.eq(T.eval("return type(remuda._t_add)"), "function", "and handed add")
-  T.eq(T.eval("remuda._t_other = nil; local ok = " .. g .. ".register(function(add) remuda._t_other = add end); return tostring(ok) .. tostring(remuda._t_other)"), "nilnil",
-    "a second registration is refused and gets nothing")
+  -- One eval: a late reload of the mod (the second install) would run Butler's own registration in between.
+  local out = T.eval([[remuda.exec("butler/guard_grants") -- a fresh load of the module: the registration is once per load
+    local g = remuda.butler.guard_grants
+    local r = { tostring(g.add) }
+    r[#r + 1] = tostring(pcall(function() return g.add({ class = 'writable', scope = '/x/y', ceiling = 'T2', holder = 'a', event = '$e' }) end))
+    r[#r + 1] = tostring(g.register('not a function'))
+    r[#r + 1] = tostring(g.register(function(add) remuda._t_add = add end))
+    r[#r + 1] = type(remuda._t_add)
+    remuda._t_other = nil
+    local ok = g.register(function(add) remuda._t_other = add end)
+    r[#r + 1] = tostring(ok) .. tostring(remuda._t_other)
+    return table.concat(r, ',')]])
+  T.eq(out, "nil,false,nil,true,function,nilnil",
+    "no add on the table, calling it fails, a non-function does not use the registration, the first handler is handed add, a second gets nothing")
   T.eval("remuda._t_guard({'guard','grants','on'})")
   T.eq(T.eval("return tostring(remuda._t_add({ class = 'writable', scope = " .. string.format("%q", root .. "/other") .. ", ceiling = 'T2', holder = 'a', event = '$e', ttl = 60 }))"),
     "g001", "the handed add still works", "ok - register")

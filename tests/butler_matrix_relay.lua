@@ -31,6 +31,7 @@ dofile("packages/butler/typed_lines.lua")
 dofile("packages/butler/approve_text.lua")
 dofile("packages/butler/status_command.lua")
 dofile("packages/butler/guard_policy.lua")
+dofile("packages/butler/guard_grants.lua")
 dofile("packages/butler/guard_approval.lua")
 local relay_module = dofile("packages/butler/matrix_relay.lua")
 
@@ -8131,6 +8132,66 @@ local function test_guard_one_shot_expiry_and_restart()
   end)
 end
 
+-- Guard slice 3, PR4: the cycle reaction makes a standing grant, for the owner only, on Butler's own post.
+local CYCLE = "\240\159\148\132"
+local function guard_fetch(env, replies, host)
+  local before = #remuda._t359.room_posts(env, HOME, "Butler approval")
+  remuda.butler.guard_policy.run({ "guard" }, { stdin = remuda.json.encode({ hook_event_name = "PermissionRequest",
+    tool_name = "WebFetch", tool_input = { url = "https://" .. host .. "/" }, cwd = "/p/w" }),
+    env = { REMUDA_BUTLER_AGENT_ALIAS = "ss-a", REMUDA_BUTLER_AGENT_KIND = "claude" } })
+  env.client:pump()
+  local posts = remuda._t359.room_posts(env, HOME, "Butler approval")
+  assert(#posts == before + 1, "one request must make exactly one approval-room post")
+  return posts[#posts].event_id, replies[#replies], posts[#posts]
+end
+local function grant_events()
+  local out = {}
+  for _, g in ipairs(remuda.butler.guard_grants.active()) do out[#out + 1] = g.event end
+  return table.concat(out, ",")
+end
+
+local function test_guard_cycle_reaction_makes_a_grant_only_for_the_owner()
+  approval_env(OWNER .. ",@agent-x:example.org", function(env)
+    with_guard(env, function(replies)
+      assert(remuda.butler.guard_policy.set_grants(true), "grants switch")
+      local event, reply, post = guard_fetch(env, replies, "a.test")
+      assert(post.body:find(CYCLE, 1, true) and post.body:find("grant:    net a.test until", 1, true), "the post offers the grant")
+      room_events(env, {
+        reaction("$stranger", STRANGER, event, CYCLE), reaction("$agent", "@agent-x:example.org", event, CYCLE),
+        reaction("$other-event", OWNER, "$another-post", CYCLE), reaction("$early", OWNER, event, CYCLE, ts(-120000)),
+      })
+      room_events(env, { reaction("$all", OWNER, event, CYCLE) }, ALL)
+      assert(guard_state(reply) == "waiting" and grant_events() == "",
+        "stranger, agent, other event, early and wrong room create nothing: " .. guard_state(reply))
+      room_events(env, { reaction("$owner", OWNER, event, CYCLE) })
+      assert(guard_state(reply) == "done:" .. GUARD_ALLOW and grant_events() == "$owner",
+        "the owner's cycle reaction allows the call and makes one grant, recorded against that reaction: " .. grant_events())
+      room_events(env, { reaction("$owner-again", OWNER, event, CYCLE), reaction("$owner-check", OWNER, event) })
+      assert(grant_events() == "$owner" and thread_replies(env, event, "Already answered.") >= 1,
+        "the reaction was consumed once")
+      -- a check makes no grant
+      local second, second_reply = guard_fetch(env, replies, "b.test")
+      room_events(env, { reaction("$check", OWNER, second) })
+      assert(guard_state(second_reply) == "done:" .. GUARD_ALLOW and grant_events() == "$owner", "a check creates no grant")
+    end)
+  end)
+end
+
+local function test_guard_cycle_reaction_needs_a_guard_request_and_the_switch()
+  approval_env(nil, function(env)
+    with_guard(env, function(replies)
+      local event, reply = guard_fetch(env, replies, "off.test")
+      room_events(env, { reaction("$off", OWNER, event, CYCLE) })
+      assert(guard_state(reply) == "waiting" and grant_events() == "", "grants off: the reaction does nothing")
+      local id, join_event = file_request(env, NEW)
+      room_events(env, { reaction("$cycle-join", OWNER, join_event, CYCLE) })
+      assert(env.relay:state().approvals[id].status == "open", "the cycle reaction does not answer a join request")
+      room_events(env, { reaction("$check-join", OWNER, join_event) })
+      assert(env.relay:state().approvals[id].status ~= "open", "the check still does")
+    end)
+  end)
+end
+
   return {
     { "test_guard_owner_answers_by_reply_and_reaction", test_guard_owner_answers_by_reply_and_reaction },
     { "test_guard_only_the_verified_owner_counts", test_guard_only_the_verified_owner_counts },
@@ -8139,6 +8200,8 @@ end
     { "test_guard_forged_nonce_gives_no_decision", test_guard_forged_nonce_gives_no_decision },
     { "test_guard_answer_binds_to_its_own_request", test_guard_answer_binds_to_its_own_request },
     { "test_guard_one_shot_expiry_and_restart", test_guard_one_shot_expiry_and_restart },
+    { "test_guard_cycle_reaction_makes_a_grant_only_for_the_owner", test_guard_cycle_reaction_makes_a_grant_only_for_the_owner },
+    { "test_guard_cycle_reaction_needs_a_guard_request_and_the_switch", test_guard_cycle_reaction_needs_a_guard_request_and_the_switch },
   }
 end)()) do
   local ok, err = pcall(case[2])

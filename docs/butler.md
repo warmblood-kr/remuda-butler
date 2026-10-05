@@ -749,19 +749,72 @@ anything more. `device`, open `net` and `full` stay T3.
 
 ### Approval post and reactions
 
-Butler composes and posts the three options itself. Only the owner's reaction
-on that event id counts. Each request carries a nonce; a reaction naming another
-request's event, or arriving after expiry, is ignored. Approve-once is
-single-use. Only the standing-grant reaction creates a grant; approve-once and
-deny create none.
+Butler composes and posts the options itself. Only the owner's reaction on
+that event id counts: an allowlisted human mxid, in the post's room, live (not
+backfill), after the post was made. Three separate reactions, never one button:
+
+| Reaction | Meaning |
+| --- | --- |
+| ✅ | approve this one call (single-use) |
+| 🔄 | approve this call and create a standing grant for the scope shown |
+| ❌ | deny, and remember the deny (see Request limits) |
+
+Each post is one request with its own id and nonce, and the post's text hash
+covers the offered grant. A reaction naming another request's event, from
+anyone else, in another room, before the post, outside live sync, on an
+expired or answered request, or on a request that offers no grant (🔄 on
+anything but a guard post, or on a call that cannot be granted) creates
+nothing. Each reaction is consumed once. Only 🔄 creates a grant; ✅ and ❌
+create none. While the grants switch is off the post offers no 🔄 and a 🔄
+that arrives anyway does nothing; the request stays open.
+
+What can be offered: a fetch (`net`, the exact host) and a plain `git push`
+(`git`, the working directory). Every grant is T2, one hour, and ends at the
+absolute time the post shows. A call
+that cannot be scoped narrowly (an unparseable host, a push that is not a
+plain `git push [remote [branch]]`, a protected place) is not offered one.
+
+Grants are created in one place: the reaction handler registered by the
+approval module in the same load that defines it, through the grant store's
+one-time `register`. If `register` answers "already registered" (the store was
+handed out earlier in this load), Butler logs it to stderr, the daemon log and
+the audit log (`grant_register_refused`), and no reaction can create a grant
+until Butler reloads.
+
+The cross-check: the store trusts only grants whose approval event id is the
+owner's reaction event that Butler itself recorded on the request (reaction
+event, grant id, class and scope all equal). A line written into the file by
+hand, or one that reuses a real reaction for another scope, is no grant.
 
 The post shows the resolved (realpath) scope and the absolute expiry time, both
 derived from the request by Butler, never from agent text.
 
-A deny is remembered for that scope until the request's TTL window ends, and
-the same request is not asked again in that window. Requests are deduplicated
-per agent and scope, and rate-limited per agent and per scope; a request over
-the limit is refused without a post.
+### Request limits and remembered denies
+
+With the grants switch on (off: no new behavior at all):
+
+- **Per agent session: 5 approval posts per minute.**
+- **Overall: 30 approval posts per hour.**
+- **A deny is remembered for 10 minutes** for the same request: the same agent
+  session and the same scope (host or repository), or the same tool, class,
+  directory and text when no scope applies. During that time the same
+  request is answered deny at once, without a post. Another agent, another
+  scope, or the same request after 10 minutes is asked as usual.
+
+A request over a post limit is refused without a post: the hook prints no
+decision, so Claude shows its own prompt, and the refusal is an audit line
+(`approval_limited`). A remembered deny is an audit line (`approval_denied`,
+"remembered deny"). Limits and remembered denies live in the daemon's memory
+and end when it restarts. The existing caps (open requests per session and in
+all, 30 requests per 10 minutes per asker) stay.
+
+### Expiry notice
+
+Grants that expire within 60 seconds of the first one are announced in one
+notice in the owner (HOME) room, naming each (`g001 net example.com`); there
+is no notice per grant and no mention. Only grants this daemon saw active are
+announced: one that expired while Butler was not running is not. With the
+switch off nothing is tracked or posted.
 
 ### Grant lifetime and store
 
@@ -835,7 +888,9 @@ appear in an approval post only as one quoted line of at most 200 characters,
 labelled `agent-supplied`, after Butler's own lines. Control and bidirectional
 characters are escaped, and Matrix HTML and markdown, mentions (`@room`, the
 owner's mxid) and links are stripped. It is never styled or placed as Butler
-text, and it never selects the scope, the TTL or the reactions.
+text, and it never selects the scope, the TTL or the reactions. On a guard post the only agent-supplied text is the tool's own
+`description` field (when it has one).
+
 
 ### Audit chain
 

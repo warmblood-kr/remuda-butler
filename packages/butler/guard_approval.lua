@@ -24,6 +24,19 @@ local ROUTED_TOOLS = { Bash = true, Read = true, Glob = true, Grep = true, WebFe
 local MAX_OPEN = 20
 local MAX_OPEN_PER_SESSION = 5
 local RATE_PER_10_MIN = 30
+-- With grants on (documented in docs/butler.md "Request limits"): a post per agent session per minute, a post
+-- overall per hour, and how long an owner's cross is remembered for the same request. A request over a limit
+-- gets no post, so Claude shows its own prompt; a remembered cross answers deny without asking again.
+local PER_AGENT_PER_MIN, GLOBAL_PER_HOUR, DENY_MEMORY_S = 5, 30, 600
+local EXPIRY_NOTICE_WAIT_S, EXPIRY_SCAN_S, NOTE_MAX = 60, 5, 200
+local grants = butler.guard_grants
+
+-- Survives a live reload: limits and the expiry tracker belong to the daemon, not to one load of this file.
+M._limits = M._limits or { agent = {}, hour = {}, denies = {} }
+M._exp = M._exp or { tracked = {}, due = {}, checked = 0 }
+
+local function clock() return grants and grants.time() or os.time() end
+local function grants_on() return grants ~= nil and policy.grants_enabled() end
 
 M.ALLOW = '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'
 M.DENY = '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":'
@@ -31,7 +44,8 @@ M.DENY = '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":
 
 -- Request id -> the hook's deferred reply, while its hook process waits.
 local waiting = {}
-local counter = 0
+-- Survives a live reload, so a request key is never reused within a second.
+M._counter = M._counter or 0
 
 -- SHA-256 (FIPS 180-4) over a byte string; lowercase hex.
 local K = {}
@@ -83,17 +97,23 @@ M.sha256 = sha256
 
 function M.enabled() return policy.approvals_enabled() end
 
+-- The standing grant the post offers (class, resolved scope, ceiling, absolute expiry); part of what the hash covers.
+local function offer_text(o)
+  if type(o) ~= "table" then return "-" end
+  return table.concat({ tostring(o.class), tostring(o.scope), tostring(o.ceiling), string.format("%d", o.expires or 0) }, "|")
+end
+
 -- The exact text the hash covers: only stored, sanitized fields.
 local function canonical(data)
   return table.concat({ "tool=" .. tostring(data.tool), "class=" .. tostring(data.class),
     "cwd=" .. tostring(data.cwd), "session=" .. tostring(data.session),
-    "agent=" .. tostring(data.agent), "text=" .. tostring(data.text) }, "\n")
+    "agent=" .. tostring(data.agent), "text=" .. tostring(data.text), "grant=" .. offer_text(data.offer) }, "\n")
 end
 
-local function audit(event, rec, summary)
+local function audit(event, rec, summary, grant_id)
   local data = type(rec.data) == "table" and rec.data or {}
   policy.append({ session = data.session or rec.asker, kind = data.agent or "claude", event = event,
-    tool = data.tool, class = data.class, summary = summary or "", id = rec.id,
+    tool = data.tool, class = data.class, summary = summary or "", id = rec.id, grant_id = grant_id,
     hash = type(data.hash) == "string" and data.hash:sub(1, 12) or "" })
 end
 
@@ -127,19 +147,61 @@ local function render(rec, display)
   local summary, summary_cut = data.text, false
   if display and display.lounge then summary, summary_cut = cap_summary(data.text, 200) end
   local expires = math.floor((tonumber(rec.expires_at) or 0) / 1000)
-  return table.concat({
+  local offer = data.offer
+  local lines = {
     "[Butler approval " .. rec.id .. "] " .. shown(data.agent) .. " session " .. shown(data.session)
       .. " asks to run a guarded action",
     "  tool:     " .. shown(data.tool),
     "  class:    " .. shown(data.class),
     "  cwd:      " .. shown(data.cwd),
     "  command:  " .. shown(summary),
-    "  hash:     sha256 " .. data.hash:sub(1, 12) .. " (tool, class, cwd, session, text)",
-    "  expires:  " .. os.date("!%Y-%m-%dT%H:%M:%SZ", expires) .. " (about " .. math.ceil(TTL_S / 60) .. " min)",
-    "React ✅ to allow this one call, ❌ to deny. Reply \"yes " .. rec.id .. "\" / \"no " .. rec.id
-      .. "\" (승인 / 거부) also works.",
-    "No answer: the agent shows its own prompt.",
-  }, "\n"), nil, summary_cut and { display_cut = true } or nil
+  }
+  if offer then
+    -- Butler's own resolved scope and absolute expiry, never agent text.
+    lines[#lines + 1] = "  grant:    " .. shown(offer.class) .. " " .. shown(offer.scope) .. " until "
+      .. os.date("!%Y-%m-%dT%H:%M:%SZ", offer.expires) .. " (about " .. math.ceil((offer.expires - clock()) / 60)
+      .. " min), ceiling " .. shown(offer.ceiling)
+  end
+  lines[#lines + 1] = "  hash:     sha256 " .. data.hash:sub(1, 12) .. " (tool, class, cwd, session, text)"
+  lines[#lines + 1] = "  expires:  " .. os.date("!%Y-%m-%dT%H:%M:%SZ", expires) .. " (about " .. math.ceil(TTL_S / 60) .. " min)"
+  lines[#lines + 1] = (offer and "React ✅ to allow this one call, 🔄 to allow it as a standing grant, ❌ to deny."
+    or "React ✅ to allow this one call, ❌ to deny.") .. " Reply \"yes " .. rec.id .. "\" / \"no " .. rec.id
+    .. "\" (승인 / 거부) also works."
+  lines[#lines + 1] = "No answer: the agent shows its own prompt."
+  -- Agent text: one labelled, quoted line, last, after Butler's own lines.
+  if data.note then lines[#lines + 1] = "agent-supplied: \"" .. shown(data.note) .. "\"" end
+  return table.concat(lines, "\n"), nil, summary_cut and { display_cut = true } or nil
+end
+
+-- Agent text for the post: one line of at most NOTE_MAX bytes. Control and direction characters are escaped by
+-- display_inline when shown; markup, links and mentions are removed here. nil when there is none.
+local function note_line(text)
+  if type(text) ~= "string" then return nil end
+  text = text:gsub("%c+", " "):gsub("%a[%w+.-]*://%S*", "[link]"):gsub("[`*<>@]", ""):gsub("^%s+", ""):gsub("%s+$", "")
+  if text == "" then return nil end
+  return (cap_summary(text, NOTE_MAX))
+end
+
+-- Limits and remembered crosses (grants on only). nil = go ahead; "denied" = the owner already said no to this
+-- request; "limited" = too many posts. Denied requests do not count against the limits.
+local function admit(session, key)
+  local L, t = M._limits, clock()
+  for k, until_ in pairs(L.denies) do if until_ <= t then L.denies[k] = nil end end
+  if L.denies[key] then return "denied" end
+  local function recent(list, span)
+    for i = #list, 1, -1 do if list[i] <= t - span then table.remove(list, i) end end
+    return #list
+  end
+  for s, list in pairs(L.agent) do if recent(list, 60) == 0 then L.agent[s] = nil end end
+  local mine = L.agent[session] or {}
+  L.agent[session] = mine
+  if recent(mine, 60) >= PER_AGENT_PER_MIN or recent(L.hour, 3600) >= GLOBAL_PER_HOUR then return "limited" end
+  mine[#mine + 1], L.hour[#L.hour + 1] = t, t
+end
+
+local function audit_refusal(record, data, verdict)
+  policy.append({ session = data.session, kind = data.agent, event = verdict == "denied" and "approval_denied" or "approval_limited",
+    tool = data.tool, class = data.class, summary = verdict == "denied" and "remembered deny" or "rate limit" })
 end
 
 -- Returns the deferred reply for the hook, or nil when the hook should print nothing.
@@ -159,7 +221,25 @@ function M.maybe_request(record, hook_json)
   local session = record.session ~= "" and record.session or "unknown"
   local data = { tool = policy.redact(record.tool, 120), class = record.class, agent = record.kind,
     cwd = policy.redact(hook_json.cwd, 300), session = policy.redact(session, 120), text = text }
-  counter = counter + 1
+  if grants_on() then
+    data.offer = grants.offer(record.tool, input, hook_json.cwd)
+    if data.offer then data.offer.expires = grants.time() + grants.DEFAULT_TTL end
+    data.note = note_line(input.description)
+    data.deny_key = data.session .. "\n" .. (data.offer and (data.offer.class .. " " .. data.offer.scope)
+      or (data.tool .. " " .. data.class .. " " .. data.cwd .. " " .. data.text))
+    local verdict = admit(data.session, data.deny_key)
+    if verdict then
+      audit_refusal(record, data, verdict)
+      if verdict == "denied" then
+        local reply = remuda.pending({ timeout = REPLY_TIMEOUT_S })
+        if type(reply) ~= "table" then return nil end
+        pcall(function() reply:resolve(0, M.DENY, "") end)
+        return reply
+      end
+      return nil
+    end
+  end
+  M._counter = M._counter + 1
   local request_id, ended
   local reply = remuda.pending({ timeout = REPLY_TIMEOUT_S, on_cancel = function()
     -- The hook process ended (Claude answered natively or gave up): the request is spent.
@@ -168,7 +248,7 @@ function M.maybe_request(record, hook_json)
     if rec and rec.status == "open" then rec.expires_at = 0; approval.sweep() end
   end })
   if type(reply) ~= "table" then return nil end
-  local started = pcall(approval.request, { kind = "guard_action", key = tostring(os.time()) .. ":" .. counter,
+  local started = pcall(approval.request, { kind = "guard_action", key = tostring(os.time()) .. ":" .. M._counter,
     asker = session, summary = "allow " .. data.tool .. " for " .. data.session, ttl_s = TTL_S, data = data,
     rate_limit_per_window = RATE_PER_10_MIN, rate_window_s = 600,
     max_open_for_asker = MAX_OPEN_PER_SESSION, max_open_total = MAX_OPEN, render = render,
@@ -182,6 +262,20 @@ function M.maybe_request(record, hook_json)
   end)
   if not started then pcall(function() reply:resolve(0, "", "") end) end
   return reply
+end
+
+-- The private grant-store add is handed here, once, by the module's own load: nothing else holds it. A refusal
+-- means a grant module that already handed it out (or none), so no reaction can create a grant: say so loudly.
+local add_grant
+if grants then
+  local ok, why = grants.register(function(add) add_grant = add end)
+  if not ok then
+    local msg = "guard grants: the owner-reaction handler could not register (" .. tostring(why)
+      .. "); no reaction creates a grant until Butler reloads"
+    io.stderr:write("butler: " .. msg .. "\n")
+    if type(remuda.log) == "function" then pcall(remuda.log, "error", msg) end
+    policy.observe("grant_register_refused", "butler", "butler", msg)
+  end
 end
 
 function M.configure()
@@ -198,6 +292,30 @@ function M.configure()
       elseif not waiting[rec.id] then
         thread_note(rec, "Expired.")
         complete(false, "no_waiting_hook")
+      elseif rec.answer_verdict == "grant" then
+        -- The owner's cycle reaction: Butler records the grant (private add), then the reaction is on record
+        -- (rec.grant) for the store's cross-check; the call itself is allowed too.
+        local offer = data.offer
+        local id, why
+        if not (grants_on() and add_grant and type(offer) == "table") then
+          why = "standing grants are not available"
+        else
+          id, why = add_grant({ class = offer.class, scope = offer.scope, ceiling = offer.ceiling,
+            holder = data.session, event = rec.answer_event_id, ttl = offer.expires - grants.time() })
+        end
+        if not id then
+          settle(rec.id, "")
+          audit("grant_refused", rec, tostring(why))
+          thread_note(rec, "No grant: " .. tostring(why) .. ". The agent shows its own prompt.")
+          complete(false, "grant_refused")
+        else
+          rec.grant = { id = id, class = offer.class, scope = offer.scope }
+          settle(rec.id, M.ALLOW)
+          audit("grant_created", rec, offer.class .. " " .. offer.scope, id)
+          thread_note(rec, "Standing grant " .. id .. ": " .. grants.show(offer.class .. " " .. offer.scope, 200)
+            .. " until " .. os.date("!%Y-%m-%dT%H:%M:%SZ", offer.expires) .. ". Allowed this call.")
+          complete(true)
+        end
       else
         settle(rec.id, M.ALLOW)
         audit("approval_approved", rec, "")
@@ -205,7 +323,17 @@ function M.configure()
         complete(true)
       end
     end,
+    -- Asked before a cycle reaction counts: nil to go ahead, or why not (the request stays open).
+    grant_check = function(rec)
+      if not grants_on() then return "Standing grants are off." end
+      if type(rec.data) ~= "table" or type(rec.data.offer) ~= "table" then
+        return "No standing grant is offered for this request."
+      end
+      if not add_grant then return "Standing grants cannot be created: the reaction handler is not registered." end
+    end,
     deny = function(rec)
+      local data = type(rec.data) == "table" and rec.data or {}
+      if grants_on() and type(data.deny_key) == "string" then M._limits.denies[data.deny_key] = clock() + DENY_MEMORY_S end
       settle(rec.id, M.DENY)
       audit("approval_denied", rec, "")
       thread_note(rec, "Denied.")
@@ -217,6 +345,39 @@ function M.configure()
     end,
   })
 end
+
+-- One notice for the grants that expired within EXPIRY_NOTICE_WAIT_S of the first one, posted to the owner's room.
+-- Only grants this daemon saw active are announced (the tracker is in memory).
+local function expiry_tick()
+  local E = M._exp
+  if not grants_on() then E.tracked, E.due, E.first = {}, {}, nil; return end
+  local t = clock()
+  if t - E.checked >= EXPIRY_SCAN_S then
+    E.checked = t
+    local active = {}
+    for _, g in ipairs(grants.active()) do active[g.id] = g end
+    for id, g in pairs(E.tracked) do
+      if not active[id] then
+        if t >= g.expires and #E.due < 200 then E.due[#E.due + 1] = g; E.first = E.first or t end
+        E.tracked[id] = nil
+      end
+    end
+    for id, g in pairs(active) do E.tracked[id] = g end
+  end
+  if #E.due > 0 and t - E.first >= EXPIRY_NOTICE_WAIT_S then
+    table.sort(E.due, function(a, b) return a.id < b.id end)
+    local names = {}
+    for i, g in ipairs(E.due) do
+      if i > 10 then names[#names + 1] = "and " .. (#E.due - 10) .. " more"; break end
+      names[#names + 1] = g.id .. " " .. g.class .. " " .. grants.show(g.scope, 80)
+    end
+    if approval.notify("Standing grants expired: " .. table.concat(names, ", ")
+        .. ". The agent asks again if it still needs them. Next: remuda butler guard grants") then
+      E.due, E.first = {}, nil
+    end
+  end
+end
+approval.tick("guard_grants_expiry", expiry_tick)
 
 M.configure()
 return M

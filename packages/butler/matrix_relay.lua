@@ -325,7 +325,9 @@ local function approval_answer_fields(ev)
     if type(rel) ~= "table" or rel.rel_type ~= "m.annotation" then return {}, nil end
     local verdict
     if rel.key == "✅" or rel.key == "✅\239\184\143" then verdict = "approve"
-    elseif rel.key == "❌" then verdict = "deny" end
+    elseif rel.key == "❌" then verdict = "deny"
+    -- The cycle arrows (with or without the emoji selector): a standing grant, offered on guard posts only.
+    elseif rel.key == "\240\159\148\132" or rel.key == "\240\159\148\132\239\184\143" then verdict = "grant" end
     return { rel.event_id }, verdict, nil, nil, "m.reaction"
   end
   if ev.type ~= "m.room.message" then return {}, nil end
@@ -1681,6 +1683,10 @@ function relay.new(options)
                 end
               end
             end
+          end
+          -- Only a guard request can end in a standing grant; on any other request the cycle arrows are just a reaction.
+          if approval_verdict == "grant" and approval_record and approval_record.kind ~= "guard_action" then
+            approval_record, approval_verdict = nil, nil
           end
           local typed_line_candidate = not approval_record and cfg.allowed_senders[ev.sender] == true
             and member_kind(ev.sender, cfg) == "HUMAN"
