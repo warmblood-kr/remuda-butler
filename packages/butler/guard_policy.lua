@@ -823,7 +823,7 @@ local function build_line(record, prev)
   for _, key in ipairs({ "session", "kind", "event", "tool", "class", "summary" }) do
     line = line .. ',"' .. key .. '":' .. remuda.json.encode(tostring(record[key] or ""))
   end
-  -- grant_id names the grant that allowed the call; no hook line carries one while nothing allows (enforcement is a later PR).
+  -- grant_id names the grant that allowed the call (grant_used and grant_limited lines); every other hook line has -.
   line = line .. ',"grant_id":' .. remuda.json.encode(tostring(record.grant_id or "-"))
   for _, key in ipairs({ "id", "hash" }) do
     if record[key] then line = line .. ',"' .. key .. '":' .. remuda.json.encode(tostring(record[key])) end
@@ -1148,6 +1148,38 @@ function M.day_facts(day)
   return count, last and sha and sha(last) or nil
 end
 
+-- A standing grant answers a Claude PermissionRequest it covers: the prompt Claude would show is skipped. Never at
+-- PreToolUse, so a deny there and Claude's own checks still run. First refusal wins, and every refusal or error
+-- returns nil: the call goes on to the approval post or Claude's prompt (ask), never to allow. The use is audited
+-- (grant_used, with its grant_id) before the allow, and an unwritten line means no allow and no count.
+local function grant_reply(record, hook_json)
+  if record.event ~= "PermissionRequest" or record.kind ~= "claude" or type(hook_json) ~= "table" then return nil end
+  if not (M.approvals_enabled() and M.grants_enabled()) then return nil end -- off: the store is not read
+  local grants, approval = remuda.butler.guard_grants, remuda.butler.guard_approval
+  if not (grants and approval) then return nil end
+  local input = type(hook_json.tool_input) == "table" and hook_json.tool_input or {}
+  if M.deny_reason(record.tool, input, { cwd = hook_json.cwd }) then return nil end
+  if record.class ~= "push" and record.class ~= "net" then return nil end
+  local matched, id = pcall(grants.match, record.tool, input, hook_json.cwd, record.class)
+  if not matched then note("guard grant match failed, asking: " .. tostring(id)); return nil end
+  if not id then return nil end
+  local room = grants.room(id)
+  local used = { session = record.session, kind = record.kind, tool = record.tool, class = record.class,
+    summary = record.summary, grant_id = id }
+  if room == "limited" then
+    if grants.limit_due(id) then
+      used.event = "grant_limited"
+      if M.append(used) then grants.noted(id) end
+    end
+    return nil
+  end
+  if room ~= "ok" then return nil end
+  used.event = "grant_used"
+  if M.append(used) ~= true then return nil end
+  grants.count(id)
+  return approval.ALLOW
+end
+
 -- `remuda butler guard [on|off|status]`. Without an argument it is the hook: it
 -- always returns an empty answer (no decision) and exit 0.
 function M.run(args, caller)
@@ -1180,6 +1212,9 @@ function M.run(args, caller)
         end
       end
       audit(record)
+      local ok_grant, granted = pcall(grant_reply, record, hook_json)
+      if ok_grant and granted then reply = granted; return end
+      if not ok_grant then note("guard grant failed, asking: " .. tostring(granted)) end
       local routing = remuda.butler.guard_approval
       if routing then reply = routing.maybe_request(record, hook_json) end
     end)

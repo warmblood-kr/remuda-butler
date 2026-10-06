@@ -1,4 +1,4 @@
--- Guard slice 3, PR-B (#339): a grant_id the agent supplies, in the hook payload or the tool input, is ignored.
+-- Guard slice 3, PR-B (#339): an active grant answers a Claude PermissionRequest it covers with allow, audited first; nothing else changes.
 local started
 local function start_butler()
   -- Installed once per file: a second install reloads the mod (the harness gives a file 20 s in all).
@@ -64,11 +64,26 @@ local function call(over) return T.eval("return remuda._t_call(" .. (over or "{}
 local function lines() return T.eval("return remuda._t_lines()") end
 local function count(text, needle) local n = 0; for _ in text:gmatch(needle) do n = n + 1 end; return n end
 
-T.test("a grant_id in the payload or the tool input is ignored", function()
-  fresh("e-forged")
-  local reply = call("{ grant_id = 'g001', input = { url = 'https://other.example/x', grant_id = 'g001' } }")
-  T.expect(not has(reply, ALLOW), "no allow for another host: " .. reply)
+T.test("a covered WebFetch is allowed at PermissionRequest, audited with its grant_id, with no approval post", function()
+  fresh("e-allow")
+  local posts = T.eval("return remuda._t_posts")
+  T.expect(has(call(), ALLOW), "allowed")
   local text = lines()
-  T.expect(not has(text, '"grant_id":"g001"'), "no line names g001: " .. text)
-  T.expect(has(text, '"event":"PermissionRequest"') and has(text, '"grant_id":"-"'), "the request line: " .. text, "ok - forged id")
+  T.eq(count(text, '"event":"grant_used"'), 1, "one grant_used line")
+  T.expect(has(text, '"event":"grant_used","tool":"WebFetch","class":"net"'), "tool and class: " .. text)
+  T.expect(text:match('"event":"grant_used"[^\n]*"grant_id":"g001"') ~= nil, "grant_id g001: " .. text)
+  T.eq(count(text, '"event":"PermissionRequest"[^\n]*"grant_id":"g001"'), 0, "the request line itself keeps -")
+  T.eq(T.eval("return remuda._t_posts"), posts, "no approval post")
+  T.expect(not has(call("{ input = { url = 'https://other.example/x' } }"), ALLOW), "another host asks", "ok - allow")
+end)
+
+T.test("never at PreToolUse: no allow, and a deny there carries grant_id -", function()
+  fresh("e-pre")
+  T.eval("remuda._t_guard({'guard','deny','on'})")
+  T.expect(not has(call("{ event = 'PreToolUse' }"), ALLOW), "no allow at PreToolUse")
+  local reply = call("{ event = 'PreToolUse', tool = 'Bash', input = { command = 'git push --force origin main' } }")
+  T.expect(has(reply, '"permissionDecision":"deny"'), "deny: " .. reply)
+  local text = lines()
+  T.eq(count(text, '"grant_id":"g001"'), 0, "no line names the grant: " .. text)
+  T.eq(count(text, '"event":"grant_used"'), 0, "no use", "ok - pre")
 end)
