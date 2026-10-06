@@ -12,13 +12,23 @@ local host = setmetatable({}, { __index = function(_, k) if k ~= "_exec_commands
 local real_emit = remuda.emit
 rawset(host, "emit", function(name, ...) log.emits[#log.emits + 1] = name; return real_emit(name, ...) end)
 log.specs = {}
-rawset(host, "schedule", function(spec) log.schedules[#log.schedules + 1] = spec.name; log.specs[spec.name] = spec; return 0 end)
-rawset(host, "cancel", function() end)
+rawset(host, "schedules", {})
+rawset(host, "schedule", function(spec)
+  local handle = {}
+  log.schedules[#log.schedules + 1] = spec.name
+  log.specs[spec.name] = spec
+  host.schedules[handle] = spec
+  return handle
+end)
+rawset(host, "cancel", function(handle) host.schedules[handle] = nil end)
 local exec_commands = with_hook and function() end or nil
 rawset(host, "_exec_commands", exec_commands)
 local fake_g = setmetatable({}, { __index = { remuda = host } })
 local env = setmetatable({ _G = fake_g, getmetatable = getmetatable }, { __index = _G })
 local mod = assert(load(src, "@init.lua", "t", env))()
+log.declaration_schedules = #log.schedules
+-- Model the core accepting an activation before instantiating declarations.
+for _, spec in ipairs(mod.schedules) do host.schedule(spec) end
 remuda._butler_skip_relay = true
 return mod, log, host
 ]==]
@@ -69,7 +79,7 @@ T.test("start after commands boots once and opens the schedules", function()
     remuda._butler_reconcile = function() log.reconcile = log.reconcile + 1 end
     mod.start({})
     mod.start({})
-    pcall(mod.schedules[2].run, {})
+    pcall(log.specs["butler-reconcile"].run, {})
     out[#out + 1] = "emits=" .. table.concat(log.emits, ",")
     out[#out + 1] = "bootstrap=" .. log.bootstrap
     out[#out + 1] = "reconcile=" .. log.reconcile
@@ -101,4 +111,19 @@ T.test("a load that is not commands-only boots by fallback on a core with the ho
     out[#out + 1] = "emits=" .. #log.emits
   ]==], true)
   T.expect(out:find("emits=1", 1, true), "an exec load did not boot: " .. out, "ok - an exec load boots by fallback on a hook core")
+end)
+
+T.test("declaration evaluation creates no fallback before activation", function()
+  setup()
+  local out = run([==[
+    out[#out + 1] = "declaration=" .. log.declaration_schedules
+    remuda._butler_test_mode = "lifecycle"
+    log.specs["butler-start-fallback"].run()
+    local remaining = 0
+    for _, spec in pairs(host.schedules) do
+      if spec.name == "butler-start-fallback" then remaining = remaining + 1 end
+    end
+    out[#out + 1] = "remaining=" .. remaining
+  ]==], true)
+  T.eq(out, "declaration=0;remaining=0", "only an accepted activation owns a one-shot fallback")
 end)
