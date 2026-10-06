@@ -69,6 +69,19 @@ function T.eval(code)
   return (remote(code):gsub("\n$", ""))
 end
 
+-- Use the real MCP transport, addressed only to the disposable child daemon.
+function T.mcp_eval(code)
+  local result = process.run {
+    argv = { exe, "-s", child_server, "mcp" }, timeout = 10,
+    stdin = remuda_api.json.encode { jsonrpc = "2.0", id = 431, method = "tools/call",
+      params = { name = "run_script", arguments = { code = code } } } .. "\n",
+  }
+  assert(not result.timed_out and result.code == 0, tostring(result.stderr))
+  local reply = remuda_api.json.decode(result.stdout)
+  assert(reply.result and not reply.result.isError, result.stdout)
+  return reply.result.content[1].text
+end
+
 local function copy_tree(source, destination)
   local ok, entries = pcall(remuda_api.list_dir, source)
   if ok and type(entries) == "table" then
