@@ -24,6 +24,7 @@ if [[ -z ${REMUDA_BIN:-} ]]; then
   REMUDA_BIN=$(cd "$T/core" && cd "${CARGO_TARGET_DIR:-target}/release" && pwd)/remuda
   built=$(git -C "$T/core" rev-parse --short=7 HEAD)
 fi
+core_ref_check
 mkdir -p "$T/bin" && cp "$REMUDA_BIN" "$T/bin/remuda" ||
   { echo "cannot copy the core binary from $REMUDA_BIN. Next: set REMUDA_BIN to a built remuda" >&2; exit 2; }
 export PATH="$T/bin:$PATH" REMUDA_BIN="$T/bin/remuda" REMUDA_NO_UPDATE_CHECK=1
