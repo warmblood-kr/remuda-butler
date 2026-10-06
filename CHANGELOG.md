@@ -7,6 +7,7 @@ release tags yet; entries come from merged pull requests.
 ## Unreleased
 
 ### Added
+- `docs/butler.md` gains a runbook for moving the North Star and staging-guard Claude crons to `remuda butler schedule add`, with verify and cleanup steps.
 - Matrix `?status` reports system load, memory and disk usage when available;
   unsupported or failed readers keep the corresponding value at `n/a`.
 - Standing grants now skip prompts: with `guard on`, `guard approvals on` and `guard grants on` (still off by default), an active grant allows the Claude permission prompt it covers (a plain push of a feature branch in its repository, or a WebFetch to its exact host) without an approval post. Each use writes a `grant_used` audit line naming the grant before the allow, and an unwritten line means the call asks; deny rules are checked again first, only `push` and `net` calls qualify, a grant allows at most 30 calls an hour (the 31st asks and writes one `grant_limited` line; the count is rebuilt from the audit log after a restart), a clock set back more than a minute matches nothing, and every error asks. Never at `PreToolUse`, never for codex (see #339).
