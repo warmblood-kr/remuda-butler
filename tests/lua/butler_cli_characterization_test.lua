@@ -173,6 +173,7 @@ families {
       remuda._butler_bus.agents.worker = { id = "01SYNTHETICWORKER000000000", parent = "butler", session_name = "worker" }
       remuda._butler_bus.agents.other = { id = "01SYNTHETICOTHER00000000000", parent = "worker", session_name = "other" }
       remuda.close = function(...) remuda._pr0_note("close", ...); return true end
+      remuda.butler.is_idle = function() return false, "busy" end -- deterministic: do not depend on the real is_idle for a fake session
     ]],
     cases = forms("close", { "close", "worker" }, { "close", "worker", "--force" }, { "close", "--force", "worker" },
       { "close", "--force" }, { "close", "--force", "--force", "worker" }, { "close", "worker", "--force", "--force" },
@@ -186,7 +187,7 @@ families {
   { name = "compact",
     setup = [[
       remuda._butler_compaction_has_session = function(name) remuda._pr0_note("compact.has_session", name); return name == "s1" end
-      remuda._butler_compaction_tick = function(...) remuda._pr0_note("compact.tick", ...); return "tick-stub" end
+      remuda._butler_compaction_tick = function(...) if select("#", ...) > 0 then remuda._pr0_note("compact.tick", ...) end; return "tick-stub" end
       remuda.butler.compact = function(...) remuda._pr0_note("compact", ...); return "compact-stub" end
     ]],
     cases = forms("compact", { "compact", "s1" }, { "compact", "s1", "--dry-run" }, { "compact", "s1", "--force" },
