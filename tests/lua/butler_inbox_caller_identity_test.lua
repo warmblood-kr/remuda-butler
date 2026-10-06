@@ -1,0 +1,111 @@
+-- A named inbox may only be read by its owner when the caller has an agent identity.
+-- Agent names and IDs are both accepted by the operator path.
+T.install_mod("butler", assert(os.getenv("REMUDA_LUA_REPO")))
+T.eval('remuda._butler_argv = {"sh", "-c", "sleep 60"}; remuda._butler_skip_relay = true')
+T.eval('return remuda.exec("butler")')
+T.wait_until(function()
+  return T.eval('return remuda._butler_bus ~= nil and remuda._butler_bus.agents.butler ~= nil')
+    :match("^%s*true%s*$") ~= nil
+end, 5, "Butler root start")
+
+T.eval(string.format([[
+  remuda.butler.project_home(%q)
+  remuda._butler_agent_builders.codex = function() return { "sleep", "100" } end
+  remuda._butler_launch("codex", "alice")
+  remuda._butler_launch("codex", "bob")
+  remuda._butler_launch("codex", "carol")
+]], os.getenv("XDG_DATA_HOME") .. "/projects"))
+
+local function call(verb, args, agent_id)
+  local encoded = {}
+  for _, value in ipairs(args) do encoded[#encoded + 1] = string.format("%q", value) end
+  local env = agent_id and string.format("{ REMUDA_BUTLER_AGENT_ID = %q }", agent_id) or "{}"
+  return T.eval([[
+    local ok, value = pcall(remuda._butler_command_run, ]] .. string.format("%q", verb)
+    .. ", { " .. table.concat(encoded, ", ") .. " }, { env = " .. env .. [[ })
+    return (ok and "ok\0" or "error\0") .. tostring(value)
+  ]])
+end
+
+local setup = T.eval([[
+  local bus, mail = remuda._butler_bus, remuda._butler_mail
+  local ids = { alice = bus.agents.alice.id, bob = bus.agents.bob.id, carol = bus.agents.carol.id }
+  local own = remuda._butler_send("butler", "alice", "alice private message")
+  local bob_message = remuda._butler_send("butler", "bob", "bob private secret")
+  return ids.alice .. "\n" .. ids.bob .. "\n" .. ids.carol .. "\n"
+    .. own:match("^queued (%S+)") .. "\n" .. bob_message:match("^queued (%S+)")
+]])
+local alice_id, bob_id, carol_id, alice_message, bob_message = setup:match("([^\n]+)\n([^\n]+)\n([^\n]+)\n([^\n]+)\n([^\n]+)")
+assert(alice_id and bob_id and carol_id and alice_message and bob_message, "agent/mail setup failed")
+
+T.test("named_inbox_refuses_another_agents_alias_and_id_without_marking_mail_read", function()
+  for _, name in ipairs({ "bob", bob_id }) do
+    local result = call("inbox", { "inbox", name }, alice_id)
+    T.ok(result:match("^error\0"), "cross-member inbox must be refused: " .. result)
+    T.ok(not result:find("bob private secret", 1, true), "refusal leaked mail content: " .. result)
+    T.eq(T.eval("return tostring(remuda._butler_mail.is_unread(" .. string.format("%q", bob_id)
+      .. ", " .. string.format("%q", bob_message) .. "))"), "true", "Bob's mail stays unread")
+  end
+end)
+
+T.test("named_inbox_refusal_does_not_reveal_whether_the_member_has_mail", function()
+  local with_mail = call("inbox", { "inbox", "bob" }, alice_id)
+  local empty = call("inbox", { "inbox", "carol" }, alice_id)
+  T.eq(with_mail:match("^error\0(.*)$"), empty:match("^error\0(.*)$"), "same refusal for occupied and empty inbox")
+  T.ok(not with_mail:find("bob", 1, true) and not empty:find("carol", 1, true), "refusal must not identify the requested member")
+end)
+
+T.test("agent_can_read_own_named_inbox_and_operator_can_read_any_named_inbox", function()
+  local implicit_own = call("inbox", { "inbox" }, alice_id)
+  T.ok(implicit_own:match("^ok\0") and implicit_own:find("alice private message", 1, true),
+    "no-argument inbox should use the caller identity: " .. implicit_own)
+  local own = call("inbox", { "inbox", "alice" }, alice_id)
+  T.ok(own:match("^ok\0"), "own inbox should work: " .. own)
+
+  local operator_message = T.eval([[return remuda._butler_send("butler", "bob", "operator-visible secret"):match("^queued (%S+)")]])
+  local operator = call("inbox", { "inbox", "bob" })
+  T.ok(operator:match("^ok\0"), "operator inbox should work: " .. operator)
+  T.ok(operator:find("operator-visible secret", 1, true), "operator inbox content missing")
+  T.eq(T.eval("return tostring(remuda._butler_mail.is_unread(" .. string.format("%q", bob_id)
+    .. ", " .. string.format("%q", operator_message) .. "))"), "false", "operator read marks mail read")
+end)
+
+T.test("message_id_branch_keeps_owner_not_found_and_not_yours_checks", function()
+  local unread_message = T.eval([[return remuda._butler_send("butler", "bob", "unread ownership probe"):match("^queued (%S+)")]])
+  local not_yours = call("inbox", { "inbox", unread_message }, alice_id)
+  T.ok(not_yours:match("^error\0"), "another agent's message ID must be refused")
+  T.ok(not_yours:find("was not delivered to you", 1, true), "not-yours reason missing: " .. not_yours)
+  T.eq(T.eval("return tostring(remuda._butler_mail.is_unread(" .. string.format("%q", bob_id)
+    .. ", " .. string.format("%q", unread_message) .. "))"), "true", "not-yours lookup leaves mail unread")
+
+  local missing = call("inbox", { "inbox", "00000000000000000000000000" }, alice_id)
+  T.ok(missing:match("^error\0"), "unknown message ID must remain an error")
+  T.ok(missing:find("no Butler agent with id", 1, true), "not-found behavior changed: " .. missing)
+  T.ok(not missing:find("bob private secret", 1, true), "not-found lookup leaked mail")
+end)
+
+-- Sibling verb probe: sessions/status/quota have no NAME argument; send accepts a
+-- destination but performs a write; reply and forward identify source mail by ID and
+-- retain the mail ownership checks. These cases document their separate semantics.
+T.test("sibling_name_verbs_do_not_read_another_members_private_inbox", function()
+  local private_id = T.eval([[return remuda._butler_send("butler", "bob", "sibling private probe"):match("^queued (%S+)")]])
+  for _, probe in ipairs({
+    { verb = "sessions", args = { "sessions", "bob" } },
+    { verb = "status", args = { "status", "bob" } },
+    { verb = "quota", args = { "quota", "bob" } },
+  }) do
+    local result = call(probe.verb, probe.args, alice_id)
+    T.ok(not result:find("sibling private probe", 1, true), probe.verb .. " exposed private mail")
+    T.eq(T.eval("return tostring(remuda._butler_mail.is_unread(" .. string.format("%q", bob_id)
+      .. ", " .. string.format("%q", private_id) .. "))"), "true", probe.verb .. " left mail unread")
+  end
+
+  local send = call("send", { "send", "bob", "sibling write probe" }, alice_id)
+  T.ok(send:match("^ok\0"), "agent send to a named recipient remains available: " .. send)
+  T.ok(not send:find("bob private secret", 1, true), "send exposed the recipient's existing mail")
+
+  local reply = call("reply", { "reply", bob_message, "reply probe" }, alice_id)
+  T.ok(reply:match("^error\0") and reply:find("was not delivered to you", 1, true), "reply keeps message ownership: " .. reply)
+  local forward = call("forward", { "forward", bob_message, "carol" }, alice_id)
+  T.ok(forward:match("^error\0") and forward:find("was not delivered to you", 1, true), "forward keeps message ownership: " .. forward)
+end)
