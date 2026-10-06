@@ -112,7 +112,7 @@ local function fits_spec(spec, args, legacy_fits)
     -- clap treats a bare `--` as the end-of-options separator; today it is just an unexpected word.
     for _, word in ipairs(args) do if word == "--" then return false end end
     local report = cli.parse(spec, args)
-    return report.ok and report.kind ~= "help"
+    return report.ok and report.kind ~= "help", report
   end
   return legacy_fits
 end
@@ -324,7 +324,22 @@ end)
 command(21, "guard", "  remuda butler guard on|off|status | approvals on|off|status | deny on|off|status | grants [on|off|status] | stats | verify  (off by default)", function(args, caller)
   return remuda.butler.guard_policy.run(args, caller)
 end)
+local AGENTS_CLI_SPEC = {
+  name = "remuda butler",
+  verbs = {
+    agents = {
+      about = "List Butler agents",
+      options = { { long = "all", help = "Include ended agents" } },
+      next = "remuda butler sessions",
+    },
+  },
+}
 command(15, "agents", "  remuda butler agents [--all]", function(args)
+  local fits, report = fits_spec(AGENTS_CLI_SPEC, args, true)
+  if report then -- a repeated --all is an unexpected word today
+    if fits and #args <= 2 then return registry_list(report.values.all == true) end
+    return nil
+  end
   if #args == 1 then return registry_list(false) end
   if #args == 2 and args[2] == "--all" then return registry_list(true) end
 end)

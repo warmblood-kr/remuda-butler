@@ -56,3 +56,29 @@ T.test("zero-arg verbs decline anything else (global usage)", function()
     end
   end
 end)
+
+T.test("agents takes only a single --all, with and without the parser", function()
+  for _, args in ipairs({ { "agents" }, { "agents", "--all" } }) do
+    local with = run(true, "agents", args)
+    T.ok(with:match("^true|ID\tALIAS"), "listing for " .. table.concat(args, " "))
+    T.eq(run(false, "agents", args), with, "same listing without the parser")
+  end
+  for _, bad in ipairs({ { "--all", "--all" }, { "--all=1" }, { "extra" }, { "--bogus" }, { "--" },
+    { "--", "--all" }, { "--all", "extra" }, { "extra", "--all" }, { "--help" }, { "-h" }, { "help" },
+    { "--help", "--all" }, { "-a" } }) do
+    local args = { "agents" }
+    for _, word in ipairs(bad) do args[#args + 1] = word end
+    for _, parser in ipairs({ true, false }) do
+      T.eq(run(parser, "agents", args), "true|nil", table.concat(args, " ") .. " parser=" .. tostring(parser))
+    end
+  end
+end)
+
+T.test("the agents spec reports --all as a flag value", function()
+  start_butler()
+  T.eq(T.eval([[
+    local r = remuda.cli.parse({ name = "remuda butler", verbs = { agents = { about = "x", next = "y",
+      options = { { long = "all", help = "z" } } } } }, { "agents", "--all" })
+    return tostring(r.ok) .. "|" .. tostring(r.values.all)
+  ]]), "true|true")
+end)
