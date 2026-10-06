@@ -48,6 +48,9 @@ bus.unread_seeded_exited_at = bus.unread_seeded_exited_at or {}
 bus.notice_retry_reasons = bus.notice_retry_reasons or {}
 bus.notice_fallbacks = bus.notice_fallbacks or {}
 bus.notice_failure_alerts = bus.notice_failure_alerts or {}
+bus.notice_sent_at = bus.notice_sent_at or {}
+bus.notice_reminder_at = bus.notice_reminder_at or {}
+bus.notice_deferred_by_task = bus.notice_deferred_by_task or {}
 local NOTICE_STABLE_SECONDS = 3
 local NOTICE_QUIET_S = 2
 local NOTICE_MAX_WAIT_S = 10
@@ -56,6 +59,7 @@ local NOTICE_RETRY_DELAYS = { 20, 60, 300, 900 }
 -- A pane that never passes the delivery policy while its composer reads empty is reported as a
 -- failed attempt after this long, so the retry schedule and the sender's failure notice apply.
 local NOTICE_STALL_S = 120
+local NOTICE_REMINDER_SECONDS = 10 * 60
 -- os.time is whole seconds: quiet is 1-2 s, plus up to 1 s for the notice tick.
 local function notice_now()
   local clock = remuda._butler_notice_clock
@@ -340,15 +344,17 @@ local function refresh_pending_notice(session, pending)
   if not pending.message_order then return pending end
   local agent = bus.agents[session]
   local identity = agent and agent.id
-  local order, notices, message_times = {}, {}, {}
+  local order, notices, message_times, reminders = {}, {}, {}, {}
   for _, id in ipairs(pending.message_order) do
     local notice = pending.message_ids and pending.message_ids[id]
     if notice and identity and ((pending.reshow and pending.reshow[id]) or mail.is_unread(identity, id)) then
       order[#order + 1], notices[id] = id, notice
       message_times[id] = pending.message_times and pending.message_times[id]
+      reminders[id] = pending.reminders and pending.reminders[id]
     end
   end
   pending.message_order, pending.message_ids, pending.message_times = order, notices, message_times
+  pending.reminders = reminders
   local fallback = bus.notice_fallbacks[session]
   if fallback then
     for id in pairs(fallback) do
@@ -568,6 +574,13 @@ notice_recovery_error = function(session, state, reason)
 end
 local function complete_notice_recovery(session, state)
   local pending = bus.notices[session]
+  local agent = bus.agents[session]
+  if agent and agent.id then
+    local sent_at = bus.notice_sent_at[agent.id] or {}
+    bus.notice_sent_at[agent.id] = sent_at
+    for _, id in ipairs(state.message_ids or {}) do sent_at[id] = notice_now() end
+    bus.notice_reminder_at[session] = notice_now() + NOTICE_REMINDER_SECONDS
+  end
   if pending then
     if state.message_ids and pending.message_order then
       local submitted = {}
@@ -864,7 +877,7 @@ local function arm_notice_timer(session, slot, seconds)
   pair[slot] = handle
   bus.notice_timers[session] = pair
 end
-function remuda._butler_notify(alias, notice, message_id, reshow)
+function remuda._butler_notify(alias, notice, message_id, reshow, reminder)
   local _, recipient = mail_id(alias, false)
   if message_id and not reshow and not mail.is_unread(recipient.id, message_id) then return true end
   local now = notice_now()
@@ -883,7 +896,10 @@ function remuda._butler_notify(alias, notice, message_id, reshow)
     pending.message_order = pending.message_order or {}
     if pending.message_ids[message_id] then return false end
     pending.message_ids[message_id] = notice
-    if reshow then
+    if reminder then
+      pending.reminders = pending.reminders or {}
+      pending.reminders[message_id] = true
+    elseif reshow then
       pending.reshow = pending.reshow or {}
       pending.reshow[message_id] = true
     end
@@ -936,6 +952,31 @@ local function seed_unread_notices(alias, previous_instance, instance, unread)
     end
   end
   return true
+end
+local function remind_unread_notices(alias, agent, now)
+  if not agent.id or bus.pending_tasks[alias] then return end
+  local due = bus.notice_reminder_at[alias]
+  if due and now < due then return end
+  bus.notice_reminder_at[alias] = now + NOTICE_REMINDER_SECONDS
+  local sent_at = bus.notice_sent_at[agent.id]
+  if not sent_at then return end
+  local has_sent = false
+  for message_id, last_sent in pairs(sent_at) do
+    if mail.is_unread(agent.id, message_id) then
+      has_sent = true
+      if now - (tonumber(last_sent) or now) >= NOTICE_REMINDER_SECONDS then
+        local message = mail.find_message(message_id) or { id = message_id }
+        message.id = message.id or message_id
+        remuda._butler_notify(alias, mail_notice_text(message, nil, agent.kind), message_id, true, true)
+      end
+    else
+      sent_at[message_id] = nil
+    end
+  end
+  if not has_sent then
+    bus.notice_sent_at[agent.id] = nil
+    bus.notice_reminder_at[alias] = nil
+  end
 end
 local function notice_session_instance(alias, agent, session_instances)
   if type(agent.session_instance_id) == "string" and agent.session_instance_id ~= "" then
@@ -1061,6 +1102,14 @@ function remuda._butler_deliver_notices()
       -- relaunch check. Seeding here can type over it after a task-poke timeout.
       -- A delegated task's startup probe owns the pane until the task clears.
       if agent.id then note_context_drop(alias, agent, instance) end
+      if bus.pending_tasks[alias] then
+        bus.notice_deferred_by_task[alias] = true
+      elseif bus.notice_deferred_by_task[alias] then
+        -- A task may have held unread mail out of the first prompt after the
+        -- instance was already marked seeded (including an empty inbox).
+        bus.notice_deferred_by_task[alias] = nil
+        bus.unread_seeded[alias] = nil
+      end
       previous_instance = bus.unread_seeded[alias]
       if previous_instance ~= instance and agent.id then
         local counted, unread = pcall(mail.unread, agent.id)
@@ -1089,6 +1138,7 @@ function remuda._butler_deliver_notices()
           end
         end
       end
+      if not update_handoff then remind_unread_notices(alias, agent, now) end
     end
   end
   local sessions = {}
