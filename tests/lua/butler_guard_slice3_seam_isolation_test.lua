@@ -2,6 +2,8 @@
 T.child_env = { REMUDA_BUTLER_TEST = "1" }
 
 T.test("production ignores every seam on direct load, first activation, re-evaluation and rollback", function()
+  T.eq(T.eval("return tostring(os.getenv('REMUDA_BUTLER_TEST'))"),
+    T.child_env.REMUDA_BUTLER_TEST or 'nil', 'real child process environment')
   T.install_mod("butler", assert(os.getenv("REMUDA_LUA_REPO")))
   -- Agent-callable MCP evaluation before Butler's first lifecycle activation.
   local early_ok, early = pcall(T.mcp_eval, [[
