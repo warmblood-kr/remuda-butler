@@ -77,7 +77,7 @@ function remuda.butler.ctx_level(name)
   if (used and used >= config.critical) or (pct and pct >= config.critical_pct) then level = "critical"
   elseif used and used >= config.warn then level = "warn"
   elseif used and used >= config.watch then level = "watch" end
-  return { level = level, used = used, pct = pct }
+  return { level = level, used = used, pct = pct, warning = pct ~= nil and pct >= 60 or false }
 end
 function remuda.butler.is_idle(name, allow_queued_mail)
   local ok, session = pcall(remuda.session, name)
