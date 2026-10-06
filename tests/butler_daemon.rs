@@ -4472,6 +4472,10 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
               screens[n] = {{ claude_yes_selected, claude_yes_selected, rule .. "\n❯ \n" .. rule }}
             elseif n == "t-claude" and k == "RET" then
               screens[n] = {{ rule .. "\n❯ \n" .. rule }}
+            elseif n == "t-claude-launch" and k == "<down>" then
+              -- The selection is verified on a fresh capture before RET is sent.
+              local selected = ({claude_trust_capture:?}):gsub("❯ No, exit", "  No, exit"):gsub("   Yes, I trust this folder", "❯ Yes, I trust this folder")
+              screens[n] = {{ selected, selected }}
             elseif n == "t-claude-launch" and k == "RET" then
               screens[n] = {{ rule .. "\n❯ \n" .. rule }}
             elseif (n == "t-codex" or n == "t-codex-peer") and k == "1" then

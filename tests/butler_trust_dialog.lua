@@ -147,6 +147,9 @@ local function launch(kind, labels, selected, opts)
   local sel = selected
   local function paint()
     if sel == "done" then return "x\n❯" end
+    if opts.fixture then
+      return sel == 1 and opts.fixture or opts.fixture:gsub("❯ No, exit", "  No, exit"):gsub("   Yes, I trust this folder", "❯ Yes, I trust this folder")
+    end
     return screen_of(labels, sel, opts.shown or cwd)
   end
   remuda.new = function(name) return name end
@@ -181,6 +184,10 @@ pressed = launch("claude", ASK, 2, { eligible = true })
 check(pressed, "RET", "claude already on yes: confirm only")
 bus.trusted_launch_dirs = { ["/p/work"] = true } -- what launch/topic set for a directory Butler just created
 pressed = launch("claude", ASK, 1, { auto_trust = true })
+bus.trusted_launch_dirs = { ["/p/work"] = true }
+local captured = io.open("tests/fixtures/claude-trust-dialog.txt"):read("*a")
+check(launch("claude", ASK, 1, { auto_trust = true, fixture = captured }), "<down>,RET", "the exact captured Claude dialog")
+bus.trusted_launch_dirs = { ["/p/work"] = true }
 bus.trusted_launch_dirs = nil
 check(pressed, "<down>,RET", "fresh-dir path still works (auto_trust)")
 pressed, result = launch("codex", { "Trust and continue", "Back to Agent Command Center" }, 1, { eligible = true })
