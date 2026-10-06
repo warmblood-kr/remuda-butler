@@ -1151,7 +1151,7 @@ end
 -- A standing grant answers a Claude PermissionRequest it covers: the prompt Claude would show is skipped. Never at
 -- PreToolUse, so a deny there and Claude's own checks still run. First refusal wins, and every refusal or error
 -- returns nil: the call goes on to the approval post or Claude's prompt (ask), never to allow. The use is audited
--- (grant_used, with its grant_id) before the allow, and an unwritten line means no allow and no count.
+-- (grant_used, with its grant_id) before the allow; an unwritten line means no allow, and its reserved use is given back.
 local function grant_reply(record, hook_json)
   if record.event ~= "PermissionRequest" or record.kind ~= "claude" or type(hook_json) ~= "table" then return nil end
   if not (M.approvals_enabled() and M.grants_enabled()) then return nil end -- off: the store is not read
@@ -1175,9 +1175,12 @@ local function grant_reply(record, hook_json)
     return nil
   end
   if room ~= "ok" then return nil end
+  -- The use is reserved before its audit write, which can wait on the audit lock while another hook runs, and given
+  -- back when the line is not written: the hourly limit holds under that interleaving and no unaudited use counts.
+  local slot = grants.count(id)
   used.event = "grant_used"
-  if M.append(used) ~= true then return nil end
-  grants.count(id)
+  local wrote, written = pcall(M.append, used)
+  if not wrote or written ~= true then grants.release(id, slot); return nil end
   return approval.ALLOW
 end
 

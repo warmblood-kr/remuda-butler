@@ -600,11 +600,16 @@ function M.room(id)
   return #list >= M.HOURLY and "limited" or "ok"
 end
 
--- Count one use; called only after its grant_used line was written.
+-- Reserve one use and return its stamp; release(id, stamp) gives it back when its grant_used line was not written.
 function M.count(id)
-  local list = M._uses[id] or {}
+  local list, at = M._uses[id] or {}, stamp(now())
   M._uses[id] = list
-  list[#list + 1] = stamp(now())
+  list[#list + 1] = at
+  return at
+end
+function M.release(id, at)
+  local list = M._uses[id] or {}
+  for i = #list, 1, -1 do if list[i] == at then table.remove(list, i); return end end
 end
 
 -- True once per grant per hour: when its grant_limited line is due. noted() records that it was written.

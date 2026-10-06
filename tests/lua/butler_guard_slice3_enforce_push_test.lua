@@ -91,6 +91,8 @@ T.test("a plain push of a feature branch is allowed and audited; CI paths, a com
   T.expect(has(push(work), ALLOW), "plain push allowed")
   T.expect(lines():match('"event":"grant_used","tool":"Bash","class":"push"[^\n]*"grant_id":"g001"') ~= nil, "audited")
   T.expect(not has(push(work, "git push && echo x"), ALLOW), "a compound asks")
+  -- the scope is the payload cwd; a leading cd (the only way to push from elsewhere in one command) is a compound
+  for _, c in ipairs({ "cd " .. work .. " && git push", "cd " .. work .. "; git push" }) do T.expect(not has(push(work, c), ALLOW), c) end
   for _, path in ipairs({ ".github/workflows/x.yml" }) do -- scripts/, Makefile and the rest: grants_push, at match level
     T.eq(sh("mkdir -p $(dirname " .. path .. "); echo x > " .. path .. "; git add -A; git commit -q -m ci"), "0", "commit " .. path)
     T.expect(not has(push(work), ALLOW), "touches " .. path)

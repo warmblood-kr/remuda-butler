@@ -920,8 +920,9 @@ own prompt. Nothing on an error path allows. A grant matches by scope only:
 any agent whose call falls in the scope uses it, whoever asked for it.
 
 Audit before allow: the call is allowed only after its `grant_used` line was
-written. If that line cannot be written the call asks and the use is not
-counted, because the audit line is the only record the owner and the hourly
+written. The use is reserved before the write (which can wait on the audit lock
+while another hook runs), so two calls at once cannot both take the last use. If
+that line cannot be written the call asks and the reserved use is given back, because the audit line is the only record the owner and the hourly
 limit rely on, and asking costs one post while an unaudited allow cannot be
 reconstructed.
 
@@ -935,8 +936,8 @@ that hour ask without another line. The count lives in daemon memory and
 survives a live reload. After a restart, a grant's first use rebuilds its count
 from the `grant_used` lines of the live audit log within the last hour; if the
 log cannot be read, the call asks. A rotation within that hour moves older lines
-out of the live log, so the rebuilt count can be low by what the rotated file
-held (the next rotation is 1 MiB later).
+out of the live log, so a rotation plus a restart can reset a grant's count by
+up to 30, once per restart.
 
 Clock skew: Butler keeps the highest clock time it has seen. A clock more than
 60 seconds behind it matches no grant until it catches up; a forward jump only
@@ -944,6 +945,22 @@ expires grants early.
 
 With grants on and no live git grant, matching runs no process: the git probes
 start only when a git grant could cover the call.
+
+Where a push runs: a git grant's scope is compared with the `cwd` field of the
+`PermissionRequest` payload, while the push itself runs in the Bash tool's own
+shell directory. The two are assumed to be the same directory (the payload has no
+other directory field). A command that changes directory first (`cd DIR && git
+push`, `cd DIR; git push`) is a compound and never matches.
+
+The CI-path check diffs against the local tracking ref
+(`refs/remotes/REMOTE/BRANCH`), which a same-user process can move (`git
+update-ref`), hiding an earlier commit that touched CI files. Like the rest of the
+guard this is cooperative; server-side branch protection is the real control.
+
+Any same-user process with a session's environment can run the hook command
+itself with a made-up payload. The allow then goes to its own output, not to
+Claude, but its `grant_used` lines spend the grant's uses, so later calls ask;
+revoke and freeze still work.
 
 ### Scope patterns
 
