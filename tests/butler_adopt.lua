@@ -112,6 +112,13 @@ local close_ok, close_result = pcall(remuda._butler_close_member, "finished", "b
 assert(close_ok and close_result == "Closed finished.\nNext: remuda butler sessions"
   and closed[1] == "finished", "finished member closes despite its stale composer screen")
 
+-- A live row sharing the name with a stale exited row stays authoritative: the live-session gates still apply.
+closed = {}
+exited = { { name = "finished", alive = false }, { name = "finished", alive = true } }
+local live_ok, live_err = pcall(remuda._butler_close_member, "finished", "butler", false, true)
+assert(not live_ok and tostring(live_err):find("composer not empty", 1, true) and #closed == 0,
+  "a live row for the same name keeps the close gates")
+
 -- A failed forced close raises a readable message (the CLI turns it into exit 1 via cli_result), never a bare Lua error.
 closed, close_error = {}, "session already gone"
 local returned, failure = pcall(remuda._butler_close_member, "finished", "butler", true, true)

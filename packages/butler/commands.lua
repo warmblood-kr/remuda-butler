@@ -171,13 +171,15 @@ local function session_exited(alias, agent)
   if type(remuda.ls) ~= "function" then return false end
   local ok, rows = pcall(remuda.ls)
   if not ok or type(rows) ~= "table" then return false end
+  local dead = false
   for _, row in ipairs(rows) do
-    if type(row) == "table" and (row.name == alias or row.name == agent.session_name)
-        and row.alive == false then
-      return true
+    if type(row) == "table" and (row.name == alias or row.name == agent.session_name) then
+      -- A live row for the name is authoritative over any stale exited one.
+      if row.alive ~= false then return false end
+      dead = true
     end
   end
-  return false
+  return dead
 end
 local function close_member(name, leader, force, leaderless_ok)
   local ok, alias = pcall(resolve, name)
