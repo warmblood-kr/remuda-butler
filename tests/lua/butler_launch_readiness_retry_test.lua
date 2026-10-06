@@ -50,3 +50,55 @@ T.test("transient capture errors and blank frames keep a live candidate probing"
   probe_until_ready("probe-error-retry", 'error("transient capture error")')
   probe_until_ready("probe-empty-retry", 'return ""')
 end)
+
+local function probe_timeout(name, kind, argv, screen, timeout, expected_reason, expected_session)
+  T.eval(string.format([[
+    remuda._butler_agent_builders[%q] = function() return %s end
+    remuda._butler_test_force_launch_probe = remuda._butler_test_force_launch_probe or {}
+    remuda._butler_test_force_launch_probe[%q] = true
+    remuda._probe_results = remuda._probe_results or {}
+    remuda.capture = function(session) if session == %q then return %q end return "" end
+  ]], kind, argv, name, name, screen))
+  T.eval(string.format([[
+    remuda._butler_choose_async({ %q }, {
+      name = %q, cwd = os.getenv("XDG_DATA_HOME"), timeout = %d,
+      spec = function() return {} end, env = function() return {} end,
+    }, function(session, agent, rows)
+      remuda._probe_results[%q] = { session = session, agent = agent, attempts = rows }
+    end)
+  ]], kind, name, timeout, name))
+  T.wait_until(function()
+    return T.eval(string.format("return tostring(remuda._probe_results[%q] ~= nil)", name)) == "true"
+  end, timeout + 5, name .. " timeout decision")
+  local result = T.eval(string.format([[
+    local row, live = remuda._probe_results[%q], false
+    for _, session in ipairs(remuda.ls()) do
+      if session.name == %q and session.alive then live = true end
+    end
+    return table.concat({ tostring(row.session), tostring(row.attempts[1].reason),
+      tostring(live), tostring(row.attempts[1].detail or ""),
+      tostring(row.attempts[1].session) }, "|")
+  ]], name, name))
+  T.ok(result:match("^[^|]*|" .. expected_reason .. "|" .. expected_session .. "|") ~= nil,
+    name .. " decision mismatch: " .. result)
+  T.eq(result:match("|([^|]*)$"), expected_session == "true" and name or "nil",
+    name .. " attempt session should distinguish success from failure")
+  return result
+end
+
+T.test("only a live blank screen is kept unverified at readiness timeout", function()
+  local blank = probe_timeout("probe-blank-unverified", "retry_probe",
+    '{ "sh", "-c", "sleep 60" }', "", 1, "ready_unverified", "true")
+  T.ok(blank:find("screen was blank", 1, true), "unverified attempt should explain the blank screen: " .. blank)
+  probe_timeout("probe-screen-timeout", "retry_probe",
+    '{ "sh", "-c", "sleep 60" }', "initializing agent", 1, "timeout", "false")
+  probe_timeout("probe-dead-child", "retry_probe",
+    '{ "sh", "-c", "exit 0" }', "", 3, "exited", "false")
+  probe_timeout("probe-login-screen", "claude",
+    '{ "sh", "-c", "sleep 60" }', "Please log in", 3, "login", "false")
+  T.eval([[remuda._butler_agent_startup.retry_probe = { modals = {{ match = "must choose", keys = {} }} }]])
+  probe_timeout("probe-known-dialog", "retry_probe",
+    '{ "sh", "-c", "sleep 60" }', "you must choose an option", 1, "dialog", "false")
+  probe_timeout("probe-unknown-dialog", "retry_probe",
+    '{ "sh", "-c", "sleep 60" }', "please confirm to continue", 5, "dialog", "false")
+end)
