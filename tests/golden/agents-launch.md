@@ -16,6 +16,7 @@ Use Butler's CLI for communication:
 - `remuda butler sessions` shows the household.
 - `remuda butler reply MESSAGE-ID -` (or `--file PATH`) answers a message in its thread; for Matrix mail it keeps the room and thread (prefer this over send when answering); answers to Matrix mail ALWAYS use this, never `remuda butler matrix send`.
 - `remuda butler forward MESSAGE-ID MEMBER [NOTE]` passes a message on with an optional note
+- Run `remuda butler ...` exactly as shown. Do not prefix it with REMUDA_NO_UPDATE_CHECK=1 or other VAR=value assignments: managed sessions never print the update banner, and a leading assignment can stop an allow rule such as Bash(remuda butler *) from matching.
 
 Codex members: use the MCP `butler_*` tools first (`butler_inbox`,
 `butler_send`, `butler_reply`, `butler_send_to_leader`, `butler_forward`,
