@@ -283,8 +283,12 @@ An allowlisted owner can approve with ✅ or a `yes`/`승인` reply, optionally
 including the id. A ❌ or `no`/`거부` denies it. Replies must arrive in live
 Matrix sync; messages from agents and the terminal approve/deny verbs cannot
 deliver prepared text. Butler types only after confirming the same live session
-instance is available and no human is attached to its pane. The owner sees the
-same normalized text that Butler stores. The display escapes control, line
+instance is live and its input box is safe to type into; an attached terminal
+does not block it (the reply says so). After typing, Butler reads the pane back
+for up to 3 seconds and replies `typed (seen)` only when the text appears there
+(wrapping tolerated); otherwise it replies `typed, NOT seen in the pane; check
+SESSION`. It never types again on its own, and neither the reply nor the trace
+repeats the text. The owner sees the same normalized text that Butler stores. The display escapes control, line
 separator and bidirectional formatting characters. A refusal before typing
 leaves the approved request available for another owner reply until expiry.
 Before typing, Butler persists a one-shot delivery marker; if typing can have

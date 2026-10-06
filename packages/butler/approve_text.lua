@@ -227,6 +227,41 @@ local function pane_attached(session)
   return attached
 end
 
+-- Read-back: "typed" only means remuda.type_text returned. Look for the text on the pane afterwards, tolerating
+-- wrapping (whitespace is dropped) and counting occurrences, so text already on screen is not a new delivery.
+-- Never retypes (a missed read-back must not become a second approval) and never logs or repeats the text.
+local function squash(value) return (value:gsub("%s", "")) end
+local function needle_of(text)
+  for line in text:gmatch("[^\n]+") do
+    if #squash(line) >= 8 then return squash(line):sub(1, 24) end
+  end
+  return squash(text):sub(1, 24)
+end
+local function screen_count(session, needle)
+  if needle == "" or type(remuda.capture) ~= "function" then return nil end
+  local ok, screen = pcall(remuda.capture, session)
+  if not ok or type(screen) ~= "string" then return nil end
+  local count, from = 0, 1
+  screen = squash(screen)
+  while true do
+    local a, b = screen:find(needle, from, true)
+    if not a then return count end
+    count, from = count + 1, b + 1
+  end
+end
+-- Looks up to 3 times, 1 s apart (one look when there is no timer); done(true) only when the count grew.
+local function confirm(session, needle, before, done)
+  local system = remuda._butler_system or {}
+  local tries = 0
+  local function look()
+    tries = tries + 1
+    local now = screen_count(session, needle)
+    if now and before and now > before then return done(true) end
+    if tries >= 3 or type(system.after) ~= "function" or not system.after(1, look) then return done(false) end
+  end
+  look()
+end
+
 function M.type_text(session, exact_bytes, provenance)
   if type(session) ~= "string" or session == "" or type(exact_bytes) ~= "string" then
     return false, "invalid_request"
@@ -245,6 +280,8 @@ function M.type_text(session, exact_bytes, provenance)
     local marked, allowed = pcall(provenance.before_write)
     if not marked or allowed ~= true then return false, "delivery_marker_failed" end
   end
+  local needle = needle_of(exact_bytes)
+  local before = screen_count(session, needle)
   local typed, result = pcall(remuda.type_text, session, exact_bytes)
   if not typed or result == false then return false, "type_failed", true end
   local trace = remuda._butler_session_trace or _G._butler_session_trace
@@ -252,7 +289,15 @@ function M.type_text(session, exact_bytes, provenance)
     pcall(trace, "matrix_approved_text", "target=" .. session .. " " .. provenance_text(provenance)
       .. " outcome=typed attached=" .. tostring(attached) .. " bytes=" .. tostring(#exact_bytes))
   end
-  return true, nil, attached
+  return true, nil, attached, function(done)
+    confirm(session, needle, before, function(seen)
+      if type(trace) == "function" then
+        pcall(trace, "matrix_approved_text_check", "target=" .. session .. " " .. provenance_text(provenance)
+          .. " seen=" .. tostring(seen))
+      end
+      done(seen)
+    end)
+  end
 end
 
 local function request(session, text, asker, ttl_s, done)
@@ -403,13 +448,17 @@ function M.configure()
         complete("retry", "session_changed")
         return
       end
-      local ok, why, attached = M.type_text(data.session, data.registered_text, {
+      local ok, why, attached, verify = M.type_text(data.session, data.registered_text, {
         owner = rec.answered_by, event_id = rec.answer_event_id, request_id = rec.id,
         before_write = function() return approval.begin_delivery(rec) end,
       })
       if ok then
-        pcall(approval.reply, rec, attached and "typed (a human is attached to the pane)" or "typed")
         complete(true)
+        local note = attached and " (a human is attached to the pane)" or ""
+        local function say(seen)
+          pcall(approval.reply, rec, (seen and "typed (seen)" or "typed, NOT seen in the pane; check " .. data.session) .. note)
+        end
+        if type(verify) == "function" then verify(say) else say(false) end
       else
         pcall(approval.reply, rec, "refused: " .. tostring(why))
         if rec.delivery_started == true then complete(false, why)
