@@ -40,6 +40,7 @@ T.test("explicit subject restores the loader on errors and native production loa
     assert(g.time() == 1790000000 and p.time() == 1790000000, 'explicit subject was not loaded')
     local root = os.getenv('XDG_DATA_HOME') .. '/remuda/mods/butler/packages/butler/'
     dofile(root .. 'guard_policy.lua'); dofile(root .. 'guard_grants.lua')
+    g, p = remuda.butler.guard_grants, remuda.butler.guard_policy -- policy replaces its table on load
     assert(math.abs(g.time() - os.time()) < 5 and math.abs(p.time() - os.time()) < 5,
       'native production retained a test closure')
     return 'ok'
