@@ -5,20 +5,20 @@ REPO=$(cd "$(dirname "$0")/.." && pwd -P)
 if (( $# == 0 )); then
   shopt -s nullglob
   files=("$REPO"/tests/lua/*_test.lua)
-  failed=()
+  failed=() logs=()
   for file in "${files[@]}"; do
     name=${file#"$REPO/"}
     start=$SECONDS
     if out=$("$REPO/tests/lua_tests.sh" "$name" 2>&1); then
       echo "PASS $name $((SECONDS - start))s"
     else
-      # Show the whole log of the failing file, never just its tail: it names the real failure.
       echo "FAIL $name $((SECONDS - start))s"
-      printf '%s\n' "$out"
       failed+=("$name")
+      logs+=("--- $name"$'\n'"$out")
     fi
   done
-  if ((${#failed[@]})); then echo "lua tests FAILED: ${failed[*]}" >&2; exit 1; fi
+  # Failing logs last: shell_tests.sh shows only the tail of this script's output, and it must name the real failure.
+  if ((${#failed[@]})); then printf '%s\n' "${logs[@]}"; echo "lua tests FAILED: ${failed[*]}" >&2; exit 1; fi
   exit 0
 fi
 if (( $# != 1 )); then
