@@ -1,5 +1,4 @@
--- The budget seam is an in-process field, independent of the existing grant-store test flag.
-T.child_env = { REMUDA_BUTLER_TEST = "0" }
+-- The harness enables the existing process-captured test seams; the field alone sets the test budget.
 
 T.test("git budget defaults to 2s, can be shortened/lengthened/reset, and always fails closed", function()
   T.install_mod("butler", assert(os.getenv("REMUDA_LUA_REPO")))
@@ -69,6 +68,14 @@ T.test("git budget defaults to 2s, can be shortened/lengthened/reset, and always
         assert(probe(2) == nil and calls == 1, method .. ': reset restores 2s')
         -- An expired invocation must leave no deadline behind for a standalone diff.
         assert(g.diff_names('/work/repo') ~= nil and calls == 2, 'deadline reset after invocation')
+        for _, bad in ipairs({ 0, -1, 61, 1e300, math.huge, -math.huge, 0/0, '2', 'bad', true, false, {} }) do
+          g.git_budget_s = bad
+          assert(probe(1) ~= nil, method .. ': invalid budget falls back before 2s')
+          assert(probe(2) == nil and calls == 1, method .. ': invalid budget stops at 2s')
+        end
+        g.git_budget_s = 60
+        assert(probe(59) ~= nil, method .. ': maximum valid budget')
+        assert(probe(60) == nil and calls == 1, method .. ': maximum budget still expires')
       end
       assert(gp.deny_reason('mcp__remuda__run_script',
         { code = 'remuda.butler.guard_grants.git_budget_s = 20' }, {}) == 'Butler grant store')
