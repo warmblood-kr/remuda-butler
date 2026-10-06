@@ -95,8 +95,29 @@ local function command(order, verb, usage, run)
   command_entries[verb] = entry
   if not remuda.contribute then remuda._butler_contribute("butler.command", verb, entry) end
 end
+-- Zero-argument verbs: the declared spec decides whether argv fits. Help, extras and
+-- unknown words all decline (nil), so the caller prints the global usage exactly as before.
+-- Without remuda.cli.parse (old core) the hand-parsed arity check below is the fallback.
+local ZERO_ARG_CLI_SPEC = {
+  name = "remuda butler",
+  verbs = {
+    doctor = { about = "Check the Butler installation", next = "remuda butler doctor" },
+    sessions = { about = "List Butler sessions", next = "remuda butler doctor" },
+    status = { about = "Report whether the Butler is up", next = "remuda butler doctor" },
+  },
+}
+local function fits_spec(spec, args, legacy_fits)
+  local cli = remuda.cli
+  if type(cli) == "table" and type(cli.parse) == "function" then
+    -- clap treats a bare `--` as the end-of-options separator; today it is just an unexpected word.
+    for _, word in ipairs(args) do if word == "--" then return false end end
+    local report = cli.parse(spec, args)
+    return report.ok and report.kind ~= "help", report
+  end
+  return legacy_fits
+end
 command(5, "doctor", "  remuda butler doctor", function(args)
-  if #args == 1 then
+  if fits_spec(ZERO_ARG_CLI_SPEC, args, #args == 1) then
     local doctor = remuda._butler_doctor
     local lines = doctor.render(doctor.probe())
     -- What the mod did to the root Butler's settings.local.json at its last launch or load.
@@ -107,6 +128,16 @@ command(5, "doctor", "  remuda butler doctor", function(args)
     return table.concat(lines, "\n")
   end
 end)
+local QUOTA_CLI_SPEC = {
+  name = "remuda butler",
+  verbs = {
+    quota = {
+      about = "Report claude and codex quota",
+      options = { { long = "report", help = "Also post the report to Matrix" } },
+      next = "remuda butler doctor",
+    },
+  },
+}
 command(6, "quota", "  remuda butler quota [--report]", function(args, caller)
   local quota = remuda._butler_quota
   if type(quota) ~= "table" then
@@ -115,10 +146,14 @@ command(6, "quota", "  remuda butler quota [--report]", function(args, caller)
     return remuda.fail("quota is unavailable: " .. reason .. "\nNext: remuda butler doctor", 1)
   end
   if #args == 2 and (args[2] == "--help" or args[2] == "-h") then return quota.help() end
-  if #args ~= 1 and not (#args == 2 and args[2] == "--report") then
+  -- Parsing is pure: it runs after the unavailable check and before authorization, as the
+  -- hand-parsed arity check did. A repeated --report is a usage error today (clap tolerates it).
+  local fits, parsed = fits_spec(QUOTA_CLI_SPEC, args, #args == 1 or (#args == 2 and args[2] == "--report"))
+  if not (fits and #args <= 2) then
     return remuda.fail(quota.usage_error(args[2] == "--report" and args[3] or args[2]), 2)
   end
   local report_flag = args[2] == "--report"
+  if parsed then report_flag = parsed.values.report == true end
   if report_flag then
     local identity = current_agent(caller)
     if identity ~= nil then
@@ -282,10 +317,10 @@ command(8, "close", "  remuda butler close <name> [--force]\n  remuda butler clo
   end)
 end)
 command(10, "sessions", "  remuda butler sessions", function(args)
-  if #args == 1 then return remuda._butler_sessions() end
+  if fits_spec(ZERO_ARG_CLI_SPEC, args, #args == 1) then return remuda._butler_sessions() end
 end)
 command(12, "status", "  remuda butler status  (0=up, 75=launching, 1=failed)", function(args)
-  if #args == 1 then
+  if fits_spec(ZERO_ARG_CLI_SPEC, args, #args == 1) then
     local message, code = remuda._butler_status()
     if code ~= 0 then
       if type(remuda.fail) == "function" then return remuda.fail(message, code) end
@@ -303,7 +338,22 @@ end)
 command(21, "guard", "  remuda butler guard on|off|status | approvals on|off|status | deny on|off|status | grants [on|off|status] | stats | verify  (off by default)", function(args, caller)
   return remuda.butler.guard_policy.run(args, caller)
 end)
+local AGENTS_CLI_SPEC = {
+  name = "remuda butler",
+  verbs = {
+    agents = {
+      about = "List Butler agents",
+      options = { { long = "all", help = "Include ended agents" } },
+      next = "remuda butler sessions",
+    },
+  },
+}
 command(15, "agents", "  remuda butler agents [--all]", function(args)
+  local fits, report = fits_spec(AGENTS_CLI_SPEC, args, true)
+  if report then -- a repeated --all is an unexpected word today
+    if fits and #args <= 2 then return registry_list(report.values.all == true) end
+    return nil
+  end
   if #args == 1 then return registry_list(false) end
   if #args == 2 and args[2] == "--all" then return registry_list(true) end
 end)

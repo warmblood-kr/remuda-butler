@@ -1,3 +1,6 @@
+# doctor, sessions, status (and, as they land, agents, quota) are spec-parsed through
+# fits_spec/ZERO_ARG_CLI_SPEC in commands.lua but keep the old-core arity fallback, so they stay
+# in the baseline: the ratchet only counts verbs with no hand-parsed remnant.
 agents
 approve
 approve-text
