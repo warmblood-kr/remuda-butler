@@ -95,6 +95,113 @@ assert(unavailable.cpu == "n/a" and unavailable.mem == "n/a"
   and unavailable.disk == "n/a",
   "all failed readers fall back independently without raising")
 
+local garbage = system.status_metrics({
+  read_file = function(path)
+    if path == "/proc/loadavg" then return "no load value" end
+    if path == "/proc/meminfo" then
+      return "MemTotal: 1000 kB\nMemAvailable: 2000 kB\n"
+    end
+  end,
+  run = function(options)
+    local argv = options.argv
+    if argv[1] == "sysctl" and argv[3] == "vm.loadavg" then
+      return { code = 0, stdout = "not a load value" }
+    end
+    if argv[1] == "vm_stat" then
+      return { code = 0, stdout = "Pages free: 10.\nPages inactive: 20.\n" }
+    end
+    if argv[1] == "sysctl" and argv[3] == "hw.memsize" then
+      return { code = 0, stdout = "4096000000\n" }
+    end
+    if argv[1] == "df" then
+      local output = "Filesystem blocks Used Avail Capacity Mounted\n"
+        .. "/dev/root 100 99 1 150% /\n"
+      return { code = 0, stdout = output }
+    end
+  end,
+})
+assert(garbage.cpu == "n/a" and garbage.mem == "n/a" and garbage.disk == "n/a",
+  "malformed counters, memory over total, and disk over 100% fall back")
+
+for _, result in ipairs({
+  { code = 1, stdout = "0.2" }, "not a process result",
+}) do
+  local failed = system.status_metrics({
+    read_file = function() error("proc unavailable") end,
+    run = function() return result end,
+  })
+  assert(failed.cpu == "n/a" and failed.mem == "n/a" and failed.disk == "n/a",
+    "nonzero and non-table process results fall back")
+end
+
+local saved_run = remuda.process.run
+local fallback_calls = {}
+remuda.process.run = function(options)
+  local argv = options.argv
+  fallback_calls[#fallback_calls + 1] = table.concat(argv, " ")
+  if argv[1] == "vm_stat" then
+    return { code = 0, stdout = "Mach Virtual Memory Statistics: "
+      .. "(page size of 4096 bytes)\nPages free: 100000.\n"
+      .. "Pages inactive: 200000.\nPages speculative: 10000.\n" }
+  end
+  if argv[1] == "sysctl" and argv[3] == "hw.memsize" then
+    return { code = 0, stdout = "4096000000\n" }
+  end
+  if argv[1] == "df" then
+    local output = "Filesystem blocks Used Avail Capacity Mounted\n"
+      .. "/dev/root 100 40 60 40% /\n"
+    return { code = 0, stdout = output }
+  end
+  error("unexpected process command: " .. table.concat(argv, " "))
+end
+local linux_fallback = system.status_metrics({
+  read_file = function(path)
+    if path == "/proc/loadavg" then return "0.12 0.10 0.08 1/50 12\n" end
+    return nil
+  end,
+})
+remuda.process.run = saved_run
+assert(linux_fallback.cpu == "0.12" and linux_fallback.mem == "69%"
+  and linux_fallback.disk == "40%",
+  "Linux memory falls back to vm_stat when proc/meminfo is unreadable")
+local expected_fallback = "vm_stat|sysctl -n hw.memsize|df -kP /"
+assert(table.concat(fallback_calls, "|") == expected_fallback,
+  "the default reader uses remuda.process.run when no test runner is supplied")
+
+local saved_open = io.open
+local read_sizes = {}
+io.open = function(path)
+  return {
+    read = function(_, size)
+      read_sizes[path] = size
+      return string.rep("x", size)
+    end,
+    close = function() end,
+  }
+end
+local read_ok, read_metrics = pcall(system.status_metrics, {
+  run = function() error("no process API") end,
+})
+io.open = saved_open
+assert(read_ok and read_metrics.cpu == "n/a",
+  "bounded file reads survive unreadable data")
+assert(read_sizes["/proc/loadavg"] == 8192
+  and read_sizes["/proc/meminfo"] == 8192,
+  "system files are read with an 8192-byte limit")
+
+local capped_stdout = system.status_metrics({
+  read_file = function() error("proc unavailable") end,
+  run = function(options)
+    local argv = options.argv
+    local stdout = string.rep("x", 8192)
+    if argv[1] == "sysctl" and argv[3] == "vm.loadavg" then
+      stdout = string.rep(" ", 8192) .. "1.25"
+    end
+    return { code = 0, stdout = stdout }
+  end,
+})
+assert(capped_stdout.cpu == "n/a", "process stdout is capped before parsing")
+
 -- Exercise the Windows backend on this host with injected environment and I/O.
 local windows = assert(system.windows, "Windows system table must be testable on this host")
 local windows_path = [[C:\Program Files\Agent;C:\tools;]]

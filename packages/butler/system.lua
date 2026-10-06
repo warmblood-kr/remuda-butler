@@ -220,7 +220,7 @@ end
 local function read_all(path)
   local ok, file = pcall(io.open, path, "rb")
   if not ok or not file then return nil end
-  local read_ok, contents = pcall(file.read, file, "*a")
+  local read_ok, contents = pcall(file.read, file, 8192)
   pcall(file.close, file)
   return read_ok and type(contents) == "string" and contents or nil
 end
@@ -229,7 +229,7 @@ local function command_output(run, argv)
   if type(run) ~= "function" then return nil end
   local ok, result = pcall(run, { argv = argv, timeout = 2 })
   if not ok or type(result) ~= "table" or result.code ~= 0 then return nil end
-  return type(result.stdout) == "string" and result.stdout or nil
+  return type(result.stdout) == "string" and result.stdout:sub(1, 8192) or nil
 end
 
 local function load_value(text)
