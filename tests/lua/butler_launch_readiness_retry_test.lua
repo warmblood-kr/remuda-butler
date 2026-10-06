@@ -110,14 +110,43 @@ T.test("root reconcile failures back off exponentially and reset on success", fu
     local retry = assert(remuda._butler_reconcile_retry, "reconcile backoff state is missing")
     retry.reset()
     remuda._butler_launching = true
+
+    local tick_calls = 0
+    local host = setmetatable({
+      _butler_test_mode = "lifecycle",
+      _butler_system = {},
+      schedule = function() return 0 end,
+      cancel = function() end,
+      exec = function() end,
+      emit = function() end,
+    }, { __index = function(_, key)
+      if key == "_butler_reconcile" then return function() tick_calls = tick_calls + 1 end end
+      return remuda[key]
+    end, __newindex = function(_, key, value) remuda[key] = value end })
+    local fake_g = setmetatable({}, { __index = { remuda = host } })
+    local env = setmetatable({ _G = fake_g, getmetatable = getmetatable }, { __index = _G })
+    local file = assert(io.open(os.getenv("REMUDA_LUA_REPO") .. "/packages/butler/init.lua"))
+    local source = file:read("a")
+    file:close()
+    local mod = assert(load(source, "@butler/init.lua", "t", env))()
+    mod.start({})
+    local tick
+    for _, schedule in ipairs(mod.schedules) do
+      if schedule.name == "butler-reconcile" then tick = schedule; break end
+    end
+    assert(tick, "reconcile tick was not registered")
+
     local expected = { 2000, 4000, 8000, 16000, 32000, 60000, 60000 }
-    for _, delay in ipairs(expected) do
+    for index, delay in ipairs(expected) do
       retry.note_failure()
       assert(retry.retry_at_ms == now + delay, "wrong retry deadline for " .. delay)
       now = retry.retry_at_ms - 1
-      assert(remuda._butler_reconcile() == "retry deferred", "retry was not deferred before deadline")
+      tick.run()
+      assert(tick_calls == index - 1, "periodic reconcile tick was not deferred before deadline")
+      assert(remuda._butler_reconcile() ~= "retry deferred", "explicit reconcile call was deferred")
       now = retry.retry_at_ms
-      assert(remuda._butler_reconcile() ~= "retry deferred", "retry was not allowed at deadline")
+      tick.run()
+      assert(tick_calls == index, "periodic reconcile tick was not allowed at deadline")
     end
     retry.reset()
     assert(retry.delay_ms == 2000 and retry.retry_at_ms == 0, "success did not reset retry state")
@@ -125,7 +154,7 @@ T.test("root reconcile failures back off exponentially and reset on success", fu
     assert(retry.retry_at_ms == now + 2000, "post-success retry did not restart at 2 seconds")
     remuda._butler_launching = nil
     remuda.clock = real_clock
-    return "backoff ok"
+    return "tick gating ok"
   ]=])
-  T.eq(result, "backoff ok", "fake remuda.clock should drive reconcile backoff")
+  T.eq(result, "tick gating ok", "fake remuda.clock should gate only periodic reconcile ticks")
 end)

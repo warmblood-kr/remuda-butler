@@ -1150,7 +1150,6 @@ function _butler_session_trace(event, detail)
 end
 
 function remuda._butler_reconcile()
-  if reconcile_retry.remaining_ms() > 0 then return "retry deferred" end
   local ok, result = pcall(launch_butler)
   if not ok then
     reconcile_retry.note_failure()
