@@ -130,6 +130,9 @@ assert(sent[#sent][1] == "butler", "leaderless recipient failure falls back to r
 
 -- If type_text reports another write in flight, a later non-empty composer is
 -- re-probed before any retry; another sender's task or human draft is untouched.
+-- This is an isolated delivery-policy scenario; prior simulated retries may
+-- have advanced unread mail past its reminder interval.
+bus.notice_sent_at, bus.notice_reminder_at = {}, {}
 now, screen = now + 10, "› Ask Codex to do anything"
 bus.agents.lead.id = "lead-id"
 bus.notices.lead, bus.notice_recoveries.lead = nil, nil
