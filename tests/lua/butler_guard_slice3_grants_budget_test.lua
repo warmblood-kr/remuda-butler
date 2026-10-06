@@ -1,7 +1,7 @@
 -- The harness enables the existing process-captured test seams; the field alone sets the test budget.
 
 T.test("git budget defaults to 2s, can be shortened/lengthened/reset, and always fails closed", function()
-  T.install_mod("butler", assert(os.getenv("REMUDA_LUA_REPO")))
+  T.install_guard_subject("butler", assert(os.getenv("REMUDA_LUA_REPO")))
   T.eq(T.eval([[
     remuda.exec('butler/guard_policy')
     remuda.exec('butler/guard_grants')
