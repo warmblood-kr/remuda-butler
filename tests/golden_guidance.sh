@@ -86,6 +86,7 @@ if [[ -z ${REMUDA_BIN:-} ]]; then
   REMUDA_BIN=$(cd "$T/core" && cd "${CARGO_TARGET_DIR:-target}/release" && pwd)/remuda
   built=$(git -C "$T/core" rev-parse --short=7 HEAD)
 fi
+core_ref_check
 
 export HOME=$T/home REMUDA_RUNTIME_DIR=$T/run XDG_DATA_HOME=$T/data XDG_CONFIG_HOME=$T/config
 export XDG_CACHE_HOME=$T/cache XDG_STATE_HOME=$T/state XDG_RUNTIME_DIR=$T/xdg-run

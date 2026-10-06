@@ -165,7 +165,7 @@ local function render(rec, display)
   end
   lines[#lines + 1] = "  hash:     sha256 " .. data.hash:sub(1, 12) .. " (tool, class, cwd, session, text)"
   lines[#lines + 1] = "  expires:  " .. os.date("!%Y-%m-%dT%H:%M:%SZ", expires) .. " (about " .. math.ceil(TTL_S / 60) .. " min)"
-  lines[#lines + 1] = (offer and "React ✅ to allow this one call, 🔄 to allow it and record a grant for the scope; calls still ask in this version, ❌ to deny."
+  lines[#lines + 1] = (offer and "React ✅ to allow this one call, 🔄 to allow it and, until the time shown, every call in this scope by any agent, ❌ to deny."
     or "React ✅ to allow this one call, ❌ to deny.") .. " Reply \"yes " .. rec.id .. "\" / \"no " .. rec.id
     .. "\" (승인 / 거부) also works."
   lines[#lines + 1] = "No answer: the agent shows its own prompt."
