@@ -624,7 +624,9 @@ if type(remuda) == "table" then
         local scheduled = system.after(1, attempt)
         if scheduled then return end
       end
-      if not saw_response and output_lines < 2 then
+      local clean_exit = ran and type(result) == "table" and type(result.stdout) == "string"
+        and (type(result.code) ~= "number" or result.code == 0)
+      if not saw_response and output_lines < 2 and clean_exit then
         response_reason = "codex limits need core nightly d47a845 or newer"
       end
       fallback(response_reason)

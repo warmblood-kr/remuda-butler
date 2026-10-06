@@ -559,8 +559,8 @@ process_calls, scheduled = 0, nil
 stubbed_result = nil
 local nil_result_reading, nil_result_reason
 quota.codex_read(function(value, failure) nil_result_reading, nil_result_reason = value, failure end)
-eq("missing app-server result gets old-core hint", nil_result_reason,
-  "codex limits need core nightly d47a845 or newer")
+eq("missing app-server result keeps generic reason", nil_result_reason,
+  "codex did not show its limits in time")
 eq("missing app-server result runs once", process_calls, 1)
 eq("missing app-server result does not schedule retry", scheduled, nil)
 
@@ -568,8 +568,8 @@ process_calls, scheduled = 0, nil
 stubbed_result = { code = 127, stdout = wire_init, timed_out = false }
 local missing_codex_reading, missing_codex_reason
 quota.codex_read(function(value, failure) missing_codex_reading, missing_codex_reason = value, failure end)
-eq("missing Codex executable gets old-core hint", missing_codex_reason,
-  "codex limits need core nightly d47a845 or newer")
+eq("missing Codex executable keeps generic reason", missing_codex_reason,
+  "codex did not show its limits in time")
 eq("missing Codex executable runs once", process_calls, 1)
 eq("missing Codex executable does not schedule retry", scheduled, nil)
 
