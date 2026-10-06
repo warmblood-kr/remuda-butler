@@ -468,12 +468,17 @@ local wire_remote = '{"method":"remoteControl/status/changed"}'
 local wire_account = '{"method":"account/updated"}'
 local wire_model_refresh = '{"method":"model/list/refreshing"}'
 local wire_rate_limits = '{"id":2}'
+local wire_delayed_rate_limits = '{"id":2,"method":"account/rateLimits/read"}'
 local decoded_lines = {
   [wire_init] = { id = 1 },
   [wire_remote] = { method = "remoteControl/status/changed" },
   [wire_account] = { method = "account/updated" },
   [wire_model_refresh] = { method = "model/list/refreshing" },
   [wire_rate_limits] = { id = 2, result = app_result },
+  [wire_delayed_rate_limits] = { id = 2, result = { rateLimitsByLimitId = {
+    codex = { planType = "prolite", primary = { usedPercent = 9,
+      windowDurationMins = 10080, resetsAt = 1791580260 } },
+  } } },
 }
 local stubbed_result, process_options, process_calls, scheduled
 remuda = {
@@ -492,7 +497,7 @@ remuda = {
   end },
 }
 quota = dofile("packages/butler/quota.lua")
-local function codex_read_case(name, stdout, timed_out, expected, failure_reason, simulated_delay)
+local function codex_read_case(name, stdout, timed_out, expected, failure_reason, simulated_delay, expected_used)
   process_calls, scheduled = 0, nil
   remuda._butler_quota_state.codex_reading = nil
   if stdout == nil then
@@ -515,7 +520,7 @@ local function codex_read_case(name, stdout, timed_out, expected, failure_reason
   if expected then
     ok(name .. " reads the fixture response", reading ~= nil)
     eq(name .. " preserves plan", reading and reading.plan, "prolite")
-    eq(name .. " reads fixture usage", reading and reading.limits[1].used, 62)
+    eq(name .. " reads fixture usage", reading and reading.limits[1].used, expected_used or 62)
     eq(name .. " has no failure reason", reason, nil)
   else
     eq(name .. " uses unknown-reason path", reading, nil)
@@ -528,7 +533,7 @@ codex_read_case("app-server id 2 fourth", table.concat({ wire_init, wire_remote,
 local delayed_fixture = assert(io.open("tests/fixtures/quota-codex-app-server-0160-delayed.txt", "rb"))
 local delayed_output = assert(delayed_fixture:read("*a")):gsub("\n$", "")
 delayed_fixture:close()
-codex_read_case("app-server delayed id 2 after model refresh", delayed_output, false, true, nil, 8)
+codex_read_case("app-server delayed id 2 after model refresh", delayed_output, false, true, nil, 6, 9)
 codex_read_case("app-server timed out with id 2", table.concat({
   wire_init, wire_remote, wire_account, wire_rate_limits,
 }, "\n"), true, true)

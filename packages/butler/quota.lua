@@ -345,6 +345,11 @@ local function agent_lines(name, agent, report_at, near_limits)
       local reason = reasons[agent.unknown_reason] and agent.unknown_reason or "could not be read"
       lines[#lines + 1] = "  quota: unknown (" .. reason .. ")"
     else
+      if agent.last_known == true then
+        local age = finite_number(agent.read_at) and finite_number(report_at)
+          and math.max(0, math.floor((report_at - agent.read_at) / 60)) or 0
+        lines[#lines + 1] = "  quota: last known (" .. tostring(age) .. " min ago)"
+      end
       for _, limit in ipairs(limits) do
         local limit_name = type(limit) == "table" and limit.name or nil
         limit_name = plain_word(limit_name) and limit_name or "unknown"
@@ -480,14 +485,16 @@ end
 
 if type(remuda) == "table" then
   remuda._butler_quota = quota
+  local system = type(remuda._butler_system) == "table" and remuda._butler_system or {}
   local quota_state = remuda._butler_quota_state
   if type(quota_state) ~= "table" then
-    quota_state = { report = nil, at = nil, waiting = nil }
+    quota_state = { report = nil, at = nil, waiting = nil, codex_reading = nil }
     remuda._butler_quota_state = quota_state
   else
     quota_state.report = type(quota_state.report) == "table" and quota_state.report or nil
     quota_state.at = finite_number(quota_state.at) and quota_state.at or nil
     quota_state.waiting = type(quota_state.waiting) == "table" and quota_state.waiting or nil
+    quota_state.codex_reading = type(quota_state.codex_reading) == "table" and quota_state.codex_reading or nil
   end
 
   local function finish_collect(report)
@@ -551,60 +558,69 @@ if type(remuda) == "table" then
   end
 
   function quota.codex_read(done)
-    local function unavailable()
-      done(nil, "codex did not show its limits in time")
-    end
-    local function needs_newer_core()
-      done(nil, "codex limits need core nightly d47a845 or newer")
-    end
     local process = remuda.process
     if type(process) ~= "table" or type(process.run) ~= "function" then
-      unavailable()
+      done(nil, "codex did not show its limits in time")
       return
     end
 
-    -- Four output lines were measured on Codex 0.159.3: initialize result, two notifications, rateLimits reply.
     local input = table.concat({
       '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"remuda","version":"1.0.0"}}}',
       '{"jsonrpc":"2.0","method":"initialized"}',
       '{"jsonrpc":"2.0","id":2,"method":"account/rateLimits/read","params":{}}',
     }, "\n") .. "\n"
-    local ran, result = pcall(process.run, {
-      argv = { "codex", "app-server" },
-      stdin = input,
-      timeout = 5,
-      stdin_hold_until_lines = 4,
-    })
-    if not ran or type(result) ~= "table" or type(result.stdout) ~= "string" then
-      unavailable()
-      return
-    end
     local decoder = type(remuda.json) == "table" and remuda.json.decode or nil
     if type(decoder) ~= "function" then
-      unavailable()
+      done(nil, "codex did not show its limits in time")
       return
     end
 
-    local output_lines = {}
-    for line in (result.stdout .. "\n"):gmatch("([^\n]*)\n") do
-      line = line:gsub("\r$", "")
-      if line ~= "" then output_lines[#output_lines + 1] = line end
-      local decoded, response = pcall(decoder, line)
-      if decoded and type(response) == "table" and response.id == 2 then
-        local parsed = quota.parse_codex_rate_limits(response.result)
-        if parsed then
-          done(parsed)
-          return
-        end
-        unavailable()
-        return
+    local attempts = 0
+    local function fallback(reason)
+      local cached = quota_state.codex_reading
+      if cached and type(cached.limits) == "table" and finite_number(cached.read_at) then
+        local reading = { plan = cached.plan, limits = cached.limits, read_at = cached.read_at, last_known = true }
+        done(reading)
+      else
+        done(nil, reason or "codex did not show its limits in time")
       end
     end
-    if result.timed_out == true or #output_lines < 2 then
-      needs_newer_core()
-      return
+    local function attempt()
+      attempts = attempts + 1
+      local ran, result = pcall(process.run, {
+        argv = { "codex", "app-server" },
+        stdin = input,
+        timeout = 15,
+        -- ponytail: current core only exposes a line hold; 64 is the chatter
+        -- ceiling. This probe may run the full 15s until core adds a
+        -- hold-until-response option; response id 2 alone determines success.
+        stdin_hold_until_lines = 64,
+      })
+      local response_reason = "codex did not show its limits in time"
+      if ran and type(result) == "table" and type(result.stdout) == "string" then
+        for line in (result.stdout .. "\n"):gmatch("([^\n]*)\n") do
+          line = line:gsub("\r$", "")
+          local decoded, response = pcall(decoder, line)
+          if decoded and type(response) == "table" and response.id == 2 then
+            local parsed = quota.parse_codex_rate_limits(response.result)
+            if parsed then
+              parsed.read_at = os.time()
+              quota_state.codex_reading = parsed
+              done(parsed)
+              return
+            end
+            response_reason = "codex did not show its limits in time"
+            break
+          end
+        end
+      end
+      if attempts < 2 and type(system.after) == "function" then
+        local scheduled = system.after(1, attempt)
+        if scheduled then return end
+      end
+      fallback(response_reason)
     end
-    unavailable()
+    attempt()
   end
 
   function quota.collect(done)
@@ -648,6 +664,8 @@ if type(remuda) == "table" then
             if reading then
               report.codex.plan = reading.plan
               report.codex.limits = reading.limits
+              report.codex.read_at = reading.read_at
+              report.codex.last_known = reading.last_known == true
             else
               report.codex.unknown_reason = reason
             end
