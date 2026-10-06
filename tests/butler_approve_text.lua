@@ -225,7 +225,10 @@ do
     "typed after an existing draft is still seen")
   screen = "$ "
   assert(verdict(function(s0) return s0 .. "\n> please run the full release checklist" end) == false,
-    "only the start of the text on screen is not delivery: head and tail must both appear")
+    "only the start of the text on screen is not delivery: the whole text must appear")
+  screen = "$ "
+  assert(verdict(function(s0) return s0 .. "\n> please run the release checklist now" end) == false,
+    "start and end on screen with the middle missing is not delivery")
   screen = "$ "
   local was_session = approve_text.session_instance
   assert(verdict(function(s0)

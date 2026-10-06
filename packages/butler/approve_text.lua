@@ -231,11 +231,12 @@ end
 -- wrapping (whitespace is dropped) and counting occurrences, so text already on screen is not a new delivery.
 -- Never retypes (a missed read-back must not become a second approval) and never logs or repeats the text.
 local function squash(value) return (value:gsub("%s", "")) end
--- The start and the end of the text must both appear (a partial echo is not delivery); none for whitespace-only text.
+-- The whole squashed text must appear (a partial echo is not delivery); none for whitespace-only text. Heuristic
+-- ceiling: very short text can match inside unrelated output, and squashing conflates "ab c" with "a bc".
 local function needles_of(text)
   local flat = squash(text)
   if flat == "" then return {} end
-  return { flat:sub(1, 24), flat:sub(-24) }
+  return { flat }
 end
 local function screen_counts(session, needles)
   if #needles == 0 or type(remuda.capture) ~= "function" then return nil end
@@ -261,7 +262,7 @@ local function grew(now, before)
   end
   return true
 end
--- Looks up to 3 times, 1 s apart (one look when there is no timer); done(true) only when both counts grew and the
+-- Looks up to 3 times, 1 s apart (one look when there is no timer); done(true) only when the count grew and the
 -- session is still the same instance. done runs once.
 local function confirm(session, needles, before, instance, done)
   local system = remuda._butler_system or {}

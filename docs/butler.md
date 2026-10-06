@@ -286,8 +286,8 @@ deliver prepared text. Butler types only after confirming the same live session
 instance is live and its input box is safe to type into; an attached terminal
 does not block it (the reply says so). After typing, Butler reads the pane back
 for up to 3 seconds and replies `typed (seen)` only when the text appears there
-(wrapping tolerated; both the start and the end of the text must appear, and the
-session must still be the same instance); otherwise it replies `typed, NOT seen
+(wrapping tolerated; the whole text must appear, very short text can match
+unrelated output, and the session must still be the same instance); otherwise it replies `typed, NOT seen
 in the pane; check SESSION before approving it again`. It never types again on
 its own, and neither the reply nor the trace repeats the text. The owner sees the same normalized text that Butler stores. The display escapes control, line
 separator and bidirectional formatting characters. A refusal before typing
