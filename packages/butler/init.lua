@@ -304,7 +304,11 @@ the normal way for a member to communicate.
           end
           local dry_run, force = false, false
           local cli = host.cli
-          if type(cli) == "table" and type(cli.parse) == "function" then
+          -- A leading-dash session name belongs to the legacy positional path.
+          -- The spec parser can consume names such as -s1, --force or --help as
+          -- options before the compact handler gets a chance to resolve them.
+          if type(cli) == "table" and type(cli.parse) == "function"
+              and args[2]:sub(1, 1) ~= "-" then
             local spec = {
               name = "remuda butler",
               verbs = { compact = {

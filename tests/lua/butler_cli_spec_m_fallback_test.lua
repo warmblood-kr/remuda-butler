@@ -131,7 +131,9 @@ local function compact_case(parser, args, has_session)
     local saved_cli, saved_has, saved_tick, saved_compact, saved_fail = remuda.cli,
       remuda._butler_compaction_has_session, remuda._butler_compaction_tick, remuda.butler.compact, remuda.fail
     if not ]] .. tostring(parser) .. [[ then remuda.cli = nil end
-    remuda._butler_compaction_has_session = function(name) return ]] .. tostring(has_session) .. [[ and name == "s1" end
+    remuda._butler_compaction_has_session = function(name)
+      return ]] .. tostring(has_session) .. [[ and (name == "s1" or name:sub(1, 1) == "-")
+    end
     remuda._butler_compaction_tick = function(name, dry) return "tick:" .. name .. ":" .. tostring(dry) end
     remuda.butler.compact = function(name, force) return "compact:" .. name .. ":" .. tostring(force) end
     remuda.fail = function(text, code) return { failed = true, code = code, text = text } end
@@ -154,6 +156,37 @@ T.test("compact flags and session precedence match on current and old cores", fu
       "session lookup must precede flag validation")
     T.ok(compact_case(parser, { "compact", "s1", "--bad" }, true):find("remuda butler — coordination", 1, true),
       "unknown compact flags return global usage")
+  end
+end)
+
+T.test("compact dash-prefixed session names keep legacy parsing on current and old cores", function()
+  local sessions = { "-s1", "-h", "--force", "--help", "--" }
+  local flags = {
+    { flag = nil, want = function(name) return "true|compact:" .. name .. ":false" end },
+    { flag = "--dry-run", want = function(name) return "true|tick:" .. name .. ":true" end },
+    { flag = "--force", want = function(name) return "true|compact:" .. name .. ":true" end },
+  }
+  for _, name in ipairs(sessions) do
+    for _, item in ipairs(flags) do
+      local args = { "compact", name }
+      if item.flag then args[#args + 1] = item.flag end
+      local want = item.want(name)
+      local current = compact_case(true, args, true)
+      local old = compact_case(false, args, true)
+      T.eq(current, want, "parser on: " .. table.concat(args, " "))
+      T.eq(old, want, "parser off: " .. table.concat(args, " "))
+      T.eq(current, old, "parser modes agree: " .. table.concat(args, " "))
+    end
+    for _, flag in ipairs({ "--dry-run", "--force" }) do
+      local args = { "compact", name, flag }
+      local want = "true|1:unknown session: " .. name
+      T.eq(compact_case(true, args, false), want, "parser on missing session: " .. table.concat(args, " "))
+      T.eq(compact_case(false, args, false), want, "parser off missing session: " .. table.concat(args, " "))
+    end
+  end
+  for _, parser in ipairs({ true, false }) do
+    T.eq(compact_case(parser, { "compact", "-missing", "--dry-run" }, false), "true|1:unknown session: -missing",
+      "unknown dash-prefixed session retains precedence over flag handling")
   end
 end)
 
