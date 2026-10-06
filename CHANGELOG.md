@@ -7,6 +7,7 @@ release tags yet; entries come from merged pull requests.
 ## Unreleased
 
 ### Added
+- A standing grant is held by the session that asked for it: Butler takes the session from core's caller identity (process ancestry, not the agent's env alias) and stores its Butler id; the grant covers that session and the sessions below it, never a sibling or a leader above. The approval post names the holder, the hash and the reaction cross-check cover it, and a caller Butler cannot identify is offered and uses no grant; `guard grants` shows the holder id (see #339).
 - `docs/butler.md` gains a runbook for moving the North Star and staging-guard Claude crons to `remuda butler schedule add`, with verify and cleanup steps.
 - Matrix `?status` reports system load, memory and disk usage when available;
   unsupported or failed readers keep the corresponding value at `n/a`.

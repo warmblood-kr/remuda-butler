@@ -901,7 +901,8 @@ every grant however it was created.
 
 The grant store lives under the protected Butler data dir, which a deny rule
 covers. Each entry holds the absolute expiry time (never a duration), the scope,
-the holder and the approval event id for cross-check. The store is reloaded on
+the holder (the asking session's Butler id, see Grant use) and the approval
+event id for cross-check. The store is reloaded on
 Butler start. An entry that is expired, unparseable, lacks a matching approval
 event, or was written with a clock that has gone backwards is no grant (fail
 closed). Limit: processes running as the same user, outside the hook, can still
@@ -938,8 +939,24 @@ the first refusal wins:
 
 Every refusal, and every error on the way (the store, git, the match itself,
 the audit write), asks: the call goes on to the approval post, or to Claude's
-own prompt. Nothing on an error path allows. A grant matches by scope only:
-any agent whose call falls in the scope uses it, whoever asked for it.
+own prompt. Nothing on an error path allows.
+
+Holder: a grant is held by the session that asked for it, and it covers that
+session and the sessions below it (its members, and theirs), never a sibling or
+a leader above. Butler takes the session from core's caller identity (the hook
+process's ancestry up to its session pane), not from the alias in the agent's
+environment, and records it as the session's Butler id (a ULID; an alias can be
+reused after a member exits). The approval post names the holder, the hash
+covers it, and the store line is vouched for only when Butler's record of the
+owner's reaction names the same holder. A call whose caller is not exactly one
+session Butler knows (outside any pane, unknown, a pane Butler did not launch)
+is offered no grant and uses none. The identity is read once when the hook
+starts, before any audit write can wait on the lock. Core states that its caller
+identity is advisory, not authentication: like the rest of the guard this keeps
+agents in their lane and is no isolation against a malicious same-user process or
+`run_script`. The subtree is cooperative too: `topic delegate --leader L` lets
+any agent start a child under any leader, and that child is covered by the
+grants L holds. The owner can revoke a grant or freeze them all.
 
 Audit before allow: the call is allowed only after its `grant_used` line was
 written. The use is reserved before the write (which can wait on the audit lock
@@ -960,6 +977,11 @@ from the `grant_used` lines of the live audit log within the last hour; if the
 log cannot be read, the call asks. A rotation within that hour moves older lines
 out of the live log, so a rotation plus a restart can reset a grant's count by
 up to 30, once per restart.
+
+`remuda butler guard grants` ends each active grant's line with `used N/30 in
+the last hour` (`?` when the count cannot be read), the same count the limit
+uses. `remuda butler guard stats` adds `auto-allowed by grants: N of M permission
+requests (P%), L limited` once any `grant_used` or `grant_limited` line exists.
 
 Clock skew: Butler keeps the highest clock time it has seen. A clock more than
 60 seconds behind it matches no grant until it catches up; a forward jump only

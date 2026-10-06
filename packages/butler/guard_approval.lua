@@ -101,7 +101,7 @@ function M.enabled() return policy.approvals_enabled() end
 -- The standing grant the post offers (class, resolved scope, ceiling, absolute expiry); part of what the hash covers.
 local function offer_text(o)
   if type(o) ~= "table" then return "-" end
-  return table.concat({ tostring(o.class), tostring(o.scope), tostring(o.ceiling), string.format("%d", o.expires or 0) }, "|")
+  return table.concat({ tostring(o.class), tostring(o.scope), tostring(o.ceiling), string.format("%d", o.expires or 0), tostring(o.holder) }, "|")
 end
 
 -- The exact text the hash covers: only stored, sanitized fields.
@@ -162,10 +162,11 @@ local function render(rec, display)
     lines[#lines + 1] = "  grant:    " .. shown(offer.class) .. " " .. shown(offer.scope) .. " until "
       .. os.date("!%Y-%m-%dT%H:%M:%SZ", offer.expires) .. " (about " .. math.ceil((offer.expires - clock()) / 60)
       .. " min), ceiling " .. shown(offer.ceiling)
+    lines[#lines + 1] = "  holder:   " .. shown(offer.holder_name) .. " and the sessions below it"
   end
   lines[#lines + 1] = "  hash:     sha256 " .. data.hash:sub(1, 12) .. " (tool, class, cwd, session, text)"
   lines[#lines + 1] = "  expires:  " .. os.date("!%Y-%m-%dT%H:%M:%SZ", expires) .. " (about " .. math.ceil(TTL_S / 60) .. " min)"
-  lines[#lines + 1] = (offer and "React ✅ to allow this one call, 🔄 to allow it and, until the time shown, every call in this scope by any agent, ❌ to deny."
+  lines[#lines + 1] = (offer and "React ✅ to allow this one call, 🔄 to allow it and, until the time shown, every call in this scope by that session and the sessions below it, ❌ to deny."
     or "React ✅ to allow this one call, ❌ to deny.") .. " Reply \"yes " .. rec.id .. "\" / \"no " .. rec.id
     .. "\" (승인 / 거부) also works."
   lines[#lines + 1] = "No answer: the agent shows its own prompt."
@@ -208,8 +209,9 @@ local function audit_refusal(record, data, verdict)
     tool = data.tool, class = data.class, summary = verdict == "denied" and "remembered deny" or "rate limit" })
 end
 
--- Returns the deferred reply for the hook, or nil when the hook should print nothing.
-function M.maybe_request(record, hook_json)
+-- Returns the deferred reply for the hook, or nil when the hook should print nothing. `holders`, `holder_name`:
+-- guard_grants.holders(), read once at hook entry.
+function M.maybe_request(record, hook_json, holders, holder_name)
   if not (M.enabled() and policy.enabled()) then return nil end
   if record.event ~= "PermissionRequest" or record.kind ~= "claude" or type(hook_json) ~= "table" then return nil end
   if type(remuda.pending) ~= "function" or record.class == "script" or not ROUTED_TOOLS[record.tool] then return nil end
@@ -227,8 +229,12 @@ function M.maybe_request(record, hook_json)
     cwd = policy.redact(hook_json.cwd, 300), session = policy.redact(session, 120), text = text }
   if grants_on() then
     -- Frozen: no standing grant is offered (the owner's reaction would make none).
-    data.offer = not grants.frozen() and grants.offer(record.tool, input, hook_json.cwd) or nil
-    if data.offer then data.offer.expires = grants.time() + grants.DEFAULT_TTL end
+    -- The holder is the calling session by core's caller identity (not the env alias): no identity, no offer.
+    data.offer = holders and not grants.frozen() and grants.offer(record.tool, input, hook_json.cwd) or nil
+    if data.offer then
+      data.offer.expires = grants.time() + grants.DEFAULT_TTL
+      data.offer.holder, data.offer.holder_name = holders[1], policy.redact(holder_name, 120)
+    end
     data.note = note_line(input.description)
     -- The post limit never keys on command text (a trailing space or `; :` would dodge it); only the remembered
     -- deny keeps the exact text.
@@ -410,7 +416,7 @@ function M.configure()
           why = "standing grants are not available"
         else
           id, why = add_grant({ class = offer.class, scope = offer.scope, ceiling = offer.ceiling,
-            holder = data.session, event = rec.answer_event_id, ttl = offer.expires - grants.time() })
+            holder = offer.holder, event = rec.answer_event_id, ttl = offer.expires - grants.time() })
         end
         if not id then
           settle(rec.id, "")
@@ -418,7 +424,7 @@ function M.configure()
           thread_note(rec, "No grant: " .. tostring(why) .. ". The agent shows its own prompt.")
           complete(false, "grant_refused")
         else
-          rec.grant = { id = id, class = offer.class, scope = offer.scope }
+          rec.grant = { id = id, class = offer.class, scope = offer.scope, holder = offer.holder }
           settle(rec.id, M.ALLOW)
           audit("grant_created", rec, offer.class .. " " .. offer.scope, id)
           -- a path may hold @ (a mention) or a backtick (markup): the note is plain text
