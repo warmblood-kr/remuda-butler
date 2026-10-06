@@ -111,6 +111,10 @@ assert(detail:find("123K 47%%", 1, false), "detail shows percent beside token co
 context[detail_agent] = { context_window = 258400, context_percent = 47 }
 detail = remuda.session_detail({ name = "detail" })
 assert(detail:find("121K 47%%", 1, false), "detail derives token count from percent and window: " .. detail)
+context[detail_agent] = { context_window = 0, context_percent = 12 }
+detail = remuda.session_detail({ name = "detail" })
+assert(not detail:find("0K 12%%", 1, false), "zero window omits derived token count: " .. detail)
+assert(detail:find(" · 12%%", 1, false), "zero window still shows the known percentage: " .. detail)
 context[detail_agent] = { context_used = "?", context_window = "?", context_percent = "?" }
 detail = remuda.session_detail({ name = "detail" })
 assert(not detail:find("?", 1, true), "unknown context stays quiet: " .. detail)

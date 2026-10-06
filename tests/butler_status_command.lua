@@ -51,6 +51,15 @@ local used_warning = status.status_format({ now = now, sessions = {
 } })
 assert(used_warning:find("near     codex  ctx 40%  idle  ⚠", 1, true), "400K warns before compaction")
 assert(not used_warning:find("done    codex  ctx 70%  idle  ⚠", 1, true), "compacted session suppresses warning")
+local function has_warning(session)
+  return status.status_format({ now = now, sessions = { session } }):find("⚠", 1, true) ~= nil
+end
+assert(not has_warning({ name = "p59", kind = "codex", context_percent = 59 }), "59% stays below warning boundary")
+assert(has_warning({ name = "p60", kind = "codex", context_percent = 60 }), "60% reaches warning boundary")
+assert(not has_warning({ name = "u399", kind = "codex", context_used = 399999 }), "399999 stays below warning boundary")
+assert(has_warning({ name = "u400", kind = "codex", context_used = 400000 }), "400000 reaches warning boundary")
+assert(not has_warning({ name = "invalid", kind = "codex", context_percent = "1e999" }),
+  "invalid percentage does not warn when percent_text shows n/a")
 
 -- stale reading, partial reading
 local stale = status.status_format({ now = now, sessions = {},
@@ -141,10 +150,33 @@ end
 remuda._butler_compaction_state = { compaction_members = { ["01B"] = { cooldown_ticks = 2 } } }
 local gathered = status.gather(now)
 assert(gathered.sessions[2].context_used == 400000 and gathered.sessions[2].compaction_fired,
-  "status gather carries context use and recent compaction state")
+  "status gather uses the same agent.id state key as compaction_run and carries recent compaction state")
 local compacted_reply = status.status_format(gathered)
 assert(not compacted_reply:find("dev-1    codex  ctx n/a  task  ✉2  ⚠", 1, true),
   "status gather suppresses the warning after compaction")
+remuda._butler_compaction_state.compaction_members["01B"] = { compaction_in_progress = true }
+gathered = status.gather(now)
+assert(gathered.sessions[2].compaction_fired, "in-progress compaction suppresses the warning")
+remuda._butler_compaction_state.compaction_members["01B"] = { restore_pending = "codex:gpt-6-luna" }
+gathered = status.gather(now)
+assert(not gathered.sessions[2].compaction_fired
+  and status.status_format(gathered):find("dev-1    codex  ctx n/a  task  ✉2  ⚠", 1, true),
+  "restore_pending alone does not suppress the warning")
+remuda._butler_compaction_state.compaction_members["01B"] = { cooldown_ticks = 0 }
+gathered = status.gather(now)
+assert(not gathered.sessions[2].compaction_fired
+  and status.status_format(gathered):find("dev-1    codex  ctx n/a  task  ✉2  ⚠", 1, true),
+  "an expired cooldown lets the warning return")
+remuda._butler_bus.agents.legacy = { kind = "codex" }
+remuda._butler_telemetry_for = function(agent)
+  if agent.kind == "codex" then return { context_percent = 65, context_used = 400000 } end
+  return { context_percent = 41 }
+end
+remuda._butler_compaction_state.compaction_members.legacy = { cooldown_ticks = 1 }
+gathered = status.gather(now)
+local legacy
+for _, row in ipairs(gathered.sessions) do if row.name == "legacy" then legacy = row end end
+assert(legacy and legacy.compaction_fired, "sessions without an id use the name state key")
 remuda._butler_compaction_state = nil
 local _, help_reply = handle(event("?help"))
 assert(help_reply == status.help_text())

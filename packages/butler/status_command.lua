@@ -15,9 +15,15 @@ local function safe_word(value)
   return (tostring(value or ""):gsub("[^%w%._%-]", ""):sub(1, NAME_LIMIT))
 end
 
-local function percent_text(value)
+local function valid_percent(value)
   value = tonumber(value)
-  if not value or value ~= value or value < 0 or value > 1000 then return "n/a" end
+  if not value or value ~= value or value < 0 or value > 1000 then return nil end
+  return value
+end
+
+local function percent_text(value)
+  value = valid_percent(value)
+  if not value then return "n/a" end
   return string.format("%.0f%%", value)
 end
 
@@ -26,7 +32,7 @@ local function session_line(session)
     percent_text(session.context_percent), session.busy and "task" or "idle")
   local unread = tonumber(session.unread)
   if unread and unread > 0 then line = line .. string.format("  ✉%d", unread) end
-  local pct, used = tonumber(session.context_percent), tonumber(session.context_used)
+  local pct, used = valid_percent(session.context_percent), tonumber(session.context_used)
   if not session.compaction_fired and ((pct and pct >= 60) or (used and used >= 400000)) then
     line = line .. "  ⚠"
   end
@@ -166,7 +172,7 @@ local function compaction_fired(host, agent, name)
   local key = type(agent.id) == "string" and agent.id ~= "" and agent.id or name
   local state = members[key]
   return type(state) == "table" and ((tonumber(state.cooldown_ticks) or 0) > 0
-    or state.compaction_in_progress == true or state.restore_pending ~= nil) or false
+    or state.compaction_in_progress == true) or false
 end
 
 -- Reads live Butler state only: no process, no shell, no screen text. A source
