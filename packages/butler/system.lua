@@ -222,7 +222,7 @@ local function read_all(path)
   if not ok or not file then return nil end
   local read_ok, contents = pcall(file.read, file, 8192)
   pcall(file.close, file)
-  return read_ok and type(contents) == "string" and contents or nil
+  return read_ok and type(contents) == "string" and contents:sub(1, 8192) or nil
 end
 
 local function command_output(run, argv)

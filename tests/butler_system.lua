@@ -170,11 +170,13 @@ assert(table.concat(fallback_calls, "|") == expected_fallback,
 
 local saved_open = io.open
 local read_sizes = {}
+local load_data = string.rep("x", 9000)
+local memory_data = string.rep("x", 9000)
 io.open = function(path)
   return {
     read = function(_, size)
       read_sizes[path] = size
-      return string.rep("x", size)
+      return path == "/proc/loadavg" and load_data or memory_data
     end,
     close = function() end,
   }
@@ -182,25 +184,62 @@ end
 local read_ok, read_metrics = pcall(system.status_metrics, {
   run = function() error("no process API") end,
 })
-io.open = saved_open
 assert(read_ok and read_metrics.cpu == "n/a",
   "bounded file reads survive unreadable data")
 assert(read_sizes["/proc/loadavg"] == 8192
   and read_sizes["/proc/meminfo"] == 8192,
   "system files are read with an 8192-byte limit")
 
+local function file_metrics(load_text, memory_text)
+  load_data, memory_data = load_text, memory_text
+  local ok, metrics = pcall(system.status_metrics, {
+    run = function() error("no process API") end,
+  })
+  assert(ok, "oversized mocked files must not raise")
+  return metrics
+end
+local memory_header = "MemTotal: 1000 kB\nMemAvailable: 500 kB\n"
+local edge_under = string.rep(" ", 8187) .. "1.25"
+local edge_at = string.rep(" ", 8188) .. "1.25"
+assert(#edge_under == 8191 and #edge_at == 8192,
+  "load fixtures pin the read-size boundary")
+local edge_metrics = file_metrics(edge_under, memory_header)
+local exact_metrics = file_metrics(edge_at, memory_header)
+assert(edge_metrics.cpu == "1.25" and exact_metrics.cpu == "1.25",
+  "load boundary values: " .. tostring(edge_metrics.cpu) .. "/"
+    .. tostring(exact_metrics.cpu))
+local oversized_load = string.rep(" ", 8192) .. "1.25"
+local oversized_memory = memory_header .. string.rep(" ", 8192 - #memory_header)
+  .. "MemAvailable: 0 kB\n"
+local truncated_files = file_metrics(oversized_load, oversized_memory)
+assert(truncated_files.cpu == "n/a" and truncated_files.mem == "50%",
+  "file data returned beyond byte 8192 is discarded for load and memory")
+io.open = saved_open
+
 local capped_stdout = system.status_metrics({
   read_file = function() error("proc unavailable") end,
   run = function(options)
     local argv = options.argv
-    local stdout = string.rep("x", 8192)
+    local stdout
     if argv[1] == "sysctl" and argv[3] == "vm.loadavg" then
       stdout = string.rep(" ", 8192) .. "1.25"
+    elseif argv[1] == "vm_stat" then
+      stdout = string.rep("x", 8192)
+        .. "Mach Virtual Memory Statistics: (page size of 4096 bytes)\n"
+        .. "Pages free: 100000.\nPages inactive: 200000.\n"
+        .. "Pages speculative: 10000.\n"
+    elseif argv[1] == "sysctl" and argv[3] == "hw.memsize" then
+      stdout = "4096000000\n" .. string.rep("x", 8192)
+    elseif argv[1] == "df" then
+      stdout = "Filesystem blocks Used Avail Capacity Mounted\n"
+        .. string.rep("x", 8192) .. "\n/dev/root 100 40 60 40% /\n"
     end
     return { code = 0, stdout = stdout }
   end,
 })
-assert(capped_stdout.cpu == "n/a", "process stdout is capped before parsing")
+assert(capped_stdout.cpu == "n/a" and capped_stdout.mem == "n/a"
+  and capped_stdout.disk == "n/a",
+  "oversized process output is discarded for load, memory and disk")
 
 -- Exercise the Windows backend on this host with injected environment and I/O.
 local windows = assert(system.windows, "Windows system table must be testable on this host")
