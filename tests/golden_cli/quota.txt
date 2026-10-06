@@ -1,0 +1,275 @@
+### remuda butler "quota"
+exit: 1
+stdout:
+
+stderr:
+quota report failed: stubbed
+Next: remuda butler doctor
+actions:
+quota.collect()
+
+### remuda butler "quota" "--help"
+exit: 0
+stdout:
+remuda butler quota reports, for claude and codex, how each is logged in, the subscription account and how much of each limit is used.
+With --report it also posts the report to this Butler's Matrix home room.
+Usage: remuda butler quota [--report]
+Example: remuda butler quota --report
+Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.
+stderr:
+
+actions:
+(none)
+
+### remuda butler "quota" "-h"
+exit: 0
+stdout:
+remuda butler quota reports, for claude and codex, how each is logged in, the subscription account and how much of each limit is used.
+With --report it also posts the report to this Butler's Matrix home room.
+Usage: remuda butler quota [--report]
+Example: remuda butler quota --report
+Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.
+stderr:
+
+actions:
+(none)
+
+### remuda butler "quota" "help"
+exit: 2
+stdout:
+
+stderr:
+unexpected argument: help
+Usage: remuda butler quota [--report]
+Example: remuda butler quota --report
+Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.
+actions:
+(none)
+
+### remuda butler "quota" "--report"
+exit: 1
+stdout:
+
+stderr:
+quota report failed: stubbed
+Next: remuda butler doctor
+actions:
+quota.collect()
+
+### remuda butler "quota" "--report" "--report"
+exit: 2
+stdout:
+
+stderr:
+unknown option: --report
+Usage: remuda butler quota [--report]
+Example: remuda butler quota --report
+Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.
+actions:
+(none)
+
+### remuda butler "quota" "--report" "extra"
+exit: 2
+stdout:
+
+stderr:
+unexpected argument: extra
+Usage: remuda butler quota [--report]
+Example: remuda butler quota --report
+Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.
+actions:
+(none)
+
+### remuda butler "quota" "extra" "--report"
+exit: 2
+stdout:
+
+stderr:
+unexpected argument: extra
+Usage: remuda butler quota [--report]
+Example: remuda butler quota --report
+Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.
+actions:
+(none)
+
+### remuda butler "quota" "--report=1"
+exit: 2
+stdout:
+
+stderr:
+unknown option: --report=1
+Usage: remuda butler quota [--report]
+Example: remuda butler quota --report
+Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.
+actions:
+(none)
+
+### remuda butler "quota" "--bogus"
+exit: 2
+stdout:
+
+stderr:
+unknown option: --bogus
+Usage: remuda butler quota [--report]
+Example: remuda butler quota --report
+Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.
+actions:
+(none)
+
+### remuda butler "quota" "extra"
+exit: 2
+stdout:
+
+stderr:
+unexpected argument: extra
+Usage: remuda butler quota [--report]
+Example: remuda butler quota --report
+Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.
+actions:
+(none)
+
+### remuda butler "quota" "--"
+exit: 2
+stdout:
+
+stderr:
+unknown option: --
+Usage: remuda butler quota [--report]
+Example: remuda butler quota --report
+Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.
+actions:
+(none)
+
+### remuda butler "quota" "--" "--report"
+exit: 2
+stdout:
+
+stderr:
+unknown option: --
+Usage: remuda butler quota [--report]
+Example: remuda butler quota --report
+Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.
+actions:
+(none)
+
+### remuda butler "quota" "--help" "--report"
+exit: 2
+stdout:
+
+stderr:
+unknown option: --help
+Usage: remuda butler quota [--report]
+Example: remuda butler quota --report
+Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.
+actions:
+(none)
+
+### remuda butler "quota" "--report" "--help"
+exit: 2
+stdout:
+
+stderr:
+unknown option: --help
+Usage: remuda butler quota [--report]
+Example: remuda butler quota --report
+Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.
+actions:
+(none)
+
+### remuda butler "quota" "-r"
+exit: 2
+stdout:
+
+stderr:
+unknown option: -r
+Usage: remuda butler quota [--report]
+Example: remuda butler quota --report
+Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.
+actions:
+(none)
+
+### remuda butler "quota" "-1"
+exit: 2
+stdout:
+
+stderr:
+unknown option: -1
+Usage: remuda butler quota [--report]
+Example: remuda butler quota --report
+Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.
+actions:
+(none)
+
+### [agent] remuda butler "quota"
+exit: 0
+stdout:
+<deferred reply>
+stderr:
+
+actions:
+quota.collect()
+
+### [agent] remuda butler "quota" "--report"
+exit: 1
+stdout:
+
+stderr:
+only the Butler itself or a person at the terminal can send the report to Matrix.
+Next: ask the Butler to run `remuda butler quota --report`, or run `remuda butler quota` to read it here.
+actions:
+(none)
+
+### [agent] remuda butler "quota" "--help"
+exit: 0
+stdout:
+remuda butler quota reports, for claude and codex, how each is logged in, the subscription account and how much of each limit is used.
+With --report it also posts the report to this Butler's Matrix home room.
+Usage: remuda butler quota [--report]
+Example: remuda butler quota --report
+Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.
+stderr:
+
+actions:
+(none)
+
+### [agent] remuda butler "quota" "--report" "extra"
+exit: 2
+stdout:
+
+stderr:
+unexpected argument: extra
+Usage: remuda butler quota [--report]
+Example: remuda butler quota --report
+Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.
+actions:
+(none)
+
+### remuda butler "quota"
+exit: 1
+stdout:
+
+stderr:
+quota is unavailable: not loaded
+Next: remuda butler doctor
+actions:
+(none)
+
+### remuda butler "quota" "--help"
+exit: 1
+stdout:
+
+stderr:
+quota is unavailable: not loaded
+Next: remuda butler doctor
+actions:
+(none)
+
+### remuda butler "quota" "--bogus"
+exit: 1
+stdout:
+
+stderr:
+quota is unavailable: not loaded
+Next: remuda butler doctor
+actions:
+(none)

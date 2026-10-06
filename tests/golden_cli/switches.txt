@@ -1,0 +1,753 @@
+### remuda butler "typed-lines"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "typed-lines" "--help"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "typed-lines" "-h"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "typed-lines" "help"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "typed-lines" "on" "extra"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "typed-lines" "off" "extra"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "typed-lines" "extra" "on"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "typed-lines" "maybe"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "typed-lines" "ON"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "typed-lines" "on=1"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "typed-lines" "--on"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "typed-lines" "--" "off"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "typed-lines" "off" "--"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "typed-lines" "-1"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "typed-lines" "off"
+exit: 0
+stdout:
+typed-lines is now off. shell-lines is also off.
+stderr:
+
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "typed-lines" "off" "off"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "typed-lines" "on" "off"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "typed-lines" "--help" "off"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "typed-lines" "off" "--help"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "shell-lines"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "shell-lines" "--help"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "shell-lines" "-h"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "shell-lines" "help"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "shell-lines" "on" "extra"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "shell-lines" "off" "extra"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "shell-lines" "extra" "on"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "shell-lines" "maybe"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "shell-lines" "ON"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "shell-lines" "on=1"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "shell-lines" "--on"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "shell-lines" "--" "off"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "shell-lines" "off" "--"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "shell-lines" "-1"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "shell-lines" "off"
+exit: 0
+stdout:
+shell-lines is now off.
+stderr:
+
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "shell-lines" "off" "off"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "shell-lines" "on" "off"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "shell-lines" "--help" "off"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "shell-lines" "off" "--help"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "status-commands"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "status-commands" "--help"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "status-commands" "-h"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "status-commands" "help"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "status-commands" "on" "extra"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "status-commands" "off" "extra"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "status-commands" "extra" "on"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "status-commands" "maybe"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "status-commands" "ON"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "status-commands" "on=1"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "status-commands" "--on"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "status-commands" "--" "off"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "status-commands" "off" "--"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "status-commands" "-1"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "status-commands" "off"
+exit: 0
+stdout:
+status-commands is now off.
+stderr:
+
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\nstatus_commands=false\n
+
+### remuda butler "status-commands" "off" "off"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "status-commands" "on" "off"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "status-commands" "--help" "off"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "status-commands" "off" "--help"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "shell-lines" "on"
+exit: 1
+stdout:
+
+stderr:
+typed-lines must be on before shell-lines can be enabled. Nothing was changed.
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### [agent] remuda butler "typed-lines" "on"
+exit: 1
+stdout:
+
+stderr:
+typed-lines is operator-only. Run it from the owner's terminal; it cannot be enabled from Matrix or Butler mail.
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### [agent] remuda butler "typed-lines" "off"
+exit: 1
+stdout:
+
+stderr:
+typed-lines is operator-only. Run it from the owner's terminal; it cannot be enabled from Matrix or Butler mail.
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### [agent] remuda butler "shell-lines" "off"
+exit: 1
+stdout:
+
+stderr:
+shell-lines is operator-only. Run it from the owner's terminal; it cannot be enabled from Matrix or Butler mail.
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### [agent] remuda butler "status-commands" "off"
+exit: 1
+stdout:
+
+stderr:
+status-commands is operator-only. Run it from the owner's terminal; it cannot be enabled from Matrix or Butler mail.
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### [agent] remuda butler "typed-lines" "bogus"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### [agent] remuda butler "typed-lines" "--help"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler typed-lines on|off
+       remuda butler shell-lines on|off
+       remuda butler status-commands on|off
+       remuda butler approve-text on|off
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "typed-lines" "off"
+exit: 1
+stdout:
+
+stderr:
+Matrix is not configured.
+Next: remuda butler matrix setup
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
