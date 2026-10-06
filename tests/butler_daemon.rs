@@ -1664,6 +1664,45 @@ fn butler_commands_only_then_exec_boots_once_after_fallback_tick() {
 }
 
 #[test]
+fn butler_refused_start_can_retry_in_lifecycle_transaction() {
+    let dir = scratch_dir("butler-refused-start-retry");
+    let _daemon = Daemon::spawn(&dir);
+    let path = daemon::socket_path_in(&dir, "s");
+    eval(&path, r#"
+        remuda._butler_test_mode = 'lifecycle'
+        remuda._butler_test_lock_held = true
+        remuda.fs.lock = function()
+          if remuda._butler_test_lock_held then
+            return nil, 'held', 'remuda-lock session=owner pid=123 since=1'
+          end
+          return { release = function() end }
+        end
+    "#);
+    let refused = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
+    assert!(!refused.status.success(), "a refused start must remain retryable, not a started activation");
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("already running in another Remuda daemon"));
+    butler_fallback_tick();
+    assert_eq!(read_count(&path, "return remuda.event_counts()['butler-start'] or 0"), 0, "refused activation booted after rollback");
+    // Discovery after the owner disappears must still refuse, rather than
+    // implicitly claiming this home while loading commands after rollback.
+    eval(&path, "remuda._butler_test_lock_held = false");
+    let status = remuda_timed(&dir, &["-s", "s", "butler", "status"]);
+    assert!(!status.status.success());
+    assert!(String::from_utf8_lossy(&status.stderr).contains("has not taken over"));
+    assert_eq!(eval(&path, "return tostring(remuda._butler_owner_lock == nil)"), "true");
+    let started = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
+    assert!(started.status.success(), "{}", String::from_utf8_lossy(&started.stderr));
+    butler_fallback_tick();
+    eval(&path, BUTLER_REMEMBER_GUARDS);
+    let initial = eval(&path, BUTLER_BOOT_AND_GUARDS);
+    assert!(initial.starts_with("1|true|true|0|"), "retry did not boot once: {initial}");
+    let repeated = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
+    assert!(repeated.status.success());
+    butler_fallback_tick();
+    assert_eq!(eval(&path, BUTLER_BOOT_AND_GUARDS), initial, "retry left a discarded fallback");
+}
+
+#[test]
 fn butler_old_core_fallback_owns_boot_and_reload() {
     let dir = scratch_dir("butler-old-core-fallback");
     // Install a private fixture whose declaration has no start/commands
