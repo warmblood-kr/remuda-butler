@@ -63,6 +63,9 @@ local function start_butler()
       return remuda.butler.approval.answer(remuda._t_event(n), verdict, who or '@owner:x', '$r' .. n)
     end
     remuda._t_grants = function() return #remuda.butler.guard_grants.active() end
+    -- The calling session by core's caller identity (a grant offer needs one; holders: enforce_holder).
+    remuda._butler_bus.agents['t-ssa'] = { id = 'U-SSA', parent = 'butler', alias = 't-ssa', session_name = 's-ssa', children = {} }
+    remuda.caller = function() return { kind = 'session', session = 's-ssa' } end
     return 'ok'
   ]])
 end
