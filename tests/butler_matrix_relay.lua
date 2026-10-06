@@ -7956,7 +7956,12 @@ local GUARD_DENY = remuda.butler.guard_approval.DENY
 
 local function with_guard(env, run)
   local gp = remuda.butler.guard_policy
+  local old_caller, old_bus = remuda.caller, remuda._butler_bus
   local old_dir, old_pending = remuda._butler_guard_dir, remuda.pending
+  -- A grant offer needs the calling session identity (holders: enforce_holder).
+  remuda._butler_bus = { agents = { ["t-ssa"] = { id = "U-SSA", parent = "butler", session_name = "s-ssa" },
+    butler = { id = "U-BUTLER", session_name = "butler" } } }
+  remuda.caller = function() return { kind = "session", session = "s-ssa" } end
   remuda._butler_guard_dir = env.dir .. "/guard"
   remuda.mkdir(remuda._butler_guard_dir)
   assert(gp.set(true) and gp.set_approvals(true), "guard switches")
@@ -7969,6 +7974,7 @@ local function with_guard(env, run)
   end
   local ok, err = pcall(run, replies)
   remuda._butler_guard_dir, remuda.pending = old_dir, old_pending
+  remuda.caller, remuda._butler_bus = old_caller, old_bus
   if not ok then error(err, 0) end
 end
 remuda._t359.with_guard = with_guard

@@ -64,6 +64,9 @@ local function start_butler()
       return remuda.butler.approval.answer(remuda._t_event(n), verdict, who or '@owner:x', '$r' .. n)
     end
     remuda._t_grants = function() return #remuda.butler.guard_grants.active() end
+    -- The calling session by core's caller identity (a grant offer needs one; holders: enforce_holder).
+    remuda._butler_bus.agents['t-ssa'] = { id = 'U-SSA', parent = 'butler', alias = 't-ssa', session_name = 's-ssa', children = {} }
+    remuda.caller = function() return { kind = 'session', session = 's-ssa' } end
     return 'ok'
   ]])
 end
@@ -118,7 +121,7 @@ T.test("only the cycle reaction creates a grant, once, and it also allows the ca
   T.eq(reply_out(n), "done:" .. ALLOW, "and allows this call")
   T.eq(grants(), 1, "one grant")
   local list = guard("grants")
-  T.expect(has(list, "g001  net  example.com  ceiling T2  holder ss-a") and has(list, "event $r1"), "list: " .. list)
+  T.expect(has(list, "g001  net  example.com  ceiling T2  holder U-SSA") and has(list, "event $r1"), "list: " .. list)
   T.eq(answer(1, "grant"), "nil Already answered.", "a second cycle reaction is consumed")
   T.eq(answer(1, "approve"), "nil Already answered.", "so is a later check")
   T.eq(grants(), 1, "still one grant")

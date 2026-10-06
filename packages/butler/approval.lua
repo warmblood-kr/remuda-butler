@@ -219,14 +219,15 @@ function approval.reply(rec, text)
     { room = rec.room_id })
 end
 
--- Butler's own record that the owner's reaction (the Matrix event id) turned this request into this standing grant.
+-- Butler's own record that the owner's reaction (the Matrix event id) turned this request into this standing grant,
+-- held by this session id.
 -- The relay writes answer_event_id only for the verified owner; the grant store trusts nothing on its own.
-function approval.granted_by(event_id, grant_id, class, scope)
+function approval.granted_by(event_id, grant_id, class, scope, holder)
   if not attached or type(event_id) ~= "string" or event_id == "" then return false end
   for _, rec in pairs(attached.state.approvals or {}) do
     local g = type(rec) == "table" and rec.kind == "guard_action" and rec.answer_verdict == "grant" and rec.grant
     if type(g) == "table" and rec.answer_event_id == event_id and g.id == grant_id and g.class == class
-        and g.scope == scope and type(rec.answered_by) == "string" and rec.answered_by ~= "" then return true end
+        and g.scope == scope and g.holder == holder and type(rec.answered_by) == "string" and rec.answered_by ~= "" then return true end
   end
   return false
 end

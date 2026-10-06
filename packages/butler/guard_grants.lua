@@ -190,7 +190,7 @@ local function verified(e)
   local fake = seam("verified")
   if fake then return fake(e) end
   local a = butler.approval
-  return a and type(a.granted_by) == "function" and a.granted_by(e.event, e.id, e.class, e.scope) == true
+  return a and type(a.granted_by) == "function" and a.granted_by(e.event, e.id, e.class, e.scope, e.holder) == true
 end
 
 -- No grant unless every field is sound, the clock agrees and the owner's reaction is on record (fail closed).
@@ -524,6 +524,35 @@ end)
 function M.time() return now() end
 M.show = show
 
+-- Who is calling, by core's caller identity (the client's process ancestry, never its environment): the ids of the
+-- calling Butler session and of each leader above it, nearest first, and its alias; nil when the caller is not exactly one session
+-- Butler knows. A grant's holder is such an id, so it covers its session and the sessions below it, never a sibling
+-- or a leader above. Advisory like the rest of the guard (core: caller() is no authentication boundary), but an
+-- agent cannot name it the way it names an alias in its env.
+function M.holders()
+  local ok, c = pcall(function() return remuda.caller() end)
+  if not ok or type(c) ~= "table" or c.kind ~= "session" or type(c.session) ~= "string" or c.session == "" then return nil end
+  local agents = remuda._butler_bus and remuda._butler_bus.agents
+  if type(agents) ~= "table" then return nil end
+  local alias
+  for a, agent in pairs(agents) do
+    if type(agent) == "table" and agent.session_name == c.session then
+      if alias then return nil end
+      alias = a
+    end
+  end
+  local out, seen, name = {}, {}, alias
+  while alias ~= nil and not seen[alias] do
+    seen[alias] = true
+    local agent = agents[alias]
+    if type(agent) ~= "table" or not text(agent.id) then break end
+    out[#out + 1] = agent.id
+    alias = agent.parent
+  end
+  if not out[1] then return nil end
+  return out, name
+end
+
 -- Clock skew: the highest time seen is kept (daemon memory, survives a live reload); a clock more than a minute
 -- behind it matches nothing until it catches up. A forward jump only expires grants early.
 M._clock = M._clock or { high = 0 }
@@ -534,13 +563,20 @@ end
 
 -- The id of the active grant that covers this call, or nil. Never takes an id from the call itself. `class` is the
 -- call's class (guard_policy.classify, computed here when not given): only a plain push or a WebFetch may match, so
--- a call that classifies as weaken, identity, escape, control, destroy, script or other never has a grant.
-M.match = budgeted(function(tool, input, cwd, class)
+-- a call that classifies as weaken, identity, escape, control, destroy, script or other never has a grant. `holders`
+-- (M.holders()) keeps only the grants held by the caller or a leader above it; the hook always passes it.
+M.match = budgeted(function(tool, input, cwd, class, holders)
   if not policy.grants_enabled() or skewed(now()) then return nil end
   input = type(input) == "table" and input or {}
   class = class or policy.classify(tool, input, { cwd = cwd })
   local kind, target, base
   local grants = M.active()
+  if holders then
+    local mine, held = {}, {}
+    for _, h in ipairs(holders) do held[h] = true end
+    for _, g in ipairs(grants) do if held[g.holder] then mine[#mine + 1] = g end end
+    grants = mine
+  end
   if tool == "WebFetch" and class == "net" then
     kind, target = "net", host_of(input.url)
   elseif (tool == "Bash" or tool == "PowerShell") and class == "push" then

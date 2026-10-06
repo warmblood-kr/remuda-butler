@@ -42,6 +42,9 @@ local function start_butler()
       if type(r) == 'table' then return 'pending' end
       return tostring(r)
     end
+    -- The calling session by core's caller identity: a grant held by U-SSA covers it (holders: enforce_holder).
+    remuda._butler_bus.agents['t-ssa'] = { id = 'U-SSA', parent = 'butler', alias = 't-ssa', session_name = 's-ssa', children = {} }
+    remuda.caller = function() return { kind = 'session', session = 's-ssa' } end
     return 'ok'
   ]])
   -- A fresh load of the store hands `add` to the test; the approval cross-check is its own test (guard_slice3_reactions).
@@ -57,7 +60,7 @@ local function fresh(name, no_grant)
     .. " local g = remuda.butler.guard_grants; g._uses, g._limited, g._clock = {}, {}, { high = 0 }"):format(name))
   T.eval("remuda._t_guard({'guard','on'}); remuda._t_guard({'guard','approvals','on'}); remuda._t_guard({'guard','grants','on'})")
   if not no_grant then
-    T.eq(T.eval("return (remuda._t_add({ class = 'net', scope = 'example.com', ceiling = 'T2', holder = 'ss-a', event = '$ev1' }))"), "g001", "grant")
+    T.eq(T.eval("return (remuda._t_add({ class = 'net', scope = 'example.com', ceiling = 'T2', holder = 'U-SSA', event = '$ev1' }))"), "g001", "grant")
   end
 end
 local function call(over) return T.eval("return remuda._t_call(" .. (over or "{}") .. ")") end
