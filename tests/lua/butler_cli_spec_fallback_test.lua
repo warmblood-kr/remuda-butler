@@ -82,3 +82,47 @@ T.test("the agents spec reports --all as a flag value", function()
     return tostring(r.ok) .. "|" .. tostring(r.values.all)
   ]]), "true|true")
 end)
+
+-- quota: unavailable-quota, then usage, then --report authorization, then the deferred reply. Parsing
+-- is pure, so no step may run collect before the one that refuses.
+local function quota_case(parser, args, setup)
+  start_butler()
+  local words = {}
+  for _, word in ipairs(args) do words[#words + 1] = string.format("%q", word) end
+  return T.eval([[
+    local saved_cli, saved_quota, saved_pending, real_fail = remuda.cli, remuda._butler_quota, remuda.pending, remuda.fail
+    local quota = remuda._butler_quota
+    local real_collect = quota.collect
+    local collected = 0
+    quota.collect = function(callback) collected = collected + 1; callback(nil, "stubbed") end
+    if not ]] .. tostring(parser) .. [[ then remuda.cli = nil end
+    remuda.fail = function(text, code) return { failed = true, code = code, text = text } end
+    ]] .. (setup or "") .. [[
+    local ok, value = pcall(remuda._butler_command_run, "quota", { ]] .. table.concat(words, ",") .. [[ },
+      { env = { REMUDA_BUTLER_AGENT_ID = "agent-test" } })
+    quota.collect = real_collect
+    remuda.cli, remuda._butler_quota, remuda.pending, remuda.fail = saved_cli, saved_quota, saved_pending, real_fail
+    local first = type(value) == "table" and value.failed and (value.code .. ":" .. value.text:match("^[^\n]*")) or type(value)
+    return tostring(ok) .. "|" .. first .. "|collect=" .. collected
+  ]])
+end
+
+T.test("quota keeps unavailable > usage > authorization > deferred-reply order", function()
+  local denied = "true|1:only the Butler itself or a person at the terminal can send the report to Matrix.|collect=0"
+  for _, parser in ipairs({ true, false }) do
+    local tag = " parser=" .. tostring(parser)
+    T.eq(quota_case(parser, { "quota", "--bogus" }, "remuda._butler_quota = nil"),
+      "true|1:quota is unavailable: not loaded|collect=0", "unavailable before usage" .. tag)
+    T.eq(quota_case(parser, { "quota", "--report", "extra" }),
+      "true|2:unexpected argument: extra|collect=0", "usage before authorization" .. tag)
+    T.eq(quota_case(parser, { "quota", "--report" }, "remuda.pending = nil"), denied,
+      "authorization before the deferred-reply check" .. tag)
+    T.eq(quota_case(parser, { "quota" }, "remuda.pending = nil"),
+      "true|1:remuda butler quota needs a Remuda core with deferred replies.|collect=0", "deferred-reply check" .. tag)
+    T.eq(quota_case(parser, { "quota", "--help" }), "true|string|collect=0", "help is text" .. tag)
+    T.eq(quota_case(parser, { "quota", "--report", "--report" }),
+      "true|2:unknown option: --report|collect=0", "repeated --report is a usage error" .. tag)
+    T.eq(quota_case(parser, { "quota", "--help", "--report" }),
+      "true|2:unknown option: --help|collect=0", "--help only counts when alone" .. tag)
+  end
+end)

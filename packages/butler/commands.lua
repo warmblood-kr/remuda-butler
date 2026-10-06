@@ -128,6 +128,16 @@ command(5, "doctor", "  remuda butler doctor", function(args)
     return table.concat(lines, "\n")
   end
 end)
+local QUOTA_CLI_SPEC = {
+  name = "remuda butler",
+  verbs = {
+    quota = {
+      about = "Report claude and codex quota",
+      options = { { long = "report", help = "Also post the report to Matrix" } },
+      next = "remuda butler doctor",
+    },
+  },
+}
 command(6, "quota", "  remuda butler quota [--report]", function(args, caller)
   local quota = remuda._butler_quota
   if type(quota) ~= "table" then
@@ -136,10 +146,14 @@ command(6, "quota", "  remuda butler quota [--report]", function(args, caller)
     return remuda.fail("quota is unavailable: " .. reason .. "\nNext: remuda butler doctor", 1)
   end
   if #args == 2 and (args[2] == "--help" or args[2] == "-h") then return quota.help() end
-  if #args ~= 1 and not (#args == 2 and args[2] == "--report") then
+  -- Parsing is pure: it runs after the unavailable check and before authorization, as the
+  -- hand-parsed arity check did. A repeated --report is a usage error today (clap tolerates it).
+  local fits, parsed = fits_spec(QUOTA_CLI_SPEC, args, #args == 1 or (#args == 2 and args[2] == "--report"))
+  if not (fits and #args <= 2) then
     return remuda.fail(quota.usage_error(args[2] == "--report" and args[3] or args[2]), 2)
   end
   local report_flag = args[2] == "--report"
+  if parsed then report_flag = parsed.values.report == true end
   if report_flag then
     local identity = current_agent(caller)
     if identity ~= nil then
