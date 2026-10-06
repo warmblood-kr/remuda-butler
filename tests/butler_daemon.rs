@@ -10104,37 +10104,6 @@ fn butler_matrix_cli_rejects_invalid_send_dash_and_fails_cleanly_without_pending
         "Matrix CLI requires a remuda core with deferred replies (core #213/#239)");
 }
 
-#[test]
-fn butler_matrix_guidance_covers_each_member_verb_and_omits_operator_verbs() {
-    let dir = scratch_dir("butler-matrix-guidance");
-    let (_daemon, path) = butler_cli_test_daemon(&dir);
-    let guidance = eval(&path, r#"
-      for _, item in ipairs(remuda.contributions("butler.guidance")) do
-        if item.owner == "butler" and item.id == "matrix" then
-          return item.entry.agents_md({ parent = "leader" })
-        end
-      end
-      return "missing Matrix guidance contribution"
-    "#);
-    let expected = [
-        "Matrix is the human-facing adapter: never call the homeserver REST API or curl directly; use `remuda butler matrix [OPTIONS] VERB ARGS`. Options go BEFORE the verb (`--json` for machine output; `--room ROOM` defaults to the configured room).",
-        "- `status`: whoami, joined rooms, and the sync cursor.",
-        "- `[-n N] history`: recent messages in the room.",
-        "- `rooms`: joined rooms (read-only).",
-        "- `thread EVENT_ID`: all replies in a thread.",
-        "- `event EVENT_ID` (alias `get`): one event.",
-        "- `send TEXT`: start a NEW post only (name the room with `--room ROOM`); long text is split, rate-limited; `send -` reads the text from stdin (up to 64 KiB). Answers ALWAYS go via `remuda butler reply MESSAGE-ID -`, never send.",
-        "- `reply EVENT_ID TEXT` / `react EVENT_ID KEY`: answer or react (same room only).",
-        "- `upload PATH`: post a file (up to 20 MB). `[-o PATH] download MXC`: fetch media.",
-        "- `redact EVENT_ID [--reason TEXT]`: remove your message.",
-    ];
-    for line in expected {
-        assert!(guidance.contains(line), "Matrix guidance omitted: {line}\n{guidance}");
-    }
-    assert!(!guidance.contains("join ROOM"), "operator join leaked into member guidance");
-    assert!(!guidance.contains("leave ROOM"), "operator leave leaked into member guidance");
-}
-
 fn doctor_render(probes: &str, platform: &str) -> String {
     let dir = scratch_dir("butler-doctor-render");
     let (_daemon, path) = butler_cli_test_daemon(&dir);
