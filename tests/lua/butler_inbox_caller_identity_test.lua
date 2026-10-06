@@ -105,6 +105,15 @@ T.test("ended_member_still_reads_its_own_mail_by_alias_and_a_reused_alias_is_not
   local reused = call("inbox", { "inbox", "dave" }, old_id)
   T.ok(reused:match("^error\0") and not reused:find("dave private note", 1, true),
     "the old identity must not read the new holder of its alias: " .. reused)
+  T.eval([[
+    -- the new holder also ends: the alias now resolves to the new id, still not the old identity's
+    local bus = remuda._butler_bus
+    bus.agents.dave = nil
+    bus.identities.dave = { id = "01ZZZZZZZZZZZZZZZZZZZZZZZZ", alias = "dave" }
+    ]])
+  local ended_reused = call("inbox", { "inbox", "dave" }, old_id)
+  T.ok(ended_reused:match("^error\0") and not ended_reused:find("dave private note", 1, true),
+    "an ended replacement holder's alias is not the old identity's: " .. ended_reused)
 end)
 
 T.test("message_id_branch_keeps_owner_not_found_and_not_yours_checks", function()

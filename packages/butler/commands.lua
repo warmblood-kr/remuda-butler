@@ -638,7 +638,8 @@ command(60, "inbox", "  remuda butler inbox [name]", function(args, caller)
         local record = (bus.identity_ids or {})[own_id]
         local alias = record and record.alias
         local live = alias and (bus.agents or {})[alias]
-        if alias and not live then own_alias = alias end
+        local latest = alias and (bus.identities or {})[alias]
+        if alias and not live and latest and latest.id == own_id then own_alias = alias end
       end
       if name ~= caller_identity and name ~= own_id and name ~= own_alias and name ~= own_session then
         error("agents may only read their own Butler inbox.\nNext: remuda butler inbox", 0)
