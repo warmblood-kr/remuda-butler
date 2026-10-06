@@ -160,7 +160,10 @@ local function choose(candidates, opts, done)
     end
     if not alive(state.name) then fail_candidate("exited", "session exited before prompt became ready"); return end
     local captured, screen = pcall(remuda.capture, state.name)
-    if not captured then fail_candidate("exited", one_line(screen)); return end
+    if not captured then
+      state.last_capture_error = one_line(screen)
+      screen = ""
+    end
     screen = tostring(screen or ""):gsub("\r\n", "\n"):gsub("\r", "\n")
     state.last_screen = one_line(screen)
     local entry, id = state.entry, state.id
@@ -285,10 +288,19 @@ local function choose(candidates, opts, done)
       end
     end
     if os.time() - state.started >= state.timeout then
+      if state.last_screen == "" and not state.dialog_seen and not state.unknown_dialog_screen then
+        state.attempt.reason, state.attempt.session = "ready_unverified", state.name
+        state.attempt.detail = "session remained alive but screen was blank at readiness timeout"
+          .. (state.last_capture_error and ("; last capture error: " .. state.last_capture_error) or "")
+        callback(state.name, state.id)
+        return
+      end
       local prefix = state.dialog_seen and ("dialog remained after its handler: " .. state.dialog_seen .. "; ") or ""
+      local capture_error = state.last_capture_error and ("; last capture error: " .. state.last_capture_error) or ""
       fail_candidate(state.dialog_seen and "dialog" or "timeout", prefix
         .. "readiness prompt not observed within " .. tostring(state.timeout)
-        .. " seconds; last screen: " .. (state.last_screen ~= "" and state.last_screen or "<empty>"))
+        .. " seconds; last screen: " .. (state.last_screen ~= "" and state.last_screen or "<empty>")
+        .. capture_error)
     end
   end
   schedule = remuda.schedule({ every = 0.2, run = function()

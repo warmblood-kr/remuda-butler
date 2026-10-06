@@ -5913,7 +5913,8 @@ fn butler_session_exited_hook_relaunches_via_the_shared_launch_function() {
     );
     assert!(
         init_lua.contains("name = \"butler-reconcile\"")
-            && init_lua.contains("host._butler_reconcile then host._butler_reconcile()"),
+            && init_lua.contains("host._butler_reconcile_retry.remaining_ms() <= 0")
+            && init_lua.contains("host._butler_reconcile()"),
         "butler needs a periodic reconciler as well as an exit event hook"
     );
 }
