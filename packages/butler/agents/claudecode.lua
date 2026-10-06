@@ -81,12 +81,10 @@ builders.claude = function(spec)
   return argv
 end
 
--- Fresh topic dirs are created by Butler itself, so trusting them is safe.
 remuda._butler_agent_startup.claude = {
   ready = function(screen) return screen:find("─\n❯", 1, true) ~= nil end, -- idle composer under its rule
   clear_input = "C-u",
   modals = {
-    { trust = "claude", pending_match = "Quick safety check:",
-      keys = { "<down>", "RET" } },
+    { trust = "claude", pending_match = "Quick safety check:" }, -- option chosen by its text
   },
 }
