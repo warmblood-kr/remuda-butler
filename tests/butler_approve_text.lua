@@ -223,6 +223,18 @@ do
   screen = "$ "
   assert(verdict(function(s0) return s0 .. "\n> half-written draft please run the full release checklist now" end) == true,
     "typed after an existing draft is still seen")
+  screen = "$ "
+  assert(verdict(function(s0) return s0 .. "\n> please run the full release checklist" end) == false,
+    "only the start of the text on screen is not delivery: head and tail must both appear")
+  screen = "$ "
+  local was_session = approve_text.session_instance
+  assert(verdict(function(s0)
+    approve_text.session_instance = function() return "other", "other-start" end -- recreated after typing
+    return s0 .. "\n> please run the full release checklist now"
+  end) == false,
+    "a different instance behind the same name is not seen")
+  approve_text.session_instance = was_session
+  screen = "$ "
   remuda.capture = nil
   scheduled = {}
   local ok_, _, _, verify = approve_text.type_text("agent-1", text, provenance)
@@ -245,7 +257,7 @@ do
     return replies[#replies]
   end
   local not_seen = approve(nil)
-  assert(not_seen == "typed, NOT seen in the pane; check agent-1", "handler says NOT seen: " .. tostring(not_seen))
+  assert(not_seen == "typed, NOT seen in the pane; check agent-1 before approving it again", "handler says NOT seen: " .. tostring(not_seen))
   assert(not not_seen:find(text, 1, true), "the reply never repeats the approved text")
   local seen = approve("\n> " .. text)
   assert(seen == "typed (seen)", "handler says seen: " .. tostring(seen))

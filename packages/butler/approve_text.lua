@@ -231,33 +231,55 @@ end
 -- wrapping (whitespace is dropped) and counting occurrences, so text already on screen is not a new delivery.
 -- Never retypes (a missed read-back must not become a second approval) and never logs or repeats the text.
 local function squash(value) return (value:gsub("%s", "")) end
-local function needle_of(text)
-  for line in text:gmatch("[^\n]+") do
-    if #squash(line) >= 8 then return squash(line):sub(1, 24) end
-  end
-  return squash(text):sub(1, 24)
+-- The start and the end of the text must both appear (a partial echo is not delivery); none for whitespace-only text.
+local function needles_of(text)
+  local flat = squash(text)
+  if flat == "" then return {} end
+  return { flat:sub(1, 24), flat:sub(-24) }
 end
-local function screen_count(session, needle)
-  if needle == "" or type(remuda.capture) ~= "function" then return nil end
+local function screen_counts(session, needles)
+  if #needles == 0 or type(remuda.capture) ~= "function" then return nil end
   local ok, screen = pcall(remuda.capture, session)
   if not ok or type(screen) ~= "string" then return nil end
-  local count, from = 0, 1
   screen = squash(screen)
-  while true do
-    local a, b = screen:find(needle, from, true)
-    if not a then return count end
-    count, from = count + 1, b + 1
+  local counts = {}
+  for i, needle in ipairs(needles) do
+    local count, from = 0, 1
+    while true do
+      local a, b = screen:find(needle, from, true)
+      if not a then break end
+      count, from = count + 1, b + 1
+    end
+    counts[i] = count
   end
+  return counts
 end
--- Looks up to 3 times, 1 s apart (one look when there is no timer); done(true) only when the count grew.
-local function confirm(session, needle, before, done)
+local function grew(now, before)
+  if not now or not before then return false end
+  for i = 1, #before do
+    if now[i] <= before[i] then return false end
+  end
+  return true
+end
+-- Looks up to 3 times, 1 s apart (one look when there is no timer); done(true) only when both counts grew and the
+-- session is still the same instance. done runs once.
+local function confirm(session, needles, before, instance, done)
   local system = remuda._butler_system or {}
-  local tries = 0
+  local tries, finished = 0, false
+  local function finish(seen)
+    if finished then return end
+    finished = true
+    done(seen)
+  end
   local function look()
+    if finished then return end
     tries = tries + 1
-    local now = screen_count(session, needle)
-    if now and before and now > before then return done(true) end
-    if tries >= 3 or type(system.after) ~= "function" or not system.after(1, look) then return done(false) end
+    local id, marker = M.session_instance(session)
+    if id ~= instance[1] or marker ~= instance[2] then return finish(false) end
+    if grew(screen_counts(session, needles), before) then return finish(true) end
+    if tries >= 3 or type(system.after) ~= "function" then return finish(false) end
+    local scheduled, ok = pcall(system.after, 1, look)
+    if not scheduled or not ok then finish(false) end
   end
   look()
 end
@@ -280,19 +302,20 @@ function M.type_text(session, exact_bytes, provenance)
     local marked, allowed = pcall(provenance.before_write)
     if not marked or allowed ~= true then return false, "delivery_marker_failed" end
   end
-  local needle = needle_of(exact_bytes)
-  local before = screen_count(session, needle)
+  local needles = needles_of(exact_bytes)
+  local before = screen_counts(session, needles)
+  local instance = { M.session_instance(session) }
   local typed, result = pcall(remuda.type_text, session, exact_bytes)
   if not typed or result == false then return false, "type_failed", true end
   local trace = remuda._butler_session_trace or _G._butler_session_trace
   if type(trace) == "function" then
-    pcall(trace, "matrix_approved_text", "target=" .. session .. " " .. provenance_text(provenance)
+    pcall(trace, "matrix_approved_text", "target=" .. M.display_inline(session) .. " " .. provenance_text(provenance)
       .. " outcome=typed attached=" .. tostring(attached) .. " bytes=" .. tostring(#exact_bytes))
   end
   return true, nil, attached, function(done)
-    confirm(session, needle, before, function(seen)
+    confirm(session, needles, before, instance, function(seen)
       if type(trace) == "function" then
-        pcall(trace, "matrix_approved_text_check", "target=" .. session .. " " .. provenance_text(provenance)
+        pcall(trace, "matrix_approved_text_check", "target=" .. M.display_inline(session) .. " " .. provenance_text(provenance)
           .. " seen=" .. tostring(seen))
       end
       done(seen)
@@ -456,7 +479,8 @@ function M.configure()
         complete(true)
         local note = attached and " (a human is attached to the pane)" or ""
         local function say(seen)
-          pcall(approval.reply, rec, (seen and "typed (seen)" or "typed, NOT seen in the pane; check " .. data.session) .. note)
+          pcall(approval.reply, rec, (seen and "typed (seen)" or "typed, NOT seen in the pane; check "
+            .. M.display_inline(data.session) .. " before approving it again") .. note)
         end
         if type(verify) == "function" then verify(say) else say(false) end
       else
