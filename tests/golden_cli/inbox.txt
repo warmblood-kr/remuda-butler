@@ -1,0 +1,140 @@
+### remuda butler "inbox"
+exit: 1
+stdout:
+
+stderr:
+[string "packages/butler/commands.lua"]:626: no Butler identity in your env; use `inbox <name>`
+actions:
+state: read=0,deliveries=0
+
+### remuda butler "inbox" "--help"
+exit: 0
+stdout:
+Usage: remuda butler inbox [name]
+       remuda butler inbox <message-id>  show one of your messages again; read state is unchanged
+
+stderr:
+
+actions:
+state: read=0,deliveries=0
+
+### remuda butler "inbox" "-h"
+exit: 0
+stdout:
+Usage: remuda butler inbox [name]
+       remuda butler inbox <message-id>  show one of your messages again; read state is unchanged
+
+stderr:
+
+actions:
+state: read=0,deliveries=0
+
+### remuda butler "inbox" "help"
+exit: 0
+stdout:
+inbox for help
+stderr:
+
+actions:
+state: read=1,deliveries=0
+
+### remuda butler "inbox" "01M49D6J4RVBW73XKFGQ6XS94J"
+exit: 1
+stdout:
+
+stderr:
+inbox <ULID> shows a message only to the member it was delivered to. Next: run it from that member's session, or remuda butler inbox <name>
+actions:
+state: read=1,deliveries=0
+
+### [agent] remuda butler "inbox" "01M49D6J4RVBW73XKFGQ6XS94J"
+exit: 0
+stdout:
+message <ULID>
+stderr:
+
+actions:
+state: read=2,deliveries=0
+
+### [agent] remuda butler "inbox" "01M49D6J4RVBW73XKFGQ6XS94K"
+exit: 1
+stdout:
+
+stderr:
+message <ULID> was not delivered to you
+actions:
+state: read=3,deliveries=0
+
+### remuda butler "inbox" "01M49D6J4RVBW73XKFGQ6XS94L"
+exit: 0
+stdout:
+inbox for <ULID>
+stderr:
+
+actions:
+state: read=4,deliveries=0
+
+### remuda butler "inbox" "alice"
+exit: 0
+stdout:
+inbox for alice
+stderr:
+
+actions:
+state: read=5,deliveries=0
+
+### remuda butler "inbox" "01M49D6J4RVBW73XKFGQ6XS94J" "extra"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+state: read=5,deliveries=0
+
+### remuda butler "inbox" "--"
+exit: 0
+stdout:
+inbox for --
+stderr:
+
+actions:
+state: read=6,deliveries=0
+
+### remuda butler "inbox" "-alice"
+exit: 0
+stdout:
+inbox for -alice
+stderr:
+
+actions:
+state: read=7,deliveries=0
+
+### remuda butler "inbox" "alice" "extra"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+state: read=7,deliveries=0
+
+### remuda butler "inbox" "--help" "extra"
+exit: 0
+stdout:
+Usage: remuda butler inbox [name]
+       remuda butler inbox <message-id>  show one of your messages again; read state is unchanged
+
+stderr:
+
+actions:
+state: read=7,deliveries=0
+
+### remuda butler "inbox" "01M49D6J4RVBW73XKFGQ6XS94J" "--help"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+state: read=7,deliveries=0
