@@ -623,7 +623,13 @@ command(60, "inbox", "  remuda butler inbox [name]", function(args, caller)
     end)
   end
   return cli_result(function()
-    return remuda._butler_inbox(args[2] or assert(current_agent(caller), "no Butler identity in your env; use `inbox <name>`"))
+    local me = current_agent(caller)
+    local name = args[2] or assert(me, "no Butler identity in your env; use `inbox <name>`")
+    if me and args[2]
+        and remuda._butler_identity.mail_id(name, true) ~= remuda._butler_identity.mail_id(me, true) then
+      error("agents may only read their own Butler inbox.\nNext: remuda butler inbox", 0)
+    end
+    return remuda._butler_inbox(name)
   end)
 end)
 local REPLY_CLI_SPEC = {
