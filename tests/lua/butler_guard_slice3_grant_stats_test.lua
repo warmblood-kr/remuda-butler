@@ -1,4 +1,4 @@
--- Guard slice 3, PR-B (#339): an active grant answers a Claude PermissionRequest it covers with allow, audited first; nothing else changes.
+-- Guard slice 3, PR-C: guard stats shows the auto-allowed share, guard grants shows each grant's uses in the last hour.
 local started
 local function start_butler()
   -- Installed once per file: a second install reloads the mod (the harness gives a file 20 s in all).
@@ -42,9 +42,6 @@ local function start_butler()
       if type(r) == 'table' then return 'pending' end
       return tostring(r)
     end
-    -- The calling session by core's caller identity: a grant held by U-SSA covers it (holders: enforce_holder).
-    remuda._butler_bus.agents['t-ssa'] = { id = 'U-SSA', parent = 'butler', alias = 't-ssa', session_name = 's-ssa', children = {} }
-    remuda.caller = function() return { kind = 'session', session = 's-ssa' } end
     return 'ok'
   ]])
   -- A fresh load of the store hands `add` to the test; the approval cross-check is its own test (guard_slice3_reactions).
@@ -60,36 +57,54 @@ local function fresh(name, no_grant)
     .. " local g = remuda.butler.guard_grants; g._uses, g._limited, g._clock = {}, {}, { high = 0 }"):format(name))
   T.eval("remuda._t_guard({'guard','on'}); remuda._t_guard({'guard','approvals','on'}); remuda._t_guard({'guard','grants','on'})")
   if not no_grant then
-    T.eq(T.eval("return (remuda._t_add({ class = 'net', scope = 'example.com', ceiling = 'T2', holder = 'U-SSA', event = '$ev1' }))"), "g001", "grant")
+    T.eq(T.eval("return (remuda._t_add({ class = 'net', scope = 'example.com', ceiling = 'T2', holder = 'ss-a', event = '$ev1' }))"), "g001", "grant")
   end
 end
 local function call(over) return T.eval("return remuda._t_call(" .. (over or "{}") .. ")") end
 local function lines() return T.eval("return remuda._t_lines()") end
 local function count(text, needle) local n = 0; for _ in text:gmatch(needle) do n = n + 1 end; return n end
+local T0 = 1791072000 + 36000 -- 2026-10-04T10:00:00Z
+local function at(offset)
+  T.eval(("local t = %d; remuda.butler.guard_policy.now = function() return t end; remuda.butler.guard_grants.now = function() return t end"):format(T0 + offset))
+end
+-- n hook calls in the daemon; returns how many were allowed.
+local function uses(n)
+  return tonumber(T.eval(("local a = 0; for _ = 1, %d do if remuda._t_call({}):find('allow', 1, true) then a = a + 1 end end; return a"):format(n)))
+end
+-- A fresh dir whose grant is written at the test clock.
+local function fresh_at(name)
+  fresh(name, true)
+  at(0)
+  T.eq(T.eval("return (remuda._t_add({ class = 'net', scope = 'example.com', ceiling = 'T2', holder = 'ss-a', event = '$ev1', ttl = 86400 }))"), "g001", "grant")
+end
+local function restart() T.eval("local g = remuda.butler.guard_grants; g._uses, g._limited = {}, {}") end
+local function guard(...) return T.eval(("return tostring(remuda._t_guard({'guard',%s}))"):format(table.concat({ ... }, ","))) end
 
-T.test("a covered WebFetch is allowed at PermissionRequest, audited with its grant_id, with no approval post", function()
-  fresh("e-allow")
-  local posts = T.eval("return remuda._t_posts")
-  T.expect(has(call(), ALLOW), "allowed")
-  local text = lines()
-  T.eq(count(text, '"event":"grant_used"'), 1, "one grant_used line")
-  T.expect(has(text, '"event":"grant_used","tool":"WebFetch","class":"net"'), "tool and class: " .. text)
-  T.expect(text:match('"event":"grant_used"[^\n]*"grant_id":"g001"') ~= nil, "grant_id g001: " .. text)
-  T.eq(count(text, '"event":"PermissionRequest"[^\n]*"grant_id":"g001"'), 0, "the request line itself keeps -")
-  T.eq(T.eval("return remuda._t_posts"), posts, "no approval post")
-  T.expect(not has(call("{ input = { url = 'https://other.example/x' } }"), ALLOW), "another host asks", "ok - allow")
+T.test("guard stats shows how much of the permission requests grants auto-allowed", function()
+  fresh_at("s-share")
+  T.eq(uses(3), 3, "three allowed")
+  call("{ input = { url = 'https://other.example/x' } }") -- no grant covers it: asked
+  local out = guard("'stats'")
+  T.expect(has(out, "auto-allowed by grants: 3 of 4 permission requests (75%), 0 limited"), "share line: " .. out)
+  uses(28)
+  uses(1)
+  out = guard("'stats'")
+  T.expect(has(out, "auto-allowed by grants: 30 of 33 permission requests (91%), 1 limited"), "limited line: " .. out, "ok - stats")
 end)
 
-T.test("never at PreToolUse: no allow, and a deny there carries grant_id -", function()
-  fresh("e-pre")
-  T.eval("remuda._t_guard({'guard','deny','on'})")
-  T.expect(not has(call("{ event = 'PreToolUse' }"), ALLOW), "no allow at PreToolUse")
-  -- a deny rule that names the very call the grant covers
-  T.eval("local p = remuda.butler.guard_policy; remuda._t_deny = p.deny_reason; p.deny_reason = function(tool) if tool == 'WebFetch' then return 'test rule' end end")
-  local reply = call("{ event = 'PreToolUse' }")
-  T.eval("remuda.butler.guard_policy.deny_reason = remuda._t_deny")
-  T.expect(has(reply, '"permissionDecision":"deny"'), "deny: " .. reply)
-  local text = lines()
-  T.eq(count(text, '"grant_id":"g001"'), 0, "no line names the grant: " .. text)
-  T.eq(count(text, '"event":"grant_used"'), 0, "no use", "ok - pre")
+T.test("guard stats has no share line while no grant was used", function()
+  fresh_at("s-none")
+  call("{ input = { url = 'https://other.example/x' } }")
+  T.expect(not has(guard("'stats'"), "auto-allowed"), "no share line")
+end)
+
+T.test("guard grants shows uses in the last hour, rebuilt after a restart, aging out", function()
+  fresh_at("s-uses")
+  T.expect(has(guard("'grants'"), "used 0/30 in the last hour"), "none yet")
+  uses(2)
+  T.expect(has(guard("'grants'"), "used 2/30 in the last hour"), "two")
+  restart()
+  T.expect(has(guard("'grants'"), "used 2/30 in the last hour"), "rebuilt from the log")
+  at(3601)
+  T.expect(has(guard("'grants'"), "used 0/30 in the last hour"), "aged out", "ok - uses")
 end)
