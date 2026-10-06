@@ -56,6 +56,15 @@ assert(bus.notices.child and bus.notices.child.message_ids[first.id],
     .. tostring(bus.unread_seeded.child) .. ", unread=" .. tostring(mail.unread("child-id"))
     .. ", seen=" .. tostring(bus.notice_seen["child-id"] and bus.notice_seen["child-id"][first.id]))
 
+-- Even if delivery retries exhaust and discard the queued notice, the original
+-- queue time starts the reminder clock for unread mail.
+bus.notices.child = nil -- model retry exhaustion dropping the delivery queue
+bus.notice_reminder_at = { child = now }
+now = now + 600
+remuda._butler_deliver_notices()
+assert(bus.notices.child and bus.notices.child.reminders[first.id],
+  "unread mail is reminded ten minutes after its initial notice was queued, even if delivery failed")
+
 -- A successfully delivered notice leaves a timestamp. Once unread for ten
 -- minutes, it is queued again; a read message is never re-notified.
 bus.notices.child = nil

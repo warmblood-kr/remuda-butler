@@ -895,6 +895,14 @@ function remuda._butler_notify(alias, notice, message_id, reshow, reminder)
     pending.message_ids = pending.message_ids or {}
     pending.message_order = pending.message_order or {}
     if pending.message_ids[message_id] then return false end
+    -- Start the unread reminder clock when a notice enters the queue. A
+    -- delivery can exhaust its retries and discard this queue before
+    -- complete_notice_recovery records a verified delivery time.
+    local agent = bus.agents[alias]
+    local recipient_id = agent and agent.id or recipient.id
+    local sent_at = bus.notice_sent_at[recipient_id] or {}
+    bus.notice_sent_at[recipient_id] = sent_at
+    sent_at[message_id] = now
     pending.message_ids[message_id] = notice
     if reminder then
       pending.reminders = pending.reminders or {}
