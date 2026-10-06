@@ -519,6 +519,7 @@ if type(remuda) == "table" then
       local stdout = type(probe) == "table" and probe.stdout or nil
       local stderr = type(probe) == "table" and probe.stderr or nil
       if name == "claude" then
+        if type(stdout) ~= "string" then return { mode = "unknown" } end
         local decoded, auth = pcall(remuda.json.decode, compact_json_whitespace(stdout))
         if not decoded then return { mode = "unknown" } end
         return parser(auth)

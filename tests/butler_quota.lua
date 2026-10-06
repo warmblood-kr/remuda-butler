@@ -452,6 +452,8 @@ local claude_account = quota.accounts().claude
 eq("pretty Claude auth status mode", claude_account.mode, "subscription")
 eq("pretty Claude auth status plan", claude_account.plan, "max")
 eq("pretty Claude auth status email", claude_account.email, "owner@example.test")
+remuda._butler_doctor = { probe = function() return { claude = {} } end }
+eq("Claude auth status without stdout stays unknown", quota.accounts().claude.mode, "unknown")
 remuda = saved_remuda
 
 local wire_init = '{"id":1}'
