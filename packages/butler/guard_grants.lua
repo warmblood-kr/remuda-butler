@@ -381,6 +381,7 @@ function M.list()
     out[#out + 1] = string.format("%s  %s  %s  ceiling %s  holder %s  expires %s (in %dm)  event %s", g.id, g.class,
       show(g.scope, 300), g.ceiling, show(g.holder, 60),
       os.date("!%Y-%m-%dT%H:%M:%SZ", g.expires), math.ceil((g.expires - t) / 60), show(g.event, 80))
+      .. string.format("  used %s/%d in the last hour", tostring(M.used(g.id) or "?"), M.HOURLY)
   end
   for _, line in ipairs(revoked) do out[#out + 1] = line end
   return table.concat(out, "\n")
@@ -590,14 +591,21 @@ local function rebuild(id)
   return used
 end
 
--- "ok" when the grant has a use left this hour, "limited" when not, nil when its count cannot be known (ask).
-function M.room(id)
+-- Uses of the grant in the last hour, nil when the count cannot be known.
+function M.used(id)
   local list = M._uses[id] or rebuild(id)
   if not list then return nil end
   M._uses[id] = list
   local floor = stamp(now() - 3600)
   for i = #list, 1, -1 do if list[i] <= floor then table.remove(list, i) end end
-  return #list >= M.HOURLY and "limited" or "ok"
+  return #list
+end
+
+-- "ok" when the grant has a use left this hour, "limited" when not, nil when its count cannot be known (ask).
+function M.room(id)
+  local n = M.used(id)
+  if not n then return nil end
+  return n >= M.HOURLY and "limited" or "ok"
 end
 
 -- Reserve one use and return its stamp; release(id, stamp) gives it back when its grant_used line was not written.
