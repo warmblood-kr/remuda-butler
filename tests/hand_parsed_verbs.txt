@@ -9,6 +9,7 @@ doctor
 deny
 guard
 help
+# inbox keeps the legacy parser path for dash-prefixed member names and an old-core fallback.
 inbox
 launch
 matrix download
@@ -40,6 +41,7 @@ statusline
 topic delegate
 typed-lines
 close
+# compact keeps session lookup before parsing and an old-core fallback.
 compact
 matrix mark-all
 matrix thread

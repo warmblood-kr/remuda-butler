@@ -604,27 +604,27 @@ command(50, "send-to-leader", "  remuda butler send-to-leader <message...> | - |
     return remuda._butler_report(from, body)
   end)
 end)
+local INBOX_CLI_SPEC = { name = "remuda butler", verbs = { inbox = { about = "Read your Butler inbox or show one delivered message",
+  args = { { name = "NAME", help = "Member name or delivered message ID", required = false } }, next = "remuda butler inbox [name]" } } }
 command(60, "inbox", "  remuda butler inbox [name]", function(args, caller)
   if args[2] == "--help" or args[2] == "-h" then
-    return "Usage: remuda butler inbox [name]\n"
-      .. "       remuda butler inbox <message-id>  show one of your messages again; read state is unchanged\n"
+    return "Usage: remuda butler inbox [name]\n" .. "       remuda butler inbox <message-id>  show one of your messages again; read state is unchanged\n"
   end
-  if #args > 2 then return nil end
-  -- Only a ULID may reach a message lookup (it opens messages/<id>.json).
-  -- An agent id is also a ULID and falls through to the name form.
-  if remuda._butler_identity.is_ulid(args[2]) and mail.find_message(args[2]) then
+  local selector, cli = args[2], remuda.cli; if selector ~= "--" then for i = 2, #args do if args[i] == "--" then return nil end end end
+  if type(cli) == "table" and type(cli.parse) == "function" and not (selector and selector:sub(1, 1) == "-") then
+    local report = cli.parse(INBOX_CLI_SPEC, args)
+    if not report.ok or report.kind == "help" then return nil end; selector = report.values.NAME
+  elseif #args > 2 then return nil end
+  if remuda._butler_identity.is_ulid(selector) and mail.find_message(selector) then
     local me = current_agent(caller)
     return cli_result(function()
-      if not me then
-        error("inbox " .. args[2] .. " shows a message only to the member it was delivered to."
-          .. " Next: run it from that member's session, or remuda butler inbox <name>", 0)
-      end
-      return remuda._butler_inbox_message(me, args[2])
+      if not me then error("inbox " .. selector .. " shows a message only to the member it was delivered to."
+        .. " Next: run it from that member's session, or remuda butler inbox <name>", 0) end
+      return remuda._butler_inbox_message(me, selector)
     end)
   end
-  return cli_result(function()
-    return remuda._butler_inbox(args[2] or assert(current_agent(caller), "no Butler identity in your env; use `inbox <name>`"))
-  end)
+  return cli_result(function() return remuda._butler_inbox(selector or assert(current_agent(caller),
+    "no Butler identity in your env; use `inbox <name>`")) end)
 end)
 local REPLY_CLI_SPEC = {
   name = "remuda butler",
