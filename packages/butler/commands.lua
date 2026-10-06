@@ -610,24 +610,31 @@ command(60, "inbox", "  remuda butler inbox [name]", function(args, caller)
       .. "       remuda butler inbox <message-id>  show one of your messages again; read state is unchanged\n"
   end
   if #args > 2 then return nil end
+  local caller_identity = current_agent(caller)
   -- Only a ULID may reach a message lookup (it opens messages/<id>.json).
   -- An agent id is also a ULID and falls through to the name form.
   if remuda._butler_identity.is_ulid(args[2]) and mail.find_message(args[2]) then
-    local me = current_agent(caller)
     return cli_result(function()
-      if not me then
+      if not caller_identity then
         error("inbox " .. args[2] .. " shows a message only to the member it was delivered to."
           .. " Next: run it from that member's session, or remuda butler inbox <name>", 0)
       end
-      return remuda._butler_inbox_message(me, args[2])
+      return remuda._butler_inbox_message(caller_identity, args[2])
     end)
   end
   return cli_result(function()
-    local me = current_agent(caller)
-    local name = args[2] or assert(me, "no Butler identity in your env; use `inbox <name>`")
-    if me and args[2]
-        and remuda._butler_identity.mail_id(name, true) ~= remuda._butler_identity.mail_id(me, true) then
-      error("agents may only read their own Butler inbox.\nNext: remuda butler inbox", 0)
+    local name = args[2] or assert(caller_identity, "no Butler identity in your env; use `inbox <name>`")
+    if caller_identity and args[2] then
+      -- Check only the caller's own identifiers before inbox resolution. An
+      -- unknown target gets the same refusal as any other cross-member name.
+      local own_id, own_agent
+      local ok, id, agent = pcall(remuda._butler_identity.mail_id, caller_identity, true)
+      if ok then own_id, own_agent = id, agent end
+      local own_alias = own_agent and own_agent.alias
+      local own_session = own_agent and own_agent.session_name
+      if name ~= caller_identity and name ~= own_id and name ~= own_alias and name ~= own_session then
+        error("agents may only read their own Butler inbox.\nNext: remuda butler inbox", 0)
+      end
     end
     return remuda._butler_inbox(name)
   end)

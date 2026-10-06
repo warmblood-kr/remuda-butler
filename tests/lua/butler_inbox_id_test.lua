@@ -29,7 +29,8 @@ T.test("inbox_with_a_non_ulid_opens_no_message_file", function()
     for _, id in ipairs({ '../../x', 'not-a-ulid' }) do
       local ok, err = pcall(remuda._butler_command_run, 'inbox', { 'inbox', id },
         { env = { REMUDA_BUTLER_AGENT_ID = agent.id } })
-      rejected[#rejected + 1] = tostring(not ok and tostring(err):find('unknown member: ' .. id, 1, true) ~= nil)
+      rejected[#rejected + 1] = tostring(not ok
+        and tostring(err):find('agents may only read their own Butler inbox', 1, true) ~= nil)
     end
     io.open = real_open
     local bus = remuda._butler_bus

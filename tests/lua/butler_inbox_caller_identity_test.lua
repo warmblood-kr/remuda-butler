@@ -49,10 +49,20 @@ T.test("named_inbox_refuses_another_agents_alias_and_id_without_marking_mail_rea
 end)
 
 T.test("named_inbox_refusal_does_not_reveal_whether_the_member_has_mail", function()
-  local with_mail = call("inbox", { "inbox", "bob" }, alice_id)
-  local empty = call("inbox", { "inbox", "carol" }, alice_id)
-  T.eq(with_mail:match("^error\0(.*)$"), empty:match("^error\0(.*)$"), "same refusal for occupied and empty inbox")
-  T.ok(not with_mail:find("bob", 1, true) and not empty:find("carol", 1, true), "refusal must not identify the requested member")
+  local absent_id = "00000000000000000000000000"
+  local results = {
+    call("inbox", { "inbox", "bob" }, alice_id),
+    call("inbox", { "inbox", "carol" }, alice_id),
+    call("inbox", { "inbox", "absent-member" }, alice_id),
+    call("inbox", { "inbox", absent_id }, alice_id),
+  }
+  local refusal = results[1]:match("^error\0(.*)$")
+  T.ok(refusal, "cross-member inbox must be refused: " .. results[1])
+  for index, result in ipairs(results) do
+    T.eq(result:match("^error\0(.*)$"), refusal, "same refusal regardless of target existence (case " .. index .. ")")
+  end
+  T.eq(T.eval("return tostring(remuda._butler_mail.is_unread(" .. string.format("%q", bob_id)
+    .. ", " .. string.format("%q", bob_message) .. "))"), "true", "all refused lookups leave Bob's mail unread")
 end)
 
 T.test("agent_can_read_own_named_inbox_and_operator_can_read_any_named_inbox", function()
@@ -80,7 +90,7 @@ T.test("message_id_branch_keeps_owner_not_found_and_not_yours_checks", function(
 
   local missing = call("inbox", { "inbox", "00000000000000000000000000" }, alice_id)
   T.ok(missing:match("^error\0"), "unknown message ID must remain an error")
-  T.ok(missing:find("no Butler agent with id", 1, true), "not-found behavior changed: " .. missing)
+  T.ok(missing:find("agents may only read their own Butler inbox", 1, true), "unresolved ULID refusal changed: " .. missing)
   T.ok(not missing:find("bob private secret", 1, true), "not-found lookup leaked mail")
 end)
 
