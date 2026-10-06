@@ -35,3 +35,13 @@ T.test("inbox_with_a_non_ulid_opens_no_message_file", function()
       .. '|' .. tostring(bus.messages['not-a-ulid'] == nil)
   ]=]), "0|true|true")
 end)
+
+-- Outside an agent session, `inbox <message-id>` says why and ends with a
+-- Next: line.
+T.test("operator_inbox_with_a_message_id_gets_a_next_line", function()
+  T.eq(T.eval([=[
+    local id = remuda._butler_send('butler', 'cx1', 'operator view'):match('^queued (%S+)')
+    local ok, out = pcall(remuda._butler_command_run, 'inbox', { 'inbox', id }, { env = {} })
+    return tostring(out):find('Next:', 1, true) ~= nil and 'next' or tostring(out)
+  ]=]), "next")
+end)

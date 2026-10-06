@@ -3293,23 +3293,6 @@ fn a_rise_during_our_compaction_does_not_rearm_the_heuristic() {
     assert_eq!(got, "0", "a rise during our compaction must not re-arm the heuristic");
 }
 
-// SEC #159 L2: `inbox <message-id>` outside an agent session says why, with
-// a Next: line.
-#[test]
-fn operator_inbox_with_a_message_id_gets_a_next_line() {
-    let (path, _daemon) = butler_with_named_agent("renotice-l2-operator", "cx1", "codex");
-    setup_renotice(&path, "cx1");
-    let got = eval(
-        &path,
-        r#"
-        local id = remuda._rn_lead('operator view')
-        local ok, out = pcall(remuda._butler_command_run, 'inbox', { 'inbox', id }, { env = {} })
-        return tostring(out):find('Next:', 1, true) ~= nil and 'next' or tostring(out)
-        "#,
-    );
-    assert_eq!(got, "next", "an operator inbox <message-id> needs a Next: line");
-}
-
 // SEC #159 L3: reading other mail (unread reaches 0) does not drop a queued
 // re-show.
 #[test]
