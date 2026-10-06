@@ -209,8 +209,9 @@ local function audit_refusal(record, data, verdict)
     tool = data.tool, class = data.class, summary = verdict == "denied" and "remembered deny" or "rate limit" })
 end
 
--- Returns the deferred reply for the hook, or nil when the hook should print nothing.
-function M.maybe_request(record, hook_json)
+-- Returns the deferred reply for the hook, or nil when the hook should print nothing. `holders`, `holder_name`:
+-- guard_grants.holders(), read once at hook entry.
+function M.maybe_request(record, hook_json, holders, holder_name)
   if not (M.enabled() and policy.enabled()) then return nil end
   if record.event ~= "PermissionRequest" or record.kind ~= "claude" or type(hook_json) ~= "table" then return nil end
   if type(remuda.pending) ~= "function" or record.class == "script" or not ROUTED_TOOLS[record.tool] then return nil end
@@ -229,7 +230,6 @@ function M.maybe_request(record, hook_json)
   if grants_on() then
     -- Frozen: no standing grant is offered (the owner's reaction would make none).
     -- The holder is the calling session by core's caller identity (not the env alias): no identity, no offer.
-    local holders, holder_name = grants.holders()
     data.offer = holders and not grants.frozen() and grants.offer(record.tool, input, hook_json.cwd) or nil
     if data.offer then
       data.offer.expires = grants.time() + grants.DEFAULT_TTL

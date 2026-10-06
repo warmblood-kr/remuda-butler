@@ -1152,7 +1152,7 @@ end
 -- PreToolUse, so a deny there and Claude's own checks still run. First refusal wins, and every refusal or error
 -- returns nil: the call goes on to the approval post or Claude's prompt (ask), never to allow. The use is audited
 -- (grant_used, with its grant_id) before the allow; an unwritten line means no allow, and its reserved use is given back.
-local function grant_reply(record, hook_json)
+local function grant_reply(record, hook_json, holders)
   if record.event ~= "PermissionRequest" or record.kind ~= "claude" or type(hook_json) ~= "table" then return nil end
   if not (M.approvals_enabled() and M.grants_enabled()) then return nil end -- off: the store is not read
   local grants, approval = remuda.butler.guard_grants, remuda.butler.guard_approval
@@ -1161,8 +1161,7 @@ local function grant_reply(record, hook_json)
   if M.deny_reason(record.tool, input, { cwd = hook_json.cwd }) then return nil end
   local shell = record.tool == "Bash" or record.tool == "PowerShell"
   if not ((shell and record.class == "push") or (record.tool == "WebFetch" and record.class == "net")) then return nil end
-  local holders = grants.holders() -- core's caller identity: no known session, no grant
-  if not holders then return nil end
+  if not holders then return nil end -- core's caller identity: no known session, no grant
   local matched, id = pcall(grants.match, record.tool, input, hook_json.cwd, record.class, holders)
   if not matched then note("guard grant match failed, asking: " .. tostring(id)); return nil end
   if not id then return nil end
@@ -1200,6 +1199,10 @@ function M.run(args, caller)
     local ok, err = pcall(function()
       if not M.enabled() then return end
       local record, hook_json = hook(caller)
+      -- Core's caller identity is read once, here, before an audit write can wait on the lock while another hook runs.
+      local holders, holder_name
+      local grants = remuda.butler.guard_grants
+      if grants and record.event == "PermissionRequest" then holders, holder_name = grants.holders() end
       if hook_json and record.event == "PreToolUse" and M.deny_enabled() then
         local policy_ok, reason = pcall(M.deny_reason, record.tool, hook_json.tool_input, { cwd = hook_json.cwd })
         if not policy_ok then
@@ -1218,11 +1221,11 @@ function M.run(args, caller)
         end
       end
       audit(record)
-      local ok_grant, granted = pcall(grant_reply, record, hook_json)
+      local ok_grant, granted = pcall(grant_reply, record, hook_json, holders)
       if ok_grant and granted then reply = granted; return end
       if not ok_grant then note("guard grant failed, asking: " .. tostring(granted)) end
       local routing = remuda.butler.guard_approval
-      if routing then reply = routing.maybe_request(record, hook_json) end
+      if routing then reply = routing.maybe_request(record, hook_json, holders, holder_name) end
     end)
     if not ok then note("guard failed open: " .. tostring(err)) end
     return reply or ""
