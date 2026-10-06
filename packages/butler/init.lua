@@ -27,8 +27,15 @@ end
 
 local function boot()
   if booted then return end
-  booted = true
+  -- A commands-only standby loaded only the refusal verbs. Explicit start
+  -- must re-ask the home locks inside this lifecycle transaction.
+  if host._butler_standby then main_loaded = false end
   load_main()
+  if host._butler_standby then
+    main_loaded = false
+    error(host.butler.guard.refusal(host._butler_standby), 0)
+  end
+  booted = true
   if host._butler_bootstrap and host._butler_test_mode ~= "lifecycle" then host._butler_bootstrap() end
   host.emit("butler-start")
   start_matrix_relay()
@@ -101,7 +108,13 @@ return {
   commands = function(state)
     commands_only = true
     host._butler_state = state
-    load_main()
+    if host._butler_standby then
+      -- A refused start rolls back. Rediscovery preserves its refusal even
+      -- if the owner has since gone; only an explicit start may take over.
+      host.butler.guard.standby(host._butler_standby, host._butler_paths)
+    else
+      load_main()
+    end
   end,
   start = function(state)
     host._butler_state = state
