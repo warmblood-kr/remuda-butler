@@ -34,6 +34,7 @@ sessions
 shell-lines
 status
 status-hook
+# The switches are declared-spec parsed on current cores, with old-core arity fallback retained.
 status-commands
 statusline
 topic delegate
