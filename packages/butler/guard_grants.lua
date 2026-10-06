@@ -401,20 +401,35 @@ function M.touches_ci(names)
   return false
 end
 
+-- One wall-clock budget for all the git probes of one match()/offer(), checked before each call; spent means no grant.
+-- ponytail: os.time() has 1 s resolution, so the budget is 2 s +/- 1 s; a finer clock when core has one.
+local GIT_BUDGET, GIT_TIMEOUT = 2, 2
+local deadline
+local function spent() return deadline ~= nil and os.time() >= deadline end
+local function budgeted(fn)
+  return function(...)
+    deadline = os.time() + GIT_BUDGET
+    local r = table.pack(pcall(fn, ...))
+    deadline = nil
+    if not r[1] then error(r[2], 0) end
+    return table.unpack(r, 2, r.n)
+  end
+end
+
 -- Files the push would add over the upstream ref, best effort; nil when it cannot be computed.
 function M.diff_names(cwd, base)
   -- Repo config must not run anything at hook time (fsmonitor, hooks, external diff, textconv); renames are
   -- split so a move out of a CI path still lists the source. base is the ref the push updates.
   local argv = { "env", "GIT_OPTIONAL_LOCKS=0", "git", "-C", cwd, "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
     "--no-pager", "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", (base or "@{upstream}") .. "...HEAD" }
-  local ok, r = pcall(remuda.process.run, { argv = argv, timeout = 5 })
+  if spent() then return nil end
+  local ok, r = pcall(remuda.process.run, { argv = argv, timeout = GIT_TIMEOUT })
   if not ok or type(r) ~= "table" or r.code ~= 0 or r.timed_out then return nil end
   local names = {}
   for name in (r.stdout or ""):gmatch("[^\0]+") do names[#names + 1] = name end
   return names
 end
 
-local FILE_TOOLS = { Write = 1, Edit = 1, MultiEdit = 1, NotebookEdit = 1 }
 local DEFAULT_PORT = { http = "80", https = "443" }
 local function host_of(url)
   if type(url) ~= "string" then return nil end
@@ -428,11 +443,15 @@ local function host_of(url)
   return parse("net", host .. (port and (":" .. port) or ""))
 end
 
--- Trimmed stdout and exit code of `git -C cwd ...`; nil when git could not run or timed out.
+-- Trimmed stdout and exit code of `git -C cwd ...`; nil when git could not run, timed out or the budget is spent.
 local function git(cwd, ...)
-  local ok, r = pcall(remuda.process.run, { argv = { "git", "-C", cwd, ... }, timeout = 5 })
+  if spent() then return nil end
+  local ok, r = pcall(remuda.process.run, { argv = { "git", "-C", cwd, ... }, timeout = GIT_TIMEOUT })
   if ok and type(r) == "table" and type(r.code) == "number" and not r.timed_out then return ((r.stdout or ""):gsub("%s+$", "")), r.code end
 end
+
+-- A grant never publishes the default branches: they are T3 and always ask, as are tags.
+local PROTECTED_BRANCH = { main = true, master = true, trunk = true }
 
 -- A push is covered only when the command is exactly `git push [remote [current-branch]]`: no shell syntax, no
 -- cd/-C/env/GIT_DIR prefix, no refspec, no flag. The remote word must be a configured remote (never a path) with
@@ -447,7 +466,7 @@ local function plain_push(command, cwd)
   if #w < 2 or #w > 4 or w[1] ~= "git" or w[2] ~= "push" then return nil end
   for i = 3, #w do if w[i]:find("^%-") then return nil end end
   local branch, bcode = git(cwd, "symbolic-ref", "--short", "-q", "HEAD")
-  if bcode ~= 0 or branch == "" then return nil end
+  if bcode ~= 0 or branch == "" or PROTECTED_BRANCH[branch:lower()] then return nil end
   -- A config probe: exit 0 = set (value), exit 1 = unset (nil); any other result (failure, timeout) is no grant.
   local failed = false
   local function cfg(...)
@@ -459,6 +478,8 @@ local function plain_push(command, cwd)
   if cfg("--get", "remote.pushDefault") or cfg("--get", "branch." .. branch .. ".pushRemote") then return nil end
   -- config that redirects or rewrites a push (mirror, pushurl, insteadOf, submodule recursion) is no grant
   if cfg("--get-regexp", "^(remote\\..*\\.(mirror|pushurl)|url\\..*\\.(insteadof|pushinsteadof)|push\\.recursesubmodules)$") then return nil end
+  -- push.followTags publishes tags (releases) with the branch; of the push.* settings in git-push(1) it is the only one that does
+  if cfg("--get", "push.followTags") then return nil end
   local mode = cfg("--get", "push.default")
   if mode == "matching" or mode == "nothing" then return nil end
   local up_remote, up_merge = cfg("--get", "branch." .. branch .. ".remote"), cfg("--get", "branch." .. branch .. ".merge")
@@ -480,7 +501,7 @@ end
 -- What a standing grant for this call would be: { class, scope, ceiling } with the scope resolved, or nil. The
 -- approval post shows it and the owner's reaction decides; nothing here creates a grant. Only calls the approval
 -- post routes can be offered: a fetch (net, exact host) or a plain push (git, the working directory).
-function M.offer(tool, input, cwd)
+M.offer = budgeted(function(tool, input, cwd)
   input = type(input) == "table" and input or {}
   local class, pattern
   if tool == "WebFetch" then
@@ -491,30 +512,35 @@ function M.offer(tool, input, cwd)
   end
   local scope = pattern and M.scope(class, pattern)
   if scope then return { class = class, scope = scope, ceiling = "T2" } end
-end
+end)
 
 -- The store's clock (the test seam included), and the display escape, for the code that announces grants.
 function M.time() return now() end
 M.show = show
 
--- The id of the active grant that covers this call, or nil. Never takes an id from the call itself.
-function M.match(tool, input, cwd)
+-- The id of the active grant that covers this call, or nil. Never takes an id from the call itself. `class` is the
+-- call's class (guard_policy.classify, computed here when not given): only a plain push or a WebFetch may match, so
+-- a call that classifies as weaken, identity, escape, control, destroy, script or other never has a grant.
+M.match = budgeted(function(tool, input, cwd, class)
   if not policy.grants_enabled() then return nil end
   input = type(input) == "table" and input or {}
-  local class, target, base
-  if FILE_TOOLS[tool] then
-    class, target = "writable", M.canonical(input.file_path or input.notebook_path)
-  elseif tool == "WebFetch" then
-    class, target = "net", host_of(input.url)
-  elseif (tool == "Bash" or tool == "PowerShell") and policy.classify(tool, input, { cwd = cwd }) == "push" then
+  class = class or policy.classify(tool, input, { cwd = cwd })
+  local kind, target, base
+  local grants = M.active()
+  if tool == "WebFetch" and class == "net" then
+    kind, target = "net", host_of(input.url)
+  elseif (tool == "Bash" or tool == "PowerShell") and class == "push" then
+    local any -- no git grant, no git: the probes below spawn processes
+    for _, g in ipairs(grants) do if g.class == "git" then any = true; break end end
+    if not any then return nil end
     base = plain_push(input.command, cwd)
     if not base then return nil end
-    class, target = "git", M.canonical(cwd)
+    kind, target = "git", M.canonical(cwd)
   end
-  if not target or (class ~= "net" and protected_target(target)) then return nil end
-  for _, g in ipairs(M.active()) do
-    if g.class == class and covers(g, target) then
-      if class == "git" then
+  if not target or (kind ~= "net" and protected_target(target)) then return nil end
+  for _, g in ipairs(grants) do
+    if g.class == kind and covers(g, target) then
+      if kind == "git" then
         local names = M.diff_names(cwd, base)
         if names == nil or M.touches_ci(names) then return nil end -- no diff: the tier asks
       end
@@ -522,6 +548,6 @@ function M.match(tool, input, cwd)
     end
   end
   return nil
-end
+end)
 
 return M

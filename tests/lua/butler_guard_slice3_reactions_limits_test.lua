@@ -234,7 +234,7 @@ T.test("a plain push is offered a git grant for its working directory and the gr
   local work = T.eval([[local root = os.getenv('XDG_DATA_HOME') .. '/l-git-tree'
     local script = table.concat({ 'set -e', 'mkdir -p ' .. root, 'cd ' .. root, 'git init -q --bare remote.git',
       'git clone -q remote.git work 2>/dev/null', 'cd work', 'git config user.email t@t; git config user.name t',
-      'echo a > a; git add a; git commit -q -m a', 'git push -q -u origin HEAD 2>/dev/null',
+      'echo a > a; git add a; git commit -q -m a', 'git branch -q -M feat; git push -q -u origin HEAD 2>/dev/null',
       'echo b > b; git add b; git commit -q -m b' }, '\n')
     remuda.process.run({ argv = { 'sh', '-c', script } })
     return (remuda.fs.realpath(root .. '/work'))]])

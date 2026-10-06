@@ -43,32 +43,44 @@ local function tree(name)
     return remuda._t_root
   ]])
 end
-T.test("R2 MUST 2: a target under a protected place gets no grant even under a broad scope", function()
+T.test("R2 MUST 2: a push from a protected place gets no grant even under a broad scope", function()
   start_butler()
   tree("g3p3-target")
   local home = T.eval("return remuda.butler.guard_grants.canonical(os.getenv('HOME'))")
   T.eval("remuda._t_guard({'guard','grants','on'})")
-  T.eq(T.eval("return tostring(remuda._t_add({ class = 'writable', scope = " .. string.format("%q", home .. "/projects/*")
+  T.eq(T.eval("return tostring(remuda._t_add({ class = 'git', scope = " .. string.format("%q", home .. "/projects/*")
     .. ", ceiling = 'T2', holder = 'ss-a', event = '$ev1', ttl = 3600 }))"), "g001", "a broad scope under the home is allowed")
-  local function w(p) return T.eval(("return tostring(remuda.butler.guard_grants.match('Write', { file_path = %q }, '/'))"):format(p)) end
-  T.eq(w(home .. "/projects/x/src/a.lua"), "g001", "control: an ordinary file is covered")
-  T.eq(w(home .. "/projects/srv/x.gitignore/hooks/a"), "g001", "control: only a segment ending in .git is a git dir")
+  -- a fake git that finds a clean plain push on a feature branch, so only the cwd decides
+  T.eval([[remuda._t_real_run = remuda.process.run
+    remuda.process.run = function(o)
+      local a = o.argv
+      if a[1] == 'env' then return { code = 0, stdout = '' } end -- the diff
+      if a[1] ~= 'git' then return remuda._t_real_run(o) end
+      local sub, key = a[4], a[#a]
+      if sub == 'symbolic-ref' then return { code = 0, stdout = 'feat\n' } end
+      if sub == 'remote' then return { code = 0, stdout = 'origin\n' } end
+      if key == 'branch.feat.remote' then return { code = 0, stdout = 'origin\n' } end
+      if key == 'branch.feat.merge' then return { code = 0, stdout = 'refs/heads/feat\n' } end
+      return { code = 1, stdout = '' }
+    end]])
+  local function w(cwd) return T.eval(("return tostring(remuda.butler.guard_grants.match('Bash', { command = 'git push' }, %q))"):format(cwd)) end
+  T.eq(w(home .. "/projects/x/src"), "g001", "control: an ordinary directory is covered")
+  T.eq(w(home .. "/projects/srv/x.gitignore/hooks"), "g001", "control: only a segment ending in .git is a git dir")
   local data = T.eval("return remuda.butler.guard_grants.canonical(remuda.butler.guard_policy.dir())")
-  for _, bad in ipairs({ home .. "/projects/x/.git/hooks/pre-commit", home .. "/projects/x/.git/config", home .. "/projects/x/.claude/settings.json",
-    home .. "/projects/x/y/.claude/z", home .. "/projects/.ssh/id_rsa", home .. "/projects/x/.CLAUDE/z",
-    home .. "/projects/srv/x.git/hooks/post-receive", home .. "/projects/srv/X.GIT/config" }) do
+  for _, bad in ipairs({ home .. "/projects/x/.git/hooks", home .. "/projects/x/.claude", home .. "/projects/x/y/.claude/z",
+    home .. "/projects/.ssh", home .. "/projects/x/.CLAUDE", home .. "/projects/srv/x.git/hooks", home .. "/projects/srv/X.GIT/config" }) do
     T.eq(w(bad), "nil", "no grant: " .. bad)
   end
   -- places that are protected by location: the data dir and ~/.config/remuda, under a scope that reaches them
-  T.eval("remuda._t_guard({'guard','grants','on'})")
   local lax = T.eval(([[local g = remuda.butler.guard_grants
     local home, data = %q, %q
     local seen = {}
     local real = g.active
-    g.active = function() return { { id = 'g777', class = 'writable', scope = '/*' } } end
-    local function t(p) return tostring(g.match('Write', { file_path = p }, '/')) end
-    seen[1] = t(data .. '/guard-grants.jsonl'); seen[2] = t(home .. '/.config/remuda/x'); seen[3] = t(home .. '/projects/ok.txt')
+    g.active = function() return { { id = 'g777', class = 'git', scope = '/*' } } end
+    local function t(p) return tostring(g.match('Bash', { command = 'git push' }, p)) end
+    seen[1] = t(data); seen[2] = t(home .. '/.config/remuda/x'); seen[3] = t(home .. '/projects/ok')
     g.active = real
+    remuda.process.run = remuda._t_real_run
     return table.concat(seen, ',')]]):format(home, data))
   T.eq(lax, "nil,nil,g777", "the data dir and ~/.config/remuda are protected targets even if a (hand-written) grant covers them", "ok - protected targets")
 end)
