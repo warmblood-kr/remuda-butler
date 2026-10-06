@@ -57,7 +57,7 @@ T.test("R2 MUST 2: a push from a protected place gets no grant even under a broa
       if a[1] == 'env' then return { code = 0, stdout = '' } end -- the diff
       if a[1] ~= 'git' then return remuda._t_real_run(o) end
       local sub, key = a[4], a[#a]
-      if sub == 'symbolic-ref' then return { code = 0, stdout = 'feat\n' } end
+      if sub == 'symbolic-ref' then return key == 'HEAD' and { code = 0, stdout = 'refs/heads/feat\n' } or { code = 1, stdout = '' } end
       if sub == 'remote' then return { code = 0, stdout = 'origin\n' } end
       if key == 'branch.feat.remote' then return { code = 0, stdout = 'origin\n' } end
       if key == 'branch.feat.merge' then return { code = 0, stdout = 'refs/heads/feat\n' } end

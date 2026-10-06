@@ -465,8 +465,10 @@ local function plain_push(command, cwd)
   for s in command:gmatch("%S+") do w[#w + 1] = s end
   if #w < 2 or #w > 4 or w[1] ~= "git" or w[2] ~= "push" then return nil end
   for i = 3, #w do if w[i]:find("^%-") then return nil end end
-  local branch, bcode = git(cwd, "symbolic-ref", "--short", "-q", "HEAD")
-  if bcode ~= 0 or branch == "" or PROTECTED_BRANCH[branch:lower()] then return nil end
+  -- the full ref: --short prints heads/main when a tag named main exists
+  local ref, bcode = git(cwd, "symbolic-ref", "-q", "HEAD")
+  local branch = bcode == 0 and ref:match("^refs/heads/(.+)$")
+  if not branch or PROTECTED_BRANCH[branch:lower()] then return nil end
   -- A config probe: exit 0 = set (value), exit 1 = unset (nil); any other result (failure, timeout) is no grant.
   local failed = false
   local function cfg(...)
@@ -493,6 +495,9 @@ local function plain_push(command, cwd)
     if name == remote then
       local pushes = cfg("--get-all", "remote." .. name .. ".push")
       if pushes or failed then return nil end
+      -- nor the remote's default branch (its HEAD as last fetched; unknown locally means only the names above)
+      local head, hcode = git(cwd, "symbolic-ref", "-q", "refs/remotes/" .. remote .. "/HEAD")
+      if (hcode ~= 0 and hcode ~= 1) or (hcode == 0 and head:lower() == ("refs/remotes/" .. remote .. "/" .. branch):lower()) then return nil end
       return "refs/remotes/" .. remote .. "/" .. branch
     end
   end
@@ -518,11 +523,19 @@ end)
 function M.time() return now() end
 M.show = show
 
+-- Clock skew: the highest time seen is kept (daemon memory, survives a live reload); a clock more than a minute
+-- behind it matches nothing until it catches up. A forward jump only expires grants early.
+M._clock = M._clock or { high = 0 }
+local function skewed(t)
+  if t > M._clock.high then M._clock.high = t end
+  return t < M._clock.high - 60
+end
+
 -- The id of the active grant that covers this call, or nil. Never takes an id from the call itself. `class` is the
 -- call's class (guard_policy.classify, computed here when not given): only a plain push or a WebFetch may match, so
 -- a call that classifies as weaken, identity, escape, control, destroy, script or other never has a grant.
 M.match = budgeted(function(tool, input, cwd, class)
-  if not policy.grants_enabled() then return nil end
+  if not policy.grants_enabled() or skewed(now()) then return nil end
   input = type(input) == "table" and input or {}
   class = class or policy.classify(tool, input, { cwd = cwd })
   local kind, target, base
@@ -549,5 +562,58 @@ M.match = budgeted(function(tool, input, cwd, class)
   end
   return nil
 end)
+
+-- Use accounting: at most HOURLY uses per grant per rolling hour; past that the call asks. Uses are UTC stamps
+-- (the audit line format, which sorts as time does) kept in daemon memory, surviving a live reload. After a start,
+-- a grant's first use rebuilds its list from the grant_used lines of the live audit log within the last hour (one
+-- bounded read); a rotation in that hour hides older lines, so the count can be low by what the rotated file held.
+M.HOURLY = 30
+local REBUILD_READ = 4 * 1024 * 1024
+M._uses = M._uses or {}
+M._limited = M._limited or {} -- grant id -> stamp of its last grant_limited line
+local function stamp(t) return os.date("!%Y-%m-%dT%H:%M:%SZ", t) end
+
+local function rebuild(id)
+  local path = policy.log_path()
+  local f = path and io.open(path, "r")
+  if not f then return nil end
+  local size = f:seek("end") or 0
+  f:seek("set", math.max(0, size - REBUILD_READ))
+  local text = f:read("a")
+  f:close()
+  if not text then return nil end
+  local used, want = {}, '"grant_id":' .. remuda.json.encode(id)
+  for line in text:gmatch("[^\n]+") do
+    local at = line:match('^{"time":"([^"]+)"')
+    if at and line:find('"event":"grant_used"', 1, true) and line:find(want, 1, true) then used[#used + 1] = at end
+  end
+  return used
+end
+
+-- "ok" when the grant has a use left this hour, "limited" when not, nil when its count cannot be known (ask).
+function M.room(id)
+  local list = M._uses[id] or rebuild(id)
+  if not list then return nil end
+  M._uses[id] = list
+  local floor = stamp(now() - 3600)
+  for i = #list, 1, -1 do if list[i] <= floor then table.remove(list, i) end end
+  return #list >= M.HOURLY and "limited" or "ok"
+end
+
+-- Reserve one use and return its stamp; release(id, stamp) gives it back when its grant_used line was not written.
+function M.count(id)
+  local list, at = M._uses[id] or {}, stamp(now())
+  M._uses[id] = list
+  list[#list + 1] = at
+  return at
+end
+function M.release(id, at)
+  local list = M._uses[id] or {}
+  for i = #list, 1, -1 do if list[i] == at then table.remove(list, i); return end end
+end
+
+-- True once per grant per hour: when its grant_limited line is due. noted() records that it was written.
+function M.limit_due(id) return (M._limited[id] or "") <= stamp(now() - 3600) end
+function M.noted(id) M._limited[id] = stamp(now()) end
 
 return M
