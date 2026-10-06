@@ -2486,11 +2486,18 @@ fn trust_dialogs_on_external_or_reused_directories_wait_for_a_human() {
               if name == 'outside' then return selected_yes end
               if name == 'outside_codex' then return codex_modal end
               if name == 'reused' then return safe_modal end
-              if name == 'fresh' then return "Accessing workspace:\n" .. {fresh:?} .. "\n❯ No, exit\n  Yes, I trust this folder" end
+              if name == 'fresh' then return remuda._trust_test_fresh end
               return three_options
             end
             remuda._trust_test_keys, remuda._trust_test_reports = {{}}, {{}}
-            remuda.key = function(name, key) table.insert(remuda._trust_test_keys, name .. ':' .. key) end
+            -- The fresh dialog follows the keys: <down> moves the marker onto Yes.
+            remuda._trust_test_fresh = "Accessing workspace:\n" .. {fresh:?} .. "\n❯ No, exit\n  Yes, I trust this folder"
+            remuda.key = function(name, key)
+              table.insert(remuda._trust_test_keys, name .. ':' .. key)
+              if name == 'fresh' and key == '<down>' then
+                remuda._trust_test_fresh = "Accessing workspace:\n" .. {fresh:?} .. "\n  No, exit\n❯ Yes, I trust this folder"
+              end
+            end
             remuda._butler_send = function(_, _, text) table.insert(remuda._trust_test_reports, text); return 'captured' end
             local cap = remuda._butler_bus.agents.butler.token
             remuda._call('butler_launch', {{ kind = 'claude', name = 'outside', cwd = {external:?} }}, {{ capability = cap }})
@@ -2502,10 +2509,17 @@ fn trust_dialogs_on_external_or_reused_directories_wait_for_a_human() {
             remuda._butler_topic_new('fresh', nil, 'claude')"#
         ),
     );
+    // Moving the marker and confirming take separate ticks; wait for the confirm.
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while std::time::Instant::now() < deadline
+        && !eval(&path, "return table.concat(remuda._trust_test_keys, '\\n')").lines().any(|key| key == "fresh:RET")
+    {
+        std::thread::sleep(Duration::from_millis(100));
+    }
     std::thread::sleep(Duration::from_secs(2));
     let keys = eval(&path, "return table.concat(remuda._trust_test_keys, '\\n')");
     assert!(keys.lines().all(|key| key.starts_with("fresh:")), "a human trust dialog was answered automatically: {keys}");
-    assert!(keys.contains("fresh:"), "fresh trust dialog was not answered: {keys}; state={}",
+    assert!(keys.lines().any(|key| key == "fresh:RET"), "fresh trust dialog was not answered: {keys}; state={}",
         eval(&path, "local a=remuda._butler_bus.agents.fresh; return tostring(a and a.cwd)..':'..tostring(a and a.trust_allowed)..':'..tostring(a and a.trust_reported)..':'..tostring(a and a.launch_attempts[1].reason)..':'..tostring(remuda._butler_bus.trusted_launch_dirs)"));
     let reports = eval(&path, "return table.concat(remuda._trust_test_reports, '\\n')");
     assert!(reports.contains("waiting for a human: trust dialog"), "leader was not asked for human trust: {reports}");
