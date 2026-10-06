@@ -24,6 +24,8 @@ local startup_action_safe = config.startup_action_safe
 local chooser = assert(remuda._butler_chooser)
 local PROMPT_DELIVERY = chooser.PROMPT_DELIVERY
 local trust_modal_state = chooser.trust_modal_state
+local trust_plan = chooser.trust_plan
+local trust_path_matches = chooser.trust_path_matches
 local choose = chooser.choose
 local configured_agent_order = chooser.configured_agent_order
 local setup_telemetry = chooser.setup_telemetry
@@ -37,6 +39,32 @@ local startup_modal_timeout_seconds = chooser.startup_modal_timeout_seconds
 local startup_modal = chooser.startup_modal
 local codex_update_complete = chooser.codex_update_complete
 local capture_update_evidence = chooser.capture_update_evidence
+
+-- The facts trust_eligible needs about this machine, read from this Butler's own process.
+local function trust_env()
+  load_topic_config()
+  local roots = {}
+  for _, tail in ipairs({ "", "/remuda", "/remuda/butler", "/remuda/butler/sessions", "/remuda/butler/mail" }) do
+    if data_home then roots[#roots + 1] = data_home .. tail end
+  end
+  local homed, home = pcall(system.home)
+  return {
+    realpath = config.realpath, home = homed and home or nil, project_home = topic_config.project_home,
+    protected = roots,
+    read_file = function(path)
+      local f = io.open(path, "rb")
+      if not f then return nil end
+      local text = f:read(4096)
+      f:close()
+      return text
+    end,
+    is_dir = function(path)
+      local f = io.open(path .. "/.", "r")
+      if f then f:close() end
+      return f ~= nil
+    end,
+  }
+end
 
 local function launch_agent(kind, requested_name, cwd, model, parent, task, relaunch_identity, fresh_trusted_cwd, profile)
   local candidates = kind and { kind } or configured_agent_order()
@@ -93,6 +121,10 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       and directory_is_under(cwd, sessions_root)
   end
   local launch_cwd = cwd or "."
+  -- Owner scope: any session THIS Butler launches in a guarded project or worktree directory.
+  local trust_checked, trust_ok = pcall(function() return chooser.trust_eligible(launch_cwd, trust_env()) end)
+  local trust_eligible = trust_checked and trust_ok == true
+  local trust_real_cwd = trust_eligible and config.realpath(launch_cwd) or nil
   if cwd and parent and auto_trust then write_agent_guidance(cwd, team_member_guidance(parent)) end
   local token = next_token(name)
   local telemetry_by_kind = {}
@@ -100,7 +132,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   telemetry_by_kind[kind] = agent_telemetry
   local choose_opts = {
     name = name, cwd = launch_cwd, auto_trust = auto_trust,
-    trust_path_gate = topic_trust_path,
+    trust_path_gate = topic_trust_path, trust_eligible = trust_eligible, trust_real_cwd = trust_real_cwd,
     spec = function(candidate_kind)
       local telemetry = telemetry_by_kind[candidate_kind]
         or setup_telemetry(candidate_kind, { name = name, model = model })
@@ -149,7 +181,8 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
     kind = kind, token = token, model = model, telemetry = agent_telemetry,
     parent = parent, children = {}, id = identity.id, alias = actual, session_name = actual,
     session_start_marker = remuda._butler_new_ulid(),
-    cwd = launch_cwd, task = task, launch_attempts = attempts, trust_allowed = auto_trust,
+    cwd = launch_cwd, task = task, launch_attempts = attempts, trust_allowed = auto_trust or trust_eligible,
+    trust_eligible = trust_eligible, trust_real_cwd = trust_real_cwd,
     sandbox = profile and profile.sandbox, writable = profile and profile.writable,
     trust_reported = waiting_for_trust, trust_answered = trust_answered,
   }
@@ -326,23 +359,35 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       if modal and modal.trust then
         local trust_state = trust_modal_state(modal, screen)
         local agent = bus.agents[actual]
-        if trust_state == "safe" and agent.trust_answered then return end
+        local actionable = trust_state == "safe" or trust_state == "safe_selected"
+        if actionable and agent.trust_answered then return end
         if agent.last_trust_screen == screen then agent.trust_ticks = (agent.trust_ticks or 0) + 1
         else agent.last_trust_screen, agent.trust_ticks = screen, 1 end
         if agent.trust_ticks < 2 then return end
-        if trust_state == "safe" and agent.trust_allowed and bus.trusted_launch_dirs
-            and bus.trusted_launch_dirs[agent.cwd] == true and startup_action_safe
-            and startup_action_safe(actual) then
-          if not agent.trust_answered then
-            local answered = true
-            for _, key in ipairs(modal.keys or {}) do
-              local ok, result = pcall(remuda.key, actual, key)
-              if not ok or result == false then answered = false end
-            end
-            if answered then
-              agent.trust_answered = true
-              bus.trusted_launch_dirs[agent.cwd] = nil
-            end
+        if actionable and agent.trust_allowed
+            and (agent.trust_eligible or (bus.trusted_launch_dirs and bus.trusted_launch_dirs[agent.cwd] == true))
+            and startup_action_safe and startup_action_safe(actual)
+            and (trust_state ~= "safe" or (agent.trust_moves or 0) < 3)
+            and (not agent.trust_eligible or trust_path_matches(modal, screen, agent.cwd, agent.trust_real_cwd)) then
+          -- Move the marker onto the affirmative option by its text; confirm once it is selected.
+          local plan = trust_plan(modal, screen)
+          local keys = plan and (#plan.moves > 0 and plan.moves or { "RET" }) or {}
+          if plan and #plan.moves > 0 then
+            agent.trust_moves = (agent.trust_moves or 0) + 1
+          end
+          local pressed = #keys > 0
+          for _, key in ipairs(keys) do
+            local ok, result = pcall(remuda.key, actual, key)
+            if not ok or result == false then pressed = false end
+          end
+          local trace = remuda._butler_session_trace or _G._butler_session_trace
+          if trace and plan then
+            pcall(trace, "trust_press", actual .. " agent=" .. tostring(agent.kind) .. " cwd=" .. tostring(agent.cwd)
+              .. " option=" .. plan.label .. " result=" .. (pressed and (keys[1] == "RET" and "confirmed" or "selected") or "key_failed"))
+          end
+          if pressed and keys[1] == "RET" then
+            agent.trust_answered = true
+            if bus.trusted_launch_dirs then bus.trusted_launch_dirs[agent.cwd] = nil end
           end
         elseif not agent.trust_reported then
           agent.trust_reported = true

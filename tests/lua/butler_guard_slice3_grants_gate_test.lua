@@ -63,7 +63,12 @@ local function git_fixture(name)
   return work, sh
 end
 local function grant_for(command, cwd, class)
-  return T.eval(("return tostring(remuda.butler.guard_grants.match('Bash', { command = %q }, %q, %s))"):format(command, cwd, class and string.format("%q", class) or "nil"))
+  return T.eval(([[local g = remuda.butler.guard_grants; local budget = g.git_budget_s
+    g.git_budget_s = 20 -- control assertions must not depend on os.time() second boundaries
+    local ok, id = pcall(g.match, 'Bash', { command = %q }, %q, %s)
+    g.git_budget_s = budget
+    if not ok then error(id, 0) end
+    return tostring(id)]]):format(command, cwd, class and string.format("%q", class) or "nil"))
 end
 
 T.test("class gate: only push and net may match; every other class gets no grant", function()
@@ -92,9 +97,10 @@ T.test("grant_id stays '-' on hook lines (denied, PreToolUse, PermissionRequest)
   T.expect(has(last_line(), '"grant_id":"-"'), "PreToolUse: " .. last_line())
   T.eval(("remuda._t_hook(%q)"):format(hook("PermissionRequest")))
   T.expect(has(last_line(), '"grant_id":"-"'), "PermissionRequest (nothing allows yet): " .. last_line())
-  T.eval("local gp = remuda.butler.guard_policy; local real = gp.deny_reason; gp.deny_reason = function() return 'test deny' end; _G._t_real_deny = real")
-  T.eval(("remuda._t_hook(%q)"):format(hook("PreToolUse")))
-  T.eval("remuda.butler.guard_policy.deny_reason = _G._t_real_deny")
+  T.eval(([[local gp = remuda.butler.guard_policy; local real = gp.deny_reason
+    gp.deny_reason = function() return 'test deny' end
+    local ok, err = pcall(remuda._t_hook, %q)
+    gp.deny_reason = real; if not ok then error(err, 0) end]]):format(hook("PreToolUse")))
   T.expect(has(last_line(), '"event":"deny"') and has(last_line(), '"grant_id":"-"'), "a denied call carries '-': " .. last_line())
   T.eval([[local gp = remuda.butler.guard_policy
     gp.append({ event = 'grant_used', grant_id = 'g001', tool = 'WebFetch', class = 'net' })
@@ -104,21 +110,25 @@ T.test("grant_id stays '-' on hook lines (denied, PreToolUse, PermissionRequest)
 end)
 
 -- Runs match('Bash', 'git push') with remuda.process.run counted (and each git call slowed by `slow` seconds); returns "id calls".
-local function counted(work, slow)
+local function counted(work, slow, net_only)
   return T.eval(([[local real, g = remuda.process.run, remuda.butler.guard_grants
+    local budget = g.git_budget_s
+    if %d == 0 then g.git_budget_s = 20 end -- the slow-git assertion keeps the default 2s
+    local active = g.active
     local n = 0
+    -- A repeated Butler exec can run its fallback between evals: install, exercise and restore the stub together.
+    if %s then g.active = function() return { { id = 'g009', class = 'net', scope = 'example.com' } } end end
     remuda.process.run = function(o) n = n + 1; if %d > 0 then real({ argv = { 'sleep', '%d' } }) end; return real(o) end
-    local id = g.match('Bash', { command = 'git push' }, %q)
-    remuda.process.run = real
-    return tostring(id) .. ' ' .. n]]):format(slow, slow, work))
+    local ok, id = pcall(g.match, 'Bash', { command = 'git push' }, %q)
+    remuda.process.run, g.active, g.git_budget_s = real, active, budget
+    if not ok then error(id, 0) end
+    return tostring(id) .. ' ' .. n]]):format(slow, tostring(net_only == true), slow, slow, work))
 end
 
 T.test("git work is budgeted: with no git grant no git runs; a slow git means no grant", function()
   local work = git_fixture("g3a-budget")
   T.eq(counted(work, 0):match("^g001"), "g001", "control: covered")
-  T.eval("local g = remuda.butler.guard_grants; _G._t_active = g.active; g.active = function() return { { id = 'g009', class = 'net', scope = 'example.com' } } end")
-  T.eq(counted(work, 0), "nil 0", "only a net grant exists: a push candidate spawns nothing")
-  T.eval("remuda.butler.guard_grants.active = _G._t_active")
+  T.eq(counted(work, 0, true), "nil 0", "only a net grant exists: a push candidate spawns nothing")
   local slow = counted(work, 1)
   local id, calls = slow:match("^(%S+) (%d+)$")
   T.eq(id, "nil", "over budget: no grant")

@@ -27,8 +27,15 @@ end
 
 local function boot()
   if booted then return end
-  booted = true
+  -- A commands-only standby loaded only the refusal verbs. Explicit start
+  -- must re-ask the home locks inside this lifecycle transaction.
+  if host._butler_standby then main_loaded = false end
   load_main()
+  if host._butler_standby then
+    main_loaded = false
+    error(host.butler.guard.refusal(host._butler_standby), 0)
+  end
+  booted = true
   if host._butler_bootstrap and host._butler_test_mode ~= "lifecycle" then host._butler_bootstrap() end
   host.emit("butler-start")
   start_matrix_relay()
@@ -76,22 +83,22 @@ local function stop_legacy_matrix_relay()
   host._butler_matrix_relay_script_path = nil
 end
 
-local fallback
-if host._butler_start_fallback then host.cancel(host._butler_start_fallback) end
--- A core that loads this mod for its commands alone calls `commands` during the
--- load; that load boots nothing, the later `start` does. Every other load of
--- this file (an exec, a core without the hook) boots by fallback when no `start` came.
+-- Core instantiates declared schedules only for an accepted activation. A
+-- discarded exec candidate must neither create nor cancel a fallback timer.
 local commands_only = false
-fallback = host.schedule({ name = "butler-start-fallback", every = 0.05, run = function()
-  host.cancel(fallback)
-  if host._butler_start_fallback == fallback then host._butler_start_fallback = nil end
-  if not booted and not commands_only then
-    io.stderr:write("butler: this remuda core ignores the lifecycle start hook"
-      .. " (warmblood-kr/remuda#104); booted by fallback -- run `remuda upgrade`\n")
-    boot()
+local function cancel_start_fallback()
+  -- Declared callbacks receive state, not their schedule handle. Find this
+  -- activation's timer in the registry; older cores do not record an owner.
+  for handle, schedule in pairs(host.schedules) do
+    if schedule.name == "butler-start-fallback"
+      and (schedule.owner == nil or schedule.owner == "butler") then
+      host.cancel(handle)
+    end
   end
-end })
-host._butler_start_fallback = fallback
+  -- Retire the imperative timer left by a Butler version predating this fix.
+  if host._butler_start_fallback then host.cancel(host._butler_start_fallback) end
+  host._butler_start_fallback = nil
+end
 
 return {
   api = "remuda-module-v1",
@@ -101,7 +108,13 @@ return {
   commands = function(state)
     commands_only = true
     host._butler_state = state
-    load_main()
+    if host._butler_standby then
+      -- A refused start rolls back. Rediscovery preserves its refusal even
+      -- if the owner has since gone; only an explicit start may take over.
+      host.butler.guard.standby(host._butler_standby, host._butler_paths)
+    else
+      load_main()
+    end
   end,
   start = function(state)
     host._butler_state = state
@@ -114,8 +127,7 @@ return {
     if matrix and matrix.relay then pcall(matrix.relay.stop)
     end
     stop_legacy_matrix_relay()
-    if host._butler_start_fallback then host.cancel(host._butler_start_fallback) end
-    host._butler_start_fallback = nil
+    cancel_start_fallback()
   end,
   hooks = {
     { event = "butler-start", id = "boot", run = load_main },
@@ -135,6 +147,16 @@ return {
       end },
   },
   schedules = {
+    -- Commands-only loads boot nothing. A core that ignores `start` still
+    -- boots an accepted exec/reload once through this compatibility timer.
+    { name = "butler-start-fallback", every = 0.05, run = function()
+      cancel_start_fallback()
+      if not booted and not commands_only then
+        io.stderr:write("butler: this remuda core ignores the lifecycle start hook"
+          .. " (warmblood-kr/remuda#104); booted by fallback -- run `remuda upgrade`\n")
+        boot()
+      end
+    end },
     { name = "butler-notices", every = 1, run = function()
       if booted and host._butler_deliver_notices then host._butler_deliver_notices() end
     end },

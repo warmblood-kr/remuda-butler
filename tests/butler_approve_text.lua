@@ -194,4 +194,77 @@ assert(message_mode_id == nil and message_mode_error:find("require live Matrix s
   and request_spec == prior_spec,
   "registration is refused when messages fallback cannot deliver live approvals")
 remuda._butler_matrix_live_config.use_messages = false
+-- Read-back: "typed" must mean the text is on the pane. Fake screen + fake timer; never retypes.
+do
+  local screen, scheduled = "$ ", {}
+  remuda.capture = function() return screen end
+  remuda._butler_system = { after = function(_, fn) scheduled[#scheduled + 1] = fn; return true end }
+  local text = "please run the full release checklist now"
+  local function verdict(on_type)
+    local count_before = #typed
+    scheduled = {}
+    local ok_, why_, _, verify = approve_text.type_text("agent-1", text, provenance)
+    assert(ok_ == true and why_ == nil and type(verify) == "function", "typing returns a read-back")
+    if on_type then screen = on_type(screen) end
+    local got
+    verify(function(seen) got = seen end)
+    while got == nil and #scheduled > 0 do table.remove(scheduled, 1)() end
+    assert(#typed == count_before + 1, "read-back never types again, whatever it sees")
+    return got
+  end
+  assert(verdict(function(s0) return s0 .. "\n> please run the full release checklist now" end) == true, "seen")
+  screen = "$ "
+  assert(verdict(function(s0) return s0 end) == false, "not seen: reported, not retried")
+  screen = "$ "
+  assert(verdict(function(s0) return s0 .. "\n> please run the full\n  release checklist now" end) == true,
+    "wrapped across lines is still seen")
+  screen = "> please run the full release checklist now\n$ "
+  assert(verdict(function(s0) return s0 end) == false, "text already on screen before typing is not a new delivery")
+  screen = "$ "
+  assert(verdict(function(s0) return s0 .. "\n> half-written draft please run the full release checklist now" end) == true,
+    "typed after an existing draft is still seen")
+  screen = "$ "
+  assert(verdict(function(s0) return s0 .. "\n> please run the full release checklist" end) == false,
+    "only the start of the text on screen is not delivery: the whole text must appear")
+  screen = "$ "
+  assert(verdict(function(s0) return s0 .. "\n> please run the release checklist now" end) == false,
+    "start and end on screen with the middle missing is not delivery")
+  screen = "$ "
+  local was_session = approve_text.session_instance
+  assert(verdict(function(s0)
+    approve_text.session_instance = function() return "other", "other-start" end -- recreated after typing
+    return s0 .. "\n> please run the full release checklist now"
+  end) == false,
+    "a different instance behind the same name is not seen")
+  approve_text.session_instance = was_session
+  screen = "$ "
+  remuda.capture = nil
+  scheduled = {}
+  local ok_, _, _, verify = approve_text.type_text("agent-1", text, provenance)
+  local got
+  verify(function(seen) got = seen end)
+  while got == nil and #scheduled > 0 do table.remove(scheduled, 1)() end
+  assert(ok_ == true and got == false, "no screen to read means not seen, never a claim of delivery")
+  -- The handler words the reply from the read-back and never repeats the approved text.
+  local replies = {}
+  remuda.butler.approval.reply = function(_, msg) replies[#replies + 1] = msg; return true end
+  remuda.capture = function() return screen end
+  local function approve(after_type)
+    screen, scheduled = "$ ", {}
+    local rec = { id = "ABCD", data = { session = "agent-1", registered_text = text, bytes = #text, request_id = "ABCD",
+      session_id = "agent1", session_marker = "agent-start", session_binding_version = 2 },
+      answered_by = "@alice:example.org", answer_event_id = "$a" }
+    request_handler.approve(rec, function() end)
+    if after_type then screen = screen .. after_type end
+    while #scheduled > 0 do table.remove(scheduled, 1)() end
+    return replies[#replies]
+  end
+  local not_seen = approve(nil)
+  assert(not_seen == "typed, NOT seen in the pane; check agent-1 before approving it again", "handler says NOT seen: " .. tostring(not_seen))
+  assert(not not_seen:find(text, 1, true), "the reply never repeats the approved text")
+  local seen = approve("\n> " .. text)
+  assert(seen == "typed (seen)", "handler says seen: " .. tostring(seen))
+  remuda.butler.approval.reply = function() return true end
+  remuda.capture, remuda._butler_system = nil, nil
+end
 print("ok - prepared approved text cases")

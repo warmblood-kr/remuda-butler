@@ -51,6 +51,17 @@ assert(type(remuda.butler) == "table", "composable compaction API must be export
 local level = remuda.butler.ctx_level("butler")
 assert(level.level == "watch" and level.used == 500000,
   "ctx_level must classify threshold context and retain usage")
+used, used_pct = "100000", 60
+level = remuda.butler.ctx_level("butler")
+assert(level.warning == true and level.level == "ok",
+  "60% warning tier must be separate from compaction levels")
+local warning_only, warning_reason = remuda.butler.compaction_policy("butler", {})
+assert(not warning_only and warning_reason == "skipped_small",
+  "the percentage warning tier must not change compaction policy decisions")
+used_pct = 59
+assert(remuda.butler.ctx_level("butler").warning == false,
+  "percentage below 60 must not be in the warning tier")
+used, used_pct = "500000", nil
 remuda._butler_prompt_is_empty = function() return "EMPTY" end
 remuda._butler_bus.agents.butler.native_autocompact = true
 local native_skip, native_reason = remuda.butler.compaction_policy("butler", {})

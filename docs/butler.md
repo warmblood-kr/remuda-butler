@@ -90,6 +90,21 @@ is left out. One report is collected at a time, and a finished report is
 reused for 60 seconds (its header then says `as of`), so repeated calls do not
 type into a Codex pane again.
 
+## Folder trust and what it implies
+
+Butler answers the folder-trust dialog (Claude Code's and Codex's) for sessions
+it launched in a directory under `project_home`, or in a strict linked git
+worktree of a repo under it. So any untrusted repo cloned under `project_home`
+is trusted automatically, and its `.claude` settings, MCP servers and hooks can
+execute. Do not clone untrusted repos under `project_home`.
+
+The guards: never `$HOME`, its ancestors, `project_home` itself (a
+`project_home` that is `/`, `$HOME` or an ancestor of it makes nothing
+eligible), or Butler's own roots and anything below them; the dialog's exact
+option text is matched and a digit is never sent; the path the dialog shows
+must equal the launch directory (or its real path); an unexpected layout
+presses nothing and alerts once.
+
 ## Closing sessions
 
 `remuda butler close NAME [--force]` closes a session when the caller is its
@@ -283,8 +298,13 @@ An allowlisted owner can approve with ✅ or a `yes`/`승인` reply, optionally
 including the id. A ❌ or `no`/`거부` denies it. Replies must arrive in live
 Matrix sync; messages from agents and the terminal approve/deny verbs cannot
 deliver prepared text. Butler types only after confirming the same live session
-instance is available and no human is attached to its pane. The owner sees the
-same normalized text that Butler stores. The display escapes control, line
+instance is live and its input box is safe to type into; an attached terminal
+does not block it (the reply says so). After typing, Butler reads the pane back
+for up to 3 seconds and replies `typed (seen)` only when the text appears there
+(wrapping tolerated; the whole text must appear, very short text can match
+unrelated output, and the session must still be the same instance); otherwise it replies `typed, NOT seen
+in the pane; check SESSION before approving it again`. It never types again on
+its own, and neither the reply nor the trace repeats the text. The owner sees the same normalized text that Butler stores. The display escapes control, line
 separator and bidirectional formatting characters. A refusal before typing
 leaves the approved request available for another owner reply until expiry.
 Before typing, Butler persists a one-shot delivery marker; if typing can have
