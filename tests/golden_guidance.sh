@@ -184,6 +184,12 @@ for file in "$OUT"/*; do
   mv "$file.tmp" "$file"
 done
 
+# Wording that must stay: members run the CLI bare (a leading VAR=1 can defeat an allow rule).
+NOPREFIX='Do not prefix it with REMUDA_NO_UPDATE_CHECK=1 or other VAR=value assignments'
+for f in agents-topic.md agents-launch.md; do
+  grep -qF "$NOPREFIX" "$OUT/$f" || { echo "FAIL golden guidance: $f lacks the no-env-prefix line" >&2; exit 1; }
+done
+
 if [[ ${GOLDEN_UPDATE:-} == 1 ]]; then
   mkdir -p "$GOLDEN"
   diff -ru "$GOLDEN" "$OUT" || true

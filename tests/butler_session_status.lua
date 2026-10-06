@@ -49,7 +49,13 @@ local sessions_config = {
 }
 remuda._butler_sessions_config = sessions_config
 local hooks = {}
-remuda._butler_telemetry_for = function(agent) return { model = "m", hook_state = hooks[agent].state, hook_at = hooks[agent].at } end
+local context = {}
+remuda._butler_telemetry_for = function(agent)
+  local extra = context[agent] or {}
+  return { model = "m", hook_state = hooks[agent].state, hook_at = hooks[agent].at,
+    context_used = extra.context_used, context_window = extra.context_window,
+    context_percent = extra.context_percent }
+end
 setmetatable(hooks, { __index = function() return {} end })
 
 local screens, captures, now = {}, 0, 100
@@ -96,6 +102,29 @@ sessions_config.registered_agent_kind = lookup
 entries.claude.working = function(_, screen) return screen:find("esc to interrupt", 1, true) ~= nil end
 local detail = remuda.session_detail({ name = "s1" })
 assert(detail:find("^working · claude · m"), "the status leads the detail line: " .. detail)
+
+local detail_agent = { kind = "codex" }
+bus.agents.detail = detail_agent
+context[detail_agent] = { context_used = 123456, context_window = 258400, context_percent = 47 }
+detail = remuda.session_detail({ name = "detail" })
+assert(detail:find("123K 47%%", 1, false), "detail shows percent beside token count: " .. detail)
+context[detail_agent] = { context_window = 258400, context_percent = 47 }
+detail = remuda.session_detail({ name = "detail" })
+assert(detail:find("~121K 47%%", 1, false), "derived token count is marked approximate: " .. detail)
+assert(not detail:find("123K", 1, true), "derived count is not the measured one")
+for _, bad in ipairs({ 1001, -1, math.huge, 0 / 0 }) do
+  context[detail_agent] = { context_window = 258400, context_percent = bad }
+  detail = remuda.session_detail({ name = "detail" })
+  assert(not detail:find("%d%%") and not detail:find("%dK") and not detail:find("?", 1, true),
+    "out-of-range percent is unknown: " .. tostring(bad) .. " " .. detail)
+end
+context[detail_agent] = { context_window = 0, context_percent = 12 }
+detail = remuda.session_detail({ name = "detail" })
+assert(not detail:find("0K 12%%", 1, false), "zero window omits derived token count: " .. detail)
+assert(detail:find(" · 12%%", 1, false), "zero window still shows the known percentage: " .. detail)
+context[detail_agent] = { context_used = "?", context_window = "?", context_percent = "?" }
+detail = remuda.session_detail({ name = "detail" })
+assert(not detail:find("?", 1, true), "unknown context stays quiet: " .. detail)
 
 -- One capture per session per listing window; a later listing captures again.
 bus.agents.c = { kind = "claude" }
