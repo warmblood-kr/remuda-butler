@@ -7958,21 +7958,24 @@ local function with_guard(env, run)
   local gp = remuda.butler.guard_policy
   local old_caller, old_bus = remuda.caller, remuda._butler_bus
   local old_dir, old_pending = remuda._butler_guard_dir, remuda.pending
-  -- A grant offer needs the calling session identity (holders: enforce_holder).
-  remuda._butler_bus = { agents = { ["t-ssa"] = { id = "U-SSA", parent = "butler", session_name = "s-ssa" },
-    butler = { id = "U-BUTLER", session_name = "butler" } } }
-  remuda.caller = function() return { kind = "session", session = "s-ssa" } end
-  remuda._butler_guard_dir = env.dir .. "/guard"
-  remuda.mkdir(remuda._butler_guard_dir)
-  assert(gp.set(true) and gp.set_approvals(true), "guard switches")
   local replies = {}
-  remuda.pending = function(opts)
-    local reply = { opts = opts }
-    function reply:resolve(_, out) self.done, self.out = true, out end
-    replies[#replies + 1] = reply
-    return reply
-  end
-  local ok, err = pcall(run, replies)
+  -- Setup runs inside the pcall too: a failing mkdir/gp.set still restores below.
+  local ok, err = pcall(function()
+    -- A grant offer needs the calling session identity (holders: enforce_holder).
+    remuda._butler_bus = { agents = { ["t-ssa"] = { id = "U-SSA", parent = "butler", session_name = "s-ssa" },
+      butler = { id = "U-BUTLER", session_name = "butler" } } }
+    remuda.caller = function() return { kind = "session", session = "s-ssa" } end
+    remuda._butler_guard_dir = env.dir .. "/guard"
+    remuda.mkdir(remuda._butler_guard_dir)
+    assert(gp.set(true) and gp.set_approvals(true), "guard switches")
+    remuda.pending = function(opts)
+      local reply = { opts = opts }
+      function reply:resolve(_, out) self.done, self.out = true, out end
+      replies[#replies + 1] = reply
+      return reply
+    end
+    run(replies)
+  end)
   remuda._butler_guard_dir, remuda.pending = old_dir, old_pending
   remuda.caller, remuda._butler_bus = old_caller, old_bus
   if not ok then error(err, 0) end
@@ -8052,6 +8055,20 @@ local function test_guard_needs_live_sync()
       assert(guard_state(reply) == "waiting", "an answer outside live sync must not approve a guarded call")
     end)
   end, "mode=messages\n")
+end
+
+function remuda._t359.test_with_guard_restores_stand_ins_when_setup_fails()
+  approval_env(nil, function(env)
+    local gp = remuda.butler.guard_policy
+    local old = { remuda.caller, remuda._butler_bus, remuda._butler_guard_dir, remuda.pending, gp.set }
+    gp.set = function() return false end
+    local ok, err = pcall(with_guard, env, function() error("run must not start", 0) end)
+    gp.set = old[5]
+    assert(not ok and tostring(err):find("guard switches", 1, true), "the failing setup still surfaces its error")
+    assert(remuda.caller == old[1] and remuda._butler_bus == old[2]
+      and remuda._butler_guard_dir == old[3] and remuda.pending == old[4],
+      "a failing setup restores the caller, bus, guard dir and pending stand-ins")
+  end)
 end
 
 function remuda._t359.test_guard_request_expires_at_290_seconds_not_default_ttl()
@@ -8307,6 +8324,7 @@ end
     { "test_guard_owner_answers_by_reply_and_reaction", test_guard_owner_answers_by_reply_and_reaction },
     { "test_guard_only_the_verified_owner_counts", test_guard_only_the_verified_owner_counts },
     { "test_guard_needs_live_sync", test_guard_needs_live_sync },
+    { "test_with_guard_restores_stand_ins_when_setup_fails", remuda._t359.test_with_guard_restores_stand_ins_when_setup_fails },
     { "test_guard_request_expires_at_290_seconds_not_default_ttl", remuda._t359.test_guard_request_expires_at_290_seconds_not_default_ttl },
     { "test_guard_forged_nonce_gives_no_decision", test_guard_forged_nonce_gives_no_decision },
     { "test_guard_answer_binds_to_its_own_request", test_guard_answer_binds_to_its_own_request },
