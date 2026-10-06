@@ -1,7 +1,7 @@
 -- Characterization goldens for the hand-parsed CLI families (arg-parser migration PR0).
 -- Each case runs the real `remuda butler ...` front door against stubbed actions and records
 -- exit status, stdout, stderr and every stub call. Current behaviour is the baseline, defects
--- included; a deliberate change must update tests/golden/cli/ in the same PR.
+-- included; a deliberate change must update tests/golden_cli/ in the same PR.
 --   CLI_GOLDEN_UPDATE=1 tests/lua_tests.sh tests/lua/butler_cli_characterization_test.lua
 local exe = assert(os.getenv("REMUDA_BIN"))
 local child = assert(os.getenv("REMUDA_LUA_CHILD_SERVER"))
@@ -100,7 +100,7 @@ local function check_golden(family)
     blocks[#blocks + 1] = run_case(case, family.trace)
   end
   local actual = table.concat(blocks, "\n")
-  local path = repo .. "/tests/golden/cli/" .. family.name .. ".txt"
+  local path = repo .. "/tests/golden_cli/" .. family.name .. ".txt"
   if os.getenv("CLI_GOLDEN_UPDATE") == "1" then
     local out = assert(io.open(path, "wb")); out:write(actual); out:close()
     return
