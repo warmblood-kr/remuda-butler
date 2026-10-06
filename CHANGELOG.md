@@ -7,6 +7,8 @@ release tags yet; entries come from merged pull requests.
 ## Unreleased
 
 ### Added
+- Matrix `?status` reports system load, memory and disk usage when available;
+  unsupported or failed readers keep the corresponding value at `n/a`.
 - Standing grants now skip prompts: with `guard on`, `guard approvals on` and `guard grants on` (still off by default), an active grant allows the Claude permission prompt it covers (a plain push of a feature branch in its repository, or a WebFetch to its exact host) without an approval post. Each use writes a `grant_used` audit line naming the grant before the allow, and an unwritten line means the call asks; deny rules are checked again first, only `push` and `net` calls qualify, a grant allows at most 30 calls an hour (the 31st asks and writes one `grant_limited` line; the count is rebuilt from the audit log after a restart), a clock set back more than a minute matches nothing, and every error asks. Never at `PreToolUse`, never for codex (see #339).
 - A grant also never covers a push of `main`, `master` or `trunk` in any case (the branch is read as its full ref, so a tag of the same name cannot hide it) or of the remote's default branch; `guard verify` costs about two seconds per megabyte of log (see #339).
 - Grant matching is stricter, and still allows nothing: a grant never covers a push of `main`, `master` or `trunk` or a push with `push.followTags` set, only a push or a WebFetch can match, git probes share a two second budget (none run without a git grant), and hook audit lines keep `grant_id` `-` until a grant allows a call; `guard stats` counts `grant_used` and `grant_limited` (see #339).
