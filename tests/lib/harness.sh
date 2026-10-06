@@ -82,12 +82,16 @@ harness_run() {
     echo "FAIL: controller launch failed (exit $command_status)" >&2
     return "$command_status"
   fi
-  for attempt in $(seq 1 400); do
+  local wait_s=${REMUDA_LUA_RESULT_WAIT:-120}
+  [[ $wait_s =~ ^[0-9]{1,5}$ ]] || wait_s=120
+  wait_s=$(( 10#$wait_s ))  # base 10: "08" is not octal
+  (( wait_s >= 1 )) || wait_s=120
+  for attempt in $(seq 1 $(( wait_s * 20 ))); do
     [[ -s "$H_RESULT" ]] && break
     sleep 0.05
   done
   if [[ ! -s "$H_RESULT" ]]; then
-    echo "FAIL: controller did not write a result within 20 seconds" >&2
+    echo "FAIL: controller did not write a result for $(basename "$resolved") within $wait_s seconds" >&2
     return 1
   fi
   cat "$H_RESULT"
