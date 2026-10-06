@@ -172,8 +172,8 @@ persistent scheduler, run these at the terminal as the operator (each `add` asks
 for `yes`; both default to the `butler` session, add `--to SESSION` for another):
 
 ```
-remuda butler schedule add north-star "7 * * * *" "Hourly North Star check: follow ~/projects/remuda-notes/north-star-check-m1-2026-10-01.md (delegate the legwork to a member/subagent). Also: remuda butler sessions + inbox; nudge any stalled or idle lead; confirm each team keeps <=3 members alive (post-reboot load limit)."
-remuda butler schedule add staging-guard "37 * * * *" "staging-guard liveness: check remuda butler sessions shows staging-guard and its pane is not stuck on a dialog (capture it). If dead or stuck, relaunch/unstick it. No report to the owner unless action was needed."
+remuda butler schedule add north-star "7 * * * *" "Hourly North Star check: follow the North Star check note in the operator's notes repo (delegate the legwork to a member/subagent). Also: remuda butler sessions + inbox; nudge any stalled or idle lead; confirm each team keeps <=3 members alive (post-reboot load limit)."
+remuda butler schedule add staging-guard "37 * * * *" "staging-guard liveness: check remuda butler sessions shows staging-guard and its pane is not stuck on a dialog (capture it). If dead or stuck, report it; do not approve dialogs. No report to the owner unless action was needed."
 remuda butler schedule list
 ```
 
