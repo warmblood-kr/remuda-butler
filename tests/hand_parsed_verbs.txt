@@ -35,3 +35,12 @@ status-commands
 statusline
 topic delegate
 typed-lines
+close
+compact
+matrix mark-all
+matrix thread
+send
+send-to-leader
+reply
+forward
+topic new

@@ -1,0 +1,263 @@
+### remuda butler "compact"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "compact" "--help"
+exit: 1
+stdout:
+
+stderr:
+unknown session: --help
+actions:
+compact.has_session(--help)
+
+### remuda butler "compact" "-h"
+exit: 1
+stdout:
+
+stderr:
+unknown session: -h
+actions:
+compact.has_session(-h)
+
+### remuda butler "compact" "help"
+exit: 1
+stdout:
+
+stderr:
+unknown session: help
+actions:
+compact.has_session(help)
+
+### remuda butler "compact" "s1"
+exit: 0
+stdout:
+compact-stub
+stderr:
+
+actions:
+compact.has_session(s1)
+compact(s1|false)
+
+### remuda butler "compact" "s1" "--dry-run"
+exit: 0
+stdout:
+tick-stub
+stderr:
+
+actions:
+compact.has_session(s1)
+compact.tick(s1|true)
+
+### remuda butler "compact" "s1" "--force"
+exit: 0
+stdout:
+compact-stub
+stderr:
+
+actions:
+compact.has_session(s1)
+compact(s1|true)
+
+### remuda butler "compact" "s1" "--dry-run" "--force"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+compact.has_session(s1)
+
+### remuda butler "compact" "s1" "--force" "--dry-run"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+compact.has_session(s1)
+
+### remuda butler "compact" "--dry-run" "s1"
+exit: 1
+stdout:
+
+stderr:
+unknown session: --dry-run
+actions:
+compact.has_session(--dry-run)
+
+### remuda butler "compact" "--force" "s1"
+exit: 1
+stdout:
+
+stderr:
+unknown session: --force
+actions:
+compact.has_session(--force)
+
+### remuda butler "compact" "s1" "--dry-run" "--dry-run"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+compact.has_session(s1)
+
+### remuda butler "compact" "s1" "--force" "--force"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+compact.has_session(s1)
+
+### remuda butler "compact" "s1" "--bogus"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+compact.has_session(s1)
+
+### remuda butler "compact" "s1" "extra"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+compact.has_session(s1)
+
+### remuda butler "compact" "s1" "--dry-run=1"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+compact.has_session(s1)
+
+### remuda butler "compact" "s1" "--"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+compact.has_session(s1)
+
+### remuda butler "compact" "--" "s1"
+exit: 1
+stdout:
+
+stderr:
+unknown session: --
+actions:
+compact.has_session(--)
+
+### remuda butler "compact" "s1" "-n"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+compact.has_session(s1)
+
+### remuda butler "compact" "s1" "-1"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+compact.has_session(s1)
+
+### remuda butler "compact" ""
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "compact" "nosuch"
+exit: 1
+stdout:
+
+stderr:
+unknown session: nosuch
+actions:
+compact.has_session(nosuch)
+
+### remuda butler "compact" "nosuch" "--dry-run"
+exit: 1
+stdout:
+
+stderr:
+unknown session: nosuch
+actions:
+compact.has_session(nosuch)
+
+### remuda butler "compact" "nosuch" "--bogus"
+exit: 1
+stdout:
+
+stderr:
+unknown session: nosuch
+actions:
+compact.has_session(nosuch)
+
+### remuda butler "compact" "nosuch" "--dry-run" "--force"
+exit: 1
+stdout:
+
+stderr:
+unknown session: nosuch
+actions:
+compact.has_session(nosuch)
+
+### remuda butler "compact" "--help" "s1"
+exit: 1
+stdout:
+
+stderr:
+unknown session: --help
+actions:
+compact.has_session(--help)
+
+### remuda butler "compact" "s1" "--help"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+compact.has_session(s1)
+
+### remuda butler "compact" "s1" "-h"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+compact.has_session(s1)
+
+### remuda butler "compact" "--dry-run"
+exit: 1
+stdout:
+
+stderr:
+unknown session: --dry-run
+actions:
+compact.has_session(--dry-run)

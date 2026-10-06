@@ -5,6 +5,7 @@ REPO=$(cd "$(dirname "$0")/.." && pwd -P)
 ALLOWLIST=${HAND_PARSED_ALLOWLIST:-$REPO/tests/hand_parsed_verbs.txt}
 MATRIX=$REPO/packages/butler/matrix_cli.lua
 COMMANDS=${1:-$REPO/packages/butler/commands.lua}
+INIT=$REPO/packages/butler/init.lua
 
 check() {
   local commands=$1 tmp
@@ -16,9 +17,11 @@ check() {
     [[ -z $verb || $verb == \#* ]] && continue
     if ! grep -Fqx -- "$verb" <<'SEED'
 agents
+approvals
 approve
 approve-text
-approvals
+close
+compact
 deny
 doctor
 forward
@@ -33,6 +36,7 @@ matrix get
 matrix history
 matrix join
 matrix leave
+matrix mark-all
 matrix quarantine
 matrix react
 matrix redact
@@ -41,18 +45,22 @@ matrix rooms
 matrix send
 matrix setup
 matrix status
+matrix thread
 matrix unfollow
 matrix upload
 quota
 reply
 schedule
+send
+send-to-leader
 sessions
 shell-lines
 status
-status-hook
 status-commands
+status-hook
 statusline
 topic delegate
+topic new
 typed-lines
 SEED
     then
@@ -80,45 +88,65 @@ SEED
     esac
   done < <(sed -nE 's/^command\([^,]+, "([^"]+)".*/\1/p' "$commands")
 
+  # Matrix leaves: bare keys (`status = true`) and quoted keys (`["mark-all"] = true`).
   while IFS= read -r leaf; do
-    [[ -z $leaf || $leaf == thread ]] || discovered+=("matrix $leaf")
+    [[ -z $leaf ]] || discovered+=("matrix $leaf")
   done < <(awk '
     /local VERBS = \{/ { in_verbs=1 }
     in_verbs && / = true/ {
       line=$0
-      while (match(line, /[a-z-]+ = true/)) {
-        item=substr(line, RSTART, RLENGTH); sub(/ = true$/, "", item); print item
+      while (match(line, /(\["[a-z-]+"\]|[a-z-]+) = true/)) {
+        item=substr(line, RSTART, RLENGTH); sub(/ = true$/, "", item); gsub(/[\["\]]/, "", item); print item
         line=substr(line, RSTART + RLENGTH)
       }
     }
     in_verbs && /^}/ { exit }
   ' "$MATRIX")
+  # Contribution entries in init.lua (`verb = "compact"`) that commands.lua does not declare.
+  while IFS= read -r verb; do
+    [[ -z $verb || $verb == matrix || $verb == topic ]] || discovered+=("$verb")
+  done < <(sed -nE 's/.*[{ ,]verb = "([^"]+)".*/\1/p' "$INIT")
   discovered+=("matrix setup" statusline status-hook help)
-  printf '%s\n' "${discovered[@]}" > "$tmp/discovered"
+  printf '%s\n' "${discovered[@]}" | sort -u > "$tmp/discovered"
 
-  # A new command declaration is accepted only when it opts into the core parser itself.
+  # A verb counts as migrated only when its body calls remuda.cli.parse and keeps no hand-parsed
+  # remnant: no `type(cli...)` capability gate (the old-core fallback) and no `args[N]` read.
+  # One cli.parse call is not enough. Rows are "verb<TAB>yes|no"; helpers between commands are
+  # outside a body (a body runs from `command(` to the next line that starts with `end)`).
   awk '
+    function flush() {
+      if (verb != "") print verb "\t" ((parsed && !hand) ? "yes" : "no")
+      if (verb == "topic") print "topic new\t" ((topic_new && !hand) ? "yes" : "no")
+      verb=""
+    }
     /^command\(/ {
-      if (verb != "" && parsed) {
-        print verb
-        if (verb == "topic" && topic_new) print "topic new"
-      }
-      verb=""; parsed=0; uses_cli=0; topic_new=0
+      flush(); parsed=0; uses_cli=0; topic_new=0; hand=0
       if (match($0, /"[^"]+"/)) { verb=substr($0, RSTART+1, RLENGTH-2) }
     }
     verb != "" && /remuda\.cli/ { uses_cli=1 }
     verb != "" && /cli\.parse/ && uses_cli { parsed=1 }
+    verb != "" && /type\(cli/ { hand=1 }
+    verb != "" && $0 !~ /^command\(/ && /args\[[0-9a-z]/ { hand=1 }
     verb == "topic" && /cli\.parse\(TOPIC_NEW_CLI_SPEC/ { topic_new=1 }
-    END {
-      if (verb != "" && parsed) {
-        print verb
-        if (verb == "topic" && topic_new) print "topic new"
-      }
-    }
-  ' "$commands" > "$tmp/migrated"
+    /^end\)/ { flush() }
+    END { flush() }
+  ' "$commands" > "$tmp/status_commands"
+  awk '
+    function flush() { if (verb != "" && !(verb in seen)) print verb "\t" ((parsed && !hand) ? "yes" : "no"); verb="" }
+    NR == FNR { split($0, row, "\t"); seen[row[1]]=1; next }
+    /[{ ,]verb = "/ { flush(); parsed=0; hand=0; uses_cli=0
+      if (match($0, /verb = "[^"]+"/)) { verb=substr($0, RSTART+8, RLENGTH-9) } }
+    verb != "" && /remuda\.cli/ { uses_cli=1 }
+    verb != "" && /cli\.parse/ && uses_cli { parsed=1 }
+    verb != "" && /type\(cli/ { hand=1 }
+    verb != "" && !/verb = "/ && /args\[[0-9a-z]/ { hand=1 }
+    verb != "" && /args\[[0-9a-z]/ && /verb = "/ { hand=1 }
+    END { flush() }
+  ' "$tmp/status_commands" "$INIT" | grep -vE '^(matrix|topic)	' > "$tmp/status_init" || true
+  cat "$tmp/status_commands" "$tmp/status_init" > "$tmp/status"
+  awk -F'\t' '$2 == "yes" { print $1 }' "$tmp/status" > "$tmp/migrated"
   while IFS=$'\t' read -r verb parsed; do
-    [[ -z $verb || $verb == matrix ]] && continue
-    if [[ $verb == topic ]]; then continue; fi
+    [[ -z $verb || $verb == matrix || $verb == topic ]] && continue
     if grep -Fqx -- "$verb" "$ALLOWLIST"; then
       if [[ $parsed == yes ]]; then
         echo "allowlist entry '$verb' is migrated; remove it (the list may only shrink)" >&2
@@ -128,16 +156,7 @@ SEED
       echo "new verbs must use remuda.cli.parse; see docs: '$verb' is not allowlisted" >&2
       return 1
     fi
-  done < <(awk '
-    /^command\(/ {
-      if (verb != "") print verb "\t" (parsed ? "yes" : "no")
-      verb=""; parsed=0; uses_cli=0
-      if (match($0, /"[^"]+"/)) { verb=substr($0, RSTART+1, RLENGTH-2) }
-    }
-    verb != "" && /remuda\.cli/ { uses_cli=1 }
-    verb != "" && /cli\.parse/ && uses_cli { parsed=1 }
-    END { if (verb != "") print verb "\t" (parsed ? "yes" : "no") }
-  ' "$commands")
+  done < "$tmp/status"
 
   for verb in "${discovered[@]}"; do
     if ! grep -Fqx -- "$verb" "$ALLOWLIST" && ! grep -Fqx -- "$verb" "$tmp/migrated"; then
@@ -192,4 +211,14 @@ awk '
 expect_failure "allowlist entry 'doctor' is migrated" "$tmp/edited.lua"
 grep -Fvx 'doctor' "$ALLOWLIST" > "$tmp/allowlist.txt"
 expect_failure "new verbs must use remuda.cli.parse; see docs: 'doctor'" "$REPO/packages/butler/commands.lua" "$tmp/allowlist.txt"
-echo "hand-parsed verb freeze: PASS (four coverage cases)"
+# Honest baseline: verbs declared only in init.lua (compact), quoted Matrix keys (mark-all) and
+# families that still carry a hand-parsed fallback (close: cli.parse behind a capability gate and args[N]
+# reads) are hand-parsed, so they must be allowlisted.
+for verb in compact "matrix mark-all" "matrix thread" close send send-to-leader reply forward "topic new"; do
+  grep -Fvx "$verb" "$ALLOWLIST" > "$tmp/allowlist.txt"
+  expect_failure "new verbs must use remuda.cli.parse; see docs: '$verb'" "$REPO/packages/butler/commands.lua" "$tmp/allowlist.txt"
+done
+cp "$REPO/packages/butler/commands.lua" "$tmp/commands.lua"
+printf '\ncommand(999, "fake-gated", "usage", function(args) local cli = remuda.cli; if type(cli.parse) == "function" then return cli.parse({}, args) end; return args[2] end)\n' >> "$tmp/commands.lua"
+expect_failure "new verbs must use remuda.cli.parse; see docs: 'fake-gated'" "$tmp/commands.lua"
+echo "hand-parsed verb freeze: PASS (four coverage cases, honest-baseline cases)"
