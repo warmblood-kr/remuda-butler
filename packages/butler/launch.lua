@@ -367,10 +367,14 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
         if actionable and agent.trust_allowed
             and (agent.trust_eligible or (bus.trusted_launch_dirs and bus.trusted_launch_dirs[agent.cwd] == true))
             and startup_action_safe and startup_action_safe(actual)
+            and (trust_state ~= "safe" or (agent.trust_moves or 0) < 3)
             and (not agent.trust_eligible or trust_path_matches(modal, screen, agent.cwd, agent.trust_real_cwd)) then
           -- Move the marker onto the affirmative option by its text; confirm once it is selected.
           local plan = trust_plan(modal, screen)
           local keys = plan and (#plan.moves > 0 and plan.moves or { "RET" }) or {}
+          if plan and #plan.moves > 0 then
+            agent.trust_moves = (agent.trust_moves or 0) + 1
+          end
           local pressed = #keys > 0
           for _, key in ipairs(keys) do
             local ok, result = pcall(remuda.key, actual, key)

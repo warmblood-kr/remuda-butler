@@ -138,6 +138,22 @@ check(eligible("/elsewhere/wt"), false, "worktree of a repo outside project_home
 files["/h/wt/feature/.git"] = "gitdir: /h/projects/repo/.git\n"
 check(eligible("/h/wt/feature"), false, "gitdir that is not a worktree admin dir")
 
+-- Review findings: broad project_home, prefix, below Butler roots, .git dir.
+dir("/h/projects-evil"); dir("/h/wt/dirgit"); files["/h/wt/dirgit/.git"] = "dir"
+dir("/h/.local/share/remuda/butler/sessions")
+check(eligible("/h/projects-evil"), false, "prefix sibling of project_home")
+check(eligible("/h/.local/share/remuda/butler/sessions"), false,
+  "cwd below butler roots")
+check(eligible("/h/.local/share/remuda/butler/sessions/fresh"), false,
+  "cwd deep below butler roots")
+check(eligible("/h/wt/dirgit"), false, ".git as a directory")
+local saved = env.project_home
+for _, broad in ipairs({ "/h", "/" }) do
+  env.project_home = broad
+  check(eligible("/h/other"), false, "project_home " .. broad .. " refused")
+end
+env.project_home = saved
+
 -- 4. The launch chooser answers by text, once, and only when eligible --------
 local function launch(kind, labels, selected, opts)
   opts = opts or {}
@@ -159,6 +175,8 @@ local function launch(kind, labels, selected, opts)
   remuda.cancel = noop
   remuda.key = function(_, key)
     pressed[#pressed + 1] = key
+    if opts.keyfail then return false end
+    if opts.stuck then return true end
     if key == "<down>" then sel = sel + 1 elseif key == "<up>" then sel = sel - 1
     elseif key == "RET" then sel = (labels[sel] == (kind == "claude" and YES or "Trust and continue")) and "done" or sel end
     return true
@@ -167,6 +185,7 @@ local function launch(kind, labels, selected, opts)
   remuda.schedule = function(spec) tick = spec.run; return 1 end
   chooser.choose({ kind }, {
     name = "m", cwd = cwd, argv = { kind }, auto_trust = opts.auto_trust, trust_eligible = opts.eligible,
+    trust_real_cwd = opts.real,
     spec = function() return {} end, env = function() return {} end, timeout = 60,
   }, function(name, id, attempts) sessions = sessions + 1; result = { name = name, id = id, attempts = attempts } end)
   for _ = 1, 12 do if tick and sessions == 0 then tick() end end
@@ -208,6 +227,41 @@ pressed = launch("claude", ASK, 1, { eligible = true, shown = "/somewhere/else" 
 check(pressed, "", "shown path differs from launch cwd: no keys")
 pressed = launch("codex", { "Trust and continue", "Back" }, 1, { eligible = true, shown = "/somewhere/else" })
 check(pressed, "", "codex shown path differs: no keys")
+-- Shown path: realpath accepted, trailing slash normalized (accepted).
+pressed = launch("claude", ASK, 1, { eligible = true, shown = "/real/work",
+  real = "/real/work" })
+check(pressed, "<down>,RET", "shown path equal to trust_real_cwd")
+pressed = launch("claude", ASK, 1, { eligible = true, shown = "/p/work/" })
+check(pressed, "<down>,RET", "trailing slash on shown path is normalized")
+-- Two markers: ambiguous, nothing pressed.
+local two = claude_screen(ASK, 1):gsub("   Yes, I trust", " ❯ Yes, I trust")
+for _, kind in ipairs({ "claude" }) do
+  check(launch(kind, ASK, 1, { eligible = true, fixture = two }), "",
+    "two markers: no keys")
+end
+-- Stale earlier header must not supply the path.
+local function with_stale(shown, old)
+  return " Accessing workspace:\n\n " .. old .. "\n\n" .. claude_screen(ASK, 1, shown)
+end
+check(launch("claude", ASK, 1, { eligible = true,
+  fixture = with_stale("/somewhere/else", "/p/work") }), "",
+  "stale matching block, last block differs: no keys")
+check(launch("claude", ASK, 1, { eligible = true,
+  fixture = with_stale("/p/work", "/somewhere/else") }), "<down>,RET",
+  "last header wins")
+-- Codex: a stale earlier "Folder access" block above the window is ignored.
+local cx = {}
+for i = 1, 14 do cx[i] = "history " .. i end
+local cx_old = "  Folder access\n  /p/work\n" .. table.concat(cx, "\n")
+check(chooser.trust_path_matches(codex, cx_old .. "\n"
+  .. codex_screen({ "Trust and continue", "Back" }, 1, "/other"), "/p/work"),
+  false, "codex stale header: no match")
+-- Move cap and key failure: no RET.
+pressed = launch("claude", ASK, 1, { eligible = true, stuck = true })
+check(pressed:find("RET", 1, true), nil, "stuck marker: no RET")
+check(select(2, pressed:gsub("<down>", "")) <= 3, true, "moves capped at 3")
+pressed = launch("claude", ASK, 1, { eligible = true, keyfail = true })
+check(pressed:find("RET", 1, true), nil, "key-send failure: no RET")
 for _, digit in ipairs({ "1", "2", "3" }) do
   for _, kind in ipairs({ "claude", "codex" }) do
     local keys = launch(kind, kind == "claude" and ASK or { "Back", "Trust and continue" }, 1, { eligible = true })

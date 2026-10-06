@@ -492,21 +492,30 @@ end
 local function startup_modal_timeout_seconds()
   return tonumber(remuda._butler_modal_timeout or remuda._butler_modal_attempts or remuda._butler_task_poke_attempts) or 60
 end
+-- The path under the LAST header (a stale earlier block never supplies it); a
+-- header with no path after it yields nil.
 claude_workspace_path = function(screen)
-  local in_header = false
+  local in_header, found = false, nil
   for line in (tostring(screen or "") .. "\n"):gmatch("(.-)\n") do
     local trimmed = line:gsub("^%s+", ""):gsub("%s+$", "")
-    if in_header and (trimmed:match("^/") or trimmed:match("^%a:[/\\]")) then return trimmed end
-    if trimmed == "Accessing workspace:" then in_header = true end
+    if in_header and (trimmed:match("^/") or trimmed:match("^%a:[/\\]")) then
+      found, in_header = trimmed, false
+    end
+    if trimmed == "Accessing workspace:" then in_header, found = true, nil end
   end
+  return found
 end
+-- Codex: the same bottom window the options and title are read from.
 local function codex_workspace_path(screen)
-  local in_header = false
-  for line in (tostring(screen or "") .. "\n"):gmatch("(.-)\n") do
+  local in_header, found = false, nil
+  for _, line in ipairs(bottom_screen_lines(screen, 12)) do
     local trimmed = line:gsub("^%s+", ""):gsub("%s+$", "")
-    if in_header and trimmed ~= "" then return trimmed:match("^/") and trimmed or nil end
-    if trimmed == "Folder access" then in_header = true end
+    if in_header and trimmed ~= "" then
+      found, in_header = trimmed:match("^/") and trimmed or nil, false
+    end
+    if trimmed == "Folder access" then in_header, found = true, nil end
   end
+  return found
 end
 -- The affirmative option of each agent's trust dialog, matched as exact text.
 TRUST_AFFIRMATIVE = { claude = "Yes, I trust this folder", codex = "Trust and continue" }
@@ -659,9 +668,15 @@ local function trust_eligible(cwd, env)
   if real == "/" then return false, "root" end
   if not home or home == real or under(home, real) then return false, "home or its ancestor" end
   if not project_home or real == project_home then return false, "project home itself" end
+  if project_home == "/" or project_home == home
+      or under(home, project_home) then
+    return false, "project home is home or its ancestor"
+  end
   for _, root in ipairs(env.protected or {}) do
     local r = resolved(root)
-    if r == real or under(r, real) then return false, "butler root" end
+    if r == real or under(r, real) or under(real, r) then
+      return false, "butler root"
+    end
   end
   if under(real, project_home) then return true end
   -- A linked worktree: `.git` is a file naming <repo>/.git/worktrees/<n>, whose
