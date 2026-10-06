@@ -8,6 +8,7 @@ release tags yet; entries come from merged pull requests.
 
 ### Added
 - `butler sessions` shows context tokens and percent; compaction keeps its existing policy thresholds while Matrix `?status` flags sessions at 60% or 400K before a compaction.
+- Member guidance (AGENTS.md) tells agents to run `remuda butler ...` exactly as shown, without a `REMUDA_NO_UPDATE_CHECK=1` or other `VAR=value` prefix: managed sessions never print the update banner, and a leading assignment can stop an allow rule such as `Bash(remuda butler *)` from matching.
 - A standing grant is held by the session that asked for it: Butler takes the session from core's caller identity (process ancestry, not the agent's env alias) and stores its Butler id; the grant covers that session and the sessions below it, never a sibling or a leader above. The approval post names the holder, the hash and the reaction cross-check cover it, and a caller Butler cannot identify is offered and uses no grant; `guard grants` shows the holder id (see #339).
 - `docs/butler.md` gains a runbook for moving the North Star and staging-guard Claude crons to `remuda butler schedule add`, with verify and cleanup steps.
 - Matrix `?status` reports system load, memory and disk usage when available;

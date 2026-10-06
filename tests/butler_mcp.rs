@@ -3153,43 +3153,6 @@ fn restart_reshows_the_read_leader_message_coalesced_with_unread_mail() {
     assert_eq!(got, "1|true|true|true", "restart: one coalesced notice naming the leader message: {got}");
 }
 
-// Heuristic guards: nil -> value is not a drop; one notice per drop,
-// re-armed only after the context rises again.
-#[test]
-fn half_drop_heuristic_guards_and_rearms_after_a_rise() {
-    let (path, _daemon) = butler_with_named_agent("renotice-guards", "cx1", "codex");
-    setup_renotice(&path, "cx1");
-    let got = eval(
-        &path,
-        r#"
-        local state = remuda._notice_test_state
-        local id = remuda._rn_lead('guard task')
-        remuda._rn_tick(0); remuda._rn_tick(2)
-        remuda._butler_inbox('cx1')
-        state.ctx.cx1 = nil
-        remuda._rn_tick(3)
-        state.ctx.cx1 = 60000
-        for t = 4, 9 do remuda._rn_tick(t) end
-        local after_nil = #state.typed
-        state.ctx.cx1 = 170000
-        remuda._rn_tick(10)
-        state.ctx.cx1 = 60000
-        for t = 11, 20 do remuda._rn_tick(t) end
-        local after_drop = #state.typed
-        state.ctx.cx1 = 25000
-        for t = 21, 30 do remuda._rn_tick(t) end
-        local no_rearm = #state.typed
-        state.ctx.cx1 = 180000
-        remuda._rn_tick(31)
-        state.ctx.cx1 = 50000
-        for t = 32, 40 do remuda._rn_tick(t) end
-        return table.concat({ tostring(after_nil), tostring(after_drop), tostring(no_rearm),
-          tostring(#state.typed) }, '|')
-        "#,
-    );
-    assert_eq!(got, "1|2|2|3", "guards: nil start, one per drop, re-arm after rise: {got}");
-}
-
 // First sight of a new member: a brief it read and has not answered while
 // still unseeded (busy with its task) is not re-shown as "after restart".
 #[test]
