@@ -1,4 +1,4 @@
--- Guard slice 3, PR-B (#339): an agent-supplied grant_id is ignored, a clock set back matches nothing, and with no grant, matching spawns nothing.
+-- Guard slice 3, PR-B (#339): a git grant allows a plain push of a feature branch at PermissionRequest; CI paths, compounds and main ask.
 local started
 local function start_butler()
   -- Installed once per file: a second install reloads the mod (the harness gives a file 20 s in all).
@@ -63,61 +63,40 @@ end
 local function call(over) return T.eval("return remuda._t_call(" .. (over or "{}") .. ")") end
 local function lines() return T.eval("return remuda._t_lines()") end
 local function count(text, needle) local n = 0; for _ in text:gmatch(needle) do n = n + 1 end; return n end
-
-T.test("a grant_id in the payload or the tool input is ignored", function()
-  fresh("e-forged")
-  local reply = call("{ grant_id = 'g001', input = { url = 'https://other.example/x', grant_id = 'g001' } }")
-  T.expect(not has(reply, ALLOW), "no allow for another host: " .. reply)
-  local text = lines()
-  T.expect(not has(text, '"grant_id":"g001"'), "no line names g001: " .. text)
-  T.expect(has(text, '"event":"PermissionRequest"') and has(text, '"grant_id":"-"'), "the request line: " .. text, "ok - forged id")
-end)
-
-
-local T0 = 1791072000 + 36000 -- 2026-10-04T10:00:00Z
-local function at(offset)
-  T.eval(("local t = %d; remuda.butler.guard_policy.now = function() return t end; remuda.butler.guard_grants.now = function() return t end"):format(T0 + offset))
-end
--- n hook calls in the daemon; returns how many were allowed.
-local function uses(n)
-  return tonumber(T.eval(("local a = 0; for _ = 1, %d do if remuda._t_call({}):find('allow', 1, true) then a = a + 1 end end; return a"):format(n)))
-end
--- A fresh dir whose grant is written at the test clock.
-local function fresh_at(name)
+-- A repo with a bare remote, on branch feat with its upstream, and a git grant g001 on the working tree.
+local function git_fixture(name)
   fresh(name, true)
-  at(0)
-  T.eq(T.eval("return (remuda._t_add({ class = 'net', scope = 'example.com', ceiling = 'T2', holder = 'ss-a', event = '$ev1', ttl = 86400 }))"), "g001", "grant")
+  -- an asking call goes no further than the grant check: the approval post probes git again to offer a grant
+  T.eval("remuda.butler.guard_approval.maybe_request = function() end")
+  local work = T.eval([[
+    local root = remuda._butler_guard_dir .. '-tree' -- beside the data dir: the data dir is a protected scope
+    local script = table.concat({ 'set -e', 'mkdir -p ' .. root, 'cd ' .. root,
+      'git init -q --bare remote.git', 'git clone -q remote.git work 2>/dev/null', 'cd work',
+      'git config user.email t@t; git config user.name t', 'echo a > a; git add a; git commit -q -m a',
+      'git branch -q -M feat; git push -q -u origin feat 2>/dev/null' }, '\n')
+    local r = remuda.process.run({ argv = { 'sh', '-c', script } })
+    assert(r.code == 0, tostring(r.stderr))
+    return (remuda.fs.realpath(root .. '/work'))]])
+  local function sh(script) return T.eval(("local r = remuda.process.run({ argv = { 'sh', '-c', %q } }); return tostring(r.code)"):format("set -e; cd " .. work .. "; " .. script)) end
+  T.eval("remuda.butler.guard_grants.insensitive = function() return false end") -- the fold has its own test
+  local added = T.eval("local id, why = remuda._t_add({ class = 'git', scope = " .. string.format("%q", work) .. ", ceiling = 'T2', holder = 'ss-a', event = '$ev1' }); return tostring(id or why)")
+  T.eq(added, "g001", "git grant")
+  return work, sh
 end
-T.test("a clock set back more than a minute matches nothing until it catches up", function()
-  fresh_at("c-skew")
-  at(200)
-  T.eq(uses(1), 1, "control")
-  at(80)
-  T.eq(uses(1), 0, "two minutes back")
-  at(170)
-  T.eq(uses(1), 1, "within a minute is no skew")
-  at(205)
-  T.eq(uses(1), 1, "caught up", "ok - skew")
-end)
+local function push(work, command) return call(("{ tool = 'Bash', input = { command = %q }, cwd = %q }"):format(command or "git push", work)) end
 
-T.test("grants on with no grant: grant matching spawns no process and stays cheap", function()
-  fresh("n-cost", true)
-  -- the approval post (which probes git to offer a grant) is not what is measured here
-  local r = T.eval([[local real, spawned = remuda.process.run, 0
-    local ga = remuda.butler.guard_approval; local post = ga.maybe_request; ga.maybe_request = function() end
-    remuda.process.run = function(o) spawned = spawned + 1; remuda._t_argv = table.concat(o.argv, " "):sub(1, 120); return real(o) end
-    local function run(n, input)
-      local t0 = os.clock()
-      for _ = 1, n do remuda._t_call({ tool = 'Bash', input = { command = 'git push' } }); remuda._t_call({}) end
-      return os.clock() - t0
-    end
-    local on = run(20)
-    remuda.process.run = real
-    remuda._t_guard({'guard','grants','off'})
-    local off = run(20)
-    ga.maybe_request = post
-    return spawned .. ' ' .. string.format('%.2f', (on - off) / 40 * 1000)]])
-  local spawned, extra = r:match("^(%d+) (%S+)$")
-  T.eq(spawned, "0", "no process: " .. T.eval("return remuda._t_argv"))
-  T.expect(tonumber(extra) < 5, "under 5 ms a call over grants off: " .. extra, "ok - cost")
+T.test("a plain push of a feature branch is allowed and audited; CI paths, a compound and main ask", function()
+  local work, sh = git_fixture("p-push")
+  T.eq(sh("echo b >> a; git commit -q -am b"), "0", "commit")
+  T.expect(has(push(work), ALLOW), "plain push allowed")
+  T.expect(lines():match('"event":"grant_used","tool":"Bash","class":"push"[^\n]*"grant_id":"g001"') ~= nil, "audited")
+  T.expect(not has(push(work, "git push && echo x"), ALLOW), "a compound asks")
+  for _, path in ipairs({ ".github/workflows/x.yml" }) do -- scripts/, Makefile and the rest: grants_push, at match level
+    T.eq(sh("mkdir -p $(dirname " .. path .. "); echo x > " .. path .. "; git add -A; git commit -q -m ci"), "0", "commit " .. path)
+    T.expect(not has(push(work), ALLOW), "touches " .. path)
+    T.eq(sh("git reset -q --hard HEAD~1"), "0", "drop it")
+  end
+  T.eq(sh("git branch -q -M main; git push -q -u origin main 2>/dev/null; echo m >> a; git commit -q -am m"), "0", "on main")
+  T.expect(not has(push(work), ALLOW), "main asks")
+  T.eq(count(lines(), '"event":"grant_used"'), 1, "one use", "ok - push")
 end)

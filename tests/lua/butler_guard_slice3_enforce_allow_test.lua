@@ -81,7 +81,10 @@ T.test("never at PreToolUse: no allow, and a deny there carries grant_id -", fun
   fresh("e-pre")
   T.eval("remuda._t_guard({'guard','deny','on'})")
   T.expect(not has(call("{ event = 'PreToolUse' }"), ALLOW), "no allow at PreToolUse")
-  local reply = call("{ event = 'PreToolUse', tool = 'Bash', input = { command = 'git push --force origin main' } }")
+  -- a deny rule that names the very call the grant covers
+  T.eval("local p = remuda.butler.guard_policy; remuda._t_deny = p.deny_reason; p.deny_reason = function(tool) if tool == 'WebFetch' then return 'test rule' end end")
+  local reply = call("{ event = 'PreToolUse' }")
+  T.eval("remuda.butler.guard_policy.deny_reason = remuda._t_deny")
   T.expect(has(reply, '"permissionDecision":"deny"'), "deny: " .. reply)
   local text = lines()
   T.eq(count(text, '"grant_id":"g001"'), 0, "no line names the grant: " .. text)

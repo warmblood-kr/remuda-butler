@@ -1,4 +1,4 @@
--- Guard slice 3, PR-B (#339): an agent-supplied grant_id is ignored, a clock set back matches nothing, and with no grant, matching spawns nothing.
+-- Guard slice 3, PR-B (#339): a WebFetch grant allows only its exact host while it is live.
 local started
 local function start_butler()
   -- Installed once per file: a second install reloads the mod (the harness gives a file 20 s in all).
@@ -63,61 +63,46 @@ end
 local function call(over) return T.eval("return remuda._t_call(" .. (over or "{}") .. ")") end
 local function lines() return T.eval("return remuda._t_lines()") end
 local function count(text, needle) local n = 0; for _ in text:gmatch(needle) do n = n + 1 end; return n end
+local function asks(over, why)
+  local reply = call(over)
+  T.expect(not has(reply, ALLOW), why .. ": " .. reply)
+end
+local function url(u) return ("{ input = { url = %q } }"):format(u) end
+local function clock(offset)
+  T.eval(("local t = os.time() + %d; remuda.butler.guard_grants.now = function() return t end"):format(offset))
+end
 
-T.test("a grant_id in the payload or the tool input is ignored", function()
-  fresh("e-forged")
-  local reply = call("{ grant_id = 'g001', input = { url = 'https://other.example/x', grant_id = 'g001' } }")
-  T.expect(not has(reply, ALLOW), "no allow for another host: " .. reply)
-  local text = lines()
-  T.expect(not has(text, '"grant_id":"g001"'), "no line names g001: " .. text)
-  T.expect(has(text, '"event":"PermissionRequest"') and has(text, '"grant_id":"-"'), "the request line: " .. text, "ok - forged id")
+T.test("only the exact host and port: no IP, userinfo, subdomain or other port", function()
+  fresh("n-host")
+  T.expect(has(call(url("https://example.com:443/a")), ALLOW), "control: default port")
+  for _, u in ipairs({ "https://93.184.216.34/", "https://u@example.com/", "https://www.example.com/",
+    "https://example.com:8443/", "https://example.com.evil.test/", "http://example.com\\@x/" }) do
+    asks(url(u), u)
+  end
+  T.eq(count(lines(), '"event":"grant_used"'), 1, "one use", "ok - host")
 end)
 
-
-local T0 = 1791072000 + 36000 -- 2026-10-04T10:00:00Z
-local function at(offset)
-  T.eval(("local t = %d; remuda.butler.guard_policy.now = function() return t end; remuda.butler.guard_grants.now = function() return t end"):format(T0 + offset))
-end
--- n hook calls in the daemon; returns how many were allowed.
-local function uses(n)
-  return tonumber(T.eval(("local a = 0; for _ = 1, %d do if remuda._t_call({}):find('allow', 1, true) then a = a + 1 end end; return a"):format(n)))
-end
--- A fresh dir whose grant is written at the test clock.
-local function fresh_at(name)
-  fresh(name, true)
-  at(0)
-  T.eq(T.eval("return (remuda._t_add({ class = 'net', scope = 'example.com', ceiling = 'T2', holder = 'ss-a', event = '$ev1', ttl = 86400 }))"), "g001", "grant")
-end
-T.test("a clock set back more than a minute matches nothing until it catches up", function()
-  fresh_at("c-skew")
-  at(200)
-  T.eq(uses(1), 1, "control")
-  at(80)
-  T.eq(uses(1), 0, "two minutes back")
-  at(170)
-  T.eq(uses(1), 1, "within a minute is no skew")
-  at(205)
-  T.eq(uses(1), 1, "caught up", "ok - skew")
-end)
-
-T.test("grants on with no grant: grant matching spawns no process and stays cheap", function()
-  fresh("n-cost", true)
-  -- the approval post (which probes git to offer a grant) is not what is measured here
-  local r = T.eval([[local real, spawned = remuda.process.run, 0
-    local ga = remuda.butler.guard_approval; local post = ga.maybe_request; ga.maybe_request = function() end
-    remuda.process.run = function(o) spawned = spawned + 1; remuda._t_argv = table.concat(o.argv, " "):sub(1, 120); return real(o) end
-    local function run(n, input)
-      local t0 = os.clock()
-      for _ = 1, n do remuda._t_call({ tool = 'Bash', input = { command = 'git push' } }); remuda._t_call({}) end
-      return os.clock() - t0
-    end
-    local on = run(20)
-    remuda.process.run = real
-    remuda._t_guard({'guard','grants','off'})
-    local off = run(20)
-    ga.maybe_request = post
-    return spawned .. ' ' .. string.format('%.2f', (on - off) / 40 * 1000)]])
-  local spawned, extra = r:match("^(%d+) (%S+)$")
-  T.eq(spawned, "0", "no process: " .. T.eval("return remuda._t_argv"))
-  T.expect(tonumber(extra) < 5, "under 5 ms a call over grants off: " .. extra, "ok - cost")
+T.test("expired, revoked, frozen, written in the future, unverified or T3: no allow", function()
+  fresh("n-life")
+  clock(-30)
+  asks("{}", "written in the future")
+  T.eval("remuda.butler.guard_grants.now = nil")
+  T.expect(has(call(), ALLOW), "control: live")
+  T.eval("remuda.butler.guard_grants.verified = function() return false end")
+  asks("{}", "unverified")
+  T.eval("remuda.butler.guard_grants.verified = function() return true end")
+  T.eq(T.eval("return (remuda._t_controls.freeze())"), "frozen", "freeze")
+  asks("{}", "frozen")
+  T.eq(T.eval("return (remuda._t_controls.unfreeze())"), "lifted", "unfreeze")
+  T.expect(has(call(), ALLOW), "control: lifted")
+  T.eq(T.eval("return (remuda._t_controls.revoke('g001'))"), "revoked", "revoke")
+  asks("{}", "revoked")
+  T.eval([[local t = os.time()
+    local f = io.open(remuda.butler.guard_policy.dir() .. '/guard-grants.jsonl', 'a')
+    f:write(remuda.json.encode({ id = 'g002', class = 'net', scope = 't3.example', ceiling = 'T3', holder = 'ss-a',
+      event = '$ev2', written = t - 5, expires = t + 600 }) .. '\n'); f:close()]])
+  asks(url("https://t3.example/"), "T3 entry")
+  clock(3601) -- last: a forward jump raises the clock's high mark
+  asks("{}", "expired")
+  T.eq(count(lines(), '"event":"grant_used"'), 2, "only the two controls", "ok - life")
 end)
