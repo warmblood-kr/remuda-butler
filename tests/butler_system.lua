@@ -5,7 +5,10 @@ os[execute_key] = function() error("shell execution must not be used for lookup"
 io[popen_key] = function() error("shell pipes must not be used for lookup") end
 
 local process_calls = 0
+local scheduled_callback, cancelled_timer
 remuda = {
+  schedule = function(spec) scheduled_callback = spec.run; return "timer-1" end,
+  cancel = function(timer) cancelled_timer = timer end,
   process = {
     run = function()
       process_calls = process_calls + 1
@@ -20,6 +23,13 @@ assert(type(system.find_command) == "function")
 assert(type(system.mkdir_p) == "function")
 assert(type(system.home) == "function")
 assert(type(system.run_in) == "function")
+local after_called = false
+local timer = system.after(1, function() after_called = true end)
+assert(timer == "timer-1" and type(scheduled_callback) == "function",
+  "system.after should schedule through the daemon event loop")
+scheduled_callback()
+assert(after_called and cancelled_timer == "timer-1",
+  "system.after should run once and cancel its timer")
 local trace_detail = system.trace_detail("path\nwith\tcontrols\0")
 assert(trace_detail == "path\\x0Awith\\x09controls\\x00", "trace details must escape control bytes: " .. trace_detail)
 local long_trace_detail = system.trace_detail(string.rep("x", 600))

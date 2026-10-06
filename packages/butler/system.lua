@@ -216,6 +216,19 @@ function system.run_in(directory, argv)
   end
   return posix.run_in(directory, argv)
 end
+-- One-shot event-loop delay for work that must not block the daemon with a sleep.
+function system.after(seconds, callback)
+  if type(remuda.schedule) ~= "function" or type(callback) ~= "function" then
+    return nil, "event-loop scheduler is unavailable"
+  end
+  local timer
+  timer = remuda.schedule({ every = math.max(1, tonumber(seconds) or 1), run = function()
+    if timer and type(remuda.cancel) == "function" then pcall(remuda.cancel, timer) end
+    timer = nil
+    callback()
+  end })
+  return timer
+end
 
 remuda._butler_system = system
 return system
