@@ -102,7 +102,9 @@ T.test("expired, revoked, frozen, written in the future, unverified or T3: no al
     f:write(remuda.json.encode({ id = 'g002', class = 'net', scope = 't3.example', ceiling = 'T3', holder = 'ss-a',
       event = '$ev2', written = t - 5, expires = t + 600 }) .. '\n'); f:close()]])
   asks(url("https://t3.example/"), "T3 entry")
+  T.eq(T.eval("return (remuda._t_add({ class = 'net', scope = 'example.com', ceiling = 'T2', holder = 'ss-a', event = '$ev3' }))"), "g003", "a new grant")
+  T.expect(has(call(), ALLOW), "control: g003")
   clock(3601) -- last: a forward jump raises the clock's high mark
   asks("{}", "expired")
-  T.eq(count(lines(), '"event":"grant_used"'), 2, "only the two controls", "ok - life")
+  T.eq(count(lines(), '"event":"grant_used"'), 3, "only the three controls", "ok - life")
 end)

@@ -98,10 +98,12 @@ T.test("after a restart the count is rebuilt from the live audit log; an unreada
   restart()
   at(1800)
   local log = T.eval("return remuda.butler.guard_policy.log_path()")
-  T.eval(("os.rename(%q, %q)"):format(log, log .. ".away"))
-  T.eval(("remuda.process.run({ argv = { 'mkdir', %q } })"):format(log)) -- a directory: opens, reads nothing
+  -- reading the log fails; writing it still works (the audit restarts the file), so only the rebuild is unable
+  T.eval(([[local real, log = io.open, %q; remuda._t_io_open = real
+    io.open = function(p, mode) if p == log and (mode == nil or mode:find("r", 1, true)) then return nil, "denied" end; return real(p, mode) end]]):format(log))
   T.eq(uses(1), 0, "log unreadable on rebuild: asks")
-  T.eval(("remuda.process.run({ argv = { 'rmdir', %q } }); os.rename(%q, %q)"):format(log, log .. ".away", log))
+  T.eval("io.open = remuda._t_io_open")
+  T.eq(count(lines(), '"event":"grant_used"'), 0, "no use was audited (the log restarted)")
   restart()
   at(3601)
   T.eq(uses(1), 1, "the first ten aged out, the hour rolls", "ok - rebuild")
