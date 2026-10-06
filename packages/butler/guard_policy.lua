@@ -1161,7 +1161,9 @@ local function grant_reply(record, hook_json)
   if M.deny_reason(record.tool, input, { cwd = hook_json.cwd }) then return nil end
   local shell = record.tool == "Bash" or record.tool == "PowerShell"
   if not ((shell and record.class == "push") or (record.tool == "WebFetch" and record.class == "net")) then return nil end
-  local matched, id = pcall(grants.match, record.tool, input, hook_json.cwd, record.class)
+  local holders = grants.holders() -- core's caller identity: no known session, no grant
+  if not holders then return nil end
+  local matched, id = pcall(grants.match, record.tool, input, hook_json.cwd, record.class, holders)
   if not matched then note("guard grant match failed, asking: " .. tostring(id)); return nil end
   if not id then return nil end
   local room = grants.room(id)
