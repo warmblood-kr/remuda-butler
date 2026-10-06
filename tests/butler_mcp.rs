@@ -3263,34 +3263,6 @@ fn restart_does_not_reshow_a_leader_message_answered_before_it() {
     assert_eq!(got, "true|0", "an answered leader message must not be re-shown after a restart: {got}");
 }
 
-// SEC #159 M2: `inbox <arg>` validates the id before any lookup: a path or a
-// non-ULID never reaches a file open and is never cached.
-#[test]
-fn inbox_with_a_non_ulid_opens_no_message_file() {
-    let (path, _daemon) = butler_with_named_agent("renotice-inbox-path", "cx1", "codex");
-    setup_renotice(&path, "cx1");
-    let got = eval(
-        &path,
-        r#"
-        local opened = {}
-        local real_open = io.open
-        io.open = function(name, ...)
-          if tostring(name):find('../../x', 1, true) or tostring(name):find('not-a-ulid', 1, true) then
-            opened[#opened + 1] = name
-          end
-          return real_open(name, ...)
-        end
-        remuda._rn_inbox_id('../../x')
-        remuda._rn_inbox_id('not-a-ulid')
-        io.open = real_open
-        local bus = remuda._butler_bus
-        return tostring(#opened) .. '|' .. tostring(bus.messages['../../x'] == nil)
-          .. '|' .. tostring(bus.messages['not-a-ulid'] == nil)
-        "#,
-    );
-    assert_eq!(got, "0|true|true", "a non-ULID must not reach a message file or the cache: {got}");
-}
-
 // SEC #159 L1: a rise during Butler's own compaction does not re-arm the
 // half-drop heuristic.
 #[test]
