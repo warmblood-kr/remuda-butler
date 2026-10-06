@@ -139,7 +139,10 @@ return {
       if booted and host._butler_deliver_notices then host._butler_deliver_notices() end
     end },
     { name = "butler-reconcile", every = host._butler_reconcile_interval or 2, run = function()
-      if booted and host._butler_reconcile then host._butler_reconcile() end
+      if booted and host._butler_reconcile and host._butler_reconcile_retry
+          and host._butler_reconcile_retry.remaining_ms() <= 0 then
+        host._butler_reconcile()
+      end
     end },
     { name = "butler-schedule", every = 30, run = function()
       if booted and host._butler_schedule_tick then host._butler_schedule_tick() end
