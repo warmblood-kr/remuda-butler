@@ -416,6 +416,48 @@ terminal_case("terminal failure cuts reason at 200", keys, { failed = long_failu
 
 -- Stub the app-server process and decoder while exercising the production callback path.
 local saved_remuda = remuda
+local claude_auth_status = [[{
+  "loggedIn": true,
+  "authMethod": "claude.ai",
+  "apiProvider": "firstParty",
+  "email": "owner@example.test",
+  "orgId": "secret-org",
+  "orgName": "Secret Organization",
+  "subscriptionType": "max"
+}]]
+local claude_auth = {
+  loggedIn = true,
+  authMethod = "claude.ai",
+  apiProvider = "firstParty",
+  email = "owner@example.test",
+  orgId = "secret-org",
+  orgName = "Secret Organization",
+  subscriptionType = "max",
+}
+remuda = {
+  _butler_doctor = { probe = function()
+    return { claude = { stdout = claude_auth_status } }
+  end },
+  json = { decode = function(text)
+    if text ~= '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty",'
+        .. '"email":"owner@example.test","orgId":"secret-org","orgName":"Secret Organization",'
+        .. '"subscriptionType":"max"}' then
+      error("unexpected Claude auth status fixture")
+    end
+    return claude_auth
+  end },
+}
+quota = dofile("packages/butler/quota.lua")
+local claude_account = quota.accounts().claude
+eq("pretty Claude auth status mode", claude_account.mode, "subscription")
+eq("pretty Claude auth status plan", claude_account.plan, "max")
+eq("pretty Claude auth status email", claude_account.email, "owner@example.test")
+remuda._butler_doctor = { probe = function() return { claude = {} } end }
+eq("Claude auth status without stdout stays unknown", quota.accounts().claude.mode, "unknown")
+remuda._butler_doctor = { probe = function() return { claude = { stdout = claude_auth_status:gsub("^{", "{\v", 1) } } end }
+eq("Claude auth status with VT stays unknown", quota.accounts().claude.mode, "unknown")
+remuda = saved_remuda
+
 local wire_init = '{"id":1}'
 local wire_remote = '{"method":"remoteControl/status/changed"}'
 local wire_account = '{"method":"account/updated"}'

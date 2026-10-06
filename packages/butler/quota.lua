@@ -16,6 +16,29 @@ local function email_address(value)
     and value:match("^[%w%._%+%-]+@[%w][%w%.%-]*$") ~= nil
 end
 
+local function compact_json_whitespace(text)
+  local compact, in_string, escaped = {}, false, false
+  for i = 1, #text do
+    local char = text:sub(i, i)
+    if in_string then
+      compact[#compact + 1] = char
+      if escaped then
+        escaped = false
+      elseif char == "\\" then
+        escaped = true
+      elseif char == '"' then
+        in_string = false
+      end
+    elseif char == '"' then
+      in_string = true
+      compact[#compact + 1] = char
+    elseif not char:match("^[ \t\r\n]$") then
+      compact[#compact + 1] = char
+    end
+  end
+  return table.concat(compact)
+end
+
 local function rounded(value)
   return math.floor(value + 0.5)
 end
@@ -496,7 +519,8 @@ if type(remuda) == "table" then
       local stdout = type(probe) == "table" and probe.stdout or nil
       local stderr = type(probe) == "table" and probe.stderr or nil
       if name == "claude" then
-        local decoded, auth = pcall(remuda.json.decode, stdout)
+        if type(stdout) ~= "string" then return { mode = "unknown" } end
+        local decoded, auth = pcall(remuda.json.decode, compact_json_whitespace(stdout))
         if not decoded then return { mode = "unknown" } end
         return parser(auth)
       end
