@@ -939,6 +939,11 @@ log cannot be read, the call asks. A rotation within that hour moves older lines
 out of the live log, so a rotation plus a restart can reset a grant's count by
 up to 30, once per restart.
 
+`remuda butler guard grants` ends each active grant's line with `used N/30 in
+the last hour` (`?` when the count cannot be read), the same count the limit
+uses. `remuda butler guard stats` adds `auto-allowed by grants: N of M permission
+requests (P%), L limited` once any `grant_used` or `grant_limited` line exists.
+
 Clock skew: Butler keeps the highest clock time it has seen. A clock more than
 60 seconds behind it matches no grant until it catches up; a forward jump only
 expires grants early.

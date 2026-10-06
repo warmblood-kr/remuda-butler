@@ -1060,6 +1060,11 @@ local function stats()
     table.sort(names)
     for _, name in ipairs(names) do out[#out + 1] = kv[1] .. " " .. name .. ": " .. kv[2][name] end
   end
+  local asked, auto, limited = event.PermissionRequest or 0, event.grant_used or 0, event.grant_limited or 0
+  if auto > 0 or limited > 0 then
+    out[#out + 1] = string.format("auto-allowed by grants: %d of %d permission requests (%d%%), %d limited", auto, asked,
+      asked > 0 and math.floor(100 * auto / asked + 0.5) or 0, limited)
+  end
   return table.concat(out, "\n") .. unaudited_note()
 end
 
