@@ -1159,7 +1159,8 @@ local function grant_reply(record, hook_json)
   if not (grants and approval) then return nil end
   local input = type(hook_json.tool_input) == "table" and hook_json.tool_input or {}
   if M.deny_reason(record.tool, input, { cwd = hook_json.cwd }) then return nil end
-  if record.class ~= "push" and record.class ~= "net" then return nil end
+  local shell = record.tool == "Bash" or record.tool == "PowerShell"
+  if not ((shell and record.class == "push") or (record.tool == "WebFetch" and record.class == "net")) then return nil end
   local matched, id = pcall(grants.match, record.tool, input, hook_json.cwd, record.class)
   if not matched then note("guard grant match failed, asking: " .. tostring(id)); return nil end
   if not id then return nil end

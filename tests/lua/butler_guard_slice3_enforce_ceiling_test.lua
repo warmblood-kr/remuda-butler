@@ -1,4 +1,4 @@
--- Guard slice 3, PR-B (#339): a grant_id the agent supplies, in the hook payload or the tool input, is ignored.
+-- Guard slice 3, PR-B (#339): 30 uses per grant per rolling hour, the count rebuilt from the audit log after a start.
 local started
 local function start_butler()
   -- Installed once per file: a second install reloads the mod (the harness gives a file 20 s in all).
@@ -63,12 +63,47 @@ end
 local function call(over) return T.eval("return remuda._t_call(" .. (over or "{}") .. ")") end
 local function lines() return T.eval("return remuda._t_lines()") end
 local function count(text, needle) local n = 0; for _ in text:gmatch(needle) do n = n + 1 end; return n end
+local T0 = 1791072000 + 36000 -- 2026-10-04T10:00:00Z
+local function at(offset)
+  T.eval(("local t = %d; remuda.butler.guard_policy.now = function() return t end; remuda.butler.guard_grants.now = function() return t end"):format(T0 + offset))
+end
+-- n hook calls in the daemon; returns how many were allowed.
+local function uses(n)
+  return tonumber(T.eval(("local a = 0; for _ = 1, %d do if remuda._t_call({}):find('allow', 1, true) then a = a + 1 end end; return a"):format(n)))
+end
+-- A fresh dir whose grant is written at the test clock.
+local function fresh_at(name)
+  fresh(name, true)
+  at(0)
+  T.eq(T.eval("return (remuda._t_add({ class = 'net', scope = 'example.com', ceiling = 'T2', holder = 'ss-a', event = '$ev1', ttl = 86400 }))"), "g001", "grant")
+end
+local function restart() T.eval("local g = remuda.butler.guard_grants; g._uses, g._limited = {}, {}") end
 
-T.test("a grant_id in the payload or the tool input is ignored", function()
-  fresh("e-forged")
-  local reply = call("{ grant_id = 'g001', input = { url = 'https://other.example/x', grant_id = 'g001' } }")
-  T.expect(not has(reply, ALLOW), "no allow for another host: " .. reply)
+T.test("30 uses an hour are allowed, the 31st asks and writes grant_limited once, the next hour allows again", function()
+  fresh_at("c-limit")
+  T.eq(uses(30), 30, "thirty allowed")
+  T.eq(uses(2), 0, "31st and 32nd ask")
   local text = lines()
-  T.expect(not has(text, '"grant_id":"g001"'), "no line names g001: " .. text)
-  T.expect(has(text, '"event":"PermissionRequest"') and has(text, '"grant_id":"-"'), "the request line: " .. text, "ok - forged id")
+  T.eq(count(text, '"event":"grant_used"'), 30, "thirty grant_used lines")
+  T.eq(count(text, '"event":"grant_limited"[^\n]*"grant_id":"g001"'), 1, "one grant_limited line")
+  at(3601)
+  T.eq(uses(1), 1, "an hour later", "ok - ceiling")
 end)
+
+T.test("after a restart the count is rebuilt from the live audit log; an unreadable log asks", function()
+  fresh_at("c-rebuild")
+  T.eq(uses(10), 10, "ten before the restart")
+  restart()
+  T.eq(uses(21), 20, "twenty more, the 31st asks")
+  restart()
+  at(1800)
+  local log = T.eval("return remuda.butler.guard_policy.log_path()")
+  T.eval(("os.rename(%q, %q)"):format(log, log .. ".away"))
+  T.eval(("remuda.process.run({ argv = { 'mkdir', %q } })"):format(log)) -- a directory: opens, reads nothing
+  T.eq(uses(1), 0, "log unreadable on rebuild: asks")
+  T.eval(("remuda.process.run({ argv = { 'rmdir', %q } }); os.rename(%q, %q)"):format(log, log .. ".away", log))
+  restart()
+  at(3601)
+  T.eq(uses(1), 1, "the first ten aged out, the hour rolls", "ok - rebuild")
+end)
+
