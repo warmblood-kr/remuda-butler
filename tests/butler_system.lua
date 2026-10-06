@@ -28,6 +28,7 @@ assert(#long_trace_detail == 512 and long_trace_detail:sub(-3) == "...",
 
 local linux_calls = {}
 local linux_metrics = system.status_metrics({
+    find_command = function(name) return name end,
   read_file = function(path)
     if path == "/proc/loadavg" then return "1.25 0.90 0.50 2/100 42\n" end
     if path == "/proc/meminfo" then
@@ -53,6 +54,7 @@ assert(#linux_calls == 1, "Linux proc counters avoid extra commands")
 
 local darwin_commands = {}
 local darwin_metrics = system.status_metrics({
+    find_command = function(name) return name end,
   read_file = function() error("unavailable proc reader") end,
   run = function(options)
     local argv = options.argv
@@ -88,6 +90,7 @@ local expected_commands = table.concat({
 assert(table.concat(darwin_commands, "|") == expected_commands,
   "Darwin reads use only the expected read-only commands")
 local unavailable = system.status_metrics({
+    find_command = function(name) return name end,
   read_file = function() error("no proc") end,
   run = function() error("no process API") end,
 })
@@ -96,6 +99,7 @@ assert(unavailable.cpu == "n/a" and unavailable.mem == "n/a"
   "all failed readers fall back independently without raising")
 
 local garbage = system.status_metrics({
+    find_command = function(name) return name end,
   read_file = function(path)
     if path == "/proc/loadavg" then return "no load value" end
     if path == "/proc/meminfo" then
@@ -127,6 +131,7 @@ for _, result in ipairs({
   { code = 1, stdout = "0.2" }, "not a process result",
 }) do
   local failed = system.status_metrics({
+    find_command = function(name) return name end,
     read_file = function() error("proc unavailable") end,
     run = function() return result end,
   })
@@ -155,6 +160,7 @@ remuda.process.run = function(options)
   error("unexpected process command: " .. table.concat(argv, " "))
 end
 local linux_fallback = system.status_metrics({
+    find_command = function(name) return name end,
   read_file = function(path)
     if path == "/proc/loadavg" then return "0.12 0.10 0.08 1/50 12\n" end
     return nil
@@ -182,6 +188,7 @@ io.open = function(path)
   }
 end
 local read_ok, read_metrics = pcall(system.status_metrics, {
+    find_command = function(name) return name end,
   run = function() error("no process API") end,
 })
 assert(read_ok and read_metrics.cpu == "n/a",
@@ -193,6 +200,7 @@ assert(read_sizes["/proc/loadavg"] == 8192
 local function file_metrics(load_text, memory_text)
   load_data, memory_data = load_text, memory_text
   local ok, metrics = pcall(system.status_metrics, {
+    find_command = function(name) return name end,
     run = function() error("no process API") end,
   })
   assert(ok, "oversized mocked files must not raise")
@@ -217,6 +225,7 @@ assert(truncated_files.cpu == "n/a" and truncated_files.mem == "50%",
 io.open = saved_open
 
 local capped_stdout = system.status_metrics({
+    find_command = function(name) return name end,
   read_file = function() error("proc unavailable") end,
   run = function(options)
     local argv = options.argv
@@ -243,6 +252,7 @@ assert(capped_stdout.cpu == "n/a" and capped_stdout.mem == "n/a"
 
 -- hw.memsize alone: padding pushes the number past the cap, so it is dropped.
 local capped_memsize = system.status_metrics({
+    find_command = function(name) return name end,
   read_file = function() error("proc unavailable") end,
   run = function(options)
     local argv = options.argv
@@ -605,3 +615,57 @@ remuda.random_bytes = remuda._test_identity_saved_random_bytes
 remuda._test_identity_saved_random_bytes, remuda._test_identity_random_requests = nil, nil
 os[execute_key], io[popen_key], os.getenv, io.open = original_execute, original_popen, original_getenv, original_io_open
 print("ok - system module command lookup, failure lines, and home contract")
+
+-- find_command resolution: resolved paths are run; unresolved commands give n/a.
+local resolved_argv = {}
+local resolved = system.status_metrics({
+  read_file = function() error("proc unavailable") end,
+  find_command = function(name) return "/fake/bin/" .. name end,
+  run = function(options)
+    resolved_argv[#resolved_argv + 1] = options.argv[1]
+    return { code = 1, stdout = "" }
+  end,
+})
+assert(resolved.disk == "n/a" and #resolved_argv == 4
+  and resolved_argv[4] == "/fake/bin/df" and resolved_argv[1] == "/fake/bin/sysctl",
+  "status metrics run the path find_command resolved")
+local ran_missing = false
+local missing = system.status_metrics({
+  read_file = function() error("proc unavailable") end,
+  find_command = function() return nil, "not found" end,
+  run = function() ran_missing = true return { code = 0, stdout = "1" } end,
+})
+assert(not ran_missing and missing.cpu == "n/a" and missing.mem == "n/a"
+  and missing.disk == "n/a", "unresolved commands are never run")
+
+-- Edge cases: zero totals, short df rows, huge numbers never raise.
+local function edge(meminfo, memsize, df_row)
+  local ok, m = pcall(system.status_metrics, {
+    read_file = function(path) if path == "/proc/meminfo" then return meminfo end end,
+    find_command = function(name) return name end,
+    run = function(options)
+      local argv = options.argv
+      if argv[1] == "vm_stat" then
+        return { code = 0, stdout = "(page size of 4096 bytes)\nPages free: 1.\n"
+          .. "Pages inactive: 1.\nPages speculative: 1.\n" }
+      elseif argv[1] == "sysctl" and argv[3] == "hw.memsize" then
+        return { code = 0, stdout = memsize }
+      elseif argv[1] == "df" then
+        return { code = 0, stdout = "Filesystem 1024-blocks Used Available Capacity Mounted on\n" .. df_row .. "\n" }
+      end
+      return { code = 1, stdout = "" }
+    end,
+  })
+  assert(ok, "edge input must not raise: " .. tostring(m))
+  return m
+end
+local zero = edge("MemTotal: 0 kB\nMemAvailable: 0 kB\n", "0\n", "/dev/x 1 1 0 100% /")
+assert(zero.mem == "n/a", "zero memory totals give n/a")
+local short = edge(nil, "4096000000\n", "/dev/x 100 58 42")
+assert(short.disk == "n/a", "df rows with fewer than 5 fields give n/a")
+local huge_digits = string.rep("9", 20)
+local huge = edge("MemTotal: " .. huge_digits .. " kB\nMemAvailable: 1 kB\n",
+  huge_digits .. "\n", "/dev/x 1 1 1 " .. huge_digits .. "% /")
+assert(huge.disk == "n/a" and (huge.mem == "n/a" or huge.mem:match("^%d+%%$")),
+  "huge numbers give n/a or a sane percent")
+print("butler_system status edge tests passed")

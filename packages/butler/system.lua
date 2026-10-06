@@ -312,7 +312,11 @@ function system.status_metrics(readers)
     local ok, result = pcall(read_file, path)
     return ok and type(result) == "string" and result or nil
   end
+  local find = readers.find_command or system.find_command
   local function run_command(argv)
+    local ok, path = pcall(find, argv[1])
+    if not ok or type(path) ~= "string" or path == "" then return nil end
+    argv[1] = path
     return command_output(run, argv)
   end
 

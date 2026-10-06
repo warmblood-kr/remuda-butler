@@ -59,7 +59,8 @@ local function metric_text(value, percent)
     number = value:match("^(%d+%.?%d*)$")
   end
   number = tonumber(number)
-  if not number or number ~= number or number < 0 or number > (percent and 100 or 1000) then
+  local limit = percent and 100 or 1000
+  if not number or number ~= number or number < 0 or number > limit then
     return "n/a"
   end
   return value
