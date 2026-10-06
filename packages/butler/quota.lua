@@ -590,18 +590,22 @@ if type(remuda) == "table" then
       local ran, result = pcall(process.run, {
         argv = { "codex", "app-server" },
         stdin = input,
-        timeout = 15,
-        -- ponytail: current core only exposes a line hold; 64 is the chatter
-        -- ceiling. This probe may run the full 15s until core adds a
-        -- hold-until-response option; response id 2 alone determines success.
+        timeout = 8,
+        -- ponytail: synchronous process.run can block this Lua image for up to
+        -- 8s per attempt, or 16s for the partial-output retry. Upgrade to a
+        -- core async/off-image process or hold-until-response option to remove
+        -- that ceiling; response id 2 alone determines success.
         stdin_hold_until_lines = 64,
       })
       local response_reason = "codex did not show its limits in time"
+      local output_lines, saw_response = 0, false
       if ran and type(result) == "table" and type(result.stdout) == "string" then
         for line in (result.stdout .. "\n"):gmatch("([^\n]*)\n") do
           line = line:gsub("\r$", "")
+          if line ~= "" then output_lines = output_lines + 1 end
           local decoded, response = pcall(decoder, line)
           if decoded and type(response) == "table" and response.id == 2 then
+            saw_response = true
             local parsed = quota.parse_codex_rate_limits(response.result)
             if parsed then
               parsed.read_at = os.time()
@@ -614,9 +618,14 @@ if type(remuda) == "table" then
           end
         end
       end
-      if attempts < 2 and type(system.after) == "function" then
+      if attempts < 2 and output_lines > 0 and not saw_response
+          and (type(result) ~= "table" or type(result.code) ~= "number" or result.code == 0)
+          and type(system.after) == "function" then
         local scheduled = system.after(1, attempt)
         if scheduled then return end
+      end
+      if not saw_response and output_lines < 2 then
+        response_reason = "codex limits need core nightly d47a845 or newer"
       end
       fallback(response_reason)
     end

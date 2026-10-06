@@ -506,7 +506,7 @@ local function codex_read_case(name, stdout, timed_out, expected, failure_reason
     stubbed_result = { stdout = stdout, timed_out = timed_out, elapsed = simulated_delay }
   end
   if simulated_delay then
-    ok(name .. " fixture arrives after the old deadline", stubbed_result.elapsed > 5)
+    ok(name .. " fixture arrives within the new deadline", stubbed_result.elapsed <= 8)
   end
   local reading, reason
   quota.codex_read(function(value, failure)
@@ -515,7 +515,7 @@ local function codex_read_case(name, stdout, timed_out, expected, failure_reason
   if not expected and type(scheduled) == "function" then scheduled() end
   eq(name .. " argv executable", process_options.argv[1], "codex")
   eq(name .. " argv subcommand", process_options.argv[2], "app-server")
-  eq(name .. " waits for complete response", process_options.timeout, 15)
+  eq(name .. " waits for complete response", process_options.timeout, 8)
   eq(name .. " holds stdin through startup chatter", process_options.stdin_hold_until_lines, 64)
   if expected then
     ok(name .. " reads the fixture response", reading ~= nil)
@@ -541,8 +541,37 @@ codex_read_case("app-server timed out without id 2", table.concat({ wire_init, w
   "codex did not show its limits in time")
 codex_read_case("app-server garbage", "not JSON\nstill not JSON", false, false)
 codex_read_case("old core initialize only", wire_init, false, false,
-  "codex did not show its limits in time")
-codex_read_case("app-server nil result", nil, false, false)
+  "codex limits need core nightly d47a845 or newer")
+
+-- Empty output gets the old-core hint and does not trigger a synchronous second run.
+process_calls, scheduled = 0, nil
+stubbed_result = { stdout = "", timed_out = true }
+local empty_output_reading, empty_output_reason
+quota.codex_read(function(value, failure)
+  empty_output_reading, empty_output_reason = value, failure
+end)
+eq("empty app-server output gets old-core hint", empty_output_reason,
+  "codex limits need core nightly d47a845 or newer")
+eq("empty app-server output runs once", process_calls, 1)
+eq("empty app-server output does not schedule retry", scheduled, nil)
+
+process_calls, scheduled = 0, nil
+stubbed_result = nil
+local nil_result_reading, nil_result_reason
+quota.codex_read(function(value, failure) nil_result_reading, nil_result_reason = value, failure end)
+eq("missing app-server result gets old-core hint", nil_result_reason,
+  "codex limits need core nightly d47a845 or newer")
+eq("missing app-server result runs once", process_calls, 1)
+eq("missing app-server result does not schedule retry", scheduled, nil)
+
+process_calls, scheduled = 0, nil
+stubbed_result = { code = 127, stdout = wire_init, timed_out = false }
+local missing_codex_reading, missing_codex_reason
+quota.codex_read(function(value, failure) missing_codex_reading, missing_codex_reason = value, failure end)
+eq("missing Codex executable gets old-core hint", missing_codex_reason,
+  "codex limits need core nightly d47a845 or newer")
+eq("missing Codex executable runs once", process_calls, 1)
+eq("missing Codex executable does not schedule retry", scheduled, nil)
 
 -- A transient first probe gets exactly one event-loop retry.
 process_calls, scheduled = 0, nil
@@ -555,12 +584,23 @@ local first_options = process_options
 stubbed_result = { stdout = table.concat({ wire_init, wire_model_refresh, wire_rate_limits }, "\n"), timed_out = false }
 scheduled()
 eq("retry starts a second probe", process_calls, 2)
-eq("retry keeps 15 second ceiling", process_options.timeout, 15)
+eq("retry keeps 8 second ceiling", process_options.timeout, 8)
 eq("retry gets fixture id 2 response", retried_reading and retried_reading.limits[1].used, 62)
 eq("retry clears failure", retried_reason, nil)
 ok("retry uses fresh process options", first_options ~= process_options)
 
--- The last successful Codex result stays available after both attempts fail.
+-- A response can follow extra startup chatter without changing the parser result.
+local extra_chatter = {}
+for i = 1, 12 do extra_chatter[#extra_chatter + 1] = '{"method":"startup/chatter"}' end
+extra_chatter[#extra_chatter + 1] = wire_init
+extra_chatter[#extra_chatter + 1] = wire_model_refresh
+extra_chatter[#extra_chatter + 1] = wire_rate_limits
+stubbed_result = { stdout = table.concat(extra_chatter, "\n"), timed_out = false }
+local chatter_reading
+quota.codex_read(function(value) chatter_reading = value end)
+eq("extra startup chatter leaves response readable", chatter_reading and chatter_reading.limits[1].used, 62)
+
+-- The last successful Codex result stays available after a partial-output retry fails.
 stubbed_result = { stdout = table.concat({ wire_init, wire_rate_limits }, "\n"), timed_out = false }
 local fresh_reading
 quota.codex_read(function(value) fresh_reading = value end)
