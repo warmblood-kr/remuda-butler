@@ -707,8 +707,7 @@ inspect readiness.
 
 ## Guardrail grants (slice 3 design rules)
 
-These rules are final for slice 3 of the guardrails (#339). They describe what
-the code must do; nothing here is shipped until its PR lands. All of it sits
+These rules are final for slice 3 of the guardrails (#339). All of slice 3 sits
 behind one switch that is off by default, and with it off no grant exists and
 no guard behavior changes.
 
@@ -756,7 +755,7 @@ backfill), after the post was made. Three separate reactions, never one button:
 | Reaction | Meaning |
 | --- | --- |
 | ✅ | approve this one call (single-use) |
-| 🔄 | approve this call and record a standing grant for the scope shown; calls still ask in this version (the grant is recorded and audited, not yet used to skip the question) |
+| 🔄 | approve this call and record a standing grant for the scope shown; while it lasts, a later Claude call it covers is allowed without a post (see Grant use) |
 | ❌ | deny, and remember the deny (see Request limits) |
 
 Each post is one request with its own id and nonce, and the post's text hash
@@ -894,6 +893,57 @@ env name (`run_script` code, and `remuda -e`, `lua`, `exec` or `run` commands),
 and commands that set `REMUDA_BUTLER_TEST=`; writes into the data dir are
 refused as protected writes. Plain reads of repo files that mention them
 (`git diff packages/butler/guard_grants.lua`, `rg guard_grants`) are allowed.
+
+### Grant use
+
+A grant answers only a Claude `PermissionRequest`: the prompt Claude would show
+for that call is skipped and the call is allowed. It never answers at
+`PreToolUse`, so a deny rule there and Claude's own permission checks still
+run first. Codex sessions never use grants. The hook decides in this order, and
+the first refusal wins:
+
+1. `guard on`, `guard approvals on`, `guard grants on`, and a Claude session.
+   With any of these off the grant store is not read.
+2. No deny rule names the call (the deny rules are checked again here, with the
+   deny switch on or off).
+3. The call is a plain push (Bash or PowerShell, class `push`) or a WebFetch
+   (class `net`). Every other class asks.
+4. The target is not a protected place, the grant is live (not frozen, expired,
+   revoked, unverified or written ahead of the clock), and it covers the call
+   (see Pushes under a grant and Network scopes).
+5. The grant has a use left this hour (below).
+6. A `grant_used` line naming the grant is written to the audit log.
+
+Every refusal, and every error on the way (the store, git, the match itself,
+the audit write), asks: the call goes on to the approval post, or to Claude's
+own prompt. Nothing on an error path allows. A grant matches by scope only:
+any agent whose call falls in the scope uses it, whoever asked for it.
+
+Audit before allow: the call is allowed only after its `grant_used` line was
+written. If that line cannot be written the call asks and the use is not
+counted, because the audit line is the only record the owner and the hourly
+limit rely on, and asking costs one post while an unaudited allow cannot be
+reconstructed.
+
+`grant_id` is `gNNN` only on the `grant_used` line of a call a grant allowed,
+on the `grant_limited` line below, and on the grant's own create and revoke
+lines. The request line of the same call, a deny and every asked call keep `-`.
+
+Hourly limit: a grant allows at most 30 calls in any rolling hour. The 31st
+asks and writes one `grant_limited` line naming the grant; further calls in
+that hour ask without another line. The count lives in daemon memory and
+survives a live reload. After a restart, a grant's first use rebuilds its count
+from the `grant_used` lines of the live audit log within the last hour; if the
+log cannot be read, the call asks. A rotation within that hour moves older lines
+out of the live log, so the rebuilt count can be low by what the rotated file
+held (the next rotation is 1 MiB later).
+
+Clock skew: Butler keeps the highest clock time it has seen. A clock more than
+60 seconds behind it matches no grant until it catches up; a forward jump only
+expires grants early.
+
+With grants on and no live git grant, matching runs no process: the git probes
+start only when a git grant could cover the call.
 
 ### Scope patterns
 
