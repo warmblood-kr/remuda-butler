@@ -405,13 +405,15 @@ end
 -- One wall-clock budget for all the git probes of one match()/offer(), checked before each call; spent means no grant.
 -- ponytail: os.time() has 1 s resolution, so the budget is 2 s +/- 1 s; a finer clock when core has one.
 local GIT_BUDGET, GIT_TIMEOUT = 2, 2
--- In-process test injection, like guard_policy.LOG_CAP; no env/config/CLI input.
--- nil restores the production budget. Per-command GIT_TIMEOUT stays 2 s.
+-- Only the existing process-captured test mode admits an in-process budget injection.
+-- Valid test budgets are numbers in (0, 60]; otherwise use 2 s. GIT_TIMEOUT stays 2 s.
 local deadline
 local function spent() return deadline ~= nil and os.time() >= deadline end
 local function budgeted(fn)
   return function(...)
-    deadline = os.time() + (M.git_budget_s or GIT_BUDGET)
+    local budget = seam("git_budget_s")
+    if type(budget) ~= "number" or not (budget > 0 and budget <= 60) then budget = GIT_BUDGET end
+    deadline = os.time() + budget
     local r = table.pack(pcall(fn, ...))
     deadline = nil
     if not r[1] then error(r[2], 0) end
