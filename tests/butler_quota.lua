@@ -86,6 +86,11 @@ local codex_core_next = "Next: update Remuda core to nightly d47a845 or newer, t
 
 -- render: the three UX examples, excluding their terminal ending.
 eq("render subscription near limit", quota.render(normal), normal_body)
+local codex_last_known = quota.render({ at = at, claude = { mode = "api_key" },
+  codex = { mode = "subscription", plan = "prolite", limits = {
+    { name = "Weekly limit", used = 9, resets_at = 1791048660 },
+  }, read_at = at - 180, last_known = true } })
+ok("Codex fallback identifies last known age", codex_last_known:find("  quota: last known (3 min ago)", 1, true) ~= nil)
 eq("render API keys", quota.render(keys), keys_body)
 eq("render not logged in and unknown quota", quota.render(unavailable), unavailable_body)
 
@@ -461,19 +466,25 @@ remuda = saved_remuda
 local wire_init = '{"id":1}'
 local wire_remote = '{"method":"remoteControl/status/changed"}'
 local wire_account = '{"method":"account/updated"}'
+local wire_model_refresh = '{"method":"model/list/refreshing"}'
 local wire_rate_limits = '{"id":2}'
 local decoded_lines = {
   [wire_init] = { id = 1 },
   [wire_remote] = { method = "remoteControl/status/changed" },
   [wire_account] = { method = "account/updated" },
+  [wire_model_refresh] = { method = "model/list/refreshing" },
   [wire_rate_limits] = { id = 2, result = app_result },
 }
-local stubbed_result, process_options
+local stubbed_result, process_options, process_calls, scheduled
 remuda = {
   process = { run = function(options)
     process_options = options
+    process_calls = (process_calls or 0) + 1
     return stubbed_result
   end },
+  _butler_system = { after = function(_, callback) scheduled = callback; return "quota-retry" end },
+  schedule = function(options) scheduled = options.run; return "quota-retry" end,
+  cancel = function() end,
   json = { decode = function(line)
     local decoded = decoded_lines[line]
     if not decoded then error("invalid JSON") end
@@ -481,20 +492,26 @@ remuda = {
   end },
 }
 quota = dofile("packages/butler/quota.lua")
-local function codex_read_case(name, stdout, timed_out, expected, failure_reason)
+local function codex_read_case(name, stdout, timed_out, expected, failure_reason, simulated_delay)
+  process_calls, scheduled = 0, nil
+  remuda._butler_quota_state.codex_reading = nil
   if stdout == nil then
     stubbed_result = nil
   else
-    stubbed_result = { stdout = stdout, timed_out = timed_out }
+    stubbed_result = { stdout = stdout, timed_out = timed_out, elapsed = simulated_delay }
+  end
+  if simulated_delay then
+    ok(name .. " fixture arrives after the old deadline", stubbed_result.elapsed > 5)
   end
   local reading, reason
   quota.codex_read(function(value, failure)
     reading, reason = value, failure
   end)
+  if not expected and type(scheduled) == "function" then scheduled() end
   eq(name .. " argv executable", process_options.argv[1], "codex")
   eq(name .. " argv subcommand", process_options.argv[2], "app-server")
-  eq(name .. " hold lines", process_options.stdin_hold_until_lines, 4)
-  eq(name .. " timeout", process_options.timeout, 5)
+  eq(name .. " waits for complete response", process_options.timeout, 15)
+  eq(name .. " holds stdin through startup chatter", process_options.stdin_hold_until_lines, 64)
   if expected then
     ok(name .. " reads the fixture response", reading ~= nil)
     eq(name .. " preserves plan", reading and reading.plan, "prolite")
@@ -508,15 +525,50 @@ local function codex_read_case(name, stdout, timed_out, expected, failure_reason
 end
 codex_read_case("app-server id 2 third", table.concat({ wire_init, wire_remote, wire_rate_limits }, "\n"), false, true)
 codex_read_case("app-server id 2 fourth", table.concat({ wire_init, wire_remote, wire_account, wire_rate_limits }, "\n"), false, true)
+local delayed_fixture = assert(io.open("tests/fixtures/quota-codex-app-server-0160-delayed.txt", "rb"))
+local delayed_output = assert(delayed_fixture:read("*a")):gsub("\n$", "")
+delayed_fixture:close()
+codex_read_case("app-server delayed id 2 after model refresh", delayed_output, false, true, nil, 8)
 codex_read_case("app-server timed out with id 2", table.concat({
   wire_init, wire_remote, wire_account, wire_rate_limits,
 }, "\n"), true, true)
 codex_read_case("app-server timed out without id 2", table.concat({ wire_init, wire_remote, wire_account }, "\n"), true, false,
-  "codex limits need core nightly d47a845 or newer")
+  "codex did not show its limits in time")
 codex_read_case("app-server garbage", "not JSON\nstill not JSON", false, false)
 codex_read_case("old core initialize only", wire_init, false, false,
-  "codex limits need core nightly d47a845 or newer")
+  "codex did not show its limits in time")
 codex_read_case("app-server nil result", nil, false, false)
+
+-- A transient first probe gets exactly one event-loop retry.
+process_calls, scheduled = 0, nil
+stubbed_result = { stdout = table.concat({ wire_init, wire_account }, "\n"), timed_out = true }
+local retried_reading, retried_reason
+quota.codex_read(function(value, failure) retried_reading, retried_reason = value, failure end)
+eq("failed first probe defers its retry", retried_reading, nil)
+ok("failed first probe schedules a retry", type(scheduled) == "function")
+local first_options = process_options
+stubbed_result = { stdout = table.concat({ wire_init, wire_model_refresh, wire_rate_limits }, "\n"), timed_out = false }
+scheduled()
+eq("retry starts a second probe", process_calls, 2)
+eq("retry keeps 15 second ceiling", process_options.timeout, 15)
+eq("retry gets fixture id 2 response", retried_reading and retried_reading.limits[1].used, 62)
+eq("retry clears failure", retried_reason, nil)
+ok("retry uses fresh process options", first_options ~= process_options)
+
+-- The last successful Codex result stays available after both attempts fail.
+stubbed_result = { stdout = table.concat({ wire_init, wire_rate_limits }, "\n"), timed_out = false }
+local fresh_reading
+quota.codex_read(function(value) fresh_reading = value end)
+ok("successful probe timestamps cached reading", fresh_reading and fresh_reading.read_at ~= nil)
+process_calls, scheduled = 0, nil
+stubbed_result = { stdout = wire_init, timed_out = true }
+local old_reading
+quota.codex_read(function(value) old_reading = value end)
+ok("failed probe schedules cache fallback retry", type(scheduled) == "function")
+scheduled()
+ok("failed retry returns last known result", old_reading and old_reading.last_known == true)
+eq("last known reading preserves timestamp", old_reading and old_reading.read_at,
+  fresh_reading and fresh_reading.read_at)
 remuda = saved_remuda
 
 eq("usage error unexpected argument", quota.usage_error("claude"), "unexpected argument: claude\n"
