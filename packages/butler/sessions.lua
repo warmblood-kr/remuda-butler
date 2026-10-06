@@ -256,9 +256,11 @@ function remuda.session_detail(session)
   local used = tonumber(telemetry.context_used)
   local pct = tonumber(telemetry.context_pct or telemetry.context_percent)
   local window = tonumber(telemetry.context_window)
-  if not used and pct and window and window > 0 then used = pct * window / 100 end
+  if pct and (pct ~= pct or pct < 0 or pct > 1000) then pct = nil end -- same sanity range as status_command
+  local derived = not used and pct and window and window > 0
+  if derived then used = pct * window / 100 end
   if used then
-    local context = string.format("%.0fK", used / 1000)
+    local context = string.format("%s%.0fK", derived and "~" or "", used / 1000)
     if pct then context = context .. string.format(" %.0f%%", pct) end
     detail = detail .. " · " .. context
   elseif pct then

@@ -110,7 +110,14 @@ detail = remuda.session_detail({ name = "detail" })
 assert(detail:find("123K 47%%", 1, false), "detail shows percent beside token count: " .. detail)
 context[detail_agent] = { context_window = 258400, context_percent = 47 }
 detail = remuda.session_detail({ name = "detail" })
-assert(detail:find("121K 47%%", 1, false), "detail derives token count from percent and window: " .. detail)
+assert(detail:find("~121K 47%%", 1, false), "derived token count is marked approximate: " .. detail)
+assert(not detail:find("123K", 1, true), "derived count is not the measured one")
+for _, bad in ipairs({ 1001, -1, math.huge, 0 / 0 }) do
+  context[detail_agent] = { context_window = 258400, context_percent = bad }
+  detail = remuda.session_detail({ name = "detail" })
+  assert(not detail:find("%d%%") and not detail:find("%dK") and not detail:find("?", 1, true),
+    "out-of-range percent is unknown: " .. tostring(bad) .. " " .. detail)
+end
 context[detail_agent] = { context_window = 0, context_percent = 12 }
 detail = remuda.session_detail({ name = "detail" })
 assert(not detail:find("0K 12%%", 1, false), "zero window omits derived token count: " .. detail)
