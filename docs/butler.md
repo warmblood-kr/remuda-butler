@@ -164,6 +164,26 @@ and cannot be launched.
 that is corrupt, oversized or of an unknown version is treated as empty and
 traced; `add` and `rm` leave it untouched until it is fixed or removed.
 
+### Moving a Claude cron to a schedule
+
+A Claude `CronCreate` job lives only in one Claude session and stops with it. To
+move the hourly North Star check and the staging-guard liveness check to the
+persistent scheduler, run these at the terminal as the operator (each `add` asks
+for `yes`; both default to the `butler` session, add `--to SESSION` for another):
+
+```
+remuda butler schedule add north-star "7 * * * *" "Hourly North Star check: follow ~/projects/remuda-notes/north-star-check-m1-2026-10-01.md (delegate the legwork to a member/subagent). Also: remuda butler sessions + inbox; nudge any stalled or idle lead; confirm each team keeps <=3 members alive (post-reboot load limit)."
+remuda butler schedule add staging-guard "37 * * * *" "staging-guard liveness: check remuda butler sessions shows staging-guard and its pane is not stuck on a dialog (capture it). If dead or stuck, relaunch/unstick it. No report to the owner unless action was needed."
+remuda butler schedule list
+```
+
+Check that `list` shows both names with the right spec and target. Only then end
+the two old Claude crons (`CronList`, then `CronDelete` on the `7 * * * *` and
+`37 * * * *` jobs in the butler session), so the check never runs twice. The
+text arrives as timed mail from `schedule`, not as a typed prompt; if you
+change the wording, keep it free of shell quoting that the mail reader would
+need to run. Undo with `remuda butler schedule rm NAME`.
+
 ## Handoff letters
 
 A Butler that is about to stop or be replaced leaves its open items as a mail to
