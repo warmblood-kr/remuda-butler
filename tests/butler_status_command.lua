@@ -50,7 +50,8 @@ local used_warning = status.status_format({ now = now, sessions = {
   { name = "done", kind = "codex", context_percent = 70, context_used = 450000, compaction_fired = true },
 } })
 assert(used_warning:find("near     codex  ctx 40%  idle  ⚠", 1, true), "400K warns before compaction")
-assert(not used_warning:find("done    codex  ctx 70%  idle  ⚠", 1, true), "compacted session suppresses warning")
+assert(used_warning:find("done     codex  ctx 70%  idle", 1, true), "compacted row is listed")
+assert(not used_warning:find("done     codex  ctx 70%  idle  ⚠", 1, true), "compacted session suppresses warning")
 local function has_warning(session)
   return status.status_format({ now = now, sessions = { session } }):find("⚠", 1, true) ~= nil
 end
