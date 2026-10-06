@@ -1,6 +1,6 @@
 -- Guard slice 3, PR3 (scope half): grant_id in audit lines, URL hosts, protected scopes, bidi escaping, no agent path to add, eval/script classing.
 local function start_butler(no_register)
-  T.install_mod("butler", assert(os.getenv("REMUDA_LUA_REPO")))
+  T.install_guard_subject("butler", assert(os.getenv("REMUDA_LUA_REPO")))
   T.eval('remuda._butler_argv = {"sh", "-c", "sleep 60"}; remuda._butler_skip_relay = true; remuda._butler_readiness_timeout = 1')
   T.eval('return remuda.exec("butler")')
   T.wait_until(function()

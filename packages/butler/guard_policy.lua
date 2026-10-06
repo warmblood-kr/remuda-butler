@@ -814,9 +814,8 @@ local function locked(path, fn)
   return fn()
 end
 
--- Test clock: the line timestamps and the digest day read this, and only under the test flag.
-local TEST_MODE = os.getenv("REMUDA_BUTLER_TEST") == "1"
-function M.time() return (TEST_MODE and M.now and M.now()) or os.time() end
+-- The line timestamps and the digest day use the production clock.
+function M.time() return os.time() end
 
 local function build_line(record, prev)
   local line = '{"time":' .. remuda.json.encode(os.date("!%Y-%m-%dT%H:%M:%SZ", M.time()))

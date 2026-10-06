@@ -1,6 +1,5 @@
--- Guard slice 3, PR5 SEC: the grant-store test seams follow the process env captured at module load
--- (REMUDA_BUTLER_TEST=1, set by the harness for the child), never the mutable remuda._butler_test field.
--- This file runs the child in production mode: the env flag is off.
+-- Guard slice 3, PR5 SEC: installed guards ignore public test fields and the legacy env flag.
+-- This file covers the real process flag set to 0; seam_isolation covers 1 and forged reads.
 T.child_env = { REMUDA_BUTLER_TEST = "0" }
 local started
 local function start_butler()
@@ -30,7 +29,7 @@ T.test("setting remuda._butler_test later does not switch the grant-store seams 
     gg.insensitive = function() return true end]])
   T.eq(T.eval("return #remuda.butler.guard_grants.active()"), "0", "a hand-written line is no grant, flag and seams or not")
   T.eq(T.eval("return tostring(math.abs(remuda.butler.guard_grants.time() - os.time()) < 5)"), "true", "the clock seam is ignored")
-  T.expect(true, "", "ok - flag captured at load")
+  T.expect(true, "", "ok - production ignores test fields")
 end)
 
 T.test("command text naming the test flag or its env var is denied like the grant store", function()
