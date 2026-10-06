@@ -252,9 +252,20 @@ function remuda.session_detail(session)
   local detail = session_status(session.name, agent, telemetry) .. " · " .. (agent.kind or "agent") .. " · " .. telemetry.model
   local profile = remuda._butler_sandbox.summary(remuda._butler_sandbox.of(agent))
   if profile then detail = detail .. " · " .. profile end
-  -- Current usage only: the window and percent cost width and rarely change.
+  -- Keep context compact while showing the percentage that makes sessions comparable.
   local used = tonumber(telemetry.context_used)
-  if used then detail = detail .. " · " .. string.format("%.0fK", used / 1000) end
+  local pct = tonumber(telemetry.context_pct or telemetry.context_percent)
+  local window = tonumber(telemetry.context_window)
+  if pct and (pct ~= pct or pct < 0 or pct > 1000) then pct = nil end -- same sanity range as status_command
+  local derived = not used and pct and window and window > 0
+  if derived then used = pct * window / 100 end
+  if used then
+    local context = string.format("%s%.0fK", derived and "~" or "", used / 1000)
+    if pct then context = context .. string.format(" %.0f%%", pct) end
+    detail = detail .. " · " .. context
+  elseif pct then
+    detail = detail .. " · " .. string.format("%.0f%%", pct)
+  end
   local unread = agent.id and agent.id ~= "" and mail.unread(agent.id) or 0
   if unread > 0 then detail = detail .. " · ✉" .. unread end
   local attempts = agent.launch_attempts or (session.name == "butler" and remuda._butler_attempts)
