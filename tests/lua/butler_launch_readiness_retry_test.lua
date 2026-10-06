@@ -102,3 +102,30 @@ T.test("only a live blank screen is kept unverified at readiness timeout", funct
   probe_timeout("probe-unknown-dialog", "retry_probe",
     '{ "sh", "-c", "sleep 60" }', "please confirm to continue", 5, "dialog", "false")
 end)
+
+T.test("root reconcile failures back off exponentially and reset on success", function()
+  local result = T.eval([=[
+    local real_clock, now = remuda.clock, 100000
+    remuda.clock = function() return now end
+    local retry = assert(remuda._butler_reconcile_retry, "reconcile backoff state is missing")
+    retry.reset()
+    remuda._butler_launching = true
+    local expected = { 2000, 4000, 8000, 16000, 32000, 60000, 60000 }
+    for _, delay in ipairs(expected) do
+      retry.note_failure()
+      assert(retry.retry_at_ms == now + delay, "wrong retry deadline for " .. delay)
+      now = retry.retry_at_ms - 1
+      assert(remuda._butler_reconcile() == "retry deferred", "retry was not deferred before deadline")
+      now = retry.retry_at_ms
+      assert(remuda._butler_reconcile() ~= "retry deferred", "retry was not allowed at deadline")
+    end
+    retry.reset()
+    assert(retry.delay_ms == 2000 and retry.retry_at_ms == 0, "success did not reset retry state")
+    retry.note_failure()
+    assert(retry.retry_at_ms == now + 2000, "post-success retry did not restart at 2 seconds")
+    remuda._butler_launching = nil
+    remuda.clock = real_clock
+    return "backoff ok"
+  ]=])
+  T.eq(result, "backoff ok", "fake remuda.clock should drive reconcile backoff")
+end)

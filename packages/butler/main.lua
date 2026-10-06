@@ -1013,6 +1013,22 @@ local function write_root_guidance(root, body)
     _butler_session_trace(event, one_line(err or path))
   end
 end
+local RECONCILE_RETRY_INITIAL_MS, RECONCILE_RETRY_MAX_MS = 2000, 60000
+local reconcile_retry = remuda._butler_reconcile_retry or {}
+reconcile_retry.delay_ms = tonumber(reconcile_retry.delay_ms) or RECONCILE_RETRY_INITIAL_MS
+reconcile_retry.retry_at_ms = tonumber(reconcile_retry.retry_at_ms) or 0
+function reconcile_retry.note_failure()
+  local delay = reconcile_retry.delay_ms
+  reconcile_retry.retry_at_ms = remuda.clock() + delay
+  reconcile_retry.delay_ms = math.min(delay * 2, RECONCILE_RETRY_MAX_MS)
+end
+function reconcile_retry.reset()
+  reconcile_retry.delay_ms, reconcile_retry.retry_at_ms = RECONCILE_RETRY_INITIAL_MS, 0
+end
+function reconcile_retry.remaining_ms()
+  return math.max(0, reconcile_retry.retry_at_ms - remuda.clock())
+end
+remuda._butler_reconcile_retry = reconcile_retry
 local function launch_butler()
   local requested_name = butler_name or remuda._butler_initial_name
   if butler_session_cwd then
@@ -1060,6 +1076,7 @@ local function launch_butler()
     local message = table.concat(launch_failure_lines(attempts), "\n")
     remuda._butler_start_error = message
     remuda._butler_start_pending = false
+    reconcile_retry.note_failure()
     _butler_session_trace("reconcile_error", message)
     return nil
   end
@@ -1073,6 +1090,7 @@ local function launch_butler()
   arm_compaction_schedule(kind)
   remuda._butler_start_error = nil
   remuda._butler_start_pending = false
+  reconcile_retry.reset()
   return selected
   end
   local attempts = choose(order, choose_opts, function(selected, kind, attempts)
@@ -1080,6 +1098,7 @@ local function launch_butler()
     local ok, err = pcall(finish, selected, kind, attempts)
     if not ok then
       remuda._butler_start_error = tostring(err)
+      reconcile_retry.note_failure()
       _butler_session_trace("reconcile_error", tostring(err))
     end
   end)
@@ -1131,8 +1150,10 @@ function _butler_session_trace(event, detail)
 end
 
 function remuda._butler_reconcile()
+  if reconcile_retry.remaining_ms() > 0 then return "retry deferred" end
   local ok, result = pcall(launch_butler)
   if not ok then
+    reconcile_retry.note_failure()
     _butler_session_trace("reconcile_error", tostring(result))
     return nil, result
   end
