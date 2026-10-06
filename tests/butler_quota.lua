@@ -485,6 +485,7 @@ remuda = {
   process = { run = function(options)
     process_options = options
     process_calls = (process_calls or 0) + 1
+    if stubbed_result == "throw" then error("spawn failed") end
     return stubbed_result
   end },
   _butler_system = { after = function(_, callback) scheduled = callback; return "quota-retry" end },
@@ -572,6 +573,13 @@ eq("missing Codex executable keeps generic reason", missing_codex_reason,
   "codex did not show its limits in time")
 eq("missing Codex executable runs once", process_calls, 1)
 eq("missing Codex executable does not schedule retry", scheduled, nil)
+
+process_calls, scheduled = 0, nil
+stubbed_result = "throw"
+local thrown_reason
+quota.codex_read(function(_, failure) thrown_reason = failure end)
+eq("thrown process.run keeps generic reason", thrown_reason, "codex did not show its limits in time")
+eq("thrown process.run does not schedule retry", scheduled, nil)
 
 -- A transient first probe gets exactly one event-loop retry.
 process_calls, scheduled = 0, nil
