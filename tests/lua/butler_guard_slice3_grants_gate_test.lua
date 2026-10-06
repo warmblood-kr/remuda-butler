@@ -63,7 +63,12 @@ local function git_fixture(name)
   return work, sh
 end
 local function grant_for(command, cwd, class)
-  return T.eval(("return tostring(remuda.butler.guard_grants.match('Bash', { command = %q }, %q, %s))"):format(command, cwd, class and string.format("%q", class) or "nil"))
+  return T.eval(([[local g = remuda.butler.guard_grants; local budget = g.git_budget_s
+    g.git_budget_s = 20 -- control assertions must not depend on os.time() second boundaries
+    local ok, id = pcall(g.match, 'Bash', { command = %q }, %q, %s)
+    g.git_budget_s = budget
+    if not ok then error(id, 0) end
+    return tostring(id)]]):format(command, cwd, class and string.format("%q", class) or "nil"))
 end
 
 T.test("class gate: only push and net may match; every other class gets no grant", function()
@@ -107,15 +112,17 @@ end)
 -- Runs match('Bash', 'git push') with remuda.process.run counted (and each git call slowed by `slow` seconds); returns "id calls".
 local function counted(work, slow, net_only)
   return T.eval(([[local real, g = remuda.process.run, remuda.butler.guard_grants
+    local budget = g.git_budget_s
+    if %d == 0 then g.git_budget_s = 20 end -- the slow-git assertion keeps the default 2s
     local active = g.active
     local n = 0
     -- A repeated Butler exec can run its fallback between evals: install, exercise and restore the stub together.
     if %s then g.active = function() return { { id = 'g009', class = 'net', scope = 'example.com' } } end end
     remuda.process.run = function(o) n = n + 1; if %d > 0 then real({ argv = { 'sleep', '%d' } }) end; return real(o) end
     local ok, id = pcall(g.match, 'Bash', { command = 'git push' }, %q)
-    remuda.process.run, g.active = real, active
+    remuda.process.run, g.active, g.git_budget_s = real, active, budget
     if not ok then error(id, 0) end
-    return tostring(id) .. ' ' .. n]]):format(tostring(net_only == true), slow, slow, work))
+    return tostring(id) .. ' ' .. n]]):format(slow, tostring(net_only == true), slow, slow, work))
 end
 
 T.test("git work is budgeted: with no git grant no git runs; a slow git means no grant", function()
