@@ -64,6 +64,9 @@ local function start_butler()
       return remuda.butler.approval.answer(remuda._t_event(n), verdict, who or '@owner:x', '$r' .. n)
     end
     remuda._t_grants = function() return #remuda.butler.guard_grants.active() end
+    -- The calling session by core's caller identity (a grant offer needs one; holders: enforce_holder).
+    remuda._butler_bus.agents['t-ssa'] = { id = 'U-SSA', parent = 'butler', alias = 't-ssa', session_name = 's-ssa', children = {} }
+    remuda.caller = function() return { kind = 'session', session = 's-ssa' } end
     return 'ok'
   ]])
 end
@@ -144,7 +147,7 @@ end)
 T.test("the post tells the owner what the standing-grant reaction does in this version", function()
   on("l-truth")
   perm("ss-a", "a.test")
-  T.expect(has(post(1), "🔄 to allow it and, until the time shown, every call in this scope by any agent"), "says so: " .. post(1))
+  T.expect(has(post(1), "🔄 to allow it and, until the time shown, every call in this scope by that session and the sessions below it"), "says so: " .. post(1))
   guard("grants", "off")
   perm("ss-a", "b.test")
   T.expect(not has(post(2), "grant"), "no grant words with the switch off", "ok - truth")
