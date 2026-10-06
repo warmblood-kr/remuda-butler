@@ -1585,6 +1585,196 @@ fn exec_butler_runs_the_builtin_package_in_the_daemons_image() {
     );
 }
 
+// Wait past the compatibility delay and the native scheduler tick. Immediate
+// assertions miss a discarded declaration's fallback loading main.lua later.
+fn butler_fallback_tick() {
+    std::thread::sleep(Duration::from_millis(1250));
+}
+
+const BUTLER_REMEMBER_GUARDS: &str = r#"
+    remuda._butler_test_policy = assert(remuda.butler.guard_policy)
+    remuda._butler_test_active = assert(remuda.butler.guard_grants.active)
+"#;
+
+const BUTLER_BOOT_AND_GUARDS: &str = r#"
+    local fallbacks = 0
+    for _, schedule in pairs(remuda.schedules) do
+      if schedule.name == "butler-start-fallback" then fallbacks = fallbacks + 1 end
+    end
+    return table.concat({ remuda.event_counts()["butler-start"] or 0,
+      tostring(remuda.butler.guard_policy == remuda._butler_test_policy),
+      tostring(remuda.butler.guard_grants.active == remuda._butler_test_active),
+      fallbacks, remuda.schedule_fires()["butler-start-fallback"] or 0 }, "|")
+"#;
+
+#[test]
+fn butler_reexec_cli_preserves_guards_after_fallback_tick() {
+    let dir = scratch_dir("butler-reexec-fallback");
+    let _daemon = Daemon::spawn(&dir);
+    let path = daemon::socket_path_in(&dir, "s");
+    eval(&path, "remuda._butler_test_mode = 'lifecycle'");
+    let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    butler_fallback_tick();
+    eval(&path, BUTLER_REMEMBER_GUARDS);
+    let initial = eval(&path, BUTLER_BOOT_AND_GUARDS);
+    assert!(initial.starts_with("1|true|true|0|"), "initial activation: {initial}");
+
+    // Exercise both production entry paths. Neither may install a candidate
+    // fallback, boot again, or replace the guard table/function after a tick.
+    for args in [&["-s", "s", "exec", "butler"][..], &["-s", "s", "butler"][..]] {
+        let out = remuda_timed(&dir, args);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        butler_fallback_tick();
+        let after = eval(&path, BUTLER_BOOT_AND_GUARDS);
+        eprintln!("{args:?}: before={initial}, after={after}");
+        assert_eq!(after, initial, "re-exec changed Butler after the fallback tick");
+    }
+
+    eval(&path, "remuda.reload('butler')");
+    butler_fallback_tick();
+    let reloaded = eval(&path, BUTLER_BOOT_AND_GUARDS);
+    assert!(reloaded.starts_with("2|false|false|0|"), "reload must boot exactly once: {reloaded}");
+    eval(&path, BUTLER_REMEMBER_GUARDS);
+    let intended = eval(&path, BUTLER_BOOT_AND_GUARDS);
+    butler_fallback_tick();
+    assert_eq!(eval(&path, BUTLER_BOOT_AND_GUARDS), intended, "reload left an orphan fallback");
+}
+
+#[test]
+fn butler_commands_only_then_exec_boots_once_after_fallback_tick() {
+    let dir = scratch_dir("butler-commands-exec-fallback");
+    let _daemon = Daemon::spawn(&dir);
+    let path = daemon::socket_path_in(&dir, "s");
+    eval(&path, "remuda._butler_test_mode = 'lifecycle'");
+    let out = remuda_timed(&dir, &["-s", "s", "butler", "sessions"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    eval(&path, BUTLER_REMEMBER_GUARDS);
+    butler_fallback_tick();
+    let commands = eval(&path, BUTLER_BOOT_AND_GUARDS);
+    assert!(commands.starts_with("0|true|true|0|"), "commands-only load booted: {commands}");
+    for _ in 0..2 {
+        let out = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        butler_fallback_tick();
+        let after = eval(&path, BUTLER_BOOT_AND_GUARDS);
+        eprintln!("commands-only -> exec: before={commands}, after={after}");
+        assert_eq!(after, commands.replacen("0|", "1|", 1), "exec must start the commands-only activation once without replacing guards or adding a fallback");
+    }
+}
+
+#[test]
+fn butler_refused_start_can_retry_in_lifecycle_transaction() {
+    let dir = scratch_dir("butler-refused-start-retry");
+    let _daemon = Daemon::spawn(&dir);
+    let path = daemon::socket_path_in(&dir, "s");
+    eval(&path, r#"
+        remuda._butler_test_mode = 'lifecycle'
+        remuda._butler_test_lock_held = true
+        remuda.fs.lock = function()
+          if remuda._butler_test_lock_held then
+            return nil, 'held', 'remuda-lock session=owner pid=123 since=1'
+          end
+          return { release = function() end }
+        end
+    "#);
+    let refused = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
+    assert!(!refused.status.success(), "a refused start must remain retryable, not a started activation");
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("already running in another Remuda daemon"));
+    butler_fallback_tick();
+    assert_eq!(read_count(&path, "return remuda.event_counts()['butler-start'] or 0"), 0, "refused activation booted after rollback");
+    // Discovery after the owner disappears must still refuse, rather than
+    // implicitly claiming this home while loading commands after rollback.
+    eval(&path, "remuda._butler_test_lock_held = false");
+    let status = remuda_timed(&dir, &["-s", "s", "butler", "status"]);
+    assert!(!status.status.success());
+    assert!(String::from_utf8_lossy(&status.stderr).contains("has not taken over"));
+    assert_eq!(eval(&path, "return tostring(remuda._butler_owner_lock == nil)"), "true");
+    let started = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
+    assert!(started.status.success(), "{}", String::from_utf8_lossy(&started.stderr));
+    butler_fallback_tick();
+    eval(&path, BUTLER_REMEMBER_GUARDS);
+    let initial = eval(&path, BUTLER_BOOT_AND_GUARDS);
+    assert!(initial.starts_with("1|true|true|0|"), "retry did not boot once: {initial}");
+    let repeated = remuda_timed(&dir, &["-s", "s", "exec", "butler"]);
+    assert!(repeated.status.success());
+    butler_fallback_tick();
+    assert_eq!(eval(&path, BUTLER_BOOT_AND_GUARDS), initial, "retry left a discarded fallback");
+}
+
+#[test]
+fn butler_old_core_fallback_owns_boot_and_reload() {
+    let dir = scratch_dir("butler-old-core-fallback");
+    // Install a private fixture whose declaration has no start/commands
+    // callbacks, as on a core that ignores those fields. Keep the production
+    // init body and real core activation, reload and scheduler paths.
+    let data = dir.join("old-core-data");
+    let fixture = data.join("remuda/mods/butler");
+    let package = fixture.join("packages/butler");
+    std::fs::create_dir_all(&package).unwrap();
+    let installed = PathBuf::from(std::env::var_os("XDG_DATA_HOME").expect("scratch data home"))
+        .join("remuda/mods/butler");
+    std::fs::copy(installed.join("extension.toml"), fixture.join("extension.toml")).unwrap();
+    fn copy_package(source: &Path, destination: &Path) {
+        std::fs::create_dir_all(destination).unwrap();
+        for entry in std::fs::read_dir(source).unwrap() {
+            let entry = entry.unwrap();
+            let target = destination.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_package(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+    copy_package(&installed.join("packages/butler"), &package);
+    let init = include_str!("../../packages/butler/init.lua")
+        .replace("start = function(state)", "ignored_start = function(state)")
+        .replace("commands = function(state)", "ignored_commands = function(state)");
+    std::fs::write(package.join("init.lua"), init).unwrap();
+    let _daemon = Daemon::spawn_with_env(&dir, &[("XDG_DATA_HOME", data.to_str().unwrap())]);
+    let path = daemon::socket_path_in(&dir, "s");
+    let pending = eval(&path, r#"
+        remuda._butler_test_mode = 'lifecycle'
+        local schedule = remuda.schedule
+        remuda.schedule = function(spec)
+          if spec.name == 'butler-start-fallback' then
+            local run = spec.run
+            spec.run = function(...)
+              local ok, err = pcall(run, ...)
+              if not ok then remuda._butler_test_fallback_error = tostring(err); error(err) end
+            end
+          end
+          return schedule(spec)
+        end
+        remuda.exec('butler')
+        local fallback
+        for handle, schedule in pairs(remuda.schedules) do
+          if schedule.name == 'butler-start-fallback' then fallback = handle end
+        end
+        assert(fallback, 'accepted activation must have a pending fallback')
+        assert(remuda._butler_state == nil, 'ignored callbacks must not publish state')
+        remuda.exec('butler')
+        return tostring(remuda.schedules[fallback] ~= nil)
+    "#);
+    assert_eq!(pending, "true", "discarded old-core candidate cancelled the legitimate pending fallback");
+    butler_fallback_tick();
+    assert_eq!(eval(&path, "return remuda._butler_test_fallback_error or 'ok'"), "ok", "fallback boot failed");
+    eval(&path, BUTLER_REMEMBER_GUARDS);
+    let initial = eval(&path, BUTLER_BOOT_AND_GUARDS);
+    assert_eq!(initial, "1|true|true|0|1", "old-core fallback must boot once and cancel itself");
+    eval(&path, "remuda.exec('butler')");
+    butler_fallback_tick();
+    assert_eq!(eval(&path, BUTLER_BOOT_AND_GUARDS), initial, "old-core re-exec restarted guards");
+    for boots in 2..=3 {
+        eval(&path, "remuda.reload('butler')");
+        butler_fallback_tick();
+        let after = eval(&path, BUTLER_BOOT_AND_GUARDS);
+        assert_eq!(after, format!("{boots}|false|false|0|{boots}"), "old-core reload must boot once via fallback");
+        eval(&path, BUTLER_REMEMBER_GUARDS);
+    }
+}
+
 #[test]
 fn butler_lifecycle_reload_replaces_hooks_and_schedules_and_rolls_back() {
     let path = scratch("butler-lifecycle-reload");
@@ -1684,6 +1874,8 @@ fn butler_lifecycle_reload_replaces_hooks_and_schedules_and_rolls_back() {
         );
     }
 
+    butler_fallback_tick();
+    let boots_before_failure = read_count(&path, "return remuda.event_counts()['butler-start']");
     let failed = eval(
         &path,
         r#"
@@ -1719,6 +1911,13 @@ fn butler_lifecycle_reload_replaces_hooks_and_schedules_and_rolls_back() {
         ) <= 1,
         "failed reload left multiple start compatibility schedules"
     );
+    // Capture the restored activation after rollback, then let timers fire.
+    // A failed candidate must not boot later or replace the restored guards.
+    eval(&path, BUTLER_REMEMBER_GUARDS);
+    let restored = eval(&path, BUTLER_BOOT_AND_GUARDS);
+    assert!(restored.starts_with(&format!("{boots_before_failure}|true|true|0|")), "failed start emitted an extra boot or leaked fallback: {restored}");
+    butler_fallback_tick();
+    assert_eq!(eval(&path, BUTLER_BOOT_AND_GUARDS), restored, "failed reload left an orphan fallback after rollback");
 }
 
 /// A daemon without `PWD` has the same stable service name.
@@ -5857,6 +6056,11 @@ fn butler_matrix_relay_starts_on_fallback_boot_and_only_once() {
 {init}
       end)()
       setmetatable(_G, old_metatable)
+      for _, spec in ipairs(module.schedules) do
+        if spec.name == "butler-start-fallback" then
+          remuda.schedule(spec)
+        end
+      end
       remuda.schedule = original_schedule
       if not fallback then return "fallback-schedule-missing" end
       fallback.run()
