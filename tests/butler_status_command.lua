@@ -24,6 +24,15 @@ assert(empty:find("quota    claude n/a  codex n/a", 1, true), "absent quota show
 assert(empty:find("load     cpu n/a · mem n/a · disk n/a", 1, true), "load is n/a")
 assert(empty:find("?help", 1, true), "footer points at ?help")
 
+local measured = status.status_format({ now = now, sessions = {}, metrics = {
+  cpu = "1.25", mem = "63%", disk = "42%",
+} })
+assert(measured:find("load     cpu 1.25 · mem 63% · disk 42%", 1, true), measured)
+local partial = status.status_format({ now = now, sessions = {}, metrics = {
+  cpu = "0.08", mem = "bad", disk = "71%",
+} })
+assert(partial:find("load     cpu 0.08 · mem n/a · disk 71%", 1, true), partial)
+
 -- several sessions
 local text = status.status_format({
   now = now,
@@ -119,9 +128,16 @@ remuda._butler_mail = { unread = function(id) return id == "01B" and 2 or 0 end 
 remuda._butler_quota = { claude_reading = function()
   return { at = now, limits = { { name = "5-hour limit", used = 62, resets_at = now + 1 } } }
 end }
+local reader_calls = 0
+remuda._butler_system = { status_metrics = function()
+  reader_calls = reader_calls + 1
+  return { cpu = "0.37", mem = "48%", disk = "83%" }
+end }
 
 local matched, reply = handle(event("?status"))
 assert(matched == true and reply, "an allowlisted human gets a status reply")
+assert(reader_calls == 1, "?status reads system metrics once")
+assert(reply:find("load     cpu 0.37 · mem 48% · disk 83%", 1, true), reply)
 assert(reply:find("butler status · 2 sessions", 1, true), reply)
 assert(reply:find("butler   claude ctx 41%  idle", 1, true), reply)
 assert(reply:find("dev-1    codex  ctx n/a  task  ✉2", 1, true), reply)
@@ -158,8 +174,10 @@ assert(again == true and text == nil, "a request inside the window is consumed w
 -- a failing source blanks only its own part
 remuda._butler_telemetry_for = function() error("boom") end
 remuda._butler_quota = nil
+remuda._butler_system.status_metrics = function() error("boom") end
 local degraded = select(2, handle(event("?status")))
 assert(degraded:find("butler   claude ctx n/a  idle", 1, true) and degraded:find("claude n/a", 1, true), degraded)
+assert(degraded:find("load     cpu n/a · mem n/a · disk n/a", 1, true), degraded)
 
 print("ok - parse, rate, handle")
 
