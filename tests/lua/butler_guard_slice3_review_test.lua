@@ -1,5 +1,5 @@
--- Guard slice 3, PR4 review round (SEC on #387): audit events counted by name, test seams only under a test
--- flag, approval records kept at least as long as the longest grant.
+-- Guard slice 3, PR4 review round (SEC on #387): audit events counted by name,
+-- explicit harness subjects, approval records kept at least as long as the longest grant.
 local started
 local function start_butler()
   if started then return end
@@ -40,9 +40,9 @@ T.test("approval records are kept at least as long as the longest grant", functi
     "the relay prunes by the shared constant, not its own literal", "ok - retention")
 end)
 
--- M.now / M.verified / M.insensitive are test seams: honoured only when the env carried REMUDA_BUTLER_TEST=1 at load
--- (production mode is covered in butler_guard_slice3_testflag_test.lua).
-T.test("the grant-store seams work in test mode", function()
+-- M.now / M.verified / M.insensitive exist only in the explicitly loaded scratch subject.
+-- Production rejection is covered in butler_guard_slice3_testflag_test.lua.
+T.test("the grant-store seams work in the explicit harness subject", function()
   start_butler()
   T.eval("remuda.exec('butler/guard_grants')")
   T.eval([[local gg, d = remuda.butler.guard_grants, os.getenv('XDG_DATA_HOME') .. '/r-seam'
@@ -55,7 +55,7 @@ T.test("the grant-store seams work in test mode", function()
     gg.verified = function() return true end
     gg.now = function() return t + 1000 end
     gg.insensitive = function() return true end]])
-  T.eq(T.eval("return #remuda.butler.guard_grants.active()"), "1", "with the env flag the seams work")
+  T.eq(T.eval("return #remuda.butler.guard_grants.active()"), "1", "with the explicit subject the seams work")
   T.eval("remuda.butler.guard_grants.verified, remuda.butler.guard_grants.now, remuda.butler.guard_grants.insensitive = nil, nil, nil")
   T.expect(true, "", "ok - seams")
 end)

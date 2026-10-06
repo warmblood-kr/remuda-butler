@@ -1,4 +1,4 @@
--- The harness enables the existing process-captured test seams; the field alone sets the test budget.
+-- Explicit scratch subject only: keep #430's deterministic budget, timeout and cleanup matrix.
 
 T.test("git budget defaults to 2s, can be shortened/lengthened/reset, and always fails closed", function()
   T.install_guard_subject("butler", assert(os.getenv("REMUDA_LUA_REPO")))

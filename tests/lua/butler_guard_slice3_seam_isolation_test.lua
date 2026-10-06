@@ -3,6 +3,25 @@ T.child_env = { REMUDA_BUTLER_TEST = "1" }
 
 T.test("production ignores every seam on direct load, first activation, re-evaluation and rollback", function()
   T.install_mod("butler", assert(os.getenv("REMUDA_LUA_REPO")))
+  -- Agent-callable MCP evaluation before Butler's first lifecycle activation.
+  local early_ok, early = pcall(T.mcp_eval, [[
+    local getenv = os.getenv
+    os.getenv = function(k) if k == 'REMUDA_BUTLER_TEST' then return '1' end return getenv(k) end
+    local hits = 0
+    local ok, err = pcall(function()
+      local root = getenv('XDG_DATA_HOME') .. '/remuda/mods/butler/packages/butler/'
+      dofile(root .. 'guard_policy.lua'); dofile(root .. 'guard_grants.lua')
+      local g, p = remuda.butler.guard_grants, remuda.butler.guard_policy
+      local function fake() hits = hits + 1; return 1 end
+      g.now, g.insensitive, g.verified, g.git_budget_s, p.now = fake, fake, fake, 20, fake
+      assert(math.abs(g.time() - os.time()) < 5 and math.abs(p.time() - os.time()) < 5)
+      g.canonical(getenv('XDG_DATA_HOME') .. '/MixedCase')
+      assert(hits == 0, 'pre-first MCP selected a field')
+    end)
+    os.getenv = getenv
+    if not ok then error(err, 0) end
+    return 'pre-first MCP'
+  ]])
   local cli = T.eval([[
     local root = os.getenv('XDG_DATA_HOME') .. '/remuda/mods/butler/packages/butler/'
     local failures = {}
@@ -126,5 +145,6 @@ T.test("production ignores every seam on direct load, first activation, re-evalu
     return 'MCP production clocks'
   ]])
   T.eq(cli, "ok", 'CLI production matrix; MCP=' .. tostring(mcp))
+  T.ok(early_ok and early:find('pre-first MCP', 1, true), tostring(early))
   T.ok(mcp_ok and mcp:find('MCP production clocks', 1, true), tostring(mcp))
 end)

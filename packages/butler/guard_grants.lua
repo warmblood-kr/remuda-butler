@@ -18,12 +18,8 @@ local CLASS = { writable = "path", git = "path", net = "net" }
 local CEILING = { T1 = true, T2 = true } -- T3 is never grantable
 local MAX_FILE = 256 * 1024
 
--- Test seams: M.now(), M.insensitive(real) and M.verified(e) replace these, but only when the process env carried
--- REMUDA_BUTLER_TEST=1 when this module loaded (the harness sets it for its child daemon). The flag is read once, here:
--- later Lua cannot switch it on, and the text deny in guard_policy refuses the field and the env name.
-local TEST_MODE = os.getenv("REMUDA_BUTLER_TEST") == "1"
-local function seam(name) return TEST_MODE and M[name] or nil end
-local function now() return (seam("now") or os.time)() end
+-- Production always uses ordinary dependencies. Deterministic test subjects live only under tests/.
+local function now() return os.time() end
 
 local function file() local d = policy.dir(); return d and (d .. "/guard-grants.jsonl") end
 
@@ -37,7 +33,7 @@ local function probe(real)
   local swapped = real:gsub("%a", function(c) local u = c:upper(); return u == c and c:lower() or u end)
   return swapped ~= real and realpath(swapped) ~= nil
 end
-local function insensitive(real) return (seam("insensitive") or probe)(real) end
+local function insensitive(real) return probe(real) end
 
 -- The ONE path canonicaliser (posix paths; ponytail: Windows drive paths yield no grant, add when codex-on-windows grants land).
 -- realpath of the nearest existing ancestor plus the remaining segments, which may not be . or ..;
@@ -184,11 +180,8 @@ end
 local function text(v) return type(v) == "string" and v ~= "" and #v <= 200 and not v:find("%c") end
 
 -- Butler's own record of the owner's reaction (the approval store written when the relay saw it): a line the store
--- holds but that record does not vouch for (same reaction event, id, class and scope) is no grant. M.verified is a
--- test seam, like M.now.
+-- holds but that record does not vouch for (same reaction event, id, class and scope) is no grant.
 local function verified(e)
-  local fake = seam("verified")
-  if fake then return fake(e) end
   local a = butler.approval
   return a and type(a.granted_by) == "function" and a.granted_by(e.event, e.id, e.class, e.scope, e.holder) == true
 end
@@ -405,15 +398,11 @@ end
 -- One wall-clock budget for all the git probes of one match()/offer(), checked before each call; spent means no grant.
 -- ponytail: os.time() has 1 s resolution, so the budget is 2 s +/- 1 s; a finer clock when core has one.
 local GIT_BUDGET, GIT_TIMEOUT = 2, 2
--- Only the existing process-captured test mode admits an in-process budget injection.
--- Valid test budgets are numbers in (0, 60]; otherwise use 2 s. GIT_TIMEOUT stays 2 s.
 local deadline
 local function spent() return deadline ~= nil and os.time() >= deadline end
 local function budgeted(fn)
   return function(...)
-    local budget = seam("git_budget_s")
-    if type(budget) ~= "number" or not (budget > 0 and budget <= 60) then budget = GIT_BUDGET end
-    deadline = os.time() + budget
+    deadline = os.time() + GIT_BUDGET
     local r = table.pack(pcall(fn, ...))
     deadline = nil
     if not r[1] then error(r[2], 0) end
@@ -524,7 +513,7 @@ M.offer = budgeted(function(tool, input, cwd)
   if scope then return { class = class, scope = scope, ceiling = "T2" } end
 end)
 
--- The store's clock (the test seam included), and the display escape, for the code that announces grants.
+-- The store's clock and the display escape, for the code that announces grants.
 function M.time() return now() end
 M.show = show
 

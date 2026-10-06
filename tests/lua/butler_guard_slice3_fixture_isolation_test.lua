@@ -29,3 +29,25 @@ T.test("normal installed package excludes fixture hooks and production entry acc
     return 'ok'
   ]]), "ok")
 end)
+
+T.test("explicit subject restores the loader on errors and native production loads replace its functions", function()
+  T.eval('remuda._431_native_exec = remuda.exec')
+  T.install_guard_subject('butler', assert(os.getenv('REMUDA_LUA_REPO')))
+  T.eq(T.eval([[
+    remuda.exec('butler/guard_policy'); remuda.exec('butler/guard_grants')
+    local g, p = remuda.butler.guard_grants, remuda.butler.guard_policy
+    g.now = function() return 1790000000 end; p.now = g.now
+    assert(g.time() == 1790000000 and p.time() == 1790000000, 'explicit subject was not loaded')
+    local root = os.getenv('XDG_DATA_HOME') .. '/remuda/mods/butler/packages/butler/'
+    dofile(root .. 'guard_policy.lua'); dofile(root .. 'guard_grants.lua')
+    assert(math.abs(g.time() - os.time()) < 5 and math.abs(p.time() - os.time()) < 5,
+      'native production retained a test closure')
+    return 'ok'
+  ]]), 'ok')
+  local ok, err = pcall(T.eval, "error('431 subject cleanup')")
+  T.ok(not ok and tostring(err):find('431 subject cleanup', 1, true), 'error control')
+  T.ok(T.mcp_eval([[
+    assert(remuda.exec == remuda._431_native_exec, 'subject loader leaked past evaluation')
+    return 'restored'
+  ]]):find('restored', 1, true), 'loader restored after error')
+end)
