@@ -29,7 +29,7 @@ local text = status.status_format({
   now = now,
   sessions = {
     { name = "butler", kind = "claude", context_percent = 41, busy = false },
-    { name = "dev-1", kind = "codex", context_percent = 78.4, busy = true, unread = 2 },
+    { name = "dev-1", kind = "codex", context_percent = 78.4, context_used = 350000, busy = true, unread = 2 },
     { name = "qa", kind = "claude", busy = false, unread = 0 },
   },
   quota = { at = now - 30, limits = {
@@ -40,10 +40,17 @@ local text = status.status_format({
 assert(text:find("butler status · 3 sessions", 1, true))
 assert(text:find("butler   claude ctx 41%  idle", 1, true), text)
 assert(text:find("dev-1    codex  ctx 78%  task  ✉2", 1, true), text)
+assert(text:find("dev-1    codex  ctx 78%  task  ✉2  ⚠", 1, true), "percentage warning marker")
 assert(text:find("qa       claude ctx n/a  idle", 1, true), text)
 assert(not text:find("qa       claude ctx n/a  idle  ✉", 1, true), "zero unread shows no mail mark")
 assert(text:find("quota    claude 5h 62% · 7d 91%  codex n/a", 1, true), text)
 assert(not text:find("as of", 1, true), "a fresh reading carries no age")
+local used_warning = status.status_format({ now = now, sessions = {
+  { name = "near", kind = "codex", context_percent = 40, context_used = 400000 },
+  { name = "done", kind = "codex", context_percent = 70, context_used = 450000, compaction_fired = true },
+} })
+assert(used_warning:find("near     codex  ctx 40%  idle  ⚠", 1, true), "400K warns before compaction")
+assert(not used_warning:find("done    codex  ctx 70%  idle  ⚠", 1, true), "compacted session suppresses warning")
 
 -- stale reading, partial reading
 local stale = status.status_format({ now = now, sessions = {},
@@ -113,7 +120,9 @@ remuda._butler_bus = { agents = {
   ["dev-1"] = { id = "01B", kind = "codex" },
 }, pending_tasks = { ["dev-1"] = "SECRET-PROMPT" }, inboxes = { butler = { { body = "SECRET-MAIL-BODY" } } } }
 remuda._butler_telemetry_for = function(agent)
-  return { context_percent = agent.kind == "claude" and 41 or "?", model = "SECRET-MODEL", screen = "SECRET-SCREEN" }
+  return { context_percent = agent.kind == "claude" and 41 or "?",
+    context_used = agent.kind == "codex" and 400000 or nil,
+    model = "SECRET-MODEL", screen = "SECRET-SCREEN" }
 end
 remuda._butler_mail = { unread = function(id) return id == "01B" and 2 or 0 end }
 remuda._butler_quota = { claude_reading = function()
@@ -124,11 +133,19 @@ local matched, reply = handle(event("?status"))
 assert(matched == true and reply, "an allowlisted human gets a status reply")
 assert(reply:find("butler status · 2 sessions", 1, true), reply)
 assert(reply:find("butler   claude ctx 41%  idle", 1, true), reply)
-assert(reply:find("dev-1    codex  ctx n/a  task  ✉2", 1, true), reply)
+assert(reply:find("dev-1    codex  ctx n/a  task  ✉2  ⚠", 1, true), reply)
 assert(reply:find("claude 5h 62%", 1, true), reply)
 for _, secret in ipairs({ "SECRET-MAIL-BODY", "SECRET-PROMPT", "SECRET-MODEL", "SECRET-SCREEN", "/secret/cwd", "01A" }) do
   assert(not reply:find(secret, 1, true), "reply leaks " .. secret)
 end
+remuda._butler_compaction_state = { compaction_members = { ["01B"] = { cooldown_ticks = 2 } } }
+local gathered = status.gather(now)
+assert(gathered.sessions[2].context_used == 400000 and gathered.sessions[2].compaction_fired,
+  "status gather carries context use and recent compaction state")
+local compacted_reply = status.status_format(gathered)
+assert(not compacted_reply:find("dev-1    codex  ctx n/a  task  ✉2  ⚠", 1, true),
+  "status gather suppresses the warning after compaction")
+remuda._butler_compaction_state = nil
 local _, help_reply = handle(event("?help"))
 assert(help_reply == status.help_text())
 

@@ -26,6 +26,10 @@ local function session_line(session)
     percent_text(session.context_percent), session.busy and "task" or "idle")
   local unread = tonumber(session.unread)
   if unread and unread > 0 then line = line .. string.format("  ✉%d", unread) end
+  local pct, used = tonumber(session.context_percent), tonumber(session.context_used)
+  if not session.compaction_fired and ((pct and pct >= 60) or (used and used >= 400000)) then
+    line = line .. "  ⚠"
+  end
   return line
 end
 
@@ -81,7 +85,7 @@ local function clamp(text)
   return head .. "\n" .. TRUNCATED
 end
 
--- data = { sessions = { {name, kind, context_percent, busy, unread} }, quota = {at, limits}|nil, now }
+-- data = { sessions = { {name, kind, context_percent, context_used, compaction_fired, busy, unread} }, quota = {at, limits}|nil, now }
 function M.status_format(data)
   data = type(data) == "table" and data or {}
   local sessions = type(data.sessions) == "table" and data.sessions or {}
@@ -155,6 +159,16 @@ local function session_names(agents)
   return names
 end
 
+local function compaction_fired(host, agent, name)
+  local owner = host._butler_state or host._butler_compaction_state or {}
+  local members = type(owner.compaction_members) == "table" and owner.compaction_members
+    or host._butler_compaction_members_state or {}
+  local key = type(agent.id) == "string" and agent.id ~= "" and agent.id or name
+  local state = members[key]
+  return type(state) == "table" and ((tonumber(state.cooldown_ticks) or 0) > 0
+    or state.compaction_in_progress == true or state.restore_pending ~= nil) or false
+end
+
 -- Reads live Butler state only: no process, no shell, no screen text. A source
 -- that fails leaves its own field empty.
 function M.gather(now)
@@ -171,6 +185,8 @@ function M.gather(now)
       sessions[#sessions + 1] = {
         name = name, kind = agent.kind,
         context_percent = type(telemetry) == "table" and tonumber(telemetry.context_percent) or nil,
+        context_used = type(telemetry) == "table" and tonumber(telemetry.context_used) or nil,
+        compaction_fired = compaction_fired(host, agent, name),
         busy = pending[name] ~= nil,
         unread = type(agent.id) == "string" and agent.id ~= "" and try(mail.unread, agent.id) or nil,
       }

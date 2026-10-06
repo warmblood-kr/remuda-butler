@@ -7,6 +7,7 @@ release tags yet; entries come from merged pull requests.
 ## Unreleased
 
 ### Added
+- `butler sessions` shows context tokens and percent; compaction keeps its existing policy thresholds while Matrix `?status` flags sessions at 60% or 400K before a compaction.
 - Grant matching is stricter, and still allows nothing: a grant never covers a push of `main`, `master` or `trunk` or a push with `push.followTags` set, only a push or a WebFetch can match, git probes share a two second budget (none run without a git grant), and hook audit lines keep `grant_id` `-` until a grant allows a call; `guard stats` counts `grant_used` and `grant_limited` (see #339).
 - Audit hash chain: each new audit line carries `prev`, the SHA-256 of the line before it, from a `chain` genesis line and across rotation (older lines are untouched). `remuda butler guard verify` (read-only) reports `ok` or the first broken line, and Butler posts one digest per UTC day to the owner room (line count, last line hash, previous digest hash). A failed hash never stops an audit write.
 - The audit digest scans a day once (a quiet day, or a failed post, no longer rescans every audit file each minute) and attests every day with lines since the last digest, oldest first, up to 7 days back; `guard verify` reports a live-log last line with no newline as a note, not BROKEN.
