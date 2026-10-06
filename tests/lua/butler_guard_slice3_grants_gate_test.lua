@@ -63,7 +63,12 @@ local function git_fixture(name)
   return work, sh
 end
 local function grant_for(command, cwd, class)
-  return T.eval(("return tostring(remuda.butler.guard_grants.match('Bash', { command = %q }, %q, %s))"):format(command, cwd, class and string.format("%q", class) or "nil"))
+  return T.eval(([[local g = remuda.butler.guard_grants; local budget = g.git_budget_s
+    g.git_budget_s = 20 -- control assertions must not depend on os.time() second boundaries
+    local ok, id = pcall(g.match, 'Bash', { command = %q }, %q, %s)
+    g.git_budget_s = budget
+    if not ok then error(id, 0) end
+    return tostring(id)]]):format(command, cwd, class and string.format("%q", class) or "nil"))
 end
 
 T.test("class gate: only push and net may match; every other class gets no grant", function()
@@ -106,11 +111,14 @@ end)
 -- Runs match('Bash', 'git push') with remuda.process.run counted (and each git call slowed by `slow` seconds); returns "id calls".
 local function counted(work, slow)
   return T.eval(([[local real, g = remuda.process.run, remuda.butler.guard_grants
+    local budget = g.git_budget_s
+    if %d == 0 then g.git_budget_s = 20 end -- the slow-git assertion keeps the default 2s
     local n = 0
     remuda.process.run = function(o) n = n + 1; if %d > 0 then real({ argv = { 'sleep', '%d' } }) end; return real(o) end
-    local id = g.match('Bash', { command = 'git push' }, %q)
-    remuda.process.run = real
-    return tostring(id) .. ' ' .. n]]):format(slow, slow, work))
+    local ok, id = pcall(g.match, 'Bash', { command = 'git push' }, %q)
+    remuda.process.run, g.git_budget_s = real, budget
+    if not ok then error(id, 0) end
+    return tostring(id) .. ' ' .. n]]):format(slow, slow, slow, work))
 end
 
 T.test("git work is budgeted: with no git grant no git runs; a slow git means no grant", function()
