@@ -80,6 +80,33 @@ T.test("agent_can_read_own_named_inbox_and_operator_can_read_any_named_inbox", f
     .. ", " .. string.format("%q", operator_message) .. "))"), "false", "operator read marks mail read")
 end)
 
+T.test("ended_member_still_reads_its_own_mail_by_alias_and_a_reused_alias_is_not_its_own", function()
+  local ids = T.eval([[
+    local bus = remuda._butler_bus
+    remuda._butler_launch("codex", "dave")
+    local old = bus.agents.dave.id
+    remuda._butler_send("butler", "dave", "dave private note")
+    bus.agents.dave = nil -- the session ended; identity records stay
+    return old
+  ]])
+  local old_id = ids:match("%S+")
+  for _, args in ipairs({ { "inbox", "dave" }, { "inbox" }, { "inbox", old_id } }) do
+    local result = call("inbox", args, old_id)
+    T.ok(result:match("^ok\0"), "an ended member reads its own inbox (" .. (args[2] or "no-arg") .. "): " .. result)
+    if args[2] == "dave" then
+      T.ok(result:find("dave private note", 1, true), "own mail shown by alias: " .. result)
+    end
+  end
+  T.eval([[
+    -- the alias is taken again by a new holder with another id
+    remuda._butler_bus.agents.dave = { id = "01ZZZZZZZZZZZZZZZZZZZZZZZZ", alias = "dave", session_name = "dave-new",
+      children = {}, kind = "codex" }
+  ]])
+  local reused = call("inbox", { "inbox", "dave" }, old_id)
+  T.ok(reused:match("^error\0") and not reused:find("dave private note", 1, true),
+    "the old identity must not read the new holder of its alias: " .. reused)
+end)
+
 T.test("message_id_branch_keeps_owner_not_found_and_not_yours_checks", function()
   local unread_message = T.eval([[return remuda._butler_send("butler", "bob", "unread ownership probe"):match("^queued (%S+)")]])
   local not_yours = call("inbox", { "inbox", unread_message }, alice_id)

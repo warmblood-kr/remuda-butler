@@ -632,6 +632,14 @@ command(60, "inbox", "  remuda butler inbox [name]", function(args, caller)
       if ok then own_id, own_agent = id, agent end
       local own_alias = own_agent and own_agent.alias
       local own_session = own_agent and own_agent.session_name
+      if own_id and not own_agent then
+        -- An ended member still reads its own mail by alias (#23), unless the alias now belongs to a new holder.
+        local bus = remuda._butler_bus or {}
+        local record = (bus.identity_ids or {})[own_id]
+        local alias = record and record.alias
+        local live = alias and (bus.agents or {})[alias]
+        if alias and not live then own_alias = alias end
+      end
       if name ~= caller_identity and name ~= own_id and name ~= own_alias and name ~= own_session then
         error("agents may only read their own Butler inbox.\nNext: remuda butler inbox", 0)
       end
