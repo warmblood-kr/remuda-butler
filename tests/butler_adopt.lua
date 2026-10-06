@@ -1,12 +1,16 @@
 -- Adoption on lead exit and the close authority rule. Run from the repository root:
 --   luajit tests/butler_adopt.lua
 local bus = { agents = {} }
-local unread, idle, closed = {}, {}, {}
+local unread, idle, closed, exited, close_error = {}, {}, {}, {}, nil
 remuda = { extension_command = function() end, butler = { typed_lines_cli = {}, schedule_cli = {}, approve_text = { cli = function() end }, matrix = { cli_usage = function() return "" end },
     is_idle = function(name) if idle[name] == false then return false, "busy" end return true end },
   _butler_bus = bus,
   _butler_mail = nil,
-  close = function(name) closed[#closed + 1] = name end,
+  ls = function() return exited end,
+  close = function(name)
+    if close_error then error(close_error, 0) end
+    closed[#closed + 1] = name
+  end,
   _butler_contribute = function() end }
 local mail = { unread = function(id) return unread[id] or 0 end }
 remuda._butler_sessions_config = { bus = bus, mail = mail, json_field = function() end }
@@ -96,4 +100,33 @@ assert(not can_close("butler", "orphan", nil, true), "a lead that is relaunching
 remuda._butler_relaunching = { DEAD = os.time() - 1000 }
 assert(can_close("butler", "orphan", nil, true), "a stale relaunch marker expires")
 remuda._butler_relaunching = nil
+
+-- A finished pane can retain an arbitrary last screen. It is still closable
+-- without force, and unread/busy/composer gates do not apply to an exited process.
+-- Before this regression fix, the exact failure was: `finished is not idle: composer not empty`.
+tree({ {"butler"}, {"finished", "butler"} })
+exited = { { name = "finished", alive = false } }
+remuda.butler.is_idle = function() return false, "composer not empty" end
+unread["finished-id"] = 2
+local close_ok, close_result = pcall(remuda._butler_close_member, "finished", "butler", false, true)
+assert(close_ok and close_result == "Closed finished.\nNext: remuda butler sessions"
+  and closed[1] == "finished", "finished member closes despite its stale composer screen")
+
+-- A live row sharing the name with a stale exited row stays authoritative: the live-session gates still apply.
+closed = {}
+exited = { { name = "finished", alive = false }, { name = "finished", alive = true } }
+local live_ok, live_err = pcall(remuda._butler_close_member, "finished", "butler", false, true)
+assert(not live_ok and tostring(live_err):find("unread Butler mail", 1, true) and #closed == 0,
+  "a live row for the same name keeps the close gates")
+
+-- A failed forced close raises a readable message (the CLI turns it into exit 1 via cli_result), never a bare Lua error.
+closed, close_error = {}, "session already gone"
+local returned, failure = pcall(remuda._butler_close_member, "finished", "butler", true, true)
+assert(not returned and failure:find("could not close finished: session already gone", 1, true)
+  and failure:find("Next: retry remuda butler close finished", 1, true),
+  "--force close failure raises a readable message, not a success string")
+exited, close_error, remuda.butler.is_idle = {}, nil, function(name)
+  if idle[name] == false then return false, "busy" end
+  return true
+end
 print("ok - adoption and close authority")

@@ -60,12 +60,35 @@ local function quota_line(quota, now)
   return "quota    claude " .. claude .. "  codex n/a"
 end
 
-local function compose(rows, hidden, quota, now, total)
+local function metric_text(value, percent)
+  if type(value) ~= "string" or #value > 12 then return "n/a" end
+  local number
+  if percent then
+    number = value:match("^(%d+)%%$")
+  else
+    number = value:match("^(%d+%.?%d*)$")
+  end
+  number = tonumber(number)
+  local limit = percent and 100 or 1000
+  if not number or number ~= number or number < 0 or number > limit then
+    return "n/a"
+  end
+  return value
+end
+
+local function metrics_line(metrics)
+  metrics = type(metrics) == "table" and metrics or {}
+  return "load     cpu " .. metric_text(metrics.cpu, false)
+    .. " · mem " .. metric_text(metrics.mem, true)
+    .. " · disk " .. metric_text(metrics.disk, true)
+end
+
+local function compose(rows, hidden, quota, metrics, now, total)
   local out = { "butler status · " .. total .. " sessions" }
   for _, row in ipairs(rows) do out[#out + 1] = row end
   if hidden > 0 then out[#out + 1] = "+" .. hidden .. " more" end
   out[#out + 1] = quota_line(quota, now)
-  out[#out + 1] = "load     cpu n/a · mem n/a · disk n/a"
+  out[#out + 1] = metrics_line(metrics)
   out[#out + 1] = "Answered by code, no LLM. More: ?help"
   return table.concat(out, "\n"), #out
 end
@@ -104,7 +127,7 @@ function M.status_format(data)
   for shown = #rows, 0, -1 do
     head[shown + 1] = nil
     local count
-    text, count = compose(head, #rows - shown, data.quota, now, #rows)
+    text, count = compose(head, #rows - shown, data.quota, data.metrics, now, #rows)
     if count <= MAX_LINES and #text <= MAX_BYTES then break end
   end
   return clamp(text)
@@ -183,6 +206,9 @@ function M.gather(now)
   local agents = type(bus.agents) == "table" and bus.agents or {}
   local pending = type(bus.pending_tasks) == "table" and bus.pending_tasks or {}
   local mail = type(host._butler_mail) == "table" and host._butler_mail or {}
+  local system = type(host._butler_system) == "table"
+    and host._butler_system or {}
+  local metrics = try(system.status_metrics)
   local sessions = {}
   for _, name in ipairs(session_names(agents)) do
     local agent = agents[name]
@@ -199,7 +225,7 @@ function M.gather(now)
     end
   end
   local quota = type(host._butler_quota) == "table" and try(host._butler_quota.claude_reading) or nil
-  return { sessions = sessions, quota = quota, now = now }
+  return { sessions = sessions, quota = quota, metrics = metrics, now = now }
 end
 
 local function accept(state, event, now, cfg)

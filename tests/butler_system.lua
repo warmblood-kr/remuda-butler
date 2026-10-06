@@ -5,7 +5,10 @@ os[execute_key] = function() error("shell execution must not be used for lookup"
 io[popen_key] = function() error("shell pipes must not be used for lookup") end
 
 local process_calls = 0
+local scheduled_callback, cancelled_timer
 remuda = {
+  schedule = function(spec) scheduled_callback = spec.run; return "timer-1" end,
+  cancel = function(timer) cancelled_timer = timer end,
   process = {
     run = function()
       process_calls = process_calls + 1
@@ -20,11 +23,259 @@ assert(type(system.find_command) == "function")
 assert(type(system.mkdir_p) == "function")
 assert(type(system.home) == "function")
 assert(type(system.run_in) == "function")
+local after_called = false
+local timer = system.after(1, function() after_called = true end)
+assert(timer == "timer-1" and type(scheduled_callback) == "function",
+  "system.after should schedule through the daemon event loop")
+scheduled_callback()
+assert(after_called and cancelled_timer == "timer-1",
+  "system.after should run once and cancel its timer")
 local trace_detail = system.trace_detail("path\nwith\tcontrols\0")
 assert(trace_detail == "path\\x0Awith\\x09controls\\x00", "trace details must escape control bytes: " .. trace_detail)
 local long_trace_detail = system.trace_detail(string.rep("x", 600))
 assert(#long_trace_detail == 512 and long_trace_detail:sub(-3) == "...",
   "trace details must be capped at 512 bytes")
+
+local linux_calls = {}
+local linux_metrics = system.status_metrics({
+    find_command = function(name) return name end,
+  read_file = function(path)
+    if path == "/proc/loadavg" then return "1.25 0.90 0.50 2/100 42\n" end
+    if path == "/proc/meminfo" then
+      return "MemTotal:       1000000 kB\nMemAvailable:    375000 kB\n"
+    end
+  end,
+  run = function(options)
+    linux_calls[#linux_calls + 1] = options
+    assert(options.timeout == 2, "system metrics use a short process timeout")
+    assert(options.argv[1] == "df" and options.argv[2] == "-kP"
+      and options.argv[3] == "/",
+      "disk usage uses df with read-only arguments")
+    return { code = 0, stdout = table.concat({
+      "Filesystem 1024-blocks Used Available Capacity Mounted on",
+      "/dev/root 100 58 42 58% /",
+    }, "\n") .. "\n" }
+  end,
+})
+assert(linux_metrics.cpu == "1.25" and linux_metrics.mem == "63%"
+  and linux_metrics.disk == "58%",
+  "Linux proc readers and df should produce bounded metric values")
+assert(#linux_calls == 1, "Linux proc counters avoid extra commands")
+
+local darwin_commands = {}
+local darwin_metrics = system.status_metrics({
+    find_command = function(name) return name end,
+  read_file = function() error("unavailable proc reader") end,
+  run = function(options)
+    local argv = options.argv
+    darwin_commands[#darwin_commands + 1] = table.concat(argv, " ")
+    if argv[1] == "sysctl" and argv[3] == "vm.loadavg" then
+      return { code = 0, stdout = "{ 0.45 0.30 0.20 }\n" }
+    end
+    if argv[1] == "vm_stat" then
+      local output = "Mach Virtual Memory Statistics: "
+        .. "(page size of 4096 bytes)\n"
+        .. "Pages free: 100000.\nPages inactive: 200000.\n"
+        .. "Pages speculative: 10000.\n"
+      return { code = 0, stdout = output }
+    end
+    if argv[1] == "sysctl" and argv[3] == "hw.memsize" then
+      return { code = 0, stdout = "4096000000\n" }
+    end
+    if argv[1] == "df" then
+      local output = "Filesystem 1024-blocks Used Available Capacity "
+        .. "Mounted on\n"
+        .. "/dev/disk1 100 75 25 75% /\n"
+      return { code = 0, stdout = output }
+    end
+    error("unexpected read-only command: " .. table.concat(argv, " "))
+  end,
+})
+assert(darwin_metrics.cpu == "0.45" and darwin_metrics.mem == "69%"
+  and darwin_metrics.disk == "75%",
+  "Darwin sysctl, vm_stat and df readers should produce metric values")
+local expected_commands = table.concat({
+  "sysctl -n vm.loadavg", "vm_stat", "sysctl -n hw.memsize", "df -kP /",
+}, "|")
+assert(table.concat(darwin_commands, "|") == expected_commands,
+  "Darwin reads use only the expected read-only commands")
+local unavailable = system.status_metrics({
+    find_command = function(name) return name end,
+  read_file = function() error("no proc") end,
+  run = function() error("no process API") end,
+})
+assert(unavailable.cpu == "n/a" and unavailable.mem == "n/a"
+  and unavailable.disk == "n/a",
+  "all failed readers fall back independently without raising")
+
+local garbage = system.status_metrics({
+    find_command = function(name) return name end,
+  read_file = function(path)
+    if path == "/proc/loadavg" then return "no load value" end
+    if path == "/proc/meminfo" then
+      return "MemTotal: 1000 kB\nMemAvailable: 2000 kB\n"
+    end
+  end,
+  run = function(options)
+    local argv = options.argv
+    if argv[1] == "sysctl" and argv[3] == "vm.loadavg" then
+      return { code = 0, stdout = "not a load value" }
+    end
+    if argv[1] == "vm_stat" then
+      return { code = 0, stdout = "Pages free: 10.\nPages inactive: 20.\n" }
+    end
+    if argv[1] == "sysctl" and argv[3] == "hw.memsize" then
+      return { code = 0, stdout = "4096000000\n" }
+    end
+    if argv[1] == "df" then
+      local output = "Filesystem blocks Used Avail Capacity Mounted\n"
+        .. "/dev/root 100 99 1 150% /\n"
+      return { code = 0, stdout = output }
+    end
+  end,
+})
+assert(garbage.cpu == "n/a" and garbage.mem == "n/a" and garbage.disk == "n/a",
+  "malformed counters, memory over total, and disk over 100% fall back")
+
+for _, result in ipairs({
+  { code = 1, stdout = "0.2" }, "not a process result",
+}) do
+  local failed = system.status_metrics({
+    find_command = function(name) return name end,
+    read_file = function() error("proc unavailable") end,
+    run = function() return result end,
+  })
+  assert(failed.cpu == "n/a" and failed.mem == "n/a" and failed.disk == "n/a",
+    "nonzero and non-table process results fall back")
+end
+
+local saved_run = remuda.process.run
+local fallback_calls = {}
+remuda.process.run = function(options)
+  local argv = options.argv
+  fallback_calls[#fallback_calls + 1] = table.concat(argv, " ")
+  if argv[1] == "vm_stat" then
+    return { code = 0, stdout = "Mach Virtual Memory Statistics: "
+      .. "(page size of 4096 bytes)\nPages free: 100000.\n"
+      .. "Pages inactive: 200000.\nPages speculative: 10000.\n" }
+  end
+  if argv[1] == "sysctl" and argv[3] == "hw.memsize" then
+    return { code = 0, stdout = "4096000000\n" }
+  end
+  if argv[1] == "df" then
+    local output = "Filesystem blocks Used Avail Capacity Mounted\n"
+      .. "/dev/root 100 40 60 40% /\n"
+    return { code = 0, stdout = output }
+  end
+  error("unexpected process command: " .. table.concat(argv, " "))
+end
+local linux_fallback = system.status_metrics({
+    find_command = function(name) return name end,
+  read_file = function(path)
+    if path == "/proc/loadavg" then return "0.12 0.10 0.08 1/50 12\n" end
+    return nil
+  end,
+})
+remuda.process.run = saved_run
+assert(linux_fallback.cpu == "0.12" and linux_fallback.mem == "69%"
+  and linux_fallback.disk == "40%",
+  "Linux memory falls back to vm_stat when proc/meminfo is unreadable")
+local expected_fallback = "vm_stat|sysctl -n hw.memsize|df -kP /"
+assert(table.concat(fallback_calls, "|") == expected_fallback,
+  "the default reader uses remuda.process.run when no test runner is supplied")
+
+local saved_open = io.open
+local read_sizes = {}
+local load_data = string.rep("x", 9000)
+local memory_data = string.rep("x", 9000)
+io.open = function(path)
+  return {
+    read = function(_, size)
+      read_sizes[path] = size
+      return path == "/proc/loadavg" and load_data or memory_data
+    end,
+    close = function() end,
+  }
+end
+local read_ok, read_metrics = pcall(system.status_metrics, {
+    find_command = function(name) return name end,
+  run = function() error("no process API") end,
+})
+assert(read_ok and read_metrics.cpu == "n/a",
+  "bounded file reads survive unreadable data")
+assert(read_sizes["/proc/loadavg"] == 8192
+  and read_sizes["/proc/meminfo"] == 8192,
+  "system files are read with an 8192-byte limit")
+
+local function file_metrics(load_text, memory_text)
+  load_data, memory_data = load_text, memory_text
+  local ok, metrics = pcall(system.status_metrics, {
+    find_command = function(name) return name end,
+    run = function() error("no process API") end,
+  })
+  assert(ok, "oversized mocked files must not raise")
+  return metrics
+end
+local memory_header = "MemTotal: 1000 kB\nMemAvailable: 500 kB\n"
+local edge_under = string.rep(" ", 8187) .. "1.25"
+local edge_at = string.rep(" ", 8188) .. "1.25"
+assert(#edge_under == 8191 and #edge_at == 8192,
+  "load fixtures pin the read-size boundary")
+local edge_metrics = file_metrics(edge_under, memory_header)
+local exact_metrics = file_metrics(edge_at, memory_header)
+assert(edge_metrics.cpu == "1.25" and exact_metrics.cpu == "1.25",
+  "load boundary values: " .. tostring(edge_metrics.cpu) .. "/"
+    .. tostring(exact_metrics.cpu))
+local oversized_load = string.rep(" ", 8192) .. "1.25"
+local oversized_memory = memory_header .. string.rep(" ", 8192 - #memory_header)
+  .. "MemAvailable: 0 kB\n"
+local truncated_files = file_metrics(oversized_load, oversized_memory)
+assert(truncated_files.cpu == "n/a" and truncated_files.mem == "50%",
+  "file data returned beyond byte 8192 is discarded for load and memory")
+io.open = saved_open
+
+local capped_stdout = system.status_metrics({
+    find_command = function(name) return name end,
+  read_file = function() error("proc unavailable") end,
+  run = function(options)
+    local argv = options.argv
+    local stdout
+    if argv[1] == "sysctl" and argv[3] == "vm.loadavg" then
+      stdout = string.rep(" ", 8192) .. "1.25"
+    elseif argv[1] == "vm_stat" then
+      stdout = string.rep("x", 8192)
+        .. "Mach Virtual Memory Statistics: (page size of 4096 bytes)\n"
+        .. "Pages free: 100000.\nPages inactive: 200000.\n"
+        .. "Pages speculative: 10000.\n"
+    elseif argv[1] == "sysctl" and argv[3] == "hw.memsize" then
+      stdout = "4096000000\n"
+    elseif argv[1] == "df" then
+      stdout = "Filesystem blocks Used Avail Capacity Mounted\n"
+        .. string.rep("x", 8192) .. "\n/dev/root 100 40 60 40% /\n"
+    end
+    return { code = 0, stdout = stdout }
+  end,
+})
+assert(capped_stdout.cpu == "n/a" and capped_stdout.mem == "n/a"
+  and capped_stdout.disk == "n/a",
+  "oversized process output is discarded for load, memory and disk")
+
+-- hw.memsize alone: padding pushes the number past the cap, so it is dropped.
+local capped_memsize = system.status_metrics({
+    find_command = function(name) return name end,
+  read_file = function() error("proc unavailable") end,
+  run = function(options)
+    local argv = options.argv
+    if argv[1] == "vm_stat" then
+      return { code = 0, stdout = "Mach Virtual Memory Statistics: (page size of 4096 bytes)\n"
+        .. "Pages free: 100000.\nPages inactive: 200000.\nPages speculative: 10000.\n" }
+    elseif argv[1] == "sysctl" and argv[3] == "hw.memsize" then
+      return { code = 0, stdout = string.rep(" ", 8192) .. "4096000000" }
+    end
+    return { code = 1, stdout = "" }
+  end,
+})
+assert(capped_memsize.mem == "n/a", "oversized hw.memsize output is discarded")
 
 -- Exercise the Windows backend on this host with injected environment and I/O.
 local windows = assert(system.windows, "Windows system table must be testable on this host")
@@ -374,3 +625,57 @@ remuda.random_bytes = remuda._test_identity_saved_random_bytes
 remuda._test_identity_saved_random_bytes, remuda._test_identity_random_requests = nil, nil
 os[execute_key], io[popen_key], os.getenv, io.open = original_execute, original_popen, original_getenv, original_io_open
 print("ok - system module command lookup, failure lines, and home contract")
+
+-- find_command resolution: resolved paths are run; unresolved commands give n/a.
+local resolved_argv = {}
+local resolved = system.status_metrics({
+  read_file = function() error("proc unavailable") end,
+  find_command = function(name) return "/fake/bin/" .. name end,
+  run = function(options)
+    resolved_argv[#resolved_argv + 1] = options.argv[1]
+    return { code = 1, stdout = "" }
+  end,
+})
+assert(resolved.disk == "n/a" and #resolved_argv == 4
+  and resolved_argv[4] == "/fake/bin/df" and resolved_argv[1] == "/fake/bin/sysctl",
+  "status metrics run the path find_command resolved")
+local ran_missing = false
+local missing = system.status_metrics({
+  read_file = function() error("proc unavailable") end,
+  find_command = function() return nil, "not found" end,
+  run = function() ran_missing = true return { code = 0, stdout = "1" } end,
+})
+assert(not ran_missing and missing.cpu == "n/a" and missing.mem == "n/a"
+  and missing.disk == "n/a", "unresolved commands are never run")
+
+-- Edge cases: zero totals, short df rows, huge numbers never raise.
+local function edge(meminfo, memsize, df_row)
+  local ok, m = pcall(system.status_metrics, {
+    read_file = function(path) if path == "/proc/meminfo" then return meminfo end end,
+    find_command = function(name) return name end,
+    run = function(options)
+      local argv = options.argv
+      if argv[1] == "vm_stat" then
+        return { code = 0, stdout = "(page size of 4096 bytes)\nPages free: 1.\n"
+          .. "Pages inactive: 1.\nPages speculative: 1.\n" }
+      elseif argv[1] == "sysctl" and argv[3] == "hw.memsize" then
+        return { code = 0, stdout = memsize }
+      elseif argv[1] == "df" then
+        return { code = 0, stdout = "Filesystem 1024-blocks Used Available Capacity Mounted on\n" .. df_row .. "\n" }
+      end
+      return { code = 1, stdout = "" }
+    end,
+  })
+  assert(ok, "edge input must not raise: " .. tostring(m))
+  return m
+end
+local zero = edge("MemTotal: 0 kB\nMemAvailable: 0 kB\n", "0\n", "/dev/x 1 1 0 100% /")
+assert(zero.mem == "n/a", "zero memory totals give n/a")
+local short = edge(nil, "4096000000\n", "/dev/x 100 58 42")
+assert(short.disk == "n/a", "df rows with fewer than 5 fields give n/a")
+local huge_digits = string.rep("9", 20)
+local huge = edge("MemTotal: " .. huge_digits .. " kB\nMemAvailable: 1 kB\n",
+  huge_digits .. "\n", "/dev/x 1 1 1 " .. huge_digits .. "% /")
+assert(huge.disk == "n/a" and (huge.mem == "n/a" or huge.mem:match("^%d+%%$")),
+  "huge numbers give n/a or a sane percent")
+print("butler_system status edge tests passed")

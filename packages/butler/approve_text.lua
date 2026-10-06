@@ -202,25 +202,29 @@ function M.session_instance(session)
   return agent.id, agent.session_start_marker
 end
 
-local function pane_has_human(session)
-  if type(remuda.ls) ~= "function" then return true end
+-- Returns attached (bool), or nil when liveness cannot be verified (fail closed).
+-- An attached terminal may only be supervising; the owner approved this text, so it
+-- does not block typing (the composer-safe notify policy still guards drafts).
+local function pane_attached(session)
+  if type(remuda.ls) ~= "function" then return nil end
   local ok, rows = pcall(remuda.ls)
-  if not ok or type(rows) ~= "table" then return true end
-  local live = false
+  if not ok or type(rows) ~= "table" then return nil end
+  local live, attached = false, false
   for _, row in ipairs(rows) do
     if type(row) == "table" and row.name == session then
       live = row.alive == true
-      if row.attached == true then return true end
+      attached = row.attached == true
     end
   end
-  if not live then return true end
+  if not live then return nil end
   if type(remuda.session) == "function" then
     local checked, current = pcall(remuda.session, session)
-    if not checked or not current then return true end
-    local read_ok, attached = pcall(function() return current.attached end)
-    if not read_ok or attached == true then return true end
+    if not checked or not current then return nil end
+    local read_ok, flag = pcall(function() return current.attached end)
+    if not read_ok then return nil end
+    attached = attached or flag == true
   end
-  return false
+  return attached
 end
 
 function M.type_text(session, exact_bytes, provenance)
@@ -231,7 +235,8 @@ function M.type_text(session, exact_bytes, provenance)
   if type(bus.pending_tasks) == "table" and bus.pending_tasks[session] then
     return false, "pane_busy"
   end
-  if pane_has_human(session) then return false, "human_attached" end
+  local attached = pane_attached(session)
+  if attached == nil then return false, "session_not_live" end
   if type(remuda._butler_notify_policy) ~= "function" then return false, "pane_busy" end
   local checked, safe = pcall(remuda._butler_notify_policy, session)
   if not checked or not safe then return false, "pane_busy" end
@@ -245,9 +250,9 @@ function M.type_text(session, exact_bytes, provenance)
   local trace = remuda._butler_session_trace or _G._butler_session_trace
   if type(trace) == "function" then
     pcall(trace, "matrix_approved_text", "target=" .. session .. " " .. provenance_text(provenance)
-      .. " outcome=typed bytes=" .. tostring(#exact_bytes))
+      .. " outcome=typed attached=" .. tostring(attached) .. " bytes=" .. tostring(#exact_bytes))
   end
-  return true
+  return true, nil, attached
 end
 
 local function request(session, text, asker, ttl_s, done)
@@ -398,12 +403,12 @@ function M.configure()
         complete("retry", "session_changed")
         return
       end
-      local ok, why = M.type_text(data.session, data.registered_text, {
+      local ok, why, attached = M.type_text(data.session, data.registered_text, {
         owner = rec.answered_by, event_id = rec.answer_event_id, request_id = rec.id,
         before_write = function() return approval.begin_delivery(rec) end,
       })
       if ok then
-        pcall(approval.reply, rec, "typed")
+        pcall(approval.reply, rec, attached and "typed (a human is attached to the pane)" or "typed")
         complete(true)
       else
         pcall(approval.reply, rec, "refused: " .. tostring(why))
