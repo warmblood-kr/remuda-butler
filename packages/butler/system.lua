@@ -217,5 +217,120 @@ function system.run_in(directory, argv)
   return posix.run_in(directory, argv)
 end
 
+local function read_all(path)
+  local ok, file = pcall(io.open, path, "rb")
+  if not ok or not file then return nil end
+  local read_ok, contents = pcall(file.read, file, "*a")
+  pcall(file.close, file)
+  return read_ok and type(contents) == "string" and contents or nil
+end
+
+local function command_output(run, argv)
+  if type(run) ~= "function" then return nil end
+  local ok, result = pcall(run, { argv = argv, timeout = 2 })
+  if not ok or type(result) ~= "table" or result.code ~= 0 then return nil end
+  return type(result.stdout) == "string" and result.stdout or nil
+end
+
+local function load_value(text)
+  local value = type(text) == "string" and text:match("^[%s{]*(%d+%.?%d*)")
+  value = tonumber(value)
+  if not value or value ~= value or value < 0 or value > 1000 then
+    return nil
+  end
+  return string.format("%.2f", value)
+end
+
+local function percent(used, total)
+  used, total = tonumber(used), tonumber(total)
+  if not used or not total or used < 0 or total <= 0
+      or used ~= used or total ~= total
+      or used == math.huge or total == math.huge then
+    return nil
+  end
+  local ratio = used / total
+  if ratio ~= ratio or ratio == math.huge then return nil end
+  local value = math.floor(ratio * 100 + 0.5)
+  if value < 0 or value > 100 then return nil end
+  return string.format("%d%%", value)
+end
+
+local function linux_memory(text)
+  if type(text) ~= "string" then return nil end
+  local values = {}
+  for name, amount in text:gmatch("([%w_]+):%s*(%d+)%s*kB") do
+    values[name] = tonumber(amount)
+  end
+  if not values.MemTotal or not values.MemAvailable
+      or values.MemAvailable > values.MemTotal then
+    return nil
+  end
+  return percent(values.MemTotal - values.MemAvailable, values.MemTotal)
+end
+
+local function darwin_memory(vm, total)
+  if type(vm) ~= "string" then return nil end
+  local free = tonumber(vm:match("Pages free:%s*(%d+)"))
+  local inactive = tonumber(vm:match("Pages inactive:%s*(%d+)"))
+  local speculative = tonumber(vm:match("Pages speculative:%s*(%d+)"))
+  total = tonumber(total)
+  if not free or not inactive or not speculative or not total or total <= 0
+      or total == math.huge then return nil end
+  local page_size = tonumber(vm:match("page size of (%d+) bytes")) or 4096
+  local available = (free + inactive + speculative) * page_size
+  if available > total then return nil end
+  return percent(total - available, total)
+end
+
+local function disk_used(text)
+  if type(text) ~= "string" then return nil end
+  local first = true
+  for line in text:gmatch("[^\r\n]+") do
+    if first then
+      first = false
+    else
+      local fields = {}
+      for field in line:gmatch("%S+") do fields[#fields + 1] = field end
+      local capacity = fields[5] and fields[5]:match("^(%d+)%%$")
+      if capacity and tonumber(capacity) <= 100 then return capacity .. "%" end
+    end
+  end
+  return nil
+end
+
+-- Read only bounded OS counters. Optional readers make the parsers testable;
+-- failures are isolated so a missing source affects only its own value.
+function system.status_metrics(readers)
+  readers = type(readers) == "table" and readers or {}
+  local read_file = readers.read_file or read_all
+  local run = readers.run
+  if type(run) ~= "function" then
+    local process = type(remuda) == "table" and remuda.process or nil
+    run = type(process) == "table" and process.run or nil
+  end
+  local function read(path)
+    local ok, result = pcall(read_file, path)
+    return ok and type(result) == "string" and result or nil
+  end
+  local function run_command(argv)
+    return command_output(run, argv)
+  end
+
+  local load = load_value(read("/proc/loadavg"))
+  if not load then
+    load = load_value(run_command({ "sysctl", "-n", "vm.loadavg" }))
+  end
+
+  local mem = linux_memory(read("/proc/meminfo"))
+  if not mem then
+    local vm = run_command({ "vm_stat" })
+    local total = run_command({ "sysctl", "-n", "hw.memsize" })
+    mem = darwin_memory(vm, total)
+  end
+
+  local disk = disk_used(run_command({ "df", "-kP", "/" }))
+  return { cpu = load or "n/a", mem = mem or "n/a", disk = disk or "n/a" }
+end
+
 remuda._butler_system = system
 return system

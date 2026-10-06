@@ -26,6 +26,75 @@ local long_trace_detail = system.trace_detail(string.rep("x", 600))
 assert(#long_trace_detail == 512 and long_trace_detail:sub(-3) == "...",
   "trace details must be capped at 512 bytes")
 
+local linux_calls = {}
+local linux_metrics = system.status_metrics({
+  read_file = function(path)
+    if path == "/proc/loadavg" then return "1.25 0.90 0.50 2/100 42\n" end
+    if path == "/proc/meminfo" then
+      return "MemTotal:       1000000 kB\nMemAvailable:    375000 kB\n"
+    end
+  end,
+  run = function(options)
+    linux_calls[#linux_calls + 1] = options
+    assert(options.timeout == 2, "system metrics use a short process timeout")
+    assert(options.argv[1] == "df" and options.argv[2] == "-kP"
+      and options.argv[3] == "/",
+      "disk usage uses df with read-only arguments")
+    return { code = 0, stdout = table.concat({
+      "Filesystem 1024-blocks Used Available Capacity Mounted on",
+      "/dev/root 100 58 42 58% /",
+    }, "\n") .. "\n" }
+  end,
+})
+assert(linux_metrics.cpu == "1.25" and linux_metrics.mem == "63%"
+  and linux_metrics.disk == "58%",
+  "Linux proc readers and df should produce bounded metric values")
+assert(#linux_calls == 1, "Linux proc counters avoid extra commands")
+
+local darwin_commands = {}
+local darwin_metrics = system.status_metrics({
+  read_file = function() error("unavailable proc reader") end,
+  run = function(options)
+    local argv = options.argv
+    darwin_commands[#darwin_commands + 1] = table.concat(argv, " ")
+    if argv[1] == "sysctl" and argv[3] == "vm.loadavg" then
+      return { code = 0, stdout = "{ 0.45 0.30 0.20 }\n" }
+    end
+    if argv[1] == "vm_stat" then
+      local output = "Mach Virtual Memory Statistics: "
+        .. "(page size of 4096 bytes)\n"
+        .. "Pages free: 100000.\nPages inactive: 200000.\n"
+        .. "Pages speculative: 10000.\n"
+      return { code = 0, stdout = output }
+    end
+    if argv[1] == "sysctl" and argv[3] == "hw.memsize" then
+      return { code = 0, stdout = "4096000000\n" }
+    end
+    if argv[1] == "df" then
+      local output = "Filesystem 1024-blocks Used Available Capacity "
+        .. "Mounted on\n"
+        .. "/dev/disk1 100 75 25 75% /\n"
+      return { code = 0, stdout = output }
+    end
+    error("unexpected read-only command: " .. table.concat(argv, " "))
+  end,
+})
+assert(darwin_metrics.cpu == "0.45" and darwin_metrics.mem == "69%"
+  and darwin_metrics.disk == "75%",
+  "Darwin sysctl, vm_stat and df readers should produce metric values")
+local expected_commands = table.concat({
+  "sysctl -n vm.loadavg", "vm_stat", "sysctl -n hw.memsize", "df -kP /",
+}, "|")
+assert(table.concat(darwin_commands, "|") == expected_commands,
+  "Darwin reads use only the expected read-only commands")
+local unavailable = system.status_metrics({
+  read_file = function() error("no proc") end,
+  run = function() error("no process API") end,
+})
+assert(unavailable.cpu == "n/a" and unavailable.mem == "n/a"
+  and unavailable.disk == "n/a",
+  "all failed readers fall back independently without raising")
+
 -- Exercise the Windows backend on this host with injected environment and I/O.
 local windows = assert(system.windows, "Windows system table must be testable on this host")
 local windows_path = [[C:\Program Files\Agent;C:\tools;]]
