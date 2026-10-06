@@ -928,10 +928,13 @@ reused after a member exits). The approval post names the holder, the hash
 covers it, and the store line is vouched for only when Butler's record of the
 owner's reaction names the same holder. A call whose caller is not exactly one
 session Butler knows (outside any pane, unknown, a pane Butler did not launch)
-is offered no grant and uses none. Core states that its caller identity is
-advisory, not authentication: like the rest of the guard this keeps agents in
-their lane and is no isolation against a malicious same-user process or
-`run_script`.
+is offered no grant and uses none. The identity is read once when the hook
+starts, before any audit write can wait on the lock. Core states that its caller
+identity is advisory, not authentication: like the rest of the guard this keeps
+agents in their lane and is no isolation against a malicious same-user process or
+`run_script`. The subtree is cooperative too: `topic delegate --leader L` lets
+any agent start a child under any leader, and that child is covered by the
+grants L holds. The owner can revoke a grant or freeze them all.
 
 Audit before allow: the call is allowed only after its `grant_used` line was
 written. The use is reserved before the write (which can wait on the audit lock

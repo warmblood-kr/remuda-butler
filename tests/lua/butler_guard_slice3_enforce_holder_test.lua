@@ -130,3 +130,22 @@ T.test("the post names the holder from core's caller identity and the 🔄 grant
   untree()
   T.eq(count(lines(), '"event":"grant_used"'), 1, "one use", "ok - make")
 end)
+
+T.test("the identity is taken once at hook entry: a caller that changes during the audit wait does not move the grant", function()
+  fresh("h-entry", true)
+  tree()
+  T.eq(T.eval("return (remuda._t_add({ class = 'net', scope = 'example.com', ceiling = 'T2', holder = 'U-TA', event = '$ev1' }))"), "g001", "grant held by ta")
+  -- The hook's own audit line (the first append) is where it can wait on the lock; core's answer changes there.
+  local flip = [[local gp = remuda.butler.guard_policy; local real = gp.append; local n = 0
+    gp.append = function(r) n = n + 1; if n == 1 then remuda._t_who = { kind = 'session', session = 's-%s' } end; return real(r) end
+    remuda._t_unflip = function() gp.append = real end]]
+  as("ta"); T.eval(flip:format("tb"))
+  T.expect(has(call(), ALLOW), "entered as ta: allowed")
+  T.eval("remuda._t_unflip()")
+  as("tb"); T.eval(flip:format("ta")); T.eval("remuda._t_text = ''")
+  T.eq(call(), "pending", "entered as tb: asks")
+  T.expect(has(T.eval("return remuda._t_text"), "  holder:   tb and the sessions below it"), "the post offers tb's grant")
+  T.eval("remuda._t_unflip()")
+  untree()
+  T.eq(count(lines(), '"event":"grant_used"'), 1, "one use", "ok - entry")
+end)
