@@ -73,8 +73,9 @@ T.test("the chain is carried across rotation and verify walks the archives", fun
   T.eval("remuda._t_dir('g7-rotate'); remuda._t_guard({'guard','on'})")
   -- One eval for the cap, the lines and the restore: with the cap set in its own eval it was sometimes not in force
   -- for the lines (the live log kept all 8, no archive), so the test failed about 1 run in 3.
-  T.eval("local gp = remuda.butler.guard_policy; gp.LOG_CAP = 700;"
-    .. " for i = 1, 6 do gp.observe('x', 's' .. i, 'claude', 'y') end; gp.LOG_CAP = 1024 * 1024")
+  T.eval("local gp = remuda.butler.guard_policy; local cap = gp.LOG_CAP; gp.LOG_CAP = 700;"
+    .. " local ok, err = pcall(function() for i = 1, 6 do gp.observe('x', 's' .. i, 'claude', 'y') end end);"
+    .. " gp.LOG_CAP = cap; if not ok then error(err, 0) end")
   local ls = list(lines())
   local last_rotated = T.eval("local f = io.open(remuda.butler.guard_policy.log_path() .. '.1'); local l; for x in f:lines() do l = x end; f:close(); return l")
   T.eq(prev_of(ls[1]), sha(last_rotated), "first live line carries the rotated file's last hash")
