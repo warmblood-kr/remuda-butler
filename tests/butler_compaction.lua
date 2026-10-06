@@ -1,7 +1,7 @@
 -- Run from the repo root: luajit tests/butler_compaction.lua
 -- Exercise the scheduled tick's shared compaction gate without a daemon.
-local used, used_pct, busy, composer_empty, session_failure, attached, queued, mail_lookup_error =
-  "?", nil, false, true, false, false, false, false
+local used, used_pct, busy, composer_empty, session_failure, attached, queued, mail_lookup_error, alive =
+  "?", nil, false, true, false, false, false, false, true
 local screen = "mock idle screen"
 remuda = {
   _butler_test_mode = true,
@@ -15,7 +15,7 @@ remuda = {
     if session_failure then error("session is no longer alive") end
     return { is_busy = busy, attached = attached }
   end,
-  ls = function() return { { name = "butler", alive = true, attached = attached } } end,
+  ls = function() return { { name = "butler", alive = alive, attached = attached } } end,
   _butler_mail = { unread = function()
     if mail_lookup_error then error("mail read failed") end
     return queued and 1 or 0
@@ -101,6 +101,10 @@ remuda._butler_prompt_is_empty = function()
 end
 local idle, idle_reason = remuda.butler.is_idle("butler")
 assert(idle and idle_reason == "idle", "is_idle should accept idle session with empty composer")
+alive, composer_empty = false, false
+idle, idle_reason = remuda.butler.is_idle("butler")
+assert(idle and idle_reason == "exited", "an exited process is idle regardless of its final composer screen")
+alive, composer_empty = true, true
 local preflight = remuda._butler_compaction_preflight("butler")
 assert(preflight == nil,
   "preflight should call the registered bound working predicate with the screen")
