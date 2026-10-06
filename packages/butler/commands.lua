@@ -217,10 +217,7 @@ local function close_member(name, leader, force, leaderless_ok)
     end
   end
   local closed, result = pcall(remuda.close, alias)
-  if not closed then
-    return "could not close " .. alias .. ": " .. tostring(result)
-      .. ".\nNext: retry remuda butler close " .. alias
-  end
+  if not closed then error("could not close " .. alias .. ": " .. tostring(result) .. ".\nNext: retry remuda butler close " .. alias, 0) end
   return "Closed " .. alias .. ".\nNext: remuda butler sessions"
 end
 remuda._butler_close_member = close_member

@@ -88,7 +88,6 @@ function remuda.butler.is_idle(name, allow_queued_mail)
     local listed, rows = pcall(remuda.ls)
     if not listed then return false, "session list unavailable" end
     for _, row in ipairs(rows or {}) do
-      if row.name == name and row.alive == false then return true, "exited" end
       if row.name == name and row.attached then return false, "human attached" end
     end
   end

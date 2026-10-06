@@ -112,11 +112,12 @@ local close_ok, close_result = pcall(remuda._butler_close_member, "finished", "b
 assert(close_ok and close_result == "Closed finished.\nNext: remuda butler sessions"
   and closed[1] == "finished", "finished member closes despite its stale composer screen")
 
--- A failed forced close is reported as a value, not thrown as a Lua error.
+-- A failed forced close raises a readable message (the CLI turns it into exit 1 via cli_result), never a bare Lua error.
 closed, close_error = {}, "session already gone"
 local returned, failure = pcall(remuda._butler_close_member, "finished", "butler", true, true)
-assert(returned and failure:find("could not close finished: session already gone", 1, true),
-  "--force reports a close failure without raising")
+assert(not returned and failure:find("could not close finished: session already gone", 1, true)
+  and failure:find("Next: retry remuda butler close finished", 1, true),
+  "--force close failure raises a readable message, not a success string")
 exited, close_error, remuda.butler.is_idle = {}, nil, function(name)
   if idle[name] == false then return false, "busy" end
   return true
