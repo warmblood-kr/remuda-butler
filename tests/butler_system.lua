@@ -229,7 +229,7 @@ local capped_stdout = system.status_metrics({
         .. "Pages free: 100000.\nPages inactive: 200000.\n"
         .. "Pages speculative: 10000.\n"
     elseif argv[1] == "sysctl" and argv[3] == "hw.memsize" then
-      stdout = "4096000000\n" .. string.rep("x", 8192)
+      stdout = "4096000000\n"
     elseif argv[1] == "df" then
       stdout = "Filesystem blocks Used Avail Capacity Mounted\n"
         .. string.rep("x", 8192) .. "\n/dev/root 100 40 60 40% /\n"
@@ -240,6 +240,22 @@ local capped_stdout = system.status_metrics({
 assert(capped_stdout.cpu == "n/a" and capped_stdout.mem == "n/a"
   and capped_stdout.disk == "n/a",
   "oversized process output is discarded for load, memory and disk")
+
+-- hw.memsize alone: padding pushes the number past the cap, so it is dropped.
+local capped_memsize = system.status_metrics({
+  read_file = function() error("proc unavailable") end,
+  run = function(options)
+    local argv = options.argv
+    if argv[1] == "vm_stat" then
+      return { code = 0, stdout = "Mach Virtual Memory Statistics: (page size of 4096 bytes)\n"
+        .. "Pages free: 100000.\nPages inactive: 200000.\nPages speculative: 10000.\n" }
+    elseif argv[1] == "sysctl" and argv[3] == "hw.memsize" then
+      return { code = 0, stdout = string.rep(" ", 8192) .. "4096000000" }
+    end
+    return { code = 1, stdout = "" }
+  end,
+})
+assert(capped_memsize.mem == "n/a", "oversized hw.memsize output is discarded")
 
 -- Exercise the Windows backend on this host with injected environment and I/O.
 local windows = assert(system.windows, "Windows system table must be testable on this host")
