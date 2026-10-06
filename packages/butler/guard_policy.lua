@@ -1181,8 +1181,8 @@ local function grant_reply(record, hook_json)
   return approval.ALLOW
 end
 
--- `remuda butler guard [on|off|status]`. Without an argument it is the hook: it
--- always returns an empty answer (no decision) and exit 0.
+-- `remuda butler guard [on|off|status]`. Without an argument it is the hook, always exit 0: a deny (PreToolUse, deny
+-- rules on), an allow (PermissionRequest under a standing grant), a pending owner approval, or an empty answer.
 function M.run(args, caller)
   local verb = args[2]
   if verb == nil then
