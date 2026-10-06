@@ -116,7 +116,7 @@ assert(close_ok and close_result == "Closed finished.\nNext: remuda butler sessi
 closed = {}
 exited = { { name = "finished", alive = false }, { name = "finished", alive = true } }
 local live_ok, live_err = pcall(remuda._butler_close_member, "finished", "butler", false, true)
-assert(not live_ok and tostring(live_err):find("composer not empty", 1, true) and #closed == 0,
+assert(not live_ok and tostring(live_err):find("unread Butler mail", 1, true) and #closed == 0,
   "a live row for the same name keeps the close gates")
 
 -- A failed forced close raises a readable message (the CLI turns it into exit 1 via cli_result), never a bare Lua error.
