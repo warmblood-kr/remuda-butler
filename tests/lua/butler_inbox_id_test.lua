@@ -25,15 +25,17 @@ T.test("inbox_with_a_non_ulid_opens_no_message_file", function()
       return real_open(name, ...)
     end
     local agent = remuda._butler_bus.agents.cx1
+    local rejected = {}
     for _, id in ipairs({ '../../x', 'not-a-ulid' }) do
-      pcall(remuda._butler_command_run, 'inbox', { 'inbox', id },
+      local ok, err = pcall(remuda._butler_command_run, 'inbox', { 'inbox', id },
         { env = { REMUDA_BUTLER_AGENT_ID = agent.id } })
+      rejected[#rejected + 1] = tostring(not ok and tostring(err):find('unknown member: ' .. id, 1, true) ~= nil)
     end
     io.open = real_open
     local bus = remuda._butler_bus
-    return tostring(#opened) .. '|' .. tostring(bus.messages['../../x'] == nil)
+    return table.concat(rejected, ',') .. '|' .. tostring(#opened) .. '|' .. tostring(bus.messages['../../x'] == nil)
       .. '|' .. tostring(bus.messages['not-a-ulid'] == nil)
-  ]=]), "0|true|true")
+  ]=]), "true,true|0|true|true")
 end)
 
 -- Outside an agent session, `inbox <message-id>` says why and ends with a
@@ -42,6 +44,8 @@ T.test("operator_inbox_with_a_message_id_gets_a_next_line", function()
   T.eq(T.eval([=[
     local id = remuda._butler_send('butler', 'cx1', 'operator view'):match('^queued (%S+)')
     local ok, out = pcall(remuda._butler_command_run, 'inbox', { 'inbox', id }, { env = {} })
-    return tostring(out):find('Next:', 1, true) ~= nil and 'next' or tostring(out)
+    out = tostring(out)
+    return (out:find('shows a message only to the member it was delivered to', 1, true)
+      and out:find(id, 1, true) and out:find('Next:', 1, true)) and 'next' or out
   ]=]), "next")
 end)

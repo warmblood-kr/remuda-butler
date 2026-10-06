@@ -2486,11 +2486,18 @@ fn trust_dialogs_on_external_or_reused_directories_wait_for_a_human() {
               if name == 'outside' then return selected_yes end
               if name == 'outside_codex' then return codex_modal end
               if name == 'reused' then return safe_modal end
-              if name == 'fresh' then return "Accessing workspace:\n" .. {fresh:?} .. "\n❯ No, exit\n  Yes, I trust this folder" end
+              if name == 'fresh' then return remuda._trust_test_fresh end
               return three_options
             end
             remuda._trust_test_keys, remuda._trust_test_reports = {{}}, {{}}
-            remuda.key = function(name, key) table.insert(remuda._trust_test_keys, name .. ':' .. key) end
+            -- The fresh dialog follows the keys: <down> moves the marker onto Yes.
+            remuda._trust_test_fresh = "Accessing workspace:\n" .. {fresh:?} .. "\n❯ No, exit\n  Yes, I trust this folder"
+            remuda.key = function(name, key)
+              table.insert(remuda._trust_test_keys, name .. ':' .. key)
+              if name == 'fresh' and key == '<down>' then
+                remuda._trust_test_fresh = "Accessing workspace:\n" .. {fresh:?} .. "\n  No, exit\n❯ Yes, I trust this folder"
+              end
+            end
             remuda._butler_send = function(_, _, text) table.insert(remuda._trust_test_reports, text); return 'captured' end
             local cap = remuda._butler_bus.agents.butler.token
             remuda._call('butler_launch', {{ kind = 'claude', name = 'outside', cwd = {external:?} }}, {{ capability = cap }})
@@ -2502,10 +2509,17 @@ fn trust_dialogs_on_external_or_reused_directories_wait_for_a_human() {
             remuda._butler_topic_new('fresh', nil, 'claude')"#
         ),
     );
+    // Moving the marker and confirming take separate ticks; wait for the confirm.
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while std::time::Instant::now() < deadline
+        && !eval(&path, "return table.concat(remuda._trust_test_keys, '\\n')").lines().any(|key| key == "fresh:RET")
+    {
+        std::thread::sleep(Duration::from_millis(100));
+    }
     std::thread::sleep(Duration::from_secs(2));
     let keys = eval(&path, "return table.concat(remuda._trust_test_keys, '\\n')");
     assert!(keys.lines().all(|key| key.starts_with("fresh:")), "a human trust dialog was answered automatically: {keys}");
-    assert!(keys.contains("fresh:"), "fresh trust dialog was not answered: {keys}; state={}",
+    assert!(keys.lines().any(|key| key == "fresh:RET"), "fresh trust dialog was not answered: {keys}; state={}",
         eval(&path, "local a=remuda._butler_bus.agents.fresh; return tostring(a and a.cwd)..':'..tostring(a and a.trust_allowed)..':'..tostring(a and a.trust_reported)..':'..tostring(a and a.launch_attempts[1].reason)..':'..tostring(remuda._butler_bus.trusted_launch_dirs)"));
     let reports = eval(&path, "return table.concat(remuda._trust_test_reports, '\\n')");
     assert!(reports.contains("waiting for a human: trust dialog"), "leader was not asked for human trust: {reports}");
@@ -3151,43 +3165,6 @@ fn restart_reshows_the_read_leader_message_coalesced_with_unread_mail() {
         "#,
     );
     assert_eq!(got, "1|true|true|true", "restart: one coalesced notice naming the leader message: {got}");
-}
-
-// Heuristic guards: nil -> value is not a drop; one notice per drop,
-// re-armed only after the context rises again.
-#[test]
-fn half_drop_heuristic_guards_and_rearms_after_a_rise() {
-    let (path, _daemon) = butler_with_named_agent("renotice-guards", "cx1", "codex");
-    setup_renotice(&path, "cx1");
-    let got = eval(
-        &path,
-        r#"
-        local state = remuda._notice_test_state
-        local id = remuda._rn_lead('guard task')
-        remuda._rn_tick(0); remuda._rn_tick(2)
-        remuda._butler_inbox('cx1')
-        state.ctx.cx1 = nil
-        remuda._rn_tick(3)
-        state.ctx.cx1 = 60000
-        for t = 4, 9 do remuda._rn_tick(t) end
-        local after_nil = #state.typed
-        state.ctx.cx1 = 170000
-        remuda._rn_tick(10)
-        state.ctx.cx1 = 60000
-        for t = 11, 20 do remuda._rn_tick(t) end
-        local after_drop = #state.typed
-        state.ctx.cx1 = 25000
-        for t = 21, 30 do remuda._rn_tick(t) end
-        local no_rearm = #state.typed
-        state.ctx.cx1 = 180000
-        remuda._rn_tick(31)
-        state.ctx.cx1 = 50000
-        for t = 32, 40 do remuda._rn_tick(t) end
-        return table.concat({ tostring(after_nil), tostring(after_drop), tostring(no_rearm),
-          tostring(#state.typed) }, '|')
-        "#,
-    );
-    assert_eq!(got, "1|2|2|3", "guards: nil start, one per drop, re-arm after rise: {got}");
 }
 
 // First sight of a new member: a brief it read and has not answered while

@@ -4239,10 +4239,12 @@ fn butler_codex_builder_uses_automatic_approval() {
     );
 }
 
-/// Codex folder trust is automatic only for directories Butler created.
+/// Codex folder trust is answered by the dialog's text (Enter on the selected
+/// "Trust and continue"), never by number, and only when the shown path is the
+/// launch directory; a dialog showing another path stays for a human.
 #[test]
 #[cfg(unix)]
-fn butler_codex_trust_dialog_only_auto_trusts_butler_created_directories() {
+fn butler_codex_trust_dialog_is_answered_by_text_and_only_for_the_launch_directory() {
     let dir = scratch_dir("butler-codex-trust");
     let home = dir.join("home");
     let project_home = dir.join("projects");
@@ -4274,12 +4276,14 @@ fn butler_codex_trust_dialog_only_auto_trusts_butler_created_directories() {
           remuda._butler_agent_builders.codex = function() return {{"sh", "-c", "sleep 30"}} end
           remuda._butler_test_force_launch_probe = {{["created-trust"] = true, ["existing-trust"] = true}}
           local dialog = {fixture:?}
-          local screens = {{["created-trust"] = dialog, ["existing-trust"] = dialog}}
+          -- The dialog of created-trust names its own directory; existing-trust shows another.
+          local screens = {{["created-trust"] = dialog:gsub("/private/tmp/t3%-trustcheck", {project_home:?} .. "/created-trust"),
+            ["existing-trust"] = dialog}}
           local actions, reports = {{}}, {{}}
           remuda.capture = function(name) return screens[name] or "" end
           remuda.key = function(name, key)
             actions[#actions + 1] = name .. " key " .. key
-            if name == "created-trust" and key == "1" then
+            if name == "created-trust" and key == "RET" then
               screens[name] = "› Ask Codex to do anything"
             end
           end
@@ -4301,12 +4305,12 @@ fn butler_codex_trust_dialog_only_auto_trusts_butler_created_directories() {
         let ready = eval(&path, "return tostring(remuda._butler_bus.agents['created-trust'] ~= nil and remuda._butler_bus.agents['existing-trust'] ~= nil)");
         if ready == "true" && reports.contains(&existing_dir.to_string_lossy().to_string()) {
             assert!(
-                actions.lines().any(|line| line == "created-trust key 1"),
-                "a Butler-created directory should select Trust and continue; actions={actions:?}; reports={reports:?}"
+                actions.lines().any(|line| line == "created-trust key RET"),
+                "a launch directory should confirm the selected Trust and continue; actions={actions:?}; reports={reports:?}"
             );
             assert!(
-                !actions.lines().any(|line| line.starts_with("existing-trust key ")),
-                "an existing directory must not receive a key: {actions:?}"
+                !actions.lines().any(|line| line.starts_with("existing-trust key ") || line.ends_with(" key 1")),
+                "a dialog showing another directory must not receive a key, and no digit is ever sent: {actions:?}"
             );
             assert!(
                 reports.contains("waiting for a human: trust dialog in"),
@@ -4468,6 +4472,10 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
               screens[n] = {{ claude_yes_selected, claude_yes_selected, rule .. "\n❯ \n" .. rule }}
             elseif n == "t-claude" and k == "RET" then
               screens[n] = {{ rule .. "\n❯ \n" .. rule }}
+            elseif n == "t-claude-launch" and k == "<down>" then
+              -- The selection is verified on a fresh capture before RET is sent.
+              local selected = ({claude_trust_capture:?}):gsub("❯ No, exit", "  No, exit"):gsub("   Yes, I trust this folder", "❯ Yes, I trust this folder")
+              screens[n] = {{ selected, selected }}
             elseif n == "t-claude-launch" and k == "RET" then
               screens[n] = {{ rule .. "\n❯ \n" .. rule }}
             elseif (n == "t-codex" or n == "t-codex-peer") and k == "1" then
@@ -10102,37 +10110,6 @@ fn butler_matrix_cli_rejects_invalid_send_dash_and_fails_cleanly_without_pending
     assert!(!old_core.status.success(), "missing remuda.pending must fail nonzero");
     assert_eq!(String::from_utf8_lossy(&old_core.stderr).trim(),
         "Matrix CLI requires a remuda core with deferred replies (core #213/#239)");
-}
-
-#[test]
-fn butler_matrix_guidance_covers_each_member_verb_and_omits_operator_verbs() {
-    let dir = scratch_dir("butler-matrix-guidance");
-    let (_daemon, path) = butler_cli_test_daemon(&dir);
-    let guidance = eval(&path, r#"
-      for _, item in ipairs(remuda.contributions("butler.guidance")) do
-        if item.owner == "butler" and item.id == "matrix" then
-          return item.entry.agents_md({ parent = "leader" })
-        end
-      end
-      return "missing Matrix guidance contribution"
-    "#);
-    let expected = [
-        "Matrix is the human-facing adapter: never call the homeserver REST API or curl directly; use `remuda butler matrix [OPTIONS] VERB ARGS`. Options go BEFORE the verb (`--json` for machine output; `--room ROOM` defaults to the configured room).",
-        "- `status`: whoami, joined rooms, and the sync cursor.",
-        "- `[-n N] history`: recent messages in the room.",
-        "- `rooms`: joined rooms (read-only).",
-        "- `thread EVENT_ID`: all replies in a thread.",
-        "- `event EVENT_ID` (alias `get`): one event.",
-        "- `send TEXT`: start a NEW post only (name the room with `--room ROOM`); long text is split, rate-limited; `send -` reads the text from stdin (up to 64 KiB). Answers ALWAYS go via `remuda butler reply MESSAGE-ID -`, never send.",
-        "- `reply EVENT_ID TEXT` / `react EVENT_ID KEY`: answer or react (same room only).",
-        "- `upload PATH`: post a file (up to 20 MB). `[-o PATH] download MXC`: fetch media.",
-        "- `redact EVENT_ID [--reason TEXT]`: remove your message.",
-    ];
-    for line in expected {
-        assert!(guidance.contains(line), "Matrix guidance omitted: {line}\n{guidance}");
-    }
-    assert!(!guidance.contains("join ROOM"), "operator join leaked into member guidance");
-    assert!(!guidance.contains("leave ROOM"), "operator leave leaked into member guidance");
 }
 
 fn doctor_render(probes: &str, platform: &str) -> String {

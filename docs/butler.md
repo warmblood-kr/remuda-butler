@@ -90,6 +90,21 @@ is left out. One report is collected at a time, and a finished report is
 reused for 60 seconds (its header then says `as of`), so repeated calls do not
 type into a Codex pane again.
 
+## Folder trust and what it implies
+
+Butler answers the folder-trust dialog (Claude Code's and Codex's) for sessions
+it launched in a directory under `project_home`, or in a strict linked git
+worktree of a repo under it. So any untrusted repo cloned under `project_home`
+is trusted automatically, and its `.claude` settings, MCP servers and hooks can
+execute. Do not clone untrusted repos under `project_home`.
+
+The guards: never `$HOME`, its ancestors, `project_home` itself (a
+`project_home` that is `/`, `$HOME` or an ancestor of it makes nothing
+eligible), or Butler's own roots and anything below them; the dialog's exact
+option text is matched and a digit is never sent; the path the dialog shows
+must equal the launch directory (or its real path); an unexpected layout
+presses nothing and alerts once.
+
 ## Closing sessions
 
 `remuda butler close NAME [--force]` closes a session when the caller is its
