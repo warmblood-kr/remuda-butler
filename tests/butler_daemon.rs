@@ -1676,12 +1676,19 @@ fn butler_old_core_fallback_owns_boot_and_reload() {
     let installed = PathBuf::from(std::env::var_os("XDG_DATA_HOME").expect("scratch data home"))
         .join("remuda/mods/butler");
     std::fs::copy(installed.join("extension.toml"), fixture.join("extension.toml")).unwrap();
-    for entry in std::fs::read_dir(installed.join("packages/butler")).unwrap() {
-        let entry = entry.unwrap();
-        if entry.file_name() != "init.lua" {
-            std::os::unix::fs::symlink(entry.path(), package.join(entry.file_name())).unwrap();
+    fn copy_package(source: &Path, destination: &Path) {
+        std::fs::create_dir_all(destination).unwrap();
+        for entry in std::fs::read_dir(source).unwrap() {
+            let entry = entry.unwrap();
+            let target = destination.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_package(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), target).unwrap();
+            }
         }
     }
+    copy_package(&installed.join("packages/butler"), &package);
     let init = include_str!("../../packages/butler/init.lua")
         .replace("start = function(state)", "ignored_start = function(state)")
         .replace("commands = function(state)", "ignored_commands = function(state)");
@@ -1690,6 +1697,17 @@ fn butler_old_core_fallback_owns_boot_and_reload() {
     let path = daemon::socket_path_in(&dir, "s");
     let pending = eval(&path, r#"
         remuda._butler_test_mode = 'lifecycle'
+        local schedule = remuda.schedule
+        remuda.schedule = function(spec)
+          if spec.name == 'butler-start-fallback' then
+            local run = spec.run
+            spec.run = function(...)
+              local ok, err = pcall(run, ...)
+              if not ok then remuda._butler_test_fallback_error = tostring(err); error(err) end
+            end
+          end
+          return schedule(spec)
+        end
         remuda.exec('butler')
         local fallback
         for handle, schedule in pairs(remuda.schedules) do
@@ -1702,6 +1720,7 @@ fn butler_old_core_fallback_owns_boot_and_reload() {
     "#);
     assert_eq!(pending, "true", "discarded old-core candidate cancelled the legitimate pending fallback");
     butler_fallback_tick();
+    assert_eq!(eval(&path, "return remuda._butler_test_fallback_error or 'ok'"), "ok", "fallback boot failed");
     eval(&path, BUTLER_REMEMBER_GUARDS);
     let initial = eval(&path, BUTLER_BOOT_AND_GUARDS);
     assert_eq!(initial, "1|true|true|0|1", "old-core fallback must boot once and cancel itself");
