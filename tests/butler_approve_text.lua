@@ -74,10 +74,21 @@ assert(ok == false and reason == "pane_busy" and #typed == 1,
   "an unsafe composer or dialog refuses without typing")
 remuda._butler_notify_policy = function() return true end
 remuda.ls = function() return { { name = "agent-1", alive = true, attached = true } } end
+local _, _, was_attached
+ok, reason, was_attached = approve_text.type_text("agent-1", multiline, provenance)
+assert(ok == true and reason == nil and was_attached == true and #typed == 2
+  and traces[#traces][2]:find("attached=true", 1, true),
+  "an attached supervisor does not block owner-approved text; the trace records it")
+remuda._butler_notify_policy = function() return false end
 ok, reason = approve_text.type_text("agent-1", multiline, provenance)
-assert(ok == false and reason == "human_attached" and #typed == 1,
-  "an attached human pane refuses without typing")
+assert(ok == false and reason == "pane_busy" and #typed == 2,
+  "an attached pane with a draft in the composer still refuses")
+remuda._butler_notify_policy = function() return true end
+remuda.ls = function() return { { name = "agent-1", alive = false, attached = true } } end
+ok, reason = approve_text.type_text("agent-1", multiline, provenance)
+assert(ok == false and reason == "session_not_live" and #typed == 2, "a dead session still refuses")
 remuda.ls = function() return { { name = "agent-1", alive = true, attached = false } } end
+typed[2] = nil
 
 local returned_id = approve_text.request("agent-1", multiline, "agent-1")
 assert(returned_id == "ABCD", "registration returns the short request id")
