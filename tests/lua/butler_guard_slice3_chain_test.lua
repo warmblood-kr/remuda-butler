@@ -103,9 +103,11 @@ T.test("a failed hash never stops the audit append; verify flags the unchained l
   start_butler()
   T.eval("remuda._t_dir('g7-failsafe'); remuda._t_guard({'guard','on'})")
   obs(1)
-  T.eval("local ga = remuda.butler.guard_approval; remuda._t_sha = ga.sha256; ga.sha256 = function() error('boom') end")
-  obs(1)
-  T.eval("remuda.butler.guard_approval.sha256 = remuda._t_sha")
+  -- Stub, observe and restore in ONE eval: a stub set in its own eval was sometimes gone by the next one (a repeated
+  -- exec re-runs main.lua and replaces the module tables, see #429), so the line got its prev and the test failed.
+  T.eval("local ga = remuda.butler.guard_approval; local real = ga.sha256; ga.sha256 = function() error('boom') end;"
+    .. " local ok, err = pcall(remuda.butler.guard_policy.observe, 'x', 's1', 'claude', 'y');"
+    .. " ga.sha256 = real; if not ok then error(err, 0) end")
   local ls = list(lines())
   T.expect(#ls == 4 and not prev_of(ls[4]), "line written without prev: " .. lines())
   T.expect(verify():find("BROKEN", 1, true), "flagged: " .. verify(), "ok - fail-safe")
