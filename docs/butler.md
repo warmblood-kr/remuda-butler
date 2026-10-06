@@ -940,9 +940,11 @@ taken without renames, so a move out of a CI path still lists the source, and
 with repo config, hooks, external diff and textconv neutralised. A push is
 covered only when the command is exactly `git push [remote [current-branch]]`:
 no shell syntax, refspec, flag, `cd`, `-C`, `env` or `GIT_DIR` prefix.
-Anything else falls to the tier. A push of `main`, `master` or `trunk` (the
-checked-out branch for a bare `git push`, the named branch otherwise) and a
-push that publishes tags (`push.followTags` set) always ask: a grant never
+Anything else falls to the tier. A push of `main`, `master` or `trunk` in any
+case (the checked-out branch, read as its full ref, for a bare `git push`, the
+named branch otherwise), a push of the remote's default branch (its
+`refs/remotes/REMOTE/HEAD` as last fetched; when that is unknown locally only
+the three names count), and a push that publishes tags (`push.followTags` set) always ask: a grant never
 covers them. Only a push or a WebFetch can match a grant at all; a call the
 guard classes as weaken, identity, escape, control, destroy, script or other
 never does. All the git probes of one call share a budget of about two seconds;
@@ -981,6 +983,11 @@ file. A final line of the live log with no newline yet is a write in
 progress: it is reported as a note, not as BROKEN. It cannot detect the whole log replaced by a consistent forgery by the
 same user, nor the truncation of the newest lines, and it cannot check the
 oldest kept archive's first link (older archives are pruned after 90 days).
+
+Verify hashes every line in pure Lua, about two seconds per megabyte on an M1
+Max, inside the daemon. Each file holds at most 1 MB before it rotates, so a
+log with many archives (90 days of heavy use) takes minutes; run it when the
+daemon may be busy that long.
 
 A fork of the chain (the audit lock fell back after 1 s and two writers raced, a line
 written without `prev` because the hash failed, a line cut short by a crash and

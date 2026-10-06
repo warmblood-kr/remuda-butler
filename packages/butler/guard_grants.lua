@@ -465,8 +465,10 @@ local function plain_push(command, cwd)
   for s in command:gmatch("%S+") do w[#w + 1] = s end
   if #w < 2 or #w > 4 or w[1] ~= "git" or w[2] ~= "push" then return nil end
   for i = 3, #w do if w[i]:find("^%-") then return nil end end
-  local branch, bcode = git(cwd, "symbolic-ref", "--short", "-q", "HEAD")
-  if bcode ~= 0 or branch == "" or PROTECTED_BRANCH[branch:lower()] then return nil end
+  -- the full ref: --short prints heads/main when a tag named main exists
+  local ref, bcode = git(cwd, "symbolic-ref", "-q", "HEAD")
+  local branch = bcode == 0 and ref:match("^refs/heads/(.+)$")
+  if not branch or PROTECTED_BRANCH[branch:lower()] then return nil end
   -- A config probe: exit 0 = set (value), exit 1 = unset (nil); any other result (failure, timeout) is no grant.
   local failed = false
   local function cfg(...)
@@ -493,6 +495,9 @@ local function plain_push(command, cwd)
     if name == remote then
       local pushes = cfg("--get-all", "remote." .. name .. ".push")
       if pushes or failed then return nil end
+      -- nor the remote's default branch (its HEAD as last fetched; unknown locally means only the names above)
+      local head, hcode = git(cwd, "symbolic-ref", "-q", "refs/remotes/" .. remote .. "/HEAD")
+      if (hcode ~= 0 and hcode ~= 1) or (hcode == 0 and head:lower() == ("refs/remotes/" .. remote .. "/" .. branch):lower()) then return nil end
       return "refs/remotes/" .. remote .. "/" .. branch
     end
   end
