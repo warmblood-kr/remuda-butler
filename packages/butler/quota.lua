@@ -32,7 +32,7 @@ local function compact_json_whitespace(text)
     elseif char == '"' then
       in_string = true
       compact[#compact + 1] = char
-    elseif not char:match("%s") then
+    elseif not char:match("^[ \t\r\n]$") then
       compact[#compact + 1] = char
     end
   end
