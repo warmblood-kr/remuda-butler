@@ -1,6 +1,6 @@
 -- Guard slice 3, PR3 (push half): the grant's push diff check against the remote ref, the plain-push whitelist and git config that redirects a push.
 local function start_butler(no_register)
-  T.install_mod("butler", assert(os.getenv("REMUDA_LUA_REPO")))
+  T.install_guard_subject("butler", assert(os.getenv("REMUDA_LUA_REPO")))
   T.eval('remuda._butler_argv = {"sh", "-c", "sleep 60"}; remuda._butler_skip_relay = true; remuda._butler_readiness_timeout = 1')
   T.eval('return remuda.exec("butler")')
   T.wait_until(function()

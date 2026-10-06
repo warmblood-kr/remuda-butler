@@ -928,9 +928,12 @@ event, or was written with a clock that has gone backwards is no grant (fail
 closed). Limit: processes running as the same user, outside the hook, can still
 write the file; the deny rule governs agent tools, not the OS.
 
-The store's test seams (clock, case probe, approval cross-check) answer only
-to `REMUDA_BUTLER_TEST=1` in the daemon's process environment, read once when
-the module loads; setting a Lua field later changes nothing. The text deny
+Installed guard modules always use the ordinary clock, filesystem case probe
+and approval cross-check, with fixed 2-second aggregate Git and command limits.
+They ignore `REMUDA_BUTLER_TEST` and legacy test fields on every load and reload.
+Deterministic test subjects live under `tests/`, outside the installed package.
+This remains a cooperative layer: arbitrary Lua in the same image can replace
+ordinary dependencies or functions. The text deny
 refuses code that names the grant store module, the `_butler_test` field or the
 env name (`run_script` code, and `remuda -e`, `lua`, `exec` or `run` commands),
 and commands that set `REMUDA_BUTLER_TEST=`; writes into the data dir are

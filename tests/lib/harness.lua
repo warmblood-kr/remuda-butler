@@ -65,8 +65,22 @@ function T.expect(value, message, success_message)
 end
 
 function T.eval(code)
+  if T.guard_subject then code = T.guard_subject.wrap(code, T.guard_subject_dir) end
   -- The CLI appends one newline to the value it prints; the value itself has none.
   return (remote(code):gsub("\n$", ""))
+end
+
+-- Use the real MCP transport, addressed only to the disposable child daemon.
+function T.mcp_eval(code)
+  local result = process.run {
+    argv = { exe, "-s", child_server, "mcp" }, timeout = 10,
+    stdin = remuda_api.json.encode { jsonrpc = "2.0", id = 431, method = "tools/call",
+      params = { name = "run_script", arguments = { code = code } } } .. "\n",
+  }
+  assert(not result.timed_out and result.code == 0, tostring(result.stderr))
+  local reply = remuda_api.json.decode(result.stdout)
+  assert(reply.result and not reply.result.isError, result.stdout)
+  return reply.result.content[1].text
 end
 
 local function copy_tree(source, destination)
@@ -93,6 +107,20 @@ function T.install_mod(name, source)
   remuda_api.mkdir(destination)
   copy_tree(source .. "/extension.toml", destination .. "/extension.toml")
   copy_tree(source .. "/packages", destination .. "/packages")
+end
+
+function T.install_guard_subject(name, source)
+  assert(name == 'butler', 'guard subject is only for Butler')
+  T.install_mod(name, source) -- the installed package itself stays unmodified
+  if T.guard_subject then return end
+  T.guard_subject = assert(loadfile(source .. '/tests/lib/guard_subject.lua'))()
+  T.guard_subject_dir = assert(os.getenv('REMUDA_LUA_SCRATCH')) .. '/guard-subjects'
+  remuda_api.mkdir(T.guard_subject_dir)
+  for _, module in ipairs({ 'guard_policy', 'guard_grants' }) do
+    local f = assert(io.open(source .. '/packages/butler/' .. module .. '.lua', 'r'))
+    local code = f:read('a'); f:close()
+    assert(fs.write_atomic(T.guard_subject_dir .. '/' .. module .. '.lua', T.guard_subject.build(code, module)))
+  end
 end
 
 function T.new_session(name, argv)
@@ -191,9 +219,7 @@ local function begin_child()
       assert(type(key) == "string" and type(value) == "string", "T.child_env must map strings to strings")
     end
   end
-  -- Test seams in Butler (guard_grants.now/verified/insensitive) are honoured only when the child daemon's process env
-  -- carries REMUDA_BUTLER_TEST=1, read once at module load; a test may override it (T.child_env) to run in production mode.
-  local env = { REMUDA_BUTLER_TEST = "1" }
+  local env = {}
   for key, value in pairs(child_env or {}) do env[key] = value end
   local started = process.run {
     argv = { exe, "-s", child_server, "-e", "1" },

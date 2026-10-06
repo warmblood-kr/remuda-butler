@@ -1,6 +1,6 @@
 -- Guard slice 3, PR-A (#339): grant matching hardened, still no allow path: protected branches and tags, push.followTags. The class gate, grant_id and the git budget are in grants_gate_test (own file: the harness gives a file 20s in all).
 local function start_butler(no_register)
-  T.install_mod("butler", assert(os.getenv("REMUDA_LUA_REPO")))
+  T.install_guard_subject("butler", assert(os.getenv("REMUDA_LUA_REPO")))
   T.eval('remuda._butler_argv = {"sh", "-c", "sleep 60"}; remuda._butler_skip_relay = true; remuda._butler_readiness_timeout = 1')
   T.eval('return remuda.exec("butler")')
   T.wait_until(function()
