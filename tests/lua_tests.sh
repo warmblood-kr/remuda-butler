@@ -14,7 +14,7 @@ if (( $# == 0 )); then
     else
       # Show the whole log of the failing file, never just its tail: it names the real failure.
       echo "FAIL $name $((SECONDS - start))s"
-      echo "$out"
+      printf '%s\n' "$out"
       failed+=("$name")
     fi
   done

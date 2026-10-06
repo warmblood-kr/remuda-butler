@@ -83,6 +83,7 @@ harness_run() {
     return "$command_status"
   fi
   local wait_s=${REMUDA_LUA_RESULT_WAIT:-120}
+  [[ $wait_s =~ ^[0-9]+$ ]] || wait_s=120
   for attempt in $(seq 1 $(( wait_s * 20 ))); do
     [[ -s "$H_RESULT" ]] && break
     sleep 0.05
