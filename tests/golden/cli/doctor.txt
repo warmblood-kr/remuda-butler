@@ -1,0 +1,90 @@
+### remuda butler "doctor"
+exit: 0
+stdout:
+doctor-stub
+stderr:
+
+actions:
+doctor.probe()
+doctor.render()
+
+### remuda butler "doctor" "--help"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "doctor" "-h"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "doctor" "help"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "doctor" "extra"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "doctor" "--"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "doctor" "--json"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "doctor" "--help" "extra"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "doctor" "extra" "--help"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "doctor" "--="
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)

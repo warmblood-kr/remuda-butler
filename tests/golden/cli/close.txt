@@ -1,0 +1,464 @@
+### remuda butler "close"
+exit: 2
+stdout:
+
+stderr:
+missing required argument <NAME>
+
+
+Usage: remuda butler close <name> [--force]
+       remuda butler close --force <name>
+Example: remuda butler close worker-1
+Next: remuda butler sessions
+actions:
+(none)
+
+### remuda butler "close" "--help"
+exit: 0
+stdout:
+Close a direct Butler member
+
+
+
+Arguments:
+  <NAME>  Member name
+
+Options:
+  -h, --help   Print help
+      --force  Skip unread-mail and idle checks
+
+
+Usage: remuda butler close <name> [--force]
+       remuda butler close --force <name>
+Example: remuda butler close worker-1
+Next: remuda butler sessions
+
+stderr:
+
+actions:
+(none)
+
+### remuda butler "close" "-h"
+exit: 0
+stdout:
+Close a direct Butler member
+
+
+
+Arguments:
+  <NAME>  Member name
+
+Options:
+  -h, --help   Print help
+      --force  Skip unread-mail and idle checks
+
+
+Usage: remuda butler close <name> [--force]
+       remuda butler close --force <name>
+Example: remuda butler close worker-1
+Next: remuda butler sessions
+
+stderr:
+
+actions:
+(none)
+
+### remuda butler "close" "help"
+exit: 1
+stdout:
+
+stderr:
+cannot close help: unknown Butler member.
+Next: remuda butler sessions
+actions:
+(none)
+
+### remuda butler "close" "worker"
+exit: 1
+stdout:
+
+stderr:
+worker is busy: busy.
+Next: wait for it to become idle, or use --force
+actions:
+(none)
+
+### remuda butler "close" "worker" "--force"
+exit: 0
+stdout:
+Closed worker.
+Next: remuda butler sessions
+stderr:
+
+actions:
+close(worker)
+
+### remuda butler "close" "--force" "worker"
+exit: 0
+stdout:
+Closed worker.
+Next: remuda butler sessions
+stderr:
+
+actions:
+close(worker)
+
+### remuda butler "close" "--force"
+exit: 2
+stdout:
+
+stderr:
+missing required argument <NAME>
+
+
+Usage: remuda butler close <name> [--force]
+       remuda butler close --force <name>
+Example: remuda butler close worker-1
+Next: remuda butler sessions
+actions:
+(none)
+
+### remuda butler "close" "--force" "--force" "worker"
+exit: 2
+stdout:
+
+stderr:
+invalid arguments: an argument cannot be used with one or more of the other specified arguments
+
+
+Usage: remuda butler close <name> [--force]
+       remuda butler close --force <name>
+Example: remuda butler close worker-1
+Next: remuda butler sessions
+actions:
+(none)
+
+### remuda butler "close" "worker" "--force" "--force"
+exit: 2
+stdout:
+
+stderr:
+invalid arguments: an argument cannot be used with one or more of the other specified arguments
+
+
+Usage: remuda butler close <name> [--force]
+       remuda butler close --force <name>
+Example: remuda butler close worker-1
+Next: remuda butler sessions
+actions:
+(none)
+
+### remuda butler "close" "worker" "extra"
+exit: 2
+stdout:
+
+stderr:
+unexpected argument 'extra'
+
+
+Usage: remuda butler close <name> [--force]
+       remuda butler close --force <name>
+Example: remuda butler close worker-1
+Next: remuda butler sessions
+actions:
+(none)
+
+### remuda butler "close" "worker" "other"
+exit: 2
+stdout:
+
+stderr:
+unexpected argument 'other'
+
+
+Usage: remuda butler close <name> [--force]
+       remuda butler close --force <name>
+Example: remuda butler close worker-1
+Next: remuda butler sessions
+actions:
+(none)
+
+### remuda butler "close" "--force=1" "worker"
+exit: 2
+stdout:
+
+stderr:
+invalid arguments: unexpected value for an argument found
+
+
+Usage: remuda butler close <name> [--force]
+       remuda butler close --force <name>
+Example: remuda butler close worker-1
+Next: remuda butler sessions
+actions:
+(none)
+
+### remuda butler "close" "-f" "worker"
+exit: 2
+stdout:
+
+stderr:
+unexpected argument '-f'
+
+
+Usage: remuda butler close <name> [--force]
+       remuda butler close --force <name>
+Example: remuda butler close worker-1
+Next: remuda butler sessions
+actions:
+(none)
+
+### remuda butler "close" "--bogus"
+exit: 2
+stdout:
+
+stderr:
+remuda: butler close: unknown option '--bogus'.
+
+
+Usage: remuda butler close <name> [--force]
+       remuda butler close --force <name>
+Example: remuda butler close worker-1
+Next: remuda butler sessions
+actions:
+(none)
+
+### remuda butler "close" "--bogus" "worker"
+exit: 2
+stdout:
+
+stderr:
+remuda: butler close: unknown option '--bogus'.
+
+
+Usage: remuda butler close <name> [--force]
+       remuda butler close --force <name>
+Example: remuda butler close worker-1
+Next: remuda butler sessions
+actions:
+(none)
+
+### remuda butler "close" "worker" "--bogus"
+exit: 2
+stdout:
+
+stderr:
+remuda: butler close: unknown option '--bogus'.
+
+
+Usage: remuda butler close <name> [--force]
+       remuda butler close --force <name>
+Example: remuda butler close worker-1
+Next: remuda butler sessions
+actions:
+(none)
+
+### remuda butler "close" "--" "worker"
+exit: 1
+stdout:
+
+stderr:
+worker is busy: busy.
+Next: wait for it to become idle, or use --force
+actions:
+(none)
+
+### remuda butler "close" "--force" "--" "worker"
+exit: 0
+stdout:
+Closed worker.
+Next: remuda butler sessions
+stderr:
+
+actions:
+close(worker)
+
+### remuda butler "close" "worker" "--"
+exit: 1
+stdout:
+
+stderr:
+worker is busy: busy.
+Next: wait for it to become idle, or use --force
+actions:
+(none)
+
+### remuda butler "close" "-worker"
+exit: 2
+stdout:
+
+stderr:
+unexpected argument '-w'
+
+
+Usage: remuda butler close <name> [--force]
+       remuda butler close --force <name>
+Example: remuda butler close worker-1
+Next: remuda butler sessions
+actions:
+(none)
+
+### remuda butler "close" "nosuch"
+exit: 1
+stdout:
+
+stderr:
+cannot close nosuch: unknown Butler member.
+Next: remuda butler sessions
+actions:
+(none)
+
+### remuda butler "close" "nosuch" "--force"
+exit: 1
+stdout:
+
+stderr:
+cannot close nosuch: unknown Butler member.
+Next: remuda butler sessions
+actions:
+(none)
+
+### remuda butler "close" "butler" "--force"
+exit: 1
+stdout:
+
+stderr:
+cannot close butler: only your direct members can be closed (you and your leader are excluded).
+Next: remuda butler sessions
+actions:
+(none)
+
+### remuda butler "close" "other" "--force"
+exit: 1
+stdout:
+
+stderr:
+cannot close other: only your direct members can be closed (you and your leader are excluded).
+Next: remuda butler sessions
+actions:
+(none)
+
+### remuda butler "close" "--help" "worker"
+exit: 0
+stdout:
+Close a direct Butler member
+
+
+
+Arguments:
+  <NAME>  Member name
+
+Options:
+  -h, --help   Print help
+      --force  Skip unread-mail and idle checks
+
+
+Usage: remuda butler close <name> [--force]
+       remuda butler close --force <name>
+Example: remuda butler close worker-1
+Next: remuda butler sessions
+
+stderr:
+
+actions:
+(none)
+
+### remuda butler "close" "worker" "--help"
+exit: 0
+stdout:
+Close a direct Butler member
+
+
+
+Arguments:
+  <NAME>  Member name
+
+Options:
+  -h, --help   Print help
+      --force  Skip unread-mail and idle checks
+
+
+Usage: remuda butler close <name> [--force]
+       remuda butler close --force <name>
+Example: remuda butler close worker-1
+Next: remuda butler sessions
+
+stderr:
+
+actions:
+(none)
+
+### remuda butler "close" "worker" "-h"
+exit: 0
+stdout:
+Close a direct Butler member
+
+
+
+Arguments:
+  <NAME>  Member name
+
+Options:
+  -h, --help   Print help
+      --force  Skip unread-mail and idle checks
+
+
+Usage: remuda butler close <name> [--force]
+       remuda butler close --force <name>
+Example: remuda butler close worker-1
+Next: remuda butler sessions
+
+stderr:
+
+actions:
+(none)
+
+### remuda butler "close" "--force" "--help"
+exit: 0
+stdout:
+Close a direct Butler member
+
+
+
+Arguments:
+  <NAME>  Member name
+
+Options:
+  -h, --help   Print help
+      --force  Skip unread-mail and idle checks
+
+
+Usage: remuda butler close <name> [--force]
+       remuda butler close --force <name>
+Example: remuda butler close worker-1
+Next: remuda butler sessions
+
+stderr:
+
+actions:
+(none)
+
+### remuda butler "close" "--help" "--force"
+exit: 0
+stdout:
+Close a direct Butler member
+
+
+
+Arguments:
+  <NAME>  Member name
+
+Options:
+  -h, --help   Print help
+      --force  Skip unread-mail and idle checks
+
+
+Usage: remuda butler close <name> [--force]
+       remuda butler close --force <name>
+Example: remuda butler close worker-1
+Next: remuda butler sessions
+
+stderr:
+
+actions:
+(none)
