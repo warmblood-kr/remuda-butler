@@ -1977,14 +1977,17 @@ return function(matrix, pinned_hostname)
     clean_store_dir()
 
     -- Store says no, or there is no store: today's private file, and the output says so.
-    for _, reason in ipairs({ "unavailable: no desktop session for alice", "denied: alice refused", "old core" }) do
-      local class = reason ~= "old core" and reason:match("^%a+") or nil
-      if reason == "old core" then remuda.system, store_calls = nil, {} else fake_store(reason) end
+    for _, reason in ipairs({ "unavailable: no desktop session for alice", "denied: alice refused", "old core", "core system without credential" }) do
+      local no_store = reason == "old core" or reason == "core system without credential"
+      local class = not no_store and reason:match("^%a+") or nil
+      if reason == "old core" then remuda.system, store_calls = nil, {}
+      elseif no_store then remuda.system, store_calls = {}, {}
+      else fake_store(reason) end
       local file_password = register(bot, { "--default" })
       assert(resolved and resolved.status == 0, reason .. ": setup should fall back to the file: "
         .. tostring(resolved and resolved.stderr))
       assert(read(store_password_path) == file_password .. "\n"
-        and #store_calls == (reason == "old core" and 0 or 1),
+        and #store_calls == (no_store and 0 or 1),
         reason .. ": the generated password should be saved in the private file")
       assert(resolved.stdout:find("\nBot account password saved privately: " .. store_password_path .. "\n", 1, true)
         and not resolved.stdout:find("OS secure store (", 1, true)
