@@ -1,0 +1,89 @@
+### remuda butler "doctor"
+exit: 0
+stdout:
+Not the owning daemon: Butler for this home is already running in another Remuda daemon (session owner-session, pid 42). Nothing was changed.
+Claude Code: installed, not logged in
+Codex CLI: installed, not logged in
+Typed lines: off
+Shell lines: off
+Approve text: off
+Approval room: all -> HOME (lounge not joined)
+Guard approvals: off
+Guard deny: off
+Guard audit: off
+Next: claude auth login
+Next: codex login
+stderr:
+
+actions:
+state: 1:0:held
+
+### remuda butler "doctor" "extra"
+exit: 1
+stdout:
+
+stderr:
+Butler for this home is already running in another Remuda daemon (session owner-session, pid 42). Nothing was changed.
+Next: remuda -s owner-session butler status
+actions:
+state: 1:0:held
+
+### remuda butler "doctor" "--help"
+exit: 1
+stdout:
+
+stderr:
+Butler for this home is already running in another Remuda daemon (session owner-session, pid 42). Nothing was changed.
+Next: remuda -s owner-session butler status
+actions:
+state: 1:0:held
+
+### remuda butler "doctor" "-h"
+exit: 1
+stdout:
+
+stderr:
+Butler for this home is already running in another Remuda daemon (session owner-session, pid 42). Nothing was changed.
+Next: remuda -s owner-session butler status
+actions:
+state: 1:0:held
+
+### remuda butler "status"
+exit: 1
+stdout:
+
+stderr:
+Butler for this home is already running in another Remuda daemon (session owner-session, pid 42). Nothing was changed.
+Next: remuda -s owner-session butler status
+actions:
+state: 1:0:held
+
+### remuda butler "approve" "A7K2"
+exit: 1
+stdout:
+
+stderr:
+Butler for this home is already running in another Remuda daemon (session owner-session, pid 42). Nothing was changed.
+Next: remuda -s owner-session butler status
+actions:
+state: 1:0:held
+
+### remuda butler "--help"
+exit: 1
+stdout:
+
+stderr:
+Butler for this home is already running in another Remuda daemon (session owner-session, pid 42). Nothing was changed.
+Next: remuda -s owner-session butler status
+actions:
+state: 1:0:held
+
+### remuda butler "--" "doctor"
+exit: 1
+stdout:
+
+stderr:
+Butler for this home is already running in another Remuda daemon (session owner-session, pid 42). Nothing was changed.
+Next: remuda -s owner-session butler status
+actions:
+state: 1:0:held
