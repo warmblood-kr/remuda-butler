@@ -50,7 +50,26 @@ local function run_case(case, trace)
   T.eval("remuda._pr0_log = {}")
   if case.pre then T.eval(case.pre) end
   local code, out, err
-  if case.as then
+  if case.as == "standby" then
+    local words = {}
+    for _, word in ipairs(argv) do words[#words + 1] = string.format("%q", word) end
+    local result = T.eval([[
+      local extension = remuda._extension_commands.butler
+      local command_run = remuda._butler_command_run
+      local real_fail = remuda.fail
+      remuda.fail = function(text, code) return { failed = true, code = code, text = text } end
+      remuda._pr0_standby_setup()
+      local ok, value = pcall(remuda._extension_commands.butler, { ]] .. table.concat(words, ",") .. [[ }, nil)
+      remuda._extension_commands.butler = extension
+      remuda._butler_command_run = command_run
+      remuda.fail = real_fail
+      if not ok then return "1\0\0" .. tostring(value) end
+      if type(value) == "table" and value.failed then return tostring(value.code) .. "\0\0" .. tostring(value.text) end
+      if type(value) == "table" then return "0\0<deferred reply>\0" end
+      return "0\0" .. tostring(value) .. "\0"
+    ]])
+    code, out, err = result:match("^(%d+)%z(.-)%z(.*)$")
+  elseif case.as then
     local words = {}
     for _, word in ipairs(argv) do words[#words + 1] = string.format("%q", word) end
     local result = T.eval([[
@@ -78,7 +97,7 @@ local function run_case(case, trace)
   local words = {}
   for _, word in ipairs(argv) do words[#words + 1] = string.format("%q", word) end
   return table.concat({
-    "### " .. (case.as and "[agent] " or "") .. "remuda butler " .. table.concat(words, " "),
+    "### " .. (case.as == "agent" and "[agent] " or "") .. "remuda butler " .. table.concat(words, " "),
     "exit: " .. code,
     "stdout:", normalize(out),
     "stderr:", normalize(err),
@@ -130,6 +149,88 @@ end
 local function agent(...) return { argv = { ... }, as = "agent" } end
 
 families {
+  { name = "approvals",
+    setup = [[
+      local approval = remuda.butler.approval
+      remuda._pr0_approvals = { calls = 0, status = "open", expired_record = nil }
+      approval.list = function()
+        remuda._pr0_note("approval.list")
+        if remuda._pr0_approvals.status == "open" then
+          return { { id = "A7K2", kind = "agent", summary = "synthetic", asker = "worker", expires_at = os.time() * 1000 + 60000 } }
+        end
+        return {}
+      end
+      approval.answer = function(id, decision, by)
+        remuda._pr0_approvals.calls = remuda._pr0_approvals.calls + 1
+        remuda._pr0_note("approval.answer", id, decision, by)
+        local expired = remuda._pr0_approvals.expired_record
+        if type(expired) == "table" and expired.id == id then
+          if expired.status == "open" and os.time() * 1000 >= expired.expires_at then
+            expired.status = "expired"
+            remuda._pr0_note("approval.expire", id)
+          end
+          remuda._pr0_approvals.status = expired.status
+          return false, nil, { id = id, status = expired.status }
+        end
+        if id ~= "A7K2" then return false, "unknown approval request", nil end
+        if remuda._pr0_approvals.status ~= "open" then return false, nil, { id = id, status = remuda._pr0_approvals.status } end
+        remuda._pr0_approvals.status = decision == "approve" and "approved" or "denied"
+        return true, nil, { id = id, summary = "synthetic", status = remuda._pr0_approvals.status }
+      end
+    ]],
+    reset = [[remuda._pr0_approvals.status = "open"; remuda._pr0_approvals.calls = 0; remuda._pr0_approvals.expired_record = nil]],
+    trace = [[return remuda._pr0_approvals.status .. ":" .. remuda._pr0_approvals.calls]],
+    cases = forms("approvals", { "approvals", "extra" }, { "approvals", "--" },
+      { "approvals", "--help", "extra" }, { "approvals", "-h", "extra" },
+      { argv = { "approvals", "--help" }, as = "agent" },
+      { "approve", "A7K2" }, { "deny", "A7K2" }, { "approve" }, { "deny" },
+      { "approve", "" }, { "deny", "" }, { "approve", "bad id" }, { "deny", "bad id" },
+      { "approve", "-A7K2" }, { "deny", "-A7K2" }, { "approve", "--", "A7K2" },
+      { "deny", "--", "A7K2" }, { "approve", "A7K2", "extra" }, { "deny", "A7K2", "extra" },
+      { "approve", "A7K2=1" }, { "deny", "A7K2=1" },
+      { "approve", "--help" }, { "deny", "-h" }, { "approve", "--help", "A7K2" },
+      { argv = { "approve", "A7K2" }, as = "agent" },
+      { argv = { "deny", "A7K2" }, as = "agent" },
+      { argv = { "approve", "A7K2" }, pre = [[remuda._pr0_approvals.status = "expired"]] },
+      { argv = { "deny", "A7K2" }, pre = [[remuda._pr0_approvals.status = "denied"]] },
+      { "approve", "unknown" }, { "deny", "unknown" },
+      { argv = { "approve", "--" }, pre = [[remuda._pr0_approvals.expired_record = { id = "--", status = "open", expires_at = 0 }]] },
+      { argv = { "deny", "--" }, pre = [[remuda._pr0_approvals.expired_record = { id = "--", status = "open", expires_at = 0 }]] },
+      { argv = { "approve", "-x" }, pre = [[remuda._pr0_approvals.expired_record = { id = "-x", status = "open", expires_at = 0 }]] }) },
+  { name = "standby",
+    setup = [[
+      local guard = remuda.butler.guard
+      remuda._pr0_standby = { claims = 0, doctor = 0, state = "initial" }
+      guard.claim = function()
+        remuda._pr0_standby.claims = remuda._pr0_standby.claims + 1
+        return { owner = false, guarded = true, held = true, session = "owner-session", pid = 42 }
+      end
+      local function stub_doctor()
+        remuda._butler_doctor.probe = function() remuda._pr0_standby.doctor = remuda._pr0_standby.doctor + 1; return {} end
+        remuda._butler_doctor.render = function() return { "doctor-stub" } end
+        remuda._butler_doctor.permission_lines = function() return {} end
+      end
+      stub_doctor()
+      -- standby doctor re-execs butler/doctor, which replaces the stubs with the
+      -- real probes (host-dependent output); re-apply them after each exec.
+      local real_exec = remuda.exec
+      remuda.exec = function(name, ...)
+        local results = table.pack(real_exec(name, ...))
+        if name == "butler/doctor" then stub_doctor() end
+        return table.unpack(results, 1, results.n)
+      end
+      remuda._pr0_standby_setup = function()
+        guard.standby({ owner = false, guarded = true, held = true, session = "owner-session", pid = 42 }, {})
+      end
+    ]],
+    reset = [[remuda._pr0_standby.claims = 0; remuda._pr0_standby.doctor = 0; remuda._pr0_standby.state = "initial"]],
+    trace = [[return remuda._pr0_standby.claims .. ":" .. remuda._pr0_standby.doctor .. ":" .. tostring(remuda._butler_standby.gone or "held")]],
+    cases = {
+      { argv = { "doctor" }, as = "standby" }, { argv = { "doctor", "extra" }, as = "standby" },
+      { argv = { "doctor", "--help" }, as = "standby" }, { argv = { "doctor", "-h" }, as = "standby" },
+      { argv = { "status" }, as = "standby" }, { argv = { "approve", "A7K2" }, as = "standby" },
+      { argv = { "--help" }, as = "standby" }, { argv = { "--", "doctor" }, as = "standby" },
+    } },
   { name = "doctor",
     setup = [[
       local d = remuda._butler_doctor
