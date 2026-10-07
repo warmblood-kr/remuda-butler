@@ -111,6 +111,9 @@ remuda.exec("butler/launch_failure")
 local launch_failure_lines = assert(remuda.butler.launch_failure_lines)
 local topic_config = paths.topic_config
 local data_home = paths.data_home
+remuda._butler_exit_ring_config = { data_home = data_home }
+remuda.exec("butler/exit_ring")
+local exit_ring = remuda._butler_exit_ring
 local butler_session_cwd = paths.butler_session_cwd
 local mail_root = paths.mail_root
 local file_exists = paths.file_exists
@@ -618,9 +621,10 @@ local butler_attempts = remuda._butler_attempts or {}
 remuda._butler_attempts = butler_attempts
 -- The household walk, roster and session hooks live in sessions.lua.
 remuda._butler_sessions_config = { bus = bus, mail = mail, identity_path = identity_path, json_field = json_field,
-  registered_agent_kind = registered_agent_kind, call_callback = call_callback }
+  registered_agent_kind = registered_agent_kind, call_callback = call_callback, exit_ring = exit_ring }
 remuda.exec("butler/sessions")
 local registry_list = remuda._butler_sessions_impl.registry_list
+remuda._butler_doctor_config = { exit_ring = exit_ring }
 remuda.exec("butler/doctor")
 local quota_loaded, quota_error = pcall(remuda.exec, "butler/quota")
 if quota_loaded then
@@ -1203,6 +1207,7 @@ local function stale_session_exit(name, instance_id)
 end
 
 function remuda._butler_session_exited(name, info)
+  exit_ring.record(name, info)
   local instance_id = type(info) == "table" and info.instance_id or nil
   if stale_session_exit(name, instance_id) then
     _butler_session_trace("stale_session_exit", name .. " instance=" .. instance_id)

@@ -6,6 +6,8 @@ local bus = assert(config.bus)
 local mail = assert(config.mail)
 local identity_path = config.identity_path
 local json_field = assert(config.json_field)
+local exit_ring = config.exit_ring
+local function exit_text(value) return (tostring(value):gsub("[%c]", " ")) end
 
 -- The household as a leader -> member walk: parents first, siblings sorted
 -- by display name, then orphans (missing or cyclic leaders) at depth 0. One
@@ -133,6 +135,17 @@ function remuda._butler_sessions()
       failed[#failed + 1] = name .. ": " .. (#details > 0 and table.concat(details, ", ") or report.error)
     end
     out = out .. "\nFAILED LAUNCHES\n" .. table.concat(failed, "\n")
+  end
+  if exit_ring then
+    local recent, exits = exit_ring.recent(5), {}
+    for _, row in ipairs(recent) do
+      local entry = row.entry
+      exits[#exits + 1] = exit_text(row.name) .. "\t" .. exit_text(entry.reason or "unknown")
+        .. "\tcode " .. tostring(entry.exit_code or "?")
+        .. "\tsignal " .. exit_text(entry.signal_name or entry.signal or "?")
+        .. "\t" .. exit_ring.age(entry.time)
+    end
+    if #exits > 0 then out = out .. "\nRECENT EXITS\nSESSION\tREASON\tEXIT CODE\tSIGNAL\tAGE\n" .. table.concat(exits, "\n") end
   end
   return out
 end
