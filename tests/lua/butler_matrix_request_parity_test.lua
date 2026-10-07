@@ -1,10 +1,22 @@
 -- B06 (Rust->Lua migration, #320): Matrix request transport, the shared fake
 -- remuda.http (tests/support/fake_http.lua), paged reads and bounded writes.
 -- Test names equal the Rust names in tests/butler_daemon.rs.
+--
+-- Deviations from the Rust originals (assertions are unchanged):
+--  * D047 lives in butler_matrix_relay_mail_parity_test.lua. Rust ran it with
+--    _butler_test_mode = "lifecycle" and D043-D046/D108-D114 with `true`; the
+--    modes cannot coexist in one daemon, so this file uses `true` like Rust and
+--    D047 gets its own file/daemon (startup path differs: lifecycle there).
+--  * JSON fixtures are built with remuda.json.encode, not serde_json; the
+--    D047 file verifies origin_server_ts = 0 end-to-end (mutation red).
+--  * One daemon serves all tests here (Rust spawned one per test), so the
+--    relay, the fake transport and the Matrix modules are shared globals;
+--    boot() resets them per test (see below).
+--  * D111 polls for the real-HTTP callback with T.wait_until (6/6 pass).
 local REPO = assert(os.getenv("REMUDA_LUA_REPO"))
 local SCRATCH = assert(os.getenv("REMUDA_LUA_SCRATCH"))
 T.install_mod("butler", REPO)
-T.eval("remuda._butler_test_mode = 'lifecycle'; remuda._butler_skip_relay = true")
+T.eval("remuda._butler_test_mode = true;remuda._butler_skip_relay = true")
 T.eval('return remuda.exec("butler")')
 -- One child daemon serves every test in this file (Rust spawned one per test),
 -- so remember the real transport: the fake replaces it and D111 needs it back.
@@ -37,8 +49,10 @@ end
 
 -- Reset the shared daemon to the real transport, drop any relay a previous
 -- test left behind, optionally load the shared fake, then point the Matrix
--- modules at this test's token/config and (re)load them: each exec rebuilds
--- the request limiter, so every test starts with a fresh one.
+-- modules at this test's token/config and (re)load them. The request limiter
+-- (tokens/queue/timer) is file-local state of butler/matrix_request and
+-- butler/matrix skips that module once loaded, so boot() re-execs it first
+-- whenever modules are requested: every test starts with a fresh limiter.
 local function boot(opts)
   local lines = { string.format("local REPO = %q", REPO), [[
     local real = remuda._b06_real
@@ -54,8 +68,16 @@ local function boot(opts)
     lines[#lines + 1] = string.format(
       "remuda._butler_matrix_config = { token_path = %q, config_path = %q }", opts.token_path, opts.config_path)
   end
-  for _, module in ipairs(opts.modules or {}) do
-    lines[#lines + 1] = string.format("remuda.exec(%q)", module)
+  if opts.modules then
+    local seen = {}
+    local modules = { "butler/matrix_request" }
+    for _, module in ipairs(opts.modules) do modules[#modules + 1] = module end
+    for _, module in ipairs(modules) do
+      if not seen[module] then
+        seen[module] = true
+        lines[#lines + 1] = string.format("remuda.exec(%q)", module)
+      end
+    end
   end
   lines[#lines + 1] = "return 'booted'"
   T.eq(T.eval(table.concat(lines, "\n")), "booted", "boot failed")
@@ -249,54 +271,6 @@ T.test("butler_matrix_relay_uses_async_request_and_preserves_envelope_metadata",
             return "ok"
   ]==])
   T.eq(result, "ok", "L3 must poll asynchronously via L1 and retain envelope metadata: " .. result)
-end)
-
-T.test("butler_matrix_relay_persists_matrix_event_time_through_real_mail_delivery", function()
-  local room = "!relay-time:example.org"
-  local _, token_path, config_path = config("mail-time", "http://matrix.example.org", room, "@bot:example.org",
-    "@alice:example.org")
-  boot({ token_path = token_path, config_path = config_path,
-    modules = { "butler/matrix_request", "butler/matrix_relay" } })
-  local event = { type = "m.room.message", event_id = "$mail-time", sender = "@alice:example.org",
-    origin_server_ts = 0,
-    content = { msgtype = "m.text", body = "dated \27[31mby Matrix" .. string.char(194, 155) .. "2J" } }
-  local response = remuda.json.encode({ next_batch = "s1",
-    rooms = { join = { [room] = { timeline = { events = { event } } } } } })
-  local result = T.eval(vars({
-    BASELINE = "http://matrix.example.org/_matrix/client/v3/sync?timeout=0",
-    SYNC = "http://matrix.example.org/_matrix/client/v3/sync?since=s0&timeout=100",
-    RESPONSE = response }) .. [==[
-      local matrix = remuda.butler.matrix
-      remuda.http.respond("GET", BASELINE, {status=200,headers={},body='{"next_batch":"s0"}'})
-      remuda.http.respond("GET", SYNC, {status=200,headers={},body=RESPONSE})
-      local original_delivery = remuda._butler_inbox_delivery
-      remuda._butler_inbox_delivery = function(message)
-        remuda.captured_delivery = message
-        return original_delivery(message)
-      end
-      assert(matrix.relay.start(remuda._butler_matrix_config))
-      for _=1,4 do remuda.http.tick() end
-      remuda._butler_inbox_delivery = original_delivery
-      local bus = remuda._butler_bus
-      local root = assert(bus.agents.butler)
-      for _, id in ipairs(remuda._butler_mail.mailbox(root.id)) do
-        local message = bus.messages[id]
-        if message and message.matrix and message.matrix.event_id == "$mail-time" then
-          local body = bus.objects[message.body.object_id].content
-          matrix.relay.stop()
-          return message.created_at .. "|" .. tostring(message.matrix.room)
-            .. "|" .. tostring(message.matrix.event_id) .. "|" .. body
-        end
-      end
-      local state = matrix.relay.instance:state()
-      local report = "mail-not-found|captured=" .. tostring(remuda.captured_delivery ~= nil)
-        .. "|calls=" .. #remuda.http.calls .. "|pending=" .. tostring(state.pending["$mail-time"] ~= nil)
-        .. "|inbox=" .. #remuda._butler_mail.mailbox(root.id)
-      matrix.relay.stop()
-      return report
-  ]==])
-  T.eq(result, "1970-01-01T00:00:00Z|home|$mail-time|dated [31mby Matrix2J",
-    "relay-to-mail delivery must preserve metadata and strip control characters: " .. result)
 end)
 
 T.test("butler_matrix_read_composites_use_async_request_for_history_and_thread_pages", function()
