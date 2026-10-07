@@ -12,9 +12,14 @@ end
 function M.resolve(caller)
   if type(caller) ~= "table" then return unidentified("caller context unavailable") end
   if caller.kind == "outside" then
-    if type(remuda.log) == "function" then
-      pcall(remuda.log, "warn", "Butler caller policy " .. OUTSIDE_POLICY .. ": outside caller mapped to operator")
-    end
+    -- The guard audit sink exists on pinned and older cores, including those
+    -- without remuda.log. Record only constants, never caller metadata or text.
+    local policy = remuda.butler and remuda.butler.guard_policy
+    local ok, written = pcall(function()
+      return assert(policy).append({ session = "operator", kind = "outside", event = "caller_policy",
+        class = "identity", summary = OUTSIDE_POLICY .. ": outside caller mapped to operator" })
+    end)
+    if not ok or not written then return unidentified("outside operator policy audit unavailable") end
     return { tag = "operator", policy = OUTSIDE_POLICY }
   end
   if caller.kind == "service" then return { tag = "service", service = caller.service } end

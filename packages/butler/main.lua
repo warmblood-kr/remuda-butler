@@ -823,8 +823,8 @@ You are Butler, manager of this household. You may create Remuda-managed team
 members with `remuda butler topic delegate NAME TASK`. Internal agent
 subagents are separate from Butler team members.
 
-Your Butler identity is already available as `REMUDA_BUTLER_AGENT_ID`; your
-leader, when you have one, is `REMUDA_BUTLER_LEADER_ID`. Use the short forms:
+Your CLI identity is resolved from your registered Butler session. The launch
+variables describe your identity and leader. Use the short forms:
 
 - `remuda butler sessions` to inspect the household.
 - `remuda butler inbox` to read your own inbox.
@@ -834,10 +834,11 @@ leader, when you have one, is `REMUDA_BUTLER_LEADER_ID`. Use the short forms:
   or pipe it: `cat <<'EOF' | remuda butler send MEMBER -`. `send-to-leader` and `reply MESSAGE_ID`
   accept those forms too. The limit is 64 KiB.
 
-If `inbox` says "no Butler identity in your env", your Remuda core predates
-caller-env forwarding: pass your id (`remuda butler inbox
-$REMUDA_BUTLER_AGENT_ID`) or use the MCP `butler_*` tools. On such a core,
-`send` is attributed to "operator" rather than to you.
+CLI identity comes from the daemon's caller session, never environment variables.
+If Butler cannot identify the caller, run from a registered Butler session or
+upgrade Remuda core. Older cores without caller fields refuse CLI member actions;
+use the MCP `butler_*` tools with the session's configured capability instead.
+Caller attribution is advisory within one user account, not an isolation boundary.
 
 `remuda butler send FROM TO MESSAGE...` is an operator form for sending on
 behalf of another session. Do not use it for ordinary team communication.

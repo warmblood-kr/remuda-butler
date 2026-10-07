@@ -8,8 +8,15 @@ or ambiguous caller context fails closed for identity sensitive commands, with
 a `Next:` instruction. Older cores without caller attribution therefore cannot
 use those commands until upgraded. A caller classified as `outside` maps to the
 operator under the named transitional policy `outside_is_operator_transitional`;
-that mapping is logged. This is **not an isolation boundary: advisory daemon
+that mapping is written to `guard-audit.jsonl` as a `caller_policy` event, even
+when guard observation is off. If the audit write fails, the caller is refused.
+This is **not an isolation boundary: advisory daemon
 attribution within the cooperative model**.
+
+MCP tools keep their existing session-capability fallback on cores without tool
+caller fields; environment variables do not select a member. File access still
+requires native caller context. Detached processes may be classified as outside,
+which is another reason this transitional policy is not an isolation boundary.
 
 Rollback keeps strict caller handling and native ancestry attribution; unknown
 callers stay refused. It does not restore a mutable identity fallback.
@@ -490,15 +497,12 @@ Butler reload (`remuda exec butler`). The interactive setup wizard writes `rooms
 defaults to allowlist unless given `--rooms open`. `send -` reads the text from
 stdin (up to 64 KiB, one trailing newline dropped); `send -- -` sends a literal `-`.
 
-`join` and `leave` change room membership. Butler refuses them for a Butler
-member, identified by the agent identity in the client environment
-(`REMUDA_BUTLER_AGENT_ID` / `REMUDA_BUTLER_SESSION_NAME`). The caller kind
-(session, unknown, outside) is not checked, so a caller with those variables
-cleared is not refused. This is advisory within one UID, not an OS boundary:
-any local process running as the same user can drop the variables.
-The CLI verbs (`approve`, `deny`, `matrix setup`, `join`, `leave`) identify the
-member from those variables only; the MCP tools also accept the session
-capability.
+`join` and `leave` change room membership. Butler identifies CLI members by the
+daemon's caller session, matched to a unique live registration; clearing launch
+variables does not change that identity. Unknown or unregistered callers are
+refused. Outside callers use the audited transitional operator policy. MCP tools
+also retain their existing session-capability fallback. This is advisory within
+one user account, not an isolation boundary.
 
 Approvals: when an agent runs `matrix join`, Butler resolves the room and
 posts one request as an ordinary message with an owner mention. Prepared-text
@@ -525,9 +529,9 @@ in the request's room counts. A bare `yes` does nothing.
 The owner can also answer from the terminal: `remuda butler approvals` lists
 the open requests, and `remuda butler approve ID` or `deny ID` answers one
 (operator-only). Terminal approve/deny are refused for a Butler member, by the
-same agent identity in the client environment; the caller kind is not checked,
-so clearing the variables passes. This is a same-UID policy, not an OS
-boundary. The Matrix answer path
+same daemon-derived caller principal; clearing launch variables does not change
+it. Unknown callers are refused. This is advisory, not an isolation boundary.
+The Matrix answer path
 is bound to the owner's MXID. An approved request joins the room ID resolved
 at request time and writes `room=ID how=approved`. The asker gets mail for every outcome:
 approved, denied or expired. A repeat ask for the same room returns the same

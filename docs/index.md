@@ -100,13 +100,12 @@ remuda butler send reviewer "please check the latest patch"
 remuda butler send-to-leader "review complete: no blockers"
 ```
 
-The sender is inferred from the calling shell's environment; quote the
-message for `send`, since `remuda butler send FROM TO MESSAGE...` (what an
-unquoted multi-word message parses as) is the operator form for sending a note on another
-session's behalf. The short forms need a Remuda core that forwards the caller's
-`REMUDA_*` variables to mod commands (warmblood-kr/remuda#95); on an older
-core, pass the name explicitly (`remuda butler inbox "$REMUDA_BUTLER_AGENT_ID"`)
-or use the MCP `butler_*` tools.
+The sender is inferred from the daemon's registered caller session. Quote the
+message for `send`, since `remuda butler send FROM TO MESSAGE...` is the operator
+form for sending on another session's behalf. Older cores without caller fields
+refuse identity-sensitive CLI commands: upgrade core or use the MCP `butler_*`
+tools with the session's configured capability. Environment variables never
+select CLI identity. Caller attribution is advisory, not an isolation boundary.
 
 ### Optional Matrix bridge
 

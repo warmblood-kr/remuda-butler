@@ -246,10 +246,11 @@ re-run the command requesting escalated permissions.
         end },
       { id = "old-core", order = 30,
         agents_md = function()
-          return [[If `inbox` says "no Butler identity in your env", your Remuda core predates
-caller-env forwarding: pass your id (`remuda butler inbox
-$REMUDA_BUTLER_AGENT_ID`) or use the MCP `butler_*` tools. On such a core,
-`send` is attributed to "operator" rather than to you.
+          return [[CLI identity comes from the daemon's caller session, never environment variables.
+If Butler cannot identify the caller, run from a registered Butler session or
+upgrade Remuda core. Older cores without caller fields refuse CLI member actions;
+use the MCP `butler_*` tools with the session's configured capability instead.
+Caller attribution is advisory within one user account, not an isolation boundary.
 
 ]]
         end },
@@ -295,7 +296,7 @@ the normal way for a member to communicate.
       { id = "quota", order = 6, verb = "quota", usage = "  remuda butler quota [--report]",
         run = function(_, args, caller) return host._butler_command_run("quota", args, caller) end },
       { id = "compact", order = 16, verb = "compact", usage = "  remuda butler compact <session> [--dry-run|--force]",
-        run = function(_, args)
+        run = function(_, args, caller)
           if not args[2] or args[2] == "" then return nil end
           if not host._butler_compaction_has_session(args[2]) then
             local message = "unknown session: " .. args[2]
@@ -335,6 +336,7 @@ the normal way for a member to communicate.
               return nil
             end
             if dry_run then return host._butler_compaction_tick(args[2], true) end
+            host._butler_current_agent(caller)
             if force then return host.butler.compact(args[2], true) end
             return host.butler.compact(args[2], false)
           end
@@ -342,9 +344,11 @@ the normal way for a member to communicate.
             return host._butler_compaction_tick(args[2], true)
           end
           if #args == 3 and args[3] == "--force" then
+            host._butler_current_agent(caller)
             return host.butler.compact(args[2], true)
           end
           if #args ~= 2 then return nil end
+          host._butler_current_agent(caller)
           return host.butler.compact(args[2], false)
         end },
       { id = "sessions", order = 10, verb = "sessions", usage = "  remuda butler sessions",

@@ -71,6 +71,7 @@ mcp mcp_up_out  matrix_upload "{\\"path\\":\\"$T/secret.txt\\"}"
 mcp mcp_up_link matrix_upload "{\\"path\\":\\"\$PWD/link.txt\\"}"
 mcp mcp_up_in   matrix_upload "{\\"path\\":\\"\$PWD/in.txt\\"}"
 puts() { remuda -s $S -e 'local n = 0; for _, call in ipairs(remuda.http.calls) do if call.method == "PUT" then n = n + 1 end end; return n' >"$T/\$1"; }
+puts puts_after_mcp
 puts puts_before
 run msend_out remuda -s $S butler matrix send --file "$T/secret.txt"
 puts puts_after
@@ -143,14 +144,17 @@ echo "== an agent caller: download inside is written; without -o it lands in the
 [[ $(cat "$MEMBER_CWD/matrix-a1") == MEDIA-BYTES ]] || fail "the default output is not in the working directory"
 [[ ! -e $HOME/matrix-a1 ]] || fail "the default output of an agent caller landed in HOME"
 
-echo "== MCP: this pinned core has no daemon caller fields, so file tools fail closed"
-for name in mcp_dl mcp_up_out mcp_up_link mcp_up_in; do
+echo "== MCP: matrix_download writes into the working directory and returns the absolute path"
+grep -qF "Downloaded 11 bytes to $MEMBER_CWD/matrix-b2" "$T/mcp_dl.out" || fail "matrix_download: $(cat "$T/mcp_dl.out")"
+[[ $(cat "$MEMBER_CWD/matrix-b2") == MEDIA-BYTES ]] || fail "matrix_download wrote the wrong content"
+
+echo "== MCP: matrix_upload outside or through a link is refused; inside returns the event id"
+for name in mcp_up_out mcp_up_link; do
   grep -qF '"isError":true' "$T/$name.out" || fail "$name was not refused: $(cat "$T/$name.out")"
-  grep -qF 'Next:' "$T/$name.out" || fail "$name has no next step: $(cat "$T/$name.out")"
+  grep -qF "is outside this session's working directory $CWD" "$T/$name.out" || fail "$name: wrong refusal: $(cat "$T/$name.out")"
 done
-[[ ! -e $MEMBER_CWD/matrix-b2 ]] || fail "a refused matrix_download wrote a file"
-[[ $(lua 'local n = 0; for _, call in ipairs(remuda.http.calls) do if call.method == "PUT" and tostring(call.body):find("INSIDE-BODY", 1, true) then n = n + 1 end end; return n') == 0 ]] \
-  || fail "a refused matrix_upload sent a Matrix PUT"
+grep -qF '$mcpup1' "$T/mcp_up_in.out" || fail "matrix_upload inside: $(cat "$T/mcp_up_in.out")"
+[[ $(cat "$T/puts_after_mcp") == 1 ]] || fail "the inside MCP upload did not post once"
 [[ $(lua 'local n = 0; for _, call in ipairs(remuda.http.calls) do if call.method == "POST" and tostring(call.body):find("TOP-SECRET", 1, true) then n = n + 1 end end; return n') == 0 ]] \
   || fail "a refused matrix_upload sent the outside file"
 

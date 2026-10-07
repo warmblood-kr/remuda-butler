@@ -399,18 +399,18 @@ fn cli_launch_parents_to_the_calling_member_not_butler() {
         "remuda._butler_agent_builders.claude = function() return {'sleep', '100'} end; \
          remuda._butler_launch('claude', 'm1')",
     );
-    let launch = |env: &str, name: &str| {
+    let launch = |caller: &str, name: &str| {
         format!(
-            "return remuda._extension_commands.butler({{'launch', 'claude', '{name}'}}, {{ env = {env} }})"
+            "return remuda._extension_commands.butler({{'launch', 'claude', '{name}'}}, {caller})"
         )
     };
-    eval(&path, &launch("{ REMUDA_BUTLER_AGENT_ID = remuda._butler_bus.agents.m1.id }", "m2"));
+    eval(&path, &launch("{kind='session', session='m1', env={REMUDA_BUTLER_AGENT_ID='butler'}}", "m2"));
     assert_eq!(eval(&path, "return remuda._butler_bus.agents.m2.parent"), "m1");
-    eval(&path, &launch("{}", "m3"));
+    eval(&path, &launch("{kind='outside'}", "m3"));
     assert_eq!(eval(&path, "return remuda._butler_bus.agents.m3.parent"), "butler");
     let unknown = client::request(
         &path,
-        &Request::Eval { code: launch("{ REMUDA_BUTLER_AGENT_ID = 'ghost' }", "m4"), name: None },
+        &Request::Eval { code: launch("{kind='session', session='unregistered', env={REMUDA_BUTLER_AGENT_ID='butler'}}", "m4"), name: None },
     )
     .expect("eval");
     assert!(matches!(unknown, Response::Error(_)), "{unknown:?}");
@@ -443,13 +443,9 @@ fn butler_close_is_limited_to_own_idle_members_unless_forced() {
     let other_id = eval(&path, "return remuda._butler_bus.agents.other.id");
     let cli = |caller_id: &str, args: &str| {
         eval(&path, &format!(
-            "local old=remuda.caller; remuda.caller=function() \
-             for _, agent in pairs(remuda._butler_bus.agents) do \
-               if agent.id == {caller_id:?} then return {{kind='session', session=agent.session_name}} end \
-             end; return {{kind='outside'}} end; \
-             local result=remuda._extension_commands.butler({{'close', {args}}}, \
-               {{env={{REMUDA_BUTLER_AGENT_ID={caller_id:?}}}}}); \
-             remuda.caller=old; return result"
+            "local caller; for _, agent in pairs(remuda._butler_bus.agents) do \
+               if agent.id == {caller_id:?} then caller={{kind='session', session=agent.session_name}} end \
+             end; return remuda._extension_commands.butler({{'close', {args}}}, caller)"
         ))
     };
     let not_owner = cli(&other_id, "'kid'");
@@ -510,9 +506,8 @@ fn butler_close_cli_uses_core_caller_not_forwarded_env() {
             format!("{{REMUDA_BUTLER_AGENT_ID={env_id:?}}}")
         };
         eval(&path, &format!(
-            "local old=remuda.caller; remuda.caller=function() return {{kind={kind:?}, session={session:?}}} end; \
-             local result=remuda._extension_commands.butler({{'close', {name:?}, '--force'}}, {{env={env}}}); \
-             remuda.caller=old; return result"
+            "return remuda._extension_commands.butler({{'close', {name:?}, '--force'}}, \
+             {{kind={kind:?}, session={session:?}, env={env}}})"
         ))
     };
 
@@ -521,19 +516,16 @@ fn butler_close_cli_uses_core_caller_not_forwarded_env() {
     let spoofed = cli("session", "lead", &other_id, "other-kid");
     assert!(spoofed.contains("only your direct members"), "spoofed env bypassed ownership: {spoofed}");
     assert_eq!(eval(&path, "return #remuda._butler_close_test_calls"), "0");
-    // An unknown caller (a plain Windows terminal) closes as the Butler, like an outside one.
-    // A Butler-kind close reaches only Butler's direct members: 'other' is one, 'kid' is lead's.
-    let unknown = cli("unknown", "", &lead_id, "other");
-    assert_eq!(unknown, "Closed other.\nNext: remuda butler sessions");
-    assert_eq!(eval(&path, "return remuda._butler_close_test_calls[1]"), "other");
+    // Unknown/native callbacks and unregistered sessions never acquire root authority.
+    for (kind, session) in [("unknown", ""), ("session", "unregistered"), ("", "")] {
+        let refused = cli(kind, session, &lead_id, "other");
+        assert!(refused.contains("cannot identify") && refused.contains("Next:"), "{refused}");
+        assert_eq!(eval(&path, "return #remuda._butler_close_test_calls"), "0");
+    }
 
-    let outside = eval(&path, &format!(
-        "local old=remuda.caller; remuda.caller=function() return {{kind='outside'}} end; \
-         local result=remuda._extension_commands.butler({{'close', 'lead', '--force'}}, {{env={{}}}}); \
-         remuda.caller=old; return result"
-    ));
+    let outside = cli("outside", "", "", "lead");
     assert_eq!(outside, "Closed lead.\nNext: remuda butler sessions");
-    assert_eq!(eval(&path, "return remuda._butler_close_test_calls[2]"), "lead");
+    assert_eq!(eval(&path, "return remuda._butler_close_test_calls[1]"), "lead");
     eval(&path, "local close=remuda._butler_close_test_native_close; \
       for _, name in ipairs({'kid', 'other-kid', 'lead', 'other'}) do pcall(close, name) end");
 }
@@ -549,10 +541,9 @@ fn butler_close_cli_invokes_real_close_path() {
       remuda._butler_launch('fake', 'real-kid')
       remuda._butler_mail.unread = function() return 0 end
       remuda.butler.is_idle = function() return true end
-      remuda.caller = function() return {kind='outside'} end
     "#);
     let result = eval(&path,
-        "return remuda._extension_commands.butler({'close', 'real-kid', '--force'}, {env={}})");
+        "return remuda._extension_commands.butler({'close', 'real-kid', '--force'}, {kind='outside'})");
     assert_eq!(result, "Closed real-kid.\nNext: remuda butler sessions");
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.agents['real-kid'] == nil)"), "true",
         "the real remuda.close path must remove the closed member from bus.agents");
@@ -3006,7 +2997,7 @@ fn setup_renotice(path: &Path, alias: &str) {
         remuda._rn_inbox_id = function(id)
           local agent = remuda._butler_bus.agents[alias]
           local ok, out = pcall(remuda._butler_command_run, 'inbox', {{ 'inbox', id }},
-            {{ env = {{ REMUDA_BUTLER_AGENT_ID = agent.id }} }})
+            {{ kind = 'session', session = agent.session_name }})
           return tostring(out)
         end
         "#,
