@@ -111,7 +111,7 @@ T.test("butler_mail_reply_threads_with_in_reply_to_and_references", function()
     local d = assert(reloaded.reply(F, c.id, "after reload"))
     local envelope = assert(io.open(root .. "/messages/" .. c.id .. ".json", "rb")):read("*a")
     local d_envelope = assert(io.open(root .. "/messages/" .. d.id .. ".json", "rb")):read("*a")
-    local fresh = reloaded.inbox(B.id)
+    local fresh = reloaded.inbox(F.id)
     return table.concat({a.id, b.id, c.id, b.to[1].alias, c.to[1].alias, b.subject, c.subject,
       table.concat(c.references, ","), c.in_reply_to, envelope, fresh, table.concat(d.references, ","),
       d.in_reply_to, d_envelope}, "\n--PART--\n")
