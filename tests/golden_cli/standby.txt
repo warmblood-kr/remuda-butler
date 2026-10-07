@@ -2,21 +2,11 @@
 exit: 0
 stdout:
 Not the owning daemon: Butler for this home is already running in another Remuda daemon (session owner-session, pid 42). Nothing was changed.
-Claude Code: installed, not logged in
-Codex CLI: installed, not logged in
-Typed lines: off
-Shell lines: off
-Approve text: off
-Approval room: all -> HOME (lounge not joined)
-Guard approvals: off
-Guard deny: off
-Guard audit: off
-Next: claude auth login
-Next: codex login
+doctor-stub
 stderr:
 
 actions:
-state: 1:0:held
+state: 1:1:held
 
 ### remuda butler "doctor" "extra"
 exit: 1

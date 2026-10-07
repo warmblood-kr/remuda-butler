@@ -205,9 +205,20 @@ families {
         remuda._pr0_standby.claims = remuda._pr0_standby.claims + 1
         return { owner = false, guarded = true, held = true, session = "owner-session", pid = 42 }
       end
-      remuda._butler_doctor.probe = function() remuda._pr0_standby.doctor = remuda._pr0_standby.doctor + 1; return {} end
-      remuda._butler_doctor.render = function() return { "doctor-stub" } end
-      remuda._butler_doctor.permission_lines = function() return {} end
+      local function stub_doctor()
+        remuda._butler_doctor.probe = function() remuda._pr0_standby.doctor = remuda._pr0_standby.doctor + 1; return {} end
+        remuda._butler_doctor.render = function() return { "doctor-stub" } end
+        remuda._butler_doctor.permission_lines = function() return {} end
+      end
+      stub_doctor()
+      -- standby doctor re-execs butler/doctor, which replaces the stubs with the
+      -- real probes (host-dependent output); re-apply them after each exec.
+      local real_exec = remuda.exec
+      remuda.exec = function(name, ...)
+        local results = table.pack(real_exec(name, ...))
+        if name == "butler/doctor" then stub_doctor() end
+        return table.unpack(results, 1, results.n)
+      end
       remuda._pr0_standby_setup = function()
         guard.standby({ owner = false, guarded = true, held = true, session = "owner-session", pid = 42 }, {})
       end
