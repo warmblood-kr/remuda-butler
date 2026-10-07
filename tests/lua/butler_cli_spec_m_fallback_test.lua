@@ -139,7 +139,8 @@ local function compact_case(parser, args, has_session)
     remuda._butler_compaction_tick = function(name, dry) return "tick:" .. name .. ":" .. tostring(dry) end
     remuda.butler.compact = function(name, force) return "compact:" .. name .. ":" .. tostring(force) end
     remuda.fail = function(text, code) return { failed = true, code = code, text = text } end
-    local ok, value = pcall(remuda._extension_commands.butler, { ]] .. q(args) .. [[ }, nil)
+    local ok, value = pcall(remuda._extension_commands.butler, { ]] .. q(args) .. [[ },
+      {kind = "session", session = "agent-test"})
     remuda.cli, remuda._butler_compaction_has_session, remuda._butler_compaction_tick,
       remuda.butler.compact, remuda.fail = saved_cli, saved_has, saved_tick, saved_compact, saved_fail
     if type(value) == "table" and value.failed then return tostring(ok) .. "|" .. value.code .. ":" .. value.text end

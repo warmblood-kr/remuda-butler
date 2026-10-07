@@ -82,6 +82,8 @@ local function git_fixture(name)
     return (remuda.fs.realpath(root .. '/work'))]])
   local function sh(script) return T.eval(("local r = remuda.process.run({ argv = { 'sh', '-c', %q } }); return tostring(r.code)"):format("set -e; cd " .. work .. "; " .. script)) end
   T.eval("remuda.butler.guard_grants.insensitive = function() return false end") -- the fold has its own test
+  -- These real-Git controls use the existing test subject budget; production and budget tests keep 2s.
+  T.eval("remuda.butler.guard_grants.git_budget_s = 20")
   local added = T.eval("local id, why = remuda._t_add({ class = 'git', scope = " .. string.format("%q", work) .. ", ceiling = 'T2', holder = 'U-SSA', event = '$ev1' }); return tostring(id or why)")
   T.eq(added, "g001", "git grant")
   return work, sh
