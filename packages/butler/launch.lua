@@ -644,7 +644,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       working = startup.working,
       trust_dialog = function(screen)
         local modal = startup_modal(startup, screen)
-        return modal ~= nil and modal.trust ~= nil
+        return modal ~= nil and (modal.trust ~= nil or modal.title ~= nil)
       end,
       allowed = function(retrying)
         if retrying then return remuda._butler_task_retry_policy(actual) end

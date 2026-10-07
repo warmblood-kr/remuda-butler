@@ -86,5 +86,8 @@ remuda._butler_agent_startup.claude = {
   clear_input = "C-u",
   modals = {
     { trust = "claude", pending_match = "Quick safety check:" }, -- option chosen by its text
+    -- Decline by option text; never "Yes" (it leads to the shell-history screen) or "Don't show again".
+    { title = "Teach auto mode about your environment?", choose = "Not now",
+      options = { "Yes", "Not now", "Don't show again" } },
   },
 }
