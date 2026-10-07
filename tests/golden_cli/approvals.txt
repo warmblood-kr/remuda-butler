@@ -363,3 +363,39 @@ Next: remuda butler approvals
 actions:
 approval.answer(unknown|deny|operator (terminal))
 state: open:1
+
+### remuda butler "approve" "--"
+exit: 1
+stdout:
+
+stderr:
+Request -- was already expired.
+Next: remuda butler approvals
+actions:
+approval.answer(--|approve|operator (terminal))
+approval.expire(--)
+state: expired:1
+
+### remuda butler "deny" "--"
+exit: 1
+stdout:
+
+stderr:
+Request -- was already expired.
+Next: remuda butler approvals
+actions:
+approval.answer(--|deny|operator (terminal))
+approval.expire(--)
+state: expired:1
+
+### remuda butler "approve" "-x"
+exit: 1
+stdout:
+
+stderr:
+Request -x was already expired.
+Next: remuda butler approvals
+actions:
+approval.answer(-x|approve|operator (terminal))
+approval.expire(-x)
+state: expired:1

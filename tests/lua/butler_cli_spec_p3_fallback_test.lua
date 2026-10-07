@@ -29,6 +29,10 @@ local function approval_case(parser, args, agent)
     approval.list = function() state.lists = state.lists + 1; return {} end
     approval.answer = function(id, verb)
       state.answers = state.answers + 1
+      if id == "--" or id == "-x" then
+        state.decision = "expired"
+        return false, nil, { id = id, status = "expired" }
+      end
       if id ~= "A7K2" then return false, "unknown approval request", nil end
       state.decision = verb == "approve" and "approved" or "denied"
       return true, nil, { id = id, summary = "stub" }
@@ -51,6 +55,27 @@ local function both_approval(args, want, agent)
     T.eq(approval_case(parser, args, agent), want,
       table.concat(args, " ") .. " parser=" .. tostring(parser))
   end
+end
+
+local function approval_bad_element(parser, expr, agent)
+  start_butler()
+  return T.eval([[
+    local saved_cli, saved_fail = remuda.cli, remuda.fail
+    local approval = remuda.butler.approval
+    local saved_answer = approval.answer
+    local calls = 0
+    approval.answer = function() calls = calls + 1; return false, "unknown approval request" end
+    remuda.fail = function(text, code) return { failed = true, text = text, code = code } end
+    if not ]] .. tostring(parser) .. [[ then remuda.cli = nil end
+    local ok, result = pcall(approval.cli, { "approve", ]] .. expr .. [[ }, ]] .. (agent and '"agent-test"' or "nil") .. [[)
+    local output
+    if not ok then output = "THREW:" .. tostring(result)
+    elseif type(result) == "table" and result.failed then output = "FAIL:" .. result.code .. ":" .. result.text
+    else output = "OK:" .. tostring(result) end
+    output = output .. "|" .. calls
+    approval.answer, remuda.cli, remuda.fail = saved_answer, saved_cli, saved_fail
+    return output
+  ]])
 end
 
 T.test("approvals declared parsing leaves state untouched for help and malformed calls", function()
@@ -76,7 +101,7 @@ T.test("approve and deny preserve valid, malformed, help, and operator-gate beha
     for _, args in ipairs({ { verb, "--help" }, { verb, "-h" } }) do
       both_approval(args, "OK:Usage: remuda butler " .. verb .. " ID\nExample: remuda butler " .. verb .. " A7K2|open:0:0")
     end
-    for _, args in ipairs({ { verb }, { verb, "" }, { verb, "--" }, { verb, "A7K2", "extra" },
+    for _, args in ipairs({ { verb }, { verb, "" }, { verb, "A7K2", "extra" },
       { verb, "--help", "A7K2" } }) do
       local with = approval_case(true, args)
       T.ok(with:find("FAIL:1:Usage: remuda butler " .. verb .. " ID", 1, true), "rejects " .. table.concat(args, " "))
@@ -88,6 +113,25 @@ T.test("approve and deny preserve valid, malformed, help, and operator-gate beha
     T.ok(denied_agent:find("operator%-only"), "member refusal follows valid parse")
     T.ok(denied_agent:match("|open:0:0$"), "member cannot decide")
     T.eq(approval_case(false, { verb, "A7K2" }, true), denied_agent, "member fallback preserves gate order")
+  end
+end)
+
+T.test("leading-dash IDs retain legacy answer path, including expired records", function()
+  for _, id in ipairs({ "--", "-x" }) do
+    for _, verb in ipairs({ "approve", "deny" }) do
+      both_approval({ verb, id }, "FAIL:1:Request " .. id .. " was already expired.\nNext: remuda butler approvals|expired:1:0")
+    end
+  end
+end)
+
+T.test("native parser failures fall back for malformed Lua argv", function()
+  local non_string = "FAIL:1:Usage: remuda butler approve ID\nExample: remuda butler approve A7K2\nNext: remuda butler approvals|0"
+  T.eq(approval_bad_element(true, "false"), non_string, "non-string operator argv")
+  T.eq(approval_bad_element(false, "false"), non_string, "non-string parserless argv")
+  for _, parser in ipairs({ true, false }) do
+    local agent = approval_bad_element(parser, "string.char(255)", true)
+    T.ok(agent:find("operator%-only"), "invalid UTF-8 still gets operator refusal: " .. agent)
+    T.ok(not agent:find("THREW:", 1, true), "invalid UTF-8 does not throw")
   end
 end)
 
@@ -132,5 +176,25 @@ T.test("standby uses the doctor declaration and refuses every parse error withou
     { "status" }, { "approve", "A7K2" }, { "--help" }, { "--", "doctor" }, { "doctor", "--" } }) do
     T.eq(standby_case(true, args), refusal, "native parser refuses " .. table.concat(args, " "))
     T.eq(standby_case(false, args), refusal, "fallback refuses " .. table.concat(args, " "))
+  end
+end)
+
+T.test("standby parser failure preserves refusal for malformed Lua argv", function()
+  start_butler()
+  for _, bad in ipairs({ "false", "string.char(255)" }) do
+    local result = T.eval([[
+      local saved_cli, saved_fail = remuda.cli, remuda.fail
+      local guard = remuda.butler.guard
+      local saved_claim = guard.claim
+      guard.claim = function() return { owner = false, guarded = true, held = true, session = "owner", pid = 9 } end
+      remuda.fail = function(text, code) return { failed = true, text = text, code = code } end
+      guard.standby({ owner = false, guarded = true, held = true, session = "owner", pid = 9 }, {})
+      local ok, value = pcall(remuda._extension_commands.butler, { "doctor", ]] .. bad .. [[ }, nil)
+      guard.claim, remuda.cli, remuda.fail = saved_claim, saved_cli, saved_fail
+      if not ok then return "THREW:" .. tostring(value) end
+      return type(value) == "table" and value.text or tostring(value)
+    ]])
+    T.ok(result:find("already running in another Remuda daemon", 1, true), "standby refusal: " .. result)
+    T.ok(not result:find("stack traceback", 1, true), "no parser stack trace")
   end
 end)

@@ -152,7 +152,7 @@ families {
   { name = "approvals",
     setup = [[
       local approval = remuda.butler.approval
-      remuda._pr0_approvals = { calls = 0, status = "open" }
+      remuda._pr0_approvals = { calls = 0, status = "open", expired_record = nil }
       approval.list = function()
         remuda._pr0_note("approval.list")
         if remuda._pr0_approvals.status == "open" then
@@ -163,13 +163,22 @@ families {
       approval.answer = function(id, decision, by)
         remuda._pr0_approvals.calls = remuda._pr0_approvals.calls + 1
         remuda._pr0_note("approval.answer", id, decision, by)
+        local expired = remuda._pr0_approvals.expired_record
+        if type(expired) == "table" and expired.id == id then
+          if expired.status == "open" and os.time() * 1000 >= expired.expires_at then
+            expired.status = "expired"
+            remuda._pr0_note("approval.expire", id)
+          end
+          remuda._pr0_approvals.status = expired.status
+          return false, nil, { id = id, status = expired.status }
+        end
         if id ~= "A7K2" then return false, "unknown approval request", nil end
         if remuda._pr0_approvals.status ~= "open" then return false, nil, { id = id, status = remuda._pr0_approvals.status } end
         remuda._pr0_approvals.status = decision == "approve" and "approved" or "denied"
         return true, nil, { id = id, summary = "synthetic", status = remuda._pr0_approvals.status }
       end
     ]],
-    reset = [[remuda._pr0_approvals.status = "open"; remuda._pr0_approvals.calls = 0]],
+    reset = [[remuda._pr0_approvals.status = "open"; remuda._pr0_approvals.calls = 0; remuda._pr0_approvals.expired_record = nil]],
     trace = [[return remuda._pr0_approvals.status .. ":" .. remuda._pr0_approvals.calls]],
     cases = forms("approvals", { "approvals", "extra" }, { "approvals", "--" },
       { "approvals", "--help", "extra" }, { "approvals", "-h", "extra" },
@@ -184,7 +193,10 @@ families {
       { argv = { "deny", "A7K2" }, as = "agent" },
       { argv = { "approve", "A7K2" }, pre = [[remuda._pr0_approvals.status = "expired"]] },
       { argv = { "deny", "A7K2" }, pre = [[remuda._pr0_approvals.status = "denied"]] },
-      { "approve", "unknown" }, { "deny", "unknown" }) },
+      { "approve", "unknown" }, { "deny", "unknown" },
+      { argv = { "approve", "--" }, pre = [[remuda._pr0_approvals.expired_record = { id = "--", status = "open", expires_at = 0 }]] },
+      { argv = { "deny", "--" }, pre = [[remuda._pr0_approvals.expired_record = { id = "--", status = "open", expires_at = 0 }]] },
+      { argv = { "approve", "-x" }, pre = [[remuda._pr0_approvals.expired_record = { id = "-x", status = "open", expires_at = 0 }]] }) },
   { name = "standby",
     setup = [[
       local guard = remuda.butler.guard
