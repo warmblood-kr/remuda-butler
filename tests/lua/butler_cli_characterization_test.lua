@@ -39,6 +39,7 @@ local function normalize(text)
     if at then text = text:sub(1, at - 1) .. "<GLOBAL-USAGE>" .. text:sub(to + 1) end
   end
   text = text:gsub("%f[%w][%d%u]+%f[%W]", function(word) return #word == 26 and "<ULID>" or word end)
+  text = text:gsub("(%.lua\"%]):%d+:", "%1:<LINE>:")
   return (text:gsub("%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%dZ", "<TS>"))
 end
 

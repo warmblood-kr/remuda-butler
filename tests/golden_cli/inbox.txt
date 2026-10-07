@@ -3,7 +3,7 @@ exit: 1
 stdout:
 
 stderr:
-[string "packages/butler/commands.lua"]:626: no Butler identity in your env; use `inbox <name>`
+[string "packages/butler/commands.lua"]:<LINE>: no Butler identity in your env; use `inbox <name>`
 actions:
 state: read=0,deliveries=0
 
