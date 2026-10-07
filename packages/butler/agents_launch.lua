@@ -39,6 +39,21 @@ end
 local function one_line(value)
   return (tostring(value or ""):match("^[^\r\n]*") or ""):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
 end
+-- Every screen- or capture-derived diagnostic (detail, sessions, launch trace) goes through sanitize_row, an
+-- allowlist with no escape/UTF-8 interpretation: row 1 only, at most its first 240 bytes. Plain printable ASCII
+-- is kept (cut at 80 characters, right-trimmed); anything else becomes a fixed placeholder holding no row bytes.
+local function sanitize_row(text)
+  local head = tostring(text == nil and "" or text):sub(1, 240)
+  local stop = head:find("[\r\n]")
+  if stop then head = head:sub(1, stop - 1) end
+  if not head:find("[^ ]") then return "<empty first row>" end
+  if head:find("[^\32-\126]") then return "<first row: non-plain, " .. #head .. " bytes>" end
+  head = head:sub(1, 80)
+  local last = #head
+  while last > 0 and head:byte(last) == 32 do last = last - 1 end
+  return head:sub(1, last)
+end
+local screen_detail = sanitize_row
 local function readiness_timeout()
   local configured = tonumber(remuda._butler_readiness_timeout or os.getenv("REMUDA_BUTLER_READINESS_TIMEOUT"))
   if configured and configured > 0 then return configured end
@@ -134,7 +149,7 @@ local function choose(candidates, opts, done)
     end
     state = { id = id, entry = entry, attempt = attempt, name = name,
       started = os.time(), timeout = opts.timeout or readiness_timeout(),
-      handled = {}, last_screen = "", dialog_seen = nil }
+      handled = {}, last_screen = "<empty first row>", last_screen_blank = true, dialog_seen = nil }
     local test_builder = remuda._butler_agent_builders[id]
       and remuda._butler_agent_builders[id] ~= BUILTIN_AGENT_BUILDERS[id]
     local force_test_probe = type(remuda._butler_test_force_launch_probe) == "table"
@@ -161,16 +176,17 @@ local function choose(candidates, opts, done)
     if not alive(state.name) then fail_candidate("exited", "session exited before prompt became ready"); return end
     local captured, screen = pcall(remuda.capture, state.name)
     if not captured then
-      state.last_capture_error = one_line(screen)
+      state.last_capture_error = sanitize_row(screen)
       screen = ""
     end
     screen = tostring(screen or ""):gsub("\r\n", "\n"):gsub("\r", "\n")
-    state.last_screen = one_line(screen)
+    state.last_screen = screen_detail(screen)
+    state.last_screen_blank = screen:find("%S") == nil
     local entry, id = state.entry, state.id
     -- Authentication screens can still contain a prompt glyph; classify
     -- login before readiness so expired credentials never look usable.
     for _, pattern in ipairs(entry.login or {}) do
-      if screen:find(pattern, 1, true) then fail_candidate("login", one_line(screen)); return end
+      if screen:find(pattern, 1, true) then fail_candidate("login", screen_detail(screen)); return end
     end
     local ready = false
     if entry.ready then local tested, matched = call_callback(entry.ready, screen); ready = tested and not not matched end
@@ -281,14 +297,14 @@ local function choose(candidates, opts, done)
         if state.unknown_dialog_screen ~= screen then
           state.unknown_dialog_screen, state.unknown_dialog_since = screen, os.time()
         elseif os.time() - state.unknown_dialog_since >= 2 then
-          fail_candidate("dialog", one_line(screen)); return
+          fail_candidate("dialog", screen_detail(screen)); return
         end
       else
         state.unknown_dialog_screen, state.unknown_dialog_since = nil, nil
       end
     end
     if os.time() - state.started >= state.timeout then
-      if state.last_screen == "" and not state.dialog_seen and not state.unknown_dialog_screen then
+      if state.last_screen_blank and not state.dialog_seen and not state.unknown_dialog_screen then
         state.attempt.reason, state.attempt.session = "ready_unverified", state.name
         state.attempt.detail = "session remained alive but screen was blank at readiness timeout"
           .. (state.last_capture_error and ("; last capture error: " .. state.last_capture_error) or "")
@@ -299,7 +315,7 @@ local function choose(candidates, opts, done)
       local capture_error = state.last_capture_error and ("; last capture error: " .. state.last_capture_error) or ""
       fail_candidate(state.dialog_seen and "dialog" or "timeout", prefix
         .. "readiness prompt not observed within " .. tostring(state.timeout)
-        .. " seconds; last screen: " .. (state.last_screen ~= "" and state.last_screen or "<empty>")
+        .. " seconds; last screen: " .. state.last_screen
         .. capture_error)
     end
   end
@@ -712,6 +728,7 @@ remuda._butler_chooser = {
   PROMPT_DELIVERY = PROMPT_DELIVERY,
   build_agent_argv = build_agent_argv,
   one_line = one_line,
+  sanitize_row = sanitize_row,
   trust_modal_state = trust_modal_state, trust_plan = trust_plan, trust_eligible = trust_eligible,
   trust_path_matches = trust_path_matches,
   choose = choose,
