@@ -115,8 +115,8 @@ function guard.standby(state, paths)
       -- Claim/refusal stays first: a parser error never changes standby policy.
       -- Reject the marker explicitly because clap treats it as an option boundary.
       for _, word in ipairs(args or {}) do if word == "--" then doctor_ok = false end end
-      local report = cli.parse(DOCTOR_CLI_SPEC, args or {})
-      doctor_ok = doctor_ok and report.ok and report.kind ~= "help"
+      local ok, report = pcall(cli.parse, DOCTOR_CLI_SPEC, args or {})
+      doctor_ok = doctor_ok and ok and report.ok and report.kind ~= "help"
     end
     if doctor_ok then
       remuda.exec("butler/doctor")

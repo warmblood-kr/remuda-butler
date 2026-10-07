@@ -550,10 +550,16 @@ local APPROVAL_CLI_SPEC = {
 local function parsed_approval_id(args, verb)
   local cli = remuda.cli
   if type(cli) ~= "table" or type(cli.parse) ~= "function" then return nil, false end
-  -- The old parser treated `--` as an ordinary extra word. clap treats it as an
-  -- option boundary, so keep that rejection ahead of the native report.
-  for _, word in ipairs(args) do if word == "--" then return nil, true end end
-  local report = cli.parse(APPROVAL_CLI_SPEC, args)
+  -- The old parser treated a leading-dash ID as an ordinary word. clap treats
+  -- `--` as an option boundary, so let the legacy answer path handle it.
+  for _, word in ipairs(args) do
+    if word == "--" then
+      if verb ~= "approvals" and #args == 2 then return args[2], false end
+      return nil, true
+    end
+  end
+  local ok, report = pcall(cli.parse, APPROVAL_CLI_SPEC, args)
+  if not ok then return nil, false end
   local exact_help = #args == 2 and (args[2] == "--help" or args[2] == "-h")
   if exact_help then return nil, true, "help" end
   if not report.ok or report.kind == "help" then
@@ -603,7 +609,7 @@ function approval.cli(args, agent)
       return fail(verb .. " is operator-only. Next: wait for the owner's answer by mail; remuda butler inbox")
     end
     local id = parsed and parsed_id or args[2]
-    if id == nil or id == "" or id == "--" then return fail(usage(verb) .. "\nNext: remuda butler approvals") end
+    if id == nil or id == "" then return fail(usage(verb) .. "\nNext: remuda butler approvals") end
     local ok, err, rec = approval.answer(id, verb, "operator (terminal)")
     if not ok then
       if rec then
