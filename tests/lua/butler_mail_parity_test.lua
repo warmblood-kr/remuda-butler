@@ -67,13 +67,16 @@ T.test("butler_mail_unloadable_envelope_stays_unread_and_is_reported", function(
     return first .. "\n--READ--\n" .. read_ids .. "\n--AGAIN--\n" .. again
   ]=], id, id, id))
   T.ok(result:find("body of a", 1, true), result)
+  local first = result:match("^(.-)\n%-%-READ%-%-") or ""
+  local read_ids = result:match("\n%-%-READ%-%-\n(.-)\n%-%-AGAIN%-%-") or ""
+  local again = result:match("\n%-%-AGAIN%-%-\n(.*)$") or ""
   for _, bad in ipairs({"message-missing", "message-corrupt"}) do
-    T.ok(result:find("message " .. bad .. ": envelope unreadable, left unread", 1, true), bad .. " was not reported")
-    T.ok(not result:match("--READ--.-" .. bad), bad .. " was marked read")
-    T.ok(result:find("message " .. bad .. ": envelope unreadable", 1, true), bad .. " was not retried")
+    T.ok(first:find("message " .. bad .. ": envelope unreadable, left unread", 1, true), bad .. " was not reported")
+    T.ok(not read_ids:find(bad, 1, true), bad .. " was marked read")
+    T.ok(again:find("message " .. bad .. ": envelope unreadable", 1, true), bad .. " was not retried")
   end
-  T.ok(result:match("--READ--.-message%-a"), "the shown message was not marked read")
-  T.ok(not result:match("--AGAIN--.-body of a"), "a read message came back")
+  T.ok(read_ids:find("message-a", 1, true), "the shown message was not marked read")
+  T.ok(not again:find("body of a", 1, true), "a read message came back")
 end)
 
 T.test("butler_mail_unreadable_envelope_is_retried_in_the_same_bus", function()
@@ -90,10 +93,11 @@ T.test("butler_mail_unreadable_envelope_is_retried_in_the_same_bus", function()
     local read_ids = assert(io.open(read, "rb")):read("*a")
     return first .. "\n--COUNTS--\n" .. before .. "|" .. after .. "\n--SECOND--\n" .. second .. "\n--READ--\n" .. read_ids
   ]=], id, id, id, id, id))
+  local second = result:match("%-%-SECOND%-%-\n(.-)\n%-%-READ%-%-") or ""
   T.ok(result:find("message message-late: envelope unreadable, left unread", 1, true), result)
   T.ok(result:find("--COUNTS--\n0|1", 1, true), "an unreadable id is not counted, then becomes readable")
   T.ok(result:find("late body", 1, true), "the late envelope was not delivered")
-  T.ok(not result:find("--SECOND--\nmessage message-late: envelope unreadable", 1, true), result)
+  T.ok(not second:find("envelope unreadable", 1, true), second)
   T.ok(result:match("--READ--.-message%-late"), "the delivered id was not marked read")
 end)
 
@@ -102,10 +106,15 @@ T.test("butler_mail_reply_threads_with_in_reply_to_and_references", function()
     local a = assert(M.queue(B, F, "question"))
     local b = assert(M.reply(F, a.id, "answer"))
     local c = assert(M.reply(B, b.id, "thanks"))
+    remuda.exec("butler/mail")
+    local reloaded = remuda._butler_mail
+    local d = assert(reloaded.reply(F, c.id, "after reload"))
     local envelope = assert(io.open(root .. "/messages/" .. c.id .. ".json", "rb")):read("*a")
-    local fresh = M.inbox(F.id)
+    local d_envelope = assert(io.open(root .. "/messages/" .. d.id .. ".json", "rb")):read("*a")
+    local fresh = reloaded.inbox(B.id)
     return table.concat({a.id, b.id, c.id, b.to[1].alias, c.to[1].alias, b.subject, c.subject,
-      table.concat(c.references, ","), c.in_reply_to, envelope, fresh}, "\n--PART--\n")
+      table.concat(c.references, ","), c.in_reply_to, envelope, fresh, table.concat(d.references, ","),
+      d.in_reply_to, d_envelope}, "\n--PART--\n")
   ]=])
   local v = {}
   for part in (out .. "\n--PART--\n"):gmatch("(.-)\n%-%-PART%-%-\n") do v[#v + 1] = part end
@@ -119,6 +128,10 @@ T.test("butler_mail_reply_threads_with_in_reply_to_and_references", function()
   T.ok(v[10]:find('"references":["' .. v[1] .. '","' .. v[2] .. '"]', 1, true), v[10])
   T.ok(v[11]:find("  in reply to " .. v[2] .. " (thread " .. v[1] .. ")", 1, true), v[11])
   T.ok(v[11]:find("thanks", 1, true) and v[11]:find("question", 1, true), v[11])
+  T.eq(v[12], v[1] .. "," .. v[2] .. "," .. v[3], "references load from the persisted parent envelope")
+  T.eq(v[13], v[3], "in_reply_to loads from the persisted parent envelope")
+  T.ok(v[14]:find('"in_reply_to":"' .. v[3] .. '"', 1, true), v[14])
+  T.ok(v[14]:find('"references":["' .. v[1] .. '","' .. v[2] .. '","' .. v[3] .. '"]', 1, true), v[14])
 end)
 
 T.test("butler_mail_reply_tolerates_old_missing_and_self_referencing_parents", function()
@@ -139,7 +152,8 @@ T.test("butler_mail_reply_tolerates_old_missing_and_self_referencing_parents", f
     local _, not_mine = M.reply(B, "message-old", "x")
     local _, from_op = M.reply(F, "message-op", "x")
     local old, orphan, selfref = refs("message-old"), refs("message-orphan"), refs("message-selfref")
-    local b_view = M.inbox(B.id)
+    remuda.exec("butler/mail")
+    local b_view = remuda._butler_mail.inbox(B.id)
     return table.concat({old, orphan, selfref, tostring(not_mine), tostring(from_op), b_view}, "\n--PART--\n")
   ]=])
   local v = {}
@@ -163,7 +177,8 @@ T.test("butler_mail_forward_redelivers_the_original_with_a_resent_row", function
     local _, stranger = M.forward(W, "message-nope", B)
     local after = assert(io.open(path, "rb")):read("*a")
     local inbox = assert(io.open(root .. "/inboxes/" .. hex(W.id) .. ".jsonl", "rb")):read("*a")
-    local fresh = M.inbox(W.id)
+    remuda.exec("butler/mail")
+    local fresh = remuda._butler_mail.inbox(W.id)
     return table.concat({a.id, tostring(again), tostring(back), tostring(stranger), tostring(before == after), inbox, fresh}, "\n--PART--\n")
   ]=])
   local v = {}

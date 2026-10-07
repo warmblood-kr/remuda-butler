@@ -5387,12 +5387,6 @@ fn reply_prelude(root: &Path) -> String {
     )
 }
 
-
-
-
-
-
-
 #[test]
 fn butler_matrix_mail_envelope_is_durable_and_deduplicated_across_daemon_restarts() {
     let dir = scratch_dir("matrix-mail");
