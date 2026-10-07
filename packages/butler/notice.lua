@@ -88,6 +88,13 @@ end
 -- exactly one of the kind's `placeholders`), "NON-EMPTY" or "UNPARSEABLE",
 -- plus the text. Dim ghost suggestions stay NON-EMPTY and defer (#137).
 local PROMPT_GLYPHS = { "❯", ">", "›" }
+local function unwrap_claude_prompt_border(kind, line)
+  if kind ~= "claude" or line:sub(1, 3) ~= "─" then return line end
+  local offset = 1
+  while line:sub(offset, offset + 2) == "─" do offset = offset + 3 end
+  if line:sub(offset, offset + 2) == "❯" then return line:sub(offset) end
+  return line
+end
 function remuda._butler_prompt_is_empty(kind, screen)
   local text, prompt_at
   -- Claude draws its empty composer as '❯' + NO-BREAK SPACE; Lua's %s
@@ -98,6 +105,7 @@ function remuda._butler_prompt_is_empty(kind, screen)
   for index, line in ipairs(lines) do
     local rest = line:gsub("^%s+", "")
     if rest:sub(1, 3) == "│" then rest = rest:sub(4):gsub("^%s+", "") end
+    rest = unwrap_claude_prompt_border(kind, rest)
     for _, glyph in ipairs(PROMPT_GLYPHS) do
       if rest:sub(1, #glyph) == glyph then
         text, prompt_at = rest:sub(#glyph + 1), index
@@ -392,6 +400,7 @@ local function recovery_draft(kind, screen, first_line)
   for index, line in ipairs(lines) do
     local rest = line:gsub("^%s+", "")
     if rest:sub(1, 3) == "│" then rest = rest:sub(4):gsub("^%s+", "") end
+    rest = unwrap_claude_prompt_border(kind, rest)
     for _, glyph in ipairs(glyphs) do
       if rest:sub(1, #glyph) == glyph then prompt_at = index end
     end

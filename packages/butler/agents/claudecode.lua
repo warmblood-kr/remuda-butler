@@ -82,7 +82,9 @@ builders.claude = function(spec)
 end
 
 remuda._butler_agent_startup.claude = {
-  ready = function(screen) return screen:find("─\n❯", 1, true) ~= nil end, -- idle composer under its rule
+  ready = function(screen)
+    return screen:find("─\n❯", 1, true) ~= nil or screen:find("─❯", 1, true) ~= nil
+  end, -- idle composer under its rule, including a ConPTY-wrapped border
   clear_input = "C-u",
   modals = {
     { trust = "claude", pending_match = "Quick safety check:" }, -- option chosen by its text

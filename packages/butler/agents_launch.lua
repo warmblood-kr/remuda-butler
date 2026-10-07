@@ -166,6 +166,7 @@ local function choose(candidates, opts, done)
     end
     screen = tostring(screen or ""):gsub("\r\n", "\n"):gsub("\r", "\n")
     state.last_screen = one_line(screen)
+    state.last_screen_blank = screen:find("%S") == nil
     local entry, id = state.entry, state.id
     -- Authentication screens can still contain a prompt glyph; classify
     -- login before readiness so expired credentials never look usable.
@@ -288,7 +289,7 @@ local function choose(candidates, opts, done)
       end
     end
     if os.time() - state.started >= state.timeout then
-      if state.last_screen == "" and not state.dialog_seen and not state.unknown_dialog_screen then
+      if state.last_screen_blank and not state.dialog_seen and not state.unknown_dialog_screen then
         state.attempt.reason, state.attempt.session = "ready_unverified", state.name
         state.attempt.detail = "session remained alive but screen was blank at readiness timeout"
           .. (state.last_capture_error and ("; last capture error: " .. state.last_capture_error) or "")

@@ -178,7 +178,9 @@ return {
     ["butler.agent"] = {
       { id = "claude", order = 10, executable = "claude", requires = "claude",
         argv = function(_, spec) return host._butler_agent_builders.claude(spec) end,
-        ready = function(_, screen) return screen:find("─\n❯", 1, true) ~= nil end,
+        ready = function(_, screen)
+          return screen:find("─\n❯", 1, true) ~= nil or screen:find("─❯", 1, true) ~= nil
+        end,
         working = function(_, screen) return screen:find("esc to interrupt", 1, true) ~= nil end,
         login = { "Please log in", "not logged in", "Authentication required", "Invalid API key", "Please run /login", "Select login method" },
         dialogs = function() return host._butler_agent_startup.claude.modals end },
