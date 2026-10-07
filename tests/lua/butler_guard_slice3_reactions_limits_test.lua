@@ -244,6 +244,11 @@ T.test("a plain push is offered a git grant for its working directory and the gr
   T.eval(("remuda._t_perm({ tool = 'Bash', input = { command = 'git push' }, cwd = %q })"):format(work))
   T.expect(has(post(1):lower(), ("grant:    git " .. work .. " until"):lower()), "offered (the scope is case-folded on a case-insensitive volume): " .. post(1))
   T.eq(answer(1, "grant"), "true nil", "granted")
-  T.eq(T.eval(("return tostring(remuda.butler.guard_grants.match('Bash', { command = 'git push' }, %q))"):format(work)), "g001",
+  -- This successful real-Git control uses the test subject allowance; production/budget tests keep 2s.
+  T.eq(T.eval(([[local g = remuda.butler.guard_grants; local budget = g.git_budget_s
+    g.git_budget_s = 20
+    local id = g.match('Bash', { command = 'git push' }, %q)
+    g.git_budget_s = budget
+    return tostring(id)]]):format(work)), "g001",
     "the next plain push is covered", "ok - git offer")
 end)
