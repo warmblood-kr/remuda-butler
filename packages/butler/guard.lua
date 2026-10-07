@@ -97,6 +97,10 @@ end
 -- probe took is given back at once.
 function guard.standby(state, paths)
   remuda._butler_standby = state
+  local DOCTOR_CLI_SPEC = {
+    name = "remuda butler",
+    verbs = { doctor = { about = "Check the Butler installation", next = "remuda butler doctor" } },
+  }
   local function run(args)
     local now = guard.claim(paths)
     if now.owner then
@@ -105,7 +109,16 @@ function guard.standby(state, paths)
     end
     remuda._butler_standby = now
     local refusal = guard.refusal(now)
-    if type(args) == "table" and args[1] == "doctor" and #args == 1 then
+    local doctor_ok = type(args) == "table" and args[1] == "doctor" and #args == 1
+    local cli = remuda.cli
+    if type(cli) == "table" and type(cli.parse) == "function" then
+      -- Claim/refusal stays first: a parser error never changes standby policy.
+      -- Reject the marker explicitly because clap treats it as an option boundary.
+      for _, word in ipairs(args or {}) do if word == "--" then doctor_ok = false end end
+      local report = cli.parse(DOCTOR_CLI_SPEC, args or {})
+      doctor_ok = doctor_ok and report.ok and report.kind ~= "help"
+    end
+    if doctor_ok then
       remuda.exec("butler/doctor")
       local doctor = remuda._butler_doctor
       return "Not the owning daemon: " .. refusal:match("^[^\n]*") .. "\n"
