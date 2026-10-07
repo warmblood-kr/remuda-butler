@@ -92,113 +92,111 @@ local function launch_diagnostic(kind, screen, throw)
   return reason, detail, sessions, trace
 end
 
-T.test("launch diagnostics show row 1 only, cut at 80 characters, never a later row", function()
+local NONPLAIN = "<first row: non-plain, "
+local function sanitize(input)
+  return T.eval("return remuda._butler_chooser.sanitize_row(" .. esc(input) .. ")")
+end
+local function placeholder(input) return NONPLAIN .. math.min(#input, 240) .. " bytes>" end
+
+T.test("launch diagnostics show an allowlisted row 1 only, never a later row", function()
   local screens = {
     { "claude", "\nSECRET_SENTINEL_ROW2\nPlease log in", "login", "<empty first row>" },
     { "claude", "   \nSECRET_SENTINEL_ROW2\nPlease log in", "login", "<empty first row>" },
     { "claude", "\r\nSECRET_SENTINEL_ROW2\nPlease log in", "login", "<empty first row>" },
     { "claude", "\nSECRET_SENTINEL_ROW2\nPress enter to continue", "dialog", "<empty first row>" },
-    { "claude", "\27[2m\27[0m\nSECRET_SENTINEL_ROW2\nPress enter to continue", "dialog", "<empty first row>" },
     { "retry_probe", "   \nSECRET_SENTINEL_ROW2", "timeout", "<empty first row>" },
     { "retry_probe", "\r\nSECRET_SENTINEL_ROW2", "timeout", "<empty first row>" },
     { "claude", "Please log in\nSECRET_SENTINEL_ROW2", "login", "Please log in" },
-    { "claude", "\27[2mPlease log in\27[0m\a\nSECRET_SENTINEL_ROW2", "login", "Please log in" },
     { "retry_probe", "first visible row\nSECRET_SENTINEL_ROW2", "timeout", "first visible row" },
-    { "claude", "Please log in \27]8;;https://example.invalid/SECRET_OSClabel\7link\27]8;;\7\nSECRET_SENTINEL_ROW2", "login", "Please log in" },
-    { "claude", "Please log in \27]8;;https://example.invalid/SECRET_OSClabel\27\\link\27]8;;\27\\", "login", "Please log in" },
-    { "claude", "Please log in \27P1$rSECRET_DCS\27\\\27_SECRET_APC\27\\\27^SECRET_PM\27\\", "login", "Please log in" },
-    { "claude", "Please log in \27]8;;SECRET_OSC_UNTERMINATED", "login", "Please log in" },
+    { "claude", "\27[2mPlease log in\27[0m\a\nSECRET_SENTINEL_ROW2", "login", NONPLAIN },
+    { "claude", "\27[2m\27[0m\nSECRET_SENTINEL_ROW2\nPress enter to continue", "dialog", NONPLAIN },
+    { "claude", "Please log in \27]8;;https://example.invalid/SECRET_OSClabel\7link\27]8;;\7", "login", NONPLAIN },
+    { "claude", "Please log in \27]8;;https://example.invalid/SECRET_OSClabel\27\\link\27]8;;\27\\", "login", NONPLAIN },
+    { "claude", "Please log in \27P1$rSECRET_DCS\27\\\27_SECRET_APC\27\\\27^SECRET_PM\27\\", "login", NONPLAIN },
+    { "claude", "Please log in ──── \226\148", "login", NONPLAIN },
   }
   for index, item in ipairs(screens) do
     local reason, detail, sessions, trace = launch_diagnostic(item[1], item[2])
     T.eq(reason, item[3], "diagnostic " .. index .. " reason")
     T.ok(detail:find(item[4], 1, true), "diagnostic " .. index .. " should show row 1: " .. detail)
     for label, text in pairs({ detail = detail, sessions = sessions, trace = trace }) do
-      T.ok(not text:find("SECRET", 1, true), "diagnostic " .. index .. " leaked a later row or a control-string payload into " .. label)
-      T.ok(not text:find("\27", 1, true), "diagnostic " .. index .. " kept a control sequence in " .. label)
+      T.ok(not text:find("SECRET", 1, true), "diagnostic " .. index .. " leaked into " .. label)
+      T.ok(not text:find("\27", 1, true), "diagnostic " .. index .. " kept a control byte in " .. label)
     end
   end
-  local _, long = launch_diagnostic("claude", "Please log in " .. string.rep("─", 120) .. "SECRET_AFTER_80\nSECRET_SENTINEL_ROW2")
-  local shown = long:match("^Please log in (.*)$") or long
+  local _, long = launch_diagnostic("claude", "Please log in " .. string.rep("x", 300) .. "SECRET_AFTER_80\nSECRET_SENTINEL_ROW2")
+  T.eq(#long, 80, "plain first row is cut at 80 characters: " .. long)
   T.ok(not long:find("SECRET", 1, true), "text past 80 characters leaked: " .. long)
-  local count = 0
-  for _ in long:gmatch("[%z\1-\127\194-\244][\128-\191]*") do count = count + 1 end
-  T.ok(count <= 80, "first row must be cut at 80 characters, got " .. count)
-  T.ok(shown ~= "", "first row text is kept")
 end)
 
-
-local function valid_utf8(text)
-  local i, n = 1, #text
-  while i <= n do
-    local b = text:byte(i)
-    local len = b < 0x80 and 1 or (b >= 0xC2 and b <= 0xDF) and 2 or (b >= 0xE0 and b <= 0xEF) and 3
-      or (b >= 0xF0 and b <= 0xF4) and 4 or nil
-    if not len or i + len - 1 > n then return false end
-    for k = 1, len - 1 do
-      local c = text:byte(i + k)
-      if c < 0x80 or c > 0xBF then return false end
-    end
-    i = i + len
-  end
-  return true
-end
-
-T.test("launch diagnostics drop every string control, C1 form and CSI shape", function()
-  local cases = {
-    "Please log in \27P1$r PUBLIC \7 SECRET_DCS\27\\ ok",
-    "Please log in \27_ PUBLIC \7 SECRET_APC\27\\ ok",
-    "Please log in \27^ PUBLIC \7 SECRET_PM\27\\ ok",
-    "Please log in \27X PUBLIC \7 SECRET_SOS\27\\ ok",
-    "Please log in \27]0;title\27\\\27]8;;SECRET_OSC_ST\27\\x\27]8;;\7 ok",
-    "Please log in \194\157" .. "8;;SECRET_C1_OSC\194\156 ok",
-    "Please log in \194\157" .. "8;;SECRET_C1_OSC_BEL\7 ok",
-    "Please log in \194\144 PUBLIC \7 SECRET_C1_DCS\194\156 ok",
-    "Please log in \194\159 SECRET_C1_APC\194\156 \194\158 SECRET_C1_PM\194\156 \194\152 SECRET_C1_SOS\194\156 ok",
-    "Please log in \27[38:2::SECRET:1:2m ok\27[1;2 q\27[?25l\27[31;SECRET",
-    "Please log in \194\155" .. "31m ok",
-    "Please log in \27]8;;SECRET_UNTERMINATED",
-    "Please log in \27P PUBLIC \7 SECRET_DCS_UNTERMINATED",
+T.test("sanitize_row allowlists plain ASCII and otherwise prints only a fixed placeholder", function()
+  local payloads = {
+    "Please log in \27P x\7 SECRET_DCS\27\\", "Please log in \27_ x\7 SECRET_APC\27\\", "Please log in \27^ SECRET_PM\27\\",
+    "Please log in \27X SECRET_SOS\27\\", "Please log in \27]8;;http://x/SECRET_OSC8\7label\27]8;;\7",
+    "Please log in \27[38:2::1:2:3m SECRET_CSI", "A\27[ qSECRET", "A\27[1;SECRET",
+    "A\194\157" .. "8;;SECRET_C1\194\156B", "A\194\144 x SECRET_C1_DCS\194\156", "A\194\155" .. "31m SECRET",
+    "A\157" .. "SECRET_RAW\156B", "A\144 SECRET_RAW", "A\159 SECRET_RAW", "A\158 SECRET_RAW", "A\152 SECRET_RAW", "A\155 SECRET_RAW",
+    string.char(194, 0, 157) .. "8;;SECRET_SYNTH" .. string.char(194, 0, 156),
+    string.char(194, 27, 157) .. "8;;SECRET_SYNTH" .. string.char(194, 7, 156),
+    "A\t SECRET", "A\127 SECRET", "A\0 SECRET", "é SECRET", "界 SECRET", "\240\128\128\128 SECRET", "\237\160\128 SECRET",
+    "\244\144\128\128 SECRET", "A" .. string.rep("\128", 10000),
   }
-  for index, screen in ipairs(cases) do
-    local _, detail, sessions, trace = launch_diagnostic("claude", screen .. "\nSECRET_ROW2")
-    for label, text in pairs({ detail = detail, sessions = sessions, trace = trace }) do
-      T.ok(not text:find("SECRET", 1, true), "string-control case " .. index .. " leaked into " .. label .. ": " .. text)
+  for index, input in ipairs(payloads) do
+    local got = sanitize(input)
+    T.eq(got, placeholder(input), "payload " .. index .. " becomes the placeholder")
+    T.ok(not got:find("SECRET", 1, true) and not got:find("[^\32-\126]"), "payload " .. index .. " leaks no payload byte")
+  end
+  T.eq(sanitize("\27" .. string.rep("x", 1000)), NONPLAIN .. "240 bytes>", "placeholder length is capped at 240")
+  T.eq(sanitize("Please log in"), "Please log in", "plain text is kept")
+  T.eq(sanitize("  indented"), "  indented", "plain text is kept verbatim")
+  T.eq(sanitize(string.rep("x", 1000)), string.rep("x", 80), "long plain row is cut at 80 characters")
+  T.eq(sanitize("A" .. string.rep(" ", 100) .. "B"), "A", "trailing spaces after the cut are trimmed")
+  T.eq(sanitize("one\nSECRET_ROW2"), "one", "row 2 never appears")
+  T.eq(sanitize("one\rSECRET_ROW2"), "one", "a bare CR ends row 1")
+  for _, blank in ipairs({ "", "   ", "\nSECRET_ROW2", "   \nSECRET_ROW2", "\r\nSECRET_ROW2" }) do
+    T.eq(sanitize(blank), "<empty first row>", "blank row 1")
+  end
+  T.eq(T.eval("return remuda._butler_chooser.sanitize_row(12345)"), "12345", "non-strings go through tostring")
+  T.eq(T.eval("return remuda._butler_chooser.sanitize_row(nil)"), "<empty first row>", "nil is an empty row")
+end)
+
+T.test("sanitize_row stays linear on floods", function()
+  local out = T.eval([[
+    local s = remuda._butler_chooser.sanitize_row
+    local inputs = { string.rep(" ", 100000), "A" .. string.rep(" ", 16000) .. "B", "A" .. string.rep(" ", 100000) .. "B",
+      string.rep("x", 16384), string.rep("\27", 16384), string.rep("\194", 100000), "\27]" .. string.rep("x\194", 40000) }
+    local worst = 0
+    for _, input in ipairs(inputs) do
+      local started = os.clock()
+      s(input)
+      worst = math.max(worst, os.clock() - started)
     end
-    T.ok(detail:find("Please log in", 1, true), "case " .. index .. " keeps the visible text: " .. detail)
-    T.ok(not detail:find("[%z\1-\8\11-\31\127]"), "case " .. index .. " kept a control byte")
+    return tostring(worst)
+  ]])
+  T.ok(tonumber(out) < 0.05, "sanitizer worst case " .. out .. "s must stay under 0.05s")
+end)
+
+T.test("real ConPTY captures give sensible row-1 diagnostics", function()
+  for _, path in ipairs({ "claude-2.1.292-win/claude-2.1.292-100x30.txt", "claude-2.1.292-120x30.txt" }) do
+    local screen = read_fixture(path)
+    T.eq(sanitize(screen), "<empty first row>", path .. " starts with an empty row")
+    local prompt_row = screen:match("([^\n]*❯[^\n]*)")
+    T.eq(sanitize(prompt_row), placeholder(prompt_row), path .. " box-drawing prompt row becomes the placeholder")
   end
 end)
 
-T.test("launch diagnostics stay valid UTF-8 within 80 characters and 240 bytes", function()
-  local screens = {
-    "Please log in A" .. string.rep("\128", 10000),
-    "Please log in \255\254\192\175\237\160\128\240\128\128\128 tail",
-    "Please log in \226\148 cut" .. string.rep("\226\148", 50),
-    string.rep("界", 200),
-    string.rep("😀", 200),
-    "Please log in " .. string.rep("é", 5000) .. "\226",
-  }
-  for index, screen in ipairs(screens) do
-    local _, detail = launch_diagnostic("claude", "Please log in " .. screen .. "\nSECRET_ROW2")
-    T.ok(valid_utf8(detail), "case " .. index .. " emitted invalid UTF-8")
-    T.ok(#detail <= 240, "case " .. index .. " exceeds 240 bytes: " .. #detail)
-    local count = select(2, detail:gsub("[^\128-\191]", ""))
-    T.ok(count <= 80, "case " .. index .. " exceeds 80 characters: " .. count)
-    T.ok(not detail:find("SECRET", 1, true), "case " .. index .. " leaked row 2")
-  end
-end)
-
-T.test("capture errors reach diagnostics through the same sanitizer", function()
-  local message = "capture failed \27]8;;SECRET_ERR\7link\27]8;;\7 \27[31m" .. string.rep("x", 5000) .. "\128\nSECRET_ERR_ROW2"
+T.test("capture errors reach diagnostics through the same function", function()
+  local message = "capture failed \27]8;;SECRET_ERR\7link\27]8;;\7 " .. string.rep("x", 5000) .. "\nSECRET_ERR_ROW2"
   local reason, detail, sessions, trace = launch_diagnostic("retry_probe", message, true)
   T.eq(reason, "ready_unverified", "a pane whose capture always fails stays unverified")
   for label, text in pairs({ detail = detail, sessions = sessions, trace = trace }) do
     T.ok(not text:find("SECRET", 1, true), "capture error leaked into " .. label)
-    T.ok(valid_utf8(text), "capture error produced invalid UTF-8 in " .. label)
+    T.ok(not text:find("\27", 1, true), "capture error kept a control byte in " .. label)
   end
-  T.ok(#detail < 600, "capture error detail must be bounded: " .. #detail)
-  T.ok(detail:find("last capture error: capture failed", 1, true), "visible error text is kept: " .. detail)
+  T.ok(detail:find("last capture error: " .. NONPLAIN, 1, true), "non-plain error text is a placeholder: " .. detail)
+  _, detail = launch_diagnostic("retry_probe", "capture failed plainly\nSECRET_ROW2", true)
+  T.ok(detail:find("last capture error: capture failed plainly", 1, true), "plain error text is kept: " .. detail)
+  T.ok(not detail:find("SECRET", 1, true), "error row 2 never appears")
 end)
 
 local TRY_FIXTURES = {

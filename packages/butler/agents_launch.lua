@@ -785,6 +785,7 @@ remuda._butler_chooser = {
   PROMPT_DELIVERY = PROMPT_DELIVERY,
   build_agent_argv = build_agent_argv,
   one_line = one_line,
+  sanitize_row = sanitize_row,
   trust_modal_state = trust_modal_state, trust_plan = trust_plan, trust_eligible = trust_eligible,
   trust_path_matches = trust_path_matches,
   choose = choose,
