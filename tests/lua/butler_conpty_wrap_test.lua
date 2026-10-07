@@ -280,8 +280,10 @@ T.test("styled proof: anything else defers", function()
   end
   -- No bottom border / cursor off the prompt row / plain capture disagreeing with the styled rows.
   local screen, styled = frame({ { text = "❯ " } })
-  styled.rows[3] = nil
-  T.ok(safe(decide("claude", join(styled.rows), styled)), "no bottom border")
+  styled.rows[3], styled.rows[4] = nil, nil
+  T.eq(decide("claude", join(styled.rows), styled).composer, "EMPTY", "blank rows to the end of the screen are empty")
+  styled.rows[3] = { { text = "  user draft" } }
+  T.ok(safe(decide("claude", join(styled.rows), styled)), "a draft with no bottom border")
   screen, styled = frame({ { text = "❯ " } })
   styled.cursor = 1
   T.ok(safe(decide("claude", screen, styled)), "cursor on the rule row")

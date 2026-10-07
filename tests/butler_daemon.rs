@@ -4659,12 +4659,24 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
             end
             return actual
           end
-          remuda.capture = function(n)
+          local plain_capture, last_plain = function(n)
             local q = screens[n]
             if #q > 1 then return table.remove(q, 1) end
             return q[1]
+          end, {{}}
+          remuda.capture = function(n)
+            last_plain[n] = plain_capture(n)
+            return last_plain[n]
           end
-          remuda.capture_styled = nil
+          -- A Claude composer is empty only under a styled capture: derive it from the last plain screen.
+          remuda.capture_styled = function(n)
+            local rows, cursor = {{}}, 1
+            for line in ((last_plain[n] or "") .. "\n"):gmatch("(.-)\n") do
+              rows[#rows + 1] = {{ {{ text = line }} }}
+              if line:find("❯", 1, true) then cursor = #rows end
+            end
+            return {{ rows = rows, cursor = {{ row = cursor }} }}
+          end
           remuda.key = function(n, k)
             log[#log + 1] = n .. " key " .. k
             if n == "t-claude" and k == "<down>" then

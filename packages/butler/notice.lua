@@ -145,7 +145,8 @@ end
 -- Claude: text heuristics cannot tell a wrapped (ConPTY) composer from a draft, so a Claude composer is
 -- EMPTY only when styled capture proves it: the cursor sits on a '❯' row (optionally behind the top
 -- border) whose text is empty or one dim 'Try "..."' suggestion, the plain capture agrees row for row, and
--- every row down to the bottom border (a '─' run exactly as long as the top one, at least 10) is blank. Anything else defers.
+-- every row down to the bottom border (a '─' run exactly as long as the top one, at least 10) or the end of the
+-- screen is blank. Anything else defers.
 local function span_text(span) return (tostring(type(span) == "table" and span.text or ""):gsub("\194\160", " ")) end
 local function row_text(row)
   local parts = {}
@@ -192,7 +193,7 @@ local function claude_styled_empty(styled, plain)
     local text = row_text(rows[below])
     if text:match("%S") then return leading_rules(text) == top end
   end
-  return false
+  return true -- nothing but blank rows below the prompt
 end
 local function claude_decision(screen, styled)
   local raw, raw_text = remuda._butler_prompt_is_empty("claude", screen)

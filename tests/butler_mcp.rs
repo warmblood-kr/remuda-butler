@@ -663,8 +663,16 @@ fn relay_deposit_produces_one_mail_notice() {
           remuda.ls, remuda.capture, remuda.capture_styled, remuda.session
         local row = { name = 'butler', alive = true, attached = false }
         remuda.ls = function() return { row } end
-        remuda.capture = function() return '> ' end
-        remuda.capture_styled = nil
+        remuda.capture = function() return '────────────\n❯ ' end
+        -- A Claude composer is empty only under a styled capture: derive it from the plain screen.
+        remuda.capture_styled = function()
+          local rows, cursor = {}, 1
+          for line in (remuda.capture() .. "\n"):gmatch("(.-)\n") do
+            rows[#rows + 1] = { { text = line } }
+            if line:find("❯", 1, true) then cursor = #rows end
+          end
+          return { rows = rows, cursor = { row = cursor } }
+        end
         remuda.session = function() return { is_busy = false } end
         local policy, t = remuda._butler_notify_policy, 0
         remuda._butler_notice_clock = function() return t end
@@ -2333,21 +2341,21 @@ fn a_topic_task_retries_a_dropped_return_before_delivering_a_notice() {
         r#"
         remuda.butler.project_home("/tmp")
         remuda._butler_agent_builders.claude = function() return {"sh", "-c", "sleep 30"} end
-        local screen, events, first_poll_empty = "──────\n❯ ", {}, false
+        local screen, events, first_poll_empty = "────────────\n❯ ", {}, false
         remuda._topic_test_events = events
         remuda._topic_test_pending_at_notice = true
         remuda.capture = function()
           if first_poll_empty then
             first_poll_empty = false
             table.insert(events, "first poll blank while text paints")
-            return "──────\n❯ "
+            return "────────────\n❯ "
           end
           return screen
         end
         remuda.type_text = function(n, text)
           if text == "finish immediately" then
             table.insert(events, "task typed; first Return dropped")
-            screen = "──────\n❯ " .. text
+            screen = "────────────\n❯ " .. text
             first_poll_empty = true
             return "unverified"
           else
@@ -2358,10 +2366,19 @@ fn a_topic_task_retries_a_dropped_return_before_delivering_a_notice() {
         remuda.key = function(_, key)
           if key == "RET" then
             table.insert(events, "retry Return accepted")
-            screen = "──────\n❯ "
+            screen = "────────────\n❯ "
           end
         end
         remuda.session = function() return {is_busy = false} end
+        -- A Claude composer is empty only under a styled capture: derive it from the plain screen.
+        remuda.capture_styled = function()
+          local rows, cursor = {}, 1
+          for line in (remuda.capture() .. "\n"):gmatch("(.-)\n") do
+            rows[#rows + 1] = { { text = line } }
+            if line:find("❯", 1, true) then cursor = #rows end
+          end
+          return { rows = rows, cursor = { row = cursor } }
+        end
         remuda._butler_notify_policy = function() return true end
         remuda._butler_topic_delegate("fast", "finish immediately", nil, "claude", "butler")
         remuda._butler_send("operator", "fast", "immediate mail")
@@ -2543,7 +2560,7 @@ fn dismissed_claude_model_modal_is_rechecked_and_notice_is_delivered() {
         &path,
         &format!(
             r#"
-        local state = {{ now = 0, screen = '❯ 1. Yes, switch to Opus 5.5\n──', events = {{}} }}
+        local state = {{ now = 0, screen = '❯ 1. Yes, switch to Opus 5.5\n────────────', events = {{}} }}
         local row = {{ name = 'm1', alive = true, attached = false }}
         remuda._notice_test_state = state
         remuda._butler_session_trace_path = {trace:?}
@@ -2552,16 +2569,24 @@ fn dismissed_claude_model_modal_is_rechecked_and_notice_is_delivered() {
         remuda._butler_human_active = function() return false end
         remuda.ls = function() return {{ row }} end
         remuda.session = function() return {{ is_busy = false }} end
-        remuda.capture_styled = nil
+        -- A Claude composer is empty only under a styled capture: derive it from the plain screen.
+        remuda.capture_styled = function()
+          local rows, cursor = {{}}, 1
+          for line in (remuda.capture() .. "\n"):gmatch("(.-)\n") do
+            rows[#rows + 1] = {{ {{ text = line }} }}
+            if line:find("❯", 1, true) then cursor = #rows end
+          end
+          return {{ rows = rows, cursor = {{ row = cursor }} }}
+        end
         remuda.capture = function() table.insert(state.events, 'capture'); return state.screen end
         remuda.type_text = function(_, text)
           table.insert(state.events, 'type ' .. text)
-          state.screen = '❯ ' .. text .. '\n──'
+          state.screen = '────────────\n❯ ' .. text .. '\n────────────'
           return true
         end
         remuda.key = function(_, key)
           table.insert(state.events, 'key ' .. key)
-          if key == 'RET' then state.screen = '❯ \n──' end
+          if key == 'RET' then state.screen = '────────────\n❯ \n────────────' end
         end
         remuda._notice_test_sent = remuda._butler_send('operator', 'm1', 'modal dismissed notice')
         state.id = remuda._notice_test_sent:match('queued ([^ ]+)')
@@ -2575,7 +2600,7 @@ fn dismissed_claude_model_modal_is_rechecked_and_notice_is_delivered() {
     );
     // Replay the captured post-modal composer: the trace line from the model
     // chooser is gone and Claude now shows its empty prompt.
-    eval(&path, "remuda._notice_test_state.screen = '❯ \\n──'");
+    eval(&path, "remuda._notice_test_state.screen = '────────────\\n❯ \\n────────────'");
     let deadline = Instant::now() + Duration::from_secs(10);
     while eval(&path, "return tostring(remuda._butler_bus.notices.m1 ~= nil)") != "false" {
         eval(
