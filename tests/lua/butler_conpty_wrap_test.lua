@@ -144,3 +144,62 @@ T.test("wrapped continuation rows keep notice policy from typing over attached d
   T.eq(T.eval("return tostring(remuda._butler_notify_policy('attached-draft'))"), "false",
     "an empty styled cursor row must not hide continuation draft text")
 end)
+
+T.test("composer safety matrix defers drafts behind footer-like continuation rows", function()
+  local continuations = {
+    { name = "blank footer", tail = "\n────\n" },
+    { name = "draft after rule", tail = "\n────\nuser draft\n────" },
+    { name = "mode draft after rule", tail = "\n────\n─⏵⏵ user draft\n────" },
+    { name = "status then draft", tail = "\n─⏵⏵ auto mode on\nuser draft\n────" },
+    { name = "footer prefix then draft", tail = "\n────\n⚠ hidden draft\n────" },
+  }
+  local shapes = {
+    { name = "empty cursor", prompt = "────❯ " },
+    { name = "dim Try", prompt = '────❯ Try "suggested text"' },
+    { name = "typed draft", prompt = "────❯ typed draft" },
+    { name = "multiline draft", prompt = "────❯ \ncontinuation draft" },
+    { name = "footer-like draft", prompt = "────❯ \n────\nuser draft" },
+    { name = "modal row", prompt = "────❯ Yes, continue" },
+    { name = "wrapped border 100", prompt = "─" .. string.rep("─", 99) .. "❯ " },
+    { name = "wrapped border 120", prompt = "─" .. string.rep("─", 119) .. "❯ " },
+    { name = "wrapped border 140", prompt = "─" .. string.rep("─", 139) .. "❯ " },
+  }
+  for si, shape in ipairs(shapes) do
+    for ci, continuation in ipairs(continuations) do
+      local name = "matrix-" .. si .. "-" .. ci
+      local screen = shape.prompt .. continuation.tail
+      T.eval(string.format([[
+        remuda._butler_bus.agents[%q] = { kind = "claude" }
+        remuda.capture = function(session) if session == %q then return %q end return "" end
+        remuda.capture_styled = nil
+        remuda.ls = function() return {{ name=%q, alive=true, attached=true, human_idle=20 }} end
+      ]], name, name, screen, name))
+      local decision = T.eval(string.format("local d=remuda._butler_prompt_is_empty('claude',%q); return d", screen))
+      local allowed = T.eval(string.format("return tostring(remuda._butler_notify_policy(%q))", name))
+      if shape.name == "empty cursor" and continuation.name == "blank footer" then
+        T.eq(decision, "EMPTY", shape.name .. " / " .. continuation.name .. " should remain ready")
+      else
+        T.ok(decision ~= "EMPTY", shape.name .. " / " .. continuation.name .. " hid a draft")
+        T.eq(allowed, "false", shape.name .. " / " .. continuation.name .. " notice must defer")
+      end
+    end
+  end
+
+  local ghost_words = {
+    { text = "❯ ", dim = false }, { text = "Try", dim = true }, { text = " ", dim = false },
+    { text = '"fix', dim = true }, { text = " ", dim = false }, { text = "typecheck", dim = true },
+    { text = " ", dim = false }, { text = 'errors"', dim = true },
+  }
+  T.eval([[remuda._matrix_ghost_words = {}
+    remuda.capture = function() error("styled composer path should not need plain capture") end
+    remuda.capture_styled = function() return { cursor={row=2}, rows={
+      {{text="history",dim=false}}, remuda._matrix_ghost_words,
+    } } end
+    remuda.ls = function() return {{name="matrix-ghost-words",alive=true,attached=true,human_idle=20}} end
+  ]])
+  for _, span in ipairs(ghost_words) do
+    T.eval(string.format("table.insert(remuda._matrix_ghost_words, { text=%q, dim=%s })", span.text, tostring(span.dim)))
+  end
+  T.eq(T.eval([[return tostring(remuda._butler_notify_policy("matrix-ghost-words"))]]), "true",
+    "a dim Try ghost split across word spans must remain ready")
+end)

@@ -94,8 +94,12 @@ T.test("only a live blank screen is kept unverified at readiness timeout", funct
     '{ "sh", "-c", "sleep 60" }', "initializing agent", 1, "timeout", "false")
   local multiline = probe_timeout("probe-multiline-screen", "retry_probe",
     '{ "sh", "-c", "sleep 60" }', "first visible row\nsecond visible row\n" .. string.rep("later row content ", 20) .. "\nSECRET_SENTINEL_LATER_ROW", 1, "timeout", "false")
-  T.ok(multiline:find("second visible row", 1, true), "timeout detail should retain useful prompt context: " .. multiline)
+  T.ok(not multiline:find("second visible row", 1, true), "timeout detail must contain only the first visible row: " .. multiline)
+  T.ok(multiline:find("first visible row", 1, true), "timeout detail should retain the first visible row: " .. multiline)
   T.ok(not multiline:find("SECRET_SENTINEL_LATER_ROW", 1, true), "timeout detail leaked later screen rows: " .. multiline)
+  local early_secret = probe_timeout("probe-early-row-secret", "retry_probe",
+    '{ "sh", "-c", "sleep 60" }', "first visible row\nSECRET_SENTINEL_LATER_ROW\nthird row", 1, "timeout", "false")
+  T.ok(not early_secret:find("SECRET_SENTINEL_LATER_ROW", 1, true), "timeout detail leaked second-row secret: " .. early_secret)
   local safe_outputs = T.eval(string.format([[
     local attempt = remuda._probe_results["probe-multiline-screen"].attempts[1]
     remuda._butler_attempts = { attempt }
