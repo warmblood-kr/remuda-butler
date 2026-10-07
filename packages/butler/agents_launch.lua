@@ -134,7 +134,7 @@ local function choose(candidates, opts, done)
     end
     state = { id = id, entry = entry, attempt = attempt, name = name,
       started = os.time(), timeout = opts.timeout or readiness_timeout(),
-      handled = {}, last_screen = "", dialog_seen = nil }
+      handled = {}, last_screen = "", last_screen_blank = true, dialog_seen = nil }
     local test_builder = remuda._butler_agent_builders[id]
       and remuda._butler_agent_builders[id] ~= BUILTIN_AGENT_BUILDERS[id]
     local force_test_probe = type(remuda._butler_test_force_launch_probe) == "table"
@@ -165,7 +165,7 @@ local function choose(candidates, opts, done)
       screen = ""
     end
     screen = tostring(screen or ""):gsub("\r\n", "\n"):gsub("\r", "\n")
-    state.last_screen = one_line(screen)
+    state.last_screen = screen
     state.last_screen_blank = screen:find("%S") == nil
     local entry, id = state.entry, state.id
     -- Authentication screens can still contain a prompt glyph; classify

@@ -83,7 +83,16 @@ end
 
 remuda._butler_agent_startup.claude = {
   ready = function(screen)
-    return screen:find("─\n❯", 1, true) ~= nil or screen:find("─❯", 1, true) ~= nil
+    if screen:find("─\n❯", 1, true) then return true end
+    for line in (screen .. "\n"):gmatch("(.-)\n") do
+      local offset = 1
+      while line:sub(offset, offset + 2) == "─" do offset = offset + 3 end
+      if offset > 1 and line:sub(offset, offset + 2) == "❯" then
+        local suffix = line:sub(offset + 3):gsub("^[ \t\194\160]+", "")
+        if suffix == "" or suffix:sub(1, 5) == 'Try "' then return true end
+      end
+    end
+    return false
   end, -- idle composer under its rule, including a ConPTY-wrapped border
   clear_input = "C-u",
   modals = {
