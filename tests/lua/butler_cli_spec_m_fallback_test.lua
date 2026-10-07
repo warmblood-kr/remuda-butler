@@ -255,7 +255,9 @@ T.test("inbox name and delivered-ID semantics are unchanged", function()
     remuda._butler_inbox_message = function(me, id) return "message:" .. id .. ":" .. me end
   ]]
   local caller = '{ env = { REMUDA_BUTLER_AGENT_ID = "agent-test" } }'
-  both_command("inbox", { "inbox", "alice" }, caller, "true|inbox:alice", setup)
+  -- #439: a member may read only its own inbox; the operator may read any named one.
+  both_command("inbox", { "inbox", "alice" }, "nil", "true|inbox:alice", setup)
+  both_command("inbox", { "inbox", "alice" }, caller, "true|1:agents may only read their own Butler inbox.\nNext: remuda butler inbox", setup)
   both_command("inbox", { "inbox", "--" }, "nil", "true|inbox:--", setup)
   both_command("inbox", { "inbox", "-alice" }, "nil", "true|inbox:-alice", setup)
   both_command("inbox", { "inbox", "01M49D6J4RVBW73XKFGQ6XS94J" }, caller,
