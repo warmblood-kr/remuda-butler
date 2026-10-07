@@ -56,6 +56,18 @@ local function screen_detail(screen)
   end
   return table.concat(chars)
 end
+local function first_screen_row(value)
+  local row = tostring(value or ""):match("^[^\n]*") or ""
+  local count = 0
+  for index = 1, #row do
+    local byte = row:byte(index)
+    if byte < 128 or byte >= 192 then
+      count = count + 1
+      if count > 80 then return row:sub(1, index - 1) end
+    end
+  end
+  return row
+end
 local function readiness_timeout()
   local configured = tonumber(remuda._butler_readiness_timeout or os.getenv("REMUDA_BUTLER_READINESS_TIMEOUT"))
   if configured and configured > 0 then return configured end
@@ -182,7 +194,8 @@ local function choose(candidates, opts, done)
       screen = ""
     end
     screen = tostring(screen or ""):gsub("\r\n", "\n"):gsub("\r", "\n")
-    state.last_screen = screen
+    state.last_screen = first_screen_row(screen)
+    state.first_screen_row_blank = state.last_screen:find("%S") == nil
     state.last_screen_blank = screen:find("%S") == nil
     local entry, id = state.entry, state.id
     -- Authentication screens can still contain a prompt glyph; classify
@@ -317,7 +330,7 @@ local function choose(candidates, opts, done)
       local capture_error = state.last_capture_error and ("; last capture error: " .. state.last_capture_error) or ""
       fail_candidate(state.dialog_seen and "dialog" or "timeout", prefix
         .. "readiness prompt not observed within " .. tostring(state.timeout)
-        .. " seconds; last screen: " .. screen_detail(state.last_screen)
+        .. " seconds; last screen: " .. (state.first_screen_row_blank and "<empty first row>" or state.last_screen)
         .. capture_error)
     end
   end

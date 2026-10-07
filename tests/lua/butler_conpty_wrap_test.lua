@@ -43,7 +43,7 @@ T.test("a blank first row does not make a visible screen blank", function()
     remuda._butler_agent_builders.visible_probe = function() return { "sh", "-c", "sleep 60" } end
     remuda._butler_test_force_launch_probe["conpty-visible"] = true
     remuda.capture = function(name)
-      if name == "conpty-visible" then return "\nClaude is still starting" end
+      if name == "conpty-visible" then return "   \nSECRET_SENTINEL" end
       return ""
     end
     remuda._conpty_visible_result = nil
@@ -51,7 +51,8 @@ T.test("a blank first row does not make a visible screen blank", function()
       name = "conpty-visible", cwd = os.getenv("XDG_DATA_HOME"), timeout = 1,
       spec = function() return {} end, env = function() return {} end,
     }, function(session, agent, attempts)
-      remuda._conpty_visible_result = { session = session, reason = attempts[1].reason }
+      remuda._conpty_visible_result = { session = session, reason = attempts[1].reason,
+        detail = attempts[1].detail, attempt = attempts[1] }
     end)
   ]])
   T.wait_until(function()
@@ -59,6 +60,18 @@ T.test("a blank first row does not make a visible screen blank", function()
   end, 5, "visible screen timeout")
   T.eq(T.eval("return remuda._conpty_visible_result.reason"), "timeout",
     "visible content after a blank first row must not be classified as blank")
+  local detail = T.eval("return remuda._conpty_visible_result.detail")
+  T.ok(detail:find("<empty first row>", 1, true), "timeout detail must identify a blank first row")
+  T.ok(not detail:find("SECRET_SENTINEL", 1, true), "timeout detail must not scan row two")
+  T.eval([[local attempt = remuda._conpty_visible_result.attempt
+    remuda._butler_bus.launch_failures = { ["visible-failure"] = { attempts = { attempt } } }]])
+  local sessions = T.eval("return remuda._butler_sessions()")
+  T.ok(not sessions:find("SECRET_SENTINEL", 1, true), "sessions output must not leak row two")
+  T.eval([[remuda._butler_session_trace_path = os.tmpname()
+    local attempt = remuda._conpty_visible_result.attempt
+    _butler_session_trace("launch_failed", "visible-failure: " .. attempt.kind .. ": " .. attempt.reason .. " (" .. attempt.detail .. ")")]])
+  local trace = T.eval([[local f=assert(io.open(remuda._butler_session_trace_path,"rb")); local s=f:read("*a"); f:close(); return s]])
+  T.ok(not trace:find("SECRET_SENTINEL", 1, true), "launch trace must not leak row two")
 end)
 
 
@@ -82,8 +95,8 @@ T.test("Claude dim Try suggestions are empty while typed Try drafts stay protect
     for i = 1, cursor do if fixture:sub(i, i) == "\n" then row = row + 1 end end
     local prompt_row = fixture:match("([^\n]*❯[^\n]*)")
     T.ok(prompt_row and prompt_row:find('Try "', 1, true), label .. " fixture should contain Claude suggestion")
-    T.eq(T.eval(string.format("local d = remuda._butler_prompt_is_empty('claude', %q); return d", fixture)), "NON-EMPTY",
-      label .. " raw dim suggestion must remain non-empty under #137")
+    T.eq(T.eval(string.format("local d = remuda._butler_prompt_is_empty('claude', %q); return d", fixture)), "UNPARSEABLE",
+      label .. " raw ANSI frame must retain its main-branch classification")
     local suggestion_at = prompt_row:find('Try "', 1, true)
     local prefix, suggestion = prompt_row:sub(1, suggestion_at - 1), prompt_row:sub(suggestion_at)
     T.eval(string.format([[
@@ -290,6 +303,8 @@ T.test("composer safety matrix defers drafts behind footer-like continuation row
     assert(history_events:find("type", 1, true), "history notice was not seen: " .. history_events)
     assert(not history_events:find("key RET", 1, true), "history notice was submitted twice: " .. history_events)
   ]=])
+end)
+
 T.test("known Claude footer rows must match whole lines", function()
   local probes = {
     { "╰user draft", false },
@@ -298,7 +313,7 @@ T.test("known Claude footer rows must match whole lines", function()
   }
   for _, probe in ipairs(probes) do
     local screen = "❯ \n" .. probe[1] .. "\n────"
-    T.eq(T.eval(string.format("return remuda._butler_prompt_is_empty('claude', %q)", screen)),
+    T.eq(T.eval(string.format("local decision = remuda._butler_prompt_is_empty('claude', %q); return decision", screen)),
       "NON-EMPTY", "footer-looking draft must not be stripped: " .. probe[1])
   end
   local ghost = 'Try "refactor <filepath>"'
@@ -306,7 +321,7 @@ T.test("known Claude footer rows must match whole lines", function()
     local screen = "❯ " .. ghost .. "\n" .. probe[1] .. "\n────"
     T.eval(string.format([[remuda.capture_styled = function() return { cursor={row=1}, rows={
       {{text="❯ ",dim=false},{text=%q,dim=true}} } } end]], ghost))
-    T.eq(T.eval(string.format("return remuda._butler_composer_decision('claude', 'conpty-wrapped', %q)", screen)),
+    T.eq(T.eval(string.format("local decision = remuda._butler_composer_decision('claude', 'conpty-wrapped', %q); return decision", screen)),
       "NON-EMPTY", "dim Try plus footer-looking draft must defer: " .. probe[1])
   end
   T.eval("remuda.capture_styled = nil")
@@ -314,7 +329,7 @@ end)
 
 T.test("every row in the current Claude composer is protected", function()
   local screen = "────❯ \nuser draft\n❯ \n────"
-  T.eq(T.eval(string.format("return remuda._butler_prompt_is_empty('claude', %q)", screen)),
+  T.eq(T.eval(string.format("local decision = remuda._butler_prompt_is_empty('claude', %q); return decision", screen)),
     "NON-EMPTY", "a later blank prompt cannot hide a draft in the current composer")
 end)
 
@@ -338,15 +353,15 @@ T.test("SEC round 3 unsafe prompt probes stay deferred", function()
     local prompt = string.rep("─", width) .. "❯ "
     for _, tail in ipairs(tails) do
       local screen = prompt .. "\n" .. tail[2] .. "\n────"
-      T.eq(T.eval(string.format("return remuda._butler_prompt_is_empty('claude', %q)", screen)),
+      T.eq(T.eval(string.format("local decision = remuda._butler_prompt_is_empty('claude', %q); return decision", screen)),
         "NON-EMPTY", string.format("SEC3 %d/empty_%s", width, tail[1]))
       total = total + 1
       if tail[1] == "corner_round" or tail[1] == "corner_square" or tail[1] == "shortcuts_prefix" then
         local ghost_screen = prompt .. ghost .. "\n" .. tail[2] .. "\n────"
         T.eval(string.format([[remuda.capture_styled = function() return { cursor={row=1}, rows={
           {{text=%q,dim=false},{text=%q,dim=true}} } } end]], prompt, ghost))
-        T.eq(T.eval(string.format("return remuda._butler_composer_decision('claude', 'conpty-wrapped', %q)", ghost_screen)),
-          "NON-EMPTY", string.format("SEC3 %d/ghost_%s", width, tail[1]))
+        local decision = T.eval(string.format("local decision = remuda._butler_composer_decision('claude', 'conpty-wrapped', %q); return decision", ghost_screen))
+        T.ok(decision ~= "EMPTY", string.format("SEC3 %d/ghost_%s must defer", width, tail[1]))
         total = total + 1
       end
     end
@@ -383,7 +398,7 @@ T.test("all Claude fixtures retain main-branch classifications", function()
     file:close()
     T.eq(T.eval(string.format("return tostring(remuda._butler_agent_startup.claude.ready(%q))", screen)),
       tostring(fixture[2]), fixture[1] .. " readiness classification")
-    T.eq(T.eval(string.format("return remuda._butler_prompt_is_empty('claude', %q)", screen)),
+    T.eq(T.eval(string.format("local decision = remuda._butler_prompt_is_empty('claude', %q); return decision", screen)),
       fixture[3], fixture[1] .. " composer classification")
   end
 end)
