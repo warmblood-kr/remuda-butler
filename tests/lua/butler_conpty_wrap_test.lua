@@ -55,6 +55,10 @@ end)
 
 -- Launch a probe session whose screen never becomes ready; return reason, detail and the
 -- rendered sessions output / launch trace for that attempt.
+-- Lua literal with every non-printable byte escaped, so invalid UTF-8 survives the eval transport.
+local function esc(text)
+  return '"' .. text:gsub('[^ -!#-%[%]-~]', function(c) return string.format("\\%03d", c:byte()) end) .. '"'
+end
 local probe_count = 0
 local function launch_diagnostic(kind, screen, throw)
   probe_count = probe_count + 1
@@ -63,13 +67,13 @@ local function launch_diagnostic(kind, screen, throw)
     remuda._butler_agent_builders[%q] = function() return { "sh", "-c", "sleep 60" } end
     remuda._butler_test_force_launch_probe = remuda._butler_test_force_launch_probe or {}
     remuda._butler_test_force_launch_probe[%q] = true
-    remuda.capture = function(session) if session == %q then if %s then error(%q, 0) end return %q end return "" end
+    remuda.capture = function(session) if session == %q then if %s then error(%s, 0) end return %s end return "" end
     remuda._diag = remuda._diag or {}
     remuda._butler_choose_async({ %q }, {
       name = %q, cwd = os.getenv("XDG_DATA_HOME"), timeout = 4,
       spec = function() return {} end, env = function() return {} end,
     }, function(session, agent, attempts) remuda._diag[%q] = attempts[1] end)
-  ]], kind, name, name, tostring(throw == true), screen, screen, kind, name, name))
+  ]], kind, name, name, tostring(throw == true), esc(screen), esc(screen), kind, name, name))
   T.wait_until(function()
     return T.eval(string.format("return tostring(remuda._diag[%q] ~= nil)", name)) == "true"
   end, 12, name .. " launch diagnostic")

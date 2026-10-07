@@ -178,6 +178,9 @@ return {
     ["butler.agent"] = {
       { id = "claude", order = 10, executable = "claude", requires = "claude",
         argv = function(_, spec) return host._butler_agent_builders.claude(spec) end,
+        -- Launch readiness only says the session reached a Claude composer, so it also accepts the joined
+        -- dim 'Try "' hint (ConPTY). It is not permission to type: agents/claudecode.lua startup.ready keeps
+        -- the empty-suffix match, and the unchanged composer gate (notice.lua) decides when to type.
         ready = function(_, screen)
           if screen:find("─\n❯", 1, true) then return true end
           for line in (screen .. "\n"):gmatch("(.-)\n") do

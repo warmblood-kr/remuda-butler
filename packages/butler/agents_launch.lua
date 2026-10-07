@@ -39,22 +39,77 @@ end
 local function one_line(value)
   return (tostring(value or ""):match("^[^\r\n]*") or ""):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
 end
--- Diagnostics that reach detail/sessions/launch trace show ROW 1 of the screen only: control
--- sequences stripped, cut at 80 characters, "<empty first row>" when it is blank. Never a later row.
-local function screen_detail(screen)
-  local row = tostring(screen or ""):match("^[^\r\n]*") or ""
-  -- String controls (OSC/DCS/APC/PM) carry hidden payloads such as hyperlink targets: drop them whole,
-  -- an unterminated one to the end of the row, then CSI and any remaining control characters.
-  row = row:gsub("\27[%]P_^X][^\7\27]*\7", ""):gsub("\27[%]P_^X].-\27\\", ""):gsub("\27[%]P_^X].*$", "")
-  row = row:gsub("\27%[[%d;?]*[%a]", ""):gsub("%c", ""):gsub("^%s+", ""):gsub("%s+$", "")
-  if row == "" then return "<empty first row>" end
-  local chars, count = {}, 0
-  for char in row:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
-    count = count + 1
-    if count > 80 then break end
+-- Every screen- or capture-derived diagnostic (detail, sessions, launch trace) goes through sanitize_row:
+-- first row only, string controls and escape sequences dropped whole (BEL ends only an OSC; DCS/APC/PM/SOS
+-- end only at ST; UTF-8 C1 forms too; an unterminated one runs to the end of the row), control characters
+-- removed, invalid UTF-8 replaced by '?', and cut at 80 characters and 240 bytes.
+local function sanitize_row(text)
+  local row = tostring(text or ""):match("^[^\r\n]*") or ""
+  local out, i, n = {}, 1, #row
+  local function string_end(from, bel_ends)
+    for j = from, n do
+      local b = row:byte(j)
+      if (bel_ends and b == 7) then return j + 1 end
+      if b == 27 and row:byte(j + 1) == 92 then return j + 2 end
+      if b == 194 and row:byte(j + 1) == 156 then return j + 2 end
+    end
+    return n + 1
+  end
+  local function csi_end(from)
+    local j = from
+    while row:byte(j) and row:byte(j) >= 0x30 and row:byte(j) <= 0x3F do j = j + 1 end
+    while row:byte(j) and row:byte(j) >= 0x20 and row:byte(j) <= 0x2F do j = j + 1 end
+    local final = row:byte(j)
+    if final and final >= 0x40 and final <= 0x7E then j = j + 1 end
+    return j
+  end
+  while i <= n do
+    local b, nxt = row:byte(i), row:byte(i + 1)
+    if b == 27 then
+      local c = row:sub(i + 1, i + 1)
+      if c == "]" then i = string_end(i + 2, true)
+      elseif c == "P" or c == "_" or c == "^" or c == "X" then i = string_end(i + 2, false)
+      elseif c == "[" then i = csi_end(i + 2)
+      else
+        local j = i + 1
+        while row:byte(j) and row:byte(j) >= 0x20 and row:byte(j) <= 0x2F do j = j + 1 end
+        i = j + 1
+      end
+    elseif b == 194 and nxt and nxt >= 128 and nxt <= 159 then
+      if nxt == 0x9D then i = string_end(i + 2, true)
+      elseif nxt == 0x90 or nxt == 0x9F or nxt == 0x9E or nxt == 0x98 then i = string_end(i + 2, false)
+      elseif nxt == 0x9B then i = csi_end(i + 2)
+      else i = i + 2 end
+    elseif b < 32 or b == 127 then i = i + 1
+    else out[#out + 1] = string.char(b); i = i + 1 end
+  end
+  row = table.concat(out):gsub("^%s+", ""):gsub("%s+$", "")
+  local chars, count, bytes, k = {}, 0, 0, 1
+  while k <= #row do
+    local b = row:byte(k)
+    local len = b < 0x80 and 1 or (b >= 0xC2 and b <= 0xDF) and 2 or (b >= 0xE0 and b <= 0xEF) and 3
+      or (b >= 0xF0 and b <= 0xF4) and 4 or 0
+    local char = len > 0 and row:sub(k, k + len - 1) or ""
+    local valid = len > 0 and #char == len
+    for c = 2, valid and len or 0 do
+      local cb = char:byte(c)
+      if cb < 0x80 or cb > 0xBF then valid = false end
+    end
+    if valid and len > 1 then
+      local second = char:byte(2)
+      if (b == 0xE0 and second < 0xA0) or (b == 0xED and second > 0x9F)
+          or (b == 0xF0 and second < 0x90) or (b == 0xF4 and second > 0x8F) then valid = false end
+    end
+    if valid then k = k + len else char, k = "?", k + 1 end
+    if count >= 80 or bytes + #char > 240 then break end
+    count, bytes = count + 1, bytes + #char
     chars[#chars + 1] = char
   end
-  return table.concat(chars)
+  return (table.concat(chars):gsub("%s+$", ""))
+end
+local function screen_detail(screen)
+  local row = sanitize_row(screen)
+  return row == "" and "<empty first row>" or row
 end
 local function readiness_timeout()
   local configured = tonumber(remuda._butler_readiness_timeout or os.getenv("REMUDA_BUTLER_READINESS_TIMEOUT"))
@@ -178,7 +233,7 @@ local function choose(candidates, opts, done)
     if not alive(state.name) then fail_candidate("exited", "session exited before prompt became ready"); return end
     local captured, screen = pcall(remuda.capture, state.name)
     if not captured then
-      state.last_capture_error = one_line(screen)
+      state.last_capture_error = sanitize_row(screen)
       screen = ""
     end
     screen = tostring(screen or ""):gsub("\r\n", "\n"):gsub("\r", "\n")
