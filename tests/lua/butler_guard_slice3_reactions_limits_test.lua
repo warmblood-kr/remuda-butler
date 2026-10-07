@@ -48,7 +48,13 @@ local function start_butler()
       local payload = remuda.json.encode({ hook_event_name = 'PermissionRequest', tool_name = over.tool or 'WebFetch',
         tool_input = over.input, cwd = over.cwd or '/p/w', session_id = 's1' })
       local before = #remuda._t_replies
-      remuda._butler_command_run('guard', { 'guard' }, { stdin = payload, env =
+      local member = over.member and remuda._butler_bus.agents[over.member]
+      if over.member and not member then
+        member = { id = 'test-' .. over.member, alias = over.member, kind = 'claude', session_name = 'test-' .. over.member }
+        remuda._butler_bus.agents[over.member] = member
+      end
+      remuda._butler_command_run('guard', { 'guard' }, { kind = 'session',
+        session = member and member.session_name or remuda._butler_bus.agents.butler.session_name, stdin = payload, env =
         { REMUDA_BUTLER_AGENT_ALIAS = over.alias or 'ss-a', REMUDA_BUTLER_AGENT_KIND = 'claude' } })
       if #remuda._t_replies > before then return #remuda._t_replies end
       return 0
@@ -100,8 +106,9 @@ end
 local function grants() return tonumber(T.eval("return remuda._t_grants()")) end
 -- The store's clock: now() is T0 + offset, set by the test.
 local function at(offset) T.eval(("remuda.butler.guard_grants.now = function() return %d end"):format(1790000000 + offset)) end
-local function perm(alias, host, over)
-  return tonumber(T.eval(("return remuda._t_perm({ input = { url = 'https://%s/' }, alias = %q })"):format(host, alias)))
+local function perm(alias, host, member)
+  local member_lua = member and (", member = " .. string.format("%q", member)) or ""
+  return tonumber(T.eval(("return remuda._t_perm({ input = { url = 'https://%s/' }, alias = %q%s })"):format(host, alias, member_lua)))
 end
 
 T.test("a cross is remembered for the same request for 10 minutes; others are asked as usual", function()
@@ -127,8 +134,8 @@ T.test("a cross is remembered for the same request for 10 minutes; others are as
   T.expect(true, "", "ok - remembered deny")
 end)
 
--- The agent names itself (alias / session), so no limit may depend on that name alone.
-T.test("changing the alias does not escape a remembered cross or the per-scope post limit", function()
+-- Forwarded aliases do not change the resolved member or its per-agent limit.
+T.test("forged aliases do not escape a remembered cross or approval limits", function()
   on("l-alias")
   at(0)
   local first = perm("ss-a", "a.test")
@@ -136,10 +143,19 @@ T.test("changing the alias does not escape a remembered cross or the per-scope p
   T.eq(reply_out(first), "done:" .. DENY, "denied")
   T.eq(reply_out(perm("ss-renamed", "a.test")), "done:" .. DENY, "a new alias still hits the remembered cross")
   T.eq(T.eval("return remuda._t_count()"), "1", "and is not asked")
-  for i = 1, 10 do
-    T.expect(perm("ss-n" .. i, "s.test") > 0, "request " .. i .. " from a new alias")
+  for i = 1, 4 do
+    T.expect(perm("ss-n" .. i, "s.test") > 0, "request " .. i .. " with forged alias")
     T.eq(answer(tonumber(T.eval("return remuda._t_count()")), "approve"), "true nil", "answered " .. i)
   end
+  T.eq(perm("ss-n5", "u.test"), 0, "a new alias cannot evade the per-agent minute limit")
+  at(61)
+  for i = 5, 9 do
+    T.expect(perm("ss-n" .. i, "s.test") > 0, "request " .. i .. " after the minute window")
+    T.eq(answer(tonumber(T.eval("return remuda._t_count()")), "approve"), "true nil", "answered " .. i)
+  end
+  at(122)
+  T.expect(perm("ss-n10", "s.test") > 0, "request 10 after the next minute window")
+  T.eq(answer(tonumber(T.eval("return remuda._t_count()")), "approve"), "true nil", "answered 10")
   T.eq(perm("ss-n11", "s.test"), 0, "the 11th post for one scope in an hour is refused whatever the alias")
   T.expect(perm("ss-n11", "t.test") > 0, "another scope is asked", "ok - alias")
 end)
@@ -163,11 +179,12 @@ T.test("at most 5 posts per agent per minute and 30 per hour overall; refused wi
   T.eq(perm("ss-a", "h6.test"), 0, "the sixth in a minute is refused: Claude shows its own prompt")
   T.eq(T.eval("return remuda._t_count()"), "5", "without a post")
   T.expect(has(T.eval("return remuda._t_lines()"), '"event":"approval_limited"'), "audited")
-  T.expect(perm("ss-b", "h6.test") > 0, "another agent is not limited")
+  T.expect(perm("ss-b", "h6.test", "second") > 0, "another registered member is not limited")
   at(61)
   T.expect(perm("ss-a", "h7.test") > 0, "a minute later the agent may ask again")
   T.eval([[for i = 1, 23 do
-    remuda._t_perm({ input = { url = 'https://g' .. i .. '.test/' }, alias = 'ss-g' .. math.floor(i / 5) })
+    local alias = 'ss-g' .. math.floor(i / 5)
+    remuda._t_perm({ input = { url = 'https://g' .. i .. '.test/' }, alias = alias, member = alias })
     remuda._t_answer(remuda._t_count(), 'approve')
   end]])
   T.eq(T.eval("return remuda._t_count()"), "30", "30 posts in the hour")

@@ -6206,7 +6206,8 @@ end)()
       remuda.butler.approve_text, remuda.butler.schedule_cli, remuda._butler_command_run }
     remuda._butler_commands_config = { current_agent = function() return nil end, OPERATOR = "operator",
       contributions = function() return {} end, registry_list = function() return {} end,
-      statusline = function() return "" end, resolve = function(name) return name end,
+      statusline = function() return "" end, resolve_principal = function() return { tag = "unidentified" } end,
+      resolve = function(name) return name end,
       mail = remuda._butler_mail }
     remuda._butler_contribute, remuda.extension_command = function() end, function() end
     remuda._butler_reply_target = function(_, id)

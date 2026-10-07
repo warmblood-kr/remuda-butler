@@ -25,8 +25,8 @@ local MAX_OPEN = 20
 local MAX_OPEN_PER_SESSION = 5
 local RATE_PER_10_MIN = 30
 -- With grants on (documented in docs/butler.md "Request limits"): posts per scope per hour and overall per hour,
--- how long an owner's cross is remembered for the same scope, and a per-session-name bucket as an extra. The agent
--- names its own session (data.session), so only the scope limits and the remembered cross are keyed without it.
+-- how long an owner's cross is remembered for the same scope, and a per-member bucket as an extra. The session key
+-- is the resolved principal alias, not callback metadata.
 -- A request over a limit gets no post, so Claude shows its own prompt; a remembered cross answers deny at once.
 local PER_AGENT_PER_MIN, PER_SCOPE_PER_HOUR, GLOBAL_PER_HOUR, DENY_MEMORY_S = 5, 10, 30, 600
 local EXPIRY_NOTICE_WAIT_S, EXPIRY_SCAN_S, NOTE_MAX = 60, 5, 200
@@ -560,6 +560,10 @@ local function digest_tick()
     if day > floor then
       if not (D.facts and D.facts.day == day) then
         local count, last = policy.day_facts(day)
+        if not count then
+          if type(remuda.log) == "function" then pcall(remuda.log, "warn", "guard digest audit archives cannot be read") end
+          return
+        end
         D.facts = { day = day, count = count, last = last }
       end
       if D.facts.count == 0 then

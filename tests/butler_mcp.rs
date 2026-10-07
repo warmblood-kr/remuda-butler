@@ -192,7 +192,7 @@ fn butler_status_is_a_live_mcp_tool_not_a_terminal_scrape() {
     let status_line = eval(
         &path,
         &format!(
-            "return remuda._dispatch_extension_command('butler', {{'statusline', {}}}, {{stdin = {}}})",
+            "return remuda._extension_commands.butler({{'statusline', {}}}, {{kind='session',session='butler',stdin={}}})",
             serde_json::to_string(&status_path).unwrap(),
             serde_json::to_string(snapshot).unwrap(),
         ),
@@ -209,7 +209,7 @@ fn butler_status_is_a_live_mcp_tool_not_a_terminal_scrape() {
     let failed_write_line = eval(
         &path,
         &format!(
-            "return remuda._dispatch_extension_command('butler', {{'statusline', {}}}, {{stdin = {}}})",
+            "return remuda._extension_commands.butler({{'statusline', {}}}, {{kind='session',session='butler',stdin={}}})",
             serde_json::to_string(&failed_write_path.display().to_string()).unwrap(),
             serde_json::to_string(snapshot).unwrap(),
         ),
@@ -222,7 +222,7 @@ fn butler_status_is_a_live_mcp_tool_not_a_terminal_scrape() {
     let non_status_line = eval(
         &path,
         &format!(
-            "return remuda._dispatch_extension_command('butler', {{'statusline', {}}}, {{stdin = {}}})",
+            "return remuda._extension_commands.butler({{'statusline', {}}}, {{kind='session',session='butler',stdin={}}})",
             serde_json::to_string(&non_status_path.display().to_string()).unwrap(),
             serde_json::to_string(snapshot).unwrap(),
         ),
@@ -255,7 +255,7 @@ fn butler_status_is_a_live_mcp_tool_not_a_terminal_scrape() {
     let status_line = eval(
         &path,
         &format!(
-            "return remuda._dispatch_extension_command('butler', {{'statusline', {}}}, {{stdin = {}}})",
+            "return remuda._extension_commands.butler({{'statusline', {}}}, {{kind='session',session='butler',stdin={}}})",
             serde_json::to_string(&status_path).unwrap(),
             serde_json::to_string(snapshot).unwrap(),
         ),
@@ -268,7 +268,7 @@ fn butler_status_is_a_live_mcp_tool_not_a_terminal_scrape() {
     let status_line = eval(
         &path,
         &format!(
-            "return remuda._dispatch_extension_command('butler', {{'statusline', {}}}, {{stdin = {}}})",
+            "return remuda._extension_commands.butler({{'statusline', {}}}, {{kind='session',session='butler',stdin={}}})",
             serde_json::to_string(&status_path).unwrap(),
             serde_json::to_string(snapshot).unwrap(),
         ),

@@ -16,7 +16,8 @@ local mail = { unread = function(id) return unread[id] or 0 end }
 remuda._butler_sessions_config = { bus = bus, mail = mail, json_field = function() end }
 remuda._butler_commands_config = { current_agent = function() end, OPERATOR = "operator",
   contributions = function() return {} end, registry_list = function() end,
-  statusline = function() end, resolve = function(name)
+  statusline = function() end, resolve_principal = function() return { tag = "unidentified" } end,
+  resolve = function(name)
     if not bus.agents[name] then error("unknown", 0) end
     return name
   end, mail = mail }

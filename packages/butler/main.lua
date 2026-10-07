@@ -221,6 +221,10 @@ local function statusline_integer(value)
 end
 
 local function statusline(args, caller)
+  local principal = caller_principal and caller_principal.resolve(caller)
+  if not principal or principal.tag ~= "member" then
+    return "Butler cannot identify this caller for status telemetry. Next: run from a registered Butler session or upgrade Remuda core."
+  end
   local snapshot = {}
   local input = caller and caller.stdin
   if type(input) == "string" then
@@ -631,7 +635,7 @@ end
 -- CLI verbs and the argv parser live in commands.lua.
 remuda._butler_commands_config = { current_agent = current_agent, OPERATOR = OPERATOR,
   contributions = contributions, registry_list = registry_list, statusline = statusline,
-  resolve = resolve, mail = mail,
+  resolve = resolve, resolve_principal = function(caller) return caller_principal.resolve(caller) end, mail = mail,
 }
 remuda.exec("butler/schedule")
 remuda.exec("butler/schedule_cli")

@@ -14,7 +14,8 @@ local function start_butler()
       remuda.mkdir(d); remuda._butler_guard_dir = d; return d
     end
     remuda._t_hook = function(stdin)
-      return remuda._butler_command_run('guard', {'guard'}, { stdin = stdin, env =
+      return remuda._butler_command_run('guard', {'guard'}, { kind = 'session',
+        session = remuda._butler_bus.agents.butler.session_name, stdin = stdin, env =
         { REMUDA_BUTLER_AGENT_ALIAS = 'ss-a', REMUDA_BUTLER_AGENT_KIND = 'claude' } })
     end
     remuda._t_lines = function()
@@ -53,8 +54,8 @@ T.test("switch changes are audited with who and when, even when turned off", fun
   T.eval("remuda._t_guard({'guard','approvals','on'}, {})")
   T.eval("remuda._t_guard({'guard','off'}, {})")
   local lines = T.eval("return remuda._t_lines()")
-  local want = { { "guard on", "lead-1" }, { "guard deny on", "lead-1" }, { "guard deny off", "operator" },
-    { "guard approvals on", "operator" }, { "guard off", "operator" } }
+  local want = { { "guard on", "butler" }, { "guard deny on", "butler" }, { "guard deny off", "butler" },
+    { "guard approvals on", "butler" }, { "guard off", "butler" } }
   local i = 0
   for line in lines:gmatch("[^\n]+") do
     if not has(line, '"event":"chain"') then -- the genesis line is not a switch
@@ -180,7 +181,7 @@ T.test("turning a switch off is audited first; an unwritable audit still switche
   T.eval("remuda._t_guard({'guard','off'}, {env={REMUDA_BUTLER_AGENT_ALIAS='lead-1'}})")
   local lines = T.eval("return remuda._t_lines()")
   local last; for l in lines:gmatch("[^\n]+") do last = l end
-  T.expect(has(last, '"summary":"guard off"') and has(last, '"session":"lead-1"')
+  T.expect(has(last, '"summary":"guard off"') and has(last, '"session":"butler"')
     and has(T.eval("return remuda._t_guard({'guard','status'})"), "guard: off"), "off line missing: " .. last, "ok - off audited first")
 end)
 

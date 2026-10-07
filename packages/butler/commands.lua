@@ -7,6 +7,7 @@ local OPERATOR = assert(config.OPERATOR)
 local contributions = assert(config.contributions)
 local registry_list = assert(config.registry_list)
 local statusline = assert(config.statusline)
+local resolve_principal = assert(config.resolve_principal)
 local resolve = assert(config.resolve)
 local mail = assert(config.mail)
 local typed_lines_cli = assert(remuda.butler and remuda.butler.typed_lines_cli,
@@ -321,12 +322,15 @@ command(14, "shell-lines", "  remuda butler shell-lines on|off", function(args, 
   return typed_lines_cli.cli(args, current_agent(caller))
 end)
 command(21, "guard", "  remuda butler guard on|off|status | approvals on|off|status | deny on|off|status | grants [on|off|status] | stats | verify  (off by default)", function(args, caller)
-  -- Hooks and read-only queries keep their existing paths. Every CLI switch
-  -- resolves the supplied caller before changing shared state.
-  if (#args == 2 and (args[2] == "on" or args[2] == "off"))
+  -- Resolve hooks and switches once, before policy, approval, or audit state can change.
+  local hook = args[2] == nil
+  local switch = (#args == 2 and (args[2] == "on" or args[2] == "off"))
       or (#args == 3 and (args[2] == "approvals" or args[2] == "deny" or args[2] == "grants")
-        and (args[3] == "on" or args[3] == "off")) then
-    current_agent(caller)
+        and (args[3] == "on" or args[3] == "off"))
+  local principal
+  if hook or switch then principal = resolve_principal(caller) end
+  if hook or switch then
+    return remuda.butler.guard_policy.run(args, caller, principal)
   end
   return remuda.butler.guard_policy.run(args, caller)
 end)

@@ -9975,7 +9975,7 @@ fn butler_quota_statusline_keeps_line_one_and_adds_rate_limits() {
     let status_path_lua = lua_raw_string(&status_path.to_string_lossy());
     let snapshot_lua = lua_raw_string(snapshot);
     let line = eval(&path, &format!(
-        "return remuda._dispatch_extension_command('butler', {{'statusline', {status_path_lua}}}, {{stdin = {snapshot_lua}}})"
+        "return remuda._extension_commands.butler({{'statusline', {status_path_lua}}}, {{kind='session',session='butler',stdin={snapshot_lua}}})"
     ));
     assert_eq!(
         line,
@@ -10022,7 +10022,7 @@ fn butler_quota_statusline_keeps_line_one_and_adds_rate_limits() {
     let no_limits = r#"{"model":{"display_name":"Claude Opus 4.6"},"context_window":{"total_input_tokens":12345,"context_window_size":200000,"used_percentage":6}}"#;
     let no_limits_lua = lua_raw_string(no_limits);
     eval(&path, &format!(
-        "return remuda._dispatch_extension_command('butler', {{'statusline', {status_path_lua}}}, {{stdin = {no_limits_lua}}})"
+        "return remuda._extension_commands.butler({{'statusline', {status_path_lua}}}, {{kind='session',session='butler',stdin={no_limits_lua}}})"
     ));
     assert_eq!(
         std::fs::read_to_string(&status_path).expect("read status without limits"),

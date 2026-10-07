@@ -10,6 +10,10 @@ use those commands until upgraded. A caller classified as `outside` maps to the
 operator under the named transitional policy `outside_is_operator_transitional`;
 that mapping is written to `guard-audit.jsonl` as a `caller_policy` event, even
 when guard observation is off. If the audit write fails, the caller is refused.
+Guard hooks resolve the caller before writing audit or approval state. Registered
+members and the audited outside operator may use them; service and unresolved
+callers are refused. Hook requester details come from that resolved principal.
+Status callbacks also refuse unresolved callers before writing telemetry.
 This is **not an isolation boundary: advisory daemon
 attribution within the cooperative model**.
 
@@ -870,10 +874,10 @@ With the grants switch on (off: no new behavior at all):
   once, without a post. Another scope, or the same request after 10 minutes,
   is asked as usual.
 
-The agent chooses its own session name and alias, so no control rests on that
-name alone: the remembered deny and the per-scope limit are keyed by scope
-only (the remembered deny also keeps the exact command text when no scope
-applies), and the per-session bucket does not replace them.
+The per-session bucket uses the alias from the resolved caller principal.
+Requester metadata cannot choose that bucket. Remembered denies and per-scope
+limits apply across sessions (and the remembered deny keeps exact command text
+when no scope applies), while the per-session bucket remains an extra limit.
 
 A request over a post limit is refused without a post: the hook prints no
 decision, so Claude shows its own prompt, and the refusal is an audit line

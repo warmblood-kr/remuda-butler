@@ -25,6 +25,16 @@ local function start_butler()
       f:close(); return table.concat(out, '\n')
     end
     remuda._t_posts, remuda._t_replies = {}, {}
+    remuda._t_caller = function(alias, kind)
+      alias = alias or 'ss-a'
+      local member = remuda._butler_bus.agents[alias]
+      if not member then
+        member = { id = 'test-' .. alias, alias = alias, kind = kind or 'claude', session_name = 'test-' .. alias }
+        remuda._butler_bus.agents[alias] = member
+      end
+      return { kind = 'session', session = member.session_name,
+        env = { REMUDA_BUTLER_AGENT_ALIAS = alias, REMUDA_BUTLER_AGENT_KIND = kind or 'claude' } }
+    end
     remuda.pending = function(opts)
       local r = { opts = opts }
       function r:resolve(code, out, err) self.done, self.code, self.out = true, code, out end
@@ -47,8 +57,9 @@ local function start_butler()
       local payload = remuda.json.encode({ hook_event_name = 'PermissionRequest', tool_name = over.tool or 'WebFetch',
         tool_input = over.input, cwd = over.cwd or '/p/w', session_id = 's1' })
       local before = #remuda._t_replies
-      remuda._butler_command_run('guard', { 'guard' }, { stdin = payload, env =
-        { REMUDA_BUTLER_AGENT_ALIAS = over.alias or 'ss-a', REMUDA_BUTLER_AGENT_KIND = 'claude' } })
+      local caller = remuda._t_caller(over.alias, over.kind)
+      caller.stdin = payload
+      remuda._butler_command_run('guard', { 'guard' }, caller)
       if #remuda._t_replies > before then return #remuda._t_replies end
       return 0
     end
