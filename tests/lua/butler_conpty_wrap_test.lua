@@ -57,3 +57,44 @@ T.test("a blank first row does not make a visible screen blank", function()
   T.eq(T.eval("return remuda._conpty_visible_result.reason"), "timeout",
     "visible content after a blank first row must not be classified as blank")
 end)
+
+
+T.test("Claude dim Try suggestions are empty while typed Try drafts stay protected", function()
+  local repo = assert(os.getenv("REMUDA_LUA_REPO"))
+  for _, size in ipairs({ "100", "120", "140" }) do
+    local file = assert(io.open(repo .. "/tests/fixtures/claude-2.1.292-" .. size .. "x30.txt", "rb"))
+    local fixture = file:read("a")
+    file:close()
+    local cursor = assert(fixture:find("────────────────", 1, true), "fixture composer border")
+    local row = 1
+    for i = 1, cursor do if fixture:sub(i, i) == "\n" then row = row + 1 end end
+    local prompt_row = fixture:match("([^\n]*❯[^\n]*)")
+    T.ok(prompt_row and prompt_row:find('Try "', 1, true), size .. " fixture should contain Claude suggestion")
+    T.eq(T.eval(string.format("local d = remuda._butler_prompt_is_empty('claude', %q); return d", fixture)), "NON-EMPTY",
+      size .. " raw dim suggestion must remain non-empty under #137")
+    local suggestion_at = prompt_row:find('Try "', 1, true)
+    local prefix, suggestion = prompt_row:sub(1, suggestion_at - 1), prompt_row:sub(suggestion_at)
+    T.eval(string.format([[
+      remuda.capture = function(name) if name == %q then return %q end return "" end
+      remuda.capture_styled = function(name)
+        if name ~= %q then return nil end
+        local rows = {}
+        for i = 1, %d do rows[i] = {} end
+        rows[%d] = { { text = %q }, { text = %q, dim = true } }
+        return { cursor = { row = %d }, rows = rows }
+      end
+      remuda._butler_bus.agents[%q] = { kind = "claude" }
+    ]], "conpty-" .. size, fixture, "conpty-" .. size, row, row, prefix, suggestion, row, "conpty-" .. size))
+    T.eq(T.eval(string.format("local d = remuda._butler_composer_decision('claude', %q, %q); return d", "conpty-" .. size, fixture)),
+      "EMPTY", size .. " dim Try suggestion should be empty by prefix")
+  end
+
+  local draft = "Try \"refactor my file\""
+  T.eval(string.format([[
+    remuda.capture_styled = function(name)
+      return { cursor = { row = 1 }, rows = { { { text = "────❯ " .. %q } } } }
+    end
+  ]], draft))
+  T.eq(T.eval(string.format("local d = remuda._butler_composer_decision('claude', 'typed-try', %q); return d", "❯ " .. draft .. "\n────")),
+    "NON-EMPTY", "normal-style text beginning Try must remain a draft")
+end)
