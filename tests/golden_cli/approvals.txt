@@ -1,0 +1,401 @@
+### remuda butler "approvals"
+exit: 0
+stdout:
+ID  KIND  SUMMARY  ASKER  EXPIRES-IN
+A7K2  agent  synthetic  worker  1m
+Next: remuda butler approve ID, or remuda butler deny ID
+stderr:
+
+actions:
+approval.list()
+state: open:0
+
+### remuda butler "approvals" "--help"
+exit: 0
+stdout:
+Usage: remuda butler approvals
+Example: remuda butler approvals
+stderr:
+
+actions:
+state: open:0
+
+### remuda butler "approvals" "-h"
+exit: 0
+stdout:
+Usage: remuda butler approvals
+Example: remuda butler approvals
+stderr:
+
+actions:
+state: open:0
+
+### remuda butler "approvals" "help"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler approvals
+Example: remuda butler approvals
+Next: remuda butler approvals
+actions:
+state: open:0
+
+### remuda butler "approvals" "extra"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler approvals
+Example: remuda butler approvals
+Next: remuda butler approvals
+actions:
+state: open:0
+
+### remuda butler "approvals" "--"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler approvals
+Example: remuda butler approvals
+Next: remuda butler approvals
+actions:
+state: open:0
+
+### remuda butler "approvals" "--help" "extra"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler approvals
+Example: remuda butler approvals
+Next: remuda butler approvals
+actions:
+state: open:0
+
+### remuda butler "approvals" "-h" "extra"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler approvals
+Example: remuda butler approvals
+Next: remuda butler approvals
+actions:
+state: open:0
+
+### [agent] remuda butler "approvals" "--help"
+exit: 0
+stdout:
+Usage: remuda butler approvals
+Example: remuda butler approvals
+stderr:
+
+actions:
+state: open:0
+
+### remuda butler "approve" "A7K2"
+exit: 0
+stdout:
+Approved request A7K2 (synthetic); joining now. The result goes to the request thread and the asker's mail.
+Next: remuda butler approvals
+stderr:
+
+actions:
+approval.answer(A7K2|approve|operator (terminal))
+state: approved:1
+
+### remuda butler "deny" "A7K2"
+exit: 0
+stdout:
+Denied request A7K2 (synthetic).
+Next: remuda butler approvals
+stderr:
+
+actions:
+approval.answer(A7K2|deny|operator (terminal))
+state: denied:1
+
+### remuda butler "approve"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler approve ID
+Example: remuda butler approve A7K2
+Next: remuda butler approvals
+actions:
+state: open:0
+
+### remuda butler "deny"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler deny ID
+Example: remuda butler deny A7K2
+Next: remuda butler approvals
+actions:
+state: open:0
+
+### remuda butler "approve" ""
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler approve ID
+Example: remuda butler approve A7K2
+Next: remuda butler approvals
+actions:
+state: open:0
+
+### remuda butler "deny" ""
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler deny ID
+Example: remuda butler deny A7K2
+Next: remuda butler approvals
+actions:
+state: open:0
+
+### remuda butler "approve" "bad id"
+exit: 1
+stdout:
+
+stderr:
+unknown approval request
+Next: remuda butler approvals
+actions:
+approval.answer(bad id|approve|operator (terminal))
+state: open:1
+
+### remuda butler "deny" "bad id"
+exit: 1
+stdout:
+
+stderr:
+unknown approval request
+Next: remuda butler approvals
+actions:
+approval.answer(bad id|deny|operator (terminal))
+state: open:1
+
+### remuda butler "approve" "-A7K2"
+exit: 1
+stdout:
+
+stderr:
+unknown approval request
+Next: remuda butler approvals
+actions:
+approval.answer(-A7K2|approve|operator (terminal))
+state: open:1
+
+### remuda butler "deny" "-A7K2"
+exit: 1
+stdout:
+
+stderr:
+unknown approval request
+Next: remuda butler approvals
+actions:
+approval.answer(-A7K2|deny|operator (terminal))
+state: open:1
+
+### remuda butler "approve" "--" "A7K2"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler approve ID
+Example: remuda butler approve A7K2
+Next: remuda butler approvals
+actions:
+state: open:0
+
+### remuda butler "deny" "--" "A7K2"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler deny ID
+Example: remuda butler deny A7K2
+Next: remuda butler approvals
+actions:
+state: open:0
+
+### remuda butler "approve" "A7K2" "extra"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler approve ID
+Example: remuda butler approve A7K2
+Next: remuda butler approvals
+actions:
+state: open:0
+
+### remuda butler "deny" "A7K2" "extra"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler deny ID
+Example: remuda butler deny A7K2
+Next: remuda butler approvals
+actions:
+state: open:0
+
+### remuda butler "approve" "A7K2=1"
+exit: 1
+stdout:
+
+stderr:
+unknown approval request
+Next: remuda butler approvals
+actions:
+approval.answer(A7K2=1|approve|operator (terminal))
+state: open:1
+
+### remuda butler "deny" "A7K2=1"
+exit: 1
+stdout:
+
+stderr:
+unknown approval request
+Next: remuda butler approvals
+actions:
+approval.answer(A7K2=1|deny|operator (terminal))
+state: open:1
+
+### remuda butler "approve" "--help"
+exit: 0
+stdout:
+Usage: remuda butler approve ID
+Example: remuda butler approve A7K2
+stderr:
+
+actions:
+state: open:0
+
+### remuda butler "deny" "-h"
+exit: 0
+stdout:
+Usage: remuda butler deny ID
+Example: remuda butler deny A7K2
+stderr:
+
+actions:
+state: open:0
+
+### remuda butler "approve" "--help" "A7K2"
+exit: 1
+stdout:
+
+stderr:
+Usage: remuda butler approve ID
+Example: remuda butler approve A7K2
+Next: remuda butler approvals
+actions:
+state: open:0
+
+### [agent] remuda butler "approve" "A7K2"
+exit: 1
+stdout:
+
+stderr:
+approve is operator-only. Next: wait for the owner's answer by mail; remuda butler inbox
+actions:
+state: open:0
+
+### [agent] remuda butler "deny" "A7K2"
+exit: 1
+stdout:
+
+stderr:
+deny is operator-only. Next: wait for the owner's answer by mail; remuda butler inbox
+actions:
+state: open:0
+
+### remuda butler "approve" "A7K2"
+exit: 1
+stdout:
+
+stderr:
+Request A7K2 was already expired.
+Next: remuda butler approvals
+actions:
+approval.answer(A7K2|approve|operator (terminal))
+state: expired:1
+
+### remuda butler "deny" "A7K2"
+exit: 1
+stdout:
+
+stderr:
+Request A7K2 was already denied.
+Next: remuda butler approvals
+actions:
+approval.answer(A7K2|deny|operator (terminal))
+state: denied:1
+
+### remuda butler "approve" "unknown"
+exit: 1
+stdout:
+
+stderr:
+unknown approval request
+Next: remuda butler approvals
+actions:
+approval.answer(unknown|approve|operator (terminal))
+state: open:1
+
+### remuda butler "deny" "unknown"
+exit: 1
+stdout:
+
+stderr:
+unknown approval request
+Next: remuda butler approvals
+actions:
+approval.answer(unknown|deny|operator (terminal))
+state: open:1
+
+### remuda butler "approve" "--"
+exit: 1
+stdout:
+
+stderr:
+Request -- was already expired.
+Next: remuda butler approvals
+actions:
+approval.answer(--|approve|operator (terminal))
+approval.expire(--)
+state: expired:1
+
+### remuda butler "deny" "--"
+exit: 1
+stdout:
+
+stderr:
+Request -- was already expired.
+Next: remuda butler approvals
+actions:
+approval.answer(--|deny|operator (terminal))
+approval.expire(--)
+state: expired:1
+
+### remuda butler "approve" "-x"
+exit: 1
+stdout:
+
+stderr:
+Request -x was already expired.
+Next: remuda butler approvals
+actions:
+approval.answer(-x|approve|operator (terminal))
+approval.expire(-x)
+state: expired:1
