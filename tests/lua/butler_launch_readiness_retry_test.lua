@@ -93,8 +93,23 @@ T.test("only a live blank screen is kept unverified at readiness timeout", funct
   probe_timeout("probe-screen-timeout", "retry_probe",
     '{ "sh", "-c", "sleep 60" }', "initializing agent", 1, "timeout", "false")
   local multiline = probe_timeout("probe-multiline-screen", "retry_probe",
-    '{ "sh", "-c", "sleep 60" }', "first visible row\nsecond visible row", 1, "timeout", "false")
-  T.ok(multiline:find("second visible row", 1, true), "timeout detail should include the whole screen: " .. multiline)
+    '{ "sh", "-c", "sleep 60" }', "first visible row\nsecond visible row\n" .. string.rep("later row content ", 20) .. "\nSECRET_SENTINEL_LATER_ROW", 1, "timeout", "false")
+  T.ok(multiline:find("second visible row", 1, true), "timeout detail should retain useful prompt context: " .. multiline)
+  T.ok(not multiline:find("SECRET_SENTINEL_LATER_ROW", 1, true), "timeout detail leaked later screen rows: " .. multiline)
+  local safe_outputs = T.eval(string.format([[
+    local attempt = remuda._probe_results["probe-multiline-screen"].attempts[1]
+    remuda._butler_attempts = { attempt }
+    local sessions = remuda._butler_sessions()
+    local path = %q .. "/session-trace.log"
+    remuda._butler_session_trace_path = path
+    _butler_session_trace("launch_failed", attempt.detail)
+    local file = assert(io.open(path, "r"))
+    local trace = file:read("a")
+    file:close()
+    return tostring(not sessions:find("SECRET_SENTINEL_LATER_ROW", 1, true)) .. "|"
+      .. tostring(not trace:find("SECRET_SENTINEL_LATER_ROW", 1, true))
+  ]], os.getenv("XDG_DATA_HOME")))
+  T.eq(safe_outputs, "true|true", "sessions and session trace must not expose later rows")
   probe_timeout("probe-dead-child", "retry_probe",
     '{ "sh", "-c", "exit 0" }', "", 3, "exited", "false")
   probe_timeout("probe-login-screen", "claude",

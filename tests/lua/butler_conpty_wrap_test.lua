@@ -117,4 +117,30 @@ T.test("Claude dim Try suggestions are empty while typed Try drafts stay protect
   ]], draft))
   T.eq(T.eval(string.format("local d = remuda._butler_composer_decision('claude', 'typed-try', %q); return d", "❯ " .. draft .. "\n────")),
     "NON-EMPTY", "normal-style text beginning Try must remain a draft")
+  T.eval([[remuda.capture_styled = function() return { cursor = { row = 1 }, rows = {
+    { { text = "❯ " }, { text = "generic suggestion", dim = true } },
+  } } end]])
+  T.eq(T.eval("local d = remuda._butler_composer_decision('claude', 'generic-dim', '❯ generic suggestion'); return d"),
+    "NON-EMPTY", "dim text outside Claude's Try suggestion must not override the raw draft")
+end)
+
+T.test("wrapped continuation rows keep notice policy from typing over attached drafts", function()
+  local wrapped = "────❯ \n─user draft\n────"
+  T.eq(T.eval(string.format("local d = remuda._butler_prompt_is_empty('claude', %q); return d", wrapped)),
+    "NON-EMPTY", "a rule-prefixed continuation is draft text")
+
+  local screen = "────❯ Try \"suggested text\"\ncontinuation user draft\n────"
+  T.eval(string.format([[
+    remuda._butler_bus.agents["attached-draft"] = { kind = "claude" }
+    remuda.capture = function(name) if name == "attached-draft" then return %q end return "" end
+    remuda.capture_styled = function(name)
+      if name ~= "attached-draft" then return nil end
+      return { cursor = { row = 1 }, rows = { {
+        { text = "────❯ " }, { text = "Try \"suggested text\"", dim = true },
+      } } }
+    end
+    remuda.ls = function() return { { name = "attached-draft", alive = true, attached = true, human_idle = 20 } } end
+  ]], screen))
+  T.eq(T.eval("return tostring(remuda._butler_notify_policy('attached-draft'))"), "false",
+    "an empty styled cursor row must not hide continuation draft text")
 end)

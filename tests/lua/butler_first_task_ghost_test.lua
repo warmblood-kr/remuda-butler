@@ -68,7 +68,8 @@ end
 -- A dim ghost is idle: the task is typed, and counts as delivered once the agent turns busy.
 local function ghost_delivers(kind, screen, prefix, row)
   local name = "t-ghost-" .. kind
-  show(name, screen, prefix, "ghost suggestion", true, row)
+  local ghost = kind == "claude" and 'Try "ghost suggestion"' or ""
+  show(name, screen, prefix, ghost, true, row)
   delegate(name, kind)
   T.wait_until(function() return types(name) == "1" end, 8, kind .. ": task typed over a dim ghost")
   T.wait_until(function() return state(name) == "delivered" end, 8,
@@ -78,8 +79,8 @@ end
 T.test("first-task delivery treats a dim ghost as idle and a draft as busy", function()
   start_butler()
   draft_defers("codex", "› real draft", "› ", 1)
-  ghost_delivers("codex", "› ghost suggestion", "› ", 1)
+  ghost_delivers("codex", "› ", "› ", 1)
   local claude = "────\n❯ %s\n────\n  ⏵⏵ auto mode on"
   draft_defers("claude", claude:format("real draft"), "❯ ", 2)
-  ghost_delivers("claude", claude:format("ghost suggestion"), "❯ ", 2)
+  ghost_delivers("claude", claude:format('Try "ghost suggestion"'), "❯ ", 2)
 end)
