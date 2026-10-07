@@ -100,6 +100,21 @@ T.test("only a live blank screen is kept unverified at readiness timeout", funct
   local early_secret = probe_timeout("probe-early-row-secret", "retry_probe",
     '{ "sh", "-c", "sleep 60" }', "first visible row\nSECRET_SENTINEL_LATER_ROW\nthird row", 1, "timeout", "false")
   T.ok(not early_secret:find("SECRET_SENTINEL_LATER_ROW", 1, true), "timeout detail leaked second-row secret: " .. early_secret)
+  local early_outputs = T.eval(string.format([[
+    local attempt=remuda._probe_results["probe-early-row-secret"].attempts[1]
+    remuda._butler_attempts={attempt}
+    local sessions=remuda._butler_sessions()
+    local path=%q .. "/early-session-trace.log"
+    remuda._butler_session_trace_path=path
+    _butler_session_trace("launch_failed",attempt.detail)
+    local file=assert(io.open(path,"r"));local trace=file:read("a");file:close()
+    local render=table.concat(remuda.butler.launch_failure_lines({attempt}),"\\n")
+    return tostring(attempt.detail:find("SECRET_SENTINEL_LATER_ROW",1,true)~=nil) .. "/"
+      .. tostring(sessions:find("SECRET_SENTINEL_LATER_ROW",1,true)~=nil) .. "/"
+      .. tostring(trace:find("SECRET_SENTINEL_LATER_ROW",1,true)~=nil) .. "/"
+      .. tostring(render:find("SECRET_SENTINEL_LATER_ROW",1,true)~=nil)
+  ]], os.getenv("XDG_DATA_HOME")))
+  T.eq(early_outputs, "false/false/false/false", "early-row secret must not reach any diagnostic surface")
   local safe_outputs = T.eval(string.format([[
     local attempt = remuda._probe_results["probe-multiline-screen"].attempts[1]
     remuda._butler_attempts = { attempt }

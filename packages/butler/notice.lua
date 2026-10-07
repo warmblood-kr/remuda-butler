@@ -122,19 +122,35 @@ function remuda._butler_prompt_is_empty(kind, screen)
     end
   end
   local parts = { text }
+  local function known_mode_footer(value)
+    return value == "⏵⏵ auto mode on"
+      or value == "⏵⏵ auto mode on (shift+tab to cycle) · ← for agents"
+      or value:match("^⏵⏵ auto mode on %(shift%+tab to cycle%) · ← %d+ agents?$") ~= nil
+  end
+  local function footer_line(value)
+    local row = value:gsub("^%s+", "")
+    if row == "" then return true end
+    if known_mode_footer(row) then return true end
+    if row:sub(1, 3) == "╰" or row:sub(1, 3) == "└" then return true end
+    if row:match("^%? for shortcuts") then return true end
+    if kind == "codex" and (row:lower():find("context left", 1, true)
+        or row:match("^⚠%s+%d+%s+warning") or row:match("^[^%s]+%s+[^%s]+%s+·")) then return true end
+    if row:sub(1, 3) == "─" then
+      local offset = 1
+      while row:sub(offset, offset + 2) == "─" do offset = offset + 3 end
+      local footer = row:sub(offset):gsub("^%s+", "")
+      return footer == "" or known_mode_footer(footer)
+    end
+    return false
+  end
   for index = prompt_at + 1, #lines do
     local rest = lines[index]:gsub("^%s+", "")
-    if rest:sub(1, 3) == "╰" or rest:sub(1, 3) == "└" then break end
-    if rest:sub(1, 3) == "─" then
-      local offset = 1
-      while rest:sub(offset, offset + 2) == "─" do offset = offset + 3 end
-      local footer = rest:sub(offset):gsub("^%s+", "")
-      if footer == "" or footer:sub(1, 6) == "⏵⏵" then break end
-    end
-    if rest:match("^%? for shortcuts")
-        or (kind == "codex" and (rest:lower():find("context left", 1, true)
-        or rest:match("^⚠%s+%d+%s+warning") or rest:match("^[^%s]+%s+[^%s]+%s+·"))) then
-      break
+    if footer_line(rest) then
+      local suffix_is_footer = true
+      for tail = index, #lines do
+        if not footer_line(lines[tail]) then suffix_is_footer = false; break end
+      end
+      if suffix_is_footer then break end
     end
     if kind == "claude" and rest:sub(1, 3) == "│" then
       rest = rest:sub(4):gsub("│%s*$", "")
@@ -191,7 +207,17 @@ function remuda._butler_notify_policy(session, now)
     if now - seen.since < NOTICE_STABLE_SECONDS then return false end
   end
   local captured, full_screen = pcall(remuda.capture, session)
-  if not captured then return false end
+  if not captured then
+    local styled_ok, styled = pcall(remuda.capture_styled, session)
+    if not styled_ok or type(styled) ~= "table" or type(styled.rows) ~= "table" then return false end
+    local rows = {}
+    for index, row in ipairs(styled.rows) do
+      local spans = {}
+      for _, span in ipairs(row) do spans[#spans + 1] = tostring(span.text or "") end
+      rows[index] = table.concat(spans)
+    end
+    full_screen = table.concat(rows, "\n")
+  end
   full_screen = tostring(full_screen or "")
   local agent = bus.agents[session]
   local kind = agent and agent.kind or ""
@@ -224,12 +250,22 @@ function remuda._butler_composer_decision(kind, session, screen)
         local list = span.dim and dim or parts
         list[#list + 1] = span.text
       end
-      local decision, text = remuda._butler_prompt_is_empty(kind, table.concat(parts))
-      -- The raw text must be exactly the dim ghost: continuation rows below an empty first
-      -- line are a human's draft.
-      local ghost = table.concat(dim):gsub("\194\160", " "):match("^%s*(.-)%s*$")
-      if kind == "claude" and decision == "EMPTY" and ghost:sub(1, 5) == 'Try "' and ghost == raw_text then
-        return decision, text
+      local visible = {}
+      for _, span in ipairs(row) do visible[#visible + 1] = span.text end
+      local decision, text = remuda._butler_prompt_is_empty(kind, table.concat(visible))
+      local plain_row = table.concat(parts):gsub("\194\160", " ")
+      local prompt_index = plain_row:find("❯", 1, true)
+      local plain = "not an empty prompt"
+      if prompt_index then
+        local before = plain_row:sub(1, prompt_index - 1):gsub("─", "")
+        local after = plain_row:sub(prompt_index + #"❯")
+        if before:match("^%s*$") and after:match("^%s*$") then plain = "" end
+      end
+      local dim_text = table.concat(dim):gsub("\194\160", " "):gsub("%s+", "")
+      local candidate = text:gsub("%s+", "")
+      if kind == "claude" and decision == "NON-EMPTY" and plain == "" and text == raw_text
+          and text:sub(1, 5) == 'Try "' and text:sub(-1) == '"' and dim_text == candidate then
+        return "EMPTY", text
       end
     end
   end

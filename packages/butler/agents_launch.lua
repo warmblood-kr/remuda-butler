@@ -40,10 +40,21 @@ local function one_line(value)
   return (tostring(value or ""):match("^[^\r\n]*") or ""):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
 end
 local function screen_detail(screen)
-  local result = tostring(screen or ""):gsub("\r\n", "\n"):gsub("\r", "\n")
-    :gsub("\n+", " | "):sub(1, 200)
-  result = result:gsub("^%s+", ""):gsub("%s+$", "")
-  return result ~= "" and result or "<empty>"
+  local normalized = tostring(screen or ""):gsub("\27%[[%d;?]*[%a]", "")
+  normalized = normalized:gsub("\r\n", "\n"):gsub("\r", "\n")
+  local first
+  for row in (normalized .. "\n"):gmatch("(.-)\n") do
+    row = row:gsub("[%c]", " "):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+    if row ~= "" then first = row; break end
+  end
+  if not first then return "<empty>" end
+  local chars, count = {}, 0
+  for char in first:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
+    count = count + 1
+    if count > 80 then break end
+    chars[#chars + 1] = char
+  end
+  return table.concat(chars)
 end
 local function readiness_timeout()
   local configured = tonumber(remuda._butler_readiness_timeout or os.getenv("REMUDA_BUTLER_READINESS_TIMEOUT"))

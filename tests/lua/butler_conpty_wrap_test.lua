@@ -176,7 +176,8 @@ T.test("composer safety matrix defers drafts behind footer-like continuation row
       ]], name, name, screen, name))
       local decision = T.eval(string.format("local d=remuda._butler_prompt_is_empty('claude',%q); return d", screen))
       local allowed = T.eval(string.format("return tostring(remuda._butler_notify_policy(%q))", name))
-      if shape.name == "empty cursor" and continuation.name == "blank footer" then
+      if (shape.name == "empty cursor" or shape.name:match("^wrapped border"))
+          and continuation.name == "blank footer" then
         T.eq(decision, "EMPTY", shape.name .. " / " .. continuation.name .. " should remain ready")
       else
         T.ok(decision ~= "EMPTY", shape.name .. " / " .. continuation.name .. " hid a draft")
@@ -191,6 +192,7 @@ T.test("composer safety matrix defers drafts behind footer-like continuation row
     { text = " ", dim = false }, { text = 'errors"', dim = true },
   }
   T.eval([[remuda._matrix_ghost_words = {}
+    remuda._butler_bus.agents["matrix-ghost-words"] = { kind = "claude" }
     remuda.capture = function() error("styled composer path should not need plain capture") end
     remuda.capture_styled = function() return { cursor={row=2}, rows={
       {{text="history",dim=false}}, remuda._matrix_ghost_words,
