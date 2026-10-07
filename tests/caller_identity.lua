@@ -3,7 +3,10 @@ remuda = {
   _butler_caller_principal_config = { bus = { agents = {
     member = { id = "01ABCDEF0123456789ABCDEFGH", alias = "member", session_name = "session-member", kind = "codex" },
   } } },
-  log = function() end,
+  butler = { guard_policy = { append = function(row)
+    assert(row.event == "caller_policy" and row.class == "identity")
+    return true
+  end } },
 }
 dofile("packages/butler/caller_principal.lua")
 local resolver = remuda._butler_caller_principal
@@ -28,3 +31,10 @@ local ok, err = pcall(resolver.current_agent, nil)
 assert(not ok and tostring(err):find("Next:", 1, true), "missing caller must fail closed")
 
 print("ok")
+
+-- Operator authority is refused if its required audit cannot be written.
+remuda.butler.guard_policy.append = function() return nil, "disk unavailable" end
+assert(resolver.resolve({kind = "outside"}).tag == "unidentified")
+assert(not pcall(resolver.current_agent, {kind = "outside"}))
+remuda.butler.guard_policy.append = function() error("old sink unavailable") end
+assert(resolver.resolve({kind = "outside"}).tag == "unidentified")

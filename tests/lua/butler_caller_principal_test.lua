@@ -90,7 +90,7 @@ T.test("unidentified_context_refuses_with_next_and_does_not_mutate_mail", functi
   }
   for _, c in ipairs(cases) do
     local before = snapshot()
-    local encoded = caller(c.kind, c.session, c.env)
+    local encoded = type(c) == "string" and c or caller(c.kind, c.session, c.env)
     local outcome = eval("local ok, err = pcall(remuda._butler_current_agent, " .. encoded .. "); return tostring(ok) .. \"|\" .. tostring(err)")
     T.ok(outcome:match("^false|"), "unidentified caller must throw: " .. outcome)
     T.ok(outcome:find("Next:", 1, true), "refusal needs a Next line: " .. outcome)
@@ -111,4 +111,34 @@ T.test("ambiguous_session_mapping_refuses", function()
   T.ok(result:match("^error|") and result:find("Next:", 1, true), "ambiguous command must fail closed: " .. result)
   T.eq(snapshot(), before, "ambiguous refusal must not mutate mail or read state")
   eval([[remuda._butler_bus.agents.bob.session_name = "bob"]])
+end)
+
+T.test("outside_policy_is_persistently_audited_without_caller_secrets", function()
+  local result = eval([[
+    local saved = remuda.log
+    remuda.log = nil -- pinned and installed cores have no logger
+    local c = { kind = "outside", session = "SECRET-SESSION", capability = "SECRET-CAPABILITY",
+      env = { REMUDA_BUTLER_AGENT_ID = "SECRET-ENV" }, stdin = "SECRET-BODY" }
+    local p = remuda._butler_caller_principal.resolve(c)
+    remuda.log = saved
+    local f = io.open(remuda.butler.guard_policy.log_path(), "r")
+    if not f then return "missing audit" end
+    local text = f:read("a"); f:close()
+    local row
+    for line in text:gmatch("[^\n]+") do
+      local r = remuda.json.decode(line)
+      if r.event == "caller_policy" then row = r end
+    end
+    return p.tag .. "|" .. (row and row.summary or "missing policy line")
+      .. "|" .. tostring(text:find("SECRET", 1, true) == nil)
+  ]])
+  T.eq(result, "operator|outside_is_operator_transitional: outside caller mapped to operator|true")
+end)
+
+T.test("mcp_capability_only_callers_keep_the_existing_path", function()
+  eval([[remuda._butler_bus.tokens["test-capability"] = "alice"]])
+  T.eq(eval([[return remuda._butler_identity.caller_agent({capability = "test-capability"})]]), "alice")
+  T.eq(eval([[return remuda._butler_identity.caller_name({capability = "invalid"})]]), "outside")
+  local outcome = eval([[local ok, err = pcall(remuda._butler_identity.caller_agent, {}); return tostring(ok) .. "|" .. tostring(err)]])
+  T.ok(outcome:find("false|unknown caller", 1, true), "MCP refusal keeps its existing reason: " .. outcome)
 end)
