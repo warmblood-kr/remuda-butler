@@ -180,7 +180,7 @@ T.test("butler_matrix_request_uses_system_tls_trust_by_default", function()
   local _, token_path, config_path = config("no-trust", "https://matrix.example.org", room, "@bot:example.org", "",
     "https://matrix.example.org\n" .. room .. "\n@bot:example.org\n")
   boot({ token_path = token_path, config_path = config_path,
-    modules = { "butler/matrix_request", "butler/matrix_relay" } })
+    modules = { "butler/matrix" } })
   local result = T.eval([==[
       local failure
       remuda.butler.matrix.request({ method = "GET", path = "/_matrix/client/v3/versions" },
@@ -223,7 +223,7 @@ T.test("butler_matrix_relay_uses_async_request_and_preserves_envelope_metadata",
     "@alice:example.org",
     " https://matrix.example.org/  \r\n " .. room .. "  \r\n @bot:example.org \r\n @alice:example.org \r\n false \r\n 30000 \r\n ca_file = /tmp/test-ca.pem \r\n")
   boot({ token_path = token_path, config_path = config_path,
-    modules = { "butler/matrix_request", "butler/matrix_relay" } })
+    modules = { "butler/matrix" } })
   local event = { type = "m.room.message", event_id = "$relay-event", sender = "@alice:example.org",
     origin_server_ts = 0,
     content = { msgtype = "m.text", body = "hello", url = "mxc://media/example",
