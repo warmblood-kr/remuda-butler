@@ -289,8 +289,13 @@ T.test("styled proof: anything else defers", function()
   T.ok(safe(decide("claude", (screen:gsub("❯ ", "❯ user draft")), styled)), "plain capture shows a draft the styled rows hide")
   T.ok(safe(decide("claude", screen .. "\nuser draft", styled)), "plain capture has an extra row")
   screen, styled = frame({ { text = "❯ " } })
-  styled.rows[1] = { { text = "─" } }
-  T.ok(safe(decide("claude", join(styled.rows), styled)), "top border shorter than the bottom border is not a composer")
+  styled.rows[3] = { { text = "────" } }
+  T.ok(safe(decide("claude", join(styled.rows), styled)), "bottom border shorter than the top border")
+  screen, styled = frame({ { text = "❯ " } })
+  styled.rows[1] = { { text = "────" } }
+  T.ok(safe(decide("claude", join(styled.rows), styled)), "top border shorter than the bottom border")
+  styled.rows[3] = { { text = "────user draft" } }
+  T.ok(safe(decide("claude", join(styled.rows), styled)), "short borders cannot prove a composer")
 end)
 
 T.test("SEC round 4 repros stay deferred", function()

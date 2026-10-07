@@ -82,7 +82,8 @@ T.test("first-task delivery treats a dim ghost as idle and a draft as busy", fun
   start_butler()
   draft_defers("codex", "› real draft", "› ", 1)
   ghost_delivers("codex", "› ghost suggestion", "› ", 1)
-  local claude = "────\n❯ %s\n────\n  ⏵⏵ auto mode on"
+  local rule = string.rep("─", 20) -- a Claude composer is EMPTY only under a full-width border
+  local claude = rule .. "\n❯ %s\n" .. rule .. "\n  ⏵⏵ auto mode on"
   draft_defers("claude", claude:format("real draft"), "❯ ", 2)
   ghost_delivers("claude", claude:format('Try "ghost suggestion"'), "❯ ", 2)
 end)

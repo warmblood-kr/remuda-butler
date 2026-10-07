@@ -88,16 +88,8 @@ end
 -- exactly one of the kind's `placeholders`), "NON-EMPTY" or "UNPARSEABLE",
 -- plus the text. Dim ghost suggestions stay NON-EMPTY and defer (#137).
 local PROMPT_GLYPHS = { "❯", ">", "›" }
-local function unwrap_claude_prompt_border(kind, line)
-  if kind ~= "claude" or line:sub(1, 3) ~= "─" then return line end
-  local offset = 1
-  while line:sub(offset, offset + 2) == "─" do offset = offset + 3 end
-  if line:sub(offset, offset + 2) == "❯" then return line:sub(offset) end
-  return line
-end
 function remuda._butler_prompt_is_empty(kind, screen)
-  screen = tostring(screen or "")
-  local text, prompt_at, earlier_prompt_draft
+  local text, prompt_at
   -- Claude draws its empty composer as '❯' + NO-BREAK SPACE; Lua's %s
   -- misses U+00A0, so fold it to a space before parsing (every kind).
   screen = screen:gsub("\194\160", " ")
@@ -106,108 +98,15 @@ function remuda._butler_prompt_is_empty(kind, screen)
   for index, line in ipairs(lines) do
     local rest = line:gsub("^%s+", "")
     if rest:sub(1, 3) == "│" then rest = rest:sub(4):gsub("^%s+", "") end
-    rest = unwrap_claude_prompt_border(kind, rest)
     for _, glyph in ipairs(PROMPT_GLYPHS) do
       if rest:sub(1, #glyph) == glyph then
-        if text and text:match("%S") then earlier_prompt_draft = text end
         text, prompt_at = rest:sub(#glyph + 1), index
         break
       end
     end
   end
   if not text then return "UNPARSEABLE", "" end
-  if kind == "claude" then
-    -- Claude's composer is a bordered region. A historical prompt in the
-    -- transcript is outside the current region; a continuation row inside
-    -- the current region remains draft text even if another prompt glyph is
-    -- captured on a later row.
-    local function horizontal_rule(line)
-      local value = line:match("^%s*(.-)%s*$") or ""
-      return value ~= "" and value:gsub("─", ""):gsub("%s", "") == ""
-    end
-    local region_start = prompt_at
-    for index = prompt_at - 1, 1, -1 do
-      if horizontal_rule(lines[index]) then
-        region_start = index + 1
-        break
-      end
-      local trimmed = lines[index]:gsub("^%s+", "")
-      if unwrap_claude_prompt_border(kind, trimmed) ~= trimmed then
-        region_start = index
-        break
-      end
-      local previous = trimmed
-      for _, glyph in ipairs(PROMPT_GLYPHS) do
-        if previous:sub(1, #glyph) == glyph then
-          -- Without a visible upper border, an earlier prompt row cannot be
-          -- proven to be scrollback, so keep it in the composer region.
-          region_start = index
-          break
-        end
-      end
-      if region_start == index then break end
-    end
-    local function exact_footer(line)
-      line = line:match("^%s*(.-)%s*$") or ""
-      -- ConPTY can join the box's bottom rule to the following exact status
-      -- row. Accept that complete captured row shape, while still rejecting
-      -- any additional user text after the known status.
-      local borderless, offset = line, 1
-      while borderless:sub(offset, offset + 2) == "─" do offset = offset + 3 end
-      if offset > 1 then
-        local suffix = borderless:sub(offset):match("^%s*(.-)%s*$")
-        if suffix and suffix:match("^⏵⏵ auto mode on") then line = suffix end
-      end
-      return line == "? for shortcuts"
-        or line == "⏵⏵ auto mode on (shift+tab to cycle) · ← for agents"
-        or line:match("^⏵⏵ auto mode on %(shift%+tab to cycle%) · ← %d+ agents?$") ~= nil
-        or line:match("^⏵⏵ auto mode on · %d+ shells? · ← %d+ agents?$") ~= nil
-        or line:match("^⏵⏵ auto mode on %(shift%+tab to cycle%) · %d+ shells? · ← %d+ agents?$") ~= nil
-        or line:match("^⏵⏵ auto mode on%s+·%s+←…$") ~= nil
-        or line:match("^MODEL:[^%s]+%s+CTX:[%d…]+$") ~= nil
-        or line:match("^MODEL:[%w%._%-]+ CTX:[%w%?…]+ CTXWIN:[%w%?]+ CTXPCT:[%w%?]+$") ~= nil
-        or line:match("^⏵⏵ auto mode on$") ~= nil
-    end
-    local parts = {}
-    local found_prompt = false
-    for index = region_start, #lines do
-      local line = lines[index]
-      if index <= prompt_at or not horizontal_rule(line) then
-        if not exact_footer(line) then
-          local rest = line:gsub("^%s+", "")
-          if rest:sub(1, 3) == "│" then rest = rest:sub(4):gsub("^%s+", "") end
-          rest = unwrap_claude_prompt_border(kind, rest)
-          local matched
-          for _, glyph in ipairs(PROMPT_GLYPHS) do
-            if rest:sub(1, #glyph) == glyph then
-              rest, matched = rest:sub(#glyph + 1), true
-              break
-            end
-          end
-          if matched then found_prompt = true end
-          if found_prompt then
-            rest = rest:gsub("│%s*$", "")
-            parts[#parts + 1] = rest
-          end
-        end
-      end
-    end
-    text = table.concat(parts, "\n"):match("^%s*(.-)%s*$")
-    local startup = remuda._butler_agent_startup[kind] or {}
-    if text == "" then return "EMPTY", text end
-    for _, placeholder in ipairs(startup.placeholders or {}) do
-      if text == placeholder then return "EMPTY", text end
-    end
-    -- ANSI terminal fixtures can place the color controls before the wrapped
-    -- prompt glyph, leaving plain capture unable to prove the prompt origin.
-    -- Keep the main-branch classification and let styled capture verify the
-    -- exact dim Try suggestion when available.
-    if text:sub(1, 5) == 'Try "' and (screen:find(string.char(27), 1, true)
-        or screen:find(string.rep("─", 20), 1, true)) then return "UNPARSEABLE", text end
-    return "NON-EMPTY", text
-  end
   text = text:gsub("│%s*$", ""):match("^%s*(.-)%s*$")
-  if text == "" and earlier_prompt_draft then return "NON-EMPTY", earlier_prompt_draft end
   local startup = remuda._butler_agent_startup[kind] or {}
   if kind == "codex" then
     for _, placeholder in ipairs(startup.placeholders or {}) do
@@ -215,39 +114,13 @@ function remuda._butler_prompt_is_empty(kind, screen)
     end
   end
   local parts = { text }
-  local function known_mode_footer(value)
-    return value == "⏵⏵ auto mode on"
-      or value == "⏵⏵ auto mode on (shift+tab to cycle) · ← for agents"
-      or value:match("^⏵⏵ auto mode on %(shift%+tab to cycle%) · ← %d+ agents?$") ~= nil
-      or value:match("^⏵⏵ auto mode on%s+·%s+←…$") ~= nil
-      or value:match("^⏵⏵ auto mode on%s+%(shift%+tab to cycle%)%s+·%s+← for agents$") ~= nil
-      or value:match("^⏵⏵ auto mode on%s+%(shift%+tab to cycle%)%s+·%s+← %d+ agents?$") ~= nil
-  end
-  local function footer_line(value)
-    local row = value:gsub("^%s+", "")
-    if row == "" then return true end
-    if known_mode_footer(row) then return true end
-    if kind == "claude" and row:match("^MODEL:[^%s]+%s+CTX:[%d…]+$") then return true end
-    if row:sub(1, 3) == "╰" or row:sub(1, 3) == "└" then return true end
-    if row:match("^%? for shortcuts") then return true end
-    if kind == "codex" and (row:lower():find("context left", 1, true)
-        or row:match("^⚠%s+%d+%s+warning") or row:match("^[^%s]+%s+[^%s]+%s+·")) then return true end
-    if row:sub(1, 3) == "─" then
-      local offset = 1
-      while row:sub(offset, offset + 2) == "─" do offset = offset + 3 end
-      local footer = row:sub(offset):gsub("^%s+", "")
-      return footer == "" or known_mode_footer(footer)
-    end
-    return false
-  end
   for index = prompt_at + 1, #lines do
     local rest = lines[index]:gsub("^%s+", "")
-    if footer_line(rest) then
-      local suffix_is_footer = true
-      for tail = index, #lines do
-        if not footer_line(lines[tail]) then suffix_is_footer = false; break end
-      end
-      if suffix_is_footer then break end
+    if rest:sub(1, 3) == "╰" or rest:sub(1, 3) == "└" or rest:sub(1, 3) == "─" then break end
+    if rest:match("^%? for shortcuts")
+        or (kind == "codex" and (rest:lower():find("context left", 1, true)
+        or rest:match("^⚠%s+%d+%s+warning") or rest:match("^[^%s]+%s+[^%s]+%s+·"))) then
+      break
     end
     if kind == "claude" and rest:sub(1, 3) == "│" then
       rest = rest:sub(4):gsub("│%s*$", "")
@@ -267,6 +140,64 @@ function remuda._butler_prompt_is_empty(kind, screen)
     if text == placeholder then return "EMPTY", text end
   end
   return "NON-EMPTY", text
+end
+
+-- Claude: text heuristics cannot tell a wrapped (ConPTY) composer from a draft, so a Claude composer is
+-- EMPTY only when styled capture proves it: the cursor sits on a '❯' row (optionally behind the top
+-- border) whose text is empty or one dim 'Try "..."' suggestion, the plain capture agrees row for row, and
+-- every row down to the bottom border (a '─' run exactly as long as the top one, at least 10) is blank. Anything else defers.
+local function span_text(span) return (tostring(type(span) == "table" and span.text or ""):gsub("\194\160", " ")) end
+local function row_text(row)
+  local parts = {}
+  for _, span in ipairs(type(row) == "table" and row or {}) do parts[#parts + 1] = span_text(span) end
+  return table.concat(parts)
+end
+local function trimmed(text) return (text:gsub("\27%[[%d;?]*%a", ""):gsub("\r", ""):match("^%s*(.-)%s*$")) end
+local function leading_rules(text)
+  local count = 0
+  while text:sub(count * 3 + 1, count * 3 + 3) == "─" do count = count + 1 end
+  return count
+end
+local function claude_styled_empty(styled, plain)
+  local rows = type(styled) == "table" and styled.rows
+  local at = type(styled) == "table" and type(styled.cursor) == "table" and styled.cursor.row
+  if type(rows) ~= "table" or type(at) ~= "number" or type(rows[at]) ~= "table" then return false end
+  local index = 0
+  for line in (plain .. "\n"):gmatch("(.-)\n") do
+    index = index + 1
+    if trimmed((line:gsub("\194\160", " "))) ~= trimmed(row_text(rows[index])) then return false end
+  end
+  local prefix, glyph, rest = "", false, {}
+  for _, span in ipairs(rows[at]) do
+    local text = span_text(span)
+    local found = not glyph and text:find("❯", 1, true)
+    if found then
+      if span.dim or text:sub(found + 3):match("%S") then return false end
+      glyph, prefix = true, prefix .. text:sub(1, found - 1)
+    elseif not glyph then prefix = prefix .. text
+    elseif span.dim or not text:match("%S") then rest[#rest + 1] = text
+    else return false end
+  end
+  local stripped, top = prefix:gsub("─", "")
+  if not glyph or stripped ~= "" then return false end
+  local ghost = trimmed(table.concat(rest))
+  if ghost ~= "" and not (ghost:sub(1, 5) == 'Try "' and ghost:sub(-1) == '"') then return false end
+  if top == 0 then
+    local above, count = trimmed(row_text(rows[at - 1])):gsub("─", "")
+    if above ~= "" or count == 0 then return false end
+    top = count
+  end
+  if top < 10 then return false end -- both borders span the terminal; a short rule could be draft text
+  for below = at + 1, #rows do
+    local text = row_text(rows[below])
+    if text:match("%S") then return leading_rules(text) == top end
+  end
+  return false
+end
+local function claude_decision(screen, styled)
+  local raw, raw_text = remuda._butler_prompt_is_empty("claude", screen)
+  if claude_styled_empty(styled, screen) then return "EMPTY", "" end
+  return raw == "EMPTY" and "NON-EMPTY" or raw, raw_text
 end
 
 -- The one delivery policy: may Butler type into SESSION now? Every pane needs
@@ -303,37 +234,48 @@ function remuda._butler_notify_policy(session, now)
     end
     if now - seen.since < NOTICE_STABLE_SECONDS then return false end
   end
-  local captured, full_screen = pcall(remuda.capture, session)
-  local styled_capture
-  if not captured then
-    local styled_ok, styled = pcall(remuda.capture_styled, session)
-    if not styled_ok or type(styled) ~= "table" or type(styled.rows) ~= "table" then return false end
+  local full_screen, prompt_screen, styled_capture = screen, screen, nil
+  if remuda.capture_styled then
+    -- A core with remuda#137 marks dim text: parse only the cursor row, and
+    -- drop a TUI's dim ghost suggestion so it reads as the empty prompt it is.
+    local captured, styled = pcall(remuda.capture_styled, session)
+    if not captured then return false end
     styled_capture = styled
     local rows = {}
-    for index, row in ipairs(styled.rows) do
-      local spans = {}
-      for _, span in ipairs(row) do spans[#spans + 1] = tostring(span.text or "") end
-      rows[index] = table.concat(spans)
+    for row_index, spans in ipairs(styled.rows or {}) do
+      local parts = {}
+      for _, span in ipairs(spans) do parts[#parts + 1] = span.text end
+      rows[row_index] = table.concat(parts)
     end
-    full_screen = table.concat(rows, "\n")
+    if not full_screen then full_screen = table.concat(rows, "\n") end
+    local cursor_parts = {}
+    for _, span in ipairs(styled.rows[styled.cursor.row] or {}) do
+      if not span.dim then cursor_parts[#cursor_parts + 1] = span.text end
+    end
+    prompt_screen = table.concat(cursor_parts)
   end
-  full_screen = tostring(full_screen or "")
+  if not full_screen then
+    local captured
+    captured, full_screen = pcall(remuda.capture, session)
+    if not captured then return false end
+  end
+  prompt_screen = prompt_screen or full_screen
   local agent = bus.agents[session]
   local kind = agent and agent.kind or ""
-  if kind == "" and styled_capture and styled_capture.cursor then
-    local spans = styled_capture.rows[styled_capture.cursor.row] or {}
-    local visible_parts = {}
-    for _, span in ipairs(spans) do
-      visible_parts[#visible_parts + 1] = tostring(span.text or "")
-    end
-    local visible = table.concat(visible_parts):gsub("\194\160", " "):match("^%s*(.-)%s*$")
-    if visible and visible:match('^❯%s*Try ".+"$') then kind = "claude" end
+  if kind == "claude" then -- the plain capture is what the styled rows must agree with
+    local plain_ok, plain = pcall(remuda.capture, session)
+    if plain_ok and type(plain) == "string" then full_screen = plain end
   end
   if known_startup_modal(remuda._butler_agent_startup[kind] or {}, full_screen) then
     _butler_session_trace("notice_deferred_modal", session .. " " .. kind)
     return false
   end
-  local decision, text = remuda._butler_composer_decision(kind, session, full_screen)
+  local decision, text
+  if kind == "claude" then
+    decision, text = claude_decision(full_screen, styled_capture)
+  else
+    decision, text = remuda._butler_prompt_is_empty(kind, prompt_screen)
+  end
   if seen.decision ~= decision then -- once per change, not every retry
     seen.decision = decision
     _butler_session_trace("notice_prompt", "message_ids="
@@ -347,9 +289,14 @@ end
 -- The composer decision the policy makes, for callers that hold a raw screen (first-task
 -- delivery): the cursor row without dim ghost text when the core can say so (#137, #372).
 function remuda._butler_composer_decision(kind, session, screen)
+  if kind == "claude" then
+    local ok, styled = false, nil
+    if remuda.capture_styled then ok, styled = pcall(remuda.capture_styled, session) end
+    return claude_decision(tostring(screen or ""), ok and styled or nil)
+  end
   local raw, raw_text = remuda._butler_prompt_is_empty(kind, screen)
   -- Only a NON-EMPTY raw read can be a ghost, and the styled row can only upgrade it to EMPTY.
-  if (raw == "NON-EMPTY" or raw == "UNPARSEABLE") and remuda.capture_styled then
+  if raw == "NON-EMPTY" and remuda.capture_styled then
     local ok, styled = pcall(remuda.capture_styled, session)
     local row = ok and styled and styled.cursor and styled.rows and styled.rows[styled.cursor.row]
     if row then
@@ -358,26 +305,11 @@ function remuda._butler_composer_decision(kind, session, screen)
         local list = span.dim and dim or parts
         list[#list + 1] = span.text
       end
-      local visible = {}
-      for _, span in ipairs(row) do visible[#visible + 1] = span.text end
-      local decision, text = remuda._butler_prompt_is_empty(kind,
-        table.concat(visible):gsub("\27%[[%d;?]*[%a]", ""))
-      local plain_row = table.concat(parts):gsub("\27%[[%d;?]*[%a]", ""):gsub("\194\160", " ")
-      local prompt_index = plain_row:find("❯", 1, true)
-      local plain = "not an empty prompt"
-      if prompt_index then
-        local before = plain_row:sub(1, prompt_index - 1):gsub("─", "")
-        local after = plain_row:sub(prompt_index + #"❯")
-        if before:match("^%s*$") and after:match("^%s*$") then plain = "" end
-      end
-      local dim_text = table.concat(dim):gsub("\194\160", " "):gsub("%s+", "")
-      local candidate = text:gsub("%s+", "")
-      local evidence = raw_text
-      if kind == "claude" and (decision == "NON-EMPTY" or decision == "UNPARSEABLE")
-          and plain == "" and text == evidence
-          and text:sub(1, 5) == 'Try "' and text:sub(-1) == '"' and dim_text == candidate then
-        return "EMPTY", text
-      end
+      local decision, text = remuda._butler_prompt_is_empty(kind, table.concat(parts))
+      -- The raw text must be exactly the dim ghost: continuation rows below an empty first
+      -- line are a human's draft.
+      local ghost = table.concat(dim):gsub("\194\160", " "):match("^%s*(.-)%s*$")
+      if decision == "EMPTY" and ghost == raw_text then return decision, text end
     end
   end
   return raw, raw_text
@@ -520,7 +452,7 @@ local function recovery_screen(session)
   return screen, decision, text
 end
 local function recovery_draft(kind, screen, first_line)
-  local lines, prompt_at, prompt_text, earlier_prompt_draft = {}, nil, nil, false
+  local lines, prompt_at = {}, nil
   screen = tostring(screen or ""):gsub("\194\160", " "):gsub("\r\n", "\n")
   for line in (screen .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
   local composer_text = tostring(first_line or "")
@@ -533,17 +465,11 @@ local function recovery_draft(kind, screen, first_line)
   for index, line in ipairs(lines) do
     local rest = line:gsub("^%s+", "")
     if rest:sub(1, 3) == "│" then rest = rest:sub(4):gsub("^%s+", "") end
-    rest = unwrap_claude_prompt_border(kind, rest)
     for _, glyph in ipairs(glyphs) do
-      if rest:sub(1, #glyph) == glyph then
-        if prompt_at and prompt_text and prompt_text:match("%S") then earlier_prompt_draft = true end
-        prompt_at = index
-        prompt_text = rest:sub(#glyph + 1):match("^%s*(.-)%s*$")
-      end
+      if rest:sub(1, #glyph) == glyph then prompt_at = index end
     end
   end
   if not prompt_at then return nil, false end
-  if earlier_prompt_draft and not (prompt_text or ""):match("%S") then return nil, false, true end
   local parts = { composer_text }
   for index = prompt_at + 1, #lines do
     local rest = lines[index]:gsub("^%s+", "")
@@ -583,8 +509,7 @@ local function compact_composer(text)
 end
 local function notice_matches_composer(session, screen, text, expected)
   local agent = bus.agents[session]
-  local composer, safe, ambiguous_prompt = recovery_draft(agent and agent.kind or "", screen, text)
-  if ambiguous_prompt then return false end
+  local composer, safe = recovery_draft(agent and agent.kind or "", screen, text)
   local expected_compact = compact_composer(expected)
   return (safe and compact_composer(composer) == expected_compact)
     or compact_composer(text) == expected_compact

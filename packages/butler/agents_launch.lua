@@ -39,34 +39,19 @@ end
 local function one_line(value)
   return (tostring(value or ""):match("^[^\r\n]*") or ""):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
 end
+-- Diagnostics that reach detail/sessions/launch trace show ROW 1 of the screen only: control
+-- sequences stripped, cut at 80 characters, "<empty first row>" when it is blank. Never a later row.
 local function screen_detail(screen)
-  local normalized = tostring(screen or ""):gsub("\27%[[%d;?]*[%a]", "")
-  normalized = normalized:gsub("\r\n", "\n"):gsub("\r", "\n")
-  local first
-  for row in (normalized .. "\n"):gmatch("(.-)\n") do
-    row = row:gsub("[%c]", " "):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
-    if row ~= "" then first = row; break end
-  end
-  if not first then return "<empty>" end
+  local row = tostring(screen or ""):gsub("\27%[[%d;?]*[%a]", ""):match("^[^\r\n]*") or ""
+  row = row:gsub("%c", ""):gsub("^%s+", ""):gsub("%s+$", "")
+  if row == "" then return "<empty first row>" end
   local chars, count = {}, 0
-  for char in first:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
+  for char in row:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
     count = count + 1
     if count > 80 then break end
     chars[#chars + 1] = char
   end
   return table.concat(chars)
-end
-local function first_screen_row(value)
-  local row = tostring(value or ""):match("^[^\n]*") or ""
-  local count = 0
-  for index = 1, #row do
-    local byte = row:byte(index)
-    if byte < 128 or byte >= 192 then
-      count = count + 1
-      if count > 80 then return row:sub(1, index - 1) end
-    end
-  end
-  return row
 end
 local function readiness_timeout()
   local configured = tonumber(remuda._butler_readiness_timeout or os.getenv("REMUDA_BUTLER_READINESS_TIMEOUT"))
@@ -163,7 +148,7 @@ local function choose(candidates, opts, done)
     end
     state = { id = id, entry = entry, attempt = attempt, name = name,
       started = os.time(), timeout = opts.timeout or readiness_timeout(),
-      handled = {}, last_screen = "", last_screen_blank = true, dialog_seen = nil }
+      handled = {}, last_screen = "<empty first row>", last_screen_blank = true, dialog_seen = nil }
     local test_builder = remuda._butler_agent_builders[id]
       and remuda._butler_agent_builders[id] ~= BUILTIN_AGENT_BUILDERS[id]
     local force_test_probe = type(remuda._butler_test_force_launch_probe) == "table"
@@ -194,8 +179,7 @@ local function choose(candidates, opts, done)
       screen = ""
     end
     screen = tostring(screen or ""):gsub("\r\n", "\n"):gsub("\r", "\n")
-    state.last_screen = first_screen_row(screen)
-    state.first_screen_row_blank = state.last_screen:find("%S") == nil
+    state.last_screen = screen_detail(screen)
     state.last_screen_blank = screen:find("%S") == nil
     local entry, id = state.entry, state.id
     -- Authentication screens can still contain a prompt glyph; classify
@@ -330,7 +314,7 @@ local function choose(candidates, opts, done)
       local capture_error = state.last_capture_error and ("; last capture error: " .. state.last_capture_error) or ""
       fail_candidate(state.dialog_seen and "dialog" or "timeout", prefix
         .. "readiness prompt not observed within " .. tostring(state.timeout)
-        .. " seconds; last screen: " .. (state.first_screen_row_blank and "<empty first row>" or state.last_screen)
+        .. " seconds; last screen: " .. state.last_screen
         .. capture_error)
     end
   end
