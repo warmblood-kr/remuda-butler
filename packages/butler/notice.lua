@@ -96,7 +96,7 @@ local function unwrap_claude_prompt_border(kind, line)
   return line
 end
 function remuda._butler_prompt_is_empty(kind, screen)
-  local text, prompt_at
+  local text, prompt_at, earlier_prompt_draft
   -- Claude draws its empty composer as '❯' + NO-BREAK SPACE; Lua's %s
   -- misses U+00A0, so fold it to a space before parsing (every kind).
   screen = screen:gsub("\194\160", " ")
@@ -108,6 +108,7 @@ function remuda._butler_prompt_is_empty(kind, screen)
     rest = unwrap_claude_prompt_border(kind, rest)
     for _, glyph in ipairs(PROMPT_GLYPHS) do
       if rest:sub(1, #glyph) == glyph then
+        if text and text:match("%S") then earlier_prompt_draft = text end
         text, prompt_at = rest:sub(#glyph + 1), index
         break
       end
@@ -115,6 +116,7 @@ function remuda._butler_prompt_is_empty(kind, screen)
   end
   if not text then return "UNPARSEABLE", "" end
   text = text:gsub("│%s*$", ""):match("^%s*(.-)%s*$")
+  if text == "" and earlier_prompt_draft then return "NON-EMPTY", earlier_prompt_draft end
   local startup = remuda._butler_agent_startup[kind] or {}
   if kind == "codex" then
     for _, placeholder in ipairs(startup.placeholders or {}) do

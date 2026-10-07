@@ -159,6 +159,7 @@ T.test("composer safety matrix defers drafts behind footer-like continuation row
     { name = "typed draft", prompt = "────❯ typed draft" },
     { name = "multiline draft", prompt = "────❯ \ncontinuation draft" },
     { name = "footer-like draft", prompt = "────❯ \n────\nuser draft" },
+    { name = "new prompt after draft", prompt = "────❯ user draft\n❯ " },
     { name = "modal row", prompt = "────❯ Yes, continue" },
     { name = "wrapped border 100", prompt = "─" .. string.rep("─", 99) .. "❯ " },
     { name = "wrapped border 120", prompt = "─" .. string.rep("─", 119) .. "❯ " },
