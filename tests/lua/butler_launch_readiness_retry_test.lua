@@ -92,6 +92,9 @@ T.test("only a live blank screen is kept unverified at readiness timeout", funct
   T.ok(blank:find("screen was blank", 1, true), "unverified attempt should explain the blank screen: " .. blank)
   probe_timeout("probe-screen-timeout", "retry_probe",
     '{ "sh", "-c", "sleep 60" }', "initializing agent", 1, "timeout", "false")
+  local multiline = probe_timeout("probe-multiline-screen", "retry_probe",
+    '{ "sh", "-c", "sleep 60" }', "first visible row\nsecond visible row", 1, "timeout", "false")
+  T.ok(multiline:find("second visible row", 1, true), "timeout detail should include the whole screen: " .. multiline)
   probe_timeout("probe-dead-child", "retry_probe",
     '{ "sh", "-c", "exit 0" }', "", 3, "exited", "false")
   probe_timeout("probe-login-screen", "claude",

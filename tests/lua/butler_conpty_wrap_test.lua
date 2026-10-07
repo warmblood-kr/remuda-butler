@@ -12,6 +12,9 @@ T.test("Claude accepts a border and prompt joined by ConPTY", function()
   local fixture = "\n────❯ "
   T.eq(T.eval(string.format("return tostring(remuda._butler_agent_startup.claude.ready(%q))", fixture)),
     "true", "startup matcher should recognize the wrapped composer")
+  local choice = "────────❯ Yes, continue\n────────"
+  T.eq(T.eval(string.format("return tostring(remuda._butler_agent_startup.claude.ready(%q))", choice)),
+    "false", "a joined modal choice row must not look like the composer")
   T.eq(T.eval(string.format("local decision = remuda._butler_prompt_is_empty('claude', %q); return decision", fixture)),
     "EMPTY", "empty-composer matcher should recognize the wrapped composer")
 
