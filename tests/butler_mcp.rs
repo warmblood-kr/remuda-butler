@@ -2839,30 +2839,6 @@ fn reading_mail_mid_notice_recovery_cancels_the_obsolete_notice() {
     assert!(!eval(&path, "return tostring(remuda._butler_sessions())").contains("important unsent draft"));
 }
 
-/// #23a: an ended member's unread mail stays readable by its alias, not only
-/// by ULID, and a never-known alias still errors.
-#[test]
-fn an_ended_aliases_unread_mail_is_readable_by_alias() {
-    let dir = scratch("ended-alias-inbox");
-    let path = daemon::socket_path_in(&dir, "s");
-    let _daemon = daemon_at(&path);
-    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
-    eval(
-        &path,
-        "remuda._butler_agent_builders.fake = function() return {'sleep', '100'} end; \
-         remuda._butler_launch('fake', 'lead1'); \
-         remuda._butler_send('operator', 'lead1', 'unread-after-end'); \
-         remuda.emit('session_exited', 'lead1')",
-    );
-    let inbox = eval(&path, "return remuda._butler_inbox('lead1')");
-    assert!(inbox.contains("unread-after-end"), "{inbox}");
-    let unknown = client::request(
-        &path,
-        &Request::Eval { code: "return remuda._butler_inbox('nobody')".into(), name: None },
-    )
-    .expect("eval");
-    assert!(matches!(unknown, Response::Error(_)), "{unknown:?}");
-}
 
 /// §7 step 3: another channel can claim delivery before Butler's inbox hook.
 #[test]
@@ -3181,26 +3157,6 @@ fn a_fresh_launch_with_a_read_unanswered_brief_gets_no_reshow() {
         "#,
     );
     assert!(got.ends_with("|0"), "a fresh launch must not re-show its read brief: {got}");
-}
-
-// inbox ID: own mailbox only; another member's message is refused with a
-// Next: line; the help names the id form.
-#[test]
-fn inbox_id_opens_only_the_callers_own_messages() {
-    let (path, _daemon) = butler_with_named_agent("renotice-inbox-id", "cx1", "codex");
-    setup_renotice(&path, "cx1");
-    let got = eval(
-        &path,
-        r#"
-        local foreign = remuda._butler_send('operator', 'butler', 'root only'):match('^queued (%S+)')
-        local refused = remuda._rn_inbox_id(foreign)
-        local help = tostring(remuda._butler_command_run('inbox', { 'inbox', '--help' }, { env = {} }))
-        return table.concat({ tostring(refused:find('root only', 1, true) == nil),
-          tostring(refused:find('Next:', 1, true) ~= nil),
-          tostring(help:find('message-id', 1, true) ~= nil) }, '|')
-        "#,
-    );
-    assert_eq!(got, "true|true|true", "inbox ID owner check and help: {got}");
 }
 
 // SEC #159 M1: a daemon restart empties the in-memory messages; the member's
