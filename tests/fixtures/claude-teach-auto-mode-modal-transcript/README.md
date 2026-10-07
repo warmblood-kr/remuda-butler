@@ -1,0 +1,4 @@
+TRANSCRIPT (not raw; terminal width ~120 estimated)
+
+NOT a raw capture. These two files were re-typed verbatim from the text returned by the remuda MCP `capture` tool for sessions win-styled (page 1, from a capture taken 2026-10-08 ~07:55 KST) and lua-b06 (page 2) on Lenovo (Windows 11, Claude Code Sonnet 5.5, remuda 0.1.0-nightly.20261007060545). Trailing whitespace and exact terminal width were not preserved by the tool output; width was about 120 columns (the separator rows are 120 characters). The sessions were closed before this request, so no raw bytes remain. A real fixture needs a fresh raw capture from a pane that shows the modal.
+Page 1 is the first dialog (1. Yes / 2. Not now / 3. Don't show again). Page 2 is the follow-up (toggle 'Also scan shell history' true, Continue). Neither page was answered by Enter.
