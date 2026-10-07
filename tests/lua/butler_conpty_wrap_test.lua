@@ -205,4 +205,89 @@ T.test("composer safety matrix defers drafts behind footer-like continuation row
   end
   T.eq(T.eval([[return tostring(remuda._butler_notify_policy("matrix-ghost-words"))]]), "true",
     "a dim Try ghost split across word spans must remain ready")
+
+  T.eval([[remuda._matrix_ghost_single = {{text="❯ ",dim=false},{text='Try "fix typecheck errors"',dim=true}}
+    remuda._butler_bus.agents["matrix-ghost-single"] = { kind = "claude" }
+    remuda.capture_styled = function() return { cursor={row=2}, rows={
+      {{text="history",dim=false}}, remuda._matrix_ghost_single,
+    } } end
+    remuda.ls = function() return {{name="matrix-ghost-single",alive=true,attached=true,human_idle=12}} end
+  ]])
+  T.eq(T.eval([[return tostring(remuda._butler_notify_policy("matrix-ghost-single"))]]), "true",
+    "a single-run dim Try ghost must remain ready")
+  T.eval([[remuda._matrix_typed = {{text="❯ co",dim=false}}
+    remuda._butler_bus.agents["matrix-typed"] = { kind = "claude" }
+    remuda.capture_styled = function() return { cursor={row=2}, rows={
+      {{text="history",dim=false}}, remuda._matrix_typed,
+    } } end
+    remuda.ls = function() return {{name="matrix-typed",alive=true,attached=true,human_idle=12}} end
+  ]])
+  T.eq(T.eval([[return tostring(remuda._butler_notify_policy("matrix-typed"))]]), "false",
+    "plain typed text stays protected when plain capture is unavailable")
+
+  T.eval([=[
+    local state = { columns = 27, events = {}, screen = "❯ \n", submitted = false, busy = false,
+      notice = "Butler message 01M4B0QGR0DVRZ0AY6D6QKNEE5 from local/butler-platform-lead arrived. Read it: MCP butler_inbox (or remuda butler inbox)" }
+    remuda._matrix_narrow_state = state
+    remuda._butler_bus.agents["matrix-narrow"] = { kind = "claude", id = "matrix-narrow" }
+    remuda._butler_bus.notice_recoveries["matrix-narrow"] = nil
+    remuda.capture_styled = nil
+    remuda._butler_notice_clock = function() return 100 end
+    remuda.ls = function() return {{name="matrix-narrow",alive=true,attached=false}} end
+    remuda.session = function() return {is_busy=state.busy} end
+    remuda.capture = function() return state.screen end
+    remuda._butler_notify_policy = function() return true end
+    local function render_notice(text)
+      local rows, width, line = {}, state.columns - 2, ""
+      local function push(prefix, value)
+        rows[#rows + 1] = prefix .. value .. string.rep(" ", state.columns - 2 - #value)
+      end
+      local function append_word(word)
+        while #word > width do
+          if line ~= "" then push(#rows == 0 and "❯ " or "  ", line); line = "" end
+          push(#rows == 0 and "❯ " or "  ", word:sub(1, width))
+          word = word:sub(width + 1)
+        end
+        if line == "" then line = word
+        elseif #line + 1 + #word <= width then line = line .. " " .. word
+        else push(#rows == 0 and "❯ " or "  ", line); line = word end
+      end
+      for word in text:gmatch("%S+") do append_word(word) end
+      push(#rows == 0 and "❯ " or "  ", line)
+      local rule = string.rep("─", state.columns)
+      local empty_prompt = "❯ " .. string.rep(" ", state.columns - 2)
+      local status = "  MODEL:Opus-5.5 CTX:13925…\n  ⏵⏵ auto mode on      · ←…"
+      local screen = rule .. "\n" .. table.concat(rows, "\n") .. "\n" .. rule
+      if state.submitted then screen = screen .. "\n" .. empty_prompt .. "\n" .. rule end
+      return screen .. "\n" .. status
+    end
+    remuda.type_text = function(_, text)
+      table.insert(state.events, "type")
+      state.screen = render_notice(text)
+      return true
+    end
+    remuda.key = function(_, key)
+      table.insert(state.events, "key " .. key)
+      if key == "RET" then
+        state.submitted, state.busy = true, true
+        state.screen = "❯ " .. string.rep(" ", state.columns - 2)
+          .. "\n" .. string.rep("─", state.columns) .. "\n  MODEL:Opus-5.5 CTX:13925…"
+      end
+    end
+    local function run_notice()
+      remuda._butler_bus.notices["matrix-narrow"] = {count=1,text=state.notice,due_at=0}
+      for _ = 1, 4 do remuda._butler_deliver_notices() end
+      return table.concat(state.events, ","), remuda._butler_bus.notices["matrix-narrow"] == nil
+    end
+    local events, done = run_notice()
+    assert(done, "wrapped notice was not verified")
+    assert(events:find("key RET", 1, true), "wrapped notice was not submitted: " .. events)
+    assert(not events:find("key C-u", 1, true), "recovery erased its wrapped notice: " .. events)
+    state.events, state.submitted, state.busy = {}, true, false
+    remuda._butler_bus.notice_recoveries["matrix-narrow"] = nil
+    local history_events, history_done = run_notice()
+    assert(history_done, "wrapped history notice was not verified")
+    assert(history_events:find("type", 1, true), "history notice was not seen: " .. history_events)
+    assert(not history_events:find("key RET", 1, true), "history notice was submitted twice: " .. history_events)
+  ]=])
 end)

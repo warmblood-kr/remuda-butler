@@ -128,11 +128,15 @@ function remuda._butler_prompt_is_empty(kind, screen)
     return value == "⏵⏵ auto mode on"
       or value == "⏵⏵ auto mode on (shift+tab to cycle) · ← for agents"
       or value:match("^⏵⏵ auto mode on %(shift%+tab to cycle%) · ← %d+ agents?$") ~= nil
+      or value:match("^⏵⏵ auto mode on%s+·%s+←…$") ~= nil
+      or value:match("^⏵⏵ auto mode on%s+%(shift%+tab to cycle%)%s+·%s+← for agents$") ~= nil
+      or value:match("^⏵⏵ auto mode on%s+%(shift%+tab to cycle%)%s+·%s+← %d+ agents?$") ~= nil
   end
   local function footer_line(value)
     local row = value:gsub("^%s+", "")
     if row == "" then return true end
     if known_mode_footer(row) then return true end
+    if kind == "claude" and row:match("^MODEL:[^%s]+%s+CTX:[%d…]+$") then return true end
     if row:sub(1, 3) == "╰" or row:sub(1, 3) == "└" then return true end
     if row:match("^%? for shortcuts") then return true end
     if kind == "codex" and (row:lower():find("context left", 1, true)
@@ -411,7 +415,7 @@ local function recovery_screen(session)
   return screen, decision, text
 end
 local function recovery_draft(kind, screen, first_line)
-  local lines, prompt_at = {}, nil
+  local lines, prompt_at, prompt_text, earlier_prompt_draft = {}, nil, nil, false
   screen = tostring(screen or ""):gsub("\194\160", " "):gsub("\r\n", "\n")
   for line in (screen .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
   local composer_text = tostring(first_line or "")
@@ -426,10 +430,15 @@ local function recovery_draft(kind, screen, first_line)
     if rest:sub(1, 3) == "│" then rest = rest:sub(4):gsub("^%s+", "") end
     rest = unwrap_claude_prompt_border(kind, rest)
     for _, glyph in ipairs(glyphs) do
-      if rest:sub(1, #glyph) == glyph then prompt_at = index end
+      if rest:sub(1, #glyph) == glyph then
+        if prompt_at and prompt_text and prompt_text:match("%S") then earlier_prompt_draft = true end
+        prompt_at = index
+        prompt_text = rest:sub(#glyph + 1):match("^%s*(.-)%s*$")
+      end
     end
   end
   if not prompt_at then return nil, false end
+  if earlier_prompt_draft and not (prompt_text or ""):match("%S") then return nil, false, true end
   local parts = { composer_text }
   for index = prompt_at + 1, #lines do
     local rest = lines[index]:gsub("^%s+", "")
@@ -469,7 +478,8 @@ local function compact_composer(text)
 end
 local function notice_matches_composer(session, screen, text, expected)
   local agent = bus.agents[session]
-  local composer, safe = recovery_draft(agent and agent.kind or "", screen, text)
+  local composer, safe, ambiguous_prompt = recovery_draft(agent and agent.kind or "", screen, text)
+  if ambiguous_prompt then return false end
   local expected_compact = compact_composer(expected)
   return (safe and compact_composer(composer) == expected_compact)
     or compact_composer(text) == expected_compact
