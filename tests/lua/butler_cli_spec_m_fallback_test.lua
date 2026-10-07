@@ -11,6 +11,8 @@ local function start_butler()
     return T.eval('return remuda._butler_bus ~= nil and remuda._butler_bus.agents.butler ~= nil')
       :match("^%s*true%s*$") ~= nil
   end, 10, "Butler root start")
+  T.eval([=[remuda._butler_bus.agents["agent-test"] = { id = "agent-test", alias = "agent-test",
+    session_name = "agent-test", children = {}, kind = "codex" }]=])
 end
 
 local function q(words)
@@ -26,7 +28,7 @@ local function run_command(parser, verb, args, caller, setup)
     if not ]] .. tostring(parser) .. [[ then remuda.cli = nil end
     ]] .. (setup or "") .. [[
     local ok, value = pcall(remuda._butler_command_run, ]] .. string.format("%q", verb) .. [[, { ]] .. q(args) .. [[ }, ]] ..
-      (caller or "nil") .. [[)
+      (caller or '{ kind = "outside" }') .. [[)
     remuda.cli = saved_cli
     local suffix = type(remuda._pr2_switch_counts) == "function" and ("|" .. remuda._pr2_switch_counts()) or ""
     remuda._pr2_switch_counts = nil
@@ -43,7 +45,7 @@ local function both_command(verb, args, caller, want, setup)
 end
 
 T.test("switches preserve usage, gate order and side-effect-free parse", function()
-  local agent = '{ env = { REMUDA_BUTLER_AGENT_ID = "agent-test" } }'
+  local agent = '{ kind = "session", session = "agent-test" }'
   local capture = [[
     local real_fail = remuda.fail
     remuda.fail = function(message, code) return { failed = true, code = code, text = message } end
@@ -55,12 +57,12 @@ T.test("switches preserve usage, gate order and side-effect-free parse", functio
       remuda.fail = function(message, code) return { failed = true, code = code, text = message } end
     ]])
     T.ok(result:find("typed%-lines is operator%-only"), "authorization follows valid parsing")
-    local no_config = run_command(parser, "typed-lines", { "typed-lines", "off" }, "nil", [[
+    local no_config = run_command(parser, "typed-lines", { "typed-lines", "off" }, '{ kind = "outside" }', [[
       remuda.fail = function(message, code) return { failed = true, code = code, text = message } end
       remuda._butler_matrix_config = {}
     ]])
     T.ok(no_config:find("Matrix is not configured"), "configuration is checked after parsing")
-    local dependency = run_command(parser, "shell-lines", { "shell-lines", "on" }, "nil", [[
+    local dependency = run_command(parser, "shell-lines", { "shell-lines", "on" }, '{ kind = "outside" }', [[
       local reads, writes = 0, 0
       remuda._butler_matrix_config = { config_path = "/synthetic/config" }
       remuda.butler.matrix.read_config = function() reads = reads + 1; return { typed_lines = false, shell_lines = false } end
@@ -70,7 +72,7 @@ T.test("switches preserve usage, gate order and side-effect-free parse", functio
     ]])
     T.ok(dependency:find("typed%-lines must be on before shell%-lines"), "dependency check follows parse/config")
     T.ok(dependency:find("|1:0$"), "dependency gate reads config but does not write it")
-    local already = run_command(parser, "typed-lines", { "typed-lines", "on" }, "nil", [[
+    local already = run_command(parser, "typed-lines", { "typed-lines", "on" }, '{ kind = "outside" }', [[
       local reads = 0
       remuda._butler_matrix_config = { config_path = "/synthetic/config" }
       remuda.butler.matrix.read_config = function() reads = reads + 1; return { typed_lines = true, shell_lines = false } end
@@ -94,7 +96,7 @@ T.test("switches preserve usage, gate order and side-effect-free parse", functio
     for _, state in ipairs({ "on", "off" }) do
       local path = assert(os.getenv("REMUDA_LUA_SCRATCH")) .. "/pr2-" .. verb .. "-" .. state .. ".conf"
       local make_case = function(parser)
-        return run_command(parser, verb, { verb, state }, "nil", [[
+        return run_command(parser, verb, { verb, state }, '{ kind = "outside" }', [[
           local path, reads, writes = ]] .. string.format("%q", path) .. [[, 0, 0
           local file = assert(io.open(path, "wb")); file:write("synthetic config\n"); file:close()
           remuda._butler_matrix_config = { config_path = path }
@@ -214,7 +216,7 @@ local function inbox_case(parser, args, caller)
     remuda.fail = function(text, code) return { failed = true, code = code, text = text } end
     local before = tostring(remuda._pr2_mail_state.reads) .. ":" .. tostring(remuda._pr2_mail_state.deliveries["01M49D6J4RVBW73XKFGQ6XS94J"])
     local ok, value = pcall(remuda._butler_command_run, "inbox", { ]] .. q(args) .. [[ }, ]] ..
-      (caller or "nil") .. [[)
+      (caller or '{ kind = "outside" }') .. [[)
     local after = tostring(remuda._pr2_mail_state.reads) .. ":" .. tostring(remuda._pr2_mail_state.deliveries["01M49D6J4RVBW73XKFGQ6XS94J"])
     remuda.cli, mail.find_message = saved_cli, real_find
     if type(value) == "table" and value.failed then return tostring(ok) .. "|" .. value.code .. ":" .. value.text .. "|" .. before .. "|" .. after end
@@ -237,7 +239,7 @@ T.test("inbox parser failures do not read mail or change deliveries", function()
   end
   for _, parser in ipairs({ true, false }) do
     local result = inbox_case(parser, { "inbox", "01M49D6J4RVBW73XKFGQ6XS94K" },
-      '{ env = { REMUDA_BUTLER_AGENT_ID = "agent-test" } }')
+      '{ kind = "session", session = "agent-test" }')
     local ok, value, before, after = result:match("^([^|]*)|([^|]*)|([^|]*)|([^|]*)$")
     T.eq(before, after, "a nondelivered ID leaves read and delivery state untouched")
     T.ok(ok == "true" and value:find("not delivered", 1, true), "nondelivered ID keeps the Lua access check: " .. tostring(result))
@@ -254,12 +256,12 @@ T.test("inbox name and delivered-ID semantics are unchanged", function()
     remuda._butler_inbox = function(name) return "inbox:" .. name end
     remuda._butler_inbox_message = function(me, id) return "message:" .. id .. ":" .. me end
   ]]
-  local caller = '{ env = { REMUDA_BUTLER_AGENT_ID = "agent-test" } }'
+  local caller = '{ kind = "session", session = "agent-test" }'
   -- #439: a member may read only its own inbox; the operator may read any named one.
-  both_command("inbox", { "inbox", "alice" }, "nil", "true|inbox:alice", setup)
+  both_command("inbox", { "inbox", "alice" }, '{ kind = "outside" }', "true|inbox:alice", setup)
   both_command("inbox", { "inbox", "alice" }, caller, "true|1:agents may only read their own Butler inbox.\nNext: remuda butler inbox", setup)
-  both_command("inbox", { "inbox", "--" }, "nil", "true|inbox:--", setup)
-  both_command("inbox", { "inbox", "-alice" }, "nil", "true|inbox:-alice", setup)
+  both_command("inbox", { "inbox", "--" }, '{ kind = "outside" }', "true|inbox:--", setup)
+  both_command("inbox", { "inbox", "-alice" }, '{ kind = "outside" }', "true|inbox:-alice", setup)
   both_command("inbox", { "inbox", "01M49D6J4RVBW73XKFGQ6XS94J" }, caller,
     "true|message:01M49D6J4RVBW73XKFGQ6XS94J:agent-test", setup)
 end)
