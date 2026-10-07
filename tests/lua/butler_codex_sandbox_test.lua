@@ -63,7 +63,9 @@ end)
 
 T.test("sandbox full is refused for agent callers with the owner command", function()
   start_butler()
-  local agent = "{ env = { REMUDA_BUTLER_AGENT_ID = 'AGENT' } }"
+  T.eval([[remuda._butler_bus.agents.AGENT = { id = "AGENT", alias = "AGENT", session_name = "agent-session",
+    children = {}, kind = "codex" }]])
+  local agent = "{ kind = 'session', session = 'agent-session' }"
   local r = ev("return remuda._butler_command_run('launch', {'launch','codex','w1','--sandbox','full'}, " .. agent .. ")")
   T.expect(r:find("remuda butler launch codex w1 --sandbox full", 1, true) and r:find("Next:", 1, true),
     "agent CLI call not refused with the owner command: " .. r, "ok - CLI agent caller gets the owner command")

@@ -3448,8 +3448,7 @@ end
 local rx_tests
 do
 -- Exercise the same permission helper and registered session lookup used by
--- main.lua. The caller env represents the agent launch; the checker itself
--- receives core caller identity, never an environment-variable override.
+-- main.lua. The checker receives only core caller identity.
 remuda._test_with_agent_file_caller = function(cwd, run)
   local saved_caller, saved_check, saved_bus = remuda.caller, remuda._butler_file_for_caller, remuda._butler_bus
   local permissions = dofile("packages/butler/permissions.lua")
@@ -3469,9 +3468,7 @@ remuda._test_with_agent_file_caller = function(cwd, run)
   end
   remuda._butler_bus = bus
   remuda.caller = function()
-    return { kind = "session", session = "session-member", env = {
-      REMUDA_BUTLER_AGENT_ID = member.id, REMUDA_BUTLER_SESSION_NAME = member.session_name,
-    } }
+    return { kind = "session", session = "session-member" }
   end
   remuda._butler_file_for_caller = function(path, flag, pipe)
     return permissions.file_for_caller(path, remuda.caller(), cwd_of, realpath, flag, pipe, "posix")

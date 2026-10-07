@@ -28,7 +28,7 @@ T.test("inbox_with_a_non_ulid_opens_no_message_file", function()
     local rejected = {}
     for _, id in ipairs({ '../../x', 'not-a-ulid' }) do
       local ok, err = pcall(remuda._butler_command_run, 'inbox', { 'inbox', id },
-        { env = { REMUDA_BUTLER_AGENT_ID = agent.id } })
+        { kind = 'session', session = agent.session_name })
       rejected[#rejected + 1] = tostring(not ok
         and tostring(err):find('agents may only read their own Butler inbox', 1, true) ~= nil)
     end
@@ -44,7 +44,7 @@ end)
 T.test("operator_inbox_with_a_message_id_gets_a_next_line", function()
   T.eq(T.eval([=[
     local id = remuda._butler_send('butler', 'cx1', 'operator view'):match('^queued (%S+)')
-    local ok, out = pcall(remuda._butler_command_run, 'inbox', { 'inbox', id }, { env = {} })
+    local ok, out = pcall(remuda._butler_command_run, 'inbox', { 'inbox', id }, { kind = 'outside' })
     out = tostring(out)
     return (out:find('shows a message only to the member it was delivered to', 1, true)
       and out:find(id, 1, true) and out:find('Next:', 1, true)) and 'next' or out

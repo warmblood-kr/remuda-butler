@@ -6,6 +6,8 @@ local function start_butler()
     return T.eval('return remuda._butler_bus ~= nil and remuda._butler_bus.agents.butler ~= nil')
       :match("^%s*true%s*$") ~= nil
   end, 10, "Butler root start")
+  T.eval([[remuda._butler_bus.agents["agent-test"] = { id = "agent-test", alias = "agent-test",
+    session_name = "agent-test", children = {}, kind = "codex" }]])
   T.eval([[
     remuda._butler_cli_action_calls = {}
     local function record(kind, ...)
@@ -26,7 +28,7 @@ end
 T.test("message verbs treat --help as help without actions", function()
   start_butler()
   local out = T.eval([[
-    local caller = { env = { REMUDA_BUTLER_AGENT_ID = "agent-test" } }
+    local caller = { kind = "session", session = "agent-test" }
     local cases = {
       { "send", { "send" } },
       { "topic", { "topic", "new", "work" }, "topic new" },
@@ -55,7 +57,7 @@ T.test("message verbs treat --help as help without actions", function()
 
     remuda._butler_cli_action_calls = {}
     local result = remuda._butler_command_run("send",
-      { "send", "sender", "recipient", "--", "--help" }, { env = {} })
+      { "send", "sender", "recipient", "--", "--help" }, { kind = "outside" })
     local action = remuda._butler_cli_action_calls[1]
     local body = action and action.args[3] or "(missing)"
     local from = action and action.args[1] or "(missing)"
@@ -105,7 +107,7 @@ end)
 T.test("send-to-leader help explains how to send dash-first text", function()
   start_butler()
   local out = T.eval([[
-    local caller = { env = { REMUDA_BUTLER_AGENT_ID = "agent-test" } }
+    local caller = { kind = "session", session = "agent-test" }
     return remuda._butler_command_run("send-to-leader", { "send-to-leader", "--help" }, caller)
   ]])
   T.expect(out:find("To send text that starts with -, put -- first:", 1, true) ~= nil

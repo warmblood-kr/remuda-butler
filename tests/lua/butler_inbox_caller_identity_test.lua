@@ -19,10 +19,13 @@ T.eval(string.format([[
 local function call(verb, args, agent_id)
   local encoded = {}
   for _, value in ipairs(args) do encoded[#encoded + 1] = string.format("%q", value) end
-  local env = agent_id and string.format("{ REMUDA_BUTLER_AGENT_ID = %q }", agent_id) or "{}"
+  local session = agent_id and T.eval("for _, a in pairs(remuda._butler_bus.agents) do if a.id == "
+    .. string.format("%q", agent_id) .. " then return a.session_name end end")
+  local caller = session and string.format("{ kind = 'session', session = %q }", session)
+    or (agent_id and "{ kind = 'session', session = 'unregistered' }" or "{ kind = 'outside' }")
   return T.eval([[
     local ok, value = pcall(remuda._butler_command_run, ]] .. string.format("%q", verb)
-    .. ", { " .. table.concat(encoded, ", ") .. " }, { env = " .. env .. [[ })
+    .. ", { " .. table.concat(encoded, ", ") .. " }, " .. caller .. [[)
     return (ok and "ok\0" or "error\0") .. tostring(value)
   ]])
 end
@@ -80,7 +83,7 @@ T.test("agent_can_read_own_named_inbox_and_operator_can_read_any_named_inbox", f
     .. ", " .. string.format("%q", operator_message) .. "))"), "false", "operator read marks mail read")
 end)
 
-T.test("ended_member_still_reads_its_own_mail_by_alias_and_a_reused_alias_is_not_its_own", function()
+T.test("ended_member_session_is_unidentified_and_alias_reuse_does_not_restore_it", function()
   local ids = T.eval([[
     local bus = remuda._butler_bus
     remuda._butler_launch("codex", "dave")
@@ -90,13 +93,9 @@ T.test("ended_member_still_reads_its_own_mail_by_alias_and_a_reused_alias_is_not
     return old
   ]])
   local old_id = ids:match("%S+")
-  for _, args in ipairs({ { "inbox", "dave" }, { "inbox" }, { "inbox", old_id } }) do
-    local result = call("inbox", args, old_id)
-    T.ok(result:match("^ok\0"), "an ended member reads its own inbox (" .. (args[2] or "no-arg") .. "): " .. result)
-    if args[2] == "dave" then
-      T.ok(result:find("dave private note", 1, true), "own mail shown by alias: " .. result)
-    end
-  end
+  local ended = call("inbox", { "inbox", "dave" }, old_id)
+  T.ok(ended:match("^error\0") and ended:find("Next:", 1, true),
+    "an ended session is unidentified and cannot read its inbox: " .. ended)
   T.eval([[
     -- the alias is taken again by a new holder with another id
     remuda._butler_bus.agents.dave = { id = "01ZZZZZZZZZZZZZZZZZZZZZZZZ", alias = "dave", session_name = "dave-new",

@@ -143,16 +143,14 @@ echo "== an agent caller: download inside is written; without -o it lands in the
 [[ $(cat "$MEMBER_CWD/matrix-a1") == MEDIA-BYTES ]] || fail "the default output is not in the working directory"
 [[ ! -e $HOME/matrix-a1 ]] || fail "the default output of an agent caller landed in HOME"
 
-echo "== MCP: matrix_download writes into the working directory and returns the absolute path"
-grep -qF "Downloaded 11 bytes to $MEMBER_CWD/matrix-b2" "$T/mcp_dl.out" || fail "matrix_download: $(cat "$T/mcp_dl.out")"
-[[ $(cat "$MEMBER_CWD/matrix-b2") == MEDIA-BYTES ]] || fail "matrix_download wrote the wrong content"
-
-echo "== MCP: matrix_upload outside or through a link is refused; inside returns the event id"
-for name in mcp_up_out mcp_up_link; do
+echo "== MCP: this pinned core has no daemon caller fields, so file tools fail closed"
+for name in mcp_dl mcp_up_out mcp_up_link mcp_up_in; do
   grep -qF '"isError":true' "$T/$name.out" || fail "$name was not refused: $(cat "$T/$name.out")"
-  grep -qF "is outside this session's working directory $CWD" "$T/$name.out" || fail "$name: wrong refusal: $(cat "$T/$name.out")"
+  grep -qF 'Next:' "$T/$name.out" || fail "$name has no next step: $(cat "$T/$name.out")"
 done
-grep -qF '$mcpup1' "$T/mcp_up_in.out" || fail "matrix_upload inside: $(cat "$T/mcp_up_in.out")"
+[[ ! -e $MEMBER_CWD/matrix-b2 ]] || fail "a refused matrix_download wrote a file"
+[[ $(lua 'local n = 0; for _, call in ipairs(remuda.http.calls) do if call.method == "PUT" and tostring(call.body):find("INSIDE-BODY", 1, true) then n = n + 1 end end; return n') == 0 ]] \
+  || fail "a refused matrix_upload sent a Matrix PUT"
 [[ $(lua 'local n = 0; for _, call in ipairs(remuda.http.calls) do if call.method == "POST" and tostring(call.body):find("TOP-SECRET", 1, true) then n = n + 1 end end; return n') == 0 ]] \
   || fail "a refused matrix_upload sent the outside file"
 
@@ -180,7 +178,7 @@ grep -qF "Next: run remuda butler matrix setup from your own terminal" "$T/setup
   || fail "a refused matrix setup made a request to the server it named"
 
 echo "== nothing was read from a refused path"
-INBOX=$(REMUDA_BUTLER_AGENT_ID=butler remuda -s "$S" butler inbox butler 2>&1)
+INBOX=$(remuda -s "$S" butler inbox butler 2>&1)
 grep -qF "INSIDE-BODY" <<<"$INBOX" || fail "the inside file did not arrive: $INBOX"
 grep -qF "TOP-SECRET-OUTSIDE" <<<"$INBOX" && fail "a refused file reached the Butler inbox"
 
