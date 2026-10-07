@@ -56,20 +56,20 @@ end)
 -- Launch a probe session whose screen never becomes ready; return reason, detail and the
 -- rendered sessions output / launch trace for that attempt.
 local probe_count = 0
-local function launch_diagnostic(kind, screen)
+local function launch_diagnostic(kind, screen, throw)
   probe_count = probe_count + 1
   local name = "diag-" .. probe_count
   T.eval(string.format([[
     remuda._butler_agent_builders[%q] = function() return { "sh", "-c", "sleep 60" } end
     remuda._butler_test_force_launch_probe = remuda._butler_test_force_launch_probe or {}
     remuda._butler_test_force_launch_probe[%q] = true
-    remuda.capture = function(session) if session == %q then return %q end return "" end
+    remuda.capture = function(session) if session == %q then if %s then error(%q, 0) end return %q end return "" end
     remuda._diag = remuda._diag or {}
     remuda._butler_choose_async({ %q }, {
       name = %q, cwd = os.getenv("XDG_DATA_HOME"), timeout = 4,
       spec = function() return {} end, env = function() return {} end,
     }, function(session, agent, attempts) remuda._diag[%q] = attempts[1] end)
-  ]], kind, name, name, screen, kind, name, name))
+  ]], kind, name, name, tostring(throw == true), screen, screen, kind, name, name))
   T.wait_until(function()
     return T.eval(string.format("return tostring(remuda._diag[%q] ~= nil)", name)) == "true"
   end, 12, name .. " launch diagnostic")
@@ -123,6 +123,79 @@ T.test("launch diagnostics show row 1 only, cut at 80 characters, never a later 
   T.ok(shown ~= "", "first row text is kept")
 end)
 
+
+local function valid_utf8(text)
+  local i, n = 1, #text
+  while i <= n do
+    local b = text:byte(i)
+    local len = b < 0x80 and 1 or (b >= 0xC2 and b <= 0xDF) and 2 or (b >= 0xE0 and b <= 0xEF) and 3
+      or (b >= 0xF0 and b <= 0xF4) and 4 or nil
+    if not len or i + len - 1 > n then return false end
+    for k = 1, len - 1 do
+      local c = text:byte(i + k)
+      if c < 0x80 or c > 0xBF then return false end
+    end
+    i = i + len
+  end
+  return true
+end
+
+T.test("launch diagnostics drop every string control, C1 form and CSI shape", function()
+  local cases = {
+    "Please log in \27P1$r PUBLIC \7 SECRET_DCS\27\\ ok",
+    "Please log in \27_ PUBLIC \7 SECRET_APC\27\\ ok",
+    "Please log in \27^ PUBLIC \7 SECRET_PM\27\\ ok",
+    "Please log in \27X PUBLIC \7 SECRET_SOS\27\\ ok",
+    "Please log in \27]0;title\27\\\27]8;;SECRET_OSC_ST\27\\x\27]8;;\7 ok",
+    "Please log in \194\157" .. "8;;SECRET_C1_OSC\194\156 ok",
+    "Please log in \194\157" .. "8;;SECRET_C1_OSC_BEL\7 ok",
+    "Please log in \194\144 PUBLIC \7 SECRET_C1_DCS\194\156 ok",
+    "Please log in \194\159 SECRET_C1_APC\194\156 \194\158 SECRET_C1_PM\194\156 \194\152 SECRET_C1_SOS\194\156 ok",
+    "Please log in \27[38:2::SECRET:1:2m ok\27[1;2 q\27[?25l\27[31;SECRET",
+    "Please log in \194\155" .. "31m ok",
+    "Please log in \27]8;;SECRET_UNTERMINATED",
+    "Please log in \27P PUBLIC \7 SECRET_DCS_UNTERMINATED",
+  }
+  for index, screen in ipairs(cases) do
+    local _, detail, sessions, trace = launch_diagnostic("claude", screen .. "\nSECRET_ROW2")
+    for label, text in pairs({ detail = detail, sessions = sessions, trace = trace }) do
+      T.ok(not text:find("SECRET", 1, true), "string-control case " .. index .. " leaked into " .. label .. ": " .. text)
+    end
+    T.ok(detail:find("Please log in", 1, true), "case " .. index .. " keeps the visible text: " .. detail)
+    T.ok(not detail:find("[%z\1-\8\11-\31\127]"), "case " .. index .. " kept a control byte")
+  end
+end)
+
+T.test("launch diagnostics stay valid UTF-8 within 80 characters and 240 bytes", function()
+  local screens = {
+    "Please log in A" .. string.rep("\128", 10000),
+    "Please log in \255\254\192\175\237\160\128\240\128\128\128 tail",
+    "Please log in \226\148 cut" .. string.rep("\226\148", 50),
+    string.rep("界", 200),
+    string.rep("😀", 200),
+    "Please log in " .. string.rep("é", 5000) .. "\226",
+  }
+  for index, screen in ipairs(screens) do
+    local _, detail = launch_diagnostic("claude", "Please log in " .. screen .. "\nSECRET_ROW2")
+    T.ok(valid_utf8(detail), "case " .. index .. " emitted invalid UTF-8")
+    T.ok(#detail <= 240, "case " .. index .. " exceeds 240 bytes: " .. #detail)
+    local count = select(2, detail:gsub("[^\128-\191]", ""))
+    T.ok(count <= 80, "case " .. index .. " exceeds 80 characters: " .. count)
+    T.ok(not detail:find("SECRET", 1, true), "case " .. index .. " leaked row 2")
+  end
+end)
+
+T.test("capture errors reach diagnostics through the same sanitizer", function()
+  local message = "capture failed \27]8;;SECRET_ERR\7link\27]8;;\7 \27[31m" .. string.rep("x", 5000) .. "\128\nSECRET_ERR_ROW2"
+  local reason, detail, sessions, trace = launch_diagnostic("retry_probe", message, true)
+  T.eq(reason, "ready_unverified", "a pane whose capture always fails stays unverified")
+  for label, text in pairs({ detail = detail, sessions = sessions, trace = trace }) do
+    T.ok(not text:find("SECRET", 1, true), "capture error leaked into " .. label)
+    T.ok(valid_utf8(text), "capture error produced invalid UTF-8 in " .. label)
+  end
+  T.ok(#detail < 600, "capture error detail must be bounded: " .. #detail)
+  T.ok(detail:find("last capture error: capture failed", 1, true), "visible error text is kept: " .. detail)
+end)
 
 local TRY_FIXTURES = {
   "claude-2.1.292-100x30.txt", "claude-2.1.292-120x30.txt", "claude-2.1.292-140x30.txt",
