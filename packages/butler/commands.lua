@@ -490,6 +490,13 @@ local SEND_CLI_SPEC = {
     },
   },
 }
+local function send_sender_matches_caller(from, caller)
+  local identity = current_agent(caller)
+  if not identity then return true end
+  local caller_ok, caller_alias = pcall(resolve, identity)
+  local sender_ok, sender_alias = pcall(resolve, from)
+  return caller_ok and sender_ok and caller_alias == sender_alias
+end
 command(40, "send", '  remuda butler send <to> "<message>" | <to> - | <to> --file PATH\n'
   .. '  remuda butler send <from> <to> <message...> | <from> <to> - | <from> <to> --file PATH', function(args, caller)
   local cli = remuda.cli
@@ -516,6 +523,9 @@ command(40, "send", '  remuda butler send <to> "<message>" | <to> - | <to> --fil
       if #words == 1 then to = words[1]
       elseif #words >= 2 then from, to = words[1], words[2] end
       if not to then return nil end
+      if not send_sender_matches_caller(from, caller) then
+        return cli_result(function() error("cannot send with a different sender", 0) end)
+      end
       return cli_result(function()
         return remuda._butler_send(from, to, message_body({ "send", "--file", report.values.file }, 2, caller))
       end)
@@ -529,6 +539,9 @@ command(40, "send", '  remuda butler send <to> "<message>" | <to> - | <to> --fil
     -- Positional short messages retain the caller-inferred sender form.
   elseif args[3] ~= "--" and (args[4] == "-" or args[4] == "--file") then
     from, to, first = args[2], args[3], 4
+  end
+  if not send_sender_matches_caller(from, caller) then
+    return cli_result(function() error("cannot send with a different sender", 0) end)
   end
   return cli_result(function()
     local body
@@ -615,16 +628,43 @@ command(60, "inbox", "  remuda butler inbox [name]", function(args, caller)
     local report = cli.parse(INBOX_CLI_SPEC, args)
     if not report.ok or report.kind == "help" then return nil end; selector = report.values.NAME
   elseif #args > 2 then return nil end
+  local caller_identity = current_agent(caller)
+  -- Only a ULID may reach a message lookup (it opens messages/<id>.json).
+  -- An agent id is also a ULID and falls through to the name form.
   if remuda._butler_identity.is_ulid(selector) and mail.find_message(selector) then
-    local me = current_agent(caller)
     return cli_result(function()
-      if not me then error("inbox " .. selector .. " shows a message only to the member it was delivered to."
-        .. " Next: run it from that member's session, or remuda butler inbox <name>", 0) end
-      return remuda._butler_inbox_message(me, selector)
+      if not caller_identity then
+        error("inbox " .. selector .. " shows a message only to the member it was delivered to."
+          .. " Next: run it from that member's session, or remuda butler inbox <name>", 0)
+      end
+      return remuda._butler_inbox_message(caller_identity, selector)
     end)
   end
-  return cli_result(function() return remuda._butler_inbox(selector or assert(current_agent(caller),
-    "no Butler identity in your env; use `inbox <name>`")) end)
+  return cli_result(function()
+    local name = selector or assert(caller_identity, "no Butler identity in your env; use `inbox <name>`")
+    if caller_identity and selector then
+      -- Check only the caller's own identifiers before inbox resolution. An
+      -- unknown target gets the same refusal as any other cross-member name.
+      local own_id, own_agent
+      local ok, id, agent = pcall(remuda._butler_identity.mail_id, caller_identity, true)
+      if ok then own_id, own_agent = id, agent end
+      local own_alias = own_agent and own_agent.alias
+      local own_session = own_agent and own_agent.session_name
+      if own_id and not own_agent then
+        -- An ended member still reads its own mail by alias (#23), unless the alias now belongs to a new holder.
+        local bus = remuda._butler_bus or {}
+        local record = (bus.identity_ids or {})[own_id]
+        local alias = record and record.alias
+        local live = alias and (bus.agents or {})[alias]
+        local latest = alias and (bus.identities or {})[alias]
+        if alias and not live and latest and latest.id == own_id then own_alias = alias end
+      end
+      if name ~= caller_identity and name ~= own_id and name ~= own_alias and name ~= own_session then
+        error("agents may only read their own Butler inbox.\nNext: remuda butler inbox", 0)
+      end
+    end
+    return remuda._butler_inbox(name)
+  end)
 end)
 local REPLY_CLI_SPEC = {
   name = "remuda butler",

@@ -28,18 +28,20 @@ local function start_butler()
       return remuda._pr_a_record("upload", table.concat(args, " "))
     end
     remuda._pr_a_caller = { env = { REMUDA_BUTLER_AGENT_ID = "agent-test" } }
+    remuda._pr_a_operator = { env = {} }
+    remuda._butler_bus.agents["agent-test"] = { id = "agent-test", alias = "agent-test", children = {}, kind = "codex" }
     remuda._pr_a_path = path
   ]=])
 end
 
 local function luaq(value) return string.format("%q", value) end
-local function invoke(verb, args)
+local function invoke(verb, args, operator)
   start_butler()
   local quoted = {}
   for _, word in ipairs(args) do quoted[#quoted + 1] = luaq(word) end
   return T.eval([[
     remuda._pr_a_actions = {}
-    local result = remuda._butler_command_run(]] .. luaq(verb) .. [[, {]] .. table.concat(quoted, ",") .. [[}, remuda._pr_a_caller)
+    local result = remuda._butler_command_run(]] .. luaq(verb) .. [[, {]] .. table.concat(quoted, ",") .. [[}, remuda._pr_a_]] .. (operator and "operator" or "caller") .. [[)
     local action = remuda._pr_a_actions[1]
     local out = { tostring(result), tostring(action and action.kind or "none") }
     for _, value in ipairs(action and action.args or {}) do out[#out + 1] = tostring(value) end
@@ -69,7 +71,7 @@ T.test("send lead --file p.txt reads the file body", function()
 end)
 
 T.test("send a b --file p keeps the from/to form", function()
-  local out = invoke("send", { "send", "a", "b", "--file", path() })
+  local out = invoke("send", { "send", "a", "b", "--file", path() }, true)
   T.eq(out, "stub:send|send|a|b|file-body", "send a b --file p")
 end)
 
@@ -168,12 +170,12 @@ T.test("forward ID worker -- -h sends the note after the separator", function()
 end)
 
 T.test("send lead hello world --file p preserves the original positional body", function()
-  local out = invoke("send", { "send", "lead", "hello", "world", "--file", "p" })
+  local out = invoke("send", { "send", "lead", "hello", "world", "--file", "p" }, true)
   T.eq(out, "stub:send|send|lead|hello|world --file p", "send lead hello world --file p behaves like main")
 end)
 
 T.test("send lead hello -h preserves the original body word", function()
-  local out = invoke("send", { "send", "lead", "hello", "-h" })
+  local out = invoke("send", { "send", "lead", "hello", "-h" }, true)
   T.eq(out, "stub:send|send|lead|hello|-h", "send lead hello -h behaves like main")
 end)
 
