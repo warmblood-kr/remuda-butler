@@ -113,6 +113,31 @@ for _, fx in ipairs(PAGE2) do
   check(chooser.known_startup_modal(startup.claude, fx[2]), true, fx[1] .. ": known modal (notice defers)")
 end
 
+-- Keys are re-derived from the CURRENT screen every tick (never cached): the marker
+-- jumps around between ticks (a key lost, then an external move) and each answer
+-- follows what is on screen at that moment.
+do
+  local script, tick_no, pressed, sessions = { 1, 1, 3, 2 }, 0, {}, 0 -- marker seen per capture
+  remuda.new = function(name) return name end
+  remuda.ls = function() return { { name = "m", alive = true } } end
+  remuda.capture = function()
+    tick_no = tick_no + 1
+    local sel = script[math.min(tick_no, #script)]
+    return tick_no > #script + 1 and "─\n❯" or with_marker(PAGE1[1][2], sel)
+  end
+  remuda.close, remuda.cancel = noop, noop
+  remuda.key = function(_, key) pressed[#pressed + 1] = key; return true end
+  local tick
+  remuda.schedule = function(spec) tick = spec.run; return 1 end
+  chooser.choose({ "claude" }, { name = "m", cwd = "/p/work", argv = { "claude" },
+    spec = function() return {} end, env = function() return {} end, timeout = 60 },
+    function() sessions = sessions + 1 end)
+  for _ = 1, 3 do tick() end
+  check(table.concat(pressed, ","), "<down>,<down>,<up>", "keys follow the current marker position each tick")
+  tick()
+  check(pressed[#pressed], "RET", "confirm only when the current screen shows the marker on 'Not now'")
+end
+
 -- Lookalikes: the title in a user's draft without the modal layout.
 local R = ("─"):rep(40)
 local lookalikes = {
