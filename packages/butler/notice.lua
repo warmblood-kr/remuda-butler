@@ -124,7 +124,13 @@ function remuda._butler_prompt_is_empty(kind, screen)
   local parts = { text }
   for index = prompt_at + 1, #lines do
     local rest = lines[index]:gsub("^%s+", "")
-    if rest:sub(1, 3) == "╰" or rest:sub(1, 3) == "└" or rest:sub(1, 3) == "─" then break end
+    if rest:sub(1, 3) == "╰" or rest:sub(1, 3) == "└" then break end
+    if rest:sub(1, 3) == "─" then
+      local offset = 1
+      while rest:sub(offset, offset + 2) == "─" do offset = offset + 3 end
+      local footer = rest:sub(offset):gsub("^%s+", "")
+      if footer == "" or footer:sub(1, 6) == "⏵⏵" then break end
+    end
     if rest:match("^%? for shortcuts")
         or (kind == "codex" and (rest:lower():find("context left", 1, true)
         or rest:match("^⚠%s+%d+%s+warning") or rest:match("^[^%s]+%s+[^%s]+%s+·"))) then
@@ -184,38 +190,16 @@ function remuda._butler_notify_policy(session, now)
     end
     if now - seen.since < NOTICE_STABLE_SECONDS then return false end
   end
-  local full_screen, prompt_screen = screen, screen
-  if remuda.capture_styled then
-    -- A core with remuda#137 marks dim text: parse only the cursor row, and
-    -- drop a TUI's dim ghost suggestion so it reads as the empty prompt it is.
-    local captured, styled = pcall(remuda.capture_styled, session)
-    if not captured then return false end
-    local rows = {}
-    for row_index, spans in ipairs(styled.rows or {}) do
-      local parts = {}
-      for _, span in ipairs(spans) do parts[#parts + 1] = span.text end
-      rows[row_index] = table.concat(parts)
-    end
-    if not full_screen then full_screen = table.concat(rows, "\n") end
-    local cursor_parts = {}
-    for _, span in ipairs(styled.rows[styled.cursor.row] or {}) do
-      if not span.dim then cursor_parts[#cursor_parts + 1] = span.text end
-    end
-    prompt_screen = table.concat(cursor_parts)
-  end
-  if not full_screen then
-    local captured
-    captured, full_screen = pcall(remuda.capture, session)
-    if not captured then return false end
-  end
-  prompt_screen = prompt_screen or full_screen
+  local captured, full_screen = pcall(remuda.capture, session)
+  if not captured then return false end
+  full_screen = tostring(full_screen or "")
   local agent = bus.agents[session]
   local kind = agent and agent.kind or ""
   if known_startup_modal(remuda._butler_agent_startup[kind] or {}, full_screen) then
     _butler_session_trace("notice_deferred_modal", session .. " " .. kind)
     return false
   end
-  local decision, text = remuda._butler_prompt_is_empty(kind, prompt_screen)
+  local decision, text = remuda._butler_composer_decision(kind, session, full_screen)
   if seen.decision ~= decision then -- once per change, not every retry
     seen.decision = decision
     _butler_session_trace("notice_prompt", "message_ids="
@@ -244,7 +228,9 @@ function remuda._butler_composer_decision(kind, session, screen)
       -- The raw text must be exactly the dim ghost: continuation rows below an empty first
       -- line are a human's draft.
       local ghost = table.concat(dim):gsub("\194\160", " "):match("^%s*(.-)%s*$")
-      if decision == "EMPTY" and ghost == raw_text then return decision, text end
+      if kind == "claude" and decision == "EMPTY" and ghost:sub(1, 5) == 'Try "' and ghost == raw_text then
+        return decision, text
+      end
     end
   end
   return raw, raw_text

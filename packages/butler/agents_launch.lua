@@ -39,6 +39,12 @@ end
 local function one_line(value)
   return (tostring(value or ""):match("^[^\r\n]*") or ""):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
 end
+local function screen_detail(screen)
+  local result = tostring(screen or ""):gsub("\r\n", "\n"):gsub("\r", "\n")
+    :gsub("\n+", " | "):sub(1, 200)
+  result = result:gsub("^%s+", ""):gsub("%s+$", "")
+  return result ~= "" and result or "<empty>"
+end
 local function readiness_timeout()
   local configured = tonumber(remuda._butler_readiness_timeout or os.getenv("REMUDA_BUTLER_READINESS_TIMEOUT"))
   if configured and configured > 0 then return configured end
@@ -171,7 +177,7 @@ local function choose(candidates, opts, done)
     -- Authentication screens can still contain a prompt glyph; classify
     -- login before readiness so expired credentials never look usable.
     for _, pattern in ipairs(entry.login or {}) do
-      if screen:find(pattern, 1, true) then fail_candidate("login", one_line(screen)); return end
+      if screen:find(pattern, 1, true) then fail_candidate("login", screen_detail(screen)); return end
     end
     local ready = false
     if entry.ready then local tested, matched = call_callback(entry.ready, screen); ready = tested and not not matched end
@@ -282,7 +288,7 @@ local function choose(candidates, opts, done)
         if state.unknown_dialog_screen ~= screen then
           state.unknown_dialog_screen, state.unknown_dialog_since = screen, os.time()
         elseif os.time() - state.unknown_dialog_since >= 2 then
-          fail_candidate("dialog", one_line(screen)); return
+          fail_candidate("dialog", screen_detail(screen)); return
         end
       else
         state.unknown_dialog_screen, state.unknown_dialog_since = nil, nil
@@ -300,7 +306,7 @@ local function choose(candidates, opts, done)
       local capture_error = state.last_capture_error and ("; last capture error: " .. state.last_capture_error) or ""
       fail_candidate(state.dialog_seen and "dialog" or "timeout", prefix
         .. "readiness prompt not observed within " .. tostring(state.timeout)
-        .. " seconds; last screen: " .. (state.last_screen ~= "" and state.last_screen or "<empty>")
+        .. " seconds; last screen: " .. screen_detail(state.last_screen)
         .. capture_error)
     end
   end
