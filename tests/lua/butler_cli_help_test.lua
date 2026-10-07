@@ -55,7 +55,7 @@ T.test("message verbs treat --help as help without actions", function()
 
     remuda._butler_cli_action_calls = {}
     local result = remuda._butler_command_run("send",
-      { "send", "sender", "recipient", "--", "--help" }, caller)
+      { "send", "sender", "recipient", "--", "--help" }, { env = {} })
     local action = remuda._butler_cli_action_calls[1]
     local body = action and action.args[3] or "(missing)"
     local from = action and action.args[1] or "(missing)"
