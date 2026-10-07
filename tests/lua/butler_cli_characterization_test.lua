@@ -39,6 +39,7 @@ local function normalize(text)
     if at then text = text:sub(1, at - 1) .. "<GLOBAL-USAGE>" .. text:sub(to + 1) end
   end
   text = text:gsub("%f[%w][%d%u]+%f[%W]", function(word) return #word == 26 and "<ULID>" or word end)
+  text = text:gsub("(%.lua\"%]):%d+:", "%1:<LINE>:")
   return (text:gsub("%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%dZ", "<TS>"))
 end
 
@@ -199,13 +200,56 @@ families {
       { "compact", "nosuch" }, { "compact", "nosuch", "--dry-run" }, { "compact", "nosuch", "--bogus" },
       { "compact", "nosuch", "--dry-run", "--force" }, { "compact", "--help", "s1" }, { "compact", "s1", "--help" },
       { "compact", "s1", "-h" }, { "compact", "--dry-run" }) },
+  { name = "inbox",
+    setup = [[
+      remuda._pr0_inbox = { read = 0, deliveries = 0 }
+      local mail = remuda._butler_mail
+      local real_find = mail.find_message
+      mail.find_message = function(id)
+        if id == "01M49D6J4RVBW73XKFGQ6XS94J" then return { id = id } end
+        if id == "01M49D6J4RVBW73XKFGQ6XS94K" then return { id = id } end
+        return nil
+      end
+      remuda._butler_inbox_message = function(me, id)
+        remuda._pr0_inbox.read = remuda._pr0_inbox.read + 1
+        if id == "01M49D6J4RVBW73XKFGQ6XS94K" then
+          error("message " .. id .. " was not delivered to you", 0)
+        end
+        return "message " .. id
+      end
+      remuda._butler_inbox = function(name)
+        remuda._pr0_inbox.read = remuda._pr0_inbox.read + 1
+        return "inbox for " .. name
+      end
+      remuda._pr0_inbox.restore = function() mail.find_message = real_find end
+    ]],
+    trace = [[return "read=" .. remuda._pr0_inbox.read .. ",deliveries=" .. remuda._pr0_inbox.deliveries]],
+    cases = {
+      { "inbox" }, { "inbox", "--help" }, { "inbox", "-h" }, { "inbox", "help" },
+      { "inbox", "01M49D6J4RVBW73XKFGQ6XS94J" },
+      agent("inbox", "01M49D6J4RVBW73XKFGQ6XS94J"),
+      agent("inbox", "01M49D6J4RVBW73XKFGQ6XS94K"),
+      { "inbox", "01M49D6J4RVBW73XKFGQ6XS94L" },
+      { "inbox", "alice" }, { "inbox", "01M49D6J4RVBW73XKFGQ6XS94J", "extra" },
+      { "inbox", "--" }, { "inbox", "-alice" }, { "inbox", "alice", "extra" },
+      { "inbox", "--help", "extra" }, { "inbox", "01M49D6J4RVBW73XKFGQ6XS94J", "--help" },
+    } },
 
-  -- typed-lines, shell-lines and status-commands share one switch parser. `on` ends at an
-  -- owner terminal prompt, which needs a tty, so only refusals and `off` are recorded here.
+  -- typed-lines, shell-lines and status-commands share one switch parser. The terminal prompt
+  -- is stubbed so both valid on and off forms are captured without touching a real terminal.
   { name = "switches",
     setup = [[
       remuda._pr0_conf = os.getenv("REMUDA_LUA_SCRATCH") .. "/pr0-matrix.conf"
       remuda._butler_matrix_config = { config_path = remuda._pr0_conf }
+      remuda._pr0_saved_pending = remuda.pending
+      remuda.pending = function()
+        return {
+          prompt_line = function(_, spec) spec.callback("yes") end,
+          resolve = function(_, code, stdout, stderr)
+            return { code = code, stdout = stdout, stderr = stderr }
+          end,
+        }
+      end
     ]],
     reset = [[
       local file = assert(io.open(remuda._pr0_conf, "wb"))
@@ -226,6 +270,14 @@ families {
           cases[#cases + 1] = argv
         end
       end
+      for _, verb in ipairs({ "typed-lines", "shell-lines", "status-commands" }) do
+        cases[#cases + 1] = { argv = { verb, "on" }, pre = [[
+          local file = assert(io.open(remuda._pr0_conf, "wb"))
+          file:write("https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=true\nstatus_commands=false\napprove_text=false\n")
+          file:close()
+        ]] }
+        cases[#cases + 1] = { argv = { verb, "off" } }
+      end
       -- shell-lines on is refused before any prompt while typed-lines is off.
       cases[#cases + 1] = { "shell-lines", "on" }
       cases[#cases + 1] = agent("typed-lines", "on")
@@ -236,6 +288,7 @@ families {
       cases[#cases + 1] = agent("typed-lines", "--help")
       cases[#cases + 1] = { argv = { "typed-lines", "off" }, pre = [[remuda._butler_matrix_config = { config_path = "" }]],
         post = [[remuda._butler_matrix_config = { config_path = remuda._pr0_conf }]] }
+      cases[#cases + 1] = { argv = { "status-commands", "off" }, post = [[remuda.pending = remuda._pr0_saved_pending]] }
       return cases
     end)() },
   { name = "schedule",

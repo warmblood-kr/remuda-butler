@@ -9,6 +9,7 @@ doctor
 deny
 guard
 help
+# inbox keeps the legacy parser path for dash-prefixed member names and an old-core fallback.
 inbox
 launch
 matrix download
@@ -34,11 +35,13 @@ sessions
 shell-lines
 status
 status-hook
+# The switches are declared-spec parsed on current cores, with old-core arity fallback retained.
 status-commands
 statusline
 topic delegate
 typed-lines
 close
+# compact keeps session lookup before parsing and an old-core fallback.
 compact
 matrix mark-all
 matrix thread
