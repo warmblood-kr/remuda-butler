@@ -10,9 +10,10 @@ local MAX_INPUT = 64 * 1024 -- larger payloads use only bounded structured deny 
 local REDACT_PREFIX = 2048 -- redaction reads only this many bytes: its patterns are quadratic on long word runs
 local SUMMARY_CAP = 200
 M.LOG_CAP = 1024 * 1024 -- the log rotates to LOG.1 past this size (a field so a test can shrink it)
--- A rotated LOG.1 moves to LOG.<UTC stamp> on the next rotation; only those dated
--- archives older than this many days are deleted, and only at rotation time.
+-- A rotated LOG.1 moves to LOG.<UTC stamp> on the next rotation. Age retention
+-- applies at rotation; the count budget may prune the oldest archives sooner.
 M.RETENTION_DAYS = 90
+M.ARCHIVE_CAP = 16 -- includes LOG.1; retain the newest evidence when this fills before 90 days
 local SCRIPT_HEAD = 120
 
 -- Where the switch and the log live; remuda._butler_guard_dir lets a test redirect both.
@@ -755,6 +756,23 @@ local function unaudited_note()
     .. " (cleared by the next audit line)"
 end
 
+-- A failed prune must be retried before a later append can acknowledge evidence.
+local function prune_archives()
+  local kept = archives()
+  table.sort(kept, function(a, b)
+    if not a.stamp then return false end -- LOG.1 is the newest archive
+    if not b.stamp then return true end
+    if a.stamp ~= b.stamp then return a.stamp < b.stamp end
+    -- Collision suffixes are chronological numbers, not lexicographic strings.
+    local function suffix(entry) return tonumber(entry.path:match("Z%-(%d+)$")) or 0 end
+    return suffix(a) < suffix(b)
+  end)
+  for i = 1, #kept - M.ARCHIVE_CAP do
+    if not os.remove(kept[i].path) then return false end
+  end
+  return true
+end
+
 function M.rotate(path, now)
   now = now or os.time()
   if exists(path .. ".1") then
@@ -762,7 +780,7 @@ function M.rotate(path, now)
     local dated, n = path .. "." .. os.date("!%Y%m%dT%H%M%SZ", now), 0
     local target = dated
     while exists(target) do n = n + 1; target = dated .. "-" .. n end
-    os.rename(path .. ".1", target)
+    if not os.rename(path .. ".1", target) then return false end
   end
   -- A failed rename returns false: the caller must not truncate the live log.
   if not os.rename(path, path .. ".1") then return false end
@@ -770,7 +788,7 @@ function M.rotate(path, now)
   for _, a in ipairs(archives()) do
     if a.stamp and a.stamp < cutoff then os.remove(a.path) end
   end
-  return true
+  return prune_archives()
 end
 
 -- Hash chain: each new line carries "prev", the sha256 of the line before it (its text without the newline). A log
@@ -838,11 +856,15 @@ local function write_line(record)
   local ok, why = pcall(function()
     pcall(remuda.mkdir, dir())
     locked(path, function()
+      assert(prune_archives(), "audit archive pruning failed")
       local tail = last_line(path) -- read before a rotation moves it
       local f = io.open(path, "r")
       local size = 0
       if f then size = f:seek("end") or 0; f:close() end
-      if size >= M.LOG_CAP and M.rotate(path) then f = nil end -- a failed rotate keeps appending to the live log
+      if size >= M.LOG_CAP then
+        assert(M.rotate(path), "audit rotation failed")
+        f = nil
+      end
       if not f then assert(remuda.fs.write_atomic(path, "", { private = true })) end
       local out = assert(io.open(path, "a"))
       local prev, genesis
@@ -859,9 +881,18 @@ local function write_line(record)
         end
       end)
       if not hashed then prev, genesis = nil, nil end
-      if genesis then assert(out:write(genesis .. "\n")) end
-      assert(out:write(build_line(record, prev) .. "\n"))
-      out:close()
+      -- Buffered writes can succeed while flush or close fails. Always close
+      -- the handle, including after an immediate write/flush error, and only
+      -- acknowledge the event once all three operations have succeeded.
+      local written, write_err = pcall(function()
+        if genesis then assert(out:write(genesis .. "\n")) end
+        assert(out:write(build_line(record, prev) .. "\n"))
+        assert(out:flush())
+      end)
+      local closed, close_ok, close_err = pcall(out.close, out)
+      if not written then error(write_err, 0) end
+      if not closed then error(close_ok, 0) end
+      assert(close_ok, close_err)
     end)
   end)
   if not ok then return nil, tostring(why) end

@@ -143,3 +143,35 @@ T.test("mcp_capability_only_callers_keep_the_existing_path", function()
   local outcome = eval([[local ok, err = pcall(remuda._butler_identity.caller_agent, {}); return tostring(ok) .. "|" .. tostring(err)]])
   T.ok(outcome:find("false|unknown caller", 1, true), "MCP refusal keeps its existing reason: " .. outcome)
 end)
+
+for _, failure in ipairs({ "close", "flush", "write", "open" }) do
+  T.test("audit_" .. failure .. "_failure_refuses_operator_before_mail_mutation", function()
+    local before = snapshot()
+    local result = eval(([=[
+      local gp, real = remuda.butler.guard_policy, io.open
+      local stage, closes = %q, 0
+      io.open = function(path, mode)
+        if path ~= gp.log_path() or mode ~= "a" then return real(path, mode) end
+        if stage == "open" then return nil, "injected open failure" end
+        local out = {}
+        function out:write() if stage == "write" then return nil, "injected write failure" end; return self end
+        function out:flush() if stage == "flush" then return nil, "injected flush failure" end; return true end
+        function out:close()
+          closes = closes + 1
+          if stage == "close" then return nil, "File too large" end
+          return true
+        end
+        return out
+      end
+      local appended, why = gp.append({event = "caller_policy", summary = "failure probe"})
+      local p = remuda._butler_caller_principal.resolve({kind = "outside"})
+      local ok, out = pcall(remuda._butler_command_run, "send", {"send", "alice", "audit failure probe"}, {kind = "outside"})
+      io.open = real
+      return tostring(not appended) .. "|" .. tostring(why ~= nil) .. "|" .. p.tag .. "|"
+        .. tostring(not ok and tostring(out):find("Next:", 1, true) ~= nil) .. "|"
+        .. tostring(stage == "open" or closes == 3)
+    ]=]):format(failure))
+    T.eq(result, "true|true|unidentified|true|true", failure .. " must fail closed and close opened handles")
+    T.eq(snapshot(), before, failure .. " must leave mail, read state and counters unchanged")
+  end)
+end

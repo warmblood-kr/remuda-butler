@@ -23,7 +23,7 @@ local function start_butler()
       for l in f:lines() do out[#out + 1] = l end
       f:close(); return table.concat(out, '\n')
     end
-    remuda._t_guard = function(args, caller) return remuda._butler_command_run('guard', args, caller or {}) end
+    remuda._t_guard = function(args, caller) caller = caller or {}; caller.kind = 'session'; caller.session = 'butler'; return remuda._butler_command_run('guard', args, caller) end
     return 'ok'
   ]])
 end
@@ -209,7 +209,30 @@ T.test("guard stats reads a 1 MiB file of newlines in linear time", function()
   T.expect(tonumber(out:match("^(%S+)")) < 2, "stats over 1 MiB of newlines was too slow: " .. out, "ok - stats linear")
 end)
 
-T.test("a failed rotate rename never truncates the live log", function()
+T.test("rotation_caps_archives_and_keeps_the_newest_evidence_in_numeric_collision_order", function()
+  start_butler()
+  T.eval("remuda._t_dir('g3-aggregate')")
+  local out = T.eval([[
+    local gp = remuda.butler.guard_policy
+    local base, now = gp.log_path(), os.time()
+    local cap = gp.ARCHIVE_CAP or 16
+    local stamp = os.date('!%Y%m%dT%H%M%SZ', now)
+    local function put(p, s) local f = assert(io.open(p, 'w')); f:write(s); f:close() end
+    for i = 0, cap + 2 do put(base .. '.' .. stamp .. (i == 0 and '' or '-' .. i), tostring(i)) end
+    put(base .. '.1', 'recent'); put(base, 'live')
+    local rotated = gp.rotate(base, now)
+    local n = 0
+    for _, name in ipairs(remuda.list_dir(remuda._butler_guard_dir)) do
+      if name:match('^guard%-audit%.jsonl%.') then n = n + 1 end
+    end
+    local f = io.open(base .. '.' .. stamp .. '-10', 'r')
+    local ten = f and f:read('a'); if f then f:close() end
+    return tostring(rotated) .. '|' .. n .. '|' .. cap .. '|' .. tostring(ten)
+  ]])
+  T.eq(out, "true|16|16|10", "archive count includes .1 and preserves newer collision suffixes")
+end)
+
+T.test("a failed rotate rename refuses append and never truncates the live log", function()
   start_butler()
   T.eval("remuda._t_dir('g3-rotfail')")
   local out = T.eval([[
@@ -224,5 +247,27 @@ T.test("a failed rotate rename never truncates the live log", function()
     return tostring(ok) .. ' ' .. size
   ]])
   local ok, size = out:match("^(%a+) (%d+)$")
-  T.expect(ok == "true" and tonumber(size) > 1024 * 1024, "the live log must keep its content when rotate fails: " .. out, "ok - rotate failure keeps log")
+  T.expect(ok == "nil" and tonumber(size) == 1024 * 1024 + 1, "the live log must keep its content when rotate fails: " .. out, "ok - rotate failure keeps log")
+end)
+
+T.test("failed_archive_move_never_overwrites_the_previous_rotated_evidence", function()
+  start_butler()
+  T.eval("remuda._t_dir('g3-archivefail')")
+  local out = T.eval([[
+    local gp, real = remuda.butler.guard_policy, os.rename
+    local base = gp.log_path()
+    for p, text in pairs({[base] = 'live', [base .. '.1'] = 'previous'}) do
+      local f = assert(io.open(p, 'w')); f:write(text); f:close()
+    end
+    os.rename = function(a, b)
+      if a == base .. '.1' then return nil, 'injected archive move failure' end
+      return real(a, b)
+    end
+    local ok = gp.rotate(base)
+    os.rename = real
+    local f = assert(io.open(base .. '.1', 'r')); local previous = f:read('a'); f:close()
+    f = io.open(base, 'r'); local live = f and f:read('a'); if f then f:close() end
+    return tostring(ok) .. '|' .. previous .. '|' .. tostring(live)
+  ]])
+  T.eq(out, "false|previous|live")
 end)

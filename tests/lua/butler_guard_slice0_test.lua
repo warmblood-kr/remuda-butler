@@ -83,7 +83,7 @@ T.test("switch defaults off, records nothing off, one line on", function()
   T.expect(has(status, "guard: off"), "default not off: " .. status, "ok - default off")
   T.eval([[remuda._t_hook('{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}')]])
   T.eq(T.eval("return remuda._t_lines()"), "", "off records nothing")
-  local on = ev("return remuda._butler_command_run('guard', {'guard','on'}, {})")
+  local on = ev("return remuda._butler_command_run('guard', {'guard','on'}, {kind='session', session='butler'})")
   T.expect(has(on, "applies to sessions launched from now on") or has(on, "Applies to sessions launched from now on"),
     "on output lacks the scope note: " .. on, "ok - on says it applies to new sessions")
   local out = ev([[return '[' .. remuda._t_hook('{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git push origin main"},"cwd":"/p"}') .. ']']])
@@ -98,14 +98,14 @@ T.test("switch defaults off, records nothing off, one line on", function()
     T.expect(has(lines, f), "audit field missing " .. f .. ": " .. lines)
   end
   T.eval("return remuda.json.decode(remuda._t_lines())") -- valid JSON
-  ev("return remuda._butler_command_run('guard', {'guard','off'}, {})")
+  ev("return remuda._butler_command_run('guard', {'guard','off'}, {kind='session', session='butler'})")
   T.eval([[remuda._t_hook('{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}')]])
   T.eq(T.eval("return select(2, remuda._t_lines():gsub('\\n', '')) + 1"), "4", "off again records nothing more (the off switch itself is audited)")
 end)
 
 T.test("hook always allows: malformed, oversized, control chars, secrets, cap", function()
   start_butler()
-  T.eval("remuda._t_dir('g-allow'); remuda._butler_command_run('guard', {'guard','on'}, {})")
+  T.eval("remuda._t_dir('g-allow'); remuda._butler_command_run('guard', {'guard','on'}, {kind='session', session='butler'})")
   for _, payload in ipairs({ "'not json'", "''", "nil", "'{}'", "'[1,2]'",
     "string.rep('x', 2 * 1024 * 1024)",
     [['{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo \\u0007\\u001b[31mred\\nline"}}']] }) do
@@ -147,11 +147,11 @@ end)
 
 T.test("fail open when the log cannot be written; log rotates", function()
   start_butler()
-  T.eval("remuda._t_dir('g-fail'); remuda._butler_command_run('guard', {'guard','on'}, {})")
+  T.eval("remuda._t_dir('g-fail'); remuda._butler_command_run('guard', {'guard','on'}, {kind='session', session='butler'})")
   T.eval("remuda._butler_guard_dir = '/no/such/dir/for/guard'")
   local out = ev([[return '[' .. remuda._t_hook('{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}') .. ']']])
   T.eq(out, "ok:[]", "unwritable log still allows")
-  T.eval("remuda._t_dir('g-rot'); remuda._butler_command_run('guard', {'guard','on'}, {})")
+  T.eval("remuda._t_dir('g-rot'); remuda._butler_command_run('guard', {'guard','on'}, {kind='session', session='butler'})")
   T.eval([[local gp = remuda.butler.guard_policy
     local f = io.open(gp.log_path(), 'w'); f:write(string.rep('x', 1024 * 1024 + 1)); f:close()
     remuda._t_hook('{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}')]])
@@ -170,7 +170,7 @@ T.test("settings file has guard hooks only when on and keeps status hooks", func
   local off = settings("s-off")
   T.expect(not has(off, "PreToolUse") and not has(off, "PermissionRequest") and not has(off, "butler guard"),
     "guard hooks present while off: " .. off, "ok - no guard hooks while off")
-  T.eval("remuda._butler_command_run('guard', {'guard','on'}, {})")
+  T.eval("remuda._butler_command_run('guard', {'guard','on'}, {kind='session', session='butler'})")
   local on = settings("s-on")
   T.expect(has(on, '"PreToolUse":[{"matcher":"*"') and has(on, '"PermissionRequest":[{"matcher":"*"'), "guard hooks missing: " .. on)
   T.expect(has(on, "--stdin butler guard >/dev/null 2>&1; exit 0") or has(on, "butler guard *> $null; exit 0"),
@@ -178,7 +178,7 @@ T.test("settings file has guard hooks only when on and keeps status hooks", func
   for _, keep in ipairs({ "UserPromptSubmit", "Stop", "Notification", "statusLine", "butler status-hook" }) do
     T.expect(has(on, keep), "status piece lost: " .. keep)
   end
-  T.eval("remuda._butler_command_run('guard', {'guard','off'}, {})")
+  T.eval("remuda._butler_command_run('guard', {'guard','off'}, {kind='session', session='butler'})")
   T.expect(not has(settings("s-off2"), "PreToolUse"), "hooks stayed after off", "ok - switch off removes hooks from new settings")
 end)
 
@@ -187,7 +187,7 @@ T.test("doctor shows the guard state", function()
   T.eval("remuda._t_dir('g-doc')")
   local d = ev("local d = remuda._butler_doctor; return table.concat(d.render(d.probe()), '\\n')")
   T.expect(has(d, "Guard audit: off"), "doctor off: " .. d, "ok - doctor reports guard off")
-  T.eval("remuda._butler_command_run('guard', {'guard','on'}, {})")
+  T.eval("remuda._butler_command_run('guard', {'guard','on'}, {kind='session', session='butler'})")
   d = ev("local d = remuda._butler_doctor; return table.concat(d.render(d.probe()), '\\n')")
   T.expect(has(d, "Guard audit: on"), "doctor on: " .. d, "ok - doctor reports guard on")
   local usage = ev("return remuda._butler_command_run('guard', {'guard','bogus'}, {})")
@@ -196,7 +196,7 @@ end)
 
 T.test("real CLI verb allows with empty output; log is private", function()
   start_butler()
-  T.eval("remuda._t_dir('g-cli'); remuda._butler_command_run('guard', {'guard','on'}, {})")
+  T.eval("remuda._t_dir('g-cli'); remuda._butler_command_run('guard', {'guard','on'}, {kind='session', session='butler'})")
   local script = "printf '%s' '{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git push\"}}'"
     .. " | REMUDA_BUTLER_AGENT_ALIAS=ss-cli REMUDA_BUTLER_AGENT_KIND=claude '" .. os.getenv("REMUDA_BIN") .. "' -s "
     .. os.getenv("REMUDA_LUA_CHILD_SERVER") .. " --stdin butler guard; echo rc=$?; sleep 30"

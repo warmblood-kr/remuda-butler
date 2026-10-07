@@ -321,6 +321,13 @@ command(14, "shell-lines", "  remuda butler shell-lines on|off", function(args, 
   return typed_lines_cli.cli(args, current_agent(caller))
 end)
 command(21, "guard", "  remuda butler guard on|off|status | approvals on|off|status | deny on|off|status | grants [on|off|status] | stats | verify  (off by default)", function(args, caller)
+  -- Hooks and read-only queries keep their existing paths. Every CLI switch
+  -- resolves the supplied caller before changing shared state.
+  if (#args == 2 and (args[2] == "on" or args[2] == "off"))
+      or (#args == 3 and (args[2] == "approvals" or args[2] == "deny" or args[2] == "grants")
+        and (args[3] == "on" or args[3] == "off")) then
+    current_agent(caller)
+  end
   return remuda.butler.guard_policy.run(args, caller)
 end)
 local AGENTS_CLI_SPEC = {
@@ -428,6 +435,7 @@ command(30, "topic", "  remuda butler topic new <name> [--template T] [--agent A
       if type(remuda.fail) == "function" then return remuda.fail(report.text, report.code) end
       error(report.text, 0)
     end
+    current_agent(caller)
     return remuda._butler_topic_new(report.values.NAME, report.values.template, report.values.agent, report.values.model)
   end
   if args[2] == "new" and args[3] then
@@ -439,6 +447,7 @@ command(30, "topic", "  remuda butler topic new <name> [--template T] [--agent A
       else return nil end
       i = i + 2
     end
+    current_agent(caller)
     return remuda._butler_topic_new(args[3], template, kind, model)
   end
   if args[2] == "delegate" and args[3] then

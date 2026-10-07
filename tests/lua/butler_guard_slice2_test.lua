@@ -46,12 +46,12 @@ T.test("deny switch is independent, off by default, and appears in doctor", func
   T.eval("remuda._t_dir('s2-switch')")
   local status = ev("return remuda._butler_command_run('guard', {'guard','deny','status'}, {})")
   T.expect(has(status, "guard deny: off") and has(status, "guard: off"), "default: " .. status)
-  T.eval("remuda._butler_command_run('guard', {'guard','deny','on'}, {})")
+  T.eval("remuda._butler_command_run('guard', {'guard','deny','on'}, {kind='session', session='butler'})")
   T.expect(has(ev("return remuda._butler_command_run('guard', {'guard','status'}, {})"), "guard: off"),
     "deny switch must not turn audit on")
   local doctor = ev("local d=remuda._butler_doctor; return table.concat(d.render(d.probe()), '\\n')")
   T.expect(has(doctor, "Guard deny: on"), "doctor: " .. doctor, "ok - deny switch and doctor")
-  T.eval("remuda._butler_command_run('guard', {'guard','deny','off'}, {})")
+  T.eval("remuda._butler_command_run('guard', {'guard','deny','off'}, {kind='session', session='butler'})")
   T.expect(ev("return remuda._butler_command_run('guard', {'guard','deny','bogus'}, {})"):find("^err:") ~= nil,
     "bad deny verb accepted")
 end)
@@ -172,24 +172,24 @@ end)
 
 T.test("settings preserve off bytes and retain stdout only for active deny", function()
   start_butler()
-  T.eval("remuda._t_dir('s2-settings'); remuda._butler_command_run('guard', {'guard','on'}, {})")
+  T.eval("remuda._t_dir('s2-settings'); remuda._butler_command_run('guard', {'guard','on'}, {kind='session', session='butler'})")
   local function settings()
     return T.eval([[local p=remuda._butler_agent_support.status_settings(os.getenv('XDG_DATA_HOME') .. '/s2.settings');
       local f=io.open(p,'r'); local t=f:read('*a'); f:close(); remuda.json.decode(t); return t]])
   end
   local off = settings()
-  T.eval("remuda._butler_command_run('guard', {'guard','deny','on'}, {})")
+  T.eval("remuda._butler_command_run('guard', {'guard','deny','on'}, {kind='session', session='butler'})")
   local on = settings()
   local pre = on:match('"PreToolUse":(%b[])')
   T.expect(pre and has(pre, "2>/dev/null; exit 0") and not has(pre, ">/dev/null 2>&1"), "deny PreToolUse entry: " .. tostring(pre))
-  T.eval("remuda._butler_command_run('guard', {'guard','deny','off'}, {})")
+  T.eval("remuda._butler_command_run('guard', {'guard','deny','off'}, {kind='session', session='butler'})")
   T.eq(settings(), off, "settings bytes with deny off")
   T.expect(true, "", "ok - settings stdout and off bytes")
 end)
 
 T.test("oversized hook payloads still deny from bounded structured fields", function()
   start_butler()
-  T.eval("remuda._t_dir('s2-large'); remuda._butler_command_run('guard', {'guard','on'}, {}); remuda._butler_command_run('guard', {'guard','deny','on'}, {})")
+  T.eval("remuda._t_dir('s2-large'); remuda._butler_command_run('guard', {'guard','on'}, {kind='session', session='butler'}); remuda._butler_command_run('guard', {'guard','deny','on'}, {kind='session', session='butler'})")
   local bash = T.eval([=[local p=remuda.json.encode({hook_event_name='PreToolUse',tool_name='Bash',
     tool_input={command='remuda stop; '..string.rep('x', 70000)}}); return remuda._t_hook(p)]=])
   T.eq(bash, [[{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Butler guard: Remuda daemon control"}}]],
@@ -203,7 +203,7 @@ end)
 
 T.test("audit append failure does not turn a denial into an allow", function()
   start_butler()
-  T.eval("remuda._t_dir('s2-audit-fail'); remuda._butler_command_run('guard', {'guard','on'}, {}); remuda._butler_command_run('guard', {'guard','deny','on'}, {})")
+  T.eval("remuda._t_dir('s2-audit-fail'); remuda._butler_command_run('guard', {'guard','on'}, {kind='session', session='butler'}); remuda._butler_command_run('guard', {'guard','deny','on'}, {kind='session', session='butler'})")
   local out = T.eval([=[local gp=remuda.butler.guard_policy; local append=gp.append
     gp.append=function() return nil, 'forced audit failure' end
     local payload=remuda.json.encode({hook_event_name='PreToolUse',tool_name='Bash',tool_input={command='remuda stop'}})
@@ -215,7 +215,7 @@ end)
 
 T.test("deny policy errors fail open and are audited", function()
   start_butler()
-  T.eval("remuda._t_dir('s2-policy-error'); remuda._butler_command_run('guard', {'guard','on'}, {}); remuda._butler_command_run('guard', {'guard','deny','on'}, {})")
+  T.eval("remuda._t_dir('s2-policy-error'); remuda._butler_command_run('guard', {'guard','on'}, {kind='session', session='butler'}); remuda._butler_command_run('guard', {'guard','deny','on'}, {kind='session', session='butler'})")
   local out = T.eval([=[local gp=remuda.butler.guard_policy; local policy=gp.deny_reason
     gp.deny_reason=function() error('forced policy failure') end
     local payload=remuda.json.encode({hook_event_name='PreToolUse',tool_name='Bash',tool_input={command='remuda stop'}})
@@ -228,7 +228,7 @@ end)
 
 T.test("deny switch leaves PermissionRequest behavior unchanged", function()
   start_butler()
-  T.eval("remuda._t_dir('s2-permission'); remuda._butler_command_run('guard', {'guard','on'}, {}); remuda._butler_command_run('guard', {'guard','deny','on'}, {})")
+  T.eval("remuda._t_dir('s2-permission'); remuda._butler_command_run('guard', {'guard','on'}, {kind='session', session='butler'}); remuda._butler_command_run('guard', {'guard','deny','on'}, {kind='session', session='butler'})")
   local out = T.eval([=[local payload=remuda.json.encode({hook_event_name='PermissionRequest',tool_name='Bash',tool_input={command='remuda stop'}}); return remuda._t_hook(payload)]=])
   T.eq(out, "", "PermissionRequest stays silent without approvals")
   local audit = T.eval("return remuda._t_lines()")
@@ -238,7 +238,7 @@ end)
 
 T.test("real CLI prints exact deny JSON, gates switches, and audits a redacted summary", function()
   start_butler()
-  T.eval("remuda._t_dir('s2-cli'); remuda._butler_command_run('guard', {'guard','deny','on'}, {})")
+  T.eval("remuda._t_dir('s2-cli'); remuda._butler_command_run('guard', {'guard','deny','on'}, {kind='session', session='butler'})")
   local json = [[{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Butler guard: Agent permission bypass flag"}}]]
   local function run_cli(name, command, expected, tool)
     tool = tool or "Bash"
@@ -258,13 +258,13 @@ T.test("real CLI prints exact deny JSON, gates switches, and audits a redacted s
     return screen
   end
   run_cli("s2-off", "codex --yolo", "SILENT") -- audit is still off
-  T.eval("remuda._butler_command_run('guard', {'guard','on'}, {})")
+  T.eval("remuda._butler_command_run('guard', {'guard','on'}, {kind='session', session='butler'})")
   run_cli("s2-on", "TOKEN=hunter2 codex --yolo", "EXACT")
   run_cli("s2-write", os.getenv("HOME") .. "/.ssh/config", "EXACT", "Write")
   local audit = T.eval("return remuda._t_lines()")
   T.expect(has(audit, '"event":"deny"') and has(audit, '"class":"weaken"'), "deny event/class missing from audit: " .. audit)
   T.expect(has(audit, '"summary":"TOKEN=*** codex --yolo"') and not has(audit, "hunter2"), "audit summary not redacted: " .. audit)
-  T.eval("remuda._butler_command_run('guard', {'guard','deny','off'}, {})")
+  T.eval("remuda._butler_command_run('guard', {'guard','deny','off'}, {kind='session', session='butler'})")
   run_cli("s2-gated", "codex --yolo", "SILENT")
   local unknown = T.eval("return remuda.butler.guard_policy.deny_reason('Read',{file_path='/x/.ssh/a'}, {}) or 'nil'")
   T.eq(unknown, "nil", "unknown tools stay allowed")

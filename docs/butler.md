@@ -1119,13 +1119,30 @@ text, and it never selects the scope, the TTL or the reactions. On a guard post 
 
 ### Audit chain
 
+The live audit log rotates at 1 MiB. Butler keeps at most 16 archives, including
+`guard-audit.jsonl.1`, and removes dated archives older than 90 days at rotation.
+When the count fills first, it removes the oldest archives, preserving the
+newest evidence and numeric ordering of rotations within the same second.
+Normal storage is about 17 MiB plus the final record in each file; this is an
+archive-count budget, not a filesystem quota. Rotation or pruning failures
+refuse new appends rather than allowing the live log to keep growing. Required
+operator attribution fails closed on open, write, flush, or close errors.
+
+Every outside principal resolution records its own `caller_policy` event;
+polls are not sampled or aggregated, and a command can resolve more than once.
+Read-only commands that do not resolve a principal, such as `sessions`, add no
+policy event. Prefer those for frequent roster polling. Export evidence before
+it ages out or fills the archive budget if longer retention is needed; daily
+HOME-room digests remain the off-box record.
+
 Each new audit line carries `prev`, the SHA-256 of the line before it (its text
 without the newline). A log that is new, or whose last line predates the chain,
 starts with a `chain` genesis line (`"prev":"genesis"`); older lines are not
 rewritten. When the log rotates, the first line of the new live log carries the
 hash of the rotated file's last line, so the chain runs across files. If the
 hash cannot be computed the line is still written, without `prev`: audit never
-blocks and never locks the owner out.
+blocks on hashing. Required operator attribution still refuses when its audit
+write cannot complete.
 
 `remuda butler guard verify` (read-only, not a weakening verb) walks the dated
 archives, `guard-audit.jsonl.1` and the live log in order and prints `ok` with
@@ -1134,18 +1151,20 @@ reason. It detects a removed, edited or unchained line and a removed rotated
 file. A final line of the live log with no newline yet is a write in
 progress: it is reported as a note, not as BROKEN. It cannot detect the whole log replaced by a consistent forgery by the
 same user, nor the truncation of the newest lines, and it cannot check the
-oldest kept archive's first link (older archives are pruned after 90 days).
+oldest kept archive's first link (older archives are pruned after 90 days or
+when the archive budget fills).
 
 Verify hashes every line in pure Lua, about two seconds per megabyte on an M1
 Max, inside the daemon. Each file holds at most 1 MB before it rotates, so a
-log with many archives (90 days of heavy use) takes minutes; run it when the
+log with all 16 archives can take tens of seconds; run it when the
 daemon may be busy that long.
 
 A fork of the chain (the audit lock fell back after 1 s and two writers raced, a line
 written without `prev` because the hash failed, a line cut short by a crash and
 appended to) makes verify report BROKEN at that line, and it keeps doing so until the
-file holding it is pruned (up to 90 days). There is no way to acknowledge or
-re-anchor the chain, and verify stops at that first break.
+file holding it is pruned (up to 90 days, or sooner under the archive budget).
+There is no way to acknowledge or re-anchor the chain, and verify stops at that
+first break.
 
 The audit lock is core's `remuda.fs.lock`, which never blocks (it is a try-lock, a
 busy lock answers at once). The audit write retries it for about a second, then
