@@ -290,4 +290,100 @@ T.test("composer safety matrix defers drafts behind footer-like continuation row
     assert(history_events:find("type", 1, true), "history notice was not seen: " .. history_events)
     assert(not history_events:find("key RET", 1, true), "history notice was submitted twice: " .. history_events)
   ]=])
+T.test("known Claude footer rows must match whole lines", function()
+  local probes = {
+    { "╰user draft", false },
+    { "└user draft", false },
+    { "? for shortcuts user draft", false },
+  }
+  for _, probe in ipairs(probes) do
+    local screen = "❯ \n" .. probe[1] .. "\n────"
+    T.eq(T.eval(string.format("return remuda._butler_prompt_is_empty('claude', %q)", screen)),
+      "NON-EMPTY", "footer-looking draft must not be stripped: " .. probe[1])
+  end
+  local ghost = 'Try "refactor <filepath>"'
+  for _, probe in ipairs(probes) do
+    local screen = "❯ " .. ghost .. "\n" .. probe[1] .. "\n────"
+    T.eval(string.format([[remuda.capture_styled = function() return { cursor={row=1}, rows={
+      {{text="❯ ",dim=false},{text=%q,dim=true}} } } end]], ghost))
+    T.eq(T.eval(string.format("return remuda._butler_composer_decision('claude', 'conpty-wrapped', %q)", screen)),
+      "NON-EMPTY", "dim Try plus footer-looking draft must defer: " .. probe[1])
+  end
+  T.eval("remuda.capture_styled = nil")
+end)
+
+T.test("every row in the current Claude composer is protected", function()
+  local screen = "────❯ \nuser draft\n❯ \n────"
+  T.eq(T.eval(string.format("return remuda._butler_prompt_is_empty('claude', %q)", screen)),
+    "NON-EMPTY", "a later blank prompt cannot hide a draft in the current composer")
+end)
+
+T.test("SEC round 3 unsafe prompt probes stay deferred", function()
+  -- The 66 cases below are the unsafe cases recorded by the SEC round 3 audit.
+  -- Their dimensions and row shapes are kept inline so this test has no audit-file dependency.
+  local widths = { 0, 1, 4, 100, 120, 140 }
+  local ghost = 'Try "refactor <filepath>"'
+  local tails = {
+    { "corner_round", "╰user draft" },
+    { "corner_square", "└user draft" },
+    { "shortcuts_prefix", "? for shortcuts user draft" },
+    { "empty_prompt", "user draft\n❯ " },
+    { "empty_ascii_prompt", "user draft\n> " },
+    { "empty_small_prompt", "user draft\n› " },
+    { "empty_wrapped_prompt", "user draft\n─❯ " },
+    { "empty_pipe_prompt", "user draft\n│ ❯ " },
+  }
+  local total = 0
+  for _, width in ipairs(widths) do
+    local prompt = string.rep("─", width) .. "❯ "
+    for _, tail in ipairs(tails) do
+      local screen = prompt .. "\n" .. tail[2] .. "\n────"
+      T.eq(T.eval(string.format("return remuda._butler_prompt_is_empty('claude', %q)", screen)),
+        "NON-EMPTY", string.format("SEC3 %d/empty_%s", width, tail[1]))
+      total = total + 1
+      if tail[1] == "corner_round" or tail[1] == "corner_square" or tail[1] == "shortcuts_prefix" then
+        local ghost_screen = prompt .. ghost .. "\n" .. tail[2] .. "\n────"
+        T.eval(string.format([[remuda.capture_styled = function() return { cursor={row=1}, rows={
+          {{text=%q,dim=false},{text=%q,dim=true}} } } end]], prompt, ghost))
+        T.eq(T.eval(string.format("return remuda._butler_composer_decision('claude', 'conpty-wrapped', %q)", ghost_screen)),
+          "NON-EMPTY", string.format("SEC3 %d/ghost_%s", width, tail[1]))
+        total = total + 1
+      end
+    end
+  end
+  T.eval("remuda.capture_styled = nil")
+  T.eq(tostring(total), "66", "all SEC round 3 unsafe probes are permanent cases")
+end)
+
+T.test("all Claude fixtures retain main-branch classifications", function()
+  local fixtures = {
+    { "claude-2.1.292-100x30.txt", false, "UNPARSEABLE" },
+    { "claude-2.1.292-120x30.txt", false, "UNPARSEABLE" },
+    { "claude-2.1.292-140x30.txt", false, "UNPARSEABLE" },
+    { "claude-2.1.292-win/claude-2.1.292-100x30.txt", false, "UNPARSEABLE" },
+    { "claude-2.1.292-win/claude-2.1.292-120x30.txt", false, "UNPARSEABLE" },
+    { "claude-2.1.292-win/claude-2.1.292-140x30.txt", false, "UNPARSEABLE" },
+    { "claude-model-confirm-composer-one-row-status.txt", true, "EMPTY" },
+    { "claude-model-confirm-composer-two-row-status.txt", true, "EMPTY" },
+    { "claude-model-confirm-dialog-changing-status.txt", false, "NON-EMPTY" },
+    { "claude-model-confirm-dialog-with-status.txt", false, "NON-EMPTY" },
+    { "claude-model-confirm-dialog.txt", false, "NON-EMPTY" },
+    { "claude-model-confirm-live-capture-0556Z.txt", true, "EMPTY" },
+    { "claude-model-confirm-live-composer-nbsp.txt", true, "EMPTY" },
+    { "claude-model-confirm-multiline-draft.txt", true, "NON-EMPTY" },
+    { "claude-model-confirm-transcript-copy.txt", true, "EMPTY" },
+    { "claude-model-confirm-wrong-title.txt", false, "NON-EMPTY" },
+    { "claude-stale-model-confirm-with-permission.txt", false, "NON-EMPTY" },
+    { "claude-trust-dialog.txt", false, "NON-EMPTY" },
+  }
+  for _, fixture in ipairs(fixtures) do
+    local path = os.getenv("REMUDA_LUA_REPO") .. "/tests/fixtures/" .. fixture[1]
+    local file = assert(io.open(path, "rb"))
+    local screen = file:read("*a")
+    file:close()
+    T.eq(T.eval(string.format("return tostring(remuda._butler_agent_startup.claude.ready(%q))", screen)),
+      tostring(fixture[2]), fixture[1] .. " readiness classification")
+    T.eq(T.eval(string.format("return remuda._butler_prompt_is_empty('claude', %q)", screen)),
+      fixture[3], fixture[1] .. " composer classification")
+  end
 end)
