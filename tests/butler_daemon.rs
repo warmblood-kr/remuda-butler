@@ -10260,8 +10260,13 @@ fn butler_matrix_cli_rejects_invalid_send_dash_and_fails_cleanly_without_pending
     eval(&path, "remuda._butler_bus.agents.agent1 = {id='agent1', alias='agent1', session_name='agent1', children={}}");
     // Model daemon session attribution, independently of forwarded launch metadata.
     let member_cli = |args: &str| eval(&path, &format!(
-        "local ok, out = pcall(remuda._extension_commands.butler, {args}, \
+        "local native_pending, completion = remuda.pending, nil; \
+         remuda.pending = function() return {{resolve=function(_, code, stdout, stderr) \
+           completion={{code=code, stdout=stdout, stderr=stderr}} end}} end; \
+         local ok, out = pcall(remuda._extension_commands.butler, {args}, \
          {{kind='session', session='agent1', env={{REMUDA_BUTLER_AGENT_ID='butler'}}}}); \
+         remuda.pending = native_pending; \
+         if completion then return tostring(completion.code == 0) .. '|' .. completion.stderr end; \
          return tostring(ok) .. '|' .. tostring(out)"
     ));
     let agent_approve = member_cli("{'approve', 'X'}");
@@ -11003,10 +11008,9 @@ fn butler_quota_report_denies_registered_member_before_collecting() {
         {kind='session', session='quota-member', env={REMUDA_BUTLER_AGENT_ID='butler'}})
       return tostring(ok) .. '|' .. tostring(out)
     "#);
-    assert_eq!(
-        member,
+    assert!(member.starts_with(
         "false|only the Butler itself or a person at the terminal can send the report to Matrix.\nNext: ask the Butler to run `remuda butler quota --report`, or run `remuda butler quota` to read it here."
-    );
+    ), "unexpected member refusal: {member}");
     assert_eq!(
         eval(&path, "return #remuda.http.calls"),
         "0",

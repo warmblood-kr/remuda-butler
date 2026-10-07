@@ -36,6 +36,8 @@ local function has(text, needle) return text:find(needle, 1, true) ~= nil end
 local function tree(name)
   T.eval("remuda._t_dir(" .. string.format("%q", name) .. ")")
   T.eval("remuda.butler.guard_grants.insensitive = function() return false end") -- the fold has its own test
+  -- These real-Git controls use the existing test subject budget; production and budget tests keep 2s.
+  T.eval("remuda.butler.guard_grants.git_budget_s = 20")
   return T.eval([[
     local root = remuda._butler_guard_dir .. '-tree' -- beside the data dir: the data dir is a protected scope
     remuda.process.run({ argv = { 'sh', '-c', 'mkdir -p ' .. root .. '/real/sub ' .. root .. '/other && ln -s real ' .. root .. '/link' } })

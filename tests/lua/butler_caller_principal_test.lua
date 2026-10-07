@@ -37,10 +37,11 @@ local function snapshot()
   return eval([=[
     local b = remuda._butler_bus
     local function count(t) local n = 0; for _ in pairs(t) do n = n + 1 end; return n end
-    local reads = 0
-    for _, values in pairs(b.read or {}) do reads = reads + count(values) end
+    local reads, delivered = 0, 0
+    for _, values in pairs(b.mail_read or {}) do reads = reads + count(values) end
+    for _, values in pairs(b.mail_delivered or {}) do delivered = delivered + count(values) end
     return table.concat({ count(b.messages), count(b.objects), reads,
-      count(b.mail_delivered), count(b.inboxes) }, ":")
+      delivered, count(b.inboxes), b.next }, ":")
   ]=])
 end
 local function command(c)
