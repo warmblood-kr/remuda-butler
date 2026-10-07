@@ -302,6 +302,42 @@ the normal way for a member to communicate.
             if type(host.fail) == "function" then return host.fail(message, 1) end
             error(message, 0)
           end
+          local dry_run, force = false, false
+          local cli = host.cli
+          -- A leading-dash session name belongs to the legacy positional path.
+          -- The spec parser can consume names such as -s1, --force or --help as
+          -- options before the compact handler gets a chance to resolve them.
+          if type(cli) == "table" and type(cli.parse) == "function"
+              and args[2]:sub(1, 1) ~= "-" then
+            local spec = {
+              name = "remuda butler",
+              verbs = { compact = {
+                about = "Compact a Butler session",
+                options = {
+                  { long = "dry-run", help = "Show compaction changes without applying them" },
+                  { long = "force", help = "Compact even when automatic rules would defer" },
+                },
+                args = { { name = "SESSION", help = "Session to compact" } },
+                next = "remuda butler compact <session> [--dry-run|--force]",
+              } },
+            }
+            -- Preserve today's gate order: unknown sessions win even when trailing flags are bad.
+            for _, word in ipairs(args) do if word == "--" then return nil end end
+            local report = cli.parse(spec, args)
+            if not report.ok or report.kind == "help" then return nil end
+            dry_run, force = report.values["dry-run"] == true, report.values.force == true
+            -- Current compact accepts only no flag or one exact trailing flag.
+            if #args == 3 and args[3] == "--dry-run" then
+              if not dry_run or force then return nil end
+            elseif #args == 3 and args[3] == "--force" then
+              if not force or dry_run then return nil end
+            elseif #args ~= 2 or dry_run or force then
+              return nil
+            end
+            if dry_run then return host._butler_compaction_tick(args[2], true) end
+            if force then return host.butler.compact(args[2], true) end
+            return host.butler.compact(args[2], false)
+          end
           if #args == 3 and args[3] == "--dry-run" then
             return host._butler_compaction_tick(args[2], true)
           end

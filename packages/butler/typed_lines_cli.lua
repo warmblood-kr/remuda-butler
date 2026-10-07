@@ -9,6 +9,19 @@ local USAGE = "Usage: remuda butler typed-lines on|off\n"
   .. "       remuda butler approve-text on|off"
 local SWITCH_KEYS = { ["typed-lines"] = "typed_lines", ["shell-lines"] = "shell_lines",
   ["status-commands"] = "status_commands", ["approve-text"] = "approve_text" }
+local SWITCH_CLI_SPEC = {
+  name = "remuda butler",
+  verbs = {
+    ["typed-lines"] = { about = "Turn typed Matrix lines on or off", args = {
+      { name = "STATE", help = "on or off" }, }, next = "remuda butler typed-lines on|off" },
+    ["shell-lines"] = { about = "Turn Matrix shell lines on or off", args = {
+      { name = "STATE", help = "on or off" }, }, next = "remuda butler shell-lines on|off" },
+    ["status-commands"] = { about = "Turn Matrix status commands on or off", args = {
+      { name = "STATE", help = "on or off" }, }, next = "remuda butler status-commands on|off" },
+    ["approve-text"] = { about = "Turn text approval on or off", args = {
+      { name = "STATE", help = "on or off" }, }, next = "remuda butler approve-text on|off" },
+  },
+}
 local WARNINGS = {
   typed_lines = "Whoever controls the owner's Matrix account, or the homeserver that carries it, can type text into every agent session of this machine, and the session cannot tell that text from text typed at its keyboard. Such text counts as the owner's own instruction, including approvals.",
   shell_lines = "Whoever controls that account or homeserver can run shell commands on this machine as this user, with no review by anyone. It is remote command execution, bounded only by rules 1 to 8. Recommended only with the Matrix account protected as well as the machine's own login (device verification, a homeserver the owner runs or trusts).",
@@ -140,13 +153,26 @@ local function enable(args, key, path)
 end
 
 function M.cli(args, agent)
-  if type(args) ~= "table" or #args ~= 2
-      or SWITCH_KEYS[args[1]] == nil
-      or (args[2] ~= "on" and args[2] ~= "off") then
+  local verb, state
+  local cli = remuda.cli
+  if type(cli) == "table" and type(cli.parse) == "function" then
+    -- The switch's usage response is deliberately the historical one; clap help/errors used to
+    -- be ordinary invalid-switch output here. Parsing must stay before all policy/config checks.
+    for _, word in ipairs(args or {}) do if word == "--" then return fail(USAGE) end end
+    local report = cli.parse(SWITCH_CLI_SPEC, args or {})
+    if not report.ok or report.kind == "help" then return fail(USAGE) end
+    verb, state = report.verb, report.values.STATE
+    if SWITCH_KEYS[verb] == nil or (state ~= "on" and state ~= "off") then return fail(USAGE) end
+  else
+    verb, state = type(args) == "table" and args[1], type(args) == "table" and args[2]
+    if type(args) ~= "table" or #args ~= 2 or SWITCH_KEYS[verb] == nil
+        or (state ~= "on" and state ~= "off") then return fail(USAGE) end
+  end
+  if not verb or not state then
     return fail(USAGE)
   end
   if type(agent) == "string" and agent ~= "" then
-    return fail(args[1] .. " is operator-only. Run it from the owner's terminal; it cannot be enabled from Matrix or Butler mail.")
+    return fail(verb .. " is operator-only. Run it from the owner's terminal; it cannot be enabled from Matrix or Butler mail.")
   end
   local path = config_path()
   if type(path) ~= "string" or path == "" then
@@ -154,13 +180,13 @@ function M.cli(args, agent)
   end
   local config, config_error = read_switches(path)
   if not config then return fail(tostring(config_error)) end
-  local key = SWITCH_KEYS[args[1]]
-  if args[2] == "on" then
+  local key = SWITCH_KEYS[verb]
+  if state == "on" then
     if key == "shell_lines" and config.typed_lines ~= true then
       return fail("typed-lines must be on before shell-lines can be enabled. Nothing was changed.")
     end
-    if config[key] == true then return args[1] .. " is already on." end
-    return enable(args, key, path)
+    if config[key] == true then return verb .. " is already on." end
+    return enable({ verb, state }, key, path)
   end
   local updates = { [key] = false }
   if key == "typed_lines" then updates.shell_lines = false end
@@ -170,7 +196,7 @@ function M.cli(args, agent)
     local written, write_error = write_switches(path, updates)
     if not written then return fail(tostring(write_error)) end
   end
-  return args[1] .. " is now off." .. (key == "typed_lines" and " shell-lines is also off." or "")
+  return verb .. " is now off." .. (key == "typed_lines" and " shell-lines is also off." or "")
 end
 
 remuda.butler.typed_lines_cli = M

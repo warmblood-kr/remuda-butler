@@ -673,6 +673,60 @@ Usage: remuda butler typed-lines on|off
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
+### remuda butler "typed-lines" "on"
+exit: 0
+stdout:
+{prompt_line = <function>, resolve = <function>}
+stderr:
+
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=true\nshell_lines=true\nstatus_commands=false\napprove_text=false\n
+
+### remuda butler "typed-lines" "off"
+exit: 0
+stdout:
+typed-lines is now off. shell-lines is also off.
+stderr:
+
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "shell-lines" "on"
+exit: 1
+stdout:
+
+stderr:
+typed-lines must be on before shell-lines can be enabled. Nothing was changed.
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=true\nstatus_commands=false\napprove_text=false\n
+
+### remuda butler "shell-lines" "off"
+exit: 0
+stdout:
+shell-lines is now off.
+stderr:
+
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "status-commands" "on"
+exit: 0
+stdout:
+{prompt_line = <function>, resolve = <function>}
+stderr:
+
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=true\nstatus_commands=true\napprove_text=false\n
+
+### remuda butler "status-commands" "off"
+exit: 0
+stdout:
+status-commands is now off.
+stderr:
+
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\nstatus_commands=false\n
+
 ### remuda butler "shell-lines" "on"
 exit: 1
 stdout:
@@ -751,3 +805,12 @@ Matrix is not configured.
 Next: remuda butler matrix setup
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+
+### remuda butler "status-commands" "off"
+exit: 0
+stdout:
+status-commands is now off.
+stderr:
+
+actions:
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\nstatus_commands=false\n
