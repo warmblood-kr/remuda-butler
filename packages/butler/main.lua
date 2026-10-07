@@ -12,16 +12,11 @@ end
 
 remuda._butler_initial_name = initial_butler_name()
 
--- The command handler runs in the daemon, so identity comes only from the
--- caller's `REMUDA_*` variables that core forwards in `caller.env` (#95) --
--- never `os.getenv`, which is whatever session happened to birth the daemon.
--- No forwarded identity (a plain shell, or an older core) is the operator.
+-- CLI identity is resolved from the caller kind/session supplied by the core.
 local OPERATOR = "operator"
+local caller_principal
 local function current_agent(caller)
-  local env = caller and caller.env or {}
-  for _, key in ipairs({ "REMUDA_BUTLER_AGENT_ID", "REMUDA_BUTLER_SESSION_NAME" }) do
-    if env[key] and env[key] ~= "" then return env[key] end
-  end
+  return assert(caller_principal, "caller principal resolver is not loaded").current_agent(caller)
 end
 local function call_callback(fn, ...)
   local args, unpack_args = {...}, table.unpack or unpack
@@ -327,6 +322,9 @@ local function contributions(point)
 end
 bus.messages = bus.messages or {}
 bus.objects = bus.objects or {}
+remuda._butler_caller_principal_config = { bus = bus }
+remuda.exec("butler/caller_principal")
+caller_principal = assert(remuda._butler_caller_principal)
 -- Loaded before identity_record so agents.jsonl shares mail.lua's append.
 remuda._butler_mail_config = { bus = bus, root = mail_root, json_quote = json_quote }
 remuda.exec("butler/mail")

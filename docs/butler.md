@@ -1,5 +1,19 @@
 # Butler
 
+## Caller identity
+
+CLI members are resolved from the daemon supplied caller kind and session name,
+matched to exactly one live Butler registration. Missing, unknown, unregistered
+or ambiguous caller context fails closed for identity sensitive commands, with
+a `Next:` instruction. Older cores without caller attribution therefore cannot
+use those commands until upgraded. A caller classified as `outside` maps to the
+operator under the named transitional policy `outside_is_operator_transitional`;
+that mapping is logged. This is **not an isolation boundary: advisory daemon
+attribution within the cooperative model**.
+
+Rollback keeps strict caller handling and native ancestry attribution; unknown
+callers stay refused. It does not restore a mutable identity fallback.
+
 Butler is Remuda's local session manager. It starts and coordinates one agent
 session through the same Lua runtime and Remuda protocol used by other
 extensions. It works without Matrix configuration.
