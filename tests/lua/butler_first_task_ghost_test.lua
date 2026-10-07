@@ -35,10 +35,8 @@ end
 local function show(name, screen, prefix, text, dim, row)
   T.eval(string.format([[remuda._t.screen[%q] = %q
     remuda._t.styled[%q] = { cursor = { row = %d }, rows = {} }
-    local rows, index = remuda._t.styled[%q].rows, 0
-    for line in (%q .. "\n"):gmatch("(.-)\n") do index = index + 1; rows[index] = { { text = line } } end
-    rows[%d] = { { text = %q }, { text = %q, dim = %s } }]],
-    name, screen, name, row, name, screen, row, prefix, text, tostring(dim)))
+    remuda._t.styled[%q].rows[%d] = { { text = %q }, { text = %q, dim = %s } }]],
+    name, screen, name, row, name, row, prefix, text, tostring(dim)))
 end
 
 local function state(name)
@@ -70,8 +68,7 @@ end
 -- A dim ghost is idle: the task is typed, and counts as delivered once the agent turns busy.
 local function ghost_delivers(kind, screen, prefix, row)
   local name = "t-ghost-" .. kind
-  local ghost = kind == "claude" and 'Try "ghost suggestion"' or "ghost suggestion"
-  show(name, screen, prefix, ghost, true, row)
+  show(name, screen, prefix, "ghost suggestion", true, row)
   delegate(name, kind)
   T.wait_until(function() return types(name) == "1" end, 8, kind .. ": task typed over a dim ghost")
   T.wait_until(function() return state(name) == "delivered" end, 8,
@@ -82,8 +79,7 @@ T.test("first-task delivery treats a dim ghost as idle and a draft as busy", fun
   start_butler()
   draft_defers("codex", "› real draft", "› ", 1)
   ghost_delivers("codex", "› ghost suggestion", "› ", 1)
-  local rule = string.rep("─", 20) -- a Claude composer is EMPTY only under a full-width border
-  local claude = rule .. "\n❯ %s\n" .. rule .. "\n  ⏵⏵ auto mode on"
+  local claude = "────\n❯ %s\n────\n  ⏵⏵ auto mode on"
   draft_defers("claude", claude:format("real draft"), "❯ ", 2)
-  ghost_delivers("claude", claude:format('Try "ghost suggestion"'), "❯ ", 2)
+  ghost_delivers("claude", claude:format("ghost suggestion"), "❯ ", 2)
 end)

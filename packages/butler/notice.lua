@@ -142,65 +142,6 @@ function remuda._butler_prompt_is_empty(kind, screen)
   return "NON-EMPTY", text
 end
 
--- Claude: text heuristics cannot tell a wrapped (ConPTY) composer from a draft, so a Claude composer is
--- EMPTY only when styled capture proves it: the cursor sits on a '❯' row (optionally behind the top
--- border) whose text is empty or one dim 'Try "..."' suggestion, the plain capture agrees row for row, and
--- every row down to the bottom border (a '─' run exactly as long as the top one, at least 10) or the end of the
--- screen is blank. Anything else defers.
-local function span_text(span) return (tostring(type(span) == "table" and span.text or ""):gsub("\194\160", " ")) end
-local function row_text(row)
-  local parts = {}
-  for _, span in ipairs(type(row) == "table" and row or {}) do parts[#parts + 1] = span_text(span) end
-  return table.concat(parts)
-end
-local function trimmed(text) return (text:gsub("\27%[[%d;?]*%a", ""):gsub("\r", ""):match("^%s*(.-)%s*$")) end
-local function leading_rules(text)
-  local count = 0
-  while text:sub(count * 3 + 1, count * 3 + 3) == "─" do count = count + 1 end
-  return count
-end
-local function claude_styled_empty(styled, plain)
-  local rows = type(styled) == "table" and styled.rows
-  local at = type(styled) == "table" and type(styled.cursor) == "table" and styled.cursor.row
-  if type(rows) ~= "table" or type(at) ~= "number" or type(rows[at]) ~= "table" then return false end
-  local index = 0
-  for line in (plain .. "\n"):gmatch("(.-)\n") do
-    index = index + 1
-    if trimmed((line:gsub("\194\160", " "))) ~= trimmed(row_text(rows[index])) then return false end
-  end
-  local prefix, glyph, rest = "", false, {}
-  for _, span in ipairs(rows[at]) do
-    local text = span_text(span)
-    local found = not glyph and text:find("❯", 1, true)
-    if found then
-      if span.dim or text:sub(found + 3):match("%S") then return false end
-      glyph, prefix = true, prefix .. text:sub(1, found - 1)
-    elseif not glyph then prefix = prefix .. text
-    elseif span.dim or not text:match("%S") then rest[#rest + 1] = text
-    else return false end
-  end
-  local stripped, top = prefix:gsub("─", "")
-  if not glyph or stripped ~= "" then return false end
-  local ghost = trimmed(table.concat(rest))
-  if ghost ~= "" and not (ghost:sub(1, 5) == 'Try "' and ghost:sub(-1) == '"') then return false end
-  if top == 0 then
-    local above, count = trimmed(row_text(rows[at - 1])):gsub("─", "")
-    if above ~= "" or count == 0 then return false end
-    top = count
-  end
-  if top < 10 then return false end -- both borders span the terminal; a short rule could be draft text
-  for below = at + 1, #rows do
-    local text = row_text(rows[below])
-    if text:match("%S") then return leading_rules(text) == top end
-  end
-  return true -- nothing but blank rows below the prompt
-end
-local function claude_decision(screen, styled)
-  local raw, raw_text = remuda._butler_prompt_is_empty("claude", screen)
-  if claude_styled_empty(styled, screen) then return "EMPTY", "" end
-  return raw == "EMPTY" and "NON-EMPTY" or raw, raw_text
-end
-
 -- The one delivery policy: may Butler type into SESSION now? Every pane needs
 -- a known empty prompt. An attached pane also needs the human to pause
 -- (human_idle >= remuda._butler_notice_human_idle, default 10s) or, on a core
@@ -235,13 +176,12 @@ function remuda._butler_notify_policy(session, now)
     end
     if now - seen.since < NOTICE_STABLE_SECONDS then return false end
   end
-  local full_screen, prompt_screen, styled_capture = screen, screen, nil
+  local full_screen, prompt_screen = screen, screen
   if remuda.capture_styled then
     -- A core with remuda#137 marks dim text: parse only the cursor row, and
     -- drop a TUI's dim ghost suggestion so it reads as the empty prompt it is.
     local captured, styled = pcall(remuda.capture_styled, session)
     if not captured then return false end
-    styled_capture = styled
     local rows = {}
     for row_index, spans in ipairs(styled.rows or {}) do
       local parts = {}
@@ -263,20 +203,11 @@ function remuda._butler_notify_policy(session, now)
   prompt_screen = prompt_screen or full_screen
   local agent = bus.agents[session]
   local kind = agent and agent.kind or ""
-  if kind == "claude" then -- the plain capture is what the styled rows must agree with
-    local plain_ok, plain = pcall(remuda.capture, session)
-    if plain_ok and type(plain) == "string" then full_screen = plain end
-  end
   if known_startup_modal(remuda._butler_agent_startup[kind] or {}, full_screen) then
     _butler_session_trace("notice_deferred_modal", session .. " " .. kind)
     return false
   end
-  local decision, text
-  if kind == "claude" then
-    decision, text = claude_decision(full_screen, styled_capture)
-  else
-    decision, text = remuda._butler_prompt_is_empty(kind, prompt_screen)
-  end
+  local decision, text = remuda._butler_prompt_is_empty(kind, prompt_screen)
   if seen.decision ~= decision then -- once per change, not every retry
     seen.decision = decision
     _butler_session_trace("notice_prompt", "message_ids="
@@ -290,11 +221,6 @@ end
 -- The composer decision the policy makes, for callers that hold a raw screen (first-task
 -- delivery): the cursor row without dim ghost text when the core can say so (#137, #372).
 function remuda._butler_composer_decision(kind, session, screen)
-  if kind == "claude" then
-    local ok, styled = false, nil
-    if remuda.capture_styled then ok, styled = pcall(remuda.capture_styled, session) end
-    return claude_decision(tostring(screen or ""), ok and styled or nil)
-  end
   local raw, raw_text = remuda._butler_prompt_is_empty(kind, screen)
   -- Only a NON-EMPTY raw read can be a ghost, and the styled row can only upgrade it to EMPTY.
   if raw == "NON-EMPTY" and remuda.capture_styled then

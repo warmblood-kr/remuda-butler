@@ -1,13 +1,10 @@
 -- #372: first-task delivery judged the raw screen, so a dim ghost suggestion in an idle
--- Claude composer read NON-EMPTY forever while the notice policy said EMPTY. One shared decision.
--- A Claude composer is EMPTY only when styled capture proves it: a dim 'Try "..."' suggestion on the cursor
--- row, blank rows down to a bottom border as wide as the top one. Run from the repository root: luajit tests/butler_composer_ghost.lua
+-- Claude composer read NON-EMPTY forever while the notice policy (cursor row, dim dropped)
+-- said EMPTY. One shared decision. Run from the repository root: luajit tests/butler_composer_ghost.lua
 _butler_session_trace = function() end
 local bus = { agents = { lead = { id = "lead-id", kind = "claude" } }, notices = {}, pending_tasks = {},
   notice_timers = {}, messages = {}, objects = {}, mail_delivered = {} }
-local rule = string.rep("─", 20)
-local ghost = 'Try "remuda butler inbox"'
-local ghost_screen = rule .. "\n❯ " .. ghost .. "\n" .. rule .. "\n  ⏵⏵ auto mode on"
+local ghost_screen = "────\n❯ remuda butler inbox\n────\n  ⏵⏵ auto mode on"
 remuda = {
   _butler_notice_config = { bus = bus, resolve = function(n) return n end,
     mail_address = function(n) return { alias = n, id = n } end,
@@ -20,8 +17,7 @@ remuda = {
   ls = function() return { { name = "lead", alive = true, attached = false } } end,
   capture = function() return ghost_screen end,
   capture_styled = function()
-    return { cursor = { row = 2 }, rows = { { { text = rule } },
-      { { text = "❯ " }, { text = ghost, dim = true } }, { { text = rule } }, { { text = "  ⏵⏵ auto mode on" } } } }
+    return { cursor = { row = 2 }, rows = { {}, { { text = "❯ " }, { text = "remuda butler inbox", dim = true } } } }
   end,
 }
 dofile("packages/butler/notice.lua")
@@ -52,6 +48,6 @@ assert(#typed == 23)
 remuda.capture_styled = function()
   return { cursor = { row = 2 }, rows = { {}, { { text = "❯ " }, { text = typed } } } }
 end
-local real = remuda._butler_composer_decision("claude", "lead", rule .. "\n❯ " .. typed .. "\n" .. rule)
+local real = remuda._butler_composer_decision("claude", "lead", "────\n❯ " .. typed .. "\n────")
 assert(real == "NON-EMPTY", "a real draft with capture_styled present must stay NON-EMPTY, got " .. tostring(real))
 print("ok - real draft stays NON-EMPTY with capture_styled")

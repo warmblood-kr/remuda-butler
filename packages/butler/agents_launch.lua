@@ -42,8 +42,11 @@ end
 -- Diagnostics that reach detail/sessions/launch trace show ROW 1 of the screen only: control
 -- sequences stripped, cut at 80 characters, "<empty first row>" when it is blank. Never a later row.
 local function screen_detail(screen)
-  local row = tostring(screen or ""):gsub("\27%[[%d;?]*[%a]", ""):match("^[^\r\n]*") or ""
-  row = row:gsub("%c", ""):gsub("^%s+", ""):gsub("%s+$", "")
+  local row = tostring(screen or ""):match("^[^\r\n]*") or ""
+  -- String controls (OSC/DCS/APC/PM) carry hidden payloads such as hyperlink targets: drop them whole,
+  -- an unterminated one to the end of the row, then CSI and any remaining control characters.
+  row = row:gsub("\27[%]P_^X][^\7\27]*\7", ""):gsub("\27[%]P_^X].-\27\\", ""):gsub("\27[%]P_^X].*$", "")
+  row = row:gsub("\27%[[%d;?]*[%a]", ""):gsub("%c", ""):gsub("^%s+", ""):gsub("%s+$", "")
   if row == "" then return "<empty first row>" end
   local chars, count = {}, 0
   for char in row:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
