@@ -98,8 +98,8 @@ remuda._butler_agent_startup.claude = {
   clear_input = "C-u",
   modals = {
     { trust = "claude", pending_match = "Quick safety check:" }, -- option chosen by its text
-    -- Decline by option text; never "Yes" (it leads to the shell-history screen) or "Don't show again".
-    { title = "Teach auto mode about your environment?", choose = "Not now",
-      options = { "Yes", "Not now", "Don't show again" } },
+    -- Detect + defer only (never answered): any fragment of the modal on screen holds the first task.
+    { title = "Teach auto mode about your environment?",
+      fragments = { "Teach auto mode", "about your environment", "Not now", "Don't show again" } },
   },
 }

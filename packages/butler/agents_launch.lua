@@ -61,7 +61,7 @@ local function readiness_timeout()
 end
 -- main.lua assigns startup_action_safe with the notice policy; read it late.
 local startup_action_safe = config.startup_action_safe
-local trust_modal_state, trust_plan, trust_path_matches, TRUST_AFFIRMATIVE, choice_modal_state
+local trust_modal_state, trust_plan, trust_path_matches, TRUST_AFFIRMATIVE, choice_modal_present
 local claude_workspace_path
 -- The one generic launch chooser serves Butler and every managed member. Kinds
 -- are lifecycle contributions; the chooser only reads their data and callbacks.
@@ -199,28 +199,15 @@ local function choose(candidates, opts, done)
     local dialogs = type(entry.dialogs) == "function" and select(2, call_callback(entry.dialogs)) or entry.dialogs or {}
     -- A titled modal can paint the idle composer beneath it: never ready while it is up.
     for _, dialog in ipairs(dialogs) do
-      if ready and dialog.title and choice_modal_state(dialog, screen) ~= "absent" then ready = false end
+      if ready and dialog.title and choice_modal_present(dialog, screen) then ready = false end
     end
     if ready then state.attempt.reason, state.attempt.session = "ready", state.name; callback(state.name, id); return end
     local known = false
     for dialog_index, dialog in ipairs(dialogs) do
       local lower_screen = screen:lower()
-      local choice_state, choice_moves
-      if dialog.title then choice_state, choice_moves = choice_modal_state(dialog, screen) end
-      if choice_state and choice_state ~= "absent" then
-        -- Decline by text: move onto "Not now", verify on a fresh capture, then confirm.
-        -- Anything else (Yes, Don't show again, the shell-history screen) is left alone.
+      if dialog.title and choice_modal_present(dialog, screen) then
+        -- Detect + defer only: a known modal is never answered with a key.
         known, state.dialog_seen = true, dialog.title
-        local safe = not startup_action_safe or startup_action_safe(state.name)
-        if safe and not state.handled[dialog_index] then
-          if choice_state == "safe_selected" then
-            local ok, result = pcall(remuda.key, state.name, "RET")
-            if ok and result ~= false then state.handled[dialog_index] = true end
-          elseif choice_state == "safe" and (state.choice_moves or 0) < 3 then
-            state.choice_moves = (state.choice_moves or 0) + 1
-            for _, key in ipairs(choice_moves) do pcall(remuda.key, state.name, key) end
-          end
-        end
         break
       end
       local trust_state = dialog.trust and trust_modal_state(dialog, screen) or nil
@@ -652,44 +639,23 @@ trust_modal_state = function(modal, screen)
   end
   return plan.selected and "safe_selected" or "safe"
 end
--- A titled choice modal (Claude "Teach auto mode ..."): the exact title line plus
--- a footer, then the option block between them. "safe"/"safe_selected" only when
--- the options are exactly modal.options (Yes / Not now / Don't show again) and
--- the one marker is somewhere in them; any other body (e.g. the shell-history
--- follow-up) is "other" and is never answered. Returns state, arrow moves to
--- modal.choose. A draft that merely mentions the title has no footer: "absent".
-choice_modal_state = function(modal, screen)
-  local lines = {}
-  for line in (tostring(screen or "") .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
-  local title
-  for index, line in ipairs(lines) do
-    if line:gsub("^%s+", ""):gsub("%s+$", "") == modal.title then title = index end
+-- A titled choice modal (Claude "Teach auto mode ..."): DETECTION ONLY, never answered.
+-- Any fragment (title or option text, partial, wrapped, quoted or drafted) counts, so
+-- first-task delivery defers. Text is lowercased with punctuation/whitespace/borders
+-- collapsed so a wrapped title still matches. Fails closed: false positives only defer.
+local function fold(text) return " " .. tostring(text):lower():gsub("[^%w]+", " ") .. " " end
+choice_modal_present = function(modal, screen)
+  local folded = fold(screen)
+  for _, fragment in ipairs(modal.fragments or {}) do
+    if folded:find(fold(fragment), 1, true) then return true end
   end
-  if not title then return "absent" end
-  local footer
-  for index = title + 1, #lines do
-    if lines[index]:find("Esc to cancel", 1, true) then footer = index; break end
-  end
-  if not footer then return "absent" end
-  local body = {}
-  for index = title + 1, footer - 1 do body[#body + 1] = lines[index] end
-  local labels, current = trust_options(body)
-  if not labels or #labels ~= #modal.options then return "other" end
-  local target
-  for index, label in ipairs(labels) do
-    if label ~= modal.options[index] then return "other" end
-    if label == modal.choose then target = index end
-  end
-  if not target then return "other" end
-  local moves = {}
-  for _ = 1, math.abs(target - current) do moves[#moves + 1] = target > current and "<down>" or "<up>" end
-  return target == current and "safe_selected" or "safe", moves
+  return false
 end
 local function startup_modal(startup, screen)
   local lower = tostring(screen or ""):lower()
   for _, modal in ipairs(startup.modals or {}) do
     if modal.title then
-      if choice_modal_state(modal, screen) ~= "absent" then return modal end
+      if choice_modal_present(modal, screen) then return modal end
     elseif modal.trust then
       if trust_modal_state(modal, screen) ~= "absent" then return modal end
     elseif modal.match and lower:find(modal.match:lower(), 1, true) then

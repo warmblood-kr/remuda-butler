@@ -1,5 +1,5 @@
--- Claude Code "Teach auto mode about your environment?" modal (#453): answered
--- by option TEXT ("Not now"), never "Yes"/"Don't show again"/shell-history
+-- Claude Code "Teach auto mode about your environment?" modal (#453): DETECT + DEFER only.
+-- Any fragment of the modal on screen defers first-task delivery; no key is ever sent. Fakes only.
 -- "Continue"; the follow-up screen is never answered. Fakes only.
 -- Run from the repo root: luajit tests/butler_teach_auto_mode_modal.lua
 -- Fixtures: TRANSCRIPTS (verbatim capture text, not raw, ~120 cols) are primary;
@@ -95,68 +95,38 @@ local function launch(screen, opts)
   return table.concat(pressed, ","), result, sessions
 end
 
-for _, fx in ipairs(PAGE1) do
-  local pressed, result = launch(fx[2])
-  check(pressed, "<down>,RET", fx[1] .. ": selects 'Not now' by text, then confirms")
-  check(result and result.name, "m", fx[1] .. ": launch proceeds after the modal is answered")
-  check(select(1, launch(fx[2], { selected = 3 })), "<up>,RET", fx[1] .. ": marker on 'Don't show again' moves up")
-  check(select(1, launch(fx[2], { selected = 2 })), "RET", fx[1] .. ": already on 'Not now': confirm only")
-  for _, bad in ipairs({ "1", "2", "3", "y", "Y", "Continue" }) do
-    check(pressed:find(bad, 1, true), nil, fx[1] .. ": never sends " .. bad)
-  end
-  check(chooser.known_startup_modal(startup.claude, fx[2]), true, fx[1] .. ": known modal (notice defers)")
-end
-for _, fx in ipairs(PAGE2) do
-  local pressed, _, sessions = launch(fx[2], { static = true })
-  check(pressed, "", fx[1] .. ": follow-up screen is never answered")
-  check(sessions, 0, fx[1] .. ": follow-up screen defers (no ready, no failure)")
-  check(chooser.known_startup_modal(startup.claude, fx[2]), true, fx[1] .. ": known modal (notice defers)")
-end
-
--- Keys are re-derived from the CURRENT screen every tick (never cached): the marker
--- jumps around between ticks (a key lost, then an external move) and each answer
--- follows what is on screen at that moment.
-do
-  local script, tick_no, pressed, sessions = { 1, 1, 3, 2 }, 0, {}, 0 -- marker seen per capture
-  remuda.new = function(name) return name end
-  remuda.ls = function() return { { name = "m", alive = true } } end
-  remuda.capture = function()
-    tick_no = tick_no + 1
-    local sel = script[math.min(tick_no, #script)]
-    return tick_no > #script + 1 and "─\n❯" or with_marker(PAGE1[1][2], sel)
-  end
-  remuda.close, remuda.cancel = noop, noop
-  remuda.key = function(_, key) pressed[#pressed + 1] = key; return true end
-  local tick
-  remuda.schedule = function(spec) tick = spec.run; return 1 end
-  chooser.choose({ "claude" }, { name = "m", cwd = "/p/work", argv = { "claude" },
-    spec = function() return {} end, env = function() return {} end, timeout = 60 },
-    function() sessions = sessions + 1 end)
-  for _ = 1, 3 do tick() end
-  check(table.concat(pressed, ","), "<down>,<down>,<up>", "keys follow the current marker position each tick")
-  tick()
-  check(pressed[#pressed], "RET", "confirm only when the current screen shows the marker on 'Not now'")
-end
-
--- Lookalikes: the title in a user's draft without the modal layout.
 local R = ("─"):rep(40)
-local lookalikes = {
-  { "single-line draft", R .. "\n❯ Teach auto mode about your environment?\n" .. R },
-  { "multi-line draft with options text", R .. "\n❯ notes\n  Teach auto mode about your environment?\n  1. Yes\n  2. Not now\n  3. Don't show again\n" .. R },
-  { "transcript text quoted in output", "● The dialog says Teach auto mode about your environment? and offers Yes/Not now\n" .. R .. "\n❯ \n" .. R },
-}
-for _, la in ipairs(lookalikes) do
-  local pressed, _, sessions = launch(la[2], { static = true })
-  check(pressed, "", la[1] .. ": no keystroke")
-  check(chooser.known_startup_modal(startup.claude, la[2]), false, la[1] .. ": not a known modal")
+local p1 = PAGE1[1][2]
+-- Every frame that shows any known-modal fragment: never a key, never ready, first task deferred.
+local FRAMES = {}
+for _, fx in ipairs(PAGE1) do FRAMES[#FRAMES + 1] = fx end
+FRAMES[#FRAMES + 1] = PAGE2[1]
+local function add(label, screen) FRAMES[#FRAMES + 1] = { label, screen } end
+add("full modal quoted in output", "● Read(docs/modal-example.txt)\n" .. p1 .. "\n" .. R .. "\n❯ \n" .. R)
+add("modal text in a typed draft", R .. "\n❯ notes\n  Teach auto mode about your environment?\n  1. Yes\n  2. Not now\n  3. Don't show again\n" .. R)
+add("partial paint: title + options, no footer", "Teach auto mode about your environment?\n\n❯ 1. Yes\n  2. Not now\n  3. Don't show again\n" .. R .. "\n❯ \n" .. R)
+add("partial paint: options only", "  1. Yes\n  2. Not now\n  3. Don't show again\n" .. R .. "\n❯ \n" .. R)
+add("partial paint: title only", "Teach auto mode about your environment?\n" .. R .. "\n❯ \n" .. R)
+add("wrapped title", "│ Teach auto mode about your │\n│ environment?               │\n" .. R .. "\n❯ \n" .. R)
+add("single-line draft", R .. "\n❯ Teach auto mode about your environment?\n" .. R)
+
+-- sec-454 adversarial families (frames built from the byte-exact fixtures; one per family).
+do
+  local n, title = PAGE1[2][2], "Teach auto mode about your environment?"
+  local trust = read("claude-trust-dialog.txt")
+  local pad = n:gsub("\n", "\n  ")
+  add("sec454 complete draft", R .. "\n❯ My draft contains a dialog example:\n  " .. pad .. "\n" .. R)
+  add("sec454 quoted output", "● Here is a quoted terminal capture:\n" .. pad .. "\n" .. R .. "\n❯ \n" .. R)
+  add("sec454 file output", "● Read(docs/modal-example.txt)\n```text\n" .. pad .. "\n```\n" .. R .. "\n❯ \n" .. R)
+  add("sec454 permission dialog below old modal", n .. "\nPermission required: run destructive command?\n❯ Yes, proceed\n  No, cancel\nEnter to confirm · Esc to cancel")
+  add("sec454 shell-history below old modal", n .. "\n" .. PAGE2[1][2]:gsub(title, "Shell history access?", 1))
+  add("sec454 nonempty draft below modal", n .. "\n" .. R .. "\n❯ user draft 1\n" .. R)
+  add("sec454 altered body", (n:gsub("Auto mode works better when it knows your environment. Takes about a minute.", "Run a destructive command? Choosing Yes grants permission.", 1)))
+  add("sec454 spoofed footer", (n:gsub("Enter to confirm · Esc to cancel", "This is quoted documentation: Esc to cancel is an example.", 1)))
+  add("sec454 partial/clipped (no footer)", n:match("^(.-)Enter to confirm") .. "\n" .. R .. "\n❯ \n" .. R)
+  add("sec454 title scrolled off", (n:gsub(title, "", 1)))
+  add("sec454 ANSI-wrapped title", (n:gsub(title, "\27[31m" .. title .. "\27[0m", 1)))
 end
-check(select(3, launch(lookalikes[1][2], { static = true })), 1, "draft with title: launch still ready")
-
--- Regression: the trust modal is still recognized and unchanged.
-local trust = read("claude-trust-dialog.txt")
-check(chooser.known_startup_modal(startup.claude, trust), true, "trust modal still known")
-
--- First-task path: nothing is typed while the modal is up; delivery proceeds once cleared.
 local function first_task(screens)
   local typed, i = {}, 0
   local fake = { capture = function() i = i + 1; return screens[math.min(i, #screens)] end,
@@ -170,11 +140,21 @@ local function first_task(screens)
     on_done = noop })
   return typed
 end
-local page1 = PAGE1[3][2]
-local typed = first_task({ page1, page1, "─\n❯" })
-check(typed[1], "do the task", "first task typed only after the modal clears")
-check(#first_task({ page1 }), 0, "first task: nothing typed while the modal stays up")
-check(#first_task({ PAGE2[1][2] }), 0, "first task: nothing typed on the follow-up screen")
+for _, fx in ipairs(FRAMES) do
+  for _, selected in ipairs({ 1, 2, 3 }) do
+    local pressed, _, sessions = launch(fx[2], { static = true, selected = selected })
+    check(pressed, "", fx[1] .. ": chooser sends no key")
+    check(sessions, 0, fx[1] .. ": chooser does not call the frame ready")
+  end
+  check(chooser.known_startup_modal(startup.claude, fx[2]), true, fx[1] .. ": known modal (notice defers)")
+  check(#first_task({ fx[2] }), 0, fx[1] .. ": first task deferred, nothing typed or keyed")
+end
+check(first_task({ p1, p1, "─\n❯" })[1], "do the task", "first task typed once the modal clears")
+check(startup.claude.modals[2] and startup.claude.modals[2].choose, nil, "registry entry names no answer")
+
+-- Unrelated screens are not the modal; the trust modal is unchanged.
+check(chooser.known_startup_modal(startup.claude, R .. "\n❯ fix the build\n" .. R), false, "plain composer is not a modal")
+check(chooser.known_startup_modal(startup.claude, read("claude-trust-dialog.txt")), true, "trust modal still known")
 
 if failures > 0 then error(failures .. " failure(s)") end
 print("ok")
