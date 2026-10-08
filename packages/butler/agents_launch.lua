@@ -43,7 +43,9 @@ end
 -- allowlist with no escape/UTF-8 interpretation: row 1 only, at most its first 240 bytes. Plain printable ASCII
 -- is kept (cut at 80 characters, right-trimmed); anything else becomes a fixed placeholder holding no row bytes.
 local function sanitize_row(text)
-  local head = tostring(text == nil and "" or text):sub(1, 240)
+  local printed, value = pcall(tostring, text == nil and "" or text)
+  if not printed or type(value) ~= "string" then return "<unprintable>" end
+  local head = value:sub(1, 240)
   local stop = head:find("[\r\n]")
   if stop then head = head:sub(1, stop - 1) end
   if not head:find("[^ ]") then return "<empty first row>" end
@@ -334,7 +336,7 @@ local function choose(candidates, opts, done)
   schedule = remuda.schedule({ every = 0.2, run = function()
     local ok, err = pcall(tick)
     if not ok then
-      if state and state.name then fail_candidate("spawn_error", tostring(err))
+      if state and state.name then fail_candidate("spawn_error", sanitize_row(err))
       else callback(nil, nil) end
     end
   end })
