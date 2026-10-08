@@ -96,11 +96,11 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
     end
 
     if options.trust_dialog then
-      local checked, waiting = pcall(options.trust_dialog, screen)
+      local checked, waiting, why = pcall(options.trust_dialog, screen, attempts > 0)
       if not checked or waiting then
         startup_ticks = startup_ticks + 1
         if startup_ticks >= (options.ready_timeout or 60) then
-          finish(false, "waiting for a human to answer the trust dialog")
+          finish(false, why or "waiting for a human to answer the trust dialog")
         end
         return
       end

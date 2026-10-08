@@ -179,7 +179,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   bus.tokens[token] = actual
   bus.agents[actual] = {
     kind = kind, token = token, model = model, telemetry = agent_telemetry,
-    parent = parent, children = {}, id = identity.id, alias = actual, session_name = actual,
+    parent = parent, parent_id = parent_identity and parent_identity.id, children = {}, id = identity.id, alias = actual, session_name = actual,
     session_start_marker = remuda._butler_new_ulid(),
     cwd = launch_cwd, task = task, launch_attempts = attempts, trust_allowed = auto_trust or trust_eligible,
     trust_eligible = trust_eligible, trust_real_cwd = trust_real_cwd,
@@ -642,8 +642,15 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       ready = startup.ready,
       modals = startup.modals,
       working = startup.working,
-      trust_dialog = function(screen)
+      -- written: the first task is already typed. The Teach modal (detect + defer) only holds the
+      -- PRE-write phase; afterwards its text on screen may be our own task echoed, so it never
+      -- vetoes verification (delivery then falls back to the normal post-write checks).
+      trust_dialog = function(screen, written)
         local modal = startup_modal(startup, screen)
+        if modal and modal.title then
+          if written then return false end
+          return true, "Teach auto mode modal on screen: first task deferred, no key sent"
+        end
         return modal ~= nil and modal.trust ~= nil
       end,
       allowed = function(retrying)
