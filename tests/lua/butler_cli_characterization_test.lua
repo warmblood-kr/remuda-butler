@@ -272,7 +272,7 @@ families {
       { argv = { "quota", "--bogus" }, pre = [[remuda._pr0_q = remuda._butler_quota; remuda._butler_quota = nil]], post = [[remuda._butler_quota = remuda._pr0_q]] }) },
   { name = "close",
     setup = [[
-      remuda._butler_bus.agents.worker = { id = "01SYNTHETICWORKER000000000", parent = "butler", session_name = "worker" }
+      remuda._butler_bus.agents.worker = { id = "01SYNTHETICWORKER000000000", parent = "butler", parent_id = remuda._butler_bus.agents.butler.id, session_name = "worker" }
       remuda._butler_bus.agents.other = { id = "01SYNTHETICOTHER00000000000", parent = "worker", parent_id = "01SYNTHETICWORKER000000000", session_name = "other" }
       remuda.close = function(...) remuda._pr0_note("close", ...); return true end
       remuda.butler.is_idle = function() return false, "busy" end -- deterministic: do not depend on the real is_idle for a fake session
