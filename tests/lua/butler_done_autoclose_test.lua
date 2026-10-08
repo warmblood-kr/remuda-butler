@@ -22,21 +22,27 @@ local function outcomes()
   return T.eval([=[
     local bus = remuda._butler_bus
     local saved = { agents = bus.agents, close = remuda.close, ls = remuda.ls, idle = remuda.butler.is_idle,
-      fail = remuda.fail, done = remuda._butler_done, tokens = bus.tokens }
+      fail = remuda.fail, done = remuda._butler_done, tokens = bus.tokens, identity_ids = bus.identity_ids }
     local closed, busy = {}, {}
     bus.agents = { butler = saved.agents.butler }
+    local ids = {}
     for _, row in ipairs({ { "lead", "butler" }, { "plain", "lead" }, { "finished", "lead" }, { "unread", "lead" },
         { "busy", "lead" }, { "followup", "lead" }, { "cli", "lead" }, { "orphan" },
         { "mcp-bool", "lead" }, { "mcp-string", "lead" }, { "mcp-false", "lead" }, { "mcp-omitted", "lead" },
         { "mcp-invalid", "lead" }, { "stale", "lead" } }) do
-      bus.agents[row[1]] = { id = "606done-" .. row[1], alias = row[1], kind = "codex", parent = row[2],
+      ids[#ids + 1] = string.format("01M606D0NE%016d", #ids + 1)
+      bus.agents[row[1]] = { id = ids[#ids], alias = row[1], kind = "codex", parent = row[2],
         session_name = row[1], token = "606done-token-" .. row[1] }
     end
     remuda._butler_done = {}
     -- A retained edge from before an alias was reused: close_member refuses it as not owned.
     bus.agents.stale.parent_id = "606done-an-earlier-lead"
     bus.tokens = setmetatable({}, { __index = saved.tokens })
-    for alias, agent in pairs(bus.agents) do if agent.token then bus.tokens[agent.token] = alias end end
+    bus.identity_ids = setmetatable({}, { __index = saved.identity_ids })
+    for alias, agent in pairs(bus.agents) do
+      if agent.token then bus.tokens[agent.token] = alias end
+      bus.identity_ids[agent.id] = { alias = alias }
+    end
     remuda.close = function(name) closed[#closed + 1] = name end
     remuda.ls = function() return {} end
     remuda.butler.is_idle = function(name) if busy[name] then return false, "busy" end return true end
@@ -58,7 +64,7 @@ local function outcomes()
       remuda._butler_send("lead", "followup", "one more thing")
       remuda._butler_inbox("followup")
       remuda._extension_commands.butler({ "send-to-leader", "--done", "cli", "done" },
-        { env = { REMUDA_BUTLER_AGENT_ID = "cli" } })
+        { kind = "session", session = "cli" })
       local function mcp(name, args)
         args.text = name .. " reports"
         return pcall(remuda._call, "butler_send_to_leader", args, { capability = "606done-token-" .. name })
@@ -98,8 +104,9 @@ local function outcomes()
       state("busy-after-idle", "busy")
       state("finished-only-once", "finished")
     end)
-    bus.agents, remuda.close, remuda.ls, remuda.butler.is_idle, remuda.fail, remuda._butler_done, bus.tokens =
-      saved.agents, saved.close, saved.ls, saved.idle, saved.fail, saved.done, saved.tokens
+    bus.agents, remuda.close, remuda.ls, remuda.butler.is_idle, remuda.fail, remuda._butler_done, bus.tokens,
+      bus.identity_ids = saved.agents, saved.close, saved.ls, saved.idle, saved.fail, saved.done, saved.tokens,
+      saved.identity_ids
     if not ok then error(err, 0) end
     return table.concat(out, " ")
   ]=])
