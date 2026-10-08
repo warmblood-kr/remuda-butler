@@ -178,9 +178,16 @@ local function mail_id(ref, allow_ended)
   return agent.id, agent
 end
 remuda._butler_resolve = resolve
+-- Token records are daemon memory only: a restarted daemon re-reads durable ids
+-- (identity reload ends every absent non-root session) but not tokens, so no
+-- bridge is re-adopted by an earlier token. An in-image reload keeps the bus.
+-- The random per-bus incarnation keeps tokens unique across rapid daemon
+-- replacement or a clock rollback; the token is a lookup key, never a secret
+-- beyond same-user advisory attribution.
 local function next_token(name)
   bus.next = bus.next + 1
-  return name .. "-" .. os.time() .. "-" .. bus.next
+  bus.incarnation = bus.incarnation or crockford_ulid():sub(-10)
+  return name .. "-" .. os.time() .. "-" .. bus.incarnation .. "-" .. bus.next
 end
 local function caller_name(caller)
   -- A native principal, including unknown and service callers, takes

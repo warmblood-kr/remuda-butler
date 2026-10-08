@@ -53,6 +53,19 @@ T.test("a_capability_from_an_ended_member_does_not_resolve_to_an_alias_replaceme
     return tostring(not ok) .. ":" .. tostring(before == snapshot())
   ]])
   T.eq(refused, "true:true", "a refused stale capability must have no mailbox effects")
+  T.eq(T.eval("return tostring(remuda._butler_bus.tokens[" .. string.format("%q", old_token) .. "])"), "nil",
+    "exit must remove the ended member's token record")
+  local ended_inbox = T.mcp_call("butler_inbox", {}, old_token)
+  T.ok(tostring(ended_inbox.error and ended_inbox.error.message or (ended_inbox.result and ended_inbox.result.content
+    and ended_inbox.result.content[1].text)):find("unknown caller", 1, true) ~= nil,
+    "an ended member's bridge must not read an inbox")
+  local shape = T.eval([[
+    local bus = remuda._butler_bus
+    local agent = bus.agents.reused
+    local record = bus.tokens[agent.token]
+    return tostring(type(record) == "table" and record.id == agent.id and record.generation == agent.session_start_marker)
+  ]])
+  T.eq(shape, "true", "a launch must store {durable id, launch marker}, not an alias string")
   local native = T.eval([[
     local cap = ]] .. string.format("%q", new_token) .. [[
     local identity = remuda._butler_identity
@@ -220,4 +233,48 @@ T.test("a_capability_is_refused_while_the_native_exit_is_pending_or_liveness_is_
     }, ":")
   ]])
   T.eq(result, "reused:nil:nil:nil", "authorization must check native liveness, not only Butler's roster")
+end)
+
+T.test("a_token_record_with_any_single_wrong_field_does_not_resolve", function()
+  local result = T.eval([[
+    local bus, identity = remuda._butler_bus, remuda._butler_identity
+    local agent = bus.agents.reused
+    local record = bus.tokens[agent.token]
+    local good = { id = record.id, generation = record.generation }
+    local out = {}
+    local function try(label, setup, undo)
+      setup(); out[#out + 1] = label .. "=" .. tostring(identity.caller_name({ capability = agent.token })); undo()
+    end
+    local state, marker = bus.identity_ids[agent.id].state, agent.session_start_marker
+    try("id", function() bus.tokens[agent.token] = { id = "OTHER", generation = good.generation } end,
+      function() bus.tokens[agent.token] = good end)
+    try("generation", function() bus.tokens[agent.token] = { id = good.id, generation = "OTHER" } end,
+      function() bus.tokens[agent.token] = good end)
+    try("state", function() bus.identity_ids[agent.id].state = "ended" end,
+      function() bus.identity_ids[agent.id].state = state end)
+    try("same_id_relaunch", function() agent.session_start_marker = "NEW-LAUNCH" end,
+      function() agent.session_start_marker = marker end)
+    try("row", function() bus.agents.reused = nil end, function() bus.agents.reused = agent end)
+    out[#out + 1] = "ok=" .. tostring(identity.caller_name({ capability = agent.token }))
+    -- legacy alias-valued entries must be proven by the live row; each guard alone refuses
+    local token = agent.token
+    local function legacy(label, mutate, restore)
+      bus.tokens[token] = "reused"; mutate()
+      out[#out + 1] = label .. "=" .. tostring(identity.caller_name({ capability = token }))
+        .. "/" .. type(bus.tokens[token]); restore(); bus.tokens[token] = good
+    end
+    legacy("legacy_token", function() agent.token = "someone-else" end, function() agent.token = token end)
+    legacy("legacy_id", function() agent.id = nil end, function() agent.id = good.id end)
+    legacy("legacy_marker", function() agent.session_start_marker = nil end, function() agent.session_start_marker = marker end)
+    return table.concat(out, ":")
+  ]])
+  T.eq(result, "id=nil:generation=nil:state=nil:same_id_relaunch=nil:row=nil:ok=reused"
+    .. ":legacy_token=nil/string:legacy_id=nil/string:legacy_marker=nil/string")
+end)
+
+T.test("tokens_carry_a_random_incarnation_component", function()
+  T.eq(T.eval([[
+    local a, b = remuda._butler_identity.next_token("x"), remuda._butler_identity.next_token("x")
+    return tostring(a:match("^x%-%d+%-%w%w%w%w%w%w%w%w%w%w%-%d+$") ~= nil and a ~= b)
+  ]]), "true")
 end)
