@@ -151,6 +151,52 @@ T.test('approve_text_tool_refuses_unresolved_requester_before_registering',funct
  T.expect(true,'','APPROVE-TEXT-REQUESTER '..result)
 end)
 
+T.test('approve_text_tool_refuses_unresolved_requester_when_member_named_outside',function()
+ local result=T.eval([=[
+  local feature=remuda.butler.approve_text
+  local tool
+  for k,v in pairs(remuda.tools) do
+    if k=='butler_approve_text' or (type(v)=='table' and v.name=='butler_approve_text') then tool=v end
+  end
+  assert(tool,'butler_approve_text tool not found')
+  local bus=remuda._butler_bus
+  bus.agents.outside={id='OUTSIDE',alias='outside',session_name='outside-sess'}
+  bus.tokens['member-token']='butler'
+  bus.tokens['outside-token']='outside'
+  local real_request,real_allowed=feature.request,feature.target_session_allowed
+  local askers={}
+  feature.target_session_allowed=function() return true end
+  feature.request=function(_,_,asker) askers[#askers+1]=asker; return 'ID' end
+  local function try(c)
+    askers={}
+    local ok,err=pcall(tool.run,{session='butler',text='hello'},c)
+    return tostring(ok)..'/'..#askers..'/'..(askers[1] or tostring(err):sub(1,60))
+  end
+  local out={
+    'invalid-token='..try({capability='invalid'}),
+    'empty='..try({}),
+    'service='..try({kind='service',service='timer'}),
+    'member='..try({capability='member-token'}),
+    'outsider='..try({kind='session',session='outside-sess'}),
+    'outsider-token='..try({capability='outside-token'}),
+    'operator='..try({kind='outside'}),
+  }
+  feature.request,feature.target_session_allowed=real_request,real_allowed
+  bus.agents.outside=nil
+  bus.tokens['member-token']=nil
+  bus.tokens['outside-token']=nil
+  return table.concat(out,';')
+ ]=])
+ for _,name in ipairs({'invalid-token','empty','service'}) do
+  T.expect(result:find(name..'=false/0/',1,true),result)
+ end
+ T.expect(result:find('member=true/1/butler',1,true),result)
+ T.expect(result:find('outsider=true/1/outside',1,true),result)
+ T.expect(result:find('outsider-token=true/1/outside',1,true),result)
+ T.expect(result:find('operator=true/1/outside',1,true),result)
+ T.expect(true,'','APPROVE-TEXT-OUTSIDE-MEMBER '..result)
+end)
+
 T.test('archive_listing_error_refuses_operator_resolution',function()
  local result=T.eval([=[
   local gp=remuda.butler.guard_policy

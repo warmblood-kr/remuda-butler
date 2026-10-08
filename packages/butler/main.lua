@@ -685,10 +685,14 @@ remuda.tool{
     if not feature or not feature.target_session_allowed(a.session) then
       error("Unknown Butler session: " .. tostring(a.session), 0)
     end
-    -- "outside" is caller_name's sentinel for an unresolved caller; only the named
-    -- operator policy (kind="outside") may ask under it.
+    -- Decide from how the caller resolved, not from caller_name's "outside" string
+    -- (a live member may be named `outside`): a session-resolved member, a live
+    -- capability token, or the named operator policy.
     local asker = caller_name(caller)
-    if not bus.agents[asker] and caller_principal.resolve(caller).tag ~= "operator" then
+    local token = type(caller) == "table" and caller.capability
+    local member = caller_principal.resolve(caller).tag == "member"
+      or (token and bus.tokens[token] and bus.agents[bus.tokens[token]])
+    if not member and caller_principal.resolve(caller).tag ~= "operator" then
       error("Butler cannot identify this caller. Next: run from a registered Butler session or upgrade Remuda core.", 0)
     end
     local id, why = feature.request(a.session, a.text, asker)
