@@ -180,3 +180,26 @@ T.test("native_session_attribution_resolves_exactly_one_registration_by_session_
   ]])
   T.eq(result, "solo:nil:nil", "native attribution must be the unique session_name match, never an alias or a capability rescue")
 end)
+
+T.test("each_root_launch_gets_a_fresh_capability_and_the_ended_one_is_revoked", function()
+  local before = T.eval([[
+    local root = remuda._butler_bus.agents.butler
+    return root.id .. ":" .. root.token .. ":" .. root.session_start_marker
+  ]])
+  local id, old_token, old_marker = before:match("([^:]+):(.-):(%S+)$")
+  T.eval('return remuda.close("butler")')
+  T.wait_until(function()
+    return T.eval('return tostring(remuda._butler_bus.agents.butler.token ~= ' .. string.format("%q", old_token)
+      .. ' and remuda._butler_start_pending == false)'):match("true") ~= nil
+  end, 10, "root respawn with a fresh capability")
+  local after = T.eval([[
+    local bus, identity = remuda._butler_bus, remuda._butler_identity
+    local root = bus.agents.butler
+    return table.concat({ root.id, tostring(root.session_start_marker ~= ]] .. string.format("%q", old_marker) .. [[),
+      tostring(identity.caller_name({ capability = ]] .. string.format("%q", old_token) .. [[ })),
+      tostring(bus.tokens[]] .. string.format("%q", old_token) .. [[]),
+      tostring(identity.caller_name({ capability = root.token })) }, ":")
+  ]])
+  T.eq(after, id .. ":true:nil:nil:butler",
+    "the durable root id must survive while the old launch's capability is revoked and the new one resolves")
+end)

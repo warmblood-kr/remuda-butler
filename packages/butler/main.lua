@@ -823,6 +823,22 @@ mailbox(root_identity.id)
 -- The root MCP config carries the root capability: owner-only (0600), and a
 -- file left 0644 by an older Butler is replaced.
 remuda.butler.guard.write_private(mcp_config_path, agent_mcp_json(butler_token))
+-- The root id is durable, but every root launch gets its own capability and
+-- marker, written to the bridge config before that launch starts. Exit revokes
+-- both, so an ended root bridge cannot authorize until the next launch.
+local function rotate_root_capability()
+  local root = bus.agents.butler
+  if root.token then bus.tokens[root.token] = nil end
+  butler_token = next_token("butler")
+  root.token, root.session_start_marker = butler_token, remuda._butler_new_ulid()
+  bus.tokens[butler_token] = { id = root_identity.id, generation = root.session_start_marker }
+  remuda.butler.guard.write_private(mcp_config_path, agent_mcp_json(butler_token))
+end
+function remuda._butler_revoke_root_capability()
+  local root = bus.agents.butler
+  if root and root.token then bus.tokens[root.token] = nil end
+  if root then root.session_start_marker = nil end
+end
 
 local SYSTEM_PROMPT = "You lead a Butler team. For every delegation, create a "
   .. "Remuda-managed member with `remuda butler topic delegate NAME TASK`. "
@@ -1071,6 +1087,7 @@ local function launch_butler()
       pcall(ensure_root_permissions, candidate_kind)
       local telemetry = setup_telemetry(candidate_kind, { name = requested_name, status_path = status_path })
       telemetry_by_kind[candidate_kind] = telemetry
+      rotate_root_capability()
       return { name = requested_name, token = butler_token, mcp_config_path = mcp_config_path,
         settings_path = telemetry.settings_path, telemetry = telemetry, system_prompt = SYSTEM_PROMPT }
     end,
@@ -1088,6 +1105,7 @@ local function launch_butler()
     local message = table.concat(launch_failure_lines(attempts), "\n")
     remuda._butler_start_error = message
     remuda._butler_start_pending = false
+    remuda._butler_revoke_root_capability() -- no live launch owns the last attempt's capability
     reconcile_retry.note_failure()
     _butler_session_trace("reconcile_error", message)
     return nil
@@ -1267,6 +1285,9 @@ function remuda._butler_session_exited(name, info)
     bus.trusted_launch_dirs[exited.cwd] = nil
   end
   if exited and name ~= "butler" and exited.token then bus.tokens[exited.token] = nil end
+  -- ponytail: a late exit of a replaced root while a launch is pending is skipped
+  -- (that launch rotates anyway); one arriving after finish would revoke the new launch.
+  if name == "butler" and not remuda._butler_launching then remuda._butler_revoke_root_capability() end
   if exited and name ~= "butler" then
     local ended = bus.identity_ids[exited.id] or exited
     ended.alias, ended.kind = exited.alias or name, exited.kind
