@@ -14,9 +14,8 @@ local function start_butler()
       local d = os.getenv('XDG_DATA_HOME') .. '/' .. name
       remuda.mkdir(d); remuda._butler_guard_dir = d; return d
     end
-    remuda._t_hook = function(stdin, env)
-      return remuda._butler_command_run('guard', {'guard'}, { kind = 'session', session = 's-ssa', stdin = stdin, env = env or
-        { REMUDA_BUTLER_AGENT_ALIAS = 'ss-a', REMUDA_BUTLER_AGENT_KIND = 'claude' } })
+    remuda._t_hook = function(stdin)
+      return remuda._butler_command_run('guard', {'guard'}, { kind = 'session', session = 's-ssa', stdin = stdin })
     end
     remuda._t_lines = function()
       local out, f = {}, io.open(gp.log_path(), 'r')
@@ -109,7 +108,7 @@ T.test("a missing caller principal resolver refuses the guard hook cleanly", fun
   local result = T.eval([[
     local resolver = remuda._butler_caller_principal
     remuda._butler_caller_principal = nil
-    local ok, why = pcall(remuda._t_hook, '{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"git push"}}')
+    local ok, why = pcall(remuda.butler.guard_policy.run, {'guard'}, { kind = 'session', session = 's-ssa', stdin = '{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"git push"}}' })
     remuda._butler_caller_principal = resolver
     return tostring(ok) .. '|' .. tostring(why)
   ]])

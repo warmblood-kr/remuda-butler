@@ -48,12 +48,15 @@ local function start_butler()
     -- One PermissionRequest through the verb; the index of its deferred reply (0 when none was made).
     remuda._t_perm = function(command, alias, over)
       over = over or {}
+      alias = alias or 'ss-a'
+      local session = 's-' .. alias
+      remuda._butler_bus.agents[alias] = { id = 'U-' .. alias, alias = alias,
+        kind = over.kind or 'claude', session_name = session }
       local input = over.input or { command = command }
       local payload = remuda.json.encode({ hook_event_name = over.event or 'PermissionRequest',
         tool_name = over.tool or 'Bash', tool_input = input, cwd = over.cwd or '/p/w', session_id = 's1' })
       local before = #remuda._t_replies
-      local out = remuda._butler_command_run('guard', { 'guard' }, { kind = 'session', session = 's-ssa', stdin = payload, env =
-        { REMUDA_BUTLER_AGENT_ALIAS = alias or 'ss-a', REMUDA_BUTLER_AGENT_KIND = over.kind or 'claude' } })
+      local out = remuda._butler_command_run('guard', { 'guard' }, { kind = 'session', session = session, stdin = payload })
       if #remuda._t_replies > before then return #remuda._t_replies end
       return 0
     end
@@ -232,7 +235,9 @@ T.test("guard approval requests and answers refuse before state changes when aud
   on("a-audit-failure")
   T.eval("remuda._t_attach()")
   for _, stage in ipairs({ "write", "flush", "close" }) do
-    T.eval("remuda._t_dir('a-request-audit-" .. stage .. "'); remuda._t_attach()")
+    T.eval("remuda._t_dir('a-request-audit-" .. stage .. "'); remuda._t_attach(); "
+      .. "remuda._butler_command_run('guard', {'guard','on'}, {kind='session', session='butler'}); "
+      .. "remuda._butler_command_run('guard', {'guard','approvals','on'}, {kind='session', session='butler'})")
     local request = T.eval(([=[
       local gp, original, stage, appends = remuda.butler.guard_policy, io.open, %q, 0
       io.open = function(path, mode)
@@ -267,7 +272,9 @@ T.test("guard approval requests and answers refuse before state changes when aud
     T.expect(request:match("^0|0|true|") ~= nil and request:find("Next:", 1, true) ~= nil,
       stage .. " failure created an approval request or lacked Next: " .. request)
 
-    T.eval("remuda._t_dir('a-answer-audit-" .. stage .. "'); remuda._t_attach()")
+    T.eval("remuda._t_dir('a-answer-audit-" .. stage .. "'); remuda._t_attach(); "
+      .. "remuda._butler_command_run('guard', {'guard','on'}, {kind='session', session='butler'}); "
+      .. "remuda._butler_command_run('guard', {'guard','approvals','on'}, {kind='session', session='butler'})")
     local reply_index = tonumber(T.eval("remuda._t_last_reply = remuda._t_perm('git push origin main'); return tostring(remuda._t_last_reply)"))
     T.expect(reply_index and reply_index > 0, "create request before answer fault")
     local answer = T.eval(([=[

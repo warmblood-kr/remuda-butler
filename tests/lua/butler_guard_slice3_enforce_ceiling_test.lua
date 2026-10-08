@@ -37,13 +37,13 @@ local function start_butler()
     remuda._t_call = function(over)
       local payload = remuda.json.encode({ hook_event_name = over.event or 'PermissionRequest', tool_name = over.tool or 'WebFetch',
         tool_input = over.input or { url = 'https://example.com/x' }, cwd = over.cwd or '/tmp', grant_id = over.grant_id })
-      local r = remuda._butler_command_run('guard', { 'guard' }, { kind = 'session', session = 's-ssa', stdin = payload, env =
-        { REMUDA_BUTLER_AGENT_ALIAS = 'ss-a', REMUDA_BUTLER_AGENT_KIND = over.kind or 'claude' } })
+      local r = remuda._butler_command_run('guard', { 'guard' }, { kind = 'session', session = 's-ssa', stdin = payload })
       if type(r) == 'table' then return 'pending' end
       return tostring(r)
     end
     -- The calling session by core's caller identity: a grant held by U-SSA covers it (holders: enforce_holder).
-    remuda._butler_bus.agents['t-ssa'] = { id = 'U-SSA', parent = 'butler', alias = 't-ssa', session_name = 's-ssa', children = {} }
+    remuda._butler_bus.agents['t-ssa'] = { id = 'U-SSA', parent = 'butler', alias = 't-ssa', kind = 'claude', session_name = 's-ssa', children = {} }
+    remuda._butler_bus.agents['ss-a'] = nil -- keep this session uniquely registered
     remuda.caller = function() return { kind = 'session', session = 's-ssa' } end
     return 'ok'
   ]])
@@ -106,7 +106,7 @@ T.test("after a restart the count is rebuilt from the live audit log; an unreada
     io.open = function(p, mode) if p == log and (mode == nil or mode:find("r", 1, true)) then return nil, "denied" end; return real(p, mode) end]]):format(log))
   T.eq(uses(1), 0, "log unreadable on rebuild: asks")
   T.eval("io.open = remuda._t_io_open")
-  T.eq(count(lines(), '"event":"grant_used"'), 0, "no use was audited (the log restarted)")
+  T.eq(count(lines(), '"event":"grant_used"'), 30, "prior audit lines remain when rebuild is unreadable")
   restart()
   at(3601)
   T.eq(uses(1), 1, "the first ten aged out, the hour rolls", "ok - rebuild")

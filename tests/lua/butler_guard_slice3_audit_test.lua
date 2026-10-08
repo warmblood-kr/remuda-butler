@@ -15,8 +15,7 @@ local function start_butler()
     end
     remuda._t_hook = function(stdin)
       return remuda._butler_command_run('guard', {'guard'}, { kind = 'session',
-        session = 's-ssa', stdin = stdin, env =
-        { REMUDA_BUTLER_AGENT_ALIAS = 'ss-a', REMUDA_BUTLER_AGENT_KIND = 'claude' } })
+        session = 's-ssa', stdin = stdin })
     end
     remuda._t_lines = function()
       local out, f = {}, io.open(gp.log_path(), 'r')
@@ -48,8 +47,8 @@ end)
 
 T.test("switch changes are audited with who and when, even when turned off", function()
   start_butler()
-  T.eval("remuda._t_dir('g3-switch'); remuda._t_guard({'guard','on'}, {env={REMUDA_BUTLER_AGENT_ALIAS='lead-1'}})")
-  T.eval("remuda._t_guard({'guard','deny','on'}, {env={REMUDA_BUTLER_AGENT_ALIAS='lead-1'}})")
+  T.eval("remuda._t_dir('g3-switch'); remuda._t_guard({'guard','on'}, {})")
+  T.eval("remuda._t_guard({'guard','deny','on'}, {})")
   T.eval("remuda._t_guard({'guard','deny','off'}, {})")
   T.eval("remuda._t_guard({'guard','approvals','on'}, {})")
   T.eval("remuda._t_guard({'guard','off'}, {})")
@@ -194,22 +193,21 @@ end)
 T.test("an unwritable audit refuses the switch change before turning guard off", function()
   start_butler()
   T.eval("remuda._t_dir('g3-offfirst'); remuda._t_guard({'guard','on'}); remuda._t_guard({'guard','deny','on'})")
-  -- a read-only log: opening it for append fails on every platform (a directory would not on Linux)
-  T.eval([[local gp = remuda.butler.guard_policy
-    remuda.process.run({ argv = { 'chmod', '400', gp.log_path() } })]])
-  local off = T.eval([[local err, real = {}, io.stderr
+  local off = T.eval([[local gp, real_open, err, real_err = remuda.butler.guard_policy, io.open, {}, io.stderr
+    io.open = function(path, mode)
+      if path == gp.log_path() and mode == 'a' then return nil, 'injected append failure' end
+      return real_open(path, mode)
+    end
     io.stderr = { write = function(_, t) err[#err + 1] = t end }
     local ok, r = pcall(remuda._t_guard, {'guard','off'})
-    io.stderr = real
+    io.open, io.stderr = real_open, real_err
     return tostring(r) .. '\nSTDERR:' .. table.concat(err)]])
   local answer, stderr = off:match("^(.-)\nSTDERR:(.*)$")
   T.expect(has(answer, "guard switch not changed") and has(answer, "Next:"),
     "refusal includes an actionable Next line: " .. off)
   local status = T.eval("return remuda._t_guard({'guard','status'})")
   T.expect(has(status, "guard: on") and not has(status, "NOT audited"), "failed audit must preserve guard on: " .. status)
-  T.eval([[local gp = remuda.butler.guard_policy
-    remuda.process.run({ argv = { 'chmod', '600', gp.log_path() } })]])
-  T.eval("remuda._t_guard({'guard','off'}, {env={REMUDA_BUTLER_AGENT_ALIAS='lead-1'}})")
+  T.eval("remuda._t_guard({'guard','off'}, {})")
   local lines = T.eval("return remuda._t_lines()")
   local last; for l in lines:gmatch("[^\n]+") do last = l end
   T.expect(has(last, '"summary":"guard off"') and has(last, '"session":"butler"')

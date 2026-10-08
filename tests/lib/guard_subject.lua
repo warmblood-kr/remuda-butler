@@ -33,7 +33,13 @@ function M.wrap(code, directory)
       if subjects[name] then
         local result = assert(loadfile(subjects[name]))()
         if name == 'butler/guard_policy' and remuda._butler_bus and type(remuda._butler_bus.agents) == 'table' then
-          remuda._butler_bus.agents['ss-a'] = { id = 'U-SSA', alias = 'ss-a', kind = 'claude', session_name = 's-ssa' }
+          local registered = false
+          for _, agent in pairs(remuda._butler_bus.agents) do
+            if type(agent) == 'table' and agent.session_name == 's-ssa' then registered = true; break end
+          end
+          if not registered then
+            remuda._butler_bus.agents['ss-a'] = { id = 'U-SSA', alias = 'ss-a', kind = 'claude', session_name = 's-ssa' }
+          end
         end
         return result
       end

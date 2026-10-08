@@ -32,8 +32,7 @@ local function start_butler()
         member = { id = 'test-' .. alias, alias = alias, kind = kind or 'claude', session_name = 'test-' .. alias }
         remuda._butler_bus.agents[alias] = member
       end
-      return { kind = 'session', session = member.session_name,
-        env = { REMUDA_BUTLER_AGENT_ALIAS = alias, REMUDA_BUTLER_AGENT_KIND = kind or 'claude' } }
+      return { kind = 'session', session = member.session_name }
     end
     remuda.pending = function(opts)
       local r = { opts = opts }
@@ -75,7 +74,8 @@ local function start_butler()
     end
     remuda._t_grants = function() return #remuda.butler.guard_grants.active() end
     -- The calling session by core's caller identity (a grant offer needs one; holders: enforce_holder).
-    remuda._butler_bus.agents['t-ssa'] = { id = 'U-SSA', parent = 'butler', alias = 't-ssa', session_name = 's-ssa', children = {} }
+    remuda._butler_bus.agents['t-ssa'] = { id = 'U-SSA', parent = 'butler', alias = 't-ssa', kind = 'claude', session_name = 's-ssa', children = {} }
+    remuda._butler_bus.agents['ss-a'] = nil -- keep this session uniquely registered
     remuda.caller = function() return { kind = 'session', session = 's-ssa' } end
     return 'ok'
   ]])

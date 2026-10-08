@@ -16,9 +16,9 @@ local function start_butler()
       local d = os.getenv('XDG_DATA_HOME') .. '/' .. name
       remuda.mkdir(d); remuda._butler_guard_dir = d; return d
     end
-    remuda._t_hook = function(stdin, env)
-      return remuda._butler_command_run('guard', {'guard'}, { kind = 'session', session = 's-ssa', stdin = stdin, env = env or
-        { REMUDA_BUTLER_AGENT_ALIAS = 's2-a', REMUDA_BUTLER_AGENT_KIND = 'claude' } })
+    remuda._butler_bus.agents['s2-a'] = { id = 'U-S2A', alias = 's2-a', kind = 'claude', session_name = 's-s2-a' }
+    remuda._t_hook = function(stdin)
+      return remuda._butler_command_run('guard', {'guard'}, { kind = 'session', session = 's-s2-a', stdin = stdin })
     end
     remuda._t_lines = function()
       local out, f = {}, io.open(gp.log_path(), 'r')

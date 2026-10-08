@@ -873,6 +873,24 @@ local function build_line(record, prev)
   return line .. "}"
 end
 
+-- Keep the live audit owner-only even when the process umask is permissive or the file predates this writer.
+local function ensure_private_log(path)
+  local contents = ""
+  local input, open_why = io.open(path, "r")
+  if input then
+    local read, read_why = input:read("*a")
+    local closed, close_why = input:close()
+    assert(type(read) == "string", "audit log could not be read: " .. tostring(read_why))
+    assert(closed, "audit log could not be closed: " .. tostring(close_why))
+    contents = read
+  elseif open_why ~= nil and not tostring(open_why):find("No such file", 1, true)
+      and not tostring(open_why):find("not found", 1, true) then
+    error("audit log could not be opened: " .. tostring(open_why), 0)
+  end
+  local wrote, why = remuda.fs.write_atomic(path, contents, { private = true })
+  assert(wrote, "audit log could not be made private: " .. tostring(why))
+end
+
 -- Append one JSON line to the audit log (0600, rotated, chained). Returns true, or nil and why.
 local function write_line(record)
   local path = M.log_path()
@@ -889,6 +907,7 @@ local function write_line(record)
         assert(M.rotate(path), "audit rotation failed")
         size = 0
       end
+      ensure_private_log(path)
       local out = assert(io.open(path, "a"))
       local prev, genesis
       local hashed = pcall(function()
