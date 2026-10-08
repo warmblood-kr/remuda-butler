@@ -35,7 +35,7 @@ local function outcomes()
     -- two-cycle with a child, a self-leader with a child, a replaced alias (failed relaunch + reuse)
     add("ca", "cb", "cb-606-id"); add("cb", "ca", "ca-606-id"); add("ckid", "ca", "ca-606-id")
     add("selfl", "selfl", "selfl-606-id"); add("selfkid", "selfl", "selfl-606-id")
-    add("mid", "sib", "sib-606-id"); add("midleaf", "mid", "mid-OLD-id"); add("midnew", "mid", "mid-606-id")
+    add("staledirect", "lead", "lead-OLD-id"); add("mid", "sib", "sib-606-id"); add("midleaf", "mid", "mid-OLD-id"); add("midnew", "mid", "mid-606-id")
     local function cli(kind, name)
       closed = {}
       local old = remuda.caller
@@ -79,6 +79,7 @@ local function outcomes()
       try("caller-in-cycle", "cb", "ckid", false, true)
       try("cycle-ancestor-target", "cb", "ca", false, true)
       try("self-leader-caller", "selfl", "selfkid", false, true)
+      try("stale-direct-lead", "lead", "staledirect", false, true)
       try("stale-alias-sibling", "sib", "midleaf", false, true)
       try("stale-alias-root", "butler", "midleaf", false, true)
       try("bound-alias-sibling", "sib", "midnew", false, true)
@@ -104,7 +105,7 @@ T.test("ancestor closes finished descendants, others still refused", function()
     "unknown-caller=refused", "empty-name=refused", "nil-name=refused", "unknown-name=refused",
     "deep-chain-root=closed", "deep-chain-sibling=refused",
     "caller-in-cycle=refused", "cycle-ancestor-target=refused", "self-leader-caller=refused",
-    "stale-alias-sibling=refused", "stale-alias-root=refused", "bound-alias-sibling=closed",
+    "stale-direct-lead=refused", "stale-alias-sibling=refused", "stale-alias-root=refused", "bound-alias-sibling=closed",
     "cli-outside-deep=closed", "cli-unknown-deep=refused", "cli-service-deep=refused",
     "busy-grandchild=refused", "busy-grandchild-force=closed",
   }, " "), "close authority over descendants")
