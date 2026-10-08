@@ -30,6 +30,9 @@ if approval_file then approval_file:close(); dofile("packages/butler/approval.lu
 dofile("packages/butler/typed_lines.lua")
 dofile("packages/butler/approve_text.lua")
 dofile("packages/butler/status_command.lua")
+local caller_bus = { agents = { ["ss-a"] = { id = "U-SSA", alias = "ss-a", kind = "claude", session_name = "s-ssa" } } }
+remuda._butler_caller_principal_config = { bus = caller_bus }
+dofile("packages/butler/caller_principal.lua")
 dofile("packages/butler/guard_policy.lua")
 dofile("packages/butler/guard_grants.lua")
 dofile("packages/butler/guard_approval.lua")
@@ -7984,7 +7987,7 @@ remuda._t359.with_guard = with_guard
 local function guard_request(env, replies, command, alias, request_room)
   request_room = request_room or HOME
   local before = #remuda._t359.room_posts(env, request_room, "Butler approval")
-  remuda.butler.guard_policy.run({ "guard" }, { stdin = remuda.json.encode({ hook_event_name = "PermissionRequest",
+  remuda.butler.guard_policy.run({ "guard" }, { kind = "session", session = "s-ssa", stdin = remuda.json.encode({ hook_event_name = "PermissionRequest",
     tool_name = "Bash", tool_input = { command = command or "git push origin main" }, cwd = "/p/w" }),
     env = { REMUDA_BUTLER_AGENT_ALIAS = alias or "ss-a", REMUDA_BUTLER_AGENT_KIND = "claude" } })
   env.client:pump()
@@ -8157,7 +8160,7 @@ end
 local CYCLE = "\240\159\148\132"
 local function guard_fetch(env, replies, host)
   local before = #remuda._t359.room_posts(env, HOME, "Butler approval")
-  remuda.butler.guard_policy.run({ "guard" }, { stdin = remuda.json.encode({ hook_event_name = "PermissionRequest",
+  remuda.butler.guard_policy.run({ "guard" }, { kind = "session", session = "s-ssa", stdin = remuda.json.encode({ hook_event_name = "PermissionRequest",
     tool_name = "WebFetch", tool_input = { url = "https://" .. host .. "/" }, cwd = "/p/w" }),
     env = { REMUDA_BUTLER_AGENT_ALIAS = "ss-a", REMUDA_BUTLER_AGENT_KIND = "claude" } })
   env.client:pump()

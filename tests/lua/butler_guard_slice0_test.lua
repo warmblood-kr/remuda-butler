@@ -1,6 +1,6 @@
 -- Guard slice 0: classifier, `butler guard` hook verb, audit log, switch, settings hooks, doctor.
 local function start_butler()
-  T.install_mod("butler", assert(os.getenv("REMUDA_LUA_REPO")))
+  T.install_guard_subject("butler", assert(os.getenv("REMUDA_LUA_REPO")))
   T.eval('remuda._butler_argv = {"sh", "-c", "sleep 60"}; remuda._butler_skip_relay = true; remuda._butler_readiness_timeout = 1')
   T.eval('return remuda.exec("butler")')
   T.wait_until(function()
@@ -15,7 +15,7 @@ local function start_butler()
       remuda.mkdir(d); remuda._butler_guard_dir = d; return d
     end
     remuda._t_hook = function(stdin, env)
-      return remuda._butler_command_run('guard', {'guard'}, { stdin = stdin, env = env or
+      return remuda._butler_command_run('guard', {'guard'}, { kind = 'session', session = 's-ssa', stdin = stdin, env = env or
         { REMUDA_BUTLER_AGENT_ALIAS = 'ss-a', REMUDA_BUTLER_AGENT_KIND = 'claude' } })
     end
     remuda._t_lines = function()
@@ -101,6 +101,20 @@ T.test("switch defaults off, records nothing off, one line on", function()
   ev("return remuda._butler_command_run('guard', {'guard','off'}, {kind='session', session='butler'})")
   T.eval([[remuda._t_hook('{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}')]])
   T.eq(T.eval("return select(2, remuda._t_lines():gsub('\\n', '')) + 1"), "4", "off again records nothing more (the off switch itself is audited)")
+end)
+
+T.test("a missing caller principal resolver refuses the guard hook cleanly", function()
+  start_butler()
+  T.eval("remuda._t_dir('g-no-principal'); remuda._butler_command_run('guard', {'guard','on'}, {kind='session', session='butler'})")
+  local result = T.eval([[
+    local resolver = remuda._butler_caller_principal
+    remuda._butler_caller_principal = nil
+    local ok, why = pcall(remuda._t_hook, '{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"git push"}}')
+    remuda._butler_caller_principal = resolver
+    return tostring(ok) .. '|' .. tostring(why)
+  ]])
+  T.expect(not has(result, "attempt to index") and has(result, "Next: run from a registered Butler session"),
+    "missing resolver should fail closed with the identity refusal: " .. result)
 end)
 
 T.test("hook always allows: malformed, oversized, control chars, secrets, cap", function()
@@ -197,8 +211,9 @@ end)
 T.test("real CLI verb allows with empty output; log is private", function()
   start_butler()
   T.eval("remuda._t_dir('g-cli'); remuda._butler_command_run('guard', {'guard','on'}, {kind='session', session='butler'})")
+  T.eval("remuda._butler_bus.agents['ss-cli'] = {id='U-CLI', alias='ss-cli', kind='claude', session_name='cli'}")
   local script = "printf '%s' '{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git push\"}}'"
-    .. " | REMUDA_BUTLER_AGENT_ALIAS=ss-cli REMUDA_BUTLER_AGENT_KIND=claude '" .. os.getenv("REMUDA_BIN") .. "' -s "
+    .. " | '" .. os.getenv("REMUDA_BIN") .. "' -s "
     .. os.getenv("REMUDA_LUA_CHILD_SERVER") .. " --stdin butler guard; echo rc=$?; sleep 30"
   T.new_session("cli", { "sh", "-c", script })
   local screen = T.wait_for_screen("cli", "rc=", 10)

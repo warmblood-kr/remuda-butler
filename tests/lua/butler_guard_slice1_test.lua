@@ -6,7 +6,7 @@ local function start_butler()
   -- Installed once: a second install makes the daemon reload the mod, which would drop the approval state.
   if started then return end
   started = true
-  T.install_mod("butler", assert(os.getenv("REMUDA_LUA_REPO")))
+  T.install_guard_subject("butler", assert(os.getenv("REMUDA_LUA_REPO")))
   T.eval('remuda._butler_argv = {"sh", "-c", "sleep 60"}; remuda._butler_skip_relay = true; remuda._butler_readiness_timeout = 1')
   T.eval('return remuda.exec("butler")')
   T.wait_until(function()
@@ -52,7 +52,7 @@ local function start_butler()
       local payload = remuda.json.encode({ hook_event_name = over.event or 'PermissionRequest',
         tool_name = over.tool or 'Bash', tool_input = input, cwd = over.cwd or '/p/w', session_id = 's1' })
       local before = #remuda._t_replies
-      local out = remuda._butler_command_run('guard', { 'guard' }, { stdin = payload, env =
+      local out = remuda._butler_command_run('guard', { 'guard' }, { kind = 'session', session = 's-ssa', stdin = payload, env =
         { REMUDA_BUTLER_AGENT_ALIAS = alias or 'ss-a', REMUDA_BUTLER_AGENT_KIND = over.kind or 'claude' } })
       if #remuda._t_replies > before then return #remuda._t_replies end
       return 0
@@ -228,6 +228,80 @@ T.test("post failure, caps and unrouted calls print nothing", function()
   T.expect(true, "", "ok - caps and unrouted calls")
 end)
 
+T.test("guard approval requests and answers refuse before state changes when audit write, flush, or close fails", function()
+  on("a-audit-failure")
+  T.eval("remuda._t_attach()")
+  for _, stage in ipairs({ "write", "flush", "close" }) do
+    T.eval("remuda._t_dir('a-request-audit-" .. stage .. "'); remuda._t_attach()")
+    local request = T.eval(([=[
+      local gp, original, stage, appends = remuda.butler.guard_policy, io.open, %q, 0
+      io.open = function(path, mode)
+        local file, why = original(path, mode)
+        if path ~= gp.log_path() or mode ~= 'a' or not file then return file, why end
+        appends = appends + 1
+        if appends == 1 then return file end
+        return {
+          write = function(_, ...)
+            if stage == 'write' then return nil, 'injected write failure' end
+            return file:write(...)
+          end,
+          flush = function()
+            if stage == 'flush' then return nil, 'injected flush failure' end
+            return file:flush()
+          end,
+          close = function()
+            local ok, err = file:close()
+            if stage == 'close' then return nil, 'injected close failure' end
+            return ok, err
+          end,
+        }
+      end
+      local old_log, messages = remuda.log, {}
+      remuda.log = function(_, message) messages[#messages + 1] = message end
+      local index = remuda._t_perm('git push origin main')
+      remuda.log = old_log
+      io.open = original
+      return tostring(index) .. '|' .. tostring(remuda._t_count()) .. '|'
+        .. tostring(next(remuda._t_state.approvals) == nil) .. '|' .. table.concat(messages, ' ')
+    ]=]):format(stage))
+    T.expect(request:match("^0|0|true|") ~= nil and request:find("Next:", 1, true) ~= nil,
+      stage .. " failure created an approval request or lacked Next: " .. request)
+
+    T.eval("remuda._t_dir('a-answer-audit-" .. stage .. "'); remuda._t_attach()")
+    local reply_index = tonumber(T.eval("remuda._t_last_reply = remuda._t_perm('git push origin main'); return tostring(remuda._t_last_reply)"))
+    T.expect(reply_index and reply_index > 0, "create request before answer fault")
+    local answer = T.eval(([=[
+      local gp, original, stage = remuda.butler.guard_policy, io.open, %q
+      io.open = function(path, mode)
+        local file, why = original(path, mode)
+        if path ~= gp.log_path() or mode ~= 'a' or not file then return file, why end
+        return {
+          write = function(_, ...)
+            if stage == 'write' then return nil, 'injected write failure' end
+            return file:write(...)
+          end,
+          flush = function()
+            if stage == 'flush' then return nil, 'injected flush failure' end
+            return file:flush()
+          end,
+          close = function()
+            local ok, err = file:close()
+            if stage == 'close' then return nil, 'injected close failure' end
+            return ok, err
+          end,
+        }
+      end
+      local ok, result, why = pcall(function() return remuda._t_answer(1, 'approve') end)
+      io.open = original
+      local rec, reply = remuda._t_rec(1), remuda._t_replies[remuda._t_last_reply]
+      return tostring(ok) .. '|' .. tostring(result) .. '|' .. tostring(why) .. '|'
+        .. tostring(rec.status) .. '|' .. tostring(reply.done)
+    ]=]):format(stage))
+    T.expect(answer:find("Next:", 1, true) ~= nil and answer:find("|open|nil$", 1, false) ~= nil,
+      stage .. " failure changed an approval answer or lacked Next: " .. answer)
+  end
+end)
+
 T.test("post escapes line and direction characters; audit and post hide secrets", function()
   on("a-esc")
   T.eval("remuda._t_attach()")
@@ -299,8 +373,9 @@ local RECORDED = '{"session_id":"abc123","transcript_path":"/home/u/.claude/proj
   .. '"tool_input":{"command":"git push origin main","description":"Push","timeout":120000},'
   .. '"tool_use_id":"toolu_01ABC","permission_suggestions":[{"rule":"Bash(git push *)","description":"Allow"}]}'
 local function run_cli(name, payload, play)
-  local script = "out=$(printf '%s' '" .. payload .. "' | REMUDA_BUTLER_AGENT_ALIAS=" .. name
-    .. " REMUDA_BUTLER_AGENT_KIND=claude '" .. os.getenv("REMUDA_BIN") .. "' -s "
+  T.eval(("remuda._butler_bus.agents[%q] = {id=%q, alias=%q, kind='claude', session_name=%q}")
+    :format(name, 'U-' .. name, name, name))
+  local script = "out=$(printf '%s' '" .. payload .. "' | '" .. os.getenv("REMUDA_BIN") .. "' -s "
     .. os.getenv("REMUDA_LUA_CHILD_SERVER") .. " --stdin butler guard 2>/dev/null); rc=$?;"
     .. " if [ \"$out\" = '" .. ALLOW .. "' ]; then r=ALLOW; elif [ \"$out\" = '" .. DENY .. "' ]; then r=DENY;"
     .. " elif [ -z \"$out\" ]; then r=SILENT; else r=OTHER; fi; echo \"RESULT=$r rc=$rc\"; sleep 30"

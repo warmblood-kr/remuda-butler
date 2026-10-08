@@ -30,7 +30,13 @@ function M.wrap(code, directory)
     local native_exec = remuda.exec
     local subjects = { ['butler/guard_policy'] = %q, ['butler/guard_grants'] = %q }
     remuda.exec = function(name, ...)
-      if subjects[name] then return assert(loadfile(subjects[name]))() end
+      if subjects[name] then
+        local result = assert(loadfile(subjects[name]))()
+        if name == 'butler/guard_policy' and remuda._butler_bus and type(remuda._butler_bus.agents) == 'table' then
+          remuda._butler_bus.agents['ss-a'] = { id = 'U-SSA', alias = 'ss-a', kind = 'claude', session_name = 's-ssa' }
+        end
+        return result
+      end
       return native_exec(name, ...)
     end
     local result = table.pack(pcall(function()

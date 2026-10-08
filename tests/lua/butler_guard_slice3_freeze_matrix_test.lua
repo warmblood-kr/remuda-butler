@@ -48,7 +48,7 @@ local function start_butler()
         tool_input = over.input, cwd = over.cwd or '/p/w', session_id = 's1' })
       local before = #remuda._t_replies
       remuda._butler_command_run('guard', { 'guard' }, { kind = 'session',
-        session = remuda._butler_bus.agents.butler.session_name, stdin = payload, env =
+        session = 's-ssa', stdin = payload, env =
         { REMUDA_BUTLER_AGENT_ALIAS = over.alias or 'ss-a', REMUDA_BUTLER_AGENT_KIND = 'claude' } })
       if #remuda._t_replies > before then return #remuda._t_replies end
       return 0

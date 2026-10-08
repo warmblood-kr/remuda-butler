@@ -1005,37 +1005,18 @@ local function switched(principal, text)
   return nil, "audit not written: " .. tostring(ok and why or appended)
 end
 
--- Change a switch with its audit line. Turning one off is audited first; when the line cannot be
--- written it still turns off (fail open: the switch only narrows enforcement, and the owner must
--- never be locked out) but says so loudly and leaves the sticky guard-unaudited marker. Turning one
--- on is audited once it took effect. Returns true and a warning text for an unaudited off.
+-- Audit every switch before changing its persisted state. An audit failure refuses the change.
 local function change(principal, label, on, set)
-  local warning
-  if not on then
-    local ok, why = switched(principal, label .. " off")
-    if not ok then
-      warning = "switched off, NOT audited: " .. tostring(why)
-      io.stderr:write("guard: " .. label .. " " .. warning .. "\n")
-      if unaudited_path() then
-        pcall(remuda.fs.write_atomic, unaudited_path(), tostring(why):gsub("%c", " ") .. "\n", { private = true })
-      end
-    end
+  local audited, audit_why = switched(principal, label .. (on and " on" or " off"))
+  if not audited then
+    return nil, tostring(audit_why) .. ". Next: check audit storage, then retry the guard switch."
   end
   local written, why = set(on)
   if not written then
-    -- The off line is already in the log: say it did not take effect.
-    if not on then
-      switched(principal, label .. " off failed: " .. tostring(why))
-      -- Nothing turned off, so an unaudited-off marker would only mislead.
-      if warning and unaudited_path() then os.remove(unaudited_path()) end
-    end
+    switched(principal, label .. (on and " on" or " off") .. " failed: " .. tostring(why))
     return nil, why
   end
-  if on then
-    local ok, audit_why = switched(principal, label .. " on")
-    if not ok then note("guard switch not audited: " .. tostring(audit_why)) end
-  end
-  return true, warning
+  return true
 end
 
 local STATS_LINE_CAP = 16 * 1024 -- a longer line is tampered or foreign: counted as unreadable, never decoded
@@ -1253,8 +1234,12 @@ end
 -- `remuda butler guard [on|off|status]`. Without an argument it is the hook, always exit 0: a deny (PreToolUse, deny
 -- rules on), an allow (PermissionRequest under a standing grant), a pending owner approval, or an empty answer.
 local function guard_principal(caller, principal)
-  principal = principal or remuda._butler_caller_principal.resolve(caller)
-  if principal.tag == "member" or principal.tag == "operator" then return principal end
+  local resolver = remuda._butler_caller_principal
+  if not principal and type(resolver) == "table" and type(resolver.resolve) == "function" then
+    local ok, resolved = pcall(resolver.resolve, caller)
+    if ok then principal = resolved end
+  end
+  if type(principal) == "table" and (principal.tag == "member" or principal.tag == "operator") then return principal end
   return nil, "Butler cannot identify this caller for guard hooks or switches. Next: run from a registered Butler session or upgrade Remuda core."
 end
 
@@ -1275,8 +1260,10 @@ function M.run(args, caller, principal)
     local reply
     local function audit(record)
       local ok, appended, why = pcall(M.append, record)
-      if not ok then note("guard audit not written: " .. tostring(appended))
-      elseif not appended then note("guard audit not written: " .. tostring(why)) end
+      if ok and appended == true then return true end
+      local failure = tostring(ok and why or appended)
+      note("guard audit not written: " .. failure .. ". Next: check audit storage, then retry the approval request.")
+      return nil, failure
     end
     local ok, err = pcall(function()
       if not M.enabled() then return end
@@ -1302,7 +1289,8 @@ function M.run(args, caller, principal)
           return
         end
       end
-      audit(record)
+      local audit_ok = audit(record)
+      if record.event == "PermissionRequest" and not audit_ok then return end
       local ok_grant, granted = pcall(grant_reply, record, hook_json, holders)
       if ok_grant and granted then reply = granted; return end
       if not ok_grant then note("guard grant failed, asking: " .. tostring(granted)) end

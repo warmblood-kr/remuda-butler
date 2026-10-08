@@ -3,7 +3,7 @@ local started
 local function start_butler()
   if started then return end
   started = true
-  T.install_mod("butler", assert(os.getenv("REMUDA_LUA_REPO")))
+  T.install_guard_subject("butler", assert(os.getenv("REMUDA_LUA_REPO")))
   T.eval('remuda._butler_argv = {"sh", "-c", "sleep 60"}; remuda._butler_skip_relay = true; remuda._butler_readiness_timeout = 1')
   T.eval('return remuda.exec("butler")')
   T.wait_until(function()
@@ -17,7 +17,7 @@ local function start_butler()
       remuda.mkdir(d); remuda._butler_guard_dir = d; return d
     end
     remuda._t_hook = function(stdin, env)
-      return remuda._butler_command_run('guard', {'guard'}, { stdin = stdin, env = env or
+      return remuda._butler_command_run('guard', {'guard'}, { kind = 'session', session = 's-ssa', stdin = stdin, env = env or
         { REMUDA_BUTLER_AGENT_ALIAS = 's2-a', REMUDA_BUTLER_AGENT_KIND = 'claude' } })
     end
     remuda._t_lines = function()
@@ -241,14 +241,15 @@ T.test("real CLI prints exact deny JSON, gates switches, and audits a redacted s
   T.eval("remuda._t_dir('s2-cli'); remuda._butler_command_run('guard', {'guard','deny','on'}, {kind='session', session='butler'})")
   local json = [[{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Butler guard: Agent permission bypass flag"}}]]
   local function run_cli(name, command, expected, tool)
+    T.eval(("remuda._butler_bus.agents[%q] = {id=%q, alias=%q, kind='claude', session_name=%q}")
+      :format(name, 'U-' .. name, name, name))
     tool = tool or "Bash"
     local input = tool == "Write" and "{file_path=" .. luaq(command) .. "}" or "{command=" .. luaq(command) .. "}"
     local payload = T.eval("return remuda.json.encode({hook_event_name='PreToolUse',tool_name=" .. luaq(tool) .. ",cwd=" .. luaq(os.getenv("HOME")) .. ",tool_input=" .. input .. "})")
     local expected_json = tool == "Write"
       and [[{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Butler guard: Protected settings or directory write"}}]]
       or json
-    local script = "out=$(printf '%s' " .. shquote(payload) .. " | REMUDA_BUTLER_AGENT_ALIAS=" .. name
-      .. " REMUDA_BUTLER_AGENT_KIND=claude " .. shquote(os.getenv("REMUDA_BIN")) .. " -s "
+    local script = "out=$(printf '%s' " .. shquote(payload) .. " | " .. shquote(os.getenv("REMUDA_BIN")) .. " -s "
       .. shquote(os.getenv("REMUDA_LUA_CHILD_SERVER")) .. " --stdin butler guard 2>/dev/null); rc=$?; "
       .. "if [ \"$out\" = " .. shquote(expected_json) .. " ]; then r=EXACT; elif [ -z \"$out\" ]; then r=SILENT; else r=OTHER; fi; "
       .. "echo RESULT=$r rc=$rc; sleep 30"

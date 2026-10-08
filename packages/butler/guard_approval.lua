@@ -113,9 +113,13 @@ end
 
 local function audit(event, rec, summary, grant_id)
   local data = type(rec.data) == "table" and rec.data or {}
-  policy.append({ session = data.session or rec.asker, kind = data.agent or "claude", event = event,
+  local ok, written, why = pcall(policy.append, {
+    session = data.session or rec.asker, kind = data.agent or "claude", event = event,
     tool = data.tool, class = data.class, summary = summary or "", id = rec.id, grant_id = grant_id,
-    hash = type(data.hash) == "string" and data.hash:sub(1, 12) or "" })
+    hash = type(data.hash) == "string" and data.hash:sub(1, 12) or "",
+  })
+  if ok and written then return true end
+  return nil, tostring(ok and why or written)
 end
 
 -- Resolve the waiting hook (once). Empty stdout means "no decision".
@@ -188,20 +192,25 @@ end
 -- scope (key, not session); "limited" = too many posts. Denied requests do not count against the limits.
 local function admit(session, key, scope_key)
   local L, t = M._limits, clock()
-  L.scope = L.scope or {}
-  for k, until_ in pairs(L.denies) do if until_ <= t then L.denies[k] = nil end end
-  if L.denies[key] then return "denied" end
+  local denied_until = L.denies[key]
+  if denied_until and denied_until > t then return "denied" end
   local function recent(list, span)
-    for i = #list, 1, -1 do if list[i] <= t - span then table.remove(list, i) end end
-    return #list
+    local count = 0
+    for _, at in ipairs(list or {}) do if at > t - span then count = count + 1 end end
+    return count
   end
-  for s, list in pairs(L.agent) do if recent(list, 60) == 0 then L.agent[s] = nil end end
-  for k, list in pairs(L.scope) do if recent(list, 3600) == 0 then L.scope[k] = nil end end
-  local mine, theirs = L.agent[session] or {}, L.scope[scope_key] or {}
-  L.agent[session], L.scope[scope_key] = mine, theirs
+  local mine, theirs = L.agent[session] or {}, (L.scope or {})[scope_key] or {}
   if recent(mine, 60) >= PER_AGENT_PER_MIN or recent(theirs, 3600) >= PER_SCOPE_PER_HOUR
       or recent(L.hour, 3600) >= GLOBAL_PER_HOUR then return "limited" end
-  mine[#mine + 1], theirs[#theirs + 1], L.hour[#L.hour + 1] = t, t, t
+  return nil, function()
+    L.scope = L.scope or {}
+    for k, until_ in pairs(L.denies) do if until_ <= t then L.denies[k] = nil end end
+    for s, list in pairs(L.agent) do if recent(list, 60) == 0 then L.agent[s] = nil end end
+    for k, list in pairs(L.scope) do if recent(list, 3600) == 0 then L.scope[k] = nil end end
+    mine, theirs = L.agent[session] or {}, L.scope[scope_key] or {}
+    L.agent[session], L.scope[scope_key] = mine, theirs
+    mine[#mine + 1], theirs[#theirs + 1], L.hour[#L.hour + 1] = t, t, t
+  end
 end
 
 local function audit_refusal(record, data, verdict)
@@ -227,6 +236,7 @@ function M.maybe_request(record, hook_json, holders, holder_name)
   local session = record.session ~= "" and record.session or "unknown"
   local data = { tool = policy.redact(record.tool, 120), class = record.class, agent = record.kind,
     cwd = policy.redact(hook_json.cwd, 300), session = policy.redact(session, 120), text = text }
+  local reserve
   if grants_on() then
     -- Frozen: no standing grant is offered (the owner's reaction would make none).
     -- The holder is the calling session by core's caller identity (not the env alias): no identity, no offer.
@@ -241,7 +251,8 @@ function M.maybe_request(record, hook_json, holders, holder_name)
     local scope_key = data.offer and (data.offer.class .. " " .. data.offer.scope)
       or (data.tool .. " " .. data.class .. " " .. data.cwd)
     data.deny_key = data.offer and scope_key or (scope_key .. " " .. data.text)
-    local verdict = admit(data.session, data.deny_key, scope_key)
+    local verdict
+    verdict, reserve = admit(data.session, data.deny_key, scope_key)
     if verdict then
       audit_refusal(record, data, verdict)
       if verdict == "denied" then
@@ -253,6 +264,17 @@ function M.maybe_request(record, hook_json, holders, holder_name)
       return nil
     end
   end
+  local request_ok, request_logged, request_why = pcall(policy.append, { session = data.session, kind = data.agent,
+    event = "approval_requested", tool = data.tool, class = data.class,
+    summary = data.text, hash = "" })
+  if not request_ok or not request_logged then
+    local message = "guard approval refused: audit not written: " .. tostring(request_ok and request_why or request_logged)
+      .. ". Next: check audit storage, then retry the approval request."
+    if type(remuda.log) == "function" then pcall(remuda.log, "warn", message)
+    else pcall(io.stderr.write, io.stderr, message .. "\n") end
+    return nil
+  end
+  if grants_on() and reserve then reserve() end
   M._counter = M._counter + 1
   local request_id, ended
   local reply = remuda.pending({ timeout = REPLY_TIMEOUT_S, on_cancel = function()
@@ -271,7 +293,6 @@ function M.maybe_request(record, hook_json, holders, holder_name)
     request_id = id
     waiting[id] = reply
     local rec = approval.for_id(id)
-    if rec then audit("approval_requested", rec, data.text) end
     if ended and rec then rec.expires_at = 0; approval.sweep() end
   end)
   if not started then pcall(function() reply:resolve(0, "", "") end) end
@@ -395,6 +416,12 @@ end
 
 function M.configure()
   approval.handler("guard_action", {
+    before_answer = function(rec, verdict, who, event_id)
+      local event = verdict == "deny" and "approval_denied" or "approval_approved"
+      local logged, why = audit(event, rec, "owner answer " .. verdict .. by_text(who, event_id))
+      if not logged then return nil, "audit not written: " .. tostring(why) end
+      return true
+    end,
     approve = function(rec, complete)
       local data = type(rec.data) == "table" and rec.data or {}
       local intact = data.id == rec.id and data.nonce == rec.nonce and type(data.hash) == "string"
@@ -434,7 +461,6 @@ function M.configure()
         end
       else
         settle(rec.id, M.ALLOW)
-        audit("approval_approved", rec, "")
         thread_note(rec, "Allowed this one call.")
         complete(true)
       end
@@ -452,7 +478,6 @@ function M.configure()
       local data = type(rec.data) == "table" and rec.data or {}
       if grants_on() and type(data.deny_key) == "string" then M._limits.denies[data.deny_key] = clock() + DENY_MEMORY_S end
       settle(rec.id, M.DENY)
-      audit("approval_denied", rec, "")
       thread_note(rec, "Denied.")
     end,
     expire = function(rec)
