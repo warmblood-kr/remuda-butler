@@ -21,7 +21,7 @@ Close a Butler member or descendant
 
 
 Arguments:
-  <NAME>  Member name
+  <NAME>  Member name (only finished members, at any depth, unless --force)
 
 Options:
   -h, --help   Print help
@@ -46,7 +46,7 @@ Close a Butler member or descendant
 
 
 Arguments:
-  <NAME>  Member name
+  <NAME>  Member name (only finished members, at any depth, unless --force)
 
 Options:
   -h, --help   Print help
@@ -346,7 +346,7 @@ Close a Butler member or descendant
 
 
 Arguments:
-  <NAME>  Member name
+  <NAME>  Member name (only finished members, at any depth, unless --force)
 
 Options:
   -h, --help   Print help
@@ -371,7 +371,7 @@ Close a Butler member or descendant
 
 
 Arguments:
-  <NAME>  Member name
+  <NAME>  Member name (only finished members, at any depth, unless --force)
 
 Options:
   -h, --help   Print help
@@ -396,7 +396,7 @@ Close a Butler member or descendant
 
 
 Arguments:
-  <NAME>  Member name
+  <NAME>  Member name (only finished members, at any depth, unless --force)
 
 Options:
   -h, --help   Print help
@@ -421,7 +421,7 @@ Close a Butler member or descendant
 
 
 Arguments:
-  <NAME>  Member name
+  <NAME>  Member name (only finished members, at any depth, unless --force)
 
 Options:
   -h, --help   Print help
@@ -446,7 +446,7 @@ Close a Butler member or descendant
 
 
 Arguments:
-  <NAME>  Member name
+  <NAME>  Member name (only finished members, at any depth, unless --force)
 
 Options:
   -h, --help   Print help

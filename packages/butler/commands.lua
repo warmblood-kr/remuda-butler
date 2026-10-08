@@ -308,7 +308,7 @@ local CLOSE_CLI_SPEC = {
     close = {
       about = "Close a Butler member or descendant",
       options = { { long = "force", help = "Skip unread-mail and idle checks" } },
-      args = { { name = "NAME", help = "Member name" } },
+      args = { { name = "NAME", help = "Member name (only finished members, at any depth, unless --force)" } },
       next = "remuda butler sessions",
     },
   },
