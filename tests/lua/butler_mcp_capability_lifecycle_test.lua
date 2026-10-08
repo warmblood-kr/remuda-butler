@@ -32,12 +32,12 @@ T.test("a_capability_from_an_ended_member_does_not_resolve_to_an_alias_replaceme
   local replacement = T.eval([[
     local agent = remuda._butler_bus.agents.reused
     return agent.id .. "\n" .. agent.token .. "\n"
-      .. remuda._butler_identity.caller_name({ env = {}, capability = ]] .. string.format("%q", old_token) .. [[ })
+      .. tostring(remuda._butler_identity.caller_name({ env = {}, capability = ]] .. string.format("%q", old_token) .. [[ }))
   ]])
   local new_id, new_token, stale_name = replacement:match("([^\n]+)\n([^\n]+)\n([^\n]+)")
   T.ok(new_id and new_token and new_id ~= old_id and new_token ~= old_token,
     "alias reuse did not create a new identity and capability")
-  T.eq(stale_name, "outside", "the ended member's capability resolved to the replacement")
+  T.eq(stale_name, "nil", "the ended member's capability resolved to the replacement")
 
   local refused = T.eval([[
     local bus = remuda._butler_bus
@@ -56,12 +56,12 @@ T.test("a_capability_from_an_ended_member_does_not_resolve_to_an_alias_replaceme
   local native = T.eval([[
     local cap = ]] .. string.format("%q", new_token) .. [[
     local identity = remuda._butler_identity
-    return table.concat({ identity.caller_name({ kind = "unknown", capability = cap }),
-      identity.caller_name({ kind = "service", capability = cap }),
-      identity.caller_name({ kind = "session", session = "unregistered", capability = cap }),
-      identity.caller_name({ kind = "session", env = { REMUDA_BUTLER_AGENT_ID = "reused" }, capability = cap }) }, ":")
+    return table.concat({ tostring(identity.caller_name({ kind = "unknown", capability = cap })),
+      tostring(identity.caller_name({ kind = "service", capability = cap })),
+      tostring(identity.caller_name({ kind = "session", session = "unregistered", capability = cap })),
+      tostring(identity.caller_name({ kind = "session", env = { REMUDA_BUTLER_AGENT_ID = "reused" }, capability = cap })) }, ":")
   ]])
-  T.eq(native, "outside:outside:outside:outside",
+  T.eq(native, "nil:nil:nil:nil",
     "capabilities and environment ids must not override a native unknown, service, or unregistered caller")
 
   local message_id = T.eval([[
@@ -130,6 +130,10 @@ T.test("unidentified_MCP_callers_cannot_mutate_mail_or_register_approvals", func
         tostring(remuda.butler.approve_text._test_request_count), tostring(remuda._butler_inbox_calls) }, ":")
     ]])
   end
+  -- A live member legally named like the old failure sentinel must not authorize failures.
+  T.eval([[local bus = remuda._butler_bus
+    bus.agents.outside = { id = "OUTSIDE", alias = "outside", session_name = "outside-s", session_start_marker = "M" }
+    bus.identity_ids.OUTSIDE = { id = "OUTSIDE", alias = "outside", state = "running" }]])
   local before = snapshot()
   local function text(reply)
     return reply.result and reply.result.content and reply.result.content[1].text
@@ -144,6 +148,7 @@ T.test("unidentified_MCP_callers_cannot_mutate_mail_or_register_approvals", func
       label .. " accepted an unidentified MCP caller: " .. result)
   end
   T.eq(snapshot(), before, "unidentified MCP mutations must have zero effects")
+  T.eval("local bus = remuda._butler_bus; bus.agents.outside, bus.identity_ids.OUTSIDE = nil, nil")
   T.eval([[
     local feature = remuda.butler.approve_text
     feature.request, feature.target_session_allowed = feature._test_original_request, feature._test_original_allowed

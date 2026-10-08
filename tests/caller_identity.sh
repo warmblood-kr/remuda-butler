@@ -50,6 +50,6 @@ expect "old core without caller kind refuses with a next step" \
 lua "local a = remuda._butler_bus.agents.m1; remuda._butler_bus.tokens['tok-m1'] = { id = a.id, generation = a.session_start_marker }" >/dev/null
 expect "a registered MCP capability names the member" \
   "remuda._butler_identity.caller_name({ capability = 'tok-m1' })" "m1"
-expect "an unregistered capability remains outside" \
-  "remuda._butler_identity.caller_name({ capability = 'nope' })" "outside"
+expect "an unregistered capability is unresolved, never a name" \
+  "tostring(remuda._butler_identity.caller_name({ capability = 'nope' }))" "nil"
 echo PASS

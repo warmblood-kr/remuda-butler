@@ -140,7 +140,7 @@ T.test("mcp_capability_only_callers_keep_the_existing_path", function()
   eval([[local a = remuda._butler_bus.agents.alice
     remuda._butler_bus.tokens["test-capability"] = { id = a.id, generation = a.session_start_marker }]])
   T.eq(eval([[return remuda._butler_identity.caller_agent({capability = "test-capability"})]]), "alice")
-  T.eq(eval([[return remuda._butler_identity.caller_name({capability = "invalid"})]]), "outside")
+  T.eq(eval([[return tostring(remuda._butler_identity.caller_name({capability = "invalid"}))]]), "nil")
   local outcome = eval([[local ok, err = pcall(remuda._butler_identity.caller_agent, {}); return tostring(ok) .. "|" .. tostring(err)]])
   T.ok(outcome:find("false|unknown caller", 1, true), "MCP refusal keeps its existing reason: " .. outcome)
 end)

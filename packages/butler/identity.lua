@@ -186,13 +186,13 @@ local function caller_name(caller)
   -- A native principal, including unknown and service callers, takes
   -- precedence over the older capability-only compatibility path.
   if caller and caller.kind ~= nil then
-    if caller.kind ~= "session" then return "outside" end
+    if caller.kind ~= "session" then return nil end
     local native_session = caller.session
     if native_session ~= nil and native_session ~= "" then
       local ok, alias = pcall(resolve, native_session)
-      return ok and alias or "outside"
+      return ok and alias or nil
     end
-    return "outside"
+    return nil
   end
   local token = caller and caller.capability
   local capability = token and bus.tokens[token]
@@ -201,11 +201,11 @@ local function caller_name(caller)
   if type(capability) == "string" then
     local legacy_agent = bus.agents[capability]
     if not legacy_agent or legacy_agent.token ~= token or not legacy_agent.id
-        or not legacy_agent.session_start_marker then return "outside" end
+        or not legacy_agent.session_start_marker then return nil end
     capability = { id = legacy_agent.id, generation = legacy_agent.session_start_marker }
     bus.tokens[token] = capability
   end
-  if type(capability) ~= "table" then return "outside" end
+  if type(capability) ~= "table" then return nil end
   local identity = bus.identity_ids[capability.id]
   local alias = identity and identity.alias
   local agent = alias and bus.agents[alias]
@@ -213,13 +213,13 @@ local function caller_name(caller)
       and agent.id == capability.id and agent.session_start_marker == capability.generation then
     return alias
   end
-  return "outside"
+  return nil
 end
 -- An MCP caller that acts on mail must be a known agent: an unknown or garbage
 -- capability is refused, never treated as the operator (review of #39).
 local function caller_agent(caller)
   local name = caller_name(caller)
-  if not bus.agents[name] then
+  if not name or not bus.agents[name] then
     error("unknown caller: run from a Butler session (its MCP config carries the capability)", 0)
   end
   return name
@@ -228,7 +228,7 @@ end
 -- caller silently became `butler`'s child and reported to root (#24).
 local function caller_leader(caller)
   local parent = caller_name(caller)
-  if not bus.agents[parent] then
+  if not parent or not bus.agents[parent] then
     error("unknown caller: run from a Butler session, or pass an explicit leader"
       .. " with `remuda butler topic delegate --leader NAME`", 0)
   end
