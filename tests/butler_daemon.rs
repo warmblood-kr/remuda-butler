@@ -2604,7 +2604,7 @@ fn butler_message_bodies_preserve_stdin_and_file_content_and_enforce_limits() {
     let body_lua = lua_raw_string(body);
     let stdin_result = eval(&path, &format!(r#"
       remuda._butler_send = function(_, _, text) remuda._test_body = text; return "captured" end
-      local result = remuda._butler_command_run("send", {{"send", "member", "-"}}, {{env={{}}, stdin={body_lua}}})
+      local result = remuda._butler_command_run("send", {{"send", "member", "-"}}, {{kind='outside', stdin={body_lua}}})
       assert(result == "captured")
       return remuda._test_body
     "#));
@@ -2614,7 +2614,7 @@ fn butler_message_bodies_preserve_stdin_and_file_content_and_enforce_limits() {
     std::fs::write(&file, body).expect("write body file");
     let file_lua = lua_raw_string(&file.to_string_lossy());
     let file_result = eval(&path, &format!(r#"
-      local result = remuda._butler_command_run("send", {{"send", "member", "--file", {file_lua}}}, {{env={{}}}})
+      local result = remuda._butler_command_run("send", {{"send", "member", "--file", {file_lua}}}, {{kind='outside'}})
       assert(result == "captured")
       return remuda._test_body
     "#));
@@ -2622,7 +2622,7 @@ fn butler_message_bodies_preserve_stdin_and_file_content_and_enforce_limits() {
 
     let empty_stdin = eval(&path, r#"
       local ok, err = pcall(function()
-        remuda._butler_command_run("send", {"send", "member", "-"}, {env={}, stdin=""})
+        remuda._butler_command_run("send", {"send", "member", "-"}, {kind='outside', stdin=""})
       end)
       assert(not ok)
       return tostring(err)
@@ -2634,7 +2634,7 @@ fn butler_message_bodies_preserve_stdin_and_file_content_and_enforce_limits() {
         std::fs::write(&file, content).expect("write invalid body file");
         let code = format!(r#"
           local ok, err = pcall(function()
-            remuda._butler_command_run("send", {{"send", "member", "--file", {file_lua}}}, {{env={{}}}})
+            remuda._butler_command_run("send", {{"send", "member", "--file", {file_lua}}}, {{kind='outside'}})
           end)
           assert(not ok)
           return tostring(err)
@@ -9675,16 +9675,23 @@ fn butler_matrix_cli_rejects_invalid_send_dash_and_fails_cleanly_without_pending
         String::from_utf8_lossy(&approvals.stderr));
     assert!(String::from_utf8_lossy(&approvals.stdout).contains("No open approval requests."),
         "operator approvals fell through to generic usage: {}", String::from_utf8_lossy(&approvals.stdout));
-    let agent_approve = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
-        .args(["-s", "s", "butler", "approve", "X"])
-        .env("REMUDA_RUNTIME_DIR", &dir)
-        .env("REMUDA_NO_UPDATE_CHECK", "1")
-        .env("REMUDA_BUTLER_AGENT_ID", "agent1")
-        .output().expect("run agent approve command");
-    assert!(!agent_approve.status.success(), "agent approve must fail");
-    assert!(String::from_utf8_lossy(&agent_approve.stderr).contains(
+    eval(&path, "remuda._butler_bus.agents.agent1 = {id='agent1', alias='agent1', session_name='agent1', children={}}");
+    // Model daemon session attribution, independently of forwarded launch metadata.
+    let member_cli = |args: &str| eval(&path, &format!(
+        "local native_pending, completion = remuda.pending, nil; \
+         remuda.pending = function() return {{resolve=function(_, code, stdout, stderr) \
+           completion={{code=code, stdout=stdout, stderr=stderr}} end}} end; \
+         local ok, out = pcall(remuda._extension_commands.butler, {args}, \
+         {{kind='session', session='agent1', env={{REMUDA_BUTLER_AGENT_ID='butler'}}}}); \
+         remuda.pending = native_pending; \
+         if completion then return tostring(completion.code == 0) .. '|' .. completion.stderr end; \
+         return tostring(ok) .. '|' .. tostring(out)"
+    ));
+    let agent_approve = member_cli("{'approve', 'X'}");
+    assert!(agent_approve.starts_with("false|"), "agent approve must fail: {agent_approve}");
+    assert!(agent_approve.contains(
         "approve is operator-only. Next: wait for the owner's answer by mail; remuda butler inbox"),
-        "unexpected agent approve error: {}", String::from_utf8_lossy(&agent_approve.stderr));
+        "unexpected agent approve error: {agent_approve}");
     let oversized = format!("{}\n", "x".repeat(65_537));
     for (args, stdin, expected) in [
         (&["send", "-"][..], "", "message body must not be empty"),
@@ -9699,32 +9706,20 @@ fn butler_matrix_cli_rejects_invalid_send_dash_and_fails_cleanly_without_pending
             String::from_utf8_lossy(&dash.stderr));
     }
     let no_stdin = eval(&path, r#"
-      local ok, err = pcall(remuda._butler_command_run, "matrix", {"matrix", "send", "-"}, {env={}})
+      local ok, err = pcall(remuda._butler_command_run, "matrix", {"matrix", "send", "-"}, {kind='outside'})
       assert(not ok)
       return tostring(err)
     "#);
     assert!(no_stdin.contains("no message body received on stdin"), "{no_stdin}");
     assert_eq!(eval(&path, "return #remuda.http.calls"), "0", "invalid send - touched Matrix");
 
-    let agent_leave = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
-        .args(["-s", "s", "butler", "matrix", "leave", room])
-        .env("REMUDA_RUNTIME_DIR", &dir)
-        .env("REMUDA_NO_UPDATE_CHECK", "1")
-        .env("REMUDA_BUTLER_AGENT_ID", "agent1")
-        .output().expect("run agent leave command");
-    assert!(!agent_leave.status.success(), "leave must be operator-only");
-    assert!(String::from_utf8_lossy(&agent_leave.stderr).contains("operator-only"),
-        "unexpected agent leave error: {}", String::from_utf8_lossy(&agent_leave.stderr));
+    let agent_leave = member_cli(&format!("{{'matrix', 'leave', {room:?}}}"));
+    assert!(agent_leave.starts_with("false|"), "leave must be operator-only: {agent_leave}");
+    assert!(agent_leave.contains("operator-only"), "unexpected agent leave error: {agent_leave}");
     // An agent join files an owner approval request; with no relay it fails before any HTTP.
-    let agent_join = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
-        .args(["-s", "s", "butler", "matrix", "join", room])
-        .env("REMUDA_RUNTIME_DIR", &dir)
-        .env("REMUDA_NO_UPDATE_CHECK", "1")
-        .env("REMUDA_BUTLER_AGENT_ID", "agent1")
-        .output().expect("run agent join command");
-    assert!(!agent_join.status.success(), "agent join without a relay must fail");
-    assert!(String::from_utf8_lossy(&agent_join.stderr).contains("Next:"),
-        "unexpected agent join error: {}", String::from_utf8_lossy(&agent_join.stderr));
+    let agent_join = member_cli(&format!("{{'matrix', 'join', {room:?}}}"));
+    assert!(agent_join.starts_with("false|"), "agent join without a relay must fail: {agent_join}");
+    assert!(agent_join.contains("Next:"), "unexpected agent join error: {agent_join}");
     assert_eq!(eval(&path, "return #remuda.http.calls"), "0", "agent join or leave reached the network");
 
     eval(&path, "remuda.pending = nil");
@@ -9979,8 +9974,10 @@ fn butler_quota_statusline_keeps_line_one_and_adds_rate_limits() {
     let snapshot = r#"{"model":{"display_name":"Claude Opus 4.6"},"context_window":{"total_input_tokens":12345,"context_window_size":200000,"used_percentage":6},"rate_limits":{"five_hour":{"used_percentage":92,"resets_at":1790838000},"seven_day":{"used_percentage":71,"resets_at":1791072000}}}"#;
     let status_path_lua = lua_raw_string(&status_path.to_string_lossy());
     let snapshot_lua = lua_raw_string(snapshot);
+    // The status helper only writes the calling member's registered telemetry path.
+    eval(&path, &format!("remuda._butler_bus.agents.butler.telemetry = {{status_path={status_path_lua}}}"));
     let line = eval(&path, &format!(
-        "return remuda._dispatch_extension_command('butler', {{'statusline', {status_path_lua}}}, {{stdin = {snapshot_lua}}})"
+        "return remuda._extension_commands.butler({{'statusline', {status_path_lua}}}, {{kind='session',session='butler',stdin={snapshot_lua}}})"
     ));
     assert_eq!(
         line,
@@ -10027,7 +10024,7 @@ fn butler_quota_statusline_keeps_line_one_and_adds_rate_limits() {
     let no_limits = r#"{"model":{"display_name":"Claude Opus 4.6"},"context_window":{"total_input_tokens":12345,"context_window_size":200000,"used_percentage":6}}"#;
     let no_limits_lua = lua_raw_string(no_limits);
     eval(&path, &format!(
-        "return remuda._dispatch_extension_command('butler', {{'statusline', {status_path_lua}}}, {{stdin = {no_limits_lua}}})"
+        "return remuda._extension_commands.butler({{'statusline', {status_path_lua}}}, {{kind='session',session='butler',stdin={no_limits_lua}}})"
     ));
     assert_eq!(
         std::fs::read_to_string(&status_path).expect("read status without limits"),
@@ -10426,19 +10423,14 @@ fn butler_quota_report_denies_registered_member_before_collecting() {
       }
     "#,
     );
-    let member = std::process::Command::new(env!("CARGO_BIN_EXE_remuda"))
-        .args(["-s", "s", "butler", "quota", "--report"])
-        .env("REMUDA_RUNTIME_DIR", &dir)
-        .env("REMUDA_NO_UPDATE_CHECK", "1")
-        .env("REMUDA_BUTLER_AGENT_ID", "quota-member-id")
-        .current_dir(&dir)
-        .output()
-        .expect("run member quota --report");
-    assert_eq!(member.status.code(), Some(1));
-    assert_eq!(
-        String::from_utf8_lossy(&member.stderr).trim(),
-        "only the Butler itself or a person at the terminal can send the report to Matrix.\nNext: ask the Butler to run `remuda butler quota --report`, or run `remuda butler quota` to read it here."
-    );
+    let member = eval(&path, r#"
+      local ok, out = pcall(remuda._butler_command_run, 'quota', {'quota', '--report'},
+        {kind='session', session='quota-member', env={REMUDA_BUTLER_AGENT_ID='butler'}})
+      return tostring(ok) .. '|' .. tostring(out)
+    "#);
+    assert!(member.starts_with(
+        "false|only the Butler itself or a person at the terminal can send the report to Matrix.\nNext: ask the Butler to run `remuda butler quota --report`, or run `remuda butler quota` to read it here."
+    ), "unexpected member refusal: {member}");
     assert_eq!(
         eval(&path, "return #remuda.http.calls"),
         "0",

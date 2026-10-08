@@ -42,7 +42,7 @@ echo "ok - a contributed verb dispatches and is listed in help by its order"
 
 lua 'remuda._butler_agent_builders.fake = function() return {"sleep", "60"} end; remuda._butler_launch("fake", "w1")' >/dev/null
 AGENTS=$(cat "$XDG_DATA_HOME/remuda/butler/sessions/w1/AGENTS.md")
-[[ $AGENTS == *"On such a core,"*"EXTRA for butler"*"You may create a Remuda-managed child team"* ]] ||
+[[ $AGENTS == *"Caller attribution is advisory"*"EXTRA for butler"*"You may create a Remuda-managed child team"* ]] ||
   fail "the contributed guidance section is missing or out of order: $AGENTS"
 echo "ok - a contributed guidance section lands in a new member's AGENTS.md by its order"
 echo PASS

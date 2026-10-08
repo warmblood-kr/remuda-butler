@@ -6,7 +6,7 @@ local function start_butler()
   -- Installed once: a second install makes the daemon reload the mod, which would drop the approval state.
   if started then return end
   started = true
-  T.install_mod("butler", assert(os.getenv("REMUDA_LUA_REPO")))
+  T.install_guard_subject("butler", assert(os.getenv("REMUDA_LUA_REPO")))
   T.eval('remuda._butler_argv = {"sh", "-c", "sleep 60"}; remuda._butler_skip_relay = true; remuda._butler_readiness_timeout = 1')
   T.eval('return remuda.exec("butler")')
   T.wait_until(function()
@@ -48,12 +48,15 @@ local function start_butler()
     -- One PermissionRequest through the verb; the index of its deferred reply (0 when none was made).
     remuda._t_perm = function(command, alias, over)
       over = over or {}
+      alias = alias or 'ss-a'
+      local session = 's-' .. alias
+      remuda._butler_bus.agents[alias] = { id = 'U-' .. alias, alias = alias,
+        kind = over.kind or 'claude', session_name = session }
       local input = over.input or { command = command }
       local payload = remuda.json.encode({ hook_event_name = over.event or 'PermissionRequest',
         tool_name = over.tool or 'Bash', tool_input = input, cwd = over.cwd or '/p/w', session_id = 's1' })
       local before = #remuda._t_replies
-      local out = remuda._butler_command_run('guard', { 'guard' }, { stdin = payload, env =
-        { REMUDA_BUTLER_AGENT_ALIAS = alias or 'ss-a', REMUDA_BUTLER_AGENT_KIND = over.kind or 'claude' } })
+      local out = remuda._butler_command_run('guard', { 'guard' }, { kind = 'session', session = session, stdin = payload })
       if #remuda._t_replies > before then return #remuda._t_replies end
       return 0
     end
@@ -82,8 +85,8 @@ local DENY = '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decisi
 local function reply_out(n) return T.eval(("local r = remuda._t_replies[%d]; return r.done and ('done:' .. r.out) or 'waiting'"):format(n)) end
 local function on(name)
   start_butler()
-  T.eval(("remuda._t_dir('%s'); remuda._butler_command_run('guard', {'guard','on'}, {}); "
-    .. "remuda._butler_command_run('guard', {'guard','approvals','on'}, {})"):format(name))
+  T.eval(("remuda._t_dir('%s'); remuda._butler_command_run('guard', {'guard','on'}, {kind='session', session='butler'}); "
+    .. "remuda._butler_command_run('guard', {'guard','approvals','on'}, {kind='session', session='butler'})"):format(name))
 end
 local function perm(command, alias, over)
   return tonumber(T.eval(("return remuda._t_perm(%q, %q, %s)"):format(command, alias or "ss-a", over or "nil")))
@@ -112,13 +115,13 @@ T.test("approvals switch defaults off, is independent, shows in doctor", functio
   T.expect(has(status, "guard approvals: off"), "default not off: " .. status, "ok - default off")
   local d = ev("local d = remuda._butler_doctor; return table.concat(d.render(d.probe()), '\\n')")
   T.expect(has(d, "Guard approvals: off"), "doctor off: " .. d)
-  local set = ev("return remuda._butler_command_run('guard', {'guard','approvals','on'}, {})")
+  local set = ev("return remuda._butler_command_run('guard', {'guard','approvals','on'}, {kind='session', session='butler'})")
   T.expect(has(set, "approvals are now on") and has(set, "Needs `guard on`"), "on text: " .. set)
   d = ev("local d = remuda._butler_doctor; return table.concat(d.render(d.probe()), '\\n')")
   T.expect(has(d, "Guard approvals: on"), "doctor on: " .. d, "ok - doctor reports approvals on")
   T.expect(has(ev("return remuda._butler_command_run('guard', {'guard','status'}, {})"), "guard: off"),
     "guard switch must stay off")
-  T.eval("remuda._butler_command_run('guard', {'guard','approvals','off'}, {})")
+  T.eval("remuda._butler_command_run('guard', {'guard','approvals','off'}, {kind='session', session='butler'})")
   T.expect(has(ev("return remuda._butler_command_run('guard', {'guard','approvals','status'}, {})"), "approvals: off"), "off again")
   T.expect(ev("return remuda._butler_command_run('guard', {'guard','approvals','bogus'}, {})"):find("^err:") ~= nil, "bad approvals verb accepted")
   T.expect(has(ev("return remuda.butler.guard_policy.classify('Bash', {command='remuda butler guard approvals off'}, {})"), "weaken"),
@@ -129,10 +132,10 @@ T.test("nothing happens unless both switches are on", function()
   start_butler()
   T.eval("remuda._t_dir('a-off'); remuda._t_attach()")
   T.eq(perm("git push origin main"), 0, "both off: no reply")
-  T.eval("remuda._butler_command_run('guard', {'guard','on'}, {})")
+  T.eval("remuda._butler_command_run('guard', {'guard','on'}, {kind='session', session='butler'})")
   T.eq(perm("git push origin main"), 0, "approvals off: no reply")
   T.eq(T.eval("return remuda._t_count()"), "0", "approvals off posts nothing")
-  T.eval("remuda._butler_command_run('guard', {'guard','off'}, {}); remuda._butler_command_run('guard', {'guard','approvals','on'}, {})")
+  T.eval("remuda._butler_command_run('guard', {'guard','off'}, {kind='session', session='butler'}); remuda._butler_command_run('guard', {'guard','approvals','on'}, {kind='session', session='butler'})")
   T.eq(perm("git push origin main"), 0, "guard off: no reply")
   T.expect(true, "", "ok - both switches are needed")
 end)
@@ -228,6 +231,84 @@ T.test("post failure, caps and unrouted calls print nothing", function()
   T.expect(true, "", "ok - caps and unrouted calls")
 end)
 
+T.test("guard approval requests and answers refuse before state changes when audit write, flush, or close fails", function()
+  on("a-audit-failure")
+  T.eval("remuda._t_attach()")
+  for _, stage in ipairs({ "write", "flush", "close" }) do
+    T.eval("remuda._t_dir('a-request-audit-" .. stage .. "'); remuda._t_attach(); "
+      .. "remuda._butler_command_run('guard', {'guard','on'}, {kind='session', session='butler'}); "
+      .. "remuda._butler_command_run('guard', {'guard','approvals','on'}, {kind='session', session='butler'})")
+    local request = T.eval(([=[
+      local gp, original, stage, appends = remuda.butler.guard_policy, io.open, %q, 0
+      io.open = function(path, mode)
+        local file, why = original(path, mode)
+        if path ~= gp.log_path() or mode ~= 'a' or not file then return file, why end
+        appends = appends + 1
+        if appends == 1 then return file end
+        return {
+          write = function(_, ...)
+            if stage == 'write' then return nil, 'injected write failure' end
+            return file:write(...)
+          end,
+          flush = function()
+            if stage == 'flush' then return nil, 'injected flush failure' end
+            return file:flush()
+          end,
+          close = function()
+            local ok, err = file:close()
+            if stage == 'close' then return nil, 'injected close failure' end
+            return ok, err
+          end,
+        }
+      end
+      local old_log, messages = remuda.log, {}
+      remuda.log = function(_, message) messages[#messages + 1] = message end
+      local index = remuda._t_perm('git push origin main')
+      remuda.log = old_log
+      io.open = original
+      return tostring(index) .. '|' .. tostring(remuda._t_count()) .. '|'
+        .. tostring(next(remuda._t_state.approvals) == nil) .. '|' .. table.concat(messages, ' ')
+    ]=]):format(stage))
+    T.expect(request:match("^0|0|true|") ~= nil and request:find("Next:", 1, true) ~= nil,
+      stage .. " failure created an approval request or lacked Next: " .. request)
+
+    T.eval("remuda._t_dir('a-answer-audit-" .. stage .. "'); remuda._t_attach(); "
+      .. "remuda._butler_command_run('guard', {'guard','on'}, {kind='session', session='butler'}); "
+      .. "remuda._butler_command_run('guard', {'guard','approvals','on'}, {kind='session', session='butler'})")
+    local reply_index = tonumber(T.eval("remuda._t_last_reply = remuda._t_perm('git push origin main'); return tostring(remuda._t_last_reply)"))
+    T.expect(reply_index and reply_index > 0, "create request before answer fault")
+    local answer = T.eval(([=[
+      local gp, original, stage = remuda.butler.guard_policy, io.open, %q
+      io.open = function(path, mode)
+        local file, why = original(path, mode)
+        if path ~= gp.log_path() or mode ~= 'a' or not file then return file, why end
+        return {
+          write = function(_, ...)
+            if stage == 'write' then return nil, 'injected write failure' end
+            return file:write(...)
+          end,
+          flush = function()
+            if stage == 'flush' then return nil, 'injected flush failure' end
+            return file:flush()
+          end,
+          close = function()
+            local ok, err = file:close()
+            if stage == 'close' then return nil, 'injected close failure' end
+            return ok, err
+          end,
+        }
+      end
+      local ok, result, why = pcall(function() return remuda._t_answer(1, 'approve') end)
+      io.open = original
+      local rec, reply = remuda._t_rec(1), remuda._t_replies[remuda._t_last_reply]
+      return tostring(ok) .. '|' .. tostring(result) .. '|' .. tostring(why) .. '|'
+        .. tostring(rec.status) .. '|' .. tostring(reply.done)
+    ]=]):format(stage))
+    T.expect(answer:find("Next:", 1, true) ~= nil and answer:find("|open|nil$", 1, false) ~= nil,
+      stage .. " failure changed an approval answer or lacked Next: " .. answer)
+  end
+end)
+
 T.test("post escapes line and direction characters; audit and post hide secrets", function()
   on("a-esc")
   T.eval("remuda._t_attach()")
@@ -275,14 +356,14 @@ end)
 
 T.test("settings: PermissionRequest keeps stdout and a long timeout only with approvals on", function()
   start_butler()
-  T.eval("remuda._t_dir('a-set'); remuda._butler_command_run('guard', {'guard','on'}, {})")
+  T.eval("remuda._t_dir('a-set'); remuda._butler_command_run('guard', {'guard','on'}, {kind='session', session='butler'})")
   local function settings(name)
     return T.eval(("local p = remuda._butler_agent_support.status_settings(os.getenv('XDG_DATA_HOME') .. '/%s.status'); "
       .. "local f = io.open(p, 'r'); local t = f:read('*a'); f:close(); remuda.json.decode(t); return t"):format(name))
   end
   local slice0 = settings("s0")
   T.expect(not has(slice0, '"timeout"'), "timeout present with approvals off: " .. slice0)
-  T.eval("remuda._butler_command_run('guard', {'guard','approvals','on'}, {})")
+  T.eval("remuda._butler_command_run('guard', {'guard','approvals','on'}, {kind='session', session='butler'})")
   local with = settings("s1")
   local perm_entry = with:match('"PermissionRequest":(%b[])')
   local pre_entry = with:match('"PreToolUse":(%b[])')
@@ -299,8 +380,9 @@ local RECORDED = '{"session_id":"abc123","transcript_path":"/home/u/.claude/proj
   .. '"tool_input":{"command":"git push origin main","description":"Push","timeout":120000},'
   .. '"tool_use_id":"toolu_01ABC","permission_suggestions":[{"rule":"Bash(git push *)","description":"Allow"}]}'
 local function run_cli(name, payload, play)
-  local script = "out=$(printf '%s' '" .. payload .. "' | REMUDA_BUTLER_AGENT_ALIAS=" .. name
-    .. " REMUDA_BUTLER_AGENT_KIND=claude '" .. os.getenv("REMUDA_BIN") .. "' -s "
+  T.eval(("remuda._butler_bus.agents[%q] = {id=%q, alias=%q, kind='claude', session_name=%q}")
+    :format(name, 'U-' .. name, name, name))
+  local script = "out=$(printf '%s' '" .. payload .. "' | '" .. os.getenv("REMUDA_BIN") .. "' -s "
     .. os.getenv("REMUDA_LUA_CHILD_SERVER") .. " --stdin butler guard 2>/dev/null); rc=$?;"
     .. " if [ \"$out\" = '" .. ALLOW .. "' ]; then r=ALLOW; elif [ \"$out\" = '" .. DENY .. "' ]; then r=DENY;"
     .. " elif [ -z \"$out\" ]; then r=SILENT; else r=OTHER; fi; echo \"RESULT=$r rc=$rc\"; sleep 30"
@@ -330,7 +412,7 @@ T.test("real CLI process: allow, deny and silence", function()
     T.eval("remuda._t_rec(3).expires_at = 0; remuda.butler.approval.sweep()")
   end)
   T.expect(has(expired, "RESULT=SILENT rc=0"), "expiry: " .. expired, "ok - real CLI is silent on expiry")
-  T.eval("remuda._butler_command_run('guard', {'guard','approvals','off'}, {})")
+  T.eval("remuda._butler_command_run('guard', {'guard','approvals','off'}, {kind='session', session='butler'})")
   local off = run_cli("g-off", RECORDED)
   T.expect(has(off, "RESULT=SILENT rc=0") and T.eval("return remuda._t_count()"):match("3"), "approvals off: " .. off,
     "ok - real CLI is silent and posts nothing with approvals off")

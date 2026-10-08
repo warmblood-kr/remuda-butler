@@ -27,9 +27,10 @@ local function start_butler()
     remuda.butler.matrix.cli = function(args)
       return remuda._pr_a_record("upload", table.concat(args, " "))
     end
-    remuda._pr_a_caller = { env = { REMUDA_BUTLER_AGENT_ID = "agent-test" } }
-    remuda._pr_a_operator = { env = {} }
-    remuda._butler_bus.agents["agent-test"] = { id = "agent-test", alias = "agent-test", children = {}, kind = "codex" }
+    remuda._pr_a_caller = { kind = "session", session = "agent-test" }
+    remuda._pr_a_operator = { kind = "outside" }
+    remuda._butler_bus.agents["agent-test"] = { id = "agent-test", alias = "agent-test",
+      session_name = "agent-test", children = {}, kind = "codex" }
     remuda._pr_a_path = path
   ]=])
 end

@@ -23,7 +23,7 @@ local function start_butler()
       for l in f:lines() do out[#out + 1] = l end
       f:close(); return table.concat(out, '\n')
     end
-    remuda._t_guard = function(args) return remuda._butler_command_run('guard', args, {}) end
+    remuda._t_guard = function(args) return remuda._butler_command_run('guard', args, {kind='session', session='butler'}) end
     -- A relay stand-in: every approval post is counted, none is answered.
     remuda._t_posts = 0
     remuda.pending = function(opts)
@@ -37,13 +37,13 @@ local function start_butler()
     remuda._t_call = function(over)
       local payload = remuda.json.encode({ hook_event_name = over.event or 'PermissionRequest', tool_name = over.tool or 'WebFetch',
         tool_input = over.input or { url = 'https://example.com/x' }, cwd = over.cwd or '/tmp', grant_id = over.grant_id })
-      local r = remuda._butler_command_run('guard', { 'guard' }, { stdin = payload, env =
-        { REMUDA_BUTLER_AGENT_ALIAS = 'ss-a', REMUDA_BUTLER_AGENT_KIND = over.kind or 'claude' } })
+      local r = remuda._butler_command_run('guard', { 'guard' }, { kind = 'session', session = 's-ssa', stdin = payload })
       if type(r) == 'table' then return 'pending' end
       return tostring(r)
     end
     -- The calling session by core's caller identity: a grant held by U-SSA covers it (as in guard_slice3_enforce_allow).
-    remuda._butler_bus.agents['t-ssa'] = { id = 'U-SSA', parent = 'butler', alias = 't-ssa', session_name = 's-ssa', children = {} }
+    remuda._butler_bus.agents['t-ssa'] = { id = 'U-SSA', parent = 'butler', alias = 't-ssa', kind = 'claude', session_name = 's-ssa', children = {} }
+    remuda._butler_bus.agents['ss-a'] = nil -- keep this session uniquely registered
     remuda.caller = function() return { kind = 'session', session = 's-ssa' } end
     return 'ok'
   ]])

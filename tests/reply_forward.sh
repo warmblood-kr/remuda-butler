@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# reply/forward through the real CLI, as members (caller env), on a private -s.
+# reply/forward through the real CLI handler, with daemon session caller tables, on a private -s.
 set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
@@ -21,7 +21,16 @@ trap cleanup EXIT INT TERM
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 lua() { "$REMUDA_BIN" -s "$SERVER" -e "$1"; }
-as() { local id=$1; shift; REMUDA_BUTLER_AGENT_ID=$id "$REMUDA_BIN" -s "$SERVER" butler "$@"; }
+lua_quote() { local value=$1; value=${value//\\/\\\\}; value=${value//\"/\\\"}; printf '"%s"' "$value"; }
+as() {
+  local id=$1; shift
+  local session verb words quoted=()
+  session=$(lua "local id=$(lua_quote "$id"); for _, a in pairs(remuda._butler_bus.agents) do if a.id == id then return a.session_name end end; return 'unregistered'")
+  verb=$1; shift
+  for word in "$verb" "$@"; do quoted+=("$(lua_quote "$word")"); done
+  words=$(IFS=,; printf '%s' "${quoted[*]}")
+  lua "return remuda._butler_command_run($(lua_quote "$verb"), {$words}, {kind='session',session=$(lua_quote "$session")})"
+}
 
 "$REMUDA_BIN" -s "$SERVER" daemon >"$SCRATCH/daemon.log" 2>&1 &
 for _ in $(seq 50); do
@@ -105,7 +114,7 @@ OUT=$(mcp "$TOK_M2" "$(call butler_forward "$(printf '{"message_id":"%s","to":"m
 echo "ok - MCP reply/forward need a known caller; a real member's capability works"
 
 if as 01ZZZZZZZZZZZZZZZZZZZZZZZZ reply "$ID" stale >"$SCRATCH/stale.out" 2>&1; then fail "a stale agent id replied"; fi
-grep -Ei "no live Butler agent|unknown caller" "$SCRATCH/stale.out" >/dev/null || fail "stale id not named: $(cat "$SCRATCH/stale.out")"
+grep -F "Next:" "$SCRATCH/stale.out" >/dev/null || fail "stale id was not refused with a next step: $(cat "$SCRATCH/stale.out")"
 "$REMUDA_BIN" -s "$SERVER" butler reply "$ID" "operator note" | grep -F butler >/dev/null || fail "plain operator reply failed"
 ID3=$(as "$ROOT" send m2 "only m2" | sed -E 's/^queued ([^ ]+).*/\1/')
 if as "$M1" forward "$ID3" butler >"$SCRATCH/theft.out" 2>&1; then fail "m1 forwarded mail it never received"; fi

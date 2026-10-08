@@ -30,6 +30,8 @@ if approval_file then approval_file:close(); dofile("packages/butler/approval.lu
 dofile("packages/butler/typed_lines.lua")
 dofile("packages/butler/approve_text.lua")
 dofile("packages/butler/status_command.lua")
+remuda._butler_caller_principal_config = { bus = { agents = { ["ss-a"] = { id = "U-SSA", alias = "ss-a", kind = "claude", session_name = "s-ssa" } } } }
+dofile("packages/butler/caller_principal.lua")
 dofile("packages/butler/guard_policy.lua")
 dofile("packages/butler/guard_grants.lua")
 dofile("packages/butler/guard_approval.lua")
@@ -3448,8 +3450,7 @@ end
 local rx_tests
 do
 -- Exercise the same permission helper and registered session lookup used by
--- main.lua. The caller env represents the agent launch; the checker itself
--- receives core caller identity, never an environment-variable override.
+-- main.lua. The checker receives only core caller identity.
 remuda._test_with_agent_file_caller = function(cwd, run)
   local saved_caller, saved_check, saved_bus = remuda.caller, remuda._butler_file_for_caller, remuda._butler_bus
   local permissions = dofile("packages/butler/permissions.lua")
@@ -3469,9 +3470,7 @@ remuda._test_with_agent_file_caller = function(cwd, run)
   end
   remuda._butler_bus = bus
   remuda.caller = function()
-    return { kind = "session", session = "session-member", env = {
-      REMUDA_BUTLER_AGENT_ID = member.id, REMUDA_BUTLER_SESSION_NAME = member.session_name,
-    } }
+    return { kind = "session", session = "session-member" }
   end
   remuda._butler_file_for_caller = function(path, flag, pipe)
     return permissions.file_for_caller(path, remuda.caller(), cwd_of, realpath, flag, pipe, "posix")
@@ -6209,7 +6208,8 @@ end)()
       remuda.butler.approve_text, remuda.butler.schedule_cli, remuda._butler_command_run }
     remuda._butler_commands_config = { current_agent = function() return nil end, OPERATOR = "operator",
       contributions = function() return {} end, registry_list = function() return {} end,
-      statusline = function() return "" end, resolve = function(name) return name end,
+      statusline = function() return "" end, resolve_principal = function() return { tag = "unidentified" } end,
+      resolve = function(name) return name end,
       mail = remuda._butler_mail }
     remuda._butler_contribute, remuda.extension_command = function() end, function() end
     remuda._butler_reply_target = function(_, id)
@@ -7962,7 +7962,7 @@ local function with_guard(env, run)
   -- Setup runs inside the pcall too: a failing mkdir/gp.set still restores below.
   local ok, err = pcall(function()
     -- A grant offer needs the calling session identity (holders: enforce_holder).
-    remuda._butler_bus = { agents = { ["t-ssa"] = { id = "U-SSA", parent = "butler", session_name = "s-ssa" },
+    remuda._butler_bus = { agents = { ["t-ssa"] = { id = "U-SSA", parent = "butler", alias = "t-ssa", kind = "claude", session_name = "s-ssa" },
       butler = { id = "U-BUTLER", session_name = "butler" } } }
     remuda.caller = function() return { kind = "session", session = "s-ssa" } end
     remuda._butler_guard_dir = env.dir .. "/guard"
@@ -7986,9 +7986,8 @@ remuda._t359.with_guard = with_guard
 local function guard_request(env, replies, command, alias, request_room)
   request_room = request_room or HOME
   local before = #remuda._t359.room_posts(env, request_room, "Butler approval")
-  remuda.butler.guard_policy.run({ "guard" }, { stdin = remuda.json.encode({ hook_event_name = "PermissionRequest",
-    tool_name = "Bash", tool_input = { command = command or "git push origin main" }, cwd = "/p/w" }),
-    env = { REMUDA_BUTLER_AGENT_ALIAS = alias or "ss-a", REMUDA_BUTLER_AGENT_KIND = "claude" } })
+  remuda.butler.guard_policy.run({ "guard" }, { kind = "session", session = "s-ssa", stdin = remuda.json.encode({ hook_event_name = "PermissionRequest",
+    tool_name = "Bash", tool_input = { command = command or "git push origin main" }, cwd = "/p/w" }) })
   env.client:pump()
   local posts = remuda._t359.room_posts(env, request_room, "Butler approval")
   assert(#posts == before + 1, "one request must make exactly one approval-room post")
@@ -8159,9 +8158,8 @@ end
 local CYCLE = "\240\159\148\132"
 local function guard_fetch(env, replies, host)
   local before = #remuda._t359.room_posts(env, HOME, "Butler approval")
-  remuda.butler.guard_policy.run({ "guard" }, { stdin = remuda.json.encode({ hook_event_name = "PermissionRequest",
-    tool_name = "WebFetch", tool_input = { url = "https://" .. host .. "/" }, cwd = "/p/w" }),
-    env = { REMUDA_BUTLER_AGENT_ALIAS = "ss-a", REMUDA_BUTLER_AGENT_KIND = "claude" } })
+  remuda.butler.guard_policy.run({ "guard" }, { kind = "session", session = "s-ssa", stdin = remuda.json.encode({ hook_event_name = "PermissionRequest",
+    tool_name = "WebFetch", tool_input = { url = "https://" .. host .. "/" }, cwd = "/p/w" }) })
   env.client:pump()
   local posts = remuda._t359.room_posts(env, HOME, "Butler approval")
   assert(#posts == before + 1, "one request must make exactly one approval-room post")
