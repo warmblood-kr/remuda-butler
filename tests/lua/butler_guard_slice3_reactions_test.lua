@@ -48,8 +48,8 @@ local function start_butler()
       local payload = remuda.json.encode({ hook_event_name = 'PermissionRequest', tool_name = over.tool or 'WebFetch',
         tool_input = over.input, cwd = over.cwd or '/p/w', session_id = 's1' })
       local before = #remuda._t_replies
-      remuda._butler_command_run('guard', { 'guard' }, { stdin = payload, env =
-        { REMUDA_BUTLER_AGENT_ALIAS = over.alias or 'ss-a', REMUDA_BUTLER_AGENT_KIND = 'claude' } })
+      remuda._butler_command_run('guard', { 'guard' }, { kind = 'session',
+        session = 's-ssa', stdin = payload })
       if #remuda._t_replies > before then return #remuda._t_replies end
       return 0
     end
@@ -65,7 +65,8 @@ local function start_butler()
     end
     remuda._t_grants = function() return #remuda.butler.guard_grants.active() end
     -- The calling session by core's caller identity (a grant offer needs one; holders: enforce_holder).
-    remuda._butler_bus.agents['t-ssa'] = { id = 'U-SSA', parent = 'butler', alias = 't-ssa', session_name = 's-ssa', children = {} }
+    remuda._butler_bus.agents['t-ssa'] = { id = 'U-SSA', parent = 'butler', alias = 't-ssa', kind = 'claude', session_name = 's-ssa', children = {} }
+    remuda._butler_bus.agents['ss-a'] = nil -- keep this session uniquely registered
     remuda.caller = function() return { kind = 'session', session = 's-ssa' } end
     return 'ok'
   ]])
@@ -75,7 +76,7 @@ local ALLOW = '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decis
 local DENY = '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":'
   .. '{"behavior":"deny","message":"Denied by the owner via Butler"}}}'
 local function reply_out(n) return T.eval(("local r = remuda._t_replies[%d]; return r.done and ('done:' .. r.out) or 'waiting'"):format(n)) end
-local function guard(...) return T.eval(("return remuda._butler_command_run('guard', {'guard', %s}, {})"):format(
+local function guard(...) return T.eval(("return remuda._butler_command_run('guard', {'guard', %s}, {kind='session', session='butler'})"):format(
   table.concat((function(t) for i, v in ipairs(t) do t[i] = string.format("%q", v) end return t end)({ ... }), ", "))) end
 -- Guard and approvals on, a fresh data dir and a fresh relay stand-in; grants on unless told otherwise.
 local function on(name, grants)

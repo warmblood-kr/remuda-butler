@@ -36,10 +36,7 @@ for _ in $(seq 50); do
   sleep 0.1
 done
 lua 'remuda._butler_agent_builders.fake = function() return {"sleep", "60"} end; remuda._butler_launch("fake", "member")' >/dev/null
-MEMBER_ID=$(lua 'return remuda._butler_bus.agents.member.id')
-
-REMUDA_BUTLER_AGENT_ID=$MEMBER_ID \
-  "$REMUDA_BIN" -s "$SERVER" butler topic delegate child --agent fake "delegated task" >/dev/null ||
+lua "return remuda._butler_command_run('topic', {'topic','delegate','child','--agent','fake','delegated task'}, {kind='session',session='member'})" >/dev/null ||
   fail "member delegation without --leader rejected its caller ULID"
 
 PARENT=$(lua 'return remuda._butler_bus.agents.child and remuda._butler_bus.agents.child.parent or "missing"')

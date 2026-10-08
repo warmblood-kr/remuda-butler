@@ -7,6 +7,7 @@ local OPERATOR = assert(config.OPERATOR)
 local contributions = assert(config.contributions)
 local registry_list = assert(config.registry_list)
 local statusline = assert(config.statusline)
+local resolve_principal = assert(config.resolve_principal)
 local resolve = assert(config.resolve)
 local mail = assert(config.mail)
 local typed_lines_cli = assert(remuda.butler and remuda.butler.typed_lines_cli,
@@ -18,11 +19,13 @@ local schedule_cli = assert(remuda.butler and remuda.butler.schedule_cli,
 local USAGE_NOTES = [[
 Agent sessions receive REMUDA_BUTLER_AGENT_ID and REMUDA_BUTLER_LEADER_ID.
 In an agent session, use `inbox`, `send <to> "..."`, and `send-to-leader ...`;
-the identity comes from the caller's environment. For a long message, use
+the identity comes from the daemon's registered caller session. For a long message, use
 `cat <<'EOF' | remuda butler send MEMBER -` or `--file "$PWD/path"`; `reply` accepts
-the same forms. Bodies are limited to 64 KiB. Without a forwarded Butler
-identity (a plain shell, or a core that does not forward the caller's env),
-`send` is from "operator" and `inbox` needs a name (`inbox <name>`).
+the same forms. Bodies are limited to 64 KiB. An outside caller uses the audited
+transitional operator policy: `send` is from "operator" and `inbox` needs a name.
+Unknown callers and older cores without caller fields refuse member actions;
+run from a registered Butler session or upgrade core. Environment variables never
+select CLI identity. Caller attribution is advisory, not an isolation boundary.
 `reply` answers a message's original sender, even when it was forwarded to you;
 `forward` re-delivers a message you received, keeping its sender, with a note.
 `reply <message-id> --attach PATH` posts a file into that Matrix message's thread.
@@ -224,7 +227,7 @@ local function close_member(name, leader, force, leaderless_ok)
   -- Members and their descendants only (remuda#606: a leader-of-leader closes a
   -- finished grandchild); the root (or a person) may also close leader-less rows
   -- (no parent, or a parent that is gone and not relaunching), from the CLI only:
-  -- an MCP caller's identity comes from its environment. The root row itself is
+  -- an MCP caller uses the existing capability path. The root row itself is
   -- never closable.
   local relaunching = remuda._butler_relaunching or {}
   local function gone(parent)
@@ -286,27 +289,9 @@ local function close_member(name, leader, force, leaderless_ok)
 end
 remuda._butler_close_member = close_member
 
-local function close_caller_leader()
-  local function refuse()
-    error("cannot identify the Butler caller.\nNext: run from a Butler member session", 0)
-  end
-  if type(remuda.caller) ~= "function" then refuse() end
-  local ok, caller = pcall(remuda.caller)
-  if not ok or type(caller) ~= "table" then refuse() end
-  -- unknown is not evidence of an operator: refuse it (only outside maps to the root)
-  if caller.kind == "outside" then return "butler" end
-  if caller.kind ~= "session" or type(caller.session) ~= "string" or caller.session == "" then refuse() end
-  local agents = remuda._butler_bus and remuda._butler_bus.agents
-  if type(agents) ~= "table" then refuse() end
-  local leader
-  for alias, agent in pairs(agents) do
-    if type(agent) == "table" and agent.session_name == caller.session then
-      if leader then refuse() end
-      leader = alias
-    end
-  end
-  if not leader then refuse() end
-  return leader
+local function close_caller_leader(caller)
+  local identity = current_agent(caller) -- same fail-closed resolver as every CLI member action
+  return identity and resolve(identity) or "butler"
 end
 
 local CLOSE_CLI_SPEC = {
@@ -331,7 +316,7 @@ command(8, "close", "  remuda butler close <name> [--force]\n  remuda butler clo
       error(message, 0)
     end
     return cli_result(function()
-      return close_member(report.values.NAME, close_caller_leader(), report.values.force, true)
+      return close_member(report.values.NAME, close_caller_leader(caller), report.values.force, true)
     end)
   end
   if args[2] == "--help" or args[2] == "-h" then
@@ -341,7 +326,7 @@ command(8, "close", "  remuda butler close <name> [--force]\n  remuda butler clo
     error(CLOSE_USAGE .. "\nNext: remuda butler sessions", 0)
   end
   return cli_result(function()
-    return close_member(args[2], close_caller_leader(), args[3] == "--force", true)
+    return close_member(args[2], close_caller_leader(caller), args[3] == "--force", true)
   end)
 end)
 command(10, "sessions", "  remuda butler sessions", function(args)
@@ -364,6 +349,16 @@ command(14, "shell-lines", "  remuda butler shell-lines on|off", function(args, 
   return typed_lines_cli.cli(args, current_agent(caller))
 end)
 command(21, "guard", "  remuda butler guard on|off|status | approvals on|off|status | deny on|off|status | grants [on|off|status] | stats | verify  (off by default)", function(args, caller)
+  -- Resolve hooks and switches once, before policy, approval, or audit state can change.
+  local hook = args[2] == nil
+  local switch = (#args == 2 and (args[2] == "on" or args[2] == "off"))
+      or (#args == 3 and (args[2] == "approvals" or args[2] == "deny" or args[2] == "grants")
+        and (args[3] == "on" or args[3] == "off"))
+  local principal
+  if hook or switch then principal = resolve_principal(caller) end
+  if hook or switch then
+    return remuda.butler.guard_policy.run(args, caller, principal)
+  end
   return remuda.butler.guard_policy.run(args, caller)
 end)
 local AGENTS_CLI_SPEC = {
@@ -471,6 +466,7 @@ command(30, "topic", "  remuda butler topic new <name> [--template T] [--agent A
       if type(remuda.fail) == "function" then return remuda.fail(report.text, report.code) end
       error(report.text, 0)
     end
+    current_agent(caller)
     return remuda._butler_topic_new(report.values.NAME, report.values.template, report.values.agent, report.values.model)
   end
   if args[2] == "new" and args[3] then
@@ -482,6 +478,7 @@ command(30, "topic", "  remuda butler topic new <name> [--template T] [--agent A
       else return nil end
       i = i + 2
     end
+    current_agent(caller)
     return remuda._butler_topic_new(args[3], template, kind, model)
   end
   if args[2] == "delegate" and args[3] then
@@ -669,7 +666,7 @@ command(60, "inbox", "  remuda butler inbox [name]", function(args, caller)
     end)
   end
   return cli_result(function()
-    local name = selector or assert(caller_identity, "no Butler identity in your env; use `inbox <name>`")
+    local name = selector or assert(caller_identity, "outside operator inbox needs a name; use `inbox <name>`")
     if caller_identity and selector then
       -- Check only the caller's own identifiers before inbox resolution. An
       -- unknown target gets the same refusal as any other cross-member name.

@@ -19,7 +19,7 @@ local function deny(tool, input) return T.eval(("return tostring(remuda.butler.g
 T.test("guard stats counts owner_line_refused and grants_unfreeze_failed by name", function()
   start_butler()
   T.eval("local d = os.getenv('XDG_DATA_HOME') .. '/r-stats6'; remuda.mkdir(d); remuda._butler_guard_dir = d")
-  T.eval("remuda._butler_command_run('guard', {'guard', 'on'}, {})")
+  T.eval("remuda._butler_command_run('guard', {'guard', 'on'}, {kind='session', session='butler'})")
   for _, e in ipairs({ "owner_line_refused", "grants_unfreeze_failed" }) do
     T.eval(("remuda.butler.guard_policy.observe(%q, 's', 'claude', 'x')"):format(e))
   end

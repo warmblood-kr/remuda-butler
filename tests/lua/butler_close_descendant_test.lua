@@ -39,10 +39,7 @@ local function outcomes()
     add("staledirect", "lead", "lead-OLD-id"); add("mid", "sib", "sib-606-id"); add("midleaf", "mid", "mid-OLD-id"); add("midnew", "mid", "mid-606-id")
     local function cli(kind, name)
       closed = {}
-      local old = remuda.caller
-      remuda.caller = function() return { kind = kind, session = "" } end
-      local ok = pcall(remuda._extension_commands.butler, { "close", name, "--force" }, { env = {} })
-      remuda.caller = old
+      local ok = pcall(remuda._extension_commands.butler, { "close", name, "--force" }, { kind = kind, session = "", env = {} })
       out[#out + 1] = "cli-" .. kind .. "-" .. name .. "=" .. ((ok and closed[1] == name) and "closed" or ((not ok and #closed == 0) and "refused" or "BAD"))
     end
     remuda.close = function(name) closed[#closed + 1] = name end

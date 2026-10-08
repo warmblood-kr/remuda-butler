@@ -46,8 +46,8 @@ local function start_butler()
       local payload = remuda.json.encode({ hook_event_name = 'PermissionRequest', tool_name = over.tool or 'WebFetch',
         tool_input = over.input, cwd = over.cwd or '/p/w', session_id = 's1' })
       local before = #remuda._t_replies
-      remuda._butler_command_run('guard', { 'guard' }, { stdin = payload, env =
-        { REMUDA_BUTLER_AGENT_ALIAS = over.alias or 'ss-a', REMUDA_BUTLER_AGENT_KIND = 'claude' } })
+      remuda._butler_command_run('guard', { 'guard' }, { kind = 'session',
+        session = 's-ssa', stdin = payload })
       if #remuda._t_replies > before then return #remuda._t_replies end
       return 0
     end
@@ -92,7 +92,7 @@ local function reset_scans() scans(); T.eval("remuda._t_scans = 0") end
 T.test("after ten days down only the last seven days are attested, oldest first", function()
   fresh("d-cap")
   at(36000) -- 10-04
-  T.eval("remuda._butler_command_run('guard', {'guard','on'}, {})")
+  T.eval("remuda._butler_command_run('guard', {'guard','on'}, {kind='session', session='butler'})")
   sweep(86400 + 300)
   T.eq(posts(), 1, "10-04")
   for day = 1, 10 do -- a line on each of 10-05 .. 10-14
@@ -108,7 +108,7 @@ end)
 T.test("quiet days after a digest are each scanned once, not on every tick", function()
   fresh("d-quiet3")
   at(36000)
-  T.eval("remuda._butler_command_run('guard', {'guard','on'}, {})")
+  T.eval("remuda._butler_command_run('guard', {'guard','on'}, {kind='session', session='butler'})")
   sweep(86400 + 300)
   T.eq(posts(), 1, "10-04")
   reset_scans()

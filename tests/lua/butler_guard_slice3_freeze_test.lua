@@ -12,7 +12,7 @@ local function start_butler()
       :match("^%s*true%s*$") ~= nil
   end, 5, "Butler root start")
   T.eval([[
-    remuda._t_guard = function(args, caller) return remuda._butler_command_run('guard', args, caller or {}) end
+    remuda._t_guard = function(args, caller) caller = caller or {}; caller.kind = 'session'; caller.session = 'butler'; return remuda._butler_command_run('guard', args, caller) end
     -- A fresh load of the store hands add and the owner controls to the test; the cross-check is not under test here.
     remuda._t_load = function()
       remuda.exec('butler/guard_grants')

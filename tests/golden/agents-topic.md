@@ -25,10 +25,11 @@ Codex members: use the MCP `butler_*` tools first (`butler_inbox`,
 design (`Operation not permitted`). If you must use the CLI and get that error,
 re-run the command requesting escalated permissions.
 
-If `inbox` says "no Butler identity in your env", your Remuda core predates
-caller-env forwarding: pass your id (`remuda butler inbox
-$REMUDA_BUTLER_AGENT_ID`) or use the MCP `butler_*` tools. On such a core,
-`send` is attributed to "operator" rather than to you.
+CLI identity comes from the daemon's caller session, never environment variables.
+If Butler cannot identify the caller, run from a registered Butler session or
+upgrade Remuda core. Older cores without caller fields refuse CLI member actions;
+use the MCP `butler_*` tools with the session's configured capability instead.
+Caller attribution is advisory within one user account, not an isolation boundary.
 
 You may create a Remuda-managed child team with `remuda butler topic delegate
 NAME TASK...` when useful. Internal agent subagents are separate from Butler

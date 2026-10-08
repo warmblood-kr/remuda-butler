@@ -194,11 +194,6 @@ local function caller_name(caller)
     end
     return "outside"
   end
-  local current = current_agent(caller)
-  if current then
-    local ok, alias = pcall(resolve, current)
-    return ok and alias or "outside"
-  end
   local token = caller and caller.capability
   local capability = token and bus.tokens[token]
   -- During a live upgrade, an older image may still have alias-valued entries.

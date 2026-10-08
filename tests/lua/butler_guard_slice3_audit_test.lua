@@ -1,6 +1,6 @@
 -- Guard slice 3, PR2: grant_id on every audit line, switch-change events, retention, `guard stats`.
 local function start_butler()
-  T.install_mod("butler", assert(os.getenv("REMUDA_LUA_REPO")))
+  T.install_guard_subject("butler", assert(os.getenv("REMUDA_LUA_REPO")))
   T.eval('remuda._butler_argv = {"sh", "-c", "sleep 60"}; remuda._butler_skip_relay = true; remuda._butler_readiness_timeout = 1')
   T.eval('return remuda.exec("butler")')
   T.wait_until(function()
@@ -14,8 +14,8 @@ local function start_butler()
       remuda.mkdir(d); remuda._butler_guard_dir = d; return d
     end
     remuda._t_hook = function(stdin)
-      return remuda._butler_command_run('guard', {'guard'}, { stdin = stdin, env =
-        { REMUDA_BUTLER_AGENT_ALIAS = 'ss-a', REMUDA_BUTLER_AGENT_KIND = 'claude' } })
+      return remuda._butler_command_run('guard', {'guard'}, { kind = 'session',
+        session = 's-ssa', stdin = stdin })
     end
     remuda._t_lines = function()
       local out, f = {}, io.open(gp.log_path(), 'r')
@@ -23,7 +23,7 @@ local function start_butler()
       for l in f:lines() do out[#out + 1] = l end
       f:close(); return table.concat(out, '\n')
     end
-    remuda._t_guard = function(args, caller) return remuda._butler_command_run('guard', args, caller or {}) end
+    remuda._t_guard = function(args, caller) caller = caller or {}; caller.kind = 'session'; caller.session = 'butler'; return remuda._butler_command_run('guard', args, caller) end
     return 'ok'
   ]])
 end
@@ -47,14 +47,14 @@ end)
 
 T.test("switch changes are audited with who and when, even when turned off", function()
   start_butler()
-  T.eval("remuda._t_dir('g3-switch'); remuda._t_guard({'guard','on'}, {env={REMUDA_BUTLER_AGENT_ALIAS='lead-1'}})")
-  T.eval("remuda._t_guard({'guard','deny','on'}, {env={REMUDA_BUTLER_AGENT_ALIAS='lead-1'}})")
+  T.eval("remuda._t_dir('g3-switch'); remuda._t_guard({'guard','on'}, {})")
+  T.eval("remuda._t_guard({'guard','deny','on'}, {})")
   T.eval("remuda._t_guard({'guard','deny','off'}, {})")
   T.eval("remuda._t_guard({'guard','approvals','on'}, {})")
   T.eval("remuda._t_guard({'guard','off'}, {})")
   local lines = T.eval("return remuda._t_lines()")
-  local want = { { "guard on", "lead-1" }, { "guard deny on", "lead-1" }, { "guard deny off", "operator" },
-    { "guard approvals on", "operator" }, { "guard off", "operator" } }
+  local want = { { "guard on", "butler" }, { "guard deny on", "butler" }, { "guard deny off", "butler" },
+    { "guard approvals on", "butler" }, { "guard off", "butler" } }
   local i = 0
   for line in lines:gmatch("[^\n]+") do
     if not has(line, '"event":"chain"') then -- the genesis line is not a switch
@@ -68,6 +68,40 @@ T.test("switch changes are audited with who and when, even when turned off", fun
   -- A status read changes nothing and records nothing.
   T.eval("remuda._t_guard({'guard','status'}, {})")
   T.eq(T.eval("return select(2, remuda._t_lines():gsub('\\n', '')) + 1"), tostring(#want + 1), "status records nothing")
+end)
+
+T.test("a registered member cannot switch guard on when the audit write, flush, or close fails", function()
+  start_butler()
+  for _, stage in ipairs({ "write", "flush", "close" }) do
+    T.eval("remuda._t_dir('g3-switch-audit-" .. stage .. "')")
+    local result = T.eval(([=[
+      local gp, original, stage = remuda.butler.guard_policy, io.open, %q
+      io.open = function(path, mode)
+        local file, why = original(path, mode)
+        if path ~= gp.log_path() or mode ~= 'a' or not file then return file, why end
+        return {
+          write = function(_, ...)
+            if stage == 'write' then return nil, 'injected write failure' end
+            return file:write(...)
+          end,
+          flush = function()
+            if stage == 'flush' then return nil, 'injected flush failure' end
+            return file:flush()
+          end,
+          close = function()
+            local ok, err = file:close()
+            if stage == 'close' then return nil, 'injected close failure' end
+            return ok, err
+          end,
+        }
+      end
+      local ok, answer = pcall(remuda._t_guard, { 'guard', 'on' })
+      io.open = original
+      return tostring(ok) .. '|' .. tostring(answer) .. '|' .. tostring(gp.enabled())
+    ]=]):format(stage))
+    T.expect(has(result, "Next:") and result:match("|false$") ~= nil,
+      stage .. " failure mutated the switch or lacked Next: " .. result)
+  end
 end)
 
 T.test("retention: size rotation keeps dated archives, prunes only past the documented period", function()
@@ -156,31 +190,27 @@ T.test("guard stats survives a tampered log: bucketed names, capped lines, unrea
   T.expect(has(out, "since 2026-01-01T00:00:00Z until 2026-01-02T00:00:00Z"), "time range wrong: " .. out, "ok - hostile stats")
 end)
 
-T.test("turning a switch off is audited first; an unwritable audit still switches off, loudly, with a sticky marker", function()
+T.test("an unwritable audit refuses the switch change before turning guard off", function()
   start_butler()
   T.eval("remuda._t_dir('g3-offfirst'); remuda._t_guard({'guard','on'}); remuda._t_guard({'guard','deny','on'})")
-  -- a read-only log: opening it for append fails on every platform (a directory would not on Linux)
-  T.eval([[local gp = remuda.butler.guard_policy
-    remuda.process.run({ argv = { 'chmod', '400', gp.log_path() } })]])
-  local off = T.eval([[local err, real = {}, io.stderr
+  local off = T.eval([[local gp, real_open, err, real_err = remuda.butler.guard_policy, io.open, {}, io.stderr
+    io.open = function(path, mode)
+      if path == gp.log_path() and mode == 'a' then return nil, 'injected append failure' end
+      return real_open(path, mode)
+    end
     io.stderr = { write = function(_, t) err[#err + 1] = t end }
     local ok, r = pcall(remuda._t_guard, {'guard','off'})
-    io.stderr = real
+    io.open, io.stderr = real_open, real_err
     return tostring(r) .. '\nSTDERR:' .. table.concat(err)]])
   local answer, stderr = off:match("^(.-)\nSTDERR:(.*)$")
-  T.expect(has(answer, "switched off, NOT audited:") and has(stderr, "NOT audited"), "loud answer and stderr: " .. off)
+  T.expect(has(answer, "guard switch not changed") and has(answer, "Next:"),
+    "refusal includes an actionable Next line: " .. off)
   local status = T.eval("return remuda._t_guard({'guard','status'})")
-  T.expect(has(status, "guard: off") and has(status, "NOT audited"), "status must show off and the marker: " .. status)
-  T.expect(has(T.eval("return remuda._t_guard({'guard','stats'})"), "NOT audited"), "stats must show the marker")
-  T.eval([[local gp = remuda.butler.guard_policy
-    remuda.process.run({ argv = { 'chmod', '600', gp.log_path() } })]])
-  T.eval("remuda._t_guard({'guard','on'}, {env={REMUDA_BUTLER_AGENT_ALIAS='lead-1'}})")
-  status = T.eval("return remuda._t_guard({'guard','status'})")
-  T.expect(has(status, "guard: on") and not has(status, "NOT audited"), "a good audit line clears the marker: " .. status)
-  T.eval("remuda._t_guard({'guard','off'}, {env={REMUDA_BUTLER_AGENT_ALIAS='lead-1'}})")
+  T.expect(has(status, "guard: on") and not has(status, "NOT audited"), "failed audit must preserve guard on: " .. status)
+  T.eval("remuda._t_guard({'guard','off'}, {})")
   local lines = T.eval("return remuda._t_lines()")
   local last; for l in lines:gmatch("[^\n]+") do last = l end
-  T.expect(has(last, '"summary":"guard off"') and has(last, '"session":"lead-1"')
+  T.expect(has(last, '"summary":"guard off"') and has(last, '"session":"butler"')
     and has(T.eval("return remuda._t_guard({'guard','status'})"), "guard: off"), "off line missing: " .. last, "ok - off audited first")
 end)
 
@@ -209,7 +239,30 @@ T.test("guard stats reads a 1 MiB file of newlines in linear time", function()
   T.expect(tonumber(out:match("^(%S+)")) < 2, "stats over 1 MiB of newlines was too slow: " .. out, "ok - stats linear")
 end)
 
-T.test("a failed rotate rename never truncates the live log", function()
+T.test("rotation_caps_archives_and_keeps_the_newest_evidence_in_numeric_collision_order", function()
+  start_butler()
+  T.eval("remuda._t_dir('g3-aggregate')")
+  local out = T.eval([[
+    local gp = remuda.butler.guard_policy
+    local base, now = gp.log_path(), os.time()
+    local cap = gp.ARCHIVE_CAP or 16
+    local stamp = os.date('!%Y%m%dT%H%M%SZ', now)
+    local function put(p, s) local f = assert(io.open(p, 'w')); f:write(s); f:close() end
+    for i = 0, cap + 2 do put(base .. '.' .. stamp .. (i == 0 and '' or '-' .. i), tostring(i)) end
+    put(base .. '.1', 'recent'); put(base, 'live')
+    local rotated = gp.rotate(base, now)
+    local n = 0
+    for _, name in ipairs(remuda.list_dir(remuda._butler_guard_dir)) do
+      if name:match('^guard%-audit%.jsonl%.') then n = n + 1 end
+    end
+    local f = io.open(base .. '.' .. stamp .. '-10', 'r')
+    local ten = f and f:read('a'); if f then f:close() end
+    return tostring(rotated) .. '|' .. n .. '|' .. cap .. '|' .. tostring(ten)
+  ]])
+  T.eq(out, "true|16|16|10", "archive count includes .1 and preserves newer collision suffixes")
+end)
+
+T.test("a failed rotate rename refuses append and never truncates the live log", function()
   start_butler()
   T.eval("remuda._t_dir('g3-rotfail')")
   local out = T.eval([[
@@ -224,5 +277,27 @@ T.test("a failed rotate rename never truncates the live log", function()
     return tostring(ok) .. ' ' .. size
   ]])
   local ok, size = out:match("^(%a+) (%d+)$")
-  T.expect(ok == "true" and tonumber(size) > 1024 * 1024, "the live log must keep its content when rotate fails: " .. out, "ok - rotate failure keeps log")
+  T.expect(ok == "nil" and tonumber(size) == 1024 * 1024 + 1, "the live log must keep its content when rotate fails: " .. out, "ok - rotate failure keeps log")
+end)
+
+T.test("failed_archive_move_never_overwrites_the_previous_rotated_evidence", function()
+  start_butler()
+  T.eval("remuda._t_dir('g3-archivefail')")
+  local out = T.eval([[
+    local gp, real = remuda.butler.guard_policy, os.rename
+    local base = gp.log_path()
+    for p, text in pairs({[base] = 'live', [base .. '.1'] = 'previous'}) do
+      local f = assert(io.open(p, 'w')); f:write(text); f:close()
+    end
+    os.rename = function(a, b)
+      if a == base .. '.1' then return nil, 'injected archive move failure' end
+      return real(a, b)
+    end
+    local ok = gp.rotate(base)
+    os.rename = real
+    local f = assert(io.open(base .. '.1', 'r')); local previous = f:read('a'); f:close()
+    f = io.open(base, 'r'); local live = f and f:read('a'); if f then f:close() end
+    return tostring(ok) .. '|' .. previous .. '|' .. tostring(live)
+  ]])
+  T.eq(out, "false|previous|live")
 end)
