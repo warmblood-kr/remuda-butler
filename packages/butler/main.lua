@@ -685,7 +685,13 @@ remuda.tool{
     if not feature or not feature.target_session_allowed(a.session) then
       error("Unknown Butler session: " .. tostring(a.session), 0)
     end
-    local id, why = feature.request(a.session, a.text, caller_name(caller))
+    -- "outside" is caller_name's sentinel for an unresolved caller; only the named
+    -- operator policy (kind="outside") may ask under it.
+    local asker = caller_name(caller)
+    if not bus.agents[asker] and caller_principal.resolve(caller).tag ~= "operator" then
+      error("Butler cannot identify this caller. Next: run from a registered Butler session or upgrade Remuda core.", 0)
+    end
+    local id, why = feature.request(a.session, a.text, asker)
     if not id then error(tostring(why or "Could not register prepared text"), 0) end
     return id
   end,
