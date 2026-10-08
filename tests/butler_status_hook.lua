@@ -24,14 +24,14 @@ _G.remuda = {
   butler = {},
   _butler_caller_principal = { resolve = function(caller)
     if caller and caller.kind == "unknown" then return { tag = "unidentified" } end
-    return { tag = "member", alias = "member-1", kind = "claude" }
+    return { tag = "member", alias = "member-1", kind = "claude", status_path = caller and caller.registered or "/tmp/x.status" }
   end },
 }
 local hook = dofile("packages/butler/status_hook.lua")
 local function check(got, want, what) assert(got == want, what .. ": expected " .. tostring(want) .. ", got " .. tostring(got)) end
 local function fire(stdin, path)
   written = {}
-  check(hook.run({ "status-hook", path or "/tmp/x.status" }, { stdin = stdin }), "", "always returns empty output")
+  check(hook.run({ "status-hook", path or "/tmp/x.status" }, { stdin = stdin, registered = path }), "", "always returns empty output")
   return written[1]
 end
 local function word_of(stdin)
@@ -65,6 +65,8 @@ assert(fire('{"e":"stop"}', "/tmp/..x/.f/f.status"), "names that merely contain 
 written = {}
 hook.run({ "status-hook" }, { stdin = '{"e":"stop"}' })
 check(written[1], nil, "missing path refused")
+check(hook.run({ "status-hook", "/tmp/other.status" }, { stdin = '{"e":"stop"}' }), "", "path other than the member's registered telemetry is refused quietly")
+check(written[1], nil, "foreign path not written")
 check(hook.run({ "status-hook", "/tmp/x.status" }, nil), "", "no stdin still exits clean for a registered member")
 written = {}
 check(hook.run({ "status-hook", "/tmp/x.status" }, { kind = "unknown", stdin = '{"e":"stop"}' }):find("Next:", 1, true) ~= nil,

@@ -42,6 +42,7 @@ function M.resolve(caller)
     alias = found.agent.alias or found.alias,
     kind = found.agent.kind,
     session_name = found.agent.session_name,
+    status_path = type(found.agent.telemetry) == "table" and found.agent.telemetry.status_path or nil,
   }
 end
 

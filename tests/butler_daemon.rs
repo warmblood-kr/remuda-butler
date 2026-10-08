@@ -9974,6 +9974,8 @@ fn butler_quota_statusline_keeps_line_one_and_adds_rate_limits() {
     let snapshot = r#"{"model":{"display_name":"Claude Opus 4.6"},"context_window":{"total_input_tokens":12345,"context_window_size":200000,"used_percentage":6},"rate_limits":{"five_hour":{"used_percentage":92,"resets_at":1790838000},"seven_day":{"used_percentage":71,"resets_at":1791072000}}}"#;
     let status_path_lua = lua_raw_string(&status_path.to_string_lossy());
     let snapshot_lua = lua_raw_string(snapshot);
+    // The status helper only writes the calling member's registered telemetry path.
+    eval(&path, &format!("remuda._butler_bus.agents.butler.telemetry = {{status_path={status_path_lua}}}"));
     let line = eval(&path, &format!(
         "return remuda._extension_commands.butler({{'statusline', {status_path_lua}}}, {{kind='session',session='butler',stdin={snapshot_lua}}})"
     ));

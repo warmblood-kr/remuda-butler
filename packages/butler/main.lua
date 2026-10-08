@@ -258,7 +258,7 @@ local function statusline(args, caller)
   local absolute = type(path) == "string" and (
     path:sub(1, 1) == "/" or path:sub(1, 2) == "\\\\" or drive_rooted
   )
-  if absolute and path:match("%.status$") then
+  if absolute and path:match("%.status$") and path == principal.status_path then
     pcall(remuda.fs.write_atomic, path, line .. "\n" .. (limits and (limits .. "\n") or ""))
   end
   return line

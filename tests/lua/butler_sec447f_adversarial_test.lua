@@ -84,6 +84,34 @@ T.test('status_helpers_refuse_unknown_caller_without_overwriting_member_telemetr
  T.expect(true,'','TELEMETRY-REFUSAL '..result)
 end)
 
+T.test('status_helpers_refuse_another_members_telemetry_path',function()
+ local result=T.eval([=[
+  local bus=remuda._butler_bus
+  local dir=os.getenv('XDG_DATA_HOME')..'/member-telemetry'; remuda.mkdir(dir)
+  local pa,pb=dir..'/a.status',dir..'/b.status'
+  bus.agents.alice={id='ALICE',alias='alice',kind='claude',session_name='alice-s',telemetry={status_path=pa}}
+  bus.agents.bob={id='BOB',alias='bob',kind='claude',session_name='bob-s',telemetry={status_path=pb}}
+  assert(remuda.fs.write_atomic(pb,'MODEL:BOB CTX:1 CTXWIN:2 CTXPCT:3\n',{private=true}))
+  assert(remuda.fs.write_atomic(pb..'.state','idle 1\n',{private=true}))
+  local function read(p) local f=io.open(p,'r'); if not f then return 'none' end local s=f:read('l'); f:close(); return s end
+  local function call(verb,path,stdin)
+    local c={kind='session',session='alice-s',stdin=remuda.json.encode(stdin)}
+    return pcall(remuda._extension_commands.butler,{verb,path},c)
+  end
+  local snap={model={display_name='FORGED'},context_window={total_input_tokens=1,context_window_size=2,used_percentage=50}}
+  local hook={hook_event_name='UserPromptSubmit'}
+  call('statusline',pb,snap); call('status-hook',pb,hook)
+  local out={'b='..read(pb)..'|'..read(pb..'.state')}
+  call('statusline',pa,snap); call('status-hook',pa,hook)
+  out[#out+1]='a='..read(pa)..'|'..(read(pa..'.state') or ''):match('^%a+')
+  bus.agents.alice=nil; bus.agents.bob=nil
+  return table.concat(out,';')
+ ]=])
+ T.expect(result:find('b=MODEL:BOB CTX:1 CTXWIN:2 CTXPCT:3|idle 1;',1,true),result)
+ T.expect(result:find('a=MODEL:FORGED CTX:1 CTXWIN:2 CTXPCT:50|working',1,true),result)
+ T.expect(true,'','FOREIGN-TELEMETRY '..result)
+end)
+
 T.test('archive_listing_error_refuses_operator_resolution',function()
  local result=T.eval([=[
   local gp=remuda.butler.guard_policy
