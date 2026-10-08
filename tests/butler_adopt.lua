@@ -129,4 +129,19 @@ exited, close_error, remuda.butler.is_idle = {}, nil, function(name)
   if idle[name] == false then return false, "busy" end
   return true
 end
+-- stale generations (sec-463b): a recorded parent_id that no longer matches is never rebound or honored
+tree({ {"butler"}, {"top", "butler"}, {"lead", "top"}, {"m1", "lead"}, {"m2", "lead"} })
+assert(can_close("lead", "m1"), "healthy direct member closes")
+bus.agents.m1.parent_id = "stale-id"
+assert(not can_close("lead", "m1"), "direct edge with a mismatched parent_id refuses")
+exit("lead")
+assert(bus.agents.m1.parent == "lead" and bus.agents.m1.parent_id == "stale-id", "stale child is not adopted")
+assert(not can_close("top", "m1") and not can_close("butler", "m1"), "stale child is not closable via the heir")
+assert(bus.agents.m2.parent == "top" and bus.agents.m2.parent_id == "top-id" and can_close("top", "m2"), "healthy sibling still adopted")
+tree({ {"butler"}, {"top", "butler"}, {"lead", "top"}, {"m1", "lead"} })
+bus.agents.lead.parent_id = "stale-id" -- the exiting row itself belongs to a stale parent generation
+exit("lead")
+assert(bus.agents.m1.parent == "butler" and bus.agents.m1.parent_id == "butler-id", "stale exiting parent: members go to the root")
+assert(not can_close("top", "m1"), "stale heir alias does not gain the members")
+
 print("ok - adoption and close authority")

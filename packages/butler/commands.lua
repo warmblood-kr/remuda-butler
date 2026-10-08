@@ -239,8 +239,10 @@ local function close_member(name, leader, force, leaderless_ok)
       local parent, up = cur.parent, agents[cur.parent]
       if seen[parent] then return false end -- cycle: refuse even when the caller was met
       seen[parent] = true
-      local direct = cur == row and parent == leader -- legacy direct-member rule: alias only
-      if not found and not direct and (not up or cur.parent_id == nil or cur.parent_id ~= up.id) then return false end
+      -- A present parent_id must match the parent's durable id on every edge below the
+      -- leader; only a direct edge with NO parent_id (legacy row) is trusted by alias.
+      local legacy_direct = cur == row and parent == leader and cur.parent_id == nil
+      if not found and not legacy_direct and (not up or cur.parent_id == nil or cur.parent_id ~= up.id) then return false end
       if parent == leader then found = true end
       if not up then break end
       cur = up
