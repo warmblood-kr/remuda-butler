@@ -73,7 +73,7 @@ function remuda._butler_adopt_members(name, exited)
     or (bus.agents.butler and "butler") or nil
   for alias, agent in pairs(bus.agents) do
     if agent.parent == name then
-      agent.parent = heir
+      agent.parent, agent.parent_id = heir, heir and bus.agents[heir].id
       if heir then table.insert(bus.agents[heir].children, alias) end
     end
   end

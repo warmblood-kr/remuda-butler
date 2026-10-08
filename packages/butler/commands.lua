@@ -230,14 +230,22 @@ local function close_member(name, leader, force, leaderless_ok)
   local function gone(parent)
     return not agents[parent] and not (relaunching[parent] and os.time() - relaunching[parent] < RELAUNCH_WINDOW)
   end
+  -- Strict descendant: walk the whole lineage; a caller match never skips the
+  -- cycle check. Past the first hop each edge must be bound to the parent's
+  -- durable id (parent_id), so a reused alias cannot inherit an old branch.
   local function descends_from(row)
-    local seen, parent = {}, row.parent
-    while parent ~= nil and not seen[parent] do
-      if parent == leader then return true end
+    local seen, found, cur = { [alias] = true }, false, row
+    while cur.parent ~= nil do
+      local parent, up = cur.parent, agents[cur.parent]
+      if seen[parent] then return false end -- cycle: refuse even when the caller was met
       seen[parent] = true
-      parent = agents[parent] and agents[parent].parent
+      local direct = cur == row and parent == leader -- legacy direct-member rule: alias only
+      if not found and not direct and (not up or cur.parent_id == nil or cur.parent_id ~= up.id) then return false end
+      if parent == leader then found = true end
+      if not up then break end
+      cur = up
     end
-    return false
+    return found
   end
   -- Note: leader "butler" (the root, and any outside/unknown CLI caller the core maps
   -- to it) is an ancestor of every non-root row, so it may close any finished member.
@@ -278,7 +286,8 @@ local function close_caller_leader()
   if type(remuda.caller) ~= "function" then refuse() end
   local ok, caller = pcall(remuda.caller)
   if not ok or type(caller) ~= "table" then refuse() end
-  if caller.kind == "outside" or caller.kind == "unknown" then return "butler" end
+  -- unknown is not evidence of an operator: refuse it (only outside maps to the root)
+  if caller.kind == "outside" then return "butler" end
   if caller.kind ~= "session" or type(caller.session) ~= "string" or caller.session == "" then refuse() end
   local agents = remuda._butler_bus and remuda._butler_bus.agents
   if type(agents) ~= "table" then refuse() end

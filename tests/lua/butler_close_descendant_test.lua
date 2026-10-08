@@ -22,16 +22,31 @@ local function outcomes()
   return T.eval([=[
     local bus = remuda._butler_bus
     local saved = { agents = bus.agents, close = remuda.close, ls = remuda.ls, idle = remuda.butler.is_idle }
-    local closed, busy = {}, {}
+    local closed, busy, out = {}, {}, {}
     bus.agents = {}
     for _, row in ipairs({ { "butler" }, { "lead", "butler" }, { "leaf", "lead" }, { "deep", "leaf" },
         { "sib", "butler" }, { "sibleaf", "sib" }, { "loop1", "loop2" }, { "loop2", "loop1" }, { "orph", "ghost" }, { "orphkid", "orph" } }) do
-      bus.agents[row[1]] = { id = row[1] .. "-606-id", kind = "codex", parent = row[2], session_name = row[1] }
+      bus.agents[row[1]] = { id = row[1] .. "-606-id", kind = "codex", parent = row[2], session_name = row[1],
+        parent_id = row[2] and (row[2] .. "-606-id") or nil }
+    end
+    local function add(alias, parent, parent_id)
+      bus.agents[alias] = { id = alias .. "-606-id", kind = "codex", parent = parent, parent_id = parent_id, session_name = alias }
+    end
+    -- two-cycle with a child, a self-leader with a child, a replaced alias (failed relaunch + reuse)
+    add("ca", "cb", "cb-606-id"); add("cb", "ca", "ca-606-id"); add("ckid", "ca", "ca-606-id")
+    add("selfl", "selfl", "selfl-606-id"); add("selfkid", "selfl", "selfl-606-id")
+    add("mid", "sib", "sib-606-id"); add("midleaf", "mid", "mid-OLD-id"); add("midnew", "mid", "mid-606-id")
+    local function cli(kind, name)
+      closed = {}
+      local old = remuda.caller
+      remuda.caller = function() return { kind = kind, session = "" } end
+      local ok = pcall(remuda._extension_commands.butler, { "close", name, "--force" }, { env = {} })
+      remuda.caller = old
+      out[#out + 1] = "cli-" .. kind .. "-" .. name .. "=" .. ((ok and closed[1] == name) and "closed" or "refused")
     end
     remuda.close = function(name) closed[#closed + 1] = name end
     remuda.ls = function() return {} end
     remuda.butler.is_idle = function(name) if busy[name] then return false, "busy" end return true end
-    local out = {}
     local function try(label, leader, name, force, cli)
       closed = {}
       local ok = pcall(remuda._butler_close_member, name, leader, force, cli)
@@ -58,9 +73,16 @@ local function outcomes()
       try("empty-name", "butler", "", false, true)
       try("nil-name", "butler", nil, false, true)
       try("unknown-name", "butler", "nobody", false, true)
-      for i = 1, 300 do bus.agents["c" .. i] = { id = "c" .. i .. "-id", kind = "codex", parent = i == 1 and "lead" or ("c" .. (i - 1)), session_name = "c" .. i } end
+      for i = 1, 300 do bus.agents["c" .. i] = { id = "c" .. i .. "-id", kind = "codex", parent = i == 1 and "lead" or ("c" .. (i - 1)), parent_id = i == 1 and "lead-606-id" or ("c" .. (i - 1) .. "-id"), session_name = "c" .. i } end
       try("deep-chain-root", "butler", "c300", false, nil)
       try("deep-chain-sibling", "sib", "c300", false, true)
+      try("caller-in-cycle", "cb", "ckid", false, true)
+      try("cycle-ancestor-target", "cb", "ca", false, true)
+      try("self-leader-caller", "selfl", "selfkid", false, true)
+      try("stale-alias-sibling", "sib", "midleaf", false, true)
+      try("stale-alias-root", "butler", "midleaf", false, true)
+      try("bound-alias-sibling", "sib", "midnew", false, true)
+      cli("outside", "deep"); cli("unknown", "deep"); cli("service", "deep")
       busy.deep = true
       try("busy-grandchild", "butler", "deep", false, true)
       try("busy-grandchild-force", "butler", "deep", true, true)
@@ -81,6 +103,9 @@ T.test("ancestor closes finished descendants, others still refused", function()
     "missing-link-root=refused", "missing-link-lead=refused", "nil-caller=refused", "empty-caller=refused",
     "unknown-caller=refused", "empty-name=refused", "nil-name=refused", "unknown-name=refused",
     "deep-chain-root=closed", "deep-chain-sibling=refused",
+    "caller-in-cycle=refused", "cycle-ancestor-target=refused", "self-leader-caller=refused",
+    "stale-alias-sibling=refused", "stale-alias-root=refused", "bound-alias-sibling=closed",
+    "cli-outside-deep=closed", "cli-unknown-deep=refused", "cli-service-deep=refused",
     "busy-grandchild=refused", "busy-grandchild-force=closed",
   }, " "), "close authority over descendants")
 end)
