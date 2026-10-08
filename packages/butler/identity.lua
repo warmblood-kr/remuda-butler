@@ -187,12 +187,11 @@ local function caller_name(caller)
   -- precedence over the older capability-only compatibility path.
   if caller and caller.kind ~= nil then
     if caller.kind ~= "session" then return nil end
-    local native_session = caller.session
-    if native_session ~= nil and native_session ~= "" then
-      local ok, alias = pcall(resolve, native_session)
-      return ok and alias or nil
-    end
-    return nil
+    -- The shared resolver (caller_principal) yields exactly one live registration
+    -- or refuses; a capability never repairs a failed native attribution.
+    local ok, id = pcall(current_agent, caller)
+    local resolved, alias = pcall(resolve, ok and id or "")
+    return resolved and alias or nil
   end
   local token = caller and caller.capability
   local capability = token and bus.tokens[token]

@@ -157,3 +157,26 @@ T.test("unidentified_MCP_callers_cannot_mutate_mail_or_register_approvals", func
     remuda._butler_inbox_original, remuda._butler_inbox_calls = nil, nil
   ]])
 end)
+
+T.test("native_session_attribution_resolves_exactly_one_registration_by_session_name", function()
+  local result = T.eval([[
+    local bus, identity = remuda._butler_bus, remuda._butler_identity
+    local function row(id, session)
+      bus.identity_ids[id] = { id = id, alias = id, state = "running" }
+      bus.agents[id] = { id = id, alias = id, session_name = session, session_start_marker = "M" }
+    end
+    row("solo", "solo-native") row("twin1", "twin-native") row("twin2", "twin-native")
+    bus.agents.alias_only = { id = "ALIAS", alias = "alias_only", session_name = "other-native", session_start_marker = "M" }
+    local cap = { id = "solo", generation = "M" }
+    bus.tokens.cap = cap
+    local out = {
+      tostring(identity.caller_name({ kind = "session", session = "solo-native" })),
+      tostring(identity.caller_name({ kind = "session", session = "twin-native", capability = "cap" })),
+      tostring(identity.caller_name({ kind = "session", session = "alias_only" })),
+    }
+    for _, k in ipairs({ "solo", "twin1", "twin2", "alias_only" }) do bus.agents[k], bus.identity_ids[k] = nil, nil end
+    bus.tokens.cap = nil
+    return table.concat(out, ":")
+  ]])
+  T.eq(result, "solo:nil:nil", "native attribution must be the unique session_name match, never an alias or a capability rescue")
+end)

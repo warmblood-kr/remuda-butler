@@ -160,10 +160,10 @@ T.test('approve_text_tool_refuses_unresolved_requester_when_member_named_outside
   end
   assert(tool,'butler_approve_text tool not found')
   local bus=remuda._butler_bus
-  bus.agents.outside={id='OUTSIDE',alias='outside',session_name='outside-sess',session_start_marker='M'}
-  bus.identity_ids.OUTSIDE={id='OUTSIDE',alias='outside',state='running'}
+  bus.agents.outside={id='0123456789ABCDEFGHJKMNPQRS',alias='outside',session_name='outside-sess',session_start_marker='M'}
+  bus.identity_ids['0123456789ABCDEFGHJKMNPQRS']={id='0123456789ABCDEFGHJKMNPQRS',alias='outside',state='running'}
   bus.tokens['member-token']={id=bus.agents.butler.id,generation=bus.agents.butler.session_start_marker}
-  bus.tokens['outside-token']={id='OUTSIDE',generation='M'}
+  bus.tokens['outside-token']={id='0123456789ABCDEFGHJKMNPQRS',generation='M'}
   local real_request,real_allowed=feature.request,feature.target_session_allowed
   local askers={}
   feature.target_session_allowed=function() return true end
@@ -183,7 +183,7 @@ T.test('approve_text_tool_refuses_unresolved_requester_when_member_named_outside
     'operator='..try({kind='outside'}),
   }
   feature.request,feature.target_session_allowed=real_request,real_allowed
-  bus.agents.outside,bus.identity_ids.OUTSIDE=nil,nil
+  bus.agents.outside,bus.identity_ids['0123456789ABCDEFGHJKMNPQRS']=nil,nil
   bus.tokens['member-token']=nil
   bus.tokens['outside-token']=nil
   return table.concat(out,';')
