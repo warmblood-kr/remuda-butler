@@ -757,8 +757,8 @@ remuda.tool{
 }
 remuda.tool{
   name = "butler_close",
-  about = "Close one of your direct Butler members. Refuses unread mail or a busy member unless force is true; force never bypasses ownership.",
-  args = { name = "Name or ID of one of your direct Butler members.", force = "Set true to skip unread-mail and idle checks." },
+  about = "Close one of your Butler members or their descendants. Refuses unread mail or a busy member unless force is true; force never bypasses ownership.",
+  args = { name = "Name or ID of one of your Butler members or their descendants.", force = "Set true to skip unread-mail and idle checks." },
   needs = { "name" },
   run = function(a, caller)
     local force = a.force

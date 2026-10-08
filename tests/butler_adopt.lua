@@ -62,7 +62,7 @@ assert(can_close("top", "m1"), "new parent closes")
 for _, who in ipairs({ "sib", "other", "om", "m1" }) do
   assert(not can_close(who, "m1"), who .. " must not close adopted m1")
 end
-assert(not can_close("butler", "m1"), "root is not the parent of a live-parented row")
+assert(can_close("butler", "m1"), "root closes a descendant below a live parent (remuda#606)")
 assert(not can_close("top", "om"), "adoption does not widen to other leads' members")
 
 -- chain: lead -> mid -> leaf; the lead exits, then mid exits
@@ -93,7 +93,7 @@ assert(can_close("butler", "orphan", nil, true), "root closes an orphan")
 assert(can_close("butler", "free", nil, true), "root closes a parentless row")
 assert(not can_close("butler", "butler"), "root never closes itself")
 assert(not can_close("lead", "orphan") and not can_close("m", "free"), "non-root cannot close leader-less rows")
-assert(not can_close("butler", "m"), "root cannot close a row whose parent is alive")
+assert(can_close("butler", "m"), "root closes a grandchild whose parent is alive (remuda#606)")
 assert(not can_close("butler", "orphan") and not can_close("butler", "free"), "an MCP caller (no CLI flag) never closes leader-less rows")
 remuda._butler_relaunching = { DEAD = os.time() }
 assert(not can_close("butler", "orphan", nil, true), "a lead that is relaunching still has its members")

@@ -16,7 +16,7 @@ actions:
 ### remuda butler "close" "--help"
 exit: 0
 stdout:
-Close a direct Butler member
+Close a Butler member or descendant
 
 
 
@@ -41,7 +41,7 @@ actions:
 ### remuda butler "close" "-h"
 exit: 0
 stdout:
-Close a direct Butler member
+Close a Butler member or descendant
 
 
 
@@ -323,25 +323,25 @@ exit: 1
 stdout:
 
 stderr:
-cannot close butler: only your direct members can be closed (you and your leader are excluded).
+cannot close butler: only your members and their descendants can be closed (you and your leaders are excluded).
 Next: remuda butler sessions
 actions:
 (none)
 
 ### remuda butler "close" "other" "--force"
-exit: 1
+exit: 0
 stdout:
-
-stderr:
-cannot close other: only your direct members can be closed (you and your leader are excluded).
+Closed other.
 Next: remuda butler sessions
+stderr:
+
 actions:
-(none)
+close(other)
 
 ### remuda butler "close" "--help" "worker"
 exit: 0
 stdout:
-Close a direct Butler member
+Close a Butler member or descendant
 
 
 
@@ -366,7 +366,7 @@ actions:
 ### remuda butler "close" "worker" "--help"
 exit: 0
 stdout:
-Close a direct Butler member
+Close a Butler member or descendant
 
 
 
@@ -391,7 +391,7 @@ actions:
 ### remuda butler "close" "worker" "-h"
 exit: 0
 stdout:
-Close a direct Butler member
+Close a Butler member or descendant
 
 
 
@@ -416,7 +416,7 @@ actions:
 ### remuda butler "close" "--force" "--help"
 exit: 0
 stdout:
-Close a direct Butler member
+Close a Butler member or descendant
 
 
 
@@ -441,7 +441,7 @@ actions:
 ### remuda butler "close" "--help" "--force"
 exit: 0
 stdout:
-Close a direct Butler member
+Close a Butler member or descendant
 
 
 

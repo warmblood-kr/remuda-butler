@@ -453,7 +453,7 @@ fn butler_close_is_limited_to_own_idle_members_unless_forced() {
         ))
     };
     let not_owner = cli(&other_id, "'kid'");
-    assert!(not_owner.contains("only your direct members") && not_owner.ends_with("Next: remuda butler sessions"), "{not_owner}");
+    assert!(not_owner.contains("only your members and their descendants") && not_owner.ends_with("Next: remuda butler sessions"), "{not_owner}");
     assert_eq!(eval(&path, "return #remuda._butler_close_test_calls"), "0");
 
     eval(&path, "remuda._butler_close_test_idle = false");
@@ -469,7 +469,7 @@ fn butler_close_is_limited_to_own_idle_members_unless_forced() {
     assert_eq!(eval(&path, "return #remuda._butler_close_test_calls"), "0");
 
     let forced = cli(&other_id, "'kid', '--force'");
-    assert!(forced.contains("only your direct members"), "--force bypassed ownership: {forced}");
+    assert!(forced.contains("only your members and their descendants"), "--force bypassed ownership: {forced}");
     assert_eq!(eval(&path, "return #remuda._butler_close_test_calls"), "0");
     let forced = cli(&leader_id, "'kid', '--force'");
     assert_eq!(forced, "Closed kid.\nNext: remuda butler sessions");
@@ -517,12 +517,12 @@ fn butler_close_cli_uses_core_caller_not_forwarded_env() {
     };
 
     let cleared = cli("session", "lead", "", "lead");
-    assert!(cleared.contains("only your direct members"), "cleared env bypassed ownership: {cleared}");
+    assert!(cleared.contains("only your members and their descendants"), "cleared env bypassed ownership: {cleared}");
     let spoofed = cli("session", "lead", &other_id, "other-kid");
-    assert!(spoofed.contains("only your direct members"), "spoofed env bypassed ownership: {spoofed}");
+    assert!(spoofed.contains("only your members and their descendants"), "spoofed env bypassed ownership: {spoofed}");
     assert_eq!(eval(&path, "return #remuda._butler_close_test_calls"), "0");
     // An unknown caller (a plain Windows terminal) closes as the Butler, like an outside one.
-    // A Butler-kind close reaches only Butler's direct members: 'other' is one, 'kid' is lead's.
+    // A Butler-kind close of its direct member 'other'.
     let unknown = cli("unknown", "", &lead_id, "other");
     assert_eq!(unknown, "Closed other.\nNext: remuda butler sessions");
     assert_eq!(eval(&path, "return remuda._butler_close_test_calls[1]"), "other");
