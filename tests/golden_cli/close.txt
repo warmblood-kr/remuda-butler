@@ -21,7 +21,7 @@ Close a Butler member or descendant
 
 
 Arguments:
-  <NAME>  Member name (only finished members, at any depth, unless --force)
+  <NAME>  Member name (direct members: idle with no unread mail; deeper descendants: exited only; --force skips the direct-member checks only)
 
 Options:
   -h, --help   Print help
@@ -46,7 +46,7 @@ Close a Butler member or descendant
 
 
 Arguments:
-  <NAME>  Member name (only finished members, at any depth, unless --force)
+  <NAME>  Member name (direct members: idle with no unread mail; deeper descendants: exited only; --force skips the direct-member checks only)
 
 Options:
   -h, --help   Print help
@@ -329,14 +329,14 @@ actions:
 (none)
 
 ### remuda butler "close" "other" "--force"
-exit: 0
+exit: 1
 stdout:
-Closed other.
-Next: remuda butler sessions
-stderr:
 
+stderr:
+other is a deeper descendant and still live; only exited descendants can be closed by lineage (use close on its direct leader).
+Next: remuda butler sessions
 actions:
-close(other)
+(none)
 
 ### remuda butler "close" "--help" "worker"
 exit: 0
@@ -346,7 +346,7 @@ Close a Butler member or descendant
 
 
 Arguments:
-  <NAME>  Member name (only finished members, at any depth, unless --force)
+  <NAME>  Member name (direct members: idle with no unread mail; deeper descendants: exited only; --force skips the direct-member checks only)
 
 Options:
   -h, --help   Print help
@@ -371,7 +371,7 @@ Close a Butler member or descendant
 
 
 Arguments:
-  <NAME>  Member name (only finished members, at any depth, unless --force)
+  <NAME>  Member name (direct members: idle with no unread mail; deeper descendants: exited only; --force skips the direct-member checks only)
 
 Options:
   -h, --help   Print help
@@ -396,7 +396,7 @@ Close a Butler member or descendant
 
 
 Arguments:
-  <NAME>  Member name (only finished members, at any depth, unless --force)
+  <NAME>  Member name (direct members: idle with no unread mail; deeper descendants: exited only; --force skips the direct-member checks only)
 
 Options:
   -h, --help   Print help
@@ -421,7 +421,7 @@ Close a Butler member or descendant
 
 
 Arguments:
-  <NAME>  Member name (only finished members, at any depth, unless --force)
+  <NAME>  Member name (direct members: idle with no unread mail; deeper descendants: exited only; --force skips the direct-member checks only)
 
 Options:
   -h, --help   Print help
@@ -446,7 +446,7 @@ Close a Butler member or descendant
 
 
 Arguments:
-  <NAME>  Member name (only finished members, at any depth, unless --force)
+  <NAME>  Member name (direct members: idle with no unread mail; deeper descendants: exited only; --force skips the direct-member checks only)
 
 Options:
   -h, --help   Print help
