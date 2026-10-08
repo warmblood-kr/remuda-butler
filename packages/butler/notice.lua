@@ -203,6 +203,8 @@ function remuda._butler_notify_policy(session, now)
   prompt_screen = prompt_screen or full_screen
   local agent = bus.agents[session]
   local kind = agent and agent.kind or ""
+  -- Conservative: a Teach-title screen is ongoing deferral (detect-only, never answered), so
+  -- notice typing waits for as long as the title is on screen, like any other known modal.
   if known_startup_modal(remuda._butler_agent_startup[kind] or {}, full_screen) then
     _butler_session_trace("notice_deferred_modal", session .. " " .. kind)
     return false

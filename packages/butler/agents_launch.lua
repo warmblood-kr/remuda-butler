@@ -203,13 +203,15 @@ local function choose(candidates, opts, done)
     end
     if ready then state.attempt.reason, state.attempt.session = "ready", state.name; callback(state.name, id); return end
     local known = false
-    for dialog_index, dialog in ipairs(dialogs) do
-      local lower_screen = screen:lower()
+    -- Detect + defer only, BEFORE any handler (trust included) can send a key.
+    state.deferred_by_fragment = nil
+    for _, dialog in ipairs(dialogs) do
       if dialog.title and choice_modal_present(dialog, screen) then
-        -- Detect + defer only: a known modal is never answered with a key.
-        known, state.dialog_seen = true, dialog.title
-        break
+        known, state.dialog_seen, state.deferred_by_fragment = true, dialog.title, true
       end
+    end
+    for dialog_index, dialog in ipairs(known and {} or dialogs) do
+      local lower_screen = screen:lower()
       local trust_state = dialog.trust and trust_modal_state(dialog, screen) or nil
       -- Topic and eligible launches must show the launch cwd; an unreadable path fails closed.
       local workspace_matches_launch = dialog.trust and (not (opts.trust_path_gate or opts.trust_eligible)
@@ -320,7 +322,8 @@ local function choose(candidates, opts, done)
         callback(state.name, state.id)
         return
       end
-      local prefix = state.dialog_seen and ("dialog remained after its handler: " .. state.dialog_seen .. "; ") or ""
+      local prefix = state.dialog_seen and ((state.deferred_by_fragment and "deferred, never answered (Teach modal on screen): "
+        or "dialog remained after its handler: ") .. state.dialog_seen .. "; ") or ""
       local capture_error = state.last_capture_error and ("; last capture error: " .. state.last_capture_error) or ""
       fail_candidate(state.dialog_seen and "dialog" or "timeout", prefix
         .. "readiness prompt not observed within " .. tostring(state.timeout)
@@ -640,14 +643,16 @@ trust_modal_state = function(modal, screen)
   return plan.selected and "safe_selected" or "safe"
 end
 -- A titled choice modal (Claude "Teach auto mode ..."): DETECTION ONLY, never answered.
--- Any fragment (title or option text, partial, wrapped, quoted or drafted) counts, so
--- first-task delivery defers. Text is lowercased with punctuation/whitespace/borders
--- collapsed so a wrapped title still matches. Fails closed: false positives only defer.
+-- Quoted, drafted, partial or wrapped title text counts, so first-task delivery defers. Text is lowercased with punctuation/whitespace/borders
+-- collapsed so a wrapped title still matches. The title alone suffices; option text counts
+-- only with the title or the context phrase in the same capture (lone "Not now" is not it).
 local function fold(text) return " " .. tostring(text):lower():gsub("[^%w]+", " ") .. " " end
 choice_modal_present = function(modal, screen)
   local folded = fold(screen)
-  for _, fragment in ipairs(modal.fragments or {}) do
-    if folded:find(fold(fragment), 1, true) then return true end
+  if folded:find(fold(modal.title), 1, true) then return true end
+  if not folded:find(fold(modal.context), 1, true) then return false end
+  for _, option in ipairs(modal.options) do
+    if folded:find(fold(option), 1, true) then return true end
   end
   return false
 end
