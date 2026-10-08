@@ -66,7 +66,7 @@ T.test("switches preserve usage, gate order and side-effect-free parse", functio
       local reads, writes = 0, 0
       remuda._butler_matrix_config = { config_path = "/synthetic/config" }
       remuda.butler.matrix.read_config = function() reads = reads + 1; return { typed_lines = false, shell_lines = false } end
-      remuda.fs.write_atomic = function() writes = writes + 1; return true end
+      remuda.fs.write_atomic = function(target) if target == "/synthetic/config" then writes = writes + 1 end; return true end
       remuda.fail = function(message, code) return { failed = true, code = code, text = message } end
       remuda._pr2_switch_counts = function() return reads .. ":" .. writes end
     ]])
@@ -105,7 +105,7 @@ T.test("switches preserve usage, gate order and side-effect-free parse", functio
             return { typed_lines = ]] .. tostring(verb == "shell-lines") .. [[, shell_lines = ]] .. tostring(state == "off") .. [[,
               status_commands = ]] .. tostring(state == "off") .. [[ }
           end
-          remuda.fs.write_atomic = function() writes = writes + 1; return true end
+          remuda.fs.write_atomic = function(target) if target == path then writes = writes + 1 end; return true end
           remuda.pending = function() return {
             prompt_line = function(_, spec) spec.callback("yes") end,
             resolve = function(_, code, stdout, stderr) return { code = code, stdout = stdout, stderr = stderr } end,
