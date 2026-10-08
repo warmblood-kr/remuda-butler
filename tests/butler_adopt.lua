@@ -26,7 +26,7 @@ dofile("packages/butler/commands.lua")
 local function tree(rows)
   bus.agents, closed = {}, {}
   for _, r in ipairs(rows) do
-    bus.agents[r[1]] = { id = r[1] .. "-id", kind = "codex", parent = r[2], children = {} }
+    bus.agents[r[1]] = { id = r[1] .. "-id", kind = "codex", parent = r[2], parent_id = r[2] and (r[2] .. "-id"), children = {} }
   end
   for name, agent in pairs(bus.agents) do
     if agent.parent and bus.agents[agent.parent] then
