@@ -248,3 +248,32 @@ T.test("Claude readiness table over the real fixtures matches main", function()
       tostring(fixture[2]), fixture[1] .. " readiness")
   end
 end)
+
+-- A custom error object whose __tostring throws must never leak through diagnostics.
+local HOSTILE = [[setmetatable({}, { __tostring = function() error("\27SECRET_TOSTRING\nSECRET_ROW2", 0) end })]]
+
+T.test("sanitize_row survives an unprintable object", function()
+  T.eq(T.eval("return remuda._butler_chooser.sanitize_row(" .. HOSTILE .. ")"), "<unprintable>",
+    "a throwing __tostring yields the fixed placeholder")
+end)
+
+T.test("a capture that throws an unprintable object leaks nothing into the attempt detail", function()
+  T.eval([[
+    remuda._butler_agent_builders.hostile_probe = function() return { "sh", "-c", "sleep 60" } end
+    remuda._butler_test_force_launch_probe = remuda._butler_test_force_launch_probe or {}
+    remuda._butler_test_force_launch_probe["hostile-capture"] = true
+    remuda._probe_results = remuda._probe_results or {}
+    remuda.capture = function(session) if session == "hostile-capture" then error(]] .. HOSTILE .. [[) end return "" end
+    remuda._butler_choose_async({ "hostile_probe" }, {
+      name = "hostile-capture", cwd = os.getenv("XDG_DATA_HOME"), timeout = 1,
+      spec = function() return {} end, env = function() return {} end,
+    }, function(session, agent, rows) remuda._probe_results["hostile-capture"] = { rows = rows } end)
+  ]])
+  T.wait_until(function()
+    return T.eval('return tostring(remuda._probe_results["hostile-capture"] ~= nil)') == "true"
+  end, 8, "hostile capture decision")
+  local detail = T.eval([[local a = remuda._probe_results["hostile-capture"].rows[1]
+    return tostring(a.reason) .. "|" .. tostring(a.detail)]])
+  T.eq(detail:find("SECRET", 1, true), nil, "no hostile bytes in the attempt detail")
+  T.eval('return remuda.close("hostile-capture")')
+end)
