@@ -368,6 +368,8 @@ local function notify_mail_delivery(message, delivered, recipient_alias, what)
   local recipient_ok, _, recipient = pcall(mail_id, recipient_ref, false)
   result.recipient_live = recipient_ok
   if recipient_ok then
+    -- New mail means more work: a member that reported --done stays open (remuda#606).
+    if remuda._butler_done then remuda._butler_done[recipient.alias] = nil end
     local notice = remuda._butler_notice.mail_notice_text({
       id = delivered.id,
       from = message.from,
@@ -605,14 +607,34 @@ function remuda._butler_inbox(name)
   end
   return result
 end
-function remuda._butler_report(from, text)
+-- Members that reported with --done (remuda#606), by alias. In memory only: a
+-- daemon restart forgets them, which leaves the member open. New mail to a
+-- member clears its mark (notify_mail_delivery).
+remuda._butler_done = remuda._butler_done or {}
+function remuda._butler_report(from, text, done)
   from = resolve(from)
   local agent = bus.agents[from]
   if not agent then error("no Butler agent named " .. tostring(from), 0) end
   if not agent.parent then error("Butler agent " .. from .. " has no leader to report to", 0) end
   local queued = remuda._butler_send(from, agent.parent, text)
   remuda.emit("butler/report", from, agent.parent, text)
+  if done then remuda._butler_done[from] = true end
   return queued
+end
+-- The auto-close tick: each done member is closed by its parent through the
+-- normal close path, never forced, so unread mail or a busy pane keeps it open
+-- until a later tick. The root and parent-less rows are never auto-closed.
+function remuda._butler_done_tick()
+  local done = remuda._butler_done
+  for alias in pairs(done) do
+    local agent = bus.agents[alias]
+    if not agent or not agent.parent or alias == "butler" or alias == remuda._butler_name then
+      done[alias] = nil
+    elseif pcall(remuda._butler_close_member, alias, agent.parent, false, false) then
+      done[alias] = nil
+      _butler_session_trace("done_autoclose", alias)
+    end
+  end
 end
 local butler_attempts = remuda._butler_attempts or {}
 remuda._butler_attempts = butler_attempts
@@ -698,10 +720,16 @@ remuda.tool{
 local send_to_leader = {
   name = "butler_send_to_leader",
   about = "Report a completed work loop to this team member's Butler leader. This also emits the live butler/report hook.",
-  args = { text = "Concise result for the leader." },
+  args = { text = "Concise result for the leader.",
+    done = "Set true when your task is finished: Butler closes you once your inbox is drained and you are idle." },
   needs = { "text" },
   run = function(a, caller)
-    return remuda._butler_report(caller_name(caller), a.text)
+    local done = a.done
+    if done == "true" then done = true elseif done == "false" then done = false end
+    if done ~= nil and type(done) ~= "boolean" then
+      error("done must be a boolean.\nNext: set done to true or omit it", 0)
+    end
+    return remuda._butler_report(caller_name(caller), a.text, done == true)
   end,
 }
 remuda.tool(send_to_leader)

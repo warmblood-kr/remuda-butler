@@ -119,6 +119,15 @@ when that leader is gone too), so they stay closable and keep reporting to a
 live session. Adoption changes only who the leader is: no one else gains close
 rights, and the unread and idle checks apply as before.
 
+A member that finishes its task can report with `remuda butler send-to-leader
+--done ...` (the `butler_send_to_leader` tool takes `done: true`). Butler then
+closes it on its own: every 30 seconds it tries the normal close with the
+member's leader as the closer, never forced, so unread mail or a busy pane keeps
+the member open until a later try. New mail to the member cancels the request,
+and so does a daemon restart (the mark is kept in memory only). A report
+without `--done` never closes anyone, and the root and leader-less rows are
+never closed this way.
+
 ## The root AGENTS.md
 
 Butler's own guidance in the root session's `AGENTS.md` sits between
