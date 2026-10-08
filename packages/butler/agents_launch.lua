@@ -63,7 +63,7 @@ local function readiness_timeout()
 end
 -- main.lua assigns startup_action_safe with the notice policy; read it late.
 local startup_action_safe = config.startup_action_safe
-local trust_modal_state, trust_plan, trust_path_matches, TRUST_AFFIRMATIVE
+local trust_modal_state, trust_plan, trust_path_matches, TRUST_AFFIRMATIVE, choice_modal_present
 local claude_workspace_path
 -- The one generic launch chooser serves Butler and every managed member. Kinds
 -- are lifecycle contributions; the chooser only reads their data and callbacks.
@@ -198,10 +198,21 @@ local function choose(candidates, opts, done)
       local tested, decision = pcall(remuda._butler_prompt_is_empty, id, screen); ready = tested and decision == "EMPTY"
     end
     if not ready and (screen:match("\n%s*❯%s*$") or screen:match("\n%s*>%s*$") or screen:match("\n%s*›%s*$")) then ready = true end
-    if ready then state.attempt.reason, state.attempt.session = "ready", state.name; callback(state.name, id); return end
     local dialogs = type(entry.dialogs) == "function" and select(2, call_callback(entry.dialogs)) or entry.dialogs or {}
+    -- A titled modal can paint the idle composer beneath it: never ready while it is up.
+    for _, dialog in ipairs(dialogs) do
+      if ready and dialog.title and choice_modal_present(dialog, screen) then ready = false end
+    end
+    if ready then state.attempt.reason, state.attempt.session = "ready", state.name; callback(state.name, id); return end
     local known = false
-    for dialog_index, dialog in ipairs(dialogs) do
+    -- Detect + defer only, BEFORE any handler (trust included) can send a key.
+    state.deferred_by_fragment = nil
+    for _, dialog in ipairs(dialogs) do
+      if dialog.title and choice_modal_present(dialog, screen) then
+        known, state.dialog_seen, state.deferred_by_fragment = true, dialog.title, true
+      end
+    end
+    for dialog_index, dialog in ipairs(known and {} or dialogs) do
       local lower_screen = screen:lower()
       local trust_state = dialog.trust and trust_modal_state(dialog, screen) or nil
       -- Topic and eligible launches must show the launch cwd; an unreadable path fails closed.
@@ -313,7 +324,8 @@ local function choose(candidates, opts, done)
         callback(state.name, state.id)
         return
       end
-      local prefix = state.dialog_seen and ("dialog remained after its handler: " .. state.dialog_seen .. "; ") or ""
+      local prefix = state.dialog_seen and ((state.deferred_by_fragment and "deferred, never answered (Teach modal on screen): "
+        or "dialog remained after its handler: ") .. state.dialog_seen .. "; ") or ""
       local capture_error = state.last_capture_error and ("; last capture error: " .. state.last_capture_error) or ""
       fail_candidate(state.dialog_seen and "dialog" or "timeout", prefix
         .. "readiness prompt not observed within " .. tostring(state.timeout)
@@ -632,10 +644,26 @@ trust_modal_state = function(modal, screen)
   end
   return plan.selected and "safe_selected" or "safe"
 end
+-- A titled choice modal (Claude "Teach auto mode ..."): DETECTION ONLY, never answered.
+-- Quoted, drafted, partial or wrapped title text counts, so first-task delivery defers. Text is lowercased with punctuation/whitespace/borders
+-- collapsed so a wrapped title still matches. The title alone suffices; option text counts
+-- only with the title or the context phrase in the same capture (lone "Not now" is not it).
+local function fold(text) return " " .. tostring(text):lower():gsub("[^%w]+", " ") .. " " end
+choice_modal_present = function(modal, screen)
+  local folded = fold(screen)
+  if folded:find(fold(modal.title), 1, true) then return true end
+  if not folded:find(fold(modal.context), 1, true) then return false end
+  for _, option in ipairs(modal.options) do
+    if folded:find(fold(option), 1, true) then return true end
+  end
+  return false
+end
 local function startup_modal(startup, screen)
   local lower = tostring(screen or ""):lower()
   for _, modal in ipairs(startup.modals or {}) do
-    if modal.trust then
+    if modal.title then
+      if choice_modal_present(modal, screen) then return modal end
+    elseif modal.trust then
       if trust_modal_state(modal, screen) ~= "absent" then return modal end
     elseif modal.match and lower:find(modal.match:lower(), 1, true) then
       return modal
