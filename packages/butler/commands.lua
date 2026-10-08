@@ -239,6 +239,8 @@ local function close_member(name, leader, force, leaderless_ok)
     end
     return false
   end
+  -- Note: leader "butler" (the root, and any outside/unknown CLI caller the core maps
+  -- to it) is an ancestor of every non-root row, so it may close any finished member.
   local root_row = alias == "butler" or alias == remuda._butler_name
   local leaderless = leaderless_ok and agent and (not agent.parent or gone(agent.parent))
   if not agent or root_row or alias == leader or not (descends_from(agent) or (leader == "butler" and leaderless)) then
