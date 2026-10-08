@@ -23,6 +23,7 @@ local function outcomes()
     local bus = remuda._butler_bus
     local saved = { agents = bus.agents, close = remuda.close, ls = remuda.ls, idle = remuda.butler.is_idle }
     local closed, busy, out = {}, {}, {}
+    local gone = { leaf = true, deep = true, c300 = true, midnew = true } -- exited sessions
     bus.agents = {}
     for _, row in ipairs({ { "butler" }, { "lead", "butler" }, { "leaf", "lead" }, { "deep", "leaf" },
         { "sib", "butler" }, { "sibleaf", "sib" }, { "loop1", "loop2" }, { "loop2", "loop1" }, { "orph", "ghost" }, { "orphkid", "orph" } }) do
@@ -42,15 +43,28 @@ local function outcomes()
       remuda.caller = function() return { kind = kind, session = "" } end
       local ok = pcall(remuda._extension_commands.butler, { "close", name, "--force" }, { env = {} })
       remuda.caller = old
-      out[#out + 1] = "cli-" .. kind .. "-" .. name .. "=" .. ((ok and closed[1] == name) and "closed" or "refused")
+      out[#out + 1] = "cli-" .. kind .. "-" .. name .. "=" .. ((ok and closed[1] == name) and "closed" or ((not ok and #closed == 0) and "refused" or "BAD"))
     end
     remuda.close = function(name) closed[#closed + 1] = name end
-    remuda.ls = function() return {} end
+    remuda.ls = function()
+      local rows = {}
+      for n in pairs(gone) do rows[#rows + 1] = { name = n, alive = false } end
+      return rows
+    end
     remuda.butler.is_idle = function(name) if busy[name] then return false, "busy" end return true end
+    local function sig()
+      local t = {}
+      for a, r in pairs(bus.agents) do t[#t + 1] = a .. ">" .. tostring(r.parent) .. ">" .. tostring(r.parent_id) end
+      table.sort(t)
+      return table.concat(t, ",")
+    end
+    -- refused = error, zero close calls and an unchanged roster; closed = exactly the named close
     local function try(label, leader, name, force, cli)
       closed = {}
+      local before = sig()
       local ok = pcall(remuda._butler_close_member, name, leader, force, cli)
-      out[#out + 1] = label .. "=" .. ((ok and closed[1] == name) and "closed" or "refused")
+      local res = (ok and closed[1] == name and #closed == 1) and "closed" or ((not ok and #closed == 0) and "refused" or "BAD")
+      out[#out + 1] = label .. "=" .. (sig() == before and res or "BAD")
     end
     local ok, err = pcall(function()
       try("root-grandchild", "butler", "leaf", false, true)
@@ -84,9 +98,13 @@ local function outcomes()
       try("stale-alias-root", "butler", "midleaf", false, true)
       try("bound-alias-sibling", "sib", "midnew", false, true)
       cli("outside", "deep"); cli("unknown", "deep"); cli("service", "deep")
-      busy.deep = true
-      try("busy-grandchild", "butler", "deep", false, true)
-      try("busy-grandchild-force", "butler", "deep", true, true)
+      try("live-direct", "butler", "lead", false, true)
+      gone.deep = nil
+      try("live-deep", "butler", "deep", false, true)
+      try("live-deep-force", "butler", "deep", true, true)
+      try("live-deep-lead", "lead", "deep", true, nil)
+      busy.deep, gone.deep = true, true
+      try("exited-busy-deep", "butler", "deep", false, true)
     end)
     bus.agents, remuda.close, remuda.ls, remuda.butler.is_idle = saved.agents, saved.close, saved.ls, saved.idle
     if not ok then error(err, 0) end
@@ -107,6 +125,7 @@ T.test("ancestor closes finished descendants, others still refused", function()
     "caller-in-cycle=refused", "cycle-ancestor-target=refused", "self-leader-caller=refused",
     "stale-direct-lead=refused", "stale-alias-sibling=refused", "stale-alias-root=refused", "bound-alias-sibling=closed",
     "cli-outside-deep=closed", "cli-unknown-deep=refused", "cli-service-deep=refused",
-    "busy-grandchild=refused", "busy-grandchild-force=closed",
+    "live-direct=closed", "live-deep=refused", "live-deep-force=refused", "live-deep-lead=refused",
+    "exited-busy-deep=closed",
   }, " "), "close authority over descendants")
 end)

@@ -249,8 +249,8 @@ local function close_member(name, leader, force, leaderless_ok)
     end
     return found
   end
-  -- Note: leader "butler" (the root, and any outside/unknown CLI caller the core maps
-  -- to it) is an ancestor of every non-root row, so it may close any finished member.
+  -- Note: leader "butler" (the root, and an outside CLI caller the core maps to it)
+  -- is an ancestor of every non-root row; deeper rows need an exited session (below).
   local root_row = alias == "butler" or alias == remuda._butler_name
   local leaderless = leaderless_ok and agent and (not agent.parent or gone(agent.parent))
   if not agent or root_row or alias == leader or not (descends_from(agent) or (leader == "butler" and leaderless)) then
@@ -260,6 +260,11 @@ local function close_member(name, leader, force, leaderless_ok)
   -- an unsent draft. They cannot do more work, so those live-session gates do
   -- not apply and must not strand the roster row.
   local exited = session_exited(alias, agent)
+  -- Lineage authority over a deeper descendant (not a direct member, not a leaderless
+  -- row) reaches only exited sessions; --force does not widen it.
+  if not exited and agent.parent ~= leader and not (leader == "butler" and leaderless) then
+    error(alias .. " is a deeper descendant and still live; only exited descendants can be closed by lineage (use close on its direct leader).\nNext: remuda butler sessions", 0)
+  end
   if not force and not exited then
     local unread_ok, unread = pcall(mail.unread, agent.id)
     if not unread_ok or type(unread) ~= "number" then
@@ -310,7 +315,7 @@ local CLOSE_CLI_SPEC = {
     close = {
       about = "Close a Butler member or descendant",
       options = { { long = "force", help = "Skip unread-mail and idle checks" } },
-      args = { { name = "NAME", help = "Member name (only finished members, at any depth, unless --force)" } },
+      args = { { name = "NAME", help = "Member name (direct members: idle with no unread mail; deeper descendants: exited only; --force skips the direct-member checks only)" } },
       next = "remuda butler sessions",
     },
   },

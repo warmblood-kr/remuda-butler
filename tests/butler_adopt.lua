@@ -2,11 +2,17 @@
 --   luajit tests/butler_adopt.lua
 local bus = { agents = {} }
 local unread, idle, closed, exited, close_error = {}, {}, {}, {}, nil
+local deeper, live_deeper = {}, {} -- deeper targets are closable by lineage only once exited
 remuda = { extension_command = function() end, butler = { typed_lines_cli = {}, schedule_cli = {}, approve_text = { cli = function() end }, matrix = { cli_usage = function() return "" end },
     is_idle = function(name) if idle[name] == false then return false, "busy" end return true end },
   _butler_bus = bus,
   _butler_mail = nil,
-  ls = function() return exited end,
+  ls = function()
+    local rows = {}
+    for _, r in ipairs(exited) do rows[#rows + 1] = r end
+    for n in pairs(deeper) do rows[#rows + 1] = { name = n, alive = false } end
+    return rows
+  end,
   close = function(name)
     if close_error then error(close_error, 0) end
     closed[#closed + 1] = name
@@ -41,7 +47,9 @@ local function exit(name)
   remuda._butler_adopt_members(name, exited)
 end
 local function can_close(leader, name, force, cli)
-  closed = {}
+  closed, deeper = {}, {}
+  local row = bus.agents[name]
+  if row and row.parent ~= leader and not live_deeper[name] then deeper[name] = true end
   local ok = pcall(remuda._butler_close_member, name, leader, force, cli)
   return ok and closed[1] == name
 end
@@ -144,4 +152,12 @@ exit("lead")
 assert(bus.agents.m1.parent == "butler" and bus.agents.m1.parent_id == "butler-id", "stale exiting parent: members go to the root")
 assert(not can_close("top", "m1"), "stale heir alias does not gain the members")
 
+-- deeper descendants close by lineage only once exited; force does not widen that
+tree({ {"butler"}, {"top", "butler"}, {"lead", "top"}, {"m1", "lead"} })
+live_deeper.m1 = true
+assert(not can_close("butler", "m1") and not can_close("butler", "m1", true), "live deeper descendant refused, even forced")
+assert(#closed == 0 and bus.agents.m1.parent == "lead", "refusal has no effect")
+live_deeper.m1 = nil
+assert(can_close("butler", "m1"), "exited deeper descendant closes")
+assert(can_close("top", "lead"), "idle live direct member still closes")
 print("ok - adoption and close authority")
