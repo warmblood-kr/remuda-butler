@@ -2,11 +2,17 @@
 --   luajit tests/butler_adopt.lua
 local bus = { agents = {} }
 local unread, idle, closed, exited, close_error = {}, {}, {}, {}, nil
+local deeper, live_deeper = {}, {} -- deeper targets are closable by lineage only once exited
 remuda = { extension_command = function() end, butler = { typed_lines_cli = {}, schedule_cli = {}, approve_text = { cli = function() end }, matrix = { cli_usage = function() return "" end },
     is_idle = function(name) if idle[name] == false then return false, "busy" end return true end },
   _butler_bus = bus,
   _butler_mail = nil,
-  ls = function() return exited end,
+  ls = function()
+    local rows = {}
+    for _, r in ipairs(exited) do rows[#rows + 1] = r end
+    for n in pairs(deeper) do rows[#rows + 1] = { name = n, alive = false } end
+    return rows
+  end,
   close = function(name)
     if close_error then error(close_error, 0) end
     closed[#closed + 1] = name
@@ -26,7 +32,7 @@ dofile("packages/butler/commands.lua")
 local function tree(rows)
   bus.agents, closed = {}, {}
   for _, r in ipairs(rows) do
-    bus.agents[r[1]] = { id = r[1] .. "-id", kind = "codex", parent = r[2], children = {} }
+    bus.agents[r[1]] = { id = r[1] .. "-id", kind = "codex", parent = r[2], parent_id = r[2] and (r[2] .. "-id"), children = {} }
   end
   for name, agent in pairs(bus.agents) do
     if agent.parent and bus.agents[agent.parent] then
@@ -41,7 +47,9 @@ local function exit(name)
   remuda._butler_adopt_members(name, exited)
 end
 local function can_close(leader, name, force, cli)
-  closed = {}
+  closed, deeper = {}, {}
+  local row = bus.agents[name]
+  if row and row.parent ~= leader and not live_deeper[name] then deeper[name] = true end
   local ok = pcall(remuda._butler_close_member, name, leader, force, cli)
   return ok and closed[1] == name
 end
@@ -62,7 +70,7 @@ assert(can_close("top", "m1"), "new parent closes")
 for _, who in ipairs({ "sib", "other", "om", "m1" }) do
   assert(not can_close(who, "m1"), who .. " must not close adopted m1")
 end
-assert(not can_close("butler", "m1"), "root is not the parent of a live-parented row")
+assert(can_close("butler", "m1"), "root closes a descendant below a live parent (remuda#606)")
 assert(not can_close("top", "om"), "adoption does not widen to other leads' members")
 
 -- chain: lead -> mid -> leaf; the lead exits, then mid exits
@@ -93,7 +101,7 @@ assert(can_close("butler", "orphan", nil, true), "root closes an orphan")
 assert(can_close("butler", "free", nil, true), "root closes a parentless row")
 assert(not can_close("butler", "butler"), "root never closes itself")
 assert(not can_close("lead", "orphan") and not can_close("m", "free"), "non-root cannot close leader-less rows")
-assert(not can_close("butler", "m"), "root cannot close a row whose parent is alive")
+assert(can_close("butler", "m"), "root closes a grandchild whose parent is alive (remuda#606)")
 assert(not can_close("butler", "orphan") and not can_close("butler", "free"), "an MCP caller (no CLI flag) never closes leader-less rows")
 remuda._butler_relaunching = { DEAD = os.time() }
 assert(not can_close("butler", "orphan", nil, true), "a lead that is relaunching still has its members")
@@ -129,4 +137,27 @@ exited, close_error, remuda.butler.is_idle = {}, nil, function(name)
   if idle[name] == false then return false, "busy" end
   return true
 end
+-- stale generations (sec-463b): a recorded parent_id that no longer matches is never rebound or honored
+tree({ {"butler"}, {"top", "butler"}, {"lead", "top"}, {"m1", "lead"}, {"m2", "lead"} })
+assert(can_close("lead", "m1"), "healthy direct member closes")
+bus.agents.m1.parent_id = "stale-id"
+assert(not can_close("lead", "m1"), "direct edge with a mismatched parent_id refuses")
+exit("lead")
+assert(bus.agents.m1.parent == "lead" and bus.agents.m1.parent_id == "stale-id", "stale child is not adopted")
+assert(not can_close("top", "m1") and not can_close("butler", "m1"), "stale child is not closable via the heir")
+assert(bus.agents.m2.parent == "top" and bus.agents.m2.parent_id == "top-id" and can_close("top", "m2"), "healthy sibling still adopted")
+tree({ {"butler"}, {"top", "butler"}, {"lead", "top"}, {"m1", "lead"} })
+bus.agents.lead.parent_id = "stale-id" -- the exiting row itself belongs to a stale parent generation
+exit("lead")
+assert(bus.agents.m1.parent == "butler" and bus.agents.m1.parent_id == "butler-id", "stale exiting parent: members go to the root")
+assert(not can_close("top", "m1"), "stale heir alias does not gain the members")
+
+-- deeper descendants close by lineage only once exited; force does not widen that
+tree({ {"butler"}, {"top", "butler"}, {"lead", "top"}, {"m1", "lead"} })
+live_deeper.m1 = true
+assert(not can_close("butler", "m1") and not can_close("butler", "m1", true), "live deeper descendant refused, even forced")
+assert(#closed == 0 and bus.agents.m1.parent == "lead", "refusal has no effect")
+live_deeper.m1 = nil
+assert(can_close("butler", "m1"), "exited deeper descendant closes")
+assert(can_close("top", "lead"), "idle live direct member still closes")
 print("ok - adoption and close authority")

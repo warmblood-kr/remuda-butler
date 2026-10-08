@@ -221,7 +221,8 @@ local function close_member(name, leader, force, leaderless_ok)
   if not ok then error("cannot close " .. tostring(name) .. ": unknown Butler member.\nNext: remuda butler sessions", 0) end
   local agents = remuda._butler_bus and remuda._butler_bus.agents or {}
   local agent = agents[alias]
-  -- Direct members only; the root (or a person) may also close leader-less rows
+  -- Members and their descendants only (remuda#606: a leader-of-leader closes a
+  -- finished grandchild); the root (or a person) may also close leader-less rows
   -- (no parent, or a parent that is gone and not relaunching), from the CLI only:
   -- an MCP caller's identity comes from its environment. The root row itself is
   -- never closable.
@@ -229,15 +230,41 @@ local function close_member(name, leader, force, leaderless_ok)
   local function gone(parent)
     return not agents[parent] and not (relaunching[parent] and os.time() - relaunching[parent] < RELAUNCH_WINDOW)
   end
+  -- Strict descendant: walk the whole lineage; a caller match never skips the
+  -- cycle check. Past the first hop each edge must be bound to the parent's
+  -- durable id (parent_id), so a reused alias cannot inherit an old branch.
+  local function descends_from(row)
+    local seen, found, cur = { [alias] = true }, false, row
+    while cur.parent ~= nil do
+      local parent, up = cur.parent, agents[cur.parent]
+      if seen[parent] then return false end -- cycle: refuse even when the caller was met
+      seen[parent] = true
+      -- A present parent_id must match the parent's durable id on every edge below the
+      -- leader; only a direct edge with NO parent_id (legacy row) is trusted by alias.
+      local legacy_direct = cur == row and parent == leader and cur.parent_id == nil
+      if not found and not legacy_direct and (not up or cur.parent_id == nil or cur.parent_id ~= up.id) then return false end
+      if parent == leader then found = true end
+      if not up then break end
+      cur = up
+    end
+    return found
+  end
+  -- Note: leader "butler" (the root, and an outside CLI caller the core maps to it)
+  -- is an ancestor of every non-root row; deeper rows need an exited session (below).
   local root_row = alias == "butler" or alias == remuda._butler_name
   local leaderless = leaderless_ok and agent and (not agent.parent or gone(agent.parent))
-  if not agent or root_row or not (agent.parent == leader or (leader == "butler" and leaderless)) then
-    error("cannot close " .. tostring(alias) .. ": only your direct members can be closed (you and your leader are excluded).\nNext: remuda butler sessions", 0)
+  if not agent or root_row or alias == leader or not (descends_from(agent) or (leader == "butler" and leaderless)) then
+    error("cannot close " .. tostring(alias) .. ": only your members and their descendants can be closed (you and your leaders are excluded).\nNext: remuda butler sessions", 0)
   end
   -- Exited sessions retain their final screen, which may look busy or contain
   -- an unsent draft. They cannot do more work, so those live-session gates do
   -- not apply and must not strand the roster row.
   local exited = session_exited(alias, agent)
+  -- Lineage authority over a deeper descendant (not a direct member, not a leaderless
+  -- row) reaches only exited sessions; --force does not widen it.
+  if not exited and agent.parent ~= leader and not (leader == "butler" and leaderless) then
+    error(alias .. " is a deeper descendant and still live; only exited descendants can be closed by lineage (use close on its direct leader).\nNext: remuda butler sessions", 0)
+  end
   if not force and not exited then
     local unread_ok, unread = pcall(mail.unread, agent.id)
     if not unread_ok or type(unread) ~= "number" then
@@ -266,7 +293,8 @@ local function close_caller_leader()
   if type(remuda.caller) ~= "function" then refuse() end
   local ok, caller = pcall(remuda.caller)
   if not ok or type(caller) ~= "table" then refuse() end
-  if caller.kind == "outside" or caller.kind == "unknown" then return "butler" end
+  -- unknown is not evidence of an operator: refuse it (only outside maps to the root)
+  if caller.kind == "outside" then return "butler" end
   if caller.kind ~= "session" or type(caller.session) ~= "string" or caller.session == "" then refuse() end
   local agents = remuda._butler_bus and remuda._butler_bus.agents
   if type(agents) ~= "table" then refuse() end
@@ -285,9 +313,9 @@ local CLOSE_CLI_SPEC = {
   name = "remuda butler",
   verbs = {
     close = {
-      about = "Close a direct Butler member",
+      about = "Close a Butler member or descendant",
       options = { { long = "force", help = "Skip unread-mail and idle checks" } },
-      args = { { name = "NAME", help = "Member name" } },
+      args = { { name = "NAME", help = "Member name (direct members: idle with no unread mail; deeper descendants: exited only; --force skips the direct-member checks only)" } },
       next = "remuda butler sessions",
     },
   },

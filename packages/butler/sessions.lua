@@ -69,11 +69,17 @@ end
 -- A lead that exits hands its live members to its own leader (the root when
 -- that leader is gone too), so someone can still close them (#230).
 function remuda._butler_adopt_members(name, exited)
-  local heir = exited.parent and bus.agents[exited.parent] and exited.parent
+  -- Only a recorded generation that still matches is rebound; a mismatch (a retained
+  -- edge from before an alias was reused) is neither adopted nor stamped.
+  local function current(parent, parent_id)
+    local row = parent and bus.agents[parent]
+    return row and (parent_id == nil or parent_id == row.id)
+  end
+  local heir = current(exited.parent, exited.parent_id) and exited.parent
     or (bus.agents.butler and "butler") or nil
   for alias, agent in pairs(bus.agents) do
-    if agent.parent == name then
-      agent.parent = heir
+    if agent.parent == name and (agent.parent_id == nil or agent.parent_id == exited.id) then
+      agent.parent, agent.parent_id = heir, heir and bus.agents[heir].id
       if heir then table.insert(bus.agents[heir].children, alias) end
     end
   end

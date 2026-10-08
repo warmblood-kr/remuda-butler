@@ -1,0 +1,131 @@
+-- remuda#606: an ancestor closes a finished descendant below its direct members
+-- (leader-of-leader), with the normal close gates; siblings, the descendant
+-- itself and other branches still cannot.
+local repo = assert(os.getenv("REMUDA_LUA_REPO"))
+local started
+
+local function start_butler()
+  if started then return end
+  started = true
+  T.install_mod("butler", repo)
+  T.eval('remuda._butler_argv = {"sh", "-c", "sleep 60"}; remuda._butler_skip_relay = true; remuda._butler_readiness_timeout = 1')
+  T.eval('return remuda.exec("butler")')
+  T.wait_until(function()
+    return T.eval('return remuda._butler_bus ~= nil and remuda._butler_bus.agents.butler ~= nil')
+      :match("^%s*true%s*$") ~= nil
+  end, 10, "Butler root start")
+end
+
+-- Runs every case in one daemon call against a stubbed roster, close and idle
+-- check, then restores them, so the live roster never sees the fake rows.
+local function outcomes()
+  return T.eval([=[
+    local bus = remuda._butler_bus
+    local saved = { agents = bus.agents, close = remuda.close, ls = remuda.ls, idle = remuda.butler.is_idle }
+    local closed, busy, out = {}, {}, {}
+    local gone = { leaf = true, deep = true, c300 = true, midnew = true } -- exited sessions
+    bus.agents = {}
+    for _, row in ipairs({ { "butler" }, { "lead", "butler" }, { "leaf", "lead" }, { "deep", "leaf" },
+        { "sib", "butler" }, { "sibleaf", "sib" }, { "loop1", "loop2" }, { "loop2", "loop1" }, { "orph", "ghost" }, { "orphkid", "orph" } }) do
+      bus.agents[row[1]] = { id = row[1] .. "-606-id", kind = "codex", parent = row[2], session_name = row[1],
+        parent_id = row[2] and (row[2] .. "-606-id") or nil }
+    end
+    local function add(alias, parent, parent_id)
+      bus.agents[alias] = { id = alias .. "-606-id", kind = "codex", parent = parent, parent_id = parent_id, session_name = alias }
+    end
+    -- two-cycle with a child, a self-leader with a child, a replaced alias (failed relaunch + reuse)
+    add("ca", "cb", "cb-606-id"); add("cb", "ca", "ca-606-id"); add("ckid", "ca", "ca-606-id")
+    add("selfl", "selfl", "selfl-606-id"); add("selfkid", "selfl", "selfl-606-id")
+    add("staledirect", "lead", "lead-OLD-id"); add("mid", "sib", "sib-606-id"); add("midleaf", "mid", "mid-OLD-id"); add("midnew", "mid", "mid-606-id")
+    local function cli(kind, name)
+      closed = {}
+      local old = remuda.caller
+      remuda.caller = function() return { kind = kind, session = "" } end
+      local ok = pcall(remuda._extension_commands.butler, { "close", name, "--force" }, { env = {} })
+      remuda.caller = old
+      out[#out + 1] = "cli-" .. kind .. "-" .. name .. "=" .. ((ok and closed[1] == name) and "closed" or ((not ok and #closed == 0) and "refused" or "BAD"))
+    end
+    remuda.close = function(name) closed[#closed + 1] = name end
+    remuda.ls = function()
+      local rows = {}
+      for n in pairs(gone) do rows[#rows + 1] = { name = n, alive = false } end
+      return rows
+    end
+    remuda.butler.is_idle = function(name) if busy[name] then return false, "busy" end return true end
+    local function sig()
+      local t = {}
+      for a, r in pairs(bus.agents) do t[#t + 1] = a .. ">" .. tostring(r.parent) .. ">" .. tostring(r.parent_id) end
+      table.sort(t)
+      return table.concat(t, ",")
+    end
+    -- refused = error, zero close calls and an unchanged roster; closed = exactly the named close
+    local function try(label, leader, name, force, cli)
+      closed = {}
+      local before = sig()
+      local ok = pcall(remuda._butler_close_member, name, leader, force, cli)
+      local res = (ok and closed[1] == name and #closed == 1) and "closed" or ((not ok and #closed == 0) and "refused" or "BAD")
+      out[#out + 1] = label .. "=" .. (sig() == before and res or "BAD")
+    end
+    local ok, err = pcall(function()
+      try("root-grandchild", "butler", "leaf", false, true)
+      try("root-great-grandchild", "butler", "deep", false, true)
+      try("lead-grandchild", "lead", "deep", false, true)
+      try("mcp-lead-grandchild", "lead", "deep", false, nil)
+      try("lead-direct", "lead", "leaf", false, true)
+      try("sibling-branch", "sib", "deep", false, true)
+      try("other-branch", "lead", "sibleaf", false, true)
+      try("child-closes-ancestor", "leaf", "lead", false, true)
+      try("self", "leaf", "leaf", false, true)
+      try("root-row", "lead", "butler", true, true)
+      try("parent-cycle", "butler", "loop1", false, nil)
+      try("cycle-self", "loop1", "loop1", false, true)
+      try("missing-link-root", "butler", "orphkid", false, nil)
+      try("missing-link-lead", "lead", "orphkid", false, true)
+      try("nil-caller", nil, "leaf", false, true)
+      try("empty-caller", "", "leaf", false, true)
+      try("unknown-caller", "nobody", "leaf", false, true)
+      try("empty-name", "butler", "", false, true)
+      try("nil-name", "butler", nil, false, true)
+      try("unknown-name", "butler", "nobody", false, true)
+      for i = 1, 300 do bus.agents["c" .. i] = { id = "c" .. i .. "-id", kind = "codex", parent = i == 1 and "lead" or ("c" .. (i - 1)), parent_id = i == 1 and "lead-606-id" or ("c" .. (i - 1) .. "-id"), session_name = "c" .. i } end
+      try("deep-chain-root", "butler", "c300", false, nil)
+      try("deep-chain-sibling", "sib", "c300", false, true)
+      try("caller-in-cycle", "cb", "ckid", false, true)
+      try("cycle-ancestor-target", "cb", "ca", false, true)
+      try("self-leader-caller", "selfl", "selfkid", false, true)
+      try("stale-direct-lead", "lead", "staledirect", false, true)
+      try("stale-alias-sibling", "sib", "midleaf", false, true)
+      try("stale-alias-root", "butler", "midleaf", false, true)
+      try("bound-alias-sibling", "sib", "midnew", false, true)
+      cli("outside", "deep"); cli("unknown", "deep"); cli("service", "deep")
+      try("live-direct", "butler", "lead", false, true)
+      gone.deep = nil
+      try("live-deep", "butler", "deep", false, true)
+      try("live-deep-force", "butler", "deep", true, true)
+      try("live-deep-lead", "lead", "deep", true, nil)
+      busy.deep, gone.deep = true, true
+      try("exited-busy-deep", "butler", "deep", false, true)
+    end)
+    bus.agents, remuda.close, remuda.ls, remuda.butler.is_idle = saved.agents, saved.close, saved.ls, saved.idle
+    if not ok then error(err, 0) end
+    return table.concat(out, " ")
+  ]=])
+end
+
+T.test("ancestor closes finished descendants, others still refused", function()
+  start_butler()
+  T.eq(outcomes(), table.concat({
+    "root-grandchild=closed", "root-great-grandchild=closed", "lead-grandchild=closed",
+    "mcp-lead-grandchild=closed", "lead-direct=closed",
+    "sibling-branch=refused", "other-branch=refused", "child-closes-ancestor=refused", "self=refused",
+    "root-row=refused", "parent-cycle=refused", "cycle-self=refused",
+    "missing-link-root=refused", "missing-link-lead=refused", "nil-caller=refused", "empty-caller=refused",
+    "unknown-caller=refused", "empty-name=refused", "nil-name=refused", "unknown-name=refused",
+    "deep-chain-root=closed", "deep-chain-sibling=refused",
+    "caller-in-cycle=refused", "cycle-ancestor-target=refused", "self-leader-caller=refused",
+    "stale-direct-lead=refused", "stale-alias-sibling=refused", "stale-alias-root=refused", "bound-alias-sibling=closed",
+    "cli-outside-deep=closed", "cli-unknown-deep=refused", "cli-service-deep=refused",
+    "live-direct=closed", "live-deep=refused", "live-deep-force=refused", "live-deep-lead=refused",
+    "exited-busy-deep=closed",
+  }, " "), "close authority over descendants")
+end)

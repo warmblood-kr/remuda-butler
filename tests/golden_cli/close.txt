@@ -16,12 +16,12 @@ actions:
 ### remuda butler "close" "--help"
 exit: 0
 stdout:
-Close a direct Butler member
+Close a Butler member or descendant
 
 
 
 Arguments:
-  <NAME>  Member name
+  <NAME>  Member name (direct members: idle with no unread mail; deeper descendants: exited only; --force skips the direct-member checks only)
 
 Options:
   -h, --help   Print help
@@ -41,12 +41,12 @@ actions:
 ### remuda butler "close" "-h"
 exit: 0
 stdout:
-Close a direct Butler member
+Close a Butler member or descendant
 
 
 
 Arguments:
-  <NAME>  Member name
+  <NAME>  Member name (direct members: idle with no unread mail; deeper descendants: exited only; --force skips the direct-member checks only)
 
 Options:
   -h, --help   Print help
@@ -323,7 +323,7 @@ exit: 1
 stdout:
 
 stderr:
-cannot close butler: only your direct members can be closed (you and your leader are excluded).
+cannot close butler: only your members and their descendants can be closed (you and your leaders are excluded).
 Next: remuda butler sessions
 actions:
 (none)
@@ -333,7 +333,7 @@ exit: 1
 stdout:
 
 stderr:
-cannot close other: only your direct members can be closed (you and your leader are excluded).
+other is a deeper descendant and still live; only exited descendants can be closed by lineage (use close on its direct leader).
 Next: remuda butler sessions
 actions:
 (none)
@@ -341,12 +341,12 @@ actions:
 ### remuda butler "close" "--help" "worker"
 exit: 0
 stdout:
-Close a direct Butler member
+Close a Butler member or descendant
 
 
 
 Arguments:
-  <NAME>  Member name
+  <NAME>  Member name (direct members: idle with no unread mail; deeper descendants: exited only; --force skips the direct-member checks only)
 
 Options:
   -h, --help   Print help
@@ -366,12 +366,12 @@ actions:
 ### remuda butler "close" "worker" "--help"
 exit: 0
 stdout:
-Close a direct Butler member
+Close a Butler member or descendant
 
 
 
 Arguments:
-  <NAME>  Member name
+  <NAME>  Member name (direct members: idle with no unread mail; deeper descendants: exited only; --force skips the direct-member checks only)
 
 Options:
   -h, --help   Print help
@@ -391,12 +391,12 @@ actions:
 ### remuda butler "close" "worker" "-h"
 exit: 0
 stdout:
-Close a direct Butler member
+Close a Butler member or descendant
 
 
 
 Arguments:
-  <NAME>  Member name
+  <NAME>  Member name (direct members: idle with no unread mail; deeper descendants: exited only; --force skips the direct-member checks only)
 
 Options:
   -h, --help   Print help
@@ -416,12 +416,12 @@ actions:
 ### remuda butler "close" "--force" "--help"
 exit: 0
 stdout:
-Close a direct Butler member
+Close a Butler member or descendant
 
 
 
 Arguments:
-  <NAME>  Member name
+  <NAME>  Member name (direct members: idle with no unread mail; deeper descendants: exited only; --force skips the direct-member checks only)
 
 Options:
   -h, --help   Print help
@@ -441,12 +441,12 @@ actions:
 ### remuda butler "close" "--help" "--force"
 exit: 0
 stdout:
-Close a direct Butler member
+Close a Butler member or descendant
 
 
 
 Arguments:
-  <NAME>  Member name
+  <NAME>  Member name (direct members: idle with no unread mail; deeper descendants: exited only; --force skips the direct-member checks only)
 
 Options:
   -h, --help   Print help
