@@ -178,27 +178,60 @@ local function mail_id(ref, allow_ended)
   return agent.id, agent
 end
 remuda._butler_resolve = resolve
+-- Token records are daemon memory only: a restarted daemon re-reads durable ids
+-- (identity reload ends every absent non-root session) but not tokens, so no
+-- bridge is re-adopted by an earlier token. An in-image reload keeps the bus.
+-- The random per-bus incarnation keeps tokens unique across rapid daemon
+-- replacement or a clock rollback; the token is a lookup key, never a secret
+-- beyond same-user advisory attribution.
 local function next_token(name)
   bus.next = bus.next + 1
-  return name .. "-" .. os.time() .. "-" .. bus.next
+  bus.incarnation = bus.incarnation or crockford_ulid():sub(-10)
+  return name .. "-" .. os.time() .. "-" .. bus.incarnation .. "-" .. bus.next
 end
 local function caller_name(caller)
-  -- CLI principal resolution is strict. MCP retains its capability-only path
-  -- on cores whose tools do not supply native caller fields. A managed session
-  -- still has to resolve uniquely; its token cannot rescue a stale registration.
-  local current = type(caller) == "table" and caller.kind == "session" and current_agent(caller)
-  if current then
-    local ok, alias = pcall(resolve, current)
-    if ok then return alias end
+  -- A native principal, including unknown and service callers, takes
+  -- precedence over the older capability-only compatibility path.
+  if caller and caller.kind ~= nil then
+    if caller.kind ~= "session" then return nil end
+    -- The shared resolver (caller_principal) yields exactly one live registration
+    -- or refuses; a capability never repairs a failed native attribution.
+    local ok, id = pcall(current_agent, caller)
+    local resolved, alias = pcall(resolve, ok and id or "")
+    return resolved and alias or nil
   end
   local token = caller and caller.capability
-  return (token and bus.tokens[token]) or "outside"
+  local capability = token and bus.tokens[token]
+  -- During a live upgrade, an older image may still have alias-valued entries.
+  -- Bind one only when the live row proves it owns that exact token.
+  if type(capability) == "string" then
+    local legacy_agent = bus.agents[capability]
+    if not legacy_agent or legacy_agent.token ~= token or not legacy_agent.id
+        or not legacy_agent.session_start_marker then return nil end
+    capability = { id = legacy_agent.id, generation = legacy_agent.session_start_marker }
+    bus.tokens[token] = capability
+  end
+  if type(capability) ~= "table" then return nil end
+  local identity = bus.identity_ids[capability.id]
+  local alias = identity and identity.alias
+  local agent = alias and bus.agents[alias]
+  if identity and identity.state == "running" and agent
+      and agent.id == capability.id and agent.session_start_marker == capability.generation then
+    -- session_exited runs after the native exit, so also ask the daemon: a
+    -- session that is gone or whose liveness cannot be read does not authorize.
+    local name = alias == "butler" and remuda._butler_name or agent.session_name or alias
+    local ok, sessions = pcall(remuda.ls)
+    for _, session in ipairs(ok and type(sessions) == "table" and sessions or {}) do
+      if session.name == name then return session.alive and alias or nil end
+    end
+  end
+  return nil
 end
 -- An MCP caller that acts on mail must be a known agent: an unknown or garbage
 -- capability is refused, never treated as the operator (review of #39).
 local function caller_agent(caller)
   local name = caller_name(caller)
-  if not bus.agents[name] then
+  if not name or not bus.agents[name] then
     error("unknown caller: run from a Butler session (its MCP config carries the capability)", 0)
   end
   return name
@@ -207,7 +240,7 @@ end
 -- caller silently became `butler`'s child and reported to root (#24).
 local function caller_leader(caller)
   local parent = caller_name(caller)
-  if not bus.agents[parent] then
+  if not parent or not bus.agents[parent] then
     error("unknown caller: run from a Butler session, or pass an explicit leader"
       .. " with `remuda butler topic delegate --leader NAME`", 0)
   end

@@ -65,7 +65,8 @@ run dl_default remuda -s $S butler matrix download mxc://media.example/a1
 run reply_dots remuda -s $S butler reply ../../../../victim hello
 run fwd_dots   remuda -s $S butler forward ../../../../victim butler
 call() { printf '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"%s","arguments":%s}}\n' "\$1" "\$2"; }
-mcp() { name=\$1; shift; call "\$@" | remuda -s $S mcp >"$T/\$name.out" 2>&1; }
+TOK_M1=\$(remuda -s $S -e 'return remuda._butler_bus.agents.m1.token')
+mcp() { name=\$1; shift; call "\$@" | REMUDA_SESSION_CAPABILITY=\$TOK_M1 remuda -s $S mcp >"$T/\$name.out" 2>&1; }
 mcp mcp_dl      matrix_download '{"mxc":"mxc://media.example/b2"}'
 mcp mcp_up_out  matrix_upload "{\\"path\\":\\"$T/secret.txt\\"}"
 mcp mcp_up_link matrix_upload "{\\"path\\":\\"\$PWD/link.txt\\"}"

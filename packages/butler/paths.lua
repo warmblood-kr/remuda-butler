@@ -124,7 +124,7 @@ local function shell_quote(s)
   return "'" .. s:gsub("'", "'\\\"'\\\"'") .. "'"
 end
 -- Names that are mail senders and never sessions.
-local RESERVED_NAMES = { schedule = true }
+local RESERVED_NAMES = { schedule = true, outside = true }
 local function valid_child_name(name, what)
   if RESERVED_NAMES[name] then error((what or "name") .. " " .. name .. " is reserved", 0) end
   if type(name) ~= "string" or name == "" or name:sub(1, 1) == "."

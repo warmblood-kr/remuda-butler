@@ -672,7 +672,8 @@ remuda.tool{
   args = { to = "Recipient session name.", text = "Message body." },
   needs = { "to", "text" },
   run = function(a, caller)
-    return remuda._butler_send(caller_name(caller), a.to, a.text)
+    local principal = caller_agent(caller)
+    return remuda._butler_send(principal, a.to, a.text)
   end,
 }
 remuda.tool{
@@ -681,21 +682,14 @@ remuda.tool{
   args = { session = "Target Butler session name.", text = "Exact text to register, up to 8 KiB." },
   needs = { "session", "text" },
   run = function(a, caller)
+    local principal = caller_principal.resolve(caller).tag == "operator" and "outside" or caller_agent(caller)
     local feature = remuda.butler and remuda.butler.approve_text
     if not feature or not feature.target_session_allowed(a.session) then
       error("Unknown Butler session: " .. tostring(a.session), 0)
     end
-    -- Decide from how the caller resolved, not from caller_name's "outside" string
-    -- (a live member may be named `outside`): a session-resolved member, a live
-    -- capability token, or the named operator policy.
-    local asker = caller_name(caller)
-    local token = type(caller) == "table" and caller.capability
-    local member = caller_principal.resolve(caller).tag == "member"
-      or (token and bus.tokens[token] and bus.agents[bus.tokens[token]])
-    if not member and caller_principal.resolve(caller).tag ~= "operator" then
-      error("Butler cannot identify this caller. Next: run from a registered Butler session or upgrade Remuda core.", 0)
-    end
-    local id, why = feature.request(a.session, a.text, asker)
+    -- One resolver: the structured principal decides; "outside" is only ever the
+    -- named operator policy, never a lookup result.
+    local id, why = feature.request(a.session, a.text, principal)
     if not id then error(tostring(why or "Could not register prepared text"), 0) end
     return id
   end,
@@ -704,7 +698,8 @@ remuda.tool{
   name = "butler_inbox",
   about = "Drain this agent's Butler inbox and return its queued messages in arrival order.",
   run = function(_, caller)
-    return remuda._butler_inbox(caller_name(caller))
+    local principal = caller_agent(caller)
+    return remuda._butler_inbox(principal)
   end,
 }
 local send_to_leader = {
@@ -713,7 +708,8 @@ local send_to_leader = {
   args = { text = "Concise result for the leader." },
   needs = { "text" },
   run = function(a, caller)
-    return remuda._butler_report(caller_name(caller), a.text)
+    local principal = caller_agent(caller)
+    return remuda._butler_report(principal, a.text)
   end,
 }
 remuda.tool(send_to_leader)
@@ -725,9 +721,10 @@ remuda.tool{
   args = { message_id = "Message to reply to.", to = "Recipient, only without message_id.", text = "Reply body." },
   needs = { "text" },
   run = function(a, caller)
-    if a.message_id then return remuda._butler_reply(caller_agent(caller), a.message_id, a.text) end
+    local principal = caller_agent(caller)
+    if a.message_id then return remuda._butler_reply(principal, a.message_id, a.text) end
     if not a.to then error("butler_reply needs message_id or to", 0) end
-    return remuda._butler_send(caller_name(caller), a.to, a.text)
+    return remuda._butler_send(principal, a.to, a.text)
   end,
 }
 remuda.tool{
@@ -747,7 +744,8 @@ remuda.tool{
   args = { mxc = "The mxc://server/media URI." },
   needs = { "mxc" },
   run = function(a, caller)
-    return remuda.butler.matrix.cli({ "matrix", "download", a.mxc }, caller_name(caller))
+    local principal = caller_agent(caller)
+    return remuda.butler.matrix.cli({ "matrix", "download", a.mxc }, principal)
   end,
 }
 remuda.tool{
@@ -756,8 +754,9 @@ remuda.tool{
   args = { path = "Absolute path of a file inside your working directory.", room = "Optional room; defaults to the configured room." },
   needs = { "path" },
   run = function(a, caller)
+    local principal = caller_agent(caller)
     local args = a.room and { "matrix", "--room", a.room, "upload", a.path } or { "matrix", "upload", a.path }
-    return remuda.butler.matrix.cli(args, caller_name(caller))
+    return remuda.butler.matrix.cli(args, principal)
   end,
 }
 remuda.tool{
@@ -793,7 +792,6 @@ local butler_kind = existing_butler and existing_butler.kind
   or (launch_options and launch_options.agent)
   or os.getenv("REMUDA_BUTLER_AGENT") or "claude"
 local butler_token = existing_butler and existing_butler.token or next_token("butler")
-bus.tokens[butler_token] = "butler"
 local root_identity = existing_butler and existing_butler.id
   and { id = existing_butler.id, alias = "butler" }
   or (bus.identities.butler and { id = bus.identities.butler.id, alias = "butler" })
@@ -816,6 +814,7 @@ bus.agents.butler.id = root_identity.id
 bus.agents.butler.alias = "butler"
 bus.agents.butler.session_name = bus.agents.butler.session_name or "butler"
 bus.agents.butler.session_start_marker = remuda._butler_new_ulid()
+bus.tokens[butler_token] = { id = root_identity.id, generation = bus.agents.butler.session_start_marker }
 bus.identity_ids[root_identity.id] = bus.identities.butler or root_identity
 bus.identities.butler = bus.identities.butler or root_identity
 local root_migrated, root_migration_error = migrate_legacy_mail("butler", root_identity.id)
@@ -824,6 +823,22 @@ mailbox(root_identity.id)
 -- The root MCP config carries the root capability: owner-only (0600), and a
 -- file left 0644 by an older Butler is replaced.
 remuda.butler.guard.write_private(mcp_config_path, agent_mcp_json(butler_token))
+-- The root id is durable, but every root launch gets its own capability and
+-- marker, written to the bridge config before that launch starts. Exit revokes
+-- both, so an ended root bridge cannot authorize until the next launch.
+local function rotate_root_capability()
+  local root = bus.agents.butler
+  if root.token then bus.tokens[root.token] = nil end
+  butler_token = next_token("butler")
+  root.token, root.session_start_marker = butler_token, remuda._butler_new_ulid()
+  bus.tokens[butler_token] = { id = root_identity.id, generation = root.session_start_marker }
+  remuda.butler.guard.write_private(mcp_config_path, agent_mcp_json(butler_token))
+end
+function remuda._butler_revoke_root_capability()
+  local root = bus.agents.butler
+  if root and root.token then bus.tokens[root.token] = nil end
+  if root then root.session_start_marker = nil end
+end
 
 local SYSTEM_PROMPT = "You lead a Butler team. For every delegation, create a "
   .. "Remuda-managed member with `remuda butler topic delegate NAME TASK`. "
@@ -1072,6 +1087,7 @@ local function launch_butler()
       pcall(ensure_root_permissions, candidate_kind)
       local telemetry = setup_telemetry(candidate_kind, { name = requested_name, status_path = status_path })
       telemetry_by_kind[candidate_kind] = telemetry
+      rotate_root_capability()
       return { name = requested_name, token = butler_token, mcp_config_path = mcp_config_path,
         settings_path = telemetry.settings_path, telemetry = telemetry, system_prompt = SYSTEM_PROMPT }
     end,
@@ -1089,6 +1105,7 @@ local function launch_butler()
     local message = table.concat(launch_failure_lines(attempts), "\n")
     remuda._butler_start_error = message
     remuda._butler_start_pending = false
+    remuda._butler_revoke_root_capability() -- no live launch owns the last attempt's capability
     reconcile_retry.note_failure()
     _butler_session_trace("reconcile_error", message)
     return nil
@@ -1267,6 +1284,10 @@ function remuda._butler_session_exited(name, info)
   if exited and exited.cwd and bus.trusted_launch_dirs then
     bus.trusted_launch_dirs[exited.cwd] = nil
   end
+  if exited and name ~= "butler" and exited.token then bus.tokens[exited.token] = nil end
+  -- ponytail: a late exit of a replaced root while a launch is pending is skipped
+  -- (that launch rotates anyway); one arriving after finish would revoke the new launch.
+  if name == "butler" and not remuda._butler_launching then remuda._butler_revoke_root_capability() end
   if exited and name ~= "butler" then
     local ended = bus.identity_ids[exited.id] or exited
     ended.alias, ended.kind = exited.alias or name, exited.kind

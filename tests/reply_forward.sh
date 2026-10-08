@@ -108,7 +108,7 @@ for tool in butler_forward butler_reply; do
   [[ $OUT == *"unknown caller"* ]] || fail "$tool without a capability was not refused: $OUT"
 done
 if grep -F "$ID2" "$M1_ROWS" >/dev/null; then fail "an unidentified MCP forward reached m1"; fi
-TOK_M2=$(lua 'for t, a in pairs(remuda._butler_bus.tokens) do if a == "m2" then return t end end')
+TOK_M2=$(lua 'return remuda._butler_bus.agents.m2.token')
 OUT=$(mcp "$TOK_M2" "$(call butler_forward "$(printf '{"message_id":"%s","to":"m1"}' "$ID2")")")
 [[ $OUT == *"forwarded $ID2 to m1"* ]] || fail "m2's own MCP forward failed: $OUT"
 echo "ok - MCP reply/forward need a known caller; a real member's capability works"

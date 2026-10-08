@@ -83,6 +83,22 @@ function T.mcp_eval(code)
   return reply.result.content[1].text
 end
 
+function T.mcp_call(name, arguments, capability)
+  arguments = arguments or {}
+  if next(arguments) == nil then arguments = remuda_api.json.object(arguments) end
+  local options = {
+    argv = { exe, "-s", child_server, "mcp" }, timeout = 10,
+    stdin = remuda_api.json.encode { jsonrpc = "2.0", id = 431, method = "tools/call",
+      params = { name = name, arguments = arguments } } .. "\n",
+  }
+  if capability then options.env = { REMUDA_SESSION_CAPABILITY = capability } end
+  local result = process.run(options)
+  assert(not result.timed_out and result.code == 0, tostring(result.stderr or result.stdout))
+  local reply = remuda_api.json.decode(result.stdout)
+  assert(reply.result or reply.error, result.stdout)
+  return reply
+end
+
 local function copy_tree(source, destination)
   local ok, entries = pcall(remuda_api.list_dir, source)
   if ok and type(entries) == "table" then
