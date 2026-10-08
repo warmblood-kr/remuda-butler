@@ -2460,7 +2460,7 @@ fn trust_dialogs_on_external_or_reused_directories_wait_for_a_human() {
         &format!(
             r#"remuda.butler.project_home({projects:?})
             remuda._butler_readiness_timeout = 30
-            remuda._butler_test_force_launch_probe = {{ outside = true, outside_codex = true, reused = true, three = true, templated = true, fresh = true }}
+            remuda._butler_test_force_launch_probe = {{ external = true, external_codex = true, reused = true, three = true, templated = true, fresh = true }}
             remuda._butler_agent_builders.claude = function() return {{'sh', '-c', 'sleep 20'}} end
             remuda._butler_agent_builders.codex = function() return {{'sh', '-c', 'sleep 20'}} end
             local real_ls = remuda.ls
@@ -2474,8 +2474,8 @@ fn trust_dialogs_on_external_or_reused_directories_wait_for_a_human() {
             local three_options = safe_modal .. "\n  Inspect first"
             local codex_modal = "Trust this folder?\n› 1. Trust and continue\n  2. Don't trust"
             remuda.capture = function(name)
-              if name == 'outside' then return selected_yes end
-              if name == 'outside_codex' then return codex_modal end
+              if name == 'external' then return selected_yes end
+              if name == 'external_codex' then return codex_modal end
               if name == 'reused' then return safe_modal end
               if name == 'fresh' then return remuda._trust_test_fresh end
               return three_options
@@ -2491,8 +2491,8 @@ fn trust_dialogs_on_external_or_reused_directories_wait_for_a_human() {
             end
             remuda._butler_send = function(_, _, text) table.insert(remuda._trust_test_reports, text); return 'captured' end
             local cap = remuda._butler_bus.agents.butler.token
-            remuda._call('butler_launch', {{ kind = 'claude', name = 'outside', cwd = {external:?} }}, {{ capability = cap }})
-            remuda._call('butler_launch', {{ kind = 'codex', name = 'outside_codex', cwd = {external:?} }}, {{ capability = cap }})
+            remuda._call('butler_launch', {{ kind = 'claude', name = 'external', cwd = {external:?} }}, {{ capability = cap }})
+            remuda._call('butler_launch', {{ kind = 'codex', name = 'external_codex', cwd = {external:?} }}, {{ capability = cap }})
             remuda._butler_topic_new('reused', nil, 'claude')
             remuda._butler_topic_new('three', nil, 'claude')
             remuda.butler.template('clone', function(topic) topic.write('repo.txt', 'third-party source') end)
