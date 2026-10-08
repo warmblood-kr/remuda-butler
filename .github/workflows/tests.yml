@@ -60,6 +60,17 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install --yes luajit
       - run: tests/shell_tests.sh
 
+  path-windows:
+    # This job runs only the pure path tables; it does not boot the Butler harness.
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Lua
+        run: choco install lua --yes --no-progress
+      - name: Run pure path tables
+        run: lua tests/lua/butler_path_test.lua
+
   contract:
     name: butler-contract
     if: ${{ always() && github.event_name == 'pull_request' }}
