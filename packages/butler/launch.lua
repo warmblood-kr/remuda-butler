@@ -176,7 +176,6 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
     end
     if attempt.session == actual and attempt.trust_answered then trust_answered = true end
   end
-  bus.tokens[token] = actual
   bus.agents[actual] = {
     kind = kind, token = token, model = model, telemetry = agent_telemetry,
     parent = parent, parent_id = parent_identity and parent_identity.id, children = {}, id = identity.id, alias = actual, session_name = actual,
@@ -186,6 +185,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
     sandbox = profile and profile.sandbox, writable = profile and profile.writable,
     trust_reported = waiting_for_trust, trust_answered = trust_answered,
   }
+  bus.tokens[token] = { id = identity.id, generation = bus.agents[actual].session_start_marker }
   if parent and bus.agents[parent] then
     local children = bus.agents[parent].children
     children[#children + 1] = actual

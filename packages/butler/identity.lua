@@ -183,13 +183,42 @@ local function next_token(name)
   return name .. "-" .. os.time() .. "-" .. bus.next
 end
 local function caller_name(caller)
+  -- A native principal, including unknown and service callers, takes
+  -- precedence over the older capability-only compatibility path.
+  if caller and caller.kind ~= nil then
+    if caller.kind ~= "session" then return "outside" end
+    local native_session = caller.session
+    if native_session ~= nil and native_session ~= "" then
+      local ok, alias = pcall(resolve, native_session)
+      return ok and alias or "outside"
+    end
+    return "outside"
+  end
   local current = current_agent(caller)
   if current then
     local ok, alias = pcall(resolve, current)
-    if ok then return alias end
+    return ok and alias or "outside"
   end
   local token = caller and caller.capability
-  return (token and bus.tokens[token]) or "outside"
+  local capability = token and bus.tokens[token]
+  -- During a live upgrade, an older image may still have alias-valued entries.
+  -- Bind one only when the live row proves it owns that exact token.
+  if type(capability) == "string" then
+    local legacy_agent = bus.agents[capability]
+    if not legacy_agent or legacy_agent.token ~= token or not legacy_agent.id
+        or not legacy_agent.session_start_marker then return "outside" end
+    capability = { id = legacy_agent.id, generation = legacy_agent.session_start_marker }
+    bus.tokens[token] = capability
+  end
+  if type(capability) ~= "table" then return "outside" end
+  local identity = bus.identity_ids[capability.id]
+  local alias = identity and identity.alias
+  local agent = alias and bus.agents[alias]
+  if identity and identity.state == "running" and agent
+      and agent.id == capability.id and agent.session_start_marker == capability.generation then
+    return alias
+  end
+  return "outside"
 end
 -- An MCP caller that acts on mail must be a known agent: an unknown or garbage
 -- capability is refused, never treated as the operator (review of #39).

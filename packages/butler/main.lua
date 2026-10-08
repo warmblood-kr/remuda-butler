@@ -670,7 +670,8 @@ remuda.tool{
   args = { to = "Recipient session name.", text = "Message body." },
   needs = { "to", "text" },
   run = function(a, caller)
-    return remuda._butler_send(caller_name(caller), a.to, a.text)
+    local principal = caller_agent(caller)
+    return remuda._butler_send(principal, a.to, a.text)
   end,
 }
 remuda.tool{
@@ -679,11 +680,12 @@ remuda.tool{
   args = { session = "Target Butler session name.", text = "Exact text to register, up to 8 KiB." },
   needs = { "session", "text" },
   run = function(a, caller)
+    local principal = caller_agent(caller)
     local feature = remuda.butler and remuda.butler.approve_text
     if not feature or not feature.target_session_allowed(a.session) then
       error("Unknown Butler session: " .. tostring(a.session), 0)
     end
-    local id, why = feature.request(a.session, a.text, caller_name(caller))
+    local id, why = feature.request(a.session, a.text, principal)
     if not id then error(tostring(why or "Could not register prepared text"), 0) end
     return id
   end,
@@ -692,7 +694,8 @@ remuda.tool{
   name = "butler_inbox",
   about = "Drain this agent's Butler inbox and return its queued messages in arrival order.",
   run = function(_, caller)
-    return remuda._butler_inbox(caller_name(caller))
+    local principal = caller_agent(caller)
+    return remuda._butler_inbox(principal)
   end,
 }
 local send_to_leader = {
@@ -701,7 +704,8 @@ local send_to_leader = {
   args = { text = "Concise result for the leader." },
   needs = { "text" },
   run = function(a, caller)
-    return remuda._butler_report(caller_name(caller), a.text)
+    local principal = caller_agent(caller)
+    return remuda._butler_report(principal, a.text)
   end,
 }
 remuda.tool(send_to_leader)
@@ -713,9 +717,10 @@ remuda.tool{
   args = { message_id = "Message to reply to.", to = "Recipient, only without message_id.", text = "Reply body." },
   needs = { "text" },
   run = function(a, caller)
-    if a.message_id then return remuda._butler_reply(caller_agent(caller), a.message_id, a.text) end
+    local principal = caller_agent(caller)
+    if a.message_id then return remuda._butler_reply(principal, a.message_id, a.text) end
     if not a.to then error("butler_reply needs message_id or to", 0) end
-    return remuda._butler_send(caller_name(caller), a.to, a.text)
+    return remuda._butler_send(principal, a.to, a.text)
   end,
 }
 remuda.tool{
@@ -735,7 +740,8 @@ remuda.tool{
   args = { mxc = "The mxc://server/media URI." },
   needs = { "mxc" },
   run = function(a, caller)
-    return remuda.butler.matrix.cli({ "matrix", "download", a.mxc }, caller_name(caller))
+    local principal = caller_agent(caller)
+    return remuda.butler.matrix.cli({ "matrix", "download", a.mxc }, principal)
   end,
 }
 remuda.tool{
@@ -744,8 +750,9 @@ remuda.tool{
   args = { path = "Absolute path of a file inside your working directory.", room = "Optional room; defaults to the configured room." },
   needs = { "path" },
   run = function(a, caller)
+    local principal = caller_agent(caller)
     local args = a.room and { "matrix", "--room", a.room, "upload", a.path } or { "matrix", "upload", a.path }
-    return remuda.butler.matrix.cli(args, caller_name(caller))
+    return remuda.butler.matrix.cli(args, principal)
   end,
 }
 remuda.tool{
@@ -781,7 +788,6 @@ local butler_kind = existing_butler and existing_butler.kind
   or (launch_options and launch_options.agent)
   or os.getenv("REMUDA_BUTLER_AGENT") or "claude"
 local butler_token = existing_butler and existing_butler.token or next_token("butler")
-bus.tokens[butler_token] = "butler"
 local root_identity = existing_butler and existing_butler.id
   and { id = existing_butler.id, alias = "butler" }
   or (bus.identities.butler and { id = bus.identities.butler.id, alias = "butler" })
@@ -804,6 +810,7 @@ bus.agents.butler.id = root_identity.id
 bus.agents.butler.alias = "butler"
 bus.agents.butler.session_name = bus.agents.butler.session_name or "butler"
 bus.agents.butler.session_start_marker = remuda._butler_new_ulid()
+bus.tokens[butler_token] = { id = root_identity.id, generation = bus.agents.butler.session_start_marker }
 bus.identity_ids[root_identity.id] = bus.identities.butler or root_identity
 bus.identities.butler = bus.identities.butler or root_identity
 local root_migrated, root_migration_error = migrate_legacy_mail("butler", root_identity.id)
@@ -1254,6 +1261,7 @@ function remuda._butler_session_exited(name, info)
   if exited and exited.cwd and bus.trusted_launch_dirs then
     bus.trusted_launch_dirs[exited.cwd] = nil
   end
+  if exited and name ~= "butler" and exited.token then bus.tokens[exited.token] = nil end
   if exited and name ~= "butler" then
     local ended = bus.identity_ids[exited.id] or exited
     ended.alias, ended.kind = exited.alias or name, exited.kind
