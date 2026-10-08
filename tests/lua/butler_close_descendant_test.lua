@@ -25,7 +25,7 @@ local function outcomes()
     local closed, busy = {}, {}
     bus.agents = {}
     for _, row in ipairs({ { "butler" }, { "lead", "butler" }, { "leaf", "lead" }, { "deep", "leaf" },
-        { "sib", "butler" }, { "sibleaf", "sib" }, { "loop1", "loop2" }, { "loop2", "loop1" } }) do
+        { "sib", "butler" }, { "sibleaf", "sib" }, { "loop1", "loop2" }, { "loop2", "loop1" }, { "orph", "ghost" }, { "orphkid", "orph" } }) do
       bus.agents[row[1]] = { id = row[1] .. "-606-id", kind = "codex", parent = row[2], session_name = row[1] }
     end
     remuda.close = function(name) closed[#closed + 1] = name end
@@ -49,6 +49,18 @@ local function outcomes()
       try("self", "leaf", "leaf", false, true)
       try("root-row", "lead", "butler", true, true)
       try("parent-cycle", "butler", "loop1", false, nil)
+      try("cycle-self", "loop1", "loop1", false, true)
+      try("missing-link-root", "butler", "orphkid", false, nil)
+      try("missing-link-lead", "lead", "orphkid", false, true)
+      try("nil-caller", nil, "leaf", false, true)
+      try("empty-caller", "", "leaf", false, true)
+      try("unknown-caller", "nobody", "leaf", false, true)
+      try("empty-name", "butler", "", false, true)
+      try("nil-name", "butler", nil, false, true)
+      try("unknown-name", "butler", "nobody", false, true)
+      for i = 1, 300 do bus.agents["c" .. i] = { id = "c" .. i .. "-id", kind = "codex", parent = i == 1 and "lead" or ("c" .. (i - 1)), session_name = "c" .. i } end
+      try("deep-chain-root", "butler", "c300", false, nil)
+      try("deep-chain-sibling", "sib", "c300", false, true)
       busy.deep = true
       try("busy-grandchild", "butler", "deep", false, true)
       try("busy-grandchild-force", "butler", "deep", true, true)
@@ -65,7 +77,10 @@ T.test("ancestor closes finished descendants, others still refused", function()
     "root-grandchild=closed", "root-great-grandchild=closed", "lead-grandchild=closed",
     "mcp-lead-grandchild=closed", "lead-direct=closed",
     "sibling-branch=refused", "other-branch=refused", "child-closes-ancestor=refused", "self=refused",
-    "root-row=refused", "parent-cycle=refused",
+    "root-row=refused", "parent-cycle=refused", "cycle-self=refused",
+    "missing-link-root=refused", "missing-link-lead=refused", "nil-caller=refused", "empty-caller=refused",
+    "unknown-caller=refused", "empty-name=refused", "nil-name=refused", "unknown-name=refused",
+    "deep-chain-root=closed", "deep-chain-sibling=refused",
     "busy-grandchild=refused", "busy-grandchild-force=closed",
   }, " "), "close authority over descendants")
 end)

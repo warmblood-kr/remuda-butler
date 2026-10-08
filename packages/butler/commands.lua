@@ -241,7 +241,7 @@ local function close_member(name, leader, force, leaderless_ok)
   end
   local root_row = alias == "butler" or alias == remuda._butler_name
   local leaderless = leaderless_ok and agent and (not agent.parent or gone(agent.parent))
-  if not agent or root_row or not (descends_from(agent) or (leader == "butler" and leaderless)) then
+  if not agent or root_row or alias == leader or not (descends_from(agent) or (leader == "butler" and leaderless)) then
     error("cannot close " .. tostring(alias) .. ": only your members and their descendants can be closed (you and your leaders are excluded).\nNext: remuda butler sessions", 0)
   end
   -- Exited sessions retain their final screen, which may look busy or contain
