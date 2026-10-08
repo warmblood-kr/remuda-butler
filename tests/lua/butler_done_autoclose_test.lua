@@ -28,11 +28,13 @@ local function outcomes()
     for _, row in ipairs({ { "lead", "butler" }, { "plain", "lead" }, { "finished", "lead" }, { "unread", "lead" },
         { "busy", "lead" }, { "followup", "lead" }, { "cli", "lead" }, { "orphan" },
         { "mcp-bool", "lead" }, { "mcp-string", "lead" }, { "mcp-false", "lead" }, { "mcp-omitted", "lead" },
-        { "mcp-invalid", "lead" } }) do
+        { "mcp-invalid", "lead" }, { "stale", "lead" } }) do
       bus.agents[row[1]] = { id = "606done-" .. row[1], alias = row[1], kind = "codex", parent = row[2],
         session_name = row[1], token = "606done-token-" .. row[1] }
     end
     remuda._butler_done = {}
+    -- A retained edge from before an alias was reused: close_member refuses it as not owned.
+    bus.agents.stale.parent_id = "606done-an-earlier-lead"
     bus.tokens = setmetatable({}, { __index = saved.tokens })
     for alias, agent in pairs(bus.agents) do if agent.token then bus.tokens[agent.token] = alias end end
     remuda.close = function(name) closed[#closed + 1] = name end
@@ -69,6 +71,7 @@ local function outcomes()
       out[#out + 1] = "mcp-invalid-refused=" .. tostring(not invalid_ok
         and tostring(invalid_error):find("done must be a boolean.", 1, true) ~= nil
         and remuda._butler_done["mcp-invalid"] == nil)
+      remuda._butler_report("stale", "done under a reused leader alias", true)
       remuda._butler_done.orphan = true
       remuda._butler_done_tick()
       state("plain", "plain")
@@ -84,6 +87,9 @@ local function outcomes()
       state("mcp-done-string-false", "mcp-false")
       state("mcp-done-omitted", "mcp-omitted")
       state("mcp-done-invalid", "mcp-invalid")
+      state("stale-generation", "stale")
+      out[#out + 1] = "stale-mark-cleared=" .. tostring(remuda._butler_done.stale == nil)
+      out[#out + 1] = "busy-mark-kept=" .. tostring(remuda._butler_done.busy == true)
       remuda._butler_inbox("unread")
       busy.busy = nil
       closed = {}
@@ -106,7 +112,7 @@ T.test("done reports auto-close once drained and idle; plain reports never", fun
     "plain=open", "finished=closed", "unread=open", "busy=open", "followup-mail-clears=open", "cli-done=closed",
     "parentless=open", "root=open",
     "mcp-done-true=closed", "mcp-done-string-true=closed", "mcp-done-string-false=open", "mcp-done-omitted=open",
-    "mcp-done-invalid=open",
+    "mcp-done-invalid=open", "stale-generation=open", "stale-mark-cleared=true", "busy-mark-kept=true",
     "unread-after-drain=closed", "busy-after-idle=closed", "finished-only-once=open",
   }, " "), "done auto-close")
 end)

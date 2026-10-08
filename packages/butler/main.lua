@@ -630,9 +630,17 @@ function remuda._butler_done_tick()
     local agent = bus.agents[alias]
     if not agent or not agent.parent or alias == "butler" or alias == remuda._butler_name then
       done[alias] = nil
-    elseif pcall(remuda._butler_close_member, alias, agent.parent, false, false) then
-      done[alias] = nil
-      _butler_session_trace("done_autoclose", alias)
+    else
+      local closed, why = pcall(remuda._butler_close_member, alias, agent.parent, false, false)
+      if closed then
+        done[alias] = nil
+        _butler_session_trace("done_autoclose", alias)
+      elseif tostring(why):find("^cannot close ") then
+        -- Not owned (e.g. a stale parent_id) or unknown: no later tick can close it, so drop the
+        -- mark and leave the member open. Unread mail, a busy pane or a failed close keep it.
+        done[alias] = nil
+        _butler_session_trace("done_autoclose_refused", alias .. " " .. tostring(why):match("^[^\n]*"))
+      end
     end
   end
 end
