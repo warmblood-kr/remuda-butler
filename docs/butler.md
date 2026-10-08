@@ -1,5 +1,30 @@
 # Butler
 
+## Caller identity
+
+CLI members are resolved from the daemon supplied caller kind and session name,
+matched to exactly one live Butler registration. Missing, unknown, unregistered
+or ambiguous caller context fails closed for identity sensitive commands, with
+a `Next:` instruction. Older cores without caller attribution therefore cannot
+use those commands until upgraded. A caller classified as `outside` maps to the
+operator under the named transitional policy `outside_is_operator_transitional`;
+that mapping is written to `guard-audit.jsonl` as a `caller_policy` event, even
+when guard observation is off. If the audit write fails, the caller is refused.
+Guard hooks resolve the caller before writing audit or approval state. Registered
+members and the audited outside operator may use them; service and unresolved
+callers are refused. Hook requester details come from that resolved principal.
+Status callbacks also refuse unresolved callers before writing telemetry.
+This is **not an isolation boundary: advisory daemon
+attribution within the cooperative model**.
+
+MCP tools keep their existing session-capability fallback on cores without tool
+caller fields; environment variables do not select a member. File access still
+requires native caller context. Detached processes may be classified as outside,
+which is another reason this transitional policy is not an isolation boundary.
+
+Rollback keeps strict caller handling and native ancestry attribution; unknown
+callers stay refused. It does not restore a mutable identity fallback.
+
 Butler is Remuda's local session manager. It starts and coordinates one agent
 session through the same Lua runtime and Remuda protocol used by other
 extensions. It works without Matrix configuration.
@@ -476,15 +501,12 @@ Butler reload (`remuda exec butler`). The interactive setup wizard writes `rooms
 defaults to allowlist unless given `--rooms open`. `send -` reads the text from
 stdin (up to 64 KiB, one trailing newline dropped); `send -- -` sends a literal `-`.
 
-`join` and `leave` change room membership. Butler refuses them for a Butler
-member, identified by the agent identity in the client environment
-(`REMUDA_BUTLER_AGENT_ID` / `REMUDA_BUTLER_SESSION_NAME`). The caller kind
-(session, unknown, outside) is not checked, so a caller with those variables
-cleared is not refused. This is advisory within one UID, not an OS boundary:
-any local process running as the same user can drop the variables.
-The CLI verbs (`approve`, `deny`, `matrix setup`, `join`, `leave`) identify the
-member from those variables only; the MCP tools also accept the session
-capability.
+`join` and `leave` change room membership. Butler identifies CLI members by the
+daemon's caller session, matched to a unique live registration; clearing launch
+variables does not change that identity. Unknown or unregistered callers are
+refused. Outside callers use the audited transitional operator policy. MCP tools
+also retain their existing session-capability fallback. This is advisory within
+one user account, not an isolation boundary.
 
 Approvals: when an agent runs `matrix join`, Butler resolves the room and
 posts one request as an ordinary message with an owner mention. Prepared-text
@@ -511,9 +533,9 @@ in the request's room counts. A bare `yes` does nothing.
 The owner can also answer from the terminal: `remuda butler approvals` lists
 the open requests, and `remuda butler approve ID` or `deny ID` answers one
 (operator-only). Terminal approve/deny are refused for a Butler member, by the
-same agent identity in the client environment; the caller kind is not checked,
-so clearing the variables passes. This is a same-UID policy, not an OS
-boundary. The Matrix answer path
+same daemon-derived caller principal; clearing launch variables does not change
+it. Unknown callers are refused. This is advisory, not an isolation boundary.
+The Matrix answer path
 is bound to the owner's MXID. An approved request joins the room ID resolved
 at request time and writes `room=ID how=approved`. The asker gets mail for every outcome:
 approved, denied or expired. A repeat ask for the same room returns the same
@@ -852,10 +874,10 @@ With the grants switch on (off: no new behavior at all):
   once, without a post. Another scope, or the same request after 10 minutes,
   is asked as usual.
 
-The agent chooses its own session name and alias, so no control rests on that
-name alone: the remembered deny and the per-scope limit are keyed by scope
-only (the remembered deny also keeps the exact command text when no scope
-applies), and the per-session bucket does not replace them.
+The per-session bucket uses the alias from the resolved caller principal.
+Requester metadata cannot choose that bucket. Remembered denies and per-scope
+limits apply across sessions (and the remembered deny keeps exact command text
+when no scope applies), while the per-session bucket remains an extra limit.
 
 A request over a post limit is refused without a post: the hook prints no
 decision, so Claude shows its own prompt, and the refusal is an audit line
@@ -1101,13 +1123,30 @@ text, and it never selects the scope, the TTL or the reactions. On a guard post 
 
 ### Audit chain
 
+The live audit log rotates at 1 MiB. Butler keeps at most 16 archives, including
+`guard-audit.jsonl.1`, and removes dated archives older than 90 days at rotation.
+When the count fills first, it removes the oldest archives, preserving the
+newest evidence and numeric ordering of rotations within the same second.
+Normal storage is about 17 MiB plus the final record in each file; this is an
+archive-count budget, not a filesystem quota. Rotation or pruning failures
+refuse new appends rather than allowing the live log to keep growing. Required
+operator attribution fails closed on open, write, flush, or close errors.
+
+Every outside principal resolution records its own `caller_policy` event;
+polls are not sampled or aggregated, and a command can resolve more than once.
+Read-only commands that do not resolve a principal, such as `sessions`, add no
+policy event. Prefer those for frequent roster polling. Export evidence before
+it ages out or fills the archive budget if longer retention is needed; daily
+HOME-room digests remain the off-box record.
+
 Each new audit line carries `prev`, the SHA-256 of the line before it (its text
 without the newline). A log that is new, or whose last line predates the chain,
 starts with a `chain` genesis line (`"prev":"genesis"`); older lines are not
 rewritten. When the log rotates, the first line of the new live log carries the
 hash of the rotated file's last line, so the chain runs across files. If the
 hash cannot be computed the line is still written, without `prev`: audit never
-blocks and never locks the owner out.
+blocks on hashing. Required operator attribution still refuses when its audit
+write cannot complete.
 
 `remuda butler guard verify` (read-only, not a weakening verb) walks the dated
 archives, `guard-audit.jsonl.1` and the live log in order and prints `ok` with
@@ -1116,18 +1155,20 @@ reason. It detects a removed, edited or unchained line and a removed rotated
 file. A final line of the live log with no newline yet is a write in
 progress: it is reported as a note, not as BROKEN. It cannot detect the whole log replaced by a consistent forgery by the
 same user, nor the truncation of the newest lines, and it cannot check the
-oldest kept archive's first link (older archives are pruned after 90 days).
+oldest kept archive's first link (older archives are pruned after 90 days or
+when the archive budget fills).
 
 Verify hashes every line in pure Lua, about two seconds per megabyte on an M1
 Max, inside the daemon. Each file holds at most 1 MB before it rotates, so a
-log with many archives (90 days of heavy use) takes minutes; run it when the
+log with all 16 archives can take tens of seconds; run it when the
 daemon may be busy that long.
 
 A fork of the chain (the audit lock fell back after 1 s and two writers raced, a line
 written without `prev` because the hash failed, a line cut short by a crash and
 appended to) makes verify report BROKEN at that line, and it keeps doing so until the
-file holding it is pruned (up to 90 days). There is no way to acknowledge or
-re-anchor the chain, and verify stops at that first break.
+file holding it is pruned (up to 90 days, or sooner under the archive budget).
+There is no way to acknowledge or re-anchor the chain, and verify stops at that
+first break.
 
 The audit lock is core's `remuda.fs.lock`, which never blocks (it is a try-lock, a
 busy lock answers at once). The audit write retries it for about a second, then

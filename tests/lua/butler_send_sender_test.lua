@@ -28,10 +28,11 @@ assert(alice_id and bob_id, "agent setup failed")
 local function call(args, agent_id, stdin)
   local encoded = {}
   for _, value in ipairs(args) do encoded[#encoded + 1] = quote(value) end
+  local caller = agent_id and string.format("{ kind = 'session', session = %q, stdin = %s }", agent_id,
+    stdin and quote(stdin) or "nil") or string.format("{ kind = 'outside', stdin = %s }", stdin and quote(stdin) or "nil")
   return T.eval([[
     local ok, result = pcall(remuda._butler_command_run, "send", {]] .. table.concat(encoded, ",")
-    .. [[}, { env = ]] .. (agent_id and "{ REMUDA_BUTLER_AGENT_ID = " .. quote(agent_id) .. " }" or "{}")
-    .. [[, stdin = ]] .. (stdin and quote(stdin) or "nil") .. [[ })
+    .. [[}, ]] .. caller .. [[)
     return (ok and "ok\0" or "error\0") .. tostring(result)
   ]])
 end
@@ -48,11 +49,11 @@ end
 
 T.test("an_agent_cannot_choose_another_explicit_sender_in_any_body_form", function()
   local before = snapshot()
-  local positional = call({ "send", "bob", "bob", "positional body" }, alice_id)
-  local stdin = call({ "send", "bob", "bob", "-" }, alice_id, "stdin body")
+  local positional = call({ "send", "bob", "bob", "positional body" }, "alice")
+  local stdin = call({ "send", "bob", "bob", "-" }, "alice", "stdin body")
   local path = T.eval("return remuda._send_sender_path")
-  local file = call({ "send", "bob", "bob", "--file", path }, alice_id)
-  local file_option_first = call({ "send", "--file", path, "bob", "bob" }, alice_id)
+  local file = call({ "send", "bob", "bob", "--file", path }, "alice")
+  local file_option_first = call({ "send", "--file", path, "bob", "bob" }, "alice")
   for _, result in ipairs({ positional, stdin, file, file_option_first }) do
     T.ok(result:match("^error\0"), "mismatched sender must be refused: " .. result)
     T.ok(result:find("sender", 1, true) or result:find("from", 1, true), "short sender refusal missing: " .. result)
@@ -61,15 +62,15 @@ T.test("an_agent_cannot_choose_another_explicit_sender_in_any_body_form", functi
 end)
 
 T.test("sender_refusal_is_identical_for_existing_and_unknown_recipients", function()
-  local existing = call({ "send", "bob", "bob", "secret" }, alice_id)
-  local missing = call({ "send", "bob", "missing-member", "secret" }, alice_id)
+  local existing = call({ "send", "bob", "bob", "secret" }, "alice")
+  local missing = call({ "send", "bob", "missing-member", "secret" }, "alice")
   T.eq(existing:match("^error\0(.*)$"), missing:match("^error\0(.*)$"), "recipient existence must not affect refusal")
 end)
 
 T.test("an_agent_can_send_as_itself_and_operator_can_choose_a_sender", function()
-  local own = call({ "send", "alice", "alice", "own body" }, alice_id)
+  local own = call({ "send", "alice", "alice", "own body" }, "alice")
   T.ok(own:match("^ok\0"), "agent sending as its own alias should work: " .. own)
-  local own_id = call({ "send", alice_id, "alice", "own id body" }, alice_id)
+  local own_id = call({ "send", alice_id, "alice", "own id body" }, "alice")
   T.ok(own_id:match("^ok\0"), "agent sending as its own id should work: " .. own_id)
   local operator = call({ "send", "bob", "alice", "operator body" })
   T.ok(operator:match("^ok\0"), "operator explicit sender should work: " .. operator)

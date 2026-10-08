@@ -12,16 +12,11 @@ end
 
 remuda._butler_initial_name = initial_butler_name()
 
--- The command handler runs in the daemon, so identity comes only from the
--- caller's `REMUDA_*` variables that core forwards in `caller.env` (#95) --
--- never `os.getenv`, which is whatever session happened to birth the daemon.
--- No forwarded identity (a plain shell, or an older core) is the operator.
+-- CLI identity is resolved from the caller kind/session supplied by the core.
 local OPERATOR = "operator"
+local caller_principal
 local function current_agent(caller)
-  local env = caller and caller.env or {}
-  for _, key in ipairs({ "REMUDA_BUTLER_AGENT_ID", "REMUDA_BUTLER_SESSION_NAME" }) do
-    if env[key] and env[key] ~= "" then return env[key] end
-  end
+  return assert(caller_principal, "caller principal resolver is not loaded").current_agent(caller)
 end
 local function call_callback(fn, ...)
   local args, unpack_args = {...}, table.unpack or unpack
@@ -226,6 +221,10 @@ local function statusline_integer(value)
 end
 
 local function statusline(args, caller)
+  local principal = caller_principal and caller_principal.resolve(caller)
+  if not principal or principal.tag ~= "member" then
+    return "Butler cannot identify this caller for status telemetry. Next: run from a registered Butler session or upgrade Remuda core."
+  end
   local snapshot = {}
   local input = caller and caller.stdin
   if type(input) == "string" then
@@ -259,7 +258,7 @@ local function statusline(args, caller)
   local absolute = type(path) == "string" and (
     path:sub(1, 1) == "/" or path:sub(1, 2) == "\\\\" or drive_rooted
   )
-  if absolute and path:match("%.status$") then
+  if absolute and path:match("%.status$") and path == principal.status_path then
     pcall(remuda.fs.write_atomic, path, line .. "\n" .. (limits and (limits .. "\n") or ""))
   end
   return line
@@ -327,6 +326,9 @@ local function contributions(point)
 end
 bus.messages = bus.messages or {}
 bus.objects = bus.objects or {}
+remuda._butler_caller_principal_config = { bus = bus }
+remuda.exec("butler/caller_principal")
+caller_principal = assert(remuda._butler_caller_principal)
 -- Loaded before identity_record so agents.jsonl shares mail.lua's append.
 remuda._butler_mail_config = { bus = bus, root = mail_root, json_quote = json_quote }
 remuda.exec("butler/mail")
@@ -633,7 +635,7 @@ end
 -- CLI verbs and the argv parser live in commands.lua.
 remuda._butler_commands_config = { current_agent = current_agent, OPERATOR = OPERATOR,
   contributions = contributions, registry_list = registry_list, statusline = statusline,
-  resolve = resolve, mail = mail,
+  resolve = resolve, resolve_principal = function(caller) return caller_principal.resolve(caller) end, mail = mail,
 }
 remuda.exec("butler/schedule")
 remuda.exec("butler/schedule_cli")
@@ -683,7 +685,17 @@ remuda.tool{
     if not feature or not feature.target_session_allowed(a.session) then
       error("Unknown Butler session: " .. tostring(a.session), 0)
     end
-    local id, why = feature.request(a.session, a.text, caller_name(caller))
+    -- Decide from how the caller resolved, not from caller_name's "outside" string
+    -- (a live member may be named `outside`): a session-resolved member, a live
+    -- capability token, or the named operator policy.
+    local asker = caller_name(caller)
+    local token = type(caller) == "table" and caller.capability
+    local member = caller_principal.resolve(caller).tag == "member"
+      or (token and bus.tokens[token] and bus.agents[bus.tokens[token]])
+    if not member and caller_principal.resolve(caller).tag ~= "operator" then
+      error("Butler cannot identify this caller. Next: run from a registered Butler session or upgrade Remuda core.", 0)
+    end
+    local id, why = feature.request(a.session, a.text, asker)
     if not id then error(tostring(why or "Could not register prepared text"), 0) end
     return id
   end,
@@ -825,8 +837,8 @@ You are Butler, manager of this household. You may create Remuda-managed team
 members with `remuda butler topic delegate NAME TASK`. Internal agent
 subagents are separate from Butler team members.
 
-Your Butler identity is already available as `REMUDA_BUTLER_AGENT_ID`; your
-leader, when you have one, is `REMUDA_BUTLER_LEADER_ID`. Use the short forms:
+Your CLI identity is resolved from your registered Butler session. The launch
+variables describe your identity and leader. Use the short forms:
 
 - `remuda butler sessions` to inspect the household.
 - `remuda butler inbox` to read your own inbox.
@@ -836,10 +848,11 @@ leader, when you have one, is `REMUDA_BUTLER_LEADER_ID`. Use the short forms:
   or pipe it: `cat <<'EOF' | remuda butler send MEMBER -`. `send-to-leader` and `reply MESSAGE_ID`
   accept those forms too. The limit is 64 KiB.
 
-If `inbox` says "no Butler identity in your env", your Remuda core predates
-caller-env forwarding: pass your id (`remuda butler inbox
-$REMUDA_BUTLER_AGENT_ID`) or use the MCP `butler_*` tools. On such a core,
-`send` is attributed to "operator" rather than to you.
+CLI identity comes from the daemon's caller session, never environment variables.
+If Butler cannot identify the caller, run from a registered Butler session or
+upgrade Remuda core. Older cores without caller fields refuse CLI member actions;
+use the MCP `butler_*` tools with the session's configured capability instead.
+Caller attribution is advisory within one user account, not an isolation boundary.
 
 `remuda butler send FROM TO MESSAGE...` is an operator form for sending on
 behalf of another session. Do not use it for ordinary team communication.

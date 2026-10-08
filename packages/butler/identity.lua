@@ -183,7 +183,10 @@ local function next_token(name)
   return name .. "-" .. os.time() .. "-" .. bus.next
 end
 local function caller_name(caller)
-  local current = current_agent(caller)
+  -- CLI principal resolution is strict. MCP retains its capability-only path
+  -- on cores whose tools do not supply native caller fields. A managed session
+  -- still has to resolve uniquely; its token cannot rescue a stale registration.
+  local current = type(caller) == "table" and caller.kind == "session" and current_agent(caller)
   if current then
     local ok, alias = pcall(resolve, current)
     if ok then return alias end

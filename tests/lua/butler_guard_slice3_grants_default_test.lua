@@ -14,8 +14,7 @@ local function start_butler(no_register)
       remuda.mkdir(d); remuda._butler_guard_dir = d; return d
     end
     remuda._t_hook = function(stdin)
-      return remuda._butler_command_run('guard', {'guard'}, { stdin = stdin, env =
-        { REMUDA_BUTLER_AGENT_ALIAS = 'ss-a', REMUDA_BUTLER_AGENT_KIND = 'claude' } })
+      return remuda._butler_command_run('guard', {'guard'}, { kind = 'session', session = 's-ssa', stdin = stdin })
     end
     remuda._t_lines = function()
       local out, f = {}, io.open(gp.log_path(), 'r')
@@ -23,7 +22,7 @@ local function start_butler(no_register)
       for l in f:lines() do out[#out + 1] = l end
       f:close(); return table.concat(out, '\n')
     end
-    remuda._t_guard = function(args, caller) return remuda._butler_command_run('guard', args, caller or {}) end
+    remuda._t_guard = function(args, caller) caller = caller or {}; caller.kind = 'session'; caller.session = 'butler'; return remuda._butler_command_run('guard', args, caller) end
     return 'ok'
   ]])
   -- Butler's own load handed `add` to the owner-reaction handler; a fresh load of the store module hands it to the test.
@@ -35,6 +34,8 @@ local function has(text, needle) return text:find(needle, 1, true) ~= nil end
 local function tree(name)
   T.eval("remuda._t_dir(" .. string.format("%q", name) .. ")")
   T.eval("remuda.butler.guard_grants.insensitive = function() return false end") -- the fold has its own test
+  -- These real-Git controls use the existing test subject budget; production and budget tests keep 2s.
+  T.eval("remuda.butler.guard_grants.git_budget_s = 20")
   return T.eval([[
     local root = remuda._butler_guard_dir .. '-tree' -- beside the data dir: the data dir is a protected scope
     remuda.process.run({ argv = { 'sh', '-c', 'mkdir -p ' .. root .. '/real/sub ' .. root .. '/other && ln -s real ' .. root .. '/link' } })

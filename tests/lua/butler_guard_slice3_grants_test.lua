@@ -14,8 +14,7 @@ local function start_butler(no_register)
       remuda.mkdir(d); remuda._butler_guard_dir = d; return d
     end
     remuda._t_hook = function(stdin)
-      return remuda._butler_command_run('guard', {'guard'}, { stdin = stdin, env =
-        { REMUDA_BUTLER_AGENT_ALIAS = 'ss-a', REMUDA_BUTLER_AGENT_KIND = 'claude' } })
+      return remuda._butler_command_run('guard', {'guard'}, { kind = 'session', session = 's-ssa', stdin = stdin })
     end
     remuda._t_lines = function()
       local out, f = {}, io.open(gp.log_path(), 'r')
@@ -23,7 +22,7 @@ local function start_butler(no_register)
       for l in f:lines() do out[#out + 1] = l end
       f:close(); return table.concat(out, '\n')
     end
-    remuda._t_guard = function(args, caller) return remuda._butler_command_run('guard', args, caller or {}) end
+    remuda._t_guard = function(args, caller) caller = caller or {}; caller.kind = 'session'; caller.session = 'butler'; return remuda._butler_command_run('guard', args, caller) end
     return 'ok'
   ]])
   -- Butler's own load handed `add` to the owner-reaction handler; a fresh load of the store module hands it to the test.
@@ -32,46 +31,30 @@ local function start_butler(no_register)
 end
 local function has(text, needle) return text:find(needle, 1, true) ~= nil end
 
-T.test("clearing the guard-unaudited marker appends a switch line that records it; an unwritable line keeps the marker", function()
+T.test("audit failure refuses guard switches without changing state", function()
   start_butler()
-  T.eval("remuda._t_dir('g3p3-marker'); remuda._t_guard({'guard','on'}); remuda._t_guard({'guard','deny','on'})")
-  T.eval([[local gp = remuda.butler.guard_policy
-    remuda.process.run({ argv = { 'chmod', '400', gp.log_path() } })
-    local real = io.stderr; io.stderr = { write = function() end }
-    remuda._t_guard({'guard','off'}); io.stderr = real
-    remuda.process.run({ argv = { 'chmod', '600', gp.log_path() } })]])
-  T.expect(has(T.eval("return remuda._t_guard({'guard','status'})"), "NOT audited"), "marker set by the unaudited off")
-  T.eval("remuda._t_guard({'guard','on'})")
-  local lines = T.eval("return remuda._t_lines()")
-  local note; for l in lines:gmatch("[^\n]+") do if has(l, "earlier off NOT audited:") then note = l end end
-  T.expect(note and has(note, '"event":"switch"') and has(note, '"class":"other"'), "no switch line records the marker: " .. lines)
-  T.expect(not has(T.eval("return remuda._t_guard({'guard','status'})"), "NOT audited"), "marker cleared after the note")
-  -- the note cannot be written: the marker stays
-  T.eval([[local gp = remuda.butler.guard_policy
-    local f = io.open(remuda._butler_guard_dir .. '/guard-unaudited', 'w'); f:write('x\n'); f:close()
-    local real, calls = io.open, 0
+  T.eval("remuda._t_dir('g3p3-auditfail'); remuda._t_guard({'guard','on'}); remuda._t_guard({'guard','deny','on'})")
+  T.eval([[local gp, real_open = remuda.butler.guard_policy, io.open
     io.open = function(path, mode)
-      if path == gp.log_path() and mode == 'a' then calls = calls + 1; if calls == 2 then return nil, 'boom' end end
-      return real(path, mode)
+      if path == gp.log_path() and mode == 'a' then return nil, 'injected append failure' end
+      return real_open(path, mode)
     end
-    remuda._t_ok = pcall(gp.append, { session = 's', event = 'switch', summary = 'x' })
-    io.open = real]])
-  T.expect(has(T.eval("return remuda._t_guard({'guard','status'})"), "NOT audited"), "marker kept when its note cannot be written")
-  T.expect(true, "", "ok - marker note")
-end)
-
-T.test("a failed switch write after an unaudited off clears the marker: no off took effect", function()
-  start_butler()
-  T.eval("remuda._t_dir('g3p3-offfail'); remuda._t_guard({'guard','on'})")
-  T.eval([[local gp = remuda.butler.guard_policy
-    os.remove(remuda._butler_guard_dir .. '/guard-observe'); remuda.mkdir(remuda._butler_guard_dir .. '/guard-observe') -- a directory where the switch belongs
-    remuda.process.run({ argv = { 'chmod', '400', gp.log_path() } })
-    local real = io.stderr; io.stderr = { write = function() end }
-    pcall(remuda._t_guard, {'guard','off'}); io.stderr = real
-    remuda.process.run({ argv = { 'chmod', '600', gp.log_path() } })]])
+    local _, why = pcall(remuda._t_guard, {'guard','off'}); remuda._t_audit_refusal = tostring(why)
+    io.open = real_open]])
   local status = T.eval("return remuda._t_guard({'guard','status'})")
-  T.expect(not has(status, "NOT audited"), "a switch that never turned off must not warn of an unaudited off: " .. status,
-    "ok - failed set clears marker")
+  local refusal = T.eval("return remuda._t_audit_refusal")
+  T.expect(has(status, "guard: on") and has(status, "deny: on") and has(refusal, "Next:"),
+    "failed audit must preserve both switches and advise a retry: " .. refusal .. " / " .. status)
+  T.eval([[local fs, real_write = remuda.fs, remuda.fs.write_atomic
+    remuda.fs.write_atomic = function(path, ...)
+      if path == remuda._butler_guard_dir .. '/guard-observe' then return nil, 'injected state write failure' end
+      return real_write(path, ...)
+    end
+    pcall(remuda._t_guard, {'guard','off'})
+    remuda.fs.write_atomic = real_write]])
+  status = T.eval("return remuda._t_guard({'guard','status'})")
+  T.expect(has(status, "guard: on"), "failed state write must preserve guard on: " .. status,
+    "ok - audit and state failures both preserve guard")
 end)
 
 local function ev(code)
@@ -93,7 +76,7 @@ T.test("the grants switch is off by default, audited, and classed like guard on/
   start_butler()
   T.eval("remuda._t_dir('g3p3-switch')")
   T.expect(has(T.eval("return remuda._t_guard({'guard','grants','status'})"), "guard grants: off"), "default off")
-  T.eval("remuda._t_guard({'guard','grants','on'}, {env={REMUDA_BUTLER_AGENT_ALIAS='lead-1'}})")
+  T.eval("remuda._t_guard({'guard','grants','on'}, {})")
   T.expect(has(T.eval("return remuda._t_guard({'guard','grants','status'})"), "guard grants: on"), "switched on")
   T.expect(has(T.eval("return remuda._t_lines()"), '"summary":"guard grants on"'), "switch change is audited")
   local out = T.eval([[local gp = remuda.butler.guard_policy

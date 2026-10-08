@@ -100,13 +100,12 @@ remuda butler send reviewer "please check the latest patch"
 remuda butler send-to-leader "review complete: no blockers"
 ```
 
-The sender is inferred from the calling shell's environment; quote the
-message for `send`, since `remuda butler send FROM TO MESSAGE...` (what an
-unquoted multi-word message parses as) is the operator form for sending a note on another
-session's behalf. The short forms need a Remuda core that forwards the caller's
-`REMUDA_*` variables to mod commands (warmblood-kr/remuda#95); on an older
-core, pass the name explicitly (`remuda butler inbox "$REMUDA_BUTLER_AGENT_ID"`)
-or use the MCP `butler_*` tools.
+The sender is inferred from the daemon's registered caller session. Quote the
+message for `send`, since `remuda butler send FROM TO MESSAGE...` is the operator
+form for sending on another session's behalf. Older cores without caller fields
+refuse identity-sensitive CLI commands: upgrade core or use the MCP `butler_*`
+tools with the session's configured capability. Environment variables never
+select CLI identity. Caller attribution is advisory, not an isolation boundary.
 
 ### Optional Matrix bridge
 
@@ -134,8 +133,8 @@ or edit it.
 Every audit line carries a `grant_id` field: `gNNN` on the `grant_used` line of a call a standing grant allowed and on its `grant_limited` line, both matched by Butler from the grant store (never taken from agent input), and on the grant's own create and revoke lines; `-` on every other line, including the request line of an allowed call and every deny.
 Each change of the `guard`, `guard deny` or `guard approvals` switch appends a
 `switch` line naming who changed it (the caller's alias, or `operator`) and when.
-`Who` is evidence from the forwarded environment, not a control; the `weaken`-class deny is the control.
-Turning a switch off is audited first. If that line cannot be written the switch still turns off (it only narrows enforcement, so the owner is never locked out), the answer and stderr say "switched off, NOT audited", and a `guard-unaudited` marker shows in `guard status` and `guard stats` until the next audit line is written. That line is followed by a `switch` line "earlier off NOT audited: ..." recording the marker; if it cannot be written the marker stays. A switch write that fails after an unaudited off removes the marker, because nothing turned off.
+`Who` comes from the resolved daemon caller identity; forwarded environment metadata does not select it.
+Each switch change writes its audit line before updating the saved state. If the audit write fails, the change is refused with a `Next:` instruction and the switch state stays the same.
 When the log passes 1 MiB, the previous `guard-audit.jsonl.1` moves to a
 `guard-audit.jsonl.<UTC stamp>` archive, and archives older than 90 days are
 deleted at that moment and never otherwise.
