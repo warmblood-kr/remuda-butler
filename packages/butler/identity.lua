@@ -210,7 +210,13 @@ local function caller_name(caller)
   local agent = alias and bus.agents[alias]
   if identity and identity.state == "running" and agent
       and agent.id == capability.id and agent.session_start_marker == capability.generation then
-    return alias
+    -- session_exited runs after the native exit, so also ask the daemon: a
+    -- session that is gone or whose liveness cannot be read does not authorize.
+    local name = alias == "butler" and remuda._butler_name or agent.session_name or alias
+    local ok, sessions = pcall(remuda.ls)
+    for _, session in ipairs(ok and type(sessions) == "table" and sessions or {}) do
+      if session.name == name then return session.alive and alias or nil end
+    end
   end
   return nil
 end

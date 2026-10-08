@@ -203,3 +203,21 @@ T.test("each_root_launch_gets_a_fresh_capability_and_the_ended_one_is_revoked", 
   T.eq(after, id .. ":true:nil:nil:butler",
     "the durable root id must survive while the old launch's capability is revoked and the new one resolves")
 end)
+
+T.test("a_capability_is_refused_while_the_native_exit_is_pending_or_liveness_is_unknown", function()
+  local result = T.eval([[
+    local bus, identity = remuda._butler_bus, remuda._butler_identity
+    local agent = bus.agents.reused
+    local cap = agent.token
+    bus.tokens[cap] = { id = agent.id, generation = agent.session_start_marker }
+    local real_ls = remuda.ls
+    local function with(ls) remuda.ls = ls; local n = tostring(identity.caller_name({ capability = cap })); remuda.ls = real_ls; return n end
+    return table.concat({
+      with(real_ls), -- the native session is alive: authorized
+      with(function() return { { name = agent.session_name, alive = false } } end), -- exit pending in Lua
+      with(function() return {} end), -- unknown to the daemon
+      with(function() error("ls unavailable") end), -- unknown liveness is refused
+    }, ":")
+  ]])
+  T.eq(result, "reused:nil:nil:nil", "authorization must check native liveness, not only Butler's roster")
+end)
