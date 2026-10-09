@@ -28,7 +28,7 @@ T.test("inbox_with_a_non_ulid_opens_no_message_file", function()
     local rejected = {}
     for _, id in ipairs({ '../../x', 'not-a-ulid' }) do
       local ok, err = pcall(remuda._butler_command_run, 'inbox', { 'inbox', id },
-        { kind = 'session', session = agent.session_name })
+        { kind = 'session', session = agent.session_name, instance_id = _inst(agent.session_name) })
       rejected[#rejected + 1] = tostring(not ok
         and tostring(err):find('agents may only read their own Butler inbox', 1, true) ~= nil)
     end

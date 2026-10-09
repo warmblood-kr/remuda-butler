@@ -4,6 +4,8 @@ local function start_butler()
   -- Installed once per file: a second install reloads the mod (the harness gives a file 20 s in all).
   if started then return end
   started = true
+  -- Butler captures the core's caller at load: it is installed before the mod loads.
+  T.eval("remuda.caller = function() return remuda._t_who end")
   T.install_guard_subject("butler", assert(os.getenv("REMUDA_LUA_REPO")))
   T.eval('remuda._butler_argv = {"sh", "-c", "sleep 60"}; remuda._butler_skip_relay = true; remuda._butler_readiness_timeout = 1')
   T.eval('return remuda.exec("butler")')
@@ -23,7 +25,7 @@ local function start_butler()
       for l in f:lines() do out[#out + 1] = l end
       f:close(); return table.concat(out, '\n')
     end
-    remuda._t_guard = function(args) return remuda._butler_command_run('guard', args, {kind='session', session='butler'}) end
+    remuda._t_guard = function(args) return remuda._butler_command_run('guard', args, {kind='session', session = 'butler', instance_id = _inst('butler')}) end
     -- A relay stand-in: every approval post is counted, none is answered.
     remuda._t_posts = 0
     remuda.pending = function(opts)
@@ -71,10 +73,9 @@ local function tree()
   T.eval([[local agents = remuda._butler_bus.agents
     for alias, a in pairs({ tl = { 'U-TL', 'butler' }, ta = { 'U-TA', 'tl' }, tb = { 'U-TB', 'tl' }, tc = { 'U-TC', 'ta' } }) do
       agents[alias] = { id = a[1], parent = a[2], alias = alias, session_name = 's-' .. alias, children = {} }
-    end
-    remuda.caller = function() return remuda._t_who end]])
+    end]])
 end
-local function untree() T.eval("local a = remuda._butler_bus.agents; a.tl, a.ta, a.tb, a.tc = nil, nil, nil, nil; remuda.caller = nil") end
+local function untree() T.eval("local a = remuda._butler_bus.agents; a.tl, a.ta, a.tb, a.tc = nil, nil, nil, nil; remuda._t_who = nil") end
 local function as(alias) T.eval(("remuda._t_who = { kind = 'session', session = 's-%s' }"):format(alias)) end
 
 T.test("a grant held by a session applies to it and the sessions below it, not to a sibling or its leader", function()
@@ -122,7 +123,7 @@ T.test("the post names the holder from core's caller identity and the 🔄 grant
   T.eval("local p = remuda.butler.guard_policy.dir() .. '/guard-grants.jsonl'; local f = io.open(p); local s = f:read('a'); f:close(); f = io.open(p, 'w'); f:write((s:gsub('U%-TA', 'U-TB'))); f:close()")
   T.expect(not has(call(), ALLOW), "a hand-moved holder is no grant")
   T.eval("remuda.butler.guard_grants.verified = function() return true end")
-  T.eval("remuda.caller = nil")
+  T.eval("remuda._t_who = nil")
   T.eval("remuda._t_text = ''")
   T.eq(call("{ input = { url = 'https://other.example/' } }"), "pending", "a post without a caller identity")
   T.expect(not has(T.eval("return remuda._t_text"), "grant:"), "offers no grant")

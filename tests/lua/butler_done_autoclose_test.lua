@@ -32,19 +32,29 @@ local function outcomes()
         { "mcp-invalid", "lead" }, { "stale", "lead" } }) do
       ids[#ids + 1] = string.format("01M606D0NE%016d", #ids + 1)
       bus.agents[row[1]] = { id = ids[#ids], alias = row[1], kind = "codex", parent = row[2],
-        session_name = row[1], token = "606done-token-" .. row[1] }
+        session_name = row[1], token = "606done-token-" .. row[1], session_start_marker = "606done-gen-" .. row[1] }
     end
     remuda._butler_done = {}
     -- A retained edge from before an alias was reused: close_member refuses it as not owned.
     bus.agents.stale.parent_id = "606done-an-earlier-lead"
     bus.tokens = setmetatable({}, { __index = saved.tokens })
     bus.identity_ids = setmetatable({}, { __index = saved.identity_ids })
+    -- What main's capability admission checks (identity.lua caller_name): a token record bound to the
+    -- row's id and generation, a running identity record, and a live session for the row.
     for alias, agent in pairs(bus.agents) do
-      if agent.token then bus.tokens[agent.token] = alias end
-      bus.identity_ids[agent.id] = { alias = alias }
+      if alias ~= "butler" then
+        bus.tokens[agent.token] = { id = agent.id, generation = agent.session_start_marker }
+        bus.identity_ids[agent.id] = { alias = alias, state = "running" }
+      end
     end
     remuda.close = function(name) closed[#closed + 1] = name end
-    remuda.ls = function() return {} end
+    remuda.ls = function()
+      local rows = {}
+      for alias in pairs(bus.agents) do
+        if alias:match("^mcp%-") then rows[#rows + 1] = { name = alias, alive = true } end
+      end
+      return rows
+    end
     remuda.butler.is_idle = function(name) if busy[name] then return false, "busy" end return true end
     remuda.fail = function(message) error(message, 0) end
     local out = {}
@@ -65,9 +75,15 @@ local function outcomes()
       remuda._butler_inbox("followup")
       remuda._extension_commands.butler({ "send-to-leader", "--done", "cli", "done" },
         { kind = "session", session = "cli" })
+      -- Tool-level: remuda._call now replaces the caller, so call the tool's run with the capability.
+      -- Admission itself is covered by the capability lifecycle, instance binding and caller principal suites.
+      local tool
+      for k, v in pairs(remuda.tools) do
+        if k == "butler_send_to_leader" or (type(v) == "table" and v.name == "butler_send_to_leader") then tool = v end
+      end
       local function mcp(name, args)
         args.text = name .. " reports"
-        return pcall(remuda._call, "butler_send_to_leader", args, { capability = "606done-token-" .. name })
+        return pcall(tool.run, args, { capability = "606done-token-" .. name })
       end
       mcp("mcp-bool", { done = true })
       mcp("mcp-string", { done = "true" })

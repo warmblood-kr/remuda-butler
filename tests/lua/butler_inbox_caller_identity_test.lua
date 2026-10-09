@@ -21,7 +21,7 @@ local function call(verb, args, agent_id)
   for _, value in ipairs(args) do encoded[#encoded + 1] = string.format("%q", value) end
   local session = agent_id and T.eval("for _, a in pairs(remuda._butler_bus.agents) do if a.id == "
     .. string.format("%q", agent_id) .. " then return a.session_name end end")
-  local caller = session and string.format("{ kind = 'session', session = %q }", session)
+  local caller = session and string.format("{ kind = 'session', session = %q, instance_id = _inst(%q) }", session, session)
     or (agent_id and "{ kind = 'session', session = 'unregistered' }" or "{ kind = 'outside' }")
   return T.eval([[
     local ok, value = pcall(remuda._butler_command_run, ]] .. string.format("%q", verb)

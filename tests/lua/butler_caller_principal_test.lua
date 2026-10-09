@@ -23,7 +23,11 @@ assert(alice_id and alice_session, "member setup failed")
 local function quote(value) return string.format("%q", value) end
 local function caller(kind, session, env)
   local entries = { "kind = " .. (kind and quote(kind) or "nil") }
-  if session then entries[#entries + 1] = "session = " .. quote(session) end
+  if session then
+    entries[#entries + 1] = "session = " .. quote(session)
+    -- the daemon's snapshot carries the instance id of the session it names
+    entries[#entries + 1] = "instance_id = _inst(" .. quote(session) .. ")"
+  end
   if env == "nil" then entries[#entries + 1] = "env = nil"
   elseif type(env) == "table" then
     local fields = {}
@@ -137,9 +141,10 @@ T.test("outside_policy_is_persistently_audited_without_caller_secrets", function
 end)
 
 T.test("mcp_capability_only_callers_keep_the_existing_path", function()
-  eval([[remuda._butler_bus.tokens["test-capability"] = "alice"]])
+  eval([[local a = remuda._butler_bus.agents.alice
+    remuda._butler_bus.tokens["test-capability"] = { id = a.id, generation = a.session_start_marker }]])
   T.eq(eval([[return remuda._butler_identity.caller_agent({capability = "test-capability"})]]), "alice")
-  T.eq(eval([[return remuda._butler_identity.caller_name({capability = "invalid"})]]), "outside")
+  T.eq(eval([[return tostring(remuda._butler_identity.caller_name({capability = "invalid"}))]]), "nil")
   local outcome = eval([[local ok, err = pcall(remuda._butler_identity.caller_agent, {}); return tostring(ok) .. "|" .. tostring(err)]])
   T.ok(outcome:find("false|unknown caller", 1, true), "MCP refusal keeps its existing reason: " .. outcome)
 end)

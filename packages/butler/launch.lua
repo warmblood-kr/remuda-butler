@@ -150,7 +150,14 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
         CLAUDE_CODE_FORCE_SESSION_PERSISTENCE = "1" }
     end,
   }
-  local function finish(actual, selected_kind, attempts)
+  local function finish(actual, selected_kind, attempts, instance_id)
+  if actual and instance_id and not chooser.instance_live(actual, instance_id) then
+    -- The bound row ended before registration: no token, no roster row; report the launch as exited.
+    for _, a in ipairs(attempts or {}) do
+      if a.session == actual then a.reason, a.detail = "exited", "session exited before Butler registered it" end
+    end
+    actual = nil
+  end
   if not actual then
     if bus.trusted_launch_dirs then bus.trusted_launch_dirs[launch_cwd] = nil end
     local message = table.concat(launch_failure_lines(attempts), "\n")
@@ -176,7 +183,6 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
     end
     if attempt.session == actual and attempt.trust_answered then trust_answered = true end
   end
-  bus.tokens[token] = actual
   bus.agents[actual] = {
     kind = kind, token = token, model = model, telemetry = agent_telemetry,
     parent = parent, parent_id = parent_identity and parent_identity.id, children = {}, id = identity.id, alias = actual, session_name = actual,
@@ -185,7 +191,10 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
     trust_eligible = trust_eligible, trust_real_cwd = trust_real_cwd,
     sandbox = profile and profile.sandbox, writable = profile and profile.writable,
     trust_reported = waiting_for_trust, trust_answered = trust_answered,
+    instance_id = instance_id, instance_binding = instance_id and 1 or nil, -- from the remuda.new return only
   }
+  bus.tokens[token] = { id = identity.id, generation = bus.agents[actual].session_start_marker,
+    instance_id = instance_id, instance_binding = instance_id and 1 or nil }
   if parent and bus.agents[parent] then
     local children = bus.agents[parent].children
     children[#children + 1] = actual
@@ -673,8 +682,8 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   return actual
   end
   local result
-  choose(candidates, choose_opts, function(actual, selected_kind, attempts)
-    local ok, value = pcall(finish, actual, selected_kind, attempts)
+  choose(candidates, choose_opts, function(actual, selected_kind, attempts, instance_id)
+    local ok, value = pcall(finish, actual, selected_kind, attempts, instance_id)
     if ok then result = value
     else
       bus.launch_failures = bus.launch_failures or {}

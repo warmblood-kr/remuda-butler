@@ -29,7 +29,7 @@ as() {
   verb=$1; shift
   for word in "$verb" "$@"; do quoted+=("$(lua_quote "$word")"); done
   words=$(IFS=,; printf '%s' "${quoted[*]}")
-  lua "return remuda._butler_command_run($(lua_quote "$verb"), {$words}, {kind='session',session=$(lua_quote "$session")})"
+  lua "return remuda._butler_command_run($(lua_quote "$verb"), {$words}, {kind='session',session=$(lua_quote "$session"),instance_id=(remuda._butler_bus.agents[$(lua_quote "$session")] or {}).instance_id})"
 }
 
 "$REMUDA_BIN" -s "$SERVER" daemon >"$SCRATCH/daemon.log" 2>&1 &
@@ -108,10 +108,13 @@ for tool in butler_forward butler_reply; do
   [[ $OUT == *"unknown caller"* ]] || fail "$tool without a capability was not refused: $OUT"
 done
 if grep -F "$ID2" "$M1_ROWS" >/dev/null; then fail "an unidentified MCP forward reached m1"; fi
-TOK_M2=$(lua 'for t, a in pairs(remuda._butler_bus.tokens) do if a == "m2" then return t end end')
+TOK_M2=$(lua 'return remuda._butler_bus.agents.m2.token')
+# On a core with native caller kinds this shell is kind=outside, so even m2's own capability
+# is refused here. A bridge inside m2's session (kind=session) needs a real session: PR B's contract test.
 OUT=$(mcp "$TOK_M2" "$(call butler_forward "$(printf '{"message_id":"%s","to":"m1"}' "$ID2")")")
-[[ $OUT == *"forwarded $ID2 to m1"* ]] || fail "m2's own MCP forward failed: $OUT"
-echo "ok - MCP reply/forward need a known caller; a real member's capability works"
+[[ $OUT == *"unknown caller"* ]] || fail "a capability from outside any session was not refused: $OUT"
+if grep -F "$ID2" "$M1_ROWS" >/dev/null; then fail "an outside MCP forward reached m1"; fi
+echo "ok - MCP reply/forward need a known caller; a capability from outside a session is refused"
 
 if as 01ZZZZZZZZZZZZZZZZZZZZZZZZ reply "$ID" stale >"$SCRATCH/stale.out" 2>&1; then fail "a stale agent id replied"; fi
 grep -F "Next:" "$SCRATCH/stale.out" >/dev/null || fail "stale id was not refused with a next step: $(cat "$SCRATCH/stale.out")"

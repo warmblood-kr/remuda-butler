@@ -31,7 +31,7 @@ T.test('guard_hook_refuses_unresolved_callers_before_approval_mutation',function
     output[#output+1]=principal.tag..'/'..tostring(ok)..'/posts='..(posts-before)..'/out='..tostring(out)
   end
   bus.agents.duplicate=nil
-  local member={kind='session',session=bus.agents.butler.session_name,
+  local member={kind='session',session=bus.agents.butler.session_name,instance_id=_inst(bus.agents.butler.session_name),
     env={REMUDA_BUTLER_AGENT_ALIAS='FORGED-MEMBER',REMUDA_BUTLER_AGENT_KIND='claude'},
     stdin=remuda.json.encode({hook_event_name='PreToolUse',tool_name='Bash',tool_input={command='ls'},cwd='/tmp'})}
   local before=posts
@@ -121,7 +121,7 @@ T.test('approve_text_tool_refuses_unresolved_requester_before_registering',funct
   end
   assert(tool,'butler_approve_text tool not found')
   local bus=remuda._butler_bus
-  bus.tokens['member-token']='butler'
+  bus.tokens['member-token']={id=bus.agents.butler.id,generation=bus.agents.butler.session_start_marker}
   local real_request,real_allowed=feature.request,feature.target_session_allowed
   local askers={}
   feature.target_session_allowed=function() return true end
@@ -147,7 +147,7 @@ T.test('approve_text_tool_refuses_unresolved_requester_before_registering',funct
   T.expect(result:find(name..'=false/0/',1,true),result)
  end
  T.expect(result:find('member=true/1/butler',1,true),result)
- T.expect(result:find('operator=true/1/outside',1,true),result)
+ T.expect(result:find('operator=false/0/',1,true),result)
  T.expect(true,'','APPROVE-TEXT-REQUESTER '..result)
 end)
 
@@ -160,9 +160,12 @@ T.test('approve_text_tool_refuses_unresolved_requester_when_member_named_outside
   end
   assert(tool,'butler_approve_text tool not found')
   local bus=remuda._butler_bus
-  bus.agents.outside={id='OUTSIDE',alias='outside',session_name='outside-sess'}
-  bus.tokens['member-token']='butler'
-  bus.tokens['outside-token']='outside'
+  bus.agents.outside={id='0123456789ABCDEFGHJKMNPQRS',alias='outside',session_name='outside-sess',session_start_marker='M'}
+  bus.identity_ids['0123456789ABCDEFGHJKMNPQRS']={id='0123456789ABCDEFGHJKMNPQRS',alias='outside',state='running'}
+  bus.tokens['member-token']={id=bus.agents.butler.id,generation=bus.agents.butler.session_start_marker}
+  local real_ls=remuda.ls -- the fixture member has a live native session
+  remuda.ls=function() local r=real_ls(); r[#r+1]={name='outside-sess',alive=true}; return r end
+  bus.tokens['outside-token']={id='0123456789ABCDEFGHJKMNPQRS',generation='M'}
   local real_request,real_allowed=feature.request,feature.target_session_allowed
   local askers={}
   feature.target_session_allowed=function() return true end
@@ -177,12 +180,13 @@ T.test('approve_text_tool_refuses_unresolved_requester_when_member_named_outside
     'empty='..try({}),
     'service='..try({kind='service',service='timer'}),
     'member='..try({capability='member-token'}),
-    'outsider='..try({kind='session',session='outside-sess'}),
+    'outsider='..try({kind='session',session='outside-sess',instance_id='I-OUTSIDE'}),
     'outsider-token='..try({capability='outside-token'}),
     'operator='..try({kind='outside'}),
   }
   feature.request,feature.target_session_allowed=real_request,real_allowed
-  bus.agents.outside=nil
+  remuda.ls=real_ls
+  bus.agents.outside,bus.identity_ids['0123456789ABCDEFGHJKMNPQRS']=nil,nil
   bus.tokens['member-token']=nil
   bus.tokens['outside-token']=nil
   return table.concat(out,';')
@@ -193,7 +197,7 @@ T.test('approve_text_tool_refuses_unresolved_requester_when_member_named_outside
  T.expect(result:find('member=true/1/butler',1,true),result)
  T.expect(result:find('outsider=true/1/outside',1,true),result)
  T.expect(result:find('outsider-token=true/1/outside',1,true),result)
- T.expect(result:find('operator=true/1/outside',1,true),result)
+ T.expect(result:find('operator=false/0/',1,true),result)
  T.expect(true,'','APPROVE-TEXT-OUTSIDE-MEMBER '..result)
 end)
 

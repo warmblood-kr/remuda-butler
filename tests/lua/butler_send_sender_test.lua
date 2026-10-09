@@ -28,7 +28,7 @@ assert(alice_id and bob_id, "agent setup failed")
 local function call(args, agent_id, stdin)
   local encoded = {}
   for _, value in ipairs(args) do encoded[#encoded + 1] = quote(value) end
-  local caller = agent_id and string.format("{ kind = 'session', session = %q, stdin = %s }", agent_id,
+  local caller = agent_id and string.format("{ kind = 'session', session = %q, instance_id = _inst(%q), stdin = %s }", agent_id, agent_id,
     stdin and quote(stdin) or "nil") or string.format("{ kind = 'outside', stdin = %s }", stdin and quote(stdin) or "nil")
   return T.eval([[
     local ok, result = pcall(remuda._butler_command_run, "send", {]] .. table.concat(encoded, ",")

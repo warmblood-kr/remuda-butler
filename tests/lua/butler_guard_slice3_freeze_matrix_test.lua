@@ -5,6 +5,8 @@ local function start_butler()
   -- Installed once: a second install makes the daemon reload the mod, which would drop the approval state.
   if started then return end
   started = true
+  -- Butler captures the core's caller at load: it is installed before the mod loads.
+  T.eval("remuda.caller = function() return { kind = 'session', session = 's-ssa' } end")
   T.install_guard_subject("butler", assert(os.getenv("REMUDA_LUA_REPO")))
   T.eval('remuda._butler_argv = {"sh", "-c", "sleep 60"}; remuda._butler_skip_relay = true; remuda._butler_readiness_timeout = 1')
   T.eval('return remuda.exec("butler")')
@@ -66,7 +68,6 @@ local function start_butler()
     -- The calling session by core's caller identity (a grant offer needs one; holders: enforce_holder).
     remuda._butler_bus.agents['t-ssa'] = { id = 'U-SSA', parent = 'butler', alias = 't-ssa', kind = 'claude', session_name = 's-ssa', children = {} }
     remuda._butler_bus.agents['ss-a'] = nil -- keep this session uniquely registered
-    remuda.caller = function() return { kind = 'session', session = 's-ssa' } end
     return 'ok'
   ]])
 end
@@ -75,7 +76,7 @@ local ALLOW = '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decis
 local DENY = '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":'
   .. '{"behavior":"deny","message":"Denied by the owner via Butler"}}}'
 local function reply_out(n) return T.eval(("local r = remuda._t_replies[%d]; return r.done and ('done:' .. r.out) or 'waiting'"):format(n)) end
-local function guard(...) return T.eval(("return remuda._butler_command_run('guard', {'guard', %s}, {kind='session', session='butler'})"):format(
+local function guard(...) return T.eval(("return remuda._butler_command_run('guard', {'guard', %s}, {kind='session', session = 'butler', instance_id = _inst('butler')})"):format(
   table.concat((function(t) for i, v in ipairs(t) do t[i] = string.format("%q", v) end return t end)({ ... }), ", "))) end
 -- Guard and approvals on, a fresh data dir and a fresh relay stand-in; grants on unless told otherwise.
 local function on(name, grants)

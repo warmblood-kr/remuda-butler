@@ -4,6 +4,43 @@ local bus = assert(config.bus)
 
 local M = {}
 local OUTSIDE_POLICY = "outside_is_operator_transitional"
+-- Captured once at load so later Lua cannot swap them (advisory only: same-user Lua is not isolated).
+local caller_live = remuda._caller_live
+M.caller = remuda.caller
+local caller_fn = remuda.caller
+-- The core's caller snapshot for file-permission attribution: the function captured at load, under pcall.
+-- nil (unavailable or raising) makes the consumer refuse.
+function M.core_caller()
+  if type(caller_fn) ~= "function" then return nil end
+  local ok, caller = pcall(caller_fn)
+  return ok and caller or nil
+end
+-- Instance binding: a member launched through a core that returns the instance id (#654) is bound to
+-- that id. Admission compares the snapshot's id and asks the core (observed-death admission; core
+-- close/alive stay name-based). Unbound members, or a core without `_caller_live`, stay legacy-visible
+-- (name checks only) unless the strict switch is on.
+function M.strict()
+  local override = remuda._butler_strict_instance_binding
+  if override ~= nil then return override == true end
+  return os.getenv("REMUDA_BUTLER_STRICT_INSTANCE_BINDING") == "1"
+end
+-- A proven binding: a nonempty id AND the marker written only where the id came from a remuda.new return.
+-- Observation-only ids (PR A) carry no marker and are cleared on upgrade. Enforcement and doctor share this.
+M.BINDING = 1
+function M.bound(agent)
+  return type(agent) == "table" and type(agent.instance_id) == "string" and agent.instance_id ~= ""
+    and agent.instance_binding == M.BINDING
+end
+function M.enforcing(agent)
+  return type(caller_live) == "function" and M.bound(agent)
+end
+function M.legacy_core() return type(caller_live) ~= "function" end
+-- True when the core confirms the BOUND instance is live; always true where not enforcing.
+function M.live(agent)
+  if not M.enforcing(agent) then return true end
+  local ok, live = pcall(caller_live, agent.session_name, agent.instance_id)
+  return ok and live == true
+end
 
 local function unidentified(reason)
   return { tag = "unidentified", reason = reason }
@@ -35,6 +72,11 @@ function M.resolve(caller)
   end
   if matches ~= 1 or not found or type(found.agent.id) ~= "string" or found.agent.id == "" then
     return unidentified("managed session has no unique Butler registration")
+  end
+  if M.enforcing(found.agent) then
+    if caller.instance_id ~= found.agent.instance_id then return unidentified("session instance is not the bound instance") end
+  elseif M.strict() then
+    return unidentified("strict instance binding: this member is not enforced")
   end
   return {
     tag = "member",
