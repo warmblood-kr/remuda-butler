@@ -29,7 +29,7 @@ as() {
   verb=$1; shift
   for word in "$verb" "$@"; do quoted+=("$(lua_quote "$word")"); done
   words=$(IFS=,; printf '%s' "${quoted[*]}")
-  lua "return remuda._butler_command_run($(lua_quote "$verb"), {$words}, {kind='session',session=$(lua_quote "$session")})"
+  lua "return remuda._butler_command_run($(lua_quote "$verb"), {$words}, {kind='session',session=$(lua_quote "$session"),instance_id=(remuda._butler_bus.agents[$(lua_quote "$session")] or {}).instance_id})"
 }
 
 "$REMUDA_BIN" -s "$SERVER" daemon >"$SCRATCH/daemon.log" 2>&1 &

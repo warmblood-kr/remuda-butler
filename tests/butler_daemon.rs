@@ -597,7 +597,11 @@ fn a_registered_schedule_actually_fires_through_a_real_daemon() {
     }
 }
 
+/// Fixture snapshots carry the bound instance id the way the core's snapshot does: `_inst(session)`.
+const INST: &str = "local function _inst(s) for _, a in pairs((remuda._butler_bus or {}).agents or {}) do if type(a) == 'table' and a.session_name == s then return a.instance_id end end end ";
+
 fn eval(path: &Path, code: &str) -> String {
+    let code = &format!("{INST}{code}");
     match client::request(
         path,
         &Request::Eval {
@@ -9682,7 +9686,7 @@ fn butler_matrix_cli_rejects_invalid_send_dash_and_fails_cleanly_without_pending
          remuda.pending = function() return {{resolve=function(_, code, stdout, stderr) \
            completion={{code=code, stdout=stdout, stderr=stderr}} end}} end; \
          local ok, out = pcall(remuda._extension_commands.butler, {args}, \
-         {{kind='session', session='agent1', env={{REMUDA_BUTLER_AGENT_ID='butler'}}}}); \
+         {{kind='session', session='agent1', instance_id=_inst('agent1'), env={{REMUDA_BUTLER_AGENT_ID='butler'}}}}); \
          remuda.pending = native_pending; \
          if completion then return tostring(completion.code == 0) .. '|' .. completion.stderr end; \
          return tostring(ok) .. '|' .. tostring(out)"
@@ -9977,7 +9981,7 @@ fn butler_quota_statusline_keeps_line_one_and_adds_rate_limits() {
     // The status helper only writes the calling member's registered telemetry path.
     eval(&path, &format!("remuda._butler_bus.agents.butler.telemetry = {{status_path={status_path_lua}}}"));
     let line = eval(&path, &format!(
-        "return remuda._extension_commands.butler({{'statusline', {status_path_lua}}}, {{kind='session',session='butler',stdin={snapshot_lua}}})"
+        "return remuda._extension_commands.butler({{'statusline', {status_path_lua}}}, {{kind='session',session='butler',instance_id=_inst('butler'),stdin={snapshot_lua}}})"
     ));
     assert_eq!(
         line,
@@ -10024,7 +10028,7 @@ fn butler_quota_statusline_keeps_line_one_and_adds_rate_limits() {
     let no_limits = r#"{"model":{"display_name":"Claude Opus 4.6"},"context_window":{"total_input_tokens":12345,"context_window_size":200000,"used_percentage":6}}"#;
     let no_limits_lua = lua_raw_string(no_limits);
     eval(&path, &format!(
-        "return remuda._extension_commands.butler({{'statusline', {status_path_lua}}}, {{kind='session',session='butler',stdin={no_limits_lua}}})"
+        "return remuda._extension_commands.butler({{'statusline', {status_path_lua}}}, {{kind='session',session='butler',instance_id=_inst('butler'),stdin={no_limits_lua}}})"
     ));
     assert_eq!(
         std::fs::read_to_string(&status_path).expect("read status without limits"),
@@ -10425,7 +10429,7 @@ fn butler_quota_report_denies_registered_member_before_collecting() {
     );
     let member = eval(&path, r#"
       local ok, out = pcall(remuda._butler_command_run, 'quota', {'quota', '--report'},
-        {kind='session', session='quota-member', env={REMUDA_BUTLER_AGENT_ID='butler'}})
+        {kind='session', session='quota-member', instance_id=_inst('quota-member'), env={REMUDA_BUTLER_AGENT_ID='butler'}})
       return tostring(ok) .. '|' .. tostring(out)
     "#);
     assert!(member.starts_with(

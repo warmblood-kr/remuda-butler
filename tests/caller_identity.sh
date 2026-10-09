@@ -38,9 +38,9 @@ expect "outside caller is the transitional operator path" \
 expect "outside send-to-leader names the operator" \
   "remuda._t({'send-to-leader', 'done'}, {kind = 'outside'})" "operator has no leader"
 expect "registered session resolves its own inbox without launch metadata" \
-  "remuda._t({'inbox'}, {kind = 'session', session = 'm1'})" "inbox empty"
+  "remuda._t({'inbox'}, {kind = 'session', session = 'm1', instance_id = remuda._butler_bus.agents.m1.instance_id})" "inbox empty"
 expect "caller metadata cannot override the registered session" \
-  "remuda._t({'inbox'}, {kind = 'session', session = 'm1', env = {REMUDA_BUTLER_AGENT_ID = 'butler'}})" "inbox empty"
+  "remuda._t({'inbox'}, {kind = 'session', session = 'm1', instance_id = remuda._butler_bus.agents.m1.instance_id, env = {REMUDA_BUTLER_AGENT_ID = 'butler'}})" "inbox empty"
 expect "unregistered managed session refuses with a next step" \
   "remuda._t({'inbox'}, {kind = 'session', session = 'unregistered'})" "Next:"
 expect "old core without caller kind refuses with a next step" \

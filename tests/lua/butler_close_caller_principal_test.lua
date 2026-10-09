@@ -33,7 +33,7 @@ T.test("close_uses_the_supplied_principal_and_refuses_unidentified_without_mutat
     local saved_session = bob.session_name
     bob.session_name = remuda._butler_bus.agents.butler.session_name
     local ambiguous = pcall(remuda._butler_command_run, "close", {"close", "alice", "--force"},
-      {kind = "session", session = bob.session_name})
+      {kind = "session", session = bob.session_name, instance_id = _inst('butler')})
     bob.session_name = saved_session
     remuda.caller, remuda.close = saved_caller, saved_close
     return failures .. "|" .. tostring(nil_ok) .. "|" .. tostring(ambiguous) .. "|" .. attempts
@@ -118,7 +118,7 @@ T.test("every_mutating_command_refuses_every_unidentified_caller_before_mutation
     local callers = {
       {kind = "unknown"}, {}, {kind = "session", session = "unregistered"},
       {kind = "service", service = "timer"}, {kind = "timer"},
-      {kind = "session", session = bob.session_name}, false,
+      {kind = "session", session = bob.session_name, instance_id = _inst('butler')}, false,
     }
     local calls, saved = 0, {}
     local function spy(host, key)
@@ -157,7 +157,7 @@ end)
 T.test("identified_topic_new_preserves_root_parent_in_both_parser_paths", function()
   T.eq(eval([[
     local cli = remuda.cli
-    local callers = {{kind = "outside"}, {kind = "session", session = remuda._butler_bus.agents.alice.session_name}}
+    local callers = {{kind = "outside"}, {kind = "session", session = remuda._butler_bus.agents.alice.session_name, instance_id = _inst(remuda._butler_bus.agents.alice.session_name)}}
     local parents = {}
     for i, c in ipairs(callers) do
       if i == 2 then remuda.cli = nil end

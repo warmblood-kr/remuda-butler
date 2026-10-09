@@ -23,7 +23,11 @@ assert(alice_id and alice_session, "member setup failed")
 local function quote(value) return string.format("%q", value) end
 local function caller(kind, session, env)
   local entries = { "kind = " .. (kind and quote(kind) or "nil") }
-  if session then entries[#entries + 1] = "session = " .. quote(session) end
+  if session then
+    entries[#entries + 1] = "session = " .. quote(session)
+    -- the daemon's snapshot carries the instance id of the session it names
+    entries[#entries + 1] = "instance_id = _inst(" .. quote(session) .. ")"
+  end
   if env == "nil" then entries[#entries + 1] = "env = nil"
   elseif type(env) == "table" then
     local fields = {}

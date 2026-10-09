@@ -81,7 +81,7 @@ local ALLOW = '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decis
 local DENY = '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":'
   .. '{"behavior":"deny","message":"Denied by the owner via Butler"}}}'
 local function reply_out(n) return T.eval(("local r = remuda._t_replies[%d]; return r.done and ('done:' .. r.out) or 'waiting'"):format(n)) end
-local function guard(...) return T.eval(("return remuda._butler_command_run('guard', {'guard', %s}, {kind='session', session='butler'})"):format(
+local function guard(...) return T.eval(("return remuda._butler_command_run('guard', {'guard', %s}, {kind='session', session = 'butler', instance_id = _inst('butler')})"):format(
   table.concat((function(t) for i, v in ipairs(t) do t[i] = string.format("%q", v) end return t end)({ ... }), ", "))) end
 -- Guard and approvals on, a fresh data dir and a fresh relay stand-in; grants on unless told otherwise.
 local function on(name, grants)

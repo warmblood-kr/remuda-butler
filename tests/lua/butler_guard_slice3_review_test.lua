@@ -17,7 +17,7 @@ local function has(text, needle) return text:find(needle, 1, true) ~= nil end
 T.test("guard stats counts the grant events by name, not as other", function()
   start_butler()
   T.eval("local d = os.getenv('XDG_DATA_HOME') .. '/r-stats'; remuda.mkdir(d); remuda._butler_guard_dir = d")
-  T.eval("remuda._butler_command_run('guard', {'guard', 'on'}, {kind='session', session='butler'})")
+  T.eval("remuda._butler_command_run('guard', {'guard', 'on'}, {kind='session', session = 'butler', instance_id = _inst('butler')})")
   for _, e in ipairs({ "approval_limited", "grant_created", "grant_refused", "grant_register_refused" }) do
     T.eval(("remuda.butler.guard_policy.observe(%q, 's', 'claude', 'x')"):format(e))
   end
