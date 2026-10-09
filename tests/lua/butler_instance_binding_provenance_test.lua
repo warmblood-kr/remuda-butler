@@ -325,13 +325,15 @@ T.test("must4_sandbox_caller_is_agent_uses_the_caller_captured_at_load", functio
   load_caller("function() return { kind = 'outside' } end")
   T.eval("remuda.caller = function() return { kind = 'session', session = 'x' } end")
   T.eq(is_agent(), "false", "the caller captured at load decides (person), not a later remuda.caller")
-  -- captured = raising / absent: unavailable keeps the current policy (not an agent); a later caller is not consulted
+  -- captured = raising / absent / not a table / not a person: no proof of an owner, so full authority is refused
   load_caller("function() error('caller unavailable', 0) end")
-  T.eval("remuda.caller = function() return { kind = 'session', session = 'x' } end")
-  T.eq(is_agent(), "false", "a raising captured caller is unavailable; a later session caller is not consulted")
+  T.eval("remuda.caller = function() return { kind = 'outside' } end")
+  T.eq(is_agent(), "true", "a raising captured caller proves no owner; a later outside caller is not consulted")
   load_caller("nil")
-  T.eval("remuda.caller = function() return { kind = 'session', session = 'x' } end")
-  T.eq(is_agent(), "false", "an absent captured caller is unavailable; a later session caller is not consulted")
+  T.eval("remuda.caller = function() return { kind = 'outside' } end")
+  T.eq(is_agent(), "true", "an absent captured caller proves no owner; a later outside caller is not consulted")
+  load_caller("function() return { kind = 'service', service = 'timer' } end")
+  T.eq(is_agent(), "true", "a service caller is not a person at a terminal")
   restore_caller()
 end)
 
