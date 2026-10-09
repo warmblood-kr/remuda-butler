@@ -577,24 +577,24 @@ fn butler_close_accepts_published_string_force_argument() {
     "#);
     let refused = eval(
         &path,
-        "local token = remuda._butler_bus.agents.butler.token; \
-         local ok = pcall(remuda._call, 'butler_close', {name='m1', force='false'}, {capability=token}); \
+        "\
+         local ok = pcall(remuda.tools.butler_close, {name='m1', force='false'}, {kind='session', session='butler'}); \
          return tostring(ok) .. ':' .. tostring(remuda._butler_bus.agents.m1 ~= nil)",
     );
     assert_eq!(refused, "false:true", "string force=false must not force the close");
     let result = eval(
         &path,
-        "local token = remuda._butler_bus.agents.butler.token; \
-         return remuda._call('butler_close', {name='m1', force='true'}, {capability=token})",
+        "\
+         return remuda.tools.butler_close({name='m1', force='true'}, {kind='session', session='butler'})",
     );
     assert_eq!(result, "Closed m1.\nNext: remuda butler sessions");
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.agents.m1 == nil)"), "true");
 
     let invalid = eval(
         &path,
-        "local token = remuda._butler_bus.agents.butler.token; \
-         local ok, message = pcall(remuda._call, 'butler_close', \
-           {name='m1', force='yes'}, {capability=token}); \
+        "\
+         local ok, message = pcall(remuda.tools.butler_close, \
+           {name='m1', force='yes'}, {kind='session', session='butler'}); \
          return tostring(ok) .. ':' .. tostring(message)",
     );
     assert!(invalid.starts_with("false:force must be a boolean."), "{invalid}");
@@ -2491,8 +2491,8 @@ fn trust_dialogs_on_external_or_reused_directories_wait_for_a_human() {
             end
             remuda._butler_send = function(_, _, text) table.insert(remuda._trust_test_reports, text); return 'captured' end
             local cap = remuda._butler_bus.agents.butler.token
-            remuda._call('butler_launch', {{ kind = 'claude', name = 'external', cwd = {external:?} }}, {{ capability = cap }})
-            remuda._call('butler_launch', {{ kind = 'codex', name = 'external_codex', cwd = {external:?} }}, {{ capability = cap }})
+            remuda.tools.butler_launch({{ kind = 'claude', name = 'external', cwd = {external:?} }}, {{ kind = 'session', session = 'butler' }})
+            remuda.tools.butler_launch({{ kind = 'codex', name = 'external_codex', cwd = {external:?} }}, {{ kind = 'session', session = 'butler' }})
             remuda._butler_topic_new('reused', nil, 'claude')
             remuda._butler_topic_new('three', nil, 'claude')
             remuda.butler.template('clone', function(topic) topic.write('repo.txt', 'third-party source') end)

@@ -682,13 +682,12 @@ remuda.tool{
   args = { session = "Target Butler session name.", text = "Exact text to register, up to 8 KiB." },
   needs = { "session", "text" },
   run = function(a, caller)
-    local principal = caller_principal.resolve(caller).tag == "operator" and "outside" or caller_agent(caller)
+    -- An MCP route needs a session identity: kind=outside is the operator only on the audited CLI path.
+    local principal = caller_agent(caller)
     local feature = remuda.butler and remuda.butler.approve_text
     if not feature or not feature.target_session_allowed(a.session) then
       error("Unknown Butler session: " .. tostring(a.session), 0)
     end
-    -- One resolver: the structured principal decides; "outside" is only ever the
-    -- named operator policy, never a lookup result.
     local id, why = feature.request(a.session, a.text, principal)
     if not id then error(tostring(why or "Could not register prepared text"), 0) end
     return id
@@ -831,6 +830,7 @@ local function rotate_root_capability()
   if root.token then bus.tokens[root.token] = nil end
   butler_token = next_token("butler")
   root.token, root.session_start_marker = butler_token, remuda._butler_new_ulid()
+  root.instance_id = nil -- set from the instance observed when this launch finishes
   bus.tokens[butler_token] = { id = root_identity.id, generation = root.session_start_marker }
   remuda.butler.guard.write_private(mcp_config_path, agent_mcp_json(butler_token))
 end
@@ -1113,6 +1113,9 @@ local function launch_butler()
   butler_name, butler_kind = selected, kind
   remuda._butler_name, remuda._butler_selected_agent = selected, kind
   bus.agents.butler.kind, bus.agents.butler.telemetry = kind, telemetry_by_kind[kind]
+  local root = bus.agents.butler
+  root.instance_id = chooser.observed_instance(selected)
+  if root.token and bus.tokens[root.token] then bus.tokens[root.token].instance_id = root.instance_id end
   local root_record = bus.identities.butler or root_identity
   root_record.kind = kind
   bus.identities.butler, bus.identity_ids[root_record.id] = root_record, root_record

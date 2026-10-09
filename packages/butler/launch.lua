@@ -184,8 +184,9 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
     trust_eligible = trust_eligible, trust_real_cwd = trust_real_cwd,
     sandbox = profile and profile.sandbox, writable = profile and profile.writable,
     trust_reported = waiting_for_trust, trust_answered = trust_answered,
+    instance_id = chooser.observed_instance(actual),
   }
-  bus.tokens[token] = { id = identity.id, generation = bus.agents[actual].session_start_marker }
+  bus.tokens[token] = { id = identity.id, generation = bus.agents[actual].session_start_marker, instance_id = bus.agents[actual].instance_id }
   if parent and bus.agents[parent] then
     local children = bus.agents[parent].children
     children[#children + 1] = actual
