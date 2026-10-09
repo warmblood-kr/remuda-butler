@@ -442,3 +442,61 @@ T.test("ambiguous_observation_leaves_the_instance_unset_on_member_launch", funct
   T.eq(seen, "true:nil:nil:true", "an ambiguous launch must still work, with the instance left unset")
   T.eval('return remuda.close("dupe")')
 end)
+
+-- An observation that cannot be proven (no row, a dead row, two rows, ls raising) stays unset through finish.
+local function launch_under(mode, launch)
+  T.eval(string.format([[
+    local real, mode = remuda.ls, %q
+    remuda._test_real_ls = real
+    remuda.ls = function(...)
+      if mode == "raise" then error("ls unavailable") end
+      local rows, out = real(...), {}
+      for _, r in ipairs(rows) do
+        local hide = r.name == remuda._test_hide
+        if mode == "none" and hide then -- row missing
+        elseif mode == "dead" and hide then local c = {}; for k, v in pairs(r) do c[k] = v end; c.alive = false; out[#out + 1] = c
+        else out[#out + 1] = r
+          if mode == "dupe" and hide then local c = {}; for k, v in pairs(r) do c[k] = v end; c.instance_id = "OTHER"; out[#out + 1] = c end
+        end
+      end
+      return out
+    end
+  ]], mode))
+  launch()
+  return T.eval([[remuda.ls = remuda._test_real_ls; remuda._test_real_ls, remuda._test_hide = nil, nil; return "ok"]])
+end
+
+T.test("unobserved_instance_stays_unset_through_member_launch_finish", function()
+  for _, mode in ipairs({ "none", "dead", "dupe", "raise" }) do
+    local name = "unobs-" .. mode
+    launch_under(mode, function()
+      T.eval(string.format('remuda._test_hide = %q; return remuda._butler_launch("codex", %q)', name, name))
+      -- the launch ran with the stub installed; read the result before it is restored by launch_under
+      T.eval(string.format([[local a = remuda._butler_bus.agents[%q]; local r = a and remuda._butler_bus.tokens[a.token]
+        remuda._test_seen = table.concat({ tostring(a ~= nil), tostring(a and a.instance_id), tostring(r and r.instance_id), tostring(r and r.id == a.id) }, ":")]], name))
+    end)
+    T.eq(T.eval("return remuda._test_seen"):gsub("%s+$", ""), "true:nil:nil:true",
+      mode .. ": an unproven observation must leave the member row and capability instance unset")
+    T.eval(string.format('remuda._test_seen = nil; return remuda.close(%q)', name))
+  end
+end)
+
+T.test("unobserved_instance_stays_unset_through_root_launch_finish", function()
+  -- (ls raising is covered at the observed_instance unit level: the root respawn itself needs ls to be ready)
+  for _, mode in ipairs({ "none", "dead", "dupe" }) do
+    local token = T.eval("return remuda._butler_bus.agents.butler.token"):gsub("%s+$", "")
+    launch_under(mode, function()
+      T.eval('remuda._test_hide = remuda._butler_name')
+      T.eval('return remuda.close(remuda._butler_name)')
+      T.wait_until(function()
+        return T.eval('return tostring(remuda._butler_bus.agents.butler.token ~= ' .. string.format("%q", token)
+          .. ' and remuda._butler_start_pending == false)'):match("true") ~= nil
+      end, 10, "root respawn under " .. mode)
+      T.eval([[local root = remuda._butler_bus.agents.butler; local r = remuda._butler_bus.tokens[root.token]
+        remuda._test_seen = tostring(root.instance_id) .. ":" .. tostring(r and r.instance_id) .. ":" .. tostring(r ~= nil)]])
+    end)
+    T.eq(T.eval("return remuda._test_seen"):gsub("%s+$", ""), "nil:nil:true",
+      mode .. ": an unproven observation must leave the root row and capability instance unset")
+    T.eval("remuda._test_seen = nil")
+  end
+end)
