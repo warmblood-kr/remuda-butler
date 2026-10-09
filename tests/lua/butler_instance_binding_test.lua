@@ -96,6 +96,11 @@ T.eval([=[
     remuda.new, remuda.close, feature.request, feature.target_session_allowed =
       t.saved.new, t.saved.close, t.saved.request, t.saved.allowed
   end
+  -- A binding as a PR B launch leaves it: the id and the provenance marker on the row AND its token record.
+  function t.prove(a, r, row_id, record_id)
+    a.instance_id, r.instance_id = row_id, record_id or row_id
+    a.instance_binding, r.instance_binding = 1, 1
+  end
   function t.agent(name)
     local a = remuda._butler_bus.agents[name]
     local rec = a and remuda._butler_bus.tokens[a.token]
@@ -292,7 +297,7 @@ end)
 
 T.test("stale_exit_uses_the_bound_instance_without_asking_ls", function()
   launch("stale")
-  T.eval("local a, r = remuda._t.agent('stale'); a.instance_id, r.instance_id = 'BOUND', 'BOUND'")
+  T.eval("local a, r = remuda._t.agent('stale'); remuda._t.prove(a, r, 'BOUND')")
   T.eval("remuda._t.ls_calls = 0; remuda._t.real_ls = remuda.ls; remuda.ls = function() remuda._t.ls_calls = remuda._t.ls_calls + 1; error('ls unavailable', 0) end")
   T.eval("remuda._butler_session_exited('stale', { instance_id = 'OLD', reason = 'exited' })")
   local kept = ev("local a, r = remuda._t.agent('stale'); return tostring(a ~= nil and r ~= nil) .. ':' .. remuda._t.ls_calls")
@@ -310,7 +315,7 @@ end)
 T.test("mutating_routes_refuse_when_caller_live_raises", function()
   launch("liveness")
   -- The snapshot and the bound id agree, but no such instance is live: core's _caller_live raises.
-  T.eval("local a, r = remuda._t.agent('liveness'); a.instance_id, r.instance_id = 'NOT-LIVE', 'NOT-LIVE'")
+  T.eval("local a, r = remuda._t.agent('liveness'); remuda._t.prove(a, r, 'NOT-LIVE')")
   T.eval("remuda._t.guard_effects()")
   local before = ev("return remuda._t.snap()")
   local caller = snapshot_literal("liveness", "NOT-LIVE")
@@ -359,7 +364,7 @@ T.test("root_adopted_after_reload_keeps_its_bound_id_only_if_token_and_row_agree
   local function adopt(row_id, token_id)
     T.eval(string.format([[
       local root = remuda._butler_bus.agents.butler
-      root.instance_id, remuda._butler_bus.tokens[root.token].instance_id = %s, %s
+      remuda._t.prove(root, remuda._butler_bus.tokens[root.token], %s, %s)
       remuda._butler_reconcile() -- live session + selected agent: the adoption branch, no chooser
     ]], row_id and quote(row_id) or "nil", token_id and quote(token_id) or "nil"))
     return ev("local root = remuda._butler_bus.agents.butler; return tostring(root.instance_id) .. ':' .. tostring(remuda._butler_bus.tokens[root.token].instance_id)")
@@ -389,13 +394,13 @@ end)
 T.test("doctor_lists_unbound_members_and_only_when_there_are_some", function()
   local function doctor() return ev("return tostring(remuda._butler_command_run('doctor', { 'doctor' }))") end
   T.eval([[
-    for alias, a in pairs(remuda._butler_bus.agents) do a.instance_id = a.instance_id or 'X' end
+    for alias, a in pairs(remuda._butler_bus.agents) do if not a.instance_id then a.instance_id, a.instance_binding = 'X', 1 end end
     remuda._t.state_before = remuda._t.snap()
   ]])
   T.ok(not doctor():find("not instance-bound", 1, true), "no unbound member: no line")
   launch("unb1"); launch("unb2")
   T.eval([[
-    for alias, a in pairs(remuda._butler_bus.agents) do a.instance_id = 'X' end
+    for alias, a in pairs(remuda._butler_bus.agents) do a.instance_id, a.instance_binding = 'X', 1 end
     remuda._butler_bus.agents.unb1.instance_id, remuda._butler_bus.agents.unb2.instance_id = nil, nil
   ]])
   local before = ev("return remuda._t.snap()")
