@@ -8,7 +8,9 @@
 local butler = assert(remuda.butler, "load butler/guard_policy before butler/guard_grants")
 local policy = assert(butler.guard_policy, "load butler/guard_policy before butler/guard_grants")
 -- The core's caller as captured when caller_principal loaded (never a later remuda.caller); nil when unavailable.
-local core_caller = assert(remuda._butler_caller_principal, "load butler/caller_principal before butler/guard_grants").core_caller
+-- A direct load without Butler's main has no principal: no caller, so holders() is nil and no grant applies (fail closed).
+local principal = remuda._butler_caller_principal
+local core_caller = principal and principal.core_caller or function() return nil end
 local M = butler.guard_grants or {}
 butler.guard_grants = M
 
