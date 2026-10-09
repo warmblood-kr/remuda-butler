@@ -9,7 +9,8 @@ local caller_live = remuda._caller_live
 M.caller = remuda.caller
 local caller_fn = remuda.caller
 -- The core's caller snapshot for file-permission attribution: the function captured at load, under pcall.
--- nil (unavailable or raising) makes the consumer refuse.
+-- nil (unavailable or raising): permissions and the guard holders refuse; sandbox full access is refused too
+-- (it needs kind == "outside").
 function M.core_caller()
   if type(caller_fn) ~= "function" then return nil end
   local ok, caller = pcall(caller_fn)
