@@ -3,9 +3,11 @@
 -- Enforcing = the core's `_caller_live` was present at load AND the agent is bound. Otherwise legacy-visible
 -- (today's checks, no isolation claim). The strict switch refuses everything that is not enforced.
 -- Every refusal must leave the bus untouched.
+-- A bound row as a PR B launch leaves it: the id came from the remuda.new return (provenance marker).
+local function proven(row) row.instance_binding = 1; return row end
 local function load(live)
   local bus = { agents = {}, tokens = {}, identity_ids = {}, identities = {}, messages = {}, next = 0, incarnation = "T" }
-  bus.agents.bound = { id = "01ABCDEF0123456789ABCDEFGH", alias = "bound", session_name = "s-bound", kind = "codex", instance_id = "I-BOUND" }
+  bus.agents.bound = proven({ id = "01ABCDEF0123456789ABCDEFGH", alias = "bound", session_name = "s-bound", kind = "codex", instance_id = "I-BOUND" })
   bus.agents.unbound = { id = "01ABCDEF0123456789ABCDEFGJ", alias = "unbound", session_name = "s-unbound", kind = "codex" }
   for alias, agent in pairs(bus.agents) do bus.identity_ids[agent.id] = { id = agent.id, alias = alias, state = "running" } end
   remuda = {
