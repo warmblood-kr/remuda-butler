@@ -7,6 +7,8 @@
 -- grant (fail closed). Cooperative, like the rest of the guard: not a boundary.
 local butler = assert(remuda.butler, "load butler/guard_policy before butler/guard_grants")
 local policy = assert(butler.guard_policy, "load butler/guard_policy before butler/guard_grants")
+-- The core's caller as captured when caller_principal loaded (never a later remuda.caller); nil when unavailable.
+local core_caller = assert(remuda._butler_caller_principal, "load butler/caller_principal before butler/guard_grants").core_caller
 local M = butler.guard_grants or {}
 butler.guard_grants = M
 
@@ -523,8 +525,8 @@ M.show = show
 -- or a leader above. Advisory like the rest of the guard (core: caller() is no authentication boundary), but an
 -- agent cannot name it the way it names an alias in its env.
 function M.holders()
-  local ok, c = pcall(function() return remuda.caller() end)
-  if not ok or type(c) ~= "table" or c.kind ~= "session" or type(c.session) ~= "string" or c.session == "" then return nil end
+  local c = core_caller()
+  if type(c) ~= "table" or c.kind ~= "session" or type(c.session) ~= "string" or c.session == "" then return nil end
   local agents = remuda._butler_bus and remuda._butler_bus.agents
   if type(agents) ~= "table" then return nil end
   local alias

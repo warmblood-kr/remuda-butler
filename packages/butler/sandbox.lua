@@ -2,6 +2,8 @@
 -- roots and `sandbox == "full"` (no sandbox). A profile is {sandbox=, writable=}
 -- and travels with the member row so a relaunch re-applies it.
 local sandbox = {}
+-- The core's caller as captured when caller_principal loaded (never a later remuda.caller); nil when unavailable.
+local core_caller = assert(remuda._butler_caller_principal, "load butler/caller_principal before butler/sandbox").core_caller
 
 local function shell_quote(value)
   return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
@@ -148,9 +150,8 @@ end
 
 -- A Butler agent session (the root included) is never a human at a terminal.
 function sandbox.caller_is_agent()
-  if type(remuda.caller) ~= "function" then return false end
-  local ok, caller = pcall(remuda.caller)
-  return ok and type(caller) == "table" and caller.kind == "session"
+  local caller = core_caller()
+  return type(caller) == "table" and caller.kind == "session"
 end
 
 remuda._butler_sandbox = sandbox
