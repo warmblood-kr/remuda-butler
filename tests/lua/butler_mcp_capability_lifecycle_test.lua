@@ -182,6 +182,9 @@ T.test("tokenless_MCP_bridge_cannot_reach_operator_only_routes_even_with_approva
       if done then done({ event_id = "$p" .. remuda._probe_posts }) end
       return {}
     end)
+    local feature = remuda.butler.approve_text
+    feature._test_request, remuda._probe_requests = feature.request, 0
+    feature.request = function(...) remuda._probe_requests = remuda._probe_requests + 1; return feature._test_request(...) end
   ]])
   local function snapshot()
     return T.eval([[
@@ -191,7 +194,7 @@ T.test("tokenless_MCP_bridge_cannot_reach_operator_only_routes_even_with_approva
       for _, rows in pairs(bus.mail_delivered) do for _ in pairs(rows) do n[3] = n[3] + 1 end end
       for _ in pairs(remuda._probe_state.approvals) do n[4] = n[4] + 1 end
       for _ in pairs(bus.agents) do n[5] = n[5] + 1 end
-      return table.concat(n, ":") .. ":" .. bus.next .. ":" .. remuda._probe_posts
+      return table.concat(n, ":") .. ":" .. bus.next .. ":" .. remuda._probe_posts .. ":" .. remuda._probe_requests
     ]])
   end
   local before = snapshot()
@@ -211,6 +214,20 @@ T.test("tokenless_MCP_bridge_cannot_reach_operator_only_routes_even_with_approva
     T.ok(message:find("unknown caller", 1, true) ~= nil, name .. " accepted a tokenless MCP caller: " .. message)
   end
   T.eq(snapshot(), before, "tokenless MCP calls must register no approval and change no state")
+  -- Same handler, other refusals: an outside bridge holding a valid saved capability, a garbage one, and a native unknown caller.
+  local token = T.eval("return remuda._butler_bus.agents.butler.token")
+  for label, capability in pairs({ saved = token, garbage = "garbage-capability" }) do
+    local reply = T.mcp_call("butler_approve_text", { session = "butler", text = "capability " .. label }, capability)
+    local message = reply.error and reply.error.message or reply.result.content[1].text
+    T.ok(message:find("unknown caller", 1, true) ~= nil, label .. " capability from outside a session was accepted: " .. message)
+  end
+  local unknown = T.eval([[
+    local tool; for k, v in pairs(remuda.tools) do if k == "butler_approve_text" or (type(v) == "table" and v.name == "butler_approve_text") then tool = v end end
+    local ok, err = pcall(tool.run, { session = "butler", text = "unknown" }, { kind = "unknown" })
+    return tostring(ok) .. ":" .. tostring(err)
+  ]])
+  T.ok(unknown:find("^false:unknown caller") ~= nil, "a native unknown caller was accepted: " .. unknown)
+  T.eq(snapshot(), before, "refused callers must not enter the request helper or change state")
   -- Positive control: a registered session still registers a request, asked by that member.
   local registered = T.eval([[
     local tool; for k, v in pairs(remuda.tools) do if k == "butler_approve_text" or (type(v) == "table" and v.name == "butler_approve_text") then tool = v end end
@@ -219,7 +236,7 @@ T.test("tokenless_MCP_bridge_cannot_reach_operator_only_routes_even_with_approva
     return tostring(ok) .. ":" .. remuda._probe_posts
   ]])
   T.eq(registered, "true:1", "a registered member must still be able to register prepared text")
-  T.eval("remuda._butler_matrix_live_config = nil")
+  T.eval("local f = remuda.butler.approve_text; f.request, f._test_request = f._test_request, nil; remuda._butler_matrix_live_config = nil")
 end)
 
 T.test("native_session_attribution_resolves_exactly_one_registration_by_session_name", function()
