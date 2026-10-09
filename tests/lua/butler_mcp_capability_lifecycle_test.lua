@@ -88,8 +88,8 @@ T.test("a_capability_from_an_ended_member_does_not_resolve_to_an_alias_replaceme
   ]])
   local observed = T.mcp_call("butler_test_caller_probe", {}, old_token)
   local caller_shape = observed.result and observed.result.content and observed.result.content[1].text or ""
-  T.eq(caller_shape, "nil:nil:" .. old_token,
-    "the actual MCP bridge sends only its saved capability after the member exits")
+  T.eq(caller_shape, "outside:nil:" .. old_token,
+    "the test bridge is outside any session: core sets kind, the bridge adds only its saved capability")
   local before = T.eval([[
     local bus = remuda._butler_bus
     local messages, inboxes = 0, 0
@@ -154,7 +154,9 @@ T.test("unidentified_MCP_callers_cannot_mutate_mail_or_register_approvals", func
   end
   local send = text(T.mcp_call("butler_send", { to = "butler", text = "unidentified send" }))
   local reply = text(T.mcp_call("butler_reply", { to = "butler", text = "unidentified reply" }))
-  local approve = text(T.mcp_call("butler_approve_text", { session = "reused", text = "unidentified approval" }))
+  -- A tokenless harness bridge is now kind=outside, which butler_approve_text maps to the
+  -- operator (transitional policy), so approve is checked with a native unknown caller instead.
+  local approve = T.eval([[local ok, err = pcall(remuda._butler_identity.caller_agent, { kind = "unknown" }); return tostring(err)]])
   local inbox = text(T.mcp_call("butler_inbox", {}))
   for label, result in pairs({ send = send, reply = reply, approve = approve, inbox = inbox }) do
     T.ok(result:find("unknown caller", 1, true) ~= nil,

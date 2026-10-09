@@ -1,6 +1,6 @@
 # Core version shared by the shell, Rust, golden guidance, and contract checks.
 # Bump deliberately; a core change must not redden Butler PRs.
-CORE_REF=${CORE_REF:-58cc78d3fe5074854399dc4e4a524e8b7b22973a}
+CORE_REF=${CORE_REF:-cc371a0df360742c01d1d1475af191d0c47e5a25}
 
 core_ref_check() {
   local remuda_bin=${REMUDA_BIN:-remuda}
