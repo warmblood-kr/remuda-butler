@@ -151,7 +151,7 @@ local function render(probe_results, platform)
   if principal and principal.legacy_core() then lines[#lines + 1] = "legacy-core: instance binding not enforced" end
   local unbound = 0
   for _, agent in pairs((remuda._butler_bus or {}).agents or {}) do
-    if type(agent) == "table" and not agent.instance_id then unbound = unbound + 1 end
+    if type(agent) == "table" and not (principal and principal.bound(agent)) then unbound = unbound + 1 end
   end
   if unbound > 0 then lines[#lines + 1] = unbound .. " members not instance-bound: relaunch to bind" end
   return lines

@@ -191,9 +191,10 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
     trust_eligible = trust_eligible, trust_real_cwd = trust_real_cwd,
     sandbox = profile and profile.sandbox, writable = profile and profile.writable,
     trust_reported = waiting_for_trust, trust_answered = trust_answered,
-    instance_id = instance_id,
+    instance_id = instance_id, instance_binding = instance_id and 1 or nil, -- from the remuda.new return only
   }
-  bus.tokens[token] = { id = identity.id, generation = bus.agents[actual].session_start_marker, instance_id = bus.agents[actual].instance_id }
+  bus.tokens[token] = { id = identity.id, generation = bus.agents[actual].session_start_marker,
+    instance_id = instance_id, instance_binding = instance_id and 1 or nil }
   if parent and bus.agents[parent] then
     local children = bus.agents[parent].children
     children[#children + 1] = actual

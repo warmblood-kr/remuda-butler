@@ -200,9 +200,16 @@ local function caller_name(caller)
     -- or refuses; a capability never repairs a failed native attribution.
     local ok, id = pcall(current_agent, caller)
     local resolved, alias = pcall(resolve, ok and id or "")
+    if not resolved or not alias then return nil end
     local record = caller.capability and bus.tokens[caller.capability]
-    if type(record) == "table" and record.instance_id and record.instance_id ~= caller.instance_id then return nil end
-    return resolved and alias or nil
+    if caller.capability and remuda._butler_caller_principal.enforcing(bus.agents[alias]) then
+      -- A supplied capability on the enforcing path must be a proven record of the same bound instance;
+      -- a missing, legacy or unbound record is no capability (a tokenless snapshot is still admitted).
+      if type(record) ~= "table" or record.instance_binding ~= 1 or record.instance_id ~= caller.instance_id then return nil end
+    elseif type(record) == "table" and record.instance_id and record.instance_id ~= caller.instance_id then
+      return nil
+    end
+    return alias
   end
   local token = caller and caller.capability
   -- Strict: a capability alone carries no instance to compare.
