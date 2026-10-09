@@ -697,7 +697,7 @@ remuda.tool{
   name = "butler_inbox",
   about = "Drain this agent's Butler inbox and return its queued messages in arrival order.",
   run = function(_, caller)
-    local principal = caller_agent(caller)
+    local principal = caller_agent(caller, true) -- reading compares the instance; liveness is for mutating routes
     return remuda._butler_inbox(principal)
   end,
 }
@@ -785,6 +785,22 @@ remuda.tool{
   end,
 }
 
+-- Upgrade: a binding is proven only with the marker on the row AND its token record and equal ids. Anything else
+-- (PR A stored ids observed through ls, with no spawn provenance) is cleared from both; those members stay
+-- legacy-visible (refused under strict) until relaunched. Proven bindings survive in-image reloads.
+for _, agent in pairs(bus.agents) do
+  if type(agent) == "table" and (agent.instance_id ~= nil or agent.instance_binding ~= nil) then
+    local record = agent.token and bus.tokens[agent.token]
+    if not (caller_principal.bound(agent) and type(record) == "table" and record.instance_binding == 1
+        and record.instance_id == agent.instance_id) then
+      agent.instance_id, agent.instance_binding = nil, nil
+      if type(record) == "table" then record.instance_id, record.instance_binding = nil, nil end
+    end
+  end
+end
+for _, record in pairs(bus.tokens) do
+  if type(record) == "table" and record.instance_binding ~= 1 then record.instance_id = nil end
+end
 local existing_butler = bus.agents.butler
 local launch_options = remuda._mod_launch_options and remuda._mod_launch_options.butler
 local butler_kind = existing_butler and existing_butler.kind
@@ -813,7 +829,10 @@ bus.agents.butler.id = root_identity.id
 bus.agents.butler.alias = "butler"
 bus.agents.butler.session_name = bus.agents.butler.session_name or "butler"
 bus.agents.butler.session_start_marker = remuda._butler_new_ulid()
-bus.tokens[butler_token] = { id = root_identity.id, generation = bus.agents.butler.session_start_marker }
+-- Carry the verified binding of the same root (the sweep above kept it only if row and record were proven).
+local carried = existing_butler and caller_principal.bound(existing_butler) and existing_butler.instance_id or nil
+bus.tokens[butler_token] = { id = root_identity.id, generation = bus.agents.butler.session_start_marker,
+  instance_id = carried, instance_binding = carried and 1 or nil }
 bus.identity_ids[root_identity.id] = bus.identities.butler or root_identity
 bus.identities.butler = bus.identities.butler or root_identity
 local root_migrated, root_migration_error = migrate_legacy_mail("butler", root_identity.id)
@@ -830,7 +849,7 @@ local function rotate_root_capability()
   if root.token then bus.tokens[root.token] = nil end
   butler_token = next_token("butler")
   root.token, root.session_start_marker = butler_token, remuda._butler_new_ulid()
-  root.instance_id = nil -- set from the instance observed when this launch finishes
+  root.instance_id, root.instance_binding = nil, nil -- set from the spawn-returned instance when this launch finishes
   bus.tokens[butler_token] = { id = root_identity.id, generation = root.session_start_marker }
   remuda.butler.guard.write_private(mcp_config_path, agent_mcp_json(butler_token))
 end
@@ -957,10 +976,7 @@ end
 -- The file arguments of send, send-to-leader, reply, matrix upload and matrix
 -- download: an agent caller is held to its own working directory (permissions.lua).
 -- The caller comes from core's caller identity, never from the environment.
-local function core_caller()
-  local known, caller = pcall(function() return remuda.caller() end)
-  return known and caller or nil
-end
+local function core_caller() return caller_principal.core_caller() end
 local function session_launch_cwd(session)
   local cwd, matches = nil, 0
   for alias, agent in pairs(bus.agents) do
@@ -1067,6 +1083,14 @@ local function launch_butler()
   if remuda._butler_selected_agent and stale_session then
     butler_name = requested_name
     remuda._butler_name = butler_name
+    -- Adopted without a chooser run: keep the bound id only if the token record and the live row agree with it.
+    local root = bus.agents.butler
+    local record = root.token and bus.tokens[root.token]
+    if root.instance_id and not (caller_principal.bound(root) and type(record) == "table" and record.instance_binding == 1
+        and record.instance_id == root.instance_id and chooser.instance_live(requested_name, root.instance_id)) then
+      root.instance_id, root.instance_binding = nil, nil
+      if type(record) == "table" then record.instance_id, record.instance_binding = nil, nil end
+    end
     if not root_permissions_ensured then
       pcall(ensure_root_permissions, remuda._butler_selected_agent)
       arm_compaction_schedule(remuda._butler_selected_agent)
@@ -1097,10 +1121,16 @@ local function launch_butler()
         REMUDA_BUTLER_AGENT_KIND = candidate_kind, CLAUDE_CODE_FORCE_SESSION_PERSISTENCE = "1" }
     end,
   }
-  local function finish(selected, kind, attempts)
+  local function finish(selected, kind, attempts, instance_id)
   butler_attempts = attempts
   remuda._butler_attempts = attempts
   bus.agents.butler.launch_attempts = attempts
+  if selected and instance_id and not chooser.instance_live(selected, instance_id) then
+    for _, a in ipairs(attempts or {}) do
+      if a.session == selected then a.reason, a.detail = "exited", "session exited before Butler registered it" end
+    end
+    selected = nil
+  end
   if not selected then
     local message = table.concat(launch_failure_lines(attempts), "\n")
     remuda._butler_start_error = message
@@ -1114,8 +1144,10 @@ local function launch_butler()
   remuda._butler_name, remuda._butler_selected_agent = selected, kind
   bus.agents.butler.kind, bus.agents.butler.telemetry = kind, telemetry_by_kind[kind]
   local root = bus.agents.butler
-  root.instance_id = chooser.observed_instance(selected)
-  if root.token and bus.tokens[root.token] then bus.tokens[root.token].instance_id = root.instance_id end
+  root.instance_id, root.instance_binding = instance_id, instance_id and 1 or nil -- from the remuda.new return only
+  if root.token and bus.tokens[root.token] then
+    bus.tokens[root.token].instance_id, bus.tokens[root.token].instance_binding = root.instance_id, root.instance_binding
+  end
   local root_record = bus.identities.butler or root_identity
   root_record.kind = kind
   bus.identities.butler, bus.identity_ids[root_record.id] = root_record, root_record
@@ -1126,9 +1158,9 @@ local function launch_butler()
   reconcile_retry.reset()
   return selected
   end
-  local attempts = choose(order, choose_opts, function(selected, kind, attempts)
+  local attempts = choose(order, choose_opts, function(selected, kind, attempts, instance_id)
     remuda._butler_launching = nil
-    local ok, err = pcall(finish, selected, kind, attempts)
+    local ok, err = pcall(finish, selected, kind, attempts, instance_id)
     if not ok then
       remuda._butler_start_error = tostring(err)
       reconcile_retry.note_failure()
@@ -1224,6 +1256,13 @@ local function report_update_task_not_relaunched(record, reason)
 end
 local function stale_session_exit(name, instance_id)
   if type(instance_id) ~= "string" or instance_id == "" then return false end
+  -- A bound member compares with its stored id and needs no ls; unbound members (and older cores) use the live row.
+  for _, agent in pairs(bus.agents) do
+    if type(agent) == "table" and (agent.session_name == name or (agent.alias == "butler" and name == butler_name))
+        and type(agent.instance_id) == "string" and agent.instance_id ~= "" then
+      return agent.instance_id ~= instance_id
+    end
+  end
   local ok, sessions = pcall(remuda.ls)
   if not ok or type(sessions) ~= "table" then return false end
   for _, session in ipairs(sessions) do
@@ -1288,7 +1327,8 @@ function remuda._butler_session_exited(name, info)
     bus.trusted_launch_dirs[exited.cwd] = nil
   end
   if exited and name ~= "butler" and exited.token then bus.tokens[exited.token] = nil end
-  -- ponytail: a late exit of a replaced root while a launch is pending is skipped
+  -- ponytail: reached by exits of the bound instance or without an instance id (older core); an exit of another
+  -- instance was dropped as stale above. A late exit of a replaced root while a launch is pending is skipped
   -- (that launch rotates anyway); one arriving after finish would revoke the new launch.
   if name == "butler" and not remuda._butler_launching then remuda._butler_revoke_root_capability() end
   if exited and name ~= "butler" then

@@ -64,7 +64,11 @@ function T.expect(value, message, success_message)
   return value
 end
 
+-- Daemon-side helper for fake session snapshots: the instance id the roster bound for SESSION (nil when unbound).
+-- A snapshot built by a fixture carries it the way the core's snapshot does: `{ kind = 'session', session = s, instance_id = _inst(s) }`.
+local INST = "local function _inst(s) for _, a in pairs((remuda._butler_bus or {}).agents or {}) do if type(a) == 'table' and a.session_name == s then return a.instance_id end end end "
 function T.eval(code)
+  code = INST .. code
   if T.guard_subject then code = T.guard_subject.wrap(code, T.guard_subject_dir) end
   -- The CLI appends one newline to the value it prints; the value itself has none.
   return (remote(code):gsub("\n$", ""))

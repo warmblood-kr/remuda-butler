@@ -75,8 +75,8 @@ local function launch(screen, opts)
   local sel, done = opts.selected or 1, false
   local function paint() return done and "─\n❯" or with_marker(screen, sel) end
   if opts.static then paint = function() return screen end end
-  remuda.new = function(name) return name end
-  remuda.ls = function() return { { name = "m", alive = true } } end
+  remuda.new = function(name) return name, "inst-" .. name end
+  remuda.ls = function() return { { name = "m", alive = true, instance_id = "inst-m" } } end
   remuda.capture = paint
   remuda.close = noop
   remuda.cancel = noop

@@ -22,7 +22,7 @@ local function start_butler(no_register)
       for l in f:lines() do out[#out + 1] = l end
       f:close(); return table.concat(out, '\n')
     end
-    remuda._t_guard = function(args, caller) caller = caller or {}; caller.kind = 'session'; caller.session = 'butler'; return remuda._butler_command_run('guard', args, caller) end
+    remuda._t_guard = function(args, caller) caller = caller or {}; caller.kind = 'session'; caller.session = 'butler'; caller.instance_id = _inst('butler'); return remuda._butler_command_run('guard', args, caller) end
     return 'ok'
   ]])
   -- Butler's own load handed `add` to the owner-reaction handler; a fresh load of the store module hands it to the test.

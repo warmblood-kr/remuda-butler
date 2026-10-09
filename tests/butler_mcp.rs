@@ -192,7 +192,7 @@ fn butler_status_is_a_live_mcp_tool_not_a_terminal_scrape() {
     let status_line = eval(
         &path,
         &format!(
-            "return remuda._extension_commands.butler({{'statusline', {}}}, {{kind='session',session='butler',stdin={}}})",
+            "return remuda._extension_commands.butler({{'statusline', {}}}, {{kind='session',session='butler',instance_id=_inst('butler'),stdin={}}})",
             serde_json::to_string(&status_path).unwrap(),
             serde_json::to_string(snapshot).unwrap(),
         ),
@@ -209,7 +209,7 @@ fn butler_status_is_a_live_mcp_tool_not_a_terminal_scrape() {
     let failed_write_line = eval(
         &path,
         &format!(
-            "return remuda._extension_commands.butler({{'statusline', {}}}, {{kind='session',session='butler',stdin={}}})",
+            "return remuda._extension_commands.butler({{'statusline', {}}}, {{kind='session',session='butler',instance_id=_inst('butler'),stdin={}}})",
             serde_json::to_string(&failed_write_path.display().to_string()).unwrap(),
             serde_json::to_string(snapshot).unwrap(),
         ),
@@ -222,7 +222,7 @@ fn butler_status_is_a_live_mcp_tool_not_a_terminal_scrape() {
     let non_status_line = eval(
         &path,
         &format!(
-            "return remuda._extension_commands.butler({{'statusline', {}}}, {{kind='session',session='butler',stdin={}}})",
+            "return remuda._extension_commands.butler({{'statusline', {}}}, {{kind='session',session='butler',instance_id=_inst('butler'),stdin={}}})",
             serde_json::to_string(&non_status_path.display().to_string()).unwrap(),
             serde_json::to_string(snapshot).unwrap(),
         ),
@@ -255,7 +255,7 @@ fn butler_status_is_a_live_mcp_tool_not_a_terminal_scrape() {
     let status_line = eval(
         &path,
         &format!(
-            "return remuda._extension_commands.butler({{'statusline', {}}}, {{kind='session',session='butler',stdin={}}})",
+            "return remuda._extension_commands.butler({{'statusline', {}}}, {{kind='session',session='butler',instance_id=_inst('butler'),stdin={}}})",
             serde_json::to_string(&status_path).unwrap(),
             serde_json::to_string(snapshot).unwrap(),
         ),
@@ -268,7 +268,7 @@ fn butler_status_is_a_live_mcp_tool_not_a_terminal_scrape() {
     let status_line = eval(
         &path,
         &format!(
-            "return remuda._extension_commands.butler({{'statusline', {}}}, {{kind='session',session='butler',stdin={}}})",
+            "return remuda._extension_commands.butler({{'statusline', {}}}, {{kind='session',session='butler',instance_id=_inst('butler'),stdin={}}})",
             serde_json::to_string(&status_path).unwrap(),
             serde_json::to_string(snapshot).unwrap(),
         ),
@@ -330,7 +330,11 @@ fn matrix_reply_is_not_registered_as_a_text_only_mcp_tool() {
     );
 }
 
+/// Fixture snapshots carry the bound instance id the way the core's snapshot does: `_inst(session)`.
+const INST: &str = "local function _inst(s) for _, a in pairs((remuda._butler_bus or {}).agents or {}) do if type(a) == 'table' and a.session_name == s then return a.instance_id end end end ";
+
 fn eval(path: &Path, code: &str) -> String {
+    let code = &format!("{INST}{code}");
     match client::request(path, &Request::Eval { code: code.into(), name: None }).expect("eval") {
         Response::Value(value) => value,
         other => panic!("eval {code:?} failed: {other:?}"),
@@ -404,7 +408,7 @@ fn cli_launch_parents_to_the_calling_member_not_butler() {
             "return remuda._extension_commands.butler({{'launch', 'claude', '{name}'}}, {caller})"
         )
     };
-    eval(&path, &launch("{kind='session', session='m1', env={REMUDA_BUTLER_AGENT_ID='butler'}}", "m2"));
+    eval(&path, &launch("{kind='session', session='m1', instance_id=_inst('m1'), env={REMUDA_BUTLER_AGENT_ID='butler'}}", "m2"));
     assert_eq!(eval(&path, "return remuda._butler_bus.agents.m2.parent"), "m1");
     eval(&path, &launch("{kind='outside'}", "m3"));
     assert_eq!(eval(&path, "return remuda._butler_bus.agents.m3.parent"), "butler");
@@ -444,7 +448,7 @@ fn butler_close_is_limited_to_own_idle_members_unless_forced() {
     let cli = |caller_id: &str, args: &str| {
         eval(&path, &format!(
             "local caller; for _, agent in pairs(remuda._butler_bus.agents) do \
-               if agent.id == {caller_id:?} then caller={{kind='session', session=agent.session_name}} end \
+               if agent.id == {caller_id:?} then caller={{kind='session', session=agent.session_name, instance_id=_inst(agent.session_name)}} end \
              end; return remuda._extension_commands.butler({{'close', {args}}}, caller)"
         ))
     };
@@ -507,7 +511,7 @@ fn butler_close_cli_uses_core_caller_not_forwarded_env() {
         };
         eval(&path, &format!(
             "return remuda._extension_commands.butler({{'close', {name:?}, '--force'}}, \
-             {{kind={kind:?}, session={session:?}, env={env}}})"
+             {{kind={kind:?}, session={session:?}, instance_id=_inst({session:?}), env={env}}})"
         ))
     };
 
@@ -578,14 +582,14 @@ fn butler_close_accepts_published_string_force_argument() {
     let refused = eval(
         &path,
         "\
-         local ok = pcall(remuda.tools.butler_close, {name='m1', force='false'}, {kind='session', session='butler'}); \
+         local ok = pcall(remuda.tools.butler_close, {name='m1', force='false'}, {kind='session', session='butler', instance_id=_inst('butler')}); \
          return tostring(ok) .. ':' .. tostring(remuda._butler_bus.agents.m1 ~= nil)",
     );
     assert_eq!(refused, "false:true", "string force=false must not force the close");
     let result = eval(
         &path,
         "\
-         return remuda.tools.butler_close({name='m1', force='true'}, {kind='session', session='butler'})",
+         return remuda.tools.butler_close({name='m1', force='true'}, {kind='session', session='butler', instance_id=_inst('butler')})",
     );
     assert_eq!(result, "Closed m1.\nNext: remuda butler sessions");
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.agents.m1 == nil)"), "true");
@@ -594,7 +598,7 @@ fn butler_close_accepts_published_string_force_argument() {
         &path,
         "\
          local ok, message = pcall(remuda.tools.butler_close, \
-           {name='m1', force='yes'}, {kind='session', session='butler'}); \
+           {name='m1', force='yes'}, {kind='session', session='butler', instance_id=_inst('butler')}); \
          return tostring(ok) .. ':' .. tostring(message)",
     );
     assert!(invalid.starts_with("false:force must be a boolean."), "{invalid}");
@@ -2491,8 +2495,8 @@ fn trust_dialogs_on_external_or_reused_directories_wait_for_a_human() {
             end
             remuda._butler_send = function(_, _, text) table.insert(remuda._trust_test_reports, text); return 'captured' end
             local cap = remuda._butler_bus.agents.butler.token
-            remuda.tools.butler_launch({{ kind = 'claude', name = 'external', cwd = {external:?} }}, {{ kind = 'session', session = 'butler' }})
-            remuda.tools.butler_launch({{ kind = 'codex', name = 'external_codex', cwd = {external:?} }}, {{ kind = 'session', session = 'butler' }})
+            remuda.tools.butler_launch({{ kind = 'claude', name = 'external', cwd = {external:?} }}, {{ kind = 'session', session = 'butler', instance_id = _inst('butler') }})
+            remuda.tools.butler_launch({{ kind = 'codex', name = 'external_codex', cwd = {external:?} }}, {{ kind = 'session', session = 'butler', instance_id = _inst('butler') }})
             remuda._butler_topic_new('reused', nil, 'claude')
             remuda._butler_topic_new('three', nil, 'claude')
             remuda.butler.template('clone', function(topic) topic.write('repo.txt', 'third-party source') end)
@@ -2973,7 +2977,7 @@ fn setup_renotice(path: &Path, alias: &str) {
         remuda._rn_inbox_id = function(id)
           local agent = remuda._butler_bus.agents[alias]
           local ok, out = pcall(remuda._butler_command_run, 'inbox', {{ 'inbox', id }},
-            {{ kind = 'session', session = agent.session_name }})
+            {{ kind = 'session', session = agent.session_name, instance_id = _inst(agent.session_name) }})
           return tostring(out)
         end
         "#,

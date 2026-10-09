@@ -232,7 +232,7 @@ T.test("tokenless_MCP_bridge_cannot_reach_operator_only_routes_even_with_approva
   local registered = T.eval([[
     local tool; for k, v in pairs(remuda.tools) do if k == "butler_approve_text" or (type(v) == "table" and v.name == "butler_approve_text") then tool = v end end
     local session = remuda._butler_bus.agents.butler.session_name
-    local ok, id = pcall(tool.run, { session = "butler", text = "member text" }, { kind = "session", session = session })
+    local ok, id = pcall(tool.run, { session = "butler", text = "member text" }, { kind = "session", session = session, instance_id = remuda._butler_bus.agents.butler.instance_id })
     return tostring(ok) .. ":" .. remuda._probe_posts
   ]])
   T.eq(registered, "true:1", "a registered member must still be able to register prepared text")
@@ -251,9 +251,9 @@ T.test("native_session_attribution_resolves_exactly_one_registration_by_session_
     local cap = { id = "solo", generation = "M" }
     bus.tokens.cap = cap
     local out = {
-      tostring(identity.caller_name({ kind = "session", session = "solo-native" })),
-      tostring(identity.caller_name({ kind = "session", session = "twin-native", capability = "cap" })),
-      tostring(identity.caller_name({ kind = "session", session = "alias_only" })),
+      tostring(identity.caller_name({ kind = "session", session = "solo-native", instance_id = "I1" })),
+      tostring(identity.caller_name({ kind = "session", session = "twin-native", capability = "cap", instance_id = "I1" })),
+      tostring(identity.caller_name({ kind = "session", session = "alias_only", instance_id = "I1" })),
     }
     for _, k in ipairs({ "solo", "twin1", "twin2", "alias_only" }) do bus.agents[k], bus.identity_ids[k] = nil, nil end
     bus.tokens.cap = nil
@@ -347,35 +347,18 @@ T.test("tokens_carry_a_random_incarnation_component", function()
   ]]), "true")
 end)
 
--- PR A of the instance binding (design-instance-binding.md): record the current observed
--- instance at launch. Recording only; nothing compares it yet.
+-- Instance binding (design-instance-binding.md): the instance id RETURNED by remuda.new is recorded on the
+-- member/root row and its capability. Binding and admission are covered by butler_instance_binding_test.lua.
 local function ls_instance(name)
   return T.eval('for _, r in ipairs(remuda.ls()) do if r.name == ' .. string.format("%q", name)
     .. ' and r.alive then return r.instance_id end end return "none"')
 end
 
-T.test("observed_instance_is_the_one_alive_ls_row_and_never_a_guess", function()
-  local result = T.eval([[
-    local pick, real, out = remuda._butler_chooser.observed_instance, remuda.ls, {}
-    local function with(rows) remuda.ls = rows; local v = tostring(pick("n")); remuda.ls = real; return v end
-    local function row(extra) local r = { name = "n", alive = true, instance_id = "I1" }; for k, v in pairs(extra or {}) do r[k] = v end; return r end
-    out[#out + 1] = with(function() return { row(), { name = "o", alive = true, instance_id = "X" } } end)
-    out[#out + 1] = with(function() return { row({ alive = false, instance_id = "OLD" }), row() } end)
-    out[#out + 1] = with(function() return { row(), row({ instance_id = "I2" }) } end) -- ambiguous: two alive rows
-    out[#out + 1] = with(function() return { row({ instance_id = false }) } end)
-    out[#out + 1] = with(function() return { row({ instance_id = "" }) } end)
-    out[#out + 1] = with(function() return {} end)
-    out[#out + 1] = with(function() error("ls unavailable") end)
-    return table.concat(out, ",")
-  ]])
-  T.eq(result, "I1,I1,nil,nil,nil,nil,nil", "an instance is taken only from exactly one alive row that carries one")
-end)
-
-T.test("member_launch_records_the_observed_instance_id", function()
+T.test("member_launch_records_the_returned_instance_id", function()
   -- (an earlier test rewrote the first launch's capability record, so only the row is checked here)
   local id = ls_instance("reused")
   T.ok(id ~= "none" and id ~= "", "core ls must expose the launch's instance_id")
-  T.eq((T.eval("return remuda._butler_bus.agents.reused.instance_id"):gsub("%s+$", "")), id, "the agent row must hold the observed instance")
+  T.eq((T.eval("return remuda._butler_bus.agents.reused.instance_id"):gsub("%s+$", "")), id, "the agent row must hold the returned instance")
   T.eval('return remuda.close("reused")')
   T.wait_until(function()
     return T.eval('return remuda._butler_bus.agents.reused == nil'):match("^%s*true%s*$") ~= nil
@@ -391,7 +374,7 @@ T.test("member_launch_records_the_observed_instance_id", function()
   T.eq(second, id2 .. ":" .. id2, "the relaunch must record its own instance, not the first")
 end)
 
-T.test("root_launch_records_observed_instance_and_rotation_replaces_it", function()
+T.test("root_launch_records_the_returned_instance_and_rotation_replaces_it", function()
   local function root()
     return T.eval([[
       local bus, root = remuda._butler_bus, remuda._butler_bus.agents.butler
@@ -415,106 +398,6 @@ T.test("root_launch_records_observed_instance_and_rotation_replaces_it", functio
   T.eq(root_ls(), id2, "the replaced record must be the native one")
 end)
 
-T.test("ambiguous_observation_leaves_the_instance_unset_on_member_launch", function()
-  T.eval([[
-    local real = remuda.ls
-    remuda._test_real_ls = real
-    remuda.ls = function() -- a second alive row under the launched name: ambiguous
-      local rows = real()
-      for _, r in ipairs(rows) do
-        if r.name == "dupe" then
-          local copy = {}; for k, v in pairs(r) do copy[k] = v end
-          copy.instance_id = "OTHER"; rows[#rows + 1] = copy; break
-        end
-      end
-      return rows
-    end
-    remuda._butler_launch("codex", "dupe")
-  ]])
-  local seen = T.eval([[
-    local bus = remuda._butler_bus
-    local a = bus.agents.dupe
-    local rec = a and bus.tokens[a.token]
-    remuda.ls = remuda._test_real_ls; remuda._test_real_ls = nil
-    return table.concat({ tostring(a ~= nil), tostring(a and a.instance_id), tostring(type(rec) == "table" and rec.instance_id),
-      tostring(type(rec) == "table" and rec.id == a.id) }, ":")
-  ]])
-  T.eq(seen, "true:nil:nil:true", "an ambiguous launch must still work, with the instance left unset")
-  T.eval('return remuda.close("dupe")')
-end)
-
--- An observation that cannot be proven (no row, a dead row, two rows, ls raising) stays unset through finish.
--- GATED limits the stub to the root launch attempt (start_pending): once the attempt is terminal, ls is truthful again,
--- so a late exit event of the replaced root meets the real stale-exit guard instead of a stub that hides the new root.
-local function launch_under(mode, launch, gated)
-  T.eval(string.format([[
-    local real, mode, gated = remuda.ls, %q, %s
-    remuda._test_real_ls = real
-    remuda.ls = function(...)
-      if gated and not remuda._butler_start_pending then return real(...) end
-      if mode == "raise" then error("ls unavailable") end
-      local rows, out = real(...), {}
-      for _, r in ipairs(rows) do
-        local hide = r.name == remuda._test_hide
-        if mode == "none" and hide then -- row missing
-        elseif mode == "dead" and hide then local c = {}; for k, v in pairs(r) do c[k] = v end; c.alive = false; out[#out + 1] = c
-        else out[#out + 1] = r
-          if mode == "dupe" and hide then local c = {}; for k, v in pairs(r) do c[k] = v end; c.instance_id = "OTHER"; out[#out + 1] = c end
-        end
-      end
-      return out
-    end
-  ]], mode, tostring(gated == true)))
-  launch()
-  return T.eval([[remuda.ls = remuda._test_real_ls; remuda._test_real_ls, remuda._test_hide = nil, nil; return "ok"]])
-end
-
-T.test("unobserved_instance_stays_unset_through_member_launch_finish", function()
-  for _, mode in ipairs({ "none", "dead", "dupe", "raise" }) do
-    local name = "unobs-" .. mode
-    launch_under(mode, function()
-      T.eval(string.format('remuda._test_hide = %q; return remuda._butler_launch("codex", %q)', name, name))
-      -- the launch ran with the stub installed; read the result before it is restored by launch_under
-      T.eval(string.format([[local a = remuda._butler_bus.agents[%q]; local r = a and remuda._butler_bus.tokens[a.token]
-        remuda._test_seen = table.concat({ tostring(a ~= nil), tostring(a and a.instance_id), tostring(r and r.instance_id), tostring(r and r.id == a.id) }, ":")]], name))
-    end)
-    T.eq(T.eval("return remuda._test_seen"):gsub("%s+$", ""), "true:nil:nil:true",
-      mode .. ": an unproven observation must leave the member row and capability instance unset")
-    T.eval(string.format('remuda._test_seen = nil; return remuda.close(%q)', name))
-  end
-end)
-
-T.test("unobserved_instance_stays_unset_through_root_launch_finish", function()
-  -- (ls raising is covered at the observed_instance unit level: the root respawn itself needs ls to be ready)
-  for _, mode in ipairs({ "none", "dead", "dupe" }) do
-    -- the previous launch must be terminal and its session live before this one is replaced
-    T.wait_until(function()
-      return T.eval('return tostring(remuda._butler_start_pending == false and remuda._butler_launching == nil)'):match("true") ~= nil
-        and ls_instance(T.eval("return remuda._butler_name"):gsub("%s+$", "")) ~= "none"
-    end, 10, "root ready before " .. mode)
-    local token = T.eval("return remuda._butler_bus.agents.butler.token"):gsub("%s+$", "")
-    local old_instance = ls_instance(T.eval("return remuda._butler_name"):gsub("%s+$", ""))
-    launch_under(mode, function()
-      T.eval('remuda._test_hide = remuda._butler_name')
-      T.eval('return remuda.close(remuda._butler_name)')
-      T.wait_until(function()
-        return T.eval('return tostring(remuda._butler_bus.agents.butler.token ~= ' .. string.format("%q", token)
-          .. ' and remuda._butler_start_pending == false)'):match("true") ~= nil
-      end, 10, "root respawn under " .. mode)
-      -- The core delivers the replaced root's exit event asynchronously: here it lands after the new launch finished,
-      -- while the stub still hides the new row. The stale-exit guard must keep the new capability.
-      T.eval(string.format('remuda._butler_session_exited(remuda._butler_name, { instance_id = %q })', old_instance))
-      T.eval([[local root = remuda._butler_bus.agents.butler; local r = remuda._butler_bus.tokens[root.token]
-        remuda._test_seen = tostring(root.instance_id) .. ":" .. tostring(r and r.instance_id) .. ":" .. tostring(r ~= nil)
-          .. ":" .. tostring(remuda._butler_start_error == nil and remuda._butler_selected_agent ~= nil)]])
-    end, true)
-    -- every mode here finishes successfully (skip_probe), so the success path is asserted: the launch is selected,
-    -- the capability exists, and only the instance stays unset.
-    T.eq(T.eval("return remuda._test_seen"):gsub("%s+$", ""), "nil:nil:true:true",
-      mode .. ": an unproven observation must leave the root row and capability instance unset")
-    T.eval("remuda._test_seen = nil")
-  end
-end)
 
 -- A failed root launch (finish with no selected candidate) and a root exit both end in this call; last, since it leaves the root without a capability.
 T.test("revoking_the_root_capability_removes_its_record_and_marker", function()

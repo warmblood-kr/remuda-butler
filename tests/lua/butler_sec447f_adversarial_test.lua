@@ -31,7 +31,7 @@ T.test('guard_hook_refuses_unresolved_callers_before_approval_mutation',function
     output[#output+1]=principal.tag..'/'..tostring(ok)..'/posts='..(posts-before)..'/out='..tostring(out)
   end
   bus.agents.duplicate=nil
-  local member={kind='session',session=bus.agents.butler.session_name,
+  local member={kind='session',session=bus.agents.butler.session_name,instance_id=_inst(bus.agents.butler.session_name),
     env={REMUDA_BUTLER_AGENT_ALIAS='FORGED-MEMBER',REMUDA_BUTLER_AGENT_KIND='claude'},
     stdin=remuda.json.encode({hook_event_name='PreToolUse',tool_name='Bash',tool_input={command='ls'},cwd='/tmp'})}
   local before=posts
@@ -180,7 +180,7 @@ T.test('approve_text_tool_refuses_unresolved_requester_when_member_named_outside
     'empty='..try({}),
     'service='..try({kind='service',service='timer'}),
     'member='..try({capability='member-token'}),
-    'outsider='..try({kind='session',session='outside-sess'}),
+    'outsider='..try({kind='session',session='outside-sess',instance_id='I-OUTSIDE'}),
     'outsider-token='..try({capability='outside-token'}),
     'operator='..try({kind='outside'}),
   }
