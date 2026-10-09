@@ -54,6 +54,11 @@ T.eval([=[
       t.real.new, t.real.ls, t.real.close, t.real.capture, t.real.key
     t.w = nil
   end
+  -- A member launched through the fake core has no real session: drop it from the roster instead of closing.
+  function t.forget(name)
+    local bus, a = remuda._butler_bus, remuda._butler_bus.agents[name]
+    if a then bus.tokens[a.token] = nil; bus.agents[name] = nil end
+  end
   function t.count(tbl) local n = 0; for _ in pairs(tbl) do n = n + 1 end; return n end
   function t.tool(name)
     for k, v in pairs(remuda.tools) do if k == name or (type(v) == "table" and v.name == name) then return v end end
@@ -167,7 +172,7 @@ T.test("the_bound_id_is_the_returned_one_never_the_observed_one", function()
   T.eval("remuda._t.restore()")
   T.ok(ok, tostring(err))
   T.ok(not seen:find("OBSERVED", 1, true), "the observed ls id must never be bound, got " .. seen)
-  T.eval("return remuda.close('ret')")
+  T.eval("remuda._t.forget('ret')")
 end)
 
 T.test("a_core_returning_no_instance_id_leaves_the_member_unbound_and_legacy_visible", function()
@@ -178,7 +183,7 @@ T.test("a_core_returning_no_instance_id_leaves_the_member_unbound_and_legacy_vis
   T.ok(ok, tostring(err))
   T.eq(seen, "nil:nil", "no returned id: no ls fallback, the row and capability stay unbound")
   T.eq(admitted("legacy", "OBS-X"), "legacy", "an unbound member stays visible by name (legacy mode, no isolation claim)")
-  T.eval("return remuda.close('legacy')")
+  T.eval("remuda._t.forget('legacy')")
 end)
 
 -- The chooser, driven directly. CHOOSE runs two fake kinds against the fake core registry.
@@ -253,7 +258,7 @@ local function root_respawn(observed)
     remuda._butler_test_force_launch_probe = { [remuda._butler_name] = true }
     t.root_tokens_before = remuda._butler_bus.agents.butler.token
     t.world { ids = { 'R1', 'R2' }, on_new = function(w, name, n) w.screens[name] = n == 1 and 'booting' or 'READY'; if n == 2 and t.observed then w.rows[name].instance_id = t.observed end end }
-    t.real.close(remuda._butler_name)
+    pcall(t.real.close, remuda._butler_name) -- a previous respawn may have left only a fake row
   ]])
   T.wait_until(function()
     return ev([[local root = remuda._butler_bus.agents.butler
@@ -295,6 +300,7 @@ T.test("stale_exit_uses_the_bound_instance_without_asking_ls", function()
   T.eq(kept, "true:0", "an exit for another instance than the bound one is stale: ignored, with no ls call")
   T.eval("remuda._butler_session_exited('stale', { instance_id = 'BOUND', reason = 'exited' })")
   T.eq(ev("return tostring(remuda._butler_bus.agents.stale == nil)"), "true", "an exit by the bound instance is processed as today")
+  T.eval("pcall(remuda.close, 'stale')") -- the simulated exit left the real session running
   launch("stale")
   T.eval("remuda._butler_session_exited('stale', { reason = 'exited' })")
   T.eq(ev("return tostring(remuda._butler_bus.agents.stale == nil)"), "true", "an exit without an instance id falls back to today's behavior")
@@ -341,10 +347,14 @@ T.test("strict_lua_override_refuses_unbound_members", function()
   local strict = admitted("strictlua", "OBS")
   T.eval("remuda._butler_strict_instance_binding = nil")
   T.eq(strict, "refused", "strict switch (Lua override): an unbound member is refused")
-  T.eval("return remuda.close('strictlua')")
+  T.eval("remuda._t.forget('strictlua')")
 end)
 
 T.test("root_adopted_after_reload_keeps_its_bound_id_only_if_token_and_row_agree", function()
+  -- the respawn tests leave only fake root rows: wait for Butler to start a real root again
+  T.wait_until(function()
+    return ev("for _, r in ipairs(remuda.ls()) do if r.name == remuda._butler_name and r.alive and remuda._butler_selected_agent then return 'yes' end end return 'no'") == "yes"
+  end, 30, "a real root session")
   local live = ev("for _, r in ipairs(remuda.ls()) do if r.name == remuda._butler_name and r.alive then return r.instance_id end end return 'none'")
   local function adopt(row_id, token_id)
     T.eval(string.format([[
@@ -372,6 +382,7 @@ T.test("adopted_members_stay_unbound_and_never_bind_an_observed_id", function() 
   T.ok(ok, tostring(err))
   T.eq(seen, "nil:nil", "adoption must not bind an observed ls id")
   T.eq(admitted("child", "OBS-CHILD"), "child", "an adopted, unbound member stays legacy-visible")
+  T.eval("remuda._t.forget('child')")
   T.eval("remuda._butler_bus.agents.lead = nil")
 end)
 
