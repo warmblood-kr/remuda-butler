@@ -403,3 +403,38 @@ T.test("doctor_lists_unbound_members_and_only_when_there_are_some", function()
   T.eq(ev("return remuda._t.snap()"), before, "doctor is read-only")
   T.eval("return remuda.close('unb1')"); T.eval("return remuda.close('unb2')")
 end)
+
+T.test("doctor_says_legacy_core_when_the_core_lacks_the_primitives", function()
+  local function doctor() return ev("return tostring(remuda._butler_command_run('doctor', { 'doctor' }))") end
+  T.ok(not doctor():find("legacy-core", 1, true), "this core enforces: no legacy-core line")
+  -- the principal captured `_caller_live` at load; make it report a core without it
+  T.eval("local p = remuda._butler_caller_principal; remuda._t.legacy = p.legacy_core; p.legacy_core = function() return true end")
+  local text = doctor()
+  T.eval("remuda._butler_caller_principal.legacy_core = remuda._t.legacy")
+  T.ok(text:find("legacy-core: instance binding not enforced", 1, true), "doctor must flag a legacy core: " .. text)
+end)
+
+T.test("finish_with_a_gone_bound_row_reports_the_launch_exited", function()
+  T.eval("remuda._t.world { ids = { 'GONE2' }, on_new = function(w, name) w.rows[name].alive = false end }")
+  local returned = ev("return tostring(remuda._butler_launch('codex', 'ghost2'))")
+  local failure = ev([[local f = remuda._butler_bus.launch_failures.ghost2
+    return f and (f.attempts[1].reason .. '|' .. f.error) or 'none']])
+  T.eval("remuda._t.restore()")
+  T.ok(failure:find("^exited|"), "the attempt must be marked exited: " .. failure)
+  T.ok(failure:find("exited before it was ready", 1, true), "the reported message must say the launch exited: " .. failure)
+  T.eq(ev("return tostring(remuda._butler_bus.agents.ghost2)"), "nil", "no roster row")
+  T.ok(returned ~= "nil", "the launch call reports a result, got " .. returned)
+end)
+
+T.test("real_bridge_inside_session_is_admitted", function() -- the real CLI, run inside a real session of the pinned core
+  local out = os.getenv("XDG_DATA_HOME") .. "/bridge.out"
+  local cmd = string.format("%s -s %s butler inbox > %s 2>&1; sleep 60",
+    os.getenv("REMUDA_BIN"), os.getenv("REMUDA_LUA_CHILD_SERVER"), out)
+  T.eval(string.format("remuda._butler_agent_builders.codex = function() return { 'sh', '-c', %q } end", cmd))
+  launch("rb")
+  T.wait_until(function() local f = io.open(out); if f then local s = f:read("a"); f:close(); return #s > 0 end end,
+    10, "bridge output")
+  local f = assert(io.open(out)); local text = f:read("a"); f:close()
+  T.eval("return remuda.close('rb')")
+  T.ok(text:find("Welcome to Butler", 1, true), "the bridge must read the member's own inbox: " .. text)
+end)

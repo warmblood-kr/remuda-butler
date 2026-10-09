@@ -86,5 +86,21 @@ section('enforcing_core', function()
   remuda._caller_live = function() error("swapped", 0) end
   assert(admitted(identity, session("bound", "I-BOUND")) == "bound", "the load-time _caller_live is used, not a later replacement")
 end)
+-- The environment switch: REMUDA_BUTLER_STRICT_INSTANCE_BINDING=1 alone turns strict on (no Lua override set).
+section('env_strict', function()
+  local ffi = require("ffi")
+  ffi.cdef("int setenv(const char *, const char *, int); int unsetenv(const char *);")
+  local name = "REMUDA_BUTLER_STRICT_INSTANCE_BINDING"
+  local ok, err = pcall(function()
+    local _, identity = load(nil)
+    assert(admitted(identity, session("unbound", "ANY")) == "unbound", "env unset: legacy access")
+    ffi.C.setenv(name, "1", 1)
+    assert(admitted(identity, session("unbound", "ANY")) == nil, "env =1: an unenforced member is refused")
+    ffi.C.setenv(name, "0", 1)
+    assert(admitted(identity, session("unbound", "ANY")) == "unbound", "env other than 1: not strict")
+  end)
+  ffi.C.unsetenv(name)
+  assert(ok, err)
+end)
 if #failed > 0 then error(#failed .. " section(s) failed:\n" .. table.concat(failed, "\n"), 0) end
 print("ok")
