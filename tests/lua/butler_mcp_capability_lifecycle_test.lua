@@ -347,21 +347,21 @@ T.test("tokens_carry_a_random_incarnation_component", function()
   ]]), "true")
 end)
 
--- PR A of the instance binding (design-instance-binding.md): record the issuing
+-- PR A of the instance binding (design-instance-binding.md): record the current observed
 -- instance at launch. Recording only; nothing compares it yet.
 local function ls_instance(name)
   return T.eval('for _, r in ipairs(remuda.ls()) do if r.name == ' .. string.format("%q", name)
     .. ' and r.alive then return r.instance_id end end return "none"')
 end
 
-T.test("launch_instance_is_the_one_alive_ls_row_and_never_a_guess", function()
+T.test("observed_instance_is_the_one_alive_ls_row_and_never_a_guess", function()
   local result = T.eval([[
-    local pick, real, out = remuda._butler_chooser.launch_instance, remuda.ls, {}
+    local pick, real, out = remuda._butler_chooser.observed_instance, remuda.ls, {}
     local function with(rows) remuda.ls = rows; local v = tostring(pick("n")); remuda.ls = real; return v end
     local function row(extra) local r = { name = "n", alive = true, instance_id = "I1" }; for k, v in pairs(extra or {}) do r[k] = v end; return r end
     out[#out + 1] = with(function() return { row(), { name = "o", alive = true, instance_id = "X" } } end)
     out[#out + 1] = with(function() return { row({ alive = false, instance_id = "OLD" }), row() } end)
-    out[#out + 1] = with(function() return { row(), row({ instance_id = "I2" }) } end) -- replacement raced in
+    out[#out + 1] = with(function() return { row(), row({ instance_id = "I2" }) } end) -- ambiguous: two alive rows
     out[#out + 1] = with(function() return { row({ instance_id = false }) } end)
     out[#out + 1] = with(function() return { row({ instance_id = "" }) } end)
     out[#out + 1] = with(function() return {} end)
@@ -371,11 +371,11 @@ T.test("launch_instance_is_the_one_alive_ls_row_and_never_a_guess", function()
   T.eq(result, "I1,I1,nil,nil,nil,nil,nil", "an instance is taken only from exactly one alive row that carries one")
 end)
 
-T.test("member_launch_records_the_native_instance_id", function()
+T.test("member_launch_records_the_observed_instance_id", function()
   -- (an earlier test rewrote the first launch's capability record, so only the row is checked here)
   local id = ls_instance("reused")
   T.ok(id ~= "none" and id ~= "", "core ls must expose the launch's instance_id")
-  T.eq((T.eval("return remuda._butler_bus.agents.reused.instance_id"):gsub("%s+$", "")), id, "the agent row must hold the launched instance")
+  T.eq((T.eval("return remuda._butler_bus.agents.reused.instance_id"):gsub("%s+$", "")), id, "the agent row must hold the observed instance")
   T.eval('return remuda.close("reused")')
   T.wait_until(function()
     return T.eval('return remuda._butler_bus.agents.reused == nil'):match("^%s*true%s*$") ~= nil
@@ -391,7 +391,7 @@ T.test("member_launch_records_the_native_instance_id", function()
   T.eq(second, id2 .. ":" .. id2, "the relaunch must record its own instance, not the first")
 end)
 
-T.test("root_launch_records_instance_and_rotation_replaces_it", function()
+T.test("root_launch_records_observed_instance_and_rotation_replaces_it", function()
   local function root()
     return T.eval([[
       local bus, root = remuda._butler_bus, remuda._butler_bus.agents.butler
@@ -401,7 +401,7 @@ T.test("root_launch_records_instance_and_rotation_replaces_it", function()
   end
   local function root_ls() return ls_instance(T.eval("return remuda._butler_name"):gsub("%s+$", "")) end
   local id, cap, token = root():match("^([^:]+):([^:]+):(.+)$")
-  T.ok(id and id ~= "nil", "the root row must hold its launch instance")
+  T.ok(id and id ~= "nil", "the root row must hold its observed instance")
   T.eq(cap, id, "the root capability must hold the same instance")
   T.eq(root_ls(), id, "the recorded root instance must be the native one")
   T.eval('return remuda.close(remuda._butler_name)')
@@ -415,7 +415,7 @@ T.test("root_launch_records_instance_and_rotation_replaces_it", function()
   T.eq(root_ls(), id2, "the replaced record must be the native one")
 end)
 
-T.test("capability_without_issuing_instance_is_not_recorded_as_bound", function()
+T.test("ambiguous_observation_leaves_the_instance_unset_on_member_launch", function()
   T.eval([[
     local real = remuda.ls
     remuda._test_real_ls = real

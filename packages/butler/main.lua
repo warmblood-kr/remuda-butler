@@ -830,7 +830,7 @@ local function rotate_root_capability()
   if root.token then bus.tokens[root.token] = nil end
   butler_token = next_token("butler")
   root.token, root.session_start_marker = butler_token, remuda._butler_new_ulid()
-  root.instance_id = nil -- recorded by the launch that this capability is for
+  root.instance_id = nil -- set from the instance observed when this launch finishes
   bus.tokens[butler_token] = { id = root_identity.id, generation = root.session_start_marker }
   remuda.butler.guard.write_private(mcp_config_path, agent_mcp_json(butler_token))
 end
@@ -1114,7 +1114,7 @@ local function launch_butler()
   remuda._butler_name, remuda._butler_selected_agent = selected, kind
   bus.agents.butler.kind, bus.agents.butler.telemetry = kind, telemetry_by_kind[kind]
   local root = bus.agents.butler
-  root.instance_id = chooser.launch_instance(selected)
+  root.instance_id = chooser.observed_instance(selected)
   if root.token and bus.tokens[root.token] then bus.tokens[root.token].instance_id = root.instance_id end
   local root_record = bus.identities.butler or root_identity
   root_record.kind = kind
