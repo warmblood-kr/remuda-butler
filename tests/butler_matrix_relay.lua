@@ -31,7 +31,11 @@ dofile("packages/butler/typed_lines.lua")
 dofile("packages/butler/approve_text.lua")
 dofile("packages/butler/status_command.lua")
 remuda._butler_caller_principal_config = { bus = { agents = { ["ss-a"] = { id = "U-SSA", alias = "ss-a", kind = "claude", session_name = "s-ssa" } } } }
+-- caller_principal captures remuda.caller at load, and the guard-grant tests below attribute to session s-ssa.
+local load_time_caller = remuda.caller
+remuda.caller = function() return { kind = "session", session = "s-ssa" } end
 dofile("packages/butler/caller_principal.lua")
+remuda.caller = load_time_caller
 dofile("packages/butler/guard_policy.lua")
 dofile("packages/butler/guard_grants.lua")
 dofile("packages/butler/guard_approval.lua")

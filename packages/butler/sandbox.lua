@@ -3,7 +3,9 @@
 -- and travels with the member row so a relaunch re-applies it.
 local sandbox = {}
 -- The core's caller as captured when caller_principal loaded (never a later remuda.caller); nil when unavailable.
-local core_caller = assert(remuda._butler_caller_principal, "load butler/caller_principal before butler/sandbox").core_caller
+-- A direct load without Butler's main has no principal: no caller, so no agent (the unavailable-caller policy).
+local principal = remuda._butler_caller_principal
+local core_caller = principal and principal.core_caller or function() return nil end
 
 local function shell_quote(value)
   return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
