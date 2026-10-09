@@ -69,7 +69,7 @@ local claude_workspace_path
 -- are lifecycle contributions; the chooser only reads their data and callbacks.
 -- Member launches must not hold the daemon image while an agent paints its
 -- first prompt. This scheduler advances one candidate at a time and invokes
--- `done(name, kind, attempts)` when a candidate is ready or the chain ends.
+-- `done(name, kind, attempts, instance_id)` when a candidate is ready or the chain ends.
 local function choose(candidates, opts, done)
   local attempts, index, state, schedule = {}, 0, nil, nil
   local lifecycle = remuda._butler_state or remuda._butler_compaction_state or {}
@@ -79,16 +79,30 @@ local function choose(candidates, opts, done)
   local chooser_record = { id = chooser_id, name = opts.name }
   lifecycle.active_choosers[chooser_id] = chooser_record
   local cancelled = false
+  -- With an id, a row counts only when it is that instance: the same name under another id is a replacement.
+  local function alive(name, id)
+    for _, row in ipairs(remuda.ls()) do
+      if row.name == name and row.alive and (not id or row.instance_id == id) then return true end
+    end
+    return false
+  end
+  local function replaced(name, id)
+    if not id then return false end
+    local ok, rows = pcall(remuda.ls)
+    for _, row in ipairs(ok and type(rows) == "table" and rows or {}) do
+      if row.name == name and row.alive and row.instance_id ~= id then return true end
+    end
+    return false
+  end
   local function callback(name, kind)
     if cancelled then return end
     if schedule then remuda.cancel(schedule); schedule = nil end
     chooser_record.ready = name ~= nil
     lifecycle.active_choosers[chooser_id] = nil
-    done(name, kind, attempts)
-  end
-  local function alive(name)
-    for _, row in ipairs(remuda.ls()) do if row.name == name and row.alive then return true end end
-    return false
+    -- Only the candidate that reached ready supplies its returned id; a live row of another id means no binding.
+    local instance_id = name and state and state.name == name and state.instance_id or nil
+    if replaced(name, instance_id) then instance_id = nil end
+    done(name, kind, attempts, instance_id)
   end
   local by_id = {}
   for _, row in ipairs(contributions("butler.agent")) do by_id[row.id] = row.entry end
@@ -103,7 +117,9 @@ local function choose(candidates, opts, done)
   local function fail_candidate(reason, detail)
     local current = state
     current.attempt.reason, current.attempt.detail = reason, detail
-    local ok, err = pcall(remuda.close, current.name)
+    -- close is name-based in core: never close a replacement that took the name.
+    local ok, err = true, nil
+    if not replaced(current.name, current.instance_id) then ok, err = pcall(remuda.close, current.name) end
     current.closing, current.close_error, current.close_ticks = true, ok and nil or err, 0
   end
   local function start_next()
@@ -144,12 +160,15 @@ local function choose(candidates, opts, done)
       end
       if type(argv) == "table" and argv[1] == executable then argv[1] = found end
     end
-    local ok, name = pcall(remuda.new, opts.name, argv, opts.cwd, opts.env(id, spec))
+    local ok, name, instance_id = pcall(remuda.new, opts.name, argv, opts.cwd, opts.env(id, spec))
     if not ok then
       attempt.reason, attempt.detail = "spawn_error", one_line(name)
       start_next(); return
     end
+    if type(instance_id) ~= "string" or instance_id == "" then instance_id = nil end
+    attempt.instance_id = instance_id
     state = { id = id, entry = entry, attempt = attempt, name = name,
+      instance_id = instance_id,
       started = os.time(), timeout = opts.timeout or readiness_timeout(),
       handled = {}, last_screen = "<empty first row>", last_screen_blank = true, dialog_seen = nil }
     local test_builder = remuda._butler_agent_builders[id]
@@ -165,7 +184,7 @@ local function choose(candidates, opts, done)
     if not state then return end
     if state.closing then
       state.close_ticks = state.close_ticks + 1
-      if not alive(state.name) then
+      if not alive(state.name, state.instance_id) then
         state = nil; start_next()
       elseif state.close_ticks >= 10 then
         state.attempt.reason = "spawn_error"
@@ -175,7 +194,7 @@ local function choose(candidates, opts, done)
       end
       return
     end
-    if not alive(state.name) then fail_candidate("exited", "session exited before prompt became ready"); return end
+    if not alive(state.name, state.instance_id) then fail_candidate("exited", "session exited before prompt became ready"); return end
     local captured, screen = pcall(remuda.capture, state.name)
     if not captured then
       state.last_capture_error = sanitize_row(screen)
@@ -347,7 +366,7 @@ local function choose(candidates, opts, done)
     if schedule then pcall(remuda.cancel, schedule); schedule = nil end
     if state and not chooser_record.ready then
       local name = state.name
-      if name and alive(name) then pcall(remuda.close, name) end
+      if name and alive(name, state.instance_id) then pcall(remuda.close, name) end
       state = nil
     end
     if opts.name == "butler" then
@@ -359,19 +378,13 @@ local function choose(candidates, opts, done)
   start_next()
   return attempts
 end
--- The instance currently observed under NAME: the one alive `ls` row of that name that
--- carries an instance_id. This is an observation, not proof of which launch created it;
--- no row, several rows or no id means nil, never a guess.
-local function observed_instance(name)
+-- Is the row NAME still alive AND the instance the spawn returned? (An ls failure counts as not alive.)
+local function instance_live(name, id)
   local ok, rows = pcall(remuda.ls)
-  local found
   for _, row in ipairs(ok and type(rows) == "table" and rows or {}) do
-    if row.name == name and row.alive then
-      if found ~= nil then return nil end
-      found = type(row.instance_id) == "string" and row.instance_id ~= "" and row.instance_id or false
-    end
+    if row.name == name and row.alive and row.instance_id == id then return true end
   end
-  return found or nil
+  return false
 end
 remuda._butler_choose = choose
 remuda._butler_choose_async = choose
@@ -777,7 +790,7 @@ remuda._butler_chooser = {
   trust_modal_state = trust_modal_state, trust_plan = trust_plan, trust_eligible = trust_eligible,
   trust_path_matches = trust_path_matches,
   choose = choose,
-  observed_instance = observed_instance,
+  instance_live = instance_live,
   configured_agent_order = configured_agent_order,
   readiness_chain_budget = readiness_chain_budget,
   setup_telemetry = setup_telemetry,

@@ -146,6 +146,14 @@ local function render(probe_results, platform)
       and probe_results.matrix_configured ~= true then
     lines[#lines + 1] = "Next: remuda butler matrix setup"
   end
+  -- Read-only: which members are checked by instance (legacy-visible ones keep name-only checks).
+  local principal = remuda._butler_caller_principal
+  if principal and principal.legacy_core() then lines[#lines + 1] = "legacy-core: instance binding not enforced" end
+  local unbound = 0
+  for _, agent in pairs((remuda._butler_bus or {}).agents or {}) do
+    if type(agent) == "table" and not agent.instance_id then unbound = unbound + 1 end
+  end
+  if unbound > 0 then lines[#lines + 1] = unbound .. " members not instance-bound: relaunch to bind" end
   return lines
 end
 

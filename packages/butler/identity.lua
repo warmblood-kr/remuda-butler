@@ -194,13 +194,19 @@ local function caller_name(caller)
   -- precedence over the older capability-only compatibility path.
   if caller and caller.kind ~= nil then
     if caller.kind ~= "session" then return nil end
+    -- The native session branch needs the snapshot's instance id in every mode.
+    if type(caller.instance_id) ~= "string" or caller.instance_id == "" then return nil end
     -- The shared resolver (caller_principal) yields exactly one live registration
     -- or refuses; a capability never repairs a failed native attribution.
     local ok, id = pcall(current_agent, caller)
     local resolved, alias = pcall(resolve, ok and id or "")
+    local record = caller.capability and bus.tokens[caller.capability]
+    if type(record) == "table" and record.instance_id and record.instance_id ~= caller.instance_id then return nil end
     return resolved and alias or nil
   end
   local token = caller and caller.capability
+  -- Strict: a capability alone carries no instance to compare.
+  if token and remuda._butler_caller_principal.strict() then return nil end
   local capability = token and bus.tokens[token]
   -- During a live upgrade, an older image may still have alias-valued entries.
   -- Bind one only when the live row proves it owns that exact token.
@@ -229,9 +235,13 @@ local function caller_name(caller)
 end
 -- An MCP caller that acts on mail must be a known agent: an unknown or garbage
 -- capability is refused, never treated as the operator (review of #39).
-local function caller_agent(caller)
+-- Mutating routes also ask the core whether the BOUND instance is live; read-only ones only compare.
+local function admitted(name, read_only)
+  return name and bus.agents[name] and (read_only or remuda._butler_caller_principal.live(bus.agents[name]))
+end
+local function caller_agent(caller, read_only)
   local name = caller_name(caller)
-  if not name or not bus.agents[name] then
+  if not admitted(name, read_only) then
     error("unknown caller: run from a Butler session (its MCP config carries the capability)", 0)
   end
   return name
@@ -240,7 +250,7 @@ end
 -- caller silently became `butler`'s child and reported to root (#24).
 local function caller_leader(caller)
   local parent = caller_name(caller)
-  if not parent or not bus.agents[parent] then
+  if not admitted(parent) then
     error("unknown caller: run from a Butler session, or pass an explicit leader"
       .. " with `remuda butler topic delegate --leader NAME`", 0)
   end

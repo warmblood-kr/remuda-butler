@@ -697,7 +697,7 @@ remuda.tool{
   name = "butler_inbox",
   about = "Drain this agent's Butler inbox and return its queued messages in arrival order.",
   run = function(_, caller)
-    local principal = caller_agent(caller)
+    local principal = caller_agent(caller, true) -- reading compares the instance; liveness is for mutating routes
     return remuda._butler_inbox(principal)
   end,
 }
@@ -1067,6 +1067,14 @@ local function launch_butler()
   if remuda._butler_selected_agent and stale_session then
     butler_name = requested_name
     remuda._butler_name = butler_name
+    -- Adopted without a chooser run: keep the bound id only if the token record and the live row agree with it.
+    local root = bus.agents.butler
+    local record = root.token and bus.tokens[root.token]
+    if root.instance_id and not (type(record) == "table" and record.instance_id == root.instance_id
+        and chooser.instance_live(requested_name, root.instance_id)) then
+      root.instance_id = nil
+      if type(record) == "table" then record.instance_id = nil end
+    end
     if not root_permissions_ensured then
       pcall(ensure_root_permissions, remuda._butler_selected_agent)
       arm_compaction_schedule(remuda._butler_selected_agent)
@@ -1097,10 +1105,16 @@ local function launch_butler()
         REMUDA_BUTLER_AGENT_KIND = candidate_kind, CLAUDE_CODE_FORCE_SESSION_PERSISTENCE = "1" }
     end,
   }
-  local function finish(selected, kind, attempts)
+  local function finish(selected, kind, attempts, instance_id)
   butler_attempts = attempts
   remuda._butler_attempts = attempts
   bus.agents.butler.launch_attempts = attempts
+  if selected and instance_id and not chooser.instance_live(selected, instance_id) then
+    for _, a in ipairs(attempts or {}) do
+      if a.session == selected then a.reason, a.detail = "exited", "session exited before Butler registered it" end
+    end
+    selected = nil
+  end
   if not selected then
     local message = table.concat(launch_failure_lines(attempts), "\n")
     remuda._butler_start_error = message
@@ -1114,7 +1128,7 @@ local function launch_butler()
   remuda._butler_name, remuda._butler_selected_agent = selected, kind
   bus.agents.butler.kind, bus.agents.butler.telemetry = kind, telemetry_by_kind[kind]
   local root = bus.agents.butler
-  root.instance_id = chooser.observed_instance(selected)
+  root.instance_id = instance_id
   if root.token and bus.tokens[root.token] then bus.tokens[root.token].instance_id = root.instance_id end
   local root_record = bus.identities.butler or root_identity
   root_record.kind = kind
@@ -1126,9 +1140,9 @@ local function launch_butler()
   reconcile_retry.reset()
   return selected
   end
-  local attempts = choose(order, choose_opts, function(selected, kind, attempts)
+  local attempts = choose(order, choose_opts, function(selected, kind, attempts, instance_id)
     remuda._butler_launching = nil
-    local ok, err = pcall(finish, selected, kind, attempts)
+    local ok, err = pcall(finish, selected, kind, attempts, instance_id)
     if not ok then
       remuda._butler_start_error = tostring(err)
       reconcile_retry.note_failure()
@@ -1224,6 +1238,13 @@ local function report_update_task_not_relaunched(record, reason)
 end
 local function stale_session_exit(name, instance_id)
   if type(instance_id) ~= "string" or instance_id == "" then return false end
+  -- A bound member compares with its stored id and needs no ls; unbound members (and older cores) use the live row.
+  for _, agent in pairs(bus.agents) do
+    if type(agent) == "table" and (agent.session_name == name or (agent.alias == "butler" and name == butler_name))
+        and type(agent.instance_id) == "string" and agent.instance_id ~= "" then
+      return agent.instance_id ~= instance_id
+    end
+  end
   local ok, sessions = pcall(remuda.ls)
   if not ok or type(sessions) ~= "table" then return false end
   for _, session in ipairs(sessions) do
