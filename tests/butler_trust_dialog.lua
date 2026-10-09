@@ -168,7 +168,7 @@ local function launch(kind, labels, selected, opts)
     end
     return screen_of(labels, sel, opts.shown or cwd)
   end
-  remuda.new = function(name) return name end
+  remuda.new = function(name) return name, "inst-" .. name end
   remuda.ls = function() return { { name = "m", alive = true } } end
   remuda.capture = paint
   remuda.close = noop

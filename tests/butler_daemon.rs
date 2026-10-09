@@ -4647,7 +4647,7 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
           end
           local native_new = remuda.new
           remuda.new = function(name, ...)
-            local actual = native_new(name, ...)
+            local actual, instance_id = native_new(name, ...)
             if name:match("^t%-codex") then log[#log + 1] = name .. " launch" end
             if name == "t-codex-versionless" then
               versionless_launches = versionless_launches + 1
@@ -4657,7 +4657,7 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
               log[#log + 1] = name .. " launch"
               screens[name] = {{ "  Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip\n  3. Skip until next version\n› Ask Codex to do anything" }}
             end
-            return actual
+            return actual, instance_id
           end
           remuda.capture = function(n)
             local q = screens[n]
