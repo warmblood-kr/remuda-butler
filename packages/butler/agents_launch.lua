@@ -359,6 +359,20 @@ local function choose(candidates, opts, done)
   start_next()
   return attempts
 end
+-- The instance a launch just created: the one alive `ls` row of that name that
+-- carries an instance_id. `new` returns only the name, so `ls` is the source; no
+-- row, several rows (a replacement raced in) or no id means nil, never a guess.
+local function launch_instance(name)
+  local ok, rows = pcall(remuda.ls)
+  local found
+  for _, row in ipairs(ok and type(rows) == "table" and rows or {}) do
+    if row.name == name and row.alive then
+      if found ~= nil then return nil end
+      found = type(row.instance_id) == "string" and row.instance_id ~= "" and row.instance_id or false
+    end
+  end
+  return found or nil
+end
 remuda._butler_choose = choose
 remuda._butler_choose_async = choose
 function remuda._butler_cancel_active_choosers(lifecycle)
@@ -763,6 +777,7 @@ remuda._butler_chooser = {
   trust_modal_state = trust_modal_state, trust_plan = trust_plan, trust_eligible = trust_eligible,
   trust_path_matches = trust_path_matches,
   choose = choose,
+  launch_instance = launch_instance,
   configured_agent_order = configured_agent_order,
   readiness_chain_budget = readiness_chain_budget,
   setup_telemetry = setup_telemetry,
