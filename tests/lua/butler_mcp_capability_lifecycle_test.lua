@@ -173,6 +173,57 @@ T.test("unidentified_MCP_callers_cannot_mutate_mail_or_register_approvals", func
   ]])
 end)
 
+T.test("tokenless_MCP_bridge_cannot_reach_operator_only_routes_even_with_approvals_on", function()
+  -- Approvals ON with a recording relay stand-in: a tokenless bridge is kind=outside, which
+  -- the CLI policy may treat as the operator but no MCP route may.
+  T.eval([[
+    remuda._butler_matrix_live_config = { approve_text = true, use_messages = false }
+    remuda._probe_posts, remuda._probe_state = 0, { approvals = remuda.json.object({}) }
+    remuda.butler.approval.attach(remuda._probe_state, function() return true end, function(_, _, done)
+      remuda._probe_posts = remuda._probe_posts + 1
+      if done then done({ event_id = "$p" .. remuda._probe_posts }) end
+      return {}
+    end)
+  ]])
+  local function snapshot()
+    return T.eval([[
+      local bus, n = remuda._butler_bus, { 0, 0, 0, 0, 0 }
+      for _ in pairs(bus.messages) do n[1] = n[1] + 1 end
+      for _ in pairs(bus.objects) do n[2] = n[2] + 1 end
+      for _, rows in pairs(bus.mail_delivered) do for _ in pairs(rows) do n[3] = n[3] + 1 end end
+      for _ in pairs(remuda._probe_state.approvals) do n[4] = n[4] + 1 end
+      for _ in pairs(bus.agents) do n[5] = n[5] + 1 end
+      return table.concat(n, ":") .. ":" .. bus.next .. ":" .. remuda._probe_posts
+    ]])
+  end
+  local before = snapshot()
+  for name, args in pairs({
+    butler_approve_text = { session = "butler", text = "tokenless prepared text" },
+    butler_send = { to = "butler", text = "x" }, butler_reply = { to = "butler", text = "x" },
+    butler_forward = { message_id = "m", to = "butler" }, butler_inbox = {},
+    butler_send_to_leader = { text = "x" }, butler_report = { text = "x" },
+    butler_launch = { kind = "codex", name = "tokenless" },
+    butler_delegate = { name = "tokenless", task = "t", kind = "codex" },
+    butler_close = { name = "butler" }, matrix_download = { mxc = "mxc://a/b" },
+    matrix_upload = { path = "/etc/hosts" },
+  }) do
+    local reply = T.mcp_call(name, args)
+    local message = reply.error and reply.error.message
+      or reply.result and reply.result.content and reply.result.content[1].text or ""
+    T.ok(message:find("unknown caller", 1, true) ~= nil, name .. " accepted a tokenless MCP caller: " .. message)
+  end
+  T.eq(snapshot(), before, "tokenless MCP calls must register no approval and change no state")
+  -- Positive control: a registered session still registers a request, asked by that member.
+  local registered = T.eval([[
+    local tool; for k, v in pairs(remuda.tools) do if k == "butler_approve_text" or (type(v) == "table" and v.name == "butler_approve_text") then tool = v end end
+    local session = remuda._butler_bus.agents.butler.session_name
+    local ok, id = pcall(tool.run, { session = "butler", text = "member text" }, { kind = "session", session = session })
+    return tostring(ok) .. ":" .. remuda._probe_posts
+  ]])
+  T.eq(registered, "true:1", "a registered member must still be able to register prepared text")
+  T.eval("remuda._butler_matrix_live_config = nil")
+end)
+
 T.test("native_session_attribution_resolves_exactly_one_registration_by_session_name", function()
   local result = T.eval([[
     local bus, identity = remuda._butler_bus, remuda._butler_identity
