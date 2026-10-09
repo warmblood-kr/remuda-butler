@@ -154,9 +154,7 @@ T.test("unidentified_MCP_callers_cannot_mutate_mail_or_register_approvals", func
   end
   local send = text(T.mcp_call("butler_send", { to = "butler", text = "unidentified send" }))
   local reply = text(T.mcp_call("butler_reply", { to = "butler", text = "unidentified reply" }))
-  -- A tokenless harness bridge is now kind=outside, which butler_approve_text maps to the
-  -- operator (transitional policy), so approve is checked with a native unknown caller instead.
-  local approve = T.eval([[local ok, err = pcall(remuda._butler_identity.caller_agent, { kind = "unknown" }); return tostring(err)]])
+  local approve = text(T.mcp_call("butler_approve_text", { session = "butler", text = "unidentified approve" }))
   local inbox = text(T.mcp_call("butler_inbox", {}))
   for label, result in pairs({ send = send, reply = reply, approve = approve, inbox = inbox }) do
     T.ok(result:find("unknown caller", 1, true) ~= nil,

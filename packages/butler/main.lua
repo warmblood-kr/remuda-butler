@@ -682,13 +682,12 @@ remuda.tool{
   args = { session = "Target Butler session name.", text = "Exact text to register, up to 8 KiB." },
   needs = { "session", "text" },
   run = function(a, caller)
-    local principal = caller_principal.resolve(caller).tag == "operator" and "outside" or caller_agent(caller)
+    -- An MCP route needs a session identity: kind=outside is the operator only on the audited CLI path.
+    local principal = caller_agent(caller)
     local feature = remuda.butler and remuda.butler.approve_text
     if not feature or not feature.target_session_allowed(a.session) then
       error("Unknown Butler session: " .. tostring(a.session), 0)
     end
-    -- One resolver: the structured principal decides; "outside" is only ever the
-    -- named operator policy, never a lookup result.
     local id, why = feature.request(a.session, a.text, principal)
     if not id then error(tostring(why or "Could not register prepared text"), 0) end
     return id

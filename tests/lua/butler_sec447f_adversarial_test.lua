@@ -147,7 +147,7 @@ T.test('approve_text_tool_refuses_unresolved_requester_before_registering',funct
   T.expect(result:find(name..'=false/0/',1,true),result)
  end
  T.expect(result:find('member=true/1/butler',1,true),result)
- T.expect(result:find('operator=true/1/outside',1,true),result)
+ T.expect(result:find('operator=false/0/',1,true),result)
  T.expect(true,'','APPROVE-TEXT-REQUESTER '..result)
 end)
 
@@ -197,7 +197,7 @@ T.test('approve_text_tool_refuses_unresolved_requester_when_member_named_outside
  T.expect(result:find('member=true/1/butler',1,true),result)
  T.expect(result:find('outsider=true/1/outside',1,true),result)
  T.expect(result:find('outsider-token=true/1/outside',1,true),result)
- T.expect(result:find('operator=true/1/outside',1,true),result)
+ T.expect(result:find('operator=false/0/',1,true),result)
  T.expect(true,'','APPROVE-TEXT-OUTSIDE-MEMBER '..result)
 end)
 
