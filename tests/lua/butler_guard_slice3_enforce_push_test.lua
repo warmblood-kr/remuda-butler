@@ -4,6 +4,8 @@ local function start_butler()
   -- Installed once per file: a second install reloads the mod (the harness gives a file 20 s in all).
   if started then return end
   started = true
+  -- Butler captures the core's caller at load: it is installed before the mod loads.
+  T.eval("remuda.caller = function() return { kind = 'session', session = 's-ssa' } end")
   T.install_guard_subject("butler", assert(os.getenv("REMUDA_LUA_REPO")))
   T.eval('remuda._butler_argv = {"sh", "-c", "sleep 60"}; remuda._butler_skip_relay = true; remuda._butler_readiness_timeout = 1')
   T.eval('return remuda.exec("butler")')
@@ -44,7 +46,6 @@ local function start_butler()
     -- The calling session by core's caller identity: a grant held by U-SSA covers it (holders: enforce_holder).
     remuda._butler_bus.agents['t-ssa'] = { id = 'U-SSA', parent = 'butler', alias = 't-ssa', kind = 'claude', session_name = 's-ssa', children = {} }
     remuda._butler_bus.agents['ss-a'] = nil -- keep this session uniquely registered
-    remuda.caller = function() return { kind = 'session', session = 's-ssa' } end
     return 'ok'
   ]])
   -- A fresh load of the store hands `add` to the test; the approval cross-check is its own test (guard_slice3_reactions).

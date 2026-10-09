@@ -304,3 +304,56 @@ T.test("must4_file_attribution_uses_the_caller_captured_at_load_under_pcall", fu
   T.eval("remuda.caller = remuda._t.real.caller")
   reload()
 end)
+
+-- MUST 4 remainder: the two other production readers of the core's caller use the same load-time capture.
+local function load_caller(fn_source)
+  T.eval("remuda.caller = " .. fn_source)
+  reload()
+end
+local function restore_caller()
+  T.eval("remuda.caller = remuda._t.real.caller")
+  reload()
+end
+
+T.test("must4_sandbox_caller_is_agent_uses_the_caller_captured_at_load", function()
+  local function is_agent() return ev("return tostring(remuda._butler_sandbox.caller_is_agent())") end
+  -- captured = session: a later swap to outside must not turn the agent into a person
+  load_caller("function() return { kind = 'session', session = 'x' } end")
+  T.eval("remuda.caller = function() return { kind = 'outside' } end")
+  T.eq(is_agent(), "true", "the caller captured at load decides (agent), not a later remuda.caller")
+  -- captured = outside: a later swap to a session must not make it an agent
+  load_caller("function() return { kind = 'outside' } end")
+  T.eval("remuda.caller = function() return { kind = 'session', session = 'x' } end")
+  T.eq(is_agent(), "false", "the caller captured at load decides (person), not a later remuda.caller")
+  -- captured = raising / absent: unavailable keeps the current policy (not an agent); a later caller is not consulted
+  load_caller("function() error('caller unavailable', 0) end")
+  T.eval("remuda.caller = function() return { kind = 'session', session = 'x' } end")
+  T.eq(is_agent(), "false", "a raising captured caller is unavailable; a later session caller is not consulted")
+  load_caller("nil")
+  T.eval("remuda.caller = function() return { kind = 'session', session = 'x' } end")
+  T.eq(is_agent(), "false", "an absent captured caller is unavailable; a later session caller is not consulted")
+  restore_caller()
+end)
+
+T.test("must4_guard_grants_holders_uses_the_caller_captured_at_load", function()
+  local function holders()
+    return ev("local h = remuda.butler.guard_grants.holders(); return h and table.concat(h, ',') or 'nil'")
+  end
+  local function roster()
+    T.eval([[remuda._butler_bus.agents.hx = { id = 'U-HX', alias = 'hx', session_name = 's-hx', children = {} }
+      remuda._butler_bus.agents.hy = { id = 'U-HY', alias = 'hy', session_name = 's-hy', children = {} }]])
+  end
+  load_caller("function() return { kind = 'session', session = 's-hx' } end")
+  roster()
+  T.eval("remuda.caller = function() return { kind = 'session', session = 's-hy' } end")
+  T.eq(holders(), "U-HX", "the caller captured at load names the holder, not a later remuda.caller")
+  load_caller("function() error('caller unavailable', 0) end")
+  roster()
+  T.eval("remuda.caller = function() return { kind = 'session', session = 's-hy' } end")
+  T.eq(holders(), "nil", "a raising captured caller yields no holder, even with a permissive caller later")
+  load_caller("nil")
+  roster()
+  T.eval("remuda.caller = function() return { kind = 'session', session = 's-hy' } end")
+  T.eq(holders(), "nil", "an absent captured caller yields no holder, even with a permissive caller later")
+  restore_caller()
+end)
