@@ -444,11 +444,14 @@ T.test("ambiguous_observation_leaves_the_instance_unset_on_member_launch", funct
 end)
 
 -- An observation that cannot be proven (no row, a dead row, two rows, ls raising) stays unset through finish.
-local function launch_under(mode, launch)
+-- GATED limits the stub to the root launch attempt (start_pending): once the attempt is terminal, ls is truthful again,
+-- so a late exit event of the replaced root meets the real stale-exit guard instead of a stub that hides the new root.
+local function launch_under(mode, launch, gated)
   T.eval(string.format([[
-    local real, mode = remuda.ls, %q
+    local real, mode, gated = remuda.ls, %q, %s
     remuda._test_real_ls = real
     remuda.ls = function(...)
+      if gated and not remuda._butler_start_pending then return real(...) end
       if mode == "raise" then error("ls unavailable") end
       local rows, out = real(...), {}
       for _, r in ipairs(rows) do
@@ -461,7 +464,7 @@ local function launch_under(mode, launch)
       end
       return out
     end
-  ]], mode))
+  ]], mode, tostring(gated == true)))
   launch()
   return T.eval([[remuda.ls = remuda._test_real_ls; remuda._test_real_ls, remuda._test_hide = nil, nil; return "ok"]])
 end
@@ -484,7 +487,13 @@ end)
 T.test("unobserved_instance_stays_unset_through_root_launch_finish", function()
   -- (ls raising is covered at the observed_instance unit level: the root respawn itself needs ls to be ready)
   for _, mode in ipairs({ "none", "dead", "dupe" }) do
+    -- the previous launch must be terminal and its session live before this one is replaced
+    T.wait_until(function()
+      return T.eval('return tostring(remuda._butler_start_pending == false and remuda._butler_launching == nil)'):match("true") ~= nil
+        and ls_instance(T.eval("return remuda._butler_name"):gsub("%s+$", "")) ~= "none"
+    end, 10, "root ready before " .. mode)
     local token = T.eval("return remuda._butler_bus.agents.butler.token"):gsub("%s+$", "")
+    local old_instance = ls_instance(T.eval("return remuda._butler_name"):gsub("%s+$", ""))
     launch_under(mode, function()
       T.eval('remuda._test_hide = remuda._butler_name')
       T.eval('return remuda.close(remuda._butler_name)')
@@ -492,11 +501,28 @@ T.test("unobserved_instance_stays_unset_through_root_launch_finish", function()
         return T.eval('return tostring(remuda._butler_bus.agents.butler.token ~= ' .. string.format("%q", token)
           .. ' and remuda._butler_start_pending == false)'):match("true") ~= nil
       end, 10, "root respawn under " .. mode)
+      -- The core delivers the replaced root's exit event asynchronously: here it lands after the new launch finished,
+      -- while the stub still hides the new row. The stale-exit guard must keep the new capability.
+      T.eval(string.format('remuda._butler_session_exited(remuda._butler_name, { instance_id = %q })', old_instance))
       T.eval([[local root = remuda._butler_bus.agents.butler; local r = remuda._butler_bus.tokens[root.token]
-        remuda._test_seen = tostring(root.instance_id) .. ":" .. tostring(r and r.instance_id) .. ":" .. tostring(r ~= nil)]])
-    end)
-    T.eq(T.eval("return remuda._test_seen"):gsub("%s+$", ""), "nil:nil:true",
+        remuda._test_seen = tostring(root.instance_id) .. ":" .. tostring(r and r.instance_id) .. ":" .. tostring(r ~= nil)
+          .. ":" .. tostring(remuda._butler_start_error == nil and remuda._butler_selected_agent ~= nil)]])
+    end, true)
+    -- every mode here finishes successfully (skip_probe), so the success path is asserted: the launch is selected,
+    -- the capability exists, and only the instance stays unset.
+    T.eq(T.eval("return remuda._test_seen"):gsub("%s+$", ""), "nil:nil:true:true",
       mode .. ": an unproven observation must leave the root row and capability instance unset")
     T.eval("remuda._test_seen = nil")
   end
+end)
+
+-- A failed root launch (finish with no selected candidate) and a root exit both end in this call; last, since it leaves the root without a capability.
+T.test("revoking_the_root_capability_removes_its_record_and_marker", function()
+  T.eq(T.eval([[
+    local bus, root = remuda._butler_bus, remuda._butler_bus.agents.butler
+    local token = root.token
+    local before = bus.tokens[token] ~= nil and root.session_start_marker ~= nil
+    remuda._butler_revoke_root_capability()
+    return tostring(before) .. ":" .. tostring(bus.tokens[token]) .. ":" .. tostring(root.session_start_marker)]]):gsub("%s+$", ""),
+    "true:nil:nil", "revoke must drop the capability record and the launch marker")
 end)
