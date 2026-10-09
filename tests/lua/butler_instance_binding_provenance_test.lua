@@ -13,10 +13,14 @@ T.wait_until(function()
   return T.eval('return remuda._butler_bus ~= nil and remuda._butler_bus.agents.butler ~= nil')
     :match("^%s*true%s*$") ~= nil
 end, 5, "Butler root start")
-T.eval(string.format([[
-  remuda.butler.project_home(%q)
-  remuda._butler_agent_builders.codex = function() return { "sleep", "60" } end
-]], os.getenv("XDG_DATA_HOME") .. "/projects"))
+-- A reload rebuilds the agent builders: set the fake member command again after every init.
+local function member_setup()
+  T.eval(string.format([[
+    remuda.butler.project_home(%q)
+    remuda._butler_agent_builders.codex = function() return { "sleep", "60" } end
+  ]], os.getenv("XDG_DATA_HOME") .. "/projects"))
+end
+member_setup()
 
 T.eval([=[
   local t = {}
@@ -46,6 +50,10 @@ T.eval([=[
   function t.route(name, args, caller)
     local ok, err = pcall(t.tool(name).run, args, caller)
     return ok and "ok" or ("err:" .. tostring(err))
+  end
+  function t.prove(a, r, row_id, record_id)
+    a.instance_id, r.instance_id = row_id, record_id or row_id
+    a.instance_binding, r.instance_binding = 1, 1
   end
   function t.agent(name)
     local a = remuda._butler_bus.agents[name]
@@ -122,6 +130,7 @@ local function reload()
   T.wait_until(function() return ev("return tostring(remuda._butler_launching)") == "nil" end, 10, "reload settled")
   local spawns = ev("return tostring(remuda._t.spawns)")
   T.eval("remuda.new = remuda._t.unwrapped")
+  member_setup()
   return tonumber(spawns)
 end
 
@@ -177,6 +186,23 @@ T.test("must1_pr_a_observation_fields_are_cleared_on_upgrade_and_never_enforce",
   T.eval("local bus = remuda._butler_bus; local a = bus.agents.pra; bus.tokens[a.token] = nil; bus.agents.pra = nil")
 end)
 
+T.test("must1_doctor_and_enforcement_share_one_valid_binding_predicate", function()
+  launch("pred")
+  local function line() return ev("return tostring(remuda._butler_command_run('doctor', { 'doctor' }))"):match("(%d+) members not instance%-bound") or "none" end
+  local function enforced(id) return tag("pred", id) end
+  local id = ev("return remuda._butler_bus.agents.pred.instance_id")
+  local base = line()
+  -- an id with no marker (or an empty/non-string id) is neither enforced nor counted as bound
+  for _, bad in ipairs({ "a.instance_binding = nil", "a.instance_id = ''", "a.instance_id = 7" }) do
+    T.eval("local a = remuda._butler_bus.agents.pred; " .. bad)
+    T.eq(tonumber(line() or 0), (tonumber(base) or 0) + 1, bad .. ": doctor must count the member unbound")
+    T.eq(enforced("WHATEVER"), "member", bad .. ": and enforcement must treat it as legacy-visible (no instance compare)")
+    T.eval("local a = remuda._butler_bus.agents.pred; a.instance_id, a.instance_binding = " .. quote(id) .. ", 1")
+  end
+  T.eq(enforced("WHATEVER"), "unidentified", "the proven binding is enforced")
+  T.eval("return remuda.close('pred')")
+end)
+
 T.test("must1_a_proven_member_binding_survives_reload", function() -- guard: the migration must not clear PR B's own bindings
   launch("keep")
   local before = bound("keep")
@@ -214,6 +240,10 @@ T.test("must2_root_binding_survives_same_head_reload_through_init", function()
   local function strip_marker()
     T.eval("local root = remuda._butler_bus.agents.butler; root.instance_binding = nil; remuda._butler_bus.tokens[root.token].instance_binding = nil")
   end
+  -- the root as its genuine launch left it (no hand-written state): the binding survives the reload
+  T.eq(root_state(), live .. ":" .. live, "precondition: the real root launch bound the returned id")
+  T.eq(reload(), 0, "genuine root reload: no chooser run")
+  T.eq(root_state(), live .. ":" .. live, "the root's own launch binding must survive the reload")
   -- coherent and proven: kept, enforcing, no chooser run
   prove(live, live)
   local before_token = ev("return remuda._butler_bus.agents.butler.token")
@@ -240,6 +270,16 @@ T.test("must2_root_binding_survives_same_head_reload_through_init", function()
   strict = tag(session, live)
   T.eval("remuda._butler_strict_instance_binding = nil")
   T.eq(strict, "unidentified", "strict: refused until relaunch")
+end)
+
+T.test("must2_adoption_rechecks_the_pair_if_the_record_drifts_after_init", function()
+  local live = root_live_id()
+  T.eval(string.format([[
+    local root = remuda._butler_bus.agents.butler
+    remuda._t.prove(root, remuda._butler_bus.tokens[root.token], %s, 'DRIFT')
+    remuda._butler_reconcile() -- live session + selected agent: the adoption branch, no chooser
+  ]], quote(live)))
+  T.eq(root_state(), "nil:nil", "a live row whose record disagrees is not adopted as bound")
 end)
 
 T.test("must4_file_attribution_uses_the_caller_captured_at_load_under_pcall", function()
