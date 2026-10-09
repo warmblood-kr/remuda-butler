@@ -280,3 +280,99 @@ T.test("tokens_carry_a_random_incarnation_component", function()
     return tostring(a:match("^x%-%d+%-%w%w%w%w%w%w%w%w%w%w%-%d+$") ~= nil and a ~= b)
   ]]), "true")
 end)
+
+-- PR A of the instance binding (design-instance-binding.md): record the issuing
+-- instance at launch. Recording only; nothing compares it yet.
+local function ls_instance(name)
+  return T.eval('for _, r in ipairs(remuda.ls()) do if r.name == ' .. string.format("%q", name)
+    .. ' and r.alive then return r.instance_id end end return "none"')
+end
+
+T.test("launch_instance_is_the_one_alive_ls_row_and_never_a_guess", function()
+  local result = T.eval([[
+    local pick, real, out = remuda._butler_chooser.launch_instance, remuda.ls, {}
+    local function with(rows) remuda.ls = rows; local v = tostring(pick("n")); remuda.ls = real; return v end
+    local function row(extra) local r = { name = "n", alive = true, instance_id = "I1" }; for k, v in pairs(extra or {}) do r[k] = v end; return r end
+    out[#out + 1] = with(function() return { row(), { name = "o", alive = true, instance_id = "X" } } end)
+    out[#out + 1] = with(function() return { row({ alive = false, instance_id = "OLD" }), row() } end)
+    out[#out + 1] = with(function() return { row(), row({ instance_id = "I2" }) } end) -- replacement raced in
+    out[#out + 1] = with(function() return { row({ instance_id = false }) } end)
+    out[#out + 1] = with(function() return { row({ instance_id = "" }) } end)
+    out[#out + 1] = with(function() return {} end)
+    out[#out + 1] = with(function() error("ls unavailable") end)
+    return table.concat(out, ",")
+  ]])
+  T.eq(result, "I1,I1,nil,nil,nil,nil,nil", "an instance is taken only from exactly one alive row that carries one")
+end)
+
+T.test("member_launch_records_the_native_instance_id", function()
+  -- (an earlier test rewrote the first launch's capability record, so only the row is checked here)
+  local id = ls_instance("reused")
+  T.ok(id ~= "none" and id ~= "", "core ls must expose the launch's instance_id")
+  T.eq((T.eval("return remuda._butler_bus.agents.reused.instance_id"):gsub("%s+$", "")), id, "the agent row must hold the launched instance")
+  T.eval('return remuda.close("reused")')
+  T.wait_until(function()
+    return T.eval('return remuda._butler_bus.agents.reused == nil'):match("^%s*true%s*$") ~= nil
+  end, 5, "member exit")
+  T.eval('return remuda._butler_launch("codex", "reused")')
+  local second = T.eval([[
+    local bus = remuda._butler_bus
+    local a = bus.agents.reused
+    return a.instance_id .. ":" .. bus.tokens[a.token].instance_id
+  ]])
+  local id2 = ls_instance("reused")
+  T.ok(id2 ~= id, "a relaunch under the same alias must be a new native instance")
+  T.eq(second, id2 .. ":" .. id2, "the relaunch must record its own instance, not the first")
+end)
+
+T.test("root_launch_records_instance_and_rotation_replaces_it", function()
+  local function root()
+    return T.eval([[
+      local bus, root = remuda._butler_bus, remuda._butler_bus.agents.butler
+      return tostring(root.instance_id) .. ":" .. tostring(bus.tokens[root.token] and bus.tokens[root.token].instance_id)
+        .. ":" .. root.token
+    ]])
+  end
+  local function root_ls() return ls_instance(T.eval("return remuda._butler_name"):gsub("%s+$", "")) end
+  local id, cap, token = root():match("^([^:]+):([^:]+):(.+)$")
+  T.ok(id and id ~= "nil", "the root row must hold its launch instance")
+  T.eq(cap, id, "the root capability must hold the same instance")
+  T.eq(root_ls(), id, "the recorded root instance must be the native one")
+  T.eval('return remuda.close(remuda._butler_name)')
+  T.wait_until(function()
+    return T.eval('return tostring(remuda._butler_bus.agents.butler.token ~= ' .. string.format("%q", token)
+      .. ' and remuda._butler_start_pending == false)'):match("true") ~= nil
+  end, 10, "root respawn")
+  local id2, cap2 = root():match("^([^:]+):([^:]+):")
+  T.ok(id2 and id2 ~= "nil" and id2 ~= id, "a new root launch must record a new instance")
+  T.eq(cap2, id2, "the rotated capability must hold the new instance")
+  T.eq(root_ls(), id2, "the replaced record must be the native one")
+end)
+
+T.test("capability_without_issuing_instance_is_not_recorded_as_bound", function()
+  T.eval([[
+    local real = remuda.ls
+    remuda._test_real_ls = real
+    remuda.ls = function() -- a second alive row under the launched name: ambiguous
+      local rows = real()
+      for _, r in ipairs(rows) do
+        if r.name == "dupe" then
+          local copy = {}; for k, v in pairs(r) do copy[k] = v end
+          copy.instance_id = "OTHER"; rows[#rows + 1] = copy; break
+        end
+      end
+      return rows
+    end
+    remuda._butler_launch("codex", "dupe")
+  ]])
+  local seen = T.eval([[
+    local bus = remuda._butler_bus
+    local a = bus.agents.dupe
+    local rec = a and bus.tokens[a.token]
+    remuda.ls = remuda._test_real_ls; remuda._test_real_ls = nil
+    return table.concat({ tostring(a ~= nil), tostring(a and a.instance_id), tostring(type(rec) == "table" and rec.instance_id),
+      tostring(type(rec) == "table" and rec.id == a.id) }, ":")
+  ]])
+  T.eq(seen, "true:nil:nil:true", "an ambiguous launch must still work, with the instance left unset")
+  T.eval('return remuda.close("dupe")')
+end)
