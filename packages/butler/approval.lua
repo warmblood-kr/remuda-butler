@@ -268,6 +268,8 @@ local function apply_approved(rec)
   return true
 end
 
+approval._apply_approved = apply_approved -- test seam: proves the action_grant guard above is observed
+
 function approval.reapply_approved()
   if not attached then return 0 end
   local count = 0
@@ -554,8 +556,8 @@ function approval.same_incarnation(a, b)
   return "different"
 end
 
--- Internal action_grant reducer (#475 slice 0). Pure state machine: no command, hook, MCP or Matrix route reaches it,
--- and a verdict never executes anything. ctx = { elapsed_ms = fn, generation = fn, utc_ms = fn }; elapsed ms and the
+-- Internal action_grant reducer (#475 slice 0). It persists records but has no action/execution effects: no dedicated
+-- Butler command, hook, MCP or Matrix route registers it (exported as _action_grant; not access control), and a verdict never executes anything. ctx = { elapsed_ms = fn, generation = fn, utc_ms = fn }; elapsed ms and the
 -- daemon generation decide lifetime, UTC is display only. ponytail: copy() assumes acyclic data, as JSON state is.
 local AG = {}
 approval._action_grant = AG
@@ -580,11 +582,18 @@ local function utc(ctx)
   local ok, value = pcall(ctx.utc_ms)
   return ok and type(value) == "number" and value or nil
 end
+-- Generation and UID are immutable scalars (non-empty string or finite number); anything else is refused at ingress.
+local function scalar(v)
+  return type(v) == "string" and v ~= "" or type(v) == "number" and v == v and v ~= math.huge and v ~= -math.huge
+end
+-- Elapsed high-water per record, beside (not inside) the record so a successful observation changes no revision or
+-- provenance. Kept in the shared state, so a same-generation reattach retains it. ponytail: entries are not pruned.
+local function marks() local s = attached.state; s.action_grant_elapsed = s.action_grant_elapsed or {}; return s.action_grant_elapsed end
 -- Elapsed ms and generation, or nil and why when either is unusable.
 local function observe(ctx)
   local ok, t = pcall(ctx.elapsed_ms)
   local gok, generation = pcall(ctx.generation)
-  if not ok or type(t) ~= "number" or t ~= t or t < 0 or t == math.huge or not gok or generation == nil then
+  if not ok or type(t) ~= "number" or t ~= t or t < 0 or t == math.huge or not gok or not scalar(generation) then
     return nil, "clock_error"
   end
   return t, generation
@@ -601,9 +610,11 @@ end
 -- Elapsed time for an unused record, expiring it (with a reason) when it is no longer admissible.
 local function live(ctx, rec)
   local t, generation = observe(ctx)
+  local high = marks()
   local why = not t and generation or generation ~= rec.generation and "generation_mismatch"
-    or t < rec.last_elapsed_ms and "clock_backward" or t >= rec.deadline_elapsed_ms and "deadline"
+    or t < math.max(rec.last_elapsed_ms, high[rec.id] or 0) and "clock_backward" or t >= rec.deadline_elapsed_ms and "deadline"
   if why then expire(ctx, rec, why, t); return nil, why end
+  high[rec.id] = t
   return t
 end
 
@@ -628,6 +639,7 @@ function AG.create(ctx, spec)
   if type(spec.requester) ~= "table" or type(spec.executor) ~= "table" or type(spec.action) ~= "table" then
     return nil, "requester, executor and action are required"
   end
+  if spec.uid ~= nil and not scalar(spec.uid) then return nil, "uid must be a string or finite number" end
   local t, generation = observe(ctx)
   if not t then return nil, generation end
   local id = random_id(attached.state)
@@ -638,6 +650,7 @@ function AG.create(ctx, spec)
     created_ms = now, expires_at = now and now + ttl * 1000 or nil, requester = copy(spec.requester),
     executor = copy(spec.executor), action = copy(spec.action), context = copy(spec.context), uid = spec.uid,
     lineage = copy(spec.lineage) }
+  marks()[id] = t
   local saved = pcall(persist)
   if not saved then attached.state.approvals[id] = nil; return nil, "Could not save action_grant" end
   return AG.snapshot(id)
