@@ -193,6 +193,8 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
     trust_reported = waiting_for_trust, trust_answered = trust_answered,
     instance_id = instance_id, instance_binding = instance_id and 1 or nil, -- from the remuda.new return only
   }
+  -- A new incarnation never inherits a done request left at its alias (remuda#606).
+  if remuda._butler_done then remuda._butler_done[actual] = nil end
   bus.tokens[token] = { id = identity.id, generation = bus.agents[actual].session_start_marker,
     instance_id = instance_id, instance_binding = instance_id and 1 or nil }
   if parent and bus.agents[parent] then

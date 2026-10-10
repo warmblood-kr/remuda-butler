@@ -609,18 +609,36 @@ function remuda._butler_inbox(name)
   end
   return result
 end
--- Members that reported with --done (remuda#606), by alias. In memory only: a
--- daemon restart forgets them, which leaves the member open. New mail to a
--- member clears its mark (notify_mail_delivery).
+-- Members that reported with --done (remuda#606), by alias. Each mark records the
+-- reporting incarnation (durable id, launch generation, proven instance id), so a
+-- replacement or relaunch at the same alias never inherits it. In memory only: a
+-- daemon restart forgets them, which leaves the member open. New mail to a member
+-- (notify_mail_delivery), its exit and a new registration at its alias clear it.
 remuda._butler_done = remuda._butler_done or {}
+local function done_mark(agent)
+  return { id = agent.id, generation = agent.session_start_marker,
+    instance_id = agent.instance_binding == 1 and agent.instance_id or nil }
+end
+-- A mark from an older image (not a table) or for another incarnation never matches.
+local function done_mark_matches(mark, agent)
+  return type(mark) == "table" and type(agent) == "table" and mark.id ~= nil and mark.generation ~= nil
+    and agent.id == mark.id and agent.session_start_marker == mark.generation
+    and (mark.instance_id == nil or agent.instance_id == mark.instance_id)
+end
 function remuda._butler_report(from, text, done)
   from = resolve(from)
   local agent = bus.agents[from]
   if not agent then error("no Butler agent named " .. tostring(from), 0) end
   if not agent.parent then error("Butler agent " .. from .. " has no leader to report to", 0) end
-  local queued = remuda._butler_send(from, agent.parent, text)
+  -- Marked before the report is sent, so mail a synchronous report hook sends back still cancels it.
+  local mark = done and done_mark(agent) or nil
+  if mark then remuda._butler_done[from] = mark end
+  local sent, queued = pcall(remuda._butler_send, from, agent.parent, text)
+  if not sent then
+    if mark and remuda._butler_done[from] == mark then remuda._butler_done[from] = nil end
+    error(queued, 0)
+  end
   remuda.emit("butler/report", from, agent.parent, text)
-  if done then remuda._butler_done[from] = true end
   return queued
 end
 -- The auto-close tick: each done member is closed by its parent through the
@@ -628,9 +646,10 @@ end
 -- until a later tick. The root and parent-less rows are never auto-closed.
 function remuda._butler_done_tick()
   local done = remuda._butler_done
-  for alias in pairs(done) do
+  for alias, mark in pairs(done) do
     local agent = bus.agents[alias]
-    if not agent or not agent.parent or alias == "butler" or alias == remuda._butler_name then
+    if not agent or not agent.parent or alias == "butler" or alias == remuda._butler_name
+        or not done_mark_matches(mark, agent) then
       done[alias] = nil
     else
       local closed, why = pcall(remuda._butler_close_member, alias, agent.parent, false, false)
@@ -1356,6 +1375,8 @@ function remuda._butler_session_exited(name, info)
   end
   -- #29: the mail stays in the inbox; only the pending pane notice goes.
   bus.unread_seeded[name] = "exited"
+  -- An accepted exit ends the incarnation that may have reported --done (remuda#606).
+  if remuda._butler_done then remuda._butler_done[name] = nil end
   bus.notices[name], bus.notice_screens[name], bus.pending_tasks[name] = nil, nil, nil
   bus.notice_recoveries[name], bus.task_retry_screens[name], bus.human_activity_screens[name] = nil, nil, nil
   local exited = bus.agents[name]
