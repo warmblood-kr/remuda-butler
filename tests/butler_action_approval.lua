@@ -1,6 +1,7 @@
 -- Focused action_grant reducer tests (#475 slice 0). Run from the repository root:
 --   luajit tests/butler_action_approval.lua
 -- Pure: fake remuda, injected elapsed clock / generation / UTC / evidence; no filesystem, network, Matrix or daemon.
+-- The effects fixture counts only post / send / typing / handler callbacks; it makes no claim about other effects.
 local random_call = 0
 remuda = { json = { null = {}, object = function(value) return value end },
   butler = { matrix = { sanitize_directory_text = function(value) return value end } },
@@ -333,6 +334,68 @@ case("public isolation", function()
   assert(not approval.cli({ "approvals" }):find("action_grant", 1, true), "CLI listing hides the kind")
   assert(approval.sweep(clock.utc + 10 ^ 12) == 0 and status(id) == "open", "wall-clock sweep never expires it")
   assert(approval.reapply_approved() == 0)
+end)
+
+case("elapsed high-water after a successful sweep", function()
+  local o = new(); local before = raw(o)
+  at(5000); assert(G().sweep(ctx) == 0 and status(o) == "open", "sweep at 5000 keeps it open")
+  assert(same(raw(o), before), "a successful observation changes no revision or provenance")
+  at(4000)
+  assert(not G().answer(ctx, o, "approve", "@owner:x", "$e") and status(o) == "expired", "open: backward after sweep")
+  assert(state.approvals[o].expire_reason == "clock_backward", "open reason " .. tostring(state.approvals[o].expire_reason))
+  local a = new(); approve(a, 2000); at(5000); assert(G().sweep(ctx) == 0 and status(a) == "approved")
+  at(4000)
+  assert(not G().consume(ctx, a, evidence()) and status(a) == "expired", "approved: backward after sweep")
+  assert(state.approvals[a].expire_reason == "clock_backward", "approved reason")
+  local eq = new(); at(5000); G().sweep(ctx)
+  assert(G().answer(ctx, eq, "approve", "@owner:x", "$e"), "an equal observation is not backward")
+end)
+
+case("elapsed high-water after evidence refusal and reattach", function()
+  local a = new(); approve(a, 2000); local before = raw(a)
+  at(5000); assert(not G().consume(ctx, a, evidence({ proof_verified = false })), "refused evidence")
+  assert(same(raw(a), before), "refusal keeps revision and provenance")
+  at(4000); assert(not G().consume(ctx, a, evidence()) and status(a) == "expired", "backward after an evidence refusal")
+  local o = new(); at(5000); G().sweep(ctx); attach(); at(4000)
+  assert(not G().answer(ctx, o, "approve", "@owner:x", "$e") and status(o) == "expired", "open: backward after reattach")
+  local p = new(); approve(p, 2000); at(5000); G().sweep(ctx); attach(); at(4000)
+  assert(not G().consume(ctx, p, evidence()) and status(p) == "expired", "approved: backward after reattach")
+  local ok = new(); approve(ok, 2000); at(5000); G().sweep(ctx); attach(); at(5000)
+  assert(G().consume(ctx, ok, evidence()), "same generation after reattach still admits a non-backward observation")
+end)
+
+case("generation and uid are immutable scalars", function()
+  local function refused(label, o, gen)
+    clock.t, clock.gen, clock.fail = 1000, gen == nil and "g1" or gen, nil
+    local count = 0; for _ in pairs(state.approvals) do count = count + 1 end
+    assert(G().create(ctx, spec(o)) == nil, label .. " must refuse")
+    local after = 0; for _ in pairs(state.approvals) do after = after + 1 end
+    assert(after == count, label .. " inserted nothing")
+  end
+  refused("table generation", nil, {})
+  refused("boolean generation", nil, true)
+  refused("function generation", nil, print)
+  refused("nan generation", nil, 0 / 0)
+  refused("empty generation", nil, "")
+  refused("table uid", { uid = {} })
+  refused("boolean uid", { uid = true })
+  refused("nan uid", { uid = 0 / 0 })
+  refused("function uid", { uid = print })
+  local uid, gen = { 1 }, { n = 1 }
+  refused("aliased table uid", { uid = uid }); uid[1] = 2
+  refused("aliased table generation", nil, gen); gen.n = 2
+  assert(G().snapshot(new({ uid = 0 })).uid == 0 and G().snapshot(new({ uid = "u1" })).uid == "u1", "scalar uids stay valid")
+  local id = new(); local live_gen = { n = 1 }
+  clock.gen = live_gen
+  assert(G().sweep(ctx) >= 1 and status(id) == "expired" and state.approvals[id].expire_reason == "clock_error",
+    "a table generation from the provider is unusable, not compared by reference")
+end)
+
+case("apply_approved never applies an action_grant", function()
+  assert(type(approval._apply_approved) == "function", "apply seam is absent")
+  local id = new(); approve(id, 2000); effects.handler = 0
+  assert(approval._apply_approved(state.approvals[id]) == false, "apply refuses the kind")
+  assert(effects.handler == 0 and status(id) == "approved", "no handler call, no status change")
 end)
 
 if #failures > 0 then
