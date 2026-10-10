@@ -583,14 +583,18 @@ local SEND_TO_LEADER_CLI_SPEC = {
   verbs = {
     ["send-to-leader"] = {
       about = "Send a message to your Butler leader",
-      options = { { long = "file", value = "PATH", help = "Read message text from a file" } },
+      options = { { long = "file", value = "PATH", help = "Read message text from a file" },
+        { long = "done", help = "Your task is finished: Butler closes you once your inbox is drained and you are idle" } },
       args = { { name = "WORDS", help = "Message words", multiple = true, required = false } },
       next = "remuda butler send-to-leader --help",
     },
   },
 }
-command(50, "send-to-leader", "  remuda butler send-to-leader <message...> | - | --file PATH\n"
+command(50, "send-to-leader", "  remuda butler send-to-leader [--done] <message...> | - | --file PATH\n"
   .. "  To send text that starts with -, put -- first: remuda butler send-to-leader -- -text", function(args, caller)
+  -- A leading --done (remuda#606) marks the member finished; the rest parses as before.
+  local done = args[2] == "--done"
+  if done then args = { args[1], table.unpack(args, 3) } end
   if #args < 2 then return nil end
   local from = current_agent(caller)
   if not from then
@@ -620,7 +624,7 @@ command(50, "send-to-leader", "  remuda butler send-to-leader <message...> | - |
         error(message, 0)
       end
       return cli_result(function()
-        return remuda._butler_report(from, message_body({ "send-to-leader", "--file", report.values.file }, 2, caller))
+        return remuda._butler_report(from, message_body({ "send-to-leader", "--file", report.values.file }, 2, caller), done or nil)
       end)
     end
     if args[2] ~= "--" then
@@ -639,7 +643,7 @@ command(50, "send-to-leader", "  remuda butler send-to-leader <message...> | - |
     else
       body = message_body(args, 2, caller)
     end
-    return remuda._butler_report(from, body)
+    return remuda._butler_report(from, body, done or nil)
   end)
 end)
 local INBOX_CLI_SPEC = { name = "remuda butler", verbs = { inbox = { about = "Read your Butler inbox or show one delivered message",
