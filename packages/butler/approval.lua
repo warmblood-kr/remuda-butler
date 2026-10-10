@@ -69,7 +69,7 @@ end
 local function open_records(state)
   local rows = {}
   for _, record in pairs(state and state.approvals or {}) do
-    if type(record) == "table" and (record.status == "open"
+    if type(record) == "table" and record.kind ~= "action_grant" and (record.status == "open"
       or (record.kind == "approve_text" and record.status == "approved")) then rows[#rows + 1] = record end
   end
   table.sort(rows, function(a, b)
@@ -244,7 +244,8 @@ approval._ticks = ticks
 function approval.tick(name, fn) ticks[name] = fn end
 
 local function apply_approved(rec)
-  if type(rec) ~= "table" or rec.status ~= "approved" or applying[rec.id] then return false end
+  -- An action_grant verdict is only a record: no handler, retry or application, installed or not.
+  if type(rec) ~= "table" or rec.kind == "action_grant" or rec.status ~= "approved" or applying[rec.id] then return false end
   local callback = handlers[rec.kind] and handlers[rec.kind].approve
   if not callback then
     rec.status, rec.error = "failed", "No approval handler is registered"
@@ -271,7 +272,8 @@ function approval.reapply_approved()
   if not attached then return 0 end
   local count = 0
   for _, rec in pairs(attached.state.approvals or {}) do
-    if type(rec) == "table" and rec.status == "approved" and rec.kind ~= "approve_text" then
+    if type(rec) == "table" and rec.status == "approved" and rec.kind ~= "approve_text"
+        and rec.kind ~= "action_grant" then
       apply_approved(rec)
       count = count + 1
     end
@@ -304,6 +306,10 @@ function approval.request(request, done)
     or type(request.key) ~= "string" or type(request.asker) ~= "string"
     or type(request.summary) ~= "string" then
     finish(nil, "Invalid approval request. Next: check the approval request details")
+    return nil
+  end
+  if request.kind == "action_grant" then
+    finish(nil, "action_grant requests are internal. Next: none; this kind has no public route")
     return nil
   end
   if type(attached.post) ~= "function" then
@@ -452,6 +458,7 @@ function approval.answer(id_or_event, verdict, who, event_id)
       or candidate.event_id == id_or_event) then rec = candidate; break end
   end
   if not rec then return nil, "No such request." end
+  if rec.kind == "action_grant" then return nil, "This request kind has no generic answer.", rec end
   if verdict == "grant" then
     -- Only a guard request can end in a standing grant, and only the owner in Matrix: the terminal never grants.
     local check = rec.kind == "guard_action" and handlers.guard_action and handlers.guard_action.grant_check
@@ -518,7 +525,7 @@ function approval.sweep(now)
   now = tonumber(now) or math.floor(os.time() * 1000)
   local count = 0
   for _, rec in pairs(attached.state.approvals or {}) do
-    local expirable = type(rec) == "table" and (rec.status == "open"
+    local expirable = type(rec) == "table" and rec.kind ~= "action_grant" and (rec.status == "open"
       or (rec.status == "approved" and rec.kind == "approve_text"))
     if expirable and tonumber(rec.expires_at) and now >= rec.expires_at then
       rec.status, rec.answered_at = "expired", now
@@ -529,6 +536,165 @@ function approval.sweep(now)
   end
   if count > 0 then persist() end
   for _, fn in pairs(ticks) do pcall(fn, now) end
+  return count
+end
+
+-- Identity (not liveness) comparison for the action_grant slices: same_proven | different | legacy_advisory.
+-- Only two proven triples (instance_binding == 1 plus instance_id) can be same_proven; marker-only rows are advisory.
+function approval.same_incarnation(a, b)
+  local function named(x)
+    return type(x) == "table" and type(x.agent_id) == "string" and x.agent_id ~= ""
+      and type(x.launch_marker) == "string" and x.launch_marker ~= ""
+  end
+  if not (named(a) and named(b) and a.agent_id == b.agent_id and a.launch_marker == b.launch_marker) then return "different" end
+  local function proven(x) return x.instance_binding == 1 and type(x.instance_id) == "string" and x.instance_id ~= "" end
+  local function legacy(x) return x.instance_id == nil and x.instance_binding == nil end
+  if proven(a) and proven(b) then return a.instance_id == b.instance_id and "same_proven" or "different" end
+  if legacy(a) and legacy(b) then return "legacy_advisory" end
+  return "different"
+end
+
+-- Internal action_grant reducer (#475 slice 0). Pure state machine: no command, hook, MCP or Matrix route reaches it,
+-- and a verdict never executes anything. ctx = { elapsed_ms = fn, generation = fn, utc_ms = fn }; elapsed ms and the
+-- daemon generation decide lifetime, UTC is display only. ponytail: copy() assumes acyclic data, as JSON state is.
+local AG = {}
+approval._action_grant = AG
+local function copy(v)
+  if type(v) ~= "table" then return v end
+  local out = {}
+  for k, x in pairs(v) do out[k] = copy(x) end
+  return out
+end
+local function equal(a, b)
+  if type(a) ~= type(b) then return false end
+  if type(a) ~= "table" then return a == b end
+  for k, v in pairs(a) do if not equal(v, b[k]) then return false end end
+  for k in pairs(b) do if a[k] == nil then return false end end
+  return true
+end
+local function grant_record(id)
+  local rec = attached and type(id) == "string" and attached.state.approvals[id]
+  if type(rec) == "table" and rec.kind == "action_grant" then return rec end
+end
+local function utc(ctx)
+  local ok, value = pcall(ctx.utc_ms)
+  return ok and type(value) == "number" and value or nil
+end
+-- Elapsed ms and generation, or nil and why when either is unusable.
+local function observe(ctx)
+  local ok, t = pcall(ctx.elapsed_ms)
+  local gok, generation = pcall(ctx.generation)
+  if not ok or type(t) ~= "number" or t ~= t or t < 0 or t == math.huge or not gok or generation == nil then
+    return nil, "clock_error"
+  end
+  return t, generation
+end
+-- One successful transition: revision rises once; refusals never reach here.
+local function move(rec, status, t, fields)
+  for k, v in pairs(fields) do rec[k] = v end
+  rec.status, rec.revision, rec.last_elapsed_ms = status, rec.revision + 1, t or rec.last_elapsed_ms
+  persist()
+end
+local function expire(ctx, rec, why, t)
+  move(rec, "expired", t, { previous_status = rec.status, expire_reason = why, expired_elapsed_ms = t, expired_at = utc(ctx) })
+end
+-- Elapsed time for an unused record, expiring it (with a reason) when it is no longer admissible.
+local function live(ctx, rec)
+  local t, generation = observe(ctx)
+  local why = not t and generation or generation ~= rec.generation and "generation_mismatch"
+    or t < rec.last_elapsed_ms and "clock_backward" or t >= rec.deadline_elapsed_ms and "deadline"
+  if why then expire(ctx, rec, why, t); return nil, why end
+  return t
+end
+
+function AG.snapshot(id)
+  local rec = grant_record(id)
+  if not rec then return nil end
+  local view = copy(rec)
+  if view.status == "open" then view.status = "pending" end
+  return view
+end
+
+function AG.create(ctx, spec)
+  if not attached or type(ctx) ~= "table" or type(spec) ~= "table" then return nil, "action_grant unavailable" end
+  local ttl = spec.ttl_s
+  if ttl == nil then
+    local ok, configured = pcall(approval.default_ttl_s)
+    ttl = ok and configured or nil
+  end
+  if type(ttl) ~= "number" or ttl ~= ttl or ttl < 1 or ttl > 86400 or ttl % 1 ~= 0 then
+    return nil, "ttl_s must be a whole number of seconds from 1 to 86400"
+  end
+  if type(spec.requester) ~= "table" or type(spec.executor) ~= "table" or type(spec.action) ~= "table" then
+    return nil, "requester, executor and action are required"
+  end
+  local t, generation = observe(ctx)
+  if not t then return nil, generation end
+  local id = random_id(attached.state)
+  if not id then return nil, "Secure randomness is unavailable" end
+  local now = utc(ctx)
+  attached.state.approvals[id] = { id = id, kind = "action_grant", status = "open", revision = 1, ttl_s = ttl,
+    created_elapsed_ms = t, deadline_elapsed_ms = t + ttl * 1000, last_elapsed_ms = t, generation = generation,
+    created_ms = now, expires_at = now and now + ttl * 1000 or nil, requester = copy(spec.requester),
+    executor = copy(spec.executor), action = copy(spec.action), context = copy(spec.context), uid = spec.uid,
+    lineage = copy(spec.lineage) }
+  local saved = pcall(persist)
+  if not saved then attached.state.approvals[id] = nil; return nil, "Could not save action_grant" end
+  return AG.snapshot(id)
+end
+
+function AG.answer(ctx, id, verdict, who, event_id)
+  local rec = grant_record(id)
+  if not rec then return nil, "No such request." end
+  if verdict ~= "approve" and verdict ~= "deny" then return nil, "Invalid approval answer." end
+  if rec.status ~= "open" then return nil, "Already answered." end
+  if type(who) ~= "string" or who == "" or type(event_id) ~= "string" or event_id == "" then
+    return nil, "Owner evidence is required."
+  end
+  local t, why = live(ctx, rec)
+  if not t then return nil, "Expired: " .. why end
+  move(rec, verdict == "approve" and "approved" or "denied", t, { answered_by = who, answer_event_id = event_id,
+    answer_verdict = verdict, answered_at = utc(ctx) })
+  return AG.snapshot(id)
+end
+
+-- e is normalized synthetic evidence: proof_verified, live_observed, action, context, executor, tool_call_id.
+function AG.consume(ctx, id, e)
+  local rec = grant_record(id)
+  if not rec or rec.status ~= "approved" then return nil, "Not approved." end
+  local t, why = live(ctx, rec)
+  if not t then return nil, "Expired: " .. why end
+  if type(e) ~= "table" or e.proof_verified ~= true or e.live_observed ~= true
+      or not equal(rec.action, e.action) or not equal(rec.context, e.context)
+      or approval.same_incarnation(rec.executor, e.executor) ~= "same_proven"
+      or type(e.tool_call_id) ~= "string" or e.tool_call_id == "" then
+    return nil, "Consume evidence does not match."
+  end
+  move(rec, "consumed", t, { consumed_elapsed_ms = t, consumed_at = utc(ctx), tool_call_id = e.tool_call_id })
+  return AG.snapshot(id)
+end
+
+function AG.renew() return nil, "In-place renewal is refused; create a new record with lineage." end
+
+function AG.sweep(ctx)
+  local count = 0
+  for _, rec in pairs(attached and attached.state.approvals or {}) do
+    if type(rec) == "table" and rec.kind == "action_grant" and (rec.status == "open" or rec.status == "approved")
+        and not live(ctx, rec) then count = count + 1 end
+  end
+  return count
+end
+
+-- A death names a complete captured incarnation; only the exactly matching unused records end.
+function AG.on_death(ctx, incarnation)
+  local count, t = 0, observe(ctx)
+  for _, rec in pairs(attached and attached.state.approvals or {}) do
+    if type(rec) == "table" and rec.kind == "action_grant" and (rec.status == "open" or rec.status == "approved")
+        and approval.same_incarnation(rec.executor, incarnation) == "same_proven" then
+      expire(ctx, rec, "executor_exited", t)
+      count = count + 1
+    end
+  end
   return count
 end
 
