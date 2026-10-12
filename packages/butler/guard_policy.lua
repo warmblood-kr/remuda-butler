@@ -828,7 +828,7 @@ local function last_line(path)
   local offset = math.max(0, size - 65536)
   local positioned, position_error = f:seek("set", offset)
   if not positioned then f:close(); return nil, "cannot seek audit log: " .. tostring(position_error) end
-  local bytes, read_error = f:read("a")
+  local bytes, read_error = f:read("*a") -- also accepted by the standalone LuaJIT tests
   if bytes == nil then f:close(); return nil, "cannot read audit log: " .. tostring(read_error) end
   local closed, close_error = f:close()
   if closed == nil then return nil, "cannot close audit log: " .. tostring(close_error) end
@@ -866,7 +866,7 @@ local function build_line(record, prev)
   end
   -- grant_id names the grant that allowed the call (grant_used and grant_limited lines); every other hook line has -.
   line = line .. ',"grant_id":' .. remuda.json.encode(tostring(record.grant_id or "-"))
-  for _, key in ipairs({ "id", "hash" }) do
+  for _, key in ipairs({ "id", "hash", "instance_id", "dialog_id", "handler_version", "action" }) do
     if record[key] then line = line .. ',"' .. key .. '":' .. remuda.json.encode(tostring(record[key])) end
   end
   if prev then line = line .. ',"prev":' .. remuda.json.encode(prev) end
@@ -1046,7 +1046,8 @@ local KNOWN_EVENT = { PreToolUse = 1, PermissionRequest = 1, deny = 1, policy_er
   oversized = 1, unparsed = 1, switch = 1, caller_policy = 1, approval_requested = 1, approval_approved = 1,
   approval_denied = 1, approval_expired = 1, approval_failed = 1, approval_limited = 1, chain = 1, grant_created = 1,
   grant_refused = 1, grant_register_refused = 1, grant_revoked = 1, grant_revoke_unsaved = 1, grants_frozen = 1,
-  grants_unfrozen = 1, owner_line_refused = 1, grants_unfreeze_failed = 1, grant_used = 1, grant_limited = 1 }
+  grants_unfrozen = 1, owner_line_refused = 1, grants_unfreeze_failed = 1, grant_used = 1, grant_limited = 1,
+  dialog_blocked = 1, dialog_reported = 1, dialog_resolved = 1, dialog_action = 1, dialog_action_result = 1 }
 local TIME = "^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%dZ$"
 
 -- Call fn(line) for each line of f, or fn(nil) for one that is over the cap; memory stays bounded.

@@ -70,6 +70,12 @@ local codex_modal_markers = {
   "Trust this folder?",
 }
 remuda._butler_agent_startup.codex = {
+  -- No invented Codex denial/cache signatures: unfamiliar choices only.
+  blocking = {
+    { id = "unknown_choice", risk = "report", match = function(screen, probes)
+      return probes.unknown and probes.unknown(screen)
+    end },
+  },
   ready = function(screen)
     local lower = screen:lower()
     for _, marker in ipairs(codex_modal_markers) do

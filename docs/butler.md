@@ -748,8 +748,8 @@ stop when the mail is read or the recipient exits.
 The client session list leads each Butler session line with its status, read
 from the agent's own screen probes: `working`, `idle`, `needs you` (a trust,
 update or startup dialog) or `other` (no screen, an unreadable one, or a kind
-without reliable probes such as Monocle). The screen is captured at most once
-per session every 2 seconds and only the status word is shown, for example
+without reliable probes such as Monocle). Status-display captures are cached
+per session for 2 seconds and only the status word is shown, for example
 `idle · claude · opus · 123K · ✉2`.
 For Claude members, Claude Code hooks written into the member's settings file
 (UserPromptSubmit = `working`, Stop = `idle`, a permission or elicitation
@@ -759,6 +759,32 @@ internal `remuda butler status-hook`, which stores only that word and a time in
 `working` (a missing Stop means a crash or interrupt), an hour for `idle` and
 `needs you`; those two still yield to a screen that shows `working`. Otherwise
 the screen probe decides. Codex has no hooks yet and stays on the screen probe.
+
+Butler also checks managed Claude and Codex panes every second for unfamiliar
+boxed or numbered choice dialogs. The reporting-only dispatcher stops Butler
+input immediately, then reports `kind=unknown` to the member's leader after two
+matching captures. It reports once per stable signature and session instance;
+an ambiguous repaint keeps input stopped until a known ready or working screen
+appears. Capture or detector failure also stops input. This geometry check does
+not recognise every possible blocker and does not classify tool-result text,
+including Claude auto-mode denials. New semantic recognisers require an observed
+dialog-only fixture; no cache-invalidation or Codex denial signature is assumed.
+
+Existing launch trust, Codex update and Teach-auto-mode policies retain their
+handlers. Model/effort dialogs belong to the existing compaction handler only
+while that member owns the compaction operation. The dispatcher sends no new
+automatic keys and creates no owner approval or standing grant.
+
+Managed `key`, `type_text` and `send` calls append `dialog_action` to the private
+guard audit before input, even while guard observation is off. Failed audit
+writes refuse input. Butler rechecks the screen and session instance after the
+audit and records the returned outcome. The dispatcher does not retry an
+uncertain write. `guard stats` counts the `dialog_blocked`, `dialog_reported`,
+`dialog_resolved`, `dialog_action` and `dialog_action_result` events. Records carry
+session-instance and descriptor metadata without storing screens or prepared
+text. A root blocker uses the operator log instead of mailing itself. This
+program-layer gate does not prevent direct input from an attached owner or
+other core clients, and capture/recheck/write is not a core atomic transaction.
 Explicit Monocle launches use this argv: `monocle agent --workdir DIR --session NAME --auto-approve`;
 Butler adds `--model M` when specified.
 `--auto-approve` means the member runs with Monocle's own auto-approval. Butler
