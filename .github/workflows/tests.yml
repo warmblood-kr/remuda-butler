@@ -69,7 +69,8 @@ jobs:
       - name: Install Lua
         run: choco install lua --yes --no-progress
       - name: Run pure path tables
-        run: lua tests/lua/butler_path_test.lua
+        # The installer does not put lua on this step's PATH; call the known install path.
+        run: '& "C:\Program Files (x86)\Lua\5.1\lua.exe" tests/lua/butler_path_test.lua'
 
   contract:
     name: butler-contract
