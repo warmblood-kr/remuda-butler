@@ -1074,7 +1074,7 @@ local function ensure_root_permissions(kind)
         .. ": " .. table.concat(report.added, ", ") .. " (file rewritten: private, mode 600)")
     end
   end
-  remuda._butler_permission_report = { kind = kind, report = report }
+  remuda._butler_permission_report = { kind = kind, report = report, settings_path = settings_path }
 end
 -- True when the last permission step for this kind finished with nothing
 -- refused: the compaction schedule is armed only then.
