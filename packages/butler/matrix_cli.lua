@@ -30,6 +30,21 @@ local VERBS = {
   upload = true, redact = true, join = true, leave = true, ["mark-all"] = true,
 }
 
+local THREAD_CLI_SPEC = {
+  name = "remuda butler matrix",
+  options = {
+    { long = "room", value = "ROOM", help = "Room ID, alias or name (default: the configured room)", global = true },
+    { long = "json", help = "Print machine-readable JSON", global = true },
+  },
+  verbs = {
+    thread = {
+      about = "Show every reply in a Matrix thread",
+      args = { { name = "EVENT_ID", help = "Event that starts the thread, e.g. $abc123, or a Butler mail id (01M...)" } },
+      next = "remuda butler matrix reply EVENT_ID TEXT",
+    },
+  },
+}
+
 local MATRIX_CLI_SPEC = {
   name = "remuda butler matrix",
   options = {
@@ -892,7 +907,7 @@ function matrix.cli(args, agent, stdin_body, file_body)
     if plan.wizard then begin_wizard() else execute_setup(plan) end
     return reply
   end
-  local verb, options
+  local verb, options, legacy_verb, legacy_options
   local cli = remuda.cli
   local spec_report
   if type(cli) == "table" and type(cli.parse) == "function" then
@@ -906,12 +921,9 @@ function matrix.cli(args, agent, stdin_body, file_body)
     end
   end
   if type(cli) == "table" and type(cli.parse) == "function" and matrix_verb(args) == "thread" then
-    local report = spec_report
-    if not report then
-      local argv = {}
-      for at = 2, #args do argv[#argv + 1] = args[at] end
-      report = cli.parse(MATRIX_CLI_SPEC, argv)
-    end
+    local argv = {}
+    for at = 2, #args do argv[#argv + 1] = args[at] end
+    local report = cli.parse(THREAD_CLI_SPEC, argv)
     if not report.ok then
       if report.kind == "help" then return THREAD_HELP_TEXT end
       local text = report.text:gsub("\nNext: [^\n]*$", "\nNext: remuda butler matrix thread --help")
@@ -925,9 +937,18 @@ function matrix.cli(args, agent, stdin_body, file_body)
     }
   else
     verb, options = parsed_simple_request(spec_report)
-    if not verb then
-      local ok
-      ok, verb, options = pcall(parse, args)
+    local ok
+    ok, legacy_verb, legacy_options = pcall(parse, args)
+    -- The legacy parser is the accept/route authority: the spec result is kept only when it
+    -- is field-for-field the same request (root -n/-o, TERM, positional boundaries, spellings).
+    local same = ok and verb == legacy_verb and type(legacy_options) == "table"
+    if same then
+      for _, key in ipairs({ "json", "room", "n", "event_id", "public", "public_term", "output" }) do
+        if options[key] ~= legacy_options[key] then same = false; break end
+      end
+    end
+    if not same then
+      verb, options = legacy_verb, legacy_options
       if not ok then
         if type(remuda.fail) == "function" then return remuda.fail(tostring(verb), 2) end
         error(tostring(verb), 0)

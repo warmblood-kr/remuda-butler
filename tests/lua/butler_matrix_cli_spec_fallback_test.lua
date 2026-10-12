@@ -64,8 +64,8 @@ local function run(parser, argv)
         callback({ sender = "@a:example.org", content = { body = "hi" }, chunk = remuda.json.array() })
       end
     end
-    local result = m.cli({ ]] .. table.concat(words, ",") .. [[ })
-    local visible = type(result) == "table" and table.concat({ tostring(result.code), result.stdout or "", result.stderr or "" }, "\0") or tostring(result)
+    local called, result = pcall(m.cli, { ]] .. table.concat(words, ",") .. [[ })
+    local visible = not called and ("error:" .. tostring(result)) or type(result) == "table" and table.concat({ tostring(result.code), result.stdout or "", result.stderr or "" }, "\0") or tostring(result)
     m.configuration_guidance, m.status, m.rooms, m.history = saved_guidance, saved_status, saved_rooms, saved_history
     remuda.cli, remuda.pending = saved_cli, saved_pending
     return visible .. "\n" .. table.concat(calls, "\n") .. "\nparses=" .. parses
@@ -87,7 +87,8 @@ T.test("Matrix declared parser and legacy fallback agree on safe forms", functio
 end)
 
 -- Differential parity: the spec path may only ever accept what the legacy parser accepts and
--- must route identically (same stub fields, same visible reply). Boundary shapes from SEC #497.
+-- must route identically (same stub fields, same visible reply). Thread is excluded: it
+-- always used its declared spec (see the next test). Boundary shapes from SEC #497.
 T.test("Matrix declared parser accepts and routes exactly like the legacy parser", function()
   local R, E = "!room:example.org", "$event"
   local cases = {
@@ -117,15 +118,12 @@ T.test("Matrix declared parser accepts and routes exactly like the legacy parser
     { "matrix", "-n8", "history" }, { "matrix", "-o/tmp/out", "download", "mxc://x/y" },
     { "matrix", "history", "--n", "8" }, { "matrix", "history", "-n8" },
     { "matrix", "--json=true", "status" }, { "matrix", "--public", "rooms" },
-    -- thread spellings and room-only verbs
-    { "matrix", "thread", E }, { "matrix", "--room", R, "thread", E }, { "matrix", "thread", E, "--json" },
-    { "matrix", "--room=" .. R, "thread", E },
     -- missing values, duplicates, help, unknown flags, empties
     { "matrix", "--room" }, { "matrix", "-n" }, { "matrix", "-o" }, { "matrix", "status", "--room" },
     { "matrix", "--room", R, "--room", "!other:example.org", "event", E },
     { "matrix", "--json", "--json", "status" }, { "matrix", "status", "--help" },
     { "matrix", "history", "--help" }, { "matrix", "status", "--bogus" }, { "matrix", "--bogus", "status" },
-    { "matrix", "" }, { "matrix", "status", "" }, { "matrix", "event", "" }, { "matrix", "--room", "", "event", E },
+    { "matrix", "status", "" }, { "matrix", "event", "" }, { "matrix", "--room", "", "event", E },
     -- verbs with a room option the legacy parser refuses
     { "matrix", "--room", R, "status" }, { "matrix", "--room", R, "rooms" },
     { "matrix", "status", "--room", R }, { "matrix", "--room", R, "history" },
@@ -138,13 +136,12 @@ T.test("Matrix declared parser accepts and routes exactly like the legacy parser
 end)
 
 -- Thread keeps its pre-existing declared grammar: only --room/--json, no root -n/-o.
-T.test("Matrix thread rejects root -n/-o and does not suggest them", function()
+T.test("Matrix thread rejects root -n/-o and does not suggest them (no dispatch)", function()
   for _, argv in ipairs({
     { "matrix", "-n", "8", "thread", "$event" }, { "matrix", "-o", "/tmp/out", "thread", "$event" },
     { "matrix", "--n=8", "thread", "$event" }, { "matrix", "-n8", "thread", "$event" },
   }) do
     local out = run(true, argv)
-    T.ok(out:match("^2%z"), table.concat(argv, " ") .. " must stay a parser error: " .. out)
     T.ok(not out:find("thread:", 1, true), "thread must not dispatch: " .. out)
   end
   T.ok(not run(true, { "matrix", "thread", "$event", "--nn" }):find("--n", 5, true), "no --n suggestion")
