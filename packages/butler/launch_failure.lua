@@ -8,6 +8,7 @@ local function safe_kind(value)
 end
 
 local function next_step(kind, reason)
+  if reason == "model_rejected" then return "relaunch with --agent " .. kind .. " --model <supported-model>" end
   if reason == "login" then
     if kind == "claude" then return "claude auth login" end
     if kind == "codex" then return "codex login" end
@@ -20,6 +21,7 @@ local function next_step(kind, reason)
 end
 
 local function reason_text(reason)
+  if reason == "model_rejected" then return "the agent rejected its model" end
   if reason == "login" then return "not logged in" end
   if reason == "dialog" then return "stopped at a startup dialog" end
   if reason == "timeout" then return "did not become ready in time" end
