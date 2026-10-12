@@ -1,6 +1,6 @@
 -- remuda#606 item 2: a member that reports with --done is closed by the
 -- auto-close tick once its inbox is drained and its pane is idle, by its
--- parent through the normal close path. A plain report never closes.
+-- parent through the normal close path. A plain report creates no new request.
 local repo = assert(os.getenv("REMUDA_LUA_REPO"))
 local started
 
@@ -162,7 +162,7 @@ local function outcomes()
   ]=])
 end
 
-T.test("done reports auto-close once drained and idle; plain reports never", function()
+T.test("done reports auto-close once drained and idle; plain reports create no request", function()
   start_butler()
   T.eq(outcomes(), table.concat({
     "mcp-invalid-refused=true", "exit-clears-mark=true", "hook-mail-clears-mark=true",

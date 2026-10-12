@@ -153,8 +153,9 @@ already exited is closed without those two checks. The request belongs to the
 session that reported it: new mail to the member, the member's exit, a new
 session registered under the same name, a relaunch and a daemon restart all
 cancel it (the mark is kept in memory only), so a relaunched or replaced member
-must report `--done` again. A report without `--done` never closes anyone, and
-the root and leader-less rows are never closed this way.
+must report `--done` again. A report without `--done`, or an MCP report with
+`done: false` or `done` omitted, creates no new auto-close request and does not
+cancel an earlier request. The root and leader-less rows are never closed this way.
 
 ## The root AGENTS.md
 

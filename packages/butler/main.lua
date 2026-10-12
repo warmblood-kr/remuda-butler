@@ -631,6 +631,7 @@ function remuda._butler_report(from, text, done)
   if not agent then error("no Butler agent named " .. tostring(from), 0) end
   if not agent.parent then error("Butler agent " .. from .. " has no leader to report to", 0) end
   -- Marked before the report is sent, so mail a synchronous report hook sends back still cancels it.
+  -- false or omitted creates no new request and preserves any earlier done consent.
   local mark = done and done_mark(agent) or nil
   if mark then remuda._butler_done[from] = mark end
   local sent, queued = pcall(remuda._butler_send, from, agent.parent, text)
@@ -754,7 +755,7 @@ local send_to_leader = {
   name = "butler_send_to_leader",
   about = "Report a completed work loop to this team member's Butler leader. This also emits the live butler/report hook.",
   args = { text = "Concise result for the leader.",
-    done = "Set true when your task is finished: Butler closes you once your inbox is drained and you are idle." },
+    done = "Set true when your task is finished: Butler closes you once your inbox is drained and you are idle. False or omitted creates no new request and does not cancel an earlier one." },
   needs = { "text" },
   run = function(a, caller)
     local done = a.done
