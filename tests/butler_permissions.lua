@@ -327,6 +327,27 @@ end
 files = { ["/s/user.json"] = allow_broad,
   ["/s/project.json"] = '{"permissions":{"deny":["Bash(remuda butler send alice)"]}}' }
 ok("doctor: unrelated named deny keeps the candidate allow", multi("/s/user.json", "/s/project.json"):find("candidate allow pattern", 1, true))
+-- Wildcard deny/ask shapes that can intersect "remuda butler close <member>" block, in both source orders.
+for _, rule in ipairs({
+  "remuda * close alice", "remuda butler cl* alice", "*remuda butler close alice*", "remuda*butler*close*alice*",
+  "remuda butler close*alice", "remuda butler close a*", "remuda butler *", "remuda b* close *", "remuda *",
+  "remuda butler close alice --force", "remuda butler close alice:*", "remuda butler close:*",
+}) do
+  for _, key in ipairs({ "deny", "ask" }) do
+    files = { ["/s/user.json"] = allow_broad,
+      ["/s/project.json"] = '{"permissions":{"' .. key .. '":["Bash(' .. rule .. ')"]}}' }
+    ok("doctor: " .. key .. " Bash(" .. rule .. ") blocks", multi("/s/user.json", "/s/project.json"):find("under " .. key, 1, true))
+    ok("doctor: " .. key .. " Bash(" .. rule .. ") blocks, reversed", multi("/s/project.json", "/s/user.json"):find("under " .. key, 1, true))
+  end
+end
+for _, rule in ipairs({ "remuda butler send alice", "remuda butler send *", "git *", "remuda butler closet alice", "remuda sessions *" }) do
+  for _, key in ipairs({ "deny", "ask" }) do
+    files = { ["/s/user.json"] = allow_broad,
+      ["/s/project.json"] = '{"permissions":{"' .. key .. '":["Bash(' .. rule .. ')"]}}' }
+    ok("doctor: unrelated " .. key .. " Bash(" .. rule .. ") keeps candidate", multi("/s/user.json", "/s/project.json"):find("candidate allow pattern", 1, true))
+    ok("doctor: unrelated " .. key .. " Bash(" .. rule .. ") keeps candidate, reversed", multi("/s/project.json", "/s/user.json"):find("candidate allow pattern", 1, true))
+  end
+end
 files = { ["/s/user.json"] = '{"permissions":{"allow":["Bash(remuda butler close alice)"]}}' }
 ok("doctor: a member-specific allow is not a close-NAME allow", multi("/s/user.json"):find("no current allow", 1, true))
 io.open = function(path, mode)

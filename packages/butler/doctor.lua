@@ -205,9 +205,15 @@ local function permission_lines(report, kind, context)
     pattern = pattern:gsub(":%*$", " *")
     local escaped = pattern:gsub("([%^%$%(%)%%%.%[%]%+%-%?])", "%%%1"):gsub("%*", ".*")
     if ("remuda butler close NAME"):match("^" .. escaped .. "$") ~= nil then return true end
-    -- A deny/ask rule naming a specific member (`remuda butler close alice`) may cover the real
-    -- command even though it cannot match the NAME placeholder; treat it as covering.
-    return pattern:sub(1, #"remuda butler close ") == "remuda butler close " and not allow_scan
+    if allow_scan then return false end
+    -- Deny/ask: block when the rule and the family "remuda butler close *" can match a common
+    -- string (conservative glob intersection; family has one trailing wildcard). Only the literal
+    -- text before the rule's first `*` constrains it, and it must agree with the family prefix.
+    local family = "remuda butler close "
+    local star = pattern:find("*", 1, true)
+    local lit = star and pattern:sub(1, star - 1) or pattern
+    if star then return lit:sub(1, #family) == family:sub(1, #lit) end
+    return lit:sub(1, #family) == family
   end
   for _, source in ipairs(sources) do
     local file, why = io.open(source, "rb")
