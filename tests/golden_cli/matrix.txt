@@ -24,9 +24,9 @@ stack traceback:
 	(eval):5: in function <(eval):5>
 	[C]: in upvalue 'raw_pcall'
 	native/src/image.rs:978:12: in function 'pcall'
-	[string "packages/butler/matrix_cli.lua"]:<LINE>: in function <[string "packages/butler/matrix_cli.lua"]:540>
+	[string "packages/butler/matrix_cli.lua"]:<LINE>: in function <[string "packages/butler/matrix_cli.lua"]:<LINE>>
 	(...tail calls...)
-	[string "packages/butler/commands.lua"]:<LINE>: in function <[string "packages/butler/commands.lua"]:822>
+	[string "packages/butler/commands.lua"]:<LINE>: in function <[string "packages/butler/commands.lua"]:<LINE>>
 	(...tail calls...)
 
 actions:
@@ -48,9 +48,9 @@ stack traceback:
 	(eval):5: in function <(eval):5>
 	[C]: in upvalue 'raw_pcall'
 	native/src/image.rs:978:12: in function 'pcall'
-	[string "packages/butler/matrix_cli.lua"]:<LINE>: in function <[string "packages/butler/matrix_cli.lua"]:540>
+	[string "packages/butler/matrix_cli.lua"]:<LINE>: in function <[string "packages/butler/matrix_cli.lua"]:<LINE>>
 	(...tail calls...)
-	[string "packages/butler/commands.lua"]:<LINE>: in function <[string "packages/butler/commands.lua"]:822>
+	[string "packages/butler/commands.lua"]:<LINE>: in function <[string "packages/butler/commands.lua"]:<LINE>>
 	(...tail calls...)
 
 actions:
@@ -102,9 +102,9 @@ stack traceback:
 	(eval):7: in function <(eval):7>
 	[C]: in upvalue 'raw_pcall'
 	native/src/image.rs:978:12: in function 'pcall'
-	[string "packages/butler/matrix_cli.lua"]:<LINE>: in function <[string "packages/butler/matrix_cli.lua"]:540>
+	[string "packages/butler/matrix_cli.lua"]:<LINE>: in function <[string "packages/butler/matrix_cli.lua"]:<LINE>>
 	(...tail calls...)
-	[string "packages/butler/commands.lua"]:<LINE>: in function <[string "packages/butler/commands.lua"]:822>
+	[string "packages/butler/commands.lua"]:<LINE>: in function <[string "packages/butler/commands.lua"]:<LINE>>
 	(...tail calls...)
 
 actions:
