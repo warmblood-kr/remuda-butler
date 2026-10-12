@@ -294,7 +294,7 @@ T.test("inbox_id_opens_only_the_callers_own_messages", function()
     local foreign = remuda._butler_send("operator", "butler", "root only"):match("^queued (%S+)")
     local agent = remuda._butler_bus.agents.cx1
     local ok, refused = pcall(remuda._butler_command_run, "inbox", {"inbox", foreign},
-      { env = { REMUDA_BUTLER_AGENT_ID = agent.id } })
+      { kind = "session", session = agent.session_name })
     refused = tostring(refused)
     local help = tostring(remuda._butler_command_run("inbox", {"inbox", "--help"}, { env = {} }))
     return table.concat({tostring(refused:find("root only", 1, true) == nil), tostring(refused:find("Next:", 1, true) ~= nil),

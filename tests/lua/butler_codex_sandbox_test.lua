@@ -3,7 +3,8 @@ local function ev(code)
   -- "ok:<value>" or "err:<message>", so a refusal is data, not a harness failure.
   return T.eval("local ok, v = pcall(function() " .. code .. " end); return (ok and 'ok:' or 'err:') .. tostring(v)")
 end
-local function start_butler()
+-- `caller` (Lua source) is installed as remuda.caller and the mod reloaded: Butler captures the core's caller at load.
+local function start_butler(caller)
   T.install_mod("butler", assert(os.getenv("REMUDA_LUA_REPO")))
   T.eval('remuda._butler_argv = {"sh", "-c", "sleep 60"}; remuda._butler_skip_relay = true; remuda._butler_readiness_timeout = 1')
   T.eval('return remuda.exec("butler")')
@@ -11,6 +12,12 @@ local function start_butler()
     return T.eval('return remuda._butler_bus ~= nil and remuda._butler_bus.agents.butler ~= nil')
       :match("^%s*true%s*$") ~= nil
   end, 30, "Butler root start")
+  if caller then
+    local marker = "return tostring(remuda._butler_bus.agents.butler.session_start_marker)"
+    local before = T.eval(marker)
+    T.eval("remuda.caller = " .. caller .. "; remuda.reload('butler')")
+    T.wait_until(function() return T.eval(marker) ~= before end, 30, "Butler reload")
+  end
   T.eval("remuda._butler_codex_config_supported = true")
 end
 local function has(list_text, item) return list_text:find(item, 1, true) ~= nil end
@@ -62,8 +69,10 @@ T.test("profile validation refuses claude, relative and missing dirs", function(
 end)
 
 T.test("sandbox full is refused for agent callers with the owner command", function()
-  start_butler()
-  local agent = "{ env = { REMUDA_BUTLER_AGENT_ID = 'AGENT' } }"
+  start_butler("function() return { kind = 'session', session = 'x' } end") -- the library caller, captured at load
+  T.eval([[remuda._butler_bus.agents.AGENT = { id = "AGENT", alias = "AGENT", session_name = "agent-session",
+    children = {}, kind = "codex" }]])
+  local agent = "{ kind = 'session', session = 'agent-session' }"
   local r = ev("return remuda._butler_command_run('launch', {'launch','codex','w1','--sandbox','full'}, " .. agent .. ")")
   T.expect(r:find("remuda butler launch codex w1 --sandbox full", 1, true) and r:find("Next:", 1, true),
     "agent CLI call not refused with the owner command: " .. r, "ok - CLI agent caller gets the owner command")
@@ -71,11 +80,60 @@ T.test("sandbox full is refused for agent callers with the owner command", funct
   T.expect(r:find("remuda butler topic delegate t1 --agent codex --sandbox full", 1, true),
     "delegate not refused with the owner command: " .. r, "ok - delegate agent caller gets the owner command")
   -- Library entry points (run_script) are refused when the core says the caller is a session.
-  T.eval("remuda.caller = function() return { kind = 'session', session = 'x' } end")
   r = ev("return remuda._butler_launch('codex', 'w2', nil, 'butler', { sandbox = 'full' })")
   T.expect(r:find("^err:") and r:find("remuda butler launch codex w2 --sandbox full", 1, true),
     "library caller not refused: " .. r, "ok - session caller of _butler_launch is refused")
   T.eval("remuda.caller = nil")
+end)
+
+-- #474 item 1: full access needs a captured caller proven to be a person (kind == outside).
+local FULL_REFUSAL = "only by a person at a terminal"
+T.test("sandbox full is refused unless the load-time caller is a person", function()
+  local cases = {
+    { "raising", "function() error('caller unavailable', 0) end" },
+    { "absent", "nil" },
+    { "non-table", "function() return 'outside' end" },
+    { "service", "function() return { kind = 'service', service = 'timer' } end" },
+    { "unknown kind", "function() return { kind = '' } end" },
+  }
+  for i, case in ipairs(cases) do
+    start_butler(case[2])
+    local lib = ev("return remuda._butler_launch('codex', 'f" .. i .. "', nil, 'butler', { sandbox = 'full' })")
+    T.expect(lib:find("^err:") and lib:find(FULL_REFUSAL, 1, true), case[1] .. " caller reached _butler_launch full: " .. lib,
+      "ok - " .. case[1] .. " caller: _butler_launch refuses full")
+    local raw = ev("return remuda._butler_launch_impl.launch_agent('codex', 'g" .. i .. "', nil, nil, 'butler', nil, nil, nil, { sandbox = 'full' })")
+    T.expect(raw:find("^err:") and raw:find(FULL_REFUSAL, 1, true), case[1] .. " caller reached raw launch_agent full: " .. raw,
+      "ok - " .. case[1] .. " caller: raw launch_agent refuses full")
+    local del = ev("return remuda._butler_topic_delegate('t" .. i .. "', 'task', nil, 'codex', 'butler', nil, nil, { sandbox = 'full' })")
+    T.expect(del:find("^err:") and del:find(FULL_REFUSAL, 1, true), case[1] .. " caller reached topic delegate full: " .. del,
+      "ok - " .. case[1] .. " caller: topic delegate refuses full")
+  end
+end)
+
+T.test("sandbox full is allowed for a load-time person and a non-full profile is unaffected", function()
+  start_butler("function() return { kind = 'outside' } end")
+  T.eval([[remuda._butler_agent_builders.codex = function(spec)
+    return { "sh", "-c", "sleep 60" }
+  end]])
+  local r = ev("return remuda._butler_launch('codex', 'own1', nil, 'butler', { sandbox = 'full' })")
+  T.expect(not r:find(FULL_REFUSAL, 1, true), "owner refused full: " .. r, "ok - an outside caller may launch full")
+  T.wait_until(function() return T.eval("return tostring(remuda._butler_bus.agents.own1 ~= nil)") == "true" end, 60, "own1 row")
+  T.eq(T.eval("return tostring(remuda._butler_bus.agents.own1.sandbox)"), "full", "owner row lost the full profile")
+  -- member (session) callers keep today's behavior: refused full, plain launches untouched
+  start_butler("function() return { kind = 'session', session = 'x' } end")
+  r = ev("return remuda._butler_launch('codex', 'mem1', nil, 'butler', { sandbox = 'full' })")
+  T.expect(r:find("^err:") and r:find(FULL_REFUSAL, 1, true), "member reached full: " .. r, "ok - a session caller is still refused")
+  local dir = T.eval("local d = os.getenv('XDG_DATA_HOME') .. '/sbx-mem'; remuda.mkdir(d); return d")
+  r = ev("return remuda._butler_launch('codex', 'mem2', nil, 'butler', { writable = { '" .. dir .. "' } })")
+  T.expect(r:find("^ok:"), "a session caller lost the non-full profile: " .. r, "ok - a non-full profile never meets the full gate")
+end)
+
+-- #474 item 5: with a person captured at load, only the missing grant stops a full relaunch.
+T.test("an ungranted full relaunch is refused even for a load-time person", function()
+  start_butler("function() return { kind = 'outside' } end")
+  local r = ev("return remuda._butler_launch_impl.launch_agent('codex', 'rl1', nil, nil, 'butler', nil, 'ID-RL', nil, { sandbox = 'full' })")
+  T.expect(r:find("^err:") and r:find(FULL_REFUSAL, 1, true), "ungranted relaunch accepted: " .. r,
+    "ok - a relaunch without a grant is refused although the caller is a person")
 end)
 
 T.test("profile is recorded, shown, and re-applied on relaunch", function()
@@ -126,8 +184,7 @@ T.test("credential and Butler state directories are refused as writable roots", 
 end)
 
 T.test("launch_agent itself gates full access and re-checks a relaunch profile", function()
-  start_butler()
-  T.eval("remuda.caller = function() return { kind = 'session', session = 'x' } end")
+  start_butler("function() return { kind = 'session', session = 'x' } end")
   local r = ev("return remuda._butler_launch_impl.launch_agent('codex', 'raw1', nil, nil, 'butler', nil, nil, nil, { sandbox = 'full' })")
   T.expect(r:find("^err:") and r:find("only by a person at a terminal", 1, true), "raw launcher not gated: " .. r,
     "ok - the raw launcher refuses full for a session caller")

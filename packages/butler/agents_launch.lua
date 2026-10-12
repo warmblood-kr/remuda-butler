@@ -43,7 +43,9 @@ end
 -- allowlist with no escape/UTF-8 interpretation: row 1 only, at most its first 240 bytes. Plain printable ASCII
 -- is kept (cut at 80 characters, right-trimmed); anything else becomes a fixed placeholder holding no row bytes.
 local function sanitize_row(text)
-  local head = tostring(text == nil and "" or text):sub(1, 240)
+  local printed, value = pcall(tostring, text == nil and "" or text)
+  if not printed or type(value) ~= "string" then return "<unprintable>" end
+  local head = value:sub(1, 240)
   local stop = head:find("[\r\n]")
   if stop then head = head:sub(1, stop - 1) end
   if not head:find("[^ ]") then return "<empty first row>" end
@@ -54,6 +56,19 @@ local function sanitize_row(text)
   return head:sub(1, last)
 end
 local screen_detail = sanitize_row
+-- These are agent error rows, not arbitrary occurrences of "model" in a prompt.
+local function model_rejection(screen)
+  for line in (tostring(screen or "") .. "\n"):gmatch("(.-)\n") do
+    local lower = line:lower():gsub("^%s+", "")
+    local error_row = lower:match("^the [\"']") or lower:match("^error:")
+      or lower:match("^api error:") or lower:match("^■")
+    if error_row and lower:find("model", 1, true)
+        and (lower:find("not supported", 1, true) or lower:find("does not exist", 1, true)
+          or lower:find("model_not_found", 1, true)) then
+      return sanitize_row(line)
+    end
+  end
+end
 local function readiness_timeout()
   local configured = tonumber(remuda._butler_readiness_timeout or os.getenv("REMUDA_BUTLER_READINESS_TIMEOUT"))
   if configured and configured > 0 then return configured end
@@ -61,13 +76,13 @@ local function readiness_timeout()
 end
 -- main.lua assigns startup_action_safe with the notice policy; read it late.
 local startup_action_safe = config.startup_action_safe
-local trust_modal_state, trust_plan, trust_path_matches, TRUST_AFFIRMATIVE
+local trust_modal_state, trust_plan, trust_path_matches, TRUST_AFFIRMATIVE, choice_modal_present
 local claude_workspace_path
 -- The one generic launch chooser serves Butler and every managed member. Kinds
 -- are lifecycle contributions; the chooser only reads their data and callbacks.
 -- Member launches must not hold the daemon image while an agent paints its
 -- first prompt. This scheduler advances one candidate at a time and invokes
--- `done(name, kind, attempts)` when a candidate is ready or the chain ends.
+-- `done(name, kind, attempts, instance_id)` when a candidate is ready or the chain ends.
 local function choose(candidates, opts, done)
   local attempts, index, state, schedule = {}, 0, nil, nil
   local lifecycle = remuda._butler_state or remuda._butler_compaction_state or {}
@@ -77,16 +92,30 @@ local function choose(candidates, opts, done)
   local chooser_record = { id = chooser_id, name = opts.name }
   lifecycle.active_choosers[chooser_id] = chooser_record
   local cancelled = false
+  -- With an id, a row counts only when it is that instance: the same name under another id is a replacement.
+  local function alive(name, id)
+    for _, row in ipairs(remuda.ls()) do
+      if row.name == name and row.alive and (not id or row.instance_id == id) then return true end
+    end
+    return false
+  end
+  local function replaced(name, id)
+    if not id then return false end
+    local ok, rows = pcall(remuda.ls)
+    for _, row in ipairs(ok and type(rows) == "table" and rows or {}) do
+      if row.name == name and row.alive and row.instance_id ~= id then return true end
+    end
+    return false
+  end
   local function callback(name, kind)
     if cancelled then return end
     if schedule then remuda.cancel(schedule); schedule = nil end
     chooser_record.ready = name ~= nil
     lifecycle.active_choosers[chooser_id] = nil
-    done(name, kind, attempts)
-  end
-  local function alive(name)
-    for _, row in ipairs(remuda.ls()) do if row.name == name and row.alive then return true end end
-    return false
+    -- Only the candidate that reached ready supplies its returned id; a live row of another id means no binding.
+    local instance_id = name and state and state.name == name and state.instance_id or nil
+    if replaced(name, instance_id) then instance_id = nil end
+    done(name, kind, attempts, instance_id)
   end
   local by_id = {}
   for _, row in ipairs(contributions("butler.agent")) do by_id[row.id] = row.entry end
@@ -101,7 +130,9 @@ local function choose(candidates, opts, done)
   local function fail_candidate(reason, detail)
     local current = state
     current.attempt.reason, current.attempt.detail = reason, detail
-    local ok, err = pcall(remuda.close, current.name)
+    -- close is name-based in core: never close a replacement that took the name.
+    local ok, err = true, nil
+    if not replaced(current.name, current.instance_id) then ok, err = pcall(remuda.close, current.name) end
     current.closing, current.close_error, current.close_ticks = true, ok and nil or err, 0
   end
   local function start_next()
@@ -142,12 +173,15 @@ local function choose(candidates, opts, done)
       end
       if type(argv) == "table" and argv[1] == executable then argv[1] = found end
     end
-    local ok, name = pcall(remuda.new, opts.name, argv, opts.cwd, opts.env(id, spec))
+    local ok, name, instance_id = pcall(remuda.new, opts.name, argv, opts.cwd, opts.env(id, spec))
     if not ok then
       attempt.reason, attempt.detail = "spawn_error", one_line(name)
       start_next(); return
     end
+    if type(instance_id) ~= "string" or instance_id == "" then instance_id = nil end
+    attempt.instance_id = instance_id
     state = { id = id, entry = entry, attempt = attempt, name = name,
+      instance_id = instance_id,
       started = os.time(), timeout = opts.timeout or readiness_timeout(),
       handled = {}, last_screen = "<empty first row>", last_screen_blank = true, dialog_seen = nil }
     local test_builder = remuda._butler_agent_builders[id]
@@ -163,7 +197,7 @@ local function choose(candidates, opts, done)
     if not state then return end
     if state.closing then
       state.close_ticks = state.close_ticks + 1
-      if not alive(state.name) then
+      if not alive(state.name, state.instance_id) then
         state = nil; start_next()
       elseif state.close_ticks >= 10 then
         state.attempt.reason = "spawn_error"
@@ -173,7 +207,7 @@ local function choose(candidates, opts, done)
       end
       return
     end
-    if not alive(state.name) then fail_candidate("exited", "session exited before prompt became ready"); return end
+    if not alive(state.name, state.instance_id) then fail_candidate("exited", "session exited before prompt became ready"); return end
     local captured, screen = pcall(remuda.capture, state.name)
     if not captured then
       state.last_capture_error = sanitize_row(screen)
@@ -183,6 +217,8 @@ local function choose(candidates, opts, done)
     state.last_screen = screen_detail(screen)
     state.last_screen_blank = screen:find("%S") == nil
     local entry, id = state.entry, state.id
+    local rejected = model_rejection(screen)
+    if rejected then fail_candidate("model_rejected", rejected); return end
     -- Authentication screens can still contain a prompt glyph; classify
     -- login before readiness so expired credentials never look usable.
     for _, pattern in ipairs(entry.login or {}) do
@@ -196,10 +232,21 @@ local function choose(candidates, opts, done)
       local tested, decision = pcall(remuda._butler_prompt_is_empty, id, screen); ready = tested and decision == "EMPTY"
     end
     if not ready and (screen:match("\n%s*❯%s*$") or screen:match("\n%s*>%s*$") or screen:match("\n%s*›%s*$")) then ready = true end
-    if ready then state.attempt.reason, state.attempt.session = "ready", state.name; callback(state.name, id); return end
     local dialogs = type(entry.dialogs) == "function" and select(2, call_callback(entry.dialogs)) or entry.dialogs or {}
+    -- A titled modal can paint the idle composer beneath it: never ready while it is up.
+    for _, dialog in ipairs(dialogs) do
+      if ready and dialog.title and choice_modal_present(dialog, screen) then ready = false end
+    end
+    if ready then state.attempt.reason, state.attempt.session = "ready", state.name; callback(state.name, id); return end
     local known = false
-    for dialog_index, dialog in ipairs(dialogs) do
+    -- Detect + defer only, BEFORE any handler (trust included) can send a key.
+    state.deferred_by_fragment = nil
+    for _, dialog in ipairs(dialogs) do
+      if dialog.title and choice_modal_present(dialog, screen) then
+        known, state.dialog_seen, state.deferred_by_fragment = true, dialog.title, true
+      end
+    end
+    for dialog_index, dialog in ipairs(known and {} or dialogs) do
       local lower_screen = screen:lower()
       local trust_state = dialog.trust and trust_modal_state(dialog, screen) or nil
       -- Topic and eligible launches must show the launch cwd; an unreadable path fails closed.
@@ -311,7 +358,8 @@ local function choose(candidates, opts, done)
         callback(state.name, state.id)
         return
       end
-      local prefix = state.dialog_seen and ("dialog remained after its handler: " .. state.dialog_seen .. "; ") or ""
+      local prefix = state.dialog_seen and ((state.deferred_by_fragment and "deferred, never answered (Teach modal on screen): "
+        or "dialog remained after its handler: ") .. state.dialog_seen .. "; ") or ""
       local capture_error = state.last_capture_error and ("; last capture error: " .. state.last_capture_error) or ""
       fail_candidate(state.dialog_seen and "dialog" or "timeout", prefix
         .. "readiness prompt not observed within " .. tostring(state.timeout)
@@ -322,7 +370,7 @@ local function choose(candidates, opts, done)
   schedule = remuda.schedule({ every = 0.2, run = function()
     local ok, err = pcall(tick)
     if not ok then
-      if state and state.name then fail_candidate("spawn_error", tostring(err))
+      if state and state.name then fail_candidate("spawn_error", sanitize_row(err))
       else callback(nil, nil) end
     end
   end })
@@ -333,7 +381,7 @@ local function choose(candidates, opts, done)
     if schedule then pcall(remuda.cancel, schedule); schedule = nil end
     if state and not chooser_record.ready then
       local name = state.name
-      if name and alive(name) then pcall(remuda.close, name) end
+      if name and alive(name, state.instance_id) then pcall(remuda.close, name) end
       state = nil
     end
     if opts.name == "butler" then
@@ -344,6 +392,14 @@ local function choose(candidates, opts, done)
   end
   start_next()
   return attempts
+end
+-- Is the row NAME still alive AND the instance the spawn returned? (An ls failure counts as not alive.)
+local function instance_live(name, id)
+  local ok, rows = pcall(remuda.ls)
+  for _, row in ipairs(ok and type(rows) == "table" and rows or {}) do
+    if row.name == name and row.alive and row.instance_id == id then return true end
+  end
+  return false
 end
 remuda._butler_choose = choose
 remuda._butler_choose_async = choose
@@ -444,10 +500,11 @@ re-run the command requesting escalated permissions.
   end })
 remuda._butler_contribute("butler.guidance", "old-core", { order = 30,
   agents_md = function()
-    return [[If `inbox` says "no Butler identity in your env", your Remuda core predates
-caller-env forwarding: pass your id (`remuda butler inbox
-$REMUDA_BUTLER_AGENT_ID`) or use the MCP `butler_*` tools. On such a core,
-`send` is attributed to "operator" rather than to you.
+    return [[CLI identity comes from the daemon's caller session, never environment variables.
+If Butler cannot identify the caller, run from a registered Butler session or
+upgrade Remuda core. Older cores without caller fields refuse CLI member actions;
+use the MCP `butler_*` tools with the session's configured capability instead.
+Caller attribution is advisory within one user account, not an isolation boundary.
 
 ]]
   end })
@@ -630,10 +687,26 @@ trust_modal_state = function(modal, screen)
   end
   return plan.selected and "safe_selected" or "safe"
 end
+-- A titled choice modal (Claude "Teach auto mode ..."): DETECTION ONLY, never answered.
+-- Quoted, drafted, partial or wrapped title text counts, so first-task delivery defers. Text is lowercased with punctuation/whitespace/borders
+-- collapsed so a wrapped title still matches. The title alone suffices; option text counts
+-- only with the title or the context phrase in the same capture (lone "Not now" is not it).
+local function fold(text) return " " .. tostring(text):lower():gsub("[^%w]+", " ") .. " " end
+choice_modal_present = function(modal, screen)
+  local folded = fold(screen)
+  if folded:find(fold(modal.title), 1, true) then return true end
+  if not folded:find(fold(modal.context), 1, true) then return false end
+  for _, option in ipairs(modal.options) do
+    if folded:find(fold(option), 1, true) then return true end
+  end
+  return false
+end
 local function startup_modal(startup, screen)
   local lower = tostring(screen or ""):lower()
   for _, modal in ipairs(startup.modals or {}) do
-    if modal.trust then
+    if modal.title then
+      if choice_modal_present(modal, screen) then return modal end
+    elseif modal.trust then
       if trust_modal_state(modal, screen) ~= "absent" then return modal end
     elseif modal.match and lower:find(modal.match:lower(), 1, true) then
       return modal
@@ -732,6 +805,7 @@ remuda._butler_chooser = {
   trust_modal_state = trust_modal_state, trust_plan = trust_plan, trust_eligible = trust_eligible,
   trust_path_matches = trust_path_matches,
   choose = choose,
+  instance_live = instance_live,
   configured_agent_order = configured_agent_order,
   readiness_chain_budget = readiness_chain_budget,
   setup_telemetry = setup_telemetry,
@@ -746,4 +820,5 @@ remuda._butler_chooser = {
   known_startup_modal = known_startup_modal,
   codex_update_complete = codex_update_complete,
   capture_update_evidence = capture_update_evidence,
+  model_rejection = model_rejection,
 }

@@ -19,6 +19,8 @@ local function start_butler()
     return T.eval('return remuda._butler_bus ~= nil and remuda._butler_bus.agents.butler ~= nil')
       :match("^%s*true%s*$") ~= nil
   end, 10, "Butler root start")
+  T.eval([[remuda._butler_bus.agents["agent-test"] = { id = "agent-test", alias = "agent-test",
+    session_name = "agent-test", children = {}, kind = "codex" }]])
   -- One shared action log: every stub appends "name(arg|arg)".
   T.eval([[
     remuda._pr0_log = {}
@@ -44,7 +46,7 @@ local function normalize(text)
 end
 
 -- A case is an argv array, or { argv = {...}, as = "agent", pre = lua, post = lua }.
--- `as = "agent"` calls the Butler front door in-process with an agent caller env.
+-- `as = "agent"` calls the Butler front door in-process with a daemon session caller.
 local function run_case(case, trace)
   local argv = case.argv or case
   T.eval("remuda._pr0_log = {}")
@@ -76,7 +78,7 @@ local function run_case(case, trace)
       local real_fail = remuda.fail
       remuda.fail = function(text, code) return { failed = true, code = code, text = text } end
       local ok, value = pcall(remuda._extension_commands.butler, { ]] .. table.concat(words, ",") .. [[ },
-        { env = { REMUDA_BUTLER_AGENT_ID = "agent-test" } })
+        { kind = "session", session = "agent-test" })
       remuda.fail = real_fail
       if not ok then return "1\0\0" .. tostring(value) end
       if type(value) == "table" and value.failed then return tostring(value.code) .. "\0\0" .. tostring(value.text) end
@@ -272,8 +274,8 @@ families {
       { argv = { "quota", "--bogus" }, pre = [[remuda._pr0_q = remuda._butler_quota; remuda._butler_quota = nil]], post = [[remuda._butler_quota = remuda._pr0_q]] }) },
   { name = "close",
     setup = [[
-      remuda._butler_bus.agents.worker = { id = "01SYNTHETICWORKER000000000", parent = "butler", session_name = "worker" }
-      remuda._butler_bus.agents.other = { id = "01SYNTHETICOTHER00000000000", parent = "worker", session_name = "other" }
+      remuda._butler_bus.agents.worker = { id = "01SYNTHETICWORKER000000000", parent = "butler", parent_id = remuda._butler_bus.agents.butler.id, session_name = "worker" }
+      remuda._butler_bus.agents.other = { id = "01SYNTHETICOTHER00000000000", parent = "worker", parent_id = "01SYNTHETICWORKER000000000", session_name = "other" }
       remuda.close = function(...) remuda._pr0_note("close", ...); return true end
       remuda.butler.is_idle = function() return false, "busy" end -- deterministic: do not depend on the real is_idle for a fake session
     ]],

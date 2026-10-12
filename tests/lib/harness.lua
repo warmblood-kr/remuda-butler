@@ -64,7 +64,11 @@ function T.expect(value, message, success_message)
   return value
 end
 
+-- Daemon-side helper for fake session snapshots: the instance id the roster bound for SESSION (nil when unbound).
+-- A snapshot built by a fixture carries it the way the core's snapshot does: `{ kind = 'session', session = s, instance_id = _inst(s) }`.
+local INST = "local function _inst(s) for _, a in pairs((remuda._butler_bus or {}).agents or {}) do if type(a) == 'table' and a.session_name == s then return a.instance_id end end end "
 function T.eval(code)
+  code = INST .. code
   if T.guard_subject then code = T.guard_subject.wrap(code, T.guard_subject_dir) end
   -- The CLI appends one newline to the value it prints; the value itself has none.
   return (remote(code):gsub("\n$", ""))
@@ -81,6 +85,22 @@ function T.mcp_eval(code)
   local reply = remuda_api.json.decode(result.stdout)
   assert(reply.result and not reply.result.isError, result.stdout)
   return reply.result.content[1].text
+end
+
+function T.mcp_call(name, arguments, capability)
+  arguments = arguments or {}
+  if next(arguments) == nil then arguments = remuda_api.json.object(arguments) end
+  local options = {
+    argv = { exe, "-s", child_server, "mcp" }, timeout = 10,
+    stdin = remuda_api.json.encode { jsonrpc = "2.0", id = 431, method = "tools/call",
+      params = { name = name, arguments = arguments } } .. "\n",
+  }
+  if capability then options.env = { REMUDA_SESSION_CAPABILITY = capability } end
+  local result = process.run(options)
+  assert(not result.timed_out and result.code == 0, tostring(result.stderr or result.stdout))
+  local reply = remuda_api.json.decode(result.stdout)
+  assert(reply.result or reply.error, result.stdout)
+  return reply
 end
 
 local function copy_tree(source, destination)

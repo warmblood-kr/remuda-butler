@@ -98,5 +98,10 @@ remuda._butler_agent_startup.claude = {
   clear_input = "C-u",
   modals = {
     { trust = "claude", pending_match = "Quick safety check:" }, -- option chosen by its text
+    -- Detect + defer only (never answered): the title (or option text with title/context) on screen holds the first task.
+    -- The TITLE keys detection; option text counts only together with the title or the
+    -- "about your environment" context (a lone "Not now" is ordinary text).
+    { title = "Teach auto mode", context = "about your environment",
+      options = { "Not now", "Don't show again" } },
   },
 }

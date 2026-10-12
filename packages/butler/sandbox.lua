@@ -2,6 +2,10 @@
 -- roots and `sandbox == "full"` (no sandbox). A profile is {sandbox=, writable=}
 -- and travels with the member row so a relaunch re-applies it.
 local sandbox = {}
+-- The core's caller as captured when caller_principal loaded (never a later remuda.caller); nil when unavailable.
+-- A direct load without Butler's main has no principal: no caller, so no agent (the unavailable-caller policy).
+local principal = remuda._butler_caller_principal
+local core_caller = principal and principal.core_caller or function() return nil end
 
 local function shell_quote(value)
   return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
@@ -146,11 +150,13 @@ function sandbox.refuse_full(command)
     .. "Next: ask the owner to run: " .. command, 0)
 end
 
--- A Butler agent session (the root included) is never a human at a terminal.
+-- Full access needs proof of a person at a terminal: the caller captured at load must be a table of
+-- kind "outside". Anything else (a session, a service, unavailable or raising) is refused, so a core
+-- without remuda.caller cannot grant full access to library/raw entry points (#474). The name is kept
+-- for the three call sites; read it as "not proven a person".
 function sandbox.caller_is_agent()
-  if type(remuda.caller) ~= "function" then return false end
-  local ok, caller = pcall(remuda.caller)
-  return ok and type(caller) == "table" and caller.kind == "session"
+  local caller = core_caller()
+  return not (type(caller) == "table" and caller.kind == "outside")
 end
 
 remuda._butler_sandbox = sandbox

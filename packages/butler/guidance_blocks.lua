@@ -43,6 +43,7 @@ leader, when you have one, is `REMUDA_BUTLER_LEADER_ID`. Use the short forms:
 `remuda butler send FROM TO MESSAGE...` is an operator form for sending on
 behalf of another session. Do not use it for ordinary team communication.
 ]==],
+  -- Legacy guidance below is matched verbatim for migration, never emitted.
   -- plus caller-env forwarding and the member list
   [==[# Butler
 
@@ -106,6 +107,32 @@ leader, when you have one, is `REMUDA_BUTLER_LEADER_ID`. Use the short forms:
 - `remuda butler send MEMBER "MESSAGE"` to direct a member; your sender is inferred.
 - `remuda butler send-to-leader MESSAGE...` to report a completed work loop.
 - For long bodies, write the text to a file and use `remuda butler send MEMBER --file "$PWD/path"`,
+  or pipe it: `cat <<'EOF' | remuda butler send MEMBER -`. `send-to-leader` and `reply MESSAGE_ID`
+  accept those forms too. The limit is 64 KiB.
+
+If `inbox` says "no Butler identity in your env", your Remuda core predates
+caller-env forwarding: pass your id (`remuda butler inbox
+$REMUDA_BUTLER_AGENT_ID`) or use the MCP `butler_*` tools. On such a core,
+`send` is attributed to "operator" rather than to you.
+
+`remuda butler send FROM TO MESSAGE...` is an operator form for sending on
+behalf of another session. Do not use it for ordinary team communication.
+]==],
+  -- Former root guidance: retained verbatim only to recognize and migrate old files.
+  [==[# Butler
+
+You are Butler, manager of this household. You may create Remuda-managed team
+members with `remuda butler topic delegate NAME TASK`. Internal agent
+subagents are separate from Butler team members.
+
+Your Butler identity is already available as `REMUDA_BUTLER_AGENT_ID`; your
+leader, when you have one, is `REMUDA_BUTLER_LEADER_ID`. Use the short forms:
+
+- `remuda butler sessions` to inspect the household.
+- `remuda butler inbox` to read your own inbox.
+- `remuda butler send MEMBER "MESSAGE"` to direct a member; your sender is inferred.
+- `remuda butler send-to-leader MESSAGE...` to report a completed work loop.
+- For long bodies, write the text to a file inside your working directory and use `remuda butler send MEMBER --file "$PWD/path"`,
   or pipe it: `cat <<'EOF' | remuda butler send MEMBER -`. `send-to-leader` and `reply MESSAGE_ID`
   accept those forms too. The limit is 64 KiB.
 

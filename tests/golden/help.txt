@@ -21,7 +21,8 @@ remuda butler — coordination for managed agents
   remuda butler topic delegate <name> [--agent A] [--leader L] [--model M] [--cwd DIR] [--writable DIR]... [--sandbox full] <task...>
   remuda butler send <to> "<message>" | <to> - | <to> --file PATH
   remuda butler send <from> <to> <message...> | <from> <to> - | <from> <to> --file PATH
-  remuda butler send-to-leader <message...> | - | --file PATH
+  remuda butler send-to-leader [--done] <message...> | - | --file PATH
+  Without --done, creates no new auto-close request and keeps an earlier one.
   To send text that starts with -, put -- first: remuda butler send-to-leader -- -text
   remuda butler inbox [name]
   remuda butler reply <message-id> <message...> | - | --file PATH
@@ -48,11 +49,13 @@ remuda butler — coordination for managed agents
 
 Agent sessions receive REMUDA_BUTLER_AGENT_ID and REMUDA_BUTLER_LEADER_ID.
 In an agent session, use `inbox`, `send <to> "..."`, and `send-to-leader ...`;
-the identity comes from the caller's environment. For a long message, use
+the identity comes from the daemon's registered caller session. For a long message, use
 `cat <<'EOF' | remuda butler send MEMBER -` or `--file "$PWD/path"`; `reply` accepts
-the same forms. Bodies are limited to 64 KiB. Without a forwarded Butler
-identity (a plain shell, or a core that does not forward the caller's env),
-`send` is from "operator" and `inbox` needs a name (`inbox <name>`).
+the same forms. Bodies are limited to 64 KiB. An outside caller uses the audited
+transitional operator policy: `send` is from "operator" and `inbox` needs a name.
+Unknown callers and older cores without caller fields refuse member actions;
+run from a registered Butler session or upgrade core. Environment variables never
+select CLI identity. Caller attribution is advisory, not an isolation boundary.
 `reply` answers a message's original sender, even when it was forwarded to you;
 `forward` re-delivers a message you received, keeping its sender, with a note.
 `reply <message-id> --attach PATH` posts a file into that Matrix message's thread.
