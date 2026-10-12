@@ -1,0 +1,8 @@
+Earlier startup output:
+Update available · 0.156.0 → 0.157.1
+
+Choose a display color
+› 1. Blue
+  2. Green
+  3. Red
+Enter to confirm

@@ -64,12 +64,52 @@ local function report(name, agent, alias, state)
   end
 end
 
-local function legacy_owned(agent, screen)
+local function startup_owned(name, agent, screen, signature)
   local startup = (remuda._butler_agent_startup or {})[agent.kind] or {}
   local chooser = remuda._butler_chooser
-  if chooser and chooser.known_startup_modal and chooser.known_startup_modal(startup, screen) then
-    return true -- existing conditional trust/update/Teach policy, unchanged
+  local delivery = (bus.first_task_delivery or {})[name]
+  local update = (bus.codex_update_relaunches or {})[name]
+  local owned = (bus.pending_tasks or {})[name] and delivery and delivery.state == 'waiting'
+    and delivery.marker ~= nil and delivery.marker == agent.session_start_marker
+  owned = owned or (type(update) == 'table' and update.identity == agent.id)
+  if not owned or not chooser or not chooser.startup_modal then return false end
+  -- Broad historical markers are suitable for startup deferral, not input
+  -- authorization. Match the current geometry and validate its option labels.
+  local current = signature or screen
+  local modal = chooser.startup_modal(startup, current)
+  local full = chooser.startup_modal(startup, screen)
+  local trust_modal = modal and modal.trust and modal or full and full.trust and full
+  if trust_modal then
+    local trust = chooser.trust_modal_state(trust_modal, screen)
+    local plan = chooser.trust_plan(trust_modal, current)
+    return plan ~= nil and (trust == 'safe' or trust == 'safe_selected')
   end
+  local labels = {}
+  for line in (current .. '\n'):gmatch('(.-)\n') do
+    line = line:gsub('^%s*❯%s*', ''):gsub('^%s*›%s*', ''):gsub('^%s*>%s*', ''):gsub('^%s+', '')
+    local label = line:match('^%d+%.%s+(.+)$')
+    if label then labels[#labels + 1] = label:lower():gsub('%s+$', '') end
+  end
+  if #labels == 0 then return false end
+  if agent.kind == 'codex' and modal and modal.update then
+    for _, label in ipairs(labels) do
+      if label ~= 'skip' and not label:match('^skip ') and not label:match('^update now') then return false end
+    end
+    return true
+  end
+  -- Teach's exact informational options still belong to its defer-only launch
+  -- handler; a historical title cannot bless any other choice block.
+  if agent.kind == 'claude' and full and full.title == 'Teach auto mode' then
+    for _, label in ipairs(labels) do
+      if label ~= 'not now' and label ~= "don't show again" then return false end
+    end
+    return true
+  end
+  return false
+end
+
+local function legacy_owned(name, agent, screen, signature)
+  if startup_owned(name, agent, screen, signature) then return true end
   local lifecycle = remuda._butler_state or remuda._butler_compaction_state or {}
   if lifecycle.compaction_fleet_active ~= (agent.id or agent.session_name) then return false end
   if agent.kind == 'claude' then
@@ -81,11 +121,12 @@ local function legacy_owned(agent, screen)
     or lower:find('select reasoning level for ', 1, true) ~= nil
 end
 
-local function classify(agent, screen)
+local function classify(name, agent, screen)
   local startup = (remuda._butler_agent_startup or {})[agent.kind] or {}
-  if legacy_owned(agent, screen) then return nil, nil, true end
   local compaction = remuda._butler_compaction
   local probes = { unknown = compaction and compaction.unknown_dialog_signature }
+  local signature = probes.unknown and probes.unknown(screen)
+  if legacy_owned(name, agent, screen, signature) then return nil, nil, true end
   for _, descriptor in ipairs(startup.blocking or {}) do
     assert(descriptor.risk == 'report' and type(descriptor.id) == 'string'
       and type(descriptor.match) == 'function', 'invalid reporting-only dialog descriptor')
@@ -95,7 +136,10 @@ local function classify(agent, screen)
   local working = startup.working and startup.working(screen)
     or screen:find('esc to interrupt', 1, true) ~= nil
   local ready = startup.ready and startup.ready(screen)
-  return nil, nil, working == true or ready == true
+  -- Notice/compaction already use this stricter composer parser, including
+  -- core-specific layouts. Unknown dialogs above always take precedence.
+  local empty = remuda._butler_prompt_is_empty and remuda._butler_prompt_is_empty(agent.kind, screen) == 'EMPTY'
+  return nil, nil, working == true or ready == true or empty == true
 end
 
 local function observe(name, agent, alias, instance, screen, failure)
@@ -108,7 +152,7 @@ local function observe(name, agent, alias, instance, screen, failure)
   if failure then
     ok, id, signature = true, failure, failure
   else
-    ok, id, signature, resolved = pcall(classify, agent, screen)
+    ok, id, signature, resolved = pcall(classify, name, agent, screen)
   end
   if not ok then id, signature = 'detection_unavailable', 'detection_unavailable' end
   if id then
@@ -167,20 +211,20 @@ local function gated_write(original, operation, name, ...)
   local agent = agent_for(name)
   if not agent then return original(name, ...) end
   local allowed, state = M.check(name)
-  if not allowed then return false, 'Butler dialog blocked; waiting for owner review' end
+  if not allowed then error('Butler dialog blocked; waiting for owner review', 0) end
   -- No prepared text or arbitrary key strings enter the log.
   local key = select(1, ...)
   local safe_key = type(key) == 'string' and (key == 'RET' or key == 'ESC' or key == 'UP'
     or key == 'DOWN' or key == 'C-u' or key:match('^%d$'))
   local action = operation == 'key' and (safe_key and ('key/' .. key) or 'terminal_key') or operation
   if not audit(name, agent, state, 'dialog_action', action, 'before_write') then
-    return false, 'Butler dialog audit unavailable; input refused'
+    error('Butler dialog audit unavailable; input refused', 0)
   end
   -- An audit append can yield on its lock: recheck the instance and screen.
   allowed = M.check(name)
   if not allowed or states[name] ~= state or agent_for(name) ~= agent then
     audit(name, agent, state, 'dialog_action_result', action, 'not_written')
-    return false, 'Butler dialog blocked or session changed during audit'
+    error('Butler dialog blocked or session changed during audit', 0)
   end
   local result = pack(pcall(original, name, ...))
   local outcome = not result[1] and 'error' or result[2] == false and 'refused' or 'returned'

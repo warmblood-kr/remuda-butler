@@ -30,14 +30,18 @@ remuda.butler.guard_policy = { append = function(record)
   return true
 end }
 remuda.butler.guard_approval = { sha256 = function(text) return 'digest:' .. #text end }
--- Helpers stand in for existing startup/compaction parsers, not new recognisers.
-remuda._butler_chooser = { known_startup_modal = function(_, screen)
-  return screen:find('Quick safety check:', 1, true) or screen:find('Teach auto mode', 1, true)
-    or screen:find('Update available', 1, true) or screen:find('Trust this folder?', 1, true)
-end }
 remuda._butler_compaction_module_config = { registered_agent_kind = function() end, registered_agent_working = function() end }
 remuda._butler_system = {}
 dofile('packages/butler/compaction.lua')
+local function noop() end
+remuda._butler_chooser_config = { bus = bus, call_callback = noop, file_exists = noop,
+  contributions = function() return {} end,
+  numbered_option = remuda._butler_compaction.numbered_option,
+  bottom_screen_lines = remuda._butler_compaction.bottom_screen_lines }
+remuda._butler_contribute = noop
+remuda._butler_prompt_delivery = {}
+remuda.contribute = noop
+dofile('packages/butler/agents_launch.lua')
 remuda._butler_model_confirm_signature = function(screen)
   if screen:find('Switch model?', 1, true) then return screen end
 end
@@ -46,26 +50,45 @@ dofile('packages/butler/agents/claudecode.lua')
 dofile('packages/butler/agents/codex.lua')
 local D = dofile('packages/butler/dialogs.lua')
 D.install()
+local function attempt(fn, ...)
+  local ok, result, detail = pcall(fn, ...)
+  if not ok then return false, result end
+  return result, detail
+end
+local fixture = assert(io.open('tests/fixtures/butler-dialog-historical-update.txt', 'r'))
+screens.codex = fixture:read('*a'); fixture:close()
+assert(remuda._butler_chooser.known_startup_modal(remuda._butler_agent_startup.codex, screens.codex),
+  'real startup matcher sees historical update marker')
+assert(remuda._butler_compaction.unknown_dialog_signature(screens.codex), 'real geometry recognises current choice')
+assert(attempt(remuda.key, 'codex', 'RET') == false and #writes == 0, 'historical startup marker must not admit unknown Return')
+-- Even recorded launch ownership does not authorise a different current dialog.
+bus.pending_tasks = {codex = true}
+bus.agents.codex.session_start_marker = 'cx-launch'
+bus.first_task_delivery = {codex = {state = 'waiting', marker = 'cx-launch'}}
+assert(attempt(remuda.key, 'codex', 'RET') == false and #writes == 0, 'pending launch cannot bless unrelated choice')
+screens.codex = 'Ask Codex to do anything'; D.tick()
+reports, audits = {}, {}
 local unknown = 'Allow dangerous thing?\n❯ 1. Yes\n2. No\n─\n❯ \n'
 screens.child, screens.codex = unknown, 'Ask Codex to do anything'
-local ok, why = remuda.key('child', 'RET')
+local ok, why = attempt(remuda.key, 'child', 'RET')
 assert(ok == false and why:find('blocked', 1, true), 'block before first key, even with ready glyph')
 assert(#writes == 0 and #reports == 0, 'no write, report waits for stable state')
 D.tick()
 assert(#reports == 1 and reports[1][1] == 'child' and reports[1][2] == 'leader', 'report to own leader')
+assert(not pcall(remuda.key, 'child', 'RET'), 'legacy pcall-based handlers must observe write refusal')
 assert(reports[1][3]:find('unknown', 1, true) and not reports[1][3]:find('dangerous', 1, true), 'metadata only')
-D.tick(); remuda.type_text('child', 'task', 0.1)
+D.tick(); attempt(remuda.type_text, 'child', 'task', 0.1)
 assert(#reports == 1 and #writes == 0, 'dedupe reports and stop text writes')
-assert(remuda.send('child', 'task') == false and #writes == 0, 'send API cannot bypass blocked write gate')
+assert(attempt(remuda.send, 'child', 'task') == false and #writes == 0, 'send API cannot bypass blocked write gate')
 assert(audits[1].event == 'dialog_blocked' and audits[1].instance_id == 'one', 'durable block decision')
 assert(audits[1].summary ~= unknown, 'never audit raw screen')
 
 -- Ordinary output does not clear a blocker: wait for a positively ready/working screen.
 screens.child = 'painting'
-D.tick(); assert(remuda.key('child', 'RET') == false, 'ambiguous repaint stays blocked')
+D.tick(); assert(attempt(remuda.key, 'child', 'RET') == false, 'ambiguous repaint stays blocked')
 screens.child = 'done\n─\n❯ \n'
 D.tick()
-assert(remuda.key('child', 'RET') == true, 'clear only after ready screen')
+assert(attempt(remuda.key, 'child', 'RET') == true, 'clear only after ready screen')
 assert(audits[#audits - 1].event == 'dialog_action', 'audit before key')
 assert(audits[#audits].event == 'dialog_action_result', 'record returned outcome')
 
@@ -84,60 +107,72 @@ assert(#reports == 5, 'failed report retried, successful report deduped')
 fail_audit = true
 screens.child = 'done\n─\n❯ \n'; D.tick()
 local count = #writes
-assert(remuda.key('child', 'RET') == false and #writes == count, 'audit failure refuses key')
-assert(remuda.type_text('child', 'task', 0.1) == false and #writes == count, 'audit failure refuses text')
+assert(attempt(remuda.key, 'child', 'RET') == false and #writes == count, 'audit failure refuses key')
+assert(attempt(remuda.type_text, 'child', 'task', 0.1) == false and #writes == count, 'audit failure refuses text')
 fail_audit = false
 fail_capture = true
-assert(remuda.key('child', 'RET') == false and #writes == count, 'capture failure refuses key')
+assert(attempt(remuda.key, 'child', 'RET') == false and #writes == count, 'capture failure refuses key')
 fail_capture = false
 
 -- Existing launch policy retains ownership of known startup dialogs.
+bus.pending_tasks.child = true
+bus.agents.child.session_start_marker = 'child-launch'
+bus.first_task_delivery.child = {state = 'waiting', marker = 'child-launch'}
 for _, screen in ipairs({
-  'Quick safety check:\n❯ 1. Yes\n2. No',
-  'Teach auto mode\n❯ 1. Not now\n2. Other',
+  'Accessing workspace:\n/proj\nQuick safety check:\n\n❯ Yes, I trust this folder\n  No, exit\n\nEnter to confirm',
+  "Teach auto mode\n❯ 1. Not now\n2. Don't show again",
 }) do
   screens.child = screen
-  assert(remuda.key('child', 'RET') == true, 'startup handler retains authority')
+  assert(attempt(remuda.key, 'child', 'RET') == true, 'startup handler retains authority')
 end
 screens.codex = 'Update available\n› 1. Update now\n2. Skip'
-assert(remuda.key('codex', '2') == true, 'Codex update flow unchanged')
+assert(attempt(remuda.key, 'codex', '2') == true, 'Codex update flow unchanged')
+screens.codex = 'Trust this folder?\n/proj\n\n› 1. Trust and continue\n  2. Back to Agent Command Center\n\nEnter to confirm'
+assert(attempt(remuda.key, 'codex', 'RET') == true, 'owned exact trust options preserve conditional trust handler')
 screens.child = 'Switch model?\n❯ 1. Yes\n2. No'
-assert(remuda.key('child', 'RET') == false, 'unowned model dialog is unknown blocker')
+assert(attempt(remuda.key, 'child', 'RET') == false, 'unowned model dialog is unknown blocker')
 remuda._butler_state.compaction_fleet_active = bus.agents.child.id
-assert(remuda.key('child', 'RET') == true, 'owned model switch retains compaction handler')
+assert(attempt(remuda.key, 'child', 'RET') == true, 'owned model switch retains compaction handler')
 remuda._butler_state.compaction_fleet_active = nil
 screens.codex = 'Odd prompt\n› 1. Yes\n2. No'
 D.tick(); D.tick()
-assert(reports[#reports][1] == 'codex' and remuda.key('codex', 'RET') == false, 'Codex unknown stops')
+assert(reports[#reports][1] == 'codex' and attempt(remuda.key, 'codex', 'RET') == false, 'Codex unknown stops')
 
 -- Reload must not stack wrappers/audits; stop restores core API ownership.
 screens.child = 'done\n─\n❯ \n'
 D = dofile('packages/butler/dialogs.lua'); D.install(); D.tick()
 local n = #audits
-local result, settle = remuda.type_text('child', 'task', 0.1)
+local result, settle = attempt(remuda.type_text, 'child', 'task', 0.1)
 assert(result == 'submitted' and settle == 0.1 and #audits == n + 2, 'reload single wrapper, returns preserved')
 n = #audits
-assert(remuda.key('unmanaged', 'RET') == true and #audits == n, 'unmanaged sessions untouched')
+assert(attempt(remuda.key, 'unmanaged', 'RET') == true and #audits == n, 'unmanaged sessions untouched')
 before_write = function(record)
   if record.event == 'dialog_action' then screens.child = unknown end
 end
 count = #writes
-assert(remuda.key('child', 'RET') == false and #writes == count, 'screen changed while audit yielded')
+assert(attempt(remuda.key, 'child', 'RET') == false and #writes == count, 'screen changed while audit yielded')
 before_write = nil
 screens.child = 'done\n─\n❯ \n'; D.tick()
 before_write = function(record)
   if record.event == 'dialog_action' then live_instance = 'replacement' end
 end
-assert(remuda.key('child', 'RET') == false and #writes == count, 'instance changed while audit yielded')
+assert(attempt(remuda.key, 'child', 'RET') == false and #writes == count, 'instance changed while audit yielded')
 before_write, live_instance = nil, nil
 screens.child = '╭────────────────╮\n│ Unknown gate │\n╰────────────────╯'
 D.tick(); D.tick()
-assert(remuda.key('child', 'RET') == false, 'boxed unknown stops writes')
+assert(attempt(remuda.key, 'child', 'RET') == false, 'boxed unknown stops writes')
+-- Existing composer policy also recognises custom/core-specific ready layouts.
+screens.child = 'MODEL:restored CTX:200000'
+remuda._butler_prompt_is_empty = function(_, screen)
+  return screen == 'MODEL:restored CTX:200000' and 'EMPTY' or 'UNPARSEABLE'
+end
+D.tick()
+assert(attempt(remuda.key, 'child', 'RET') == true, 'existing positive composer probe releases resolved blocker')
 -- A descriptor failure is a blocker rather than a schedule exception.
 remuda._butler_agent_startup.claude.blocking[1].match = function() error('parser broke') end
 screens.child = 'done\n─\n❯ \n'; D.tick(); D.tick()
-assert(remuda.key('child', 'RET') == false, 'parser failure refuses input')
+assert(attempt(remuda.key, 'child', 'RET') == false, 'parser failure refuses input')
 D.stop()
 n = #audits
-assert(remuda.key('child', 'RET') == true and #audits == n, 'stop restores originals')
+assert(attempt(remuda.key, 'child', 'RET') == true and #audits == n, 'stop restores originals')
 print('butler dialogs: PASS')

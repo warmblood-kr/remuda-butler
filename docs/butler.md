@@ -771,7 +771,9 @@ including Claude auto-mode denials. New semantic recognisers require an observed
 dialog-only fixture; no cache-invalidation or Codex denial signature is assumed.
 
 Existing launch trust, Codex update and Teach-auto-mode policies retain their
-handlers. Model/effort dialogs belong to the existing compaction handler only
+handlers. Startup ownership requires the matching pending launch/update record
+and the current dialog's known options; historical startup markers alone never
+admit an unfamiliar choice. Model/effort dialogs belong to the existing compaction handler only
 while that member owns the compaction operation. The dispatcher sends no new
 automatic keys and creates no owner approval or standing grant.
 
@@ -785,6 +787,8 @@ session-instance and descriptor metadata without storing screens or prepared
 text. A root blocker uses the operator log instead of mailing itself. This
 program-layer gate does not prevent direct input from an attached owner or
 other core clients, and capture/recheck/write is not a core atomic transaction.
+Refused writes raise an error so existing handlers using `pcall` cannot treat
+an unsent key as success.
 Explicit Monocle launches use this argv: `monocle agent --workdir DIR --session NAME --auto-approve`;
 Butler adds `--model M` when specified.
 `--auto-approve` means the member runs with Monocle's own auto-approval. Butler

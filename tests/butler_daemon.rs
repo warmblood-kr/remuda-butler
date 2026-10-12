@@ -4561,6 +4561,10 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
           remuda._butler_inbox("butler")
           remuda._butler_session_trace_path = {trace:?}
           remuda._butler_task_poke_attempts = 6
+          -- This focused launch test advances queued fixtures on capture and
+          -- replaces input APIs. Independent fleet polling would consume those
+          -- scripted frames; dispatcher polling is tested with stable screens.
+          remuda._butler_dialog_tick = function() end
           remuda._butler_test_force_launch_probe = {{
             ["t-claude"] = true,
             ["t-claude-launch"] = true,
@@ -7661,8 +7665,16 @@ done
     while log_of("cx-a") != full_cycle || log_of("cx-b") != full_cycle {
         assert_eq!(std::fs::read_to_string(&codex_config).unwrap(), config_seed,
             "config.toml changed while two members compacted");
-        assert!(Instant::now() < deadline, "both members must finish a full cycle. a:\n{}\nb:\n{}",
-            log_of("cx-a"), log_of("cx-b"));
+        assert!(Instant::now() < deadline,
+            "both members must finish a full cycle. a:\n{}\nb:\n{}\nreports: {}\ndialog metadata: {}",
+            log_of("cx-a"), log_of("cx-b"), reports(), eval(&path, r#"
+              local out = { 'fleet=' .. tostring((remuda._butler_state or {}).compaction_fleet_active) }
+              for _, name in ipairs({'cx-a', 'cx-b'}) do
+                local state = (remuda._butler_bus.dialog_states or {})[name] or {}
+                out[#out + 1] = name .. ':' .. tostring(state.id) .. ':' .. tostring(state.blocked)
+              end
+              return table.concat(out, ';')
+            "#));
         eval(&path, "return remuda.butler.compact('cx-b')");
         std::thread::sleep(Duration::from_millis(100));
     }
