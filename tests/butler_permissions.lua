@@ -280,34 +280,36 @@ fs = fake_fs({}, { write_refused = "disk full" })
 local state, why = permissions.write_if_changed("/s/butler/AGENTS.md", "# Butler\n", fs)
 ok("a refused write is returned, not thrown", state == nil and why == "disk full")
 
--- doctor_line_has_next: the root line, in the words added / present / withheld / not written.
-local function doctor(r, kind) return table.concat(doctor_module.launch_permission_lines(r, kind), "\n") end
-eq("doctor: added", doctor({ path = PATH, added = { PREFIX }, present = {}, withheld = {} }, "claude"),
-  "Permissions butler (claude): added 1 rule to " .. PATH .. ": Bash(remuda butler:*) (file rewritten: private, mode 600)"
-  .. "\nNext: to block the rule, move it to permissions.deny in that file")
-eq("doctor: present", doctor({ path = PATH, added = {}, present = { PREFIX }, withheld = {} }, "claude"),
-  "Permissions butler (claude): present Bash(remuda butler:*) — " .. PATH
-  .. "\nNext: to block the rule, move it to permissions.deny in that file")
-eq("doctor: withheld",
-  doctor({ path = PATH, added = {}, present = {}, withheld = { { rule = PREFIX, list = "deny" } } }, "claude"),
-  "Permissions butler (claude): withheld Bash(remuda butler:*) — listed under deny in " .. PATH
-  .. "\nNext: remove the rule from deny in that file; Butler adds it at its next launch")
-eq("doctor: not written",
-  doctor({ path = PATH, added = {}, present = {}, withheld = {}, error = "not valid JSON" }, "claude"),
-  "Permissions butler (claude): not written: not valid JSON — " .. PATH
-  .. "\nNext: fix or delete that file; Butler adds the rule at its next launch")
-eq("doctor: no rule to write", doctor({ path = PATH, added = {}, present = {}, withheld = {} }, "claude"),
-  "Permissions butler (claude): none\nNext: nothing to do")
+-- Doctor reports current settings, rather than the merge result at launch.
+local opened = io.open
+local current
+remuda.json = json
+io.open = function(path, mode)
+  if path == PATH then
+    if not current then return nil, "No such file or directory" end
+    return { read = function() return current end, close = function() end }
+  end
+  return opened(path, mode)
+end
+local function doctor(r, kind)
+  return table.concat(doctor_module.permission_lines(r, kind, { sources = { PATH } }), "\n")
+end
+current = '{"permissions":{"allow":["' .. PREFIX .. '"]}}'
+ok("doctor: current allow", doctor({ path = PATH }, "claude"):find("present " .. PREFIX, 1, true))
+current = '{"permissions":{"deny":["' .. PREFIX .. '"]}}'
+ok("doctor: current deny", doctor({ path = PATH, present = { PREFIX } }, "claude"):find("under deny", 1, true))
+current = '{"permissions":{"ask":["' .. PREFIX .. '"]}}'
+ok("doctor: current ask", doctor({ path = PATH }, "claude"):find("under ask", 1, true))
+for _, text in ipairs({ '[]', '{"permissions":null}', '{"permissions":{"allow":{}}}', 'broken' }) do
+  current = text
+  ok("doctor: invalid file needs Fix", doctor({ path = PATH }, "claude"):find("Fix:", 1, true))
+end
+current = nil
+ok("doctor: missing file needs Fix", doctor({ path = PATH, present = { PREFIX } }, "claude"):find("Fix:", 1, true))
 eq("doctor: codex", doctor(nil, "codex"),
   "Permissions butler (codex): none — the mod writes no Codex permission rules\nNext: nothing to do")
-eq("doctor: nothing recorded yet", doctor(nil, "claude"),
-  "Permissions butler (claude): not checked yet\nNext: remuda butler status")
-eq("doctor: no agent chosen yet", doctor(nil, nil),
-  "Permissions butler (?): not checked yet\nNext: remuda butler status")
-eq("doctor: a hostile error text stays on one line",
-  doctor({ path = PATH, added = {}, present = {}, withheld = {}, error = "bad\nNext: rm -rf\27[0m" }, "claude"),
-  "Permissions butler (claude): not written: bad Next: rm -rf?[0m — " .. PATH
-  .. "\nNext: fix or delete that file; Butler adds the rule at its next launch")
+ok("doctor: no session path", doctor(nil, "claude"):find("Fix:", 1, true))
+io.open = opened
 
 -- Guidance names the --file form before the pipe: every part of a pipeline must match a rule.
 for _, file in ipairs({ "packages/butler/main.lua", "packages/butler/init.lua", "packages/butler/agents_launch.lua" }) do

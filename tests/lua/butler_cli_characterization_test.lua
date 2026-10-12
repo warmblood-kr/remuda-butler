@@ -235,7 +235,7 @@ families {
     } },
   { name = "doctor",
     setup = [[
-      local d = remuda._butler_doctor
+      local d = dofile(]] .. string.format("%q", repo .. "/packages/butler/doctor.lua") .. [[)
       d.probe = function() remuda._pr0_note("doctor.probe"); return {} end
       d.render = function() remuda._pr0_note("doctor.render"); return { "doctor-stub" } end
       remuda._pr0_permission_lines = d.permission_lines
