@@ -151,6 +151,44 @@ end
 local function agent(...) return { argv = { ... }, as = "agent" } end
 
 families {
+  { name = "matrix",
+    setup = [[
+      local m = remuda.butler.matrix
+      m.configuration_guidance = function() return nil end
+      m.configured_room = function() return "!room:example.org" end
+      m.room_kind = function() return "joined" end
+      m.status = function(options, callback) remuda._pr0_note("matrix.status", options.json); callback({ user_id = "@bot:example.org", joined_rooms = {} }) end
+      m.rooms = function(options, callback) remuda._pr0_note("matrix.rooms", options.public, options.public_term); callback({ rooms = {}, mode = "allowlist" }) end
+      m.history = function(options, callback) remuda._pr0_note("matrix.history", options.room, options.n, options.json); callback({ chunk = {} }) end
+      m.thread = function(options, callback) remuda._pr0_note("matrix.thread", options.room, options.event_id, options.json); callback({ chunk = {} }) end
+      m.event = function(options, callback) remuda._pr0_note("matrix.event", options.room, options.event_id, options.json); callback({ sender = "@alice:example.org", content = { body = "hello" } }) end
+      m.send = function(options, callback) remuda._pr0_note("matrix.send", options.room, options.text, options.stdin, options.json); callback({ sent = 1, event_ids = { "$sent" } }) end
+      m.reply = function(options, callback) remuda._pr0_note("matrix.reply", options.room, options.event_id, options.text, options.json); callback({ sent = 1, event_ids = { "$reply" } }) end
+      m.react = function(options, callback) remuda._pr0_note("matrix.react", options.room, options.event_id, options.key, options.json); callback({ event_id = options.event_id }) end
+      m.upload = function(options, callback) remuda._pr0_note("matrix.upload", options.room, options.file, options.json); callback({ content_uri = "mxc://example/file", event_id = "$upload" }) end
+      m.download = function(options, callback) remuda._pr0_note("matrix.download", options.output, options.mxc, options.json); callback({ bytes = 3, path = options.output or "/tmp/file" }) end
+      m.redact = function(options, callback) remuda._pr0_note("matrix.redact", options.room, options.event_id, options.reason, options.json); callback({ event_id = options.event_id }) end
+      m.setup_prepare = function(args) remuda._pr0_note("matrix.setup_prepare", table.concat(args, "|")); return { help = true, usage = "matrix setup help" } end
+    ]],
+    cases = {
+      { "matrix", "status" }, { "matrix", "--json", "status" }, { "matrix", "status", "--json" },
+      { "matrix", "rooms" }, { "matrix", "rooms", "--public", "science" },
+      { "matrix", "--room", "!room:example.org", "-n", "8", "history" },
+      { "matrix", "history", "-n", "4", "--json" }, { "matrix", "thread", "$event" },
+      { "matrix", "--room", "!room:example.org", "follow", "$event" },
+      { "matrix", "unfollow", "$event" }, { "matrix", "event", "$event" }, { "matrix", "get", "$event" },
+      { "matrix", "--room", "!room:example.org", "send", "hello", "world" },
+      { "matrix", "send", "-" }, { "matrix", "send", "--", "--literal" },
+      { "matrix", "reply", "$event", "hello", "there" }, { "matrix", "react", "$event", "+1" },
+      { "matrix", "upload", "file.txt" }, { "matrix", "-o", "/tmp/out", "download", "mxc://example/file" },
+      { "matrix", "redact", "$event", "--reason", "cleanup" },
+      { "matrix", "setup", "--help" }, { "matrix", "setup" },
+      { "matrix", "unknown" }, { "matrix", "stats" }, { "matrix", "--", "status" },
+      { "matrix", "history" }, { "matrix", "history", "extra" }, { "matrix", "send" },
+      { "matrix", "reply", "$event" }, { "matrix", "react", "$event" }, { "matrix", "upload" },
+      { "matrix", "download", "mxc://example/file" }, { "matrix", "redact", "$event" },
+      { "matrix", "status", "extra" }, { "matrix", "help" }, { "matrix", "--help" },
+    } },
   { name = "approvals",
     setup = [[
       local approval = remuda.butler.approval
