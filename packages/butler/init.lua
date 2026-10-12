@@ -397,6 +397,7 @@ the normal way for a member to communicate.
           .. '  remuda butler send <from> <to> <message...> | <from> <to> - | <from> <to> --file PATH',
         run = function(_, args, caller) return host._butler_command_run("send", args, caller) end },
       { id = "send-to-leader", order = 50, verb = "send-to-leader", usage = "  remuda butler send-to-leader [--done] <message...> | - | --file PATH\n"
+          .. "  Without --done, creates no new auto-close request and keeps an earlier one.\n"
           .. "  To send text that starts with -, put -- first: remuda butler send-to-leader -- -text",
         run = function(_, args, caller) return host._butler_command_run("send-to-leader", args, caller) end },
       { id = "inbox", order = 60, verb = "inbox", usage = "  remuda butler inbox [name]",

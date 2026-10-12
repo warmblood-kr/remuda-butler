@@ -584,13 +584,14 @@ local SEND_TO_LEADER_CLI_SPEC = {
     ["send-to-leader"] = {
       about = "Send a message to your Butler leader",
       options = { { long = "file", value = "PATH", help = "Read message text from a file" },
-        { long = "done", help = "Your task is finished: Butler closes you once your inbox is drained and you are idle" } },
+        { long = "done", help = "Your task is finished: Butler closes you once your inbox is drained and you are idle. Omitting this keeps an earlier request" } },
       args = { { name = "WORDS", help = "Message words", multiple = true, required = false } },
       next = "remuda butler send-to-leader --help",
     },
   },
 }
 command(50, "send-to-leader", "  remuda butler send-to-leader [--done] <message...> | - | --file PATH\n"
+  .. "  Without --done, creates no new auto-close request and keeps an earlier one.\n"
   .. "  To send text that starts with -, put -- first: remuda butler send-to-leader -- -text", function(args, caller)
   -- A leading --done (remuda#606) marks the member finished; the rest parses as before.
   local done = args[2] == "--done"
