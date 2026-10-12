@@ -129,6 +129,36 @@ screens.codex = 'Update available\n› 1. Update now\n2. Skip'
 assert(attempt(remuda.key, 'codex', '2') == true, 'Codex update flow unchanged')
 screens.codex = 'Trust this folder?\n/proj\n\n› 1. Trust and continue\n  2. Back to Agent Command Center\n\nEnter to confirm'
 assert(attempt(remuda.key, 'codex', 'RET') == true, 'owned exact trust options preserve conditional trust handler')
+bus.pending_tasks.codex = nil
+remuda._butler_state.compaction_fleet_active = bus.agents.codex.id
+fixture = assert(io.open('tests/fixtures/butler-dialog-historical-picker.txt', 'r'))
+screens.codex = fixture:read('*a'); fixture:close()
+assert(remuda._butler_compaction.unknown_dialog_signature(screens.codex), 'real geometry sees unrelated current choice')
+count = #writes
+assert(not pcall(remuda.key, 'codex', 'RET') and #writes == count,
+  'active compaction and historical picker title must not bless current unknown Return')
+remuda._butler_state.compaction_members = {[bus.agents.codex.id] = {dialog_operation = {
+  agent = bus.agents.codex, model = 'gpt-6-luna', effort = 'high', phase = 'model',
+}}}
+assert(not pcall(remuda.key, 'codex', 'RET') and #writes == count,
+  'recorded target cannot bless a different current choice')
+local operation = remuda._butler_state.compaction_members[bus.agents.codex.id].dialog_operation
+screens.codex = 'Select Model and Effort\n\n› 1. GPT-6-Luna\n  2. GPT-5.6-Sol (current)\n\nenter select · esc back'
+assert(attempt(remuda.key, 'codex', '1') == true, 'genuine current model picker with expected target is owned')
+operation.phase = 'effort'
+screens.codex = 'Select Reasoning Level for GPT-6-Luna\n\n  1. Medium (default)\n› 2. High\n\nenter default · s session · esc back'
+assert(attempt(remuda.key, 'codex', 's') == true, 'genuine current target effort picker is owned')
+screens.codex = 'Select Reasoning Level for GPT-5.6-Sol\n\n  1. Medium\n› 2. High\n\nenter default · s session · esc back'
+assert(not pcall(remuda.key, 'codex', 's'), 'a different target model never inherits picker ownership')
+operation.phase = 'model'
+screens.codex = 'Select Model and Effort\n\n› 1. GPT-6-Nova\n  2. GPT-5.6-Sol (current)\n\nenter select · esc back'
+assert(not pcall(remuda.key, 'codex', '1'), 'missing expected model never admits selection')
+operation.phase = 'escape'
+assert(attempt(remuda.key, 'codex', 'ESC') == true, 'existing cleanup can close a genuine picker with missing target')
+screens.codex = 'Select Model and Effort\n\nChoose a display color\n› 1. Blue\n  2. Green\nEnter to confirm'
+assert(not pcall(remuda.key, 'codex', 'ESC'), 'cleanup phase cannot bless a different current dialog')
+remuda._butler_state.compaction_fleet_active = nil
+screens.codex = 'Ask Codex to do anything'; D.tick()
 screens.child = 'Switch model?\n❯ 1. Yes\n2. No'
 assert(attempt(remuda.key, 'child', 'RET') == false, 'unowned model dialog is unknown blocker')
 remuda._butler_state.compaction_fleet_active = bus.agents.child.id

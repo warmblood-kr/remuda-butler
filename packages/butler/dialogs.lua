@@ -115,10 +115,11 @@ local function legacy_owned(name, agent, screen, signature)
   if agent.kind == 'claude' then
     return remuda._butler_model_confirm_signature and remuda._butler_model_confirm_signature(screen) ~= nil
   end
-  -- These are already owned by compaction_run.lua's bounded picker workflow.
-  local lower = screen:lower()
-  return lower:find('select model and effort', 1, true) ~= nil
-    or lower:find('select reasoning level for ', 1, true) ~= nil
+  local member = (lifecycle.compaction_members or {})[agent.id or name]
+  local operation = member and member.dialog_operation
+  local startup = (remuda._butler_agent_startup or {})[agent.kind] or {}
+  return operation and operation.agent == agent and startup.owned_picker
+    and startup.owned_picker(screen, signature, operation) == true
 end
 
 local function classify(name, agent, screen)

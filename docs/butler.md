@@ -774,7 +774,9 @@ Existing launch trust, Codex update and Teach-auto-mode policies retain their
 handlers. Startup ownership requires the matching pending launch/update record
 and the current dialog's known options; historical startup markers alone never
 admit an unfamiliar choice. Model/effort dialogs belong to the existing compaction handler only
-while that member owns the compaction operation. The dispatcher sends no new
+while that member owns the compaction operation and its recorded picker phase
+and target match the current caption and option rows. Historical picker titles
+never establish ownership. The dispatcher sends no new
 automatic keys and creates no owner approval or standing grant.
 
 Managed `key`, `type_text` and `send` calls append `dialog_action` to the private

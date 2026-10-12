@@ -70,6 +70,55 @@ local codex_modal_markers = {
   "Trust this folder?",
 }
 remuda._butler_agent_startup.codex = {
+  -- A compaction-owned picker must be the current option block, with the
+  -- recorded target and phase. A historical title is never ownership evidence.
+  owned_picker = function(screen, signature, operation)
+    if type(signature) ~= "string" or type(operation.model) ~= "string"
+        or type(operation.effort) ~= "string" then return false end
+    local at, scan = nil, 1
+    while true do
+      local found = screen:find(signature, scan, true)
+      if not found then break end
+      at, scan = found, found + 1
+    end
+    if not at then return false end
+    local rows, first, offset = {}, nil, 1
+    for line in (signature .. "\n"):gmatch("(.-)\n") do
+      local text = line:gsub("^%s*❯%s*", ""):gsub("^%s*›%s*", ""):gsub("^%s*>%s*", ""):gsub("^%s+", "")
+      local label = text:match("^%d+%.%s+(.+)$")
+      if label then
+        first = first or offset
+        rows[#rows + 1] = label:lower():gsub("%s+$", "")
+      end
+      offset = offset + #line + 1
+    end
+    if not first or #rows < 2 then return false end
+    local title
+    for line in (screen:sub(1, at + first - 2) .. "\n"):gmatch("(.-)\n") do
+      local text = line:match("^%s*(.-)%s*$")
+      if text ~= "" then title = text:lower() end
+    end
+    local phase, target = operation.phase, false
+    if title == "select model and effort" and (phase == "model" or phase == "escape") then
+      for _, label in ipairs(rows) do
+        local model, suffix = label:match("^(gpt%-[%w%.%-]+)(.*)$")
+        if not model or (suffix ~= "" and not suffix:match("^%s*%b()$")) then return false end
+        target = target or model == operation.model
+      end
+      return target or phase == "escape"
+    end
+    if title == "select reasoning level for " .. operation.model and (phase == "effort" or phase == "escape") then
+      local wanted = operation.effort == "xhigh" and "extra high" or operation.effort
+      local known = { low = true, medium = true, high = true, ["extra high"] = true }
+      for _, label in ipairs(rows) do
+        label = label:gsub("%s+%(default%)$", "")
+        if not known[label] then return false end
+        target = target or label == wanted
+      end
+      return target or phase == "escape"
+    end
+    return false
+  end,
   -- No invented Codex denial/cache signatures: unfamiliar choices only.
   blocking = {
     { id = "unknown_choice", risk = "report", match = function(screen, probes)

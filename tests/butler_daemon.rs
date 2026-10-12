@@ -7660,7 +7660,7 @@ done
     start("cx-a", "happy");
     start("cx-b", "happy");
     eval(&path, "return remuda.butler.compact('cx-a')");
-    eval(&path, "return remuda.butler.compact('cx-b')");
+    let mut b_started = eval(&path, "return remuda.butler.compact('cx-b')") == "started";
     let deadline = Instant::now() + Duration::from_secs(30);
     while log_of("cx-a") != full_cycle || log_of("cx-b") != full_cycle {
         assert_eq!(std::fs::read_to_string(&codex_config).unwrap(), config_seed,
@@ -7675,7 +7675,12 @@ done
               end
               return table.concat(out, ';')
             "#));
-        eval(&path, "return remuda.butler.compact('cx-b')");
+        // A's key log can finish before its completion callback frees the
+        // fleet lock. Retry B until accepted, then wait without starting
+        // another force-compaction after B's first cycle has finished.
+        if !b_started {
+            b_started = eval(&path, "return remuda.butler.compact('cx-b')") == "started";
+        }
         std::thread::sleep(Duration::from_millis(100));
     }
     // The last key is logged before the mod has seen the footer and freed the fleet lock.
