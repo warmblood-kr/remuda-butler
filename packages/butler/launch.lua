@@ -417,6 +417,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
         finish_task(false, "the recipient is gone")
         return
       end
+      delivery.last_screen = screen
       local agent = bus.agents[actual]
       if agent then agent.last_screen = capture_update_evidence(actual, screen) end
       if update_relaunch_record_ref then
@@ -665,6 +666,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
             finish_task(false, "the recipient is gone")
             return
           end
+          delivery.last_screen = latest
           local decision, text = remuda._butler_composer_decision(kind, actual, latest)
           local working = false
           if startup.working then
@@ -714,6 +716,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       -- PRE-write phase; afterwards its text on screen may be our own task echoed, so it never
       -- vetoes verification (delivery then falls back to the normal post-write checks).
       trust_dialog = function(screen, written)
+        delivery.last_screen = screen
         local modal = startup_modal(startup, screen)
         if modal and modal.title then
           if written then return false end
@@ -748,11 +751,18 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
         remuda.cancel(monitor); return
       end
       checks = checks + 1
-      local captured, screen = pcall(remuda.capture, actual)
+      -- Startup/task confirmation owns its captures. Reuse that evidence so
+      -- this observer cannot advance a scripted TUI or race its startup dialogs.
+      local delivery = bus.first_task_delivery and bus.first_task_delivery[actual]
+      local captured, screen
+      if bus.pending_tasks[actual] then
+        captured, screen = delivery and delivery.last_screen ~= nil, delivery and delivery.last_screen
+      else
+        captured, screen = pcall(remuda.capture, actual)
+      end
       local rejected = captured and chooser.model_rejection(screen)
       if rejected then
         remuda.cancel(monitor)
-        local delivery = bus.first_task_delivery and bus.first_task_delivery[actual]
         if delivery and delivery.marker == agent.session_start_marker then
           delivery.state = "failed"
           bus.pending_tasks[actual] = nil

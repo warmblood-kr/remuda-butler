@@ -57,6 +57,8 @@ T.test("fallback candidates and roster use their own model defaults", function()
       os.getenv("XDG_DATA_HOME"), "gpt-custom", "butler", task)
     assert(#polls >= 2, "early model-rejection monitor missing")
     rejected = true
+    -- While the task poll owns the pane, the observer uses its captured evidence.
+    bus.first_task_delivery["model-error"].last_screen = remuda.capture("model-error")
     polls[#polls].run()
     assert(bus.launch_failures["model-error"], "model rejection absent from FAILED LAUNCHES")
     assert(bus.first_task_delivery["model-error"].state == "failed", "task delivery not stopped")
