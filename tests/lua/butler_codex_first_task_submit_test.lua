@@ -16,7 +16,11 @@ T.test("Codex first task retries a collapsed paste after the human pauses", func
     chooser.choose = function(_, opts, done) done(opts.name, "codex", {}, "fake-instance") end
     chooser.instance_live = function() return true end
     remuda._butler_agent_startup.codex = { ready = function() return true end }
-    remuda.schedule = function(spec) polls[#polls + 1] = spec; return spec end
+    remuda.schedule = function(spec)
+      -- Drive task delivery only; independent observers do not own this fixture.
+      if spec.every == 0.5 then polls[#polls + 1] = spec end
+      return spec
+    end
     remuda.cancel = function(spec) spec.cancelled = true end
     remuda.ls = function() return {{ name = name, alive = true }} end
     remuda.capture = function() return "› " .. composer end
