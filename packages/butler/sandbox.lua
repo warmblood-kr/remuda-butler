@@ -50,8 +50,8 @@ local function touches(real, protected, realpath)
   end
 end
 
--- Directories under the home directory that hold credentials, plus those the caller names
--- (Butler's config, data and runtime directories).
+-- Directories under the home directory that hold credentials, plus caller-supplied
+-- Butler config, data and runtime directories.
 function sandbox.protected(extra)
   local list = {}
   local home = os.getenv("HOME")
