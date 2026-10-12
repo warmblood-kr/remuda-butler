@@ -56,6 +56,19 @@ local function sanitize_row(text)
   return head:sub(1, last)
 end
 local screen_detail = sanitize_row
+-- These are agent error rows, not arbitrary occurrences of "model" in a prompt.
+local function model_rejection(screen)
+  for line in (tostring(screen or "") .. "\n"):gmatch("(.-)\n") do
+    local lower = line:lower():gsub("^%s+", "")
+    local error_row = lower:match("^the [\"']") or lower:match("^error:")
+      or lower:match("^api error:") or lower:match("^■")
+    if error_row and lower:find("model", 1, true)
+        and (lower:find("not supported", 1, true) or lower:find("does not exist", 1, true)
+          or lower:find("model_not_found", 1, true)) then
+      return sanitize_row(line)
+    end
+  end
+end
 local function readiness_timeout()
   local configured = tonumber(remuda._butler_readiness_timeout or os.getenv("REMUDA_BUTLER_READINESS_TIMEOUT"))
   if configured and configured > 0 then return configured end
@@ -204,6 +217,8 @@ local function choose(candidates, opts, done)
     state.last_screen = screen_detail(screen)
     state.last_screen_blank = screen:find("%S") == nil
     local entry, id = state.entry, state.id
+    local rejected = model_rejection(screen)
+    if rejected then fail_candidate("model_rejected", rejected); return end
     -- Authentication screens can still contain a prompt glyph; classify
     -- login before readiness so expired credentials never look usable.
     for _, pattern in ipairs(entry.login or {}) do
@@ -805,4 +820,5 @@ remuda._butler_chooser = {
   known_startup_modal = known_startup_modal,
   codex_update_complete = codex_update_complete,
   capture_update_evidence = capture_update_evidence,
+  model_rejection = model_rejection,
 }
