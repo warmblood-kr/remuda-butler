@@ -1,5 +1,6 @@
 -- Read-only installation and authentication checks for the Butler CLI.
 local system = assert(remuda._butler_system)
+local exit_ring = remuda._butler_doctor_config and remuda._butler_doctor_config.exit_ring
 
 local function command_candidates(name, platform)
   platform = platform or system.platform()
@@ -107,6 +108,14 @@ local function render(probe_results, platform)
     "Approve text: " .. (probe_results.approve_text == true and "on" or "off"),
     "Approval room: " .. tostring(probe_results.approval_room or "all -> HOME (lounge not joined)"),
   }
+  if exit_ring then
+    for _, row in ipairs(exit_ring.recent(5)) do
+      local entry = row.entry
+      lines[#lines + 1] = "Last exit: " .. safe(row.name) .. " " .. safe(entry.reason or "unknown")
+        .. " code " .. tostring(entry.exit_code or "?") .. " signal "
+        .. safe(entry.signal_name or entry.signal or "?") .. " " .. exit_ring.age(entry.time)
+    end
+  end
   if probe_results.guard_approvals ~= nil then
     lines[#lines + 1] = "Guard approvals: " .. (probe_results.guard_approvals
       and "on (the owner answers Claude permission prompts of new sessions in Matrix; no answer means Claude's own prompt)"
