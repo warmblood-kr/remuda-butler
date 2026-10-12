@@ -120,7 +120,7 @@ assert(fallback_rows.monocle and fallback_rows.monocle.order == 30,
 assert(fallback_rows.monocle.login[1] == "monocle login"
   and fallback_rows.monocle.working(nil, working_screen),
   "legacy Monocle registration should retain its login and working predicates")
-remuda.new = function(name, argv) capture.name, capture.argv = name or "monocle-test", argv; return capture.name end
+remuda.new = function(name, argv) capture.name, capture.argv = name or "monocle-test", argv; return capture.name, "inst-" .. capture.name end
 remuda.ls = function() return {} end
 remuda._butler_choose({ "monocle" }, {
   name = "monocle-test",
@@ -140,7 +140,7 @@ local reasons = { name = "name must not start with a dash", cwd = "cwd must not 
   model = "model must be a plain token" }
 for field, bad in pairs({ name = "-x", cwd = "-w", model = "-m" }) do
   local spawned, result = 0, nil
-  remuda.new = function() spawned = spawned + 1; return "x" end
+  remuda.new = function() spawned = spawned + 1; return "x", "inst-x" end
   remuda._butler_choose({ "monocle" }, {
     name = "refused", cwd = "/work", skip_probe = true, env = function() return {} end,
     spec = function(kind)
@@ -168,7 +168,7 @@ do
   local order = remuda._butler_configured_agent_order()
   assert(table.concat(order, ",") == "claude,codex", "legacy order must be claude,codex: " .. table.concat(order, ","))
   local started, failed = {}, nil
-  remuda.new = function(name, argv) started[#started + 1] = argv[1]; return name end
+  remuda.new = function(name, argv) started[#started + 1] = argv[1]; return name, "inst-" .. name end
   remuda._butler_chooser_config.system.find_command = function(name) if name ~= "monocle" then return nil end return name end
   remuda._butler_choose(order, { name = "legacy-fail", cwd = "/work", spec = function(kind) return { cwd = "/work", name = "legacy-fail", kind = kind } end, env = function() return {} end, skip_probe = true }, function(name, kind, attempts) failed = { name = name, kind = kind } end)
   assert(#started == 0 and failed and failed.kind ~= "monocle" and failed.kind == nil,

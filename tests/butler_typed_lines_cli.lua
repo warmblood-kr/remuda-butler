@@ -229,6 +229,7 @@ remuda._butler_commands_config = {
   contributions = function() return command_rows end,
   registry_list = function() return {} end,
   statusline = function() return "" end,
+  resolve_principal = function() return { tag = "unidentified" } end,
   resolve = function(name) return name end,
   mail = {},
 }

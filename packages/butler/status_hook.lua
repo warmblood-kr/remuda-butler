@@ -20,12 +20,16 @@ function M.word(hook)
 end
 
 function M.run(args, caller)
+  local principal = remuda._butler_caller_principal and remuda._butler_caller_principal.resolve(caller)
+  if not principal or principal.tag ~= "member" then
+    return "Butler cannot identify this caller for status telemetry. Next: run from a registered Butler session or upgrade Remuda core."
+  end
   local path, input = args[2], caller and caller.stdin
   local absolute = type(path) == "string" and (path:sub(1, 1) == "/" or path:sub(1, 2) == "\\\\"
     or (path:match("^%a:") ~= nil and (path:sub(3, 3) == "/" or path:sub(3, 3) == "\\")))
   -- A "." or ".." component would let the written file land beside another status file.
   local plain = absolute and not ("/" .. path:gsub("\\", "/") .. "/"):find("/%.%.?/")
-  if plain and path:match("%.status$") and type(input) == "string" then
+  if plain and path == principal.status_path and path:match("%.status$") and type(input) == "string" then
     local decoded_ok, decoded = pcall(remuda.json.decode, input)
     local word = decoded_ok and M.word(decoded)
     if word then

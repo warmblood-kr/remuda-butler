@@ -11,6 +11,8 @@ local function start_butler()
     return T.eval('return remuda._butler_bus ~= nil and remuda._butler_bus.agents.butler ~= nil')
       :match("^%s*true%s*$") ~= nil
   end, 10, "Butler root start")
+  T.eval([[remuda._butler_bus.agents["agent-test"] = { id = "agent-test", alias = "agent-test",
+    session_name = "agent-test", children = {}, kind = "codex" }]])
   T.eval([[
     local d = remuda._butler_doctor
     d.probe = function() return {} end
@@ -99,7 +101,7 @@ local function quota_case(parser, args, setup)
     remuda.fail = function(text, code) return { failed = true, code = code, text = text } end
     ]] .. (setup or "") .. [[
     local ok, value = pcall(remuda._butler_command_run, "quota", { ]] .. table.concat(words, ",") .. [[ },
-      { env = { REMUDA_BUTLER_AGENT_ID = "agent-test" } })
+      { kind = "session", session = "agent-test" })
     quota.collect = real_collect
     remuda.cli, remuda._butler_quota, remuda.pending, remuda.fail = saved_cli, saved_quota, saved_pending, real_fail
     local first = type(value) == "table" and value.failed and (value.code .. ":" .. value.text:match("^[^\n]*")) or type(value)

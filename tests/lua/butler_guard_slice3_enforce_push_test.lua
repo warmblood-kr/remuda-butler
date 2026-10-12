@@ -4,6 +4,8 @@ local function start_butler()
   -- Installed once per file: a second install reloads the mod (the harness gives a file 20 s in all).
   if started then return end
   started = true
+  -- Butler captures the core's caller at load: it is installed before the mod loads.
+  T.eval("remuda.caller = function() return { kind = 'session', session = 's-ssa' } end")
   T.install_guard_subject("butler", assert(os.getenv("REMUDA_LUA_REPO")))
   T.eval('remuda._butler_argv = {"sh", "-c", "sleep 60"}; remuda._butler_skip_relay = true; remuda._butler_readiness_timeout = 1')
   T.eval('return remuda.exec("butler")')
@@ -23,7 +25,7 @@ local function start_butler()
       for l in f:lines() do out[#out + 1] = l end
       f:close(); return table.concat(out, '\n')
     end
-    remuda._t_guard = function(args) return remuda._butler_command_run('guard', args, {}) end
+    remuda._t_guard = function(args) return remuda._butler_command_run('guard', args, {kind='session', session = 'butler', instance_id = _inst('butler')}) end
     -- A relay stand-in: every approval post is counted, none is answered.
     remuda._t_posts = 0
     remuda.pending = function(opts)
@@ -37,14 +39,13 @@ local function start_butler()
     remuda._t_call = function(over)
       local payload = remuda.json.encode({ hook_event_name = over.event or 'PermissionRequest', tool_name = over.tool or 'WebFetch',
         tool_input = over.input or { url = 'https://example.com/x' }, cwd = over.cwd or '/tmp', grant_id = over.grant_id })
-      local r = remuda._butler_command_run('guard', { 'guard' }, { stdin = payload, env =
-        { REMUDA_BUTLER_AGENT_ALIAS = 'ss-a', REMUDA_BUTLER_AGENT_KIND = over.kind or 'claude' } })
+      local r = remuda._butler_command_run('guard', { 'guard' }, { kind = 'session', session = 's-ssa', stdin = payload })
       if type(r) == 'table' then return 'pending' end
       return tostring(r)
     end
     -- The calling session by core's caller identity: a grant held by U-SSA covers it (holders: enforce_holder).
-    remuda._butler_bus.agents['t-ssa'] = { id = 'U-SSA', parent = 'butler', alias = 't-ssa', session_name = 's-ssa', children = {} }
-    remuda.caller = function() return { kind = 'session', session = 's-ssa' } end
+    remuda._butler_bus.agents['t-ssa'] = { id = 'U-SSA', parent = 'butler', alias = 't-ssa', kind = 'claude', session_name = 's-ssa', children = {} }
+    remuda._butler_bus.agents['ss-a'] = nil -- keep this session uniquely registered
     return 'ok'
   ]])
   -- A fresh load of the store hands `add` to the test; the approval cross-check is its own test (guard_slice3_reactions).
@@ -82,6 +83,8 @@ local function git_fixture(name)
     return (remuda.fs.realpath(root .. '/work'))]])
   local function sh(script) return T.eval(("local r = remuda.process.run({ argv = { 'sh', '-c', %q } }); return tostring(r.code)"):format("set -e; cd " .. work .. "; " .. script)) end
   T.eval("remuda.butler.guard_grants.insensitive = function() return false end") -- the fold has its own test
+  -- These real-Git controls use the existing test subject budget; production and budget tests keep 2s.
+  T.eval("remuda.butler.guard_grants.git_budget_s = 20")
   local added = T.eval("local id, why = remuda._t_add({ class = 'git', scope = " .. string.format("%q", work) .. ", ceiling = 'T2', holder = 'U-SSA', event = '$ev1' }); return tostring(id or why)")
   T.eq(added, "g001", "git grant")
   return work, sh

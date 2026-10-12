@@ -490,6 +490,15 @@ function approval.answer(id_or_event, verdict, who, event_id)
   if rec.status ~= "open" then
     return nil, rec.status == "expired" and "Expired." or "Already answered.", rec
   end
+  local before_answer = handlers[rec.kind] and handlers[rec.kind].before_answer
+  if before_answer then
+    local ok, ready, why = pcall(before_answer, rec, verdict, who, event_id)
+    if not ok or ready ~= true then
+      local failure = tostring(ok and why or ready)
+      return nil, "Approval answer refused: " .. failure
+        .. ". Next: check audit storage, then retry the answer.", rec
+    end
+  end
   local now = math.floor(os.time() * 1000)
   rec.status, rec.answered_by, rec.answered_at, rec.answer_event_id =
     verdict == "deny" and "denied" or "approved", who, now, event_id

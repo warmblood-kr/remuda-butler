@@ -5,6 +5,8 @@ local function start_butler()
   -- Installed once: a second install makes the daemon reload the mod, which would drop the approval state.
   if started then return end
   started = true
+  -- Butler captures the core's caller at load: it is installed before the mod loads.
+  T.eval("remuda.caller = function() return { kind = 'session', session = 's-ssa' } end")
   T.install_guard_subject("butler", assert(os.getenv("REMUDA_LUA_REPO")))
   T.eval('remuda._butler_argv = {"sh", "-c", "sleep 60"}; remuda._butler_skip_relay = true; remuda._butler_readiness_timeout = 1')
   T.eval('return remuda.exec("butler")')
@@ -47,8 +49,8 @@ local function start_butler()
       local payload = remuda.json.encode({ hook_event_name = 'PermissionRequest', tool_name = over.tool or 'WebFetch',
         tool_input = over.input, cwd = over.cwd or '/p/w', session_id = 's1' })
       local before = #remuda._t_replies
-      remuda._butler_command_run('guard', { 'guard' }, { stdin = payload, env =
-        { REMUDA_BUTLER_AGENT_ALIAS = over.alias or 'ss-a', REMUDA_BUTLER_AGENT_KIND = 'claude' } })
+      remuda._butler_command_run('guard', { 'guard' }, { kind = 'session',
+        session = 's-ssa', stdin = payload })
       if #remuda._t_replies > before then return #remuda._t_replies end
       return 0
     end
@@ -64,8 +66,8 @@ local function start_butler()
     end
     remuda._t_grants = function() return #remuda.butler.guard_grants.active() end
     -- The calling session by core's caller identity (a grant offer needs one; holders: enforce_holder).
-    remuda._butler_bus.agents['t-ssa'] = { id = 'U-SSA', parent = 'butler', alias = 't-ssa', session_name = 's-ssa', children = {} }
-    remuda.caller = function() return { kind = 'session', session = 's-ssa' } end
+    remuda._butler_bus.agents['t-ssa'] = { id = 'U-SSA', parent = 'butler', alias = 't-ssa', kind = 'claude', session_name = 's-ssa', children = {} }
+    remuda._butler_bus.agents['ss-a'] = nil -- keep this session uniquely registered
     return 'ok'
   ]])
 end
@@ -74,7 +76,7 @@ local ALLOW = '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decis
 local DENY = '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":'
   .. '{"behavior":"deny","message":"Denied by the owner via Butler"}}}'
 local function reply_out(n) return T.eval(("local r = remuda._t_replies[%d]; return r.done and ('done:' .. r.out) or 'waiting'"):format(n)) end
-local function guard(...) return T.eval(("return remuda._butler_command_run('guard', {'guard', %s}, {})"):format(
+local function guard(...) return T.eval(("return remuda._butler_command_run('guard', {'guard', %s}, {kind='session', session = 'butler', instance_id = _inst('butler')})"):format(
   table.concat((function(t) for i, v in ipairs(t) do t[i] = string.format("%q", v) end return t end)({ ... }), ", "))) end
 -- Guard and approvals on, a fresh data dir and a fresh relay stand-in; grants on unless told otherwise.
 local function on(name, grants)
@@ -102,7 +104,14 @@ local function oc(line, who, event)
 end
 local function at(offset) T.eval(("remuda.butler.guard_grants.now = function() return %d end"):format(1790000000 + offset)) end
 -- Make the audit log unwritable (opening it for append fails) or writable again.
-local function audit_mode(mode) T.eval(("remuda.process.run({ argv = { 'chmod', '%s', remuda.butler.guard_policy.log_path() } })"):format(mode)) end
+local function audit_mode(mode)
+  if mode == "400" then
+    T.eval([[local path = remuda.butler.guard_policy.log_path(); remuda._real_io_open = io.open
+      io.open = function(p, m) if p == path and m == 'a' then return nil, 'injected append failure' end; return remuda._real_io_open(p, m) end]])
+  else
+    T.eval("io.open = remuda._real_io_open; remuda._real_io_open = nil")
+  end
+end
 local function logged_errors() return T.eval("return table.concat(remuda._t_logged or {}, '|')") end
 local function frozen() return T.eval("return tostring(remuda.butler.guard_grants.frozen())") end
 local function lines() return T.eval("return remuda._t_lines()") end

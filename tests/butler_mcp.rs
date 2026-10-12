@@ -192,7 +192,7 @@ fn butler_status_is_a_live_mcp_tool_not_a_terminal_scrape() {
     let status_line = eval(
         &path,
         &format!(
-            "return remuda._dispatch_extension_command('butler', {{'statusline', {}}}, {{stdin = {}}})",
+            "return remuda._extension_commands.butler({{'statusline', {}}}, {{kind='session',session='butler',instance_id=_inst('butler'),stdin={}}})",
             serde_json::to_string(&status_path).unwrap(),
             serde_json::to_string(snapshot).unwrap(),
         ),
@@ -209,7 +209,7 @@ fn butler_status_is_a_live_mcp_tool_not_a_terminal_scrape() {
     let failed_write_line = eval(
         &path,
         &format!(
-            "return remuda._dispatch_extension_command('butler', {{'statusline', {}}}, {{stdin = {}}})",
+            "return remuda._extension_commands.butler({{'statusline', {}}}, {{kind='session',session='butler',instance_id=_inst('butler'),stdin={}}})",
             serde_json::to_string(&failed_write_path.display().to_string()).unwrap(),
             serde_json::to_string(snapshot).unwrap(),
         ),
@@ -222,7 +222,7 @@ fn butler_status_is_a_live_mcp_tool_not_a_terminal_scrape() {
     let non_status_line = eval(
         &path,
         &format!(
-            "return remuda._dispatch_extension_command('butler', {{'statusline', {}}}, {{stdin = {}}})",
+            "return remuda._extension_commands.butler({{'statusline', {}}}, {{kind='session',session='butler',instance_id=_inst('butler'),stdin={}}})",
             serde_json::to_string(&non_status_path.display().to_string()).unwrap(),
             serde_json::to_string(snapshot).unwrap(),
         ),
@@ -255,7 +255,7 @@ fn butler_status_is_a_live_mcp_tool_not_a_terminal_scrape() {
     let status_line = eval(
         &path,
         &format!(
-            "return remuda._dispatch_extension_command('butler', {{'statusline', {}}}, {{stdin = {}}})",
+            "return remuda._extension_commands.butler({{'statusline', {}}}, {{kind='session',session='butler',instance_id=_inst('butler'),stdin={}}})",
             serde_json::to_string(&status_path).unwrap(),
             serde_json::to_string(snapshot).unwrap(),
         ),
@@ -268,7 +268,7 @@ fn butler_status_is_a_live_mcp_tool_not_a_terminal_scrape() {
     let status_line = eval(
         &path,
         &format!(
-            "return remuda._dispatch_extension_command('butler', {{'statusline', {}}}, {{stdin = {}}})",
+            "return remuda._extension_commands.butler({{'statusline', {}}}, {{kind='session',session='butler',instance_id=_inst('butler'),stdin={}}})",
             serde_json::to_string(&status_path).unwrap(),
             serde_json::to_string(snapshot).unwrap(),
         ),
@@ -330,7 +330,11 @@ fn matrix_reply_is_not_registered_as_a_text_only_mcp_tool() {
     );
 }
 
+/// Fixture snapshots carry the bound instance id the way the core's snapshot does: `_inst(session)`.
+const INST: &str = "local function _inst(s) for _, a in pairs((remuda._butler_bus or {}).agents or {}) do if type(a) == 'table' and a.session_name == s then return a.instance_id end end end ";
+
 fn eval(path: &Path, code: &str) -> String {
+    let code = &format!("{INST}{code}");
     match client::request(path, &Request::Eval { code: code.into(), name: None }).expect("eval") {
         Response::Value(value) => value,
         other => panic!("eval {code:?} failed: {other:?}"),
@@ -399,18 +403,18 @@ fn cli_launch_parents_to_the_calling_member_not_butler() {
         "remuda._butler_agent_builders.claude = function() return {'sleep', '100'} end; \
          remuda._butler_launch('claude', 'm1')",
     );
-    let launch = |env: &str, name: &str| {
+    let launch = |caller: &str, name: &str| {
         format!(
-            "return remuda._extension_commands.butler({{'launch', 'claude', '{name}'}}, {{ env = {env} }})"
+            "return remuda._extension_commands.butler({{'launch', 'claude', '{name}'}}, {caller})"
         )
     };
-    eval(&path, &launch("{ REMUDA_BUTLER_AGENT_ID = remuda._butler_bus.agents.m1.id }", "m2"));
+    eval(&path, &launch("{kind='session', session='m1', instance_id=_inst('m1'), env={REMUDA_BUTLER_AGENT_ID='butler'}}", "m2"));
     assert_eq!(eval(&path, "return remuda._butler_bus.agents.m2.parent"), "m1");
-    eval(&path, &launch("{}", "m3"));
+    eval(&path, &launch("{kind='outside'}", "m3"));
     assert_eq!(eval(&path, "return remuda._butler_bus.agents.m3.parent"), "butler");
     let unknown = client::request(
         &path,
-        &Request::Eval { code: launch("{ REMUDA_BUTLER_AGENT_ID = 'ghost' }", "m4"), name: None },
+        &Request::Eval { code: launch("{kind='session', session='unregistered', env={REMUDA_BUTLER_AGENT_ID='butler'}}", "m4"), name: None },
     )
     .expect("eval");
     assert!(matches!(unknown, Response::Error(_)), "{unknown:?}");
@@ -443,17 +447,13 @@ fn butler_close_is_limited_to_own_idle_members_unless_forced() {
     let other_id = eval(&path, "return remuda._butler_bus.agents.other.id");
     let cli = |caller_id: &str, args: &str| {
         eval(&path, &format!(
-            "local old=remuda.caller; remuda.caller=function() \
-             for _, agent in pairs(remuda._butler_bus.agents) do \
-               if agent.id == {caller_id:?} then return {{kind='session', session=agent.session_name}} end \
-             end; return {{kind='outside'}} end; \
-             local result=remuda._extension_commands.butler({{'close', {args}}}, \
-               {{env={{REMUDA_BUTLER_AGENT_ID={caller_id:?}}}}}); \
-             remuda.caller=old; return result"
+            "local caller; for _, agent in pairs(remuda._butler_bus.agents) do \
+               if agent.id == {caller_id:?} then caller={{kind='session', session=agent.session_name, instance_id=_inst(agent.session_name)}} end \
+             end; return remuda._extension_commands.butler({{'close', {args}}}, caller)"
         ))
     };
     let not_owner = cli(&other_id, "'kid'");
-    assert!(not_owner.contains("only your direct members") && not_owner.ends_with("Next: remuda butler sessions"), "{not_owner}");
+    assert!(not_owner.contains("only your members and their descendants") && not_owner.ends_with("Next: remuda butler sessions"), "{not_owner}");
     assert_eq!(eval(&path, "return #remuda._butler_close_test_calls"), "0");
 
     eval(&path, "remuda._butler_close_test_idle = false");
@@ -469,7 +469,7 @@ fn butler_close_is_limited_to_own_idle_members_unless_forced() {
     assert_eq!(eval(&path, "return #remuda._butler_close_test_calls"), "0");
 
     let forced = cli(&other_id, "'kid', '--force'");
-    assert!(forced.contains("only your direct members"), "--force bypassed ownership: {forced}");
+    assert!(forced.contains("only your members and their descendants"), "--force bypassed ownership: {forced}");
     assert_eq!(eval(&path, "return #remuda._butler_close_test_calls"), "0");
     let forced = cli(&leader_id, "'kid', '--force'");
     assert_eq!(forced, "Closed kid.\nNext: remuda butler sessions");
@@ -510,30 +510,26 @@ fn butler_close_cli_uses_core_caller_not_forwarded_env() {
             format!("{{REMUDA_BUTLER_AGENT_ID={env_id:?}}}")
         };
         eval(&path, &format!(
-            "local old=remuda.caller; remuda.caller=function() return {{kind={kind:?}, session={session:?}}} end; \
-             local result=remuda._extension_commands.butler({{'close', {name:?}, '--force'}}, {{env={env}}}); \
-             remuda.caller=old; return result"
+            "return remuda._extension_commands.butler({{'close', {name:?}, '--force'}}, \
+             {{kind={kind:?}, session={session:?}, instance_id=_inst({session:?}), env={env}}})"
         ))
     };
 
     let cleared = cli("session", "lead", "", "lead");
-    assert!(cleared.contains("only your direct members"), "cleared env bypassed ownership: {cleared}");
+    assert!(cleared.contains("only your members and their descendants"), "cleared env bypassed ownership: {cleared}");
     let spoofed = cli("session", "lead", &other_id, "other-kid");
-    assert!(spoofed.contains("only your direct members"), "spoofed env bypassed ownership: {spoofed}");
+    assert!(spoofed.contains("only your members and their descendants"), "spoofed env bypassed ownership: {spoofed}");
     assert_eq!(eval(&path, "return #remuda._butler_close_test_calls"), "0");
-    // An unknown caller (a plain Windows terminal) closes as the Butler, like an outside one.
-    // A Butler-kind close reaches only Butler's direct members: 'other' is one, 'kid' is lead's.
-    let unknown = cli("unknown", "", &lead_id, "other");
-    assert_eq!(unknown, "Closed other.\nNext: remuda butler sessions");
-    assert_eq!(eval(&path, "return remuda._butler_close_test_calls[1]"), "other");
+    // Unknown/native callbacks and unregistered sessions never acquire root authority.
+    for (kind, session) in [("unknown", ""), ("session", "unregistered"), ("", "")] {
+        let refused = cli(kind, session, &lead_id, "other");
+        assert!(refused.contains("cannot identify") && refused.contains("Next:"), "{refused}");
+        assert_eq!(eval(&path, "return #remuda._butler_close_test_calls"), "0");
+    }
 
-    let outside = eval(&path, &format!(
-        "local old=remuda.caller; remuda.caller=function() return {{kind='outside'}} end; \
-         local result=remuda._extension_commands.butler({{'close', 'lead', '--force'}}, {{env={{}}}}); \
-         remuda.caller=old; return result"
-    ));
+    let outside = cli("outside", "", "", "lead");
     assert_eq!(outside, "Closed lead.\nNext: remuda butler sessions");
-    assert_eq!(eval(&path, "return remuda._butler_close_test_calls[2]"), "lead");
+    assert_eq!(eval(&path, "return remuda._butler_close_test_calls[1]"), "lead");
     eval(&path, "local close=remuda._butler_close_test_native_close; \
       for _, name in ipairs({'kid', 'other-kid', 'lead', 'other'}) do pcall(close, name) end");
 }
@@ -549,10 +545,9 @@ fn butler_close_cli_invokes_real_close_path() {
       remuda._butler_launch('fake', 'real-kid')
       remuda._butler_mail.unread = function() return 0 end
       remuda.butler.is_idle = function() return true end
-      remuda.caller = function() return {kind='outside'} end
     "#);
     let result = eval(&path,
-        "return remuda._extension_commands.butler({'close', 'real-kid', '--force'}, {env={}})");
+        "return remuda._extension_commands.butler({'close', 'real-kid', '--force'}, {kind='outside'})");
     assert_eq!(result, "Closed real-kid.\nNext: remuda butler sessions");
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.agents['real-kid'] == nil)"), "true",
         "the real remuda.close path must remove the closed member from bus.agents");
@@ -586,24 +581,24 @@ fn butler_close_accepts_published_string_force_argument() {
     "#);
     let refused = eval(
         &path,
-        "local token = remuda._butler_bus.agents.butler.token; \
-         local ok = pcall(remuda._call, 'butler_close', {name='m1', force='false'}, {capability=token}); \
+        "\
+         local ok = pcall(remuda.tools.butler_close, {name='m1', force='false'}, {kind='session', session='butler', instance_id=_inst('butler')}); \
          return tostring(ok) .. ':' .. tostring(remuda._butler_bus.agents.m1 ~= nil)",
     );
     assert_eq!(refused, "false:true", "string force=false must not force the close");
     let result = eval(
         &path,
-        "local token = remuda._butler_bus.agents.butler.token; \
-         return remuda._call('butler_close', {name='m1', force='true'}, {capability=token})",
+        "\
+         return remuda.tools.butler_close({name='m1', force='true'}, {kind='session', session='butler', instance_id=_inst('butler')})",
     );
     assert_eq!(result, "Closed m1.\nNext: remuda butler sessions");
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.agents.m1 == nil)"), "true");
 
     let invalid = eval(
         &path,
-        "local token = remuda._butler_bus.agents.butler.token; \
-         local ok, message = pcall(remuda._call, 'butler_close', \
-           {name='m1', force='yes'}, {capability=token}); \
+        "\
+         local ok, message = pcall(remuda.tools.butler_close, \
+           {name='m1', force='yes'}, {kind='session', session='butler', instance_id=_inst('butler')}); \
          return tostring(ok) .. ':' .. tostring(message)",
     );
     assert!(invalid.starts_with("false:force must be a boolean."), "{invalid}");
@@ -2469,7 +2464,7 @@ fn trust_dialogs_on_external_or_reused_directories_wait_for_a_human() {
         &format!(
             r#"remuda.butler.project_home({projects:?})
             remuda._butler_readiness_timeout = 30
-            remuda._butler_test_force_launch_probe = {{ outside = true, outside_codex = true, reused = true, three = true, templated = true, fresh = true }}
+            remuda._butler_test_force_launch_probe = {{ external = true, external_codex = true, reused = true, three = true, templated = true, fresh = true }}
             remuda._butler_agent_builders.claude = function() return {{'sh', '-c', 'sleep 20'}} end
             remuda._butler_agent_builders.codex = function() return {{'sh', '-c', 'sleep 20'}} end
             local real_ls = remuda.ls
@@ -2483,8 +2478,8 @@ fn trust_dialogs_on_external_or_reused_directories_wait_for_a_human() {
             local three_options = safe_modal .. "\n  Inspect first"
             local codex_modal = "Trust this folder?\n› 1. Trust and continue\n  2. Don't trust"
             remuda.capture = function(name)
-              if name == 'outside' then return selected_yes end
-              if name == 'outside_codex' then return codex_modal end
+              if name == 'external' then return selected_yes end
+              if name == 'external_codex' then return codex_modal end
               if name == 'reused' then return safe_modal end
               if name == 'fresh' then return remuda._trust_test_fresh end
               return three_options
@@ -2500,8 +2495,8 @@ fn trust_dialogs_on_external_or_reused_directories_wait_for_a_human() {
             end
             remuda._butler_send = function(_, _, text) table.insert(remuda._trust_test_reports, text); return 'captured' end
             local cap = remuda._butler_bus.agents.butler.token
-            remuda._call('butler_launch', {{ kind = 'claude', name = 'outside', cwd = {external:?} }}, {{ capability = cap }})
-            remuda._call('butler_launch', {{ kind = 'codex', name = 'outside_codex', cwd = {external:?} }}, {{ capability = cap }})
+            remuda.tools.butler_launch({{ kind = 'claude', name = 'external', cwd = {external:?} }}, {{ kind = 'session', session = 'butler', instance_id = _inst('butler') }})
+            remuda.tools.butler_launch({{ kind = 'codex', name = 'external_codex', cwd = {external:?} }}, {{ kind = 'session', session = 'butler', instance_id = _inst('butler') }})
             remuda._butler_topic_new('reused', nil, 'claude')
             remuda._butler_topic_new('three', nil, 'claude')
             remuda.butler.template('clone', function(topic) topic.write('repo.txt', 'third-party source') end)
@@ -2982,7 +2977,7 @@ fn setup_renotice(path: &Path, alias: &str) {
         remuda._rn_inbox_id = function(id)
           local agent = remuda._butler_bus.agents[alias]
           local ok, out = pcall(remuda._butler_command_run, 'inbox', {{ 'inbox', id }},
-            {{ env = {{ REMUDA_BUTLER_AGENT_ID = agent.id }} }})
+            {{ kind = 'session', session = agent.session_name, instance_id = _inst(agent.session_name) }})
           return tostring(out)
         end
         "#,

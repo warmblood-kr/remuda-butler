@@ -15,6 +15,13 @@ local function compact(text)
   return tostring(text):gsub("%s+", "")
 end
 
+local function composer_is_task(text, task)
+  text = tostring(text or "")
+  local placeholder = text:match("^%[?Pasted text #%d+%s*%+%s*%d+%s+lines?%]?%s*$") ~= nil
+    or text:match("^%[Pasted Content %d+ chars%]$") ~= nil
+  return #text > 0 and (compact(text) == compact(task) or placeholder)
+end
+
 local function utf8_prefix(value, limit)
   local cut = limit
   while cut > 0 do
@@ -96,11 +103,11 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
     end
 
     if options.trust_dialog then
-      local checked, waiting = pcall(options.trust_dialog, screen)
+      local checked, waiting, why = pcall(options.trust_dialog, screen, attempts > 0)
       if not checked or waiting then
         startup_ticks = startup_ticks + 1
         if startup_ticks >= (options.ready_timeout or 60) then
-          finish(false, "waiting for a human to answer the trust dialog")
+          finish(false, why or "waiting for a human to answer the trust dialog")
         end
         return
       end
@@ -221,10 +228,8 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
       finish(true)
       return
     end
-    local placeholder = composer_text:match("^%[?Pasted text #%d+%s*%+%s*%d+%s+lines?%]?%s*$") ~= nil
-      or composer_text:match("^%[Pasted Content %d+ chars%]$") ~= nil
-    local composer_is_task = not empty and (compact(composer_text) == compact(task) or placeholder)
-    if composer_is_task then task_seen_in_composer = true end
+    local contains_task = not empty and composer_is_task(composer_text, task)
+    if contains_task then task_seen_in_composer = true end
     if started and empty then
       finish(true)
       return
@@ -242,7 +247,7 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
     end
     -- A task can be fully painted while its first Return is dropped. Retry
     -- submit once, before allowing queued notices to reach this composer.
-    if composer_is_task and verify_ticks >= 4 and not options.return_retried then
+    if contains_task and verify_ticks >= 4 and not options.return_retried then
       local allowed = true
       if options.allowed then
         local checked, result = pcall(options.allowed, true, screen)
@@ -265,6 +270,7 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
   return poll
 end
 
-local delivery = { schedule = schedule, ready = ready, prompt_start_visible = prompt_start_visible, trace_write = trace_write }
+local delivery = { schedule = schedule, ready = ready, prompt_start_visible = prompt_start_visible,
+  trace_write = trace_write, composer_is_task = composer_is_task }
 remuda._butler_prompt_delivery = delivery
 return delivery
