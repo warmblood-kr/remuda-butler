@@ -593,7 +593,6 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
         -- Retry Return while the task sits in the composer; a write that
         -- never appeared is reported only after 15 seconds.
         delivery.write_at = os.time()
-        local task_line = task:gsub("^%s+", ""):match("^[^\n]*") or ""
         local checks, seen_in_composer, returns = 0, false, 0
         confirm = remuda.schedule({ every = 0.5, run = function()
           if not same_live_launch() then
@@ -616,8 +615,8 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
           end
           local checked, session = pcall(remuda.session, actual)
           local active = working or not checked or not session or session.is_busy == true
-          local task_in_composer = #task_line > 0 and (text == task_line
-            or (#text > 0 and task_line:sub(1, #text) == text))
+          local task_in_composer = decision == "NON-EMPTY"
+            and PROMPT_DELIVERY.composer_is_task(text, task)
           if task_in_composer then seen_in_composer = true end
           if decision == "EMPTY" and (active or seen_in_composer) then
             remuda.cancel(confirm)
@@ -631,7 +630,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
           end
           -- Give the UI time to consume the first Return before retrying.
           if decision == "NON-EMPTY" and task_in_composer and checks >= 4 and checks % 4 == 0
-              and returns < 3 then
+              and returns < 3 and remuda._butler_task_retry_policy(actual) then
             returns = returns + 1
             pcall(remuda.key, actual, "RET")
           end
