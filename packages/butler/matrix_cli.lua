@@ -40,25 +40,25 @@ local MATRIX_CLI_SPEC = {
   },
   verbs = {
     status = { about = "Show Matrix connection status", next = "remuda butler matrix rooms" },
-    rooms = { about = "List Matrix rooms", options = { { long = "public", help = "Search public rooms" } }, args = { { name = "TERM", required = false } }, next = "remuda butler matrix setup" },
-    history = { about = "Show recent Matrix events", args = { { name = "WORDS", required = false, multiple = true } }, next = "remuda butler matrix status" },
-    thread = { about = "Show every reply in a Matrix thread", args = { { name = "EVENT_ID" } }, next = "remuda butler matrix reply EVENT_ID TEXT" },
-    follow = { about = "Follow a Matrix thread", args = { { name = "EVENT_ID" } }, next = "remuda butler matrix thread EVENT_ID" },
-    unfollow = { about = "Unfollow a Matrix thread", args = { { name = "EVENT_ID" } }, next = "remuda butler matrix follow EVENT_ID" },
-    event = { about = "Show one Matrix event", args = { { name = "EVENT_ID" } }, next = "remuda butler matrix history" },
-    get = { about = "Show one Matrix event", args = { { name = "EVENT_ID" } }, next = "remuda butler matrix history" },
-    send = { about = "Send a Matrix message", args = { { name = "TEXT", multiple = true } }, next = "remuda butler matrix history" },
-    reply = { about = "Reply to a Matrix event", args = { { name = "WORDS", multiple = true } }, next = "remuda butler matrix history" },
-    react = { about = "React to a Matrix event", args = { { name = "EVENT_AND_KEY", multiple = true } }, next = "remuda butler matrix history" },
+    rooms = { about = "List Matrix rooms", options = { { long = "public", help = "Search public rooms" } }, args = { { name = "TERM", required = false, help = "TERM" } }, next = "remuda butler matrix setup" },
+    history = { about = "Show recent Matrix events", args = { { name = "WORDS", required = false, multiple = true, help = "WORDS" } }, next = "remuda butler matrix status" },
+    thread = { about = "Show every reply in a Matrix thread", args = { { name = "EVENT_ID", help = "EVENT_ID" } }, next = "remuda butler matrix reply EVENT_ID TEXT" },
+    follow = { about = "Follow a Matrix thread", args = { { name = "EVENT_ID", help = "EVENT_ID" } }, next = "remuda butler matrix thread EVENT_ID" },
+    unfollow = { about = "Unfollow a Matrix thread", args = { { name = "EVENT_ID", help = "EVENT_ID" } }, next = "remuda butler matrix follow EVENT_ID" },
+    event = { about = "Show one Matrix event", args = { { name = "EVENT_ID", help = "EVENT_ID" } }, next = "remuda butler matrix history" },
+    get = { about = "Show one Matrix event", args = { { name = "EVENT_ID", help = "EVENT_ID" } }, next = "remuda butler matrix history" },
+    send = { about = "Send a Matrix message", args = { { name = "TEXT", multiple = true, help = "TEXT" } }, next = "remuda butler matrix history" },
+    reply = { about = "Reply to a Matrix event", args = { { name = "WORDS", multiple = true, help = "WORDS" } }, next = "remuda butler matrix history" },
+    react = { about = "React to a Matrix event", args = { { name = "EVENT_AND_KEY", multiple = true, help = "EVENT_AND_KEY" } }, next = "remuda butler matrix history" },
     upload = { about = "Upload a file to Matrix", options = {
       { long = "thread", value = "EVENT_ID", help = "Thread to reply in" },
       { long = "caption", value = "TEXT", help = "Caption for the upload" },
-    }, args = { { name = "PATH" } }, next = "remuda butler matrix history" },
-    download = { about = "Download Matrix media", args = { { name = "MXC" } }, next = "remuda butler matrix history" },
-    redact = { about = "Redact a Matrix event", options = { { long = "reason", value = "TEXT", help = "Reason for redaction" } }, args = { { name = "EVENT_ID" } }, next = "remuda butler matrix history" },
-    join = { about = "Join a Matrix room", args = { { name = "ROOM" } }, next = "remuda butler matrix rooms" },
-    leave = { about = "Leave a Matrix room", args = { { name = "ROOM" } }, next = "remuda butler matrix rooms" },
-    ["mark-all"] = { about = "Mark a room as the ALL-BUTLERS room", args = { { name = "ROOM" } }, next = "remuda butler matrix rooms" },
+    }, args = { { name = "PATH", help = "PATH" } }, next = "remuda butler matrix history" },
+    download = { about = "Download Matrix media", args = { { name = "MXC", help = "MXC" } }, next = "remuda butler matrix history" },
+    redact = { about = "Redact a Matrix event", options = { { long = "reason", value = "TEXT", help = "Reason for redaction" } }, args = { { name = "EVENT_ID", help = "EVENT_ID" } }, next = "remuda butler matrix history" },
+    join = { about = "Join a Matrix room", args = { { name = "ROOM", help = "ROOM" } }, next = "remuda butler matrix rooms" },
+    leave = { about = "Leave a Matrix room", args = { { name = "ROOM", help = "ROOM" } }, next = "remuda butler matrix rooms" },
+    ["mark-all"] = { about = "Mark a room as the ALL-BUTLERS room", args = { { name = "ROOM", help = "ROOM" } }, next = "remuda butler matrix rooms" },
     quarantine = { about = "Inspect quarantined Matrix events", options = { { long = "id", value = "EVENT_ID", help = "Inspect one event" } }, next = "remuda butler matrix status" },
   },
 }
@@ -304,18 +304,18 @@ local function parsed_simple_request(report)
   local values, verb = report.values or {}, report.verb
   if verb == "status" then
     if values.room ~= nil then return nil end
-    return verb, { json = values.json == true }
+    return verb, { json = (values.json == true or nil) }
   elseif verb == "rooms" then
     if values.room ~= nil then return nil end
-    return verb, { json = values.json == true, public = values.public == true, public_term = values.TERM }
+    return verb, { json = (values.json == true or nil), public = (values.public == true or nil), public_term = values.TERM }
   elseif verb == "history" then
     if values.WORDS ~= nil and values.WORDS ~= "" and not (type(values.WORDS) == "table" and #values.WORDS == 0) then
       return nil
     end
-    return verb, { json = values.json == true, room = values.room, n = values.n }
+    return verb, { json = (values.json == true or nil), room = values.room, n = values.n }
   elseif verb == "event" or verb == "get" or verb == "follow" or verb == "unfollow" then
     return verb == "get" and "event" or verb, {
-      json = values.json == true, room = values.room, event_id = values.EVENT_ID,
+      json = (values.json == true or nil), room = values.room, event_id = values.EVENT_ID,
     }
   end
 end
