@@ -304,6 +304,38 @@ for _, text in ipairs({ '[]', '{"permissions":null}', '{"permissions":{"allow":{
   current = text
   ok("doctor: invalid file needs Fix", doctor({ path = PATH }, "claude"):find("Fix:", 1, true))
 end
+-- Named-member rules and source precedence: a broad allow never confirms close permission while any
+-- source denies or asks for a specific member; the deny may live in a different source than the allow.
+local files = {}
+io.open = function(path, mode)
+  if files[path] then return { read = function() return files[path] end, close = function() end } end
+  if path == PATH then return nil, "No such file or directory" end
+  return opened(path, mode)
+end
+local function multi(...)
+  return table.concat(doctor_module.permission_lines({ path = PATH }, "claude", { sources = { ... } }), "\n")
+end
+local allow_broad = '{"permissions":{"allow":["Bash(remuda butler:*)"]}}'
+for _, key in ipairs({ "deny", "ask" }) do
+  files = { ["/s/user.json"] = allow_broad,
+    ["/s/project.json"] = '{"permissions":{"' .. key .. '":["Bash(remuda butler close alice)"]}}' }
+  ok("doctor: named " .. key .. " in a second source blocks", multi("/s/user.json", "/s/project.json"):find("under " .. key, 1, true))
+  ok("doctor: named " .. key .. " wins whatever the source order", multi("/s/project.json", "/s/user.json"):find("under " .. key, 1, true))
+  files = { ["/s/user.json"] = '{"permissions":{"allow":["Bash(remuda butler:*)"],"' .. key .. '":["Bash(remuda butler close alice:*)"]}}' }
+  ok("doctor: named " .. key .. " prefix rule in the same source blocks", multi("/s/user.json"):find("under " .. key, 1, true))
+end
+files = { ["/s/user.json"] = allow_broad,
+  ["/s/project.json"] = '{"permissions":{"deny":["Bash(remuda butler send alice)"]}}' }
+ok("doctor: unrelated named deny keeps the candidate allow", multi("/s/user.json", "/s/project.json"):find("candidate allow pattern", 1, true))
+files = { ["/s/user.json"] = '{"permissions":{"allow":["Bash(remuda butler close alice)"]}}' }
+ok("doctor: a member-specific allow is not a close-NAME allow", multi("/s/user.json"):find("no current allow", 1, true))
+io.open = function(path, mode)
+  if path == PATH then
+    if not current then return nil, "No such file or directory" end
+    return { read = function() return current end, close = function() end }
+  end
+  return opened(path, mode)
+end
 current = nil
 ok("doctor: missing file needs Fix", doctor({ path = PATH, present = { PREFIX } }, "claude"):find("Fix:", 1, true))
 eq("doctor: codex", doctor(nil, "codex"),

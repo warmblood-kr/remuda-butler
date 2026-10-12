@@ -196,6 +196,7 @@ local function permission_lines(report, kind, context)
       "Fix: review permissions.deny/ask and autoMode.classifyAllShell in the checked files; restore Bash(remuda butler:*) in permissions.allow only if intended. Confirm loaded sources with Claude /status; checked "
         .. safe(table.concat(sources, ", ")) }
   end
+  local allow_scan = false
   local function matches(rule)
     if rule == "Bash" or rule == "Bash(*)" then return true end
     if type(rule) ~= "string" then return nil end
@@ -203,7 +204,10 @@ local function permission_lines(report, kind, context)
     if not pattern then return false end
     pattern = pattern:gsub(":%*$", " *")
     local escaped = pattern:gsub("([%^%$%(%)%%%.%[%]%+%-%?])", "%%%1"):gsub("%*", ".*")
-    return ("remuda butler close NAME"):match("^" .. escaped .. "$") ~= nil
+    if ("remuda butler close NAME"):match("^" .. escaped .. "$") ~= nil then return true end
+    -- A deny/ask rule naming a specific member (`remuda butler close alice`) may cover the real
+    -- command even though it cannot match the NAME placeholder; treat it as covering.
+    return pattern:sub(1, #"remuda butler close ") == "remuda butler close " and not allow_scan
   end
   for _, source in ipairs(sources) do
     local file, why = io.open(source, "rb")
@@ -256,12 +260,13 @@ local function permission_lines(report, kind, context)
     end
   end
   if classify_all then return blocked("autoMode.classifyAllShell suspends shell allow rules") end
+  allow_scan = true
   for _, entry in ipairs(allows) do
     if matches(entry.rule) and entry.rule ~= "Bash" and entry.rule ~= "Bash(*)" then
       local prefix = entry.rule:match("^Bash%((.-):%*%)$") or entry.rule:match("^Bash%((.-) %*%)$")
       if prefix and (prefix == "remuda butler" or prefix == "remuda butler close") then
         return { head .. "present " .. safe(entry.rule) .. " — " .. safe(entry.source)
-          .. " (current settings allow remuda butler close NAME)",
+          .. " (candidate allow pattern for remuda butler close NAME; deny and ask rules checked across current settings)",
           "Next: this dry check reads settings files only; Claude hooks, server-managed policy and runtime settings may still block execution" }
       end
     end

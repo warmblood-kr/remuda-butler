@@ -93,7 +93,7 @@ actions:
 exit: 0
 stdout:
 doctor-stub
-Permissions butler (claude): present Bash(remuda butler:*) — /doctor/settings.local.json (current settings allow remuda butler close NAME)
+Permissions butler (claude): present Bash(remuda butler:*) — /doctor/settings.local.json (candidate allow pattern for remuda butler close NAME; deny and ask rules checked across current settings)
 Next: this dry check reads settings files only; Claude hooks, server-managed policy and runtime settings may still block execution
 stderr:
 
