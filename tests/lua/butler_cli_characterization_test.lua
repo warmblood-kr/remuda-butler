@@ -41,8 +41,14 @@ local function normalize(text)
     if at then text = text:sub(1, at - 1) .. "<GLOBAL-USAGE>" .. text:sub(to + 1) end
   end
   text = text:gsub("%f[%w][%d%u]+%f[%W]", function(word) return #word == 26 and "<ULID>" or word end)
-  text = text:gsub("(%.lua\"%]):%d+:", "%1:<LINE>:"):gsub("(%.lua\"%]):%d+>", "%1:<LINE>>")
-  text = text:gsub("(native/src/[%w_/]+%.rs):%d+:%d+:", "%1:<LINE>:<COL>:")
+  text = text:gsub("(%.lua\"%]):%d+:", "%1:<LINE>:")
+  -- Narrow allowance: only traceback frame lines (tab-indented, "... in <what>") lose their
+  -- numeric closing/native locations; the same text in a payload keeps its numbers.
+  text = text:gsub("[^\n]+", function(line)
+    if not line:find("^\t") then return line end
+    line = line:gsub("^(\t[^\n]-%.lua\"%]:<LINE>: in function <%[string \"[^\"]+%.lua\"%]):%d+>$", "%1:<LINE>>")
+    return (line:gsub("^(\tnative/src/[%w_/]+%.rs):%d+:%d+:( in )", "%1:<LINE>:<COL>:%2"))
+  end)
   return (text:gsub("%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%dZ", "<TS>"))
 end
 
