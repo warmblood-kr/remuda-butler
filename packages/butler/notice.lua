@@ -210,6 +210,13 @@ function remuda._butler_notify_policy(session, now)
     return false
   end
   local decision, text = remuda._butler_prompt_is_empty(kind, prompt_screen)
+  -- During a fresh redraw the cursor may still sit on a footer or banner.
+  -- A cursor row with no composer glyph supplies no input evidence: use the
+  -- full parser only when it independently identifies an empty composer.
+  if decision == "UNPARSEABLE" and prompt_screen ~= full_screen then
+    local full_decision, full_text = remuda._butler_prompt_is_empty(kind, full_screen)
+    if full_decision == "EMPTY" then decision, text = full_decision, full_text end
+  end
   if seen.decision ~= decision then -- once per change, not every retry
     seen.decision = decision
     _butler_session_trace("notice_prompt", "message_ids="
