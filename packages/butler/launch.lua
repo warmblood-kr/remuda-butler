@@ -674,6 +674,11 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
           end
           local checked, session = pcall(remuda.session, actual)
           local active = working or not checked or not session or session.is_busy == true
+          if decision == "NON-EMPTY" and PROMPT_DELIVERY.composer_is_opaque(text) then
+            remuda.cancel(confirm)
+            finish_task(false, "opaque paste has no delivery ownership evidence", true)
+            return
+          end
           local task_in_composer = decision == "NON-EMPTY"
             and PROMPT_DELIVERY.composer_is_task(text, task)
           if task_in_composer then seen_in_composer = true end

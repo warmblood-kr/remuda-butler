@@ -15,11 +15,16 @@ local function compact(text)
   return tostring(text):gsub("%s+", "")
 end
 
+local function composer_is_opaque(text)
+  text = tostring(text or "")
+  return text:match("^%[?Pasted text #%d+%s*%+%s*%d+%s+lines?%]?%s*$") ~= nil
+    or text:match("^%[Pasted Content %d+ chars%]$") ~= nil
+end
+
 local function composer_is_task(text, task)
   text = tostring(text or "")
-  local placeholder = text:match("^%[?Pasted text #%d+%s*%+%s*%d+%s+lines?%]?%s*$") ~= nil
-    or text:match("^%[Pasted Content %d+ chars%]$") ~= nil
-  return #text > 0 and (compact(text) == compact(task) or placeholder)
+  -- Placeholder shape cannot prove that this delivery still owns the paste.
+  return #text > 0 and not composer_is_opaque(text) and compact(text) == compact(task)
 end
 
 local function utf8_prefix(value, limit)
@@ -228,6 +233,10 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
       finish(true)
       return
     end
+    if not empty and composer_is_opaque(composer_text) then
+      finish(false, "opaque paste has no delivery ownership evidence", true)
+      return
+    end
     local contains_task = not empty and composer_is_task(composer_text, task)
     if contains_task then task_seen_in_composer = true end
     if started and empty then
@@ -271,6 +280,7 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
 end
 
 local delivery = { schedule = schedule, ready = ready, prompt_start_visible = prompt_start_visible,
-  trace_write = trace_write, composer_is_task = composer_is_task }
+  trace_write = trace_write, composer_is_task = composer_is_task,
+  composer_is_opaque = composer_is_opaque }
 remuda._butler_prompt_delivery = delivery
 return delivery
