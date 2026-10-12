@@ -88,3 +88,33 @@ stderr:
 <GLOBAL-USAGE>
 actions:
 (none)
+
+### [agent] remuda butler "doctor"
+exit: 0
+stdout:
+doctor-stub
+stderr:
+
+actions:
+doctor.probe()
+doctor.render()
+
+### [agent] remuda butler "doctor"
+exit: 0
+stdout:
+doctor-stub
+stderr:
+
+actions:
+doctor.probe()
+doctor.render()
+
+### [agent] remuda butler "doctor"
+exit: 0
+stdout:
+doctor-stub
+stderr:
+
+actions:
+doctor.probe()
+doctor.render()

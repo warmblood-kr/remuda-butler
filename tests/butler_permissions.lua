@@ -281,7 +281,7 @@ local state, why = permissions.write_if_changed("/s/butler/AGENTS.md", "# Butler
 ok("a refused write is returned, not thrown", state == nil and why == "disk full")
 
 -- doctor_line_has_next: the root line, in the words added / present / withheld / not written.
-local function doctor(r, kind) return table.concat(doctor_module.permission_lines(r, kind), "\n") end
+local function doctor(r, kind) return table.concat(doctor_module.launch_permission_lines(r, kind), "\n") end
 eq("doctor: added", doctor({ path = PATH, added = { PREFIX }, present = {}, withheld = {} }, "claude"),
   "Permissions butler (claude): added 1 rule to " .. PATH .. ": Bash(remuda butler:*) (file rewritten: private, mode 600)"
   .. "\nNext: to block the rule, move it to permissions.deny in that file")
