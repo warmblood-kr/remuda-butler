@@ -34,7 +34,7 @@ local function start_butler()
 end
 
 local usage -- the global usage text, substituted so a new verb does not rewrite every golden
-local function normalize(text)
+local function normalize(text, frames)
   text = (text or ""):gsub("\n$", "")
   if usage and usage ~= "" then
     local at, to = text:find(usage, 1, true)
@@ -42,15 +42,32 @@ local function normalize(text)
   end
   text = text:gsub("%f[%w][%d%u]+%f[%W]", function(word) return #word == 26 and "<ULID>" or word end)
   text = text:gsub("(%.lua\"%]):%d+:", "%1:<LINE>:")
-  -- Narrow allowance: only traceback frame lines (tab-indented, "... in <what>") lose their
-  -- numeric closing/native locations; the same text in a payload keeps its numbers.
-  text = text:gsub("[^\n]+", function(line)
-    if not line:find("^\t") then return line end
-    line = line:gsub("^(\t[^\n]-%.lua\"%]:<LINE>: in function <%[string \"[^\"]+%.lua\"%]):%d+>$", "%1:<LINE>>")
-    return (line:gsub("^(\tnative/src/[%w_/]+%.rs):%d+:%d+:( in )", "%1:<LINE>:<COL>:%2"))
-  end)
+  -- Narrow allowance: only the tab-indented frames directly under a `stack traceback:` header lose
+  -- their numeric closing/native locations; the same text anywhere else keeps its numbers.
+  -- `frames` is false for the stub-call log, which never holds a traceback.
+  if frames ~= false then
+    local in_trace = false
+    text = text:gsub("[^\n]+", function(line)
+      if line == "stack traceback:" then in_trace = true; return line end
+      if not (in_trace and line:find("^\t")) then in_trace = false; return line end
+      line = line:gsub("^(\t[^\n]-%.lua\"%]:<LINE>: in function <%[string \"[^\"]+%.lua\"%]):%d+>$", "%1:<LINE>>")
+      return (line:gsub("^(\tnative/src/[%w_/]+%.rs):%d+:%d+:( in )", "%1:<LINE>:<COL>:%2"))
+    end)
+  end
   return (text:gsub("%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%dZ", "<TS>"))
 end
+
+T.test("normalizer only rewrites frames under a traceback header", function()
+  local payload = "\tnative/src/x.rs:1:2: in function 'pcall'"
+  assert(normalize(payload) == payload, "payload line outside a traceback must keep its numbers")
+  assert(normalize(payload .. "\n\tnative/src/x.rs:3:4: in function 'pcall'") == payload .. "\n\tnative/src/x.rs:3:4: in function 'pcall'",
+    "distinct payload locations must stay distinct")
+  local trace = "stack traceback:\n" .. payload .. "\n\tnative/src/y.rs:5:6: in function 'pcall'\nafter\n" .. payload
+  local want = "stack traceback:\n\tnative/src/x.rs:<LINE>:<COL>: in function 'pcall'\n"
+    .. "\tnative/src/y.rs:<LINE>:<COL>: in function 'pcall'\nafter\n" .. payload
+  assert(normalize(trace) == want, normalize(trace))
+  assert(normalize("stack traceback:\n" .. payload, false) == "stack traceback:\n" .. payload, "actions are not normalized")
+end)
 
 -- A case is an argv array, or { argv = {...}, as = "agent", pre = lua, post = lua }.
 -- `as = "agent"` calls the Butler front door in-process with a daemon session caller.
@@ -110,7 +127,7 @@ local function run_case(case, trace)
     "exit: " .. code,
     "stdout:", normalize(out),
     "stderr:", normalize(err),
-    "actions:", log == "" and "(none)" or normalize(log),
+    "actions:", log == "" and "(none)" or normalize(log, false),
     "",
   }, "\n")
 end
