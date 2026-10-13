@@ -6,6 +6,10 @@ ALLOWLIST=${HAND_PARSED_ALLOWLIST:-$REPO/tests/hand_parsed_verbs.txt}
 MATRIX=$REPO/packages/butler/matrix_cli.lua
 COMMANDS=${1:-$REPO/packages/butler/commands.lua}
 INIT=$REPO/packages/butler/init.lua
+APPROVAL=$REPO/packages/butler/approval.lua
+APPROVE_TEXT=$REPO/packages/butler/approve_text.lua
+SCHEDULE_CLI=$REPO/packages/butler/schedule_cli.lua
+TYPED_LINES_CLI=$REPO/packages/butler/typed_lines_cli.lua
 
 check() {
   local commands=$1 tmp
@@ -144,8 +148,24 @@ SEED
     verb != "" && /args\[[0-9a-z]/ && /verb = "/ { hand=1 }
     END { flush() }
   ' "$tmp/status_commands" "$INIT" | grep -vE '^(matrix|topic)	' > "$tmp/status_init" || true
-  # Matrix leaves are declared in matrix_arg_spec and parsed through the shared
-  # parser. matrix setup remains a separate hand-parsed command.
+  : > "$tmp/status_helpers"
+  if grep -Fq 'pcall(cli_parse, APPROVAL_CLI_SPEC, args or {})' "$APPROVAL"; then
+    printf 'approvals\tyes\napprove\tyes\ndeny\tyes\n' >> "$tmp/status_helpers"
+  fi
+  if grep -Fq 'parse_cli(SWITCH_CLI_SPEC, args or {})' "$TYPED_LINES_CLI"; then
+    printf 'typed-lines\tyes\nshell-lines\tyes\nstatus-commands\tyes\n' >> "$tmp/status_helpers"
+  fi
+  if grep -Fq 'parse_cli(SCHEDULE_CLI_SPEC, argv)' "$SCHEDULE_CLI"; then
+    printf 'schedule\tyes\n' >> "$tmp/status_helpers"
+  fi
+  if grep -Fq 'parse_cli(spec, args or {})' "$APPROVE_TEXT"; then
+    printf 'approve-text\tyes\n' >> "$tmp/status_helpers"
+  fi
+  awk -F '\t' 'NR==FNR { helpers[$1]=1; next } !($1 in helpers)' "$tmp/status_helpers" "$tmp/status_commands" > "$tmp/status_commands.filtered"
+  mv "$tmp/status_commands.filtered" "$tmp/status_commands"
+  awk -F '\t' 'NR==FNR { helpers[$1]=1; next } !($1 in helpers)' "$tmp/status_helpers" "$tmp/status_init" > "$tmp/status_init.filtered"
+  mv "$tmp/status_init.filtered" "$tmp/status_init"
+  # Matrix leaves and setup are declared in specs and parsed through the shared parser.
   : > "$tmp/status_matrix"
   if grep -Fq 'cli.parse(matrix_arg_spec, argv)' "$MATRIX"; then
     awk '
@@ -165,7 +185,7 @@ SEED
   if grep -Fq 'cli.parse(SETUP_CLI_SPEC, argv)' "$REPO/packages/butler/matrix_setup.lua"; then
     printf 'matrix setup\tyes\n' >> "$tmp/status_matrix"
   fi
-  cat "$tmp/status_commands" "$tmp/status_init" "$tmp/status_matrix" > "$tmp/status"
+  cat "$tmp/status_commands" "$tmp/status_init" "$tmp/status_matrix" "$tmp/status_helpers" > "$tmp/status"
   awk -F'\t' '$2 == "yes" { print $1 }' "$tmp/status" > "$tmp/migrated"
   while IFS=$'\t' read -r verb parsed; do
     [[ -z $verb || $verb == matrix || $verb == topic ]] && continue
@@ -233,9 +253,8 @@ awk '
 expect_failure "allowlist entry 'doctor' is migrated" "$tmp/edited.lua"
 grep -Fvx 'doctor' "$ALLOWLIST" > "$tmp/allowlist.txt"
 expect_failure "new verbs must use remuda.cli.parse; see docs: 'doctor'" "$REPO/packages/butler/commands.lua" "$tmp/allowlist.txt"
-# Honest baseline: verbs declared only in init.lua (compact) and families that
-# still carry a hand-parsed fallback (close: cli.parse behind a capability gate and args[N]
-# reads) are hand-parsed, so they must be allowlisted.
+# Honest baseline: compact is declared only in init.lua. Other entries in this
+# loop still have manual argv mapping or validation in addition to parser calls.
 for verb in compact close send send-to-leader reply forward "topic new"; do
   grep -Fvx "$verb" "$ALLOWLIST" > "$tmp/allowlist.txt"
   expect_failure "new verbs must use remuda.cli.parse; see docs: '$verb'" "$REPO/packages/butler/commands.lua" "$tmp/allowlist.txt"

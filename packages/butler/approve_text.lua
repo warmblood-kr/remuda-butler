@@ -4,6 +4,8 @@ local butler = assert(remuda.butler, "load butler/matrix before butler/approve_t
 local approval = assert(butler.approval, "load butler/approval before butler/approve_text")
 local M = butler.approve_text or {}
 butler.approve_text = M
+local parse_cli = assert(remuda.cli and remuda.cli.parse,
+  "Butler CLI requires remuda.cli.parse (Remuda core #465 or later); upgrade Remuda")
 
 local MAX_BYTES = 8 * 1024
 local MAX_TTL = 24 * 60 * 60
@@ -441,17 +443,30 @@ function M.target_session_allowed(session)
 end
 
 function M.cli(args, agent, stdin)
-  if type(args) ~= "table" or type(args[1]) ~= "string" then return fail("Usage: remuda butler approve-text request SESSION - | on|off") end
-  if args[1] == "on" or args[1] == "off" then
+  local spec = {
+    name = "remuda butler approve-text",
+    verbs = {
+      request = { about = "Register text for owner approval. Example: remuda butler approve-text request worker -",
+        args = { { name = "SESSION", help = "Target Butler session" },
+          { name = "STDIN", help = "Must be -; text is read from stdin" } }, next = "remuda butler approvals" },
+      on = { about = "Turn prepared text approval on. Example: remuda butler approve-text on", next = "remuda butler approve-text off" },
+      off = { about = "Turn prepared text approval off. Example: remuda butler approve-text off", next = "remuda butler approve-text on" },
+    },
+  }
+  local report = parse_cli(spec, args or {})
+  if report.kind == "help" then return report.text end
+  if not report.ok then return fail(type(report.text) == "string" and report.text ~= ""
+    and report.text or "Usage: remuda butler approve-text request SESSION - | on|off") end
+  if report.verb == "on" or report.verb == "off" then
     local cli = butler.typed_lines_cli
     if not cli then return fail("Approve text switch is unavailable") end
-    return cli.cli({ "approve-text", args[1] }, agent)
+    return cli.cli({ "approve-text", report.verb }, agent)
   end
-  if args[1] ~= "request" or #args ~= 3 or args[3] ~= "-" then
+  if report.verb ~= "request" or report.values.STDIN ~= "-" then
     return fail("Usage: remuda butler approve-text request SESSION - | on|off")
   end
-  if not M.target_session_allowed(args[2]) then return fail("Unknown Butler session: " .. tostring(args[2])) end
-  local id, why = M.request(args[2], stdin, agent or "operator")
+  if not M.target_session_allowed(report.values.SESSION) then return fail("Unknown Butler session: " .. tostring(report.values.SESSION)) end
+  local id, why = M.request(report.values.SESSION, stdin, agent or "operator")
   if not id then return fail(tostring(why or "Could not register prepared text")) end
   return "Registered prepared text request " .. tostring(id)
 end

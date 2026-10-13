@@ -51,7 +51,7 @@ T.test("switches preserve usage, gate order and side-effect-free parse", functio
     remuda.fail = function(message, code) return { failed = true, code = code, text = message } end
   ]]
   local malformed = run_command(true, "typed-lines", { "typed-lines", "maybe" }, agent, capture)
-  T.ok(malformed:find("Usage: remuda butler typed%-lines on|off"), "invalid values retain switch usage")
+  T.ok(malformed:find("Usage: remuda butler typed%-lines"), "invalid values include parser-generated switch usage: " .. malformed)
   for _, parser in ipairs({ true, false }) do
     local result = run_command(parser, "typed-lines", { "typed-lines", "on" }, agent, [[
       remuda.fail = function(message, code) return { failed = true, code = code, text = message } end
@@ -89,7 +89,7 @@ T.test("switches preserve usage, gate order and side-effect-free parse", functio
       remuda._pr2_switch_counts = function() return reads .. ":0" end
       remuda.fail = function(message, code) return { failed = true, code = code, text = message } end
     ]])
-    T.ok(extra:find("Usage: remuda butler typed%-lines on|off"), "extra arguments are rejected before the operator gate")
+    T.ok(extra:find("Usage: remuda butler typed%-lines"), "extra arguments are rejected before the operator gate: " .. extra)
     T.ok(extra:find("|0:0$"), "invalid parsing does not read or write switch state")
   end
   for _, verb in ipairs({ "typed-lines", "shell-lines", "status-commands" }) do

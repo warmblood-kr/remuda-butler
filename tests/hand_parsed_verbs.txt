@@ -1,25 +1,17 @@
 # Remaining verbs still have hand-parsed positional or option paths; remove each entry only
 # when its complete accepted grammar and help use remuda.cli.parse.
 agents
-approve
-approve-text
-approvals
 doctor
-deny
 guard
 help
 inbox
 launch
 quota
-schedule
 sessions
-shell-lines
 status
 status-hook
-status-commands
 statusline
 topic delegate
-typed-lines
 close
 compact
 send

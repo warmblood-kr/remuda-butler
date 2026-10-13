@@ -81,15 +81,21 @@ end
 T.test("approvals declared parsing leaves state untouched for help and malformed calls", function()
   both_approval({ "approvals" }, "OK:No open approval requests.\nNext: nothing to do; agent requests appear here.|open:0:1")
   for _, args in ipairs({ { "approvals", "--help" }, { "approvals", "-h" } }) do
-    both_approval(args, "OK:Usage: remuda butler approvals\nExample: remuda butler approvals|open:0:0")
-  end
-  for _, args in ipairs({ { "approvals", "extra" }, { "approvals", "--" },
-    { "approvals", "--help", "extra" }, { "approvals", "--help=1" } }) do
     local result = approval_case(true, args)
-    T.ok(result:find("FAIL:1:Usage: remuda butler approvals", 1, true), "rejects " .. table.concat(args, " "))
+    T.ok(result:find("OK:List open approval requests.", 1, true)
+        and result:find("Usage: remuda butler approvals", 1, true)
+        and result:match("|open:0:0$"), "generated approval help is side-effect free")
+    T.eq(approval_case(false, args), result, "same declared help when public parser table is absent")
+  end
+  for _, args in ipairs({ { "approvals", "extra" }, { "approvals", "--help=1" } }) do
+    local result = approval_case(true, args)
+    T.ok(result:find("FAIL:1:", 1, true) and result:find("Usage: remuda butler approvals", 1, true), "rejects " .. table.concat(args, " "))
     T.ok(result:match("|open:0:0$"), "no list or decision on parse failure")
     T.eq(approval_case(false, args), result, "fallback result for " .. table.concat(args, " "))
   end
+  T.ok(approval_case(true, { "approvals", "--help", "extra" }):find("OK:List open approval requests.", 1, true),
+    "parser help takes priority over later arguments")
+  T.ok(approval_case(true, { "approvals", "--" }):match("|open:0:1$"), "bare separator leaves zero-argument list valid")
 end)
 
 T.test("approve and deny preserve valid, malformed, help, and operator-gate behavior", function()
@@ -99,16 +105,23 @@ T.test("approve and deny preserve valid, malformed, help, and operator-gate beha
       and "Approved request A7K2 (stub); joining now. The result goes to the request thread and the asker's mail.\nNext: remuda butler approvals"
       or "Denied request A7K2 (stub).\nNext: remuda butler approvals") .. "|" .. decision .. ":1:0")
     for _, args in ipairs({ { verb, "--help" }, { verb, "-h" } }) do
-      both_approval(args, "OK:Usage: remuda butler " .. verb .. " ID\nExample: remuda butler " .. verb .. " A7K2|open:0:0")
+      local result = approval_case(true, args)
+      T.ok(result:find("OK:", 1, true) and result:find("Usage: remuda butler " .. verb .. " ID", 1, true)
+          and result:match("|open:0:0$"), verb .. " generated help is side-effect free")
+      T.eq(approval_case(false, args), result, "same declared help without public parser table")
     end
-    for _, args in ipairs({ { verb }, { verb, "" }, { verb, "A7K2", "extra" },
-      { verb, "--help", "A7K2" } }) do
+    local help_first = approval_case(true, { verb, "--help", "A7K2" })
+    T.ok(help_first:find("Usage: remuda butler " .. verb .. " ID", 1, true)
+        and help_first:match("|open:0:0$"), "help takes priority over trailing values")
+    for _, args in ipairs({ { verb }, { verb, "" }, { verb, "A7K2", "extra" } }) do
       local with = approval_case(true, args)
-      T.ok(with:find("FAIL:1:Usage: remuda butler " .. verb .. " ID", 1, true), "rejects " .. table.concat(args, " "))
+      T.ok(with:find("FAIL:1:", 1, true) and with:find("Usage: remuda butler " .. verb .. " ID", 1, true), "rejects " .. table.concat(args, " "))
       T.ok(with:match("|open:0:0$"), "failure does not call approval.answer")
       T.eq(approval_case(false, args), with, "fallback result for " .. table.concat(args, " "))
     end
-    both_approval({ verb, "-A7K2" }, "FAIL:1:unknown approval request\nNext: remuda butler approvals|open:1:0")
+    local prefixed = approval_case(true, { verb, "-A7K2" })
+    T.ok(prefixed:find("FAIL:1:unexpected argument", 1, true) and prefixed:match("|open:0:0$"),
+      "parser rejects a dash-prefixed ID without an option separator")
     local denied_agent = approval_case(true, { verb, "A7K2" }, true)
     T.ok(denied_agent:find("operator%-only"), "member refusal follows valid parse")
     T.ok(denied_agent:match("|open:0:0$"), "member cannot decide")
@@ -116,21 +129,22 @@ T.test("approve and deny preserve valid, malformed, help, and operator-gate beha
   end
 end)
 
-T.test("leading-dash IDs retain legacy answer path, including expired records", function()
+T.test("leading-dash IDs use the -- separator, including expired records", function()
   for _, id in ipairs({ "--", "-x" }) do
     for _, verb in ipairs({ "approve", "deny" }) do
-      both_approval({ verb, id }, "FAIL:1:Request " .. id .. " was already expired.\nNext: remuda butler approvals|expired:1:0")
+      both_approval({ verb, "--", id }, "FAIL:1:Request " .. id .. " was already expired.\nNext: remuda butler approvals|expired:1:0")
     end
   end
 end)
 
-T.test("native parser failures fall back for malformed Lua argv", function()
-  local non_string = "FAIL:1:Usage: remuda butler approve ID\nExample: remuda butler approve A7K2\nNext: remuda butler approvals|0"
+T.test("parser failures refuse malformed Lua argv", function()
+  local non_string = "FAIL:1:Usage: remuda butler approvals | approve ID | deny ID\nNext: remuda butler approvals|0"
   T.eq(approval_bad_element(true, "false"), non_string, "non-string operator argv")
   T.eq(approval_bad_element(false, "false"), non_string, "non-string parserless argv")
   for _, parser in ipairs({ true, false }) do
     local agent = approval_bad_element(parser, "string.char(255)", true)
-    T.ok(agent:find("operator%-only"), "invalid UTF-8 still gets operator refusal: " .. agent)
+    T.ok(agent:find("Usage: remuda butler approvals", 1, true), "invalid UTF-8 is rejected before authorization: " .. agent)
+    T.ok(agent:match("|0$"), "invalid UTF-8 does not call approval.answer")
     T.ok(not agent:find("THREW:", 1, true), "invalid UTF-8 does not throw")
   end
 end)
