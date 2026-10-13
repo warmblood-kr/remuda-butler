@@ -206,7 +206,7 @@ stdout:
 
 stderr:
 remuda: butler matrix: unknown verb 'unknown'.
-Usage: remuda butler matrix <download | event | follow | get | history | join | leave | mark-all | quarantine | react | redact | reply | rooms | send | status | thread | unfollow | upload>
+Usage: remuda butler matrix <download | event | follow | get | history | join | leave | mark-all | notifications | quarantine | react | redact | reply | rooms | send | status | thread | unfollow | upload>
 Next: remuda butler matrix --help
 actions:
 (none)
@@ -252,6 +252,7 @@ stdout:
   remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
   remuda butler matrix [--json] [--room ROOM] follow EVENT_ID
   remuda butler matrix [--json] [--room ROOM] unfollow EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] notifications [all|mentions-followed|none]
   remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
   remuda butler matrix [--json] [-o PATH] download MXC
   remuda butler matrix [--json] [--room ROOM] send TEXT | - | --file PATH
@@ -282,6 +283,7 @@ stdout:
   remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
   remuda butler matrix [--json] [--room ROOM] follow EVENT_ID
   remuda butler matrix [--json] [--room ROOM] unfollow EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] notifications [all|mentions-followed|none]
   remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
   remuda butler matrix [--json] [-o PATH] download MXC
   remuda butler matrix [--json] [--room ROOM] send TEXT | - | --file PATH
@@ -312,6 +314,7 @@ stdout:
   remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
   remuda butler matrix [--json] [--room ROOM] follow EVENT_ID
   remuda butler matrix [--json] [--room ROOM] unfollow EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] notifications [all|mentions-followed|none]
   remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
   remuda butler matrix [--json] [-o PATH] download MXC
   remuda butler matrix [--json] [--room ROOM] send TEXT | - | --file PATH
@@ -342,6 +345,7 @@ stdout:
   remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
   remuda butler matrix [--json] [--room ROOM] follow EVENT_ID
   remuda butler matrix [--json] [--room ROOM] unfollow EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] notifications [all|mentions-followed|none]
   remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
   remuda butler matrix [--json] [-o PATH] download MXC
   remuda butler matrix [--json] [--room ROOM] send TEXT | - | --file PATH
@@ -372,6 +376,7 @@ stdout:
   remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
   remuda butler matrix [--json] [--room ROOM] follow EVENT_ID
   remuda butler matrix [--json] [--room ROOM] unfollow EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] notifications [all|mentions-followed|none]
   remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
   remuda butler matrix [--json] [-o PATH] download MXC
   remuda butler matrix [--json] [--room ROOM] send TEXT | - | --file PATH
@@ -420,6 +425,7 @@ stdout:
   remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
   remuda butler matrix [--json] [--room ROOM] follow EVENT_ID
   remuda butler matrix [--json] [--room ROOM] unfollow EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] notifications [all|mentions-followed|none]
   remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
   remuda butler matrix [--json] [-o PATH] download MXC
   remuda butler matrix [--json] [--room ROOM] send TEXT | - | --file PATH
@@ -450,6 +456,7 @@ stdout:
   remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
   remuda butler matrix [--json] [--room ROOM] follow EVENT_ID
   remuda butler matrix [--json] [--room ROOM] unfollow EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] notifications [all|mentions-followed|none]
   remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
   remuda butler matrix [--json] [-o PATH] download MXC
   remuda butler matrix [--json] [--room ROOM] send TEXT | - | --file PATH
@@ -480,6 +487,7 @@ stdout:
   remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
   remuda butler matrix [--json] [--room ROOM] follow EVENT_ID
   remuda butler matrix [--json] [--room ROOM] unfollow EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] notifications [all|mentions-followed|none]
   remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
   remuda butler matrix [--json] [-o PATH] download MXC
   remuda butler matrix [--json] [--room ROOM] send TEXT | - | --file PATH

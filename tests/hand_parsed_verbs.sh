@@ -37,6 +37,7 @@ matrix history
 matrix join
 matrix leave
 matrix mark-all
+matrix notifications
 matrix quarantine
 matrix react
 matrix redact
