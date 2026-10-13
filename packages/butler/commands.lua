@@ -31,6 +31,11 @@ select CLI identity. Caller attribution is advisory, not an isolation boundary.
 `reply` answers a message's original sender, even when it was forwarded to you;
 `forward` re-delivers a message you received, keeping its sender, with a note.
 `reply <message-id> --attach PATH` posts a file into that Matrix message's thread.
+`remuda butler sessions` adds ACTIVITY: `working`, `idle`, `needs you`, or
+`other` when no reliable state is available. Claude uses fresh lifecycle hooks
+and its prompt screen; Codex uses its visible working/ready/modal screen. This
+is an advisory snapshot, not a close-safety guarantee. `close` still checks
+its own idle and unread-mail rules.
 ]]
 -- Help groups the installed `butler.command` entries into sections, each in
 -- contribution order, so it names only the verbs that are installed. An entry's

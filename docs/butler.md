@@ -132,6 +132,27 @@ presses nothing and alerts once.
 
 ## Closing sessions
 
+`remuda butler sessions` shows an `ACTIVITY` column beside each managed
+session. `working` comes from the agent's visible working signal; `idle` means
+the adapter recognised its empty prompt; `needs you` means a known prompt or
+startup dialog is waiting for a person. `other` means Butler could not match a
+reliable state. These labels come from adapter status, not whether the child
+process is alive.
+
+Claude Code status uses its configured `UserPromptSubmit`, `Stop`, and
+`Notification` hooks. A recent submit marks `working`; a stop or idle
+notification marks `idle`; permission and elicitation notifications mark
+`needs you`. Butler falls back to the captured prompt screen when hook data is
+missing or stale. Codex status uses its recognized TUI screen: `esc to
+interrupt` marks `working`, the exact ready composer marks `idle`, and known
+update or trust dialogs mark `needs you`. Unknown or failed captures show
+`other`. The roster caches status briefly, so it is a point-in-time reading.
+
+Treat `idle` as a useful close candidate, not a guarantee that closing is safe:
+the terminal may change immediately after the listing. `remuda butler close`
+performs its own unread-mail and idle checks; `--force` skips those checks.
+`other` should be inspected before closing.
+
 `remuda butler close NAME [--force]` closes a session when the caller is its
 leader. A person at a terminal counts as the root `butler`. The root may also
 close a leader-less row (no leader, or a leader that is gone and not

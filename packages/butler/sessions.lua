@@ -91,12 +91,24 @@ function remuda._butler_sessions()
   local rows = {}
   for _, item in ipairs(team_order()) do
     local agent = bus.agents[item.id]
+    -- Reuse the session detail hook's adapter signals. Do not infer agent
+    -- activity from whether the PTY child is alive: a live process can be
+    -- waiting for the owner, and a quiet screen can be unrecognised.
+    local activity = "other"
+    if type(remuda.session_detail) == "function" then
+      local ok, detail = pcall(remuda.session_detail, { name = item.id })
+      if ok and type(detail) == "string" then
+        local word = detail:match("^([^ ]+) · ")
+        if word == "working" or word == "idle" or word == "other" then activity = word end
+        if detail:match("^needs you · ") then activity = "needs you" end
+      end
+    end
     rows[#rows + 1] = string.rep(" ", item.indent * 2) .. (item.orphan and "[orphan] " or "")
       .. display_name(item.id) .. "\t" .. tostring(agent.kind or "") .. "\t"
-      .. tostring(agent.parent or "-")
+      .. tostring(agent.parent or "-") .. "\t" .. activity
   end
   local out = #rows == 0 and "no Butler agents"
-    or "SESSION\tAGENT\tLEADER\n" .. table.concat(rows, "\n")
+    or "SESSION\tAGENT\tLEADER\tACTIVITY\n" .. table.concat(rows, "\n")
   if bus.agents.butler and #butler_attempts > 0 then
     local details = {}
     for _, attempt in ipairs(butler_attempts) do
