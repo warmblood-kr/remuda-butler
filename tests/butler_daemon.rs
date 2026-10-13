@@ -3360,10 +3360,12 @@ fn butler_matrix_reply_home_all_roster_subscriptions_survive_restart() {
         home_a, "@butler-a:example.org", "@human:example.org,@agent-bot:example.org");
     let (_b_token, b_config) = butler_config(&dir, "butler-b", "http://matrix.example.org",
         home_b, "@butler-b:example.org", "@human:example.org,@agent-bot:example.org");
-    for config in [&a_config, &b_config] {
+    {
         use std::io::Write;
-        let mut file = std::fs::OpenOptions::new().append(true).open(config).unwrap();
-        writeln!(file, "all_room={all}").unwrap();
+        let mut file = std::fs::OpenOptions::new().append(true).open(&a_config).unwrap();
+        writeln!(file, "all_room={all}\nnotify_room={all} mode=all").unwrap();
+        let mut file = std::fs::OpenOptions::new().append(true).open(&b_config).unwrap();
+        writeln!(file, "all_room={all}\nnotify_room={all} mode=mentions-followed").unwrap();
     }
     eval(&path, include_str!("support/fake_http.lua"));
     eval(&path, "remuda.exec('butler/matrix')");
@@ -3443,13 +3445,13 @@ fn butler_matrix_reply_home_all_roster_subscriptions_survive_restart() {
       end
       if not has(a, "$home-a") or has(b, "$home-a") then return "home-routing-failed" end
       if not has(b, "$home-b") or has(a, "$home-b") then return "other-home-routing-failed" end
-      if not has(a, "$top") or not has(b, "$top") then return "all-top-level-missed" end
-      if has(a, "$unsub") or has(b, "$unsub") or has(b, "$mention-a") then return "thread-routing-failed" end
+      if not has(a, "$top") or has(b, "$top") then return "per-room-top-level-policy-failed" end
+      if not has(a, "$unsub") or has(b, "$unsub") or has(b, "$mention-a") then return "thread-routing-failed" end
       local top = has(a, "$top")
       if top.room ~= "all" or top.event_id ~= "$top" then return "mail-room-metadata-missing" end
       if has(a, "$mention-a").thread_id ~= "$mention-thread" then return "thread-id-metadata-missing" end
-      -- Receive rules: a Butler's root post is delivered without a mention.
-      if not has(a, "$agent-quiet") or not has(b, "$agent-quiet") then return "agent-root-not-delivered" end
+      -- Receive rules: all includes unmentioned roots; mentions-followed does not.
+      if not has(a, "$agent-quiet") or has(b, "$agent-quiet") then return "agent-root-policy-failed" end
       if not has(a, "$agent-mention") or has(b, "$agent-mention") then return "agent-mention-routing-failed" end
       -- Old rule (PR 1): can_reply_to was false for a Butler's event. Replaced by the
       -- loop guard b2b_max_turns: a delivered Butler event can be answered; an
@@ -3548,7 +3550,7 @@ fn butler_matrix_reply_thread_returns_to_original_mail_after_relay_restart() {
     {
         use std::io::Write;
         let mut file = std::fs::OpenOptions::new().append(true).open(&config_path).unwrap();
-        writeln!(file, "all_room={room}").unwrap();
+        writeln!(file, "all_room={room}\nnotify_room={room} mode=all").unwrap();
     }
     eval(&path, include_str!("support/fake_http.lua"));
     eval(&path, &format!(

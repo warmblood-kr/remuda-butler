@@ -44,6 +44,7 @@ close
 # compact keeps session lookup before parsing and an old-core fallback.
 compact
 matrix mark-all
+matrix notifications
 matrix thread
 send
 send-to-leader

@@ -69,7 +69,8 @@ function matrix.rooms(args, callback, agent)
   local rooms = {}
   for room, kind in pairs(conf.rooms) do
     rooms[#rooms + 1] = { room = room, alias = conf.room_aliases[room], kind = kind,
-      how = conf.room_how[room] or "config", inviter = conf.room_inviters[room] }
+      how = conf.room_how[room] or "config", inviter = conf.room_inviters[room],
+      notifications = matrix.notification_mode(conf, room) }
   end
   local order = { home = 1, all = 2, joined = 3 }
   table.sort(rooms, function(a, b)
