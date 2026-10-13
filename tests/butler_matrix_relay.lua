@@ -1119,7 +1119,7 @@ local function test_cli_matrix_mail_replies_keep_room_and_relation()
   local dir, config_path = fixture()
   local config = assert(io.open(config_path, "w"))
   config:write("http://matrix.invalid\n", home_room, "\n@bot:example.org\n@alice:example.org\n",
-    "false\n30000\nroom=", joined_room, " how=operator\n")
+    "false\n30000\nroom=", joined_room, " how=operator\nnotify_room=", joined_room, " mode=all\n")
   config:close()
   local token_path = config_path .. ".token"
   local token = assert(io.open(token_path, "w")); token:write("fake-token"); token:close()
@@ -1594,7 +1594,7 @@ end
 local function owner_message(room, id)
   return { [room] = { timeline = { events = {
     { type = "m.room.message", event_id = id, sender = OWNER,
-      content = { msgtype = "m.text", body = "hello from " .. room } },
+      content = { msgtype = "m.text", body = "@bot:example.org hello from " .. room } },
   } } } }
 end
 
@@ -1621,7 +1621,7 @@ local function test_owner_invite_joins_writes_line_and_notices_once()
     "a repeated owner invite for a configured room must retry join without repeating the notice")
   client:sync({ json = { next_batch = "s3", rooms = { join = owner_message(NEW, "$in-new") } } })
   assert(delivered_ids(delivered, "$in-new"),
-    "a later owner message in the joined room must become mail (HOME rules)")
+    "a later mention in the joined room must become mail under the default notification policy")
   relay:stop()
   remove_dir(dir)
 end
@@ -2193,7 +2193,7 @@ local function test_open_mode_sender_allowlist_still_quarantines()
   client:sync({ json = { next_batch = "s1", rooms = { join = {
     [NEW] = { timeline = { events = {
       { type = "m.room.message", event_id = "$open-blocked", sender = STRANGER,
-        content = { msgtype = "m.text", body = "not allowed" } },
+        content = { msgtype = "m.text", body = "@bot:example.org not allowed" } },
     } } },
   } } } })
   local item
@@ -3491,12 +3491,13 @@ remuda._test_create_symlink = function(target, link)
   assert(result and result.code == 0, "could not create symlink: " .. tostring(result and result.stderr))
 end
 
--- Receive rules (notes/rx-design.md, PR 1). One accept rule in every room:
--- root, followed thread, or mention. Non-allowlisted senders arrive with a marker.
+-- Receive rules: each room's notification policy chooses all, mentions/follows,
+-- or none. Non-allowlisted senders that pass that policy arrive with a marker.
 local RX_BUTLER, RX_ALLY, RX_PREFIX = "@helper:example.org", "@agent-ally:example.org", "@agent-evil:evil.example"
 
-local function rx_fixture()
-  return invite_fixture(OWNER .. "," .. RX_ALLY, "butler_senders=" .. RX_BUTLER .. "\nroom=" .. NEW .. "\n")
+local function rx_fixture(extra)
+  return invite_fixture(OWNER .. "," .. RX_ALLY,
+    "butler_senders=" .. RX_BUTLER .. "\nroom=" .. NEW .. "\n" .. (extra or ""))
 end
 
 local function rx_frame(sender)
@@ -3628,11 +3629,13 @@ local function test_rx_agent_root_without_mention()
       rx_msg("$ally-root", RX_ALLY, "status: started"), rx_msg("$prefix-root", RX_PREFIX, "status: hi") })
     rx_sync(client, NEW, { rx_msg("$helper-new", RX_BUTLER, "joined-room status") })
     rx_sync(client, ALL, { rx_msg("$helper-all", RX_BUTLER, "all-room status") })
-    for _, id in ipairs({ "$helper-root", "$ally-root", "$prefix-root", "$helper-new", "$helper-all" }) do
+    for _, id in ipairs({ "$helper-root", "$ally-root", "$prefix-root" }) do
       local event = rx_find(delivered, id)
       assert(event, id .. ": a Butler's root post must be delivered without a mention")
       assert(event.from_agent == true, id .. ": a Butler root keeps from_agent=true")
     end
+    assert(not rx_find(delivered, "$helper-new") and not rx_find(delivered, "$helper-all"),
+      "additional rooms default to mentions-followed, including ALL-BUTLERS")
     assert(rx_find(delivered, "$ally-root").trusted ~= false, "an allowlisted Butler is trusted")
     assert(rx_find(delivered, "$helper-root").trusted == false, "butler_senders alone is not the owner allowlist")
     relay:stop()
@@ -3669,13 +3672,134 @@ local function test_rx_thread_reply_needs_follow_home_joined()
     assert(not rx_followed(relay, HOME, "$root-home"), "delivery in HOME does not follow the thread")
     -- A joined room delivers a thread reply only in a followed thread.
     rx_sync(client, NEW, { rx_msg("$root-new", OWNER, "root"),
-      rx_msg("$root-new-t1", OWNER, "reply", rx_thread("$root-new")) })
-    assert(rx_find(delivered, "$root-new"), "a joined room delivers a root")
-    assert(not rx_find(delivered, "$root-new-t1"), "a joined room does not deliver an unfollowed thread reply")
-    relay:subscribe_thread(NEW, "$root-new")
-    rx_sync(client, NEW, { rx_msg("$root-new-t2", OWNER, "reply", rx_thread("$root-new")) })
+      rx_msg("$root-new-m", OWNER, "@bot:example.org please see"),
+      rx_msg("$root-new-t1", OWNER, "reply", rx_thread("$root-new-m")) })
+    assert(not rx_find(delivered, "$root-new"), "a joined room does not deliver an unmentioned root")
+    assert(rx_find(delivered, "$root-new-m"), "a mention in a new room is delivered")
+    assert(rx_followed(relay, NEW, "$root-new-m"), "a mention in a root post auto-follows that thread")
+    assert(rx_find(delivered, "$root-new-t1"), "a joined room delivers replies after a root mention")
+    relay:subscribe_thread(NEW, "$root-new-m")
+    rx_sync(client, NEW, { rx_msg("$root-new-t2", OWNER, "reply", rx_thread("$root-new-m")) })
     assert(rx_find(delivered, "$root-new-t2"), "a joined room delivers a followed thread reply")
+    relay:unsubscribe_thread(NEW, "$root-new-m")
+    rx_sync(client, NEW, { rx_msg("$root-new-t3", OWNER, "reply after unfollow", rx_thread("$root-new-m")) })
+    assert(not rx_find(delivered, "$root-new-t3"), "unfollow immediately stops later thread mail")
     relay:stop()
+  end)
+end
+
+function test_rx_room_notification_modes()
+  dofile("packages/butler/matrix_write.lua")
+  local dir, path = rx_fixture()
+  local conf = assert(matrix.read_config(path))
+  assert(matrix.notification_mode(conf, HOME) == "all", "HOME defaults to all notifications")
+  assert(matrix.notification_mode(conf, NEW) == "mentions-followed",
+    "an invited room defaults to mentions and followed threads")
+  assert(matrix.notification_mode(conf, ALL) == "mentions-followed",
+    "ALL-BUTLERS is an additional room and defaults to mentions and followed threads")
+  assert(matrix.config_set_notification_mode(path, NEW, "none"), "an owner can save a room's none policy")
+  conf = assert(matrix.read_config(path))
+  assert(matrix.notification_mode(conf, NEW) == "none", "the explicit none policy is parsed")
+  assert(matrix.config_set_notification_mode(path, NEW, "mentions-followed"),
+    "restoring the default policy should succeed")
+  conf = assert(matrix.read_config(path))
+  assert(conf.room_notifications[NEW] == nil and matrix.notification_mode(conf, NEW) == "mentions-followed",
+    "writing the room default removes its redundant override")
+  local unknown_ok, unknown_error = matrix.config_set_notification_mode(path, "!foreign:example.org", "none")
+  assert(not unknown_ok and tostring(unknown_error):find("not a configured Matrix room", 1, true),
+    "notification policy cannot be set for an unconfigured room")
+  remove_dir(dir)
+
+  dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    local relay, client, delivered = rx_relay(path)
+    local old_instance = relay_module.instance
+    relay_module.instance = relay
+    local old_config, old_paths = remuda._butler_matrix_config, remuda._butler_matrix_paths
+    remuda._butler_matrix_config = { config_path = path }
+    remuda._butler_matrix_paths = remuda._butler_matrix_config
+    local changed = capture_matrix_cli({ "matrix", "--room", NEW, "notifications", "all" })
+    assert(changed and changed.code == 0 and changed.stdout:find("Notifications for " .. NEW .. ": all", 1, true),
+      "the owner can change a room's policy through the Matrix CLI")
+    remuda._butler_matrix_config, remuda._butler_matrix_paths = old_config, old_paths
+    rx_sync(client, NEW, { rx_msg("$all-root", OWNER, "unmentioned root"),
+      rx_msg("$all-reply", OWNER, "unfollowed reply", rx_thread("$never-followed")) })
+    assert(rx_find(delivered, "$all-root") and rx_find(delivered, "$all-reply"),
+      "all mode delivers all room messages regardless of mention or follow")
+    relay_module.instance = old_instance
+    relay:stop()
+  end)
+
+  dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    local relay, client, delivered = rx_relay(path)
+    local old_instance = relay_module.instance
+    relay_module.instance = relay
+    relay:subscribe_thread(NEW, "$followed")
+    local old_config, old_paths = remuda._butler_matrix_config, remuda._butler_matrix_paths
+    remuda._butler_matrix_config = { config_path = path }
+    remuda._butler_matrix_paths = remuda._butler_matrix_config
+    local changed = capture_matrix_cli({ "matrix", "--room", NEW, "notifications", "none" })
+    assert(changed and changed.code == 0 and changed.stdout:find(": none", 1, true),
+      "the owner can suppress all notifications in a room")
+    remuda._butler_matrix_config, remuda._butler_matrix_paths = old_config, old_paths
+    rx_sync(client, NEW, { rx_msg("$none-root", OWNER, "@bot:example.org mentioned"),
+      rx_msg("$none-reply", OWNER, "followed reply", rx_thread("$followed")) })
+    assert(not rx_find(delivered, "$none-root") and not rx_find(delivered, "$none-reply"),
+      "none mode suppresses mentions and followed thread replies")
+    relay:subscribe_thread(NEW, "$none-mentioned-root")
+    relay:unsubscribe_thread(NEW, "$none-mentioned-root")
+    rx_sync(client, NEW, { rx_msg("$none-mentioned", OWNER, "@bot:example.org mention after unfollow",
+      rx_thread("$none-mentioned-root")) })
+    assert(not rx_find(delivered, "$none-mentioned"), "none mode still suppresses the mention's inbox delivery")
+    assert(rx_followed(relay, NEW, "$none-mentioned-root"),
+      "a trusted mention auto-follows even while room notifications are none")
+
+    remuda._butler_matrix_config = { config_path = path }
+    remuda._butler_matrix_paths = remuda._butler_matrix_config
+    local following = capture_matrix_cli({ "matrix", "--room", NEW, "notifications", "mentions-followed" })
+    assert(following and following.code == 0, "the owner can restore mentions-followed mode")
+    rx_sync(client, NEW, { rx_msg("$none-mentioned-reply", OWNER, "followed after mode restore",
+      rx_thread("$none-mentioned-root")) })
+    assert(rx_find(delivered, "$none-mentioned-reply"),
+      "the mention received while none was active still follows the thread")
+
+    relay:stop()
+    local pending, pending_client, pending_delivered = rx_relay(path)
+    relay_module.instance = pending
+    local queued = capture_matrix_cli({ "matrix", "--room", NEW, "notifications", "mentions-followed" })
+    assert(queued and queued.code == 0, "mentions-followed mode can be set before queueing")
+    rx_sync(pending_client, NEW, {
+      rx_msg("$pending-unfollow", OWNER, "@bot:example.org wait for context", rx_thread("$pending-unfollow-root")) }, true)
+    assert(not rx_find(pending_delivered, "$pending-unfollow"), "the context fetch holds the mail pending")
+    assert(rx_followed(pending, NEW, "$pending-unfollow-root"), "the mention follows before context completes")
+    pending:unsubscribe_thread(NEW, "$pending-unfollow-root")
+    rx_context(pending_client, true)
+    assert(not rx_find(pending_delivered, "$pending-unfollow"),
+      "a pending mention is suppressed if its thread is unfollowed before delivery")
+
+    pending:subscribe_thread(NEW, "$pending-reply-root")
+    rx_sync(pending_client, NEW, {
+      rx_msg("$pending-reply", OWNER, "unmentioned reply while context is loading",
+        rx_thread("$pending-reply-root")) }, true)
+    assert(not rx_find(pending_delivered, "$pending-reply"), "the followed reply waits for context")
+    pending:unsubscribe_thread(NEW, "$pending-reply-root")
+    rx_context(pending_client, true)
+    assert(not rx_find(pending_delivered, "$pending-reply"),
+      "an unmentioned pending reply is suppressed if its thread is unfollowed before delivery")
+
+    rx_sync(pending_client, NEW, {
+      rx_msg("$pending-none", OWNER, "@bot:example.org switch to none while waiting",
+        rx_thread("$pending-none-root")) }, true)
+    assert(not rx_find(pending_delivered, "$pending-none"), "the second context fetch holds mail pending")
+    local suppress = capture_matrix_cli({ "matrix", "--room", NEW, "notifications", "none" })
+    assert(suppress and suppress.code == 0, "none mode can be selected while a mail is pending")
+    rx_context(pending_client, true)
+    assert(not rx_find(pending_delivered, "$pending-none"),
+      "a queued mail is suppressed when the current room policy changes to none")
+    pending:stop()
+    remuda._butler_matrix_config, remuda._butler_matrix_paths = old_config, old_paths
+    relay_module.instance = old_instance
   end)
 end
 
@@ -3734,7 +3858,7 @@ local function test_rx_reply_follows_thread_all_room_kinds()
     local relay, client, delivered = rx_relay(path)
     for _, room in ipairs({ HOME, NEW, ALL }) do
       local root, sent = "$rr-" .. room:sub(2, 4), "$sent-" .. room:sub(2, 4)
-      rx_sync(client, room, { rx_msg(root, OWNER, "question") })
+      rx_sync(client, room, { rx_msg(root, OWNER, "@bot:example.org question") })
       assert(rx_find(delivered, root), room .. ": root delivered")
       assert(relay:record_outgoing_reply(root, sent), room .. ": the reply is recorded")
       assert(rx_followed(relay, room, root), room .. ": a reply must follow its thread")
@@ -3784,7 +3908,7 @@ local function test_rx_mention_follows_thread()
 end
 
 local function test_rx_main_timeline_reply_is_root()
-  local dir, path = rx_fixture()
+  local dir, path = rx_fixture("notify_room=" .. ALL .. " mode=all\nnotify_room=" .. NEW .. " mode=all\n")
   rx_with_dir(dir, function()
     local relay, client, delivered = rx_relay(path)
     local plain = { ["m.in_reply_to"] = { event_id = "$earlier" } }
@@ -3792,7 +3916,7 @@ local function test_rx_main_timeline_reply_is_root()
     rx_sync(client, NEW, { rx_msg("$plain-new", RX_BUTLER, "plain reply", plain) })
     for _, id in ipairs({ "$plain-all", "$plain-new" }) do
       local event = rx_find(delivered, id)
-      assert(event, id .. ": a plain m.in_reply_to without m.thread is a root and is delivered")
+      assert(event, id .. ": all mode delivers a plain m.in_reply_to without m.thread")
       assert(event.thread_root == nil and event.in_reply_to == "$earlier", id .. ": no thread root is invented")
     end
     relay:stop()
@@ -3825,13 +3949,14 @@ local function test_rx_allowlisted_human_unchanged()
       rx_sync(client, ALL, { rx_msg("$a-root", OWNER, "all root"),
         rx_msg("$a-m", OWNER, "@bot:example.org see", rx_thread("$a-thread")),
         rx_msg("$a-quiet", OWNER, "unfollowed", rx_thread("$other-thread")) })
-      for _, id in ipairs({ "$h-root", "$a-root", "$a-m" }) do
+      for _, id in ipairs({ "$h-root", "$a-m" }) do
         local message = rx_find(emitted, id)
         assert(message, id .. ": allowlisted human root or mention is delivered")
         assert(not message.text:find("not on the owner allowlist", 1, true), id .. ": allowlisted text has no marker")
         assert(message.matrix.trusted == true and message.matrix.from_agent == false
           and message.from.kind == "matrix", id .. ": allowlisted human is trusted, not an agent")
       end
+      assert(not rx_find(emitted, "$a-root"), "an unmentioned root in ALL-BUTLERS is not delivered by default")
       assert(rx_find(emitted, "$h-root").text == "plain owner text", "allowlisted body is unchanged")
       assert(not rx_find(emitted, "$a-quiet"), "an unfollowed thread reply in ALL stays filtered")
     end)
@@ -3899,8 +4024,8 @@ local function test_rx_untrusted_room_cap_logs_once_home_summary()
     local relay, client, delivered = rx_relay(path)
     local events = { rx_msg("$u-img", STRANGER, "x.png", nil, "m.image") }
     for i = 1, 3 do events[#events + 1] = rx_msg("$u-thread" .. i, STRANGER, "unfollowed", rx_thread("$nope")) end
-    for i = 1, 5 do events[#events + 1] = rx_msg("$u" .. i, STRANGER, "root " .. i) end
-    events[#events + 1] = rx_msg("$u-owner", OWNER, "owner still arrives")
+    for i = 1, 5 do events[#events + 1] = rx_msg("$u" .. i, STRANGER, "@bot:example.org root " .. i) end
+    events[#events + 1] = rx_msg("$u-owner", OWNER, "@bot:example.org owner still arrives")
     rx_sync(client, NEW, events)
     assert(rx_find(delivered, "$u1") and rx_find(delivered, "$u2"),
       "the first 2 accepted untrusted roots are delivered (rejected and quarantined events do not count)")
@@ -3914,7 +4039,7 @@ local function test_rx_untrusted_room_cap_logs_once_home_summary()
       rx_msg("$h2", STRANGER, "home thread", rx_thread("$nope")), rx_msg("$h3", STRANGER, "home 3") })
     assert(rx_find(delivered, "$h2") and not rx_find(delivered, "$h3"),
       "the cap is per room, and an unfollowed thread reply in HOME is accepted, so it counts")
-    rx_sync(client, NEW, { rx_msg("$u6", STRANGER, "still capped") })
+    rx_sync(client, NEW, { rx_msg("$u6", STRANGER, "@bot:example.org still capped") })
     assert(not rx_find(delivered, "$u6"), "the room stays capped within the hour")
     local warnings, new_warnings = 0, 0
     for _, line in ipairs(logs) do
@@ -3937,7 +4062,7 @@ local function test_rx_untrusted_room_cap_logs_once_home_summary()
     assert(client:messages(HOME, summary .. NEW) == 1,
       "a second capped sync within 10 minutes posts no second summary for the room")
     now = now + 3601
-    rx_sync(client, NEW, { rx_msg("$u7", STRANGER, "an hour later") })
+    rx_sync(client, NEW, { rx_msg("$u7", STRANGER, "@bot:example.org an hour later") })
     assert(rx_find(delivered, "$u7"), "delivery works again after the hour")
     assert(client:messages(HOME, summary_line("1 message", NEW)) == 1,
       "the held count is posted by the first sync after the 10 minutes, even with nothing capped in it")
@@ -4289,8 +4414,8 @@ local function test_rx_untrusted_room_cap_summary_no_quarantine()
     local relay, client, delivered = rx_relay(path)
     local events = {}
     for i = 1, 3 do events[#events + 1] = rx_msg("$u-thread" .. i, STRANGER, "unfollowed", rx_thread("$nope")) end
-    for i = 1, 5 do events[#events + 1] = rx_msg("$u" .. i, STRANGER, "root " .. i) end
-    events[#events + 1] = rx_msg("$u-owner", OWNER, "owner still arrives")
+    for i = 1, 5 do events[#events + 1] = rx_msg("$u" .. i, STRANGER, "@bot:example.org root " .. i) end
+    events[#events + 1] = rx_msg("$u-owner", OWNER, "@bot:example.org owner still arrives")
     rx_sync(client, NEW, events)
     assert(rx_find(delivered, "$u1") and rx_find(delivered, "$u2"), "the first 2 untrusted roots are delivered")
     for i = 3, 5 do
@@ -4303,7 +4428,7 @@ local function test_rx_untrusted_room_cap_summary_no_quarantine()
       .. " were not passed to the Butler (hourly rate cap). Next: remuda butler matrix --room '" .. NEW .. "' history"
     assert(client:messages(HOME, line) == 1,
       "ONE exact HOME summary for the sync, the room shell-quoted in Next (unaccepted events do not count)")
-    rx_sync(client, NEW, { rx_msg("$u-owner2", OWNER, "quiet sync") })
+    rx_sync(client, NEW, { rx_msg("$u-owner2", OWNER, "@bot:example.org quiet sync") })
     assert(client:messages(HOME, "non-allowlisted senders in ") == 1, "no summary for a sync with nothing capped")
     relay:stop()
   end)
@@ -4323,7 +4448,7 @@ local function test_rx_untrusted_room_cap_summary_floor_10min()
       local events = {}
       for _ = 1, count do
         seq = seq + 1
-        events[#events + 1] = rx_msg("$f" .. seq, sender, "root " .. seq)
+        events[#events + 1] = rx_msg("$f" .. seq, sender, "@bot:example.org root " .. seq)
       end
       rx_sync(client, room, events)
     end
@@ -4956,7 +5081,7 @@ function ctx_tests.test_matrix_thread_takes_room_from_route()
   rx_with_dir(dir, function()
     local relay, client = rx_relay(path)
     relay_module.instance = relay
-    rx_sync(client, NEW, { rx_msg("$t-joined", OWNER, "a root in the joined room") })
+    rx_sync(client, NEW, { rx_msg("$t-joined", OWNER, "@bot:example.org a root in the joined room") })
     local urls = {}
     with_alias_http(path, function(spec)
       urls[#urls + 1] = tostring(spec.url or spec.path)
@@ -5362,7 +5487,7 @@ function ctx_tests.test_ctx_lines_do_not_count_as_turns_or_against_the_rate_cap(
     local relay = relay_module.instance
     assert(not relay:b2b_stopped(NEW, "$cnt-root"), "3 Butler context lines are not turns (b2b_max_turns=2)")
     assert(#relay:quarantine_list() == 0, "context lines are not quarantined")
-    ctx.sync(NEW, { ctx_event("$cnt-s", STRANGER, "a real root from the stranger", 10) })
+    ctx.sync(NEW, { ctx_event("$cnt-s", STRANGER, "@bot:example.org a real root from the stranger", 10) })
     assert(ctx.mail("$cnt-s"), "2 stranger context lines do not use up untrusted_per_room_hour=1")
     assert(#ctx.emitted == 2, "context lines are not delivered as mail of their own, got " .. #ctx.emitted .. " mails")
   end)
@@ -5607,6 +5732,7 @@ rx_tests = {
   { "test_rx_agent_root_without_mention", test_rx_agent_root_without_mention },
   { "test_rx_prefix_stranger_gets_marker", test_rx_prefix_stranger_gets_marker },
   { "test_rx_thread_reply_needs_follow_home_joined", test_rx_thread_reply_needs_follow_home_joined },
+  { "test_rx_room_notification_modes", test_rx_room_notification_modes },
   { "test_rx_follow_unfollow_verbs", test_rx_follow_unfollow_verbs },
   { "test_rx_reply_follows_thread_all_room_kinds", test_rx_reply_follows_thread_all_room_kinds },
   { "test_rx_send_follows_own_root", test_rx_send_follows_own_root },
@@ -6508,8 +6634,8 @@ rx_tests[#rx_tests + 1] = { "test_ctx_pending_fetch_does_not_hold_back_other_mai
     local relay, client, delivered = rx_relay(path)
     rx_sync(client, NEW, {
       rx_msg("$hold-a", OWNER, "@bot:example.org first thread", rx_thread("$hold-root-a")),
-      rx_msg("$hold-root", OWNER, "a root post"),
-      rx_msg("$hold-s", STRANGER, "a stranger's root post"),
+      rx_msg("$hold-root", OWNER, "@bot:example.org a root post"),
+      rx_msg("$hold-s", STRANGER, "@bot:example.org a stranger's root post"),
       rx_msg("$hold-sm", STRANGER, "@bot:example.org a stranger's mention in a thread", rx_thread("$hold-root-s")),
       rx_msg("$hold-b", OWNER, "@bot:example.org second thread", rx_thread("$hold-root-b")),
     }, true)

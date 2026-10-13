@@ -218,7 +218,7 @@ local function read_config(path)
     sender = trim(sender)
     if sender ~= "" then allowed[sender] = true end
   end
-  local opts, extra_rooms, deny_room_ids, deny_room_aliases, deny_servers = {}, {}, {}, {}, {}
+  local opts, extra_rooms, room_notifications, deny_room_ids, deny_room_aliases, deny_servers = {}, {}, {}, {}, {}, {}
   local room_mode = "allowlist"
   for i = 5, #lines do
     local key, value = lines[i]:match("^([^=]+)=(.*)$")
@@ -233,6 +233,13 @@ local function read_config(path)
         if inviter and not config_valid_mxid(inviter) then inviter = nil end
         if room and config_valid_room_id(room) then
           extra_rooms[#extra_rooms + 1] = { room = room, how = how, alias = alias, inviter = inviter }
+        end
+      elseif key == "notify_room" then
+        local room, notify = value:match("^(%S+)%s+mode=(%S+)$")
+        if config_valid_room_id(room) and (notify == "all" or notify == "mentions-followed" or notify == "none") then
+          room_notifications[room] = notify
+        else
+          warn_invalid_config_line(path, i, key, value)
         end
       elseif key == "rooms" then
         if value == "open" or value == "allowlist" then
@@ -352,6 +359,7 @@ local function read_config(path)
   return {
     base = base, room = lines[2], home_room = lines[2], all_room = all_room,
     rooms = rooms, room_how = room_how, room_aliases = room_aliases, room_inviters = room_inviters,
+    room_notifications = room_notifications,
     rooms_mode = room_mode, deny_room_ids = deny_room_ids,
     deny_room_aliases = deny_room_aliases, deny_servers = deny_servers,
     self_mxid = lines[3], allowed_senders = allowed,
@@ -370,6 +378,14 @@ local function read_config(path)
   }
 end
 matrix.read_config = read_config
+
+function matrix.notification_mode(conf, room)
+  if type(conf) ~= "table" or type(room) ~= "string" then return "mentions-followed" end
+  local explicit = type(conf.room_notifications) == "table" and conf.room_notifications[room]
+  if explicit == "all" or explicit == "mentions-followed" or explicit == "none" then return explicit end
+  if room == conf.home_room then return "all" end
+  return "mentions-followed"
+end
 
 local post_times = {}
 
@@ -551,7 +567,8 @@ function matrix.config_remove_room(path, room)
   if not contents then return nil, err end
   local kept, removed = {}, false
   each_raw_line(contents, function(raw, line, ending)
-    if room_line_id(line) == room then
+    local notify_room = line:match("^%s*notify_room=(%S+)")
+    if room_line_id(line) == room or notify_room == room then
       removed = true
     else
       kept[#kept + 1] = raw .. ending
@@ -559,6 +576,33 @@ function matrix.config_remove_room(path, room)
   end)
   if not removed then return true end
   return write_config_text(path, table.concat(kept))
+end
+
+function matrix.config_set_notification_mode(path, room, mode)
+  if mode ~= "all" and mode ~= "mentions-followed" and mode ~= "none" then
+    return nil, "notification mode must be all, mentions-followed, or none"
+  end
+  local conf, err = read_config(path)
+  if not conf then return nil, err end
+  if conf.rooms[room] == nil then
+    return nil, tostring(room) .. " is not a configured Matrix room.\nNext: remuda butler matrix rooms"
+  end
+  local contents
+  contents, err = read_file(path, "config")
+  if not contents then return nil, err end
+  local kept = {}
+  each_raw_line(contents, function(raw, line, ending)
+    if line:match("^%s*notify_room=(%S+)%s") == room then return end
+    kept[#kept + 1] = raw .. ending
+  end)
+  local default = matrix.notification_mode({ home_room = conf.home_room, all_room = conf.all_room,
+    rooms = conf.rooms, room_notifications = {} }, room)
+  local updated = table.concat(kept)
+  if mode ~= default then
+    if updated ~= "" and updated:sub(-1) ~= "\n" then updated = updated .. "\n" end
+    updated = updated .. "notify_room=" .. room .. " mode=" .. mode .. "\n"
+  end
+  return write_config_text(path, updated)
 end
 
 -- Mark an already-joined room as the ALL-BUTLERS room: its room= line becomes all_room=.

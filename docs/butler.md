@@ -260,6 +260,7 @@ remuda butler matrix [--json] [--room ROOM] [-n N] history
 remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
 remuda butler matrix [--json] [--room ROOM] follow EVENT_ID
 remuda butler matrix [--json] [--room ROOM] unfollow EVENT_ID
+remuda butler matrix [--json] [--room ROOM] notifications [all|mentions-followed|none]
 remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
 remuda butler matrix [--json] [-o PATH] download MXC
 remuda butler matrix [--json] [--room ROOM] send TEXT | - | --file PATH
@@ -473,8 +474,9 @@ replacing `PATH` with the chosen directory.
 
 `event` and `get` are aliases for the same read.
 The `remuda butler matrix rooms` command lists configured rooms, saved aliases,
-its kind, how it was added, and its inviter; it also shows the room mode and
-deny rules. Server-side memberships show in `remuda butler matrix status`.
+its kind, how it was added, its inviter, and its notification mode; it also
+shows the room mode and deny rules. Server-side memberships show in
+`remuda butler matrix status`.
 Use `remuda butler matrix rooms --public [TERM]` to browse up to 20 public
 rooms, optionally filtered by a search term.
 
@@ -491,6 +493,17 @@ ignored; a new invite can retry a configured room, subject to deny checks and
 the budget. Open mode allows at most 20 automatic join attempts per rolling
 day. Owner invites count toward the cap, and failed join attempts remain
 counted.
+
+Each room has an independent Matrix delivery policy. HOME defaults to `all`;
+ALL-BUTLERS and other joined rooms default to `mentions-followed`. The latter
+delivers a message that mentions this Butler or a reply in a followed thread;
+new unmentioned thread roots and replies to unfollowed threads stay out of the
+Butler inbox. `none` suppresses all room messages. Read or change the policy
+with `remuda butler matrix [--room ROOM] notifications [all|mentions-followed|none]`;
+without a mode, the command shows the current value. This is operator-only.
+Changing it applies to the running relay immediately. `follow` and `unfollow`
+control thread replies in `mentions-followed` rooms; `all` deliberately
+delivers every message regardless of follow state.
 
 Add `deny_room=!ROOM_ID` or `deny_room=#alias:server` for each denied room, and
 `deny_server=host` for each denied server. Room IDs, canonical aliases, room
@@ -645,6 +658,8 @@ file contains:
 6. Optional sync timeout in milliseconds; blank defaults to `30000`.
 7. Optional transport and room settings, one `key=value` per line:
    `all_room=ROOM_ID` configures the shared ALL-BUTLERS room;
+   `notify_room=ROOM_ID mode=all|mentions-followed|none` overrides the default
+   Matrix delivery policy for a configured room (repeat for different rooms);
    `rooms=open` or `rooms=allowlist` selects invite behavior, with allowlist as
    the default; repeat `deny_room=ROOM_ID`, `deny_room=#alias:server`, or
    `deny_server=host` lines to refuse matching invites;

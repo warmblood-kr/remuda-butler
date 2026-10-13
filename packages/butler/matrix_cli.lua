@@ -8,6 +8,7 @@ local USAGE = [[  remuda butler matrix [--json] status
   remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
   remuda butler matrix [--json] [--room ROOM] follow EVENT_ID
   remuda butler matrix [--json] [--room ROOM] unfollow EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] notifications [all|mentions-followed|none]
   remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
   remuda butler matrix [--json] [-o PATH] download MXC
   remuda butler matrix [--json] [--room ROOM] send TEXT | - | --file PATH
@@ -27,7 +28,7 @@ Or end with --password-cmd PROG [ARG...] in place of --password-file to read the
 local VERBS = {
   status = true, rooms = true, history = true, event = true, get = true, quarantine = true,
   thread = true, follow = true, unfollow = true, download = true, send = true, reply = true, react = true,
-  upload = true, redact = true, join = true, leave = true, ["mark-all"] = true,
+  upload = true, redact = true, join = true, leave = true, ["mark-all"] = true, notifications = true,
 }
 
 local THREAD_CLI_SPEC = {
@@ -60,6 +61,9 @@ local MATRIX_CLI_SPEC = {
     thread = { about = "Show every reply in a Matrix thread", args = { { name = "EVENT_ID", help = "EVENT_ID" } }, next = "remuda butler matrix reply EVENT_ID TEXT" },
     follow = { about = "Follow a Matrix thread", args = { { name = "EVENT_ID", help = "EVENT_ID" } }, next = "remuda butler matrix thread EVENT_ID" },
     unfollow = { about = "Unfollow a Matrix thread", args = { { name = "EVENT_ID", help = "EVENT_ID" } }, next = "remuda butler matrix follow EVENT_ID" },
+    notifications = { about = "Get or set a room's notification policy", args = {
+      { name = "MODE", required = false, help = "all, mentions-followed, or none" },
+    }, next = "remuda butler matrix rooms" },
     event = { about = "Show one Matrix event", args = { { name = "EVENT_ID", help = "EVENT_ID" } }, next = "remuda butler matrix history" },
     get = { about = "Show one Matrix event", args = { { name = "EVENT_ID", help = "EVENT_ID" } }, next = "remuda butler matrix history" },
     send = { about = "Send a Matrix message", args = { { name = "TEXT", multiple = true, help = "TEXT" } }, next = "remuda butler matrix history" },
@@ -247,7 +251,7 @@ local function parse(args)
   end
 
   local method = verb == "get" and "event" or verb
-  local room_verbs = { history = true, thread = true, event = true, send = true,
+  local room_verbs = { history = true, thread = true, event = true, send = true, notifications = true,
     follow = true, unfollow = true, reply = true, react = true, upload = true, redact = true }
   if options.room and not room_verbs[method] then return nil end
   if options.n and method ~= "history" then return nil end
@@ -295,6 +299,9 @@ local function parse(args)
     options.room = values[1]
   elseif method == "history" then
     if #values ~= 0 then return nil end
+  elseif method == "notifications" then
+    if #values > 1 then return nil end
+    options.mode = values[1]
   elseif method == "thread" or method == "event" or method == "follow" or method == "unfollow" then
     if #values ~= 1 then return nil end
     options.event_id = values[1]
@@ -332,6 +339,8 @@ local function parsed_simple_request(report)
     return verb == "get" and "event" or verb, {
       json = (values.json == true or nil), room = values.room, event_id = values.EVENT_ID,
     }
+  elseif verb == "notifications" then
+    return verb, { json = (values.json == true or nil), room = values.room, mode = values.MODE }
   end
 end
 
@@ -391,6 +400,7 @@ local function render_human(verb, options, result)
       local kind = terminal_safe(item.kind)
       local how = terminal_safe(item.how or "config")
       if item.inviter then how = how .. "; inviter " .. terminal_safe(item.inviter) end
+      how = how .. "; notifications " .. terminal_safe(item.notifications or "mentions-followed")
       safe_rooms[#safe_rooms + 1] = room
       safe_kinds[#safe_kinds + 1] = kind
       safe_hows[#safe_hows + 1] = how
@@ -425,6 +435,10 @@ local function render_human(verb, options, result)
     local rooms = data.joined_rooms or {}
     return table.concat({ "User: " .. tostring(data.user_id or "unknown"),
       "Joined rooms: " .. tostring(#rooms) }, "\n") .. "\n"
+  elseif verb == "notifications" then
+    return "Notifications for " .. terminal_safe(data.room) .. ": " .. terminal_safe(data.mode)
+      .. "\nNext: remuda butler matrix --room " .. shell_quote(terminal_safe(data.room))
+      .. " notifications [all|mentions-followed|none]\n"
   elseif verb == "history" or verb == "thread" then
     local events = data.chunk or {}
     local lines = {}

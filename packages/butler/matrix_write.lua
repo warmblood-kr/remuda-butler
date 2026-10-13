@@ -676,6 +676,48 @@ function matrix.mark_all(opts, on_done, agent)
   return { cancel = function() end }
 end
 
+function matrix.notifications(opts, on_done, agent)
+  opts = opts or {}
+  local done = once(on_done)
+  if agent then
+    done({ error = "matrix notifications is operator-only\nNext: ask the owner to run remuda butler matrix notifications from their terminal" })
+    return { cancel = function() end }
+  end
+  local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths or {}
+  local config_path = paths.config_path
+  if type(config_path) ~= "string" or config_path == "" then
+    error_result(done, "Matrix config path is unavailable")
+    return { cancel = function() end }
+  end
+  local conf, config_error = matrix.read_config(config_path)
+  if not conf then
+    error_result(done, config_error)
+    return { cancel = function() end }
+  end
+  local room = opts.room or conf.home_room
+  if conf.rooms[room] == nil then
+    error_result(done, tostring(room) .. " is not a configured Matrix room.\nNext: remuda butler matrix rooms")
+    return { cancel = function() end }
+  end
+  if opts.mode ~= nil then
+    local ok, write_error = matrix.config_set_notification_mode(config_path, room, opts.mode)
+    if not ok then
+      error_result(done, write_error)
+      return { cancel = function() end }
+    end
+    if matrix.relay and matrix.relay.instance and matrix.relay.instance.set_notification_mode then
+      matrix.relay.instance:set_notification_mode(room, opts.mode)
+    end
+    conf, config_error = matrix.read_config(config_path)
+    if not conf then
+      error_result(done, config_error)
+      return { cancel = function() end }
+    end
+  end
+  done({ status = 200, json = { room = room, mode = matrix.notification_mode(conf, room) } })
+  return { cancel = function() end }
+end
+
 function matrix.leave(opts, on_done, agent)
   opts = opts or {}
   local done = once(on_done)

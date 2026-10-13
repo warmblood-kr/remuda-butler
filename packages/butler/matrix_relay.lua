@@ -813,6 +813,19 @@ function relay.new(options)
     return cfg.b2b_max_turns
   end
 
+  function instance:notification_mode(room_id)
+    return matrix.notification_mode(cfg, room_id)
+  end
+
+  function instance:set_notification_mode(room_id, mode)
+    if cfg.rooms[room_id] == nil then return false end
+    cfg.room_notifications = cfg.room_notifications or {}
+    local default = matrix.notification_mode({ home_room = cfg.home_room, all_room = cfg.all_room,
+      rooms = cfg.rooms, room_notifications = {} }, room_id)
+    cfg.room_notifications[room_id] = mode ~= default and mode or nil
+    return true
+  end
+
   function instance:note_own_turn(room, root)
     return note_turn(room, root, "agent")
   end
@@ -1298,6 +1311,19 @@ function relay.new(options)
       for _, id in ipairs(ids) do
         local event = state.pending[id]
         if event and not delivery_retry_waiting[id] then
+          local notify_mode = matrix.notification_mode(cfg, event.room_id)
+          local subscriptions = state.subscriptions[event.room_id] or {}
+          local still_accepted = notify_mode == "all"
+            or (notify_mode == "mentions-followed"
+              and ((event.is_mention == true
+                  and (event.mention_follow_root == nil
+                    or subscriptions[event.mention_follow_root] ~= nil))
+                or (event.thread_root ~= nil and subscriptions[event.thread_root] ~= nil)))
+          if not still_accepted then
+            add_processed(state, event.event_id)
+            state.pending[id] = nil
+            persist()
+          else
           resolve_pending_thread_context(event)
           local needs_context = event.thread_root and event.trusted == true
             and not event.context_mail_id and not event.references
@@ -1319,8 +1345,9 @@ function relay.new(options)
                   allowlisted_human = event.trusted == true and event.from_agent == false,
                   room_kind = event.room_kind,
                   created_at = event.created_at }
-                if event.subscribe_thread and event.thread_root then
-                  subscribe(state, event.room_id, event.thread_root, event.context_mail_id or result.id)
+                local followed_root = event.thread_root or (event.subscribe_thread and event.event_id or nil)
+                if event.subscribe_thread and followed_root then
+                  subscribe(state, event.room_id, followed_root, event.context_mail_id or result.id)
                 end
                 trim_map(state.routes, MAX_MAIL_ROUTES, "created_at")
                 persist()
@@ -1346,9 +1373,10 @@ function relay.new(options)
                 end)
               end
             end
+          end
+          end
         end
       end
-    end
     reconcile_acks()
   end
 
@@ -1550,12 +1578,13 @@ function relay.new(options)
   end
 
   local function typed_line_room_allowed(event, room_id)
-    if room_id == cfg.home_room then return true end
     local content = type(event.content) == "table" and event.content or {}
     local thread_root = relation_fields(content)
     local subscriptions = state.subscriptions[room_id] or {}
-    return (thread_root ~= nil and subscriptions[thread_root] ~= nil)
-      or mentions(content, content.body, cfg.self_mxid)
+    local mode = matrix.notification_mode(cfg, room_id)
+    return mode == "all" or (mode == "mentions-followed"
+      and ((thread_root ~= nil and subscriptions[thread_root] ~= nil)
+        or mentions(content, content.body, cfg.self_mxid)))
   end
 
   local function check_typed_line(event)
@@ -1846,9 +1875,17 @@ function relay.new(options)
           local thread_id = thread_root or in_reply_to
           local subscriptions = state.subscriptions[actual_room] or json.object({})
           state.subscriptions[actual_room] = subscriptions
+          local follow_root = thread_root or ev.event_id
           local is_subscribed = thread_root and subscriptions[thread_root] ~= nil
+          local auto_followed = false
+          if trusted and is_mention and not subscriptions[follow_root] then
+            auto_followed = subscribe(state, actual_room, follow_root, nil)
+            if auto_followed and thread_root ~= nil then is_subscribed = true end
+          end
           local is_agent = sender_kind == "AGENT"
-          local accepted = actual_room == cfg.home_room or thread_root == nil or is_subscribed or is_mention
+          local notify_mode = matrix.notification_mode(cfg, actual_room)
+          local accepted = notify_mode == "all"
+            or (notify_mode == "mentions-followed" and (is_mention or (thread_root ~= nil and is_subscribed)))
           local route_mail_id = thread_id
             and instance:mail_route_for_event(actual_room, thread_root, in_reply_to) or nil
           local thread_root_mail_id = thread_root
@@ -1883,6 +1920,7 @@ function relay.new(options)
           if not accepted or rate_capped then
             add_processed(state, ev.event_id)
             if cursor then state.since = cursor end
+            if auto_followed then persist() end
           else
           local root = thread_root or ev.event_id
           if is_agent then note_turn(actual_room, root, "agent")
@@ -1896,7 +1934,10 @@ function relay.new(options)
             references = references and { references } or nil,
             from_agent = is_agent,
             trusted = trusted,
-            subscribe_thread = thread_root ~= nil and is_mention and trusted,
+            is_mention = is_mention,
+            mention_follow_root = is_mention and trusted and subscriptions[follow_root] ~= nil
+              and follow_root or nil,
+            subscribe_thread = is_mention and trusted,
             thread_id = thread_id,
           }
           added[#added + 1] = ev.event_id
