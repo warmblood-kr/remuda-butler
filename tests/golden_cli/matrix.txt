@@ -9,49 +9,19 @@ actions:
 matrix.status(nil)
 
 ### remuda butler "matrix" "--json" "status"
-exit: 1
+exit: 0
 stdout:
-
+{"joined_rooms":[],"user_id":"@bot:example.org"}
 stderr:
-runtime error: empty tables are ambiguous; use remuda.json.array or remuda.json.object
-stack traceback:
-	[C]: in ?
-	[C]: in upvalue 'raw_pcall'
-	native/src/image.rs:<LINE>:<COL>: in function 'pcall'
-	[string "packages/butler/matrix_request.lua"]:<LINE>: in field 'encode_json'
-	[string "packages/butler/matrix_cli.lua"]:<LINE>: in upvalue 'finish'
-	[string "packages/butler/matrix_cli.lua"]:<LINE>: in local 'callback'
-	(eval):5: in function <(eval):5>
-	[C]: in upvalue 'raw_pcall'
-	native/src/image.rs:<LINE>:<COL>: in function 'pcall'
-	[string "packages/butler/matrix_cli.lua"]:<LINE>: in function <[string "packages/butler/matrix_cli.lua"]:<LINE>>
-	(...tail calls...)
-	[string "packages/butler/commands.lua"]:<LINE>: in function <[string "packages/butler/commands.lua"]:<LINE>>
-	(...tail calls...)
 
 actions:
 matrix.status(true)
 
 ### remuda butler "matrix" "status" "--json"
-exit: 1
+exit: 0
 stdout:
-
+{"joined_rooms":[],"user_id":"@bot:example.org"}
 stderr:
-runtime error: empty tables are ambiguous; use remuda.json.array or remuda.json.object
-stack traceback:
-	[C]: in ?
-	[C]: in upvalue 'raw_pcall'
-	native/src/image.rs:<LINE>:<COL>: in function 'pcall'
-	[string "packages/butler/matrix_request.lua"]:<LINE>: in field 'encode_json'
-	[string "packages/butler/matrix_cli.lua"]:<LINE>: in upvalue 'finish'
-	[string "packages/butler/matrix_cli.lua"]:<LINE>: in local 'callback'
-	(eval):5: in function <(eval):5>
-	[C]: in upvalue 'raw_pcall'
-	native/src/image.rs:<LINE>:<COL>: in function 'pcall'
-	[string "packages/butler/matrix_cli.lua"]:<LINE>: in function <[string "packages/butler/matrix_cli.lua"]:<LINE>>
-	(...tail calls...)
-	[string "packages/butler/commands.lua"]:<LINE>: in function <[string "packages/butler/commands.lua"]:<LINE>>
-	(...tail calls...)
 
 actions:
 matrix.status(true)
@@ -87,25 +57,10 @@ actions:
 matrix.history(!room:example.org|8|nil)
 
 ### remuda butler "matrix" "history" "-n" "4" "--json"
-exit: 1
+exit: 0
 stdout:
-
+{"chunk":[]}
 stderr:
-runtime error: empty tables are ambiguous; use remuda.json.array or remuda.json.object
-stack traceback:
-	[C]: in ?
-	[C]: in upvalue 'raw_pcall'
-	native/src/image.rs:<LINE>:<COL>: in function 'pcall'
-	[string "packages/butler/matrix_request.lua"]:<LINE>: in field 'encode_json'
-	[string "packages/butler/matrix_cli.lua"]:<LINE>: in upvalue 'finish'
-	[string "packages/butler/matrix_cli.lua"]:<LINE>: in local 'callback'
-	(eval):7: in function <(eval):7>
-	[C]: in upvalue 'raw_pcall'
-	native/src/image.rs:<LINE>:<COL>: in function 'pcall'
-	[string "packages/butler/matrix_cli.lua"]:<LINE>: in function <[string "packages/butler/matrix_cli.lua"]:<LINE>>
-	(...tail calls...)
-	[string "packages/butler/commands.lua"]:<LINE>: in function <[string "packages/butler/commands.lua"]:<LINE>>
-	(...tail calls...)
 
 actions:
 matrix.history(nil|4|true)
