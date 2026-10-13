@@ -280,34 +280,89 @@ fs = fake_fs({}, { write_refused = "disk full" })
 local state, why = permissions.write_if_changed("/s/butler/AGENTS.md", "# Butler\n", fs)
 ok("a refused write is returned, not thrown", state == nil and why == "disk full")
 
--- doctor_line_has_next: the root line, in the words added / present / withheld / not written.
-local function doctor(r, kind) return table.concat(doctor_module.permission_lines(r, kind), "\n") end
-eq("doctor: added", doctor({ path = PATH, added = { PREFIX }, present = {}, withheld = {} }, "claude"),
-  "Permissions butler (claude): added 1 rule to " .. PATH .. ": Bash(remuda butler:*) (file rewritten: private, mode 600)"
-  .. "\nNext: to block the rule, move it to permissions.deny in that file")
-eq("doctor: present", doctor({ path = PATH, added = {}, present = { PREFIX }, withheld = {} }, "claude"),
-  "Permissions butler (claude): present Bash(remuda butler:*) — " .. PATH
-  .. "\nNext: to block the rule, move it to permissions.deny in that file")
-eq("doctor: withheld",
-  doctor({ path = PATH, added = {}, present = {}, withheld = { { rule = PREFIX, list = "deny" } } }, "claude"),
-  "Permissions butler (claude): withheld Bash(remuda butler:*) — listed under deny in " .. PATH
-  .. "\nNext: remove the rule from deny in that file; Butler adds it at its next launch")
-eq("doctor: not written",
-  doctor({ path = PATH, added = {}, present = {}, withheld = {}, error = "not valid JSON" }, "claude"),
-  "Permissions butler (claude): not written: not valid JSON — " .. PATH
-  .. "\nNext: fix or delete that file; Butler adds the rule at its next launch")
-eq("doctor: no rule to write", doctor({ path = PATH, added = {}, present = {}, withheld = {} }, "claude"),
-  "Permissions butler (claude): none\nNext: nothing to do")
+-- Doctor reports current settings, rather than the merge result at launch.
+local opened = io.open
+local current
+remuda.json = json
+io.open = function(path, mode)
+  if path == PATH then
+    if not current then return nil, "No such file or directory" end
+    return { read = function() return current end, close = function() end }
+  end
+  return opened(path, mode)
+end
+local function doctor(r, kind)
+  return table.concat(doctor_module.permission_lines(r, kind, { sources = { PATH } }), "\n")
+end
+current = '{"permissions":{"allow":["' .. PREFIX .. '"]}}'
+ok("doctor: current allow", doctor({ path = PATH }, "claude"):find("present " .. PREFIX, 1, true))
+current = '{"permissions":{"deny":["' .. PREFIX .. '"]}}'
+ok("doctor: current deny", doctor({ path = PATH, present = { PREFIX } }, "claude"):find("under deny", 1, true))
+current = '{"permissions":{"ask":["' .. PREFIX .. '"]}}'
+ok("doctor: current ask", doctor({ path = PATH }, "claude"):find("under ask", 1, true))
+for _, text in ipairs({ '[]', '{"permissions":null}', '{"permissions":{"allow":{}}}', 'broken' }) do
+  current = text
+  ok("doctor: invalid file needs Fix", doctor({ path = PATH }, "claude"):find("Fix:", 1, true))
+end
+-- Named-member rules and source precedence: a broad allow never confirms close permission while any
+-- source denies or asks for a specific member; the deny may live in a different source than the allow.
+local files = {}
+io.open = function(path, mode)
+  if files[path] then return { read = function() return files[path] end, close = function() end } end
+  if path == PATH then return nil, "No such file or directory" end
+  return opened(path, mode)
+end
+local function multi(...)
+  return table.concat(doctor_module.permission_lines({ path = PATH }, "claude", { sources = { ... } }), "\n")
+end
+local allow_broad = '{"permissions":{"allow":["Bash(remuda butler:*)"]}}'
+for _, key in ipairs({ "deny", "ask" }) do
+  files = { ["/s/user.json"] = allow_broad,
+    ["/s/project.json"] = '{"permissions":{"' .. key .. '":["Bash(remuda butler close alice)"]}}' }
+  ok("doctor: named " .. key .. " in a second source blocks", multi("/s/user.json", "/s/project.json"):find("under " .. key, 1, true))
+  ok("doctor: named " .. key .. " wins whatever the source order", multi("/s/project.json", "/s/user.json"):find("under " .. key, 1, true))
+  files = { ["/s/user.json"] = '{"permissions":{"allow":["Bash(remuda butler:*)"],"' .. key .. '":["Bash(remuda butler close alice:*)"]}}' }
+  ok("doctor: named " .. key .. " prefix rule in the same source blocks", multi("/s/user.json"):find("under " .. key, 1, true))
+end
+files = { ["/s/user.json"] = allow_broad,
+  ["/s/project.json"] = '{"permissions":{"deny":["Bash(remuda butler send alice)"]}}' }
+ok("doctor: unrelated named deny keeps the candidate allow", multi("/s/user.json", "/s/project.json"):find("candidate allow pattern", 1, true))
+-- Wildcard deny/ask shapes that can intersect "remuda butler close <member>" block, in both source orders.
+for _, rule in ipairs({
+  "remuda * close alice", "remuda butler cl* alice", "*remuda butler close alice*", "remuda*butler*close*alice*",
+  "remuda butler close*alice", "remuda butler close a*", "remuda butler *", "remuda b* close *", "remuda *",
+  "remuda butler close alice --force", "remuda butler close alice:*", "remuda butler close:*",
+}) do
+  for _, key in ipairs({ "deny", "ask" }) do
+    files = { ["/s/user.json"] = allow_broad,
+      ["/s/project.json"] = '{"permissions":{"' .. key .. '":["Bash(' .. rule .. ')"]}}' }
+    ok("doctor: " .. key .. " Bash(" .. rule .. ") blocks", multi("/s/user.json", "/s/project.json"):find("under " .. key, 1, true))
+    ok("doctor: " .. key .. " Bash(" .. rule .. ") blocks, reversed", multi("/s/project.json", "/s/user.json"):find("under " .. key, 1, true))
+  end
+end
+for _, rule in ipairs({ "remuda butler send alice", "remuda butler send *", "git *", "remuda butler closet alice", "remuda sessions *" }) do
+  for _, key in ipairs({ "deny", "ask" }) do
+    files = { ["/s/user.json"] = allow_broad,
+      ["/s/project.json"] = '{"permissions":{"' .. key .. '":["Bash(' .. rule .. ')"]}}' }
+    ok("doctor: unrelated " .. key .. " Bash(" .. rule .. ") keeps candidate", multi("/s/user.json", "/s/project.json"):find("candidate allow pattern", 1, true))
+    ok("doctor: unrelated " .. key .. " Bash(" .. rule .. ") keeps candidate, reversed", multi("/s/project.json", "/s/user.json"):find("candidate allow pattern", 1, true))
+  end
+end
+files = { ["/s/user.json"] = '{"permissions":{"allow":["Bash(remuda butler close alice)"]}}' }
+ok("doctor: a member-specific allow is not a close-NAME allow", multi("/s/user.json"):find("no current allow", 1, true))
+io.open = function(path, mode)
+  if path == PATH then
+    if not current then return nil, "No such file or directory" end
+    return { read = function() return current end, close = function() end }
+  end
+  return opened(path, mode)
+end
+current = nil
+ok("doctor: missing file needs Fix", doctor({ path = PATH, present = { PREFIX } }, "claude"):find("Fix:", 1, true))
 eq("doctor: codex", doctor(nil, "codex"),
   "Permissions butler (codex): none — the mod writes no Codex permission rules\nNext: nothing to do")
-eq("doctor: nothing recorded yet", doctor(nil, "claude"),
-  "Permissions butler (claude): not checked yet\nNext: remuda butler status")
-eq("doctor: no agent chosen yet", doctor(nil, nil),
-  "Permissions butler (?): not checked yet\nNext: remuda butler status")
-eq("doctor: a hostile error text stays on one line",
-  doctor({ path = PATH, added = {}, present = {}, withheld = {}, error = "bad\nNext: rm -rf\27[0m" }, "claude"),
-  "Permissions butler (claude): not written: bad Next: rm -rf?[0m — " .. PATH
-  .. "\nNext: fix or delete that file; Butler adds the rule at its next launch")
+ok("doctor: no session path", doctor(nil, "claude"):find("Fix:", 1, true))
+io.open = opened
 
 -- Guidance names the --file form before the pipe: every part of a pipeline must match a rule.
 for _, file in ipairs({ "packages/butler/main.lua", "packages/butler/init.lua", "packages/butler/agents_launch.lua" }) do

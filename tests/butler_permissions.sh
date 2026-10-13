@@ -71,8 +71,8 @@ wait_for "the root launch did not write $FILE" has_rule
 # The mod makes .claude with remuda.fs.mkdir_new; the pinned core (0651664) gives it mode 700.
 [[ $(mode "$ROOT/.claude") == 700 ]] || fail "the created .claude directory is not private: $(mode "$ROOT/.claude")"
 DOCTOR=$("$REMUDA_BIN" -s "$SERVER" butler doctor 2>&1 || true)
-grep -qF "Permissions butler (claude): added 1 rule to $FILE: $RULE (file rewritten: private, mode 600)" <<<"$DOCTOR" \
-  || fail "doctor does not show the added rule: $DOCTOR"
+grep -qF "Permissions butler (claude): present $RULE — $FILE" <<<"$DOCTOR" \
+  || fail "doctor does not show the current rule: $DOCTOR"
 [[ $(tail -1 <<<"$DOCTOR") == Next:* ]] || fail "doctor does not end with Next: $DOCTOR"
 
 echo "== tick_does_not_rewrite (3 reconcile ticks)"
@@ -158,7 +158,7 @@ for content in '{"permissions":' '{"permissions":{"allow":[]},"permissions":{}}'
   respawn
   sleep 1
   [[ $(cat "$FILE") == "$content" ]] || fail "a file the mod must not edit was changed: $content -> $(cat "$FILE")"
-  "$REMUDA_BIN" -s "$SERVER" butler doctor 2>&1 | grep -qE "Permissions butler \(claude\): not written: (not valid JSON|wrong type) — " \
+  "$REMUDA_BIN" -s "$SERVER" butler doctor 2>&1 | grep -qE "Permissions butler \(claude\): close permission not confirmed — invalid " \
     || fail "doctor does not say why $content was not written"
 done
 
@@ -178,7 +178,7 @@ printf '{"permissions":{"deny":["%s"]}}' "$RULE" >"$FILE"
 respawn
 sleep 1
 [[ $(cat "$FILE") == '{"permissions":{"deny":["'"$RULE"'"]}}' ]] || fail "a file with the rule under deny was changed: $(cat "$FILE")"
-"$REMUDA_BIN" -s "$SERVER" butler doctor 2>&1 | grep -qF "withheld $RULE — listed under deny in $FILE" \
+"$REMUDA_BIN" -s "$SERVER" butler doctor 2>&1 | grep -qF "$RULE under deny in $FILE" \
   || fail "doctor does not say the rule is withheld"
 
 echo "== symlink_is_not_written"
@@ -188,15 +188,15 @@ ln -s "$SCRATCH/elsewhere.json" "$FILE"
 respawn
 sleep 1
 [[ -L $FILE && $(cat "$SCRATCH/elsewhere.json") == '{}' ]] || fail "the mod wrote through or over a symlink"
-"$REMUDA_BIN" -s "$SERVER" butler doctor 2>&1 | grep -qF "not written: is a symlink — $FILE" \
-  || fail "doctor does not name the symlink"
+"$REMUDA_BIN" -s "$SERVER" butler doctor 2>&1 | grep -qF "no current allow rule covers remuda butler close NAME" \
+  || fail "doctor must not reuse the launch report for a symlink without an allow"
 
 echo "== launch_survives_unwritable_dir"
 rm "$FILE"
 chmod 500 "$ROOT/.claude"
 respawn
 [[ ! -e $FILE ]] || fail "a file appeared in a read-only directory"
-"$REMUDA_BIN" -s "$SERVER" butler doctor 2>&1 | grep -qF "Permissions butler (claude): not written: " \
+"$REMUDA_BIN" -s "$SERVER" butler doctor 2>&1 | grep -qF "Permissions butler (claude): close permission not confirmed — " \
   || fail "doctor does not report the failed write"
 chmod 700 "$ROOT/.claude"
 

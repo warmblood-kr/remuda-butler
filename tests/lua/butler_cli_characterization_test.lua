@@ -235,13 +235,37 @@ families {
     } },
   { name = "doctor",
     setup = [[
-      local d = remuda._butler_doctor
+      local d = dofile(]] .. string.format("%q", repo .. "/packages/butler/doctor.lua") .. [[)
       d.probe = function() remuda._pr0_note("doctor.probe"); return {} end
       d.render = function() remuda._pr0_note("doctor.render"); return { "doctor-stub" } end
+      remuda._pr0_permission_lines = d.permission_lines
       d.permission_lines = function() return {} end
+      function remuda._pr0_current_permissions(text)
+        remuda._butler_permission_report = { kind = "claude", report = {
+          path = "/doctor/settings.local.json", added = {}, present = { "Bash(remuda butler:*)" }, withheld = {} } }
+        d.permission_lines = function(report, kind)
+          local opened = io.open
+          io.open = function(path, mode)
+            if path == "/doctor/settings.local.json" then
+              remuda._pr0_note("settings.read", path)
+              if text == nil then return nil, "No such file or directory" end
+              return { read = function() return text end, close = function() end }
+            end
+            return opened(path, mode)
+          end
+          local ok, lines = pcall(remuda._pr0_permission_lines, report, kind, { sources = { report.path } })
+          io.open = opened
+          assert(ok, lines)
+          return lines
+        end
+      end
     ]],
     cases = forms("doctor", { "doctor", "extra" }, { "doctor", "--" }, { "doctor", "--json" },
-      { "doctor", "--help", "extra" }, { "doctor", "extra", "--help" }, { "doctor", "--=" }) },
+      { "doctor", "--help", "extra" }, { "doctor", "extra", "--help" }, { "doctor", "--=" },
+      { argv = { "doctor" }, as = "agent", pre = [[remuda._pr0_current_permissions('{"permissions":{"allow":["Bash(remuda butler:*)"]}}')]] },
+      { argv = { "doctor" }, as = "agent", pre = [[remuda._pr0_current_permissions('{"permissions":{"deny":["Bash(remuda butler:*)"]}}')]] },
+      { argv = { "doctor" }, as = "agent", pre = [[remuda._pr0_current_permissions(nil)]],
+        post = [[remuda._butler_doctor.permission_lines = function() return {} end; remuda._butler_permission_report = nil]] }) },
   { name = "sessions",
     setup = [[remuda._butler_sessions = function() remuda._pr0_note("sessions.lookup"); return "sessions-stub" end]],
     cases = forms("sessions", { "sessions", "extra" }, { "sessions", "--all" }, { "sessions", "--", "x" },
