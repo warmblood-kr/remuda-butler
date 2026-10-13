@@ -378,6 +378,16 @@ local function codex_picker_rows(screen, title)
   return rows
 end
 local function codex_row(rows, name)
+  if name == "default" then
+    local target
+    for index, row in ipairs(rows or {}) do
+      if row.label:find("(default)", 1, true) then
+        if target then return nil end -- ambiguous default marker
+        target = index
+      end
+    end
+    return target, target and rows[target] or nil
+  end
   for index, row in ipairs(rows or {}) do
     local rest = row.label:sub(#name + 1)
     if row.label:sub(1, #name) == name and (rest == "" or rest:match("^[%s(]")) then return index, row end
@@ -829,6 +839,14 @@ function remuda._butler_compaction_execute(session_name, force)
         local rows, cursor = effort_rows(effort_screen)
         local target = codex_row(rows, row_label)
         if not target then abort("no '" .. effort .. "' effort row for " .. model); return end
+        -- A symbolic footer resolves through this model's marked default;
+        -- after applying, Codex may display the concrete effort instead.
+        local selected_effort = effort
+        if effort == "default" then
+          local label = rows[target].label:match("^(.-)%s*%(") or rows[target].label
+          selected_effort = label == "extra high" and "xhigh" or label
+        end
+        operation.effort = selected_effort -- keep the gate bound to the resolved default target
         local step = target > cursor and "<down>" or "<up>"
         for _ = 1, math.abs(target - cursor) do
           if not key(step, "effort picker") then return end
@@ -842,7 +860,7 @@ function remuda._butler_compaction_execute(session_name, force)
           operation.phase = "settle"
           wait_for("codex-model-set", function(set_screen)
             local current, current_effort = codex_footer(set_screen)
-            return current == model and current_effort == effort
+            return current == model and (current_effort == effort or current_effort == selected_effort)
           end, function()
             if state.dialog_operation == operation then state.dialog_operation = nil end
             on_done()

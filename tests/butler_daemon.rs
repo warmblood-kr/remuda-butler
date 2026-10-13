@@ -7520,6 +7520,10 @@ done
         &path,
         &format!(
             r#"
+      -- This fixture drives compaction manually; keep unrelated periodic
+      -- compactions from stealing the fleet lock during long failure cases.
+      -- Dialog polling and the audited input gate remain enabled.
+      remuda._butler_state.compaction_enabled = false
       remuda._butler_compaction_config = {{critical=400000, cooldown_ticks=0, capture_gap=0,
         completion_timeout=1, claude_completion_timeout=0.2, failure_cooldown_seconds=0, input_settle=0.01}}
       local prior_contributions = remuda.contributions

@@ -758,7 +758,8 @@ internal `remuda butler status-hook`, which stores only that word and a time in
 `<status file>.state`. A hook word beats the screen while fresh: 10 minutes for
 `working` (a missing Stop means a crash or interrupt), an hour for `idle` and
 `needs you`; those two still yield to a screen that shows `working`. Otherwise
-the screen probe decides. Codex has no hooks yet and stays on the screen probe.
+the screen probe decides. Codex has no status hooks yet and stays on the screen
+probe.
 
 Butler also checks managed Claude and Codex panes every second for unfamiliar
 boxed or numbered choice dialogs. The reporting-only dispatcher stops Butler
