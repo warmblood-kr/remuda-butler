@@ -316,6 +316,14 @@ local function statusline_integer(value)
 end
 
 local function statusline(args, caller)
+  local spec = { name = "remuda butler", verbs = { statusline = {
+    about = "Read status-line JSON from stdin and print Butler telemetry. Example: remuda butler statusline /tmp/status.status",
+    args = { { name = "PATH", help = "Optional status file path", required = false } },
+    next = "remuda butler statusline [PATH]",
+  } } }
+  local report = remuda.cli.parse(spec, args or {})
+  if report.kind == "help" then return report.text end
+  if not report.ok then return remuda.fail(report.text, report.code) end
   local principal = caller_principal and caller_principal.resolve(caller)
   if not principal or principal.tag ~= "member" then
     return "Butler cannot identify this caller for status telemetry. Next: run from a registered Butler session or upgrade Remuda core."
@@ -347,7 +355,7 @@ local function statusline(args, caller)
     statusline_integer(window.context_window_size), statusline_integer(window.used_percentage))
   local limits = remuda._butler_quota and remuda._butler_quota.rate_limits_line(snapshot, os.time())
 
-  local path = args[2]
+  local path = report.values.PATH
   local drive_rooted = type(path) == "string" and path:match("^%a:")
     and (path:sub(3, 3) == "/" or path:sub(3, 3) == "\\")
   local absolute = type(path) == "string" and (

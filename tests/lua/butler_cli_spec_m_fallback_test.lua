@@ -261,8 +261,12 @@ T.test("inbox name and delivered-ID semantics are unchanged", function()
   -- #439: a member may read only its own inbox; the operator may read any named one.
   both_command("inbox", { "inbox", "alice" }, '{ kind = "outside" }', "true|inbox:alice", setup)
   both_command("inbox", { "inbox", "alice" }, caller, "true|1:agents may only read their own Butler inbox.\nNext: remuda butler inbox", setup)
-  both_command("inbox", { "inbox", "--" }, '{ kind = "outside" }', "true|inbox:--", setup)
-  both_command("inbox", { "inbox", "-alice" }, '{ kind = "outside" }', "true|inbox:-alice", setup)
+  both_command("inbox", { "inbox", "--" }, '{ kind = "outside" }',
+    "true|1:outside operator inbox needs a name; use `remuda butler inbox <name>`", setup)
+  local leading_dash = run_command(true, "inbox", { "inbox", "-alice" }, '{ kind = "outside" }', setup)
+  T.ok(leading_dash:find("unexpected argument '-a'", 1, true)
+      and leading_dash:find("Usage: remuda butler inbox", 1, true), "dash-prefixed names need the standard separator")
+  both_command("inbox", { "inbox", "--", "-alice" }, '{ kind = "outside" }', "true|inbox:-alice", setup)
   both_command("inbox", { "inbox", "01M49D6J4RVBW73XKFGQ6XS94J" }, caller,
     "true|message:01M49D6J4RVBW73XKFGQ6XS94J:agent-test", setup)
 end)

@@ -153,8 +153,7 @@ command(6, "quota", "  remuda butler quota [--report]", function(args, caller)
     return remuda.fail(parsed and parsed.text or "Usage: remuda butler quota [--report]", 2)
   end
   -- Parsing is pure and happens before authorization or report collection.
-  local report_flag = args[2] == "--report"
-  if parsed then report_flag = parsed.values.report == true end
+  local report_flag = parsed and parsed.values.report == true
   if report_flag then
     local identity = current_agent(caller)
     if identity ~= nil then
@@ -611,16 +610,10 @@ command(50, "send-to-leader", "  remuda butler send-to-leader [--done] <message.
     return remuda._butler_report(from, body, done or nil)
   end)
 end)
-local INBOX_CLI_SPEC = { name = "remuda butler", verbs = { inbox = { about = "Read your Butler inbox or show one delivered message",
-  args = { { name = "NAME", help = "Member name or delivered message ID", required = false } }, next = "remuda butler inbox [name]" } } }
+local INBOX_CLI_SPEC = { name = "remuda butler", verbs = { inbox = { about = "Read your Butler inbox or show one delivered message. Examples: remuda butler inbox; remuda butler inbox 01M...",
+  args = { { name = "NAME", help = "Member name or delivered message ID", required = false } }, next = "remuda butler inbox [NAME]" } } }
 command(60, "inbox", "  remuda butler inbox [name]", function(args, caller)
-  local argv = args
-  local selector = args[2]
-  if type(selector) == "string" and selector:sub(1, 1) == "-" and selector ~= "--help" and selector ~= "-h" then
-    argv = { args[1], "--", selector }
-    for index = 3, #args do argv[#argv + 1] = args[index] end
-  end
-  local report = cli_parser(INBOX_CLI_SPEC, argv)
+  local report = cli_parser(INBOX_CLI_SPEC, args)
   if report.kind == "help" then
     return report.text .. "\nA message ID shows one of your delivered messages without changing its read state."
   end
@@ -628,7 +621,7 @@ command(60, "inbox", "  remuda butler inbox [name]", function(args, caller)
     if type(remuda.fail) == "function" then return remuda.fail(report.text, report.code) end
     error(report.text, 0)
   end
-  selector = report.values.NAME
+  local selector = report.values.NAME
   local caller_identity = current_agent(caller)
   -- Only a ULID may reach a message lookup (it opens messages/<id>.json).
   -- An agent id is also a ULID and falls through to the name form.
@@ -642,7 +635,10 @@ command(60, "inbox", "  remuda butler inbox [name]", function(args, caller)
     end)
   end
   return cli_result(function()
-    local name = selector or assert(caller_identity, "outside operator inbox needs a name; use `inbox <name>`")
+    if not selector and not caller_identity then
+      error("outside operator inbox needs a name; use `remuda butler inbox <name>`", 0)
+    end
+    local name = selector or caller_identity
     if caller_identity and selector then
       -- Check only the caller's own identifiers before inbox resolution. An
       -- unknown target gets the same refusal as any other cross-member name.

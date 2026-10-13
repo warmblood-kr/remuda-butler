@@ -1,21 +1,11 @@
 # Remaining verbs still have hand-parsed positional or option paths; remove each entry only
 # when its complete accepted grammar and help use remuda.cli.parse.
-agents
-doctor
 guard
 help
-inbox
 launch
-quota
-sessions
-status
-status-hook
-statusline
 topic delegate
-close
 compact
 send
-send-to-leader
 reply
 forward
 topic new

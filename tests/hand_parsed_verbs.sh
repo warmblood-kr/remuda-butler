@@ -10,6 +10,8 @@ APPROVAL=$REPO/packages/butler/approval.lua
 APPROVE_TEXT=$REPO/packages/butler/approve_text.lua
 SCHEDULE_CLI=$REPO/packages/butler/schedule_cli.lua
 TYPED_LINES_CLI=$REPO/packages/butler/typed_lines_cli.lua
+MAIN=$REPO/packages/butler/main.lua
+STATUS_HOOK=$REPO/packages/butler/status_hook.lua
 
 check() {
   local commands=$1 tmp
@@ -130,6 +132,8 @@ SEED
     }
     verb != "" && /remuda\.cli/ { uses_cli=1 }
     verb != "" && /cli\.parse/ && uses_cli { parsed=1 }
+    verb != "" && /cli_parser\(/ { parsed=1 }
+    verb != "" && /fits_spec\(/ { parsed=1 }
     verb != "" && /type\(cli/ { hand=1 }
     verb != "" && $0 !~ /^command\(/ && /args\[[0-9a-z]/ { hand=1 }
     verb == "topic" && /cli\.parse\(TOPIC_NEW_CLI_SPEC/ { topic_new=1 }
@@ -160,6 +164,12 @@ SEED
   fi
   if grep -Fq 'parse_cli(spec, args or {})' "$APPROVE_TEXT"; then
     printf 'approve-text\tyes\n' >> "$tmp/status_helpers"
+  fi
+  if grep -Fq 'remuda.cli.parse(spec, args or {})' "$MAIN"; then
+    printf 'statusline\tyes\n' >> "$tmp/status_helpers"
+  fi
+  if grep -Fq 'remuda.cli.parse(STATUS_HOOK_CLI_SPEC, args or {})' "$STATUS_HOOK"; then
+    printf 'status-hook\tyes\n' >> "$tmp/status_helpers"
   fi
   awk -F '\t' 'NR==FNR { helpers[$1]=1; next } !($1 in helpers)' "$tmp/status_helpers" "$tmp/status_commands" > "$tmp/status_commands.filtered"
   mv "$tmp/status_commands.filtered" "$tmp/status_commands"
@@ -244,22 +254,13 @@ cp "$REPO/packages/butler/commands.lua" "$tmp/commands.lua"
 printf '\ncommand(999, "fake-migrated", "usage", function() local cli = remuda.cli; cli.parse({}, {}) end)\n' >> "$tmp/commands.lua"
 HAND_PARSED_ALLOWLIST="$ALLOWLIST" bash "$0" --check "$tmp/commands.lua"
 
-cp "$REPO/packages/butler/commands.lua" "$tmp/commands.lua"
-awk '
-  /^command\(5, "doctor"/ { doctor=1 }
-  doctor && /^end\)/ { print "  local cli = remuda.cli; cli.parse({}, {})"; doctor=0 }
-  { print }
-' "$tmp/commands.lua" > "$tmp/edited.lua"
-expect_failure "allowlist entry 'doctor' is migrated" "$tmp/edited.lua"
-grep -Fvx 'doctor' "$ALLOWLIST" > "$tmp/allowlist.txt"
-expect_failure "new verbs must use remuda.cli.parse; see docs: 'doctor'" "$REPO/packages/butler/commands.lua" "$tmp/allowlist.txt"
 # Honest baseline: compact is declared only in init.lua. Other entries in this
 # loop still have manual argv mapping or validation in addition to parser calls.
-for verb in compact close send send-to-leader reply forward "topic new"; do
+for verb in compact send reply forward "topic new"; do
   grep -Fvx "$verb" "$ALLOWLIST" > "$tmp/allowlist.txt"
   expect_failure "new verbs must use remuda.cli.parse; see docs: '$verb'" "$REPO/packages/butler/commands.lua" "$tmp/allowlist.txt"
 done
 cp "$REPO/packages/butler/commands.lua" "$tmp/commands.lua"
 printf '\ncommand(999, "fake-gated", "usage", function(args) local cli = remuda.cli; if type(cli.parse) == "function" then return cli.parse({}, args) end; return args[2] end)\n' >> "$tmp/commands.lua"
 expect_failure "new verbs must use remuda.cli.parse; see docs: 'fake-gated'" "$tmp/commands.lua"
-echo "hand-parsed verb freeze: PASS (four coverage cases, honest-baseline cases)"
+echo "hand-parsed verb freeze: PASS (new verb, parser gate, migrated entry, honest-baseline cases)"
