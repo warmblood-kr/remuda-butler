@@ -31,6 +31,10 @@ Caller attribution is advisory, **not an isolation boundary**. See
 [Caller identity](docs/butler.md#caller-identity); CI's core pin is in
 `tests/core_ref.sh`.
 
+The Butler CLI requires core `remuda.cli.parse`, introduced by
+warmblood-kr/remuda#465 (2026-10-02). Upgrade Remuda before using
+`remuda butler` on an older core.
+
 Butler requires a running `remuda` daemon and
 the generic Lua/runtime APIs supplied by `remuda-native`, with protocol and
 session policy from `remuda-core`. The package uses sessions, process helpers,
@@ -98,9 +102,14 @@ remuda mod install warmblood-kr/remuda-butler
 remuda butler --agent codex
 ```
 
-`remuda mod update butler` updates the installed extension. An already-running
-daemon keeps its current Lua image until `remuda butler` is run again or the
-daemon is restarted.
+`remuda mod update butler` updates the installed extension on disk. To apply
+an update to the running daemon immediately, use
+`remuda mod update butler --reload`. After editing the installed Butler files
+directly, run `remuda -e "remuda.reload('butler')"`. There is no file watcher;
+ordinary edits and updates without `--reload` leave the running Lua image
+unchanged until an explicit reload or daemon restart. Reload requires the
+lifecycle-managed Butler module; `remuda exec butler` does not re-run an active
+module.
 
 `remuda butler --agent claude|codex` selects the root Butler agent without an
 environment variable. Add `--headless` when only the service should start.

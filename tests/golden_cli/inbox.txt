@@ -10,9 +10,19 @@ state: read=0,deliveries=0
 ### remuda butler "inbox" "--help"
 exit: 0
 stdout:
-Usage: remuda butler inbox [name]
-       remuda butler inbox <message-id>  show one of your messages again; read state is unchanged
+Read your Butler inbox or show one delivered message
 
+Usage: remuda butler inbox [NAME]
+
+Arguments:
+  [NAME]  Member name or delivered message ID
+
+Options:
+  -h, --help  Print help
+
+Next: remuda butler inbox [name]
+
+A message ID shows one of your delivered messages without changing its read state.
 stderr:
 
 actions:
@@ -21,9 +31,19 @@ state: read=0,deliveries=0
 ### remuda butler "inbox" "-h"
 exit: 0
 stdout:
-Usage: remuda butler inbox [name]
-       remuda butler inbox <message-id>  show one of your messages again; read state is unchanged
+Read your Butler inbox or show one delivered message
 
+Usage: remuda butler inbox [NAME]
+
+Arguments:
+  [NAME]  Member name or delivered message ID
+
+Options:
+  -h, --help  Print help
+
+Next: remuda butler inbox [name]
+
+A message ID shows one of your delivered messages without changing its read state.
 stderr:
 
 actions:
@@ -88,7 +108,9 @@ exit: 2
 stdout:
 
 stderr:
-<GLOBAL-USAGE>
+unexpected argument 'extra'
+Usage: remuda butler inbox [NAME]
+Next: remuda butler inbox [name]
 actions:
 state: read=5,deliveries=0
 
@@ -115,26 +137,50 @@ exit: 2
 stdout:
 
 stderr:
-<GLOBAL-USAGE>
+unexpected argument 'extra'
+Usage: remuda butler inbox [NAME]
+Next: remuda butler inbox [name]
 actions:
 state: read=7,deliveries=0
 
 ### remuda butler "inbox" "--help" "extra"
 exit: 0
 stdout:
-Usage: remuda butler inbox [name]
-       remuda butler inbox <message-id>  show one of your messages again; read state is unchanged
+Read your Butler inbox or show one delivered message
 
+Usage: remuda butler inbox [NAME]
+
+Arguments:
+  [NAME]  Member name or delivered message ID
+
+Options:
+  -h, --help  Print help
+
+Next: remuda butler inbox [name]
+
+A message ID shows one of your delivered messages without changing its read state.
 stderr:
 
 actions:
 state: read=7,deliveries=0
 
 ### remuda butler "inbox" "01M49D6J4RVBW73XKFGQ6XS94J" "--help"
-exit: 2
+exit: 0
 stdout:
+Read your Butler inbox or show one delivered message
 
+Usage: remuda butler inbox [NAME]
+
+Arguments:
+  [NAME]  Member name or delivered message ID
+
+Options:
+  -h, --help  Print help
+
+Next: remuda butler inbox [name]
+
+A message ID shows one of your delivered messages without changing its read state.
 stderr:
-<GLOBAL-USAGE>
+
 actions:
 state: read=7,deliveries=0

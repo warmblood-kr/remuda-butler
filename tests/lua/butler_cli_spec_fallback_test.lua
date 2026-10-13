@@ -1,5 +1,5 @@
 -- Verbs migrated to declared CLI specs must behave identically with and without remuda.cli.parse
--- (an old core that predates the parser keeps the hand-parsed fallback). Stubs only; no live actions.
+-- Shared-parser command behavior is characterized against the declared grammar. Stubs only; no live actions.
 local started
 local function start_butler()
   if started then return end
@@ -117,15 +117,16 @@ T.test("quota keeps unavailable > usage > authorization > deferred-reply order",
     T.eq(quota_case(parser, { "quota", "--bogus" }, "remuda._butler_quota = nil"),
       "true|1:quota is unavailable: not loaded|collect=0", "unavailable before usage" .. tag)
     T.eq(quota_case(parser, { "quota", "--report", "extra" }),
-      "true|2:unexpected argument: extra|collect=0", "usage before authorization" .. tag)
+      "true|2:unexpected argument 'extra'|collect=0", "usage before authorization" .. tag)
     T.eq(quota_case(parser, { "quota", "--report" }, "remuda.pending = nil"), denied,
       "authorization before the deferred-reply check" .. tag)
     T.eq(quota_case(parser, { "quota" }, "remuda.pending = nil"),
       "true|1:remuda butler quota needs a Remuda core with deferred replies.|collect=0", "deferred-reply check" .. tag)
     T.eq(quota_case(parser, { "quota", "--help" }), "true|string|collect=0", "help is text" .. tag)
     T.eq(quota_case(parser, { "quota", "--report", "--report" }),
-      "true|2:unknown option: --report|collect=0", "repeated --report is a usage error" .. tag)
+      "true|2:invalid arguments: an argument cannot be used with one or more of the other specified arguments|collect=0",
+      "repeated --report is a usage error" .. tag)
     T.eq(quota_case(parser, { "quota", "--help", "--report" }),
-      "true|2:unknown option: --help|collect=0", "--help only counts when alone" .. tag)
+      "true|string|collect=0", "parser help wins before action" .. tag)
   end
 end)

@@ -144,7 +144,28 @@ SEED
     verb != "" && /args\[[0-9a-z]/ && /verb = "/ { hand=1 }
     END { flush() }
   ' "$tmp/status_commands" "$INIT" | grep -vE '^(matrix|topic)	' > "$tmp/status_init" || true
-  cat "$tmp/status_commands" "$tmp/status_init" > "$tmp/status"
+  # Matrix leaves are declared in matrix_arg_spec and parsed through the shared
+  # parser. matrix setup remains a separate hand-parsed command.
+  : > "$tmp/status_matrix"
+  if grep -Fq 'cli.parse(matrix_arg_spec, argv)' "$MATRIX"; then
+    awk '
+      /verbs = \{/ { in_verbs=1; next }
+      in_verbs && /^  },$/ { exit }
+      in_verbs && /matrix_verb\(/ {
+        line=$0
+        if (match(line, /^    \["[a-z-]+"\] =/)) {
+          name=substr(line, RSTART+6, RLENGTH-9); gsub(/["\[\]]/, "", name)
+        } else if (match(line, /^    [a-z-]+ =/)) {
+          name=substr(line, RSTART+4, RLENGTH-6)
+        } else name=""
+        if (name != "") print "matrix " name "\tyes"
+      }
+    ' "$MATRIX" > "$tmp/status_matrix"
+  fi
+  if grep -Fq 'cli.parse(SETUP_CLI_SPEC, argv)' "$REPO/packages/butler/matrix_setup.lua"; then
+    printf 'matrix setup\tyes\n' >> "$tmp/status_matrix"
+  fi
+  cat "$tmp/status_commands" "$tmp/status_init" "$tmp/status_matrix" > "$tmp/status"
   awk -F'\t' '$2 == "yes" { print $1 }' "$tmp/status" > "$tmp/migrated"
   while IFS=$'\t' read -r verb parsed; do
     [[ -z $verb || $verb == matrix || $verb == topic ]] && continue
@@ -212,10 +233,10 @@ awk '
 expect_failure "allowlist entry 'doctor' is migrated" "$tmp/edited.lua"
 grep -Fvx 'doctor' "$ALLOWLIST" > "$tmp/allowlist.txt"
 expect_failure "new verbs must use remuda.cli.parse; see docs: 'doctor'" "$REPO/packages/butler/commands.lua" "$tmp/allowlist.txt"
-# Honest baseline: verbs declared only in init.lua (compact), quoted Matrix keys (mark-all) and
-# families that still carry a hand-parsed fallback (close: cli.parse behind a capability gate and args[N]
+# Honest baseline: verbs declared only in init.lua (compact) and families that
+# still carry a hand-parsed fallback (close: cli.parse behind a capability gate and args[N]
 # reads) are hand-parsed, so they must be allowlisted.
-for verb in compact "matrix mark-all" "matrix thread" close send send-to-leader reply forward "topic new"; do
+for verb in compact close send send-to-leader reply forward "topic new"; do
   grep -Fvx "$verb" "$ALLOWLIST" > "$tmp/allowlist.txt"
   expect_failure "new verbs must use remuda.cli.parse; see docs: '$verb'" "$REPO/packages/butler/commands.lua" "$tmp/allowlist.txt"
 done

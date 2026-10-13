@@ -104,35 +104,33 @@ T.test("close help documents --force before the name", function()
   T.eq(tostring(usage_count), "1", "close parse error prints usage once")
 end)
 
-T.test("close fallback usage only advertises trailing --force", function()
+T.test("close parser accepts --force before the name", function()
   start_butler()
   T.eval("remuda._pr_a_saved_cli = remuda.cli; remuda.cli = nil")
   local out = invoke_error("close", { "close", "--force", "worker" })
   T.eval("remuda.cli = remuda._pr_a_saved_cli; remuda._pr_a_saved_cli = nil")
-  T.expect(out:find("Usage: remuda butler close <name> [--force]", 1, true) ~= nil
-      and out:find("remuda butler close --force <name>", 1, true) == nil,
-    "close fallback usage should match its accepted argument order: " .. out)
+  T.expect(out:find("cannot close worker", 1, true) ~= nil,
+    "close parser should accept --force before the name and reach member resolution: " .. out)
 end)
 
-T.test("reply ID --attach PATH caption words uploads with caption", function()
-  local out = invoke("reply", { "reply", "ID", "--attach", path(), "caption", "words" })
+T.test("reply --attach PATH ID caption words uploads with caption", function()
+  local out = invoke("reply", { "reply", "--attach", path(), "ID", "caption", "words" })
   local expected = "stub:upload|upload|matrix --room !room:test upload --thread $event --caption caption words " .. path()
   T.eq(out, expected, "reply ID --attach PATH caption words")
 end)
 
-T.test("reply ID --file note.txt uses file text as body", function()
-  local out = invoke("reply", { "reply", "ID", "--file", path() })
+T.test("reply --file note.txt ID uses file text as body", function()
+  local out = invoke("reply", { "reply", "--file", path(), "ID" })
   T.eq(out, "stub:reply|reply|agent-test|ID|file-body", "reply ID --file note.txt")
 end)
 
-T.test("reply and forward reject valid first-position CLI parses", function()
-  local out = invoke_error("reply", { "reply", "--file", path(), "ID" })
-  local forward = invoke_error("forward", { "forward", "--", "ID", "worker" })
-  local reply_ok = out:find("Usage: remuda butler reply", 1, true) ~= nil and out:find("Next:", 1, true) ~= nil
-    and out:find("false|", 1, true) == 1 and out:find("|0$") ~= nil
-  local forward_ok = forward:find("Usage: remuda butler forward", 1, true) ~= nil and forward:find("Next:", 1, true) ~= nil
-    and forward:find("false|", 1, true) == 1 and forward:find("|0$") ~= nil
-  T.expect(reply_ok and forward_ok, "reply result: " .. out .. "\nforward result: " .. forward)
+T.test("reply and forward use parser option and positional forms", function()
+  local out = invoke("reply", { "reply", "--file", path(), "ID" })
+  local forward = invoke("forward", { "forward", "ID", "worker", "note" })
+  T.expect(out == "stub:reply|reply|agent-test|ID|file-body",
+    "reply --file PATH ID should parse before performing the action: " .. out)
+  T.expect(forward == "stub:forward|forward|agent-test|ID|worker|note",
+    "forward ID worker note should parse before performing the action: " .. forward)
 end)
 
 T.test("reply help in first position returns usage", function()
@@ -220,13 +218,9 @@ T.test("send-to-leader --bogus returns a usage error with Next", function()
     "send-to-leader --bogus should fail with usage and no report: " .. out)
 end)
 
-T.test("send-to-leader --file=PATH returns usage with Next", function()
-  local out = invoke_error("send-to-leader", { "send-to-leader", "--file=" .. path() })
-  T.expect(out:find("Usage: remuda butler send-to-leader", 1, true) ~= nil
-      and out:find("Next: remuda butler send-to-leader --help\nstack traceback", 1, true) ~= nil
-      and out:find("false|", 1, true) == 1
-      and out:find("|0$") ~= nil,
-    "send-to-leader --file=PATH should fail with usage and no report: " .. out)
+T.test("send-to-leader accepts --file=PATH", function()
+  local out = invoke("send-to-leader", { "send-to-leader", "--file=" .. path() })
+  T.eq(out, "stub:report|report|agent-test|file-body", "send-to-leader --file=PATH")
 end)
 
 T.test("send-to-leader fix the -h flag sends free text", function()
