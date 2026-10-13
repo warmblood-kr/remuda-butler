@@ -45,6 +45,39 @@ local THREAD_CLI_SPEC = {
   },
 }
 
+local MATRIX_CLI_SPEC = {
+  name = "remuda butler matrix",
+  options = {
+    { long = "room", value = "ROOM", help = "Room ID, alias or name (default: the configured room)", global = true },
+    { long = "json", help = "Print machine-readable JSON", global = true },
+    { short = "n", long = "n", value = "N", help = "Number of recent events" },
+    { short = "o", long = "o", value = "PATH", help = "Output path for downloaded media" },
+  },
+  verbs = {
+    status = { about = "Show Matrix connection status", next = "remuda butler matrix rooms" },
+    rooms = { about = "List Matrix rooms", options = { { long = "public", help = "Search public rooms" } }, args = { { name = "TERM", required = false, help = "TERM" } }, next = "remuda butler matrix setup" },
+    history = { about = "Show recent Matrix events", args = { { name = "WORDS", required = false, multiple = true, help = "WORDS" } }, next = "remuda butler matrix status" },
+    thread = { about = "Show every reply in a Matrix thread", args = { { name = "EVENT_ID", help = "EVENT_ID" } }, next = "remuda butler matrix reply EVENT_ID TEXT" },
+    follow = { about = "Follow a Matrix thread", args = { { name = "EVENT_ID", help = "EVENT_ID" } }, next = "remuda butler matrix thread EVENT_ID" },
+    unfollow = { about = "Unfollow a Matrix thread", args = { { name = "EVENT_ID", help = "EVENT_ID" } }, next = "remuda butler matrix follow EVENT_ID" },
+    event = { about = "Show one Matrix event", args = { { name = "EVENT_ID", help = "EVENT_ID" } }, next = "remuda butler matrix history" },
+    get = { about = "Show one Matrix event", args = { { name = "EVENT_ID", help = "EVENT_ID" } }, next = "remuda butler matrix history" },
+    send = { about = "Send a Matrix message", args = { { name = "TEXT", multiple = true, help = "TEXT" } }, next = "remuda butler matrix history" },
+    reply = { about = "Reply to a Matrix event", args = { { name = "WORDS", multiple = true, help = "WORDS" } }, next = "remuda butler matrix history" },
+    react = { about = "React to a Matrix event", args = { { name = "EVENT_AND_KEY", multiple = true, help = "EVENT_AND_KEY" } }, next = "remuda butler matrix history" },
+    upload = { about = "Upload a file to Matrix", options = {
+      { long = "thread", value = "EVENT_ID", help = "Thread to reply in" },
+      { long = "caption", value = "TEXT", help = "Caption for the upload" },
+    }, args = { { name = "PATH", help = "PATH" } }, next = "remuda butler matrix history" },
+    download = { about = "Download Matrix media", args = { { name = "MXC", help = "MXC" } }, next = "remuda butler matrix history" },
+    redact = { about = "Redact a Matrix event", options = { { long = "reason", value = "TEXT", help = "Reason for redaction" } }, args = { { name = "EVENT_ID", help = "EVENT_ID" } }, next = "remuda butler matrix history" },
+    join = { about = "Join a Matrix room", args = { { name = "ROOM", help = "ROOM" } }, next = "remuda butler matrix rooms" },
+    leave = { about = "Leave a Matrix room", args = { { name = "ROOM", help = "ROOM" } }, next = "remuda butler matrix rooms" },
+    ["mark-all"] = { about = "Mark a room as the ALL-BUTLERS room", args = { { name = "ROOM", help = "ROOM" } }, next = "remuda butler matrix rooms" },
+    quarantine = { about = "Inspect quarantined Matrix events", options = { { long = "id", value = "EVENT_ID", help = "Inspect one event" } }, next = "remuda butler matrix status" },
+  },
+}
+
 local THREAD_HELP_TEXT = [[Show every reply in a Matrix thread
 
 Usage: remuda butler matrix thread [OPTIONS] EVENT_ID
@@ -279,6 +312,27 @@ local function parse(args)
     if #values ~= 0 then return nil end
   end
   return method, options
+end
+
+local function parsed_simple_request(report)
+  if type(report) ~= "table" or not report.ok or report.kind == "help" then return nil end
+  local values, verb = report.values or {}, report.verb
+  if verb == "status" then
+    if values.room ~= nil then return nil end
+    return verb, { json = (values.json == true or nil) }
+  elseif verb == "rooms" then
+    if values.room ~= nil then return nil end
+    return verb, { json = (values.json == true or nil), public = (values.public == true or nil), public_term = values.TERM }
+  elseif verb == "history" then
+    if values.WORDS ~= nil and values.WORDS ~= "" and not (type(values.WORDS) == "table" and #values.WORDS == 0) then
+      return nil
+    end
+    return verb, { json = (values.json == true or nil), room = values.room, n = values.n }
+  elseif verb == "event" or verb == "get" or verb == "follow" or verb == "unfollow" then
+    return verb == "get" and "event" or verb, {
+      json = (values.json == true or nil), room = values.room, event_id = values.EVENT_ID,
+    }
+  end
 end
 
 local function event_line(event)
@@ -853,8 +907,19 @@ function matrix.cli(args, agent, stdin_body, file_body)
     if plan.wizard then begin_wizard() else execute_setup(plan) end
     return reply
   end
-  local verb, options
+  local verb, options, legacy_verb, legacy_options
   local cli = remuda.cli
+  local spec_report
+  if type(cli) == "table" and type(cli.parse) == "function" then
+    local has_separator = false
+    for _, word in ipairs(args or {}) do if word == "--" then has_separator = true; break end end
+    if not has_separator then
+      local argv = {}
+      for at = 2, #(args or {}) do argv[#argv + 1] = args[at] end
+      local ok, report = pcall(cli.parse, MATRIX_CLI_SPEC, argv)
+      if ok then spec_report = report end
+    end
+  end
   if type(cli) == "table" and type(cli.parse) == "function" and matrix_verb(args) == "thread" then
     local argv = {}
     for at = 2, #args do argv[#argv + 1] = args[at] end
@@ -871,11 +936,23 @@ function matrix.cli(args, agent, stdin_body, file_body)
       json = report.values.json,
     }
   else
+    verb, options = parsed_simple_request(spec_report)
     local ok
-    ok, verb, options = pcall(parse, args)
-    if not ok then
-      if type(remuda.fail) == "function" then return remuda.fail(tostring(verb), 2) end
-      error(tostring(verb), 0)
+    ok, legacy_verb, legacy_options = pcall(parse, args)
+    -- The legacy parser is the accept/route authority: the spec result is kept only when it
+    -- is field-for-field the same request (root -n/-o, TERM, positional boundaries, spellings).
+    local same = ok and verb == legacy_verb and type(legacy_options) == "table"
+    if same then
+      for _, key in ipairs({ "json", "room", "n", "event_id", "public", "public_term", "output" }) do
+        if options[key] ~= legacy_options[key] then same = false; break end
+      end
+    end
+    if not same then
+      verb, options = legacy_verb, legacy_options
+      if not ok then
+        if type(remuda.fail) == "function" then return remuda.fail(tostring(verb), 2) end
+        error(tostring(verb), 0)
+      end
     end
   end
   if not verb then
