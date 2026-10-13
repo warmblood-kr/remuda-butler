@@ -4561,6 +4561,10 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
           remuda._butler_inbox("butler")
           remuda._butler_session_trace_path = {trace:?}
           remuda._butler_task_poke_attempts = 6
+          -- This focused launch test advances queued fixtures on capture and
+          -- replaces input APIs. Independent fleet polling would consume those
+          -- scripted frames; dispatcher polling is tested with stable screens.
+          remuda._butler_dialog_tick = function() end
           remuda._butler_test_force_launch_probe = {{
             ["t-claude"] = true,
             ["t-claude-launch"] = true,
@@ -7516,6 +7520,10 @@ done
         &path,
         &format!(
             r#"
+      -- This fixture drives compaction manually; keep unrelated periodic
+      -- compactions from stealing the fleet lock during long failure cases.
+      -- Dialog polling and the audited input gate remain enabled.
+      remuda._butler_state.compaction_enabled = false
       remuda._butler_compaction_config = {{critical=400000, cooldown_ticks=0, capture_gap=0,
         completion_timeout=1, claude_completion_timeout=0.2, failure_cooldown_seconds=0, input_settle=0.01}}
       local prior_contributions = remuda.contributions
@@ -7656,14 +7664,27 @@ done
     start("cx-a", "happy");
     start("cx-b", "happy");
     eval(&path, "return remuda.butler.compact('cx-a')");
-    eval(&path, "return remuda.butler.compact('cx-b')");
+    let mut b_started = eval(&path, "return remuda.butler.compact('cx-b')") == "started";
     let deadline = Instant::now() + Duration::from_secs(30);
     while log_of("cx-a") != full_cycle || log_of("cx-b") != full_cycle {
         assert_eq!(std::fs::read_to_string(&codex_config).unwrap(), config_seed,
             "config.toml changed while two members compacted");
-        assert!(Instant::now() < deadline, "both members must finish a full cycle. a:\n{}\nb:\n{}",
-            log_of("cx-a"), log_of("cx-b"));
-        eval(&path, "return remuda.butler.compact('cx-b')");
+        assert!(Instant::now() < deadline,
+            "both members must finish a full cycle. a:\n{}\nb:\n{}\nreports: {}\ndialog metadata: {}",
+            log_of("cx-a"), log_of("cx-b"), reports(), eval(&path, r#"
+              local out = { 'fleet=' .. tostring((remuda._butler_state or {}).compaction_fleet_active) }
+              for _, name in ipairs({'cx-a', 'cx-b'}) do
+                local state = (remuda._butler_bus.dialog_states or {})[name] or {}
+                out[#out + 1] = name .. ':' .. tostring(state.id) .. ':' .. tostring(state.blocked)
+              end
+              return table.concat(out, ';')
+            "#));
+        // A's key log can finish before its completion callback frees the
+        // fleet lock. Retry B until accepted, then wait without starting
+        // another force-compaction after B's first cycle has finished.
+        if !b_started {
+            b_started = eval(&path, "return remuda.butler.compact('cx-b')") == "started";
+        }
         std::thread::sleep(Duration::from_millis(100));
     }
     // The last key is logged before the mod has seen the footer and freed the fleet lock.

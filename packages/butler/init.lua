@@ -7,7 +7,7 @@ if not getmetatable(_G) then
 end
 
 local host = getmetatable(_G).__index.remuda
-local system
+local system, dialogs
 local booted, main_loaded = false, false
 local function load_main()
   if main_loaded then return end
@@ -15,6 +15,7 @@ local function load_main()
   host.exec("butler/system")
   system = assert(host._butler_system)
   host.exec("butler/main")
+  dialogs = host.butler and host.butler.dialogs
 end
 local function start_matrix_relay()
   local matrix = host.butler and host.butler.matrix
@@ -122,6 +123,7 @@ return {
     stop_legacy_matrix_relay()
   end,
   stop = function(state)
+    if dialogs then dialogs.stop() end
     if host._butler_cancel_active_choosers then host._butler_cancel_active_choosers(state) end
     local matrix = host.butler and host.butler.matrix
     if matrix and matrix.relay then pcall(matrix.relay.stop)
@@ -159,6 +161,9 @@ return {
     end },
     { name = "butler-notices", every = 1, run = function()
       if booted and host._butler_deliver_notices then host._butler_deliver_notices() end
+    end },
+    { name = "butler-dialogs", every = 1, run = function()
+      if booted and host._butler_dialog_tick then host._butler_dialog_tick() end
     end },
     { name = "butler-reconcile", every = host._butler_reconcile_interval or 2, run = function()
       if booted and host._butler_reconcile and host._butler_reconcile_retry

@@ -1818,7 +1818,10 @@ fn narrow_claude_wrapped_notice_is_verified_and_submitted() {
     eval(
         &path,
         r#"
-        local row = { name = 'm1', alive = true, attached = false }
+        -- Preserve the launched instance identity when mocking ls: the periodic
+        -- dialog probe must not interpret the narrow-notice mock as a replaced pane.
+        local row = { name = 'm1', alive = true, attached = false,
+          instance_id = remuda._butler_bus.agents.m1.instance_id }
         local state = { columns = 27, events = {}, screen = '❯ \n', submitted = false, busy = false }
         remuda._notice_test_state = state
         remuda._butler_bus.agents.m1.kind = 'claude'

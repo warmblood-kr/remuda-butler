@@ -481,6 +481,7 @@ function remuda._butler_compaction_execute(session_name, force)
   local claude_switch = agent.kind == "claude"
   local function release_lock()
     state.compaction_in_progress = false
+    state.dialog_operation = nil
     if owner_state.compaction_fleet_active == state_key then owner_state.compaction_fleet_active = nil end
     _butler_trace("lock_released", detail)
   end
@@ -779,6 +780,8 @@ function remuda._butler_compaction_execute(session_name, force)
   -- Pick `model` at `effort` for this Codex session only, reading each picker
   -- row from the screen. Every failure closes the picker, then calls on_abort.
   local function codex_select(model, effort, on_done, on_abort)
+    local operation = { agent = agent, model = model, effort = effort, phase = "model" }
+    state.dialog_operation = operation
     local row_label = CODEX_EFFORT_ROWS[effort] or effort
     local picker_timeout = math.max(completion_timeout, 15)
     local effort_title = "select reasoning level for " .. model
@@ -790,6 +793,7 @@ function remuda._butler_compaction_execute(session_name, force)
     -- One ESC per screen, each confirmed from the screen before the next,
     -- so two ESCs never merge and none lands in the composer.
     local function escape(reason, escapes)
+      operation.phase = "escape"
       local function left_open() on_abort(reason .. "; the Codex model picker was left open") end
       wait_for("codex-picker-escape", function(screen) return picker_open(screen) ~= nil end, function(screen)
         local open = picker_open(screen)
@@ -824,6 +828,7 @@ function remuda._butler_compaction_execute(session_name, force)
       local _, row = codex_row(codex_picker_rows(screen, "select model and effort"), model)
       if not row then abort("no " .. model .. " row in the Codex model picker"); return end
       if not key(row.number, "model picker") then return end
+      operation.phase = "effort"
       local function effort_rows(effort_screen)
         local rows = codex_picker_rows(effort_screen, effort_title)
         for index, candidate in ipairs(rows or {}) do if candidate.cursor then return rows, index end end
@@ -841,6 +846,7 @@ function remuda._butler_compaction_execute(session_name, force)
           local label = rows[target].label:match("^(.-)%s*%(") or rows[target].label
           selected_effort = label == "extra high" and "xhigh" or label
         end
+        operation.effort = selected_effort -- keep the gate bound to the resolved default target
         local step = target > cursor and "<down>" or "<up>"
         for _ = 1, math.abs(target - cursor) do
           if not key(step, "effort picker") then return end
@@ -851,10 +857,14 @@ function remuda._butler_compaction_execute(session_name, force)
           return at == target
         end, function()
           if not key("s", "session-only model") then return end
+          operation.phase = "settle"
           wait_for("codex-model-set", function(set_screen)
             local current, current_effort = codex_footer(set_screen)
             return current == model and (current_effort == effort or current_effort == selected_effort)
-          end, on_done, picker_timeout, nil, abort)
+          end, function()
+            if state.dialog_operation == operation then state.dialog_operation = nil end
+            on_done()
+          end, picker_timeout, nil, abort)
         end, picker_timeout, nil, abort)
       end, picker_timeout, nil, abort)
     end, picker_timeout, nil, abort)
