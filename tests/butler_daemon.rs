@@ -3363,7 +3363,7 @@ fn butler_matrix_reply_home_all_roster_subscriptions_survive_restart() {
     for config in [&a_config, &b_config] {
         use std::io::Write;
         let mut file = std::fs::OpenOptions::new().append(true).open(config).unwrap();
-        writeln!(file, "all_room={all}").unwrap();
+        writeln!(file, "all_room={all}\nnotify_room={all} mode=all").unwrap();
     }
     eval(&path, include_str!("support/fake_http.lua"));
     eval(&path, "remuda.exec('butler/matrix')");
@@ -3548,7 +3548,7 @@ fn butler_matrix_reply_thread_returns_to_original_mail_after_relay_restart() {
     {
         use std::io::Write;
         let mut file = std::fs::OpenOptions::new().append(true).open(&config_path).unwrap();
-        writeln!(file, "all_room={room}").unwrap();
+        writeln!(file, "all_room={room}\nnotify_room={room} mode=all").unwrap();
     }
     eval(&path, include_str!("support/fake_http.lua"));
     eval(&path, &format!(
