@@ -36,9 +36,16 @@ warmblood-kr/remuda#465 (2026-10-02). Upgrade Remuda before using
 `remuda butler` on an older core.
 
 Shared-parser syntax changes: put `reply --file PATH` and
-`reply --attach PATH` before the message ID; put `send --file PATH` before
-both sender and recipient; and use `inbox -- -NAME` for a name beginning with
-a dash. Normal `--help` and `-h` now show parser-generated command usage.
+`reply --attach PATH` before the message ID; use `send --from SENDER TO` to
+set an explicit sender and put `send --file PATH TO` to read a body from a
+file; the former positional `send FROM TO ...` form was ambiguous with a
+multiword message and is removed. Use `inbox -- -NAME` for a name beginning
+with a dash. `compact` accepts its options around the session argument; malformed
+options are reported before session lookup, and `--` must precede a session name
+that begins with a dash. `launch` and both `topic`
+subcommands now reject missing or extra arguments with parser usage, and
+`--help`/`-h` show each command's declared options and examples. Normal `--help`
+and `-h` now show parser-generated command usage.
 
 Butler requires a running `remuda` daemon and
 the generic Lua/runtime APIs supplied by `remuda-native`, with protocol and
@@ -124,8 +131,9 @@ environment variable. Add `--headless` when only the service should start.
 New Butler behavior tests belong in `tests/lua/`. Keep Rust tests for core
 primitives and the wire protocol. Run all Lua tests or one file with
 `REMUDA_BIN=<pinned remuda> tests/lua_tests.sh [tests/lua/file_test.lua]`.
-New Butler CLI verbs must use `remuda.cli.parse`; hand-parsed exceptions are
-listed in `tests/hand_parsed_verbs.txt`, and that list may only shrink.
+All interactive Butler CLI verbs use `remuda.cli.parse`; the no-argument guard
+hook is a stdin protocol. The parser ratchet in `tests/hand_parsed_verbs.sh`
+prevents adding hand-parsed verbs.
 
 The harness uses private daemon names `h<pid>` and `h<pid>c`, private HOME,
 XDG, and runtime directories, and never targets the default daemon. Teardown

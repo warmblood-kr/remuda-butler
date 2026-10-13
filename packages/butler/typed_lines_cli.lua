@@ -14,13 +14,13 @@ local SWITCH_KEYS = { ["typed-lines"] = "typed_lines", ["shell-lines"] = "shell_
 local SWITCH_CLI_SPEC = {
   name = "remuda butler",
   verbs = {
-    ["typed-lines"] = { about = "Turn typed Matrix lines on or off", args = {
+    ["typed-lines"] = { about = "Turn typed Matrix lines on or off. Example: remuda butler typed-lines on", args = {
       { name = "STATE", help = "on or off" }, }, next = "remuda butler typed-lines on|off" },
-    ["shell-lines"] = { about = "Turn Matrix shell lines on or off", args = {
+    ["shell-lines"] = { about = "Turn Matrix shell lines on or off. Example: remuda butler shell-lines on", args = {
       { name = "STATE", help = "on or off" }, }, next = "remuda butler shell-lines on|off" },
-    ["status-commands"] = { about = "Turn Matrix status commands on or off", args = {
+    ["status-commands"] = { about = "Turn Matrix status commands on or off. Example: remuda butler status-commands on", args = {
       { name = "STATE", help = "on or off" }, }, next = "remuda butler status-commands on|off" },
-    ["approve-text"] = { about = "Turn text approval on or off", args = {
+    ["approve-text"] = { about = "Turn text approval on or off. Example: remuda butler approve-text on", args = {
       { name = "STATE", help = "on or off" }, }, next = "remuda butler approve-text on|off" },
   },
 }

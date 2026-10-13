@@ -526,7 +526,7 @@ remuda._butler_contribute("butler.guidance", "delegation", { order = 40,
   agents_md = function()
     return [[You may create a Remuda-managed child team with `remuda butler topic delegate
 NAME TASK...` when useful. Internal agent subagents are separate from Butler
-team members. `remuda butler send FROM TO MESSAGE...` is an operator form, not
+team members. `remuda butler send --from FROM TO MESSAGE...` is an operator form, not
 the normal way for a member to communicate.
 ]]
   end })

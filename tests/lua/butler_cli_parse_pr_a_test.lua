@@ -71,8 +71,8 @@ T.test("send lead --file p.txt reads the file body", function()
   T.eq(out, "stub:send|send|agent-test|lead|file-body", "send lead --file p.txt")
 end)
 
-T.test("send --file p a b keeps the from/to form", function()
-  local out = invoke("send", { "send", "--file", path(), "a", "b" }, true)
+T.test("send --from a --file p b keeps explicit sender and recipient", function()
+  local out = invoke("send", { "send", "--from", "a", "--file", path(), "b" }, true)
   T.eq(out, "stub:send|send|a|b|file-body", "send a b --file p")
 end)
 
@@ -168,14 +168,31 @@ T.test("forward ID worker -- -h sends the note after the separator", function()
   T.eq(out, "stub:forward|forward|agent-test|ID|worker|-h", "forward ID worker -- -h")
 end)
 
-T.test("send lead hello world --file p preserves the original positional body", function()
-  local out = invoke("send", { "send", "lead", "hello", "world", "--file", "p" }, true)
-  T.eq(out, "stub:send|send|lead|hello|world --file p", "send lead hello world --file p behaves like main")
+T.test("send rejects file input combined with positional message text", function()
+  local out = invoke_error("send", { "send", "--file", "p", "lead", "hello" })
+  T.expect(out:find("send --file does not accept message words", 1, true) ~= nil,
+    "file and positional message forms must not be combined: " .. out)
+  T.expect(out:sub(-2) == "|0", "invalid input must not send: " .. out)
 end)
 
-T.test("send lead hello -h preserves the original body word", function()
-  local out = invoke("send", { "send", "lead", "hello", "-h" }, true)
-  T.eq(out, "stub:send|send|lead|hello|-h", "send lead hello -h behaves like main")
+T.test("send help documents explicit sender and message forms", function()
+  local out = invoke("send", { "send", "--help" })
+  T.expect(out:find("Usage: remuda butler send", 1, true)
+      and out:find("--from <SENDER>", 1, true)
+      and out:find("<TO>", 1, true)
+      and out:find("[BODY]...", 1, true)
+      and out:find("Examples: remuda butler send", 1, true),
+    "send help is missing its supported forms: " .. out)
+end)
+
+T.test("send lead hello -h preserves its body word", function()
+  local out = invoke("send", { "send", "lead", "hello", "-h" })
+  T.eq(out, "stub:send|send|agent-test|lead|hello -h", "send lead hello -h")
+end)
+
+T.test("send -- -h preserves a dash-leading body word", function()
+  local out = invoke("send", { "send", "lead", "--", "-h" })
+  T.eq(out, "stub:send|send|agent-test|lead|-h", "send lead -- -h")
 end)
 
 T.test("send-to-leader hello world sends the original positional body", function()

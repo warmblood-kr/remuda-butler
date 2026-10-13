@@ -11,7 +11,7 @@ quota.collect()
 ### remuda butler "quota" "--help"
 exit: 0
 stdout:
-Report claude and codex quota
+Report claude and codex quota. Example: remuda butler quota --report
 
 Usage: remuda butler quota [OPTIONS]
 
@@ -29,7 +29,7 @@ actions:
 ### remuda butler "quota" "-h"
 exit: 0
 stdout:
-Report claude and codex quota
+Report claude and codex quota. Example: remuda butler quota --report
 
 Usage: remuda butler quota [OPTIONS]
 
@@ -152,7 +152,7 @@ actions:
 ### remuda butler "quota" "--help" "--report"
 exit: 0
 stdout:
-Report claude and codex quota
+Report claude and codex quota. Example: remuda butler quota --report
 
 Usage: remuda butler quota [OPTIONS]
 
@@ -170,7 +170,7 @@ actions:
 ### remuda butler "quota" "--report" "--help"
 exit: 0
 stdout:
-Report claude and codex quota
+Report claude and codex quota. Example: remuda butler quota --report
 
 Usage: remuda butler quota [OPTIONS]
 
@@ -229,7 +229,7 @@ actions:
 ### [agent] remuda butler "quota" "--help"
 exit: 0
 stdout:
-Report claude and codex quota
+Report claude and codex quota. Example: remuda butler quota --report
 
 Usage: remuda butler quota [OPTIONS]
 
@@ -267,7 +267,7 @@ actions:
 ### remuda butler "quota" "--help"
 exit: 0
 stdout:
-Report claude and codex quota
+Report claude and codex quota. Example: remuda butler quota --report
 
 Usage: remuda butler quota [OPTIONS]
 

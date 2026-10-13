@@ -47,7 +47,7 @@ Caller attribution is advisory within one user account, not an isolation boundar
 
 You may create a Remuda-managed child team with `remuda butler topic delegate
 NAME TASK...` when useful. Internal agent subagents are separate from Butler
-team members. `remuda butler send FROM TO MESSAGE...` is an operator form, not
+team members. `remuda butler send --from FROM TO MESSAGE...` is an operator form, not
 the normal way for a member to communicate.
 Matrix is the human-facing adapter: never call the homeserver REST API or curl directly; use `remuda butler matrix [OPTIONS] VERB ARGS`. Options go BEFORE the verb (`--json` for machine output; `--room ROOM` defaults to the configured room).
 - `status`: whoami, joined rooms, and the sync cursor.

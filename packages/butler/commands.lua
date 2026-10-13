@@ -39,11 +39,27 @@ local function butler_usage()
   for _, item in ipairs(contributions("butler.command")) do lines[#lines + 1] = item.entry.usage end
   return "remuda butler — coordination for managed agents\n\n" .. table.concat(lines, "\n") .. "\n\n" .. USAGE_NOTES
 end
-
-local function words_after(args, first)
-  local words = {}
-  for i = first, #args do words[#words + 1] = args[i] end
-  return table.concat(words, " ")
+local HELP_CLI_SPEC = {
+  name = "remuda butler",
+  verbs = {
+    usage = {
+      about = "Show the installed Butler command list and usage notes",
+      next = "remuda butler help",
+    },
+  },
+}
+local function help_cli(args)
+  local argv = { "usage" }
+  for index, word in ipairs(args) do if index > 1 then argv[#argv + 1] = word end end
+  local report = cli_parser(HELP_CLI_SPEC, argv)
+  if report.kind == "help" then
+    return report.text:gsub("remuda butler usage", "remuda butler help")
+  end
+  if not report.ok then
+    if type(remuda.fail) == "function" then return remuda.fail(report.text, report.code) end
+    error(report.text, 0)
+  end
+  return butler_usage()
 end
 
 local MAX_MESSAGE_BYTES = 64 * 1024
@@ -52,37 +68,31 @@ local function checked_message_body(body)
   if #body > MAX_MESSAGE_BYTES then error("message body exceeds the 64 KiB limit", 0) end
   return body
 end
-local function message_body(args, first, caller)
-  if args[first] == "-" then
-    if #args ~= first then error("stdin message form takes no extra arguments", 0) end
-    local body = caller and caller.stdin
-    if type(body) ~= "string" then
-      error("no message body received on stdin; use `--file PATH` or a Remuda core with caller stdin support", 0)
-    end
-    return checked_message_body(body)
-  elseif args[first] == "--file" then
-    if #args ~= first + 1 or not args[first + 1] or args[first + 1] == "" then
-      error("expected one path after --file", 0)
-    end
-    local path = args[first + 1]
-    local absolute = path:sub(1, 1) == "/" or path:sub(1, 1) == "\\"
-      or path:match("^%a:[/\\]") ~= nil
-    if not absolute then error('message file path must be absolute; use `--file "$PWD/path"`', 0) end
-    -- ponytail: io.open blocks on a named FIFO outside /dev and /proc and would
-    -- hang the daemon; upgrade to a core non-blocking fs read word when it exists.
-    if path:match("^/dev/") or path:match("^/proc/") then
-      error("--file must be a regular file; for a pipe, use - and redirect stdin (Next: remuda butler send NAME - < FILE)", 0)
-    end
-    local allowed, refusal = remuda._butler_file_for_caller(path, "--file ", true)
-    if not allowed then error(refusal, 0) end
-    local file, open_err = io.open(allowed, "rb")
-    if not file then error("cannot read message file: " .. tostring(open_err), 0) end
-    local body, read_err = file:read(MAX_MESSAGE_BYTES + 1)
-    file:close()
-    if read_err then error("cannot read message file: " .. tostring(read_err), 0) end
-    return checked_message_body(body or "")
+local function stdin_message(caller)
+  local body = caller and caller.stdin
+  if type(body) ~= "string" then
+    error("no message body received on stdin; use `--file PATH` or a Remuda core with caller stdin support", 0)
   end
-  return checked_message_body(words_after(args, first))
+  return checked_message_body(body)
+end
+local function file_message(path, caller)
+  if type(path) ~= "string" or path == "" then error("--file needs a path", 0) end
+  local absolute = path:sub(1, 1) == "/" or path:sub(1, 1) == "\\"
+    or path:match("^%a:[/\\]") ~= nil
+  if not absolute then error('message file path must be absolute; use `--file "$PWD/path"`', 0) end
+  -- ponytail: io.open blocks on a named FIFO outside /dev and /proc and would
+  -- hang the daemon; upgrade to a core non-blocking fs read word when it exists.
+  if path:match("^/dev/") or path:match("^/proc/") then
+    error("--file must be a regular file; for a pipe, use - and redirect stdin (Next: remuda butler send NAME - < FILE)", 0)
+  end
+  local allowed, refusal = remuda._butler_file_for_caller(path, "--file ", true)
+  if not allowed then error(refusal, 0) end
+  local file, open_err = io.open(allowed, "rb")
+  if not file then error("cannot read message file: " .. tostring(open_err), 0) end
+  local body, read_err = file:read(MAX_MESSAGE_BYTES + 1)
+  file:close()
+  if read_err then error("cannot read message file: " .. tostring(read_err), 0) end
+  return checked_message_body(body or "")
 end
 local function cli_result(callback)
   local ok, result = pcall(callback)
@@ -105,9 +115,9 @@ end
 local ZERO_ARG_CLI_SPEC = {
   name = "remuda butler",
   verbs = {
-    doctor = { about = "Check the Butler installation", next = "remuda butler doctor" },
-    sessions = { about = "List Butler sessions", next = "remuda butler doctor" },
-    status = { about = "Report whether the Butler is up", next = "remuda butler doctor" },
+    doctor = { about = "Check the Butler installation. Example: remuda butler doctor", next = "remuda butler doctor" },
+    sessions = { about = "List Butler sessions. Example: remuda butler sessions", next = "remuda butler doctor" },
+    status = { about = "Report whether the Butler is up. Example: remuda butler status", next = "remuda butler doctor" },
   },
 }
 local function fits_spec(spec, args)
@@ -134,7 +144,7 @@ local QUOTA_CLI_SPEC = {
   name = "remuda butler",
   verbs = {
     quota = {
-      about = "Report claude and codex quota",
+      about = "Report claude and codex quota. Example: remuda butler quota --report",
       options = { { long = "report", help = "Also post the report to Matrix" } },
       next = "remuda butler doctor",
     },
@@ -335,24 +345,56 @@ end)
 command(14, "shell-lines", "  remuda butler shell-lines on|off", function(args, caller)
   return typed_lines_cli.cli(args, current_agent(caller))
 end)
+local GUARD_CLI_SPEC = {
+  name = "remuda butler guard",
+  verbs = {
+    on = { about = "Enable guard audit recording. Example: remuda butler guard on", next = "remuda butler guard --help" },
+    off = { about = "Disable guard audit recording. Example: remuda butler guard off", next = "remuda butler guard --help" },
+    status = { about = "Show guard switch status. Example: remuda butler guard status", next = "remuda butler guard --help" },
+    stats = { about = "Show guard audit statistics. Example: remuda butler guard stats", next = "remuda butler guard --help" },
+    verify = { about = "Verify guard audit records. Example: remuda butler guard verify", next = "remuda butler guard --help" },
+    approvals = { about = "Control owner approval requests. Example: remuda butler guard approvals status", args = { { name = "STATE", help = "on, off, or status" } }, next = "remuda butler guard --help" },
+    deny = { about = "Control recognized high-impact call denials. Example: remuda butler guard deny status", args = { { name = "STATE", help = "on, off, or status" } }, next = "remuda butler guard --help" },
+    grants = { about = "List or control guard grants. Example: remuda butler guard grants", args = { { name = "STATE", help = "on, off, or status", required = false } }, next = "remuda butler guard --help" },
+  },
+}
+local GUARD_SUMMARY_CLI_SPEC = {
+  name = "remuda butler",
+  verbs = {
+    guard = {
+      about = "Guard audit is off by default. Forms: on|off|status; approvals on|off|status; deny on|off|status; grants [on|off|status]; stats; verify. Example: remuda butler guard approvals status",
+      next = "remuda butler guard approvals status",
+    },
+  },
+}
 command(21, "guard", "  remuda butler guard on|off|status | approvals on|off|status | deny on|off|status | grants [on|off|status] | stats | verify  (off by default)", function(args, caller)
-  -- Resolve hooks and switches once, before policy, approval, or audit state can change.
-  local hook = args[2] == nil
-  local switch = (#args == 2 and (args[2] == "on" or args[2] == "off"))
-      or (#args == 3 and (args[2] == "approvals" or args[2] == "deny" or args[2] == "grants")
-        and (args[3] == "on" or args[3] == "off"))
-  local principal
-  if hook or switch then principal = resolve_principal(caller) end
-  if hook or switch then
-    return remuda.butler.guard_policy.run(args, caller, principal)
+  local argv = {}
+  for index, word in ipairs(args) do if index > 1 then argv[#argv + 1] = word end end
+  -- The no-argument form is a stdin hook protocol, not an interactive verb.
+  if #argv == 0 then return remuda.butler.guard_policy.run(nil, nil, caller) end
+  if argv[1] == "--help" or argv[1] == "-h" then
+    return cli_parser(GUARD_SUMMARY_CLI_SPEC, { "guard", "--help" }).text
   end
-  return remuda.butler.guard_policy.run(args, caller)
+  local report = cli_parser(GUARD_CLI_SPEC, argv)
+  if report.kind == "help" then return report.text end
+  if not report.ok then
+    if type(remuda.fail) == "function" then return remuda.fail(report.text, report.code) end
+    error(report.text, 0)
+  end
+  -- Resolve hooks and switches once, before policy, approval, or audit state can change.
+  local action, state = report.verb, report.values.STATE
+  local switch = (action == "on" or action == "off")
+      or ((action == "approvals" or action == "deny" or action == "grants")
+        and (state == "on" or state == "off"))
+  local principal
+  if switch then principal = resolve_principal(caller) end
+  return remuda.butler.guard_policy.run(action, state, caller, principal)
 end)
 local AGENTS_CLI_SPEC = {
   name = "remuda butler",
   verbs = {
     agents = {
-      about = "List Butler agents",
+      about = "List Butler agents. Example: remuda butler agents --all",
       options = { { long = "all", help = "Include ended agents" } },
       next = "remuda butler sessions",
     },
@@ -385,20 +427,6 @@ local function refuse(message)
   if type(remuda.fail) == "function" then return remuda.fail(tostring(message), 1) end
   error(tostring(message), 0)
 end
--- Parses --writable DIR (repeatable) and --sandbox full out of a flag list; refuses
--- `full` from any Butler agent session (only a person at a terminal grants it).
-local function sandbox_flag(args, i, state)
-  if args[i] ~= "--writable" and args[i] ~= "--sandbox" then return false end
-  local value = args[i + 1]
-  if not value or value == "" then error(args[i] .. " needs a value.\nNext: remuda butler help", 0) end
-  if args[i] == "--writable" then
-    state.writable = state.writable or {}
-    state.writable[#state.writable + 1] = value
-  else
-    state.sandbox = value
-  end
-  return true
-end
 -- verb_words is the owner's command up to the flags, for the refusal message.
 local function checked_profile(kind, state, caller, verb_words, cwd, suffix)
   if state.sandbox == "full" and current_agent(caller) ~= nil then
@@ -407,30 +435,53 @@ local function checked_profile(kind, state, caller, verb_words, cwd, suffix)
   end
   return remuda._butler_profile(kind, state.sandbox, state.writable)
 end
+local function parsed_writable(values)
+  if type(values) ~= "table" or #values == 0 then return nil end
+  return values
+end
+local LAUNCH_CLI_SPEC = {
+  name = "remuda butler",
+  verbs = {
+    launch = {
+      about = "Launch a Butler agent. Name defaults to the agent kind, model and sandbox use agent defaults. Example: remuda butler launch codex review --model o3",
+      options = {
+        { long = "model", value = "MODEL", help = "Model override" },
+        { long = "writable", value = "DIR", help = "Writable directory (repeatable)", repeat_policy = "append" },
+        { long = "sandbox", value = "MODE", help = "Use the full sandbox profile (operator-only; default is agent-specific)" },
+      },
+      args = {
+        { name = "AGENT", help = "Registered agent type (claude, codex, or monocle)" },
+        { name = "NAME", help = "Optional session name", required = false },
+      },
+      next = "remuda butler launch --help",
+    },
+  },
+}
 command(20, "launch", "  remuda butler launch <claude|codex|monocle> [name] [--model M] [--writable DIR]... [--sandbox full]", function(args, caller)
-  if not args[2] then return nil end
-  local registered = false
-  for _, row in ipairs(contributions("butler.agent")) do if row.id == args[2] then registered = true end end
-  if not registered then return nil end
-  local model, name, state, i = nil, nil, {}, 3
-  while i <= #args do
-    if args[i] == "--model" and args[i + 1] then model = args[i + 1]; i = i + 2
-    elseif sandbox_flag(args, i, state) then i = i + 2
-    elseif not name and args[i]:sub(1, 2) ~= "--" then name = args[i]; i = i + 1
-    else return nil end
+  local report = cli_parser(LAUNCH_CLI_SPEC, args)
+  if report.kind == "help" then return report.text end
+  if not report.ok then
+    if type(remuda.fail) == "function" then return remuda.fail(report.text, report.code) end
+    error(report.text, 0)
   end
+  local kind = report.values.AGENT
+  local registered = false
+  for _, row in ipairs(contributions("butler.agent")) do if row.id == kind then registered = true end end
+  if not registered then return nil end
+  local state = { sandbox = report.values.sandbox, writable = parsed_writable(report.values.writable) }
+  local model, name = report.values.model, report.values.NAME
   -- The calling member leads the child; only the operator's falls to butler (#24).
   local parent = current_agent(caller)
-  local words = "remuda butler launch " .. args[2] .. " " .. (name or "NAME")
-  local ok, profile = pcall(checked_profile, args[2], state, caller, words)
+  local words = "remuda butler launch " .. kind .. " " .. (name or "NAME")
+  local ok, profile = pcall(checked_profile, kind, state, caller, words)
   if not ok then return refuse(profile) end
-  return remuda._butler_launch(args[2], name, model, parent, profile)
+  return remuda._butler_launch(kind, name, model, parent, profile)
 end)
 local TOPIC_NEW_CLI_SPEC = {
   name = "remuda butler topic",
   verbs = {
     new = {
-      about = "Create a Butler topic",
+      about = "Create a Butler topic. Template defaults to none, agent and model use configured defaults. Example: remuda butler topic new release --template sprint",
       options = {
         { long = "template", value = "TEMPLATE", help = "Topic template" },
         { long = "agent", value = "AGENT", help = "Agent kind to launch" },
@@ -438,6 +489,27 @@ local TOPIC_NEW_CLI_SPEC = {
       },
       args = { { name = "NAME", help = "Topic name" } },
       next = "remuda butler topic new --help",
+    },
+  },
+}
+local TOPIC_DELEGATE_CLI_SPEC = {
+  name = "remuda butler topic",
+  verbs = {
+    delegate = {
+      about = "Launch a child agent for a topic. Agent and model use configured defaults; leader defaults to your Butler leader or butler, and cwd defaults to the topic directory. Example: remuda butler topic delegate release --agent codex fix the docs",
+      options = {
+        { long = "agent", value = "AGENT", help = "Agent type to launch" },
+        { long = "leader", value = "LEADER", help = "Butler member that leads the child" },
+        { long = "model", value = "MODEL", help = "Model override" },
+        { long = "cwd", value = "DIR", help = "Working directory" },
+        { long = "writable", value = "DIR", help = "Writable directory (repeatable)", repeat_policy = "append" },
+        { long = "sandbox", value = "MODE", help = "Use the full sandbox profile (operator-only; default is agent-specific)" },
+      },
+      args = {
+        { name = "NAME", help = "Topic name" },
+        { name = "TASK", help = "Task for the child agent", multiple = true },
+      },
+      next = "remuda butler topic delegate --help",
     },
   },
 }
@@ -455,36 +527,38 @@ command(30, "topic", "  remuda butler topic new <name> [--template T] [--agent A
     current_agent(caller)
     return remuda._butler_topic_new(report.values.NAME, report.values.template, report.values.agent, report.values.model)
   end
-  if args[2] == "delegate" and args[3] then
-    local kind, parent, model, cwd, i = nil, current_agent(caller) or "butler", nil, nil, 4
-    local state = {}
-    while i <= #args and (args[i] == "--agent" or args[i] == "--leader" or args[i] == "--model" or args[i] == "--cwd"
-        or args[i] == "--writable" or args[i] == "--sandbox") do
-      if sandbox_flag(args, i, state) then -- recorded in state
-      elseif args[i] == "--agent" then kind = args[i + 1]
-      elseif args[i] == "--model" then model = args[i + 1]
-      elseif args[i] == "--cwd" then cwd = args[i + 1]
-      else parent = args[i + 1] end
-      if not args[i + 1] or args[i + 1] == "" then return nil end
-      i = i + 2
-    end
-    if i <= #args then
-      local words = "remuda butler topic delegate " .. args[3] .. " --agent " .. tostring(kind or "codex")
-      local ok, profile = pcall(checked_profile, kind, state, caller, words, cwd, " <task...>")
-      if not ok then return refuse(profile) end
-      return remuda._butler_topic_delegate(args[3], words_after(args, i), nil, kind, parent, model, cwd, profile)
-    end
+  if args[2] ~= "delegate" then return nil end
+  local argv = {}
+  for index = 2, #args do argv[#argv + 1] = args[index] end
+  local report = cli_parser(TOPIC_DELEGATE_CLI_SPEC, argv)
+  if report.kind == "help" then return report.text end
+  if not report.ok then
+    if type(remuda.fail) == "function" then return remuda.fail(report.text, report.code) end
+    error(report.text, 0)
   end
+  local kind = report.values.AGENT
+  local parent = report.values.LEADER or current_agent(caller) or "butler"
+  local model, cwd = report.values.model, report.values.cwd
+  local state = { sandbox = report.values.sandbox, writable = parsed_writable(report.values.writable) }
+  local words = "remuda butler topic delegate " .. report.values.NAME .. " --agent " .. tostring(kind or "codex")
+  local ok, profile = pcall(checked_profile, kind, state, caller, words, cwd, " <task...>")
+  if not ok then return refuse(profile) end
+  local task = report.values.TASK
+  if type(task) == "string" then task = { task } end
+  return remuda._butler_topic_delegate(report.values.NAME, table.concat(task or {}, " "), nil, kind, parent, model, cwd, profile)
 end)
 local SEND_CLI_SPEC = {
   name = "remuda butler",
   verbs = {
     send = {
-      about = "Send a message to a Butler member. Examples: remuda butler send worker 'check the build'; remuda butler send --file '$PWD/note.txt' worker",
-      options = { { long = "file", value = "PATH", help = "Read message text from a file (place before recipient words)" } },
+      about = "Send a message to a Butler member. Sender defaults to your registered identity, or operator outside an agent session. Examples: remuda butler send worker 'check the build'; remuda butler send --from operator worker 'check the build'",
+      options = {
+        { long = "from", value = "SENDER", help = "Set an explicit sender (must match your identity as an agent)" },
+        { long = "file", value = "PATH", help = "Read message text from a file" },
+      },
       args = {
-        { name = "TO", help = "Recipient, or sender when followed by another recipient" },
-        { name = "TAIL", help = "Optional recipient and message words", multiple = true, required = false },
+        { name = "TO", help = "Recipient" },
+        { name = "BODY", help = "Message words, or - to read stdin", multiple = true, required = false },
       },
       next = "remuda butler send --help",
     },
@@ -497,64 +571,34 @@ local function send_sender_matches_caller(from, caller)
   local sender_ok, sender_alias = pcall(resolve, from)
   return caller_ok and sender_ok and caller_alias == sender_alias
 end
-command(40, "send", '  remuda butler send <to> "<message>" | <to> - | <to> --file PATH\n'
-  .. '  remuda butler send <from> <to> <message...> | <from> <to> -\n'
-  .. '  remuda butler send --file PATH <to> | <from> <to>', function(args, caller)
+command(40, "send", '  remuda butler send <to> <message...> | <to> - | --file PATH <to>\n'
+  .. '  remuda butler send --from <sender> <to> <message...> | --from <sender> --file PATH <to>', function(args, caller)
   local report = cli_parser(SEND_CLI_SPEC, args)
   if report.kind == "help" then return report.text end
   if not report.ok then
     if type(remuda.fail) == "function" then return remuda.fail(report.text, report.code) end
     error(report.text, 0)
   end
-  local tail = report.values.TAIL
-  if type(tail) == "string" then tail = { tail } end
-  tail = type(tail) == "table" and tail or {}
-  local first = report.values.TO
-  local from, to, body_words, body
+  local body_words = report.values.BODY
+  if type(body_words) == "string" then body_words = { body_words } end
+  body_words = type(body_words) == "table" and body_words or {}
+  local from = report.values.from or current_agent(caller) or OPERATOR
+  local to, body
   if report.values.file then
-    if #tail > 1 then
-      return remuda.fail('send --file accepts one recipient or a sender/recipient pair.\nUsage: remuda butler send --file PATH <to> | <from> <to>\nExample: remuda butler send --file "$PWD/message.txt" lead\nNext: remuda butler send --help', 2)
+    if #body_words > 0 then
+      return remuda.fail('send --file does not accept message words.\nUsage: remuda butler send --file PATH <to>\nExample: remuda butler send --file "$PWD/message.txt" lead\nNext: remuda butler send --help', 2)
     end
-    from = current_agent(caller) or OPERATOR
-    if #tail == 0 then to = first
-    elseif #tail == 1 then from, to = first, tail[1]
-    else return nil end
-    body = message_body({ "send", "--file", report.values.file }, 2, caller)
+    to = report.values.TO
+    body = file_message(report.values.file, caller)
   else
-    if not first then return nil end
-    from, to = current_agent(caller) or OPERATOR, first
-    local body_after_separator = false
-    -- The parser consumes `--` as its option boundary. Keep its position only
-    -- to disambiguate the two documented sender forms and preserve literal body words.
-    local default_sender_separator = args[3] == "--"
-    local explicit_sender_separator = args[4] == "--"
-    if explicit_sender_separator then
-      from, to = first, tail[1]
-      body_words = {}
-      for index = 2, #tail do body_words[#body_words + 1] = tail[index] end
-      body_after_separator = true
-    elseif default_sender_separator then
-      body_words = tail
-      body_after_separator = true
-    elseif #tail >= 2 and tail[1] ~= "--" then
-      from, to = first, tail[1]
-      body_words = {}
-      for index = 2, #tail do body_words[#body_words + 1] = tail[index] end
-    else
-      body_words = tail
-    end
-    if body_words[1] == "--" then table.remove(body_words, 1); body_after_separator = true end
-    if body_words[1] == "--file" and not body_after_separator then
-      return remuda.fail('place --file before recipient words.\nUsage: remuda butler send --file PATH <to> | <from> <to>\nExample: remuda butler send --file "$PWD/message.txt" lead\nNext: remuda butler send --help', 2)
-    end
+    to = report.values.TO
     if body_words[1] == "-" then
       if #body_words ~= 1 then return remuda.fail("stdin message form takes no extra arguments", 2) end
-      body = message_body({ "send", "-" }, 2, caller)
+      body = stdin_message(caller)
     else
       body = checked_message_body(table.concat(body_words, " "))
     end
   end
-  if not to then return nil end
   if not send_sender_matches_caller(from, caller) then
     return cli_result(function() error("cannot send with a different sender", 0) end)
   end
@@ -564,7 +608,7 @@ local SEND_TO_LEADER_CLI_SPEC = {
   name = "remuda butler",
   verbs = {
     ["send-to-leader"] = {
-      about = "Send a message to your Butler leader",
+      about = "Send a message to your Butler leader. Example: remuda butler send-to-leader 'build is green'",
       options = { { long = "file", value = "PATH", help = "Read message text from a file" },
         { long = "done", help = "Your task is finished: Butler closes you once your inbox is drained and you are idle. Omitting this keeps an earlier request" } },
       args = { { name = "WORDS", help = "Message words", multiple = true, required = false } },
@@ -606,14 +650,14 @@ command(50, "send-to-leader", "  remuda butler send-to-leader [--done] <message.
       error(message, 0)
     end
     return cli_result(function()
-      return remuda._butler_report(from, message_body({ "send-to-leader", "--file", file_path }, 2, caller), done or nil)
+      return remuda._butler_report(from, file_message(file_path, caller), done or nil)
     end)
   end
   return cli_result(function()
     local body = table.concat(words, " ")
     if words[1] == "-" then
       if #words ~= 1 then error("stdin message form takes no extra arguments", 0) end
-      body = message_body({ "send-to-leader", "-" }, 2, caller)
+      body = stdin_message(caller)
     else
       body = checked_message_body(body)
     end
@@ -677,7 +721,7 @@ local REPLY_CLI_SPEC = {
   name = "remuda butler",
   verbs = {
     reply = {
-      about = "Reply to a Butler message",
+      about = "Reply to a Butler message. Example: remuda butler reply 01M... 'acknowledged'",
       options = {
         { long = "file", value = "PATH", help = "Read reply text from a file (place before MESSAGE-ID)" },
         { long = "attach", value = "PATH", help = "Attach a file to the Matrix thread (place before MESSAGE-ID)" },
@@ -690,9 +734,6 @@ local REPLY_CLI_SPEC = {
 command(70, "reply", "  remuda butler reply <message-id> <message...> | -\n"
   .. "  remuda butler reply --file PATH <message-id>\n"
   .. "  remuda butler reply --attach PATH <message-id> [caption...]", function(args, caller)
-  if (#args == 2 and (args[2] == "--help" or args[2] == "-h")) or args[#args] == "--help" then
-    return cli_parser(REPLY_CLI_SPEC, { args[1], "--help" }).text
-  end
   local report = cli_parser(REPLY_CLI_SPEC, args)
   if report.kind == "help" then return report.text end
   if not report.ok then
@@ -723,10 +764,10 @@ command(70, "reply", "  remuda butler reply <message-id> <message...> | -\n"
   local body
   if report.values.file then
     if #body_words > 0 then return remuda.fail("reply --file takes only the message ID after PATH.\nNext: remuda butler reply --help", 2) end
-    body = message_body({ "reply", "--file", report.values.file }, 2, caller)
+    body = file_message(report.values.file, caller)
   elseif body_words[1] == "-" then
     if #body_words ~= 1 then return remuda.fail("stdin message form takes no extra arguments", 2) end
-    body = message_body({ "reply", "-" }, 2, caller)
+    body = stdin_message(caller)
   else
     body = checked_message_body(table.concat(body_words, " "))
   end
@@ -736,16 +777,13 @@ local FORWARD_CLI_SPEC = {
   name = "remuda butler",
   verbs = {
     forward = {
-      about = "Forward a Butler message to a member",
+      about = "Forward a Butler message to a member. Example: remuda butler forward 01M... worker",
       args = { { name = "WORDS", help = "Message ID, member, and optional note", multiple = true } },
       next = "remuda butler forward --help",
     },
   },
 }
 command(80, "forward", "  remuda butler forward <message-id> <member> [note...]", function(args, caller)
-  if (#args == 2 and (args[2] == "--help" or args[2] == "-h")) or args[#args] == "--help" then
-    return cli_parser(FORWARD_CLI_SPEC, { args[1], "--help" }).text
-  end
   local report = cli_parser(FORWARD_CLI_SPEC, args)
   if report.kind == "help" then return report.text end
   if not report.ok then
@@ -782,7 +820,7 @@ command(100, "matrix", remuda.butler.matrix.cli_usage(), function(args, caller)
     return checked_message_body((body:gsub("\r?\n$", "")))
   end, function(path)
     -- `matrix send --file PATH`: the same bounded, caller-confined read as the mail verbs.
-    return (message_body({ "--file", path }, 1, caller):gsub("\r?\n$", ""))
+    return (file_message(path, caller):gsub("\r?\n$", ""))
   end)
 end)
 remuda._butler_command_run = function(verb, args, caller)
@@ -793,7 +831,9 @@ end
 -- The generic Remuda extension-command bridge passes an argv-like Lua table.
 -- This parser lives with Butler, not in the Remuda executable.
 remuda.extension_command("butler", function(args, caller)
-  if #args == 0 or args[1] == "help" or args[1] == "-h" or args[1] == "--help" then return butler_usage() end
+  if #args == 0 then return help_cli({ "help" }) end
+  if args[1] == "help" then return help_cli(args) end
+  if args[1] == "-h" or args[1] == "--help" then return help_cli({ "help", "--help" }) end
   if args[1] == "statusline" then return statusline(args, caller) end
   if args[1] == "status-hook" then return remuda.butler.status_hook.run(args, caller) end
   for _, item in ipairs(contributions("butler.command")) do

@@ -12,7 +12,7 @@ state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:examp
 ### remuda butler "typed-lines" "--help"
 exit: 0
 stdout:
-Turn typed Matrix lines on or off
+Turn typed Matrix lines on or off. Example: remuda butler typed-lines on
 
 Usage: remuda butler typed-lines STATE
 
@@ -32,7 +32,7 @@ state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:examp
 ### remuda butler "typed-lines" "-h"
 exit: 0
 stdout:
-Turn typed Matrix lines on or off
+Turn typed Matrix lines on or off. Example: remuda butler typed-lines on
 
 Usage: remuda butler typed-lines STATE
 
@@ -204,7 +204,7 @@ state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:examp
 ### remuda butler "typed-lines" "--help" "off"
 exit: 0
 stdout:
-Turn typed Matrix lines on or off
+Turn typed Matrix lines on or off. Example: remuda butler typed-lines on
 
 Usage: remuda butler typed-lines STATE
 
@@ -224,7 +224,7 @@ state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:examp
 ### remuda butler "typed-lines" "off" "--help"
 exit: 0
 stdout:
-Turn typed Matrix lines on or off
+Turn typed Matrix lines on or off. Example: remuda butler typed-lines on
 
 Usage: remuda butler typed-lines STATE
 
@@ -255,7 +255,7 @@ state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:examp
 ### remuda butler "shell-lines" "--help"
 exit: 0
 stdout:
-Turn Matrix shell lines on or off
+Turn Matrix shell lines on or off. Example: remuda butler shell-lines on
 
 Usage: remuda butler shell-lines STATE
 
@@ -275,7 +275,7 @@ state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:examp
 ### remuda butler "shell-lines" "-h"
 exit: 0
 stdout:
-Turn Matrix shell lines on or off
+Turn Matrix shell lines on or off. Example: remuda butler shell-lines on
 
 Usage: remuda butler shell-lines STATE
 
@@ -447,7 +447,7 @@ state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:examp
 ### remuda butler "shell-lines" "--help" "off"
 exit: 0
 stdout:
-Turn Matrix shell lines on or off
+Turn Matrix shell lines on or off. Example: remuda butler shell-lines on
 
 Usage: remuda butler shell-lines STATE
 
@@ -467,7 +467,7 @@ state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:examp
 ### remuda butler "shell-lines" "off" "--help"
 exit: 0
 stdout:
-Turn Matrix shell lines on or off
+Turn Matrix shell lines on or off. Example: remuda butler shell-lines on
 
 Usage: remuda butler shell-lines STATE
 
@@ -498,7 +498,7 @@ state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:examp
 ### remuda butler "status-commands" "--help"
 exit: 0
 stdout:
-Turn Matrix status commands on or off
+Turn Matrix status commands on or off. Example: remuda butler status-commands on
 
 Usage: remuda butler status-commands STATE
 
@@ -518,7 +518,7 @@ state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:examp
 ### remuda butler "status-commands" "-h"
 exit: 0
 stdout:
-Turn Matrix status commands on or off
+Turn Matrix status commands on or off. Example: remuda butler status-commands on
 
 Usage: remuda butler status-commands STATE
 
@@ -690,7 +690,7 @@ state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:examp
 ### remuda butler "status-commands" "--help" "off"
 exit: 0
 stdout:
-Turn Matrix status commands on or off
+Turn Matrix status commands on or off. Example: remuda butler status-commands on
 
 Usage: remuda butler status-commands STATE
 
@@ -710,7 +710,7 @@ state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:examp
 ### remuda butler "status-commands" "off" "--help"
 exit: 0
 stdout:
-Turn Matrix status commands on or off
+Turn Matrix status commands on or off. Example: remuda butler status-commands on
 
 Usage: remuda butler status-commands STATE
 
@@ -841,7 +841,7 @@ state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:examp
 ### [agent] remuda butler "typed-lines" "--help"
 exit: 0
 stdout:
-Turn typed Matrix lines on or off
+Turn typed Matrix lines on or off. Example: remuda butler typed-lines on
 
 Usage: remuda butler typed-lines STATE
 

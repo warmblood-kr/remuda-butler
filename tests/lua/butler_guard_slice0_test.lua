@@ -108,7 +108,8 @@ T.test("a missing caller principal resolver refuses the guard hook cleanly", fun
   local result = T.eval([[
     local resolver = remuda._butler_caller_principal
     remuda._butler_caller_principal = nil
-    local ok, why = pcall(remuda.butler.guard_policy.run, {'guard'}, { kind = 'session', session = 's-ssa', stdin = '{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"git push"}}' })
+    local ok, why = pcall(remuda.butler.guard_policy.run, nil, nil,
+      { kind = 'session', session = 's-ssa', stdin = '{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"git push"}}' })
     remuda._butler_caller_principal = resolver
     return tostring(ok) .. '|' .. tostring(why)
   ]])

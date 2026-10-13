@@ -1,11 +1,2 @@
-# Remaining verbs still have hand-parsed positional or option paths; remove each entry only
-# when its complete accepted grammar and help use remuda.cli.parse.
-guard
-help
-launch
-topic delegate
-compact
-send
-reply
-forward
-topic new
+# Temporary exceptions to the shared-parser migration. Keep empty unless an
+# owner-approved verb must be staged for a later migration phase.

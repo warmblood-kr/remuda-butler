@@ -57,7 +57,7 @@ T.test("message verbs treat --help as help without actions", function()
 
     remuda._butler_cli_action_calls = {}
     local result = remuda._butler_command_run("send",
-      { "send", "sender", "recipient", "--", "--help" }, { kind = "outside" })
+      { "send", "--from", "sender", "recipient", "--", "--help" }, { kind = "outside" })
     local action = remuda._butler_cli_action_calls[1]
     local body = action and action.args[3] or "(missing)"
     local from = action and action.args[1] or "(missing)"
@@ -113,4 +113,45 @@ T.test("send-to-leader help explains how to send dash-first text", function()
   T.expect(out:find("To send text that starts with -, put -- first:", 1, true) ~= nil
       and out:find("remuda butler send-to-leader -- -text", 1, true) ~= nil,
     "send-to-leader help should explain the -- separator: " .. out)
+end)
+
+T.test("launch and topic delegate help show the parser grammar", function()
+  start_butler()
+  local out = T.eval([[
+    local caller = { kind = "session", session = "agent-test" }
+    local launch = remuda._butler_command_run("launch", { "launch", "--help" }, caller)
+    local delegate = remuda._butler_command_run("topic", { "topic", "delegate", "--help" }, caller)
+    return launch .. "\n---DELEGATE---\n" .. delegate
+  ]])
+  T.expect(out:find("Usage: remuda butler launch", 1, true)
+      and out:find("<AGENT>", 1, true) and out:find("[NAME]", 1, true)
+      and out:find("--writable <DIR>", 1, true)
+      and out:find("Example: remuda butler launch", 1, true),
+    "launch help did not show its supported grammar and example: " .. out)
+  local delegate = out:match("%-%-%-DELEGATE%-%-%-\n(.*)$") or ""
+  T.expect(delegate:find("Usage: remuda butler topic delegate", 1, true)
+      and delegate:find("<NAME>", 1, true) and delegate:find("<TASK>...", 1, true)
+      and delegate:find("--leader <LEADER>", 1, true)
+      and delegate:find("--sandbox <MODE>", 1, true)
+      and delegate:find("Example: remuda butler topic delegate", 1, true),
+    "topic delegate help did not show its supported grammar and example: " .. delegate)
+end)
+
+T.test("guard switch help shows supported subcommands and state arguments", function()
+  start_butler()
+  local out = T.eval([[
+    local caller = { kind = "session", session = "agent-test" }
+    local root = remuda._butler_command_run("guard", { "guard", "--help" }, caller)
+    local approvals = remuda._butler_command_run("guard", { "guard", "approvals", "--help" }, caller)
+    return root .. "\n---APPROVALS---\n" .. approvals
+  ]])
+  T.expect(out:find("Usage: remuda butler guard", 1, true)
+      and out:find("approvals", 1, true) and out:find("deny", 1, true)
+      and out:find("grants", 1, true) and out:find("verify", 1, true),
+    "guard root help omitted a supported subcommand: " .. out)
+  local approvals = out:match("%-%-%-APPROVALS%-%-%-\n(.*)$") or ""
+  T.expect(approvals:find("Usage: remuda butler guard approvals STATE", 1, true)
+      and approvals:find("on, off, or status", 1, true)
+      and approvals:find("Example: remuda butler guard approvals status", 1, true),
+    "guard approvals help omitted its state values or example: " .. approvals)
 end)
