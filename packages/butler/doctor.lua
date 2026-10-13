@@ -157,30 +157,127 @@ local function render(probe_results, platform)
   return lines
 end
 
--- The root Butler's permission rule (permissions.lua): what the mod did to its
--- settings.local.json at the last launch or load. The block ends with Next:.
-local function permission_lines(report, kind)
-  local function one_line(value) return (tostring(value):gsub("[\r\n]+", " "):gsub("%c", "?")) end
-  local head = "Permissions butler (" .. one_line(kind or "?") .. "): "
+-- Read the current files on every invocation; a launch report is only a path hint.
+-- https://code.claude.com/docs/en/settings (list merging and precedence)
+-- https://code.claude.com/docs/en/auto-mode-config (classifyAllShell scopes)
+local function permission_lines(report, kind, context)
+  context = context or {}
+  local head = "Permissions butler (" .. safe(kind or "?") .. "): "
   if kind == "codex" then
     return { head .. "none — the mod writes no Codex permission rules", "Next: nothing to do" }
   end
-  if type(report) ~= "table" then return { head .. "not checked yet", "Next: remuda butler status" } end
-  local path, withheld = one_line(report.path or "?"), report.withheld[1]
-  if report.error then
-    return { head .. "not written: " .. one_line(report.error) .. " — " .. path,
-      "Next: fix or delete that file; Butler adds the rule at its next launch" }
-  elseif withheld then
-    return { head .. "withheld " .. one_line(withheld.rule) .. " — listed under " .. withheld.list .. " in " .. path,
-      "Next: remove the rule from " .. withheld.list .. " in that file; Butler adds it at its next launch" }
-  elseif #report.added > 0 then
-    return { head .. "added " .. #report.added .. " rule to " .. path .. ": " .. one_line(table.concat(report.added, ", "))
-      .. " (file rewritten: private, mode 600)", "Next: to block the rule, move it to permissions.deny in that file" }
-  elseif #report.present > 0 then
-    return { head .. "present " .. one_line(table.concat(report.present, ", ")) .. " — " .. path,
-      "Next: to block the rule, move it to permissions.deny in that file" }
+  local path = type(report) == "table" and report.path
+  if kind ~= "claude" or type(path) ~= "string" then
+    return { head .. "close permission unknown — session settings path unavailable",
+      "Fix: launch the root Butler and retry remuda butler doctor" }
   end
-  return { head .. "none", "Next: nothing to do" }
+  local sources = context.sources
+  if not sources then
+    sources = {}
+    local home = os.getenv("HOME") or os.getenv("USERPROFILE")
+    local config = os.getenv("CLAUDE_CONFIG_DIR") or (home and home .. "/.claude")
+    if config then sources[#sources + 1] = config .. "/settings.json" end
+    sources[#sources + 1] = path:gsub("settings%.local%.json$", "settings.json")
+    sources[#sources + 1] = path
+    if context.settings_path then sources[#sources + 1] = context.settings_path end
+    local platform = system.platform()
+    if platform == "windows" then
+      sources[#sources + 1] = (os.getenv("ProgramFiles") or "C:/Program Files") .. "/ClaudeCode/managed-settings.json"
+    else
+      -- system.platform distinguishes POSIX from Windows only. Inspect both
+      -- conventional POSIX locations conservatively; absent files are ignored.
+      sources[#sources + 1] = "/Library/Application Support/ClaudeCode/managed-settings.json"
+      sources[#sources + 1] = "/etc/claude-code/managed-settings.json"
+    end
+  end
+  local allows, asks, denies, classify_all = {}, {}, {}, false
+  local function blocked(reason)
+    return { head .. "close permission not confirmed — " .. safe(reason),
+      "Fix: review permissions.deny/ask and autoMode.classifyAllShell in the checked files; restore Bash(remuda butler:*) in permissions.allow only if intended. Confirm loaded sources with Claude /status; checked "
+        .. safe(table.concat(sources, ", ")) }
+  end
+  local allow_scan = false
+  local function matches(rule)
+    if rule == "Bash" or rule == "Bash(*)" then return true end
+    if type(rule) ~= "string" then return nil end
+    local pattern = rule:match("^Bash%((.*)%)$")
+    if not pattern then return false end
+    pattern = pattern:gsub(":%*$", " *")
+    local escaped = pattern:gsub("([%^%$%(%)%%%.%[%]%+%-%?])", "%%%1"):gsub("%*", ".*")
+    if ("remuda butler close NAME"):match("^" .. escaped .. "$") ~= nil then return true end
+    if allow_scan then return false end
+    -- Deny/ask: block when the rule and the family "remuda butler close *" can match a common
+    -- string (conservative glob intersection; family has one trailing wildcard). Only the literal
+    -- text before the rule's first `*` constrains it, and it must agree with the family prefix.
+    local family = "remuda butler close "
+    local star = pattern:find("*", 1, true)
+    local lit = star and pattern:sub(1, star - 1) or pattern
+    if star then return lit:sub(1, #family) == family:sub(1, #lit) end
+    return lit:sub(1, #family) == family
+  end
+  for _, source in ipairs(sources) do
+    local file, why = io.open(source, "rb")
+    if file then
+      local text = file:read("*a")
+      file:close()
+      local json = remuda.json
+      if not json or type(json.decode) ~= "function" then return blocked("JSON decoder unavailable") end
+      local ok, settings = pcall(json.decode, text)
+      local array = type(json.array) == "function" and getmetatable(json.array({}))
+      local function is(value, want_array)
+        if type(value) ~= "table" or value == json.null then return false end
+        if array then return (getmetatable(value) == array) == want_array end
+        return true
+      end
+      if not ok or not is(settings, false) or settings[1] ~= nil then
+        return blocked("invalid settings in " .. source)
+      end
+      local perms = settings.permissions
+      if perms ~= nil then
+        if not is(perms, false) then return blocked("invalid permissions in " .. source) end
+        for _, row in ipairs({ { "allow", allows }, { "ask", asks }, { "deny", denies } }) do
+          local rules = perms[row[1]]
+          if rules ~= nil then
+            if not is(rules, true) then return blocked("invalid " .. row[1] .. " in " .. source) end
+            for key, rule in pairs(rules) do
+              if type(key) ~= "number" or type(rule) ~= "string" then return blocked("invalid rule list in " .. source) end
+              row[2][#row[2] + 1] = { rule = rule, source = source }
+            end
+          end
+        end
+      end
+      if settings.autoMode ~= nil and source ~= path and source ~= path:gsub("settings%.local%.json$", "settings.json") then
+        if not is(settings.autoMode, false) then return blocked("invalid autoMode in " .. source) end
+        if settings.autoMode.classifyAllShell ~= nil then
+          if type(settings.autoMode.classifyAllShell) ~= "boolean" then return blocked("invalid classifyAllShell in " .. source) end
+          classify_all = settings.autoMode.classifyAllShell
+        end
+      end
+      if settings.allowManagedPermissionRulesOnly == true then
+        return blocked("managed-only permissions require review in Claude")
+      end
+    elseif not tostring(why):lower():find("no such file", 1, true) then
+      return blocked("cannot read " .. source)
+    end
+  end
+  for _, rows in ipairs({ { "deny", denies }, { "ask", asks } }) do
+    for _, entry in ipairs(rows[2]) do
+      if matches(entry.rule) then return blocked(entry.rule .. " under " .. rows[1] .. " in " .. entry.source) end
+    end
+  end
+  if classify_all then return blocked("autoMode.classifyAllShell suspends shell allow rules") end
+  allow_scan = true
+  for _, entry in ipairs(allows) do
+    if matches(entry.rule) and entry.rule ~= "Bash" and entry.rule ~= "Bash(*)" then
+      local prefix = entry.rule:match("^Bash%((.-):%*%)$") or entry.rule:match("^Bash%((.-) %*%)$")
+      if prefix and (prefix == "remuda butler" or prefix == "remuda butler close") then
+        return { head .. "present " .. safe(entry.rule) .. " — " .. safe(entry.source)
+          .. " (candidate allow pattern for remuda butler close NAME; deny and ask rules checked across current settings)",
+          "Next: this dry check reads settings files only; Claude hooks, server-managed policy and runtime settings may still block execution" }
+      end
+    end
+  end
+  return blocked("no current allow rule covers remuda butler close NAME")
 end
 
 local doctor = {
