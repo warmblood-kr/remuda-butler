@@ -1,0 +1,129 @@
+### remuda butler "doctor"
+exit: 0
+stdout:
+doctor-stub
+stderr:
+
+actions:
+doctor.probe()
+doctor.render()
+
+### remuda butler "doctor" "--help"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "doctor" "-h"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "doctor" "help"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "doctor" "extra"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "doctor" "--"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "doctor" "--json"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "doctor" "--help" "extra"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "doctor" "extra" "--help"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "doctor" "--="
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### [agent] remuda butler "doctor"
+exit: 0
+stdout:
+doctor-stub
+Permissions butler (claude): present Bash(remuda butler:*) — /doctor/settings.local.json (candidate allow pattern for remuda butler close NAME; deny and ask rules checked across current settings)
+Next: this dry check reads settings files only; Claude hooks, server-managed policy and runtime settings may still block execution
+stderr:
+
+actions:
+doctor.probe()
+doctor.render()
+settings.read(/doctor/settings.local.json)
+
+### [agent] remuda butler "doctor"
+exit: 0
+stdout:
+doctor-stub
+Permissions butler (claude): close permission not confirmed — Bash(remuda butler:*) under deny in /doctor/settings.local.json
+Fix: review permissions.deny/ask and autoMode.classifyAllShell in the checked files; restore Bash(remuda butler:*) in permissions.allow only if intended. Confirm loaded sources with Claude /status; checked /doctor/settings.local.json
+stderr:
+
+actions:
+doctor.probe()
+doctor.render()
+settings.read(/doctor/settings.local.json)
+
+### [agent] remuda butler "doctor"
+exit: 0
+stdout:
+doctor-stub
+Permissions butler (claude): close permission not confirmed — no current allow rule covers remuda butler close NAME
+Fix: review permissions.deny/ask and autoMode.classifyAllShell in the checked files; restore Bash(remuda butler:*) in permissions.allow only if intended. Confirm loaded sources with Claude /status; checked /doctor/settings.local.json
+stderr:
+
+actions:
+doctor.probe()
+doctor.render()
+settings.read(/doctor/settings.local.json)

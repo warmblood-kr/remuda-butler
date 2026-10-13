@@ -93,7 +93,7 @@ local function confirm(label, run)
   end
   local prompted, prompt_error = pcall(reply.prompt_line, reply, {
     label = label,
-    preface = WARNING,
+    preface = matrix.wrap_prompt_preface(WARNING),
     callback = function(answer, failure)
       if completed then return end
       if failure then return resolve(1, "", "The schedule prompt failed. Nothing was changed.\n") end

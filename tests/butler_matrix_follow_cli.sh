@@ -9,7 +9,8 @@ T=$(mktemp -d /tmp/bmf.XXXXXX)
 T=$(cd "$T" && pwd -P); S=bmf
 export REMUDA_RUNTIME_DIR=$T/run XDG_DATA_HOME=$T/data XDG_CONFIG_HOME=$T/config HOME=$T/home
 export REMUDA_BUTLER_PROJECT_HOME=$T/projects REMUDA_NO_UPDATE_CHECK=1
-unset REMUDA_BUTLER_TOKEN REMUDA_BUTLER_CONFIG
+unset REMUDA_BUTLER_TOKEN REMUDA_BUTLER_CONFIG REMUDA_SESSION_ID REMUDA_SESSION_NAME REMUDA_DAEMON_ID
+for name in ${!REMUDA_BUTLER_AGENT_@} REMUDA_BUTLER_LEADER_ID REMUDA_BUTLER_SESSION_NAME; do unset "$name"; done
 mkdir -p "$XDG_DATA_HOME/remuda/mods/butler" "$HOME"
 tar -c -C "$REPO" extension.toml packages | tar -x -C "$XDG_DATA_HOME/remuda/mods/butler"
 cleanup() {
@@ -151,5 +152,29 @@ WANT="  Matrix event \$rp1 in room !side:example.org (joined), thread \$rp-root
 reprint body"
 [[ $REPRINT == *"] Matrix message from @owner:example.org
 $WANT" ]] || soft "inbox MESSAGE-ID must show the Matrix line and the Next line of the mail, got: $REPRINT"
+# Upload into a thread and reply --attach: argument vectors in, exit and text out. The
+# event is unknown to the relay, so each refusal happens before any request.
+UP=$T/shot.png
+printf 'PNG' >"$UP"
+run_args upload --thread '$nope:example.org' "$UP"
+[[ $CODE == 1 && $OUT == *'Reply not sent: event $nope:example.org was not delivered to this Butler as mail, so its sender cannot be verified.'* \
+  && $OUT == *'Next: remuda butler inbox (you can only reply to events listed there)'* ]] \
+  || fail "upload --thread of an unverifiable event: $CODE $OUT"
+run_args upload --thread
+[[ $CODE == 2 && $OUT == *'--thread requires a value'* ]] || fail "upload --thread without a value: $CODE $OUT"
+run_args upload --caption
+[[ $CODE == 2 && $OUT == *'--caption requires a value'* ]] || fail "upload --caption without a value: $CODE $OUT"
+run_args upload --thread '$e:example.org'
+[[ $OUT == *'upload [--thread EVENT_ID] [--caption TEXT] PATH'* ]] || fail "upload without a path shows the usage: $OUT"
+set +e
+OUT=$(remuda -s "$S" butler reply "$RP_ID" --attach "$UP" 2>&1); CODE=$?
+set -e
+[[ $CODE == 1 && $OUT == *'Reply not sent: event $rp1 was not delivered to this Butler as mail'* ]] \
+  || fail "reply --attach through a mail the relay never routed: $CODE $OUT"
+set +e
+OUT=$(remuda -s "$S" butler reply "NOSUCHMAIL" --attach "$UP" 2>&1); CODE=$?
+set -e
+[[ $CODE == 1 && $OUT == *'message NOSUCHMAIL is not a Matrix message, so a file cannot be attached'* \
+  && $OUT == *'Next: remuda butler reply NOSUCHMAIL TEXT'* ]] || fail "reply --attach of a non-Matrix mail: $CODE $OUT"
 ((${#SOFT[@]} == 0)) || fail "$(printf '%s\n' "${SOFT[@]}")"
 echo PASS

@@ -2,9 +2,9 @@
 # Installs a persistence layer for `remuda exec butler`: a systemd --user
 # timer (Linux) or a launchd agent (macOS) that polls `remuda ls` every 15s
 # and re-runs `remuda exec butler` whenever no session is named exactly
-# "butler" -- reviving the Matrix bridge after a daemon crash, `remuda
-# restart`, or a reboot, none of which anything in `remuda` itself recovers
-# from on its own (native/tests/daemon.rs,
+# "butler" -- reviving the Matrix bridge after a daemon crash, a daemon
+# restart (`remuda stop` followed by any command), or a reboot, none of which
+# anything in `remuda` itself recovers from on its own (native/tests/daemon.rs,
 # a_daemon_restart_does_not_relaunch_the_butler_session).
 #
 #   curl -fsSL https://warmblood-kr.github.io/remuda/install-butler.sh | sh
@@ -24,13 +24,13 @@
 # without ever noticing the daemon underneath had died.
 #
 # Windows has no systemd/launchd equivalent wired up here yet: run `remuda
-# exec butler` by hand after a restart, or via Task Scheduler, until someone
-# builds that lane.
+# exec butler` by hand after a daemon restart (`remuda stop` followed by any
+# command), or via Task Scheduler, until someone builds that lane.
 #
-# The reboot leg is unproven, by construction: the daemon-restart/relaunch
-# logic below was verified for real (`restart -f`, a genuine registration,
-# a kill, a by-hand relaunch matching the poll loop), but never across an
-# actual `reboot` -- this was developed on the shared fleet substrate, where
+# A daemon restart is `remuda stop` followed by any command, which lazily
+# starts a fresh daemon. The reboot leg is unproven: it was never checked
+# across an actual `reboot` -- this was developed on the shared fleet
+# substrate, where
 # rebooting would kill every concurrent session on it. Whether OnBootSec=10s
 # actually fires after a real reboot, and whether `loginctl enable-linger`
 # actually keeps the --user instance alive through a real logout/reboot
@@ -206,7 +206,8 @@ status "butler is ready."
 # Sibling to remuda/butler/, not inside it: the generic per-daemon loader
 # (native/src/daemon.rs's `load_user_config`), evaluated automatically by
 # every FRESH remuda daemon at boot -- this is what re-registers butler
-# after a `remuda restart` or a reboot, with no human hand and no need to
+# after a daemon restart (`remuda stop` followed by any command) or a reboot,
+# with no human hand and no need to
 # wait for butler-poll.sh's next tick below. Unconditional: nothing else
 # writes this file, so there is nothing of the reader's own to preserve.
 mkdir -p "$config_home/remuda"
@@ -214,7 +215,8 @@ init_lua="$config_home/remuda/init.lua"
 cat >"$init_lua" <<'LUA'
 -- Written by install-butler.sh. Evaluated automatically by every fresh
 -- remuda daemon at startup -- this is what re-registers butler after a
--- daemon restart or machine reboot, with no human hand and no need to
+-- daemon restart (`remuda stop` followed by any command) or machine reboot,
+-- with no human hand and no need to
 -- wait for butler-poll.sh's next tick. An older remuda binary (built
 -- before this loader existed) silently ignores this file, exactly as if
 -- it were absent -- no trap, unlike the earlier package-stub window.
@@ -222,16 +224,7 @@ remuda.exec("butler")
 LUA
 status "wrote $init_lua"
 
-# Real functional verification: kill the daemon and let the next command
-# lazily start a fresh one, then wait for Butler's readiness without calling
-# `remuda exec butler` a second time.
-status "restarting the daemon to verify the new loader actually re-registers butler..."
-env -u PWD remuda restart -f >&2
-
-if ! wait_butler_ready; then
-	die "Butler did not come back ready after a daemon restart -- the boot-time loader ($init_lua) did not work; try 'remuda upgrade' and re-run this installer"
-fi
-status "confirmed: butler came back ready after a daemon restart, with no 'remuda exec butler' call."
+status "daemon restart: run 'remuda stop', then any remuda command."
 
 # The poll-and-relaunch logic lives in its own small script rather than
 # inline in the unit/plist ExecStart -- both systemd unit files and plist
@@ -340,3 +333,5 @@ EOF
 	status "  launchctl bootstrap gui/\$(id -u) $plist"
 	;;
 esac
+
+status "Next: enable the timer or agent using the command shown above."

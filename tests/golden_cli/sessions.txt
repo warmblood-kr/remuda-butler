@@ -1,0 +1,71 @@
+### remuda butler "sessions"
+exit: 0
+stdout:
+sessions-stub
+stderr:
+
+actions:
+sessions.lookup()
+
+### remuda butler "sessions" "--help"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "sessions" "-h"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "sessions" "help"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "sessions" "extra"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "sessions" "--all"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "sessions" "--" "x"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "sessions" "--help" "extra"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)

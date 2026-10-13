@@ -28,7 +28,19 @@ local setup_tests = dofile("tests/butler_matrix_setup.lua")
 local approval_file = io.open("packages/butler/approval.lua", "r")
 if approval_file then approval_file:close(); dofile("packages/butler/approval.lua") end
 dofile("packages/butler/typed_lines.lua")
+dofile("packages/butler/approve_text.lua")
 dofile("packages/butler/status_command.lua")
+remuda._butler_caller_principal_config = { bus = { agents = { ["ss-a"] = { id = "U-SSA", alias = "ss-a", kind = "claude", session_name = "s-ssa" } } } }
+-- caller_principal captures remuda.caller at load, and the guard-grant tests below attribute to session s-ssa.
+do
+  local load_time_caller = remuda.caller
+  remuda.caller = function() return { kind = "session", session = "s-ssa" } end
+  dofile("packages/butler/caller_principal.lua")
+  remuda.caller = load_time_caller
+end
+dofile("packages/butler/guard_policy.lua")
+dofile("packages/butler/guard_grants.lua")
+dofile("packages/butler/guard_approval.lua")
 local relay_module = dofile("packages/butler/matrix_relay.lua")
 
 local function remove_dir(dir)
@@ -1277,6 +1289,10 @@ local function test_redefined_public_words_do_not_change_trust()
   dofile("packages/butler/matrix_write.lua")
   assert(remuda._test_matrix_write_random_request == 16,
     "Matrix write transaction tag should use remuda.random_bytes when /dev/urandom is unavailable")
+  remuda.random_bytes = nil
+  local txn_ok, txn_error = pcall(dofile, "packages/butler/matrix_write.lua")
+  assert(not txn_ok and tostring(txn_error):find("secure random source unavailable", 1, true),
+    "Matrix writes must fail to load when both secure random sources are unavailable")
   remuda.random_bytes = remuda._test_matrix_write_saved_random
   io.open = remuda._test_matrix_write_saved_open
   remuda._test_matrix_write_saved_random, remuda._test_matrix_write_saved_open = nil, nil
@@ -1342,11 +1358,13 @@ end
 local HOME, ALL, NEW = "!room:example.org", "!all:example.org", "!new:example.org"
 local OWNER, STRANGER = "@alice:example.org", "@mallory:example.org"
 
-local function invite_fixture(senders, extra)
+local function invite_fixture(senders, extra, all_room)
   local dir, path = fixture()
   local file = assert(io.open(path, "w"))
   file:write("http://matrix.invalid\n", HOME, "\n@bot:example.org\n", senders or OWNER,
-    "\nfalse\n30000\nall_room=", ALL, "\n", extra or "")
+    "\nfalse\n30000\n")
+  if all_room ~= false then file:write("all_room=", all_room or ALL, "\n") end
+  file:write(extra or "")
   file:close()
   return dir, path
 end
@@ -1467,6 +1485,17 @@ local function test_typed_line_config_is_strict_and_off_by_default()
   local conf = assert(matrix.read_config(path))
   assert(conf.typed_lines == false and conf.shell_lines == false,
     "typed-line switches must default to false")
+  assert(conf.approval_room == "all", "approval_room must default to all")
+  cleanup_fixture(dir, path)
+
+  dir, path = fixture("approval_room=home\n")
+  conf = assert(matrix.read_config(path))
+  assert(conf.approval_room == "home", "approval_room=home must be accepted")
+  cleanup_fixture(dir, path)
+
+  dir, path = fixture("approval_room=other\n")
+  conf = assert(matrix.read_config(path))
+  assert(conf.approval_room == "all", "invalid approval_room values must fall back to all")
   cleanup_fixture(dir, path)
 
   dir, path = fixture("typed_lines=true\nshell_lines=false\n")
@@ -2564,6 +2593,92 @@ local function capture_matrix_cli(args, agent, stdin_body, file_body)
   return captured
 end
 
+-- The #235 tests live in one table: the main chunk is at Lua's 200-local limit.
+local ctx_tests = {}
+function ctx_tests.test_matrix_thread_cli_parser_contract()
+  local dir, path = invite_fixture()
+  with_operator_config(path, 200, function(calls)
+    local failures = {}
+    local function check(name, args, validate)
+      local before = #calls
+      local result = capture_matrix_cli(args)
+      local ok, err = pcall(validate, result)
+      if not ok then failures[#failures + 1] = name .. ": " .. tostring(err) end
+      if #calls ~= before then failures[#failures + 1] = name .. " made a Matrix request" end
+    end
+
+    check("thread --help", { "matrix", "thread", "--help" }, function(help)
+      local expected_help = [[Show every reply in a Matrix thread
+
+Usage: remuda butler matrix thread [OPTIONS] EVENT_ID
+
+Arguments:
+  EVENT_ID  Event that starts the thread, e.g. $abc123, or a Butler mail id (01M...)
+
+Options:
+      --room ROOM  Room ID, alias or name (default: the configured room)
+      --json       Print machine-readable JSON
+  -h, --help       Print help
+
+Next: remuda butler matrix reply EVENT_ID TEXT]]
+      assert(help and help.code == 0 and help.stdout == expected_help and help.stderr == "",
+        "must show the exact per-verb help and exit 0; got: " .. tostring(help and help.stdout or help))
+    end)
+
+    check("thread --jsno", { "matrix", "thread", "--jsno", "$abc" }, function(bad_option)
+      local expected_error = "remuda: butler matrix thread: unknown option '--jsno'. Did you mean '--json'?\n"
+        .. "Usage: remuda butler matrix thread [OPTIONS] EVENT_ID\n"
+        .. "Next: remuda butler matrix thread --help\n"
+      assert(bad_option and bad_option.code == 2 and bad_option.stderr == expected_error
+        and bad_option.stdout == "", "must suggest --json, show Usage and Next, and exit 2; got: "
+          .. tostring(bad_option and bad_option.stderr or bad_option))
+    end)
+
+    local hostile_option = "--jsno\27]8;;https://example.invalid\7"
+    check("thread hostile option", { "matrix", "thread", hostile_option, "$abc" }, function(result)
+      local text = tostring(result and result.stderr or result)
+      assert(result and result.code == 2 and text:find("unknown option", 1, true)
+        and not text:find("\27", 1, true) and not text:find("\7", 1, true),
+        "parser errors must strip ESC/OSC controls from arguments: " .. text)
+    end)
+
+    check("matrix folow", { "matrix", "folow", "$abc" }, function(unknown)
+      local text = tostring(unknown and (unknown.stderr .. unknown.stdout) or unknown)
+      assert(unknown and unknown.code == 2 and text:find("folow", 1, true)
+        and text:find("follow", 1, true) and text:find("Did you mean", 1, true)
+        and text:find("Usage:", 1, true) and text:find("Next:", 1, true),
+        "must suggest follow, show Usage and Next, and exit 2; got: " .. text)
+    end)
+
+    check("matrix C1 verb", { "matrix", "unknown\194\133verb" }, function(unknown)
+      local text = tostring(unknown and (unknown.stderr .. unknown.stdout) or unknown)
+      assert(unknown and unknown.code == 2 and not text:find("\194[\128-\159]"),
+        "unknown-verb errors must strip UTF-8 C1 controls: " .. text)
+    end)
+
+    check("matrix -n history extra", { "matrix", "-n", "5", "history", "extra" }, function(result)
+      assert(result and result.code == 0 and result.stdout == matrix.cli_usage() and result.stderr == "",
+        "an invalid history invocation must keep the legacy full-usage response")
+    end)
+    check("matrix help", { "matrix", "help" }, function(result)
+      assert(result and result.code == 0 and result.stdout == matrix.cli_usage() and result.stderr == "",
+        "matrix help must keep the legacy full-usage response")
+    end)
+
+    local before = #calls
+    local old_cli = remuda.cli
+    remuda.cli = nil
+    local old_core = capture_matrix_cli({ "matrix", "thread", "$abc" })
+    remuda.cli = old_cli
+    local ok, err = pcall(function()
+      assert(old_core and old_core.code == 0 and old_core.stdout == "No Matrix events\n"
+        and #calls == before + 1, "without remuda.cli, thread must keep the old parser and request path")
+    end)
+    if not ok then failures[#failures + 1] = "old core fallback: " .. tostring(err) end
+    assert(#failures == 0, table.concat(failures, "\n"))
+  end)
+  remove_dir(dir)
+end
 local function test_alias_directory_room_id_terminal_controls_are_refused()
   local dir, path = invite_fixture()
   local before = read_text(path)
@@ -2591,6 +2706,47 @@ local function test_rooms_public_refuses_agents()
     assert(#calls == 0, "agent public-room browsing must be refused before HTTP")
   end)
   remove_dir(dir)
+end
+
+remuda._t359 = remuda._t359 or {}
+function remuda._t359.test_mark_all_marks_a_joined_room_operator_only()
+  local dir, path = invite_fixture(nil, "room=" .. NEW .. " how=owner-invite\n", false)
+  with_operator_config(path, 200, function(calls)
+    local before = read_text(path)
+    local refused
+    matrix.mark_all({ room = NEW }, function(value) refused = value end, ASKER)
+    assert(refused and refused.error and refused.error:find("matrix mark-all is operator-only", 1, true)
+      and refused.error:find("Next: ask the owner to run remuda butler matrix mark-all ROOM from their terminal", 1, true),
+      "an agent mark-all must be refused with owner guidance")
+    assert(read_text(path) == before, "a refused mark-all must not touch the config")
+    local cli = capture_matrix_cli({ "matrix", "mark-all", NEW }, ASKER)
+    assert(cli and cli.code == 1 and cli.stderr:find("operator-only", 1, true), "the CLI must refuse an agent caller: " .. tostring(cli and (cli.code .. cli.stderr .. cli.stdout)))
+    local missing
+    matrix.mark_all({ room = "!nope:example.org" }, function(value) missing = value end)
+    assert(missing and missing.error and missing.error:find("not a joined room", 1, true), "an unknown room is refused")
+    local home
+    matrix.mark_all({ room = HOME }, function(value) home = value end)
+    assert(home and home.error and home.error:find("not a joined room", 1, true), "HOME cannot be marked")
+    assert(read_text(path) == before, "failed marks must not touch the config")
+    local result = capture_matrix_cli({ "matrix", "mark-all", NEW })
+    assert(result and result.code == 0 and result.stdout:find("Marked " .. NEW .. " as the ALL-BUTLERS room", 1, true)
+      and result.stdout:find("Next: remuda exec butler", 1, true), "the operator verb must say to reload: " .. tostring(result and result.stdout))
+    local conf = assert(matrix.read_config(path))
+    assert(conf.all_room == NEW and conf.rooms[NEW] == "all", "the room must become ALL-BUTLERS")
+    assert(not read_text(path):find("\nroom=" .. NEW, 1, true), "the room= line must be replaced, not duplicated")
+    assert(#calls == 0, "marking is a local config write")
+    local again
+    matrix.mark_all({ room = NEW }, function(value) again = value end)
+    assert(again and not again.error, "marking the current ALL-BUTLERS room again is a no-op")
+  end)
+  local dir2, path2 = invite_fixture(nil, "room=" .. NEW .. " how=owner-invite\n")
+  with_operator_config(path2, 200, function()
+    local blocked
+    matrix.mark_all({ room = NEW }, function(value) blocked = value end)
+    assert(blocked and blocked.error and blocked.error:find("already set", 1, true), "an existing ALL-BUTLERS room is not replaced")
+  end)
+  remove_dir(dir)
+  remove_dir(dir2)
 end
 
 local function test_join_leave_missing_room_guidance()
@@ -3299,6 +3455,42 @@ end
 -- One block: the main chunk is at Lua's limit of 200 local variables.
 local rx_tests
 do
+-- Exercise the same permission helper and registered session lookup used by
+-- main.lua. The checker receives only core caller identity.
+remuda._test_with_agent_file_caller = function(cwd, run)
+  local saved_caller, saved_check, saved_bus = remuda.caller, remuda._butler_file_for_caller, remuda._butler_bus
+  local permissions = dofile("packages/butler/permissions.lua")
+  local realpath = permissions.fs_helpers(remuda.fs, function(argv)
+    return remuda.process.run({ argv = argv, timeout = 5 })
+  end, "posix")
+  local member = { id = "registered-member", alias = "member", session_name = "session-member", cwd = cwd }
+  local bus = { agents = { member = member } }
+  local function cwd_of(session)
+    local matches, result = 0, nil
+    for alias, agent in pairs(bus.agents) do
+      if type(agent) == "table" and (agent.session_name == session or (alias == "butler" and session == "butler")) then
+        matches, result = matches + 1, agent.cwd
+      end
+    end
+    return matches == 1 and result or nil
+  end
+  remuda._butler_bus = bus
+  remuda.caller = function()
+    return { kind = "session", session = "session-member" }
+  end
+  remuda._butler_file_for_caller = function(path, flag, pipe)
+    return permissions.file_for_caller(path, remuda.caller(), cwd_of, realpath, flag, pipe, "posix")
+  end
+  local ok, err = pcall(run)
+  remuda.caller, remuda._butler_file_for_caller, remuda._butler_bus = saved_caller, saved_check, saved_bus
+  if not ok then error(err, 0) end
+end
+
+remuda._test_create_symlink = function(target, link)
+  local result = remuda.process.run({ argv = { "ln", "-s", target, link }, timeout = 5 })
+  assert(result and result.code == 0, "could not create symlink: " .. tostring(result and result.stderr))
+end
+
 -- Receive rules (notes/rx-design.md, PR 1). One accept rule in every room:
 -- root, followed thread, or mention. Non-allowlisted senders arrive with a marker.
 local RX_BUTLER, RX_ALLY, RX_PREFIX = "@helper:example.org", "@agent-ally:example.org", "@agent-evil:evil.example"
@@ -3988,14 +4180,14 @@ end
 -- Receive rules PR 2: loop guard, own post cap, untrusted per-room cap.
 -- Posts by the CLI go through remuda.http; notices may go through the relay
 -- client, so the HOME-line counts look at both.
-local function rx_cli(args)
+local function rx_cli(args, agent)
   local old_pending, old_guidance, captured = remuda.pending, matrix.configuration_guidance, nil
   remuda.pending = function()
     return { resolve = function(_, code, stdout, stderr) captured = { code = code, stdout = stdout, stderr = stderr } end }
   end
   matrix.configuration_guidance = function() return nil end
   local ok, err = pcall(function()
-    local returned = matrix.cli(args)
+    local returned = matrix.cli(args, agent)
     for _ = 1, 8 do if captured then break end tick_timers(1) end
     if not captured and type(returned) == "string" then captured = { code = 0, stdout = returned, stderr = "" } end
   end)
@@ -4190,6 +4382,55 @@ local function test_rx_reply_to_undelivered_event_says_not_sent()
       assert(type(low) == "table" and low.error == text,
         "matrix.reply to an undelivered event is refused with the same text, got: " .. tostring(low and low.error))
       assert(posted() == 0, "nothing is posted")
+    end)
+    relay:stop()
+  end)
+end
+
+function test_rx_reply_to_own_event_keeps_thread_root()
+  local dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    local relay = rx_relay(path)
+    relay_module.instance = relay
+    rx_post_http(path, function(calls, posted)
+      local result = rx_cli({ "matrix", "send", "own root" })
+      assert(result.code == 0 and relay:can_reply_to("$own1"),
+        "a message sent by this Butler can be replied to: " .. tostring(result.stderr))
+      local route = relay:route_for_event("$own1")
+      assert(route and route.room_id == HOME and route.thread_root == "$own1",
+        "an own root event keeps its room and is its own thread root")
+
+      result = rx_cli({ "matrix", "reply", "$own1", "reply to root" })
+      assert(result.code == 0 and posted() == 2, "replying to our own root posts: " .. tostring(result.stderr))
+      route = relay:route_for_event("$own2")
+      assert(route and route.room_id == HOME and route.thread_root == "$own1",
+        "the outgoing thread reply is recorded under its root")
+
+      result = rx_cli({ "matrix", "reply", "$own2", "reply to reply" })
+      assert(result.code == 0 and posted() == 3, "replying to our own thread reply posts: " .. tostring(result.stderr))
+      local relations = {}
+      for _, call in ipairs(calls) do
+        if call.method == "PUT" then
+          local content = assert(matrix.decode_json(call.body))
+          if content.body == "reply to root" or content.body == "reply to reply" then
+            relations[content.body] = content["m.relates_to"]
+          end
+        end
+      end
+      assert(relations["reply to root"] and relations["reply to root"].rel_type == "m.thread"
+        and relations["reply to root"].event_id == "$own1"
+        and relations["reply to root"]["m.in_reply_to"].event_id == "$own1",
+        "a reply to our root is posted as a thread relation on that root")
+      assert(relations["reply to reply"] and relations["reply to reply"].rel_type == "m.thread"
+        and relations["reply to reply"].event_id == "$own1"
+        and relations["reply to reply"]["m.in_reply_to"].event_id == "$own2",
+        "a reply to our thread reply keeps the root and names that event as its target")
+
+      local refused = rx_cli({ "matrix", "reply", "$foreign-unknown", "no" })
+      local refusal_text = "Reply not sent: event $foreign-unknown was not delivered to this Butler as mail, so its sender cannot be verified.\n"
+        .. "Next: remuda butler inbox (you can only reply to events listed there)"
+      assert(refused.code ~= 0 and refused.stderr:find(refusal_text, 1, true)
+        and posted() == 3, "an unknown foreign event keeps the original refusal without posting")
     end)
     relay:stop()
   end)
@@ -4632,10 +4873,6 @@ local function test_rx_link_like_root_counted_but_not_shown()
   end)
 end
 
--- The #235 tests live in one table: the main chunk of this file is at Lua's
--- limit of 200 local variables, and a table costs one.
-local ctx_tests = {}
-
 -- #235 step A1: the inbox header of a Matrix mail names the room, its kind and
 -- the thread; a thread mail gets a Next line with the room always written.
 function ctx_tests.test_inbox_header_names_room_and_thread()
@@ -4740,6 +4977,79 @@ function ctx_tests.test_matrix_thread_takes_room_from_route()
     end)
     relay:stop()
   end)
+end
+
+function ctx_tests.test_matrix_thread_takes_a_mail_id()
+  local dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    local relay = rx_relay(path)
+    relay_module.instance = relay
+    local MAIL, old_mail = "01M43ECFKRY1782NGW0XNYWD6G", remuda._butler_mail
+    -- Stands in for mail.matrix_thread_target: only member1 (or the operator) holds MAIL.
+    local seen_operator
+    remuda._butler_mail = { matrix_thread_target = function(caller, id, as_operator)
+      seen_operator = as_operator
+      if id == MAIL and (caller == "member1" or as_operator) then return NEW, "$root1" end
+      return nil, "message " .. id .. " was not delivered to you\nNext: remuda butler inbox"
+    end }
+    local urls = {}
+    with_alias_http(path, function(spec)
+      urls[#urls + 1] = tostring(spec.url or spec.path)
+      return { status = 200, body = '{"chunk":[]}' }
+    end, function()
+      rx_cli({ "matrix", "thread", MAIL }, "member1")
+      local asked = table.concat(urls, "\n")
+      assert(asked:find("/rooms/" .. encoded(NEW) .. "/relations/" .. encoded("$root1") .. "/", 1, true),
+        "thread MAIL_ID must read the mail's room and thread root, asked:\n" .. asked)
+      rx_cli({ "matrix", "thread", MAIL })
+      assert(seen_operator == true and #urls == 2, "the operator reads a mail's thread")
+      local before = #urls
+      local refused = rx_cli({ "matrix", "thread", MAIL }, "member2")
+      assert(#urls == before and refused.code == 1 and seen_operator == false
+        and refused.stderr:find("not delivered to you", 1, true)
+        and refused.stderr:find("\nNext: remuda butler inbox", 1, true),
+        "a member the mail was not delivered to must be refused with no request, got: " .. tostring(refused.stderr))
+      local other = rx_cli({ "matrix", "--room", HOME, "thread", MAIL }, "member1")
+      assert(#urls == before and other.code == 1 and other.stderr:find("belongs to room " .. NEW, 1, true)
+        and other.stderr:find("\nNext: remuda butler matrix thread", 1, true),
+        "a --room that differs from the mail's room must be refused, got: " .. tostring(other.stderr))
+    end)
+    remuda._butler_mail = old_mail
+    relay:stop()
+  end)
+end
+
+-- The REAL mail.matrix_thread_target, in memory (no mail root): the delivery check is the
+-- security boundary of `matrix thread MAIL_ID`, so a stub must not be the only test of it.
+function ctx_tests.test_mail_matrix_thread_target_checks_delivery()
+  local old_mail, old_config = remuda._butler_mail, remuda._butler_mail_config
+  local THREADED, SOLO, PLAIN, UNKNOWN = "01MTHREADED", "01MSOLO", "01MPLAIN", "01MUNKNOWN"
+  local bus = { agents = { alice = { id = "A1", alias = "alice" }, bob = { id = "B1", alias = "bob" } },
+    inboxes = {}, messages = {
+      [THREADED] = { matrix = { room_id = NEW, event_id = "$reply1", thread_root = "$root1" } },
+      [SOLO] = { matrix = { room_id = NEW, event_id = "$solo" } },
+      [PLAIN] = {} },
+    mail_delivered = { A1 = { [THREADED] = true, [SOLO] = true, [PLAIN] = true } } }
+  remuda._butler_mail_config = { bus = bus, json_quote = function(value) return '"' .. value .. '"' end }
+  local loaded, why = pcall(dofile, "packages/butler/mail.lua")
+  local target = remuda._butler_mail and remuda._butler_mail.matrix_thread_target
+  remuda._butler_mail, remuda._butler_mail_config = old_mail, old_config
+  assert(loaded and target, "mail.lua must load in memory: " .. tostring(why))
+  local function refused(id, caller, as_operator, expected)
+    local room, message = target(caller, id, as_operator)
+    assert(room == nil and message:find(expected, 1, true) and message:find("\nNext: remuda butler inbox", 1, true),
+      id .. " must be refused with '" .. expected .. "' and a Next line, got: " .. tostring(room) .. " " .. tostring(message))
+  end
+  refused(THREADED, "bob", false, "not delivered to you")
+  refused(UNKNOWN, "alice", false, "not delivered to you")
+  refused(PLAIN, "alice", false, "is not a Matrix message")
+  refused(UNKNOWN, nil, true, "is not a Matrix message")
+  local room, root = target("alice", THREADED, false)
+  assert(room == NEW and root == "$root1", "the recipient gets the room and thread root")
+  room, root = target(nil, THREADED, true)
+  assert(room == NEW and root == "$root1", "the operator gets the room and thread root")
+  room, root = target("alice", SOLO, false)
+  assert(room == NEW and root == "$solo", "a mail with no thread root falls back to its event")
 end
 
 -- #235 step B: the first mail from a thread this Butler has not seen carries the
@@ -5368,6 +5678,7 @@ rx_tests = {
   { "test_rx_untrusted_room_cap_summary_no_quarantine", test_rx_untrusted_room_cap_summary_no_quarantine },
   { "test_rx_untrusted_room_cap_summary_floor_10min", test_rx_untrusted_room_cap_summary_floor_10min },
   { "test_rx_reply_to_undelivered_event_says_not_sent", test_rx_reply_to_undelivered_event_says_not_sent },
+  { "test_rx_reply_to_own_event_keeps_thread_root", test_rx_reply_to_own_event_keeps_thread_root },
   { "test_rx_mail_reply_turn_guard", test_rx_mail_reply_turn_guard },
   { "test_rx_mail_reply_limit_turn_is_posted_through_matrix_reply", test_rx_mail_reply_limit_turn_is_posted_through_matrix_reply },
   { "test_rx_mail_reply_posts_per_hour", test_rx_mail_reply_posts_per_hour },
@@ -5383,6 +5694,8 @@ rx_tests = {
   { "test_rx_link_like_root_counted_but_not_shown", test_rx_link_like_root_counted_but_not_shown },
   { "test_inbox_header_names_room_and_thread", ctx_tests.test_inbox_header_names_room_and_thread },
   { "test_matrix_thread_takes_room_from_route", ctx_tests.test_matrix_thread_takes_room_from_route },
+  { "test_matrix_thread_takes_a_mail_id", ctx_tests.test_matrix_thread_takes_a_mail_id },
+  { "test_mail_matrix_thread_target_checks_delivery", ctx_tests.test_mail_matrix_thread_target_checks_delivery },
   { "test_ctx_block_text_with_all_four_marks", ctx_tests.test_ctx_block_text_with_all_four_marks },
   { "test_ctx_more_than_twenty_and_second_mail_has_no_block", ctx_tests.test_ctx_more_than_twenty_and_second_mail_has_no_block },
   { "test_ctx_line_rules_cut_join_media_time_and_hostile_text", ctx_tests.test_ctx_line_rules_cut_join_media_time_and_hostile_text },
@@ -5487,6 +5800,568 @@ rx_tests[#rx_tests + 1] = { "test_rx_reply_and_post_slot_never_raise_on_an_older
     end)
   end) end)
 end }
+
+-- The live shape: a live reload re-runs butler/matrix on the retained matrix
+-- table (its send is an older load), then `matrix --json --room ROOM send` and
+-- `reply` to the id it printed, an event id with '-' and '_'.
+rx_tests[#rx_tests + 1] = { "test_rx_cli_json_room_send_then_reply_threads_on_root", function()
+  local dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    local relay = rx_relay(path)
+    relay_module.instance = relay
+    local ids, puts = { "$tbLa1m8VTJauQDU1Yn1DkSHdvVa160O8--EAT8nOvMY", "$reply_Id-2" }, {}
+    with_alias_http(path, function(spec)
+      if spec.method == "PUT" then
+        puts[#puts + 1] = spec
+        return { status = 200, body = '{"event_id":"' .. ids[#puts] .. '"}' }
+      end
+      return { status = 200, body = '{"event":{"room_id":"' .. HOME .. '"}}' }
+    end, function()
+      -- The retained matrix table holds an older send; only matrix_write is re-run.
+      matrix.send = function(_, done) done({ error = "older load" }) end
+      local package_exec = remuda.exec
+      remuda.exec = function(name)
+        if name == "butler/matrix_write" then dofile("packages/butler/matrix_write.lua") end
+      end
+      local reloaded, reload_error = pcall(dofile, "packages/butler/matrix.lua")
+      remuda.exec = package_exec
+      assert(reloaded, reload_error)
+      local sent = rx_cli({ "matrix", "--json", "--room", HOME, "send", "root text" })
+      assert(sent.code == 0 and sent.stdout:find(ids[1], 1, true), "send: " .. sent.stderr .. sent.stdout)
+      local result = rx_cli({ "matrix", "--json", "--room", HOME, "reply", ids[1], "answer" })
+      assert(result.code == 0, "reply to our own send is accepted: " .. result.stderr .. result.stdout)
+      local content = assert(matrix.decode_json(puts[2].body))
+      local rel = content["m.relates_to"]
+      assert(rel and rel.rel_type == "m.thread" and rel.event_id == ids[1], "reply is a thread on the root")
+    end)
+    relay:stop()
+  end)
+end }
+
+-- Own-event reply table (#326): restart persistence, trim, load hardening,
+-- failed sends, and the post slot a reply to an own event takes.
+
+rx_tests[#rx_tests + 1] = { "test_rx_own_event_survives_a_relay_restart", function()
+  local dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    local relay = rx_relay(path)
+    relay_module.instance = relay
+    rx_post_http(path, function(_, posted)
+      local sent = rx_cli({ "matrix", "send", "root" })
+      assert(sent.code == 0 and relay:can_reply_to("$own1"), "send is recorded: " .. sent.stderr)
+      relay:stop()
+      local restarted = rx_relay(path)
+      relay_module.instance = restarted
+      local route = restarted:route_for_event("$own1")
+      assert(route and route.room_id == HOME and route.thread_root == "$own1", "the record is reloaded")
+      local reply = rx_cli({ "matrix", "reply", "$own1", "after restart" })
+      assert(reply.code == 0 and posted() == 2, "reply after restart posts: " .. reply.stderr)
+      restarted:stop()
+    end)
+  end)
+end }
+
+rx_tests[#rx_tests + 1] = { "test_rx_own_events_keep_the_newest_500_per_room", function()
+  local dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    local relay = rx_relay(path)
+    for index = 1, 501 do assert(relay:record_own_event(HOME, "$e" .. index, "$e" .. index)) end
+    assert(not relay:can_reply_to("$e1"), "the 501st record evicts the oldest")
+    assert(relay:can_reply_to("$e2") and relay:can_reply_to("$e501"), "the rest and the newest stay")
+    local saved = assert(matrix.decode_json(read_text(path .. ".since")))
+    assert(#saved.matrix_own_events[HOME] == 500, "500 are persisted, got " .. #saved.matrix_own_events[HOME])
+    assert(not relay:record_own_event(HOME, "bad-id", "$x"), "an id without $ is refused")
+    assert(not relay:record_own_event("!gone:example.org", "$g", "$g"), "an unconfigured room is refused")
+    relay:stop()
+  end)
+end }
+
+rx_tests[#rx_tests + 1] = { "test_rx_own_events_load_ignores_malformed_duplicate_and_unconfigured", function()
+  local dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    local home_events = { "text", 5, { event_id = "bad", thread_root = "$r" },
+      { event_id = "$ok", thread_root = "$ok" }, { event_id = "$dup", thread_root = "$from-home" },
+      { event_id = "$nothread" } }
+    local state = { matrix_own_events = {
+      [HOME] = home_events,
+      [NEW] = { { event_id = "$dup", thread_root = "$from-new" }, { event_id = "$new1", thread_root = "$new1" } },
+      ["!gone:example.org"] = { { event_id = "$gone", thread_root = "$gone" } },
+      ["not-a-room"] = { { event_id = "$odd", thread_root = "$odd" } },
+    } }
+    local file = assert(io.open(path .. ".since", "wb"))
+    file:write(assert(matrix.encode_json(state)))
+    file:close()
+    local relay = rx_relay(path)
+    assert(relay:can_reply_to("$ok") and relay:can_reply_to("$new1"), "valid records load")
+    for _, id in ipairs({ "bad", "$nothread", "$gone", "$odd" }) do
+      assert(not relay:can_reply_to(id), id .. " is ignored")
+    end
+    local dup = relay:route_for_event("$dup")
+    assert(dup and dup.room_id == NEW and dup.thread_root == "$from-new",
+      "a duplicate id belongs to the first room in sorted order")
+    relay:stop()
+  end)
+end }
+
+rx_tests[#rx_tests + 1] = { "test_rx_own_events_load_reads_only_the_newest_500_raw_entries", function()
+  local dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    local events = {}
+    for index = 1, 600 do events[index] = { event_id = "$h" .. index, thread_root = "$h" .. index } end
+    local file = assert(io.open(path .. ".since", "wb"))
+    file:write(assert(matrix.encode_json({ matrix_own_events = { [HOME] = events } })))
+    file:close()
+    local relay = rx_relay(path)
+    assert(not relay:can_reply_to("$h100") and relay:can_reply_to("$h101") and relay:can_reply_to("$h600"),
+      "the newest 500 load")
+    relay:stop()
+  end)
+end }
+
+rx_tests[#rx_tests + 1] = { "test_rx_own_events_load_slices_newest_500_before_filtering", function()
+  local dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    local events = {}
+    for index = 1, 520 do events[index] = { event_id = "$h" .. index, thread_root = "$h" .. index } end
+    events[21] = { event_id = "bad", thread_root = "$r" }
+    events[22] = "text"
+    events[23] = { event_id = "$h24", thread_root = "$h24" } -- the first of two entries with this id
+    events[25] = { event_id = "$h1", thread_root = "$h1" }   -- same id as an entry outside the newest 500
+    local file = assert(io.open(path .. ".since", "wb"))
+    file:write(assert(matrix.encode_json({ matrix_own_events = { [HOME] = events } })))
+    file:close()
+    local relay = rx_relay(path)
+    local expected = { ["$h24"] = true, ["$h1"] = true }
+    for index = 26, 520 do expected["$h" .. index] = true end
+    local loaded = 0
+    for index = 1, 520 do
+      local id = "$h" .. index
+      assert(relay:can_reply_to(id) == (expected[id] == true), id .. " loads only if valid within the newest 500")
+      if expected[id] then loaded = loaded + 1 end
+    end
+    assert(loaded == 497, "invalid entries shrink the set below 500, got " .. loaded)
+    relay:stop()
+  end)
+end }
+
+rx_tests[#rx_tests + 1] = { "test_rx_failed_send_registers_no_own_event", function()
+  local dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    local relay = rx_relay(path)
+    relay_module.instance = relay
+    with_alias_http(path, function() return { status = 500, body = "{}" } end, function()
+      local sent = rx_cli({ "matrix", "send", "doomed" })
+      assert(sent.code ~= 0, "the send fails")
+      assert(relay:route_for_event("$own0") == nil and not relay:can_reply_to("$own0"), "nothing is recorded")
+      local saved = io.open(path .. ".since", "rb")
+      local text = saved and saved:read("a") or ""
+      if saved then saved:close() end
+      assert(not text:find("$", 1, true) or not text:find('"event_id"', 1, true), "no own event is persisted")
+    end)
+    relay:stop()
+  end)
+end }
+
+-- An upload is an `m.room.message` event whose content carries the msgtype; a
+-- msgtype in the event-type position stores a custom event that clients do not show.
+rx_tests[#rx_tests + 1] = { "test_rx_upload_puts_an_m_room_message_event", function()
+  local dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    local relay = rx_relay(path)
+    relay_module.instance = relay
+    local names = { { "chart.png", "m.image" }, { "notes.txt", "m.file" } }
+    local saved_check = remuda._butler_file_for_caller
+    remuda._butler_file_for_caller = function(file) return file end
+    for _, item in ipairs(names) do
+      local file = dir .. "/" .. item[1]
+      local handle = assert(io.open(file, "wb")); handle:write("payload"); handle:close()
+      local result
+      with_alias_http(path, function(spec)
+        if (spec.url or ""):find("/_matrix/media/", 1, true) then return { status = 200, body = '{"content_uri":"mxc://example.org/abc"}' } end
+        return { status = 200, body = '{"event_id":"$up1"}' }
+      end, function(calls)
+        result = rx_cli({ "matrix", "upload", file })
+        assert(result.code == 0, "the upload completes: " .. tostring(result.stderr) .. tostring(result.stdout))
+        local put
+        for _, spec in ipairs(calls) do if spec.method == "PUT" then put = spec end end
+        assert(put, "the event is PUT")
+        assert(put.url:find("/send/m.room.message/", 1, true), "the event type is m.room.message, got " .. put.url)
+        assert(not put.url:find("/send/m.image/", 1, true) and not put.url:find("/send/m.file/", 1, true), "no msgtype in the event type")
+        local content = assert(matrix.decode_json(put.body))
+        assert(content.msgtype == item[2] and content.body == item[1] and content.url == "mxc://example.org/abc",
+          "the msgtype stays in the content: " .. put.body)
+      end)
+      os.remove(file)
+    end
+    remuda._butler_file_for_caller = saved_check
+    relay:stop()
+  end)
+end }
+
+-- A reply to an own event is not a reply to an allowlisted person: it takes a post slot.
+rx_tests[#rx_tests + 1] = { "test_rx_reply_to_own_event_takes_post_slot", function()
+  local dir, path = invite_fixture(OWNER, "posts_per_hour=1\n")
+  rx_with_dir(dir, function() rx_fresh_hour(function()
+    local relay = rx_relay(path)
+    relay_module.instance = relay
+    assert(relay:record_own_event(HOME, "$mine", "$mine"))
+    rx_post_http(path, function(_, posted)
+      local reply = rx_cli({ "matrix", "reply", "$mine", "answer" })
+      assert(reply.code == 0 and posted() == 1, "the reply is under posts_per_hour=1: " .. reply.stderr)
+      local second = rx_cli({ "matrix", "reply", "$mine", "again" })
+      assert(second.code ~= 0 and (second.stderr .. second.stdout):find("Matrix post limit reached (1 per hour)", 1, true),
+        "the reply took the only slot, got: " .. second.stderr .. second.stdout)
+      assert(posted() == 1, "only one is posted, got " .. posted())
+    end)
+    relay:stop()
+  end) end)
+end }
+
+-- matrix upload --thread EVENT: the file lands in the thread, built as reply builds it.
+;(function()
+  local function upload_fixture(run, agent_caller, symlink_target)
+    local dir, path = rx_fixture()
+    rx_with_dir(dir, function()
+      local relay = rx_relay(path)
+      relay_module.instance = relay
+      local file = dir .. "/shot.png"
+      local handle = assert(io.open(file, "wb")); handle:write("PNGDATA"); handle:close()
+      local saved_check = remuda._butler_file_for_caller
+      if not agent_caller then remuda._butler_file_for_caller = function(p) return p end end
+      local requests, context_room, on_context = {}, HOME, nil
+      local ok, err = pcall(with_alias_http, path, function(spec)
+        requests[#requests + 1] = spec
+        if spec.method == "GET" then if on_context then on_context() end; return { status = 200, body = '{"event":{"room_id":"' .. context_room .. '"}}' } end
+        if spec.method == "POST" then return { status = 200, body = '{"content_uri":"mxc://example.org/up1"}' } end
+        return { status = 200, body = '{"event_id":"$upload1"}' }
+      end, function()
+        local function exercise()
+          run(relay, file, requests, function(room) context_room = room end, function(fn) on_context = fn end,
+            symlink_target)
+        end
+        if agent_caller then remuda._test_with_agent_file_caller(dir, exercise) else exercise() end
+      end)
+      remuda._butler_file_for_caller = saved_check
+      relay:stop()
+      if not ok then error(err, 0) end
+    end)
+  end
+  local function puts(requests)
+    local found = {}
+    for _, spec in ipairs(requests) do if spec.method == "PUT" then found[#found + 1] = spec end end
+    return found
+  end
+
+  rx_tests[#rx_tests + 1] = { "test_rx_upload_thread_carries_the_reply_relation_and_records_the_own_event", function()
+    upload_fixture(function(relay, file, requests)
+      assert(relay:record_own_event(HOME, "$mine", "$root"))
+      local result = rx_cli({ "matrix", "--json", "--room", HOME, "upload", "--thread", "$mine", file })
+      assert(result.code == 0, "threaded upload: " .. result.stderr .. result.stdout)
+      local sent = puts(requests)
+      assert(#sent == 1, "one event is sent")
+      local content = assert(matrix.decode_json(sent[1].body))
+      assert(content.msgtype == "m.image" and content.body == "shot.png" and content.filename == nil,
+        "without a caption the body is the file name")
+      local rel = content["m.relates_to"]
+      assert(rel and rel.rel_type == "m.thread" and rel.event_id == "$root"
+        and rel["m.in_reply_to"].event_id == "$mine" and rel.is_falling_back == nil,
+        "the relation is the one reply builds: " .. sent[1].body)
+      assert(relay:route_for_event("$upload1") and relay:thread_root_for_event("$upload1") == "$root",
+        "the upload is an own event on its thread root")
+      local again = rx_cli({ "matrix", "--room", HOME, "reply", "$upload1", "thanks" })
+      assert(again.code == 0, "a reply to the upload works: " .. again.stderr .. again.stdout)
+    end)
+  end }
+
+  rx_tests[#rx_tests + 1] = { "test_rx_upload_thread_reads_the_file_before_waiting_on_the_homeserver", function()
+    local outside_dir, outside_path = rx_fixture()
+    local outside_file = outside_dir .. "/outside.png"
+    local outside = assert(io.open(outside_file, "wb")); outside:write("LATE-LINK"); outside:close()
+    upload_fixture(function(relay, file, requests, _, swap_on_context, target)
+      assert(relay:record_own_event(HOME, "$mine", "$mine"))
+      swap_on_context(function()
+        assert(os.remove(file))
+        remuda._test_create_symlink(target, file)
+      end)
+      local result = rx_cli({ "matrix", "--room", HOME, "upload", "--thread", "$mine", file })
+      assert(result.code == 0, "threaded upload: " .. result.stderr .. result.stdout)
+      local media
+      for _, spec in ipairs(requests) do if spec.method == "POST" then media = spec end end
+      assert(media and media.body == "PNGDATA", "the bytes are those read before the homeserver wait: " .. tostring(media and media.body))
+    end, true, outside_file)
+    remove_dir(outside_dir)
+  end }
+
+  rx_tests[#rx_tests + 1] = { "test_rx_agent_matrix_upload_confines_plain_threaded_symlink_and_inside_paths", function()
+    local dir, path = rx_fixture()
+    local outside_dir, outside_path = rx_fixture()
+    rx_with_dir(dir, function()
+      local relay = rx_relay(path)
+      relay_module.instance = relay
+      local inside = dir .. "/inside.png"
+      local outside = outside_dir .. "/outside.png"
+      for _, item in ipairs({ { inside, "INSIDE" }, { outside, "OUTSIDE" } }) do
+        local handle = assert(io.open(item[1], "wb")); handle:write(item[2]); handle:close()
+      end
+      assert(relay:record_own_event(HOME, "$mine", "$mine"))
+      local link = dir .. "/outside-link.png"
+      remuda._test_create_symlink(outside, link)
+      local function run_upload(args)
+        local requests, result = {}, nil
+        with_alias_http(path, function(spec)
+          requests[#requests + 1] = spec
+          if spec.method == "POST" then return { status = 200, body = '{"content_uri":"mxc://example.org/up1"}' } end
+          return { status = 200, body = '{"event_id":"$upload1"}' }
+        end, function(calls)
+          remuda._test_with_agent_file_caller(dir, function() result = rx_cli(args) end)
+          requests = calls
+        end)
+        return result, requests
+      end
+      local function refused(args, label)
+        local result, requests = run_upload(args)
+        local output = result.stderr .. result.stdout
+        if result.code == 0 or not output:find("outside this session's working directory", 1, true)
+            or not output:find("Next: copy it into your working directory first", 1, true) then
+          return label .. " did not show the confinement refusal and copy guidance: " .. output
+        end
+        if #requests ~= 0 then return label .. " sent " .. tostring(#requests) .. " request(s)" end
+      end
+      local failures = {}
+      local function check_refusal(args, label)
+        local failure = refused(args, label)
+        if failure then failures[#failures + 1] = failure end
+      end
+      check_refusal({ "matrix", "--room", HOME, "upload", outside }, "plain upload outside the working directory")
+      check_refusal({ "matrix", "--room", HOME, "upload", "--thread", "$mine", outside },
+        "threaded upload outside the working directory")
+      check_refusal({ "matrix", "--room", HOME, "upload", link }, "a symlink inside the working directory")
+      local result, requests = run_upload({ "matrix", "--room", HOME, "upload", inside })
+      if result.code ~= 0 then failures[#failures + 1] = "an inside path was refused: " .. result.stderr .. result.stdout end
+      local posted = false
+      for _, spec in ipairs(requests) do if spec.method == "POST" then posted = true end end
+      if not posted then failures[#failures + 1] = "the inside-path control did not upload the file" end
+      relay:stop()
+      assert(#failures == 0, table.concat(failures, "\n"))
+    end)
+    remove_dir(outside_dir)
+  end }
+
+  rx_tests[#rx_tests + 1] = { "test_rx_upload_caption_is_the_body_and_the_name_is_the_filename", function()
+    upload_fixture(function(relay, file, requests)
+      assert(relay:record_own_event(HOME, "$mine", "$mine"))
+      local result = rx_cli({ "matrix", "--room", HOME, "upload", "--thread", "$mine", "--caption", "the mockup", file })
+      assert(result.code == 0, "captioned upload: " .. result.stderr .. result.stdout)
+      local content = assert(matrix.decode_json(puts(requests)[1].body))
+      assert(content.body == "the mockup" and content.filename == "shot.png" and content.msgtype == "m.image",
+        "caption body, file name apart: " .. puts(requests)[1].body)
+    end)
+  end }
+
+  rx_tests[#rx_tests + 1] = { "test_rx_upload_without_thread_is_unchanged_and_records_a_root", function()
+    upload_fixture(function(relay, file, requests)
+      local result = rx_cli({ "matrix", "--room", HOME, "upload", file })
+      assert(result.code == 0, "plain upload: " .. result.stderr .. result.stdout)
+      local content = assert(matrix.decode_json(puts(requests)[1].body))
+      assert(content["m.relates_to"] == nil and content.body == "shot.png" and content.filename == nil,
+        "no relation and no caption fields")
+      assert(relay:thread_root_for_event("$upload1") == "$upload1" and relay:can_reply_to("$upload1"),
+        "a plain upload is its own thread root")
+    end)
+  end }
+
+  rx_tests[#rx_tests + 1] = { "test_rx_upload_thread_refuses_an_unverifiable_event_and_another_room", function()
+    upload_fixture(function(relay, file, requests, set_context_room)
+      local result = rx_cli({ "matrix", "--room", HOME, "upload", "--thread", "$stranger", file })
+      assert(result.code ~= 0 and result.stderr:find("Reply not sent: event $stranger was not delivered to this Butler as mail", 1, true)
+        and result.stderr:find("Next: remuda butler inbox (you can only reply to events listed there)", 1, true),
+        "the reply refusal, got: " .. result.stderr .. result.stdout)
+      assert(#puts(requests) == 0 and #requests == 0, "nothing is read or sent")
+      assert(relay:record_own_event(HOME, "$mine", "$mine"))
+      set_context_room(NEW)
+      result = rx_cli({ "matrix", "--room", HOME, "upload", "--thread", "$mine", file })
+      assert(result.code ~= 0 and (result.stderr .. result.stdout):find("outside the configured Matrix room", 1, true)
+        and #puts(requests) == 0, "another room is refused: " .. result.stderr .. result.stdout)
+    end)
+  end }
+
+  rx_tests[#rx_tests + 1] = { "test_rx_upload_cli_parse_errors", function()
+    local function failed(args, text)
+      local result = capture_matrix_cli(args)
+      assert(result and result.code ~= 0 and result.stderr:find(text, 1, true),
+        table.concat(args, " ") .. " should fail with " .. text .. ", got: " .. tostring(result and result.stderr))
+    end
+    failed({ "matrix", "upload", "--thread" }, "--thread requires a value")
+    failed({ "matrix", "upload", "--thread", "$e", "--caption" }, "--caption requires a value")
+    local function usage_shown(args)
+      local result = capture_matrix_cli(args)
+      assert(result and result.code == 0 and result.stdout:find("upload [--thread EVENT_ID] [--caption TEXT] PATH", 1, true),
+        table.concat(args, " ") .. " should print the usage, got: " .. tostring(result and result.stdout))
+    end
+    usage_shown({ "matrix", "upload", "--thread", "$e" })
+    usage_shown({ "matrix", "upload", "--bogus", "/x" })
+    usage_shown({ "matrix", "upload", "--caption", "c" })
+    failed({ "matrix", "send", "--thread", "$e", "hi" }, "unknown option --thread")
+  end }
+end)()
+
+-- Scripted failures of the upload and the send, and `reply MAIL --attach` through the real
+-- mail, relay and commands.lua with the fake homeserver.
+;(function()
+  local function with_commands(run, preserve_file_checker)
+    local saved = { remuda._butler_commands_config, remuda._butler_contribute, remuda.extension_command,
+      remuda._butler_reply_target, remuda._butler_file_for_caller, remuda.butler.typed_lines_cli,
+      remuda.butler.approve_text, remuda.butler.schedule_cli, remuda._butler_command_run }
+    remuda._butler_commands_config = { current_agent = function() return nil end, OPERATOR = "operator",
+      contributions = function() return {} end, registry_list = function() return {} end,
+      statusline = function() return "" end, resolve_principal = function() return { tag = "unidentified" } end,
+      resolve = function(name) return name end,
+      mail = remuda._butler_mail }
+    remuda._butler_contribute, remuda.extension_command = function() end, function() end
+    remuda._butler_reply_target = function(_, id)
+      local room, event = remuda._butler_mail.matrix_target({ id = "operator", alias = "operator" }, id, true)
+      if not room then error(event, 0) end
+      return room, event
+    end
+    if not preserve_file_checker then remuda._butler_file_for_caller = function(p) return p end end
+    for _, name in ipairs({ "typed_lines_cli", "approve_text", "schedule_cli" }) do
+      remuda.butler[name] = { cli = function() end }
+    end
+    dofile("packages/butler/commands.lua")
+    local ok, err = pcall(run)
+    remuda._butler_commands_config, remuda._butler_contribute, remuda.extension_command,
+      remuda._butler_reply_target, remuda._butler_file_for_caller, remuda.butler.typed_lines_cli,
+      remuda.butler.approve_text, remuda.butler.schedule_cli, remuda._butler_command_run = table.unpack(saved, 1, 9)
+    if not ok then error(err, 0) end
+  end
+  local function run_reply(args)
+    local old_pending, old_fail, captured = remuda.pending, remuda.fail, nil
+    remuda.pending = function()
+      return { resolve = function(_, code, stdout, stderr) captured = { code = code, stdout = stdout, stderr = stderr } end }
+    end
+    remuda.fail = function(message, code) return { code = code or 1, stdout = "", stderr = tostring(message) } end
+    local ok, returned = pcall(remuda._butler_command_run, "reply", args, nil)
+    for _ = 1, 8 do if captured then break end tick_timers(1) end
+    remuda.pending, remuda.fail = old_pending, old_fail
+    if not ok then error(returned, 0) end
+    return captured or returned
+  end
+  local function attach_fixture(handler, run, preserve_file_checker)
+    local dir, path = rx_fixture()
+    rx_with_dir(dir, function()
+      local file = dir .. "/shot.png"
+      local handle = assert(io.open(file, "wb")); handle:write("PNGDATA"); handle:close()
+      rx_production(path, function(client)
+        rx_sync(client, HOME, { rx_msg("$q", OWNER, "question") })
+        rx_sync(client, HOME, { rx_msg("$t1", OWNER, "in thread", rx_thread("$q")) })
+        local relay = relay_module.instance
+        local mail_id = assert(relay:route_for_event("$q"), "the question is a mail").source_mail_id
+        local requests = {}
+        with_alias_http(path, function(spec)
+          requests[#requests + 1] = spec
+          return handler(spec)
+        end, function()
+          with_commands(function() run(relay, file, mail_id, requests) end, preserve_file_checker)
+        end)
+      end)
+    end)
+  end
+  local function ok_handler(spec)
+    if spec.method == "GET" then return { status = 200, body = '{"event":{"room_id":"' .. HOME .. '"}}' } end
+    if spec.method == "POST" then return { status = 200, body = '{"content_uri":"mxc://example.org/up1"}' } end
+    return { status = 200, body = '{"event_id":"$upload1"}' }
+  end
+  local function puts(requests)
+    local found = {}
+    for _, spec in ipairs(requests) do if spec.method == "PUT" then found[#found + 1] = spec end end
+    return found
+  end
+
+  rx_tests[#rx_tests + 1] = { "test_rx_reply_attach_posts_the_file_into_the_mail_thread_with_a_caption", function()
+    attach_fixture(ok_handler, function(relay, file, mail_id, requests)
+      local result = run_reply({ "reply", mail_id, "--attach", file, "the", "mockup" })
+      assert(result.code == 0, "reply --attach: " .. tostring(result.stderr) .. tostring(result.stdout))
+      assert(result.stdout:find("Uploaded as mxc://example.org/up1 ($upload1)", 1, true), "output: " .. result.stdout)
+      local sent = puts(requests)
+      assert(#sent == 1, "one event is sent")
+      local content = assert(matrix.decode_json(sent[1].body))
+      local rel = content["m.relates_to"]
+      assert(content.body == "the mockup" and content.filename == "shot.png"
+        and rel.rel_type == "m.thread" and rel.event_id == "$q" and rel["m.in_reply_to"].event_id == "$q",
+        "the mail's thread, caption as body: " .. sent[1].body)
+      assert(relay:thread_root_for_event("$upload1") == "$q", "recorded as an own event on the thread")
+    end)
+  end }
+
+  rx_tests[#rx_tests + 1] = { "test_rx_reply_attach_answers_inside_the_thread_of_a_thread_mail", function()
+    attach_fixture(ok_handler, function(relay, file, _, requests)
+      local thread_mail = assert(relay:route_for_event("$t1"), "the thread reply is a mail").source_mail_id
+      local result = run_reply({ "reply", thread_mail, "--attach", file })
+      assert(result.code == 0, "reply --attach: " .. tostring(result.stderr))
+      local content = assert(matrix.decode_json(puts(requests)[1].body))
+      local rel = content["m.relates_to"]
+      assert(content.body == "shot.png" and rel.event_id == "$q" and rel["m.in_reply_to"].event_id == "$t1",
+        "root is the thread root, target is the mail's event")
+    end)
+  end }
+
+  rx_tests[#rx_tests + 1] = { "test_rx_reply_attach_refuses_a_mail_that_is_not_matrix_and_bad_forms", function()
+    attach_fixture(ok_handler, function(_, file, _, requests)
+      local plain = assert(remuda._butler_mail.queue({ id = "a", alias = "a" }, { id = "butler", alias = "butler" },
+        "hi", "subject")).id
+      local result = run_reply({ "reply", plain, "--attach", file })
+      assert(result.code == 1 and result.stderr:find("is not a Matrix message, so a file cannot be attached", 1, true)
+        and result.stderr:find("Next: remuda butler reply " .. plain .. " TEXT", 1, true),
+        "non-Matrix mail: " .. tostring(result.stderr))
+      assert(run_reply({ "reply", plain, "--attach" }) == nil, "--attach without a path gets the usage")
+      assert(#requests == 0, "nothing is sent")
+    end)
+  end }
+
+  rx_tests[#rx_tests + 1] = { "test_rx_agent_reply_attach_refuses_path_outside_working_directory", function()
+    local outside_dir, outside_path = rx_fixture()
+    local outside_file = outside_dir .. "/outside.png"
+    local outside = assert(io.open(outside_file, "wb")); outside:write("OUTSIDE"); outside:close()
+    attach_fixture(ok_handler, function(_, file, mail_id, requests)
+      local cwd = file:match("^(.*)/[^/]+$")
+      local result
+      remuda._test_with_agent_file_caller(cwd, function()
+        with_commands(function()
+          result = run_reply({ "reply", mail_id, "--attach", outside_file })
+        end, true)
+      end)
+      local output = result.stderr .. result.stdout
+      assert(result.code ~= 0 and output:find("outside this session's working directory", 1, true)
+        and output:find("Next: copy it into your working directory first", 1, true),
+        "reply --attach outside must show the confinement refusal and copy guidance: " .. output)
+      assert(#requests == 0, "a refused reply attachment sends nothing")
+    end, true)
+    remove_dir(outside_dir)
+  end }
+
+  rx_tests[#rx_tests + 1] = { "test_rx_upload_scripted_failures_register_nothing", function()
+    local function failing(handler, expected)
+      attach_fixture(handler, function(relay, file, mail_id)
+        local result = run_reply({ "reply", mail_id, "--attach", file })
+        assert(result.code ~= 0 and (result.stderr .. result.stdout):find(expected, 1, true),
+          "expected " .. expected .. ", got: " .. tostring(result.stderr) .. tostring(result.stdout))
+        assert(not relay:can_reply_to("$upload1"), "a failed upload records no own event")
+      end)
+    end
+    failing(function(spec)
+      if spec.method == "POST" then return { status = 500, body = "{}" } end
+      return ok_handler(spec)
+    end, "500")
+    failing(function(spec)
+      if spec.method == "PUT" then return { status = 500, body = "{}" } end
+      return ok_handler(spec)
+    end, "500")
+    failing(function(spec)
+      if spec.method == "POST" then return { status = 200, body = "{}" } end
+      return ok_handler(spec)
+    end, "omitted content_uri")
+  end }
+end)()
 
 -- The relations page does not contain the delivered event: 21 newer thread
 -- messages arrived before the fetch. They were sent AFTER the delivered one, so
@@ -5932,6 +6807,15 @@ do
   assert(without_lock == false and with_lock == true,
     "prompt preface is used exactly on a core that has remuda.fs.lock: " .. tostring(without_lock) .. " " .. tostring(with_lock))
   matrix.prompt_preface_supported = function() return true end
+  local wrapped_sample = matrix.wrap_prompt_preface(string.rep("preface-word ", 40):gsub(" $", ""))
+  local wrapped_lines = 0
+  for line in (wrapped_sample .. "\n"):gmatch("([^\n]*)\n") do
+    wrapped_lines = wrapped_lines + 1
+    assert(#line <= 200, "shared preface wrapper must use lines no longer than 200 characters")
+  end
+  assert(wrapped_lines <= 32, "shared preface wrapper must stay under the core line limit")
+  assert(wrapped_sample:gsub("\n", " ") == string.rep("preface-word ", 39) .. "preface-word",
+    "shared preface wrapper must preserve every word")
   -- The setup tests need one machine name on every core: the shell wrapper
   -- exports HOSTNAME for cores without remuda.hostname, and the word is pinned
   -- to the same name on cores that have it (#207).
@@ -6012,11 +6896,13 @@ for _, case in ipairs({
   { "test_typed_line_config_is_strict_and_off_by_default", test_typed_line_config_is_strict_and_off_by_default },
   { "test_join_leave_missing_room_guidance", test_join_leave_missing_room_guidance },
   { "test_quarantine_list_room_reason_columns", test_quarantine_list_room_reason_columns },
+  { "test_matrix_thread_cli_parser_contract", ctx_tests.test_matrix_thread_cli_parser_contract },
   { "test_join_room_alias_resolves_and_labels_output", test_join_room_alias_resolves_and_labels_output },
   { "test_unknown_room_alias_is_reported_without_config_change", test_unknown_room_alias_is_reported_without_config_change },
   { "test_alias_directory_room_id_must_be_valid", test_alias_directory_room_id_must_be_valid },
   { "test_alias_directory_room_id_terminal_controls_are_refused", test_alias_directory_room_id_terminal_controls_are_refused },
   { "test_rooms_public_refuses_agents", test_rooms_public_refuses_agents },
+  { "test_mark_all_marks_a_joined_room_operator_only", remuda._t359.test_mark_all_marks_a_joined_room_operator_only },
   { "test_invalid_room_aliases_are_rejected_before_http", test_invalid_room_aliases_are_rejected_before_http },
   { "test_leave_alias_resolves_and_home_all_stay_refused", test_leave_alias_resolves_and_home_all_stay_refused },
   { "test_leave_alias_prefers_configured_label_over_current_directory", test_leave_alias_prefers_configured_label_over_current_directory },
@@ -6067,8 +6953,9 @@ local function approval()
   return assert(remuda.butler.approval, "packages/butler/approval.lua must publish remuda.butler.approval")
 end
 
-local function approval_env(senders, run)
-  local dir, path = invite_fixture(senders)
+local function approval_env(senders, run, extra, all_room)
+  if all_room == nil then all_room = false end
+  local dir, path = invite_fixture(senders, extra, all_room)
   local mails, saved_send = {}, remuda._butler_send
   remuda._butler_send = function(from, to, text)
     mails[#mails + 1] = { from = from, to = to, text = text }
@@ -6088,7 +6975,19 @@ local function approval_env(senders, run)
     return { status = 200, body = "{}" }
   end, function(calls)
     env.calls, env.client, env.delivered = calls, invite_client(), {}
-    env.relay = started_relay(path, env.client, env.delivered)
+    if extra and extra:find("mode=messages", 1, true) then
+      env.relay = relay_module.new({ config_path = path, matrix = env.client,
+        deliver = function(event) env.delivered[#env.delivered + 1] = event return true end })
+      assert(env.relay:start())
+      env.relay._response({ start = "m0", ["end"] = "m0", chunk = {} },
+        "/_matrix/client/v3/rooms/" .. encoded(HOME) .. "/messages")
+      env.relay:stop()
+      for index, request in ipairs(env.client.requests) do
+        if request.path:find("/messages", 1, true) then env.client.callbacks[index] = nil end
+      end
+    else
+      env.relay = started_relay(path, env.client, env.delivered)
+    end
     local passed, failure = pcall(run, env)
     env.relay:stop()
     if not passed then error(failure, 0) end
@@ -6098,11 +6997,35 @@ local function approval_env(senders, run)
   if not ok then error(err, 0) end
 end
 
+local reaction
+local function test_legacy_approval_reaction_works_in_messages_fallback()
+  approval_env(nil, function(env)
+    local applied = 0
+    approval().handler("legacy_fallback_test", { approve = function(_, done)
+      applied = applied + 1
+      done(true)
+    end })
+    local request_id
+    approval().request({ kind = "legacy_fallback_test", key = "fallback-approval", asker = ASKER,
+      summary = "fallback test", on_id = function(id) request_id = id end }, function() end)
+    env.client:pump()
+    local rec = env.relay:state().approvals[request_id]
+    assert(rec and rec.event_id, "fallback approval posts normally")
+    env.relay._response({ start = "m0", ["end"] = "m1",
+      chunk = { reaction("$fallback-yes", OWNER, rec.event_id) } },
+      "/_matrix/client/v3/rooms/" .. encoded(HOME) .. "/messages")
+    env.client:pump()
+    assert(rec.status == "applied" and applied == 1,
+      "messages fallback owner reaction must answer an ordinary approval without a live flag")
+  end, "mode=messages\n")
+end
+
 -- Simulates a daemon restart: fresh approval and write modules, a new relay on
 -- the same config and state file.
 local function restart_relay(env)
   env.relay:stop()
   dofile("packages/butler/approval.lua")
+  dofile("packages/butler/approve_text.lua")
   dofile("packages/butler/matrix_write.lua")
   env.relay = relay_module.new({ config_path = env.path, matrix = env.client,
     deliver = function(event) env.delivered[#env.delivered + 1] = event return true end })
@@ -6120,6 +7043,8 @@ end
 
 -- Every PUT to HOME as { event_id, body, relates_to }; the scripted pump
 -- answers request N with event id "$sentN".
+remuda._t359 = remuda._t359 or {}
+
 local function home_posts(env, fragment)
   local posts = {}
   for index, args in ipairs(env.client.requests) do
@@ -6128,6 +7053,23 @@ local function home_posts(env, fragment)
       local body = args.text or (type(content) == "table" and content.body) or ""
       if not fragment or body:find(fragment, 1, true) then
         posts[#posts + 1] = { event_id = "$sent" .. index, body = body,
+          content = type(content) == "table" and content or {},
+          relates_to = type(content) == "table" and content["m.relates_to"] or nil }
+      end
+    end
+  end
+  return posts
+end
+
+function remuda._t359.room_posts(env, room, fragment)
+  local posts = {}
+  for index, args in ipairs(env.client.requests) do
+    if args.method == "PUT" and (args.room == room or args.path:find("/rooms/" .. encoded(room) .. "/", 1, true)) then
+      local content = args.body and matrix.decode_json(args.body) or {}
+      local body = args.text or (type(content) == "table" and content.body) or ""
+      if not fragment or body:find(fragment, 1, true) then
+        posts[#posts + 1] = { event_id = "$sent" .. index, body = body,
+          content = type(content) == "table" and content or {},
           relates_to = type(content) == "table" and content["m.relates_to"] or nil }
       end
     end
@@ -6174,11 +7116,12 @@ local function agent_cli_join(env, room, agent)
 end
 
 -- Files a join request as an agent and returns its id and HOME event id.
-local function file_request(env, room, agent)
-  local before = #home_posts(env, "Butler wants to join")
+local function file_request(env, room, agent, request_room)
+  request_room = request_room or HOME
+  local before = #remuda._t359.room_posts(env, request_room, "Butler wants to join")
   local result = agent_cli_join(env, room, agent)
-  local posts = home_posts(env, "Butler wants to join")
-  assert(#posts == before + 1, "an agent join must file a request with one HOME post (got "
+  local posts = remuda._t359.room_posts(env, request_room, "Butler wants to join")
+  assert(#posts == before + 1, "an agent join must file a request with one approval-room post (got "
     .. (#posts - before) .. " posts; cli: " .. tostring(result.stdout) .. tostring(result.stderr) .. ")")
   local post = posts[#posts]
   local id = assert(post.body:match("Request (%w+)"), "the HOME post must name the request: " .. post.body)
@@ -6187,7 +7130,7 @@ end
 
 local function ts(offset_ms) return os.time() * 1000 + (offset_ms or 1000) end
 
-local function reaction(id, sender, target, key, when)
+function reaction(id, sender, target, key, when)
   return { type = "m.reaction", event_id = id, sender = sender, origin_server_ts = when or ts(),
     content = { ["m.relates_to"] = { rel_type = "m.annotation", event_id = target, key = key or CHECK } } }
 end
@@ -6240,7 +7183,7 @@ local function test_agent_join_files_request_and_does_not_join()
       "a bare room ID must not be repeated in the approval summary: " .. tostring(rec and rec.summary))
     assert(post.body:find("Butler wants to join", 1, true) and post.body:find(NEW, 1, true)
       and post.body:find("Asked by: ", 1, true) and post.body:find(ASKER, 1, true)
-      and post.body:find("within 10 minutes", 1, true)
+      and post.body:find("within 30 minutes", 1, true)
       and post.body:find("or: remuda butler approve " .. id, 1, true),
       "the HOME post must show the target id, the asker, the window and the terminal fallback: " .. post.body)
     assert(result.code == 0 and result.stdout:find("Asked the owner to approve joining", 1, true)
@@ -6285,6 +7228,57 @@ local function test_owner_yes_reply_approves_and_bare_yes_does_not()
   end)
 end
 
+local function test_legacy_reply_parser_preserves_exact_words_and_rich_fallback()
+  approval_env(nil, function(env)
+    local id, event = file_request(env, NEW)
+    room_events(env, { text_event("$yes-sure", OWNER, "yes sure", event),
+      text_event("$no-wait", OWNER, "no wait", event) })
+    assert(server_joins(env, NEW) == 0 and is_open(id)
+      and delivered_ids(env.delivered, "$yes-sure") and delivered_ids(env.delivered, "$no-wait"),
+      "non-exact legacy replies must remain ordinary mail as on main")
+    local rich = text_event("$rich-yes", OWNER, "yes", event)
+    rich.content.format = "org.matrix.custom.html"
+    rich.content.formatted_body = "<p>yes</p>"
+    room_events(env, { rich })
+    assert(server_joins(env, NEW) == 1 and not delivered_ids(env.delivered, "$rich-yes"),
+      "formatted-body clients must still answer legacy approvals")
+  end)
+end
+
+local function test_legacy_notice_and_emote_answers_stay_compatible()
+  approval_env(nil, function(env)
+    local yes_id, yes_event = file_request(env, NEW)
+    local notice_yes = text_event("$notice-yes", OWNER, "yes", yes_event)
+    notice_yes.content.msgtype = "m.notice"
+    room_events(env, { notice_yes })
+    assert(server_joins(env, NEW) == 1 and not is_open(yes_id),
+      "m.notice yes replies must continue to answer ordinary approvals")
+
+    local no_id, no_event = file_request(env, NEW2)
+    local emote_no = text_event("$emote-no", OWNER, "no", no_event)
+    emote_no.content.msgtype = "m.emote"
+    room_events(env, { emote_no })
+    assert(env.relay:state().approvals[no_id].status == "denied" and server_joins(env, NEW2) == 0,
+      "m.emote no replies must continue to deny ordinary approvals")
+  end)
+end
+
+local function test_legacy_approval_survives_first_non_live_sync()
+  approval_env(nil, function(env)
+    local id, event = file_request(env, NEW)
+    env.relay:stop()
+    env.relay = relay_module.new({ config_path = env.path, matrix = env.client,
+      deliver = function(message) env.delivered[#env.delivered + 1] = message return true end })
+    assert(env.relay:start())
+    -- The first /sync after a relay restart is a baseline and is not marked live.
+    env.client:sync({ json = { next_batch = "first-after-restart", rooms = { join = {
+      [HOME] = { timeline = { events = { reaction("$first-sync-yes", OWNER, event) } } },
+    } } } })
+    assert(server_joins(env, NEW) == 1 and not is_open(id),
+      "a legacy owner reaction in the first non-live sync must still answer the request")
+  end)
+end
+
 local function test_reaction_from_stranger_agent_or_other_room_is_ignored()
   approval_env(OWNER .. ",@agent-x:example.org", function(env)
     local id, event = file_request(env, NEW)
@@ -6319,7 +7313,7 @@ local function test_deny_and_expiry_mail_with_next_and_no_join()
     room_events(env, { reaction("$no", OWNER, denied, CROSS) })
     assert(server_joins(env, NEW) == 0 and not is_open(denied_id), "a cross-mark must deny without joining")
     assert(mails_to(env, ASKER, "Denied by the owner (request " .. denied_id .. ", " .. NEW
-      .. "). Next: ask the owner in HOME why, or pick another room.") == 1,
+      .. "). Next: ask the owner in the request room why, or pick another room.") == 1,
       "a denial must mail the asker with Next")
     assert(thread_replies(env, denied, "Denied by " .. OWNER) == 1, "the request thread must say who denied")
 
@@ -6361,12 +7355,12 @@ local function test_dedupe_returns_same_id_and_cap_refuses_without_post()
     local capped = agent_cli_join(env, NEW4)
     local text = capped.stdout .. capped.stderr
     assert(#home_posts(env, "Butler wants to join") == 3
-      and text:find("Too many open approval requests (3 per agent, 5 total). Next: wait for an answer or expiry (10 min), then retry.", 1, true),
+      and text:find("Too many open approval requests (3 per agent, 5 total). Next: wait for an answer or expiry, then retry.", 1, true),
       "a fourth open request for one asker must be refused with Next and post nothing: " .. text)
     file_request(env, NEW4, "team-2-mx"); file_request(env, "!new5:example.org", "team-2-mx")
     local total = agent_cli_join(env, "!new6:example.org", "team-3-mx")
     assert(#home_posts(env, "Butler wants to join") == 5
-      and (total.stdout .. total.stderr):find("Too many open approval requests (3 per agent, 5 total). Next: wait for an answer or expiry (10 min), then retry.", 1, true),
+      and (total.stdout .. total.stderr):find("Too many open approval requests (3 per agent, 5 total). Next: wait for an answer or expiry, then retry.", 1, true),
       "a sixth open request in total must be refused and post nothing")
   end)
 end
@@ -6405,7 +7399,7 @@ local function test_approve_deny_refuse_agents_only()
       local listed = tostring(cli({ "approvals" }, nil))
       local agent_listed = tostring(cli({ "approvals" }, ASKER))
       assert(listed:find(id, 1, true) and listed:find(NEW, 1, true)
-        and listed:find("EXPIRES-IN", 1, true) and listed:find("10m", 1, true)
+        and listed:find("EXPIRES-IN", 1, true) and listed:find("30m", 1, true)
         and listed:find("Next: remuda butler approve ID, or remuda butler deny ID", 1, true),
         "approvals must list the open request with a Next line: " .. listed)
       assert(agent_listed:find("Next: wait for mail; remuda butler inbox", 1, true),
@@ -6417,7 +7411,7 @@ local function test_approve_deny_refuse_agents_only()
       failed = nil
       local out = cli({ "approve", id:lower() }, nil)
       env.client:pump()
-      assert(not failed and tostring(out):find("Approved request " .. id .. " (join " .. NEW .. "); joining now. The result goes to the HOME thread and the asker's mail.", 1, true),
+      assert(not failed and tostring(out):find("Approved request " .. id .. " (join " .. NEW .. "); joining now. The result goes to the request thread and the asker's mail.", 1, true),
         "the operator approve must succeed with a Next line: " .. tostring(failed and failed.message or out))
       local denied_id = file_request(env, NEW2)
       local denied_out = cli({ "deny", denied_id }, nil)
@@ -6495,7 +7489,7 @@ local function test_hostile_room_name_sanitised_in_home_post()
       "the HOME post must strip ESC and bidi controls: " .. body)
     assert(not body:find("\nReact yes", 1, true) and not body:find(string.rep("A", 129), 1, true),
       "the room name must be one line and capped at 128 chars")
-    assert(body:match("^[^\n]*" .. NEW:gsub("%p", "%%%0")), "the room id must appear next to the name on the first line")
+    assert(body:match("^[^\n]*\n[^\n]*" .. NEW:gsub("%p", "%%%0")), "the room id must appear next to the name on the line after the mention")
   end)
 end
 
@@ -6515,14 +7509,854 @@ local function test_restart_does_not_reanswer_answered_request()
   end)
 end
 
+local function with_approved_text_stubs(run)
+  local old_type, old_key, old_policy, old_trace = remuda.type_text, remuda.key,
+    remuda._butler_notify_policy, remuda._butler_session_trace
+  local old_ls, old_session, old_bus = remuda.ls, remuda.session, remuda._butler_bus
+  local typed, keys, traces = {}, {}, {}
+  local safe = true
+  remuda.type_text = function(session, bytes)
+    typed[#typed + 1] = { session = session, bytes = bytes }
+    return true
+  end
+  remuda.key = function(session, key)
+    keys[#keys + 1] = { session = session, key = key }
+    return true
+  end
+  remuda._butler_notify_policy = function() return safe end
+  remuda._butler_bus = { agents = { butler = { id = "butler", session_name = "butler", session_start_marker = "butler-start" } } }
+  remuda.ls = function() return { { name = "butler", alive = true, attached = false } } end
+  remuda.session = function() return { attached = false } end
+  remuda._butler_session_trace = function(kind, detail) traces[#traces + 1] = { kind, detail } end
+  local ok, err = pcall(run, typed, keys, traces, function(value) safe = value end)
+  remuda.type_text, remuda.key = old_type, old_key
+  remuda._butler_notify_policy, remuda._butler_session_trace = old_policy, old_trace
+  remuda.ls, remuda.session, remuda._butler_bus = old_ls, old_session, old_bus
+  if not ok then error(err, 0) end
+end
+
+remuda._t359 = remuda._t359 or {}
+function remuda._t359.test_approval_post_mentions_owner_with_code_block_and_30_minute_expiry()
+  with_approved_text_stubs(function()
+    approval_env(nil, function(env)
+      local bytes = "echo <hi> & `date`\nsecond line"
+      local id = assert(remuda.butler.approve_text.request("butler", bytes, ASKER))
+      env.client:pump()
+      local rec = env.relay:state().approvals[id]
+      assert(rec.expires_at - rec.created_ms == 30 * 60 * 1000, "the default expiry is 30 minutes")
+      local post = home_posts(env, "Approve prepared text for")[1]
+      local mentions = post.content["m.mentions"]
+      assert(mentions and mentions.user_ids and mentions.user_ids[1] == OWNER and #mentions.user_ids == 1,
+        "the request mentions the owner in m.mentions")
+      assert(post.body:sub(1, #OWNER) == OWNER, "the body starts with the owner's MXID")
+      assert(post.body:find("Butler will type the text below into butler once, only if you approve.", 1, true),
+        "one plain line says what approval does")
+      assert(post.body:find("```\necho <hi> & `date`\nsecond line\n```", 1, true), "the text is a code block")
+      local html = post.content.formatted_body or ""
+      assert(post.content.format == "org.matrix.custom.html"
+        and html:find("<pre><code>echo &lt;hi&gt; &amp; `date`\nsecond line</code></pre>", 1, true),
+        "the HTML code block escapes the text: " .. html)
+      assert(html:find("(about 30 min)", 1, true) and post.body:find("(about 30 min)", 1, true),
+        "the post states the deadline")
+      room_events(env, { text_event("$owner-approve", OWNER, "승인 " .. id, rec.event_id) })
+      room_events(env, { reaction("$late", OWNER, rec.event_id, CHECK) })
+      local reply = home_posts(env, "Already answered.")[1]
+      assert(reply and not reply.content["m.mentions"], "thread replies do not mention the owner again")
+    end, "approve_text=true\n")
+  end)
+end
+
+function remuda._t359.test_approval_mentions_exclude_butlers_and_relay_mxid()
+  approval_env(OWNER .. ",@helper:example.org,@bot:example.org", function(env)
+    local id
+    approval().request({ kind = "mention_filter_test", key = "mentions", asker = ASKER,
+      summary = "check mention filtering", on_id = function(value) id = value end })
+    env.client:pump()
+    local posts = remuda._t359.room_posts(env, ALL, "Butler wants to check mention filtering")
+    local rec = env.relay:state().approvals[id]
+    assert(rec and rec.event_id and #posts == 1, "the mention-filter request is posted once")
+    local mentions = posts[1].content["m.mentions"]
+    assert(mentions and #mentions.user_ids == 1 and mentions.user_ids[1] == OWNER,
+      "m.mentions includes the allowed owner, excluding butler_senders and the relay's own mxid")
+    assert(posts[1].content["app.remuda.approval"] == true,
+      "approval messages carry the relay-loop marker")
+  end, "butler_senders=@helper:example.org\n", ALL)
+end
+
+function remuda._t359.test_approval_room_routing_and_answer_binding()
+  with_approved_text_stubs(function(typed)
+    approval_env(nil, function(env)
+      local id = assert(remuda.butler.approve_text.request("butler", "lounge text", ASKER))
+      env.client:pump()
+      local rec = env.relay:state().approvals[id]
+      local post = remuda._t359.room_posts(env, ALL, "Approve prepared text for")[1]
+      assert(rec and rec.room_id == ALL and post, "prepared-text approval uses the configured all room")
+      assert(post.content.msgtype == "m.text" and post.content["m.mentions"].user_ids[1] == OWNER,
+        "the lounge request is an ordinary message with the owner mention")
+      room_events(env, { text_event("$prepared-home-answer", OWNER, "yes " .. id) }, HOME)
+      room_events(env, { text_event("$prepared-stranger-answer", STRANGER, "yes " .. id) }, ALL)
+      assert(rec.status == "open" and #typed == 0,
+        "the owner in HOME and a stranger in the lounge cannot approve prepared text")
+      room_events(env, { text_event("$prepared-lounge-answer", OWNER, "yes " .. id) }, ALL)
+      assert(#typed == 1 and typed[1].bytes == "lounge text",
+        "the owner can approve prepared text in its lounge request room")
+
+      local join_id, join_event, _, join_post = file_request(env, NEW, nil, ALL)
+      assert(join_post.content.msgtype == "m.text" and env.relay:state().approvals[join_id].room_id == ALL,
+        "join approval is an ordinary message stored against the lounge room")
+      room_events(env, { text_event("$join-home-answer", OWNER, "yes", join_event) }, HOME)
+      assert(env.relay:state().approvals[join_id].status == "open" and server_joins(env, NEW) == 0,
+        "an owner answer in HOME cannot approve a lounge request")
+      room_events(env, { text_event("$join-lounge-answer", OWNER, "yes", join_event) }, ALL)
+      assert(env.relay:state().approvals[join_id].status == "applied" and server_joins(env, NEW) == 1,
+        "the owner can approve the join in the room where it was posted")
+
+      remuda._t359.with_guard(env, function(replies)
+        local guard_event, guard_reply, guard_id, guard_post = remuda._t359.guard_request(env, replies, nil, nil, ALL)
+        local guard_rec = env.relay:state().approvals[guard_id]
+        assert(guard_rec.room_id == ALL and guard_post.content.msgtype == "m.text",
+          "guard approval uses the configured lounge as an ordinary message")
+        room_events(env, { reaction("$guard-stranger", STRANGER, guard_event) }, ALL)
+        room_events(env, { reaction("$guard-home", OWNER, guard_event) }, HOME)
+        assert(guard_rec.status == "open" and remuda._t359.guard_state(guard_reply) == "waiting",
+          "a stranger in the lounge and the owner in HOME cannot answer the lounge request")
+        room_events(env, { reaction("$guard-owner", OWNER, guard_event) }, ALL)
+        assert(remuda._t359.guard_state(guard_reply) == "done:" .. remuda._t359.guard_allow,
+          "the allowlisted owner can answer the guard request in the lounge")
+        env.client:pump()
+        local lounge_reply = remuda._t359.room_posts(env, ALL, "Allowed this one call.")[1]
+        assert(lounge_reply and lounge_reply.relates_to.event_id == guard_event,
+          "guard thread notes are sent to the stored approval room")
+      end)
+
+      approval().reply({ event_id = "$legacy-home-root" }, "legacy reply")
+      env.client:pump()
+      local legacy = remuda._t359.room_posts(env, HOME, "legacy reply")[1]
+      assert(legacy and legacy.relates_to.event_id == "$legacy-home-root",
+        "an old approval record without room_id keeps its thread in HOME")
+    end, "approve_text=true\n", ALL)
+  end)
+end
+
+function remuda._t359.test_approval_room_falls_back_to_home_without_joined_lounge()
+  approval_env(nil, function(env)
+    local id
+    approval().request({ kind = "room_fallback_test", key = "fallback", asker = ASKER,
+      summary = "use fallback room", on_id = function(value) id = value end })
+    env.client:pump()
+    local rec = env.relay:state().approvals[id]
+    assert(rec and rec.room_id == HOME and #remuda._t359.room_posts(env, HOME, "Butler wants to use fallback room") == 1,
+      "without a joined all room the request is posted in HOME and stores HOME")
+  end, nil, false)
+end
+
+function remuda._t359.test_approval_room_home_mode_and_kind_fallback()
+  approval_env(nil, function(env)
+    local id
+    approval().request({ kind = "room_home_test", key = "home", asker = ASKER,
+      summary = "use home room", on_id = function(value) id = value end })
+    env.client:pump()
+    local rec = env.relay:state().approvals[id]
+    assert(rec and rec.room_id == HOME
+      and #remuda._t359.room_posts(env, HOME, "Butler wants to use home room") == 1
+      and #remuda._t359.room_posts(env, ALL, "Butler wants to use home room") == 0,
+      "approval_room=home posts only in HOME")
+  end, "approval_room=home\n", ALL)
+  assert(relay_module.approval_room_for_config({ approval_room = "all", home_room = HOME,
+    all_room = ALL, rooms = { [ALL] = "joined" } }) == HOME,
+    "an all_room configured as a joined room is not an ALL-BUTLERS lounge")
+end
+
+function remuda._t359.test_failed_lounge_post_does_not_fall_back_to_home()
+  approval_env(nil, function(env)
+    local request_error, id
+    approval().request({ kind = "lounge_failure_test", key = "lounge-failure", asker = ASKER,
+      summary = "must fail in lounge", on_id = function(value) id = value end },
+      function(value, err) if not value then request_error = err end end)
+    local index
+    for i, args in ipairs(env.client.requests) do
+      if args.method == "PUT" and args.room == ALL then index = i break end
+    end
+    assert(index, "the request is first sent to the configured lounge")
+    env.client:complete(index, { error = "Matrix room not joined" })
+    assert(request_error and request_error:find("Could not post approval request", 1, true),
+      "a failed lounge post reports Could not post approval request")
+    assert(#remuda._t359.room_posts(env, HOME, "must fail in lounge") == 0
+      and #remuda._t359.room_posts(env, ALL, "must fail in lounge") == 1,
+      "the failed lounge attempt is not retried or copied into HOME")
+    assert(not env.relay:state().approvals[id], "a failed lounge post leaves no saved request")
+  end, nil, ALL)
+end
+
+function remuda._t359.test_approval_marker_skips_live_sync_and_backfill()
+  approval_env(nil, function(env)
+    local marked = text_event("$marked-live", "@helper:example.org", "approval chatter")
+    marked.content["app.remuda.approval"] = true
+    local plain = text_event("$plain-live", "@helper:example.org", "ordinary chatter")
+    local non_butler = text_event("$non-butler-marked-live", STRANGER, "marked human chatter")
+    non_butler.content["app.remuda.approval"] = true
+    room_events(env, { marked, plain, non_butler }, HOME)
+    local state = env.relay:state()
+    assert(state.pending["$marked-live"] == nil and state.processed["$marked-live"]
+      and delivered_ids(env.delivered, "$plain-live") and not delivered_ids(env.delivered, "$marked-live")
+      and delivered_ids(env.delivered, "$non-butler-marked-live"),
+      "live sync skips marked Butler posts; unmarked control and marked non-Butler messages are delivered")
+  end, "butler_senders=@helper:example.org\n")
+
+  approval_env(nil, function(env)
+    local marked = text_event("$marked-backfill", "@helper:example.org", "approval chatter")
+    marked.content["app.remuda.approval"] = true
+    local plain = text_event("$plain-backfill", "@helper:example.org", "ordinary chatter")
+    env.relay._response({ start = "m0", ["end"] = "m1", chunk = { marked, plain } },
+      "/_matrix/client/v3/rooms/" .. encoded(HOME) .. "/messages")
+    local state = env.relay:state()
+    assert(state.pending["$marked-backfill"] == nil and state.processed["$marked-backfill"]
+      and delivered_ids(env.delivered, "$plain-backfill")
+      and not delivered_ids(env.delivered, "$marked-backfill"),
+      "messages backfill skips marked approval messages while unmarked control is delivered")
+  end, "mode=messages\nbutler_senders=@helper:example.org\n")
+end
+
+function remuda._t359.test_long_prepared_text_routes_home_only_and_types_full_text()
+  with_approved_text_stubs(function(typed)
+    approval_env(nil, function(env)
+      local bytes = string.rep("x", 1025)
+      local id = assert(remuda.butler.approve_text.request("butler", bytes, ASKER))
+      env.client:pump()
+      local rec = env.relay:state().approvals[id]
+      local home_post = remuda._t359.room_posts(env, HOME, "Approve prepared text for")[1]
+      assert(rec and rec.data.registered_text == bytes and rec.data.bytes == #bytes
+        and rec.data.display_fingerprint == id .. "/" .. #bytes and rec.room_id == HOME,
+        "the stored prepared text, fingerprint, and answer room retain the full request")
+      assert(home_post and home_post.body:find(bytes, 1, true)
+        and home_post.body:find(id .. "/" .. #bytes, 1, true),
+        "HOME contains the complete 1 KiB plus one byte request and its full fingerprint")
+      assert(#remuda._t359.room_posts(env, ALL) == 0,
+        "a long prepared-text request never reaches the lounge")
+      room_events(env, { text_event("$prepared-lounge-answer", OWNER, "yes " .. id) }, ALL)
+      assert(rec.status == "open" and #typed == 0,
+        "a lounge answer cannot approve a request that was posted in HOME")
+      room_events(env, { text_event("$prepared-home-answer", OWNER, "yes " .. id) }, HOME)
+      assert(rec.status == "applied" and #typed == 1 and typed[1].bytes == rec.data.registered_text
+        and typed[1].bytes == bytes,
+        "answering the HOME-only request types exactly the full stored text")
+    end, "approve_text=true\n", ALL)
+  end)
+end
+
+function remuda._t359.test_multibyte_prepared_text_boundary_routes_without_truncation()
+  with_approved_text_stubs(function(typed)
+    approval_env(nil, function(env)
+      local bytes = string.rep("a", 1021) .. "界"
+      assert(#bytes == 1024, "fixture must end at the 1 KiB UTF-8 byte boundary")
+      local id = assert(remuda.butler.approve_text.request("butler", bytes, ASKER))
+      env.client:pump()
+      local rec = env.relay:state().approvals[id]
+      local home_post = remuda._t359.room_posts(env, HOME, "Approve prepared text for")[1]
+      assert(rec and rec.room_id == HOME and rec.data.registered_text == bytes
+        and home_post and home_post.body:find(bytes, 1, true)
+        and #remuda._t359.room_posts(env, ALL) == 0,
+        "the full multibyte boundary text is routed to HOME without a lounge post")
+      room_events(env, { text_event("$prepared-multibyte-home", OWNER, "yes " .. id) }, HOME)
+      assert(#typed == 1 and typed[1].bytes == bytes and rec.data.registered_text == bytes,
+        "the multibyte boundary request types the exact stored bytes")
+    end, "approve_text=true\n", ALL)
+  end)
+end
+
+function remuda._t359.test_approval_expiry_is_configurable_and_a_fence_in_the_text_falls_back_to_quotes()
+  with_approved_text_stubs(function()
+    approval_env(nil, function(env)
+      local id = assert(remuda.butler.approve_text.request("butler", "a\n```\nb", ASKER))
+      env.client:pump()
+      local rec = env.relay:state().approvals[id]
+      assert(rec.expires_at - rec.created_ms == 5 * 60 * 1000, "approval_ttl_minutes=5 sets a 5 minute expiry")
+      local post = home_posts(env, "Approve prepared text for")[1]
+      assert(post.body:find("> a\n> ```\n> b", 1, true), "text holding a fence keeps the exact quoted form")
+      assert(not post.content.formatted_body, "no HTML is built for the quoted form")
+    end, "approve_text=true\napproval_ttl_minutes=5\n")
+  end)
+end
+
+local function test_approved_text_live_owner_reply_types_exact_bytes_once()
+  with_approved_text_stubs(function(typed, keys, traces)
+    approval_env(nil, function(env)
+      local bytes = "line one\nline two\n"
+      local id = assert(remuda.butler.approve_text.request("butler", bytes, ASKER))
+      env.client:pump()
+      local rec = env.relay:state().approvals[id]
+      local event = rec and rec.event_id
+      assert(rec and event and rec.data.registered_text == bytes and rec.data.bytes == #bytes,
+        "registration must persist exact bytes with its posted event")
+      local post = home_posts(env, "Approve prepared text for")[1]
+      assert(post and post.body:find(id .. "/" .. #bytes, 1, true)
+        and post.body:find("```\nline one\nline two\n\n```", 1, true),
+        "the HOME post shows the request fingerprint and the multiline text in a code block")
+      room_events(env, { text_event("$owner-approve", OWNER, "승인 " .. id, event) })
+      assert(#typed == 1 and typed[1].session == "butler" and typed[1].bytes == bytes,
+        "an owner live reply types the stored bytes exactly")
+      assert(#keys == 0 and rec.status == "applied",
+        "type_text submits exactly once and the request is marked spent")
+      assert(traces[1][2]:find(OWNER, 1, true) and traces[1][2]:find("$owner-approve", 1, true)
+        and traces[1][2]:find(id, 1, true), "trace records owner, source event, and request id")
+      room_events(env, { reaction("$duplicate-approve", OWNER, event, CHECK) })
+      assert(#typed == 1 and thread_replies(env, event, "Already answered.") == 1,
+        "one-shot request cannot type again")
+      local bare_approve_id = assert(remuda.butler.approve_text.request("butler", "bare korean approve", ASKER))
+      env.client:pump()
+      local bare_approve = env.relay:state().approvals[bare_approve_id]
+      room_events(env, { text_event("$bare-korean-approve", OWNER, "승인", bare_approve.event_id) })
+      assert(bare_approve.status == "applied" and #typed == 2,
+        "a bare 승인 reply to prepared text approves it")
+      local bare_deny_id = assert(remuda.butler.approve_text.request("butler", "bare korean deny", ASKER))
+      env.client:pump()
+      local bare_deny = env.relay:state().approvals[bare_deny_id]
+      room_events(env, { text_event("$bare-korean-deny", OWNER, "거부", bare_deny.event_id) })
+      assert(bare_deny.status == "denied" and #typed == 2,
+        "a bare 거부 reply to prepared text denies it")
+      local reaction_id = assert(remuda.butler.approve_text.request("butler", "reaction bytes", ASKER))
+      env.client:pump()
+      local reaction_rec = env.relay:state().approvals[reaction_id]
+      room_events(env, { reaction("$owner-reaction", OWNER, reaction_rec.event_id, CHECK) })
+      assert(#typed == 3 and typed[3].bytes == "reaction bytes" and reaction_rec.status == "applied",
+        "an owner reaction on the request also approves prepared text")
+    end, "approve_text=true\n")
+  end)
+end
+
+local function test_approved_text_unknown_explicit_id_never_uses_reply_target()
+  with_approved_text_stubs(function(typed)
+    approval_env(nil, function(env)
+      local id = assert(remuda.butler.approve_text.request("butler", "prepared", ASKER))
+      env.client:pump()
+      local rec = env.relay:state().approvals[id]
+      room_events(env, { text_event("$unknown-explicit", OWNER, "yes WXYZ", rec.event_id) })
+      assert(#typed == 0 and rec.status == "open"
+        and delivered_ids(env.delivered, "$unknown-explicit"),
+        "an unknown explicit approve-text id cannot fall back to the replied-to request")
+    end, "approve_text=true\n")
+  end)
+end
+
+local function test_approved_text_cancel_and_failed_delivery_are_one_shot()
+  with_approved_text_stubs(function(typed)
+    approval_env(nil, function(env)
+      local cancel_id = assert(remuda.butler.approve_text.request("butler", "cancel me", ASKER))
+      env.client:pump()
+      local cancelled = env.relay:state().approvals[cancel_id]
+      remuda._butler_notify_policy = function() return false end
+      room_events(env, { text_event("$approve-busy", OWNER, "yes", cancelled.event_id) })
+      assert(cancelled.status == "approved" and #typed == 0,
+        "a pre-write busy refusal stays retryable")
+      remuda._butler_notify_policy = function() return true end
+      room_events(env, { reaction("$cancel-approved", OWNER, cancelled.event_id, CROSS) })
+      assert(cancelled.status == "denied" and #typed == 0,
+        "an owner cross cancels an approved-but-undelivered request")
+
+      for index, failure in ipairs({ "failed key", "partial write" }) do
+        local id = assert(remuda.butler.approve_text.request("butler", "one shot " .. index, ASKER))
+        env.client:pump()
+        local rec = env.relay:state().approvals[id]
+        local attempts = 0
+        remuda.type_text = function()
+          attempts = attempts + 1
+          if failure == "failed key" then return false, "key failed" end
+          error("type_text failed after partial write")
+        end
+        room_events(env, { text_event("$failed-write-" .. index, OWNER, "yes", rec.event_id) })
+        assert(rec.status == "failed" and rec.delivery_started == true and attempts == 1,
+          "a " .. failure .. " result after type_text starts is terminal")
+        room_events(env, { reaction("$retry-failed-" .. index, OWNER, rec.event_id, CHECK) })
+        assert(attempts == 1, "an owner check mark cannot repeat a possibly partial write")
+        remuda.type_text = function(session, bytes)
+          typed[#typed + 1] = { session = session, bytes = bytes }
+          return true
+        end
+      end
+    end, "approve_text=true\n")
+  end)
+end
+
+local function test_approved_text_refusal_stays_approved_for_owner_retry()
+  with_approved_text_stubs(function(typed, keys, traces, set_safe)
+    approval_env(nil, function(env)
+      local bytes = "prepared\ntext"
+      local id = assert(remuda.butler.approve_text.request("butler", bytes, ASKER))
+      env.client:pump()
+      local rec = env.relay:state().approvals[id]
+      set_safe(false)
+      room_events(env, { text_event("$busy-answer", OWNER, "yes " .. id, rec.event_id) })
+      assert(rec.status == "approved" and #typed == 0 and #keys == 0,
+        "busy target remains approved but undelivered")
+      assert(thread_replies(env, rec.event_id, "refused: pane_busy") == 1,
+        "owner gets the refusal reason")
+      set_safe(true)
+      room_events(env, { text_event("$retry-answer", OWNER, "yes", rec.event_id) })
+      assert(rec.status == "applied" and #typed == 1 and typed[1].bytes == bytes,
+        "a new live owner reply retries delivery from stored bytes")
+    end, "approve_text=true\n")
+  end)
+end
+
+local function test_approved_text_switch_off_keeps_reply_on_mail_path()
+  with_approved_text_stubs(function(typed)
+    approval_env(nil, function(env)
+      local id = assert(remuda.butler.approve_text.request("butler", "prepared", ASKER))
+      env.client:pump()
+      local rec = env.relay:state().approvals[id]
+      local file = assert(io.open(env.path, "rb"))
+      local config = file:read("a")
+      file:close()
+      file = assert(io.open(env.path, "wb"))
+      file:write((config:gsub("approve_text=true\n", "")))
+      file:close()
+      room_events(env, { text_event("$switch-off-reply", OWNER, "yes " .. id, rec.event_id) })
+      assert(#typed == 0 and rec.status == "open" and delivered_ids(env.delivered, "$switch-off-reply"),
+        "with approve-text off, the reply stays ordinary mail and cannot deliver")
+    end, "approve_text=true\n")
+  end)
+end
+
+local function test_approved_text_registration_refuses_when_switch_is_off()
+  with_approved_text_stubs(function()
+    approval_env(nil, function(env)
+      local before = #home_posts(env, "Approve prepared text for")
+      local id, why = remuda.butler.approve_text.request("butler", "prepared", ASKER)
+      assert(id == nil and tostring(why):find("Prepared text approvals are off", 1, true)
+        and #home_posts(env, "Approve prepared text for") == before,
+        "switch-off registration must report a clear refusal without a HOME post")
+    end)
+  end)
+end
+
+local function test_approved_text_denial_and_expiry_type_nothing()
+  with_approved_text_stubs(function(typed, keys)
+    approval_env(nil, function(env)
+      local denied_id = assert(remuda.butler.approve_text.request("butler", "never type", ASKER))
+      env.client:pump()
+      local denied = env.relay:state().approvals[denied_id]
+      room_events(env, { text_event("$owner-deny", OWNER, "거부 " .. denied_id, denied.event_id) })
+      assert(denied.status == "denied" and #typed == 0 and #keys == 0,
+        "owner denial never types prepared text")
+
+      local expired_id = assert(remuda.butler.approve_text.request("butler", "also never type", ASKER))
+      env.client:pump()
+      local expired = env.relay:state().approvals[expired_id]
+      expired.expires_at = 0
+      tick_timers(1)
+      env.client:pump()
+      assert(expired.status == "expired" and #typed == 0 and #keys == 0,
+        "an unanswered request expires without typing")
+      assert(thread_replies(env, expired.event_id, "expired") == 1,
+        "the owner gets one expiry notice in the request thread")
+    end, "approve_text=true\n")
+  end)
+end
+
 local approval_failures = {}
+for _, case in ipairs((function()
+-- Guard slice 1: the owner gate for PermissionRequest approvals. The hook verb runs through
+-- guard_policy.run with a recording deferred reply.
+local GUARD_ALLOW = remuda.butler.guard_approval.ALLOW
+local GUARD_DENY = remuda.butler.guard_approval.DENY
+
+local function with_guard(env, run)
+  local gp = remuda.butler.guard_policy
+  local old_caller, old_bus = remuda.caller, remuda._butler_bus
+  local old_dir, old_pending = remuda._butler_guard_dir, remuda.pending
+  local replies = {}
+  -- Setup runs inside the pcall too: a failing mkdir/gp.set still restores below.
+  local ok, err = pcall(function()
+    -- A grant offer needs the calling session identity (holders: enforce_holder).
+    remuda._butler_bus = { agents = { ["t-ssa"] = { id = "U-SSA", parent = "butler", alias = "t-ssa", kind = "claude", session_name = "s-ssa" },
+      butler = { id = "U-BUTLER", session_name = "butler" } } }
+    remuda.caller = function() return { kind = "session", session = "s-ssa" } end
+    remuda._butler_guard_dir = env.dir .. "/guard"
+    remuda.mkdir(remuda._butler_guard_dir)
+    assert(gp.set(true) and gp.set_approvals(true), "guard switches")
+    remuda.pending = function(opts)
+      local reply = { opts = opts }
+      function reply:resolve(_, out) self.done, self.out = true, out end
+      replies[#replies + 1] = reply
+      return reply
+    end
+    run(replies)
+  end)
+  remuda._butler_guard_dir, remuda.pending = old_dir, old_pending
+  remuda.caller, remuda._butler_bus = old_caller, old_bus
+  if not ok then error(err, 0) end
+end
+remuda._t359.with_guard = with_guard
+
+-- One PermissionRequest through the verb: the request's event id, its deferred reply, its id, its post.
+local function guard_request(env, replies, command, alias, request_room)
+  request_room = request_room or HOME
+  local before = #remuda._t359.room_posts(env, request_room, "Butler approval")
+  remuda.butler.guard_policy.run({ "guard" }, { kind = "session", session = "s-ssa", stdin = remuda.json.encode({ hook_event_name = "PermissionRequest",
+    tool_name = "Bash", tool_input = { command = command or "git push origin main" }, cwd = "/p/w" }) })
+  env.client:pump()
+  local posts = remuda._t359.room_posts(env, request_room, "Butler approval")
+  assert(#posts == before + 1, "one request must make exactly one approval-room post")
+  local post = posts[#posts]
+  return post.event_id, replies[#replies], assert(post.body:match("%[Butler approval (%w+)%]")), post
+end
+remuda._t359.guard_request = guard_request
+
+local function guard_state(reply) return reply.done and ("done:" .. reply.out) or "waiting" end
+remuda._t359.guard_state = guard_state
+remuda._t359.guard_allow = GUARD_ALLOW
+
+local function test_guard_owner_answers_by_reply_and_reaction()
+  approval_env(nil, function(env)
+    with_guard(env, function(replies)
+      local cases = {
+        { "yes id", function(id, ev) return text_event("$g1", OWNER, "yes " .. id, ev) end, GUARD_ALLOW },
+        { "bare 승인 reply", function(_, ev) return text_event("$g2", OWNER, "승인", ev) end, GUARD_ALLOW },
+        { "check reaction", function(_, ev) return reaction("$g3", OWNER, ev, CHECK) end, GUARD_ALLOW },
+        { "no id", function(id, ev) return text_event("$g4", OWNER, "no " .. id, ev) end, GUARD_DENY },
+        { "bare 거부 reply", function(_, ev) return text_event("$g5", OWNER, "거부", ev) end, GUARD_DENY },
+        { "cross reaction", function(_, ev) return reaction("$g6", OWNER, ev, CROSS) end, GUARD_DENY },
+      }
+      for _, case in ipairs(cases) do
+        local event, reply, id = guard_request(env, replies)
+        assert(guard_state(reply) == "waiting", "the hook waits for the owner")
+        room_events(env, { case[2](id, event) })
+        assert(guard_state(reply) == "done:" .. case[3], case[1] .. " must print the decision, got " .. guard_state(reply))
+      end
+    end)
+  end)
+end
+
+local function test_guard_only_the_verified_owner_counts()
+  approval_env(OWNER .. ",@agent-x:example.org", function(env)
+    with_guard(env, function(replies)
+      local event, reply, id = guard_request(env, replies)
+      local edit = text_event("$edit", OWNER, "* yes " .. id, event)
+      edit.content["m.new_content"] = { msgtype = "m.text", body = "yes " .. id }
+      edit.content["m.relates_to"] = { rel_type = "m.replace", event_id = event }
+      room_events(env, {
+        reaction("$stranger", STRANGER, event), text_event("$stranger-yes", STRANGER, "yes " .. id, event),
+        reaction("$agent", "@agent-x:example.org", event), text_event("$agent-yes", "@agent-x:example.org", "yes", event),
+        reaction("$other-event", OWNER, "$another-post"), text_event("$wrong-id", OWNER, "yes WXYZ", event),
+        text_event("$bare-elsewhere", OWNER, "yes"), edit,
+        reaction("$early", OWNER, event, CHECK, ts(-120000)),
+      })
+      room_events(env, { reaction("$all", OWNER, event) }, ALL)
+      assert(guard_state(reply) == "waiting", "non-owner, wrong room, edit, wrong target and wrong id must do nothing: "
+        .. guard_state(reply))
+      room_events(env, { reaction("$owner", OWNER, event) })
+      assert(guard_state(reply) == "done:" .. GUARD_ALLOW, "the owner's answer still works afterwards")
+    end)
+  end)
+end
+
+local function test_guard_needs_live_sync()
+  approval_env(nil, function(env)
+    with_guard(env, function(replies)
+      local event, reply = guard_request(env, replies)
+      env.relay._response({ start = "m0", ["end"] = "m1", chunk = { reaction("$not-live", OWNER, event) } },
+        "/_matrix/client/v3/rooms/" .. encoded(HOME) .. "/messages")
+      env.client:pump()
+      assert(guard_state(reply) == "waiting", "an answer outside live sync must not approve a guarded call")
+    end)
+  end, "mode=messages\n")
+end
+
+function remuda._t359.test_with_guard_restores_stand_ins_when_setup_fails()
+  approval_env(nil, function(env)
+    local gp = remuda.butler.guard_policy
+    local old = { remuda.caller, remuda._butler_bus, remuda._butler_guard_dir, remuda.pending, gp.set }
+    gp.set = function() return false end
+    local ok, err = pcall(with_guard, env, function() error("run must not start", 0) end)
+    gp.set = old[5]
+    assert(not ok and tostring(err):find("guard switches", 1, true), "the failing setup still surfaces its error")
+    assert(remuda.caller == old[1] and remuda._butler_bus == old[2]
+      and remuda._butler_guard_dir == old[3] and remuda.pending == old[4],
+      "a failing setup restores the caller, bus, guard dir and pending stand-ins")
+  end)
+end
+
+function remuda._t359.test_guard_request_expires_at_290_seconds_not_default_ttl()
+  approval_env(nil, function(env)
+    with_guard(env, function(replies)
+      local event, reply, id = guard_request(env, replies)
+      local rec = env.relay:state().approvals[id]
+      assert(rec.expires_at - rec.created_ms == 290 * 1000,
+        "guard approvals keep their 290 second window instead of the 30 minute default")
+      assert(remuda.butler.approval.sweep(rec.expires_at - 1) == 0 and rec.status == "open",
+        "the guard request remains open immediately before its 290 second expiry")
+      assert(remuda.butler.approval.sweep(rec.expires_at) == 1 and rec.status == "expired",
+        "the guard request expires at 290 seconds")
+      env.client:pump()
+      assert(guard_state(reply) == "done:" and thread_replies(env, event, "Expired.") == 1,
+        "guard expiry releases the hook without a decision and replies in its request thread")
+    end)
+  end)
+end
+
+local function test_guard_forged_nonce_gives_no_decision()
+  approval_env(nil, function(env)
+    with_guard(env, function(replies)
+      for _, field in ipairs({ "nonce", "hash", "text" }) do
+        local event, reply, id = guard_request(env, replies)
+        env.relay:state().approvals[id].data[field] = "forged"
+        room_events(env, { reaction("$owner-" .. field, OWNER, event) })
+        assert(guard_state(reply) == "done:", "a request whose " .. field .. " no longer matches must print no decision")
+      end
+    end)
+  end)
+end
+
+-- An answer is bound to the request it targets: another request's answer, hash or id gives nothing.
+local function test_guard_answer_binds_to_its_own_request()
+  approval_env(nil, function(env)
+    with_guard(env, function(replies)
+      local first, first_reply, first_id = guard_request(env, replies, "git push origin main")
+      local second, second_reply, second_id = guard_request(env, replies, "rm -rf /x")
+      local first_hash = env.relay:state().approvals[first_id].data.hash
+      assert(first_hash ~= env.relay:state().approvals[second_id].data.hash, "each request has its own hash")
+      room_events(env, { text_event("$wrong-hash", OWNER, "yes " .. first_hash:sub(1, 4):upper(), second) })
+      assert(guard_state(first_reply) == "waiting" and guard_state(second_reply) == "waiting",
+        "an answer naming a hash instead of the request id changes nothing")
+      room_events(env, { text_event("$cross", OWNER, "yes " .. second_id, first) })
+      assert(guard_state(first_reply) == "done:" .. GUARD_ALLOW or guard_state(second_reply) == "done:" .. GUARD_ALLOW,
+        "an explicit id decides that request")
+      assert(guard_state(first_reply) == "waiting" and guard_state(second_reply) == "done:" .. GUARD_ALLOW,
+        "the id in the answer, not the replied-to post, picks the request; the other stays open")
+    end)
+  end)
+end
+
+local function test_guard_one_shot_expiry_and_restart()
+  approval_env(nil, function(env)
+    with_guard(env, function(replies)
+      local event, reply = guard_request(env, replies)
+      room_events(env, { reaction("$once", OWNER, event) })
+      room_events(env, { reaction("$twice", OWNER, event), text_event("$thrice", OWNER, "yes", event) })
+      assert(guard_state(reply) == "done:" .. GUARD_ALLOW and thread_replies(env, event, "Already answered.") >= 1,
+        "a duplicate answer must change nothing and be told so")
+
+      local expiring, expiring_reply, expiring_id = guard_request(env, replies, "git push -f")
+      env.relay:state().approvals[expiring_id].expires_at = 0
+      tick_timers(1)
+      env.client:pump()
+      assert(guard_state(expiring_reply) == "done:", "expiry prints no decision")
+      local told = thread_replies(env, expiring, "Expired")
+      assert(told >= 1, "the owner is told in the thread")
+      room_events(env, { reaction("$late", OWNER, expiring) })
+      assert(guard_state(expiring_reply) == "done:" and thread_replies(env, expiring, "Expired.") == told + 1
+        and #home_posts(env, "Allowed") == 1, "a late answer allows nothing and is told: expired")
+
+      local restarted, restarted_reply, restarted_id = guard_request(env, replies, "git push --force")
+      restart_relay(env)
+      assert(env.relay:state().approvals[restarted_id].status == "expired" and guard_state(restarted_reply) == "done:",
+        "a restart expires the open request without an allow")
+      room_events(env, {}) -- the first sync after a restart is not live
+      local before = thread_replies(env, restarted, "Expired.")
+      room_events(env, { reaction("$after-restart", OWNER, restarted) })
+      assert(thread_replies(env, restarted, "Expired.") == before + 1 and #home_posts(env, "Allowed") == 1,
+        "an answer after a restart is told: expired")
+    end)
+  end)
+end
+
+-- Guard slice 3, PR4: the cycle reaction makes a standing grant, for the owner only, on Butler's own post.
+local CYCLE = "\240\159\148\132"
+local function guard_fetch(env, replies, host)
+  local before = #remuda._t359.room_posts(env, HOME, "Butler approval")
+  remuda.butler.guard_policy.run({ "guard" }, { kind = "session", session = "s-ssa", stdin = remuda.json.encode({ hook_event_name = "PermissionRequest",
+    tool_name = "WebFetch", tool_input = { url = "https://" .. host .. "/" }, cwd = "/p/w" }) })
+  env.client:pump()
+  local posts = remuda._t359.room_posts(env, HOME, "Butler approval")
+  assert(#posts == before + 1, "one request must make exactly one approval-room post")
+  return posts[#posts].event_id, replies[#replies], posts[#posts]
+end
+local function grant_events()
+  local out = {}
+  for _, g in ipairs(remuda.butler.guard_grants.active()) do out[#out + 1] = g.event end
+  return table.concat(out, ",")
+end
+
+local function test_guard_cycle_reaction_makes_a_grant_only_for_the_owner()
+  approval_env(OWNER .. ",@agent-x:example.org", function(env)
+    with_guard(env, function(replies)
+      assert(remuda.butler.guard_policy.set_grants(true), "grants switch")
+      local event, reply, post = guard_fetch(env, replies, "a.test")
+      assert(post.body:find(CYCLE, 1, true) and post.body:find("grant:    net a.test until", 1, true), "the post offers the grant")
+      room_events(env, {
+        reaction("$stranger", STRANGER, event, CYCLE), reaction("$agent", "@agent-x:example.org", event, CYCLE),
+        reaction("$other-event", OWNER, "$another-post", CYCLE), reaction("$early", OWNER, event, CYCLE, ts(-120000)),
+      })
+      room_events(env, { reaction("$all", OWNER, event, CYCLE) }, ALL)
+      assert(guard_state(reply) == "waiting" and grant_events() == "",
+        "stranger, agent, other event, early and wrong room create nothing: " .. guard_state(reply))
+      room_events(env, { reaction("$owner", OWNER, event, CYCLE) })
+      assert(guard_state(reply) == "done:" .. GUARD_ALLOW and grant_events() == "$owner",
+        "the owner's cycle reaction allows the call and makes one grant, recorded against that reaction: " .. grant_events())
+      room_events(env, { reaction("$owner-again", OWNER, event, CYCLE), reaction("$owner-check", OWNER, event) })
+      assert(grant_events() == "$owner" and thread_replies(env, event, "Already answered.") >= 1,
+        "the reaction was consumed once")
+      -- a check makes no grant
+      local second, second_reply = guard_fetch(env, replies, "b.test")
+      room_events(env, { reaction("$check", OWNER, second) })
+      assert(guard_state(second_reply) == "done:" .. GUARD_ALLOW and grant_events() == "$owner", "a check creates no grant")
+    end)
+  end)
+end
+
+-- Guard slice 3, PR5: `guard freeze`, `guard revoke gNNN` and `guard unfreeze` are owner lines on the Matrix path only.
+local function guard_line(id, sender, body, when) return text_event(id, sender, body, nil, when) end
+local function first_post(env, fragment)
+  local posts = home_posts(env, fragment)
+  return posts[#posts]
+end
+
+local function test_guard_verbs_only_from_the_verified_owner()
+  approval_env(OWNER .. ",@agent-x:example.org", function(env)
+    with_guard(env, function(replies)
+      assert(remuda.butler.guard_policy.set_grants(true), "grants switch")
+      local event = guard_fetch(env, replies, "a.test")
+      room_events(env, { reaction("$owner", OWNER, event, CYCLE) })
+      assert(grant_events() == "$owner", "a grant to freeze and revoke")
+      local g = remuda.butler.guard_grants
+      local edited = guard_line("$edited", OWNER, "* guard freeze")
+      edited.content["m.new_content"] = { msgtype = "m.text", body = "guard freeze" }
+      edited.content["m.relates_to"] = { rel_type = "m.replace", event_id = "$orig" }
+      room_events(env, {
+        guard_line("$s", STRANGER, "guard freeze"), guard_line("$s2", STRANGER, "guard revoke g001"),
+        guard_line("$a", "@agent-x:example.org", "guard freeze"), guard_line("$early", OWNER, "guard freeze", ts(-120000)),
+        edited,
+      })
+      room_events(env, { guard_line("$all", OWNER, "guard freeze") }, ALL)
+      assert(not g.frozen() and grant_events() == "$owner", "stranger, agent, early, edited and wrong room change nothing")
+      restart_relay(env)
+      room_events(env, { guard_line("$not-live", OWNER, "guard freeze") }) -- the first sync after a restart is not live
+      assert(not g.frozen(), "a line outside live sync changes nothing")
+      room_events(env, { guard_line("$freeze", OWNER, "guard freeze") })
+      assert(g.frozen() and grant_events() == "", "the owner's line freezes: no grant matches")
+      assert(#home_posts(env, "Grants are frozen:") == 1, "one plain confirmation")
+      room_events(env, { guard_line("$freeze", OWNER, "guard freeze") })
+      assert(#home_posts(env, "Grants are frozen:") == 1 and #home_posts(env, "already frozen") == 0, "a replayed event answers nothing")
+      room_events(env, { guard_line("$freeze2", OWNER, "guard freeze") })
+      assert(#home_posts(env, "Grants are already frozen.") == 1, "a second line is told")
+    end)
+  end)
+end
+
+local function test_guard_revoke_from_the_owner()
+  approval_env(OWNER, function(env)
+    with_guard(env, function(replies)
+      assert(remuda.butler.guard_policy.set_grants(true), "grants switch")
+      local event = guard_fetch(env, replies, "a.test")
+      room_events(env, { reaction("$owner", OWNER, event, CYCLE) })
+      room_events(env, { guard_line("$no", STRANGER, "guard revoke g001") })
+      assert(grant_events() == "$owner", "a stranger revokes nothing")
+      room_events(env, { guard_line("$rev", OWNER, "guard revoke g001"), guard_line("$rev9", OWNER, "guard revoke g009") })
+      assert(grant_events() == "", "the owner's revoke ends the grant")
+      assert(#home_posts(env, "Revoked g001.") == 1 and #home_posts(env, "No grant g009.") == 1, "plain answers")
+      local lines = io.open(remuda.butler.guard_policy.log_path()):read("a")
+      assert(lines:find('"event":"grant_revoked"', 1, true) and lines:find('"grant_id":"g001"', 1, true), "audited with grant_id")
+    end)
+  end)
+end
+
+local function test_guard_unfreeze_needs_the_owner_answer_on_butler_post()
+  approval_env(OWNER, function(env)
+    with_guard(env, function(replies)
+      assert(remuda.butler.guard_policy.set_grants(true), "grants switch")
+      local g = remuda.butler.guard_grants
+      room_events(env, { guard_line("$f", OWNER, "guard freeze") })
+      room_events(env, { guard_line("$u", OWNER, "guard unfreeze") })
+      assert(g.frozen(), "the owner's line only asks")
+      local post = assert(first_post(env, "Lift the guard grant freeze"), "a Butler post asks")
+      local id = assert(post.body:match("%[Butler approval (%w+)%]"))
+      room_events(env, { reaction("$stranger", STRANGER, post.event_id), reaction("$early", OWNER, post.event_id, nil, ts(-120000)) })
+      room_events(env, { guard_line("$stranger-yes", STRANGER, "yes " .. id) })
+      assert(g.frozen(), "a stranger or an early reaction lifts nothing")
+      room_events(env, { reaction("$no", OWNER, post.event_id, "\226\157\140") })
+      assert(g.frozen(), "a cross keeps the freeze")
+      room_events(env, { guard_line("$u2", OWNER, "guard unfreeze") })
+      post = first_post(env, "Lift the guard grant freeze")
+      id = post.body:match("%[Butler approval (%w+)%]")
+      room_events(env, { reaction("$yes", OWNER, post.event_id) })
+      assert(not g.frozen() and thread_replies(env, post.event_id, "Freeze lifted") == 1, "the owner's reaction lifts it")
+      -- the reply path
+      room_events(env, { guard_line("$f2", OWNER, "guard freeze"), guard_line("$u3", OWNER, "guard unfreeze") })
+      post = first_post(env, "Lift the guard grant freeze")
+      id = post.body:match("%[Butler approval (%w+)%]")
+      assert(g.frozen(), "frozen again")
+      room_events(env, { guard_line("$reply", OWNER, "yes " .. id) })
+      assert(not g.frozen(), "the owner's yes ID lifts it")
+    end)
+  end)
+end
+
+local function test_guard_verb_lines_with_extra_text_are_answered_and_audited_with_the_event()
+  approval_env(OWNER, function(env)
+    with_guard(env, function(replies)
+      assert(remuda.butler.guard_policy.set_grants(true), "grants switch")
+      local g = remuda.butler.guard_grants
+      room_events(env, {
+        guard_line("$extra1", OWNER, "guard revoke g001 now"), guard_line("$extra2", OWNER, "guard freeze please"),
+      })
+      assert(#home_posts(env, "Usage: guard revoke gNNN") == 1 and #home_posts(env, "Usage: guard freeze") == 1,
+        "each line is answered, not handed on as mail")
+      assert(not g.frozen(), "usage lines change nothing")
+      room_events(env, { guard_line("$freeze-ev", OWNER, "guard freeze") })
+      local lines = io.open(remuda.butler.guard_policy.log_path()):read("a")
+      assert(g.frozen() and lines:find(OWNER .. ", event $freeze-ev", 1, true), "the audit names sender and event: " .. lines)
+    end)
+  end)
+end
+
+local function test_guard_cycle_reaction_needs_a_guard_request_and_the_switch()
+  approval_env(nil, function(env)
+    with_guard(env, function(replies)
+      local event, reply = guard_fetch(env, replies, "off.test")
+      room_events(env, { reaction("$off", OWNER, event, CYCLE) })
+      assert(guard_state(reply) == "waiting" and grant_events() == "", "grants off: the reaction does nothing")
+      local id, join_event = file_request(env, NEW)
+      room_events(env, { reaction("$cycle-join", OWNER, join_event, CYCLE) })
+      assert(env.relay:state().approvals[id].status == "open", "the cycle reaction does not answer a join request")
+      room_events(env, { reaction("$check-join", OWNER, join_event) })
+      assert(env.relay:state().approvals[id].status ~= "open", "the check still does")
+    end)
+  end)
+end
+
+  return {
+    { "test_guard_owner_answers_by_reply_and_reaction", test_guard_owner_answers_by_reply_and_reaction },
+    { "test_guard_only_the_verified_owner_counts", test_guard_only_the_verified_owner_counts },
+    { "test_guard_needs_live_sync", test_guard_needs_live_sync },
+    { "test_with_guard_restores_stand_ins_when_setup_fails", remuda._t359.test_with_guard_restores_stand_ins_when_setup_fails },
+    { "test_guard_request_expires_at_290_seconds_not_default_ttl", remuda._t359.test_guard_request_expires_at_290_seconds_not_default_ttl },
+    { "test_guard_forged_nonce_gives_no_decision", test_guard_forged_nonce_gives_no_decision },
+    { "test_guard_answer_binds_to_its_own_request", test_guard_answer_binds_to_its_own_request },
+    { "test_guard_one_shot_expiry_and_restart", test_guard_one_shot_expiry_and_restart },
+    { "test_guard_cycle_reaction_makes_a_grant_only_for_the_owner", test_guard_cycle_reaction_makes_a_grant_only_for_the_owner },
+    { "test_guard_cycle_reaction_needs_a_guard_request_and_the_switch", test_guard_cycle_reaction_needs_a_guard_request_and_the_switch },
+    { "test_guard_verbs_only_from_the_verified_owner", test_guard_verbs_only_from_the_verified_owner },
+    { "test_guard_revoke_from_the_owner", test_guard_revoke_from_the_owner },
+    { "test_guard_unfreeze_needs_the_owner_answer_on_butler_post", test_guard_unfreeze_needs_the_owner_answer_on_butler_post },
+    { "test_guard_verb_lines_with_extra_text_are_answered_and_audited_with_the_event",
+      test_guard_verb_lines_with_extra_text_are_answered_and_audited_with_the_event },
+  }
+end)()) do
+  local ok, err = pcall(case[2])
+  if not ok then approval_failures[#approval_failures + 1] = case[1] .. ": " .. tostring(err) end
+end
+
 for _, case in ipairs({
   { "test_agent_join_files_request_and_does_not_join", test_agent_join_files_request_and_does_not_join },
   { "test_owner_check_reaction_approves_and_joins_with_how_approved", test_owner_check_reaction_approves_and_joins_with_how_approved },
   { "test_owner_yes_reply_approves_and_bare_yes_does_not", test_owner_yes_reply_approves_and_bare_yes_does_not },
+  { "test_legacy_reply_parser_preserves_exact_words_and_rich_fallback", test_legacy_reply_parser_preserves_exact_words_and_rich_fallback },
+  { "test_legacy_notice_and_emote_answers_stay_compatible", test_legacy_notice_and_emote_answers_stay_compatible },
+  { "test_legacy_approval_reaction_works_in_messages_fallback", test_legacy_approval_reaction_works_in_messages_fallback },
+  { "test_legacy_approval_survives_first_non_live_sync", test_legacy_approval_survives_first_non_live_sync },
   { "test_reaction_from_stranger_agent_or_other_room_is_ignored", test_reaction_from_stranger_agent_or_other_room_is_ignored },
   { "test_reaction_on_older_request_or_before_post_is_ignored", test_reaction_on_older_request_or_before_post_is_ignored },
-  { "test_deny_and_expiry_mail_with_next_and_no_join", test_deny_and_expiry_mail_with_next_and_no_join },
+    { "test_deny_and_expiry_mail_with_next_and_no_join", test_deny_and_expiry_mail_with_next_and_no_join },
   { "test_approved_join_failure_mail_includes_request_identity", test_approved_join_failure_mail_includes_request_identity },
   { "test_dedupe_returns_same_id_and_cap_refuses_without_post", test_dedupe_returns_same_id_and_cap_refuses_without_post },
   { "test_approve_deny_refuse_agents_only", test_approve_deny_refuse_agents_only },
@@ -6530,6 +8364,23 @@ for _, case in ipairs({
   { "test_cleared_identity_is_not_refused", test_cleared_identity_is_not_refused },
   { "test_hostile_room_name_sanitised_in_home_post", test_hostile_room_name_sanitised_in_home_post },
   { "test_restart_does_not_reanswer_answered_request", test_restart_does_not_reanswer_answered_request },
+  { "test_approval_post_mentions_owner_with_code_block_and_30_minute_expiry", remuda._t359.test_approval_post_mentions_owner_with_code_block_and_30_minute_expiry },
+  { "test_approval_mentions_exclude_butlers_and_relay_mxid", remuda._t359.test_approval_mentions_exclude_butlers_and_relay_mxid },
+  { "test_approval_room_routing_and_answer_binding", remuda._t359.test_approval_room_routing_and_answer_binding },
+  { "test_approval_room_falls_back_to_home_without_joined_lounge", remuda._t359.test_approval_room_falls_back_to_home_without_joined_lounge },
+  { "test_approval_room_home_mode_and_kind_fallback", remuda._t359.test_approval_room_home_mode_and_kind_fallback },
+  { "test_failed_lounge_post_does_not_fall_back_to_home", remuda._t359.test_failed_lounge_post_does_not_fall_back_to_home },
+  { "test_approval_marker_skips_live_sync_and_backfill", remuda._t359.test_approval_marker_skips_live_sync_and_backfill },
+  { "test_long_prepared_text_routes_home_only_and_types_full_text", remuda._t359.test_long_prepared_text_routes_home_only_and_types_full_text },
+  { "test_multibyte_prepared_text_boundary_routes_without_truncation", remuda._t359.test_multibyte_prepared_text_boundary_routes_without_truncation },
+  { "test_approval_expiry_is_configurable_and_a_fence_in_the_text_falls_back_to_quotes", remuda._t359.test_approval_expiry_is_configurable_and_a_fence_in_the_text_falls_back_to_quotes },
+  { "test_approved_text_live_owner_reply_types_exact_bytes_once", test_approved_text_live_owner_reply_types_exact_bytes_once },
+  { "test_approved_text_unknown_explicit_id_never_uses_reply_target", test_approved_text_unknown_explicit_id_never_uses_reply_target },
+  { "test_approved_text_cancel_and_failed_delivery_are_one_shot", test_approved_text_cancel_and_failed_delivery_are_one_shot },
+  { "test_approved_text_refusal_stays_approved_for_owner_retry", test_approved_text_refusal_stays_approved_for_owner_retry },
+  { "test_approved_text_switch_off_keeps_reply_on_mail_path", test_approved_text_switch_off_keeps_reply_on_mail_path },
+  { "test_approved_text_registration_refuses_when_switch_is_off", test_approved_text_registration_refuses_when_switch_is_off },
+  { "test_approved_text_denial_and_expiry_type_nothing", test_approved_text_denial_and_expiry_type_nothing },
 }) do
   local ok, err = pcall(case[2])
   if not ok then approval_failures[#approval_failures + 1] = case[1] .. ": " .. tostring(err) end

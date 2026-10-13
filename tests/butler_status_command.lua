@@ -24,12 +24,21 @@ assert(empty:find("quota    claude n/a  codex n/a", 1, true), "absent quota show
 assert(empty:find("load     cpu n/a · mem n/a · disk n/a", 1, true), "load is n/a")
 assert(empty:find("?help", 1, true), "footer points at ?help")
 
+local measured = status.status_format({ now = now, sessions = {}, metrics = {
+  cpu = "1.25", mem = "63%", disk = "42%",
+} })
+assert(measured:find("load     cpu 1.25 · mem 63% · disk 42%", 1, true), measured)
+local partial = status.status_format({ now = now, sessions = {}, metrics = {
+  cpu = "0.08", mem = "bad", disk = "71%",
+} })
+assert(partial:find("load     cpu 0.08 · mem n/a · disk 71%", 1, true), partial)
+
 -- several sessions
 local text = status.status_format({
   now = now,
   sessions = {
     { name = "butler", kind = "claude", context_percent = 41, busy = false },
-    { name = "dev-1", kind = "codex", context_percent = 78.4, busy = true, unread = 2 },
+    { name = "dev-1", kind = "codex", context_percent = 78.4, context_used = 350000, busy = true, unread = 2 },
     { name = "qa", kind = "claude", busy = false, unread = 0 },
   },
   quota = { at = now - 30, limits = {
@@ -40,10 +49,27 @@ local text = status.status_format({
 assert(text:find("butler status · 3 sessions", 1, true))
 assert(text:find("butler   claude ctx 41%  idle", 1, true), text)
 assert(text:find("dev-1    codex  ctx 78%  task  ✉2", 1, true), text)
+assert(text:find("dev-1    codex  ctx 78%  task  ✉2  ⚠", 1, true), "percentage warning marker")
 assert(text:find("qa       claude ctx n/a  idle", 1, true), text)
 assert(not text:find("qa       claude ctx n/a  idle  ✉", 1, true), "zero unread shows no mail mark")
 assert(text:find("quota    claude 5h 62% · 7d 91%  codex n/a", 1, true), text)
 assert(not text:find("as of", 1, true), "a fresh reading carries no age")
+local used_warning = status.status_format({ now = now, sessions = {
+  { name = "near", kind = "codex", context_percent = 40, context_used = 400000 },
+  { name = "done", kind = "codex", context_percent = 70, context_used = 450000, compaction_fired = true },
+} })
+assert(used_warning:find("near     codex  ctx 40%  idle  ⚠", 1, true), "400K warns before compaction")
+assert(used_warning:find("done     codex  ctx 70%  idle", 1, true), "compacted row is listed")
+assert(not used_warning:find("done     codex  ctx 70%  idle  ⚠", 1, true), "compacted session suppresses warning")
+local function has_warning(session)
+  return status.status_format({ now = now, sessions = { session } }):find("⚠", 1, true) ~= nil
+end
+assert(not has_warning({ name = "p59", kind = "codex", context_percent = 59 }), "59% stays below warning boundary")
+assert(has_warning({ name = "p60", kind = "codex", context_percent = 60 }), "60% reaches warning boundary")
+assert(not has_warning({ name = "u399", kind = "codex", context_used = 399999 }), "399999 stays below warning boundary")
+assert(has_warning({ name = "u400", kind = "codex", context_used = 400000 }), "400000 reaches warning boundary")
+assert(not has_warning({ name = "invalid", kind = "codex", context_percent = "1e999" }),
+  "invalid percentage does not warn when percent_text shows n/a")
 
 -- stale reading, partial reading
 local stale = status.status_format({ now = now, sessions = {},
@@ -113,22 +139,62 @@ remuda._butler_bus = { agents = {
   ["dev-1"] = { id = "01B", kind = "codex" },
 }, pending_tasks = { ["dev-1"] = "SECRET-PROMPT" }, inboxes = { butler = { { body = "SECRET-MAIL-BODY" } } } }
 remuda._butler_telemetry_for = function(agent)
-  return { context_percent = agent.kind == "claude" and 41 or "?", model = "SECRET-MODEL", screen = "SECRET-SCREEN" }
+  return { context_percent = agent.kind == "claude" and 41 or "?",
+    context_used = agent.kind == "codex" and 400000 or nil,
+    model = "SECRET-MODEL", screen = "SECRET-SCREEN" }
 end
 remuda._butler_mail = { unread = function(id) return id == "01B" and 2 or 0 end }
 remuda._butler_quota = { claude_reading = function()
   return { at = now, limits = { { name = "5-hour limit", used = 62, resets_at = now + 1 } } }
 end }
+local reader_calls = 0
+remuda._butler_system = { status_metrics = function()
+  reader_calls = reader_calls + 1
+  return { cpu = "0.37", mem = "48%", disk = "83%" }
+end }
 
 local matched, reply = handle(event("?status"))
 assert(matched == true and reply, "an allowlisted human gets a status reply")
+assert(reader_calls == 1, "?status reads system metrics once")
+assert(reply:find("load     cpu 0.37 · mem 48% · disk 83%", 1, true), reply)
 assert(reply:find("butler status · 2 sessions", 1, true), reply)
 assert(reply:find("butler   claude ctx 41%  idle", 1, true), reply)
-assert(reply:find("dev-1    codex  ctx n/a  task  ✉2", 1, true), reply)
+assert(reply:find("dev-1    codex  ctx n/a  task  ✉2  ⚠", 1, true), reply)
 assert(reply:find("claude 5h 62%", 1, true), reply)
 for _, secret in ipairs({ "SECRET-MAIL-BODY", "SECRET-PROMPT", "SECRET-MODEL", "SECRET-SCREEN", "/secret/cwd", "01A" }) do
   assert(not reply:find(secret, 1, true), "reply leaks " .. secret)
 end
+remuda._butler_compaction_state = { compaction_members = { ["01B"] = { cooldown_ticks = 2 } } }
+local gathered = status.gather(now)
+assert(gathered.sessions[2].context_used == 400000 and gathered.sessions[2].compaction_fired,
+  "status gather uses the same agent.id state key as compaction_run and carries recent compaction state")
+local compacted_reply = status.status_format(gathered)
+assert(not compacted_reply:find("dev-1    codex  ctx n/a  task  ✉2  ⚠", 1, true),
+  "status gather suppresses the warning after compaction")
+remuda._butler_compaction_state.compaction_members["01B"] = { compaction_in_progress = true }
+gathered = status.gather(now)
+assert(gathered.sessions[2].compaction_fired, "in-progress compaction suppresses the warning")
+remuda._butler_compaction_state.compaction_members["01B"] = { restore_pending = "codex:gpt-6-luna" }
+gathered = status.gather(now)
+assert(not gathered.sessions[2].compaction_fired
+  and status.status_format(gathered):find("dev-1    codex  ctx n/a  task  ✉2  ⚠", 1, true),
+  "restore_pending alone does not suppress the warning")
+remuda._butler_compaction_state.compaction_members["01B"] = { cooldown_ticks = 0 }
+gathered = status.gather(now)
+assert(not gathered.sessions[2].compaction_fired
+  and status.status_format(gathered):find("dev-1    codex  ctx n/a  task  ✉2  ⚠", 1, true),
+  "an expired cooldown lets the warning return")
+remuda._butler_bus.agents.legacy = { kind = "codex" }
+remuda._butler_telemetry_for = function(agent)
+  if agent.kind == "codex" then return { context_percent = 65, context_used = 400000 } end
+  return { context_percent = 41 }
+end
+remuda._butler_compaction_state.compaction_members.legacy = { cooldown_ticks = 1 }
+gathered = status.gather(now)
+local legacy
+for _, row in ipairs(gathered.sessions) do if row.name == "legacy" then legacy = row end end
+assert(legacy and legacy.compaction_fired, "sessions without an id use the name state key")
+remuda._butler_compaction_state = nil
 local _, help_reply = handle(event("?help"))
 assert(help_reply == status.help_text())
 
@@ -158,8 +224,10 @@ assert(again == true and text == nil, "a request inside the window is consumed w
 -- a failing source blanks only its own part
 remuda._butler_telemetry_for = function() error("boom") end
 remuda._butler_quota = nil
+remuda._butler_system.status_metrics = function() error("boom") end
 local degraded = select(2, handle(event("?status")))
 assert(degraded:find("butler   claude ctx n/a  idle", 1, true) and degraded:find("claude n/a", 1, true), degraded)
+assert(degraded:find("load     cpu n/a · mem n/a · disk n/a", 1, true), degraded)
 
 print("ok - parse, rate, handle")
 

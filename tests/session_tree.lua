@@ -87,7 +87,7 @@ remuda.capture = function() error("no pane") end -- no screen: status is "other"
 remuda._butler_telemetry_for = function()
   return { model = "opus", context_used = "123456", context_window = "1000000", context_percent = "12" }
 end
-assert_equal(remuda.session_detail({ name = "root" }), "other · claude · opus · 123K", "detail shows usage in K")
+assert_equal(remuda.session_detail({ name = "root" }), "other · claude · opus · 123K 12%", "detail shows usage in K and percent")
 remuda._butler_telemetry_for = function()
   return { model = "opus", context_used = "?", context_window = "?", context_percent = "?" }
 end

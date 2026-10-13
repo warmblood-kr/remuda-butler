@@ -12,16 +12,11 @@ end
 
 remuda._butler_initial_name = initial_butler_name()
 
--- The command handler runs in the daemon, so identity comes only from the
--- caller's `REMUDA_*` variables that core forwards in `caller.env` (#95) --
--- never `os.getenv`, which is whatever session happened to birth the daemon.
--- No forwarded identity (a plain shell, or an older core) is the operator.
+-- CLI identity is resolved from the caller kind/session supplied by the core.
 local OPERATOR = "operator"
+local caller_principal
 local function current_agent(caller)
-  local env = caller and caller.env or {}
-  for _, key in ipairs({ "REMUDA_BUTLER_AGENT_ID", "REMUDA_BUTLER_SESSION_NAME" }) do
-    if env[key] and env[key] ~= "" then return env[key] end
-  end
+  return assert(caller_principal, "caller principal resolver is not loaded").current_agent(caller)
 end
 local function call_callback(fn, ...)
   local args, unpack_args = {...}, table.unpack or unpack
@@ -65,6 +60,9 @@ local clear_legacy_restore_state = compaction.clear_legacy_restore_state
 if remuda._butler_test_mode == true then
   return
 end
+
+remuda.exec("butler/private_write")
+remuda._butler_private_write.install()
 
 -- Cancel the existing Matrix relay before resolving new config;
 -- matrix.lua will start exactly one relay after the new config is installed.
@@ -127,6 +125,7 @@ remuda.exec("butler/matrix")
 -- The root Butler's permission rule and the write-only-when-changed helper
 -- live in permissions.lua; these are the file helpers it is handed.
 remuda.exec("butler/permissions")
+remuda.exec("butler/guidance_blocks")
 local permissions = remuda._butler_permissions
 -- Core's remuda.fs.realpath and is_symlink where it has them; on an older core
 -- the posix shell helpers, and no answer (so a refusal) on Windows.
@@ -156,8 +155,9 @@ local butler_fs = {
     if private then return nil, "atomic writes are unavailable on this core" end
     local f, why = io.open(path, "w")
     if not f then return nil, why end
-    f:write(text)
-    f:close()
+    local wrote, werr = f:write(text)
+    local closed, cerr = f:close()
+    if not wrote or not closed then return nil, werr or cerr or "write failed" end
     return true
   end,
 }
@@ -189,9 +189,20 @@ local function status_settings(path)
   local hook = '{"hooks":[{"type":"command","command":' .. json_quote(
     "remuda -s " .. shell_quote(server) .. " --stdin butler status-hook " .. shell_quote(path) .. quiet
   ) .. '}]}'
+  -- Guard hooks are installed per session while audit is on. PreToolUse keeps stdout
+  -- only when deny is on; PermissionRequest keeps it only when approvals are on.
+  local guard_policy = remuda.butler and remuda.butler.guard_policy
+  local guard_hooks = ""
+  if guard_policy and guard_policy.enabled() then
+    local keep_stdout = system.platform() == "windows" and " 2>$null; exit 0" or " 2>/dev/null; exit 0"
+    local guard_command = "remuda -s " .. shell_quote(server) .. " --stdin butler guard"
+    guard_hooks = guard_policy.hooks_json(guard_command .. quiet, json_quote,
+      guard_policy.approvals_enabled() and (guard_command .. keep_stdout) or nil,
+      guard_policy.deny_enabled() and (guard_command .. keep_stdout) or nil) .. ","
+  end
   settings:write('{"statusLine":{"type":"command","command":'
     .. json_quote("remuda -s " .. shell_quote(server) .. " --stdin butler statusline " .. shell_quote(path))
-    .. '},"hooks":{"UserPromptSubmit":[' .. hook .. '],"Stop":[' .. hook .. '],"Notification":[' .. hook .. ']}}')
+    .. '},"hooks":{' .. guard_hooks .. '"UserPromptSubmit":[' .. hook .. '],"Stop":[' .. hook .. '],"Notification":[' .. hook .. ']}}')
   settings:close()
   return settings_path
 end
@@ -210,6 +221,10 @@ local function statusline_integer(value)
 end
 
 local function statusline(args, caller)
+  local principal = caller_principal and caller_principal.resolve(caller)
+  if not principal or principal.tag ~= "member" then
+    return "Butler cannot identify this caller for status telemetry. Next: run from a registered Butler session or upgrade Remuda core."
+  end
   local snapshot = {}
   local input = caller and caller.stdin
   if type(input) == "string" then
@@ -243,7 +258,7 @@ local function statusline(args, caller)
   local absolute = type(path) == "string" and (
     path:sub(1, 1) == "/" or path:sub(1, 2) == "\\\\" or drive_rooted
   )
-  if absolute and path:match("%.status$") then
+  if absolute and path:match("%.status$") and path == principal.status_path then
     pcall(remuda.fs.write_atomic, path, line .. "\n" .. (limits and (limits .. "\n") or ""))
   end
   return line
@@ -311,6 +326,9 @@ local function contributions(point)
 end
 bus.messages = bus.messages or {}
 bus.objects = bus.objects or {}
+remuda._butler_caller_principal_config = { bus = bus }
+remuda.exec("butler/caller_principal")
+caller_principal = assert(remuda._butler_caller_principal)
 -- Loaded before identity_record so agents.jsonl shares mail.lua's append.
 remuda._butler_mail_config = { bus = bus, root = mail_root, json_quote = json_quote }
 remuda.exec("butler/mail")
@@ -352,6 +370,8 @@ local function notify_mail_delivery(message, delivered, recipient_alias, what)
   local recipient_ok, _, recipient = pcall(mail_id, recipient_ref, false)
   result.recipient_live = recipient_ok
   if recipient_ok then
+    -- New mail means more work: a member that reported --done stays open (remuda#606).
+    if remuda._butler_done then remuda._butler_done[recipient.alias] = nil end
     local notice = remuda._butler_notice.mail_notice_text({
       id = delivered.id,
       from = message.from,
@@ -458,9 +478,11 @@ remuda._butler_agent_startup = remuda._butler_agent_startup or {}
 remuda._butler_agent_support = {
   mcp_config_path = agent_mcp_path,
   mcp_flags = agent_mcp_flags,
+  json_quote = json_quote,
   mcp_config = agent_mcp_config,
   status_settings = status_settings,
 }
+remuda.exec("butler/sandbox")
 remuda.exec("butler/telemetry")
 remuda.exec("butler/agents/claudecode")
 remuda.exec("butler/agents/codex")
@@ -479,10 +501,17 @@ local choose = chooser.choose
 local configured_agent_order = chooser.configured_agent_order
 local readiness_chain_budget = chooser.readiness_chain_budget
 local setup_telemetry = chooser.setup_telemetry
-local write_agent_guidance = chooser.write_agent_guidance
 local codex_update_complete = chooser.codex_update_complete
 -- Member launch and topic creation live in launch.lua.
 remuda._butler_launch_config = { bus = bus,
+  realpath = realpath,
+  protected_dirs = function()
+    local dirs = { data_home and (data_home .. "/remuda"), runtime_dir, config_path and config_path:match("^(.*)/[^/]+$"),
+      token_path and token_path:match("^(.*)/[^/]+$") }
+    local out = {}
+    for _, d in ipairs(dirs) do if d then out[#out + 1] = d end end
+    return out
+  end,
   topic_config = topic_config,
   data_home = data_home,
   load_topic_config = load_topic_config,
@@ -514,7 +543,6 @@ remuda._butler_notice_config = { bus = bus,
 remuda.exec("butler/notice")
 -- The launch configs above call main.lua's startup_action_safe late; set it here.
 startup_action_safe = remuda._butler_notice.startup_action_safe
-local notice_recovery_error = remuda._butler_notice.notice_recovery_error
 -- Reply and forward live in mail.lua; this adds the caller's identity and the
 -- terminal notice. A recipient that has ended still gets the mail, unnotified.
 local function sender_address(from)
@@ -540,6 +568,13 @@ function remuda._butler_reply(from, message_id, text)
   if message.matrix_reply then return "queued Matrix reply " .. message.id .. " for " .. message.source_mail_id end
   return notify_queued(message, recipient.alias, "(reply) from " .. sender.alias)
 end
+-- The Matrix room and event of a mail the caller holds, for `reply --attach`: the file goes
+-- into that mail's thread through `matrix upload --thread`, never through the text outbox.
+function remuda._butler_reply_target(from, message_id)
+  local room, event = mail.matrix_target(sender_address(from), message_id, from == OPERATOR)
+  if not room then error(event, 0) end
+  return room, event
+end
 function remuda._butler_forward(from, message_id, member, note)
   local sender = sender_address(from)
   local _, target = mail_id(member, false)
@@ -555,14 +590,11 @@ function remuda._butler_inbox(name)
   if mail.unread(id) == 0 then
     for alias, agent in pairs(bus.agents) do
       if agent.id == id then
-        local recovery = bus.notice_recoveries[alias]
         local pending, reshow = bus.notices[alias], false
         for _, message_id in ipairs(pending and pending.message_order or {}) do
           reshow = reshow or (pending.reshow and pending.reshow[message_id]) == true
         end
-        if recovery and recovery.draft and recovery.draft ~= "" then
-          notice_recovery_error(alias, recovery, "mail was read while notice recovery was active; draft preserved")
-        elseif not reshow then
+        if not reshow then
           -- A queued re-show is of already-read mail: reading keeps it.
           bus.notices[alias], bus.notice_recoveries[alias] = nil, nil
         end
@@ -577,14 +609,62 @@ function remuda._butler_inbox(name)
   end
   return result
 end
-function remuda._butler_report(from, text)
+-- Members that reported with --done (remuda#606), by alias. Each mark records the
+-- reporting incarnation (durable id, launch generation, proven instance id), so a
+-- replacement or relaunch at the same alias never inherits it. In memory only: a
+-- daemon restart forgets them, which leaves the member open. New mail to a member
+-- (notify_mail_delivery), its exit and a new registration at its alias clear it.
+remuda._butler_done = remuda._butler_done or {}
+local function done_mark(agent)
+  return { id = agent.id, generation = agent.session_start_marker,
+    instance_id = agent.instance_binding == 1 and agent.instance_id or nil }
+end
+-- A mark from an older image (not a table) or for another incarnation never matches.
+local function done_mark_matches(mark, agent)
+  return type(mark) == "table" and type(agent) == "table" and mark.id ~= nil and mark.generation ~= nil
+    and agent.id == mark.id and agent.session_start_marker == mark.generation
+    and (mark.instance_id == nil or agent.instance_id == mark.instance_id)
+end
+function remuda._butler_report(from, text, done)
   from = resolve(from)
   local agent = bus.agents[from]
   if not agent then error("no Butler agent named " .. tostring(from), 0) end
   if not agent.parent then error("Butler agent " .. from .. " has no leader to report to", 0) end
-  local queued = remuda._butler_send(from, agent.parent, text)
+  -- Marked before the report is sent, so mail a synchronous report hook sends back still cancels it.
+  -- false or omitted creates no new request and preserves any earlier done consent.
+  local mark = done and done_mark(agent) or nil
+  if mark then remuda._butler_done[from] = mark end
+  local sent, queued = pcall(remuda._butler_send, from, agent.parent, text)
+  if not sent then
+    if mark and remuda._butler_done[from] == mark then remuda._butler_done[from] = nil end
+    error(queued, 0)
+  end
   remuda.emit("butler/report", from, agent.parent, text)
   return queued
+end
+-- The auto-close tick: each done member is closed by its parent through the
+-- normal close path, never forced, so unread mail or a busy pane keeps it open
+-- until a later tick. The root and parent-less rows are never auto-closed.
+function remuda._butler_done_tick()
+  local done = remuda._butler_done
+  for alias, mark in pairs(done) do
+    local agent = bus.agents[alias]
+    if not agent or not agent.parent or alias == "butler" or alias == remuda._butler_name
+        or not done_mark_matches(mark, agent) then
+      done[alias] = nil
+    else
+      local closed, why = pcall(remuda._butler_close_member, alias, agent.parent, false, false)
+      if closed then
+        done[alias] = nil
+        _butler_session_trace("done_autoclose", alias)
+      elseif tostring(why):find("^cannot close ") then
+        -- Not owned (e.g. a stale parent_id) or unknown: no later tick can close it, so drop the
+        -- mark and leave the member open. Unread mail, a busy pane or a failed close keep it.
+        done[alias] = nil
+        _butler_session_trace("done_autoclose_refused", alias .. " " .. tostring(why):match("^[^\n]*"))
+      end
+    end
+  end
 end
 local butler_attempts = remuda._butler_attempts or {}
 remuda._butler_attempts = butler_attempts
@@ -605,31 +685,38 @@ end
 -- CLI verbs and the argv parser live in commands.lua.
 remuda._butler_commands_config = { current_agent = current_agent, OPERATOR = OPERATOR,
   contributions = contributions, registry_list = registry_list, statusline = statusline,
-  resolve = resolve, mail = mail,
+  resolve = resolve, resolve_principal = function(caller) return caller_principal.resolve(caller) end, mail = mail,
 }
 remuda.exec("butler/schedule")
 remuda.exec("butler/schedule_cli")
 remuda.exec("butler/status_hook")
+remuda.exec("butler/guard_policy")
+remuda.exec("butler/guard_grants")
+remuda.exec("butler/guard_approval")
+remuda.exec("butler/dialogs")
+remuda.butler.dialogs.install()
+remuda._butler_dialog_tick = function() remuda.butler.dialogs.tick() end
 remuda.exec("butler/commands")
 
 remuda.tool{
   name = "butler_launch",
   about = "Launch a Claude Code, Codex, or Monocle child agent with this Butler's shared MCP mailbox.",
-  args = { kind = "Agent kind: claude, codex, or monocle.", name = "Optional session name.", cwd = "Optional working directory.", model = "Optional model override." },
+  args = { kind = "Agent kind: claude, codex, or monocle.", name = "Optional session name.", cwd = "Optional working directory.", model = "Optional model override.", writable = "Optional absolute directories a Codex member may also write, one per line." },
   needs = { "kind" },
   run = function(a, caller)
     local parent = caller_leader(caller)
-    return "launched " .. launch_agent(a.kind, a.name, a.cwd, a.model, parent)
+    local profile = remuda._butler_profile(a.kind, nil, a.writable)
+    return "launched " .. launch_agent(a.kind, a.name, a.cwd, a.model, parent, nil, nil, nil, profile)
   end,
 }
 remuda.tool{
   name = "butler_delegate",
   about = "Create a topic, start a child agent in it, and give it an initial task. The child reports each completed work loop to this leader.",
-  args = { name = "Topic and child-session name.", task = "Initial task for the child.", template = "Optional Butler topic template.", kind = "Optional agent kind; defaults to the leader's kind.", model = "Optional model override." },
+  args = { name = "Topic and child-session name.", task = "Initial task for the child.", template = "Optional Butler topic template.", kind = "Optional agent kind; defaults to the leader's kind.", model = "Optional model override.", writable = "Optional absolute directories a Codex member may also write, one per line (needs kind codex)." },
   needs = { "name", "task" },
   run = function(a, caller)
     local parent = caller_leader(caller)
-    return "delegated " .. remuda._butler_topic_delegate(a.name, a.task, a.template, a.kind, parent, a.model)
+    return "delegated " .. remuda._butler_topic_delegate(a.name, a.task, a.template, a.kind, parent, a.model, nil, remuda._butler_profile(a.kind, nil, a.writable))
   end,
 }
 remuda.tool{
@@ -638,23 +725,49 @@ remuda.tool{
   args = { to = "Recipient session name.", text = "Message body." },
   needs = { "to", "text" },
   run = function(a, caller)
-    return remuda._butler_send(caller_name(caller), a.to, a.text)
+    local principal = caller_agent(caller)
+    return remuda._butler_send(principal, a.to, a.text)
+  end,
+}
+remuda.tool{
+  name = "butler_approve_text",
+  about = "Register exact prepared text for owner approval before it is typed into a Butler session.",
+  args = { session = "Target Butler session name.", text = "Exact text to register, up to 8 KiB." },
+  needs = { "session", "text" },
+  run = function(a, caller)
+    -- An MCP route needs a session identity: kind=outside is the operator only on the audited CLI path.
+    local principal = caller_agent(caller)
+    local feature = remuda.butler and remuda.butler.approve_text
+    if not feature or not feature.target_session_allowed(a.session) then
+      error("Unknown Butler session: " .. tostring(a.session), 0)
+    end
+    local id, why = feature.request(a.session, a.text, principal)
+    if not id then error(tostring(why or "Could not register prepared text"), 0) end
+    return id
   end,
 }
 remuda.tool{
   name = "butler_inbox",
   about = "Drain this agent's Butler inbox and return its queued messages in arrival order.",
   run = function(_, caller)
-    return remuda._butler_inbox(caller_name(caller))
+    local principal = caller_agent(caller, true) -- reading compares the instance; liveness is for mutating routes
+    return remuda._butler_inbox(principal)
   end,
 }
 local send_to_leader = {
   name = "butler_send_to_leader",
   about = "Report a completed work loop to this team member's Butler leader. This also emits the live butler/report hook.",
-  args = { text = "Concise result for the leader." },
+  args = { text = "Concise result for the leader.",
+    done = "Set true when your task is finished: Butler closes you once your inbox is drained and you are idle. False or omitted creates no new request and does not cancel an earlier one." },
   needs = { "text" },
   run = function(a, caller)
-    return remuda._butler_report(caller_name(caller), a.text)
+    local done = a.done
+    if done == "true" then done = true elseif done == "false" then done = false end
+    if done ~= nil and type(done) ~= "boolean" then
+      error("done must be a boolean.\nNext: set done to true or omit it", 0)
+    end
+    local principal = caller_agent(caller)
+    return remuda._butler_report(principal, a.text, done == true)
   end,
 }
 remuda.tool(send_to_leader)
@@ -666,9 +779,10 @@ remuda.tool{
   args = { message_id = "Message to reply to.", to = "Recipient, only without message_id.", text = "Reply body." },
   needs = { "text" },
   run = function(a, caller)
-    if a.message_id then return remuda._butler_reply(caller_agent(caller), a.message_id, a.text) end
+    local principal = caller_agent(caller)
+    if a.message_id then return remuda._butler_reply(principal, a.message_id, a.text) end
     if not a.to then error("butler_reply needs message_id or to", 0) end
-    return remuda._butler_send(caller_name(caller), a.to, a.text)
+    return remuda._butler_send(principal, a.to, a.text)
   end,
 }
 remuda.tool{
@@ -688,7 +802,8 @@ remuda.tool{
   args = { mxc = "The mxc://server/media URI." },
   needs = { "mxc" },
   run = function(a, caller)
-    return remuda.butler.matrix.cli({ "matrix", "download", a.mxc }, caller_name(caller))
+    local principal = caller_agent(caller)
+    return remuda.butler.matrix.cli({ "matrix", "download", a.mxc }, principal)
   end,
 }
 remuda.tool{
@@ -697,8 +812,9 @@ remuda.tool{
   args = { path = "Absolute path of a file inside your working directory.", room = "Optional room; defaults to the configured room." },
   needs = { "path" },
   run = function(a, caller)
+    local principal = caller_agent(caller)
     local args = a.room and { "matrix", "--room", a.room, "upload", a.path } or { "matrix", "upload", a.path }
-    return remuda.butler.matrix.cli(args, caller_name(caller))
+    return remuda.butler.matrix.cli(args, principal)
   end,
 }
 remuda.tool{
@@ -710,24 +826,46 @@ remuda.tool{
 }
 remuda.tool{
   name = "butler_close",
-  about = "Close one of your direct Butler members. Refuses unread mail or a busy member unless force is true; force never bypasses ownership.",
-  args = { name = "Name or ID of one of your direct Butler members.", force = "Set true to skip unread-mail and idle checks." },
+  about = "Close one of your Butler members or their descendants. Direct members: refused with unread mail or when busy unless force is true. Deeper descendants: only exited sessions can be closed. Force skips the direct-member checks only and never bypasses ownership.",
+  args = { name = "Name or ID of one of your Butler members or their descendants.", force = "Set true to skip the direct-member unread-mail and idle checks (never bypasses ownership or the exited-only rule for deeper descendants)." },
   needs = { "name" },
   run = function(a, caller)
-    if a.force ~= nil and type(a.force) ~= "boolean" then error("force must be a boolean.\nNext: set force to true or omit it", 0) end
+    local force = a.force
+    if force == "true" then
+      force = true
+    elseif force == "false" then
+      force = false
+    elseif force ~= nil and type(force) ~= "boolean" then
+      error("force must be a boolean.\nNext: set force to true or omit it", 0)
+    end
     local ok, leader = pcall(caller_leader, caller)
     if not ok then error(tostring(leader) .. "\nNext: run from a Butler member session", 0) end
-    return remuda._butler_close_member(a.name, leader, a.force == true)
+    return remuda._butler_close_member(a.name, leader, force == true)
   end,
 }
 
+-- Upgrade: a binding is proven only with the marker on the row AND its token record and equal ids. Anything else
+-- (PR A stored ids observed through ls, with no spawn provenance) is cleared from both; those members stay
+-- legacy-visible (refused under strict) until relaunched. Proven bindings survive in-image reloads.
+for _, agent in pairs(bus.agents) do
+  if type(agent) == "table" and (agent.instance_id ~= nil or agent.instance_binding ~= nil) then
+    local record = agent.token and bus.tokens[agent.token]
+    if not (caller_principal.bound(agent) and type(record) == "table" and record.instance_binding == 1
+        and record.instance_id == agent.instance_id) then
+      agent.instance_id, agent.instance_binding = nil, nil
+      if type(record) == "table" then record.instance_id, record.instance_binding = nil, nil end
+    end
+  end
+end
+for _, record in pairs(bus.tokens) do
+  if type(record) == "table" and record.instance_binding ~= 1 then record.instance_id = nil end
+end
 local existing_butler = bus.agents.butler
 local launch_options = remuda._mod_launch_options and remuda._mod_launch_options.butler
 local butler_kind = existing_butler and existing_butler.kind
   or (launch_options and launch_options.agent)
   or os.getenv("REMUDA_BUTLER_AGENT") or "claude"
 local butler_token = existing_butler and existing_butler.token or next_token("butler")
-bus.tokens[butler_token] = "butler"
 local root_identity = existing_butler and existing_butler.id
   and { id = existing_butler.id, alias = "butler" }
   or (bus.identities.butler and { id = bus.identities.butler.id, alias = "butler" })
@@ -749,6 +887,11 @@ bus.agents.butler = existing_butler or {
 bus.agents.butler.id = root_identity.id
 bus.agents.butler.alias = "butler"
 bus.agents.butler.session_name = bus.agents.butler.session_name or "butler"
+bus.agents.butler.session_start_marker = remuda._butler_new_ulid()
+-- Carry the verified binding of the same root (the sweep above kept it only if row and record were proven).
+local carried = existing_butler and caller_principal.bound(existing_butler) and existing_butler.instance_id or nil
+bus.tokens[butler_token] = { id = root_identity.id, generation = bus.agents.butler.session_start_marker,
+  instance_id = carried, instance_binding = carried and 1 or nil }
 bus.identity_ids[root_identity.id] = bus.identities.butler or root_identity
 bus.identities.butler = bus.identities.butler or root_identity
 local root_migrated, root_migration_error = migrate_legacy_mail("butler", root_identity.id)
@@ -757,10 +900,25 @@ mailbox(root_identity.id)
 -- The root MCP config carries the root capability: owner-only (0600), and a
 -- file left 0644 by an older Butler is replaced.
 remuda.butler.guard.write_private(mcp_config_path, agent_mcp_json(butler_token))
+-- The root id is durable, but every root launch gets its own capability and
+-- marker, written to the bridge config before that launch starts. Exit revokes
+-- both, so an ended root bridge cannot authorize until the next launch.
+local function rotate_root_capability()
+  local root = bus.agents.butler
+  if root.token then bus.tokens[root.token] = nil end
+  butler_token = next_token("butler")
+  root.token, root.session_start_marker = butler_token, remuda._butler_new_ulid()
+  root.instance_id, root.instance_binding = nil, nil -- set from the spawn-returned instance when this launch finishes
+  bus.tokens[butler_token] = { id = root_identity.id, generation = root.session_start_marker }
+  remuda.butler.guard.write_private(mcp_config_path, agent_mcp_json(butler_token))
+end
+function remuda._butler_revoke_root_capability()
+  local root = bus.agents.butler
+  if root and root.token then bus.tokens[root.token] = nil end
+  if root then root.session_start_marker = nil end
+end
 
-local SYSTEM_PROMPT = "Early in this session, call remuda._butler_register_compaction_schedule() "
-  .. "via the run_script MCP tool, once, to enable this butler's own periodic "
-  .. "context-compaction upkeep. You lead a Butler team. For every delegation, create a "
+local SYSTEM_PROMPT = "You lead a Butler team. For every delegation, create a "
   .. "Remuda-managed member with `remuda butler topic delegate NAME TASK`. "
   .. "Internal agent subagents are separate from Butler team members. Use `remuda butler sessions` to "
   .. "inspect members, `inbox` to read reports, and `send` for follow-up direction."
@@ -772,8 +930,8 @@ You are Butler, manager of this household. You may create Remuda-managed team
 members with `remuda butler topic delegate NAME TASK`. Internal agent
 subagents are separate from Butler team members.
 
-Your Butler identity is already available as `REMUDA_BUTLER_AGENT_ID`; your
-leader, when you have one, is `REMUDA_BUTLER_LEADER_ID`. Use the short forms:
+Your CLI identity is resolved from your registered Butler session. The launch
+variables describe your identity and leader. Use the short forms:
 
 - `remuda butler sessions` to inspect the household.
 - `remuda butler inbox` to read your own inbox.
@@ -783,10 +941,11 @@ leader, when you have one, is `REMUDA_BUTLER_LEADER_ID`. Use the short forms:
   or pipe it: `cat <<'EOF' | remuda butler send MEMBER -`. `send-to-leader` and `reply MESSAGE_ID`
   accept those forms too. The limit is 64 KiB.
 
-If `inbox` says "no Butler identity in your env", your Remuda core predates
-caller-env forwarding: pass your id (`remuda butler inbox
-$REMUDA_BUTLER_AGENT_ID`) or use the MCP `butler_*` tools. On such a core,
-`send` is attributed to "operator" rather than to you.
+CLI identity comes from the daemon's caller session, never environment variables.
+If Butler cannot identify the caller, run from a registered Butler session or
+upgrade Remuda core. Older cores without caller fields refuse CLI member actions;
+use the MCP `butler_*` tools with the session's configured capability instead.
+Caller attribution is advisory within one user account, not an isolation boundary.
 
 `remuda butler send FROM TO MESSAGE...` is an operator form for sending on
 behalf of another session. Do not use it for ordinary team communication.
@@ -826,9 +985,15 @@ local function _butler_trace(event, detail)
     end
     f = io.open(path, "a")
     if not f then return end
-    f:write(os.date("!%Y-%m-%dT%H:%M:%SZ") .. "\t" .. event .. "\t" .. (detail or "") .. "\n")
+    f:write(os.date("!%Y-%m-%dT%H:%M:%SZ") .. "\t" .. event .. "\t" .. system.trace_detail(detail) .. "\n")
     f:close()
   end)
+end
+-- Data made before core chose the data directory is still in use (#205).
+-- This module reloads in the daemon, so keep the migration note to one trace line.
+if paths.data_home_note and not remuda._butler_data_home_traced then
+  remuda._butler_data_home_traced = true
+  _butler_trace("data_home", paths.data_home_note)
 end
 
 local BUTLER_ARGV = remuda._butler_argv
@@ -870,10 +1035,7 @@ end
 -- The file arguments of send, send-to-leader, reply, matrix upload and matrix
 -- download: an agent caller is held to its own working directory (permissions.lua).
 -- The caller comes from core's caller identity, never from the environment.
-local function core_caller()
-  local known, caller = pcall(function() return remuda.caller() end)
-  return known and caller or nil
-end
+local function core_caller() return caller_principal.core_caller() end
 local function session_launch_cwd(session)
   local cwd, matches = nil, 0
   for alias, agent in pairs(bus.agents) do
@@ -897,7 +1059,8 @@ end
 local root_permissions_ensured = false
 local function ensure_root_permissions(kind)
   root_permissions_ensured = true
-  if not butler_session_cwd then return end
+  remuda._butler_permission_report = nil
+  if not butler_session_cwd then remuda._butler_permission_report = { kind = kind }; return end
   local report
   if kind == "claude" then
     local rules, dropped = permissions.rules({ role = "root" }, contributions("butler.permission"))
@@ -914,19 +1077,83 @@ local function ensure_root_permissions(kind)
         .. ": " .. table.concat(report.added, ", ") .. " (file rewritten: private, mode 600)")
     end
   end
-  remuda._butler_permission_report = { kind = kind, report = report }
+  remuda._butler_permission_report = { kind = kind, report = report, settings_path = settings_path }
 end
+-- True when the last permission step for this kind finished with nothing
+-- refused: the compaction schedule is armed only then.
+local function root_permissions_settled(kind)
+  local state = remuda._butler_permission_report
+  if not state or state.kind ~= kind then return false end
+  local report = state.report
+  return report == nil or (not report.error and #report.withheld == 0)
+end
+local function arm_compaction_schedule(kind)
+  if root_permissions_settled(kind) then remuda._butler_register_compaction_schedule(); return end
+  _butler_session_trace("compaction_schedule_unarmed", "root permission step did not settle for " .. tostring(kind))
+end
+-- The root AGENTS.md carries Butler's text in a marked block; text outside the
+-- markers is the user's and stays. A trace line names a problem once per file.
+local guidance_traced = {}
+-- AGENTS.md may hold the user's text: it is written atomically or not at all
+-- (an old core without remuda.fs.write_atomic leaves it as it is).
+local guidance_fs = setmetatable({
+  write = function(path, text)
+    if not (remuda.fs and type(remuda.fs.write_atomic) == "function") then
+      return nil, "atomic writes are unavailable on this core"
+    end
+    return butler_fs.write(path, text)
+  end,
+}, { __index = butler_fs })
+local function write_root_guidance(root, body)
+  local path = root .. "/AGENTS.md"
+  local _, report, err = remuda._butler_guidance_blocks.sync(path, { { id = "butler", body = body } }, guidance_fs)
+  local outcome = err and "guidance_not_written" or report[1].outcome
+  local event = ({ damaged = "guidance_markers_damaged", duplicated = "guidance_markers_damaged",
+    symlink = "guidance_symlink_refused", ["mixed-eol"] = "guidance_mixed_eol", dropped = "guidance_block_dropped" })[outcome]
+  if err then event = outcome end
+  if event and not guidance_traced[event .. path] then
+    guidance_traced[event .. path] = true
+    _butler_session_trace(event, one_line(err or path))
+  end
+end
+local RECONCILE_RETRY_INITIAL_MS, RECONCILE_RETRY_MAX_MS = 2000, 60000
+local reconcile_retry = remuda._butler_reconcile_retry or {}
+reconcile_retry.delay_ms = tonumber(reconcile_retry.delay_ms) or RECONCILE_RETRY_INITIAL_MS
+reconcile_retry.retry_at_ms = tonumber(reconcile_retry.retry_at_ms) or 0
+function reconcile_retry.note_failure()
+  local delay = reconcile_retry.delay_ms
+  reconcile_retry.retry_at_ms = remuda.clock() + delay
+  reconcile_retry.delay_ms = math.min(delay * 2, RECONCILE_RETRY_MAX_MS)
+end
+function reconcile_retry.reset()
+  reconcile_retry.delay_ms, reconcile_retry.retry_at_ms = RECONCILE_RETRY_INITIAL_MS, 0
+end
+function reconcile_retry.remaining_ms()
+  return math.max(0, reconcile_retry.retry_at_ms - remuda.clock())
+end
+remuda._butler_reconcile_retry = reconcile_retry
 local function launch_butler()
   local requested_name = butler_name or remuda._butler_initial_name
   if butler_session_cwd then
     remuda.mkdir(butler_session_cwd)
-    write_agent_guidance(butler_session_cwd, BUTLER_GUIDANCE, true)
+    write_root_guidance(butler_session_cwd, BUTLER_GUIDANCE)
   end
   local stale_session = session_exists(requested_name)
   if remuda._butler_selected_agent and stale_session then
     butler_name = requested_name
     remuda._butler_name = butler_name
-    if not root_permissions_ensured then pcall(ensure_root_permissions, remuda._butler_selected_agent) end
+    -- Adopted without a chooser run: keep the bound id only if the token record and the live row agree with it.
+    local root = bus.agents.butler
+    local record = root.token and bus.tokens[root.token]
+    if root.instance_id and not (caller_principal.bound(root) and type(record) == "table" and record.instance_binding == 1
+        and record.instance_id == root.instance_id and chooser.instance_live(requested_name, root.instance_id)) then
+      root.instance_id, root.instance_binding = nil, nil
+      if type(record) == "table" then record.instance_id, record.instance_binding = nil, nil end
+    end
+    if not root_permissions_ensured then
+      pcall(ensure_root_permissions, remuda._butler_selected_agent)
+      arm_compaction_schedule(remuda._butler_selected_agent)
+    end
     return
   end
   if remuda._butler_launching then return "launching Butler" end
@@ -943,6 +1170,7 @@ local function launch_butler()
       pcall(ensure_root_permissions, candidate_kind)
       local telemetry = setup_telemetry(candidate_kind, { name = requested_name, status_path = status_path })
       telemetry_by_kind[candidate_kind] = telemetry
+      rotate_root_capability()
       return { name = requested_name, token = butler_token, mcp_config_path = mcp_config_path,
         settings_path = telemetry.settings_path, telemetry = telemetry, system_prompt = SYSTEM_PROMPT }
     end,
@@ -952,33 +1180,49 @@ local function launch_butler()
         REMUDA_BUTLER_AGENT_KIND = candidate_kind, CLAUDE_CODE_FORCE_SESSION_PERSISTENCE = "1" }
     end,
   }
-  local function finish(selected, kind, attempts)
+  local function finish(selected, kind, attempts, instance_id)
   butler_attempts = attempts
   remuda._butler_attempts = attempts
   bus.agents.butler.launch_attempts = attempts
+  if selected and instance_id and not chooser.instance_live(selected, instance_id) then
+    for _, a in ipairs(attempts or {}) do
+      if a.session == selected then a.reason, a.detail = "exited", "session exited before Butler registered it" end
+    end
+    selected = nil
+  end
   if not selected then
     local message = table.concat(launch_failure_lines(attempts), "\n")
     remuda._butler_start_error = message
     remuda._butler_start_pending = false
+    remuda._butler_revoke_root_capability() -- no live launch owns the last attempt's capability
+    reconcile_retry.note_failure()
     _butler_session_trace("reconcile_error", message)
     return nil
   end
   butler_name, butler_kind = selected, kind
   remuda._butler_name, remuda._butler_selected_agent = selected, kind
   bus.agents.butler.kind, bus.agents.butler.telemetry = kind, telemetry_by_kind[kind]
+  local root = bus.agents.butler
+  root.instance_id, root.instance_binding = instance_id, instance_id and 1 or nil -- from the remuda.new return only
+  if root.token and bus.tokens[root.token] then
+    bus.tokens[root.token].instance_id, bus.tokens[root.token].instance_binding = root.instance_id, root.instance_binding
+  end
   local root_record = bus.identities.butler or root_identity
   root_record.kind = kind
   bus.identities.butler, bus.identity_ids[root_record.id] = root_record, root_record
   identity_record(root_record)
+  arm_compaction_schedule(kind)
   remuda._butler_start_error = nil
   remuda._butler_start_pending = false
+  reconcile_retry.reset()
   return selected
   end
-  local attempts = choose(order, choose_opts, function(selected, kind, attempts)
+  local attempts = choose(order, choose_opts, function(selected, kind, attempts, instance_id)
     remuda._butler_launching = nil
-    local ok, err = pcall(finish, selected, kind, attempts)
+    local ok, err = pcall(finish, selected, kind, attempts, instance_id)
     if not ok then
       remuda._butler_start_error = tostring(err)
+      reconcile_retry.note_failure()
       _butler_session_trace("reconcile_error", tostring(err))
     end
   end)
@@ -1032,6 +1276,7 @@ end
 function remuda._butler_reconcile()
   local ok, result = pcall(launch_butler)
   if not ok then
+    reconcile_retry.note_failure()
     _butler_session_trace("reconcile_error", tostring(result))
     return nil, result
   end
@@ -1056,13 +1301,27 @@ if not bus.close_wrapper_installed and type(remuda.close) == "function" then
 end
 local function report_update_task_not_relaunched(record, reason)
   if not record or not record.task or record.task == "" then return end
+  -- The launch reports a lost first task itself; one mail per lost task.
+  local delivery = bus.first_task_delivery and bus.first_task_delivery[record.name]
+  if delivery then
+    if delivery.state ~= "waiting" then return end
+    delivery.state = "failed"
+    bus.pending_tasks[record.name] = nil
+  end
   pcall(remuda._butler_send, "butler", record.parent or "butler",
     "Task for " .. record.name .. " was not delivered because its Codex update ended without a safe relaunch ("
-      .. tostring(reason or "update aborted") .. "). Resend it with `remuda butler send "
-      .. record.name .. " TASK` when the pane is ready.")
+      .. tostring(reason or "update aborted") .. "). To resend it when the pane is ready, run this in a POSIX shell: remuda butler send "
+      .. record.name .. " TASK")
 end
 local function stale_session_exit(name, instance_id)
   if type(instance_id) ~= "string" or instance_id == "" then return false end
+  -- A bound member compares with its stored id and needs no ls; unbound members (and older cores) use the live row.
+  for _, agent in pairs(bus.agents) do
+    if type(agent) == "table" and (agent.session_name == name or (agent.alias == "butler" and name == butler_name))
+        and type(agent.instance_id) == "string" and agent.instance_id ~= "" then
+      return agent.instance_id ~= instance_id
+    end
+  end
   local ok, sessions = pcall(remuda.ls)
   if not ok or type(sessions) ~= "table" then return false end
   for _, session in ipairs(sessions) do
@@ -1120,12 +1379,19 @@ function remuda._butler_session_exited(name, info)
   end
   -- #29: the mail stays in the inbox; only the pending pane notice goes.
   bus.unread_seeded[name] = "exited"
+  -- An accepted exit ends the incarnation that may have reported --done (remuda#606).
+  if remuda._butler_done then remuda._butler_done[name] = nil end
   bus.notices[name], bus.notice_screens[name], bus.pending_tasks[name] = nil, nil, nil
   bus.notice_recoveries[name], bus.task_retry_screens[name], bus.human_activity_screens[name] = nil, nil, nil
   local exited = bus.agents[name]
   if exited and exited.cwd and bus.trusted_launch_dirs then
     bus.trusted_launch_dirs[exited.cwd] = nil
   end
+  if exited and name ~= "butler" and exited.token then bus.tokens[exited.token] = nil end
+  -- ponytail: reached by exits of the bound instance or without an instance id (older core); an exit of another
+  -- instance was dropped as stale above. A late exit of a replaced root while a launch is pending is skipped
+  -- (that launch rotates anyway); one arriving after finish would revoke the new launch.
+  if name == "butler" and not remuda._butler_launching then remuda._butler_revoke_root_capability() end
   if exited and name ~= "butler" then
     local ended = bus.identity_ids[exited.id] or exited
     ended.alias, ended.kind = exited.alias or name, exited.kind
@@ -1142,18 +1408,23 @@ function remuda._butler_session_exited(name, info)
       local children = bus.agents[exited.parent].children
       for i = #children, 1, -1 do if children[i] == name then table.remove(children, i) end end
     end
+    -- A lead that is about to relaunch under the same name keeps its members.
+    if not update_restart then remuda._butler_adopt_members(name, exited) end
   end
   if name == butler_name then
     _butler_session_trace("relaunching", name)
     remuda._butler_reconcile()
   end
   if update_restart then
+    remuda._butler_relaunching = remuda._butler_relaunching or {}
+    remuda._butler_relaunching[name] = os.time()
     _butler_session_trace("codex_updated_relaunch", name)
     local ok, err = pcall(launch_agent, update_restart.kind, update_restart.name,
       update_restart.cwd, update_restart.model, update_restart.parent, update_restart.task,
-      update_restart.identity)
+      update_restart.identity, nil, update_restart.profile)
     if not ok then
       _butler_session_trace("codex_updated_relaunch_failed", name .. ": " .. tostring(err))
+      remuda._butler_relaunching[name] = nil
       pcall(remuda._butler_send, "butler", update_restart.parent or "butler",
         "Codex update completed but " .. name .. " could not be relaunched: " .. tostring(err))
     end

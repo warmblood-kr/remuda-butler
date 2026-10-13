@@ -66,6 +66,25 @@ local function team_order()
   return order
 end
 
+-- A lead that exits hands its live members to its own leader (the root when
+-- that leader is gone too), so someone can still close them (#230).
+function remuda._butler_adopt_members(name, exited)
+  -- Only a recorded generation that still matches is rebound; a mismatch (a retained
+  -- edge from before an alias was reused) is neither adopted nor stamped.
+  local function current(parent, parent_id)
+    local row = parent and bus.agents[parent]
+    return row and (parent_id == nil or parent_id == row.id)
+  end
+  local heir = current(exited.parent, exited.parent_id) and exited.parent
+    or (bus.agents.butler and "butler") or nil
+  for alias, agent in pairs(bus.agents) do
+    if agent.parent == name and (agent.parent_id == nil or agent.parent_id == exited.id) then
+      agent.parent, agent.parent_id = heir, heir and bus.agents[heir].id
+      if heir then table.insert(bus.agents[heir].children, alias) end
+    end
+  end
+end
+
 function remuda._butler_sessions()
   -- main.lua reassigns its butler_attempts with this global; read it late.
   local butler_attempts = remuda._butler_attempts or {}
@@ -98,6 +117,13 @@ function remuda._butler_sessions()
     end
   end
   if #member_attempts > 0 then out = out .. "\nMEMBER ATTEMPTS\n" .. table.concat(member_attempts, "\n") end
+  local profiles = {}
+  for _, item in ipairs(team_order()) do
+    local agent = bus.agents[item.id]
+    local summary = remuda._butler_sandbox.summary(remuda._butler_sandbox.of(agent))
+    if summary then profiles[#profiles + 1] = display_name(item.id) .. ": " .. summary end
+  end
+  if #profiles > 0 then out = out .. "\nSANDBOX\n" .. table.concat(profiles, "\n") end
   local failed_names = {}
   for name in pairs(bus.launch_failures or {}) do failed_names[#failed_names + 1] = name end
   table.sort(failed_names)
@@ -230,9 +256,22 @@ function remuda.session_detail(session)
   if not agent then return nil end
   local telemetry = remuda._butler_telemetry_for(agent)
   local detail = session_status(session.name, agent, telemetry) .. " · " .. (agent.kind or "agent") .. " · " .. telemetry.model
-  -- Current usage only: the window and percent cost width and rarely change.
+  local profile = remuda._butler_sandbox.summary(remuda._butler_sandbox.of(agent))
+  if profile then detail = detail .. " · " .. profile end
+  -- Keep context compact while showing the percentage that makes sessions comparable.
   local used = tonumber(telemetry.context_used)
-  if used then detail = detail .. " · " .. string.format("%.0fK", used / 1000) end
+  local pct = tonumber(telemetry.context_pct or telemetry.context_percent)
+  local window = tonumber(telemetry.context_window)
+  if pct and (pct ~= pct or pct < 0 or pct > 1000) then pct = nil end -- same sanity range as status_command
+  local derived = not used and pct and window and window > 0
+  if derived then used = pct * window / 100 end
+  if used then
+    local context = string.format("%s%.0fK", derived and "~" or "", used / 1000)
+    if pct then context = context .. string.format(" %.0f%%", pct) end
+    detail = detail .. " · " .. context
+  elseif pct then
+    detail = detail .. " · " .. string.format("%.0f%%", pct)
+  end
   local unread = agent.id and agent.id ~= "" and mail.unread(agent.id) or 0
   if unread > 0 then detail = detail .. " · ✉" .. unread end
   local attempts = agent.launch_attempts or (session.name == "butler" and remuda._butler_attempts)

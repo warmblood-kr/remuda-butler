@@ -1,0 +1,89 @@
+### remuda butler "status"
+exit: 0
+stdout:
+up
+stderr:
+
+actions:
+status.lookup()
+
+### remuda butler "status" "--help"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "status" "-h"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "status" "help"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "status" "extra"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "status" "--json"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "status" "--" "x"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "status"
+exit: 75
+stdout:
+
+stderr:
+launching
+actions:
+status.lookup()
+
+### remuda butler "status"
+exit: 1
+stdout:
+
+stderr:
+failed
+actions:
+status.lookup()
+
+### remuda butler "status" "extra"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)

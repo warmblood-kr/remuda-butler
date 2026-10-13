@@ -1,0 +1,270 @@
+-- Unit tests for prepared owner-approved text. Run from the repository root:
+--   luajit tests/butler_approve_text.lua
+local request_spec, request_handler
+remuda = { butler = { approval = { default_ttl_s = function() return 1800 end,
+  handler = function(kind, callbacks) assert(kind == "approve_text"); request_handler = callbacks end,
+  request = function(spec) request_spec = spec; spec.on_id("ABCD"); return "request-handle" end,
+  reply = function() return true end,
+  begin_delivery = function(rec) rec.delivery_started = true; return true end,
+} } }
+local approve_text = dofile("packages/butler/approve_text.lua")
+
+local multiline = "first\nsecond\n"
+local record = assert(approve_text.prepare("agent-1", multiline, "ABCD"))
+assert(record.bytes == #multiline and record.registered_text == multiline,
+  "registration must retain exact multiline bytes and byte count")
+assert(record.display_fingerprint == "ABCD/" .. #multiline,
+  "fingerprint must use the request id and byte count when SHA-256 is unavailable")
+local at_limit = string.rep("a", 8190) .. "\n\n"
+local boundary = assert(approve_text.prepare("agent-1", at_limit, "WXYZ"))
+assert(boundary.bytes == 8192, "8 KiB text is accepted by byte length")
+local too_long, too_long_error = approve_text.prepare("agent-1", at_limit .. "a", "WXYZ")
+assert(too_long == nil and too_long_error == "text_too_long", "text over 8 KiB is refused")
+local empty, empty_error = approve_text.prepare("agent-1", "", "WXYZ")
+assert(empty == nil and empty_error == "empty_text", "empty text is refused")
+local esc, esc_error = approve_text.prepare("agent-1", "safe\27[31m", "WXYZ")
+assert(esc == nil and esc_error == "control_character", "ESC and other controls are refused before posting")
+local crlf = assert(approve_text.prepare("agent-1", "one\r\ntwo\rthree", "WXYZ"))
+assert(crlf.registered_text == "one\ntwo\nthree",
+  "CR and CRLF normalize before storage and owner display")
+
+local displayed, escaped = approve_text.display("one\ntwo\t\1")
+assert(displayed:find("> one\n> two\\t\\x01", 1, true), "display preserves lines and escapes controls")
+assert(escaped == true, "display says when controls were escaped")
+local unicode_display = approve_text.display("x\226\128\168y\226\128\174z\194\133")
+assert(unicode_display:find("\\u2028", 1, true) and unicode_display:find("\\u202E", 1, true)
+  and unicode_display:find("\\u0085", 1, true), "display escapes separators, bidi controls and C1 controls")
+
+local typed, keys, traces = {}, {}, {}
+remuda.type_text = function(session, bytes)
+  typed[#typed + 1] = { session = session, bytes = bytes }
+  return true
+end
+remuda.key = function(session, key)
+  keys[#keys + 1] = { session = session, key = key }
+  return true
+end
+remuda._butler_notify_policy = function() return true end
+remuda._butler_session_trace = function(kind, detail) traces[#traces + 1] = { kind, detail } end
+remuda.ls = function() return { { name = "agent-1", alive = true, attached = false } } end
+remuda.session = function() return { attached = false } end
+remuda._butler_matrix_live_config = { approve_text = true }
+remuda._butler_bus = { pending_tasks = {}, agents = {
+  butler = { id = "butler", session_start_marker = "root-start" },
+  agent1 = { id = "agent1", session_start_marker = "agent-start", session_name = "agent-1", parent = "butler" },
+} }
+local provenance = { owner = "@alice:example.org", event_id = "$approved", request_id = "ABCD" }
+local ok, reason = approve_text.type_text("agent-1", multiline, provenance)
+assert(ok == true and reason == nil, "safe delivery succeeds")
+assert(#typed == 1 and typed[1].session == "agent-1" and typed[1].bytes == multiline,
+  "typing seam receives exact registered bytes")
+assert(#keys == 0, "type_text performs submission; delivery must not send a second Return")
+assert(#traces == 1 and traces[1][2]:find("@alice:example.org", 1, true)
+  and traces[1][2]:find("$approved", 1, true) and traces[1][2]:find("ABCD", 1, true),
+  "trace records owner, approval event, and request id")
+
+remuda._butler_bus.pending_tasks["agent-1"] = true
+ok, reason = approve_text.type_text("agent-1", multiline, provenance)
+assert(ok == false and reason == "pane_busy" and #typed == 1,
+  "busy session refuses without typing")
+remuda._butler_bus.pending_tasks["agent-1"] = nil
+remuda._butler_notify_policy = function() return false end
+ok, reason = approve_text.type_text("agent-1", multiline, provenance)
+assert(ok == false and reason == "pane_busy" and #typed == 1,
+  "an unsafe composer or dialog refuses without typing")
+remuda._butler_notify_policy = function() return true end
+remuda.ls = function() return { { name = "agent-1", alive = true, attached = true } } end
+local _, _, was_attached
+ok, reason, was_attached = approve_text.type_text("agent-1", multiline, provenance)
+assert(ok == true and reason == nil and was_attached == true and #typed == 2
+  and traces[#traces][2]:find("attached=true", 1, true),
+  "an attached supervisor does not block owner-approved text; the trace records it")
+remuda._butler_notify_policy = function() return false end
+ok, reason = approve_text.type_text("agent-1", multiline, provenance)
+assert(ok == false and reason == "pane_busy" and #typed == 2,
+  "an attached pane with a draft in the composer still refuses")
+remuda._butler_notify_policy = function() return true end
+remuda.ls = function() return { { name = "agent-1", alive = false, attached = true } } end
+ok, reason = approve_text.type_text("agent-1", multiline, provenance)
+assert(ok == false and reason == "session_not_live" and #typed == 2, "a dead session still refuses")
+remuda.ls = function() return { { name = "agent-1", alive = true, attached = false } } end
+typed[2] = nil
+
+local returned_id = approve_text.request("agent-1", multiline, "agent-1")
+assert(returned_id == "ABCD", "registration returns the short request id")
+assert(request_spec.kind == "approve_text" and request_spec.data.session == "agent-1"
+  and request_spec.data.registered_text == multiline and request_spec.data.bytes == #multiline
+  and request_spec.data.session_id == "agent1" and request_spec.data.session_marker == "agent-start"
+  and request_spec.data.session_binding_version == 2
+  and request_spec.data.session_start == nil and request_spec.data.session_start_marker == nil,
+  "request stores text once and binds to a non-secret session launch marker")
+assert(request_spec.rate_limit_per_window == 10 and request_spec.rate_window_s == 600,
+  "registration rate is bounded per agent")
+local posted = request_spec.render({ id = "ABCD", data = request_spec.data,
+  expires_at = os.time() * 1000 + 60000 })
+assert(posted:find("ABCD/" .. #multiline, 1, true) and posted:find("```\nfirst\nsecond\n\n```", 1, true)
+  and posted:find("Expires ", 1, true) and posted:find("React ✅", 1, true),
+  "posted request identifies its fingerprint, expiry, answer methods, and code block")
+-- A session or asker name with a line separator or direction override cannot forge a line or reorder the header.
+do
+  local saved_ls, saved_spec = remuda.ls, request_spec
+  local evil = "x\226\128\168Fingerprint ABCD/1\226\128\174"
+  remuda.ls = function() return { { name = evil, alive = true, attached = false } } end
+  request_spec = nil
+  remuda._butler_bus.agents.evil = { id = "evil", session_start_marker = "evil-start", session_name = evil, parent = "butler" }
+  local ok, id_or_err, why = pcall(approve_text.request, evil, "hello", evil)
+  assert(ok and request_spec, "the name registers: " .. tostring(id_or_err) .. " " .. tostring(why))
+  local evil_post = request_spec.render({ id = "ABCD", data = request_spec.data,
+    expires_at = os.time() * 1000 + 60000 })
+  assert(evil_post, "a registration for a session name with separators still renders")
+  assert(not evil_post:find("\226\128\168", 1, true) and not evil_post:find("\226\128\174", 1, true),
+    "session and asker names are shown without raw line or direction characters")
+  remuda._butler_bus.agents.evil = nil
+  remuda.ls, request_spec = saved_ls, saved_spec
+end
+local applied
+remuda._butler_notify_policy = function() return true end
+request_handler.approve({ id = "ABCD", data = request_spec.data,
+  answered_by = "@alice:example.org", answer_event_id = "$owner-answer" },
+  function(ok, why) applied = { ok, why } end)
+assert(applied[1] == true, "approved request delivers the stored text")
+
+local saved_marker = remuda._butler_bus.agents.agent1.session_start_marker
+remuda._butler_bus.agents.agent1.session_start_marker = "new-start"
+local relaunch_result
+request_handler.approve({ id = "ABCD", data = request_spec.data },
+  function(ok, why) relaunch_result = { ok, why } end)
+assert(relaunch_result[1] == "retry" and relaunch_result[2] == "session_changed" and #typed == 2,
+  "a relaunch under the same name cannot receive a registered request")
+remuda._butler_bus.agents.agent1.session_start_marker = saved_marker
+
+local changed = { id = "ABCD", data = { session = "agent-1", bytes = #multiline - 1,
+  registered_text = string.rep("x", #multiline), request_id = "ABCD" } }
+request_handler.approve(changed, function(ok, why) applied = { ok, why } end)
+assert(applied[1] == false and applied[2] == "text_changed",
+  "text mismatch fails closed without delivery")
+
+local cli_result = approve_text.cli({ "request", "agent-1", "-" }, "agent-1", multiline)
+assert(cli_result == "Registered prepared text request ABCD",
+  "CLI registers stdin bytes for a Butler session and returns the short id")
+local invalid_target, invalid_error = approve_text.cli({ "request", "outside", "-" }, "agent-1", multiline)
+local invalid_message = type(invalid_target) == "table" and invalid_target.error or invalid_error
+assert(invalid_message and invalid_message:find("Unknown Butler session", 1, true),
+  "registration cannot target a session outside the Butler tree")
+remuda._butler_matrix_live_config.approve_text = false
+local prior_spec = request_spec
+local disabled, disabled_error = approve_text.cli({ "request", "agent-1", "-" }, "agent-1", multiline)
+local disabled_message = type(disabled) == "table" and disabled.error or disabled_error
+assert(disabled_message and disabled_message:find("Prepared text approvals are off", 1, true)
+  and request_spec == prior_spec, "switch-off registration is refused before posting")
+remuda._butler_matrix_live_config.approve_text = true
+
+assert(approve_text.reply_verdict("yes") == "approve")
+local verdict, reply_id = approve_text.reply_verdict("승인 abcd")
+assert(verdict == "approve" and reply_id == "ABCD", "Korean reply supports the optional request id")
+assert(approve_text.reply_verdict("승인") == "approve" and approve_text.reply_verdict("거부") == "deny"
+  and approve_text.reply_verdict("거부 ABCD") == "deny" and approve_text.reply_verdict("maybe") == nil,
+  "deny words are exact and other replies are not approvals")
+local owner_cfg = { home_room = "!home:example.org", self_mxid = "@bot:example.org",
+  allowed_senders = { ["@alice:example.org"] = true, ["@agent-runner:example.org"] = true },
+  butler_senders = {} }
+local owner_event = { type = "m.room.message", event_id = "$owner", sender = "@alice:example.org", origin_server_ts = 1000100 }
+local owner_record = { created_ms = 1000000 }
+assert(approve_text.owner_event_allowed(owner_event, owner_record, owner_cfg, true, owner_cfg.home_room),
+  "allowlisted owner answer from live HOME sync is accepted")
+assert(not approve_text.owner_event_allowed(owner_event, owner_record, owner_cfg, false, owner_cfg.home_room),
+  "backfill and mail events cannot approve")
+local agent_event = { type = "m.room.message", event_id = "$agent", sender = "@agent-runner:example.org", origin_server_ts = 1000100 }
+assert(not approve_text.owner_event_allowed(agent_event, owner_record, owner_cfg, true, owner_cfg.home_room),
+  "an agent MXID cannot approve")
+local stranger_event = { type = "m.room.message", event_id = "$stranger",
+  sender = "@mallory:example.org", origin_server_ts = 1000100 }
+assert(not approve_text.owner_event_allowed(stranger_event, owner_record, owner_cfg, true, owner_cfg.home_room),
+  "a non-allowlisted sender cannot approve")
+assert(not approve_text.owner_event_allowed(owner_event, owner_record, owner_cfg, true, "!other:example.org"),
+  "answers outside HOME cannot approve")
+local edited = { type = "m.room.message", event_id = "$edited", sender = owner_event.sender,
+  origin_server_ts = owner_event.origin_server_ts, content = { ["m.new_content"] = { body = "yes" } } }
+assert(not approve_text.owner_event_allowed(edited, owner_record, owner_cfg, true, owner_cfg.home_room),
+  "edited Matrix events cannot approve")
+remuda._butler_matrix_live_config.use_messages = true
+local prior_spec = request_spec
+local message_mode_id, message_mode_error = approve_text.request("agent-1", multiline, "agent-1")
+assert(message_mode_id == nil and message_mode_error:find("require live Matrix sync", 1, true)
+  and request_spec == prior_spec,
+  "registration is refused when messages fallback cannot deliver live approvals")
+remuda._butler_matrix_live_config.use_messages = false
+-- Read-back: "typed" must mean the text is on the pane. Fake screen + fake timer; never retypes.
+do
+  local screen, scheduled = "$ ", {}
+  remuda.capture = function() return screen end
+  remuda._butler_system = { after = function(_, fn) scheduled[#scheduled + 1] = fn; return true end }
+  local text = "please run the full release checklist now"
+  local function verdict(on_type)
+    local count_before = #typed
+    scheduled = {}
+    local ok_, why_, _, verify = approve_text.type_text("agent-1", text, provenance)
+    assert(ok_ == true and why_ == nil and type(verify) == "function", "typing returns a read-back")
+    if on_type then screen = on_type(screen) end
+    local got
+    verify(function(seen) got = seen end)
+    while got == nil and #scheduled > 0 do table.remove(scheduled, 1)() end
+    assert(#typed == count_before + 1, "read-back never types again, whatever it sees")
+    return got
+  end
+  assert(verdict(function(s0) return s0 .. "\n> please run the full release checklist now" end) == true, "seen")
+  screen = "$ "
+  assert(verdict(function(s0) return s0 end) == false, "not seen: reported, not retried")
+  screen = "$ "
+  assert(verdict(function(s0) return s0 .. "\n> please run the full\n  release checklist now" end) == true,
+    "wrapped across lines is still seen")
+  screen = "> please run the full release checklist now\n$ "
+  assert(verdict(function(s0) return s0 end) == false, "text already on screen before typing is not a new delivery")
+  screen = "$ "
+  assert(verdict(function(s0) return s0 .. "\n> half-written draft please run the full release checklist now" end) == true,
+    "typed after an existing draft is still seen")
+  screen = "$ "
+  assert(verdict(function(s0) return s0 .. "\n> please run the full release checklist" end) == false,
+    "only the start of the text on screen is not delivery: the whole text must appear")
+  screen = "$ "
+  assert(verdict(function(s0) return s0 .. "\n> please run the release checklist now" end) == false,
+    "start and end on screen with the middle missing is not delivery")
+  screen = "$ "
+  local was_session = approve_text.session_instance
+  assert(verdict(function(s0)
+    approve_text.session_instance = function() return "other", "other-start" end -- recreated after typing
+    return s0 .. "\n> please run the full release checklist now"
+  end) == false,
+    "a different instance behind the same name is not seen")
+  approve_text.session_instance = was_session
+  screen = "$ "
+  remuda.capture = nil
+  scheduled = {}
+  local ok_, _, _, verify = approve_text.type_text("agent-1", text, provenance)
+  local got
+  verify(function(seen) got = seen end)
+  while got == nil and #scheduled > 0 do table.remove(scheduled, 1)() end
+  assert(ok_ == true and got == false, "no screen to read means not seen, never a claim of delivery")
+  -- The handler words the reply from the read-back and never repeats the approved text.
+  local replies = {}
+  remuda.butler.approval.reply = function(_, msg) replies[#replies + 1] = msg; return true end
+  remuda.capture = function() return screen end
+  local function approve(after_type)
+    screen, scheduled = "$ ", {}
+    local rec = { id = "ABCD", data = { session = "agent-1", registered_text = text, bytes = #text, request_id = "ABCD",
+      session_id = "agent1", session_marker = "agent-start", session_binding_version = 2 },
+      answered_by = "@alice:example.org", answer_event_id = "$a" }
+    request_handler.approve(rec, function() end)
+    if after_type then screen = screen .. after_type end
+    while #scheduled > 0 do table.remove(scheduled, 1)() end
+    return replies[#replies]
+  end
+  local not_seen = approve(nil)
+  assert(not_seen == "typed, NOT seen in the pane; check agent-1 before approving it again", "handler says NOT seen: " .. tostring(not_seen))
+  assert(not not_seen:find(text, 1, true), "the reply never repeats the approved text")
+  local seen = approve("\n> " .. text)
+  assert(seen == "typed (seen)", "handler says seen: " .. tostring(seen))
+  remuda.butler.approval.reply = function() return true end
+  remuda.capture, remuda._butler_system = nil, nil
+end
+print("ok - prepared approved text cases")

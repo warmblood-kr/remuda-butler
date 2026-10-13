@@ -213,8 +213,10 @@ function permissions.file_for_caller(path, caller, cwd_of, realpath, flag, pipe,
   end
   if inside(key, path_key(root, platform)) then return real end
   return nil, what .. " is outside this session's working directory " .. one_line(cwd)
-    .. "\nNext: copy the file into " .. one_line(cwd) .. " and pass that path"
-    .. (pipe and ", or pipe the text: cat FILE | remuda butler send NAME -" or "")
+    .. (pipe and ("\nNext: copy the file into " .. one_line(cwd) .. " and pass that path"
+        .. ", or pipe the text: cat FILE | remuda butler send NAME -")
+      or ("\nNext: copy it into your working directory first: cp '"
+        .. one_line(path):gsub("'", "'\\''") .. "' \"$PWD/\" and pass that path"))
 end
 
 -- A file to WRITE (matrix download). `path` is -o PATH or nil; `name` is the

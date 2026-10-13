@@ -71,8 +71,8 @@ wait_for "the root launch did not write $FILE" has_rule
 # The mod makes .claude with remuda.fs.mkdir_new; the pinned core (0651664) gives it mode 700.
 [[ $(mode "$ROOT/.claude") == 700 ]] || fail "the created .claude directory is not private: $(mode "$ROOT/.claude")"
 DOCTOR=$("$REMUDA_BIN" -s "$SERVER" butler doctor 2>&1 || true)
-grep -qF "Permissions butler (claude): added 1 rule to $FILE: $RULE (file rewritten: private, mode 600)" <<<"$DOCTOR" \
-  || fail "doctor does not show the added rule: $DOCTOR"
+grep -qF "Permissions butler (claude): present $RULE — $FILE" <<<"$DOCTOR" \
+  || fail "doctor does not show the current rule: $DOCTOR"
 [[ $(tail -1 <<<"$DOCTOR") == Next:* ]] || fail "doctor does not end with Next: $DOCTOR"
 
 echo "== tick_does_not_rewrite (3 reconcile ticks)"
@@ -82,6 +82,36 @@ sleep 7
 [[ $(mtime "$ROOT/AGENTS.md") == "$BEFORE_AGENTS" ]] || fail "AGENTS.md was rewritten on the tick (issue 236)"
 rm "$ROOT/AGENTS.md"
 wait_for "a deleted AGENTS.md was not written again" test -s "$ROOT/AGENTS.md"
+
+echo "== guidance_block_keeps_outside_text, symlink_refused"
+grep -qF "<!-- BEGIN remuda-butler:managed id=butler -->" "$ROOT/AGENTS.md" || fail "AGENTS.md has no managed block"
+printf '\n| my | table |\n' >>"$ROOT/AGENTS.md"
+respawn
+grep -qF "| my | table |" "$ROOT/AGENTS.md" || fail "text outside the block was lost on relaunch"
+mv "$ROOT/AGENTS.md" "$ROOT/AGENTS.real"
+printf 'drift\n' >"$ROOT/AGENTS.real"
+ln -s "$ROOT/AGENTS.real" "$ROOT/AGENTS.md"
+BEFORE_REAL=$(mtime "$ROOT/AGENTS.real")
+sleep 7
+[[ -L $ROOT/AGENTS.md ]] || fail "the symlinked AGENTS.md was replaced"
+[[ $(mtime "$ROOT/AGENTS.real") == "$BEFORE_REAL" ]] || fail "the symlinked AGENTS.md was written through"
+[[ $(cat "$ROOT/AGENTS.real") == drift ]] || fail "the symlinked AGENTS.md target was changed"
+rm "$ROOT/AGENTS.md" "$ROOT/AGENTS.real"
+wait_for "AGENTS.md was not written again after the symlink case" test -s "$ROOT/AGENTS.md"
+
+echo "== no_atomic_write_leaves_the_root_agents_md"
+# A core without remuda.fs.write_atomic leaves AGENTS.md as it is (one trace line)
+# and never falls back to a truncating write; with it back, the block is refreshed.
+TRACE=$XDG_CONFIG_HOME/remuda/session-trace.log
+printf '<!-- BEGIN remuda-butler:managed id=butler -->\nstale body\n<!-- END remuda-butler:managed id=butler -->\nhand text\n' >"$ROOT/AGENTS.md"
+cp "$ROOT/AGENTS.md" "$SCRATCH/agents.stale"
+lua 'remuda._saved_write_atomic = remuda.fs.write_atomic; remuda.fs.write_atomic = nil' >/dev/null
+respawn
+cmp -s "$ROOT/AGENTS.md" "$SCRATCH/agents.stale" || fail "AGENTS.md was rewritten without write_atomic: $(cat "$ROOT/AGENTS.md")"
+[[ $(grep -c 'guidance_not_written' "$TRACE") == 1 ]] || fail "guidance_not_written is not traced once: $(cat "$TRACE")"
+lua 'remuda.fs.write_atomic = remuda._saved_write_atomic' >/dev/null
+respawn
+{ grep -qF 'hand text' "$ROOT/AGENTS.md" && ! grep -qF 'stale body' "$ROOT/AGENTS.md"; } || fail "AGENTS.md was not refreshed once write_atomic is back"
 
 echo "== respawn_readds_removed_rule; the real remuda.json keeps the meaning of everything else"
 # The one write goes through remuda.json: keys come back sorted and pretty-printed;
@@ -128,7 +158,7 @@ for content in '{"permissions":' '{"permissions":{"allow":[]},"permissions":{}}'
   respawn
   sleep 1
   [[ $(cat "$FILE") == "$content" ]] || fail "a file the mod must not edit was changed: $content -> $(cat "$FILE")"
-  "$REMUDA_BIN" -s "$SERVER" butler doctor 2>&1 | grep -qE "Permissions butler \(claude\): not written: (not valid JSON|wrong type) — " \
+  "$REMUDA_BIN" -s "$SERVER" butler doctor 2>&1 | grep -qE "Permissions butler \(claude\): close permission not confirmed — invalid " \
     || fail "doctor does not say why $content was not written"
 done
 
@@ -148,7 +178,7 @@ printf '{"permissions":{"deny":["%s"]}}' "$RULE" >"$FILE"
 respawn
 sleep 1
 [[ $(cat "$FILE") == '{"permissions":{"deny":["'"$RULE"'"]}}' ]] || fail "a file with the rule under deny was changed: $(cat "$FILE")"
-"$REMUDA_BIN" -s "$SERVER" butler doctor 2>&1 | grep -qF "withheld $RULE — listed under deny in $FILE" \
+"$REMUDA_BIN" -s "$SERVER" butler doctor 2>&1 | grep -qF "$RULE under deny in $FILE" \
   || fail "doctor does not say the rule is withheld"
 
 echo "== symlink_is_not_written"
@@ -158,15 +188,15 @@ ln -s "$SCRATCH/elsewhere.json" "$FILE"
 respawn
 sleep 1
 [[ -L $FILE && $(cat "$SCRATCH/elsewhere.json") == '{}' ]] || fail "the mod wrote through or over a symlink"
-"$REMUDA_BIN" -s "$SERVER" butler doctor 2>&1 | grep -qF "not written: is a symlink — $FILE" \
-  || fail "doctor does not name the symlink"
+"$REMUDA_BIN" -s "$SERVER" butler doctor 2>&1 | grep -qF "no current allow rule covers remuda butler close NAME" \
+  || fail "doctor must not reuse the launch report for a symlink without an allow"
 
 echo "== launch_survives_unwritable_dir"
 rm "$FILE"
 chmod 500 "$ROOT/.claude"
 respawn
 [[ ! -e $FILE ]] || fail "a file appeared in a read-only directory"
-"$REMUDA_BIN" -s "$SERVER" butler doctor 2>&1 | grep -qF "Permissions butler (claude): not written: " \
+"$REMUDA_BIN" -s "$SERVER" butler doctor 2>&1 | grep -qF "Permissions butler (claude): close permission not confirmed — " \
   || fail "doctor does not report the failed write"
 chmod 700 "$ROOT/.claude"
 

@@ -69,7 +69,8 @@ end
 local function open_records(state)
   local rows = {}
   for _, record in pairs(state and state.approvals or {}) do
-    if type(record) == "table" and record.status == "open" then rows[#rows + 1] = record end
+    if type(record) == "table" and (record.status == "open"
+      or (record.kind == "approve_text" and record.status == "approved")) then rows[#rows + 1] = record end
   end
   table.sort(rows, function(a, b)
     if tonumber(a.created_ms) and tonumber(b.created_ms) then return a.created_ms < b.created_ms end
@@ -95,12 +96,94 @@ function approval.handler(kind, callbacks)
   return true
 end
 
-function approval.attach(state, persist_fn, post_fn)
+-- Seconds a finished approval record is kept. It must outlive the longest standing grant (guard_grants.MAX_TTL,
+-- 24 h): the grant store trusts a grant only while Butler's record of the owner's reaction exists.
+approval.RETENTION_S = 24 * 60 * 60
+
+-- Minutes an owner approval request stays open (configured by `approval_ttl_minutes`).
+approval.ttl_minutes = 30
+function approval.default_ttl_s() return approval.ttl_minutes * 60 end
+
+function approval.attach(state, persist_fn, post_fn, room_fn, home_room)
   assert(type(state) == "table", "approval state is required")
   if type(state.approvals) ~= "table" or state.approvals == remuda.json.null then
     state.approvals = remuda.json and remuda.json.object({}) or {}
   end
-  attached = { state = state, persist = persist_fn, post = post_fn }
+  attached = { state = state, persist = persist_fn, post = post_fn, approval_room = room_fn,
+    home_room = home_room }
+  local recovered = false
+  local restarted_ms = math.floor(os.time() * 1000)
+  for _, rec in pairs(state.approvals) do
+    -- A guard request is answered only while its hook waits; a restart ends the wait.
+    if type(rec) == "table" and rec.kind == "guard_action" and (rec.status == "open" or rec.status == "approved") then
+      rec.status, rec.answered_at, rec.error = "expired", restarted_ms, "daemon restarted"
+      local callback = handlers.guard_action and handlers.guard_action.expire
+      if callback then pcall(callback, rec) end
+      recovered = true
+    end
+  end
+  for _, rec in pairs(state.approvals) do
+    if type(rec) == "table" and rec.kind == "approve_text" then
+      local data = type(rec.data) == "table" and rec.data or {}
+      if data.session_binding_version ~= 2 then
+        data.session_start, data.session_marker = nil, nil
+        rec.data = data
+        if rec.status == "open" or rec.status == "approved" then
+          rec.status, rec.error = "failed", "session binding changed; re-register prepared text"
+        end
+        recovered = true
+      end
+      if rec.status == "approved" and rec.delivery_started == true then
+        rec.status, rec.error = "failed", "delivery outcome unknown after restart"
+        rec.recovery_notice = { owner_sent = false, agent_sent = false }
+        recovered = true
+      end
+    end
+  end
+  if recovered then persist() end
+  for _, rec in pairs(state.approvals) do
+    local notice = type(rec) == "table" and rec.recovery_notice
+    if type(notice) == "table" and rec.kind == "approve_text" and rec.status == "failed" then
+      if notice.owner_sent ~= true and type(rec.event_id) == "string" and rec.event_id ~= ""
+          and type(attached.post) == "function" then
+        local called = pcall(attached.post,
+          "Delivery outcome unknown after restart. The prepared text may not have been typed; register it again before asking for approval.",
+          { rel_type = "m.thread", event_id = rec.event_id }, function(result)
+            if type(result) == "table" and not result.error then
+              notice.owner_sent = true
+              pcall(persist)
+            end
+          end, { room = rec.room_id })
+        if not called then notice.owner_sent = false end
+      end
+      if notice.agent_sent ~= true and type(remuda._butler_send) == "function"
+          and type(rec.asker) == "string" then
+        local called, sent = pcall(remuda._butler_send, "butler", rec.asker,
+          "Prepared text request " .. tostring(rec.id)
+            .. " had an unknown delivery outcome after restart; it may not have been typed. Register the text again before requesting approval.")
+        if called and sent ~= nil and sent ~= false then
+          notice.agent_sent = true
+          pcall(persist)
+        end
+      end
+      if notice.owner_sent == true and notice.agent_sent == true then
+        rec.recovery_notice = nil
+        pcall(persist)
+      end
+    end
+  end
+  return true
+end
+
+function approval.begin_delivery(rec)
+  if not attached or type(rec) ~= "table" or rec.kind ~= "approve_text"
+      or rec.status ~= "approved" or rec.delivery_started == true then return false end
+  rec.delivery_started = true
+  local ok, result = pcall(persist)
+  if not ok or result == false then
+    rec.status, rec.error = "failed", "could not persist one-shot delivery marker"
+    return false
+  end
   return true
 end
 
@@ -117,6 +200,14 @@ function approval.for_event(event_id)
   end
 end
 
+function approval.for_id(id)
+  if not attached or type(id) ~= "string" then return nil end
+  for key, rec in pairs(attached.state.approvals or {}) do
+    if type(rec) == "table" and (tostring(key):upper() == id:upper()
+      or (type(rec.id) == "string" and rec.id:upper() == id:upper())) then return rec end
+  end
+end
+
 function approval.reply(rec, text)
   if not attached or type(attached.post) ~= "function" then
     return nil, "Matrix relay is not running. Next: remuda butler matrix status"
@@ -124,8 +215,33 @@ function approval.reply(rec, text)
   if type(rec) ~= "table" or type(rec.event_id) ~= "string" or rec.event_id == "" then
     return nil, "Approval request event is unavailable"
   end
-  return attached.post(text, { rel_type = "m.thread", event_id = rec.event_id }, function() end)
+  return attached.post(text, { rel_type = "m.thread", event_id = rec.event_id }, function() end,
+    { room = rec.room_id })
 end
+
+-- Butler's own record that the owner's reaction (the Matrix event id) turned this request into this standing grant,
+-- held by this session id.
+-- The relay writes answer_event_id only for the verified owner; the grant store trusts nothing on its own.
+function approval.granted_by(event_id, grant_id, class, scope, holder)
+  if not attached or type(event_id) ~= "string" or event_id == "" then return false end
+  for _, rec in pairs(attached.state.approvals or {}) do
+    local g = type(rec) == "table" and rec.kind == "guard_action" and rec.answer_verdict == "grant" and rec.grant
+    if type(g) == "table" and rec.answer_event_id == event_id and g.id == grant_id and g.class == class
+        and g.scope == scope and g.holder == holder and type(rec.answered_by) == "string" and rec.answered_by ~= "" then return true end
+  end
+  return false
+end
+
+-- A plain notice in the owner's room (no request, no mention); nil and why when the relay is not running.
+function approval.notify(text)
+  if not attached or type(attached.post) ~= "function" then return nil, "Matrix relay is not running" end
+  return attached.post(text, nil, function() end, {})
+end
+
+-- Named per-second hooks run by sweep(); a name is replaced, never added, so a live reload leaves one.
+local ticks = approval._ticks or {}
+approval._ticks = ticks
+function approval.tick(name, fn) ticks[name] = fn end
 
 local function apply_approved(rec)
   if type(rec) ~= "table" or rec.status ~= "approved" or applying[rec.id] then return false end
@@ -141,8 +257,9 @@ local function apply_approved(rec)
     if completed then return end
     completed = true
     applying[rec.id] = nil
-    rec.status = ok and "applied" or "failed"
-    if err then rec.error = tostring(err) end
+    rec.status = ok == "retry" and "approved" or ok and "applied" or "failed"
+    if err then rec.error = tostring(err)
+    elseif ok then rec.error = nil end
     persist()
   end
   local ok, err = pcall(callback, rec, done)
@@ -154,12 +271,21 @@ function approval.reapply_approved()
   if not attached then return 0 end
   local count = 0
   for _, rec in pairs(attached.state.approvals or {}) do
-    if type(rec) == "table" and rec.status == "approved" then
+    if type(rec) == "table" and rec.status == "approved" and rec.kind ~= "approve_text" then
       apply_approved(rec)
       count = count + 1
     end
   end
   return count
+end
+
+-- End every open request of a kind now (their expire handler runs): a newer decision replaces the old asks.
+function approval.expire_open(kind)
+  if not attached then return end
+  for _, rec in pairs(attached.state.approvals or {}) do
+    if type(rec) == "table" and rec.kind == kind and rec.status == "open" then rec.expires_at = 0 end
+  end
+  approval.sweep()
 end
 
 function approval.request(request, done)
@@ -199,19 +325,41 @@ function approval.request(request, done)
     pending.callbacks[#pending.callbacks + 1] = finish
     return nil
   end
+  -- Caps count requests of the same kind, so one kind cannot starve another.
   local open_total, open_for_asker = 0, 0
+  local registered_in_window = 0
+  local now = math.floor(os.time() * 1000)
+  local rate_limit = tonumber(request.rate_limit_per_window)
+  local rate_window_ms = math.max(1, tonumber(request.rate_window_s) or 600) * 1000
   for _, rec in pairs(attached.state.approvals or {}) do
-    if type(rec) == "table" and rec.status == "open" then
+    if type(rec) == "table" and rec.status == "open" and rec.kind == request.kind then
       open_total = open_total + 1
       if rec.asker == asker then open_for_asker = open_for_asker + 1 end
     end
+    if rate_limit and type(rec) == "table" and rec.kind == request.kind and rec.asker == asker
+        and tonumber(rec.created_ms) and tonumber(rec.created_ms) >= now - rate_window_ms then
+      registered_in_window = registered_in_window + 1
+    end
   end
   for _, item in pairs(pending_requests) do
-    open_total = open_total + 1
-    if item.asker == asker then open_for_asker = open_for_asker + 1 end
+    if item.kind == request.kind then
+      open_total = open_total + 1
+      if item.asker == asker then open_for_asker = open_for_asker + 1 end
+    end
+    if rate_limit and item.kind == request.kind and item.asker == asker
+        and tonumber(item.created_ms) and item.created_ms >= now - rate_window_ms then
+      registered_in_window = registered_in_window + 1
+    end
   end
-  if open_for_asker >= 3 or open_total >= 5 then
-    finish(nil, "Too many open approval requests (3 per agent, 5 total). Next: wait for an answer or expiry (10 min), then retry.")
+  if rate_limit and registered_in_window >= rate_limit then
+    finish(nil, "Too many prepared text registrations. Next: wait 10 minutes, then retry.")
+    return nil
+  end
+  local max_for_asker = tonumber(request.max_open_for_asker) or 3
+  local max_total = tonumber(request.max_open_total) or 5
+  if open_for_asker >= max_for_asker or open_total >= max_total then
+    finish(nil, "Too many open approval requests (" .. tostring(max_for_asker)
+      .. " per agent, " .. tostring(max_total) .. " total). Next: wait for an answer or expiry, then retry.")
     return nil
   end
   local id = random_id(attached.state)
@@ -221,18 +369,50 @@ function approval.request(request, done)
     return nil
   end
   local created_ms = math.floor(os.time() * 1000)
+  local room_id
+  if type(attached.approval_room) == "function" then
+    local ok, value = pcall(attached.approval_room)
+    if ok and type(value) == "string" and value ~= "" then room_id = value end
+  end
   local rec = { id = id, kind = request.kind, key = request.key, asker = asker,
     summary = summary, data = request.data, nonce = hex(nonce), created_ms = created_ms,
     expires_at = created_ms + math.max(1, tonumber(request.ttl_s) or 600) * 1000,
-    event_id = nil, status = "open" }
+    event_id = nil, room_id = room_id, status = "open" }
   local ttl_minutes = math.max(1, math.ceil((tonumber(request.ttl_s) or 600) / 60))
+  local lounge = type(room_id) == "string" and type(attached.home_room) == "string"
+    and room_id ~= attached.home_room
+  local html, render_metadata
   local text = table.concat({ "Butler wants to " .. summary,
     "Asked by: " .. asker,
     "React ✅ or reply yes to THIS message within " .. tostring(ttl_minutes)
       .. " minutes. ❌ or no denies.",
     "Request " .. id,
     "or: remuda butler approve " .. id }, "\n")
-  pending = { id = id, asker = asker, callbacks = { finish } }
+  if type(request.on_id) == "function" then pcall(request.on_id, id) end
+  if type(request.render) == "function" then
+    local rendered, value, value_html, metadata = pcall(request.render, rec,
+      { lounge = lounge, summary = summary })
+    if not rendered or type(value) ~= "string" then
+      finish(nil, "Could not prepare approval message: " .. tostring(value))
+      return nil
+    end
+    text, html = value, type(value_html) == "string" and value_html or nil
+    render_metadata = type(metadata) == "table" and metadata or nil
+  end
+  if lounge and render_metadata and render_metadata.display_cut == true then
+    room_id, rec.room_id, lounge = attached.home_room, attached.home_room, false
+    if type(request.render) == "function" then
+      local rendered, full_text, full_html = pcall(request.render, rec,
+        { lounge = false, summary = summary })
+      if not rendered or type(full_text) ~= "string" then
+        finish(nil, "Could not prepare full approval request: " .. tostring(full_text))
+        return nil
+      end
+      text, html = full_text, type(full_html) == "string" and full_html or nil
+    end
+  end
+  pending = { id = id, asker = asker, kind = request.kind, created_ms = created_ms,
+    callbacks = { finish } }
   pending_requests[token] = pending
   local function complete(request_id, why)
     if pending_requests[token] ~= pending then return end
@@ -241,14 +421,15 @@ function approval.request(request, done)
   end
   local ok, handle = pcall(attached.post, text, nil, function(result)
     if type(result) ~= "table" or result.error then
-      return complete(nil, "Could not post to HOME: "
+      return complete(nil, "Could not post approval request: "
         .. tostring(type(result) == "table" and result.error or "Matrix post returned no result"))
     end
     local event_id = result.event_id
     if type(event_id) ~= "string" or event_id == "" then
-      return complete(nil, "Could not post to HOME: response omitted event_id")
+      return complete(nil, "Could not post approval request: response omitted event_id")
     end
     rec.event_id = event_id
+    if type(result.room_id) == "string" and result.room_id ~= "" then rec.room_id = result.room_id end
     attached.state.approvals[id] = rec
     local saved, save_error = pcall(persist)
     if not saved then
@@ -256,14 +437,14 @@ function approval.request(request, done)
       return complete(nil, "Could not save approval request: " .. tostring(save_error))
     end
     complete(id)
-  end)
-  if not ok then complete(nil, "Could not post to HOME: " .. tostring(handle)) end
+  end, { mention = true, html = html, room = room_id })
+  if not ok then complete(nil, "Could not post approval request: " .. tostring(handle)) end
   return handle
 end
 
-function approval.answer(id_or_event, verdict, who)
+function approval.answer(id_or_event, verdict, who, event_id)
   if not attached then return nil, "Matrix relay is not running. Next: remuda butler matrix status" end
-  if verdict ~= "approve" and verdict ~= "deny" then return nil, "Invalid approval answer." end
+  if verdict ~= "approve" and verdict ~= "deny" and verdict ~= "grant" then return nil, "Invalid approval answer." end
   approval.sweep()
   local rec
   for id, candidate in pairs(attached.state.approvals or {}) do
@@ -271,14 +452,59 @@ function approval.answer(id_or_event, verdict, who)
       or candidate.event_id == id_or_event) then rec = candidate; break end
   end
   if not rec then return nil, "No such request." end
+  if verdict == "grant" then
+    -- Only a guard request can end in a standing grant, and only the owner in Matrix: the terminal never grants.
+    local check = rec.kind == "guard_action" and handlers.guard_action and handlers.guard_action.grant_check
+    local why = not check and "No standing grant is offered for this request."
+      or who == "operator (terminal)" and "A guarded tool call can only be approved by the owner in its live Matrix thread."
+      or rec.status == "open" and check(rec)
+    if why then
+      if rec.status == "open" then approval.reply(rec, why) end
+      return nil, why
+    end
+  end
+  if rec.kind == "approve_text" and who == "operator (terminal)" and verdict == "approve" then
+    return nil, "Prepared text can only be approved by the owner in its live Matrix thread."
+  end
+  if rec.kind == "guard_action" and who == "operator (terminal)" and verdict == "approve" then
+    return nil, "A guarded tool call can only be approved by the owner in its live Matrix thread."
+  end
+  if rec.kind == "guard_unfreeze" and who == "operator (terminal)" and verdict == "approve" then
+    return nil, "Lifting the freeze can only be approved by the owner in its live Matrix thread."
+  end
+  if rec.kind == "approve_text" and rec.status == "approved" and verdict == "approve" then
+    if rec.delivery_started == true then return nil, "Already answered.", rec end
+    rec.answered_by, rec.answer_event_id = who, event_id
+    apply_approved(rec)
+    return true, nil, rec
+  end
+  if rec.kind == "approve_text" and rec.status == "approved" and verdict == "deny"
+      and rec.delivery_started ~= true then
+    rec.status, rec.answered_by, rec.answered_at, rec.answer_event_id = "denied", who,
+      math.floor(os.time() * 1000), event_id
+    persist()
+    local callback = handlers[rec.kind] and handlers[rec.kind].deny
+    if callback then callback(rec) end
+    return true, nil, rec
+  end
   if rec.status ~= "open" then
     return nil, rec.status == "expired" and "Expired." or "Already answered.", rec
   end
+  local before_answer = handlers[rec.kind] and handlers[rec.kind].before_answer
+  if before_answer then
+    local ok, ready, why = pcall(before_answer, rec, verdict, who, event_id)
+    if not ok or ready ~= true then
+      local failure = tostring(ok and why or ready)
+      return nil, "Approval answer refused: " .. failure
+        .. ". Next: check audit storage, then retry the answer.", rec
+    end
+  end
   local now = math.floor(os.time() * 1000)
-  rec.status, rec.answered_by, rec.answered_at = verdict == "approve" and "approved" or "denied", who,
-    now
+  rec.status, rec.answered_by, rec.answered_at, rec.answer_event_id =
+    verdict == "deny" and "denied" or "approved", who, now, event_id
+  rec.answer_verdict = verdict
   persist()
-  if verdict == "approve" then
+  if verdict ~= "deny" then
     apply_approved(rec)
   else
     local callback = handlers[rec.kind] and handlers[rec.kind].deny
@@ -291,8 +517,10 @@ function approval.sweep(now)
   if not attached then return 0 end
   now = tonumber(now) or math.floor(os.time() * 1000)
   local count = 0
-  for _, rec in ipairs(open_records(attached.state)) do
-    if tonumber(rec.expires_at) and now >= rec.expires_at then
+  for _, rec in pairs(attached.state.approvals or {}) do
+    local expirable = type(rec) == "table" and (rec.status == "open"
+      or (rec.status == "approved" and rec.kind == "approve_text"))
+    if expirable and tonumber(rec.expires_at) and now >= rec.expires_at then
       rec.status, rec.answered_at = "expired", now
       local callback = handlers[rec.kind] and handlers[rec.kind].expire
       if callback then callback(rec) end
@@ -300,6 +528,7 @@ function approval.sweep(now)
     end
   end
   if count > 0 then persist() end
+  for _, fn in pairs(ticks) do pcall(fn, now) end
   return count
 end
 
@@ -316,25 +545,71 @@ local function usage(verb)
   return "Usage: remuda butler " .. verb .. " ID\nExample: remuda butler " .. verb .. " A7K2"
 end
 
+local APPROVAL_CLI_SPEC = {
+  name = "remuda butler",
+  verbs = {
+    approvals = { about = "List open approval requests", next = "remuda butler approvals" },
+    approve = { about = "Approve a request", args = { { name = "ID", help = "Approval request ID" } },
+      next = "remuda butler approvals" },
+    deny = { about = "Deny a request", args = { { name = "ID", help = "Approval request ID" } },
+      next = "remuda butler approvals" },
+  },
+}
+
+local function parsed_approval_id(args, verb)
+  local cli = remuda.cli
+  if type(cli) ~= "table" or type(cli.parse) ~= "function" then return nil, false end
+  -- The old parser treated a leading-dash ID as an ordinary word. clap treats
+  -- `--` as an option boundary, so let the legacy answer path handle it.
+  for _, word in ipairs(args) do
+    if word == "--" then
+      if verb ~= "approvals" and #args == 2 then return args[2], false end
+      return nil, true
+    end
+  end
+  local ok, report = pcall(cli.parse, APPROVAL_CLI_SPEC, args)
+  if not ok then return nil, false end
+  local exact_help = #args == 2 and (args[2] == "--help" or args[2] == "-h")
+  if exact_help then return nil, true, "help" end
+  if not report.ok or report.kind == "help" then
+    -- A lone dash-prefixed ID used to reach approval.answer as an ID. Keep
+    -- that behavior while the declared grammar owns ordinary valid argv.
+    if verb ~= "approvals" and #args == 2 and type(args[2]) == "string" and args[2] ~= ""
+        and args[2]:sub(1, 1) == "-" then return args[2], true end
+    return nil, true
+  end
+  if verb == "approvals" then return nil, true end
+  local id = report.values and report.values.ID
+  if type(id) ~= "string" or id == "" then return nil, true end
+  return id, true
+end
+
 function approval.cli(args, agent)
   local verb = args and args[1]
   if verb == "approvals" then
+    parsed_approval_id(args, verb)
     if #args == 2 and (args[2] == "--help" or args[2] == "-h") then return usage(verb) end
-    if #args ~= 1 then return fail(usage(verb) .. "\nNext: remuda butler approvals") end
+    if #args ~= 1 then
+      return fail(usage(verb) .. "\nNext: remuda butler approvals")
+    end
     local rows = approval.list()
     if #rows == 0 then return "No open approval requests.\nNext: nothing to do; agent requests appear here." end
     local now = math.floor(os.time() * 1000)
     local lines = { "ID  KIND  SUMMARY  ASKER  EXPIRES-IN" }
+    local has_prepared_text = false
     for _, rec in ipairs(rows) do
       local minutes = math.max(0, math.ceil(((tonumber(rec.expires_at) or now) - now) / 60000))
       lines[#lines + 1] = string.format("%s  %s  %s  %s  %s", tostring(rec.id), tostring(rec.kind),
         tostring(rec.summary), tostring(rec.asker), tostring(minutes) .. "m")
+      if rec.kind == "approve_text" or rec.kind == "guard_action" then has_prepared_text = true end
     end
     lines[#lines + 1] = agent and "Next: wait for mail; remuda butler inbox"
+      or has_prepared_text and "Next: remuda butler deny ID cancels prepared text or a guarded call; owner Matrix approval is required"
       or "Next: remuda butler approve ID, or remuda butler deny ID"
     return table.concat(lines, "\n")
   end
   if verb == "approve" or verb == "deny" then
+    local parsed_id, parsed = parsed_approval_id(args, verb)
     if #args == 2 and (args[2] == "--help" or args[2] == "-h") then return usage(verb) end
     if #args ~= 2 or type(args[2]) ~= "string" or args[2] == "" then
       return fail(usage(verb) .. "\nNext: remuda butler approvals")
@@ -342,7 +617,9 @@ function approval.cli(args, agent)
     if agent then
       return fail(verb .. " is operator-only. Next: wait for the owner's answer by mail; remuda butler inbox")
     end
-    local ok, err, rec = approval.answer(args[2], verb, "operator (terminal)")
+    local id = parsed and parsed_id or args[2]
+    if id == nil or id == "" then return fail(usage(verb) .. "\nNext: remuda butler approvals") end
+    local ok, err, rec = approval.answer(id, verb, "operator (terminal)")
     if not ok then
       if rec then
         return fail("Request " .. tostring(rec.id) .. " was already " .. tostring(rec.status) .. ".\nNext: remuda butler approvals")
@@ -350,7 +627,7 @@ function approval.cli(args, agent)
       return fail(tostring(err) .. "\nNext: remuda butler approvals")
     end
     if verb == "approve" then
-      return "Approved request " .. tostring(rec.id) .. " (" .. tostring(rec.summary) .. "); joining now. The result goes to the HOME thread and the asker's mail."
+      return "Approved request " .. tostring(rec.id) .. " (" .. tostring(rec.summary) .. "); joining now. The result goes to the request thread and the asker's mail."
         .. "\nNext: remuda butler approvals"
     end
     return "Denied request " .. tostring(rec.id) .. " (" .. tostring(rec.summary) .. ")."

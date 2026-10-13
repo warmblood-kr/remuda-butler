@@ -13,10 +13,11 @@ local USAGE = [[  remuda butler matrix [--json] status
   remuda butler matrix [--json] [--room ROOM] send TEXT | - | --file PATH
   remuda butler matrix [--json] [--room ROOM] reply EVENT_ID TEXT | - | --file PATH
   remuda butler matrix [--json] [--room ROOM] react EVENT_ID KEY
-  remuda butler matrix [--json] [--room ROOM] upload PATH
+  remuda butler matrix [--json] [--room ROOM] upload [--thread EVENT_ID] [--caption TEXT] PATH
   remuda butler matrix [--json] [--room ROOM] redact EVENT_ID [--reason TEXT]
   remuda butler matrix [--json] join ROOM (ID, #alias, or public name; operator)
   remuda butler matrix [--json] leave ROOM (operator)
+  remuda butler matrix [--json] mark-all ROOM (operator; ROOM is a joined room ID; reload with remuda exec butler)
   remuda butler matrix setup [OPTIONS]
   remuda butler matrix [--json] quarantine [--id EVENT_ID] (operator)
 
@@ -26,8 +27,151 @@ Or end with --password-cmd PROG [ARG...] in place of --password-file to read the
 local VERBS = {
   status = true, rooms = true, history = true, event = true, get = true, quarantine = true,
   thread = true, follow = true, unfollow = true, download = true, send = true, reply = true, react = true,
-  upload = true, redact = true, join = true, leave = true,
+  upload = true, redact = true, join = true, leave = true, ["mark-all"] = true,
 }
+
+local THREAD_CLI_SPEC = {
+  name = "remuda butler matrix",
+  options = {
+    { long = "room", value = "ROOM", help = "Room ID, alias or name (default: the configured room)", global = true },
+    { long = "json", help = "Print machine-readable JSON", global = true },
+  },
+  verbs = {
+    thread = {
+      about = "Show every reply in a Matrix thread",
+      args = { { name = "EVENT_ID", help = "Event that starts the thread, e.g. $abc123, or a Butler mail id (01M...)" } },
+      next = "remuda butler matrix reply EVENT_ID TEXT",
+    },
+  },
+}
+
+local MATRIX_CLI_SPEC = {
+  name = "remuda butler matrix",
+  options = {
+    { long = "room", value = "ROOM", help = "Room ID, alias or name (default: the configured room)", global = true },
+    { long = "json", help = "Print machine-readable JSON", global = true },
+    { short = "n", long = "n", value = "N", help = "Number of recent events" },
+    { short = "o", long = "o", value = "PATH", help = "Output path for downloaded media" },
+  },
+  verbs = {
+    status = { about = "Show Matrix connection status", next = "remuda butler matrix rooms" },
+    rooms = { about = "List Matrix rooms", options = { { long = "public", help = "Search public rooms" } }, args = { { name = "TERM", required = false, help = "TERM" } }, next = "remuda butler matrix setup" },
+    history = { about = "Show recent Matrix events", args = { { name = "WORDS", required = false, multiple = true, help = "WORDS" } }, next = "remuda butler matrix status" },
+    thread = { about = "Show every reply in a Matrix thread", args = { { name = "EVENT_ID", help = "EVENT_ID" } }, next = "remuda butler matrix reply EVENT_ID TEXT" },
+    follow = { about = "Follow a Matrix thread", args = { { name = "EVENT_ID", help = "EVENT_ID" } }, next = "remuda butler matrix thread EVENT_ID" },
+    unfollow = { about = "Unfollow a Matrix thread", args = { { name = "EVENT_ID", help = "EVENT_ID" } }, next = "remuda butler matrix follow EVENT_ID" },
+    event = { about = "Show one Matrix event", args = { { name = "EVENT_ID", help = "EVENT_ID" } }, next = "remuda butler matrix history" },
+    get = { about = "Show one Matrix event", args = { { name = "EVENT_ID", help = "EVENT_ID" } }, next = "remuda butler matrix history" },
+    send = { about = "Send a Matrix message", args = { { name = "TEXT", multiple = true, help = "TEXT" } }, next = "remuda butler matrix history" },
+    reply = { about = "Reply to a Matrix event", args = { { name = "WORDS", multiple = true, help = "WORDS" } }, next = "remuda butler matrix history" },
+    react = { about = "React to a Matrix event", args = { { name = "EVENT_AND_KEY", multiple = true, help = "EVENT_AND_KEY" } }, next = "remuda butler matrix history" },
+    upload = { about = "Upload a file to Matrix", options = {
+      { long = "thread", value = "EVENT_ID", help = "Thread to reply in" },
+      { long = "caption", value = "TEXT", help = "Caption for the upload" },
+    }, args = { { name = "PATH", help = "PATH" } }, next = "remuda butler matrix history" },
+    download = { about = "Download Matrix media", args = { { name = "MXC", help = "MXC" } }, next = "remuda butler matrix history" },
+    redact = { about = "Redact a Matrix event", options = { { long = "reason", value = "TEXT", help = "Reason for redaction" } }, args = { { name = "EVENT_ID", help = "EVENT_ID" } }, next = "remuda butler matrix history" },
+    join = { about = "Join a Matrix room", args = { { name = "ROOM", help = "ROOM" } }, next = "remuda butler matrix rooms" },
+    leave = { about = "Leave a Matrix room", args = { { name = "ROOM", help = "ROOM" } }, next = "remuda butler matrix rooms" },
+    ["mark-all"] = { about = "Mark a room as the ALL-BUTLERS room", args = { { name = "ROOM", help = "ROOM" } }, next = "remuda butler matrix rooms" },
+    quarantine = { about = "Inspect quarantined Matrix events", options = { { long = "id", value = "EVENT_ID", help = "Inspect one event" } }, next = "remuda butler matrix status" },
+  },
+}
+
+local THREAD_HELP_TEXT = [[Show every reply in a Matrix thread
+
+Usage: remuda butler matrix thread [OPTIONS] EVENT_ID
+
+Arguments:
+  EVENT_ID  Event that starts the thread, e.g. $abc123, or a Butler mail id (01M...)
+
+Options:
+      --room ROOM  Room ID, alias or name (default: the configured room)
+      --json       Print machine-readable JSON
+  -h, --help       Print help
+
+Next: remuda butler matrix reply EVENT_ID TEXT]]
+
+local function terminal_safe(value)
+  return tostring(value or ""):gsub("[%c]", " "):gsub("\194[\128-\159]", " ")
+end
+
+local function matrix_verb(args)
+  if type(args) ~= "table" then return nil end
+  local at = 2
+  while at <= #args do
+    if args[at] == "--json" then
+      at = at + 1
+    elseif args[at] == "--room" or args[at] == "-n" or args[at] == "-o" or args[at] == "--id" then
+      at = at + 2
+    elseif args[at] == "--" then
+      return nil
+    elseif type(args[at]) == "string" and args[at]:sub(1, 1) == "-" then
+      at = at + 1
+    else
+      return args[at]
+    end
+  end
+end
+
+local function matrix_cli_failure(text, code)
+  text = tostring(text or "")
+  local trailing_newline = text:sub(-1) == "\n"
+  if trailing_newline then text = text:sub(1, -2) end
+  local safe_lines = {}
+  for line in (text .. "\n"):gmatch("(.-)\n") do
+    safe_lines[#safe_lines + 1] = terminal_safe(line)
+  end
+  text = table.concat(safe_lines, "\n")
+  if trailing_newline then text = text .. "\n" end
+  if text:sub(-1) ~= "\n" then text = text .. "\n" end
+  if type(remuda.pending) == "function" then
+    local reply = remuda.pending({ timeout = 1 })
+    reply:resolve(code or 2, "", text)
+    return reply
+  end
+  if type(remuda.fail) == "function" then return remuda.fail(text, code or 2) end
+  error(text, 0)
+end
+
+local function verb_distance(left, right)
+  local previous = {}
+  for at = 0, #right do previous[at] = at end
+  for row = 1, #left do
+    local current = { [0] = row }
+    for column = 1, #right do
+      current[column] = math.min(current[column - 1] + 1, previous[column] + 1,
+        previous[column - 1] + (left:sub(row, row) == right:sub(column, column) and 0 or 1))
+    end
+    previous = current
+  end
+  return previous[#right]
+end
+
+local function unknown_matrix_verb(args)
+  local word = matrix_verb(args)
+  if not word or word == "help" or VERBS[word] then return nil end
+  local verbs = {}
+  for verb in pairs(VERBS) do verbs[#verbs + 1] = verb end
+  table.sort(verbs)
+  local suggestion, distance
+  for _, verb in ipairs(verbs) do
+    local candidate = verb_distance(word, verb)
+    if not distance or candidate < distance then suggestion, distance = verb, candidate end
+  end
+  local safe_word = terminal_safe(word)
+  local lines = { "remuda: butler matrix: unknown verb '" .. safe_word .. "'." }
+  if suggestion and distance <= math.max(1, math.floor(#word / 3)) then
+    lines[1] = lines[1]:sub(1, -2) .. " Did you mean '" .. suggestion .. "'?"
+    lines[#lines + 1] = "Usage: remuda butler matrix [--json] [--room ROOM] " .. suggestion .. " EVENT_ID"
+    lines[#lines + 1] = "Example: remuda butler matrix " .. suggestion .. " '$EVENT_ID'"
+    lines[#lines + 1] = "Next: remuda butler matrix " .. suggestion .. " '$EVENT_ID'"
+  else
+    lines[#lines + 1] = "Usage: remuda butler matrix <" .. table.concat(verbs, " | ") .. ">"
+    lines[#lines + 1] = "Next: remuda butler matrix --help"
+  end
+  return matrix_cli_failure(table.concat(lines, "\n"), 2)
+end
 
 local function join_words(values, first)
   local words = {}
@@ -87,6 +231,10 @@ local function parse(args)
       if not args[at + 1] then error("-o requires an absolute path", 0) end
       options.output = args[at + 1]
       at = at + 2
+    elseif verb == "upload" and not positional and (value == "--thread" or value == "--caption") then
+      if not args[at + 1] then error(value .. " requires a value", 0) end
+      options[value:sub(3)] = args[at + 1]
+      at = at + 2
     elseif verb == "redact" and value == "--reason" then
       if not args[at + 1] then error("--reason requires text", 0) end
       options.reason = args[at + 1]
@@ -142,7 +290,7 @@ local function parse(args)
   elseif method == "redact" then
     if #values ~= 1 then return nil end
     options.event_id = values[1]
-  elseif method == "join" or method == "leave" then
+  elseif method == "join" or method == "leave" or method == "mark-all" then
     if #values > 1 or options.room then return nil end
     options.room = values[1]
   elseif method == "history" then
@@ -166,6 +314,27 @@ local function parse(args)
   return method, options
 end
 
+local function parsed_simple_request(report)
+  if type(report) ~= "table" or not report.ok or report.kind == "help" then return nil end
+  local values, verb = report.values or {}, report.verb
+  if verb == "status" then
+    if values.room ~= nil then return nil end
+    return verb, { json = (values.json == true or nil) }
+  elseif verb == "rooms" then
+    if values.room ~= nil then return nil end
+    return verb, { json = (values.json == true or nil), public = (values.public == true or nil), public_term = values.TERM }
+  elseif verb == "history" then
+    if values.WORDS ~= nil and values.WORDS ~= "" and not (type(values.WORDS) == "table" and #values.WORDS == 0) then
+      return nil
+    end
+    return verb, { json = (values.json == true or nil), room = values.room, n = values.n }
+  elseif verb == "event" or verb == "get" or verb == "follow" or verb == "unfollow" then
+    return verb == "get" and "event" or verb, {
+      json = (values.json == true or nil), room = values.room, event_id = values.EVENT_ID,
+    }
+  end
+end
+
 local function event_line(event)
   if type(event) ~= "table" then return tostring(event) end
   local sender = event.sender or "unknown sender"
@@ -175,14 +344,23 @@ local function event_line(event)
   return sender .. ": " .. (matrix.encode_json(event) or "<event>")
 end
 
-local function terminal_safe(value)
-  return tostring(value or ""):gsub("[%c]", " "):gsub("\194[\128-\159]", " ")
-end
 -- At most `limit` bytes; a cut text ends with "..." inside the limit, so the
 -- reader can see that it is not complete.
 local function shortened(text, limit)
   if #text <= limit then return text end
   return matrix.utf8_prefix(text, limit - 3) .. "..."
+end
+local function shortened_path(text, limit)
+  if #text <= limit then return text end
+  local room = limit - 3
+  local prefix = matrix.utf8_prefix(text, math.floor(room / 3))
+  local suffix_start = #text - (room - #prefix) + 1
+  while suffix_start <= #text do
+    local byte = text:byte(suffix_start)
+    if not byte or byte < 0x80 or byte >= 0xC0 then break end
+    suffix_start = suffix_start + 1
+  end
+  return prefix .. "..." .. text:sub(suffix_start)
 end
 local function shell_quote(value)
   return matrix.shell_quote(tostring(value))
@@ -281,6 +459,8 @@ local function render_human(verb, options, result)
     return "Completed Matrix " .. verb .. (result.event_id and (": " .. result.event_id) or "") .. "\n"
   elseif verb == "upload" then
     return "Uploaded as " .. tostring(result.content_uri or "") .. " (" .. tostring(result.event_id or "") .. ")\n"
+  elseif verb == "mark-all" then
+    return "Marked " .. terminal_safe(result.room_id or options.room) .. " as the ALL-BUTLERS room\nNext: remuda exec butler\n"
   elseif verb == "join" or verb == "leave" then
     if verb == "join" and result.approval_request_id then
       return "Asked the owner to approve joining " .. terminal_safe(result.approval_label or "the Matrix room")
@@ -320,7 +500,7 @@ local function finish(reply, cancelled, completed, verb, options, result)
   if result.error then
     local message = tostring(result.error)
     if not message:find("Next:", 1, true) then
-      if verb == "join" or verb == "leave" then message = message .. "\nNext: remuda butler matrix rooms" end
+      if verb == "join" or verb == "leave" or verb == "mark-all" then message = message .. "\nNext: remuda butler matrix rooms" end
       if verb == "rooms" then message = message .. "\nNext: remuda butler matrix setup" end
     end
     return reply:resolve(1, "", message .. "\n")
@@ -357,6 +537,58 @@ end
 -- safe. Replace it when core has a capability or version word.
 function matrix.prompt_preface_supported()
   return type(remuda.fs) == "table" and type(remuda.fs.lock) == "function"
+end
+
+function matrix.wrap_prompt_preface(text)
+  if type(text) ~= "string" then return "" end
+  local lines = {}
+  local function wrap_line(source)
+    if #source <= 200 then lines[#lines + 1] = source; return end
+    if source:match("^%s*$") then lines[#lines + 1] = ""; return end
+    -- A wrapped line keeps its indent, on the continuation lines too.
+    local indent = source:match("^%s*"):sub(1, 8)
+    local room = 200 - #indent
+    local line = ""
+    local function flush()
+      if line ~= "" then lines[#lines + 1] = indent .. line; line = "" end
+    end
+    for word in source:gmatch("%S+") do
+      while #word > room do
+        flush()
+        local cut = room
+        while cut > 0 do
+          local byte = word:byte(cut + 1) or 0
+          if byte < 0x80 or byte > 0xbf then break end
+          cut = cut - 1
+        end
+        -- No boundary within reach (malformed bytes): split on the byte.
+        if cut == 0 then cut = room end
+        lines[#lines + 1] = indent .. word:sub(1, cut)
+        word = word:sub(cut + 1)
+      end
+      if line == "" then
+        line = word
+      elseif #line + 1 + #word <= room then
+        line = line .. " " .. word
+      else
+        flush()
+        line = word
+      end
+    end
+    flush()
+  end
+  local start = 1
+  while true do
+    local newline = text:find("\n", start, true)
+    wrap_line(text:sub(start, newline and newline - 1 or #text))
+    if not newline then break end
+    start = newline + 1
+  end
+  if #lines > 32 then
+    for index = #lines, 32, -1 do lines[index] = nil end
+    lines[32] = "..."
+  end
+  return table.concat(lines, "\n")
 end
 
 function matrix.cli(args, agent, stdin_body, file_body)
@@ -434,23 +666,27 @@ function matrix.cli(args, agent, stdin_body, file_body)
                 or nil
               return prompt_failure(safe_error, next_line)
             end
+            -- A dynamic value is cut at 150 characters so one long value cannot
+            -- crowd the summary; the fixed wording is never cut.
+            local function value(text) return shortened(terminal_safe(text), 150) end
+            local function path(text) return shortened_path(terminal_safe(text), 150) end
             local lines = {
               "Matrix setup will:",
-              "  Homeserver: " .. terminal_safe(wizard_plan.homeserver),
-              "  Owner: " .. terminal_safe(wizard_plan.owner_mxid),
+              "  Homeserver: " .. value(wizard_plan.homeserver),
+              "  Owner: " .. value(wizard_plan.owner_mxid),
               "  Rooms: open (anyone can invite this Butler). Restrict: set rooms=allowlist or add deny_room/deny_server in "
-                .. terminal_safe(wizard_plan.config_path) .. ". The sender allowlist still decides whose messages are trusted.",
+                .. path(wizard_plan.config_path) .. ". The sender allowlist still decides whose messages are trusted.",
               "  Account: create a Butler bot (you will need its server registration token)",
-              "  Bot: " .. terminal_safe(wizard_plan.bot_mxid),
+              "  Bot: " .. value(wizard_plan.bot_mxid),
               -- Without --dir the files go next to the config file.
               "  Save private token and config files in: "
-                .. terminal_safe(wizard_plan.output_dir or wizard_plan.config_path:match("^(.*)/[^/]+$")),
+                .. path(wizard_plan.output_dir or wizard_plan.config_path:match("^(.*)/[^/]+$")),
               "  Start the relay for this Butler with this config (replaces its current Matrix relay config)",
             }
             if wizard_plan.pin then
               lines[#lines + 1] = "  HTTPS certificate pin: " .. wizard_plan.pin
             elseif wizard_plan.ca_file then
-              lines[#lines + 1] = "  HTTPS CA file: " .. terminal_safe(wizard_plan.ca_file)
+              lines[#lines + 1] = "  HTTPS CA file: " .. path(wizard_plan.ca_file)
             elseif scheme_or_error == "https" then
               lines[#lines + 1] = "  HTTPS trust: this system's trusted certificates"
             end
@@ -460,10 +696,7 @@ function matrix.cli(args, agent, stdin_body, file_body)
             local question = "Continue? Type Y to continue, or N to cancel"
             local label, preface = table.concat(lines, "\n") .. "\n" .. question, nil
             if matrix.prompt_preface_supported() then
-              -- A preface line over 256 characters is an error from core, not
-              -- a cut: shorten a very long value here so the wizard goes on.
-              for index, line in ipairs(lines) do lines[index] = shortened(line, 250) end
-              label, preface = question, table.concat(lines, "\n")
+              label, preface = question, matrix.wrap_prompt_preface(table.concat(lines, "\n"))
             end
             prompt_line(label, "N", function(answer)
                 answer = type(answer) == "string" and answer:lower() or ""
@@ -674,12 +907,59 @@ function matrix.cli(args, agent, stdin_body, file_body)
     if plan.wizard then begin_wizard() else execute_setup(plan) end
     return reply
   end
-  local ok, verb, options = pcall(parse, args)
-  if not ok then
-    if type(remuda.fail) == "function" then return remuda.fail(tostring(verb), 2) end
-    error(tostring(verb), 0)
+  local verb, options, legacy_verb, legacy_options
+  local cli = remuda.cli
+  local spec_report
+  if type(cli) == "table" and type(cli.parse) == "function" then
+    local has_separator = false
+    for _, word in ipairs(args or {}) do if word == "--" then has_separator = true; break end end
+    if not has_separator then
+      local argv = {}
+      for at = 2, #(args or {}) do argv[#argv + 1] = args[at] end
+      local ok, report = pcall(cli.parse, MATRIX_CLI_SPEC, argv)
+      if ok then spec_report = report end
+    end
+  end
+  if type(cli) == "table" and type(cli.parse) == "function" and matrix_verb(args) == "thread" then
+    local argv = {}
+    for at = 2, #args do argv[#argv + 1] = args[at] end
+    local report = cli.parse(THREAD_CLI_SPEC, argv)
+    if not report.ok then
+      if report.kind == "help" then return THREAD_HELP_TEXT end
+      local text = report.text:gsub("\nNext: [^\n]*$", "\nNext: remuda butler matrix thread --help")
+      return matrix_cli_failure(text, report.code)
+    end
+    verb = report.verb
+    options = {
+      event_id = report.values.EVENT_ID,
+      room = report.values.room,
+      json = report.values.json,
+    }
+  else
+    verb, options = parsed_simple_request(spec_report)
+    local ok
+    ok, legacy_verb, legacy_options = pcall(parse, args)
+    -- The legacy parser is the accept/route authority: the spec result is kept only when it
+    -- is field-for-field the same request (root -n/-o, TERM, positional boundaries, spellings).
+    local same = ok and verb == legacy_verb and type(legacy_options) == "table"
+    if same then
+      for _, key in ipairs({ "json", "room", "n", "event_id", "public", "public_term", "output" }) do
+        if options[key] ~= legacy_options[key] then same = false; break end
+      end
+    end
+    if not same then
+      verb, options = legacy_verb, legacy_options
+      if not ok then
+        if type(remuda.fail) == "function" then return remuda.fail(tostring(verb), 2) end
+        error(tostring(verb), 0)
+      end
+    end
   end
   if not verb then
+    if type(cli) == "table" and type(cli.parse) == "function" then
+      local unknown = unknown_matrix_verb(args)
+      if unknown then return unknown end
+    end
     local candidate
     for _, value in ipairs(args or {}) do
       if value == "follow" or value == "unfollow" then candidate = value end
@@ -799,7 +1079,10 @@ function matrix.cli(args, agent, stdin_body, file_body)
     return resolve_local(0, "Not following thread " .. safe_thread .. " in " .. safe_room
       .. ".\nNext: remuda butler matrix " .. next_room .. "follow " .. shell_quote(safe_thread) .. "\n", "")
   end
-  if verb == "reply" then
+  -- A reply, or an upload into a thread, answers one verified event.
+  local answers = verb == "reply" and options.event_id or (verb == "upload" and options.thread)
+  if answers then
+    options.event_id = answers
     local relay, relay_error = matrix.reply_relay()
     if not relay then
       finish(reply, cancelled, completed, verb, options,
@@ -820,6 +1103,21 @@ function matrix.cli(args, agent, stdin_body, file_body)
     else
       options.thread_root = relay:thread_root_for_event(options.event_id)
     end
+  elseif verb == "thread" and #options.event_id == 26 and options.event_id:match("^[0-9A-HJKMNP-TV-Z]+$") then
+    -- A Butler mail id names its Matrix room and thread root.
+    local mail = remuda._butler_mail
+    local room, root = nil, "the mail lookup is unavailable"
+    if mail and mail.matrix_thread_target then room, root = mail.matrix_thread_target(agent, options.event_id, agent == nil) end
+    if room and options.room and options.room ~= room then
+      root = "mail " .. terminal_safe(options.event_id) .. " belongs to room " .. terminal_safe(room) .. ", not "
+        .. terminal_safe(options.room) .. "\nNext: remuda butler matrix thread " .. terminal_safe(options.event_id)
+      room = nil
+    end
+    if not room then
+      finish(reply, cancelled, completed, verb, options, { error = root })
+      return reply
+    end
+    options.room, options.event_id = room, root
   elseif verb == "thread" and not options.room then
     local relay = matrix.relay and matrix.relay.instance
     local route = relay and relay.route_for_event and relay:route_for_event(options.event_id)
@@ -854,7 +1152,7 @@ function matrix.cli(args, agent, stdin_body, file_body)
     end
     options.output = allowed
   end
-  local called, handle = pcall(matrix[verb], options, callback, agent)
+  local called, handle = pcall(matrix[(verb:gsub("-", "_"))], options, callback, agent)
   if not called then
     finish(reply, cancelled, completed, verb, options, { error = tostring(handle) })
   else

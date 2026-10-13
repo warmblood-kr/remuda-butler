@@ -14,14 +14,17 @@ local function switch(extra)
   local conf = matrix.read_config(path)
   io.stderr = old_stderr
   os.remove(path)
-  return assert(conf, "config must parse").status_commands
+  return assert(conf, "config must parse")
 end
 
-assert(switch("") == true, "absent key is on")
-assert(switch("status_commands=true\n") == true)
-assert(switch("status_commands=false\n") == false)
+assert(switch("").status_commands == true, "absent status key is on")
+assert(switch("").approve_text == false, "prepared text approvals default off")
+assert(switch("status_commands=true\napprove_text=true\n").approve_text == true)
+assert(switch("approve_text=false\n").approve_text == false)
+assert(switch("status_commands=true\n").status_commands == true)
+assert(switch("status_commands=false\n").status_commands == false)
 for _, bad in ipairs({ "off", "0", "no", "", "TRUE", "yes" }) do
-  assert(switch("status_commands=" .. bad .. "\n") == false, "invalid value fails closed: " .. bad)
+  assert(switch("status_commands=" .. bad .. "\n").status_commands == false, "invalid value fails closed: " .. bad)
 end
 print("ok - status_commands switch")
 

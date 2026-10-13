@@ -3,6 +3,7 @@ remuda butler — coordination for managed agents
   remuda butler doctor
   remuda butler quota [--report]
   remuda butler close <name> [--force]
+  remuda butler close --force <name>
   remuda butler sessions
   remuda butler status  (0=up, 75=launching, 1=failed)
   remuda butler typed-lines on|off
@@ -13,14 +14,19 @@ remuda butler — coordination for managed agents
   remuda butler schedule list
   remuda butler schedule add <name> "<M H * * *>" <text> | - [--to SESSION]
   remuda butler schedule rm <name>
-  remuda butler launch <claude|codex|monocle> [name] [--model M]
+  remuda butler approve-text request SESSION - | on|off
+  remuda butler launch <claude|codex|monocle> [name] [--model M] [--writable DIR]... [--sandbox full]
+  remuda butler guard on|off|status | approvals on|off|status | deny on|off|status  (off by default)
   remuda butler topic new <name> [--template T] [--agent A] [--model M]
-  remuda butler topic delegate <name> [--agent A] [--leader L] [--model M] <task...>
+  remuda butler topic delegate <name> [--agent A] [--leader L] [--model M] [--cwd DIR] [--writable DIR]... [--sandbox full] <task...>
   remuda butler send <to> "<message>" | <to> - | <to> --file PATH
   remuda butler send <from> <to> <message...> | <from> <to> - | <from> <to> --file PATH
-  remuda butler send-to-leader <message...> | - | --file PATH
+  remuda butler send-to-leader [--done] <message...> | - | --file PATH
+  Without --done, creates no new auto-close request and keeps an earlier one.
+  To send text that starts with -, put -- first: remuda butler send-to-leader -- -text
   remuda butler inbox [name]
   remuda butler reply <message-id> <message...> | - | --file PATH
+  remuda butler reply <message-id> --attach PATH [caption...]
   remuda butler forward <message-id> <member> [note...]
   remuda butler approvals
   remuda butler approve <ID>
@@ -36,18 +42,21 @@ remuda butler — coordination for managed agents
   remuda butler matrix [--json] [--room ROOM] send TEXT | - | --file PATH
   remuda butler matrix [--json] [--room ROOM] reply EVENT_ID TEXT | - | --file PATH
   remuda butler matrix [--json] [--room ROOM] react EVENT_ID KEY
-  remuda butler matrix [--json] [--room ROOM] upload PATH
+  remuda butler matrix [--json] [--room ROOM] upload [--thread EVENT_ID] [--caption TEXT] PATH
   remuda butler matrix [--json] [--room ROOM] redact EVENT_ID [--reason TEXT]
   remuda butler matrix [--json] join ROOM (operator)
   remuda butler matrix [--json] leave ROOM (operator)
 
 Agent sessions receive REMUDA_BUTLER_AGENT_ID and REMUDA_BUTLER_LEADER_ID.
 In an agent session, use `inbox`, `send <to> "..."`, and `send-to-leader ...`;
-the identity comes from the caller's environment. For a long message, use
+the identity comes from the daemon's registered caller session. For a long message, use
 `cat <<'EOF' | remuda butler send MEMBER -` or `--file "$PWD/path"`; `reply` accepts
-the same forms. Bodies are limited to 64 KiB. Without a forwarded Butler
-identity (a plain shell, or a core that does not forward the caller's env),
-`send` is from "operator" and `inbox` needs a name (`inbox <name>`).
+the same forms. Bodies are limited to 64 KiB. An outside caller uses the audited
+transitional operator policy: `send` is from "operator" and `inbox` needs a name.
+Unknown callers and older cores without caller fields refuse member actions;
+run from a registered Butler session or upgrade core. Environment variables never
+select CLI identity. Caller attribution is advisory, not an isolation boundary.
 `reply` answers a message's original sender, even when it was forwarded to you;
 `forward` re-delivers a message you received, keeping its sender, with a note.
+`reply <message-id> --attach PATH` posts a file into that Matrix message's thread.
 

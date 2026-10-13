@@ -154,6 +154,12 @@ return function(matrix, pinned_hostname)
   local _, spaces = invalid_ids("@alice smith:example.org", "@butler-demo:example.org")
   assert(spaces and spaces:find("--owner '@alice smith:example.org' contains spaces", 1, true),
     "spaces should show a specific Matrix user ID hint")
+  do
+    local _, c1_error = invalid_ids("@alice:example.org\194\133", "@butler-demo:example.org")
+    assert(c1_error and not c1_error:find("\194\133", 1, true)
+      and c1_error:find("@alice:example.org?", 1, true),
+      "C1 controls in an MXID server must be rejected and sanitized in the hint")
+  end
   local _, invalid_bot = invalid_ids("@alice:example.org", "butler-home:example.org")
   assert(invalid_bot and invalid_bot:find("--bot 'butler-home:example.org' is not a Matrix user ID. It looks like @butler-home:example.org", 1, true),
     "bot ID errors should name --bot and show the corrected shape")
@@ -164,6 +170,11 @@ return function(matrix, pinned_hostname)
   assert(valid_id_plan and valid_id_plan.owner_mxid == "@alice:example.org"
     and valid_id_plan.bot_mxid == "@butler-demo:example.org",
     "valid Matrix user IDs should still pass")
+  for _, name in ipairs({ "é", "ü", "한", "😀", "€" }) do
+    local plan = invalid_ids("@" .. name .. ":example.org", "@" .. name .. "bot:example.org")
+    assert(plan and plan.owner_mxid == "@" .. name .. ":example.org",
+      "legit multibyte UTF-8 must not be rejected as C1: " .. name)
+  end
 
   local registration_token_file = root .. "/registration-token"
   write(registration_token_file, "  homeserver-registration-token  \nignored")
@@ -631,7 +642,7 @@ return function(matrix, pinned_hostname)
         local count = 0
         for line in (spec.preface .. "\n"):gmatch("([^\n]*)\n") do
           count = count + 1
-          assert(#line <= 250, "a preface line must leave room under core's 256-character cap: " .. #line)
+          assert(#line <= 200, "a preface line must fit the shared wrapping limit: " .. #line)
         end
         assert(count <= 32, "a preface must stay under core's 32-line cap: " .. count)
       end
@@ -655,8 +666,8 @@ return function(matrix, pinned_hostname)
   line_specs[2].callback("@alice:example.org", nil)
   assert(#line_specs == 3 and line_specs[3].label:find("Continue? Type Y", 1, true)
     and line_specs[3].label:find("Bot: @butler%-")
-    and line_specs[3].label:find("\n  Rooms: open (anyone can invite this Butler). Restrict: set rooms=allowlist or add deny_room/deny_server in "
-      .. default_paths.config_path .. ". The sender allowlist still decides whose messages are trusted.\n", 1, true)
+    and line_specs[3].label:gsub("%s*\n%s*", " "):find(" Rooms: open (anyone can invite this Butler). Restrict: set rooms=allowlist or add deny_room/deny_server in "
+      .. default_paths.config_path .. ". The sender allowlist still decides whose messages are trusted. ", 1, true)
     and not line_specs[3].label:find("quarantined", 1, true)
     and not line_specs[3].label:find("Room access", 1, true)
     and line_specs[3].label:find("replaces its current Matrix relay config", 1, true),
@@ -685,10 +696,33 @@ return function(matrix, pinned_hostname)
       and not line_specs[3].preface:find(long_owner, 1, true),
       "a very long value is cut to fit a preface line: " .. tostring(resolved and resolved.stderr))
     -- The cut is visible: what the user confirms must not look complete.
-    assert(line_specs[3].preface:match("\n(  Owner: @a+%.%.%.)\n") and #line_specs[3].preface:match("\n(  Owner: [^\n]*)") == 250
+    assert(line_specs[3].preface:match("\n(  Owner: @a+%.%.%.)\n") and #line_specs[3].preface:match("\n(  Owner: [^\n]*)") == 159
       and line_specs[1].label == "Matrix homeserver URL" and not line_specs[3].preface:find("Homeserver: [^\n]*%.%.%.\n"),
       "a cut summary line ends with ... inside the limit, and an uncut line has no mark")
     line_specs[3].callback("N", nil)
+
+    -- Long paths need a middle cut so the owner can still identify the file.
+    local saved_paths = remuda._butler_matrix_paths
+    local long_prefix = "/tmp/" .. string.rep("long-directory/", 12)
+    remuda._butler_matrix_paths = { token_path = long_prefix .. "remuda/butler/token",
+      config_path = long_prefix .. "remuda/butler/config" }
+    requests, resolved, prompt_specs, line_specs = {}, nil, {}, {}
+    matrix.cli({ "matrix", "setup" })
+    line_specs[1].callback("http://matrix.invalid", nil)
+    line_specs[2].callback("@alice:example.org", nil)
+    local summary = line_specs[3].preface
+    local config_cut = summary:find("...", 1, true)
+    local config_tail = summary:find("remuda/butler/config", 1, true)
+    assert(summary:find(long_prefix:sub(1, 12), 1, true)
+      and config_cut and config_tail and config_cut < config_tail and #summary <= 32 * 200,
+      "a long path summary keeps a leading directory and the trailing config filename: " .. tostring(summary))
+    local output_line = summary:match("\n(  Save private token and config files in: [^\n]*)")
+    assert(output_line and output_line:find("...", 1, true)
+      and output_line:match("remuda/butler$"),
+      "the output directory summary keeps its trailing directory names: " .. tostring(summary))
+    line_specs[3].callback("N", nil)
+    remuda._butler_matrix_paths = saved_paths
+
     -- A core without preface (older daemons ignore it silently) keeps the
     -- summary in the label, as before.
     local supported = matrix.prompt_preface_supported
@@ -1943,14 +1977,17 @@ return function(matrix, pinned_hostname)
     clean_store_dir()
 
     -- Store says no, or there is no store: today's private file, and the output says so.
-    for _, reason in ipairs({ "unavailable: no desktop session for alice", "denied: alice refused", "old core" }) do
-      local class = reason ~= "old core" and reason:match("^%a+") or nil
-      if reason == "old core" then remuda.system, store_calls = nil, {} else fake_store(reason) end
+    for _, reason in ipairs({ "unavailable: no desktop session for alice", "denied: alice refused", "old core", "core system without credential" }) do
+      local no_store = reason == "old core" or reason == "core system without credential"
+      local class = not no_store and reason:match("^%a+") or nil
+      if reason == "old core" then remuda.system, store_calls = nil, {}
+      elseif no_store then remuda.system, store_calls = {}, {}
+      else fake_store(reason) end
       local file_password = register(bot, { "--default" })
       assert(resolved and resolved.status == 0, reason .. ": setup should fall back to the file: "
         .. tostring(resolved and resolved.stderr))
       assert(read(store_password_path) == file_password .. "\n"
-        and #store_calls == (reason == "old core" and 0 or 1),
+        and #store_calls == (no_store and 0 or 1),
         reason .. ": the generated password should be saved in the private file")
       assert(resolved.stdout:find("\nBot account password saved privately: " .. store_password_path .. "\n", 1, true)
         and not resolved.stdout:find("OS secure store (", 1, true)

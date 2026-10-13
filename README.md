@@ -17,11 +17,19 @@ The butler spawns a lead; a worker can spawn its own workers (cascading).
 
 ## Runtime dependency
 
-Install Remuda core/native first. Recommended core: `0.1.0-nightly.20261001000710.0a5f090`
-or later — the first with the lifecycle `start` hook (warmblood-kr/remuda#104)
+Install Remuda core/native first. Core `0.1.0-nightly.20261001000710.0a5f090`
+introduced the lifecycle `start` hook (warmblood-kr/remuda#104)
 that boots Butler right after activation. An older core ignores `start`; Butler
 then boots by a one-shot fallback on the next tick and writes `booted by
 fallback -- run \`remuda upgrade\`` to the daemon log (`tests/old_core_boot.sh`).
+
+Identity-sensitive CLI commands also require daemon-supplied caller kind and
+session fields, matched to one live Butler registration. Older cores without
+those fields refuse these commands; upgrade core or use the MCP tools with the
+session's configured capability. Environment variables never select CLI identity.
+Caller attribution is advisory, **not an isolation boundary**. See
+[Caller identity](docs/butler.md#caller-identity); CI's core pin is in
+`tests/core_ref.sh`.
 
 Butler requires a running `remuda` daemon and
 the generic Lua/runtime APIs supplied by `remuda-native`, with protocol and
@@ -96,3 +104,17 @@ daemon is restarted.
 
 `remuda butler --agent claude|codex` selects the root Butler agent without an
 environment variable. Add `--headless` when only the service should start.
+
+## Testing
+
+New Butler behavior tests belong in `tests/lua/`. Keep Rust tests for core
+primitives and the wire protocol. Run all Lua tests or one file with
+`REMUDA_BIN=<pinned remuda> tests/lua_tests.sh [tests/lua/file_test.lua]`.
+New Butler CLI verbs must use `remuda.cli.parse`; hand-parsed exceptions are
+listed in `tests/hand_parsed_verbs.txt`, and that list may only shrink.
+
+The harness uses private daemon names `h<pid>` and `h<pid>c`, private HOME,
+XDG, and runtime directories, and never targets the default daemon. Teardown
+reports `left: 0`. Keep `tests/lib/harness.lua` free of `os.execute` and
+`io.popen`.
+Test files can set `T.child_env = { PWD = "/path/" }` before startup to customize the child daemon environment.

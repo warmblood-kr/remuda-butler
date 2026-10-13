@@ -15,9 +15,52 @@ local function compact(text)
   return tostring(text):gsub("%s+", "")
 end
 
+local function composer_is_opaque(text)
+  text = tostring(text or "")
+  return text:match("^%[?Pasted text #%d+%s*%+%s*%d+%s+lines?%]?%s*$") ~= nil
+    or text:match("^%[Pasted Content %d+ chars%]$") ~= nil
+end
+
+local function composer_is_task(text, task)
+  text = tostring(text or "")
+  -- Placeholder shape cannot prove that this delivery still owns the paste.
+  return #text > 0 and not composer_is_opaque(text) and compact(text) == compact(task)
+end
+
+local function utf8_prefix(value, limit)
+  local cut = limit
+  while cut > 0 do
+    local byte = value:byte(cut + 1) or 0
+    if byte < 0x80 or byte > 0xbf then break end
+    cut = cut - 1
+  end
+  return value:sub(1, cut)
+end
+
+local function safe_type_error_line(value)
+  local line = tostring(value):match("^[^\r\n]*") or ""
+  line = line:gsub("[%c]", " "):gsub("\194[\128-\159]", " ")
+  line = line:gsub("^.-%.lua:%d+: ", "", 1)
+  return utf8_prefix(line, 200)
+end
+
+local function trace_write(remuda, session, marker, ok, result, detail)
+  local first = safe_type_error_line(ok and (detail or result) or result or "")
+  local raw = (tostring(result or "") .. " " .. tostring(detail or "")):lower()
+  local refused = raw:find("latesubmitabandoned", 1, true)
+    or (raw:find("input write", 1, true) and raw:find("in flight", 1, true))
+  local outcome = (refused or result == false) and "refused" or ok and "success" or "error"
+  if type(_butler_session_trace) == "function" then
+    pcall(_butler_session_trace, "task_write_outcome", session .. " marker=" .. tostring(marker)
+      .. " outcome=" .. outcome .. (first ~= "" and " first_line=" .. first or ""))
+  end
+  return outcome, first
+end
+
 local function prompt_start_visible(screen, task)
   local visible, expected = compact(screen), compact(task)
-  if expected == "" then return false end
+  -- A short task can equal a banner word; only a long-enough prefix is evidence.
+  if #expected < 8 then return false end
   local marker_size = math.min(48, #expected)
   return visible:find(expected:sub(1, marker_size), 1, true) ~= nil
 end
@@ -42,27 +85,34 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
     end
     return os.time()
   end
-  local function finish(ok, reason)
+  local function finish(ok, reason, unverified)
     remuda.cancel(poll)
     if options.on_done then
-      pcall(options.on_done, ok, reason)
+      pcall(options.on_done, ok, reason, unverified)
     elseif not ok then
       notify(remuda, parent, name, reason)
     end
   end
   poll = remuda.schedule({ every = 0.5, run = function()
+    if options.same_launch then
+      local checked, alive, reason = pcall(options.same_launch)
+      if not checked or alive ~= true then
+        finish(false, reason or "session was replaced")
+        return
+      end
+    end
     local captured, screen = pcall(remuda.capture, actual)
     if not captured then
-      finish(false, "could not capture the agent screen")
+      finish(false, "could not capture the agent screen", verify_started ~= nil)
       return
     end
 
     if options.trust_dialog then
-      local checked, waiting = pcall(options.trust_dialog, screen)
+      local checked, waiting, why = pcall(options.trust_dialog, screen, attempts > 0)
       if not checked or waiting then
         startup_ticks = startup_ticks + 1
         if startup_ticks >= (options.ready_timeout or 60) then
-          finish(false, "waiting for a human to answer the trust dialog")
+          finish(false, why or "waiting for a human to answer the trust dialog")
         end
         return
       end
@@ -111,9 +161,13 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
       end
       if is_ready then
         local allowed = true
+        if options.detect_only and options.empty then
+          local checked, decision = pcall(options.empty, screen)
+          allowed = checked and decision == "EMPTY"
+        end
         if options.allowed then
           local checked, result = pcall(options.allowed, false, screen)
-          allowed = checked and result == true
+          allowed = allowed and checked and result == true
         end
         if not allowed then
           deferred_ticks = deferred_ticks + 1
@@ -126,15 +180,12 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
         verify_ticks = 0
         -- Keep this nonblocking: a long terminal sleep stalls every daemon
         -- callback, including notice and lifecycle work.
-        local typed, type_error = pcall(remuda.type_text, actual, task, 0.1)
-        if not typed then
-          local reason = "type failed"
-          if type(type_error) == "string" then
-            local first_line = type_error:match("^[^\r\n]*") or ""
-            first_line = first_line:gsub("^.-:%d+: ", "", 1):sub(1, 200)
-            reason = "type failed: " .. first_line
-          end
-          finish(false, reason)
+        local typed, result, detail = pcall(remuda.type_text, actual, task, 0.1)
+        local outcome, first = trace_write(remuda, actual, options.marker, typed, result, detail)
+        if options.on_write then pcall(options.on_write, outcome, first) end
+        if outcome ~= "success" then
+          local reason = first ~= "" and first or "write refused"
+          finish(false, options.detect_only and reason or "type failed: " .. reason)
         else
           verify_started = now()
         end
@@ -170,6 +221,11 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
     if remuda.session then
       local checked, session = pcall(remuda.session, actual)
       session_busy = checked and session and session.is_busy == true
+      if options.detect_only then session_busy = not checked or not session or session.is_busy == true end
+    end
+    if options.detect_only and options.working then
+      local checked, working = pcall(options.working, screen)
+      session_busy = session_busy or not checked or working == true
     end
     -- Busy is useful only after the composer releases our text; typing the
     -- task itself also makes a terminal look busy.
@@ -177,10 +233,12 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
       finish(true)
       return
     end
-    local placeholder = composer_text:match("^%[?Pasted text #%d+%s*%+%s*%d+%s+lines?%]?%s*$") ~= nil
-      or composer_text:match("^%[Pasted Content %d+ chars%]$") ~= nil
-    local composer_is_task = not empty and (compact(composer_text) == compact(task) or placeholder)
-    if composer_is_task then task_seen_in_composer = true end
+    if not empty and composer_is_opaque(composer_text) then
+      finish(false, "opaque paste has no delivery ownership evidence", true)
+      return
+    end
+    local contains_task = not empty and composer_is_task(composer_text, task)
+    if contains_task then task_seen_in_composer = true end
     if started and empty then
       finish(true)
       return
@@ -189,9 +247,16 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
       finish(true)
       return
     end
+    -- Empty, idle and never seen in the composer: the write was lost. Wait
+    -- out a slow first paint before saying so.
+    if options.detect_only and empty and not session_busy and not task_seen_in_composer
+      and now() - verify_started >= 15 then
+      finish(false, "write returned success but the task never appeared")
+      return
+    end
     -- A task can be fully painted while its first Return is dropped. Retry
     -- submit once, before allowing queued notices to reach this composer.
-    if composer_is_task and verify_ticks >= 4 and not options.return_retried then
+    if contains_task and verify_ticks >= 4 and not options.return_retried then
       local allowed = true
       if options.allowed then
         local checked, result = pcall(options.allowed, true, screen)
@@ -214,6 +279,8 @@ local function schedule(remuda, kind, actual, name, parent, task, options)
   return poll
 end
 
-local delivery = { schedule = schedule, ready = ready, prompt_start_visible = prompt_start_visible }
+local delivery = { schedule = schedule, ready = ready, prompt_start_visible = prompt_start_visible,
+  trace_write = trace_write, composer_is_task = composer_is_task,
+  composer_is_opaque = composer_is_opaque }
 remuda._butler_prompt_delivery = delivery
 return delivery

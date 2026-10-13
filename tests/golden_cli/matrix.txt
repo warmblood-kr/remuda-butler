@@ -1,0 +1,501 @@
+### remuda butler "matrix" "status"
+exit: 0
+stdout:
+User: @bot:example.org
+Joined rooms: 0
+stderr:
+
+actions:
+matrix.status(nil)
+
+### remuda butler "matrix" "--json" "status"
+exit: 0
+stdout:
+{"joined_rooms":[],"user_id":"@bot:example.org"}
+stderr:
+
+actions:
+matrix.status(true)
+
+### remuda butler "matrix" "status" "--json"
+exit: 0
+stdout:
+{"joined_rooms":[],"user_id":"@bot:example.org"}
+stderr:
+
+actions:
+matrix.status(true)
+
+### remuda butler "matrix" "rooms"
+exit: 0
+stdout:
+Rooms mode: allowlist
+No configured Matrix rooms
+Next: invite the Butler to a room from an allowlisted account (none).
+stderr:
+
+actions:
+matrix.rooms(nil|nil)
+
+### remuda butler "matrix" "rooms" "--public" "science"
+exit: 0
+stdout:
+No public Matrix rooms found
+Next: remuda butler matrix join 'science'
+stderr:
+
+actions:
+matrix.rooms(true|science)
+
+### remuda butler "matrix" "--room" "!room:example.org" "-n" "8" "history"
+exit: 0
+stdout:
+No Matrix events
+stderr:
+
+actions:
+matrix.history(!room:example.org|8|nil)
+
+### remuda butler "matrix" "history" "-n" "4" "--json"
+exit: 0
+stdout:
+{"chunk":[]}
+stderr:
+
+actions:
+matrix.history(nil|4|true)
+
+### remuda butler "matrix" "thread" "$event"
+exit: 0
+stdout:
+No Matrix events
+stderr:
+
+actions:
+matrix.thread(nil|$event|false)
+
+### remuda butler "matrix" "--room" "!room:example.org" "follow" "$event"
+exit: 1
+stdout:
+
+stderr:
+Matrix relay is not running. Next: remuda butler doctor
+actions:
+(none)
+
+### remuda butler "matrix" "unfollow" "$event"
+exit: 1
+stdout:
+
+stderr:
+Matrix relay is not running. Next: remuda butler doctor
+actions:
+(none)
+
+### remuda butler "matrix" "event" "$event"
+exit: 0
+stdout:
+@alice:example.org: hello
+stderr:
+
+actions:
+matrix.event(nil|$event|nil)
+
+### remuda butler "matrix" "get" "$event"
+exit: 0
+stdout:
+@alice:example.org: hello
+stderr:
+
+actions:
+matrix.event(nil|$event|nil)
+
+### remuda butler "matrix" "--room" "!room:example.org" "send" "hello" "world"
+exit: 0
+stdout:
+Sent 1 message(s) to !room:example.org: $sent
+stderr:
+
+actions:
+matrix.send(!room:example.org|hello world|nil|nil)
+
+### remuda butler "matrix" "send" "-"
+exit: 1
+stdout:
+
+stderr:
+message body must not be empty
+actions:
+(none)
+
+### remuda butler "matrix" "send" "--" "--literal"
+exit: 0
+stdout:
+Sent 1 message(s) to !room:example.org: $sent
+stderr:
+
+actions:
+matrix.send(nil|--literal|nil|nil)
+
+### remuda butler "matrix" "reply" "$event" "hello" "there"
+exit: 1
+stdout:
+
+stderr:
+Matrix relay is not running or is from an older load; event sender cannot be verified
+actions:
+(none)
+
+### remuda butler "matrix" "react" "$event" "+1"
+exit: 0
+stdout:
+Completed Matrix react: $event
+stderr:
+
+actions:
+matrix.react(nil|$event|+1|nil)
+
+### remuda butler "matrix" "upload" "file.txt"
+exit: 0
+stdout:
+Uploaded as mxc://example/file ($upload)
+stderr:
+
+actions:
+matrix.upload(nil|file.txt|nil)
+
+### remuda butler "matrix" "-o" "/tmp/out" "download" "mxc://example/file"
+exit: 0
+stdout:
+Downloaded 3 bytes to /tmp/out
+stderr:
+
+actions:
+matrix.download(/tmp/out|mxc://example/file|nil)
+
+### remuda butler "matrix" "redact" "$event" "--reason" "cleanup"
+exit: 0
+stdout:
+Completed Matrix redact: $event
+stderr:
+
+actions:
+matrix.redact(nil|$event|cleanup|nil)
+
+### remuda butler "matrix" "setup" "--help"
+exit: 0
+stdout:
+matrix setup help
+stderr:
+
+actions:
+matrix.setup_prepare(--help)
+
+### remuda butler "matrix" "setup"
+exit: 0
+stdout:
+matrix setup help
+stderr:
+
+actions:
+matrix.setup_prepare()
+
+### remuda butler "matrix" "unknown"
+exit: 2
+stdout:
+
+stderr:
+remuda: butler matrix: unknown verb 'unknown'.
+Usage: remuda butler matrix <download | event | follow | get | history | join | leave | mark-all | quarantine | react | redact | reply | rooms | send | status | thread | unfollow | upload>
+Next: remuda butler matrix --help
+actions:
+(none)
+
+### remuda butler "matrix" "stats"
+exit: 2
+stdout:
+
+stderr:
+remuda: butler matrix: unknown verb 'stats' Did you mean 'status'?
+Usage: remuda butler matrix [--json] [--room ROOM] status EVENT_ID
+Example: remuda butler matrix status '$EVENT_ID'
+Next: remuda butler matrix status '$EVENT_ID'
+actions:
+(none)
+
+### remuda butler "matrix" "--" "status"
+exit: 0
+stdout:
+User: @bot:example.org
+Joined rooms: 0
+stderr:
+
+actions:
+matrix.status(nil)
+
+### remuda butler "matrix" "history"
+exit: 0
+stdout:
+No Matrix events
+stderr:
+
+actions:
+matrix.history(nil|nil|nil)
+
+### remuda butler "matrix" "history" "extra"
+exit: 0
+stdout:
+  remuda butler matrix [--json] status
+  remuda butler matrix [--json] rooms
+  remuda butler matrix [--json] rooms --public [TERM]
+  remuda butler matrix [--json] [--room ROOM] [-n N] history
+  remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] follow EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] unfollow EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
+  remuda butler matrix [--json] [-o PATH] download MXC
+  remuda butler matrix [--json] [--room ROOM] send TEXT | - | --file PATH
+  remuda butler matrix [--json] [--room ROOM] reply EVENT_ID TEXT | - | --file PATH
+  remuda butler matrix [--json] [--room ROOM] react EVENT_ID KEY
+  remuda butler matrix [--json] [--room ROOM] upload [--thread EVENT_ID] [--caption TEXT] PATH
+  remuda butler matrix [--json] [--room ROOM] redact EVENT_ID [--reason TEXT]
+  remuda butler matrix [--json] join ROOM (ID, #alias, or public name; operator)
+  remuda butler matrix [--json] leave ROOM (operator)
+  remuda butler matrix [--json] mark-all ROOM (operator; ROOM is a joined room ID; reload with remuda exec butler)
+  remuda butler matrix setup [OPTIONS]
+  remuda butler matrix [--json] quarantine [--id EVENT_ID] (operator)
+
+Example: remuda butler matrix setup --homeserver https://<homeserver> --owner @<owner>:<server> --bot @<bot>:<server> --password-file <path>
+Or end with --password-cmd PROG [ARG...] in place of --password-file to read the bot password from a program.
+stderr:
+
+actions:
+(none)
+
+### remuda butler "matrix" "send"
+exit: 0
+stdout:
+  remuda butler matrix [--json] status
+  remuda butler matrix [--json] rooms
+  remuda butler matrix [--json] rooms --public [TERM]
+  remuda butler matrix [--json] [--room ROOM] [-n N] history
+  remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] follow EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] unfollow EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
+  remuda butler matrix [--json] [-o PATH] download MXC
+  remuda butler matrix [--json] [--room ROOM] send TEXT | - | --file PATH
+  remuda butler matrix [--json] [--room ROOM] reply EVENT_ID TEXT | - | --file PATH
+  remuda butler matrix [--json] [--room ROOM] react EVENT_ID KEY
+  remuda butler matrix [--json] [--room ROOM] upload [--thread EVENT_ID] [--caption TEXT] PATH
+  remuda butler matrix [--json] [--room ROOM] redact EVENT_ID [--reason TEXT]
+  remuda butler matrix [--json] join ROOM (ID, #alias, or public name; operator)
+  remuda butler matrix [--json] leave ROOM (operator)
+  remuda butler matrix [--json] mark-all ROOM (operator; ROOM is a joined room ID; reload with remuda exec butler)
+  remuda butler matrix setup [OPTIONS]
+  remuda butler matrix [--json] quarantine [--id EVENT_ID] (operator)
+
+Example: remuda butler matrix setup --homeserver https://<homeserver> --owner @<owner>:<server> --bot @<bot>:<server> --password-file <path>
+Or end with --password-cmd PROG [ARG...] in place of --password-file to read the bot password from a program.
+stderr:
+
+actions:
+(none)
+
+### remuda butler "matrix" "reply" "$event"
+exit: 0
+stdout:
+  remuda butler matrix [--json] status
+  remuda butler matrix [--json] rooms
+  remuda butler matrix [--json] rooms --public [TERM]
+  remuda butler matrix [--json] [--room ROOM] [-n N] history
+  remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] follow EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] unfollow EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
+  remuda butler matrix [--json] [-o PATH] download MXC
+  remuda butler matrix [--json] [--room ROOM] send TEXT | - | --file PATH
+  remuda butler matrix [--json] [--room ROOM] reply EVENT_ID TEXT | - | --file PATH
+  remuda butler matrix [--json] [--room ROOM] react EVENT_ID KEY
+  remuda butler matrix [--json] [--room ROOM] upload [--thread EVENT_ID] [--caption TEXT] PATH
+  remuda butler matrix [--json] [--room ROOM] redact EVENT_ID [--reason TEXT]
+  remuda butler matrix [--json] join ROOM (ID, #alias, or public name; operator)
+  remuda butler matrix [--json] leave ROOM (operator)
+  remuda butler matrix [--json] mark-all ROOM (operator; ROOM is a joined room ID; reload with remuda exec butler)
+  remuda butler matrix setup [OPTIONS]
+  remuda butler matrix [--json] quarantine [--id EVENT_ID] (operator)
+
+Example: remuda butler matrix setup --homeserver https://<homeserver> --owner @<owner>:<server> --bot @<bot>:<server> --password-file <path>
+Or end with --password-cmd PROG [ARG...] in place of --password-file to read the bot password from a program.
+stderr:
+
+actions:
+(none)
+
+### remuda butler "matrix" "react" "$event"
+exit: 0
+stdout:
+  remuda butler matrix [--json] status
+  remuda butler matrix [--json] rooms
+  remuda butler matrix [--json] rooms --public [TERM]
+  remuda butler matrix [--json] [--room ROOM] [-n N] history
+  remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] follow EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] unfollow EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
+  remuda butler matrix [--json] [-o PATH] download MXC
+  remuda butler matrix [--json] [--room ROOM] send TEXT | - | --file PATH
+  remuda butler matrix [--json] [--room ROOM] reply EVENT_ID TEXT | - | --file PATH
+  remuda butler matrix [--json] [--room ROOM] react EVENT_ID KEY
+  remuda butler matrix [--json] [--room ROOM] upload [--thread EVENT_ID] [--caption TEXT] PATH
+  remuda butler matrix [--json] [--room ROOM] redact EVENT_ID [--reason TEXT]
+  remuda butler matrix [--json] join ROOM (ID, #alias, or public name; operator)
+  remuda butler matrix [--json] leave ROOM (operator)
+  remuda butler matrix [--json] mark-all ROOM (operator; ROOM is a joined room ID; reload with remuda exec butler)
+  remuda butler matrix setup [OPTIONS]
+  remuda butler matrix [--json] quarantine [--id EVENT_ID] (operator)
+
+Example: remuda butler matrix setup --homeserver https://<homeserver> --owner @<owner>:<server> --bot @<bot>:<server> --password-file <path>
+Or end with --password-cmd PROG [ARG...] in place of --password-file to read the bot password from a program.
+stderr:
+
+actions:
+(none)
+
+### remuda butler "matrix" "upload"
+exit: 0
+stdout:
+  remuda butler matrix [--json] status
+  remuda butler matrix [--json] rooms
+  remuda butler matrix [--json] rooms --public [TERM]
+  remuda butler matrix [--json] [--room ROOM] [-n N] history
+  remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] follow EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] unfollow EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
+  remuda butler matrix [--json] [-o PATH] download MXC
+  remuda butler matrix [--json] [--room ROOM] send TEXT | - | --file PATH
+  remuda butler matrix [--json] [--room ROOM] reply EVENT_ID TEXT | - | --file PATH
+  remuda butler matrix [--json] [--room ROOM] react EVENT_ID KEY
+  remuda butler matrix [--json] [--room ROOM] upload [--thread EVENT_ID] [--caption TEXT] PATH
+  remuda butler matrix [--json] [--room ROOM] redact EVENT_ID [--reason TEXT]
+  remuda butler matrix [--json] join ROOM (ID, #alias, or public name; operator)
+  remuda butler matrix [--json] leave ROOM (operator)
+  remuda butler matrix [--json] mark-all ROOM (operator; ROOM is a joined room ID; reload with remuda exec butler)
+  remuda butler matrix setup [OPTIONS]
+  remuda butler matrix [--json] quarantine [--id EVENT_ID] (operator)
+
+Example: remuda butler matrix setup --homeserver https://<homeserver> --owner @<owner>:<server> --bot @<bot>:<server> --password-file <path>
+Or end with --password-cmd PROG [ARG...] in place of --password-file to read the bot password from a program.
+stderr:
+
+actions:
+(none)
+
+### remuda butler "matrix" "download" "mxc://example/file"
+exit: 0
+stdout:
+Downloaded 3 bytes to /tmp/file
+stderr:
+
+actions:
+matrix.download(nil|mxc://example/file|nil)
+
+### remuda butler "matrix" "redact" "$event"
+exit: 0
+stdout:
+Completed Matrix redact: $event
+stderr:
+
+actions:
+matrix.redact(nil|$event|nil|nil)
+
+### remuda butler "matrix" "status" "extra"
+exit: 0
+stdout:
+  remuda butler matrix [--json] status
+  remuda butler matrix [--json] rooms
+  remuda butler matrix [--json] rooms --public [TERM]
+  remuda butler matrix [--json] [--room ROOM] [-n N] history
+  remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] follow EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] unfollow EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
+  remuda butler matrix [--json] [-o PATH] download MXC
+  remuda butler matrix [--json] [--room ROOM] send TEXT | - | --file PATH
+  remuda butler matrix [--json] [--room ROOM] reply EVENT_ID TEXT | - | --file PATH
+  remuda butler matrix [--json] [--room ROOM] react EVENT_ID KEY
+  remuda butler matrix [--json] [--room ROOM] upload [--thread EVENT_ID] [--caption TEXT] PATH
+  remuda butler matrix [--json] [--room ROOM] redact EVENT_ID [--reason TEXT]
+  remuda butler matrix [--json] join ROOM (ID, #alias, or public name; operator)
+  remuda butler matrix [--json] leave ROOM (operator)
+  remuda butler matrix [--json] mark-all ROOM (operator; ROOM is a joined room ID; reload with remuda exec butler)
+  remuda butler matrix setup [OPTIONS]
+  remuda butler matrix [--json] quarantine [--id EVENT_ID] (operator)
+
+Example: remuda butler matrix setup --homeserver https://<homeserver> --owner @<owner>:<server> --bot @<bot>:<server> --password-file <path>
+Or end with --password-cmd PROG [ARG...] in place of --password-file to read the bot password from a program.
+stderr:
+
+actions:
+(none)
+
+### remuda butler "matrix" "help"
+exit: 0
+stdout:
+  remuda butler matrix [--json] status
+  remuda butler matrix [--json] rooms
+  remuda butler matrix [--json] rooms --public [TERM]
+  remuda butler matrix [--json] [--room ROOM] [-n N] history
+  remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] follow EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] unfollow EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
+  remuda butler matrix [--json] [-o PATH] download MXC
+  remuda butler matrix [--json] [--room ROOM] send TEXT | - | --file PATH
+  remuda butler matrix [--json] [--room ROOM] reply EVENT_ID TEXT | - | --file PATH
+  remuda butler matrix [--json] [--room ROOM] react EVENT_ID KEY
+  remuda butler matrix [--json] [--room ROOM] upload [--thread EVENT_ID] [--caption TEXT] PATH
+  remuda butler matrix [--json] [--room ROOM] redact EVENT_ID [--reason TEXT]
+  remuda butler matrix [--json] join ROOM (ID, #alias, or public name; operator)
+  remuda butler matrix [--json] leave ROOM (operator)
+  remuda butler matrix [--json] mark-all ROOM (operator; ROOM is a joined room ID; reload with remuda exec butler)
+  remuda butler matrix setup [OPTIONS]
+  remuda butler matrix [--json] quarantine [--id EVENT_ID] (operator)
+
+Example: remuda butler matrix setup --homeserver https://<homeserver> --owner @<owner>:<server> --bot @<bot>:<server> --password-file <path>
+Or end with --password-cmd PROG [ARG...] in place of --password-file to read the bot password from a program.
+stderr:
+
+actions:
+(none)
+
+### remuda butler "matrix" "--help"
+exit: 0
+stdout:
+  remuda butler matrix [--json] status
+  remuda butler matrix [--json] rooms
+  remuda butler matrix [--json] rooms --public [TERM]
+  remuda butler matrix [--json] [--room ROOM] [-n N] history
+  remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] follow EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] unfollow EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
+  remuda butler matrix [--json] [-o PATH] download MXC
+  remuda butler matrix [--json] [--room ROOM] send TEXT | - | --file PATH
+  remuda butler matrix [--json] [--room ROOM] reply EVENT_ID TEXT | - | --file PATH
+  remuda butler matrix [--json] [--room ROOM] react EVENT_ID KEY
+  remuda butler matrix [--json] [--room ROOM] upload [--thread EVENT_ID] [--caption TEXT] PATH
+  remuda butler matrix [--json] [--room ROOM] redact EVENT_ID [--reason TEXT]
+  remuda butler matrix [--json] join ROOM (ID, #alias, or public name; operator)
+  remuda butler matrix [--json] leave ROOM (operator)
+  remuda butler matrix [--json] mark-all ROOM (operator; ROOM is a joined room ID; reload with remuda exec butler)
+  remuda butler matrix setup [OPTIONS]
+  remuda butler matrix [--json] quarantine [--id EVENT_ID] (operator)
+
+Example: remuda butler matrix setup --homeserver https://<homeserver> --owner @<owner>:<server> --bot @<bot>:<server> --password-file <path>
+Or end with --password-cmd PROG [ARG...] in place of --password-file to read the bot password from a program.
+stderr:
+
+actions:
+(none)

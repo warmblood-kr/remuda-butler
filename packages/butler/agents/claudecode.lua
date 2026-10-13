@@ -81,12 +81,34 @@ builders.claude = function(spec)
   return argv
 end
 
--- Fresh topic dirs are created by Butler itself, so trusting them is safe.
 remuda._butler_agent_startup.claude = {
-  ready = function(screen) return screen:find("─\n❯", 1, true) ~= nil end, -- idle composer under its rule
+  -- Report-only descriptor contract; tool-result auto-mode denials are outside
+  -- PR1. Future semantic recognisers require an observed dialog-only fixture.
+  blocking = {
+    { id = "unknown_choice", risk = "report", match = function(screen, probes)
+      return probes.unknown and probes.unknown(screen)
+    end },
+  },
+  ready = function(screen)
+    if screen:find("─\n❯", 1, true) then return true end
+    for line in (screen .. "\n"):gmatch("(.-)\n") do
+      local offset = 1
+      while line:sub(offset, offset + 2) == "─" do offset = offset + 3 end
+      if offset > 1 and line:sub(offset, offset + 2) == "❯" then
+        local suffix = line:sub(offset + 3):gsub("^[ \t\194\160]+", "")
+        -- Empty suffix only: a joined 'Try "' hint is launch-ready (init.lua) but not startup-ready.
+        if suffix == "" then return true end
+      end
+    end
+    return false
+  end, -- idle composer under its rule, including a ConPTY-wrapped border
   clear_input = "C-u",
   modals = {
-    { trust = "claude", pending_match = "Quick safety check:",
-      keys = { "<down>", "RET" } },
+    { trust = "claude", pending_match = "Quick safety check:" }, -- option chosen by its text
+    -- Detect + defer only (never answered): the title (or option text with title/context) on screen holds the first task.
+    -- The TITLE keys detection; option text counts only together with the title or the
+    -- "about your environment" context (a lone "Not now" is ordinary text).
+    { title = "Teach auto mode", context = "about your environment",
+      options = { "Not now", "Don't show again" } },
   },
 }

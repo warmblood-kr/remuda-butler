@@ -1,0 +1,10 @@
+  immediately after their first paint. I’ll wait for each real session to become
+  idle before the quota call, and explicitly prove the draft composer is non-
+  empty before testing refusal.
+ 
+• Working (26s • esc to interrupt)
+
+ 
+› Ask Codex to do anything
+ verification failed: invalid hunk at line 28, Expected update hunk to start with a @@ context marker, got: 'done'quota-qa · Run quota QA round 2
+  ? for shortcuts

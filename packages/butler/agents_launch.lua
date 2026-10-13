@@ -39,6 +39,36 @@ end
 local function one_line(value)
   return (tostring(value or ""):match("^[^\r\n]*") or ""):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
 end
+-- Every screen- or capture-derived diagnostic (detail, sessions, launch trace) goes through sanitize_row, an
+-- allowlist with no escape/UTF-8 interpretation: row 1 only, at most its first 240 bytes. Plain printable ASCII
+-- is kept (cut at 80 characters, right-trimmed); anything else becomes a fixed placeholder holding no row bytes.
+local function sanitize_row(text)
+  local printed, value = pcall(tostring, text == nil and "" or text)
+  if not printed or type(value) ~= "string" then return "<unprintable>" end
+  local head = value:sub(1, 240)
+  local stop = head:find("[\r\n]")
+  if stop then head = head:sub(1, stop - 1) end
+  if not head:find("[^ ]") then return "<empty first row>" end
+  if head:find("[^\32-\126]") then return "<first row: non-plain, " .. #head .. " bytes>" end
+  head = head:sub(1, 80)
+  local last = #head
+  while last > 0 and head:byte(last) == 32 do last = last - 1 end
+  return head:sub(1, last)
+end
+local screen_detail = sanitize_row
+-- These are agent error rows, not arbitrary occurrences of "model" in a prompt.
+local function model_rejection(screen)
+  for line in (tostring(screen or "") .. "\n"):gmatch("(.-)\n") do
+    local lower = line:lower():gsub("^%s+", "")
+    local error_row = lower:match("^the [\"']") or lower:match("^error:")
+      or lower:match("^api error:") or lower:match("^■")
+    if error_row and lower:find("model", 1, true)
+        and (lower:find("not supported", 1, true) or lower:find("does not exist", 1, true)
+          or lower:find("model_not_found", 1, true)) then
+      return sanitize_row(line)
+    end
+  end
+end
 local function readiness_timeout()
   local configured = tonumber(remuda._butler_readiness_timeout or os.getenv("REMUDA_BUTLER_READINESS_TIMEOUT"))
   if configured and configured > 0 then return configured end
@@ -46,13 +76,13 @@ local function readiness_timeout()
 end
 -- main.lua assigns startup_action_safe with the notice policy; read it late.
 local startup_action_safe = config.startup_action_safe
-local trust_modal_state
+local trust_modal_state, trust_plan, trust_path_matches, TRUST_AFFIRMATIVE, choice_modal_present
 local claude_workspace_path
 -- The one generic launch chooser serves Butler and every managed member. Kinds
 -- are lifecycle contributions; the chooser only reads their data and callbacks.
 -- Member launches must not hold the daemon image while an agent paints its
 -- first prompt. This scheduler advances one candidate at a time and invokes
--- `done(name, kind, attempts)` when a candidate is ready or the chain ends.
+-- `done(name, kind, attempts, instance_id)` when a candidate is ready or the chain ends.
 local function choose(candidates, opts, done)
   local attempts, index, state, schedule = {}, 0, nil, nil
   local lifecycle = remuda._butler_state or remuda._butler_compaction_state or {}
@@ -62,16 +92,30 @@ local function choose(candidates, opts, done)
   local chooser_record = { id = chooser_id, name = opts.name }
   lifecycle.active_choosers[chooser_id] = chooser_record
   local cancelled = false
+  -- With an id, a row counts only when it is that instance: the same name under another id is a replacement.
+  local function alive(name, id)
+    for _, row in ipairs(remuda.ls()) do
+      if row.name == name and row.alive and (not id or row.instance_id == id) then return true end
+    end
+    return false
+  end
+  local function replaced(name, id)
+    if not id then return false end
+    local ok, rows = pcall(remuda.ls)
+    for _, row in ipairs(ok and type(rows) == "table" and rows or {}) do
+      if row.name == name and row.alive and row.instance_id ~= id then return true end
+    end
+    return false
+  end
   local function callback(name, kind)
     if cancelled then return end
     if schedule then remuda.cancel(schedule); schedule = nil end
     chooser_record.ready = name ~= nil
     lifecycle.active_choosers[chooser_id] = nil
-    done(name, kind, attempts)
-  end
-  local function alive(name)
-    for _, row in ipairs(remuda.ls()) do if row.name == name and row.alive then return true end end
-    return false
+    -- Only the candidate that reached ready supplies its returned id; a live row of another id means no binding.
+    local instance_id = name and state and state.name == name and state.instance_id or nil
+    if replaced(name, instance_id) then instance_id = nil end
+    done(name, kind, attempts, instance_id)
   end
   local by_id = {}
   for _, row in ipairs(contributions("butler.agent")) do by_id[row.id] = row.entry end
@@ -86,7 +130,9 @@ local function choose(candidates, opts, done)
   local function fail_candidate(reason, detail)
     local current = state
     current.attempt.reason, current.attempt.detail = reason, detail
-    local ok, err = pcall(remuda.close, current.name)
+    -- close is name-based in core: never close a replacement that took the name.
+    local ok, err = true, nil
+    if not replaced(current.name, current.instance_id) then ok, err = pcall(remuda.close, current.name) end
     current.closing, current.close_error, current.close_ticks = true, ok and nil or err, 0
   end
   local function start_next()
@@ -127,14 +173,17 @@ local function choose(candidates, opts, done)
       end
       if type(argv) == "table" and argv[1] == executable then argv[1] = found end
     end
-    local ok, name = pcall(remuda.new, opts.name, argv, opts.cwd, opts.env(id, spec))
+    local ok, name, instance_id = pcall(remuda.new, opts.name, argv, opts.cwd, opts.env(id, spec))
     if not ok then
       attempt.reason, attempt.detail = "spawn_error", one_line(name)
       start_next(); return
     end
+    if type(instance_id) ~= "string" or instance_id == "" then instance_id = nil end
+    attempt.instance_id = instance_id
     state = { id = id, entry = entry, attempt = attempt, name = name,
+      instance_id = instance_id,
       started = os.time(), timeout = opts.timeout or readiness_timeout(),
-      handled = {}, last_screen = "", dialog_seen = nil }
+      handled = {}, last_screen = "<empty first row>", last_screen_blank = true, dialog_seen = nil }
     local test_builder = remuda._butler_agent_builders[id]
       and remuda._butler_agent_builders[id] ~= BUILTIN_AGENT_BUILDERS[id]
     local force_test_probe = type(remuda._butler_test_force_launch_probe) == "table"
@@ -148,7 +197,7 @@ local function choose(candidates, opts, done)
     if not state then return end
     if state.closing then
       state.close_ticks = state.close_ticks + 1
-      if not alive(state.name) then
+      if not alive(state.name, state.instance_id) then
         state = nil; start_next()
       elseif state.close_ticks >= 10 then
         state.attempt.reason = "spawn_error"
@@ -158,16 +207,22 @@ local function choose(candidates, opts, done)
       end
       return
     end
-    if not alive(state.name) then fail_candidate("exited", "session exited before prompt became ready"); return end
+    if not alive(state.name, state.instance_id) then fail_candidate("exited", "session exited before prompt became ready"); return end
     local captured, screen = pcall(remuda.capture, state.name)
-    if not captured then fail_candidate("exited", one_line(screen)); return end
+    if not captured then
+      state.last_capture_error = sanitize_row(screen)
+      screen = ""
+    end
     screen = tostring(screen or ""):gsub("\r\n", "\n"):gsub("\r", "\n")
-    state.last_screen = one_line(screen)
+    state.last_screen = screen_detail(screen)
+    state.last_screen_blank = screen:find("%S") == nil
     local entry, id = state.entry, state.id
+    local rejected = model_rejection(screen)
+    if rejected then fail_candidate("model_rejected", rejected); return end
     -- Authentication screens can still contain a prompt glyph; classify
     -- login before readiness so expired credentials never look usable.
     for _, pattern in ipairs(entry.login or {}) do
-      if screen:find(pattern, 1, true) then fail_candidate("login", one_line(screen)); return end
+      if screen:find(pattern, 1, true) then fail_candidate("login", screen_detail(screen)); return end
     end
     local ready = false
     if entry.ready then local tested, matched = call_callback(entry.ready, screen); ready = tested and not not matched end
@@ -177,17 +232,26 @@ local function choose(candidates, opts, done)
       local tested, decision = pcall(remuda._butler_prompt_is_empty, id, screen); ready = tested and decision == "EMPTY"
     end
     if not ready and (screen:match("\n%s*❯%s*$") or screen:match("\n%s*>%s*$") or screen:match("\n%s*›%s*$")) then ready = true end
-    if ready then state.attempt.reason, state.attempt.session = "ready", state.name; callback(state.name, id); return end
     local dialogs = type(entry.dialogs) == "function" and select(2, call_callback(entry.dialogs)) or entry.dialogs or {}
+    -- A titled modal can paint the idle composer beneath it: never ready while it is up.
+    for _, dialog in ipairs(dialogs) do
+      if ready and dialog.title and choice_modal_present(dialog, screen) then ready = false end
+    end
+    if ready then state.attempt.reason, state.attempt.session = "ready", state.name; callback(state.name, id); return end
     local known = false
-    for dialog_index, dialog in ipairs(dialogs) do
+    -- Detect + defer only, BEFORE any handler (trust included) can send a key.
+    state.deferred_by_fragment = nil
+    for _, dialog in ipairs(dialogs) do
+      if dialog.title and choice_modal_present(dialog, screen) then
+        known, state.dialog_seen, state.deferred_by_fragment = true, dialog.title, true
+      end
+    end
+    for dialog_index, dialog in ipairs(known and {} or dialogs) do
       local lower_screen = screen:lower()
       local trust_state = dialog.trust and trust_modal_state(dialog, screen) or nil
-      local displayed_workspace = dialog.trust == "claude" and claude_workspace_path(screen) or nil
-      -- An unreadable Claude workspace path fails closed: the human decides.
-      local workspace_matches_launch = not opts.trust_path_gate or dialog.trust ~= "claude"
-        or (displayed_workspace ~= nil
-          and displayed_workspace:gsub("/+$", "") == tostring(opts.cwd or ""):gsub("/+$", ""))
+      -- Topic and eligible launches must show the launch cwd; an unreadable path fails closed.
+      local workspace_matches_launch = dialog.trust and (not (opts.trust_path_gate or opts.trust_eligible)
+        or trust_path_matches(dialog, screen, opts.cwd, opts.trust_real_cwd))
       local matched = dialog.trust and trust_state ~= "absent"
         or (dialog.match and lower_screen:find(dialog.match:lower(), 1, true))
       if matched then
@@ -196,48 +260,49 @@ local function choose(candidates, opts, done)
           if state.trust_screen == screen then state.trust_ticks = (state.trust_ticks or 0) + 1
           else state.trust_screen, state.trust_ticks = screen, 1 end
           if state.trust_ticks < 2 then break end
-          if trust_state == "pending" and opts.auto_trust then break end
-          local trust_grant_available = (bus.trusted_launch_dirs
-              and bus.trusted_launch_dirs[opts.cwd] == true)
+          local may_answer = opts.auto_trust or opts.trust_eligible
+          if trust_state == "pending" and may_answer then break end
+          local trust_grant_available = opts.trust_eligible
+            or (bus.trusted_launch_dirs and bus.trusted_launch_dirs[opts.cwd] == true)
             or state.handled[dialog_index] == "selection_pending"
-          local may_auto_trust = opts.auto_trust and trust_grant_available and startup_action_safe
+          local may_auto_trust = may_answer and trust_grant_available and startup_action_safe
             and startup_action_safe(state.name) and workspace_matches_launch
-          if dialog.trust == "claude" and opts.trust_path_gate and may_auto_trust
-              and trust_state == "safe" and not state.handled[dialog_index] then
-            local ok, result = pcall(remuda.key, state.name, "<down>")
-            if ok and result ~= false then
-              state.handled[dialog_index] = "selection_pending"
-              state.attempt.trust_selection_moved = true
-              bus.trusted_launch_dirs[opts.cwd] = nil
-              local captured, selected_screen = pcall(remuda.capture, state.name)
-              if captured then
-                selected_screen = tostring(selected_screen or ""):gsub("\r\n", "\n"):gsub("\r", "\n")
-                if trust_modal_state(dialog, selected_screen) == "safe_selected" then
-                  state.trust_screen, state.trust_ticks = selected_screen, 1
-                end
+          local function trace_press(what, result)
+            local trace = remuda._butler_session_trace or _G._butler_session_trace
+            if trace then pcall(trace, "trust_press", state.name .. " agent=" .. tostring(state.id)
+              .. " cwd=" .. tostring(opts.cwd) .. " option=" .. what .. " result=" .. result) end
+          end
+          if may_auto_trust and trust_state == "safe" and not state.handled[dialog_index] then
+            -- Move the marker onto the affirmative option by its text, then
+            -- verify on a fresh capture before confirming on a later tick.
+            local plan = trust_plan(dialog, screen)
+            state.trust_moves = (state.trust_moves or 0) + 1
+            if plan and state.trust_moves <= 3 then
+              local moved = true
+              for _, key in ipairs(plan.moves) do
+                local ok, result = pcall(remuda.key, state.name, key)
+                if not ok or result == false then moved = false end
               end
+              local captured, selected_screen = pcall(remuda.capture, state.name)
+              selected_screen = captured and tostring(selected_screen or ""):gsub("\r\n", "\n"):gsub("\r", "\n") or ""
+              local verified = moved and trust_modal_state(dialog, selected_screen) == "safe_selected"
+              trace_press(plan.label, verified and "selected" or "selection_unverified")
+              if verified then
+                state.handled[dialog_index] = "selection_pending"
+                state.attempt.trust_selection_moved = true
+                state.trust_screen, state.trust_ticks = selected_screen, 1
+              end
+              break
             end
-            break
-          elseif dialog.trust == "claude" and opts.trust_path_gate and may_auto_trust and trust_state == "safe_selected"
-              and state.handled[dialog_index] == "selection_pending" then
+          elseif may_auto_trust and trust_state == "safe_selected"
+              and (not state.handled[dialog_index] or state.handled[dialog_index] == "selection_pending") then
             local ok, result = pcall(remuda.key, state.name, "RET")
-            if ok and result ~= false then
+            local pressed = ok and result ~= false
+            trace_press(TRUST_AFFIRMATIVE[dialog.trust], pressed and "confirmed" or "key_failed")
+            if pressed then
               state.handled[dialog_index] = "confirmed"
               state.attempt.trust_answered = true
-              bus.trusted_launch_dirs[opts.cwd] = nil
-            end
-            break
-          elseif (dialog.trust ~= "claude" or not opts.trust_path_gate) and may_auto_trust
-              and trust_state == "safe" and not state.handled[dialog_index] then
-            state.handled[dialog_index] = true
-            local answered = true
-            for _, key in ipairs(dialog.keys or {}) do
-              local ok, result = pcall(remuda.key, state.name, key)
-              if not ok or result == false then answered = false end
-            end
-            if answered then
-              state.attempt.trust_answered = true
-              bus.trusted_launch_dirs[opts.cwd] = nil
+              if bus.trusted_launch_dirs then bus.trusted_launch_dirs[opts.cwd] = nil end
             end
             break
           end
@@ -279,23 +344,33 @@ local function choose(candidates, opts, done)
         if state.unknown_dialog_screen ~= screen then
           state.unknown_dialog_screen, state.unknown_dialog_since = screen, os.time()
         elseif os.time() - state.unknown_dialog_since >= 2 then
-          fail_candidate("dialog", one_line(screen)); return
+          fail_candidate("dialog", screen_detail(screen)); return
         end
       else
         state.unknown_dialog_screen, state.unknown_dialog_since = nil, nil
       end
     end
     if os.time() - state.started >= state.timeout then
-      local prefix = state.dialog_seen and ("dialog remained after its handler: " .. state.dialog_seen .. "; ") or ""
+      if state.last_screen_blank and not state.dialog_seen and not state.unknown_dialog_screen then
+        state.attempt.reason, state.attempt.session = "ready_unverified", state.name
+        state.attempt.detail = "session remained alive but screen was blank at readiness timeout"
+          .. (state.last_capture_error and ("; last capture error: " .. state.last_capture_error) or "")
+        callback(state.name, state.id)
+        return
+      end
+      local prefix = state.dialog_seen and ((state.deferred_by_fragment and "deferred, never answered (Teach modal on screen): "
+        or "dialog remained after its handler: ") .. state.dialog_seen .. "; ") or ""
+      local capture_error = state.last_capture_error and ("; last capture error: " .. state.last_capture_error) or ""
       fail_candidate(state.dialog_seen and "dialog" or "timeout", prefix
         .. "readiness prompt not observed within " .. tostring(state.timeout)
-        .. " seconds; last screen: " .. (state.last_screen ~= "" and state.last_screen or "<empty>"))
+        .. " seconds; last screen: " .. state.last_screen
+        .. capture_error)
     end
   end
   schedule = remuda.schedule({ every = 0.2, run = function()
     local ok, err = pcall(tick)
     if not ok then
-      if state and state.name then fail_candidate("spawn_error", tostring(err))
+      if state and state.name then fail_candidate("spawn_error", sanitize_row(err))
       else callback(nil, nil) end
     end
   end })
@@ -306,7 +381,7 @@ local function choose(candidates, opts, done)
     if schedule then pcall(remuda.cancel, schedule); schedule = nil end
     if state and not chooser_record.ready then
       local name = state.name
-      if name and alive(name) then pcall(remuda.close, name) end
+      if name and alive(name, state.instance_id) then pcall(remuda.close, name) end
       state = nil
     end
     if opts.name == "butler" then
@@ -317,6 +392,14 @@ local function choose(candidates, opts, done)
   end
   start_next()
   return attempts
+end
+-- Is the row NAME still alive AND the instance the spawn returned? (An ls failure counts as not alive.)
+local function instance_live(name, id)
+  local ok, rows = pcall(remuda.ls)
+  for _, row in ipairs(ok and type(rows) == "table" and rows or {}) do
+    if row.name == name and row.alive and row.instance_id == id then return true end
+  end
+  return false
 end
 remuda._butler_choose = choose
 remuda._butler_choose_async = choose
@@ -393,6 +476,7 @@ remuda._butler_contribute("butler.guidance", "cli", { order = 20,
 - `remuda butler sessions` shows the household.
 - `remuda butler reply MESSAGE-ID -` (or `--file PATH`) answers a message in its thread; for Matrix mail it keeps the room and thread (prefer this over send when answering); answers to Matrix mail ALWAYS use this, never `remuda butler matrix send`.
 - `remuda butler forward MESSAGE-ID MEMBER [NOTE]` passes a message on with an optional note
+- Run `remuda butler ...` exactly as shown. Do not prefix it with REMUDA_NO_UPDATE_CHECK=1 or other VAR=value assignments: managed sessions never print the update banner, and a leading assignment can stop an allow rule such as Bash(remuda butler *) from matching.
 
 ]]
   end,
@@ -416,10 +500,11 @@ re-run the command requesting escalated permissions.
   end })
 remuda._butler_contribute("butler.guidance", "old-core", { order = 30,
   agents_md = function()
-    return [[If `inbox` says "no Butler identity in your env", your Remuda core predates
-caller-env forwarding: pass your id (`remuda butler inbox
-$REMUDA_BUTLER_AGENT_ID`) or use the MCP `butler_*` tools. On such a core,
-`send` is attributed to "operator" rather than to you.
+    return [[CLI identity comes from the daemon's caller session, never environment variables.
+If Butler cannot identify the caller, run from a registered Butler session or
+upgrade Remuda core. Older cores without caller fields refuse CLI member actions;
+use the MCP `butler_*` tools with the session's configured capability instead.
+Caller attribution is advisory within one user account, not an isolation boundary.
 
 ]]
   end })
@@ -493,68 +578,135 @@ end
 local function startup_modal_timeout_seconds()
   return tonumber(remuda._butler_modal_timeout or remuda._butler_modal_attempts or remuda._butler_task_poke_attempts) or 60
 end
+-- The path under the LAST header (a stale earlier block never supplies it); a
+-- header with no path after it yields nil.
 claude_workspace_path = function(screen)
-  local in_header = false
+  local in_header, found = false, nil
   for line in (tostring(screen or "") .. "\n"):gmatch("(.-)\n") do
     local trimmed = line:gsub("^%s+", ""):gsub("%s+$", "")
-    if in_header and (trimmed:match("^/") or trimmed:match("^%a:[/\\]")) then return trimmed end
-    if trimmed == "Accessing workspace:" then in_header = true end
+    if in_header and (trimmed:match("^/") or trimmed:match("^%a:[/\\]")) then
+      found, in_header = trimmed, false
+    end
+    if trimmed == "Accessing workspace:" then in_header, found = true, nil end
   end
+  return found
+end
+-- Codex: the same bottom window the options and title are read from.
+local function codex_workspace_path(screen)
+  local in_header, found = false, nil
+  for _, line in ipairs(bottom_screen_lines(screen, 12)) do
+    local trimmed = line:gsub("^%s+", ""):gsub("%s+$", "")
+    if in_header and trimmed ~= "" then
+      found, in_header = trimmed:match("^/") and trimmed or nil, false
+    end
+    if trimmed == "Folder access" then in_header, found = true, nil end
+  end
+  return found
+end
+-- The affirmative option of each agent's trust dialog, matched as exact text.
+TRUST_AFFIRMATIVE = { claude = "Yes, I trust this folder", codex = "Trust and continue" }
+-- The option block of a trust dialog: the contiguous non-blank lines around
+-- its one selection marker, as labels (numbering and marker stripped).
+local function trust_options(lines)
+  local marked
+  for index, line in ipairs(lines) do
+    local trimmed = line:gsub("^%s+", "")
+    if trimmed:sub(1, #"❯") == "❯" or trimmed:sub(1, #"›") == "›" then
+      if marked then return nil end
+      marked = index
+    end
+  end
+  if not marked then return nil end
+  local first, last = marked, marked
+  while first > 1 and lines[first - 1]:find("%S") and not lines[first - 1]:find("─", 1, true) do first = first - 1 end
+  while last < #lines and lines[last + 1]:find("%S") and not lines[last + 1]:find("─", 1, true) do last = last + 1 end
+  local labels = {}
+  for index = first, last do
+    local trimmed = lines[index]:gsub("^%s+", ""):gsub("^❯%s*", ""):gsub("^›%s*", "")
+    labels[#labels + 1] = trimmed:gsub("^%d+[%.)]%s*", ""):gsub("%s+$", "")
+  end
+  if #labels < 2 or #labels > 4 then return nil end
+  return labels, marked - first + 1
+end
+-- Select the affirmative option by its TEXT: {moves, selected, label}, or nil
+-- (with the reason) when no option matches exactly once or the structure is
+-- unexpected. Never a digit: moves are arrow keys from the current marker.
+trust_plan = function(modal, screen)
+  local affirmative = TRUST_AFFIRMATIVE[modal.trust]
+  if not affirmative then return nil, "unknown agent" end
+  local lines = {}
+  for line in (tostring(screen or "") .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
+  if modal.trust == "codex" then lines = bottom_screen_lines(screen, 12) end
+  local labels, current = trust_options(lines)
+  if not labels then return nil, "unexpected structure" end
+  local target
+  for index, label in ipairs(labels) do
+    if label == affirmative then
+      if target then return nil, "ambiguous option" end
+      target = index
+    end
+  end
+  if not target then return nil, "no exact match" end
+  local moves = {}
+  for _ = 1, math.abs(target - current) do moves[#moves + 1] = target > current and "<down>" or "<up>" end
+  return { moves = moves, selected = target == current, label = affirmative }
+end
+local function trust_displayed_path(modal, screen)
+  if modal.trust == "claude" then return claude_workspace_path(screen) end
+  if modal.trust == "codex" then return codex_workspace_path(screen) end
+end
+-- The shown workspace path must be the launch cwd (or its realpath); an
+-- unreadable path fails closed.
+trust_path_matches = function(modal, screen, cwd, real)
+  local function norm(path) return (tostring(path or ""):gsub("/+$", "")) end
+  local shown = norm(trust_displayed_path(modal, screen))
+  return shown ~= "" and (shown == norm(cwd) or (real ~= nil and shown == norm(real)))
 end
 trust_modal_state = function(modal, screen)
-  local lines, title, affirmative, selected_no, selected_index, selected_yes = {}, false, false, false, nil, false
-  for line in (tostring(screen or "") .. "\n"):gmatch("(.-)\n") do
-    lines[#lines + 1] = line
-    local trimmed = line:gsub("^%s+", "")
-    local option_label = trimmed:gsub("^❯%s*", ""):gsub("^›%s*", "")
-    if trimmed:find("Accessing workspace:", 1, true) then title = true end
-    if trimmed:match("^❯%s*No, exit") then selected_no, selected_index = true, #lines end
-    if trimmed:match("^❯%s*Yes, I trust this folder%s*$") then selected_yes = true end
-    if option_label:match("^Yes, I trust this folder%s*$") then affirmative = true end
-  end
   local lower = tostring(screen or ""):lower()
   if modal.trust == "claude" then
-    if not title then
+    if not lower:find("accessing workspace:", 1, true) then
       if lower:find("quick safety check:", 1, true) then return "pending" end
       return "absent"
     end
-    if not lower:find("no, exit", 1, true) or not lower:find("yes, i trust this folder", 1, true) then
-      if lower:find("quick safety check:", 1, true) then return "pending" end
-      return "human"
-    end
-    local options = 0
-    for _, line in ipairs(lines) do
-      if line:match("^%s*[❯›]%s*%S") or line:match("^%s%s%S") then options = options + 1 end
-    end
-    if affirmative and options == 2 then
-      if selected_no and selected_index then return "safe" end
-      if selected_yes then return "safe_selected" end
-    end
-    return "human"
   elseif modal.trust == "codex" then
-    local visible_lines = bottom_screen_lines(screen, 12)
-    local visible_lower = table.concat(visible_lines, "\n"):lower()
-    if not visible_lower:find("trust this folder?", 1, true) then return "absent" end
-    local options, selected_codex = 0, false
-    for index, line in ipairs(visible_lines) do
-      local number, label, selected = numbered_option(line)
-      if number then options = options + 1 end
-      local next_number, next_label = numbered_option(visible_lines[index + 1] or "")
-      if number == "1" and label == "Trust and continue" and selected and next_number == "2" then
-        for _, back_option in ipairs(modal.back_options or {}) do
-          if next_label:lower() == back_option:lower() then selected_codex = true end
-        end
-      end
+    if not table.concat(bottom_screen_lines(screen, 12), "\n"):lower():find("trust this folder?", 1, true) then
+      return "absent"
     end
-    if selected_codex and options == 2 then return "safe" end
+  else
     return "human"
   end
-  return "human"
+  local plan = trust_plan(modal, screen)
+  if not plan then
+    -- The explanation painted before any option is a partial frame, not a mismatch.
+    if modal.trust == "claude" and lower:find("quick safety check:", 1, true)
+        and not screen:find("❯", 1, true) and not screen:find("›", 1, true) then
+      return "pending"
+    end
+    return "human"
+  end
+  return plan.selected and "safe_selected" or "safe"
+end
+-- A titled choice modal (Claude "Teach auto mode ..."): DETECTION ONLY, never answered.
+-- Quoted, drafted, partial or wrapped title text counts, so first-task delivery defers. Text is lowercased with punctuation/whitespace/borders
+-- collapsed so a wrapped title still matches. The title alone suffices; option text counts
+-- only with the title or the context phrase in the same capture (lone "Not now" is not it).
+local function fold(text) return " " .. tostring(text):lower():gsub("[^%w]+", " ") .. " " end
+choice_modal_present = function(modal, screen)
+  local folded = fold(screen)
+  if folded:find(fold(modal.title), 1, true) then return true end
+  if not folded:find(fold(modal.context), 1, true) then return false end
+  for _, option in ipairs(modal.options) do
+    if folded:find(fold(option), 1, true) then return true end
+  end
+  return false
 end
 local function startup_modal(startup, screen)
   local lower = tostring(screen or ""):lower()
   for _, modal in ipairs(startup.modals or {}) do
-    if modal.trust then
+    if modal.title then
+      if choice_modal_present(modal, screen) then return modal end
+    elseif modal.trust then
       if trust_modal_state(modal, screen) ~= "absent" then return modal end
     elseif modal.match and lower:find(modal.match:lower(), 1, true) then
       return modal
@@ -597,12 +749,63 @@ local function capture_update_evidence(session, screen)
   return evidence
 end
 
+-- Whether this Butler may answer the trust dialog of a session it launched in
+-- `cwd`: a normalized absolute real directory that is not a broad or Butler
+-- root, and is under project_home or is a linked git worktree of a repo under
+-- project_home. `env` carries realpath, home, project_home, protected (roots
+-- that may not be the cwd), read_file and is_dir so tests need no syscalls.
+-- Returns true, or false plus the refusal reason.
+local function trust_eligible(cwd, env)
+  local function under(path, root) return path ~= root and path:sub(1, #root + 1) == root .. "/" end
+  if type(cwd) ~= "string" or cwd:sub(1, 1) ~= "/" or cwd:find("%c") then return false, "not absolute" end
+  if cwd ~= "/" and (cwd:sub(-1) == "/" or cwd:find("//", 1, true) or cwd:find("/%./") or cwd:find("/%.%./")
+      or cwd:match("/%.$") or cwd:match("/%.%.$")) then
+    return false, "not normalized"
+  end
+  local real = env.realpath(cwd)
+  if not real or real:sub(1, 1) ~= "/" or not env.is_dir(real) then return false, "not an existing directory" end
+  local function resolved(path) return path and (env.realpath(path) or path) end
+  local home = resolved(env.home)
+  local project_home = resolved(env.project_home)
+  if real == "/" then return false, "root" end
+  if not home or home == real or under(home, real) then return false, "home or its ancestor" end
+  if not project_home or real == project_home then return false, "project home itself" end
+  if project_home == "/" or project_home == home
+      or under(home, project_home) then
+    return false, "project home is home or its ancestor"
+  end
+  for _, root in ipairs(env.protected or {}) do
+    local r = resolved(root)
+    if r == real or under(r, real) or under(real, r) then
+      return false, "butler root"
+    end
+  end
+  if under(real, project_home) then return true end
+  -- A linked worktree: `.git` is a file naming <repo>/.git/worktrees/<n>, whose
+  -- own `gitdir` file points back here, and the repo lies under project_home.
+  local pointer = env.read_file(real .. "/.git")
+  local gitdir = pointer and pointer:match("^gitdir: ([^\r\n]+)%s*$")
+  if gitdir and gitdir:sub(1, 1) == "/" then
+    local admin = env.realpath(gitdir)
+    local repo = admin and admin:match("^(.+)/%.git/worktrees/[^/]+$")
+    local back = admin and env.read_file(admin .. "/gitdir")
+    back = back and back:gsub("%s+$", "")
+    if repo and back and (back == real .. "/.git" or env.realpath(back) == real .. "/.git")
+        and under(repo, project_home) and repo ~= project_home then
+      return true
+    end
+  end
+  return false, "outside project home"
+end
 remuda._butler_chooser = {
   PROMPT_DELIVERY = PROMPT_DELIVERY,
   build_agent_argv = build_agent_argv,
   one_line = one_line,
-  trust_modal_state = trust_modal_state,
+  sanitize_row = sanitize_row,
+  trust_modal_state = trust_modal_state, trust_plan = trust_plan, trust_eligible = trust_eligible,
+  trust_path_matches = trust_path_matches,
   choose = choose,
+  instance_live = instance_live,
   configured_agent_order = configured_agent_order,
   readiness_chain_budget = readiness_chain_budget,
   setup_telemetry = setup_telemetry,
@@ -617,4 +820,5 @@ remuda._butler_chooser = {
   known_startup_modal = known_startup_modal,
   codex_update_complete = codex_update_complete,
   capture_update_evidence = capture_update_evidence,
+  model_rejection = model_rejection,
 }

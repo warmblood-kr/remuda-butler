@@ -255,14 +255,17 @@ local function read_config(path)
         else
           warn_invalid_config_line(path, i, key, value)
         end
-      elseif key == "typed_lines" or key == "shell_lines" or key == "status_commands" then
+      elseif key == "approval_room" then
+        opts[key] = value
+      elseif key == "typed_lines" or key == "shell_lines" or key == "status_commands"
+          or key == "approve_text" then
         if value == "true" then
           opts[key] = true
         elseif value == "false" then
           opts[key] = false
         else
           -- An unreadable status switch turns the commands off, never on.
-          if key == "status_commands" then opts[key] = false end
+          if key == "status_commands" or key == "approve_text" then opts[key] = false end
           warn_invalid_config_line(path, i, key, value)
         end
       else
@@ -284,6 +287,13 @@ local function read_config(path)
       or posts_per_hour % 1 ~= 0 then
     posts_per_hour = 30
   end
+  local approval_ttl_minutes = tonumber(opts.approval_ttl_minutes)
+  if not approval_ttl_minutes or approval_ttl_minutes ~= approval_ttl_minutes
+      or approval_ttl_minutes < 1 or approval_ttl_minutes > 1440 or approval_ttl_minutes % 1 ~= 0 then
+    approval_ttl_minutes = 30
+  end
+  local approval_room = opts.approval_room
+  if approval_room ~= "home" and approval_room ~= "all" then approval_room = "all" end
   local b2b_max_turns = tonumber(opts.b2b_max_turns)
   if not b2b_max_turns or b2b_max_turns ~= b2b_max_turns
       or b2b_max_turns < 1 or b2b_max_turns == math.huge
@@ -349,9 +359,12 @@ local function read_config(path)
     typed_lines = opts.typed_lines == true,
     shell_lines = opts.shell_lines == true,
     status_commands = opts.status_commands == nil or opts.status_commands == true,
+    approve_text = opts.approve_text == true,
     untrusted_per_room_hour = untrusted_per_room_hour,
     posts_per_hour = posts_per_hour,
     b2b_max_turns = b2b_max_turns,
+    approval_ttl_minutes = approval_ttl_minutes,
+    approval_room = approval_room,
     use_messages = mode == "1" or mode == "true" or mode == "messages" or mode == "fallback",
     timeout_ms = math.max(1, timeout), ca_file = ca_file, pin = pin,
   }
@@ -546,6 +559,29 @@ function matrix.config_remove_room(path, room)
   end)
   if not removed then return true end
   return write_config_text(path, table.concat(kept))
+end
+
+-- Mark an already-joined room as the ALL-BUTLERS room: its room= line becomes all_room=.
+function matrix.config_mark_all(path, room)
+  local conf, err = read_config(path)
+  if not conf then return nil, err end
+  if conf.all_room == room then return true, false end
+  if conf.rooms[room] ~= "joined" then
+    return nil, tostring(room) .. " is not a joined room.\nNext: remuda butler matrix rooms"
+  end
+  if conf.all_room then
+    return nil, "an ALL-BUTLERS room is already set (" .. conf.all_room .. ").\nNext: remuda butler matrix rooms"
+  end
+  local contents
+  contents, err = read_file(path, "config")
+  if not contents then return nil, err end
+  local kept = {}
+  each_raw_line(contents, function(raw, line, ending)
+    kept[#kept + 1] = (room_line_id(line) == room and ("all_room=" .. room) or raw) .. ending
+  end)
+  local wrote, write_error = write_config_text(path, table.concat(kept))
+  if not wrote then return nil, write_error end
+  return true, true
 end
 
 -- Core's stable TLS reason for a wrong pin (remuda net/http_client.rs tls_failure_reason).

@@ -1,0 +1,28 @@
+
+ ▐▛███▛█   Claude Code v2.1.292
+▝▜██████▀  Sonnet 5.5 · Claude Max
+ ▝▝   ▝▝   ~\.local\share\remuda\butler\sessions\butler\work\win-blank
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────❯ Try "refactor <filepath>"
+────────────────────────────────────────────────────────────────────────────────────────────────────  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents

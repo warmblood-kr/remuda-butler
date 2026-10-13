@@ -1,0 +1,127 @@
+### remuda butler "agents"
+exit: 0
+stdout:
+ID	ALIAS	KIND	LEADER	STATE	REASON	CREATED	ENDED
+<ULID>	butler	claude		running		<TS>	
+stderr:
+
+actions:
+(none)
+
+### remuda butler "agents" "--help"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "agents" "-h"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "agents" "help"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "agents" "--all"
+exit: 0
+stdout:
+ID	ALIAS	KIND	LEADER	STATE	REASON	CREATED	ENDED
+<ULID>	butler	claude		running		<TS>	
+stderr:
+
+actions:
+(none)
+
+### remuda butler "agents" "--all" "--all"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "agents" "--all=1"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "agents" "extra"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "agents" "--bogus"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "agents" "--" "--all"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "agents" "--all" "extra"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "agents" "extra" "--all"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "agents" "--help" "--all"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)
+
+### remuda butler "agents" "-a"
+exit: 2
+stdout:
+
+stderr:
+<GLOBAL-USAGE>
+actions:
+(none)

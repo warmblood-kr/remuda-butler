@@ -4,6 +4,8 @@ set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 REMUDA_BIN=${REMUDA_BIN:-remuda}
+source "$REPO/tests/core_ref.sh"
+core_ref_check
 T=$(mktemp -d /tmp/bmr.XXXXXX)
 T=$(cd "$T" && pwd -P)
 S=bmr

@@ -21,8 +21,8 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 source "$REPO/tests/awk-timeout.sh"
 GOLDEN=$REPO/tests/golden
 CORE_URL=${CORE_URL:-https://github.com/warmblood-kr/remuda.git}
-# Keep in step with tests/rust_tests.sh.
-CORE_REF=${CORE_REF:-c7b0cbd0}
+# The core pin is shared: tests/core_ref.sh.
+source "$REPO/tests/core_ref.sh"
 T=$(mktemp -d /tmp/bgg.XXXXXX)
 T=$(cd "$T" && pwd -P)
 S=bgg
@@ -86,6 +86,7 @@ if [[ -z ${REMUDA_BIN:-} ]]; then
   REMUDA_BIN=$(cd "$T/core" && cd "${CARGO_TARGET_DIR:-target}/release" && pwd)/remuda
   built=$(git -C "$T/core" rev-parse --short=7 HEAD)
 fi
+core_ref_check
 
 export HOME=$T/home REMUDA_RUNTIME_DIR=$T/run XDG_DATA_HOME=$T/data XDG_CONFIG_HOME=$T/config
 export XDG_CACHE_HOME=$T/cache XDG_STATE_HOME=$T/state XDG_RUNTIME_DIR=$T/xdg-run
@@ -153,6 +154,7 @@ wait_live lead1; wait_live w1; wait_file "$T/argv/lead1"
 
 OUT=$T/out; mkdir -p "$OUT"
 R butler help >"$OUT/help.txt"
+R butler matrix thread --help >"$OUT/matrix-thread-help.txt"
 cp "$T/projects/lead1/AGENTS.md" "$OUT/agents-topic.md"
 cp "$XDG_DATA_HOME/remuda/butler/sessions/w1/AGENTS.md" "$OUT/agents-launch.md"
 wait_welcome
@@ -180,6 +182,12 @@ NORMALIZE_ROOT=$(cd "$T" && pwd -P)
 for file in "$OUT"/*; do
   bounded_awk -v t="$T" -v real_t="$NORMALIZE_ROOT" -f "$REPO/tests/normalize-guidance.awk" "$file" >"$file.tmp"
   mv "$file.tmp" "$file"
+done
+
+# Wording that must stay: members run the CLI bare (a leading VAR=1 can defeat an allow rule).
+NOPREFIX='Do not prefix it with REMUDA_NO_UPDATE_CHECK=1 or other VAR=value assignments'
+for f in agents-topic.md agents-launch.md; do
+  grep -qF "$NOPREFIX" "$OUT/$f" || { echo "FAIL golden guidance: $f lacks the no-env-prefix line" >&2; exit 1; }
 done
 
 if [[ ${GOLDEN_UPDATE:-} == 1 ]]; then

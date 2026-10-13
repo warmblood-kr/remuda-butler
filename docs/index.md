@@ -79,6 +79,18 @@ autocompact safety net defaults to `600k`; set
 The Butler scheduler remains the primary compaction path. The MCP
 `butler_launch` and `butler_delegate` tools take `model`.
 
+Codex members get extra writable directories with `--writable DIR` (repeatable,
+absolute and existing; on `launch` and `topic delegate`; the MCP tools take
+`writable`). `--sandbox full` removes the sandbox and is accepted only from a
+person at a terminal, never from a Butler agent. `--writable` refuses `/`, the
+home directory and its ancestors, and any directory that is, contains or lies
+inside `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.codex`, `~/.claude` or Butler's
+config, data and runtime directories; only `--sandbox full` grants those. The
+profile is kept for relaunches and shown by `remuda butler sessions`. The
+`--sandbox full` check covers every Butler entry point (CLI, MCP tools, the
+launcher and relaunch). It is not a boundary against an agent that can run
+Lua through `run_script`, which runs as the daemon.
+
 Every Butler-managed agent receives `REMUDA_BUTLER_AGENT_ID` and, when it has
 one, `REMUDA_BUTLER_LEADER_ID`. Therefore agents normally use the short forms:
 
@@ -88,19 +100,125 @@ remuda butler send reviewer "please check the latest patch"
 remuda butler send-to-leader "review complete: no blockers"
 ```
 
-The sender is inferred from the calling shell's environment; quote the
-message for `send`, since `remuda butler send FROM TO MESSAGE...` (what an
-unquoted multi-word message parses as) is the operator form for sending a note on another
-session's behalf. The short forms need a Remuda core that forwards the caller's
-`REMUDA_*` variables to mod commands (warmblood-kr/remuda#95); on an older
-core, pass the name explicitly (`remuda butler inbox "$REMUDA_BUTLER_AGENT_ID"`)
-or use the MCP `butler_*` tools.
+The sender is inferred from the daemon's registered caller session. Quote the
+message for `send`, since `remuda butler send FROM TO MESSAGE...` is the operator
+form for sending on another session's behalf. Older cores without caller fields
+refuse identity-sensitive CLI commands: upgrade core or use the MCP `butler_*`
+tools with the session's configured capability. Environment variables never
+select CLI identity. Caller attribution is advisory, not an isolation boundary.
 
 ### Optional Matrix bridge
 
 With Matrix credentials configured, Butler can bridge one room. The bridge is
 optional and composes Remuda processes, hooks, sessions, and MCP rather than
 introducing a separate runtime.
+
+### Guard audit
+
+`remuda butler guard on|off|status` switches an audit of what Claude members do;
+it is off by default and may be switched by Butler and leaders. While it is on,
+the per-session settings file of each Claude member launched from then on gets
+`PreToolUse` and `PermissionRequest` hooks that call `remuda butler guard`.
+Each call appends one JSON line (time, session, agent kind, event, tool,
+class, a redacted and size-capped summary) to `guard-audit.jsonl` in Butler's
+data directory (mode 0600, rotated at 1 MiB). The class is one of `push`,
+`destroy`, `escape`, `net`, `control`, `weaken`, `identity`, `script` or `other`,
+chosen by a fixed classifier over the tool name and arguments (`other` means "not recognised", not "harmless": wrapped commands such as `bash -c` are not unpacked); `run_script` calls
+are logged with their size and first 120 characters. With only audit on, the
+hook never blocks or asks and fails open: if the daemon or the log is unavailable
+the agent proceeds as before. `remuda butler doctor` shows the switch. The audit
+is a record, not a security boundary: agents run as the same user and can bypass
+or edit it.
+
+Every audit line carries a `grant_id` field: `gNNN` on the `grant_used` line of a call a standing grant allowed and on its `grant_limited` line, both matched by Butler from the grant store (never taken from agent input), and on the grant's own create and revoke lines; `-` on every other line, including the request line of an allowed call and every deny.
+Each change of the `guard`, `guard deny` or `guard approvals` switch appends a
+`switch` line naming who changed it (the caller's alias, or `operator`) and when.
+`Who` comes from the resolved daemon caller identity; forwarded environment metadata does not select it.
+Each switch change writes its audit line before updating the saved state. If the audit write fails, the change is refused with a `Next:` instruction and the switch state stays the same.
+When the log passes 1 MiB, the previous `guard-audit.jsonl.1` moves to a
+`guard-audit.jsonl.<UTC stamp>` archive, and archives older than 90 days are
+deleted at that moment and never otherwise.
+Two rotations in one second keep both archives (a `-N` suffix).
+`remuda butler guard stats` prints the line count, the first and last time, and
+the counts per class and per event over the log and its archives, bucketing names it does not know as `other` and counting oversized or unreadable lines as unreadable, as a baseline
+to compare before enabling `guard deny`.
+Each new audit line carries `prev`, the SHA-256 of the line before it, starting at a `chain` genesis line and carried across rotation; lines from before the chain stay as they are. `remuda butler guard verify` (read-only) walks the archives and the live log and prints `ok` or the first broken line. Once per UTC day Butler posts a digest of the last day to the owner room (line count, last line hash, previous digest hash); that off-box digest is what shows a replaced log, the local chain only detects. See `docs/butler.md` (Audit chain).
+
+### Guard grants
+
+`remuda butler guard grants on|off|status` is a switch, off by default, classed like `guard on|off` (it weakens the guard: owner-only, denied to agents). `remuda butler guard grants` prints the operator view of the active grants: id, class, resolved scope, ceiling, holder, absolute expiry and approval event. With the switch off the grant store is not read and every `grant_id` is `-`. No CLI verb creates a grant. With `guard on`, `guard approvals on` and `guard grants on`, an active grant allows the Claude permission prompt it covers, for the session that asked for it (by core's caller identity, not the env alias) and the sessions below it, at most 30 times an hour per grant, each use audited first (see `docs/butler.md`, Grant use).
+
+The store is `guard-grants.jsonl` in Butler's protected data dir. An entry holds the class (`writable`, `git`, `net`), the resolved scope, a ceiling (`T1` or `T2`, never `T3`), the holder, the approval event id, the time it was written and an absolute expiry at most 24 hours later. It is read afresh on every use, so a start reloads it; an entry that is expired, unparseable, lacks its approval event, was written with a clock ahead of now or fails any check is no grant. A scope is a path or host: a `*` is allowed only as a whole path segment below a fixed absolute prefix, and paths are canonicalised by one function (realpath of the nearest existing ancestor, no `.` or `..`, case-folded only on a case-insensitive volume). A push covered by a `git` grant is checked at hook time with `git diff --name-only` against the upstream ref: a change under `.github/`, `.circleci/`, `.buildkite/`, `.gitlab/` or to a root CI file is T3 and gets no grant, and so does a push whose diff cannot be computed (no upstream, new branch, git failure). A scope at the root, `/Users`, the home itself, or covering `.ssh`, `.claude`, `.config/remuda`, Butler's data dir, `.git/hooks` or `.git/config` is refused. A grant never overrides a deny or a weaken, identity or escape decision. `add` takes the store's lock, prunes expired lines and allocates the id in one step, and refuses when the lock stays held. No command or `run_script` text may name the grant module (denied), and `remuda eval` classes as `script`. `guard grants` shows direction-control characters escaped. A push is covered only as exactly `git push [remote [current-branch]]`; `scripts/`, `Makefile` and `justfile` count as CI paths, and the diff is taken without renames and with repo config neutralised. A URL with userinfo, a backslash, whitespace or a control character gets no net grant. The deny rules keep their own lexical path checks and do not use the grant canonicaliser yet.
+
+Grants are created in one place: the owner's cycle-arrows reaction (🔄) on Butler's own approval post for a fetch (`net`, the exact host) or a plain `git push` (`git`, the working directory), with the grants switch on. The post shows the resolved scope, the ceiling and the absolute expiry (one hour). Each grant line is cross-checked on every read against Butler's own approval record of that owner reaction (same reaction event, grant id, class and scope); a line the record does not vouch for, such as one written by hand, is no grant. ✅ allows one call and ❌ denies, and neither makes a grant; a reaction is consumed once. With the switch on, an agent session gets at most 5 approval posts per minute and Butler at most 30 per hour (a request over the limit gets no post and Claude shows its own prompt), an owner's ❌ is remembered for the same request for 10 minutes (answered deny without a post), and grants that expire within 60 seconds of each other are announced in one notice in the owner room. See "Guardrail grants" in butler.md.
+
+The owner can narrow grants from Matrix with whole-message lines in the HOME room: `guard revoke gNNN` ends one grant, `guard freeze` stops every grant from matching and from being made (it survives a restart). Only the verified owner (allowlisted human, live sync, not an edit) can send them; there is no CLI verb and an agent cannot. `guard unfreeze` only asks: Butler posts a request, and the owner's ✅ reaction on it (or `yes ID`) lifts the freeze. Butler replies with one short plain line and audits each action; `remuda butler guard grants` shows the frozen and revoked state.
+
+### Guard approvals
+
+`remuda butler guard approvals on|off|status` is a second switch, off by
+default and independent of `guard on|off`; routing runs only while both are on,
+for Claude members launched after the switch. The `PermissionRequest` hook of
+such a member registers each permission prompt as an approval request (id,
+stored redacted summary, class, a sha256 of the request text) and posts one
+message to the owner's Matrix HOME room. The verified owner answers it as for
+`approve-text`: reply `yes` or `no` (also `승인`/`거부`) to that post, or react ✅ or
+❌ to it. Only an allowlisted human in HOME on a live sync counts; an edit, a
+reaction on another post or an unknown id does nothing, and a terminal cannot
+approve (it may deny). An answer applies once, to that request, while the
+member's hook waits; the hook then prints Claude's allow or deny decision.
+Only `Bash`, `Read`, `Glob`, `Grep`, `WebFetch` and `WebSearch` calls are routed,
+because the post shows their whole action; `Write`, `Edit` and other tools keep
+Claude's own prompt. A command longer than 1000 bytes, a `run_script` call, a cap
+(5 open requests per session, 20 in all) or a missing or failing Matrix
+setup is not routed either. A call whose text redaction would change (a command with a token, password or URL credential) keeps Claude's own prompt, so the owner approves exactly what would run. A command with a control character (newline, carriage return, NUL, tab) is not routed either. Open-request caps count one kind of approval at a time. Pending requests are stored, and a restart expires them.
+
+Every other outcome prints no decision, so Claude shows its own prompt: this
+slice only adds a way for the owner to answer prompts the agent already raises,
+and never allows something the member could not do before. A request expires
+after about 5 minutes (the longest wait core allows a hook), which is
+"no decision", not "deny"; a late answer is told "Expired." in the thread. The
+owner sees the redacted command or path, not other tool input such as file
+contents. Requests, answers and expiries are appended to the guard audit
+(`approval_requested`, `approval_approved`, `approval_denied`, `approval_expired`).
+Codex and Monocle members are not routed. This is a cooperative guardrail, not a
+boundary: a member that goes through `run_script`, edits its own settings or
+runs outside the hook is not covered.
+
+### Guard deny
+
+`remuda butler guard deny on|off|status` is a separate switch, off by default.
+Denials run only while both `guard on` and `guard deny on` are set. For Claude
+members launched after both switches are on, the `PreToolUse` hook denies
+recognised permission bypass flags, owner-only Butler controls, daemon
+stop/restart/kill commands, writes to hook/settings files, the home-level
+`~/.codex/AGENTS.md` and `~/.claude/CLAUDE.md`, or protected directories, and force or delete pushes that name `main`, `master` or `trunk`.
+Agents are also denied `remuda butler guard deny status`. Plain pushes and force
+pushes to other branches remain allowed. `doctor` shows the deny switch.
+
+The test harness can stop or restart its private daemon with `-s hNNN` (an `h`
+followed by digits, optionally followed by `c`). This exception applies only
+when every server selector names such a harness daemon and no other daemon
+selector is present; other daemon stop/restart/kill commands are denied.
+
+This is a cooperative guardrail. `run_script` calls and edits to a member's own
+settings outside the hook can bypass it. The hook scans command text
+lexically, including `sh`, `bash`, `zsh`, `dash`, `ksh` and `ash` `-c` bodies,
+`eval` bodies, and `find -exec`/`-execdir` bodies. It does not unwrap `ssh`,
+`su -c`, `script -c`, `setsid`, `stdbuf`, `ionice` or `busybox`; it also cannot
+resolve `$var` command indirection or commands piped into `sh`. For payloads
+over 64 KiB, it checks the tool name, file path, and at most the first 4 KiB of
+a command. Protected roots are anchored to the user's home and active Butler
+data directory. The user's `.claude` and `.codex` directories are not protected
+wholesale; only hook/settings files there are protected, so auto-memory and
+plans remain writable. Without an explicit
+refspec, the hook cannot infer the current branch, so a force push with an
+implied target is not denied. Writer detection covers redirects and the
+lexical writers `rm`, `mv`, `cp` destinations, `tee`, `dd` output, `chmod`,
+`chown`, `ln`, `touch`, `truncate`, `install` destinations, and `sed -i`.
+`perl -pi`, interpreter one-liners, `rsync`, `curl -o`, and `patch` are not covered. If the
+hook fails before it builds a decision, it fails open and prints no decision;
+an audit append failure does not change a built denial.
 
 ## Compatibility
 

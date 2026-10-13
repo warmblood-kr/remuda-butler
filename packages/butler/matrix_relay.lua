@@ -4,6 +4,8 @@ local matrix = assert(remuda.butler and remuda.butler.matrix,
   "load butler/matrix_request before butler/matrix_relay")
 local typed_lines = assert(remuda.butler.typed_lines,
   "load butler/typed_lines before butler/matrix_relay")
+local approve_text = assert(remuda.butler.approve_text,
+  "load butler/approve_text before butler/matrix_relay")
 local status_command = assert(remuda.butler.status_command,
   "load butler/status_command before butler/matrix_relay")
 -- Trust words are bound at load (main.lua execs matrix_request before
@@ -12,6 +14,16 @@ local read_config = matrix.read_config
 local json = assert(remuda.json, "Matrix requires core remuda.json")
 local relay = matrix.relay or {}
 matrix.relay = relay
+function relay.approval_room_for_config(cfg)
+  if type(cfg) ~= "table" then return nil end
+  if cfg.approval_room == "home" then return cfg.home_room end
+  local room_id = cfg.all_room
+  if type(room_id) == "string" and room_id ~= "" and type(cfg.rooms) == "table"
+      and cfg.rooms[room_id] == "all" then
+    return room_id
+  end
+  return cfg.home_room
+end
 local JSON_ARRAY_MT = getmetatable(json.array({}))
 
 local MAX_PROCESSED = 5000
@@ -23,6 +35,7 @@ local MAX_QUARANTINE_ITEMS = 200
 local MAX_QUARANTINE_PREVIEW_BYTES = 1024
 local QUARANTINE_TTL_SECONDS = 30 * 24 * 60 * 60
 local MAX_MAIL_ROUTES = 5000
+local MAX_OWN_EVENTS_PER_ROOM = 500
 local MAX_THREAD_SUBSCRIPTIONS = 5000
 local MAX_REPLY_OUTBOX = 1000
 local MAX_REPLY_RESULTS = 5000
@@ -312,8 +325,10 @@ local function approval_answer_fields(ev)
     if type(rel) ~= "table" or rel.rel_type ~= "m.annotation" then return {}, nil end
     local verdict
     if rel.key == "✅" or rel.key == "✅\239\184\143" then verdict = "approve"
-    elseif rel.key == "❌" then verdict = "deny" end
-    return { rel.event_id }, verdict
+    elseif rel.key == "❌" then verdict = "deny"
+    -- The cycle arrows (with or without the emoji selector): a standing grant, offered on guard posts only.
+    elseif rel.key == "\240\159\148\132" or rel.key == "\240\159\148\132\239\184\143" then verdict = "grant" end
+    return { rel.event_id }, verdict, nil, nil, "m.reaction"
   end
   if ev.type ~= "m.room.message" then return {}, nil end
   local thread_root, in_reply_to = relation_fields(content)
@@ -325,10 +340,11 @@ local function approval_answer_fields(ev)
   -- generated line for exact approval words while leaving delivery untouched.
   local prefix_end = body:match("^> [^\n]*()\n")
   if prefix_end then body = body:sub(prefix_end + 1) end
-  body = body:match("^%s*(.-)%s*$") or ""
-  body = body:lower()
-  local verdict = body == "yes" and "approve" or body == "no" and "deny" or nil
-  return targets, verdict
+  local legacy_body = body:match("^%s*(.-)%s*$") or ""
+  legacy_body = legacy_body:lower()
+  local verdict = legacy_body == "yes" and "approve" or legacy_body == "no" and "deny" or nil
+  local text_verdict, explicit_id = approve_text.reply_verdict(body)
+  return targets, verdict, explicit_id, text_verdict, content.msgtype
 end
 
 local function mentions(content, body, mxid)
@@ -470,6 +486,7 @@ end
 local function empty_state()
   return { since = nil, messages_since = nil, processed = {}, processed_order = {},
     pending = json.object({}), quarantine = json.array({}), routes = json.object({}),
+    own_events = json.object({}),
     invite_dedupe = json.object({}),
     subscriptions = json.object({}),
     auto_join_timestamps = json.array({}),
@@ -477,7 +494,7 @@ local function empty_state()
     reply_outbox = json.object({}), reply_results = json.object({}), approvals = json.object({}) }
 end
 
-local function load_state(path)
+local function load_state(path, rooms)
   local file = io.open(path, "rb")
   local recovered_backup = false
   if not file then
@@ -499,6 +516,7 @@ local function load_state(path)
   local pending = value.pending_events or json.object({})
   local quarantine = value.quarantine or json.array({})
   local routes = value.matrix_mail_routes or json.object({})
+  local own_events = value.matrix_own_events or json.object({})
   local reply_outbox = value.matrix_reply_outbox or json.object({})
   local reply_results = value.matrix_reply_results or json.object({})
   local subscriptions = value.matrix_thread_subscriptions or json.object({})
@@ -515,6 +533,7 @@ local function load_state(path)
     or type(quarantine) ~= "table" or quarantine == json.null
     or getmetatable(quarantine) ~= JSON_ARRAY_MT
     or type(routes) ~= "table" or routes == json.null or getmetatable(routes) == JSON_ARRAY_MT
+    or type(own_events) ~= "table" or own_events == json.null or getmetatable(own_events) == JSON_ARRAY_MT
     or type(reply_outbox) ~= "table" or reply_outbox == json.null or getmetatable(reply_outbox) == JSON_ARRAY_MT
     or type(reply_results) ~= "table" or reply_results == json.null or getmetatable(reply_results) == JSON_ARRAY_MT
     or type(subscriptions) ~= "table" or subscriptions == json.null or getmetatable(subscriptions) == JSON_ARRAY_MT
@@ -537,11 +556,14 @@ local function load_state(path)
   local quarantine_pruned = false
   state.since, state.messages_since = since, messages_since
   state.quarantine, state.routes = json.array({}), json.object({})
+  state.own_events = json.object({})
   state.reply_outbox, state.reply_results = json.object({}), json.object({})
   state.invite_dedupe = json.object({})
   state.typed_line_timestamps = json.array({})
   state.approvals = approvals
-  local approval_cutoff = math.floor(os.time() * 1000) - 24 * 60 * 60 * 1000
+  -- Records are pruned by approval.RETENTION_S; without the approval module nothing is pruned.
+  local retention = remuda.butler and remuda.butler.approval and remuda.butler.approval.RETENTION_S
+  local approval_cutoff = math.floor(os.time() * 1000) - (retention or math.huge) * 1000
   for id, rec in pairs(state.approvals) do
     if type(rec) == "table" and (rec.status == "applied" or rec.status == "failed"
       or rec.status == "denied" or rec.status == "expired")
@@ -625,6 +647,28 @@ local function load_state(path)
       state.routes[id] = route
     end
   end
+  -- Own events load for configured rooms only (all rooms when no config is
+  -- given), in sorted room order, newest MAX_OWN_EVENTS_PER_ROOM raw entries per
+  -- room. An event id is kept once: the first sorted room that lists it wins.
+  -- Only the newest 500 raw entries are read; invalid and duplicate ones among them are dropped without pulling in older entries.
+  local own_rooms, seen_own = {}, {}
+  for room_id in pairs(rooms or own_events) do own_rooms[#own_rooms + 1] = room_id end
+  table.sort(own_rooms)
+  for _, room_id in ipairs(own_rooms) do
+    local events = own_events[room_id]
+    if valid_room_id(room_id) and type(events) == "table" and getmetatable(events) == JSON_ARRAY_MT then
+      local valid = json.array({})
+      for index = math.max(1, #events - MAX_OWN_EVENTS_PER_ROOM + 1), #events do
+        local item = events[index]
+        if type(item) == "table" and valid_event_key(item.event_id)
+          and valid_event_key(item.thread_root) and not seen_own[item.event_id] then
+          seen_own[item.event_id] = true
+          valid[#valid + 1] = { event_id = item.event_id, thread_root = item.thread_root }
+        end
+      end
+      state.own_events[room_id] = valid
+    end
+  end
   for id, item in pairs(reply_outbox) do
     if type(id) == "string" and type(item) == "table"
       and type(item.source_mail_id) == "string" and type(item.room_id) == "string"
@@ -652,6 +696,7 @@ local function save_state(path, state)
   local json = encode({ since = state.since, processed_event_ids = processed,
     messages_since = state.messages_since, pending_events = state.pending,
     quarantine = state.quarantine, matrix_mail_routes = state.routes,
+    matrix_own_events = state.own_events,
     matrix_reply_outbox = state.reply_outbox, matrix_reply_results = state.reply_results,
     matrix_thread_subscriptions = state.subscriptions, approvals = state.approvals,
     invite_dedupe = state.invite_dedupe,
@@ -668,7 +713,7 @@ function relay.new(options)
   local cfg, config_error = read_config(config_path)
   if not cfg then error(config_error, 0) end
   local state_path, ack_path = config_path .. ".since", config_path .. ".acks"
-  local state, state_error, quarantine_pruned = load_state(state_path)
+  local state, state_error, quarantine_pruned = load_state(state_path, cfg.rooms)
   if state_error then
     warn_once("state", state_path .. "\0" .. state_error,
       "butler invalid Matrix relay state; starting from a fresh baseline: " .. tostring(state_error))
@@ -774,26 +819,45 @@ function relay.new(options)
 
   local approval = remuda.butler and remuda.butler.approval
   if approval and type(approval.attach) == "function" then
-    approval.attach(state, persist, function(text, relation, callback)
-      local body, encode_error = encode({ msgtype = "m.notice", body = text,
-        ["m.relates_to"] = relation })
+    approval.ttl_minutes = cfg.approval_ttl_minutes or 30
+    -- Owners are the allowlisted humans; a mention makes the client notify them.
+    local owners = {}
+    for mxid in pairs(cfg.allowed_senders or {}) do
+      if not (cfg.butler_senders or {})[mxid] and mxid ~= cfg.self_mxid then owners[#owners + 1] = mxid end
+    end
+    table.sort(owners)
+    approval.attach(state, persist, function(text, relation, callback, extras)
+      extras = extras or {}
+      local room_id = type(extras.room) == "string" and cfg.rooms[extras.room] ~= nil
+        and extras.room or cfg.home_room
+      local content = { msgtype = "m.text", body = text, ["m.relates_to"] = relation,
+        ["app.remuda.approval"] = true }
+      if extras.mention and #owners > 0 then
+        content.body = table.concat(owners, " ") .. "\n" .. text
+        content["m.mentions"] = { user_ids = owners }
+      end
+      if extras.html then
+        local lead = content["m.mentions"] and (table.concat(owners, " "):gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;") .. "<br>") or ""
+        content.format, content.formatted_body = "org.matrix.custom.html", lead .. extras.html
+      end
+      local body, encode_error = encode(content)
       if not body then
         callback({ error = encode_error })
         return { cancel = function() end }
       end
       return api.request_json({ method = "PUT",
-        path = "/_matrix/client/v3/rooms/" .. percent_encode(cfg.home_room)
+        path = "/_matrix/client/v3/rooms/" .. percent_encode(room_id)
           .. "/send/m.room.message/" .. percent_encode("approval-" .. tostring(remuda._butler_new_ulid())),
-        room = cfg.home_room, body = body,
+        room = room_id, body = body,
         headers = { ["Content-Type"] = "application/json" },
       }, function(result)
         if type(result) ~= "table" or result.error then
           callback({ error = type(result) == "table" and result.error or "Matrix approval post failed" })
         else
-          callback({ event_id = result.json and result.json.event_id })
+          callback({ event_id = result.json and result.json.event_id, room_id = room_id })
         end
       end)
-    end)
+    end, function() return relay.approval_room_for_config(cfg) end, cfg.home_room)
   end
 
   local function quarantine_event(ev, reason, room_id, defer_persist)
@@ -903,13 +967,39 @@ function relay.new(options)
     return false
   end
 
+  function instance:record_own_event(room_id, event_id, thread_root)
+    if not valid_room_id(room_id) or cfg.rooms[room_id] == nil or not valid_event_key(event_id) then return false end
+    thread_root = valid_event_key(thread_root) and thread_root or event_id
+    local events = state.own_events[room_id] or json.array({})
+    for index, item in ipairs(events) do
+      if item.event_id == event_id then table.remove(events, index); break end
+    end
+    events[#events + 1] = { event_id = event_id, thread_root = thread_root }
+    while #events > MAX_OWN_EVENTS_PER_ROOM do table.remove(events, 1) end
+    state.own_events[room_id] = events
+    persist()
+    return true
+  end
+
+  local function own_event_for(event_id)
+    for room_id, events in pairs(state.own_events) do
+      if cfg.rooms[room_id] ~= nil then
+        for _, item in ipairs(events) do
+          if item.event_id == event_id then
+            return { room_id = room_id, thread_root = item.thread_root }
+          end
+        end
+      end
+    end
+  end
+
   function instance:can_reply_to(event_id)
     for _, route in pairs(state.routes) do
       if route.event_id == event_id or route.last_reply_event_id == event_id then
         return true
       end
     end
-    return false
+    return own_event_for(event_id) ~= nil
   end
 
   function instance:thread_root_for_event(event_id)
@@ -918,7 +1008,8 @@ function relay.new(options)
         return route.thread_root or route.event_id
       end
     end
-    return event_id
+    local own = own_event_for(event_id)
+    return own and own.thread_root or event_id
   end
 
   function instance:route_for_event(event_id)
@@ -929,6 +1020,8 @@ function relay.new(options)
           allowlisted_human = route.allowlisted_human == true }
       end
     end
+    local own = own_event_for(event_id)
+    if own then return own end
   end
 
   function instance:subscribe_thread(room_id, thread_id, mail_id)
@@ -1545,6 +1638,31 @@ function relay.new(options)
     return true
   end
 
+  -- Prepared-text and guard requests take the strict owner gate; the first also needs its switch.
+  local function owner_gated(record)
+    return (record.kind == "approve_text" and cfg.approve_text == true) or record.kind == "guard_action"
+      or record.kind == "guard_unfreeze"
+  end
+
+  -- The owner's `guard freeze|unfreeze|revoke gNNN` lines (guard_approval.owner_command). The strict owner gate is the
+  -- one the reactions use, against the HOME room and this relay's start in place of a post: an allowlisted human, live
+  -- sync, not edited, not older than the relay. Returns the reply text when the line was a guard verb.
+  local relay_started_ms = os.time() * 1000
+  local function owner_guard_line(ev, content, live_sync, room_id)
+    local guards = remuda.butler and remuda.butler.guard_approval
+    if not (guards and guards.owner_command) or content.msgtype ~= "m.text" or type(content.body) ~= "string"
+        or not content.body:lower():match("^%s*guard%s") then return nil end
+    if not (approve_text.owner_event_allowed(ev, { room_id = cfg.home_room, created_ms = relay_started_ms }, cfg,
+        live_sync, room_id) and member_kind(ev.sender, cfg) == "HUMAN") then return nil end
+    local ok, reply = pcall(guards.owner_command, content.body, ev.sender, ev.event_id)
+    if ok and type(reply) == "string" then return reply end
+    -- a guard verb is never handed on as mail, even when its handler failed
+    local verb = content.body:lower():match("^%s*guard%s+(%a+)")
+    if not ok and (verb == "freeze" or verb == "unfreeze" or verb == "revoke") then
+      return "That guard command failed and was not run. Check `remuda butler guard grants`."
+    end
+  end
+
   local function accept_events(events, cursor, room_id, live_sync)
     local added = {}
     for _, ev in ipairs(type(events) == "table" and events or {}) do
@@ -1553,15 +1671,45 @@ function relay.new(options)
         if (event_id == "" or (not state.processed[event_id] and not state.pending[event_id]))
           and ev.sender ~= cfg.self_mxid then
           local content = type(ev.content) == "table" and ev.content or {}
+          local is_butler_sender = cfg.butler_senders[ev.sender] == true
+            or member_kind(ev.sender, cfg) == "AGENT"
+          if content["app.remuda.approval"] ~= nil and is_butler_sender then
+            if event_id ~= "" then add_processed(state, event_id) end
+            if cursor then state.since = cursor end
+            persist()
+          else
           local approval_record, approval_verdict
           if approval then
-            local targets, verdict = approval_answer_fields(ev)
-            if verdict then
-              for _, target in ipairs(targets) do
-                approval_record = approval.for_event(target)
-                if approval_record then approval_verdict = verdict; break end
+            local targets, verdict, explicit_id, text_verdict, msgtype = approval_answer_fields(ev)
+            if verdict or text_verdict then
+              if explicit_id and type(approval.for_id) == "function" then
+                local candidate = approval.for_id(explicit_id)
+                if candidate and owner_gated(candidate) and msgtype == "m.text" then
+                  approval_record = candidate
+                  approval_verdict = text_verdict
+                end
+              end
+              if not approval_record and not explicit_id then
+                for _, target in ipairs(targets) do
+                  local candidate = approval.for_event(target)
+                  if candidate and (candidate.kind == "approve_text" or candidate.kind == "guard_action"
+                      or candidate.kind == "guard_unfreeze") then
+                    if owner_gated(candidate) and msgtype == "m.text" then
+                      approval_record, approval_verdict = candidate, text_verdict
+                    elseif owner_gated(candidate) and msgtype == "m.reaction" then
+                      approval_record, approval_verdict = candidate, verdict
+                    end
+                  elseif candidate and verdict then
+                    approval_record, approval_verdict = candidate, verdict
+                  end
+                  if approval_record then break end
+                end
               end
             end
+          end
+          -- Only a guard request can end in a standing grant; on any other request the cycle arrows are just a reaction.
+          if approval_verdict == "grant" and approval_record and approval_record.kind ~= "guard_action" then
+            approval_record, approval_verdict = nil, nil
           end
           local typed_line_candidate = not approval_record and cfg.allowed_senders[ev.sender] == true
             and member_kind(ev.sender, cfg) == "HUMAN"
@@ -1596,6 +1744,7 @@ function relay.new(options)
               trace_typed_line(ev, room_id or cfg.room, nil, nil, "butler", "refused:not_live")
             end
           end
+          local guard_reply = not approval_record and owner_guard_line(ev, content, live_sync == true, room_id or cfg.room)
           local status_matched, status_text, status_commit = false, nil, nil
           if not approval_record and type(content.body) == "string" and content.body:sub(1, 1) == "?"
               and member_kind(ev.sender, cfg) == "HUMAN" then
@@ -1610,7 +1759,13 @@ function relay.new(options)
                 "consumed:" .. trace_reason .. ":" .. (terminal_safe_field(tostring(matched), 64):gsub("%c", " ")))
             end
           end
-          if status_matched then
+          if guard_reply then
+            -- The event is spent before it acts, so a replay after a restart changes nothing.
+            if event_id ~= "" then add_processed(state, event_id) end
+            if cursor then state.since = cursor end
+            pcall(persist)
+            send_threaded_notice(ev, room_id or cfg.room, guard_reply, "guard-command-")
+          elseif status_matched then
             if event_id ~= "" then add_processed(state, event_id) end
             if cursor then state.since = cursor end
             local persisted, persist_result = pcall(persist)
@@ -1622,14 +1777,25 @@ function relay.new(options)
             if event_id ~= "" then add_processed(state, event_id) end
             if cursor then state.since = cursor end
             local origin_ms = tonumber(ev.origin_server_ts)
-            local counts = approval_verdict ~= nil and (room_id or cfg.room) == cfg.home_room
-              and type(ev.sender) == "string" and cfg.allowed_senders[ev.sender]
-              and member_kind(ev.sender, cfg) == "HUMAN"
-              and origin_ms ~= nil and tonumber(approval_record.created_ms) ~= nil
-              and origin_ms >= tonumber(approval_record.created_ms) - 30000
+            local counts
+            if approval_record.kind == "approve_text" or approval_record.kind == "guard_action"
+                or approval_record.kind == "guard_unfreeze" then
+              counts = approval_verdict ~= nil
+                and approve_text.owner_event_allowed(ev, approval_record, cfg, live_sync, room_id or cfg.room)
+                and member_kind(ev.sender, cfg) == "HUMAN"
+            else
+              counts = event_id ~= "" and approval_verdict ~= nil
+                and (room_id or cfg.room) == (approval_record.room_id or cfg.home_room)
+                and type(ev.sender) == "string" and cfg.allowed_senders[ev.sender]
+                and member_kind(ev.sender, cfg) == "HUMAN"
+                and origin_ms ~= nil and tonumber(approval_record.created_ms) ~= nil
+                and origin_ms >= tonumber(approval_record.created_ms) - 30000
+            end
             if counts then
-              if approval_record.status == "open" then
-                pcall(approval.answer, approval_record.event_id, approval_verdict, ev.sender)
+              if approval_record.status == "open"
+                  or (approval_record.kind == "approve_text" and approval_record.status == "approved"
+                    and (approval_verdict == "approve" or approval_verdict == "deny")) then
+                pcall(approval.answer, approval_record.event_id, approval_verdict, ev.sender, ev.event_id)
               elseif approval_record.status == "expired" then
                 pcall(approval.reply, approval_record, "Expired.")
               else
@@ -1736,6 +1902,7 @@ function relay.new(options)
           added[#added + 1] = ev.event_id
           if cursor then state.since = cursor end
           persist()
+          end
           end
           end
           end
@@ -2094,10 +2261,13 @@ function relay.new(options)
       local refreshed = read_config(config_path)
       if refreshed then
         cfg.rooms, cfg.room_how = refreshed.rooms, refreshed.room_how
-        cfg.typed_lines, cfg.shell_lines = refreshed.typed_lines, refreshed.shell_lines
+        cfg.typed_lines, cfg.shell_lines, cfg.approve_text = refreshed.typed_lines,
+          refreshed.shell_lines, refreshed.approve_text
         cfg.status_commands = refreshed.status_commands
+        remuda._butler_matrix_live_config = cfg
       else
-        cfg.typed_lines, cfg.shell_lines = false, false
+        cfg.typed_lines, cfg.shell_lines, cfg.approve_text = false, false, false
+        remuda._butler_matrix_live_config = cfg
       end
     end
     if path == SYNC_PATH and state.since == nil then
@@ -2172,6 +2342,7 @@ function relay.new(options)
     generation = generation + 1
     live_sync_ready = false
     active = true
+    remuda._butler_matrix_live_config = cfg
     if approval and type(approval.reapply_approved) == "function" then approval.reapply_approved() end
     if approval and type(approval.sweep) == "function" and type(remuda.schedule) == "function" then
       -- ponytail: move to remuda.after when team-3 lands it.
@@ -2189,6 +2360,7 @@ function relay.new(options)
   function instance:stop()
     generation = generation + 1
     active = false
+    if remuda._butler_matrix_live_config == cfg then remuda._butler_matrix_live_config = nil end
     if request_handle and request_handle.cancel then pcall(function() request_handle:cancel() end) end
     request_handle = nil
     request_token = nil

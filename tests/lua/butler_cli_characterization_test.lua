@@ -1,0 +1,495 @@
+-- Characterization goldens for the hand-parsed CLI families (arg-parser migration PR0).
+-- Each case runs the real `remuda butler ...` front door against stubbed actions and records
+-- exit status, stdout, stderr and every stub call. Current behaviour is the baseline, defects
+-- included; a deliberate change must update tests/golden_cli/ in the same PR.
+--   CLI_GOLDEN_UPDATE=1 tests/lua_tests.sh tests/lua/butler_cli_characterization_test.lua
+local exe = assert(os.getenv("REMUDA_BIN"))
+local child = assert(os.getenv("REMUDA_LUA_CHILD_SERVER"))
+local repo = assert(os.getenv("REMUDA_LUA_REPO"))
+local scratch = assert(os.getenv("REMUDA_LUA_SCRATCH"))
+local started
+
+local function start_butler()
+  if started then return end
+  started = true
+  T.install_mod("butler", repo)
+  T.eval('remuda._butler_argv = {"sh", "-c", "sleep 60"}; remuda._butler_skip_relay = true; remuda._butler_readiness_timeout = 1')
+  T.eval('return remuda.exec("butler")')
+  T.wait_until(function()
+    return T.eval('return remuda._butler_bus ~= nil and remuda._butler_bus.agents.butler ~= nil')
+      :match("^%s*true%s*$") ~= nil
+  end, 10, "Butler root start")
+  T.eval([[remuda._butler_bus.agents["agent-test"] = { id = "agent-test", alias = "agent-test",
+    session_name = "agent-test", children = {}, kind = "codex" }]])
+  -- One shared action log: every stub appends "name(arg|arg)".
+  T.eval([[
+    remuda._pr0_log = {}
+    function remuda._pr0_note(name, ...)
+      local parts = {}
+      for i = 1, select("#", ...) do parts[i] = tostring((select(i, ...))) end
+      remuda._pr0_log[#remuda._pr0_log + 1] = name .. "(" .. table.concat(parts, "|") .. ")"
+    end
+    return "ok"
+  ]])
+end
+
+local usage -- the global usage text, substituted so a new verb does not rewrite every golden
+local function normalize(text)
+  text = (text or ""):gsub("\n$", "")
+  if usage and usage ~= "" then
+    local at, to = text:find(usage, 1, true)
+    if at then text = text:sub(1, at - 1) .. "<GLOBAL-USAGE>" .. text:sub(to + 1) end
+  end
+  text = text:gsub("%f[%w][%d%u]+%f[%W]", function(word) return #word == 26 and "<ULID>" or word end)
+  text = text:gsub("(%.lua\"%]):%d+:", "%1:<LINE>:")
+  return (text:gsub("%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%dZ", "<TS>"))
+end
+
+-- A case is an argv array, or { argv = {...}, as = "agent", pre = lua, post = lua }.
+-- `as = "agent"` calls the Butler front door in-process with a daemon session caller.
+local function run_case(case, trace)
+  local argv = case.argv or case
+  T.eval("remuda._pr0_log = {}")
+  if case.pre then T.eval(case.pre) end
+  local code, out, err
+  if case.as == "standby" then
+    local words = {}
+    for _, word in ipairs(argv) do words[#words + 1] = string.format("%q", word) end
+    local result = T.eval([[
+      local extension = remuda._extension_commands.butler
+      local command_run = remuda._butler_command_run
+      local real_fail = remuda.fail
+      remuda.fail = function(text, code) return { failed = true, code = code, text = text } end
+      remuda._pr0_standby_setup()
+      local ok, value = pcall(remuda._extension_commands.butler, { ]] .. table.concat(words, ",") .. [[ }, nil)
+      remuda._extension_commands.butler = extension
+      remuda._butler_command_run = command_run
+      remuda.fail = real_fail
+      if not ok then return "1\0\0" .. tostring(value) end
+      if type(value) == "table" and value.failed then return tostring(value.code) .. "\0\0" .. tostring(value.text) end
+      if type(value) == "table" then return "0\0<deferred reply>\0" end
+      return "0\0" .. tostring(value) .. "\0"
+    ]])
+    code, out, err = result:match("^(%d+)%z(.-)%z(.*)$")
+  elseif case.as then
+    local words = {}
+    for _, word in ipairs(argv) do words[#words + 1] = string.format("%q", word) end
+    local result = T.eval([[
+      local real_fail = remuda.fail
+      remuda.fail = function(text, code) return { failed = true, code = code, text = text } end
+      local ok, value = pcall(remuda._extension_commands.butler, { ]] .. table.concat(words, ",") .. [[ },
+        { kind = "session", session = "agent-test" })
+      remuda.fail = real_fail
+      if not ok then return "1\0\0" .. tostring(value) end
+      if type(value) == "table" and value.failed then return tostring(value.code) .. "\0\0" .. tostring(value.text) end
+      if type(value) == "table" then return "0\0<deferred reply>\0" end
+      return "0\0" .. tostring(value) .. "\0"
+    ]])
+    code, out, err = result:match("^(%d+)%z(.-)%z(.*)$")
+  else
+    local full = { exe, "-s", child, "butler" }
+    for _, word in ipairs(argv) do full[#full + 1] = word end
+    local result = remuda.process.run { argv = full, timeout = 20 }
+    assert(not result.timed_out, "timed out: " .. table.concat(argv, " "))
+    code, out, err = tostring(result.code), result.stdout, result.stderr
+  end
+  local log = T.eval('return table.concat(remuda._pr0_log, "\\n")')
+  if trace then log = log .. (log == "" and "" or "\n") .. "state: " .. T.eval(trace):gsub("\n", "\\n") end
+  if case.post then T.eval(case.post) end
+  local words = {}
+  for _, word in ipairs(argv) do words[#words + 1] = string.format("%q", word) end
+  return table.concat({
+    "### " .. (case.as == "agent" and "[agent] " or "") .. "remuda butler " .. table.concat(words, " "),
+    "exit: " .. code,
+    "stdout:", normalize(out),
+    "stderr:", normalize(err),
+    "actions:", log == "" and "(none)" or normalize(log),
+    "",
+  }, "\n")
+end
+
+local function check_golden(family)
+  start_butler()
+  if not usage then
+    local helped = remuda.process.run({ argv = { exe, "-s", child, "butler", "help" }, timeout = 20 })
+    usage = (helped.stdout or ""):gsub("%s+$", "")
+    assert(#usage > 200, "cannot read the global usage: " .. tostring(helped.stderr))
+  end
+  if family.setup then T.eval(family.setup) end
+  local blocks = {}
+  for _, case in ipairs(family.cases) do
+    if family.reset then T.eval(family.reset) end
+    blocks[#blocks + 1] = run_case(case, family.trace)
+  end
+  local actual = table.concat(blocks, "\n")
+  local path = repo .. "/tests/golden_cli/" .. family.name .. ".txt"
+  if os.getenv("CLI_GOLDEN_UPDATE") == "1" then
+    local out = assert(io.open(path, "wb")); out:write(actual); out:close()
+    return
+  end
+  local file = assert(io.open(path, "rb"), "missing golden " .. path)
+  local want = file:read("*a"); file:close()
+  if want ~= actual then
+    local saved = scratch .. "/" .. family.name .. ".actual"
+    local got = assert(io.open(saved, "wb")); got:write(actual); got:close()
+    error(family.name .. " golden differs; actual saved to " .. saved .. "\n--- actual\n" .. actual, 0)
+  end
+end
+
+local function families(list)
+  for _, family in ipairs(list) do
+    T.test(family.name .. " CLI goldens", function() check_golden(family) end)
+  end
+end
+
+-- bare, long and short help, and the bare word `help`, then the family's own shapes.
+local function forms(verb, ...)
+  local cases = { { verb }, { verb, "--help" }, { verb, "-h" }, { verb, "help" } }
+  for _, extra in ipairs({ ... }) do cases[#cases + 1] = extra end
+  return cases
+end
+local function agent(...) return { argv = { ... }, as = "agent" } end
+
+families {
+  { name = "matrix",
+    setup = [[
+      local m = remuda.butler.matrix
+      m.configuration_guidance = function() return nil end
+      m.configured_room = function() return "!room:example.org" end
+      m.room_kind = function() return "joined" end
+      m.status = function(options, callback) remuda._pr0_note("matrix.status", options.json); callback({ user_id = "@bot:example.org", joined_rooms = remuda.json.array({}) }) end
+      m.rooms = function(options, callback) remuda._pr0_note("matrix.rooms", options.public, options.public_term); callback({ rooms = remuda.json.array({}), mode = "allowlist" }) end
+      m.history = function(options, callback) remuda._pr0_note("matrix.history", options.room, options.n, options.json); callback({ chunk = remuda.json.array({}) }) end
+      m.thread = function(options, callback) remuda._pr0_note("matrix.thread", options.room, options.event_id, options.json); callback({ chunk = remuda.json.array({}) }) end
+      m.event = function(options, callback) remuda._pr0_note("matrix.event", options.room, options.event_id, options.json); callback({ sender = "@alice:example.org", content = { body = "hello" } }) end
+      m.send = function(options, callback) remuda._pr0_note("matrix.send", options.room, options.text, options.stdin, options.json); callback({ sent = 1, event_ids = { "$sent" } }) end
+      m.reply = function(options, callback) remuda._pr0_note("matrix.reply", options.room, options.event_id, options.text, options.json); callback({ sent = 1, event_ids = { "$reply" } }) end
+      m.react = function(options, callback) remuda._pr0_note("matrix.react", options.room, options.event_id, options.key, options.json); callback({ event_id = options.event_id }) end
+      m.upload = function(options, callback) remuda._pr0_note("matrix.upload", options.room, options.file, options.json); callback({ content_uri = "mxc://example/file", event_id = "$upload" }) end
+      m.download = function(options, callback) remuda._pr0_note("matrix.download", options.output, options.mxc, options.json); callback({ bytes = 3, path = options.output or "/tmp/file" }) end
+      m.redact = function(options, callback) remuda._pr0_note("matrix.redact", options.room, options.event_id, options.reason, options.json); callback({ event_id = options.event_id }) end
+      m.setup_prepare = function(args) remuda._pr0_note("matrix.setup_prepare", table.concat(args, "|")); return { help = true, usage = "matrix setup help" } end
+    ]],
+    cases = {
+      { "matrix", "status" }, { "matrix", "--json", "status" }, { "matrix", "status", "--json" },
+      { "matrix", "rooms" }, { "matrix", "rooms", "--public", "science" },
+      { "matrix", "--room", "!room:example.org", "-n", "8", "history" },
+      { "matrix", "history", "-n", "4", "--json" }, { "matrix", "thread", "$event" },
+      { "matrix", "--room", "!room:example.org", "follow", "$event" },
+      { "matrix", "unfollow", "$event" }, { "matrix", "event", "$event" }, { "matrix", "get", "$event" },
+      { "matrix", "--room", "!room:example.org", "send", "hello", "world" },
+      { "matrix", "send", "-" }, { "matrix", "send", "--", "--literal" },
+      { "matrix", "reply", "$event", "hello", "there" }, { "matrix", "react", "$event", "+1" },
+      { "matrix", "upload", "file.txt" }, { "matrix", "-o", "/tmp/out", "download", "mxc://example/file" },
+      { "matrix", "redact", "$event", "--reason", "cleanup" },
+      { "matrix", "setup", "--help" }, { "matrix", "setup" },
+      { "matrix", "unknown" }, { "matrix", "stats" }, { "matrix", "--", "status" },
+      { "matrix", "history" }, { "matrix", "history", "extra" }, { "matrix", "send" },
+      { "matrix", "reply", "$event" }, { "matrix", "react", "$event" }, { "matrix", "upload" },
+      { "matrix", "download", "mxc://example/file" }, { "matrix", "redact", "$event" },
+      { "matrix", "status", "extra" }, { "matrix", "help" }, { "matrix", "--help" },
+    } },
+  { name = "approvals",
+    setup = [[
+      local approval = remuda.butler.approval
+      remuda._pr0_approvals = { calls = 0, status = "open", expired_record = nil }
+      approval.list = function()
+        remuda._pr0_note("approval.list")
+        if remuda._pr0_approvals.status == "open" then
+          return { { id = "A7K2", kind = "agent", summary = "synthetic", asker = "worker", expires_at = os.time() * 1000 + 60000 } }
+        end
+        return {}
+      end
+      approval.answer = function(id, decision, by)
+        remuda._pr0_approvals.calls = remuda._pr0_approvals.calls + 1
+        remuda._pr0_note("approval.answer", id, decision, by)
+        local expired = remuda._pr0_approvals.expired_record
+        if type(expired) == "table" and expired.id == id then
+          if expired.status == "open" and os.time() * 1000 >= expired.expires_at then
+            expired.status = "expired"
+            remuda._pr0_note("approval.expire", id)
+          end
+          remuda._pr0_approvals.status = expired.status
+          return false, nil, { id = id, status = expired.status }
+        end
+        if id ~= "A7K2" then return false, "unknown approval request", nil end
+        if remuda._pr0_approvals.status ~= "open" then return false, nil, { id = id, status = remuda._pr0_approvals.status } end
+        remuda._pr0_approvals.status = decision == "approve" and "approved" or "denied"
+        return true, nil, { id = id, summary = "synthetic", status = remuda._pr0_approvals.status }
+      end
+    ]],
+    reset = [[remuda._pr0_approvals.status = "open"; remuda._pr0_approvals.calls = 0; remuda._pr0_approvals.expired_record = nil]],
+    trace = [[return remuda._pr0_approvals.status .. ":" .. remuda._pr0_approvals.calls]],
+    cases = forms("approvals", { "approvals", "extra" }, { "approvals", "--" },
+      { "approvals", "--help", "extra" }, { "approvals", "-h", "extra" },
+      { argv = { "approvals", "--help" }, as = "agent" },
+      { "approve", "A7K2" }, { "deny", "A7K2" }, { "approve" }, { "deny" },
+      { "approve", "" }, { "deny", "" }, { "approve", "bad id" }, { "deny", "bad id" },
+      { "approve", "-A7K2" }, { "deny", "-A7K2" }, { "approve", "--", "A7K2" },
+      { "deny", "--", "A7K2" }, { "approve", "A7K2", "extra" }, { "deny", "A7K2", "extra" },
+      { "approve", "A7K2=1" }, { "deny", "A7K2=1" },
+      { "approve", "--help" }, { "deny", "-h" }, { "approve", "--help", "A7K2" },
+      { argv = { "approve", "A7K2" }, as = "agent" },
+      { argv = { "deny", "A7K2" }, as = "agent" },
+      { argv = { "approve", "A7K2" }, pre = [[remuda._pr0_approvals.status = "expired"]] },
+      { argv = { "deny", "A7K2" }, pre = [[remuda._pr0_approvals.status = "denied"]] },
+      { "approve", "unknown" }, { "deny", "unknown" },
+      { argv = { "approve", "--" }, pre = [[remuda._pr0_approvals.expired_record = { id = "--", status = "open", expires_at = 0 }]] },
+      { argv = { "deny", "--" }, pre = [[remuda._pr0_approvals.expired_record = { id = "--", status = "open", expires_at = 0 }]] },
+      { argv = { "approve", "-x" }, pre = [[remuda._pr0_approvals.expired_record = { id = "-x", status = "open", expires_at = 0 }]] }) },
+  { name = "standby",
+    setup = [[
+      local guard = remuda.butler.guard
+      remuda._pr0_standby = { claims = 0, doctor = 0, state = "initial" }
+      guard.claim = function()
+        remuda._pr0_standby.claims = remuda._pr0_standby.claims + 1
+        return { owner = false, guarded = true, held = true, session = "owner-session", pid = 42 }
+      end
+      local function stub_doctor()
+        remuda._butler_doctor.probe = function() remuda._pr0_standby.doctor = remuda._pr0_standby.doctor + 1; return {} end
+        remuda._butler_doctor.render = function() return { "doctor-stub" } end
+        remuda._butler_doctor.permission_lines = function() return {} end
+      end
+      stub_doctor()
+      -- standby doctor re-execs butler/doctor, which replaces the stubs with the
+      -- real probes (host-dependent output); re-apply them after each exec.
+      local real_exec = remuda.exec
+      remuda.exec = function(name, ...)
+        local results = table.pack(real_exec(name, ...))
+        if name == "butler/doctor" then stub_doctor() end
+        return table.unpack(results, 1, results.n)
+      end
+      remuda._pr0_standby_setup = function()
+        guard.standby({ owner = false, guarded = true, held = true, session = "owner-session", pid = 42 }, {})
+      end
+    ]],
+    reset = [[remuda._pr0_standby.claims = 0; remuda._pr0_standby.doctor = 0; remuda._pr0_standby.state = "initial"]],
+    trace = [[return remuda._pr0_standby.claims .. ":" .. remuda._pr0_standby.doctor .. ":" .. tostring(remuda._butler_standby.gone or "held")]],
+    cases = {
+      { argv = { "doctor" }, as = "standby" }, { argv = { "doctor", "extra" }, as = "standby" },
+      { argv = { "doctor", "--help" }, as = "standby" }, { argv = { "doctor", "-h" }, as = "standby" },
+      { argv = { "status" }, as = "standby" }, { argv = { "approve", "A7K2" }, as = "standby" },
+      { argv = { "--help" }, as = "standby" }, { argv = { "--", "doctor" }, as = "standby" },
+    } },
+  { name = "doctor",
+    setup = [[
+      local d = dofile(]] .. string.format("%q", repo .. "/packages/butler/doctor.lua") .. [[)
+      d.probe = function() remuda._pr0_note("doctor.probe"); return {} end
+      d.render = function() remuda._pr0_note("doctor.render"); return { "doctor-stub" } end
+      remuda._pr0_permission_lines = d.permission_lines
+      d.permission_lines = function() return {} end
+      function remuda._pr0_current_permissions(text)
+        remuda._butler_permission_report = { kind = "claude", report = {
+          path = "/doctor/settings.local.json", added = {}, present = { "Bash(remuda butler:*)" }, withheld = {} } }
+        d.permission_lines = function(report, kind)
+          local opened = io.open
+          io.open = function(path, mode)
+            if path == "/doctor/settings.local.json" then
+              remuda._pr0_note("settings.read", path)
+              if text == nil then return nil, "No such file or directory" end
+              return { read = function() return text end, close = function() end }
+            end
+            return opened(path, mode)
+          end
+          local ok, lines = pcall(remuda._pr0_permission_lines, report, kind, { sources = { report.path } })
+          io.open = opened
+          assert(ok, lines)
+          return lines
+        end
+      end
+    ]],
+    cases = forms("doctor", { "doctor", "extra" }, { "doctor", "--" }, { "doctor", "--json" },
+      { "doctor", "--help", "extra" }, { "doctor", "extra", "--help" }, { "doctor", "--=" },
+      { argv = { "doctor" }, as = "agent", pre = [[remuda._pr0_current_permissions('{"permissions":{"allow":["Bash(remuda butler:*)"]}}')]] },
+      { argv = { "doctor" }, as = "agent", pre = [[remuda._pr0_current_permissions('{"permissions":{"deny":["Bash(remuda butler:*)"]}}')]] },
+      { argv = { "doctor" }, as = "agent", pre = [[remuda._pr0_current_permissions(nil)]],
+        post = [[remuda._butler_doctor.permission_lines = function() return {} end; remuda._butler_permission_report = nil]] }) },
+  { name = "sessions",
+    setup = [[remuda._butler_sessions = function() remuda._pr0_note("sessions.lookup"); return "sessions-stub" end]],
+    cases = forms("sessions", { "sessions", "extra" }, { "sessions", "--all" }, { "sessions", "--", "x" },
+      { "sessions", "--help", "extra" }) },
+  { name = "status",
+    setup = [[
+      remuda._pr0_state = { "up", 0 }
+      remuda._butler_status = function() remuda._pr0_note("status.lookup"); return remuda._pr0_state[1], remuda._pr0_state[2] end
+    ]],
+    cases = forms("status", { "status", "extra" }, { "status", "--json" }, { "status", "--", "x" },
+      { argv = { "status" }, pre = [[remuda._pr0_state = { "launching", 75 }]] },
+      { argv = { "status" }, pre = [[remuda._pr0_state = { "failed", 1 }]] },
+      { argv = { "status", "extra" }, pre = [[remuda._pr0_state = { "failed", 1 }]] }) },
+  { name = "agents",
+    cases = forms("agents", { "agents", "--all" }, { "agents", "--all", "--all" }, { "agents", "--all=1" },
+      { "agents", "extra" }, { "agents", "--bogus" }, { "agents", "--", "--all" }, { "agents", "--all", "extra" },
+      { "agents", "extra", "--all" }, { "agents", "--help", "--all" }, { "agents", "-a" }) },
+  { name = "quota",
+    setup = [[
+      remuda._butler_quota.collect = function(callback) remuda._pr0_note("quota.collect"); callback(nil, "stubbed") end
+      remuda.butler.matrix.send = function(...) remuda._pr0_note("matrix.send", ...); error("no Matrix post in tests", 0) end
+    ]],
+    cases = forms("quota", { "quota", "--report" }, { "quota", "--report", "--report" }, { "quota", "--report", "extra" },
+      { "quota", "extra", "--report" }, { "quota", "--report=1" }, { "quota", "--bogus" }, { "quota", "extra" },
+      { "quota", "--" }, { "quota", "--", "--report" }, { "quota", "--help", "--report" }, { "quota", "--report", "--help" },
+      { "quota", "-r" }, { "quota", "-1" },
+      agent("quota"), agent("quota", "--report"), agent("quota", "--help"), agent("quota", "--report", "extra"),
+      { argv = { "quota" }, pre = [[remuda._pr0_q = remuda._butler_quota; remuda._butler_quota = nil]], post = [[remuda._butler_quota = remuda._pr0_q]] },
+      { argv = { "quota", "--help" }, pre = [[remuda._pr0_q = remuda._butler_quota; remuda._butler_quota = nil]], post = [[remuda._butler_quota = remuda._pr0_q]] },
+      { argv = { "quota", "--bogus" }, pre = [[remuda._pr0_q = remuda._butler_quota; remuda._butler_quota = nil]], post = [[remuda._butler_quota = remuda._pr0_q]] }) },
+  { name = "close",
+    setup = [[
+      remuda._butler_bus.agents.worker = { id = "01SYNTHETICWORKER000000000", parent = "butler", parent_id = remuda._butler_bus.agents.butler.id, session_name = "worker" }
+      remuda._butler_bus.agents.other = { id = "01SYNTHETICOTHER00000000000", parent = "worker", parent_id = "01SYNTHETICWORKER000000000", session_name = "other" }
+      remuda.close = function(...) remuda._pr0_note("close", ...); return true end
+      remuda.butler.is_idle = function() return false, "busy" end -- deterministic: do not depend on the real is_idle for a fake session
+    ]],
+    cases = forms("close", { "close", "worker" }, { "close", "worker", "--force" }, { "close", "--force", "worker" },
+      { "close", "--force" }, { "close", "--force", "--force", "worker" }, { "close", "worker", "--force", "--force" },
+      { "close", "worker", "extra" }, { "close", "worker", "other" }, { "close", "--force=1", "worker" },
+      { "close", "-f", "worker" }, { "close", "--bogus" }, { "close", "--bogus", "worker" },
+      { "close", "worker", "--bogus" }, { "close", "--", "worker" }, { "close", "--force", "--", "worker" },
+      { "close", "worker", "--" }, { "close", "-worker" }, { "close", "nosuch" }, { "close", "nosuch", "--force" },
+      { "close", "butler", "--force" }, { "close", "other", "--force" },
+      { "close", "--help", "worker" }, { "close", "worker", "--help" }, { "close", "worker", "-h" },
+      { "close", "--force", "--help" }, { "close", "--help", "--force" }) },
+  { name = "compact",
+    setup = [[
+      remuda._butler_compaction_has_session = function(name) remuda._pr0_note("compact.has_session", name); return name == "s1" end
+      remuda._butler_compaction_tick = function(...) if select("#", ...) > 0 then remuda._pr0_note("compact.tick", ...) end; return "tick-stub" end
+      remuda.butler.compact = function(...) remuda._pr0_note("compact", ...); return "compact-stub" end
+    ]],
+    cases = forms("compact", { "compact", "s1" }, { "compact", "s1", "--dry-run" }, { "compact", "s1", "--force" },
+      { "compact", "s1", "--dry-run", "--force" }, { "compact", "s1", "--force", "--dry-run" },
+      { "compact", "--dry-run", "s1" }, { "compact", "--force", "s1" }, { "compact", "s1", "--dry-run", "--dry-run" },
+      { "compact", "s1", "--force", "--force" }, { "compact", "s1", "--bogus" }, { "compact", "s1", "extra" },
+      { "compact", "s1", "--dry-run=1" }, { "compact", "s1", "--" }, { "compact", "--", "s1" },
+      { "compact", "s1", "-n" }, { "compact", "s1", "-1" }, { "compact", "" },
+      { "compact", "nosuch" }, { "compact", "nosuch", "--dry-run" }, { "compact", "nosuch", "--bogus" },
+      { "compact", "nosuch", "--dry-run", "--force" }, { "compact", "--help", "s1" }, { "compact", "s1", "--help" },
+      { "compact", "s1", "-h" }, { "compact", "--dry-run" }) },
+  { name = "inbox",
+    setup = [[
+      remuda._pr0_inbox = { read = 0, deliveries = 0 }
+      local mail = remuda._butler_mail
+      local real_find = mail.find_message
+      mail.find_message = function(id)
+        if id == "01M49D6J4RVBW73XKFGQ6XS94J" then return { id = id } end
+        if id == "01M49D6J4RVBW73XKFGQ6XS94K" then return { id = id } end
+        return nil
+      end
+      remuda._butler_inbox_message = function(me, id)
+        remuda._pr0_inbox.read = remuda._pr0_inbox.read + 1
+        if id == "01M49D6J4RVBW73XKFGQ6XS94K" then
+          error("message " .. id .. " was not delivered to you", 0)
+        end
+        return "message " .. id
+      end
+      remuda._butler_inbox = function(name)
+        remuda._pr0_inbox.read = remuda._pr0_inbox.read + 1
+        return "inbox for " .. name
+      end
+      remuda._pr0_inbox.restore = function() mail.find_message = real_find end
+    ]],
+    trace = [[return "read=" .. remuda._pr0_inbox.read .. ",deliveries=" .. remuda._pr0_inbox.deliveries]],
+    cases = {
+      { "inbox" }, { "inbox", "--help" }, { "inbox", "-h" }, { "inbox", "help" },
+      { "inbox", "01M49D6J4RVBW73XKFGQ6XS94J" },
+      agent("inbox", "01M49D6J4RVBW73XKFGQ6XS94J"),
+      agent("inbox", "01M49D6J4RVBW73XKFGQ6XS94K"),
+      { "inbox", "01M49D6J4RVBW73XKFGQ6XS94L" },
+      { "inbox", "alice" }, { "inbox", "01M49D6J4RVBW73XKFGQ6XS94J", "extra" },
+      { "inbox", "--" }, { "inbox", "-alice" }, { "inbox", "alice", "extra" },
+      { "inbox", "--help", "extra" }, { "inbox", "01M49D6J4RVBW73XKFGQ6XS94J", "--help" },
+    } },
+
+  -- typed-lines, shell-lines and status-commands share one switch parser. The terminal prompt
+  -- is stubbed so both valid on and off forms are captured without touching a real terminal.
+  { name = "switches",
+    setup = [[
+      remuda._pr0_conf = os.getenv("REMUDA_LUA_SCRATCH") .. "/pr0-matrix.conf"
+      remuda._butler_matrix_config = { config_path = remuda._pr0_conf }
+      remuda._pr0_saved_pending = remuda.pending
+      remuda.pending = function()
+        return {
+          prompt_line = function(_, spec) spec.callback("yes") end,
+          resolve = function(_, code, stdout, stderr)
+            return { code = code, stdout = stdout, stderr = stderr }
+          end,
+        }
+      end
+    ]],
+    reset = [[
+      local file = assert(io.open(remuda._pr0_conf, "wb"))
+      file:write("https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n")
+      file:close()
+    ]],
+    trace = [[local file = assert(io.open(remuda._pr0_conf, "rb")); local text = file:read("*a"); file:close(); return text]],
+    cases = (function()
+      local cases = {}
+      for _, verb in ipairs({ "typed-lines", "shell-lines", "status-commands" }) do
+        for _, rest in ipairs({
+          {}, { "--help" }, { "-h" }, { "help" }, { "on", "extra" }, { "off", "extra" }, { "extra", "on" },
+          { "maybe" }, { "ON" }, { "on=1" }, { "--on" }, { "--", "off" }, { "off", "--" }, { "-1" },
+          { "off" }, { "off", "off" }, { "on", "off" }, { "--help", "off" }, { "off", "--help" },
+        }) do
+          local argv = { verb }
+          for _, word in ipairs(rest) do argv[#argv + 1] = word end
+          cases[#cases + 1] = argv
+        end
+      end
+      for _, verb in ipairs({ "typed-lines", "shell-lines", "status-commands" }) do
+        cases[#cases + 1] = { argv = { verb, "on" }, pre = [[
+          local file = assert(io.open(remuda._pr0_conf, "wb"))
+          file:write("https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=true\nstatus_commands=false\napprove_text=false\n")
+          file:close()
+        ]] }
+        cases[#cases + 1] = { argv = { verb, "off" } }
+      end
+      -- shell-lines on is refused before any prompt while typed-lines is off.
+      cases[#cases + 1] = { "shell-lines", "on" }
+      cases[#cases + 1] = agent("typed-lines", "on")
+      cases[#cases + 1] = agent("typed-lines", "off")
+      cases[#cases + 1] = agent("shell-lines", "off")
+      cases[#cases + 1] = agent("status-commands", "off")
+      cases[#cases + 1] = agent("typed-lines", "bogus")
+      cases[#cases + 1] = agent("typed-lines", "--help")
+      cases[#cases + 1] = { argv = { "typed-lines", "off" }, pre = [[remuda._butler_matrix_config = { config_path = "" }]],
+        post = [[remuda._butler_matrix_config = { config_path = remuda._pr0_conf }]] }
+      cases[#cases + 1] = { argv = { "status-commands", "off" }, post = [[remuda.pending = remuda._pr0_saved_pending]] }
+      return cases
+    end)() },
+  { name = "schedule",
+    setup = [[
+      remuda._pr0_sched = os.getenv("REMUDA_LUA_SCRATCH") .. "/pr0-schedules.json"
+      remuda._pr0_reset = function() os.remove(remuda._pr0_sched) end
+      remuda._butler_schedule_env = {
+        path = remuda._pr0_sched,
+        trace = function(event, detail) remuda._pr0_note("schedule.trace", event, detail) end,
+        resolve = function(target) if target ~= "s1" and target ~= "butler" then error("unknown member: " .. target, 0) end return target end,
+      }
+    ]],
+    reset = [[remuda._pr0_reset()]],
+    trace = [[local file = io.open(remuda._pr0_sched, "rb"); if not file then return "(no file)" end; local text = file:read("*a"); file:close(); return text]],
+    cases = (function()
+      local cases = forms("schedule", { "schedule", "list" }, { "schedule", "list", "extra" }, { "schedule", "list", "--help" },
+        { "schedule", "--help", "list" }, { "schedule", "rm" }, { "schedule", "rm", "nope" }, { "schedule", "rm", "nope", "extra" },
+        { "schedule", "rm", "--help" }, { "schedule", "rm", "--", "nope" }, { "schedule", "add" }, { "schedule", "add", "--help" },
+        { "schedule", "add", "-h" }, { "schedule", "add", "job" }, { "schedule", "add", "job", "0 9 * * *" },
+        { "schedule", "add", "job", "bad cron", "text" }, { "schedule", "add", "job", "0 9 * * *", "text" },
+        { "schedule", "add", "job", "0 9 * * *", "text", "--to", "s1" }, { "schedule", "add", "job", "0 9 * * *", "text", "--to" },
+        { "schedule", "add", "job", "0 9 * * *", "text", "--to", "nosuch" },
+        { "schedule", "add", "job", "0 9 * * *", "text", "--to", "s1", "--to", "s1" },
+        { "schedule", "add", "job", "0 9 * * *", "--to", "s1", "text" },
+        { "schedule", "add", "job", "--to", "s1", "0 9 * * *", "text" },
+        { "schedule", "add", "job", "0 9 * * *", "text", "--to=s1" },
+        { "schedule", "add", "job", "0 9 * * *", "text", "more words" },
+        { "schedule", "add", "job", "0 9 * * *", "-text" }, { "schedule", "add", "job", "0 9 * * *", "--", "-text" },
+        { "schedule", "add", "job", "0 9 * * *", "--help" }, { "schedule", "add", "job", "0 9 * * *", "-" },
+        { "schedule", "add", "--", "job", "0 9 * * *", "text" }, { "schedule", "add", "-1", "0 9 * * *", "text" },
+        { "schedule", "bogus" }, { "schedule", "--bogus" }, { "schedule", "--" }, { "schedule", "list", "--" })
+      cases[#cases + 1] = agent("schedule", "list")
+      cases[#cases + 1] = agent("schedule", "add", "job", "0 9 * * *", "text")
+      cases[#cases + 1] = agent("schedule", "rm", "nope")
+      cases[#cases + 1] = agent("schedule", "bogus")
+      cases[#cases + 1] = agent("schedule", "--help")
+      return cases
+    end)() },
+}

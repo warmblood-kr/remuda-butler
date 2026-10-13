@@ -1,4 +1,6 @@
-local config = { typed_lines = true, shell_lines = false }
+local config = { typed_lines = true, shell_lines = false, approve_text = false,
+  approval_room = "all", home_room = "!room:example.org",
+  all_room = "!all:example.org", rooms = { ["!all:example.org"] = "all" } }
 remuda = {
   _butler_system = {
     platform = function() return "macos" end,
@@ -19,8 +21,45 @@ end
 local rendered = output()
 assert(rendered:find("Typed lines: on", 1, true), "doctor should show typed-lines on")
 assert(rendered:find("Shell lines: off", 1, true), "doctor should show shell-lines off")
+assert(rendered:find("Approve text: off", 1, true), "doctor should show approve-text off")
+assert(rendered:find("Approval room: all -> !all:example.org", 1, true), "doctor should show the configured approval room")
 config.typed_lines, config.shell_lines = false, true
 rendered = output()
 assert(rendered:find("Typed lines: off", 1, true), "doctor should show typed-lines off")
 assert(rendered:find("Shell lines: on", 1, true), "doctor should show shell-lines on")
+config.approval_room, config.all_room, config.rooms = "home", nil, {}
+rendered = output()
+assert(rendered:find("Approval room: home -> HOME", 1, true), "doctor should show the HOME selection")
+config.approval_room = "all"
+rendered = output()
+assert(rendered:find("Approval room: all -> HOME (lounge not joined)", 1, true), "doctor should show the HOME fallback")
+assert(rendered:find("Next: remuda butler matrix join ROOM", 1, true), "an unjoined lounge points to join")
+-- One joined room that is not marked ALL-BUTLERS: say so, and name the fix and the reload.
+config.rooms = { ["!lounge:example.org"] = "joined" }
+rendered = output()
+assert(rendered:find("Approval room: all -> HOME (joined room is not marked ALL-BUTLERS)", 1, true),
+  "doctor should not claim the lounge is unjoined")
+assert(rendered:find("remuda butler matrix mark-all '!lounge:example.org'; then remuda exec butler", 1, true),
+  "doctor should name the mark-all fix and the reload")
+assert(rendered:find("check that the room's members are only you and Butlers", 1, true),
+  "the Next line warns that ALL-BUTLERS receives approvals in full")
+config.rooms = { ["!x'y\n:example.org"] = "joined" }
+rendered = output()
+assert(rendered:find("mark-all '!x'\\''y :example.org'", 1, true) and not rendered:find("\n:example", 1, true),
+  "the printed room id is terminal-safe and shell-quoted")
+config.rooms = { ["!lounge:example.org"] = "joined" }
+config.rooms["!other:example.org"] = "joined"
+assert(output():find("Next: remuda butler matrix rooms; then remuda butler matrix mark-all ROOM", 1, true),
+  "several joined rooms point to rooms first")
+config.rooms = {}
 print("ok - doctor typed-line switch status")
+
+-- The setup hint appears only while Matrix is not configured.
+local ready = { installed = true, logged_in = true }
+local function lines_with(matrix_configured)
+  return table.concat(doctor.render({ claude = ready, codex = ready, matrix_configured = matrix_configured }, "macos"), "\n")
+end
+assert(lines_with(false):find("Next: remuda butler matrix setup", 1, true), "unconfigured Matrix points to setup")
+assert(not lines_with(true):find("Next:", 1, true), "configured Matrix gets no setup hint")
+assert(doctor.probe().matrix_configured == true, "a readable Matrix config counts as configured")
+print("ok - doctor setup hint only when Matrix is unconfigured")
