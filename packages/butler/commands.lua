@@ -480,10 +480,11 @@ local SEND_CLI_SPEC = {
   name = "remuda butler",
   verbs = {
     send = {
-      about = "Send a message to a Butler member",
-      options = { { long = "file", value = "PATH", help = "Read message text from a file" } },
+      about = "Send a message to a Butler member. Examples: remuda butler send worker 'check the build'; remuda butler send --file '$PWD/note.txt' worker",
+      options = { { long = "file", value = "PATH", help = "Read message text from a file (place before recipient words)" } },
       args = {
-        { name = "WORDS", help = "Recipient, sender, and message words", multiple = true },
+        { name = "TO", help = "Recipient, or sender when followed by another recipient" },
+        { name = "TAIL", help = "Optional recipient and message words", multiple = true, required = false },
       },
       next = "remuda butler send --help",
     },
@@ -497,58 +498,67 @@ local function send_sender_matches_caller(from, caller)
   return caller_ok and sender_ok and caller_alias == sender_alias
 end
 command(40, "send", '  remuda butler send <to> "<message>" | <to> - | <to> --file PATH\n'
-  .. '  remuda butler send <from> <to> <message...> | <from> <to> - | <from> <to> --file PATH', function(args, caller)
+  .. '  remuda butler send <from> <to> <message...> | <from> <to> -\n'
+  .. '  remuda butler send --file PATH <to> | <from> <to>', function(args, caller)
   local report = cli_parser(SEND_CLI_SPEC, args)
   if report.kind == "help" then return report.text end
   if not report.ok then
     if type(remuda.fail) == "function" then return remuda.fail(report.text, report.code) end
     error(report.text, 0)
   end
+  local tail = report.values.TAIL
+  if type(tail) == "string" then tail = { tail } end
+  tail = type(tail) == "table" and tail or {}
+  local first = report.values.TO
+  local from, to, body_words, body
   if report.values.file then
-    if args[2] == "--file" and report.values.file then
-      local words = report.values.WORDS
-      if type(words) == "string" then words = { words } end
-      if #words > 2 then
-        local message = 'send --file accepts at most two words after PATH.\n'
-          .. 'Usage: remuda butler send --file PATH <to> [<from> <to>]\n'
-          .. 'Example: remuda butler send --file "$PWD/message.txt" lead\n'
-          .. 'Next: remuda butler send --help'
-        if type(remuda.fail) == "function" then return remuda.fail(message, 2) end
-        error(message, 0)
-      end
-      local from, to = current_agent(caller) or OPERATOR, nil
-      if #words == 1 then to = words[1]
-      elseif #words >= 2 then from, to = words[1], words[2] end
-      if not to then return nil end
-      if not send_sender_matches_caller(from, caller) then
-        return cli_result(function() error("cannot send with a different sender", 0) end)
-      end
-      return cli_result(function()
-        return remuda._butler_send(from, to, message_body({ "send", "--file", report.values.file }, 2, caller))
-      end)
+    if #tail > 1 then
+      return remuda.fail('send --file accepts one recipient or a sender/recipient pair.\nUsage: remuda butler send --file PATH <to> | <from> <to>\nExample: remuda butler send --file "$PWD/message.txt" lead\nNext: remuda butler send --help', 2)
+    end
+    from = current_agent(caller) or OPERATOR
+    if #tail == 0 then to = first
+    elseif #tail == 1 then from, to = first, tail[1]
+    else return nil end
+    body = message_body({ "send", "--file", report.values.file }, 2, caller)
+  else
+    if not first then return nil end
+    from, to = current_agent(caller) or OPERATOR, first
+    local body_after_separator = false
+    -- The parser consumes `--` as its option boundary. Keep its position only
+    -- to disambiguate the two documented sender forms and preserve literal body words.
+    local default_sender_separator = args[3] == "--"
+    local explicit_sender_separator = args[4] == "--"
+    if explicit_sender_separator then
+      from, to = first, tail[1]
+      body_words = {}
+      for index = 2, #tail do body_words[#body_words + 1] = tail[index] end
+      body_after_separator = true
+    elseif default_sender_separator then
+      body_words = tail
+      body_after_separator = true
+    elseif #tail >= 2 and tail[1] ~= "--" then
+      from, to = first, tail[1]
+      body_words = {}
+      for index = 2, #tail do body_words[#body_words + 1] = tail[index] end
+    else
+      body_words = tail
+    end
+    if body_words[1] == "--" then table.remove(body_words, 1); body_after_separator = true end
+    if body_words[1] == "--file" and not body_after_separator then
+      return remuda.fail('place --file before recipient words.\nUsage: remuda butler send --file PATH <to> | <from> <to>\nExample: remuda butler send --file "$PWD/message.txt" lead\nNext: remuda butler send --help', 2)
+    end
+    if body_words[1] == "-" then
+      if #body_words ~= 1 then return remuda.fail("stdin message form takes no extra arguments", 2) end
+      body = message_body({ "send", "-" }, 2, caller)
+    else
+      body = checked_message_body(table.concat(body_words, " "))
     end
   end
-  if #args < 3 then return nil end
-  local from, to, first = current_agent(caller) or OPERATOR, args[2], 3
-  if args[3] ~= "-" and args[3] ~= "--file" and args[3] ~= "--" and #args >= 4 then
-    from, to, first = args[2], args[3], 4
-  elseif args[3] ~= "-" and args[3] ~= "--file" and args[3] ~= "--" and #args < 4 then
-    -- Positional short messages retain the caller-inferred sender form.
-  elseif args[3] ~= "--" and (args[4] == "-" or args[4] == "--file") then
-    from, to, first = args[2], args[3], 4
-  end
+  if not to then return nil end
   if not send_sender_matches_caller(from, caller) then
     return cli_result(function() error("cannot send with a different sender", 0) end)
   end
-  return cli_result(function()
-    local body
-    if args[first] == "--" then
-      body = checked_message_body(words_after(args, first + 1))
-    else
-      body = message_body(args, first, caller)
-    end
-    return remuda._butler_send(from, to, body)
-  end)
+  return cli_result(function() return remuda._butler_send(from, to, body) end)
 end)
 local SEND_TO_LEADER_CLI_SPEC = {
   name = "remuda butler",

@@ -35,6 +35,11 @@ The Butler CLI requires core `remuda.cli.parse`, introduced by
 warmblood-kr/remuda#465 (2026-10-02). Upgrade Remuda before using
 `remuda butler` on an older core.
 
+Shared-parser syntax changes: put `reply --file PATH` and
+`reply --attach PATH` before the message ID; put `send --file PATH` before
+both sender and recipient; and use `inbox -- -NAME` for a name beginning with
+a dash. Normal `--help` and `-h` now show parser-generated command usage.
+
 Butler requires a running `remuda` daemon and
 the generic Lua/runtime APIs supplied by `remuda-native`, with protocol and
 session policy from `remuda-core`. The package uses sessions, process helpers,
