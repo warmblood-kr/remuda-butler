@@ -4,6 +4,7 @@
 #   help.txt           `remuda butler help`
 #   agents-topic.md    AGENTS.md written for a delegated topic member (lead1)
 #   agents-launch.md   AGENTS.md written for a launched member (w1, leader butler)
+#   agents-root.md     AGENTS.md written for the root Butler session
 #   welcome.txt        the "Welcome to Butler" mail body in lead1's inbox
 #   argv-claude.txt    the argv Butler starts a claude member with (the prompt text)
 # normalises run-specific values (paths, ULIDs, message ids, times, tokens), and
@@ -157,6 +158,7 @@ R butler help >"$OUT/help.txt"
 R butler matrix thread --help >"$OUT/matrix-thread-help.txt"
 cp "$T/projects/lead1/AGENTS.md" "$OUT/agents-topic.md"
 cp "$XDG_DATA_HOME/remuda/butler/sessions/w1/AGENTS.md" "$OUT/agents-launch.md"
+cp "$XDG_DATA_HOME/remuda/butler/sessions/butler/AGENTS.md" "$OUT/agents-root.md"
 wait_welcome
 WELCOME_COUNT=$(grep -c 'Welcome to Butler' "$T/welcome-inbox.txt" || true)
 [[ "$WELCOME_COUNT" == 1 ]] || { echo "expected one welcome, got $WELCOME_COUNT" >&2; exit 1; }
