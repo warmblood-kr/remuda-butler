@@ -140,6 +140,15 @@ local butler_fs = {
     f:close()
     return text
   end,
+  -- text, or nil plus "unreadable" when the file exists but cannot be read
+  -- (nil alone: absent).
+  read_checked = function(path)
+    local file, _, code = io.open(path, "rb")
+    if not file then return nil, code ~= 2 and "unreadable" or nil end
+    local text = file:read("*a")
+    file:close()
+    return text, text == nil and "unreadable" or nil
+  end,
   -- nil when it cannot tell: then nothing is written.
   is_symlink = is_symlink,
   json = remuda.json,
@@ -167,15 +176,7 @@ remuda.exec("butler/coordination_config")
 -- adoption of an already-running session. Both clients get workdir defaults.
 remuda._butler_coordination_reports = remuda._butler_coordination_reports or {}
 local coordination_config = remuda._butler_coordination_config
-local coordination_fs = setmetatable({
-  read_checked = function(path)
-    local file, _, code = io.open(path, "rb")
-    if not file then return nil, code ~= 2 and "unreadable" or nil end
-    local text = file:read("*a")
-    file:close()
-    return text, text == nil and "unreadable" or nil
-  end,
-}, { __index = butler_fs })
+local coordination_fs = setmetatable({}, { __index = butler_fs })
 coordination_fs.validate = coordination_config.validator(remuda.process.run,
   function(dir) return remuda.fs and remuda.fs.mkdir_new and remuda.fs.mkdir_new(dir) == true end,
   butler_fs.write, function(path, recursive)

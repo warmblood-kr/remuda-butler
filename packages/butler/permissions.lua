@@ -83,7 +83,9 @@ function permissions.ensure(path, rules, fs)
       local linked = fs.is_symlink(target)
       if linked ~= false then report.error = linked and "is a symlink" or "cannot check for a symlink"; return end
     end
-    local existing = fs.read(path)
+    -- An unreadable file is not an absent one: never replace what we cannot read.
+    local existing, unreadable = (fs.read_checked or fs.read)(path)
+    if unreadable then report.error = "cannot read existing settings; unchanged"; return end
     local text
     text, report = permissions.merge(existing, rules, fs.json)
     if not text then return end
