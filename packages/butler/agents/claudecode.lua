@@ -4,8 +4,15 @@ local telemetry = assert(remuda._butler_telemetry_adapters)
 
 telemetry.claude = {
   setup = function(spec)
-    local status_path = spec.status_path or (os.tmpname() .. "." .. spec.name .. ".status")
-    return { status_path = status_path, settings_path = support.status_settings(status_path) }
+    local status_path = spec.status_path
+    if not status_path then
+      -- Not a name beside a reserved tmpname file: a directory this session owns.
+      local dir = support.new_private_dir()
+      status_path = (dir or os.tmpname()) .. "/" .. spec.name .. ".status"
+    end
+    local settings_path, why = support.status_settings(status_path)
+    if not settings_path and _butler_session_trace then _butler_session_trace("settings_not_written", tostring(why)) end
+    return { status_path = status_path, settings_path = settings_path, settings_error = why }
   end,
   read = function(state)
     -- The hook-written `.state` file: "<word> <unix time>", one fixed word.

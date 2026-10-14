@@ -86,6 +86,45 @@ T.test("per-launch Claude --settings file carries allow-only Remuda defaults, pr
     assert(not text:find("REMUDA_SESSION_CAPABILITY", 1, true), "no capability serialized")
     local mode = remuda.process.run({ argv = { "ls", "-ld", settings_path }, timeout = 5 }).stdout
     assert(mode:match("^%-rw%-%-%-%-%-%-%-"), "private mode: " .. mode)
+    local dir_mode = remuda.process.run({ argv = { "ls", "-ldH", settings_path:match("^(.*)/[^/]+$") }, timeout = 5 }).stdout
+    assert(dir_mode:match("^drwx%-%-%-%-%-%-"), "exclusive private directory: " .. dir_mode)
+    return "ok"
+  ]]), "ok")
+end)
+
+T.test("settings file failure returns no path and never falls back to a plain write", function()
+  T.eq(T.eval([[
+    local path = remuda.fs.realpath(os.getenv("XDG_DATA_HOME")) .. "/wcc-fail.status"
+    local status_settings = remuda._butler_agent_support.status_settings
+    local real_atomic, real_mkdir_new, real_open = remuda.fs.write_atomic, remuda.fs.mkdir_new, io.open
+    local function expect_failure(label, setup, restore)
+      local plain_opens = 0
+      io.open = function(p, mode, ...)
+        if type(p) == "string" and p:find("settings.json", 1, true) and mode and mode:find("w", 1, true) then
+          plain_opens = plain_opens + 1
+        end
+        return real_open(p, mode, ...)
+      end
+      setup()
+      local ok, got, why = pcall(status_settings, path)
+      restore(); io.open = real_open
+      assert(ok and got == nil and type(why) == "string" and why ~= "", label .. ": no path, reason given")
+      assert(plain_opens == 0, label .. ": no plain-write fallback")
+    end
+    expect_failure("missing atomic support", function() remuda.fs.write_atomic = nil end,
+      function() remuda.fs.write_atomic = real_atomic end)
+    expect_failure("atomic write error", function() remuda.fs.write_atomic = function() return nil, "injected" end end,
+      function() remuda.fs.write_atomic = real_atomic end)
+    expect_failure("atomic write raises", function() remuda.fs.write_atomic = function() error("boom", 0) end end,
+      function() remuda.fs.write_atomic = real_atomic end)
+    expect_failure("no exclusive mkdir", function() remuda.fs.mkdir_new = nil end,
+      function() remuda.fs.mkdir_new = real_mkdir_new end)
+    expect_failure("directory is a link", function()
+      remuda.fs.mkdir_new = function(dir)
+        os.execute("ln -s " .. os.getenv("XDG_DATA_HOME") .. " '" .. dir .. "'")
+        return true
+      end
+    end, function() remuda.fs.mkdir_new = real_mkdir_new end)
     return "ok"
   ]]), "ok")
 end)

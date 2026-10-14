@@ -225,8 +225,30 @@ local server = os.getenv("REMUDA_BUTLER_SERVER") or "default"
 local runtime_dir = os.getenv("REMUDA_RUNTIME_DIR")
 local status_path = remuda._butler_status_path
   or (config_path and (config_path .. ".status") or (os.tmpname() .. ".status"))
+-- A fresh, exclusively created private (0700) directory owned by this daemon
+-- session, or nil plus a reason. Never a pre-existing path: mkdir_new fails if
+-- the name exists (including as a link), and the result must not be a link.
+local function new_private_dir()
+  if not (remuda.fs and type(remuda.fs.mkdir_new) == "function") then return nil, "core lacks exclusive directory creation" end
+  local dir = os.tmpname()
+  os.remove(dir)
+  if remuda.fs.mkdir_new(dir) ~= true then return nil, "cannot exclusively create a private directory" end
+  if is_symlink(dir) ~= false then
+    pcall(remuda.remove_dir_all, dir)
+    return nil, "private directory is a link or cannot be checked"
+  end
+  return dir
+end
+-- Per-launch settings directories, replaced (and the old one removed) when the
+-- same status path is launched again. A crash can leave one private directory
+-- behind; it holds only allow literals and the status hook command.
+local settings_dirs = {}
+-- Returns the settings file path, or nil plus a reason; never a path that was
+-- not completely written (no plain-write fallback).
 local function status_settings(path)
-  local settings_path = path .. ".settings.json"
+  local dir, why = new_private_dir()
+  if not dir then return nil, why end
+  local settings_path = dir .. "/settings.json"
   -- Hooks feed the per-session status word (see status_hook.lua); their
   -- output is discarded and they always exit 0 so Claude never sees them.
   -- Claude runs hook commands through sh, or PowerShell on Windows.
@@ -254,13 +276,18 @@ local function status_settings(path)
   local text = '{"permissions":{"allow":[' .. table.concat(allow, ",") .. ']},"statusLine":{"type":"command","command":'
     .. json_quote("remuda -s " .. shell_quote(server) .. " --stdin butler statusline " .. shell_quote(path))
     .. '},"hooks":{' .. guard_hooks .. '"UserPromptSubmit":[' .. hook .. '],"Stop":[' .. hook .. '],"Notification":[' .. hook .. ']}}'
-  -- Private atomic write where the core has it (session-owned, 0600); an
-  -- older core keeps the previous plain write.
-  if not butler_fs.write(settings_path, text, true) then
-    local settings = assert(io.open(settings_path, "w"))
-    settings:write(text)
-    settings:close()
+  -- Checked private atomic write (0600) into the exclusive directory. Failure
+  -- is reported to the caller with no path, so no launch can name a missing
+  -- or partial file.
+  local called, wrote, write_why = pcall(butler_fs.write, settings_path, text, true)
+  if not called then wrote, write_why = nil, wrote end
+  if not wrote then
+    pcall(remuda.remove_dir_all, dir)
+    return nil, "settings file not written: " .. tostring(write_why or "unknown")
   end
+  local previous = settings_dirs[path]
+  settings_dirs[path] = dir
+  if previous then pcall(remuda.remove_dir_all, previous) end
   return settings_path
 end
 
@@ -538,6 +565,7 @@ remuda._butler_agent_support = {
   json_quote = json_quote,
   mcp_config = agent_mcp_config,
   status_settings = status_settings,
+  new_private_dir = new_private_dir,
 }
 remuda.exec("butler/sandbox")
 remuda.exec("butler/telemetry")
