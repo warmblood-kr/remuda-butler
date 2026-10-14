@@ -1,5 +1,13 @@
 -- L3 Matrix relay: durable state + event delivery over the L1 request word.
 -- The relay owns no transport details; request_json is its only HTTP composite.
+
+-- Diagnostics are observational: unavailable/broken recording cannot affect mail or control.
+local function diagnostic(outcome, reason, correlation)
+  local diagnostics = remuda._butler_diagnostics
+  if diagnostics and type(diagnostics.record) == "function" then
+    pcall(diagnostics.record, "matrix", outcome, reason, correlation)
+  end
+end
 local matrix = assert(remuda.butler and remuda.butler.matrix,
   "load butler/matrix_request before butler/matrix_relay")
 local typed_lines = assert(remuda.butler.typed_lines,
@@ -1224,6 +1232,7 @@ function relay.new(options)
 
   local deliver_pending
   local function schedule_delivery_retry(id, delay)
+    diagnostic("retry", "retry_scheduled", id)
     local elapsed = 0
     local timer
     timer = remuda.schedule({ every = 1, run = function()
@@ -1320,6 +1329,7 @@ function relay.new(options)
         if event and not delivery_retry_waiting[id] then
           local subscriptions = state.subscriptions[event.room_id] or {}
           if not matrix.delivery_policy.accept_pending(cfg, event.room_id, subscriptions, event) then
+            diagnostic("filtered", "filter_policy", id)
             add_processed(state, event.event_id)
             state.pending[id] = nil
             persist()
@@ -1338,6 +1348,7 @@ function relay.new(options)
           else
             local ok, result = pcall(deliver, event)
             if ok and result ~= nil then
+              diagnostic("delivered", "delivery_ok", id)
               if type(result) == "table" and type(result.id) == "string" and result.id ~= "" then
                 state.routes[result.id] = { room_id = event.room_id, event_id = event.event_id,
                   thread_root = event.thread_root, in_reply_to = event.in_reply_to,
@@ -1354,6 +1365,7 @@ function relay.new(options)
               end
               append_ack(id)
             elseif not ok then
+              diagnostic("error", "delivery_failed", id)
               local attempts = (tonumber(event._relay_failures) or 0) + 1
               event._relay_failures = attempts
               if attempts >= MAX_DELIVERY_FAILURES then
@@ -1372,6 +1384,8 @@ function relay.new(options)
                   io.stderr:write("butler Matrix delivery failed for " .. tostring(id) .. ": " .. tostring(result) .. "\n")
                 end)
               end
+            else
+              diagnostic("deferred", "delivery_deferred", id)
             end
           end
           end
@@ -1888,8 +1902,10 @@ function relay.new(options)
             reason = "unsupported_message_type"
           elseif type(content.body) ~= "string" then reason = "missing_text_body" end
           if reason then
+            diagnostic("error", "conversion_failed", event_id)
             quarantine_event(ev, reason)
           else
+          diagnostic("converted", "conversion_ok", event_id)
           local thread_root, in_reply_to = relation_fields(content)
           local media_kind = MEDIA_MSGTYPES[content.msgtype]
           local trusted = cfg.allowed_senders[ev.sender] == true
@@ -1943,6 +1959,7 @@ function relay.new(options)
             end
           end
           if not accepted or rate_capped then
+            diagnostic("filtered", "filter_policy", event_id)
             add_processed(state, ev.event_id)
             if cursor then state.since = cursor end
             if auto_followed then persist() end
@@ -1965,6 +1982,7 @@ function relay.new(options)
             subscribe_thread = is_mention and trusted,
             thread_id = thread_id,
           }
+          diagnostic("routed", "routing_accepted", event_id)
           added[#added + 1] = ev.event_id
           if cursor then state.since = cursor end
           persist()
