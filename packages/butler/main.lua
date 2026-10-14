@@ -204,6 +204,12 @@ function remuda._butler_ensure_coordination(cwd, kind, role)
   if actual then remuda._butler_coordination_reports[actual] = report end
   if role == "root" then remuda._butler_root_coordination_report = report end
   if report.error then _butler_session_trace("coordination_config_not_written", report.error) end
+  -- Fixed reasons only (no file content, no resolver output): which client was
+  -- blocked or had defaults withheld.
+  for client in pairs(report.blocked or {}) do _butler_session_trace("coordination_config_blocked", client) end
+  for _, item in ipairs(report.withheld or {}) do
+    _butler_session_trace("coordination_config_withheld", tostring(item.rule) .. " (" .. tostring(item.list) .. ")")
+  end
   if #report.written > 0 then _butler_session_trace("coordination_config_written", "files=" .. #report.written) end
   return report
 end
@@ -245,7 +251,7 @@ end
 local settings_dirs = {}
 -- Returns the settings file path, or nil plus a reason; never a path that was
 -- not completely written (no plain-write fallback).
-local function status_settings(path)
+local function status_settings(path, key)
   local dir, why = new_private_dir()
   if not dir then return nil, why end
   local settings_path = dir .. "/settings.json"
@@ -267,10 +273,10 @@ local function status_settings(path)
       guard_policy.approvals_enabled() and (guard_command .. keep_stdout) or nil,
       guard_policy.deny_enabled() and (guard_command .. keep_stdout) or nil) .. ","
   end
-  -- Allow-only permission defaults for this launch: a --settings source adds
-  -- to, and never outranks, deny/ask rules from user, project and local
-  -- settings (measured with claude 2.1.300), and unlike the workdir file it
-  -- is read from any cwd, repository subdirectory or worktree.
+  -- Allow-only permission defaults for this launch. Measured (claude 2.1.300,
+  -- Bash tool, -p default mode; docs/workdir-client-config-claude-evidence.txt):
+  -- project-root local ask/deny still blocked a command this source allowed,
+  -- from repo root, subdirectory and worktree. Other scopes are not measured.
   local allow = {}
   for _, rule in ipairs(coordination_config.CLAUDE_RULES) do allow[#allow + 1] = json_quote(rule) end
   local text = '{"permissions":{"allow":[' .. table.concat(allow, ",") .. ']},"statusLine":{"type":"command","command":'
@@ -285,8 +291,9 @@ local function status_settings(path)
     pcall(remuda.remove_dir_all, dir)
     return nil, "settings file not written: " .. tostring(write_why or "unknown")
   end
-  local previous = settings_dirs[path]
-  settings_dirs[path] = dir
+  key = key or path
+  local previous = settings_dirs[key]
+  settings_dirs[key] = dir
   if previous then pcall(remuda.remove_dir_all, previous) end
   return settings_path
 end

@@ -173,7 +173,7 @@ local function permission_lines(report, kind, context)
       return { head .. "coordination initialization blocked — " .. safe(coordination.error),
         "Next: inspect existing workdir settings/rules; malformed or conflicting files are preserved" }
     end
-    local partial = (#(coordination.withheld or {}) > 0 and " (some defaults withheld: see launch trace)" or "")
+    local partial = (#(coordination.withheld or {}) > 0 and " (some defaults withheld: reasons in the session trace as coordination_config_withheld)" or "")
       .. (next(coordination.blocked or {}) and " (one client blocked)" or "")
     return { head .. "workdir Remuda defaults initialized (launch-time report)" .. partial,
       "Next: managed review, sandbox, user overrides and daemon role checks remain authoritative" }

@@ -46,6 +46,7 @@ end)
 T.test("registered member launch and relaunch use each actual workdir for both adapters", function()
   T.eq(T.eval([[
     local base = os.getenv("XDG_DATA_HOME") .. "/delegated-fixtures"
+    remuda._wcc_real_claude_builder = remuda._wcc_real_claude_builder or remuda._butler_agent_builders.claude
     remuda._butler_agent_builders.claude = function(spec)
       for _, rel in ipairs({ "/.claude/settings.local.json", "/.codex/config.toml", "/.codex/rules/remuda.rules" }) do
         local f = assert(io.open(spec.cwd .. rel, "rb")); local text = f:read("*a"); f:close()
@@ -125,6 +126,101 @@ T.test("settings file failure returns no path and never falls back to a plain wr
         return true
       end
     end, function() remuda.fs.mkdir_new = real_mkdir_new end)
+    return "ok"
+  ]]), "ok")
+end)
+
+-- Boundary: the real telemetry adapter + argv builder the chooser calls for a
+-- Claude candidate (root, member, delegation and relaunch all go through
+-- them). A builder error becomes a spawn_error for that candidate and the
+-- chooser never reaches remuda.new (agents_launch.lua start_next).
+local GUARD_ON = [[
+  local real_policy = remuda.butler.guard_policy
+  remuda.butler.guard_policy = setmetatable({
+    enabled = function() return true end,
+    approvals_enabled = function() return true end,
+    deny_enabled = function() return true end,
+  }, { __index = real_policy })
+  local function restore() remuda.butler.guard_policy = real_policy end
+]]
+
+T.test("settings persistence failure: Claude argv builder refuses (no argv without guard hooks)", function()
+  T.eq(T.eval(GUARD_ON .. [[
+    local real_atomic = remuda.fs.write_atomic
+    remuda.fs.write_atomic = function() return nil, "injected persistence failure" end
+    local telemetry = remuda._butler_telemetry_adapters.claude.setup({ name = "bf-member" })
+    remuda.fs.write_atomic = real_atomic
+    local ok, err = pcall(remuda._wcc_real_claude_builder or remuda._butler_agent_builders.claude,
+      { name = "bf-member", token = "t", model = "opus", cwd = os.getenv("XDG_DATA_HOME"),
+        settings_path = telemetry.settings_path, telemetry = telemetry })
+    restore()
+    assert(telemetry.settings_path == nil and telemetry.settings_error, "adapter reports the failure")
+    assert(not ok and tostring(err):find("refusing to start Claude", 1, true), "builder refuses with a reason: " .. tostring(err))
+    return "refused"
+  ]]), "refused")
+end)
+
+T.test("settings persistence failure with guard policy off degrades without --settings, traced", function()
+  T.eq(T.eval([[
+    local real_atomic = remuda.fs.write_atomic
+    remuda.fs.write_atomic = function() return nil, "injected persistence failure" end
+    local telemetry = remuda._butler_telemetry_adapters.claude.setup({ name = "bf-off" })
+    remuda.fs.write_atomic = real_atomic
+    local policy = remuda.butler.guard_policy
+    assert(not policy.enabled(), "fixture expects guard policy off by default")
+    local ok, argv = pcall(remuda._wcc_real_claude_builder or remuda._butler_agent_builders.claude,
+      { name = "bf-off", token = "t", model = "opus", cwd = os.getenv("XDG_DATA_HOME"),
+        settings_path = telemetry.settings_path, telemetry = telemetry })
+    assert(ok and type(argv) == "table", "builds without guard dependency")
+    for _, word in ipairs(argv) do assert(word ~= "--settings", "no --settings without a file") end
+    return "ok"
+  ]]), "ok")
+end)
+
+T.test("normal Claude argv carries --settings with guard hooks, defaults and status, in any cwd", function()
+  T.eq(T.eval(GUARD_ON .. [[
+    local base = os.getenv("XDG_DATA_HOME") .. "/boundary-ok"
+    remuda.mkdir(base); remuda.mkdir(base .. "/.git"); remuda.mkdir(base .. "/sub"); remuda.mkdir(base .. "/wt")
+    local f = assert(io.open(base .. "/wt/.git", "wb")); f:write("gitdir: /elsewhere"); f:close()
+    local problems = {}
+    for _, cwd in ipairs({ base, base .. "/sub", base .. "/wt" }) do
+      local telemetry = remuda._butler_telemetry_adapters.claude.setup({ name = "bo-member" })
+      local ok, argv = pcall(remuda._wcc_real_claude_builder or remuda._butler_agent_builders.claude,
+        { name = "bo-member", token = "t", model = "opus", cwd = cwd,
+          settings_path = telemetry.settings_path, telemetry = telemetry })
+      if not ok then problems[#problems + 1] = "builder failed in " .. cwd
+      else
+        local path
+        for i, word in ipairs(argv) do if word == "--settings" then path = argv[i + 1] end end
+        local fh = path and io.open(path, "rb")
+        local text = fh and fh:read("*a") or ""
+        if fh then fh:close() end
+        for _, needle in ipairs({ "PreToolUse", "PermissionRequest", "Bash(remuda:*)", "mcp__remuda__*", "statusLine" }) do
+          if not text:find(needle, 1, true) then problems[#problems + 1] = cwd .. " lacks " .. needle end
+        end
+      end
+    end
+    restore()
+    assert(#problems == 0, table.concat(problems, "; "))
+    return "ok"
+  ]]), "ok")
+end)
+
+T.test("relaunching a member replaces its settings and status directories (no accumulation)", function()
+  T.eq(T.eval([[
+    local adapter = remuda._butler_telemetry_adapters.claude
+    local first = adapter.setup({ name = "lc-member" })
+    local first_dir = first.settings_path:match("^(.*)/[^/]+$")
+    local first_status_dir = first.status_path:match("^(.*)/[^/]+$")
+    local second = adapter.setup({ name = "lc-member" })
+    assert(second.settings_path and second.settings_path ~= first.settings_path, "fresh settings file")
+    local function exists(dir)
+      local r = remuda.process.run({ argv = { "ls", "-d", dir }, timeout = 5 })
+      return r.code == 0
+    end
+    assert(not exists(first_dir), "previous settings directory removed")
+    assert(not exists(first_status_dir), "previous status directory removed")
+    assert(exists(second.settings_path:match("^(.*)/[^/]+$")), "current settings directory kept")
     return "ok"
   ]]), "ok")
 end)

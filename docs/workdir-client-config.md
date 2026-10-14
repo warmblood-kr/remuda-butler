@@ -22,16 +22,23 @@ How Claude receives the defaults: every Butler-launched Claude session gets
 `Bash(remuda:*)` and `mcp__remuda__*` as an allow-only `permissions.allow` in
 its per-launch `--settings` file, beside the existing status line and hooks.
 The file lives in a fresh exclusive private (0700) directory owned by the
-daemon, is written with a checked private atomic write (0600) and holds only
-those literals and the status hook command (no identity, token or env value).
-If any step fails there is no `--settings` argument at all: the launch proceeds
-without these defaults (and without status hooks), `settings_not_written` is
-traced, and there is no plain-write fallback or write into a checkout/HOME.
-The previous directory for the same status path is removed on relaunch; a
-crash can leave one small private directory behind.
+daemon, is written with a checked private atomic write (0600), and holds the
+allow literals, the status line/hook commands (which embed the Butler server
+name and status path) and, when guard policy is on, the guard hook commands.
+No capability, token or identity value is added to it.
+If any step fails and guard policy is on, the Claude launch is refused (fail
+closed): the builder raises, the chooser records a `spawn_error` for that
+candidate and never starts Claude without its guard hooks. With guard policy
+off the same failure only loses the defaults and status telemetry: Claude
+starts with no `--settings` argument.
+`settings_not_written` is traced with the reason; there is no plain-write
+fallback or write into a checkout/HOME. The previous status and settings
+directories of a member are removed when that member is set up again
+(relaunch); directories of finished sessions and of a crashed daemon are not
+removed and can accumulate (best effort, private, small).
 
 Measured with claude 2.1.300, Bash tool, `-p --permission-mode default`,
-haiku (`fix-wcc-claude-lookup-evidence.txt`; the first sections loaded the
+haiku (`docs/workdir-client-config-claude-evidence.txt`; the first sections loaded the
 user's global settings, the final "isolated" section excludes the user layer
 with `--setting-sources project,local`): a `--settings` allow works from the
 repo root, a subdirectory and a worktree; a project-root deny or ask rule
@@ -106,7 +113,7 @@ and in-memory flags are unchanged by this feature.
 
 ## Preservation and diagnostics
 
-The merger plans and validates all three targets before writing any of them.
+Within one client the merger plans, validates and snapshots every target before writing any of them; the clients are processed one after the other (Claude, then Codex), so Claude files may be written before Codex validation runs.
 Unreadable files are not mistaken for missing files. Symlinks or uncertain link
 checks refuse writes. A changed snapshot during validation aborts the merge.
 Target writes use core private atomic writes; callbacks in one daemon serialize
