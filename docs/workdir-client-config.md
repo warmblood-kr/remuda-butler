@@ -20,13 +20,30 @@ directory:
 
 How Claude receives the defaults: every Butler-launched Claude session gets
 `Bash(remuda:*)` and `mcp__remuda__*` as an allow-only `permissions.allow` in
-its per-launch `--settings` file (session-owned, outside any checkout, written
-privately and atomically, no secrets or identity). Measured with claude
-2.1.300 (`fix-wcc-claude-lookup-evidence.txt`): that allow works from a
-repository subdirectory and a worktree, and deny/ask rules from user, project
-root and local settings still outrank it. The workdir
-`.claude/settings.local.json` is written only outside any repository; at or
-below a `.git` entry (including one that cannot be read) it is withheld.
+its per-launch `--settings` file, beside the existing status line and hooks.
+The file lives in a fresh exclusive private (0700) directory owned by the
+daemon, is written with a checked private atomic write (0600) and holds only
+those literals and the status hook command (no identity, token or env value).
+If any step fails there is no `--settings` argument at all: the launch proceeds
+without these defaults (and without status hooks), `settings_not_written` is
+traced, and there is no plain-write fallback or write into a checkout/HOME.
+The previous directory for the same status path is removed on relaunch; a
+crash can leave one small private directory behind.
+
+Measured with claude 2.1.300, Bash tool, `-p --permission-mode default`,
+haiku (`fix-wcc-claude-lookup-evidence.txt`; the first sections loaded the
+user's global settings, the final "isolated" section excludes the user layer
+with `--setting-sources project,local`): a `--settings` allow works from the
+repo root, a subdirectory and a worktree; a project-root deny or ask rule
+still blocks the same command when `--settings` allows it. Not measured:
+managed settings, MCP tools, auto mode (the launcher's mode), other client
+versions or platforms, hook merging with enterprise settings. Managed-only
+permission rules can still ignore these grants. If the file disappears or is
+replaced while the client runs, nothing re-validates it.
+
+The workdir `.claude/settings.local.json` is written only outside any
+repository; at or below a `.git` entry (including one that cannot be read) it
+is withheld.
 
 Withheld defaults (reported in `withheld`/`blocked`, never silently widened):
 
@@ -34,11 +51,13 @@ Withheld defaults (reported in `withheld`/`blocked`, never silently widened):
   Codex's own resolver lists a `remuda` server (this resolves escaped, quoted
   and dotted key spellings), a user/ancestor layer is unreadable or non-empty
   (an ancestor may be untrusted now and applied later), or Codex/its home
-  cannot be queried. A project layer outranks those layers.
-- Each client initializes independently: a malformed or unverifiable Claude
-  file does not block Codex and vice versa; only the launching client's own
-  failure is `report.error`. Without Codex installed, Claude still initializes
-  and fresh Codex defaults are written without the policy fields.
+  cannot be queried. A project layer outranks those layers. A named Codex
+  `--profile` is not selected by any Butler launch and is not consulted.
+- Each client is checked, read, validated, snapshotted and written inside its
+  own boundary: a link, unreadable or invalid file of one client blocks only
+  that client (`report.blocked`); only the launching client's own block is
+  `report.error`. Without Codex installed, Claude still initializes and fresh
+  Codex defaults are written without the policy fields.
 - The legacy root permission writer leaves an unreadable settings file alone
   (`read_checked` is required of the filesystem adapter for this guarantee).
 
@@ -49,13 +68,16 @@ Known limits (accepted, not solved):
   unchanged; enforcement of those commands is not. This is the owner-authorized
   broad grant and needs explicit activation.
 - Validation copies the complete existing TOML to a private (0700/0600)
-  temporary Codex home and deletes it. No new session secret is passed; a
-  pre-existing secret in that file is briefly copied. Cleanup is best effort.
+  temporary Codex home and removes it on a best-effort basis; a crash or a
+  failed removal can leave that copy. No new session secret is passed; a
+  pre-existing secret in that file is copied.
 - Writes are atomic per file, not across files, with no lock and no rollback;
   an external writer between snapshot and write can be overwritten. A failed
-  second/third write leaves the earlier files and is reported.
-- The TOML merge is line based. Documents with multiline strings are refused
-  (fail closed); other shapes rely on native validation.
+  second write leaves the earlier file and is reported.
+- The TOML merge is line based. Documents containing triple quotes (also in
+  comments) are refused; other shapes rely on native validation only. The
+  resolver's output is read as a list of server entries without a full schema
+  check.
 - Replacing an existing file uses a private 0600 mode (this can drop an
   intentional read-only mode). Existing directory modes are not hardened.
 

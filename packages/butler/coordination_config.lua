@@ -172,60 +172,60 @@ local function plan_codex(cwd, before, after, fs, report)
   if why then error(why, 0) end
 end
 
--- Each client is planned independently: one that cannot be verified is
--- reported in report.blocked[client] and left untouched; the other still
--- initializes. report.error is set only for the launching kind's own client.
+-- Each client is checked, planned, snapshotted and written inside its own
+-- boundary: a link, unreadable or invalid file of one client blocks only that
+-- client (report.blocked[client]); the other still initializes. report.error is
+-- the launching kind's own blocked reason (or a cwd failure for both).
+local CLIENTS = {
+  claude = { dirs = { "/.claude" }, files = { [1] = "/.claude/settings.local.json" } },
+  codex = { dirs = { "/.codex", "/.codex/rules" },
+    files = { [2] = "/.codex/config.toml", [3] = "/.codex/rules/remuda.rules" } },
+}
+
+local function run_client(name, cwd, fs, permissions, report)
+  local spec = CLIENTS[name]
+  for _, rel in ipairs(spec.dirs) do
+    if fs.is_symlink(cwd .. rel) ~= false then error("configuration directory is a symlink or cannot be checked", 0) end
+  end
+  local before, after = {}, {}
+  for i, rel in pairs(spec.files) do
+    if fs.is_symlink(cwd .. rel) ~= false then error("configuration file is a symlink or cannot be checked", 0) end
+    local why
+    before[i], why = fs.read_checked(cwd .. rel)
+    if why then error("cannot read existing configuration; unchanged", 0) end
+  end
+  if name == "claude" then plan_claude(cwd, before, after, fs, permissions, report)
+  else plan_codex(cwd, before, after, fs, report) end
+  -- Plan/validate before any target write, then recheck this client's snapshot.
+  -- Daemon launch callbacks serialize shared-workdir merges (no cross-process lock).
+  for i, rel in pairs(spec.files) do
+    local current, read_error = fs.read_checked(cwd .. rel)
+    if read_error or current ~= before[i] then error("configuration changed during initialization; unchanged", 0) end
+  end
+  for _, rel in ipairs(spec.dirs) do fs.mkdir(cwd .. rel) end
+  for _, i in ipairs(name == "claude" and { 1 } or { 2, 3 }) do
+    local path = cwd .. spec.files[i]
+    if after[i] then
+      if not fs.write(path, after[i], true) then
+        error("configuration atomic write failed (earlier files may have been written)", 0)
+      end
+      report.written[#report.written + 1] = path
+    else report.unchanged[#report.unchanged + 1] = path end
+  end
+end
+
 function config.ensure(cwd, kind, fs, permissions)
   local report = { cwd = cwd, kind = kind, written = {}, unchanged = {}, withheld = {}, blocked = {} }
   if kind ~= "claude" and kind ~= "codex" then report.skipped = true; return report end
-  local ok, err = pcall(function()
-    local dirs = { cwd, cwd .. "/.claude", cwd .. "/.codex", cwd .. "/.codex/rules" }
-    for _, dir in ipairs(dirs) do
-      if fs.is_symlink(dir) ~= false then error("configuration directory is a symlink or cannot be checked", 0) end
-    end
-    local paths = { cwd .. "/.claude/settings.local.json", cwd .. "/.codex/config.toml",
-      cwd .. "/.codex/rules/remuda.rules" }
-    local before, after = {}, {}
-    for i, path in ipairs(paths) do
-      if fs.is_symlink(path) ~= false then error("configuration file is a symlink or cannot be checked", 0) end
-      local why
-      before[i], why = fs.read_checked(path)
-      if why then error("cannot read existing configuration; unchanged", 0) end
-    end
-    local clients = {
-      claude = { 1, function() plan_claude(cwd, before, after, fs, permissions, report) end },
-      codex = { 2, function() plan_codex(cwd, before, after, fs, report) end, 3 },
-    }
-    local active = {}
-    for _, name in ipairs({ "claude", "codex" }) do
-      local planned, why = pcall(clients[name][2])
-      if planned then active[name] = true
-      else
-        report.blocked[name] = tostring(why)
-        after[clients[name][1]], after[clients[name][3] or 0] = nil, nil
-      end
-    end
-    -- Plan/validate every file before any target write, then check for a changed
-    -- workdir snapshot. Daemon launch callbacks serialize shared-workdir merges.
-    for i, path in ipairs(paths) do
-      local current, read_error = fs.read_checked(path)
-      if read_error or current ~= before[i] then error("configuration changed during initialization; unchanged", 0) end
-    end
-    local owner = { "claude", "codex", "codex" }
-    for _, dir in ipairs({ cwd .. "/.claude", cwd .. "/.codex", cwd .. "/.codex/rules" }) do
-      local which = dir:find("/.claude", 1, true) and "claude" or "codex"
-      if active[which] then fs.mkdir(dir) end
-    end
-    for i, path in ipairs(paths) do
-      if after[i] and active[owner[i]] then
-        local wrote = fs.write(path, after[i], true)
-        if not wrote then error("configuration atomic write failed (earlier files may have been written)", 0) end
-        report.written[#report.written + 1] = path
-      elseif active[owner[i]] then report.unchanged[#report.unchanged + 1] = path end
-    end
-  end)
-  if not ok then report.error = tostring(err)
-  elseif report.blocked[kind] then report.error = report.blocked[kind] end
+  if fs.is_symlink(cwd) ~= false then
+    report.error = "configuration directory is a symlink or cannot be checked"
+    return report
+  end
+  for _, name in ipairs({ "claude", "codex" }) do
+    local ok, why = pcall(run_client, name, cwd, fs, permissions, report)
+    if not ok then report.blocked[name] = tostring(why) end
+  end
+  report.error = report.blocked[kind]
   return report
 end
 

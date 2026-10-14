@@ -198,6 +198,41 @@ fixture(function(dir)
     and read(dir .. "/.codex/rules/remuda.rules") == nil, "partial write reported; no half-written file")
 end)
 
+-- SHOULD-B: independence extends to checks, reads and links, not just validation.
+fixture(function(dir)
+  local _, toml = paths(dir)
+  local split = setmetatable({ read_checked = function(path)
+    if path:find("/.codex/", 1, true) then return nil, "unreadable" end
+    return read(path)
+  end }, { __index = fs })
+  local report = config.ensure(dir, "claude", split, permissions)
+  check(not report.error and read(dir .. "/.claude/settings.local.json") ~= nil, "unreadable Codex file does not block Claude")
+  check(report.blocked.codex ~= nil, "blocked Codex client is reported")
+end)
+fixture(function(dir)
+  local linked = setmetatable({ is_symlink = function(path)
+    if path:find("/.codex", 1, true) then return true end
+    return fs.is_symlink(path)
+  end }, { __index = fs })
+  local report = config.ensure(dir, "claude", linked, permissions)
+  check(not report.error and read(dir .. "/.claude/settings.local.json") ~= nil, "linked Codex dir does not block Claude")
+  local own = config.ensure(dir, "codex", linked, permissions)
+  check(own.error ~= nil, "launching Codex sees its own blocked reason")
+end)
+fixture(function(dir)
+  -- a cwd that itself contains '/.claude' must not confuse client ownership
+  local odd = dir .. "/.claude-parent"
+  remuda.mkdir(odd)
+  local report = config.ensure(odd, "codex", fs, permissions)
+  check(not report.error and read(odd .. "/.codex/config.toml") ~= nil, "odd cwd name initializes Codex")
+end)
+fixture(function(dir)
+  local rejecting = setmetatable({ validate = function(format) return format ~= "toml" end }, { __index = fs })
+  local report = config.ensure(dir, "codex", rejecting, permissions)
+  check(report.error and report.blocked.codex and read(dir .. "/.claude/settings.local.json") ~= nil,
+    "validator rejection reports the launching client's error and still writes Claude")
+end)
+
 fixture(function(dir)
   local claude = paths(dir)
   local blocked = '{"permissions":{"deny":["mcp__remuda__*"],"ask":["Bash(remuda:*)"]}}'
