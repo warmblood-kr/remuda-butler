@@ -176,7 +176,10 @@ remuda.exec("butler/coordination_config")
 -- adoption of an already-running session. Both clients get workdir defaults.
 remuda._butler_coordination_reports = remuda._butler_coordination_reports or {}
 local coordination_config = remuda._butler_coordination_config
-local coordination_fs = setmetatable({}, { __index = butler_fs })
+local coordination_fs = setmetatable({
+  -- Inherited Codex user layer; nil (policy fields withheld) when unknown.
+  codex_home = os.getenv("CODEX_HOME") or (os.getenv("HOME") and os.getenv("HOME") .. "/.codex") or nil,
+}, { __index = butler_fs })
 coordination_fs.validate = coordination_config.validator(remuda.process.run,
   function(dir) return remuda.fs and remuda.fs.mkdir_new and remuda.fs.mkdir_new(dir) == true end,
   butler_fs.write, function(path, recursive)

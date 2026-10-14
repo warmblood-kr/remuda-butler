@@ -16,6 +16,7 @@ end
 local fs = {
   read_checked = read, is_symlink = is_symlink, json = remuda.json,
   mkdir = remuda.mkdir,
+  codex_home = os.getenv("HOME") .. "/.codex", -- fixture HOME holds no Codex layer
   write = function(path, text) return remuda.fs.write_atomic(path, text, { private = true }) end,
 }
 fs.validate = config.validator(remuda.process.run, remuda.fs.mkdir_new, fs.write,
@@ -90,6 +91,31 @@ fixture(function(dir)
     check(result.code == 0 and remuda.json.decode(result.stdout).decision == row[2], "specific restriction wins broad allow")
   end
   local snapshot = read(toml); check(#ensure(dir, "claude").written == 0 and read(toml) == snapshot, "custom merge repeat stable")
+end)
+
+-- MUST 1: a project layer outranks user/ancestor Codex config, so defaults that
+-- would override an inherited disable/prompt are withheld.
+for _, where in ipairs({ "home", "ancestor" }) do
+  fixture(function(dir)
+    local work, inherited_fs = dir .. "/a/b", fs
+    remuda.mkdir(dir .. "/a"); remuda.mkdir(work)
+    local layer = dir .. "/layer"
+    put(layer .. "/config.toml", '[mcp_servers.remuda]\nenabled = false\ndefault_tools_approval_mode = "prompt"\n')
+    if where == "home" then inherited_fs = setmetatable({ codex_home = layer }, { __index = fs })
+    else put(dir .. "/.codex/config.toml", read(layer .. "/config.toml")) end
+    local report = config.ensure(work, "codex", inherited_fs, permissions)
+    check(not report.error, report.error or "inherited fixture")
+    local text = read(work .. "/.codex/config.toml")
+    check(text:find('command = "remuda"', 1, true), "non-policy defaults still written")
+    check(not text:find("enabled", 1, true) and not text:find("default_tools_approval_mode", 1, true),
+      "local default must not override inherited disable/prompt (" .. where .. ")")
+  end)
+end
+fixture(function(dir)
+  local blind = setmetatable({ codex_home = false }, { __index = fs })
+  config.ensure(dir, "codex", blind, permissions)
+  local text = read(dir .. "/.codex/config.toml")
+  check(text and not text:find("enabled", 1, true), "unknown inherited layer withholds policy defaults")
 end)
 
 fixture(function(dir)

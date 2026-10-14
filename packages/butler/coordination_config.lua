@@ -13,7 +13,12 @@ local MCP_FIELDS = {
 local FRESH_TOML = "[mcp_servers.remuda]\n# Butler Remuda MCP defaults v1 (launch overrides own identity)\n"
 for _, field in ipairs(MCP_FIELDS) do FRESH_TOML = FRESH_TOML .. field[1] .. " = " .. field[2] .. "\n" end
 
-function config.merge_toml(text, validate)
+-- Fields a project layer would use to override an inherited (user/ancestor)
+-- Codex restriction; withheld when an inherited layer mentions Remuda or
+-- cannot be established.
+local POLICY_FIELDS = { enabled = true, default_tools_approval_mode = true }
+
+function config.merge_toml(text, validate, withhold_policy)
   text = text or ""
   -- Legacy inline capability assignments must not be copied to validator
   -- fixtures or rewritten. Session capabilities are launcher-owned.
@@ -42,7 +47,7 @@ function config.merge_toml(text, validate)
   -- Keep all original bytes; insert missing defaults at the end of its section.
   local additions = {}
   for _, field in ipairs(MCP_FIELDS) do
-    if not keys[field[1]] then additions[#additions + 1] = field[1] .. " = " .. field[2] .. "\n" end
+    if not keys[field[1]] and not (withhold_policy and POLICY_FIELDS[field[1]]) then additions[#additions + 1] = field[1] .. " = " .. field[2] .. "\n" end
   end
   if #additions == 0 then return nil end
   local defaults = "# Butler Remuda MCP defaults v1 (launch overrides own identity)\n" .. table.concat(additions)
@@ -78,6 +83,24 @@ function config.merge_rules(text, validate)
   return proposed
 end
 
+-- true when an inherited Codex layer (CODEX_HOME or an ancestor .codex) may
+-- already restrict the Remuda server, or that cannot be established.
+function config.inherited_restricts(cwd, fs)
+  if not fs.codex_home then return true end
+  local files = { fs.codex_home .. "/config.toml" }
+  local dir = cwd
+  while true do
+    dir = dir:match("^(.*)/[^/]*$")
+    if not dir then break end
+    files[#files + 1] = dir .. "/.codex/config.toml"
+  end
+  for _, path in ipairs(files) do
+    local text, why = fs.read_checked(path)
+    if why or (text and text:find("remuda", 1, true)) then return true end
+  end
+  return false
+end
+
 function config.ensure(cwd, kind, fs, permissions)
   local report = { cwd = cwd, kind = kind, written = {}, unchanged = {}, withheld = {} }
   if kind ~= "claude" and kind ~= "codex" then report.skipped = true; return report end
@@ -99,6 +122,11 @@ function config.ensure(cwd, kind, fs, permissions)
     after[1], claude = permissions.merge(before[1], CLAUDE_RULES, fs.json)
     if claude.error then error("invalid Claude settings: " .. claude.error .. "; unchanged", 0) end
     report.withheld = claude.withheld
+    local inherited = config.inherited_restricts(cwd, fs)
+    if inherited then
+      report.withheld[#report.withheld + 1] = { rule = "codex enabled/default_tools_approval_mode",
+        list = "inherited Codex configuration may restrict Remuda" }
+    end
     for _, list in ipairs({ "allow", "deny", "ask" }) do
       local decoded = fs.json.decode(before[1] or "{}")
       for _, value in ipairs(decoded.permissions and decoded.permissions[list] or {}) do
@@ -106,7 +134,7 @@ function config.ensure(cwd, kind, fs, permissions)
       end
     end
     local why
-    after[2], why = config.merge_toml(before[2], fs.validate)
+    after[2], why = config.merge_toml(before[2], fs.validate, inherited)
     if why then error(why, 0) end
     after[3], why = config.merge_rules(before[3], fs.validate)
     if why then error(why, 0) end
