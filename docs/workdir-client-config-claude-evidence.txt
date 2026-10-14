@@ -1,0 +1,92 @@
+Claude lookup evidence — 2026-10-14T23:10:25Z
+2.1.300 (Claude Code)
+Method: throwaway git repo R (+ subdir R/sub, worktree W of R) in scratchpad; real 'claude -p --model haiku --permission-mode default'. Prompt asks Bash 'touch wcc_NAME' (relative, inside cwd); evidence is whether the marker exists. Dropped probes: 'echo' (auto-approved, proves nothing) and absolute marker outside cwd (denied even with an allow rule: path constraint). User/global settings also load (not isolated). Only the haiku API call leaves the machine.
+R/.claude/settings.local.json: deny touch wcc_denied; R/sub/.claude/settings.local.json: allow touch wcc_sub; W/.claude/settings.local.json: allow touch wcc_wt; F.json (--settings): allow touch wcc_flag + wcc_denied, hooks.Stop=[]
+
+## 0 baseline R/sub: nothing allows wcc_none (expect NOT RUN)
+  RAN (marker created): allowed
+
+## 1 --settings F allows wcc_flag, run from R/sub (expect RAN)
+  RAN (marker created): allowed
+
+## 2 --settings allows wcc_denied but R-root settings.local.json denies; run from R/sub (deny must win)
+  NOT RUN: denied/blocked
+
+## 3 control: same from R root
+  NOT RUN: denied/blocked
+
+## 4 allow only in R/sub/.claude/settings.local.json, run from R/sub (is cwd-local file read?)
+  RAN (marker created): allowed
+
+## 5 allow only in W/.claude/settings.local.json, run from W (worktree cwd-local file read?)
+  RAN (marker created): allowed
+
+## 6 worktree W: main-checkout deny + --settings allow, run from W (is main-checkout deny applied?)
+  NOT RUN: denied/blocked
+
+## 7 worktree W: --settings allows wcc_flag (route works in worktree)
+  RAN (marker created): allowed
+
+NOTE: in PART 1 the allow probes (#0,#1,#4,#5,#7) are NOT discriminating: ~/.claude/settings.json already allows Bash(touch:*) and Bash(python:*), so the baseline ran. Only the deny probes (#2,#3,#6: deny wins over --settings allow; main-checkout/root deny applies from subdir and worktree) are meaningful. A first PART 2 with python3 -c was dropped for the same reason. PART 3 below uses 'dd', which no user rule allows.
+
+=== PART 3: command 'dd if=/dev/null of=NAME count=0' (no user rule allows dd). Rule A = Bash(dd if=/dev/null:*) ===
+
+## a baseline R/sub, no rule anywhere (expect NOT RUN)
+  NOT RUN: denied/blocked
+
+## b --settings F3 (allow A + hooks.Stop=[]) from R/sub (expect RAN)
+  RAN (marker created): allowed
+
+## c allow A only in R/sub/.claude/settings.local.json, from R/sub
+  RAN (marker created): allowed
+
+## d same file, run from R root (expect NOT RUN)
+  NOT RUN: denied/blocked
+
+## e allow A only in R root file, run from R/sub (walk-up/root read?)
+  RAN (marker created): allowed
+
+## f allow A only in R root file, run from worktree W (main-checkout read?)
+  RAN (marker created): allowed
+
+## g allow A only in W/.claude/settings.local.json, run from W (root file removed)
+  RAN (marker created): allowed
+
+## h allow A only in W file, run from W subdir? (n/a) -> instead: deny A in R root + --settings F3 allow, from R/sub (deny must win)
+  NOT RUN: denied/blocked
+
+## i ask A in R root + --settings F3 allow, from R/sub (ask outranks allow? => NOT RUN in -p)
+  NOT RUN: denied/blocked
+
+=== ISOLATED SECTION (claude --setting-sources project,local: the user layer ~/.claude/settings.json is NOT loaded) ===
+Isolation method: HOME/CLAUDE_CONFIG_DIR isolation is impossible without copying credentials (an empty CLAUDE_CONFIG_DIR gives 'Not logged in'), so the user settings layer is excluded with --setting-sources project,local instead. No managed-settings dir exists on this machine (/Library/Application Support/ClaudeCode absent). Plugins/hooks from the user layer are not loaded either.
+Probe: dd if=/dev/null of=NAME count=0 (no rule outside the fixture allows dd). Rule under test A = Bash(dd if=/dev/null:*). Root state = A placed in R/.claude/settings.local.json (the local source) as none/allow/ask/deny; flag = --settings F3 with allow A (+hooks.Stop=[]).
+
+## isolation check: user allow Bash(touch:*) must NOT apply now (expect NOT-RUN)
+  R/sub touch, no rules: NOT-RUN
+
+## matrix: state x flag x dir  (dir: sub = R/sub, wt = worktree W of R, root = R)
+  dir=sub rootfile=none --settings-allow=noflag => NOT-RUN
+  dir=sub rootfile=none --settings-allow=flag => RAN
+  dir=sub rootfile=allow --settings-allow=noflag => RAN
+  dir=sub rootfile=allow --settings-allow=flag => RAN
+  dir=sub rootfile=ask --settings-allow=noflag => NOT-RUN
+  dir=sub rootfile=ask --settings-allow=flag => NOT-RUN
+  dir=sub rootfile=deny --settings-allow=noflag => NOT-RUN
+  dir=sub rootfile=deny --settings-allow=flag => NOT-RUN
+  dir=wt rootfile=none --settings-allow=noflag => NOT-RUN
+  dir=wt rootfile=none --settings-allow=flag => RAN
+  dir=wt rootfile=allow --settings-allow=noflag => RAN
+  dir=wt rootfile=allow --settings-allow=flag => RAN
+  dir=wt rootfile=ask --settings-allow=noflag => NOT-RUN
+  dir=wt rootfile=ask --settings-allow=flag => NOT-RUN
+  dir=wt rootfile=deny --settings-allow=noflag => NOT-RUN
+  dir=wt rootfile=deny --settings-allow=flag => NOT-RUN
+  dir=root rootfile=none --settings-allow=noflag => NOT-RUN
+  dir=root rootfile=none --settings-allow=flag => RAN
+  dir=root rootfile=allow --settings-allow=noflag => RAN
+  dir=root rootfile=allow --settings-allow=flag => RAN
+  dir=root rootfile=ask --settings-allow=noflag => NOT-RUN
+  dir=root rootfile=ask --settings-allow=flag => NOT-RUN
+  dir=root rootfile=deny --settings-allow=noflag => NOT-RUN
+  dir=root rootfile=deny --settings-allow=flag => NOT-RUN
