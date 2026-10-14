@@ -33,6 +33,7 @@ jobs:
       - run: sh scripts/test-no-shell-lua.sh
         env:
           CORE_REF: ${{ steps.core-ref.outputs.ref }}
+      - run: scripts/check-core-pin.sh
       - run: tests/rust_tests.sh
         env:
           CORE_REF: ${{ steps.core-ref.outputs.ref }}
