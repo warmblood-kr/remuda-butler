@@ -104,3 +104,44 @@ T.test("butler_mail_an_unidentified_caller_cannot_reply_or_forward_but_the_opera
   T.eq(values[5], "0", "an unidentified caller delivered mail")
   T.eq(values[6], "butler", "the explicit operator could not reply")
 end)
+
+T.test("inbox_read_log_failure_preserves_unread_until_retry", function()
+  local root = mail_root("read-failure")
+  T.eq(T.eval([=[
+    local root = "]=] .. root .. [=["
+    remuda._butler_mail_config = {
+      bus = { agents = {}, inboxes = {}, messages = {}, objects = {} },
+      root = root, json_quote = function(value) return '"' .. value .. '"' end,
+    }
+    remuda.exec("butler/mail")
+    local M, bus = remuda._butler_mail, remuda._butler_mail_config.bus
+    local to = { id = "SYNTHETIC", alias = "fixture", session = "fixture" }
+    local rows = {}
+    for _, failure in ipairs({ "open", "write", "close" }) do
+      local message = assert(M.queue("synthetic", to, "synthetic retry " .. failure))
+      local original_open = io.open
+      io.open = function(path, mode)
+        if path:find("/read/", 1, true) and mode == "a" then
+          if failure == "open" then return nil, "synthetic open failure" end
+          return {
+            write = function() if failure == "write" then return nil, "synthetic write failure" end return true end,
+            close = function() if failure == "close" then return nil, "synthetic close failure" end return true end,
+          }
+        end
+        return original_open(path, mode)
+      end
+      local ok, result = pcall(M.inbox, to.id)
+      io.open = original_open
+      assert(ok, result)
+      assert(result:find("mail read-state was not saved", 1, true))
+      assert(not bus.mail_read[to.id][message.id], "failed append marked synthetic message read")
+      assert(M.unread(to.id) == 1 and M.is_unread(to.id, message.id))
+      assert(M.inbox(to.id):find("synthetic retry " .. failure, 1, true))
+      assert(bus.mail_read[to.id][message.id] and M.unread(to.id) == 0)
+      bus.mail_loaded[to.id], bus.mail_read[to.id], bus.inboxes[to.id] = nil, nil, nil
+      assert(M.unread(to.id) == 0, "successful retry was not saved")
+      rows[#rows + 1] = failure
+    end
+    return table.concat(rows, ",")
+  ]=]), "open,write,close")
+end)

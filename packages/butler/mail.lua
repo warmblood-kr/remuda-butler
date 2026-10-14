@@ -635,7 +635,7 @@ local function inbox(name)
       if matrix_line ~= "" then lines[#lines + 1] = MATRIX_BODY_MARK end
       lines[#lines + 1] = object.content
       out[#out + 1] = table.concat(lines, "\n")
-      read[id], shown[#shown + 1] = true, id
+      shown[#shown + 1] = id
     end
   end
   for _, id in ipairs(unreadable) do
@@ -646,6 +646,8 @@ local function inbox(name)
     local wrote, err = append(disk.read, table.concat(shown, "\n") .. "\n")
     if not wrote then return "mail read-state was not saved: " .. tostring(err) end
   end
+  -- Preserve the in-memory unread state when saving the read log fails.
+  for _, id in ipairs(shown) do read[id] = true end
   bus.inboxes[name] = {}
   return table.concat(out, "\n")
 end
