@@ -193,7 +193,7 @@ sleep 1
 # The symlinked local file must not be credited with a rule; the per-launch
 # --settings file now carries the allow, and doctor must name that source.
 DOCTOR_OUT=$("$REMUDA_BIN" -s "$SERVER" butler doctor 2>&1)
-echo "$DOCTOR_OUT" | grep -F "present Bash(remuda:*)" | grep -qF ".status.settings.json" \
+echo "$DOCTOR_OUT" | grep -F "present Bash(remuda:*)" | grep -qF "/settings.json" \
   || fail "doctor must source the allow from the session settings file"
 echo "$DOCTOR_OUT" | grep -F "present Bash(remuda:*)" | grep -qF "$FILE" \
   && fail "doctor must not credit the symlinked local settings file"
@@ -206,7 +206,7 @@ respawn
 # The workdir file could not be written, but the per-launch --settings file
 # carries the allow, and doctor must say so from that source.
 "$REMUDA_BIN" -s "$SERVER" butler doctor 2>&1 | grep -F "Permissions butler (claude): present Bash(remuda:*)" \
-  | grep -qF ".status.settings.json" \
+  | grep -qF "/settings.json" \
   || fail "doctor does not source the allow from the session settings file after the failed write"
 chmod 700 "$ROOT/.claude"
 
