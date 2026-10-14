@@ -463,7 +463,7 @@ families {
       remuda._butler_schedule_env = {
         path = remuda._pr0_sched,
         trace = function(event, detail) remuda._pr0_note("schedule.trace", event, detail) end,
-        resolve = function(target) if target ~= "s1" and target ~= "butler" then error("unknown member: " .. target, 0) end return target end,
+        resolve = function(target) if target ~= "s1" and target ~= "butler" and target ~= "agent-test" then error("unknown member: " .. target, 0) end return target end,
       }
     ]],
     reset = [[remuda._pr0_reset()]],
@@ -486,8 +486,15 @@ families {
         { "schedule", "add", "--", "job", "0 9 * * *", "text" }, { "schedule", "add", "-1", "0 9 * * *", "text" },
         { "schedule", "bogus" }, { "schedule", "--bogus" }, { "schedule", "--" }, { "schedule", "list", "--" })
       cases[#cases + 1] = agent("schedule", "list")
-      cases[#cases + 1] = agent("schedule", "add", "job", "0 9 * * *", "text")
+      cases[#cases + 1] = { argv = { "schedule", "add", "job", "0 9 * * *", "text" }, as = "agent",
+        pre = [[remuda._pr0_saved_time = os.time; os.time = function(...) if select("#", ...) == 0 then return 1700000000 end return remuda._pr0_saved_time(...) end]],
+        post = [[os.time = remuda._pr0_saved_time; remuda._pr0_saved_time = nil]] }
       cases[#cases + 1] = agent("schedule", "rm", "nope")
+      local legacy_operator_schedule = [[local entry = { name = "legacy", spec = "12 * * * *", target = "butler",
+        text = "legacy text", created_by = "operator", created_at = "2020-01-01T00:00:00Z",
+        last_fired = 0, enabled = true }; assert(remuda.butler.schedule.save(remuda._pr0_sched, { entry }))]]
+      cases[#cases + 1] = { argv = { "schedule", "rm", "legacy" }, as = "agent", pre = legacy_operator_schedule }
+      cases[#cases + 1] = { argv = { "schedule", "rm", "legacy" }, pre = legacy_operator_schedule }
       cases[#cases + 1] = agent("schedule", "bogus")
       cases[#cases + 1] = agent("schedule", "--help")
       return cases

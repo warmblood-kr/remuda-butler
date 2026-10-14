@@ -391,7 +391,12 @@ end)
 command(18, "schedule", "  remuda butler schedule list\n"
   .. '  remuda butler schedule add <name> "<M H * * *>" <text> | - [--to SESSION]\n'
   .. "  remuda butler schedule rm <name>", function(args, caller)
-  return schedule_cli.cli(args, current_agent(caller), caller and caller.stdin)
+  local principal = resolve_principal(caller)
+  if principal.tag ~= "member" and principal.tag ~= "operator" then
+    return remuda.fail("Butler cannot identify this caller. Next: run from a registered Butler session or upgrade Remuda core.", 1)
+  end
+  if principal.tag == "operator" then principal = nil end
+  return schedule_cli.cli(args, principal, caller and caller.stdin)
 end)
 local function refuse(message)
   if type(remuda.fail) == "function" then return remuda.fail(tostring(message), 1) end
