@@ -199,27 +199,36 @@ function remuda.session_order()
   return order
 end
 
--- Per-session status from the agent's own screen probes: "needs you" (a
--- startup/trust/update dialog), "working", "idle" or "other". Only kinds whose
--- ready/working probes are meaningful are probed (monocle's "working" means
--- "not ready"). Any failure is "other"; the screen itself is never shown.
-local STATUS_KINDS = { claude = true, codex = true }
+-- Agent-specific screen interpretation lives in lazily loaded modules under
+-- session_status/. The host keeps capture, hook precedence and cache policy.
 local STATUS_TTL_SECONDS = 2
 local status_cache = {}
+local detector_cache = {}
+local function status_detector(kind)
+  -- Kinds are also used as module path components; reject anything that is not
+  -- a simple identifier before asking the host loader to resolve it.
+  if type(kind) ~= "string" or not kind:match("^[%w_-]+$") then return nil end
+  local cached = detector_cache[kind]
+  if cached ~= nil then return cached or nil end
+  local load_detector = config.load_status_detector
+  if type(load_detector) ~= "function" then
+    detector_cache[kind] = false
+    return nil
+  end
+  local ok = pcall(load_detector, kind)
+  local registry = remuda._butler_session_status_detectors
+  local detector = ok and type(registry) == "table" and registry[kind] or nil
+  detector_cache[kind] = type(detector) == "function" and detector or false
+  return type(detector) == "function" and detector or nil
+end
 local function probe_status(name, agent)
-  if not STATUS_KINDS[agent.kind] then return "other" end
-  local entry = config.registered_agent_kind(agent.kind)
-  if not (entry and type(entry.ready) == "function" and type(entry.working) == "function") then return "other" end
+  local detector = status_detector(agent.kind)
+  if not detector then return "other" end
   local captured, screen = pcall(remuda.capture, name)
   if not captured or type(screen) ~= "string" then return "other" end
-  local startup = remuda._butler_agent_startup[agent.kind] or {}
-  local modal_ok, modal = pcall(remuda._butler_chooser.known_startup_modal, startup, screen)
-  if modal_ok and modal then return "needs you" end
-  local working_ok, working = config.call_callback(entry.working, screen)
-  if not working_ok then return "other" end
-  if working then return "working" end
-  local ready_ok, ready = config.call_callback(entry.ready, screen)
-  return ready_ok and ready and "idle" or "other"
+  local ok, status = pcall(detector, screen, agent, config)
+  if not ok or (status ~= "needs you" and status ~= "working" and status ~= "idle") then return "other" end
+  return status
 end
 -- A hook word (Claude Code hooks, see status_hook.lua) beats the screen while
 -- fresh: "working" for 10 minutes (a Stop that never came means a crash or an
