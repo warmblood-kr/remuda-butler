@@ -101,6 +101,24 @@ function config.inherited_restricts(cwd, fs)
   return false
 end
 
+-- Claude reads settings.local.json from the repository root (the main
+-- checkout for a worktree), not the launch cwd, so a file written below the
+-- root is not known to be read. Returns the reason, or nil when cwd is a plain
+-- repository root or outside any repository.
+function config.claude_lookup_unverified(cwd, fs)
+  -- A worktree/submodule .git is a file with content; a directory reads as
+  -- empty or unreadable.
+  local own = fs.read_checked(cwd .. "/.git")
+  if own and own ~= "" then return "worktree or submodule: Claude reads the main checkout" end
+  local dir = cwd
+  while true do
+    dir = dir:match("^(.*)/[^/]*$")
+    if not dir or dir == "" then return nil end
+    local text, why = fs.read_checked(dir .. "/.git")
+    if text ~= nil or why then return "below a repository root: Claude reads the root settings" end
+  end
+end
+
 function config.ensure(cwd, kind, fs, permissions)
   local report = { cwd = cwd, kind = kind, written = {}, unchanged = {}, withheld = {} }
   if kind ~= "claude" and kind ~= "codex" then report.skipped = true; return report end
@@ -122,6 +140,11 @@ function config.ensure(cwd, kind, fs, permissions)
     after[1], claude = permissions.merge(before[1], CLAUDE_RULES, fs.json)
     if claude.error then error("invalid Claude settings: " .. claude.error .. "; unchanged", 0) end
     report.withheld = claude.withheld
+    local unverified = config.claude_lookup_unverified(cwd, fs)
+    if unverified then
+      after[1] = nil
+      report.withheld[#report.withheld + 1] = { rule = "claude settings.local.json", list = unverified }
+    end
     local inherited = config.inherited_restricts(cwd, fs)
     if inherited then
       report.withheld[#report.withheld + 1] = { rule = "codex enabled/default_tools_approval_mode",

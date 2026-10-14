@@ -18,6 +18,17 @@ directory:
   byte; their more restrictive decisions still take precedence. A modified or
   duplicated Butler block is preserved and reported rather than overwritten.
 
+Withheld defaults (reported, never silently widened):
+
+- Claude settings are not written when the working directory is below a
+  repository root or is a worktree/submodule: Claude reads the root (or main
+  checkout) settings, so a file here may be ignored, and the root is not
+  written on the user's behalf. Native lookup was not exercised end to end.
+- Codex `enabled` and `default_tools_approval_mode` are not inserted when
+  `CODEX_HOME`, an ancestor `.codex/config.toml` mentions `remuda`, cannot be
+  read, or the Codex home is unknown: a project layer outranks those.
+- The legacy root permission writer leaves an unreadable settings file alone.
+
 This broader scope follows the direct owner instruction in the coordinator's
 API conversation: “and, I want to allow every remuda tasks, `remuda` cli execution,
 or remuda mcp, no matter which tool in it.” It supersedes the earlier routine

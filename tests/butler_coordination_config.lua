@@ -11,7 +11,8 @@ end
 local function read(path)
   local f, _, code = io.open(path, "rb")
   if not f then return nil, code ~= 2 and "unreadable" or nil end
-  local text = f:read("*a"); f:close(); return text
+  local text = f:read("*a"); f:close()
+  return text, text == nil and "unreadable" or nil -- same contract as main.lua read_checked
 end
 local fs = {
   read_checked = read, is_symlink = is_symlink, json = remuda.json,
@@ -116,6 +117,22 @@ fixture(function(dir)
   config.ensure(dir, "codex", blind, permissions)
   local text = read(dir .. "/.codex/config.toml")
   check(text and not text:find("enabled", 1, true), "unknown inherited layer withholds policy defaults")
+end)
+
+-- MUST 2: native Claude lookup is not established for a repo subdirectory or
+-- worktree, so no (possibly ignored) Claude file is written there.
+fixture(function(dir)
+  remuda.mkdir(dir .. "/.git"); remuda.mkdir(dir .. "/sub"); remuda.mkdir(dir .. "/wt")
+  put(dir .. "/wt/.git", "gitdir: /elsewhere\n")
+  local root = config.ensure(dir, "claude", fs, permissions)
+  check(not root.error and read(dir .. "/.claude/settings.local.json"), "plain repository root is written")
+  for _, sub in ipairs({ dir .. "/sub", dir .. "/wt" }) do
+    local report = config.ensure(sub, "claude", fs, permissions)
+    check(not report.error and read(sub .. "/.claude/settings.local.json") == nil,
+      "no Claude settings written where native lookup is unverified")
+    check(read(sub .. "/.codex/config.toml") ~= nil, "Codex layer still initialized")
+    check(report.withheld[1] and report.withheld[1].rule == "claude settings.local.json", "withhold is reported")
+  end
 end)
 
 fixture(function(dir)
