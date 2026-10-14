@@ -728,6 +728,12 @@ the state file is unreadable or has invalid field types, the relay starts from
 a fresh sync baseline; it does not replay room history, and pending deliveries
 in the damaged state cannot be recovered.
 
+Receive and pending-delivery notification decisions share the
+[`matrix_delivery_policy` interface](matrix-delivery-policy.md). That document
+describes composition, the pending unfollow recheck, and which code changes
+require a relay restart; extracting policy does not make existing closures
+reloadable.
+
 `remuda butler matrix reply EVENT_ID TEXT` sends a threaded reply. The relay
 records the returned event ID against the originating Butler mail. A human
 replying in that thread needs no mention: the event-to-mail correlation routes

@@ -41,6 +41,7 @@ end
 dofile("packages/butler/guard_policy.lua")
 dofile("packages/butler/guard_grants.lua")
 dofile("packages/butler/guard_approval.lua")
+dofile("packages/butler/matrix_delivery_policy.lua")
 local relay_module = dofile("packages/butler/matrix_relay.lua")
 
 local function remove_dir(dir)
@@ -5833,6 +5834,15 @@ rx_tests = {
   { "test_ctx_only_the_root_line_when_the_delivered_message_is_the_only_reply", ctx_tests.test_ctx_only_the_root_line_when_the_delivered_message_is_the_only_reply },
   { "test_ctx_restart_between_fetch_and_delivery", ctx_tests.test_ctx_restart_between_fetch_and_delivery },
 }
+
+-- The main chunk already uses Lua's 200-local budget; register in a function.
+do (function(cases)
+  for _, case in ipairs(cases) do rx_tests[#rx_tests + 1] = case end
+end)(dofile("tests/helpers/matrix_delivery_policy.lua")({
+  matrix = matrix, relay_module = relay_module, fixture = rx_fixture, with_dir = rx_with_dir,
+  relay = rx_relay, sync = rx_sync, msg = rx_msg, thread = rx_thread,
+  context = rx_context, find = rx_find, home = HOME, room = NEW, owner = OWNER,
+})) end
 
 -- A live reload keeps the old relay instance, so the relay object may be from an
 -- older load and lack newer methods. ONE check at the top of the reply path: the

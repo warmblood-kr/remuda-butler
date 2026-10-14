@@ -11,6 +11,9 @@ local status_command = assert(remuda.butler.status_command,
 -- Trust words are bound at load (main.lua execs matrix_request before
 -- this file), so a later redefinition of the public entry cannot change them.
 local read_config = matrix.read_config
+assert(matrix.delivery_policy, "load butler/matrix_delivery_policy before butler/matrix_relay")
+-- Do not capture policy functions here: a policy-only reevaluation publishes
+-- its interface on the retained matrix table for already-refactored instances.
 local json = assert(remuda.json, "Matrix requires core remuda.json")
 local relay = matrix.relay or {}
 matrix.relay = relay
@@ -1311,15 +1314,8 @@ function relay.new(options)
       for _, id in ipairs(ids) do
         local event = state.pending[id]
         if event and not delivery_retry_waiting[id] then
-          local notify_mode = matrix.notification_mode(cfg, event.room_id)
           local subscriptions = state.subscriptions[event.room_id] or {}
-          local still_accepted = notify_mode == "all"
-            or (notify_mode == "mentions-followed"
-              and ((event.is_mention == true
-                  and (event.mention_follow_root == nil
-                    or subscriptions[event.mention_follow_root] ~= nil))
-                or (event.thread_root ~= nil and subscriptions[event.thread_root] ~= nil)))
-          if not still_accepted then
+          if not matrix.delivery_policy.accept_pending(cfg, event.room_id, subscriptions, event) then
             add_processed(state, event.event_id)
             state.pending[id] = nil
             persist()
@@ -1581,10 +1577,9 @@ function relay.new(options)
     local content = type(event.content) == "table" and event.content or {}
     local thread_root = relation_fields(content)
     local subscriptions = state.subscriptions[room_id] or {}
-    local mode = matrix.notification_mode(cfg, room_id)
-    return mode == "all" or (mode == "mentions-followed"
-      and ((thread_root ~= nil and subscriptions[thread_root] ~= nil)
-        or mentions(content, content.body, cfg.self_mxid)))
+    return matrix.delivery_policy.accept_received(cfg, room_id, subscriptions, {
+      thread_root = thread_root, is_mention = mentions(content, content.body, cfg.self_mxid),
+    })
   end
 
   local function check_typed_line(event)
@@ -1876,16 +1871,14 @@ function relay.new(options)
           local subscriptions = state.subscriptions[actual_room] or json.object({})
           state.subscriptions[actual_room] = subscriptions
           local follow_root = thread_root or ev.event_id
-          local is_subscribed = thread_root and subscriptions[thread_root] ~= nil
           local auto_followed = false
           if trusted and is_mention and not subscriptions[follow_root] then
             auto_followed = subscribe(state, actual_room, follow_root, nil)
-            if auto_followed and thread_root ~= nil then is_subscribed = true end
           end
           local is_agent = sender_kind == "AGENT"
-          local notify_mode = matrix.notification_mode(cfg, actual_room)
-          local accepted = notify_mode == "all"
-            or (notify_mode == "mentions-followed" and (is_mention or (thread_root ~= nil and is_subscribed)))
+          local accepted = matrix.delivery_policy.accept_received(cfg, actual_room, subscriptions, {
+            thread_root = thread_root, is_mention = is_mention,
+          })
           local route_mail_id = thread_id
             and instance:mail_route_for_event(actual_room, thread_root, in_reply_to) or nil
           local thread_root_mail_id = thread_root

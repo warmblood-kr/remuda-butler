@@ -26,6 +26,7 @@ remuda.exec("butler/typed_lines")
 remuda.exec("butler/approve_text")
 remuda.exec("butler/status_command")
 remuda.exec("butler/typed_lines_cli")
+remuda.exec("butler/matrix_delivery_policy")
 remuda.exec("butler/matrix_relay")
 
 return matrix
