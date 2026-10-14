@@ -360,7 +360,7 @@ end
 current = nil
 ok("doctor: missing file needs Fix", doctor({ path = PATH, present = { PREFIX } }, "claude"):find("Fix:", 1, true))
 eq("doctor: codex", doctor(nil, "codex"),
-  "Permissions butler (codex): none — the mod writes no Codex permission rules\nNext: nothing to do")
+  "Permissions butler (codex): coordination defaults not initialized for this running session\nNext: client defaults are generated before the next agent start; no automatic restart")
 ok("doctor: no session path", doctor(nil, "claude"):find("Fix:", 1, true))
 io.open = opened
 

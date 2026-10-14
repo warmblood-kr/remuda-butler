@@ -164,7 +164,17 @@ local function permission_lines(report, kind, context)
   context = context or {}
   local head = "Permissions butler (" .. safe(kind or "?") .. "): "
   if kind == "codex" then
-    return { head .. "none — the mod writes no Codex permission rules", "Next: nothing to do" }
+    local coordination = context.coordination or remuda._butler_root_coordination_report
+    if type(coordination) ~= "table" then
+      return { head .. "coordination defaults not initialized for this running session",
+        "Next: client defaults are generated before the next agent start; no automatic restart" }
+    end
+    if coordination.error then
+      return { head .. "coordination initialization blocked — " .. safe(coordination.error),
+        "Next: inspect existing workdir settings/rules; malformed or conflicting files are preserved" }
+    end
+    return { head .. "workdir Remuda defaults initialized (launch-time report)",
+      "Next: managed review, sandbox, user overrides and daemon role checks remain authoritative" }
   end
   local path = type(report) == "table" and report.path
   if kind ~= "claude" or type(path) ~= "string" then
@@ -270,7 +280,7 @@ local function permission_lines(report, kind, context)
   for _, entry in ipairs(allows) do
     if matches(entry.rule) and entry.rule ~= "Bash" and entry.rule ~= "Bash(*)" then
       local prefix = entry.rule:match("^Bash%((.-):%*%)$") or entry.rule:match("^Bash%((.-) %*%)$")
-      if prefix and (prefix == "remuda butler" or prefix == "remuda butler close") then
+      if prefix and (prefix == "remuda" or prefix == "remuda butler" or prefix == "remuda butler close") then
         return { head .. "present " .. safe(entry.rule) .. " — " .. safe(entry.source)
           .. " (candidate allow pattern for remuda butler close NAME; deny and ask rules checked across current settings)",
           "Next: this dry check reads settings files only; Claude hooks, server-managed policy and runtime settings may still block execution" }
@@ -286,6 +296,16 @@ local doctor = {
   probe_command = probe_command,
   permission_lines = permission_lines,
   candidate_names = command_candidates,
+  coordination_lines = function(report)
+    if not report then return { "Workdir client config: not initialized in this load",
+      "Next: defaults initialize at the next actual agent start; no automatic restart" } end
+    if report.skipped then return { "Workdir client config: adapter does not use Claude/Codex defaults",
+      "Next: no client configuration change for this adapter" } end
+    if report.error then return { "Workdir client config: " .. safe(report.error),
+      "Next: inspect preserved workdir settings/rules before the next agent start" } end
+    return { "Workdir client config: Remuda defaults initialized (launch-time report; current user/managed restrictions still apply)",
+      "Next: existing sessions retain loaded settings; client restart or a new session requires owner direction" }
+  end,
 }
 remuda._butler_doctor = doctor
 return doctor

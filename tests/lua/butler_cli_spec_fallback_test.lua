@@ -18,6 +18,7 @@ local function start_butler()
     d.probe = function() return {} end
     d.render = function() return { "doctor-stub" } end
     d.permission_lines = function() return {} end
+    d.coordination_lines = function() return {} end
     remuda._butler_sessions = function() return "sessions-stub" end
     remuda._butler_status = function() return "up", 0 end
     return "ok"

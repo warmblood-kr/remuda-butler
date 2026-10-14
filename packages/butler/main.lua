@@ -162,6 +162,37 @@ local butler_fs = {
   end,
 }
 
+remuda.exec("butler/coordination_config")
+-- Initialization happens only at an actual Claude/Codex start, not a tick or
+-- adoption of an already-running session. Both clients get workdir defaults.
+remuda._butler_coordination_reports = remuda._butler_coordination_reports or {}
+local coordination_config = remuda._butler_coordination_config
+local coordination_fs = setmetatable({
+  read_checked = function(path)
+    local file, _, code = io.open(path, "rb")
+    if not file then return nil, code ~= 2 and "unreadable" or nil end
+    local text = file:read("*a")
+    file:close()
+    return text, text == nil and "unreadable" or nil
+  end,
+}, { __index = butler_fs })
+coordination_fs.validate = coordination_config.validator(remuda.process.run,
+  function(dir) return remuda.fs and remuda.fs.mkdir_new and remuda.fs.mkdir_new(dir) == true end,
+  butler_fs.write, function(path, recursive)
+    if recursive then return remuda.remove_dir_all(path) end
+    return os.remove(path)
+  end, function() return system.find_command("codex") ~= nil end)
+function remuda._butler_ensure_coordination(cwd, kind, role)
+  local actual = type(cwd) == "string" and realpath(cwd)
+  local report = actual and coordination_config.ensure(actual, kind, coordination_fs, permissions)
+    or { kind = kind, error = "cannot resolve session working directory", written = {}, withheld = {} }
+  if actual then remuda._butler_coordination_reports[actual] = report end
+  if role == "root" then remuda._butler_root_coordination_report = report end
+  if report.error then _butler_session_trace("coordination_config_not_written", report.error) end
+  if #report.written > 0 then _butler_session_trace("coordination_config_written", "files=" .. #report.written) end
+  return report
+end
+
 -- The session needs an `--mcp-config` pointing back at this same daemon, or
 -- it has no way to reach the Butler MCP tools at all — a bare `remuda.new(nil,
 -- {"claude"})` starts a session with no MCP server configured. `claude`
@@ -1182,6 +1213,7 @@ local function launch_butler()
     skip_probe = remuda._butler_argv ~= nil,
     spec = function(candidate_kind)
       pcall(ensure_root_permissions, candidate_kind)
+      remuda._butler_ensure_coordination(butler_session_cwd, candidate_kind, "root")
       local telemetry = setup_telemetry(candidate_kind, { name = requested_name, status_path = status_path })
       telemetry_by_kind[candidate_kind] = telemetry
       rotate_root_capability()

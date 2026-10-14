@@ -55,6 +55,11 @@ function permissions.merge(text, rules, json)
     report.error = "wrong type"
     return nil, report
   end
+  for _, list in ipairs({ "allow", "deny", "ask" }) do
+    for _, value in ipairs(perms[list] or {}) do
+      if type(value) ~= "string" then report.error = "wrong type"; return nil, report end
+    end
+  end
   for _, rule in ipairs(rules) do
     local blocked = (holds(perms.deny, rule) and "deny") or (holds(perms.ask, rule) and "ask")
     if blocked then report.withheld[#report.withheld + 1] = { rule = rule, list = blocked }
