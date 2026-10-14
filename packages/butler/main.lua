@@ -180,6 +180,17 @@ local coordination_fs = setmetatable({
   -- Inherited Codex user layer; nil (policy fields withheld) when unknown.
   codex_home = os.getenv("CODEX_HOME") or (os.getenv("HOME") and os.getenv("HOME") .. "/.codex") or nil,
 }, { __index = butler_fs })
+-- Codex's own effective view of configured MCP servers (read-only, offline,
+-- starts no server). Only the parsed server names are used; output is never
+-- logged. nil when Codex is absent or the answer is unusable.
+function coordination_fs.native_servers(cwd, home)
+  if system.find_command("codex") == nil then return nil end
+  local ok, answer = pcall(remuda.process.run, { argv = { "codex", "mcp", "list", "--json" }, timeout = 5,
+    cwd = cwd, env = { CODEX_HOME = home } })
+  if not ok or not answer or answer.code ~= 0 or answer.timed_out then return nil end
+  local decoded_ok, list = pcall(remuda.json.decode, answer.stdout or "")
+  return decoded_ok and type(list) == "table" and list or nil
+end
 coordination_fs.validate = coordination_config.validator(remuda.process.run,
   function(dir) return remuda.fs and remuda.fs.mkdir_new and remuda.fs.mkdir_new(dir) == true end,
   butler_fs.write, function(path, recursive)

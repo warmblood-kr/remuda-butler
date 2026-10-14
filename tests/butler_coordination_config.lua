@@ -18,6 +18,12 @@ local fs = {
   read_checked = read, is_symlink = is_symlink, json = remuda.json,
   mkdir = remuda.mkdir,
   codex_home = os.getenv("HOME") .. "/.codex", -- fixture HOME holds no Codex layer
+  native_servers = function(cwd, home) -- Codex's own effective view, as main.lua does
+    local r = remuda.process.run({ argv = { "codex", "mcp", "list", "--json" }, timeout = 5, cwd = cwd,
+      env = { CODEX_HOME = home } })
+    if r.code ~= 0 then return nil end
+    return remuda.json.decode(r.stdout)
+  end,
   write = function(path, text) return remuda.fs.write_atomic(path, text, { private = true }) end,
 }
 fs.validate = config.validator(remuda.process.run, remuda.fs.mkdir_new, fs.write,
@@ -124,15 +130,72 @@ end)
 fixture(function(dir)
   remuda.mkdir(dir .. "/.git"); remuda.mkdir(dir .. "/sub"); remuda.mkdir(dir .. "/wt")
   put(dir .. "/wt/.git", "gitdir: /elsewhere\n")
-  local root = config.ensure(dir, "claude", fs, permissions)
-  check(not root.error and read(dir .. "/.claude/settings.local.json"), "plain repository root is written")
-  for _, sub in ipairs({ dir .. "/sub", dir .. "/wt" }) do
+  for _, sub in ipairs({ dir, dir .. "/sub", dir .. "/wt" }) do
     local report = config.ensure(sub, "claude", fs, permissions)
     check(not report.error and read(sub .. "/.claude/settings.local.json") == nil,
       "no Claude settings written where native lookup is unverified")
     check(read(sub .. "/.codex/config.toml") ~= nil, "Codex layer still initialized")
     check(report.withheld[1] and report.withheld[1].rule == "claude settings.local.json", "withhold is reported")
   end
+end)
+
+-- MUST 1 (sec-wcc2): inherited key spelled with a TOML escape is invisible to a
+-- substring scan; Codex's own resolver sees it.
+for _, where in ipairs({ "home", "ancestor" }) do
+  fixture(function(dir)
+    local work, inherited_fs = dir .. "/a/b", fs
+    remuda.mkdir(dir .. "/a"); remuda.mkdir(work)
+    local body = '["mcp_servers"."\\u0072emuda"]\ncommand = "x"\nenabled = false\ndefault_tools_approval_mode = "prompt"\n'
+    check(not body:find("remuda", 1, true), "fixture hides the literal word")
+    put(dir .. "/layer/config.toml", body)
+    if where == "home" then inherited_fs = setmetatable({ codex_home = dir .. "/layer" }, { __index = fs })
+    else put(dir .. "/.codex/config.toml", body) end
+    config.ensure(work, "codex", inherited_fs, permissions)
+    local text = read(work .. "/.codex/config.toml")
+    check(text and text:find('command = "remuda"', 1, true), "non-policy defaults written")
+    check(not text:find("enabled", 1, true) and not text:find("default_tools_approval_mode", 1, true),
+      "escaped inherited key still withholds policy defaults (" .. where .. ")")
+  end)
+end
+-- B: a Codex-less machine must not block Claude (or fresh literal Codex) init.
+fixture(function(dir)
+  local bare = setmetatable({ native_servers = function() return nil end,
+    validate = config.validator(function() error("must not execute") end, function() return true end,
+      fs.write, os.remove, function() return false end) }, { __index = fs })
+  local report = config.ensure(dir, "claude", bare, permissions)
+  local claude = paths(dir)
+  check(not report.error and read(claude) ~= nil, "Claude initializes without Codex or native resolver")
+  local text = read(dir .. "/.codex/config.toml")
+  check(text and not text:find("enabled", 1, true), "policy fields withheld without a resolver")
+end)
+-- unreadable own .git is treated as possibly inside a repository
+fixture(function(dir)
+  local blind = setmetatable({ read_checked = function(path)
+    if path:match("/%.git$") then return nil, "unreadable" end
+    return read(path)
+  end }, { __index = fs })
+  local report = config.ensure(dir, "claude", blind, permissions)
+  check(read(dir .. "/.claude/settings.local.json") == nil and not report.error, "unreadable .git withholds Claude file")
+end)
+-- S4: multiline strings are an unsupported shape: refused, file untouched.
+fixture(function(dir)
+  local _, toml = paths(dir)
+  local body = 'description = """\n[mcp_servers.remuda]\n"""\n'
+  put(toml, body)
+  local report = config.ensure(dir, "codex", fs, permissions)
+  check(report.error and read(toml) == body, "multiline TOML string fails closed")
+end)
+-- S3: a failed later write leaves earlier files and reports; no rollback.
+fixture(function(dir)
+  local calls = 0
+  local failing = setmetatable({ write = function(path, text)
+    calls = calls + 1
+    if path:find("remuda.rules", 1, true) then return nil, "disk full" end
+    return fs.write(path, text)
+  end }, { __index = fs })
+  local report = config.ensure(dir, "codex", failing, permissions)
+  check(report.error and #report.written == 2 and read(dir .. "/.codex/config.toml") ~= nil
+    and read(dir .. "/.codex/rules/remuda.rules") == nil, "partial write reported; no half-written file")
 end)
 
 fixture(function(dir)
@@ -150,10 +213,15 @@ for _, item in ipairs({
 }) do
   fixture(function(dir)
     local files = { paths(dir) }; put(files[item[1]], item[2])
-    local report = config.ensure(dir, "codex", fs, permissions)
-    check(report.error ~= nil and #report.written == 0, "malformed/modified file blocks target writes")
+    local own = item[1] == 1 and "claude" or "codex"
+    local report = config.ensure(dir, own, fs, permissions)
+    check(report.error ~= nil and report.blocked[own], "malformed/modified file blocks its own client")
     check(read(files[item[1]]) == item[2], "malformed original untouched")
-    for i, file in ipairs(files) do if i ~= item[1] then check(read(file) == nil, "other targets not partially created") end end
+    local mine = item[1] == 1 and { 1 } or { 2, 3 }
+    for _, i in ipairs(mine) do if i ~= item[1] then check(read(files[i]) == nil, "own client not partially created") end end
+    -- B: the other client still initializes (a broken/absent client must not block it)
+    local others = item[1] == 1 and { 2, 3 } or { 1 }
+    for _, i in ipairs(others) do check(read(files[i]) ~= nil, "independent client still initialized") end
   end)
 end
 
@@ -188,7 +256,7 @@ fixture(function(dir)
   local legacy = '[mcp_servers.remuda.env]\nREMUDA_SESSION_CAPABILITY = "fixture-session-capability-not-to-save"\n'
   put(toml, legacy)
   local report = config.ensure(dir, "codex", fs, permissions)
-  check(report.error and #report.written == 0 and read(toml) == legacy, "legacy capability is neither copied nor rewritten")
+  check(report.error and report.blocked.codex and read(toml) == legacy, "legacy capability is neither copied nor rewritten")
 end)
 
 do

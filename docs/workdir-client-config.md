@@ -18,16 +18,46 @@ directory:
   byte; their more restrictive decisions still take precedence. A modified or
   duplicated Butler block is preserved and reported rather than overwritten.
 
-Withheld defaults (reported, never silently widened):
+How Claude receives the defaults: every Butler-launched Claude session gets
+`Bash(remuda:*)` and `mcp__remuda__*` as an allow-only `permissions.allow` in
+its per-launch `--settings` file (session-owned, outside any checkout, written
+privately and atomically, no secrets or identity). Measured with claude
+2.1.300 (`fix-wcc-claude-lookup-evidence.txt`): that allow works from a
+repository subdirectory and a worktree, and deny/ask rules from user, project
+root and local settings still outrank it. The workdir
+`.claude/settings.local.json` is written only outside any repository; at or
+below a `.git` entry (including one that cannot be read) it is withheld.
 
-- Claude settings are not written when the working directory is below a
-  repository root or is a worktree/submodule: Claude reads the root (or main
-  checkout) settings, so a file here may be ignored, and the root is not
-  written on the user's behalf. Native lookup was not exercised end to end.
+Withheld defaults (reported in `withheld`/`blocked`, never silently widened):
+
 - Codex `enabled` and `default_tools_approval_mode` are not inserted when
-  `CODEX_HOME`, an ancestor `.codex/config.toml` mentions `remuda`, cannot be
-  read, or the Codex home is unknown: a project layer outranks those.
-- The legacy root permission writer leaves an unreadable settings file alone.
+  Codex's own resolver lists a `remuda` server (this resolves escaped, quoted
+  and dotted key spellings), a user/ancestor layer is unreadable or non-empty
+  (an ancestor may be untrusted now and applied later), or Codex/its home
+  cannot be queried. A project layer outranks those layers.
+- Each client initializes independently: a malformed or unverifiable Claude
+  file does not block Codex and vice versa; only the launching client's own
+  failure is `report.error`. Without Codex installed, Claude still initializes
+  and fresh Codex defaults are written without the policy fields.
+- The legacy root permission writer leaves an unreadable settings file alone
+  (`read_checked` is required of the filesystem adapter for this guarantee).
+
+Known limits (accepted, not solved):
+
+- The Remuda execpolicy `allow` rule lets matching commands run outside the
+  sandbox without a prompt (Codex rules semantics). Sandbox keys are left
+  unchanged; enforcement of those commands is not. This is the owner-authorized
+  broad grant and needs explicit activation.
+- Validation copies the complete existing TOML to a private (0700/0600)
+  temporary Codex home and deletes it. No new session secret is passed; a
+  pre-existing secret in that file is briefly copied. Cleanup is best effort.
+- Writes are atomic per file, not across files, with no lock and no rollback;
+  an external writer between snapshot and write can be overwritten. A failed
+  second/third write leaves the earlier files and is reported.
+- The TOML merge is line based. Documents with multiline strings are refused
+  (fail closed); other shapes rely on native validation.
+- Replacing an existing file uses a private 0600 mode (this can drop an
+  intentional read-only mode). Existing directory modes are not hardened.
 
 This broader scope follows the direct owner instruction in the coordinator's
 API conversation: “and, I want to allow every remuda tasks, `remuda` cli execution,

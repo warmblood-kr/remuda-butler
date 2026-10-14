@@ -12,7 +12,13 @@ local MCP_FIELDS = {
   { "enabled", 'true' }, { "default_tools_approval_mode", '"approve"' },
 }
 local FRESH_TOML = "[mcp_servers.remuda]\n# Butler Remuda MCP defaults v1 (launch overrides own identity)\n"
-for _, field in ipairs(MCP_FIELDS) do FRESH_TOML = FRESH_TOML .. field[1] .. " = " .. field[2] .. "\n" end
+local FRESH_WITHHELD_TOML = FRESH_TOML
+for _, field in ipairs(MCP_FIELDS) do
+  FRESH_TOML = FRESH_TOML .. field[1] .. " = " .. field[2] .. "\n"
+  if not (field[1] == "enabled" or field[1] == "default_tools_approval_mode") then
+    FRESH_WITHHELD_TOML = FRESH_WITHHELD_TOML .. field[1] .. " = " .. field[2] .. "\n"
+  end
+end
 
 -- Fields a project layer would use to override an inherited (user/ancestor)
 -- Codex restriction; withheld when an inherited layer mentions Remuda or
@@ -25,6 +31,11 @@ function config.merge_toml(text, validate, withhold_policy)
   -- fixtures or rewritten. Session capabilities are launcher-owned.
   if text:match("REMUDA_SESSION_CAPABILITY[\"']?%s*=") then
     return nil, "existing capability assignment requires owner cleanup; unchanged"
+  end
+  -- The section scanner is line based: a multiline string could hold a
+  -- header-like line. Unsupported shape => fail closed, file untouched.
+  if text:find('"""', 1, true) or text:find("'''", 1, true) then
+    return nil, "multiline TOML strings are not supported by the merger; unchanged"
   end
   if text ~= "" and not validate("toml", text) then return nil, "invalid TOML or Codex configuration; unchanged" end
   -- Only canonical sections are edited. Other TOML forms stay untouched and
@@ -84,8 +95,12 @@ function config.merge_rules(text, validate)
   return proposed
 end
 
--- true when an inherited Codex layer (CODEX_HOME or an ancestor .codex) may
--- already restrict the Remuda server, or that cannot be established.
+-- true when an inherited Codex layer may already restrict the Remuda server,
+-- or that cannot be established. The semantic check is Codex's own resolver
+-- (fs.native_servers lists the effective MCP servers, so escaped/quoted/dotted
+-- key spellings resolve); unreadable layers and a missing resolver fail closed.
+-- The file reads below additionally catch layers the resolver does not load
+-- (untrusted ancestors).
 function config.inherited_restricts(cwd, fs)
   if not fs.codex_home then return true end
   local files = { fs.codex_home .. "/config.toml" }
@@ -95,33 +110,73 @@ function config.inherited_restricts(cwd, fs)
     if not dir then break end
     files[#files + 1] = dir .. "/.codex/config.toml"
   end
-  for _, path in ipairs(files) do
+  for i, path in ipairs(files) do
     local text, why = fs.read_checked(path)
-    if why or (text and text:find("remuda", 1, true)) then return true end
+    -- The home layer is resolved natively below. An ancestor layer may be
+    -- untrusted today (not loaded by the resolver) and apply once trusted, and
+    -- an escaped key hides from text search, so any nonempty ancestor layer
+    -- withholds.
+    if why or (text and (text:find("remuda", 1, true) or (i > 1 and text:find("%S")))) then return true end
+  end
+  local servers = fs.native_servers and fs.native_servers(cwd, fs.codex_home)
+  if type(servers) ~= "table" then return true end
+  for _, server in ipairs(servers) do
+    if type(server) ~= "table" or server.name == "remuda" then return true end
   end
   return false
 end
 
--- Claude reads settings.local.json from the repository root (the main
--- checkout for a worktree), not the launch cwd, so a file written below the
--- root is not known to be read. Returns the reason, or nil when cwd is a plain
--- repository root or outside any repository.
+-- Any .git entry (own or ancestor), including one that cannot be read, may put
+-- cwd inside a repository or worktree; Claude's native lookup there varies by
+-- client version/platform. Withhold the workdir file; the per-launch
+-- --settings file carries the defaults instead.
 function config.claude_lookup_unverified(cwd, fs)
-  -- A worktree/submodule .git is a file with content; a directory reads as
-  -- empty or unreadable.
-  local own = fs.read_checked(cwd .. "/.git")
-  if own and own ~= "" then return "worktree or submodule: Claude reads the main checkout" end
   local dir = cwd
-  while true do
-    dir = dir:match("^(.*)/[^/]*$")
-    if not dir or dir == "" then return nil end
+  while dir and dir ~= "" do
     local text, why = fs.read_checked(dir .. "/.git")
-    if text ~= nil or why then return "below a repository root: Claude reads the root settings" end
+    if text ~= nil or why then return "inside or at a repository/worktree (lookup unverified)" end
+    dir = dir:match("^(.*)/[^/]*$")
+  end
+  return nil
+end
+
+-- One client's plan: returns ok, err. Writes nothing; fills after[i].
+local function plan_claude(cwd, before, after, fs, permissions, report)
+  local claude
+  after[1], claude = permissions.merge(before[1], CLAUDE_RULES, fs.json)
+  if claude.error then error("invalid Claude settings: " .. claude.error .. "; unchanged", 0) end
+  for _, rule in ipairs(claude.withheld) do report.withheld[#report.withheld + 1] = rule end
+  local decoded = fs.json.decode(before[1] or "{}")
+  for _, list in ipairs({ "allow", "deny", "ask" }) do
+    for _, value in ipairs(decoded.permissions and decoded.permissions[list] or {}) do
+      if type(value) ~= "string" then error("invalid Claude permission entry; unchanged", 0) end
+    end
+  end
+  local unverified = config.claude_lookup_unverified(cwd, fs)
+  if unverified then
+    after[1] = nil
+    report.withheld[#report.withheld + 1] = { rule = "claude settings.local.json", list = unverified }
   end
 end
 
+local function plan_codex(cwd, before, after, fs, report)
+  local inherited = config.inherited_restricts(cwd, fs)
+  if inherited then
+    report.withheld[#report.withheld + 1] = { rule = "codex enabled/default_tools_approval_mode",
+      list = "inherited Codex configuration may restrict Remuda" }
+  end
+  local why
+  after[2], why = config.merge_toml(before[2], fs.validate, inherited)
+  if why then error(why, 0) end
+  after[3], why = config.merge_rules(before[3], fs.validate)
+  if why then error(why, 0) end
+end
+
+-- Each client is planned independently: one that cannot be verified is
+-- reported in report.blocked[client] and left untouched; the other still
+-- initializes. report.error is set only for the launching kind's own client.
 function config.ensure(cwd, kind, fs, permissions)
-  local report = { cwd = cwd, kind = kind, written = {}, unchanged = {}, withheld = {} }
+  local report = { cwd = cwd, kind = kind, written = {}, unchanged = {}, withheld = {}, blocked = {} }
   if kind ~= "claude" and kind ~= "codex" then report.skipped = true; return report end
   local ok, err = pcall(function()
     local dirs = { cwd, cwd .. "/.claude", cwd .. "/.codex", cwd .. "/.codex/rules" }
@@ -137,47 +192,40 @@ function config.ensure(cwd, kind, fs, permissions)
       before[i], why = fs.read_checked(path)
       if why then error("cannot read existing configuration; unchanged", 0) end
     end
-    local claude
-    after[1], claude = permissions.merge(before[1], CLAUDE_RULES, fs.json)
-    if claude.error then error("invalid Claude settings: " .. claude.error .. "; unchanged", 0) end
-    report.withheld = claude.withheld
-    local unverified = config.claude_lookup_unverified(cwd, fs)
-    if unverified then
-      after[1] = nil
-      report.withheld[#report.withheld + 1] = { rule = "claude settings.local.json", list = unverified }
-    end
-    local inherited = config.inherited_restricts(cwd, fs)
-    if inherited then
-      report.withheld[#report.withheld + 1] = { rule = "codex enabled/default_tools_approval_mode",
-        list = "inherited Codex configuration may restrict Remuda" }
-    end
-    for _, list in ipairs({ "allow", "deny", "ask" }) do
-      local decoded = fs.json.decode(before[1] or "{}")
-      for _, value in ipairs(decoded.permissions and decoded.permissions[list] or {}) do
-        if type(value) ~= "string" then error("invalid Claude permission entry; unchanged", 0) end
+    local clients = {
+      claude = { 1, function() plan_claude(cwd, before, after, fs, permissions, report) end },
+      codex = { 2, function() plan_codex(cwd, before, after, fs, report) end, 3 },
+    }
+    local active = {}
+    for _, name in ipairs({ "claude", "codex" }) do
+      local planned, why = pcall(clients[name][2])
+      if planned then active[name] = true
+      else
+        report.blocked[name] = tostring(why)
+        after[clients[name][1]], after[clients[name][3] or 0] = nil, nil
       end
     end
-    local why
-    after[2], why = config.merge_toml(before[2], fs.validate, inherited)
-    if why then error(why, 0) end
-    after[3], why = config.merge_rules(before[3], fs.validate)
-    if why then error(why, 0) end
     -- Plan/validate every file before any target write, then check for a changed
     -- workdir snapshot. Daemon launch callbacks serialize shared-workdir merges.
     for i, path in ipairs(paths) do
       local current, read_error = fs.read_checked(path)
       if read_error or current ~= before[i] then error("configuration changed during initialization; unchanged", 0) end
     end
-    for _, dir in ipairs({ cwd .. "/.claude", cwd .. "/.codex", cwd .. "/.codex/rules" }) do fs.mkdir(dir) end
+    local owner = { "claude", "codex", "codex" }
+    for _, dir in ipairs({ cwd .. "/.claude", cwd .. "/.codex", cwd .. "/.codex/rules" }) do
+      local which = dir:find("/.claude", 1, true) and "claude" or "codex"
+      if active[which] then fs.mkdir(dir) end
+    end
     for i, path in ipairs(paths) do
-      if after[i] then
+      if after[i] and active[owner[i]] then
         local wrote = fs.write(path, after[i], true)
         if not wrote then error("configuration atomic write failed (earlier files may have been written)", 0) end
         report.written[#report.written + 1] = path
-      else report.unchanged[#report.unchanged + 1] = path end
+      elseif active[owner[i]] then report.unchanged[#report.unchanged + 1] = path end
     end
   end)
-  if not ok then report.error = tostring(err) end
+  if not ok then report.error = tostring(err)
+  elseif report.blocked[kind] then report.error = report.blocked[kind] end
   return report
 end
 
@@ -188,7 +236,8 @@ function config.validator(run, mkdir, write, remove, available)
     if not available() then
       -- These literal generated documents are valid without a native parser.
       -- Existing/custom documents require Codex; never guess at their syntax.
-      return (format == "toml" and text:gsub("^%s+", "") == FRESH_TOML)
+      local fresh = text:gsub("^%s+", "")
+      return (format == "toml" and (fresh == FRESH_TOML or fresh == FRESH_WITHHELD_TOML))
         or (format == "rules" and text == RULE_BLOCK)
     end
     local dir = os.tmpname()
