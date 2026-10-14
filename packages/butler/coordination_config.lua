@@ -2,6 +2,7 @@
 -- to launch overrides; this module never receives them.
 local config = {}
 local CLAUDE_RULES = { "Bash(remuda:*)", "mcp__remuda__*" }
+config.CLAUDE_RULES = CLAUDE_RULES
 local RULE_BLOCK = '# BEGIN Butler Remuda CLI v1\n'
   .. 'prefix_rule(pattern=["remuda"], decision="allow")\n'
   .. '# END Butler Remuda CLI v1\n'

@@ -216,7 +216,6 @@ local status_path = remuda._butler_status_path
   or (config_path and (config_path .. ".status") or (os.tmpname() .. ".status"))
 local function status_settings(path)
   local settings_path = path .. ".settings.json"
-  local settings = assert(io.open(settings_path, "w"))
   -- Hooks feed the per-session status word (see status_hook.lua); their
   -- output is discarded and they always exit 0 so Claude never sees them.
   -- Claude runs hook commands through sh, or PowerShell on Windows.
@@ -235,10 +234,22 @@ local function status_settings(path)
       guard_policy.approvals_enabled() and (guard_command .. keep_stdout) or nil,
       guard_policy.deny_enabled() and (guard_command .. keep_stdout) or nil) .. ","
   end
-  settings:write('{"statusLine":{"type":"command","command":'
+  -- Allow-only permission defaults for this launch: a --settings source adds
+  -- to, and never outranks, deny/ask rules from user, project and local
+  -- settings (measured with claude 2.1.300), and unlike the workdir file it
+  -- is read from any cwd, repository subdirectory or worktree.
+  local allow = {}
+  for _, rule in ipairs(coordination_config.CLAUDE_RULES) do allow[#allow + 1] = json_quote(rule) end
+  local text = '{"permissions":{"allow":[' .. table.concat(allow, ",") .. ']},"statusLine":{"type":"command","command":'
     .. json_quote("remuda -s " .. shell_quote(server) .. " --stdin butler statusline " .. shell_quote(path))
-    .. '},"hooks":{' .. guard_hooks .. '"UserPromptSubmit":[' .. hook .. '],"Stop":[' .. hook .. '],"Notification":[' .. hook .. ']}}')
-  settings:close()
+    .. '},"hooks":{' .. guard_hooks .. '"UserPromptSubmit":[' .. hook .. '],"Stop":[' .. hook .. '],"Notification":[' .. hook .. ']}}'
+  -- Private atomic write where the core has it (session-owned, 0600); an
+  -- older core keeps the previous plain write.
+  if not butler_fs.write(settings_path, text, true) then
+    local settings = assert(io.open(settings_path, "w"))
+    settings:write(text)
+    settings:close()
+  end
   return settings_path
 end
 

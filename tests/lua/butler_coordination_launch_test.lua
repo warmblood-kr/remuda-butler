@@ -72,3 +72,20 @@ T.test("registered member launch and relaunch use each actual workdir for both a
     return "two actual workdirs|both adapters|repeat relaunch|no capability config"
   ]]), "two actual workdirs|both adapters|repeat relaunch|no capability config")
 end)
+
+T.test("per-launch Claude --settings file carries allow-only Remuda defaults, privately", function()
+  T.eq(T.eval([[
+    local path = remuda.fs.realpath(os.getenv("XDG_DATA_HOME")) .. "/wcc-session.status"
+    local settings_path = remuda._butler_agent_support.status_settings(path)
+    local f = assert(io.open(settings_path, "rb")); local text = f:read("*a"); f:close()
+    local doc = remuda.json.decode(text)
+    local p = doc.permissions
+    assert(p and p.allow and #p.allow == 2 and p.allow[1] == "Bash(remuda:*)" and p.allow[2] == "mcp__remuda__*", "allow rules")
+    assert(p.deny == nil and p.ask == nil and p.defaultMode == nil, "allow-only: no deny/ask/mode keys")
+    assert(doc.hooks and doc.hooks.Stop and doc.statusLine, "telemetry hooks and status line kept")
+    assert(not text:find("REMUDA_SESSION_CAPABILITY", 1, true), "no capability serialized")
+    local mode = remuda.process.run({ argv = { "ls", "-ld", settings_path }, timeout = 5 }).stdout
+    assert(mode:match("^%-rw%-%-%-%-%-%-%-"), "private mode: " .. mode)
+    return "ok"
+  ]]), "ok")
+end)
