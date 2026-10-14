@@ -5683,6 +5683,38 @@ rx_tests = {
       create.content = { room_version = "12" }
       sync({ mention("$v12-creator") }, { create, power(0, 50) })
       assert(rx_find(delivered, "$v12-creator"), "v12 creator has infinite power")
+      -- Decode real JSON: the core preserves the distinction between [] and {}.
+      local invalid_power = {
+        '[]', 'null',
+        '{"notifications":[],"users_default":50}',
+        '{"users":[],"users_default":50}',
+        '{"notifications":null,"users_default":50}',
+        '{"users":null,"users_default":50}',
+        '{"users_default":null}',
+        '{"users_default":1e20}',
+        '{"users_default":9007199254740992}',
+        '{"users_default":-9007199254740992}',
+        '{"notifications":{"room":-9007199254740992},"users_default":50}',
+        '{"notifications":{"room":9007199254740992},"users_default":50}',
+        '{"users":{"' .. OWNER .. '":1e20}}',
+      }
+      for index, raw in ipairs(invalid_power) do
+        local event = power(50, 50)
+        event.content = remuda.json.decode(raw)
+        sync({ mention("$json-invalid" .. index) }, { event })
+        assert(not rx_find(delivered, "$json-invalid" .. index), "malformed decoded power fails closed: " .. raw)
+      end
+      local valid_power = {
+        '{"notifications":{},"users":{},"users_default":50}',
+        '{"notifications":{"room":9007199254740991},"users_default":9007199254740991}',
+        '{"notifications":{"room":-9007199254740991},"users_default":-9007199254740991}',
+      }
+      for index, raw in ipairs(valid_power) do
+        local event = power(50, 50)
+        event.content = remuda.json.decode(raw)
+        sync({ mention("$json-valid" .. index) }, { event })
+        assert(rx_find(delivered, "$json-valid" .. index), "valid decoded objects and integer bounds work")
+      end
       local missing = power(100, 50)
       missing.content = nil
       sync({ mention("$missing-power-content") }, { missing })

@@ -390,12 +390,20 @@ local function notification_state_event(room, event)
 end
 
 local function room_mention_allowed(room, content, sender)
+  local function object(value)
+    if type(value) ~= "table" or value == json.null or getmetatable(value) == JSON_ARRAY_MT then
+      return false
+    end
+    for key in pairs(value) do if type(key) ~= "string" then return false end end
+    return true
+  end
   local mention = content["m.mentions"]
-  if type(mention) ~= "table" or mention.room ~= true or not room or room.unusable then return false end
+  if not object(mention) or mention.room ~= true or not room or room.unusable then return false end
   local function integer(value, default)
     if value == nil then return default end
     if type(value) == "number" and value == value and value ~= math.huge
-        and value ~= -math.huge and value % 1 == 0 then return value end
+        and value >= -9007199254740991 and value <= 9007199254740991
+        and value % 1 == 0 then return value end
   end
   local create = room.create
   local version = type(create) == "table" and (create.room_version or "1") or nil
@@ -416,11 +424,13 @@ local function room_mention_allowed(room, content, sender)
     if not room.complete or not known_version then return false end
     return is_creator -- all other users default to 0; notification threshold is 50.
   end
-  if type(power) ~= "table" then return false end
-  if power.notifications ~= nil and type(power.notifications) ~= "table" then return false end
-  if power.users ~= nil and type(power.users) ~= "table" then return false end
+  if not object(power) then return false end
+  if power.notifications ~= nil and not object(power.notifications) then return false end
+  if power.users ~= nil and not object(power.users) then return false end
   local threshold = integer(power.notifications and power.notifications.room, 50)
-  local level = integer(power.users and power.users[sender], integer(power.users_default, 0))
+  local default_level = integer(power.users_default, 0)
+  if default_level == nil then return false end
+  local level = integer(power.users and power.users[sender], default_level)
   if threshold == nil or level == nil then return false end
   if is_creator and known_version and tonumber(version) >= 12 then return true end
   return level >= threshold
