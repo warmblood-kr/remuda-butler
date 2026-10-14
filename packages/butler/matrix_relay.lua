@@ -87,7 +87,7 @@ local function query(path, params)
   local parts = {}
   local order
   if params.from ~= nil then order = { "from", "dir", "limit" }
-  elseif params.since ~= nil then order = { "since", "timeout", "full_state" }
+  elseif params.since ~= nil then order = { "since", "timeout", "full_state", "filter" }
   else order = { "timeout", "dir", "limit" } end
   for _, key in ipairs(order) do
     local value = params[key]
@@ -387,6 +387,16 @@ local function notification_state_event(room, event)
   elseif event.type == "m.room.create" then
     room.create, room.creator = event.content, event.sender
   end
+end
+
+-- Inline sync filter: state limited to the two events notification permission
+-- reads, in configured rooms only. Sorted so the request URL is stable.
+local function notification_state_filter(rooms)
+  local ids = {}
+  for room_id in pairs(rooms) do ids[#ids + 1] = encode(room_id) end
+  table.sort(ids)
+  return '{"room":{"state":{"types":["m.room.create","m.room.power_levels"],"rooms":['
+    .. table.concat(ids, ",") .. "]}}}"
 end
 
 local function room_mention_allowed(room, content, sender)
@@ -2548,7 +2558,13 @@ function relay.new(options)
       begin_request(SYNC_PATH, { timeout = "0" }, 10)
     else
       local query = { since = state.since, timeout = tostring(cfg.timeout_ms) }
-      if notification_full_state then query.full_state = "true" end
+      if notification_full_state then
+        -- Restart: room mention permission needs state at the timeline start, but
+        -- unfiltered full state can exceed the response cap in large rooms and
+        -- stall live sync. Limit the snapshot to create and power levels for
+        -- configured rooms; the timeline itself is not filtered.
+        query.full_state, query.filter = "true", notification_state_filter(cfg.rooms)
+      end
       begin_request(SYNC_PATH, query, cfg.timeout_ms / 1000 + 10)
     end
   end

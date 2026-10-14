@@ -847,6 +847,9 @@ local function test_matrix_download_explicit_output_without_home()
 end
 
 local function test_state_restart_corruption_and_processed_cap()
+  -- A restart re-reads mention permission state, filtered to create and power
+  -- levels in the configured room so a large room cannot overflow the response cap.
+  local RESTART_STATE = "&full_state=true&filter=%7B%22room%22%3A%7B%22state%22%3A%7B%22types%22%3A%5B%22m.room.create%22%2C%22m.room.power_levels%22%5D%2C%22rooms%22%3A%5B%22%21room%3Aexample.org%22%5D%7D%7D%7D"
   local dir, config_path = fixture()
   local client = scripted_client()
   local state_path = config_path .. ".since"
@@ -865,7 +868,7 @@ local function test_state_restart_corruption_and_processed_cap()
   assert(relay:state().pending["$pending"].references == nil,
     "invalid saved references should be discarded when pending state loads")
   relay:start()
-  assert(client.requests[1].path == "/_matrix/client/v3/sync?since=persisted&timeout=30000&full_state=true",
+  assert(client.requests[1].path == "/_matrix/client/v3/sync?since=persisted&timeout=30000" .. RESTART_STATE,
     "restart must resume the stored cursor without running a baseline")
   relay:stop()
 
@@ -873,7 +876,7 @@ local function test_state_restart_corruption_and_processed_cap()
   local legacy = relay_module.new({ config_path = config_path, matrix = client, deliver = function() return true end })
   assert(legacy:state().since == "legacy-cursor", "old cursor-only state must remain readable")
   legacy:start()
-  assert(client.requests[2].path == "/_matrix/client/v3/sync?since=legacy-cursor&timeout=30000&full_state=true")
+  assert(client.requests[2].path == "/_matrix/client/v3/sync?since=legacy-cursor&timeout=30000" .. RESTART_STATE)
   legacy:stop()
 
   local bad = assert(io.open(state_path, "wb")); bad:write("{broken"); bad:close()
@@ -900,6 +903,8 @@ local function test_state_restart_corruption_and_processed_cap()
 end
 
 local function test_pending_delivery_retries_safely_after_restart()
+  -- Same filtered restart snapshot as test_state_restart_corruption_and_processed_cap.
+  local RESTART_STATE = "&full_state=true&filter=%7B%22room%22%3A%7B%22state%22%3A%7B%22types%22%3A%5B%22m.room.create%22%2C%22m.room.power_levels%22%5D%2C%22rooms%22%3A%5B%22%21room%3Aexample.org%22%5D%7D%7D%7D"
   local dir, config_path = fixture()
   local first_client, second_client = scripted_client(), scripted_client()
   local successes = 0
@@ -925,7 +930,7 @@ local function test_pending_delivery_retries_safely_after_restart()
   assert(successes == 1, "restart must retry the pending envelope")
   assert(restarted:state().pending["$pending-restart"] == nil)
   assert(restarted:state().processed["$pending-restart"])
-  assert(second_client.requests[1].path == "/_matrix/client/v3/sync?since=s1&timeout=30000&full_state=true")
+  assert(second_client.requests[1].path == "/_matrix/client/v3/sync?since=s1&timeout=30000" .. RESTART_STATE)
   second_client:complete(1, { json = { next_batch = "s2", rooms = { join = {
     ["!room:example.org"] = { timeline = { events = {
       { type = "m.room.message", event_id = "$pending-restart", sender = "@alice:example.org",
@@ -5654,14 +5659,16 @@ rx_tests = {
         and rx_find(delivered, "$home-unchanged"), "direct, followed and HOME delivery unchanged")
       relay:stop()
       relay, client, delivered = rx_relay(path)
-      assert(client.requests[1].path:find("full_state=true", 1, true), "restart requests a full state snapshot")
+      assert(client.requests[1].path:find("full_state=true&filter=", 1, true)
+        and client.requests[1].path:find("m.room.power_levels", 1, true),
+        "restart requests a full state snapshot filtered to permission state")
       sync({ mention("$restart-unknown") })
       assert(not rx_find(delivered, "$restart-unknown"), "restart never trusts persisted privilege")
       sync({ mention("$restart-known") }, { power(50, 50) })
       assert(rx_find(delivered, "$restart-known"), "fresh permission state enables notification")
       relay:stop()
       relay:start()
-      assert(client.requests[#client.requests].path:find("full_state=true", 1, true),
+      assert(client.requests[#client.requests].path:find("full_state=true&filter=", 1, true),
         "stop/start also clears cached permission and fetches full state")
       sync({ mention("$same-instance-restart") })
       assert(not rx_find(delivered, "$same-instance-restart"), "stop/start cannot retain permission")
