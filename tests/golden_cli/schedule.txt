@@ -6,7 +6,7 @@ stderr:
 Usage: remuda butler schedule list
        remuda butler schedule add NAME "M H * * *" TEXT [--to SESSION]
        remuda butler schedule rm NAME
-TEXT may be - to read it from stdin. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
+TEXT may be - to read it from stdin. Members can target only themselves and remove only schedules they created; the operator can manage any target. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
 actions:
 state: (no file)
 
@@ -18,7 +18,7 @@ stderr:
 Usage: remuda butler schedule list
        remuda butler schedule add NAME "M H * * *" TEXT [--to SESSION]
        remuda butler schedule rm NAME
-TEXT may be - to read it from stdin. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
+TEXT may be - to read it from stdin. Members can target only themselves and remove only schedules they created; the operator can manage any target. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
 actions:
 state: (no file)
 
@@ -30,7 +30,7 @@ stderr:
 Usage: remuda butler schedule list
        remuda butler schedule add NAME "M H * * *" TEXT [--to SESSION]
        remuda butler schedule rm NAME
-TEXT may be - to read it from stdin. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
+TEXT may be - to read it from stdin. Members can target only themselves and remove only schedules they created; the operator can manage any target. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
 actions:
 state: (no file)
 
@@ -42,7 +42,7 @@ stderr:
 Usage: remuda butler schedule list
        remuda butler schedule add NAME "M H * * *" TEXT [--to SESSION]
        remuda butler schedule rm NAME
-TEXT may be - to read it from stdin. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
+TEXT may be - to read it from stdin. Members can target only themselves and remove only schedules they created; the operator can manage any target. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
 actions:
 state: (no file)
 
@@ -63,7 +63,7 @@ stderr:
 Usage: remuda butler schedule list
        remuda butler schedule add NAME "M H * * *" TEXT [--to SESSION]
        remuda butler schedule rm NAME
-TEXT may be - to read it from stdin. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
+TEXT may be - to read it from stdin. Members can target only themselves and remove only schedules they created; the operator can manage any target. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
 actions:
 state: (no file)
 
@@ -75,7 +75,7 @@ stderr:
 Usage: remuda butler schedule list
        remuda butler schedule add NAME "M H * * *" TEXT [--to SESSION]
        remuda butler schedule rm NAME
-TEXT may be - to read it from stdin. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
+TEXT may be - to read it from stdin. Members can target only themselves and remove only schedules they created; the operator can manage any target. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
 actions:
 state: (no file)
 
@@ -87,7 +87,7 @@ stderr:
 Usage: remuda butler schedule list
        remuda butler schedule add NAME "M H * * *" TEXT [--to SESSION]
        remuda butler schedule rm NAME
-TEXT may be - to read it from stdin. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
+TEXT may be - to read it from stdin. Members can target only themselves and remove only schedules they created; the operator can manage any target. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
 actions:
 state: (no file)
 
@@ -99,7 +99,7 @@ stderr:
 Usage: remuda butler schedule list
        remuda butler schedule add NAME "M H * * *" TEXT [--to SESSION]
        remuda butler schedule rm NAME
-TEXT may be - to read it from stdin. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
+TEXT may be - to read it from stdin. Members can target only themselves and remove only schedules they created; the operator can manage any target. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
 actions:
 state: (no file)
 
@@ -120,7 +120,7 @@ stderr:
 Usage: remuda butler schedule list
        remuda butler schedule add NAME "M H * * *" TEXT [--to SESSION]
        remuda butler schedule rm NAME
-TEXT may be - to read it from stdin. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
+TEXT may be - to read it from stdin. Members can target only themselves and remove only schedules they created; the operator can manage any target. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
 actions:
 state: (no file)
 
@@ -141,7 +141,7 @@ stderr:
 Usage: remuda butler schedule list
        remuda butler schedule add NAME "M H * * *" TEXT [--to SESSION]
        remuda butler schedule rm NAME
-TEXT may be - to read it from stdin. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
+TEXT may be - to read it from stdin. Members can target only themselves and remove only schedules they created; the operator can manage any target. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
 actions:
 state: (no file)
 
@@ -153,7 +153,7 @@ stderr:
 Usage: remuda butler schedule list
        remuda butler schedule add NAME "M H * * *" TEXT [--to SESSION]
        remuda butler schedule rm NAME
-TEXT may be - to read it from stdin. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
+TEXT may be - to read it from stdin. Members can target only themselves and remove only schedules they created; the operator can manage any target. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
 actions:
 state: (no file)
 
@@ -165,7 +165,7 @@ stderr:
 Usage: remuda butler schedule list
        remuda butler schedule add NAME "M H * * *" TEXT [--to SESSION]
        remuda butler schedule rm NAME
-TEXT may be - to read it from stdin. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
+TEXT may be - to read it from stdin. Members can target only themselves and remove only schedules they created; the operator can manage any target. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
 actions:
 state: (no file)
 
@@ -177,7 +177,7 @@ stderr:
 Usage: remuda butler schedule list
        remuda butler schedule add NAME "M H * * *" TEXT [--to SESSION]
        remuda butler schedule rm NAME
-TEXT may be - to read it from stdin. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
+TEXT may be - to read it from stdin. Members can target only themselves and remove only schedules they created; the operator can manage any target. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
 actions:
 state: (no file)
 
@@ -189,7 +189,7 @@ stderr:
 Usage: remuda butler schedule list
        remuda butler schedule add NAME "M H * * *" TEXT [--to SESSION]
        remuda butler schedule rm NAME
-TEXT may be - to read it from stdin. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
+TEXT may be - to read it from stdin. Members can target only themselves and remove only schedules they created; the operator can manage any target. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
 actions:
 state: (no file)
 
@@ -201,7 +201,7 @@ stderr:
 Usage: remuda butler schedule list
        remuda butler schedule add NAME "M H * * *" TEXT [--to SESSION]
        remuda butler schedule rm NAME
-TEXT may be - to read it from stdin. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
+TEXT may be - to read it from stdin. Members can target only themselves and remove only schedules they created; the operator can manage any target. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
 actions:
 state: (no file)
 
@@ -240,7 +240,7 @@ stderr:
 Usage: remuda butler schedule list
        remuda butler schedule add NAME "M H * * *" TEXT [--to SESSION]
        remuda butler schedule rm NAME
-TEXT may be - to read it from stdin. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
+TEXT may be - to read it from stdin. Members can target only themselves and remove only schedules they created; the operator can manage any target. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
 actions:
 state: (no file)
 
@@ -261,7 +261,7 @@ stderr:
 Usage: remuda butler schedule list
        remuda butler schedule add NAME "M H * * *" TEXT [--to SESSION]
        remuda butler schedule rm NAME
-TEXT may be - to read it from stdin. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
+TEXT may be - to read it from stdin. Members can target only themselves and remove only schedules they created; the operator can manage any target. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
 actions:
 state: (no file)
 
@@ -273,7 +273,7 @@ stderr:
 Usage: remuda butler schedule list
        remuda butler schedule add NAME "M H * * *" TEXT [--to SESSION]
        remuda butler schedule rm NAME
-TEXT may be - to read it from stdin. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
+TEXT may be - to read it from stdin. Members can target only themselves and remove only schedules they created; the operator can manage any target. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
 actions:
 state: (no file)
 
@@ -285,7 +285,7 @@ stderr:
 Usage: remuda butler schedule list
        remuda butler schedule add NAME "M H * * *" TEXT [--to SESSION]
        remuda butler schedule rm NAME
-TEXT may be - to read it from stdin. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
+TEXT may be - to read it from stdin. Members can target only themselves and remove only schedules they created; the operator can manage any target. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
 actions:
 state: (no file)
 
@@ -297,7 +297,7 @@ stderr:
 Usage: remuda butler schedule list
        remuda butler schedule add NAME "M H * * *" TEXT [--to SESSION]
        remuda butler schedule rm NAME
-TEXT may be - to read it from stdin. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
+TEXT may be - to read it from stdin. Members can target only themselves and remove only schedules they created; the operator can manage any target. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
 actions:
 state: (no file)
 
@@ -309,7 +309,7 @@ stderr:
 Usage: remuda butler schedule list
        remuda butler schedule add NAME "M H * * *" TEXT [--to SESSION]
        remuda butler schedule rm NAME
-TEXT may be - to read it from stdin. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
+TEXT may be - to read it from stdin. Members can target only themselves and remove only schedules they created; the operator can manage any target. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
 actions:
 state: (no file)
 
@@ -330,7 +330,7 @@ stderr:
 Usage: remuda butler schedule list
        remuda butler schedule add NAME "M H * * *" TEXT [--to SESSION]
        remuda butler schedule rm NAME
-TEXT may be - to read it from stdin. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
+TEXT may be - to read it from stdin. Members can target only themselves and remove only schedules they created; the operator can manage any target. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
 actions:
 state: (no file)
 
@@ -360,7 +360,7 @@ stderr:
 Usage: remuda butler schedule list
        remuda butler schedule add NAME "M H * * *" TEXT [--to SESSION]
        remuda butler schedule rm NAME
-TEXT may be - to read it from stdin. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
+TEXT may be - to read it from stdin. Members can target only themselves and remove only schedules they created; the operator can manage any target. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
 actions:
 state: (no file)
 
@@ -381,7 +381,7 @@ stderr:
 Usage: remuda butler schedule list
        remuda butler schedule add NAME "M H * * *" TEXT [--to SESSION]
        remuda butler schedule rm NAME
-TEXT may be - to read it from stdin. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
+TEXT may be - to read it from stdin. Members can target only themselves and remove only schedules they created; the operator can manage any target. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
 actions:
 state: (no file)
 
@@ -393,7 +393,7 @@ stderr:
 Usage: remuda butler schedule list
        remuda butler schedule add NAME "M H * * *" TEXT [--to SESSION]
        remuda butler schedule rm NAME
-TEXT may be - to read it from stdin. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
+TEXT may be - to read it from stdin. Members can target only themselves and remove only schedules they created; the operator can manage any target. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
 actions:
 state: (no file)
 
@@ -405,7 +405,7 @@ stderr:
 Usage: remuda butler schedule list
        remuda butler schedule add NAME "M H * * *" TEXT [--to SESSION]
        remuda butler schedule rm NAME
-TEXT may be - to read it from stdin. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
+TEXT may be - to read it from stdin. Members can target only themselves and remove only schedules they created; the operator can manage any target. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
 actions:
 state: (no file)
 
@@ -417,7 +417,7 @@ stderr:
 Usage: remuda butler schedule list
        remuda butler schedule add NAME "M H * * *" TEXT [--to SESSION]
        remuda butler schedule rm NAME
-TEXT may be - to read it from stdin. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
+TEXT may be - to read it from stdin. Members can target only themselves and remove only schedules they created; the operator can manage any target. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
 actions:
 state: (no file)
 
@@ -431,22 +431,42 @@ actions:
 state: (no file)
 
 ### [agent] remuda butler "schedule" "add" "job" "0 9 * * *" "text"
-exit: 1
+exit: 0
 stdout:
-
+added schedule job. From now on this text arrives as mail from the reserved sender `schedule` at every due time, until the schedule is removed, also after restarts. The receiving agent reads it like any mail and may act on it.
 stderr:
-schedule add is operator-only. Run it from the owner's terminal; ask the owner to run it.
+
 actions:
-state: (no file)
+schedule.trace(schedule_added|job 0 9 * * * -> agent-test)
+state: {"schedules":[{"created_at":"<TS>","created_by":"agent-test","enabled":true,"last_fired":28333333,"name":"job","recipient_id":"agent-test","spec":"0 9 * * *","target":"agent-test","text":"text"}],"version":1}
 
 ### [agent] remuda butler "schedule" "rm" "nope"
 exit: 1
 stdout:
 
 stderr:
-schedule rm is operator-only. Run it from the owner's terminal; ask the owner to run it.
+no schedule named nope
 actions:
 state: (no file)
+
+### [agent] remuda butler "schedule" "rm" "legacy"
+exit: 1
+stdout:
+
+stderr:
+no schedule named legacy
+actions:
+state: {"schedules":[{"created_at":"<TS>","created_by":"operator","enabled":true,"last_fired":0,"name":"legacy","spec":"12 * * * *","target":"butler","text":"legacy text"}],"version":1}
+
+### remuda butler "schedule" "rm" "legacy"
+exit: 0
+stdout:
+removed schedule legacy
+stderr:
+
+actions:
+schedule.trace(schedule_removed|legacy)
+state: {"schedules":[],"version":1}
 
 ### [agent] remuda butler "schedule" "bogus"
 exit: 1
@@ -456,7 +476,7 @@ stderr:
 Usage: remuda butler schedule list
        remuda butler schedule add NAME "M H * * *" TEXT [--to SESSION]
        remuda butler schedule rm NAME
-TEXT may be - to read it from stdin. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
+TEXT may be - to read it from stdin. Members can target only themselves and remove only schedules they created; the operator can manage any target. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
 actions:
 state: (no file)
 
@@ -468,6 +488,6 @@ stderr:
 Usage: remuda butler schedule list
        remuda butler schedule add NAME "M H * * *" TEXT [--to SESSION]
        remuda butler schedule rm NAME
-TEXT may be - to read it from stdin. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
+TEXT may be - to read it from stdin. Members can target only themselves and remove only schedules they created; the operator can manage any target. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *.
 actions:
 state: (no file)

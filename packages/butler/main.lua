@@ -1262,6 +1262,7 @@ remuda._butler_schedule_env = {
   path = mail_root and mail_root .. "/schedules.json",
   trace = _butler_trace,
   resolve = resolve,
+  resolve_id = function(alias) local agent = bus.agents[alias]; return agent and agent.id end,
   unread = function(alias, message_id) return mail.is_unread(mail_id(alias, false), message_id) end,
 }
 
