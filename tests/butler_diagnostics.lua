@@ -51,4 +51,16 @@ dofile('packages/butler/diagnostics.lua')
 assert(#remuda._butler_diagnostics.snapshot().events == 200)
 remuda._butler_diagnostics_state = nil
 assert(#dofile('packages/butler/diagnostics.lua').snapshot().events == 0)
+local labels = remuda._butler_diagnostics
+assert(labels.record('notice', 'observed', 'heuristic_completion', 'synthetic'))
+local notice = labels.snapshot({subsystem='notice'})
+assert(notice.events[1].outcome == 'observed' and notice.events[1].reason == 'heuristic_completion')
+for _, rendered in ipairs({labels.format(notice), assert(labels.command({'diagnostics-list','--subsystem','notice'}))}) do
+  assert(rendered:find('observed',1,true) and rendered:find('heuristic_completion',1,true))
+  assert(not rendered:find('delivered',1,true) and not rendered:find('delivery_ok',1,true))
+end
+if json then
+  local row = json.decode(assert(labels.command({'diagnostics-list','--json','--subsystem','notice'}))).events[1]
+  assert(row.outcome == 'observed' and row.reason == 'heuristic_completion')
+end
 print('diagnostics boundedness, privacy, query and CLI: ok')

@@ -4,12 +4,12 @@ local M = {}
 local CAPACITY, PAGE_SIZE = 200, 12
 local subsystems = { mail = true, matrix = true, notice = true, control = true }
 local levels = { error = 'error', delivered = 'info', filtered = 'info', deferred = 'warn',
-  retry = 'warn', converted = 'info', routed = 'info', stopped = 'warn', submitted = 'info' }
+  retry = 'warn', converted = 'info', routed = 'info', stopped = 'warn', submitted = 'info', observed = 'info' }
 local reasons = {}
 for word in ('storage_prepare body_write envelope_write inbox_append envelope_read read_state_write '
   .. 'conversion_failed conversion_ok routing_failed routing_accepted delivery_failed delivery_ok '
   .. 'delivery_deferred filter_policy retry_scheduled prompt_busy prompt_policy heuristic_unknown_choice '
-  .. 'heuristic_dialog capture_unavailable session_unavailable session_replaced detection_unavailable write_returned'):gmatch('%S+') do
+  .. 'heuristic_dialog heuristic_completion capture_unavailable session_unavailable session_replaced detection_unavailable write_returned'):gmatch('%S+') do
   reasons[word] = true
 end
 local state = remuda._butler_diagnostics_state or {

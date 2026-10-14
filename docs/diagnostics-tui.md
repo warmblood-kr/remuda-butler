@@ -28,6 +28,24 @@ Retention is bounded and daemon-local; restart clears recent diagnostics.
 Absence of records means no retained observation, not proof of healthy delivery.
 No historical inbox bodies are scanned to populate the viewer.
 
+## Subsystem success semantics
+
+Success labels describe the subsystem boundary, never agent receipt or consumption:
+
+- `mail delivered/delivery_ok` means inbox acceptance. With disk storage configured,
+  body/envelope writes and inbox-log append succeeded; without disk paths it is
+  in-memory acceptance. The durable inbox deposit is separate from typing a notice.
+  This event does not promise fsync durability or that an agent read the message.
+- `matrix delivered/delivery_ok` means the configured delivery callback returned
+  a non-nil result without throwing. It establishes callback acceptance, not
+  downstream agent receipt, consumption, or a Matrix read acknowledgment.
+- `notice observed/heuristic_completion` means the existing composer/screen/busy
+  checks completed notice recovery. In particular, `verify_existing` accepts an
+  EMPTY composer alone. This is heuristic observed completion/submission, not
+  proof the notice reached or was consumed by an agent. The same labels appear
+  in the TUI, text CLI and JSON. Notice queue/retry behavior is unchanged.
+- `control submitted/write_returned` means the core write returned, not consumption.
+
 The `heuristic_unknown_choice` record means the Lua control heuristic stopped acting. It
 does not mean the agent process exited, finished work, or is safe to resume.
 Actual process liveness continues to come from the existing session registry.

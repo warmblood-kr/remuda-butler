@@ -744,7 +744,8 @@ notice_recovery_error = function(session, state, reason)
   return false
 end
 local function complete_notice_recovery(session, state)
-  diagnostic("delivered", "delivery_ok", session)
+  -- Composer/screen/busy observations establish heuristic completion only.
+  diagnostic("observed", "heuristic_completion", session)
   local pending = bus.notices[session]
   if pending then pending.diagnostic_reason = nil end
   local agent = bus.agents[session]
