@@ -62,6 +62,7 @@ $XDG_DATA_HOME/remuda/extensions/butler/
   packages/butler/mail.lua
   packages/butler/telemetry.lua
   packages/butler/agents/*.lua
+  packages/butler/session_status/*.lua
 ```
 
 The `extension.toml` manifest is the installation contract. Remuda resolves it
@@ -87,7 +88,8 @@ until the generic external CLI/client contract is implemented in Remuda core.
 
 ## Contents
 
-- `packages/butler/`: Butler core, mail, telemetry, and agent adapters.
+- `packages/butler/`: Butler core, mail, telemetry, agent adapters, and
+  lazily loaded per-agent session status detectors.
 - `packages/butler/matrix.lua`, `matrix_request.lua`, `matrix_read.lua`,
   `matrix_write.lua`, and `matrix_relay.lua`: the Matrix relay and command
   composites. See the [Matrix command and configuration

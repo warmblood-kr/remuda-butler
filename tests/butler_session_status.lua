@@ -47,6 +47,15 @@ local sessions_config = {
   bus = bus, mail = { unread = function() return 0 end }, json_field = noop,
   registered_agent_kind = function(kind) return entries[kind] end, call_callback = call_callback,
 }
+local detector_loads = {}
+sessions_config.load_status_detector = function(kind)
+  detector_loads[kind] = (detector_loads[kind] or 0) + 1
+  local path = "packages/butler/session_status/" .. kind .. ".lua"
+  local file = io.open(path, "r")
+  if not file then error("detector unavailable: " .. kind) end
+  file:close()
+  dofile(path)
+end
 remuda._butler_sessions_config = sessions_config
 local hooks = {}
 local context = {}
@@ -86,10 +95,16 @@ check(status_of("claude", "some other screen"), "other", "claude unrecognised sc
 check(status_of("codex", "Working\nesc to interrupt\n"), "working", "codex working")
 check(status_of("codex", "Ask Codex to do anything\n"), "idle", "codex idle")
 check(status_of("codex", "Update available\n1. Update now\n2. Skip\n"), "needs you", "codex update dialog")
+assert(detector_loads.claude == 1 and detector_loads.codex == 1,
+  "Claude and Codex detectors load on first use and are reused")
 check(status_of("monocle", "busy output\n"), "other", "monocle is never working")
 check(status_of("monocle", "❯ \n"), "other", "monocle ready is still other")
 entries.gemini = entries.claude
 check(status_of("gemini", "esc to interrupt"), "other", "unknown kind with probes")
+assert(detector_loads.monocle == 1 and detector_loads.gemini == 1,
+  "unsupported and unknown kinds are attempted once and fall back")
+check(status_of("../claude", claude_idle), "other", "invalid kind cannot select a module path")
+assert(detector_loads["../claude"] == nil, "invalid kind never reaches the dynamic loader")
 check(status_of("claude", function() error("esc to interrupt") end), "other", "capture error")
 check(status_of("claude", nil), "other", "capture returns nothing")
 
