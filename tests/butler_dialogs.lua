@@ -148,6 +148,19 @@ assert(attempt(remuda.key, 'codex', '1') == true, 'genuine current model picker 
 operation.phase = 'effort'
 screens.codex = 'Select Reasoning Level for GPT-6-Luna\n\n  1. Medium (default)\n› 2. High\n\nenter default · s session · esc back'
 assert(attempt(remuda.key, 'codex', 's') == true, 'genuine current target effort picker is owned')
+-- Codex 0.162 adds Max on Luna and Ultra on Sol. The whole visible
+-- option block must validate even when the operation targets Low.
+operation.effort = 'low'
+screens.codex = 'Select Reasoning Level for GPT-6-Luna\n\n› 1. Low\n  2. Medium (default)\n  3. High\n  4. Extra high\n  5. Max\n\nenter default · s session · esc back'
+assert(attempt(remuda.key, 'codex', 's') == true, 'Max row must not block owned Low selection')
+operation.phase = 'escape'
+assert(attempt(remuda.key, 'codex', 'ESC') == true, 'known Max picker permits existing bounded cleanup')
+screens.codex = screens.codex:gsub('5. Max', '5. Unknown effort')
+assert(not pcall(remuda.key, 'codex', 'ESC'), 'unknown effort stays fail closed even during cleanup')
+operation.phase, operation.model, operation.effort = 'effort', 'gpt-6.1-sol', 'ultra'
+screens.codex = 'Select Reasoning Level for GPT-6.1-Sol\n\n  1. Low\n  2. Max\n› 3. Ultra\n\nenter default · s session · esc back'
+assert(attempt(remuda.key, 'codex', 's') == true, 'owned Ultra restore is supported')
+operation.model, operation.effort = 'gpt-6-luna', 'high'
 screens.codex = 'Select Reasoning Level for GPT-5.6-Sol\n\n  1. Medium\n› 2. High\n\nenter default · s session · esc back'
 assert(not pcall(remuda.key, 'codex', 's'), 'a different target model never inherits picker ownership')
 operation.phase = 'model'

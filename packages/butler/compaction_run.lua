@@ -548,6 +548,7 @@ function remuda._butler_compaction_execute(session_name, force)
         _butler_trace("settings_model_verified", detail .. " model=" .. tostring(actual))
       end
     end
+    local had_restore = state.restore_pending ~= nil
     release_lock()
     remuda._butler_compaction_clear_failures(state, event ~= "restored_after_dialog")
     state.cooldown_ticks = config.cooldown_ticks
@@ -559,11 +560,13 @@ function remuda._butler_compaction_execute(session_name, force)
     state.restore_pending_exhausted = nil
     state.settings_model_alert_sent = nil
     clear_legacy_restore_state(state)
-    local cleared, clear_err = clear_compaction_restore(compaction_agent_key(agent, session_name), session_name)
-    if not cleared then
-      _butler_trace("restore_record_clear_failed", detail .. " reason=" .. tostring(clear_err))
-      pcall(remuda._butler_send, session_name, agent.parent or "butler",
-        "model was restored, but its recovery record could not be cleared")
+    if had_restore then
+      local cleared, clear_err = clear_compaction_restore(compaction_agent_key(agent, session_name), session_name)
+      if not cleared then
+        _butler_trace("restore_record_clear_failed", detail .. " reason=" .. tostring(clear_err))
+        pcall(remuda._butler_send, session_name, agent.parent or "butler",
+          "model was restored, but its recovery record could not be cleared")
+      end
     end
     _butler_trace(event or "verified", detail)
     pcall(remuda._butler_notice_compacted, session_name)
@@ -584,7 +587,9 @@ function remuda._butler_compaction_execute(session_name, force)
   end
   local function send_command(command)
     local sent, status = pcall(remuda.type_text, session_name, command, config.input_settle)
-    if not sent then fail("compaction command failed: " .. tostring(status)); return false end
+    if not sent or status == false then
+      fail("compaction command failed: " .. tostring(status)); return false
+    end
     -- The status ("submitted" or "unverified"; nil on an older core), else true.
     return status or true
   end
@@ -798,7 +803,9 @@ function remuda._butler_compaction_execute(session_name, force)
       wait_for("codex-picker-escape", function(screen) return picker_open(screen) ~= nil end, function(screen)
         local open = picker_open(screen)
         if open == "closed" then on_abort(reason); return end
-        if escapes >= 2 or not pcall(remuda.key, session_name, "ESC") then left_open(); return end
+        if escapes >= 2 then left_open(); return end
+        local pressed, result = pcall(remuda.key, session_name, "ESC")
+        if not pressed or result == false then left_open(); return end
         wait_for("codex-" .. open .. "-picker-closed", function(next_screen)
           local now = picker_open(next_screen)
           return now ~= nil and now ~= open
@@ -808,8 +815,11 @@ function remuda._butler_compaction_execute(session_name, force)
     local function abort(reason) escape(reason, 0) end
     local function key(name, what)
       local pressed, press_err = pcall(remuda.key, session_name, name)
-      if not pressed then abort(what .. " key failed: " .. tostring(press_err)) end
-      return pressed
+      if not pressed or press_err == false then
+        abort(what .. " key failed: " .. tostring(press_err))
+        return false
+      end
+      return true
     end
     if not send_command("/model") then return end
     -- The row, or the same rows on 3 captures (not a half-painted list).
@@ -968,6 +978,24 @@ function remuda._butler_compaction_execute(session_name, force)
         or remuda._butler_compaction_is_unknown_dialog(screen) then
       return "restore_pending"
     end
+    if agent.kind == "codex" then
+      local prior, prior_effort = restore_pending:match("^codex:(%S+) (%S+)$")
+      local current, current_effort = codex_footer(screen)
+      if prior and prior_effort and current == prior and current_effort == prior_effort then
+        forget_prior()
+        return "model_already_restored"
+      end
+      -- A legacy record is not permission to overwrite a later user choice.
+      -- Only the old helper's temporary model can enter automatic restoration.
+      if current ~= CODEX_LOWER_MODEL or current_effort ~= prior_effort then
+        if not state.restore_pending_failure_notified then
+          state.restore_pending_failure_notified = true
+          pcall(remuda._butler_send, session_name, agent.parent or "butler",
+            "Codex model restore needs owner review; current model/effort differs from the compaction target. No input was sent.")
+        end
+        return "restore_pending"
+      end
+    end
     remuda._butler_compaction_prepare_restore(state)
     owner_state.compaction_fleet_active = state_key
     state.restore_pending_attempts = (tonumber(state.restore_pending_attempts) or 0) + 1
@@ -1028,30 +1056,11 @@ function remuda._butler_compaction_execute(session_name, force)
     if not send_command("/model sonnet") then return "failed" end
     wait_for_model("model-sonnet", "sonnet", before, telemetry_on_sonnet, compact)
   else
-    local _, screen = pcall(remuda.capture, session_name)
-    local current, current_effort = codex_footer(screen)
-    if not current then
-      _butler_trace("model_switch_skipped", detail .. " reason=footer_unreadable")
-      compact()
-    elseif current == CODEX_LOWER_MODEL then
-      _butler_trace("model_switch_skipped", detail .. " reason=already_lower")
-      compact()
-    else
-      codex_prior = "codex:" .. current .. " " .. current_effort
-      state.restore_pending = codex_prior
-      state.restore_pending_attempts = 0
-      state.restore_pending_exhausted = nil
-      local persisted, persist_err = persist_compaction_restore(compaction_agent_key(agent, session_name), codex_prior)
-      if not persisted then
-        codex_prior, state.restore_pending, state.restore_pending_attempts = nil, nil, nil
-        fail("could not persist model restore state: " .. tostring(persist_err))
-        return "failed"
-      end
-      codex_select(CODEX_LOWER_MODEL, current_effort, compact, function(reason)
-        forget_prior()
-        fail(reason)
-      end)
-    end
+    -- Keep the session's intended model and effort. Opening /model here used
+    -- to leave unattended sessions in a picker when Codex added effort rows.
+    -- /compact needs no model change; legacy durable restores above still run.
+    _butler_trace("model_switch_skipped", detail .. " reason=preserve_session_model")
+    compact()
   end
   return "started"
 end
