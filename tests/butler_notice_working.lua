@@ -29,7 +29,7 @@ remuda = {
   },
   _butler_chooser = { known_startup_modal = function() return remuda._test_modal() end },
   _test_modal = function() return false end,
-  _butler_agent_startup = { claude = {} },
+  _butler_agent_startup = { claude = {}, codex = { placeholders = { "Ask Codex to do anything" } } },
   _butler_notice_clock = function() return now end,
   _butler_session_trace = function() end,
   ls = function() return { { name = "lead", alive = true, attached = false } } end,
@@ -75,4 +75,10 @@ assert(bus.notices.lead, "deferred notice stays queued")
 assert(run({ working, draft, draft }, { 4 }) == 0, "draft composer is not typed over")
 -- 5. approval dialog stays: nothing typed.
 assert(run({ approval, approval, approval }, { 4 }) == 0, "approval dialog defers")
+-- 6. Codex steers mid-turn (not a queue): a working Codex pane is deferred, never typed.
+local codex = read(FX .. "codex-0.162.1-working-empty.txt")
+bus.agents.lead.kind = "codex"
+assert(run({ codex, codex, codex }, { 4 }) == 0, "working Codex+EMPTY defers without type_text")
+assert(bus.notices.lead, "Codex notice stays queued")
+bus.agents.lead.kind = "claude"
 print("ok")

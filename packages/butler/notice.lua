@@ -519,9 +519,20 @@ notice_recovery_error = function(session, state, reason)
   if pending and not alerts.exhausted then
     alerts.exhausted = true
     -- Reminders must not re-arm this notice; remind_unread_notices reports hourly instead.
-    local ids = {}
-    for _, id in ipairs(state.message_ids or {}) do ids[#ids + 1] = id end
-    bus.notice_stuck[session] = { ids = ids, since = notice_now(), reason = reason }
+    -- A later exhaustion merges into the open record so older unread IDs and the
+    -- report throttle survive.
+    local stuck = bus.notice_stuck[session]
+    local agent_id = bus.agents[session] and bus.agents[session].id
+    if not stuck or stuck.agent_id ~= agent_id then
+      stuck = { ids = {}, since = notice_now(), agent_id = agent_id }
+      bus.notice_stuck[session] = stuck
+    end
+    local known = {}
+    for _, id in ipairs(stuck.ids) do known[id] = true end
+    for _, id in ipairs(state.message_ids or {}) do
+      if not known[id] then stuck.ids[#stuck.ids + 1] = id end
+    end
+    stuck.reason = reason
     if session ~= "butler" then
       local by_sender = {}
       for _, id in ipairs(state.message_ids or {}) do
@@ -635,7 +646,18 @@ local function complete_notice_recovery(session, state)
   bus.notice_recoveries[session] = nil
   bus.notice_retry_reasons[session] = nil
   bus.notice_failure_alerts[session] = nil
-  bus.notice_stuck[session] = nil
+  local stuck = bus.notice_stuck[session]
+  if stuck then
+    -- Close only what this delivery covered; other stuck mail keeps its record and throttle.
+    local delivered = {}
+    for _, id in ipairs(state.message_ids or {}) do delivered[id] = true end
+    local rest = {}
+    for _, id in ipairs(stuck.ids) do
+      if not delivered[id] then rest[#rest + 1] = id end
+    end
+    stuck.ids = rest
+    if #rest == 0 then bus.notice_stuck[session] = nil end
+  end
   clear_notice_fallbacks(session, state.message_ids)
   return true
 end
@@ -702,9 +724,12 @@ local function tick_notice_recovery(session, state)
     return notice_recovery_error(session, state, "recovery timed out after 20 seconds")
   end
   local observing_submit = state.phase == "verify_notice" or state.phase == "verify_existing"
-  -- A working agent only queues the notice for its next turn (probed on Claude
-  -- 2.1.300 and Codex 0.162.1), so the probe may run while busy; the human gate stays.
-  if not recovery_human_safe(session, observing_submit or state.phase == "probe") then return false end
+  -- Claude 2.1.300 queues text typed mid-turn for the next turn (probed), so its probe may
+  -- run while busy. Codex 0.162.1 STEERS instead (submitted after the next tool call, can
+  -- redirect a running task), so busy Codex keeps the old defer until queue semantics are verified.
+  local agent_kind = bus.agents[session] and bus.agents[session].kind
+  local probe_busy_ok = state.phase == "probe" and agent_kind == "claude"
+  if not recovery_human_safe(session, observing_submit or probe_busy_ok) then return false end
   local busy = false
   if remuda.session then
     local checked, value = pcall(function()
@@ -726,7 +751,7 @@ local function tick_notice_recovery(session, state)
   if state.phase == "probe" then
     -- An EMPTY composer needs no stable screen: a working pane animates. The
     -- policy inside begin_notice_submit re-checks modal and composer before typing.
-    if decision ~= "EMPTY" then
+    if decision ~= "EMPTY" or not probe_busy_ok then
       if state.last_screen == normalized then state.stable = (state.stable or 0) + 1
       else state.last_screen, state.stable = normalized, 1 end
       if state.stable < 2 then return false end
@@ -1005,6 +1030,7 @@ end
 local function remind_unread_notices(alias, agent, now)
   if not agent.id or bus.pending_tasks[alias] then return end
   local stuck = bus.notice_stuck[alias]
+  if stuck and stuck.agent_id ~= agent.id then bus.notice_stuck[alias], stuck = nil, nil end -- relaunched member
   if stuck then return report_stuck_notice(alias, agent, stuck, now) end
   local due = bus.notice_reminder_at[alias]
   if due and now < due then return end
@@ -1259,4 +1285,5 @@ remuda._butler_notice = {
   notice_recovery_error = notice_recovery_error,
   deliver_notice = deliver_notice,
   remind_unread_notices = remind_unread_notices,
+  complete_notice_recovery = complete_notice_recovery,
 }

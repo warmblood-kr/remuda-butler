@@ -56,4 +56,27 @@ assert(#sent == to_sender + 2, "one report per hour")
 unread = false
 N.remind_unread_notices("lead", agent, now + 8000)
 assert(bus.notice_stuck.lead == nil and #sent == to_sender + 2, "read mail closes the stuck record")
+
+-- Overlapping sets: a second exhaustion merges IDs and keeps the report throttle.
+unread = true
+bus.notice_stuck.lead, bus.notice_failure_alerts.lead = nil, nil
+bus.notice_sent_at = { ["lead-id"] = { m1 = now, m2 = now } }
+exhaust() -- m1
+local mark = #sent
+N.remind_unread_notices("lead", agent, now)
+assert(#sent == mark + 1, "report for m1")
+bus.notice_failure_alerts.lead = nil -- a new queue resets the alerts
+bus.notices.lead = { count = 1, message_order = { "m2" }, delivery_attempts = 4 }
+N.notice_recovery_error("lead", { message_ids = { "m2" }, draft = "" }, "recovery timed out")
+local stuck = bus.notice_stuck.lead
+assert(#stuck.ids == 2 and stuck.reported_at, "ids merged and reported_at kept")
+local after_merge = #sent
+N.remind_unread_notices("lead", agent, now + 1)
+assert(#sent == after_merge, "no second leader report within the hour after replacement")
+-- An unrelated successful delivery closes only its own ID.
+bus.notices.lead = { count = 1, message_order = { "m2" } }
+N.complete_notice_recovery("lead", { message_ids = { "m2" } })
+assert(bus.notice_stuck.lead and #bus.notice_stuck.lead.ids == 1 and bus.notice_stuck.lead.ids[1] == "m1",
+  "delivering m2 keeps m1 stuck")
+assert(bus.notice_stuck.lead.reported_at == stuck.reported_at, "throttle survives")
 print("ok")
