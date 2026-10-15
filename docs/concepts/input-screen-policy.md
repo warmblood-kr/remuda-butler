@@ -5,6 +5,25 @@ The screen gate is independent of caller authorization, session identity,
 instance fencing, workflow ownership, approval policy, and required write audits.
 Those restrictions continue to apply.
 
+Owner-approved prepared text uses its own admission policy rather than the
+unsolicited mail-notice requirement for a recognized empty composer. Unknown
+or unavailable rendering allows approved text; a positively parsed draft,
+current known modal, recent attached human input, conflicting task workflow,
+unavailable session or changed instance still refuses. On legacy cores without
+human_idle, the independent attached-human stable-pause guard remains. Refusals
+report these reasons instead of labeling every case pane_busy. Neither recent
+output nor an active agent turn establishes that the composer cannot accept
+input. Existing submission semantics are unchanged; no extra Return is sent.
+For approved text only, generic menu geometry in the last prompt region is
+uncertain unless an independent current composer boundary or recognized footer
+establishes a draft. A numbered prefix alone never grants input. Historical or
+quoted menus cannot erase a later current draft. Borderless menu-shaped draft
+text is inherently indistinguishable from an unknown chooser and is allowed
+under the owner's explicit unknown=allow decision; a bounded numbered draft
+still blocks. Unsolicited notice policy remains unchanged.
+The durable one-shot marker is followed by another identity/admission check;
+refusal after that marker is terminal and cannot replay approved bytes.
+
 `packages/butler/dialogs.lua` gates key/type_text/send. It captures again after
 its before-write audit. Missing/replaced sessions block; failed/malformed
 captures and classifier errors are unknown screens. A previous screen blocker
