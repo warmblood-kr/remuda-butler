@@ -270,16 +270,23 @@ local function current_composer_evidence(kind, screen)
     end
   end
   if not prompt_at then return false, "" end
-  local current = table.concat(lines, "\n", prompt_at)
+  local current_rows = {}
+  for i = prompt_at, #lines do
+    current_rows[#current_rows + 1] = lines[i]:gsub("^%s*│%s*", ""):gsub("│%s*$", "")
+  end
+  local current = table.concat(current_rows, "\n")
   local before = (lines[prompt_at - 1] or ""):gsub("^%s+", "")
-  local top = before:match("^─") or (before:sub(1, 3) == "╭" or before:sub(1, 3) == "┌")
+  local top = before:match("^─")
   for i = prompt_at + 1, #lines do
     local rest = lines[i]:gsub("^%s+", "")
     if rest:match("^%? for shortcuts")
         or (kind == "codex" and rest:lower():find("context left", 1, true))
         or (kind == "claude" and (rest:find("auto mode on", 1, true)
           or rest:find("shift+tab to cycle", 1, true))) then return true, current end
-    if rest:match("^─") or (rest:sub(1, 3) == "╰" or rest:sub(1, 3) == "└") then return not not top, current end
+    if rest:match("^─") or (rest:sub(1, 3) == "╰" or rest:sub(1, 3) == "└") then
+      if top then return true, current end
+      -- A generic enclosing box is menu geometry, not composer evidence.
+    end
   end
   return false, current
 end
