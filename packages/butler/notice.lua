@@ -270,16 +270,31 @@ local function current_composer_evidence(kind, screen)
     end
   end
   if not prompt_at then return false, false end
-  local before = (lines[prompt_at - 1] or ""):gsub("^%s+", "")
+  local option_start, preceding_options = prompt_at, 0
+  local selected_row = lines[prompt_at]:gsub("^%s+", ""):gsub("^│%s*", "")
+  for _, glyph in ipairs(PROMPT_GLYPHS) do
+    if selected_row:sub(1, #glyph) == glyph then
+      selected_row = selected_row:sub(#glyph + 1):gsub("^%s+", "")
+      break
+    end
+  end
+  if selected_row:match("^%d+[%.)]%s*%S") then
+    for i = prompt_at - 1, 1, -1 do
+      local rest = lines[i]:gsub("^%s+", ""):gsub("^│%s*", "")
+      if not rest:match("^%d+[%.)]%s*%S") then break end
+      preceding_options, option_start = preceding_options + 1, i
+    end
+  end
+  local before = (lines[option_start - 1] or ""):gsub("^%s+", "")
   local top = before:match("^─")
   local boxed = false
-  for i = prompt_at - 1, 1, -1 do
+  for i = option_start - 1, 1, -1 do
     local rest = lines[i]:gsub("^%s+", "")
     local first = rest:sub(1, 3)
     if first == "╭" or first == "┌" or first == "╔" then boxed = true; break end
     if first ~= "│" then break end
   end
-  local bounded, closed_box, options, selected_option = false, false, 0, false
+  local bounded, closed_box, options, selected_option = false, false, preceding_options, false
   for i = prompt_at, #lines do
     local rest = lines[i]:gsub("^%s+", ""):gsub("^│%s*", ""):gsub("│%s*$", "")
     local selected = false

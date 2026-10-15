@@ -57,6 +57,14 @@ local long_menu='Choose theme\n› 1. Light'
 for i=2,10 do long_menu=long_menu..'\n  '..i..'. Other' end
 long_menu=long_menu..'\nEnter to choose'
 check(long_menu,true)
+local selected_last='Choose theme\n  1. Light\n› 2. Dark\nEnter to choose'
+local selected_middle='Choose theme\n  1. Light\n› 2. Dark\n  3. Blue\nEnter to choose'
+check(selected_last,true)
+check(selected_middle,true)
+check('────────────────────\n  1. Light\n› 2. Dark\n────────────────────',false,'composer_nonempty')
+check(selected_last..'\n? for shortcuts',false,'composer_nonempty')
+check(selected_last..'\n› actual draft',false,'composer_nonempty')
+
 check('────────────────────\n'..long_menu:gsub('Choose theme\n','')..'\n────────────────────',false,'composer_nonempty')
 check(long_menu..'\n› actual draft',false,'composer_nonempty')
 check(unnumbered..'\n› actual draft',false,'composer_nonempty')
