@@ -2,6 +2,7 @@
 -- remove its own schedules. An outside operator retains management of all.
 local schedule = assert(remuda.butler and remuda.butler.schedule,
   "load butler/schedule before butler/schedule_cli")
+local parse_cli = assert(remuda.cli and remuda.cli.parse, "Butler CLI requires remuda.cli.parse; upgrade Remuda")
 local M = {}
 
 local USAGE = "Usage: remuda butler schedule list\n"
@@ -10,6 +11,22 @@ local USAGE = "Usage: remuda butler schedule list\n"
   .. "TEXT may be - to read it from stdin. Members can target only themselves and remove only schedules they created; the operator can manage any target. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *."
 local WARNING = "From now on this text arrives as mail from the reserved sender `schedule` at every due time, until the schedule is removed, also after restarts. The receiving agent reads it like any mail and may act on it."
 local LIST_TEXT_BYTES = 80
+
+local SCHEDULE_CLI_SPEC = {
+  name = "remuda butler schedule",
+  verbs = {
+    list = { about = "List scheduled Butler messages. Example: remuda butler schedule list",
+      next = "remuda butler schedule add --help" },
+    add = { about = "Add a recurring Butler message. Example: remuda butler schedule add morning '0 9 * * *' 'Check the queue'",
+      options = { { long = "to", value = "SESSION", help = "Target session (default: your own session for members, butler for the operator)" } },
+      args = { { name = "NAME", help = "Unique schedule name" },
+        { name = "CRON", help = "Supported minute/hour schedule, e.g. 0 9 * * *" },
+        { name = "TEXT", help = "Message text, or - to read from stdin" } },
+      next = "remuda butler schedule list" },
+    rm = { about = "Remove a scheduled message. Example: remuda butler schedule rm morning",
+      args = { { name = "NAME", help = "Schedule name" } }, next = "remuda butler schedule list" },
+  },
+}
 
 local function fail(message)
   if type(remuda.fail) == "function" then return remuda.fail(message, 1) end
@@ -44,15 +61,13 @@ local function load_list(env)
 end
 
 -- parse_add(args, stdin) -> { name, spec, text, target } | nil, reason
-local function parse_add(args, stdin)
-  local n = #args
-  if n ~= 5 and not (n == 7 and args[6] == "--to" and args[7] ~= "") then return nil, USAGE end
-  local text = args[5]
+local function parse_add(values, stdin)
+  local text = values.TEXT
   if text == "-" then
     if type(stdin) ~= "string" then return nil, "no text received on stdin" end
     text = stdin:gsub("\n+$", "")
   end
-  return { name = args[3], spec = args[4], text = text, target = args[7] or "butler" }
+  return { name = values.NAME, spec = values.CRON, text = text, target = values.to or "butler", explicit_target = values.to ~= nil }
 end
 
 -- build(env, request, list) -> entry | nil, reason: everything add checks before it asks.
@@ -120,16 +135,14 @@ local function persist_add(env, request, creator, recipient_id)
   return true, "added schedule " .. fresh.name
 end
 
-local function add(args, env, stdin, principal)
-  local request, parse_error = parse_add(args, stdin)
-  if not request then return fail(parse_error) end
+local function add(request, env, principal)
   local creator
   if principal then
     creator = principal.id
     if type(creator) ~= "string" or creator == "" or type(principal.alias) ~= "string" then
       return fail("schedule add needs an authenticated Butler session")
     end
-    if args[7] ~= nil and request.target ~= principal.alias then
+    if request.explicit_target and request.target ~= principal.alias then
       return fail("a Butler session can create schedules only for itself")
     end
     request.target = principal.alias
@@ -150,23 +163,21 @@ local function add(args, env, stdin, principal)
   end)
 end
 
-local function remove(args, env, principal)
-  if #args ~= 3 then return fail(USAGE) end
+local function remove(name, env, principal)
   local list, list_error = load_list(env)
   if not list then return fail(list_error) end
-  local index, entry = schedule.find(list, args[3])
+  local index, entry = schedule.find(list, name)
   if not entry or (principal and entry.created_by ~= principal.id) then
-    return fail("no schedule named " .. terminal_safe(args[3]))
+    return fail("no schedule named " .. terminal_safe(name))
   end
   table.remove(list, index)
   local saved, save_error = schedule.save(env.path, list)
   if not saved then return fail("could not save the schedules: " .. tostring(save_error)) end
-  env.trace("schedule_removed", terminal_safe(args[3]))
-  return "removed schedule " .. args[3]
+  env.trace("schedule_removed", terminal_safe(name))
+  return "removed schedule " .. name
 end
 
-local function show(args, env)
-  if #args ~= 2 then return fail(USAGE) end
+local function show(env)
   local entries, list_error = load_list(env)
   if not entries then return fail(list_error) end
   if #entries == 0 then return "no schedules" end
@@ -178,16 +189,25 @@ end
 -- cli(args, principal, stdin): args[1] is "schedule". `principal` is the
 -- authenticated caller, nil for the outside operator.
 function M.cli(args, principal, stdin)
+  local argv = {}
+  for i = 2, #(args or {}) do argv[#argv + 1] = args[i] end
+  local report = parse_cli(SCHEDULE_CLI_SPEC, argv)
+  if report.kind == "help" then return report.text end
+  if not report.ok then return fail(report.text) end
   local env = remuda._butler_schedule_env
   if type(args) ~= "table" or type(env) ~= "table" or not env.path then return fail(USAGE) end
-  local verb = args[2]
-  if verb == "list" then return show(args, env) end
+  local verb = report.verb
+  if verb == "list" then return show(env) end
   if verb ~= "add" and verb ~= "rm" then return fail(USAGE) end
   if principal ~= nil and (type(principal) ~= "table" or principal.tag ~= "member") then
     return fail("schedule " .. verb .. " needs an authenticated Butler session or the operator")
   end
-  if verb == "add" then return add(args, env, stdin, principal) end
-  return remove(args, env, principal)
+  if verb == "add" then
+    local request, problem = parse_add(report.values, stdin)
+    if not request then return fail(problem) end
+    return add(request, env, principal)
+  end
+  return remove(report.values.NAME, env, principal)
 end
 
 remuda.butler.schedule_cli = M

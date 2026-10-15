@@ -3,27 +3,55 @@ exit: 2
 stdout:
 
 stderr:
-<GLOBAL-USAGE>
+missing required argument <SESSION>
+Usage: remuda butler compact [OPTIONS] SESSION
+Next: remuda butler compact --help
 actions:
 (none)
 
 ### remuda butler "compact" "--help"
-exit: 1
+exit: 0
 stdout:
+Compact a Butler session. Example: remuda butler compact worker-1 --dry-run
+
+Usage: remuda butler compact [OPTIONS] SESSION
+
+Arguments:
+  <SESSION>  Session to compact
+
+Options:
+  -h, --help     Print help
+      --dry-run  Show compaction changes without applying them
+      --force    Compact even when automatic rules would defer
+
+Next: remuda butler compact --help
 
 stderr:
-unknown session: --help
+
 actions:
-compact.has_session(--help)
+(none)
 
 ### remuda butler "compact" "-h"
-exit: 1
+exit: 0
 stdout:
+Compact a Butler session. Example: remuda butler compact worker-1 --dry-run
+
+Usage: remuda butler compact [OPTIONS] SESSION
+
+Arguments:
+  <SESSION>  Session to compact
+
+Options:
+  -h, --help     Print help
+      --dry-run  Show compaction changes without applying them
+      --force    Compact even when automatic rules would defer
+
+Next: remuda butler compact --help
 
 stderr:
-unknown session: -h
+
 actions:
-compact.has_session(-h)
+(none)
 
 ### remuda butler "compact" "help"
 exit: 1
@@ -69,126 +97,146 @@ exit: 2
 stdout:
 
 stderr:
-<GLOBAL-USAGE>
+--dry-run and --force cannot be used together.
+Next: remuda butler compact --help
 actions:
-compact.has_session(s1)
+(none)
 
 ### remuda butler "compact" "s1" "--force" "--dry-run"
 exit: 2
 stdout:
 
 stderr:
-<GLOBAL-USAGE>
+--dry-run and --force cannot be used together.
+Next: remuda butler compact --help
 actions:
-compact.has_session(s1)
+(none)
 
 ### remuda butler "compact" "--dry-run" "s1"
-exit: 1
+exit: 0
 stdout:
-
+tick-stub
 stderr:
-unknown session: --dry-run
+
 actions:
-compact.has_session(--dry-run)
+compact.has_session(s1)
+compact.tick(s1|true)
 
 ### remuda butler "compact" "--force" "s1"
-exit: 1
+exit: 0
 stdout:
-
+compact-stub
 stderr:
-unknown session: --force
+
 actions:
-compact.has_session(--force)
+compact.has_session(s1)
+compact(s1|true)
 
 ### remuda butler "compact" "s1" "--dry-run" "--dry-run"
 exit: 2
 stdout:
 
 stderr:
-<GLOBAL-USAGE>
+invalid arguments: an argument cannot be used with one or more of the other specified arguments
+Usage: remuda butler compact [OPTIONS] SESSION
+Next: remuda butler compact --help
 actions:
-compact.has_session(s1)
+(none)
 
 ### remuda butler "compact" "s1" "--force" "--force"
 exit: 2
 stdout:
 
 stderr:
-<GLOBAL-USAGE>
+invalid arguments: an argument cannot be used with one or more of the other specified arguments
+Usage: remuda butler compact [OPTIONS] SESSION
+Next: remuda butler compact --help
 actions:
-compact.has_session(s1)
+(none)
 
 ### remuda butler "compact" "s1" "--bogus"
 exit: 2
 stdout:
 
 stderr:
-<GLOBAL-USAGE>
+remuda: butler compact: unknown option '--bogus'.
+Usage: remuda butler compact [OPTIONS] SESSION
+Next: remuda butler compact --help
 actions:
-compact.has_session(s1)
+(none)
 
 ### remuda butler "compact" "s1" "extra"
 exit: 2
 stdout:
 
 stderr:
-<GLOBAL-USAGE>
+unexpected argument 'extra'
+Usage: remuda butler compact [OPTIONS] SESSION
+Next: remuda butler compact --help
 actions:
-compact.has_session(s1)
+(none)
 
 ### remuda butler "compact" "s1" "--dry-run=1"
 exit: 2
 stdout:
 
 stderr:
-<GLOBAL-USAGE>
+invalid arguments: unexpected value for an argument found
+Usage: remuda butler compact [OPTIONS] SESSION
+Next: remuda butler compact --help
 actions:
-compact.has_session(s1)
+(none)
 
 ### remuda butler "compact" "s1" "--"
-exit: 2
+exit: 0
 stdout:
-
+compact-stub
 stderr:
-<GLOBAL-USAGE>
+
 actions:
 compact.has_session(s1)
+compact(s1|false)
 
 ### remuda butler "compact" "--" "s1"
-exit: 1
+exit: 0
 stdout:
-
+compact-stub
 stderr:
-unknown session: --
+
 actions:
-compact.has_session(--)
+compact.has_session(s1)
+compact(s1|false)
 
 ### remuda butler "compact" "s1" "-n"
 exit: 2
 stdout:
 
 stderr:
-<GLOBAL-USAGE>
+unexpected argument '-n'
+Usage: remuda butler compact [OPTIONS] SESSION
+Next: remuda butler compact --help
 actions:
-compact.has_session(s1)
+(none)
 
 ### remuda butler "compact" "s1" "-1"
 exit: 2
 stdout:
 
 stderr:
-<GLOBAL-USAGE>
+unexpected argument '-1'
+Usage: remuda butler compact [OPTIONS] SESSION
+Next: remuda butler compact --help
 actions:
-compact.has_session(s1)
+(none)
 
 ### remuda butler "compact" ""
-exit: 2
+exit: 1
 stdout:
 
 stderr:
-<GLOBAL-USAGE>
+unknown session: <empty>
 actions:
-(none)
+compact.has_session()
 
 ### remuda butler "compact" "nosuch"
 exit: 1
@@ -209,55 +257,99 @@ actions:
 compact.has_session(nosuch)
 
 ### remuda butler "compact" "nosuch" "--bogus"
-exit: 1
+exit: 2
 stdout:
 
 stderr:
-unknown session: nosuch
+remuda: butler compact: unknown option '--bogus'.
+Usage: remuda butler compact [OPTIONS] SESSION
+Next: remuda butler compact --help
 actions:
-compact.has_session(nosuch)
+(none)
 
 ### remuda butler "compact" "nosuch" "--dry-run" "--force"
-exit: 1
+exit: 2
 stdout:
 
 stderr:
-unknown session: nosuch
+--dry-run and --force cannot be used together.
+Next: remuda butler compact --help
 actions:
-compact.has_session(nosuch)
+(none)
 
 ### remuda butler "compact" "--help" "s1"
-exit: 1
+exit: 0
 stdout:
+Compact a Butler session. Example: remuda butler compact worker-1 --dry-run
+
+Usage: remuda butler compact [OPTIONS] SESSION
+
+Arguments:
+  <SESSION>  Session to compact
+
+Options:
+  -h, --help     Print help
+      --dry-run  Show compaction changes without applying them
+      --force    Compact even when automatic rules would defer
+
+Next: remuda butler compact --help
 
 stderr:
-unknown session: --help
+
 actions:
-compact.has_session(--help)
+(none)
 
 ### remuda butler "compact" "s1" "--help"
-exit: 2
+exit: 0
 stdout:
+Compact a Butler session. Example: remuda butler compact worker-1 --dry-run
+
+Usage: remuda butler compact [OPTIONS] SESSION
+
+Arguments:
+  <SESSION>  Session to compact
+
+Options:
+  -h, --help     Print help
+      --dry-run  Show compaction changes without applying them
+      --force    Compact even when automatic rules would defer
+
+Next: remuda butler compact --help
 
 stderr:
-<GLOBAL-USAGE>
+
 actions:
-compact.has_session(s1)
+(none)
 
 ### remuda butler "compact" "s1" "-h"
+exit: 0
+stdout:
+Compact a Butler session. Example: remuda butler compact worker-1 --dry-run
+
+Usage: remuda butler compact [OPTIONS] SESSION
+
+Arguments:
+  <SESSION>  Session to compact
+
+Options:
+  -h, --help     Print help
+      --dry-run  Show compaction changes without applying them
+      --force    Compact even when automatic rules would defer
+
+Next: remuda butler compact --help
+
+stderr:
+
+actions:
+(none)
+
+### remuda butler "compact" "--dry-run"
 exit: 2
 stdout:
 
 stderr:
-<GLOBAL-USAGE>
+missing required argument <SESSION>
+Usage: remuda butler compact [OPTIONS] SESSION
+Next: remuda butler compact --help
 actions:
-compact.has_session(s1)
-
-### remuda butler "compact" "--dry-run"
-exit: 1
-stdout:
-
-stderr:
-unknown session: --dry-run
-actions:
-compact.has_session(--dry-run)
+(none)

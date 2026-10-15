@@ -298,7 +298,7 @@ T.test("inbox_id_opens_only_the_callers_own_messages", function()
     refused = tostring(refused)
     local help = tostring(remuda._butler_command_run("inbox", {"inbox", "--help"}, { env = {} }))
     return table.concat({tostring(refused:find("root only", 1, true) == nil), tostring(refused:find("Next:", 1, true) ~= nil),
-      tostring(help:find("message-id", 1, true) ~= nil)}, "|")
+      tostring(help:find("message ID", 1, true) ~= nil)}, "|")
   ]=])
   T.eq(out, "true|true|true", "inbox ID owner check and help")
 end)

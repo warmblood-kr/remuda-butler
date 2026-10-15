@@ -3,34 +3,49 @@ exit: 1
 stdout:
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+missing required argument <STATE>
+Usage: remuda butler typed-lines STATE
+Next: remuda butler typed-lines on|off
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
 ### remuda butler "typed-lines" "--help"
-exit: 1
+exit: 0
 stdout:
+Turn typed Matrix lines on or off. Example: remuda butler typed-lines on
+
+Usage: remuda butler typed-lines STATE
+
+Arguments:
+  <STATE>  on or off
+
+Options:
+  -h, --help  Print help
+
+Next: remuda butler typed-lines on|off
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
 ### remuda butler "typed-lines" "-h"
-exit: 1
+exit: 0
 stdout:
+Turn typed Matrix lines on or off. Example: remuda butler typed-lines on
+
+Usage: remuda butler typed-lines STATE
+
+Arguments:
+  <STATE>  on or off
+
+Options:
+  -h, --help  Print help
+
+Next: remuda butler typed-lines on|off
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
@@ -51,10 +66,9 @@ exit: 1
 stdout:
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+unexpected argument 'extra'
+Usage: remuda butler typed-lines STATE
+Next: remuda butler typed-lines on|off
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
@@ -63,10 +77,9 @@ exit: 1
 stdout:
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+unexpected argument 'extra'
+Usage: remuda butler typed-lines STATE
+Next: remuda butler typed-lines on|off
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
@@ -75,10 +88,9 @@ exit: 1
 stdout:
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+unexpected argument 'on'
+Usage: remuda butler typed-lines STATE
+Next: remuda butler typed-lines on|off
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
@@ -123,34 +135,27 @@ exit: 1
 stdout:
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+remuda: butler typed-lines: unknown option '--on'.
+Usage: remuda butler typed-lines STATE
+Next: remuda butler typed-lines on|off
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
 ### remuda butler "typed-lines" "--" "off"
-exit: 1
+exit: 0
 stdout:
-
+typed-lines is now off. shell-lines is also off.
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
 ### remuda butler "typed-lines" "off" "--"
-exit: 1
+exit: 0
 stdout:
-
+typed-lines is now off. shell-lines is also off.
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
@@ -159,10 +164,9 @@ exit: 1
 stdout:
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+unexpected argument '-1'
+Usage: remuda butler typed-lines STATE
+Next: remuda butler typed-lines on|off
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
@@ -180,10 +184,9 @@ exit: 1
 stdout:
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+unexpected argument 'off'
+Usage: remuda butler typed-lines STATE
+Next: remuda butler typed-lines on|off
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
@@ -192,34 +195,49 @@ exit: 1
 stdout:
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+unexpected argument 'off'
+Usage: remuda butler typed-lines STATE
+Next: remuda butler typed-lines on|off
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
 ### remuda butler "typed-lines" "--help" "off"
-exit: 1
+exit: 0
 stdout:
+Turn typed Matrix lines on or off. Example: remuda butler typed-lines on
+
+Usage: remuda butler typed-lines STATE
+
+Arguments:
+  <STATE>  on or off
+
+Options:
+  -h, --help  Print help
+
+Next: remuda butler typed-lines on|off
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
 ### remuda butler "typed-lines" "off" "--help"
-exit: 1
+exit: 0
 stdout:
+Turn typed Matrix lines on or off. Example: remuda butler typed-lines on
+
+Usage: remuda butler typed-lines STATE
+
+Arguments:
+  <STATE>  on or off
+
+Options:
+  -h, --help  Print help
+
+Next: remuda butler typed-lines on|off
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
@@ -228,34 +246,49 @@ exit: 1
 stdout:
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+missing required argument <STATE>
+Usage: remuda butler shell-lines STATE
+Next: remuda butler shell-lines on|off
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
 ### remuda butler "shell-lines" "--help"
-exit: 1
+exit: 0
 stdout:
+Turn Matrix shell lines on or off. Example: remuda butler shell-lines on
+
+Usage: remuda butler shell-lines STATE
+
+Arguments:
+  <STATE>  on or off
+
+Options:
+  -h, --help  Print help
+
+Next: remuda butler shell-lines on|off
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
 ### remuda butler "shell-lines" "-h"
-exit: 1
+exit: 0
 stdout:
+Turn Matrix shell lines on or off. Example: remuda butler shell-lines on
+
+Usage: remuda butler shell-lines STATE
+
+Arguments:
+  <STATE>  on or off
+
+Options:
+  -h, --help  Print help
+
+Next: remuda butler shell-lines on|off
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
@@ -276,10 +309,9 @@ exit: 1
 stdout:
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+unexpected argument 'extra'
+Usage: remuda butler shell-lines STATE
+Next: remuda butler shell-lines on|off
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
@@ -288,10 +320,9 @@ exit: 1
 stdout:
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+unexpected argument 'extra'
+Usage: remuda butler shell-lines STATE
+Next: remuda butler shell-lines on|off
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
@@ -300,10 +331,9 @@ exit: 1
 stdout:
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+unexpected argument 'on'
+Usage: remuda butler shell-lines STATE
+Next: remuda butler shell-lines on|off
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
@@ -348,34 +378,27 @@ exit: 1
 stdout:
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+remuda: butler shell-lines: unknown option '--on'.
+Usage: remuda butler shell-lines STATE
+Next: remuda butler shell-lines on|off
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
 ### remuda butler "shell-lines" "--" "off"
-exit: 1
+exit: 0
 stdout:
-
+shell-lines is now off.
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
 ### remuda butler "shell-lines" "off" "--"
-exit: 1
+exit: 0
 stdout:
-
+shell-lines is now off.
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
@@ -384,10 +407,9 @@ exit: 1
 stdout:
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+unexpected argument '-1'
+Usage: remuda butler shell-lines STATE
+Next: remuda butler shell-lines on|off
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
@@ -405,10 +427,9 @@ exit: 1
 stdout:
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+unexpected argument 'off'
+Usage: remuda butler shell-lines STATE
+Next: remuda butler shell-lines on|off
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
@@ -417,34 +438,49 @@ exit: 1
 stdout:
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+unexpected argument 'off'
+Usage: remuda butler shell-lines STATE
+Next: remuda butler shell-lines on|off
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
 ### remuda butler "shell-lines" "--help" "off"
-exit: 1
+exit: 0
 stdout:
+Turn Matrix shell lines on or off. Example: remuda butler shell-lines on
+
+Usage: remuda butler shell-lines STATE
+
+Arguments:
+  <STATE>  on or off
+
+Options:
+  -h, --help  Print help
+
+Next: remuda butler shell-lines on|off
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
 ### remuda butler "shell-lines" "off" "--help"
-exit: 1
+exit: 0
 stdout:
+Turn Matrix shell lines on or off. Example: remuda butler shell-lines on
+
+Usage: remuda butler shell-lines STATE
+
+Arguments:
+  <STATE>  on or off
+
+Options:
+  -h, --help  Print help
+
+Next: remuda butler shell-lines on|off
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
@@ -453,34 +489,49 @@ exit: 1
 stdout:
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+missing required argument <STATE>
+Usage: remuda butler status-commands STATE
+Next: remuda butler status-commands on|off
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
 ### remuda butler "status-commands" "--help"
-exit: 1
+exit: 0
 stdout:
+Turn Matrix status commands on or off. Example: remuda butler status-commands on
+
+Usage: remuda butler status-commands STATE
+
+Arguments:
+  <STATE>  on or off
+
+Options:
+  -h, --help  Print help
+
+Next: remuda butler status-commands on|off
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
 ### remuda butler "status-commands" "-h"
-exit: 1
+exit: 0
 stdout:
+Turn Matrix status commands on or off. Example: remuda butler status-commands on
+
+Usage: remuda butler status-commands STATE
+
+Arguments:
+  <STATE>  on or off
+
+Options:
+  -h, --help  Print help
+
+Next: remuda butler status-commands on|off
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
@@ -501,10 +552,9 @@ exit: 1
 stdout:
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+unexpected argument 'extra'
+Usage: remuda butler status-commands STATE
+Next: remuda butler status-commands on|off
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
@@ -513,10 +563,9 @@ exit: 1
 stdout:
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+unexpected argument 'extra'
+Usage: remuda butler status-commands STATE
+Next: remuda butler status-commands on|off
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
@@ -525,10 +574,9 @@ exit: 1
 stdout:
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+unexpected argument 'on'
+Usage: remuda butler status-commands STATE
+Next: remuda butler status-commands on|off
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
@@ -573,46 +621,38 @@ exit: 1
 stdout:
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+remuda: butler status-commands: unknown option '--on'.
+Usage: remuda butler status-commands STATE
+Next: remuda butler status-commands on|off
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
 ### remuda butler "status-commands" "--" "off"
-exit: 1
+exit: 0
 stdout:
-
+status-commands is now off.
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+
 actions:
-state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\nstatus_commands=false\n
 
 ### remuda butler "status-commands" "off" "--"
-exit: 1
+exit: 0
 stdout:
-
+status-commands is now off.
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+
 actions:
-state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
+state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\nstatus_commands=false\n
 
 ### remuda butler "status-commands" "-1"
 exit: 1
 stdout:
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+unexpected argument '-1'
+Usage: remuda butler status-commands STATE
+Next: remuda butler status-commands on|off
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
@@ -630,10 +670,9 @@ exit: 1
 stdout:
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+unexpected argument 'off'
+Usage: remuda butler status-commands STATE
+Next: remuda butler status-commands on|off
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
@@ -642,34 +681,49 @@ exit: 1
 stdout:
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+unexpected argument 'off'
+Usage: remuda butler status-commands STATE
+Next: remuda butler status-commands on|off
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
 ### remuda butler "status-commands" "--help" "off"
-exit: 1
+exit: 0
 stdout:
+Turn Matrix status commands on or off. Example: remuda butler status-commands on
+
+Usage: remuda butler status-commands STATE
+
+Arguments:
+  <STATE>  on or off
+
+Options:
+  -h, --help  Print help
+
+Next: remuda butler status-commands on|off
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
 ### remuda butler "status-commands" "off" "--help"
-exit: 1
+exit: 0
 stdout:
+Turn Matrix status commands on or off. Example: remuda butler status-commands on
+
+Usage: remuda butler status-commands STATE
+
+Arguments:
+  <STATE>  on or off
+
+Options:
+  -h, --help  Print help
+
+Next: remuda butler status-commands on|off
 
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
@@ -785,14 +839,21 @@ actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 
 ### [agent] remuda butler "typed-lines" "--help"
-exit: 1
+exit: 0
 stdout:
+Turn typed Matrix lines on or off. Example: remuda butler typed-lines on
 
+Usage: remuda butler typed-lines STATE
+
+Arguments:
+  <STATE>  on or off
+
+Options:
+  -h, --help  Print help
+
+Next: remuda butler typed-lines on|off
 stderr:
-Usage: remuda butler typed-lines on|off
-       remuda butler shell-lines on|off
-       remuda butler status-commands on|off
-       remuda butler approve-text on|off
+
 actions:
 state: https://matrix.invalid\n!room:example.org\n@bot:example.org\n@alice:example.org\nfalse\n30000\nuntrusted_per_room_hour=12\ntyped_lines=false\nshell_lines=false\napprove_text=false\n
 

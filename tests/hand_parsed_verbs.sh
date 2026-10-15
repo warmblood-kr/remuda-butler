@@ -6,6 +6,12 @@ ALLOWLIST=${HAND_PARSED_ALLOWLIST:-$REPO/tests/hand_parsed_verbs.txt}
 MATRIX=$REPO/packages/butler/matrix_cli.lua
 COMMANDS=${1:-$REPO/packages/butler/commands.lua}
 INIT=$REPO/packages/butler/init.lua
+APPROVAL=$REPO/packages/butler/approval.lua
+APPROVE_TEXT=$REPO/packages/butler/approve_text.lua
+SCHEDULE_CLI=$REPO/packages/butler/schedule_cli.lua
+TYPED_LINES_CLI=$REPO/packages/butler/typed_lines_cli.lua
+MAIN=$REPO/packages/butler/main.lua
+STATUS_HOOK=$REPO/packages/butler/status_hook.lua
 
 check() {
   local commands=$1 tmp
@@ -117,34 +123,92 @@ SEED
   awk '
     function flush() {
       if (verb != "") print verb "\t" ((parsed && !hand) ? "yes" : "no")
-      if (verb == "topic") print "topic new\t" ((topic_new && !hand) ? "yes" : "no")
+      if (verb == "topic") {
+        print "topic new\t" ((topic_new && !hand) ? "yes" : "no")
+        print "topic delegate\t" ((topic_delegate && !hand) ? "yes" : "no")
+      }
       verb=""
     }
     /^command\(/ {
-      flush(); parsed=0; uses_cli=0; topic_new=0; hand=0
+      flush(); parsed=0; uses_cli=0; topic_new=0; topic_delegate=0; hand=0
       if (match($0, /"[^"]+"/)) { verb=substr($0, RSTART+1, RLENGTH-2) }
     }
-    verb != "" && /remuda\.cli/ { uses_cli=1 }
+    verb != "" && (/remuda\.cli/ || /host\.cli\.parse/) { uses_cli=1 }
     verb != "" && /cli\.parse/ && uses_cli { parsed=1 }
+    verb != "" && /cli_parser\(/ { parsed=1 }
+    verb != "" && /fits_spec\(/ { parsed=1 }
     verb != "" && /type\(cli/ { hand=1 }
-    verb != "" && $0 !~ /^command\(/ && /args\[[0-9a-z]/ { hand=1 }
-    verb == "topic" && /cli\.parse\(TOPIC_NEW_CLI_SPEC/ { topic_new=1 }
+    # `topic` routes its subverb in args[2]; each leaf then has its own full parser spec.
+    verb != "" && verb != "topic" && $0 !~ /^command\(/ && /args\[[0-9a-z]/ { hand=1 }
+    verb == "topic" && /cli_parser\(TOPIC_NEW_CLI_SPEC/ { topic_new=1 }
+    verb == "topic" && /cli_parser\(TOPIC_DELEGATE_CLI_SPEC/ { topic_delegate=1 }
     /^end\)/ { flush() }
     END { flush() }
   ' "$commands" > "$tmp/status_commands"
-  awk '
+  if grep -Fq 'local cli_parse = assert(host.cli and host.cli.parse' "$INIT"; then
+    awk '
     function flush() { if (verb != "" && !(verb in seen)) print verb "\t" ((parsed && !hand) ? "yes" : "no"); verb="" }
     NR == FNR { split($0, row, "\t"); seen[row[1]]=1; next }
     /[{ ,]verb = "/ { flush(); parsed=0; hand=0; uses_cli=0
       if (match($0, /verb = "[^"]+"/)) { verb=substr($0, RSTART+8, RLENGTH-9) } }
-    verb != "" && /remuda\.cli/ { uses_cli=1 }
+    verb != "" && (/remuda\.cli/ || /host\.cli\.parse/) { uses_cli=1 }
     verb != "" && /cli\.parse/ && uses_cli { parsed=1 }
+    verb != "" && /cli_parse\(spec, args\)/ { parsed=1 }
     verb != "" && /type\(cli/ { hand=1 }
     verb != "" && !/verb = "/ && /args\[[0-9a-z]/ { hand=1 }
     verb != "" && /args\[[0-9a-z]/ && /verb = "/ { hand=1 }
     END { flush() }
-  ' "$tmp/status_commands" "$INIT" | grep -vE '^(matrix|topic)	' > "$tmp/status_init" || true
-  cat "$tmp/status_commands" "$tmp/status_init" > "$tmp/status"
+    ' "$tmp/status_commands" "$INIT" | grep -vE '^(matrix|topic)\\t' > "$tmp/status_init" || true
+  else
+    : > "$tmp/status_init"
+  fi
+  : > "$tmp/status_helpers"
+  if grep -Fq 'pcall(cli_parse, APPROVAL_CLI_SPEC, args or {})' "$APPROVAL"; then
+    printf 'approvals\tyes\napprove\tyes\ndeny\tyes\n' >> "$tmp/status_helpers"
+  fi
+  if grep -Fq 'parse_cli(SWITCH_CLI_SPEC, args or {})' "$TYPED_LINES_CLI"; then
+    printf 'typed-lines\tyes\nshell-lines\tyes\nstatus-commands\tyes\n' >> "$tmp/status_helpers"
+  fi
+  if grep -Fq 'parse_cli(SCHEDULE_CLI_SPEC, argv)' "$SCHEDULE_CLI"; then
+    printf 'schedule\tyes\n' >> "$tmp/status_helpers"
+  fi
+  if grep -Fq 'parse_cli(spec, args or {})' "$APPROVE_TEXT"; then
+    printf 'approve-text\tyes\n' >> "$tmp/status_helpers"
+  fi
+  if grep -Fq 'remuda.cli.parse(spec, args or {})' "$MAIN"; then
+    printf 'statusline\tyes\n' >> "$tmp/status_helpers"
+  fi
+  if grep -Fq 'remuda.cli.parse(STATUS_HOOK_CLI_SPEC, args or {})' "$STATUS_HOOK"; then
+    printf 'status-hook\tyes\n' >> "$tmp/status_helpers"
+  fi
+  if grep -Fq 'cli_parser(HELP_CLI_SPEC, argv)' "$COMMANDS"; then
+    printf 'help\tyes\n' >> "$tmp/status_helpers"
+  fi
+  awk -F '\t' 'NR==FNR { helpers[$1]=1; next } !($1 in helpers)' "$tmp/status_helpers" "$tmp/status_commands" > "$tmp/status_commands.filtered"
+  mv "$tmp/status_commands.filtered" "$tmp/status_commands"
+  awk -F '\t' 'NR==FNR { helpers[$1]=1; next } !($1 in helpers)' "$tmp/status_helpers" "$tmp/status_init" > "$tmp/status_init.filtered"
+  mv "$tmp/status_init.filtered" "$tmp/status_init"
+  # Matrix leaves and setup are declared in specs and parsed through the shared parser.
+  : > "$tmp/status_matrix"
+  if grep -Fq 'cli.parse(matrix_arg_spec, argv)' "$MATRIX"; then
+    awk '
+      /verbs = \{/ { in_verbs=1; next }
+      in_verbs && /^  },$/ { exit }
+      in_verbs && /matrix_verb\(/ {
+        line=$0
+        if (match(line, /^    \["[a-z-]+"\] =/)) {
+          name=substr(line, RSTART+6, RLENGTH-9); gsub(/["\[\]]/, "", name)
+        } else if (match(line, /^    [a-z-]+ =/)) {
+          name=substr(line, RSTART+4, RLENGTH-6)
+        } else name=""
+        if (name != "") print "matrix " name "\tyes"
+      }
+    ' "$MATRIX" > "$tmp/status_matrix"
+  fi
+  if grep -Fq 'cli.parse(SETUP_CLI_SPEC, argv)' "$REPO/packages/butler/matrix_setup.lua"; then
+    printf 'matrix setup\tyes\n' >> "$tmp/status_matrix"
+  fi
+  cat "$tmp/status_commands" "$tmp/status_init" "$tmp/status_matrix" "$tmp/status_helpers" > "$tmp/status"
   awk -F'\t' '$2 == "yes" { print $1 }' "$tmp/status" > "$tmp/migrated"
   while IFS=$'\t' read -r verb parsed; do
     [[ -z $verb || $verb == matrix || $verb == topic ]] && continue
@@ -175,7 +239,8 @@ SEED
 }
 
 if [[ ${1:-} == --check ]]; then
-  check "${2:-$REPO/packages/butler/commands.lua}"
+  COMMANDS=${2:-$REPO/packages/butler/commands.lua}
+  check "$COMMANDS"
   exit
 fi
 
@@ -204,22 +269,6 @@ printf '\ncommand(999, "fake-migrated", "usage", function() local cli = remuda.c
 HAND_PARSED_ALLOWLIST="$ALLOWLIST" bash "$0" --check "$tmp/commands.lua"
 
 cp "$REPO/packages/butler/commands.lua" "$tmp/commands.lua"
-awk '
-  /^command\(5, "doctor"/ { doctor=1 }
-  doctor && /^end\)/ { print "  local cli = remuda.cli; cli.parse({}, {})"; doctor=0 }
-  { print }
-' "$tmp/commands.lua" > "$tmp/edited.lua"
-expect_failure "allowlist entry 'doctor' is migrated" "$tmp/edited.lua"
-grep -Fvx 'doctor' "$ALLOWLIST" > "$tmp/allowlist.txt"
-expect_failure "new verbs must use remuda.cli.parse; see docs: 'doctor'" "$REPO/packages/butler/commands.lua" "$tmp/allowlist.txt"
-# Honest baseline: verbs declared only in init.lua (compact), quoted Matrix keys (mark-all) and
-# families that still carry a hand-parsed fallback (close: cli.parse behind a capability gate and args[N]
-# reads) are hand-parsed, so they must be allowlisted.
-for verb in compact "matrix mark-all" "matrix thread" close send send-to-leader reply forward "topic new"; do
-  grep -Fvx "$verb" "$ALLOWLIST" > "$tmp/allowlist.txt"
-  expect_failure "new verbs must use remuda.cli.parse; see docs: '$verb'" "$REPO/packages/butler/commands.lua" "$tmp/allowlist.txt"
-done
-cp "$REPO/packages/butler/commands.lua" "$tmp/commands.lua"
 printf '\ncommand(999, "fake-gated", "usage", function(args) local cli = remuda.cli; if type(cli.parse) == "function" then return cli.parse({}, args) end; return args[2] end)\n' >> "$tmp/commands.lua"
 expect_failure "new verbs must use remuda.cli.parse; see docs: 'fake-gated'" "$tmp/commands.lua"
-echo "hand-parsed verb freeze: PASS (four coverage cases, honest-baseline cases)"
+echo "hand-parsed verb freeze: PASS (new verb, parser gate, migrated entry, old-core refusal)"

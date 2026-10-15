@@ -51,7 +51,7 @@ T.test("switches preserve usage, gate order and side-effect-free parse", functio
     remuda.fail = function(message, code) return { failed = true, code = code, text = message } end
   ]]
   local malformed = run_command(true, "typed-lines", { "typed-lines", "maybe" }, agent, capture)
-  T.ok(malformed:find("Usage: remuda butler typed%-lines on|off"), "invalid values retain switch usage")
+  T.ok(malformed:find("Usage: remuda butler typed%-lines"), "invalid values include parser-generated switch usage: " .. malformed)
   for _, parser in ipairs({ true, false }) do
     local result = run_command(parser, "typed-lines", { "typed-lines", "on" }, agent, [[
       remuda.fail = function(message, code) return { failed = true, code = code, text = message } end
@@ -89,7 +89,7 @@ T.test("switches preserve usage, gate order and side-effect-free parse", functio
       remuda._pr2_switch_counts = function() return reads .. ":0" end
       remuda.fail = function(message, code) return { failed = true, code = code, text = message } end
     ]])
-    T.ok(extra:find("Usage: remuda butler typed%-lines on|off"), "extra arguments are rejected before the operator gate")
+    T.ok(extra:find("Usage: remuda butler typed%-lines"), "extra arguments are rejected before the operator gate: " .. extra)
     T.ok(extra:find("|0:0$"), "invalid parsing does not read or write switch state")
   end
   for _, verb in ipairs({ "typed-lines", "shell-lines", "status-commands" }) do
@@ -148,49 +148,30 @@ local function compact_case(parser, args, has_session)
   ]])
 end
 
-T.test("compact flags and session precedence match on current and old cores", function()
+T.test("compact flags use shared parser validation and execution", function()
   for _, parser in ipairs({ true, false }) do
     T.eq(compact_case(parser, { "compact", "s1" }, true), "true|compact:s1:false")
     T.eq(compact_case(parser, { "compact", "s1", "--dry-run" }, true), "true|tick:s1:true")
     T.eq(compact_case(parser, { "compact", "s1", "--force" }, true), "true|compact:s1:true")
-    T.ok(compact_case(parser, { "compact", "s1", "--dry-run", "--force" }, true):find("remuda butler — coordination", 1, true),
-      "mutually exclusive compact flags return global usage")
-    T.eq(compact_case(parser, { "compact", "s1", "--bad" }, false), "true|1:unknown session: s1",
-      "session lookup must precede flag validation")
-    T.ok(compact_case(parser, { "compact", "s1", "--bad" }, true):find("remuda butler — coordination", 1, true),
-      "unknown compact flags return global usage")
+    local both = compact_case(parser, { "compact", "s1", "--dry-run", "--force" }, true)
+    T.ok(both:find("--dry-run and --force cannot be used together", 1, true),
+      "mutually exclusive compact flags return a direct parser-oriented error")
+    local bad = compact_case(parser, { "compact", "s1", "--bad" }, false)
+    T.ok(bad:find("Usage: remuda butler compact", 1, true), "unknown options return command usage")
+    local missing = compact_case(parser, { "compact", "missing" }, false)
+    T.ok(missing:find("unknown session: missing", 1, true), "unknown session is reported after valid parsing")
+    T.eq(compact_case(parser, { "compact", "--dry-run", "s1" }, true), "true|tick:s1:true",
+      "standard options can appear before the positional session")
   end
 end)
 
-T.test("compact dash-prefixed session names keep legacy parsing on current and old cores", function()
-  local sessions = { "-s1", "-h", "--force", "--help", "--" }
-  local flags = {
-    { flag = nil, want = function(name) return "true|compact:" .. name .. ":false" end },
-    { flag = "--dry-run", want = function(name) return "true|tick:" .. name .. ":true" end },
-    { flag = "--force", want = function(name) return "true|compact:" .. name .. ":true" end },
-  }
-  for _, name in ipairs(sessions) do
-    for _, item in ipairs(flags) do
-      local args = { "compact", name }
-      if item.flag then args[#args + 1] = item.flag end
-      local want = item.want(name)
-      local current = compact_case(true, args, true)
-      local old = compact_case(false, args, true)
-      T.eq(current, want, "parser on: " .. table.concat(args, " "))
-      T.eq(old, want, "parser off: " .. table.concat(args, " "))
-      T.eq(current, old, "parser modes agree: " .. table.concat(args, " "))
-    end
-    for _, flag in ipairs({ "--dry-run", "--force" }) do
-      local args = { "compact", name, flag }
-      local want = "true|1:unknown session: " .. name
-      T.eq(compact_case(true, args, false), want, "parser on missing session: " .. table.concat(args, " "))
-      T.eq(compact_case(false, args, false), want, "parser off missing session: " .. table.concat(args, " "))
-    end
-  end
-  for _, parser in ipairs({ true, false }) do
-    T.eq(compact_case(parser, { "compact", "-missing", "--dry-run" }, false), "true|1:unknown session: -missing",
-      "unknown dash-prefixed session retains precedence over flag handling")
-  end
+T.test("compact dash-prefixed session names use the standard option separator", function()
+  T.eq(compact_case(true, { "compact", "--", "-s1" }, true), "true|compact:-s1:false")
+  T.eq(compact_case(true, { "compact", "--dry-run", "--", "-s1" }, true), "true|tick:-s1:true")
+  T.eq(compact_case(true, { "compact", "-s1" }, true):match("Usage: remuda butler compact") ~= nil, true,
+    "dash-prefixed session without -- should be parsed as an option error")
+  T.eq(compact_case(true, { "compact", "--", "--help" }, true), "true|compact:--help:false",
+    "a dash-leading literal session name is accepted after --")
 end)
 
 local function inbox_case(parser, args, caller)
@@ -261,8 +242,12 @@ T.test("inbox name and delivered-ID semantics are unchanged", function()
   -- #439: a member may read only its own inbox; the operator may read any named one.
   both_command("inbox", { "inbox", "alice" }, '{ kind = "outside" }', "true|inbox:alice", setup)
   both_command("inbox", { "inbox", "alice" }, caller, "true|1:agents may only read their own Butler inbox.\nNext: remuda butler inbox", setup)
-  both_command("inbox", { "inbox", "--" }, '{ kind = "outside" }', "true|inbox:--", setup)
-  both_command("inbox", { "inbox", "-alice" }, '{ kind = "outside" }', "true|inbox:-alice", setup)
+  both_command("inbox", { "inbox", "--" }, '{ kind = "outside" }',
+    "true|1:outside operator inbox needs a name; use `remuda butler inbox <name>`", setup)
+  local leading_dash = run_command(true, "inbox", { "inbox", "-alice" }, '{ kind = "outside" }', setup)
+  T.ok(leading_dash:find("unexpected argument '-a'", 1, true)
+      and leading_dash:find("Usage: remuda butler inbox", 1, true), "dash-prefixed names need the standard separator")
+  both_command("inbox", { "inbox", "--", "-alice" }, '{ kind = "outside" }', "true|inbox:-alice", setup)
   both_command("inbox", { "inbox", "01M49D6J4RVBW73XKFGQ6XS94J" }, caller,
     "true|message:01M49D6J4RVBW73XKFGQ6XS94J:agent-test", setup)
 end)

@@ -60,6 +60,14 @@ local function random_id(state)
   return nil
 end
 
+function approval.source_refresh_busy()
+  if next(pending_requests) or next(applying) then return true end
+  for _, record in pairs(attached and attached.state and attached.state.approvals or {}) do
+    if record.status == "open" or record.status == "approved" then return true end
+  end
+  return false
+end
+
 local function hex(bytes)
   local out = {}
   for i = 1, #bytes do out[i] = string.format("%02x", bytes:byte(i)) end
@@ -540,58 +548,32 @@ local function fail(message)
   return message
 end
 
-local function usage(verb)
-  if verb == "approvals" then return "Usage: remuda butler approvals\nExample: remuda butler approvals" end
-  return "Usage: remuda butler " .. verb .. " ID\nExample: remuda butler " .. verb .. " A7K2"
-end
-
 local APPROVAL_CLI_SPEC = {
   name = "remuda butler",
   verbs = {
-    approvals = { about = "List open approval requests", next = "remuda butler approvals" },
-    approve = { about = "Approve a request", args = { { name = "ID", help = "Approval request ID" } },
+    approvals = { about = "List open approval requests. Example: remuda butler approvals", next = "remuda butler approve --help" },
+    approve = { about = "Approve a request. Example: remuda butler approve A7K2", args = { { name = "ID", help = "Approval request ID" } },
       next = "remuda butler approvals" },
-    deny = { about = "Deny a request", args = { { name = "ID", help = "Approval request ID" } },
+    deny = { about = "Deny a request. Example: remuda butler deny A7K2", args = { { name = "ID", help = "Approval request ID" } },
       next = "remuda butler approvals" },
   },
 }
-
-local function parsed_approval_id(args, verb)
-  local cli = remuda.cli
-  if type(cli) ~= "table" or type(cli.parse) ~= "function" then return nil, false end
-  -- The old parser treated a leading-dash ID as an ordinary word. clap treats
-  -- `--` as an option boundary, so let the legacy answer path handle it.
-  for _, word in ipairs(args) do
-    if word == "--" then
-      if verb ~= "approvals" and #args == 2 then return args[2], false end
-      return nil, true
-    end
-  end
-  local ok, report = pcall(cli.parse, APPROVAL_CLI_SPEC, args)
-  if not ok then return nil, false end
-  local exact_help = #args == 2 and (args[2] == "--help" or args[2] == "-h")
-  if exact_help then return nil, true, "help" end
-  if not report.ok or report.kind == "help" then
-    -- A lone dash-prefixed ID used to reach approval.answer as an ID. Keep
-    -- that behavior while the declared grammar owns ordinary valid argv.
-    if verb ~= "approvals" and #args == 2 and type(args[2]) == "string" and args[2] ~= ""
-        and args[2]:sub(1, 1) == "-" then return args[2], true end
-    return nil, true
-  end
-  if verb == "approvals" then return nil, true end
-  local id = report.values and report.values.ID
-  if type(id) ~= "string" or id == "" then return nil, true end
-  return id, true
-end
+local cli_parse = assert(remuda.cli and remuda.cli.parse,
+  "Butler CLI requires remuda.cli.parse (Remuda core #465 or later); upgrade Remuda")
 
 function approval.cli(args, agent)
-  local verb = args and args[1]
+  local parse_ok, report = pcall(cli_parse, APPROVAL_CLI_SPEC, args or {})
+  if not parse_ok then
+    return fail("Usage: remuda butler approvals | approve ID | deny ID\nNext: remuda butler approvals")
+  end
+  if report.kind == "help" then return report.text end
+  if not report.ok then
+    local text = report.text ~= "" and report.text or "Usage: remuda butler approvals | approve ID | deny ID"
+    if not text:find("\nNext:", 1, true) then text = text .. "\nNext: remuda butler approvals" end
+    return fail(text)
+  end
+  local verb = report.verb
   if verb == "approvals" then
-    parsed_approval_id(args, verb)
-    if #args == 2 and (args[2] == "--help" or args[2] == "-h") then return usage(verb) end
-    if #args ~= 1 then
-      return fail(usage(verb) .. "\nNext: remuda butler approvals")
-    end
     local rows = approval.list()
     if #rows == 0 then return "No open approval requests.\nNext: nothing to do; agent requests appear here." end
     local now = math.floor(os.time() * 1000)
@@ -609,15 +591,13 @@ function approval.cli(args, agent)
     return table.concat(lines, "\n")
   end
   if verb == "approve" or verb == "deny" then
-    local parsed_id, parsed = parsed_approval_id(args, verb)
-    if #args == 2 and (args[2] == "--help" or args[2] == "-h") then return usage(verb) end
-    if #args ~= 2 or type(args[2]) ~= "string" or args[2] == "" then
-      return fail(usage(verb) .. "\nNext: remuda butler approvals")
+    local id = report.values.ID
+    if type(id) ~= "string" or id == "" then
+      return fail("Usage: remuda butler " .. verb .. " ID\nNext: remuda butler approvals")
     end
     if agent then
       return fail(verb .. " is operator-only. Next: wait for the owner's answer by mail; remuda butler inbox")
     end
-    local id = parsed and parsed_id or args[2]
     if id == nil or id == "" then return fail(usage(verb) .. "\nNext: remuda butler approvals") end
     local ok, err, rec = approval.answer(id, verb, "operator (terminal)")
     if not ok then
