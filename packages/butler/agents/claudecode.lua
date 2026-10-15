@@ -11,7 +11,9 @@ telemetry.claude = {
     local status_path = spec.status_path
     if not status_path then
       -- Not a name beside a reserved tmpname file: a directory this session owns.
-      local dir, why = support.new_private_dir()
+      local dir, why
+      if type(support.new_private_dir) == "function" then dir, why = support.new_private_dir()
+      else why = "support lacks a private directory helper" end
       if not dir then
         if _butler_session_trace then _butler_session_trace("settings_not_written", tostring(why)) end
         return { settings_error = why }

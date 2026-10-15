@@ -5,7 +5,7 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 REMUDA_BIN=${REMUDA_BIN:-remuda}
 source "$REPO/tests/core_ref.sh"
 core_ref_check
-command -v codex >/dev/null
+# Native Codex is optional: without it the lua test runs its Codex-less subset.
 T=$(mktemp -d /tmp/bcc.XXXXXX)
 T=$(cd "$T" && pwd -P)
 export HOME=$T/home XDG_CONFIG_HOME=$T/config XDG_DATA_HOME=$T/data

@@ -47,6 +47,50 @@ local function ensure(dir, kind)
   return report
 end
 
+-- Without a native Codex (CI has none) only the Codex-less behaviour is
+-- exercised: literal fresh defaults, per-client independence, fail-closed shapes.
+local codex_ok, codex_probe = pcall(remuda.process.run, { argv = { "codex", "--version" }, timeout = 5 })
+if not (codex_ok and codex_probe and codex_probe.code == 0) then
+  local bare = setmetatable({
+    native_servers = function() return nil end,
+    validate = config.validator(function() error("no native Codex") end, function() return true end,
+      fs.write, os.remove, function() return false end),
+  }, { __index = fs })
+  fixture(function(dir)
+    local report = config.ensure(dir, "claude", bare, permissions)
+    check(not report.error and read(dir .. "/.claude/settings.local.json") ~= nil, "Claude initializes without Codex")
+    local text = read(dir .. "/.codex/config.toml")
+    check(text and text:find('command = "remuda"', 1, true) and not text:find("enabled", 1, true),
+      "fresh Codex literal written without policy fields")
+    check(#config.ensure(dir, "codex", bare, permissions).written == 0, "repeat is stable")
+  end)
+  fixture(function(dir)
+    local split = setmetatable({ read_checked = function(path)
+      if path:find("/.codex/", 1, true) then return nil, "unreadable" end
+      return read(path)
+    end }, { __index = bare })
+    local report = config.ensure(dir, "claude", split, permissions)
+    check(not report.error and report.blocked.codex ~= nil, "unreadable Codex file blocks only Codex")
+  end)
+  fixture(function(dir)
+    local blind = setmetatable({ read_checked = function(path)
+      if path:match("/%.git$") then return nil, "unreadable" end
+      return read(path)
+    end }, { __index = bare })
+    local report = config.ensure(dir, "claude", blind, permissions)
+    check(read(dir .. "/.claude/settings.local.json") == nil and not report.error, "unreadable .git withholds Claude file")
+  end)
+  fixture(function(dir)
+    local _, toml = paths(dir)
+    local body = 'description = """\n[mcp_servers.remuda]\n"""\n'
+    put(toml, body)
+    local report = config.ensure(dir, "codex", bare, permissions)
+    check(report.error and read(toml) == body, "multiline TOML string fails closed")
+  end)
+  print("ok: workdir coordination config offline subset " .. count .. " assertions (no native Codex)")
+  return
+end
+
 for _, kind in ipairs({ "claude", "codex" }) do
   fixture(function(dir)
     local report = ensure(dir, kind)
