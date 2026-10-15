@@ -19,6 +19,8 @@ remuda.exec = function() end
 local matrix_module_ok, matrix_module_error = pcall(dofile, "packages/butler/matrix.lua")
 remuda.exec = package_exec
 assert(matrix_module_ok, matrix_module_error)
+dofile("packages/butler/matrix_mentions.lua")
+dofile("tests/lua/butler_matrix_mentions_test.lua")
 local ASKER = "team-1-mx"
 dofile("packages/butler/system.lua")
 dofile("packages/butler/matrix_setup.lua")

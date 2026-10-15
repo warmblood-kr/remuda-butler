@@ -8,6 +8,8 @@ local approve_text = assert(remuda.butler.approve_text,
   "load butler/approve_text before butler/matrix_relay")
 local status_command = assert(remuda.butler.status_command,
   "load butler/status_command before butler/matrix_relay")
+local mention_normalization = assert(remuda.butler.matrix.mention_normalization,
+  "load butler/matrix_mentions before butler/matrix_relay")
 -- Trust words are bound at load (main.lua execs matrix_request before
 -- this file), so a later redefinition of the public entry cannot change them.
 local read_config = matrix.read_config
@@ -1925,6 +1927,11 @@ function relay.new(options)
           local media_kind = MEDIA_MSGTYPES[content.msgtype]
           local trusted = cfg.allowed_senders[ev.sender] == true
           local raw_body = media_kind and media_mail_body(content, media_kind) or content.body
+          local mention_ids = {}
+          if trusted and member_kind(ev.sender, cfg) == "HUMAN" and not media_kind
+              and not (in_reply_to and not thread_root) then
+            raw_body, mention_ids = mention_normalization.normalize(content)
+          end
           local body = trusted and mail_body(raw_body) or cap_body(raw_body)
           if in_reply_to and not thread_root then body = strip_reply_fallback(body) end
           local actual_room = room_id or cfg.room
@@ -1984,6 +1991,7 @@ function relay.new(options)
           state.pending[ev.event_id] = {
             sender = ev.sender, room_id = actual_room, event_id = ev.event_id,
             created_at = timestamp(ev), body = body,
+            normalized_mentions = mention_ids,
             thread_root = thread_root, in_reply_to = in_reply_to,
             mxc = valid_media_uri(media_uri(content)) and media_uri(content) or nil,
             room = cfg.rooms[actual_room], room_kind = cfg.rooms[actual_room], context_mail_id = context_mail_id,
@@ -2511,6 +2519,7 @@ function relay.start(config)
           in_reply_to = event.in_reply_to, thread_id = event.thread_id,
           room = event.room, room_kind = event.room_kind,
           context_mail_id = event.context_mail_id, from_agent = event.from_agent,
+          mentions = event.normalized_mentions,
           trusted = event.trusted ~= false, mxc = event.mxc },
         references = event.references,
       })
