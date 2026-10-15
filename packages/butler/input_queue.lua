@@ -62,7 +62,9 @@ function M.open(path)
   if not parent then return nil,'invalid_path' end
   local canonical=fs.realpath(parent)
   if not canonical then return nil,'private_parent_unavailable' end
-  path=canonical..package.config:sub(1,1)..name
+  local system=remuda._butler_system
+  if not system or type(system.join_path)~='function'then return nil,'storage_path_unavailable'end
+  path=system.join_path(canonical,name)
   local busy=false
   local function load()
     if fs.realpath(parent)~=canonical then return nil,'storage_parent_changed' end

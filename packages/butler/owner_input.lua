@@ -211,7 +211,7 @@ local function deliver(r)
   if r.route=='owner_line' then
     -- Preserve this route's separate RET. Failure can never retry the text.
     local function return_allowed()
-      return own_return() and admissible(r,own_return)
+      return own_return() and admissible(r,own_return) and own_return()
     end
     local checked,result=pcall(guarded_write,'key',r.session,{expected_instance=r.instance_id,before=return_allowed,
       recheck=return_allowed,identity=return_allowed},'RET')

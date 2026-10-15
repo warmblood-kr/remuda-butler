@@ -1,5 +1,6 @@
 -- Actual queue + actual private core filesystem. No transport/pane/model.
 local previous=remuda.butler
+dofile('packages/butler/system.lua')
 local noop=function()end
 remuda.butler={approval={handler=noop,tick=noop},guard_policy={},approve_text={}}
 dofile('packages/butler/guard_approval.lua')

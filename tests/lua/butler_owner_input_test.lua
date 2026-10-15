@@ -20,7 +20,7 @@ local function subject(name,run,without_provider)
     f.ls=function()return{{name='codex',alive=true,attached=mode.attached or false,
       human_idle=mode.human_idle or math.huge,instance_id=mode.instance}}end
     f.session=function()return{is_busy=true}end -- output activity is not admission.
-    f.capture=function()return mode.screen end;f.capture_styled=nil
+    f.capture=function()if mode.on_capture then mode.on_capture()end;return mode.screen end;f.capture_styled=nil
     f.type_text=function(_,bytes)
       writes[#writes+1]=bytes
       if mode.write_throw then error('synthetic ambiguous partial write')end
@@ -49,6 +49,7 @@ local function subject(name,run,without_provider)
     local dir=assert(os.getenv('REMUDA_LUA_SCRATCH'))..'/owner-'..name
     assert(f.fs.mkdir_new(dir));assert(f.fs.mkdir_new(dir..'/remuda'));assert(f.fs.mkdir_new(dir..'/remuda/butler'))
     f._butler_paths={data_home=dir}
+    dofile('packages/butler/system.lua')
     dofile('packages/butler/input_queue.lua')
     local state={approvals={}}
     local function persist()return not mode.marker_fail end
@@ -205,4 +206,32 @@ T.test('missing bound provider accepts independent requests but never dispatches
   T.eq(cancelled.status,'cancelled');T.eq(cancelled.may_have_written,false)
   s.queue.tick();T.eq(#s.writes,0,'next head still defers without capability')
  end,true)
+end)
+
+T.test('human reset at every posttext capture blocks separate Return',function()
+ for _,screen in ipairs({'›','unknown renderer'})do
+  for point=1,16 do
+   subject('capture-'..#screen..'-'..point,function(s)
+    local event=s.event('capture-'..point,'exact line')
+    assert(s.queue.accept_line('codex','exact line',event,'!home:fixture',true))
+    local after,count,injected=false,0,false
+    s.mode.after_text=function()after=true;s.mode.screen=screen end
+    local capture=remuda.capture
+    remuda.capture=function(...)
+     if after then
+      count=count+1
+      if count==point then s.mode.human_idle=0;injected=true end
+     end
+     return capture(...)
+    end
+    s.queue.tick()
+    if point==8 then T.eq(injected,true,'exercise independent RED cut')end
+    if injected then
+     T.eq(#s.keys,0,'human reset during capture '..point..' '..screen)
+     T.eq(s.queue.status()[1].status,'uncertain')
+     s.queue.tick();T.eq(#s.writes,1);T.eq(#s.keys,0)
+    end
+   end)
+  end
+ end
 end)
