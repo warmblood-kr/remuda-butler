@@ -4351,17 +4351,32 @@ local function test_rx_b2b_turn_guard_home_line_once()
     rx_post_http(path, function(calls)
       rx_sync(client, HOME, { rx_msg("$gt", OWNER, "@bot:example.org and @agent-ally:example.org, talk") })
       relay:subscribe_thread(HOME, "$gt")
+      for i = 1, 8 do
+        local progress = rx_cli({ "matrix", "reply", "$gt", "progress " .. i })
+        assert(progress.code == 0, "our own progress reports must not exhaust the peer turn limit: "
+          .. tostring(progress.stderr))
+      end
+      assert(not relay:b2b_stopped(HOME, "$gt"), "our own reports do not start a peer-only streak")
+      assert(client:messages(HOME, line) + rx_http_texts(calls, line) == 0,
+        "normal progress reports do not announce a Butler ping-pong")
       for i = 1, 5 do rx_sync(client, HOME, { rx_msg("$gt-a" .. i, RX_ALLY, "@bot:example.org turn " .. i, rx_thread("$gt")) }) end
       assert(rx_find(delivered, "$gt-a5"), "Butler turns in a followed thread are delivered")
       local result = rx_cli({ "matrix", "reply", "$gt-a5", "my turn" })
-      assert(result.code == 0, "turn 6 (our own reply to a Butler) is allowed once the B2B block is lifted: "
+      assert(result.code == 0, "a reply after five peer turns is allowed: "
         .. tostring(result.stderr))
       result = rx_cli({ "matrix", "reply", "$gt-a5", "one more" })
+      assert(result.code == 0 and not relay:b2b_stopped(HOME, "$gt"),
+        "our own replies neither increment nor reset the five peer turns")
+      rx_sync(client, HOME, { rx_msg("$gt-a6", RX_ALLY, "@bot:example.org turn 6", rx_thread("$gt")) })
+      result = rx_cli({ "matrix", "reply", "$gt-a6", "past the peer limit" })
       assert(result.code ~= 0 and (result.stderr .. result.stdout):find("Reply not sent: stopped replying in thread $gt ("
         .. HOME .. "): 6 Butler-only turns. A reply in that thread from a person on the allowlist resumes it.\nNext: remuda butler matrix --room '"
         .. HOME .. "' thread '$gt'", 1, true),
         "after 6 Butler-only turns a reply into the thread is refused and says it was not sent, got: "
           .. result.stderr .. result.stdout)
+      result = rx_cli({ "matrix", "reply", "$gt", "progress for the owner" })
+      assert(result.code == 0 and relay:b2b_stopped(HOME, "$gt"),
+        "a verified human can receive progress without resetting a stopped peer loop")
       rx_sync(client, HOME, { rx_msg("$gt-a7", RX_ALLY, "@bot:example.org turn 7", rx_thread("$gt")) })
       result = rx_cli({ "matrix", "reply", "$gt-a7", "again" })
       assert(result.code ~= 0, "the thread stays stopped while only Butlers talk")
@@ -4575,11 +4590,22 @@ local function test_rx_mail_reply_turn_guard()
   rx_with_dir(dir, function()
     local relay, client, delivered = rx_relay(path)
     local line = "Two Butlers talked 2 turns without a human, so I paused thread $mt (" .. HOME .. ") to avoid ping-pong. No action needed; reply in that thread only if you want it to continue."
-    rx_sync(client, HOME, { rx_msg("$mt", RX_ALLY, "@bot:example.org ping") })
-    local mail = rx_mail_id(delivered, "$mt")
-    assert(mail, "a Butler's root post is delivered")
+    rx_sync(client, HOME, { rx_msg("$mt", OWNER, "@bot:example.org report progress") })
+    local human_mail = rx_mail_id(delivered, "$mt")
+    for i = 1, 8 do
+      local admitted, why = relay:queue_mail_reply({ mail_id = human_mail,
+        reply_mail_id = "P" .. i, text = "normal progress " .. i })
+      assert(admitted, "normal mail progress must not count toward the peer limit: " .. tostring(why))
+    end
+    assert(not relay:b2b_stopped(HOME, "$mt") and client:messages(HOME, line) == 0,
+      "our own mail reports do not start or announce a peer loop")
+    rx_sync(client, HOME, { rx_msg("$mt-a1", RX_ALLY, "@bot:example.org ping", rx_thread("$mt")) })
+    local mail = rx_mail_id(delivered, "$mt-a1")
+    assert(mail, "a Butler's reply is delivered")
     local ok, err = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R1", text = "reply-one" })
-    assert(ok, "turn 2 of 2 (our mail reply to a Butler) is queued: " .. tostring(err))
+    assert(ok and not relay:b2b_stopped(HOME, "$mt"),
+      "our reply leaves the single peer turn unchanged: " .. tostring(err))
+    rx_sync(client, HOME, { rx_msg("$mt-a2", RX_ALLY, "@bot:example.org again", rx_thread("$mt")) })
     ok, err = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R2", text = "reply-two" })
     assert(ok == nil and tostring(err):find("Reply not sent: stopped replying in thread $mt (" .. HOME
       .. "): 2 Butler-only turns. A reply in that thread from a person on the allowlist resumes it.", 1, true),
@@ -4589,14 +4615,17 @@ local function test_rx_mail_reply_turn_guard()
     assert(client:messages(HOME, "reply-two") == 0 and relay:state().reply_outbox["R2"] == nil,
       "a refused mail reply is neither queued nor posted")
     assert(client:messages(HOME, line) == 1, "exactly ONE HOME line for the stopped thread")
+    ok, err = relay:queue_mail_reply({ mail_id = human_mail, reply_mail_id = "PH", text = "owner progress" })
+    assert(ok and relay:b2b_stopped(HOME, "$mt") and client:messages(HOME, "owner progress") == 1,
+      "mail to a verified human remains available and does not reset peer protection: " .. tostring(err))
     relay:stop()
   end)
 end
 
 -- Live path: the daemon's relay sends a queued mail reply through api.reply, the
 -- REAL matrix.reply (the tests above give the relay a scripted client as api).
--- The reply that reaches b2b_max_turns was allowed by queue_mail_reply, so it
--- must be posted; only the next one is refused.
+-- A reply accepted before the peer limit must still be posted after another
+-- peer message stops the thread; subsequent peer replies are refused.
 local function test_rx_mail_reply_limit_turn_is_posted_through_matrix_reply()
   local dir, path = invite_fixture(OWNER .. "," .. RX_ALLY, "b2b_max_turns=2\n")
   rx_with_dir(dir, function()
@@ -4622,14 +4651,18 @@ local function test_rx_mail_reply_limit_turn_is_posted_through_matrix_reply()
         local mail = rx_mail_id(delivered, "$lt")
         assert(mail, "a Butler's root post is delivered")
         local queued, queue_error = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R1", text = "reply-one" })
-        assert(queued, "turn 2 of 2 (our mail reply to a Butler) is queued: " .. tostring(queue_error))
+        assert(queued, "our reply is queued without consuming a peer turn: " .. tostring(queue_error))
+        assert(not relay:b2b_stopped(HOME, "$lt"), "our reply leaves the peer count below the limit")
+        relay._response({ next_batch = "s2", rooms = { join = { [HOME] = { timeline = { events = {
+          rx_msg("$lt-a2", RX_ALLY, "peer followup", rx_thread("$lt")) } } } } } }, sync)
+        assert(relay:b2b_stopped(HOME, "$lt"), "the second peer message stops the thread")
         for _ = 1, 4 do
           if rx_http_texts(calls, "reply-one") > 0 then break end
           tick_timers(1)
         end
         local held = relay:state().reply_outbox["R1"]
         assert(rx_http_texts(calls, "reply-one") == 1,
-          "the reply that reaches the limit is POSTED through matrix.reply, not refused after it was allowed; outbox error: "
+          "the accepted reply is POSTED through matrix.reply after the peer limit; outbox error: "
             .. tostring(held and held.last_error))
         queued, queue_error = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R2", text = "reply-two" })
         assert(queued == nil and tostring(queue_error):find("2 Butler-only turns", 1, true),
