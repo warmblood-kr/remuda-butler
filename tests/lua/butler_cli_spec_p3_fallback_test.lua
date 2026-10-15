@@ -1,5 +1,5 @@
--- PR3 declared-spec regressions: approvals and standby preserve behavior with
--- remuda.cli.parse present and on older cores without it.
+-- Declared-spec regressions: approvals retain their captured parser; standby
+-- refuses without a shared parser instead of accepting an old-core arity fallback.
 local started
 local function start_butler()
   if started then return end
@@ -152,7 +152,7 @@ end)
 local function standby_case(parser, args)
   start_butler()
   return T.eval([[
-    local saved_cli, saved_fail = remuda.cli, remuda.fail
+    local saved_cli, saved_fail, saved_exec = remuda.cli, remuda.fail, remuda.exec
     local guard = remuda.butler.guard
     local saved_claim = guard.claim
     local saved_extension = remuda._extension_commands.butler
@@ -184,8 +184,8 @@ end
 T.test("standby uses the doctor declaration and refuses every parse error without promotion", function()
   local doctor = "OK:Not the owning daemon: Butler for this home is already running in another Remuda daemon (session owner, pid 9). Nothing was changed.\ndoctor-stub|1:1"
   T.eq(standby_case(true, { "doctor" }), doctor)
-  T.eq(standby_case(false, { "doctor" }), doctor)
   local refusal = "FAIL:1:Butler for this home is already running in another Remuda daemon (session owner, pid 9). Nothing was changed.\nNext: remuda -s owner butler status|1:0"
+  T.eq(standby_case(false, { "doctor" }), refusal, "no parser means no doctor probe")
   for _, args in ipairs({ { "doctor", "extra" }, { "doctor", "--help" }, { "doctor", "-h" },
     { "status" }, { "approve", "A7K2" }, { "--help" }, { "--", "doctor" }, { "doctor", "--" } }) do
     T.eq(standby_case(true, args), refusal, "native parser refuses " .. table.concat(args, " "))
