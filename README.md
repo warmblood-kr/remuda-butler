@@ -126,8 +126,11 @@ refresh fails the command visibly; corrected source is retried. Use this during
 idle development. Butler defers refresh visibly while launch choosers, startup,
 mail delivery, managed dialogs, compaction/model restoration, input recovery,
 approvals, or its Matrix relay are active; retry
-when idle. If the active version predates the guard, refresh refuses and asks
-for one explicit reload when idle to enable guarded refresh. An explicit reload
+when idle. Failed helper loads restore the old command registrations and cached
+input gate; if recovery itself fails, input is refused until a corrected reload.
+If the active version predates the guard or resume callback, refresh refuses and
+asks for one explicit reload when idle. New Butler also refuses source refresh
+on a core without lifecycle resume support; upgrade the core first. An explicit reload
 remains a deliberate lifecycle replacement.
 There is no background file watcher. Ordinary edits and updates without either
 opt-in refresh or `--reload` leave the running Lua image unchanged. Reload requires the
