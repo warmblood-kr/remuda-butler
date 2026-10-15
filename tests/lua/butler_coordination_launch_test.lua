@@ -120,12 +120,15 @@ T.test("settings file failure returns no path and never falls back to a plain wr
       function() remuda.fs.write_atomic = real_atomic end)
     expect_failure("no exclusive mkdir", function() remuda.fs.mkdir_new = nil end,
       function() remuda.fs.mkdir_new = real_mkdir_new end)
-    expect_failure("directory is a link", function()
-      remuda.fs.mkdir_new = function(dir)
-        os.execute("ln -s " .. os.getenv("XDG_DATA_HOME") .. " '" .. dir .. "'")
-        return true
-      end
-    end, function() remuda.fs.mkdir_new = real_mkdir_new end)
+    -- After exclusive creation the directory must still be checked: a link
+    -- answer, or no answer at all, rejects it (core is_symlink is looked up per call).
+    local real_is_symlink = remuda.fs.is_symlink
+    for _, answer in ipairs({ "link", "unknown" }) do
+      expect_failure("directory is a link/unknown (" .. answer .. ")", function()
+        remuda.fs.mkdir_new = function() return true end
+        remuda.fs.is_symlink = function() if answer == "link" then return true end return nil, "error" end
+      end, function() remuda.fs.mkdir_new = real_mkdir_new; remuda.fs.is_symlink = real_is_symlink end)
+    end
     return "ok"
   ]]), "ok")
 end)
