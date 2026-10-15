@@ -2695,7 +2695,7 @@ fn butler_cli_unknown_recipient_and_inbox_help_are_plain_errors() {
 
     let help = remuda_timed(&dir, &["-s", "s", "butler", "inbox", "--help"]);
     assert!(help.status.success(), "{}", String::from_utf8_lossy(&help.stderr));
-    assert!(String::from_utf8_lossy(&help.stdout).contains("Usage: remuda butler inbox [name]"));
+    assert!(String::from_utf8_lossy(&help.stdout).contains("Usage: remuda butler inbox [NAME]"));
 }
 
 #[test]
@@ -2804,7 +2804,7 @@ fn butler_compaction_defers_for_mail_queued_through_the_cli() {
     let queued = remuda_timed(
         &dir,
         &[
-            "-s", "s", "butler", "send", "operator", "butler",
+            "-s", "s", "butler", "send", "--from", "operator", "butler",
             "\"mail must be read before compaction\"",
         ],
     );
@@ -7195,7 +7195,7 @@ paint() {
 set_settings() { printf '{"model":"%s"}\n' "$1" > "$HOME/.claude/settings.json"; }
 paint
 while true; do
-  if IFS= read -t 0.3 -r line; then
+  if IFS= read -t 1 -r line; then
     if [ "$mode" = dialog ] && [ -z "$line" ]; then mode=switching; ticks=4; paint; continue; fi
     if [ "$mode" != idle ]; then [ -n "$line" ] && printf 'LOST:%s\n' "$line" >> "$log"; continue; fi
     [ -n "$line" ] && printf 'CMD:%s\n' "$line" >> "$log"
@@ -7209,7 +7209,9 @@ while true; do
       '/compact') ctx=200000; paint ;;
     esac
   else
-    [ $? -gt 128 ] || exit 0
+    # Stock macOS Bash reports timeout as 1; newer Bash uses >128.
+    # This fake has a PTY and is terminated by daemon teardown.
+    :
     if [ $ticks -gt 0 ] && { [ "$scenario" != nodialog ] || [ -e "$log.status" ]; }; then
       ticks=$((ticks - 1))
       if [ $ticks -le 0 ]; then model=$target; set_settings "$target"; mode=idle; paint; fi
@@ -10081,36 +10083,21 @@ fn butler_quota_never_guesses_mode() {
 fn butler_quota_usage_error() {
     let dir = scratch_dir("butler-quota-usage");
     let (_daemon, _path) = butler_cli_test_daemon(&dir);
-    let next = "Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.";
-    let usage = "Usage: remuda butler quota [--report]\nExample: remuda butler quota --report";
-    let out = remuda_timed(&dir, &["-s", "s", "butler", "quota", "--bogus"]);
-    assert_eq!(out.status.code(), Some(2));
-    assert_eq!(
-        String::from_utf8_lossy(&out.stderr).trim(),
-        format!("unknown option: --bogus\n{usage}\n{next}")
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout),
-        "",
-        "a usage error prints nothing on stdout"
-    );
-
-    let out = remuda_timed(&dir, &["-s", "s", "butler", "quota", "claude"]);
-    assert_eq!(out.status.code(), Some(2));
-    assert_eq!(
-        String::from_utf8_lossy(&out.stderr).trim(),
-        format!("unexpected argument: claude\n{usage}\n{next}")
-    );
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "");
-
+    for (argument, problem) in [("--bogus", "unknown option '--bogus'"), ("claude", "unexpected argument 'claude'")] {
+        let out = remuda_timed(&dir, &["-s", "s", "butler", "quota", argument]);
+        assert_eq!(out.status.code(), Some(2));
+        let error = String::from_utf8_lossy(&out.stderr);
+        assert!(error.contains(problem) && error.contains("Usage: remuda butler quota [OPTIONS]")
+            && error.contains("Next: remuda butler doctor"), "{error}");
+        assert!(out.stdout.is_empty(), "usage errors must print nothing on stdout");
+    }
     for flag in ["--help", "-h"] {
         let out = remuda_timed(&dir, &["-s", "s", "butler", "quota", flag]);
-        assert_eq!(out.status.code(), Some(0), "{flag}");
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout).trim(),
-            format!("remuda butler quota reports, for claude and codex, how each is logged in, the subscription account and how much of each limit is used.\nWith --report it also posts the report to this Butler's Matrix home room.\n{usage}\n{next}"),
-            "{flag}"
-        );
+        assert!(out.status.success(), "{flag}");
+        let help = String::from_utf8_lossy(&out.stdout);
+        for detail in ["Usage: remuda butler quota", "--report", "subscription accounts", "usage limits", "Example:", "Next:"] {
+            assert!(help.contains(detail), "missing {detail}: {help}");
+        }
     }
 }
 

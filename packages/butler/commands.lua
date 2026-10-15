@@ -146,7 +146,7 @@ local QUOTA_CLI_SPEC = {
   name = "remuda butler",
   verbs = {
     quota = {
-      about = "Report claude and codex quota. Example: remuda butler quota --report",
+      about = "Report how Claude and Codex are logged in, their subscription accounts and current usage limits. With --report, also post the report to this Butler's Matrix home room. Example: remuda butler quota --report",
       options = { { long = "report", help = "Also post the report to Matrix" } },
       next = "remuda butler doctor",
     },

@@ -91,6 +91,18 @@ local ok, err = pcall(function()
     .. "in another Remuda daemon (session bsi-a, pid 4242). Nothing was changed."
     and doctor:find("\nClaude Code: ", 1, true), "doctor runs in a refused daemon and says who the owner is: " .. doctor)
 
+  for _, extra in ipairs({"--", "--help", "extra"}) do
+    failed = nil
+    remuda._command.run({"doctor", extra})
+    assert(failed and failed.code == 1, "standby doctor extras must retain refusal policy: " .. extra)
+  end
+  local saved_cli = remuda.cli
+  remuda.cli = nil
+  failed = nil
+  remuda._command.run({"doctor"})
+  remuda.cli = saved_cli
+  assert(failed and failed.code == 1, "standby doctor must not fall back to hand parsing without the shared parser")
+
   -- M1: same config path, different data home. The data lock is ours, the
   -- config lock is held: NOT the owner, and the data lock is given back.
   guard = fresh(function(path)
@@ -231,7 +243,7 @@ local ok, err = pcall(function()
 
   -- L2: in a refused daemon main.lua is not loaded, so the functions these
   -- lifecycle hooks call do not exist. The hooks must do nothing, not raise.
-  local host = { schedule = function() return {} end, cancel = function() end, emit = function() end,
+  local host = { cli = remuda.cli, schedule = function() return {} end, cancel = function() end, emit = function() end,
     exec = function() end }
   local real_meta = getmetatable(_G)
   setmetatable(_G, { __index = { remuda = host } })

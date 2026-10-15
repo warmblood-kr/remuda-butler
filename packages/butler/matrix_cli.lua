@@ -194,6 +194,10 @@ local function parse(args)
   if not report.ok then return nil, nil, report end
   local values = report.values or {}
   local method = report.verb == "get" and "event" or report.verb
+  local function invalid(message)
+    return nil, nil, { ok = false, kind = "error", code = 2,
+      text = message .. "\nUsage: remuda butler matrix " .. method .. " [OPTIONS]\nNext: remuda butler matrix " .. method .. " --help" }
+  end
   local function words(name)
     local value = values[name]
     if type(value) == "table" then return value end
@@ -213,21 +217,21 @@ local function parse(args)
   }
   local room_verbs = { notifications = true, history = true, thread = true, event = true, send = true,
     follow = true, unfollow = true, reply = true, react = true, upload = true, redact = true }
-  if options.n and method ~= "history" then return nil, nil, report end
-  if options.output and method ~= "download" then return nil, nil, report end
-  if options.room and not room_verbs[method] then return nil, nil, report end
+  if options.n and method ~= "history" then return invalid("-n is only supported by history") end
+  if options.output and method ~= "download" then return invalid("-o is only supported by download") end
+  if options.room and not room_verbs[method] then return invalid("--room is not supported by " .. method) end
   if method == "rooms" then
     options.public_term = words("TERM")[1]
-    if options.public_term and not options.public then return nil, nil, report end
+    if options.public_term and not options.public then return invalid("a room search term requires --public") end
   elseif method == "join" or method == "leave" or method == "mark-all" then
-    if options.room then return nil, nil, report end
+    if options.room then return invalid("pass ROOM as an argument") end
     options.room = words("ROOM")[1]
   elseif method == "send" then
     local body = words("TEXT")
     options.text = join_words(body, 1)
     options.file_body = values.file
     if body[1] == "-" and not (function() for _, word in ipairs(args) do if word == "--" then return true end end end)() then
-      if #body ~= 1 then return nil, nil, report end
+      if #body ~= 1 then return invalid("stdin message form takes no extra arguments") end
       options.stdin = true
     end
   elseif method == "notifications" then
@@ -243,7 +247,7 @@ local function parse(args)
     options.text = join_words(body, 1)
     options.file_body = values.file
     if body[1] == "-" then
-      if #body ~= 1 then return nil, nil, report end
+      if #body ~= 1 then return invalid("stdin message form takes no extra arguments") end
       options.stdin = true
     end
   elseif method == "react" then
