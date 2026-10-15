@@ -225,6 +225,7 @@ end
 -- Explicit owner recovery cancels only a complete known Codex picker. It
 -- never lends general write authority to the reporting gate or changes models.
 local recovering = {}
+function M.source_refresh_busy() return next(recovering) ~= nil end
 function M.recover_input(name, done)
   local agent, alias = agent_for(name)
   if not agent or agent.kind ~= "codex" then return done("Recovery refused: target is not a managed Codex session.") end

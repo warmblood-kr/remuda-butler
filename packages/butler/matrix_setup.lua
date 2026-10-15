@@ -420,6 +420,10 @@ local SETUP_CLI_SPEC = {
 }
 
 function matrix.setup_usage()
+  local cli = remuda.cli
+  if cli and cli.parse then
+    return cli.parse(SETUP_CLI_SPEC, { "setup", "--help" }).text .. "\n\n" .. USAGE
+  end
   return USAGE
 end
 
@@ -433,7 +437,7 @@ function matrix.setup_prepare(args)
   local argv = { "setup" }
   for index = 1, #args do argv[#argv + 1] = args[index] end
   local report = cli.parse(SETUP_CLI_SPEC, argv)
-  if report.kind == "help" then return { help = true, usage = report.text } end
+  if report.kind == "help" then return { help = true, usage = matrix.setup_usage() } end
   if not report.ok then return nil, report.text end
   local values = report.values or {}
   local options = {

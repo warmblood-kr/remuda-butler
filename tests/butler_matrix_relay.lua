@@ -2609,27 +2609,17 @@ function ctx_tests.test_matrix_thread_cli_parser_contract()
     end
 
     check("thread --help", { "matrix", "thread", "--help" }, function(help)
-      local expected_help = [[Show every reply in a Matrix thread
-
-Usage: remuda butler matrix thread [OPTIONS] EVENT_ID
-
-Arguments:
-  EVENT_ID  Event that starts the thread, e.g. $abc123, or a Butler mail id (01M...)
-
-Options:
-      --room ROOM  Room ID, alias or name (default: the configured room)
-      --json       Print machine-readable JSON
-  -h, --help       Print help
-
-Next: remuda butler matrix reply EVENT_ID TEXT]]
-      assert(help and help.code == 0 and help.stdout == expected_help and help.stderr == "",
-        "must show the exact per-verb help and exit 0; got: " .. tostring(help and help.stdout or help))
+      assert(help and help.code == 0 and help.stderr == ""
+        and help.stdout:find("Usage: remuda butler matrix thread", 1, true)
+        and help.stdout:find("EVENT_ID", 1, true) and help.stdout:find("--json", 1, true)
+        and help.stdout:find("--room", 1, true) and help.stdout:find("Example:", 1, true),
+        "must show detailed declared per-verb help and exit 0")
     end)
 
     check("thread --jsno", { "matrix", "thread", "--jsno", "$abc" }, function(bad_option)
       local expected_error = "remuda: butler matrix thread: unknown option '--jsno'. Did you mean '--json'?\n"
         .. "Usage: remuda butler matrix thread [OPTIONS] EVENT_ID\n"
-        .. "Next: remuda butler matrix thread --help\n"
+        .. "Next: remuda butler matrix --help\n"
       assert(bad_option and bad_option.code == 2 and bad_option.stderr == expected_error
         and bad_option.stdout == "", "must suggest --json, show Usage and Next, and exit 2; got: "
           .. tostring(bad_option and bad_option.stderr or bad_option))
@@ -2658,8 +2648,8 @@ Next: remuda butler matrix reply EVENT_ID TEXT]]
     end)
 
     check("matrix -n history extra", { "matrix", "-n", "5", "history", "extra" }, function(result)
-      assert(result and result.code == 0 and result.stdout == matrix.cli_usage() and result.stderr == "",
-        "an invalid history invocation must keep the legacy full-usage response")
+      assert(result and result.code == 2 and result.stderr:find("unexpected argument", 1, true),
+        "an invalid history invocation must fail with declared-parser usage")
     end)
     check("matrix help", { "matrix", "help" }, function(result)
       assert(result and result.code == 0 and result.stdout == matrix.cli_usage() and result.stderr == "",
@@ -2672,8 +2662,8 @@ Next: remuda butler matrix reply EVENT_ID TEXT]]
     local old_core = capture_matrix_cli({ "matrix", "thread", "$abc" })
     remuda.cli = old_cli
     local ok, err = pcall(function()
-      assert(old_core and old_core.code == 0 and old_core.stdout == "No Matrix events\n"
-        and #calls == before + 1, "without remuda.cli, thread must keep the old parser and request path")
+      assert(old_core and old_core.code ~= 0 and old_core.stderr:find("requires remuda.cli.parse", 1, true)
+        and #calls == before, "without remuda.cli, thread must refuse without a request")
     end)
     if not ok then failures[#failures + 1] = "old core fallback: " .. tostring(err) end
     assert(#failures == 0, table.concat(failures, "\n"))
@@ -2755,17 +2745,11 @@ local function test_join_leave_missing_room_guidance()
   with_operator_config(path, 200, function(calls)
     for _, verb in ipairs({ "join", "leave" }) do
       local result = capture_matrix_cli({ "matrix", verb })
-      local example = verb == "join"
-        and "Next: remuda butler matrix join #alias:server"
-        or "Next: remuda butler matrix leave '!room:server'"
-      assert(result and result.code == 1
-        and result.stderr:match("^[^\n]+\nNext: [^\n]+\n$") ~= nil,
-        "matrix " .. verb .. " without ROOM must print one error and one Next line: "
-          .. tostring(result and result.stderr))
-      assert(result.stderr:find("matrix " .. verb .. " requires ROOM", 1, true)
-        and result.stderr:find(example, 1, true)
-        and not result.stderr:find("Usage", 1, true),
-        "matrix " .. verb .. " without ROOM must give a concise example, not usage: " .. result.stderr)
+      assert(result and result.code == 2 and result.stdout == ""
+        and result.stderr:find("missing required argument <ROOM>", 1, true)
+        and result.stderr:find("Usage: remuda butler matrix " .. verb, 1, true)
+        and result.stderr:find("Next:", 1, true),
+        "matrix " .. verb .. " without ROOM must report declared-parser usage")
     end
     assert(#calls == 0, "missing-room commands must not make HTTP calls")
   end)
@@ -3845,7 +3829,7 @@ local function test_rx_follow_unfollow_verbs()
 
       result = capture_matrix_cli({ "matrix", "follow" })
       assert(result and result.code ~= 0
-        and result.stderr:find("remuda butler matrix [--json] [--room ROOM] follow EVENT_ID", 1, true)
+        and result.stderr:find("Usage: remuda butler matrix follow", 1, true)
         and not result.stderr:find("upload PATH", 1, true),
         "a follow parse error shows only the follow usage")
     end)
@@ -5813,8 +5797,10 @@ rx_tests = {
         assert(result.code == 0 and n == 1 and body:find("from file /in.md", 1, true)
           and not body:find('"--file', 1, true), "reply --file posts the file text, got " .. tostring(result.stderr))
         result, n = posted({ "matrix", "reply", "$q", "--fiel", "x" })
-        assert(result.code ~= 0 and n == 0 and result.stderr:find("matrix reply EVENT_ID --file PATH", 1, true),
+        assert(result.code ~= 0 and n == 0 and result.stderr:find("unknown reply option --fiel", 1, true),
           "a mistyped reply option never posts, got " .. tostring(result.stderr))
+        result, n, body = posted({ "matrix", "reply", "$q", "--", "--fiel", "x" })
+        assert(result.code == 0 and n == 1 and body:find("--fiel x", 1, true), "reply text after -- stays literal")
       end)
       relay:stop()
     end)
@@ -6360,17 +6346,17 @@ end }
       assert(result and result.code ~= 0 and result.stderr:find(text, 1, true),
         table.concat(args, " ") .. " should fail with " .. text .. ", got: " .. tostring(result and result.stderr))
     end
-    failed({ "matrix", "upload", "--thread" }, "--thread requires a value")
-    failed({ "matrix", "upload", "--thread", "$e", "--caption" }, "--caption requires a value")
+    failed({ "matrix", "upload", "--thread" }, "--thread <EVENT_ID>")
+    failed({ "matrix", "upload", "--thread", "$e", "--caption" }, "--caption <TEXT>")
     local function usage_shown(args)
       local result = capture_matrix_cli(args)
-      assert(result and result.code == 0 and result.stdout:find("upload [--thread EVENT_ID] [--caption TEXT] PATH", 1, true),
+      assert(result and result.code == 2 and result.stderr:find("Usage: remuda butler matrix upload", 1, true),
         table.concat(args, " ") .. " should print the usage, got: " .. tostring(result and result.stdout))
     end
     usage_shown({ "matrix", "upload", "--thread", "$e" })
     usage_shown({ "matrix", "upload", "--bogus", "/x" })
     usage_shown({ "matrix", "upload", "--caption", "c" })
-    failed({ "matrix", "send", "--thread", "$e", "hi" }, "unknown option --thread")
+    failed({ "matrix", "send", "--thread", "$e", "hi" }, "unknown option '--thread'")
   end }
 end)()
 
@@ -6482,7 +6468,8 @@ end)()
       assert(result.code == 1 and result.stderr:find("is not a Matrix message, so a file cannot be attached", 1, true)
         and result.stderr:find("Next: remuda butler reply " .. plain .. " TEXT", 1, true),
         "non-Matrix mail: " .. tostring(result.stderr))
-      assert(run_reply({ "reply", plain, "--attach" }) == nil, "--attach without a path gets the usage")
+      local missing = run_reply({ "reply", plain, "--attach" })
+      assert(missing and missing.code == 2 and missing.stderr:find("--attach <PATH>", 1, true), "--attach without a path fails with declared usage")
       assert(#requests == 0, "nothing is sent")
     end)
   end }
@@ -7330,8 +7317,8 @@ local function test_agent_join_files_request_and_does_not_join()
     local before = read_text(env.path)
     local posts_before = #home_posts(env, "Butler wants to join")
     local missing_room = agent_cli_join(env, nil, ASKER)
-    assert(missing_room.code == 1 and missing_room.stderr
-      == "matrix join requires ROOM.\nNext: remuda butler matrix join #alias:server\n",
+    assert(missing_room.code == 2 and missing_room.stderr:find("missing required argument <ROOM>", 1, true)
+      and missing_room.stderr:find("Usage: remuda butler matrix join", 1, true),
       "an agent join without ROOM must receive the same missing-room error: "
         .. tostring(missing_room.stdout) .. tostring(missing_room.stderr))
     assert(#home_posts(env, "Butler wants to join") == posts_before

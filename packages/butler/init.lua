@@ -108,6 +108,13 @@ return {
   state_version = 1,
   initialize = function() return { compaction_enabled = false, active_choosers = {}, next_chooser_id = 0 } end,
   source_refresh_ready = function(state)
+    if state.compaction_fleet_active then return "compaction is active" end
+    for _, member in pairs(state.compaction_members or {}) do
+      if member.compaction_in_progress or member.dialog_operation or member.restore_pending_attempt_active then
+        return "compaction or model restoration is active"
+      end
+    end
+    if dialogs and dialogs.source_refresh_busy and dialogs.source_refresh_busy() then return "input recovery is active" end
     if next(state.active_choosers or {}) then return "a launch chooser is active" end
     if host._butler_launching or host._butler_start_pending then return "Butler is starting" end
     local bus = host._butler_bus or {}

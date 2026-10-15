@@ -30,3 +30,22 @@ T.test("changed CLI source defers refresh without closing an in-flight launch", 
   local normal = T.eval('remuda._load_extension_command("butler", "butler"); return remuda._dispatch_extension_command("butler", {"doctor", "--help"}, {})')
   T.expect(normal:find("Usage: remuda butler doctor", 1, true), normal)
 end)
+
+T.test("source refresh defers compaction and model restoration before lifecycle stop", function()
+  local result = T.eval([[
+    local state = remuda._butler_state
+    local answers = {}
+    state.compaction_fleet_active = "member-id"
+    local ok, err = pcall(remuda._load_extension_command, "butler", "butler", true)
+    answers[#answers + 1] = tostring(not ok and tostring(err):find("compaction is active", 1, true) ~= nil)
+    state.compaction_fleet_active = nil
+    for _, flag in ipairs({"compaction_in_progress", "dialog_operation", "restore_pending_attempt_active"}) do
+      state.compaction_members = { ["member-id"] = { [flag] = true } }
+      ok, err = pcall(remuda._load_extension_command, "butler", "butler", true)
+      answers[#answers + 1] = tostring(not ok and tostring(err):find("compaction or model restoration is active", 1, true) ~= nil)
+    end
+    state.compaction_members = nil
+    return table.concat(answers, "|")
+  ]])
+  T.eq(result, "true|true|true|true")
+end)

@@ -124,7 +124,8 @@ already loaded entry/helper source and reloads changed lifecycle code. This is
 opt-in and applies on the next command, without restarting the daemon. A failed
 refresh fails the command visibly; corrected source is retried. Use this during
 idle development. Butler defers refresh visibly while launch choosers, startup,
-mail delivery, managed dialogs, approvals, or its Matrix relay are active; retry
+mail delivery, managed dialogs, compaction/model restoration, input recovery,
+approvals, or its Matrix relay are active; retry
 when idle. If the active version predates the guard, refresh refuses and asks
 for one explicit reload when idle to enable guarded refresh. An explicit reload
 remains a deliberate lifecycle replacement.

@@ -234,6 +234,11 @@ local function parse(args)
     options.mode = values.MODE
   elseif method == "reply" then
     local body = words("TEXT")
+    local separated = false
+    for _, word in ipairs(args) do if word == "--" then separated = true; break end end
+    if body[1] and body[1]:sub(1, 2) == "--" and not separated then
+      error("unknown reply option " .. body[1] .. "; use -- before literal text.\nNext: remuda butler matrix reply --help", 0)
+    end
     options.event_id = values.EVENT_ID
     options.text = join_words(body, 1)
     options.file_body = values.file
@@ -846,7 +851,7 @@ function matrix.cli(args, agent, stdin_body, file_body)
       local unknown = unknown_matrix_verb(args)
       if unknown then return unknown end
     end
-    if report and report.text and #args <= 2 then return USAGE end
+    if report and report.text and (#args == 1 or args[2] == "help") then return USAGE end
     if report and report.text then
       local text = report.text:gsub("\nNext: [^\n]*$", "\nNext: remuda butler matrix --help")
       return matrix_cli_failure(text, report.code)

@@ -730,10 +730,11 @@ local REPLY_CLI_SPEC = {
     reply = {
       about = "Reply to a Butler message. Example: remuda butler reply 01M... 'acknowledged'",
       options = {
-        { long = "file", value = "PATH", help = "Read reply text from a file (place before MESSAGE-ID)" },
-        { long = "attach", value = "PATH", help = "Attach a file to the Matrix thread (place before MESSAGE-ID)" },
+        { long = "file", value = "PATH", help = "Read reply text from a file" },
+        { long = "attach", value = "PATH", help = "Attach a file to the Matrix thread" },
       },
-      args = { { name = "WORDS", help = "Message ID followed by reply text or an optional attachment caption", multiple = true } },
+      args = { { name = "MESSAGE_ID", help = "Message to reply to" },
+        { name = "BODY", help = "Reply text or attachment caption", multiple = true, required = false } },
       next = "remuda butler reply --help",
     },
   },
@@ -747,11 +748,11 @@ command(70, "reply", "  remuda butler reply <message-id> <message...> | -\n"
     if type(remuda.fail) == "function" then return remuda.fail(report.text, report.code) end
     error(report.text, 0)
   end
-  local words = report.values.WORDS
-  if type(words) == "string" then words = { words } end
-  words = type(words) == "table" and words or {}
-  local message_id = words[1]
-  if not message_id then return nil end
+  local body_values = report.values.BODY
+  if type(body_values) == "string" then body_values = { body_values } end
+  local words = { report.values.MESSAGE_ID }
+  for _, word in ipairs(body_values or {}) do words[#words + 1] = word end
+  local message_id = report.values.MESSAGE_ID
   if #words < 2 and not report.values.file and not report.values.attach then return nil end
   if report.values.attach then
     local caption = {}
