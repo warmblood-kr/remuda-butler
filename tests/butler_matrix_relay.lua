@@ -8585,3 +8585,47 @@ do
   remuda.butler.dialogs=previous
 end
 print('ok: Matrix owner input recovery route')
+
+-- Durable adapter contract at the actual relay boundary. Store durability and
+-- authenticated adapter behavior are exercised separately by Lua harness tests.
+do
+  local previous=remuda.butler.owner_input
+  local ok,err=pcall(function()
+    with_typed_line_stubs(function(typed,keys)
+      approval_env(nil,function(env)
+        local accepted,calls={},0
+        local refusal=true
+        remuda.butler.owner_input={
+          lookup_owner=function(event)return accepted[event.event_id]end,
+          accept_line=function(session,text,event,room,live)
+            calls=calls+1
+            assert(live and room==HOME and event.sender==OWNER)
+            if refusal then return nil,'storage_busy'end
+            local old=accepted[event.event_id]
+            if old then return{id=old.id,status=old.status,duplicate=true}end
+            local receipt={id='fixture-'..event.event_id,status='queued',text=text,session=session}
+            accepted[event.event_id]=receipt
+            return receipt
+          end,
+        }
+        room_events(env,{text_event('$queue-retry',OWNER,'!first')})
+        assert(not env.relay:state().processed['$queue-retry'],'no consumed marker before durable acceptance')
+        assert(#home_posts(env,'Queued input')==0,'storage refusal never reports accepted')
+        refusal=false
+        room_events(env,{text_event('$queue-retry',OWNER,'!first'),text_event('$queue-2',OWNER,'!second'),
+          text_event('$queue-3',OWNER,'!third')})
+        assert(accepted['$queue-retry'] and accepted['$queue-2'] and accepted['$queue-3'])
+        assert(#home_posts(env,'Queued input')==3,'all three get explicit queued receipts')
+        assert(#typed==0 and #keys==0,'acceptance never writes directly through legacy transport')
+        local before=calls
+        room_events(env,{text_event('$queue-2',OWNER,'!second')})
+        assert(calls==before,'persisted processed event does not enqueue again')
+        room_events(env,{text_event('$queue-evil',STRANGER,'!bad')})
+        assert(not accepted['$queue-evil'],'untrusted event never reaches accepted queue')
+      end,'typed_lines=true\nshell_lines=false\n')
+    end)
+  end)
+  remuda.butler.owner_input=previous
+  assert(ok,err)
+end
+print('ok: Matrix durable owner plaintext admission contract')

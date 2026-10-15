@@ -121,6 +121,9 @@ function system.trace_detail(value)
   return table.concat(parts)
 end
 function system.platform() return windows_selected and "windows" or "posix" end
+function system.join_path(directory,name)
+  return directory..(windows_selected and "\\" or "/")..name
+end
 function system.is_absolute(path)
   if type(path) ~= "string" then return false end
   if windows_selected then return path:match("^%a:[/\\]") ~= nil or path:match("^[/\\][/\\]") ~= nil end

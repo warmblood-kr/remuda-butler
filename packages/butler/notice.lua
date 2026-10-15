@@ -332,7 +332,7 @@ local function current_composer_evidence(kind, screen)
   return bounded, (boxed and closed_box) or (selected_option and options >= 2)
 end
 
-function remuda._butler_approved_text_policy(session, now)
+function remuda._butler_approved_text_policy(session, now, owned_composer)
   local agent = bus.agents[session]
   if not agent then
     for _, candidate in pairs(bus.agents) do
@@ -379,8 +379,13 @@ function remuda._butler_approved_text_policy(session, now)
   local kind = agent and agent.kind or ""
   local startup = remuda._butler_agent_startup[kind] or {}
   if startup.picker and startup.picker(screen) then return false, "known_modal" end
-  local parsed, decision = pcall(remuda._butler_composer_decision, kind, session, screen)
+  local parsed, decision, text = pcall(remuda._butler_composer_decision, kind, session, screen)
   if parsed and decision == "NON-EMPTY" then
+    -- Only the internal post-write Return stage supplies this proof. Keep all
+    -- independent human/workflow/modal guards above; never match history text.
+    if type(owned_composer) == 'function' and owned_composer(text) == true then
+      return true, 'owned_composer'
+    end
     local bounded, menu_like = current_composer_evidence(kind, screen)
     if menu_like and not bounded then
       return true, "renderer_unknown"

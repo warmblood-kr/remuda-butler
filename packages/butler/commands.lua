@@ -429,6 +429,12 @@ command(19, "approve-text", "  remuda butler approve-text request SESSION - | on
   for i = 2, #args do rest[#rest + 1] = args[i] end
   return approve_text.cli(rest, current_agent(caller), caller and caller.stdin)
 end)
+command(22, "input-queue", "  remuda butler input-queue status [ID] | cancel ID | resolve ID not_sent|delivered", function(args, caller)
+  local rest = {}; for i=2,#args do rest[#rest+1]=args[i] end
+  local feature = remuda.butler.input_queue_cli
+  if not feature then return remuda.fail("Durable input queue unavailable.",1) end
+  return feature.cli(rest, resolve_principal(caller))
+end)
 command(18, "schedule", "  remuda butler schedule list\n"
   .. '  remuda butler schedule add <name> "<M H * * *>" <text> | - [--to SESSION]\n'
   .. "  remuda butler schedule rm <name>", function(args, caller)

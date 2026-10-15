@@ -1600,7 +1600,15 @@ function relay.new(options)
     })
   end
 
-  local function check_typed_line(event)
+  local function check_typed_line(event, room_id)
+    local queue = remuda.butler and remuda.butler.owner_input
+    if queue and queue.lookup_owner and cfg.allowed_senders[event.sender] == true
+        and member_kind(event.sender, cfg) == "HUMAN" then
+      local existing = queue.lookup_owner(event, room_id)
+      if existing then
+        return {now=os.time(),ok=true,line=event.content.body:sub(2),form="!",duplicate=true}
+      end
+    end
     local now = os.time()
     trim_typed_line_timestamps(now)
     local ok, reason, line, form = typed_lines.gate({
@@ -1631,6 +1639,29 @@ function relay.new(options)
       target, target_line, target_agent, member_target = resolve_typed_target(line, form)
       if form == "!!" and type(target_agent) == "table" and tostring(target_agent.kind):lower() ~= "claude" then
         ok, reason = false, tostring(target_agent.kind):lower() == "codex" and "shell_codex" or "shell_unsupported"
+      elseif form == "!" and remuda.butler and remuda.butler.owner_input then
+        local queue = remuda.butler.owner_input
+        local called, receipt, failure = pcall(queue.accept_line, target, target_line, event, room_id, true)
+        if not called or not receipt then
+          local why = called and failure or "storage_uncertain"
+          trace_typed_line(event, room_id, form, target_line, target, "not_accepted:" .. tostring(why))
+          local message = why == "storage_uncertain"
+            and ("Queue acceptance is uncertain; check input-queue status before resending this event.")
+            or ("Not accepted into the input queue: " .. tostring(why) .. ".")
+          send_typed_line_reply(event, room_id, message)
+          return true -- No accepted ACK and no processed marker on rejection.
+        end
+        if event.event_id ~= "" then add_processed(state, event.event_id) end
+        if not receipt.duplicate then state.typed_line_timestamps[#state.typed_line_timestamps + 1] = now end
+        -- Queue durability is authoritative even if this secondary checkpoint
+        -- fails. Replayed events use the original ID/payload receipt.
+        pcall(persist)
+        trace_typed_line(event, room_id, form, target_line, target, "queued:" .. receipt.status)
+        -- Acceptance receipts are per-event acknowledgements, not the
+        -- rate-limited refusal notices shared by unrelated owner lines.
+        send_threaded_notice(event, room_id, "Queued input " .. receipt.id .. " for "
+          .. terminal_safe_field(target,128) .. "; status " .. receipt.status .. ".", "input-queue-accepted-")
+        return true
       else
         local policy_ok, may_type = false, false
         local bus = remuda._butler_bus or {}
@@ -1766,7 +1797,7 @@ function relay.new(options)
           local typed_line_check
           local typed_line_check_failed = false
           if typed_line_enabled and live_sync == true then
-            local checked, result = pcall(check_typed_line, ev)
+            local checked, result = pcall(check_typed_line, ev, room_id or cfg.room)
             if checked then
               typed_line_check = result
             else

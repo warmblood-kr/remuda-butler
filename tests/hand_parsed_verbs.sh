@@ -10,6 +10,7 @@ APPROVAL=$REPO/packages/butler/approval.lua
 APPROVE_TEXT=$REPO/packages/butler/approve_text.lua
 SCHEDULE_CLI=$REPO/packages/butler/schedule_cli.lua
 TYPED_LINES_CLI=$REPO/packages/butler/typed_lines_cli.lua
+INPUT_QUEUE_CLI=$REPO/packages/butler/input_queue_cli.lua
 MAIN=$REPO/packages/butler/main.lua
 STATUS_HOOK=$REPO/packages/butler/status_hook.lua
 
@@ -174,6 +175,11 @@ SEED
   fi
   if grep -Fq 'parse_cli(spec, args or {})' "$APPROVE_TEXT"; then
     printf 'approve-text\tyes\n' >> "$tmp/status_helpers"
+  fi
+  if grep -Fq 'local parse=assert(remuda.cli and remuda.cli.parse)' "$INPUT_QUEUE_CLI" \
+      && grep -Fq 'local report=parse(SPEC,' "$INPUT_QUEUE_CLI" \
+      && grep -Fq 'return feature.cli(rest, resolve_principal(caller))' "$commands"; then
+    printf 'input-queue\tyes\n' >> "$tmp/status_helpers"
   fi
   if grep -Fq 'remuda.cli.parse(spec, args or {})' "$MAIN"; then
     printf 'statusline\tyes\n' >> "$tmp/status_helpers"

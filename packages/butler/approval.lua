@@ -78,7 +78,8 @@ local function open_records(state)
   local rows = {}
   for _, record in pairs(state and state.approvals or {}) do
     if type(record) == "table" and (record.status == "open"
-      or (record.kind == "approve_text" and record.status == "approved")) then rows[#rows + 1] = record end
+      or (record.kind == "approve_text" and (record.status == "approved" or record.status == "queued"
+        or record.status == "delivery_uncertain" or record.status == "delivery_quarantined"))) then rows[#rows + 1] = record end
   end
   table.sort(rows, function(a, b)
     if tonumber(a.created_ms) and tonumber(b.created_ms) then return a.created_ms < b.created_ms end
@@ -185,7 +186,7 @@ end
 
 function approval.begin_delivery(rec)
   if not attached or type(rec) ~= "table" or rec.kind ~= "approve_text"
-      or rec.status ~= "approved" or rec.delivery_started == true then return false end
+      or (rec.status ~= "approved" and rec.status ~= "queued") or rec.delivery_started == true then return false end
   rec.delivery_started = true
   local ok, result = pcall(persist)
   if not ok or result == false then
@@ -265,7 +266,7 @@ local function apply_approved(rec)
     if completed then return end
     completed = true
     applying[rec.id] = nil
-    rec.status = ok == "retry" and "approved" or ok and "applied" or "failed"
+    rec.status = ok == "retry" and "approved" or ok == "queued" and "queued" or ok and "applied" or "failed"
     if err then rec.error = tostring(err)
     elseif ok then rec.error = nil end
     persist()
@@ -521,13 +522,30 @@ function approval.answer(id_or_event, verdict, who, event_id)
   return true, nil, rec
 end
 
+-- Queue acceptance is authoritative before an approved waiting record's TTL.
+local before_sweep = approval._before_sweep or {}
+approval._before_sweep = before_sweep
+function approval.before_sweep(name, fn) before_sweep[name] = fn end
+function approval.persist_queue_state(rec, status, queue_id)
+  local allowed = {queued=true,applied=true,delivery_uncertain=true,delivery_quarantined=true,failed=true,denied=true}
+  if not attached or type(rec) ~= 'table' or rec.kind ~= 'approve_text' or not allowed[status]
+      or type(queue_id) ~= 'string' then return false end
+  rec.status, rec.queue_id = status, queue_id
+  local ok, result = pcall(persist)
+  return ok and result ~= false
+end
 function approval.sweep(now)
   if not attached then return 0 end
   now = tonumber(now) or math.floor(os.time() * 1000)
+  local prepared_safe = true
+  for _, fn in pairs(before_sweep) do
+    local ok, ready = pcall(fn, attached.state.approvals)
+    if not ok or ready ~= true then prepared_safe = false end
+  end
   local count = 0
   for _, rec in pairs(attached.state.approvals or {}) do
     local expirable = type(rec) == "table" and (rec.status == "open"
-      or (rec.status == "approved" and rec.kind == "approve_text"))
+      or (rec.status == "approved" and rec.kind == "approve_text" and prepared_safe))
     if expirable and tonumber(rec.expires_at) and now >= rec.expires_at then
       rec.status, rec.answered_at = "expired", now
       local callback = handlers[rec.kind] and handlers[rec.kind].expire
