@@ -535,6 +535,14 @@ function M.register_queue_writer(register)
   -- Only an internally installed, instance-bound provider may drain a queue.
   -- Existing name-only core words are not an identity-fenced fallback.
   local provider = remuda._butler_queue_bound_provider
+  if provider == nil and remuda._input_instance_bound_version == 1
+      and type(remuda._input_type_text_if_instance) == 'function'
+      and type(remuda._input_key_if_instance) == 'function' then
+    -- Capture the complete versioned capability; never infer support from a
+    -- single word or fall back to name-only calls after any bound failure.
+    provider = {identity_fenced=true, type_text=remuda._input_type_text_if_instance,
+      key=remuda._input_key_if_instance}
+  end
   if type(provider) ~= 'table' or provider.identity_fenced ~= true
       or type(provider.type_text) ~= 'function' or type(provider.key) ~= 'function' then
     register(nil)

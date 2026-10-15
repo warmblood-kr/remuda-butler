@@ -44,3 +44,25 @@ outcome='throw';assert(not pcall(write,'type_text','codex',hooks(true),'exact'))
 dialogs.stop();count=before
 assert(not pcall(write,'type_text','codex',hooks(true),'exact'));assert(calls==3 and before==count)
 print('butler dialog queue handoff: PASS')
+-- Native capability negotiation uses a complete explicit versioned contract.
+for _,variant in ipairs({'absent','wrong-version','partial','complete'})do
+ remuda._butler_queue_bound_provider=nil
+ remuda._input_instance_bound_version=variant=='wrong-version'and 2 or variant=='absent'and nil or 1
+ local native_text,native_key=0,0
+ remuda._input_type_text_if_instance=variant~='absent'and function(name,instance,bytes)
+  assert(name=='codex'and instance=='cx'and bytes=='exact');native_text=native_text+1;return'submitted'
+ end or nil
+ remuda._input_key_if_instance=variant=='complete'and function(name,instance,key)
+  assert(name=='codex'and instance=='cx'and key=='RET');native_key=native_key+1;return true
+ end or nil
+ dofile('packages/butler/dialogs.lua');local generation=remuda.butler.dialogs;generation.install()
+ local capability='unset';assert(generation.register_queue_writer(function(cap)capability=cap end))
+ if variant=='complete'then
+  assert(type(capability)=='function')
+  assert(capability('type_text','codex',hooks(true),'exact')=='submitted')
+  assert(capability('key','codex',hooks(true),'RET')==true)
+  assert(native_text==1 and native_key==1)
+ else assert(capability==nil and native_text==0 and native_key==0,variant..' must defer without fallback')end
+ generation.stop()
+end
+print('butler native queue capability negotiation: PASS')
