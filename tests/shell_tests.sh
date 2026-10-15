@@ -40,7 +40,7 @@ echo "core $version, butler $(git -C "$REPO" rev-parse --short HEAD)"
 failed=()
 run() { # name command...
   local log="$T/$1.log"
-  if (cd "$REPO" && "${@:2}") >"$log" 2>&1; then echo "PASS $1"; else echo "FAIL $1"; tail -20 "$log"; failed+=("$1"); fi
+  if (cd "$REPO" && "${@:2}") >"$log" 2>&1; then echo "PASS $1"; grep -E "^(codexless subset|NOTE)" "$log" || true; else echo "FAIL $1"; tail -20 "$log"; failed+=("$1"); fi
 }
 for lua in "$REPO"/tests/*.lua; do
   # session_tree.lua needs a live daemon's _butler_bus; session_tree.sh runs it.

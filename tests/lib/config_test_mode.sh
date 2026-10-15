@@ -1,7 +1,9 @@
 # Decides the coordination-config test mode once, outside Lua.
-#   full       native Codex present and answering `codex --version`
+#   full       native Codex present, `codex --version` exits 0 and prints
+#              `codex[-cli] X.Y.Z` (a version string cannot authenticate a
+#              hostile PATH shim; trusted PATH + native assertions are the check)
 #   codexless  Codex not installed (a subset only; CI without Codex gets this)
-# A present but broken/slow/failing Codex is a hard failure, never a subset;
+# A present but broken/slow/failing/garbage-printing Codex is a hard failure, never a subset;
 # REQUIRE_NATIVE_CODEX=1 also makes an absent Codex a failure.
 config_test_mode() {
   if ! command -v codex >/dev/null 2>&1; then
@@ -13,8 +15,13 @@ config_test_mode() {
     echo codexless
     return 0
   fi
-  if ! perl -e 'alarm 10; exec @ARGV' codex --version >/dev/null 2>&1; then
+  local out
+  if ! out=$(perl -e 'alarm shift; exec @ARGV; exit 127' "${BUTLER_CONFIG_TEST_PROBE_TIMEOUT:-10}" codex --version 2>/dev/null); then
     echo "FAIL: codex is installed but 'codex --version' failed or timed out" >&2
+    return 1
+  fi
+  if ! [[ ${out%%$'\n'*} =~ ^codex(-cli)?\ [0-9]+\.[0-9]+\.[0-9]+ ]]; then
+    echo "FAIL: codex is installed but 'codex --version' printed no supported version" >&2
     return 1
   fi
   echo full

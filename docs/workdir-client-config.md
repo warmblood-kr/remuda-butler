@@ -174,8 +174,14 @@ Codex keys were verified against the
 (`tests/lib/config_test_mode.sh`) and passes it to the Lua test as
 `BUTLER_CONFIG_TEST_MODE`; the Lua file never probes Codex. `full` runs the
 native Codex parser/execpolicy/resolver checks. `codexless` (Codex not
-installed) runs only a small subset. An installed Codex that fails
-`codex --version` is a hard failure, never a subset, and
-`REQUIRE_NATIVE_CODEX=1` makes an absent Codex a failure too. CI without Codex
+installed) runs only a small subset, and the runner prints its
+`codexless subset` line even from a passing log. When Codex is installed, the
+probe requires `codex --version` to exit 0 within
+`BUTLER_CONFIG_TEST_PROBE_TIMEOUT` seconds (default 10) and print
+`codex[-cli] X.Y.Z`; a failing, hanging, exec-failing or garbage-printing
+Codex is a hard failure, never a subset. `REQUIRE_NATIVE_CODEX=1` makes an
+absent Codex a failure too. This checks only that a Codex-looking executable
+answers; a version string cannot authenticate a hostile PATH shim, so the
+native assertions on a trusted PATH are the real check. CI without Codex
 therefore only gets the subset: the native gate is a local/QA requirement.
 Whether CI should provision Codex is an open decision for the maintainers.
