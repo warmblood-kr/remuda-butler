@@ -329,7 +329,10 @@ function M.type_text(session, exact_bytes, provenance)
       or id ~= instance[1] or marker ~= instance[2] then return false, "session_changed" end
   if bus.pending_tasks and bus.pending_tasks[session] then return false, "workflow_owned" end
   attached = current_attached
-  local typed, result = pcall(remuda.type_text, session, exact_bytes)
+  local writer = type(provenance) == "table" and provenance.queue_write
+  local typed, result
+  if type(writer) == "function" then typed, result = pcall(writer, exact_bytes)
+  else typed, result = pcall(remuda.type_text, session, exact_bytes) end
   if not typed or result == false then return false, "type_failed", true end
   local trace = remuda._butler_session_trace or _G._butler_session_trace
   if type(trace) == "function" then
@@ -344,7 +347,7 @@ function M.type_text(session, exact_bytes, provenance)
       end
       done(seen)
     end)
-  end
+  end, result
 end
 
 local function request(session, text, asker, ttl_s, done)
@@ -378,9 +381,15 @@ local function request(session, text, asker, ttl_s, done)
   request_counter = request_counter + 1
   local key = tostring(os.time()) .. ":" .. tostring(request_counter)
   local requested_id, failure
+  local core_instance
+  if butler.owner_input then
+    local binding, why = butler.owner_input.binding(session)
+    if not binding then done(nil, why); return nil, why end
+    core_instance = binding.instance_id
+  end
   local request_data = { registered_text = prepared.registered_text, session = session,
     session_id = session_id, session_marker = session_marker, session_binding_version = 2,
-    bytes = prepared.bytes }
+    bytes = prepared.bytes, core_instance = core_instance }
   local bounded_ttl = math.max(1, math.min(MAX_TTL, tonumber(ttl_s) or approval.default_ttl_s()))
   local result = approval.request({ kind = "approve_text", key = key,
     asker = asker, summary = "type " .. tostring(prepared.bytes) .. " prepared bytes in " .. session,
@@ -493,6 +502,7 @@ function M.cli(args, agent, stdin)
 end
 
 function M.configure()
+  if butler.owner_input then return butler.owner_input.bind_approval() end
   approval.handler("approve_text", {
     approve = function(rec, complete)
       local data = type(rec.data) == "table" and rec.data or {}

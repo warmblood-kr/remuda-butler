@@ -435,6 +435,8 @@ the normal way for a member to communicate.
           .. '  remuda butler schedule add <name> "<M H * * *>" <text> | - [--to SESSION]\n'
           .. "  remuda butler schedule rm <name>",
         run = function(_, args, caller) return host._butler_command_run("schedule", args, caller) end },
+      { id = "input-queue", order = 22, verb = "input-queue", usage = "  remuda butler input-queue status [ID] | cancel ID | resolve ID not_sent|delivered",
+        run = function(_, args, caller) return host._butler_command_run("input-queue", args, caller) end },
       { id = "launch", order = 20, verb = "launch", usage = "  remuda butler launch <claude|codex|monocle> [name] [--model M] [--writable DIR]... [--sandbox full]",
         run = function(_, args, caller) return host._butler_command_run("launch", args, caller) end },
       { id = "topic", order = 30, verb = "topic", usage = "  remuda butler topic new <name> [--template T] [--agent A] [--model M]\n"

@@ -472,9 +472,12 @@ function M.recover_input(name, done)
   step(initial)
 end
 
-local function gated_write(original, operation, name, ...)
+local function gated_write_with_hooks(original, operation, name, hooks, ...)
   local agent = agent_for(name)
-  if not agent then return original(name, ...) end
+  if not agent then
+    if hooks then error("Butler queue target is not registered", 0) end
+    return original(name, ...)
+  end
   local allowed, state = M.check(name)
   if not allowed then error('Butler dialog blocked; waiting for owner review', 0) end
   -- No prepared text or arbitrary key strings enter the log.
@@ -491,6 +494,28 @@ local function gated_write(original, operation, name, ...)
     audit(name, agent, state, 'dialog_action_result', action, 'not_written')
     error('Butler dialog blocked or session changed during audit', 0)
   end
+  if hooks then
+    local marked, accepted = pcall(hooks.before)
+    if not marked or accepted ~= true then
+      audit(name, agent, state, 'dialog_action_result', action, 'not_written')
+      error('Butler queue dispatch marker refused', 0)
+    end
+    -- Marker persistence can yield. Any refusal here is after dispatch intent
+    -- and must remain uncertain in the queue; never replay it as unattempted.
+    local checked, valid = pcall(hooks.recheck)
+    allowed = checked and valid == true and M.check(name)
+    if not allowed or states[name] ~= state or agent_for(name) ~= agent then
+      audit(name, agent, state, 'dialog_action_result', action, 'not_written')
+      error('Butler queue target or admission changed after marker', 0)
+    end
+  end
+  if hooks then
+    local checked, valid = pcall(hooks.identity)
+    if not checked or valid ~= true then
+      audit(name, agent, state, 'dialog_action_result', action, 'not_written')
+      error('Butler queue final identity fence refused', 0)
+    end
+  end
   local result = pack(pcall(original, name, ...))
   local outcome = not result[1] and 'error' or result[2] == false and 'refused' or 'returned'
   audit(name, agent, state, 'dialog_action_result', action, outcome)
@@ -498,7 +523,39 @@ local function gated_write(original, operation, name, ...)
   return unpack_args(result, 2, result.n)
 end
 
+local function gated_write(original, operation, name, ...)
+  return gated_write_with_hooks(original, operation, name, nil, ...)
+end
+-- Hand the guarded writer to the owner adapter once, never from input payloads.
+-- No arbitrary original/raw writer or approval authority is handed out.
+local queue_writer_registered = false
+function M.register_queue_writer(register)
+  if queue_writer_registered or type(register) ~= 'function' or not M._installed then return false end
+  queue_writer_registered = true
+  -- Only an internally installed, instance-bound provider may drain a queue.
+  -- Existing name-only core words are not an identity-fenced fallback.
+  local provider = remuda._butler_queue_bound_provider
+  if type(provider) ~= 'table' or provider.identity_fenced ~= true
+      or type(provider.type_text) ~= 'function' or type(provider.key) ~= 'function' then
+    register(nil)
+    return true
+  end
+  register(function(operation, name, hooks, ...)
+    if butler.dialogs ~= M or not M._installed then error('Butler queue writer generation changed', 0) end
+    if operation ~= 'type_text' and operation ~= 'key' then error('Unsupported queue operation', 0) end
+    if type(hooks) ~= 'table' or type(hooks.before) ~= 'function' or type(hooks.recheck) ~= 'function' or type(hooks.identity) ~= 'function' or type(hooks.expected_instance) ~= 'string' then
+      error('Butler queue writer requires internal callbacks', 0)
+    end
+    local function bound(target, ...)
+      return provider[operation](target, hooks.expected_instance, ...)
+    end
+    return gated_write_with_hooks(bound, operation, name, hooks, ...)
+  end)
+  return true
+end
+
 function M.install()
+  M._installed = true
   -- Reload replaces this module but retains the original core functions once.
   local originals = remuda._butler_dialog_originals
   if not originals then
@@ -519,6 +576,7 @@ function M.install()
 end
 M.write = gated_write
 function M.stop()
+  M._installed = false
   if butler.dialogs ~= M then return end -- retiring activation cannot unwrap its replacement
   local originals = remuda._butler_dialog_originals
   if originals then
