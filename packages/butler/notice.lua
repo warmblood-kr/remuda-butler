@@ -694,7 +694,9 @@ local function tick_notice_recovery(session, state)
     return notice_recovery_error(session, state, "recovery timed out after 20 seconds")
   end
   local observing_submit = state.phase == "verify_notice" or state.phase == "verify_existing"
-  if not recovery_human_safe(session, observing_submit) then return false end
+  -- A working agent only queues the notice for its next turn (probed on Claude
+  -- 2.1.300 and Codex 0.162.1), so the probe may run while busy; the human gate stays.
+  if not recovery_human_safe(session, observing_submit or state.phase == "probe") then return false end
   local busy = false
   if remuda.session then
     local checked, value = pcall(function()
@@ -714,9 +716,13 @@ local function tick_notice_recovery(session, state)
     return begin_notice_submit(session, state)
   end
   if state.phase == "probe" then
-    if state.last_screen == normalized then state.stable = (state.stable or 0) + 1
-    else state.last_screen, state.stable = normalized, 1 end
-    if state.stable < 2 then return false end
+    -- An EMPTY composer needs no stable screen: a working pane animates. The
+    -- policy inside begin_notice_submit re-checks modal and composer before typing.
+    if decision ~= "EMPTY" then
+      if state.last_screen == normalized then state.stable = (state.stable or 0) + 1
+      else state.last_screen, state.stable = normalized, 1 end
+      if state.stable < 2 then return false end
+    end
     if decision == "EMPTY" then
       bus.notice_recoveries[session] = nil
       return begin_notice_submit(session, state)
