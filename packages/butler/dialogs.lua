@@ -128,6 +128,8 @@ local function classify(name, agent, screen)
   local probes = { unknown = compaction and compaction.unknown_dialog_signature }
   local signature = probes.unknown and probes.unknown(screen)
   if legacy_owned(name, agent, screen, signature) then return nil, nil, true end
+  local picker = startup.picker and startup.picker(screen)
+  if picker then return "codex_" .. picker.kind .. "_picker", picker.signature end
   for _, descriptor in ipairs(startup.blocking or {}) do
     assert(descriptor.risk == 'report' and type(descriptor.id) == 'string'
       and type(descriptor.match) == 'function', 'invalid reporting-only dialog descriptor')
@@ -206,6 +208,127 @@ function M.tick()
     end
   end
   for name in pairs(states) do if not live[name] then states[name] = nil end end
+end
+
+-- Notice deferral is specifically a picker wait, not the general write gate:
+-- verification of already submitted mail must still observe subsequent dialogs.
+function M.picker_pending(name)
+  local agent = agent_for(name)
+  if not agent or agent.kind ~= "codex" then return false end
+  local startup = (remuda._butler_agent_startup or {}).codex or {}
+  if type(startup.picker) ~= "function" then return false end
+  local captured, screen = pcall(remuda.capture, name)
+  if not captured or type(screen) ~= "string" then return true end
+  return startup.picker(screen) ~= nil
+end
+
+-- Explicit owner recovery cancels only a complete known Codex picker. It
+-- never lends general write authority to the reporting gate or changes models.
+local recovering = {}
+function M.recover_input(name, done)
+  local agent, alias = agent_for(name)
+  if not agent or agent.kind ~= "codex" then return done("Recovery refused: target is not a managed Codex session.") end
+  if recovering[name] then return done("Recovery already pending for " .. name .. ".") end
+  local lifecycle = remuda._butler_state or remuda._butler_compaction_state or {}
+  local member = (lifecycle.compaction_members or {})[agent.id or name]
+  if member and (member.compaction_in_progress or member.dialog_operation) then
+    return done("Recovery refused: a compaction workflow still owns this session. Wait for its bounded cleanup.")
+  end
+  local startup = (remuda._butler_agent_startup or {}).codex or {}
+  local function snapshot()
+    if butler.dialogs ~= M or agent_for(name) ~= agent then return nil end
+    local lifecycle = remuda._butler_state or remuda._butler_compaction_state or {}
+    local member = (lifecycle.compaction_members or {})[agent.id or name]
+    if member and (member.compaction_in_progress or member.dialog_operation) then return nil end
+    local ok, sessions = pcall(remuda.ls)
+    local instance
+    for _, row in ipairs(ok and sessions or {}) do
+      if row.name == name and row.alive and type(row.instance_id) == "string" and row.instance_id ~= "" then
+        instance = row.instance_id
+      end
+    end
+    if not instance or (agent.instance_id and agent.instance_id ~= instance) then return nil end
+    local captured, screen = pcall(remuda.capture, name)
+    if not captured or type(screen) ~= "string" then return nil end
+    return {instance=instance, screen=screen, picker=startup.picker and startup.picker(screen)}
+  end
+  local initial = snapshot()
+  if not initial or not initial.picker then return done("Recovery refused: no complete known Codex model/effort picker. No input was sent.") end
+  local telemetry = remuda._butler_telemetry_for and remuda._butler_telemetry_for(agent) or {}
+  local initial_model = type(telemetry.model) == "string" and telemetry.model:match("^gpt%-[%w%.%-]+$") and telemetry.model or "unknown"
+  local token = {instance=initial.instance, escapes=0}
+  recovering[name] = token
+  local handle, finished
+  local function finish(reason, final)
+    if finished then return end
+    finished = true
+    if handle and handle.cancel then handle:cancel() end
+    if recovering[name] == token then recovering[name] = nil end
+    local text = "Input recovery " .. name .. ": " .. reason .. ". Initial actual model=" .. initial_model
+      .. "; initial effort=unknown; picker=" .. initial.picker.kind
+      .. (initial.picker.model and ("/" .. initial.picker.model) or "")
+      .. "; ESC sent=" .. token.escapes .. "."
+    if final then text = text .. " Current model/effort=" .. final .. "." end
+    done(text .. " No model was selected; intended settings were not inferred. Queued inbox mail is retained.")
+  end
+  local function current()
+    local now = snapshot()
+    if not now or now.instance ~= token.instance or recovering[name] ~= token then return nil end
+    return now
+  end
+  local step
+  step = function(observed)
+    local now = current()
+    if not now then return finish("stopped: session changed or capture unavailable") end
+    if not now.picker then
+      local unknown = remuda._butler_compaction and remuda._butler_compaction.unknown_dialog_signature
+      local empty = remuda._butler_prompt_is_empty and remuda._butler_prompt_is_empty("codex", now.screen) == "EMPTY"
+      local model, effort = now.screen:match("(GPT%-[%w%.%-]+)%s+(%a+)%s+·")
+      if empty and model and effort and not (unknown and unknown(now.screen)) then
+        if not M.check(name) then return finish("stopped: resolution audit unavailable") end
+        return finish("completed; composer is safe", model:lower() .. " " .. effort:lower())
+      end
+      return finish("stopped: picker disappeared without a verified safe composer")
+    end
+    if now.picker.signature ~= observed.picker.signature or now.picker.kind ~= observed.picker.kind then
+      return finish("stopped: dialog changed before cancellation")
+    end
+    if token.escapes >= 2 then return finish("stopped: cancellation limit reached") end
+    local decision = {instance=token.instance, id="codex_picker_cancel", signature=now.picker.signature}
+    if not audit(name, agent, decision, "dialog_action", "key/ESC", "owner_recovery") then
+      return finish("stopped: audit unavailable")
+    end
+    local checked = current()
+    if not checked or not checked.picker or checked.picker.signature ~= now.picker.signature then
+      return finish("stopped: session or dialog changed during audit")
+    end
+    local originals = remuda._butler_dialog_originals
+    if not originals or not originals.key then return finish("stopped: original key API unavailable") end
+    local sent, result = pcall(originals.key, name, "ESC")
+    audit(name, agent, decision, "dialog_action_result", "key/ESC", sent and result ~= false and "returned" or "not_written")
+    if not sent or result == false then return finish("stopped: cancellation refused") end
+    token.escapes = token.escapes + 1
+    local previous = now.picker
+    local ok, next_handle = pcall(remuda.expect, name, {{id="owner-picker-cancel", match=function()
+      local next = current()
+      return not next or not next.picker or next.picker.signature ~= previous.signature
+    end, action=function()
+      if handle and handle.cancel then handle:cancel() end
+      local next = current()
+      if not next then return finish("stopped: session changed") end
+      -- ESC must make the observed effort picker go back to model, or close
+      -- the model picker. Any other transition ends this one-shot authority.
+      if next.picker and (previous.kind ~= "effort" or next.picker.kind ~= "model") then
+        return finish("stopped: unexpected picker transition")
+      end
+      step(next)
+    end}}, {timeout=5, interval=0.1,
+      on_timeout=function() finish("stopped: cancellation timed out; reissue a fresh owner command after review") end,
+      on_error=function() finish("stopped: cancellation watcher failed") end}, false)
+    if not ok then return finish("stopped: cancellation watcher unavailable") end
+    handle = next_handle
+  end
+  step(initial)
 end
 
 local function gated_write(original, operation, name, ...)

@@ -1739,7 +1739,8 @@ function relay.new(options)
           if approval_verdict == "grant" and approval_record and approval_record.kind ~= "guard_action" then
             approval_record, approval_verdict = nil, nil
           end
-          local typed_line_candidate = not approval_record and cfg.allowed_senders[ev.sender] == true
+          local recovery_line = type(content.body) == "string" and (content.body == "!recover-input" or content.body:match("^!recover%-input%s"))
+          local typed_line_candidate = not recovery_line and not approval_record and cfg.allowed_senders[ev.sender] == true
             and member_kind(ev.sender, cfg) == "HUMAN"
             and type(content.body) == "string" and content.body:sub(1, 1) == "!"
           local typed_line_enabled = typed_line_candidate and cfg.typed_lines == true
@@ -1772,7 +1773,15 @@ function relay.new(options)
               trace_typed_line(ev, room_id or cfg.room, nil, nil, "butler", "refused:not_live")
             end
           end
-          local guard_reply = not approval_record and owner_guard_line(ev, content, live_sync == true, room_id or cfg.room)
+          -- Recovery is handled by code even when the root pane is blocked.
+          -- The owner event is durably consumed BEFORE any cancellation key.
+          local recovery_target = recovery_line and content.body:match("^!recover%-input ([%w_.%-]+)$")
+          local recovery_allowed = recovery_line and not approval_record
+            and typed_lines.accept(state, ev, os.time(), cfg)
+            and approve_text.owner_event_allowed(ev, {room_id=cfg.home_room, created_ms=relay_started_ms}, cfg,
+              live_sync == true, room_id or cfg.room)
+            and member_kind(ev.sender, cfg) == "HUMAN"
+          local guard_reply = not recovery_line and not approval_record and owner_guard_line(ev, content, live_sync == true, room_id or cfg.room)
           local status_matched, status_text, status_commit = false, nil, nil
           if not approval_record and type(content.body) == "string" and content.body:sub(1, 1) == "?"
               and member_kind(ev.sender, cfg) == "HUMAN" then
@@ -1787,7 +1796,26 @@ function relay.new(options)
                 "consumed:" .. trace_reason .. ":" .. (terminal_safe_field(tostring(matched), 64):gsub("%c", " ")))
             end
           end
-          if guard_reply then
+          if recovery_line then
+            -- A rejected recovery line is never forwarded as terminal text.
+            if event_id ~= "" then add_processed(state, event_id) end
+            if cursor then state.since = cursor end
+            local saved, saved_result = pcall(persist)
+            if recovery_allowed and saved and saved_result == true then
+              local dialogs = remuda.butler and remuda.butler.dialogs
+              if not recovery_target then
+                send_threaded_notice(ev, room_id or cfg.room, "Usage: !recover-input SESSION", "input-recovery-")
+              elseif dialogs and type(dialogs.recover_input) == "function" then
+                local ok = pcall(dialogs.recover_input, recovery_target, function(text)
+                  send_threaded_notice(ev, room_id or cfg.room, text, "input-recovery-")
+                end)
+                if not ok then send_threaded_notice(ev, room_id or cfg.room,
+                  "Input recovery stopped. Reissue a fresh command after review; no automatic replay.", "input-recovery-") end
+              else
+                send_threaded_notice(ev, room_id or cfg.room, "Input recovery unavailable on this Butler version.", "input-recovery-")
+              end
+            end
+          elseif guard_reply then
             -- The event is spent before it acts, so a replay after a restart changes nothing.
             if event_id ~= "" then add_processed(state, event_id) end
             if cursor then state.since = cursor end

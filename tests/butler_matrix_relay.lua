@@ -8556,3 +8556,45 @@ for _, case in ipairs({
 end
 assert(#approval_failures == 0, #approval_failures .. " approval tests failed:\n" .. table.concat(approval_failures, "\n"))
 print("ok: agent join approvals")
+
+-- Owner recovery is an authenticated code route even when typed lines are off.
+do
+  local previous = remuda.butler.dialogs
+  local calls = {}
+  approval_env(OWNER .. ',@agent-x:example.org', function(env)
+    remuda.butler.dialogs = {recover_input=function(name, done)
+      local f=assert(io.open(env.path..'.since'));local data=f:read('*a');f:close()
+      assert(data:find('$recover-ok',1,true), 'owner event must persist before cancellation')
+      calls[#calls+1]=name
+      done('Input recovery '..name..': synthetic completed')
+    end}
+    local edited=text_event('$recover-edited',OWNER,'!recover-input codex')
+    edited.content['m.new_content']={msgtype='m.text',body='!recover-input codex'}
+    room_events(env, {
+      text_event('$recover-stranger',STRANGER,'!recover-input codex'),
+      text_event('$recover-agent','@agent-x:example.org','!recover-input codex'),
+      text_event('$recover-old',OWNER,'!recover-input codex',nil,ts(-400000)),
+      text_event('$recover-future',OWNER,'!recover-input codex',nil,ts(120000)), edited,
+    })
+    room_events(env,{text_event('$recover-wrong-room',OWNER,'!recover-input codex')},ALL)
+    assert(#calls==0,'nonowner, member, stale/future, edited and wrong room cannot cancel')
+    restart_relay(env)
+    room_events(env,{text_event('$recover-not-live',OWNER,'!recover-input codex')})
+    assert(#calls==0,'first nonlive sync cannot cancel')
+    room_events(env,{text_event('$recover-ok',OWNER,'!recover-input codex')})
+    assert(#calls==1 and calls[1]=='codex','fresh live owner command reaches recovery despite typed-lines off')
+    assert(#home_posts(env,'synthetic completed')==1,'result returns through independent Matrix thread')
+    room_events(env,{text_event('$recover-ok',OWNER,'!recover-input codex')})
+    assert(#calls==1,'same event never replays cancellation')
+    local write=remuda.fs.write_atomic
+    remuda.fs.write_atomic=function(path,...)
+      if path==env.path..'.since' then return nil,'synthetic disk full' end
+      return write(path,...)
+    end
+    room_events(env,{text_event('$recover-disk',OWNER,'!recover-input codex')})
+    remuda.fs.write_atomic=write
+    assert(#calls==1,'failed durable consume cannot cancel')
+  end)
+  remuda.butler.dialogs=previous
+end
+print('ok: Matrix owner input recovery route')

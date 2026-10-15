@@ -862,6 +862,27 @@ local function deliver_notice(session)
   pending = refresh_pending_notice(session, pending)
   if not pending then return true end
   if bus.pending_tasks[session] then return false end
+  -- A Codex picker is a wait condition, not a failed text delivery. Keep the mail
+  -- and any submission verification intact; never probe a picker with keys.
+  local dialogs = remuda.butler and remuda.butler.dialogs
+  if dialogs and type(dialogs.picker_pending) == "function" then
+    local checked, pending_picker = pcall(dialogs.picker_pending, session)
+    if not checked or pending_picker then
+      pending.dialog_since = pending.dialog_since or notice_now()
+      pending.due_at = notice_now() + 1
+      if notice_now() - pending.dialog_since >= NOTICE_BUSY_CAP_S then
+        remuda._butler_notice_open_stuck(session, pending.message_order, "dialog: waiting for owner review")
+      end
+      return false
+    end
+  end
+  if pending.dialog_since then
+    local recovery = bus.notice_recoveries[session]
+    if recovery and recovery.started_at then
+      recovery.started_at = recovery.started_at + notice_now() - pending.dialog_since
+    end
+    pending.dialog_since = nil
+  end
   local recovering = bus.notice_recoveries[session]
   if recovering then
     recovering.started_at = recovering.started_at or notice_now()

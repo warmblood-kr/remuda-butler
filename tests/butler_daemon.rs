@@ -7365,7 +7365,7 @@ done
 /// submits with Return) lands as a global-default choice and shows in the log.
 #[test]
 #[cfg(unix)]
-fn butler_codex_compaction_switches_to_luna_for_the_session_and_restores() {
+fn butler_codex_compaction_preserves_session_model_and_restores_legacy_records() {
     let dir = scratch_dir("butler-fake-codex");
     let (token_path, config_path) = butler_config(
         &dir,
@@ -7424,7 +7424,7 @@ rows=("Low" "Medium" "High" "Extra high")
 levels=("low" "medium" "high" "xhigh")
 model=gpt-5.6-sol; effort=high
 case "$scenario" in
-  crash) model=gpt-6-luna; effort=medium ;;
+  crash) model=gpt-6-luna; effort=low ;;
   no-row) effort=minimal ;;
   no-luna) names[3]="GPT-6-Nova"; ids[3]="gpt-6-nova" ;;
 esac
@@ -7593,74 +7593,40 @@ done
         eval(&path, &format!("remuda._fake_codex({name:?}, {:?}, {scenario:?})", log.to_string_lossy()));
         wait_for(&path, name, "Ask Codex to do anything");
     };
-    // Switch to luna keeping the high effort (luna's default row is Medium),
-    // compact, then restore sol at high (sol's default row is Low). Picker
-    // rows are chosen with remuda.key, never typed.
-    let full_cycle = "CMD:/model\nKEY:4\nKEY:<down>\nKEY:s\nCMD:/compact\nCMD:/model\nKEY:5\nKEY:<down>\nKEY:<down>\nKEY:s\n";
-
-    // 1. Happy path, twice: effort kept, prior model back, record written
-    //    before the switch and cleared after, config.toml never written.
+    // New compaction runs never open a model picker or change model/effort.
+    let full_cycle = "CMD:/compact\n";
     start("cx-happy", "happy");
     for round in 1..=2 {
-        assert_eq!(eval(&path, "return remuda.butler.compact('cx-happy')"), "started", "round {round}");
-        let expected = full_cycle.repeat(round);
-        let got = settle("cx-happy", &|log| log == expected, "the full session-only cycle");
-        assert!(!got.contains("PROMPT:"), "no /model text may reach the model as a prompt: {got}");
-        assert!(capture(&path, "cx-happy").contains("GPT-5.6-Sol high"),
-            "round {round}: the prior model and effort must be back");
-        eval(&path, "remuda._fake_record_at_s['cx-happy'] = nil");
+        assert_eq!(eval(&path, "return remuda.butler.compact('cx-happy')"), "started");
+        settle("cx-happy", &|log| log == full_cycle.repeat(round), "direct compaction");
+        assert!(capture(&path, "cx-happy").contains("GPT-5.6-Sol high"));
     }
-    assert!(!record().contains("cx-happy-id"), "a finished compaction must clear its restore record: {}", record());
-    assert_eq!(std::fs::read_to_string(&codex_config).unwrap(), config_seed,
-        "session-only switches must leave config.toml byte-identical");
-
-    // 2. The restore record holds the prior model and effort while on luna.
-    //    An unrelated entry keeps the file on disk after cx-record's is cleared.
-    std::fs::write(&restore_file, r#"{"cx-other-id":"codex:gpt-5.6-sol high"}"#).unwrap();
-    eval(&path, "remuda._butler_compaction_load_restore_record()");
-    eval(&path, "remuda._fake_record_at_s['cx-record'] = nil");
-    start("cx-record", "happy");
-    assert_eq!(eval(&path, "return remuda.butler.compact('cx-record')"), "started");
-    settle("cx-record", &|log| log == full_cycle, "the full cycle");
-    let at_switch = eval(&path, "return remuda._fake_record_at_s['cx-record'] or ''");
-    assert!(at_switch.contains("\"cx-record-id\"") && at_switch.contains("codex:gpt-5.6-sol high"),
-        "the durable record must name the prior model and effort before the luna switch: {at_switch:?}");
-    let mode = std::fs::metadata(&restore_file).expect("restore record").permissions().mode() & 0o777;
-    assert_eq!(mode, 0o600, "the restore record must be written privately");
-    std::fs::remove_file(&restore_file).unwrap();
-    eval(&path, "remuda._butler_compaction_load_restore_record()");
-
-    // 3. A failed compaction still restores the prior model.
+    assert!(!record().contains("cx-happy-id"), "no new restore record is needed");
+    assert_eq!(std::fs::read_to_string(&codex_config).unwrap(), config_seed);
     start("cx-fails", "compact-fails");
     assert_eq!(eval(&path, "return remuda.butler.compact('cx-fails')"), "started");
-    let got = settle("cx-fails", &|log| log == full_cycle, "the restore after a failed compaction");
-    assert!(capture(&path, "cx-fails").contains("GPT-5.6-Sol high"), "failure must still restore: {got}");
-    assert!(!record().contains("cx-fails-id"), "restored after failure, the record must be cleared: {}", record());
+    settle("cx-fails", &|log| log == full_cycle, "failed direct compaction");
+    assert!(capture(&path, "cx-fails").contains("GPT-5.6-Sol high"));
+    // Efforts absent from Luna and accounts without Luna no longer matter.
+    for (name, scenario) in [("cx-no-row", "no-row"), ("cx-no-luna", "no-luna"), ("cx-s-ignored", "s-ignored")] {
+        start(name, scenario);
+        assert_eq!(eval(&path, &format!("return remuda.butler.compact({name:?})")), "started");
+        settle(name, &|log| log == full_cycle, "compaction without picker");
+    }
 
-    // 4. No row for the current effort on the luna picker: ESC out, never
-    //    press s or Enter, never compact, and report why.
-    start("cx-no-row", "no-row");
-    eval(&path, "return remuda.butler.compact('cx-no-row')");
-    let got = settle("cx-no-row", &|log| log.contains("KEY:ESC"), "an ESC out of the picker");
-    assert!(!got.contains("KEY:s") && !got.contains("KEY:RET") && !got.contains("/compact"),
-        "a missing effort row must not switch or compact: {got}");
-    let screen = capture(&path, "cx-no-row");
-    assert!(screen.contains("Ask Codex to do anything") && screen.contains("GPT-5.6-Sol minimal"),
-        "the picker must be closed and the model unchanged:\n{screen}");
-    assert!(reports().contains("minimal"), "the parent must hear which effort row was missing: {}", reports());
-
-    // 5. A crash left the member on luna with a durable record: the next tick
-    //    re-selects the prior model for the session only, then clears it.
+    // A legacy crash record restores session-only, then clears. Keep Low in
+    // this PTY fake: macOS shell reads can split arrow sequences into ESC,[,B.
+    // Production effort movement/abort is covered by codex-compaction-scenarios.lua.
     start("cx-crash", "crash");
     std::fs::create_dir_all(Path::new(&restore_file).parent().unwrap()).unwrap();
     let mut prior: serde_json::Value = serde_json::from_str(&record()).unwrap_or_else(|_| serde_json::json!({}));
-    prior["cx-crash-id"] = serde_json::json!("codex:gpt-5.6-sol medium");
+    prior["cx-crash-id"] = serde_json::json!("codex:gpt-5.6-sol low");
     std::fs::write(&restore_file, prior.to_string()).unwrap();
     eval(&path, "remuda._butler_compaction_load_restore_record()");
     eval(&path, "return remuda._butler_compaction_tick('cx-crash', false)");
     let got = settle("cx-crash", &|log| log.contains("KEY:s"), "the restore after a crash");
-    assert_eq!(got, "CMD:/model\nKEY:5\nKEY:<down>\nKEY:s\n", "resume must only restore, session-only");
-    assert!(capture(&path, "cx-crash").contains("GPT-5.6-Sol medium"));
+    assert_eq!(got, "CMD:/model\nKEY:5\nKEY:s\n", "resume must only restore, session-only");
+    assert!(capture(&path, "cx-crash").contains("GPT-5.6-Sol low"));
     assert!(!record().contains("cx-crash-id"), "the resumed restore must clear the record: {}", record());
 
     // 6. Two members compacting at once: config.toml stays byte-identical.
@@ -7695,29 +7661,6 @@ done
     settle("cx-b", &|log| log == full_cycle, "cx-b's lock release");
     assert_eq!(std::fs::read_to_string(&codex_config).unwrap(), config_seed);
 
-    // 7. Every picker failure closes the picker (one ESC per screen) before
-    //    it fails, so no later tick stalls behind an open picker.
-    let closed = |name: &str, what: &str| {
-        let screen = capture(&path, name);
-        assert!(screen.contains("Ask Codex to do anything") && screen.contains("GPT-5.6-Sol high")
-            && !screen.contains("Select "), "{what}: the picker must be closed, model unchanged:\n{screen}");
-        assert!(!record().contains(&format!("{name}-id")), "{what}: nothing to restore: {}", record());
-    };
-    // 7a. The account offers no luna row: ESC out of the model list.
-    start("cx-no-luna", "no-luna");
-    assert_eq!(eval(&path, "return remuda.butler.compact('cx-no-luna')"), "started");
-    let got = settle("cx-no-luna", &|log| log.contains("KEY:ESC"), "an ESC out of the model list");
-    assert_eq!(got, "CMD:/model\nKEY:ESC\n", "a missing luna row must only close the picker");
-    closed("cx-no-luna", "missing luna row");
-    assert!(reports().contains("gpt-6-luna"), "the parent must hear luna was missing: {}", reports());
-    // 7b. `s` is ignored: after the timeout, ESC back to the list, then out.
-    start("cx-s-ignored", "s-ignored");
-    assert_eq!(eval(&path, "return remuda.butler.compact('cx-s-ignored')"), "started");
-    let got = settle("cx-s-ignored", &|log| log.ends_with("KEY:ESC\nKEY:ESC\n"), "two ESCs out of the pickers");
-    assert_eq!(got, "CMD:/model\nKEY:4\nKEY:<down>\nKEY:s\nKEY:ESC\nKEY:ESC\n",
-        "an ignored s must close both pickers and never compact");
-    closed("cx-s-ignored", "ignored s");
-    assert!(reports().contains("codex-model-set"), "the parent must hear which step failed: {}", reports());
     drop(daemon);
 }
 
@@ -8086,8 +8029,7 @@ done
     assert_eq!(eval(&path, "return remuda.butler.compact('cx-next')"), "started",
         "the fleet lock must be released at the ceiling");
 
-    // 2. Not on luna: at the ceiling the prior model is restored for the
-    //    session before the not-confirmed mail.
+    // 2. Not on luna: the intended model remains unchanged at the ceiling.
     start("cx-sol", "forever-sol");
     let timeout = timeout_on_file(&path, &dir, "cx-sol", "compact-complete");
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -8097,7 +8039,7 @@ done
     }
     let deadline = Instant::now() + Duration::from_secs(40);
     while !capture(&path, "cx-sol").contains("Compacting") {
-        assert!(Instant::now() < deadline, "cx-sol never started compacting on luna. reports: {}\nscreen:\n{}\ntrace:\n{}",
+        assert!(Instant::now() < deadline, "cx-sol never started compacting. reports: {}\nscreen:\n{}\ntrace:\n{}",
             reports(), capture(&path, "cx-sol"), trace());
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -8108,32 +8050,11 @@ done
             reports(), capture(&path, "cx-sol"), trace());
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert!(reports().contains("the model is restored when the session is idle"), "{}", reports());
-    // Still busy: ticks keep the restore pending and type nothing.
-    let log_of = || std::fs::read_to_string(dir.join("cx-sol.log")).unwrap_or_default();
-    for _ in 0..3 {
-        eval(&path, "return remuda._butler_compaction_tick('cx-sol', false)");
-        std::thread::sleep(Duration::from_millis(300));
-    }
-    assert!(log_of().ends_with("CMD:/compact\n"), "no /model may be typed into a busy pane: {}", log_of());
-    // Idle: a later tick restores the prior model for the session.
+    assert!(!reports().contains("the model is restored when the session is idle"), "no model change needs recovery");
+    let log = std::fs::read_to_string(dir.join("cx-sol.log")).unwrap_or_default();
+    assert_eq!(log, "CMD:/compact\n", "no model command on timeout");
     eval(&path, "remuda.type_text('cx-sol', '/idle')");
-    // Tick only while the restore is pending, checked in the same eval: a tick after the
-    // restore has finished would start a new compaction (the context is still high and
-    // this test has no cooldown), and the pane would never show the prior model again.
-    let tick_while_pending = || eval(&path, r#"
-      local state = (remuda._butler_compaction_members_state or {})['cx-sol-id'] or {}
-      if state.restore_pending then return remuda._butler_compaction_tick('cx-sol', false) end"#);
-    let deadline = Instant::now() + Duration::from_secs(40);
-    while !capture(&path, "cx-sol").contains("GPT-5.6-Sol high") {
-        assert!(Instant::now() < deadline, "the pending restore never ran once idle. log:\n{}\nscreen:\n{}",
-            log_of(), capture(&path, "cx-sol"));
-        tick_while_pending();
-        std::thread::sleep(Duration::from_millis(300));
-    }
-    let log = log_of();
-    assert!(log.contains("CMD:/compact\nCMD:/idle\nCMD:/model"), "restore only after idle: {log}");
-    assert!(log.ends_with("KEY:s\n"), "the restore is session-only: {log}");
+    wait_for(&path, "cx-sol", "GPT-5.6-Sol high");
     drop(daemon);
 }
 

@@ -69,55 +69,63 @@ local codex_modal_markers = {
   "Skip until next version",
   "Trust this folder?",
 }
+-- Parse a complete current picker, not a title left in terminal history.
+-- Codex 0.162 renders descriptions in a second column and hides Max/Ultra
+-- behind the exact "More reasoning…" row. Unknown rows/geometry fail closed.
+local function picker(screen)
+  if type(screen) ~= "string" then return nil end
+  local kind, model, lines, rows, selected, footer = nil, nil, {}, {}, 0, false
+  for raw in (screen .. "\n"):gmatch("(.-)\n") do
+    local line = raw:match("^%s*(.-)%s*$")
+    local title_model = line:lower():match("^select reasoning level for (gpt%-[%w%.%-]+)$")
+    if line:lower() == "select model and effort" or title_model then
+      kind, model = title_model and "effort" or "model", title_model
+      lines, rows, selected, footer = {raw}, {}, 0, false
+    elseif kind then
+      lines[#lines+1] = raw
+      local mark, number, label = raw:match("^%s*([^%s%d]*)%s*(%d+)%.%s+(.-)%s*$")
+      if number and not footer then
+        if mark ~= "" and mark ~= "›" and mark ~= "❯" then return nil end
+        selected = selected + (mark ~= "" and 1 or 0)
+        -- Two or more spaces delimit the description column.
+        label = (label:match("^(.-)%s%s+") or label):lower()
+        if tonumber(number) ~= #rows+1 then return nil end
+        local base = label:gsub("%s+%(default%)$", "")
+        if kind == "model" then
+          local id, suffix = label:match("^(gpt%-[%w%.%-]+)(.*)$")
+          if not id or (suffix ~= "" and suffix ~= " (current)") then return nil end
+        elseif not ({low=true, medium=true, high=true, ["extra high"]=true,
+            max=true, ultra=true, ["more reasoning…"]=true})[base] then return nil end
+        rows[#rows+1] = label
+      elseif line ~= "" then
+        local expected = kind == "model" and "enter select · esc back" or "enter default · s session · esc back"
+        if footer or line:lower():gsub("%s+", " ") ~= expected then return nil end
+        footer = true
+      end
+    end
+  end
+  if not kind or not footer or #rows < 2 or selected ~= 1 then return nil end
+  return {kind=kind, model=model, rows=rows, signature=table.concat(lines, "\n")}
+end
 remuda._butler_agent_startup.codex = {
-  -- A compaction-owned picker must be the current option block, with the
-  -- recorded target and phase. A historical title is never ownership evidence.
+  picker = picker,
+  -- Only the recorded workflow target and phase authorize selector keys.
   owned_picker = function(screen, signature, operation)
-    if type(signature) ~= "string" or type(operation.model) ~= "string"
-        or type(operation.effort) ~= "string" then return false end
-    local at, scan = nil, 1
-    while true do
-      local found = screen:find(signature, scan, true)
-      if not found then break end
-      at, scan = found, found + 1
-    end
-    if not at then return false end
-    local rows, first, offset = {}, nil, 1
-    for line in (signature .. "\n"):gmatch("(.-)\n") do
-      local text = line:gsub("^%s*❯%s*", ""):gsub("^%s*›%s*", ""):gsub("^%s*>%s*", ""):gsub("^%s+", "")
-      local label = text:match("^%d+%.%s+(.+)$")
-      if label then
-        first = first or offset
-        rows[#rows + 1] = label:lower():gsub("%s+$", "")
-      end
-      offset = offset + #line + 1
-    end
-    if not first or #rows < 2 then return false end
-    local title
-    for line in (screen:sub(1, at + first - 2) .. "\n"):gmatch("(.-)\n") do
-      local text = line:match("^%s*(.-)%s*$")
-      if text ~= "" then title = text:lower() end
-    end
+    local current = picker(screen)
+    if not current or type(operation.model) ~= "string" or type(operation.effort) ~= "string" then return false end
     local phase, target = operation.phase, false
-    if title == "select model and effort" and (phase == "model" or phase == "escape") then
-      for _, label in ipairs(rows) do
-        local model, suffix = label:match("^(gpt%-[%w%.%-]+)(.*)$")
-        if not model or (suffix ~= "" and not suffix:match("^%s*%b()$")) then return false end
-        target = target or model == operation.model
+    if current.kind == "model" and (phase == "model" or phase == "escape") then
+      for _, label in ipairs(current.rows) do
+        target = target or label:match("^(gpt%-[%w%.%-]+)") == operation.model
       end
-      return target or phase == "escape"
-    end
-    if title == "select reasoning level for " .. operation.model and (phase == "effort" or phase == "escape") then
+    elseif current.kind == "effort" and current.model == operation.model
+        and (phase == "effort" or phase == "escape") then
       local wanted = operation.effort == "xhigh" and "extra high" or operation.effort
-      local known = { low = true, medium = true, high = true, ["extra high"] = true }
-      for _, label in ipairs(rows) do
-        label = label:gsub("%s+%(default%)$", "")
-        if not known[label] then return false end
-        target = target or label == wanted
+      for _, label in ipairs(current.rows) do
+        target = target or label:gsub("%s+%(default%)$", "") == wanted
       end
-      return target or phase == "escape"
-    end
-    return false
+    else return false end
+    return target or phase == "escape"
   end,
   -- No invented Codex denial/cache signatures: unfamiliar choices only.
   blocking = {
