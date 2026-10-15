@@ -258,6 +258,32 @@ end
 -- Owner-approved exact text has its own admission policy. Rendering uncertainty
 -- allows input; only positive draft/human/modal evidence blocks it. Recent output
 -- is not a turn signal and never establishes that a composer cannot receive input.
+-- Menu rows can share a prompt glyph with drafts. Establish evidence around
+-- the LAST prompt, so historical menus/borders cannot erase a current draft.
+local function current_composer_evidence(kind, screen)
+  local lines, prompt_at = {}, nil
+  for line in (screen .. "\n"):gmatch("(.-)\n") do
+    lines[#lines + 1] = line
+    local rest = line:gsub("^%s+", ""):gsub("^│%s*", "")
+    for _, glyph in ipairs(PROMPT_GLYPHS) do
+      if rest:sub(1, #glyph) == glyph then prompt_at = #lines; break end
+    end
+  end
+  if not prompt_at then return false, "" end
+  local current = table.concat(lines, "\n", prompt_at)
+  local before = (lines[prompt_at - 1] or ""):gsub("^%s+", "")
+  local top = before:match("^─") or (before:sub(1, 3) == "╭" or before:sub(1, 3) == "┌")
+  for i = prompt_at + 1, #lines do
+    local rest = lines[i]:gsub("^%s+", "")
+    if rest:match("^%? for shortcuts")
+        or (kind == "codex" and rest:lower():find("context left", 1, true))
+        or (kind == "claude" and (rest:find("auto mode on", 1, true)
+          or rest:find("shift+tab to cycle", 1, true))) then return true, current end
+    if rest:match("^─") or (rest:sub(1, 3) == "╰" or rest:sub(1, 3) == "└") then return not not top, current end
+  end
+  return false, current
+end
+
 function remuda._butler_approved_text_policy(session, now)
   local agent = bus.agents[session]
   if not agent then
@@ -306,7 +332,15 @@ function remuda._butler_approved_text_policy(session, now)
   local startup = remuda._butler_agent_startup[kind] or {}
   if startup.picker and startup.picker(screen) then return false, "known_modal" end
   local parsed, decision = pcall(remuda._butler_composer_decision, kind, session, screen)
-  if parsed and decision == "NON-EMPTY" then return false, "composer_nonempty" end
+  if parsed and decision == "NON-EMPTY" then
+    local geometry = remuda._butler_compaction_is_unknown_dialog
+    local bounded, current = current_composer_evidence(kind, screen)
+    local checked, menu_like = pcall(function() return geometry and geometry(current) end)
+    if checked and menu_like and not bounded then
+      return true, "renderer_unknown"
+    end
+    return false, "composer_nonempty"
+  end
   return true, parsed and decision == "EMPTY" and "composer_empty" or "renderer_unknown"
 end
 

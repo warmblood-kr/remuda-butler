@@ -14,6 +14,13 @@ human_idle, the independent attached-human stable-pause guard remains. Refusals
 report these reasons instead of labeling every case pane_busy. Neither recent
 output nor an active agent turn establishes that the composer cannot accept
 input. Existing submission semantics are unchanged; no extra Return is sent.
+For approved text only, generic menu geometry in the last prompt region is
+uncertain unless an independent current composer boundary or recognized footer
+establishes a draft. A numbered prefix alone never grants input. Historical or
+quoted menus cannot erase a later current draft. Borderless menu-shaped draft
+text is inherently indistinguishable from an unknown chooser and is allowed
+under the owner's explicit unknown=allow decision; a bounded numbered draft
+still blocks. Unsolicited notice policy remains unchanged.
 The durable one-shot marker is followed by another identity/admission check;
 refusal after that marker is terminal and cannot replay approved bytes.
 
