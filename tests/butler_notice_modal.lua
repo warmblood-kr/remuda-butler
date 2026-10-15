@@ -57,4 +57,18 @@ for _, owned in ipairs({false, true}) do
   assert(not bus.notices.codex and not bus.notice_recoveries.codex, 'submission confirmed and queue cleared')
   assert(writes == before+1, 'notice submitted exactly once')
 end
+-- A submitted Claude notice can be confirmed from history while its next
+-- approval dialog is pending. Picker deferral must not turn that into a retry.
+bus.agents.codex.kind='claude'
+bus.notices.codex={count=1,text='Submitted synthetic notice',message_order={'submitted'},
+  message_ids={submitted='Submitted synthetic notice'}}
+bus.notice_recoveries.codex={phase='verify_notice',notice='Submitted synthetic notice',
+  saw_notice=true,checks=0,message_ids={'submitted'},started_at=now}
+screen='Submitted synthetic notice\nApproval required\n❯ 1. Yes\n  2. No'
+busy=true
+local before=writes
+N.deliver_notice('codex')
+assert(not bus.notices.codex and not bus.notice_recoveries.codex,
+  'already submitted notice verifies despite unrelated approval dialog')
+assert(writes==before,'verification sends no additional input')
 print('Modal notice retention and recovery: PASS')

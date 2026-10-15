@@ -862,12 +862,12 @@ local function deliver_notice(session)
   pending = refresh_pending_notice(session, pending)
   if not pending then return true end
   if bus.pending_tasks[session] then return false end
-  -- A modal is a wait condition, not a failed text delivery. Keep the mail
+  -- A Codex picker is a wait condition, not a failed text delivery. Keep the mail
   -- and any submission verification intact; never probe a picker with keys.
   local dialogs = remuda.butler and remuda.butler.dialogs
-  if dialogs and type(dialogs.check) == "function" then
-    local checked, allowed, _, owned = pcall(dialogs.check, session)
-    if not checked or not allowed or owned then
+  if dialogs and type(dialogs.picker_pending) == "function" then
+    local checked, pending_picker = pcall(dialogs.picker_pending, session)
+    if not checked or pending_picker then
       pending.dialog_since = pending.dialog_since or notice_now()
       pending.due_at = notice_now() + 1
       if notice_now() - pending.dialog_since >= NOTICE_BUSY_CAP_S then

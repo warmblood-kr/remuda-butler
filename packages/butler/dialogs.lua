@@ -127,7 +127,7 @@ local function classify(name, agent, screen)
   local compaction = remuda._butler_compaction
   local probes = { unknown = compaction and compaction.unknown_dialog_signature }
   local signature = probes.unknown and probes.unknown(screen)
-  if legacy_owned(name, agent, screen, signature) then return nil, nil, true, true end
+  if legacy_owned(name, agent, screen, signature) then return nil, nil, true end
   local picker = startup.picker and startup.picker(screen)
   if picker then return "codex_" .. picker.kind .. "_picker", picker.signature end
   for _, descriptor in ipairs(startup.blocking or {}) do
@@ -151,11 +151,11 @@ local function observe(name, agent, alias, instance, screen, failure)
     state = { instance = instance, agent = agent, captures = 0 }
     states[name] = state
   end
-  local ok, id, signature, resolved, owned
+  local ok, id, signature, resolved
   if failure then
     ok, id, signature = true, failure, failure
   else
-    ok, id, signature, resolved, owned = pcall(classify, name, agent, screen)
+    ok, id, signature, resolved = pcall(classify, name, agent, screen)
   end
   if not ok then id, signature = 'detection_unavailable', 'detection_unavailable' end
   if id then
@@ -175,7 +175,7 @@ local function observe(name, agent, alias, instance, screen, failure)
       state.captures, state.reported, state.audited = 0, nil, nil
     end
   end
-  return not state.blocked, state, owned == true
+  return not state.blocked, state
 end
 
 function M.check(name)
@@ -208,6 +208,18 @@ function M.tick()
     end
   end
   for name in pairs(states) do if not live[name] then states[name] = nil end end
+end
+
+-- Notice deferral is specifically a picker wait, not the general write gate:
+-- verification of already submitted mail must still observe subsequent dialogs.
+function M.picker_pending(name)
+  local agent = agent_for(name)
+  if not agent or agent.kind ~= "codex" then return false end
+  local startup = (remuda._butler_agent_startup or {}).codex or {}
+  if type(startup.picker) ~= "function" then return false end
+  local captured, screen = pcall(remuda.capture, name)
+  if not captured or type(screen) ~= "string" then return true end
+  return startup.picker(screen) ~= nil
 end
 
 -- Explicit owner recovery cancels only a complete known Codex picker. It
