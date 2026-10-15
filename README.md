@@ -125,7 +125,9 @@ opt-in and applies on the next command, without restarting the daemon. A failed
 refresh fails the command visibly; corrected source is retried. Use this during
 idle development. Butler defers refresh visibly while launch choosers, startup,
 mail delivery, managed dialogs, approvals, or its Matrix relay are active; retry
-when idle. An explicit reload remains a deliberate lifecycle replacement.
+when idle. If the active version predates the guard, refresh refuses and asks
+for one explicit reload when idle to enable guarded refresh. An explicit reload
+remains a deliberate lifecycle replacement.
 There is no background file watcher. Ordinary edits and updates without either
 opt-in refresh or `--reload` leave the running Lua image unchanged. Reload requires the
 lifecycle-managed Butler module; `remuda exec butler` does not re-run an active

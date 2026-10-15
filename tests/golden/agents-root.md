@@ -36,6 +36,6 @@ upgrade Remuda core. Older cores without caller fields refuse CLI member actions
 use the MCP `butler_*` tools with the session's configured capability instead.
 Caller attribution is advisory within one user account, not an isolation boundary.
 
-`remuda butler send FROM TO MESSAGE...` is an operator form for sending on
+`remuda butler send --from FROM TO MESSAGE...` is an operator form for sending on
 behalf of another session. Do not use it for ordinary team communication.
 <!-- END remuda-butler:managed id=butler -->
