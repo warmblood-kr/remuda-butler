@@ -69,7 +69,7 @@ assert(attempt(remuda.key, 'codex', 'RET') == true, 'unrecognized choice permits
 writes = {}
 screens.codex = 'Ask Codex to do anything'; D.tick()
 reports, audits = {}, {}
-local unknown = 'Do you want to proceed?\n❯ 1. Yes\n2. No\n─\n❯ \n'
+local unknown = 'Do you want to proceed?\n❯ 1. Yes\n2. No\n'
 screens.child, screens.codex = unknown, 'Ask Codex to do anything'
 local ok, why = attempt(remuda.key, 'child', 'RET')
 assert(ok == false and why:find('blocked', 1, true), 'block before first key, even with ready glyph')
@@ -169,6 +169,21 @@ screens.child = '╭────────────────────
 assert(attempt(remuda.key, 'child', 'RET') == false, 'known boxed session limit blocks')
 screens.child = 'ordinary output'
 assert(attempt(remuda.key, 'child', 'RET') == true, 'unknown screen clears known modal state')
+
+-- Source-backed representative approval headers have metadata/commands between
+-- title and options. A later composer or a fenced quote makes these historical.
+for _, path in ipairs({'tests/fixtures/codex-approval-command.txt', 'tests/fixtures/codex-approval-edit.txt'}) do
+  local f = assert(io.open(path)); local approval = f:read('*a'); f:close()
+  screens.codex = approval
+  assert(attempt(remuda.key, 'codex', 'RET') == false, 'known approval with body blocks')
+  for _, screen in ipairs({approval .. '\n› Ask Codex to do anything',
+      approval .. '\n──────\n❯ task already drafted',
+      '```text\n' .. approval .. '```\nordinary answer',
+      approval .. '\nChoose a display color\n› 1. Blue\n2. Green'}) do
+    screens.codex = screen
+    assert(attempt(remuda.key, 'codex', 'RET') == true, 'historical or quoted approval allows: ' .. screen)
+  end
+end
 
 -- Existing launch policy retains ownership of known startup dialogs.
 bus.pending_tasks.child = true

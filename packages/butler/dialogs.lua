@@ -125,6 +125,54 @@ end
 
 -- Match current modal context, not a box/menu alone or a title in scrollback.
 -- Provenance for the supported UI strings is in docs/concepts/input-screen-policy.md.
+local function current_geometry(screen, geometry)
+  if type(screen) ~= 'string' or not geometry then return nil end
+  local lines = {}
+  for line in (screen .. '\n'):gmatch('(.-)\n') do lines[#lines + 1] = line end
+  -- A composer below the old choices makes them transcript, not the current
+  -- interaction. Check this before picker/modal detection as well.
+  local saw_choices, in_quote, selected = false, false, nil
+  for index, line in ipairs(lines) do
+    local trimmed = line:match('^%s*(.-)%s*$')
+    if trimmed:match('^```') then in_quote = not in_quote end
+    if not in_quote then
+      local number, _, marked = remuda._butler_compaction.numbered_option(line)
+      if number then saw_choices = true end
+      if marked then selected = index end
+    end
+    if saw_choices and not remuda._butler_compaction.numbered_option(line) then
+      if trimmed:sub(1, 3) == '❯' or trimmed:sub(1, 3) == '›'
+          or trimmed == '>' or trimmed:match('^> ') or trimmed:find('Ask Codex to do anything', 1, true) == 1 then
+        saw_choices, selected = false, nil
+      end
+    end
+  end
+  if not saw_choices then
+    -- Box-only modal recognition still requires a supported title below.
+    local signature = geometry(screen)
+    if signature and (signature:sub(1, 3) == '╭' or signature:sub(1, 3) == '┌' or signature:sub(1, 3) == '╔') then
+      local start = screen:find(signature, 1, true)
+      local prefix = start and screen:sub(1, start - 1) or ''
+      local quoted = false
+      for line in (prefix .. '\n'):gmatch('(.-)\n') do
+        if line:match('^%s*```') then quoted = not quoted end
+      end
+      if quoted then return nil end
+      local suffix = start and screen:sub(start + #signature) or ''
+      if suffix:find('❯', 1, true) or suffix:find('›', 1, true) then return nil end
+      return signature
+    end
+    return nil
+  end
+  if not selected then return nil end
+  local first, last = selected, selected
+  while first > 1 and remuda._butler_compaction.numbered_option(lines[first - 1]) do first = first - 1 end
+  while last < #lines and remuda._butler_compaction.numbered_option(lines[last + 1]) do last = last + 1 end
+  local current = {}
+  for index = first, last do current[#current + 1] = lines[index] end
+  return table.concat(current, '\n')
+end
+
 local function exception_signature(kind, screen, signature)
   if not signature then return nil end
   local start, from = nil, 1
@@ -148,6 +196,25 @@ local function exception_signature(kind, screen, signature)
     end
   end
   heading = heading:match('^%s*(.-)%s*$'):lower()
+  if kind == 'codex' then
+    local tail = remuda._butler_compaction.bottom_screen_lines(prefix, 32)
+    for i = #tail, 1, -1 do
+      local line = tail[i]:match('^%s*(.-)%s*$')
+      local lower = line:lower()
+      local approval = lower == 'would you like to run the following command?'
+        or lower == 'would you like to make the following edits?'
+        or lower == 'would you like to grant these permissions?'
+        or lower == 'would you like to send input to the existing terminal?'
+      if approval then heading = lower; break end
+      -- Recognized approval header fields and command/diff rows may separate
+      -- the title from choices. A new unrelated heading ends the search.
+      if line ~= '' and not line:match('^Reason:') and not line:match('^Thread:')
+          and not line:match('^Environment:') and not line:match('^Permission rule:')
+          and not line:match('^Description:') and not line:match('^Destination:')
+          and not line:match('^%$ ') and not line:match('^[+%-@]')
+          and not line:match('^%d+%s') and not line:match('^%d+%s*[+%-]') then break end
+    end
+  end
   local known = heading == 'switch model?' or heading == 'change effort level?'
     or heading == 'do you want to proceed?'
   if kind == 'codex' then
@@ -197,12 +264,12 @@ local function classify(name, agent, screen)
   local startup = (remuda._butler_agent_startup or {})[agent.kind] or {}
   local compaction = remuda._butler_compaction
   local geometry = compaction and compaction.unknown_dialog_signature
-  local signature = geometry and geometry(screen)
+  local signature = current_geometry(screen, geometry)
   local probes = { unknown = function(current)
-    return exception_signature(agent.kind, current, geometry and geometry(current))
+    return exception_signature(agent.kind, current, current_geometry(current, geometry))
   end }
   if legacy_owned(name, agent, screen, signature) then return nil, nil, true end
-  local picker = startup.picker and startup.picker(screen)
+  local picker = signature and startup.picker and startup.picker(screen)
   if picker then return "codex_" .. picker.kind .. "_picker", picker.signature end
   for _, descriptor in ipairs(startup.blocking or {}) do
     assert(descriptor.risk == 'report' and type(descriptor.id) == 'string'

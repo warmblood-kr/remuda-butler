@@ -21,7 +21,11 @@ recovery still requires its complete parser, exact instance, audit and bounded
 ESC-only transition checks.
 
 Numbered options or a box alone do not identify an exceptional state. A known
-heading must immediately precede the current choice, or be inside its box.
+heading must precede the current choice, or be inside its box. Supported
+approval metadata and command rows may intervene, bounded to 32 lines; an
+unrelated heading ends the search. A later composer or fenced transcript
+quote makes old choices historical. Only the current contiguous choice block
+is classified.
 Historical titles separated by a new heading do not confer meaning on the
 current menu. Existing broader compaction/startup matching helpers are not
 changed; they do not grant generic write authority.
@@ -55,3 +59,15 @@ Tests use synthetic screens, including limits/refusal confirmations, unknown
 menus/boxes/composers, stale titles, failed captures/parsers, instance changes,
 audits and known picker recovery. They do not manufacture owner approval or
 select a real permission option.
+
+## Approval header layout evidence
+
+OpenAI Codex upstream `codex-rs/tui/src/bottom_pane/approval_overlay.rs`
+(build_options/build_header), read 2026-10-15:
+https://github.com/openai/codex/blob/main/codex-rs/tui/src/bottom_pane/approval_overlay.rs
+build_options places the title before the request header and selector; header
+metadata/reason and command rows can separate title from choices. File-change
+headers use description/destination fields:
+https://github.com/openai/codex/blob/main/codex-rs/tui/src/bottom_pane/apply_patch_header.rs
+The command/edit fixtures are synthetic representative renderings of those
+source layouts using harmless sample values, not captures of real panes.
