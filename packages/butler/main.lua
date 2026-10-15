@@ -6,6 +6,7 @@
 -- `remuda send butler ...`, installer liveness checks, and restart recovery
 -- must never depend on the directory that happened to start the daemon.
 local system = assert(remuda._butler_system)
+remuda.exec("butler/diagnostics")
 local function initial_butler_name()
   return "butler"
 end

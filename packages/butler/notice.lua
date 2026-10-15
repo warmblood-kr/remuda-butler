@@ -1,6 +1,14 @@
 -- Mail notices: the typing policy, notice recovery, deposit debounce and
 -- delivery, and _butler_send. main.lua passes its locals in (the mail.lua
 -- pattern) and binds startup_action_safe back.
+
+-- Diagnostics are observational: unavailable/broken recording cannot affect mail or control.
+local function diagnostic(outcome, reason, correlation)
+  local diagnostics = remuda._butler_diagnostics
+  if diagnostics and type(diagnostics.record) == "function" then
+    pcall(diagnostics.record, "notice", outcome, reason, correlation)
+  end
+end
 local config = assert(remuda._butler_notice_config)
 local bus = assert(config.bus)
 local resolve = assert(config.resolve)
@@ -223,6 +231,7 @@ function remuda._butler_notify_policy(session, now)
   end
   if seen.decision ~= decision then -- once per change, not every retry
     seen.decision = decision
+    if decision ~= "EMPTY" then diagnostic("deferred", "prompt_policy", session) end
     _butler_session_trace("notice_prompt", "message_ids="
       .. table.concat(bus.notices[session] and bus.notices[session].message_order or {}, ",")
       .. " session=" .. session .. " kind=" .. kind .. " decision=" .. decision
@@ -583,6 +592,7 @@ end
 local function trace_notice_retry(session, pending, reason)
   if bus.notice_retry_reasons[session] == reason then return end
   bus.notice_retry_reasons[session] = reason
+  diagnostic("deferred", "prompt_policy", session)
   _butler_session_trace("notice_retry", "message_ids="
     .. table.concat(pending and pending.message_order or {}, ",")
     .. " session=" .. session .. " reason=" .. tostring(reason))
@@ -634,6 +644,7 @@ function remuda._butler_notice_open_stuck(session, ids, reason)
 end
 notice_recovery_error = function(session, state, reason)
   state.failed = true
+  diagnostic("error", "delivery_failed", session)
   _butler_session_trace("notice_recovery_failed", "message_ids="
     .. table.concat(state.message_ids or {}, ",") .. " session=" .. session .. " reason=" .. reason
     .. " draft_bytes=" .. tostring(notice_byte_length(state.draft)))
@@ -646,6 +657,8 @@ notice_recovery_error = function(session, state, reason)
   local attempts = pending and (pending.delivery_attempts or 0) or 0
   local delay = NOTICE_RETRY_DELAYS[attempts + 1]
   if pending and delay then
+    diagnostic("retry", "retry_scheduled", session)
+    pending.diagnostic_reason = nil
     pending.delivery_attempts = attempts + 1
     pending.last_delivery_error = reason
     pending.retry_at = notice_now() + delay
@@ -731,7 +744,10 @@ notice_recovery_error = function(session, state, reason)
   return false
 end
 local function complete_notice_recovery(session, state)
+  -- Composer/screen/busy observations establish heuristic completion only.
+  diagnostic("observed", "heuristic_completion", session)
   local pending = bus.notices[session]
+  if pending then pending.diagnostic_reason = nil end
   local agent = bus.agents[session]
   if agent and agent.id then
     local sent_at = bus.notice_sent_at[agent.id] or {}
@@ -842,6 +858,10 @@ local function defer_notice_busy(session)
     pending.busy_since = pending.busy_since or notice_now()
     if notice_now() - pending.busy_since >= NOTICE_BUSY_CAP_S then
       remuda._butler_notice_open_stuck(session, pending.message_order, "busy: Codex is_busy has not cleared")
+    end
+    if pending.diagnostic_reason ~= "prompt_busy" then
+      diagnostic("deferred", "prompt_busy", session)
+      pending.diagnostic_reason = "prompt_busy"
     end
   end
   return false, "busy"
