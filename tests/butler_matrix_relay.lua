@@ -6929,6 +6929,45 @@ local function rx_check(name, test)
   if not ok then rx_failures[#rx_failures + 1] = name .. ": " .. tostring(err) end
 end
 
+rx_check("confirmed mentions through relay", function()
+  local dir, config_path = fixture()
+  local client, delivered = scripted_client(), {}
+  local relay = relay_module.new({ config_path = config_path, matrix = client,
+    deliver = function(event) delivered[#delivered + 1] = event return true end,
+  })
+  assert(relay:start())
+  client:complete(1, { json = { next_batch = "s0" } })
+  client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+    ["!room:example.org"] = { timeline = { events = {
+      { type = "m.room.message", event_id = "$mention-pills", sender = "@alice:example.org",
+        content = { msgtype = "m.text", body = "Hello Alice and Alice",
+          format = "org.matrix.custom.html",
+          formatted_body = "Hello <a href='https://matrix.to/#/@alice:example.org'>Alice</a> and "
+            .. '<a href="https://matrix.to/#/@ally:example.org">Alice</a>',
+          ["m.mentions"] = { user_ids = { "@alice:example.org", "@ally:example.org" } } } },
+      { type = "m.room.message", event_id = "$mention-plain", sender = "@alice:example.org",
+        content = { msgtype = "m.text", body = "Alice" } },
+      { type = "m.room.message", event_id = "$mention-media", sender = "@alice:example.org",
+        content = { msgtype = "m.file", body = "file.txt", filename = "file.txt",
+          url = "mxc://example.org/file" } },
+    } } },
+  } } } })
+  local by_id = {}
+  for _, event in ipairs(delivered) do by_id[event.event_id] = event end
+  assert(by_id["$mention-pills"] and by_id["$mention-pills"].body == "Hello @Alice and @Alice",
+    "confirmed pills should normalize at the relay delivery boundary")
+  assert(by_id["$mention-pills"].normalized_mentions[1] == "@alice:example.org"
+      and by_id["$mention-pills"].normalized_mentions[2] == "@ally:example.org",
+    "same-display-name pills should retain their distinct MXIDs in occurrence order")
+  assert(by_id["$mention-plain"] and by_id["$mention-plain"].body == "Alice"
+      and by_id["$mention-plain"].normalized_mentions == nil,
+    "plain display-name text must not be rewritten or marked as a mention")
+  assert(by_id["$mention-media"] and by_id["$mention-media"].normalized_mentions == nil,
+    "media events must not receive mention metadata")
+  relay:stop()
+  cleanup_fixture(dir, config_path)
+end)
+
 rx_check("test_baseline_resume_filters_and_envelope", test_baseline_resume_filters_and_envelope)
 rx_check("test_allowlisted_media_types_and_sender_filter", test_allowlisted_media_types_and_sender_filter)
 test_media_field_cap_preserves_utf8()
