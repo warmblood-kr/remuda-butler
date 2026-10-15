@@ -68,7 +68,7 @@ do
   local old_config, old_mail, old_ulid = remuda._butler_mail_config, remuda._butler_mail, remuda._butler_new_ulid
   local root = os.tmpname()
   os.remove(root)
-  assert(os.execute("mkdir -p " .. string.format("%q", root)))
+  assert(remuda.fs.mkdir_new(root))
   local bus = { inboxes = {}, messages = {}, objects = {} }
   local counter = 0
   remuda._butler_new_ulid = function() counter = counter + 1 return "MENTION" .. tostring(counter) end
@@ -88,7 +88,7 @@ do
       "actual MXIDs must survive mail envelope persistence in occurrence order")
   end)
   remuda._butler_mail_config, remuda._butler_mail, remuda._butler_new_ulid = old_config, old_mail, old_ulid
-  os.execute("rm -rf " .. string.format("%q", root))
+  remuda.remove_dir_all(root)
   assert(ok, err)
 end
 
