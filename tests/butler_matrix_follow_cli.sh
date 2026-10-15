@@ -161,11 +161,11 @@ run_args upload --thread '$nope:example.org' "$UP"
   && $OUT == *'Next: remuda butler inbox (you can only reply to events listed there)'* ]] \
   || fail "upload --thread of an unverifiable event: $CODE $OUT"
 run_args upload --thread
-[[ $CODE == 2 && $OUT == *'--thread requires a value'* ]] || fail "upload --thread without a value: $CODE $OUT"
+[[ $CODE == 2 && $OUT == *'--thread <EVENT_ID>'* ]] || fail "upload --thread without a value: $CODE $OUT"
 run_args upload --caption
-[[ $CODE == 2 && $OUT == *'--caption requires a value'* ]] || fail "upload --caption without a value: $CODE $OUT"
+[[ $CODE == 2 && $OUT == *'--caption <TEXT>'* ]] || fail "upload --caption without a value: $CODE $OUT"
 run_args upload --thread '$e:example.org'
-[[ $OUT == *'upload [--thread EVENT_ID] [--caption TEXT] PATH'* ]] || fail "upload without a path shows the usage: $OUT"
+[[ $CODE == 2 && $OUT == *'Usage: remuda butler matrix upload [OPTIONS] PATH'* ]] || fail "upload without a path shows the usage: $OUT"
 set +e
 OUT=$(remuda -s "$S" butler reply "$RP_ID" --attach "$UP" 2>&1); CODE=$?
 set -e
