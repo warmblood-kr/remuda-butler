@@ -20,6 +20,7 @@ local saved_exec = remuda.exec
 remuda.exec = function() end
 dofile('packages/butler/matrix.lua')
 remuda.exec = saved_exec
+dofile('packages/butler/matrix_delivery_policy.lua')
 dofile('packages/butler/system.lua')
 dofile('packages/butler/typed_lines.lua')
 dofile('packages/butler/approval.lua')
