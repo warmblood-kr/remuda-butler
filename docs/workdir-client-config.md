@@ -29,7 +29,7 @@ No capability, token or identity value is added to it.
 If any step fails and guard policy is on, the Claude launch is refused (fail
 closed): the builder raises, the chooser records a `spawn_error` for that
 candidate and never starts Claude without its guard hooks. With guard policy
-off the same failure only loses the defaults and status telemetry: Claude
+off (guard is "on" only when its marker file is readable and its first line is exactly `on`; an I/O error counts as off) the same failure only loses the defaults and status telemetry: Claude
 starts with no `--settings` argument.
 `settings_not_written` is traced with the reason; there is no plain-write
 fallback or write into a checkout/HOME. The previous status and settings

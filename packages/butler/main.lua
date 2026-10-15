@@ -206,7 +206,9 @@ function remuda._butler_ensure_coordination(cwd, kind, role)
   if report.error then _butler_session_trace("coordination_config_not_written", report.error) end
   -- Fixed reasons only (no file content, no resolver output): which client was
   -- blocked or had defaults withheld.
-  for client in pairs(report.blocked or {}) do _butler_session_trace("coordination_config_blocked", client) end
+  for client, reason in pairs(report.blocked or {}) do
+    _butler_session_trace("coordination_config_blocked", client .. ": " .. tostring(reason):gsub("[\r\n]+", " "))
+  end
   for _, item in ipairs(report.withheld or {}) do
     _butler_session_trace("coordination_config_withheld", tostring(item.rule) .. " (" .. tostring(item.list) .. ")")
   end
@@ -245,9 +247,11 @@ local function new_private_dir()
   end
   return dir
 end
--- Per-launch settings directories, replaced (and the old one removed) when the
--- same status path is launched again. A crash can leave one private directory
--- behind; it holds only allow literals and the status hook command.
+-- Per-launch settings directories, keyed by member name (or status path) and
+-- replaced, with the old one removed, on the next setup for that key. Finished
+-- sessions and a crashed daemon leave their private directory behind, so they
+-- can accumulate. A file holds the allow literals, the status hook commands
+-- and, when guard policy is on, the guard hook commands.
 local settings_dirs = {}
 -- Returns the settings file path, or nil plus a reason; never a path that was
 -- not completely written (no plain-write fallback).
@@ -1102,14 +1106,9 @@ if paths.data_home_note and not remuda._butler_data_home_traced then
   _butler_trace("data_home", paths.data_home_note)
 end
 
-local BUTLER_ARGV = remuda._butler_argv
-if not BUTLER_ARGV then
-  BUTLER_ARGV = build_agent_argv(butler_kind, {
-    name = "butler", token = butler_token, mcp_config_path = mcp_config_path, settings_path = settings_path,
-    telemetry = butler_telemetry,
-    system_prompt = SYSTEM_PROMPT,
-  })
-end
+-- The root argv is built per candidate by the chooser (launch_butler's spec);
+-- no eager construction here, so a refused Claude candidate (guard hooks that
+-- cannot be persisted) is a candidate failure, never a module-init abort.
 
 -- Reused both for the initial launch and every respawn, so the watchdog
 -- below can never drift from what a fresh start would have done. Keeps the
