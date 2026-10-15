@@ -27,7 +27,7 @@ local function subject(name,run,without_provider)
       if mode.write_false then return false end
       return mode.provider or'submitted'
     end
-    f.key=function(_,key)keys[#keys+1]=key;if mode.key_false then return false end;return true end
+    f.key=function(_,key)keys[#keys+1]=key;if mode.key_false then return false end;if mode.key_nil then return nil end;return true end
     f._butler_queue_bound_provider={identity_fenced=true,
       type_text=function(name,instance,...)assert(instance==mode.instance,'synthetic wrong instance');return f._butler_dialog_originals.type_text(name,...)end,
       key=function(name,instance,...)assert(instance==mode.instance,'synthetic wrong instance');return f._butler_dialog_originals.key(name,...)end}
@@ -151,6 +151,13 @@ T.test('owner line preserves separate RET; failed RET never repeats payload or k
   local duplicate=assert(s.queue.accept_line('codex','exact line',event,'!home:fixture',true));T.eq(duplicate.duplicate,true)
   s.mode.key_false=true;s.queue.tick();T.eq(#s.writes,1);T.eq(#s.keys,1);T.eq(s.keys[1],'RET')
   T.eq(s.queue.status()[1].status,'uncertain');s.queue.tick();T.eq(#s.writes,1);T.eq(#s.keys,1)
+ end)
+ subject('line-key-unknown',function(s)
+  local event=s.event('key-unknown','exact line')
+  assert(s.queue.accept_line('codex','exact line',event,'!home:fixture',true))
+  s.mode.key_nil=true;s.queue.tick()
+  T.eq(s.queue.status()[1].status,'uncertain','missing explicit key success cannot report delivered')
+  s.queue.tick();T.eq(#s.writes,1);T.eq(#s.keys,1)
  end)
  subject('line-auth',function(s)
   local event=s.event('evil','text');event.sender='@evil:fixture'

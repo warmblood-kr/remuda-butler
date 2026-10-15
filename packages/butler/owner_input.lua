@@ -187,7 +187,7 @@ local function deliver(r)
     -- Preserve this route's separate RET. Failure can never retry the text.
     local checked,result=pcall(guarded_write,'key',r.session,{expected_instance=r.instance_id,before=function()return admissible(r)end,
       recheck=function()return admissible(r)end,identity=function()return same_target(r)end},'RET')
-    if not checked or result==false then return store:finish(r.id,'uncertain','separate_return_unknown')end
+    if not checked or result~=true then return store:finish(r.id,'uncertain','separate_return_unknown')end
   end
   return store:finish(r.id,'delivered',r.route=='owner_line'and'submitted+RET'or'submitted')
 end
