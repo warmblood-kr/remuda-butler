@@ -50,6 +50,8 @@ bus.notice_fallbacks = bus.notice_fallbacks or {}
 bus.notice_failure_alerts = bus.notice_failure_alerts or {}
 bus.notice_sent_at = bus.notice_sent_at or {}
 bus.notice_reminder_at = bus.notice_reminder_at or {}
+-- session -> { ids, since, reason, reported_at }: mail whose notice ran out of retries.
+bus.notice_stuck = bus.notice_stuck or {}
 bus.notice_deferred_by_task = bus.notice_deferred_by_task or {}
 local NOTICE_STABLE_SECONDS = 3
 local NOTICE_QUIET_S = 2
@@ -60,6 +62,7 @@ local NOTICE_RETRY_DELAYS = { 20, 60, 300, 900 }
 -- failed attempt after this long, so the retry schedule and the sender's failure notice apply.
 local NOTICE_STALL_S = 120
 local NOTICE_REMINDER_SECONDS = 10 * 60
+local NOTICE_STUCK_REPORT_SECONDS = 60 * 60
 -- os.time is whole seconds: quiet is 1-2 s, plus up to 1 s for the notice tick.
 local function notice_now()
   local clock = remuda._butler_notice_clock
@@ -515,6 +518,10 @@ notice_recovery_error = function(session, state, reason)
   bus.notice_failure_alerts[session] = alerts
   if pending and not alerts.exhausted then
     alerts.exhausted = true
+    -- Reminders must not re-arm this notice; remind_unread_notices reports hourly instead.
+    local ids = {}
+    for _, id in ipairs(state.message_ids or {}) do ids[#ids + 1] = id end
+    bus.notice_stuck[session] = { ids = ids, since = notice_now(), reason = reason }
     if session ~= "butler" then
       local by_sender = {}
       for _, id in ipairs(state.message_ids or {}) do
@@ -628,6 +635,7 @@ local function complete_notice_recovery(session, state)
   bus.notice_recoveries[session] = nil
   bus.notice_retry_reasons[session] = nil
   bus.notice_failure_alerts[session] = nil
+  bus.notice_stuck[session] = nil
   clear_notice_fallbacks(session, state.message_ids)
   return true
 end
@@ -976,8 +984,28 @@ local function seed_unread_notices(alias, previous_instance, instance, unread)
   end
   return true
 end
+-- One report per hour per stuck session to its leader; the record closes once its mail is read.
+local function report_stuck_notice(alias, agent, stuck, now)
+  local unread = {}
+  for _, id in ipairs(stuck.ids) do
+    if mail.is_unread(agent.id, id) then unread[#unread + 1] = id end
+  end
+  if #unread == 0 then bus.notice_stuck[alias] = nil; return end
+  if stuck.reported_at and now - stuck.reported_at < NOTICE_STUCK_REPORT_SECONDS then return end
+  stuck.reported_at = now
+  local leader = agent.parent
+  if not leader or leader == alias or not bus.agents[leader] then leader = "butler" end
+  if leader == alias then return end
+  pcall(remuda._butler_send, "butler", leader, "Stuck Butler mail for " .. alias .. ": "
+    .. #unread .. " unread message(s) (" .. table.concat(unread, ",") .. ") undelivered for "
+    .. math.floor((now - stuck.since) / 60) .. " min after notice retries ran out (last error: "
+    .. tostring(stuck.reason) .. "). Inspect its composer, then `remuda butler send \"" .. alias
+    .. "\" \"read your inbox\"`.")
+end
 local function remind_unread_notices(alias, agent, now)
   if not agent.id or bus.pending_tasks[alias] then return end
+  local stuck = bus.notice_stuck[alias]
+  if stuck then return report_stuck_notice(alias, agent, stuck, now) end
   local due = bus.notice_reminder_at[alias]
   if due and now < due then return end
   bus.notice_reminder_at[alias] = now + NOTICE_REMINDER_SECONDS
@@ -1230,4 +1258,5 @@ remuda._butler_notice = {
   startup_action_safe = startup_action_safe,
   notice_recovery_error = notice_recovery_error,
   deliver_notice = deliver_notice,
+  remind_unread_notices = remind_unread_notices,
 }
