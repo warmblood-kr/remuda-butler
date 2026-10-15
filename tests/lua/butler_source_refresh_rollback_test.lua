@@ -90,6 +90,12 @@ T.test("failed input-gate resume refuses writes and a corrected activation recov
     local after
     for _, row in ipairs(remuda.ls()) do if row.name == "butler" and row.alive then after = row.instance_id end end
     assert(after == before, "recovery preserves the existing root session")
+    remuda._butler_bus.agents.butler.kind = "claude"
+    remuda.capture = function() return "Claude Code\n─\n❯ " end
+    local audits = 0
+    remuda.butler.guard_policy.append = function() audits = audits + 1; return true end
+    remuda.key("butler", "RET")
+    assert(remuda._rollback_writes == written + 1 and audits >= 2, "corrected activation restores audited input")
     return "refused then recovered"
   ]])
   T.eq(result, "refused then recovered")
