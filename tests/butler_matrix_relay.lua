@@ -8689,4 +8689,4 @@ print('ok: Matrix durable owner plaintext admission contract')
 -- Keep the isolated mail persistence fixture after all relay tests: it loads
 -- mail.lua with a temporary bus/config and should not affect their globals.
 dofile("packages/butler/matrix_mentions.lua")
-dofile("tests/butler_matrix_mentions.lua")
+dofile("tests/fixtures/matrix-mention-normalization.lua")
