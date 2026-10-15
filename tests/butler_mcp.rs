@@ -2291,7 +2291,10 @@ fn a_topic_task_is_submitted_before_an_immediate_notice_is_typed() {
         ),
     );
 
-    let deadline = Instant::now() + Duration::from_secs(8);
+    // Startup and the first write can take five seconds; retry needs four more
+    // verification ticks. Preserve the ordering assertions with a bounded budget
+    // that also accommodates their IPC on a loaded debug runner.
+    let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let screen = eval(&path, "return remuda.capture('topic')");
         let composer = screen.rsplit('❯').next().unwrap_or("");
