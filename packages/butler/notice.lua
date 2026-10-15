@@ -684,6 +684,19 @@ local function recovery_human_safe(session, allow_busy)
   end
   return true
 end
+-- ONE guard for every type_text path (recovery tick, probe-to-direct, direct, reminder):
+-- Codex STEERS text typed mid-turn into the running task, so a busy Codex defers; Claude
+-- queues it for the next turn, so a busy Claude with an EMPTY composer (checked by the
+-- caller's policy) may receive it. Unknown kinds keep the previous behaviour.
+function remuda._butler_busy_client_may_receive(session)
+  local agent = bus.agents[session]
+  if not (agent and agent.kind == "codex") or not remuda.session then return true end
+  local ok, busy = pcall(function()
+    local row = remuda.session(session)
+    return row and row.is_busy
+  end)
+  return not (ok and busy == true)
+end
 local function defer_notice_busy(session)
   bus.notice_recoveries[session] = nil
   local pending = bus.notices[session]
@@ -697,6 +710,7 @@ local function begin_notice_submit(session, state)
     bus.notice_recoveries[session] = nil
     return false
   end
+  if not remuda._butler_busy_client_may_receive(session) then return defer_notice_busy(session) end
   state.draft = nil
   state.count = pending.count
   state.message_ids = {}
@@ -864,6 +878,7 @@ local function deliver_notice(session)
           "composer was not empty after a failed notice write")
       end
     end
+    if not remuda._butler_busy_client_may_receive(session) then return defer_notice_busy(session) end
     local state = { phase = "verify_notice", count = pending.count, notice = pending_notice_text(pending), checks = 0,
       started_at = notice_now() }
     state.message_ids = {}

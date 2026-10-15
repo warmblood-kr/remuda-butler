@@ -82,3 +82,35 @@ assert(run({ codex, codex, codex }, { 4 }) == 0, "working Codex+EMPTY defers wit
 assert(bus.notices.lead, "Codex notice stays queued")
 bus.agents.lead.kind = "claude"
 print("ok")
+
+-- 7. Shared guard, direct path: busy Codex + EMPTY composer must not reach type_text via
+--    notify_policy (no probe) nor via probe-to-direct (policy passes while a probe exists).
+remuda.capture_styled = function() return { rows = { { { text = "› " } } }, cursor = { row = 1 } } end
+local function direct(with_probe)
+  bus.agents.lead.kind = "codex"
+  frames, calls, typed = { codex, codex, codex, codex, codex }, 0, {}
+  bus.notices.lead = { count = 1, message_order = { "m1" }, message_ids = { m1 = "Butler message m1 arrived." },
+    text = "Butler message m1 arrived.", kind = "codex", delivery_attempts = 0 }
+  bus.notice_screens = {}
+  bus.notice_recoveries = with_probe and { lead = { phase = "probe", count = 1, message_ids = { "m1" },
+    started_at = now, checks = 0 } } or {}
+  remuda._test_modal = function() return false end
+  deliver("lead")
+  return #typed
+end
+assert(direct(false) == 0, "busy Codex direct path defers")
+assert(bus.notices.lead, "deferred notice stays queued (direct)")
+assert(direct(true) == 0, "busy Codex probe-to-direct defers")
+assert(bus.notices.lead, "deferred notice stays queued (probe-to-direct)")
+-- 8. Idle Codex still gets the notice; busy Claude with an EMPTY composer keeps typing.
+remuda.session = function() return { is_busy = false } end
+assert(direct(false) == 1, "idle Codex still typed")
+remuda.session = function() return { is_busy = true } end
+bus.agents.lead.kind = "claude"
+frames, calls, typed = { working, working, working }, 0, {}
+bus.notices.lead = { count = 1, message_order = { "m1" }, message_ids = { m1 = "Butler message m1 arrived." },
+  text = "Butler message m1 arrived.", kind = "claude", delivery_attempts = 0 }
+bus.notice_recoveries, bus.notice_screens = {}, {}
+deliver("lead")
+assert(#typed == 1, "busy Claude + EMPTY composer unchanged")
+print("ok")
