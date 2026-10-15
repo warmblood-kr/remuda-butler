@@ -168,6 +168,9 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
     name = name, cwd = launch_cwd, auto_trust = auto_trust,
     trust_path_gate = topic_trust_path, trust_eligible = trust_eligible, trust_real_cwd = trust_real_cwd,
     spec = function(candidate_kind)
+      if remuda._butler_ensure_coordination then
+        remuda._butler_ensure_coordination(launch_cwd, candidate_kind, "member")
+      end
       local telemetry = telemetry_by_kind[candidate_kind]
         or setup_telemetry(candidate_kind, { name = name, model = models[candidate_kind] })
       telemetry_by_kind[candidate_kind] = telemetry

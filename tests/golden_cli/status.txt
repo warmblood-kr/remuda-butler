@@ -8,20 +8,36 @@ actions:
 status.lookup()
 
 ### remuda butler "status" "--help"
-exit: 2
+exit: 0
 stdout:
+Report whether the Butler is up. Example: remuda butler status
+
+Usage: remuda butler status
+
+Options:
+  -h, --help  Print help
+
+Next: remuda butler doctor
 
 stderr:
-<GLOBAL-USAGE>
+
 actions:
 (none)
 
 ### remuda butler "status" "-h"
-exit: 2
+exit: 0
 stdout:
+Report whether the Butler is up. Example: remuda butler status
+
+Usage: remuda butler status
+
+Options:
+  -h, --help  Print help
+
+Next: remuda butler doctor
 
 stderr:
-<GLOBAL-USAGE>
+
 actions:
 (none)
 

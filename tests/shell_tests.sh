@@ -40,13 +40,14 @@ echo "core $version, butler $(git -C "$REPO" rev-parse --short HEAD)"
 failed=()
 run() { # name command...
   local log="$T/$1.log"
-  if (cd "$REPO" && "${@:2}") >"$log" 2>&1; then echo "PASS $1"; else echo "FAIL $1"; tail -20 "$log"; failed+=("$1"); fi
+  if (cd "$REPO" && "${@:2}") >"$log" 2>&1; then echo "PASS $1"; grep -E "^(codexless subset|NOTE)" "$log" || true; else echo "FAIL $1"; tail -20 "$log"; failed+=("$1"); fi
 }
 for lua in "$REPO"/tests/*.lua; do
   # session_tree.lua needs a live daemon's _butler_bus; session_tree.sh runs it.
   # The Matrix relay state tests need core's remuda.json; its shell wrapper
   # runs them inside the pinned daemon instead of standalone LuaJIT.
-  [[ $(basename "$lua") == session_tree.lua || $(basename "$lua") == butler_matrix_relay.lua ]] && continue
+  [[ $(basename "$lua") == session_tree.lua || $(basename "$lua") == butler_matrix_relay.lua || $(basename "$lua") == butler_coordination_config.lua ]] && continue
+  case $(basename "$lua") in butler_approve_text.lua|butler_status_hook.lua|butler_guard.lua|butler_adopt.lua|butler_approval_retry.lua|butler_schedule_cli.lua|butler_typed_lines_cli.lua) continue ;; esac # real-parser coverage: lua/butler_cli_unit_test.lua
   run "$(basename "$lua")" luajit "tests/$(basename "$lua")"
 done
 for sh in "$REPO"/tests/*.sh; do

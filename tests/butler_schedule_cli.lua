@@ -79,16 +79,22 @@ local function add(args, answer, stdin, agent)
   return reply.result, prompts[1]
 end
 local function words(...) return { "schedule", ... } end
+local alice = { tag = "member", id = "01HALICE", alias = "dev-1" }
+local reincarnated_alice = { tag = "member", id = "01HNEWID", alias = "dev-1" }
 
 eq("an empty store lists nothing", cli.cli(words("list")), "no schedules")
 
--- add is operator-only.
-local refused = cli.cli(words("add", "north-star", "7 * * * *", "hello"), "01HABC")
-ok("an agent identity is refused for add", type(refused) == "table" and refused.error:find("operator%-only"))
-eq("a refused add asks nothing", #prompts, 0)
-eq("a refused add writes nothing", file_text(), nil)
-ok("a session name counts as an agent identity too",
-  type(cli.cli(words("add", "x", "7 * * * *", "t"), "dev-1")) == "table")
+-- A session creates only for itself, with command invocation serving as consent.
+local member_added = cli.cli(words("add", "self-service", "7 * * * *", "hello"), alice)
+ok("a member can add for itself", type(member_added) == "string" and member_added:find("added schedule self%-service"))
+ok("the member add includes the standing-delivery warning", member_added:find("reserved sender `schedule`", 1, true))
+eq("a member add does not ask for an impossible terminal prompt", #prompts, 0)
+local owned = select(2, schedule.find(stored(), "self-service"))
+eq("member schedule targets its own alias", owned.target, "dev-1")
+eq("member schedule stores durable owner identity", owned.created_by, alice.id)
+eq("member schedule pins delivery to its durable target ID", owned.recipient_id, alice.id)
+ok("a member cannot target another session", type(cli.cli(words("add", "other-target", "7 * * * *", "hello", "--to", "butler"), alice)) == "table")
+eq("cross-target refusal writes nothing", select(1, schedule.find(stored(), "other-target")), nil)
 
 -- add: validated first, then confirmed, then written.
 local result, prompt = add(words("add", "north-star", "7 * * * *", "North Star check"), "yes")
@@ -98,12 +104,13 @@ ok("the prompt names the schedule", prompt.label:find("north%-star"))
 ok("the prompt warns about standing delivery", prompt.preface:find("reserved sender `schedule`", 1, true))
 eq("the warning wording is preserved", prompt.preface:gsub("\n", " "),
   "From now on this text arrives as mail from the reserved sender `schedule` at every due time, until the schedule is removed, also after restarts. The receiving agent reads it like any mail and may act on it.")
-local entry = stored()[1]
+local entry = select(2, schedule.find(stored(), "north-star"))
 eq("stored name", entry.name, "north-star")
 eq("stored spec", entry.spec, "7 * * * *")
 eq("target defaults to butler", entry.target, "butler")
 eq("stored text", entry.text, "North Star check")
 eq("created by the operator", entry.created_by, "operator")
+eq("operator schedule keeps alias target semantics", entry.recipient_id, nil)
 eq("enabled", entry.enabled, true)
 ok("created_at is set", entry.created_at:find("^%d%d%d%d%-%d%d%-%d%dT"))
 ok("a new schedule starts at the current minute, not at an old slot",
@@ -150,7 +157,7 @@ rejected("a dangling --to", words("add", "n1", "7 * * * *", "t", "--to"))
 ok("an unknown target is named", rejected("an unknown target", words("add", "n1", "7 * * * *", "t", "--to", "ghost")):find("ghost"))
 rejected("a target given as an id", words("add", "n1", "7 * * * *", "t", "--to", "01HABCDEFGHJKMNPQRSTVWXYZ0"))
 local usage = rejected("a bare add", words("add"))
-ok("usage is shown", usage:find("Usage: remuda butler schedule list", 1, true))
+ok("usage is shown", usage:find("Usage: remuda butler schedule add", 1, true))
 ok("a bare schedule shows usage", cli.cli(words()).error:find("Usage:", 1, true))
 ok("an unknown verb shows usage", cli.cli(words("rename")).error:find("Usage:", 1, true))
 
@@ -166,7 +173,7 @@ local listing = cli.cli(words("list"), "01HABC")
 ok("an agent may list", type(listing) == "string")
 local first = listing:match("^[^\n]*")
 ok("a line carries name, spec, target, state and last_fired",
-  first:find("^north%-star  7 %* %* %* %*  %-> butler  on  last %d%d%d%d%-%d%d%-%d%d %d%d:%d%d  North Star check$"))
+  first:find("^self%-service  7 %* %* %* %*  %-> dev%-1  on  last %d%d%d%d%-%d%d%-%d%d %d%d:%d%d  hello$"))
 eq("one line per schedule", select(2, listing:gsub("\n", "\n")) + 1, 16)
 local long = schedule.load(path)
 long[1].text = ("a"):rep(200)
@@ -188,9 +195,15 @@ ok("disabled reads as off", lines[3]:find("  off  ", 1, true))
 
 -- rm: operator-only, no prompt.
 local gone_before = #stored()
-local rm_refused = cli.cli(words("rm", "north-star"), "01HABC")
-ok("an agent identity is refused for rm", type(rm_refused) == "table" and rm_refused.error:find("operator%-only"))
+local rm_refused = cli.cli(words("rm", "north-star"), alice)
+ok("a member cannot remove another owner's schedule", type(rm_refused) == "table" and rm_refused.error:find("no schedule named"))
 eq("a refused rm removes nothing", #stored(), gone_before)
+local reused_alias_refused = cli.cli(words("rm", "self-service"), reincarnated_alice)
+ok("a new identity reusing the owner's alias cannot remove the old schedule",
+  type(reused_alias_refused) == "table" and reused_alias_refused.error:find("no schedule named"))
+eq("alias reuse leaves the old schedule in place", select(2, schedule.find(stored(), "self-service")).created_by, alice.id)
+eq("the owner can remove its schedule", cli.cli(words("rm", "self-service"), alice), "removed schedule self-service")
+eq("owner removal takes its record out", select(1, schedule.find(stored(), "self-service")), nil)
 prompts = {}
 eq("rm reports", cli.cli(words("rm", "north-star")), "removed schedule north-star")
 eq("rm asks nothing", #prompts, 0)
@@ -198,6 +211,21 @@ eq("rm removes the schedule", select(1, schedule.find(stored(), "north-star")), 
 ok("the rm is traced", traces[#traces] == "schedule_removed north-star")
 ok("rm of an absent schedule fails", cli.cli(words("rm", "north-star")).error:find("no schedule named north%-star"))
 ok("rm needs a name", cli.cli(words("rm")).error:find("Usage:", 1, true))
+
+-- Existing operator-owned rows retain operator access and remain private from members.
+do
+  local entries = stored()
+  local legacy = { name = "legacy-operator", spec = "12 * * * *", target = "dev-1", text = "legacy",
+    created_by = "operator", created_at = "2020-01-01T00:00:00Z", last_fired = 0, enabled = true }
+  ok("legacy schedule fixture is valid", schedule.add(entries, legacy))
+  ok("legacy schedule fixture is written", schedule.save(path, entries))
+  local refused = cli.cli(words("rm", "legacy-operator"), alice)
+  ok("member cannot remove a pre-existing operator schedule", type(refused) == "table" and refused.error:find("no schedule named"))
+  eq("member refusal preserves the legacy operator schedule",
+    select(2, schedule.find(stored(), "legacy-operator")).created_by, "operator")
+  eq("operator can remove a pre-existing operator schedule",
+    cli.cli(words("rm", "legacy-operator")), "removed schedule legacy-operator")
+end
 
 -- A file that cannot be read is never overwritten by add or rm.
 local garbage = "{{{ corrupt"

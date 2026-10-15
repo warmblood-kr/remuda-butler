@@ -7,7 +7,9 @@ if not getmetatable(_G) then
 end
 
 local host = getmetatable(_G).__index.remuda
-local system, dialogs
+local cli_parse = assert(host.cli and host.cli.parse,
+  "Butler CLI requires remuda.cli.parse (Remuda core #465 or later); upgrade Remuda")
+local system, dialogs, input_originals
 local booted, main_loaded = false, false
 local function load_main()
   if main_loaded then return end
@@ -16,6 +18,7 @@ local function load_main()
   system = assert(host._butler_system)
   host.exec("butler/main")
   dialogs = host.butler and host.butler.dialogs
+  input_originals = host._butler_dialog_originals
 end
 local function start_matrix_relay()
   local matrix = host.butler and host.butler.matrix
@@ -105,6 +108,29 @@ return {
   api = "remuda-module-v1",
   state_version = 1,
   initialize = function() return { compaction_enabled = false, active_choosers = {}, next_chooser_id = 0 } end,
+  source_refresh_ready = function(state)
+    if host._module_resume_supported ~= true then return "core lacks lifecycle resume; upgrade Remuda before source refresh" end
+    if state.compaction_fleet_active then return "compaction is active" end
+    for _, member in pairs(state.compaction_members or {}) do
+      if member.compaction_in_progress or member.dialog_operation or member.restore_pending_attempt_active then
+        return "compaction or model restoration is active"
+      end
+    end
+    if dialogs and dialogs.source_refresh_busy and dialogs.source_refresh_busy() then return "input recovery is active" end
+    if next(state.active_choosers or {}) then return "a launch chooser is active" end
+    if host._butler_launching or host._butler_start_pending then return "Butler is starting" end
+    local bus = host._butler_bus or {}
+    if next(bus.pending_tasks or {}) then return "mail delivery is pending" end
+    for _, dialog in pairs(bus.dialog_states or {}) do
+      if dialog.blocked or dialog.id or dialog.reporting then return "a managed dialog is active" end
+    end
+    local matrix = host.butler and host.butler.matrix
+    if matrix and matrix.relay and matrix.relay.instance then return "Matrix relay is active" end
+    local approval = host.butler and host.butler.approval
+    if approval and type(approval.source_refresh_busy) == "function" and approval.source_refresh_busy() then
+      return "an approval is pending"
+    end
+  end,
   -- Registers the CLI verbs only; `start` boots. Cores without the hook ignore this field.
   commands = function(state)
     commands_only = true
@@ -121,6 +147,28 @@ return {
     host._butler_state = state
     boot()
     stop_legacy_matrix_relay()
+  end,
+  -- Rollback restores this activation's registrations. Reinstall only resources
+  -- stop() unwrapped; cached start/main closures must not reread a broken helper.
+  resume = function(state)
+    local ok, err = pcall(function()
+      host._butler_state = state
+      if dialogs then
+        host.butler.dialogs = dialogs
+        host._butler_dialog_originals = input_originals
+        dialogs.install()
+      end
+      if booted then start_matrix_relay() end
+    end)
+    if not ok then
+      -- Never leave raw input exposed if the old activation cannot resume.
+      -- Keep the originals for a later explicit, corrected activation.
+      host._butler_dialog_originals = input_originals
+      local function refuse() error("Butler input gate recovery failed; reload Butler when idle", 0) end
+      host.key, host.type_text = refuse, refuse
+      if input_originals and input_originals.send then host.send = refuse end
+      error(err, 0)
+    end
   end,
   stop = function(state)
     if dialogs then dialogs.stop() end
@@ -226,6 +274,20 @@ task sent to this terminal. Your Butler identity is already in
 `REMUDA_BUTLER_AGENT_ID`, and your leader is in `REMUDA_BUTLER_LEADER_ID`.
 Start by running `remuda butler inbox` to read your welcome message.
 
+## Memory
+
+Keep useful notes under `docs/`. Put stable, reusable facts and decisions in
+`docs/concepts/`; put dated events, progress, and context that may expire in
+`docs/journal/YYYY-MM-DD.md`. Keep source files concise: each concepts file and
+daily note must stay at or below 5,000 characters. Use at most 50 concepts
+files; when full, delete low-value material, consolidate or compress existing
+notes, or decline lower-priority material.
+
+Summarize daily notes older than two ISO weeks into
+`docs/journal/YYYY-Www.md` (use the correct ISO week year and week number), then
+gzip the summarized daily files under `docs/journal/archive/`. These are
+manual file practices; do not assume a process performs them automatically.
+
 ]]
         end,
         prompt = function()
@@ -280,7 +342,7 @@ Caller attribution is advisory within one user account, not an isolation boundar
         agents_md = function()
           return [[You may create a Remuda-managed child team with `remuda butler topic delegate
 NAME TASK...` when useful. Internal agent subagents are separate from Butler
-team members. `remuda butler send FROM TO MESSAGE...` is an operator form, not
+team members. `remuda butler send --from FROM TO MESSAGE...` is an operator form, not
 the normal way for a member to communicate.
 ]]
         end },
@@ -319,65 +381,45 @@ the normal way for a member to communicate.
         run = function(_, args, caller) return host._butler_command_run("quota", args, caller) end },
       { id = "compact", order = 16, verb = "compact", usage = "  remuda butler compact <session> [--dry-run|--force]",
         run = function(_, args, caller)
-          if not args[2] or args[2] == "" then return nil end
-          if not host._butler_compaction_has_session(args[2]) then
-            local message = "unknown session: " .. args[2]
+          local spec = {
+            name = "remuda butler",
+            verbs = { compact = {
+              about = "Compact a Butler session. Example: remuda butler compact worker-1 --dry-run",
+              options = {
+                { long = "dry-run", help = "Show compaction changes without applying them" },
+                { long = "force", help = "Compact even when automatic rules would defer" },
+              },
+              args = { { name = "SESSION", help = "Session to compact" } },
+              next = "remuda butler compact --help",
+            } },
+          }
+          local report = cli_parse(spec, args)
+          if report.kind == "help" then return report.text end
+          if not report.ok then
+            if type(host.fail) == "function" then return host.fail(report.text, report.code) end
+            error(report.text, 0)
+          end
+          local session = report.values.SESSION
+          local dry_run, force = report.values["dry-run"] == true, report.values.force == true
+          if dry_run and force then
+            local message = "--dry-run and --force cannot be used together.\nNext: remuda butler compact --help"
+            if type(host.fail) == "function" then return host.fail(message, 2) end
+            error(message, 0)
+          end
+          if not host._butler_compaction_has_session(session) then
+            local message = "unknown session: " .. (session == "" and "<empty>" or session)
             if type(host.fail) == "function" then return host.fail(message, 1) end
             error(message, 0)
           end
-          local dry_run, force = false, false
-          local cli = host.cli
-          -- A leading-dash session name belongs to the legacy positional path.
-          -- The spec parser can consume names such as -s1, --force or --help as
-          -- options before the compact handler gets a chance to resolve them.
-          if type(cli) == "table" and type(cli.parse) == "function"
-              and args[2]:sub(1, 1) ~= "-" then
-            local spec = {
-              name = "remuda butler",
-              verbs = { compact = {
-                about = "Compact a Butler session",
-                options = {
-                  { long = "dry-run", help = "Show compaction changes without applying them" },
-                  { long = "force", help = "Compact even when automatic rules would defer" },
-                },
-                args = { { name = "SESSION", help = "Session to compact" } },
-                next = "remuda butler compact <session> [--dry-run|--force]",
-              } },
-            }
-            -- Preserve today's gate order: unknown sessions win even when trailing flags are bad.
-            for _, word in ipairs(args) do if word == "--" then return nil end end
-            local report = cli.parse(spec, args)
-            if not report.ok or report.kind == "help" then return nil end
-            dry_run, force = report.values["dry-run"] == true, report.values.force == true
-            -- Current compact accepts only no flag or one exact trailing flag.
-            if #args == 3 and args[3] == "--dry-run" then
-              if not dry_run or force then return nil end
-            elseif #args == 3 and args[3] == "--force" then
-              if not force or dry_run then return nil end
-            elseif #args ~= 2 or dry_run or force then
-              return nil
-            end
-            if dry_run then return host._butler_compaction_tick(args[2], true) end
-            host._butler_current_agent(caller)
-            if force then return host.butler.compact(args[2], true) end
-            return host.butler.compact(args[2], false)
-          end
-          if #args == 3 and args[3] == "--dry-run" then
-            return host._butler_compaction_tick(args[2], true)
-          end
-          if #args == 3 and args[3] == "--force" then
-            host._butler_current_agent(caller)
-            return host.butler.compact(args[2], true)
-          end
-          if #args ~= 2 then return nil end
+          if dry_run then return host._butler_compaction_tick(session, true) end
           host._butler_current_agent(caller)
-          return host.butler.compact(args[2], false)
+          return host.butler.compact(session, force)
         end },
       { id = "sessions", order = 10, verb = "sessions", usage = "  remuda butler sessions",
         run = function(_, args, caller) return host._butler_command_run("sessions", args, caller) end },
       { id = "status", order = 12, verb = "status", usage = "  remuda butler status  (0=up, 75=launching, 1=failed)",
         run = function(_, args, caller) return host._butler_command_run("status", args, caller) end },
-      { id = "guard", order = 21, verb = "guard", usage = "  remuda butler guard on|off|status | approvals on|off|status | deny on|off|status  (off by default)",
+      { id = "guard", order = 21, verb = "guard", usage = "  remuda butler guard on|off|status | approvals on|off|status | deny on|off|status | grants [on|off|status] | stats | verify (all switches off by default)",
         run = function(_, args, caller) return host._butler_command_run("guard", args, caller) end },
       { id = "typed-lines", order = 13, verb = "typed-lines", usage = "  remuda butler typed-lines on|off",
         run = function(_, args, caller) return host._butler_command_run("typed-lines", args, caller) end },
@@ -399,7 +441,7 @@ the normal way for a member to communicate.
           .. "  remuda butler topic delegate <name> [--agent A] [--leader L] [--model M] [--cwd DIR] [--writable DIR]... [--sandbox full] <task...>",
         run = function(_, args, caller) return host._butler_command_run("topic", args, caller) end },
       { id = "send", order = 40, verb = "send", usage = '  remuda butler send <to> "<message>" | <to> - | <to> --file PATH\n'
-          .. '  remuda butler send <from> <to> <message...> | <from> <to> - | <from> <to> --file PATH',
+          .. '  remuda butler send --from <from> <to> <message...> | --from <from> --file PATH <to>',
         run = function(_, args, caller) return host._butler_command_run("send", args, caller) end },
       { id = "send-to-leader", order = 50, verb = "send-to-leader", usage = "  remuda butler send-to-leader [--done] <message...> | - | --file PATH\n"
           .. "  Without --done, creates no new auto-close request and keeps an earlier one.\n"

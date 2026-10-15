@@ -1,6 +1,8 @@
 -- Terminal-only, owner-confirmed switches for Matrix typed lines and status commands.
 local matrix = assert(remuda.butler and remuda.butler.matrix,
   "load butler/matrix_request before butler/typed_lines_cli")
+local parse_cli = assert(remuda.cli and remuda.cli.parse,
+  "Butler CLI requires remuda.cli.parse (Remuda core #465 or later); upgrade Remuda")
 local M = {}
 
 local USAGE = "Usage: remuda butler typed-lines on|off\n"
@@ -12,13 +14,13 @@ local SWITCH_KEYS = { ["typed-lines"] = "typed_lines", ["shell-lines"] = "shell_
 local SWITCH_CLI_SPEC = {
   name = "remuda butler",
   verbs = {
-    ["typed-lines"] = { about = "Turn typed Matrix lines on or off", args = {
+    ["typed-lines"] = { about = "Turn typed Matrix lines on or off. Example: remuda butler typed-lines on", args = {
       { name = "STATE", help = "on or off" }, }, next = "remuda butler typed-lines on|off" },
-    ["shell-lines"] = { about = "Turn Matrix shell lines on or off", args = {
+    ["shell-lines"] = { about = "Turn Matrix shell lines on or off. Example: remuda butler shell-lines on", args = {
       { name = "STATE", help = "on or off" }, }, next = "remuda butler shell-lines on|off" },
-    ["status-commands"] = { about = "Turn Matrix status commands on or off", args = {
+    ["status-commands"] = { about = "Turn Matrix status commands on or off. Example: remuda butler status-commands on", args = {
       { name = "STATE", help = "on or off" }, }, next = "remuda butler status-commands on|off" },
-    ["approve-text"] = { about = "Turn text approval on or off", args = {
+    ["approve-text"] = { about = "Turn text approval on or off. Example: remuda butler approve-text on", args = {
       { name = "STATE", help = "on or off" }, }, next = "remuda butler approve-text on|off" },
   },
 }
@@ -153,23 +155,12 @@ local function enable(args, key, path)
 end
 
 function M.cli(args, agent)
-  local verb, state
-  local cli = remuda.cli
-  if type(cli) == "table" and type(cli.parse) == "function" then
-    -- The switch's usage response is deliberately the historical one; clap help/errors used to
-    -- be ordinary invalid-switch output here. Parsing must stay before all policy/config checks.
-    for _, word in ipairs(args or {}) do if word == "--" then return fail(USAGE) end end
-    local report = cli.parse(SWITCH_CLI_SPEC, args or {})
-    if not report.ok or report.kind == "help" then return fail(USAGE) end
-    verb, state = report.verb, report.values.STATE
-    if SWITCH_KEYS[verb] == nil or (state ~= "on" and state ~= "off") then return fail(USAGE) end
-  else
-    verb, state = type(args) == "table" and args[1], type(args) == "table" and args[2]
-    if type(args) ~= "table" or #args ~= 2 or SWITCH_KEYS[verb] == nil
-        or (state ~= "on" and state ~= "off") then return fail(USAGE) end
-  end
-  if not verb or not state then
-    return fail(USAGE)
+  local report = parse_cli(SWITCH_CLI_SPEC, args or {})
+  if report.kind == "help" then return report.text end
+  if not report.ok then return fail(type(report.text) == "string" and report.text ~= "" and report.text or USAGE) end
+  local verb, state = report.verb, report.values.STATE
+  if SWITCH_KEYS[verb] == nil or (state ~= "on" and state ~= "off") then
+    return fail(type(report.text) == "string" and report.text ~= "" and report.text or USAGE)
   end
   if type(agent) == "string" and agent ~= "" then
     return fail(verb .. " is operator-only. Run it from the owner's terminal; it cannot be enabled from Matrix or Butler mail.")

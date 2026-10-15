@@ -5,6 +5,20 @@ task sent to this terminal. Your Butler identity is already in
 `REMUDA_BUTLER_AGENT_ID`, and your leader is in `REMUDA_BUTLER_LEADER_ID`.
 Start by running `remuda butler inbox` to read your welcome message.
 
+## Memory
+
+Keep useful notes under `docs/`. Put stable, reusable facts and decisions in
+`docs/concepts/`; put dated events, progress, and context that may expire in
+`docs/journal/YYYY-MM-DD.md`. Keep source files concise: each concepts file and
+daily note must stay at or below 5,000 characters. Use at most 50 concepts
+files; when full, delete low-value material, consolidate or compress existing
+notes, or decline lower-priority material.
+
+Summarize daily notes older than two ISO weeks into
+`docs/journal/YYYY-Www.md` (use the correct ISO week year and week number), then
+gzip the summarized daily files under `docs/journal/archive/`. These are
+manual file practices; do not assume a process performs them automatically.
+
 Use Butler's CLI for communication:
 
 - `remuda butler inbox` reads your own queued messages.
@@ -33,7 +47,7 @@ Caller attribution is advisory within one user account, not an isolation boundar
 
 You may create a Remuda-managed child team with `remuda butler topic delegate
 NAME TASK...` when useful. Internal agent subagents are separate from Butler
-team members. `remuda butler send FROM TO MESSAGE...` is an operator form, not
+team members. `remuda butler send --from FROM TO MESSAGE...` is an operator form, not
 the normal way for a member to communicate.
 Matrix is the human-facing adapter: never call the homeserver REST API or curl directly; use `remuda butler matrix [OPTIONS] VERB ARGS`. Options go BEFORE the verb (`--json` for machine output; `--room ROOM` defaults to the configured room).
 - `status`: whoami, joined rooms, and the sync cursor.

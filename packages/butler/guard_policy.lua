@@ -1263,11 +1263,10 @@ local function guard_principal(caller, principal)
   return nil, "Butler cannot identify this caller for guard hooks or switches. Next: run from a registered Butler session or upgrade Remuda core."
 end
 
-function M.run(args, caller, principal)
-  local verb = args[2]
-  local switch_call = (#args == 2 and (verb == "on" or verb == "off"))
-    or (#args == 3 and (verb == "approvals" or verb == "deny" or verb == "grants")
-      and (args[3] == "on" or args[3] == "off"))
+function M.run(verb, state, caller, principal)
+  local switch_call = (verb == "on" or verb == "off")
+    or ((verb == "approvals" or verb == "deny" or verb == "grants")
+      and (state == "on" or state == "off"))
   if switch_call then
     local resolved, refusal = guard_principal(caller, principal)
     if not resolved then error(refusal, 0) end
@@ -1320,44 +1319,44 @@ function M.run(args, caller, principal)
     if not ok then note("guard failed open: " .. tostring(err)) end
     return reply or ""
   end
-  if #args == 3 and verb == "approvals" and (args[3] == "on" or args[3] == "off") then
-    local written, why = change(principal, "guard approvals", args[3] == "on", M.set_approvals)
+  if verb == "approvals" and (state == "on" or state == "off") then
+    local written, why = change(principal, "guard approvals", state == "on", M.set_approvals)
     local warn = why
     if not written then return remuda.fail("guard approvals switch not changed: " .. tostring(why), 1) end
-    return "guard approvals are now " .. args[3] .. ". " .. SWITCH_NOTE
+    return "guard approvals are now " .. state .. ". " .. SWITCH_NOTE
       .. (warn and ("\n" .. warn) or "")
-      .. (args[3] == "on" and " Needs `guard on`; the owner answers Claude permission prompts in Matrix,"
+      .. (state == "on" and " Needs `guard on`; the owner answers Claude permission prompts in Matrix,"
         .. " and with no answer Claude shows its own prompt." or "")
   end
-  if #args == 3 and verb == "approvals" and args[3] == "status" then
+  if verb == "approvals" and state == "status" then
     return "guard approvals: " .. (M.approvals_enabled() and "on" or "off") .. " (guard: "
       .. (M.enabled() and "on" or "off") .. "; routing runs only when both are on)\n" .. SWITCH_NOTE
   end
-  if #args == 3 and verb == "grants" and (args[3] == "on" or args[3] == "off") then
-    local written, why = change(principal, "guard grants", args[3] == "on", M.set_grants)
+  if verb == "grants" and (state == "on" or state == "off") then
+    local written, why = change(principal, "guard grants", state == "on", M.set_grants)
     local warn = why
     if not written then return remuda.fail("guard grants switch not changed: " .. tostring(why), 1) end
-    return "guard grants are now " .. args[3] .. ". There is no way to create a grant from the CLI."
+    return "guard grants are now " .. state .. ". There is no way to create a grant from the CLI."
       .. (warn and ("\n" .. warn) or "")
   end
-  if #args == 3 and verb == "grants" and args[3] == "status" then
+  if verb == "grants" and state == "status" then
     return "guard grants: " .. (M.grants_enabled() and "on" or "off") .. " (guard: " .. (M.enabled() and "on" or "off")
       .. "; with the switch off the grant store is not read)"
   end
-  if #args == 2 and verb == "grants" then return remuda.butler.guard_grants.list() end
-  if #args == 3 and verb == "deny" and (args[3] == "on" or args[3] == "off") then
-    local written, why = change(principal, "guard deny", args[3] == "on", M.set_deny)
+  if verb == "grants" and state == nil then return remuda.butler.guard_grants.list() end
+  if verb == "deny" and (state == "on" or state == "off") then
+    local written, why = change(principal, "guard deny", state == "on", M.set_deny)
     local warn = why
     if not written then return remuda.fail("guard deny switch not changed: " .. tostring(why), 1) end
-    return "guard deny is now " .. args[3] .. ". " .. SWITCH_NOTE
+    return "guard deny is now " .. state .. ". " .. SWITCH_NOTE
       .. (warn and ("\n" .. warn) or "")
-      .. (args[3] == "on" and " Needs `guard on`; recognised high-impact calls are denied." or "")
+      .. (state == "on" and " Needs `guard on`; recognised high-impact calls are denied." or "")
   end
-  if #args == 3 and verb == "deny" and args[3] == "status" then
+  if verb == "deny" and state == "status" then
     return "guard deny: " .. (M.deny_enabled() and "on" or "off") .. " (guard: "
       .. (M.enabled() and "on" or "off") .. "; denial runs only when both are on)\n" .. SWITCH_NOTE
   end
-  if #args == 2 and (verb == "on" or verb == "off") then
+  if verb == "on" or verb == "off" then
     local written, why = change(principal, "guard", verb == "on", M.set)
     local warn = why
     if not written then return remuda.fail("guard switch not changed: " .. tostring(why), 1) end
@@ -1365,13 +1364,13 @@ function M.run(args, caller, principal)
       .. (warn and ("\n" .. warn) or "")
       .. (verb == "on" and " It records calls; `guard deny on` also enables recognised denials." or "")
   end
-  if #args == 2 and verb == "status" then
+  if verb == "status" then
     return "guard: " .. (M.enabled() and "on" or "off") .. " (audit; deny: "
       .. (M.deny_enabled() and "on" or "off") .. ")\nlog: " .. tostring(M.log_path())
       .. "\n" .. SWITCH_NOTE .. unaudited_note()
   end
-  if #args == 2 and verb == "stats" then return stats() end
-  if #args == 2 and verb == "verify" then return verify() end
+  if verb == "stats" then return stats() end
+  if verb == "verify" then return verify() end
   return remuda.fail("Usage: remuda butler guard on|off|status | approvals on|off|status | deny on|off|status | grants [on|off|status] | stats | verify", 2)
 end
 

@@ -101,7 +101,7 @@ remuda butler send-to-leader "review complete: no blockers"
 ```
 
 The sender is inferred from the daemon's registered caller session. Quote the
-message for `send`, since `remuda butler send FROM TO MESSAGE...` is the operator
+message for `send`, since `remuda butler send --from FROM TO MESSAGE...` is the operator
 form for sending on another session's behalf. Older cores without caller fields
 refuse identity-sensitive CLI commands: upgrade core or use the MCP `butler_*`
 tools with the session's configured capability. Environment variables never

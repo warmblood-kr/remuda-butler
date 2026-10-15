@@ -11,11 +11,16 @@ quota.collect()
 ### remuda butler "quota" "--help"
 exit: 0
 stdout:
-remuda butler quota reports, for claude and codex, how each is logged in, the subscription account and how much of each limit is used.
-With --report it also posts the report to this Butler's Matrix home room.
-Usage: remuda butler quota [--report]
-Example: remuda butler quota --report
-Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.
+Report how Claude and Codex are logged in, their subscription accounts and current usage limits. With --report, also post the report to this Butler's Matrix home room. Example: remuda butler quota --report
+
+Usage: remuda butler quota [OPTIONS]
+
+Options:
+  -h, --help    Print help
+      --report  Also post the report to Matrix
+
+Next: remuda butler doctor
+
 stderr:
 
 actions:
@@ -24,11 +29,16 @@ actions:
 ### remuda butler "quota" "-h"
 exit: 0
 stdout:
-remuda butler quota reports, for claude and codex, how each is logged in, the subscription account and how much of each limit is used.
-With --report it also posts the report to this Butler's Matrix home room.
-Usage: remuda butler quota [--report]
-Example: remuda butler quota --report
-Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.
+Report how Claude and Codex are logged in, their subscription accounts and current usage limits. With --report, also post the report to this Butler's Matrix home room. Example: remuda butler quota --report
+
+Usage: remuda butler quota [OPTIONS]
+
+Options:
+  -h, --help    Print help
+      --report  Also post the report to Matrix
+
+Next: remuda butler doctor
+
 stderr:
 
 actions:
@@ -39,10 +49,9 @@ exit: 2
 stdout:
 
 stderr:
-unexpected argument: help
-Usage: remuda butler quota [--report]
-Example: remuda butler quota --report
-Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.
+unexpected argument 'help'
+Usage: remuda butler quota [OPTIONS]
+Next: remuda butler doctor
 actions:
 (none)
 
@@ -61,10 +70,9 @@ exit: 2
 stdout:
 
 stderr:
-unknown option: --report
-Usage: remuda butler quota [--report]
-Example: remuda butler quota --report
-Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.
+invalid arguments: an argument cannot be used with one or more of the other specified arguments
+Usage: remuda butler quota [OPTIONS]
+Next: remuda butler doctor
 actions:
 (none)
 
@@ -73,10 +81,9 @@ exit: 2
 stdout:
 
 stderr:
-unexpected argument: extra
-Usage: remuda butler quota [--report]
-Example: remuda butler quota --report
-Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.
+unexpected argument 'extra'
+Usage: remuda butler quota [OPTIONS]
+Next: remuda butler doctor
 actions:
 (none)
 
@@ -85,10 +92,9 @@ exit: 2
 stdout:
 
 stderr:
-unexpected argument: extra
-Usage: remuda butler quota [--report]
-Example: remuda butler quota --report
-Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.
+unexpected argument 'extra'
+Usage: remuda butler quota [OPTIONS]
+Next: remuda butler doctor
 actions:
 (none)
 
@@ -97,10 +103,9 @@ exit: 2
 stdout:
 
 stderr:
-unknown option: --report=1
-Usage: remuda butler quota [--report]
-Example: remuda butler quota --report
-Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.
+invalid arguments: unexpected value for an argument found
+Usage: remuda butler quota [OPTIONS]
+Next: remuda butler doctor
 actions:
 (none)
 
@@ -109,10 +114,9 @@ exit: 2
 stdout:
 
 stderr:
-unknown option: --bogus
-Usage: remuda butler quota [--report]
-Example: remuda butler quota --report
-Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.
+remuda: butler quota: unknown option '--bogus'.
+Usage: remuda butler quota [OPTIONS]
+Next: remuda butler doctor
 actions:
 (none)
 
@@ -121,10 +125,9 @@ exit: 2
 stdout:
 
 stderr:
-unexpected argument: extra
-Usage: remuda butler quota [--report]
-Example: remuda butler quota --report
-Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.
+unexpected argument 'extra'
+Usage: remuda butler quota [OPTIONS]
+Next: remuda butler doctor
 actions:
 (none)
 
@@ -133,10 +136,7 @@ exit: 2
 stdout:
 
 stderr:
-unknown option: --
 Usage: remuda butler quota [--report]
-Example: remuda butler quota --report
-Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.
 actions:
 (none)
 
@@ -145,34 +145,43 @@ exit: 2
 stdout:
 
 stderr:
-unknown option: --
 Usage: remuda butler quota [--report]
-Example: remuda butler quota --report
-Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.
 actions:
 (none)
 
 ### remuda butler "quota" "--help" "--report"
-exit: 2
+exit: 0
 stdout:
+Report how Claude and Codex are logged in, their subscription accounts and current usage limits. With --report, also post the report to this Butler's Matrix home room. Example: remuda butler quota --report
+
+Usage: remuda butler quota [OPTIONS]
+
+Options:
+  -h, --help    Print help
+      --report  Also post the report to Matrix
+
+Next: remuda butler doctor
 
 stderr:
-unknown option: --help
-Usage: remuda butler quota [--report]
-Example: remuda butler quota --report
-Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.
+
 actions:
 (none)
 
 ### remuda butler "quota" "--report" "--help"
-exit: 2
+exit: 0
 stdout:
+Report how Claude and Codex are logged in, their subscription accounts and current usage limits. With --report, also post the report to this Butler's Matrix home room. Example: remuda butler quota --report
+
+Usage: remuda butler quota [OPTIONS]
+
+Options:
+  -h, --help    Print help
+      --report  Also post the report to Matrix
+
+Next: remuda butler doctor
 
 stderr:
-unknown option: --help
-Usage: remuda butler quota [--report]
-Example: remuda butler quota --report
-Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.
+
 actions:
 (none)
 
@@ -181,10 +190,9 @@ exit: 2
 stdout:
 
 stderr:
-unknown option: -r
-Usage: remuda butler quota [--report]
-Example: remuda butler quota --report
-Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.
+unexpected argument '-r'
+Usage: remuda butler quota [OPTIONS]
+Next: remuda butler doctor
 actions:
 (none)
 
@@ -193,10 +201,9 @@ exit: 2
 stdout:
 
 stderr:
-unknown option: -1
-Usage: remuda butler quota [--report]
-Example: remuda butler quota --report
-Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.
+unexpected argument '-1'
+Usage: remuda butler quota [OPTIONS]
+Next: remuda butler doctor
 actions:
 (none)
 
@@ -222,11 +229,15 @@ actions:
 ### [agent] remuda butler "quota" "--help"
 exit: 0
 stdout:
-remuda butler quota reports, for claude and codex, how each is logged in, the subscription account and how much of each limit is used.
-With --report it also posts the report to this Butler's Matrix home room.
-Usage: remuda butler quota [--report]
-Example: remuda butler quota --report
-Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.
+Report how Claude and Codex are logged in, their subscription accounts and current usage limits. With --report, also post the report to this Butler's Matrix home room. Example: remuda butler quota --report
+
+Usage: remuda butler quota [OPTIONS]
+
+Options:
+  -h, --help    Print help
+      --report  Also post the report to Matrix
+
+Next: remuda butler doctor
 stderr:
 
 actions:
@@ -237,10 +248,9 @@ exit: 2
 stdout:
 
 stderr:
-unexpected argument: extra
-Usage: remuda butler quota [--report]
-Example: remuda butler quota --report
-Next: run `remuda butler quota`, or `remuda butler quota --report` to also send the report to Matrix.
+unexpected argument 'extra'
+Usage: remuda butler quota [OPTIONS]
+Next: remuda butler doctor
 actions:
 (none)
 
@@ -255,12 +265,20 @@ actions:
 (none)
 
 ### remuda butler "quota" "--help"
-exit: 1
+exit: 0
 stdout:
+Report how Claude and Codex are logged in, their subscription accounts and current usage limits. With --report, also post the report to this Butler's Matrix home room. Example: remuda butler quota --report
+
+Usage: remuda butler quota [OPTIONS]
+
+Options:
+  -h, --help    Print help
+      --report  Also post the report to Matrix
+
+Next: remuda butler doctor
 
 stderr:
-quota is unavailable: not loaded
-Next: remuda butler doctor
+
 actions:
 (none)
 

@@ -11,6 +11,9 @@ local status_command = assert(remuda.butler.status_command,
 -- Trust words are bound at load (main.lua execs matrix_request before
 -- this file), so a later redefinition of the public entry cannot change them.
 local read_config = matrix.read_config
+assert(matrix.delivery_policy, "load butler/matrix_delivery_policy before butler/matrix_relay")
+-- Do not capture policy functions here: a policy-only reevaluation publishes
+-- its interface on the retained matrix table for already-refactored instances.
 local json = assert(remuda.json, "Matrix requires core remuda.json")
 local relay = matrix.relay or {}
 matrix.relay = relay
@@ -827,7 +830,11 @@ function relay.new(options)
   end
 
   function instance:note_own_turn(room, root)
-    return note_turn(room, root, "agent")
+    -- The loop budget counts messages from other Butlers, not our progress
+    -- reports. Do not reset the peer streak either: genuine ping-pong must
+    -- still stop when the other Butler reaches the limit.
+    local turns = b2b_turns[room] and b2b_turns[room][root]
+    return turns and turns.n or 0
   end
 
   local approval = remuda.butler and remuda.butler.approval
@@ -1154,7 +1161,7 @@ function relay.new(options)
       if pending >= MAX_REPLY_OUTBOX then return nil, "Matrix mail reply outbox is full" end
       local room = route.room_id
       local root = instance:thread_root_for_event(route.event_id)
-      if instance:b2b_stopped(room, root) then
+      if route.allowlisted_human ~= true and instance:b2b_stopped(room, root) then
         local safe_room = terminal_safe_field(room, 512)
         local shown_root = matrix.shown_event_id(root)
         local root_is_shown = shown_root ~= "(id not shown)"
@@ -1311,15 +1318,8 @@ function relay.new(options)
       for _, id in ipairs(ids) do
         local event = state.pending[id]
         if event and not delivery_retry_waiting[id] then
-          local notify_mode = matrix.notification_mode(cfg, event.room_id)
           local subscriptions = state.subscriptions[event.room_id] or {}
-          local still_accepted = notify_mode == "all"
-            or (notify_mode == "mentions-followed"
-              and ((event.is_mention == true
-                  and (event.mention_follow_root == nil
-                    or subscriptions[event.mention_follow_root] ~= nil))
-                or (event.thread_root ~= nil and subscriptions[event.thread_root] ~= nil)))
-          if not still_accepted then
+          if not matrix.delivery_policy.accept_pending(cfg, event.room_id, subscriptions, event) then
             add_processed(state, event.event_id)
             state.pending[id] = nil
             persist()
@@ -1581,10 +1581,9 @@ function relay.new(options)
     local content = type(event.content) == "table" and event.content or {}
     local thread_root = relation_fields(content)
     local subscriptions = state.subscriptions[room_id] or {}
-    local mode = matrix.notification_mode(cfg, room_id)
-    return mode == "all" or (mode == "mentions-followed"
-      and ((thread_root ~= nil and subscriptions[thread_root] ~= nil)
-        or mentions(content, content.body, cfg.self_mxid)))
+    return matrix.delivery_policy.accept_received(cfg, room_id, subscriptions, {
+      thread_root = thread_root, is_mention = mentions(content, content.body, cfg.self_mxid),
+    })
   end
 
   local function check_typed_line(event)
@@ -1740,7 +1739,8 @@ function relay.new(options)
           if approval_verdict == "grant" and approval_record and approval_record.kind ~= "guard_action" then
             approval_record, approval_verdict = nil, nil
           end
-          local typed_line_candidate = not approval_record and cfg.allowed_senders[ev.sender] == true
+          local recovery_line = type(content.body) == "string" and (content.body == "!recover-input" or content.body:match("^!recover%-input%s"))
+          local typed_line_candidate = not recovery_line and not approval_record and cfg.allowed_senders[ev.sender] == true
             and member_kind(ev.sender, cfg) == "HUMAN"
             and type(content.body) == "string" and content.body:sub(1, 1) == "!"
           local typed_line_enabled = typed_line_candidate and cfg.typed_lines == true
@@ -1773,7 +1773,15 @@ function relay.new(options)
               trace_typed_line(ev, room_id or cfg.room, nil, nil, "butler", "refused:not_live")
             end
           end
-          local guard_reply = not approval_record and owner_guard_line(ev, content, live_sync == true, room_id or cfg.room)
+          -- Recovery is handled by code even when the root pane is blocked.
+          -- The owner event is durably consumed BEFORE any cancellation key.
+          local recovery_target = recovery_line and content.body:match("^!recover%-input ([%w_.%-]+)$")
+          local recovery_allowed = recovery_line and not approval_record
+            and typed_lines.accept(state, ev, os.time(), cfg)
+            and approve_text.owner_event_allowed(ev, {room_id=cfg.home_room, created_ms=relay_started_ms}, cfg,
+              live_sync == true, room_id or cfg.room)
+            and member_kind(ev.sender, cfg) == "HUMAN"
+          local guard_reply = not recovery_line and not approval_record and owner_guard_line(ev, content, live_sync == true, room_id or cfg.room)
           local status_matched, status_text, status_commit = false, nil, nil
           if not approval_record and type(content.body) == "string" and content.body:sub(1, 1) == "?"
               and member_kind(ev.sender, cfg) == "HUMAN" then
@@ -1788,7 +1796,26 @@ function relay.new(options)
                 "consumed:" .. trace_reason .. ":" .. (terminal_safe_field(tostring(matched), 64):gsub("%c", " ")))
             end
           end
-          if guard_reply then
+          if recovery_line then
+            -- A rejected recovery line is never forwarded as terminal text.
+            if event_id ~= "" then add_processed(state, event_id) end
+            if cursor then state.since = cursor end
+            local saved, saved_result = pcall(persist)
+            if recovery_allowed and saved and saved_result == true then
+              local dialogs = remuda.butler and remuda.butler.dialogs
+              if not recovery_target then
+                send_threaded_notice(ev, room_id or cfg.room, "Usage: !recover-input SESSION", "input-recovery-")
+              elseif dialogs and type(dialogs.recover_input) == "function" then
+                local ok = pcall(dialogs.recover_input, recovery_target, function(text)
+                  send_threaded_notice(ev, room_id or cfg.room, text, "input-recovery-")
+                end)
+                if not ok then send_threaded_notice(ev, room_id or cfg.room,
+                  "Input recovery stopped. Reissue a fresh command after review; no automatic replay.", "input-recovery-") end
+              else
+                send_threaded_notice(ev, room_id or cfg.room, "Input recovery unavailable on this Butler version.", "input-recovery-")
+              end
+            end
+          elseif guard_reply then
             -- The event is spent before it acts, so a replay after a restart changes nothing.
             if event_id ~= "" then add_processed(state, event_id) end
             if cursor then state.since = cursor end
@@ -1876,16 +1903,14 @@ function relay.new(options)
           local subscriptions = state.subscriptions[actual_room] or json.object({})
           state.subscriptions[actual_room] = subscriptions
           local follow_root = thread_root or ev.event_id
-          local is_subscribed = thread_root and subscriptions[thread_root] ~= nil
           local auto_followed = false
           if trusted and is_mention and not subscriptions[follow_root] then
             auto_followed = subscribe(state, actual_room, follow_root, nil)
-            if auto_followed and thread_root ~= nil then is_subscribed = true end
           end
           local is_agent = sender_kind == "AGENT"
-          local notify_mode = matrix.notification_mode(cfg, actual_room)
-          local accepted = notify_mode == "all"
-            or (notify_mode == "mentions-followed" and (is_mention or (thread_root ~= nil and is_subscribed)))
+          local accepted = matrix.delivery_policy.accept_received(cfg, actual_room, subscriptions, {
+            thread_root = thread_root, is_mention = is_mention,
+          })
           local route_mail_id = thread_id
             and instance:mail_route_for_event(actual_room, thread_root, in_reply_to) or nil
           local thread_root_mail_id = thread_root

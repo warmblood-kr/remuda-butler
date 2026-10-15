@@ -2,10 +2,30 @@ local builders = assert(remuda._butler_agent_builders)
 local support = assert(remuda._butler_agent_support)
 local telemetry = assert(remuda._butler_telemetry_adapters)
 
+-- Owned status directories by member name, replaced (old one removed) on the
+-- next setup for that name; also the key for the settings directory.
+local status_dirs = {}
+
 telemetry.claude = {
   setup = function(spec)
-    local status_path = spec.status_path or (os.tmpname() .. "." .. spec.name .. ".status")
-    return { status_path = status_path, settings_path = support.status_settings(status_path) }
+    local status_path = spec.status_path
+    if not status_path then
+      -- Not a name beside a reserved tmpname file: a directory this session owns.
+      local dir, why
+      if type(support.new_private_dir) == "function" then dir, why = support.new_private_dir()
+      else why = "support lacks a private directory helper" end
+      if not dir then
+        if _butler_session_trace then _butler_session_trace("settings_not_written", tostring(why)) end
+        return { settings_error = why }
+      end
+      status_path = dir .. "/" .. spec.name .. ".status"
+      local previous = status_dirs[spec.name]
+      status_dirs[spec.name] = dir
+      if previous then pcall(remuda.remove_dir_all, previous) end
+    end
+    local settings_path, why = support.status_settings(status_path, spec.name)
+    if not settings_path and _butler_session_trace then _butler_session_trace("settings_not_written", tostring(why)) end
+    return { status_path = status_path, settings_path = settings_path, settings_error = why }
   end,
   read = function(state)
     -- The hook-written `.state` file: "<word> <unix time>", one fixed word.
@@ -40,6 +60,21 @@ telemetry.claude = {
 }
 
 builders.claude = function(spec)
+  -- The per-launch settings file carries the guard hooks (PreToolUse and
+  -- PermissionRequest) when guard policy is on. A launch that needs them but
+  -- could not persist the file is refused (fail closed): the chooser records
+  -- a spawn_error for this candidate and never starts Claude without them.
+  -- With guard policy off the failure only drops the defaults and status
+  -- telemetry; the launch continues without --settings (traced).
+  local settings_error = spec.telemetry and spec.telemetry.settings_error
+  if settings_error then
+    local policy = remuda.butler and remuda.butler.guard_policy
+    local ok, guard_on = pcall(function() return policy and policy.enabled() end)
+    if not ok or guard_on then
+      error("Claude settings file could not be written (" .. tostring(settings_error)
+        .. "); refusing to start Claude without its guard hooks", 0)
+    end
+  end
   local argv = { "claude" }
   local config = remuda._butler_compaction_config or {}
   local configured = remuda._butler_claude_autocompact

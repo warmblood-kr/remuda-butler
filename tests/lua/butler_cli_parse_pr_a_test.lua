@@ -71,8 +71,8 @@ T.test("send lead --file p.txt reads the file body", function()
   T.eq(out, "stub:send|send|agent-test|lead|file-body", "send lead --file p.txt")
 end)
 
-T.test("send a b --file p keeps the from/to form", function()
-  local out = invoke("send", { "send", "a", "b", "--file", path() }, true)
+T.test("send --from a --file p b keeps explicit sender and recipient", function()
+  local out = invoke("send", { "send", "--from", "a", "--file", path(), "b" }, true)
   T.eq(out, "stub:send|send|a|b|file-body", "send a b --file p")
 end)
 
@@ -104,35 +104,33 @@ T.test("close help documents --force before the name", function()
   T.eq(tostring(usage_count), "1", "close parse error prints usage once")
 end)
 
-T.test("close fallback usage only advertises trailing --force", function()
+T.test("close parser accepts --force before the name", function()
   start_butler()
   T.eval("remuda._pr_a_saved_cli = remuda.cli; remuda.cli = nil")
   local out = invoke_error("close", { "close", "--force", "worker" })
   T.eval("remuda.cli = remuda._pr_a_saved_cli; remuda._pr_a_saved_cli = nil")
-  T.expect(out:find("Usage: remuda butler close <name> [--force]", 1, true) ~= nil
-      and out:find("remuda butler close --force <name>", 1, true) == nil,
-    "close fallback usage should match its accepted argument order: " .. out)
+  T.expect(out:find("cannot close worker", 1, true) ~= nil,
+    "close parser should accept --force before the name and reach member resolution: " .. out)
 end)
 
-T.test("reply ID --attach PATH caption words uploads with caption", function()
-  local out = invoke("reply", { "reply", "ID", "--attach", path(), "caption", "words" })
+T.test("reply --attach PATH ID caption words uploads with caption", function()
+  local out = invoke("reply", { "reply", "--attach", path(), "ID", "caption", "words" })
   local expected = "stub:upload|upload|matrix --room !room:test upload --thread $event --caption caption words " .. path()
   T.eq(out, expected, "reply ID --attach PATH caption words")
 end)
 
-T.test("reply ID --file note.txt uses file text as body", function()
-  local out = invoke("reply", { "reply", "ID", "--file", path() })
+T.test("reply --file note.txt ID uses file text as body", function()
+  local out = invoke("reply", { "reply", "--file", path(), "ID" })
   T.eq(out, "stub:reply|reply|agent-test|ID|file-body", "reply ID --file note.txt")
 end)
 
-T.test("reply and forward reject valid first-position CLI parses", function()
-  local out = invoke_error("reply", { "reply", "--file", path(), "ID" })
-  local forward = invoke_error("forward", { "forward", "--", "ID", "worker" })
-  local reply_ok = out:find("Usage: remuda butler reply", 1, true) ~= nil and out:find("Next:", 1, true) ~= nil
-    and out:find("false|", 1, true) == 1 and out:find("|0$") ~= nil
-  local forward_ok = forward:find("Usage: remuda butler forward", 1, true) ~= nil and forward:find("Next:", 1, true) ~= nil
-    and forward:find("false|", 1, true) == 1 and forward:find("|0$") ~= nil
-  T.expect(reply_ok and forward_ok, "reply result: " .. out .. "\nforward result: " .. forward)
+T.test("reply and forward use parser option and positional forms", function()
+  local out = invoke("reply", { "reply", "--file", path(), "ID" })
+  local forward = invoke("forward", { "forward", "ID", "worker", "note" })
+  T.expect(out == "stub:reply|reply|agent-test|ID|file-body",
+    "reply --file PATH ID should parse before performing the action: " .. out)
+  T.expect(forward == "stub:forward|forward|agent-test|ID|worker|note",
+    "forward ID worker note should parse before performing the action: " .. forward)
 end)
 
 T.test("reply help in first position returns usage", function()
@@ -155,7 +153,7 @@ T.test("forward ID worker -h preserves the note word", function()
   T.eq(out, "stub:forward|forward|agent-test|ID|worker|-h", "forward ID worker -h body word")
 end)
 
-T.test("send lead -- --file x sends the text after the separator", function()
+T.test("send lead preserves an option-like body word", function()
   local out = invoke("send", { "send", "lead", "--", "--file", "x" })
   T.eq(out, "stub:send|send|agent-test|lead|--file x", "send lead -- --file x")
 end)
@@ -170,14 +168,31 @@ T.test("forward ID worker -- -h sends the note after the separator", function()
   T.eq(out, "stub:forward|forward|agent-test|ID|worker|-h", "forward ID worker -- -h")
 end)
 
-T.test("send lead hello world --file p preserves the original positional body", function()
-  local out = invoke("send", { "send", "lead", "hello", "world", "--file", "p" }, true)
-  T.eq(out, "stub:send|send|lead|hello|world --file p", "send lead hello world --file p behaves like main")
+T.test("send rejects file input combined with positional message text", function()
+  local out = invoke_error("send", { "send", "--file", "p", "lead", "hello" })
+  T.expect(out:find("send --file does not accept message words", 1, true) ~= nil,
+    "file and positional message forms must not be combined: " .. out)
+  T.expect(out:sub(-2) == "|0", "invalid input must not send: " .. out)
 end)
 
-T.test("send lead hello -h preserves the original body word", function()
-  local out = invoke("send", { "send", "lead", "hello", "-h" }, true)
-  T.eq(out, "stub:send|send|lead|hello|-h", "send lead hello -h behaves like main")
+T.test("send help documents explicit sender and message forms", function()
+  local out = invoke("send", { "send", "--help" })
+  T.expect(out:find("Usage: remuda butler send", 1, true)
+      and out:find("--from <SENDER>", 1, true)
+      and out:find("<TO>", 1, true)
+      and out:find("[BODY]...", 1, true)
+      and out:find("Examples: remuda butler send", 1, true),
+    "send help is missing its supported forms: " .. out)
+end)
+
+T.test("send lead hello -h preserves its body word", function()
+  local out = invoke("send", { "send", "lead", "hello", "-h" })
+  T.eq(out, "stub:send|send|agent-test|lead|hello -h", "send lead hello -h")
+end)
+
+T.test("send -- -h preserves a dash-leading body word", function()
+  local out = invoke("send", { "send", "lead", "--", "-h" })
+  T.eq(out, "stub:send|send|agent-test|lead|-h", "send lead -- -h")
 end)
 
 T.test("send-to-leader hello world sends the original positional body", function()
@@ -220,13 +235,9 @@ T.test("send-to-leader --bogus returns a usage error with Next", function()
     "send-to-leader --bogus should fail with usage and no report: " .. out)
 end)
 
-T.test("send-to-leader --file=PATH returns usage with Next", function()
-  local out = invoke_error("send-to-leader", { "send-to-leader", "--file=" .. path() })
-  T.expect(out:find("Usage: remuda butler send-to-leader", 1, true) ~= nil
-      and out:find("Next: remuda butler send-to-leader --help\nstack traceback", 1, true) ~= nil
-      and out:find("false|", 1, true) == 1
-      and out:find("|0$") ~= nil,
-    "send-to-leader --file=PATH should fail with usage and no report: " .. out)
+T.test("send-to-leader accepts --file=PATH", function()
+  local out = invoke("send-to-leader", { "send-to-leader", "--file=" .. path() })
+  T.eq(out, "stub:report|report|agent-test|file-body", "send-to-leader --file=PATH")
 end)
 
 T.test("send-to-leader fix the -h flag sends free text", function()
@@ -242,4 +253,17 @@ end)
 T.test("send-to-leader with no words keeps the existing usage result", function()
   local out = invoke("send-to-leader", { "send-to-leader" })
   T.eq(out, "nil|none", "send-to-leader with no words")
+end)
+
+T.test("topic delegate preserves explicit agent and leader options", function()
+  start_butler()
+  T.eval('remuda._butler_topic_delegate = function(name, task, unused, kind, parent) return name .. "|" .. task .. "|" .. tostring(kind) .. "|" .. tostring(parent) end')
+  local out = T.eval('return remuda._butler_command_run("topic", {"topic", "delegate", "child", "--agent", "claude", "--leader", "chosen-leader", "do", "work"}, remuda._pr_a_caller)')
+  T.eq(out, "child|do work|claude|chosen-leader")
+end)
+
+T.test("reply preserves file and attachment options after the message ID", function()
+  T.eq(invoke("reply", {"reply", "ID", "--file", path()}), "stub:reply|reply|agent-test|ID|file-body")
+  local out = invoke("reply", {"reply", "ID", "--attach", path(), "caption"})
+  T.expect(out:find("stub:upload|upload|matrix --room !room:test upload --thread $event --caption caption", 1, true), out)
 end)

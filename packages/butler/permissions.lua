@@ -55,6 +55,11 @@ function permissions.merge(text, rules, json)
     report.error = "wrong type"
     return nil, report
   end
+  for _, list in ipairs({ "allow", "deny", "ask" }) do
+    for _, value in ipairs(perms[list] or {}) do
+      if type(value) ~= "string" then report.error = "wrong type"; return nil, report end
+    end
+  end
   for _, rule in ipairs(rules) do
     local blocked = (holds(perms.deny, rule) and "deny") or (holds(perms.ask, rule) and "ask")
     if blocked then report.withheld[#report.withheld + 1] = { rule = rule, list = blocked }
@@ -78,7 +83,9 @@ function permissions.ensure(path, rules, fs)
       local linked = fs.is_symlink(target)
       if linked ~= false then report.error = linked and "is a symlink" or "cannot check for a symlink"; return end
     end
-    local existing = fs.read(path)
+    -- An unreadable file is not an absent one: never replace what we cannot read.
+    local existing, unreadable = (fs.read_checked or fs.read)(path)
+    if unreadable then report.error = "cannot read existing settings; unchanged"; return end
     local text
     text, report = permissions.merge(existing, rules, fs.json)
     if not text then return end

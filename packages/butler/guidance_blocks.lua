@@ -40,7 +40,7 @@ leader, when you have one, is `REMUDA_BUTLER_LEADER_ID`. Use the short forms:
 - `remuda butler send MEMBER MESSAGE...` to direct a member; your sender is inferred.
 - `remuda butler send-to-leader MESSAGE...` to report a completed work loop.
 
-`remuda butler send FROM TO MESSAGE...` is an operator form for sending on
+`remuda butler send --from FROM TO MESSAGE...` is an operator form for sending on
 behalf of another session. Do not use it for ordinary team communication.
 ]==],
   -- Legacy guidance below is matched verbatim for migration, never emitted.
@@ -64,7 +64,7 @@ caller-env forwarding: pass your id (`remuda butler inbox
 $REMUDA_BUTLER_AGENT_ID`) or use the MCP `butler_*` tools. On such a core,
 `send` is attributed to "operator" rather than to you.
 
-`remuda butler send FROM TO MESSAGE...` is an operator form for sending on
+`remuda butler send --from FROM TO MESSAGE...` is an operator form for sending on
 behalf of another session. Do not use it for ordinary team communication.
 ]==],
   -- plus the long-body line
@@ -89,7 +89,7 @@ caller-env forwarding: pass your id (`remuda butler inbox
 $REMUDA_BUTLER_AGENT_ID`) or use the MCP `butler_*` tools. On such a core,
 `send` is attributed to "operator" rather than to you.
 
-`remuda butler send FROM TO MESSAGE...` is an operator form for sending on
+`remuda butler send --from FROM TO MESSAGE...` is an operator form for sending on
 behalf of another session. Do not use it for ordinary team communication.
 ]==],
   -- long bodies via a file or a pipe
@@ -115,7 +115,7 @@ caller-env forwarding: pass your id (`remuda butler inbox
 $REMUDA_BUTLER_AGENT_ID`) or use the MCP `butler_*` tools. On such a core,
 `send` is attributed to "operator" rather than to you.
 
-`remuda butler send FROM TO MESSAGE...` is an operator form for sending on
+`remuda butler send --from FROM TO MESSAGE...` is an operator form for sending on
 behalf of another session. Do not use it for ordinary team communication.
 ]==],
   -- Former root guidance: retained verbatim only to recognize and migrate old files.
@@ -141,7 +141,7 @@ caller-env forwarding: pass your id (`remuda butler inbox
 $REMUDA_BUTLER_AGENT_ID`) or use the MCP `butler_*` tools. On such a core,
 `send` is attributed to "operator" rather than to you.
 
-`remuda butler send FROM TO MESSAGE...` is an operator form for sending on
+`remuda butler send --from FROM TO MESSAGE...` is an operator form for sending on
 behalf of another session. Do not use it for ordinary team communication.
 ]==],
 }

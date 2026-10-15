@@ -408,18 +408,21 @@ or untrusted messages. If reading the thread fails or a request times out (10
 seconds each), the mail arrives with a short failure line and the original
 message. The fetch does not delay mail from other threads.
 
-Configure `b2b_max_turns` (default 6) for consecutive Butler-only turns in one
+Configure `b2b_max_turns` (default 6) for consecutive messages from other Butlers in one
 thread, `posts_per_hour` (default 30) for posts that are not a reply to a person
 on the allowlist, and
 `untrusted_per_room_hour` (default 20) for non-allowlisted messages delivered
-from each room. The Butler's own replies count as turns. These counters are held
+from each room. The Butler's own replies neither increment nor reset the peer
+counter, so normal progress reports do not exhaust it. Replies to verified
+people on the allowlist remain available even when peer replies are paused.
+These counters are held
 in memory and reset when the daemon restarts. `b2b_max_turns` and
 `untrusted_per_room_hour` are read when the relay starts, so restart the relay
 after changing either setting; `posts_per_hour` is read for every post. HOME
 notices, `upload`, and `react` do not take a post slot.
 
 When the Butler reaches the turn limit, it posts this line to HOME and stops
-replying in that thread until an allowlisted human replies:
+replying to peers in that thread until an allowlisted human replies:
 
 ```text
 Two Butlers talked N turns without a human, so I paused thread ROOT (ROOM) to avoid ping-pong. No action needed; reply in that thread only if you want it to continue.
@@ -667,7 +670,7 @@ file contains:
    (default 30; a Claude guard approval keeps its fixed 5 minute window);
    `approval_room=all|home` selects the joined ALL-BUTLERS room or HOME
    (default `all`);
-   `b2b_max_turns=N` sets the consecutive Butler-only thread turn limit
+   `b2b_max_turns=N` sets the consecutive messages from other Butlers limit per thread
    (default 6); `posts_per_hour=N` caps posts that are not a reply to a person
    on the allowlist (default 30);
    `untrusted_per_room_hour=N` sets the per-room non-allowlisted message limit
@@ -727,6 +730,12 @@ deduplication, this provides exactly-once delivery across relay restarts. If
 the state file is unreadable or has invalid field types, the relay starts from
 a fresh sync baseline; it does not replay room history, and pending deliveries
 in the damaged state cannot be recovered.
+
+Receive and pending-delivery notification decisions share the
+[`matrix_delivery_policy` interface](matrix-delivery-policy.md). That document
+describes composition, the pending unfollow recheck, and which code changes
+require a relay restart; extracting policy does not make existing closures
+reloadable.
 
 `remuda butler matrix reply EVENT_ID TEXT` sends a threaded reply. The relay
 records the returned event ID against the originating Butler mail. A human
@@ -831,6 +840,11 @@ expires, continues while status is 75, and stops on ready or failure. Bare
 inspect readiness.
 
 ## Guardrail grants (slice 3 design rules)
+
+Workdir client defaults for root and delegated agent starts are documented in
+[Client configuration at agent start](workdir-client-config.md). These client
+permissions preserve managed review, sandbox and daemon role restrictions;
+they do not change the guardrail grant rules below.
 
 These rules are final for slice 3 of the guardrails (#339). All of slice 3 sits
 behind one switch that is off by default, and with it off no grant exists and
