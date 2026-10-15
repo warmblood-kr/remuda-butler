@@ -45,6 +45,13 @@ local unchanged = {
   { body = "Alice", format = "org.matrix.custom.html",
     formatted_body = "<a href='https://matrix.to/#/@alice:example.org'>Alice</a>",
     ["m.mentions"] = { user_ids = { alice2 } } },
+  { body = "Alice", format = "org.matrix.custom.html",
+    formatted_body = "<a href='https://matrix.to/#/@alice:example.org' "
+      .. "href='https://matrix.to/#/@alice2:example.org'>Alice</a>",
+    ["m.mentions"] = { user_ids = { alice, alice2 } } },
+  { body = "Alice", format = "org.matrix.custom.html",
+    formatted_body = "<a href='https://matrix.to/#/@alice:example.org' data-label=unquoted>Alice</a>",
+    ["m.mentions"] = { user_ids = { alice } } },
 }
 for index, content in ipairs(unchanged) do
   local raw = content.body

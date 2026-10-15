@@ -51,11 +51,38 @@ local function tag_info(raw)
   name = name:lower()
   local self_close = raw:match("/%s*$") ~= nil
   local attrs = {}
-  local rest = raw:sub((raw:find(name, 1, true) or 0) + #name)
-  for key, quote, value in rest:gmatch("([%w:_-]+)%s*=%s*(['\"])(.-)%2") do
-    attrs[key:lower()] = value
+  local prefix = raw:match("^%s*/?%s*[%a][%w:-]*")
+  local rest = raw:sub(#prefix + 1)
+  if self_close then rest = rest:gsub("/%s*$", "") end
+  if closing == "/" then
+    if rest:find("%S") then return nil end
+    return { closing = true, name = name, self_close = false, attrs = attrs }
   end
-  return { closing = closing == "/", name = name, self_close = self_close, attrs = attrs }
+  local seen, at = {}, 1
+  while at <= #rest do
+    while rest:sub(at, at):match("%s") do at = at + 1 end
+    if at > #rest then break end
+    local key, after = rest:sub(at):match("^([%a_:][%w:._-]*)()")
+    if not key then return nil end
+    key, at = key:lower(), at + after - 1
+    if seen[key] then return nil end
+    seen[key] = true
+    while rest:sub(at, at):match("%s") do at = at + 1 end
+    local value
+    if rest:sub(at, at) == "=" then
+      at = at + 1
+      while rest:sub(at, at):match("%s") do at = at + 1 end
+      local quote = rest:sub(at, at)
+      if quote ~= "'" and quote ~= '"' then return nil end
+      local finish = rest:find(quote, at + 1, true)
+      if not finish then return nil end
+      value, at = rest:sub(at + 1, finish - 1), finish + 1
+    elseif key == "href" then
+      return nil
+    end
+    attrs[key] = value
+  end
+  return { closing = false, name = name, self_close = self_close, attrs = attrs }
 end
 
 local function matrix_to_user(href)
