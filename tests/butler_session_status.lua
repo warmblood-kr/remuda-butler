@@ -117,6 +117,11 @@ sessions_config.registered_agent_kind = lookup
 entries.claude.working = function(_, screen) return screen:find("esc to interrupt", 1, true) ~= nil end
 local detail = remuda.session_detail({ name = "s1" })
 assert(detail:find("^working · claude · m"), "the status leads the detail line: " .. detail)
+local decoration = remuda.session_list_decorate({ name = "s1" })
+assert(decoration.activity == "working", "the session-list activity remains adapter status")
+assert(decoration.agent_kind == "claude", "the session-list exposes the registered agent kind")
+assert(decoration.description == "m", "the decorator keeps the detail description")
+assert(decoration.layout == "compact", "Butler explicitly overrides the core stacked layout")
 
 local detail_agent = { kind = "codex" }
 bus.agents.detail = detail_agent
@@ -187,4 +192,35 @@ check(hooked("idle", 3599, "some other screen"), "idle", "idle hook is trusted f
 check(hooked(nil, nil, claude_idle), "idle", "no hook file falls back to the screen")
 check(hooked("working", -50, claude_idle), "idle", "a hook from the future is ignored")
 check(hooked("bogus", 5, claude_idle), "idle", "unknown hook word is ignored")
+
+-- OSC 7501 is preferred when present and fresh; a stale report falls back to
+-- the existing probe rather than inventing a state.
+local function osc_status(state, age, screen)
+  seq = seq + 1
+  local name = "o" .. seq
+  bus.agents[name] = { kind = "codex", id = name }
+  screens[name] = screen or "some other screen"
+  captures = 0
+  local row = { name = name, program_status = { state = state, app = "codex" }, program_status_age = age }
+  return remuda.session_detail(row):match("^(.-) · "), captures
+end
+check((osc_status("working", 5)), "working", "fresh OSC working")
+check((osc_status("idle", 5)), "idle", "fresh OSC idle")
+check((osc_status("blocked", 5, claude_idle)), "needs you", "OSC blocked is needs input")
+check((osc_status("done", 5)), "idle", "done reads as idle in ACTIVITY")
+check((osc_status("error", 5)), "other", "error stays visible as other")
+local stale, stale_captures = osc_status("working", 601, "x\nesc to interrupt")
+check(stale, "working", "stale OSC falls back to the working screen")
+check(stale_captures, 1, "stale OSC probes the screen")
+local missing, missing_captures = osc_status(nil, nil, "Ask Codex to do anything\n")
+check(missing, "idle", "absent OSC falls back to the probe")
+check(missing_captures, 1, "absent OSC captures the screen")
+
+-- The decorator and roster use the same detail, so their ACTIVITY cannot disagree.
+local row = { name = "decor", program_status = { state = "blocked", app = "codex" }, program_status_age = 1 }
+bus.agents.decor = { kind = "codex", id = "decor" }
+screens.decor = "some other screen"
+local decoration = remuda.session_list_decorate(row)
+check(decoration.activity, "needs you", "decorator uses the same OSC projection")
+check(decoration.layout, "compact", "decorator keeps compact layout")
 print("ok")

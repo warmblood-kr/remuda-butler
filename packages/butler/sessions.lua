@@ -266,7 +266,42 @@ end
 -- those two the screen is still probed and a "working" screen wins, because
 -- resuming after a permission prompt fires no hook.
 local HOOK_MAX_AGE = { working = 600, idle = 3600, ["needs you"] = 3600 }
-local function session_status(name, agent, telemetry)
+-- OSC 7501 is a display hint, not a safety fact. `done` reads as idle in the
+-- roster; `error` stays visible as other instead of being erased to idle.
+-- The limits are display heuristics: the protocol has no heartbeat, so a
+-- long silent working/blocked report must not be destroyed, only demoted.
+local OSC_ACTIVITY = {
+  working = "working", idle = "idle", blocked = "needs you",
+  done = "idle", error = "other",
+}
+local OSC_ACTIVITY_MAX_AGE = {
+  working = 600, idle = 3600, blocked = 3600, done = 3600, error = 3600,
+}
+local function osc_activity(session)
+  local status = type(session) == "table" and session.program_status
+  if type(status) ~= "table" then return nil end
+  local state = status.state
+  local activity = OSC_ACTIVITY[state]
+  local limit = OSC_ACTIVITY_MAX_AGE[state]
+  local age = tonumber(session.program_status_age) or 0
+  if not activity or not limit or age < 0 or age > limit then return nil end
+  return activity
+end
+-- `remuda.session_detail` is also called with just {name=...}; find the live
+-- row then, but never invent a status for a missing session.
+local function session_with_status(session)
+  if type(session) ~= "table" then return nil end
+  if type(session.program_status) == "table" then return session end
+  local listed = remuda.session and remuda.session.list
+  if type(listed) ~= "function" then return session end
+  local ok, rows = pcall(listed)
+  if not ok or type(rows) ~= "table" then return session end
+  for _, row in ipairs(rows) do
+    if row.name == session.name then return row end
+  end
+  return session
+end
+local function session_status(name, agent, telemetry, session)
   local now = (remuda._butler_status_now or os.time)()
   local cached = status_cache[name]
   -- A closed session whose name is reused is a new agent: never show its status.
@@ -275,13 +310,15 @@ local function session_status(name, agent, telemetry)
   end
   local hook, hook_at = telemetry.hook_state, tonumber(telemetry.hook_at)
   local fresh = hook and hook_at and now >= hook_at and now - hook_at < (HOOK_MAX_AGE[hook] or 0)
-  local status
-  if fresh and hook == "working" then
-    status = hook
-  else
-    local ok, probed = pcall(probe_status, name, agent)
-    status = ok and probed or "other"
-    if fresh and status ~= "working" then status = hook end
+  local status = osc_activity(session_with_status(session))
+  if not status then
+    if fresh and hook == "working" then
+      status = hook
+    else
+      local ok, probed = pcall(probe_status, name, agent)
+      status = ok and probed or "other"
+      if fresh and status ~= "working" then status = hook end
+    end
   end
   for key, value in pairs(status_cache) do -- entries of closed sessions expire with the window
     if key ~= name and now - value.at >= STATUS_TTL_SECONDS then status_cache[key] = nil end
@@ -294,7 +331,7 @@ function remuda.session_detail(session)
   local agent = bus.agents[session.name]
   if not agent then return nil end
   local telemetry = remuda._butler_telemetry_for(agent)
-  local detail = session_status(session.name, agent, telemetry) .. " · " .. (agent.kind or "agent") .. " · " .. telemetry.model
+  local detail = session_status(session.name, agent, telemetry, session) .. " · " .. (agent.kind or "agent") .. " · " .. telemetry.model
   local profile = remuda._butler_sandbox.summary(remuda._butler_sandbox.of(agent))
   if profile then detail = detail .. " · " .. profile end
   -- Keep context compact while showing the percentage that makes sessions comparable.
@@ -322,6 +359,30 @@ function remuda.session_detail(session)
     if #skipped > 0 then detail = detail .. " · skipped " .. table.concat(skipped, ", ") end
   end
   return detail
+end
+
+-- Core's session-list decorator is a typed presentation contract. Activity is
+-- advisory status only; it says nothing about whether input is safe or ready.
+-- Keep this beside the detail API so older core versions keep the same detail.
+function remuda.session_list_decorate(session)
+  local agent = type(session) == "table" and bus.agents[session.name]
+  if not agent then return nil end
+  local detail = remuda.session_detail(session)
+  local activity = type(detail) == "string" and detail:match("^(.-) · ") or nil
+  if activity ~= "working" and activity ~= "idle" and activity ~= "needs you" then
+    activity = "other"
+  end
+  local prefix = activity .. " · " .. (agent.kind or "agent") .. " · "
+  local description = type(detail) == "string" and detail:sub(1, #prefix) == prefix
+    and detail:sub(#prefix + 1) or detail
+  return {
+    activity = activity,
+    agent_kind = agent.kind or "agent",
+    description = description,
+    -- The Butler pane opts into the one-line layout; core keeps its default
+    -- stacked layout for extensions without a preference.
+    layout = "compact",
+  }
 end
 
 remuda._butler_sessions_impl = { registry_list = registry_list }

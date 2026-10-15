@@ -153,6 +153,10 @@ the terminal may change immediately after the listing. `remuda butler close`
 performs its own unread-mail and idle checks; `--force` skips those checks.
 `other` should be inspected before closing.
 
+In the client session pane, Butler supplies a typed list decoration with agent
+kind, activity, and description, and selects the compact row layout. Activity
+is adapter status only; it does not claim that input is ready or safe to send.
+
 `remuda butler close NAME [--force]` closes a session when the caller is its
 leader. A person at a terminal counts as the root `butler`. The root may also
 close a leader-less row (no leader, or a leader that is gone and not
