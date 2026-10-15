@@ -50,6 +50,8 @@ bus.notice_fallbacks = bus.notice_fallbacks or {}
 bus.notice_failure_alerts = bus.notice_failure_alerts or {}
 bus.notice_sent_at = bus.notice_sent_at or {}
 bus.notice_reminder_at = bus.notice_reminder_at or {}
+-- session -> { ids, since, reason, reported_at }: mail whose notice ran out of retries.
+bus.notice_stuck = bus.notice_stuck or {}
 bus.notice_deferred_by_task = bus.notice_deferred_by_task or {}
 local NOTICE_STABLE_SECONDS = 3
 local NOTICE_QUIET_S = 2
@@ -60,6 +62,8 @@ local NOTICE_RETRY_DELAYS = { 20, 60, 300, 900 }
 -- failed attempt after this long, so the retry schedule and the sender's failure notice apply.
 local NOTICE_STALL_S = 120
 local NOTICE_REMINDER_SECONDS = 10 * 60
+local NOTICE_STUCK_REPORT_SECONDS = 60 * 60
+local NOTICE_BUSY_CAP_S = 15 * 60
 -- os.time is whole seconds: quiet is 1-2 s, plus up to 1 s for the notice tick.
 local function notice_now()
   local clock = remuda._butler_notice_clock
@@ -487,6 +491,21 @@ local function notice_fallback_or_fail(session, state, pending, reason)
   bus.notice_recoveries[session] = nil
   return true
 end
+-- Open or merge into the session's stuck record (IDs union, since and report throttle kept).
+function remuda._butler_notice_open_stuck(session, ids, reason)
+  local stuck = bus.notice_stuck[session]
+  local agent_id = bus.agents[session] and bus.agents[session].id
+  if not stuck or stuck.agent_id ~= agent_id then
+    stuck = { ids = {}, since = notice_now(), agent_id = agent_id }
+    bus.notice_stuck[session] = stuck
+  end
+  local known = {}
+  for _, id in ipairs(stuck.ids) do known[id] = true end
+  for _, id in ipairs(ids or {}) do
+    if not known[id] then stuck.ids[#stuck.ids + 1] = id end
+  end
+  stuck.reason = reason
+end
 notice_recovery_error = function(session, state, reason)
   state.failed = true
   _butler_session_trace("notice_recovery_failed", "message_ids="
@@ -515,6 +534,10 @@ notice_recovery_error = function(session, state, reason)
   bus.notice_failure_alerts[session] = alerts
   if pending and not alerts.exhausted then
     alerts.exhausted = true
+    -- Reminders must not re-arm this notice; remind_unread_notices reports hourly instead.
+    -- A later exhaustion merges into the open record so older unread IDs and the
+    -- report throttle survive.
+    remuda._butler_notice_open_stuck(session, state.message_ids, reason)
     if session ~= "butler" then
       local by_sender = {}
       for _, id in ipairs(state.message_ids or {}) do
@@ -628,6 +651,18 @@ local function complete_notice_recovery(session, state)
   bus.notice_recoveries[session] = nil
   bus.notice_retry_reasons[session] = nil
   bus.notice_failure_alerts[session] = nil
+  local stuck = bus.notice_stuck[session]
+  if stuck then
+    -- Close only what this delivery covered; other stuck mail keeps its record and throttle.
+    local delivered = {}
+    for _, id in ipairs(state.message_ids or {}) do delivered[id] = true end
+    local rest = {}
+    for _, id in ipairs(stuck.ids) do
+      if not delivered[id] then rest[#rest + 1] = id end
+    end
+    stuck.ids = rest
+    if #rest == 0 then bus.notice_stuck[session] = nil end
+  end
   clear_notice_fallbacks(session, state.message_ids)
   return true
 end
@@ -654,10 +689,35 @@ local function recovery_human_safe(session, allow_busy)
   end
   return true
 end
+-- ONE guard for every type_text path (recovery tick, probe-to-direct, direct, reminder):
+-- Codex STEERS text typed mid-turn into the running task, so a busy Codex defers; Claude
+-- queues it for the next turn, so a busy Claude with an EMPTY composer (checked by the
+-- caller's policy) may receive it. Codex FAILS CLOSED: only a successful row with an
+-- explicit is_busy == false permits typing (missing API, error, nil row or nil is_busy defer).
+-- Kinds other than codex (claude, unrecognised) keep the previous behaviour: only codex is
+-- known to steer. Not an atomic write boundary: busy can change after this check.
+function remuda._butler_busy_client_may_receive(session)
+  local agent = bus.agents[session]
+  if not (agent and agent.kind == "codex") then return true end
+  if not remuda.session then return false end
+  local ok, busy = pcall(function()
+    local row = remuda.session(session)
+    return row and row.is_busy
+  end)
+  return ok and busy == false
+end
 local function defer_notice_busy(session)
   bus.notice_recoveries[session] = nil
   local pending = bus.notices[session]
-  if pending then pending.due_at = notice_now() + 1 end
+  if pending then
+    pending.due_at = notice_now() + 1
+    -- Bounded visibility: a notice deferred for busy past the cap opens the stuck record
+    -- (hourly leader report, closes on delivery/read). Mail stays queued; no sender notice.
+    pending.busy_since = pending.busy_since or notice_now()
+    if notice_now() - pending.busy_since >= NOTICE_BUSY_CAP_S then
+      remuda._butler_notice_open_stuck(session, pending.message_order, "busy: Codex is_busy has not cleared")
+    end
+  end
   return false, "busy"
 end
 local function begin_notice_submit(session, state)
@@ -667,6 +727,8 @@ local function begin_notice_submit(session, state)
     bus.notice_recoveries[session] = nil
     return false
   end
+  if not remuda._butler_busy_client_may_receive(session) then return defer_notice_busy(session) end
+  pending.busy_since = nil
   state.draft = nil
   state.count = pending.count
   state.message_ids = {}
@@ -694,7 +756,12 @@ local function tick_notice_recovery(session, state)
     return notice_recovery_error(session, state, "recovery timed out after 20 seconds")
   end
   local observing_submit = state.phase == "verify_notice" or state.phase == "verify_existing"
-  if not recovery_human_safe(session, observing_submit) then return false end
+  -- Claude 2.1.300 queues text typed mid-turn for the next turn (probed), so its probe may
+  -- run while busy. Codex 0.162.1 STEERS instead (submitted after the next tool call, can
+  -- redirect a running task), so busy Codex keeps the old defer until queue semantics are verified.
+  local agent_kind = bus.agents[session] and bus.agents[session].kind
+  local probe_busy_ok = state.phase == "probe" and agent_kind == "claude"
+  if not recovery_human_safe(session, observing_submit or probe_busy_ok) then return false end
   local busy = false
   if remuda.session then
     local checked, value = pcall(function()
@@ -714,9 +781,13 @@ local function tick_notice_recovery(session, state)
     return begin_notice_submit(session, state)
   end
   if state.phase == "probe" then
-    if state.last_screen == normalized then state.stable = (state.stable or 0) + 1
-    else state.last_screen, state.stable = normalized, 1 end
-    if state.stable < 2 then return false end
+    -- An EMPTY composer needs no stable screen: a working pane animates. The
+    -- policy inside begin_notice_submit re-checks modal and composer before typing.
+    if decision ~= "EMPTY" or not probe_busy_ok then
+      if state.last_screen == normalized then state.stable = (state.stable or 0) + 1
+      else state.last_screen, state.stable = normalized, 1 end
+      if state.stable < 2 then return false end
+    end
     if decision == "EMPTY" then
       bus.notice_recoveries[session] = nil
       return begin_notice_submit(session, state)
@@ -825,6 +896,8 @@ local function deliver_notice(session)
           "composer was not empty after a failed notice write")
       end
     end
+    if not remuda._butler_busy_client_may_receive(session) then return defer_notice_busy(session) end
+    pending.busy_since = nil
     local state = { phase = "verify_notice", count = pending.count, notice = pending_notice_text(pending), checks = 0,
       started_at = notice_now() }
     state.message_ids = {}
@@ -970,8 +1043,29 @@ local function seed_unread_notices(alias, previous_instance, instance, unread)
   end
   return true
 end
+-- One report per hour per stuck session to its leader; the record closes once its mail is read.
+local function report_stuck_notice(alias, agent, stuck, now)
+  local unread = {}
+  for _, id in ipairs(stuck.ids) do
+    if mail.is_unread(agent.id, id) then unread[#unread + 1] = id end
+  end
+  if #unread == 0 then bus.notice_stuck[alias] = nil; return end
+  if stuck.reported_at and now - stuck.reported_at < NOTICE_STUCK_REPORT_SECONDS then return end
+  stuck.reported_at = now
+  local leader = agent.parent
+  if not leader or leader == alias or not bus.agents[leader] then leader = "butler" end
+  if leader == alias then return end
+  pcall(remuda._butler_send, "butler", leader, "Stuck Butler mail for " .. alias .. ": "
+    .. #unread .. " unread message(s) (" .. table.concat(unread, ",") .. ") undelivered for "
+    .. math.floor((now - stuck.since) / 60) .. " min (last error: "
+    .. tostring(stuck.reason) .. "). Inspect its composer, then `remuda butler send \"" .. alias
+    .. "\" \"read your inbox\"`.")
+end
 local function remind_unread_notices(alias, agent, now)
   if not agent.id or bus.pending_tasks[alias] then return end
+  local stuck = bus.notice_stuck[alias]
+  if stuck and stuck.agent_id ~= agent.id then bus.notice_stuck[alias], stuck = nil, nil end -- relaunched member
+  if stuck then return report_stuck_notice(alias, agent, stuck, now) end
   local due = bus.notice_reminder_at[alias]
   if due and now < due then return end
   bus.notice_reminder_at[alias] = now + NOTICE_REMINDER_SECONDS
@@ -1224,4 +1318,6 @@ remuda._butler_notice = {
   startup_action_safe = startup_action_safe,
   notice_recovery_error = notice_recovery_error,
   deliver_notice = deliver_notice,
+  remind_unread_notices = remind_unread_notices,
+  complete_notice_recovery = complete_notice_recovery,
 }

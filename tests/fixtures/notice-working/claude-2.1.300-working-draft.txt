@@ -1,0 +1,9 @@
+  The first harbors were not built. They were found.
+
+❯ DRAFT-X                                                                       
+  ctrl+enter to send now
+
+────────────────────────────────────────────────────────────────────────────────
+❯ x
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle)
