@@ -841,6 +841,11 @@ inspect readiness.
 
 ## Guardrail grants (slice 3 design rules)
 
+Workdir client defaults for root and delegated agent starts are documented in
+[Client configuration at agent start](workdir-client-config.md). These client
+permissions preserve managed review, sandbox and daemon role restrictions;
+they do not change the guardrail grant rules below.
+
 These rules are final for slice 3 of the guardrails (#339). All of slice 3 sits
 behind one switch that is off by default, and with it off no grant exists and
 no guard behavior changes.

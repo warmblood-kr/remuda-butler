@@ -140,6 +140,15 @@ local butler_fs = {
     f:close()
     return text
   end,
+  -- text, or nil plus "unreadable" when the file exists but cannot be read
+  -- (nil alone: absent).
+  read_checked = function(path)
+    local file, _, code = io.open(path, "rb")
+    if not file then return nil, code ~= 2 and "unreadable" or nil end
+    local text = file:read("*a")
+    file:close()
+    return text, text == nil and "unreadable" or nil
+  end,
   -- nil when it cannot tell: then nothing is written.
   is_symlink = is_symlink,
   json = remuda.json,
@@ -162,6 +171,51 @@ local butler_fs = {
   end,
 }
 
+remuda.exec("butler/coordination_config")
+-- Initialization happens only at an actual Claude/Codex start, not a tick or
+-- adoption of an already-running session. Both clients get workdir defaults.
+remuda._butler_coordination_reports = remuda._butler_coordination_reports or {}
+local coordination_config = remuda._butler_coordination_config
+local coordination_fs = setmetatable({
+  -- Inherited Codex user layer; nil (policy fields withheld) when unknown.
+  codex_home = os.getenv("CODEX_HOME") or (os.getenv("HOME") and os.getenv("HOME") .. "/.codex") or nil,
+}, { __index = butler_fs })
+-- Codex's own effective view of configured MCP servers (read-only, offline,
+-- starts no server). Only the parsed server names are used; output is never
+-- logged. nil when Codex is absent or the answer is unusable.
+function coordination_fs.native_servers(cwd, home)
+  if system.find_command("codex") == nil then return nil end
+  local ok, answer = pcall(remuda.process.run, { argv = { "codex", "mcp", "list", "--json" }, timeout = 5,
+    cwd = cwd, env = { CODEX_HOME = home } })
+  if not ok or not answer or answer.code ~= 0 or answer.timed_out then return nil end
+  local decoded_ok, list = pcall(remuda.json.decode, answer.stdout or "")
+  return decoded_ok and type(list) == "table" and list or nil
+end
+coordination_fs.validate = coordination_config.validator(remuda.process.run,
+  function(dir) return remuda.fs and remuda.fs.mkdir_new and remuda.fs.mkdir_new(dir) == true end,
+  butler_fs.write, function(path, recursive)
+    if recursive then return remuda.remove_dir_all(path) end
+    return os.remove(path)
+  end, function() return system.find_command("codex") ~= nil end)
+function remuda._butler_ensure_coordination(cwd, kind, role)
+  local actual = type(cwd) == "string" and realpath(cwd)
+  local report = actual and coordination_config.ensure(actual, kind, coordination_fs, permissions)
+    or { kind = kind, error = "cannot resolve session working directory", written = {}, withheld = {} }
+  if actual then remuda._butler_coordination_reports[actual] = report end
+  if role == "root" then remuda._butler_root_coordination_report = report end
+  if report.error then _butler_session_trace("coordination_config_not_written", report.error) end
+  -- Fixed reasons only (no file content, no resolver output): which client was
+  -- blocked or had defaults withheld.
+  for client, reason in pairs(report.blocked or {}) do
+    _butler_session_trace("coordination_config_blocked", client .. ": " .. tostring(reason):gsub("[\r\n]+", " "))
+  end
+  for _, item in ipairs(report.withheld or {}) do
+    _butler_session_trace("coordination_config_withheld", tostring(item.rule) .. " (" .. tostring(item.list) .. ")")
+  end
+  if #report.written > 0 then _butler_session_trace("coordination_config_written", "files=" .. #report.written) end
+  return report
+end
+
 -- The session needs an `--mcp-config` pointing back at this same daemon, or
 -- it has no way to reach the Butler MCP tools at all — a bare `remuda.new(nil,
 -- {"claude"})` starts a session with no MCP server configured. `claude`
@@ -179,9 +233,32 @@ local server = os.getenv("REMUDA_BUTLER_SERVER") or "default"
 local runtime_dir = os.getenv("REMUDA_RUNTIME_DIR")
 local status_path = remuda._butler_status_path
   or (config_path and (config_path .. ".status") or (os.tmpname() .. ".status"))
-local function status_settings(path)
-  local settings_path = path .. ".settings.json"
-  local settings = assert(io.open(settings_path, "w"))
+-- A fresh, exclusively created private (0700) directory owned by this daemon
+-- session, or nil plus a reason. Never a pre-existing path: mkdir_new fails if
+-- the name exists (including as a link), and the result must not be a link.
+local function new_private_dir()
+  if not (remuda.fs and type(remuda.fs.mkdir_new) == "function") then return nil, "core lacks exclusive directory creation" end
+  local dir = os.tmpname()
+  os.remove(dir)
+  if remuda.fs.mkdir_new(dir) ~= true then return nil, "cannot exclusively create a private directory" end
+  if is_symlink(dir) ~= false then
+    pcall(remuda.remove_dir_all, dir)
+    return nil, "private directory is a link or cannot be checked"
+  end
+  return dir
+end
+-- Per-launch settings directories, keyed by member name (or status path) and
+-- replaced, with the old one removed, on the next setup for that key. Finished
+-- sessions and a crashed daemon leave their private directory behind, so they
+-- can accumulate. A file holds the allow literals, the status hook commands
+-- and, when guard policy is on, the guard hook commands.
+local settings_dirs = {}
+-- Returns the settings file path, or nil plus a reason; never a path that was
+-- not completely written (no plain-write fallback).
+local function status_settings(path, key)
+  local dir, why = new_private_dir()
+  if not dir then return nil, why end
+  local settings_path = dir .. "/settings.json"
   -- Hooks feed the per-session status word (see status_hook.lua); their
   -- output is discarded and they always exit 0 so Claude never sees them.
   -- Claude runs hook commands through sh, or PowerShell on Windows.
@@ -200,10 +277,28 @@ local function status_settings(path)
       guard_policy.approvals_enabled() and (guard_command .. keep_stdout) or nil,
       guard_policy.deny_enabled() and (guard_command .. keep_stdout) or nil) .. ","
   end
-  settings:write('{"statusLine":{"type":"command","command":'
+  -- Allow-only permission defaults for this launch. Measured (claude 2.1.300,
+  -- Bash tool, -p default mode; docs/workdir-client-config-claude-evidence.txt):
+  -- project-root local ask/deny still blocked a command this source allowed,
+  -- from repo root, subdirectory and worktree. Other scopes are not measured.
+  local allow = {}
+  for _, rule in ipairs(coordination_config.CLAUDE_RULES) do allow[#allow + 1] = json_quote(rule) end
+  local text = '{"permissions":{"allow":[' .. table.concat(allow, ",") .. ']},"statusLine":{"type":"command","command":'
     .. json_quote("remuda -s " .. shell_quote(server) .. " --stdin butler statusline " .. shell_quote(path))
-    .. '},"hooks":{' .. guard_hooks .. '"UserPromptSubmit":[' .. hook .. '],"Stop":[' .. hook .. '],"Notification":[' .. hook .. ']}}')
-  settings:close()
+    .. '},"hooks":{' .. guard_hooks .. '"UserPromptSubmit":[' .. hook .. '],"Stop":[' .. hook .. '],"Notification":[' .. hook .. ']}}'
+  -- Checked private atomic write (0600) into the exclusive directory. Failure
+  -- is reported to the caller with no path, so no launch can name a missing
+  -- or partial file.
+  local called, wrote, write_why = pcall(butler_fs.write, settings_path, text, true)
+  if not called then wrote, write_why = nil, wrote end
+  if not wrote then
+    pcall(remuda.remove_dir_all, dir)
+    return nil, "settings file not written: " .. tostring(write_why or "unknown")
+  end
+  key = key or path
+  local previous = settings_dirs[key]
+  settings_dirs[key] = dir
+  if previous then pcall(remuda.remove_dir_all, previous) end
   return settings_path
 end
 
@@ -481,6 +576,7 @@ remuda._butler_agent_support = {
   json_quote = json_quote,
   mcp_config = agent_mcp_config,
   status_settings = status_settings,
+  new_private_dir = new_private_dir,
 }
 remuda.exec("butler/sandbox")
 remuda.exec("butler/telemetry")
@@ -1010,14 +1106,9 @@ if paths.data_home_note and not remuda._butler_data_home_traced then
   _butler_trace("data_home", paths.data_home_note)
 end
 
-local BUTLER_ARGV = remuda._butler_argv
-if not BUTLER_ARGV then
-  BUTLER_ARGV = build_agent_argv(butler_kind, {
-    name = "butler", token = butler_token, mcp_config_path = mcp_config_path, settings_path = settings_path,
-    telemetry = butler_telemetry,
-    system_prompt = SYSTEM_PROMPT,
-  })
-end
+-- The root argv is built per candidate by the chooser (launch_butler's spec);
+-- no eager construction here, so a refused Claude candidate (guard hooks that
+-- cannot be persisted) is a candidate failure, never a module-init abort.
 
 -- Reused both for the initial launch and every respawn, so the watchdog
 -- below can never drift from what a fresh start would have done. Keeps the
@@ -1182,6 +1273,7 @@ local function launch_butler()
     skip_probe = remuda._butler_argv ~= nil,
     spec = function(candidate_kind)
       pcall(ensure_root_permissions, candidate_kind)
+      remuda._butler_ensure_coordination(butler_session_cwd, candidate_kind, "root")
       local telemetry = setup_telemetry(candidate_kind, { name = requested_name, status_path = status_path })
       telemetry_by_kind[candidate_kind] = telemetry
       rotate_root_capability()

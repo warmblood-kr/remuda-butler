@@ -127,6 +127,9 @@ command(5, "doctor", "  remuda butler doctor", function(args)
     for _, line in ipairs(doctor.permission_lines(state.report, state.kind, state)) do
       lines[#lines + 1] = line
     end
+    for _, line in ipairs(doctor.coordination_lines(remuda._butler_root_coordination_report)) do
+      lines[#lines + 1] = line
+    end
     return table.concat(lines, "\n")
   end
 end)

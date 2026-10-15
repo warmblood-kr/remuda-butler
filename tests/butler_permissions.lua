@@ -264,6 +264,12 @@ ok("malformed file: no write", #fs.writes == 0 and report.error == "not valid JS
 fs = fake_fs({ [PATH] = '{"permissions":{"deny":["Bash(remuda butler:*)"]}}' })
 report = permissions.ensure(PATH, RULES, fs)
 ok("withheld: no write", #fs.writes == 0 and report.withheld[1].list == "deny" and report.path == PATH)
+-- unreadable_is_not_absent: the legacy writer must not replace a file it cannot read.
+fs = fake_fs({ [PATH] = '{"permissions":{"deny":["Bash(rm:*)"]}}' })
+fs.read = function() return nil end -- what a plain io.open failure looks like
+fs.read_checked = function() return nil, "unreadable" end
+report = permissions.ensure(PATH, RULES, fs)
+ok("unreadable file: no write, reported", #fs.writes == 0 and #fs.dirs == 0 and report.error ~= nil)
 fs = fake_fs({})
 report = permissions.ensure(PATH, {}, fs)
 ok("no rules: no file is created", #fs.writes == 0 and #fs.dirs == 0 and not report.error)
@@ -360,7 +366,7 @@ end
 current = nil
 ok("doctor: missing file needs Fix", doctor({ path = PATH, present = { PREFIX } }, "claude"):find("Fix:", 1, true))
 eq("doctor: codex", doctor(nil, "codex"),
-  "Permissions butler (codex): none — the mod writes no Codex permission rules\nNext: nothing to do")
+  "Permissions butler (codex): coordination defaults not initialized for this running session\nNext: client defaults are generated before the next agent start; no automatic restart")
 ok("doctor: no session path", doctor(nil, "claude"):find("Fix:", 1, true))
 io.open = opened
 

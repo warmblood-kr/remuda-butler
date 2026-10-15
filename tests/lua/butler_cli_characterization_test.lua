@@ -278,6 +278,7 @@ families {
       d.render = function() remuda._pr0_note("doctor.render"); return { "doctor-stub" } end
       remuda._pr0_permission_lines = d.permission_lines
       d.permission_lines = function() return {} end
+      d.coordination_lines = function() return {} end
       function remuda._pr0_current_permissions(text)
         remuda._butler_permission_report = { kind = "claude", report = {
           path = "/doctor/settings.local.json", added = {}, present = { "Bash(remuda butler:*)" }, withheld = {} } }
