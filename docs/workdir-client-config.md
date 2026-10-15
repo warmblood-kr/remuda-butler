@@ -177,7 +177,7 @@ native Codex parser/execpolicy/resolver checks. `codexless` (Codex not
 installed) runs only a small subset, and the runner prints its
 `codexless subset` line even from a passing log. When Codex is installed, the
 probe requires `codex --version` to exit 0 within
-`BUTLER_CONFIG_TEST_PROBE_TIMEOUT` seconds (integer 1-60, default 10; anything
+`BUTLER_CONFIG_TEST_PROBE_TIMEOUT` seconds (integer 1-60, no leading zero, default 10; anything
 else is a failure) and print exactly `codex[-cli] X.Y.Z[-pre][+build]` on its
 first line; a failing, hanging, exec-failing or garbage-printing
 Codex is a hard failure, never a subset. `REQUIRE_NATIVE_CODEX=1` makes an

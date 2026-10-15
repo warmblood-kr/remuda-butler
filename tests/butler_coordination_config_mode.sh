@@ -35,12 +35,14 @@ done
 if BUTLER_CONFIG_TEST_PROBE_TIMEOUT=1 PATH=$T/slow config_test_mode >/dev/null 2>&1; then
   fail "a timing-out codex must be a failure"
 fi
-for to in 0 abc 0.1 -1 9999 ""; do
+for to in 0 abc 0.1 -1 9999 "" 99999999999999999999 4294967296 18446744073709551616 061 "60 " 61; do
   if BUTLER_CONFIG_TEST_PROBE_TIMEOUT=$to PATH=$T/ok config_test_mode >/dev/null 2>&1; then
     fail "probe timeout '$to' must be a failure"
   fi
 done
-got=$(BUTLER_CONFIG_TEST_PROBE_TIMEOUT=60 PATH=$T/ok config_test_mode 2>/dev/null) || fail "timeout 60 must be accepted"
+for to in 1 60; do
+  BUTLER_CONFIG_TEST_PROBE_TIMEOUT=$to PATH=$T/ok config_test_mode >/dev/null 2>&1 || fail "timeout $to must be accepted"
+done
 printf '#!/bin/sh\necho codex-cli 1.2.3-beta.1+build5\n' >"$T/ok/codex"
 got=$(PATH=$T/ok config_test_mode 2>/dev/null) || fail "prerelease version must select full"
 if REQUIRE_NATIVE_CODEX=1 PATH=$T/garbage config_test_mode >/dev/null 2>&1; then

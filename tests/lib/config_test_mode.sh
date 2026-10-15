@@ -16,7 +16,7 @@ config_test_mode() {
     return 0
   fi
   local out to=${BUTLER_CONFIG_TEST_PROBE_TIMEOUT-10} line
-  if ! [[ $to =~ ^[1-9][0-9]*$ ]] || ((to > 60)); then
+  if ! [[ $to =~ ^[1-9][0-9]?$ ]] || ((10#$to > 60)); then
     echo "FAIL: BUTLER_CONFIG_TEST_PROBE_TIMEOUT must be an integer 1-60 (got '$to')" >&2
     return 1
   fi
