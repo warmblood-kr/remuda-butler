@@ -1,6 +1,6 @@
 -- Synthetic screens only; no daemon, agent process or transcript fixtures.
 local screens, reports, audits, writes = {}, {}, {}, {}
-local fail_audit, fail_report, fail_capture, before_write, live_instance
+local fail_audit, fail_report, fail_capture, before_write, live_instance, missing_session
 local bus = { agents = {
   child = { id = 'child-id', kind = 'claude', parent = 'leader', instance_id = 'one' },
   codex = { id = 'codex-id', kind = 'codex', parent = 'leader', instance_id = 'cx' },
@@ -11,7 +11,7 @@ _G.remuda = {
   capture = function(name) if fail_capture then error('capture unavailable') end; return screens[name] end,
   session = function(name) return { instance_id = bus.agents[name].instance_id, alive = true } end,
   ls = function() return {
-    { name = 'child', alive = true, instance_id = live_instance or bus.agents.child.instance_id },
+    { name = 'child', alive = not missing_session, instance_id = live_instance or bus.agents.child.instance_id },
     { name = 'codex', alive = true, instance_id = bus.agents.codex.instance_id },
   } end,
   key = function(name, key) writes[#writes + 1] = {name, key}; return true end,
@@ -60,15 +60,16 @@ screens.codex = fixture:read('*a'); fixture:close()
 assert(remuda._butler_chooser.known_startup_modal(remuda._butler_agent_startup.codex, screens.codex),
   'real startup matcher sees historical update marker')
 assert(remuda._butler_compaction.unknown_dialog_signature(screens.codex), 'real geometry recognises current choice')
-assert(attempt(remuda.key, 'codex', 'RET') == false and #writes == 0, 'historical startup marker must not admit unknown Return')
+assert(attempt(remuda.key, 'codex', 'RET') == true, 'historical startup marker is not a current exception')
 -- Even recorded launch ownership does not authorise a different current dialog.
 bus.pending_tasks = {codex = true}
 bus.agents.codex.session_start_marker = 'cx-launch'
 bus.first_task_delivery = {codex = {state = 'waiting', marker = 'cx-launch'}}
-assert(attempt(remuda.key, 'codex', 'RET') == false and #writes == 0, 'pending launch cannot bless unrelated choice')
+assert(attempt(remuda.key, 'codex', 'RET') == true, 'unrecognized choice permits input even during pending launch')
+writes = {}
 screens.codex = 'Ask Codex to do anything'; D.tick()
 reports, audits = {}, {}
-local unknown = 'Allow dangerous thing?\n❯ 1. Yes\n2. No\n─\n❯ \n'
+local unknown = 'Do you want to proceed?\n❯ 1. Yes\n2. No\n'
 screens.child, screens.codex = unknown, 'Ask Codex to do anything'
 local ok, why = attempt(remuda.key, 'child', 'RET')
 assert(ok == false and why:find('blocked', 1, true), 'block before first key, even with ready glyph')
@@ -83,9 +84,9 @@ assert(attempt(remuda.send, 'child', 'task') == false and #writes == 0, 'send AP
 assert(audits[1].event == 'dialog_blocked' and audits[1].instance_id == 'one', 'durable block decision')
 assert(audits[1].summary ~= unknown, 'never audit raw screen')
 
--- Ordinary output does not clear a blocker: wait for a positively ready/working screen.
+-- An unrecognized repaint clears a stale screen blocker under default allow.
 screens.child = 'painting'
-D.tick(); assert(attempt(remuda.key, 'child', 'RET') == false, 'ambiguous repaint stays blocked')
+D.tick(); assert(attempt(remuda.key, 'child', 'RET') == true, 'unrecognized repaint releases stale blocker')
 screens.child = 'done\n─\n❯ \n'
 D.tick()
 assert(attempt(remuda.key, 'child', 'RET') == true, 'clear only after ready screen')
@@ -111,8 +112,78 @@ assert(attempt(remuda.key, 'child', 'RET') == false and #writes == count, 'audit
 assert(attempt(remuda.type_text, 'child', 'task', 0.1) == false and #writes == count, 'audit failure refuses text')
 fail_audit = false
 fail_capture = true
-assert(attempt(remuda.key, 'child', 'RET') == false and #writes == count, 'capture failure refuses key')
+assert(attempt(remuda.key, 'child', 'RET') == true and #writes == count + 1, 'capture failure allows screen input')
 fail_capture = false
+
+-- Known exceptional modal geometry remains blocked without selecting options.
+for _, name in ipairs({'child', 'codex'}) do
+  for _, screen in ipairs({
+    'What do you want to do?\n› 1. Upgrade your plan\n2. Stop and wait for limit to reset',
+    'Do you want to proceed?\n❯ 1. Confirm\n2. Cancel',
+    'Do you want to proceed?\n❯ 1. Allow\n2. Deny',
+  }) do
+    if name == 'codex' then screen = screen:gsub('What do you want to do%?', 'Would you like to run the following command?') end
+    screens[name] = screen
+    count = #writes
+    assert(attempt(remuda.key, name, 'RET') == false and #writes == count, 'identified choice modal blocks Return')
+    assert(attempt(remuda.type_text, name, 'task') == false, 'identified choice modal blocks text')
+    assert(attempt(remuda.send, name, 'task') == false, 'identified choice modal blocks send')
+  end
+end
+
+-- Screen default allow applies to both managed adapters and every write API.
+-- Nonempty composers must admit the Return retry after a dropped submit key.
+for _, name in ipairs({'child', 'codex'}) do
+  for _, screen in ipairs({'', 'unrecognized output', '❯ do the delegated task',
+      '› do the delegated task', 'partial modal title without active options'}) do
+    screens[name] = screen
+    assert(attempt(remuda.key, name, 'RET') == true, 'unknown/nonempty composer permits Return')
+    assert(attempt(remuda.type_text, name, 'task', 0.1) == 'submitted', 'unknown permits text')
+    assert(attempt(remuda.send, name, 'task') == true, 'unknown permits send')
+  end
+  screens[name] = false
+  assert(attempt(remuda.key, name, 'RET') == true, 'malformed capture permits screen input')
+end
+screens.child = 'unrecognized'
+missing_session = true
+count = #writes
+assert(attempt(remuda.key, 'child', 'RET') == false and #writes == count, 'missing session still fences input')
+missing_session = nil
+fail_capture, live_instance = true, 'replacement'
+assert(attempt(remuda.key, 'child', 'RET') == false and #writes == count, 'capture failure cannot bypass instance fence')
+fail_capture, live_instance = nil, nil
+
+-- Active semantic exception vs stale or quoted transcript evidence.
+local refusal = 'Automatic approval review rejected too many approval requests for this turn (3 consecutive, 3 in the last 3 reviews); interrupting the turn.'
+screens.codex = refusal .. '\n› 1. Confirm\n2. Cancel'
+assert(attempt(remuda.key, 'codex', 'RET') == false, 'active refusal confirmation choices block')
+for _, screen in ipairs({refusal, 'Earlier: ' .. refusal .. '\n› task',
+    refusal .. '\nChoose a display color\n› 1. Blue\n2. Green',
+    'Quoted: Would you like to run the following command?\nordinary output',
+    'Select an unfamiliar action\n› 1. Blue\n2. Green',
+    '╭────────────────╮\n│ Unknown panel │\n╰────────────────╯'}) do
+  screens.codex = screen
+  assert(attempt(remuda.key, 'codex', 'RET') == true, 'unknown/stale transcript is not an active known exception')
+end
+screens.child = '╭────────────────────────────────────────╮\n│ What do you want to do?                 │\n│ › 1. Stop and wait for limit to reset   │\n╰────────────────────────────────────────╯'
+assert(attempt(remuda.key, 'child', 'RET') == false, 'known boxed session limit blocks')
+screens.child = 'ordinary output'
+assert(attempt(remuda.key, 'child', 'RET') == true, 'unknown screen clears known modal state')
+
+-- Source-backed representative approval headers have metadata/commands between
+-- title and options. A later composer or a fenced quote makes these historical.
+for _, path in ipairs({'tests/fixtures/codex-approval-command.txt', 'tests/fixtures/codex-approval-edit.txt'}) do
+  local f = assert(io.open(path)); local approval = f:read('*a'); f:close()
+  screens.codex = approval
+  assert(attempt(remuda.key, 'codex', 'RET') == false, 'known approval with body blocks')
+  for _, screen in ipairs({approval .. '\n› Ask Codex to do anything',
+      approval .. '\n──────\n❯ task already drafted',
+      '```text\n' .. approval .. '```\nordinary answer',
+      approval .. '\nChoose a display color\n› 1. Blue\n2. Green'}) do
+    screens.codex = screen
+    assert(attempt(remuda.key, 'codex', 'RET') == true, 'historical or quoted approval allows: ' .. screen)
+  end
+end
 
 -- Existing launch policy retains ownership of known startup dialogs.
 bus.pending_tasks.child = true
@@ -135,13 +206,11 @@ fixture = assert(io.open('tests/fixtures/butler-dialog-historical-picker.txt', '
 screens.codex = fixture:read('*a'); fixture:close()
 assert(remuda._butler_compaction.unknown_dialog_signature(screens.codex), 'real geometry sees unrelated current choice')
 count = #writes
-assert(not pcall(remuda.key, 'codex', 'RET') and #writes == count,
-  'active compaction and historical picker title must not bless current unknown Return')
+assert(pcall(remuda.key, 'codex', 'RET'), 'historical picker title does not block unknown menu')
 remuda._butler_state.compaction_members = {[bus.agents.codex.id] = {dialog_operation = {
   agent = bus.agents.codex, model = 'gpt-6-luna', effort = 'high', phase = 'model',
 }}}
-assert(not pcall(remuda.key, 'codex', 'RET') and #writes == count,
-  'recorded target cannot bless a different current choice')
+assert(pcall(remuda.key, 'codex', 'RET'), 'unknown menu allows independently of recorded target')
 local operation = remuda._butler_state.compaction_members[bus.agents.codex.id].dialog_operation
 screens.codex = 'Select Model and Effort\n\n› 1. GPT-6-Luna\n  2. GPT-5.6-Sol (current)\n\nenter select · esc back'
 assert(attempt(remuda.key, 'codex', '1') == true, 'genuine current model picker with expected target is owned')
@@ -169,7 +238,7 @@ assert(not pcall(remuda.key, 'codex', '1'), 'missing expected model never admits
 operation.phase = 'escape'
 assert(attempt(remuda.key, 'codex', 'ESC') == true, 'existing cleanup can close a genuine picker with missing target')
 screens.codex = 'Select Model and Effort\n\nChoose a display color\n› 1. Blue\n  2. Green\nEnter to confirm'
-assert(not pcall(remuda.key, 'codex', 'ESC'), 'cleanup phase cannot bless a different current dialog')
+assert(pcall(remuda.key, 'codex', 'ESC'), 'unknown color menu permits input independently of cleanup')
 remuda._butler_state.compaction_fleet_active = nil
 screens.codex = 'Ask Codex to do anything'; D.tick()
 screens.child = 'Switch model?\n❯ 1. Yes\n2. No'
@@ -177,7 +246,7 @@ assert(attempt(remuda.key, 'child', 'RET') == false, 'unowned model dialog is un
 remuda._butler_state.compaction_fleet_active = bus.agents.child.id
 assert(attempt(remuda.key, 'child', 'RET') == true, 'owned model switch retains compaction handler')
 remuda._butler_state.compaction_fleet_active = nil
-screens.codex = 'Odd prompt\n› 1. Yes\n2. No'
+screens.codex = 'Would you like to run the following command?\n› 1. Yes\n2. No'
 D.tick(); D.tick()
 assert(reports[#reports][1] == 'codex' and attempt(remuda.key, 'codex', 'RET') == false, 'Codex unknown stops')
 
@@ -200,10 +269,10 @@ before_write = function(record)
   if record.event == 'dialog_action' then live_instance = 'replacement' end
 end
 assert(attempt(remuda.key, 'child', 'RET') == false and #writes == count, 'instance changed while audit yielded')
-before_write, live_instance = nil, nil
+before_write, live_instance, missing_session = nil, nil
 screens.child = '╭────────────────╮\n│ Unknown gate │\n╰────────────────╯'
 D.tick(); D.tick()
-assert(attempt(remuda.key, 'child', 'RET') == false, 'boxed unknown stops writes')
+assert(attempt(remuda.key, 'child', 'RET') == true, 'boxed unknown permits input')
 -- Existing composer policy also recognises custom/core-specific ready layouts.
 screens.child = 'MODEL:restored CTX:200000'
 remuda._butler_prompt_is_empty = function(_, screen)
@@ -211,10 +280,10 @@ remuda._butler_prompt_is_empty = function(_, screen)
 end
 D.tick()
 assert(attempt(remuda.key, 'child', 'RET') == true, 'existing positive composer probe releases resolved blocker')
--- A descriptor failure is a blocker rather than a schedule exception.
+-- A descriptor failure leaves screen recognition unknown.
 remuda._butler_agent_startup.claude.blocking[1].match = function() error('parser broke') end
 screens.child = 'done\n─\n❯ \n'; D.tick(); D.tick()
-assert(attempt(remuda.key, 'child', 'RET') == false, 'parser failure refuses input')
+assert(attempt(remuda.key, 'child', 'RET') == true, 'parser failure allows input')
 D.stop()
 n = #audits
 assert(attempt(remuda.key, 'child', 'RET') == true and #audits == n, 'stop restores originals')
