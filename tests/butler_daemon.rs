@@ -1806,6 +1806,7 @@ fn butler_lifecycle_reload_replaces_hooks_and_schedules_and_rolls_back() {
     let counts = r#"
         local inbox, owned, notices, reconcile, compaction, scheduled, owned_contributions = 0, 0, 0, 0, 0, 0, -1
         local switch_verbs = {}
+        local input_queue_commands = 0
         for _, hook in ipairs(remuda.hook_list()) do
           if hook.group == "remuda-module:butler" then owned = owned + 1 end
           if hook.event == "butler/deliver" and hook.id == "inbox"
@@ -1823,6 +1824,11 @@ fn butler_lifecycle_reload_replaces_hooks_and_schedules_and_rolls_back() {
             for _, item in ipairs(remuda.contributions(point)) do
               if item.owner == "butler" then
                 owned_contributions = owned_contributions + 1
+                if point == "butler.command" and item.id == "input-queue" then
+                  assert(item.entry.verb == "input-queue" and type(item.entry.run) == "function",
+                    "input-queue must retain its executable lifecycle command")
+                  input_queue_commands = input_queue_commands + 1
+                end
                 if point == "butler.command" and item.id
                     and (item.id == "typed-lines" or item.id == "shell-lines"
                       or item.id == "status-commands") then
@@ -1834,12 +1840,15 @@ fn butler_lifecycle_reload_replaces_hooks_and_schedules_and_rolls_back() {
         end
         table.sort(switch_verbs)
         return table.concat({ inbox, owned, notices, reconcile, compaction, scheduled, owned_contributions,
-          table.concat(switch_verbs, ",") }, "|")
+          table.concat(switch_verbs, ","), input_queue_commands }, "|")
     "#;
     let initial = eval(&path, counts);
     assert!(
-        initial == "1|4|1|1|1|1|31|shell-lines,status-commands,typed-lines"
-            || initial == "1|4|1|1|1|1|-1|",
+        // The durable input operator command adds one owned contribution.
+        // Require its identity exactly once as well as the total; reload and
+        // rollback below must preserve this complete registration snapshot.
+        initial == "1|4|1|1|1|1|32|shell-lines,status-commands,typed-lines|1"
+            || initial == "1|4|1|1|1|1|-1||0",
         "unexpected Butler lifecycle registrations: {initial}"
     );
 
