@@ -15,12 +15,18 @@ config_test_mode() {
     echo codexless
     return 0
   fi
-  local out
-  if ! out=$(perl -e 'alarm shift; exec @ARGV; exit 127' "${BUTLER_CONFIG_TEST_PROBE_TIMEOUT:-10}" codex --version 2>/dev/null); then
+  local out to=${BUTLER_CONFIG_TEST_PROBE_TIMEOUT-10} line
+  if ! [[ $to =~ ^[1-9][0-9]*$ ]] || ((to > 60)); then
+    echo "FAIL: BUTLER_CONFIG_TEST_PROBE_TIMEOUT must be an integer 1-60 (got '$to')" >&2
+    return 1
+  fi
+  if ! out=$(perl -e 'alarm shift; exec @ARGV; exit 127' "$to" codex --version 2>/dev/null); then
     echo "FAIL: codex is installed but 'codex --version' failed or timed out" >&2
     return 1
   fi
-  if ! [[ ${out%%$'\n'*} =~ ^codex(-cli)?\ [0-9]+\.[0-9]+\.[0-9]+ ]]; then
+  line=${out%%$'\n'*}
+  line=${line%$'\r'}
+  if ! [[ $line =~ ^codex(-cli)?\ [0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$ ]]; then
     echo "FAIL: codex is installed but 'codex --version' printed no supported version" >&2
     return 1
   fi
