@@ -830,7 +830,11 @@ function relay.new(options)
   end
 
   function instance:note_own_turn(room, root)
-    return note_turn(room, root, "agent")
+    -- The loop budget counts messages from other Butlers, not our progress
+    -- reports. Do not reset the peer streak either: genuine ping-pong must
+    -- still stop when the other Butler reaches the limit.
+    local turns = b2b_turns[room] and b2b_turns[room][root]
+    return turns and turns.n or 0
   end
 
   local approval = remuda.butler and remuda.butler.approval
@@ -1157,7 +1161,7 @@ function relay.new(options)
       if pending >= MAX_REPLY_OUTBOX then return nil, "Matrix mail reply outbox is full" end
       local room = route.room_id
       local root = instance:thread_root_for_event(route.event_id)
-      if instance:b2b_stopped(room, root) then
+      if route.allowlisted_human ~= true and instance:b2b_stopped(room, root) then
         local safe_room = terminal_safe_field(room, 512)
         local shown_root = matrix.shown_event_id(root)
         local root_is_shown = shown_root ~= "(id not shown)"

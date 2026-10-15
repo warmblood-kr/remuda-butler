@@ -210,7 +210,7 @@ function matrix.reply(opts, on_done)
       .. " Butler-only turns. A reply in that thread from a person on the allowlist resumes it.\n"
       .. next_step
   end
-  if not opts.from_outbox and relay:b2b_stopped(room, root) then
+  if not opts.from_outbox and not allowlisted_human_reply and relay:b2b_stopped(room, root) then
     return error_result(done, stopped_error())
   end
   return same_room_then(room, opts.event_id, done, function(reply_done)
