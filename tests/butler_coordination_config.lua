@@ -47,10 +47,13 @@ local function ensure(dir, kind)
   return report
 end
 
--- Without a native Codex (CI has none) only the Codex-less behaviour is
--- exercised: literal fresh defaults, per-client independence, fail-closed shapes.
-local codex_ok, codex_probe = pcall(remuda.process.run, { argv = { "codex", "--version" }, timeout = 5 })
-if not (codex_ok and codex_probe and codex_probe.code == 0) then
+-- The mode is chosen by tests/butler_coordination_config.sh and passed in;
+-- this file never probes Codex itself. A present-but-broken Codex is a shell
+-- failure, not a subset.
+local mode = os.getenv("BUTLER_CONFIG_TEST_MODE")
+assert(mode == "full" or mode == "codexless",
+  "BUTLER_CONFIG_TEST_MODE must be 'full' or 'codexless' (run tests/butler_coordination_config.sh)")
+if mode == "codexless" then
   local bare = setmetatable({
     native_servers = function() return nil end,
     validate = config.validator(function() error("no native Codex") end, function() return true end,

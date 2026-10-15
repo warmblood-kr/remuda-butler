@@ -167,3 +167,15 @@ that executable even though fresh runtime defaults can be generated without it.
 
 Codex keys were verified against the
 [official configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
+
+## Test modes
+
+`tests/butler_coordination_config.sh` decides its mode once
+(`tests/lib/config_test_mode.sh`) and passes it to the Lua test as
+`BUTLER_CONFIG_TEST_MODE`; the Lua file never probes Codex. `full` runs the
+native Codex parser/execpolicy/resolver checks. `codexless` (Codex not
+installed) runs only a small subset. An installed Codex that fails
+`codex --version` is a hard failure, never a subset, and
+`REQUIRE_NATIVE_CODEX=1` makes an absent Codex a failure too. CI without Codex
+therefore only gets the subset: the native gate is a local/QA requirement.
+Whether CI should provision Codex is an open decision for the maintainers.

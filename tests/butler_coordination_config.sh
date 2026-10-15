@@ -5,7 +5,14 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 REMUDA_BIN=${REMUDA_BIN:-remuda}
 source "$REPO/tests/core_ref.sh"
 core_ref_check
-# Native Codex is optional: without it the lua test runs its Codex-less subset.
+# Mode is decided here, once (tests/lib/config_test_mode.sh), never inside Lua:
+# full (native Codex answering), or the codexless subset when Codex is not
+# installed. A present-but-broken Codex fails; REQUIRE_NATIVE_CODEX=1 makes an
+# absent Codex fail too. CI without Codex only exercises the subset; the full
+# native gate is a local/QA requirement.
+source "$REPO/tests/lib/config_test_mode.sh"
+BUTLER_CONFIG_TEST_MODE=$(config_test_mode) || exit 1
+export BUTLER_CONFIG_TEST_MODE
 T=$(mktemp -d /tmp/bcc.XXXXXX)
 T=$(cd "$T" && pwd -P)
 export HOME=$T/home XDG_CONFIG_HOME=$T/config XDG_DATA_HOME=$T/data
