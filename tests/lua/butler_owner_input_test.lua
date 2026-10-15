@@ -10,7 +10,7 @@ local function subject(name,run,without_provider)
     local mode={screen='synthetic unparseable footer',instance='fixture-core'}
     local writes,keys,notes={},{},{}
     f.fs={};for k,v in pairs(api.fs)do f.fs[k]=v end
-    f.json,f.cli,f.random_bytes=api.json,api.cli,api.random_bytes
+    f.json,f.cli,f.random_bytes,f.clock=api.json,api.cli,api.random_bytes,api.clock
     f.butler.approval=nil;f.butler.owner_input=nil;f.butler.guard_grants=nil
     f.butler.matrix={sanitize_directory_text=function(v)return v end}
     f.butler.guard_policy={append=function(record)
@@ -25,6 +25,7 @@ local function subject(name,run,without_provider)
       writes[#writes+1]=bytes
       if mode.write_throw then error('synthetic ambiguous partial write')end
       if mode.write_false then return false end
+      if mode.after_text then mode.after_text()end
       return mode.provider or'submitted'
     end
     f.key=function(_,key)keys[#keys+1]=key;if mode.key_false then return false end;if mode.key_nil then return nil end;return true end
@@ -145,6 +146,30 @@ T.test('cross-ledger acceptance and marker gaps cannot expire or replay accepted
  end)
 end)
 T.test('owner line preserves separate RET; failed RET never repeats payload or key',function()
+ subject('line-visible',function(s)
+  local event=s.event('visible','exact line')
+  assert(s.queue.accept_line('codex','exact line',event,'!home:fixture',true))
+  s.mode.after_text=function()s.mode.screen='› exact line'end
+  s.queue.tick();T.eq(#s.writes,1);T.eq(#s.keys,1);T.eq(s.queue.status()[1].status,'delivered')
+ end)
+ for _,change in ipairs({'different','human','attached','clock','missing-idle','missing-clock'})do
+  subject('line-proof-'..change,function(s)
+   local event=s.event(change,'exact line')
+   assert(s.queue.accept_line('codex','exact line',event,'!home:fixture',true))
+   if change=='missing-clock'then remuda.clock=nil end
+   if change=='missing-idle'then
+    local ls=remuda.ls;remuda.ls=function()local rows=ls();rows[1].human_idle=nil;return rows end
+   end
+   s.mode.after_text=function()
+    s.mode.screen=change=='different'and'› human draft'or'› exact line'
+    if change=='human'then s.mode.human_idle=0 end
+    if change=='attached'then s.mode.attached=true end
+    if change=='clock'then remuda.clock=function()return -1 end end
+   end
+   s.queue.tick();T.eq(#s.writes,1);T.eq(#s.keys,0,change)
+   T.eq(s.queue.status()[1].status,'uncertain');s.queue.tick();T.eq(#s.writes,1)
+  end)
+ end
  subject('line',function(s)
   local event=s.event('one','exact line')
   local accepted=assert(s.queue.accept_line('codex','exact line',event,'!home:fixture',true));T.eq(accepted.status,'queued')

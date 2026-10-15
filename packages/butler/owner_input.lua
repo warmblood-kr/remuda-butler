@@ -41,14 +41,38 @@ local function same_target(r)
   end
   return true
 end
-local function admissible(r)
+local function admissible(r,owned_composer)
   local cfg=remuda._butler_matrix_live_config or{}
   if not(cfg.allowed_senders and cfg.allowed_senders[r.owner]==true) then return false,'owner_not_allowed'end
   if r.route=='prepared' and cfg.approve_text~=true then return false,'approve_text_off'end
   if r.route=='owner_line' and cfg.typed_lines~=true then return false,'typed_lines_off'end
-  local ok,allowed,why=pcall(remuda._butler_approved_text_policy,r.session)
+  local ok,allowed,why=pcall(remuda._butler_approved_text_policy,r.session,nil,owned_composer)
   if not ok or allowed~=true then return false,ok and why or 'input_policy_error'end
   return same_target(r) -- Actual identity after policy/capture can yield.
+end
+-- Sampled ownership evidence for the existing separate Return, never a claim
+-- of atomic exclusion against human input after the final sample.
+local function return_proof(r)
+  if type(remuda.clock)~='function'then return function()return false end end
+  local started=remuda.clock()
+  if type(started)~='number'or started~=started or started==math.huge then return function()return false end end
+  local baseline
+  for _,row in ipairs(remuda.ls())do if row.name==r.session then baseline=row end end
+  local idle=baseline and baseline.human_idle
+  if not baseline or not baseline.alive or baseline.instance_id~=r.instance_id or type(idle)~='number'
+      or idle~=idle or idle<10 then return function()return false end end
+  return function(text)
+    if text~=nil and text~=r.text then return false end
+    local current
+    for _,row in ipairs(remuda.ls())do if row.name==r.session then current=row end end
+    local now=remuda.clock()
+    if type(now)~='number'or now~=now or now<started or now-started>10000 then return false end
+    if not current or not current.alive or current.instance_id~=r.instance_id
+        or current.attached~=baseline.attached or type(current.human_idle)~='number'
+        or current.human_idle~=current.human_idle then return false end
+    if idle==math.huge then return current.human_idle==math.huge end
+    return current.human_idle~=math.huge and current.human_idle>=idle+(now-started)/1000-0.05
+  end
 end
 local function approval_key(rec)return 'iq-'..hash(frame('prepared',rec.event_id,rec.nonce))end
 local function line_key(event,room)return 'iq-'..hash(frame('owner_line',room,event.event_id))end
@@ -152,6 +176,7 @@ local function deliver(r)
     return store:defer(r.id,why)
   end
   local marked=false
+  local own_return=r.route=='owner_line'and return_proof(r)or nil
   local hooks={expected_instance=r.instance_id,recheck=function()return admissible(r)end,identity=function()return same_target(r)end}
   hooks.before=function()
     if admissible(r)~=true then return false end
@@ -185,8 +210,11 @@ local function deliver(r)
   end
   if r.route=='owner_line' then
     -- Preserve this route's separate RET. Failure can never retry the text.
-    local checked,result=pcall(guarded_write,'key',r.session,{expected_instance=r.instance_id,before=function()return admissible(r)end,
-      recheck=function()return admissible(r)end,identity=function()return same_target(r)end},'RET')
+    local function return_allowed()
+      return own_return() and admissible(r,own_return)
+    end
+    local checked,result=pcall(guarded_write,'key',r.session,{expected_instance=r.instance_id,before=return_allowed,
+      recheck=return_allowed,identity=return_allowed},'RET')
     if not checked or result~=true then return store:finish(r.id,'uncertain','separate_return_unknown')end
   end
   return store:finish(r.id,'delivered',r.route=='owner_line'and'submitted+RET'or'submitted')
