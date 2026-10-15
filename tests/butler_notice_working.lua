@@ -81,7 +81,6 @@ bus.agents.lead.kind = "codex"
 assert(run({ codex, codex, codex }, { 4 }) == 0, "working Codex+EMPTY defers without type_text")
 assert(bus.notices.lead, "Codex notice stays queued")
 bus.agents.lead.kind = "claude"
-print("ok")
 
 -- 7. Shared guard, direct path: busy Codex + EMPTY composer must not reach type_text via
 --    notify_policy (no probe) nor via probe-to-direct (policy passes while a probe exists).
@@ -113,4 +112,42 @@ bus.notices.lead = { count = 1, message_order = { "m1" }, message_ids = { m1 = "
 bus.notice_recoveries, bus.notice_screens = {}, {}
 deliver("lead")
 assert(#typed == 1, "busy Claude + EMPTY composer unchanged")
+
+-- 9. Codex busy telemetry that is missing, throwing or nil fails CLOSED (defers).
+bus.agents.lead.kind = "codex"
+local session_api = remuda.session
+for name, api in pairs({
+  missing = false,
+  throws = function() error("boom") end,
+  nil_row = function() return nil end,
+  nil_busy = function() return {} end,
+}) do
+  remuda.session = api or nil
+  assert(direct(false) == 0, "codex busy telemetry " .. name .. " fails closed")
+  assert(direct(true) == 0, "codex busy telemetry " .. name .. " fails closed (probe)")
+end
+remuda.session = function() return { is_busy = false } end
+-- 10. Permanently busy Codex: mail stays queued, one escalation record (reason busy) opens after
+--     the cap, the leader hears about it once per hour, and idle later delivers it.
+remuda.session = function() return { is_busy = true } end
+remuda._butler_send = function(from, to, body) sent[#sent + 1] = { to, body } end
+sent = {}
+bus.notices.lead = { count = 1, message_order = { "m1" }, message_ids = { m1 = "Butler message m1 arrived." },
+  text = "Butler message m1 arrived.", kind = "codex", delivery_attempts = 0 }
+bus.notice_recoveries, bus.notice_screens, bus.notice_stuck = {}, {}, {}
+bus.notice_reminder_at, bus.notice_sent_at = {}, {}
+frames, calls, typed = { codex }, 0, {}
+local N = remuda._butler_notice
+local t0 = now
+for _ = 1, 600 do now = now + 1; deliver("lead"); N.remind_unread_notices("lead", bus.agents.lead, now) end
+assert(not bus.notice_stuck.lead and #sent == 0, "no escalation before the cap")
+for _ = 1, 7200 do now = now + 1; deliver("lead"); N.remind_unread_notices("lead", bus.agents.lead, now) end
+assert(#typed == 0 and bus.notices.lead, "busy mail retained, never typed")
+assert(bus.notice_stuck.lead and bus.notice_stuck.lead.ids[1] == "m1", "busy cap opens the stuck record")
+assert(tostring(bus.notice_stuck.lead.reason):find("busy"), "reason names busy")
+assert(#sent >= 2 and #sent <= 3, "hourly leader report, deduped: " .. #sent)
+for _, s in ipairs(sent) do assert(s[1] ~= "alice", "sender is not spammed") end
+remuda.session = function() return { is_busy = false } end
+now = now + 1; deliver("lead")
+assert(#typed == 1, "idle Codex receives the retained notice")
 print("ok")
