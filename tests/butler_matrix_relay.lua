@@ -6931,9 +6931,16 @@ end
 
 rx_check("confirmed mentions through relay", function()
   local dir, config_path = fixture()
-  local client, delivered = scripted_client(), {}
+  local client, delivered, held_for_restart = scripted_client(), {}, false
   local relay = relay_module.new({ config_path = config_path, matrix = client,
-    deliver = function(event) delivered[#delivered + 1] = event return true end,
+    deliver = function(event)
+      if event.event_id == "$mention-pills" and not held_for_restart then
+        held_for_restart = true
+        error("hold for restart")
+      end
+      delivered[#delivered + 1] = event
+      return true
+    end,
   })
   assert(relay:start())
   client:complete(1, { json = { next_batch = "s0" } })
@@ -6952,6 +6959,15 @@ rx_check("confirmed mentions through relay", function()
           url = "mxc://example.org/file" } },
     } } },
   } } } })
+  local first_attempts = {}
+  for _, event in ipairs(delivered) do first_attempts[event.event_id] = event end
+  assert(not first_attempts["$mention-pills"], "mention delivery should remain pending for restart")
+  relay:stop()
+  local resumed_client = scripted_client()
+  relay = relay_module.new({ config_path = config_path, matrix = resumed_client,
+    deliver = function(event) delivered[#delivered + 1] = event return true end,
+  })
+  assert(relay:start())
   local by_id = {}
   for _, event in ipairs(delivered) do by_id[event.event_id] = event end
   assert(by_id["$mention-pills"] and by_id["$mention-pills"].body == "Hello @Alice and @Alice",
