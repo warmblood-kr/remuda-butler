@@ -269,26 +269,43 @@ local function current_composer_evidence(kind, screen)
       if rest:sub(1, #glyph) == glyph then prompt_at = #lines; break end
     end
   end
-  if not prompt_at then return false, "" end
-  local current_rows = {}
-  for i = prompt_at, #lines do
-    current_rows[#current_rows + 1] = lines[i]:gsub("^%s*│%s*", ""):gsub("│%s*$", "")
-  end
-  local current = table.concat(current_rows, "\n")
+  if not prompt_at then return false, false end
   local before = (lines[prompt_at - 1] or ""):gsub("^%s+", "")
   local top = before:match("^─")
-  for i = prompt_at + 1, #lines do
+  local boxed = false
+  for i = prompt_at - 1, 1, -1 do
     local rest = lines[i]:gsub("^%s+", "")
+    local first = rest:sub(1, 3)
+    if first == "╭" or first == "┌" or first == "╔" then boxed = true; break end
+    if first ~= "│" then break end
+  end
+  local bounded, closed_box, options, selected_option = false, false, 0, false
+  for i = prompt_at, #lines do
+    local rest = lines[i]:gsub("^%s+", ""):gsub("^│%s*", ""):gsub("│%s*$", "")
+    local selected = false
+    for _, glyph in ipairs(PROMPT_GLYPHS) do
+      if rest:sub(1, #glyph) == glyph then
+        selected = true
+        rest = rest:sub(#glyph + 1):gsub("^%s+", "")
+        break
+      end
+    end
+    if rest:match("^%d+[%.)]%s*%S") then
+      options = options + 1
+      if selected then selected_option = true end
+    end
     if rest:match("^%? for shortcuts")
         or (kind == "codex" and rest:lower():find("context left", 1, true))
         or (kind == "claude" and (rest:find("auto mode on", 1, true)
-          or rest:find("shift+tab to cycle", 1, true))) then return true, current end
-    if rest:match("^─") or (rest:sub(1, 3) == "╰" or rest:sub(1, 3) == "└") then
-      if top then return true, current end
-      -- A generic enclosing box is menu geometry, not composer evidence.
-    end
+          or rest:find("shift+tab to cycle", 1, true))) then bounded = true end
+    local first = rest:sub(1, 3)
+    if first == "╰" or first == "└" or first == "╚" then closed_box = true end
+    if i > prompt_at and (rest:match("^─") or closed_box) and top then bounded = true end
   end
-  return false, current
+  -- Scan the full current region, not compaction's last-eight-line window.
+  -- A lone numbered prefix is insufficient; an enclosing generic box or a
+  -- selected row plus another numbered option supplies menu uncertainty.
+  return bounded, (boxed and closed_box) or (selected_option and options >= 2)
 end
 
 function remuda._butler_approved_text_policy(session, now)
@@ -340,10 +357,8 @@ function remuda._butler_approved_text_policy(session, now)
   if startup.picker and startup.picker(screen) then return false, "known_modal" end
   local parsed, decision = pcall(remuda._butler_composer_decision, kind, session, screen)
   if parsed and decision == "NON-EMPTY" then
-    local geometry = remuda._butler_compaction_is_unknown_dialog
-    local bounded, current = current_composer_evidence(kind, screen)
-    local checked, menu_like = pcall(function() return geometry and geometry(current) end)
-    if checked and menu_like and not bounded then
+    local bounded, menu_like = current_composer_evidence(kind, screen)
+    if menu_like and not bounded then
       return true, "renderer_unknown"
     end
     return false, "composer_nonempty"

@@ -50,6 +50,19 @@ check(numbered,false,'composer_nonempty')
 local boxed='╭──────────────────╮\n│ › 1. Light       │\n│   2. Dark        │\n╰──────────────────╯'
 check(boxed,true)
 check(boxed..'\n? for shortcuts',false,'composer_nonempty')
+local unnumbered='╭──────────────────╮\n│ › Light          │\n│   Dark           │\n╰──────────────────╯'
+check(unnumbered,true)
+check(unnumbered..'\n? for shortcuts',false,'composer_nonempty')
+local long_menu='Choose theme\n› 1. Light'
+for i=2,10 do long_menu=long_menu..'\n  '..i..'. Other' end
+long_menu=long_menu..'\nEnter to choose'
+check(long_menu,true)
+check('────────────────────\n'..long_menu:gsub('Choose theme\n','')..'\n────────────────────',false,'composer_nonempty')
+check(long_menu..'\n› actual draft',false,'composer_nonempty')
+check(unnumbered..'\n› actual draft',false,'composer_nonempty')
+-- A numbered prefix alone is still a draft, not generic menu geometry.
+check('› 1. This is one draft item',false,'composer_nonempty')
+
 check(menu..'\n────────────────────\n› actual current draft\n────────────────────\n? for shortcuts',false,'composer_nonempty')
 check('Quoted menu:\n'..menu..'\n› actual borderless draft',false,'composer_nonempty')
 -- Inherently ambiguous borderless menu-shaped drafts follow unknown=allow.
